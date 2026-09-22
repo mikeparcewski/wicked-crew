@@ -14,14 +14,16 @@ import { AuditLog } from './audit.js';
 import { EvalRunStore } from './eval-store.js';
 import { RetryIndex } from './retry-index.js';
 import { GroupIndex } from './group-index.js';
-import { RunTimingIndex } from './run-timing-index.js';
+import { RunTimingIndex, recordRunLaunched } from './run-timing-index.js';
 import { GuidanceIndex } from './guidance-index.js';
+import { ChatScopeIndex, reapStaleChatNamespaces } from './chat-scope.js';
 import {
   DeliveryIndex,
   deliverUnitOf,
   gitRunBranchIsEmpty,
   gitWorktreeIsClean,
   prUrlFrom,
+  canDeliverResolver,
   type VacuityProbes,
 } from './delivery-index.js';
 import { DeliveryDerivationCache } from './delivery-cache.js';
@@ -33,26 +35,54 @@ import { startInteractiveDraftSubscriber } from '../interactive/draft-events.js'
 import { startInteractiveEditSubscriber } from '../interactive/edit-events.js';
 import { startInteractiveChatSubscriber } from '../interactive/chat-events.js';
 import { startInteractiveDemoSubscriber } from '../interactive/demo-events.js';
-import { resolveInteractiveRoot } from '../interactive/bridge-root.js';
-import { sweepDocLedgers, type DocLedgerSweep } from '../interactive/doc-ledger-sweep.js';
+import { resolveProjectInteractiveRoot } from '../interactive/bridge-root.js';
+import { sweepDocLedgers, type DocLedgerSource, type DocLedgerSweep } from '../interactive/doc-ledger-sweep.js';
+import { DocRunIndex } from '../interactive/doc-run-index.js';
+import { TestSetIndex, registerTestSetForRun } from '../qe/test-sets.js';
+import { DocGroundingStore } from '../interactive/doc-grounding.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
 import { crewStateHome } from '../projects/state-home.js';
 import { startProjectBus, MEMBERSHIP_ATTACHED, membershipAttachedKey } from '../projects/events.js';
 import { startInteractiveWsRelay, registerInteractiveEventRoutes } from '../interactive/ws-relay.js';
 import { MembershipIndex } from '../projects/membership-index.js';
 import { writeRunEvidencePointer } from '../projects/charter.js';
-import { CoreAdapter } from '../core/adapter.js';
-import type { CoreEvent } from '../core/types.js';
+import {
+  engineBenchesUnclassifiedSeats, CoreAdapter } from '../core/adapter.js';
+import type { Actor, CoreEvent } from '../core/types.js';
 import { resolveCursorUnit } from '../core/cursor.js';
+import {
+  STALL_DETECTED_ACTION,
+  STALL_ESCALATED_ACTION,
+  StallFrameIndex,
+  stallFrameAction,
+} from './stall-frame-index.js';
 import { SeatHealthTracker } from './seat-health.js';
+import { rosterWithStandingFactory } from './roster-standing.js';
+import { ChatTurnIndex } from './chat-turns.js';
+import { ChatTranscriptStore } from './chat-transcripts.js';
+import { sweepDeliveredWorktree } from './worktree-sweep.js';
 import { installEndpointManifestHook } from './endpoint-manifest.js';
 import { WorkerStallWatchdog } from './stall-watchdog.js';
 import { applyWorkerConfigRoot } from './seat-signin.js';
+import { registeredSkillRefs } from '../skills/core-closure.js';
+import type { PluginSource } from '../skills/plugin-source.js';
+import { assertSkillsRootFenced } from '../skills/root-fence.js';
+import { SkillsRuntime } from '../skills/runtime.js';
+import { SKILLS_SNAPSHOT_ENGINE_ENV } from '../skills/engine-env.js';
+import { assertWickedRootsOutsideStateHome, StateHomeWatch } from '../projects/state-home-preflight.js';
+import { resolveSkillsRoot, SkillsStore } from '../skills/store.js';
+import { uvSyncBaseline, type VenvProvisioner } from '../skills/venv.js';
 import {
   DEFAULT_WORKER_STALL_ESCALATE_MINUTES,
   DEFAULT_WORKER_STALL_MINUTES,
 } from '../core/types.js';
 import { daemonSignalLog } from '../core/daemon-signal-log.js';
+import { refreshProjectGraphsAfterOnboarding } from '../projects/auto-refresh.js';
+
+/** The daemon's own actor on the audit trail (`run.delivered`, `run.ended`, the onboarding `run.launched`). */
+const DAEMON_ACTOR: Actor = { id: 'daemon', kind: 'system', trust: 'admin' };
+/** The stall watchdog acts on runs by itself, so its audit lines name IT, not the daemon. */
+const STALL_WATCHDOG_ACTOR: Actor = { id: 'stall-watchdog', kind: 'system', trust: 'admin' };
 
 // Allow the studio (a separate localhost origin, e.g. :4200) to call the
 // daemon's REST API. Restricted to loopback origins — the daemon only binds
@@ -107,6 +137,9 @@ export interface CreateServerOptions {
     draftDir?: string;
     /** Seat roster override (JSON array); omit for the production council roster. */
     clisJson?: string;
+    /** Docs-root resolver override (tests); default = per-project `interactiveRoot` setting. Used
+     *  to READ the create-time grounding sidecar (F-046). */
+    resolveDocsRoot?: (projectId: string | undefined) => string;
   };
   /**
    * Opt-in governed answering of wicked-interactive STRUCTURAL edits (task #86, Phase 7c final
@@ -210,6 +243,16 @@ export interface CreateServerOptions {
     pollIntervalMs?: number;
   };
   /**
+   * F-042/F-043 — what the spawned wicked-interactive bridge is told about THIS daemon. The pool
+   * always exports `WICKED_CREW_API` (the daemon's bound origin); `busDataDir` is the directory of
+   * the bus db the interactive seams read, exported as `WICKED_BUS_DATA_DIR` so the bridge emits
+   * where the seams read. `null`/omitted = not exported (the CLI passes null only when `--bus-db`
+   * names a file wicked-bus cannot be pointed at through a data dir).
+   */
+  interactiveBridge?: {
+    busDataDir?: string | null;
+  };
+  /**
    * DES-MERGE-001 §5.4/§6.1 (slice 3) — the interactive /ws relay. DEFAULT-ON: every
    * wicked.interactive.** bus event is bridged onto the /ws stream as an `interactiveEvent`
    * frame so the studio needs exactly ONE socket. `disabled: true` turns it off (tests).
@@ -282,6 +325,24 @@ export interface CreateServerOptions {
     /** Sweep cadence, ms (tests shorten it). */
     sweepIntervalMs?: number;
   };
+  /**
+   * The skills seam (skills keystone): at boot the daemon seeds `<state home>/skills` — the ONE
+   * root, not a setting (codex round 5) — from the LIVE installed wicked-garden plugin, publishes a
+   * first immutable snapshot when none exists (its `views/copilot/` generated alongside), and
+   * exports `WICKED_SKILLS_SNAPSHOT` for the engine. It never writes into the user's own CLI
+   * directories (design v3.2 §1): the boot REFUSES (`SkillsRootUnfencedError`) a root whose
+   * canonical path leaves the state home or lands inside one. `disabled: true` registers the
+   * routes without a store (they answer 503) —
+   * the manifest collector and tests that must not touch a plugin cache use it. `source` /
+   * `provisionVenv` aim a test at a fixture plugin root and a provisioner that spawns nothing
+   * (`noVenv`) — a boot test must never run the host's `uv` or download anything; production omits
+   * both (live discovery, `uvSyncBaseline`).
+   */
+  skills?: {
+    disabled?: boolean;
+    source?: () => PluginSource | null;
+    provisionVenv?: VenvProvisioner;
+  };
 }
 
 export async function createServer(
@@ -314,6 +375,17 @@ export async function createServer(
     signalLog: daemonSignalLog,
     log: (m) => app.log.warn(m),
   });
+  // THE roster accessor (F-RECON-002/003, `api/roster-standing.ts`): the registry roster WITH this
+  // tracker's standing, built ONCE and handed to every launch path — the routes (below, through
+  // `runtime.rosterWithStanding`), the four interactive seams (`roster`), and the adapter's own
+  // launches (`setRosterProvider` → `seatsForWorkflow` / `wicked-crew start`). Read at call time,
+  // so a seat signed in from the System page is eligible on the very next launch.
+  const rosterWithStanding = rosterWithStandingFactory({ seatHealth });
+  // Runtime-guarded, not typed away: the integration suites drive `createServer` over PARTIAL fake
+  // adapters (cast to `CoreAdapter`) that never grew this method — the real adapter always has it.
+  if (typeof (adapter as { setRosterProvider?: unknown }).setRosterProvider === 'function') {
+    adapter.setRosterProvider(rosterWithStanding);
+  }
 
   // The identity/actor seam (task #88). Resolved ONCE, before any hook exists:
   // a malformed token file or a configured-but-unimplemented OIDC block must
@@ -342,7 +414,80 @@ export async function createServer(
   // unset/empty restores the env this process booted with (an operator-exported
   // WICKED_WORKER_HOME — or the test harness's hermetic arming, crew#396 — survives), falling
   // back to the engine default ~/.wicked-worker when the process booted without one.
-  applyWorkerConfigRoot((await adapter.getSettings()).worker_config_root);
+  const bootSettings = await adapter.getSettings();
+  applyWorkerConfigRoot(bootSettings.worker_config_root);
+
+  // The skills seam (skills keystone): boot-time only — there is NO skills setting to re-apply on
+  // PUT /settings (codex round 5: `skills_root` and its env override are retired). The store hangs
+  // off `<state home>/skills` (never a `~/.wicked-crew` literal, crew#353), and the boot ASSERTS the
+  // root is fenced before the store exists: canonically inside the state home, outside every user
+  // CLI directory, not a symlink — a violation is a daemon start error (`SkillsRootUnfencedError`,
+  // skills/root-fence.ts). The worker Read fence is core's explicit denylist of state-home subtrees
+  // (v3.1 §1; tests/fixtures/state-home-subtrees.json is the shared registry), with the resolved
+  // snapshot the one non-denied path; the core-by-reference closure is seeded from the workflow
+  // catalog the daemon serves (built-ins + user-registered), read at use time so a later
+  // registration counts at the next publish. `apply` never throws and never fails open: no
+  // installed plugin is the logged fallback (engine input unset); a blocked first publish or a
+  // corrupt root points the engine at a refusal path so launches fail loudly (skills/runtime.ts).
+  // Awaited: a first publish provisions the baseline env before it returns.
+  //
+  // wicked-core#411 / crew#497 (F-RC1-011): a `WICKED_*` root variable pointed INSIDE the state
+  // home is a configuration error the boot REFUSES — the same posture as an unfenced skills root
+  // below. The rig set `WICKED_WORKFLOWS_DIR=<state home>/workflows`: crew seeded the interactive-*
+  // drop-in defs there, the fence's registry could not classify the entry, and every worker launch
+  // was refused — discovered at each run's first worker. Judged here, before any seam creates
+  // anything under those roots (`serve` asserts the same rule before the engine spawns).
+  assertWickedRootsOutsideStateHome(process.env, crewStateHome());
+  let skillsRuntime: SkillsRuntime | undefined;
+  if (options?.skills?.disabled !== true) {
+    const source = options?.skills?.source;
+    const skillsRoot = resolveSkillsRoot();
+    assertSkillsRootFenced(skillsRoot, { stateHome: crewStateHome() });
+    skillsRuntime = new SkillsRuntime({
+      store: new SkillsStore({
+        root: skillsRoot,
+        registeredSkillRefs: () => registeredSkillRefs(adapter.listWorkflows()),
+        provisionVenv: options?.skills?.provisionVenv ?? uvSyncBaseline,
+        ...(source !== undefined ? { source } : {}),
+        warn: (m) => app.log.warn(m),
+      }),
+      log: (m) => app.log.warn(m),
+    });
+    // The base skill setting (crew#554 / wicked-core#468) is applied BEFORE the ladder runs, so
+    // `apply`'s outcome re-judges it against whatever generation it exports: `WICKED_BASE_SKILL_REF`
+    // is ALWAYS exported while the setting is on (`'require'` is the only policy — the engine refuses
+    // at intake when the generation it is handed lacks the skill) and deleted when `baseSkillRef` is
+    // `''` — the engine reads it at intake, per launch. Re-applied by PUT /settings
+    // and by every publish / refresh (skills/runtime.ts).
+    skillsRuntime.configureBaseSkill(bootSettings);
+    await skillsRuntime.apply();
+  }
+
+  // The state-home PREFLIGHT (wicked-core#411 / crew#497; F-RC1-011, F-RC2-020): an entry under the
+  // state home that core's fence registry cannot classify refuses EVERY worker launch — and until
+  // now the daemon booted green over it, the refusal surfacing at each run's first worker as a
+  // "triage judge errored" gate. Surveyed HERE, after the skills seam decided which snapshot the
+  // engine is handed (the fence derives the state home from that path), through the engine's own
+  // classification when the addon carries it and crew's registry copy otherwise; ONE error-level
+  // line per entry (the pino tee lands it in `/diagnostics.recentErrors`, which showed nothing
+  // before — F-RC2-027); reported live on `/diagnostics.stateHome` and `/health.warnings`; and
+  // `POST /runs` answers 409 while it refuses launches. The daemon still SERVES — studio must load
+  // and show the blocker — it refuses to launch.
+  const stateHomeWatch = new StateHomeWatch({
+    dbPath: typeof adapter.dbPath === 'string' && adapter.dbPath !== '' ? adapter.dbPath : null,
+    snapshotPath: () => {
+      const v = process.env[SKILLS_SNAPSHOT_ENGINE_ENV];
+      return v === undefined || v === '' ? null : v;
+    },
+    engine: CoreAdapter.stateHomePreflighter(),
+  });
+  const stateHomeAtBoot = await stateHomeWatch.refresh();
+  for (const finding of stateHomeAtBoot.findings) {
+    app.log.error(`[state-home] ${finding.message}`);
+  }
+  if (stateHomeAtBoot.error !== null) {
+    app.log.warn(`[state-home] the state-home preflight could not classify (${stateHomeAtBoot.source}): ${stateHomeAtBoot.error}`);
+  }
 
   // The project seam (DES-PROJECT-001): the bus handle for post-commit event emission + the
   // /ws activity bridge, and the run→project index that tags outbound frames (§5.2). Hydrated
@@ -358,6 +503,11 @@ export async function createServer(
   // bootstrap-configured state home (crew#353); the warn hook is the loud half of the migration
   // posture — an override root shadowing a default-root file must be SAID at boot, never silent.
   const projectSettings = new ProjectSettingsStore(undefined, (m) => app.log.warn(m));
+  // crew#619: chats promoted to runs retain their transcripts until the run is terminal, even
+  // across daemon restarts. The maps are populated from the audit trail below (non-terminal
+  // `run.launched` entries that carry a `chatId`) and kept in sync by the event loop.
+  const chatRetained = new Map<string, Set<string>>();
+  const runToChat = new Map<string, string>();
   // Retry lineage (CREW-UX-3) + ad-hoc group attach (wicked-studio#27): both durable records
   // live in the trail's `run.launched` entries, so ONE exhaustive scan feeds both indexes —
   // boot stays at three full-file trail scans, not four (the crew#321 consolidation note).
@@ -371,12 +521,68 @@ export async function createServer(
     retryIndex.hydrateFromLaunchEntries(launchEntries);
     groupIndex.hydrateFromLaunchEntries(launchEntries);
     runTimingIndex.hydrateFromLaunchEntries(launchEntries);
+    // `ended_at` (crew#496 / studio#230): the `run.ended` entries this daemon wrote at terminal
+    // frames — one more filtered scan, same try, same best-effort. Nothing is re-emitted at boot: a
+    // run that terminalled with no entry (pre-field, or the crash window between the engine's
+    // status write and the synchronous record below) stays undated.
+    const endedEntries = await audit.readAll({ action: 'run.ended' });
+    runTimingIndex.hydrateFromEndedEntries(endedEntries);
+    // crew#619: rebuild the chat↔run retention maps for runs that were still live when the
+    // daemon was last stopped. The `run.launched` entries that carry `chatId` and are NOT in
+    // `run.ended` represent runs whose transcripts must still be on disk.
+    const endedRunIds = new Set(
+      endedEntries.filter((e) => typeof e.runId === 'string').map((e) => e.runId as string),
+    );
+    for (const entry of launchEntries) {
+      const chatId = (entry.detail as Record<string, unknown> | undefined)?.['chatId'];
+      if (typeof entry.runId === 'string' && typeof chatId === 'string' && !endedRunIds.has(entry.runId)) {
+        linkChatRun(chatId, entry.runId);
+      }
+    }
   } catch (err) {
     app.log.warn(
       `[runs] launch-index hydrate failed (prior runs read as not-a-retry / ungrouped / undated until restart): ${
         err instanceof Error ? err.message : String(err)
       }`,
     );
+  }
+  // wicked-studio#284: the watchdog's own frames, rebuilt from the trail this daemon (or a previous
+  // one) wrote — so a run page reloaded after the run ended, or after a restart, still shows the
+  // stall/escalation facts the live socket carried. Same posture as the indexes above: two more
+  // filtered scans, best-effort, and NOTHING is re-emitted — hydrating fills a map, it never
+  // broadcasts or re-arms a clock.
+  const stallFrameIndex = new StallFrameIndex();
+  try {
+    stallFrameIndex.hydrateFromEntries([
+      ...(await audit.readAll({ action: STALL_DETECTED_ACTION })),
+      ...(await audit.readAll({ action: STALL_ESCALATED_ACTION })),
+    ]);
+  } catch (err) {
+    app.log.warn(
+      `[runs] stall-frame hydrate failed (stalls recorded before this boot stay off GET /runs/:id/events): ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+  // BC-15's compensating clause — "the engine benches it per run at the ballot threshold" — covers
+  // an UNCLASSIFIED persistently-failing seat only from wicked-core-ts 0.7.27 (the 3D' arm, core
+  // #523). The runtime pin still allows 0.7.26, where crew's deleted ledger has no engine
+  // counterpart, so say it once at boot instead of letting such a seat look healthy forever.
+  if (!engineBenchesUnclassifiedSeats()) {
+    app.log.warn(
+      '[roster] this engine (wicked-core-ts < 0.7.27) does not bench a seat whose ballots fail ' +
+        'persistently WITHOUT a recognised reason, and crew keeps no bench of its own (BC-15): such ' +
+        'a seat stays council-eligible until it authenticates or an operator disables it. ' +
+        'Upgrade the engine to 0.7.27+ to get the per-run bench back.',
+    );
+  }
+  // Onboarding runs launch inside the adapter (`_doOnboardingLaunch`), never through POST /runs — so
+  // they had no `run.launched` entry and no `created_at` (crew#496). The adapter reports each one
+  // here, after the engine accepted it, and the SAME recorder every launch route uses dates it.
+  if (typeof (adapter as Partial<CoreAdapter>).setOnRunLaunched === 'function') {
+    adapter.setOnRunLaunched((runId, detail) => {
+      recordRunLaunched(audit, runTimingIndex, DAEMON_ACTOR, runId, detail);
+    });
   }
   // Operator guidance (CREW-UX-7, DES-UX-002 §7.2): same durable pattern — hydrated from the
   // trail's `guidance.set` entries so notes survive a daemon restart.
@@ -386,6 +592,10 @@ export async function createServer(
   // trail's `run.delivered` entries so `session.delivery` survives a daemon restart.
   const deliveryIndex = new DeliveryIndex();
   await deliveryIndex.hydrate(audit, (m) => app.log.warn(m));
+  // Wave 6 (F-7R2-014): the test sets `qe-author-tests` runs registered — same durable pattern,
+  // hydrated from the trail's `testing.testset.registered` entries, fed at each terminal frame.
+  const testSets = new TestSetIndex();
+  await testSets.hydrate(audit, (m) => app.log.warn(m));
   // The background delivery-derivation cache (GET /runs p99): the ONLY place the git vacuity
   // probes run in the daemon — the run DTOs read this cache (degrading to the stat-only
   // stranded/none label on a miss) and never spawn git on the request path. ONE probes object,
@@ -401,10 +611,17 @@ export async function createServer(
       async (repoRef) => (await adapter.listRepos()).find((r) => r.id === repoRef)?.root_path,
     ),
   };
+  // Def-awareness (crew#481 / D-14): ONE predicate — `runCanDeliver` over the run's resolved def —
+  // shared by this cache (GET /runs, GET /runs/:id, the resume 409) and the campaigns rollup below,
+  // so a completed capture-learnings/onboarding run reads `delivery: 'none'` on every surface. A
+  // read-time derivation over the run record + the registry: existing records flip at their next
+  // read, nothing is written, the `run.delivered` trail is untouched.
+  const canDeliver = canDeliverResolver(() => adapter.listWorkflows(), (m) => app.log.warn(m));
   const deliveryCache = new DeliveryDerivationCache({
     listViews: () => adapter.sessionsDetail(),
     probes: vacuityProbes,
     isDelivered: (runId) => deliveryIndex.urlFor(runId) !== undefined,
+    canDeliver,
     log: (m) => app.log.warn(m),
     // Non-probe derivation throws are defects — error level, so the diagnostics ring sees them.
     logError: (m) => app.log.error(m),
@@ -448,7 +665,7 @@ export async function createServer(
       // The durable record first, then the read-side index — the same write order as
       // `guidance.set`, so the index can only LAG a crash (rehydrated at next boot), never
       // hold a record the trail does not.
-      audit.record('run.delivered', { id: 'daemon', kind: 'system', trust: 'admin' }, {
+      audit.record('run.delivered', DAEMON_ACTOR, {
         runId,
         detail: { url },
       });
@@ -472,6 +689,7 @@ export async function createServer(
             ? { pollIntervalMs: options.projectEvents.pollIntervalMs }
             : {}),
           log: (m) => app.log.warn(m),
+          logError: (m) => app.log.error(m),
         });
   if (projectBus !== null) {
     app.log.info('project bus seam armed (wicked.crew.project.* + /ws activity bridge)');
@@ -499,37 +717,48 @@ export async function createServer(
    *  crewStateHome() default each seam resolves — under `--db` the sweep must follow the
    *  override, crew#353/#398). Never throws — the report says what happened. */
   const crewStateDir = crewStateHome();
+  // F-046: the create-time doc → subject-repo bindings, shared by the proxy (records) and the
+  // draft/demo seams (read). The store keeps NO file of its own — each binding is a
+  // `crew-grounding.json` sidecar beside the doc's `versions.json` under the project's docs root
+  // (doc-grounding.ts says why not the state home: core's fence refuses unregistered entries).
+  const docGrounding = new DocGroundingStore();
+  /** The four seams' ledgers, read AT USE TIME (a seam that armed after this closure was built is
+   *  still preferred over its file) — shared by the doc-delete sweep and the doc↔run index. */
+  const docLedgerSources = (): DocLedgerSource[] => [
+    {
+      name: 'draft',
+      ledger: draftSub?.ledger,
+      path:
+        options?.interactiveDraftEvents?.ledgerPath ??
+        join(crewStateDir, 'interactive-draft-ledger.json'),
+    },
+    {
+      name: 'edit',
+      ledger: editSub?.ledger,
+      path:
+        options?.interactiveEditEvents?.ledgerPath ??
+        join(crewStateDir, 'interactive-edit-ledger.json'),
+    },
+    {
+      name: 'chat',
+      ledger: chatSub?.ledger,
+      path:
+        options?.interactiveChatEvents?.ledgerPath ??
+        join(crewStateDir, 'interactive-chat-ledger.json'),
+    },
+    {
+      name: 'demo',
+      ledger: demoSub?.ledger,
+      path:
+        options?.interactiveDemoEvents?.ledgerPath ??
+        join(crewStateDir, 'interactive-demo-ledger.json'),
+    },
+  ];
   const dropDocLedgerRows = (documentId: string): DocLedgerSweep =>
-    sweepDocLedgers(documentId, [
-      {
-        name: 'draft',
-        ledger: draftSub?.ledger,
-        path:
-          options?.interactiveDraftEvents?.ledgerPath ??
-          join(crewStateDir, 'interactive-draft-ledger.json'),
-      },
-      {
-        name: 'edit',
-        ledger: editSub?.ledger,
-        path:
-          options?.interactiveEditEvents?.ledgerPath ??
-          join(crewStateDir, 'interactive-edit-ledger.json'),
-      },
-      {
-        name: 'chat',
-        ledger: chatSub?.ledger,
-        path:
-          options?.interactiveChatEvents?.ledgerPath ??
-          join(crewStateDir, 'interactive-chat-ledger.json'),
-      },
-      {
-        name: 'demo',
-        ledger: demoSub?.ledger,
-        path:
-          options?.interactiveDemoEvents?.ledgerPath ??
-          join(crewStateDir, 'interactive-demo-ledger.json'),
-      },
-    ]);
+    sweepDocLedgers(documentId, docLedgerSources());
+  // Wave 6 (F-4R2-006 root fix): the document ↔ run binding as a direct read off the SAME four
+  // ledgers — `AgentSession.document_id` on the run DTO and `GET /runs?doc=`.
+  const docRuns = new DocRunIndex(docLedgerSources, { log: (m) => app.log.warn(m) });
 
   // The interactive relay seam (DES-MERGE-001 §5.4/§6.1, slice 3): every wicked.interactive.**
   // bus event becomes an `interactiveEvent` frame on the SAME /ws socket the studio already
@@ -547,6 +776,7 @@ export async function createServer(
             ? { pollIntervalMs: options.interactiveWsRelay.pollIntervalMs }
             : {}),
           log: (m) => app.log.warn(m),
+          logError: (m) => app.log.error(m),
           // crew#338 — a retirement that bypassed the governed DELETE route (direct bridge call,
           // another tool) still drops the doc's ledger rows. Idempotent, so overlapping with the
           // route's own synchronous sweep is harmless.
@@ -588,12 +818,18 @@ export async function createServer(
     );
   };
 
-  /** The docs root a project's interactive docs live under — the SAME per-project settings
-   *  resolution the project routes, the interactive proxy, and the chat seam share
-   *  (DES-MERGE-001 §7.1/§7.2). Shared by the edit seam (demo-kind gate, CREW-UX-9) and the
-   *  demo seam (spec install + manifest reads). */
+  /** The docs root a project's interactive docs live under — the SAME per-project resolution
+   *  the project routes and the interactive proxy use (DES-MERGE-001 §7.1/§7.2; partitioned
+   *  per project since crew#472, with an event that carries no `project_id` belonging to
+   *  Unfiled). Shared by the edit seam (demo-kind gate, CREW-UX-9), the demo seam (spec
+   *  install + manifest reads), and the chat seam. The partition is containment-checked on
+   *  REAL paths here exactly as the routes check it (crew#474 — one walk, `bridge-root.ts`):
+   *  a symlinked `projects/<id>` throws `InteractivePartitionRefusedError` into the seam's
+   *  handler (logged by its `onError`, the event unanswered — fail closed) instead of being
+   *  followed into another project's docs; the seams only READ under a root the routes
+   *  materialized, so a missing partition is returned as spelled and nothing is created. */
   const interactiveDocsRoot = (projectId: string | undefined): string =>
-    resolveInteractiveRoot(projectId !== undefined ? projectSettings.get(projectId) : null);
+    resolveProjectInteractiveRoot(projectId, projectId !== undefined ? projectSettings.get(projectId) : null);
 
   // Arm the opt-in QE gate-event subscription (crew's bus seam). Failure to
   // arm is LOUD but non-fatal: the acceptance route never depends on the bus.
@@ -603,6 +839,7 @@ export async function createServer(
       ...(dbPath !== undefined ? { dbPath } : {}),
       ...(pollIntervalMs !== undefined ? { pollIntervalMs } : {}),
       log: (m) => app.log.warn(m),
+      logError: (m) => app.log.error(m),
     });
     if (sub !== null) {
       app.log.info(`qe gate-event subscription armed (filter wicked.qe.**)`);
@@ -668,8 +905,18 @@ export async function createServer(
       ...(o.ledgerPath !== undefined ? { ledgerPath: o.ledgerPath } : {}),
       ...(o.draftDir !== undefined ? { draftDir: o.draftDir } : {}),
       ...(o.clisJson !== undefined ? { clisJson: o.clisJson } : {}),
+      // The roster WITH standing when no override is set (F-RECON-002/003).
+      roster: rosterWithStanding,
+      // The quality-floor skill gate (draft-skill.ts): stamped only when the published snapshot holds it.
+      skillHeld: (name) => skillsRuntime?.holdsSkill(name) ?? false,
       onRunFiled: fileRun,
+      onRunLaunched: (runId, detail) => { recordRunLaunched(audit, runTimingIndex, DAEMON_ACTOR, runId, detail); },
+      // F-046: the create-time grounding sidecar is read under the SAME per-project docs root the
+      // proxy recorded it in.
+      groundingStore: docGrounding,
+      resolveDocsRoot: o.resolveDocsRoot ?? interactiveDocsRoot,
       log: (m) => app.log.warn(m),
+      logError: (m) => app.log.error(m),
     });
     if (draftSub !== null) {
       const sub = draftSub;
@@ -696,6 +943,10 @@ export async function createServer(
       ...(o.ledgerPath !== undefined ? { ledgerPath: o.ledgerPath } : {}),
       ...(o.editDir !== undefined ? { editDir: o.editDir } : {}),
       ...(o.clisJson !== undefined ? { clisJson: o.clisJson } : {}),
+      // The roster WITH standing when no override is set (F-RECON-002/003).
+      roster: rosterWithStanding,
+      // The quality-floor skill gate (draft-skill.ts): stamped only when the published snapshot holds it.
+      skillHeld: (name) => skillsRuntime?.holdsSkill(name) ?? false,
       // The demo-kind gate (CREW-UX-9): a demo doc's step feedback is the demo seam's — but
       // only when that seam is actually up. Probed per event (the demo seam arms below), so an
       // un-armed demo seam gets an honest error status instead of a silent, unanswerable drop.
@@ -703,6 +954,7 @@ export async function createServer(
       demoSeamArmed: () => demoSub !== null,
       onRunFiled: fileRun,
       log: (m) => app.log.warn(m),
+      logError: (m) => app.log.error(m),
     });
     if (editSub !== null) {
       const sub = editSub;
@@ -727,9 +979,14 @@ export async function createServer(
       ...(o.ledgerPath !== undefined ? { ledgerPath: o.ledgerPath } : {}),
       ...(o.demoDir !== undefined ? { demoDir: o.demoDir } : {}),
       ...(o.clisJson !== undefined ? { clisJson: o.clisJson } : {}),
+      // The roster WITH standing when no override is set (F-RECON-002/003).
+      roster: rosterWithStanding,
       resolveDocsRoot: o.resolveDocsRoot ?? interactiveDocsRoot,
       onRunFiled: fileRun,
+      onRunLaunched: (runId, detail) => { recordRunLaunched(audit, runTimingIndex, DAEMON_ACTOR, runId, detail); },
+      groundingStore: docGrounding,
       log: (m) => app.log.warn(m),
+      logError: (m) => app.log.error(m),
     });
     if (demoSub !== null) {
       const sub = demoSub;
@@ -756,17 +1013,19 @@ export async function createServer(
       ...(o.ledgerPath !== undefined ? { ledgerPath: o.ledgerPath } : {}),
       ...(o.chatDir !== undefined ? { chatDir: o.chatDir } : {}),
       ...(o.clisJson !== undefined ? { clisJson: o.clisJson } : {}),
+      // The roster WITH standing when no override is set (F-RECON-002/003).
+      roster: rosterWithStanding,
+      // The quality-floor skill gate (draft-skill.ts): stamped only when the published snapshot holds it.
+      skillHeld: (name) => skillsRuntime?.holdsSkill(name) ?? false,
       ...(o.queueSweepMs !== undefined ? { queueSweepMs: o.queueSweepMs } : {}),
       ...(o.landingGateMs !== undefined ? { landingGateMs: o.landingGateMs } : {}),
-      resolveDocsRoot:
-        o.resolveDocsRoot ??
-        ((projectId) =>
-          resolveInteractiveRoot(projectId !== undefined ? projectSettings.get(projectId) : null)),
+      resolveDocsRoot: o.resolveDocsRoot ?? interactiveDocsRoot,
       isDocBusy: (documentId) =>
         (draftSub?.inFlightDocs().includes(documentId) ?? false) ||
         (editSub?.inFlightDocs().includes(documentId) ?? false),
       onRunFiled: fileRun,
       log: (m) => app.log.warn(m),
+      logError: (m) => app.log.error(m),
     });
     if (chatSub !== null) {
       const sub = chatSub;
@@ -796,11 +1055,23 @@ export async function createServer(
           // candidates. Views with no units (older engines, stub adapters) keep the historical
           // `unit_ix` fallback.
           const cursor = resolveCursorUnit(v);
+          // DES-L3 PR-3E (F-RC1-012): an EVALUATOR cursor must never fail over onto a seat
+          // that built the work it reviews — the creators' seats ride as `avoid`. A free-text
+          // unit carries no role → no constraint (today's pick).
+          const avoid =
+            cursor?.role === 'evaluator'
+              ? v.units
+                  .filter((u) => (u as { role?: unknown }).role === 'creator' && u.assigned_cli != null)
+                  .map((u) => u.assigned_cli as string)
+              : [];
           return {
             id: v.session.id,
             ord: cursor?.ord ?? v.session.unit_ix,
             ...(cursor?.cli !== undefined ? { cli: cursor.cli } : {}),
             ...(Array.isArray(v.session.clis) ? { seats: v.session.clis } : {}),
+            ...(avoid.length > 0 ? { avoid } : {}),
+            // crew #580 / #581: a tool cursor is notified about, never reassigned.
+            ...(cursor !== undefined ? { executor: cursor.executor } : {}),
           };
         }),
     broadcast: (frame) => broadcast(frame),
@@ -833,15 +1104,20 @@ export async function createServer(
       },
       // An automated actor touching a run is a privileged action exactly like an operator
       // doing it — one audit line per escalation, needs-you or not (task #88 posture).
-      audit: (frame) => {
-        const { type, session, ...detail } = frame;
-        void type; // the audit `action` names the event; the tag would only duplicate it
-        audit.record(
-          'run.stall.escalated',
-          { id: 'stall-watchdog', kind: 'system', trust: 'admin' },
-          { runId: session, detail },
-        );
-      },
+    },
+    // wicked-studio#284: every frame the watchdog broadcasts is RECORDED here — the escalation line
+    // crew#341 already wrote (`run.stall.escalated`, spelling unchanged) and now the detection line
+    // too — and remembered in the index the events route serves. The trail is what survives the run
+    // leaving the executing listing and this process exiting; the index is the read-side latency
+    // layer, stamped with the entry's OWN ts so live and post-restart answers are the same instant.
+    onFrame: (frame) => {
+      const { type, session, ...detail } = frame;
+      void type; // `stallFrameAction` names the action from it; the tag would only duplicate it
+      const ts = audit.record(stallFrameAction(frame), STALL_WATCHDOG_ACTOR, {
+        runId: session,
+        detail,
+      });
+      stallFrameIndex.record(frame, ts);
     },
     // The engine's own turn ceiling fired (`stepStatus: "timed_out"`, perf#4) — audit it as
     // what it is, distinct from an operator cancel. Never sent by older engines; the ambiguous
@@ -868,28 +1144,187 @@ export async function createServer(
   const stallWatchdogArmed =
     options?.stallWatchdog?.enabled ??
     !(process.env['VITEST'] !== undefined || process.env['NODE_ENV'] === 'test');
+  // Chat scopes (crew#502): the routes record one per open; the engine's own reclaims (idle TTL,
+  // pool cap) and operator closes all surface as `chatClosed`, which frees the id here — removing
+  // the scratch root of an engine-side reap, finishing a `DELETE`'s closing window, or cancelling
+  // an open still in flight (the index is a small state machine; see `chat-scope.ts`).
+  const chatScopes = new ChatScopeIndex();
+  // Chat turns (F-RECON-017): which seats are mid-turn in which chat, folded from the same
+  // CoreEvent stream below; `POST /chats/:id/messages` refuses a send to a busy seat and the
+  // chat frames leave here stamped with the `turn_id` they answer.
+  const chatTurns = new ChatTurnIndex();
+  // Chat transcripts at rest (DES-L5, D-13): one JSONL per LIVE chat under `<state home>/chats/`,
+  // written from the stamped frames below, dropped with the chat on `chatClosed`, served on
+  // `GET /chats/:id.messages`.
+  const chatTranscripts = new ChatTranscriptStore();
+  // crew#619: see declaration of chatRetained/runToChat above (before the hydration block).
+  // linkChatRun populates both maps and is called from the hydration block (function-hoisted)
+  // and from the launch route (via RoutesRuntime.linkChatRun).
+  function linkChatRun(chatId: string, runId: string): void {
+    runToChat.set(runId, chatId);
+    const existing = chatRetained.get(chatId);
+    if (existing !== undefined) {
+      existing.add(runId);
+    } else {
+      chatRetained.set(chatId, new Set([runId]));
+    }
+  }
+  // Boot reaper (crew#502 hardening, W6): the scratch namespaces of daemons that died without
+  // closing their chats (`<tmp>/wicked-crew-chats/<pid>-*` with a dead pid) are removed once, here,
+  // under the same real-directory/ownership checks a live close applies. Not under vitest: the
+  // suites build many servers and must never touch the developer's real temp namespace.
+  if (!(process.env['VITEST'] !== undefined || process.env['NODE_ENV'] === 'test')) {
+    const reaped = reapStaleChatNamespaces();
+    if (reaped.length > 0) {
+      app.log.info(`chat scratch: reaped ${reaped.length} namespace(s) of dead daemons: ${reaped.join(', ')}`);
+    }
+    // Clear orphaned transcripts at boot. Transcripts for promoted runs that are still
+    // non-terminal (rehydrated above into chatRetained) are PRESERVED so Continue-in-Build
+    // prefill remains reproducible across a daemon restart (crew#619).
+    chatTranscripts.clearOrphaned(new Set(chatRetained.keys()));
+  }
   const offEvent = adapter.onEvent((event) => {
     gateCache.ingest(event);
     elicitationCache.ingest(event);
     seatHealth.ingest(event);
+    if (event.type === 'chatClosed' && typeof event.chat === 'string') {
+      chatScopes.closed(event.chat);
+      // crew#619: retain the transcript when a promoted run is still live — the chat may be
+      // idle-TTL'd before the run finishes, and Continue-in-Build needs the transcript.
+      const retaining = chatRetained.get(event.chat);
+      if (retaining === undefined || retaining.size === 0) {
+        // ONE mechanism for DELETE / idle / pool_cap alike: the transcript goes with the chat.
+        chatTranscripts.drop(event.chat);
+      }
+    }
+    // Stamp BEFORE folding: the closing `chatReply` is the frame most worth correlating — and the
+    // one the transcript records (only a stamped reply is persisted; a straggler after the close
+    // carries no `turn_id` and cannot recreate the file).
+    const stamped = chatTurns.decorate(event);
+    // crew#618 Acceptance 1: rewrite the chatReply frame ONCE — before both observe (persist) and
+    // broadcast (/ws → studio render/promote). `observe`'s own rewrite pass is then a no-op.
+    const rewritten = chatTranscripts.rewriteEvent(stamped);
+    chatTranscripts.observe(rewritten);
+    chatTurns.observe(event);
     // Only feed the watchdog when its sweep is (or will be) armed: sweeping is what
     // prunes its per-run maps, so ingesting while disabled grows without bound
     // (Copilot on #301).
     if (stallWatchdogArmed) stallWatchdog.ingest(event);
     terminals.route(event);
+    // Skills keystone: a live run pins the snapshot generation it may be reading; its terminal
+    // frame releases the pin and reaps generations no other live run holds (design v3 §1).
+    skillsRuntime?.observe(event);
     const session = typeof event.session === 'string' ? event.session : undefined;
     const projectId = session !== undefined ? membershipIndex.projectOf(session) : undefined;
-    broadcast(projectId !== undefined ? ({ ...event, project_id: projectId } as CoreEvent) : event);
+    broadcast(projectId !== undefined ? ({ ...rewritten, project_id: projectId } as CoreEvent) : rewritten);
     // The delivered-PR record (CREW-UX-8, crew#321): resolved once per run at its terminal
     // frame, best-effort, off the hot path — see `resolveRunDelivery` above for why BOTH
     // terminal frames trigger it and why a failed deliver is a no-op. THEN the delivery-
     // derivation cache warms this run (after, so a just-recorded PR URL skips the git pair),
     // healing the DTO's stranded/vacuous/none label in seconds instead of at the next sweep.
     if (
-      (event.type === 'sessionCompleted' || event.type === 'sessionFailed') &&
+      (event.type === 'sessionCompleted' || event.type === 'sessionFailed' || event.type === 'runCancelled') &&
       session !== undefined
     ) {
-      void resolveRunDelivery(session).then(() => deliveryCache.warm(session));
+      // crew#619: when a run that was linked to a chat terminates, release the retention hold and
+      // drop the transcript if the chat was already reclaimed (not in chatScopes).
+      const linkedChat = runToChat.get(session);
+      if (linkedChat !== undefined) {
+        runToChat.delete(session);
+        const retaining = chatRetained.get(linkedChat);
+        if (retaining !== undefined) {
+          retaining.delete(session);
+          if (retaining.size === 0) {
+            chatRetained.delete(linkedChat);
+            if (!chatScopes.has(linkedChat)) {
+              chatTranscripts.drop(linkedChat);
+            }
+          }
+        }
+      }
+      // `ended_at` (crew#496 / studio#230; api-types 0.38.0): the durable record first (`run.ended`),
+      // then the index — the `run.delivered` write order. Synchronous, on the frame, so the DTO dates
+      // the run the instant it terminals. IDEMPOTENT per run: a resume/retry re-terminal (or any
+      // second terminal frame) finds the run already dated and writes nothing; a restart re-reads the
+      // trail (newest entry wins) instead of re-emitting. The one hole — a crash between the engine's
+      // status write and this record — leaves that run ABSENT, never null (the wire contract).
+      if (runTimingIndex.endedAtFor(session) === undefined) {
+        const endedTs = audit.record('run.ended', DAEMON_ACTOR, {
+          runId: session,
+          detail: { status: event.type },
+        });
+        if (endedTs > 0) runTimingIndex.setEnded(session, endedTs);
+      }
+      void resolveRunDelivery(session)
+        // crew#620 Acceptance 3: sweep the delivered run's worktree once the PR is open.
+        // Best-effort — a sweep error must never fail the terminal frame.
+        .then(async () => {
+          if (deliveryIndex.urlFor(session) !== undefined) {
+            try {
+              const views = await adapter.sessionsDetail();
+              const repoRef = views.find((v) => v.session.id === session)?.session.repo_ref;
+              if (repoRef !== null && repoRef !== undefined) {
+                const repos = await adapter.listRepos();
+                const repoRoot = repos.find((r) => r.id === repoRef)?.root_path;
+                if (repoRoot !== undefined) {
+                  await sweepDeliveredWorktree(session, repoRoot, (m) => app.log.info(m));
+                }
+              }
+            } catch (err: unknown) {
+              app.log.warn(
+                `[runs] worktree sweep failed for ${session}: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            }
+          }
+        })
+        .then(() => deliveryCache.warm(session))
+        // Wave 6 (F-7R2-014): a terminal `qe-author-tests` run registers its TEST SET — the
+        // produced tests as the verify phase judged them — AFTER the delivery record resolved, so
+        // the set carries the PR URL when the engine's deliver phase opened one. Best-effort:
+        // registration never fails the run; a non-qe run is a no-op. `runCancelled` is a terminal
+        // frame too (review L-2 of #536): a run the operator cancelled after verify passed still
+        // has a set worth showing (`run_status: 'cancelled'`).
+        .then(() =>
+          registerTestSetForRun(
+            {
+              adapter,
+              audit,
+              index: testSets,
+              workflows: () => adapter.listWorkflows(),
+              deliveryUrlFor: (runId) => deliveryIndex.urlFor(runId),
+              labelFor: (runId) => {
+                const attach = groupIndex.attachOf(runId);
+                return attach !== undefined && 'label' in attach ? attach.label : undefined;
+              },
+              log: (m) => app.log.info(m),
+            },
+            session,
+          ),
+        )
+        .catch((err: unknown) => {
+          app.log.warn(
+            `[testing] test-set registration for ${session} failed: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        });
+    }
+    // A completed ONBOARDING run refreshes the project graph(s) its repo belongs to (F-2R2-008):
+    // bounded (plain refresh — unchanged members skip; one project at a time; at most two rounds),
+    // off the hot path, logged. Only runs THIS daemon launched are known here, by design.
+    if (event.type === 'sessionCompleted' && session !== undefined) {
+      const onboardedRepo = adapter.onboardedRepoOf(session);
+      if (onboardedRepo !== undefined) {
+        void refreshProjectGraphsAfterOnboarding(adapter, onboardedRepo, {
+          log: (m) => app.log.info(m),
+        }).catch((err: unknown) => {
+          app.log.warn(
+            `[projects] auto-refresh after onboarding ${onboardedRepo} failed: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        });
+      }
     }
     // The foundation record's evidence pointer (§3.2 row 3): a project-bound run that completes
     // gets its run-scope pointer written, best-effort, off the hot path.
@@ -923,8 +1358,16 @@ export async function createServer(
       })();
     }
   });
+  // Skills keystone (codex round 4): every launch the daemon hands the engine — run, resume, gate
+  // answer, campaign — opens a generation pin BEFORE the engine call, released only by the engine's
+  // `skillsSnapshotHanded` report or the terminal frame (live-generations.ts). Unregistered on
+  // close like the event listener.
+  const offLaunch = adapter.onLaunch((notice) => {
+    skillsRuntime?.launched(notice);
+  });
   app.addHook('onClose', async () => {
     offEvent();
+    offLaunch();
   });
 
   // (The seat-health `--version` recovery probe that armed here is retired — perf recon
@@ -1021,11 +1464,21 @@ export async function createServer(
     { audit, authMode: auth.mode },
     {
       seatHealth,
+      // wicked-studio#284: the watchdog's remembered frames ride `GET /runs/:id/events`.
+      stallFrames: (runId) => stallFrameIndex.framesFor(runId),
+      // The SAME standing accessor the seams and the adapter launch with (F-RECON-002/003).
+      rosterWithStanding,
       retryIndex,
       groupIndex,
       runTimingIndex,
       guidanceIndex,
+      chatScopes,
+      chatTurns,
+      chatTranscripts,
       deliveryIndex,
+      // Wave 6: the doc↔run binding (F-4R2-006) and the registered test sets (F-7R2-014).
+      docRuns,
+      testSets,
       // The delivery machinery built beside the index above: the started cache, and the SAME
       // probe functions it derives through — so the routes' campaign rollup shares one TTL memo
       // with the sweeper instead of re-probing on its own clock.
@@ -1033,10 +1486,22 @@ export async function createServer(
       worktreeExists: vacuityProbes.worktreeExists,
       worktreeIsClean: vacuityProbes.worktreeIsClean,
       runBranchIsEmpty: vacuityProbes.runBranchIsEmpty,
+      canDeliver,
       errorRing,
       studioRoot,
       dropDocLedgerRows,
       evalStore,
+      // F-043/F-046: the bridge's bus dir and the create-time grounding store reach the proxy.
+      interactiveBridgeBusDataDir: options?.interactiveBridge?.busDataDir ?? null,
+      docGrounding,
+      ...(skillsRuntime !== undefined ? { skills: skillsRuntime } : {}),
+      // wicked-core#411 / crew#497: the live state-home classification the routes report and gate on.
+      stateHome: stateHomeWatch,
+      // Routes that say something to the thread (a refused chat seat, F-2R2-007) emit through the
+      // SAME /ws fan-out the engine's frames take.
+      broadcast: (frame) => broadcast(frame),
+      // crew#619: retain a chat's transcript for the lifetime of its promoted run.
+      linkChatRun,
     },
   );
 

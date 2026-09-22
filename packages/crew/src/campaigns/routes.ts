@@ -25,8 +25,7 @@ import { z } from 'zod';
 import {
   CampaignsUnsupportedError,
   ProjectsUnsupportedError,
-  type CoreAdapter,
-} from '../core/adapter.js';
+  type CoreAdapter, ENGINE_TOO_OLD_RE } from '../core/adapter.js';
 import type { Actor, LaunchCampaignBody } from '../core/types.js';
 import type { AuditLog } from '../api/audit.js';
 import { API_PREFIX } from '../api/api-prefix.js';
@@ -78,6 +77,13 @@ export const LaunchCampaignSchema = z
     scenarios: z.array(ScenarioSchema).min(1),
     policy: z.enum(['fail_fast', 'continue_independent', 'human_gate_on_failure']).optional(),
     maxConcurrency: z.number().int().min(1).max(64).optional(),
+    // (DES-L1 PR-1D / core #484, wicked-core ≥ 0.7.27) What an UNATTENDED campaign does when a node
+    // parks at the engine's ESCALATION gate: `hold` (engine default — the node waits for a human) or
+    // `auto_reject` (the campaign answers that gate with Reject; the node cancels, dependents follow
+    // the edge rule). Def / run-level gates always hold. Passed through to the engine def as
+    // `denial_gate`; on an addon < 0.7.27 the adapter REFUSES the launch by name (409) rather than
+    // let serde drop the field and hold a campaign that asked not to (review-L1-598 M1).
+    denialGate: z.enum(['hold', 'auto_reject']).optional(),
     clisJson: z.string().optional(),
     // The pinned multiscope wire (see api/multiscope.ts): explicit codebase attachments and/or
     // a project whose crew.repo members crew resolves server-side. Neither ⇒ today's behavior.
@@ -92,7 +98,9 @@ export const LaunchCampaignSchema = z
 export interface CampaignRoutesDeps extends RollupDeps {
   audit: AuditLog;
   actorOf: (req: FastifyRequest & { actor?: Actor }) => Actor;
-  /** The default council roster for agent scenarios (already parsed). */
+  /** The default council roster for agent scenarios (already parsed) — WITH crew's standing
+   *  (`council_eligible` …), which the adapter translates into the engine's per-seat `health` at
+   *  launch, per node (`core/engine-roster.ts` `engineCampaignDef`, F-086). */
   roster: () => unknown[];
 }
 
@@ -170,8 +178,11 @@ export function registerCampaignRoutes(
           return reply.code(501).send({ error: err.message });
         }
         const msg = message(err);
-        // A campaign id that already exists is a state conflict on a real resource.
-        if (/already exists|already launched/i.test(msg)) {
+        // A campaign id that already exists is a state conflict on a real resource; so is an
+        // engine that lacks the arm the body asked for (`denialGate` on an addon < 0.7.27) — the
+        // request is well-formed, the daemon's engine is what cannot honour it (same 409 the gate
+        // route answers for the `action` / `amendScope` arms).
+        if (/already exists|already launched/i.test(msg) || ENGINE_TOO_OLD_RE.test(msg)) {
           return reply.code(409).send({ error: msg });
         }
         return reply.code(400).send({ error: msg });
@@ -201,6 +212,9 @@ export function registerCampaignRoutes(
         return {
           campaigns: await Promise.all(campaigns.map((c) => enrichCampaign(c, byId, deps))),
           groups: await buildGroups(byId, deps),
+          // Wave 6 (F-7R2-014): the test sets `qe-author-tests` runs registered at completion —
+          // what the Test landing counts (tests / test runs / pass rate). Additive, `[]` when none.
+          test_sets: deps.testSets?.list() ?? [],
         };
       } catch (err) {
         if (err instanceof CampaignsUnsupportedError) {

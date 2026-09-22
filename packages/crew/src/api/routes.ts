@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
+import type { RecordedStallFrame } from './stall-frame-index.js';
 import { z } from 'zod';
 import { listRequirements, getRequirement, patchRequirement } from './requirements.js';
 import { randomUUID } from 'node:crypto';
@@ -6,8 +7,16 @@ import { readFileSync, existsSync } from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, SteeringUnsupportedError, humanGatePhaseIds } from '../core/adapter.js';
-import { codeGraphDb, requirementsGraph } from '../core/repoPaths.js';
+import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, SteeringUnsupportedError, humanGatePhaseIds, settingsFilePath } from '../core/adapter.js';
+import { codeGraphDb, codeGraphErrorStatus, requirementsGraph } from '../core/repoPaths.js';
+import type {
+  CodeGraphData,
+  CoreEvent,
+  RecordedEvent,
+  RepoEntry,
+  RepoFinding,
+  WorkflowDef,
+} from '../core/types.js';
 import { resolveCursorUnit } from '../core/cursor.js';
 import { detectRefusal, type GateCache } from './gate-cache.js';
 import type { ElicitationCache } from './elicitation-cache.js';
@@ -26,7 +35,6 @@ import type {
   PolicyLandingResult,
   RejectProposalResponse,
   RetireMemoryResponse,
-  RosterSeat,
   SessionStatus,
   SessionView,
   SteeringType,
@@ -35,15 +43,33 @@ import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
 import { callEstateTool, EstateMcpError } from '../core/estate-mcp-client.js';
 import { SeatHealthTracker } from './seat-health.js';
 import { applyWorkerConfigRoot, signedInHeuristic } from './seat-signin.js';
+import { chatSeatAdmission } from './seat-standing.js';
+import { rosterWithStandingFactory, type RosterWithStanding } from './roster-standing.js';
+import { ChatTurnIndex } from './chat-turns.js';
+import type { ChatRepoRoot, ChatTranscriptStore } from './chat-transcripts.js';
+import {
+  ChatScopeIndex,
+  chatScopeDeps,
+  prepareChatScratch,
+  removeChatScratch,
+  resolveChatScope,
+  type ChatSeatRefusal,
+} from './chat-scope.js';
 import { allowedRootsFor, isInsideRoot, openWithSystemDefault } from './open-path.js';
 import {
   InvalidDiffBaseError,
+  MERGE_BASE_LITERAL,
   NotARegularFileError,
   UnresolvableDiffBaseError,
+  branchDiff,
+  isPlainRef,
   readFileCapped,
   worktreeDiff,
 } from './run-files.js';
-import { resolveProjectGraphBinding } from '../projects/graph.js';
+import { DocRunIndex } from '../interactive/doc-run-index.js';
+import { listInteractiveDocs } from '../interactive/docs-index.js';
+import { TestSetIndex } from '../qe/test-sets.js';
+import { estateExe, resolveProjectGraphBinding } from '../projects/graph.js';
 import { registerProjectRoutes, type ProjectRoutesDeps } from '../projects/routes.js';
 import { registerCampaignRoutes } from '../campaigns/routes.js';
 import { registerGovernanceWikiRoutes } from './governance-wiki.js';
@@ -55,11 +81,26 @@ import {
 } from './governance-steering.js';
 import { isSteeringAuthorRun, landSteeringProposal } from './steering-landing.js';
 import { registerTestingRoutes } from './testing.js';
+import { registerSkillsRoutes } from './skills.js';
+import { disabledSkillsHealth, type SkillsRuntime } from '../skills/runtime.js';
+import {
+  STATE_HOME_BLOCKER_CODE,
+  STATE_HOME_REMEDY,
+  isEngineStateHomeRefusal,
+  stateHomeBlockerBody,
+  type StateHomeWatch,
+} from '../projects/state-home-preflight.js';
+import { BASE_SKILL_POLICIES, BASE_SKILL_REF_SHAPE, baseSkillRemedy } from '../skills/base-skill.js';
 import type { EvalRunStore } from './eval-store.js';
+import { noEligibleSeatBody, parseNoEligibleSeat } from '../core/engine-roster.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
 import { boundOrigin, InteractiveBridgePool } from '../interactive/bridge-pool.js';
+import { composeDeliverText, factsFromRun, framedDeliverText, runUrlFor } from '../core/deliver-text.js';
+import { resolvePullRequest as resolvePullRequestViaGh, type PullRequestResolution } from '../core/deliver.js';
+import type { DocGroundingStore } from '../interactive/doc-grounding.js';
 import { registerInteractiveProxy } from '../interactive/proxy-routes.js';
 import { registerInteractiveDocDelete } from '../interactive/doc-delete-routes.js';
+import { registerInteractiveDocList } from '../interactive/doc-list-routes.js';
 import type { DocLedgerSweep } from '../interactive/doc-ledger-sweep.js';
 import { MembershipIndex } from '../projects/membership-index.js';
 import { MEMBERSHIP_ATTACHED, membershipAttachedKey } from '../projects/events.js';
@@ -73,6 +114,8 @@ import {
   readStudioBundleVersion,
   type ErrorRing,
 } from './diagnostics.js';
+import { GovernanceDiagnostics } from './governance-health.js';
+import { legacyHomeOutboxPath } from '../core/governance-store.js';
 import { RetryIndex } from './retry-index.js';
 import { GroupIndex } from './group-index.js';
 import { RunTimingIndex, recordRunLaunched } from './run-timing-index.js';
@@ -83,6 +126,7 @@ import {
   gitWorktreeIsClean,
   isDeliverConflictStranded,
   prUrlFrom,
+  canDeliverResolver,
   type DeliveryState,
   type VacuityProbes,
 } from './delivery-index.js';
@@ -128,6 +172,47 @@ function sortActionableFirst(views: SessionView[]): SessionView[] {
   return [...views].sort(
     (a, b) => (STATUS_ORDER[a.session.status] ?? 9) - (STATUS_ORDER[b.session.status] ?? 9),
   );
+}
+
+/**
+ * `codeGraphDb(repo)` for a repo surface, or `null` after answering **503** — a CURRENT engine that
+ * resolved no repo-graph root (`code_graph_root_unresolvable`, wicked-core#406) is a daemon-
+ * environment fault, not a bad request and not Fastify's generic 500. The mapping is the shared
+ * `codeGraphErrorStatus`; anything it does not classify rethrows unchanged (the stale-addon error
+ * keeps its pre-existing shape here).
+ */
+/**
+ * What `GET /repos/:id/graph` answers with 200 (F-2R2-005) — the daemon-side shape the drift guard
+ * pins both ways against `wicked-crew-api-types` `RepoGraphResponse` (#533 review, F-5). `graph`
+ * present = the estate slice; `graph: null` = not built, with `reason` (and the engine's `finding`
+ * when it has one) saying why.
+ */
+export interface RepoGraphReply {
+  graph: CodeGraphData | null;
+  reason?: string;
+  finding?: RepoFinding;
+}
+
+/**
+ * The whole-graph counts from `wicked-estate stats --db` stdout (`nodes=N edges=M files=F …`, the
+ * first line estate prints — `main.rs`'s `stats` summary). `undefined` when the line does not parse
+ * (an older/newer estate, an error message): the caller leaves `CodeGraphData.totals` ABSENT.
+ */
+export function parseEstateTotals(stdout: string): { nodes: number; edges: number; files: number } | undefined {
+  const m = /^nodes=(\d+) edges=(\d+) files=(\d+)/m.exec(stdout);
+  if (m === null) return undefined;
+  return { nodes: Number(m[1]), edges: Number(m[2]), files: Number(m[3]) };
+}
+
+function codeGraphDbOr503(repo: RepoEntry, reply: FastifyReply): string | null {
+  try {
+    return codeGraphDb(repo);
+  } catch (err) {
+    const status = codeGraphErrorStatus(err);
+    if (status === null) throw err;
+    void reply.code(status).send({ error: message(err) });
+    return null;
+  }
 }
 
 function message(err: unknown): string {
@@ -411,6 +496,12 @@ export const LaunchSchema = z.object({
    *  defaults to `"pr"` (flippable via the `deliverDefault` setting), everything else to
    *  `"none"` — see the resolution below. */
   deliver: z.enum(['pr', 'none']).optional(),
+  /** F-E2E-030 — who confirms the deliver phase. `'human'` (the default when omitted): the engine
+   *  pauses before the composed `deliver` Tool unit pushes and opens the PR, whatever
+   *  `humanConfirm` says. `'auto'`: the caller's EXPLICIT opt-out — the push and PR follow verify
+   *  unattended, under the daemon's active gh account; a UI sending it must name the posture
+   *  "auto-deliver" to its operator. Additive; an older daemon's schema rejects it with a 400. */
+  deliverGate: z.enum(['human', 'auto']).optional(),
   /** DES-UX-001 §8.3 (CREW-UX-3) — the run this launch retries. Must name an EXISTING run id
    *  (the route checks the store and 400s with a named error otherwise); persisted via the
    *  `run.launched` audit entry + retry index and echoed as `AgentSession.retry_of`. */
@@ -425,19 +516,65 @@ export const LaunchSchema = z.object({
    *  sharing a label form one `RunGroup` on `GET /campaigns`. Persisted/echoed like
    *  `campaignId` (as `AgentSession.group_label`). */
   groupLabel: z.string().min(1).max(200).optional(),
+  /** DES-L9 / crew#550 (api-types 0.38.0) — REVISE an OPEN same-repository pull request: its head
+   *  branch becomes the run's base and the deliver phase pushes the run's commits onto it (no
+   *  second PR), commenting the run record. Needs `repoRef` + `workflow` and `deliver: "pr"`
+   *  (explicit `"none"` is a 400; a daemon that resolves the omitted field to `none` is a 409).
+   *  Resolved via `gh pr view` at launch — not OPEN / a fork / gh failure ⇒ 409, nothing launched.
+   *  Send it only when `GET /health.capabilities.revisesPr === true` (engine ≥ 0.7.27). */
+  revisesPr: z.number().int().positive().optional(),
+  /** crew#619 — the chat this run was promoted from; the daemon retains that chat's transcript
+   *  on disk until this run reaches a terminal state so the Continue-in-Build prefill is
+   *  always reproducible. Optional; omit when the launch is not promoted from a chat. */
+  chatId: z.string().min(1).max(128).regex(/^[A-Za-z0-9._-]+$/).optional(),
+  /** crew#632 — the surface that triggered this launch: `studio` (the web UI), `cli` (the
+   *  wicked-crew CLI), or `api` (a programmatic caller). Persisted on the `run.launched` audit
+   *  entry (`detail.channel`) and served on the run DTO; absent = origin unknown. */
+  channel: z.enum(['studio', 'cli', 'api']).optional(),
+  /** crew#632 — an opaque caller-supplied identifier for the user or system that triggered the
+   *  launch (e.g. a CI job name or a studio tab id). Persisted on the `run.launched` audit entry
+   *  (`detail.actor`) and served on the run DTO; absent = caller omitted it. */
+  actor: z.string().min(1).max(256).optional(),
 }).strict().refine((b) => b.deliver !== 'pr' || b.workflow !== undefined, {
   message: 'deliver: "pr" requires a workflow — a free-text run has no def to append the deliver phase to',
   path: ['deliver'],
+}).refine((b) => b.deliverGate === undefined || b.deliver !== 'none', {
+  // F-E2E-030: a deliver-gate posture on a launch that declines delivery is a contradiction the
+  // caller should hear about, not a silent no-op. (A launch that OMITS `deliver` may still
+  // resolve to no deliver unit — repo-less, free-text, read-only def; the field is then inert.)
+  message: 'deliverGate has no meaning with deliver: "none" — there is no deliver phase to gate',
+  path: ['deliverGate'],
 }).refine((b) => b.campaignId === undefined || b.groupLabel === undefined, {
   message:
     'campaignId and groupLabel are mutually exclusive — a run files onto ONE grouping surface (an existing campaign, or a label group)',
   path: ['groupLabel'],
+}).refine((b) => b.revisesPr === undefined || (b.repoRef !== undefined && b.workflow !== undefined), {
+  message: 'revisesPr needs repoRef and workflow — a revision bases a repo-scoped, def-driven run on the pull request\'s branch',
+  path: ['revisesPr'],
+}).refine((b) => b.revisesPr === undefined || b.deliver !== 'none', {
+  message: 'revisesPr needs deliver: "pr" — a launch that declines delivery has no phase to push the revision with',
+  path: ['revisesPr'],
 });
 
+/** `POST /runs/:id/gate` (api-types 0.38.0 `GateDecision`; DES-L1 PR-2). Additive arms: `action`
+ *  names the arm (`approve` | `request_changes` | `reject`; absent = today's two-arm mapping of
+ *  `approve`), `amendScope` says where an approve's `amend` lands (`cursor` = the gated unit, today's
+ *  behaviour | `creator` = the first creator phase at/after the cursor — an intake steer reaches the
+ *  phase that implements). `request_changes` sends a NOT-PASS review back to the creator with the
+ *  findings in context (`amend` = the operator's note). A disagreement between `action` and
+ *  `approve` is a 400 that names both. */
 export const GateSchema = z.object({
   approve: z.boolean(),
   amend: z.string().optional(),
-}).strict();
+  action: z.enum(['approve', 'request_changes', 'reject']).optional(),
+  amendScope: z.enum(['cursor', 'creator']).optional(),
+}).strict().refine(
+  (b) => b.action === undefined || (b.action === 'approve') === b.approve,
+  { message: '`action` disagrees with `approve`: request_changes and reject require approve: false; approve requires approve: true', path: ['action'] },
+).refine(
+  (b) => b.amendScope === undefined || b.approve,
+  { message: '`amendScope` applies to an approve only (approve: true)', path: ['amendScope'] },
+);
 
 /** `PUT /runs/:id/guidance` (DES-UX-002 §7.2, CREW-UX-7) — the durable pre-gate note body.
  *  The empty string is a legal body: it CLEARS the note. The byte cap is checked in the route
@@ -522,8 +659,40 @@ export interface SecurityDeps {
  * fed by the daemon's single CoreEvent subscription) and the OS opener for `/open` (crew#273,
  * injectable so tests never actually open anything).
  */
+/** A remembered watchdog frame as `GET /runs/:id/events` SERVES it — with the `seq` the published
+ *  `RecordedEvent` contract requires (api-types 0.38.0). `daemon: true` rides additively until
+ *  api-types 0.39.0 declares it; every consumer today reads unknown keys through. */
+type ServedStallFrame = RecordedStallFrame & { seq: number };
+
+/**
+ * Stamp the required `seq` onto the daemon-authored frames of a ts-sorted merge. A watchdog frame
+ * has no engine `seq` — the engine's log never saw it — so each one rides the seq of the engine
+ * record it FOLLOWS (0 before the first). The served array is therefore monotonic non-decreasing in
+ * `seq`, and a consumer that re-sorts by seq (studio's narrator) keeps every frame beside the event
+ * it was captured after, instead of dropping it to the front on a missing key.
+ */
+function withServedSeq(
+  merged: Array<RecordedEvent | RecordedStallFrame>,
+): Array<RecordedEvent | ServedStallFrame> {
+  let seq = 0;
+  return merged.map((e) => {
+    if (!('daemon' in e)) {
+      if (typeof e.seq === 'number') seq = e.seq;
+      return e;
+    }
+    return { ...e, seq };
+  });
+}
+
 export interface RuntimeDeps {
+  /** DES-L9: how `revisesPr` is resolved to a PR head branch (`gh pr view`, 5 s). Injectable so
+   *  route tests answer without gh; production uses `core/deliver.ts::resolvePullRequest`. */
+  resolvePullRequest?: (repoRoot: string, number: number) => Promise<PullRequestResolution>;
   seatHealth?: SeatHealthTracker;
+  /** wicked-studio#284: the stall watchdog's remembered frames for a run — merged into
+   *  `GET /runs/:id/events` at serve time so a reloaded page sees the `workerStalled` /
+   *  `workerStallEscalated` facts the live socket carried. Absent ⇒ engine events only. */
+  stallFrames?: (runId: string) => readonly RecordedStallFrame[];
   /** Run→retry-lineage index (CREW-UX-3) — `createServer` hydrates one from the audit trail so
    *  a restarted daemon still echoes `retry_of`; a directly-driven route set gets a fresh one. */
   retryIndex?: RetryIndex;
@@ -538,6 +707,17 @@ export interface RuntimeDeps {
   /** Run→operator-guidance index (CREW-UX-7) — `createServer` hydrates one from the audit trail
    *  so a restarted daemon still echoes `guidance`; a directly-driven route set gets a fresh one. */
   guidanceIndex?: GuidanceIndex;
+  /** Chat→scope index (crew#502) — `createServer` supplies the one it also reaps on the engine's
+   *  `chatClosed` frames (so a reclaimed chat's scratch root goes with it); a directly-driven
+   *  route set gets a fresh one. */
+  chatScopes?: ChatScopeIndex;
+  /** Per-chat turn index (F-RECON-017) — `createServer` feeds one from the CoreEvent fold so
+   *  `POST /chats/:id/messages` refuses a send to a seat still mid-turn; a directly-driven route
+   *  set gets a fresh one (tests fold frames into it themselves). */
+  chatTurns?: ChatTurnIndex;
+  /** DES-L5 (D-13): the chat transcript at rest — `GET /chats/:id.messages`. Absent ⇒ nothing is
+   *  persisted and the field is omitted (a directly-driven route in tests). */
+  chatTranscripts?: ChatTranscriptStore;
   /** Run→delivered-PR index (CREW-UX-8, crew#321) — `createServer` hydrates one from the audit
    *  trail so a restarted daemon still echoes `delivery`; a directly-driven route set gets a
    *  fresh one. */
@@ -561,6 +741,12 @@ export interface RuntimeDeps {
    *  directly-driven route set gets a COLD, unstarted one over the same injectable probes:
    *  reads then answer the stat-only tri-state until a test sweeps or warms it explicitly. */
   deliveryCache?: DeliveryDerivationCache;
+  /** Def-awareness for the delivery derivation (crew#481 / D-14) — `createServer` injects the
+   *  `runCanDeliver(view, resolveRunWorkflow(view, adapter.listWorkflows()))` closure it also hands
+   *  its cache, so the campaigns rollup and the run DTOs classify from ONE predicate. A
+   *  directly-driven route set derives the same closure over the adapter's registry when it has
+   *  one, else every completed repo-scoped run stays a candidate (today's read). */
+  canDeliver?: (view: SessionView) => boolean;
   /** The post-hoc deliver exec (crew#393, `POST /runs/:id/deliver`) — spawns the hardened
    *  deliver script in a run's worktree. Injectable so route tests aim the spawn's HOME/PATH at
    *  a fixture (stub `gh`, local bare origin); defaults to the real `bash -lc` spawn. */
@@ -579,10 +765,25 @@ export interface RuntimeDeps {
   /** Seat sign-in presence probe (seat sign-in) — injectable so route tests never read the
    *  developer's real dotfiles. Defaults to the file/env heuristic in seat-signin.ts. */
   signedIn?: (seatKey: string, workerConfigRoot?: string) => boolean | null;
+  /** The roster WITH crew's standing (`api/roster-standing.ts`) — `createServer` injects its single
+   *  instance so the routes, the interactive seams and the adapter's own launches all bench the
+   *  same seats (F-RECON-002/003); a directly-driven route set builds one over `seatHealth` +
+   *  `signedIn` above. */
+  rosterWithStanding?: RosterWithStanding;
+  /** The `/ws` fan-out, for the few routes that say something to a thread themselves (a refused
+   *  chat seat, F-2R2-007). Absent (unit tests, library use) = nothing is broadcast. */
+  broadcast?: (frame: CoreEvent) => void;
   /** The wicked-interactive bridge pool behind `/projects/:id/interactive/*` (DES-MERGE-001
    *  slice 1). Injectable so the integration suite proxies to a FAKE bridge instead of
    *  spawning a real `npx wicked-interactive serve`. */
   interactiveBridges?: InteractiveBridgePool;
+  /** F-043 — the directory of the bus db this daemon's interactive seams read, exported to a
+   *  bridge the pool spawns as `WICKED_BUS_DATA_DIR`. `null`/absent = not exported. Ignored when
+   *  `interactiveBridges` is injected (the injected pool carries its own io). */
+  interactiveBridgeBusDataDir?: string | null;
+  /** F-046 — the create-time doc → subject-repo binding store the proxy records into and the
+   *  draft/demo seams read. Absent = the create stays pure transport (a directly-driven route set). */
+  docGrounding?: DocGroundingStore;
   /** The governed doc-delete's handoff-ledger sweep (crew#338) — `createServer` wires the real
    *  four-ledger sweep (live seam instances first, ledger files as fallback); a directly-driven
    *  route set gets an INERT one so unit tests never touch ~/.wicked-crew. */
@@ -590,6 +791,10 @@ export interface RuntimeDeps {
   /** The daemon's in-process error-level log ring (diagnostics) — `createServer` tees the pino
    *  stream into one; a directly-driven route set (tests) gets an honestly-empty tail. */
   errorRing?: ErrorRing;
+  /** The pre-fix HOME dead-letter outbox `/diagnostics.governance` points at when it exists
+   *  (crew#495): `undefined` = the engine's own default under HOME; `null` = report none — a
+   *  directly-driven route set (tests) never has to `stat` the developer's real home. */
+  governanceLegacyOutboxPath?: string | null;
   /** The studio asset root `createServer` resolved (bundled or overridden) — diagnostics reads
    *  the bundle's shipped version manifest from it. Absent = headless = `studioBundle: null`. */
   studioRoot?: string;
@@ -598,12 +803,49 @@ export interface RuntimeDeps {
    *  (tests) gets one only when it injects it, so a test that never touches the eval routes writes
    *  nothing under `~/.wicked-crew`. */
   evalStore?: EvalRunStore;
+  /** The skills seam (skills keystone) — `createServer` builds one over the daemon state home
+   *  (seeded from the installed plugin, published); a directly-driven route set gets none and
+   *  `/skills*` answers 503 unless a test injects one over a fixture root. */
+  skills?: SkillsRuntime;
+  /** The live state-home classification (wicked-core#411 / crew#497) — `createServer` surveys the
+   *  daemon state home at boot and hands the watch here; the routes re-survey on demand, report it
+   *  on `/diagnostics.stateHome` + `/health.warnings`, and answer `POST /runs` 409 while a handed
+   *  snapshot derives a state home with an entry the fence cannot classify. A directly-driven route
+   *  set (tests) gets none: no survey, no warning, no gate — never a fabricated clean answer. */
+  stateHome?: StateHomeWatch;
+  /** The document ↔ run binding (wave 6, F-4R2-006) read off the interactive seams' handoff ledgers —
+   *  `createServer` builds one over the four ledger sources; a directly-driven route set gets an
+   *  EMPTY one (`document_id: null` on every run). */
+  docRuns?: DocRunIndex;
+  /** The registered test sets (wave 6, F-7R2-014) — `createServer` hydrates one from the trail and
+   *  registers into it at each `qe-author-tests` run's terminal frame; a directly-driven route set
+   *  gets a fresh, empty one. */
+  testSets?: TestSetIndex;
+  /** crew#619 — called when a run is launched with a `chatId`, to retain that chat's transcript
+   *  until the run terminates. Absent in directly-driven route sets (tests). */
+  linkChatRun?: (chatId: string, runId: string) => void;
 }
 
 /**
  * The daemon REST surface. Every endpoint is a thin wrapper over one adapter /
  * core-ts call (DES-STUDIO-001 §2). `session`/`phase` nouns are now `run`/`unit`.
  */
+/**
+ * `POST /chats` body (crew#165; `projectId` DES-PROJECT-001 §2.2; `repoRefs` + scope semantics
+ * crew#502). Exported for the wire-contract drift guard (`tests/wire-contract.test.ts`).
+ */
+export const ChatOpenSchema = z.object({
+  chatId: z.string().min(1).max(128).regex(/^[A-Za-z0-9._-]+$/).optional(),
+  clis: z.array(z.string().min(1)).min(1).max(8).optional(),
+  /** One repo in scope — the legacy spelling, merged into `repoRefs` (crew#502). */
+  repoRef: z.string().min(1).optional(),
+  /** The repos in scope, by registry id or name (crew#502). */
+  repoRefs: z.array(z.string().min(1)).min(1).max(32).optional(),
+  /** File the chat into a project (`crew.chat` membership) — and, with no `repoRefs`, scope it to
+   *  every registered `crew.repo` member of that project (crew#502). */
+  projectId: z.string().min(1).optional(),
+}).strict();
+
 export function registerRoutes(
   app: FastifyInstance,
   adapter: CoreAdapter,
@@ -633,7 +875,14 @@ export function registerRoutes(
   const groupIndex = runtime.groupIndex ?? new GroupIndex();
   const runTimingIndex = runtime.runTimingIndex ?? new RunTimingIndex();
   const guidanceIndex = runtime.guidanceIndex ?? new GuidanceIndex();
+  const chatScopes = runtime.chatScopes ?? new ChatScopeIndex();
+  const chatTurns = runtime.chatTurns ?? new ChatTurnIndex();
+  const chatTranscripts = runtime.chatTranscripts;
   const deliveryIndex = runtime.deliveryIndex ?? new DeliveryIndex();
+  // Wave 6: the doc↔run binding and the registered test sets — `createServer` injects the real
+  // ones; a directly-driven route set gets an empty index (every run `document_id: null`, no sets).
+  const docRuns = runtime.docRuns ?? new DocRunIndex(() => []);
+  const testSets = runtime.testSets ?? new TestSetIndex();
   const worktreeExists = runtime.worktreeExists ?? ((p: string) => existsSync(p));
   const vacuityProbes: VacuityProbes = {
     worktreeExists,
@@ -649,14 +898,30 @@ export function registerRoutes(
   // the daemon's sweep/warm feed it. The default (a directly-driven route set) is COLD and
   // unstarted — no background timer under a unit test, reads degrade to the stat-only
   // tri-state — while `createServer` injects a started one over the production probes.
+  // Def-awareness (crew#481 / D-14): the ONE predicate the run DTOs' cache, the campaigns rollup and
+  // the resume 409 classify from. A fake adapter with no registry (`listWorkflows` absent) resolves
+  // no def ⇒ `runCanDeliver(view, null)` ⇒ candidate — byte-for-byte today's read.
+  const canDeliver =
+    runtime.canDeliver ??
+    canDeliverResolver(
+      () => (typeof (adapter as Partial<CoreAdapter>).listWorkflows === 'function' ? adapter.listWorkflows() : []),
+      (m) => app.log.warn(m),
+    );
   const deliveryCache =
     runtime.deliveryCache ??
     new DeliveryDerivationCache({
       listViews: () => adapter.sessionsDetail(),
       probes: vacuityProbes,
       isDelivered: (runId) => deliveryIndex.urlFor(runId) !== undefined,
+      canDeliver,
     });
   const deliverExec = runtime.deliverExec ?? runDeliverScript;
+  // crew#524: the deliver phase's script asks THIS daemon for the run-derived PR text, and the PR
+  // body links the run here — so the adapter learns the bound origin lazily (the server has not
+  // listened yet when routes register). Guarded: directly-driven route sets hand in fakes.
+  if (typeof (adapter as Partial<CoreAdapter>).setDeliverApiOrigin === 'function') {
+    adapter.setDeliverApiOrigin(() => boundOrigin(app.server.address()));
+  }
   const reprovisionWorktree = runtime.reprovisionWorktree ?? gitReprovisionWorktree;
   // The estate MCP client behind `/proposals*` AND `/memory*` (DES-MEM-FACETED-001) — one seam. The
   // default is the real spawn-per-call `wicked-estate-mcp` client; route tests inject a stub so no
@@ -665,6 +930,8 @@ export function registerRoutes(
   /** Repo root for a repo ref, from the registry — shared by the reprovision path below. */
   const repoRootOf = async (repoRef: string): Promise<string | undefined> =>
     (await adapter.listRepos()).find((r) => r.id === repoRef)?.root_path;
+  /** DES-L9: PR number → head branch, through `gh pr view` unless the runtime injected an answerer. */
+  const resolvePullRequest = runtime.resolvePullRequest ?? resolvePullRequestViaGh;
   // The run-DTO joins (DES-UX-001 §8.2/§8.3, DES-UX-002 §7.2): `project_id` from the membership
   // record — `null` = genuinely unfiled, so the field is ALWAYS present on served runs —
   // `retry_of` from the lineage index and `guidance` from the guidance index, each set only
@@ -711,11 +978,14 @@ export function registerRoutes(
     const url = deliveryIndex.urlFor(view.session.id);
     if (url !== undefined) return { delivery: 'delivered', deliverUrl: url };
     if (conflictStrand) return { delivery: 'stranded' };
-    return deliveryCache.read(view.session);
+    return deliveryCache.read(view);
   };
   const decorateRun = (view: SessionView): SessionView => {
     const conflictStrand = normalizeStranded(view);
     view.session.project_id = projects.index.projectOf(view.session.id) ?? null;
+    // Wave 6 (F-4R2-006): the interactive document this run answered, from the seams' handoff
+    // ledgers — `null` = genuinely not a document run, so the field is ALWAYS present on served runs.
+    view.session.document_id = docRuns.documentOf(view.session.id) ?? null;
     const retryOf = retryIndex.retryOfFor(view.session.id);
     if (retryOf !== undefined) view.session.retry_of = retryOf;
     // wicked-studio#27 (api-types 0.19.0): the launch-time group attach, from the same durable
@@ -733,6 +1003,15 @@ export function registerRoutes(
     // exclude an undated run rather than dating it with a false now.
     const createdAt = runTimingIndex.createdAtFor(view.session.id);
     if (createdAt !== undefined) view.session.created_at = createdAt;
+    // `ended_at` (crew#496 / studio#230; api-types 0.38.0): the same posture from the `run.ended`
+    // entry the daemon records at the run's terminal frame — ABSENT when it has none.
+    const endedAt = runTimingIndex.endedAtFor(view.session.id);
+    if (endedAt !== undefined) view.session.ended_at = endedAt;
+    // crew#632: launch surface and caller identity — served ABSENT when absent, never null.
+    const channel = runTimingIndex.channelFor(view.session.id);
+    if (channel !== undefined) view.session.channel = channel;
+    const launchActor = runTimingIndex.launchActorFor(view.session.id);
+    if (launchActor !== undefined) view.session.launch_actor = launchActor;
     const state = resolveDelivery(view, conflictStrand);
     view.session.delivery = state.delivery;
     if (state.deliverUrl !== undefined) view.session.deliverUrl = state.deliverUrl;
@@ -754,7 +1033,40 @@ export function registerRoutes(
   // null / [] for the rest ("where declared", never invented). See src/api/endpoint-manifest.ts.
   app.get(`${V}/health`, { config: { manifest: { statusCodes: [200] } } }, async () => {
     const ping = await adapter.ping();
-    return { status: 'ok', version: PKG_VERSION, ping };
+    // F-E2E-030: what this deployment can keep. A composer reads `capabilities.deliverGate`
+    // before it promises "pauses at the deliver gate"; a stub-driven route set without the
+    // probe honestly reports no gate.
+    const capabilities =
+      typeof adapter.engineCapabilities === 'function'
+        ? adapter.engineCapabilities()
+        : { deliverGate: false, revisesPr: false, chatIdOnLaunch: false, seatChipOnCreate: false };
+    // wicked-core#411 / crew#497: the state-home blocker rides the health probe as a WARNING. The
+    // daemon still SERVES (status stays ok — studio must load and show the blocker) but refuses to
+    // launch while the state home holds an entry the worker Read fence cannot classify. Re-surveyed
+    // per probe (two readdirs) so an entry that appears after boot is reported without a restart;
+    // the field is ABSENT when there is nothing to say, and on a route set booted without the watch.
+    const stateHome = runtime.stateHome !== undefined ? await runtime.stateHome.refresh() : null;
+    // crew#554: the BASE skill posture for the next launch — the composer's confirm line
+    // ("discipline skill: <name> gen N" / "MISSING — …"). Cached by the skills runtime: no I/O.
+    const baseSkill = runtime.skills?.baseSkill() ?? null;
+    // F-W1-102: the base skill's ERROR rides `warnings` too. A daemon under `require` with no published
+    // generation holding the skill (the crew-only install: no wicked-garden) REFUSES every launch at
+    // intake — it must never read "status ok, no warnings". The SAME finding object as
+    // `baseSkill.finding` and `/diagnostics.skills.findings[]` (one surface, no new field;
+    // `HealthWarning.kind` is open); status stays ok because the daemon serves and studio must load
+    // and show it — exactly the state-home blocker's precedent above.
+    const warnings = [
+      ...(stateHome === null ? [] : stateHome.findings.map((f) => ({ kind: f.kind, severity: f.severity, message: f.message }))),
+      ...(baseSkill?.finding ? [{ kind: baseSkill.finding.kind, severity: baseSkill.finding.severity, message: baseSkill.finding.message }] : []),
+    ];
+    return {
+      status: 'ok',
+      version: PKG_VERSION,
+      ping,
+      capabilities,
+      baseSkill,
+      ...(warnings.length > 0 ? { warnings } : {}),
+    };
   });
 
   // The daemon's self-knowledge surface (diagnostics): what is deployed, what it stores, what
@@ -765,6 +1077,15 @@ export function registerRoutes(
   // can never turn this GET into an event-log re-reader or a `--version` spawner per request.
   const acpFoldCache = new AcpFoldCache();
   const engineVersionCache = new EngineVersionCache();
+  // The governance block (crew#495): the store the engine's emit seam writes to (as the adapter
+  // exported it — `null` on a boot that resolved none), its record count through the engine
+  // binding when the addon has one, and the dead-letter outbox folded on change. Built at boot so
+  // the record baseline is the boot baseline.
+  const governanceDiagnostics = new GovernanceDiagnostics(
+    adapter.governanceStore ?? null,
+    CoreAdapter.eventStoreCounter(),
+    runtime.governanceLegacyOutboxPath === undefined ? legacyHomeOutboxPath() : runtime.governanceLegacyOutboxPath,
+  );
   app.get(
     `${V}/diagnostics`,
     { config: { manifest: { responseType: 'DiagnosticsResponse', statusCodes: [200] } } },
@@ -772,12 +1093,13 @@ export function registerRoutes(
       // `dbPath` is a readonly field of the real adapter; a stub-driven route set may lack it,
       // and diagnostics over an unknown store honestly reports no stores and no ACP record.
       const dbPath = typeof adapter.dbPath === 'string' && adapter.dbPath !== '' ? adapter.dbPath : null;
-      const [stores, byCli, engineBinaries] = await Promise.all([
+      const [stores, byCli, engineBinaries, governance] = await Promise.all([
         dbPath !== null ? listStoreFiles(dbPath) : Promise.resolve([]),
         dbPath !== null
           ? acpFoldCache.get(eventsDirOf(dbPath))
           : Promise.resolve<Awaited<ReturnType<AcpFoldCache['get']>>>({}),
         engineVersionCache.get(),
+        governanceDiagnostics.health(),
       ]);
       const uptimeMs = Math.round(process.uptime() * 1000);
       const addr = app.server.address();
@@ -794,6 +1116,18 @@ export function registerRoutes(
         stores,
         recentErrors: runtime.errorRing?.list() ?? [],
         acp: { byCli },
+        // The skills seam's last outcome (skills keystone): published / fallback / blocked /
+        // config-error, with the `skills.*` findings the ladder produced — the operator's one
+        // read-only answer to "why do launches refuse the snapshot".
+        skills: runtime.skills?.health() ?? disabledSkillsHealth(),
+        // Is the governance evidence LANDING (crew#495): the store, the records on it, the dead
+        // letters — with a `governance.deadletter` finding the moment the outbox holds one.
+        governance,
+        // The state-home classification (wicked-core#411 / crew#497): which state home the worker
+        // Read fence classifies, every entry it cannot classify there (top level and skills root),
+        // who classified (the engine, or crew's registry copy on an older addon) and whether that
+        // refuses launches — re-surveyed per read. `null` on a route set booted without the watch.
+        stateHome: runtime.stateHome !== undefined ? await runtime.stateHome.refresh() : null,
       };
     },
   );
@@ -842,25 +1176,16 @@ export function registerRoutes(
   });
 
   // The council seats for the launch form (static production roster), each carrying its RUNTIME
-  // health (crew#274). The roster is declarative — every configured seat is listed — and `health`
-  // is what the platform has observed: default active with no message; inactive + the error
-  // excerpt after a seat-level failure, until an ok output or the recovery probe flips it back.
-  // Existing fields ride through verbatim (the seat still round-trips into `clisJson` on launch)
-  // — the spread is deliberately NOT a field whitelist, which is what lets the engine's
-  // `login_invocation` (seat sign-in, wicked-core PR#278) pass through untouched. Each seat also
-  // gains `signed_in`: the cheap file/env presence heuristic, computed against the LIVE
-  // `WICKED_WORKER_HOME` env — the same value the engine reads at the next worker spawn, kept
-  // current by `applyWorkerConfigRoot` at boot and on every settings change.
-  app.get(`${V}/roster`, async () => {
-    const workerRoot = process.env['WICKED_WORKER_HOME'];
-    return {
-      roster: (CoreAdapter.roster() as RosterSeat[]).map((seat) => ({
-        ...seat,
-        health: seatHealth.healthFor(String(seat.key)),
-        signed_in: signedIn(String(seat.key), workerRoot === '' ? undefined : workerRoot),
-      })),
-    };
-  });
+  // health (crew#274) and its STANDING (F-2R2-009) — `api/roster-standing.ts` is the ONE accessor
+  // every launch path shares (F-RECON-002/003: the interactive seams, the adapter's onboarding
+  // launch and `wicked-crew start` used to hand the engine the RAW registry roster, so signed-out
+  // seats were convened and even elected). `createServer` injects the daemon's single instance
+  // (built over the same `seatHealth`); a directly-driven route set builds an equivalent one here.
+  // `POST /chats` seats its defaults through the SAME standing, so the roster and the chat never
+  // disagree about a seat.
+  const rosterWithStanding: RosterWithStanding =
+    runtime.rosterWithStanding ?? rosterWithStandingFactory({ seatHealth, signedIn });
+  app.get(`${V}/roster`, async () => ({ roster: rosterWithStanding() }));
 
   // Open a file/folder with the OS default application (crew#273) — the studio Files tab's
   // click-to-open. The open MUST happen daemon-side (the SPA cannot spawn a process), which is
@@ -1013,25 +1338,8 @@ export function registerRoutes(
     const resolved = await resolveRunPath(reply, id, rawPath);
     if (resolved === null) return reply;
     const workdir = resolved.session.workdir;
-    if (typeof workdir !== 'string' || workdir.length === 0) {
-      return reply.code(409).send({ error: `run ${id} has no workdir — nothing to diff` });
-    }
-    if (!existsSync(workdir)) {
-      return reply.code(409).send({ error: `run ${id}'s workdir no longer exists: ${workdir}` });
-    }
-    // Narrowing is WORKTREE-scoped: a contained-but-outside-the-worktree path (extra write
-    // root / repo root) is a valid FILE read but has no meaning as a diff pathspec — rejected
-    // explicitly here rather than handing git a `../`-prefixed pathspec and surfacing its
-    // "outside repository" error as a 500 (Copilot, #305).
-    if (resolved.target !== undefined && !isInsideRoot(workdir, resolved.target)) {
-      return reply.code(400).send({
-        error: `\`path\` must be inside the run's worktree to diff: ${workdir}`,
-      });
-    }
-    const rel = resolved.target === undefined ? undefined : relative(workdir, resolved.target);
-    try {
-      return await worktreeDiff(workdir, rel, rawBase);
-    } catch (err) {
+    /** The route's one error mapping, shared by the worktree and the branch reads. */
+    const diffError = (err: unknown) => {
       // Named 400s (§8.1): malformed base (not a plain ref) and well-formed-but-unresolvable
       // base are both client errors, each with its error name in the body — never a git 500.
       if (err instanceof InvalidDiffBaseError || err instanceof UnresolvableDiffBaseError) {
@@ -1049,6 +1357,75 @@ export function registerRoutes(
         });
       }
       return reply.code(500).send({ error: message(err) });
+    };
+    const worktreeLive = typeof workdir === 'string' && workdir.length > 0 && existsSync(workdir);
+    if (!worktreeLive) {
+      // Wave 6 (F-7R2-013): the engine reaps a completed run's worktree, and the run page went dark
+      // (`409 workdir no longer exists`). The run's WORK is not gone — it lives on the `wicked/<id>`
+      // branch of the registered repo, and the wave-6 engine records `run_branch` + `base_commit`
+      // on the session. Serve the diff from the BRANCH (`source: 'branch'`): the recorded branch
+      // (else `wicked/<id>`) against the recorded base (else its merge-base with the default
+      // branch), `?base=<ref>` overriding the base with a plain in-repo ref. Only when there is
+      // neither a worktree nor a branch does the 409 stand — and then it says so.
+      const repoRef = resolved.session.repo_ref;
+      const root = repoRef !== null ? await repoRootOf(repoRef) : undefined;
+      if (root !== undefined) {
+        const session = resolved.session as typeof resolved.session & {
+          run_branch?: string;
+          base_commit?: string;
+        };
+        const branch =
+          typeof session.run_branch === 'string' && session.run_branch !== '' ? session.run_branch : `wicked/${id}`;
+        let base: string | null =
+          typeof session.base_commit === 'string' && session.base_commit !== '' ? session.base_commit : null;
+        if (rawBase !== undefined && rawBase !== '' && rawBase !== MERGE_BASE_LITERAL) {
+          if (!isPlainRef(rawBase)) {
+            return reply.code(400).send({
+              error: `InvalidDiffBaseError: \`base\` must be the literal '${MERGE_BASE_LITERAL}' or a plain git ref`,
+            });
+          }
+          base = rawBase;
+        }
+        // Narrowing: a path under the (gone) worktree or under the repo root, made repo-relative.
+        let rel: string | undefined;
+        if (resolved.target !== undefined) {
+          if (isInsideRoot(root, resolved.target)) rel = relative(root, resolved.target);
+          else if (typeof workdir === 'string' && workdir.length > 0 && isInsideRoot(workdir, resolved.target)) {
+            rel = relative(workdir, resolved.target);
+          } else {
+            return reply.code(400).send({
+              error: `\`path\` must be inside the run's worktree or its repository to diff: ${root}`,
+            });
+          }
+        }
+        try {
+          const fromBranch = await branchDiff(root, branch, base, rel);
+          if (fromBranch !== null) return fromBranch;
+        } catch (err) {
+          return diffError(err);
+        }
+      }
+      if (typeof workdir !== 'string' || workdir.length === 0) {
+        return reply.code(409).send({ error: `run ${id} has no workdir and no run branch — nothing to diff` });
+      }
+      return reply.code(409).send({
+        error: `run ${id}'s workdir no longer exists (${workdir}) and its run branch holds no commits — nothing to diff`,
+      });
+    }
+    // Narrowing is WORKTREE-scoped: a contained-but-outside-the-worktree path (extra write
+    // root / repo root) is a valid FILE read but has no meaning as a diff pathspec — rejected
+    // explicitly here rather than handing git a `../`-prefixed pathspec and surfacing its
+    // "outside repository" error as a 500 (Copilot, #305).
+    if (resolved.target !== undefined && !isInsideRoot(workdir, resolved.target)) {
+      return reply.code(400).send({
+        error: `\`path\` must be inside the run's worktree to diff: ${workdir}`,
+      });
+    }
+    const rel = resolved.target === undefined ? undefined : relative(workdir, resolved.target);
+    try {
+      return { ...(await worktreeDiff(workdir, rel, rawBase)), source: 'worktree' as const };
+    } catch (err) {
+      return diffError(err);
     }
   });
 
@@ -1112,10 +1489,13 @@ export function registerRoutes(
           requestType: 'LaunchRunBody',
           responseType: '{ runId: string }',
           // 404/409: unknown project / unknown campaignId (wicked-studio#27) /
-          // archived-or-synthesized project + busy engine (see the catch below); 400: zod
-          // reject or a retryOf naming no existing run; 501: campaignId attach on an engine
-          // addon without the campaign bindings ("upgrade the engine").
-          statusCodes: [201, 400, 404, 409, 501],
+          // archived-or-synthesized project + busy engine + the state-home blocker
+          // (`state_home_unregistered`) + a roster with no eligible seat (`no_eligible_seat`,
+          // wicked-core#461 — see the catch below); 400: zod reject or a retryOf naming no
+          // existing run; 422: the base-skill intake refusal (`base_skill_refused`, crew#554);
+          // 501: campaignId attach on an engine addon without the campaign bindings ("upgrade
+          // the engine").
+          statusCodes: [201, 400, 404, 409, 422, 501],
         },
       },
     },
@@ -1125,13 +1505,32 @@ export function registerRoutes(
       return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
     }
     const b = parsed.data;
+    // wicked-core#411 / crew#497: the state-home blocker, judged BEFORE anything is resolved or
+    // committed. While the handed skills snapshot derives a state home with an entry the worker
+    // Read fence cannot classify, the engine refuses this launch at intake (and an engine before
+    // that fix refused it at the run's first worker, after councils and the intake gate) — so the
+    // daemon answers the typed 409 itself, naming every entry and the remedy, until they are gone.
+    // Re-surveyed per launch: the entries named are the ones there NOW.
+    if (runtime.stateHome !== undefined) {
+      const stateHome = await runtime.stateHome.refresh();
+      if (stateHome.refusesLaunches) {
+        return reply.code(409).send(stateHomeBlockerBody(stateHome));
+      }
+    }
     const input: LaunchRunInput = {
       problem: b.problem,
       sessionId: b.sessionId ?? randomUUID(),
-      clisJson: b.clisJson ?? JSON.stringify(CoreAdapter.roster()),
+      // The default roster carries crew's STANDING (wave 6, the crew half of F-7R2-006): the adapter
+      // translates `council_eligible: false` into the engine's per-seat bench verdict at launch
+      // (`core/engine-roster.ts`), so a signed-out seat is never convened, never a judge.
+      clisJson: b.clisJson ?? JSON.stringify(rosterWithStanding()),
     };
     if (b.entityMode !== undefined) input.entityMode = b.entityMode;
     if (b.humanConfirm !== undefined) input.humanConfirm = b.humanConfirm;
+    // F-E2E-030: only the explicit `'auto'` opts out of the engine's deliver gate. `'human'` and
+    // an omitted field both leave `autoDeliver` off the input — the gate is the engine's default,
+    // so the wire never has to say "gate me" to be gated.
+    if (b.deliverGate === 'auto') input.autoDeliver = true;
     if (b.repoRef !== undefined) input.repoRef = b.repoRef;
     if (b.workflow !== undefined) input.workflow = b.workflow;
     if (b.projectId !== undefined) {
@@ -1156,7 +1555,10 @@ export function registerRoutes(
     // HERE, at the boundary, for every launch:
     //   - explicit 'pr' / 'none' wins (the operator decided);
     //   - omitted + repo-scoped + a CODE-WORK workflow (the def carries at least one
-    //     `executes_code` phase — feature/bug/migration, not chat/onboarding/recon) ⇒ the
+    //     `executes_code` phase that is NOT an evaluator — feature/bug/migration and a Tool
+    //     phase that writes, not chat/onboarding/recon, and not domain-extraction, whose only
+    //     code phase is the `coverage` EVALUATOR, which executes code solely to write its own
+    //     report into the tree for its validator — nothing to deliver) ⇒ the
     //     daemon's `deliverDefault` setting ('pr' unless the operator flipped it) — the default
     //     that keeps run 83052f0b's work from stranding invisibly again. The code-work guard is
     //     the issue's own scope ("default deliver:'pr' for CODE-WORK launches"): a read-only
@@ -1177,7 +1579,9 @@ export function registerRoutes(
       // Unknown def ⇒ no default (the launch fails at workflow resolution with its own error —
       // defaulting 'pr' onto it would swap that for a misleading deliver-flavored one).
       const def = adapter.getWorkflow(b.workflow);
-      const codeWork = def !== null && def.phases.some((p) => p.executes_code === true);
+      const codeWork =
+        def !== null &&
+        def.phases.some((p) => p.executes_code === true && p.role !== 'evaluator');
       deliver =
         codeWork && (await adapter.getSettings()).deliverDefault !== 'none' ? 'pr' : 'none';
       deliverDefaulted = true;
@@ -1186,6 +1590,35 @@ export function registerRoutes(
       deliverDefaulted = true;
     }
     if (deliver === 'pr') input.deliver = 'pr';
+    // DES-L9 / crew#550 — REVISION: `revisesPr` names an OPEN same-repository pull request whose
+    // head branch becomes the run's base (`baseRef`, crew-internal → the engine's
+    // `LaunchSpec.base_ref`) and the push target of the composed deliver phase — the PR gains
+    // exactly the run's commits, no second PR. Resolved HERE via `gh pr view` (5 s; the engine has
+    // no GitHub client) and refused by name on anything but OPEN + same repo. Judged AFTER the
+    // deliver resolution (F5): a launch this daemon resolved to `none` (deliverDefault) has no
+    // phase to push with — a revision that pushes nothing would be a silent no-op.
+    let revisesPr: { number: number; headRef: string; url: string } | undefined;
+    if (b.revisesPr !== undefined) {
+      if (deliver !== 'pr') {
+        return reply.code(409).send({
+          error: `revisesPr needs deliver: pr — this daemon resolved the launch to none (deliverDefault); send deliver: "pr"`,
+        });
+      }
+      const revisedRepo = b.repoRef;
+      if (revisedRepo === undefined) {
+        // Unreachable past the schema refine; kept so the type narrows honestly.
+        return reply.code(400).send({ error: 'revisesPr needs repoRef' });
+      }
+      const root = await repoRootOf(revisedRepo);
+      if (root === undefined) {
+        return reply.code(404).send({ error: `repoRef names an unknown repo: ${revisedRepo}` });
+      }
+      const resolved = await resolvePullRequest(root, b.revisesPr);
+      if (!resolved.ok) return reply.code(409).send({ error: resolved.error });
+      revisesPr = { number: b.revisesPr, headRef: resolved.pr.headRef, url: resolved.pr.url };
+      input.baseRef = revisesPr.headRef;
+      input.revisesPr = revisesPr;
+    }
     // Retry lineage (DES-UX-001 §8.3): `retryOf` must name an EXISTING run — recording lineage
     // to a run that never existed would be provenance pointing at nothing, so the launch fails
     // loudly (400, before anything is committed) rather than filing a dangling edge.
@@ -1240,12 +1673,22 @@ export function registerRoutes(
         // CREW-UX-3: the trail is the durable record of lineage — the retry index (and a
         // restarted daemon's hydrate) reads it back from exactly this entry.
         ...(b.retryOf !== undefined ? { retryOf: b.retryOf } : {}),
+        // DES-L9: the revised PR (number, head branch, URL) — the retry index (and a restarted
+        // daemon's hydrate) reads it back from here so a stranded revision re-pushes to THAT PR.
+        ...(revisesPr !== undefined ? { revisesPr, baseRef: revisesPr.headRef } : {}),
         // wicked-studio#27: the trail is likewise the durable record of the group attach —
         // the group index (and a restarted daemon's hydrate) reads it back from here.
         ...(b.campaignId !== undefined ? { campaignId: b.campaignId } : {}),
         ...(b.groupLabel !== undefined ? { groupLabel: b.groupLabel } : {}),
+        // crew#619: the chat↔run link is durable so the retention maps can be rehydrated after a
+        // daemon restart (rehydration reads `run.launched` entries and keeps non-terminal entries).
+        ...(b.chatId !== undefined ? { chatId: b.chatId } : {}),
+        // crew#632: launch surface and caller identity — human-readable provenance on the audit trail.
+        ...(b.channel !== undefined ? { channel: b.channel } : {}),
+        ...(b.actor !== undefined ? { actor: b.actor } : {}),
       });
       if (b.retryOf !== undefined) retryIndex.set(runId, b.retryOf);
+      if (revisesPr !== undefined) retryIndex.setRevisesPr(runId, revisesPr);
       if (b.campaignId !== undefined) groupIndex.set(runId, { campaignId: b.campaignId });
       else if (b.groupLabel !== undefined) groupIndex.set(runId, { label: b.groupLabel });
       if (b.projectId !== undefined) {
@@ -1261,9 +1704,42 @@ export function registerRoutes(
           membershipAttachedKey(b.projectId, 'crew.run', runId, Date.now()),
         );
       }
+      // crew#619: retain the chat transcript for the run's lifetime so Continue-in-Build prefill
+      // is always reproducible even if the chat is idle-reclaimed before the run finishes.
+      if (b.chatId !== undefined) runtime.linkChatRun?.(b.chatId, runId);
       return reply.code(201).send({ runId });
     } catch (err) {
       const msg = message(err);
+      // The engine's own intake refusal (wicked-core#411 `StateHomeConfigError`) is a configuration
+      // error, not a malformed request: the same typed 409 the pre-check above answers, over a fresh
+      // survey — the pre-check saw a clean state home (or an addon that could not classify), the
+      // engine did not.
+      if (isEngineStateHomeRefusal(msg)) {
+        const stateHome = runtime.stateHome !== undefined ? await runtime.stateHome.refresh() : null;
+        return reply
+          .code(409)
+          .send(
+            stateHome !== null && stateHome.unregistered.length > 0
+              ? stateHomeBlockerBody(stateHome)
+              : {
+                  error: msg,
+                  code: STATE_HOME_BLOCKER_CODE,
+                  stateHome: stateHome?.stateHome ?? null,
+                  unregistered: [],
+                  remedy: STATE_HOME_REMEDY,
+                },
+          );
+      }
+      // wicked-core#461 / crew#556: the engine's typed `NoEligibleSeat` intake refusal — the plan
+      // needs a seat and every seat of the roster was benched by the launcher (signed out / quota /
+      // not installed). A 409 with a typed body, not the 400 the generic arm below answered: the
+      // request is well-formed and succeeds unchanged once a seat is signed in — the conflict is
+      // with the roster's standing (the `state_home_unregistered` rule) — and not a 5xx: the engine
+      // is healthy and said no, naming every seat and its cause.
+      const noSeat = parseNoEligibleSeat(msg);
+      if (noSeat !== null) {
+        return reply.code(409).send(noEligibleSeatBody(msg, noSeat));
+      }
       // An unknown/archived project is a state conflict on a real resource, not a malformed
       // request: 404/409 per the projects error mapping; anything else keeps the launch 400/409.
       if (b.projectId !== undefined && /project.*not registered/i.test(msg)) {
@@ -1271,6 +1747,16 @@ export function registerRoutes(
       }
       if (b.projectId !== undefined && /archived|'default'|synthesized/i.test(msg)) {
         return reply.code(409).send({ error: msg });
+      }
+      // crew#554 / wicked-core#468: the engine refused the launch AT INTAKE because the handed
+      // skills snapshot lacks the run's BASE skill (`SkillsError::BaseSkillRefused` — the message
+      // names the skill and "refused at intake"). Nothing was planned or persisted. A typed 422 so a
+      // composer renders a clear card (skill, policy, remedy) instead of a generic launch 400.
+      if (/\bbase skill\b.*\brefused at intake\b/is.test(msg)) {
+        const posture = runtime.skills?.baseSkill() ?? null;
+        // F-W1-102: the SAME remedy sentence the /health finding and `wicked-crew status` carry.
+        const remedy = baseSkillRemedy(posture?.inCatalog ?? false);
+        return reply.code(422).send({ code: 'base_skill_refused', error: msg, baseSkill: posture, remedy });
       }
       const busy = /busy|in flight|already/i.test(msg);
       return reply.code(busy ? 409 : 400).send({ error: msg });
@@ -1292,8 +1778,21 @@ export function registerRoutes(
     // resolve, not leak.
     // Fastify parses a REPEATED query param as string[] — normalize so `?include=archived`
     // and `?include=archived&include=archived` behave identically (Copilot).
-    const { include, limit } = req.query as { include?: string | string[]; limit?: string | string[] };
+    const { include, limit, doc } = req.query as {
+      include?: string | string[];
+      limit?: string | string[];
+      doc?: string | string[];
+    };
     const includeArchived = (Array.isArray(include) ? include : [include]).includes('archived');
+    // `?doc=<document id>` (wave 6, F-4R2-006): only the runs the interactive seams launched for
+    // that document — the doc↔run binding as a direct read (the run DTO carries `document_id`).
+    // A repeated `?doc` is an ambiguity, not a repetition — refused like a repeated `?limit`.
+    if (Array.isArray(doc)) {
+      return reply.code(400).send({ error: '`doc` may be given at most once' });
+    }
+    if (doc !== undefined && doc.trim() === '') {
+      return reply.code(400).send({ error: '`doc` must name a document id' });
+    }
     // `?limit=N` — the top N AFTER the actionable-first sort below, so a capped poll still sees
     // the runs that need a human before the terminal sediment. The default stays UNBOUNDED: the
     // param used to be read by nobody (silently ignored — the full payload regardless), so an
@@ -1316,9 +1815,11 @@ export function registerRoutes(
       }
       cap = Number(limit);
     }
-    const visible = includeArchived
+    const unarchived = includeArchived
       ? views
       : views.filter((v) => v.session.archived_at == null);
+    const visible =
+      doc === undefined ? unarchived : unarchived.filter((v) => docRuns.documentOf(v.session.id) === doc.trim());
     const ordered = sortActionableFirst(visible);
     return { runs: (cap !== undefined ? ordered.slice(0, cap) : ordered).map(decorateRun) };
   });
@@ -1382,6 +1883,39 @@ export function registerRoutes(
     if (!run) return reply.code(404).send({ error: 'Run not found' });
     return { run: decorateRun(run) };
   });
+
+  /** The full workflow registry, or `[]` on a directly-driven route set whose fake adapter has none. */
+  const listWorkflowsSafe = (): WorkflowDef[] =>
+    typeof (adapter as Partial<CoreAdapter>).listWorkflows === 'function' ? adapter.listWorkflows() : [];
+
+  // ── Deliver text (crew#524 / F-3R2-014) — the PR title + body a run's delivery carries ──
+  // `gh pr create --fill` gave wicked-studio#249 a mid-word title and an EMPTY body. The deliver
+  // script now asks this route for the text composed from the PERSISTED RUN RECORD: the intent,
+  // `Fixes #N`, the run link, every phase with its seat and gate outcome, the repo checks with
+  // their exit codes, the evaluator verdict (`core/deliver-text.ts`). text/plain, FRAMED as line 1
+  // title, line 2 blank, then the body — the same shape the script's embedded fallback has, so the
+  // script parses exactly one thing. Read-only; the run's `deliver` unit is still running when it
+  // asks, and is listed as `this PR`.
+  app.get(
+    `${V}/runs/:id/deliver-text`,
+    { config: { manifest: { statusCodes: [200, 404] } } },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const views = await adapter.sessionsDetail();
+      const run = views.find((v) => v.session.id === id);
+      if (!run) return reply.code(404).send({ error: 'Run not found' });
+      const origin = boundOrigin(app.server.address());
+      // The workflow DEFINITION (a user-registered workflow's view carries the engine instance id).
+      const def = resolveRunWorkflow(run, listWorkflowsSafe());
+      const text = composeDeliverText(
+        factsFromRun(decorateRun(run), runUrlFor(origin, id), {
+          workflowId: def?.id ?? null,
+          revisesPr: retryIndex.revisesPrFor(id) ?? null,
+        }),
+      );
+      return reply.type('text/plain; charset=utf-8').send(framedDeliverText(text));
+    },
+  );
 
   // ── Post-hoc delivery (crew#393) — lift a stranded run's worktree into a PR ──
   // The recovery path for the run 83052f0b class: a COMPLETED repo-scoped run whose reviewable
@@ -1480,6 +2014,9 @@ export function registerRoutes(
       // the throwaway down after the lift.
       let result: DeliverScriptResult | undefined;
       let worktreeGone = false;
+      // DES-L9: a stranded REVISION re-pushes onto its PR's branch (re-checked OPEN via the same
+      // resolver), never a new PR; a PR that closed meanwhile is a named 409.
+      let revisionRefused: string | undefined;
       try {
         // The worktree admin (reprovision), the deliver spawn, AND the throwaway teardown all run
         // under the per-repo lock, so a second stranded run in this repo cannot touch
@@ -1500,7 +2037,33 @@ export function registerRoutes(
               workdir = reprov.workdir;
               cw = reprov.cleanup;
             }
-            result = await deliverExec(workdir, s.problem ?? undefined);
+            // crew#524: the post-hoc lift composes its PR text from the run record it already
+            // holds (the fallback), and names this daemon so the script can re-ask at delivery.
+            const origin = boundOrigin(app.server.address());
+            const def = resolveRunWorkflow(run, listWorkflowsSafe());
+            const revising = retryIndex.revisesPrFor(id);
+            let revisesPr: { number: number; headRef: string; url: string } | null = null;
+            if (revising !== undefined) {
+              const revisedRoot = await repoRootOf(repoRef);
+              const again =
+                revisedRoot === undefined
+                  ? ({ ok: false, error: `repo ${repoRef} is no longer registered — cannot re-check pull request #${revising.number}` } as const)
+                  : await resolvePullRequest(revisedRoot, revising.number);
+              if (!again.ok) {
+                revisionRefused = again.error;
+                return;
+              }
+              revisesPr = { number: revising.number, headRef: again.pr.headRef, url: again.pr.url };
+            }
+            result = await deliverExec(workdir, s.problem ?? undefined, {
+              runId: id,
+              apiOrigin: origin,
+              facts: factsFromRun(run, runUrlFor(origin, id), {
+                workflowId: def?.id ?? null,
+                revisesPr: revisesPr === null ? null : { number: revisesPr.number, url: revisesPr.url },
+              }),
+              revisesPr,
+            });
           } finally {
             if (cw !== null) await cw(); // tear the throwaway down whether the lift succeeded or threw
           }
@@ -1514,6 +2077,9 @@ export function registerRoutes(
         return reply.code(409).send({
           error: `run ${id}'s worktree is gone (${s.workdir}) — nothing left to deliver`,
         });
+      }
+      if (revisionRefused !== undefined) {
+        return reply.code(409).send({ error: revisionRefused });
       }
       if (result === undefined) {
         // Unreachable: the lock body assigns `result` on every path that is not `worktreeGone`.
@@ -1596,107 +2162,447 @@ export function registerRoutes(
   // ── Chat sessions (crew#165): warm ACP seat pool + group fan-out (core#134) ──
   // A chat is NOT a run: no council, no gates, no units. Seats warm on open;
   // messages fan out to warm seats; replies stream on /ws as chatDelta/chatReply.
-  const ChatOpenSchema = z.object({
-    chatId: z.string().min(1).max(128).regex(/^[A-Za-z0-9._-]+$/).optional(),
-    clis: z.array(z.string().min(1)).min(1).max(8).optional(),
-    repoRef: z.string().optional(),
-    /** DES-PROJECT-001 §2.2 — file the chat into a project (`crew.chat` membership). */
-    projectId: z.string().min(1).optional(),
-  }).strict();
-  app.post(`${V}/chats`, async (req, reply) => {
-    const parsed = ChatOpenSchema.safeParse(req.body ?? {});
-    if (!parsed.success) {
-      return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
-    }
-    const b = parsed.data;
-    const chatId = b.chatId ?? randomUUID();
-    let cwd: string | undefined;
-    if (b.repoRef !== undefined) {
-      const repos = await adapter.listRepos();
-      const repo = repos.find((r) => r.id === b.repoRef);
-      if (!repo) return reply.code(404).send({ error: `Repo ${b.repoRef} not found` });
-      cwd = repo.root_path;
-    }
-    // Validate the project BEFORE opening seats: a chat has no launch record for the engine to
-    // attach against atomically (chats are an in-memory seat pool), so the route validates
-    // up-front and attaches right after open — the one non-atomic attach, documented in the ADR
-    // changelog. Fail here and no seats were warmed for a filing that could never happen.
-    if (b.projectId !== undefined) {
-      try {
-        const project = await adapter.projectGet(b.projectId);
-        if (project === null) {
-          return reply.code(404).send({ error: `Project ${b.projectId} not found` });
-        }
-        if (project.status === 'archived') {
-          return reply
-            .code(409)
-            .send({ error: `project ${b.projectId} is archived and blocks new attachments` });
-        }
-      } catch (err) {
-        return reply.code(501).send({ error: message(err) });
+  //
+  // A chat is SCOPED (crew#502, F-067): its seats run in a private scratch root — never a repo,
+  // never the daemon's cwd — with the scoped repos as read roots and, where a graph binds, the
+  // READ-ONLY estate MCP over it (the grounding governed runs get). The scope is resolved and
+  // validated BEFORE any seat warms, stated to the seats in the scratch root's AGENTS.md /
+  // CLAUDE.md, and returned as `scope` (see `chat-scope.ts`).
+  app.post(
+    `${V}/chats`,
+    {
+      config: {
+        manifest: {
+          requestType: 'ChatOpenBody',
+          responseType: 'ChatOpenResponse',
+          statusCodes: [201, 400, 404, 409, 500, 501],
+        },
+      },
+    },
+    async (req, reply) => {
+      const parsed = ChatOpenSchema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
       }
-    }
-    const clis =
-      b.clis ??
-      (CoreAdapter.roster() as { key?: string }[])
-        .map((s) => s.key)
-        .filter((k): k is string => typeof k === 'string');
-    try {
-      const seats = await adapter.chatOpen(chatId, clis, cwd);
+      const b = parsed.data;
+      const chatId = b.chatId ?? randomUUID();
+      // Validate the project BEFORE opening seats: a chat has no launch record for the engine to
+      // attach against atomically (chats are an in-memory seat pool), so the route validates
+      // up-front and attaches right after open — the one non-atomic attach, documented in the ADR
+      // changelog. Fail here and no seats were warmed for a filing that could never happen.
       if (b.projectId !== undefined) {
         try {
-          const { member, created } = await adapter.projectMemberAttach(
-            b.projectId,
-            'crew.chat',
-            chatId,
-          );
-          if (created) {
-            projects.index.set(chatId, b.projectId);
-            projects.bus?.emit(
-              MEMBERSHIP_ATTACHED,
-              { project_id: b.projectId, member: { kind: 'crew.chat', ref: chatId }, actor: actorOf(req).id },
-              membershipAttachedKey(b.projectId, 'crew.chat', chatId, member.attached_at),
-            );
+          const project = await adapter.projectGet(b.projectId);
+          if (project === null) {
+            return reply.code(404).send({ error: `Project ${b.projectId} not found` });
+          }
+          if (project.status === 'archived') {
+            return reply
+              .code(409)
+              .send({ error: `project ${b.projectId} is archived and blocks new attachments` });
           }
         } catch (err) {
-          // The chat is open and usable; the filing failed. Say so instead of failing the open —
-          // the caller can re-attach via POST /projects/:id/members.
-          return reply
-            .code(201)
-            .send({ chatId, seats, projectAttachError: message(err) });
+          return reply.code(501).send({ error: message(err) });
         }
       }
-      return reply.code(201).send({ chatId, seats });
-    } catch (err) {
-      return reply.code(400).send({ error: message(err) });
-    }
+      // A chat id this daemon already holds a scope for is LIVE: re-preparing its scratch root and
+      // re-opening it would overwrite the statement its seats are reading and (on a changed scope)
+      // evict them mid-conversation (Copilot, #518). Close it first, or let the daemon mint the id.
+      const token = chatScopes.reserve(chatId);
+      if (token === null) {
+        const state = chatScopes.stateOf(chatId);
+        return reply.code(409).send({
+          error:
+            state === 'closing'
+              ? `chat ${chatId} is closing; wait for its chatClosed (a few seconds at most) before reusing the id, or omit chatId to mint a fresh one`
+              : `chat ${chatId} is already open on this daemon; DELETE /chats/${chatId} first, or omit chatId to mint a fresh one`,
+        });
+      }
+      // Everything below either ends in `chatScopes.set(chatId, …, token)` or releases the reservation.
+      try {
+      // The scope (crew#502): explicit repos (`repoRefs`, the legacy `repoRef` merged in) or the
+      // project's members — each ref checked against the registry, EVERY missing one named — else
+      // none. Resolved before any seat warms: a 404 here warmed nothing.
+      const resolution = await resolveChatScope(
+        {
+          chatId,
+          ...(b.projectId !== undefined ? { projectId: b.projectId } : {}),
+          repoRefs: [...(b.repoRef !== undefined ? [b.repoRef] : []), ...(b.repoRefs ?? [])],
+        },
+        { ...chatScopeDeps(adapter), scratchBase: chatScopes.base, log: (m) => req.log.warn(m) },
+      );
+      if (!resolution.ok) {
+        chatScopes.release(chatId, token);
+        return reply.code(resolution.status).send({
+          error: resolution.error,
+          ...(resolution.missing !== undefined ? { missing: resolution.missing } : {}),
+        });
+      }
+      const { scope, engine } = resolution;
+      try {
+        // Cleans up only what it created itself on failure (Copilot, #518).
+        prepareChatScratch(chatId, scope);
+      } catch (err) {
+        chatScopes.release(chatId, token);
+        return reply
+          .code(500)
+          .send({ error: `cannot prepare the chat's scratch root ${scope.cwd}: ${message(err)}` });
+      }
+      // The DEFAULT seats are the roster seats the daemon's own admission admits (F-2R2-007,
+      // F-2R2-009): the seat's auth standing (a signed-out seat is refused up front, with the
+      // reason, instead of failing its first turn — the same predicate `GET /roster` reports as
+      // `council_eligible`) and, for a SCOPED chat, the engine's rule restated (only a seat whose
+      // ACP adapter asks permissions or whose record arms the kernel write floor can be held to
+      // read-only roots — with the default roster that is claude and opencode). Every seat dropped
+      // here is NAMED on the response (`refused`) and in the thread (`chatSeatRefused`), so a
+      // person can see why pi is missing. Explicit `clis` are passed through as asked; the engine
+      // refuses per seat with its reason, which is copied into `refused` too.
+      const scoped = scope.kind !== 'none';
+      const refused: ChatSeatRefusal[] = [];
+      // The standing roster, read ONCE: the default admission below and the engine-drop
+      // attribution after `chatOpen` both consult it (F-A45-011).
+      const standing = rosterWithStanding();
+      const standingOf = (key: string) => standing.find((s) => String(s.key) === key);
+      let clis: string[];
+      if (b.clis !== undefined) {
+        clis = b.clis;
+      } else {
+        clis = [];
+        for (const seat of standing) {
+          const key = String(seat.key);
+          const admission = chatSeatAdmission(
+            seat as { key: string; enabled_for_council?: boolean; acp?: { acp_input_governance?: boolean; os_sandbox?: boolean } | null },
+            seat.auth ?? 'unknown',
+            scoped,
+          );
+          if (admission.ok) clis.push(key);
+          else refused.push({ cliKey: key, reason: admission.reason, source: admission.source });
+        }
+      }
+      if (clis.length === 0) {
+        chatScopes.release(chatId, token);
+        removeChatScratch(scope.cwd, chatScopes.base);
+        return reply.code(409).send({
+          error:
+            (scoped
+              ? 'no seat in the roster can be held to a scoped chat (an ACP adapter admitted to input ' +
+                'governance, or `os_sandbox = true` on its [cli.acp] record) and take a turn; open the ' +
+                'chat unscoped, sign a seat in, or name seats with `clis`'
+              : 'no seat in the roster can take a turn (every seat is signed out); sign a seat in from ' +
+                'the System page, or name seats with `clis`') + ' — see refused',
+          refused,
+        });
+      }
+      try {
+        const seats = await adapter.chatOpen(chatId, clis, engine.cwd, {
+          codeGraphDb: engine.codeGraphDb,
+          readRoots: engine.readRoots,
+        });
+        // A REQUESTED seat the engine refused joins the same list, with the engine's reason.
+        for (const s of seats) {
+          if (!s.ok) refused.push({ cliKey: s.cliKey, reason: s.error ?? 'the engine refused the seat', source: 'engine' });
+        }
+        // F-A45-011 (F-2R2-007 still open): a seat the engine DROPPED — absent from `seats`
+        // altogether, neither ok nor refused — used to vanish without a trace (the fresh rig's pi:
+        // default chips claude·pi·opencode, 201 `seats:[claude, opencode]`, `refused: []`). It was
+        // taken out by the council-bench / dispatch-timeout path, not by admission, so admission's
+        // list never named it. Every requested-or-defaulted seat that is not in `seats` is named
+        // here with the most specific cause the daemon knows: its own "no credential" report
+        // (`auth`), else the dispatch budget (`budget`). (R5b: crew keeps no council bench of its
+        // own any more — the engine benches per run and says so in `unitDistributed.degradedReason`.)
+        for (const key of clis) {
+          if (seats.some((s) => s.cliKey === key) || refused.some((r) => r.cliKey === key)) continue;
+          const st = standingOf(key);
+          const authFailure = seatHealth.authFailureFor(key);
+          if (authFailure !== null || st?.auth === 'signed_out') {
+            refused.push({
+              cliKey: key,
+              reason:
+                authFailure !== null
+                  ? `not seated — the seat itself reported no credential (${authFailure.source}: ${authFailure.detail}); sign it in from the System page`
+                  : 'not seated — signed out; sign it in from the System page',
+              source: 'auth',
+            });
+          } else {
+            refused.push({
+              cliKey: key,
+              reason:
+                'not seated — the engine did not warm it within its dispatch budget (the seat timed out or ' +
+                'was dropped at dispatch); check GET /roster and try again, or name seats with `clis`',
+              source: 'budget',
+            });
+          }
+        }
+        // Nothing warmed (independent review, W1): the engine holds no pool row and has dropped the
+        // scope itself (no `chatClosed` will come) — report the PER-SEAT reasons, never an
+        // engine-version guess; the root goes, the id is free again.
+        if (seats.every((s) => !s.ok)) {
+          chatScopes.release(chatId, token);
+          removeChatScratch(scope.cwd, chatScopes.base);
+          return reply.code(409).send({
+            error: `chat ${chatId}: no seat warmed (${seats.length} failed) — see seats`,
+            seats,
+            refused,
+          });
+        }
+        // Honest scope (Copilot, #518): a SCOPED chat is a promise — the roots are read-only, the
+        // graph is attached, the seats see nothing else — and only an engine that CONFIRMS it
+        // recorded the scope (its `chatList` row carries the scope fields) can keep it. An engine
+        // predating chat scope (wicked-core#410) dropped `scopeJson` and runs the seats unbounded in
+        // the scratch root; an engine that cannot be asked has confirmed nothing. Neither may hold a
+        // scoped chat: it is closed again, its root removed, and the caller gets a 501 naming the
+        // remedy — never a chat whose statement promises what its seats do not enforce. An UNSCOPED
+        // chat (`kind: 'none'`) promises nothing beyond its scratch root and proceeds.
+        const applied = await adapter.chatScopeApplied(chatId);
+        if (applied !== true && scoped) {
+          await adapter.chatClose(chatId).catch(() => undefined);
+          // The engine's `chatClosed` for this id is still on its way: park, do not release
+          // (Copilot, #518), so a reuse cannot have its root removed by the late event.
+          chatScopes.abortToClosing(chatId, token);
+          removeChatScratch(scope.cwd, chatScopes.base);
+          if (applied === false) {
+            // A row WITHOUT the scope fields: the engine predates chat scope (wicked-core#410).
+            return reply.code(501).send({
+              error:
+                'the installed wicked-core-ts predates chat scope (wicked-core#410): it cannot ground ' +
+                'a scoped chat or hold its read roots read-only — upgrade the engine, or open the ' +
+                'chat without projectId/repoRefs.',
+              seats,
+            });
+          }
+          // NO row although a seat reported warm: nothing is actually held for this chat.
+          return reply.code(409).send({
+            error:
+              `chat ${chatId}: a seat reported warm but the engine holds no row for the chat — ` +
+              'nothing warmed; open it again (see seats)',
+            seats,
+          });
+        }
+        // File the chat into its project WHILE the id is still reserved (Copilot, #518): publishing
+        // first would let a concurrent DELETE / engine `chatClosed` land during this await and leave
+        // a 201 with a stale scope and a membership attached to a closed chat.
+        let projectAttachError: string | undefined;
+        let attachedMemberId: string | undefined;
+        if (b.projectId !== undefined) {
+          try {
+            const { member, created } = await adapter.projectMemberAttach(
+              b.projectId,
+              'crew.chat',
+              chatId,
+            );
+            if (created) attachedMemberId = member.id;
+            if (created) {
+              projects.index.set(chatId, b.projectId);
+              projects.bus?.emit(
+                MEMBERSHIP_ATTACHED,
+                { project_id: b.projectId, member: { kind: 'crew.chat', ref: chatId }, actor: actorOf(req).id },
+                membershipAttachedKey(b.projectId, 'crew.chat', chatId, member.attached_at),
+              );
+            }
+          } catch (err) {
+            // The chat is open and usable; the filing failed. Said on the 201 rather than failing
+            // the open — the caller can re-attach via POST /projects/:id/members.
+            projectAttachError = message(err);
+          }
+        }
+        if (!chatScopes.set(chatId, scope, token, refused, engine)) {
+          // The reservation was cancelled while the open was in flight — an engine `chatClosed` or a
+          // `DELETE` for this id (Copilot, #518). Nothing was recorded; tear the chat down (engine
+          // session, scratch root, and the filing just made) instead of returning a stale 201.
+          await adapter.chatClose(chatId).catch(() => undefined);
+          removeChatScratch(scope.cwd, chatScopes.base);
+          if (b.projectId !== undefined && attachedMemberId !== undefined) {
+            await adapter.projectMemberDetach(b.projectId, attachedMemberId).catch(() => false);
+            projects.index.delete(chatId);
+          }
+          return reply.code(409).send({
+            error: `chat ${chatId} was closed while it was being opened; open it again`,
+          });
+        }
+        // Register roots for path rewriting (crew#618): absolute host paths in seat replies are
+        // rewritten to repo-relative form before being stored in the transcript.
+        if (chatTranscripts !== undefined && scope.repos.length > 0) {
+          const roots: ChatRepoRoot[] = scope.repos.map((r) => ({ absRoot: resolve(r.rootPath), name: r.name }));
+          chatTranscripts.registerRoots(chatId, roots);
+        }
+        // The thread learns of every refused seat the way it learns of everything else — a frame
+        // on /ws — AFTER the scope is published, so a reader never sees a refusal for a chat it
+        // cannot yet look up.
+        for (const r of refused) {
+          runtime.broadcast?.({
+            type: 'chatSeatRefused',
+            chat: chatId,
+            cliKey: r.cliKey,
+            reason: r.reason,
+            source: r.source,
+            ...(b.projectId !== undefined ? { project_id: b.projectId } : {}),
+          } as CoreEvent);
+        }
+        return reply.code(201).send({
+          chatId,
+          seats,
+          scope,
+          refused,
+          ...(projectAttachError !== undefined ? { projectAttachError } : {}),
+        });
+      } catch (err) {
+        // Nothing warmed: the scratch root prepared above must not linger — removed under the SAME
+        // base the resolver created it in (Copilot, #518), fail-closed like every removal.
+        chatScopes.release(chatId, token);
+        removeChatScratch(scope.cwd, chatScopes.base);
+        return reply.code(400).send({ error: message(err) });
+      }
+      } finally {
+        // A reservation that never became a scope (any early return above) must not pin the id —
+        // token-guarded, so a reservation that is no longer ours is left alone.
+        chatScopes.release(chatId, token);
+      }
+    },
+  );
+
+  /**
+   * The ONE 409 `turn_in_flight` body (review NIT): the send route and the re-seat route refuse for
+   * the same reason and promise the same shape, so they build it in one place and cannot drift.
+   * `nothingHappened` names what did NOT happen on this route — their only difference.
+   */
+  const turnInFlightBody = (
+    chatId: string,
+    inFlight: NonNullable<ReturnType<ChatTurnIndex['inFlight']>>,
+    nothingHappened: string,
+  ) => ({
+    code: 'turn_in_flight' as const,
+    error:
+      `${inFlight.busy.join(', ')} ${inFlight.busy.length === 1 ? 'is' : 'are'} still answering the previous ` +
+      `message in this chat (turn ${inFlight.turnId}, ${Math.round(inFlight.ageMs / 1000)}s ago: ` +
+      `“${inFlight.excerpt}”) — wait for the reply, or target only idle seats. ${nothingHappened}`,
+    chatId,
+    turn: inFlight,
   });
 
   const ChatMessageSchema = z.object({
     text: z.string().min(1).max(65536),
     targets: z.array(z.string().min(1)).min(1).max(8).optional(),
   }).strict();
+  // F-RECON-017: a message sent while a targeted seat is still answering the previous one is
+  // REFUSED, not queued. The engine queues silently (the worker gets the text the instant the
+  // previous turn's final block lands) and its reply frames carry no message correlation, so the
+  // recon saw Q2's reply render under Q3's bubble. The daemon's own turn index (`chat-turns.ts`)
+  // is the record: 409 `turn_in_flight` names the turn and the busy seats — a send that targets
+  // only IDLE seats passes (a stalled seat never blocks a follow-up to the one that answered) —
+  // and the 202 returns the `turnId` the reply frames are stamped with (`turn_id`) on `/ws`.
   app.post(`${V}/chats/:id/messages`, async (req, reply) => {
     const { id } = req.params as { id: string };
     const parsed = ChatMessageSchema.safeParse(req.body);
     if (!parsed.success) {
       return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
     }
+    // DES-L5 §5-c (F-E2E-041): the audience is decided HERE — the named targets, else the engine's
+    // warm seats — so the turn can be opened BEFORE the engine call, in the same tick as the
+    // predicate below: two racing sends can no longer both pass `inFlight` during the await, and a
+    // `chatDelta` that lands before `chatSend` resolves is already stamped with its `turn_id`.
+    const audience = parsed.data.targets ?? (await adapter.chatSeats(id));
+    if (audience.length === 0) {
+      return reply.code(409).send({ error: `chat '${id}' has no warm seats — open it first` });
+    }
+    const inFlight = chatTurns.inFlight(id, audience);
+    if (inFlight !== null) {
+      return reply.code(409).send(turnInFlightBody(id, inFlight, 'Nothing was sent.'));
+    }
+    // Sync, same tick as `inFlight`: the window is closed before anything yields.
+    const turn = chatTurns.begin(id, audience, parsed.data.text);
     try {
       const seats = await adapter.chatSend(id, parsed.data.text, parsed.data.targets);
-      return reply.code(202).send({ seats });
+      if (turn !== null) {
+        // The engine's answer is the truth: the reserved audience is squared with the seats it
+        // reached, and the operator's message joins the transcript with exactly those seats.
+        chatTurns.reconcile(id, turn.turnId, seats);
+        chatTranscripts?.appendUser(id, turn.turnId, parsed.data.text, seats);
+      }
+      return reply.code(202).send({ seats, ...(turn !== null ? { turnId: turn.turnId } : {}) });
     } catch (err) {
+      // Nothing went out: the reservation is retracted so the next send is not refused for it.
+      if (turn !== null) chatTurns.abort(id, turn.turnId);
       const msg = message(err);
       return reply.code(/no warm seats/.test(msg) ? 409 : 400).send({ error: msg });
     }
   });
+
+  // F-W1-005 (wave-1 P6): re-seat NAMED seats on a LIVE chat — the retry lever for a seat the open
+  // refused (or whose session died). Re-runs the engine's per-seat `chat_ensure` through `chatOpen`
+  // with the IDENTICAL scope recorded at open (a different scope would evict every warm seat —
+  // Copilot, #426; the index retains what the engine was handed). Explicit seats bypass the daemon's
+  // default pre-filter exactly as `clis` on `POST /chats` does: the engine refuses per seat and its
+  // reason rides the outcome, then `refused[]` and a `chatSeatRefused` frame — the same shapes the
+  // 201 carries, so the thread and the picker read one story. Never a new chat, never a new pool key.
+  const ChatSeatsSchema = z.object({
+    clis: z.array(z.string().min(1)).min(1).max(8),
+  }).strict();
+  app.post(
+    `${V}/chats/:id/seats`,
+    // Typed like every neighbouring chat route (review HIGH-1): the names bind the 0.39.0 api-types
+    // mirror to this row — `ChatSeatsBody { clis }` in, `ChatSeatsResponse { chatId, seats, refused }`
+    // out (the 201's own `ChatSeatOutcome` / `ChatSeatRefusal` shapes, which 0.38.0 already ships).
+    {
+      config: {
+        manifest: {
+          requestType: 'ChatSeatsBody',
+          responseType: 'ChatSeatsResponse',
+          statusCodes: [200, 400, 404, 409],
+        },
+      },
+    },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const parsed = ChatSeatsSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
+      }
+      const engine = chatScopes.engineOf(id);
+      if (engine === undefined) {
+        return reply.code(404).send({
+          error: `chat ${id} is not open on this daemon — open a chat first, then re-seat into it`,
+        });
+      }
+      const clis = [...new Set(parsed.data.clis)];
+      // A seat mid-turn is not re-warmed under its own reply (the same rule as a send).
+      const inFlight = chatTurns.inFlight(id, clis);
+      if (inFlight !== null) {
+        return reply.code(409).send(turnInFlightBody(id, inFlight, 'No seat was re-warmed.'));
+      }
+      try {
+        const seats = await adapter.chatOpen(id, clis, engine.cwd, {
+          codeGraphDb: engine.codeGraphDb,
+          readRoots: engine.readRoots,
+        });
+        const refused = chatScopes.foldSeats(id, seats);
+        const projectId = projects.index.projectOf(id) ?? undefined;
+        for (const s of seats) {
+          if (s.ok) continue;
+          runtime.broadcast?.({
+            type: 'chatSeatRefused',
+            chat: id,
+            cliKey: s.cliKey,
+            reason: s.error ?? 'the engine refused the seat',
+            source: 'engine',
+            ...(projectId !== undefined ? { project_id: projectId } : {}),
+          } as CoreEvent);
+        }
+        return { chatId: id, seats, refused };
+      } catch (err) {
+        return reply.code(400).send({ error: message(err) });
+      }
+    },
+  );
 
   // Enumerate live chats (FINDING-027 gap 4). Chat sessions deliberately outlive the page, and
   // their ids are minted client-side — so before this route the only record of an orphaned seat
   // lived in the tab that abandoned it, and an operator could not reclaim one without restarting
   // the daemon. Registered BEFORE `/chats/:id` is irrelevant to fastify (it routes on the literal
   // segment first), but the order reads the way the routes nest.
-  app.get(`${V}/chats`, async (_req, reply) => {
+  app.get(
+    `${V}/chats`,
+    { config: { manifest: { responseType: 'ChatListResponse', statusCodes: [200, 400, 501] } } },
+    async (_req, reply) => {
     try {
       return { chats: await adapter.chatList() };
     } catch (err) {
@@ -1709,19 +2615,60 @@ export function registerRoutes(
         .code(err instanceof ChatUnsupportedError ? 501 : 400)
         .send({ error: message(err) });
     }
-  });
+    },
+  );
 
-  app.get(`${V}/chats/:id`, async (req, reply) => {
-    const { id } = req.params as { id: string };
-    try {
-      return { chatId: id, seats: await adapter.chatSeats(id) };
-    } catch (err) {
-      return reply.code(400).send({ error: message(err) });
-    }
-  });
+  // ── Interactive documents, daemon-wide, WITHOUT spawning a bridge (wave 6, studio #263) ──────
+  // The per-project listing (`GET /projects/:id/interactive/api/docs`) asks the project's bridge —
+  // one `wicked-interactive serve` per project root, ≈60 s cold start — so a skin must never fan
+  // it out on mount. This reads what the bridge reads (every project's docs root, each slug child
+  // carrying a `versions.json`) plus what only the daemon knows (the seams that answered each doc
+  // and the runs they launched, from the handoff ledgers). `?includeRetired=1` lists tombstones.
+  app.get(
+    `${V}/interactive/docs`,
+    { config: { manifest: { responseType: 'InteractiveDocsListing', statusCodes: [200] } } },
+    async (req) => {
+      const q = req.query as { includeRetired?: string | string[] };
+      const flag = Array.isArray(q.includeRetired) ? q.includeRetired[0] : q.includeRetired;
+      return listInteractiveDocs({
+        adapter,
+        settings: projectSettings,
+        docRuns,
+        includeRetired: flag === '1' || flag === 'true',
+      });
+    },
+  );
+
+  app.get(
+    `${V}/chats/:id`,
+    { config: { manifest: { responseType: 'ChatDetailResponse', statusCodes: [200, 400] } } },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      try {
+        // The scope recorded at open (crew#502) — `null` for a chat this daemon did not open — and
+        // the seats refused at open (F-A45-011), so the studio's admission copy survives a reload.
+        return {
+          chatId: id,
+          seats: await adapter.chatSeats(id),
+          scope: chatScopes.get(id) ?? null,
+          refused: chatScopes.refusedOf(id) ?? null,
+          // DES-L5 (D-13): the transcript so far, append order — `[]` before the first persisted
+          // turn; the file goes with the chat on `chatClosed`, so a reclaimed id answers `[]` too.
+          ...(chatTranscripts !== undefined ? { messages: chatTranscripts.read(id) } : {}),
+        };
+      } catch (err) {
+        return reply.code(400).send({ error: message(err) });
+      }
+    },
+  );
 
   app.delete(`${V}/chats/:id`, async (req, reply) => {
     const { id } = req.params as { id: string };
+    // The scratch root goes with the chat at once, whether or not the engine still knew it
+    // (crew#502); the id stays parked until the engine's `chatClosed` is observed, so a delayed
+    // close can never land on a chat that reused it (Copilot, #518).
+    chatScopes.beginClose(id);
+    chatTurns.closed(id);
     try {
       await adapter.chatClose(id);
       return { ok: true };
@@ -1860,7 +2807,16 @@ export function registerRoutes(
       isSteeringAuthorRun(run, adapter.listWorkflows());
     const gatePrompt = steeringPropose ? gateCache.get(id)?.prompt : undefined;
     try {
-      const status = await adapter.confirmGate(id, parsed.data.approve, parsed.data.amend);
+      // All five positionals, explicit `undefined` for the absent ones (DES-L1 PR-2; the
+      // gate-arms tripwire pins the arity). An engine refusal (no creator to send back to,
+      // an engine older than the arm) surfaces as the existing 409 below.
+      const status = await adapter.confirmGate(
+        id,
+        parsed.data.approve,
+        parsed.data.amend,
+        parsed.data.action,
+        parsed.data.amendScope,
+      );
       // WHO approved/rejected — the gate-decision audit (task #88). The engine
       // records THAT the gate resolved (interaction_requests / gateDecided);
       // only this HTTP layer knows the authenticated principal behind it.
@@ -1869,6 +2825,8 @@ export function registerRoutes(
         detail: {
           approve: parsed.data.approve,
           ...(parsed.data.amend !== undefined ? { amend: parsed.data.amend } : {}),
+          ...(parsed.data.action !== undefined ? { action: parsed.data.action } : {}),
+          ...(parsed.data.amendScope !== undefined ? { amendScope: parsed.data.amendScope } : {}),
           status,
         },
       });
@@ -2001,9 +2959,38 @@ export function registerRoutes(
     const views = await adapter.sessionsDetail();
     const run = views.find((v) => v.session.id === id);
     if (!run) return reply.code(404).send({ error: 'Run not found' });
-    if (run.session.status !== 'executing') {
+    // Wave 6 (F-7R2-007 root fix): a run PARKED at a gate on a dead seat — the stall watchdog's
+    // escalation gate, or a verdict escalation — used to answer 409 here, so the studio's control
+    // needed two calls (approve, then race the engine's re-dispatch of the same dead seat with a
+    // reassign). The ENGINE's `reassign_unit` accepts ONLY an Executing run (wicked-core actor.rs:
+    // "run X is not Executing (status: AwaitingHuman)") — there is no reassign-in-place for a gated
+    // run — so this route performs APPROVE-THEN-REASSIGN in one call: the approve resumes the run
+    // (the engine re-dispatches the cursor unit to its current seat), and the reassign IMMEDIATELY
+    // supersedes that turn (cancels its epoch, closes the seat's session, bumps the attempt) and
+    // re-dispatches to the requested seat or the council's pick. The dead seat is dispatched for
+    // the gap between the two engine calls — a bounded window the engine contract leaves open (a
+    // reassign-as-approval engine op would close it; documented in the PR). Audited as BOTH a gate
+    // decision (`via: 'reassign'`) and a reassign, so the "who approved" trail has no side door.
+    // A steering-author propose gate is NOT approvable this way: its approve LANDS the proposal
+    // through `POST /runs/:id/gate` (crew#388), and a reassign is not a review of the rules.
+    const gated = run.session.status === 'awaiting_human';
+    if (run.session.status !== 'executing' && !gated) {
       return reply.code(409).send({
         error: `run ${id} is ${run.session.status}, not executing — only an executing run has a cursor unit to reassign`,
+      });
+    }
+    if (gated && typeof adapter.confirmGate !== 'function') {
+      // A partial adapter (a directly-driven route set) cannot approve the gate on the caller's
+      // behalf — say so by name, never a TypeError dressed as a refusal.
+      return reply.code(409).send({
+        error:
+          `run ${id} is awaiting_human, not executing — the engine reassigns only an executing run, and ` +
+          `this build cannot approve the gate on your behalf (no confirmGate); approve via POST /runs/${id}/gate, then reassign`,
+      });
+    }
+    if (gated && typeof adapter.listWorkflows === 'function' && isSteeringAuthorRun(run, adapter.listWorkflows())) {
+      return reply.code(409).send({
+        error: `run ${id} is awaiting a steering-author propose gate — approve or reject it via POST /runs/${id}/gate (the approve lands the proposal); reassign is not a review of the rules`,
       });
     }
     const requestedCli = parsed.data.cli;
@@ -2018,12 +3005,24 @@ export function registerRoutes(
     const cursor = resolveCursorUnit(run);
     const ord = cursor?.ord ?? run.session.unit_ix;
     try {
+      if (gated) {
+        const status = await adapter.confirmGate(id, true);
+        audit.record('gate.decided', actorOf(req), {
+          runId: id,
+          detail: { approve: true, via: 'reassign', status },
+        });
+      }
       await adapter.reassignUnit(id, ord, requestedCli ?? null);
       audit.record('run.reassigned', actorOf(req), {
         runId: id,
-        detail: { ord, ...(requestedCli !== undefined ? { cli: requestedCli } : {}) },
+        detail: { ord, ...(requestedCli !== undefined ? { cli: requestedCli } : {}), ...(gated ? { approved: true } : {}) },
       });
-      return reply.send({ status: 'ok', ord, ...(requestedCli !== undefined ? { cli: requestedCli } : {}) });
+      return reply.send({
+        status: 'ok',
+        ord,
+        ...(requestedCli !== undefined ? { cli: requestedCli } : {}),
+        ...(gated ? { approved: true } : {}),
+      });
     } catch (err) {
       return reply.code(409).send({ error: message(err) });
     }
@@ -2258,14 +3257,23 @@ export function registerRoutes(
       return reply.code(404).send({ error: 'Run not found' });
     }
 
-    const events = await adapter.runEvents(id);
-    if (events === null) {
+    const engineEvents = await adapter.runEvents(id);
+    if (engineEvents === null) {
       // Same shape as the gate route's 503, and for the same reason: "no events" would report a
       // missing binding as a fact about the run. The run may well have a rich history.
       return reply.code(503).send({
         error: 'Run history is unavailable: this wicked-core build has no event-log read binding',
       });
     }
+    // wicked-studio#284: the stall watchdog's frames are daemon-authored — the engine's log never
+    // saw them — so a reloaded page used to lose the "needs you" facts the live socket carried.
+    // Merge the remembered frames in capture order beside the engine's; they carry `daemon: true`
+    // and no engine `seq`.
+    const daemonFrames = runtime.stallFrames?.(id) ?? [];
+    const events: Array<RecordedEvent | ServedStallFrame> =
+      daemonFrames.length === 0
+        ? engineEvents
+        : withServedSeq([...engineEvents, ...daemonFrames].sort((a, b) => a.ts - b.ts));
 
     // An empty array here is a real answer, not a failure: runs that predate the log have no
     // history, and saying so is the honest response.
@@ -2687,7 +3695,8 @@ export function registerRoutes(
     if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
 
     const graphPath = requirementsGraph(repo);
-    const dbPath = codeGraphDb(repo);
+    const dbPath = codeGraphDbOr503(repo, reply);
+    if (dbPath === null) return reply;
 
     // Coverage from the live estate store — computed by wicked-core governance layer.
     let coverage: unknown = null;
@@ -2748,7 +3757,15 @@ export function registerRoutes(
     if (!parsed.success) {
       return reply.code(400).send(invalidBody(parsed.error, 'Invalid query'));
     }
-    const page = await listRequirements(repo, parsed.data);
+    let page: Awaited<ReturnType<typeof listRequirements>>;
+    try {
+      page = await listRequirements(repo, parsed.data);
+    } catch (err) {
+      // wicked-core#406: a CURRENT engine with no repo-graph root is a 503, not a 500.
+      const status = codeGraphErrorStatus(err);
+      if (status === null) throw err;
+      return reply.code(status).send({ error: message(err) });
+    }
     if (page === null) {
       return reply.code(404).send({ error: 'requirements_graph.json not generated for this repo yet' });
     }
@@ -2775,7 +3792,15 @@ export function registerRoutes(
     } catch {
       return reply.code(400).send({ error: 'Malformed requirement key encoding' });
     }
-    const detail = await getRequirement(repo, decoded);
+    let detail: Awaited<ReturnType<typeof getRequirement>>;
+    try {
+      detail = await getRequirement(repo, decoded);
+    } catch (err) {
+      // wicked-core#406: a CURRENT engine with no repo-graph root is a 503, not a 500.
+      const status = codeGraphErrorStatus(err);
+      if (status === null) throw err;
+      return reply.code(status).send({ error: message(err) });
+    }
     if (detail === null) return reply.code(404).send({ error: 'Requirement not found' });
     return { requirement: detail };
   });
@@ -2808,20 +3833,45 @@ export function registerRoutes(
     } catch {
       return reply.code(400).send({ error: 'Malformed requirement key encoding' });
     }
-    const detail = await patchRequirement(repo, decodedKey, parsed.data);
+    let detail: Awaited<ReturnType<typeof patchRequirement>>;
+    try {
+      detail = await patchRequirement(repo, decodedKey, parsed.data);
+    } catch (err) {
+      // wicked-core#406: a CURRENT engine with no repo-graph root is a 503, not a 500.
+      const status = codeGraphErrorStatus(err);
+      if (status === null) throw err;
+      return reply.code(status).send({ error: message(err) });
+    }
     if (detail === null) return reply.code(404).send({ error: 'Requirement not found' });
     return { requirement: detail };
   });
 
-  app.get(`${V}/repos/:id/graph`, async (req, reply) => {
+  app.get(
+    `${V}/repos/:id/graph`,
+    { config: { manifest: { responseType: 'RepoGraphResponse', statusCodes: [200, 404, 500, 503] } } },
+    async (req, reply) => {
     const { id } = req.params as { id: string };
     const repos = await adapter.listRepos();
     const repo = repos.find((r) => r.id === id);
     if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
 
-    const dbPath = codeGraphDb(repo);
+    const dbPath = codeGraphDbOr503(repo, reply);
+    if (dbPath === null) return reply;
     if (!existsSync(dbPath)) {
-      return reply.send({ graph: null });
+      // `graph: null` alone cannot tell "not indexed" from "empty" (F-2R2-005): say WHY, with the
+      // same finding text the repos wire carries when the engine has one.
+      const finding = (repo.findings ?? []).find(
+        (f) => f.code === 'in_tree_code_graph_ignored' || f.code === 'code_graph_root_unresolvable',
+      );
+      const unbuilt: RepoGraphReply = {
+        graph: null,
+        reason:
+          finding?.message ??
+          `no code graph has been built for '${repo.name}' yet (nothing at ${dbPath}) — run onboarding ` +
+            `(POST /api/v1/repos/${repo.id}/onboard) to index it`,
+        ...(finding !== undefined ? { finding } : {}),
+      };
+      return reply.send(unbuilt);
     }
 
     try {
@@ -2839,26 +3889,39 @@ export function registerRoutes(
       if (q.focus !== undefined && q.focus.trim() !== '') {
         args.push('--focus', q.focus.trim());
       }
-      const { stdout } = await execCapped('wicked-estate', args, {
-        timeout: 30_000,
-        cwd: repo.root_path,
-      });
+      // Whole-graph `totals` beside the served slice (crew#505 / F-RC1-100; api-types 0.38.0):
+      // `graph-view --limit` emits only the slice, so `stats` alone read "my repo has 150 symbols".
+      // `wicked-estate stats --db` prints `nodes=N edges=M files=F …`; both spawns run under
+      // `Promise.all` (one round trip, not two), the SAME daemon-side CLI posture as `graph-view`.
+      // A stats spawn that fails or prints something else leaves `totals` ABSENT and the slice
+      // still 200 — the tile then knows only the slice, never a substituted count.
+      const exe = estateExe();
+      const [{ stdout }, statsOut] = await Promise.all([
+        execCapped(exe, args, { timeout: 30_000, cwd: repo.root_path }),
+        execCapped(exe, ['stats', '--db', dbPath], { timeout: 30_000, cwd: repo.root_path })
+          .then((r) => r.stdout)
+          .catch(() => null),
+      ]);
       const raw = JSON.parse(stdout) as {
         nodes: Array<{ id: string; name: string; kind: string; file: string; lang: string; score: number; inDeg: number; outDeg: number }>;
         edges: Array<{ src: string; tgt: string }>;
       };
       const fileCount = new Set(raw.nodes.map((n) => n.file)).size;
-      return reply.send({
+      const totals = statsOut === null ? undefined : parseEstateTotals(statsOut);
+      const built: RepoGraphReply = {
         graph: {
           nodes: raw.nodes,
           edges: raw.edges,
           stats: { nodeCount: raw.nodes.length, edgeCount: raw.edges.length, fileCount },
+          ...(totals !== undefined ? { totals } : {}),
         },
-      });
+      };
+      return reply.send(built);
     } catch (err) {
       return reply.code(500).send({ error: message(err) });
     }
-  });
+    },
+  );
 
   // ── Git history (last 20 commits via git log) ─────────────────────────────
 
@@ -2876,7 +3939,8 @@ export function registerRoutes(
     const repos = await adapter.listRepos();
     const repo = repos.find((r) => r.id === id);
     if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
-    const dbPath = codeGraphDb(repo);
+    const dbPath = codeGraphDbOr503(repo, reply);
+    if (dbPath === null) return reply;
     if (!existsSync(dbPath)) {
       return reply.code(404).send({ error: 'Code graph not built for this repo yet' });
     }
@@ -3017,7 +4081,11 @@ export function registerRoutes(
   // The store is SHARED with the skin (crew#323): beside the engine's own keys it round-trips
   // the studio's `studio.*` preference blobs verbatim — see `CrewSystemSettings`'s index
   // signature in core/types.ts, which states that rather than leaving it to a client comment.
-  app.get(`${V}/settings`, async () => ({ settings: await adapter.getSettings() }));
+  // crew#494 (F-007 — FIX-IT-ALL L10-6): the System page showed a LITERAL settings path; the daemon
+  // now says where its settings file actually is (`WICKED_CREW_SYSTEM_SETTINGS` honoured) as the
+  // additive `path` (api-types 0.38.0 `SettingsResponse.path?`; adjudicated §4.6 — `path`, not
+  // `settings_path`).
+  app.get(`${V}/settings`, async () => ({ settings: await adapter.getSettings(), path: settingsFilePath() }));
 
   app.put(`${V}/settings`, async (req, reply) => {
     const patch = req.body as Partial<import('../core/types.js').CrewSystemSettings>;
@@ -3038,6 +4106,11 @@ export function registerRoutes(
         });
       }
     }
+    // There is NO skills setting (skills keystone, codex round 5): the skills root is
+    // `<state home>/skills`, full stop — `skills_root` is retired (a configurable root let a PUT
+    // aim seeding at `~/.codex/skills`), and the v3 `skills_mirror` knob was withdrawn before it
+    // (design v3.2 §1: wicked never writes into the user's CLI directories). A client still sending
+    // either is an unknown key, dropped and NAMED in the audit entry like any other.
     // workerStallMinutes (crew#287): the stall watchdog's silence threshold. Bounded to a day —
     // a huge value is "off in practice", which should be a deliberate choice, not a typo.
     if (Object.hasOwn(patch, 'workerStallMinutes')) {
@@ -3087,6 +4160,26 @@ export function registerRoutes(
           .send({ error: "deliverDefault must be 'pr' or 'none'" });
       }
     }
+    // baseSkillRef / baseSkillPolicy (crew#554 / wicked-core#468): the discipline skill EVERY
+    // governed unit is told to follow, and what a snapshot without it means. Both decide whether
+    // launches carry the directive or are refused at intake, so a typo is a 400, never a silently
+    // dropped key. The name is exported to the engine verbatim: a skill-name shape only.
+    if (Object.hasOwn(patch, 'baseSkillRef')) {
+      const r = patch.baseSkillRef;
+      if (typeof r !== 'string' || !BASE_SKILL_REF_SHAPE.test(r.trim())) {
+        return reply.code(400).send({
+          error: 'baseSkillRef must be a skill name (lowercase letters, digits, "-", "_", ":", ".", up to 128 chars — e.g. "wicked-garden-governed-worker"), or "" to turn the base skill off',
+        });
+      }
+    }
+    if (Object.hasOwn(patch, 'baseSkillPolicy')) {
+      const p = patch.baseSkillPolicy;
+      if (typeof p !== 'string' || !BASE_SKILL_POLICIES.has(p)) {
+        return reply.code(400).send({
+          error: "baseSkillPolicy must be 'require' — the only policy (the engine refuses launches at intake until the published snapshot holds the base skill); 'warn' was deleted in crew 0.7.35: it ran seats UNGROUNDED. Set baseSkillRef \"\" to turn the base skill off explicitly",
+        });
+      }
+    }
     // Skin-owned keys (crew#323): allowed through, but VALIDATED rather than trusted. The
     // daemon does not read these values, so the only two things it can check are the two that
     // can hurt it — a value it cannot persist, and a value big enough to bloat settings.json.
@@ -3126,6 +4219,8 @@ export function registerRoutes(
       'workerStallEscalateAction',
       'workerStallMaxEscalations',
       'deliverDefault',
+      'baseSkillRef',
+      'baseSkillPolicy',
     ];
     const safe: Partial<import('../core/types.js').CrewSystemSettings> = {};
     for (const key of allowed) {
@@ -3150,6 +4245,13 @@ export function registerRoutes(
     // WICKED_WORKER_HOME per worker spawn — never cached — so this alone makes the change live
     // at the next spawn: no daemon restart, no engine restart.
     applyWorkerConfigRoot(settings.worker_config_root);
+    // Re-judge and re-export the BASE skill (crew#554) — the engine reads WICKED_BASE_SKILL_REF at
+    // intake, per launch, so this alone makes a changed name or policy live at the next launch.
+    // Only when the patch named either key: an unrelated settings write must not re-log the seam.
+    if (Object.hasOwn(safe, 'baseSkillRef') || Object.hasOwn(safe, 'baseSkillPolicy')) {
+      runtime.skills?.configureBaseSkill(settings);
+    }
+    // (No skills re-apply: the skills root is not a setting — skills/runtime.ts, codex round 5.)
     // `changed` names every persisted key, engine and `studio.*` alike; `ignored` (present only
     // when there is one) is where a dropped unknown key stops being invisible.
     audit.record('settings.updated', actorOf(req), {
@@ -3513,12 +4615,20 @@ export function registerRoutes(
   registerCampaignRoutes(app, adapter, {
     audit,
     actorOf,
-    roster: () => CoreAdapter.roster(),
+    // The roster WITH crew's standing (F-086 — parity with POST /runs and POST /testing/*): the
+    // adapter turns `council_eligible` into the engine's per-seat bench at launch, per campaign
+    // node (`core/engine-roster.ts` `engineCampaignDef`), so a signed-out seat is never convened
+    // by a campaign node either.
+    roster: () => rosterWithStanding(),
     groupIndex,
+    // Wave 6 (F-7R2-014): the registered test sets ride beside the campaigns + groups.
+    testSets,
     deliveryUrlFor: (runId) => deliveryIndex.urlFor(runId),
     vacuity: vacuityProbes,
     // A non-probe derivation throw in the rollup is a defect — error level, loud in diagnostics.
     logDefect: (m) => app.log.error(m),
+    // crew#481: the SAME def-awareness the run DTOs apply — one predicate, every surface.
+    canDeliver,
   });
 
   // ── Governance wiki management (wiki-mgmt) — scoreboard + honest empty-state meta ──────────
@@ -3533,7 +4643,9 @@ export function registerRoutes(
   registerGovernanceSteeringRoutes(app, adapter, {
     audit,
     actorOf,
-    roster: () => CoreAdapter.roster(),
+    // Standing too (F-086 parity): the steering-author run launches through `launchRun`, whose
+    // roster translation (`engineRosterJson`) already benches `council_eligible: false` seats.
+    roster: () => rosterWithStanding(),
     // So the steering-author run's `run.launched` entry stamps `created_at` live too (Copilot #466).
     runTimingIndex,
   });
@@ -3546,14 +4658,28 @@ export function registerRoutes(
   registerTestingRoutes(app, adapter, {
     audit,
     actorOf,
-    roster: () => CoreAdapter.roster(),
+    // The roster WITH crew's standing (wave 6): the adapter turns `council_eligible` into the
+    // engine's per-seat bench at launch, and the author response's `plan.seats` reads it.
+    roster: () => rosterWithStanding(),
     projects: { bus: projects.bus, index: projects.index },
+    // The author launch files each run under its repo's `qe-tests-<repo>` label (F-7R2-014).
+    groupIndex,
     // So the recon fan's `run.launched` entries stamp `created_at` live too (Copilot #466), not
     // just after a restart re-hydrates the trail.
     runTimingIndex,
     // The eval history store: `createServer` supplies a real one (state-home-rooted); a
     // directly-driven route set records nothing unless it injects one (no `~/.wicked-crew` writes).
     ...(runtime.evalStore !== undefined ? { evalStore: runtime.evalStore } : {}),
+  });
+
+  // ── Skills (skills keystone) — the file manager over the daemon-owned garden plugin root ─────
+  // Manifest + typed reads, guarded CAS writes, refresh/publish/analyze. `createServer` injects the
+  // runtime it booted (store seeded from the installed plugin, snapshot published); a
+  // directly-driven route set answers 503 unless a test injects one over a fixture root.
+  registerSkillsRoutes(app, {
+    ...(runtime.skills !== undefined ? { runtime: runtime.skills } : {}),
+    audit,
+    actorOf,
   });
 
   // ── The wicked-interactive bridge, reverse-proxied (DES-MERGE-001 §5.3/§7.2) ──
@@ -3571,10 +4697,15 @@ export function registerRoutes(
       // pool POSTs it to the bridge's /api/studio-origin on start/adopt so the bridge's
       // `GET /` redirects into studio.
       studioOrigin: () => boundOrigin(app.server.address()),
+      // F-043: the bridge emits where this daemon's interactive seams read — one bus per daemon.
+      busDataDir: runtime.interactiveBridgeBusDataDir ?? null,
     });
   registerInteractiveProxy(app, adapter, {
     settings: projectSettings,
     pool: interactiveBridges,
+    ...(runtime.docGrounding !== undefined ? { grounding: runtime.docGrounding } : {}),
+    // crew#631: supply the standing roster so doc/demo creates can refuse an unavailable seat.
+    roster: () => rosterWithStanding(),
     log: (m) => app.log.warn(m),
   });
 
@@ -3592,6 +4723,16 @@ export function registerRoutes(
     // the operator's real ~/.wicked-crew ledgers. The real sweep always arrives from
     // `createServer`.
     dropDocLedgerRows: runtime.dropDocLedgerRows ?? (() => ({ ok: true, removed_keys: [] })),
+    log: (m) => app.log.warn(m),
+  });
+
+  // ── Project-attributed docs list (crew#472) ──
+  // `GET /projects/:id/interactive/api/docs` relays the bridge's list and stamps each row with
+  // the mount's `projectId` — the attribution the bridge cannot know. Same static-over-wildcard
+  // discipline as the delete: only this GET leaves the proxy, `POST /api/docs` still streams.
+  registerInteractiveDocList(app, adapter, {
+    settings: projectSettings,
+    pool: interactiveBridges,
     log: (m) => app.log.warn(m),
   });
 }

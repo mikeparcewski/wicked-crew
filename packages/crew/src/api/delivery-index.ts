@@ -22,15 +22,86 @@
  */
 
 import type { AuditLog } from './audit.js';
-import type { AgentSession, SessionView, WorkUnit } from '../core/types.js';
+import type { AgentSession, SessionView, WorkUnit, WorkflowDef } from '../core/types.js';
 import { execCapped } from '../core/exec.js';
-import { DELIVER_LIFT_CONFLICT_MARKER } from '../core/deliver.js';
+import { DELIVER_LIFT_CONFLICT_MARKER, DELIVER_PHASE_ID } from '../core/deliver.js';
+import { resolveRunWorkflow } from '../qe/acceptance.js';
 
 /** What `AgentSession.delivery` + `deliverUrl` spell on the wire (api-types 0.18.0, crew#393). */
 export interface DeliveryState {
   delivery: 'delivered' | 'stranded' | 'vacuous' | 'none';
   /** Present exactly when `delivery === 'delivered'`. */
   deliverUrl?: string;
+}
+
+/**
+ * Does this workflow DEFINITION do code work — the ONE predicate crew already applies at launch
+ * (`routes.ts` `POST /runs`: `deliver` defaults to `'pr'` only for such a def): some phase declares
+ * `executes_code` and is not the evaluator's. Hoisted here (DES-L8 §5 PR-8A; adjudicated §4.8) so
+ * the launch-time default and the read-time classification below cannot drift —
+ * `tests/delivery-classification.test.ts` pins this function equal to the inline rule for every
+ * shipped def — by DRIVING `POST /runs` with no `deliver` and reading the `run.launched` audit
+ * `detail.deliver` the closure's own rule produced (never a copy of the predicate). The inline call
+ * in the `POST /runs` closure stays this train; its 3-line swap to this import is a follow-up in
+ * that closure's owner lane.
+ */
+export function isCodeWorkDef(def: WorkflowDef): boolean {
+  return def.phases.some((p) => p.executes_code === true && p.role !== 'evaluator');
+}
+
+/** The phase id a planned unit carries — the `<base>:<phase>` suffix (`qe/acceptance.ts`'s rule);
+ *  `''` for a free-text unit (`u1`, `u2`, …) or a legacy id with no colon. */
+export function phaseIdOf(unitId: string): string {
+  const colonIdx = unitId.indexOf(':');
+  return colonIdx >= 0 ? unitId.slice(colonIdx + 1) : '';
+}
+
+/**
+ * Could THIS run ever have delivered (crew#481 / F-BM-006 list half; D-14 — a READ-TIME derivation,
+ * nothing persisted)? TRUE when a `deliver` unit was planned (the composed per-run phase or an
+ * operator overlay's own), when the def is unknown (`null` — a free-text `wf-…` run or a def the
+ * registry no longer holds: today's candidacy, never narrowed on a guess), or when the def does
+ * code work ({@link isCodeWorkDef}). FALSE only for a RESOLVED def with no deliver unit and no
+ * code-work phase — `onboarding`, `capture-learnings`, `domain-graph-slice`, `chat`, … — whose
+ * completed runs then read `delivery: 'none'` instead of the stranded/vacuous a live worktree used
+ * to earn them (the board's "nine runs need you" after onboarding). A code-work run launched with
+ * `deliver: 'none'` stays a candidate: its work is on `wicked/<id>`, liftable post hoc.
+ */
+export function runCanDeliver(view: SessionView, def: WorkflowDef | null): boolean {
+  if ((view.units ?? []).some((u) => phaseIdOf(u.id) === DELIVER_PHASE_ID)) return true;
+  if (def === null) return true;
+  return isCodeWorkDef(def);
+}
+
+/**
+ * The ONE def-awareness closure the daemon hands its delivery cache and its campaigns rollup —
+ * `runCanDeliver` over the run's def resolved through the registry (`resolveRunWorkflow`). Built
+ * for a READ path: a run record with no `workflow_id` (a fake adapter's minimal session, an older
+ * record), no `units`, or a registry that throws resolves NO def ⇒ `runCanDeliver(view, null)` ⇒
+ * today's candidacy — never a 500 on `GET /runs` (the auth-required suite's `{ id, status }`
+ * sessions are exactly this shape). Absence of an answer is today's label, not an error.
+ */
+export function canDeliverResolver(
+  listWorkflows: () => WorkflowDef[],
+  log?: (msg: string) => void,
+): (view: SessionView) => boolean {
+  return (view) => {
+    let def: WorkflowDef | null = null;
+    try {
+      def =
+        typeof view.session?.workflow_id === 'string' ? resolveRunWorkflow(view, listWorkflows() ?? []) : null;
+    } catch (err) {
+      // A registry that cannot answer is the ABSENCE of a def, not a verdict: the run keeps today's
+      // candidacy (never `none` on an error, never a 500) — and the defect is SAID, never swallowed.
+      log?.(
+        `[runs] delivery classification: the workflow registry could not answer for ${view.session?.id ?? '?'} (reads as a candidate): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      def = null;
+    }
+    return runCanDeliver(view, def);
+  };
 }
 
 /**
@@ -48,13 +119,21 @@ export interface DeliveryState {
  *
  * `worktreeExists` is injected (a `fs.existsSync` in production) so route tests can pin the
  * derivation without staging real directories.
+ *
+ * `canDeliver` (crew#481, D-14) is the def-awareness — {@link runCanDeliver}'s answer, resolved by
+ * the caller (the cache dep / the rollup dep) so this fn stays a pure derivation: `false` answers
+ * `'none'` for a completed run whose def could never have delivered, AFTER the url check (a recorded
+ * PR always wins, whatever the def) and BEFORE the worktree stat (nothing there is liftable work).
+ * Defaults to `true` = today's behaviour for every caller that has no def in hand.
  */
 export function deliveryStateOf(
   session: Pick<AgentSession, 'status' | 'repo_ref' | 'workdir'>,
   url: string | undefined,
   worktreeExists: (path: string) => boolean,
+  canDeliver: boolean = true,
 ): DeliveryState {
   if (url !== undefined) return { delivery: 'delivered', deliverUrl: url };
+  if (!canDeliver) return { delivery: 'none' };
   if (
     session.status === 'completed' &&
     session.repo_ref != null &&
@@ -130,8 +209,12 @@ export async function deliveryStateWithVacuity(
   session: Pick<AgentSession, 'id' | 'status' | 'repo_ref' | 'workdir'>,
   url: string | undefined,
   probes: VacuityProbes,
+  canDeliver: boolean = true,
 ): Promise<DeliveryState> {
-  const state = deliveryStateOf(session, url, probes.worktreeExists);
+  const state = deliveryStateOf(session, url, probes.worktreeExists, canDeliver);
+  // A run that could never have delivered is 'none' by definition (crew#481): no probe can turn
+  // "nothing was ever liftable" into vacuous — and the git pair must not be spent finding out.
+  if (!canDeliver) return state;
   if (state.delivery === 'stranded') {
     // `deliveryStateOf` only answers 'stranded' after proving workdir is a non-empty string.
     return (await probes.worktreeIsClean(session.workdir as string))

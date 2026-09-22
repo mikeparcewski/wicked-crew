@@ -137,6 +137,81 @@ export type RoutingInfo =
   | { method: 'evaluator_distinct'; winner: string; was: string }
   | { method: 'tool' };
 
+/**
+ * `GET /health` (api-types 0.37.0 — the shape was previously undeclared here; `status`,
+ * `version` and `ping` are unchanged since 0.1). `capabilities` (additive) names what the
+ * running daemon + its engine addon can actually do, so a client never promises a behaviour the
+ * deployment cannot keep:
+ *   - `deliverGate` — the engine pauses before the composed `deliver` phase pushes and opens the
+ *     PR unless the launch said `deliverGate: 'auto'` (F-E2E-030; wicked-core-ts ≥ 0.7.24).
+ *     `false` (or the whole object absent — a daemon before 0.7.33) ⇒ delivery follows verify
+ *     UNATTENDED; a composer must say so instead of promising a gate, and must not send
+ *     `deliverGate` (an older daemon's launch schema rejects it).
+ *   - `revisesPr` (api-types 0.38.0, additive) — the daemon accepts `LaunchRunBody.revisesPr`
+ *     (crew#550). Absent or `false` ⇒ a composer must NOT send it (an older daemon's launch
+ *     schema rejects it with a 400) and says "this daemon cannot revise a PR" instead.
+ *
+ * The object is the named {@link HealthCapabilities} since 0.38.0 — the same shape 0.37.0 declared
+ * inline, so nothing a 0.37.0 client compiled against moves.
+ */
+export interface HealthResponse {
+  status: string;
+  version: string;
+  ping: string;
+  capabilities?: HealthCapabilities;
+  /**
+   * Blockers the daemon reports while it still SERVES (additive; wicked-core#411 / wicked-crew#497).
+   * One kind today — `state-home.unregistered`: the daemon's state home holds an entry the worker
+   * Read fence cannot classify, so every governed launch would be refused and `POST /runs` answers
+   * **409** `state_home_unregistered` until it is gone (`GET /diagnostics.stateHome` has the
+   * detail). ABSENT when there is nothing to say, and on a daemon before this field. A composer
+   * shows it as the blocker it is; `status` stays `ok` — the daemon is up, it refuses to launch.
+   */
+  warnings?: HealthWarning[];
+  /**
+   * The BASE skill posture for the NEXT launch (crew#554; additive) — what a composer's confirm
+   * line renders as `discipline skill: <name> gen N` (or `MISSING — runs will be refused at
+   * intake` under `baseSkillPolicy: 'require'`, `MISSING — runs proceed without it` under
+   * `'warn'`). `null` when the setting is off or the skills seam is disabled; absent on a daemon
+   * before this field. Cached by the daemon — reading it costs no I/O.
+   */
+  baseSkill?: BaseSkillPosture | null;
+}
+
+/**
+ * `GET /health.capabilities` (api-types 0.38.0 — named; 0.37.0 declared the same shape inline on
+ * {@link HealthResponse}). What the running daemon + its engine addon can actually do; every key
+ * is a promise the deployment keeps, so a client reads it before offering the behaviour.
+ */
+export interface HealthCapabilities {
+  /** See {@link HealthResponse} — the engine's deliver gate exists (wicked-core-ts ≥ 0.7.24). */
+  deliverGate: boolean;
+  /**
+   * `LaunchRunBody.revisesPr` is accepted (crew#550; crew ≥ 0.7.36). ABSENT on a daemon before
+   * the field — read as `false`: do not send `revisesPr` to such a daemon.
+   */
+  revisesPr?: boolean;
+  /**
+   * `LaunchRunBody.chatId` is accepted (crew#619; crew ≥ 0.7.39). ABSENT on a daemon before
+   * the field — read as `false`: do not send `chatId` to such a daemon.
+   */
+  chatIdOnLaunch?: boolean;
+  /**
+   * `InteractiveDocCreateRequest.clisJson` (and the same field on demo/video and testing bodies)
+   * is accepted (crew#631; crew ≥ 0.7.40). ABSENT on a daemon before the field — omit `clisJson`
+   * on such a daemon.
+   */
+  seatChipOnCreate?: boolean;
+}
+
+/** One `GET /health.warnings[]` entry (additive; wicked-core#411 / wicked-crew#497). */
+export interface HealthWarning {
+  /** `state-home.unregistered` today; open for later kinds. */
+  kind: string;
+  severity: 'warning' | 'error';
+  message: string;
+}
+
 /** A run (`AgentSession`). */
 export interface AgentSession {
   id: string;
@@ -147,6 +222,14 @@ export interface AgentSession {
   clis: string[];
   status: SessionStatus;
   human_confirm: HumanConfirm;
+  /**
+   * Whether the run's deliver phase may push and open its PR WITHOUT a human confirming it
+   * first (F-E2E-030; api-types 0.37.0, additive). `false` — the engine pauses before the `deliver` Tool unit
+   * whatever `human_confirm` says; `true` — the launch opted out explicitly (`deliverGate:
+   * 'auto'`). ABSENT on runs from an engine that predates the deliver gate (wicked-core-ts <
+   * 0.7.24): such an engine delivers unattended — render no gate promise for it.
+   */
+  auto_deliver?: boolean;
   unit_ix: number;
   attempt: number;
   workdir: string | null;
@@ -282,6 +365,64 @@ export interface AgentSession {
    * now; a joined `AgentSession.cost` is a follow-up once that store exists.
    */
   created_at?: number;
+  /**
+   * When this run reached a TERMINAL status — unix SECONDS (api-types 0.38.0; crew#496 / studio#230).
+   * Mirrors {@link created_at}: daemon-derived at DTO assembly on BOTH `GET /runs` and
+   * `GET /runs/:id` from a `run.ended` audit entry the daemon records when it sees the run's
+   * terminal frame (`sessionCompleted` | `sessionFailed` | `runCancelled`), joined like
+   * {@link retry_of} / {@link guidance} and hydrated from the same trail scan at boot. Together with
+   * {@link created_at} ("started" ≡ "created" — the ONE launch instant) it gives a run its own clock;
+   * a skin prefers these over the moment it happened to attach.
+   *
+   * ABSENT — never `null`, never fabricated — when the daemon has no `run.ended` entry: a run
+   * still live, a run that terminalled before this field existed or before THIS daemon booted
+   * (no re-emission at boot), a lost trail, or the one crash window between the engine's status
+   * write and the daemon's synchronous audit record. Read with `typeof === 'number'`; a duration
+   * or a "finished N minutes ago" MUST be omitted for an undated run, never derived from now.
+   * Distinct from {@link finished_at} (engine-side unix MILLIS, retention bookkeeping).
+   */
+  ended_at?: number;
+  /**
+   * The interactive DOCUMENT this run answered (wave 6, F-4R2-006 root fix; api-types 0.36.0) —
+   * daemon-joined at DTO assembly on `GET /runs` and `GET /runs/:id` from the interactive seams'
+   * handoff ledgers (the system of record for "this handoff was answered by this run"), so a skin
+   * no longer parses `extra_write_roots` for it. `GET /runs?doc=<id>` filters on it. `null` =
+   * genuinely not a document run; ABSENT = a pre-0.36 daemon. A document chip renders only on
+   * `typeof === 'string'`.
+   */
+  document_id?: string | null;
+  /**
+   * Wave 6 (F-7R2-013): the run branch the worktree was minted on (`wicked/<run id>`, sanitized) —
+   * recorded by the engine when the worktree is ready and durable past its reap, so
+   * `GET /runs/:id/diff` serves the run's work from the branch (`source: 'branch'`) once the
+   * worktree is gone. Absent for an unbound run and on an engine predating wave 6 (the daemon then
+   * derives `wicked/<id>` itself).
+   */
+  run_branch?: string;
+  /** Wave 6 (F-7R2-013): the commit the worktree was minted FROM (`runBaseResolved.baseCommit`) —
+   *  the branch diff's base. Absent for an unbound run, a reused worktree, or an older engine (the
+   *  daemon then uses the branch's merge-base with the default branch). */
+  base_commit?: string;
+  /** Wave 6 (F-7R2-013): when the run reached a TERMINAL status, unix millis. A COMPLETED run's
+   *  worktree is RETAINED from here until archive or the engine's retention window elapses
+   *  (`WICKED_COMPLETED_WORKTREE_KEEP_DAYS`, default 14). Absent on a live run and on older engines. */
+  finished_at?: number;
+  /** Wave 6 (F-7R2-006): the seats BENCHED for this run — never convened, never a failover or
+   *  judge target. Absent (never `[]`) when none / on an older engine. */
+  benched_seats?: BenchedSeat[];
+  /**
+   * The surface that triggered this launch (crew#632; crew ≥ 0.7.40): `'studio'` (web UI),
+   * `'cli'` (wicked-crew CLI), or `'api'` (programmatic). ABSENT when the launch did not include
+   * the field (an older daemon or a caller that omitted it).
+   */
+  channel?: 'studio' | 'cli' | 'api';
+  /**
+   * An opaque caller-supplied identifier for the user or system that triggered the launch
+   * (crew#632; crew ≥ 0.7.40). ABSENT when the launch did not name one. Use `AgentSession.actor`
+   * (the authenticated crew actor) for the identity of WHO launched; `launch_actor` is an
+   * ADDITIONAL annotation the caller may attach (e.g. a CI job name or a studio tab id).
+   */
+  launch_actor?: string;
 }
 
 /** An ordered unit of work within a run (`WorkUnit`). */
@@ -318,6 +459,14 @@ export interface WorkUnit {
    * before the field existed, and on an older engine.
    */
   executes_code?: boolean;
+  /**
+   * The BASE skill this unit follows (wicked-core#468; additive, skip-if-none on the wire): the
+   * run's role-keyed discipline skill, copied onto every AGENT unit at plan time (never a Tool
+   * unit). The unit header renders it with the unit's `role` as `discipline: <name> §<role> gen N`,
+   * `N` from the unit's `skillsSnapshotHanded.gen` frame. Absent on runs without one, on units
+   * planned before the field existed, and on an older engine.
+   */
+  base_skill_ref?: string | null;
 }
 
 /** A run plus its ordered units (`SessionView`) — the shape `GET /runs` returns. */
@@ -341,8 +490,31 @@ export interface RepoEntry {
    * Optional in the TYPE, mandatory in practice: an addon predating the field omits it, and
    * `codeGraphDb()` in the daemon's `repoPaths.ts` is where that turns into a loud error. Never
    * join this path yourself — six independent spellings is what FINDING-069 was.
+   *
+   * Since wicked-core#406 the path is `<daemon state home>/repo-graphs/<key>/estate.db` — never
+   * inside `root_path`; a checkout's in-tree `.codegraph/` is reported in `findings`, not adopted.
    */
   code_graph_db?: string;
+  /**
+   * Diagnostics about the checkout the engine wants shown on the repo card (wicked-core#406) —
+   * derived by the engine on every read like `code_graph_db`, never authoritative in the record.
+   * An empty array for a clean checkout; optional in the TYPE only because an addon predating the
+   * field omits it. Today's codes: `in_tree_code_graph_ignored` (the checkout carries a
+   * `.codegraph/` an older engine indexed in-tree — ignored; `path` names the directory and
+   * `message` says how to clear it) and `code_graph_root_unresolvable` (no repo-graph root
+   * resolves for this daemon, so `code_graph_db` is empty).
+   */
+  findings?: RepoFinding[];
+}
+
+/** One engine diagnostic on a registered repo (`RepoEntry.findings[]`; wicked-core#406). */
+export interface RepoFinding {
+  /** Stable machine code (`snake_case`) a consumer switches on. */
+  code: string;
+  /** Operator-facing explanation: what was found, why it is ignored, how to clear it. */
+  message: string;
+  /** The filesystem path the finding is about, or `null` when it has none. */
+  path: string | null;
 }
 
 /** The run id of the onboarding run launched when a repo was registered (`GET /repos/:id/onboard`). */
@@ -361,6 +533,14 @@ export interface OnboardRef {
  * the message — no operator hand-edit involved.
  */
 export interface SeatHealth {
+  /**
+   * `inactive` is NO LONGER PRODUCED from crew 0.7.36 (api-types 0.38.0 doc; DES-L3 R5): the daemon
+   * stopped flipping a seat on `stepFailed{workerError}`, on quota/401/timeout phrases and on
+   * repeated ACP fallback — seat standing is the engine's per-run ballot bench
+   * (`AgentSession.benched_seats`) plus the seat's own auth refusal (`RosterSeat.auth`). The token
+   * stays in the union so a daemon before 0.7.36 still parses; a reader treats it exactly as
+   * before (a seat-level error, recovery by the probe or a restart).
+   */
   status: 'active' | 'inactive';
   /** Bounded excerpt of the last seat-level error; present while `inactive`. */
   message?: string;
@@ -403,8 +583,77 @@ export interface RosterSeat {
    * unknown seat keys, or a daemon predating the field).
    */
   signed_in?: boolean | null;
+  /**
+   * What `signed_in` MEANS for this seat (api-types 0.35.0, F-2R2-009): `signed_in` — a credential
+   * artifact is observable; `signed_out` — none is and the seat needs one (a council benches it on
+   * its first ballot; a chat refuses it up front); `not_required` — none is, but the seat answers
+   * on a free tier with no account (`free_tier` names it); `unknown` — the probe cannot tell
+   * cheaply (keychain-backed seats, unknown seat keys). Absent on a daemon predating the field.
+   */
+  auth?: SeatAuth;
+  /**
+   * Where `auth` came from (api-types 0.36.0, F-A45-006): `seat-stderr` — the seat ITSELF reported
+   * no credential (a council ballot's "No API key found", a worker's 401, an authentication ACP
+   * fallback) within the last 30 minutes with no ok output since, which OVERRIDES the credential-
+   * file probe (`signed_in`) — the fresh rig's pi read `signed_in: true` off an empty `auth.json`
+   * while every ballot failed. Absent = the probe decided (and since 0.36.0 the probe itself needs
+   * a credential-SHAPED file, never mere presence).
+   */
+  auth_source?: 'seat-stderr';
+  /** Present with `auth_source: 'seat-stderr'`: the seat's own words, bounded. */
+  auth_evidence?: string;
+  /** Present when `auth` is `not_required`: the free tier the seat answers on. */
+  free_tier?: string;
+  /**
+   * Where the `not_required` reading came from: `registry` when the CLI's own record declared the
+   * credential requirement, `crew-heuristic` when the daemon's per-CLI table did (today's only
+   * source — the engine's `AgenticCli` declares none; a wicked-core follow-up). A reader can show
+   * the heuristic as such.
+   */
+  free_tier_source?: 'registry' | 'crew-heuristic';
+  /**
+   * Whether a council would seat AND keep this seat as far as the daemon can tell: enabled for
+   * council, runtime `health` active, `auth` not `signed_out`. The daemon's PREDICTION from its
+   * own records — the engine still convenes whatever roster it is handed and benches a seat only
+   * after it fails. Chat admission (`POST /chats` defaults) reads the same auth predicate.
+   */
+  council_eligible?: boolean;
+  /** Present when `council_eligible` is false: the one reason, in the operator's words. */
+  council_ineligible_reason?: string;
+  /**
+   * Present when THIS daemon's recent councils benched the seat: the engine's own
+   * `councilSeatFailed` evidence (`non_zero_exit` / `timed_out`, the derivative `benched` kind
+   * excluded), folded over a bounded window (`window_ms`) and cleared by the seat's next ok unit
+   * output. `council_eligible` is false while it is present.
+   *
+   * @deprecated ABSENT from crew 0.7.36 (DES-L3 R5b): the daemon-wide council-failure ledger is
+   * retired — the engine benches a dead seat per run at its own ballot threshold and the run DTO
+   * carries the bench (`AgentSession.benched_seats`). Removed from this contract one minor later;
+   * a reader must tolerate absence today.
+   */
+  council_bench?: RosterSeatCouncilBench;
   [k: string]: unknown;
 }
+
+/** `RosterSeat.council_bench` (api-types 0.35.0).
+ *  @deprecated ABSENT from crew 0.7.36 (see {@link RosterSeat.council_bench}); removed one minor later. */
+export interface RosterSeatCouncilBench {
+  /** Primary ballot failures inside the window. */
+  failures: number;
+  /** The last failure's `councilSeatFailed.kind`. */
+  last_kind: string;
+  /** ISO-8601 of the last failure. */
+  last_at: string;
+  /** The run the last failure happened in, when the frame named one. */
+  last_run?: string;
+  /** A bounded excerpt of the last failure's detail / stderr, when there was one. */
+  last_detail?: string;
+  /** The rolling window the failures were counted over, ms. */
+  window_ms: number;
+}
+
+/** A seat's auth reading (`RosterSeat.auth`; api-types 0.35.0). */
+export type SeatAuth = 'signed_in' | 'signed_out' | 'not_required' | 'unknown';
 
 /** Body for `POST /open` — open a file/folder with the OS default application (crew#273). */
 export interface OpenPathBody {
@@ -448,6 +697,21 @@ export interface RunDiff {
   diff: string;
   /** The diff exceeded the 1 MB output cap and was cut. */
   truncated: boolean;
+  /**
+   * Where the diff was read from (wave 6, F-7R2-013; api-types 0.36.0): `worktree` — the live run
+   * worktree (staged + unstaged + untracked; the pre-0.36 answer); `branch` — the run's retained
+   * `wicked/<id>` branch in the REGISTERED repository, diffed against its base, served when the
+   * engine has reaped the worktree (a completed run) so the files view never goes dark at
+   * completion. A pre-0.36 daemon omits the field and answers 409 for a reaped worktree; 409 now
+   * means "no worktree AND no run branch" (nothing was ever committed for the run).
+   */
+  source?: 'worktree' | 'branch';
+  /** `source: 'branch'` — the run branch the diff was read from. */
+  branch?: string;
+  /** `source: 'branch'` — the base commit the branch was diffed against: the engine's recorded
+   *  `AgentSession.base_commit` when it has one, else the branch's merge-base with the default
+   *  branch; `?base=<ref>` overrides it with a plain in-repo ref. */
+  base?: string;
 }
 
 /** The daemon's cached open-gate record (`GET /runs/:id/gate`, DES-STUDIO-001 §3.3). */
@@ -473,6 +737,26 @@ export interface GateInfo {
 export interface GateDecision {
   approve: boolean;
   amend?: string;
+  /**
+   * The decision ARM (api-types 0.38.0, additive; DES-L1 PR-1B / crew PR-2, crew ≥ 0.7.36 on
+   * wicked-core-ts ≥ 0.7.27). Absent = today's two-arm mapping: `approve: true` approves (retry
+   * the same unit, `amend` steers it), `approve: false` rejects (cancels the run, keeps a dirty
+   * worktree). `'request_changes'` — an ESCALATION gate only: rewind to the most recent creator
+   * phase at or before the gated unit, hand it the evaluator's findings (+ `amend` as the note)
+   * and re-dispatch it (`unitReworkAmended{scope: 'request_changes'}` → `resumed` →
+   * `unitDispatched{attempt: last + 1}`); requires `approve: false` — a disagreement between
+   * `action` and `approve` answers 400, a gate with no creator phase before it 409. An older
+   * daemon's strict schema rejects the key with a 400 — omit it against such servers.
+   */
+  action?: 'approve' | 'request_changes' | 'reject';
+  /**
+   * Where an approve's `amend` lands (api-types 0.38.0, additive; same release as `action`).
+   * Absent = `'cursor'` (today: the gated unit's description). `'creator'` — the first creator
+   * phase at or after the cursor receives it (`unitReworkAmended{scope: 'creator'}`) while the
+   * cursor dispatches unamended: the intake steer that must reach the fix phase, not triage.
+   * Identical text already present on the target is not appended twice.
+   */
+  amendScope?: 'cursor' | 'creator';
 }
 
 /**
@@ -491,6 +775,12 @@ export interface ReassignRequest {
  * fields cover the frames the daemon and the studio inspect; the index
  * signature keeps the shape additive-safe so new variants pass through
  * untouched (DES-STUDIO-001 §2.1, §5.1).
+ *
+ * Exact per-frame shapes for consumers that narrow on `type`: the cockpit
+ * {@link InsightEvent} union, the gate-evidence {@link GateEvidenceEvent}
+ * union, and — typed in api-types 0.38.0 as the engine already emits them —
+ * the 11-key {@link GateEscalatedEvent}, {@link SandboxPostureEvent} and
+ * {@link WorktreeRetainedEvent}.
  */
 export interface CoreEvent {
   type: string;
@@ -567,6 +857,12 @@ export interface CoreEvent {
   denialReason?: string | null;
   /** `gateEvaluated`: the final deny-dominant decision over all layers (mirrors `gateDecided.allow`). */
   combined?: boolean;
+  /** `gateEvaluated` (wicked-core#431, api-types 0.33.0): WHO rendered `agentVerdict` — the council seat key
+   *  the layer-2 judge ran under; `null` when no judge ran, and on the bus-mediated path. */
+  judgeCli?: string | null;
+  /** `gateEvaluated` (wicked-core#431): whether that judge was identity-distinct from the work's author
+   *  (`true` = the rotation pick, `false` = the single default runner); `null` when no judge ran. */
+  judgeDistinct?: boolean | null;
   // sessionStarted enrichment fields (snake_case — serde wire names)
   workflow_id?: string | null;
   cli_count?: number;
@@ -600,17 +896,43 @@ export interface CoreEvent {
   hasValidatorPin?: boolean;
   executor_type?: string;
   executorType?: string;
-  // unitDistributed enrichment fields
+  // unitDistributed enrichment fields — the wire spelling is camelCase (event_to_json; see
+  // UnitDistributedEvent, api-types 0.36.0); the snake_case variants are kept for older relays.
+  routingMethod?: string;
   routing_method?: string;
   agreement_pct?: number | null;
   returned?: number | null;
+  seated?: number | null;
   dissent?: number | null;
+  degradedReason?: string | null;
   degraded_reason?: string | null;
+  seatConstraint?: string | null;
+  /** `unitDistributed` (wicked-core#461): the evaluator ≠ creator fallback as a field — see
+   *  `UnitDistributedEvent.distinctnessFallback`. */
+  distinctnessFallback?: 'creator_seat' | null;
+  /** `gateEvaluated` (wave 6, F-7R2-005): `true` when NOTHING gated the unit — render as UNGATED. */
+  ungated?: boolean;
+  /** `gateEvaluated` (wave 6): why, when `ungated`. */
+  ungatedReason?: string | null;
+  /** `gateEvaluated` (wave 6, #449 @ 9e11685): why the deterministic layer is absent / why no judge ran. */
+  floorNote?: string | null;
+  judgeSkippedReason?: string | null;
+  /** `repoChecksEvaluated` (wave 6): the sandbox level, and why the sandbox / check detection failed. */
+  sandboxLevel?: string;
+  sandboxError?: string | null;
+  detectError?: string | null;
+  /** `workerToolCallDenied` (wave 6, F-7R2-012): the refused command / the remedy / the unit's role. */
+  command?: string;
+  remedy?: string;
+  role?: string;
+  /** `runBaseResolved` (wave 6, F-7R2-013): the run branch the worktree was minted on. */
+  runBranch?: string;
   // councilConvened / councilDeliberated / councilVoted (live deliberation) — camelCase
   // per event_to_json
   clis?: string[];
   consensus?: boolean;
-  agreementPct?: number;
+  /** councilConvened/Deliberated/Voted: a number; `unitDistributed` (api-types 0.36.0): `number | null`. */
+  agreementPct?: number | null;
   votes?: number;
   /** councilDeliberated: the completed ballot number (1-based). */
   round?: number;
@@ -665,7 +987,10 @@ export interface CoreEvent {
   /** campaignNodeStarted / campaignNodeAwaitingHuman: the node's attempt-keyed Run id. */
   runId?: string;
   // assumptionRecorded (external-transform convention) — camelCase per event_to_json
-  kind?: string;
+  /** `assumptionRecorded`: the assumption kind; `councilSeatFailed`: the failure branch;
+   *  `evaluatorToolCallDenied` (wicked-core#431, api-types 0.33.0): the ACP `toolCall.kind` — `null`
+   *  when the agent sent none. Widened to admit that `null`; every other producer still sends a string. */
+  kind?: string | null;
   library?: string;
   transform?: string;
   known?: boolean;
@@ -759,8 +1084,20 @@ export interface RecordedEvent extends CoreEvent {
    * is required and spans every frame of the run; that one is optional and scoped to a stream. The
    * name is inherited from the wire and narrowed here rather than renamed, because the wire is what
    * `runEvents` returns.
+   *
+   * Across a daemon RESTART the counter is re-seeded from the trail's highest `seq` + 1, so `seq`
+   * stays strictly increasing over the whole trail — but two records of one run may be separated
+   * by an engine that lost every in-flight frame in between (api-types 0.38.0; crew#513).
    */
   seq: number;
+  /**
+   * Stamped `true` on exactly ONE record per restart: the first frame a fresh engine writes for a
+   * run whose trail already existed (wicked-core `event_log.rs`; api-types 0.38.0, crew#513). Every
+   * other record omits the key — never `false`. A timeline reads it as a "daemon restarted here"
+   * boundary: frames the previous process never wrote are not coming, and the run's `ended_at` may
+   * be absent for that reason.
+   */
+  daemonRestarted?: true;
 }
 
 /**
@@ -781,6 +1118,20 @@ export interface UnitDispatchedEvent {
   session: string;
   ord: number;
   attempt: number;
+  /**
+   * The BASE skill directive this dispatch carries (wicked-core#468; additive): the run's
+   * role-keyed discipline skill and the `§<role>` section the unit was told to follow. Emitted
+   * unconditionally by an engine that has it — `null` when the run declares none; ABSENT on an
+   * older engine. The generation it is handed from is the same unit's `skillsSnapshotHanded.gen`
+   * (the handoff is where the generation is known truthfully). A run page renders
+   * `discipline: <name> §<role> gen N`.
+   *
+   * `handed` (api-types 0.38.0, additive; wicked-core#479 — typed AHEAD of its producer, which
+   * lands in the wave-3 core-ts): `true` when the admitted snapshot holds the base skill and the
+   * carrier delivered it (the skill form is not `Unloaded`); `false` when the run only NAMED it.
+   * ABSENT ⇒ UNKNOWN (an engine before the field) — render `gen ?`, never "not handed".
+   */
+  baseSkill?: { name: string; role: 'creator' | 'evaluator' | 'neutral'; handed?: boolean } | null;
 }
 
 /** §3 B3 — token/cost burn for one unit run. `costUsd` is `null` when no cost is known. */
@@ -802,7 +1153,55 @@ export interface DataUsedEvent {
   files: string[];
 }
 
-/** §3 B1 — the gate's decision depth, emitted alongside `gateDecided`. */
+/**
+ * The layer that denied a unit — a stable token (wicked-core `UnitDenial.source`):
+ * - `governance` — the unit's own gate; `input_governance` — the tool-call hook / boundary;
+ * - `pinned_validator` — the deterministic re-verify; `agent_validator` — the LLM judge;
+ *   `evaluator` — the evaluator≠creator second pass;
+ * - `worker_failure` — the CLI process failed; `substance` — no reviewable substance;
+ *   `deliverables` — declared deliverables missing; `elicitation` — ACP elicitation ended;
+ * - `worktree_guard` — a def-driven, agent-executed `executes_code: false` phase changed the
+ *   worktree it was reviewing (wicked-core F-036, see {@link EvaluatorMutatedWorktreeEvent}) — or
+ *   the guard could not re-verify it (no baseline persisted at dispatch, comparison unverifiable),
+ *   which denies fail-closed WITHOUT that event; `reason` names the cause;
+ * - `repo_checks` — the repository's own checks failed in the worktree (wicked-core F-039, see
+ *   {@link RepoChecksEvaluatedEvent}).
+ * Open-ended (`string & {}`) so a newer engine's source parses in an older studio.
+ */
+export type UnitDenialSource =
+  | 'governance'
+  | 'input_governance'
+  | 'pinned_validator'
+  | 'agent_validator'
+  | 'evaluator'
+  | 'worker_failure'
+  | 'substance'
+  | 'deliverables'
+  | 'elicitation'
+  | 'worktree_guard'
+  | 'repo_checks'
+  | (string & {});
+
+/** The MACHINE-READABLE twin of `gateEvaluated.denialReason` (wicked-core `UnitDenial`, camelCase on
+ *  the wire): which layer denied, the prose reason, and — when the layer recorded them — the
+ *  conformance claim id, the firing rule ids, the refused tool and the unit-phase token. `null`
+ *  fields are the engine's `Option::None`, never absent. */
+export interface UnitDenial {
+  source: UnitDenialSource;
+  reason: string;
+  claimId: string | null;
+  ruleIds: string[];
+  deniedTool: string | null;
+  phase: string | null;
+}
+
+/** §3 B1 — the gate's decision depth, emitted alongside `gateDecided`. `denial` is the structured
+ *  twin of `denialReason`: `null` when the gate approved, else the winning layer (deny-dominates) —
+ *  `worktree_guard` and `repo_checks` are the two wicked-core F-036/F-039 layers. `judgeCli` /
+ *  `judgeDistinct` (wicked-core#431 / F-3R2-007, api-types 0.33.0) name WHO rendered `agentVerdict`,
+ *  so evaluator ≠ creator is auditable from the event stream alone (compare with the unit's
+ *  `unitDistributed.cli`). Both keys are ALWAYS present: `null` when no judge ran (`agentVerdict`
+ *  is `null` too) and on the bus-mediated evaluator path, where the seat is not reported back. */
 export interface GateEvaluatedEvent {
   type: 'gateEvaluated';
   session: string;
@@ -813,8 +1212,50 @@ export interface GateEvaluatedEvent {
   agentVerdict: string | null;
   agentReasoning: string | null;
   evaluatorPass: boolean | null;
+  /** Policy ids the evaluator≠creator pass applied (empty = vacuous default-allow, FINDING-025). */
+  evaluatorPolicies: string[];
   denialReason: string | null;
+  denial: UnitDenial | null;
   combined: boolean;
+  /** The council seat key the layer-2 judge ran under (`codex`, `pi`, …) — WHO rendered
+   *  `agentVerdict`. `null` when no judge ran, and on the bus-mediated path. */
+  judgeCli: string | null;
+  /** Whether that judge seat was IDENTITY-DISTINCT from the work's author: `true` for the rotation
+   *  pick, `false` when the judge fell back to the single default runner (prompt-only independence).
+   *  `null` when no judge ran or the seat is unknown. */
+  judgeDistinct: boolean | null;
+  /**
+   * Wave 6 (F-7R2-005, api-types 0.36.0): `true` when NOTHING gated this unit — no deterministic
+   * floor (no pinned validator, and the repo-checks floor did not apply), no agent judge, and an
+   * EMPTY evaluator-policy selection — the exact default-allow shape run b86c14c1 passed seven times.
+   * A consumer MUST render it as UNGATED, never as "pass", and a narrator must never say "checks
+   * ran" without a `repoChecksEvaluated` for the same unit. Absent on an engine predating wave 6
+   * (read `=== true`); `false` on a gated unit.
+   */
+  ungated?: boolean;
+  /** WHY, when `ungated` — each absent layer and its cause (`"no judge: no eligible judge seat
+   *  distinct from creator \`claude\` (roster: claude; benched: codex (signed out))"`). `null` when
+   *  gated; absent on an older engine. */
+  ungatedReason?: string | null;
+  /** Wave 6 (wicked-core#449 @ 9e11685, api-types 0.36.0): WHY the deterministic layer is absent —
+   *  set whenever `hasDeterministicFloor` is `false` on an agent unit, judge or not (`"no pinned
+   *  validator; the repo-checks floor did not apply: the tree was not changed"`). `null` when a
+   *  floor ran; absent on an older engine. */
+  floorNote?: string | null;
+  /** Wave 6: WHY no judge was convened for a unit that WANTED one (its tree changed and no pinned
+   *  validator gated it) — `"no eligible judge seat distinct from creator \`claude\` (roster: …;
+   *  benched: …)"`. `null` when a judge ran or none was wanted; absent on an older engine. */
+  judgeSkippedReason?: string | null;
+  /**
+   * The evaluator's own `VERDICT:` token (api-types 0.38.0, additive; DES-L1 PR-1A, wicked-core-ts
+   * ≥ 0.7.27): after trimming leading decoration, the LAST line whose first token is `VERDICT`
+   * decides — `"PASS"`, `"FAIL"`, or whatever token the seat wrote (`"CONDITIONAL"` is not PASS).
+   * Parsed for an Evaluator-role agent unit only; `null` for creator / neutral / tool units and
+   * when no such line exists (then `denial.source` is `evaluator_verdict` and the gate escalates
+   * `verdict_not_pass`). ABSENT on an engine before the field — a reader treats absent as "not
+   * parsed", never as PASS.
+   */
+  evaluatorVerdict?: string | null;
 }
 
 /** Foundation wave: session started with enriched context. */
@@ -864,13 +1305,42 @@ export interface AcpSessionStartedEvent {
   acpSessionId: string;
 }
 
-/** P1 — ACP unavailable or failed for a CLI; the run continues with single-shot fallback. */
+/**
+ * `acpFallback.fallbackKind` — WHY a unit left the ACP carrier for the wrapped (single-shot) one:
+ * - `binary_unavailable` / `session_died` / `auth_required` — the ACP session could not be had; the
+ *   run continues single-shot (a FAILURE of the seat's transport or account, counted by seat health);
+ * - `governance_requires_wrapped` — a governed unit on a seat whose ACP adapter cannot enforce input
+ *   governance is routed to the wrapped carrier by design (crew#276);
+ * - `read_only_requires_wrapped` (wicked-core#431 / F-3R2-009, api-types 0.33.0) — an
+ *   `executes_code: false` unit (an evaluator, a recon rung, a review) on an ACP seat NOT admitted to
+ *   input governance (pi-acp, codex-acp) is routed to the wrapped carrier BEFORE any ACP turn, where
+ *   the read-only lever is an argv fact (`--sandbox read-only` / `--exclude-tools edit,write`). No
+ *   per-call {@link EvaluatorToolCallDeniedEvent} exists on that route — consumers must not wait for one.
+ * The two `*_requires_wrapped` kinds are deliberate routing, not failures — never a seat-health signal.
+ * Open-ended (`string & {}`) so a newer engine's kind parses in an older consumer.
+ */
+export type AcpFallbackKind =
+  | 'binary_unavailable'
+  | 'session_died'
+  | 'auth_required'
+  /** Wave 6 (F-7R2-019, api-types 0.36.0): the ACP handshake was REFUSED for authentication — the
+   *  seat's account, not its binary (`pi-acp` existed; pi answered 401). The engine benches the seat
+   *  for the run and does NOT attempt the single-shot wrapped fallback (it fails the same way). */
+  | 'auth_failed'
+  /** Wave 6 — the seat reported no credential at all (`unauthenticated`); same bench, same no-retry. */
+  | 'unauthenticated'
+  | 'governance_requires_wrapped'
+  | 'read_only_requires_wrapped'
+  | (string & {});
+
+/** P1 — ACP unavailable or failed for a CLI, or the unit was deliberately routed off ACP; the run
+ *  continues on the wrapped carrier. `fallbackKind` says which (see {@link AcpFallbackKind}). */
 export interface AcpFallbackEvent {
   type: 'acpFallback';
   session: string;
   cliKey: string;
   reason: string;
-  fallbackKind: string;
+  fallbackKind: AcpFallbackKind;
 }
 
 // ── P2 observability events ─────────────────────────────────────────────────
@@ -938,14 +1408,87 @@ export interface ValidationPinAttachedEvent {
   criterion: string;
 }
 
-/** P2 — a HumanConfirmIf gate escalated to human review. */
+/**
+ * P2 — a HumanConfirmIf gate escalated to human review. Since wicked-core#464 every fold DENIAL
+ * parks the run here too (followed by `awaitingHuman{gateKind: 'escalation'}`), and `condition`
+ * names the CLASS: `evaluator_mutated_worktree` (the worktree guard) · `boundary_deny` (input
+ * governance refused a tool call) · `dead_seat` (the seat is unusable — signed out / not installed /
+ * benched) · `floor_failed` (a deterministic floor: repo checks, pinned validator, substance,
+ * deliverables) · `verdict_not_pass` (the layer-2 judge, a worker failure, or — wicked-core-ts ≥
+ * 0.7.27 — the evaluator's own `VERDICT` line), or a def-declared `human_confirm_if` condition
+ * (`defGate: true`). `verdictSummary` is the denial reason.
+ *
+ * The seven additive keys (api-types 0.38.0 — the engine has emitted all eleven fields, twelve JSON
+ * keys with `type`, since wicked-core#464; `event.rs::GateEscalated`) carry what a decision arm
+ * needs without re-reading the unit. ABSENT on a daemon whose engine predates them; when present
+ * they are ALWAYS all present.
+ */
 export interface GateEscalatedEvent {
   type: 'gateEscalated';
   session: string;
   ord: number;
   condition: string;
   verdictSummary: string;
+  /** The attempt whose output — persisted as the unit's REJECTED transcript — this gate reviews. */
+  attempt?: number;
+  /**
+   * The raw denial LAYER token (`gateEvaluated.denial.source`): `worktree_guard` ·
+   * `input_governance` · `dead_seat` · `repo_checks` · `repo_checks_timeout` · `pinned_validator`
+   * · `substance` · `deliverables` · `agent_validator` · `worker_failure` · `evaluator_verdict`
+   * (0.7.27) · `governance`. `""` (EMPTY) = a hook veto whose source identity was folded away
+   * (`actor.rs` `boundary_deny` arm with no structured denial) — a reader keys copy on
+   * `(condition, denialSource)` and treats `""` beside `boundary_deny` as input governance.
+   */
+  denialSource?: string;
+  /** `true` when the unit's OWN def declared this escalation (`human_confirm_if`); `false` = engine-authored. */
+  defGate?: boolean;
+  /** The phase produced output text — the precondition of an "accept the captured output" arm. */
+  outputCaptured?: boolean;
+  /**
+   * The worktree guard's restore outcome, mirroring {@link WorktreeRestoredEvent} — meaningful for
+   * `evaluator_mutated_worktree` only; `false` / `[]` / `null` for every other class.
+   */
+  restored?: boolean;
+  /** The paths the restore discarded (`git status --porcelain` status + path), as {@link WorktreeRestoredEvent.discarded}. */
+  discarded?: { status: string; path: string }[];
+  /** The `refs/wicked/suggestions/<run>/<ord>/<attempt>` ref holding the discarded changes; `null` when none. */
+  suggestionRef?: string | null;
 }
+
+/**
+ * F-E2E-039 (api-types 0.38.0; emitted since wicked-core `pipeline.rs` armed it): the containment
+ * POSTURE a unit's worker actually ran under, once per dispatch, so a skin can say it instead of
+ * implying an OS sandbox that was never armed. `os` — the registry seat record arms an OS write
+ * boundary (macOS `sandbox-exec` / Linux `bwrap`); `advisory` — the record arms none, so
+ * containment is the worktree guard plus the command-text fences, which a shell can evade.
+ * `reason` is the engine's sentence naming the deciding record/flag.
+ */
+export type SandboxPostureEvent = {
+  type: 'sandboxPosture';
+  session: string;
+  ord: number;
+  /** The registry seat key. */
+  cli: string;
+  posture: 'os' | 'advisory';
+  reason: string;
+};
+
+/**
+ * F-RC1-064 / F-E2E-028 (api-types 0.38.0; emitted since wicked-core#456): a TERMINAL run's
+ * worktree was KEPT because it holds uncommitted work the run branch does not carry — named on the
+ * wire so a skin can point the operator at the path. Cancel and the terminal reap apply the same
+ * rule; the retention window (`WICKED_COMPLETED_WORKTREE_KEEP_DAYS`) then reaps it clean-only. A
+ * clean tree is reaped and emits nothing. Session-level (no `ord`). Both new frames are `type`
+ * aliases on purpose — see {@link EvaluatorMutatedWorktreeEvent}: an alias satisfies `CoreEvent`'s
+ * index signature and relays through the CoreEvent-typed broadcast seams unchanged.
+ */
+export type WorktreeRetainedEvent = {
+  type: 'worktreeRetained';
+  session: string;
+  /** The kept worktree's absolute path (the engine's; a skin never resolves it). */
+  path: string;
+  reason: string;
+};
 
 /** P2 — a tool-executor command was dispatched (non-agent unit). */
 export interface ToolExecutorDispatchedEvent {
@@ -979,6 +1522,374 @@ export interface GovernanceUnenforcedEvent {
   reason: string;
 }
 
+/** One path an `executes_code: false` phase changed, with git's one-letter status
+ *  (`A`dded, `M`odified, `D`eleted, `T`ype-changed). */
+export interface WorktreeChangedPath {
+  status: string;
+  path: string;
+}
+
+/** wicked-core F-036 — an `executes_code: false` phase (an evaluator, a recon rung, a review) CHANGED
+ *  the worktree it was working in. Scope: the guard governs a DEF-DRIVEN, AGENT-executed
+ *  `executes_code: false` phase (`WorkUnit.worktree_guarded`, derived at plan time); Tool phases —
+ *  crew's `deliver-pr` included — and prose-planned runs are not guarded. The engine snapshots the
+ *  tree at dispatch and takes the FINAL snapshot after everything the phase owned has run (seat
+ *  quiesced — its process group killed, a persistent session closed — judge rendered, repo checks
+ *  done), for EVERY seat and carrier regardless of governance adapter. `changed` is EVERY path that
+ *  differs, and every one DENIES the unit (its `gateEvaluated.denial.source` is `worktree_guard`):
+ *  there are NO exemptions — not documentation, not a declared `required_deliverables` entry, not
+ *  tool state (a phase whose deliverable must live in the tree is a code phase; the engine's own
+ *  `tmp/` scratch is excluded from the snapshot by construction). `headMoved`: the run branch was
+ *  committed/amended/reset. The event is emitted exactly when a MUTATION denies the unit (`changed`
+ *  non-empty and/or `headMoved`), so an operator always sees what an evaluator wrote. A
+ *  `worktree_guard` denial can also come from the guard's fail-closed paths — no baseline persisted
+ *  at dispatch, or the comparison unverifiable — and those carry NO `evaluatorMutatedWorktree`
+ *  event: the gate's `denial.reason` names the cause. Evaluator ≠ creator is no longer a promise the
+ *  seat keeps; it is a check.
+ *
+ *  `type` alias on purpose, not `interface`: only anonymous object types satisfy `CoreEvent`'s index
+ *  signature, which is what lets the frame flow through CoreEvent-typed broadcast seams. */
+export type EvaluatorMutatedWorktreeEvent = {
+  type: 'evaluatorMutatedWorktree';
+  session: string;
+  ord: number;
+  attempt: number;
+  /** The seat that ran the unit (`assigned_cli`; `''` when unassigned). */
+  cli: string;
+  /** The workflow phase id (`verify`, `adversarial-review`, …). */
+  phase: string;
+  beforeTree: string;
+  afterTree: string;
+  headMoved: boolean;
+  changed: WorktreeChangedPath[];
+  /** wicked-core#431 / F-3R2-010 (api-types 0.33.0): whether the engine RESTORED the creator's tree
+   *  (`beforeTree`) in the worktree right after detecting the mutation — so the retry a human
+   *  approves runs against the VERIFIED tree, never against the evaluator's edit. When `true` a
+   *  {@link WorktreeRestoredEvent} follows with the discarded paths, the gate's `denialReason` says the
+   *  edit was discarded, and the `awaitingHuman` prompt reads "… its edit was discarded and the
+   *  creator's verified tree restored. Approve to retry the phase against the restored tree …" (the
+   *  pre-0.33.0 prompt was "confirm to retry the phase"; a card that matched the old text must
+   *  re-check). `false` = the restore failed or was not attempted — `restoreError` says why — and the
+   *  denial keeps the manual `git read-tree` remedy. */
+  restored: boolean;
+  restoreError: string | null;
+};
+
+/** One repository check the engine ran in the run's worktree (wicked-core F-039). */
+export interface RepoCheckRun {
+  /** `install` | `typecheck` | `lint` | `test` | `cargo-test`. */
+  name: string;
+  argv: string[];
+  /** Provenance an operator can verify: `package.json scripts.test`, `Cargo.toml`, … For the `install`
+   *  step the lockfile and WHY it ran: `package-lock.json (node_modules absent)`, `pnpm-lock.yaml (…)`,
+   *  `yarn.lock (…)`, `package.json (…, no lockfile)` — and, since wicked-core#431 / #433, `… (forced:
+   *  lockfile drift)` when the deliver lift moved a lockfile/manifest between the old base and the
+   *  remote tip and the re-verify re-installed (frozen lockfile, `--ignore-scripts`) before the checks. */
+  source: string;
+  /** The process exit code; `null` when it produced none (timed out / could not spawn). */
+  exitCode: number | null;
+  timedOut: boolean;
+  /** The OS error when the command could not be started (binary not on PATH, …); `null` otherwise
+   *  — the key is always present on the wire. */
+  spawnError: string | null;
+  durationMs: number;
+  /** The last 4 KiB of each stream — the evidence, verbatim. */
+  stdoutTail: string;
+  stderrTail: string;
+  /**
+   * The baseline-diff floor's evidence (api-types 0.38.0 — the seven keys the engine has emitted
+   * since wicked-core#469 / #476). PRESENT ON EVERY CHECK from that engine on: the one producer of
+   * this camelCase form, `event.rs::check_run_json`, writes all seven every time — `0` / `null` / `[]`
+   * when there is nothing to say (the Rust `Option` → `null` rule; the struct's own
+   * `skip_serializing_if` governs the persisted record, not this frame). ABSENT only on an older
+   * engine — the `?:` is that one case, so read with `== null`, never `=== undefined`. `boundS` — the
+   * EFFECTIVE wall-clock bound the check ran under, seconds (base × host-load factor; a bare number,
+   * `0` when unknown); `boundNote` — how it was derived, for the operator (`null` when none).
+   */
+  boundS?: number;
+  boundNote?: string | null;
+  /**
+   * Failure identifiers streamed off the runner's output (`test a::b ... FAILED`, ` FAIL file >
+   * name`, `path: error TS1234: …`) — what the baseline diff compares. `[]` when the runner's format
+   * is not one the scanner knows (the diff then compares exit codes).
+   */
+  failureIds?: string[];
+  /**
+   * Set when the check FAILED and the same check was run on the base (`base`): `regression` (head
+   * failures absent on the base — denies) or `pre_existing_in_sandbox` (equal failure sets — never
+   * this change's doing); `floor_env_mismatch` was emitted by engines before wicked-core-ts 0.7.27
+   * and is retired. An OPEN string — new tokens may follow; `null` when the check passed,
+   * timed out, could not run, or no base comparison was possible (the check then denies as before).
+   */
+  classification?: string | null;
+  /** Head failures that ALSO fail on the base (never this change's doing); `[]` when none. */
+  preExisting?: string[];
+  /** Head failures ABSENT on the base — the regressions that deny; `[]` when none. */
+  regressions?: string[];
+  /** The same check run on the run BASE, when the floor ran it; `null` otherwise. */
+  base?: RepoCheckBaseRun | null;
+}
+
+/**
+ * `RepoCheckRun.base` — the same check on the run base (api-types 0.38.0; wicked-core
+ * `repo_checks.rs::BaseRun`, serialised by `event.rs::base_run_json`). Typed as an OPEN object this
+ * release; the engine writes all four keys every time: `head` (the base commit), `cached` (read back
+ * from this run's cache), `run` (a nested check run — `null` when the base could not be run) and
+ * `error` (why not: export failed, the base declares no such check, its install failed, the repo
+ * opted out — the head check then denies fail-closed; `null` when it ran). The fields are named in
+ * the next minor (DES-L2 2C); read them through `unknown` narrowing until then.
+ */
+export interface RepoCheckBaseRun {
+  [k: string]: unknown;
+}
+
+/** wicked-core F-039 — the engine ran the repository's OWN checks in the worktree for the def's
+ *  code-verifying unit (`verified_evidence` with an `executes_code` creator upstream: `bug/verify`,
+ *  `feature/test`, `migration/verify`) and folded them into the gate as a deterministic floor. Fires
+ *  once per fold, just before `gateEvaluated` (whose `hasDeterministicFloor`/`criterion` include this
+ *  floor). `checks` is what actually ran, in order (`package.json` `typecheck`/`lint`/`test` via the
+ *  lockfile's package manager, an `install` first when `node_modules/` is absent; `Cargo.toml` →
+ *  `cargo test`); `skipped` names detected checks not run because an earlier one failed. `passed:
+ *  false` ⇒ the unit is denied (`denial.source` is `repo_checks`).
+ *
+ *  The checks are repo-controlled code and run ONLY inside an OS write boundary (macOS
+ *  `sandbox-exec` / Linux `bwrap`: writes confined to the worktree, the curated secret directories
+ *  unreadable, network open for installs) with an isolated `HOME`, `npm_config_cache`, `CARGO_HOME`,
+ *  `CARGO_TARGET_DIR` and `XDG_*` under `<worktree>/tmp/wicked-checks/`, and with a MINIMAL
+ *  environment — the daemon's env is cleared and only `PATH`, locale (`LANG`/`LC_*`), `TERM`,
+ *  `USER`/`LOGNAME`, `RUSTUP_HOME`, the Windows shell essentials and those isolation overrides
+ *  (`CI=1` included) reach a check: no token, API key or `WICKED_*` variable does; installs are always
+ *  `--ignore-scripts` (`--no-package-lock` when the repo ships no lockfile). When NO boundary can be
+ *  armed (no sandbox tool on the host — Windows) the checks do NOT run and the floor FAILS
+ *  (`passed: false`, `checks: []`, the reason on the unit record) — repo-controlled scripts never
+ *  run unsandboxed. Detection is fail-closed the same way: a `package.json` that cannot be read or
+ *  parsed, or a symlinked manifest/lockfile/`node_modules` (every probe `lstat`s, opens `O_NOFOLLOW`
+ *  and `fstat`s the opened descriptor before reading — links are never followed), FAILS the floor.
+ *  Only a repo with NO DETECTABLE check is the disclosed vacuous pass (`checks: []`, `passed:
+ *  true`): no manifest at all, or a readable `package.json` with no string `typecheck`/`lint`/`test`
+ *  script and no `Cargo.toml`. A manifest that cannot be read or trusted still FAILS.
+ *  "Done" for a verify phase is now the exit code the engine observed, not the seat's account of
+ *  having run the suite.
+ *
+ *  wicked-core#431 (api-types 0.33.0): the frame ALSO arrives for the DELIVER ord — a Tool unit —
+ *  whenever the worktree's tree is NOT the tree the run verified when the deliver phase is about to
+ *  push: after a lift onto the remote tip ({@link DeliverLiftEvaluatedEvent} `outcome: 'lifted'`), on
+ *  a retry after a failed re-verify, after an operator's by-hand rebase, or for a run that recorded
+ *  no verified tree. The engine re-runs the repository's checks on the tree that would ship before
+ *  allowing the push (a lockfile that moved with the base forces a frozen `--ignore-scripts` install
+ *  first), and the deliver unit's `gateEvaluated` then carries `hasDeterministicFloor: true` with
+ *  this floor's `criterion`. `passed: false` there fails the deliver unit closed — nothing is pushed.
+ *  `type` alias on purpose — see {@link EvaluatorMutatedWorktreeEvent}. */
+export type RepoChecksEvaluatedEvent = {
+  type: 'repoChecksEvaluated';
+  session: string;
+  ord: number;
+  attempt: number;
+  passed: boolean;
+  criterion: string;
+  /** The checks that RAN. EMPTY means "0 checks detected" — a consumer must say so, never "checks
+   *  ran"; since wave 6 the frame says WHY (`detectError`, `sandboxError`). */
+  checks: RepoCheckRun[];
+  skipped: string[];
+  /** Wave 6 (wicked-core#449 @ 9e11685, api-types 0.36.0): the sandbox level the checks ran under
+   *  (`bwrap`, `sandbox-exec`, `none`, …). Absent on an older engine. */
+  sandboxLevel?: string;
+  /** Wave 6: why the sandbox could not be armed, when it could not (`null` when it was). */
+  sandboxError?: string | null;
+  /** Wave 6: why check DETECTION failed (an unreadable `package.json`, a manifest with no
+   *  `typecheck`/`lint`/`test` script, …) — the reason an empty `checks` is empty; `null` when
+   *  detection succeeded. */
+  detectError?: string | null;
+};
+
+// ── wicked-core#431 gate / deliver evidence (F-3R2-013 / -010 / -009; api-types 0.33.0) ──────────
+
+/** wicked-core#431 / F-3R2-010 — the engine PUT THE CREATOR'S TREE BACK after an `executes_code:
+ *  false` phase changed it ({@link EvaluatorMutatedWorktreeEvent} with `restored: true`): the run
+ *  branch's `HEAD` is back at the baseline commit when the phase had moved it (`head`), the index and
+ *  working tree match `tree` (the baseline the actor snapshotted at dispatch), and every path the
+ *  phase ADDED is deleted. `discarded` names exactly what the evaluator's edit was — the same list the
+ *  mutation event carried as `changed` — so the ledger shows what was thrown away, and `suggestionRef`
+ *  says where the discarded edit was pinned so it can be read back. Emitted at the gate fold, AFTER
+ *  `evaluatorMutatedWorktree` and BEFORE `gateEvaluated`. `type` alias on purpose — see
+ *  {@link EvaluatorMutatedWorktreeEvent}. */
+export type WorktreeRestoredEvent = {
+  type: 'worktreeRestored';
+  session: string;
+  ord: number;
+  attempt: number;
+  /** The seat that ran the unit. */
+  cli: string;
+  /** The workflow phase id (`verify`, `adversarial-review`, …). */
+  phase: string;
+  /** The tree id the worktree was restored to (the creator's baseline). */
+  tree: string;
+  /** The commit `HEAD` was reset to when the phase had moved it; `null` when it had not. */
+  head: string | null;
+  discarded: WorktreeChangedPath[];
+  /** Where the DISCARDED tree was pinned so the edit is never lost (wicked-core#433 review
+   *  F-433-008 — the seam wicked-core#432's suggestion lane reads from):
+   *  `refs/wicked/suggestions/<run>/<ord>/<attempt>`, a commit whose tree is the mutation event's
+   *  `afterTree`. `null` when the pin failed (the discarded content is then only a gc-prunable
+   *  dangling tree). */
+  suggestionRef: string | null;
+};
+
+/**
+ * `deliverLiftEvaluated.outcome` — what the engine's pre-push lift onto the remote default branch did:
+ * - `unchanged` — the base was already the remote tip; the deliver rebase is a no-op and the tree the
+ *   checks verified is the tree that ships;
+ * - `lifted` — the remote moved; the run's changes were re-applied onto its tip in the worktree
+ *   (`treeBefore` → `treeAfter`) and the repository's own checks were RE-RUN on the lifted tree (a
+ *   {@link RepoChecksEvaluatedEvent} for this ord) before the push was allowed;
+ * - `conflict` — the lift would conflict in `conflicts`; the worktree was left exactly as verified and
+ *   the deliver unit FAILED with a `deliver: LIFT-CONFLICT — …` remedy — nothing rebased or pushed
+ *   (crew reads that marker as a recoverable strand, `delivery: 'stranded'`);
+ * - `skipped` — the lift could not be DECIDED (no remote / fetch failed / git too old / a branch
+ *   carrying its own commits); the worktree was never touched and the deliver script's own rebase
+ *   stands, as before;
+ * - `failed` — the lift was decided but its APPLICATION failed part-way; the worktree may hold a
+ *   partial state, the deliver unit fails closed, nothing was pushed.
+ * Open-ended (`string & {}`) so a newer engine's outcome parses in an older consumer.
+ */
+export type DeliverLiftOutcome =
+  | 'unchanged'
+  | 'lifted'
+  | 'conflict'
+  | 'skipped'
+  | 'failed'
+  | (string & {});
+
+/** wicked-core#431 / F-3R2-013 — before the run's `deliver` Tool phase pushed, the engine LIFTED the
+ *  run's work onto the remote default branch's CURRENT tip (in memory, `git merge-tree`) and said what
+ *  that did (see {@link DeliverLiftOutcome}). Emitted once per deliver attempt, BEFORE the deliver
+ *  unit's `repoChecksEvaluated` (when a re-verify ran — the tree that would ship is not the recorded
+ *  verified tree) / `stepFailed` (conflict, failed, or a failed re-verify) / `unitDone`. The deliver
+ *  gate never pushes a tree that was not verified: on `unchanged` / `lifted` the deliver command
+ *  receives the verified remote-tip commit as `WICKED_DELIVER_VERIFIED_BASE` and crew's script refuses
+ *  to rebase past it (`deliver: BASE MOVED since verification — …`). `type` alias on purpose. */
+export type DeliverLiftEvaluatedEvent = {
+  type: 'deliverLiftEvaluated';
+  session: string;
+  ord: number;
+  attempt: number;
+  outcome: DeliverLiftOutcome;
+  /** The remote default ref the lift targets (`origin/main`), when one was resolved. */
+  baseRef: string | null;
+  /** The run branch's `HEAD` before the lift (the base the work was verified on). */
+  baseBefore: string | null;
+  /** The remote tip the work now sits on (`lifted`) or would have (`conflict`). */
+  baseAfter: string | null;
+  treeBefore: string | null;
+  treeAfter: string | null;
+  /** The paths the lift would conflict in (`conflict`); empty otherwise. */
+  conflicts: string[];
+  /** Why the lift was skipped / failed, or a disclosed degradation (a failed fetch); `null` otherwise. */
+  note: string | null;
+};
+
+/** wicked-core#431 / F-3R2-009 — an `executes_code: false` phase (an evaluator, a recon rung, a
+ *  review) asked to run a WRITE-CLASS tool (edit/write/delete/move, by ACP `kind` or by tool name) and
+ *  the engine REFUSED the call at the carrier's permission boundary, answering the agent's own reject
+ *  option. Fires on the ACP carrier (`carrier: 'acp'`) for a seat whose adapter is ADMITTED to input
+ *  governance (claude, opencode). A guarded unit on an UNADMITTED ACP seat never starts an ACP turn —
+ *  it is rerouted with `acpFallback {fallbackKind: 'read_only_requires_wrapped'}` and no per-call
+ *  event exists on that route. A refused call costs the seat one tool call, not the phase a retry;
+ *  the worktree guard ({@link EvaluatorMutatedWorktreeEvent}) remains the backstop for what a
+ *  permission boundary cannot see (a `bash` heredoc). `type` alias on purpose. */
+export type EvaluatorToolCallDeniedEvent = {
+  type: 'evaluatorToolCallDenied';
+  session: string;
+  ord: number;
+  attempt: number;
+  /** The registry seat key (ACP-path convention, as `governanceUnenforced`). */
+  cli: string;
+  /** The carrier the refusal happened on — `'acp'` today. Open-ended for a future carrier. */
+  carrier: 'acp' | (string & {});
+  /** The tool the agent asked for, as it named it (`edit`, `write`, `str_replace_based_edit_tool`, …). */
+  tool: string;
+  /** The ACP `toolCall.kind` when the agent sent one (`edit`, `delete`, `move`, …); `null` otherwise. */
+  kind: string | null;
+  /** The path the call targeted, when its arguments carried one; `null` otherwise. */
+  path: string | null;
+  reason: string;
+};
+
+/** wicked-core#431 / F-3R2-013 — how the run's BASE commit was chosen when its worktree was minted:
+ *  the engine fetches `origin` and, when the registered clone's `HEAD` is strictly behind the remote
+ *  default branch's tip, bases the run on that tip — so the worker starts from the current code and
+ *  the deliver lift has nothing to move. `lifted: true` = the base moved off the clone's `HEAD` by
+ *  `behind` commits; `false` = `HEAD` was already the tip, or was ahead of / diverged from it (local
+ *  unpushed work — kept, `note` says so), or no remote default ref resolved (`baseRef: null`).
+ *  Emitted once per freshly minted worktree, BEFORE `worktreeReady`; a resumed run reuses its live
+ *  worktree and emits nothing. Session-level (no `ord`). `type` alias on purpose. */
+export type RunBaseResolvedEvent = {
+  type: 'runBaseResolved';
+  session: string;
+  /** The remote default ref (`origin/main`), or `null` when none could be resolved. */
+  baseRef: string | null;
+  /** The commit the run worktree was minted from. */
+  baseCommit: string;
+  /** The registered clone's `HEAD` at mint time. */
+  localHead: string;
+  /** How many commits `localHead` was behind `baseRef`; `0` when not behind or unknown. */
+  behind: number;
+  /** Whether `git fetch origin` succeeded (a failed fetch is disclosed in `note`, cached refs used). */
+  fetched: boolean;
+  lifted: boolean;
+  note: string | null;
+  /** Wave 6 (F-7R2-013, api-types 0.36.0): the run branch the worktree was minted on
+   *  (`wicked/<run id>`, sanitized), recorded on the session as `run_branch` beside `base_commit`
+   *  so the run's diff is servable from the branch once the worktree is reaped. Absent on an
+   *  engine predating wave 6. */
+  runBranch?: string;
+};
+
+/** The gate-evidence events (wicked-core F-036/F-039, extended by wicked-core#431 — api-types 0.33.0
+ *  added {@link WorktreeRestoredEvent}, {@link DeliverLiftEvaluatedEvent} and
+ *  {@link EvaluatorToolCallDeniedEvent}) as a discriminated union for consumers that narrow on `type`;
+ *  they also flow through the permissive {@link CoreEvent}. {@link RunBaseResolvedEvent} is
+ *  session-level evidence and stands on its own. */
+/**
+ * Wave 6 (F-7R2-012, api-types 0.36.0) — a WORKER seat asked to run a REMOTE-WRITING command
+ * (`git push`, `gh pr create|merge|edit|comment`, a `gh api` mutation, `gh release`, …) and the
+ * engine REFUSED it: delivery is performed by the run's deliver phase (which lifts, re-verifies,
+ * pushes and opens the PR so the ledger records it), never by a creator or evaluator seat. Emitted
+ * on both carriers: the ACP permission bridge (`carrier: 'acp'`) answers the seat's permission
+ * request with its reject option; the wrapped carrier's PreToolUse gate hook (`carrier:
+ * 'wrapped_cli'`) blocks the call and the fold replays the record at the gate. A refusal costs the
+ * seat one tool call, never the unit — the seat continues with `remedy`. Spelled exactly as
+ * wicked-core's `CoreEvent::to_json` emits it. `type` alias on purpose (relays through the
+ * `CoreEvent`-typed seams unchanged).
+ */
+export type WorkerToolCallDeniedEvent = {
+  type: 'workerToolCallDenied';
+  session: string;
+  ord: number;
+  attempt: number;
+  /** The registry seat key. */
+  cli: string;
+  /** `'acp'` | `'wrapped_cli'`; open-ended for a future carrier. */
+  carrier: 'acp' | 'wrapped_cli' | (string & {});
+  /** The unit's role (`creator` | `evaluator` | `neutral`). */
+  role: 'creator' | 'evaluator' | 'neutral' | (string & {});
+  /** The tool the seat invoked (`Bash`, `bash`, `shell`, …). */
+  tool: string;
+  /** The command text the seat sent. */
+  command: string;
+  reason: string;
+  /** What the seat was told to do instead ("delivery is performed by the run's deliver phase"). */
+  remedy: string;
+};
+
+export type GateEvidenceEvent =
+  | EvaluatorMutatedWorktreeEvent
+  | RepoChecksEvaluatedEvent
+  | WorktreeRestoredEvent
+  | DeliverLiftEvaluatedEvent
+  | EvaluatorToolCallDeniedEvent
+  | WorkerToolCallDeniedEvent;
+
 // ── P2 decisions-full observability events (wicked-core EVT-001/012/013) ────
 
 /** P2 — a structured workflow def was selected; fires once per session, after SessionStarted and before
@@ -1001,6 +1912,15 @@ export interface UnitReworkAmendedEvent {
   amendment: string;
   /** The unit's description after the amendment was injected. */
   updatedDescription: string;
+  /**
+   * WHICH unit received the text and WHY (api-types 0.38.0, additive; DES-L1 PR-1B, wicked-core-ts ≥
+   * 0.7.27): `'cursor'` — the gated unit, today's approve-with-steer (`GateDecision.amendScope`
+   * absent or `'cursor'`); `'creator'` — the first creator phase at/after the cursor
+   * (`amendScope: 'creator'`); `'request_changes'` — the creator phase the gate rewound to, and
+   * `amendment` then carries the evaluator's full findings + the operator's note. ABSENT on an
+   * engine before the field — read as `'cursor'`.
+   */
+  scope?: 'cursor' | 'creator' | 'request_changes';
 }
 
 /** P2 — a worker's ApplyStepResult arrived and output is ready to be gated. Fires before GateDecided.
@@ -1049,17 +1969,78 @@ export interface UnitPlannedEvent {
   executor_type: 'agent' | 'tool';
 }
 
-/** Foundation wave: a unit was distributed with full routing detail. */
+/**
+ * Foundation wave: a unit was distributed with full routing detail.
+ *
+ * WIRE SPELLING (api-types 0.36.0, crew#533 follow-through): the engine's `CoreEvent::to_json` and
+ * the napi frames spell these fields camelCase — `routingMethod`, `agreementPct`, `returned`,
+ * `seated`, `dissent`, `degradedReason`, `seatConstraint` — exactly as `wicked-core-ts`'s own
+ * `UnitDistributedEventJson` declares them; `packages/crew/tests/wire-contract.test.ts` pins this
+ * interface against that type AND against a recorded frame. Pre-0.36 this interface declared the
+ * snake_case spellings, which the engine never emitted — a consumer reading `degraded_reason` got
+ * `undefined` and rendered a benched council as whole. The snake_case names stay for ONE minor as
+ * `@deprecated` optional aliases (a normalising relay may still produce them); consumers read the
+ * camelCase names. Every camelCase `Option` field is emitted unconditionally: `null`, never absent.
+ */
 export interface UnitDistributedEvent {
   type: 'unitDistributed';
   session: string;
   ord: number;
+  /** The roster key of the assigned seat. */
   cli: string;
-  routing_method: 'council' | 'degraded' | 'evaluator_distinct' | 'tool';
-  agreement_pct: number | null;
+  /** How the seat was chosen: the council verdict, a degrade to the first candidate, an
+   *  evaluator ≠ creator reassignment, or a deterministic tool execution. */
+  routingMethod: 'council' | 'degraded' | 'evaluator_distinct' | 'tool';
+  agreementPct: number | null;
+  /** Ballots that came back. Read against `seated`. */
   returned: number | null;
+  /** Seats CONVENED for the council that produced this assignment (`null` = unknown / not a council). */
+  seated: number | null;
   dissent: number | null;
-  degraded_reason: string | null;
+  /**
+   * WHY the routing was degraded. Since wave 6 (F-7R2-006) the engine sets it on EVERY routing arm
+   * whenever the eligible seat set is smaller than the configured roster — `"4 of 5 seats benched:
+   * codex (signed out — launcher), pi (unauthenticated — ballot), …"` — not only for its `degraded`
+   * arm, so a council that held on a fraction of its seats reads as degraded. `null` when whole.
+   */
+  degradedReason: string | null;
+  /** WHY the candidate seats were narrowed BEFORE the council voted (core#401): a non-portable
+   *  skill constrained the unit to a claude seat. `null` when every roster seat was a candidate. */
+  seatConstraint: string | null;
+  /**
+   * The evaluator ≠ creator DISCLOSURE as a field (wicked-core#461, crew#556): `'creator_seat'` when a
+   * review/test unit STAYS on a seat that built what it checks because no eligible seat distinct from
+   * the builders admits it — a single-eligible-seat roster, or a bench that emptied the pool
+   * (`degradedReason` then says which; on a bench-free single-seat roster it stays `null`, so this
+   * field is the ONLY disclosure). `null` otherwise. The fallback seat is always a still-eligible one:
+   * a benched or dead seat is never the fallback.
+   *
+   * OPTIONAL on this side of the wire deliberately: the engine emits the key unconditionally (`null`,
+   * never absent — the `seatConstraint` rule) from the wicked-core release carrying #461 on, but an
+   * older engine does not send it at all, and this contract must read frames from both. Consumers
+   * guard with `== null`, never `=== undefined`.
+   */
+  distinctnessFallback?: 'creator_seat' | null;
+  /** @deprecated api-types 0.36.0 — the engine emits `routingMethod`; removed in 0.37. */
+  routing_method?: 'council' | 'degraded' | 'evaluator_distinct' | 'tool';
+  /** @deprecated api-types 0.36.0 — the engine emits `agreementPct`; removed in 0.37. */
+  agreement_pct?: number | null;
+  /** @deprecated api-types 0.36.0 — the engine emits `degradedReason`; removed in 0.37. */
+  degraded_reason?: string | null;
+}
+
+/** One seat the wave-6 engine BENCHED for a run (`AgentSession.benched_seats`, F-7R2-006): never
+ *  convened, never a failover or judge target, named in `unitDistributed.degradedReason`. */
+export interface BenchedSeat {
+  /** The roster key. */
+  cli: string;
+  /** Why — the launcher's words (`signed out`) or the engine's classification (`not_logged_in`,
+   *  `unauthenticated`). */
+  reason: string;
+  /** Who benched it: `launcher` (the roster's health probe — crew's `council_eligible`), `ballot`
+   *  (a council seat failure), `worker` (a unit's worker failed with an auth refusal), `judge`
+   *  (the seat failed while judging another unit — wicked-core#449 @ 9e11685). */
+  source: 'launcher' | 'ballot' | 'worker' | 'judge' | (string & {});
 }
 
 // ── Worker injection + reassignment events (core#93) ──────────────────────────
@@ -1156,8 +2137,15 @@ export interface ConformanceRule {
   excludes?: string[];
   /** Ordering within a severity band + gate priority. Engine default: 1.0. */
   weight?: number;
-  /** Enforcement half (from the retired policy model). Absent ⇒ the rule is recall-only. */
-  effect?: 'deny' | 'allow_with_conditions' | 'allow';
+  /**
+   * Enforcement half (from the retired policy model). Absent ⇒ the rule is RECALL-ONLY: it is
+   * surfaced to workers but never enters decide()/select(), so it can neither block a gate nor
+   * `catch` an eval sample — which is why a store of effect-less rules evals to "every bad
+   * sample is a gap" (api-types 0.27.0, the #394/#395 companion). `deny` blocks (the only effect
+   * the evals credit as a catch); `warn` surfaces without blocking (the operator-authorable
+   * middle band); `allow_with_conditions` permits with obligations; `allow` permits outright.
+   */
+  effect?: 'deny' | 'warn' | 'allow_with_conditions' | 'allow';
   trigger?: { contains?: string };
   obligations?: string[];
   /** The frozen acceptance-criteria text (becomes a claim's `criteria` when the rule decides a gate). */
@@ -1319,6 +2307,478 @@ export interface SteeringLandingResult {
   error?: string;
 }
 
+// ── Skills — the daemon-owned garden plugin root, published as immutable snapshots (api-types 0.28.0) ──
+//
+// api-types 0.29.0 (design amendment v3.6, crew #490): the installer-managed copy
+// `<config dir>/plugins/wicked-garden` is a LAST-resort seed source — `SkillSourceKind` gains
+// `installer-copy`, and `DiagnosticsSkillsFinding.kind` gains the persistent `skills.source` warning
+// and the fail-closed `skills.manifest` error.
+//
+// Skills are files (skills keystone, design v3 + amendments v3.1/v3.2). The daemon owns ONE
+// effective `wicked-garden`-shaped plugin root — `<state home>/skills/effective/`, the dependency
+// closure of the installed plugin: `.claude-plugin/{plugin.json,archetypes.json,components.json}`,
+// `skills/**` (nested layout verbatim), `scripts/**` minus CI + dev tools, `schemas/`,
+// `docs/examples/`, `pyproject.toml`, `uv.lock` — seeded from the LIVE installed plugin into a
+// content-addressed `baseline/<contentHash>/`. The operator edits files in place, replaces a
+// skill, adds one, disables one (manifest state — the files stay), resets one (content from the
+// baseline; never enablement). Nothing a worker runs is read from `effective/`: PUBLISHING
+// validates the whole tree and writes an IMMUTABLE, read-only `snapshots/<gen>/` (enabled skills
+// only, closure included, `snapshot.json`, and the generated delivery views —
+// `views/copilot/.github/skills/<name>/` holding the enabled PORTABLE skills, part of the content
+// hash), then flips `current -> snapshots/<gen>`; the engine receives the resolved snapshot path
+// as `WICKED_SKILLS_SNAPSHOT`. The daemon NEVER writes into the user's own CLI directories
+// (`~/.codex`, `~/.pi`, `~/.copilot`, `~/.config/opencode`, `~/.claude`): skills reach non-Claude
+// workers only through per-launch, wicked-owned delivery core performs from the snapshot (v3.2) —
+// a CLI without a lever (codex today) runs without wicked skills, and a unit on such a seat that
+// requires one is REFUSED at launch (no proceed-with-disclosure setting exists).
+// `/skills` is a file manager whose EVERY mutation is CAS-guarded (`expectedRevision`) and
+// answers 2xx `{verdict, findings[], revision}` — a `blocked` verdict is a normal response,
+// including a publish refused because one is in flight (`publish-in-flight`) or aborted because the
+// root changed under it (`root-changed`), neither of which wrote anything. 409 (`{error, revision}`)
+// is EXCLUSIVELY a stale `expectedRevision` (a CAS conflict).
+
+/** What a skill IS, from its frontmatter — fork-first: `context: fork` → fork worker (a subagent
+ *  body); else `user-invocable: true` → router (an operator-facing entry point); else module (a
+ *  nested reference skill routers/workers pull in). */
+export type SkillKind = 'router' | 'fork-worker' | 'module';
+
+/** `shipped` = every own file byte-identical to the baseline; `override` = a shipped skill with
+ *  edited/replaced files; `user-added` = no baseline (added through the API, or upstream dropped
+ *  it while the operator's edits were kept). */
+export type SkillProvenance = 'shipped' | 'override' | 'user-added';
+
+/** Where a baseline was captured from. `claude-plugin-cache` is the marketplace cache
+ *  (`<config dir>/plugins/cache/wicked-garden/wicked-garden/<version>` — the plugin Claude Code
+ *  runs); `installer-copy` is the installer-managed `<config dir>/plugins/wicked-garden` copy
+ *  (`npx wicked-installer install wicked-garden`), accepted only as the LAST resort when no cache
+ *  exists (design v3.6, api-types 0.29.0) and flagged by the `skills.source` diagnostics finding
+ *  while it is the current baseline; `checkout` is a git working tree; `directory` any other
+ *  explicit plugin-shaped directory. */
+export type SkillSourceKind = 'claude-plugin-cache' | 'installer-copy' | 'checkout' | 'directory';
+
+/** The per-baseline `uv sync` state (`<baseline>/.venv`, provisioned once per content hash — the
+ *  publish that needs it AWAITS it — and shared read-only by every snapshot that links it):
+ *  `pending` until a successful publish records it, `synced` on success (the snapshot carries a
+ *  `.venv` link), `skipped` when the bundle carries no `pyproject.toml` (nothing to provision; no
+ *  link). `failed` (uv missing or a sync error) is BLOCKING for the publish (`venv-failed`) and is
+ *  therefore never the recorded state of a published baseline — the record keeps its previous
+ *  value; a later publish retries. */
+export type SkillVenvState = 'pending' | 'synced' | 'failed' | 'skipped';
+
+/** One captured baseline — keyed in `SkillManifest.baselines` by the content hash of its bundle
+ *  (sorted relative paths + sha256 digests), never by the version string alone: two installs of
+ *  "12.32.0" with different bytes are two baselines. */
+export interface SkillBaselineRecord {
+  /** `version` from the source's `.claude-plugin/plugin.json`. */
+  plugin_version: string;
+  source: { kind: SkillSourceKind; path: string };
+  /** HEAD sha for a `checkout` source; `null` otherwise (or when git could not answer). */
+  git_sha: string | null;
+  /** ISO-8601 instant the baseline was captured. */
+  captured_at: string;
+  venv: SkillVenvState;
+}
+
+/**
+ * Why a skill's text cannot be followed on a non-Claude CLI (F-079, api-types 0.34.0; design W4
+ * §5.1 — the same tokens wicked-garden's own lint reports):
+ *
+ *   - `plugin-root` — the text contains `${CLAUDE_PLUGIN_ROOT}` (only Claude Code substitutes it);
+ *   - `skill-dir-var` — the text contains `${CLAUDE_SKILL_DIR}` (likewise Claude-only);
+ *   - `cwd-script` — an interpreter invokes a plugin script by a path relative to the worktree cwd
+ *     (`python3 scripts/domain/extract_loop.py`) instead of the `wicked-garden run …` launcher;
+ *   - `relative-link` — a `../` link whose target exists in the bundle (the flat `<name>/SKILL.md`
+ *     layout of every non-Claude install cannot follow it);
+ *   - `cross-skill-path` — a path (plugin-root or `../`) that lands in ANOTHER skill's directory;
+ *     the portable form names that skill (`wicked-garden-<x>`) instead;
+ *   - `requires-harness:claude` — the author declared `metadata.requires-harness: claude` in the
+ *     frontmatter: the skill genuinely needs the Claude harness (not an authoring defect).
+ *   - `claude-dispatch` (api-types 0.38.0; crew ≥ 0.7.36, DES-L6 D-21) — the body CALLS a Claude
+ *     Code dispatch primitive (`Task(`, `Skill(`, `context: fork`, `AskUserQuestion`, `TaskCreate`)
+ *     that no other seat has: a pi/opencode/codex worker cannot follow it. The portable form is the
+ *     plain-prose Hand-off paragraph. Reported by the publisher; garden's lint fails the same
+ *     skill (12.38.0). An older daemon never emits the token.
+ */
+export type SkillPortabilityReason =
+  | 'plugin-root'
+  | 'skill-dir-var'
+  | 'cwd-script'
+  | 'relative-link'
+  | 'cross-skill-path'
+  | 'requires-harness:claude'
+  | 'claude-dispatch';
+
+/** Per-reason portability of a skill (F-079, api-types 0.34.0) — reported beside `portable`. */
+export interface SkillPortability {
+  /** The same value as `SkillEntry.portable`: `reasons.length === 0`. */
+  portable: boolean;
+  /** Sorted, unique. Empty when portable. */
+  reasons: SkillPortabilityReason[];
+  /** Up to five anchors, `<plugin-relative file>:<line>`, one per hit in file order — where the
+   *  offending text sits (the drawer's "why" and the operator's path to the line). */
+  evidence?: string[];
+}
+
+export interface SkillEntry {
+  /** Plugin-relative directory, nested layout preserved (`skills/engineering/frontend`). Never
+   *  renamed — sibling `../` links depend on it. */
+  dir: string;
+  kind: SkillKind;
+  /** Core-by-reference: in the registered-reference closure — a `skill_ref` of a workflow the
+   *  daemon knows (core drop-ins, crew-generated, user-registered) or a skill one of those names in
+   *  its SKILL.md (repo-learn → search, mem). Disabling or renaming it is blocking. */
+  core: boolean;
+  /** `false` when the skill's files carry any `SkillPortabilityReason` — Claude-only: excluded from
+   *  the snapshot's `views/copilot/` and from the per-launch skill lists core builds for the other
+   *  CLIs. `portable` is the admission key for every non-Claude view (design v3.2); the reasons
+   *  are reported per token in `portability` (api-types 0.34.0). wicked-garden ≥ 12.33 authors
+   *  every skill portably, so a non-portable row there is either an older garden or a skill that
+   *  declares `requires-harness: claude`. */
+  portable: boolean;
+  /** Per-reason portability (F-079, api-types 0.34.0): `portable` again, the sorted unique
+   *  `reasons`, and up to five `file:line` anchors. Absent on manifests written by a daemon older
+   *  than 0.7.30 — treat absence as "reasons unknown". */
+  portability?: SkillPortability;
+  /** Manifest state, orthogonal to content: a disabled skill's files stay in `effective/` and are
+   *  excluded from the next published snapshot. Reset never flips it. */
+  enabled: boolean;
+  provenance: SkillProvenance;
+  /** ISO-8601 instant of the last edit/replace/add through the API; `null` when untouched. */
+  editedAt: string | null;
+  /** A refreshed baseline changed a file this skill overrides — the new side is readable as
+   *  `?side=baseline` for diffing; the operator's content is kept. */
+  upgradeAvailable: boolean;
+  /** `upgradeAvailable`, or the last refresh found a name collision (upstream now ships a skill
+   *  under this user-added name at another dir). Cleared by reset / a later refresh. */
+  conflict: boolean;
+  /** The held-back UPSTREAM skill's directory in the current baseline when the last refresh found a
+   *  name collision (upstream ships this name at another dir than the operator's skill); `null`
+   *  otherwise. `GET /skills/:name/files/*path?side=baseline` reads THIS directory for such a skill,
+   *  so the two sides of the collision are comparable — the answer's `path` names the file actually
+   *  read (api-types 0.28.0). Re-derived by every refresh. */
+  upstreamDir: string | null;
+}
+
+/** One managed file (plugin-relative path → hashes). `baselineHash` `null` = user-added file;
+ *  `effectiveHash` `null` = a baseline file absent from `effective/` (removed by a direct
+ *  filesystem edit — reset restores it; the skill reads `override` until then). */
+export interface SkillFileRecord {
+  baselineHash: string | null;
+  effectiveHash: string | null;
+  /** The hash this file had in the most recent published snapshot; `null` = never published. */
+  lastPublishedHash: string | null;
+  /** The last refresh saw BOTH sides change (kept the effective side). */
+  conflict: boolean;
+}
+
+/** The most recent publish. */
+export interface SkillPublishedRecord {
+  gen: number;
+  /** Hash over the snapshot's files (sorted relative paths + sha256 digests), `snapshot.json` excluded. */
+  contentHash: string;
+  /** ISO-8601 instant. */
+  at: string;
+  /** sha256 of the exact `snapshot.json` bytes publish wrote. `snapshot.json` is excluded from the
+   *  content hash, so the crew-owned manifest AUTHENTICATES it: `current` verifies only the
+   *  generation this record names, with metadata hashing to this value (api-types 0.28.0). */
+  snapshotHash: string;
+}
+
+/** `<skills root>/manifest.json` — the state of the daemon-owned root. (The v3 mirror ledger is
+ *  withdrawn with the mirror — design v3.2 §1: the daemon never writes into the user's CLI dirs.) */
+export interface SkillManifest {
+  version: 2;
+  /** Monotonic; bumped by EVERY mutation. Every mutating request carries it as `expectedRevision`. */
+  revision: number;
+  /** Content hash of the current baseline (`baseline/<hash>/`). */
+  baseline: string;
+  baselines: Record<string, SkillBaselineRecord>;
+  /** Keyed by frontmatter `name` (`wicked-garden-<dir segments joined by '-'>`). */
+  skills: Record<string, SkillEntry>;
+  /** Every managed file under `effective/`, plugin-relative. */
+  files: Record<string, SkillFileRecord>;
+  published: SkillPublishedRecord | null;
+}
+
+/** `GET /skills` 200 body. 503 when the root is not seeded (no installed plugin was found) or when
+ *  `current` exists but fails verification (realpath outside `snapshots/`, malformed
+ *  `snapshot.json`, content hash mismatch) — a corrupt root is a loud error, never an empty catalog. */
+export interface SkillsManifestResponse {
+  manifest: SkillManifest;
+  revision: number;
+  /** The resolved skills root on the daemon host (`<state home>/skills` by default). */
+  root: string;
+  /** The VERIFIED published snapshot `current` resolves to, or `null` before the first publish.
+   *  `path` is the absolute REAL path of `snapshots/<gen>` — byte-identical to the one input the
+   *  engine is handed (`WICKED_SKILLS_SNAPSHOT`; design v3.1 §2). `rules` / `drift` (api-types
+   *  0.36.0, F-083 / crew#535) ride beside it on a daemon ≥ 0.7.30 — absent on an older one. */
+  current: {
+    gen: number;
+    path: string;
+    /** The portability rules the generation was published under vs the rules this daemon runs:
+     *  `recorded` is `null` for a generation predating the identity (0.7.29 and earlier);
+     *  `stale: true` = they differ and the daemon raised `skills.stale-rules`. */
+    rules?: {
+      recorded: PortabilityRulesIdentity | null;
+      running: PortabilityRulesIdentity;
+      stale: boolean;
+    };
+    /** The rows whose portability derives differently under the running rules than the snapshot
+     *  recorded — the `skills.stale-rules` warning names up to five; the list carries the rest.
+     *  `recorded.reasons` is `null` for a row written before per-reason portability (0.34.0). */
+    drift?: SnapshotRowDrift[];
+  } | null;
+}
+
+/** The identity of a portability-rule table (api-types 0.36.0, F-083): its version and the
+ *  sha256 of the committed parity fixture (`tests/fixtures/portability_rules.json`). */
+export interface PortabilityRulesIdentity {
+  version: number;
+  sha256: string;
+}
+
+/** One snapshot row whose portability the RUNNING rules derive differently than the snapshot
+ *  recorded (api-types 0.36.0, F-083) — see `SkillsManifestResponse.current.drift`. */
+export interface SnapshotRowDrift {
+  name: string;
+  recorded: { portable: boolean; reasons: SkillPortabilityReason[] | null };
+  /** What the RUNNING rules derive for the row — the same per-reason shape `SkillEntry.portability` carries. */
+  derived: SkillPortability;
+}
+
+export interface SkillFileEntry {
+  /** POSIX path relative to the skill dir. */
+  path: string;
+  size: number;
+  sha256: string;
+  /** This file's manifest record (`null` for a file present on disk but not yet recorded). */
+  record: SkillFileRecord | null;
+}
+
+/** `GET /skills/:name/files` 200 body — the skill's OWN files (a nested skill's files are its own). */
+export interface SkillFileTree {
+  name: string;
+  dir: string;
+  enabled: boolean;
+  files: SkillFileEntry[];
+}
+
+/** `GET /skills/:name/files/*path` and `GET /skills/support/*path` 200 body — a typed, capped read.
+ *  Save is disabled on `truncated` or `binary`. `?side=baseline` reads the baseline copy instead
+ *  (the "new side" of a refresh conflict). */
+export interface SkillReadResult {
+  /** Plugin-relative path served. */
+  path: string;
+  /** UTF-8 text — the first 512 KB when `truncated`; `null` when `binary` (there is no text to show). */
+  content: string | null;
+  /** The file's FULL size in bytes. */
+  size: number;
+  truncated: boolean;
+  binary: boolean;
+}
+
+export type SkillFindingKind =
+  | 'name-invalid'
+  | 'name-collision'
+  | 'name-mismatch'
+  | 'frontmatter-invalid'
+  | 'missing-skill-md'
+  | 'unregistered-skill'
+  | 'nested-skill-create'
+  | 'core-disable'
+  | 'core-rename'
+  | 'core-missing'
+  | 'support-file-edit'
+  /** A write made (or would make) the skill non-portable — a WARNING, one finding PER REASON per
+   *  file (api-types 0.34.0), anchored `file:line` at the first hit and carrying the token in
+   *  `portabilityReason`. The skill leaves every non-Claude delivery view. */
+  | 'non-portable'
+  /** A `${CLAUDE_PLUGIN_ROOT}/<p>` or `../<p>` reference in an enabled skill's files that does not
+   *  resolve inside the would-be snapshot. Severity follows the TARGET (design v3.4 §1): a reference
+   *  that ESCAPES the plugin root (`..` climbing out — it reaches whatever lies beside the snapshot on
+   *  the worker host) is `blocking`; one whose target is MISSING (it normalizes inside the root but
+   *  the snapshot does not carry it — a file the bundle omits, or a skill that is disabled) is a
+   *  `warning`: a content bug the skill's author owns, published as found — a publish with only
+   *  warnings answers `verdict: 'warnings'` with the findings AND a written snapshot (api-types
+   *  0.28.0). */
+  | 'unresolved-ref'
+  /** A path the store refuses BY NAME rather than reads through: a shape that could leave its root
+   *  (`..`, an absolute piece), a component that crosses a symlink, or — under `effective/`, where
+   *  every entry is classified — a symlink or a special node (socket, fifo, device) anywhere,
+   *  the contents of a pruned directory (`.venv`, `node_modules`, `__pycache__`) INCLUDED: such a
+   *  directory is never copied or hashed, but what it holds is still judged, and a link inside one
+   *  blocks with the reason (a provisioned environment lives under `baseline/`, not the editable
+   *  root). Blocking; `file` names the entry, `skill` its owning skill when it has one. */
+  | 'path-invalid'
+  | 'unknown-skill'
+  | 'no-baseline'
+  | 'fs-drift'
+  | 'refresh-conflict'
+  | 'empty-snapshot'
+  /** `.claude-plugin/plugin.json`, `archetypes.json` or `components.json` is absent from `effective/`
+   *  — the plugin manifest + the runtime catalogs are REQUIRED snapshot members (blocking at
+   *  publish; api-types 0.28.0). */
+  | 'missing-plugin-manifest'
+  /** The plugin manifest or a runtime catalog is present but not what its reader expects — does
+   *  not parse as JSON, is not a JSON object, or `archetypes.json` lacks its `archetypes`
+   *  collection (blocking at publish; api-types 0.28.0). A manifest without `name` is
+   *  `name-mismatch`. */
+  | 'catalog-invalid'
+  /** The baseline's shared read-only Python env could not be provisioned (uv missing, `uv sync`
+   *  failed, or the env could not be locked) while the bundle carries a `pyproject.toml` — the env
+   *  is REQUIRED, so the publish is blocked and nothing (the provisioning state included) is
+   *  persisted (api-types 0.28.0). */
+  | 'venv-failed'
+  /** A publish was refused because one is already running (one at a time) — nothing was written, so
+   *  it is a 2xx `blocked` envelope, not a 409 (409 is only a stale `expectedRevision`; api-types
+   *  0.28.0). Re-read `GET /skills` and retry against the revision it answers. */
+  | 'publish-in-flight'
+  /** A publish was aborted because the skills root changed under it — nothing was written to either
+   *  root; a 2xx `blocked` envelope (api-types 0.28.0). Re-read `GET /skills` and retry. */
+  | 'root-changed'
+  /** A path outside the bundle closure — the ONE allowlist of what the seed copies, what the support
+   *  API may address, and what a snapshot may carry: the five runtime catalogs under `.claude-plugin`
+   *  BY NAME (`plugin.json`, `archetypes.json`, `components.json`, `specialist.json`,
+   *  `stack-registry.json` — `marketplace.json`, a publish-time listing, is outside), everything under
+   *  `skills`, `schemas` and `docs/examples`, everything under `scripts` except the `ci` and `wg`
+   *  directories and any `wg-`-prefixed dev tooling, plus `pyproject.toml` and `uv.lock`. A support
+   *  add/PUT there is a 2xx `blocked` envelope (nothing written); a file found there under
+   *  `effective/` at publish/analyze (a direct filesystem edit) is a BLOCKING finding naming the path
+   *  — a snapshot never ships it (api-types 0.28.0). */
+  | 'outside-closure'
+  /** A content-addressed `baseline/<hash>` whose tree does not hash to its name (a bundle file
+   *  modified, planted or removed, or a symlink inside), or a baseline file whose bytes do not match
+   *  the hash the manifest recorded for it. Baselines are re-verified before EVERY reuse: a refresh
+   *  refuses to reuse it (2xx `blocked`, nothing copied), reset refuses to restore from it (nothing
+   *  written), publish/analyze report it blocking (before AND after the env was provisioned in it).
+   *  Read-only mode bits on the baseline are a guard, never the integrity boundary — the hash is
+   *  (api-types 0.28.0). */
+  | 'baseline-corrupt';
+
+export type SkillFindingSeverity = 'warning' | 'blocking';
+
+/** `blocked` = at least one blocking finding (nothing was written / published); `warnings` =
+ *  proceeded with warnings; `clear` = nothing to say. */
+export type SkillVerdict = 'clear' | 'warnings' | 'blocked';
+
+export interface SkillConflictFinding {
+  kind: SkillFindingKind;
+  severity: SkillFindingSeverity;
+  /** The skill this finding is about, or `null` for a catalog / support-file finding. */
+  skill: string | null;
+  /** Plugin-relative file the finding names, or `null`. */
+  file: string | null;
+  /** 1-based line in `file`, when the finding is anchored to one. */
+  line: number | null;
+  /** The OTHER catalog skill this finding is against (a collision, a core guard), or `null`. */
+  againstSkill: string | null;
+  againstIsCore: boolean;
+  /** The concrete fact (names, paths, the parse error). */
+  evidence: string;
+  /** Why it matters. */
+  explanation: string;
+  /** On a `non-portable` finding: WHICH reason this finding reports (one finding per reason per
+   *  file). Absent on every other kind (api-types 0.34.0). */
+  portabilityReason?: SkillPortabilityReason;
+}
+
+/** `POST /skills/analyze` 200 body (a PURE dry run of the publish validation: nothing persisted,
+ *  `revision` unchanged — drift it observes is reported, and recorded only by the publish that
+ *  ships it) — and the base of every mutation result. */
+export interface SkillAnalyzeResult {
+  verdict: SkillVerdict;
+  findings: SkillConflictFinding[];
+  revision: number;
+}
+
+/** Every `/skills` mutation's 200 body. `blocked` ⇒ nothing was written and `revision` is unchanged. */
+export interface SkillMutationResult extends SkillAnalyzeResult {
+  skill?: SkillEntry & { name: string };
+}
+
+/** `POST /skills/publish` 200 body. `snapshot` is `null` when the verdict is `blocked` — and then
+ *  `revision` is unchanged (a blocked publish persists nothing — not the drift it observed, not the
+ *  baseline's provisioning state). `path` is the absolute REAL path of the locked, read-only
+ *  generation; its `snapshot.json` carries the skill rows and the `views` block (`views.copilot`:
+ *  the `views/copilot` dir + the portable skills laid out in it). One publish runs at a time — a
+ *  concurrent one wrote nothing and answers a 2xx `blocked` `publish-in-flight` envelope
+ *  (`snapshot: null`), not a 409. */
+export interface SkillPublishResult extends SkillAnalyzeResult {
+  snapshot: { gen: number; path: string; contentHash: string; skills: number } | null;
+  /** The BASE skill posture AFTER this publish (crew#554): `present: false` with a `finding` is the
+   *  "published a snapshot without the discipline skill" warning. Absent on a daemon before it. */
+  baseSkill?: BaseSkillPosture | null;
+  /**
+   * `true` when the publish found NOTHING to publish (api-types 0.38.0; crew#547 / DES-L6, crew ≥
+   * 0.7.36): the effective tree's `contentHash` equals the current generation's, so no new
+   * `snapshots/<gen>/` was minted, `current` did not move and `snapshot` is the CURRENT generation
+   * (its `gen` unchanged). ABSENT (never `false`) on a publish that staged a generation, and on a
+   * daemon before the field — a skin shows "already published as gen N", not a new generation.
+   */
+  unchanged?: true;
+}
+
+/** `POST /skills/refresh-baseline` 200 body — the three-way merge per FILE (baseline_old /
+ *  baseline_new / effective): unchanged → take new; user-modified & upstream-unchanged → keep;
+ *  both changed → keep + `conflict` (new side readable as `?side=baseline`); user-DELETED &
+ *  upstream-changed → the deletion is kept + `conflict` (a deletion is a modification; reset
+ *  restores upstream); upstream-deleted & user-unmodified → remove; upstream-deleted &
+ *  user-modified → keep as user-added; a new upstream skill whose path-derived name is a
+ *  user-added skill's → conflict. 502 when no plugin is installed. */
+export interface SkillRefreshResult extends SkillAnalyzeResult {
+  previous_baseline: string;
+  baseline: string;
+  plugin_version: string;
+  /** Skills whose files were replaced from the new baseline. */
+  taken: string[];
+  /** Skills that kept operator content (upstream unchanged, or a flagged conflict). */
+  kept: string[];
+  added: string[];
+  removed: string[];
+  /** Skills flagged `conflict` by this refresh. */
+  conflicts: string[];
+  /** The BASE skill posture AFTER this refresh (crew#554): a refresh moves the CATALOG, not the handed
+   *  generation, so `inCatalog: true, present: false` reads "publish to hand it". Absent on a daemon before it. */
+  baseSkill?: BaseSkillPosture | null;
+}
+
+/** The 409 body of a `/skills` mutation whose `expectedRevision` is stale — a CAS conflict, the
+ *  ONLY thing that answers 409. A publish refused because another is in flight, or aborted because
+ *  the skills root changed under it, wrote nothing and instead answers a 2xx `blocked` findings
+ *  envelope (`publish-in-flight` / `root-changed`; api-types 0.28.0), never a 409. */
+export interface SkillRevisionConflict {
+  error: string;
+  /** The current revision — re-read `GET /skills` (or use this) and retry. */
+  revision: number;
+}
+
+/** The body of `POST /skills/:name/{enable,disable,reset}`, `POST /skills/publish` and
+ *  `POST /skills/refresh-baseline`. */
+export interface SkillRevisionBody {
+  expectedRevision: number;
+}
+
+/** `PUT /skills/:name/files/*path` and `PUT /skills/support/*path` body. `content` is UTF-8 text,
+ *  at most 512 KB. */
+export interface PutSkillFileBody {
+  content: string;
+  expectedRevision: number;
+}
+
+/** `POST /skills` body — add a user skill. `files` maps skill-relative POSIX paths to UTF-8 text
+ *  and must include `SKILL.md`; the skill lands at `skills/<name minus "wicked-garden-">`. */
+export interface AddSkillBody {
+  name: string;
+  files: Record<string, string>;
+  expectedRevision: number;
+}
+
+/** `POST /skills/:name/replace` body — replace the skill's OWN files wholesale (nested skills untouched). */
+export interface ReplaceSkillBody {
+  files: Record<string, string>;
+  expectedRevision: number;
+}
+
 // ── Governance wiki management (scoreboard + meta) ─────────────────────────────
 
 /**
@@ -1465,7 +2925,17 @@ export interface GovernanceEvalNearestRule {
  * remediation pointer for "which rule needs sharpening".
  */
 export interface GovernanceEvalResult {
-  sample: Pick<GovernanceEvalSample, 'id' | 'description' | 'kind' | 'steering_type'>;
+  sample: Pick<GovernanceEvalSample, 'id' | 'description' | 'kind' | 'steering_type'> & {
+    /**
+     * The sample's PAYLOAD identity — `sha256:` over the canonical JSON of its full payload (id,
+     * description, kind, steering_type, signals). The engine echoes only the four fields above
+     * (input `signals` never ride a result row), so this is stamped by a PRODUCER that held the
+     * samples it staged (the internal-corpus `run`); a row without it cannot be proven to be the
+     * same action as a row with the same id in another run, and the offline comparison reports
+     * such a pair as unverified rather than comparable.
+     */
+    payload_hash?: string;
+  };
   expected: 'deny' | 'allow';
   fired: string[];
   verdict: 'caught' | 'gap' | 'false_positive';
@@ -1481,14 +2951,72 @@ export interface GovernanceEvalSummary {
 }
 
 /**
+ * One steering rule in the judged store that NO sample of the run exercised — the inverse blind
+ * spot of `summary.gaps` (core #394): a gap is a sample nothing caught, but a rule with zero
+ * exercising samples produces no result row at all and so is invisible to the summary. Each
+ * entry names the rule and the Steering sub-page it belongs to, so the corpus can grow a sample
+ * for it (or the rule can be retired as untestable).
+ */
+export interface GovernanceEvalUnexercisedRule {
+  rule_id: string;
+  steering_type: SteeringType;
+}
+
+/**
+ * One steering type's row of {@link GovernanceEvalRuleCoverage.per_type} (evals.rs `TypeCoverage`):
+ * how many of the run's eligible decide-lane rules OF THAT TYPE fired for at least one sample, and
+ * how many fired for none. `unexercised` here is a COUNT — the ids are the parent's `unexercised`
+ * list, whose rows each carry their `steering_type`, so the two reconcile per type.
+ */
+export interface GovernanceEvalTypeCoverage {
+  exercised: number;
+  unexercised: number;
+}
+
+/**
+ * Rule-side coverage of an eval run (core #394/#395 — evals.rs `RuleCoverage`): the decide-lane
+ * rules ELIGIBLE for the run (every active effect-bearing rule, narrowed to the run's `--type`
+ * slice when one was given) partitioned into `exercised` (fired — blocking or not — for at least
+ * one sample; a COUNT) and `unexercised` (fired for none; the ids, each with its steering type).
+ * Together with `summary` it separates "the corpus lacks a behavior" from "the store lacks a rule"
+ * — the two readings a bare gap count conflates. `recall_only` counts the active rules in the slice
+ * carrying NO effect — outside the partition because the gate never fires them (core #395).
+ * `per_type` is the same partition per steering type — all seven keys, zeros included (the engine
+ * pins the shape).
+ *
+ * Every engine that emits `rule_coverage` at all (core #394 onward) serializes all four fields on
+ * every report (serde, no skip). `recall_only` and `per_type` are declared optional on the CONTRACT
+ * only because the daemon persists a run's coverage VERBATIM and validates none of its fields, so a
+ * stored record is exactly as complete as its producer made it and the contract never promises what
+ * was never checked: a consumer reads an absent `per_type` as "the engine reports no per-type
+ * coverage" (the offline comparison says exactly that), never as zeros. `exercised` and
+ * `unexercised` are required — no engine ever emitted one without the other.
+ *
+ * A run's `results[].fired` is NOT this partition's evidence: `fired` is the BLOCKING subset of the
+ * firings, and under a type filter it may name rules of OTHER types — the filter slices the samples
+ * and this denominator, never the gate (evals.rs `run_evals` / `evaluate_sample`).
+ */
+export interface GovernanceEvalRuleCoverage {
+  exercised: number;
+  unexercised: GovernanceEvalUnexercisedRule[];
+  recall_only?: number;
+  per_type?: Record<SteeringType, GovernanceEvalTypeCoverage>;
+}
+
+/**
  * The `POST /testing/evals/run` 200 body — the engine's serde report passed through VERBATIM
  * (snake_case field names, `degraded` spelled `null` when the run was full-fidelity;
- * `'facet-only'` when the embedding side was unavailable and only facet matching ran).
+ * `'facet-only'` when the gap-hint embedder was unavailable and hints fell back to lexical
+ * matching — the verdicts are the same either way, only `nearest_rules` degrades).
+ *
+ * `rule_coverage` is OPTIONAL on purpose: an engine that predates core #394 emits a report
+ * without it, and that report still validates — the daemon never fabricates the field.
  */
 export interface GovernanceEvalReport {
   results: GovernanceEvalResult[];
   summary: GovernanceEvalSummary;
   degraded: 'facet-only' | null;
+  rule_coverage?: GovernanceEvalRuleCoverage;
 }
 
 /** The `POST /testing/corpora/import` request body — a named eval corpus for later runs. */
@@ -1553,6 +3081,12 @@ export interface EvalRunSummary {
   per_type: Partial<Record<SteeringType, EvalRunPerTypeCount>>;
   /** `'facet-only'` when the run degraded to facet matching; null when it ran full-fidelity. */
   degraded: 'facet-only' | null;
+  /**
+   * The report's {@link GovernanceEvalReport.rule_coverage}, persisted VERBATIM (like `degraded`,
+   * never recomputed daemon-side). ABSENT — not null — when the engine that ran the eval predates
+   * core #394 and emitted no coverage, so a history row honestly shows which runs measured it.
+   */
+  rule_coverage?: GovernanceEvalRuleCoverage;
 }
 
 /**
@@ -1625,6 +3159,148 @@ export interface TestingReconResponse {
   projectAttachError?: string;
 }
 
+// ── The governed test-authoring launch (wave 6; api-types 0.36.0) ──────────────────────────────
+
+/**
+ * The id of the governed test-authoring workflow the daemon serves (`GET /workflows` lists it, not
+ * `is_system` — an operator-selectable work mode): recon (`wicked-garden-qe` plan) → author
+ * (creator, evidence-floor pinned, `wicked-garden-qe` author) → verify (a TOOL phase that RUNS every
+ * produced test under the repository's own harness — vitest/jest/pytest/Playwright — and FAILS the
+ * unit when one fails or was never executed) → review (evaluator ≠ creator, `wicked-garden-qe`
+ * review) → the ENGINE's deliver phase (appended per run; never a worker's `gh pr create`).
+ * F-7R2-003/004/005/012/014/015 + acceptance R4-r2.
+ */
+export type QeAuthorTestsWorkflowId = 'qe-author-tests';
+
+/**
+ * Body of `POST /testing/author` — the Testing page's "New test". Same scope wire as
+ * {@link TestingReconBody} (`repoRefs` and/or `projectId`, resolved server-side), but the scope
+ * MUST resolve to ≥ 1 repo (a test-authoring run writes into a repository; an unscoped author is a
+ * 400). One governed `qe-author-tests` run per resolved repo, each filed under the repo's
+ * `qe-tests-<repo name>` label group (`RunGroup` on `GET /campaigns`).
+ */
+export interface TestingAuthorBody {
+  /** The operator's intent — what to test — verbatim; the run's problem statement. */
+  problem: string;
+  /** The project to FILE the runs into. Alone: the scope is the project's `crew.repo` members. */
+  projectId?: string;
+  /**
+   * The repos to author into (registry id or name). With `projectId`, THIS is the scope and the
+   * project is the filing only (a NARROWED project scope — studio #263 F-4): the runs are filed
+   * into the project without inheriting its other repo members, so a skin with repo chips names
+   * the repos and the project once instead of fanning one `POST /runs` per repo (one deliver/PR
+   * each). Unlike {@link TestingReconBody}, where both fields union. The 201 says which was used
+   * (`scope`).
+   */
+  repoRefs?: string[];
+  /** EXPLICITLY launch unattended (no intake gate). Default `false`: each run pauses at its intake
+   *  gate (`before:1`) with the plan on the table before any unit runs. */
+  ungated?: boolean;
+  /** `pr` (default) — the ENGINE's deliver phase opens the PR; `none` — the tests stay on the run
+   *  branch (`delivery: 'stranded'` on the wire, liftable via `POST /runs/:id/deliver`). */
+  deliver?: 'pr' | 'none';
+}
+
+/** One planned phase as the intake gate shows it — derived from the workflow DEFINITION. */
+export interface WorkflowPlanPhase {
+  id: string;
+  kind: StageKindPhase;
+  role: PhaseRole;
+  executor: 'agent' | 'tool';
+  /** The garden skill the phase routes through (`wicked-garden-qe`), `null` for a tool phase. */
+  skillRef: string | null;
+  /** `auto` | `human` (unconditional confirm) | `human_if_not_pass` (a not-pass verdict escalates). */
+  gate: 'auto' | 'human' | 'human_if_not_pass';
+  executesCode: boolean;
+  /** `true` for the phase the ENGINE appends and owns (the deliver phase) — not in the def. */
+  engine?: boolean;
+}
+
+/** The plan the intake gate shows (F-7R2-008): the phases in order + the seats a council may
+ *  pick from (the launcher's eligible roster — benched seats excluded). */
+export interface WorkflowPlan {
+  workflow: string;
+  phases: WorkflowPlanPhase[];
+  seats: string[];
+}
+
+/** One launched authoring run and the label group it was filed under. */
+export interface TestingAuthorRun {
+  runId: string;
+  repoRef: string;
+  /** `qe-tests-<repo name>` — the `RunGroup.label` on `GET /campaigns`. */
+  label: string;
+}
+
+/**
+ * The `POST /testing/author` 201 body. `runIds` is the source of truth (one per resolved repo in
+ * the caller's order); `runId` is its first entry. `plan` is what the intake card renders before
+ * approval; `gate` says whether the runs paused there. `campaignRegistered` is always `false`: an
+ * author launch is filed as label groups, never an engine campaign (campaign nodes are
+ * engine-launched and would not receive the daemon's deliver composition).
+ */
+export interface TestingAuthorResponse {
+  runId: string;
+  runIds: string[];
+  workflow: QeAuthorTestsWorkflowId;
+  runs: TestingAuthorRun[];
+  gate: 'before:1' | 'none';
+  deliver: 'pr' | 'none';
+  plan: WorkflowPlan;
+  /** How the repos were chosen: `repoRefs` — the named repos (a `projectId`, when given, was the
+   *  filing only); `project` — the project's `crew.repo` members. Absent on a daemon predating it. */
+  scope?: 'repoRefs' | 'project';
+  campaignRegistered: false;
+}
+
+/** One produced test file as the verify phase judged it. */
+export interface TestSetFile {
+  path: string;
+  /** `playwright` | `playwright-python` | `vitest` | `jest` | `pytest` | `python` | `unknown`. */
+  harness: string;
+  status: 'passed' | 'failed' | 'not-executed';
+}
+
+/**
+ * A registered TEST SET (wave 6, F-7R2-014; api-types 0.36.0) — the produced tests of a terminal
+ * `qe-author-tests` run, read back from its verify phase's `QE-VERIFY` report and recorded as a
+ * durable `testing.testset.registered` audit entry the daemon hydrates at boot. Served as
+ * `CampaignsListResponse.test_sets` — what the Test landing counts. Deny-dominates: a run whose
+ * verify phase FAILED registers too (`verified: false`, counts intact) so a red set is shown, never
+ * hidden; a run that never reached its verdict registers with zero counts and `plan: null`.
+ */
+export interface TestSet {
+  /** `testset-<run id>` — one set per producing run. */
+  id: string;
+  run_id: string;
+  workflow_id: QeAuthorTestsWorkflowId;
+  /** The `RunGroup.label` the launch filed the run under, when it did. */
+  label?: string;
+  repo_ref: string | null;
+  repo_name?: string;
+  /** Unix millis. */
+  registered_at: number;
+  /** The producing run's terminal status. */
+  run_status: SessionStatus | (string & {});
+  /** The verify unit's status (`done` | `rejected` | …); `null` when the run never planned one. */
+  verify_status: string | null;
+  /** `true` ONLY when the verify phase passed: ≥ 1 produced test, every one executed and green,
+   *  the repository checks green, the PLAN present. */
+  verified: boolean;
+  files: TestSetFile[];
+  produced: number;
+  executed: number;
+  passed: number;
+  failed: number;
+  not_executed: number;
+  /** The produced `tests/PLAN-*.md`, `null` when none was produced. */
+  plan: string | null;
+  /** The harnesses the produced tests ran under (unique, first-use order). */
+  harnesses: string[];
+  /** The delivered PR, when the engine's deliver phase opened one. */
+  deliverUrl?: string;
+}
+
 // ── Governance claims (crew#40/43) ─────────────────────────────────────────────
 
 /**
@@ -1686,6 +3362,39 @@ export interface LaunchRunBody {
    */
   deliver?: 'pr' | 'none';
   /**
+   * Who confirms the deliver phase (F-E2E-030; api-types 0.37.0, additive). `'human'` — the default when omitted:
+   * the ENGINE pauses before the composed `deliver` Tool unit pushes the run branch and opens the
+   * PR, whatever `humanConfirm` says (the push leaves the machine under the daemon's active gh
+   * account, so it is confirmed unless the caller opts out). `'auto'` — the caller's EXPLICIT
+   * opt-out: the push and PR follow verify unattended; a client sending it must name the posture
+   * "auto-deliver" to its operator. `humanConfirm: 'none'` is NOT an opt-out (it is that field's
+   * default and typo fallback). Requires wicked-core-ts ≥ 0.7.24 / crew ≥ 0.7.33 for the gate to
+   * exist at all — read `AgentSession.auto_deliver` to learn whether the engine knows it. An
+   * older daemon's launch schema rejects the field with a 400 — omit it against such servers.
+   */
+  deliverGate?: 'human' | 'auto';
+  /**
+   * REVISE an existing pull request instead of opening a new one (api-types 0.38.0, additive;
+   * crew#550 / DES-L9, crew ≥ 0.7.36 on wicked-core-ts ≥ 0.7.27): the number of an OPEN same-repo PR.
+   * The daemon resolves its head branch (`gh pr view` in the registered clone), the engine bases the
+   * run's worktree on that head, and the deliver phase pushes exactly the run's commits to that
+   * branch and comments the run record on the PR — no second PR, no rebase. Needs `repoRef` and
+   * `workflow` (400 without), a resolved `deliver: 'pr'` (409 otherwise; an explicit
+   * `deliver: 'none'` is a 400), and the PR must be OPEN and not from a fork (409 naming why).
+   * Send it ONLY when `GET /health.capabilities.revisesPr === true` — an older daemon's strict
+   * launch schema rejects the key with a 400.
+   */
+  revisesPr?: number;
+  /**
+   * Promote-from-chat linkage (crew#619; api-types 0.39.0, additive): the id of the chat this
+   * run was promoted from. When present, the daemon retains that chat's conversation transcript
+   * on disk for the run's lifetime, so the Continue-in-Build prefill is always reproducible
+   * even if the chat is idle-reclaimed before the run finishes. Optional; omit when the launch
+   * is not promoted from a chat. Check `GET /health.capabilities.chatIdOnLaunch` before sending —
+   * an older daemon's strict launch schema rejects the key with a 400.
+   */
+  chatId?: string;
+  /**
    * Retry lineage (DES-UX-001 §8.3, CREW-UX-3; api-types 0.8.0): the id of the run this
    * launch retries. Must name an EXISTING run id — an unknown id fails the launch (400 with
    * a named error), never a silently unrecorded lineage. The daemon persists it, echoes it
@@ -1716,6 +3425,21 @@ export interface LaunchRunBody {
    * `AgentSession.group_label`. Mutually exclusive with `campaignId` (both ⇒ 400).
    */
   groupLabel?: string;
+  /**
+   * The surface that triggered this launch (crew#632; additive). `'studio'` (web UI), `'cli'`
+   * (wicked-crew CLI), or `'api'` (programmatic caller). Persisted in the `run.launched` audit
+   * entry and echoed as `AgentSession.channel`. Absent ⇒ origin unknown. Check
+   * `GET /health.capabilities.seatChipOnCreate` to confirm the daemon accepts the field before
+   * sending — an older daemon's strict schema rejects unknown keys with a 400.
+   */
+  channel?: 'studio' | 'cli' | 'api';
+  /**
+   * An opaque caller-supplied identifier for the user or system that triggered the launch
+   * (crew#632; additive). Persisted in the `run.launched` audit entry and echoed as
+   * `AgentSession.launch_actor`. Absent ⇒ caller omitted it. Subject to the same daemon-version
+   * guard as `channel` above.
+   */
+  actor?: string;
 }
 
 /**
@@ -1870,6 +3594,15 @@ export interface WorkflowDef {
   phases: PhaseDef[];
   /** True for built-in workflows that have dedicated entry points and must not appear in the work-mode selector. */
   is_system?: boolean;
+  /**
+   * The BASE skill every agent phase of THIS workflow follows (wicked-core#468; additive, engine
+   * ≥ the release carrying it — an older engine's strict def parser refuses the key). The engine
+   * leads every unit prompt with `Invoke your skill "<base>" … and follow its §<role> section`
+   * before the phase's `skill_ref` directive. Absent ⇒ the daemon's `SystemSettings.baseSkillRef`
+   * default (exported as `WICKED_BASE_SKILL_REF`); `""` ⇒ an explicit opt-out for this workflow.
+   * Gated at intake: a launch whose snapshot lacks the skill is refused before any unit is planned.
+   */
+  base_skill_ref?: string | null;
 }
 
 /** Top-level requirements_graph.json artifact (schema 1.0.0). */
@@ -1934,7 +3667,29 @@ export interface CodeGraphEdge { src: string; tgt: string; }
 export interface CodeGraphData {
   nodes: CodeGraphNode[];
   edges: CodeGraphEdge[];
+  /** Counts of the SERVED SLICE (`graph-view --limit`, `SystemSettings.graphNodeLimit`) — what is in `nodes`/`edges`. */
   stats: { nodeCount: number; edgeCount: number; fileCount: number };
+  /**
+   * Whole-graph counts (api-types 0.38.0, additive; crew#505 / F-RC1-100): what the repository's
+   * estate database holds in total, from `wicked-estate stats`, so a tile can read "150 of 5,470
+   * symbols shown" instead of presenting the slice as the repo. ABSENT when the stats line did not
+   * parse or on a daemon before the field — then only the slice is known; never substitute `stats`.
+   */
+  totals?: { nodes: number; edges: number; files: number };
+}
+
+/**
+ * `GET /repos/:id/graph` → 200 (api-types 0.35.0, F-2R2-005). `graph: null` = the repo's code
+ * graph has not been built (nothing at its registered graph path) — and `reason` says WHY, so a
+ * consumer of this route alone can tell "not indexed" from "empty": the same finding text the
+ * repos wire carries when the engine has one (`finding` — e.g. `in_tree_code_graph_ignored`: a
+ * checkout's in-tree graph is ignored and no live graph exists yet; re-run onboarding), else the
+ * daemon's own sentence. Both absent when `graph` is present.
+ */
+export interface RepoGraphResponse {
+  graph: CodeGraphData | null;
+  reason?: string;
+  finding?: RepoFinding;
 }
 
 export interface GitCommit {
@@ -1963,6 +3718,15 @@ export interface SystemSettings {
    * the engine default `~/.wicked-worker`.
    */
   worker_config_root?: string;
+  /*
+   * There is NO skills setting (skills keystone, api-types 0.28.0). The daemon-owned skills root is
+   * `<state home>/skills` — the directory holding `manifest.json`, `baseline/<hash>/`, `effective/`,
+   * `snapshots/<gen>/` and the `current` symlink — full stop: not configurable (a `skills_root` a
+   * client sends is dropped and named in the audit entry's `ignored`; design v3.1 §1 one storage
+   * root, v3.2 §1 never a user CLI directory), and there is no mirror knob either (the daemon never
+   * writes into the user's own CLI directories). `GET /skills` → `root` and `GET /diagnostics` →
+   * `skills.root` report where it is.
+   */
   /**
    * The repo-scoped launch delivery DEFAULT (crew#393; api-types 0.18.0, additive). What a
    * `POST /runs` with `repoRef` + a CODE-WORK `workflow` (a def with at least one
@@ -1973,6 +3737,26 @@ export interface SystemSettings {
    * launches (those are always `'none'`).
    */
   deliverDefault?: 'pr' | 'none';
+  /**
+   * The BASE skill every governed agent unit follows (crew#554 / wicked-core#468; additive): the
+   * frontmatter name the daemon exports as the engine-config default `WICKED_BASE_SKILL_REF`, so
+   * the engine leads EVERY unit prompt with `Invoke your skill "<base>" … and follow its §<role>
+   * section` (`creator` | `evaluator` | `neutral`) ahead of the phase's own `skill_ref` directive.
+   * A workflow def's own `base_skill_ref` overrides it (`""` there = opt-out for that workflow).
+   * Shipped default `"wicked-garden-governed-worker"`; `""` = OFF (the variable is deleted).
+   * Absent reads as the shipped default.
+   */
+  baseSkillRef?: string;
+  /**
+   * What a published snapshot WITHOUT the base skill means (crew#554; additive). `'warn'` (the
+   * default): the daemon exports the variable ONLY when the current generation holds the skill —
+   * otherwise runs proceed without the discipline directive and `GET /diagnostics.skills` carries a
+   * `skills.base-skill` WARNING (a fresh install lacks the skill until the garden that ships it is
+   * published). `'require'`: the variable is always exported and the engine REFUSES every launch at
+   * intake until a generation holding the skill is published (`POST /runs` → 422
+   * `base_skill_refused`); the finding is an `error`.
+   */
+  baseSkillPolicy?: 'warn' | 'require';
   /**
    * The stall watchdog's DETECTION threshold (crew#287; api-types 0.18.0 — previously a
    * daemon-local extension): minutes a run in `executing` may go without ANY engine event on the
@@ -2023,6 +3807,18 @@ export interface SystemSettings {
    * forward-additive, §5.1), so a skin's own state MUST ride this namespace to persist.
    */
   [key: `studio.${string}`]: unknown;
+}
+
+/**
+ * `GET /settings` → 200 (api-types 0.38.0 — the body's first named type; the shape `{ settings }`
+ * is unchanged since 0.1). `path` (additive; DES-L10 PR-L10-6, crew ≥ 0.7.35) is the ABSOLUTE
+ * path of the settings file the daemon reads and writes (`WICKED_CREW_SYSTEM_SETTINGS` honoured),
+ * so a skin names the real file instead of a guessed default. ABSENT on a daemon before the field
+ * — render "the daemon's settings file", never a fabricated path.
+ */
+export interface SettingsResponse {
+  settings: SystemSettings;
+  path?: string;
 }
 
 // ── Requirements management (server-side search + overrides; crew api/requirements.ts) ──
@@ -2246,6 +4042,228 @@ export interface InteractiveDocDeleteResponse {
   ledger: InteractiveDocDeleteLedgerReport;
 }
 
+/** One hand-pinned demo step on a `kind: "demo"` create (api-types 0.30.0): the wizard's ordered
+ *  steps the governed run authors the spec from (ADR-0018: the agent authors, the service records). */
+export interface InteractiveDemoStepDraft {
+  index: number;
+  subject: string;
+  action: string;
+}
+
+/**
+ * The body of `POST /projects/:projectId/interactive/api/docs` as crew's proxy understands it
+ * (acceptance finding F-046; api-types 0.30.0 — the studio types its create from THIS declaration,
+ * no local mirror). The bridge's own fields (`name`, `kind`, `html`, `brief`, `source_paths`,
+ * `url`, `demo_steps`, `style`, `project`, `source_message_id`) are relayed as-is — this type
+ * documents the two things CREW adds at the proxy before forwarding:
+ *
+ *  - `repo_ref` / `repo_refs` — the repository (or repositories) this document is ABOUT, each a
+ *    registered repo id, its registry name, or its root directory's basename. Crew validates them
+ *    against the project's `crew.repo` members BEFORE the bridge sees the request (a miss is the
+ *    400 {@link InteractiveDocCreateRefusal}, nothing created), strips them from the forwarded
+ *    body, and remembers the binding so the governed draft/demo run is grounded on THOSE repos
+ *    (offline snapshot + the project graph) — never on the project's first member. Unfiled
+ *    (`default` mount) documents cannot name a repository.
+ *  - `style` — passed through when given; when ABSENT crew infers it from the brief's format
+ *    words (print-ready / A4 / brochure → `brochure`; slides / deck → `ppt`; memo / whitepaper →
+ *    `doc`) so the bridge's own print instructions apply to a print brief. No format words → the
+ *    bridge's `web` default.
+ */
+export interface InteractiveDocCreateRequest {
+  /** The doc name; the bridge slugifies it (409 when taken or retired). */
+  name?: string;
+  /** Omitted = a plain html doc (`html` required); `source` = generated from brief/sources; `demo` = a recording. */
+  kind?: 'source' | 'demo';
+  /** A plain html doc's content (or a `source` doc's seed). */
+  html?: string;
+  brief?: string;
+  source_paths?: string[];
+  /** `kind: "demo"` — the live app URL to record against. */
+  url?: string;
+  /** `kind: "demo"` — hand-pinned steps; omitted = the run authors them from the brief. */
+  demo_steps?: InteractiveDemoStepDraft[];
+  style?: 'web' | 'ppt' | 'brochure' | 'doc';
+  /** Crew project binding (DES-PROJECT-001 §2.3): registration is the authority. */
+  project?: string;
+  /** The thread message this generation came from (§7.6). */
+  source_message_id?: string;
+  /** ONE subject repository: a repo id, its name, or its root basename. */
+  repo_ref?: string;
+  /** SEVERAL subject repositories (at most 8); the union with `repo_ref`, de-duplicated. */
+  repo_refs?: string[];
+  /**
+   * Per-doc council roster override (crew#631; crew ≥ 0.7.40 — check `GET /health` capabilities
+   * `seatChipOnCreate` before sending). JSON-serialised `AgenticCli[]`; defaults to the daemon's
+   * full roster when absent. Seat keys not present in `GET /roster` → 400.
+   */
+  clisJson?: string;
+  /** Launch channel (crew#632). Persisted to the run's `run.launched` audit entry and served on
+   *  run DTOs as `channel`. ABSENT when the caller does not know the channel. */
+  channel?: 'studio' | 'cli' | 'api';
+  /** Launch actor (crew#632). Free-form string (≤ 256 chars) identifying the human or service
+   *  that triggered the launch. ABSENT when unknown. */
+  actor?: string;
+}
+
+/**
+ * The bridge's answer to a successful `POST /projects/:projectId/interactive/api/docs`, relayed
+ * verbatim by crew's proxy (api-types 0.30.0): interactive's `{ name, head, … }` — `generating`
+ * for a `kind: "source"` doc whose first draft a governed run now produces, `learning` for a demo,
+ * `project_id` echoed for a project-bound doc.
+ */
+export interface InteractiveDocCreateResult {
+  name: string;
+  head: number;
+  kind?: 'doc' | 'demo';
+  generating?: boolean;
+  learning?: boolean;
+  project_id?: string;
+}
+
+/**
+ * Crew's 400 on `POST /projects/:projectId/interactive/api/docs` when the request names a
+ * repository the document cannot be grounded on (F-046; api-types 0.30.0). Nothing was created
+ * on the bridge.
+ */
+export interface InteractiveDocCreateRefusal {
+  /** Human-readable, names the fix (attach the repo, pick one of `available`, name it by id, …). */
+  error: string;
+  /**
+   * `repo_not_in_project` — a ref matched no member repo; `unfiled_doc_repo` — a repo named on the
+   * Unfiled mount; `invalid_repo_ref` — junk spelling / shape / over the cap; `ambiguous_repo_ref`
+   * — a name or basename shared by several member repos (name it by id); `project_mismatch` — the
+   * body's `project` is not the route's project (or is present on the Unfiled mount). The proxy
+   * canonicalizes an OMITTED `project` from the route.
+   */
+  code: 'repo_not_in_project' | 'unfiled_doc_repo' | 'invalid_repo_ref' | 'ambiguous_repo_ref' | 'project_mismatch';
+  /** The refs the request named, as spelled (best-effort stringified when malformed). */
+  requested: string[];
+  /** The subset of `requested` that matched no member repo (`repo_not_in_project` only). */
+  missing?: string[];
+  /** `ambiguous_repo_ref`: each ambiguous ref with the member repos it names. */
+  ambiguous?: Array<{ ref: string; candidates: Array<{ id: string; name: string }> }>;
+  /** The project's `crew.repo` members the request could have named. */
+  available?: Array<{ id: string; name: string }>;
+}
+
+/**
+ * The 502 the create earns when the bridge dropped the connection AFTER the request had reached it
+ * (api-types 0.30.0): the document may already exist, so the proxy never replays the POST — list the
+ * project's documents before creating again.
+ */
+export interface InteractiveDocCreateUndetermined {
+  code: 'create_undetermined';
+  error: string;
+}
+
+/**
+ * The payload of `wicked.interactive.status.posted` as crew's own seams emit it (`producer_id:
+ * "wi-crew"`, relayed on `/ws` inside an `interactiveEvent` frame; api-types 0.30.0). Acceptance finding F-045: every
+ * seam emit — status narration, the terminal error/complete lines, and the closing
+ * `draft.completed` / `edit.completed` / `demo.requested` — now carries `project_id` for a
+ * project-bound document (omitted for an Unfiled one), exactly like the bridge's own emits, so a
+ * skin can file the frame under the right thread. A skin should ALSO match frames by
+ * `document_id` alone when the doc is open under exactly one mount (belt and braces).
+ */
+export interface InteractiveStatusPosted {
+  ts: string;
+  document_id: string;
+  /** Present for a project-bound document. */
+  project_id?: string;
+  state: 'processing' | 'working' | 'asking' | 'complete' | 'error';
+  message?: string;
+  /** The edit seam stamps the handoff version it is answering. */
+  version?: number;
+  /** Wave 6 (F-4R2-005 root fix; api-types 0.36.0): the governed run this narration is about, so a
+   *  skin keys the thread per run. Absent on a pre-launch status and on a pre-0.36 daemon. */
+  run_id?: string;
+  /** Wave 6: the unit (ord) the line narrates — the latest unit-scoped engine frame's `ord`, so a
+   *  skin renders one council at a time. Absent before the first unit-scoped frame. */
+  unit_ord?: number;
+}
+
+/**
+ * One row of `GET /projects/:projectId/interactive/api/docs` (crew#472) — the bridge's own
+ * `GET /api/docs` row (interactive's `listDocs` shape, relayed field-for-field) stamped with the
+ * project whose mount it was listed under. Docs roots are partitioned per project (the `default`
+ * project keeps the legacy shared root), so `projectId` is the attribution a client rendering
+ * docs from several projects at once cannot otherwise recover.
+ */
+export interface InteractiveDocSummary {
+  /** The doc name (slug). */
+  name: string;
+  /** Manifest `kind`; a manifest without one lists as `doc`. */
+  kind: 'doc' | 'html' | 'source' | 'demo';
+  /** Head version. */
+  head: number;
+  /** Lineage size. */
+  versions: number;
+  /** ISO-8601 timestamp of the head version, or null when the lineage is empty. */
+  updated_at: string | null;
+  /** Present only on a retired (tombstoned) row, which lists only with `?includeRetired=1`. */
+  retired?: true;
+  /** ISO-8601 retirement timestamp; present with `retired`. */
+  retired_at?: string;
+  /** The crew project this row was listed under — the mount's `:projectId`. */
+  projectId: string;
+}
+
+/**
+ * `GET /api/v1/interactive/docs` (api-types 0.36.0, studio #263) — every interactive document across
+ * projects, listed by the DAEMON from disk WITHOUT spawning a bridge: each project's docs root
+ * (the per-project `interactiveRoot` binding, else `WICKED_INTERACTIVE_ROOT`, else the default
+ * root / its `projects/<id>` partition), each slug-named child carrying a `versions.json`, read by
+ * the bridge's own `listDocs` rules — plus what only the daemon knows: the seams that answered
+ * the document and the governed runs they launched (the handoff ledgers). The per-project
+ * `GET /projects/:id/interactive/api/docs` spawns one bridge per project (≈60 s cold start) — a
+ * skin must never fan that out on mount; this is the listing it mounts with. `?includeRetired=1`
+ * lists tombstoned rows too.
+ */
+export interface InteractiveDocsListing {
+  /** Newest first (by `updatedAt`), then by name. */
+  docs: InteractiveDocIndexRow[];
+  /** Project docs roots the daemon could not read (or a partition its containment walk refused),
+   *  with the reason — never silently dropped. `[]` when every root was readable. */
+  unreachable: InteractiveDocsUnreachable[];
+}
+
+/** The seams that can answer a document (the handoff ledgers). */
+export type InteractiveSeamKind = 'draft' | 'edit' | 'chat' | 'demo' | (string & {});
+
+/** One document on the daemon-wide listing (api-types 0.36.0). */
+export interface InteractiveDocIndexRow {
+  /** The project whose docs root holds the document. A root SHARED by several projects (an
+   *  explicit `interactiveRoot` binding, or `WICKED_INTERACTIVE_ROOT` applying to all) lists once,
+   *  under the first project in listing order (the synthesized `default` first). */
+  projectId: string;
+  /** The doc name (slug). */
+  name: string;
+  /** Manifest `kind`; a manifest without one lists as `doc`. */
+  kind: 'doc' | 'html' | 'source' | 'demo' | (string & {});
+  /** Head version; `null` when the manifest carries none. */
+  head: number | null;
+  /** Lineage size. */
+  versions: number;
+  /** ISO-8601 of the head (last) version, or `null` when the lineage is empty. */
+  updatedAt: string | null;
+  /** Present only on a retired (tombstoned) row, listed only with `?includeRetired=1`. */
+  retired?: true;
+  /** ISO-8601 retirement timestamp; present with `retired`. */
+  retiredAt?: string;
+  /** The seams that answered this document, from the handoff ledgers (`[]` = none yet). */
+  kinds: InteractiveSeamKind[];
+  /** The governed runs those seams launched for it (ledger order) — the doc ↔ run binding. */
+  runs: string[];
+}
+
+/** A project docs root the listing could not read (api-types 0.36.0). */
+export interface InteractiveDocsUnreachable {
+  projectId: string;
+  /** The resolved root, or `null` when the containment walk refused the partition before resolving one. */
+  root: string | null;
+  error: string;
+}
+
 /**
  * One normalized entry of the merged project activity feed
  * (`GET /projects/:id/activity`, ADR §5.2): core events of member runs/chats
@@ -2308,13 +4326,188 @@ export interface ProjectPrompts {
   prompts: InteractionRequest[];
 }
 
-/** `POST /chats` body (gains `projectId` with DES-PROJECT-001). */
+/**
+ * `POST /chats` body (gains `projectId` with DES-PROJECT-001; `repoRefs` and the SCOPE semantics
+ * with crew#502).
+ *
+ * A chat is SCOPED (crew#502, F-067): its seats run in a private scratch root — never a repo and
+ * never the daemon's working directory — with the scoped repositories as read roots and, where a
+ * graph can be bound, a READ-ONLY wicked-estate MCP over it (the grounding governed runs get). The
+ * scope is: the explicit `repoRefs` (plus the legacy single `repoRef`, merged in) when given, else
+ * ALL of `projectId`'s registered `crew.repo` members, else nothing (the seats see only their
+ * scratch root). The resolved scope comes back as {@link ChatOpenResponse.scope}.
+ */
 export interface ChatOpenBody {
   chatId?: string;
   clis?: string[];
+  /** One repo in scope — the legacy spelling; merged into `repoRefs`. */
   repoRef?: string;
-  /** File the chat into a project (`crew.chat` membership, attached on open). */
+  /** The repos in scope, by registry id or name (1–32). With `projectId` the PROJECT graph grounds
+   *  them; without it a single repo's own graph does, and several repos get no graph. */
+  repoRefs?: string[];
+  /** File the chat into a project (`crew.chat` membership, attached on open) — and, when no
+   *  `repoRefs` are given, scope it to every registered `crew.repo` member of that project. */
   projectId?: string;
+}
+
+/** How a chat's scope was chosen (crew#502). */
+export type ChatScopeKind = 'project' | 'repos' | 'none';
+
+/** One repository a chat's seats may read. */
+export interface ChatScopeRepo {
+  id: string;
+  name: string;
+  /** The registered root path — the read root the seats are pointed at. */
+  rootPath: string;
+}
+
+/**
+ * What a chat's seats can see — decided at `POST /chats`, stated to the seats in their scratch
+ * root's `AGENTS.md` / `CLAUDE.md`, and returned to the caller so the UI can show it. Additive:
+ * older skins ignore it.
+ */
+export interface ChatScope {
+  kind: ChatScopeKind;
+  /** The project the chat is filed into, when any. */
+  projectId?: string;
+  /** The repositories in scope (read-only). Empty for `kind: 'none'`. */
+  repos: ChatScopeRepo[];
+  /** The seats' working directory: the chat's private scratch root under the OS temp dir. */
+  cwd: string;
+  /** Whether a READ-ONLY estate MCP over a code graph is attached, and why / why not. `repoLabel`
+   *  is the estate label the project graph indexes the (single) scoped repo under, when the
+   *  binding was repo-bound — informational; the engine binds by graph path. `action` (api-types
+   *  0.35.0, F-2R2-008) names the UI action that would change a `bound: false` outcome, when one
+   *  would: `projects.graph.refresh` = build the project graph from the project page. */
+  graph: { bound: boolean; reason: string; repoLabel?: string; action?: ProjectGraphAction };
+  /** `crew.repo` members of the project whose registry record is gone — named, not readable. */
+  dangling: string[];
+}
+
+/** One seat's warm-up outcome on `POST /chats`. */
+export interface ChatSeatOutcome {
+  cliKey: string;
+  ok: boolean;
+  error?: string;
+}
+
+/**
+ * One seat a `POST /chats` did NOT seat, and why (api-types 0.35.0, F-2R2-007): a DEFAULT seat the
+ * daemon's admission dropped before the engine saw it (signed out; not admissible to a scoped chat
+ * — its ACP adapter asks no permissions and arms no sandbox, or it has no ACP adapter), or a
+ * REQUESTED seat (`clis`) the engine refused (`ChatSeatOutcome.ok: false`, its `error` repeated
+ * here as `reason`). One list for the scope card and the thread to read.
+ */
+/**
+ * Why a seat was not seated (api-types 0.36.0, F-A45-011): `auth` — signed out (the probe, or the
+ * seat's own "no credential" report); `scope` — the scoped-chat admission rule; `bench` — benched by
+ * this daemon's recent councils; `budget` — the engine did not warm it within its dispatch budget
+ * (the seat timed out or was dropped at dispatch); `engine` — the engine refused it with its own
+ * reason. Open-ended so a newer daemon's source parses in an older skin.
+ */
+export type ChatRefusalSource = 'auth' | 'scope' | 'bench' | 'budget' | 'engine' | (string & {});
+
+export interface ChatSeatRefusal {
+  cliKey: string;
+  reason: string;
+  /** api-types 0.36.0 (F-A45-011): the cause class. Absent on a daemon predating the field. Since
+   *  0.36.0 EVERY requested-or-defaulted seat that is not in `seats` as warm has an entry — a seat
+   *  the engine DROPPED at dispatch (absent from `seats` altogether) included, never a silent gap. */
+  source?: ChatRefusalSource;
+}
+
+/** `POST /chats` → 201. */
+export interface ChatOpenResponse {
+  chatId: string;
+  seats: ChatSeatOutcome[];
+  /** The resolved scope (crew#502). */
+  scope: ChatScope;
+  /** Present when the chat opened but its `crew.chat` filing into `projectId` failed. */
+  projectAttachError?: string;
+  /** Every seat that was asked for or defaulted and is NOT in `seats` as warm, with its reason
+   *  (api-types 0.35.0). Empty when every seat warmed; absent on a daemon predating the field. */
+  refused?: ChatSeatRefusal[];
+}
+
+/**
+ * A seat refused at `POST /chats` (api-types 0.35.0, F-2R2-007). DAEMON-SYNTHETIC: broadcast
+ * straight to `/ws` once per refused seat, right after the open, so the chat thread can say why a
+ * seat is missing (the studio's `chat-scope-admission` copy) — the engine emits nothing for a seat
+ * it never saw. `chat` names the chat the way the engine's `chatClosed` does; `project_id` rides
+ * along when the chat was filed. An anonymous object type on purpose, like the stall frames, so it
+ * flows through `CoreEvent`-typed seams.
+ */
+export type ChatSeatRefusedFrame = {
+  type: 'chatSeatRefused';
+  chat: string;
+  cliKey: string;
+  reason: string;
+  /** api-types 0.36.0 (F-A45-011): the cause class — see {@link ChatRefusalSource}. */
+  source?: ChatRefusalSource;
+  project_id?: string;
+};
+
+/** One live chat on `GET /chats` (FINDING-027 gap 4; scope fields with crew#502). */
+export interface ChatSummary {
+  chatId: string;
+  /** The seats currently warm, sorted. */
+  seats: string[];
+  /** Seconds since the chat's last open/ensure/turn; `null` when it has no activity stamp. */
+  idleSecs: number | null;
+  /** The seats' working directory as the engine recorded it; absent on an engine predating scope. */
+  cwd?: string | null;
+  /** The estate graph the seats' read-only estate MCP is bound to; `null` ⇒ none. */
+  codeGraphDb?: string | null;
+  /** The repository roots in scope. */
+  readRoots?: string[];
+}
+
+/** `GET /chats` → 200. */
+export interface ChatListResponse {
+  chats: ChatSummary[];
+}
+
+/**
+ * Token/cost burn of ONE seat's chat turn (api-types 0.38.0; DES-L5, crew ≥ 0.7.35 on wicked-core-ts
+ * ≥ 0.7.26) — mirrors the engine's `Usage` (`workflow.rs`) as `chatReply.usage`: `null` on bridges
+ * that emit no usage (pi, agy). `costUsd` is `null` when no price is known — never `0`.
+ */
+export interface ChatUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  costUsd: number | null;
+}
+
+/**
+ * One record of a chat's persisted transcript (api-types 0.38.0; DES-L5 D-13): the daemon appends
+ * the operator's message and every seat's reply to `<state home>/chats/<id>.jsonl` for the CHAT'S
+ * LIFETIME (dropped on `chatClosed`, cleared at boot) and serves them on `GET /chats/:id.messages`
+ * in append order. `at` is epoch millis; `turnId` is always present (only turn-stamped frames are
+ * persisted). A `seat` record's `ok: false` text names the reason (a budget eviction reads
+ * "exceeded the N s turn budget … target it on your next message to re-seat it").
+ */
+export type ChatTranscriptRecord =
+  | { at: number; turnId: string; kind: 'user'; text: string; seats: string[] }
+  | { at: number; turnId: string; kind: 'seat'; cliKey: string; text: string; ok: boolean; usage: ChatUsage | null };
+
+/** `GET /chats/:id` → 200. */
+export interface ChatDetailResponse {
+  chatId: string;
+  seats: string[];
+  /** The scope recorded at open; `null` for a chat this daemon did not open (or after a restart). */
+  scope: ChatScope | null;
+  /** The seats refused at open (api-types 0.36.0, F-A45-011) — the same list the 201 carried, so
+   *  the admission copy survives a reload; `null` for a chat this daemon did not open; absent on a
+   *  daemon predating the field. */
+  refused?: ChatSeatRefusal[] | null;
+  /**
+   * The chat's transcript so far (api-types 0.38.0, additive; DES-L5, crew ≥ 0.7.35) — `[]` for a
+   * chat with no persisted turn yet; ABSENT on a daemon predating the field (a rejoin then shows
+   * "session continues" without history). Unbounded — a reply may be up to the engine's cap.
+   */
+  messages?: ChatTranscriptRecord[];
 }
 
 // ── Project code graph (DES-PROJECT-001; the co-located multi-repo graph) ──────
@@ -2385,11 +4578,21 @@ export interface ProjectGraphRepo {
 }
 
 /** `GET /projects/:id/graph` — what the project graph holds and what it cannot answer. */
+/** The UI action that resolves a project-graph state or a declined binding (api-types 0.35.0):
+ *  `projects.graph.refresh` = `POST /projects/:id/graph/refresh`, surfaced as the project page's
+ *  build/refresh control. */
+export type ProjectGraphAction = 'projects.graph.refresh';
+
 export interface ProjectGraphStatus {
   projectId: string;
   state: ProjectGraphState;
-  /** One sentence naming the state's cause and its remedy. Always present, never empty. */
+  /** One sentence naming the state's cause and its remedy, in the operator's words — never a raw
+   *  route (F-2R2-008); the route rides on `action`. Always present, never empty. */
   detail: string;
+  /** Present when one UI action resolves the state (today: `not-indexed` with registered members
+   *  → `projects.graph.refresh`). Absent when no single action does (dangling-only members, no
+   *  members, or a graph that is already built). api-types 0.35.0. */
+  action?: ProjectGraphAction;
   /** Absolute path of the co-located database; `null` when there is none to point at. */
   dbPath: string | null;
   repos: ProjectGraphRepo[];
@@ -2699,6 +4902,9 @@ export interface RunGroup {
 export interface CampaignsListResponse {
   campaigns: Campaign[];
   groups: RunGroup[];
+  /** The registered test sets (wave 6, F-7R2-014; api-types 0.36.0 — ADDITIVE: a pre-0.36 daemon
+   *  omits it). Newest first. See {@link TestSet}. */
+  test_sets?: TestSet[];
 }
 
 /**
@@ -2854,7 +5060,9 @@ export interface AcpCliDiagnostics {
   sessionsStarted: number;
   /** Count of `acpFallback` events (ACP unavailable/failed; run continued single-shot). */
   fallbacks: number;
-  /** Fallback counts by `fallbackKind` (`session_died`, `auth_required`, `binary_unavailable`, …). */
+  /** Fallback counts by `fallbackKind` (`session_died`, `auth_required`, `binary_unavailable`, and the
+   *  two deliberate reroutes `governance_requires_wrapped` / `read_only_requires_wrapped` — see
+   *  {@link AcpFallbackKind}). */
   fallbackKinds: Record<string, number>;
   /** Epoch ms of the newest `acpSessionStarted`, or `null` when none recorded. */
   lastStartedTs: number | null;
@@ -2876,11 +5084,305 @@ export interface AcpDiagnostics {
 export interface DiagnosticsResponse {
   components: DiagnosticsComponents;
   daemon: DiagnosticsDaemon;
-  /** `core.db` + sidecars + the events dir (as a total), sorted by name. */
+  /** `core.db` + sidecars + the events dir (as a total), sorted by name, followed by one entry per
+   *  repo code graph under the state home (`repo-graphs/<key>/estate.db`, key-sorted;
+   *  wicked-core#406). */
   stores: DiagnosticsStoreFile[];
   /** Bounded tail of the daemon's own error-level log lines, newest first. */
   recentErrors: DiagnosticsRecentError[];
   acp: AcpDiagnostics;
+  /** The skills seam's last outcome (api-types 0.28.0) — see `DiagnosticsSkills`. */
+  skills: DiagnosticsSkills;
+  /** Whether the engine's governance evidence is LANDING (api-types 0.31.0, crew#495) — see `DiagnosticsGovernance`. */
+  governance: DiagnosticsGovernance;
+  /** The state-home classification (additive; wicked-core#411 / wicked-crew#497) — see
+   *  `DiagnosticsStateHome`. `null` on a daemon booted without the watch (some tests); ABSENT on a
+   *  daemon before this field. */
+  stateHome?: DiagnosticsStateHome | null;
+}
+
+// ── Diagnostics — governance store + dead letters (api-types 0.31.0, crew#495 / F-022) ─────────
+//
+// The engine's emit seam writes every cross-product `wicked.*` event — conformance claims and
+// decisions, phase transitions, the steering-rule lifecycle — onto the shared estate store named
+// by `WICKED_ESTATE_DB`, or, when it cannot, spools the event to an NDJSON dead-letter outbox
+// (`WICKED_APPS_EMIT_DEADLETTER`). `serve` now resolves that store (`--governance-db` /
+// `WICKED_CREW_GOVERNANCE_DB` › an inherited `WICKED_ESTATE_DB` › `<core db>.governance/
+// governance.db`) and keeps the outbox under the state home (`<core db>.governance/
+// emit-outbox.ndjson`), never under HOME; this block is the read-only account of both.
+
+/** Which rule chose the store: the flag, crew's env override, the engine's own inherited
+ *  `WICKED_ESTATE_DB`, or the default sidecar of the core db. */
+export type DiagnosticsGovernanceStoreSource = 'flag' | 'env-crew' | 'env-estate' | 'core-db-sidecar';
+
+/** The store the engine's emit seam writes governance events to. */
+export interface DiagnosticsGovernanceStore {
+  /** The store as exported to the engine — an absolute SQLite path, or `:memory:`. The emit seam is SQLite-only,
+   *  so a URL spec (`postgres://…`) is refused at boot and never appears here. */
+  path: string;
+  source: DiagnosticsGovernanceStoreSource;
+}
+
+/** EVENT records on the governance store. Counted through the engine binding; an engine without
+ *  it answers `null` for both — never a fabricated 0. */
+export interface DiagnosticsGovernanceRecords {
+  /** Event records on the store right now (short-TTL), or `null` when the engine cannot count. */
+  total: number | null;
+  /** Records landed since this daemon's API came up (`total − baseline`; the baseline is taken when the routes
+   *  register, after the engine has booted, so its boot-time emits are in the baseline), or `null` when either
+   *  side is unknown. */
+  sinceBoot: number | null;
+}
+
+/** The dead-letter outbox, folded (streamed, size-capped). */
+export interface DiagnosticsGovernanceDeadletters {
+  /** The outbox this daemon exports to the engine; `null` when no store was resolved (library boot). */
+  path: string | null;
+  /** Entries in the outbox — 0 is the good answer. A floor when `truncated`. */
+  count: number;
+  /** Entries per event type (`wicked.crew.governance.conformance_recorded`, …); overflow folds into `other`. */
+  byType: Record<string, number>;
+  /** Entries per reason bucket — the engine's reason text before its first `:` (`no shared store (WICKED_ESTATE_DB unset)`,
+   *  `open shared store failed`, `store write failed`). */
+  byReason: Record<string, number>;
+  /** Entries carrying the engine's `ts` (epoch ms; written by wicked-core builds that stamp spooled records). */
+  timestamped: number;
+  /** Entries without a timestamp (a pre-stamp engine, or an unparseable line) — counted, never given an invented time. */
+  untimestamped: number;
+  /** Epoch ms of the oldest / newest timestamped entry, or `null` when none carries one. */
+  oldestTs: number | null;
+  newestTs: number | null;
+  /** `true` when the fold stopped at its byte cap — `count` is then a floor. */
+  truncated: boolean;
+  /** The pre-fix outbox under HOME (`~/.something-wicked/wicked-apps/emit-outbox.ndjson`) when it exists and is
+   *  non-empty — events earlier daemons on this host spooled there; `null` otherwise. Reported, never written.
+   *  `scope` (api-types 0.35.0, F-2R2-006): `own` = this daemon runs in that HOME's default state home, so the
+   *  file is its own earlier versions' outbox (the finding is a warning with the replay recipe); `host` = this
+   *  daemon's state home is isolated, so the file — shared by every daemon on the host — cannot be attributed
+   *  to it (an `info` finding with a read-only `--dry-run` inspect recipe and no replay). REQUIRED, deliberately:
+   *  the daemon always attributes the file it reports, so a `legacyOutbox` object without `scope` never leaves a
+   *  daemon shipping this contract; a skin that talks to an OLDER daemon must treat the whole `legacyOutbox`
+   *  object as best-effort (it predates the attribution), not the field alone. */
+  legacyOutbox: { path: string; bytes: number; scope: 'own' | 'host' } | null;
+}
+
+/** One governance finding. `governance.store` (error) = no store resolved, every emit dead-letters;
+ *  `governance.deadletter` (error) = the outbox holds entries; `governance.legacy-outbox` = the pre-fix
+ *  HOME outbox exists — `warning` with the replay command when it is this daemon's own, `info` with none
+ *  when it is shared across the host's daemons and not this one's (api-types 0.35.0). */
+export interface DiagnosticsGovernanceFinding {
+  kind: 'governance.store' | 'governance.deadletter' | 'governance.legacy-outbox';
+  severity: 'info' | 'warning' | 'error';
+  message: string;
+}
+
+/** `GET /diagnostics` → `governance` (api-types 0.31.0). */
+export interface DiagnosticsGovernance {
+  store: DiagnosticsGovernanceStore | null;
+  records: DiagnosticsGovernanceRecords;
+  deadletters: DiagnosticsGovernanceDeadletters;
+  findings: DiagnosticsGovernanceFinding[];
+}
+
+/** The skills seam's state as `GET /diagnostics` reports it (skills keystone, api-types 0.28.0). */
+export type DiagnosticsSkillsState = 'published' | 'fallback' | 'blocked' | 'config-error' | 'disabled';
+
+/** One finding the skills degradation ladder produced (design v3 §3). */
+export interface DiagnosticsSkillsFinding {
+  /** `skills.fallback` = no wicked-garden installed (engine input left unset / restored to the boot
+   *  value — the engine resolves the live cache itself); `skills.blocked` = the first publish is
+   *  blocked (engine input points at a non-existent refusal path — launches fail loudly until the
+   *  catalog is fixed); `skills.config` = the configured root is corrupt/unusable (same refusal;
+   *  `error`), or — as a `warning` on the `published` state — the root lies OUTSIDE the daemon
+   *  state home, so core's fence cross-check (`WICKED_CREW_STATE_HOME`) refuses every launch;
+   *  `skills.source` (`warning`, api-types 0.29.0, design v3.6) = the CURRENT baseline was seeded
+   *  from the installer-managed copy (`SkillSourceKind` `installer-copy`) — the daemon works, but
+   *  that copy receives no marketplace updates until the plugin is registered with Claude Code; it
+   *  persists (alongside the ladder's own finding, if any) until a refresh from the marketplace
+   *  cache re-records the baseline's provenance (byte-identical or not); `skills.manifest`
+   *  (`error`, api-types 0.29.0) = `manifest.json` could not be read when diagnostics were taken
+   *  (corrupt, unreadable, or the root no longer the one the store bound) — reported as
+   *  `config-error` with the cause instead of the stale boot outcome; the exported engine input is
+   *  unchanged until the daemon restarts; `skills.stale-rules` (`warning`, api-types 0.36.0, F-083 /
+   *  crew#535) = the CURRENT generation was published under OTHER portability rules than the daemon
+   *  now runs — accepted (the snapshot is never rewritten; the runtime stays `published`), the rows
+   *  that now derive differently are named (`SkillsManifestResponse.current.drift`), and a publish
+   *  records the running rules and clears it; `skills.base-skill` (crew#554 / wicked-core#468) =
+   *  the configured BASE skill (`SystemSettings.baseSkillRef`) is not in the current generation —
+   *  a `warning` under `baseSkillPolicy: 'warn'` (runs proceed without the discipline directive),
+   *  an `error` under `'require'` (the engine refuses every launch at intake); cleared by a publish
+   *  that hands it. Also carried as `DiagnosticsSkills.baseSkill.finding`. */
+  kind:
+    | 'skills.fallback'
+    | 'skills.blocked'
+    | 'skills.config'
+    | 'skills.source'
+    | 'skills.manifest'
+    | 'skills.stale-rules'
+    | 'skills.base-skill';
+  severity: 'warning' | 'error';
+  message: string;
+}
+
+/**
+ * `GET /diagnostics` → `skills`: whether the engine is being handed a verified snapshot, and if not,
+ * why — the one read-only answer to "why do launches refuse the skills snapshot". `disabled` is a
+ * daemon booted without the seam (the manifest collector, some tests).
+ */
+export interface DiagnosticsSkills {
+  state: DiagnosticsSkillsState;
+  /** The resolved skills root on the daemon host; `null` when `disabled`. */
+  root: string | null;
+  /** The VERIFIED published snapshot (`current` realpath-contained, `snapshot.json` + content hash
+   *  checked), or `null`. `path` is the absolute REAL path of `snapshots/<gen>`. */
+  current: { gen: number; path: string } | null;
+  /** What `WICKED_SKILLS_SNAPSHOT` — the engine's ONE skills input (v3.1 §2, v3.4 §2;
+   *  `WICKED_SKILLS_CURRENT` is never set, `WICKED_CREW_STATE_HOME` is not exported) — is exported as
+   *  right now: the real snapshot path, a `<root>/refused/…` refusal path, `""` when the process
+   *  booted with an explicitly EMPTY value (preserved — a configuration error core refuses, state
+   *  `config-error`; design v3.5 §4), or `null` = unset. */
+  engineInput: string | null;
+  /** DIAGNOSTICS-ONLY: the canonical realpath of the daemon state home, reported for humans. It is
+   *  NOT an engine input — `WICKED_CREW_STATE_HOME` is retired (v3.4 §2): core reads only
+   *  `WICKED_SKILLS_SNAPSHOT` and derives the state home from its `<state home>/skills/snapshots/<gen>`
+   *  layout. `null` only when `disabled`. */
+  stateHome: string | null;
+  findings: DiagnosticsSkillsFinding[];
+  /** The BASE skill posture (crew#554) — the System page's "discipline skill" row beside the skills
+   *  generation; its `finding` (when the generation lacks the skill) also rides `findings`. `null`
+   *  when the setting is off or the seam is `disabled`. A daemon before this field omits the key
+   *  (read it as `null`). */
+  baseSkill: BaseSkillPosture | null;
+}
+
+/**
+ * The BASE skill in force for the next launch (crew#554 — the launcher half of wicked-core#468).
+ * The engine leads EVERY agent unit's prompt with one role-keyed directive naming this skill and
+ * the unit's `§<role>` section; a launch whose handed snapshot lacks it is refused at intake. The
+ * daemon judges the setting against the CURRENT published generation and exports
+ * `WICKED_BASE_SKILL_REF` per `policy` (see `SystemSettings.baseSkillPolicy`). Carried by
+ * `GET /health.baseSkill`, `GET /diagnostics.skills.baseSkill`, `POST /skills/publish` and
+ * `POST /skills/refresh-baseline` results, and the 422 `base_skill_refused` launch body.
+ */
+export interface BaseSkillPosture {
+  /** The frontmatter name (`wicked-garden-governed-worker` by default). */
+  name: string;
+  policy: 'warn' | 'require';
+  /** The published generation the engine is handed holds the skill — the intake admission passes. */
+  present: boolean;
+  /** The editor catalog holds the skill enabled — the NEXT publish hands it. */
+  inCatalog: boolean;
+  /** The generation judged (`current`), or `null` when nothing is published. */
+  gen: number | null;
+  /** What `WICKED_BASE_SKILL_REF` is exported as right now: the name, or `null` = unset (runs proceed without a base skill). */
+  engineInput: string | null;
+  /** The `skills.base-skill` finding when the generation lacks the skill (`warning` under `warn`, `error` under `require`); `null` when it holds it. */
+  finding: DiagnosticsSkillsFinding | null;
+}
+
+/**
+ * `POST /runs` **422** (crew#554): the engine refused the launch AT INTAKE because the handed skills
+ * snapshot lacks the run's base skill (`SkillsError::BaseSkillRefused` — `baseSkillPolicy:
+ * 'require'`, or a workflow def's own `base_skill_ref`). Nothing was planned or persisted; no run
+ * id exists. `error` is the engine's message naming the skill; `baseSkill` is the daemon's posture
+ * at refusal time; `remedy` names the fix (publish a generation holding it, or relax the policy).
+ */
+export interface BaseSkillRefusedResponse {
+  code: 'base_skill_refused';
+  error: string;
+  baseSkill: BaseSkillPosture | null;
+  remedy: string;
+}
+
+// ── Diagnostics — the state-home classification (additive; wicked-core#411 / wicked-crew#497) ───
+//
+// The worker Read fence over the daemon state home is an EXPLICIT registry (design v3.1 §1): an
+// entry it does not classify refuses the launch by name, fail closed. Right — but it used to fire
+// at the run's FIRST WORKER, after a planning council and the intake gate, labelled "triage judge
+// errored", while the daemon booted green (F-RC1-011, F-RC2-020, F-032/F-033). Now the daemon
+// surveys the state home at boot and on every read of this block, logs one error line per entry
+// (`recentErrors`), warns on `GET /health`, and answers `POST /runs` 409 `state_home_unregistered`
+// while a handed snapshot derives a state home with such an entry; the engine refuses at intake.
+
+/** One entry the state-home registry cannot classify. */
+export interface DiagnosticsStateHomeEntry {
+  /** The entry's name as listed. */
+  name: string;
+  /** Its absolute path on the daemon host. */
+  path: string;
+  /** `state-home` — a top-level entry; `skills-root` — a child of `<state home>/skills` that is
+   *  neither the read slot (`snapshots`) nor a registered denied child. */
+  level: 'state-home' | 'skills-root';
+}
+
+/** One finding of the state-home survey — the same text `GET /health.warnings[]` carries. */
+export interface DiagnosticsStateHomeFinding {
+  kind: 'state-home.unregistered';
+  severity: 'error';
+  message: string;
+}
+
+/**
+ * `GET /diagnostics` → `stateHome`: which state home the worker Read fence classifies, every entry
+ * it cannot classify there, who classified, and whether that refuses launches. Honest throughout:
+ * a field the daemon cannot answer is `null`, never invented.
+ */
+export interface DiagnosticsStateHome {
+  /** The state home surveyed, or `null` when neither input yields one. */
+  stateHome: string | null;
+  /** `snapshot` — derived from the handed `WICKED_SKILLS_SNAPSHOT` by its
+   *  `<state home>/skills/snapshots/<gen>` shape (the directory the fence classifies); `db` — the
+   *  core db's parent, surveyed for information when no snapshot is handed. */
+  derivedFrom: 'snapshot' | 'db' | null;
+  /** Who classified: the engine (`Core.preflightStateHome`, the fence's own code), crew's registry
+   *  copy on an addon without it, or nobody (`unavailable`: no db path and no snapshot). */
+  source: 'engine' | 'crew' | 'unavailable';
+  unregistered: DiagnosticsStateHomeEntry[];
+  /** `true` exactly when a HANDED snapshot derives a state home with unregistered entries — the
+   *  condition the engine refuses every launch on, and what `POST /runs` answers 409 for. */
+  refusesLaunches: boolean;
+  findings: DiagnosticsStateHomeFinding[];
+  /** What to do, in operator terms — the same text the 409 body and every finding end with. */
+  remedy: string;
+  /** Why the survey could not run (an unresolvable snapshot, an unlistable directory), or `null`. */
+  error: string | null;
+  /** When this survey was taken (unix ms). */
+  checkedAt: number;
+}
+
+/**
+ * The `POST /runs` **409** body while the state home refuses launches (`code:
+ * 'state_home_unregistered'`): the configuration error as fields — every entry and the remedy —
+ * so a composer can show the blocker instead of a bare string.
+ */
+export interface StateHomeBlockerBody {
+  error: string;
+  code: 'state_home_unregistered';
+  stateHome: string | null;
+  unregistered: DiagnosticsStateHomeEntry[];
+  remedy: string;
+}
+
+/**
+ * The `POST /runs` **409** body when the engine refuses the launch at intake because the roster has
+ * NO eligible seat (`code: 'no_eligible_seat'`; wicked-core#461's typed `NoEligibleSeat`, crew#556):
+ * the plan needs a seat and every configured seat was benched by the launcher — signed out, out of
+ * quota, not installed (crew's `council_eligible: false` → the engine's `health.usable: false`).
+ * Nothing was persisted, nothing reached the wire. A 409, not a 400: the body is well-formed and the
+ * same request succeeds once a seat is signed in — the conflict is with the roster's current
+ * standing (the `state_home_unregistered` rule), and not a 5xx: the engine is healthy and said no.
+ */
+export interface NoEligibleSeatBody {
+  /** The engine's own text: `no eligible seat for <run>: <benched> — sign a seat in, or add one, …`. */
+  error: string;
+  code: 'no_eligible_seat';
+  /** The refused run id (never persisted). */
+  runId: string;
+  /** The bench, seat by seat with its cause — `"2 of 2 seats benched: codex (signed out — launcher),
+   *  copilot (quota exhausted — launcher)"` — the engine's `benched_summary`, verbatim. */
+  benched: string;
+  /** What to do, in operator terms. */
+  remedy: string;
 }
 
 // ── Memory proposal queue (DES-MEM-FACETED-001 §5.0, api-types 0.21.0) ─────────

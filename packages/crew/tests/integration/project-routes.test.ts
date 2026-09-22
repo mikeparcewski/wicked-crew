@@ -24,6 +24,7 @@ import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
 import type { Project, ProjectMember, InteractionRequest, SessionView } from '../../src/core/types.js';
 import { removeScratch } from '../setup/scratch.js';
+import { baseSkillOff } from '../setup/base-skill-off.js';
 
 let dir: string;
 let adapter: CoreAdapter;
@@ -36,6 +37,7 @@ const STUB_CLIS = JSON.stringify([
 
 async function boot(dbPath: string): Promise<void> {
   adapter = new CoreAdapter({ dbPath, stub: true });
+  baseSkillOff(); // run mechanics, not grounding — no published generation here (see tests/setup/base-skill-off.ts)
   app = await createServer(adapter, { projectEvents: { disabled: true } });
   await app.listen({ port: 0, host: '127.0.0.1' });
   const addr = app.server.address();

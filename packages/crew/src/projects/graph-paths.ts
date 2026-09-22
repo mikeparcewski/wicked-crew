@@ -10,8 +10,10 @@
  *
  * # Why NOT inside a repo checkout
  *
- * The per-repo graph lives at `<repo>/.codegraph/estate.db` — inside the working tree — and we have
- * just spent the effort removing that directory from six checkouts it had polluted. A PROJECT graph
+ * The per-repo graph USED TO live at `<repo>/.codegraph/estate.db` — inside the working tree — and
+ * we spent the effort removing that directory from six checkouts it had polluted; since
+ * wicked-core#406 the engine keeps it under `<state home>/repo-graphs/<key>/estate.db` and never
+ * adopts an in-tree copy. A PROJECT graph
  * is worse on that axis, not better: it holds N repos, so there is no one checkout it belongs to,
  * and writing it into the first member's tree would make repo A's working directory grow with repo
  * B's symbols. It goes in the daemon's own state directory.
