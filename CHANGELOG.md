@@ -24,7 +24,12 @@ mentioned only where a daemon release depends on them.
   distinguishable in the ledger from the same verdict at load 10. `hookTimeout` rises from 15 s to
   30 s (`packages/crew/vitest.config.ts`) for the same reason. Evidence: the targeted check over an
   UNMODIFIED tree at load 45 reported `tests/evals-internal-corpus.test.ts` as failing (two tests
-  "timed out in 30000ms"); the same file re-run serially passed 55/55 at exit 0.
+  "timed out in 30000ms"); the same file re-run serially passed 55/55 at exit 0. The classifiers
+  strip ANSI before parsing: the floor runs checks with `CI=1` and vitest colours on that (Windows
+  colours by default), `\s` does not match `\x1b`, and a plain-text fixture would have hidden it —
+  the guard runs on vitest's own coloured bytes, captured as a fixture. The entry point sets
+  `process.exitCode` rather than calling `process.exit()`, which can drop buffered stdout — and with
+  it the telemetry line — when the floor pipes the check's output.
 - **#641 — Single-seat chat degradation is now disclosed prominently.** `POST /chats` → 201 and
   `POST /chats/:id/messages` → 202 both carry a `singleSeat` field when exactly one seat warmed
   and at least one was refused. The field names the warm seat, the full refused list (with each

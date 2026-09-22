@@ -20,6 +20,7 @@
 // computed URL (tsc does not resolve it; the shape below is the contract this test pins).
 
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -27,10 +28,22 @@ import { beforeAll, describe, expect, it } from 'vitest';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const SCRIPT = join(ROOT, 'scripts', 'test-related.mjs');
 
+/**
+ * Vitest's own output, COLOURED, captured verbatim from
+ * `CI=true FORCE_COLOR=1 npx vitest run <a test that blows its deadline>` in this package and
+ * committed as a fixture. This is the input production actually hands the classifiers — the floor
+ * runs checks with `CI=1`, and Windows colours by default — and it is the input the first cut of
+ * #656 could not parse: hand-written plain-text fixtures passed while the real thing returned `[]`.
+ * Regenerate with the command above if vitest's reporter changes.
+ */
+const HERE = dirname(fileURLToPath(import.meta.url));
+const COLORED = readFileSync(join(HERE, 'fixtures', 'vitest-colored-failure-output.txt'), 'utf8');
+
 type RunResult = { status: number; output: string; spawnError: string | null };
 interface TestRelated {
   HOST_MARKER: string;
   RETRY_MARKER: string;
+  stripAnsi(output: string): string;
   retryableFailureReason(output: string): string | null;
   failedTestFiles(output: string): string[];
   formatHostLine(snap: Record<string, unknown>, label: string): string;
@@ -189,6 +202,83 @@ describe('crew#649 — the targeted check tolerates worker-IPC deaths and record
     expect(pre).toContain('load1=130.40');
     expect(pre).toContain('swapFreeMb=12.50');
     expect(rec.lines[rec.lines.length - 1]!.startsWith(`${mod.HOST_MARKER} label=post`)).toBe(true);
+  });
+
+  // ── The input production actually hands these functions (review of #656, defect 1) ───────────
+  // The floor runs checks with `CI=1`, vitest colours on that, and Windows colours by default. `\s`
+  // does not match `\x1b`, so `^\s*FAIL` matched nothing in production and the retry never fired —
+  // while the hand-written plain-text fixtures above passed. Everything below runs on the real bytes.
+  describe('COLOURED vitest output — the shape the floor actually produces', () => {
+    // Passes on head too, by construction: it asserts a property of the FIXTURE, not of the code.
+    // It ships because the two cases below are only worth anything while this one holds — a future
+    // edit that "tidies" the escapes out of the fixture would make them green and blind again.
+    it('the fixture really is coloured (a "tidied" fixture would make the guard vacuous again)', () => {
+      expect(COLORED, 'regenerate with CI=true FORCE_COLOR=1 npx vitest run').toContain('[');
+      expect(COLORED).toMatch(/\[[0-9;]*m\[[0-9;]*m FAIL /);
+    });
+
+    it('finds the failing file inside the escape codes', () => {
+      expect(mod.failedTestFiles(COLORED)).toEqual(['tests/zz-probe-timeout.test.ts']);
+    });
+
+    // DISCLOSED: this one also passes on head. `retryableFailureReason` is unanchored and vitest does
+    // not split the marker phrase with escapes, so colour never broke it — which is exactly why the
+    // defect was invisible: the classifier said "retry" while the file finder returned nothing. It
+    // ships as the control that pins that asymmetry, not as evidence of the fix.
+    it('still classifies the deadline that output carries', () => {
+      expect(mod.retryableFailureReason(COLORED)).toMatch(/in-suite deadline/);
+    });
+
+    it('RETRIES the named file — the end the whole fix exists for, on production-shaped input', async () => {
+      const rec = recorder([
+        { status: 1, output: COLORED, spawnError: null },
+        { status: 0, output: ' Test Files  1 passed (1)', spawnError: null },
+      ]);
+      const code = await mod.runTargeted([CREW_FILE], rec.io);
+
+      expect(code).toBe(0);
+      expect(rec.calls, 'a coloured deadline must re-run the FILE, not the whole suite').toHaveLength(2);
+      expect(rec.calls[1]!.argv).toEqual([
+        'npx',
+        'vitest',
+        'run',
+        '--no-file-parallelism',
+        'tests/zz-probe-timeout.test.ts',
+      ]);
+      expect(rec.lines.join('\n')).not.toContain('named no test file');
+    });
+
+    it('stripAnsi removes styling and hyperlinks without touching plain text', () => {
+      expect(mod.stripAnsi('plain FAIL tests/a.test.ts')).toBe('plain FAIL tests/a.test.ts');
+      expect(mod.stripAnsi('[41m[1m FAIL [22m[49m tests/a.test.ts[2m > [22mx')).toBe(
+        ' FAIL  tests/a.test.ts > x',
+      );
+      expect(mod.stripAnsi(']8;;file:///xlink]8;;')).toBe('link');
+      expect(mod.stripAnsi(undefined as unknown as string)).toBe('');
+    });
+  });
+
+  // Defect 2 of the same review. This one is a SOURCE-level guard, deliberately and with its limits
+  // stated: the failure it prevents — `process.exit()` tearing down before node drains an
+  // asynchronous piped stdout — only shows up under real pipe backpressure, which a unit test cannot
+  // manufacture against this entry point (the fast paths print two lines, far under the 64 KiB pipe
+  // buffer). What it does guarantee is that the discipline cannot be reintroduced silently. The
+  // BEHAVIOURAL half is covered by the subprocess cases here and in the mapper test: with
+  // `process.exitCode` the script must still exit with the right status and must still terminate —
+  // a stray handle would hang them.
+  it('the entry point sets process.exitCode and never calls process.exit (the last line is the telemetry)', () => {
+    const src = readFileSync(SCRIPT, 'utf8');
+    // CODE only: the block carries a comment explaining why `process.exit()` is refused, and a
+    // guard that its own rationale trips is a guard nobody can keep.
+    const entry = src
+      .slice(src.indexOf('const isMain'))
+      .split('\n')
+      .filter((l) => !l.trim().startsWith('//'))
+      .join('\n');
+    expect(entry).toContain('process.exitCode = await runTargeted(files)');
+    expect(entry, 'process.exit() can drop buffered stdout under pipe backpressure').not.toMatch(
+      /process\.exit\s*\(/,
+    );
   });
 
   it('end to end: a real invocation prints a real host snapshot as its last line', () => {

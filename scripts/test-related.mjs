@@ -177,11 +177,37 @@ export function formatHostLine(snap, label) {
 }
 
 /**
+ * Strip ANSI styling before ANY parsing of vitest's output.
+ *
+ * The output this script parses is COLOURED wherever it actually runs: vitest colours when `CI=true`
+ * (the repo-checks floor sets it — see the `RepoChecksEvaluatedEvent` doc: `CI=1` is one of the few
+ * variables that reach a check), when `FORCE_COLOR` is set, and by default on Windows, where
+ * picocolors turns colour on. A real `FAIL` line then reads
+ *
+ *   \x1b[41m\x1b[1m FAIL \x1b[22m\x1b[49m tests/foo.test.ts\x1b[2m > \x1b[22mname
+ *
+ * — captured verbatim from `CI=true FORCE_COLOR=1 npx vitest run` and committed as
+ * `packages/crew/tests/fixtures/vitest-colored-failure-output.txt`. `\s` does not match `\x1b`, so
+ * `^\s*FAIL` never matched a line in production, and `\S+` would have swallowed the trailing style
+ * code even if it had. The first cut's unit fixtures were hand-written plain text, so they passed
+ * while the real input could not (review of #656, defect 1).
+ *
+ * Normalising here rather than at the call site means a caller cannot forget: both classifiers are
+ * self-protecting, and the cost is one `replace` over at most 512 KiB, once per attempt.
+ */
+export function stripAnsi(output) {
+  // CSI sequences (colour, cursor) and the OSC-8 hyperlinks some reporters emit.
+  return String(output ?? '')
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '');
+}
+
+/**
  * WHY this output earns a re-run, or `null` when it does not. The whole tolerance hangs off this
  * predicate, so it only ever answers for a deadline (see {@link RETRYABLE_FAILURES}).
  */
 export function retryableFailureReason(output) {
-  const text = String(output ?? '');
+  const text = stripAnsi(output);
   for (const { re, why } of RETRYABLE_FAILURES) {
     if (re.test(text)) return why;
   }
@@ -198,7 +224,7 @@ export function failedTestFiles(output) {
   const out = [];
   const re = /^\s*FAIL\s+(\S+)/gm;
   let m;
-  while ((m = re.exec(String(output ?? ''))) !== null) {
+  while ((m = re.exec(stripAnsi(output))) !== null) {
     const p = m[1].replace(/\\/g, '/');
     if (!/\.(test|spec)\.[cm]?[jt]sx?$/.test(p)) continue;
     if (!out.includes(p)) out.push(p);
@@ -345,10 +371,18 @@ if (isMain) {
   const args = process.argv.slice(2);
   const dryRun = args[0] === '--dry-run';
   const files = dryRun ? args.slice(1) : args;
+  // `process.exitCode`, NEVER `process.exit()` (review of #656, defect 2). When stdout/stderr are
+  // PIPED — which is exactly how the repo-checks floor runs this — node's streams are asynchronous,
+  // and `process.exit()` terminates without draining them: under the pipe backpressure this check
+  // exists to survive, the tail can be cut. The last thing this script writes is the `WICKED-HOST`
+  // telemetry, placed last precisely so it survives the floor's 4 KiB `stdoutTail` truncation —
+  // exiting hard could drop the one line the fix added. Setting the code lets node leave once the
+  // buffers drain; nothing after this statement keeps the event loop alive.
   if (dryRun) {
     // Pure: the plan as JSON and nothing else — the mapper test parses this stdout.
     process.stdout.write(`${JSON.stringify(plan(files))}\n`);
-    process.exit(0);
+    process.exitCode = 0;
+  } else {
+    process.exitCode = await runTargeted(files);
   }
-  process.exit(await runTargeted(files));
 }
