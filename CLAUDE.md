@@ -16,13 +16,20 @@ protocol, where things live) are in the parent `../CLAUDE.md`.
   `build:with-studio` bundles wicked-studio's dist as the default local UI.
 - `packages/crew-api-types` — the published wire contract of `/api/v1` + `/ws` (types only,
   zero runtime); wicked-studio builds against this, never against crew internals.
-- `packages/agent-acp-bridges` — ACP stdio bridge for headless CLIs without a native
-  adapter (currently agy/Antigravity), used by wicked-core for governed sessions.
+- `packages/agent-acp-bridges` — two bins, not one. `agy-acp` is an ACP stdio bridge for
+  agy/Antigravity, spawned by wicked-core for governed ACP sessions. `wicked-pi` is a
+  *launcher* shim, not a bridge: it turns wicked-core's `WICKED_PI_SKILL_DIRS` into pi's
+  `--no-skills --skill <dir>…` and is wired in by **crew**, not core, via
+  `PI_ACP_PI_COMMAND` (`src/core/bridge-path.ts`) so the community `pi-acp` adapter spawns
+  it instead of bare `pi`. Note `agy-acp` is resolved by name off PATH and an unrelated
+  community `agy-acp` is now published on npm — which one a spawn gets is PATH order.
 
 ## Where the real docs live
 
 - `README.md` — product overview, install, quickstart.
 - `.product/` (repo root) — requirements + design artifacts (REQ-*, DES-*, ADRs, build plans).
+  **Gitignored and in no commit** — a fresh clone has none of it, and a `.product/…` path
+  cited in a source comment may simply not exist on the machine you are reading from.
 - `docs/` — operator docs and articles; `site/` — the product website (Astro).
 - `e2e/` — end-to-end probe scripts; root `tests/` — workspace-level scenario scripts.
 
