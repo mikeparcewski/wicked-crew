@@ -489,6 +489,15 @@ describe('crew#641 — single-seat degradation disclosed on open and every turn'
 // so the case an operator is most likely to create — a chat opened with ONE seat on purpose, nothing
 // refused — opened silently: `ok: true`, `refused: []`, no disclosure at all. The chat is just as
 // unable to disagree with itself, which is the property the field exists to state.
+/** The disclosure as a consumer sees it (crew#650 + the #658 review's `refusalsKnown`). */
+type SingleSeat = {
+  degraded: boolean;
+  warmed: string;
+  refused: { cliKey: string }[];
+  refusalsKnown?: boolean;
+  message: string;
+};
+
 describe('crew#650 — singleSeat is disclosed with NO refusals at all', () => {
   it('201 carries singleSeat for a chat opened with exactly one seat and nothing refused', async () => {
     const res = await open({ chatId: 'solo', clis: ['claude'], repoRefs: ['alpha'] });
@@ -496,7 +505,7 @@ describe('crew#650 — singleSeat is disclosed with NO refusals at all', () => {
     const body = res.json() as {
       seats: { cliKey: string; ok: boolean }[];
       refused: unknown[];
-      singleSeat?: { degraded: boolean; warmed: string; refused: unknown[]; message: string };
+      singleSeat?: SingleSeat;
     };
     expect(body.seats.filter((s) => s.ok).map((s) => s.cliKey)).toEqual(['claude']);
     expect(body.refused).toEqual([]);
@@ -509,6 +518,8 @@ describe('crew#650 — singleSeat is disclosed with NO refusals at all', () => {
     expect(body.singleSeat!.message).toMatch(/wicked-core#563/);
     // …and it must NOT invent a refusal clause with nothing after it.
     expect(body.singleSeat!.message, 'no "Refused:" clause when nothing was refused').not.toMatch(/Refused:/);
+    // The daemon just opened this chat, so the empty list is a RECORD, not a gap.
+    expect(body.singleSeat!.refusalsKnown).toBe(true);
   });
 
   it('202 carries singleSeat on every turn of that chat', async () => {
@@ -519,17 +530,18 @@ describe('crew#650 — singleSeat is disclosed with NO refusals at all', () => {
       payload: { text: 'hello' },
     });
     expect(res.statusCode).toBe(202);
-    const body = res.json() as { seats: string[]; singleSeat?: { warmed: string; refused: unknown[]; message: string } };
+    const body = res.json() as { seats: string[]; singleSeat?: SingleSeat };
     expect(body.seats).toEqual(['claude']);
     expect(body.singleSeat).toBeDefined();
     expect(body.singleSeat!.warmed).toBe('claude');
     expect(body.singleSeat!.refused).toEqual([]);
     expect(body.singleSeat!.message).not.toMatch(/Refused:/);
+    expect(body.singleSeat!.refusalsKnown, 'this daemon opened it — the empty list is a record').toBe(true);
   });
 
   it('202 still discloses for a single-seat chat this daemon did not open (post-restart: refusals unknown)', async () => {
     // A restarted daemon holds no scope for a chat the engine still has warm: `refusedOf` answers
-    // `undefined`. That is "the refusals are unknown", not "the chat gained a seat" — the old guard
+    // `undefined`. That is "the refusals are unknown", not "the chat gained a seat" — the first guard
     // read it as the latter and went silent.
     warmByChat.set('survivor', ['claude']);
     expect(chatScopes.refusedOf('survivor')).toBeUndefined();
@@ -539,11 +551,57 @@ describe('crew#650 — singleSeat is disclosed with NO refusals at all', () => {
       payload: { text: 'still one seat?' },
     });
     expect(res.statusCode).toBe(202);
-    const body = res.json() as { seats: string[]; singleSeat?: { warmed: string; refused: unknown[] } };
+    const body = res.json() as { seats: string[]; singleSeat?: SingleSeat };
     expect(body.seats).toEqual(['claude']);
     expect(body.singleSeat, 'the chat is single-seated whether or not this daemon remembers why').toBeDefined();
     expect(body.singleSeat!.warmed).toBe('claude');
     expect(body.singleSeat!.refused).toEqual([]);
+    // The prose FIRST, because that is the defect: this chat may have opened with ['claude','pi']
+    // and had pi refused, and the record is GONE rather than empty (review of #658). Asserting
+    // "opened with a single seat — no other seat was refused" here is two falsehoods in one
+    // sentence. Unknown is a third state and `[]` cannot carry it.
+    expect(
+      body.singleSeat!.message,
+      'the chat may have been opened with two seats, one refused — this daemon cannot know',
+    ).not.toMatch(/no other seat was refused/);
+    expect(body.singleSeat!.message, 'never assert a refusal that was not observed').not.toMatch(/Refused:/);
+    expect(body.singleSeat!.message).toMatch(/UNKNOWN/);
+    expect(body.singleSeat!.message).toMatch(/no refusal record/);
+    // …and the same distinction for a machine reader: `refused: []` is as ambiguous as the sentence.
+    expect(body.singleSeat!.refusalsKnown, 'this daemon has no refusal record for that chat').toBe(false);
+  });
+
+  it('the UNKNOWN record and a KNOWN-empty one are different answers, on the wire and in the prose', async () => {
+    // The distinction #651 got right for chat-promotion provenance (`null` for unreadable, `[]` for
+    // empty) applied here: if these two responses cannot be told apart, the disclosure is guessing.
+    await open({ chatId: 'known-empty', clis: ['claude'], repoRefs: ['alpha'] });
+    const known = await app.inject({
+      method: 'POST',
+      url: '/api/v1/chats/known-empty/messages',
+      payload: { text: 'hello' },
+    });
+    expect(chatScopes.refusedOf('known-empty')).toEqual([]);
+
+    warmByChat.set('unknown-record', ['claude']);
+    expect(chatScopes.refusedOf('unknown-record')).toBeUndefined();
+    const unknown = await app.inject({
+      method: 'POST',
+      url: '/api/v1/chats/unknown-record/messages',
+      payload: { text: 'hello' },
+    });
+
+    const k = (known.json() as { singleSeat?: SingleSeat }).singleSeat!;
+    const u = (unknown.json() as { singleSeat?: SingleSeat }).singleSeat!;
+    // Same seat, same empty array — everything a consumer sees must still separate them.
+    expect(k.warmed).toBe(u.warmed);
+    expect(k.refused).toEqual(u.refused);
+    // The prose must already separate them…
+    expect(k.message, 'a known-empty record MAY say nothing was refused').toMatch(/no other seat was refused/);
+    expect(u.message, 'an unknown record may not').not.toMatch(/no other seat was refused/);
+    expect(k.message).not.toBe(u.message);
+    // …and so must the wire, for a consumer that reads fields rather than sentences.
+    expect(k.refusalsKnown).toBe(true);
+    expect(u.refusalsKnown).toBe(false);
   });
 
   // Declared boundary control, NOT a regression guard: this one passes on head too (the old guard

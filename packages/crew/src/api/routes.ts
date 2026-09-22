@@ -855,23 +855,54 @@ export const ChatOpenSchema = z.object({
  * about. It also made the 202 go quiet after a restart, when `refusedOf` no longer knows the
  * refusals, even though the chat is just as single-seated as it was a minute earlier.
  *
- * `refused` therefore rides along as EVIDENCE when there is any, and is `[]` when there is none —
- * it never decides whether the caller is told. The message keeps the refusal clause only when
- * there are refusals to name; a "Refused: ." clause would be a worse disclosure than none.
+ * `refused` therefore rides along as EVIDENCE when there is any — it never decides whether the
+ * caller is told.
+ *
+ * THREE states, not two (review of #658). The refusal list has a third possibility that `[]` cannot
+ * express: this daemon does not KNOW. `chatScopes.refusedOf` answers `undefined` for a chat this
+ * daemon did not open — the engine keeps the warm session across a restart, the in-memory index does
+ * not — and the first cut collapsed that to `[]` with `?? []`, which made the 202 tell an operator
+ * *"It was opened with a single seat — no other seat was refused"* about a chat that was opened with
+ * two seats, one of which was refused. Both halves false, stated confidently. It is the same
+ * distinction #651 got right for chat-promotion provenance (`.catch(() => null)`, never `[]`):
+ * unreadable and empty are different answers, and only one of them may be asserted.
+ *
+ *   • refusals known, non-empty → name them;
+ *   • refusals known, empty     → say the chat was opened with a single seat;
+ *   • refusals UNKNOWN          → say the record is unavailable and assert NOTHING either way.
+ *
+ * `refusalsKnown` carries the same distinction for a machine reader, because `refused: []` is
+ * exactly as ambiguous on the wire as the sentence was in prose.
  */
 function singleSeatDisclosure(
   warmed: string,
-  refused: ChatSeatRefusal[],
-): { degraded: true; warmed: string; refused: ChatSeatRefusal[]; message: string } {
+  /** `undefined` = this daemon has no refusal record for the chat (it did not open it). */
+  refused: ChatSeatRefusal[] | undefined,
+): {
+  degraded: true;
+  warmed: string;
+  refused: ChatSeatRefusal[];
+  refusalsKnown: boolean;
+  message: string;
+} {
+  const known = refused !== undefined;
+  const list = refused ?? [];
+  const refusalClause =
+    list.length > 0
+      ? `Refused: ${list.map((r) => `${r.cliKey} (${r.reason})`).join('; ')}. `
+      : known
+        ? 'It was opened with a single seat — no other seat was refused. '
+        : 'This daemon holds no refusal record for this chat — it was opened before a restart — so ' +
+          'whether another seat was refused is UNKNOWN: the empty refused[] means the record is gone, ' +
+          'not that nothing was refused. ';
   return {
     degraded: true,
     warmed,
-    refused,
+    refused: list,
+    refusalsKnown: known,
     message:
       `This chat has one seat (${warmed}); it cannot disagree with itself. ` +
-      (refused.length > 0
-        ? `Refused: ${refused.map((r) => `${r.cliKey} (${r.reason})`).join('; ')}. `
-        : 'It was opened with a single seat — no other seat was refused. ') +
+      refusalClause +
       'The single-seat root cause is tracked as wicked-core#563; this chat makes it visible.',
   };
 }
@@ -2599,11 +2630,11 @@ export function registerRoutes(
       // after a problem they do not have.
       // crew#650: `refusedOf` is `undefined` for a chat THIS daemon did not open (a restart drops
       // the index) — that is "the refusals are unknown", not "the chat gained a seat". The
-      // disclosure is decided by the warm roster alone; unknown refusals spell as none.
+      // disclosure is decided by the warm roster alone, and the `undefined` is handed STRAIGHT to
+      // the builder (never `?? []`, review of #658): only it may decide what an unknown record is
+      // allowed to claim.
       const singleSeat202 =
-        warmRoster.length === 1
-          ? singleSeatDisclosure(warmRoster[0]!, chatScopes.refusedOf(id) ?? [])
-          : undefined;
+        warmRoster.length === 1 ? singleSeatDisclosure(warmRoster[0]!, chatScopes.refusedOf(id)) : undefined;
       return reply.code(202).send({
         seats,
         ...(turn !== null ? { turnId: turn.turnId } : {}),

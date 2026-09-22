@@ -4431,19 +4431,28 @@ export interface ChatSeatRefusal {
 }
 
 /**
- * Single-seat degradation disclosure (crew#641): present on `POST /chats` → 201 and on
- * `POST /chats/:id/messages` → 202 when exactly ONE seat is warm and at least one was refused.
- * A single-seat chat cannot disagree with itself — named here so callers do not have to reason
+ * Single-seat degradation disclosure (crew#641/#650): present on `POST /chats` → 201 and on
+ * `POST /chats/:id/messages` → 202 whenever exactly ONE seat is warm — refusals or not, since a
+ * one-seat chat cannot disagree with itself either way. Named here so callers do not have to reason
  * about the `refused[]` array. The root cause is tracked as wicked-core#563.
  */
 export interface ChatSingleSeatDegradation {
   degraded: true;
   /** The one warm seat key (e.g. `"claude"`). */
   warmed: string;
-  /** Every seat that was refused, with its reason and source — EVIDENCE, not the trigger: `[]` when
-   *  the chat was opened with a single seat and nothing was refused (crew#650), and `[]` likewise on
-   *  a 202 for a chat this daemon did not open (the refusals are unknown; the seat count is not). */
+  /** Every seat that was refused, with its reason and source — EVIDENCE, not the trigger. Read it
+   *  WITH {@link ChatSingleSeatDegradation.refusalsKnown}: `[]` means "none were refused" only when
+   *  that flag is `true`. */
   refused: ChatSeatRefusal[];
+  /**
+   * Whether `refused` is the COMPLETE record (crew#650, review follow-up). `true` on every 201 (the
+   * daemon just opened the chat) and on a 202 for a chat it still holds. `false` on a 202 for a chat
+   * this daemon did not open — the engine keeps a warm session across a restart, the daemon's
+   * in-memory scope index does not — where `refused: []` means THE RECORD IS GONE, not that nothing
+   * was refused, and `message` says so instead of asserting either way. Absent on a daemon predating
+   * this field, where `[]` was ambiguous.
+   */
+  refusalsKnown?: boolean;
   /** Human-readable summary naming the degradation, its cause, and wicked-core#563. */
   message: string;
 }

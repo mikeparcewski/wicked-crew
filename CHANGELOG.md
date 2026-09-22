@@ -38,7 +38,13 @@ mentioned only where a daemon release depends on them.
   `POST /chats/:id/messages` 202 now decide from the WARM SEAT COUNT alone, which is the property
   the field states: *this chat has one seat; it cannot disagree with itself*. `refused` rides along
   as evidence and is `[]` when there is none; the message drops its "Refused: …" clause rather than
-  emitting an empty one. Two or more warm seats still disclose nothing, and a targeted send that
+  emitting an empty one. The refusal record has THREE states, not two: known-and-named,
+  known-and-empty, and UNKNOWN — a chat this daemon did not open (the engine keeps a warm session
+  across a restart; the in-memory scope index does not). An unknown record no longer reads as "no
+  other seat was refused" — a sentence that would be false in both halves for a chat opened with two
+  seats where one was refused. It says the record is unavailable and asserts nothing either way, and
+  the new `ChatSingleSeatDegradation.refusalsKnown` carries the same distinction for a machine
+  reader, because `refused: []` is as ambiguous on the wire as the sentence was in prose. Two or more warm seats still disclose nothing, and a targeted send that
   reaches one seat of a two-seat chat still does not fabricate a degradation. Built in one place
   (`singleSeatDisclosure`) so the two routes cannot drift.
 - **#641 — Single-seat chat degradation is now disclosed prominently.** `POST /chats` → 201 and
