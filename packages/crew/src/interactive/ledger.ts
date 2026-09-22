@@ -110,6 +110,11 @@ export class InteractiveHandoffLedger {
     return Object.keys(this.entries).length;
   }
 
+  /** Every row as `[key, entry]` — a snapshot (the doc↔run index reads the binding off the key). */
+  rows(): Array<[string, HandoffLedgerEntry]> {
+    return Object.entries(this.entries).map(([key, entry]) => [key, { ...entry }]);
+  }
+
   /**
    * Drop every row belonging to one document (crew#338 — a deleted/retired doc must not leave
    * ghost rows that shadow its name forever). BOTH key grammars are swept, which is why this is

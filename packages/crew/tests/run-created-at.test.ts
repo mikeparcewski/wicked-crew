@@ -238,6 +238,91 @@ describe('RunTimingIndex — millis → whole unix seconds', () => {
   });
 });
 
+// crew#632: launch provenance — channel and actor round-trip through POST /runs → GET /runs/:id
+// and the list. The hydrate path (RunTimingIndex.hydrateFromLaunchEntries) reads them back on
+// restart. Unknown channel → 400 (LaunchSchema enum). Absent → field omitted on the DTO.
+describe('run metrics — channel / launch_actor on the run DTO (crew#632)', () => {
+  let mockAdapter: MockAdapter;
+  let runTimingIndex: RunTimingIndex;
+  let app: FastifyInstance;
+  let dir: string;
+  let audit: AuditLog;
+
+  beforeEach(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'crew-channel-dto-'));
+    audit = new AuditLog(join(dir, 'audit.log'), () => undefined);
+    mockAdapter = {
+      sessionsDetail: vi.fn().mockResolvedValue([view('run-c')]),
+      sessions: vi.fn().mockResolvedValue(['run-c']),
+      launchRun: vi.fn().mockResolvedValue('run-c'),
+      projectMembers: vi.fn().mockResolvedValue([]),
+      projectMemberAttach: vi.fn(),
+      projectMemberDetach: vi.fn(),
+    };
+    runTimingIndex = new RunTimingIndex();
+    app = buildApp(mockAdapter, runTimingIndex, audit);
+    await app.ready();
+  });
+
+  afterEach(async () => {
+    await app?.close();
+    removeScratch(dir);
+  });
+
+  it('channel + actor are echoed on GET /runs/:id and the list after POST /runs', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/runs',
+      payload: { problem: 'p', clisJson: '[]', channel: 'studio', actor: 'u-1' },
+    });
+    expect(res.statusCode).toBe(201);
+
+    const detail = await detailSession(app, 'run-c');
+    expect(detail['channel']).toBe('studio');
+    expect(detail['launch_actor']).toBe('u-1');
+
+    const listed = await listSession(app, 'run-c');
+    expect(listed['channel']).toBe('studio');
+    expect(listed['launch_actor']).toBe('u-1');
+  });
+
+  it('absent channel/actor → fields are omitted, not null', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/runs',
+      payload: { problem: 'p', clisJson: '[]' },
+    });
+    expect(res.statusCode).toBe(201);
+
+    const detail = await detailSession(app, 'run-c');
+    expect('channel' in detail).toBe(false);
+    expect('launch_actor' in detail).toBe(false);
+  });
+
+  it('unknown channel token → 400', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/runs',
+      payload: { problem: 'p', clisJson: '[]', channel: 'nope' },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('hydrateFromLaunchEntries restores channel and launch_actor (restart path)', async () => {
+    await app.inject({
+      method: 'POST',
+      url: '/api/v1/runs',
+      payload: { problem: 'p', clisJson: '[]', channel: 'cli', actor: 'bot-42' },
+    });
+    await audit.flush();
+
+    const rehydrated = new RunTimingIndex();
+    await rehydrated.hydrate(new AuditLog(join(dir, 'audit.log'), () => undefined));
+    expect(rehydrated.channelFor('run-c')).toBe('cli');
+    expect(rehydrated.launchActorFor('run-c')).toBe('bot-42');
+  });
+});
+
 // The shared launch seam (Copilot #466): EVERY route that launches a run records `run.launched` AND
 // stamps the index through this one helper, so a recon fan / steering-author run gets `created_at`
 // live too — never absent-until-restart. Pinned directly (cheaper than standing up those routes).

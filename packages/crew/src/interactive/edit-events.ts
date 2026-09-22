@@ -45,14 +45,26 @@ import {
   proposeClause,
   recallClause,
   type RecallIntent,
+  docScope,
+  type SeamStatusPayload,
+  narrationStamps,
 } from './draft-events.js';
 import { InteractiveHandoffLedger } from './ledger.js';
+import { DRAFT_SKILL, draftQualityClause, draftSkillArmLine, withDraftSkill, type SkillHeld } from './draft-skill.js';
 import { crewStateHome } from '../projects/state-home.js';
 import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
 import { readDocHead } from './chat-events.js';
 import { resolveInteractiveRoot } from './bridge-root.js';
 import type { CoreAdapter } from '../core/adapter.js';
 import type { CoreEvent, LaunchRunInput, WorkflowDef } from '../core/types.js';
+import {
+  acpFallbackLine,
+  councilAgreementPct,
+  councilOutcomeSuffix,
+  ungatedGateNote,
+  workerToolCallDeniedLine,
+} from './council-outcome.js';
+import { busSubscriberErrorReporter } from './bus-subscriber-errors.js';
 
 // ── Vocabulary constants (interactive's, verbatim — src/service/events.js is the truth) ──────
 
@@ -299,6 +311,16 @@ export interface InteractiveEditOptions {
   /** Seat roster JSON for the governed run (default: the production council roster).
    *  The functional-test harness passes a deterministic stub seat here. */
   clisJson?: string;
+  /** The roster accessor used when `clisJson` is not set — the server wires the daemon's roster
+   *  WITH crew's standing (`api/roster-standing.ts`, F-RECON-002/003) so a signed-out seat reaches
+   *  the engine benched (`health {usable: false, reason}`) instead of being convened or elected. */
+  roster?: () => unknown[];
+  /** Does the daemon's PUBLISHED skills snapshot hold (and enable) a skill? Consulted ONCE at arm time
+   *  for `wicked-garden-draft` (interactive/draft-skill.ts): held ⇒ the drafting phases carry the
+   *  skill_ref and the task names the self-check's inputs; not held ⇒ the run proceeds without the
+   *  quality floor and the arm log says so (the engine would refuse a skill_ref the snapshot lacks).
+   *  Default: `() => false` (a caller without a skills runtime has no snapshot to hold anything). */
+  skillHeld?: SkillHeld;
   /** The docs root a handoff's doc manifest is read from — the KIND GATE only (CREW-UX-9):
    *  a doc whose manifest says `kind: "demo"` is the demo seam's to answer (a demo refines by
    *  re-authoring `demo.spec.mjs` + re-recording, assist SKILL.md Step 8c — a storyboard
@@ -325,6 +347,8 @@ export interface InteractiveEditOptions {
   onRunFiled?: (runId: string, projectId: string) => void;
   /** Diagnostics sink (default: console.error). */
   log?: (message: string) => void;
+  /** Error-level logger for connection-fatal subscriber errors (the /diagnostics ring folds it); defaults to `log`. */
+  logError?: (message: string) => void;
 }
 
 /** Handle for a running subscription. */
@@ -340,10 +364,16 @@ export interface InteractiveEditSubscription {
 interface InFlight {
   key: string;
   documentId: string;
+  /** The doc's project binding — stamped on every emit (F-045). Undefined = unfiled. */
+  projectId?: string | undefined;
   version: number;
   items: HandoffFileItem[];
   /** The most recent real narration line (phase transitions overwrite it; the heartbeat repeats it). */
   narration: string;
+  /** The governed run id (the in-flight map key), stamped on narration as `run_id` (F-4R2-005). */
+  runId?: string | undefined;
+  /** The ord of the latest unit-scoped engine frame, stamped on narration as `unit_ord`. */
+  narrationOrd?: number | undefined;
   heartbeat: ReturnType<typeof setInterval>;
   /** The engine's own reason for the most recent failed unit (`stepFailed.detail`). Carried so
    *  the terminal error status names WHY — in particular the crew#311 deliverable-floor report,
@@ -358,9 +388,17 @@ function defaultStateDir(): string {
   return crewStateHome();
 }
 
-/** The production council roster, resolved lazily through the adapter's own class so this module
- *  never imports the native addon at runtime (unit tests pass `clisJson` and a fake adapter). */
-function rosterOf(adapter: CoreAdapter): unknown[] {
+/** The council roster a launch carries when no `clisJson` override is set. F-RECON-002/003: the
+ *  server injects `roster` — the daemon's roster WITH standing (`api/roster-standing.ts`), so
+ *  `launchRun`'s `engineRosterJson` benches signed-out seats instead of convening (or electing)
+ *  them. Without an injected accessor the adapter's own `launchRoster()` is asked (the same
+ *  standing when the daemon wired it); the raw registry, resolved lazily through the adapter's
+ *  class so this module never imports the native addon at runtime, is the last resort (unit tests
+ *  pass `clisJson` and a fake adapter). */
+function rosterOf(adapter: CoreAdapter, roster?: () => unknown[]): unknown[] {
+  if (roster !== undefined) return roster();
+  const own = (adapter as unknown as { launchRoster?: () => unknown[] }).launchRoster;
+  if (typeof own === 'function') return own.call(adapter);
   return (adapter.constructor as unknown as { roster(): unknown[] }).roster();
 }
 
@@ -378,6 +416,7 @@ export async function startInteractiveEditSubscriber(
   opts: InteractiveEditOptions = {},
 ): Promise<InteractiveEditSubscription | null> {
   const log = opts.log ?? ((m: string) => console.error(m));
+  let draftSkillHeld = false; // set at arm time (draft-skill.ts); read at launch for the task clause
 
   let bus: typeof import('wicked-bus');
   try {
@@ -409,7 +448,10 @@ export async function startInteractiveEditSubscriber(
   // persisted/hot-registered (FINDING-002 ordering), so a drifted def fails the arm loudly
   // instead of failing the first launch obscurely.
   try {
-    await adapter.registerWorkflow(INTERACTIVE_EDIT_WORKFLOW_DEF);
+    // The quality-floor skill rides only when the published snapshot holds it (draft-skill.ts).
+    draftSkillHeld = (opts.skillHeld ?? (() => false))(DRAFT_SKILL);
+    log(draftSkillArmLine('interactive-edit', draftSkillHeld));
+    await adapter.registerWorkflow(withDraftSkill(INTERACTIVE_EDIT_WORKFLOW_DEF, draftSkillHeld));
   } catch (err) {
     log(
       `[interactive-edit] could not register the '${INTERACTIVE_EDIT_WORKFLOW}' workflow — ` +
@@ -461,13 +503,20 @@ export async function startInteractiveEditSubscriber(
     }
   }
 
+  /** Every `status.posted` this seam emits is typed as the published frame's payload (codex on
+   *  crew#506: the wire type at the real boundary, not a detached alias) — `emitInteractive` adds `ts`. */
+  function emitStatus(payload: SeamStatusPayload): boolean {
+    return emitInteractive(STATUS_POSTED, { ...payload });
+  }
+
   function narrate(flight: InFlight, message: string): void {
     flight.narration = message;
-    emitInteractive(STATUS_POSTED, {
-      document_id: flight.documentId,
+    emitStatus({
+      ...docScope(flight.documentId, flight.projectId),
       version: flight.version,
       state: 'working',
       message,
+      ...narrationStamps(flight),
     });
   }
 
@@ -487,6 +536,10 @@ export async function startInteractiveEditSubscriber(
     if (runId === undefined) return;
     const flight = inFlight.get(runId);
     if (flight === undefined) return;
+    // F-4R2-005: every narration line and heartbeat from here carries the run id and the ord of the
+    // latest unit-scoped frame (`narrationStamps`), so a skin keys the thread per run and per unit.
+    flight.runId ??= runId;
+    if (typeof event.ord === 'number') flight.narrationOrd = event.ord;
 
     // Narration ladder — same rationale as the draft fold: the heartbeat repeats the LATEST
     // line and the transcript dedups repeats, so advancing the line = visible progress.
@@ -513,8 +566,10 @@ export async function startInteractiveEditSubscriber(
     if (event.type === 'unitDistributed') {
       if (isFloorOrd(event)) return;
       const who = typeof event.cli === 'string' ? event.cli : 'a worker';
-      const pct = typeof event.agreement_pct === 'number' ? ` (${event.agreement_pct}% agreement)` : '';
-      narrate(flight, `Council picked ${who} to rework ${blocks}${pct}…`);
+      const agreement = councilAgreementPct(event);
+      const pct = agreement !== null ? ` (${agreement}% agreement)` : '';
+      // Honest about a council that held on a fraction of its seats (F-4R2-007).
+      narrate(flight, `Council picked ${who} to rework ${blocks}${pct}${councilOutcomeSuffix(event)}…`);
       return;
     }
 
@@ -550,9 +605,26 @@ export async function startInteractiveEditSubscriber(
       return;
     }
 
+    // Wave 6 — the honest gate (F-7R2-005): a unit NOTHING gated must read as UNGATED in the thread,
+    // never as approved; the engine says so on `gateEvaluated.ungated` and names the missing layers.
+    if (event.type === 'gateEvaluated') {
+      const note = ungatedGateNote(event);
+      if (note !== null) {
+        const ord = typeof event.ord === 'number' ? event.ord : 0;
+        narrate(flight, `Gate for unit ${ord}: ${note}`);
+      }
+      return;
+    }
+
+    // Wave 6 — the fenced worker (F-7R2-012): a seat that tried to push or open a PR itself was
+    // refused; the thread names who, what, and that delivery belongs to the run's deliver phase.
+    if (event.type === 'workerToolCallDenied') {
+      narrate(flight, workerToolCallDeniedLine(event));
+      return;
+    }
+
     if (event.type === 'acpFallback') {
-      const who = typeof event.cliKey === 'string' ? event.cliKey : 'the worker';
-      narrate(flight, `${who}'s live session dropped — continuing in single-shot mode…`);
+      narrate(flight, acpFallbackLine(event));
       return;
     }
 
@@ -574,8 +646,8 @@ export async function startInteractiveEditSubscriber(
       ledger.recordFailure(flight.key);
       const why =
         flight.failureDetail !== undefined ? ` Reason: ${oneLine(flight.failureDetail, 600)}` : '';
-      emitInteractive(STATUS_POSTED, {
-        document_id: flight.documentId,
+      emitStatus({
+        ...docScope(flight.documentId, flight.projectId),
         version: flight.version,
         state: 'error',
         message:
@@ -587,7 +659,7 @@ export async function startInteractiveEditSubscriber(
   });
 
   function finalize(flight: InFlight, runId: string): void {
-    const { documentId, version, key, items } = flight;
+    const { documentId, projectId, version, key, items } = flight;
     // The deterministic pre-emit self-check (INV-2 at scale): a violating fragment would be
     // rejected SILENTLY by the service (regenerate.js Inv2Error) — the user's edit would just
     // die. Fail honest here instead: error status, failure row, no emit.
@@ -595,8 +667,8 @@ export async function startInteractiveEditSubscriber(
     if (violations.length > 0) {
       ledger.recordFailure(key);
       const detail = violations.map((v) => `${v.selector}: ${v.reason}`).join('; ');
-      emitInteractive(STATUS_POSTED, {
-        document_id: documentId,
+      emitStatus({
+        ...docScope(documentId, projectId),
         version,
         state: 'error',
         message:
@@ -610,7 +682,7 @@ export async function startInteractiveEditSubscriber(
     // deterministic doc+version key — a re-announce is a WB-002 no-op.
     const emitted = emitInteractive(
       EDIT_COMPLETED,
-      { document_id: documentId, version, results },
+      { ...docScope(documentId, projectId), version, results },
       editIdempotencyKey(documentId, version),
     );
     if (!emitted) {
@@ -618,8 +690,8 @@ export async function startInteractiveEditSubscriber(
       // the service. Fail HONEST — leaving the ledger row launched-but-never-closed would
       // silently eat every replay of this handoff (the launch gate is `ledger.has`).
       ledger.recordFailure(key);
-      emitInteractive(STATUS_POSTED, {
-        document_id: documentId,
+      emitStatus({
+        ...docScope(documentId, projectId),
         version,
         state: 'error',
         message:
@@ -630,8 +702,8 @@ export async function startInteractiveEditSubscriber(
       return;
     }
     ledger.recordEmitted(key);
-    emitInteractive(STATUS_POSTED, {
-      document_id: documentId,
+    emitStatus({
+      ...docScope(documentId, projectId),
       version,
       state: 'complete',
       message: 'Edit is in — landing the new version on the canvas now.',
@@ -657,8 +729,8 @@ export async function startInteractiveEditSubscriber(
       // …but ONLY when the demo seam is actually there to take it. Skipping into a seam that
       // never armed is a silent drop: no run, no status, a canvas that waits forever. Say so.
       if (!(opts.demoSeamArmed ?? (() => false))()) {
-        emitInteractive(STATUS_POSTED, {
-          document_id: handoff.documentId,
+        emitStatus({
+          ...docScope(handoff.documentId, handoff.projectId),
           version: handoff.version,
           state: 'error',
           message:
@@ -716,8 +788,8 @@ export async function startInteractiveEditSubscriber(
     );
     const runId = randomUUID();
 
-    emitInteractive(STATUS_POSTED, {
-      document_id: handoff.documentId,
+    emitStatus({
+      ...docScope(handoff.documentId, handoff.projectId),
       version: handoff.version,
       state: 'processing',
       message: `A governed crew picked up your edit — reworking ${items.length === 1 ? 'the block' : `${items.length} blocks`}…`,
@@ -755,13 +827,26 @@ export async function startInteractiveEditSubscriber(
         // `project` axis (the reliably-available axis on this seam). An unfiled handoff leaves it
         // undefined, so the clause is omitted. Phase 6: thread cli/repo (no single cli is in scope
         // here — the launch carries the whole council roster via `clisJson`, not one assigned seat).
-        problem: editProblem(
-          handoff,
-          handoffPath,
-          handoff.projectId !== undefined ? { project: handoff.projectId } : undefined,
-        ),
+        problem:
+          editProblem(
+            handoff,
+            handoffPath,
+            handoff.projectId !== undefined ? { project: handoff.projectId } : undefined,
+          ) +
+          // The quality floor on a revision (draft-skill.ts): the edited fragments are what land,
+          // so the self-check runs on each item's output_path — no page budget applies to a fragment
+          // (the document's count is the service's to keep), no snapshot rides this leg.
+          (draftSkillHeld
+            ? ' ' +
+              draftQualityClause(
+                'each item\'s output_path from the handoff file',
+                { pages: null, exact: false, source: 'unknown' },
+                [],
+                { revision: true, style: 'doc' },
+              )
+            : ''),
         sessionId: runId,
-        clisJson: opts.clisJson ?? JSON.stringify(rosterOf(adapter)),
+        clisJson: opts.clisJson ?? JSON.stringify(rosterOf(adapter, opts.roster)),
         workflow: INTERACTIVE_EDIT_WORKFLOW,
         // The 7b surface: a project-bound doc's governed edits are FILED — the run lands in
         // the project's activity feed instead of floating unattributed.
@@ -790,8 +875,8 @@ export async function startInteractiveEditSubscriber(
       // The 'processing' status is already on the thread — close it out honestly so the
       // canvas never sits in an in-between state on a launch that went nowhere.
       const reason = err instanceof Error ? err.message : String(err);
-      emitInteractive(STATUS_POSTED, {
-        document_id: handoff.documentId,
+      emitStatus({
+        ...docScope(handoff.documentId, handoff.projectId),
         version: handoff.version,
         state: 'error',
         message: `Crew could not start a run for this edit: ${reason}. The assist loop can still take over.`,
@@ -811,17 +896,19 @@ export async function startInteractiveEditSubscriber(
     const flight: InFlight = {
       key,
       documentId: handoff.documentId,
+      projectId: handoff.projectId,
       version: handoff.version,
       items,
       narration: 'Crew run launched — working on your edit…',
       heartbeat: setInterval(() => {
         // Repeat the last real narration so the ~20s status.requested window is always fed,
         // even mid-phase when the engine is quiet.
-        emitInteractive(STATUS_POSTED, {
-          document_id: flight.documentId,
+        emitStatus({
+          ...docScope(flight.documentId, flight.projectId),
           version: flight.version,
           state: 'working',
           message: flight.narration,
+          ...narrationStamps(flight),
         });
       }, heartbeatMs),
       // Do not keep the daemon alive for narration alone.
@@ -843,11 +930,13 @@ export async function startInteractiveEditSubscriber(
     // would double-launch precisely because the ledger row is only written on success.
     maxRetries: 0,
     handler: (event: BusEvent) => handleFeedbackProcessed(event),
-    onError: (err: Error, event?: BusEvent) => {
-      log(
+    onError: busSubscriberErrorReporter({
+      describe: (err, event) =>
         `[interactive-edit] handler error on event ${String(event?.event_id ?? '?')}: ${err.message}`,
-      );
-    },
+      log,
+      logError: opts.logError,
+      pollIntervalMs: opts.pollIntervalMs ?? 2000,
+    }),
   });
 
   return {

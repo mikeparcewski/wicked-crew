@@ -50,6 +50,11 @@
 //   synthetic detection frame AND the engine's PTY-path event) — and AUDITED via the crew
 //   audit trail (`run.stall.escalated`), because an automated actor touching a run is a
 //   privileged action exactly like an operator doing it.
+// - EVERY frame this watchdog broadcasts — detections included — goes to the `onFrame` recorder
+//   as well (wicked-studio#284). The daemon writes it to the audit trail and keeps it in
+//   `api/stall-frame-index.ts`, which is what `GET /runs/:id/events` serves a reloaded page. This
+//   class remembers nothing itself: a run leaving the executing listing, or this process exiting,
+//   must not take the "needs you" history with it.
 //
 // The synthetic frames go straight to the /ws fan-out, never back through the engine relay, so
 // they cannot stamp or re-arm the watchdog themselves. A SUCCESSFUL reassign, by contrast,
@@ -113,6 +118,14 @@ export interface ExecutingRun {
   /** The run's own seat pool (`session.clis`), in roster order — the failover candidates a
    *  reassign may route to (perf#4). Absent/empty = no pool known: reassign in place. */
   seats?: string[];
+  /** Seats a failover must NOT land on (DES-L3 PR-3E, F-RC1-012 / crew#436): when the cursor is
+   *  an EVALUATOR, every seat that built work it reviews — evaluator ≠ creator holds across a
+   *  stall reassign too. Absent/empty = no constraint (a free-text unit carries no role). */
+  avoid?: string[];
+  /** What runs the cursor unit (crew #580 / #581): a `tool` unit is the engine's own command —
+   *  there is no seat to fail over to, so the escalation stage NOTIFIES instead of reassigning.
+   *  Absent = unknown (older engine views): today's ladder. */
+  executor?: 'tool' | 'agent';
 }
 
 /**
@@ -149,9 +162,14 @@ export interface StallWatchdogDeps {
      * the engine re-runs the council.
      */
     reassign: (runId: string, ord: number, cli?: string) => Promise<void>;
-    /** Audit sink — the server appends `run.stall.escalated` to the crew audit trail. */
-    audit?: (frame: WorkerStallEscalatedFrame) => void;
   };
+  /**
+   * Every frame this watchdog broadcasts, handed over for RECORDING (wicked-studio#284): the daemon
+   * writes one audit line per frame (`run.stall.detected` / `run.stall.escalated`) and fills the
+   * index `GET /runs/:id/events` reads. Absent = frames are live-only (`/ws`), the pre-#284
+   * behaviour — a directly-driven watchdog in a test records nothing.
+   */
+  onFrame?: (frame: WorkerStalledFrame | WorkerStallEscalatedFrame) => void;
   /**
    * Called when a relayed `unitOutputCaptured` carries `stepStatus: "timed_out"` — the ENGINE's
    * own turn ceiling fired (the run is terminating; the last-resort backstop the silence ladder
@@ -296,12 +314,13 @@ export class WorkerStallWatchdog {
         if (quietForMs >= thresholdMs && !period?.detectionEmitted) {
           this.quietPeriod(run.id).detectionEmitted = true;
           const ord = this.lastOrd.get(run.id) ?? run.ord;
-          this.deps.broadcast({
+          const detected: WorkerStalledFrame = {
             type: 'workerStalled',
             session: run.id,
             ...(ord !== undefined ? { ord } : {}),
             quietForMs,
-          });
+          };
+          this.emit(detected);
           this.log(
             `[stall-watchdog] run ${run.id}${ord !== undefined ? ` (unit ${ord})` : ''} silent for ` +
               `${(quietForMs / 60_000).toFixed(1)} min — workerStalled frame broadcast` +
@@ -413,7 +432,20 @@ export class WorkerStallWatchdog {
       quietForMs,
     };
     let frame: WorkerStallEscalatedFrame;
-    if (escalation.action === 'notify') {
+    if (run.executor === 'tool') {
+      // crew #580 / #581 (F-BM-004 / F-BM-010): the cursor is a TOOL unit — the engine's own
+      // command (a deliver script, an index) — and there is no seat to fail over to. A reassign
+      // would spawn a second copy of the same command into the same worktree (run 6: three
+      // deliver scripts raced on one branch); the engine now kills the running child on a
+      // supersede, so an automatic reassign would only be a kill-and-retry loop burning the
+      // budget. Surface it for a human instead; no budget consumed, `stalledSeats` untouched.
+      frame = { ...base, action: 'notify', outcome: 'ok', needsYou: true };
+      this.deps.log?.(
+        `stall watchdog: run ${run.id} unit ${ord ?? '?'} is a tool command running for ` +
+          `${Math.round(quietForMs / 60_000)} min — no seat to fail over to; Cancel run stops it, ` +
+          `POST /runs/${run.id}/reassign re-runs it`,
+      );
+    } else if (escalation.action === 'notify') {
       // The fail-loud rung: surface for a human, touch nothing. No budget — notifying is free.
       frame = { ...base, action: 'notify', outcome: 'ok', needsYou: true };
     } else {
@@ -488,12 +520,7 @@ export class WorkerStallWatchdog {
         }
       }
     }
-    this.deps.broadcast(frame);
-    try {
-      this.deps.escalation?.audit?.(frame);
-    } catch (err) {
-      this.log(`[stall-watchdog] escalation audit sink failed: ${String(err)}`);
-    }
+    this.emit(frame);
     const where = `run ${run.id}${ord !== undefined ? ` (unit ${ord})` : ''}`;
     const quiet = `${(quietForMs / 60_000).toFixed(1)} min silent`;
     if (frame.action === 'notify') {
@@ -527,6 +554,21 @@ export class WorkerStallWatchdog {
   }
 
   /**
+   * Put a frame on `/ws` and hand it to the recorder — the ONE place a watchdog frame leaves this
+   * class. The recorder (the daemon's `onFrame`) writes the durable audit line and fills the index
+   * `GET /runs/:id/events` serves; a throwing recorder is logged and swallowed, because recording
+   * a stall must never break detecting the next one.
+   */
+  private emit(frame: WorkerStalledFrame | WorkerStallEscalatedFrame): void {
+    this.deps.broadcast(frame);
+    try {
+      this.deps.onFrame?.(frame);
+    } catch (err) {
+      this.log(`[stall-watchdog] frame recorder failed: ${String(err)}`);
+    }
+  }
+
+  /**
    * The failover TARGET for a stall reassign (perf#4): the first seat of the run's own pool
    * that is neither the currently-stalled seat nor one this run already stall-reassigned away
    * from. `undefined` = no distinct candidate (no pool known, a single-seat pool, or every
@@ -534,10 +576,16 @@ export class WorkerStallWatchdog {
    * (still safe) behaviour. Pool order is `session.clis` order: deterministic, no health
    * heuristics — the per-run budget bounds how far the rotation can walk.
    */
+
   private pickFailoverSeat(run: ExecutingRun): string | undefined {
     if (run.cli === undefined) return undefined; // unknown current seat → council re-pick
     const stalled = this.stalledSeats.get(run.id);
-    return (run.seats ?? []).find((s) => s !== run.cli && !(stalled?.has(s) ?? false));
+    // DES-L3 PR-3E: never onto a seat the cursor evaluator reviews (`avoid` — the creators'
+    // seats); no distinct candidate left ⇒ in-place recycle, as before.
+    const avoid = run.avoid ?? [];
+    return (run.seats ?? []).find(
+      (s) => s !== run.cli && !(stalled?.has(s) ?? false) && !avoid.includes(s),
+    );
   }
 
   /** Returns the independent detection/action latches for this quiet period. */

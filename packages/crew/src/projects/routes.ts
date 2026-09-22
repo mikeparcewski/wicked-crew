@@ -28,6 +28,7 @@
  *   409 · anything else 400. A pre-0.6.0 addon answers 501 (ProjectsUnsupportedError), never 400.
  */
 
+import { codeGraphErrorStatus } from '../core/repoPaths.js';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { CoreAdapter } from '../core/adapter.js';
@@ -48,6 +49,7 @@ import {
   projectUpdatedKey,
 } from './events.js';
 import type { MembershipIndex } from './membership-index.js';
+import { DEFAULT_PROJECT_ID } from './default-project.js';
 import { ProjectSettingsStore } from './settings.js';
 import { buildActivityPage } from './activity.js';
 import {
@@ -67,8 +69,16 @@ import type { Actor } from '../core/types.js';
 
 const V = API_PREFIX;
 
-/** The reserved, synthesized "Unfiled" project id (ADR §1.1/§7). */
-export const DEFAULT_PROJECT_ID = 'default';
+/**
+ * The `error` of a query route that cannot answer: the status's own sentence — customer copy since
+ * F-2R2-008, which names the page action and not the route — plus, for an API caller who has no
+ * page, the route the `action` stands for. `status` rides alongside with the machine field.
+ */
+function notQueryableError(status: ProjectGraphStatus): string {
+  return status.action === 'projects.graph.refresh'
+    ? `${status.detail} API: POST ${V}/projects/${status.projectId}/graph/refresh.`
+    : status.detail;
+}
 
 // Exported for tests/wire-contract.test.ts (the request-direction drift guard).
 export const CreateProjectSchema = z
@@ -503,27 +513,40 @@ export function registerProjectRoutes(
     };
   }
 
-  /** Engine capability gaps map to 501, everything else to the projects mapping. */
+  /** Engine capability gaps map to 501; a current engine with no resolvable repo-graph root (a
+   *  daemon-environment fault, wicked-core#406) to 503 through the shared `codeGraphErrorStatus`
+   *  every code-graph consumer uses; everything else to the projects mapping. */
   function graphErrorStatus(err: unknown): number {
-    return err instanceof ProjectGraphEngineTooOldError ? 501 : engineErrorStatus(err);
+    if (err instanceof ProjectGraphEngineTooOldError) return 501;
+    return codeGraphErrorStatus(err) ?? engineErrorStatus(err);
   }
 
-  app.get(`${V}/projects/:id/graph`, async (req, reply) => {
+  app.get(
+    `${V}/projects/:id/graph`,
+    { config: { manifest: { statusCodes: [200, 404, 501, 503] } } },
+    async (req, reply) => {
     const { id } = req.params as { id: string };
     if (id === DEFAULT_PROJECT_ID) return { status: defaultProjectGraph() };
     try {
       const project = await adapter.projectGet(id);
       if (project === null) return reply.code(404).send({ error: `Project ${id} not found` });
-      // Always 200: "this project has no repos" and "its graph was never built" are ANSWERS about
-      // the graph's standing, which is what this route reports. The query routes below are where
-      // they become a refusal, because there they are the reason a question cannot be answered.
+      // 200 for every answer about the graph's STANDING: "this project has no repos", "its graph
+      // was never built", "the addon is too old" are all reported as a status, not refused. The
+      // query routes below are where they become a refusal, because there they are the reason a
+      // question cannot be answered. The non-200s here are not standings: 404 unknown project,
+      // and — via `graphErrorStatus` — 503 when a CURRENT engine resolved no repo-graph root
+      // (a daemon-environment fault, wicked-core#406) or 501 when the standing itself could not
+      // be computed because the addon predates `code_graph_db`.
       return { status: await projectGraphStatus(adapter, id) };
     } catch (err) {
       return reply.code(graphErrorStatus(err)).send({ error: message(err) });
     }
   });
 
-  app.post(`${V}/projects/:id/graph/refresh`, async (req, reply) => {
+  app.post(
+    `${V}/projects/:id/graph/refresh`,
+    { config: { manifest: { statusCodes: [200, 400, 404, 409, 501, 503] } } },
+    async (req, reply) => {
     const { id } = req.params as { id: string };
     if (id === DEFAULT_PROJECT_ID) {
       return reply.code(409).send({ error: defaultProjectGraph().detail });
@@ -549,7 +572,10 @@ export function registerProjectRoutes(
     }
   });
 
-  app.get(`${V}/projects/:id/graph/blast-radius`, async (req, reply) => {
+  app.get(
+    `${V}/projects/:id/graph/blast-radius`,
+    { config: { manifest: { statusCodes: [200, 400, 404, 501, 503] } } },
+    async (req, reply) => {
     const { id } = req.params as { id: string };
     const q = req.query as { name?: string };
     if (q.name === undefined || q.name.trim() === '') {
@@ -567,7 +593,7 @@ export function registerProjectRoutes(
       // different — and dangerous — statement from "there is no graph to ask".
       if (!ready.ok) {
         const code = ready.status.state === 'engine-too-old' ? 501 : 404;
-        return reply.code(code).send({ error: ready.status.detail, status: ready.status });
+        return reply.code(code).send({ error: notQueryableError(ready.status), status: ready.status });
       }
       return reply.send(await projectBlastRadius(ready, q.name.trim()));
     } catch (err) {
@@ -575,7 +601,10 @@ export function registerProjectRoutes(
     }
   });
 
-  app.get(`${V}/projects/:id/graph/search`, async (req, reply) => {
+  app.get(
+    `${V}/projects/:id/graph/search`,
+    { config: { manifest: { statusCodes: [200, 400, 404, 501, 503] } } },
+    async (req, reply) => {
     const { id } = req.params as { id: string };
     const q = req.query as { name?: string };
     if (q.name === undefined || q.name.trim() === '') {
@@ -590,7 +619,7 @@ export function registerProjectRoutes(
       const ready = await queryable(adapter, id);
       if (!ready.ok) {
         const code = ready.status.state === 'engine-too-old' ? 501 : 404;
-        return reply.code(code).send({ error: ready.status.detail, status: ready.status });
+        return reply.code(code).send({ error: notQueryableError(ready.status), status: ready.status });
       }
       return reply.send(await projectSymbolSearch(ready, q.name.trim()));
     } catch (err) {

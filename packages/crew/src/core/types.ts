@@ -23,6 +23,8 @@ export type * from 'wicked-crew-api-types';
 
 import type { SystemSettings } from 'wicked-crew-api-types';
 
+import { DEFAULT_BASE_SKILL_REF, type BaseSkillPolicy } from '../skills/base-skill.js';
+
 /** The run id of the onboarding run started when a repo was registered. */
 export interface RepoOnboardRef {
   repoId: string;
@@ -41,8 +43,33 @@ export interface LaunchRunInput {
   entityMode?: string;
   /** Human-confirm gate policy: `none` (default) | `all` | `before:<ord>`. */
   humanConfirm?: string;
+  /**
+   * EXPLICIT opt-out of the engine's deliver gate (F-E2E-030). The composed `deliver` Tool phase
+   * pauses for a human before it pushes the run branch and opens the PR — whatever `humanConfirm`
+   * says — unless this is `true` (wicked-core `LaunchSpec.auto_deliver`). The HTTP boundary sets
+   * it ONLY from an explicit `deliverGate: 'auto'` on `POST /runs`; omitted, `false`, and
+   * `deliverGate: 'human'` all reach the engine as the gate. Never derived from `humanConfirm`:
+   * `none` is that field's default and typo fallback, not a statement about delivery.
+   */
+  autoDeliver?: boolean;
   /** Id of a registered repo to run within. Omit for a repo-less run. */
   repoRef?: string;
+  /**
+   * DES-L9 / crew#550 (`revisesPr`): the head BRANCH of the open pull request this run revises,
+   * resolved by the HTTP boundary from the PR number via `gh pr view` — the engine bases the run
+   * worktree on `origin/<baseRef>` (wicked-core `LaunchSpec.base_ref`, core-ts ≥ 0.7.27) and the
+   * composed deliver phase pushes the run's commits onto that branch instead of opening a second
+   * PR. Crew-INTERNAL: never on the wire (`LaunchRunBody` carries `revisesPr` only). The adapter
+   * fails CLOSED on an addon without the field — an older engine would base on the default branch
+   * and push a duplicate PR.
+   */
+  baseRef?: string;
+  /**
+   * The pull request `baseRef` was resolved from (DES-L9): number, head branch and URL — carried
+   * to the deliver phase so its script pushes `wicked/<run>` onto `refs/heads/<headRef>`, proves
+   * the tip, comments the run record on the PR (`gh pr comment`) and prints the PR URL last.
+   */
+  revisesPr?: { number: number; headRef: string; url: string };
   /** Workflow def id to drive (e.g. `domain-extraction`). Omit ⇒ free-text planning. */
   workflow?: string;
   /**
@@ -168,6 +195,15 @@ export interface CrewSystemSettings extends SystemSettings {
    * per-key byte cap" at the PUT boundary (`api/routes.ts` `STUDIO_SETTINGS_MAX_BYTES`).
    */
   [key: `studio.${string}`]: unknown;
+  /**
+   * RESTATED narrow (DES-L4 PR-⑧, D-8b): `'require'` is the only policy this daemon reads or writes.
+   * The published wire (`wicked-crew-api-types` 0.38.0 `SystemSettings.baseSkillPolicy`) still spells
+   * `'warn' | 'require'` — it predates the deletion; the union loses `'warn'` in the next api-types
+   * field list. `PUT /settings` refuses `'warn'` (400) and the settings.json loader refuses it by
+   * name, so nothing typed by the wire reaches a reader as `'warn'`. (The one-way wire pins —
+   * produced ⊆ published — hold: `'require'` ⊆ `'warn' | 'require'`.)
+   */
+  baseSkillPolicy?: BaseSkillPolicy;
 }
 
 export const DEFAULT_SETTINGS: CrewSystemSettings = {
@@ -180,4 +216,11 @@ export const DEFAULT_SETTINGS: CrewSystemSettings = {
   // default: a completed code run ends with a PR, or with the operator's explicit
   // `deliver: 'none'` (or this setting flipped) saying why not.
   deliverDefault: 'pr',
+  // crew#554 (wicked-core#468) / DES-L4 PR-⑧ (D-8, D-8b) — every governed agent unit follows the
+  // cross-CLI discipline skill, and `'require'` is the ONLY policy: a published generation that
+  // lacks the skill REFUSES every launch at intake (the engine's `BaseSkillRefused`) — never a
+  // silently UNGROUNDED run (the deleted `'warn'` rung left every seat with no launcher and no
+  // shim, signalled only by a /health warning). `baseSkillRef: ''` is the one OFF switch.
+  baseSkillRef: DEFAULT_BASE_SKILL_REF,
+  baseSkillPolicy: 'require',
 };

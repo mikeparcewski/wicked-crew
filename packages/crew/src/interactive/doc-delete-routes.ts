@@ -47,14 +47,12 @@ import type { FastifyInstance } from 'fastify';
 import { API_PREFIX } from '../api/api-prefix.js';
 import type { AuditLog } from '../api/audit.js';
 import type { CoreAdapter } from '../core/adapter.js';
-import { ProjectsUnsupportedError } from '../core/adapter.js';
 import type { Actor } from '../core/types.js';
-import { DEFAULT_PROJECT_ID } from '../projects/routes.js';
 import type { ProjectSettingsStore } from '../projects/settings.js';
-import { resolveInteractiveRoot } from './bridge-root.js';
 import { BridgeUnavailableError, type InteractiveBridgePool, type LiveBridge } from './bridge-pool.js';
 import { DOC_NAME } from './draft-events.js';
 import type { DocLedgerSweep } from './doc-ledger-sweep.js';
+import { projectDocsRoot } from './project-root.js';
 
 const V = API_PREFIX;
 
@@ -73,6 +71,10 @@ export interface DocDeleteDeps {
    *  a directly-driven route set gets an inert default so unit tests never touch ~/.wicked-crew). */
   dropDocLedgerRows: (documentId: string) => DocLedgerSweep;
   env?: NodeJS.ProcessEnv;
+  /** The daemon state home the DEFAULT docs root hangs off (crew ≥ 0.7.35, D-L7-1; tests point it at a scratch dir). */
+  stateHome?: string;
+  /** The HOME a leading `~` in an EXPLICIT `interactiveRoot` expands against. */
+  home?: string;
   log?: (msg: string) => void;
   /** Budget for the bridge's retire call (tests shorten it). The tombstone write is local and
    *  fast; the default only has to outlast a busy event-loop, not a build. */
@@ -92,23 +94,12 @@ export function registerInteractiveDocDelete(
   deps: DocDeleteDeps,
 ): void {
   const { settings, pool, audit, actorOf, dropDocLedgerRows } = deps;
-  const env = deps.env ?? process.env;
   const log = deps.log ?? ((): void => undefined);
   const timeoutMs = deps.upstreamTimeoutMs ?? 30_000;
 
   /** The resolved docs root for a project, or null when no such project exists — the SAME
-   *  resolution the proxy uses (`default` is synthesized by the route layer; a pre-projects
-   *  engine still answers for the one project it can have). */
-  async function rootFor(projectId: string): Promise<string | null> {
-    if (projectId !== DEFAULT_PROJECT_ID) {
-      try {
-        if ((await adapter.projectGet(projectId)) === null) return null;
-      } catch (err) {
-        if (!(err instanceof ProjectsUnsupportedError)) throw err;
-      }
-    }
-    return resolveInteractiveRoot(settings.get(projectId), env);
-  }
+   *  resolution the proxy and the docs list use (`project-root.ts`). */
+  const rootFor = (projectId: string): Promise<string | null> => projectDocsRoot(adapter, settings, projectId, deps);
 
   /** One retire call to the bridge. Throws on transport failure (caller retries once). */
   async function retireUpstream(bridge: LiveBridge, doc: string): Promise<UpstreamRetire> {
@@ -195,8 +186,9 @@ export function registerInteractiveDocDelete(
       }
 
       // A 404 is only the retire wire's "unknown doc" when the BODY says so. A bridge too old to
-      // carry the retire route (any published wicked-interactive up to 0.8.1 — the route is newer
-      // than the ^0.8.1 spawn floor) answers this DELETE with express's default not-found page:
+      // carry the retire route (any published wicked-interactive up to 0.8.1 — the spawn floor has
+      // been ≥ ^0.9.1 since F-081 (^0.9.2 now), but a bridge an older daemon left running, or one pinned back through
+      // WICKED_INTERACTIVE_SPEC, can still answer) replies with express's default not-found page:
       // same status, no JSON, doc still alive and listed. Sweeping on that 404 would drop live
       // replay-dedup rows and report "unknown doc" for a doc `GET /api/docs` plainly lists — a
       // silent two-store divergence. So the sweep below trusts only the wire's own body.

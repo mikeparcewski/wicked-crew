@@ -21,7 +21,13 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { deliverPrScript } from '../core/deliver.js';
+import {
+  DELIVER_POSTHOC_ENV,
+  DELIVER_VERIFIED_BASE_ENV,
+  deliverPrScript,
+  type DeliverScriptOptions,
+} from '../core/deliver.js';
+import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 
 /** What one spawn of the deliver script produced: its exit status and merged output. */
 export interface DeliverScriptResult {
@@ -35,8 +41,14 @@ export interface DeliverScriptResult {
 }
 
 /** The exec seam the deliver route runs the script through — injectable so route tests can
- *  point HOME/PATH at a fixture (a stub `gh`, a temp home) without touching the daemon env. */
-export type DeliverExec = (workdir: string, intent?: string) => Promise<DeliverScriptResult>;
+ *  point HOME/PATH at a fixture (a stub `gh`, a temp home) without touching the daemon env.
+ *  `opts` is the script's PR/commit text context (crew#524): the run id, the facts the route
+ *  already holds for the fallback text, and this daemon's own origin for the run-record fetch. */
+export type DeliverExec = (
+  workdir: string,
+  intent?: string,
+  opts?: DeliverScriptOptions,
+) => Promise<DeliverScriptResult>;
 
 /** A worktree stood back up from a run's `wicked/<id>` branch, plus its teardown (crew#418). */
 export interface ReprovisionedWorktree {
@@ -73,7 +85,7 @@ export const gitReprovisionWorktree: WorktreeReprovisioner = async (repoRoot, ru
   const branch = `wicked/${runId}`;
   const run = (args: string[]): Promise<void> =>
     new Promise((resolve, reject) => {
-      execFile('git', ['-C', repoRoot, ...args], { windowsHide: true }, (err) =>
+      execFile('git', ['-C', repoRoot, ...args], { windowsHide: true, env: childEnvWithBootEstateDb() }, (err) =>
         err === null ? resolve() : reject(err),
       );
     });
@@ -115,21 +127,35 @@ const SCRIPT_TIMEOUT_MS = 5 * 60_000;
 /**
  * The production {@link DeliverExec}: `bash -lc <script>` in the run's worktree — the exact
  * invocation core's `run_tool_cmd` uses for the deliver phase (login shell, so the operator's
- * PATH — where `gh` lives — is loaded). `env` overlays the daemon's own environment; tests use
- * it to substitute HOME (whose `.bash_profile` prepends a stub `gh`), production passes none.
+ * PATH — where `gh` lives — is loaded). `opts` is the PR/commit text context (crew#524). `env`
+ * overlays the daemon's own environment; tests use it to substitute HOME (whose `.bash_profile`
+ * prepends a stub `gh`), production passes none.
  */
 export function runDeliverScript(
   workdir: string,
   intent?: string,
+  opts?: DeliverScriptOptions,
   env?: Record<string, string>,
 ): Promise<DeliverScriptResult> {
+  // The daemon's governance-store variables never ride into the deliver shell: the helper is
+  // applied LAST, so a caller overlay that spreads `process.env` cannot put them back.
+  const shellEnv = childEnvWithBootEstateDb({ ...process.env, ...env });
+  // A post-hoc lift has NO engine verification to pin to — the daemon runs the script itself, no
+  // deliver lift preceded it — so the script's verified-base refusal (wicked-core#431,
+  // `WICKED_DELIVER_VERIFIED_BASE`) must not fire off a stray pin in the daemon's own environment:
+  // it would refuse a base that merely differs from something nobody verified THIS work against.
+  delete shellEnv[DELIVER_VERIFIED_BASE_ENV];
+  // …and the script is told this IS a post-hoc lift, so the crew#426 preflight may regenerate
+  // tracked files and deliver them (disclosed) instead of refusing as an engine-driven Tool unit
+  // must (wicked-core#433 review addendum — there is no verified tree here to weaken).
+  shellEnv[DELIVER_POSTHOC_ENV] = '1';
   return new Promise((resolve) => {
     execFile(
       'bash',
-      ['-lc', deliverPrScript(intent)],
+      ['-lc', deliverPrScript(intent, opts)],
       {
         cwd: workdir,
-        env: { ...process.env, ...env },
+        env: shellEnv,
         maxBuffer: OUTPUT_CAP_BYTES,
         timeout: SCRIPT_TIMEOUT_MS,
       },

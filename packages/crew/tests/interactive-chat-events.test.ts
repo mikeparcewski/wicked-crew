@@ -43,6 +43,7 @@ import {
   startInteractiveChatSubscriber,
 } from '../src/interactive/chat-events.js';
 import { DRAFT_COMPLETED, STATUS_POSTED, INTERACTIVE_PRODUCER } from '../src/interactive/draft-events.js';
+import { mkdirSync as mkdirp } from 'node:fs';
 import { projectGraphDb, projectGraphManifest, repoLabel } from '../src/projects/graph-paths.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent, LaunchRunInput, WorkflowDef } from '../src/core/types.js';
@@ -566,6 +567,39 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     expect(sub!.inFlightDocs()).toEqual([]);
   });
 
+  it('F-045: every frame for a project-bound ask carries project_id — pickup, heartbeat, terminal, and the announce', async () => {
+    const bus = await import('wicked-bus');
+    const engine = fakeAdapter();
+    const docDir = join(docsRoot, 'pid-doc');
+    mkdirp(docDir, { recursive: true });
+    writeFileSync(join(docDir, 'versions.json'), JSON.stringify({ head: 1, versions: [{ version: 1, html_file: '_v1.html' }] }), 'utf8');
+    writeFileSync(join(docDir, '_v1.html'), '<html><body><h1 data-wid="w-h1">hi</h1></body></html>', 'utf8');
+    const sub = await startSub(engine, { heartbeatMs: 60 });
+    expect(sub).not.toBeNull();
+    subs.push(sub!);
+    armProbe(bus);
+
+    await emitChatPosted(bus, 'pid-doc', { project_id: 'proj-9', source_message_id: 'm-9' });
+    await waitFor(() => engine.launches.length === 1);
+    const launch = engine.launches[0]!;
+    const frames = () =>
+      probeEvents.filter(
+        (e) =>
+          e.event_type === STATUS_POSTED &&
+          e.producer_id === INTERACTIVE_PRODUCER &&
+          (e.payload as { document_id?: string }).document_id === 'pid-doc',
+      );
+    await waitFor(() => frames().length >= 3); // pickup + heartbeats
+    for (const e of frames()) expect((e.payload as { project_id?: string }).project_id).toBe('proj-9');
+
+    writeFileSync(join(launch.extraWriteRoots![0]!, 'revised.html'), '<html><body><h1>revised</h1></body></html>', 'utf8');
+    engine.fire({ type: 'sessionCompleted', session: launch.sessionId });
+    await waitFor(() => probeEvents.some((e) => e.event_type === DRAFT_COMPLETED));
+    expect((probeEvents.find((e) => e.event_type === DRAFT_COMPLETED)!.payload as { project_id?: string }).project_id).toBe('proj-9');
+    await waitFor(() => frames().some((e) => (e.payload as { state?: string }).state === 'complete'));
+    expect(frames().every((e) => (e.payload as { project_id?: string }).project_id === 'proj-9')).toBe(true);
+  });
+
   it('ROLE FILTER: agent narration echoes and feedback-batch echoes launch nothing', async () => {
     const bus = await import('wicked-bus');
     const engine = fakeAdapter();
@@ -595,12 +629,26 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     seedDoc('kindless-doc'); // the real source-doc manifest shape: no kind field at all
     const sub = await startSub(engine);
     subs.push(sub!);
+    armProbe(bus);
 
-    await emitChatPosted(bus, 'demo-doc');
+    await emitChatPosted(bus, 'demo-doc', { project_id: 'proj-7' });
     await emitChatPosted(bus, 'never-created');
     await new Promise((r) => setTimeout(r, 300));
     expect(engine.launches.length).toBe(0);
     expect(sub!.ledger.size()).toBe(0);
+    // F-RECON-013: the demo ask is DECLINED ON THE THREAD (an error status naming what to do instead) —
+    // not dropped into a log line while the canvas shows "generating". The unknown doc stays silent
+    // (nothing to post to).
+    await waitFor(() =>
+      probeEvents.some((e) => e.event_type === STATUS_POSTED && e.producer_id === INTERACTIVE_PRODUCER && (e.payload as { state?: string }).state === 'error'),
+    );
+    const declined = probeEvents.filter((e) => e.event_type === STATUS_POSTED && (e.payload as { state?: string }).state === 'error');
+    expect(declined.length).toBe(1);
+    const pl = declined[0]!.payload as { document_id: string; project_id?: string; message: string };
+    expect(pl.document_id).toBe('demo-doc');
+    expect(pl.project_id).toBe('proj-7');
+    expect(pl.message).toMatch(/demo storyboards are not supported yet/);
+    expect(pl.message).toMatch(/highlight the step/);
 
     // …while the kindless manifest — what interactive ACTUALLY writes for a source doc — is answered.
     await emitChatPosted(bus, 'kindless-doc', { source_message_id: 'm-kindless' });
@@ -965,7 +1013,7 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
       expect(launch.projectId).toBe('proj-nograph');
       expect('projectGraph' in launch).toBe(false);
       // The decision is RECORDED even on the degrade — a repo-less run is told it gets NOTHING.
-      expect(logged.some((m) => /no code graph yet|repo-less run gets no code graph/.test(m))).toBe(true);
+      expect(logged.some((m) => /has not been built yet|repo-less run gets no code graph/.test(m))).toBe(true);
     });
 
     it('an UNFILED doc (no project_id) launches with NO projectGraph key — nothing to bind', async () => {

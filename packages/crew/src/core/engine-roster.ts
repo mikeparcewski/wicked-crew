@@ -1,0 +1,199 @@
+/**
+ * The roster crew hands the ENGINE (`LaunchOptions.clisJson`) vs the roster crew serves the STUDIO
+ * (`GET /roster`) — one seat, two audiences, and the fields must not leak across (wave 6, the crew
+ * half of F-7R2-006).
+ *
+ * `GET /roster` decorates every registry seat with crew's own readings: runtime `health`
+ * (`{status: 'active', since, lastErrorAt?}` — seat-health.ts; `inactive` is no longer produced), `signed_in`, `auth`,
+ * `free_tier(_source)`, `council_eligible` + `council_ineligible_reason` (seat-standing.ts;
+ * `council_bench` is gone — R5b — though the stripper below still names it, so a seat from an older
+ * daemon's roster cannot round-trip it into the engine). The studio's launch form round-trips those seats into `clisJson` verbatim,
+ * which was fine while the engine ignored every unknown field — but the wave-6 engine grew its own
+ * `AgenticCli.health: Option<SeatHealth {usable: bool, reason?}>` (the launcher's usability verdict
+ * that benches a seat for the run). Same key, different shape: a round-tripped crew `health`
+ * (`{status: …}`) would fail the engine's deserializer with "missing field `usable`" and refuse the
+ * launch. So the boundary translates:
+ *
+ *  - crew's standing fields are STRIPPED (they are the studio's, not the engine's);
+ *  - `council_eligible` becomes the engine's `health`: `false` ⇒ `{usable: false, reason}` — the seat
+ *    is BENCHED for the run (never convened, never a failover or judge target, named in
+ *    `unitDistributed.degradedReason`); `true` ⇒ `{usable: true}`; absent ⇒ no `health` (unknown —
+ *    the engine treats the seat as eligible until it fails authentication in the run);
+ *  - a seat that already carries an ENGINE-shaped `health` (`usable` is a boolean) is kept as sent.
+ *
+ * An engine predating the field ignores `health` (the `AgenticCli` deserializer has no
+ * `deny_unknown_fields`), so the stamp is additive there and effective on the wave-6 engine.
+ */
+
+import type { CampaignDef } from './types.js';
+
+/** The crew-only readings `GET /roster` adds to a registry seat — never handed to the engine. */
+export const CREW_ONLY_SEAT_FIELDS: ReadonlySet<string> = new Set([
+  // F-W1-005: the daemon's chat admission verdict — the studio picker's source of truth, not an
+  // engine field.
+  'chat_admission',
+  'health',
+  'signed_in',
+  'auth',
+  'free_tier',
+  'free_tier_source',
+  'council_eligible',
+  'council_ineligible_reason',
+  'council_bench',
+]);
+
+/** The engine's `AgenticCli.health` (wicked-core `SeatHealth`, wave 6). */
+export interface EngineSeatHealth {
+  usable: boolean;
+  reason?: string;
+}
+
+function isEngineHealth(v: unknown): v is EngineSeatHealth {
+  return typeof v === 'object' && v !== null && typeof (v as { usable?: unknown }).usable === 'boolean';
+}
+
+/**
+ * The SHORT bench reason the engine renders inline — `"codex (signed out — launcher)"` in
+ * `unitDistributed.degradedReason` — derived from the standing readings themselves (seat-standing.ts
+ * `seatStanding` decides `council_eligible`; this names the one cause in two or three words), falling
+ * back to the first clause of `council_ineligible_reason` for a cause this table does not know.
+ */
+export function shortBenchReason(seat: Record<string, unknown>): string | undefined {
+  if (seat['enabled_for_council'] === false) return 'not enabled for council';
+  if (seat['auth'] === 'signed_out') return 'signed out';
+  // (R5 / R5b, DES-L3 PR-3D) The `inactive` health flip and the crew council-count bench are
+  // gone — the engine's per-run ballot ledger is the one bench; a stale client's `council_bench`
+  // is still stripped by CREW_ONLY_SEAT_FIELDS, never read.
+  const verbose = seat['council_ineligible_reason'];
+  if (typeof verbose === 'string' && verbose.trim() !== '') {
+    return verbose.split(/\s+—\s+|;\s+/, 1)[0]!.trim().slice(0, 80);
+  }
+  return undefined;
+}
+
+/** One seat translated for the engine (see the module doc). Non-object entries pass through so the
+ *  engine reports its own parse error rather than crew inventing one. */
+export function toEngineSeat(seat: unknown): unknown {
+  if (typeof seat !== 'object' || seat === null || Array.isArray(seat)) return seat;
+  const s = seat as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(s)) {
+    if (!CREW_ONLY_SEAT_FIELDS.has(k)) out[k] = v;
+  }
+  if (isEngineHealth(s['health'])) out['health'] = s['health'];
+  if (s['council_eligible'] === false) {
+    const reason = shortBenchReason(s);
+    out['health'] = {
+      usable: false,
+      ...(reason !== undefined ? { reason } : {}),
+    } satisfies EngineSeatHealth;
+  } else if (s['council_eligible'] === true) {
+    out['health'] = { usable: true } satisfies EngineSeatHealth;
+  }
+  return out;
+}
+
+/** Translate a whole roster. */
+export function toEngineRoster(seats: readonly unknown[]): unknown[] {
+  return seats.map(toEngineSeat);
+}
+
+/**
+ * Translate a `clisJson` string for the engine. A string that does not parse to a JSON array is
+ * returned UNCHANGED — the engine's own "invalid clisJson" refusal is the honest answer, not a
+ * crew-side rewrite of something crew could not read.
+ */
+export function engineRosterJson(clisJson: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(clisJson);
+  } catch {
+    return clisJson;
+  }
+  if (!Array.isArray(parsed)) return clisJson;
+  return JSON.stringify(toEngineRoster(parsed));
+}
+
+/**
+ * Translate a `CampaignDef` for the engine (F-086). Every node's `run_spec.clis` goes through
+ * {@link toEngineRoster} — the ONLY seat list the def carries (`CampaignDef` has no def-level
+ * roster; `campaigns/plan.ts` stamps the roster per node). `CoreAdapter.launchCampaign` used to
+ * `JSON.stringify(def)` verbatim, so a def built from `rosterWithStanding()` (`POST /testing/recon`)
+ * reached core-ts ≥ 0.7.22 (wicked-core#449) with crew's `health {status}` intact and the engine
+ * refused it ("defJson is not a valid CampaignDef: missing field `usable`") — the campaign seam now
+ * translates exactly as `launchRun` does through {@link engineRosterJson}.
+ *
+ * Non-mutating: the caller's def, nodes and run_specs are left as built (the route's audit record
+ * and the recon response read them after the launch). A node whose `clis` is not an array passes
+ * through unchanged so the engine reports its own parse error, the {@link engineRosterJson} rule.
+ */
+export function engineCampaignDef(def: CampaignDef): CampaignDef {
+  return {
+    ...def,
+    nodes: def.nodes.map((node) => ({
+      ...node,
+      run_spec: {
+        ...node.run_spec,
+        clis: Array.isArray(node.run_spec.clis) ? toEngineRoster(node.run_spec.clis) : node.run_spec.clis,
+      },
+    })),
+  };
+}
+
+/** `POST /runs` 409 `code` when the engine refuses a launch for want of an eligible seat (crew#556). */
+export const NO_ELIGIBLE_SEAT_CODE = 'no_eligible_seat' as const;
+
+/** The remedy in operator terms — the engine's own closing clause, plus where the standing shows. */
+export const NO_ELIGIBLE_SEAT_REMEDY =
+  'Sign a seat in (or add one to the roster) and launch again — GET /api/v1/roster shows each ' +
+  "seat's standing and why it is not council-eligible.";
+
+/**
+ * wicked-core#461's typed `NoEligibleSeat` intake refusal, as its Display reaches crew through the
+ * napi rejection: `no eligible seat for <run>: <benched> — sign a seat in, or add one, before
+ * launching`. The engine raises it synchronously at `launch_run` when the plan needs a seat and every
+ * seat of a non-empty roster was benched by the launcher (`health.usable: false` — crew's
+ * `council_eligible: false`, stamped by {@link toEngineRoster}); nothing is persisted, nothing
+ * reaches the wire. The napi seam carries only the message, so the recogniser is the message's
+ * shape (the `isEngineStateHomeRefusal` rule); a message of any other shape is not this refusal.
+ */
+export function parseNoEligibleSeat(message: string): { runId: string; benched: string } | null {
+  const m = /^no eligible seat for (\S+): (.+?) — sign a seat in, or add one, before launching$/s.exec(
+    message.trim(),
+  );
+  return m === null ? null : { runId: m[1]!, benched: m[2]! };
+}
+
+/** The typed 409 body (`NoEligibleSeatBody` in wicked-crew-api-types) for a recognised refusal. */
+export function noEligibleSeatBody(
+  message: string,
+  refused: { runId: string; benched: string },
+): {
+  error: string;
+  code: typeof NO_ELIGIBLE_SEAT_CODE;
+  runId: string;
+  benched: string;
+  remedy: string;
+} {
+  return {
+    error: message,
+    code: NO_ELIGIBLE_SEAT_CODE,
+    runId: refused.runId,
+    benched: refused.benched,
+    remedy: NO_ELIGIBLE_SEAT_REMEDY,
+  };
+}
+
+/** The seat keys of a roster the ENGINE would convene — every seat not benched by its `health`. */
+export function eligibleSeatKeys(seats: readonly unknown[]): string[] {
+  const out: string[] = [];
+  for (const seat of toEngineRoster(seats)) {
+    if (typeof seat !== 'object' || seat === null) continue;
+    const s = seat as { key?: unknown; health?: unknown; enabled_for_council?: unknown };
+    if (typeof s.key !== 'string') continue;
+    if (s.enabled_for_council === false) continue;
+    if (isEngineHealth(s.health) && !s.health.usable) continue;
+    out.push(s.key);
+  }
+  return out;
+}
