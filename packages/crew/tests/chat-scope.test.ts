@@ -692,6 +692,9 @@ describe('resolveChatScope — crew#642 entityCount liveness gate', () => {
   // constructor that omitted the dep SKIPPED the gate entirely and reported a schema-only database
   // as grounded — crew#642 all over again, in the one shape the type system permits.
   it('OMITTING entityCount still runs the liveness gate: a zero-entity graph reports ungrounded', async () => {
+    // CreateProcess cannot run a shebang file, so the probe would fail to spawn and return 0 —
+    // ungrounded for the WRONG reason, which would make this pass without ever parsing `nodes=0`.
+    if (process.platform === 'win32') return;
     // A stub `wicked-estate` that answers the stats line estate itself prints, with nodes=0.
     const stub = join(base, 'estate-zero.mjs');
     writeFileSync(stub, "#!/usr/bin/env node\nconsole.log('nodes=0 edges=0 files=0');\n");
@@ -708,6 +711,9 @@ describe('resolveChatScope — crew#642 entityCount liveness gate', () => {
   });
 
   it('OMITTING entityCount is not a blanket refusal either: the default probe grounds a POPULATED graph (guard)', async () => {
+    // Same shebang-stub limit: on Windows the spawn fails, the probe reads 0 and this guard would
+    // fail unconditionally on a correct implementation.
+    if (process.platform === 'win32') return;
     const stub = join(base, 'estate-full.mjs');
     writeFileSync(stub, "#!/usr/bin/env node\nconsole.log('nodes=5 edges=4 files=2');\n");
     chmodSync(stub, 0o755);
