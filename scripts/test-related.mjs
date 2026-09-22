@@ -216,8 +216,13 @@ export function checksTimeoutS(root = ROOT) {
   }
 }
 
-/** Run a command, streaming its output through AND capturing it (the last 512 KiB) for the classifier. */
-function spawnCapturing(argv, cwd, out) {
+/**
+ * Run a command, streaming each stream through to ITS OWN destination — stdout to stdout, stderr to
+ * stderr — while capturing both (the last 512 KiB, interleaved) for the classifier. The split
+ * matters: the floor records `stdoutTail` and `stderrTail` separately on the verdict, and folding
+ * stderr into stdout would empty one of the two pieces of evidence an operator reads.
+ */
+function spawnCapturing(argv, cwd, out, err) {
   return new Promise((done) => {
     const [cmd, ...rest] = argv;
     const child = spawn(process.platform === 'win32' ? `${cmd}.cmd` : cmd, rest, {
@@ -227,14 +232,14 @@ function spawnCapturing(argv, cwd, out) {
     });
     const CAP = 512 * 1024;
     let buf = '';
-    const take = (chunk) => {
+    const take = (sink) => (chunk) => {
       const s = chunk.toString();
-      out(s);
+      sink(s);
       buf += s;
       if (buf.length > CAP) buf = buf.slice(-CAP);
     };
-    child.stdout?.on('data', take);
-    child.stderr?.on('data', take);
+    child.stdout?.on('data', take(out));
+    child.stderr?.on('data', take(err));
     child.on('error', (err) => done({ status: 1, output: buf, spawnError: err.message }));
     child.on('close', (code) => done({ status: code ?? 1, output: buf, spawnError: null }));
   });
@@ -246,7 +251,15 @@ function spawnCapturing(argv, cwd, out) {
  * `io.run` is the seam the tests drive: `(argv, cwd) => Promise<{ status, output, spawnError }>`.
  */
 export async function runTargeted(files, io = {}) {
-  const run = io.run ?? ((argv, cwd) => spawnCapturing(argv, cwd, (s) => process.stdout.write(s)));
+  const run =
+    io.run ??
+    ((argv, cwd) =>
+      spawnCapturing(
+        argv,
+        cwd,
+        (s) => process.stdout.write(s),
+        (s) => process.stderr.write(s),
+      ));
   const out = io.out ?? ((line) => process.stdout.write(`${line}\n`));
   const host = io.host ?? hostSnapshot;
   const now = io.now ?? Date.now;
