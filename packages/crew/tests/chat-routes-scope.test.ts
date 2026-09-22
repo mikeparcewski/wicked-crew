@@ -28,6 +28,9 @@ let entityCount: (dbPath: string) => Promise<number> = async () => 1;
 let broadcast: unknown[];
 /** chatId → the seats that actually warmed, filled by the adapter's `chatOpen` wrapper. */
 let warmByChat: Map<string, string[]>;
+/** When set, decides what a send REACHES — used to model a turn that reaches fewer seats than are
+ *  warm (a transient engine drop), which is the only broadcast that can tell "roster" from "reach". */
+let sendReaches: ((chatId: string, targets?: string[]) => string[]) | null = null;
 /** Records exactly what the route hands the engine: `(chatId, clis, cwd, scope)`. */
 const chatOpen = vi.fn(async (...args: [string, string[], string?, unknown?]) =>
   args[1].map((c) => ({ cliKey: c, ok: true })),
@@ -61,6 +64,7 @@ function fakeAdapter(): CoreAdapter {
     // The seats a turn REACHES: the named targets narrowed to what is warm, else everyone warm.
     // A targeted send returning one seat is not a one-seat chat, and this fixture can now say so.
     chatSend: async (chatId: string, _text: string, targets?: string[]) => {
+      if (sendReaches !== null) return sendReaches(chatId, targets);
       const warm = warmByChat.get(chatId) ?? [];
       return targets === undefined ? warm : targets.filter((t) => warm.includes(t));
     },
@@ -78,6 +82,7 @@ beforeEach(async () => {
   entityCount = async () => 1; // default: indexed; override per-test for crew#642 zero-entity path
   broadcast = [];
   warmByChat = new Map();
+  sendReaches = null;
   chatScopes = new ChatScopeIndex(join(base, 'chats'));
   app = Fastify({ logger: false });
   registerRoutes(app, fakeAdapter(), new GateCache(), new ElicitationCache(), undefined, undefined, undefined, {
@@ -405,17 +410,35 @@ describe('crew#641 — single-seat degradation disclosed on open and every turn'
     return body;
   };
 
-  it('202 carries NO singleSeat on a BROADCAST to a two-warm-seat chat that had a refusal', async () => {
+  it('202 carries NO singleSeat on a BROADCAST to a two-warm-seat chat — including when the turn REACHES only one of them', async () => {
     await openTwoWarmOneRefused('two-warm-broadcast');
-    const res = await app.inject({
+    // (a) the ordinary broadcast: both warm seats answer.
+    const all = await app.inject({
       method: 'POST',
       url: '/api/v1/chats/two-warm-broadcast/messages',
       payload: { text: 'hello both' },
     });
-    expect(res.statusCode).toBe(202);
-    const body = res.json() as { seats: string[]; singleSeat?: unknown };
-    expect(body.seats).toEqual(['claude', 'opencode']);
-    expect(body.singleSeat).toBeUndefined();
+    expect(all.statusCode).toBe(202);
+    const allBody = all.json() as { seats: string[]; singleSeat?: unknown };
+    expect(allBody.seats).toEqual(['claude', 'opencode']);
+    expect(allBody.singleSeat).toBeUndefined();
+
+    // (b) a SECOND two-warm-seat chat where the engine REACHES only one seat on a broadcast (a
+    // transient drop). A separate chat, because the first one's turn is still in flight. The chat
+    // still has two warm seats and can still disagree with itself, so the 202 must report WHICH
+    // seat answered without claiming the chat is degraded. This is the broadcast that can tell the
+    // roster from the reach — assertion (a) alone passes on either derivation.
+    await openTwoWarmOneRefused('two-warm-partial');
+    sendReaches = () => ['claude'];
+    const partial = await app.inject({
+      method: 'POST',
+      url: '/api/v1/chats/two-warm-partial/messages',
+      payload: { text: 'anyone there?' },
+    });
+    expect(partial.statusCode).toBe(202);
+    const partialBody = partial.json() as { seats: string[]; singleSeat?: unknown };
+    expect(partialBody.seats).toEqual(['claude']);
+    expect(partialBody.singleSeat, 'one seat REACHED is not a one-seat chat').toBeUndefined();
   });
 
   it('202 carries NO singleSeat on a TARGETED send to ONE seat of a two-warm-seat chat — the turn reached one seat, the chat still has two', async () => {
