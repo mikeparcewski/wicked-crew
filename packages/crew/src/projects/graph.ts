@@ -85,6 +85,18 @@ export function estateExe(env: NodeJS.ProcessEnv = process.env): string {
   return env['WICKED_ESTATE_EXE'] ?? 'wicked-estate';
 }
 
+/**
+ * The whole-graph counts from `wicked-estate stats --db` stdout (`nodes=N edges=M files=F …`, the
+ * first line estate prints — `main.rs`'s `stats` summary). `undefined` when the line does not parse
+ * (an older/newer estate, an error message): the caller leaves `CodeGraphData.totals` ABSENT.
+ * Shared by the repo-graph route (routes.ts) and the chat-scope liveness check (crew#642).
+ */
+export function parseEstateTotals(stdout: string): { nodes: number; edges: number; files: number } | undefined {
+  const m = /^nodes=(\d+) edges=(\d+) files=(\d+)/m.exec(stdout);
+  if (m === null) return undefined;
+  return { nodes: Number(m[1]), edges: Number(m[2]), files: Number(m[3]) };
+}
+
 /** Queries are interactive; a full repo index is not. Both are bounded — neither hangs the daemon. */
 const QUERY_TIMEOUT_MS = 30_000;
 const INDEX_TIMEOUT_MS = 600_000;
