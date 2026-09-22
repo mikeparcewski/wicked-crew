@@ -31,6 +31,8 @@ beforeEach(() => {
 
 afterEach(() => {
   rmSync(base, { recursive: true, force: true });
+  // The stub `wicked-estate` some tests point at lives under `base`, which has just been removed.
+  delete process.env['WICKED_ESTATE_EXE'];
 });
 
 function repo(id: string, name: string, root: string, graph = join(base, `graph-${id}.db`)): RepoEntry {
@@ -685,6 +687,58 @@ describe('the scratch root and its statement', () => {
 
 // crew#642 — ownGraph liveness: a graph file that holds zero entities is NOT grounded.
 describe('resolveChatScope — crew#642 entityCount liveness gate', () => {
+  // Review of #651, finding 1: the dep is OPTIONAL and its contract promises a default that probes
+  // `wicked-estate stats --db`. Before this fix the default lived only in `chatScopeDeps`, so a
+  // constructor that omitted the dep SKIPPED the gate entirely and reported a schema-only database
+  // as grounded — crew#642 all over again, in the one shape the type system permits.
+  it('OMITTING entityCount still runs the liveness gate: a zero-entity graph reports ungrounded', async () => {
+    // A stub `wicked-estate` that answers the stats line estate itself prints, with nodes=0.
+    const stub = join(base, 'estate-zero.mjs');
+    writeFileSync(stub, "#!/usr/bin/env node\nconsole.log('nodes=0 edges=0 files=0');\n");
+    chmodSync(stub, 0o755);
+    process.env['WICKED_ESTATE_EXE'] = stub;
+    const d = deps();
+    delete (d as { entityCount?: unknown }).entityCount; // the dep a future constructor forgets
+    const res = await resolveChatScope({ chatId: 'ec-default', repoRefs: ['r-gamma'] }, d);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.scope.graph.bound).toBe(false);
+    expect(res.scope.graph.reason).toMatch(/holds no entities/);
+    expect(res.engine.codeGraphDb).toBeNull();
+  });
+
+  it('OMITTING entityCount is not a blanket refusal either: the default probe grounds a POPULATED graph (guard)', async () => {
+    const stub = join(base, 'estate-full.mjs');
+    writeFileSync(stub, "#!/usr/bin/env node\nconsole.log('nodes=5 edges=4 files=2');\n");
+    chmodSync(stub, 0o755);
+    process.env['WICKED_ESTATE_EXE'] = stub;
+    const d = deps();
+    delete (d as { entityCount?: unknown }).entityCount;
+    const res = await resolveChatScope({ chatId: 'ec-default-full', repoRefs: ['r-gamma'] }, d);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    // Proves the default is really the estate probe rather than a constant 0 — this one passes on
+    // the pre-fix tree too (no gate ran there), and is kept as the over-fire guard.
+    expect(res.scope.graph.bound).toBe(true);
+  });
+
+  // Review of #651, finding 2: `nodes === 0` is the wrong predicate for a gate that must fail
+  // closed — every malformed answer (-1, NaN) slipped past it and bound the graph.
+  it.each([
+    ['a NEGATIVE count', -1],
+    ['a NaN count (unparseable probe output)', Number.NaN],
+  ])('a malformed entityCount answer — %s — reports ungrounded, not bound', async (_name, value) => {
+    const res = await resolveChatScope(
+      { chatId: `ec-malformed-${String(value)}`, repoRefs: ['r-gamma'] },
+      deps({ entityCount: async () => value as number }),
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.scope.graph.bound).toBe(false);
+    expect(res.scope.graph.reason).toMatch(/holds no entities/);
+    expect(res.engine.codeGraphDb).toBeNull();
+  });
+
   it('a single repo whose graph file exists but holds ZERO entities reports ungrounded with the indexing remedy — FAILS on main (returns bound:true)', async () => {
     // gamma's code_graph_db is written as an empty file in REPOS() (line ~50).
     const res = await resolveChatScope(

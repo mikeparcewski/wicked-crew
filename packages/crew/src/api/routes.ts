@@ -2482,7 +2482,7 @@ export function registerRoutes(
                 message:
                   `This chat has one seat (${warmSeat.cliKey}); it cannot disagree with itself. ` +
                   `Refused: ${refused.map((r) => `${r.cliKey} (${r.reason})`).join('; ')}. ` +
-                  'The single-seat root cause is tracked as wicked-core#563; this run makes it visible.',
+                  'The single-seat root cause is tracked as wicked-core#563; this chat makes it visible.',
               }
             : undefined;
         return reply.code(201).send({
@@ -2586,7 +2586,7 @@ export function registerRoutes(
               message:
                 `This chat has one seat (${warmRoster[0]!}); it cannot disagree with itself. ` +
                 `Refused: ${refused202.map((r) => `${r.cliKey} (${r.reason})`).join('; ')}. ` +
-                'The single-seat root cause is tracked as wicked-core#563; this run makes it visible.',
+                'The single-seat root cause is tracked as wicked-core#563; this chat makes it visible.',
             }
           : undefined;
       return reply.code(202).send({
