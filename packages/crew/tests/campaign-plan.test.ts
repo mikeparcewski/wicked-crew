@@ -57,6 +57,15 @@ describe('buildCampaign — DAG shape', () => {
     expect(def.max_concurrency).toBe(4);
   });
 
+  it('passes `denialGate` through as the engine def\'s `denial_gate`; absent ⇒ absent (engine default hold)', () => {
+    const { def } = buildCampaign({ ...body(), denialGate: 'auto_reject' }, CLIS);
+    expect(def.denial_gate).toBe('auto_reject');
+    const { def: plain } = buildCampaign(body(), CLIS);
+    expect('denial_gate' in plain).toBe(false);
+    // The wire the engine parses: snake_case, beside `policy` / `max_concurrency`.
+    expect(JSON.parse(JSON.stringify(def))).toMatchObject({ policy: 'continue_independent', max_concurrency: 2, denial_gate: 'auto_reject' });
+  });
+
   it('rejects an unknown dep, a self-dep, and a duplicated dep — each named', () => {
     expect(() =>
       buildCampaign(body({ scenarios: [{ id: 'a', deps: ['ghost'], tool: { cmd: ['true'] } }] }), CLIS),

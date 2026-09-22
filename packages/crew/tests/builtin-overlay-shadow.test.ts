@@ -11,7 +11,8 @@
 // `bug.verify` and `migration.verify` — every gate floor core ships, removed by a file write, on a
 // run that still reported the right workflow and the right phases.
 //
-// Two halves fix it. Core carries a shadowed pin forward as a backstop (`carry_shadowed_pins`).
+// Two halves fix it. Core REFUSES a shadow that drops a gate (registration judges the def as
+// authored — wicked-core#414; the earlier `carry_shadowed_pins` backstop is gone).
 // This is the other half, and it is the one that stops the shadowing: the write is now scoped to
 // the ids core does NOT seed, which is the only reason the write existed.
 //
@@ -27,6 +28,7 @@ import { join } from 'node:path';
 import { CoreAdapter } from '../src/core/adapter.js';
 import type { WorkflowDef } from '../src/core/types.js';
 import { SKIP_CORE_CHECKS, readCoreJson } from './support/core-checkout.js';
+import { BUG_FIX_SWEEP_INSTRUCTIONS } from '../src/core/deliver.js';
 import { removeScratch } from './setup/scratch.js';
 
 const SEATS = JSON.stringify([
@@ -160,6 +162,18 @@ describe.skipIf(SKIP_CORE_CHECKS)('mirror matches wicked-core', () => {
     });
   }
 
+  // DES-L9 BC-60, row 6.9: the `bug.fix` sweep `instructions` is on BOTH carriers now — core-ts 0.7.27
+  // is published and core main's `workflows/bug.json` carries the field, so the field-for-field loop
+  // above compares the mirror with a core that has it (no tolerance; a bridge function existed in
+  // crew #601 only for the window between #522 landing and 0.7.27 publishing — deleted here so any
+  // real mirror drift fails). This positive check keeps the literal explicit on both sides.
+  it('the bug.fix sweep instructions are byte-identical on the mirror and core (BC-60, both carriers)', () => {
+    const served = adapter.listWorkflows().find((w) => w.id === 'bug')!;
+    const coreFix = coreDefs['bug']!.phases.find((p) => p.id === 'fix')!;
+    expect(served.phases.find((p) => p.id === 'fix')!.instructions).toBe(BUG_FIX_SWEEP_INSTRUCTIONS);
+    expect(coreFix.instructions).toBe(BUG_FIX_SWEEP_INSTRUCTIONS);
+  });
+
   it('reports the evidence floor on exactly the phases core gates', () => {
     // The assertion the mirror failed. `listWorkflows()` is what GET /api/v1/workflows and the
     // work-mode selector render, so a null pin here tells an operator a gated phase is ungated.
@@ -167,10 +181,12 @@ describe.skipIf(SKIP_CORE_CHECKS)('mirror matches wicked-core', () => {
       const def = adapter.listWorkflows().find((w) => w.id === id)!;
       return [id, def.phases.filter((p) => p.validator_pin !== null).map((p) => p.id)];
     });
+    // wicked-core F-039: the code-writing Creator phases carry the floor too — the `fix` gate
+    // (and `build`/`execute`) must evaluate something, never fold `combined: true` over nothing.
     expect(gated).toEqual([
-      ['feature', ['adversarial-review', 'test']],
-      ['bug', ['verify']],
-      ['migration', ['verify']],
+      ['feature', ['build', 'adversarial-review', 'test']],
+      ['bug', ['fix', 'verify']],
+      ['migration', ['execute', 'verify']],
     ]);
   });
 });

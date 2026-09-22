@@ -102,9 +102,12 @@ describe('GET /roster with seat health (crew#274)', () => {
     const { roster } = res.json() as { roster: RosterSeat[] };
     const codex = roster.find((s) => s.key === 'codex');
     const claude = roster.find((s) => s.key === 'claude');
-    expect(codex?.health?.status).toBe('inactive');
-    expect(codex?.health?.message).toContain('401 Unauthorized');
+    // (R5) A 401 never flips the seat `inactive`; it is the seat's OWN auth refusal → `auth`.
+    expect(codex?.health?.status).toBe('active');
+    expect(codex?.health?.message).toBeUndefined();
     expect(codex?.health?.lastErrorAt).toBeDefined();
+    expect(codex).toMatchObject({ auth: 'signed_out', auth_source: 'seat-stderr' });
+    expect(String((codex as Record<string, unknown>)['auth_evidence'])).toContain('401 Unauthorized');
     expect(claude?.health?.status).toBe('active');
     expect(claude?.health?.message).toBeUndefined();
   });

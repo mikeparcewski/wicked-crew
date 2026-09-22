@@ -34,7 +34,7 @@
  * so a raced terminal-frame warm heals in seconds even where the sweep is off.
  */
 
-import type { AgentSession, SessionView } from '../core/types.js';
+import type { SessionView } from '../core/types.js';
 import {
   deliveryStateOf,
   deliveryStateWithVacuity,
@@ -44,8 +44,10 @@ import {
   type VacuityProbes,
 } from './delivery-index.js';
 
-/** The session facts the derivation reads — the same pick `deliveryStateWithVacuity` takes. */
-type SessionFacts = Pick<AgentSession, 'id' | 'status' | 'repo_ref' | 'workdir'>;
+/** What the cache classifies (crew#481): the whole run view — the deliver unit and the def
+ *  (`workflow_id` → `resolveRunWorkflow`) are two of `runCanDeliver`'s inputs, so candidacy needs
+ *  the view, not the session facts alone. */
+export type CacheView = SessionView;
 
 /** One tick = the trust window the per-probe memo already grants, so moving derivation off the
  *  request path changes WHO pays, never how stale a label may read. */
@@ -73,19 +75,18 @@ export interface DeliveryDerivationCacheDeps {
   /** A run the `DeliveryIndex` already answers needs no derivation — the read path
    *  short-circuits on the recorded URL before it ever consults this cache. */
   isDelivered: (runId: string) => boolean;
+  /** Def-awareness (crew#481 / D-14): `runCanDeliver(view, resolveRunWorkflow(view, workflows))` in
+   *  the daemon — a completed run whose def has no deliver unit and no code-work phase is NOT a
+   *  candidate (never derived, never cached; `read` answers `'none'` from the same predicate the
+   *  campaigns rollup and the resume 409 apply). Absent ⇒ every completed repo-scoped run is a
+   *  candidate — today's behaviour, for directly-driven route sets whose adapter has no registry. */
+  canDeliver?: (view: CacheView) => boolean;
   /** Retry-backoff floor after a failed derivation (tests shorten it). */
   retryBaseMs?: number;
   log?: (msg: string) => void;
   /** ERROR-level channel for a NON-probe derivation throw — a defect, not weather (the daemon
    *  wires `app.log.error`, which the diagnostics ring also captures). Falls back to `log`. */
   logError?: (msg: string) => void;
-}
-
-/** Only a COMPLETED repo-scoped run's full derivation can differ from the stat-only tri-state
- *  (`deliveryStateWithVacuity` answers `deliveryStateOf` verbatim, git-free, for every other
- *  shape) — so only these runs are ever derived or cached. */
-function isCandidate(session: SessionFacts): boolean {
-  return session.status === 'completed' && session.repo_ref != null;
 }
 
 export class DeliveryDerivationCache {
@@ -112,6 +113,20 @@ export class DeliveryDerivationCache {
 
   constructor(private readonly deps: DeliveryDerivationCacheDeps) {}
 
+  /** The def-awareness answer for one view — `true` when no `canDeliver` dep is wired (today). */
+  private canDeliver(view: CacheView): boolean {
+    return this.deps.canDeliver?.(view) ?? true;
+  }
+
+  /** Only a COMPLETED repo-scoped run THAT COULD HAVE DELIVERED has a full derivation that can
+   *  differ from the stat-only tri-state (`deliveryStateWithVacuity` answers `deliveryStateOf`
+   *  verbatim, git-free, for every other shape) — so only these runs are ever derived or cached.
+   *  The third clause is crew#481: a completed `capture-learnings`/`onboarding` run is `'none'` by
+   *  definition, so it is neither probed nor cached. */
+  private isCandidate(view: CacheView, canDeliver: boolean = this.canDeliver(view)): boolean {
+    return view.session.status === 'completed' && view.session.repo_ref != null && canDeliver;
+  }
+
   /**
    * The request path. Synchronous by design — a cache hit answers the background-derived state;
    * a miss answers the stat-only tri-state (one `existsSync`, no git) and does NOT enqueue a
@@ -119,14 +134,17 @@ export class DeliveryDerivationCache {
    * never fan a poll out into subprocess spawns, however cold the cache.
    *
    * Non-candidate shapes skip the cache entirely: their stat answer IS the full derivation, and
-   * skipping keeps a (theoretical) stale entry from ever outliving its run's candidacy.
+   * skipping keeps a (theoretical) stale entry from ever outliving its run's candidacy. The
+   * def-awareness rides the same `canDeliver` the candidacy read (crew#481): a completed run whose
+   * def could never have delivered answers `'none'` here, cold or warm.
    */
-  read(session: SessionFacts): DeliveryState {
-    if (isCandidate(session)) {
-      const hit = this.derived.get(session.id);
+  read(view: CacheView): DeliveryState {
+    const canDeliver = this.canDeliver(view); // one registry read per request, passed through
+    if (this.isCandidate(view, canDeliver)) {
+      const hit = this.derived.get(view.session.id);
       if (hit !== undefined) return hit;
     }
-    return deliveryStateOf(session, undefined, this.deps.probes.worktreeExists);
+    return deliveryStateOf(view.session, undefined, this.deps.probes.worktreeExists, canDeliver);
   }
 
   /**
@@ -140,8 +158,8 @@ export class DeliveryDerivationCache {
       if (this.deps.isDelivered(runId)) return;
       const views = await this.deps.listViews();
       const view = views.find((v) => v.session.id === runId);
-      if (view === undefined || !isCandidate(view.session)) return;
-      await this.schedule(view.session);
+      if (view === undefined || !this.isCandidate(view)) return;
+      await this.schedule(view);
     } catch (err) {
       this.deps.log?.(
         `[runs] delivery-derivation warm for ${runId} failed (label reads stat-only until the next sweep): ${
@@ -168,8 +186,8 @@ export class DeliveryDerivationCache {
       }
       await Promise.all(
         views
-          .filter((v) => isCandidate(v.session) && !this.deps.isDelivered(v.session.id))
-          .map((v) => this.schedule(v.session)),
+          .filter((v) => this.isCandidate(v) && !this.deps.isDelivered(v.session.id))
+          .map((v) => this.schedule(v)),
       );
     } catch (err) {
       this.deps.log?.(
@@ -213,13 +231,19 @@ export class DeliveryDerivationCache {
    *  the entry is left untouched (a miss keeps the honest stat-only degrade; a previous honest
    *  verdict stands) and the run re-derives after a short backoff, doubling up to the sweep
    *  cadence — the in-flight guard folds overlapping schedules, so retries can never storm. */
-  private schedule(session: SessionFacts): Promise<void> {
+  private schedule(view: CacheView): Promise<void> {
+    const { session } = view;
     const pending = this.inFlight.get(session.id);
     if (pending !== undefined) return pending;
     const job = (async () => {
       await this.acquire();
       try {
-        const state = await deliveryStateWithVacuity(session, undefined, this.deps.probes);
+        const state = await deliveryStateWithVacuity(
+          session,
+          undefined,
+          this.deps.probes,
+          this.canDeliver(view),
+        );
         // A 'stranded' verdict over a worktree that VANISHED mid-derivation is not an answer
         // either: the engine's terminal reap races the terminal-frame warm, and a half-removed
         // tree can read "dirty" (deleted paths in `git status`) the instant before its .git

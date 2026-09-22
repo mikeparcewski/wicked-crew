@@ -346,7 +346,8 @@ describe('the background pool — capped, in-flight-guarded, candidates only', (
     );
     try {
       await cache.warm('run-raced'); // the failed derivation itself
-      const facts = { id: 'run-raced', status: 'completed', repo_ref: 'r', workdir: '/wt' } as const;
+      // crew#481: the cache classifies the whole view (def-awareness reads the units + workflow id).
+      const facts = view('run-raced', { repo_ref: 'r', workdir: '/wt' });
       // Not cached: the read still answers the stat-only degrade, never the raced 'stranded'
       // dressed up as a full derivation. (Both spell 'stranded' here — what is pinned is that
       // the WRONG shape was not recorded, proven by the heal below.)
@@ -380,7 +381,7 @@ describe('the background pool — capped, in-flight-guarded, candidates only', (
     );
     try {
       await cache.warm('run-vanish');
-      const facts = { id: 'run-vanish', status: 'completed', repo_ref: 'r', workdir: '/wt' } as const;
+      const facts = view('run-vanish', { repo_ref: 'r', workdir: '/wt' });
       await vi.waitFor(() => expect(cache.read(facts)).toEqual({ delivery: 'vacuous' }), {
         timeout: 2_000,
       });
@@ -437,9 +438,9 @@ describe('the background pool — capped, in-flight-guarded, candidates only', (
       expect(String(logError.mock.calls[0]![0])).toContain('DEFECT'); // distinct from probe noise
       expect(log).not.toHaveBeenCalled(); // the warn channel carries only probe-unavailable
       // The label still degrades honestly, never records the broken derivation:
-      expect(
-        cache.read({ id: 'run-bug', status: 'completed', repo_ref: 'r', workdir: '/wt' }),
-      ).toEqual({ delivery: 'stranded' });
+      expect(cache.read(view('run-bug', { repo_ref: 'r', workdir: '/wt' }))).toEqual({
+        delivery: 'stranded',
+      });
     } finally {
       cache.stop();
     }
@@ -458,9 +459,7 @@ describe('the background pool — capped, in-flight-guarded, candidates only', (
       index,
     );
     await cache.warm('run-a');
-    expect(
-      cache.read({ id: 'run-a', status: 'completed', repo_ref: 'r', workdir: '/wt' }),
-    ).toEqual({ delivery: 'vacuous' });
+    expect(cache.read(view('run-a', { repo_ref: 'r', workdir: '/wt' }))).toEqual({ delivery: 'vacuous' });
     await cache.warm('run-pr');
     expect(worktreeIsClean).toHaveBeenCalledTimes(1); // run-a alone — the PR run never probes
   });

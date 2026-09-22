@@ -63,14 +63,26 @@ import {
   proposeClause,
   recallClause,
   type RecallIntent,
+  docScope,
+  type SeamStatusPayload,
+  narrationStamps,
 } from './draft-events.js';
 import { InteractiveHandoffLedger } from './ledger.js';
+import { DRAFT_SKILL, draftQualityClause, draftSkillArmLine, withDraftSkill, type SkillHeld } from './draft-skill.js';
 import { crewStateHome } from '../projects/state-home.js';
 import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
 import { resolveInteractiveRoot } from './bridge-root.js';
 import type { CoreAdapter } from '../core/adapter.js';
 import { DELIVERABLE_FLOOR_PHASE_ID } from '../core/deliverable-floor.js';
 import type { CoreEvent, WorkflowDef } from '../core/types.js';
+import {
+  acpFallbackLine,
+  councilAgreementPct,
+  councilOutcomeSuffix,
+  ungatedGateNote,
+  workerToolCallDeniedLine,
+} from './council-outcome.js';
+import { busSubscriberErrorReporter } from './bus-subscriber-errors.js';
 
 // ── Vocabulary constants (interactive's, verbatim — src/service/events.js is the truth) ──────
 
@@ -269,6 +281,23 @@ export function isAnswerableDocKind(kind: string): boolean {
   return kind === 'source' || kind === 'doc';
 }
 
+/** The thread's answer to an ask on a doc no seam answers (F-RECON-013) — demo gets the specific
+ *  remedy, any other foreign kind the generic one. Mirrors the proxy's 422 (`askRefusalFor`). */
+export function foreignKindAskMessage(kind: string): string {
+  if (kind === 'demo') {
+    return (
+      'Asks on demo storyboards are not supported yet — a demo is re-authored from STEP feedback, not from ' +
+      'the thread. Nothing was launched for this message. To change the demo, highlight the step and send ' +
+      'that as feedback (the demo seam re-authors the spec and re-records); to retry the recording as ' +
+      'authored, use Re-record.'
+    );
+  }
+  return (
+    `Asks on documents of kind '${kind}' have no answering seam on this daemon — nothing was launched for ` +
+    'this message.'
+  );
+}
+
 /**
  * The run's problem statement (the engine scopes it per phase and folds each phase's
  * instructions on top). Carries everything ask-specific: identity, the flattened ask, the
@@ -327,6 +356,16 @@ export interface InteractiveChatOptions {
   /** Seat roster JSON for the governed run (default: the production council roster).
    *  The functional-test harness passes a deterministic stub seat here. */
   clisJson?: string;
+  /** The roster accessor used when `clisJson` is not set — the server wires the daemon's roster
+   *  WITH crew's standing (`api/roster-standing.ts`, F-RECON-002/003) so a signed-out seat reaches
+   *  the engine benched (`health {usable: false, reason}`) instead of being convened or elected. */
+  roster?: () => unknown[];
+  /** Does the daemon's PUBLISHED skills snapshot hold (and enable) a skill? Consulted ONCE at arm time
+   *  for `wicked-garden-draft` (interactive/draft-skill.ts): held ⇒ the drafting phases carry the
+   *  skill_ref and the task names the self-check's inputs; not held ⇒ the run proceeds without the
+   *  quality floor and the arm log says so (the engine would refuse a skill_ref the snapshot lacks).
+   *  Default: `() => false` (a caller without a skills runtime has no snapshot to hold anything). */
+  skillHeld?: SkillHeld;
   /** The docs root an ask's doc is read from. Default: the shared-default resolution
    *  (`WICKED_INTERACTIVE_ROOT` › `~/wicked-interactive/docs`); the server wires the
    *  per-project `interactiveRoot` setting through here so a project on its own root
@@ -347,6 +386,8 @@ export interface InteractiveChatOptions {
   onRunFiled?: (runId: string, projectId: string) => void;
   /** Diagnostics sink (default: console.error). */
   log?: (message: string) => void;
+  /** Error-level logger for connection-fatal subscriber errors (the /diagnostics ring folds it); defaults to `log`. */
+  logError?: (message: string) => void;
 }
 
 /** Handle for a running subscription. */
@@ -363,11 +404,17 @@ export interface InteractiveChatSubscription {
 interface InFlight {
   key: string;
   documentId: string;
+  /** The doc's project binding — stamped on every emit (F-045). Undefined = unfiled. */
+  projectId?: string | undefined;
   outPath: string;
   /** The manifest head the launch snapshotted — the landing gate's baseline. */
   headAtLaunch: number;
   /** The most recent real narration line (phase transitions overwrite it; the heartbeat repeats it). */
   narration: string;
+  /** The governed run id (the in-flight map key), stamped on narration as `run_id` (F-4R2-005). */
+  runId?: string | undefined;
+  /** The ord of the latest unit-scoped engine frame, stamped on narration as `unit_ord`. */
+  narrationOrd?: number | undefined;
   heartbeat: ReturnType<typeof setInterval>;
   /** The engine's own reason for the most recent failed unit (`stepFailed.detail`). Carried so
    *  the terminal error status names WHY — in particular the crew#311 deliverable-floor report,
@@ -399,9 +446,17 @@ function defaultStateDir(): string {
   return crewStateHome();
 }
 
-/** The production council roster, resolved lazily through the adapter's own class so this module
- *  never imports the native addon at runtime (unit tests pass `clisJson` and a fake adapter). */
-function rosterOf(adapter: CoreAdapter): unknown[] {
+/** The council roster a launch carries when no `clisJson` override is set. F-RECON-002/003: the
+ *  server injects `roster` — the daemon's roster WITH standing (`api/roster-standing.ts`), so
+ *  `launchRun`'s `engineRosterJson` benches signed-out seats instead of convening (or electing)
+ *  them. Without an injected accessor the adapter's own `launchRoster()` is asked (the same
+ *  standing when the daemon wired it); the raw registry, resolved lazily through the adapter's
+ *  class so this module never imports the native addon at runtime, is the last resort (unit tests
+ *  pass `clisJson` and a fake adapter). */
+function rosterOf(adapter: CoreAdapter, roster?: () => unknown[]): unknown[] {
+  if (roster !== undefined) return roster();
+  const own = (adapter as unknown as { launchRoster?: () => unknown[] }).launchRoster;
+  if (typeof own === 'function') return own.call(adapter);
   return (adapter.constructor as unknown as { roster(): unknown[] }).roster();
 }
 
@@ -420,6 +475,7 @@ export async function startInteractiveChatSubscriber(
   opts: InteractiveChatOptions = {},
 ): Promise<InteractiveChatSubscription | null> {
   const log = opts.log ?? ((m: string) => console.error(m));
+  let draftSkillHeld = false; // set at arm time (draft-skill.ts); read at launch for the task clause
 
   let bus: typeof import('wicked-bus');
   try {
@@ -451,7 +507,10 @@ export async function startInteractiveChatSubscriber(
   // persisted/hot-registered (FINDING-002 ordering), so a drifted def fails the arm loudly
   // instead of failing the first launch obscurely.
   try {
-    await adapter.registerWorkflow(INTERACTIVE_CHAT_WORKFLOW_DEF);
+    // The quality-floor skill rides only when the published snapshot holds it (draft-skill.ts).
+    draftSkillHeld = (opts.skillHeld ?? (() => false))(DRAFT_SKILL);
+    log(draftSkillArmLine('interactive-chat', draftSkillHeld));
+    await adapter.registerWorkflow(withDraftSkill(INTERACTIVE_CHAT_WORKFLOW_DEF, draftSkillHeld));
   } catch (err) {
     log(
       `[interactive-chat] could not register the '${INTERACTIVE_CHAT_WORKFLOW}' workflow — ` +
@@ -506,12 +565,19 @@ export async function startInteractiveChatSubscriber(
     }
   }
 
+  /** Every `status.posted` this seam emits is typed as the published frame's payload (codex on
+   *  crew#506: the wire type at the real boundary, not a detached alias) — `emitInteractive` adds `ts`. */
+  function emitStatus(payload: SeamStatusPayload): boolean {
+    return emitInteractive(STATUS_POSTED, { ...payload });
+  }
+
   function narrate(flight: InFlight, message: string): void {
     flight.narration = message;
-    emitInteractive(STATUS_POSTED, {
-      document_id: flight.documentId,
+    emitStatus({
+      ...docScope(flight.documentId, flight.projectId),
       state: 'working',
       message,
+      ...narrationStamps(flight),
     });
   }
 
@@ -544,6 +610,10 @@ export async function startInteractiveChatSubscriber(
     if (runId === undefined) return;
     const flight = inFlight.get(runId);
     if (flight === undefined) return;
+    // F-4R2-005: every narration line and heartbeat from here carries the run id and the ord of the
+    // latest unit-scoped frame (`narrationStamps`), so a skin keys the thread per run and per unit.
+    flight.runId ??= runId;
+    if (typeof event.ord === 'number') flight.narrationOrd = event.ord;
 
     // Narration ladder — same rationale as the draft fold: the heartbeat repeats the LATEST
     // line and the transcript dedups repeats, so advancing the line = visible progress.
@@ -575,8 +645,10 @@ export async function startInteractiveChatSubscriber(
       if (isFloorOrd(event)) return;
       const ord = typeof event.ord === 'number' ? event.ord : 0;
       const who = typeof event.cli === 'string' ? event.cli : 'a worker';
-      const pct = typeof event.agreement_pct === 'number' ? ` (${event.agreement_pct}% agreement)` : '';
-      narrate(flight, `Council picked ${who} for ${phaseName(ord)}${pct}…`);
+      const agreement = councilAgreementPct(event);
+      const pct = agreement !== null ? ` (${agreement}% agreement)` : '';
+      // Honest about a council that held on a fraction of its seats (F-4R2-007).
+      narrate(flight, `Council picked ${who} for ${phaseName(ord)}${pct}${councilOutcomeSuffix(event)}…`);
       return;
     }
 
@@ -619,9 +691,26 @@ export async function startInteractiveChatSubscriber(
       return;
     }
 
+    // Wave 6 — the honest gate (F-7R2-005): a unit NOTHING gated must read as UNGATED in the thread,
+    // never as approved; the engine says so on `gateEvaluated.ungated` and names the missing layers.
+    if (event.type === 'gateEvaluated') {
+      const note = ungatedGateNote(event);
+      if (note !== null) {
+        const ord = typeof event.ord === 'number' ? event.ord : 0;
+        narrate(flight, `Gate for ${phaseName(ord)}: ${note}`);
+      }
+      return;
+    }
+
+    // Wave 6 — the fenced worker (F-7R2-012): a seat that tried to push or open a PR itself was
+    // refused; the thread names who, what, and that delivery belongs to the run's deliver phase.
+    if (event.type === 'workerToolCallDenied') {
+      narrate(flight, workerToolCallDeniedLine(event));
+      return;
+    }
+
     if (event.type === 'acpFallback') {
-      const who = typeof event.cliKey === 'string' ? event.cliKey : 'the worker';
-      narrate(flight, `${who}'s live session dropped — continuing in single-shot mode…`);
+      narrate(flight, acpFallbackLine(event));
       return;
     }
 
@@ -644,8 +733,8 @@ export async function startInteractiveChatSubscriber(
       ledger.recordFailure(flight.key);
       const why =
         flight.failureDetail !== undefined ? ` Reason: ${oneLine(flight.failureDetail, 600)}` : '';
-      emitInteractive(STATUS_POSTED, {
-        document_id: flight.documentId,
+      emitStatus({
+        ...docScope(flight.documentId, flight.projectId),
         state: 'error',
         message:
           `The crew run answering your ask ${event.type === 'runCancelled' ? 'was cancelled' : 'failed'} ` +
@@ -659,7 +748,7 @@ export async function startInteractiveChatSubscriber(
   });
 
   function finalize(flight: InFlight, runId: string): void {
-    const { key, documentId, outPath } = flight;
+    const { key, documentId, projectId, outPath } = flight;
     let ok = false;
     try {
       ok = existsSync(outPath) && statSync(outPath).size > 0;
@@ -668,8 +757,8 @@ export async function startInteractiveChatSubscriber(
     }
     if (!ok) {
       ledger.recordFailure(key);
-      emitInteractive(STATUS_POSTED, {
-        document_id: documentId,
+      emitStatus({
+        ...docScope(documentId, projectId),
         state: 'error',
         message: `The crew run completed but produced no revised document at ${outPath} (run ${runId}). Resend the message to retry.`,
       });
@@ -681,7 +770,7 @@ export async function startInteractiveChatSubscriber(
     // makes a re-announce a WB-002 no-op.
     const emitted = emitInteractive(
       DRAFT_COMPLETED,
-      { document_id: documentId, html_path: outPath },
+      { ...docScope(documentId, projectId), html_path: outPath },
       `crew:interactive.chat:${key}`,
     );
     if (!emitted) {
@@ -689,8 +778,8 @@ export async function startInteractiveChatSubscriber(
       // reached the service. Fail HONEST — leaving the row launched-but-never-closed would
       // silently eat a redelivery of this ask (the launch gate is `ledger.has`).
       ledger.recordFailure(key);
-      emitInteractive(STATUS_POSTED, {
-        document_id: documentId,
+      emitStatus({
+        ...docScope(documentId, projectId),
         state: 'error',
         message:
           `Crew finished the revision but could not announce it on the bus (run ${runId}); ` +
@@ -708,8 +797,8 @@ export async function startInteractiveChatSubscriber(
       minHead: flight.headAtLaunch + 1,
       until: Date.now() + landingGateMs,
     });
-    emitInteractive(STATUS_POSTED, {
-      document_id: documentId,
+    emitStatus({
+      ...docScope(documentId, projectId),
       state: 'complete',
       message: 'Revision is in — landing the new version on the canvas now.',
     });
@@ -740,8 +829,8 @@ export async function startInteractiveChatSubscriber(
       headOk = false;
     }
     if (!headOk) {
-      emitInteractive(STATUS_POSTED, {
-        document_id: ask.documentId,
+      emitStatus({
+        ...docScope(ask.documentId, ask.projectId),
         state: 'error',
         message: `Crew could not read the document's current version (missing ${doc.headHtmlPath}) — the ask was not answered.`,
       });
@@ -765,8 +854,8 @@ export async function startInteractiveChatSubscriber(
 
     // The studio's 90s silence budget: this pickup line is what keeps the thread honest, so
     // it fires BEFORE the launch resolves.
-    emitInteractive(STATUS_POSTED, {
-      document_id: ask.documentId,
+    emitStatus({
+      ...docScope(ask.documentId, ask.projectId),
       state: 'processing',
       message: 'A governed crew picked up your ask — revising the document…',
     });
@@ -805,14 +894,22 @@ export async function startInteractiveChatSubscriber(
         // axis (the reliably-available axis on this seam). An unfiled ask leaves it undefined, so
         // the clause is omitted. Phase 6: thread cli/repo (no single cli is in scope here — the
         // launch carries the whole council roster via `clisJson`, not one assigned seat).
-        problem: chatProblem(
-          ask,
-          currentPath,
-          outPath,
-          ask.projectId !== undefined ? { project: ask.projectId } : undefined,
-        ),
+        problem:
+          chatProblem(
+            ask,
+            currentPath,
+            outPath,
+            ask.projectId !== undefined ? { project: ask.projectId } : undefined,
+          ) +
+          // The quality floor on a revision (draft-skill.ts): the revised COMPLETE document lands at
+          // outPath, so the self-check runs there; the page budget is the one the document already
+          // has (count its pages — the manifest carries no style), no snapshot rides this leg.
+          (draftSkillHeld
+            ? ' ' +
+              draftQualityClause(outPath, { pages: null, exact: false, source: 'unknown' }, [], { revision: true })
+            : ''),
         sessionId: runId,
-        clisJson: opts.clisJson ?? JSON.stringify(rosterOf(adapter)),
+        clisJson: opts.clisJson ?? JSON.stringify(rosterOf(adapter, opts.roster)),
         workflow: INTERACTIVE_CHAT_WORKFLOW,
         // A project-bound doc's governed revision is FILED (same contract as the sibling
         // seams); an unbound doc launches with the key OMITTED — an unfiled governed run,
@@ -846,8 +943,8 @@ export async function startInteractiveChatSubscriber(
       // The 'processing' status is already on the thread — close it out honestly so the
       // canvas never sits in an in-between state on a launch that went nowhere.
       const reason = err instanceof Error ? err.message : String(err);
-      emitInteractive(STATUS_POSTED, {
-        document_id: ask.documentId,
+      emitStatus({
+        ...docScope(ask.documentId, ask.projectId),
         state: 'error',
         message: `Crew could not start a run for your ask: ${reason}. Resend the message to retry.`,
       });
@@ -864,16 +961,18 @@ export async function startInteractiveChatSubscriber(
     const flight: InFlight = {
       key,
       documentId: ask.documentId,
+      projectId: ask.projectId,
       outPath,
       headAtLaunch: doc.head,
       narration: 'Crew run launched — working on your revision…',
       heartbeat: setInterval(() => {
         // Repeat the last real narration so the ~20s status.requested window is always fed,
         // even mid-phase when the engine is quiet.
-        emitInteractive(STATUS_POSTED, {
-          document_id: flight.documentId,
+        emitStatus({
+          ...docScope(flight.documentId, flight.projectId),
           state: 'working',
           message: flight.narration,
+          ...narrationStamps(flight),
         });
       }, heartbeatMs),
       // Do not keep the daemon alive for narration alone.
@@ -979,8 +1078,19 @@ export async function startInteractiveChatSubscriber(
       return;
     }
     if (!isAnswerableDocKind(doc.kind)) {
+      // F-RECON-013: NOT a silent decline. The proxy refuses such an ask with a typed 422 before it
+      // reaches the bus (proxy-routes.ts `askRefusalFor`); one that still arrives (an older skin, a
+      // direct bridge client) gets an honest `error` status on the thread — the thread would
+      // otherwise sit on "generating" until its silence budget blamed the service. No ledger row:
+      // nothing was answered, and a replay must be judged again.
+      emitStatus({
+        ...docScope(ask.documentId, ask.projectId),
+        state: 'error',
+        message: foreignKindAskMessage(doc.kind),
+      });
       log(
-        `[interactive-chat] doc ${ask.documentId} has kind '${doc.kind}' — demo (and other foreign-kind) docs are not this seam's to answer`,
+        `[interactive-chat] doc ${ask.documentId} has kind '${doc.kind}' — demo (and other foreign-kind) docs are not ` +
+          `this seam's to answer; the ask was declined on the thread with an error status, not dropped`,
       );
       return;
     }
@@ -993,8 +1103,8 @@ export async function startInteractiveChatSubscriber(
       const queue = queues.get(ask.documentId) ?? [];
       queue.push(queued);
       queues.set(ask.documentId, queue);
-      emitInteractive(STATUS_POSTED, {
-        document_id: ask.documentId,
+      emitStatus({
+        ...docScope(ask.documentId, ask.projectId),
         state: 'processing',
         message:
           'Crew has your ask — a run is already working this document, so it is queued and will start as soon as the current work lands.',
@@ -1019,11 +1129,13 @@ export async function startInteractiveChatSubscriber(
     // would double-launch precisely because the ledger row is only written on success.
     maxRetries: 0,
     handler: (event: BusEvent) => handleChatPosted(event),
-    onError: (err: Error, event?: BusEvent) => {
-      log(
+    onError: busSubscriberErrorReporter({
+      describe: (err, event) =>
         `[interactive-chat] handler error on event ${String(event?.event_id ?? '?')}: ${err.message}`,
-      );
-    },
+      log,
+      logError: opts.logError,
+      pollIntervalMs: opts.pollIntervalMs ?? 2000,
+    }),
   });
 
   return {

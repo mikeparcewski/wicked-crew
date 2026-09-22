@@ -2,13 +2,14 @@
 #
 # This repo is an npm WORKSPACE: the root package `wicked-crew-workspace` is private and the
 # publishable `wicked-crew` daemon lives in packages/crew — hence `publish_working_dir: packages/crew`
-# (added to wicked-ci's node-release.yml on branch feat/publish-working-dir).
+# (a node-release.yml input since wicked-ci v1.2.0 — CHANGELOG "workspace publish dir", wicked-ci#7).
 #
 # PREREQUISITES — this is staged prep; a tag push will NOT go green until ALL of these land:
 #   1. wicked-core-ts is on npm (push tag `core-ts-v0.1.0` in the wicked-core repo → napi-release.yml).
 #   2. packages/crew's core-ts dep is flipped `file:../../../wicked-core/crates/wicked-core-ts` → `^0.1`
 #      so a clean CI checkout resolves the native addon (+ its platform package) from npm.
-#   3. wicked-ci `@v1` is re-tagged to include `publish_working_dir` (merge feat/publish-working-dir).
+#   3. DONE (wicked-ci v1.2.0 = 2346ba60, the SHA pinned below): `publish_working_dir`, `build_cmd`
+#      and `arm_checks_sandbox` are all released node-release.yml inputs (wicked-ci CHANGELOG v1.2.0).
 #   4. DONE (v0.2.0, DES-STUDIO-SERVING-001; re-wired by task #84; re-sourced by the #98 carve):
 #      `scripts/bundle-studio.mjs` copies the INSTALLED `wicked-studio` package's `dist/` →
 #      `packages/crew/dist/studio/`. Studio is its own product now
@@ -36,7 +37,7 @@ permissions:
 
 jobs:
   release:
-    uses: mikeparcewski/wicked-ci/.github/workflows/node-release.yml@v1
+    uses: mikeparcewski/wicked-ci/.github/workflows/node-release.yml@2346ba60a182b51b936804846f659784f6755181 # v1.2.0
     with:
       package_name: wicked-crew
       publish_working_dir: packages/crew
@@ -52,6 +53,57 @@ jobs:
       # silently skipped. Fetch the checkout so the release gates on the same evidence CI does
       # (FINDING-094). `tests/core-checkout-policy.test.ts` fails loudly if this ever stops working.
       install_cmd: 'node scripts/fetch-core-checkout.mjs && npm install'
+      # wicked-core#433 raised the evidence floor: before deliver pushes, the engine re-runs the repo's
+      # checks INSIDE an OS write boundary (Linux: bwrap) and fails closed without one — the v0.7.29 tag's
+      # first release run (34582106702) went red on deliver-e2e for want of it while PR CI (ci.yml, #527)
+      # was green. #529 stop-gapped that by folding the bwrap install + smoke into install_cmd; since
+      # wicked-ci v1.2.0 (wicked-ci#21) node-release.yml arms the same sandbox itself when opted in.
+      arm_checks_sandbox: true
       test_cmd: 'npm run -w packages/crew build && npm run -w packages/crew test'
       enable_sync_pr: true
     secrets: inherit
+
+  # ── Post-publish release-verify (FIX-IT-ALL L10-7; DES-L10 §5 PR-L10-7). Rule 2 of the RC: the
+  # wicked-smoke harness (wicked-ci smoke.yml, S01–S10) had ZERO callers across five repos — a release
+  # could publish a set no smoke ever installed. `version` derives the published version from the tag
+  # and waits for npm to serve it (six-package replication lag; bound 10 min). `smoke` installs THAT
+  # published set into a hermetic root on the runner and runs the harness. A red `smoke` turns the
+  # release run red: the publish is NOT reverted — the playbook deprecates the version and the set
+  # stays FIXED-UNVERIFIED until a green smoke. A true pre-`latest` gate (publish under dist-tag
+  # `next`, promote on PASS) is decision D-L10-1, owed; this is the post-publish default. The
+  # harness is pinned by SHA (`wicked_ci_ref` empty ⇒ the same commit) — re-pin to the v1.3.2 tag's
+  # SHA when wicked-ci cuts it (the new S09/S10 checks for crew#551/#493 ride that tag).
+  version:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - id: v
+        shell: bash
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          printf 'version=%s\n' "$v" >> "$GITHUB_OUTPUT"
+          echo "waiting for wicked-crew@$v on npm (bound: 10 min)"
+          for i in $(seq 1 60); do
+            got="$(npm view "wicked-crew@$v" version 2>/dev/null || true)"
+            if [ "$got" = "$v" ]; then echo "npm serves wicked-crew@$v"; exit 0; fi
+            sleep 10
+          done
+          echo "::error::wicked-crew@$v is not visible on npm 10 min after publish"
+          exit 1
+  smoke:
+    needs: [release, version]
+    permissions:
+      contents: read
+    uses: mikeparcewski/wicked-ci/.github/workflows/smoke.yml@201d42dfebac1306a8fc81fe559aee99bbdef0e2 # v1.3.2
+    with:
+      crew_version: ${{ needs.version.outputs.version }}
+      # wicked-ci #30 (release verdict crew 0.7.35 §Smoke gate): on a CROSS-REPO workflow_call GitHub
+      # leaves `github.job_workflow_sha` empty, so the harness's "same commit as the `uses:` pin"
+      # default fell back to `github.sha` — crew's own tag commit — and the harness checkout failed
+      # ("not our ref"); the smoke gate never ran inside the release run. Pin the harness ref
+      # EXPLICITLY to the same SHA as the `uses:` line above (move both together on every re-pin).
+      wicked_ci_ref: 201d42dfebac1306a8fc81fe559aee99bbdef0e2

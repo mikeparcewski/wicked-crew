@@ -11,10 +11,14 @@
  * no project ever had — every project fell through to the same root, one bridge, one registry,
  * the same 31 docs under every project's URL. Now:
  *
- *  - the synthesized `default` ("Unfiled") project keeps the LEGACY shared root, byte-identical
- *    to `wicked-interactive serve`'s own default — so every doc created before partitioning stays
- *    visible under Unfiled with no data migration, and an operator's already-running default
- *    bridge is still adopted rather than duplicated;
+ *  - the synthesized `default` ("Unfiled") project gets the SHARED default root — since crew
+ *    0.7.35 `<crew state home>/interactive/docs` (D-L7-1 / BC-49, F-RC1-122): one per daemon, so
+ *    two daemons on one host never meet on one docs directory. It is no longer interactive's own
+ *    `~/wicked-interactive/docs`: crew ALWAYS passes `--root`, so the bridge's default matters
+ *    only to a standalone `serve`. Documents an earlier daemon left under the old HOME default are
+ *    NOT moved — the boot names them once (`legacyHomeDocsNotice`) and they stay reachable through
+ *    `WICKED_INTERACTIVE_ROOT` or a project's `interactiveRoot`, which may now point anywhere,
+ *    inside the state home included;
  *  - every other project without an explicit root gets its own partition UNDER that root,
  *    `<default root>/projects/<projectId>`. Nested there on purpose: the legacy bridge's
  *    `listDocs` only lists slug-named children carrying a `versions.json`, so `projects/` is
@@ -27,10 +31,11 @@
  * "why is it on 5 ports" confusion ADR-0025 exists to prevent.
  */
 
-import { lstatSync, mkdirSync, readlinkSync, realpathSync, type Stats } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, realpathSync, type Stats } from 'node:fs';
 import { homedir } from 'node:os';
-import { relative, resolve, sep } from 'node:path';
+import { join, relative, resolve, sep } from 'node:path';
 import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
+import { crewStateHome } from '../projects/state-home.js';
 
 /** The setting carrier — a `Project` record or a crew-side settings row both satisfy this. */
 export interface InteractiveRootSetting {
@@ -54,13 +59,83 @@ export const PROJECTS_DIR = 'projects';
 const PARTITION_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 /**
- * What `wicked-interactive serve` uses with no `--root`: the canonical shared root
- * `~/wicked-interactive/docs` (ADR-0025 amended, `bin/wicked-interactive.js:181`). Kept
- * byte-identical to interactive's own default on purpose — that is what lets an operator's
- * already-running default bridge be ADOPTED by the pool instead of duplicated.
+ * The SHARED default docs root: `<crew state home>/interactive/docs` (crew 0.7.35, D-L7-1 /
+ * BC-49). One per daemon — the state home is what isolates two daemons on one host — and a
+ * registered state-home entry (`interactive`, tests/fixtures/state-home-subtrees.json), so the
+ * worker Read fence classifies it. Spelled as a literal `join(crewStateHome(), …)` on purpose:
+ * `tests/state-home-subtrees.test.ts` scans src/ for exactly that shape.
+ *
+ * Until 0.7.34 this was `~/wicked-interactive/docs`, "kept byte-identical to interactive's own
+ * default" so an operator's hand-started default bridge could be adopted. That coupling is gone:
+ * crew always spawns with `--root`, and a bridge on the old path is still adopted when a project
+ * names it. `stateHome` is injectable for tests; production always resolves the daemon's own.
  */
-export function defaultInteractiveRoot(home: string = homedir()): string {
+export function defaultInteractiveRoot(stateHome?: string): string {
+  return stateHome === undefined ? join(crewStateHome(), 'interactive', 'docs') : join(stateHome, 'interactive', 'docs');
+}
+
+/**
+ * Where the recorder's Playwright browser is provisioned and looked for — the third variable crew
+ * hands every bridge it starts (`PLAYWRIGHT_BROWSERS_PATH`, BC-50 / R-L7-d): under the same
+ * registered `interactive` entry, never the global Playwright cache (interactive #228). A
+ * bridge started before this key existed is recycled by the pool (its sidecar lacks the key) —
+ * which is also how interactive 0.9.3 reaches a running daemon.
+ */
+export function recorderBrowsersPath(stateHome?: string): string {
+  return stateHome === undefined
+    ? join(crewStateHome(), 'interactive', 'recorder-browsers')
+    : join(stateHome, 'interactive', 'recorder-browsers');
+}
+
+/** The pre-0.7.35 default docs root — interactive's own standalone default under HOME. */
+export function legacyHomeDocsRoot(home: string = homedir()): string {
   return resolve(home, 'wicked-interactive', 'docs');
+}
+
+/** A doc directory name as the bridge lists it (interactive's `DOC_NAME`). */
+const DOC_SLUG = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+function countDocDirs(dir: string): number {
+  try {
+    return readdirSync(dir, { withFileTypes: true }).filter(
+      (e) => e.isDirectory() && DOC_SLUG.test(e.name) && existsSync(join(dir, e.name, 'versions.json')),
+    ).length;
+  } catch {
+    return 0; // absent or unreadable — nothing to report
+  }
+}
+
+/**
+ * The ONE boot notice the root move owes an operator (BC-49): documents left under the old
+ * `~/wicked-interactive/docs` default (its top level and its `projects/<id>` partitions) while
+ * nothing explicit names that directory. Null when there is nothing to say — the variable is set
+ * (an explicit shared root says where docs live), the two defaults coincide, or no doc is there.
+ * Pure over its inputs so the CLI prints it once and the tests exercise it on a scratch HOME.
+ */
+export function legacyHomeDocsNotice(
+  env: Record<string, string | undefined> = process.env,
+  home: string = homedir(),
+  stateHome: string = crewStateHome(),
+): string | null {
+  const shared = env[ROOT_ENV];
+  if (typeof shared === 'string' && shared.trim() !== '') return null;
+  const legacy = legacyHomeDocsRoot(home);
+  const current = defaultInteractiveRoot(stateHome);
+  if (resolve(legacy) === resolve(current)) return null;
+  let count = countDocDirs(legacy);
+  try {
+    for (const e of readdirSync(join(legacy, PROJECTS_DIR), { withFileTypes: true })) {
+      if (e.isDirectory()) count += countDocDirs(join(legacy, PROJECTS_DIR, e.name));
+    }
+  } catch {
+    /* no partitions there */
+  }
+  if (count === 0) return null;
+  return (
+    `${count} interactive document${count === 1 ? '' : 's'} found under ${legacy} — the pre-0.7.35 default docs root. ` +
+    `The default is now ${current} (one per daemon state home) and existing documents are NOT moved. ` +
+    `To keep serving them, set ${ROOT_ENV}=${legacy} or bind a project's interactiveRoot to that directory.`
+  );
 }
 
 /**
@@ -73,16 +148,16 @@ export function defaultInteractiveRoot(home: string = homedir()): string {
  * one answer that must never be given is a silent fallback to the shared root, which would
  * quietly re-open the leak this partition closes.
  */
-export function partitionedInteractiveRoot(projectId: string, home: string = homedir()): string {
+export function partitionedInteractiveRoot(projectId: string, stateHome: string = crewStateHome()): string {
   if (!PARTITION_SEGMENT.test(projectId)) {
     throw new Error(`project id ${JSON.stringify(projectId)} cannot name an interactive docs partition`);
   }
-  return resolve(partitionsBase(home), projectId);
+  return resolve(partitionsBase(stateHome), projectId);
 }
 
 /** The directory holding every partition: `<default root>/projects`. */
-export function partitionsBase(home: string = homedir()): string {
-  return resolve(defaultInteractiveRoot(home), PROJECTS_DIR);
+export function partitionsBase(stateHome: string = crewStateHome()): string {
+  return resolve(defaultInteractiveRoot(stateHome), PROJECTS_DIR);
 }
 
 /**
@@ -143,8 +218,8 @@ function lstatOrNull(path: string): Stats | null {
  * already running is that process's (and the filesystem's) business, not something crew can see
  * from the resolution seam.
  */
-export function preparePartitionedInteractiveRoot(projectId: string, home: string = homedir()): string {
-  return containPartitionedInteractiveRoot(projectId, home, true);
+export function preparePartitionedInteractiveRoot(projectId: string, stateHome: string = crewStateHome()): string {
+  return containPartitionedInteractiveRoot(projectId, stateHome, true);
 }
 
 /**
@@ -158,8 +233,8 @@ export function preparePartitionedInteractiveRoot(projectId: string, home: strin
  * creates nothing (an event naming a project that never had a partition must not mint one).
  * Returns the lexical path either way.
  */
-export function checkPartitionedInteractiveRoot(projectId: string, home: string = homedir()): string {
-  return containPartitionedInteractiveRoot(projectId, home, false);
+export function checkPartitionedInteractiveRoot(projectId: string, stateHome: string = crewStateHome()): string {
+  return containPartitionedInteractiveRoot(projectId, stateHome, false);
 }
 
 /**
@@ -168,9 +243,9 @@ export function checkPartitionedInteractiveRoot(projectId: string, home: string 
  * seams must agree on what `projects/<id>` may be, or a link the routes refuse is still followed
  * through the seam path (the gap Copilot found on #474).
  */
-function containPartitionedInteractiveRoot(projectId: string, home: string, materialize: boolean): string {
-  const partition = partitionedInteractiveRoot(projectId, home);
-  const base = partitionsBase(home);
+function containPartitionedInteractiveRoot(projectId: string, stateHome: string, materialize: boolean): string {
+  const partition = partitionedInteractiveRoot(projectId, stateHome);
+  const base = partitionsBase(stateHome);
   if (materialize) {
     mkdirSync(base, { recursive: true });
   } else if (lstatOrNull(base) === null) {
@@ -244,13 +319,17 @@ function explicitInteractiveRoot(
  * bridge pool key. Precedence: the own `interactiveRoot` › `WICKED_INTERACTIVE_ROOT` › the
  * shared default. This is the `default` project's resolution; callers that know which project
  * they are resolving for use `resolveProjectInteractiveRoot` so other projects partition.
+ *
+ * Two injectable homes, deliberately distinct: `stateHome` places the DEFAULT (and the
+ * partitions under it); `home` only expands a leading `~` in an EXPLICIT setting.
  */
 export function resolveInteractiveRoot(
   setting: InteractiveRootSetting | null | undefined,
   env: Record<string, string | undefined> = process.env,
+  stateHome: string = crewStateHome(),
   home: string = homedir(),
 ): string {
-  return explicitInteractiveRoot(setting, env, home) ?? defaultInteractiveRoot(home);
+  return explicitInteractiveRoot(setting, env, home) ?? defaultInteractiveRoot(stateHome);
 }
 
 /**
@@ -271,9 +350,10 @@ export function resolveProjectInteractiveRoot(
   projectId: string | undefined,
   setting: InteractiveRootSetting | null | undefined,
   env: Record<string, string | undefined> = process.env,
+  stateHome: string = crewStateHome(),
   home: string = homedir(),
 ): string {
-  return resolveProjectRootWith(checkPartitionedInteractiveRoot, projectId, setting, env, home);
+  return resolveProjectRootWith(checkPartitionedInteractiveRoot, projectId, setting, env, stateHome, home);
 }
 
 /**
@@ -288,21 +368,23 @@ export function ensureProjectInteractiveRoot(
   projectId: string | undefined,
   setting: InteractiveRootSetting | null | undefined,
   env: Record<string, string | undefined> = process.env,
+  stateHome: string = crewStateHome(),
   home: string = homedir(),
 ): string {
-  return resolveProjectRootWith(preparePartitionedInteractiveRoot, projectId, setting, env, home);
+  return resolveProjectRootWith(preparePartitionedInteractiveRoot, projectId, setting, env, stateHome, home);
 }
 
 /** The one precedence rule, parameterized by how a partition is produced (spelled vs. prepared). */
 function resolveProjectRootWith(
-  partition: (projectId: string, home: string) => string,
+  partition: (projectId: string, stateHome: string) => string,
   projectId: string | undefined,
   setting: InteractiveRootSetting | null | undefined,
   env: Record<string, string | undefined>,
+  stateHome: string,
   home: string,
 ): string {
   const explicit = explicitInteractiveRoot(setting, env, home);
   if (explicit !== null) return explicit;
-  if (projectId === undefined || projectId === DEFAULT_PROJECT_ID) return defaultInteractiveRoot(home);
-  return partition(projectId, home);
+  if (projectId === undefined || projectId === DEFAULT_PROJECT_ID) return defaultInteractiveRoot(stateHome);
+  return partition(projectId, stateHome);
 }

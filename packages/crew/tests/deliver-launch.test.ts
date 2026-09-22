@@ -94,6 +94,17 @@ describe('launchRun with deliver:"pr" (crew#293)', () => {
     expect(adapter.listWorkflows().map((w) => w.id)).not.toContain('feature-deliver-run-xyz');
   });
 
+  it('autoDeliver: true rides to the engine as LaunchOptions.autoDeliver; absent otherwise (F-E2E-030)', async () => {
+    await adapter.launchRun({
+      problem: 'p', sessionId: 'run-auto', clisJson: '[]', workflow: 'feature', deliver: 'pr', autoDeliver: true,
+    });
+    await adapter.launchRun({ problem: 'p', sessionId: 'run-gated', clisJson: '[]', workflow: 'feature', deliver: 'pr' });
+    const sent = launched as Array<LaunchOptions & { autoDeliver?: boolean }>;
+    expect(sent[0]!.autoDeliver).toBe(true);
+    // The gate is the engine's default: nothing is sent to ask for it.
+    expect('autoDeliver' in sent[1]!).toBe(false);
+  });
+
   it('two delivered launches compose two independent defs — no cross-run sharing', async () => {
     await adapter.launchRun({ problem: 'p', sessionId: 'run-a', clisJson: '[]', workflow: 'feature', deliver: 'pr' });
     await adapter.launchRun({ problem: 'p', sessionId: 'run-b', clisJson: '[]', workflow: 'feature', deliver: 'pr' });

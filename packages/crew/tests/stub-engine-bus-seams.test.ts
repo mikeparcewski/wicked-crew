@@ -53,6 +53,7 @@ function fakeAdapter(stub: boolean): CoreAdapter {
     stub,
     getSettings: async (): Promise<SystemSettings> => ({ graphNodeLimit: 150 }),
     projectsSupported: (): boolean => false,
+    onLaunch: (): (() => void) => () => undefined, // the launch hook createServer registers (skills keystone, codex round 4)
     onEvent: (): (() => void) => () => undefined,
     registerWorkflow: async (def: WorkflowDef): Promise<string> => {
       registered.push(def.id);

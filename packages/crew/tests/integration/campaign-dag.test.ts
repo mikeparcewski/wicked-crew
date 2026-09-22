@@ -27,6 +27,7 @@ import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
 import type { Campaign } from '../../src/core/types.js';
 import { removeScratch } from '../setup/scratch.js';
+import { baseSkillOff } from '../setup/base-skill-off.js';
 import { quiesceCampaign } from '../setup/quiesce.js';
 
 // Presence-gated at COLLECTION time (describe.skipIf needs the answer before beforeAll): napi
@@ -65,6 +66,7 @@ beforeAll(async () => {
   process.env['WICKED_CREW_PROJECT_GRAPH_ROOT'] = join(scratch, 'project-graphs');
 
   adapter = new CoreAdapter({ dbPath: join(scratch, 'core.db'), stub: true });
+  baseSkillOff(); // run mechanics, not grounding — no published generation here (see tests/setup/base-skill-off.ts)
   app = await createServer(adapter, { auditPath: join(scratch, 'audit.log') });
   await app.listen({ port: 0, host: '127.0.0.1' });
   const addr = app.server.address();

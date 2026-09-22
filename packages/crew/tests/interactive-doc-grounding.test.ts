@@ -1,0 +1,465 @@
+// Doc → subject-repo grounding (acceptance findings F-046 + follow-up), the pure half.
+//
+// What these pin:
+//  - the CREATE GRAMMAR: `repo_ref` / `repo_refs` parse, dedupe, cap, and refuse junk; `style`
+//    inference is conservative (format words only) and the style contract names the print rule;
+//  - the RESOLUTION RULE, in order: named refs › brief-named members › sole member › none —
+//    never the project's first member (the defect);
+//  - the DURABLE BINDING: a `crew-grounding.json` sidecar beside the doc (never under the state
+//    home — core's fence refuses unregistered entries), readable by a fresh store, removable, and
+//    `waitFor` closes the bus-beats-create window without ever hanging.
+
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  CREW_GROUNDING_FILE,
+  DocGroundingStore,
+  GroundingPathRefusedError,
+  REPO_REFS_MAX,
+  groundingNarration,
+  inferDocStyle,
+  isDocStyle,
+  matchRepoRef,
+  matchingRepos,
+  parseRepoRefs,
+  projectRepoCandidates,
+  reposNamedInBrief,
+  resolveGroundingRepos,
+  snapshotDirName,
+  styleContract,
+  type GroundingRepo,
+} from '../src/interactive/doc-grounding.js';
+import type { CoreAdapter } from '../src/core/adapter.js';
+import { removeScratch } from './setup/scratch.js';
+
+describe('parseRepoRefs (the create grammar)', () => {
+  it('reads repo_ref, repo_refs, or both — de-duplicated in order', () => {
+    expect(parseRepoRefs({})).toEqual({ ok: true, refs: [] });
+    expect(parseRepoRefs({ repo_ref: 'wicked-studio' })).toEqual({ ok: true, refs: ['wicked-studio'] });
+    expect(parseRepoRefs({ repo_refs: ['a', 'b'] })).toEqual({ ok: true, refs: ['a', 'b'] });
+    expect(parseRepoRefs({ repo_ref: ' a ', repo_refs: ['b', 'a', ''] })).toEqual({ ok: true, refs: ['a', 'b'] });
+    expect(parseRepoRefs({ repo_ref: null, repo_refs: undefined })).toEqual({ ok: true, refs: [] });
+  });
+
+  it('refuses non-string entries, a non-array repo_refs, junk spellings, and more than the cap — carrying the refs AS SPELLED so the refusal can show them (Copilot, #506)', () => {
+    const nonArray = parseRepoRefs({ repo_refs: 'x' });
+    expect(nonArray).toEqual({ ok: false, error: 'repo_refs must be an array of repository ids', requested: ['x'] });
+    const nonString = parseRepoRefs({ repo_refs: [1] });
+    expect(nonString.ok).toBe(false);
+    if (!nonString.ok) expect(nonString.requested).toEqual(['1']);
+    const spaced = parseRepoRefs({ repo_ref: 'has space', repo_refs: ['ok-one'] });
+    expect(spaced.ok).toBe(false);
+    if (!spaced.ok) expect(spaced.requested).toEqual(['has space', 'ok-one']);
+    expect(parseRepoRefs({ repo_ref: '../escape' }).ok).toBe(false);
+    const many = parseRepoRefs({ repo_refs: Array.from({ length: REPO_REFS_MAX + 1 }, (_, i) => `r${i}`) });
+    expect(many.ok).toBe(false);
+    if (!many.ok) {
+      expect(many.error).toContain(`at most ${REPO_REFS_MAX}`);
+      expect(many.requested).toHaveLength(REPO_REFS_MAX + 1);
+    }
+  });
+});
+
+describe('style: inference + the format contract (F-046, F-050/F-053)', () => {
+  it('infers the bridge style from format words — print/A4 → brochure, slides → ppt, memo → doc', () => {
+    expect(inferDocStyle('A high-end product brochure. Print-ready A4, two pages.')).toBe('brochure');
+    expect(inferDocStyle('a printable one-pager for the sales team')).toBe('brochure');
+    expect(inferDocStyle('a 12-slide deck for the board')).toBe('ppt');
+    expect(inferDocStyle('an internal memo about the rollout')).toBe('doc');
+  });
+
+  it('is CONSERVATIVE: a brief with no format words infers nothing (the bridge keeps its web default)', () => {
+    expect(inferDocStyle('a one-page overview of the wicked ecosystem')).toBeUndefined();
+    expect(inferDocStyle('')).toBeUndefined();
+  });
+
+  it('explicit slide words beat print words — a deck to print is still a deck', () => {
+    expect(inferDocStyle('a slide deck we will also print on A4')).toBe('ppt');
+  });
+
+  it('isDocStyle accepts exactly the bridge set', () => {
+    for (const s of ['web', 'ppt', 'brochure', 'doc']) expect(isDocStyle(s)).toBe(true);
+    expect(isDocStyle('pdf')).toBe(false);
+    expect(isDocStyle(undefined)).toBe(false);
+  });
+
+  it('the brochure contract forbids the F-050 shape: fixed slide pages + overflow:hidden', () => {
+    const c = styleContract('brochure');
+    expect(c).toContain('PRINT pages');
+    expect(c).toContain('page breaks');
+    expect(c).toContain('never a fixed slide-size viewport');
+    expect(styleContract('ppt')).toContain('landscape slides');
+    expect(styleContract('web')).toContain('scrollable');
+    expect(styleContract('doc')).toContain('prose');
+    expect(styleContract('odd')).toContain('"odd"');
+    for (const s of ['web', 'ppt', 'brochure', 'doc']) expect(styleContract(s)).not.toMatch(/[\n\r\t]/);
+  });
+});
+
+const STUDIO: GroundingRepo = { repoRef: 'repo-studio', name: 'wicked-studio', rootPath: '/src/wicked-studio' };
+const CORE: GroundingRepo = { repoRef: 'repo-core', name: 'wicked-engine', rootPath: '/src/wicked-engine' };
+const ARCHIVED: GroundingRepo = { repoRef: 'repo-arch', name: 'wicked-studio-archived', rootPath: '/src/wicked-studio-archived' };
+/** A SECOND checkout of wicked-studio under another parent — the same name and basename (codex on #506). */
+const STUDIO_TWIN: GroundingRepo = { repoRef: 'repo-studio-twin', name: 'wicked-studio', rootPath: '/elsewhere/wicked-studio' };
+
+function adapterWith(
+  members: Record<string, Array<{ member_kind: string; member_ref: string }>>,
+  repos: Array<{ id: string; name?: string; root_path: string }>,
+): CoreAdapter {
+  return {
+    projectMembers: async (projectId: string) => members[projectId] ?? [],
+    listRepos: async () => repos,
+  } as unknown as CoreAdapter;
+}
+
+describe('matchRepoRef / reposNamedInBrief', () => {
+  it('matches a ref by registry id (exact), by name, or by root basename (case-insensitive)', () => {
+    expect(matchRepoRef('repo-studio', STUDIO)).toBe(true);
+    expect(matchRepoRef('Wicked-Studio', STUDIO)).toBe(true);
+    expect(matchRepoRef('REPO-STUDIO', STUDIO)).toBe(false); // ids are exact
+    expect(matchRepoRef('wicked-engine', STUDIO)).toBe(false);
+  });
+
+  it('matchingRepos: an exact id is unique by construction; a human spelling shared by two repos is AMBIGUOUS, never first-match (codex on #506)', () => {
+    expect(matchingRepos('repo-studio', [CORE, STUDIO, STUDIO_TWIN])).toEqual([STUDIO]);
+    expect(matchingRepos('repo-studio-twin', [CORE, STUDIO, STUDIO_TWIN])).toEqual([STUDIO_TWIN]);
+    expect(matchingRepos('wicked-studio', [CORE, STUDIO, STUDIO_TWIN])).toEqual([STUDIO, STUDIO_TWIN]);
+    expect(matchingRepos('wicked-studio', [CORE, STUDIO])).toEqual([STUDIO]);
+    expect(matchingRepos('nope', [CORE, STUDIO])).toEqual([]);
+  });
+
+  it('finds the member repos a brief names OUTRIGHT — whole tokens only, so a longer sibling name never matches', () => {
+    const brief = 'Use the real product (the wicked-studio repo in this project) for features.';
+    expect(reposNamedInBrief(brief, [CORE, STUDIO, ARCHIVED])).toEqual([STUDIO]);
+    expect(reposNamedInBrief('about Wicked Studio the product', [CORE, STUDIO])).toEqual([]); // no hyphenated name present
+    expect(reposNamedInBrief('archive: wicked-studio-archived', [STUDIO, ARCHIVED])).toEqual([ARCHIVED]);
+    expect(reposNamedInBrief('', [STUDIO])).toEqual([]);
+  });
+});
+
+describe('projectRepoCandidates + resolveGroundingRepos (the rule, in order)', () => {
+  const world = {
+    'proj-multi': [
+      { member_kind: 'crew.repo', member_ref: 'repo-core' }, // FIRST member — the old wrong default
+      { member_kind: 'crew.repo', member_ref: 'repo-studio' },
+      { member_kind: 'crew.run', member_ref: 'run-1' },
+      { member_kind: 'crew.repo', member_ref: 'repo-stale' }, // not in the registry any more
+    ],
+    'proj-solo': [{ member_kind: 'crew.repo', member_ref: 'repo-core' }],
+    'proj-bare': [{ member_kind: 'crew.run', member_ref: 'run-2' }],
+  };
+  const registry = [
+    { id: 'repo-core', name: 'wicked-engine', root_path: '/src/wicked-engine' },
+    { id: 'repo-studio', root_path: '/src/wicked-studio' }, // no name column → basename
+  ];
+  const adapter = adapterWith(world, registry);
+
+  it('lists the crew.repo members the registry vouches for, naming each by registry name or root basename', async () => {
+    const logged: string[] = [];
+    const repos = await projectRepoCandidates(adapter, 'proj-multi', (m) => logged.push(m));
+    expect(repos.map((r) => `${r.repoRef}:${r.name}`)).toEqual(['repo-core:wicked-engine', 'repo-studio:wicked-studio']);
+    expect(logged.some((m) => m.includes('repo-stale'))).toBe(true);
+    expect(await projectRepoCandidates(adapter, 'proj-bare')).toEqual([]);
+    expect(await projectRepoCandidates({} as CoreAdapter, 'proj-multi')).toEqual([]); // an adapter that cannot answer
+  });
+
+  it('NAMED refs win — resolved to member repos in request order, misses reported, never substituted', async () => {
+    const d = await resolveGroundingRepos(adapter, 'proj-multi', 'brief names wicked-engine', ['wicked-studio', 'repo-gone']);
+    expect(d.source).toBe('named');
+    expect(d.repos.map((r) => r.repoRef)).toEqual(['repo-studio']);
+    expect(d.missing).toEqual(['repo-gone']);
+    expect(d.ambiguous).toEqual([]);
+    expect(d.memberCount).toBe(2);
+  });
+
+  it('a NAMED ref shared by two member repos is reported as AMBIGUOUS and grounds nothing — the id disambiguates (codex on #506)', async () => {
+    const twins = adapterWith(
+      { 'proj-twins': [{ member_kind: 'crew.repo', member_ref: 'repo-studio' }, { member_kind: 'crew.repo', member_ref: 'repo-studio-twin' }] },
+      [
+        { id: 'repo-studio', root_path: '/src/wicked-studio' },
+        { id: 'repo-studio-twin', root_path: '/elsewhere/wicked-studio' },
+      ],
+    );
+    const d = await resolveGroundingRepos(twins, 'proj-twins', 'anything', ['wicked-studio']);
+    expect(d).toMatchObject({ source: 'named', repos: [], missing: [], ambiguous: ['wicked-studio'], memberCount: 2 });
+    const byId = await resolveGroundingRepos(twins, 'proj-twins', 'anything', ['repo-studio-twin']);
+    expect(byId.repos.map((r) => r.repoRef)).toEqual(['repo-studio-twin']);
+    expect(byId.ambiguous).toEqual([]);
+    expect(groundingNarration(d, [], 'draft')).toBe(
+      'Requested repository "wicked-studio" names several repositories in this project — name it by repository id; skipped.',
+    );
+  });
+
+  it('else the BRIEF-named members', async () => {
+    const d = await resolveGroundingRepos(adapter, 'proj-multi', 'the wicked-studio repo in this project', undefined);
+    expect(d.source).toBe('brief');
+    expect(d.repos.map((r) => r.repoRef)).toEqual(['repo-studio']);
+  });
+
+  it('else the SOLE member', async () => {
+    const d = await resolveGroundingRepos(adapter, 'proj-solo', 'anything', []);
+    expect(d.source).toBe('sole-member');
+    expect(d.repos.map((r) => r.repoRef)).toEqual(['repo-core']);
+  });
+
+  it('else NONE — a multi-repo project with nothing named is NOT grounded on its first member (the F-046 defect)', async () => {
+    const d = await resolveGroundingRepos(adapter, 'proj-multi', 'a brochure for the product', undefined);
+    expect(d.source).toBe('none');
+    expect(d.repos).toEqual([]);
+    expect(d.memberCount).toBe(2);
+    const bare = await resolveGroundingRepos(adapter, 'proj-bare', 'anything', undefined);
+    expect(bare).toEqual({ repos: [], source: 'none', missing: [], ambiguous: [], memberCount: 0 });
+  });
+});
+
+describe('groundingNarration (the thread line — F-046 follow-up) + snapshotDirName', () => {
+  it('says WHERE and WHY, reports missing named repos, and explains a none-of-N project', () => {
+    expect(groundingNarration({ repos: [STUDIO], source: 'named', missing: [], ambiguous: [], memberCount: 2 }, [STUDIO], 'draft')).toMatch(
+      /^Grounded on wicked-studio \(named in your request\)/,
+    );
+    expect(groundingNarration({ repos: [STUDIO], source: 'brief', missing: [], ambiguous: [], memberCount: 2 }, [STUDIO], 'draft')).toContain(
+      'named in your brief',
+    );
+    expect(groundingNarration({ repos: [CORE], source: 'sole-member', missing: [], ambiguous: [], memberCount: 1 }, [CORE], 'demo')).toContain(
+      "the project's only repository",
+    );
+    expect(groundingNarration({ repos: [], source: 'named', missing: ['repo-gone'], ambiguous: [], memberCount: 2 }, [], 'draft')).toBe(
+      'Requested repository "repo-gone" is not a member of this project — skipped.',
+    );
+    expect(groundingNarration({ repos: [], source: 'none', missing: [], ambiguous: [], memberCount: 3 }, [], 'draft')).toContain(
+      'This project has 3 repositories and none was named for this draft',
+    );
+    // Nothing to say: a repo-less project.
+    expect(groundingNarration({ repos: [], source: 'none', missing: [], ambiguous: [], memberCount: 0 }, [], 'draft')).toBeNull();
+    // A named repo whose snapshot failed: no "Grounded on" claim, nothing false said.
+    expect(groundingNarration({ repos: [STUDIO], source: 'named', missing: [], ambiguous: [], memberCount: 2 }, [], 'draft')).toBeNull();
+  });
+
+  it('derives the snapshot directory from the CANONICAL repo id (names and basenames collide), path-safe, unique case-insensitively per launch (codex on #506)', () => {
+    expect(snapshotDirName(STUDIO)).toBe('repo-studio');
+    expect(snapshotDirName(STUDIO_TWIN)).toBe('repo-studio-twin');
+    expect(snapshotDirName({ repoRef: 'a b/c', name: 'x', rootPath: '/x' })).toBe('a-b-c');
+    expect(snapshotDirName({ repoRef: '///', name: 'x', rootPath: '/x' })).toBe('repo');
+    // Two ids differing only by case never overwrite each other on a case-insensitive filesystem.
+    const taken = new Set<string>();
+    expect(snapshotDirName({ repoRef: 'Foo', name: 'Foo', rootPath: '/a' }, taken)).toBe('Foo');
+    expect(snapshotDirName({ repoRef: 'foo', name: 'foo', rootPath: '/b' }, taken)).toBe('foo-2');
+    expect(snapshotDirName({ repoRef: 'FOO', name: 'FOO', rootPath: '/c' }, taken)).toBe('FOO-3');
+    expect([...taken]).toEqual(['Foo', 'foo-2', 'FOO-3']);
+  });
+});
+
+function readdirSyncSafe(dir: string): string[] {
+  try {
+    return readdirSync(dir);
+  } catch {
+    return [];
+  }
+}
+
+describe('DocGroundingStore (the sidecar beside the doc; the bus-beats-create window)', () => {
+  let dir: string;
+  let root: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'crew-dgs-'));
+    root = join(dir, 'docs');
+  });
+  afterEach(() => {
+    removeScratch(dir);
+  });
+
+  it('records the binding as <docsRoot>/<doc>/crew-grounding.json beside versions.json — a fresh store reads it; remove drops exactly that doc', () => {
+    const store = new DocGroundingStore();
+    // The bridge created the doc dir before answering the create.
+    mkdirSync(join(root, 'brochure'), { recursive: true });
+    writeFileSync(join(root, 'brochure', 'versions.json'), '{"head":0}', 'utf8');
+    expect(store.get(root, 'brochure')).toBeUndefined();
+    store.record(root, 'brochure', { project_id: 'proj-1', repo_refs: ['repo-studio'], style: 'brochure' });
+    store.record(root, 'other', { project_id: 'proj-1', repo_refs: ['repo-core'] }); // dir not yet there → created
+    expect(existsSync(join(root, 'brochure', CREW_GROUNDING_FILE))).toBe(true);
+    expect(DocGroundingStore.sidecarPath(root, 'brochure')).toBe(join(root, 'brochure', CREW_GROUNDING_FILE));
+    const fresh = new DocGroundingStore();
+    expect(fresh.get(root, 'brochure')).toMatchObject({ project_id: 'proj-1', repo_refs: ['repo-studio'], style: 'brochure' });
+    expect(fresh.get(root, 'other')?.repo_refs).toEqual(['repo-core']);
+    expect(fresh.remove(root, 'brochure')).toBe(true);
+    expect(fresh.remove(root, 'brochure')).toBe(false);
+    expect(fresh.get(root, 'brochure')).toBeUndefined();
+    expect(fresh.get(root, 'other')).toBeDefined();
+    // Nothing else appeared in the doc dir: the bridge's own files are untouched.
+    expect(readFileSync(join(root, 'brochure', 'versions.json'), 'utf8')).toBe('{"head":0}');
+  });
+
+  it('CONTAINMENT (codex on #506): a symlinked doc dir or sidecar is refused for read, write and remove — nothing outside the real docs root is ever touched', () => {
+    const store = new DocGroundingStore();
+    const outside = join(dir, 'outside');
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, CREW_GROUNDING_FILE), JSON.stringify({ project_id: 'evil', repo_refs: ['x'] }), 'utf8');
+    mkdirSync(root, { recursive: true });
+    // A planted `<docs root>/<doc>` → elsewhere: read yields nothing, write refuses, remove touches nothing.
+    symlinkSync(outside, join(root, 'linked-doc'), 'dir');
+    expect(store.get(root, 'linked-doc')).toBeUndefined();
+    expect(() => store.record(root, 'linked-doc', { project_id: 'p', repo_refs: ['r'] })).toThrow(GroundingPathRefusedError);
+    expect(store.remove(root, 'linked-doc')).toBe(false);
+    expect(existsSync(join(outside, CREW_GROUNDING_FILE))).toBe(true);
+    expect(readFileSync(join(outside, CREW_GROUNDING_FILE), 'utf8')).toContain('evil'); // untouched
+    // A real doc dir whose SIDECAR is a link out: same refusals.
+    mkdirSync(join(root, 'real-doc'));
+    symlinkSync(join(outside, CREW_GROUNDING_FILE), join(root, 'real-doc', CREW_GROUNDING_FILE));
+    expect(store.get(root, 'real-doc')).toBeUndefined();
+    expect(() => store.record(root, 'real-doc', { project_id: 'p', repo_refs: ['r'] })).toThrow(GroundingPathRefusedError);
+    expect(store.remove(root, 'real-doc')).toBe(false);
+    expect(existsSync(join(outside, CREW_GROUNDING_FILE))).toBe(true);
+    // A doc path that is a FILE, not a directory: refused too.
+    writeFileSync(join(root, 'file-doc'), 'not a dir', 'utf8');
+    expect(() => store.record(root, 'file-doc', { project_id: 'p', repo_refs: ['r'] })).toThrow(GroundingPathRefusedError);
+    // A docs root that does not exist: nothing to read, nothing to write.
+    expect(store.get(join(dir, 'missing-root'), 'doc')).toBeUndefined();
+    expect(() => store.record(join(dir, 'missing-root'), 'doc', { project_id: 'p', repo_refs: [] })).toThrow();
+    // …while a plain doc dir under a symlinked ROOT works — the root is realpath'd, the doc dir checked beneath it.
+    symlinkSync(root, join(dir, 'root-link'), 'dir');
+    store.record(join(dir, 'root-link'), 'plain-doc', { project_id: 'p', repo_refs: ['r'] });
+    expect(existsSync(join(root, 'plain-doc', CREW_GROUNDING_FILE))).toBe(true);
+    expect(store.get(join(dir, 'root-link'), 'plain-doc')?.repo_refs).toEqual(['r']);
+  });
+
+  it('the lstat→open window is closed (codex on #506): a sidecar swapped for a link between the checks and the open is never read, never followed', () => {
+    const outside = join(dir, 'outside');
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, 'secret.json'), JSON.stringify({ project_id: 'evil', repo_refs: ['stolen'] }), 'utf8');
+    mkdirSync(join(root, 'doc'), { recursive: true });
+    const sidecar = join(root, 'doc', CREW_GROUNDING_FILE);
+    writeFileSync(sidecar, JSON.stringify({ project_id: 'p', repo_refs: ['r'] }), 'utf8');
+    // The race, made deterministic: between the path checks and the descriptor open, an attacker
+    // replaces the regular file with a link out of the root.
+    const swapping = new DocGroundingStore({
+      afterLstat: (path) => {
+        rmSync(path);
+        symlinkSync(join(outside, 'secret.json'), path);
+      },
+    });
+    expect(swapping.get(root, 'doc')).toBeUndefined(); // O_NOFOLLOW refuses the link; nothing outside is read
+    // …and a swap for a DIFFERENT regular file is caught by the dev/ino identity check.
+    writeFileSync(join(root, 'doc', 'other.json'), JSON.stringify({ project_id: 'p2', repo_refs: ['r2'] }), 'utf8');
+    rmSync(sidecar);
+    writeFileSync(sidecar, JSON.stringify({ project_id: 'p', repo_refs: ['r'] }), 'utf8');
+    const replacing = new DocGroundingStore({
+      afterLstat: (path) => {
+        renameSync(join(root, 'doc', 'other.json'), path);
+      },
+    });
+    expect(replacing.get(root, 'doc')).toBeUndefined();
+    // A quiet store reads it fine.
+    expect(new DocGroundingStore().get(root, 'doc')?.repo_refs).toEqual(['r2']);
+  });
+
+  it('writes go through an EXCLUSIVE random temp and a rename: a pre-planted link at the old predictable temp name, or at the sidecar path itself, is never written through (codex on #506)', () => {
+    const outside = join(dir, 'outside2');
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, 'target.json'), 'pristine', 'utf8');
+    mkdirSync(join(root, 'doc2'), { recursive: true });
+    const sidecar = join(root, 'doc2', CREW_GROUNDING_FILE);
+    // The old predictable temp spelling, planted as a link out of the root.
+    symlinkSync(join(outside, 'target.json'), `${sidecar}.tmp-${process.pid}`);
+    new DocGroundingStore().record(root, 'doc2', { project_id: 'p', repo_refs: ['r'] });
+    expect(readFileSync(join(outside, 'target.json'), 'utf8')).toBe('pristine');
+    expect(new DocGroundingStore().get(root, 'doc2')?.repo_refs).toEqual(['r']);
+    // A link planted at the SIDECAR PATH after the checks: the rename replaces the link itself;
+    // its target is never written.
+    const planting = new DocGroundingStore({
+      afterLstat: (path) => {
+        rmSync(path, { force: true });
+        symlinkSync(join(outside, 'target.json'), path);
+      },
+    });
+    planting.record(root, 'doc2', { project_id: 'p', repo_refs: ['r3'] });
+    expect(readFileSync(join(outside, 'target.json'), 'utf8')).toBe('pristine');
+    expect(new DocGroundingStore().get(root, 'doc2')?.repo_refs).toEqual(['r3']);
+    // No RANDOM temp lingers (the planted link at the old predictable name is the test's own fixture).
+    expect(readdirSyncSafe(join(root, 'doc2')).filter((n) => n.startsWith(`.${CREW_GROUNDING_FILE}.`) && n.endsWith('.tmp'))).toEqual([]);
+    expect(readdirSyncSafe(join(root, 'doc2')).sort()).toEqual([CREW_GROUNDING_FILE, `${CREW_GROUNDING_FILE}.tmp-${process.pid}`]);
+  });
+
+  it('the PARENT-swap window is closed (codex r3 on #506): the doc dir replaced by a link after validation is refused for read, write and remove — the external target untouched', () => {
+    const outside = join(dir, 'outside3');
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, CREW_GROUNDING_FILE), JSON.stringify({ project_id: 'evil', repo_refs: ['stolen'] }), 'utf8');
+    const pristine = readFileSync(join(outside, CREW_GROUNDING_FILE), 'utf8');
+    mkdirSync(join(root, 'doc3'), { recursive: true });
+    writeFileSync(join(root, 'doc3', CREW_GROUNDING_FILE), JSON.stringify({ project_id: 'p', repo_refs: ['r'] }), 'utf8');
+    // After validation (and the held directory handle), the WHOLE doc dir is swapped for a link out.
+    const swapParent = (path: string): void => {
+      const docDir = join(path, '..');
+      renameSync(docDir, `${docDir}.moved`);
+      symlinkSync(outside, docDir, 'dir');
+    };
+    const restore = (): void => {
+      rmSync(join(root, 'doc3'), { force: true });
+      renameSync(join(root, 'doc3.moved'), join(root, 'doc3'));
+    };
+    // read: refused — the external sidecar is never read.
+    expect(new DocGroundingStore({ afterLstat: swapParent }).get(root, 'doc3')).toBeUndefined();
+    restore();
+    // write: refused — nothing is created or renamed through the link; the target is byte-identical.
+    expect(() => new DocGroundingStore({ afterLstat: swapParent }).record(root, 'doc3', { project_id: 'p', repo_refs: ['r9'] })).toThrow(
+      GroundingPathRefusedError,
+    );
+    expect(readFileSync(join(outside, CREW_GROUNDING_FILE), 'utf8')).toBe(pristine);
+    expect(readdirSyncSafe(outside)).toEqual([CREW_GROUNDING_FILE]); // no temp landed outside either
+    restore();
+    // remove: refused — the target survives.
+    expect(new DocGroundingStore({ afterLstat: swapParent }).remove(root, 'doc3')).toBe(false);
+    expect(existsSync(join(outside, CREW_GROUNDING_FILE))).toBe(true);
+    restore();
+    // The real doc dir is intact and readable once nothing tampers.
+    expect(new DocGroundingStore().get(root, 'doc3')?.repo_refs).toEqual(['r']);
+  });
+
+  it('never names a path for an id outside the doc grammar, and reads a malformed sidecar as "nothing named"', () => {
+    const store = new DocGroundingStore();
+    expect(DocGroundingStore.sidecarPath(root, '../escape')).toBeNull();
+    mkdirSync(root, { recursive: true });
+    expect(store.get(root, '../escape')).toBeUndefined();
+    expect(() => store.record(root, 'Nope Caps', { project_id: 'p', repo_refs: [] })).toThrow(/cannot name/);
+    mkdirSync(join(root, 'bad'), { recursive: true });
+    writeFileSync(join(root, 'bad', CREW_GROUNDING_FILE), '{not json', 'utf8');
+    expect(store.get(root, 'bad')).toBeUndefined();
+    writeFileSync(join(root, 'bad', CREW_GROUNDING_FILE), JSON.stringify({ repo_refs: ['x'] }), 'utf8'); // no project
+    expect(store.get(root, 'bad')).toBeUndefined();
+  });
+
+  it('waitFor: immediate when the binding exists or nothing is pending; waits for an in-flight create; never past the timeout', async () => {
+    const store = new DocGroundingStore();
+    mkdirSync(root, { recursive: true });
+    expect(await store.waitFor(root, 'doc-a', 'proj-1', 1000)).toBeUndefined(); // nothing pending → immediate
+    store.record(root, 'doc-b', { project_id: 'proj-1', repo_refs: ['r'] });
+    expect((await store.waitFor(root, 'doc-b', 'proj-1', 1000))?.repo_refs).toEqual(['r']);
+
+    // An in-flight create for the SAME project holds the wait until it settles.
+    const token = store.beginCreate('proj-1');
+    expect(store.pendingCount('proj-1')).toBe(1);
+    const t0 = Date.now();
+    setTimeout(() => {
+      store.record(root, 'doc-c', { project_id: 'proj-1', repo_refs: ['r2'] });
+      store.settleCreate(token);
+    }, 150);
+    const got = await store.waitFor(root, 'doc-c', 'proj-1', 5000);
+    expect(got?.repo_refs).toEqual(['r2']);
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(100);
+    expect(store.pendingCount('proj-1')).toBe(0);
+
+    // A pending create for ANOTHER project does not hold this one.
+    const other = store.beginCreate('proj-2');
+    expect(await store.waitFor(root, 'doc-d', 'proj-1', 1000)).toBeUndefined();
+    store.settleCreate(other);
+
+    // A create that never settles is bounded by the timeout.
+    store.beginCreate('proj-1');
+    const t1 = Date.now();
+    expect(await store.waitFor(root, 'doc-e', 'proj-1', 120)).toBeUndefined();
+    expect(Date.now() - t1).toBeGreaterThanOrEqual(100);
+    expect(Date.now() - t1).toBeLessThan(2000);
+    store.settleCreate(999); // unknown token — a no-op
+  });
+});

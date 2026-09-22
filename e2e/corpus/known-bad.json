@@ -1,0 +1,4 @@
+{
+  "description": "Window commits of the internal evals corpus that the team marks as BAD behavior (every other commit is `good` — these are merged, released commits). Keyed by sample id `<repo>@<sha12>`; each entry needs a `reason` (becomes the sample's description) and may pin a `steering_type` (one of architecture|development|security|testing|operations|compliance|design-ux) instead of the path-inferred one. `samples` fails closed on an id that is not in any pinned window (a stale entry or a moved tag). Empty by design until a human judges a commit — the script never infers badness.",
+  "samples": {}
+}
