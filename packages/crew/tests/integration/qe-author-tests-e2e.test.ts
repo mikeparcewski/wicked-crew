@@ -70,6 +70,31 @@ const SEATS = JSON.stringify([
   { key: 'alpha', display_name: 'Alpha', binary: 'alpha', headless_invocation: 'alpha {PROMPT}' },
 ]);
 
+/**
+ * The seats the SHIPPED DEF case launches with (wicked-crew#653).
+ *
+ * `POST /testing/author` falls back to the daemon's PRODUCTION roster when the body names none
+ * (`src/api/testing.ts:700-701`) — and this suite redirects `HOME` to a credential-free scratch dir,
+ * so every seat reads `auth: 'signed_out'` ⇒ `council_eligible: false`, which
+ * `core/engine-roster.ts:84-90` translates into the engine's `health: {usable: false}` and
+ * `distribute.rs::launcher_benched` benches as source `launcher`. Benched down to one eligible seat,
+ * the `review` unit's evaluator can no longer be distinct from its creator, so wicked-core refuses
+ * the WHOLE run at the `dead_seat` gate (`distribute.rs:649` since core#560, parked by
+ * `actor.rs::park_at_dead_seat_gate`) before `author` ever runs. That is a seat-health refusal — NOT
+ * one of the three rungs this case exists to pin — so the case would stop testing its own subject.
+ *
+ * Declaring TWO eligible seats keeps evaluator≠creator satisfiable, so the run reaches the author
+ * floor for real instead of riding the `creator_seat` fallback a single seat would fall back to.
+ *
+ * The keys must be REAL registry keys: unlike `POST /runs` (`api/routes.ts:1526` takes `clisJson`
+ * verbatim), `POST /testing/author` validates them against the live roster (`api/testing.ts:638` →
+ * `validateClisJson`) and answers 400 for a name the registry does not carry — which is why this is
+ * derived from `CoreAdapter.roster()` rather than reusing `SEATS`' synthetic `alpha`. No standing
+ * fields ride along: a seat carrying no `council_eligible` is given no engine `health` at all, and a
+ * seat with no health is eligible (`engine-roster.ts:84-91`) — the shape `SEATS` already uses.
+ */
+let authorSeats: string;
+
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 
 /**
@@ -257,6 +282,25 @@ beforeAll(async () => {
   const repo = await adapter.registerRepo('qe-author-e2e-ws', clone);
   repoId = repo.id;
 
+  // Two eligible seats for the SHIPPED DEF case, named from the registry the author route validates
+  // against — read AFTER the HOME redirect above, since `registry_roster()` reads
+  // `$HOME/.config/wicked-council/clis.toml` over the built-in table. See `authorSeats`.
+  const registryKeys = (CoreAdapter.roster() as Array<{ key?: unknown }>).flatMap((s) =>
+    typeof s.key === 'string' ? [s.key] : [],
+  );
+  expect(
+    registryKeys.length,
+    'the built-in council registry must offer two seats, or evaluator\u2260creator cannot be satisfied',
+  ).toBeGreaterThanOrEqual(2);
+  authorSeats = JSON.stringify(
+    registryKeys.slice(0, 2).map((key) => ({
+      key,
+      display_name: key,
+      binary: key,
+      headless_invocation: `${key} {PROMPT}`,
+    })),
+  );
+
   // The two stand-in variants, registered through the API (the engine validates them as authored).
   const green = await postJson('/api/v1/workflows', standInDef('qe-author-tests-e2e-green', 'console.log("launch spec ok");'));
   expect(green.status).toBe(201);
@@ -428,6 +472,9 @@ describe('wave 6 end to end — the governed test-authoring journey', () => {
       problem: 'e2e: functional tests for the launch flow',
       repoRefs: [repoId],
       ungated: true,
+      // Named, never defaulted: the production-roster fallback benches every seat under this suite's
+      // scratch HOME and the run dies at `dead_seat` before the author floor. See `authorSeats`.
+      clisJson: authorSeats,
     });
     expect(launch.status).toBe(201);
     expect(launch.body['workflow']).toBe(QE_AUTHOR_TESTS_WORKFLOW);
