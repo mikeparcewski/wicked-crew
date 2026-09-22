@@ -24,9 +24,14 @@ package further — the goal is for this package to disappear.
 
 ## Terms-of-service caution
 
-`agy-acp` drives Antigravity programmatically. Community reports suggest this may
-conflict with Antigravity's terms of service — review Google's current terms before
-using this bridge, and drop the seat from your roster if in doubt.
+`agy-acp` drives Antigravity programmatically. Whether that is permitted depends on the
+credential the seat runs under, not on the act of driving it: a consumer Google account
+sign-in is the restricted path, a Vertex AI project is the clean one, and a
+`GEMINI_API_KEY` sits in between — its terms depend on whether the project is
+billing-enabled, and a free-tier key is indistinguishable from a paid one at the seat.
+
+The bridge cannot verify which tier a credential belongs to. Review Google's current
+terms before using it, and drop the seat from your roster if in doubt.
 
 ## Install
 

@@ -214,10 +214,20 @@ touching it.
 
 Crew drives the coding-agent CLIs you install, under your own accounts and subscriptions.
 **It is your responsibility to confirm that driving a given CLI programmatically is
-permitted by its terms of service.** In particular, community reports suggest that
-driving **Antigravity (`agy`)** headless/programmatically may conflict with its ToS —
-review Google's current terms before enabling that seat, and remove it from your roster
-if in doubt. The engine works identically with any subset of the roster.
+permitted by its terms of service.** For **Antigravity (`agy`)** the answer depends on
+which credential the seat runs under, not on the fact that it is driven programmatically:
+
+| Credential | Notes |
+|---|---|
+| Consumer Google account sign-in (OAuth) | The restricted path — do not run a governed seat this way |
+| Gemini API key (`GEMINI_API_KEY`) | Terms differ by whether the project is billing-enabled; a free-tier and a paid-tier key are the same env var |
+| Vertex AI (GCP project) | Enterprise terms; the clean path for programmatic use |
+
+Crew **cannot detect which tier a key belongs to** — a free-tier and a paid-tier
+`GEMINI_API_KEY` are indistinguishable at the seat. Configuring the seat's credential is
+an assertion you are making, not a fact crew verifies. Review Google's current terms
+before enabling that seat, and remove it from your roster if in doubt. The engine works
+identically with any subset of the roster.
 
 ## Crew is the control plane; the studio is its own product
 

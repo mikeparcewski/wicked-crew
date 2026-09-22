@@ -80,8 +80,10 @@ Cross-agent context is injected automatically: when unit 4 runs on a
 different CLI than unit 3, it receives unit 3's output as labeled context.
 
 > **Terms-of-service note:** crew drives CLIs you install under your own accounts.
-> Confirm that programmatic use is permitted by each CLI's terms — community reports
-> suggest driving Antigravity (`agy`) this way may conflict with its ToS.
+> Confirm that programmatic use is permitted by each CLI's terms. For Antigravity
+> (`agy`) that turns on the credential the seat runs under — a consumer Google account
+> sign-in is the restricted path, Vertex AI is the clean one — and crew cannot verify
+> which tier a `GEMINI_API_KEY` belongs to.
 
 It is fair to ask what this adds to orchestration tools that already exist. Temporal
 will run a workflow durably and retry it forever; LangGraph and CrewAI will wire agents
