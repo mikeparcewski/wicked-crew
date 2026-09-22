@@ -11,6 +11,25 @@ mentioned only where a daemon release depends on them.
 ## [Unreleased]
 
 ### Fixed
+- **#649 — The `test_targeted` repo-checks floor no longer reports ambient host load as a
+  regression.** `scripts/test-related.mjs` now re-runs a DEADLINE failure once before recording it:
+  a vitest worker that dies with `[vitest-worker]: Timeout calling "…"`, or a test/hook that blows
+  its in-suite deadline, has its named test files re-run serially (`--no-file-parallelism`) and the
+  re-run decides the verdict — a failure that does not reproduce on its own is not evidence. A
+  non-zero exit with no deadline marker (an `AssertionError`, a thrown error) is still recorded
+  immediately and is never re-run, so the tolerance cannot launder a real failure. Every invocation
+  now also prints `WICKED-HOST` telemetry — 1- and 5-minute load, CPU count, load per CPU, free
+  memory, free/used swap — before the run and again as its LAST line, so it survives the floor's
+  4 KiB `stdoutTail` truncation and a verdict taken at load 130 with swap exhausted is
+  distinguishable in the ledger from the same verdict at load 10. `hookTimeout` rises from 15 s to
+  30 s (`packages/crew/vitest.config.ts`) for the same reason. Evidence: the targeted check over an
+  UNMODIFIED tree at load 45 reported `tests/evals-internal-corpus.test.ts` as failing (two tests
+  "timed out in 30000ms"); the same file re-run serially passed 55/55 at exit 0. The classifiers
+  strip ANSI before parsing: the floor runs checks with `CI=1` and vitest colours on that (Windows
+  colours by default), `\s` does not match `\x1b`, and a plain-text fixture would have hidden it —
+  the guard runs on vitest's own coloured bytes, captured as a fixture. The entry point sets
+  `process.exitCode` rather than calling `process.exit()`, which can drop buffered stdout — and with
+  it the telemetry line — when the floor pipes the check's output.
 - **#641 — Single-seat chat degradation is now disclosed prominently.** `POST /chats` → 201 and
   `POST /chats/:id/messages` → 202 both carry a `singleSeat` field when exactly one seat warmed
   and at least one was refused. The field names the warm seat, the full refused list (with each

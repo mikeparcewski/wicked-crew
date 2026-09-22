@@ -1,0 +1,18 @@
+[31m⎯⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Tests 1 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m tests/zz-probe-timeout.test.ts[2m > [22mprobe times out on purpose
+[31m[1mError[22m: Test timed out in 200ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".[39m
+[36m [2m❯[22m tests/zz-probe-timeout.test.ts:[2m2:1[22m[39m
+    [90m  1| [39m[35mimport[39m { it } [35mfrom[39m [32m'vitest'[39m[33m;[39m
+    [90m  2| [39mit('probe times out on purpose', async () => { await new Promise((r) =…
+    [90m   | [39m[31m^[39m
+    [90m  3| [39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯[22m[39m
+
+
+[2m Test Files [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+[2m   Start at [22m 09:15:54
+[2m   Duration [22m 661ms[2m (transform 29ms, setup 30ms, collect 15ms, tests 206ms, environment 0ms, prepare 66ms)[22m
