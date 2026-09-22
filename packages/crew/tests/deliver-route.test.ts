@@ -380,7 +380,8 @@ describe('GET /health capabilities (F-E2E-030)', () => {
     await app.ready();
     const res = await app.inject({ method: 'GET', url: '/api/v1/health' });
     // DES-L9: `revisesPr` rides beside `deliverGate` — a stub-driven route set honestly reports neither.
-    expect(res.json().capabilities).toEqual({ deliverGate: false, revisesPr: false });
+    // crew#619: `chatIdOnLaunch` is a crew-side constant so it is always false when engineCapabilities throws.
+    expect(res.json().capabilities).toEqual({ deliverGate: false, revisesPr: false, chatIdOnLaunch: false, seatChipOnCreate: false });
     await app.close();
   });
 });

@@ -191,6 +191,17 @@ export interface HealthCapabilities {
    * the field — read as `false`: do not send `revisesPr` to such a daemon.
    */
   revisesPr?: boolean;
+  /**
+   * `LaunchRunBody.chatId` is accepted (crew#619; crew ≥ 0.7.39). ABSENT on a daemon before
+   * the field — read as `false`: do not send `chatId` to such a daemon.
+   */
+  chatIdOnLaunch?: boolean;
+  /**
+   * `InteractiveDocCreateRequest.clisJson` (and the same field on demo/video and testing bodies)
+   * is accepted (crew#631; crew ≥ 0.7.40). ABSENT on a daemon before the field — omit `clisJson`
+   * on such a daemon.
+   */
+  seatChipOnCreate?: boolean;
 }
 
 /** One `GET /health.warnings[]` entry (additive; wicked-core#411 / wicked-crew#497). */
@@ -399,6 +410,19 @@ export interface AgentSession {
   /** Wave 6 (F-7R2-006): the seats BENCHED for this run — never convened, never a failover or
    *  judge target. Absent (never `[]`) when none / on an older engine. */
   benched_seats?: BenchedSeat[];
+  /**
+   * The surface that triggered this launch (crew#632; crew ≥ 0.7.40): `'studio'` (web UI),
+   * `'cli'` (wicked-crew CLI), or `'api'` (programmatic). ABSENT when the launch did not include
+   * the field (an older daemon or a caller that omitted it).
+   */
+  channel?: 'studio' | 'cli' | 'api';
+  /**
+   * An opaque caller-supplied identifier for the user or system that triggered the launch
+   * (crew#632; crew ≥ 0.7.40). ABSENT when the launch did not name one. Use `AgentSession.actor`
+   * (the authenticated crew actor) for the identity of WHO launched; `launch_actor` is an
+   * ADDITIONAL annotation the caller may attach (e.g. a CI job name or a studio tab id).
+   */
+  launch_actor?: string;
 }
 
 /** An ordered unit of work within a run (`WorkUnit`). */
@@ -3362,6 +3386,15 @@ export interface LaunchRunBody {
    */
   revisesPr?: number;
   /**
+   * Promote-from-chat linkage (crew#619; api-types 0.39.0, additive): the id of the chat this
+   * run was promoted from. When present, the daemon retains that chat's conversation transcript
+   * on disk for the run's lifetime, so the Continue-in-Build prefill is always reproducible
+   * even if the chat is idle-reclaimed before the run finishes. Optional; omit when the launch
+   * is not promoted from a chat. Check `GET /health.capabilities.chatIdOnLaunch` before sending —
+   * an older daemon's strict launch schema rejects the key with a 400.
+   */
+  chatId?: string;
+  /**
    * Retry lineage (DES-UX-001 §8.3, CREW-UX-3; api-types 0.8.0): the id of the run this
    * launch retries. Must name an EXISTING run id — an unknown id fails the launch (400 with
    * a named error), never a silently unrecorded lineage. The daemon persists it, echoes it
@@ -3392,6 +3425,21 @@ export interface LaunchRunBody {
    * `AgentSession.group_label`. Mutually exclusive with `campaignId` (both ⇒ 400).
    */
   groupLabel?: string;
+  /**
+   * The surface that triggered this launch (crew#632; additive). `'studio'` (web UI), `'cli'`
+   * (wicked-crew CLI), or `'api'` (programmatic caller). Persisted in the `run.launched` audit
+   * entry and echoed as `AgentSession.channel`. Absent ⇒ origin unknown. Check
+   * `GET /health.capabilities.seatChipOnCreate` to confirm the daemon accepts the field before
+   * sending — an older daemon's strict schema rejects unknown keys with a 400.
+   */
+  channel?: 'studio' | 'cli' | 'api';
+  /**
+   * An opaque caller-supplied identifier for the user or system that triggered the launch
+   * (crew#632; additive). Persisted in the `run.launched` audit entry and echoed as
+   * `AgentSession.launch_actor`. Absent ⇒ caller omitted it. Subject to the same daemon-version
+   * guard as `channel` above.
+   */
+  actor?: string;
 }
 
 /**
@@ -4043,6 +4091,18 @@ export interface InteractiveDocCreateRequest {
   repo_ref?: string;
   /** SEVERAL subject repositories (at most 8); the union with `repo_ref`, de-duplicated. */
   repo_refs?: string[];
+  /**
+   * Per-doc council roster override (crew#631; crew ≥ 0.7.40 — check `GET /health` capabilities
+   * `seatChipOnCreate` before sending). JSON-serialised `AgenticCli[]`; defaults to the daemon's
+   * full roster when absent. Seat keys not present in `GET /roster` → 400.
+   */
+  clisJson?: string;
+  /** Launch channel (crew#632). Persisted to the run's `run.launched` audit entry and served on
+   *  run DTOs as `channel`. ABSENT when the caller does not know the channel. */
+  channel?: 'studio' | 'cli' | 'api';
+  /** Launch actor (crew#632). Free-form string (≤ 256 chars) identifying the human or service
+   *  that triggered the launch. ABSENT when unknown. */
+  actor?: string;
 }
 
 /**

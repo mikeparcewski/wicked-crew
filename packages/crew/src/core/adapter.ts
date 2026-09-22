@@ -1381,13 +1381,17 @@ export class CoreAdapter {
    * silently ignores fields an older addon does not declare, so the version is the only honest
    * signal until the field lands.
    */
-  engineCapabilities(): { deliverGate: boolean; revisesPr: boolean } {
+  engineCapabilities(): { deliverGate: boolean; revisesPr: boolean; chatIdOnLaunch: boolean; seatChipOnCreate: boolean } {
     return {
       deliverGate: addonAtLeast(0, 7, 24),
       // DES-L9 / crew#550: `LaunchRunBody.revisesPr` needs the engine's `LaunchSpec.base_ref`
       // (wicked-core-ts ≥ 0.7.27) — an older addon would base on the default branch and push a
       // duplicate PR, so the route fails closed and the composer hides the affordance.
       revisesPr: addonAtLeast(0, 7, 27),
+      // crew#619: `LaunchRequest.chatId` is crew-side; always available once this daemon is deployed.
+      chatIdOnLaunch: true,
+      // crew#631: per-doc `clisJson` on interactive create bodies; always available once deployed.
+      seatChipOnCreate: true,
     };
   }
 

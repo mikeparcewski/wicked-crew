@@ -149,3 +149,4 @@ export function draftSkillArmLine(seam: string, held: boolean): string {
         `the quality floor, exactly as before; upgrade wicked-garden, republish the snapshot and restart crew to arm it ` +
         `(stamping it anyway would make the engine refuse every run at plan time: "the skills snapshot … does not hold the skills this run requires")`;
 }
+

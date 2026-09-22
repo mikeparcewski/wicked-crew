@@ -584,6 +584,9 @@ export interface InteractiveDemoOptions {
   /** Called after a launch that FILED the run into a project (the trigger carried
    *  `project_id`). Same wiring as the sibling seams. */
   onRunFiled?: (runId: string, projectId: string) => void;
+  /** Called after every successful `adapter.launchRun()` with the run id and provenance detail
+   *  (channel, actor when present). Server.ts wires it to `recordRunLaunched`. */
+  onRunLaunched?: (runId: string, detail: Record<string, unknown>) => void;
   /** The create-time doc → subject-repo bindings the proxy recorded (F-046, `doc-grounding.ts` — a
    *  `crew-grounding.json` sidecar beside the doc's `versions.json`, read under `resolveDocsRoot`);
    *  the server wires the daemon's shared instance. */
@@ -1101,6 +1104,12 @@ export async function startInteractiveDemoSubscriber(
       runDir: string;
       outPath: string;
       agentPhaseCount: number;
+      /** Per-doc council roster override from the create request (#631); takes precedence over `opts.clisJson`. */
+      clisJson?: string | undefined;
+      /** Launch channel from the create request (#632) — recorded in the run's launched audit entry. */
+      channel?: 'studio' | 'cli' | 'api' | undefined;
+      /** Launch actor from the create request (#632) — recorded in the run's launched audit entry. */
+      actor?: string | undefined;
       /** The pre-registered placeholder's run id — the flight `handle*` put in `inFlight` BEFORE its
        *  awaits, so the doc reads busy throughout and `stop()` sweeps its snapshots. */
       runId: string;
@@ -1143,7 +1152,7 @@ export async function startInteractiveDemoSubscriber(
       .launchRun({
         problem: input.problem,
         sessionId: runId,
-        clisJson: opts.clisJson ?? JSON.stringify(rosterOf(adapter, opts.roster)),
+        clisJson: input.clisJson ?? opts.clisJson ?? JSON.stringify(rosterOf(adapter, opts.roster)),
         workflow: input.workflow,
         // A project-bound doc's governed run is FILED (the engine attaches the crew.run
         // membership atomically with the launch); an unfiled doc launches with the key OMITTED
@@ -1178,6 +1187,10 @@ export async function startInteractiveDemoSubscriber(
           return;
         }
         if (input.projectId !== undefined) opts.onRunFiled?.(runId, input.projectId);
+        opts.onRunLaunched?.(runId, {
+          ...(input.channel !== undefined ? { channel: input.channel } : {}),
+          ...(input.actor !== undefined ? { actor: input.actor } : {}),
+        });
         // Upgrade the placeholder to a live flight: the heartbeat starts once the run exists.
         const flight: InFlight = placeholder ?? {
           key: input.key,
@@ -1285,6 +1298,9 @@ export async function startInteractiveDemoSubscriber(
     // named in the task; the thread hears where the demo is grounded and why.
     const subjects: DemoGrounding['subjects'] = [];
     const snapshotDirs = placeholder.snapshotDirs; // tracked on the flight so stop() sweeps them
+    let docClisJson: string | undefined;
+    let docChannel: 'studio' | 'cli' | 'api' | undefined;
+    let docActor: string | undefined;
     if (doc.projectId !== undefined) {
       let binding;
       let decision;
@@ -1294,6 +1310,9 @@ export async function startInteractiveDemoSubscriber(
             ? await groundingStore.waitFor(resolveDocsRoot(doc.projectId), doc.documentId, doc.projectId, GROUNDING_BINDING_WAIT_MS)
             : undefined;
         decision = await resolveGroundingRepos(adapter, doc.projectId, doc.brief, binding?.repo_refs, log);
+        docClisJson = binding?.clis_json;
+        docChannel = binding?.channel;
+        docActor = binding?.actor;
       } catch (err) {
         endFlight(runId);
         throw err;
@@ -1353,6 +1372,9 @@ export async function startInteractiveDemoSubscriber(
       runDir,
       outPath,
       agentPhaseCount: INTERACTIVE_DEMO_WORKFLOW_DEF.phases.length,
+      clisJson: docClisJson,
+      channel: docChannel,
+      actor: docActor,
       runId,
     });
   }

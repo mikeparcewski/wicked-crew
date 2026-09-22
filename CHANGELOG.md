@@ -10,6 +10,68 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.39] — 2026-09-21
+
+- **Pins core-ts ^0.7.30 and studio ^0.5.13.** core-ts 0.7.30 carries the council ballot budget
+  scaling with host load (#537), the bounded and testable load exemption (#557, #559), operator
+  notes surviving a deliver-gate `request_changes` (#549), the re-scoped write fence (#541, #540),
+  and floor/judge failing closed on an unclassifiable red base (#538, #539). studio 0.5.13 carries
+  the gate controls, composers, run cost and storyboard work, and is the dist this release bundles
+  via `build:with-studio` — the bundled UI moves with the pin, so both are bumped explicitly rather
+  than left to the caret.
+
+### Fixed
+- **#495 — `worktree-sweep.ts` git children no longer inherit the daemon's `WICKED_ESTATE_DB`.** Both
+  `execFile('git', …)` calls in `sweepDeliveredWorktree` (worktree remove and worktree prune) now
+  pass `{ windowsHide: true, env: childEnvWithBootEstateDb() }`, consistent with the pattern
+  established in `post-hoc-deliver.ts`. Previously the daemon-exported estate-DB URL was silently
+  inherited by these git child processes.
+- **#618 — Chat scope: seat replies no longer expose absolute host paths.** The chat scope
+  statement now instructs seats to cite files relative to their repository root, prefixed with
+  the repository name (e.g. `alpha/src/foo.ts` instead of `/srv/repos/alpha/src/foo.ts`). The
+  `ChatTranscriptStore` registers the chat's resolved repo roots at open time and rewrites any
+  absolute host-path prefix in seat reply text to repo-relative form before storing or serving
+  the transcript.
+- **#619 — Idle-TTL no longer drops a chat transcript while its promoted run is live.** When
+  `POST /runs` is called with `chatId`, the daemon links that run to the chat and exempts the
+  chat's transcript from deletion on `chatClosed` (idle / pool_cap / operator DELETE). The
+  transcript is dropped as normal once the run reaches a terminal frame. The new `chatId` field
+  is additive in `LaunchRequest`; `GET /health.capabilities.chatIdOnLaunch` advertises support
+  so older-Studio clients omit it safely. Note: the engine's own idle reclaim still happens — the
+  idle TTL and seat pool-cap eviction live in wicked-core; this fix retains the transcript and
+  records `chatId` on the run record so the crew daemon can enforce the retention invariant.
+  Tracked as wicked-crew#619.
+- **#620 — Run worktrees excluded from interactive grounding snapshots.** `wicked-worktrees/`
+  is now in `SNAPSHOT_SKIP` alongside `.git` and `node_modules`, preventing engine-managed run
+  checkouts from being included in the grounding context handed to interactive workers. The chat
+  scope statement also explicitly instructs seats not to read from `wicked-worktrees/`
+  subdirectories. The crew half of this fix is the snapshot skip, the chat-scope statement, and
+  the post-delivery worktree sweep (a delivered run's worktree is now detached via
+  `git worktree remove --force` after its PR is opened); the estate search-index exclusion of
+  `wicked-worktrees/` is estate-side. Tracked as wicked-crew#619 (chat-scope / retention) and
+  wicked-crew#620 (snapshot skip / sweep).
+- **#623 — `qe-author-tests` verify phase: node:test harness now recognised.** A produced test file
+  that imports `node:test`, or whose nearest `package.json` declares `scripts.test` with
+  `node --test`, is now detected as the `node-test` harness; each file runs with
+  `node --test <file>` and the full-suite repo check runs `npm test`. Previously, any such file
+  resolved to `unknown` → not-executed → the verify unit failed even though the tests were passing.
+  When no harness is recognised but the repo has a `test` script, the verify phase now falls back to
+  `npm test` and counts the file as executed when its name appears in the output; the hard
+  "no harness recognised" failure is reserved for repos with no test script at all.
+- **#624 — `qe-author-tests` verify phase: three gaps closed.** (1) Repo-level suite checks now
+  re-run at the base commit when the HEAD run exits non-zero, classifying each failure as
+  `produced-test-failure`, `pre-existing-on-base`, or `unclassified`; only `produced-test-failure`
+  increments the failure counter — a pre-existing broken test no longer causes a false FAIL.
+  (2) Every temporary file the verify script creates uses an explicit template under
+  `${TMPDIR:-/tmp}` (e.g. `mktemp "${TMPDIR:-/tmp}/qe-verify.XXXXXX"`) and fails loudly with a
+  typed reason if the directory is write-denied — previously `mktemp` on macOS ignored `$TMPDIR`
+  under the sandbox and silently produced `tests=0 → not-executed`. (3) Command output is now
+  bounded to 51 200 bytes per attempt, with the `QE-VERIFY*` marker lines emitted outside the
+  bounded capture so the parser cannot be corrupted by a truncated run.
+- **#622 — Proxy `forward()` / `forwardCreate()`: upstream abort/reset no longer triggers an unhandled rejection when the client closed first.** When the browser closes a connection (`reply.raw` close event), the proxy now sets a `clientGone` flag and resolves cleanly on subsequent upstream errors that are caused by the client disconnect (`ECONNRESET`, `ERR_STREAM_PREMATURE_CLOSE`, or an `aborted` message). Upstream errors that occur without a preceding client close still reject (logged at level 50). The fix covers both the streaming `forward()` path and the create-body `forwardCreate()` path.
+- **#631 — Interactive doc/demo/testing create bodies: optional `clisJson` seat field.** `POST /projects/:id/interactive/api/docs`, the demo create body, `POST /testing/recon`, and `POST /testing/author` now accept an optional `clisJson` string (JSON-serialised `AgenticCli[]`). When present, it is stripped from the forwarded body, persisted in the per-doc `DocGroundingBinding`, and threaded into the governed launch as the council roster override — precedence: per-doc binding ≫ arm-time `opts.clisJson` ≫ default roster. A seat key not present in `GET /roster` → 400 with `SEAT_UNAVAILABLE_REASON`. `GET /health.capabilities.seatChipOnCreate` is `true` on this daemon.
+- **#632 — `POST /runs` (and testing/recon/author and interactive doc/demo create bodies) accept optional `channel` and `actor` launch-provenance fields.** `channel` (`'studio' | 'cli' | 'api'`) and `actor` (opaque string, max 256 chars) are persisted in the `run.launched` audit entry (`detail.channel` / `detail.actor`) and served on `GET /runs` / `GET /runs/:id` as `AgentSession.channel` / `AgentSession.launch_actor`. For doc/demo creates, channel and actor are extracted by the proxy at create time, persisted in the per-doc `DocGroundingBinding`, and threaded into the governed launch via the `onRunLaunched` callback. The CLI's own `start` command now sends `channel: 'cli'` by routing through `POST /api/v1/runs` instead of calling the adapter directly. `channel` and `launch_actor` are OMITTED from the run record when absent — never guessed from headers, never defaulted — and consumers must read an absent field as "origin unknown". The `SEAT_UNAVAILABLE_REASON` string exists verbatim in both `api/testing.ts` and `interactive/proxy-routes.ts`; the two modules deliberately avoid a cross-layer import and the text is identical by design.
+
 ## [0.7.38] — 2026-09-15
 
 Re-pin the engine and UI: `wicked-core-ts` `^0.7.29` (carries **BC-79** project-scoped capture
@@ -3039,7 +3101,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.38...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.39...HEAD
+[0.7.39]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.38...v0.7.39
 [0.7.38]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.37...v0.7.38
 [0.7.37]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.36...v0.7.37
 [0.7.36]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.35...v0.7.36

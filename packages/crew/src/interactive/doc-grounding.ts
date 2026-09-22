@@ -393,6 +393,12 @@ export interface DocGroundingBinding {
   repo_refs: string[];
   /** The style the create was forwarded with (client-given or brief-inferred), when known. */
   style?: string | undefined;
+  /** Per-doc council roster override from the create request (#631). JSON-serialized `AgenticCli[]`. */
+  clis_json?: string | undefined;
+  /** Launch channel from the create request (#632): 'studio' | 'cli' | 'api'. */
+  channel?: 'studio' | 'cli' | 'api' | undefined;
+  /** Opaque launch actor string from the create request (#632). */
+  actor?: string | undefined;
   recorded_at: string;
 }
 
@@ -578,10 +584,14 @@ export class DocGroundingStore {
       const refs = Array.isArray(row['repo_refs'])
         ? row['repo_refs'].filter((r): r is string => typeof r === 'string' && r.length > 0)
         : [];
+      const validChannels = new Set(['studio', 'cli', 'api']);
       return {
         project_id: row['project_id'],
         repo_refs: refs,
         ...(typeof row['style'] === 'string' ? { style: row['style'] } : {}),
+        ...(typeof row['clis_json'] === 'string' ? { clis_json: row['clis_json'] } : {}),
+        ...(typeof row['channel'] === 'string' && validChannels.has(row['channel']) ? { channel: row['channel'] as 'studio' | 'cli' | 'api' } : {}),
+        ...(typeof row['actor'] === 'string' ? { actor: row['actor'] } : {}),
         recorded_at: typeof row['recorded_at'] === 'string' ? row['recorded_at'] : new Date(0).toISOString(),
       };
     } catch {

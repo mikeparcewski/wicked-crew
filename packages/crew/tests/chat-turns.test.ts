@@ -287,7 +287,8 @@ describe('POST /chats/:id/messages — refuse mid-turn, correlate replies (F-REC
       expect(statSync(join(transcriptDir, 'chats')).mode & 0o777).toBe(0o700);
       expect(statSync(join(transcriptDir, 'chats', 'e057.jsonl')).mode & 0o777).toBe(0o600);
     }
-    // The engine's chatClosed (any reason) drops the file — the SAME arm server.ts folds for scopes.
+    // The engine's chatClosed drops the file when no promoted run is retaining it (crew#619);
+    // server.ts calls drop() on the same arm it folds for scopes.
     transcripts.drop('e057');
     expect(readdirSync(join(transcriptDir, 'chats'))).toEqual([]);
     expect((await app.inject({ method: 'GET', url: '/api/v1/chats/e057' })).json()).toMatchObject({ messages: [] });

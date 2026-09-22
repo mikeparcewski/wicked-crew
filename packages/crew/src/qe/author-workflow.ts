@@ -66,7 +66,7 @@ export const QE_MAX_INLINE_INSTRUCTION_BYTES = 600;
 
 const RECON_INSTRUCTIONS =
   'Phase 1/4 PLAN (qe skill, plan action): read the repository and its existing tests, detect the ' +
-  'test harness (vitest/jest/pytest/Playwright and any loopback e2e fixture), map the operator ' +
+  'test harness (vitest/jest/pytest/Playwright/node:test and any loopback e2e fixture), map the operator ' +
   'intent to behaviours, and list the coverage gaps — cite file:line for anything you claim is ' +
   'already covered. Analysis only: write no files.';
 
@@ -148,6 +148,12 @@ export function qeVerifyScript(): string {
     'is_vitest_dir() { pkg_has_dep "$1" vitest; }',
     'is_jest_dir() { pkg_has_dep "$1" jest; }',
     'is_py_dir() { [ -f "$1/pytest.ini" ] || [ -f "$1/conftest.py" ] || [ -f "$1/tox.ini" ] || { [ -f "$1/pyproject.toml" ] && grep -q "tool.pytest" "$1/pyproject.toml"; } || { [ -f "$1/setup.cfg" ] && grep -q "tool:pytest" "$1/setup.cfg"; }; }',
+    // node:test rung: package.json scripts.test declares "node --test"
+    'pkg_has_nodetest() { local f="$1/package.json"; [ -f "$f" ] || return 1; grep -q "node --test" "$f"; }',
+    // any package.json dir — used for node:test file resolution and npm-test fallback
+    'is_pkg_dir() { [ -f "$1/package.json" ]; }',
+    // package has a non-placeholder test script (not the npm "no test specified" default)
+    'pkg_has_test_script() { local f="$1/package.json"; [ -f "$f" ] || return 1; grep -Eq "\\"test\\"[[:space:]]*:" "$f" || return 1; grep -q "no test specified" "$f" && return 1; return 0; }',
     'nearest() { local d; d=$(dirname "$1"); while :; do if "$2" "$d"; then echo "$d"; return 0; fi; [ "$d" = "." ] && break; d=$(dirname "$d"); done; echo ""; return 1; }',
     // the runner: the nearest node_modules/.bin/<tool> from the package dir up to the worktree root,
     // spelled RELATIVE TO the package dir (every command runs from there: `./…` or `../…`) — NEVER npx
@@ -165,18 +171,23 @@ export function qeVerifyScript(): string {
     '  d=$(nearest "$1" is_vitest_dir); if [ -n "$d" ]; then echo "vitest	$d"; return; fi',
     '  d=$(nearest "$1" is_jest_dir); if [ -n "$d" ]; then echo "jest	$d"; return; fi',
     '  d=$(nearest "$1" is_pw_dir); if [ -n "$d" ]; then echo "playwright	$d"; return; fi',
+    '  # node:test rung: file imports node:test OR nearest package has node --test in scripts.test',
+    '  if grep -q "node:test" "$1" 2>/dev/null; then d=$(nearest "$1" is_pkg_dir); [ -n "$d" ] || d="."; printf "node-test\\t%s\\n" "$d"; return; fi',
+    '  d=$(nearest "$1" pkg_has_nodetest); if [ -n "$d" ]; then printf "node-test\\t%s\\n" "$d"; return; fi',
     '  echo "unknown	."',
     '}',
     // how many tests the RUNNER says it executed (its own summary line) — 0 = nothing ran
     'sum_counts() { grep -E "$2" "$1" | tail -1 | awk \'{s=0; for(i=1;i<=NF;i++) if($i ~ /^[0-9]+$/ && $(i+1) ~ /^(passed|failed|flaky|skipped|total)/) s+=$i; print s}\'; }',
     'collected() {',
-    '  local n=""',
+    '  local n="" fname="${3:-}"',
     '  case "$1" in',
     '    pytest) n=$(sum_counts "$2" "[0-9]+ (passed|failed)"); [ "${n:-0}" -gt 0 ] || n=$(grep -Eo "collected [0-9]+ item" "$2" | tail -1 | grep -Eo "[0-9]+");;',
     '    vitest) n=$(sum_counts "$2" "^[[:space:]]*Tests[[:space:]]");;',
     '    jest) n=$(grep -Eo "[0-9]+ total" "$2" | tail -1 | grep -Eo "[0-9]+");;',
     '    playwright) n=$(sum_counts "$2" "[0-9]+ (passed|failed|flaky)");;',
     '    playwright-python) n=$(grep -Eci "passed|\\bpass\\b|✓|\\"checks\\"|\\bok\\b" "$2");;',
+    '    node-test) n=$(grep -Eo "pass [0-9]+" "$2" | head -1 | grep -Eo "[0-9]+");;',
+    '    npm-test) if [ -n "$fname" ] && grep -qF "$fname" "$2" 2>/dev/null; then n=1; else n=0; fi;;',
     '  esac',
     '  echo "${n:-0}"',
     '}',
@@ -195,20 +206,30 @@ export function qeVerifyScript(): string {
     '    jest) BIN=$(find_bin "$PKG" jest) || { not_executed "$f" "$H" "$PKG" "harness not available: jest — no node_modules/.bin/jest from $PKG up to the worktree root; install the repository dependencies in the worktree (npm ci) in the author phase. The verify path never runs npx"; continue; }; CMD=("$BIN" "$rel");;',
     '    pytest) PT=$(find_pytest "$PKG") || { not_executed "$f" "$H" "$PKG" "harness not available: pytest — no .venv/bin/pytest from $PKG up to the worktree root and python3 cannot import pytest; a test-shaped .py file is NEVER run as a plain script (it would pass with zero assertions). Install pytest in the worktree in the author phase"; continue; }; if [ "$PT" = "python3 -m pytest" ]; then CMD=(python3 -m pytest -q "$rel"); else CMD=("$PT" -q "$rel"); fi;;',
     '    playwright-python) python3 -c "import playwright" >/dev/null 2>&1 || { not_executed "$f" "$H" "$PKG" "harness not available: playwright (python) — python3 cannot import playwright; pip install playwright && playwright install chromium in the author phase"; continue; }; CMD=(python3 "$rel");;',
-    '    *) not_executed "$f" unknown "$PKG" "no harness recognised — declare one the repository owns (playwright.config.*, vitest/jest in the nearest package.json, a pytest marker)"; continue;;',
+    '    node-test) CMD=(node --test "$rel");;',
+    '    unknown)',
+    '      NPM_PKG=$(nearest "$f" is_pkg_dir); NPM_PKG="${NPM_PKG:-.}"',
+    '      if pkg_has_test_script "$NPM_PKG"; then',
+    '        H=npm-test; PKG="$NPM_PKG"; rel="$f"; [ "$PKG" = "." ] || rel="${f#$PKG/}"; CMD=(npm test)',
+    '      else',
+    '        not_executed "$f" unknown "$NPM_PKG" "no harness recognised — declare one the repository owns (playwright.config.*, vitest/jest/node:test in the nearest package.json, a pytest marker); the repository has no test script to fall back to"; continue',
+    '      fi;;',
+    '    *) not_executed "$f" "$H" "$PKG" "unrecognised harness: $H"; continue;;',
     '  esac',
     '  case " $HARNESSES " in *" $H|$PKG "*) ;; *) HARNESSES="$HARNESSES $H|$PKG";; esac',
     '  echo "QE-VERIFY-RUN file=$f harness=$H pkg=$PKG cmd=\\"${CMD[*]}\\""',
-    '  OUT=$(mktemp)',
-    '  ( cd "$PKG" && "${CMD[@]}" ) 2>&1 | tee "$OUT"; RC=${PIPESTATUS[0]}',
-    '  N=$(collected "$H" "$OUT"); rm -f "$OUT"',
+    '  OUT=$(mktemp "${TMPDIR:-/tmp}/qe-verify.XXXXXX") || { echo "qe-verify: FAIL — cannot create capture file for $f; check that ${TMPDIR:-/tmp} is writable"; exit 1; }',
+    '  ( cd "$PKG" && "${CMD[@]}" ) >"$OUT" 2>&1; RC=$?',
+    '  head -c 51200 <"$OUT"',
+    '  N=$(collected "$H" "$OUT" "$rel"); rm -f "$OUT"',
     '  E=$((E+1))',
     '  if [ "$RC" -ne 0 ]; then FAIL=$((FAIL+1)); ST=failed;',
     '  elif [ "${N:-0}" -lt 1 ]; then NX=$((NX+1)); E=$((E-1)); ST=not-executed; echo "qe-verify: $f — the $H runner exited 0 but reported 0 tests (nothing was collected or executed)";',
     '  else PASS=$((PASS+1)); ST=passed; fi',
     '  echo "QE-VERIFY: file=$f harness=$H pkg=$PKG cmd=\\"${CMD[*]}\\" exit=$RC tests=${N:-0} status=$ST"',
     "done < <(printf '%s\\n' \"$PRODUCED\")",
-    // 4. repo checks — the full unit suite once per (harness, package dir) the produced tests used
+    // 4. repo checks — the full unit suite once per (harness, package dir) the produced tests used;
+    //    when HEAD fails, re-run at BASE to classify: produced-test-failure vs pre-existing-on-base vs unclassified
     'C=0; CF=0',
     'for HP in $HARNESSES; do',
     '  H="${HP%%|*}"; PKG="${HP#*|}"',
@@ -216,13 +237,29 @@ export function qeVerifyScript(): string {
     '    vitest) BIN=$(find_bin "$PKG" vitest); CMD=("$BIN" run);;',
     '    jest) BIN=$(find_bin "$PKG" jest); CMD=("$BIN");;',
     '    pytest) PT=$(find_pytest "$PKG"); if [ "$PT" = "python3 -m pytest" ]; then CMD=(python3 -m pytest -q); else CMD=("$PT" -q); fi;;',
-    '    *) echo "QE-VERIFY-CHECK: harness=$H pkg=$PKG skipped=full-suite (produced files ran individually)"; continue;;',
+    '    node-test) CMD=(npm test);;',
+    '    npm-test|*) echo "QE-VERIFY-CHECK: harness=$H pkg=$PKG skipped=full-suite (produced files ran individually)"; continue;;',
     '  esac',
     '  C=$((C+1))',
     '  echo "QE-VERIFY-CHECK-RUN harness=$H pkg=$PKG cmd=\\"${CMD[*]}\\""',
-    '  ( cd "$PKG" && "${CMD[@]}" ); RC=$?',
-    '  [ "$RC" -eq 0 ] || CF=$((CF+1))',
-    '  echo "QE-VERIFY-CHECK: harness=$H pkg=$PKG cmd=\\"${CMD[*]}\\" exit=$RC"',
+    '  CHECK_OUT=$(mktemp "${TMPDIR:-/tmp}/qe-check.XXXXXX") || CHECK_OUT=""',
+    '  ( cd "$PKG" && "${CMD[@]}" ) >"${CHECK_OUT:-/dev/null}" 2>&1; RC=$?',
+    '  [ -n "$CHECK_OUT" ] && head -c 51200 <"$CHECK_OUT"; rm -f "$CHECK_OUT"',
+    '  CLASS=""',
+    '  if [ "$RC" -ne 0 ]; then',
+    '    BASE_WT="${TMPDIR:-/tmp}/qe-base-$$-$RANDOM"',
+    '    if git worktree add --detach "$BASE_WT" "$BASE" >/dev/null 2>&1; then',
+    '      [ -d "$BASE_WT/$PKG" ] && [ -d "$PKG/node_modules" ] && { NM_ABS=$(cd "$PKG/node_modules" 2>/dev/null && pwd -P) && ln -sfn "$NM_ABS" "$BASE_WT/$PKG/node_modules"; } 2>/dev/null || true',
+    '      BASE_CHECK_OUT=$(mktemp "${TMPDIR:-/tmp}/qe-base-check.XXXXXX") 2>/dev/null || BASE_CHECK_OUT=""',
+    '      echo "QE-VERIFY-CHECK-BASE-RUN harness=$H pkg=$PKG base=$BASE"',
+    '      ( cd "$BASE_WT/$PKG" 2>/dev/null && "${CMD[@]}" ) >"${BASE_CHECK_OUT:-/dev/null}" 2>&1; BASE_RC=$?',
+    '      [ -n "$BASE_CHECK_OUT" ] && head -c 51200 <"$BASE_CHECK_OUT"; rm -f "$BASE_CHECK_OUT"',
+    '      git worktree remove --force "$BASE_WT" >/dev/null 2>&1 || true',
+    '      if [ "$BASE_RC" -ne 0 ]; then CLASS=pre-existing-on-base',
+    '      else CLASS=produced-test-failure; CF=$((CF+1)); fi',
+    '    else CLASS=unclassified; CF=$((CF+1)); fi',
+    '  fi',
+    '  echo "QE-VERIFY-CHECK: harness=$H pkg=$PKG cmd=\\"${CMD[*]}\\" exit=$RC${CLASS:+ class=$CLASS}"',
     'done',
     // 5. verdict
     'echo "QE-VERIFY-SUMMARY: produced=$P executed=$E passed=$PASS failed=$FAIL not_executed=$NX plan=${PLAN:-missing} checks=$C checks_failed=$CF"',
@@ -327,6 +364,8 @@ export interface QeVerifiedCheck {
   harness: string;
   cmd: string;
   exit: number;
+  /** Present when exit is non-zero: how the failure was classified by base comparison. */
+  class?: 'produced-test-failure' | 'pre-existing-on-base' | 'unclassified';
 }
 
 /** The verify phase's report — what the campaign/test-set registration and the studio read. */
@@ -372,7 +411,13 @@ export function parseQeVerifyOutput(text: string): QeVerifyReport | null {
     } else if (line.startsWith(QE_VERIFY_CHECK_MARKER)) {
       const f = fields(line.slice(QE_VERIFY_CHECK_MARKER.length));
       if (f['skipped'] !== undefined || f['harness'] === undefined || f['exit'] === undefined) continue;
-      checks.push({ harness: f['harness'], cmd: f['cmd'] ?? '', exit: int(f['exit']) });
+      const cls = f['class'] as QeVerifiedCheck['class'] | undefined;
+      checks.push({
+        harness: f['harness'],
+        cmd: f['cmd'] ?? '',
+        exit: int(f['exit']),
+        ...(cls !== undefined ? { class: cls } : {}),
+      });
     } else if (line.startsWith(QE_VERIFY_MARKER)) {
       const f = fields(line.slice(QE_VERIFY_MARKER.length));
       if (f['file'] === undefined) continue;

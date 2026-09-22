@@ -522,6 +522,15 @@ respondsWith<Wire.LaunchRunBody['campaignId'], string | undefined>();
 respondsWith<string | undefined, Wire.LaunchRunBody['campaignId']>();
 respondsWith<Wire.LaunchRunBody['groupLabel'], string | undefined>();
 respondsWith<string | undefined, Wire.LaunchRunBody['groupLabel']>();
+// crew#632: launch channel and actor — body → DTO round-trip check.
+respondsWith<Wire.LaunchRunBody['channel'], 'studio' | 'cli' | 'api' | undefined>();
+respondsWith<'studio' | 'cli' | 'api' | undefined, Wire.LaunchRunBody['channel']>();
+respondsWith<Wire.LaunchRunBody['actor'], string | undefined>();
+respondsWith<string | undefined, Wire.LaunchRunBody['actor']>();
+respondsWith<Wire.AgentSession['channel'], 'studio' | 'cli' | 'api' | undefined>();
+respondsWith<'studio' | 'cli' | 'api' | undefined, Wire.AgentSession['channel']>();
+respondsWith<Wire.AgentSession['launch_actor'], string | undefined>();
+respondsWith<string | undefined, Wire.AgentSession['launch_actor']>();
 respondsWith<Wire.AgentSession['campaign_id'], string | undefined>();
 respondsWith<string | undefined, Wire.AgentSession['campaign_id']>();
 respondsWith<Wire.AgentSession['group_label'], string | undefined>();
