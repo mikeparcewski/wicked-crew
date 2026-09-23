@@ -298,13 +298,14 @@ describe('CoreAdapter.onLaunch — every launch the daemon hands the engine is a
     await adapter.launchRun({ problem: 'probe launch pin', sessionId: 's-launch', clisJson: SEATS }).catch(() => undefined);
     expect(notices[0]).toEqual({ kind: 'run', id: 's-launch', status: 'handed' });
     // An unknown run: the engine answers however it answers — the notices are `handed` first and,
-    // when the call rejected, `rejected` after (the pin opened for it is released).
+    // when the call rejected, `rejected` after (the pin opened for it is released); when it resolved,
+    // `accepted` after (crew#661 — the durable per-run records key on it, never on `handed`).
     const outcome = await adapter.confirmGate('no-such-run', true).then(
       () => 'resolved',
       () => 'rejected',
     );
     const gate = notices.filter((n) => n.id === 'no-such-run').map((n) => n.status);
-    expect(gate).toEqual(outcome === 'rejected' ? ['handed', 'rejected'] : ['handed']);
+    expect(gate).toEqual(outcome === 'rejected' ? ['handed', 'rejected'] : ['handed', 'accepted']);
     await adapter.resumeRun('s-launch').catch(() => undefined);
     expect(notices.filter((n) => n.id === 's-launch' && n.status === 'handed')).toHaveLength(2);
     off();

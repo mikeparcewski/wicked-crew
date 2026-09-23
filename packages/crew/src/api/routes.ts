@@ -83,6 +83,7 @@ import { isSteeringAuthorRun, landSteeringProposal } from './steering-landing.js
 import { registerTestingRoutes } from './testing.js';
 import { registerSkillsRoutes } from './skills.js';
 import { disabledSkillsHealth, type SkillsRuntime } from '../skills/runtime.js';
+import { phaseSkillFindings, withPhaseSkillGaps, type PhaseSkillArming, type RunSkillGapIndex } from '../skills/phase-skill-gaps.js';
 import {
   STATE_HOME_BLOCKER_CODE,
   STATE_HOME_REMEDY,
@@ -801,6 +802,13 @@ export interface RuntimeDeps {
    *  (seeded from the installed plugin, published); a directly-driven route set gets none and
    *  `/skills*` answers 503 unless a test injects one over a fixture root. */
   skills?: SkillsRuntime;
+  /** crew#661 — each drafting seam's ARM-TIME skill outcome: the subsystems whose phases run without
+   *  a declared skill (`/diagnostics.skills.phaseSkillGaps` + `skills.phase-skill` findings, and
+   *  `/health.warnings`). Absent = nothing armed here (a directly-driven route set): no gaps. */
+  phaseSkills?: PhaseSkillArming;
+  /** crew#661 — the runs launched with such a gap (`AgentSession.skill_gaps`), hydrated from the
+   *  trail. Absent = no run carries the field. */
+  runSkillGaps?: RunSkillGapIndex;
   /** The live state-home classification (wicked-core#411 / crew#497) — `createServer` surveys the
    *  daemon state home at boot and hands the watch here; the routes re-survey on demand, report it
    *  on `/diagnostics.stateHome` + `/health.warnings`, and answer `POST /runs` 409 while a handed
@@ -1077,6 +1085,9 @@ export function registerRoutes(
     }
     const guidance = guidanceIndex.guidanceFor(view.session.id);
     if (guidance !== undefined) view.session.guidance = guidance;
+    // crew#661: the declared skills this run's phases ran WITHOUT (degrade-and-disclose) — ABSENT when none.
+    const skillGaps = runtime.runSkillGaps?.gapsFor(view.session.id);
+    if (skillGaps !== undefined) view.session.skill_gaps = skillGaps;
     // Run launch time (home command-center run metrics): unix SECONDS from the `run.launched`
     // audit entry, ABSENT when the daemon has no launch record for this run (onboarding/campaign
     // runs launched off POST /runs, pre-field runs) — never fabricated, so a bucketed KPI can
@@ -1140,9 +1151,12 @@ export function registerRoutes(
     // `baseSkill.finding` and `/diagnostics.skills.findings[]` (one surface, no new field;
     // `HealthWarning.kind` is open); status stays ok because the daemon serves and studio must load
     // and show it — exactly the state-home blocker's precedent above.
+    // crew#661: a drafting seam that armed WITHOUT its declared skill rides `warnings` as well — its
+    // runs proceed degraded, so "status ok, no warnings" would be the silent answer the issue names.
     const warnings = [
       ...(stateHome === null ? [] : stateHome.findings.map((f) => ({ kind: f.kind, severity: f.severity, message: f.message }))),
       ...(baseSkill?.finding ? [{ kind: baseSkill.finding.kind, severity: baseSkill.finding.severity, message: baseSkill.finding.message }] : []),
+      ...phaseSkillFindings(runtime.phaseSkills?.gaps() ?? []),
     ];
     return {
       status: 'ok',
@@ -1204,7 +1218,9 @@ export function registerRoutes(
         // The skills seam's last outcome (skills keystone): published / fallback / blocked /
         // config-error, with the `skills.*` findings the ladder produced — the operator's one
         // read-only answer to "why do launches refuse the snapshot".
-        skills: runtime.skills?.health() ?? disabledSkillsHealth(),
+        // crew#661: plus every subsystem whose phases ARMED without a declared skill (`phaseSkillGaps`,
+        // one `skills.phase-skill` finding each) — the degraded runs' operator-facing record.
+        skills: withPhaseSkillGaps(runtime.skills?.health() ?? disabledSkillsHealth(), runtime.phaseSkills),
         // Is the governance evidence LANDING (crew#495): the store, the records on it, the dead
         // letters — with a `governance.deadletter` finding the moment the outbox holds one.
         governance,

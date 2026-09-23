@@ -10,6 +10,21 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed (observability)
+- **#661 — A phase that runs without the skill its workflow declares is disclosed, not silent.**
+  When the published skills snapshot lacks `wicked-garden-draft`, interactive-draft / -edit / -chat
+  arm with no `skill_ref` (the engine would refuse one it lacks) and their runs proceed without the
+  quality floor; the only trace was one boot-time warn line on stdout. Now: `GET /diagnostics`
+  carries `skills.phaseSkillGaps[]` (subsystem, workflow, phases, skill, generation judged at arm
+  time, remedy) plus one `skills.phase-skill` warning finding each, `GET /health.warnings` carries
+  the same findings, and every run launched on an unarmed seam carries `skill_gaps[]` on its DTO
+  (a `run.skill.unarmed` audit entry written only once the engine ACCEPTED the launch — the new
+  `LaunchNotice` status `accepted` — so a refused launch leaves nothing for a retry to inherit; survives
+  a restart). A seam that fails to register reports no gap (it runs nothing). Posture: degrade-and-disclose (the
+  `degradedReason` / `distinctnessFallback` class), not fail-loud — the skill is a quality floor, not
+  the governance directive the base skill is. api-types: additive `DiagnosticsSkills.phaseSkillGaps`,
+  `DiagnosticsPhaseSkillGap`, `RunSkillGap`, `AgentSession.skill_gaps`, finding kind `skills.phase-skill`.
+
 ### Fixed
 - **Crew CI typecheck red since wicked-core#595 — `unitDistributed.distinctnessFallback` gains
   `'same_cli_instance'`.** core#595 (seat-instance identity, #591) widened the engine's union to
