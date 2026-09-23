@@ -10,6 +10,8 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.40] — 2026-09-23
+
 ### Added
 - **studio#323 R4 — A chat can NAME its scope: `system` + `everything` / `project` / `repo`
   (`wicked-crew-api-types` 0.39.0).** `POST /chats` accepts an optional `scopeKind`. `system` is the
@@ -3214,7 +3216,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.39...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.40...HEAD
+[0.7.40]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.39...v0.7.40
 [0.7.39]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.38...v0.7.39
 [0.7.38]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.37...v0.7.38
 [0.7.37]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.36...v0.7.37
