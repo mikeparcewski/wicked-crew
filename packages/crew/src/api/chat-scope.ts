@@ -453,17 +453,19 @@ export async function resolveChatScope(
 }
 
 /**
- * The shape rules of a NAMED kind (studio#323 R4), checked before anything is read: a named kind
+ * The shape rules of a NAMED kind (studio#323 R4), checked before anything is read — and by the
+ * route BEFORE its project lookup, so a shape error is the contracted 400, never a 404/409 about a
+ * project the body should not have named (codex on #664). A named kind
  * resolves to exactly that kind or is refused — an input it cannot use is a 400, never silently
  * dropped or re-inferred into another kind. `null` = acceptable (or no kind named).
  */
-function namedKindRefusal(
+export function namedKindRefusal(
   kind: ChatScopeRequestKind | undefined,
   projectId: string | undefined,
   refs: string[],
-): ChatScopeResolution | null {
+): { ok: false; status: 400; error: string } | null {
   if (kind === undefined) return null;
-  const refuse = (error: string): ChatScopeResolution => ({ ok: false, status: 400, error });
+  const refuse = (error: string) => ({ ok: false as const, status: 400 as const, error });
   if (kind === 'repo' || kind === 'repos') {
     return refs.length === 0 ? refuse(`scopeKind '${kind}' requires repoRefs (1–32 repos by id or name)`) : null;
   }

@@ -52,6 +52,7 @@ import {
   chatScopeDeps,
   prepareChatScratch,
   removeChatScratch,
+  namedKindRefusal,
   resolveChatScope,
   type ChatSeatRefusal,
 } from './chat-scope.js';
@@ -2314,6 +2315,11 @@ export function registerRoutes(
       }
       const b = parsed.data;
       const chatId = b.chatId ?? randomUUID();
+      const requestedRefs = [...(b.repoRef !== undefined ? [b.repoRef] : []), ...(b.repoRefs ?? [])];
+      // A named scope's SHAPE first (studio#323 R4, codex on #664): a body whose kind refuses its own
+      // projectId/repoRefs is a 400 — never masked by the project lookup's 404/409 below.
+      const shape = namedKindRefusal(b.scopeKind, b.projectId, [...new Set(requestedRefs)]);
+      if (shape !== null) return reply.code(400).send({ error: shape.error });
       // Validate the project BEFORE opening seats: a chat has no launch record for the engine to
       // attach against atomically (chats are an in-memory seat pool), so the route validates
       // up-front and attaches right after open — the one non-atomic attach, documented in the ADR
@@ -2355,7 +2361,7 @@ export function registerRoutes(
         {
           chatId,
           ...(b.projectId !== undefined ? { projectId: b.projectId } : {}),
-          repoRefs: [...(b.repoRef !== undefined ? [b.repoRef] : []), ...(b.repoRefs ?? [])],
+          repoRefs: requestedRefs,
           ...(b.scopeKind !== undefined ? { kind: b.scopeKind } : {}),
         },
         {

@@ -69,6 +69,8 @@ function fakeAdapter(): CoreAdapter {
       return targets === undefined ? warm : targets.filter((t) => warm.includes(t));
     },
     chatClose: async () => undefined,
+    // Only `p-live` exists: any other id is the route's 404 (codex on #664 — shape before lookup).
+    projectGet: async (id: string) => (id === 'p-live' ? { id, status: 'active' } : null),
   } as unknown as CoreAdapter;
 }
 
@@ -769,6 +771,18 @@ describe('POST /chats — named scope kinds (studio#323 R4)', () => {
     // A refused open frees its id: nothing is held.
     expect(chatScopes.has('no-repos')).toBe(false);
     expect(existsSync(join(base, 'chats', 'no-repos'))).toBe(false);
+  });
+
+  it('a named-scope SHAPE error is a 400 even when the project does not exist — the shape is checked before the project lookup (codex on #664)', async () => {
+    const none = await open({ chatId: 'none-missing', clis: ['claude'], scopeKind: 'none', projectId: 'missing' });
+    expect(none.statusCode).toBe(400);
+    expect((none.json() as { error: string }).error).toMatch(/scopeKind 'none' takes no projectId/);
+    const sys = await open({ chatId: 'sys-missing', clis: ['claude'], scopeKind: 'system', projectId: 'missing', repoRefs: ['alpha'] });
+    expect(sys.statusCode).toBe(400);
+    expect((sys.json() as { error: string }).error).toMatch(/scopeKind 'system' takes no repoRefs/);
+    expect(chatOpen).not.toHaveBeenCalled();
+    expect(chatScopes.has('none-missing')).toBe(false);
+    expect(chatScopes.has('sys-missing')).toBe(false);
   });
 
   it('an unknown scopeKind is a 400 from body validation', async () => {
