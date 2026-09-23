@@ -1067,7 +1067,8 @@ export function humanGatePhaseIds(wf: WorkflowDef): string[] {
  * A launch the daemon hands the engine — or one the engine refused. `handed` is notified BEFORE the
  * engine call (the skills seam opens a generation pin for the launch, so no worker spawn can read
  * `WICKED_SKILLS_SNAPSHOT` ahead of the pin — live-generations.ts); `rejected` follows a call that
- * threw (nothing will ever spawn for it). Every path a spawn can originate from goes through here:
+ * threw (nothing will ever spawn for it); `accepted` follows a call that RESOLVED (the engine took
+ * it — the only notice a durable per-run record may key on, crew#661). Every path a spawn can originate from goes through here:
  * `launchRun` (POST /runs, onboarding, testing, steering), `resumeRun`, `confirmGate`,
  * `launchCampaign`, `resumeCampaign`.
  */
@@ -1075,7 +1076,7 @@ export interface LaunchNotice {
   kind: 'run' | 'campaign';
   /** The run's session id (`LaunchRunInput.sessionId` / the run id) or the campaign's `CampaignDef.id`. */
   id: string;
-  status: 'handed' | 'rejected';
+  status: 'handed' | 'accepted' | 'rejected';
   /** The workflow id a NEW run launches (`LaunchRunInput.workflow` — the base id, before any per-run
    *  composition). Absent on a resume, a gate answer, a campaign, and a launch naming no workflow. */
   workflow?: string;
@@ -1352,11 +1353,26 @@ export class CoreAdapter {
       this.releaseAfterFailure(kind, id, err);
       throw err;
     }
+    let out: T;
     try {
-      return await call();
+      out = await call();
     } catch (err) {
       this.releaseAfterFailure(kind, id, err);
       throw err;
+    }
+    this.announceAccepted({ kind, id, status: 'accepted', ...(workflow !== undefined ? { workflow } : {}) });
+    return out;
+  }
+
+  /** Deliver `accepted` once the engine TOOK the launch. Never propagates: the launch already happened,
+   *  so a listener failure is logged and must not turn an accepted run into a rejected call. */
+  private announceAccepted(notice: LaunchNotice): void {
+    for (const listener of this.launchListeners) {
+      try {
+        listener(notice);
+      } catch (err) {
+        console.warn(`[crew] launch ${notice.kind}:${notice.id} accepted, but a launch listener failed on it: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
   }
 

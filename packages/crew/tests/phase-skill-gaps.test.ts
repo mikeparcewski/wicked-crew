@@ -13,7 +13,7 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import Fastify, { type FastifyInstance } from 'fastify';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -22,19 +22,23 @@ import { AuditLog } from '../src/api/audit.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { registerRoutes, type RuntimeDeps } from '../src/api/routes.js';
-import type { CoreAdapter } from '../src/core/adapter.js';
-import type { DiagnosticsResponse, HealthResponse, SessionView, WorkflowDef } from '../src/core/types.js';
+import { createServer } from '../src/api/server.js';
+import { CoreAdapter } from '../src/core/adapter.js';
+import { DEFAULT_SETTINGS, type DiagnosticsResponse, HealthResponse, SessionView, WorkflowDef } from '../src/core/types.js';
 import { INTERACTIVE_CHAT_WORKFLOW_DEF, startInteractiveChatSubscriber } from '../src/interactive/chat-events.js';
 import { INTERACTIVE_DRAFT_WORKFLOW_DEF, startInteractiveDraftSubscriber } from '../src/interactive/draft-events.js';
 import { INTERACTIVE_EDIT_WORKFLOW_DEF, startInteractiveEditSubscriber } from '../src/interactive/edit-events.js';
 import { QeGateCache } from '../src/qe/gate-events.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
+import { setCrewStateHome } from '../src/projects/state-home.js';
+import { pluginSourceAt } from '../src/skills/plugin-source.js';
+import { noVenv } from '../src/skills/venv.js';
 import { SKILLS_SNAPSHOT_ENGINE_ENV } from '../src/skills/engine-env.js';
 import { BASE_SKILL_REF_ENGINE_ENV } from '../src/skills/base-skill.js';
 import { PhaseSkillArming, RunSkillGapIndex } from '../src/skills/phase-skill-gaps.js';
 import { SkillsRuntime } from '../src/skills/runtime.js';
 import { removeScratch } from './setup/scratch.js';
-import { scaffold, type Scaffold } from './support/skills-fixture.js';
+import { FIXTURE_PLUGIN, scaffold, type Scaffold } from './support/skills-fixture.js';
 
 const savedSnapshotEnv = process.env[SKILLS_SNAPSHOT_ENGINE_ENV];
 const savedBaseSkillEnv = process.env[BASE_SKILL_REF_ENGINE_ENV];
@@ -208,7 +212,7 @@ describe('a run launched on an unarmed seam says so on the run record (degrade-a
       units: [],
     }) as unknown as SessionView;
 
-  it('the handed launch on an unarmed workflow is recorded durably, survives a restart, and rides GET /runs/:id as skill_gaps; other runs carry no field', async () => {
+  it('the ACCEPTED launch on an unarmed workflow is recorded durably, survives a restart, and rides GET /runs/:id as skill_gaps; other runs carry no field', async () => {
     const arming = new PhaseSkillArming(() => 4);
     arming.record('interactive-chat', INTERACTIVE_CHAT_WORKFLOW_DEF, DRAFT, false);
     arming.record('interactive-draft', INTERACTIVE_DRAFT_WORKFLOW_DEF, DRAFT, true);
@@ -217,9 +221,9 @@ describe('a run launched on an unarmed seam says so on the run record (degrade-a
     const audit = new AuditLog(trail, () => undefined);
     const live = new RunSkillGapIndex();
     const warn = vi.fn();
-    live.onLaunch({ kind: 'run', id: RUN, status: 'handed', workflow: 'interactive-chat' }, arming, audit, DAEMON, warn);
-    live.onLaunch({ kind: 'run', id: OTHER, status: 'handed', workflow: 'interactive-draft' }, arming, audit, DAEMON, warn);
-    live.onLaunch({ kind: 'run', id: 'resumed', status: 'handed' }, arming, audit, DAEMON, warn);
+    live.onLaunch({ kind: 'run', id: RUN, status: 'accepted', workflow: 'interactive-chat' }, arming, audit, DAEMON, warn);
+    live.onLaunch({ kind: 'run', id: OTHER, status: 'accepted', workflow: 'interactive-draft' }, arming, audit, DAEMON, warn);
+    live.onLaunch({ kind: 'run', id: 'resumed', status: 'accepted' }, arming, audit, DAEMON, warn);
     await audit.flush();
     expect(warn).toHaveBeenCalledTimes(1);
     expect(String(warn.mock.calls[0]![0])).toContain(`run ${RUN}`);
@@ -240,5 +244,72 @@ describe('a run launched on an unarmed seam says so on the run record (degrade-a
     expect(unarmed.run.session.skill_gaps?.[0]?.remedy).toContain('republish the skills snapshot');
     const armed = (await app.inject({ method: 'GET', url: `/api/v1/runs/${OTHER}` })).json() as { run: SessionView };
     expect('skill_gaps' in armed.run.session).toBe(false);
+  });
+});
+
+describe('the daemon wiring (createServer) records only what really armed and what the engine really accepted (codex on #665)', () => {
+  let adapter: CoreAdapter | undefined;
+  afterEach(() => {
+    adapter?.close();
+    adapter = undefined;
+  });
+
+  /** A daemon over a real (stub-spawned) adapter posing as a real engine: the draft def FAILS to register
+   *  (that seam disables itself and returns null), the chat def registers; the engine refuses the launch
+   *  of `refused-run` AFTER the daemon handed it over and accepts every other. */
+  async function bootDaemon(): Promise<{ app: FastifyInstance; adapter: CoreAdapter; auditPath: string }> {
+    const home = join(dir, 'home');
+    const a = new CoreAdapter({ dbPath: join(home, 'core.db'), stub: true });
+    adapter = a;
+    setCrewStateHome(home);
+    a.listWorkflows = () => [];
+    a.getSettings = async () => ({ ...DEFAULT_SETTINGS });
+    Object.defineProperty(a, 'stub', { value: false }); // the stub engine refuses every interactive seam (crew#309)
+    a.registerWorkflow = async (def: WorkflowDef) => {
+      if (def.id === 'interactive-draft') throw new Error('drifted def');
+      return def.id;
+    };
+    const core = (a as unknown as { core: { launchRun: (o: { sessionId?: string }) => Promise<string> } }).core;
+    core.launchRun = async (o) => {
+      if (o.sessionId === 'refused-run') throw new Error('engine refused the launch');
+      return o.sessionId ?? 'x';
+    };
+    const auditPath = join(dir, 'audit.log');
+    const app = await createServer(a, {
+      auth: { mode: 'off' },
+      auditPath,
+      projectEvents: { disabled: true },
+      interactiveWsRelay: { disabled: true },
+      stallWatchdog: { enabled: false },
+      studioRoot: join(dir, 'no-studio'),
+      skills: { source: () => pluginSourceAt(FIXTURE_PLUGIN), provisionVenv: noVenv },
+      interactiveDraftEvents: { enabled: true, dbPath: join(dir, 'bus-d.db'), ledgerPath: join(dir, 'ld.json'), draftDir: join(dir, 'd'), clisJson: '[]' },
+      interactiveChatEvents: { enabled: true, dbPath: join(dir, 'bus-c.db'), ledgerPath: join(dir, 'lc.json'), chatDir: join(dir, 'c'), clisJson: '[]' },
+    });
+    apps.push(app);
+    return { app, adapter: a, auditPath };
+  }
+
+  it('a seam that FAILS to register (disabled, returns null) is not reported as running unarmed — only the seam that is up', async () => {
+    const { app } = await bootDaemon();
+    const diag = (await app.inject({ method: 'GET', url: '/api/v1/diagnostics' })).json() as DiagnosticsResponse;
+    expect(diag.skills.phaseSkillGaps?.map((g) => g.subsystem)).toEqual(['interactive-chat']);
+    const health = (await app.inject({ method: 'GET', url: '/api/v1/health' })).json() as HealthResponse;
+    expect((health.warnings ?? []).filter((w) => w.kind === 'skills.phase-skill').map((w) => w.message.split(':')[0])).toEqual(['interactive-chat']);
+  });
+
+  it('a launch the engine REFUSES after it was handed leaves no run.skill.unarmed record (a retry under the same id must not inherit it); an accepted one does', async () => {
+    const { app, adapter: a, auditPath } = await bootDaemon();
+    await expect(a.launchRun({ problem: 'p', sessionId: 'refused-run', workflow: 'interactive-chat', clisJson: '[]' })).rejects.toThrow('engine refused the launch');
+    await a.launchRun({ problem: 'p', sessionId: 'accepted-run', workflow: 'interactive-chat', clisJson: '[]' });
+    await app.close();
+    apps.splice(apps.indexOf(app), 1);
+    const unarmed = readFileSync(auditPath, 'utf8')
+      .split('\n')
+      .filter((l) => l.trim() !== '')
+      .map((l) => JSON.parse(l) as { action: string; runId?: string })
+      .filter((e) => e.action === 'run.skill.unarmed')
+      .map((e) => e.runId);
+    expect(unarmed).toEqual(['accepted-run']);
   });
 });

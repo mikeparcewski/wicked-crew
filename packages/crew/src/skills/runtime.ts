@@ -486,7 +486,8 @@ export class SkillsRuntime {
    */
   launched(notice: LaunchNotice): void {
     if (notice.status === 'handed') this.store.live.launched(notice.kind, notice.id);
-    else this.store.live.launchRejected(notice.kind, notice.id);
+    else if (notice.status === 'rejected') this.store.live.launchRejected(notice.kind, notice.id);
+    // `accepted` changes nothing here: the pin opened at `handed` is released by the engine's report.
   }
 
   /**

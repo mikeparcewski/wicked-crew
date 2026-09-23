@@ -926,6 +926,8 @@ export async function createServer(
       log: (m) => app.log.warn(m),
       logError: (m) => app.log.error(m),
     });
+    // crew#661: a seam that failed to arm runs nothing — its arm-time skill answer is not a gap.
+    if (draftSub === null) phaseSkills.forget('interactive-draft');
     if (draftSub !== null) {
       const sub = draftSub;
       app.log.info('interactive-draft subscription armed (filter wicked.interactive.doc.created)');
@@ -965,6 +967,8 @@ export async function createServer(
       log: (m) => app.log.warn(m),
       logError: (m) => app.log.error(m),
     });
+    // crew#661: a seam that failed to arm runs nothing — its arm-time skill answer is not a gap.
+    if (editSub === null) phaseSkills.forget('interactive-edit');
     if (editSub !== null) {
       const sub = editSub;
       app.log.info('interactive-edit subscription armed (filter wicked.interactive.feedback.processed)');
@@ -1037,6 +1041,8 @@ export async function createServer(
       log: (m) => app.log.warn(m),
       logError: (m) => app.log.error(m),
     });
+    // crew#661: a seam that failed to arm runs nothing — its arm-time skill answer is not a gap.
+    if (chatSub === null) phaseSkills.forget('interactive-chat');
     if (chatSub !== null) {
       const sub = chatSub;
       app.log.info('interactive-chat subscription armed (filter wicked.interactive.chat.posted)');
@@ -1374,8 +1380,8 @@ export async function createServer(
   // close like the event listener.
   const offLaunch = adapter.onLaunch((notice) => {
     skillsRuntime?.launched(notice);
-    // crew#661: a run handed on a workflow that armed WITHOUT its declared skill proceeds degraded
-    // and says so on the run (`session.skill_gaps`, a `run.skill.unarmed` trail entry). Never throws.
+    // crew#661: a run the engine ACCEPTED on a workflow that armed WITHOUT its declared skill proceeds
+    // degraded and says so on the run (`session.skill_gaps`, a `run.skill.unarmed` trail entry). Never throws.
     runSkillGaps.onLaunch(notice, phaseSkills, audit, DAEMON_ACTOR, (m) => app.log.warn(m));
   });
   app.addHook('onClose', async () => {

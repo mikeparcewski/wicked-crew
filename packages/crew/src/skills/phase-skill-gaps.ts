@@ -97,6 +97,12 @@ export class PhaseSkillArming {
     };
   }
 
+  /** Drop a subsystem's outcome — its seam asked the question but then failed to arm (it returned
+   *  null and runs nothing), so no phase of it runs, unarmed or otherwise. */
+  forget(subsystem: string): void {
+    this.bySubsystem.delete(subsystem);
+  }
+
   /** Record one arm-time outcome (latest wins per subsystem). */
   record(subsystem: string, def: WorkflowDef, skill: string, held: boolean): void {
     if (held) {
@@ -196,7 +202,7 @@ export class RunSkillGapIndex {
   }
 
   /**
-   * The daemon's launch listener half: a RUN handed to the engine on a workflow that armed with a
+   * The daemon's launch listener half: a RUN the engine ACCEPTED on a workflow that armed with a
    * gap is recorded (audit + map) and logged at warn naming the run. Never throws — a listener
    * failure would fail the launch (`CoreAdapter.notifyLaunch`), and disclosure must not turn a
    * degraded run into a refused one; a failure to disclose is itself logged.
@@ -209,7 +215,9 @@ export class RunSkillGapIndex {
     warn: (msg: string) => void,
   ): RunSkillGap | undefined {
     try {
-      if (notice.kind !== 'run' || notice.status !== 'handed' || notice.workflow === undefined) return undefined;
+      // `accepted` only — the engine TOOK the run. A `handed` launch can still be refused, and a durable
+      // record written then would stick to a later retry under the same (client-supplied) id.
+      if (notice.kind !== 'run' || notice.status !== 'accepted' || notice.workflow === undefined) return undefined;
       const gap = arming.gapForWorkflow(notice.workflow);
       if (gap === undefined) return undefined;
       const runGap = this.record(audit, actor, notice.id, gap);
