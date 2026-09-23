@@ -10,6 +10,27 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Changed (wire, additive)
+- **wicked-core#590 S5 — units are routed `teamed`, not by a council.** The engine no longer
+  convenes a council per phase to route units to seats: every seated unit takes the first eligible
+  seat its skills admit and records `RoutingInfo { method: 'teamed', winner }`; the evaluator ≠
+  creator fence still moves a review/test unit off a builder seat (`evaluator_distinct`).
+  `wicked-crew-api-types` mirrors it: `RoutingInfo` gains `{ method: 'teamed'; winner }`,
+  `UnitDistributedEvent.routingMethod` (and the deprecated `routing_method`) gain `'teamed'`, whose
+  council-only fields (`agreementPct`, `returned`, `seated`, `dissent`) are `null`. `council` /
+  `degraded` stay in both sets for recorded runs. Additive: crew typechecks against the npm-pinned
+  `wicked-core-ts` (4-member set) and against core main carrying S5 (5-member set);
+  `tests/wire-contract.test.ts` pins the contract's set two-way against the literal, the engine's
+  one-way into it, and the engine's serialized bytes at runtime. No `POST /runs` field: the council
+  is not a routing mode.
+- **The interactive seams narrate a `teamed` frame as a routing, not a council pick.** draft /
+  chat / demo / edit each narrated every `unitDistributed` frame as "Council picked … (N%
+  agreement)"; one helper (`unitDistributedLine`) now owns the line and branches on
+  `routingMethod`: `teamed` reads "Routed codex for outline…" with no council or agreement language
+  (a `degradedReason` is still quoted), a recorded `council` / `degraded` frame (or an older engine
+  sending no `routingMethod`) keeps the honest council line (F-4R2-007), `evaluator_distinct` /
+  `tool` keep the wording they had.
+
 ## [0.7.40] — 2026-09-23
 
 ### Added

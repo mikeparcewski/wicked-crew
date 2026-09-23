@@ -111,7 +111,15 @@ export type EntityMode = 'shared' | 'isolated';
 /** Human-confirm gate policy. serde: `None`→"none", `All`→"all", `Before(n)`→{ before: n }. */
 export type HumanConfirm = 'none' | 'all' | { before: number };
 
-/** Why a CLI was assigned to a unit (`RoutingInfo`, internally tagged on `method`). */
+/**
+ * Why a CLI was assigned to a unit (`RoutingInfo`, internally tagged on `method`).
+ *
+ * `teamed` (wicked-core#590 S5) is what every seated unit of a new run carries: the engine no
+ * longer convenes a council to route, it picks the first eligible seat the unit's skills admit, in
+ * roster order (`winner`), and the evaluator ≠ creator fence then moves a review/test unit off a
+ * builder seat (`evaluator_distinct`, whose `was` is the teamed pick). `council` and `degraded` are
+ * no longer produced; they stay because a recorded run's units carry them.
+ */
 export type RoutingInfo =
   /**
    * `seated` is the seats CONVENED — the denominator `returned` must be read against.
@@ -135,7 +143,8 @@ export type RoutingInfo =
     }
   | { method: 'degraded'; reason: string }
   | { method: 'evaluator_distinct'; winner: string; was: string }
-  | { method: 'tool' };
+  | { method: 'tool' }
+  | { method: 'teamed'; winner: string };
 
 /**
  * `GET /health` (api-types 0.37.0 — the shape was previously undeclared here; `status`,
@@ -2060,9 +2069,12 @@ export interface UnitDistributedEvent {
   ord: number;
   /** The roster key of the assigned seat. */
   cli: string;
-  /** How the seat was chosen: the council verdict, a degrade to the first candidate, an
-   *  evaluator ≠ creator reassignment, or a deterministic tool execution. */
-  routingMethod: 'council' | 'degraded' | 'evaluator_distinct' | 'tool';
+  /** How the seat was chosen: `'teamed'` — the deterministic pick, no council (wicked-core#590 S5;
+   *  every seated unit of a new run) — an evaluator ≠ creator reassignment, or a deterministic tool
+   *  execution. `'council'` / `'degraded'` are no longer emitted by a new run and stay for recorded
+   *  frames. On `'teamed'` the council-only fields (`agreementPct`, `returned`, `seated`, `dissent`)
+   *  are `null`. Consumers must render an unrecognised method as "routed", never as a council. */
+  routingMethod: 'council' | 'degraded' | 'evaluator_distinct' | 'tool' | 'teamed';
   agreementPct: number | null;
   /** Ballots that came back. Read against `seated`. */
   returned: number | null;
@@ -2100,7 +2112,7 @@ export interface UnitDistributedEvent {
    */
   distinctnessFallback?: 'creator_seat' | 'same_cli_instance' | null;
   /** @deprecated api-types 0.36.0 — the engine emits `routingMethod`; removed in 0.37. */
-  routing_method?: 'council' | 'degraded' | 'evaluator_distinct' | 'tool';
+  routing_method?: 'council' | 'degraded' | 'evaluator_distinct' | 'tool' | 'teamed';
   /** @deprecated api-types 0.36.0 — the engine emits `agreementPct`; removed in 0.37. */
   agreement_pct?: number | null;
   /** @deprecated api-types 0.36.0 — the engine emits `degradedReason`; removed in 0.37. */
