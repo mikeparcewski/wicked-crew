@@ -367,6 +367,44 @@ const WORKER_DENIED = {
   remedy: "delivery is performed by the run's deliver phase",
 };
 respondsWith<Wire.WorkerToolCallDeniedEvent, typeof WORKER_DENIED>();
+// wicked-core#602 (DES-TEAMING-001 S3, api-types 0.40.0): the team-advice frames, recorded byte for
+// byte from wicked-core's `CoreEvent::to_json` (`event::tests::advice_events_wire_shape_is_exact`).
+const RECORDED_ADVICE_DELIVERED = {
+  type: 'adviceDelivered' as const,
+  session: 'run-1',
+  ord: 3,
+  attempt: 1,
+  findingIds: ['f-3fa9c2e1d0b4a7e6'],
+  carrier: 'acp_steering' as const,
+  outcome: 'injected' as const,
+  detail: null,
+};
+const RECORDED_ADVICE_NOT_DELIVERED = {
+  ...RECORDED_ADVICE_DELIVERED,
+  carrier: 'none' as const,
+  outcome: 'not_delivered' as const,
+  detail:
+    "this unit's carrier has no mid-turn channel (only an ACP adapter advertising _meta.steering.supported takes a steer); the finding goes to the gate",
+};
+const RECORDED_WORKER_ADVICE_RESPONSE = {
+  type: 'workerAdviceResponse' as const,
+  session: 'run-1',
+  ord: 3,
+  attempt: 1,
+  findingId: 'f-3fa9c2e1d0b4a7e6',
+  disposition: 'declined' as const,
+  reason: 'campaign.rs:325 documents the exclusion',
+};
+respondsWith<Wire.AdviceDeliveredEvent, typeof RECORDED_ADVICE_DELIVERED>();
+respondsWith<Wire.AdviceDeliveredEvent, typeof RECORDED_ADVICE_NOT_DELIVERED>();
+respondsWith<Wire.WorkerAdviceResponseEvent, typeof RECORDED_WORKER_ADVICE_RESPONSE>();
+respondsWith<Wire.CoreEvent, Wire.AdviceDeliveredEvent>();
+respondsWith<Wire.CoreEvent, Wire.WorkerAdviceResponseEvent>();
+respondsWith<Wire.TeamAdviceEvent, Wire.AdviceDeliveredEvent | Wire.WorkerAdviceResponseEvent>();
+// The closed token sets the engine emits, both directions (the `(string & {})` tail stays open).
+respondsWith<Wire.AdviceDeliveredEvent['outcome'], 'injected' | 'turn_ended' | 'refused' | 'not_delivered'>();
+respondsWith<Wire.AdviceDeliveredEvent['carrier'], 'acp_steering' | 'none'>();
+respondsWith<Wire.WorkerAdviceResponseEvent['disposition'], 'accepted' | 'declined'>();
 const GATE_UNGATED = {
   ...GATE_NO_JUDGE,
   hasDeterministicFloor: false,
@@ -1148,5 +1186,22 @@ describe('wire contract (wicked-crew-api-types) drift guard', () => {
         expect(['neutral', 'creator', 'evaluator']).toContain(p.role);
       }
     }
+  });
+});
+
+describe('team-advice wire shapes (wicked-core#602, api-types 0.40.0)', () => {
+  it('spells adviceDelivered and workerAdviceResponse exactly as the engine emits them', () => {
+    // Every key always present — `detail` is `null`, never absent (the engine's to_json contract).
+    expect(Object.keys(RECORDED_ADVICE_DELIVERED).sort()).toEqual(
+      ['attempt', 'carrier', 'detail', 'findingIds', 'ord', 'outcome', 'session', 'type'].sort(),
+    );
+    expect('detail' in RECORDED_ADVICE_DELIVERED).toBe(true);
+    expect(RECORDED_ADVICE_DELIVERED.detail).toBeNull();
+    expect(Object.keys(RECORDED_ADVICE_NOT_DELIVERED).sort()).toEqual(
+      Object.keys(RECORDED_ADVICE_DELIVERED).sort(),
+    );
+    expect(Object.keys(RECORDED_WORKER_ADVICE_RESPONSE).sort()).toEqual(
+      ['attempt', 'disposition', 'findingId', 'ord', 'reason', 'session', 'type'].sort(),
+    );
   });
 });

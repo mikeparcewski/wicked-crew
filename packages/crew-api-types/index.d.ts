@@ -1012,7 +1012,9 @@ export interface CoreEvent {
   library?: string;
   transform?: string;
   known?: boolean;
-  detail?: string;
+  /** `adviceDelivered` (wicked-core#602, api-types 0.40.0) spells an absent detail `null`, never an
+   *  absent key — widened to admit that `null`; every other producer still sends a string. */
+  detail?: string | null;
   [k: string]: unknown;
 }
 
@@ -1899,6 +1901,58 @@ export type WorkerToolCallDeniedEvent = {
   /** What the seat was told to do instead ("delivery is performed by the run's deliver phase"). */
   remedy: string;
 };
+
+/**
+ * DES-TEAMING-001 §5.2 / §7 (wicked-core#602, S3; api-types 0.40.0) — what became of HIGH monitor
+ * advice for one attempt of a unit. The one mid-turn carrier is the ACP adapter's
+ * `_session/steering` request, always sent with `idleBehavior: "promptRequired"` so a steer that
+ * lands after the turn settled never starts a detached turn.
+ *
+ * - `carrier: 'acp_steering'` + `outcome: 'injected'` — the steer reached the running turn.
+ * - `outcome: 'turn_ended'` — the adapter answered `promptRequired` (the turn had settled; nothing
+ *   was started), or the turn ended with the steer unanswered. The advice goes to the gate.
+ * - `outcome: 'refused'` — the adapter answered a JSON-RPC error (in `detail`); the turn continues.
+ * - `outcome: 'not_delivered'` — the advice never rode a steer: `carrier: 'none'` when the unit's
+ *   carrier has no mid-turn channel (wrapped, PTY, an ACP adapter not advertising steering), or
+ *   `'acp_steering'` when the turn ended before the next tool-call boundary. `detail` says which.
+ *
+ * Every key is always present; `detail` is `null` when there is nothing to add. Spelled exactly as
+ * wicked-core's `CoreEvent::to_json` emits it. `type` alias on purpose (relays through the
+ * `CoreEvent`-typed seams unchanged).
+ */
+export type AdviceDeliveredEvent = {
+  type: 'adviceDelivered';
+  session: string;
+  ord: number;
+  attempt: number;
+  /** `f-` + 16 lowercase hex per finding; one steer may carry several. */
+  findingIds: string[];
+  carrier: 'acp_steering' | 'none' | (string & {});
+  outcome: 'injected' | 'turn_ended' | 'refused' | 'not_delivered' | (string & {});
+  detail: string | null;
+};
+
+/**
+ * DES-TEAMING-001 §5.3 / §7 (wicked-core#602, S3; api-types 0.40.0) — the worker's answer to one
+ * DELIVERED finding, read from its final output line `ADVICE <id>: ACCEPT|DECLINE — <reason>` (the
+ * last line per id wins). The worker may decline and must say why: `reason` (≤2 KB) is its
+ * evidence, and may be `""` — a refusal with no evidence is recorded as exactly that. A delivered
+ * finding with no line emits nothing here and is `unanswered` in the team ledger. The gate, not the
+ * monitor, decides.
+ */
+export type WorkerAdviceResponseEvent = {
+  type: 'workerAdviceResponse';
+  session: string;
+  ord: number;
+  attempt: number;
+  findingId: string;
+  disposition: 'accepted' | 'declined' | (string & {});
+  reason: string;
+};
+
+/** The S3 team-advice events as a discriminated union for consumers that narrow on `type`; they
+ *  also flow through the permissive {@link CoreEvent}. */
+export type TeamAdviceEvent = AdviceDeliveredEvent | WorkerAdviceResponseEvent;
 
 export type GateEvidenceEvent =
   | EvaluatorMutatedWorktreeEvent
