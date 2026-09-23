@@ -59,9 +59,8 @@ import type { CoreAdapter } from '../core/adapter.js';
 import type { CoreEvent, LaunchRunInput, WorkflowDef } from '../core/types.js';
 import {
   acpFallbackLine,
-  councilAgreementPct,
-  councilOutcomeSuffix,
   ungatedGateNote,
+  unitDistributedLine,
   workerToolCallDeniedLine,
 } from './council-outcome.js';
 import { busSubscriberErrorReporter } from './bus-subscriber-errors.js';
@@ -565,11 +564,9 @@ export async function startInteractiveEditSubscriber(
 
     if (event.type === 'unitDistributed') {
       if (isFloorOrd(event)) return;
-      const who = typeof event.cli === 'string' ? event.cli : 'a worker';
-      const agreement = councilAgreementPct(event);
-      const pct = agreement !== null ? ` (${agreement}% agreement)` : '';
-      // Honest about a council that held on a fraction of its seats (F-4R2-007).
-      narrate(flight, `Council picked ${who} to rework ${blocks}${pct}${councilOutcomeSuffix(event)}…`);
+      // One helper narrates the frame by `routingMethod` (S5 `teamed` = "Routed …", a recorded
+      // council = "Council picked …" honest about its benched seats, F-4R2-007).
+      narrate(flight, unitDistributedLine(event, `to rework ${blocks}`));
       return;
     }
 

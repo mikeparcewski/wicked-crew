@@ -66,9 +66,8 @@ import { DELIVERABLE_FLOOR_PHASE_ID } from '../core/deliverable-floor.js';
 import type { CoreEvent, WorkflowDef } from '../core/types.js';
 import {
   acpFallbackLine,
-  councilAgreementPct,
-  councilOutcomeSuffix,
   ungatedGateNote,
+  unitDistributedLine,
   workerToolCallDeniedLine,
 } from './council-outcome.js';
 import { busSubscriberErrorReporter } from './bus-subscriber-errors.js';
@@ -846,11 +845,9 @@ export async function startInteractiveDraftSubscriber(
     if (event.type === 'unitDistributed') {
       if (isFloorOrd(event)) return;
       const ord = typeof event.ord === 'number' ? event.ord : 0;
-      const who = typeof event.cli === 'string' ? event.cli : 'a worker';
-      const agreement = councilAgreementPct(event);
-      const pct = agreement !== null ? ` (${agreement}% agreement)` : '';
-      // Honest about a council that held on a fraction of its seats (F-4R2-007).
-      narrate(flight, `Council picked ${who} for ${phaseName(ord)}${pct}${councilOutcomeSuffix(event)}…`);
+      // One helper narrates the frame by `routingMethod` (S5 `teamed` = "Routed …", a recorded
+      // council = "Council picked …" honest about its benched seats, F-4R2-007).
+      narrate(flight, unitDistributedLine(event, `for ${phaseName(ord)}`));
       return;
     }
 

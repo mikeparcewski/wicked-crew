@@ -611,6 +611,29 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     await waitFor(narrated('3-seat council'));
     engine.fire({ type: 'unitDistributed', session: launch.sessionId, ord: 2, cli: 'stub', agreement_pct: 100 });
     await waitFor(narrated('picked stub'));
+    // wicked-core#590 S5: a `teamed` frame (no council convened; the council-only fields are null)
+    // is narrated as a routing, never as a council pick.
+    engine.fire({
+      type: 'unitDistributed',
+      session: launch.sessionId,
+      ord: 2,
+      cli: 'stub',
+      routingMethod: 'teamed',
+      agreementPct: null,
+      returned: null,
+      seated: null,
+      dissent: null,
+      degradedReason: null,
+    } as unknown as CoreEvent);
+    await waitFor(narrated('Routed stub for draft'));
+    expect(
+      probeEvents.filter(
+        (e) =>
+          e.event_type === STATUS_POSTED &&
+          /Routed stub/.test(String((e.payload as { message?: string }).message)) &&
+          /council|agreement|picked/i.test(String((e.payload as { message?: string }).message)),
+      ),
+    ).toEqual([]);
     engine.fire({ type: 'toolInvoked', session: launch.sessionId, ord: 2, attempt: 0, tools: ['Write', 'Write', 'Read'] });
     await waitFor(narrated('using Write, Read'));
     engine.fire({ type: 'gateDecided', session: launch.sessionId, ord: 2, allow: true });
