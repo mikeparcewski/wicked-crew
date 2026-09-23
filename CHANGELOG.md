@@ -10,6 +10,20 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Added
+- **studio#323 R4 — A chat can NAME its scope: `system` + `everything` / `project` / `repo`
+  (`wicked-crew-api-types` 0.39.0).** `POST /chats` accepts an optional `scopeKind`. `system` is the
+  platform itself — stated to the seats as such, no repository, no code graph, and the reason says
+  plainly that the seats have no live read of the daemon (only what the message carries).
+  `everything` reads every registered repository across all projects from the registry — not an
+  enumerated `repoRefs` list, so the 1–32 cap does not apply — and binds no graph, saying why (no
+  single graph spans them). `project` requires `projectId`; `repo` (legacy spelling `repos`)
+  requires `repoRefs`; `none` is the legacy unscoped chat. A named kind resolves to exactly that
+  kind or is a 400 before any seat warms — an input it cannot use is refused, never dropped.
+  Omitting `scopeKind` keeps the legacy inference byte-for-byte, so older skins are unaffected.
+  `system` takes the unscoped seat admission (it holds no repository read-only); `everything` the
+  scoped one. `ChatScopeKind` gains `system` | `everything`; new `ChatScopeRequestKind`.
+
 ### Fixed (observability)
 - **#661 — A phase that runs without the skill its workflow declares is disclosed, not silent.**
   When the published skills snapshot lacks `wicked-garden-draft`, interactive-draft / -edit / -chat
