@@ -923,7 +923,7 @@ export interface CoreEvent {
   seatConstraint?: string | null;
   /** `unitDistributed` (wicked-core#461): the evaluator ≠ creator fallback as a field — see
    *  `UnitDistributedEvent.distinctnessFallback`. */
-  distinctnessFallback?: 'creator_seat' | null;
+  distinctnessFallback?: 'creator_seat' | 'same_cli_instance' | null;
   /** `gateEvaluated` (wave 6, F-7R2-005): `true` when NOTHING gated the unit — render as UNGATED. */
   ungated?: boolean;
   /** `gateEvaluated` (wave 6): why, when `ungated`. */
@@ -2033,8 +2033,14 @@ export interface UnitDistributedEvent {
    * never absent — the `seatConstraint` rule) from the wicked-core release carrying #461 on, but an
    * older engine does not send it at all, and this contract must read frames from both. Consumers
    * guard with `== null`, never `=== undefined`.
+   *
+   * `'same_cli_instance'` (wicked-core#591/#595): the unit IS on a seat distinct from every builder
+   * seat, but that seat runs the SAME cli as a builder (`claude#2` grading `claude#1`) — instance
+   * distinctness removes the creator's context, not the model's blind spots, so it is a degraded
+   * gate and disclosed. `'creator_seat'` dominates when both would apply. Consumers must treat an
+   * unrecognised value as a disclosure too, never as "distinct".
    */
-  distinctnessFallback?: 'creator_seat' | null;
+  distinctnessFallback?: 'creator_seat' | 'same_cli_instance' | null;
   /** @deprecated api-types 0.36.0 — the engine emits `routingMethod`; removed in 0.37. */
   routing_method?: 'council' | 'degraded' | 'evaluator_distinct' | 'tool';
   /** @deprecated api-types 0.36.0 — the engine emits `agreementPct`; removed in 0.37. */

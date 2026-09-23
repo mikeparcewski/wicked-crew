@@ -10,6 +10,15 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+- **Crew CI typecheck red since wicked-core#595 — `unitDistributed.distinctnessFallback` gains
+  `'same_cli_instance'`.** core#595 (seat-instance identity, #591) widened the engine's union to
+  `'creator_seat' | 'same_cli_instance' | null` (a review unit on a distinct seat INSTANCE of the
+  builder's own cli — a degraded gate, disclosed). Crew CI builds `wicked-core-ts` from core main, so
+  `tests/wire-contract.test.ts` failed on every branch. `wicked-crew-api-types` now declares the same
+  closed set on `UnitDistributedEvent` and the `RecordedEvent` mirror (doc names the new value); the
+  wire pins hold against both the core-main and the npm-pinned addon shapes, two-way on the token set.
+
 ### Tests
 - **#655 — Chat-promotion provenance is pinned on the path that carries a value.**
   `tests/chat-promotion-provenance.test.ts` previously asserted only the ABSENT answer, which a tree

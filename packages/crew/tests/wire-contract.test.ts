@@ -301,14 +301,16 @@ respondsWith<UnitDistributedEventJson, typeof RECORDED_UNIT_DISTRIBUTED>();
 
 // ── Hardening S5 (wicked-core#461 / crew#556): `unitDistributed.distinctnessFallback` ──────────────
 // The engine adds the evaluator ≠ creator fallback as a REQUIRED key of `UnitDistributedEventJson`
-// (`'creator_seat' | null`, emitted unconditionally). Crew CI builds `wicked-core-ts` from core MAIN
+// (`'creator_seat' | 'same_cli_instance' | null` since core#595, emitted unconditionally). Crew CI builds `wicked-core-ts` from core MAIN
 // while the npm pin lags, so the contract must hold against BOTH shapes at once — which is why the
-// contract declares the field OPTIONAL (`?: 'creator_seat' | null`): an engine frame WITH the key
+// contract declares the field OPTIONAL (`?: 'creator_seat' | 'same_cli_instance' | null`): an engine frame WITH the key
 // (core main) and one WITHOUT it (the current pin) both satisfy it. `UnitDistributedEventJsonWithFallback`
 // is the post-#461 napi shape spelled out here, so this file proves the core-main direction on the
 // pinned addon too (and keeps proving it once the pin catches up, when the two types coincide).
+// wicked-core#591/#595 widened the engine's union with `'same_cli_instance'` (two seat instances of
+// one cli); the contract carries the same closed set.
 type UnitDistributedEventJsonWithFallback = UnitDistributedEventJson & {
-  distinctnessFallback: 'creator_seat' | null;
+  distinctnessFallback: 'creator_seat' | 'same_cli_instance' | null;
 };
 // The engine's post-#461 frame satisfies the contract (the field REQUIRED there, optional here) …
 respondsWith<Wire.UnitDistributedEvent, UnitDistributedEventJsonWithFallback>();
@@ -334,7 +336,17 @@ const RECORDED_UNIT_DISTRIBUTED_FALLBACK = {
 };
 respondsWith<Wire.UnitDistributedEvent, typeof RECORDED_UNIT_DISTRIBUTED_FALLBACK>();
 respondsWith<UnitDistributedEventJsonWithFallback, typeof RECORDED_UNIT_DISTRIBUTED_FALLBACK>();
-respondsWith<Wire.UnitDistributedEvent['distinctnessFallback'], 'creator_seat' | null | undefined>();
+// wicked-core#591/#595: a review unit on a DISTINCT seat instance of the builder's own cli.
+type RecordedUnitDistributedSameCli = Omit<typeof RECORDED_UNIT_DISTRIBUTED_FALLBACK, 'distinctnessFallback'> & {
+  distinctnessFallback: 'same_cli_instance';
+};
+respondsWith<Wire.UnitDistributedEvent, RecordedUnitDistributedSameCli>();
+// (Not pinned against `UnitDistributedEventJsonWithFallback`: on the npm-pinned addon that type
+// intersects to `'creator_seat' | null`. The core-main direction is proven above, where
+// `UnitDistributedEventJson` itself carries `'same_cli_instance'` and must satisfy the contract.)
+respondsWith<Wire.UnitDistributedEvent['distinctnessFallback'], 'creator_seat' | 'same_cli_instance' | null | undefined>();
+// … and the contract's set is no WIDER than the engine's (the pin is two-way).
+respondsWith<'creator_seat' | 'same_cli_instance' | null | undefined, Wire.UnitDistributedEvent['distinctnessFallback']>();
 // The typed `POST /runs` 409 for the engine's `NoEligibleSeat` intake refusal (same PR).
 respondsWith<Wire.NoEligibleSeatBody, ReturnType<typeof noEligibleSeatBody>>();
 respondsWith<Wire.NoEligibleSeatBody['code'], typeof NO_ELIGIBLE_SEAT_CODE>();
