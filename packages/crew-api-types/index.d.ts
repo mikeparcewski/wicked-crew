@@ -4372,10 +4372,32 @@ export interface ChatOpenBody {
   /** File the chat into a project (`crew.chat` membership, attached on open) — and, when no
    *  `repoRefs` are given, scope it to every registered `crew.repo` member of that project. */
   projectId?: string;
+  /**
+   * The scope the caller NAMES (api-types 0.39.0, studio#323 R4). Omitted ⇒ the legacy inference
+   * above (`repoRefs` ⇒ `repos`, else `projectId` ⇒ `project`, else `none`) — unchanged for older
+   * skins. Named, the daemon resolves exactly that kind or refuses with 400:
+   *   - `system`     — the platform itself (daemon, seats, runs, config): NO repository and no code
+   *                    graph. The seats have no live read of the daemon; what they know of it is what
+   *                    the message carries. Takes no `repoRefs`; `projectId` only files the chat.
+   *   - `everything` — EVERY repository registered with the daemon, across all projects, as read
+   *                    roots — never an enumerated list (no 1–32 cap). No single code graph spans
+   *                    them, so none is bound. Takes no `repoRefs`; `projectId` only files the chat.
+   *   - `project`    — requires `projectId`; takes no `repoRefs` (name `repo` to narrow).
+   *   - `repo`       — requires `repoRefs`; `repos` is the same kind in its legacy spelling.
+   *   - `none`       — the legacy unscoped chat; takes neither `projectId` nor `repoRefs`.
+   */
+  scopeKind?: ChatScopeRequestKind;
 }
 
-/** How a chat's scope was chosen (crew#502). */
-export type ChatScopeKind = 'project' | 'repos' | 'none';
+/** The scope a `POST /chats` caller may name (api-types 0.39.0, studio#323 R4). */
+export type ChatScopeRequestKind = 'system' | 'everything' | 'project' | 'repo' | 'repos' | 'none';
+
+/**
+ * How a chat's scope was chosen (crew#502). `system` and `everything` (api-types 0.39.0,
+ * studio#323 R4) come back only for a request that named them (`ChatOpenBody.scopeKind`); a named
+ * `repo` comes back as `repos`, the kind for an explicit repo list.
+ */
+export type ChatScopeKind = 'system' | 'everything' | 'project' | 'repos' | 'none';
 
 /** One repository a chat's seats may read. */
 export interface ChatScopeRepo {
@@ -4394,7 +4416,7 @@ export interface ChatScope {
   kind: ChatScopeKind;
   /** The project the chat is filed into, when any. */
   projectId?: string;
-  /** The repositories in scope (read-only). Empty for `kind: 'none'`. */
+  /** The repositories in scope (read-only). Empty for `kind: 'none'` and `kind: 'system'`. */
   repos: ChatScopeRepo[];
   /** The seats' working directory: the chat's private scratch root under the OS temp dir. */
   cwd: string;

@@ -704,3 +704,76 @@ describe('crew#642 — zero-entity graph reports ungrounded on the 201 scope', (
     expect(body.scope.graph.bound).toBe(true);
   });
 });
+
+// studio#323 R4 — `scopeKind` on the wire: system + everything / project / repo.
+describe('POST /chats — named scope kinds (studio#323 R4)', () => {
+  it("scopeKind 'system' opens a stated platform chat: no read roots, the UNSCOPED seat admission, and a statement the seats read", async () => {
+    const spy = vi.spyOn(CoreAdapter, 'roster').mockReturnValue([
+      { key: 'claude', acp: { acp_input_governance: true, os_sandbox: false } },
+      { key: 'pi', acp: { acp_input_governance: false, os_sandbox: false } },
+    ]);
+    try {
+      const res = await open({ chatId: 'sys', scopeKind: 'system' });
+      expect(res.statusCode).toBe(201);
+      const body = res.json() as { scope: { kind: string; repos: unknown[]; cwd: string; graph: { bound: boolean; reason: string } } };
+      expect(body.scope.kind).toBe('system');
+      expect(body.scope.repos).toEqual([]);
+      expect(body.scope.graph.bound).toBe(false);
+      // pi (no permission asks) is admitted: a system chat holds no repository read-only.
+      expect(chatOpen.mock.calls.at(-1)).toEqual(['sys', ['claude', 'pi'], body.scope.cwd, { codeGraphDb: null, readRoots: [] }]);
+      expect(readFileSync(join(body.scope.cwd, 'AGENTS.md'), 'utf8')).toMatch(/## Scope: system/);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("scopeKind 'system' opens on an engine that predates chat scope (it promises no read roots)", async () => {
+    applied = false;
+    const res = await open({ chatId: 'sys-old', clis: ['claude'], scopeKind: 'system' });
+    expect(res.statusCode).toBe(201);
+    expect((res.json() as { scope: { kind: string } }).scope.kind).toBe('system');
+  });
+
+  it("scopeKind 'everything' reads every registered repo and applies the SCOPED seat admission", async () => {
+    const spy = vi.spyOn(CoreAdapter, 'roster').mockReturnValue([
+      { key: 'claude', acp: { acp_input_governance: true, os_sandbox: false } },
+      { key: 'pi', acp: { acp_input_governance: false, os_sandbox: false } },
+    ]);
+    try {
+      const res = await open({ chatId: 'all', scopeKind: 'everything' });
+      expect(res.statusCode).toBe(201);
+      const body = res.json() as { scope: { kind: string; repos: { rootPath: string }[]; cwd: string }; refused: { cliKey: string }[] };
+      expect(body.scope.kind).toBe('everything');
+      expect(body.scope.repos.map((r) => r.rootPath)).toEqual(['/srv/repos/alpha']);
+      expect(body.refused.map((r) => r.cliKey)).toEqual(['pi']);
+      expect(chatOpen.mock.calls.at(-1)).toEqual(['all', ['claude'], body.scope.cwd, { codeGraphDb: null, readRoots: ['/srv/repos/alpha'] }]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("scopeKind 'repo' is the explicit repo list; a kind missing what it needs is a 400 BEFORE any seat warms", async () => {
+    const one = await open({ chatId: 'one', clis: ['claude'], scopeKind: 'repo', repoRefs: ['alpha'] });
+    expect(one.statusCode).toBe(201);
+    expect((one.json() as { scope: { kind: string } }).scope.kind).toBe('repos');
+    chatOpen.mockClear();
+    const noRepos = await open({ chatId: 'no-repos', clis: ['claude'], scopeKind: 'repo' });
+    expect(noRepos.statusCode).toBe(400);
+    expect((noRepos.json() as { error: string }).error).toMatch(/repoRefs/);
+    const noProject = await open({ chatId: 'no-project', clis: ['claude'], scopeKind: 'project' });
+    expect(noProject.statusCode).toBe(400);
+    expect((noProject.json() as { error: string }).error).toMatch(/projectId/);
+    const sysRepos = await open({ chatId: 'sys-repos', clis: ['claude'], scopeKind: 'system', repoRefs: ['alpha'] });
+    expect(sysRepos.statusCode).toBe(400);
+    expect(chatOpen).not.toHaveBeenCalled();
+    // A refused open frees its id: nothing is held.
+    expect(chatScopes.has('no-repos')).toBe(false);
+    expect(existsSync(join(base, 'chats', 'no-repos'))).toBe(false);
+  });
+
+  it('an unknown scopeKind is a 400 from body validation', async () => {
+    const res = await open({ chatId: 'bad', clis: ['claude'], scopeKind: 'galaxy' });
+    expect(res.statusCode).toBe(400);
+    expect(chatOpen).not.toHaveBeenCalled();
+  });
+});

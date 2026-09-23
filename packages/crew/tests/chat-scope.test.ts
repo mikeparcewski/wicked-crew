@@ -810,3 +810,125 @@ describe('resolveChatScope — crew#642 entityCount liveness gate', () => {
     expect(res.scope.graph.reason).toMatch(/holds no entities/);
   });
 });
+
+// studio#323 R4 — the named scope vocabulary: system + everything / project / repo. A request
+// that NAMES its kind (`kind`) is resolved to exactly that kind or refused (400) — never silently
+// inferred into another one; a request without `kind` keeps the legacy inference above.
+describe('resolveChatScope — named scope kinds (studio#323 R4)', () => {
+  /** Narrow a resolution to its ok arm WITHOUT a skip: a refusal fails the test loudly. */
+  function okOf(res: Awaited<ReturnType<typeof resolveChatScope>>) {
+    if (!res.ok) throw new Error(`expected an ok resolution, got ${res.status}: ${res.error}`);
+    return res;
+  }
+  function refusalOf(res: Awaited<ReturnType<typeof resolveChatScope>>) {
+    if (res.ok) throw new Error(`expected a refusal, got kind ${res.scope.kind}`);
+    return res;
+  }
+
+  it("'system' is a STATED scope about the platform itself: no repos, no graph, and a reason that says the seats have no live read of the daemon", async () => {
+    const d = deps();
+    const res = okOf(await resolveChatScope({ chatId: 's1', kind: 'system', repoRefs: [] }, d));
+    expect(res.scope.kind).toBe('system');
+    expect(res.scope.repos).toEqual([]);
+    expect(res.scope.dangling).toEqual([]);
+    expect(res.scope.graph.bound).toBe(false);
+    expect(res.scope.graph.reason).toMatch(/platform itself/);
+    expect(res.scope.graph.reason).toMatch(/no live read/);
+    expect(res.engine).toEqual({ cwd: join(base, 's1'), codeGraphDb: null, readRoots: [] });
+    expect(d.bindCalls).toEqual([]);
+  });
+
+  it("'system' files into a project when asked, but still reads no repository of it", async () => {
+    const d = deps();
+    const res = okOf(await resolveChatScope({ chatId: 's2', kind: 'system', projectId: 'p1', repoRefs: [] }, d));
+    expect(res.scope.kind).toBe('system');
+    expect(res.scope.projectId).toBe('p1');
+    expect(res.scope.repos).toEqual([]);
+    expect(res.engine.readRoots).toEqual([]);
+    expect(d.bindCalls).toEqual([]);
+  });
+
+  it("'everything' reads EVERY registered repo (not an enumerated list) and says why no single graph is bound", async () => {
+    const d = deps();
+    const res = okOf(await resolveChatScope({ chatId: 'e1', kind: 'everything', repoRefs: [] }, d));
+    expect(res.scope.kind).toBe('everything');
+    expect(res.scope.repos).toEqual([
+      { id: 'r-alpha', name: 'alpha', rootPath: '/srv/repos/alpha' },
+      { id: 'r-beta', name: 'beta', rootPath: '/srv/repos/beta' },
+      { id: 'r-gamma', name: 'gamma', rootPath: '/srv/repos/gamma' },
+    ]);
+    expect(res.engine.readRoots).toEqual(['/srv/repos/alpha', '/srv/repos/beta', '/srv/repos/gamma']);
+    expect(res.engine.codeGraphDb).toBeNull();
+    expect(res.scope.graph.bound).toBe(false);
+    expect(res.scope.graph.reason).toMatch(/3 registered repos/);
+    expect(res.scope.graph.reason).toMatch(/no single code graph spans them/);
+    expect(d.bindCalls).toEqual([]);
+  });
+
+  it("'everything' over more than 32 registered repos is not capped by the repoRefs enumeration limit", async () => {
+    const many = Array.from({ length: 40 }, (_, i) => repo(`r-${i}`, `n-${i}`, `/srv/many/n-${i}`));
+    const res = okOf(await resolveChatScope({ chatId: 'e2', kind: 'everything', repoRefs: [] }, deps({ listRepos: async () => many })));
+    expect(res.scope.repos).toHaveLength(40);
+    expect(res.engine.readRoots).toHaveLength(40);
+  });
+
+  it("'everything' on a daemon with no registered repo is still 'everything', with an empty read-root list", async () => {
+    const res = okOf(await resolveChatScope({ chatId: 'e3', kind: 'everything', repoRefs: [] }, deps({ listRepos: async () => [] })));
+    expect(res.scope.kind).toBe('everything');
+    expect(res.scope.repos).toEqual([]);
+    expect(res.scope.graph.reason).toMatch(/no repository is registered/);
+  });
+
+  it("'project' resolves exactly as the legacy project scope does, and REQUIRES a projectId", async () => {
+    const named = okOf(await resolveChatScope({ chatId: 'p-a', kind: 'project', projectId: 'p1', repoRefs: [] }, deps()));
+    expect(named.scope.kind).toBe('project');
+    expect(named.scope.repos.map((r) => r.id)).toEqual(['r-alpha', 'r-beta']);
+    expect(named.scope.dangling).toEqual(['r-gone']);
+    const missing = refusalOf(await resolveChatScope({ chatId: 'p-b', kind: 'project', repoRefs: [] }, deps()));
+    expect(missing.status).toBe(400);
+    expect(missing.error).toMatch(/projectId/);
+  });
+
+  it("'repo' (and its legacy spelling 'repos') resolves to the explicit repo list and REQUIRES repoRefs", async () => {
+    const one = okOf(await resolveChatScope({ chatId: 'r-a', kind: 'repo', repoRefs: ['gamma'] }, deps()));
+    expect(one.scope.kind).toBe('repos');
+    expect(one.scope.repos.map((r) => r.id)).toEqual(['r-gamma']);
+    const legacy = okOf(await resolveChatScope({ chatId: 'r-b', kind: 'repos', repoRefs: ['r-alpha', 'r-beta'] }, deps()));
+    expect(legacy.scope.kind).toBe('repos');
+    expect(legacy.scope.repos.map((r) => r.id)).toEqual(['r-alpha', 'r-beta']);
+    const none = refusalOf(await resolveChatScope({ chatId: 'r-c', kind: 'repo', repoRefs: [] }, deps()));
+    expect(none.status).toBe(400);
+    expect(none.error).toMatch(/repoRefs/);
+  });
+
+  it("an explicit 'none' is the legacy unscoped chat and takes neither a project nor repos", async () => {
+    const plain = okOf(await resolveChatScope({ chatId: 'n-a', kind: 'none', repoRefs: [] }, deps()));
+    expect(plain.scope.kind).toBe('none');
+    const withProject = refusalOf(await resolveChatScope({ chatId: 'n-b', kind: 'none', projectId: 'p1', repoRefs: [] }, deps()));
+    expect(withProject.status).toBe(400);
+  });
+
+  it('a kind that cannot carry repoRefs refuses them (400) instead of silently dropping them', async () => {
+    for (const kind of ['system', 'everything', 'project', 'none'] as const) {
+      const res = refusalOf(
+        await resolveChatScope({ chatId: `x-${kind}`, kind, projectId: 'p1', repoRefs: ['r-alpha'] }, deps()),
+      );
+      expect(res.status, kind).toBe(400);
+      expect(res.error, kind).toMatch(/repoRefs/);
+    }
+  });
+
+  it('the seats READ the named scope: system names the platform, everything names every repository', async () => {
+    const sys = okOf(await resolveChatScope({ chatId: 'st-s', kind: 'system', repoRefs: [] }, deps()));
+    const sysText = chatScopeStatement('st-s', sys.scope);
+    expect(sysText).toMatch(/## Scope: system/);
+    expect(sysText).toMatch(/the wicked platform itself/);
+    expect(sysText).toMatch(/cannot query the daemon's live state/);
+    expect(sysText).not.toMatch(/opened without a project or repo scope/);
+    const all = okOf(await resolveChatScope({ chatId: 'st-e', kind: 'everything', repoRefs: [] }, deps()));
+    const allText = chatScopeStatement('st-e', all.scope);
+    expect(allText).toMatch(/## Scope: everything/);
+    expect(allText).toMatch(/every repository registered with this daemon/);
+    expect(allText).toContain('`/srv/repos/gamma`');
+  });
+});

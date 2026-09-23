@@ -850,6 +850,9 @@ export const ChatOpenSchema = z.object({
   /** File the chat into a project (`crew.chat` membership) — and, with no `repoRefs`, scope it to
    *  every registered `crew.repo` member of that project (crew#502). */
   projectId: z.string().min(1).optional(),
+  /** The scope the caller NAMES (studio#323 R4) — omitted ⇒ the legacy inference. Shape rules
+   *  (which kinds need / refuse `projectId` / `repoRefs`) are the resolver's (`chat-scope.ts`). */
+  scopeKind: z.enum(['system', 'everything', 'project', 'repo', 'repos', 'none']).optional(),
 }).strict();
 
 /**
@@ -2353,6 +2356,7 @@ export function registerRoutes(
           chatId,
           ...(b.projectId !== undefined ? { projectId: b.projectId } : {}),
           repoRefs: [...(b.repoRef !== undefined ? [b.repoRef] : []), ...(b.repoRefs ?? [])],
+          ...(b.scopeKind !== undefined ? { kind: b.scopeKind } : {}),
         },
         {
           ...chatScopeDeps(adapter),
@@ -2387,7 +2391,10 @@ export function registerRoutes(
       // here is NAMED on the response (`refused`) and in the thread (`chatSeatRefused`), so a
       // person can see why pi is missing. Explicit `clis` are passed through as asked; the engine
       // refuses per seat with its reason, which is copied into `refused` too.
-      const scoped = scope.kind !== 'none';
+      // A chat is SCOPED — held to read-only roots — when it reads repositories by its kind. `none`
+      // and `system` (studio#323 R4: the platform itself, no repository) read none, so they take the
+      // unscoped admission and open on an engine that predates chat scope.
+      const scoped = scope.kind !== 'none' && scope.kind !== 'system';
       const refused: ChatSeatRefusal[] = [];
       // The standing roster, read ONCE: the default admission below and the engine-drop
       // attribution after `chatOpen` both consult it (F-A45-011).

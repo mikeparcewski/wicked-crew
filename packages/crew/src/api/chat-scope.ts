@@ -45,7 +45,7 @@ import { basename, dirname, join, resolve, sep } from 'node:path';
 import type { CoreAdapter } from '../core/adapter.js';
 import { execCapped } from '../core/exec.js';
 import { codeGraphDb } from '../core/repoPaths.js';
-import type { ChatScope, ChatScopeRepo, RepoEntry } from '../core/types.js';
+import type { ChatScope, ChatScopeRepo, ChatScopeRequestKind, RepoEntry } from '../core/types.js';
 import { estateExe, parseEstateTotals, resolveProjectGraphBinding, type ProjectGraphBindingDecision } from '../projects/graph.js';
 import type { ChatRefusalSource } from './seat-standing.js';
 
@@ -70,6 +70,8 @@ export interface ChatScopeRequest {
   projectId?: string;
   /** Registry ids or names; empty when the caller named none. */
   repoRefs: string[];
+  /** The kind the caller NAMED (`scopeKind`, studio#323 R4); absent ⇒ the legacy inference. */
+  kind?: ChatScopeRequestKind;
 }
 
 /** What the engine is handed for the chat — the wire shape of `chatOpen`'s `scopeJson` plus `cwd`. */
@@ -292,9 +294,63 @@ export async function resolveChatScope(
       error: `chatId ${JSON.stringify(req.chatId)} cannot name a chat scratch directory`,
     };
   }
+  const refs = [...new Set(req.repoRefs)];
+  const named = namedKindRefusal(req.kind, req.projectId, refs);
+  if (named !== null) return named;
   const repos = await deps.listRepos();
   const log = deps.log ?? (() => undefined);
-  const refs = [...new Set(req.repoRefs)];
+
+  if (req.kind === 'system') {
+    // The platform itself (studio#323 R4): stated, not the absence of a scope. Nothing is read
+    // and nothing is bound — and the reason says what the seats actually have to go on.
+    const overlap = refuseOverlap(repos, base, new Set(), log);
+    if (overlap !== null) return overlap;
+    return ok(
+      {
+        kind: 'system',
+        ...(req.projectId !== undefined ? { projectId: req.projectId } : {}),
+        repos: [],
+        cwd,
+        graph: {
+          bound: false,
+          reason:
+            'a system chat is about the wicked platform itself (daemon, seats, runs, configuration), ' +
+            'so no repository and no code graph are in scope; its seats have no live read of the ' +
+            'daemon — only what the message carries.',
+        },
+        dangling: [],
+      },
+      null,
+      [],
+    );
+  }
+
+  if (req.kind === 'everything') {
+    // Every registered repo, across all projects (studio#323 R4) — the registry, never an
+    // enumerated `repoRefs` list, so the 1–32 cap does not apply. A project graph covers only its
+    // project's repos, so none is bound even when the chat is filed into one.
+    const overlap = refuseOverlap(repos, base, new Set(repos.map((r) => r.id)), log);
+    if (overlap !== null) return overlap;
+    return ok(
+      {
+        kind: 'everything',
+        ...(req.projectId !== undefined ? { projectId: req.projectId } : {}),
+        repos: repos.map(row),
+        cwd,
+        graph: {
+          bound: false,
+          reason:
+            repos.length === 0
+              ? 'no repository is registered with this daemon, so there is nothing to read and no code graph.'
+              : `${repos.length} registered repos across all projects and no single code graph spans them, ` +
+                'so this chat gets no code graph; scope it to a project to ground on its graph.',
+        },
+        dangling: [],
+      },
+      null,
+      repos,
+    );
+  }
 
   if (refs.length > 0) {
     const found: RepoEntry[] = [];
@@ -394,6 +450,34 @@ export async function resolveChatScope(
     null,
     [],
   );
+}
+
+/**
+ * The shape rules of a NAMED kind (studio#323 R4), checked before anything is read: a named kind
+ * resolves to exactly that kind or is refused — an input it cannot use is a 400, never silently
+ * dropped or re-inferred into another kind. `null` = acceptable (or no kind named).
+ */
+function namedKindRefusal(
+  kind: ChatScopeRequestKind | undefined,
+  projectId: string | undefined,
+  refs: string[],
+): ChatScopeResolution | null {
+  if (kind === undefined) return null;
+  const refuse = (error: string): ChatScopeResolution => ({ ok: false, status: 400, error });
+  if (kind === 'repo' || kind === 'repos') {
+    return refs.length === 0 ? refuse(`scopeKind '${kind}' requires repoRefs (1–32 repos by id or name)`) : null;
+  }
+  if (refs.length > 0) {
+    const hint = kind === 'project' ? " — name scopeKind 'repo' (with projectId) to narrow a project to some repos" : '';
+    return refuse(`scopeKind '${kind}' takes no repoRefs${hint}`);
+  }
+  if (kind === 'project' && projectId === undefined) {
+    return refuse("scopeKind 'project' requires projectId");
+  }
+  if (kind === 'none' && projectId !== undefined) {
+    return refuse("scopeKind 'none' takes no projectId — name 'project' to scope to it, or 'system' to only file into it");
+  }
+  return null;
 }
 
 function ok(scope: ChatScope, dbPath: string | null, repos: RepoEntry[]): ChatScopeResolution {
@@ -556,7 +640,26 @@ export function chatScopeStatement(chatId: string, scope: ChatScope): string {
     `This directory is the scratch root of wicked-crew chat \`${chatId}\`. It is the ONLY place you may write.`,
     '',
   ];
-  if (scope.repos.length === 0 && scope.kind === 'project') {
+  if (scope.kind === 'system') {
+    lines.push(
+      '## Scope: system',
+      '',
+      'This chat is about the wicked platform itself — the wicked-crew daemon, its seats, runs and',
+      'configuration — not a code repository. No repository is in scope and no code graph is bound.',
+      "You cannot query the daemon's live state from here: answer from the context the message",
+      'carries (for example a diagnostics or run snapshot) and from general knowledge, and say',
+      'plainly when a question needs live state you were not given.',
+      '',
+    );
+  } else if (scope.kind === 'everything' && scope.repos.length === 0) {
+    lines.push(
+      '## Scope: everything',
+      '',
+      'This chat covers every repository registered with this daemon, but none is registered yet:',
+      'no repository is readable. Say so plainly if asked about code.',
+      '',
+    );
+  } else if (scope.repos.length === 0 && scope.kind === 'project') {
     // A project whose every `crew.repo` member is dangling (or that has none): filed, but nothing
     // readable — say exactly that, never "opened without a project" (Copilot, #518).
     lines.push(
@@ -579,6 +682,14 @@ export function chatScopeStatement(chatId: string, scope: ChatScope): string {
       '',
     );
   } else {
+    if (scope.kind === 'everything') {
+      lines.push(
+        '## Scope: everything',
+        '',
+        'This chat covers every repository registered with this daemon, across all projects.',
+        '',
+      );
+    }
     lines.push(
       '## Repositories in scope (READ-ONLY)',
       '',
@@ -628,6 +739,10 @@ export function chatScopeStatement(chatId: string, scope: ChatScope): string {
       `The graph is bound to \`${scope.graph.repoLabel ?? 'this scope'}\` (${scope.graph.reason}).`,
       '',
     );
+  } else if (scope.repos.length === 0 && (scope.kind === 'system' || scope.kind === 'everything')) {
+    // Nothing to read (studio#323 R4 kinds; the legacy kinds keep their pinned wording): never
+    // tell a seat to "read the repositories directly" when there are none.
+    lines.push(`No code graph is bound: ${scope.graph.reason}`, '');
   } else {
     lines.push(
       `No code graph is bound: ${scope.graph.reason} — read the repositories directly and say so.`,
