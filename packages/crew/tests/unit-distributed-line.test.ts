@@ -77,6 +77,17 @@ describe('unitDistributedLine (wicked-core#590 S5)', () => {
     );
   });
 
+  it('renders an UNRECOGNISED method as routed, never as a council (the api-types contract)', () => {
+    // `UnitDistributedEvent.routingMethod` (crew-api-types): "Consumers must render an unrecognised
+    // method as \"routed\", never as a council" — a future engine method must not read as a pick.
+    const line = unitDistributedLine(distributed({ routingMethod: 'skill_affinity', cli: 'codex' }), 'for outline');
+    expect(line).toBe('Routed codex for outline…');
+    expect(line).not.toMatch(/council|agreement|picked/i);
+    expect(unitDistributedLine(distributed({ routing_method: 'skill_affinity' }), 'to write the draft')).toBe(
+      'Routed claude to write the draft…',
+    );
+  });
+
   it('falls back to "a worker" when the frame names no cli', () => {
     expect(unitDistributedLine(distributed({ routingMethod: 'teamed', cli: undefined }), 'for outline')).toBe(
       'Routed a worker for outline…',

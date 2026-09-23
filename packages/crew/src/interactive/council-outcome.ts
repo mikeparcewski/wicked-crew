@@ -67,17 +67,26 @@ export function councilOutcomeSuffix(event: CoreEvent): string {
  * route a unit: every seated unit is routed `teamed` (the first eligible seat its skills admit) and
  * the council-only fields (`agreementPct`, `returned`, `seated`, `dissent`) are `null`, so a teamed
  * frame must read as a routing — "Routed codex for outline…" — never as a council pick. The council
- * wording ("Council picked X for Y (N% agreement) (…)") is kept for recorded `council` / `degraded`
- * frames and for an older engine that sends no `routingMethod`; `evaluator_distinct` and `tool`
- * frames keep the wording they had. `degradedReason` is quoted on every arm — wave 6 sets it on
- * every routing arm whenever the eligible set is smaller than the roster.
+ * wording ("Council picked X for Y (N% agreement) (…)") is kept ONLY for recorded `council` /
+ * `degraded` frames and for an older engine that sends no `routingMethod`; `evaluator_distinct` and
+ * `tool` frames keep the wording they had. Any other non-empty method — one this build does not
+ * know — takes the "Routed …" branch too: the contract (`UnitDistributedEvent.routingMethod` in
+ * wicked-crew-api-types) says an unrecognised method renders as routed, never as a council, so a
+ * newer engine's method cannot read as a pick. `degradedReason` is quoted on every arm — wave 6
+ * sets it on every routing arm whenever the eligible set is smaller than the roster.
  *
  * `task` is the seam's own object: `for outline`, `to write the draft`, `to rework 3 targeted blocks`.
  */
+/** The `routingMethod`s that keep the council-era line: a recorded council, its degrade, and the
+ *  two (`evaluator_distinct`, `tool`) whose wording is kept as it was. Everything else (`teamed`,
+ *  or a method this build does not know) is narrated as a routing. A missing method (an older
+ *  engine) is council-era too. */
+const COUNCIL_WORDED_METHODS: ReadonlySet<string> = new Set(['council', 'degraded', 'evaluator_distinct', 'tool']);
+
 export function unitDistributedLine(event: CoreEvent, task: string): string {
   const who = str(event, 'cli') ?? 'a worker';
   const method = str(event, 'routingMethod', 'routing_method');
-  if (method === 'teamed') {
+  if (method !== null && !COUNCIL_WORDED_METHODS.has(method)) {
     const reason = str(event, 'degradedReason', 'degraded_reason');
     return `Routed ${who} ${task}${reason !== null ? ` (${reason})` : ''}…`;
   }
