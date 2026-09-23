@@ -31,9 +31,10 @@ import { coreUnitId } from './evidence.js';
 import { registerClient, broadcast } from '../events/bus.js';
 import { TerminalHub, registerTerminalWs } from '../events/terminals.js';
 import { QeGateCache, startQeGateSubscriber } from '../qe/gate-events.js';
-import { startInteractiveDraftSubscriber } from '../interactive/draft-events.js';
-import { startInteractiveEditSubscriber } from '../interactive/edit-events.js';
-import { startInteractiveChatSubscriber } from '../interactive/chat-events.js';
+import { INTERACTIVE_DRAFT_WORKFLOW_DEF, startInteractiveDraftSubscriber } from '../interactive/draft-events.js';
+import { INTERACTIVE_EDIT_WORKFLOW_DEF, startInteractiveEditSubscriber } from '../interactive/edit-events.js';
+import { INTERACTIVE_CHAT_WORKFLOW_DEF, startInteractiveChatSubscriber } from '../interactive/chat-events.js';
+import { PhaseSkillArming, RunSkillGapIndex } from '../skills/phase-skill-gaps.js';
 import { startInteractiveDemoSubscriber } from '../interactive/demo-events.js';
 import { resolveProjectInteractiveRoot } from '../interactive/bridge-root.js';
 import { sweepDocLedgers, type DocLedgerSource, type DocLedgerSweep } from '../interactive/doc-ledger-sweep.js';
@@ -588,6 +589,12 @@ export async function createServer(
   // trail's `guidance.set` entries so notes survive a daemon restart.
   const guidanceIndex = new GuidanceIndex();
   await guidanceIndex.hydrate(audit, (m) => app.log.warn(m));
+  // crew#661: each drafting seam's ARM-TIME skill outcome (diagnostics / health), and the runs
+  // launched while a seam was unarmed (`session.skill_gaps`) — same durable trail pattern.
+  const phaseSkills = new PhaseSkillArming(() => skillsRuntime?.health().current?.gen ?? null);
+  const runSkillGaps = new RunSkillGapIndex();
+  await runSkillGaps.hydrate(audit, (m) => app.log.warn(m));
+  const skillHeld = (name: string): boolean => skillsRuntime?.holdsSkill(name) ?? false;
   // Delivered-PR record (CREW-UX-8, crew#321): same durable pattern — hydrated from the
   // trail's `run.delivered` entries so `session.delivery` survives a daemon restart.
   const deliveryIndex = new DeliveryIndex();
@@ -907,8 +914,9 @@ export async function createServer(
       ...(o.clisJson !== undefined ? { clisJson: o.clisJson } : {}),
       // The roster WITH standing when no override is set (F-RECON-002/003).
       roster: rosterWithStanding,
-      // The quality-floor skill gate (draft-skill.ts): stamped only when the published snapshot holds it.
-      skillHeld: (name) => skillsRuntime?.holdsSkill(name) ?? false,
+      // The quality-floor skill gate (draft-skill.ts): stamped only when the published snapshot holds it;
+      // the arm-time answer is recorded for /diagnostics (crew#661).
+      skillHeld: phaseSkills.probe('interactive-draft', INTERACTIVE_DRAFT_WORKFLOW_DEF, skillHeld),
       onRunFiled: fileRun,
       onRunLaunched: (runId, detail) => { recordRunLaunched(audit, runTimingIndex, DAEMON_ACTOR, runId, detail); },
       // F-046: the create-time grounding sidecar is read under the SAME per-project docs root the
@@ -945,8 +953,9 @@ export async function createServer(
       ...(o.clisJson !== undefined ? { clisJson: o.clisJson } : {}),
       // The roster WITH standing when no override is set (F-RECON-002/003).
       roster: rosterWithStanding,
-      // The quality-floor skill gate (draft-skill.ts): stamped only when the published snapshot holds it.
-      skillHeld: (name) => skillsRuntime?.holdsSkill(name) ?? false,
+      // The quality-floor skill gate (draft-skill.ts): stamped only when the published snapshot holds it;
+      // the arm-time answer is recorded for /diagnostics (crew#661).
+      skillHeld: phaseSkills.probe('interactive-edit', INTERACTIVE_EDIT_WORKFLOW_DEF, skillHeld),
       // The demo-kind gate (CREW-UX-9): a demo doc's step feedback is the demo seam's — but
       // only when that seam is actually up. Probed per event (the demo seam arms below), so an
       // un-armed demo seam gets an honest error status instead of a silent, unanswerable drop.
@@ -1015,8 +1024,9 @@ export async function createServer(
       ...(o.clisJson !== undefined ? { clisJson: o.clisJson } : {}),
       // The roster WITH standing when no override is set (F-RECON-002/003).
       roster: rosterWithStanding,
-      // The quality-floor skill gate (draft-skill.ts): stamped only when the published snapshot holds it.
-      skillHeld: (name) => skillsRuntime?.holdsSkill(name) ?? false,
+      // The quality-floor skill gate (draft-skill.ts): stamped only when the published snapshot holds it;
+      // the arm-time answer is recorded for /diagnostics (crew#661).
+      skillHeld: phaseSkills.probe('interactive-chat', INTERACTIVE_CHAT_WORKFLOW_DEF, skillHeld),
       ...(o.queueSweepMs !== undefined ? { queueSweepMs: o.queueSweepMs } : {}),
       ...(o.landingGateMs !== undefined ? { landingGateMs: o.landingGateMs } : {}),
       resolveDocsRoot: o.resolveDocsRoot ?? interactiveDocsRoot,
@@ -1364,6 +1374,9 @@ export async function createServer(
   // close like the event listener.
   const offLaunch = adapter.onLaunch((notice) => {
     skillsRuntime?.launched(notice);
+    // crew#661: a run handed on a workflow that armed WITHOUT its declared skill proceeds degraded
+    // and says so on the run (`session.skill_gaps`, a `run.skill.unarmed` trail entry). Never throws.
+    runSkillGaps.onLaunch(notice, phaseSkills, audit, DAEMON_ACTOR, (m) => app.log.warn(m));
   });
   app.addHook('onClose', async () => {
     offEvent();
@@ -1472,6 +1485,8 @@ export async function createServer(
       groupIndex,
       runTimingIndex,
       guidanceIndex,
+      phaseSkills,
+      runSkillGaps,
       chatScopes,
       chatTurns,
       chatTranscripts,

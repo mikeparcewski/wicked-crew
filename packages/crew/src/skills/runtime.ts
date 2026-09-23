@@ -174,7 +174,7 @@ export type SkillsHealthState = 'published' | 'fallback' | 'blocked' | 'config-e
 
 /** `skills.stale-rules` (F-083) is emitted ahead of its `wicked-crew-api-types` declaration — the next api-types cut adds it to `DiagnosticsSkillsFinding.kind`. */
 /** `skills.base-skill` (crew#554 / DES-L4 PR-⑧): the configured base skill is not in the published generation — an ERROR (the engine refuses launches at intake; `'require'` is the only policy). */
-export type SkillsHealthFindingKind = 'skills.fallback' | 'skills.blocked' | 'skills.config' | 'skills.source' | 'skills.manifest' | 'skills.stale-rules' | 'skills.base-skill';
+export type SkillsHealthFindingKind = 'skills.fallback' | 'skills.blocked' | 'skills.config' | 'skills.source' | 'skills.manifest' | 'skills.stale-rules' | 'skills.base-skill' | 'skills.phase-skill';
 
 export interface SkillsHealthFinding {
   kind: SkillsHealthFindingKind;

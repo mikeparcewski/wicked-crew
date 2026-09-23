@@ -501,6 +501,8 @@ describe('daemon boot (createServer) — the root is <state home>/skills; the fe
         stateHome: canonicalCrewStateHome(),
         findings: [expect.objectContaining({ kind: 'skills.base-skill', severity: 'error' })],
         baseSkill: expect.objectContaining({ name: DEFAULT_SETTINGS.baseSkillRef, policy: 'require', present: false, gen: 1, engineInput: DEFAULT_SETTINGS.baseSkillRef }),
+        // crew#661: no drafting seam armed on this boot → no phase ran without its declared skill.
+        phaseSkillGaps: [],
       });
       // The root lives under THIS state home — never under the operator's real one.
       expect(readdirSync(dir)).toContain('skills');
@@ -572,6 +574,8 @@ describe('daemon boot (createServer) — the root is <state home>/skills; the fe
           expect.objectContaining({ kind: 'skills.base-skill', severity: 'error' }),
         ],
         baseSkill: expect.objectContaining({ name: DEFAULT_SETTINGS.baseSkillRef, present: false, gen: 1, engineInput: DEFAULT_SETTINGS.baseSkillRef }),
+        // crew#661: no drafting seam armed on this boot → no phase ran without its declared skill.
+        phaseSkillGaps: [],
       });
       const res = await app.inject({ method: 'GET', url: '/api/v1/skills' });
       expect(res.statusCode).toBe(200);

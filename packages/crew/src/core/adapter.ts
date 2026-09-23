@@ -1076,6 +1076,9 @@ export interface LaunchNotice {
   /** The run's session id (`LaunchRunInput.sessionId` / the run id) or the campaign's `CampaignDef.id`. */
   id: string;
   status: 'handed' | 'rejected';
+  /** The workflow id a NEW run launches (`LaunchRunInput.workflow` — the base id, before any per-run
+   *  composition). Absent on a resume, a gate answer, a campaign, and a launch naming no workflow. */
+  workflow?: string;
 }
 export type LaunchListener = (notice: LaunchNotice) => void;
 
@@ -1337,9 +1340,14 @@ export class CoreAdapter {
    * never swallowed (codex round 6). A listener failing on `rejected` cannot un-launch anything;
    * the primary error keeps precedence and the secondary one is logged, not lost.
    */
-  private async handedToEngine<T>(kind: LaunchNotice['kind'], id: string, call: () => Promise<T>): Promise<T> {
+  private async handedToEngine<T>(
+    kind: LaunchNotice['kind'],
+    id: string,
+    call: () => Promise<T>,
+    workflow?: string,
+  ): Promise<T> {
     try {
-      this.notifyLaunch({ kind, id, status: 'handed' });
+      this.notifyLaunch({ kind, id, status: 'handed', ...(workflow !== undefined ? { workflow } : {}) });
     } catch (err) {
       this.releaseAfterFailure(kind, id, err);
       throw err;
@@ -1614,7 +1622,7 @@ export class CoreAdapter {
           'deliverable floor to',
       );
     }
-    return this.handedToEngine('run', input.sessionId, () => this.core.launchRun(opts));
+    return this.handedToEngine('run', input.sessionId, () => this.core.launchRun(opts), input.workflow);
   }
 
   /** Resume a run from its persisted cursor → the status token. */

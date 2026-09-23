@@ -410,6 +410,10 @@ export interface AgentSession {
   /** Wave 6 (F-7R2-006): the seats BENCHED for this run — never convened, never a failover or
    *  judge target. Absent (never `[]`) when none / on an older engine. */
   benched_seats?: BenchedSeat[];
+  /** crew#661: the declared skills this run's phases ran WITHOUT (the published skills snapshot did not
+   *  hold them when the launching subsystem armed) — the run proceeded DEGRADED, and says so here.
+   *  ABSENT (never `[]`) when the run launched fully armed, and on a daemon before this field. */
+  skill_gaps?: RunSkillGap[];
   /**
    * The surface that triggered this launch (crew#632; crew ≥ 0.7.40): `'studio'` (web UI),
    * `'cli'` (wicked-crew CLI), or `'api'` (programmatic). ABSENT when the launch did not include
@@ -5299,7 +5303,9 @@ export interface DiagnosticsSkillsFinding {
    *  the configured BASE skill (`SystemSettings.baseSkillRef`) is not in the current generation —
    *  a `warning` under `baseSkillPolicy: 'warn'` (runs proceed without the discipline directive),
    *  an `error` under `'require'` (the engine refuses every launch at intake); cleared by a publish
-   *  that hands it. Also carried as `DiagnosticsSkills.baseSkill.finding`. */
+   *  that hands it. Also carried as `DiagnosticsSkills.baseSkill.finding`; `skills.phase-skill`
+   *  (`warning`, crew#661) = a subsystem's phases declare a skill the published snapshot did not hold
+   *  when it armed, so they run without it — one per `DiagnosticsSkills.phaseSkillGaps` entry. */
   kind:
     | 'skills.fallback'
     | 'skills.blocked'
@@ -5307,7 +5313,8 @@ export interface DiagnosticsSkillsFinding {
     | 'skills.source'
     | 'skills.manifest'
     | 'skills.stale-rules'
-    | 'skills.base-skill';
+    | 'skills.base-skill'
+    | 'skills.phase-skill';
   severity: 'warning' | 'error';
   message: string;
 }
@@ -5341,7 +5348,39 @@ export interface DiagnosticsSkills {
    *  when the setting is off or the seam is `disabled`. A daemon before this field omits the key
    *  (read it as `null`). */
   baseSkill: BaseSkillPosture | null;
+  /** Subsystems whose phases run WITHOUT a skill their workflow declares (crew#661; additive) — one
+   *  entry per subsystem, judged when that seam ARMED (the decision holds until the daemon restarts).
+   *  Each entry also rides `findings` as a `skills.phase-skill` warning. `[]` when every armed seam
+   *  holds its skill; ABSENT on a daemon before this field (read it as unknown, not as `[]`). */
+  phaseSkillGaps?: DiagnosticsPhaseSkillGap[];
 }
+
+/**
+ * One subsystem whose phases declare a skill the published snapshot did not hold when the subsystem
+ * armed (crew#661) — today the interactive seams' `wicked-garden-draft` quality floor. The phases
+ * run DEGRADED (no `skill_ref`, no quality floor) and every run launched on it says so in
+ * `AgentSession.skill_gaps`; the engine would refuse a `skill_ref` its snapshot lacks, so the seam
+ * cannot simply stamp it.
+ */
+export interface DiagnosticsPhaseSkillGap {
+  /** The subsystem (`interactive-draft` / `interactive-edit` / `interactive-chat`). */
+  subsystem: string;
+  /** The workflow id the subsystem launches. */
+  workflow: string;
+  /** The agent phases that declare the skill and run without it. */
+  phases: string[];
+  /** The declared skill (`wicked-garden-draft`). */
+  skill: string;
+  /** The published skills generation judged at arm time, or `null` when none was published. */
+  gen: number | null;
+  /** Epoch ms of the arm-time judgement. */
+  armedAt: number;
+  /** The fix: republish the skills snapshot from a wicked-garden that carries the skill, then restart. */
+  remedy: string;
+}
+
+/** A skill gap a run LAUNCHED with (`AgentSession.skill_gaps[]`, crew#661) — the arm-time gap without its timestamp. */
+export type RunSkillGap = Omit<DiagnosticsPhaseSkillGap, 'armedAt'>;
 
 /**
  * The BASE skill in force for the next launch (crew#554 — the launcher half of wicked-core#468).
