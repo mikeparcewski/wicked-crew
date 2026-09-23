@@ -347,6 +347,42 @@ respondsWith<Wire.UnitDistributedEvent, RecordedUnitDistributedSameCli>();
 respondsWith<Wire.UnitDistributedEvent['distinctnessFallback'], 'creator_seat' | 'same_cli_instance' | null | undefined>();
 // … and the contract's set is no WIDER than the engine's (the pin is two-way).
 respondsWith<'creator_seat' | 'same_cli_instance' | null | undefined, Wire.UnitDistributedEvent['distinctnessFallback']>();
+// ── wicked-core#590 S5: `routingMethod: 'teamed'` / `RoutingInfo { method: 'teamed' }` ──────────────
+// The engine stopped convening a council to route units: every seated unit is routed `teamed` (the
+// first eligible seat), and the council-only fields are `null`. Crew CI builds `wicked-core-ts` from
+// core MAIN while the npm pin lags, so the contract must hold against BOTH addon shapes: the engine's
+// set is a SUBSET of the contract's on each (4 members on the pin, 5 once core carries S5), which is
+// what `respondsWith<Wire.UnitDistributedEvent, UnitDistributedEventJson>()` above already proves in
+// the engine→contract direction. The contract-side set is pinned two-way against the literal below,
+// never against the engine's (a two-way pin against the addon would break on whichever shape lags).
+const RECORDED_UNIT_DISTRIBUTED_TEAMED = {
+  ...RECORDED_UNIT_DISTRIBUTED,
+  routingMethod: 'teamed' as const,
+  agreementPct: null,
+  returned: null,
+  seated: null,
+  dissent: null,
+  degradedReason: null,
+};
+respondsWith<Wire.UnitDistributedEvent, typeof RECORDED_UNIT_DISTRIBUTED_TEAMED>();
+type RoutingMethods = 'council' | 'degraded' | 'evaluator_distinct' | 'tool' | 'teamed';
+respondsWith<RoutingMethods, Wire.UnitDistributedEvent['routingMethod']>();
+respondsWith<Wire.UnitDistributedEvent['routingMethod'], RoutingMethods>();
+// The engine's own set — whichever addon shape this build links — fits the contract's.
+respondsWith<RoutingMethods, UnitDistributedEventJson['routingMethod']>();
+// The routing ARTIFACT on a unit (`WorkUnit.routing`, serde `{"method":"teamed","winner":…}`).
+const TEAMED_ROUTING = { method: 'teamed' as const, winner: 'codex' };
+respondsWith<Wire.RoutingInfo, typeof TEAMED_ROUTING>();
+// A recorded run's council routing still reads (the variant is kept for history).
+const RECORDED_COUNCIL_ROUTING = {
+  method: 'council' as const,
+  winner: 'claude',
+  agreement_pct: 100,
+  returned: 1,
+  seated: null,
+  dissent: 0,
+};
+respondsWith<Wire.RoutingInfo, typeof RECORDED_COUNCIL_ROUTING>();
 // The typed `POST /runs` 409 for the engine's `NoEligibleSeat` intake refusal (same PR).
 respondsWith<Wire.NoEligibleSeatBody, ReturnType<typeof noEligibleSeatBody>>();
 respondsWith<Wire.NoEligibleSeatBody['code'], typeof NO_ELIGIBLE_SEAT_CODE>();
@@ -1203,5 +1239,27 @@ describe('team-advice wire shapes (wicked-core#602, api-types 0.40.0)', () => {
     expect(Object.keys(RECORDED_WORKER_ADVICE_RESPONSE).sort()).toEqual(
       ['attempt', 'disposition', 'findingId', 'ord', 'reason', 'session', 'type'].sort(),
     );
+  });
+});
+
+describe('teamed routing wire shapes (wicked-core#590 S5)', () => {
+  it('reads a teamed unitDistributed frame and routing artifact exactly as the engine serializes them', () => {
+    // The engine's bytes (wicked-core `event_to_json` / serde on `RoutingInfo::Teamed`), verbatim,
+    // parse to the compile-time pins above — so the pins describe what actually crosses the wire.
+    const frame = JSON.parse(
+      '{"type":"unitDistributed","session":"b86c14c1-e295-4659-8a30-51b4ec1ac589","ord":2,' +
+        '"cli":"claude","routingMethod":"teamed","agreementPct":null,"returned":null,"seated":null,' +
+        '"dissent":null,"degradedReason":null,"seatConstraint":null,"distinctnessFallback":null}',
+    ) as Wire.UnitDistributedEvent;
+    expect(frame).toEqual(RECORDED_UNIT_DISTRIBUTED_TEAMED);
+    const routing = JSON.parse('{"method":"teamed","winner":"codex"}') as Wire.RoutingInfo;
+    expect(routing).toEqual(TEAMED_ROUTING);
+    expect(routing.method === 'teamed' ? routing.winner : undefined).toBe('codex');
+    // A recorded run's council routing still narrows on the same tag.
+    const recorded = JSON.parse(
+      '{"method":"council","winner":"claude","agreement_pct":100,"returned":1,"seated":null,"dissent":0}',
+    ) as Wire.RoutingInfo;
+    expect(recorded).toEqual(RECORDED_COUNCIL_ROUTING);
+    expect(recorded.method === 'council' ? recorded.agreement_pct : undefined).toBe(100);
   });
 });
