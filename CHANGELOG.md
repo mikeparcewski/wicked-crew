@@ -13,6 +13,14 @@ mentioned only where a daemon release depends on them.
 ## [0.7.40] — 2026-09-23
 
 ### Added
+- **wicked-core#602 (DES-TEAMING-001 S3) — the team-advice wire events (`wicked-crew-api-types`
+  0.40.0).** Additive `AdviceDeliveredEvent` (`adviceDelivered`: a HIGH monitor finding steered into
+  the working ACP turn over `_session/steering` with `idleBehavior: "promptRequired"` —
+  `injected` / `turn_ended` / `refused` — or disclosed `not_delivered` when the carrier has no
+  mid-turn channel or the turn ended first) and `WorkerAdviceResponseEvent`
+  (`workerAdviceResponse`: the worker's `ACCEPT`/`DECLINE` with its reason), plus the
+  `TeamAdviceEvent` union. `tests/wire-contract.test.ts` pins both against the exact JSON
+  wicked-core's `CoreEvent::to_json` emits. Types only: the `/ws` relay already forwards every frame.
 - **studio#323 R4 — A chat can NAME its scope: `system` + `everything` / `project` / `repo`
   (`wicked-crew-api-types` 0.39.0).** `POST /chats` accepts an optional `scopeKind`. `system` is the
   platform itself — stated to the seats as such, no repository, no code graph, and the reason says
