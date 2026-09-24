@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module';
+import type { BusUnavailable } from './engine-bus.js';
 import { mkdir, access, readFile, writeFile, chmod, rm } from 'node:fs/promises';
 import { existsSync, readdirSync, readFileSync, renameSync } from 'node:fs';
 import { join, dirname, resolve, isAbsolute, relative, sep } from 'node:path';
@@ -988,7 +989,7 @@ export interface CoreAdapterOptions {
    * engine then runs without a bus, and `/health.warnings` carries a `bus.unavailable` notice
    * naming this reason (T0: a daemon-level notice; a per-run `transport:"none"` lands with P1).
    */
-  busUnavailable?: { dbPath: string; reason: string };
+  busUnavailable?: BusUnavailable;
   /**
    * The governance store + dead-letter outbox this daemon hands the engine (crew#495 / F-022) —
    * resolved by the CLI (`core/governance-store.ts`), exported to `process.env` HERE, before the
@@ -1134,7 +1135,7 @@ export class CoreAdapter {
   readonly busDbPath: string | undefined;
   /** Why the engine has no usable bus — the boot probe's failure, or the engine could not arm its
    *  bus bridge on the handed bus within its bound — else `null`. */
-  readonly busUnavailable: { dbPath: string; reason: string } | null;
+  readonly busUnavailable: BusUnavailable | null;
   /**
    * `true` when this adapter drives the DETERMINISTIC OFFLINE engine (`Core.spawnStub`) rather
    * than the production one — i.e. the `StubDispatcher` (every seat votes for the first roster
@@ -1256,7 +1257,7 @@ export class CoreAdapter {
       const state = JSON.parse(this.core.busBridgeState()) as { state: string; reason?: string };
       if (state.state === 'not-armed') {
         const reason = `the engine could not arm its bus bridge: ${state.reason ?? 'no reason given'}`;
-        this.busUnavailable = { dbPath: this.busDbPath, reason };
+        this.busUnavailable = { dbPath: this.busDbPath, reason: state.reason ?? 'no reason given', kind: 'bridge_not_armed' };
         console.error(`[crew] bus unavailable: ${this.busDbPath} (${reason}) — the engine launches nothing from the bus`);
       }
     }

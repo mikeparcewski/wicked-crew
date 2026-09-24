@@ -5,7 +5,7 @@ import { closeSync, mkdirSync, openSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { CoreAdapter } from '../core/adapter.js';
 import { crewBusHandle } from '../core/bus-handle.js';
-import { engineBusHandoff } from '../core/engine-bus.js';
+import { engineBusHandoff, type BusUnavailable } from '../core/engine-bus.js';
 import { ensureBridgesOnPath, ensurePiLauncherCommand, PI_ACP_COMMAND_ENV } from '../core/bridge-path.js';
 import { bridgeReaper, reapOrphansAtBoot, startOrphanSweep } from '../core/bridge-reaper.js';
 import { daemonSignalLog } from '../core/daemon-signal-log.js';
@@ -220,26 +220,26 @@ function parseBootstrap(args: string[]): BootstrapOpts {
 
 /** Open the daemon's crew bus handle (creating the file and its directory); the reason when it
  *  cannot, else `undefined`. */
-function probeCrewBus(dbPath: string): { dbPath: string; reason: string } | undefined {
+function probeCrewBus(dbPath: string): BusUnavailable | undefined {
   try {
     mkdirSync(dirname(dbPath), { recursive: true });
     crewBusHandle(dbPath, { create: true }).prepare('SELECT 1').all();
     return undefined;
   } catch (err) {
-    return { dbPath, reason: err instanceof Error ? err.message : String(err) };
+    return { dbPath, reason: err instanceof Error ? err.message : String(err), kind: 'probe_open' };
   }
 }
 
 /** Probe the pre-T0 exec bus an engine without the one-connection rule would get — a plain file
  *  open, NOT a SQLite connection: this runs before the engine spawns and no connection in this
  *  process holds that file (it is not the crew bus), so the close here drops nobody's locks. */
-function probePreRuleExecBus(dbPath: string): { dbPath: string; reason: string } | undefined {
+function probePreRuleExecBus(dbPath: string): BusUnavailable | undefined {
   try {
     mkdirSync(dirname(dbPath), { recursive: true });
     closeSync(openSync(dbPath, 'a'));
     return undefined;
   } catch (err) {
-    return { dbPath, reason: err instanceof Error ? err.message : String(err) };
+    return { dbPath, reason: err instanceof Error ? err.message : String(err), kind: 'probe_open' };
   }
 }
 

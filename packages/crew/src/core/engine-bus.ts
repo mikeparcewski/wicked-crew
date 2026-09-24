@@ -12,6 +12,9 @@
 export interface BusUnavailable {
   dbPath: string;
   reason: string;
+  /** Which failure (see `core/bus-notice.ts`): crew's probe could not open the file, or the engine
+   *  could not arm its bus bridge on it. */
+  kind: 'probe_open' | 'bridge_not_armed';
 }
 
 export interface EngineBusInput {

@@ -18,11 +18,11 @@ export interface HealthBusWarning {
 }
 
 export function busUnavailableWarning(u: BusUnavailableNotice): HealthBusWarning {
-  return {
-    kind: 'bus.unavailable',
-    severity: 'warning',
-    message:
-      `bus unavailable: cannot open ${u.dbPath} (${u.reason}) — ` +
-      'the engine runs without a bus (un-teamed); fix the path or its permissions and restart the daemon',
-  };
+  const message =
+    u.kind === 'bridge_not_armed'
+      ? `bus unavailable: the engine could not arm its bus bridge on ${u.dbPath} (${u.reason}) — ` +
+        'it launches nothing from the bus; find what holds the bus file locked or slow, then restart the daemon'
+      : `bus unavailable: cannot open ${u.dbPath} (${u.reason}) — ` +
+        'the engine runs without a bus (un-teamed); fix the path or its permissions and restart the daemon';
+  return { kind: 'bus.unavailable', severity: 'warning', message };
 }

@@ -5,7 +5,7 @@ import { engineBusHandoff, type EngineBusInput } from '../src/core/engine-bus.js
 
 const CREW = '/s/core.db.bus/bus.db';
 const LEGACY = '/s/bus.db';
-const DOWN = (dbPath: string) => ({ dbPath, reason: 'ENOTDIR' });
+const DOWN = (dbPath: string) => ({ dbPath, reason: 'ENOTDIR', kind: 'probe_open' as const });
 const base: EngineBusInput = {
   engineRule: true,
   engineExec: false,

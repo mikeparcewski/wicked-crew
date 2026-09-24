@@ -75,20 +75,46 @@ async function bootDaemon(dbPath: string, extraArgs: string[], extraEnv: Record<
   proc.stderr!.on('data', (c: string) => {
     stderr += c;
   });
+  // Every failure path (timeout, early exit, an unparseable ready line, a spawn error) clears the
+  // timer, detaches this function's listeners and kills the child: a hung daemon never leaks.
   const ready = await new Promise<Record<string, unknown>>((resolveReady, reject) => {
-    const timer = setTimeout(() => reject(new Error(`daemon did not report ready in ${BOOT_TIMEOUT_MS}ms\n${stderr}`)), BOOT_TIMEOUT_MS);
-    proc.stdout!.on('data', (chunk: string) => {
+    let settled = false;
+    const onStdout = (chunk: string): void => {
       stdout += chunk;
       const line = stdout.split('\n').find((l) => l.startsWith('WICKED_CREW_READY '));
-      if (line !== undefined) {
-        clearTimeout(timer);
-        resolveReady(JSON.parse(line.slice('WICKED_CREW_READY '.length)) as Record<string, unknown>);
+      if (line === undefined) return;
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = JSON.parse(line.slice('WICKED_CREW_READY '.length)) as Record<string, unknown>;
+      } catch (err) {
+        fail(new Error(`unparseable ready line: ${line}\n${String(err)}`));
+        return;
       }
-    });
-    proc.on('exit', (code) => {
+      settle();
+      resolveReady(parsed);
+    };
+    const onExit = (code: number | null): void => fail(new Error(`daemon exited (${code}) before ready\n${stderr}`));
+    const onError = (err: Error): void => fail(err);
+    const timer = setTimeout(
+      () => fail(new Error(`daemon did not report ready in ${BOOT_TIMEOUT_MS}ms\n${stderr}`)),
+      BOOT_TIMEOUT_MS,
+    );
+    function settle(): void {
+      settled = true;
       clearTimeout(timer);
-      reject(new Error(`daemon exited (${code}) before ready\n${stderr}`));
-    });
+      proc.stdout!.off('data', onStdout);
+      proc.off('exit', onExit);
+      proc.off('error', onError);
+    }
+    function fail(err: Error): void {
+      if (settled) return;
+      settle();
+      if (proc.exitCode === null && proc.signalCode === null) proc.kill('SIGKILL');
+      reject(err);
+    }
+    proc.stdout!.on('data', onStdout);
+    proc.on('exit', onExit);
+    proc.on('error', onError);
   });
   return {
     proc,
