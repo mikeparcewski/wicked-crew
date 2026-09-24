@@ -5787,3 +5787,417 @@ export interface RetireMemoryBody {
 export interface RetireMemoryResponse {
   erased: number;
 }
+
+// ── Team events on the bus (DES-TEAMING-002 §6, wicked-core T1; api-types 0.41.0) ──────────────
+//
+// The `wicked.team.*` facts wicked-core publishes on the cross-product bus (`domain`
+// `wicked-core`, `subdomain` `core.team`), one owner per type (DES-002 §7: E engine, S supervisor,
+// R attempt runner). Crew publishes none of them: it relays and reads. Mirrors wicked-core
+// `src/team/events.rs`; `packages/crew/tests/team-events.test.ts` pins every type against the
+// engine's own round-trip fixtures by value. Payload keys are snake_case and every key is
+// present (an absent value is `null`), except a plan step's optional fields, which a plan omits
+// when unset. The embedded {@link TeamLedger} keeps DES-001 §7's camelCase.
+
+/** The 25 `wicked.team.<noun>.<verb>` event types. */
+export type TeamEventType =
+  | 'wicked.team.path.started'
+  | 'wicked.team.path.scored'
+  | 'wicked.team.plan.proposed'
+  | 'wicked.team.plan.revised'
+  | 'wicked.team.plan.accepted'
+  | 'wicked.team.plan.refused'
+  | 'wicked.team.member.joined'
+  | 'wicked.team.member.left'
+  | 'wicked.team.step.claimed'
+  | 'wicked.team.checkpoint.reached'
+  | 'wicked.team.finding.raised'
+  | 'wicked.team.advice.delivered'
+  | 'wicked.team.advice.answered'
+  | 'wicked.team.help.requested'
+  | 'wicked.team.help.answered'
+  | 'wicked.team.change.requested'
+  | 'wicked.team.step.completed'
+  | 'wicked.team.step.reviewed'
+  | 'wicked.team.finding.settled'
+  | 'wicked.team.council.called'
+  | 'wicked.team.council.ruled'
+  | 'wicked.team.ledger.folded'
+  | 'wicked.team.gate.opened'
+  | 'wicked.team.gate.decided'
+  | 'wicked.team.path.ended';
+
+/** The fields every team payload carries. */
+export interface TeamEnvelope {
+  run_id: string;
+  ord: number | null;
+  attempt: number | null;
+  /** The acting seat instance, `'engine'`, `'human'` or `'council:<task id>'`. */
+  by: string;
+  /** Epoch milliseconds at the producer. */
+  at: number;
+  /** The row this one answers, e.g. `'finding.raised#4'`. */
+  re: string | null;
+}
+
+/** A plan step: a catalog entry plus the step fields a plan may set (omitted when unset). */
+export interface TeamPlanStep {
+  catalog: string;
+  id: string;
+  instructions?: string;
+  owner?: 'pa' | 'team' | (string & {});
+  depends_on?: string[];
+  /** A raised gate, as the workflow's externally tagged `GateSpec`. */
+  gate?: unknown;
+  added_by?: 'plan' | 'floor' | (string & {});
+  floor_reason?: string;
+  late?: boolean;
+}
+
+export interface TeamPlanOverride {
+  remove: string[];
+  reason: string;
+}
+
+export type TeamPathStartedPayload = TeamEnvelope & {
+  cli: string;
+  selection: 'chosen' | 'random' | (string & {});
+  roster: string[];
+  request: string;
+  workflow: string | null;
+  plan: boolean;
+};
+
+export type TeamPathScoredPayload = TeamEnvelope & {
+  /** `'intent:<proposal_id>'` | `'diff:<ord>:<attempt>:<rescore_seq>'`. */
+  score_source: string;
+  basis: 'intent' | 'diff' | (string & {});
+  score: number;
+  deterministic: number;
+  reasons: string[];
+  model: { add: number; rationale: string } | null;
+  signals: {
+    changed_symbols: number;
+    dependents: number;
+    products: number;
+    contract_change: boolean;
+    test_gap: number;
+    critical: boolean;
+    destructive: boolean;
+    truncated: boolean;
+  } | null;
+  plan: { monitors: number; depth: string; post_hoc_reviewer: boolean; post_hoc_other_cli: boolean };
+  tree: string | null;
+};
+
+export type TeamPlanProposedPayload = TeamEnvelope & {
+  proposal_id: string;
+  base_rev: number | null;
+  kind: 'initial' | 'change' | 'edit' | (string & {});
+  preset: string | null;
+  steps: TeamPlanStep[];
+  monitors: { asked: number };
+  asks: string[];
+  touch: string[];
+  override: TeamPlanOverride | null;
+  rationale: string;
+};
+
+export type TeamPlanRevisedPayload = TeamEnvelope & {
+  plan_rev: number;
+  proposal_id: string | null;
+  reason: 'floor_raised' | 'pa_added' | 'member_request' | (string & {});
+  from_band: string;
+  to_band: string;
+  high_risk: boolean;
+  added: TeamPlanStep[];
+};
+
+export type TeamPlanAcceptedPayload = TeamEnvelope & {
+  plan_rev: number;
+  workflow_id: string;
+  band: string;
+  high_risk: boolean;
+  mode: 'auto' | 'manual' | (string & {});
+  steps: TeamPlanStep[];
+  override: TeamPlanOverride | null;
+  proposal_id: string | null;
+};
+
+export type TeamPlanRefusedPayload = TeamEnvelope & {
+  proposal_id: string;
+  base_rev: number | null;
+  reason: string;
+};
+
+export type TeamMemberJoinedPayload = TeamEnvelope & {
+  member_id: string;
+  open_seq: number;
+  seat: string;
+  role: 'monitor' | (string & {});
+  status: 'attached' | 'failed' | (string & {});
+  reason: string;
+  error: string | null;
+};
+
+export type TeamMemberLeftPayload = TeamEnvelope & {
+  member_id: string;
+  open_seq: number;
+  seat: string;
+  status: 'completed' | 'budget_exhausted' | 'failed' | 'timed_out' | (string & {});
+  batches: number;
+  error: string | null;
+};
+
+export type TeamStepClaimedPayload = TeamEnvelope & {
+  step_id: string;
+  role: string;
+  kind: string;
+  phase: string;
+  criterion: string;
+  baseline_tree: string | null;
+  repo: { workdir: string; git_dir: string } | null;
+  code_graph_db: string | null;
+};
+
+export type TeamCheckpointReachedPayload = TeamEnvelope & {
+  seq: number;
+  tool_call_id: string;
+  kind: string;
+  title: string;
+  status: 'completed' | 'failed' | (string & {});
+  paths: string[];
+};
+
+export type TeamFindingRaisedPayload = TeamEnvelope & {
+  raise_seq: number;
+  finding_id: string;
+  member_id: string;
+  line_key: string | null;
+  anchor: string | null;
+  anchor_source: 'graph' | 'hunk' | 'none' | (string & {}) | null;
+  severity: 'high' | 'medium' | (string & {});
+  path: string;
+  line: number;
+  evidence: string;
+  claim: string;
+  suggestion: string | null;
+  tree: string;
+  in_diff: boolean;
+  corroborated_by: string[];
+};
+
+export type TeamAdviceDeliveredPayload = TeamEnvelope & {
+  raise_seq: number;
+  finding_id: string;
+  /** The steer id | `'boundary:<step_id>:<attempt>'` | `'end:<attempt>'`. */
+  delivery_id: string;
+  steer_id: string | null;
+  channel: 'acp_steering' | 'boundary' | 'none' | (string & {});
+  outcome: 'injected' | 'turn_ended' | 'refused' | 'not_delivered' | (string & {});
+  detail: string | null;
+};
+
+export type TeamAdviceAnsweredPayload = TeamEnvelope & {
+  raise_seq: number;
+  /** `'<step_id>:<attempt>'`. */
+  answered_in: string;
+  finding_id: string;
+  disposition: 'accepted' | 'declined' | (string & {});
+  reason: string;
+};
+
+export type TeamHelpRequestedPayload = TeamEnvelope & {
+  help_id: string;
+  help_seq: number;
+  question: string;
+  context: string;
+};
+
+export type TeamHelpAnsweredPayload = TeamEnvelope & {
+  help_id: string;
+  answer_id: string;
+  answer: string;
+  evidence: string[];
+};
+
+export type TeamChangeRequestedPayload = TeamEnvelope & {
+  change_id: string;
+  change_seq: number;
+  steps: TeamPlanStep[];
+  reason: string;
+};
+
+export type TeamStepCompletedPayload = TeamEnvelope & {
+  step_id: string;
+  status: 'ok' | 'failed' | 'cancelled' | 'elicitation_failed' | 'timed_out' | (string & {});
+  tree: string | null;
+  output_bytes: number;
+  output_ref: string;
+};
+
+export type TeamStepReviewedPayload = TeamEnvelope & {
+  step_id: string;
+  verdict: 'accepted' | 'rejected' | (string & {});
+  to: 'member' | 'pa' | (string & {}) | null;
+  reason: string;
+};
+
+export type TeamFindingSettledPayload = TeamEnvelope & {
+  raise_seq: number;
+  finding_id: string;
+  status: 'held' | 'withdrawn' | 'superseded' | (string & {});
+  reason: string;
+  final_line: number | null;
+};
+
+export type TeamCouncilCalledPayload = TeamEnvelope & {
+  /** `'finding:<raise_seq>'` | `'step:<step_id>:<attempt>'`. */
+  subject: string;
+  finding_id: string | null;
+  trigger: 'unresolved_high' | 'member_step' | (string & {});
+  question: string;
+  positions: { by: string; position: string; reason: string }[];
+  evidence: string;
+  excluded_seats: string[];
+  transcript: number[];
+};
+
+export type TeamCouncilRuledPayload = TeamEnvelope & {
+  subject: string;
+  verdict: 'yes' | 'no' | 'no_verdict' | (string & {});
+  reason: 'no_quorum' | 'seats_benched' | 'error' | 'timeout' | 'cap' | (string & {}) | null;
+  task_id: string | null;
+  consensus: boolean;
+  agreement_pct: number;
+  dissent: string[];
+  returned: number;
+  seated: number;
+};
+
+/** DES-001 §7 `teamLedger.findings[]` (camelCase). */
+export interface TeamLedgerFinding {
+  findingId: string;
+  monitorId: string;
+  seat: string;
+  severity: 'high' | 'medium' | (string & {});
+  path: string;
+  line: number;
+  evidence: string;
+  claim: string;
+  suggestion: string | null;
+  tree: string;
+  inDiff: boolean;
+  finalLine: number | null;
+  corroboratedBy: string[];
+  delivery: 'injected' | 'not_delivered' | (string & {});
+  status: 'accepted' | 'declined' | 'withdrawn' | 'unanswered' | 'superseded' | (string & {});
+  workerReason: string | null;
+  monitorReply: { kind: 'hold' | 'withdraw' | (string & {}); reason: string } | null;
+  dispute: {
+    verdict: 'yes' | 'no' | 'no_verdict' | (string & {});
+    agreementPct: number | null;
+    dissent: number | null;
+    seats: string[];
+    reason: string | null;
+  } | null;
+}
+
+/** DES-001 §7 `teamLedger` without its envelope: the fold of one attempt's team stream. */
+export interface TeamLedger {
+  finalPass: 'completed' | 'timed_out' | 'skipped' | 'stream_gap' | (string & {});
+  renderedToJudge: boolean;
+  teamPause: boolean;
+  monitors: {
+    monitorId: string;
+    seat: string;
+    batches: number;
+    status: 'completed' | 'budget_exhausted' | 'failed' | 'timed_out' | (string & {});
+    error: string | null;
+  }[];
+  findings: TeamLedgerFinding[];
+  rejected: { malformed: number; belowBar: number; unconfirmed: number; duplicate: number };
+}
+
+export type TeamLedgerFoldedPayload = TeamEnvelope & {
+  final_pass: 'completed' | 'timed_out' | 'skipped' | 'stream_gap' | (string & {});
+  ledger: TeamLedger;
+  transport: 'bus' | 'none' | (string & {});
+  transcript: {
+    from_event_id: number;
+    to_event_id: number;
+    count: number;
+    truncated: boolean;
+    events: { event_id: number; event_type: string; payload: unknown }[];
+  };
+};
+
+/** `gate.opened`'s kind-specific fields, discriminated on `kind`. */
+export type TeamGateOpenedPayload = TeamEnvelope & { gate_id: string } & (
+  | { kind: 'unit_review'; ledger_ref: string | null; ledger_source: 'folded' | 'synthesized' | 'no_bus' | (string & {}) }
+  | {
+      kind: 'plan_approval';
+      reviewing_ord: number;
+      plan_rev: number;
+      band: string;
+      high_risk: boolean;
+      mode: 'auto' | 'manual' | (string & {});
+      reason: 'manual_mode' | 'high_risk' | 'into_high_risk' | 'override' | (string & {});
+      diff: { from_rev: number | null; added: string[] };
+    }
+  | { kind: 'team_dispute'; finding_ids: string[] }
+  | { kind: 'team_transport'; fact: string; reason: string }
+);
+
+export type TeamGateDecidedPayload = TeamEnvelope & {
+  gate_id: string;
+  kind: 'unit_review' | 'plan_approval' | 'team_dispute' | 'team_transport' | (string & {});
+  decision:
+    | 'allow'
+    | 'deny'
+    | 'paused'
+    | 'human_approved'
+    | 'human_amended'
+    | 'human_rejected'
+    | (string & {});
+  combined: boolean | null;
+  team_pause: boolean;
+  unresolved: string[];
+};
+
+export type TeamPathEndedPayload = TeamEnvelope & {
+  status: 'completed' | 'failed' | 'cancelled' | (string & {});
+};
+
+/** Each team event type's payload. */
+export interface TeamEventPayloads {
+  'wicked.team.path.started': TeamPathStartedPayload;
+  'wicked.team.path.scored': TeamPathScoredPayload;
+  'wicked.team.plan.proposed': TeamPlanProposedPayload;
+  'wicked.team.plan.revised': TeamPlanRevisedPayload;
+  'wicked.team.plan.accepted': TeamPlanAcceptedPayload;
+  'wicked.team.plan.refused': TeamPlanRefusedPayload;
+  'wicked.team.member.joined': TeamMemberJoinedPayload;
+  'wicked.team.member.left': TeamMemberLeftPayload;
+  'wicked.team.step.claimed': TeamStepClaimedPayload;
+  'wicked.team.checkpoint.reached': TeamCheckpointReachedPayload;
+  'wicked.team.finding.raised': TeamFindingRaisedPayload;
+  'wicked.team.advice.delivered': TeamAdviceDeliveredPayload;
+  'wicked.team.advice.answered': TeamAdviceAnsweredPayload;
+  'wicked.team.help.requested': TeamHelpRequestedPayload;
+  'wicked.team.help.answered': TeamHelpAnsweredPayload;
+  'wicked.team.change.requested': TeamChangeRequestedPayload;
+  'wicked.team.step.completed': TeamStepCompletedPayload;
+  'wicked.team.step.reviewed': TeamStepReviewedPayload;
+  'wicked.team.finding.settled': TeamFindingSettledPayload;
+  'wicked.team.council.called': TeamCouncilCalledPayload;
+  'wicked.team.council.ruled': TeamCouncilRuledPayload;
+  'wicked.team.ledger.folded': TeamLedgerFoldedPayload;
+  'wicked.team.gate.opened': TeamGateOpenedPayload;
+  'wicked.team.gate.decided': TeamGateDecidedPayload;
+  'wicked.team.path.ended': TeamPathEndedPayload;
+}
+
+/** One team bus row, discriminated on `event_type`. */
+export type TeamBusEvent = {
+  [K in TeamEventType]: { event_type: K; payload: TeamEventPayloads[K] };
+}[TeamEventType];
