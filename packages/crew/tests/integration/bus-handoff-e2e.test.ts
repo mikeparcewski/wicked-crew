@@ -16,6 +16,8 @@
 //  E. an engine WITHOUT the one-connection rule (no `Core.busConnectionStats` — what crew CI links
 //     until the engine half is on wicked-core main) gets exactly the pre-T0 handoff: no bus on a
 //     default boot, one line saying why; crew's seams still use the crew bus.
+//  F. an engine without the rule, `--engine-exec` and an unopenable `--bus-db`: the unavailable bus
+//     dominates — no bus is handed, exec mediation is off, and `/health.warnings` says so.
 //
 // A–C need the engine half and run only against an engine that has it; E runs only against one
 // that does not. Both configurations are exercised: locally against the core PR's engine, in crew
@@ -269,5 +271,21 @@ describe.runIf(existsSync(CLI))('T0 bus handoff — one daemon, one bus file (DE
     expect(daemon.stderr()).toContain('predates the one-connection bus rule');
     await createProject(daemon.port, 't0-e');
     await waitForRow(crewBus, 'wicked.crew.project.', (r) => r.payload.includes('t0-e'));
+  }, 120_000);
+
+  it.runIf(!engineHasRule)('F. an engine without the rule + --engine-exec + an unopenable --bus-db: the unavailable bus dominates', async () => {
+    scratch = mkdtempSync(join(tmpdir(), 'crew-t0-f-'));
+    const dbPath = join(scratch, 'state', 'core.db');
+    const notADir = join(scratch, 'not-a-dir');
+    writeFileSync(notADir, 'a file where the bus directory should be');
+    const unopenable = join(notADir, 'bus.db');
+    daemon = await bootDaemon(dbPath, ['--bus-db', unopenable, '--engine-exec']);
+
+    expect(daemon.ready['engineExec']).toBe(false);
+    expect(daemon.ready['busDb']).toBeUndefined();
+    const health = (await (await fetch(`http://127.0.0.1:${daemon.port}/api/v1/health`)).json()) as {
+      warnings?: { kind: string; message: string }[];
+    };
+    expect(health.warnings?.find((w) => w.kind === 'bus.unavailable')?.message).toContain(unopenable);
   }, 120_000);
 });
