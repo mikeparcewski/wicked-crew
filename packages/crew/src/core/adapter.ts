@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module';
+import type { BusUnavailable } from './engine-bus.js';
 import { mkdir, access, readFile, writeFile, chmod, rm } from 'node:fs/promises';
 import { existsSync, readdirSync, readFileSync, renameSync } from 'node:fs';
 import { join, dirname, resolve, isAbsolute, relative, sep } from 'node:path';
@@ -384,7 +385,15 @@ type CampaignMethods = {
   campaignList?(): Promise<string>;
 };
 
+/** DES-TEAMING-002 T0 (wicked-core-ts ≥ the release carrying it): what arming the engine's bus
+ *  bridge came to at spawn — JSON `{state:"none"|"armed"|"not-armed", floor?, reason?}`. Optional:
+ *  an older addon has no such method. */
+interface BusBridgeMethods {
+  busBridgeState?(): string;
+}
+
 type CoreHandleFull = CoreHandle &
+  BusBridgeMethods &
   GovernanceMethods &
   ChatMethods &
   EventLogMethods &
@@ -412,6 +421,13 @@ interface CoreConstructor {
    *  pinned addon predates it, and crew classifies with its own registry copy until it lands
    *  (`projects/state-home-preflight.ts`). */
   preflightStateHome?(snapshotPath: string | null, dbPath: string): Promise<string>;
+  /** DES-TEAMING-002 T0 (wicked-core-ts ≥ the release carrying it): the engine's ONE connection to
+   *  the bus file at `path` — JSON `{ opens, opener }`, or `null` when it never opened that file.
+   *  Its PRESENCE is the capability: an engine carrying it opens the bus off its actor thread, holds
+   *  one connection per bus file for the life of the process and routes the gate judge to the bus
+   *  only under exec. One without it opens-and-closes its bus connections, which on a file crew's
+   *  seams also hold drops their locks (F-E2E-021), so crew does not hand such an engine the bus. */
+  busConnectionStats?(path: string): string | null;
 }
 
 /** The engine's replay report (`Core.replayEmitOutbox`), parsed. */
@@ -960,8 +976,20 @@ export interface CoreAdapterOptions {
    * back to the in-process path — it never silently wedges (wicked-core seam finding #4).
    */
   engineExec?: boolean;
-  /** The wicked-bus SQLite db the exec seam publishes/consumes over. Required when `engineExec` is on. */
+  /**
+   * The wicked-bus SQLite db handed to the engine as `WICKED_BUS_DB` (DES-TEAMING-002 T0): the
+   * daemon's OWN cross-product bus, the file crew's seams use, on EVERY boot — not only under
+   * `engineExec`. The engine opens it off its actor thread; exec mediation, when armed, runs over
+   * the same file. Required when `engineExec` is on. Absent (a library boot, a unit test, or a
+   * daemon whose bus could not open — see `busUnavailable`) exports nothing.
+   */
   busDbPath?: string;
+  /**
+   * Why the daemon hands the engine NO bus (its boot probe could not open the resolved file). The
+   * engine then runs without a bus, and `/health.warnings` carries a `bus.unavailable` notice
+   * naming this reason (T0: a daemon-level notice; a per-run `transport:"none"` lands with P1).
+   */
+  busUnavailable?: BusUnavailable;
   /**
    * The governance store + dead-letter outbox this daemon hands the engine (crew#495 / F-022) —
    * resolved by the CLI (`core/governance-store.ts`), exported to `process.env` HERE, before the
@@ -1102,8 +1130,12 @@ export class CoreAdapter {
   readonly dbPath: string;
   /** `true` when this adapter armed the event-driven exec seam (for readiness/reporting). */
   readonly engineExec: boolean;
-  /** The bus db the exec seam runs over when armed (else `undefined`). */
+  /** The bus db handed to the engine (`WICKED_BUS_DB`; exec mediation runs over it when armed), or
+   *  `undefined` when this adapter handed none. */
   readonly busDbPath: string | undefined;
+  /** Why the engine has no usable bus — the boot probe's failure, or the engine could not arm its
+   *  bus bridge on the handed bus within its bound — else `null`. */
+  readonly busUnavailable: BusUnavailable | null;
   /**
    * `true` when this adapter drives the DETERMINISTIC OFFLINE engine (`Core.spawnStub`) rather
    * than the production one — i.e. the `StubDispatcher` (every seat votes for the first roster
@@ -1180,16 +1212,24 @@ export class CoreAdapter {
     // `onboarding.json` has to be out of the way by then or it shadows the built-in def.
     quarantineStaleOnboardingOverlay();
 
+    // DES-TEAMING-002 T0: the engine gets the daemon's bus on EVERY boot (`WICKED_BUS_DB`); exec
+    // mediation stays a separate switch (`WICKED_BUS_EXEC`), set only under `engineExec`, and the
+    // engine's bus gate-judge path follows that switch — never the mere presence of a bus.
     const armExec = opts.engineExec === true;
-    if (armExec) {
-      if (!opts.busDbPath || opts.busDbPath.length === 0) {
-        throw new Error('engineExec requires busDbPath (the wicked-bus db to mediate execution over)');
-      }
-      process.env['WICKED_BUS_EXEC'] = '1';
-      process.env['WICKED_BUS_DB'] = opts.busDbPath;
+    const busDbPath = opts.busDbPath !== undefined && opts.busDbPath.length > 0 ? opts.busDbPath : undefined;
+    if (armExec && busDbPath === undefined) {
+      throw new Error('engineExec requires busDbPath (the wicked-bus db to mediate execution over)');
     }
+    // process.env matches the decision EXACTLY before the engine spawns: the engine reads both
+    // variables itself, so an inherited value the decision did not hand it (an unopenable bus crew
+    // declined, an exec switch crew did not arm) would otherwise reach it anyway — fail-open.
+    if (busDbPath !== undefined) process.env['WICKED_BUS_DB'] = busDbPath;
+    else delete process.env['WICKED_BUS_DB'];
+    if (armExec) process.env['WICKED_BUS_EXEC'] = '1';
+    else delete process.env['WICKED_BUS_EXEC'];
     this.engineExec = armExec;
-    this.busDbPath = armExec ? opts.busDbPath : undefined;
+    this.busDbPath = busDbPath;
+    this.busUnavailable = busDbPath === undefined ? (opts.busUnavailable ?? null) : null;
 
     // Give the Rust actor the path to the wicked-core standalone binary so the gate-hook
     // command works when wicked-core is loaded as a napi-rs addon (where current_exe()
@@ -1210,6 +1250,17 @@ export class CoreAdapter {
     this.stub = opts.stub === true;
     this.dbPath = opts.dbPath;
     this.core = this.stub ? Core.spawnStub(opts.dbPath) : Core.spawn(opts.dbPath);
+    // DES-TEAMING-002 T0: `spawn` returns only once the engine's bus bridge is armed, or has given up
+    // within its bound. Not armed = the engine launches nothing from the bus: say so on the same
+    // `bus.unavailable` path as a bus crew could not open.
+    if (this.busDbPath !== undefined && typeof this.core.busBridgeState === 'function') {
+      const state = JSON.parse(this.core.busBridgeState()) as { state: string; reason?: string };
+      if (state.state === 'not-armed') {
+        const reason = `the engine could not arm its bus bridge: ${state.reason ?? 'no reason given'}`;
+        this.busUnavailable = { dbPath: this.busDbPath, reason: state.reason ?? 'no reason given', kind: 'bridge_not_armed' };
+        console.error(`[crew] bus unavailable: ${this.busDbPath} (${reason}) — the engine launches nothing from the bus`);
+      }
+    }
     // The ONE subscribe() for the process. Error-first callback (index.d.ts:56):
     // one JSON string per CoreEvent, in emission order. A throw in a listener is
     // isolated so one bad consumer can never stall the pump or the others.
@@ -1238,6 +1289,12 @@ export class CoreAdapter {
    * store FILE that does not exist yet counts as 0: nothing has landed, which is a number, not an
    * unknown (the engine's read-only open refuses a missing file, and that refusal is not "unknown").
    */
+  /** Whether the linked engine follows the one-connection bus rule (`Core.busConnectionStats`,
+   *  DES-TEAMING-002 T0) and may therefore be handed the daemon's bus on every boot. */
+  static engineHoldsBusConnection(): boolean {
+    return typeof Core.busConnectionStats === 'function';
+  }
+
   static eventStoreCounter(): ((dbPath: string) => Promise<number>) | null {
     const fn = Core.eventStoreCount;
     if (typeof fn !== 'function') return null;
