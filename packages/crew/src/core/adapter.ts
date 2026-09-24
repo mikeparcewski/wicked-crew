@@ -384,7 +384,15 @@ type CampaignMethods = {
   campaignList?(): Promise<string>;
 };
 
+/** DES-TEAMING-002 T0 (wicked-core-ts ≥ the release carrying it): what arming the engine's bus
+ *  bridge came to at spawn — JSON `{state:"none"|"armed"|"not-armed", floor?, reason?}`. Optional:
+ *  an older addon has no such method. */
+interface BusBridgeMethods {
+  busBridgeState?(): string;
+}
+
 type CoreHandleFull = CoreHandle &
+  BusBridgeMethods &
   GovernanceMethods &
   ChatMethods &
   EventLogMethods &
@@ -1124,7 +1132,8 @@ export class CoreAdapter {
   /** The bus db handed to the engine (`WICKED_BUS_DB`; exec mediation runs over it when armed), or
    *  `undefined` when this adapter handed none. */
   readonly busDbPath: string | undefined;
-  /** Why the daemon handed the engine no bus (the boot probe's failure), else `null`. */
+  /** Why the engine has no usable bus — the boot probe's failure, or the engine could not arm its
+   *  bus bridge on the handed bus within its bound — else `null`. */
   readonly busUnavailable: { dbPath: string; reason: string } | null;
   /**
    * `true` when this adapter drives the DETERMINISTIC OFFLINE engine (`Core.spawnStub`) rather
@@ -1235,6 +1244,17 @@ export class CoreAdapter {
     this.stub = opts.stub === true;
     this.dbPath = opts.dbPath;
     this.core = this.stub ? Core.spawnStub(opts.dbPath) : Core.spawn(opts.dbPath);
+    // DES-TEAMING-002 T0: `spawn` returns only once the engine's bus bridge is armed, or has given up
+    // within its bound. Not armed = the engine launches nothing from the bus: say so on the same
+    // `bus.unavailable` path as a bus crew could not open.
+    if (this.busDbPath !== undefined && typeof this.core.busBridgeState === 'function') {
+      const state = JSON.parse(this.core.busBridgeState()) as { state: string; reason?: string };
+      if (state.state === 'not-armed') {
+        const reason = `the engine could not arm its bus bridge: ${state.reason ?? 'no reason given'}`;
+        this.busUnavailable = { dbPath: this.busDbPath, reason };
+        console.error(`[crew] bus unavailable: ${this.busDbPath} (${reason}) — the engine launches nothing from the bus`);
+      }
+    }
     // The ONE subscribe() for the process. Error-first callback (index.d.ts:56):
     // one JSON string per CoreEvent, in emission order. A throw in a listener is
     // isolated so one bad consumer can never stall the pump or the others.

@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 import { performance } from 'node:perf_hooks';
 import { join, dirname } from 'node:path';
-import { mkdirSync } from 'node:fs';
+import { closeSync, mkdirSync, openSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { CoreAdapter } from '../core/adapter.js';
 import { crewBusHandle } from '../core/bus-handle.js';
+import { engineBusHandoff } from '../core/engine-bus.js';
 import { ensureBridgesOnPath, ensurePiLauncherCommand, PI_ACP_COMMAND_ENV } from '../core/bridge-path.js';
 import { bridgeReaper, reapOrphansAtBoot, startOrphanSweep } from '../core/bridge-reaper.js';
 import { daemonSignalLog } from '../core/daemon-signal-log.js';
@@ -229,6 +230,19 @@ function probeCrewBus(dbPath: string): { dbPath: string; reason: string } | unde
   }
 }
 
+/** Probe the pre-T0 exec bus an engine without the one-connection rule would get — a plain file
+ *  open, NOT a SQLite connection: this runs before the engine spawns and no connection in this
+ *  process holds that file (it is not the crew bus), so the close here drops nobody's locks. */
+function probePreRuleExecBus(dbPath: string): { dbPath: string; reason: string } | undefined {
+  try {
+    mkdirSync(dirname(dbPath), { recursive: true });
+    closeSync(openSync(dbPath, 'a'));
+    return undefined;
+  } catch (err) {
+    return { dbPath, reason: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 let adapterRef: CoreAdapter | undefined;
 
 async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; port: number }> {
@@ -344,18 +358,31 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
         (opts.engineExec ? `; --engine-exec mediates over ${opts.preRuleExecBusDbPath}` : ''),
     );
   }
-  const engineBus: { busDbPath: string } | { busUnavailable: { dbPath: string; reason: string } } | Record<string, never> =
-    engineRule && busUnavailable === undefined
-      ? { busDbPath: opts.busDbPath }
-      : !engineRule && opts.engineExec
-        ? { busDbPath: opts.preRuleExecBusDbPath }
-        : busUnavailable !== undefined
-          ? { busUnavailable }
-          : {};
+  // The pre-T0 exec bus is probed too when it is the one the engine would get: an unavailable bus
+  // dominates every branch (core/engine-bus.ts).
+  const preRuleExecUnavailable =
+    !engineRule && opts.engineExec
+      ? opts.preRuleExecBusDbPath === crewBus.dbPath
+        ? busUnavailable
+        : probePreRuleExecBus(opts.preRuleExecBusDbPath)
+      : undefined;
+  if (preRuleExecUnavailable !== undefined && opts.preRuleExecBusDbPath !== crewBus.dbPath) {
+    console.error(
+      `[crew] bus unavailable: cannot open ${opts.preRuleExecBusDbPath} (${preRuleExecUnavailable.reason}) — the engine runs without a bus (un-teamed); --engine-exec is off`,
+    );
+  }
+  const { engineExec, ...engineBus } = engineBusHandoff({
+    engineRule,
+    engineExec: opts.engineExec,
+    busDbPath: opts.busDbPath,
+    busUnavailable,
+    preRuleExecBusDbPath: opts.preRuleExecBusDbPath,
+    preRuleExecUnavailable,
+  });
   const adapter = new CoreAdapter({
     dbPath: opts.dbPath,
     stub: opts.stub,
-    engineExec: opts.engineExec && 'busDbPath' in engineBus,
+    engineExec,
     ...engineBus,
     governanceStore,
   });
