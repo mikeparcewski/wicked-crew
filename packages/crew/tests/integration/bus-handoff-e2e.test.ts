@@ -18,6 +18,9 @@
 //     default boot, one line saying why; crew's seams still use the crew bus.
 //  F. an engine without the rule, `--engine-exec` and an unopenable `--bus-db`: the unavailable bus
 //     dominates — no bus is handed, exec mediation is off, and `/health.warnings` says so.
+//  G. an INHERITED `WICKED_BUS_DB` naming an unopenable bus: crew decides "no bus" and the engine
+//     must not see the variable either — process.env matches the decision exactly (the engine logs
+//     nothing about a bus: it was handed none).
 //
 // A–C need the engine half and run only against an engine that has it; E runs only against one
 // that does not. Both configurations are exercised: locally against the core PR's engine, in crew
@@ -52,7 +55,7 @@ interface Daemon {
   stop: () => Promise<void>;
 }
 
-async function bootDaemon(dbPath: string, extraArgs: string[]): Promise<Daemon> {
+async function bootDaemon(dbPath: string, extraArgs: string[], extraEnv: Record<string, string> = {}): Promise<Daemon> {
   // These runs are about the bus, not grounding: the scratch HOME publishes no skills generation.
   baseSkillOff();
   const env: NodeJS.ProcessEnv = { ...process.env };
@@ -60,6 +63,7 @@ async function bootDaemon(dbPath: string, extraArgs: string[]): Promise<Daemon> 
   for (const k of ['WICKED_BUS_DB', 'WICKED_BUS_EXEC', 'WICKED_BUS_DATA_DIR', 'WICKED_ESTATE_DB', 'WICKED_CREW_GOVERNANCE_DB']) {
     delete env[k];
   }
+  Object.assign(env, extraEnv);
   const proc = spawn(process.execPath, [CLI, 'serve', '--stub', '--port', '0', '--db', dbPath, ...extraArgs], {
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -287,5 +291,20 @@ describe.runIf(existsSync(CLI))('T0 bus handoff — one daemon, one bus file (DE
       warnings?: { kind: string; message: string }[];
     };
     expect(health.warnings?.find((w) => w.kind === 'bus.unavailable')?.message).toContain(unopenable);
+  }, 120_000);
+
+  it('G. an inherited WICKED_BUS_DB naming an unopenable bus: the engine gets no bus (env matches the decision)', async () => {
+    scratch = mkdtempSync(join(tmpdir(), 'crew-t0-g-'));
+    const dbPath = join(scratch, 'state', 'core.db');
+    const notADir = join(scratch, 'not-a-dir');
+    writeFileSync(notADir, 'a file where the bus directory should be');
+    const unopenable = join(notADir, 'bus.db');
+    daemon = await bootDaemon(dbPath, [], { WICKED_BUS_DB: unopenable });
+
+    expect(daemon.ready['busDb']).toBeUndefined();
+    const lines = daemon.stderr().split('\n').filter((l) => l.includes('bus unavailable'));
+    expect(lines).toHaveLength(1);
+    // Handed no bus, the engine never touches one: no bridge line of any kind.
+    expect(daemon.stderr()).not.toMatch(/wicked-core: bus bridge/);
   }, 120_000);
 });
