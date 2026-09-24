@@ -24,13 +24,13 @@
  * are one SQLite library, never two.
  */
 
-import { existsSync } from 'node:fs';
+import { statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 
 /** The better-sqlite3 surface the handle uses (typed locally — crew reaches it through wicked-bus). */
 export interface BusSqlite {
-  prepare(sql: string): { all(...params: unknown[]): unknown[] };
+  prepare(sql: string): { all(...params: unknown[]): unknown[]; run(...params: unknown[]): unknown };
   pragma(sql: string): unknown;
 }
 type SqliteCtor = new (path: string, opts?: { fileMustExist?: boolean }) => BusSqlite;
@@ -48,7 +48,24 @@ function sqlite(): SqliteCtor | null {
   return sqliteCtor;
 }
 
-const handles = new Map<string, BusSqlite>();
+/** A handle and the identity of the file it opened. */
+interface Entry {
+  db: BusSqlite;
+  identity: string | null;
+}
+const handles = new Map<string, Entry>();
+
+/** Which file a path names: `<dev>:<ino>` (bigint, exact), or `null` when it cannot be read. On
+ *  Windows Node reports the NTFS file index as `ino`; the OS also refuses to delete a file SQLite
+ *  holds open there, so the recreated-file case barely arises. */
+function fileIdentity(path: string): string | null {
+  try {
+    const st = statSync(path, { bigint: true });
+    return `${st.dev}:${st.ino}`;
+  } catch {
+    return null;
+  }
+}
 /** Handles whose file was replaced under the same path: kept referenced so they are never closed. */
 const retired: BusSqlite[] = [];
 let opens = 0;
@@ -61,8 +78,9 @@ let opens = 0;
 export function crewBusHandle(dbPath: string, opts: { create: boolean }): BusSqlite {
   const key = resolve(dbPath);
   const cached = handles.get(key);
-  // A bus file deleted and recreated under the same path is a different database.
-  if (cached !== undefined && existsSync(key)) return cached;
+  // Reuse the handle only while the path still names the file it opened: a bus file deleted and
+  // recreated under the same path is a DIFFERENT database (same path, new identity).
+  if (cached !== undefined && cached.identity !== null && fileIdentity(key) === cached.identity) return cached.db;
   const Database = sqlite();
   if (Database === null) throw new Error('better-sqlite3 is not resolvable from wicked-bus');
   const db = new Database(key, opts.create ? {} : { fileMustExist: true });
@@ -75,8 +93,8 @@ export function crewBusHandle(dbPath: string, opts: { create: boolean }): BusSql
     retired.push(db);
     throw err;
   }
-  if (cached !== undefined) retired.push(cached);
-  handles.set(key, db);
+  if (cached !== undefined) retired.push(cached.db); // never closed: kept referenced
+  handles.set(key, { db, identity: fileIdentity(key) });
   opens += 1;
   return db;
 }

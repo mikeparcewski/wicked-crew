@@ -1219,8 +1219,13 @@ export class CoreAdapter {
     if (armExec && busDbPath === undefined) {
       throw new Error('engineExec requires busDbPath (the wicked-bus db to mediate execution over)');
     }
+    // process.env matches the decision EXACTLY before the engine spawns: the engine reads both
+    // variables itself, so an inherited value the decision did not hand it (an unopenable bus crew
+    // declined, an exec switch crew did not arm) would otherwise reach it anyway — fail-open.
     if (busDbPath !== undefined) process.env['WICKED_BUS_DB'] = busDbPath;
+    else delete process.env['WICKED_BUS_DB'];
     if (armExec) process.env['WICKED_BUS_EXEC'] = '1';
+    else delete process.env['WICKED_BUS_EXEC'];
     this.engineExec = armExec;
     this.busDbPath = busDbPath;
     this.busUnavailable = busDbPath === undefined ? (opts.busUnavailable ?? null) : null;
