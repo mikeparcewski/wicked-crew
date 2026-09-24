@@ -21,45 +21,18 @@
  * won the EXCLUSIVE lock on its own close, checkpointed and UNLINKED bus.db-wal/-shm under the
  * seams, whose reads decayed into "database disk image is malformed" on every poll for the life
  * of the daemon. Rule: ONE SQLite library per database file per process — this read goes through
- * wicked-bus's better-sqlite3, whose deferred-close protection then covers it like any seam.
+ * wicked-bus's better-sqlite3, and (DES-TEAMING-002 T0) through the daemon's ONE long-lived crew bus
+ * handle (`core/bus-handle.ts`): the engine's rusqlite now shares this file too, and a per-request
+ * close would release ITS locks exactly as `node:sqlite`'s did the seams'.
  *
  * Newest-first, cursor on `(ts, id)` — an opaque `<ts>:<id>` token, base64url. The merge is
  * recomputed per read; members are few and the log excludes high-volume frames, so the simple
  * full-merge is the honest v1 (the ADR explicitly rejects a new store here).
  */
 
-import { createRequire } from 'node:module';
+import { crewBusHandle } from '../core/bus-handle.js';
 import type { CoreAdapter } from '../core/adapter.js';
 import type { ActivityEntry } from '../core/types.js';
-
-/** Minimal better-sqlite3 surface (typed locally — crew reaches it through wicked-bus, never directly). */
-interface SqliteDatabase {
-  prepare(sql: string): { all(...params: unknown[]): unknown[] };
-  close(): void;
-}
-type SqliteCtor = new (
-  path: string,
-  opts?: { readonly?: boolean; fileMustExist?: boolean },
-) => SqliteDatabase;
-
-let sqliteCtor: SqliteCtor | null | undefined;
-/**
- * The better-sqlite3 module INSTANCE wicked-bus loads: resolved from wicked-bus's own entry (the
- * same walk `lib/db.js`'s `require('better-sqlite3')` takes), so even a duplicated copy elsewhere
- * in node_modules could not become a second SQLite library on the bus db (see the module doc).
- * `null` when unresolvable — the interactive half is then empty, never an error.
- */
-function sqlite(): SqliteCtor | null {
-  if (sqliteCtor === undefined) {
-    try {
-      const busEntry = createRequire(import.meta.url).resolve('wicked-bus');
-      sqliteCtor = createRequire(busEntry)('better-sqlite3') as SqliteCtor;
-    } catch {
-      sqliteCtor = null;
-    }
-  }
-  return sqliteCtor;
-}
 
 /** One-line human summary of a core frame (best-effort; `raw` carries the whole frame). */
 function summarizeCoreEvent(frame: Record<string, unknown>, runId: string): string {
@@ -150,12 +123,11 @@ async function interactiveEntries(
   projectId: string,
 ): Promise<ActivityEntry[]> {
   if (busDbPath === null) return [];
-  const Database = sqlite();
-  if (Database === null) return [];
-  let db: SqliteDatabase | null = null;
   const entries: ActivityEntry[] = [];
   try {
-    db = new Database(busDbPath, { readonly: true, fileMustExist: true });
+    // The daemon's ONE long-lived crew handle on the bus (core/bus-handle.ts) — never a
+    // per-request open/close, which would release the locks the engine's connection holds.
+    const db = crewBusHandle(busDbPath, { create: false });
     const rows = db
       .prepare(
         `SELECT event_id, event_type, payload, emitted_at FROM events
@@ -188,8 +160,6 @@ async function interactiveEntries(
     // No bus db / schema mismatch — the interactive half is empty, never an error:
     // a project with no bound docs must not 500 its activity feed.
     return entries;
-  } finally {
-    db?.close();
   }
   return entries;
 }

@@ -10,6 +10,9 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Changed
+- **DES-TEAMING-002 T0: one daemon, one bus file.** The engine is now handed the daemon's own cross-product bus (`resolveCrewBus`: `--bus-db` › `WICKED_BUS_DATA_DIR` › `<core db>.bus/bus.db`) as `WICKED_BUS_DB` on every boot, not only under `--engine-exec`. `--engine-exec` still sets `WICKED_BUS_EXEC` and now mediates over that same file; its old crew-private `<state home>/bus.db` default is gone. The ready line's `busDb` reports the handed bus on every boot. At boot crew opens one long-lived crew bus handle (`core/bus-handle.ts`) before the engine spawns, and the project activity feed's per-request open/close goes through it. Each SQLite library in the process now holds its bus connection for the life of the process (the F-E2E-021 lock-loss class). A bus that cannot open logs one `[crew] bus unavailable` line, hands the engine no bus, and raises a `bus.unavailable` notice on `/health.warnings`; the per-run `transport:"none"` lands with P1. An engine without `Core.busConnectionStats` (it predates the one-connection rule) gets the pre-T0 handoff, with one line saying so.
+
 ### Changed (wire, additive)
 - **wicked-core#590 S5 — units are routed `teamed`, not by a council.** The engine no longer
   convenes a council per phase to route units to seats: every seated unit takes the first eligible

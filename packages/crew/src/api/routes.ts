@@ -1161,6 +1161,18 @@ export function registerRoutes(
       ...(stateHome === null ? [] : stateHome.findings.map((f) => ({ kind: f.kind, severity: f.severity, message: f.message }))),
       ...(baseSkill?.finding ? [{ kind: baseSkill.finding.kind, severity: baseSkill.finding.severity, message: baseSkill.finding.message }] : []),
       ...phaseSkillFindings(runtime.phaseSkills?.gaps() ?? []),
+      // DES-TEAMING-002 T0: the daemon's bus did not open at boot, so the engine was handed none
+      // and runs un-teamed. A daemon-level notice (status stays ok: it serves); the per-run
+      // `transport:"none"` record lands with P1.
+      ...(adapter.busUnavailable != null
+        ? [{
+            kind: 'bus.unavailable',
+            severity: 'warning' as const,
+            message:
+              `bus unavailable: cannot open ${adapter.busUnavailable.dbPath} (${adapter.busUnavailable.reason}) — ` +
+              'the engine runs without a bus (un-teamed); fix the path or its permissions and restart the daemon',
+          }]
+        : []),
     ];
     return {
       status: 'ok',
