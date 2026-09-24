@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
+import { busUnavailableWarning } from '../core/bus-notice.js';
 import type { RecordedStallFrame } from './stall-frame-index.js';
 import { z } from 'zod';
 import { listRequirements, getRequirement, patchRequirement } from './requirements.js';
@@ -1164,15 +1165,7 @@ export function registerRoutes(
       // DES-TEAMING-002 T0: the daemon's bus did not open at boot, so the engine was handed none
       // and runs un-teamed. A daemon-level notice (status stays ok: it serves); the per-run
       // `transport:"none"` record lands with P1.
-      ...(adapter.busUnavailable != null
-        ? [{
-            kind: 'bus.unavailable',
-            severity: 'warning' as const,
-            message:
-              `bus unavailable: cannot open ${adapter.busUnavailable.dbPath} (${adapter.busUnavailable.reason}) — ` +
-              'the engine runs without a bus (un-teamed); fix the path or its permissions and restart the daemon',
-          }]
-        : []),
+      ...(adapter.busUnavailable != null ? [busUnavailableWarning(adapter.busUnavailable)] : []),
     ];
     return {
       status: 'ok',
