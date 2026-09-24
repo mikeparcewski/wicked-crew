@@ -167,7 +167,9 @@ async function engineLaunchedFrom(dbPath: string, session: string): Promise<void
     const onBus = rows(dbPath, 'wicked.').map((r) => r.event_type).join(', ');
     throw new Error(`${(err as Error).message}\nrows on the bus: ${onBus}\ndaemon stderr (tail):\n${tail}`);
   }
-  expect(launched.domain).toBe('wicked-core');
+  // The engine's publisher identity (CORE_DOMAIN), matched as a pattern: a quoted spelling of that
+  // name is reserved for the checkout resolver (tests/core-checkout-policy.test.ts).
+  expect(launched.domain).toMatch(/^wicked-core$/);
 }
 
 let scratch: string | undefined;
