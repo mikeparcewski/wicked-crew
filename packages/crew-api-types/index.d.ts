@@ -5831,7 +5831,10 @@ export interface TeamEnvelope {
   run_id: string;
   ord: number | null;
   attempt: number | null;
-  /** The acting seat instance, `'engine'`, `'human'` or `'council:<task id>'`. */
+  /**
+   * Who acted: a seated CLI instance (the PA, a member or the authoring monitor, e.g.
+   * `'claude#1'`, `'claude#2'`, `'codex'`), `'engine'`, `'human'` or `'council:<task id>'`.
+   */
   by: string;
   /** Epoch milliseconds at the producer. */
   at: number;
