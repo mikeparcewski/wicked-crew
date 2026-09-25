@@ -856,6 +856,51 @@ export interface DeliverLaunchContext {
   ghTokenPinned?: boolean;
 }
 
+/**
+ * The `deliver` PLAN STEP a delivering PRESET launch hands the engine (DES-TEAMING-002 T3,
+ * `LaunchOptions.deliverStepJson`): catalog `deliver`, id `deliver`, the same hardened push-and-PR
+ * Tool command, gate-card instructions and evidence-floor pin as the composed phase below. The
+ * engine appends it to the preset's plan and puts `deliver` in the floor, so the run stays ONE
+ * team plan behind its `plan_approval` gate — crew never composes a def over a preset. The step
+ * omits `depends_on` (compose gives `deliver` the step before it) and carries no
+ * `verified_evidence` (a plan step cannot; DES rev 12 note 4: a recorded difference with no
+ * runtime effect). `phases` only feeds the embedded fallback text.
+ */
+export function deliverPresetStep(
+  presetName: string,
+  phases: PhaseDef[],
+  runId: string,
+  intent?: string,
+  launch: DeliverLaunchContext = {},
+): { catalog: 'deliver'; id: string; instructions: string; executor: PhaseDef['executor']; validator_pin: string } {
+  const apiOrigin = launch.apiOrigin ?? null;
+  const revisesPr = launch.revisesPr ?? null;
+  const facts = factsFromWorkflow({
+    runId,
+    intent,
+    workflowId: presetName,
+    repoRef: launch.repoRef ?? null,
+    phases,
+    runUrl: runUrlFor(apiOrigin, runId),
+    revisesPr: revisesPr === null ? null : { number: revisesPr.number, url: revisesPr.url },
+  });
+  const phase = deliverPrPhase([], intent, {
+    runId,
+    facts,
+    apiOrigin,
+    revisesPr,
+    ghAccount: launch.ghAccount ?? null,
+    ghTokenPinned: launch.ghTokenPinned === true,
+  });
+  return {
+    catalog: 'deliver',
+    id: DELIVER_PHASE_ID,
+    instructions: phase.instructions ?? '',
+    executor: phase.executor,
+    validator_pin: EVIDENCE_FLOOR_PIN,
+  };
+}
+
 export function composeDeliverWorkflow(
   base: WorkflowDef,
   runId: string,

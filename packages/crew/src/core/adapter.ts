@@ -39,7 +39,7 @@ import type {
 import { DEFAULT_SETTINGS } from './types.js';
 import { BASE_SKILL_REF_SHAPE } from '../skills/base-skill.js';
 import { execCapped } from './exec.js';
-import { BUG_FIX_SWEEP_INSTRUCTIONS, composeDeliverWorkflow, DELIVER_PHASE_ID, EVIDENCE_FLOOR_PIN } from './deliver.js';
+import { BUG_FIX_SWEEP_INSTRUCTIONS, composeDeliverWorkflow, DELIVER_PHASE_ID, deliverPresetStep, EVIDENCE_FLOOR_PIN } from './deliver.js';
 import { engineCampaignDef, engineRosterJson } from './engine-roster.js';
 import { QE_AUTHOR_TESTS_WORKFLOW_DEF } from '../qe/author-workflow.js';
 import { CAMPAIGN_WORKFLOW_PREFIX } from '../campaigns/plan.js';
@@ -1657,7 +1657,39 @@ export class CoreAdapter {
       if (!this.supportsPlanLaunch()) throw new PlanLaunchUnsupportedError('A plan launch');
       (opts as LaunchOptions & { planJson?: string }).planJson = JSON.stringify(input.plan);
     }
-    if (input.workflow !== undefined) {
+    // DES-TEAMING-002 T3: a workflow that names a PRESET is a plan the engine floor-fills and gates.
+    // Crew never composes a per-run def over one (that def is no preset, so the launch would skip
+    // `plan_approval`): delivery rides the launch as the deliver STEP (`deliverStepJson`), and a
+    // deliverable floor — which has no engine-side step yet — is refused rather than composed.
+    const requireDeliverablesAll = input.requireDeliverables ?? [];
+    const namesPreset =
+      input.workflow !== undefined &&
+      (input.deliver === 'pr' || requireDeliverablesAll.length > 0) &&
+      (await this.presetNamed(input.workflow, input.projectId)) !== null;
+    if (namesPreset && input.workflow !== undefined) {
+      if (requireDeliverablesAll.length > 0) {
+        throw new Error(
+          `requireDeliverables on a preset launch ('${input.workflow}') is refused: the deliverable ` +
+            'floor would have to be composed into a per-run def, which skips the plan_approval gate',
+        );
+      }
+      if (!this.supportsPlanLaunch()) throw new PlanLaunchUnsupportedError('Delivering a preset launch');
+      const step = deliverPresetStep(
+        input.workflow,
+        this.getWorkflow(input.workflow)?.phases ?? [],
+        input.sessionId,
+        input.problem,
+        {
+          repoRef: input.repoRef ?? null,
+          apiOrigin: this.deliverApiOrigin?.() ?? null,
+          revisesPr: input.revisesPr ?? null,
+          ghAccount: process.env['GH_ACCOUNT'] ?? null,
+          ghTokenPinned: typeof process.env['GH_TOKEN'] === 'string' && process.env['GH_TOKEN'] !== '',
+        },
+      );
+      (opts as LaunchOptions & { deliverStepJson?: string }).deliverStepJson = JSON.stringify(step);
+      opts.workflow = input.workflow;
+    } else if (input.workflow !== undefined) {
       let workflowId = input.workflow;
       // Both per-run compositions (deliver + deliverable floor) fold into ONE def and ONE
       // registration: composing twice would arm two ids and launch the second, leaving the
@@ -2069,6 +2101,18 @@ export class CoreAdapter {
   async deletePreset(name: string, projectId?: string): Promise<boolean> {
     const fn = this.requirePresets(this.core.deletePreset, 'Deleting a preset');
     return JSON.parse(await fn.call(this.core, name, projectId ?? null)) as boolean;
+  }
+
+  /** The preset `name` resolves to for a launch in `projectId` (the project's row shadows the
+   *  global one), or `null` — including on an addon without presets, whose engine resolves every
+   *  workflow id as a registered def. */
+  async presetNamed(name: string, projectId?: string): Promise<Preset | null> {
+    try {
+      return (await this.listPresets(projectId)).find((p) => p.name === name) ?? null;
+    } catch (err) {
+      if (err instanceof PresetsUnsupportedError) return null;
+      throw err;
+    }
   }
 
   async listPresets(projectId?: string): Promise<Preset[]> {

@@ -1,4 +1,7 @@
 // crew#293 — launchRun threads deliver:"pr" as PER-RUN workflow composition.
+// DES-TEAMING-002 T3: a workflow that names a PRESET (`feature`) is never composed over — its
+// delivery rides the launch as the deliver step (tests/plan-approval-gate.test.ts). The per-run
+// composition pinned here is the REGISTERED-DEF path, so these cases launch `bug`.
 //
 // What must hold, and what these tests pin:
 //   - deliver:"pr" + a workflow ⇒ ONE composed def is hot-registered with the engine (base
@@ -63,13 +66,13 @@ afterEach(() => {
 
 describe('launchRun with deliver:"pr" (crew#293)', () => {
   it('arms ONE composed per-run def and launches its id, leaving the shared def alone', async () => {
-    const sharedBefore = JSON.stringify(adapter.getWorkflow('feature'));
+    const sharedBefore = JSON.stringify(adapter.getWorkflow('bug'));
 
     const runId = await adapter.launchRun({
       problem: 'p',
       sessionId: 'run-xyz',
       clisJson: '[]',
-      workflow: 'feature',
+      workflow: 'bug',
       deliver: 'pr',
     });
     expect(runId).toBe('run-xyz');
@@ -77,28 +80,28 @@ describe('launchRun with deliver:"pr" (crew#293)', () => {
     // Exactly one hot registration, of the composed def: base phases + deliver appended once.
     expect(registered).toHaveLength(1);
     const def = JSON.parse(registered[0]!) as WorkflowDef;
-    expect(def.id).toBe('feature-deliver-run-xyz');
+    expect(def.id).toBe('bug-deliver-run-xyz');
     expect(def.phases.map((p: PhaseDef) => p.id)).toEqual([
-      'clarify', 'design', 'build', 'adversarial-review', 'test', 'review', DELIVER_PHASE_ID,
+      'triage', 'reproduce', 'fix', 'verify', DELIVER_PHASE_ID,
     ]);
     expect(def.phases.filter((p: PhaseDef) => p.id === DELIVER_PHASE_ID)).toHaveLength(1);
 
     // The launch ran the composed id, not the base.
     expect(launched).toHaveLength(1);
-    expect(launched[0]!.workflow).toBe('feature-deliver-run-xyz');
+    expect(launched[0]!.workflow).toBe('bug-deliver-run-xyz');
 
     // The shared def is untouched, the overlay dir stays empty (per-run defs are hot-only),
     // and the catalog never shows the per-run id.
-    expect(JSON.stringify(adapter.getWorkflow('feature'))).toBe(sharedBefore);
+    expect(JSON.stringify(adapter.getWorkflow('bug'))).toBe(sharedBefore);
     expect(readdirSync(overlayDir)).toEqual([]);
-    expect(adapter.listWorkflows().map((w) => w.id)).not.toContain('feature-deliver-run-xyz');
+    expect(adapter.listWorkflows().map((w) => w.id)).not.toContain('bug-deliver-run-xyz');
   });
 
   it('autoDeliver: true rides to the engine as LaunchOptions.autoDeliver; absent otherwise (F-E2E-030)', async () => {
     await adapter.launchRun({
-      problem: 'p', sessionId: 'run-auto', clisJson: '[]', workflow: 'feature', deliver: 'pr', autoDeliver: true,
+      problem: 'p', sessionId: 'run-auto', clisJson: '[]', workflow: 'bug', deliver: 'pr', autoDeliver: true,
     });
-    await adapter.launchRun({ problem: 'p', sessionId: 'run-gated', clisJson: '[]', workflow: 'feature', deliver: 'pr' });
+    await adapter.launchRun({ problem: 'p', sessionId: 'run-gated', clisJson: '[]', workflow: 'bug', deliver: 'pr' });
     const sent = launched as Array<LaunchOptions & { autoDeliver?: boolean }>;
     expect(sent[0]!.autoDeliver).toBe(true);
     // The gate is the engine's default: nothing is sent to ask for it.
@@ -106,11 +109,11 @@ describe('launchRun with deliver:"pr" (crew#293)', () => {
   });
 
   it('two delivered launches compose two independent defs — no cross-run sharing', async () => {
-    await adapter.launchRun({ problem: 'p', sessionId: 'run-a', clisJson: '[]', workflow: 'feature', deliver: 'pr' });
-    await adapter.launchRun({ problem: 'p', sessionId: 'run-b', clisJson: '[]', workflow: 'feature', deliver: 'pr' });
+    await adapter.launchRun({ problem: 'p', sessionId: 'run-a', clisJson: '[]', workflow: 'bug', deliver: 'pr' });
+    await adapter.launchRun({ problem: 'p', sessionId: 'run-b', clisJson: '[]', workflow: 'bug', deliver: 'pr' });
 
     const ids = registered.map((j) => (JSON.parse(j) as WorkflowDef).id);
-    expect(ids).toEqual(['feature-deliver-run-a', 'feature-deliver-run-b']);
+    expect(ids).toEqual(['bug-deliver-run-a', 'bug-deliver-run-b']);
     // Each composed def still carries exactly one deliver phase — appending is per-run,
     // never cumulative on a shared object.
     for (const j of registered) {
@@ -120,9 +123,9 @@ describe('launchRun with deliver:"pr" (crew#293)', () => {
   });
 
   it('without deliver, nothing is registered and the base id launches (the old path)', async () => {
-    await adapter.launchRun({ problem: 'p', sessionId: 'run-1', clisJson: '[]', workflow: 'feature' });
+    await adapter.launchRun({ problem: 'p', sessionId: 'run-1', clisJson: '[]', workflow: 'bug' });
     expect(registered).toEqual([]);
-    expect(launched[0]!.workflow).toBe('feature');
+    expect(launched[0]!.workflow).toBe('bug');
   });
 
   it('deliver:"pr" without a workflow rejects before anything launches', async () => {

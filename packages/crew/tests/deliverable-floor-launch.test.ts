@@ -1,3 +1,6 @@
+// DES-TEAMING-002 T3: a workflow that names a PRESET (`feature`) is never composed over — its
+// delivery rides the launch as the deliver step (tests/plan-approval-gate.test.ts). The per-run
+// composition pinned here is the REGISTERED-DEF path, so these cases launch `bug`.
 // crew#311 — launchRun threads requireDeliverables as PER-RUN workflow composition.
 //
 // What must hold, and what these tests pin:
@@ -77,22 +80,22 @@ afterEach(() => {
 
 describe('launchRun with requireDeliverables (crew#311)', () => {
   it('arms ONE composed per-run def whose floor checks exactly the declared paths', async () => {
-    const sharedBefore = JSON.stringify(adapter.getWorkflow('feature'));
+    const sharedBefore = JSON.stringify(adapter.getWorkflow('bug'));
 
     const runId = await adapter.launchRun({
       problem: 'p',
       sessionId: 'run-xyz',
       clisJson: '[]',
-      workflow: 'feature',
+      workflow: 'bug',
       requireDeliverables: ['/inbox/run-xyz/draft.html', '/inbox/run-xyz/fragments'],
     });
     expect(runId).toBe('run-xyz');
 
     expect(registered).toHaveLength(1);
     const def = JSON.parse(registered[0]!) as WorkflowDef;
-    expect(def.id).toBe('feature-verified-run-xyz');
+    expect(def.id).toBe('bug-verified-run-xyz');
     expect(def.phases.map((p: PhaseDef) => p.id)).toEqual([
-      'clarify', 'design', 'build', 'adversarial-review', 'test', 'review',
+      'triage', 'reproduce', 'fix', 'verify',
       DELIVERABLE_FLOOR_PHASE_ID,
     ]);
 
@@ -103,12 +106,12 @@ describe('launchRun with requireDeliverables (crew#311)', () => {
     ]);
 
     expect(launched).toHaveLength(1);
-    expect(launched[0]!.workflow).toBe('feature-verified-run-xyz');
+    expect(launched[0]!.workflow).toBe('bug-verified-run-xyz');
 
     // Shared def untouched, overlay dir empty, catalog clean — per-run defs are hot-only.
-    expect(JSON.stringify(adapter.getWorkflow('feature'))).toBe(sharedBefore);
+    expect(JSON.stringify(adapter.getWorkflow('bug'))).toBe(sharedBefore);
     expect(readdirSync(overlayDir)).toEqual([]);
-    expect(adapter.listWorkflows().map((w) => w.id)).not.toContain('feature-verified-run-xyz');
+    expect(adapter.listWorkflows().map((w) => w.id)).not.toContain('bug-verified-run-xyz');
   });
 
   it('combined with deliver:"pr": ONE def, ONE registration, floor BEFORE the PR phase', async () => {
@@ -116,7 +119,7 @@ describe('launchRun with requireDeliverables (crew#311)', () => {
       problem: 'p',
       sessionId: 'run-both',
       clisJson: '[]',
-      workflow: 'feature',
+      workflow: 'bug',
       deliver: 'pr',
       requireDeliverables: ['/inbox/out.html'],
     });
@@ -141,7 +144,7 @@ describe('launchRun with requireDeliverables (crew#311)', () => {
       problem: 'p',
       sessionId: 'run-fresh',
       clisJson: '[]',
-      workflow: 'feature',
+      workflow: 'bug',
       requireDeliverables: ['/inbox/doc-42/draft.html'],
     });
     const after = Date.now();
@@ -154,16 +157,16 @@ describe('launchRun with requireDeliverables (crew#311)', () => {
 
   it('two floored launches compose two independent defs — no cross-run sharing', async () => {
     await adapter.launchRun({
-      problem: 'p', sessionId: 'run-a', clisJson: '[]', workflow: 'feature',
+      problem: 'p', sessionId: 'run-a', clisJson: '[]', workflow: 'bug',
       requireDeliverables: ['/inbox/a.html'],
     });
     await adapter.launchRun({
-      problem: 'p', sessionId: 'run-b', clisJson: '[]', workflow: 'feature',
+      problem: 'p', sessionId: 'run-b', clisJson: '[]', workflow: 'bug',
       requireDeliverables: ['/inbox/b.html'],
     });
     expect(registered.map((j) => (JSON.parse(j) as WorkflowDef).id)).toEqual([
-      'feature-verified-run-a',
-      'feature-verified-run-b',
+      'bug-verified-run-a',
+      'bug-verified-run-b',
     ]);
     expect(floorOf(registered[0]!).checked).toEqual(['/inbox/a.html']);
     expect(floorOf(registered[1]!).checked).toEqual(['/inbox/b.html']);
@@ -203,11 +206,11 @@ describe('launchRun with requireDeliverables (crew#311)', () => {
 
   it('an EMPTY requireDeliverables is the old path exactly — no composition, no vacuous floor', async () => {
     await adapter.launchRun({
-      problem: 'p', sessionId: 'run-1', clisJson: '[]', workflow: 'feature',
+      problem: 'p', sessionId: 'run-1', clisJson: '[]', workflow: 'bug',
       requireDeliverables: [],
     });
     expect(registered).toEqual([]);
-    expect(launched[0]!.workflow).toBe('feature');
+    expect(launched[0]!.workflow).toBe('bug');
   });
 
   it('requireDeliverables with an unknown workflow rejects before anything launches', async () => {
@@ -224,7 +227,7 @@ describe('launchRun with requireDeliverables (crew#311)', () => {
   it('a blank declared path REJECTS the launch rather than arming a floor that checks nothing', async () => {
     await expect(
       adapter.launchRun({
-        problem: 'p', sessionId: 'run-1', clisJson: '[]', workflow: 'feature',
+        problem: 'p', sessionId: 'run-1', clisJson: '[]', workflow: 'bug',
         requireDeliverables: ['   '],
       }),
     ).rejects.toThrow(/must not be blank/);
