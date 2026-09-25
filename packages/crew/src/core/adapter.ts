@@ -27,6 +27,8 @@ import type {
   GraphKind,
   WorkflowDef,
   CrewSystemSettings,
+  Preset,
+  PresetStep,
   Project,
   ProjectMember,
   InteractionRequest,
@@ -385,6 +387,20 @@ type CampaignMethods = {
   campaignList?(): Promise<string>;
 };
 
+/**
+ * The preset bindings (DES-TEAMING-002 §8.4, seam C2). ALL optional, same doctrine as
+ * `ProjectMethods`: they land after wicked-core-ts 0.7.30, so the installed addon may not carry
+ * them at runtime. Every method resolves a JSON string.
+ */
+type PresetMethods = {
+  /** `stepsJson` = JSON array of plan steps. Resolves to the stored `Preset` JSON. */
+  putPreset?(name: string, stepsJson: string, projectId?: string | null, createdBy?: string | null): Promise<string>;
+  /** Resolves to the JSON literal `true`, or `false` when no such live preset exists. */
+  deletePreset?(name: string, projectId?: string | null): Promise<string>;
+  /** Resolves to a JSON array of `Preset` objects (the set a launch in `projectId` sees). */
+  listPresets?(projectId?: string | null): Promise<string>;
+};
+
 /** DES-TEAMING-002 T0 (wicked-core-ts ≥ the release carrying it): what arming the engine's bus
  *  bridge came to at spawn — JSON `{state:"none"|"armed"|"not-armed", floor?, reason?}`. Optional:
  *  an older addon has no such method. */
@@ -398,6 +414,7 @@ type CoreHandleFull = CoreHandle &
   ChatMethods &
   EventLogMethods &
   ProjectMethods &
+  PresetMethods &
   CampaignMethods;
 
 /** The napi constructor surface — the static factories live on the class object. */
@@ -822,6 +839,17 @@ export class ProjectsUnsupportedError extends Error {
   constructor(what: string) {
     super(`${what} is not supported by this wicked-core build (needs wicked-core-ts >= 0.6.0)`);
     this.name = 'ProjectsUnsupportedError';
+  }
+}
+
+/**
+ * The preset bindings (DES-TEAMING-002 seam C2) are not in the installed `wicked-core-ts`. The
+ * routes answer 501 ("upgrade the engine"), never 400.
+ */
+export class PresetsUnsupportedError extends Error {
+  constructor(what: string) {
+    super(`${what} is not supported by this wicked-core build (needs the wicked-core-ts release carrying presets)`);
+    this.name = 'PresetsUnsupportedError';
   }
 }
 
@@ -1939,6 +1967,38 @@ export class CoreAdapter {
   /** A unit's captured transcript (string, or `null`). */
   async workOutput(unitId: string): Promise<string | null> {
     return JSON.parse(await this.core.workOutput(unitId)) as string | null;
+  }
+
+  // ── Presets (DES-TEAMING-002 §8.4, seam C2) ─────────────────────────────────
+  // 1:1 maps of the engine's preset commands. The engine owns the store AND resolution: a launch
+  // naming a preset (`workflow`) is resolved inside the engine, so crew never expands one itself.
+  // Every method throws PresetsUnsupportedError on an addon without the bindings (routes: 501).
+
+  /** True when the installed addon carries the preset bindings. */
+  presetsSupported(): boolean {
+    return typeof this.core.putPreset === 'function';
+  }
+
+  private requirePresets<T>(fn: T | undefined, what: string): T {
+    if (typeof fn !== 'function') throw new PresetsUnsupportedError(what);
+    return fn;
+  }
+
+  async putPreset(name: string, steps: PresetStep[], projectId?: string, createdBy?: string): Promise<Preset> {
+    const fn = this.requirePresets(this.core.putPreset, 'Saving a preset');
+    return JSON.parse(
+      await fn.call(this.core, name, JSON.stringify(steps), projectId ?? null, createdBy ?? null),
+    ) as Preset;
+  }
+
+  async deletePreset(name: string, projectId?: string): Promise<boolean> {
+    const fn = this.requirePresets(this.core.deletePreset, 'Deleting a preset');
+    return JSON.parse(await fn.call(this.core, name, projectId ?? null)) as boolean;
+  }
+
+  async listPresets(projectId?: string): Promise<Preset[]> {
+    const fn = this.requirePresets(this.core.listPresets, 'Listing presets');
+    return JSON.parse(await fn.call(this.core, projectId ?? null)) as Preset[];
   }
 
   // ── Projects (DES-PROJECT-001) ──────────────────────────────────────────────
