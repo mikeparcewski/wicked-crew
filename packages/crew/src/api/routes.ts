@@ -3001,7 +3001,8 @@ export function registerRoutes(
           requestType: 'GateDecision',
           responseType: '{ status: SessionStatus; landing?: SteeringLandingResult }',
           // 409 twice over: a run not awaiting a human gate, and an engine refusal at confirm.
-          statusCodes: [200, 400, 404, 409],
+          // 501: an edited plan on an addon without the plan approval gate (DES-TEAMING-002 T3).
+          statusCodes: [200, 400, 404, 409, 501],
         },
       },
     },
