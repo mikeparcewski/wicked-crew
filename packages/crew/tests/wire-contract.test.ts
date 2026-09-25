@@ -72,6 +72,7 @@ import type {
   RefreshProjectGraphSchema,
   UpdateProjectSchema,
 } from '../src/projects/routes.js';
+import type { PutPresetSchema } from '../src/presets/routes.js';
 import type { DEFAULT_SETTINGS } from '../src/core/types.js';
 
 /** Compile-time: what the daemon PRODUCES must satisfy what the contract PUBLISHES. */
@@ -931,6 +932,11 @@ accepts<z.input<typeof OpenPathSchema>, Wire.OpenPathBody>();
 accepts<z.input<typeof CreateProjectSchema>, Wire.CreateProjectBody>();
 accepts<z.input<typeof UpdateProjectSchema>, Wire.UpdateProjectBody>();
 accepts<z.input<typeof AttachMemberSchema>, Wire.AttachMemberBody>();
+// Presets (DES-TEAMING-002 C2): every body the contract lets a client send must parse, and the
+// adapter's preset rows satisfy the published shape.
+accepts<z.input<typeof PutPresetSchema>, Wire.PutPresetBody>();
+respondsWith<Wire.Preset, Awaited<ReturnType<CoreAdapter['putPreset']>>>();
+respondsWith<Wire.Preset[], Awaited<ReturnType<CoreAdapter['listPresets']>>>();
 // Steering (STEERING program) — the import batch and the "add with chat" authoring launch.
 accepts<z.input<typeof SteeringImportSchema>, Wire.SteeringImportBody>();
 accepts<z.input<typeof SteeringAuthorSchema>, Wire.SteeringAuthorBody>();

@@ -345,6 +345,34 @@
     },
     {
       "method": "GET",
+      "path": "/api/v1/presets",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/presets/:name",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/presets/:name",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/presets/:name",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
       "path": "/api/v1/projects",
       "requestType": null,
       "responseType": null,
