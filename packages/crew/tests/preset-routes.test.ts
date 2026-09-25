@@ -19,6 +19,7 @@ import { CoreAdapter, PresetsUnsupportedError } from '../src/core/adapter.js';
 import { createServer } from '../src/api/server.js';
 import type { Preset, PresetStep, WorkUnit } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
+import { baseSkillOff } from './setup/base-skill-off.js';
 
 const SEATS = JSON.stringify([
   { key: 'alpha', display_name: 'Alpha', binary: 'alpha', headless_invocation: 'alpha {PROMPT}' },
@@ -214,6 +215,9 @@ describe.skipIf(!ENGINE_HAS_PRESETS)('preset launch through the real engine', ()
   let ctx: Awaited<ReturnType<typeof boot>>;
 
   beforeAll(async () => {
+    // Run mechanics, not grounding: the scratch HOME has no published skills generation, so the
+    // base skill is switched off the way an operator does (tests/setup/base-skill-off.ts).
+    baseSkillOff();
     ctx = await boot('preset-launch');
   });
 
@@ -230,7 +234,7 @@ describe.skipIf(!ENGINE_HAS_PRESETS)('preset launch through the real engine', ()
       method: 'POST',
       ...json({ problem: 'add SSO login', workflow: 'my-flow', clisJson: SEATS }),
     });
-    expect(launch.status).toBe(201);
+    expect(launch.status, await launch.clone().text()).toBe(201);
     const { runId } = (await launch.json()) as { runId: string };
     expect(shape(runId, await unitsOf(ctx.adapter, runId))).toEqual([
       ['scope', 'recon', 'neutral'],
