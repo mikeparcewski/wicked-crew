@@ -15,7 +15,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CoreAdapter, PresetsUnsupportedError } from '../src/core/adapter.js';
+import { CoreAdapter, PresetsUnsupportedError, engineSupportsPlanLaunch } from '../src/core/adapter.js';
 import { createServer } from '../src/api/server.js';
 import type { Preset, PresetStep, WorkUnit } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
@@ -236,11 +236,27 @@ describe.skipIf(!ENGINE_HAS_PRESETS)('preset launch through the real engine', ()
     });
     expect(launch.status, await launch.clone().text()).toBe(201);
     const { runId } = (await launch.json()) as { runId: string };
-    expect(shape(runId, await unitsOf(ctx.adapter, runId))).toEqual([
-      ['scope', 'recon', 'neutral'],
-      ['make', 'build', 'creator'],
-      ['check', 'review', 'evaluator'],
-    ]);
+    // DES-TEAMING-002 T3: an engine with the plan approval gate puts a preset launch through
+    // the plan pipeline — a preset declares no `touch`, so its creator plan scores 100 ("no
+    // declared scope") and floor fill inserts the 70-100 phases it lacks; an older engine
+    // launches the selection as authored.
+    expect(shape(runId, await unitsOf(ctx.adapter, runId))).toEqual(
+      engineSupportsPlanLaunch()
+        ? [
+            ['scope', 'recon', 'neutral'],
+            ['test_plan', 'test', 'neutral'],
+            ['design', 'recon', 'neutral'],
+            ['architecture', 'recon', 'neutral'],
+            ['make', 'build', 'creator'],
+            ['check', 'review', 'evaluator'],
+            ['security_review', 'review', 'evaluator'],
+          ]
+        : [
+            ['scope', 'recon', 'neutral'],
+            ['make', 'build', 'creator'],
+            ['check', 'review', 'evaluator'],
+          ],
+    );
   });
 
   it('(a) the built-in feature preset is listed and cannot be deleted (d)', async () => {
