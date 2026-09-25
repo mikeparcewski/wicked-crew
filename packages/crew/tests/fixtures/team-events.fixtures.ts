@@ -11,7 +11,7 @@ export const TEAM_EVENT_FIXTURES = [
   },
   {
     event_type: "wicked.team.path.scored",
-    payload: {"run_id": "r1", "ord": null, "attempt": null, "by": "engine", "at": 1758700000001, "re": null, "score_source": "intent:p-0123456789abcdef0123456789abcdef", "basis": "intent", "score": 70, "deterministic": 70, "reasons": ["destructive => floor 70", "reach 21-100 dependents: +60"], "model": {"add": 10, "rationale": "migration touches a shared table"}, "signals": {"changed_symbols": 4, "dependents": 37, "products": 1, "contract_change": false, "test_gap": 0.5, "critical": false, "destructive": true, "truncated": false}, "plan": {"monitors": 3, "depth": "deep", "post_hoc_reviewer": true, "post_hoc_other_cli": true}, "tree": null},
+    payload: {"run_id": "r1", "ord": null, "attempt": null, "by": "engine", "at": 1758700000001, "re": null, "score_source": "intent:p-0123456789abcdef0123456789abcdef", "basis": "intent", "score": 80, "deterministic": 70, "reasons": ["destructive => floor 70", "reach 21-100 dependents: +60"], "model": {"add": 10, "rationale": "migration touches a shared table"}, "signals": {"changed_symbols": 4, "dependents": 37, "products": 1, "contract_change": false, "test_gap": 0.5, "critical": false, "destructive": true, "truncated": false}, "plan": {"monitors": 3, "depth": "deep", "post_hoc_reviewer": true, "post_hoc_other_cli": true}, "tree": null},
   },
   {
     event_type: "wicked.team.plan.proposed",
@@ -47,23 +47,23 @@ export const TEAM_EVENT_FIXTURES = [
   },
   {
     event_type: "wicked.team.finding.raised",
-    payload: {"run_id": "r1", "ord": 3, "attempt": 1, "by": "claude#2", "at": 1758700000010, "re": "checkpoint.reached#17", "raise_seq": 4, "finding_id": "f-3fa9c2e1d0b4a7e6", "member_id": "m1", "line_key": null, "anchor": null, "anchor_source": null, "severity": "high", "path": "src/retire.ts", "line": 41, "evidence": "fetchCoverage(scope).then(setCount)", "claim": "the fetch is never cancelled", "suggestion": null, "tree": "t-k", "in_diff": true, "corroborated_by": []},
+    payload: {"run_id": "r1", "ord": 3, "attempt": 1, "by": "claude#2", "at": 1758700000010, "re": "checkpoint.reached#17", "raise_seq": 4, "finding_id": "f-7bf84000911d564c", "member_id": "m1", "line_key": null, "anchor": null, "anchor_source": null, "severity": "high", "path": "src/retire.ts", "line": 41, "evidence": "fetchCoverage(scope).then(setCount)", "claim": "the fetch is never cancelled", "suggestion": null, "tree": "t-k", "in_diff": true, "corroborated_by": []},
   },
   {
     event_type: "wicked.team.advice.delivered",
-    payload: {"run_id": "r1", "ord": 3, "attempt": 1, "by": "engine", "at": 1758700000011, "re": "finding.raised#4", "raise_seq": 4, "finding_id": "f-3fa9c2e1d0b4a7e6", "delivery_id": "s-1", "steer_id": "s-1", "channel": "acp_steering", "outcome": "injected", "detail": null},
+    payload: {"run_id": "r1", "ord": 3, "attempt": 1, "by": "engine", "at": 1758700000011, "re": "finding.raised#4", "raise_seq": 4, "finding_id": "f-7bf84000911d564c", "delivery_id": "s-1", "steer_id": "s-1", "channel": "acp_steering", "outcome": "injected", "detail": null},
   },
   {
     event_type: "wicked.team.advice.answered",
-    payload: {"run_id": "r1", "ord": 3, "attempt": 1, "by": "claude#1", "at": 1758700000012, "re": "finding.raised#4", "raise_seq": 4, "answered_in": "build:1", "finding_id": "f-3fa9c2e1d0b4a7e6", "disposition": "declined", "reason": "campaign.rs:325 documents the exclusion"},
+    payload: {"run_id": "r1", "ord": 3, "attempt": 1, "by": "claude#1", "at": 1758700000012, "re": "finding.raised#4", "raise_seq": 4, "answered_in": "build:1", "finding_id": "f-7bf84000911d564c", "disposition": "declined", "reason": "campaign.rs:325 documents the exclusion"},
   },
   {
     event_type: "wicked.team.help.requested",
-    payload: {"run_id": "r1", "ord": 3, "attempt": 1, "by": "claude#1", "at": 1758700000013, "re": null, "help_id": "h-0123456789abcdef0123456789abcdef", "help_seq": 2, "question": "which table owns coverage?", "context": "retire.ts reads it at :41"},
+    payload: {"run_id": "r1", "ord": 3, "attempt": 1, "by": "claude#1", "at": 1758700000013, "re": null, "help_id": "h-173a7b6f9ad38fce2f578afd2aa1be38", "help_seq": 2, "question": "which table owns coverage?", "context": "retire.ts reads it at :41"},
   },
   {
     event_type: "wicked.team.help.answered",
-    payload: {"run_id": "r1", "ord": 3, "attempt": 1, "by": "claude#2", "at": 1758700000014, "re": "help.requested#h-0123456789abcdef0123456789abcdef", "help_id": "h-0123456789abcdef0123456789abcdef", "answer_id": "t-7", "answer": "coverage_rows, created in migration 12", "evidence": ["src/x.rs:41"]},
+    payload: {"run_id": "r1", "ord": 3, "attempt": 1, "by": "claude#2", "at": 1758700000014, "re": "help.requested#h-173a7b6f9ad38fce2f578afd2aa1be38", "help_id": "h-173a7b6f9ad38fce2f578afd2aa1be38", "answer_id": "t-7", "answer": "coverage_rows, created in migration 12", "evidence": ["src/x.rs:41"]},
   },
   {
     event_type: "wicked.team.change.requested",
@@ -79,11 +79,11 @@ export const TEAM_EVENT_FIXTURES = [
   },
   {
     event_type: "wicked.team.finding.settled",
-    payload: {"run_id": "r1", "ord": 3, "attempt": 1, "by": "claude#2", "at": 1758700000018, "re": "advice.answered#4", "raise_seq": 4, "finding_id": "f-3fa9c2e1d0b4a7e6", "status": "held", "reason": "no reply (counted as hold)", "final_line": 43},
+    payload: {"run_id": "r1", "ord": 3, "attempt": 1, "by": "claude#2", "at": 1758700000018, "re": "advice.answered#4", "raise_seq": 4, "finding_id": "f-7bf84000911d564c", "status": "held", "reason": "no reply (counted as hold)", "final_line": 43},
   },
   {
     event_type: "wicked.team.council.called",
-    payload: {"run_id": "r1", "ord": 3, "attempt": 1, "by": "engine", "at": 1758700000019, "re": "finding.settled#4", "subject": "finding:4", "finding_id": "f-3fa9c2e1d0b4a7e6", "trigger": "unresolved_high", "question": "Should the run continue autonomously with the worker's refusal standing?", "positions": [{"by": "worker claude#1", "position": "YES — the refusal stands", "reason": "campaign.rs:325 documents the exclusion"}, {"by": "monitor claude#2", "position": "NO — the finding stands", "reason": "no reply (counted as hold)"}], "evidence": "src/retire.ts:43 fetchCoverage(scope).then(setCount)", "excluded_seats": ["claude#1", "claude#2"], "transcript": [1201, 1207, 1215, 1220]},
+    payload: {"run_id": "r1", "ord": 3, "attempt": 1, "by": "engine", "at": 1758700000019, "re": "finding.settled#4", "subject": "finding:4", "finding_id": "f-7bf84000911d564c", "trigger": "unresolved_high", "question": "Should the run continue autonomously with the worker's refusal standing?", "positions": [{"by": "worker claude#1", "position": "YES — the refusal stands", "reason": "campaign.rs:325 documents the exclusion"}, {"by": "monitor claude#2", "position": "NO — the finding stands", "reason": "no reply (counted as hold)"}], "evidence": "src/retire.ts:43 fetchCoverage(scope).then(setCount)", "excluded_seats": ["claude#1", "claude#2"], "transcript": [1201, 1207, 1215, 1220]},
   },
   {
     event_type: "wicked.team.council.ruled",
@@ -91,7 +91,7 @@ export const TEAM_EVENT_FIXTURES = [
   },
   {
     event_type: "wicked.team.ledger.folded",
-    payload: {"run_id": "r1", "ord": 3, "attempt": 1, "by": "engine", "at": 1758700000021, "re": null, "final_pass": "completed", "transport": "bus", "ledger": {"finalPass": "completed", "renderedToJudge": false, "teamPause": true, "monitors": [{"monitorId": "m1", "seat": "claude#2", "batches": 4, "status": "completed", "error": null}], "findings": [{"findingId": "f-3fa9c2e1d0b4a7e6", "monitorId": "m1", "seat": "claude#2", "severity": "high", "path": "src/retire.ts", "line": 41, "finalLine": 43, "evidence": "fetchCoverage(scope).then(setCount)", "claim": "the fetch is never cancelled", "suggestion": null, "tree": "t-k", "inDiff": true, "corroboratedBy": [], "delivery": "injected", "status": "declined", "workerReason": "campaign.rs:325 documents the exclusion", "monitorReply": {"kind": "hold", "reason": "no reply (counted as hold)"}, "dispute": {"verdict": "no", "agreementPct": 67, "dissent": 1, "seats": [], "reason": null}}], "rejected": {"malformed": 0, "belowBar": 0, "unconfirmed": 0, "duplicate": 0}}, "transcript": {"from_event_id": 1180, "to_event_id": 1290, "count": 1, "truncated": false, "events": [{"event_id": 1201, "event_type": "wicked.team.finding.raised", "payload": {"raise_seq": 4}}]}},
+    payload: {"run_id": "r1", "ord": 3, "attempt": 1, "by": "engine", "at": 1758700000021, "re": null, "final_pass": "completed", "transport": "bus", "ledger": {"finalPass": "completed", "renderedToJudge": false, "teamPause": true, "monitors": [{"monitorId": "m1", "seat": "claude#2", "batches": 4, "status": "completed", "error": null}], "findings": [{"findingId": "f-7bf84000911d564c", "monitorId": "m1", "seat": "claude#2", "severity": "high", "path": "src/retire.ts", "line": 41, "finalLine": 43, "evidence": "fetchCoverage(scope).then(setCount)", "claim": "the fetch is never cancelled", "suggestion": null, "tree": "t-k", "inDiff": true, "corroboratedBy": [], "delivery": "injected", "status": "declined", "workerReason": "campaign.rs:325 documents the exclusion", "monitorReply": {"kind": "hold", "reason": "no reply (counted as hold)"}, "dispute": {"verdict": "no", "agreementPct": 67, "dissent": 1, "seats": [], "reason": null}}], "rejected": {"malformed": 0, "belowBar": 0, "unconfirmed": 0, "duplicate": 0}}, "transcript": {"from_event_id": 1180, "to_event_id": 1290, "count": 1, "truncated": false, "events": [{"event_id": 1201, "event_type": "wicked.team.finding.raised", "payload": {"raise_seq": 4}}]}},
   },
   {
     event_type: "wicked.team.gate.opened",
@@ -103,7 +103,7 @@ export const TEAM_EVENT_FIXTURES = [
   },
   {
     event_type: "wicked.team.gate.opened",
-    payload: {"run_id": "r1", "ord": 3, "attempt": 1, "by": "engine", "at": 1758700000026, "re": null, "gate_id": "g-r1-5", "kind": "team_dispute", "finding_ids": ["f-3fa9c2e1d0b4a7e6"]},
+    payload: {"run_id": "r1", "ord": 3, "attempt": 1, "by": "engine", "at": 1758700000026, "re": null, "gate_id": "g-r1-5", "kind": "team_dispute", "finding_ids": ["f-7bf84000911d564c"]},
   },
   {
     event_type: "wicked.team.gate.opened",
@@ -115,7 +115,7 @@ export const TEAM_EVENT_FIXTURES = [
   },
   {
     event_type: "wicked.team.gate.decided",
-    payload: {"run_id": "r1", "ord": 3, "attempt": 1, "by": "engine", "at": 1758700000024, "re": "gate.opened#g-r1-3", "gate_id": "g-r1-3", "kind": "unit_review", "decision": "paused", "combined": true, "team_pause": true, "unresolved": ["f-3fa9c2e1d0b4a7e6"]},
+    payload: {"run_id": "r1", "ord": 3, "attempt": 1, "by": "engine", "at": 1758700000024, "re": "gate.opened#g-r1-3", "gate_id": "g-r1-3", "kind": "unit_review", "decision": "paused", "combined": true, "team_pause": true, "unresolved": ["f-7bf84000911d564c"]},
   },
   {
     event_type: "wicked.team.path.ended",
