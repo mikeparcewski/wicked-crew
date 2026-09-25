@@ -8,11 +8,12 @@ import { readFileSync, existsSync } from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, SteeringUnsupportedError, humanGatePhaseIds, settingsFilePath } from '../core/adapter.js';
+import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, humanGatePhaseIds, settingsFilePath } from '../core/adapter.js';
 import { codeGraphDb, codeGraphErrorStatus, requirementsGraph } from '../core/repoPaths.js';
 import type {
   CodeGraphData,
   CoreEvent,
+  LaunchPlan,
   RecordedEvent,
   RepoEntry,
   RepoFinding,
@@ -475,6 +476,26 @@ const RegisterRepoSchema = z
 // The request-body schemas below are exported so `tests/wire-contract.test.ts` can prove, at
 // compile time, that every body the published contract (`wicked-crew-api-types`) lets a client
 // send is a body these schemas accept — the request-direction half of the drift guard (task #84).
+/** DES-TEAMING-002 §8.4 (seam T3) — a USER-COMPOSED plan: `steps[]` over the phase catalog (a
+ *  step's `id` defaults to its catalog id), the predicted `touch` set (the intent score's input)
+ *  and an optional MANUAL-mode floor `override`. The ENGINE validates every step key and every rule
+ *  (compose, the floor, the override in auto mode); this schema only shapes the command. */
+export const PlanSchema = z.object({
+  steps: z
+    .array(z.object({ catalog: z.string().min(1), id: z.string().min(1).optional() }).passthrough())
+    .min(1),
+  touch: z.array(z.string().min(1)).max(64).optional(),
+  override: z.object({ remove: z.array(z.string().min(1)).min(1), reason: z.string().min(1) }).strict().optional(),
+}).strict();
+
+/** The parsed plan as the engine command's `LaunchPlan` (an absent optional stays absent). */
+function toLaunchPlan(p: z.infer<typeof PlanSchema>): LaunchPlan {
+  const plan: LaunchPlan = { steps: p.steps };
+  if (p.touch !== undefined) plan.touch = p.touch;
+  if (p.override !== undefined) plan.override = p.override;
+  return plan;
+}
+
 export const LaunchSchema = z.object({
   problem: z.string().min(1),
   sessionId: z.string().min(1).optional(),
@@ -483,6 +504,10 @@ export const LaunchSchema = z.object({
   humanConfirm: z.string().min(1).optional(),
   repoRef: z.string().min(1).optional(),
   workflow: z.string().min(1).optional(),
+  /** DES-TEAMING-002 T3 — a user-composed plan (`LaunchRunBody.plan`), forwarded to the engine,
+   *  which publishes `plan.proposed{by:"human"}` and holds it at a `plan_approval` gate when the
+   *  approval matrix says so. Mutually exclusive with `workflow` (refine below). */
+  plan: PlanSchema.optional(),
   /** DES-PROJECT-001 §2.2 — file the run into a project; membership attaches atomically with
    *  the launch record. Unknown/archived ⇒ the launch fails (never a silent unfiled run). */
   projectId: z.string().min(1).optional(),
@@ -533,7 +558,14 @@ export const LaunchSchema = z.object({
    *  launch (e.g. a CI job name or a studio tab id). Persisted on the `run.launched` audit entry
    *  (`detail.actor`) and served on the run DTO; absent = caller omitted it. */
   actor: z.string().min(1).max(256).optional(),
-}).strict().refine((b) => b.deliver !== 'pr' || b.workflow !== undefined, {
+}).strict().refine((b) => b.plan === undefined || b.workflow === undefined, {
+  message: 'plan and workflow are mutually exclusive — a launch carries a plan or names a preset, not both',
+  path: ['plan'],
+}).refine((b) => b.plan === undefined || b.deliver !== 'pr', {
+  message:
+    'deliver: "pr" with a plan is not wired yet (DES-TEAMING-002 T8) — launch the plan with deliver omitted or "none"',
+  path: ['deliver'],
+}).refine((b) => b.plan !== undefined || b.deliver !== 'pr' || b.workflow !== undefined, {
   message: 'deliver: "pr" requires a workflow — a free-text run has no def to append the deliver phase to',
   path: ['deliver'],
 }).refine((b) => b.deliverGate === undefined || b.deliver !== 'none', {
@@ -564,11 +596,19 @@ export const LaunchSchema = z.object({
 export const GateSchema = z.object({
   approve: z.boolean(),
   amend: z.string().optional(),
-  action: z.enum(['approve', 'request_changes', 'reject']).optional(),
+  action: z.enum(['approve', 'request_changes', 'reject', 'edit_plan']).optional(),
   amendScope: z.enum(['cursor', 'creator']).optional(),
+  /** DES-TEAMING-002 T3 — approve a `plan_approval` gate WITH AN EDIT (`GateDecision.plan`). */
+  plan: PlanSchema.optional(),
 }).strict().refine(
-  (b) => b.action === undefined || (b.action === 'approve') === b.approve,
-  { message: '`action` disagrees with `approve`: request_changes and reject require approve: false; approve requires approve: true', path: ['action'] },
+  (b) => b.action === undefined || (b.action === 'approve' || b.action === 'edit_plan') === b.approve,
+  { message: '`action` disagrees with `approve`: request_changes and reject require approve: false; approve and edit_plan require approve: true', path: ['action'] },
+).refine(
+  (b) => (b.action === 'edit_plan') === (b.plan !== undefined) || (b.action === undefined && b.plan !== undefined),
+  { message: 'an edited plan answers a plan_approval gate: `plan` needs approve: true with `action` omitted or edit_plan, and edit_plan needs `plan`', path: ['plan'] },
+).refine(
+  (b) => b.plan === undefined || (b.approve && b.amend === undefined && b.amendScope === undefined),
+  { message: '`plan` is an approve WITH an edited plan: approve: true, and no amend / amendScope (the plan is the edit)', path: ['plan'] },
 ).refine(
   (b) => b.amendScope === undefined || b.approve,
   { message: '`amendScope` applies to an approve only (approve: true)', path: ['amendScope'] },
@@ -1644,6 +1684,9 @@ export function registerRoutes(
     if (b.deliverGate === 'auto') input.autoDeliver = true;
     if (b.repoRef !== undefined) input.repoRef = b.repoRef;
     if (b.workflow !== undefined) input.workflow = b.workflow;
+    // DES-TEAMING-002 T3: the plan is the ENGINE's to propose, score, floor and gate — crew
+    // forwards the command and publishes nothing (§4.0).
+    if (b.plan !== undefined) input.plan = toLaunchPlan(b.plan);
     if (b.projectId !== undefined) {
       input.projectId = b.projectId;
       // A project is a CONTEXT (crew#326): a run filed into one should see the project's whole
@@ -1845,6 +1888,11 @@ export function registerRoutes(
       return reply.code(201).send({ runId });
     } catch (err) {
       const msg = message(err);
+      // DES-TEAMING-002 T3: a plan on an engine without the plan approval gate is an "upgrade the
+      // engine" 501 — never a free-text run launched in its place.
+      if (err instanceof PlanLaunchUnsupportedError) {
+        return reply.code(501).send({ error: msg });
+      }
       // The engine's own intake refusal (wicked-core#411 `StateHomeConfigError`) is a configuration
       // error, not a malformed request: the same typed 409 the pre-check above answers, over a fresh
       // survey — the pre-check saw a clean state home (or an addon that could not classify), the
@@ -2991,6 +3039,7 @@ export function registerRoutes(
         parsed.data.amend,
         parsed.data.action,
         parsed.data.amendScope,
+        parsed.data.plan !== undefined ? toLaunchPlan(parsed.data.plan) : undefined,
       );
       // WHO approved/rejected — the gate-decision audit (task #88). The engine
       // records THAT the gate resolved (interaction_requests / gateDecided);
@@ -3002,6 +3051,7 @@ export function registerRoutes(
           ...(parsed.data.amend !== undefined ? { amend: parsed.data.amend } : {}),
           ...(parsed.data.action !== undefined ? { action: parsed.data.action } : {}),
           ...(parsed.data.amendScope !== undefined ? { amendScope: parsed.data.amendScope } : {}),
+          ...(parsed.data.plan !== undefined ? { planSteps: parsed.data.plan.steps.length } : {}),
           status,
         },
       });
@@ -3018,6 +3068,9 @@ export function registerRoutes(
         : undefined;
       return reply.send({ status, ...(landing !== undefined ? { landing } : {}) });
     } catch (err) {
+      if (err instanceof PlanLaunchUnsupportedError) {
+        return reply.code(501).send({ error: message(err) });
+      }
       return reply.code(409).send({ error: message(err) });
     }
   });

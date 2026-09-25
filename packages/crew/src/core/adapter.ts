@@ -10,6 +10,7 @@ import type { Core as CoreHandle, LaunchOptions, Subscription } from 'wicked-cor
 import type {
   CoreEvent,
   LaunchRunInput,
+  LaunchPlan,
   RepoEntry,
   RepoOnboardRef,
   SessionView,
@@ -445,6 +446,11 @@ interface CoreConstructor {
    *  only under exec. One without it opens-and-closes its bus connections, which on a file crew's
    *  seams also hold drops their locks (F-E2E-021), so crew does not hand such an engine the bus. */
   busConnectionStats?(path: string): string | null;
+  /** DES-TEAMING-002 T3 (wicked-core-ts ≥ the release carrying it): the addon carries the plan
+   *  approval gate — `LaunchOptions.planJson` / `deliverStepJson` and `confirmGate(…, planJson)`.
+   *  Its PRESENCE is the capability: napi ignores an undeclared object field, so an older addon
+   *  would drop a plan and run the launch unplanned and UNGATED. */
+  supportsPlanLaunch?(): boolean;
 }
 
 /** The engine's replay report (`Core.replayEmitOutbox`), parsed. */
@@ -461,6 +467,27 @@ export interface EmitOutboxReplayReport {
 }
 
 const { Core } = require('wicked-core-ts') as { Core: CoreConstructor };
+
+/**
+ * Does the linked engine carry DES-TEAMING-002 T3's plan launch (`Core.supportsPlanLaunch`)? A
+ * plan handed to an addon without it would be silently ignored — the run launches as free text,
+ * with no `plan.proposed` and no `plan_approval` gate — so every plan path fails CLOSED on this.
+ * Read at call time (not cached): the addon is resolved once, but tests swap the static.
+ */
+export function engineSupportsPlanLaunch(): boolean {
+  return typeof Core.supportsPlanLaunch === 'function' && Core.supportsPlanLaunch() === true;
+}
+
+/** A plan path on an engine without the plan approval gate (maps to 501 at the HTTP boundary). */
+export class PlanLaunchUnsupportedError extends Error {
+  constructor(what: string) {
+    super(
+      `${what} needs a wicked-core-ts that carries the plan approval gate (Core.supportsPlanLaunch, ` +
+        `DES-TEAMING-002 T3); the installed addon would drop the plan and run the launch ungated`,
+    );
+    this.name = 'PlanLaunchUnsupportedError';
+  }
+}
 
 /**
  * Does the installed wicked-core-ts addon understand `LaunchOptions.extraWriteRoots` (≥ 0.6.1)?
@@ -1504,6 +1531,12 @@ export class CoreAdapter {
     };
   }
 
+  /** Whether this engine carries the plan approval gate (DES-TEAMING-002 T3) — see
+   *  [`engineSupportsPlanLaunch`]. An instance method so a partial-stub adapter can say either. */
+  supportsPlanLaunch(): boolean {
+    return engineSupportsPlanLaunch();
+  }
+
   /** Launch an interactive, resumable run → the run id. */
   async launchRun(input: LaunchRunInput): Promise<string> {
     const opts: LaunchOptions = {
@@ -1607,6 +1640,22 @@ export class CoreAdapter {
         );
       }
       opts.projectGraph = input.projectGraph;
+    }
+    if (input.plan !== undefined) {
+      // DES-TEAMING-002 T3: a user-composed plan is a COMMAND the engine owns end to end — it
+      // publishes `plan.proposed`, scores, floor-fills and gates it. Crew only forwards it, and
+      // refuses what it cannot forward faithfully rather than dropping it.
+      if (input.workflow !== undefined) {
+        throw new Error('a launch carries a plan or names a workflow (a preset), not both');
+      }
+      if (input.deliver === 'pr' || (input.requireDeliverables ?? []).length > 0) {
+        throw new Error(
+          'deliver: "pr" / requireDeliverables with a plan is not wired yet (DES-TEAMING-002 T8) — ' +
+            'launch the plan without them',
+        );
+      }
+      if (!this.supportsPlanLaunch()) throw new PlanLaunchUnsupportedError('A plan launch');
+      (opts as LaunchOptions & { planJson?: string }).planJson = JSON.stringify(input.plan);
     }
     if (input.workflow !== undefined) {
       let workflowId = input.workflow;
@@ -1736,8 +1785,34 @@ export class CoreAdapter {
    *  would silently DROP them — a `request_changes` would run as a plain reject — so they fail
    *  CLOSED on version (the `extraWriteRoots` / `projectGraph` doctrine); absent, the call is the
    *  three-arg one every engine understands. */
-  confirmGate(runId: string, approve: boolean, amend?: string, action?: string, amendScope?: string): Promise<string> {
+  confirmGate(
+    runId: string,
+    approve: boolean,
+    amend?: string,
+    action?: string,
+    amendScope?: string,
+    plan?: LaunchPlan,
+  ): Promise<string> {
     return this.handedToEngine('run', runId, () => {
+      if (plan !== undefined) {
+        // DES-TEAMING-002 T3: approve a `plan_approval` gate WITH AN EDIT — the engine proposes,
+        // floor-fills and accepts it (or refuses it and re-opens the gate). Fail CLOSED on an
+        // addon without the gate: it would drop the edit and approve the held plan unedited.
+        if (!this.supportsPlanLaunch()) {
+          return Promise.reject(new PlanLaunchUnsupportedError('An edited plan at the gate'));
+        }
+        const core = this.core as unknown as {
+          confirmGate(
+            runId: string,
+            approve: boolean,
+            amend?: string,
+            action?: string,
+            amendScope?: string,
+            planJson?: string,
+          ): Promise<string>;
+        };
+        return core.confirmGate(runId, true, undefined, 'edit_plan', undefined, JSON.stringify(plan));
+      }
       if (action === undefined && amendScope === undefined) {
         return this.core.confirmGate(runId, approve, amend);
       }

@@ -775,7 +775,7 @@ export interface GateDecision {
    * `action` and `approve` answers 400, a gate with no creator phase before it 409. An older
    * daemon's strict schema rejects the key with a 400 — omit it against such servers.
    */
-  action?: 'approve' | 'request_changes' | 'reject';
+  action?: 'approve' | 'request_changes' | 'reject' | 'edit_plan';
   /**
    * Where an approve's `amend` lands (api-types 0.38.0, additive; same release as `action`).
    * Absent = `'cursor'` (today: the gated unit's description). `'creator'` — the first creator
@@ -784,6 +784,28 @@ export interface GateDecision {
    * Identical text already present on the target is not appended twice.
    */
   amendScope?: 'cursor' | 'creator';
+  /**
+   * Approve a `plan_approval` gate WITH AN EDIT (DES-TEAMING-002 §8.6, seam T3; additive; needs an
+   * engine whose addon carries `Core.supportsPlanLaunch`). The edited plan: the engine publishes
+   * `plan.proposed{by:"human", kind:"edit"}`, floor-fills it (phases below the floor are ADDED,
+   * never refused) and accepts it as the next `plan_rev` — or refuses it (`plan.refused`) and
+   * re-opens the gate under a new `gate_id`, answering `awaiting_human`. Requires `approve: true`
+   * and `action` omitted or `'edit_plan'`; `amend` / `amendScope` do not apply. A plain approve
+   * (no `plan`) releases the held plan as it is; `approve: false` rejects (cancels).
+   */
+  plan?: LaunchPlan;
+}
+
+/**
+ * A USER-COMPOSED plan (DES-TEAMING-002 §8.4, seam T3): ordered `steps[]` over the phase catalog,
+ * the predicted `touch` set (the intent score's input: a plan with a creator step and no `touch`
+ * scores 100, "no declared scope") and an optional MANUAL-mode floor `override` (refused in auto
+ * mode). A step's `id` defaults to its catalog id. The ENGINE validates every key.
+ */
+export interface LaunchPlan {
+  steps: Array<{ catalog: string; id?: string | undefined; [k: string]: unknown }>;
+  touch?: string[];
+  override?: TeamPlanOverride;
 }
 
 /**
@@ -3421,6 +3443,16 @@ export interface LaunchRunBody {
   repoRef?: string;
   /** Built-in workflow id (`feature` | `bug` | `migration`); omit for free-text single-unit mode. */
   workflow?: string;
+  /**
+   * A USER-COMPOSED plan (DES-TEAMING-002 §8.4, seam T3; additive; needs an engine whose addon
+   * carries `Core.supportsPlanLaunch` — an older one is refused with a 501, never run unplanned).
+   * The ENGINE publishes `plan.proposed{by:"human"}` before any unit runs, scores and floor-fills
+   * it, and holds it at a `plan_approval` gate (`awaiting_human{gate_kind:"plan_approval"}`) when
+   * the approval matrix says so: always in manual mode, and in auto mode when high risk (band
+   * 70-100 or destructive). Mutually exclusive with `workflow` (a plan or a preset).
+   * `deliver: "pr"` with a plan is not wired yet (DES-TEAMING-002 T8) and answers 400.
+   */
+  plan?: LaunchPlan;
   /**
    * The project to file this run into (DES-PROJECT-001 §2.2). The `crew.run` membership is
    * attached atomically with the launch record; an unknown or archived project fails the launch
