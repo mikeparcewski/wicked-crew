@@ -73,6 +73,7 @@ import { listInteractiveDocs } from '../interactive/docs-index.js';
 import { TestSetIndex } from '../qe/test-sets.js';
 import { estateExe, parseEstateTotals, resolveProjectGraphBinding } from '../projects/graph.js';
 import { registerProjectRoutes, type ProjectRoutesDeps } from '../projects/routes.js';
+import { registerPresetRoutes } from '../presets/routes.js';
 import { registerCampaignRoutes } from '../campaigns/routes.js';
 import { registerGovernanceWikiRoutes } from './governance-wiki.js';
 import {
@@ -4780,6 +4781,10 @@ export function registerRoutes(
 
   // ── Projects (DES-PROJECT-001) — the 9-route experience-plane surface ────────
   registerProjectRoutes(app, adapter, { ...projects, settings: projectSettings }, security);
+
+  // ── Presets (DES-TEAMING-002 §8.4, seam C2) — saved phase selections in the engine's store;
+  // a launch names one via `workflow`, and the ENGINE resolves it.
+  registerPresetRoutes(app, adapter, security);
 
   // ── Campaigns (crew#342 + TH-9) — the engine's durable Run-DAG scheduler over REST ──────────
   // Progress streams as campaign* CoreEvents on the existing allowlist-free /ws relay; these

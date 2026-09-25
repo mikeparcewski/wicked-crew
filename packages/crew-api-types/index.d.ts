@@ -3992,6 +3992,53 @@ export interface ElicitationResponse {
   content?: { response: string };
 }
 
+// ── Presets (DES-TEAMING-002 §8.4, seam C2) — saved phase selections ──────────
+
+/**
+ * One plan step: the catalog entry it instantiates (`understand`, `build`, …), its phase id,
+ * and the step fields the catalog lets a step set (`gate`, `validator_pin`, `depends_on`, …).
+ * The engine validates it (`plan::compose`); unknown keys are refused there.
+ */
+export interface PresetStep {
+  catalog: string;
+  id: string;
+  [k: string]: unknown;
+}
+
+/**
+ * A preset (`GET /presets`, `PUT /presets/:name`): a named phase selection stored in the core
+ * store. A launch's `workflow` names one (`POST /runs {workflow}`); a project-scoped preset
+ * shadows a global one of the same name for that project. Built-ins carry
+ * `created_by: "builtin"` and cannot be deleted.
+ */
+export interface Preset {
+  name: string;
+  /** `"global"` or `"project:<id>"`. */
+  scope: string;
+  steps: PresetStep[];
+  /** `"builtin"` for a seeded built-in; otherwise the writing surface. */
+  created_by: string;
+  /** Unix millis. */
+  updated_at: number;
+  [k: string]: unknown;
+}
+
+/** `PUT /presets/:name` body. `projectId` absent ⇒ a global preset. */
+export interface PutPresetBody {
+  steps: PresetStep[];
+  projectId?: string;
+}
+
+/** `GET /presets` (`?projectId=`) — the presets a launch in that project sees, by name. */
+export interface PresetListResponse {
+  presets: Preset[];
+}
+
+/** `GET /presets/:name`, `PUT /presets/:name`. */
+export interface PresetResponse {
+  preset: Preset;
+}
+
 // ── Projects (DES-PROJECT-001) — the experience-plane keystone ─────────────────
 
 /** Project lifecycle: `active ⇄ archived`, no hard delete (ADR §1.3). */
