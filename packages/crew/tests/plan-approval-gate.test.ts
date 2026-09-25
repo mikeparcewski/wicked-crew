@@ -11,10 +11,12 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter, engineSupportsPlanLaunch } from '../src/core/adapter.js';
+import { DELIVER_PHASE_ID, EVIDENCE_FLOOR_PIN } from '../src/core/deliver.js';
 import { createServer } from '../src/api/server.js';
 import type { LaunchOptions } from 'wicked-core-ts';
 import type { SessionView, WorkUnit } from '../src/core/types.js';
@@ -59,6 +61,7 @@ describe('POST /runs {plan} and the plan_approval gate — HTTP contract (shadow
   let ctx: Awaited<ReturnType<typeof boot>>;
   let launched: LaunchOptions[];
   let gated: unknown[][];
+  let registered: string[];
 
   beforeEach(async () => {
     ctx = await boot('plan-contract');
@@ -67,6 +70,11 @@ describe('POST /runs {plan} and the plan_approval gate — HTTP contract (shadow
     stubCore(ctx.adapter, 'launchRun', (opts: LaunchOptions) => {
       launched.push(opts);
       return Promise.resolve(opts.sessionId);
+    });
+    registered = [];
+    stubCore(ctx.adapter, 'registerWorkflow', (j: string) => {
+      registered.push(j);
+      return Promise.resolve('ok');
     });
     stubCore(ctx.adapter, 'confirmGate', (...args: unknown[]) => {
       gated.push(args);
@@ -185,6 +193,56 @@ describe('POST /runs {plan} and the plan_approval gate — HTTP contract (shadow
     });
   });
 
+  it('a delivering PRESET launch hands the engine its deliver step and composes no per-run def', async () => {
+    await withCapability(ctx.adapter, true, async () => {
+      const res = await fetch(
+        `${ctx.baseUrl}/api/v1/runs`,
+        json({ problem: 'ship SSO', clisJson: SEATS, workflow: 'feature', deliver: 'pr' }),
+      );
+      expect(res.status, await res.clone().text()).toBe(201);
+      const opts = launched[0] as LaunchOptions & { deliverStepJson?: string; planJson?: string };
+      // The preset itself is launched — the engine floor-fills and gates it — never feature-deliver-<run>.
+      expect(opts.workflow).toBe('feature');
+      expect(opts.planJson).toBeUndefined();
+      expect(registered).toEqual([]);
+      const step = JSON.parse(opts.deliverStepJson ?? 'null') as Record<string, unknown>;
+      expect(step['catalog']).toBe('deliver');
+      expect(step['id']).toBe(DELIVER_PHASE_ID);
+      expect(step['validator_pin']).toBe(EVIDENCE_FLOOR_PIN);
+      expect((step['executor'] as { type: string; cmd: string[] }).type).toBe('tool');
+      expect((step['executor'] as { cmd: string[] }).cmd[0]).toBe('bash');
+      expect(step['depends_on']).toBeUndefined();
+    });
+  });
+
+  it('a delivering preset on an addon without the gate is a 501 — no composed fallback', async () => {
+    await withCapability(ctx.adapter, false, async () => {
+      const res = await fetch(
+        `${ctx.baseUrl}/api/v1/runs`,
+        json({ problem: 'ship SSO', clisJson: SEATS, workflow: 'feature', deliver: 'pr' }),
+      );
+      expect(res.status).toBe(501);
+      expect(launched).toHaveLength(0);
+      expect(registered).toEqual([]);
+    });
+  });
+
+  it('requireDeliverables on a preset launch is refused, never composed past the gate', async () => {
+    await withCapability(ctx.adapter, true, async () => {
+      await expect(
+        ctx.adapter.launchRun({
+          problem: 'p',
+          sessionId: 'r-floor',
+          clisJson: SEATS,
+          workflow: 'feature',
+          requireDeliverables: ['out/report.md'],
+        }),
+      ).rejects.toThrow(/requireDeliverables on a preset launch/);
+      expect(launched).toHaveLength(0);
+      expect(registered).toEqual([]);
+    });
+  });
+
   it('an edited plan on an addon without the gate is a 501, never an unedited approve', async () => {
     await withCapability(ctx.adapter, false, async () => {
       const res = await fetch(
@@ -284,6 +342,56 @@ describe.skipIf(!ENGINE_HAS_PLAN_GATE)('the plan approval gate through the real 
     const res = await fetch(`${ctx.baseUrl}/api/v1/runs/t3-f/gate`, json({ approve: false }));
     expect(res.status).toBe(200);
     expect(((await res.json()) as { status: string }).status).toBe('cancelled');
+  });
+
+  it('the DEFAULT launch — a repo-scoped feature with deliver:"pr", auto mode, no touch — pauses plan_approval before build', async () => {
+    // A real clone of a local bare origin (the worktree base resolution fetches origin).
+    const origin = join(ctx.dir, 'origin.git');
+    const seed = join(ctx.dir, 'seed');
+    const clone = join(ctx.dir, 'clone');
+    const git = (cwd: string, ...args: string[]) =>
+      execFileSync('git', ['-c', 'commit.gpgsign=false', ...args], { cwd, encoding: 'utf8' });
+    execFileSync('git', ['init', '--bare', '-q', '-b', 'main', origin]);
+    execFileSync('git', ['init', '-q', '-b', 'main', seed]);
+    git(seed, 'config', 'user.email', 'seed@test');
+    git(seed, 'config', 'user.name', 'seed');
+    writeFileSync(join(seed, 'README.md'), '# t3\n');
+    git(seed, 'add', '-A');
+    git(seed, 'commit', '-qm', 'base');
+    git(seed, 'remote', 'add', 'origin', origin);
+    git(seed, 'push', '-q', '-u', 'origin', 'main');
+    execFileSync('git', ['clone', '-q', origin, clone]);
+    await ctx.adapter.registerRepo('t3-deliver-ws', clone);
+    const repoId = (await ctx.adapter.listRepos()).find((r) => r.name === 't3-deliver-ws')!.id;
+
+    const res = await fetch(
+      `${ctx.baseUrl}/api/v1/runs`,
+      json({ problem: 'add SSO login', sessionId: 't3-dlv', clisJson: SEATS, workflow: 'feature', repoRef: repoId, deliver: 'pr' }),
+    );
+    expect(res.status, await res.clone().text()).toBe(201);
+    const v = await waitFor('the plan_approval pause', async () => {
+      const view = await viewOf(ctx.adapter, 't3-dlv');
+      return view?.session.status === 'awaiting_human' ? view : undefined;
+    });
+    // The preset, floor-filled at 100 ("no declared scope"), with crew's deliver step last.
+    expect(ids('t3-dlv', v.units)).toEqual([
+      'clarify',
+      'test_plan',
+      'design',
+      'architecture',
+      'build',
+      'adversarial-review',
+      'test',
+      'review',
+      'security_review',
+      'deliver',
+    ]);
+    expect(v.units.every((u) => u.status === 'pending' || u.status === 'distributed')).toBe(true);
+    const open = (await ctx.adapter.interactionRequests('t3-dlv', 'open')) ?? [];
+    expect(open.map((r) => (r as { gate_kind?: string }).gate_kind)).toEqual(['plan_approval']);
+    expect(open[0]?.ord).toBe(1);
+    // No per-run composed def was armed for the launch.
+    expect(ctx.adapter.listWorkflows().map((w) => w.id).filter((id) => id.includes('-deliver-'))).toEqual([]);
   });
 
   it('an understand-only plan scores 0 and is not held in auto mode', async () => {
