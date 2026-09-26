@@ -81,6 +81,24 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
     // TEMP DIAG: a watchdog that dumps what it can WITHOUT the actor while the launch hangs.
     let step = 'fetch POST /runs';
     const t0 = Date.now();
+    // A synchronous tick: if it stops, the JS thread is blocked.
+    const tick = setInterval(() => process.stderr.write(`T8TICK ${sessionId} ${step} ${Date.now() - t0}\n`), 1000);
+    // An off-thread dumper: a worker thread reads the bus file and the state dir every 3 s, so a
+    // blocked main thread still leaves a record.
+    const { Worker } = await import('node:worker_threads');
+    const worker = new Worker(
+      `const { parentPort, workerData } = require('node:worker_threads');
+       const fs = require('node:fs'); const path = require('node:path');
+       const t0 = Date.now();
+       setInterval(() => {
+         let outbox = 'none';
+         try { outbox = fs.readFileSync(path.join(workerData.dir, 'team-outbox.ndjson'), 'utf8').slice(0, 1500); } catch {}
+         let ls = ''; try { ls = fs.readdirSync(workerData.dir).map((f) => f + ':' + fs.statSync(path.join(workerData.dir, f)).size).join(','); } catch (e) { ls = String(e); }
+         process.stderr.write('T8WORKER ' + (Date.now() - t0) + ' ' + ls + ' OUTBOX ' + JSON.stringify(outbox) + '\\n');
+       }, 3000);`,
+      { eval: true, workerData: { dir } },
+    );
+    worker.unref();
     const dog = setInterval(() => {
       void (async () => {
         const { readdirSync, readFileSync, existsSync } = await import('node:fs');
@@ -102,6 +120,8 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
       await launchHeldInner(sessionId, extra, (s) => { step = s; });
     } finally {
       clearInterval(dog);
+      clearInterval(tick);
+      await worker.terminate();
     }
   }
 
@@ -112,6 +132,7 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
     );
     expect(res.status, await res.clone().text()).toBe(201);
     mark('waiting for awaiting_human');
+    process.stderr.write(`T8STEP POST /runs answered ${res.status}\n`);
     try {
       await waitFor('the plan_approval pause', async () =>
         (await viewOf(sessionId))?.session.status === 'awaiting_human' ? true : undefined,
