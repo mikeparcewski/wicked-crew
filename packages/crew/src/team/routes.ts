@@ -19,6 +19,7 @@ import { PlanLaunchUnsupportedError, TeamUnsupportedError } from '../core/adapte
 import { crewBusHandle } from '../core/bus-handle.js';
 import type {
   Actor,
+  SessionStatus,
   CatalogResponse,
   RunTeamResponse,
   RunTeamUnit,
@@ -34,7 +35,16 @@ import { PlanSchema, toLaunchPlan } from '../api/plan-schema.js';
 const V = API_PREFIX;
 
 // Exported for tests/wire-contract.test.ts (the request-direction drift guard).
-export const EditPlanSchema = z.object({ plan: PlanSchema }).strict();
+export const EditPlanSchema = z
+  .object({ plan: PlanSchema, requestId: z.string().min(1).max(128).optional() })
+  .strict();
+
+/** The 501 for a plan edit off a `plan_approval` gate: the engine has no mid-run edit command yet. */
+const MID_RUN_EDIT =
+  "mid-run plan edits need the engine's proposePlan (not in wicked-core-ts yet); today a plan edit " +
+  'answers a plan_approval gate';
+/** The engine's refusal of an edit when the paused run's open gate is not a plan approval. */
+const NO_PLAN_GATE = /no plan_approval gate open/;
 export const PlanPreviewSchema = z
   .object({
     plan: PlanSchema,
@@ -47,16 +57,19 @@ function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/** A run with no team: the "none" transport, nothing to join. */
-function unteamed(runId: string): RunTeamResponse {
+const TERMINAL: ReadonlySet<SessionStatus> = new Set<SessionStatus>(['completed', 'cancelled', 'failed']);
+
+/** A run that is not a team run: no transport at all (not the "none" fallback), nothing to join. */
+function unteamed(runId: string, status: SessionStatus): RunTeamResponse {
   return {
     runId,
-    transport: 'none',
-    reason: 'not a team run',
+    teamed: false,
+    transport: null,
+    reason: null,
     streamFloor: null,
     planRev: null,
     pending: null,
-    ended: false,
+    ended: TERMINAL.has(status),
     units: [],
     rows: [],
   };
@@ -119,7 +132,7 @@ export function joinTeam(view: RunTeamView, rows: TeamRow[]): RunTeamResponse {
       used !== undefined && used.event_type === 'wicked.team.ledger.folded' ? used.payload.ledger : null;
     return { ...u, rows: own, ledger };
   });
-  return { ...view, units, rows: labelled.filter((r) => r.payload.ord === null) };
+  return { ...view, teamed: true, units, rows: labelled.filter((r) => r.payload.ord === null) };
 }
 
 export function registerTeamRoutes(
@@ -139,9 +152,10 @@ export function registerTeamRoutes(
     async (req, reply) => {
       const { id } = req.params;
       try {
-        if ((await findRun(id)) === undefined) return reply.code(404).send({ error: 'Run not found' });
+        const run = await findRun(id);
+        if (run === undefined) return reply.code(404).send({ error: 'Run not found' });
         const view = await adapter.runTeam(id);
-        if (view === null) return unteamed(id);
+        if (view === null) return unteamed(id, run.session.status);
         return joinTeam(view, busRows(adapter.busDbPath, id));
       } catch (err) {
         return reply.code(unsupported(err) ? 501 : 500).send({ error: message(err) });
@@ -156,7 +170,8 @@ export function registerTeamRoutes(
         manifest: {
           requestType: 'EditPlanBody',
           responseType: '{ status: SessionStatus }',
-          // 409: not awaiting a gate, or the engine refused (no plan_approval gate open).
+          // 501: off a plan_approval gate (a mid-run edit needs proposePlan) or no plan gate in the
+          // addon; 409: the engine refused the edit.
           statusCodes: [200, 400, 404, 409, 501],
         },
       },
@@ -170,17 +185,20 @@ export function registerTeamRoutes(
       const run = await findRun(id);
       if (run === undefined) return reply.code(404).send({ error: 'Run not found' });
       if (run.session.status !== 'awaiting_human') {
-        return reply
-          .code(409)
-          .send({ error: `Run is not at a plan_approval gate (status: ${run.session.status})` });
+        return reply.code(501).send({ error: `${MID_RUN_EDIT} (status: ${run.session.status})` });
       }
       try {
         // The edit IS the gate answer (T3): the engine proposes it (`plan.proposed{by:"human",
         // kind:"edit"}`), floor-fills and accepts it, or refuses it and re-opens the gate.
         const status = await adapter.confirmGate(id, true, undefined, 'edit_plan', undefined, toLaunchPlan(parsed.data.plan));
-        audit.record('plan.edited', actorOf(req), { runId: id, detail: { planSteps: parsed.data.plan.steps.length, status } });
+        // WHO answered the gate, like every other gate answer (POST /runs/:id/gate).
+        audit.record('gate.decided', actorOf(req), {
+          runId: id,
+          detail: { approve: true, action: 'edit_plan', planSteps: parsed.data.plan.steps.length, status },
+        });
         return { status };
       } catch (err) {
+        if (NO_PLAN_GATE.test(message(err))) return reply.code(501).send({ error: `${MID_RUN_EDIT}: ${message(err)}` });
         return reply.code(unsupported(err) ? 501 : 409).send({ error: message(err) });
       }
     },

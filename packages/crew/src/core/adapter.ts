@@ -2186,7 +2186,10 @@ export class CoreAdapter {
     return JSON.parse(await fn.call(this.core)) as CatalogEntry[];
   }
 
-  /** The engine's floor fill of a draft plan, as a launch in `projectId` would compute it. */
+  /** The engine's floor fill of a draft plan, as a launch in `projectId` would compute it.
+   *  TODO(DES-TEAMING-002 T8 follow-up): the `PlanPreviewResponse` cast is unchecked. The engine's
+   *  `plan::FloorFilled` carries `floor` / `def` / `floor_override`, not `added_by_floor`; pin this
+   *  shape against the core binding (`Core.previewPlan`) when it lands. */
   async previewPlan(plan: LaunchPlan, projectId?: string, humanConfirm?: string): Promise<PlanPreviewResponse> {
     const fn = this.requireTeam(this.core.previewPlan, 'Previewing a plan', 'previewPlan');
     return JSON.parse(

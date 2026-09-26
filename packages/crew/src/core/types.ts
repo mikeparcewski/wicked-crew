@@ -25,7 +25,8 @@ import type { RunTeamResponse, RunTeamUnit, SystemSettings } from 'wicked-crew-a
 
 /** `Core.runTeam`'s JSON (DES-TEAMING-002 P1): the persisted half of `GET /runs/:id/team`, before
  *  crew joins the bus rows and the folded ledger onto it. */
-export type RunTeamView = Omit<RunTeamResponse, 'units' | 'rows'> & {
+export type RunTeamView = Omit<RunTeamResponse, 'units' | 'rows' | 'teamed' | 'transport'> & {
+  transport: NonNullable<RunTeamResponse['transport']>;
   units: Array<Omit<RunTeamUnit, 'rows' | 'ledger'>>;
 };
 

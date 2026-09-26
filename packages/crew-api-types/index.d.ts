@@ -6372,33 +6372,46 @@ export interface RunTeamUnit {
 }
 
 /**
- * `GET /runs/:id/team`. The run's team transport and per-unit team state. An un-teamed run
- * answers `transport: "none"` with `units: []`.
+ * `GET /runs/:id/team`. The run's team transport and per-unit team state. A run that is not a team
+ * run (free text, a registered def: bug, chat, onboarding, …) answers `teamed: false`,
+ * `transport: null` and `units: []` — nothing to render, and no outage.
  */
 export interface RunTeamResponse {
   runId: string;
+  /** Whether the run is a team run at all. `false` ⇒ `transport` and `reason` are `null`. */
+  teamed: boolean;
   /**
-   * `"bus"`; `"none"` (un-teamed: render the "team transport unavailable" banner with `reason`);
-   * `"pending"` (not decided yet); `"unavailable"` (teamed, but this daemon has no bus: the run is
-   * paused `team_transport` until the operator answers it).
+   * For a team run: `"bus"`; `"none"` (the teamed run fell back to no team transport: render the
+   * "team transport unavailable" banner with `reason`); `"pending"` (not decided yet);
+   * `"unavailable"` (this daemon has no bus: the run is paused `team_transport` until the operator
+   * answers it). `null` for a run that is not a team run.
    */
-  transport: 'bus' | 'none' | 'pending' | 'unavailable' | (string & {});
+  transport: 'bus' | 'none' | 'pending' | 'unavailable' | (string & {}) | null;
   reason: string | null;
   /** The first bus event id of the run's stream. */
   streamFloor: number | null;
   planRev: number | null;
   /** The required fact the run waits on (its event type), if any. */
   pending: string | null;
-  /** The run is terminal and its end is on record. */
+  /** The run is terminal and its end is on record (a run that is not a team run: its status is terminal). */
   ended: boolean;
   units: RunTeamUnit[];
   /** The run-level rows (`payload.ord` null: `path.*`, `plan.*`), ordered by `event_id`. */
   rows: TeamRow[];
 }
 
-/** `POST /runs/:id/plan` body: a plan edit at a `plan_approval` gate. */
+/**
+ * `POST /runs/:id/plan` body: a plan edit. Today the edit answers a `plan_approval` gate; a run off
+ * that gate answers 501 (a mid-run edit needs the engine's `proposePlan`, not in core-ts yet).
+ */
 export interface EditPlanBody {
   plan: LaunchPlan;
+  /**
+   * The caller's id for this edit (DES-002 §6.1: the `plan.proposed` source of a mid-run human
+   * edit), so a retried POST proposes once. Accepted now; used once the engine's `proposePlan`
+   * lands (a gate edit is keyed on its gate id).
+   */
+  requestId?: string;
 }
 
 /** `POST /team/outbox/replay`: the engine's replay of `<state home>/team-outbox.ndjson`. */
