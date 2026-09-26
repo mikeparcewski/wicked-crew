@@ -13,7 +13,6 @@ import type { Verdict } from 'wicked-ledger';
 import {
   acceptancePhaseIds,
   resolveAcceptanceGate,
-  resolveRunWorkflow,
   runWindowFromEvents,
   FINAL_EVENT_TYPES,
   REOPEN_EVENT_TYPES,
@@ -22,7 +21,8 @@ import {
 } from '../src/qe/acceptance.js';
 import type { QeAcceptanceState } from '../src/qe/ledger.js';
 import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
-import type { RecordedEvent, SessionView, WorkflowDef } from '../src/core/types.js';
+import type { RecordedEvent, RunIdentity, SessionView, WorkflowDef } from '../src/core/types.js';
+import { runWorkflowDef } from '../src/core/run-identity.js';
 
 /** A minimal ledger state carrying one verdict. */
 function stateWith(verdict: string, reason: string | null = null): QeAcceptanceState {
@@ -217,7 +217,7 @@ describe('resolveAcceptanceGate', () => {
   });
 });
 
-describe('resolveRunWorkflow', () => {
+describe('runWorkflowDef — the def registered under the run\'s recorded name (seam X2)', () => {
   const USER_WF: WorkflowDef = {
     id: 'qe-accept',
     phases: [
@@ -226,62 +226,46 @@ describe('resolveRunWorkflow', () => {
   };
   const registry = [...BUILTIN_WORKFLOWS, USER_WF];
 
-  function view(workflowId: string, unitPhaseIds: string[]): SessionView {
+  function view(workflowId: string, unitPhaseIds: string[], identity?: RunIdentity): SessionView {
     return {
-      session: { id: 'run-1', workflow_id: workflowId },
+      session: { id: 'run-1', workflow_id: workflowId, ...(identity !== undefined ? { run_identity: identity } : {}) },
       units: unitPhaseIds.map((p, i) => ({ id: `run-1:${p}`, ord: i + 1 })),
     } as unknown as SessionView;
   }
-
-  it('resolves a patched-back built-in id directly', () => {
-    const wf = resolveRunWorkflow(view('feature', []), registry);
-    expect(wf?.id).toBe('feature');
+  const named = (kind: RunIdentity['kind'], name: string | null): RunIdentity => ({
+    kind,
+    name,
+    user_plan: kind === 'user_plan',
+    system: false,
   });
 
-  it('resolves a user workflow from the unit phase sequence when the id is an instance id', () => {
-    // sessionsDetail() only patches BUILT-IN ids back; a user workflow's run
-    // still carries `wf-<uuid>` — the requirement must still resolve.
-    const wf = resolveRunWorkflow(view('wf-abc123', ['accept']), registry);
+  it('resolves a recorded built-in name directly', () => {
+    expect(runWorkflowDef(view('feature', []), registry)?.id).toBe('feature');
+  });
+
+  it("resolves a user workflow's instance-id run from the identity the adapter resolved", () => {
+    const wf = runWorkflowDef(view('wf-abc123', ['accept'], named('workflow', 'qe-accept')), registry);
     expect(wf?.id).toBe('qe-accept');
   });
 
-  it('resolves nothing for a free-text run (planned units are u1, u2, …)', () => {
-    expect(resolveRunWorkflow(view('wf-abc123', ['u1', 'u2']), registry)).toBeNull();
+  it('resolves a preset run to the def carrying its name, whatever units the floor added', () => {
+    const units = ['clarify', 'test_plan', 'design', 'build', 'adversarial-review', 'test', 'review'];
+    expect(runWorkflowDef(view('wf-abc123', units, named('preset', 'feature')), registry)?.id).toBe('feature');
   });
 
-  it('resolves nothing for an unknown id that is not an instance id', () => {
-    expect(resolveRunWorkflow(view('not-registered', ['accept']), registry)).toBeNull();
+  it('a composed per-run delivery def reads as its base', () => {
+    expect(runWorkflowDef(view('qe-accept-deliver-run-1', ['accept', 'deliver']), registry)?.id).toBe('qe-accept');
   });
 
-  it('resolves a DELIVERED run — the per-run deliver phase is stripped before matching (crew#393)', () => {
-    // Default-on delivery appends a `deliver` unit the definition never had; the acceptance
-    // requirement must not vanish because the run also opened its PR.
-    const wf = resolveRunWorkflow(view('wf-abc123', ['accept', 'deliver']), registry);
-    expect(wf?.id).toBe('qe-accept');
+  it('resolves nothing for a user plan, a free-text run, or a run the daemon has no record of', () => {
+    expect(runWorkflowDef(view('wf-abc123', ['build'], named('user_plan', null)), registry)).toBeNull();
+    expect(runWorkflowDef(view('wf-abc123', ['u1', 'u2'], named('free_text', null)), registry)).toBeNull();
+    // No record: the unit sequence (which matches `qe-accept`) is NOT read.
+    expect(runWorkflowDef(view('wf-abc123', ['accept']), registry)).toBeNull();
   });
 
-  it('strips the deliverable floor + deliver pair (composition order) and still matches', () => {
-    const wf = resolveRunWorkflow(
-      view('wf-abc123', ['accept', 'verify-deliverables', 'deliver']),
-      registry,
-    );
-    expect(wf?.id).toBe('qe-accept');
-  });
-
-  it('a def carrying its OWN deliver phase wins the exact match — stripping never fires', () => {
-    const OWN_DELIVER: WorkflowDef = {
-      id: 'own-deliver',
-      phases: [
-        { id: 'accept', kind: 'test', gate_type: 'execution', gate: 'auto', executes_code: false, verified_evidence: true, required_deliverables: [], depends_on: [], role: 'evaluator', skill_ref: null, allowed_skills: [], validator_pin: null },
-        { id: 'deliver', kind: 'build', gate_type: null, gate: 'auto', executes_code: false, verified_evidence: true, required_deliverables: [], depends_on: ['accept'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-      ],
-    };
-    const wf = resolveRunWorkflow(view('wf-abc123', ['accept', 'deliver']), [...registry, OWN_DELIVER]);
-    expect(wf?.id).toBe('own-deliver');
-  });
-
-  it('a bare deliver-only sequence resolves nothing rather than a phantom empty def', () => {
-    expect(resolveRunWorkflow(view('wf-abc123', ['deliver']), registry)).toBeNull();
+  it('resolves nothing for a name the registry does not hold', () => {
+    expect(runWorkflowDef(view('not-registered', ['accept']), registry)).toBeNull();
   });
 });
 

@@ -113,7 +113,6 @@ export const INTERACTIVE_CHAT_WORKFLOW = 'interactive-chat';
  */
 export const INTERACTIVE_CHAT_WORKFLOW_DEF: WorkflowDef = {
   id: INTERACTIVE_CHAT_WORKFLOW,
-  is_system: true,
   phases: [
     {
       id: 'understand',

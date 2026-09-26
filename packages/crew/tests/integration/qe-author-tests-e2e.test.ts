@@ -301,12 +301,19 @@ beforeAll(async () => {
     })),
   );
 
-  // The two stand-in variants, registered through the API (the engine validates them as authored).
-  const green = await postJson('/api/v1/workflows', standInDef('qe-author-tests-e2e-green', 'console.log("launch spec ok");'));
-  expect(green.status).toBe(201);
-  const red = await postJson('/api/v1/workflows', standInDef('qe-author-tests-e2e-red', 'console.log("launch spec about to fail"); process.exit(1);'));
-  expect(red.status).toBe(201);
 }, 120_000);
+
+/**
+ * Arm a stand-in UNDER THE SHIPPED ID, through the API (the engine validates it as authored). The
+ * run must BE a `qe-author-tests` run — the daemon classifies a run by the name the engine recorded
+ * for its launch (seam X2), never by its phase sequence, so a stand-in under another id is, rightly,
+ * not a test-authoring run and registers no test set. The SHIPPED case re-arms the shipped def.
+ */
+async function armQeAuthor(def: WorkflowDef): Promise<void> {
+  const res = await postJson('/api/v1/workflows', def);
+  expect(res.status, JSON.stringify(res.body)).toBe(201);
+  expect(adapter.getWorkflow(QE_AUTHOR_TESTS_WORKFLOW)?.phases).toEqual(def.phases);
+}
 
 afterAll(async () => {
   try {
@@ -324,10 +331,11 @@ afterAll(async () => {
 describe('wave 6 end to end — the governed test-authoring journey', () => {
   it('GREEN: verify RUNS the produced e2e under the repo harness, the ENGINE deliver phase opens the PR, the test set is registered, the diff survives completion', async () => {
     process.env['GH_STUB_OUT'] = 'https://github.com/o/r/pull/601';
+    await armQeAuthor(standInDef(QE_AUTHOR_TESTS_WORKFLOW, 'console.log("launch spec ok");'));
     const launch = await postJson('/api/v1/runs', {
       problem: 'e2e: functional tests for the launch flow',
       clisJson: SEATS,
-      workflow: 'qe-author-tests-e2e-green',
+      workflow: QE_AUTHOR_TESTS_WORKFLOW,
       repoRef: repoId,
       humanConfirm: 'none',
       // core ≥ 11d3b66 (core-ts 0.7.24) gates the deliver phase by default (F-E2E-030); this rig's intent is a
@@ -433,10 +441,11 @@ describe('wave 6 end to end — the governed test-authoring journey', () => {
 
   it('RED (R4-r2 floor): a produced e2e that FAILS under the harness fails the run — no PR, no branch, a red test set', async () => {
     process.env['GH_STUB_OUT'] = 'https://github.com/o/r/pull/602';
+    await armQeAuthor(standInDef(QE_AUTHOR_TESTS_WORKFLOW, 'console.log("launch spec about to fail"); process.exit(1);'));
     const launch = await postJson('/api/v1/runs', {
       problem: 'e2e: tests that do not pass must not ship',
       clisJson: SEATS,
-      workflow: 'qe-author-tests-e2e-red',
+      workflow: QE_AUTHOR_TESTS_WORKFLOW,
       repoRef: repoId,
       humanConfirm: 'none',
       // core ≥ 11d3b66 (core-ts 0.7.24) gates the deliver phase by default (F-E2E-030); this rig's intent is a
@@ -468,6 +477,7 @@ describe('wave 6 end to end — the governed test-authoring journey', () => {
 
   it('SHIPPED DEF via POST /testing/author: a run whose author produced nothing is refused BEFORE deliver — whichever rung refuses (skill routing, the author floor, verify’s produced=0) — and never delivers', async () => {
     process.env['GH_STUB_OUT'] = 'https://github.com/o/r/pull/603';
+    await armQeAuthor(QE_AUTHOR_TESTS_WORKFLOW_DEF);
     const launch = await postJson('/api/v1/testing/author', {
       problem: 'e2e: functional tests for the launch flow',
       repoRefs: [repoId],

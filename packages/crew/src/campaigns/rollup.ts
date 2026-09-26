@@ -46,7 +46,7 @@ export interface RollupDeps {
   /** ERROR-level channel — only a NON-probe derivation throw (a defect) is reported here; the
    *  expected probe-unavailable degrade stays quiet (the probe layer already said it). */
   logDefect?: (msg: string) => void;
-  /** Def-awareness (crew#481 / D-14) — the SAME `runCanDeliver(view, resolveRunWorkflow(…))` the
+  /** Def-awareness (crew#481 / D-14) — the SAME `runCanDeliver(view, runWorkflowDef(…))` the
    *  run DTOs' delivery cache applies, so a completed `capture-learnings` node reads `'none'` here
    *  AND on `GET /runs` (the split-brain this surface's charter forbids). Absent ⇒ every completed
    *  repo-scoped node is a candidate — today's behaviour for a directly-driven route set. */

@@ -588,10 +588,9 @@ export function baseWorkflowId(workflowId: string, runId: string): string {
  * The facts from a persisted run view — what the daemon answers on `GET /runs/:id/deliver-text`.
  * The deliver phase itself (running while it asks) is listed as `this PR`.
  *
- * `resolved.workflowId` is the DEFINITION the route resolved for the run (`resolveRunWorkflow`
- * over the full registry): the engine stores an instance id (`wf-<uuid>`) that `sessionsDetail()`
- * patches back to a name for BUILT-INS only, so a user-registered workflow would otherwise read as
- * `workflow wf-…` here. Absent, the view's id is used (with the per-run composition suffix cut).
+ * `resolved.workflowId` is the run's preset or workflow NAME the route resolved from the engine's
+ * record (`runIdentityOf`, seam X2) — `null` for a user plan or a free-text run, which names no
+ * workflow. Absent (`undefined`), the view's id is used (with the per-run composition suffix cut).
  */
 export function factsFromRun(
   view: SessionView,
@@ -604,7 +603,9 @@ export function factsFromRun(
   return {
     runId: s.id,
     intent: s.problem ?? '',
-    workflowId: resolved.workflowId ?? baseWorkflowId(s.workflow_id, s.id),
+    // An explicit `null` is the resolver's answer (a user plan, free text): no workflow line, never
+    // the engine's synthetic `wf-<run>` id.
+    workflowId: resolved.workflowId !== undefined ? resolved.workflowId : baseWorkflowId(s.workflow_id, s.id),
     repoRef: s.repo_ref,
     runUrl,
     source: 'run',

@@ -6,7 +6,6 @@
 
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
 import {
   extractProposedRules,
   isSteeringAuthorRun,
@@ -149,18 +148,24 @@ describe('isSteeringAuthorRun', () => {
       units: phaseIds.map((p, i) => ({ id: `r1:${p}`, ord: i + 1 })),
     }) as unknown as SessionView;
 
-  it('matches by the patched definition name', () => {
-    expect(isSteeringAuthorRun(view('steering-author', ['analyze', 'propose']), BUILTIN_WORKFLOWS)).toBe(true);
+  it('matches by the recorded name', () => {
+    expect(isSteeringAuthorRun(view('steering-author', ['analyze', 'propose']))).toBe(true);
   });
 
-  it("matches a core instance id ('wf-<uuid>') by exact phase sequence", () => {
-    expect(isSteeringAuthorRun(view('wf-abc123', ['analyze', 'propose']), BUILTIN_WORKFLOWS)).toBe(true);
+  it('matches the name the adapter resolved from the engine record (a preset run: seam X2)', () => {
+    const v = view('wf-abc123', ['analyze', 'propose']);
+    v.session.run_identity = { kind: 'preset', name: 'steering-author', user_plan: false, system: true };
+    expect(isSteeringAuthorRun(v)).toBe(true);
+  });
+
+  it("never guesses from a core instance id's phase sequence (seam X2)", () => {
+    expect(isSteeringAuthorRun(view('wf-abc123', ['analyze', 'propose']))).toBe(false);
   });
 
   it('never matches another workflow — the legacy gate path stays untouched', () => {
-    expect(isSteeringAuthorRun(view('feature', ['clarify', 'design']), BUILTIN_WORKFLOWS)).toBe(false);
-    expect(isSteeringAuthorRun(view('wf-abc123', ['gather', 'store']), BUILTIN_WORKFLOWS)).toBe(false);
-    expect(isSteeringAuthorRun(view('wf-abc123', ['u1']), BUILTIN_WORKFLOWS)).toBe(false);
+    expect(isSteeringAuthorRun(view('feature', ['clarify', 'design']))).toBe(false);
+    expect(isSteeringAuthorRun(view('wf-abc123', ['gather', 'store']))).toBe(false);
+    expect(isSteeringAuthorRun(view('wf-abc123', ['u1']))).toBe(false);
   });
 });
 

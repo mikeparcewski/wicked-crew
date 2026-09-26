@@ -25,7 +25,7 @@ import type { AuditLog } from './audit.js';
 import type { AgentSession, SessionView, WorkUnit, WorkflowDef } from '../core/types.js';
 import { execCapped } from '../core/exec.js';
 import { DELIVER_LIFT_CONFLICT_MARKER, DELIVER_PHASE_ID } from '../core/deliver.js';
-import { resolveRunWorkflow } from '../qe/acceptance.js';
+import { runIdentityOf, runWorkflowDef } from '../core/run-identity.js';
 
 /** What `AgentSession.delivery` + `deliverUrl` spell on the wire (api-types 0.18.0, crew#393). */
 export interface DeliveryState {
@@ -66,18 +66,32 @@ export function phaseIdOf(unitId: string): string {
  * completed runs then read `delivery: 'none'` instead of the stranded/vacuous a live worktree used
  * to earn them (the board's "nine runs need you" after onboarding). A code-work run launched with
  * `deliver: 'none'` stays a candidate: its work is on `wicked/<id>`, liftable post hoc.
+ *
+ * A PRESET or USER-PLAN run (seam X2) is judged by what it CONTAINS, never by a def looked up by
+ * name: it could deliver when one of its planned units does code work (`executes_code`, not the
+ * evaluator's — the same rule as {@link isCodeWorkDef}, over the units the engine planned). With
+ * no planned units yet it stays a candidate. `def` is not read for such a run.
  */
 export function runCanDeliver(view: SessionView, def: WorkflowDef | null): boolean {
-  if ((view.units ?? []).some((u) => phaseIdOf(u.id) === DELIVER_PHASE_ID)) return true;
+  const units = view.units ?? [];
+  // A planned `deliver` step: by phase id, or by its catalog id on a preset/user-plan run.
+  if (units.some((u) => phaseIdOf(u.id) === DELIVER_PHASE_ID || u.catalog === DELIVER_PHASE_ID)) {
+    return true;
+  }
+  const kind = view.session !== undefined ? runIdentityOf(view).kind : 'unknown';
+  if (kind === 'preset' || kind === 'user_plan') {
+    return units.length === 0 || units.some((u) => u.executes_code === true && u.role !== 'evaluator');
+  }
   if (def === null) return true;
   return isCodeWorkDef(def);
 }
 
 /**
  * The ONE def-awareness closure the daemon hands its delivery cache and its campaigns rollup —
- * `runCanDeliver` over the run's def resolved through the registry (`resolveRunWorkflow`). Built
- * for a READ path: a run record with no `workflow_id` (a fake adapter's minimal session, an older
- * record), no `units`, or a registry that throws resolves NO def ⇒ `runCanDeliver(view, null)` ⇒
+ * `runCanDeliver` over the def registered under the run's recorded NAME (`runWorkflowDef`, seam
+ * X2: its preset or workflow, never a phase-sequence guess). Built for a READ path: a run with no
+ * name (a user plan, free text, a fake adapter's minimal session, an older record), no `units`, or a
+ * registry that throws resolves NO def ⇒ `runCanDeliver(view, null)` ⇒
  * today's candidacy — never a 500 on `GET /runs` (the auth-required suite's `{ id, status }`
  * sessions are exactly this shape). Absence of an answer is today's label, not an error.
  */
@@ -88,8 +102,7 @@ export function canDeliverResolver(
   return (view) => {
     let def: WorkflowDef | null = null;
     try {
-      def =
-        typeof view.session?.workflow_id === 'string' ? resolveRunWorkflow(view, listWorkflows() ?? []) : null;
+      def = view.session !== undefined ? runWorkflowDef(view, listWorkflows() ?? []) : null;
     } catch (err) {
       // A registry that cannot answer is the ABSENCE of a def, not a verdict: the run keeps today's
       // candidacy (never `none` on an error, never a 500) — and the defect is SAID, never swallowed.

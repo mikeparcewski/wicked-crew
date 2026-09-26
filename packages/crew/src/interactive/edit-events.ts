@@ -97,7 +97,6 @@ export const INTERACTIVE_EDIT_WORKFLOW = 'interactive-edit';
  */
 export const INTERACTIVE_EDIT_WORKFLOW_DEF: WorkflowDef = {
   id: INTERACTIVE_EDIT_WORKFLOW,
-  is_system: true,
   phases: [
     {
       id: 'edit',
