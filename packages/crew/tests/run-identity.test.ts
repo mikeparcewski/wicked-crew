@@ -166,6 +166,29 @@ describe('acceptance and delivery read what the run CONTAINS (seam X2, round 2)'
     expect(acceptanceRequirementOf(view({ workflow_id: 'bug' }), BUILTIN_WORKFLOWS, VERIFIED)).toEqual({ declared: true, phases: ['verify'] });
   });
 
+  it('X1: a run whose PA is still scoping its plan is declared and blocked, and stays a delivery candidate', () => {
+    // wicked-core#633: a creator preset (or a plan with no `touch`) has ONE unit, the read-only
+    // `pa-scope`, until the scope step's boundary decides the plan. Its units say nothing yet.
+    const scoping = view(
+      {
+        workflow_id: 'wf-r1',
+        team_plan: { rev: 1, accepted_rev: 1, preset: 'feature', scope: { plan: { steps: [] }, unbound: true } },
+      },
+      [unit('pa-scope', 1, 'understand', { executes_code: false, role: 'neutral' })],
+    );
+    const req = acceptanceRequirementOf(scoping, BUILTIN_WORKFLOWS, VERIFIED);
+    expect(req.declared).toBe(true);
+    expect(req.failClosed).toMatch(/still being scoped by its PA/);
+    expect(runCanDeliver(scoping, null)).toBe(true);
+    // Once scoped (`scope` gone), the run is read from the units the plan decided.
+    const scoped = view({ workflow_id: 'wf-r1', team_plan: { rev: 2, accepted_rev: 2, preset: 'feature' } }, [
+      unit('pa-scope', 1, 'understand', { executes_code: false, role: 'neutral' }),
+      unit('build', 2, 'build', { executes_code: true, role: 'creator' }),
+      unit('test', 3, 'test', { executes_code: true, role: 'evaluator' }),
+    ]);
+    expect(acceptanceRequirementOf(scoped, BUILTIN_WORKFLOWS, VERIFIED)).toEqual({ declared: true, phases: ['test'] });
+  });
+
   it("delivery candidacy of a plan run is its units' code work, never the def under its name", () => {
     const def = BUILTIN_WORKFLOWS.find((w) => w.id === 'feature')!;
     const prose = view({ workflow_id: 'wf-r1', team_plan: { rev: 1, accepted_rev: 1, preset: 'feature' } }, [
@@ -209,11 +232,15 @@ describe.skipIf(!ENGINE_HAS_PLANS)('run identity through the real engine', () =>
   let app: Awaited<ReturnType<typeof createServer>>;
   let baseUrl: string;
 
+  // A creator preset or a plan with no `touch` is scoped by the run's PA first (wicked-core#633,
+  // X1): until the `pa-scope` unit's boundary decides the plan, `team_plan.scope` is set and
+  // `pa-scope` is the only unit. Wait for the decided plan.
   async function planned(runId: string): Promise<SessionView> {
     const deadline = Date.now() + 20_000;
     while (Date.now() < deadline) {
       const v = (await adapter.sessionsDetail()).find((x) => x.session.id === runId);
-      if (v !== undefined && v.units.length > 0) return v;
+      const decided = v !== undefined && v.session.team_plan?.scope == null && v.units.some((u) => !u.id.endsWith(':pa-scope'));
+      if (decided) return v;
       await new Promise((r) => setTimeout(r, 25));
     }
     throw new Error(`run ${runId} planned no units within 20 s`);
@@ -229,8 +256,10 @@ describe.skipIf(!ENGINE_HAS_PLANS)('run identity through the real engine', () =>
   async function launchPreset(name: string, steps: PresetStep[] = TWO_STEPS): Promise<SessionView> {
     if (name !== 'feature') await adapter.putPreset(name, steps);
     const v = await launch({ workflow: name });
+    // A preset declares no `touch`: its PA scoped it first, so `pa-scope` is unit 1 (X1).
+    expect(v.units[0]?.id).toBe(`${v.session.id}:pa-scope`);
     // The floor added steps the preset never declared, so the unit sequence matches no def.
-    expect(v.units.length).toBeGreaterThan(name === 'feature' ? 6 : steps.length);
+    expect(v.units.length).toBeGreaterThan(1 + (name === 'feature' ? 6 : steps.length));
     return v;
   }
 

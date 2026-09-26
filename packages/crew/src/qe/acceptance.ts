@@ -149,6 +149,12 @@ export function acceptanceRequirementOf(
     }
     case 'preset':
     case 'user_plan': {
+      // X1 (wicked-core#633): while the PA scopes a plan that declared no `touch`, the run's only
+      // unit is the read-only `pa-scope` step — what it will contain is not decided yet, so reading
+      // its units now would declare no requirement (fail OPEN).
+      if (view.session.team_plan?.scope != null) {
+        return closed("the run's plan is still being scoped by its PA, so its steps are not decided yet");
+      }
       const units = [...(view.units ?? [])].sort((a, b) => a.ord - b.ord);
       if (units.length === 0) return closed("the run's plan has no planned steps yet");
       if (units.some((u) => typeof u.catalog !== 'string' || u.catalog === '')) {

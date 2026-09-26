@@ -302,6 +302,14 @@ async function viewOf(adapter: CoreAdapter, runId: string): Promise<SessionView 
 
 const ids = (runId: string, units: WorkUnit[]) => units.map((u) => u.id.slice(runId.length + 1));
 
+// A declared scope keeps the score at LAUNCH (rev 1, the gate at ord 1): a creator plan with no
+// `touch` is scoped by the run's PA first (wicked-core#633, X1). With no repo the graph cannot be
+// read, so this still scores the fail-closed 100 and lands in the 70-100 floor.
+const TOUCH = ['src/auth/sso.ts'];
+
+/** The run's plan state as the engine persists it (`AgentSession.team_plan`). */
+const planState = (v: SessionView) => v.session.team_plan;
+
 describe.skipIf(!ENGINE_HAS_PLAN_GATE)('the plan approval gate through the real engine', () => {
   let ctx: Awaited<ReturnType<typeof boot>>;
 
@@ -326,8 +334,8 @@ describe.skipIf(!ENGINE_HAS_PLAN_GATE)('the plan approval gate through the real 
     });
   }
 
-  it('T2 (g): an auto-mode build plan with no touch pauses plan_approval before build dispatches', async () => {
-    const v = await launch('t3-g', { steps: [{ catalog: 'build' }] });
+  it('T2 (g): an auto-mode build plan (touch declared, no repo) pauses plan_approval before build dispatches', async () => {
+    const v = await launch('t3-g', { steps: [{ catalog: 'build' }], touch: TOUCH });
     // The 70-100 floor around the lone build (no deliver: the run does not deliver).
     expect(ids('t3-g', v.units)).toEqual([
       'test_plan',
@@ -341,10 +349,33 @@ describe.skipIf(!ENGINE_HAS_PLAN_GATE)('the plan approval gate through the real 
     const open = (await ctx.adapter.interactionRequests('t3-g', 'open')) ?? [];
     expect(open.map((r) => (r as { gate_kind?: string }).gate_kind)).toEqual(['plan_approval']);
     expect(open[0]?.ord).toBe(1);
+    expect(planState(v)).toMatchObject({ rev: 1, accepted_rev: 0 });
+  });
+
+  it('X1: a build plan with NO touch is scoped by the PA first — `pa-scope` is unit 1, the scored plan gates at ord 2', async () => {
+    const v = await launch('t3-x1', { steps: [{ catalog: 'build' }] });
+    // Rev 1 was `pa-scope` alone (accepted at launch); its answer scored the plan (no repo and no
+    // RISK line here: fail closed at 100), which is rev 2 — the same 70-100 floor, after `pa-scope`.
+    expect(ids('t3-x1', v.units)).toEqual([
+      'pa-scope',
+      'test_plan',
+      'design',
+      'architecture',
+      'build',
+      'review',
+      'security_review',
+    ]);
+    expect(v.units[0]).toMatchObject({ ord: 1, catalog: 'understand' });
+    expect(v.units.slice(1).every((u) => u.status === 'pending' || u.status === 'distributed')).toBe(true);
+    const open = (await ctx.adapter.interactionRequests('t3-x1', 'open')) ?? [];
+    expect(open.map((r) => (r as { gate_kind?: string }).gate_kind)).toEqual(['plan_approval']);
+    expect(open[0]?.ord).toBe(2);
+    expect(planState(v)).toMatchObject({ rev: 2, accepted_rev: 1 });
+    expect(planState(v)?.scope).toBeUndefined();
   });
 
   it('approve with an edited plan re-plans onto rev 2 and releases its first unit', async () => {
-    await launch('t3-e', { steps: [{ catalog: 'build' }] });
+    await launch('t3-e', { steps: [{ catalog: 'build' }], touch: TOUCH });
     const res = await fetch(
       `${ctx.baseUrl}/api/v1/runs/t3-e/gate`,
       json({ approve: true, plan: { steps: [{ catalog: 'build', id: 'make' }, { catalog: 'test', id: 'prove' }] } }),
@@ -366,13 +397,13 @@ describe.skipIf(!ENGINE_HAS_PLAN_GATE)('the plan approval gate through the real 
   });
 
   it('reject cancels', async () => {
-    await launch('t3-f', { steps: [{ catalog: 'build' }] });
+    await launch('t3-f', { steps: [{ catalog: 'build' }], touch: TOUCH });
     const res = await fetch(`${ctx.baseUrl}/api/v1/runs/t3-f/gate`, json({ approve: false }));
     expect(res.status).toBe(200);
     expect(((await res.json()) as { status: string }).status).toBe('cancelled');
   });
 
-  it('the DEFAULT launch — a repo-scoped feature with deliver:"pr", auto mode, no touch — pauses plan_approval before build', async () => {
+  it('the DEFAULT launch — a repo-scoped feature with deliver:"pr", auto mode, no touch — is PA-scoped, then pauses plan_approval before build', async () => {
     // A real clone of a local bare origin (the worktree base resolution fetches origin).
     const origin = join(ctx.dir, 'origin.git');
     const seed = join(ctx.dir, 'seed');
@@ -401,8 +432,11 @@ describe.skipIf(!ENGINE_HAS_PLAN_GATE)('the plan approval gate through the real 
       const view = await viewOf(ctx.adapter, 't3-dlv');
       return view?.session.status === 'awaiting_human' ? view : undefined;
     });
-    // The preset, floor-filled at 100 ("no declared scope"), with crew's deliver step last.
+    // X1: a preset declares no `touch`, so the PA scopes it first (`pa-scope`, rev 1). Its answer
+    // scores the preset — no SCOPE line from this rig's seats: fail closed at 100 — and the scored
+    // plan (rev 2) is floor-filled with crew's deliver step last, gated at ord 2.
     expect(ids('t3-dlv', v.units)).toEqual([
+      'pa-scope',
       'clarify',
       'test_plan',
       'design',
@@ -414,10 +448,11 @@ describe.skipIf(!ENGINE_HAS_PLAN_GATE)('the plan approval gate through the real 
       'security_review',
       'deliver',
     ]);
-    expect(v.units.every((u) => u.status === 'pending' || u.status === 'distributed')).toBe(true);
+    expect(v.units.slice(1).every((u) => u.status === 'pending' || u.status === 'distributed')).toBe(true);
     const open = (await ctx.adapter.interactionRequests('t3-dlv', 'open')) ?? [];
     expect(open.map((r) => (r as { gate_kind?: string }).gate_kind)).toEqual(['plan_approval']);
-    expect(open[0]?.ord).toBe(1);
+    expect(open[0]?.ord).toBe(2);
+    expect(planState(v)).toMatchObject({ rev: 2, accepted_rev: 1, preset: 'feature' });
     // No per-run composed def was armed for the launch.
     expect(ctx.adapter.listWorkflows().map((w) => w.id).filter((id) => id.includes('-deliver-'))).toEqual([]);
   });

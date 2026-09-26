@@ -197,11 +197,17 @@ const ENGINE_HAS_PRESETS = probeAdapter.presetsSupported();
 probeAdapter.close();
 removeScratch(probe);
 
+/**
+ * The run's units once its plan is decided. A creator preset declares no `touch`, so on an engine
+ * with wicked-core#633 (X1) the run's PA scopes it first: until the `pa-scope` unit's boundary
+ * decides the plan, `team_plan.scope` is set and `pa-scope` is the only unit.
+ */
 async function unitsOf(adapter: CoreAdapter, runId: string): Promise<WorkUnit[]> {
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
     const view = (await adapter.sessionsDetail()).find((v) => v.session.id === runId);
-    if (view && view.units.length > 0) return view.units;
+    const scoping = view?.session.team_plan?.scope != null;
+    if (view && !scoping && view.units.some((u) => !u.id.endsWith(':pa-scope'))) return view.units;
     await new Promise((r) => setTimeout(r, 25));
   }
   throw new Error(`run ${runId} planned no units within 10 s`);
@@ -237,12 +243,14 @@ describe.skipIf(!ENGINE_HAS_PRESETS)('preset launch through the real engine', ()
     expect(launch.status, await launch.clone().text()).toBe(201);
     const { runId } = (await launch.json()) as { runId: string };
     // DES-TEAMING-002 T3: an engine with the plan approval gate puts a preset launch through
-    // the plan pipeline — a preset declares no `touch`, so its creator plan scores 100 ("no
-    // declared scope") and floor fill inserts the 70-100 phases it lacks; an older engine
-    // launches the selection as authored.
+    // the plan pipeline. A preset declares no `touch`, so (wicked-core#633, X1) the run's PA scopes
+    // it first — `pa-scope` is unit 1 — and its answer scores the plan: this rig's seats give no
+    // RISK line, so it fails closed at 100 and floor fill inserts the 70-100 phases it lacks. An
+    // older engine launches the selection as authored.
     expect(shape(runId, await unitsOf(ctx.adapter, runId))).toEqual(
       engineSupportsPlanLaunch()
         ? [
+            ['pa-scope', 'recon', 'neutral'],
             ['scope', 'recon', 'neutral'],
             ['test_plan', 'test', 'neutral'],
             ['design', 'recon', 'neutral'],

@@ -132,7 +132,16 @@ describe.skipIf(!ENGINE_HAS_TEAM)('crew seams beside the real engine on one bus 
       Array.from({ length: LAUNCHES }, async (_, i) => {
         const launch = fetch(
           `${baseUrl}/api/v1/runs`,
-          json({ problem: `bus 679 #${i}`, sessionId: `b679-${i}`, clisJson: SEATS, projectId, plan: { steps: [{ catalog: 'build' }] } }),
+          json({
+            problem: `bus 679 #${i}`,
+            sessionId: `b679-${i}`,
+            clisJson: SEATS,
+            projectId,
+            // A declared scope gates at launch; a plan with no `touch` would be scoped by the PA
+            // first (wicked-core#633, X1), which on this supervisor-less teamed rig waits the
+            // engine's 30 s gate floor before its plan gate opens. This test is about the bus.
+            plan: { steps: [{ catalog: 'build' }], touch: ['src/bus-679.ts'] },
+          }),
         );
         for (let k = 0; k < EMITS_PER_LAUNCH; k++) {
           const res = await fetch(
