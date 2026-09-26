@@ -119,6 +119,8 @@ import {
   workerToolCallDeniedLine,
 } from './council-outcome.js';
 import { busSubscriberErrorReporter } from './bus-subscriber-errors.js';
+import { openCrewBus, tapBus } from '../core/bus-tap.js';
+import { emitOnBus } from '../core/bus-writer.js';
 
 // ── Vocabulary constants (interactive's, verbatim — src/service/events.js is the truth) ──────
 
@@ -151,13 +153,6 @@ export const RECORDER_ERROR_SOURCE = 'recorder';
 export const INTERACTIVE_DEMO_BUS_FILTER = `${DOC_CREATED}@${INTERACTIVE_DOMAIN}`;
 export const INTERACTIVE_DEMO_FEEDBACK_BUS_FILTER = `${FEEDBACK_PROCESSED}@${INTERACTIVE_DOMAIN}`;
 export const INTERACTIVE_DEMO_RECORDER_BUS_FILTER = `${STATUS_POSTED}@${INTERACTIVE_DOMAIN}`;
-
-/** Dedicated durable-cursor identities — NOT the draft/edit/chat seams', so every interactive
- *  seam advances an independent cursor and stopping one never strands another. The two demo
- *  subscriptions get their own cursors too: they filter different types. */
-export const INTERACTIVE_DEMO_BUS_PLUGIN = 'wicked-crew-interactive-demo';
-export const INTERACTIVE_DEMO_FEEDBACK_BUS_PLUGIN = 'wicked-crew-interactive-demo-feedback';
-export const INTERACTIVE_DEMO_RECORDER_BUS_PLUGIN = 'wicked-crew-interactive-demo-recorder';
 
 /** The one file the whole demo pipeline pivots on (interactive demo.js `DEMO_SPEC`):
  *  `recordDemo` refuses to record until `<docDir>/demo.spec.mjs` exists. */
@@ -666,7 +661,7 @@ function rosterOf(adapter: CoreAdapter, roster?: () => unknown[]): unknown[] {
 }
 
 /**
- * Arm the seam: register the demo workflows, open durable subscriptions on
+ * Arm the seam: register the demo workflows, tap the bus for
  * `wicked.interactive.doc.created` (kind:demo) and `wicked.interactive.feedback.processed`
  * (demo-kind docs), and answer each with a governed run that authors/installs
  * `demo.spec.mjs` and ends in `wicked.interactive.demo.requested` — the model-free service
@@ -682,23 +677,12 @@ export async function startInteractiveDemoSubscriber(
 ): Promise<InteractiveDemoSubscription | null> {
   const log = opts.log ?? ((m: string) => console.error(m));
 
-  let bus: typeof import('wicked-bus');
+  // crew#679: this seam reads the bus through a read-only tap on crew's long-lived handle and
+  // writes through the one bus writer — never a write on the engine's bus file through crew's
+  // own SQLite. Opened here so an unopenable bus disables the seam before anything is armed.
+  let busDbPath: string;
   try {
-    bus = await import('wicked-bus');
-  } catch (err) {
-    log(
-      `[interactive-demo] wicked-bus is not importable — governed demo authoring disabled: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    );
-    return null;
-  }
-
-  let db: import('wicked-bus').BusDb;
-  let config: Record<string, unknown>;
-  try {
-    config = bus.loadConfig(opts.dbPath !== undefined ? { db_path: opts.dbPath } : {});
-    db = bus.openDb(opts.dbPath !== undefined ? { db_path: opts.dbPath } : {});
+    busDbPath = openCrewBus(opts.dbPath);
   } catch (err) {
     log(
       `[interactive-demo] could not open the bus db${
@@ -759,13 +743,13 @@ export async function startInteractiveDemoSubscriber(
   /** Emit onto interactive's vocabulary as the `wi-crew` producer. Never throws into the
    *  caller: narration/announce failures are logged — a lost status line must not kill the
    *  subscription, and a duplicate demo.requested (WB-002) is the idempotency key WORKING. */
-  function emitInteractive(
+  async function emitInteractive(
     type: string,
     payload: Record<string, unknown>,
     idempotencyKey?: string,
-  ): boolean {
+  ): Promise<boolean> {
     try {
-      bus.emit(db, config, {
+      await emitOnBus(busDbPath, {
         event_type: type,
         // Subdomains per interactive's events.js table: demo.requested rides `demo`,
         // status.posted rides `status`.
@@ -791,7 +775,7 @@ export async function startInteractiveDemoSubscriber(
 
   /** Every `status.posted` this seam emits is typed as the published frame's payload (codex on
    *  crew#506: the wire type at the real boundary, not a detached alias) — `emitInteractive` adds `ts`. */
-  function emitStatus(payload: SeamStatusPayload): boolean {
+  function emitStatus(payload: SeamStatusPayload): Promise<boolean> {
     return emitInteractive(STATUS_POSTED, { ...payload });
   }
 
@@ -954,7 +938,10 @@ export async function startInteractiveDemoSubscriber(
 
     if (event.type === 'sessionCompleted') {
       endFlight(runId);
-      finalize(flight, runId);
+      // The announce awaits the bus writer; a throw is logged, as a synchronous one was.
+      finalize(flight, runId).catch((err: unknown) =>
+        log(`[interactive-demo] finalizing run ${runId} failed: ${err instanceof Error ? err.message : String(err)}`),
+      );
       return;
     }
 
@@ -990,7 +977,7 @@ export async function startInteractiveDemoSubscriber(
    * failure row, and NO demo.requested — the doc keeps its current state instead of the
    * service throwing "no demo.spec.mjs authored yet" at a request crew knew was hollow.
    */
-  function finalize(flight: InFlight, runId: string): void {
+  async function finalize(flight: InFlight, runId: string): Promise<void> {
     // The run is terminal — its app-source snapshots are done serving reads, on every branch below.
     removeSnapshots(flight.snapshotDirs);
     const { documentId, projectId, outPath, key } = flight;
@@ -1053,7 +1040,7 @@ export async function startInteractiveDemoSubscriber(
       flight.leg === 'spec'
         ? demoIdempotencyKey(documentId)
         : demoReauthorIdempotencyKey(documentId, flight.version ?? 0);
-    const emitted = emitInteractive(DEMO_REQUESTED, docScope(documentId, projectId), idemKey);
+    const emitted = await emitInteractive(DEMO_REQUESTED, docScope(documentId, projectId), idemKey);
     if (!emitted) {
       // The bus refused the announce (non-WB-002): the spec IS installed but the recording was
       // never requested. Fail HONEST — and say exactly where things stand, because unlike the
@@ -1511,13 +1498,10 @@ export async function startInteractiveDemoSubscriber(
     logError(recorderFailureLine(failure, record.runId));
   }
 
-  const subRecorder = bus.subscribe({
-    db,
-    plugin: INTERACTIVE_DEMO_RECORDER_BUS_PLUGIN,
+  const subRecorder = tapBus({
+    dbPath: busDbPath,
     filter: INTERACTIVE_DEMO_RECORDER_BUS_FILTER,
-    cursor_init: 'latest',
     pollIntervalMs: opts.pollIntervalMs ?? 2000,
-    maxRetries: 0,
     handler: (event: BusEvent) => handleRecorderStatus(event),
     onError: busSubscriberErrorReporter({
       describe: (err, event) =>
@@ -1528,17 +1512,14 @@ export async function startInteractiveDemoSubscriber(
     }),
   });
 
-  const subCreated = bus.subscribe({
-    db,
-    plugin: INTERACTIVE_DEMO_BUS_PLUGIN,
+  const subCreated = tapBus({
+    dbPath: busDbPath,
     filter: INTERACTIVE_DEMO_BUS_FILTER,
     // Live triggers only: replaying a bus backlog would answer docs whose demos the assist
     // loop long since produced. History reconciliation belongs to the state plane, not here.
-    cursor_init: 'latest',
     pollIntervalMs: opts.pollIntervalMs ?? 2000,
     // Our own ledger + idempotency key are the dedupe; a bus-level retry of a failed launch
     // would double-launch precisely because the ledger row is only written on success.
-    maxRetries: 0,
     handler: (event: BusEvent) => handleDocCreated(event),
     onError: busSubscriberErrorReporter({
       describe: (err, event) =>
@@ -1549,13 +1530,10 @@ export async function startInteractiveDemoSubscriber(
     }),
   });
 
-  const subFeedback = bus.subscribe({
-    db,
-    plugin: INTERACTIVE_DEMO_FEEDBACK_BUS_PLUGIN,
+  const subFeedback = tapBus({
+    dbPath: busDbPath,
     filter: INTERACTIVE_DEMO_FEEDBACK_BUS_FILTER,
-    cursor_init: 'latest',
     pollIntervalMs: opts.pollIntervalMs ?? 2000,
-    maxRetries: 0,
     handler: (event: BusEvent) => handleFeedbackProcessed(event),
     onError: busSubscriberErrorReporter({
       describe: (err, event) =>

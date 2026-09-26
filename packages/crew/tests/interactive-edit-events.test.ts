@@ -26,7 +26,6 @@ import {
   FEEDBACK_PROCESSED,
   EDIT_COMPLETED,
   INTERACTIVE_EDIT_BUS_FILTER,
-  INTERACTIVE_EDIT_BUS_PLUGIN,
   INTERACTIVE_EDIT_WORKFLOW,
   INTERACTIVE_EDIT_WORKFLOW_DEF,
   parseStructuralFeedback,
@@ -255,10 +254,9 @@ describe('the interactive-edit workflow def (workflows-as-data)', () => {
 });
 
 describe('bus identity constants', () => {
-  it('subscribes on an exact-type, domain-guarded filter under a dedicated plugin name', () => {
+  it('subscribes on an exact-type, domain-guarded filter ', () => {
     expect(INTERACTIVE_EDIT_BUS_FILTER).toBe('wicked.interactive.feedback.processed@wicked-interactive');
     // NOT the draft seam's plugin — independent cursors, independently stoppable.
-    expect(INTERACTIVE_EDIT_BUS_PLUGIN).toBe('wicked-crew-interactive-edit');
   });
 });
 

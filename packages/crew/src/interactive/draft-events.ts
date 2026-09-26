@@ -10,15 +10,16 @@
  * answerer instead — same bus vocabulary, zero interactive-service changes beyond the additive
  * producer row (`wi-crew`) in interactive's events.js ownership table.
  *
- * Shape mirrors `qe/gate-events.ts` (crew's existing bus seam, Phase 6a): OPT-IN, dynamic
- * wicked-bus import, graceful degradation when the bus is absent, durable cursor with
- * `cursor_init: 'latest'` under a dedicated plugin name.
+ * Shape mirrors `qe/gate-events.ts` (crew's existing bus seam, Phase 6a): graceful degradation
+ * when the bus cannot open, a read-only tap from the newest row (`core/bus-tap.ts`), and every
+ * emit through crew's one bus writer (`core/bus-writer.ts`) — never a write on the engine's bus
+ * through crew's own SQLite (crew#679).
  *
  * Behavioral invariants honored (recon-verified against interactive):
  *  - Heartbeat: the canvas shows a working veil and the browser fires ~20s
  *    `status.requested` heartbeats; a silent answerer reads as a frozen UI. We narrate
  *    `wicked.interactive.status.posted` on every phase transition AND on a ≤15s timer.
- *  - Idempotency: the durable cursor redelivers under at-least-once semantics, and a replayed
+ *  - Idempotency: interactive may re-emit (and a replay tool can re-post) a doc, and a replayed
  *    `doc.created` must not produce a duplicate `_v2.html`. A durable per-doc ledger
  *    (JSON file, atomic rename) gates the launch, and the final `draft.completed` emit carries
  *    a deterministic idempotency key (`crew:interactive.draft:<doc>:v1`) so even a double
@@ -71,6 +72,8 @@ import {
   workerToolCallDeniedLine,
 } from './council-outcome.js';
 import { busSubscriberErrorReporter } from './bus-subscriber-errors.js';
+import { openCrewBus, tapBus } from '../core/bus-tap.js';
+import { emitOnBus } from '../core/bus-writer.js';
 
 // ── Vocabulary constants (interactive's, verbatim — src/service/events.js is the truth) ──────
 
@@ -81,10 +84,6 @@ export const STATUS_POSTED = 'wicked.interactive.status.posted';
 
 /** Exact-type filter with a domain guard — no wildcard, one event type is the whole trigger. */
 export const INTERACTIVE_BUS_FILTER = `${DOC_CREATED}@${INTERACTIVE_DOMAIN}`;
-
-/** Dedicated durable-cursor identity — NOT the qe subscriber's `wicked-crew`, so the two
- *  seams advance independent cursors and stopping one never strands the other. */
-export const INTERACTIVE_BUS_PLUGIN = 'wicked-crew-interactive-draft';
 
 /** The producer identity stamped on every event crew's interactive seams emit (this module and
  *  edit-events.ts). Must appear in interactive's events.js ownership table for DRAFT_COMPLETED,
@@ -653,23 +652,12 @@ export async function startInteractiveDraftSubscriber(
   const log = opts.log ?? ((m: string) => console.error(m));
   let draftSkillHeld = false; // set at arm time (draft-skill.ts); read at launch for the task clause
 
-  let bus: typeof import('wicked-bus');
+  // crew#679: this seam reads the bus through a read-only tap on crew's long-lived handle and
+  // writes through the one bus writer — never a write on the engine's bus file through crew's
+  // own SQLite. Opened here so an unopenable bus disables the seam before anything is armed.
+  let busDbPath: string;
   try {
-    bus = await import('wicked-bus');
-  } catch (err) {
-    log(
-      `[interactive-draft] wicked-bus is not importable — governed drafting disabled: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    );
-    return null;
-  }
-
-  let db: import('wicked-bus').BusDb;
-  let config: Record<string, unknown>;
-  try {
-    config = bus.loadConfig(opts.dbPath !== undefined ? { db_path: opts.dbPath } : {});
-    db = bus.openDb(opts.dbPath !== undefined ? { db_path: opts.dbPath } : {});
+    busDbPath = openCrewBus(opts.dbPath);
   } catch (err) {
     log(
       `[interactive-draft] could not open the bus db${
@@ -715,13 +703,13 @@ export async function startInteractiveDraftSubscriber(
   /** Emit onto interactive's vocabulary as the `wi-crew` producer. Never throws into the
    *  caller: narration/announce failures are logged — a lost status line must not kill the
    *  subscription, and a duplicate draft emit (WB-002) is the idempotency key WORKING. */
-  function emitInteractive(
+  async function emitInteractive(
     type: string,
     payload: Record<string, unknown>,
     idempotencyKey?: string,
-  ): boolean {
+  ): Promise<boolean> {
     try {
-      bus.emit(db, config, {
+      await emitOnBus(busDbPath, {
         event_type: type,
         domain: INTERACTIVE_DOMAIN,
         subdomain: type === DRAFT_COMPLETED ? 'generation' : 'status',
@@ -745,7 +733,7 @@ export async function startInteractiveDraftSubscriber(
 
   /** Every `status.posted` this seam emits is typed as the published frame's payload (codex on
    *  crew#506: the wire type at the real boundary, not a detached alias) — `emitInteractive` adds `ts`. */
-  function emitStatus(payload: SeamStatusPayload): boolean {
+  function emitStatus(payload: SeamStatusPayload): Promise<boolean> {
     return emitInteractive(STATUS_POSTED, { ...payload });
   }
 
@@ -915,7 +903,10 @@ export async function startInteractiveDraftSubscriber(
 
     if (event.type === 'sessionCompleted') {
       endFlight(runId);
-      finalize(flight, runId);
+      // The announce awaits the bus writer; a throw is logged, as a synchronous one was.
+      finalize(flight, runId).catch((err: unknown) =>
+        log(`[interactive-draft] finalizing run ${runId} failed: ${err instanceof Error ? err.message : String(err)}`),
+      );
       return;
     }
 
@@ -944,7 +935,7 @@ export async function startInteractiveDraftSubscriber(
     }
   });
 
-  function finalize(flight: InFlight, runId: string): void {
+  async function finalize(flight: InFlight, runId: string): Promise<void> {
     // The run is terminal — its grounding snapshots are done serving reads, on every branch below.
     removeSnapshots(flight);
     const { documentId, projectId, outPath } = flight;
@@ -966,7 +957,7 @@ export async function startInteractiveDraftSubscriber(
     }
     // ADR-0019 D5: announce by path — the service reads the file itself, so a large draft
     // never rides the bus payload. The deterministic key makes a re-announce a WB-002 no-op.
-    const emitted = emitInteractive(
+    const emitted = await emitInteractive(
       DRAFT_COMPLETED,
       { ...docScope(documentId, projectId), html_path: outPath },
       draftIdempotencyKey(documentId),
@@ -1337,17 +1328,14 @@ export async function startInteractiveDraftSubscriber(
     log(`[interactive-draft] doc ${doc.documentId} → governed run ${runId} (draft → ${outPath})`);
   }
 
-  const sub = bus.subscribe({
-    db,
-    plugin: INTERACTIVE_BUS_PLUGIN,
+  const sub = tapBus({
+    dbPath: busDbPath,
     filter: INTERACTIVE_BUS_FILTER,
     // Live triggers only: replaying a bus backlog would answer docs whose drafts the assist
     // loop long since produced. History reconciliation belongs to the state plane, not here.
-    cursor_init: 'latest',
     pollIntervalMs: opts.pollIntervalMs ?? 2000,
     // Our own ledger + idempotency key are the dedupe; a bus-level retry of a failed launch
     // would double-launch precisely because the ledger row is only written on success.
-    maxRetries: 0,
     handler: (event: BusEvent) => handleDocCreated(event),
     onError: busSubscriberErrorReporter({
       describe: (err, event) =>

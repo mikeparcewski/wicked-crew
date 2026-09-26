@@ -11,8 +11,8 @@
  * its bundled SQLite while crew holds it through better-sqlite3: two SQLite copies in one process,
  * whose POSIX locks do not exclude each other (sqlite.org/howtocorrupt.html §2.2.1). A crew write
  * concurrent with an engine write corrupts the file. A wicked-bus `subscribe` writes (it registers
- * a subscription and acks a durable cursor per row), so the relay does not use one: it polls
- * through crew's one long-lived bus handle (`core/bus-handle.ts`) with its cursor in memory,
+ * a subscription and acks a durable cursor per row), so the relay does not use one: it is a
+ * read-only tap (`core/bus-tap.ts`) on crew's one long-lived bus handle, its cursor in memory,
  * starting at the newest row (`latest`). Nothing is lost that matters: the bus is the durable
  * record and `GET /runs/:id/team` reads it back, so a restart needs no stored cursor.
  *
@@ -21,14 +21,12 @@
  * the next poll.
  */
 
-import { crewBusHandle, type BusSqlite } from '../core/bus-handle.js';
+import { tapBus } from '../core/bus-tap.js';
 import { broadcast as broadcastToWs } from '../events/bus.js';
 import type { CoreEvent } from '../core/types.js';
 
 /** The scope guard: only team rows are relayed. */
-const RELAY_TYPE_PATTERN = 'wicked.team.%';
-/** Rows per poll: a burst drains over a few polls instead of one unbounded read. */
-const BATCH = 500;
+const RELAY_FILTER = 'wicked.team.**';
 
 /** The ONE envelope type this relay puts on `/ws` (api-types `TeamEventFrame`). */
 export const TEAM_EVENT_FRAME = 'teamEvent';
@@ -53,54 +51,33 @@ export interface TeamRelayOptions {
 export async function startTeamWsRelay(opts: TeamRelayOptions): Promise<TeamRelay | null> {
   const log = opts.log ?? ((): void => undefined);
   const send = opts.broadcast ?? broadcastToWs;
-  let db: BusSqlite;
-  let cursor: number;
+  let lastError: string | null = null;
   try {
-    db = crewBusHandle(opts.dbPath, { create: false });
-    cursor = (db.prepare('SELECT COALESCE(MAX(event_id), 0) AS m FROM events').all()[0] as { m: number }).m;
+    return tapBus({
+      dbPath: opts.dbPath,
+      filter: RELAY_FILTER,
+      pollIntervalMs: opts.pollIntervalMs ?? 2000,
+      handler: (event) => {
+        lastError = null;
+        const runId = (event.payload as { run_id?: unknown } | null)?.run_id;
+        const projectId = typeof runId === 'string' ? opts.projectOf(runId) : undefined;
+        send({
+          type: TEAM_EVENT_FRAME,
+          event,
+          ...(projectId !== undefined ? { project_id: projectId } : {}),
+        } as CoreEvent);
+      },
+      // A failed read (the engine mid-checkpoint) is retried on the next poll; said once per
+      // distinct failure, not once per poll.
+      onError: (err) => {
+        if (message(err) !== lastError) log(`[team-relay] bus read failed (retrying): ${message(err)}`);
+        lastError = message(err);
+      },
+    });
   } catch (err) {
     log(`[team-relay] cannot read the bus at ${opts.dbPath} — /ws carries no teamEvent frames: ${message(err)}`);
     return null;
   }
-  const next = db.prepare(
-    `SELECT * FROM events WHERE event_id > ? AND event_type LIKE '${RELAY_TYPE_PATTERN}' ORDER BY event_id LIMIT ${BATCH}`,
-  );
-  let lastError: string | null = null;
-  const tick = (): void => {
-    let rows: Array<Record<string, unknown> & { event_id: number; payload: unknown }>;
-    try {
-      rows = next.all(cursor) as typeof rows;
-      lastError = null;
-    } catch (err) {
-      // Said once per distinct failure, not once per poll.
-      if (message(err) !== lastError) log(`[team-relay] bus read failed (retrying): ${message(err)}`);
-      lastError = message(err);
-      return;
-    }
-    for (const row of rows) {
-      cursor = row.event_id;
-      let payload: unknown = row.payload;
-      try {
-        payload = typeof row.payload === 'string' ? (JSON.parse(row.payload) as unknown) : row.payload;
-      } catch {
-        /* relayed as stored */
-      }
-      const runId = (payload as { run_id?: unknown } | null)?.run_id;
-      const projectId = typeof runId === 'string' ? opts.projectOf(runId) : undefined;
-      send({
-        type: TEAM_EVENT_FRAME,
-        event: { ...row, payload },
-        ...(projectId !== undefined ? { project_id: projectId } : {}),
-      } as CoreEvent);
-    }
-  };
-  const timer = setInterval(tick, opts.pollIntervalMs ?? 2000);
-  timer.unref();
-  return {
-    stop: async () => {
-      clearInterval(timer);
-    },
-  };
 }
 
 function message(err: unknown): string {

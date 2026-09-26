@@ -7,7 +7,7 @@
  *
  * Two halves, one bus handle:
  *
- * 1. RELAY (bus → /ws). Subscribe to `wicked.interactive.**` and rebroadcast each event as
+ * 1. RELAY (bus → /ws). Tap `wicked.interactive.**` and rebroadcast each event as
  *    `{ type: 'interactiveEvent', event: <the full bus event> }` — ONE envelope type, the original
  *    event nested whole, no field renaming, no project filter. Ordering is as received (the bus
  *    hands a batch to the handler in order and `broadcast` is synchronous), and there is no
@@ -22,10 +22,10 @@
  * Deliberately DISTINCT from the `projectActivity` bridge in projects/events.ts, which reads the
  * same filter: that one is project-FILTERED and reshapes the event into an activity frame for a
  * project view. This one is unfiltered and verbatim, because the studio's document canvas must see
- * the events of a doc that was never filed under a project. Separate plugin identity → separate
- * durable cursor, so neither seam can strand the other.
+ * the events of a doc that was never filed under a project. Each is its own tap with its own
+ * in-memory cursor, so neither seam can strand the other.
  *
- * Posture mirrors every other bus seam here: LOUD-non-fatal. No wicked-bus, or a broken db → the
+ * Posture mirrors every other bus seam here: LOUD-non-fatal. A bus db that cannot open → the
  * factory logs once and returns null, the daemon boots without the relay, and the POST route
  * answers 503 instead of pretending the emit landed.
  */
@@ -39,12 +39,11 @@ import { LOCAL_ACTOR } from '../api/auth.js';
 import { INTERACTIVE_DOMAIN, INTERACTIVE_PRODUCER } from './draft-events.js';
 import type { Actor } from '../core/types.js';
 import { busSubscriberErrorReporter } from './bus-subscriber-errors.js';
+import { tapBus, type BusTap } from '../core/bus-tap.js';
+import { emitOnBus } from '../core/bus-writer.js';
 
 const V = API_PREFIX;
 
-/** Dedicated durable-cursor identity — NOT the projects bridge's, so the two seams that read
- *  `wicked.interactive.**` advance independent cursors. */
-const RELAY_PLUGIN = 'wicked-crew-interactive-relay';
 const RELAY_FILTER = 'wicked.interactive.**';
 /** The scope guard, restated locally: the property "only interactive events are relayed" is this
  *  module's, not the bus glob's. */
@@ -76,9 +75,9 @@ export const EmitInteractiveEventSchema = z
 export interface InteractiveRelay {
   /**
    * Emit one interactive event onto the bus. Returns true on success (or on WB-002, a duplicate
-   * key — the emit already happened); logs and returns false otherwise. Never throws.
+   * key — the emit already happened); logs and returns false otherwise. Never rejects.
    */
-  emitInteractive(type: string, payload: Record<string, unknown>, idempotencyKey: string): boolean;
+  emitInteractive(type: string, payload: Record<string, unknown>, idempotencyKey: string): Promise<boolean>;
   stop(): Promise<void>;
 }
 
@@ -103,8 +102,7 @@ export interface InteractiveRelayOptions {
 }
 
 /**
- * Open the bus and arm both halves. Returns `null` (logged) when wicked-bus is not importable or
- * the db cannot open — the caller degrades to a daemon whose `/ws` simply carries no interactive
+ * Arm both halves. Returns `null` (logged) when the bus db cannot open — the caller degrades to a daemon whose `/ws` simply carries no interactive
  * frames, exactly as before this slice.
  */
 export async function startInteractiveWsRelay(
@@ -112,48 +110,21 @@ export async function startInteractiveWsRelay(
 ): Promise<InteractiveRelay | null> {
   const log = opts.log ?? ((): void => undefined);
 
-  let bus: typeof import('wicked-bus');
-  try {
-    bus = await import('wicked-bus');
-  } catch (err) {
-    log(
-      `[interactive-relay] wicked-bus is not importable — the interactive /ws relay is disabled: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    );
-    return null;
-  }
-
-  let db: import('wicked-bus').BusDb;
-  let config: Record<string, unknown>;
-  try {
-    const override = opts.dbPath !== undefined ? { db_path: opts.dbPath } : {};
-    config = bus.loadConfig(override);
-    db = bus.openDb(override);
-  } catch (err) {
-    log(
-      `[interactive-relay] could not open the bus db${
-        opts.dbPath !== undefined ? ` at ${opts.dbPath}` : ''
-      } — the interactive /ws relay is disabled: ${err instanceof Error ? err.message : String(err)}`,
-    );
-    return null;
-  }
-
-  // Half 1 — bus → /ws. maxRetries: 0 for the same reason the projects bridge uses it: a retry
-  // loop or a DLQ entry for a lost liveness frame is noise, and the durable feed is the record.
+  // Both halves ride crew's one bus mechanism (crew#679): the relay is a read-only tap on crew's
+  // long-lived handle, the emit direction goes to the one bus writer — never a write on the
+  // engine's bus file through crew's own SQLite.
   //
-  // This subscription also sees the events emitted by half 2 (they match the same filter). That
-  // is not a loop — the relay only broadcasts, never re-emits — and the echo is the UI's
-  // confirmation that its own emission actually landed on the bus.
-  let subscription: import('wicked-bus').BusSubscription | null = null;
+  // Half 1 — bus → /ws. No retry: a lost liveness frame is noise, and the durable feed is the record.
+  //
+  // This tap also sees the events emitted by half 2 (they match the same filter). That is not a
+  // loop — the relay only broadcasts, never re-emits — and the echo is the UI's confirmation that
+  // its own emission actually landed on the bus.
+  let tap: BusTap;
   try {
-    subscription = bus.subscribe({
-      db,
-      plugin: RELAY_PLUGIN,
+    tap = tapBus({
+      dbPath: opts.dbPath,
       filter: RELAY_FILTER,
-      cursor_init: 'latest',
       pollIntervalMs: opts.pollIntervalMs ?? 2000,
-      maxRetries: 0,
       handler: (event) => {
         if (!event.event_type.startsWith(RELAY_TYPE_PREFIX)) return;
         broadcast({ type: INTERACTIVE_EVENT_FRAME, event });
@@ -185,21 +156,22 @@ export async function startInteractiveWsRelay(
     });
   } catch (err) {
     log(
-      `[interactive-relay] could not arm the /ws relay subscriber (the emit direction still works): ${
-        err instanceof Error ? err.message : String(err)
-      }`,
+      `[interactive-relay] could not open the bus db${
+        opts.dbPath !== undefined ? ` at ${opts.dbPath}` : ''
+      } — the interactive /ws relay is disabled: ${err instanceof Error ? err.message : String(err)}`,
     );
+    return null;
   }
 
   // Half 2 — the emit surface the POST route calls after the whitelist check. The subdomain is
   // the third segment of interactive's own type grammar (`wicked.interactive.<subdomain>.<verb>`).
-  function emitInteractive(
+  async function emitInteractive(
     type: string,
     payload: Record<string, unknown>,
     idempotencyKey: string,
-  ): boolean {
+  ): Promise<boolean> {
     try {
-      bus.emit(db, config, {
+      await emitOnBus(tap.dbPath, {
         event_type: type,
         domain: INTERACTIVE_DOMAIN,
         subdomain: type.split('.')[2] ?? 'status',
@@ -220,9 +192,7 @@ export async function startInteractiveWsRelay(
 
   return {
     emitInteractive,
-    stop: async () => {
-      if (subscription !== null) await subscription.stop();
-    },
+    stop: () => tap.stop(),
   };
 }
 
@@ -265,7 +235,7 @@ export function registerInteractiveEventRoutes(
     // caller's (task #88 — event actors are not caller-supplied), so a payload that names either
     // one cannot override them.
     const idempotencyKey = interactiveEmitKey(projectId, type);
-    const emitted = relay.emitInteractive(
+    const emitted = await relay.emitInteractive(
       type,
       { ...(parsed.data.payload ?? {}), project_id: projectId, actor: actorOf(req).id },
       idempotencyKey,

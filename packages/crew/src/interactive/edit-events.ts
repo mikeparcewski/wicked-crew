@@ -64,6 +64,8 @@ import {
   workerToolCallDeniedLine,
 } from './council-outcome.js';
 import { busSubscriberErrorReporter } from './bus-subscriber-errors.js';
+import { openCrewBus, tapBus } from '../core/bus-tap.js';
+import { emitOnBus } from '../core/bus-writer.js';
 
 // ── Vocabulary constants (interactive's, verbatim — src/service/events.js is the truth) ──────
 
@@ -72,10 +74,6 @@ export const EDIT_COMPLETED = 'wicked.interactive.edit.completed';
 
 /** Exact-type filter with a domain guard — no wildcard, one event type is the whole trigger. */
 export const INTERACTIVE_EDIT_BUS_FILTER = `${FEEDBACK_PROCESSED}@${INTERACTIVE_DOMAIN}`;
-
-/** Dedicated durable-cursor identity — NOT the draft seam's, so the two interactive seams
- *  advance independent cursors and stopping one never strands the other. */
-export const INTERACTIVE_EDIT_BUS_PLUGIN = 'wicked-crew-interactive-edit';
 
 // ── The workflow (workflows-as-data) ─────────────────────────────────────────────────────────
 
@@ -417,23 +415,12 @@ export async function startInteractiveEditSubscriber(
   const log = opts.log ?? ((m: string) => console.error(m));
   let draftSkillHeld = false; // set at arm time (draft-skill.ts); read at launch for the task clause
 
-  let bus: typeof import('wicked-bus');
+  // crew#679: this seam reads the bus through a read-only tap on crew's long-lived handle and
+  // writes through the one bus writer — never a write on the engine's bus file through crew's
+  // own SQLite. Opened here so an unopenable bus disables the seam before anything is armed.
+  let busDbPath: string;
   try {
-    bus = await import('wicked-bus');
-  } catch (err) {
-    log(
-      `[interactive-edit] wicked-bus is not importable — governed structural edits disabled: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    );
-    return null;
-  }
-
-  let db: import('wicked-bus').BusDb;
-  let config: Record<string, unknown>;
-  try {
-    config = bus.loadConfig(opts.dbPath !== undefined ? { db_path: opts.dbPath } : {});
-    db = bus.openDb(opts.dbPath !== undefined ? { db_path: opts.dbPath } : {});
+    busDbPath = openCrewBus(opts.dbPath);
   } catch (err) {
     log(
       `[interactive-edit] could not open the bus db${
@@ -474,13 +461,13 @@ export async function startInteractiveEditSubscriber(
   /** Emit onto interactive's vocabulary as the `wi-crew` producer. Never throws into the
    *  caller: narration/announce failures are logged — a lost status line must not kill the
    *  subscription, and a duplicate edit emit (WB-002) is the idempotency key WORKING. */
-  function emitInteractive(
+  async function emitInteractive(
     type: string,
     payload: Record<string, unknown>,
     idempotencyKey?: string,
-  ): boolean {
+  ): Promise<boolean> {
     try {
-      bus.emit(db, config, {
+      await emitOnBus(busDbPath, {
         event_type: type,
         domain: INTERACTIVE_DOMAIN,
         subdomain: type === EDIT_COMPLETED ? 'feedback' : 'status',
@@ -504,7 +491,7 @@ export async function startInteractiveEditSubscriber(
 
   /** Every `status.posted` this seam emits is typed as the published frame's payload (codex on
    *  crew#506: the wire type at the real boundary, not a detached alias) — `emitInteractive` adds `ts`. */
-  function emitStatus(payload: SeamStatusPayload): boolean {
+  function emitStatus(payload: SeamStatusPayload): Promise<boolean> {
     return emitInteractive(STATUS_POSTED, { ...payload });
   }
 
@@ -627,7 +614,10 @@ export async function startInteractiveEditSubscriber(
 
     if (event.type === 'sessionCompleted') {
       endFlight(runId);
-      finalize(flight, runId);
+      // The announce awaits the bus writer; a throw is logged, as a synchronous one was.
+      finalize(flight, runId).catch((err: unknown) =>
+        log(`[interactive-edit] finalizing run ${runId} failed: ${err instanceof Error ? err.message : String(err)}`),
+      );
       return;
     }
 
@@ -655,7 +645,7 @@ export async function startInteractiveEditSubscriber(
     }
   });
 
-  function finalize(flight: InFlight, runId: string): void {
+  async function finalize(flight: InFlight, runId: string): Promise<void> {
     const { documentId, projectId, version, key, items } = flight;
     // The deterministic pre-emit self-check (INV-2 at scale): a violating fragment would be
     // rejected SILENTLY by the service (regenerate.js Inv2Error) — the user's edit would just
@@ -677,7 +667,7 @@ export async function startInteractiveEditSubscriber(
     }
     // Announce with the handoff's version (the parent the service forks from) and the
     // deterministic doc+version key — a re-announce is a WB-002 no-op.
-    const emitted = emitInteractive(
+    const emitted = await emitInteractive(
       EDIT_COMPLETED,
       { ...docScope(documentId, projectId), version, results },
       editIdempotencyKey(documentId, version),
@@ -915,17 +905,14 @@ export async function startInteractiveEditSubscriber(
     log(`[interactive-edit] handoff ${key} → governed run ${runId} (${items.length} item(s), handoff ${handoffPath})`);
   }
 
-  const sub = bus.subscribe({
-    db,
-    plugin: INTERACTIVE_EDIT_BUS_PLUGIN,
+  const sub = tapBus({
+    dbPath: busDbPath,
     filter: INTERACTIVE_EDIT_BUS_FILTER,
     // Live triggers only: replaying a bus backlog would answer handoffs whose edits the assist
     // loop long since produced. History reconciliation belongs to the state plane, not here.
-    cursor_init: 'latest',
     pollIntervalMs: opts.pollIntervalMs ?? 2000,
     // Our own ledger + idempotency key are the dedupe; a bus-level retry of a failed launch
     // would double-launch precisely because the ledger row is only written on success.
-    maxRetries: 0,
     handler: (event: BusEvent) => handleFeedbackProcessed(event),
     onError: busSubscriberErrorReporter({
       describe: (err, event) =>

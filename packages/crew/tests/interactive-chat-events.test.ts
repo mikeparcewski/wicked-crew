@@ -30,7 +30,6 @@ import { join } from 'node:path';
 import {
   CHAT_POSTED,
   INTERACTIVE_CHAT_BUS_FILTER,
-  INTERACTIVE_CHAT_BUS_PLUGIN,
   INTERACTIVE_CHAT_WORKFLOW,
   INTERACTIVE_CHAT_WORKFLOW_DEF,
   parseChatPosted,
@@ -288,10 +287,9 @@ describe('the interactive-chat workflow def (workflows-as-data)', () => {
 });
 
 describe('bus identity constants', () => {
-  it('subscribes on an exact-type, domain-guarded filter under a dedicated plugin name', () => {
+  it('subscribes on an exact-type, domain-guarded filter ', () => {
     expect(INTERACTIVE_CHAT_BUS_FILTER).toBe('wicked.interactive.chat.posted@wicked-interactive');
     // NOT the draft/edit seams' plugins — independent cursors, independently stoppable.
-    expect(INTERACTIVE_CHAT_BUS_PLUGIN).toBe('wicked-crew-interactive-chat');
   });
 });
 

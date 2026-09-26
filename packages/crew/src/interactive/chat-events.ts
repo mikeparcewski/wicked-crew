@@ -82,6 +82,8 @@ import {
   workerToolCallDeniedLine,
 } from './council-outcome.js';
 import { busSubscriberErrorReporter } from './bus-subscriber-errors.js';
+import { openCrewBus, tapBus } from '../core/bus-tap.js';
+import { emitOnBus } from '../core/bus-writer.js';
 
 // ── Vocabulary constants (interactive's, verbatim — src/service/events.js is the truth) ──────
 
@@ -89,10 +91,6 @@ export const CHAT_POSTED = 'wicked.interactive.chat.posted';
 
 /** Exact-type filter with a domain guard — no wildcard, one event type is the whole trigger. */
 export const INTERACTIVE_CHAT_BUS_FILTER = `${CHAT_POSTED}@${INTERACTIVE_DOMAIN}`;
-
-/** Dedicated durable-cursor identity — NOT the draft/edit seams', so the three interactive
- *  seams advance independent cursors and stopping one never strands another. */
-export const INTERACTIVE_CHAT_BUS_PLUGIN = 'wicked-crew-interactive-chat';
 
 // ── The workflow (workflows-as-data) ─────────────────────────────────────────────────────────
 
@@ -476,23 +474,12 @@ export async function startInteractiveChatSubscriber(
   const log = opts.log ?? ((m: string) => console.error(m));
   let draftSkillHeld = false; // set at arm time (draft-skill.ts); read at launch for the task clause
 
-  let bus: typeof import('wicked-bus');
+  // crew#679: this seam reads the bus through a read-only tap on crew's long-lived handle and
+  // writes through the one bus writer — never a write on the engine's bus file through crew's
+  // own SQLite. Opened here so an unopenable bus disables the seam before anything is armed.
+  let busDbPath: string;
   try {
-    bus = await import('wicked-bus');
-  } catch (err) {
-    log(
-      `[interactive-chat] wicked-bus is not importable — governed iteration disabled: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    );
-    return null;
-  }
-
-  let db: import('wicked-bus').BusDb;
-  let config: Record<string, unknown>;
-  try {
-    config = bus.loadConfig(opts.dbPath !== undefined ? { db_path: opts.dbPath } : {});
-    db = bus.openDb(opts.dbPath !== undefined ? { db_path: opts.dbPath } : {});
+    busDbPath = openCrewBus(opts.dbPath);
   } catch (err) {
     log(
       `[interactive-chat] could not open the bus db${
@@ -536,13 +523,13 @@ export async function startInteractiveChatSubscriber(
   /** Emit onto interactive's vocabulary as the `wi-crew` producer. Never throws into the
    *  caller: narration/announce failures are logged — a lost status line must not kill the
    *  subscription, and a duplicate announce (WB-002) is the idempotency key WORKING. */
-  function emitInteractive(
+  async function emitInteractive(
     type: string,
     payload: Record<string, unknown>,
     idempotencyKey?: string,
-  ): boolean {
+  ): Promise<boolean> {
     try {
-      bus.emit(db, config, {
+      await emitOnBus(busDbPath, {
         event_type: type,
         domain: INTERACTIVE_DOMAIN,
         subdomain: type === DRAFT_COMPLETED ? 'generation' : 'status',
@@ -566,7 +553,7 @@ export async function startInteractiveChatSubscriber(
 
   /** Every `status.posted` this seam emits is typed as the published frame's payload (codex on
    *  crew#506: the wire type at the real boundary, not a detached alias) — `emitInteractive` adds `ts`. */
-  function emitStatus(payload: SeamStatusPayload): boolean {
+  function emitStatus(payload: SeamStatusPayload): Promise<boolean> {
     return emitInteractive(STATUS_POSTED, { ...payload });
   }
 
@@ -598,8 +585,12 @@ export async function startInteractiveChatSubscriber(
 
   /** Contract (c): the doc is busy while ANY governed run is working it — our own chat runs
    *  plus whatever the sibling draft/edit seams report through `isDocBusy`. */
+  /** Docs whose run completed but whose announce is still on its way to the bus writer: busy,
+   *  so no drain snapshots the head before `finalize` has set the landing gate. */
+  const finalizing = new Set<string>();
+
   function docBusy(documentId: string): boolean {
-    return docHasFlight(documentId) || opts.isDocBusy?.(documentId) === true;
+    return docHasFlight(documentId) || finalizing.has(documentId) || opts.isDocBusy?.(documentId) === true;
   }
 
   /** Terminal-event fold: turn the governed run's own events into interactive narration, and
@@ -713,8 +704,17 @@ export async function startInteractiveChatSubscriber(
 
     if (event.type === 'sessionCompleted') {
       endFlight(runId);
-      finalize(flight, runId);
-      drainDoc(flight.documentId);
+      // The announce awaits the bus writer; a throw is logged, as a synchronous one was. The doc
+      // stays busy until it returns: finalize sets the landing gate the drain must see.
+      finalizing.add(flight.documentId);
+      finalize(flight, runId)
+        .catch((err: unknown) =>
+          log(`[interactive-chat] finalizing run ${runId} failed: ${err instanceof Error ? err.message : String(err)}`),
+        )
+        .finally(() => {
+          finalizing.delete(flight.documentId);
+          drainDoc(flight.documentId);
+        });
       return;
     }
 
@@ -744,7 +744,7 @@ export async function startInteractiveChatSubscriber(
     }
   });
 
-  function finalize(flight: InFlight, runId: string): void {
+  async function finalize(flight: InFlight, runId: string): Promise<void> {
     const { key, documentId, projectId, outPath } = flight;
     let ok = false;
     try {
@@ -765,7 +765,7 @@ export async function startInteractiveChatSubscriber(
     // Announce on the SAME wire the first draft rides (ADR-0019 D5: by path — the service
     // reads the file and lands it as a generated version). The deterministic per-ask key
     // makes a re-announce a WB-002 no-op.
-    const emitted = emitInteractive(
+    const emitted = await emitInteractive(
       DRAFT_COMPLETED,
       { ...docScope(documentId, projectId), html_path: outPath },
       `crew:interactive.chat:${key}`,
@@ -1115,16 +1115,13 @@ export async function startInteractiveChatSubscriber(
     await launchAsk(queued);
   }
 
-  const sub = bus.subscribe({
-    db,
-    plugin: INTERACTIVE_CHAT_BUS_PLUGIN,
+  const sub = tapBus({
+    dbPath: busDbPath,
     filter: INTERACTIVE_CHAT_BUS_FILTER,
     // Live triggers only: replaying a bus backlog would answer asks whose moment has passed.
-    cursor_init: 'latest',
     pollIntervalMs: opts.pollIntervalMs ?? 2000,
     // Our own ledger + idempotency key are the dedupe; a bus-level retry of a failed launch
     // would double-launch precisely because the ledger row is only written on success.
-    maxRetries: 0,
     handler: (event: BusEvent) => handleChatPosted(event),
     onError: busSubscriberErrorReporter({
       describe: (err, event) =>

@@ -14,10 +14,13 @@
  *
  * The rule both sides now follow: each library holds its connection to the bus file for the life
  * of the process and never opens-and-closes one. The engine's side is `BusDb::shared` in
- * wicked-core. Crew's side is this handle: ad-hoc bus reads (the project activity feed) go through
- * it instead of a per-request open/close, and the daemon opens it at boot BEFORE the engine spawns
- * (the boot probe in `cli/index.ts`), so crew's library always has a connection holding its locks.
- * There is deliberately no close.
+ * wicked-core. Crew's side is this handle: every in-daemon bus read goes through it (the seams'
+ * taps, `core/bus-tap.ts`; the activity feed and the team read route) instead of a per-request
+ * open/close, and the daemon opens it at boot BEFORE the engine spawns (the boot probe in
+ * `cli/index.ts`), so crew's library always has a connection holding its locks. There is
+ * deliberately no close. The handle only READS (crew#679): two libraries in one process do not
+ * exclude each other's writes either, so crew's bus writes go to its one bus writer, a child
+ * process (`core/bus-writer.ts`).
  *
  * The better-sqlite3 module is the INSTANCE wicked-bus itself loads (resolved from wicked-bus's own
  * entry — the walk its `lib/db.js` `require('better-sqlite3')` takes), so this handle and the seams
@@ -28,9 +31,11 @@ import { statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 
-/** The better-sqlite3 surface the handle uses (typed locally — crew reaches it through wicked-bus). */
+/** The better-sqlite3 surface the handle uses (typed locally — crew reaches it through wicked-bus).
+ *  READ-ONLY by type: no `run`, no `exec` (crew#679 — crew never writes the engine's bus through
+ *  its own SQLite; its writes go through `core/bus-writer.ts`). */
 export interface BusSqlite {
-  prepare(sql: string): { all(...params: unknown[]): unknown[]; run(...params: unknown[]): unknown };
+  prepare(sql: string): { all(...params: unknown[]): unknown[] };
   pragma(sql: string): unknown;
 }
 type SqliteCtor = new (path: string, opts?: { fileMustExist?: boolean }) => BusSqlite;
