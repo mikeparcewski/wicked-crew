@@ -73,6 +73,14 @@ export interface LaunchRunInput {
   /** Workflow def id to drive (e.g. `domain-extraction`). Omit ⇒ free-text planning. */
   workflow?: string;
   /**
+   * A USER-COMPOSED plan (DES-TEAMING-002 §8.4, seam T3; `LaunchRunBody.plan`), handed to the
+   * engine as `LaunchOptions.planJson`. The engine owns every fact about it (`plan.proposed`, the
+   * score, the floor, the approval matrix); crew only forwards the command. Mutually exclusive
+   * with `workflow`. The adapter fails CLOSED on an addon without `Core.supportsPlanLaunch` — napi
+   * ignores an undeclared field, so an older engine would run the launch unplanned and ungated.
+   */
+  plan?: import('wicked-crew-api-types').LaunchPlan;
+  /**
    * Project to file this run into (DES-PROJECT-001 §2.2). The engine attaches the `crew.run`
    * membership atomically with the launch record; unknown/archived ⇒ the launch fails with no
    * session persisted. Omit ⇒ unfiled (the synthesized `default` project).

@@ -18,6 +18,9 @@
 // schema's INPUT type (extra optional keys are assignable) — so only the RUNTIME strictness and the
 // adapter arity can drift; this file watches those.
 //
+// DES-TEAMING-002 T3 added a SIXTH positional, `plan` (an edited plan at a `plan_approval` gate,
+// `tests/plan-approval-gate.test.ts`); the pins below carry it as a trailing `undefined`.
+//
 // Contract for L1 PR-2 (so its flip is not a false red): the route pins below spread ALL FIVE
 // positionals — `confirmGate(id, approve, amend, action, amendScope)` with an explicit `undefined`
 // for an absent `amend` / `action` / `amendScope` — because `toEqual` on the recorded argument array
@@ -158,7 +161,7 @@ describe('POST /runs/:id/gate — the arms reach the adapter (DES-L1 PR-2)', () 
     const res = await gate('run-gated', { approve: false, action: 'request_changes', amend: 'add the missing null check' });
     expect(res.statusCode).toBe(200);
     expect(confirmCalls).toHaveLength(1);
-    expect(confirmCalls[0]).toEqual(['run-gated', false, 'add the missing null check', 'request_changes', undefined]);
+    expect(confirmCalls[0]).toEqual(['run-gated', false, 'add the missing null check', 'request_changes', undefined, undefined]);
     expect(recorded[0]!.detail).toMatchObject({ approve: false, action: 'request_changes' });
   });
 
@@ -166,7 +169,7 @@ describe('POST /runs/:id/gate — the arms reach the adapter (DES-L1 PR-2)', () 
     const res = await gate('run-gated', { approve: true, amend: 'prefer the existing helper', amendScope: 'creator' });
     expect(res.statusCode).toBe(200);
     expect(confirmCalls).toHaveLength(1);
-    expect(confirmCalls[0]).toEqual(['run-gated', true, 'prefer the existing helper', undefined, 'creator']);
+    expect(confirmCalls[0]).toEqual(['run-gated', true, 'prefer the existing helper', undefined, 'creator', undefined]);
     expect(recorded[0]!.detail).toMatchObject({ approve: true, amendScope: 'creator' });
   });
 
