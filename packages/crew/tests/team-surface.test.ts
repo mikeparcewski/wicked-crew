@@ -99,10 +99,10 @@ async function seedBus(busPath: string, rows: Array<{ type: string; payload: Rec
   for (const r of rows) {
     bus.emit(db, config, {
       event_type: r.type,
-      domain: 'wicked-core',
+      domain: 'core-fixture', // crew reads by event_type only
       subdomain: 'core.team',
       payload: r.payload,
-      producer_id: 'wicked-core',
+      producer_id: 'core-fixture',
       idempotency_key: `seed-${busPath}-${n++}`,
     });
   }
