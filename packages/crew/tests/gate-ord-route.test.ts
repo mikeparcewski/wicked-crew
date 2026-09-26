@@ -57,6 +57,7 @@ describe('POST /runs/:id/gate with ord', () => {
         view('run-cached', 'awaiting_human', 2),
         view('run-durable', 'awaiting_human', 5),
         view('run-unknown', 'awaiting_human', 1),
+        view('run-empty', 'awaiting_human', 1),
       ]),
       listRepos: vi.fn().mockResolvedValue([]),
       listWorkflows: () => BUILTIN_WORKFLOWS,
@@ -65,8 +66,8 @@ describe('POST /runs/:id/gate with ord', () => {
         id === 'run-durable'
           ? [{ kind: 'gate', ord: 5, prompt: 'Approve unit 5?', created_at: '2026-09-26T10:00:00Z' }]
           : []),
-      // No event-log binding: run-unknown's open gate cannot be resolved at all.
-      runEvents: vi.fn(async () => null),
+      // run-unknown: no event-log binding at all. run-empty: a log that records no open gate.
+      runEvents: vi.fn(async (id: string) => (id === 'run-empty' ? [] : null)),
       confirmGate: vi.fn(async (...args: unknown[]) => {
         confirmCalls.push(args);
         return 'executing';
@@ -122,8 +123,19 @@ describe('POST /runs/:id/gate with ord', () => {
     expect(ok.statusCode).toBe(200);
   });
 
-  it('an open gate the daemon cannot resolve is not proof of a change: the decision proceeds', async () => {
-    const res = await gate('run-unknown', { approve: true, ord: 1 });
+  it('a decision that names its gate is REFUSED when the daemon cannot tell which gate is open (409 gate_unknown)', async () => {
+    for (const id of ['run-unknown', 'run-empty']) {
+      const res = await gate(id, { approve: true, ord: 1 });
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toMatchObject({ code: 'gate_unknown' });
+      expect(res.json().error).toMatch(/refresh and decide again/i);
+    }
+    expect(confirmCalls).toEqual([]);
+    expect(recorded).toEqual([]);
+  });
+
+  it('without ord, an unresolvable open gate keeps today\'s behaviour (200)', async () => {
+    const res = await gate('run-unknown', { approve: true });
     expect(res.statusCode).toBe(200);
     expect(confirmCalls).toHaveLength(1);
   });
