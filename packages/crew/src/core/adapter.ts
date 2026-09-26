@@ -27,9 +27,14 @@ import type {
   CoverageReport,
   GraphKind,
   WorkflowDef,
+  PhaseDef,
   CrewSystemSettings,
   Preset,
   PresetStep,
+  CatalogEntry,
+  PlanPreviewResponse,
+  RunTeamView,
+  TeamOutboxReplayReport,
   Project,
   ProjectMember,
   InteractionRequest,
@@ -402,6 +407,22 @@ type PresetMethods = {
   listPresets?(projectId?: string | null): Promise<string>;
 };
 
+/**
+ * The team bindings (DES-TEAMING-002 T8). ALL optional: `runTeam` / `replayTeamOutbox` land with
+ * seam P1; `catalog` / `previewPlan` are the engine's catalog and floor fill (`src/catalog.rs`,
+ * `plan::floor_fill`) as bindings. Each resolves a JSON string; an addon without one answers 501.
+ */
+type TeamMethods = {
+  /** `RunTeamView` JSON, or the literal `null` for a run that is not a team run; rejects for an unknown run. */
+  runTeam?(runId: string): Promise<string>;
+  /** The outbox replay report JSON; rejects when the engine has no bus or no state home. */
+  replayTeamOutbox?(): Promise<string>;
+  /** The phase catalog: a JSON array of `PhaseDef` entries, in catalog order. */
+  catalog?(): Promise<string>;
+  /** The floor fill of a draft plan: `{steps, added_by_floor, band, high_risk}`; rejects a refused plan with the reason. */
+  previewPlan?(planJson: string, projectId?: string | null, humanConfirm?: string | null): Promise<string>;
+};
+
 /** DES-TEAMING-002 T0 (wicked-core-ts ≥ the release carrying it): what arming the engine's bus
  *  bridge came to at spawn — JSON `{state:"none"|"armed"|"not-armed", floor?, reason?}`. Optional:
  *  an older addon has no such method. */
@@ -416,6 +437,7 @@ type CoreHandleFull = CoreHandle &
   EventLogMethods &
   ProjectMethods &
   PresetMethods &
+  TeamMethods &
   CampaignMethods;
 
 /** The napi constructor surface — the static factories live on the class object. */
@@ -877,6 +899,17 @@ export class PresetsUnsupportedError extends Error {
   constructor(what: string) {
     super(`${what} is not supported by this wicked-core build (needs the wicked-core-ts release carrying presets)`);
     this.name = 'PresetsUnsupportedError';
+  }
+}
+
+/**
+ * A team binding (DES-TEAMING-002 T8) is not in the installed `wicked-core-ts`. The routes answer
+ * 501 ("upgrade the engine"), never 400.
+ */
+export class TeamUnsupportedError extends Error {
+  constructor(what: string, binding: string) {
+    super(`${what} is not supported by this wicked-core build (needs the wicked-core-ts binding Core.${binding})`);
+    this.name = 'TeamUnsupportedError';
   }
 }
 
@@ -1537,6 +1570,18 @@ export class CoreAdapter {
     return engineSupportsPlanLaunch();
   }
 
+  /** The launcher's `deliver` step for a plan (`name` null) or a preset launch (DES-TEAMING-002
+   *  §8.5): the engine appends it to the plan and puts it in the floor. */
+  private deliverStep(name: string | null, phases: PhaseDef[], input: LaunchRunInput): ReturnType<typeof deliverPresetStep> {
+    return deliverPresetStep(name, phases, input.sessionId, input.problem, {
+      repoRef: input.repoRef ?? null,
+      apiOrigin: this.deliverApiOrigin?.() ?? null,
+      revisesPr: input.revisesPr ?? null,
+      ghAccount: process.env['GH_ACCOUNT'] ?? null,
+      ghTokenPinned: typeof process.env['GH_TOKEN'] === 'string' && process.env['GH_TOKEN'] !== '',
+    });
+  }
+
   /** Launch an interactive, resumable run → the run id. */
   async launchRun(input: LaunchRunInput): Promise<string> {
     const opts: LaunchOptions = {
@@ -1648,14 +1693,20 @@ export class CoreAdapter {
       if (input.workflow !== undefined) {
         throw new Error('a launch carries a plan or names a workflow (a preset), not both');
       }
-      if (input.deliver === 'pr' || (input.requireDeliverables ?? []).length > 0) {
+      if ((input.requireDeliverables ?? []).length > 0) {
         throw new Error(
-          'deliver: "pr" / requireDeliverables with a plan is not wired yet (DES-TEAMING-002 T8) — ' +
-            'launch the plan without them',
+          'requireDeliverables with a plan is refused: the deliverable floor has no engine-side ' +
+            'step yet — launch the plan without it',
         );
       }
       if (!this.supportsPlanLaunch()) throw new PlanLaunchUnsupportedError('A plan launch');
       (opts as LaunchOptions & { planJson?: string }).planJson = JSON.stringify(input.plan);
+      // T8: a delivering plan hands the engine its deliver step, exactly as a preset launch does.
+      if (input.deliver === 'pr') {
+        (opts as LaunchOptions & { deliverStepJson?: string }).deliverStepJson = JSON.stringify(
+          this.deliverStep(null, [], input),
+        );
+      }
     }
     // DES-TEAMING-002 T3: a workflow that names a PRESET is a plan the engine floor-fills and gates.
     // Crew never composes a per-run def over one (that def is no preset, so the launch would skip
@@ -1674,19 +1725,7 @@ export class CoreAdapter {
         );
       }
       if (!this.supportsPlanLaunch()) throw new PlanLaunchUnsupportedError('Delivering a preset launch');
-      const step = deliverPresetStep(
-        input.workflow,
-        this.getWorkflow(input.workflow)?.phases ?? [],
-        input.sessionId,
-        input.problem,
-        {
-          repoRef: input.repoRef ?? null,
-          apiOrigin: this.deliverApiOrigin?.() ?? null,
-          revisesPr: input.revisesPr ?? null,
-          ghAccount: process.env['GH_ACCOUNT'] ?? null,
-          ghTokenPinned: typeof process.env['GH_TOKEN'] === 'string' && process.env['GH_TOKEN'] !== '',
-        },
-      );
+      const step = this.deliverStep(input.workflow, this.getWorkflow(input.workflow)?.phases ?? [], input);
       (opts as LaunchOptions & { deliverStepJson?: string }).deliverStepJson = JSON.stringify(step);
       opts.workflow = input.workflow;
     } else if (input.workflow !== undefined) {
@@ -1788,8 +1827,8 @@ export class CoreAdapter {
           await this._writeBuiltinOverlay(builtinDef);
         }
       }
-    } else if (input.deliver === 'pr') {
-      // Fail loud, not silent: dropping the option would run to completion with the caller
+    } else if (input.deliver === 'pr' && input.plan === undefined) {
+      // (A plan carries its deliver step above.) Fail loud, not silent: dropping the option would run to completion with the caller
       // believing a PR opens at the end — the exact operator gap crew#293 closes.
       throw new Error(
         'deliver: "pr" requires a workflow — a free-text run has no def to append the deliver phase to',
@@ -2118,6 +2157,44 @@ export class CoreAdapter {
   async listPresets(projectId?: string): Promise<Preset[]> {
     const fn = this.requirePresets(this.core.listPresets, 'Listing presets');
     return JSON.parse(await fn.call(this.core, projectId ?? null)) as Preset[];
+  }
+
+  // ── Team (DES-TEAMING-002 T8) ───────────────────────────────────────────────
+  // Reads and commands over the engine; crew publishes no team fact (§4.0). Every method throws
+  // TeamUnsupportedError on an addon without its binding (routes: 501).
+
+  private requireTeam<T>(fn: T | undefined, what: string, binding: string): T {
+    if (typeof fn !== 'function') throw new TeamUnsupportedError(what, binding);
+    return fn;
+  }
+
+  /** The run's team transport and per-unit snapshots, or `null` for a run that is not a team run. */
+  async runTeam(runId: string): Promise<RunTeamView | null> {
+    const fn = this.requireTeam(this.core.runTeam, 'Reading a run\'s team', 'runTeam');
+    return JSON.parse(await fn.call(this.core, runId)) as RunTeamView | null;
+  }
+
+  /** Replay `<state home>/team-outbox.ndjson` onto the bus. */
+  async replayTeamOutbox(): Promise<TeamOutboxReplayReport> {
+    const fn = this.requireTeam(this.core.replayTeamOutbox, 'Replaying the team outbox', 'replayTeamOutbox');
+    return JSON.parse(await fn.call(this.core)) as TeamOutboxReplayReport;
+  }
+
+  /** The engine's phase catalog. */
+  async catalog(): Promise<CatalogEntry[]> {
+    const fn = this.requireTeam(this.core.catalog, 'Reading the phase catalog', 'catalog');
+    return JSON.parse(await fn.call(this.core)) as CatalogEntry[];
+  }
+
+  /** The engine's floor fill of a draft plan, as a launch in `projectId` would compute it.
+   *  TODO(DES-TEAMING-002 T8 follow-up): the `PlanPreviewResponse` cast is unchecked. The engine's
+   *  `plan::FloorFilled` carries `floor` / `def` / `floor_override`, not `added_by_floor`; pin this
+   *  shape against the core binding (`Core.previewPlan`) when it lands. */
+  async previewPlan(plan: LaunchPlan, projectId?: string, humanConfirm?: string): Promise<PlanPreviewResponse> {
+    const fn = this.requireTeam(this.core.previewPlan, 'Previewing a plan', 'previewPlan');
+    return JSON.parse(
+      await fn.call(this.core, JSON.stringify(plan), projectId ?? null, humanConfirm ?? null),
+    ) as PlanPreviewResponse;
   }
 
   // ── Projects (DES-PROJECT-001) ──────────────────────────────────────────────

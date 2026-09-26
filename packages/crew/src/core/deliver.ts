@@ -867,7 +867,8 @@ export interface DeliverLaunchContext {
  * runtime effect). `phases` only feeds the embedded fallback text.
  */
 export function deliverPresetStep(
-  presetName: string,
+  /** The preset launched, or `null` for a user-composed plan. */
+  presetName: string | null,
   phases: PhaseDef[],
   runId: string,
   intent?: string,

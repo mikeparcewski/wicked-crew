@@ -73,6 +73,7 @@ import type {
   UpdateProjectSchema,
 } from '../src/projects/routes.js';
 import type { PutPresetSchema } from '../src/presets/routes.js';
+import type { EditPlanSchema, PlanPreviewSchema, joinTeam } from '../src/team/routes.js';
 import type { DEFAULT_SETTINGS } from '../src/core/types.js';
 
 /** Compile-time: what the daemon PRODUCES must satisfy what the contract PUBLISHES. */
@@ -937,6 +938,14 @@ accepts<z.input<typeof AttachMemberSchema>, Wire.AttachMemberBody>();
 accepts<z.input<typeof PutPresetSchema>, Wire.PutPresetBody>();
 respondsWith<Wire.Preset, Awaited<ReturnType<CoreAdapter['putPreset']>>>();
 respondsWith<Wire.Preset[], Awaited<ReturnType<CoreAdapter['listPresets']>>>();
+// Team surface (DES-TEAMING-002 T8): the command bodies parse, and the read route and the adapter's
+// team reads produce the published shapes.
+accepts<z.input<typeof EditPlanSchema>, Wire.EditPlanBody>();
+accepts<z.input<typeof PlanPreviewSchema>, Wire.PlanPreviewBody>();
+respondsWith<Wire.RunTeamResponse, ReturnType<typeof joinTeam>>();
+respondsWith<Wire.TeamOutboxReplayReport, Awaited<ReturnType<CoreAdapter['replayTeamOutbox']>>>();
+respondsWith<Wire.CatalogEntry[], Awaited<ReturnType<CoreAdapter['catalog']>>>();
+respondsWith<Wire.PlanPreviewResponse, Awaited<ReturnType<CoreAdapter['previewPlan']>>>();
 // Steering (STEERING program) — the import batch and the "add with chat" authoring launch.
 accepts<z.input<typeof SteeringImportSchema>, Wire.SteeringImportBody>();
 accepts<z.input<typeof SteeringAuthorSchema>, Wire.SteeringAuthorBody>();

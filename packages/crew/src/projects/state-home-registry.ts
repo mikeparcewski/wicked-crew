@@ -45,7 +45,13 @@ export const STATE_HOME_ENTRY_NAMES: ReadonlyArray<string> = [
 ];
 
 /** Top-level PREFIXES the registry classifies (a file and its sidecars). */
-export const STATE_HOME_ENTRY_PREFIXES: ReadonlyArray<string> = ['bus.db', 'core.db', 'daemon-'];
+export const STATE_HOME_ENTRY_PREFIXES: ReadonlyArray<string> = [
+  'bus.db',
+  'core.db',
+  'daemon-',
+  // DES-TEAMING-002 §4.1: the engine's team outbox (and its transient `.compact` sidecar).
+  'team-outbox.ndjson',
+];
 
 /** Is `topLevel` a name the registry classifies? */
 export function isRegisteredStateHomeEntry(topLevel: string): boolean {

@@ -121,11 +121,10 @@ describe('POST /runs {plan} and the plan_approval gate — HTTP contract (shadow
     });
   });
 
-  it('refuses a plan with a workflow, a plan with deliver: "pr", and an unknown plan key (400), launching nothing', async () => {
+  it('refuses a plan with a workflow and an unknown plan key (400), launching nothing', async () => {
     await withCapability(ctx.adapter, true, async () => {
       const cases = [
         { problem: 'p', plan: { steps: [{ catalog: 'build' }] }, workflow: 'feature' },
-        { problem: 'p', plan: { steps: [{ catalog: 'build' }] }, deliver: 'pr' },
         { problem: 'p', plan: { steps: [{ catalog: 'build' }], score: 0 } },
         { problem: 'p', plan: { steps: [] } },
       ];
@@ -212,6 +211,35 @@ describe('POST /runs {plan} and the plan_approval gate — HTTP contract (shadow
       expect((step['executor'] as { type: string; cmd: string[] }).type).toBe('tool');
       expect((step['executor'] as { cmd: string[] }).cmd[0]).toBe('bash');
       expect(step['depends_on']).toBeUndefined();
+    });
+  });
+
+  it('T8: a delivering PLAN launch hands the engine the plan and its deliver step', async () => {
+    await withCapability(ctx.adapter, true, async () => {
+      const plan = { steps: [{ catalog: 'build' }] };
+      const res = await fetch(`${ctx.baseUrl}/api/v1/runs`, json({ problem: 'ship SSO', clisJson: SEATS, plan, deliver: 'pr' }));
+      expect(res.status, await res.clone().text()).toBe(201);
+      const opts = launched[0] as LaunchOptions & { deliverStepJson?: string; planJson?: string };
+      expect(JSON.parse(opts.planJson ?? 'null')).toEqual(plan);
+      expect(opts.workflow).toBeUndefined();
+      expect(registered).toEqual([]);
+      const step = JSON.parse(opts.deliverStepJson ?? 'null') as Record<string, unknown>;
+      expect(step['catalog']).toBe('deliver');
+      expect(step['id']).toBe(DELIVER_PHASE_ID);
+      expect(step['validator_pin']).toBe(EVIDENCE_FLOOR_PIN);
+      expect((step['executor'] as { type: string }).type).toBe('tool');
+    });
+  });
+
+  it('T8: a plan launch without deliver hands no deliver step; requireDeliverables with a plan is refused', async () => {
+    await withCapability(ctx.adapter, true, async () => {
+      const plan = { steps: [{ catalog: 'build' }] };
+      const res = await fetch(`${ctx.baseUrl}/api/v1/runs`, json({ problem: 'p', clisJson: SEATS, plan }));
+      expect(res.status).toBe(201);
+      expect((launched[0] as { deliverStepJson?: string }).deliverStepJson).toBeUndefined();
+      await expect(
+        ctx.adapter.launchRun({ problem: 'p', sessionId: 'r-plan-floor', clisJson: SEATS, plan, requireDeliverables: ['out/r.md'] }),
+      ).rejects.toThrow(/requireDeliverables with a plan/);
     });
   });
 

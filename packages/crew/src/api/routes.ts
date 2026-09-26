@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { busUnavailableWarning } from '../core/bus-notice.js';
+import { PlanSchema, toLaunchPlan } from './plan-schema.js';
 import type { RecordedStallFrame } from './stall-frame-index.js';
 import { z } from 'zod';
 import { listRequirements, getRequirement, patchRequirement } from './requirements.js';
@@ -13,7 +14,6 @@ import { codeGraphDb, codeGraphErrorStatus, requirementsGraph } from '../core/re
 import type {
   CodeGraphData,
   CoreEvent,
-  LaunchPlan,
   RecordedEvent,
   RepoEntry,
   RepoFinding,
@@ -75,6 +75,7 @@ import { TestSetIndex } from '../qe/test-sets.js';
 import { estateExe, parseEstateTotals, resolveProjectGraphBinding } from '../projects/graph.js';
 import { registerProjectRoutes, type ProjectRoutesDeps } from '../projects/routes.js';
 import { registerPresetRoutes } from '../presets/routes.js';
+import { registerTeamRoutes } from '../team/routes.js';
 import { registerCampaignRoutes } from '../campaigns/routes.js';
 import { registerGovernanceWikiRoutes } from './governance-wiki.js';
 import {
@@ -476,25 +477,7 @@ const RegisterRepoSchema = z
 // The request-body schemas below are exported so `tests/wire-contract.test.ts` can prove, at
 // compile time, that every body the published contract (`wicked-crew-api-types`) lets a client
 // send is a body these schemas accept — the request-direction half of the drift guard (task #84).
-/** DES-TEAMING-002 §8.4 (seam T3) — a USER-COMPOSED plan: `steps[]` over the phase catalog (a
- *  step's `id` defaults to its catalog id), the predicted `touch` set (the intent score's input)
- *  and an optional MANUAL-mode floor `override`. The ENGINE validates every step key and every rule
- *  (compose, the floor, the override in auto mode); this schema only shapes the command. */
-export const PlanSchema = z.object({
-  steps: z
-    .array(z.object({ catalog: z.string().min(1), id: z.string().min(1).optional() }).passthrough())
-    .min(1),
-  touch: z.array(z.string().min(1)).max(64).optional(),
-  override: z.object({ remove: z.array(z.string().min(1)).min(1), reason: z.string().min(1) }).strict().optional(),
-}).strict();
-
-/** The parsed plan as the engine command's `LaunchPlan` (an absent optional stays absent). */
-function toLaunchPlan(p: z.infer<typeof PlanSchema>): LaunchPlan {
-  const plan: LaunchPlan = { steps: p.steps };
-  if (p.touch !== undefined) plan.touch = p.touch;
-  if (p.override !== undefined) plan.override = p.override;
-  return plan;
-}
+export { PlanSchema };
 
 export const LaunchSchema = z.object({
   problem: z.string().min(1),
@@ -561,10 +544,6 @@ export const LaunchSchema = z.object({
 }).strict().refine((b) => b.plan === undefined || b.workflow === undefined, {
   message: 'plan and workflow are mutually exclusive — a launch carries a plan or names a preset, not both',
   path: ['plan'],
-}).refine((b) => b.plan === undefined || b.deliver !== 'pr', {
-  message:
-    'deliver: "pr" with a plan is not wired yet (DES-TEAMING-002 T8) — launch the plan with deliver omitted or "none"',
-  path: ['deliver'],
 }).refine((b) => b.plan !== undefined || b.deliver !== 'pr' || b.workflow !== undefined, {
   message: 'deliver: "pr" requires a workflow — a free-text run has no def to append the deliver phase to',
   path: ['deliver'],
@@ -4839,6 +4818,10 @@ export function registerRoutes(
   // ── Presets (DES-TEAMING-002 §8.4, seam C2) — saved phase selections in the engine's store;
   // a launch names one via `workflow`, and the ENGINE resolves it.
   registerPresetRoutes(app, adapter, security);
+
+  // ── Team (DES-TEAMING-002 T8) — reads and commands over the engine; the live stream is the
+  // teamEvent relay (team/ws-relay.ts). Crew publishes no team fact (§4.0).
+  registerTeamRoutes(app, adapter, security);
 
   // ── Campaigns (crew#342 + TH-9) — the engine's durable Run-DAG scheduler over REST ──────────
   // Progress streams as campaign* CoreEvents on the existing allowlist-free /ws relay; these

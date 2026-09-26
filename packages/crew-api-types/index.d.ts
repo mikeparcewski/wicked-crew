@@ -3450,7 +3450,8 @@ export interface LaunchRunBody {
    * it, and holds it at a `plan_approval` gate (`awaiting_human{gate_kind:"plan_approval"}`) when
    * the approval matrix says so: always in manual mode, and in auto mode when high risk (band
    * 70-100 or destructive). Mutually exclusive with `workflow` (a plan or a preset).
-   * `deliver: "pr"` with a plan is not wired yet (DES-TEAMING-002 T8) and answers 400.
+   * `deliver: "pr"` with a plan (api-types 0.42.0, T8) hands the engine the deliver step, which it
+   * appends to the plan and puts in the floor; `deliver` omitted with a plan means `"none"`.
    */
   plan?: LaunchPlan;
   /**
@@ -6182,6 +6183,31 @@ export interface TeamLedgerFinding {
     seats: string[];
     reason: string | null;
   } | null;
+  /**
+   * (T6, api-types 0.42.0) The enclosing location the finding id is minted over (git's funcname
+   * heuristic). Omitted when file-level.
+   */
+  anchor?: string;
+  /** (T6, api-types 0.42.0) The attempt that first raised it, when it was carried into a redriven attempt. Omitted otherwise. */
+  carriedFromAttempt?: number;
+}
+
+/**
+ * (T6, DES-002 §8.8; api-types 0.42.0) The PA's review of a member's step, as the attempt that
+ * carried the review recorded it.
+ */
+export interface TeamStepReview {
+  stepId: string;
+  /** The member attempt the review is about. */
+  reviewedAttempt: number;
+  verdict: 'accepted' | 'rejected' | (string & {});
+  to: 'member' | 'pa' | (string & {}) | null;
+  reason: string;
+  /** On a rejection: `true` the member held (`HOLD`), `false` it accepted, `null` no answer on record. */
+  held: boolean | null;
+  memberReason: string | null;
+  /** The one-off council a hold convened. */
+  dispute: TeamLedgerFinding['dispute'];
 }
 
 /** DES-001 §7 `teamLedger` without its envelope: the fold of one attempt's team stream. */
@@ -6198,6 +6224,8 @@ export interface TeamLedger {
   }[];
   findings: TeamLedgerFinding[];
   rejected: { malformed: number; belowBar: number; unconfirmed: number; duplicate: number };
+  /** (T6, api-types 0.42.0) The PA's reviews of member steps this attempt carried. Omitted when none. */
+  stepReviews?: TeamStepReview[];
 }
 
 export type TeamLedgerFoldedPayload = TeamEnvelope & {
@@ -6283,3 +6311,145 @@ export interface TeamEventPayloads {
 export type TeamBusEvent = {
   [K in TeamEventType]: { event_type: K; payload: TeamEventPayloads[K] };
 }[TeamEventType];
+
+// ── The crew team surface (DES-TEAMING-002 T8; api-types 0.42.0) ─────────────────────────────
+//
+// Commands go through the API, facts go on the bus (§4.0). Crew RELAYS the engine's
+// `wicked.team.*` rows onto `/ws`, READS them back per run, and POSTs commands to the engine. It
+// publishes no team row.
+
+/**
+ * A `/ws` frame carrying one `wicked.team.*` bus row, relayed verbatim (the `interactiveEvent`
+ * pattern). `project_id` is set when the run's membership files it, as on every other frame.
+ */
+export interface TeamEventFrame {
+  type: 'teamEvent';
+  /** The whole bus row as wicked-bus delivers it. */
+  event: TeamBusEvent & { event_id: number; [k: string]: unknown };
+  project_id?: string;
+}
+
+/** One `wicked.team.*` bus row as `GET /runs/:id/team` returns it. */
+export type TeamRow = TeamBusEvent & {
+  event_id: number;
+  /** wicked-bus `emitted_at` (Unix millis). */
+  emitted_at: number;
+  /**
+   * Set on a `wicked.team.ledger.folded` row the unit's gate did NOT read: a `gate.opened
+   * {kind:"unit_review"}` for the same ord and attempt names another ledger (`ledger_ref` null,
+   * a synthesized ledger). `gate.opened.ledger_ref` is the only authority on what the gate read.
+   */
+  unused?: true;
+};
+
+/**
+ * One unit's team state in {@link RunTeamResponse}: the engine's persisted snapshot
+ * (`Core.runTeam`; the last five fields are `null` until the unit's attempt folded) plus the
+ * unit's bus rows.
+ */
+export interface RunTeamUnit {
+  ord: number;
+  /** `null` until the unit dispatched. */
+  transport: 'bus' | 'none' | (string & {}) | null;
+  reason: string | null;
+  /** Where the gate's ledger came from: folded by the supervisor, synthesized by the worker on the final-pass timeout, or local (no bus). */
+  ledgerSource: 'folded' | 'synthesized' | 'no_bus' | (string & {}) | null;
+  /** The supervisor row the gate read (`"ledger.folded#<ord>:<attempt>"`); `null` for a synthesized or local ledger. */
+  ledgerRef: string | null;
+  finalPass: 'completed' | 'timed_out' | 'skipped' | 'stream_gap' | (string & {}) | null;
+  /** An unresolved HIGH (or an incomplete record) stands without a council YES: the run pauses `team_dispute`. */
+  teamPause: boolean | null;
+  /** How many findings the attempt's ledger holds. */
+  findings: number | null;
+  /** The unit's bus rows (`payload.ord` = this ord), every attempt, ordered by `event_id`. Empty when the bus has none. */
+  rows: TeamRow[];
+  /**
+   * The folded ledger the gate read (the `ledger.folded` row `ledgerRef` names), or `null`: not
+   * folded yet, synthesized or local (read `UnitEvidence.team` on the evidence route), or the bus
+   * no longer has the row (the snapshot fields above still stand).
+   */
+  ledger: TeamLedger | null;
+}
+
+/**
+ * `GET /runs/:id/team`. The run's team transport and per-unit team state. A run that is not a team
+ * run (free text, a registered def: bug, chat, onboarding, …) answers `teamed: false`,
+ * `transport: null` and `units: []` — nothing to render, and no outage.
+ */
+export interface RunTeamResponse {
+  runId: string;
+  /** Whether the run is a team run at all. `false` ⇒ `transport` and `reason` are `null`. */
+  teamed: boolean;
+  /**
+   * For a team run: `"bus"`; `"none"` (the teamed run fell back to no team transport: render the
+   * "team transport unavailable" banner with `reason`); `"pending"` (not decided yet);
+   * `"unavailable"` (this daemon has no bus: the run is paused `team_transport` until the operator
+   * answers it). `null` for a run that is not a team run.
+   */
+  transport: 'bus' | 'none' | 'pending' | 'unavailable' | (string & {}) | null;
+  reason: string | null;
+  /** The first bus event id of the run's stream. */
+  streamFloor: number | null;
+  planRev: number | null;
+  /** The required fact the run waits on (its event type), if any. */
+  pending: string | null;
+  /** The run is terminal and its end is on record (a run that is not a team run: its status is terminal). */
+  ended: boolean;
+  units: RunTeamUnit[];
+  /** The run-level rows (`payload.ord` null: `path.*`, `plan.*`), ordered by `event_id`. */
+  rows: TeamRow[];
+}
+
+/**
+ * `POST /runs/:id/plan` body: a plan edit. Today the edit answers a `plan_approval` gate; a run off
+ * that gate answers 501 (a mid-run edit needs the engine's `proposePlan`, not in core-ts yet).
+ */
+export interface EditPlanBody {
+  plan: LaunchPlan;
+  /**
+   * The caller's id for this edit (DES-002 §6.1: the `plan.proposed` source of a mid-run human
+   * edit), so a retried POST proposes once. Accepted now; used once the engine's `proposePlan`
+   * lands (a gate edit is keyed on its gate id).
+   */
+  requestId?: string;
+}
+
+/** `POST /team/outbox/replay`: the engine's replay of `<state home>/team-outbox.ndjson`. */
+export interface TeamOutboxReplayReport {
+  /** `[idempotency key, bus event id]` of every fact that reached the bus, in publish order. */
+  published: Array<[string, number]>;
+  superseded: number;
+  invalid: number;
+  remaining: number;
+  /** `[run id, reason]` per lane that stopped. */
+  failures: Array<[string, string]>;
+}
+
+/** One phase type of the engine's catalog (`GET /catalog`): a `PhaseDef` keyed by its catalog `id`. */
+export interface CatalogEntry {
+  id: string;
+  [k: string]: unknown;
+}
+
+/** `GET /catalog`. */
+export interface CatalogResponse {
+  entries: CatalogEntry[];
+}
+
+/** `POST /plans/preview` body: a draft plan, previewed in a project's scope and gate mode. */
+export interface PlanPreviewBody {
+  plan: LaunchPlan;
+  projectId?: string;
+  /** The launch's gate mode (`humanConfirm` on `POST /runs`); absent = auto. */
+  humanConfirm?: string;
+}
+
+/** `POST /plans/preview`: the engine's floor fill of the draft (§8.5), as a launch would compute it. */
+export interface PlanPreviewResponse {
+  /** The floor-filled steps; each carries `added_by` and, when the floor added it, `floor_reason`. */
+  steps: TeamPlanStep[];
+  /** The catalog ids the floor added. */
+  added_by_floor: string[];
+  band: string;
+  high_risk: boolean;
+}
