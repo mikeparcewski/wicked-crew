@@ -25,7 +25,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
 import { CoreAdapter, engineSupportsPlanLaunch } from '../src/core/adapter.js';
-import { readBus } from '../src/core/bus.js';
+import { busTesting, readBus } from '../src/core/bus.js';
 import { createRequire } from 'node:module';
 import { createServer } from '../src/api/server.js';
 import type { SessionView } from '../src/core/types.js';
@@ -82,7 +82,12 @@ describe.skipIf(!ENGINE_HAS_TEAM)('crew seams beside the real engine on one bus 
     return (await adapter.sessionsDetail()).find((v) => v.session.id === runId);
   }
 
+  // The REAL engine answers every bus call here: the test double (tests/setup/bus-double.ts) is off,
+  // so an engine without Core.busEmit/busRead fails this file instead of the double standing in.
+  const double = busTesting.unattached;
+
   beforeAll(async () => {
+    busTesting.unattached = undefined;
     baseSkillOff();
     dir = mkdtempSync(join(tmpdir(), 'bus-seams-engine-'));
     busPath = join(dir, 'bus.db');
@@ -107,6 +112,7 @@ describe.skipIf(!ENGINE_HAS_TEAM)('crew seams beside the real engine on one bus 
   });
 
   afterAll(async () => {
+    busTesting.unattached = double;
     ws?.close();
     await app?.close();
     adapter?.close();

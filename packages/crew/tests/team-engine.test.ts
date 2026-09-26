@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
 import { CoreAdapter, engineSupportsPlanLaunch } from '../src/core/adapter.js';
-import { readBus } from '../src/core/bus.js';
+import { busTesting, readBus } from '../src/core/bus.js';
 import { createServer } from '../src/api/server.js';
 import type {
   CatalogResponse,
@@ -95,7 +95,12 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
     );
   }
 
+  // The REAL engine answers every bus call here: the test double (tests/setup/bus-double.ts) is off,
+  // so an engine without Core.busEmit/busRead fails this file instead of the double standing in.
+  const double = busTesting.unattached;
+
   beforeAll(async () => {
+    busTesting.unattached = undefined;
     baseSkillOff();
     dir = mkdtempSync(join(tmpdir(), 'team-engine-'));
     busPath = join(dir, 'bus.db');
@@ -120,6 +125,7 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
   });
 
   afterAll(async () => {
+    busTesting.unattached = double;
     ws?.close();
     await app?.close();
     adapter?.close();

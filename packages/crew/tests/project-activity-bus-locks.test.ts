@@ -16,7 +16,7 @@
 // the holder and the REAL `wicked-bus emit` CLI as the external emitter, and asserts the sidecar
 // inodes survive the feed reads and the engine keeps reading every row.
 
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -61,6 +61,15 @@ function externalEmit(dataDir: string, n: number): void {
 }
 
 describe('project activity feed vs the engine holding the bus (F-E2E-021)', () => {
+  // The REAL engine answers the bus calls: the test double is off for this file.
+  const double = busTesting.unattached;
+  beforeAll(() => {
+    busTesting.unattached = undefined;
+  });
+  afterAll(() => {
+    busTesting.unattached = double;
+  });
+
   it('reads the interactive half through the engine: external emitter closes leave bus.db-wal/-shm in place and every row is read', async () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'crew-fe2e021-'));
     const dbPath = join(dataDir, 'bus.db');
