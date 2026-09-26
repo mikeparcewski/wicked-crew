@@ -23,6 +23,8 @@ import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createInterface } from 'node:readline';
 
+import { childEnvWithBootEstateDb } from './governance-store.js';
+
 /** One row, as wicked-bus `emit` takes it. */
 export interface BusRow {
   event_type: string;
@@ -116,6 +118,8 @@ function writerFor(dbPath: string): Writer {
   const existing = writers.get(dbPath);
   if (existing !== undefined) return existing;
   const child = spawn(process.execPath, ['--input-type=module', '-e', CHILD, wickedBusUrl(), dbPath], {
+    // The daemon's governance store never reaches a child it does not own (crew#495).
+    env: childEnvWithBootEstateDb(),
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
   });
