@@ -1,13 +1,17 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.42.0",
+  "apiTypesVersion": "0.43.0",
   "endpoints": [
     {
       "method": "GET",
       "path": "/api/v1/audit",
       "requestType": null,
-      "responseType": null,
-      "statusCodes": []
+      "responseType": "AuditPage",
+      "statusCodes": [
+        200,
+        400,
+        500
+      ]
     },
     {
       "method": "GET",

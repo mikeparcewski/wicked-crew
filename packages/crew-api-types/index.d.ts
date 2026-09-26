@@ -84,7 +84,25 @@ export interface AuditEntry {
   [k: string]: unknown;
 }
 
-/** `GET /audit` — newest first, filterable by `?runId=` / `?action=` / `?limit=`. */
+/**
+ * `GET /audit`'s query (api-types 0.43.0 adds `since`). Every filter is optional and they
+ * compose (AND); an empty value is absent. A malformed `limit` or `since` answers 400.
+ */
+export interface AuditQuery {
+  runId?: string;
+  action?: string;
+  /** Max entries returned, newest first. Default 200, capped at 1000. */
+  limit?: number;
+  /**
+   * Inclusive lower bound on {@link AuditEntry.ts} (unix MILLIS): keep entries with
+   * `ts >= since`. Applied before `limit`. The "while you were away" read: a skin passes the
+   * operator's last-visit instant and gets what happened since, including `system` actors'
+   * actions (the stall watchdog's `run.stall.*` entries).
+   */
+  since?: number;
+}
+
+/** `GET /audit` — newest first, filterable by {@link AuditQuery} (`?runId=` / `?action=` / `?limit=` / `?since=`). */
 export interface AuditPage {
   entries: AuditEntry[];
 }

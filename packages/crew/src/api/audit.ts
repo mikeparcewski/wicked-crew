@@ -34,6 +34,9 @@ export function defaultAuditPath(env: NodeJS.ProcessEnv = process.env): string {
 export interface AuditReadFilter {
   runId?: string;
   action?: string;
+  /** Inclusive lower bound on the entry clock (`ts`, unix millis): keep entries with `ts >= since`.
+   *  Applied BEFORE `limit`, so `limit` trims the newest N of the in-window entries. */
+  since?: number;
   /** Max entries returned (newest first). Default 200, capped at 1000. */
   limit?: number;
 }
@@ -145,6 +148,7 @@ export class AuditLog {
         if (typeof e.ts !== 'number' || typeof e.action !== 'string') continue;
         if (filter?.runId !== undefined && e.runId !== filter.runId) continue;
         if (filter?.action !== undefined && e.action !== filter.action) continue;
+        if (filter?.since !== undefined && e.ts < filter.since) continue;
         entries.push(e);
       } catch {
         /* torn line — skip it, keep the trail readable */
