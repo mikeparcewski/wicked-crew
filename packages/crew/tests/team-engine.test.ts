@@ -34,8 +34,8 @@ const json = (body: unknown): RequestInit => ({
   body: JSON.stringify(body),
 });
 
-async function waitFor<T>(what: string, probeFn: () => Promise<T | undefined> | T | undefined): Promise<T> {
-  const deadline = Date.now() + 60_000;
+async function waitFor<T>(what: string, probeFn: () => Promise<T | undefined> | T | undefined, ms = 60_000): Promise<T> {
+  const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
     const got = await probeFn();
     if (got !== undefined) return got;
@@ -83,9 +83,31 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
       json({ problem: 'add SSO login', sessionId, clisJson: SEATS, plan: { steps: [{ catalog: 'build' }] }, ...extra }),
     );
     expect(res.status, await res.clone().text()).toBe(201);
-    await waitFor('the plan_approval pause', async () =>
-      (await viewOf(sessionId))?.session.status === 'awaiting_human' ? true : undefined,
-    );
+    try {
+      await waitFor('the plan_approval pause', async () =>
+        (await viewOf(sessionId))?.session.status === 'awaiting_human' ? true : undefined,
+        20_000,
+      );
+    } catch (e) {
+      // TEMP DIAG (crew main red after #675): what the engine is doing when the pause never comes.
+      const v = await viewOf(sessionId);
+      const safe = async (f: () => unknown) => { try { return await f(); } catch (x) { return String(x); } };
+      const { readdirSync, readFileSync, existsSync } = await import('node:fs');
+      console.error('T8DIAG', JSON.stringify({
+        sessionId,
+        status: v?.session.status,
+        units: v?.units.map((u) => [u.id, u.status]),
+        team: await safe(() => adapter.runTeam(sessionId)),
+        bridge: await safe(() => (adapter as unknown as { core: { busBridgeState(): string } }).core.busBridgeState()),
+        open: await safe(() => adapter.interactionRequests(sessionId, 'open')),
+        rows: await safe(() => busRows(sessionId).map((r) => r.event_type)),
+        quick: await safe(() => crewBusHandle(busPath, { create: false }).prepare('PRAGMA quick_check').all()),
+        dir: await safe(() => readdirSync(dir)),
+        outbox: await safe(() => (existsSync(join(dir, 'team-outbox.ndjson')) ? readFileSync(join(dir, 'team-outbox.ndjson'), 'utf8').slice(0, 3000) : 'none')),
+        events: await safe(async () => (await adapter.runEvents(sessionId))?.map((e) => (e as { type?: string }).type)),
+      }));
+      throw e;
+    }
   }
 
   beforeAll(async () => {
