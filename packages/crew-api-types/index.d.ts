@@ -497,6 +497,23 @@ export interface TeamPlanState {
   accepted_rev: number;
   /** The preset the launch named. ABSENT on a user plan. */
   preset?: string;
+  /**
+   * (wicked-core#633, DES-TEAMING-002 X1; api-types 0.47.0) PRESENT while the run's PA is scoping
+   * its launch plan — a creator plan or preset that declared no `touch` set. Until the `pa-scope`
+   * unit's boundary decides the plan, the run's only unit is `pa-scope` (plan rev 1): what the run
+   * will contain is not known yet. ABSENT once the plan is scoped (or when none needed scoping).
+   */
+  scope?: TeamPlanScopeHold;
+}
+
+/** The launch plan the PA is scoping (the engine's `ScopeHold`). */
+export interface TeamPlanScopeHold {
+  /** The launch plan as authored (the preset's steps or the user's plan), without `pa-scope`. */
+  plan: { steps: TeamPlanStep[] } & Record<string, unknown>;
+  /** The run has no repo: the PA rates the risk (`RISK`) instead of declaring a touch set. */
+  unbound: boolean;
+  /** The scope step's `SCOPE` / `RISK` lines once its turn folds; ABSENT until then. */
+  answer?: { ord: number; attempt: number; by: string; lines: string };
 }
 
 /**
@@ -3541,6 +3558,10 @@ export interface LaunchRunBody {
    * it, and holds it at a `plan_approval` gate (`awaiting_human{gate_kind:"plan_approval"}`) when
    * the approval matrix says so: always in manual mode, and in auto mode when high risk (band
    * 70-100 or destructive). Mutually exclusive with `workflow` (a plan or a preset).
+   * A creator plan with NO `touch` set — and every creator preset — is scoped by the run's PA
+   * first (wicked-core#633, X1): rev 1 is the read-only `pa-scope` step alone (unit ord 1), the
+   * scored plan is rev 2 proposed by the PA seat (`plan.proposed{by:<PA seat>}`), and its
+   * `plan_approval` gate, when one opens, is at ord 2. Declare `touch` to be scored at launch.
    * `deliver: "pr"` with a plan (api-types 0.42.0, T8) hands the engine the deliver step, which it
    * appends to the plan and puts in the floor; `deliver` omitted with a plan means `"none"`.
    */
@@ -6628,6 +6649,10 @@ export interface PlanPreviewResponse {
   pause_reason: 'manual_mode' | 'high_risk' | 'override' | (string & {}) | null;
   /** `"ready"`: the score read the repo's code graph. `"not_needed"`: a docs-only touch set (or no
    *  creator and no touch set). `"unavailable"`: the fail-closed score (no repo, no or a stale
-   *  graph, no declared scope — `reasons` says which). */
-  graph: 'ready' | 'not_needed' | 'unavailable';
+   *  graph — `reasons` says which). `"pending_pa_scope"` (wicked-core#633, DES-TEAMING-002 X1;
+   *  api-types 0.47.0): a creator plan with no `touch` set — the launch runs the PA's read-only
+   *  `pa-scope` step first and scores the plan from its answer, so `score`, `band` and the floor
+   *  shown are the baseline's with `pa-scope` first, NOT the plan's final risk, and `pauses` is
+   *  manual mode's alone (an auto-mode launch may still pause once the PA's scope lands high). */
+  graph: 'ready' | 'not_needed' | 'unavailable' | 'pending_pa_scope';
 }

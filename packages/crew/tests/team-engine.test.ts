@@ -58,11 +58,18 @@ async function waitFor<T>(what: string, probeFn: () => Promise<T | undefined> | 
 interface BusRow {
   event_id: number;
   event_type: string;
-  payload: { by?: string; kind?: string; run_id?: string };
+  payload: { by?: string; kind?: string; run_id?: string; base_rev?: number; plan_rev?: number };
 }
+
+// A declared scope keeps the plan's score, its `plan.proposed{by:"human"}` and its gate at LAUNCH
+// (rev 1, ord 1). A creator plan with no `touch` is scoped by the run's PA first (wicked-core#633,
+// X1) — pinned on its own below, since on a teamed rig with no supervisor its `pa-scope` unit waits
+// the engine's 30 s gate floor (`MIN_GATE_WAIT`) before it folds.
+const TOUCH = ['src/auth/sso.ts'];
 
 describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine and bus', () => {
   const savedBus = process.env['WICKED_BUS_DB'];
+  const savedFinalPass = process.env['WICKED_TEAM_FINAL_PASS_SECS'];
   let dir: string;
   let busPath: string;
   let adapter: CoreAdapter;
@@ -87,7 +94,7 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
   async function launchHeld(sessionId: string, extra: Record<string, unknown> = {}): Promise<void> {
     const res = await fetch(
       `${baseUrl}/api/v1/runs`,
-      json({ problem: 'add SSO login', sessionId, clisJson: SEATS, plan: { steps: [{ catalog: 'build' }] }, ...extra }),
+      json({ problem: 'add SSO login', sessionId, clisJson: SEATS, plan: { steps: [{ catalog: 'build' }], touch: TOUCH }, ...extra }),
     );
     expect(res.status, await res.clone().text()).toBe(201);
     await waitFor('the plan_approval pause', async () =>
@@ -102,6 +109,10 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
   beforeAll(async () => {
     busTesting.unattached = undefined;
     baseSkillOff();
+    // No team supervisor runs on this bus, so a unit's gate wait never sees a fold and runs its
+    // whole final-pass budget (300 s by default). Shrink it to the engine's floor, `MIN_GATE_WAIT`
+    // (30 s), before the engine reads it: the X1 `pa-scope` case below waits exactly that.
+    process.env['WICKED_TEAM_FINAL_PASS_SECS'] = '1';
     dir = mkdtempSync(join(tmpdir(), 'team-engine-'));
     busPath = join(dir, 'bus.db');
     // The engine creates and holds the bus; crew opens no SQLite of its own (wicked-core#631).
@@ -132,6 +143,8 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
     removeScratch(dir);
     if (savedBus === undefined) delete process.env['WICKED_BUS_DB'];
     else process.env['WICKED_BUS_DB'] = savedBus;
+    if (savedFinalPass === undefined) delete process.env['WICKED_TEAM_FINAL_PASS_SECS'];
+    else process.env['WICKED_TEAM_FINAL_PASS_SECS'] = savedFinalPass;
   });
 
   it('(a)(f) every team row reaches /ws as teamEvent, tagged project_id; plan.proposed{by:"human"} precedes the first dispatch', async () => {
@@ -240,14 +253,15 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
 
   it.skipIf(!ENGINE_HAS_T8_BINDINGS)('(e) POST /plans/preview: the launch decision in the engine shape; floor steps are marked; nothing is launched', async () => {
     const before = (await adapter.sessionsDetail()).length;
-    const res = await fetch(`${baseUrl}/api/v1/plans/preview`, json({ plan: { steps: [{ catalog: 'build' }] } }));
+    const res = await fetch(`${baseUrl}/api/v1/plans/preview`, json({ plan: { steps: [{ catalog: 'build' }], touch: TOUCH } }));
     expect(res.status, await res.clone().text()).toBe(200);
     const p = (await res.json()) as PlanPreviewResponse;
     expect(Object.keys(p).sort()).toEqual([
       'band', 'def', 'destructive', 'deterministic', 'floor', 'floor_override', 'graph', 'high_risk', 'pause_reason',
       'pauses', 'reasons', 'score', 'steps',
     ]);
-    // No declared scope: the fail-closed score, high risk, and the launch would pause for approval.
+    // A declared scope with no repo to read: the fail-closed score, high risk, and the launch would
+    // pause for approval.
     expect(p.graph).toBe('unavailable');
     expect(p.high_risk).toBe(true);
     expect(p.pauses).toBe(true);
@@ -259,6 +273,66 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
     expect(p.def.phases.map((ph) => ph.id)).toEqual(p.steps.map((s) => s.id));
     expect((await adapter.sessionsDetail()).length).toBe(before);
   });
+
+  it.skipIf(!ENGINE_HAS_T8_BINDINGS)('(e) POST /plans/preview X1: a creator plan with no touch is pending its PA scope — never the fail-closed score as if final', async () => {
+    const res = await fetch(`${baseUrl}/api/v1/plans/preview`, json({ plan: { steps: [{ catalog: 'build' }] } }));
+    expect(res.status, await res.clone().text()).toBe(200);
+    const p = (await res.json()) as PlanPreviewResponse;
+    expect(p.graph).toBe('pending_pa_scope');
+    // The baseline's score and band, the PA's read-only `pa-scope` step first; auto mode does not
+    // pause yet (the PA's scope may still land high once the run scopes it).
+    expect(p.score).toBe(0);
+    expect(p.band).toBe('0-19');
+    expect(p.high_risk).toBe(false);
+    expect(p.pauses).toBe(false);
+    expect(p.reasons[0]).toMatch(/^pending the PA's scope/);
+    expect(p.steps.map((s) => [s.catalog, s.id])).toEqual([
+      ['understand', 'pa-scope'],
+      ['build', 'build'],
+    ]);
+    expect(p.def.phases[0]?.id).toBe('pa-scope');
+  });
+
+  it('X1: a plan with no touch runs `pa-scope` first; the scored plan is proposed by the PA seat as rev 2', async () => {
+    // Teamed rig, no supervisor on the bus: the `pa-scope` unit folds only after its gate wait, the
+    // engine's 30 s floor (`MIN_GATE_WAIT`; WICKED_TEAM_FINAL_PASS_SECS is set to 1 above), so this
+    // waits past the default test timeout.
+    const res = await fetch(
+      `${baseUrl}/api/v1/runs`,
+      json({ problem: 'add SSO login', sessionId: 't8-x1', clisJson: SEATS, plan: { steps: [{ catalog: 'build' }] } }),
+    );
+    expect(res.status, await res.clone().text()).toBe(201);
+    // Before the scope step decides: rev 1 is `pa-scope` alone, and the run is still scoping.
+    const early = await waitFor('the pa-scope unit', async () => {
+      const v = await viewOf('t8-x1');
+      return v && v.units.length > 0 ? v : undefined;
+    });
+    expect(early.units[0]?.id).toBe('t8-x1:pa-scope');
+    const proposals = async () =>
+      (await busRows('t8-x1')).filter((r) => r.event_type === 'wicked.team.plan.proposed');
+    const pa = await waitFor('the PA seat\'s plan.proposed', async () =>
+      (await proposals()).find((r) => r.payload.by !== 'human'),
+    );
+    // The launch proposed rev 1 (`pa-scope`); the PA's answer proposes the scored plan on top of it.
+    expect(pa.payload.by).toMatch(/^(alpha|beta)/);
+    expect(pa.payload).toMatchObject({ kind: 'initial', base_rev: 1 });
+    // The scored plan is held at its plan_approval gate at ord 2 (fail closed at 100: no SCOPE line).
+    const v = await waitFor('the plan_approval pause at ord 2', async () => {
+      const view = await viewOf('t8-x1');
+      return view?.session.status === 'awaiting_human' ? view : undefined;
+    });
+    expect(v.units[0]?.id).toBe('t8-x1:pa-scope');
+    expect(v.units.length).toBeGreaterThan(2);
+    expect(v.session.team_plan).toMatchObject({ rev: 2, accepted_rev: 1 });
+    expect(v.session.team_plan?.scope).toBeUndefined();
+    const open = (await adapter.interactionRequests('t8-x1', 'open')) ?? [];
+    expect(open.map((r) => [(r as { gate_kind?: string }).gate_kind, r.ord])).toEqual([['plan_approval', 2]]);
+    // The relay carried the PA's proposal to /ws like every other team row.
+    await waitFor('the relayed PA proposal', () =>
+      teamFrames('t8-x1').some((f) => f.event.event_id === pa.event_id) ? true : undefined,
+    );
+    expect((await fetch(`${baseUrl}/api/v1/runs/t8-x1/cancel`, { method: 'POST' })).status).toBe(200);
+  }, 120_000);
 
   it.skipIf(!ENGINE_HAS_T8_BINDINGS)('(e) POST /plans/preview: deliver "pr" puts the launch deliver step in the floor; a refused draft and an unknown repo are 400s', async () => {
     const delivered = await fetch(`${baseUrl}/api/v1/plans/preview`, json({ plan: { steps: [{ catalog: 'build' }] }, deliver: 'pr' }));

@@ -70,7 +70,9 @@ export function phaseIdOf(unitId: string): string {
  * A PRESET or USER-PLAN run (seam X2) is judged by what it CONTAINS, never by a def looked up by
  * name: it could deliver when one of its planned units does code work (`executes_code`, not the
  * evaluator's — the same rule as {@link isCodeWorkDef}, over the units the engine planned). With
- * no planned units yet it stays a candidate. `def` is not read for such a run.
+ * no planned units yet it stays a candidate, and so does a run whose PA is still scoping its plan
+ * (`team_plan.scope`, wicked-core#633 X1): its only unit is the read-only `pa-scope` step, which
+ * says nothing about what the plan will contain. `def` is not read for such a run.
  */
 export function runCanDeliver(view: SessionView, def: WorkflowDef | null): boolean {
   const units = view.units ?? [];
@@ -80,7 +82,8 @@ export function runCanDeliver(view: SessionView, def: WorkflowDef | null): boole
   }
   const kind = view.session !== undefined ? runIdentityOf(view).kind : 'unknown';
   if (kind === 'preset' || kind === 'user_plan') {
-    return units.length === 0 || units.some((u) => u.executes_code === true && u.role !== 'evaluator');
+    if (units.length === 0 || view.session?.team_plan?.scope != null) return true;
+    return units.some((u) => u.executes_code === true && u.role !== 'evaluator');
   }
   if (def === null) return true;
   return isCodeWorkDef(def);
