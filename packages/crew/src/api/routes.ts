@@ -20,7 +20,7 @@ import type {
   WorkflowDef,
 } from '../core/types.js';
 import { resolveCursorUnit } from '../core/cursor.js';
-import { detectRefusal, type GateCache } from './gate-cache.js';
+import { detectRefusal, type GateCache, type GateCacheEntry } from './gate-cache.js';
 import type { ElicitationCache } from './elicitation-cache.js';
 import { QeGateCache } from '../qe/gate-events.js';
 import { buildAcceptanceView, resolveRunWorkflow } from '../qe/acceptance.js';
@@ -579,6 +579,9 @@ export const GateSchema = z.object({
   amendScope: z.enum(['cursor', 'creator']).optional(),
   /** DES-TEAMING-002 T3 — approve a `plan_approval` gate WITH AN EDIT (`GateDecision.plan`). */
   plan: PlanSchema.optional(),
+  /** api-types 0.44.0 — the gate this decision answers (its unit `ord`). A mismatch with the run's
+   *  open gate is a 409 `gate_changed`: the decision was made on a gate that is no longer open. */
+  ord: z.number().int().nonnegative().optional(),
 }).strict().refine(
   (b) => b.action === undefined || (b.action === 'approve' || b.action === 'edit_plan') === b.approve,
   { message: '`action` disagrees with `approve`: request_changes and reject require approve: false; approve and edit_plan require approve: true', path: ['action'] },
@@ -2989,6 +2992,40 @@ export function registerRoutes(
     });
   });
 
+  /**
+   * The run's OPEN gate, resolved the way `GET /runs/:id/gate` serves it: the cache, then the
+   * engine's durable `interaction_requests` row (adopted into the cache), then the event-log replay.
+   * The caller has already checked `awaiting_human`. `null` = the log records no open gate;
+   * `'no-log'` = this build cannot read the log, so nothing can be said.
+   */
+  async function resolveOpenGate(id: string): Promise<GateCacheEntry | null | 'no-log'> {
+    const cached = gateCache.get(id);
+    if (cached) return cached;
+    const durableRows =
+      typeof adapter.interactionRequests === 'function'
+        ? await adapter.interactionRequests(id, 'open')
+        : null;
+    const durableGate = durableRows?.find((r) => r.kind === 'gate');
+    if (durableGate !== undefined) {
+      // This path builds the entry inline (not through `fold`), so it must run the SAME refusal
+      // detection (issue #419) — otherwise a gate served from the durable row after a restart would
+      // silently drop the warning that the live/replay paths carry.
+      const refusal = detectRefusal(durableGate.prompt);
+      const entry = {
+        ord: durableGate.ord ?? 0,
+        prompt: durableGate.prompt,
+        lifecycle: 'open' as const,
+        receivedAt: new Date(durableGate.created_at).toISOString(),
+        ...(refusal !== undefined ? { refusal } : {}),
+      };
+      gateCache.adopt(id, entry);
+      return entry;
+    }
+    const events = await adapter.runEvents(id);
+    if (events === null) return 'no-log';
+    return gateCache.rebuild(id, events) ?? null;
+  }
+
   // The steering gate (§11.1). approve+amend = approve-with-steer; approve:false = reject (cancels).
   app.post(
     `${V}/runs/:id/gate`,
@@ -3016,6 +3053,21 @@ export function registerRoutes(
       return reply
         .code(409)
         .send({ error: `Run is not awaiting a human gate (status: ${run.session.status})` });
+    }
+    // api-types 0.44.0: a decision that names its gate answers THAT gate or nothing. An open gate
+    // the daemon cannot resolve (no cache, no durable row, no log binding, or a log recording no
+    // open gate) proves no change, so the status check above stands alone — as it did before `ord`.
+    if (parsed.data.ord !== undefined) {
+      const open = await resolveOpenGate(id);
+      if (open !== null && open !== 'no-log' && open.ord !== parsed.data.ord) {
+        return reply.code(409).send({
+          error:
+            `Gate changed: this decision was made on the gate before unit ${parsed.data.ord}, but the open gate `
+            + `is before unit ${open.ord} — it was answered or replaced. Read the open gate before deciding.`,
+          code: 'gate_changed',
+          openOrd: open.ord,
+        });
+      }
     }
     // The steering-author landing (crew#388): decided — and the gate prompt captured — BEFORE
     // the confirm, because a terminal-phase approve prunes the gate cache and moves the run out
@@ -3050,6 +3102,7 @@ export function registerRoutes(
           ...(parsed.data.action !== undefined ? { action: parsed.data.action } : {}),
           ...(parsed.data.amendScope !== undefined ? { amendScope: parsed.data.amendScope } : {}),
           ...(parsed.data.plan !== undefined ? { planSteps: parsed.data.plan.steps.length } : {}),
+          ...(parsed.data.ord !== undefined ? { ord: parsed.data.ord } : {}),
           status,
         },
       });
@@ -3282,36 +3335,12 @@ export function registerRoutes(
     }
 
     // DURABLE TRUTH FIRST (DES-PROJECT-001 §5.3): the engine persists the open prompt in
-    // `interaction_requests`, written in the same transaction as the `awaiting_human` pause —
-    // so a daemon restart reads it back directly instead of replaying the event log. The cache
-    // adopts the row (latency layer over durable truth — its comments finally true). The replay
-    // below stays as the FALLBACK, not just for engines predating the binding: a run parked
-    // BEFORE the engine grew the table is awaiting_human with no row, and answering 404 there
-    // would re-open FINDING-051 for exactly the runs mid-upgrade. Row → serve it; no row →
-    // fall through and let the log speak.
-    const durableRows =
-      typeof adapter.interactionRequests === 'function'
-        ? await adapter.interactionRequests(id, 'open')
-        : null;
-    const durableGate = durableRows?.find((r) => r.kind === 'gate');
-    if (durableGate !== undefined) {
-      // This path builds the entry inline (not through `fold`), so it must run the SAME refusal
-      // detection (issue #419) — otherwise a gate served from the durable row after a restart would
-      // silently drop the warning that the live/replay paths carry.
-      const refusal = detectRefusal(durableGate.prompt);
-      const entry = {
-        ord: durableGate.ord ?? 0,
-        prompt: durableGate.prompt,
-        lifecycle: 'open' as const,
-        receivedAt: new Date(durableGate.created_at).toISOString(),
-        ...(refusal !== undefined ? { refusal } : {}),
-      };
-      gateCache.adopt(id, entry);
-      return { runId: id, ...entry };
-    }
-
-    const events = await adapter.runEvents(id);
-    if (events === null) {
+    // `interaction_requests`, written in the same transaction as the `awaiting_human` pause — so a
+    // daemon restart reads it back instead of replaying the log; the replay stays the FALLBACK for
+    // runs parked before the engine grew the table. `resolveOpenGate` is that one resolution, shared
+    // with the POST route's `ord` check.
+    const open = await resolveOpenGate(id);
+    if (open === 'no-log') {
       // Now — and only now — 503 is the honest answer: this run really is holding for a human, and
       // this build cannot say what it is asking. Distinct cause, distinct message; answering "no
       // gate" here would report a capability gap as a fact about the run (the FINDING-050 shape).
@@ -3319,13 +3348,12 @@ export function registerRoutes(
         error: 'Gate history is unavailable: this wicked-core build has no event-log read binding',
       });
     }
-    const replayed = gateCache.rebuild(id, events);
-    if (!replayed) {
+    if (open === null) {
       // Parked, with a history that records no open gate. Pre-log runs land here (their prompt is
       // genuinely lost), as does a gate whose `awaitingHuman` predates the log's retention.
       return reply.code(404).send({ error: 'No open gate for this run' });
     }
-    return { runId: id, ...replayed };
+    return { runId: id, ...open };
   });
 
   // ── Elicitation (DES-002) ────────────────────────────────────────────────────

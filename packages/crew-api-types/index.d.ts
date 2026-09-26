@@ -812,6 +812,16 @@ export interface GateDecision {
    * (no `plan`) releases the held plan as it is; `approve: false` rejects (cancels).
    */
   plan?: LaunchPlan;
+  /**
+   * The gate this decision answers — the unit `ord` its open gate paused before, as `GET
+   * /runs/:id/gate` served it (api-types 0.44.0, additive). When present the daemon compares it to
+   * the run's open gate and answers **409** `{ error, code: 'gate_changed', openOrd }` on a
+   * mismatch, confirming nothing: the gate was answered elsewhere or replaced while the decision
+   * waited (a skin's undo window). An open gate the daemon cannot resolve proves no change, so the
+   * decision proceeds under the existing `awaiting_human` check. Absent = today's behaviour. An
+   * older daemon's strict schema refuses the key with a 400 — omit it against such servers.
+   */
+  ord?: number;
 }
 
 /**
