@@ -73,6 +73,45 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
       )
       .all(run) as BusRow[];
 
+  /** TEMP DIAG: the same question asked three ways — the engine's persisted view, crew's
+   *  in-process handle, and a SEPARATE process reading the file — so a hang says who is blind. */
+  async function hangReport(tag: string, runId: string): Promise<string> {
+    const { readFileSync, existsSync, readdirSync, statSync } = await import('node:fs');
+    const { spawnSync } = await import('node:child_process');
+    const safe = (f: () => unknown) => { try { return f(); } catch (x) { return String(x); } };
+    const race = <T,>(p: Promise<T>, ms: number) =>
+      Promise.race([p, new Promise<'TIMEOUT'>((r) => setTimeout(() => r('TIMEOUT'), ms))]);
+    const child = spawnSync(process.execPath, ['-e', `
+      const D = require(require.resolve('better-sqlite3', { paths: [require.resolve('wicked-bus')] }));
+      const db = new D(process.argv[1], { readonly: true, fileMustExist: true });
+      const rows = db.prepare("SELECT event_id, event_type FROM events WHERE event_type LIKE 'wicked.team.%' AND json_extract(payload,'$.run_id') = ? ORDER BY event_id").all(process.argv[2]);
+      const max = db.prepare('SELECT MAX(event_id) AS m FROM events').get();
+      process.stdout.write(JSON.stringify({ max, rows: rows.map((r) => r.event_id + ':' + r.event_type) }));
+    `, busPath, runId], { encoding: 'utf8', timeout: 10000, cwd: process.cwd() });
+    return 'T8HANG ' + tag + ' ' + JSON.stringify({
+      runId,
+      team: await race(adapter.runTeam(runId).catch((x) => String(x)), 3000),
+      view: await race(viewOf(runId).then((v) => (v ? [v.session.status, v.units.map((u) => u.status)] : 'none')), 3000),
+      crewRows: safe(() => busRows(runId).map((r) => `${r.event_id}:${r.event_type}`)),
+      crewMax: safe(() => crewBusHandle(busPath, { create: false }).prepare('SELECT MAX(event_id) AS m FROM events').all()),
+      childProcess: child.stdout || child.stderr || String(child.error),
+      frames: teamFrames(runId).map((f) => `${f.event.event_id}:${f.event.event_type}`),
+      files: safe(() => readdirSync(dir).filter((f) => f.startsWith('bus') || f.startsWith('team')).map((f) => `${f}:${statSync(join(dir, f)).size}`)),
+      outbox: safe(() => (existsSync(join(dir, 'team-outbox.ndjson')) ? readFileSync(join(dir, 'team-outbox.ndjson'), 'utf8').slice(0, 1500) : 'none')),
+    });
+  }
+
+  /** TEMP DIAG: a bounded wait that fails with the hang report instead of the test timeout. */
+  async function waitOrReport<T>(tag: string, runId: string, probe: () => T | undefined): Promise<T> {
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      const got = probe();
+      if (got !== undefined) return got;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    throw new Error(await hangReport(tag, runId));
+  }
+
   async function viewOf(runId: string): Promise<SessionView | undefined> {
     return (await adapter.sessionsDetail()).find((v) => v.session.id === runId);
   }
@@ -225,12 +264,12 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
     const project = await adapter.projectCreate('t8-project');
     console.error('T8STEP projectCreate done', Date.now());
     await launchHeld('t8-a', { projectId: project.id });
-    await waitFor('the relayed plan.proposed', () =>
+    await waitOrReport('relayed plan.proposed', 't8-a', () =>
       teamFrames('t8-a').some((f) => f.event.event_type === 'wicked.team.plan.proposed') ? true : undefined,
     );
     // Every row on the bus for the run arrived, in event_id order, each tagged with the project.
     const rows = busRows('t8-a');
-    await waitFor('every row relayed', () => (teamFrames('t8-a').length >= rows.length ? true : undefined));
+    await waitOrReport('every row relayed', 't8-a', () => (teamFrames('t8-a').length >= rows.length ? true : undefined));
     const relayed = teamFrames('t8-a');
     expect(relayed.map((f) => f.event.event_id)).toEqual(rows.map((r) => r.event_id));
     expect(relayed.every((f) => f.project_id === project.id)).toBe(true);
@@ -239,7 +278,7 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
 
     // Approve: the first unit dispatches only after the human plan fact.
     expect((await fetch(`${baseUrl}/api/v1/runs/t8-a/gate`, json({ approve: true }))).status).toBe(200);
-    const claimed = await waitFor('the first step.claimed', () =>
+    const claimed = await waitOrReport('the first step.claimed', 't8-a', () =>
       busRows('t8-a').find((r) => r.event_type === 'wicked.team.step.claimed'),
     );
     expect(proposed.event.event_id).toBeLessThan(claimed.event_id);
@@ -290,7 +329,7 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
         const p = JSON.parse(r.payload) as { by?: string; kind?: string };
         return r.event_type === 'wicked.team.plan.proposed' && p.by === 'human' && p.kind === 'edit';
       });
-    await waitFor('the edit fact', () => (edits().length === 1 ? true : undefined));
+    await waitOrReport('the edit fact', 't8-c', () => (edits().length === 1 ? true : undefined));
     expect(confirms).toBe(1);
     // The gate is answered and the run moved on: crew refuses the repeat itself (a mid-run edit is
     // the engine's proposePlan, not in core-ts yet) — the engine is never asked twice.
