@@ -21,7 +21,7 @@ function scriptedEngine() {
   let rows: BusEvent[] = [];
   let nextId = 1;
   const emitted: string[] = [];
-  const reads: Array<{ afterId: number; limit: number; typePrefix: string | null | undefined }> = [];
+  const reads: Array<{ afterId: number; limit: number; typePrefix: string | null | undefined; includeExpired: boolean | null | undefined }> = [];
   const engine: EngineBus = {
     async busEmit(eventJson) {
       emitted.push(eventJson);
@@ -32,8 +32,8 @@ function scriptedEngine() {
       rows.push(row);
       return row.event_id;
     },
-    async busRead(afterId, limit, typePrefix) {
-      reads.push({ afterId, limit, typePrefix });
+    async busRead(afterId, limit, typePrefix, includeExpired) {
+      reads.push({ afterId, limit, typePrefix, includeExpired });
       const tail = rows.length === 0 ? 0 : rows[rows.length - 1]!.event_id;
       if (afterId > tail) return JSON.stringify({ next: 0, rows: [] });
       if (limit === 0) return JSON.stringify({ next: tail, rows: [] });
@@ -114,7 +114,11 @@ describe('crew bus through the engine (wicked-core#631)', () => {
     const rows = await readBus(PATH, 'wicked.team.');
     expect(rows).toHaveLength(602);
     expect(rows.map((r) => (r.payload as { i: number }).i)).toEqual(Array.from({ length: 602 }, (_, k) => k * 2));
-    expect(s.reads.every((r) => r.typePrefix === 'wicked.team.' && r.limit === 500)).toBe(true);
+    expect(s.reads.every((r) => r.typePrefix === 'wicked.team.' && r.limit === 500 && r.includeExpired === false)).toBe(true);
+    // A history read asks the engine for expired rows too.
+    s.reads.length = 0;
+    await readBus(PATH, 'wicked.team.', { history: true });
+    expect(s.reads.every((r) => r.includeExpired === true)).toBe(true);
   });
 
   it('a tap starts at the tail, relays matching rows in order, and reads with the filter prefix', async () => {
@@ -240,5 +244,18 @@ describe('crew bus through the engine (wicked-core#631)', () => {
     await s.push('wicked.a.b', { n: 10 }); // event_id 1 in the NEW file, below the old cursor
     await until(() => seen.includes(10));
     expect(seen).toEqual([1, 2, 3, 10]);
+  });
+});
+
+describe('the test double keeps the engine emit contract (tests/setup/bus-double.ts)', () => {
+  it('refuses an unknown field and a non-integer ttl_hours with WB-001, as the engine does', async () => {
+    const { mkdtempSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dbPath = join(mkdtempSync(join(tmpdir(), 'bus-double-')), 'bus.db');
+    const base = { event_type: 'wicked.a.b', domain: 'd', payload: {} };
+    await expect(emitOnBus(dbPath, { ...base, metadata: {} } as unknown as Parameters<typeof emitOnBus>[1])).rejects.toThrow(/^WB-001/);
+    await expect(emitOnBus(dbPath, { ...base, ttl_hours: 1.5 })).rejects.toThrow(/^WB-001/);
+    expect(await emitOnBus(dbPath, { ...base, ttl_hours: 2 })).toBeGreaterThan(0);
   });
 });

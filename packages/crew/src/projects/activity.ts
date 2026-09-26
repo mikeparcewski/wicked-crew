@@ -9,7 +9,7 @@
  *   `bus:<event_id>`. Crew opens no SQLite of its own: a second SQLite library on the engine's bus
  *   file in the same process drops the engine's POSIX locks on its close (F-E2E-021), which is
  *   why this read used to need a long-lived handle and now needs none. The newest 1000 live
- *   interactive rows for the project are read.
+ *   interactive rows for the project are read, expired ones included: the feed is history.
  *
  * Newest-first, cursor on `(ts, id)` — an opaque `<ts>:<id>` token, base64url. The merge is
  * recomputed per read; members are few and the log excludes high-volume frames, so the simple
@@ -111,7 +111,8 @@ async function interactiveEntries(
   if (busDbPath === null) return [];
   const entries: ActivityEntry[] = [];
   try {
-    const rows = (await readBus(busDbPath, 'wicked.interactive.'))
+    // History: rows past the bus TTL stay in the feed (nothing sweeps the daemon's bus).
+    const rows = (await readBus(busDbPath, 'wicked.interactive.', { history: true }))
       .filter((r) => (r.payload as { project_id?: unknown } | null)?.project_id === projectId)
       .sort((x, y) => y.emitted_at - x.emitted_at)
       .slice(0, 1000);

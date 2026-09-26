@@ -26,7 +26,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
-import { QeGateCache } from '../src/qe/gate-events.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
 import { DeliveryIndex, gitWorktreeIsClean } from '../src/api/delivery-index.js';
 import { AuditLog } from '../src/api/audit.js';
@@ -123,7 +122,6 @@ function buildApp(views: SessionView[], runtimeOver: Partial<RuntimeDeps> = {}):
     adapter,
     new GateCache(),
     new ElicitationCache(),
-    new QeGateCache(),
     { bus: null, index: new MembershipIndex(), log: () => undefined },
     { audit: AuditLog.noop(), authMode: 'off' },
     {

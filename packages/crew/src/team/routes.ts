@@ -82,7 +82,8 @@ function unteamed(runId: string, status: SessionStatus): RunTeamResponse {
 async function busRows(busDbPath: string | undefined, runId: string): Promise<TeamRow[]> {
   if (busDbPath === undefined) return [];
   try {
-    const rows = await readBus(busDbPath, 'wicked.team.');
+    // History: a finished run's rows stay readable past the bus TTL (nothing sweeps the daemon's bus).
+    const rows = await readBus(busDbPath, 'wicked.team.', { history: true });
     return rows
       .filter((r) => (r.payload as { run_id?: unknown } | null)?.run_id === runId)
       .map(

@@ -452,8 +452,9 @@ interface BusBridgeMethods {
   /** wicked-core#631 (wicked-core-ts ≥ the release carrying it): emit one wicked-bus row on the
    *  engine's bus; resolves to its event id (a key already on the bus → the existing row's id). */
   busEmit?(eventJson: string): Promise<number>;
-  /** wicked-core#631: live rows after a cursor, filtered by type prefix — JSON `{ next, rows }`. */
-  busRead?(afterId: number, limit: number, typePrefix?: string | null): Promise<string>;
+  /** wicked-core#631: rows after a cursor, filtered by type prefix (live ones unless
+   *  `includeExpired`) — JSON `{ next, rows }`. */
+  busRead?(afterId: number, limit: number, typePrefix?: string | null, includeExpired?: boolean | null): Promise<string>;
 }
 
 type CoreHandleFull = CoreHandle &
@@ -1244,6 +1245,9 @@ export class CoreAdapter {
   /** Why the engine has no usable bus — the boot probe's failure, or the engine could not arm its
    *  bus bridge on the handed bus within its bound — else `null`. */
   readonly busUnavailable: BusUnavailable | null;
+  /** The bus file whose seams are off because the linked engine has no `Core.busEmit`/`busRead`
+   *  (wicked-core#631) — `/health.warnings` says so — else `null`. */
+  readonly busSeamsOff: string | null = null;
   /** The engine's bus calls, attached for `busDbPath` (core/bus.ts); `null` without a bus. */
   private engineBus: EngineBus | null = null;
   /**
@@ -1379,10 +1383,11 @@ export class CoreAdapter {
       if (typeof core.busEmit === 'function' && typeof core.busRead === 'function') {
         this.engineBus = {
           busEmit: (eventJson) => core.busEmit!(eventJson),
-          busRead: (afterId, limit, typePrefix) => core.busRead!(afterId, limit, typePrefix),
+          busRead: (afterId, limit, typePrefix, includeExpired) => core.busRead!(afterId, limit, typePrefix, includeExpired),
         };
         attachEngineBus(this.busDbPath, this.engineBus);
       } else {
+        (this as { busSeamsOff: string | null }).busSeamsOff = this.busDbPath;
         console.error(
           `[crew] the linked wicked-core-ts has no Core.busEmit/busRead (wicked-core#631) — crew's bus seams on ${this.busDbPath} stay off; upgrade the engine`,
         );

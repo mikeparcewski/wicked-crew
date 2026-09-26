@@ -128,7 +128,7 @@ describe('GET /runs — document_id on the DTO and the ?doc= filter', () => {
       listRepos: vi.fn().mockResolvedValue([]),
     };
     app = Fastify({ logger: false });
-    registerRoutes(app, mockAdapter as unknown as CoreAdapter, new GateCache(), new ElicitationCache(), undefined, undefined, undefined, {
+    registerRoutes(app, mockAdapter as unknown as CoreAdapter, new GateCache(), new ElicitationCache(), undefined, undefined, {
       docRuns,
     });
     await app.ready();

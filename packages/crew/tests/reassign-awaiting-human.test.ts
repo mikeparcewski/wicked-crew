@@ -65,7 +65,7 @@ describe('POST /runs/:id/reassign on an awaiting_human run (F-7R2-007)', () => {
       }),
     };
     app = Fastify({ logger: false });
-    registerRoutes(app, mockAdapter as unknown as CoreAdapter, new GateCache(), new ElicitationCache(), undefined, undefined, {
+    registerRoutes(app, mockAdapter as unknown as CoreAdapter, new GateCache(), new ElicitationCache(), undefined, {
       audit,
       authMode: 'off',
     });

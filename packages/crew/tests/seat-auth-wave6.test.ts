@@ -159,7 +159,7 @@ describe('GET /roster + POST /chats with the seat’s own evidence (F-A45-006 / 
       chatClose: async () => undefined,
     } as unknown as CoreAdapter;
     app = Fastify({ logger: false });
-    registerRoutes(app, adapter, new GateCache(), new ElicitationCache(), undefined, undefined, undefined, {
+    registerRoutes(app, adapter, new GateCache(), new ElicitationCache(), undefined, undefined, {
       seatHealth,
       chatScopes,
       signedIn: (seatKey) => signedIn(seatKey),

@@ -47,7 +47,7 @@ describe('repo surfaces — a current engine with no repo-graph root answers 503
   async function build(repos: RepoEntry[]): Promise<void> {
     const adapter = { listRepos: vi.fn().mockResolvedValue(repos) } as unknown as CoreAdapter;
     app = Fastify({ logger: false });
-    registerRoutes(app, adapter, new GateCache(), new ElicitationCache(), undefined, undefined, undefined, {});
+    registerRoutes(app, adapter, new GateCache(), new ElicitationCache(), undefined, undefined, {});
     await app.ready();
   }
 

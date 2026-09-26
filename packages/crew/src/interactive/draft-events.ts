@@ -10,8 +10,7 @@
  * answerer instead — same bus vocabulary, zero interactive-service changes beyond the additive
  * producer row (`wi-crew`) in interactive's events.js ownership table.
  *
- * Shape mirrors `qe/gate-events.ts` (crew's existing bus seam, Phase 6a): graceful degradation
- * when no engine holds the bus, a tap from the newest row and every emit through the engine that
+ * Shape: graceful degradation when no engine holds the bus, a tap from the newest row and every emit through the engine that
  * holds the bus (`core/bus.ts`, wicked-core#631) — crew opens no SQLite of its own.
  *
  * Behavioral invariants honored (recon-verified against interactive):

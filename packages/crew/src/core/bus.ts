@@ -20,7 +20,7 @@ import { resolve } from 'node:path';
 /** The engine's two bus calls (wicked-core-ts `Core.busEmit` / `Core.busRead`). */
 export interface EngineBus {
   busEmit(eventJson: string): Promise<number>;
-  busRead(afterId: number, limit: number, typePrefix?: string | null): Promise<string>;
+  busRead(afterId: number, limit: number, typePrefix?: string | null, includeExpired?: boolean | null): Promise<string>;
 }
 
 /** One row, as wicked-bus `emit` takes it. */
@@ -31,6 +31,8 @@ export interface BusRow {
   payload: unknown;
   idempotency_key?: string;
   producer_id?: string;
+  /** Per-event TTL in whole hours (wicked-bus `emit`'s override); default the bus config's. */
+  ttl_hours?: number;
 }
 
 /** One `events` row as the engine reads it back: every column the file has, `payload` parsed
@@ -100,17 +102,22 @@ export async function emitOnBus(dbPath: string, row: BusRow): Promise<number> {
   return engineFor(dbPath).busEmit(JSON.stringify(row));
 }
 
-/** One page of live rows after `afterId` whose type starts with `typePrefix`. */
-async function readPage(engine: EngineBus, afterId: number, typePrefix: string | null): Promise<BusPage> {
-  return JSON.parse(await engine.busRead(afterId, BATCH, typePrefix)) as BusPage;
+/** One page of rows after `afterId` whose type starts with `typePrefix` (live ones unless
+ *  `includeExpired`). */
+async function readPage(engine: EngineBus, afterId: number, typePrefix: string | null, includeExpired = false): Promise<BusPage> {
+  return JSON.parse(await engine.busRead(afterId, BATCH, typePrefix, includeExpired)) as BusPage;
 }
 
-/** Every live row on the bus at `dbPath` whose type starts with `typePrefix`, oldest first. */
-export async function readBus(dbPath: string, typePrefix: string): Promise<BusEvent[]> {
+/**
+ * Every row on the bus at `dbPath` whose type starts with `typePrefix`, oldest first. `history:
+ * true` includes rows past their TTL: the daemon's bus is never swept, so an expired row is still
+ * the record (the activity feed, the team route); a live consumer leaves it off.
+ */
+export async function readBus(dbPath: string, typePrefix: string, opts: { history?: boolean } = {}): Promise<BusEvent[]> {
   const engine = engineFor(dbPath);
   const out: BusEvent[] = [];
   for (let after = 0; ; ) {
-    const page = await readPage(engine, after, typePrefix);
+    const page = await readPage(engine, after, typePrefix, opts.history === true);
     out.push(...page.rows);
     if (page.rows.length < BATCH || page.next <= after) return out;
     after = page.next;

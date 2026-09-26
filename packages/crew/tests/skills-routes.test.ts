@@ -54,7 +54,7 @@ function settingsAdapter(initial: Partial<SystemSettings> = {}): CoreAdapter {
 
 function buildApp(runtime?: SkillsRuntime): FastifyInstance {
   const fastify = Fastify({ logger: false });
-  registerRoutes(fastify, settingsAdapter(), new GateCache(), new ElicitationCache(), undefined, undefined, undefined, {
+  registerRoutes(fastify, settingsAdapter(), new GateCache(), new ElicitationCache(), undefined, undefined, {
     ...(runtime !== undefined ? { skills: runtime } : {}),
   });
   return fastify;

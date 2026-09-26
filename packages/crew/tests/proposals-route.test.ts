@@ -56,7 +56,6 @@ describe('proposal queue routes (DES-MEM-FACETED-001 §5.0)', () => {
       new ElicitationCache(),
       undefined,
       undefined,
-      undefined,
       { callEstateTool: proposalTool as (t: string, a: Record<string, unknown>) => Promise<unknown> },
     );
     await app.ready();

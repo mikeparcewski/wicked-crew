@@ -30,7 +30,6 @@ import { DeliveryDerivationCache } from './delivery-cache.js';
 import { coreUnitId } from './evidence.js';
 import { registerClient, broadcast } from '../events/bus.js';
 import { TerminalHub, registerTerminalWs } from '../events/terminals.js';
-import { QeGateCache, startQeGateSubscriber } from '../qe/gate-events.js';
 import { INTERACTIVE_DRAFT_WORKFLOW_DEF, startInteractiveDraftSubscriber } from '../interactive/draft-events.js';
 import { INTERACTIVE_EDIT_WORKFLOW_DEF, startInteractiveEditSubscriber } from '../interactive/edit-events.js';
 import { INTERACTIVE_CHAT_WORKFLOW_DEF, startInteractiveChatSubscriber } from '../interactive/chat-events.js';
@@ -105,19 +104,6 @@ export function defaultStudioRoot(): string {
 export interface CreateServerOptions {
   /** Override the studio asset root (tests point this at a temp fixture dir). */
   studioRoot?: string;
-  /**
-   * Opt-in QE gate-event consumption over wicked-bus (Phase 6a). When enabled,
-   * a durable subscriber folds `wicked.qe.gate.*` / `wicked.qe.deploy.completed`
-   * into the acceptance route's freshness cache; when absent (the default),
-   * the route's lazy ledger read stands alone — same answers, read on demand.
-   */
-  qeGateEvents?: {
-    enabled: boolean;
-    /** The bus db; omit for the one the adapter handed its engine (`busDbPath`, core/bus.ts). */
-    dbPath?: string;
-    /** Poll cadence, ms (tests shorten it). */
-    pollIntervalMs?: number;
-  };
   /**
    * Opt-in governed answering of wicked-interactive first-draft generation (task #86 spike,
    * Phase 7c). When enabled, a durable subscriber answers `wicked.interactive.doc.created`
@@ -379,7 +365,6 @@ export async function createServer(
   const gateCache = new GateCache();
   const elicitationCache = new ElicitationCache();
   const terminals = new TerminalHub();
-  const qeGateCache = new QeGateCache();
   // Per-seat runtime health (crew#274): folded from the single CoreEvent subscription below,
   // surfaced on GET /roster, recovered by the low-frequency probe armed further down.
   const seatHealth = new SeatHealthTracker({
@@ -873,24 +858,6 @@ export async function createServer(
   const interactiveDocsRoot = (projectId: string | undefined): string =>
     resolveProjectInteractiveRoot(projectId, projectId !== undefined ? projectSettings.get(projectId) : null);
 
-  // Arm the opt-in QE gate-event subscription (crew's bus seam). Failure to
-  // arm is LOUD but non-fatal: the acceptance route never depends on the bus.
-  if (options?.qeGateEvents?.enabled === true) {
-    const { dbPath, pollIntervalMs } = options.qeGateEvents;
-    const sub = await startQeGateSubscriber(qeGateCache, {
-      ...busOf(dbPath),
-      ...(pollIntervalMs !== undefined ? { pollIntervalMs } : {}),
-      log: (m) => app.log.warn(m),
-      logError: (m) => app.log.error(m),
-    });
-    if (sub !== null) {
-      app.log.info(`qe gate-event subscription armed (filter wicked.qe.**)`);
-      app.addHook('onClose', async () => {
-        await sub.stop();
-      });
-    }
-  }
-
   // ── A STUB ENGINE NEVER ANSWERS ANOTHER PRODUCT'S TRAFFIC (crew#309) ────────────────────────
   //
   // The four seams below are ANSWERERS: each taps the bus (core/bus.ts) and replies
@@ -914,8 +881,8 @@ export async function createServer(
   // convening, which is the StubDispatcher's signature; the real runs 5 minutes later took ~95s to
   // vote and split their seats (`pi` for outline, `claude` for draft).
   //
-  // So: refuse to arm, loudly. The deny is scoped to the ANSWERERS on purpose — the QE seam above
-  // only fills a freshness cache and the project seam only relays, neither launches work nor
+  // So: refuse to arm, loudly. The deny is scoped to the ANSWERERS on purpose — the project seam
+  // only relays, neither launches work nor
   // narrates governance, so neither can fabricate a verdict. Offline/deterministic runs are NOT
   // lost by this: every harness in `e2e/` already does the correct thing, keeping the REAL engine
   // (`stub: false`) and registering a scripted stub SEAT in the roster — which exercises planning,
@@ -1508,7 +1475,6 @@ export async function createServer(
     adapter,
     gateCache,
     elicitationCache,
-    qeGateCache,
     {
       bus: projectBus,
       index: membershipIndex,

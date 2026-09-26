@@ -74,7 +74,7 @@ describe('POST /runs/:id/gate with ord', () => {
       }),
     };
     app = Fastify({ logger: false });
-    registerRoutes(app, mockAdapter as unknown as CoreAdapter, gateCache, new ElicitationCache(), undefined, undefined, {
+    registerRoutes(app, mockAdapter as unknown as CoreAdapter, gateCache, new ElicitationCache(), undefined, {
       audit,
       authMode: 'off',
     });

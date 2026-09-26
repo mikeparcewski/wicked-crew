@@ -6,9 +6,10 @@
 // wicked-bus, so no engine holds that file. For those, this setup file answers the same two calls
 // with wicked-bus on the same file — ONE SQLite library in the test process (better-sqlite3), the
 // one the test's own emits use, one connection per file, never closed. It keeps the engine's
-// contract: a duplicate key resolves to the existing row's id; a read answers `{ next, rows }`
-// (live rows after the cursor with the type prefix, oldest first, whole rows with `payload`
-// parsed; `next` the last row's id on a full page, else the tail read before the rows, `0` when
+// contract: an emit refuses (`WB-001`) a field the engine does not write or a non-integer
+// `ttl_hours`, and a duplicate key resolves to the existing row's id; a read answers `{ next, rows }`
+// (rows after the cursor with the type prefix — live ones unless `includeExpired` — oldest first,
+// whole rows with `payload` parsed; `next` the last row's id on a full page, else the tail read before the rows, `0` when
 // the cursor is past the tail; `limit` 0 answers the tail alone).
 //
 // An engine the test attaches (a real `CoreAdapter` with a `busDbPath`) always wins: this is only
@@ -23,6 +24,9 @@ import { busTesting, type EngineBus } from '../../src/core/bus.js';
 interface Db {
   prepare(sql: string): { all(...params: unknown[]): unknown[]; get(...params: unknown[]): unknown };
 }
+
+/** The fields the engine's wire emit accepts (wicked-core `BusDb::emit_wire`); any other is WB-001. */
+const WIRE_FIELDS = new Set(['event_type', 'domain', 'subdomain', 'payload', 'idempotency_key', 'producer_id', 'ttl_hours']);
 
 const open = new Map<string, { db: Db; config: Record<string, unknown> }>();
 
@@ -44,6 +48,12 @@ function wickedBusDouble(path: string): EngineBus {
     async busEmit(eventJson) {
       const { db, config } = handle(path);
       const row = JSON.parse(eventJson) as Parameters<typeof bus.emit>[2];
+      const unknown = Object.keys(row).filter((k) => !WIRE_FIELDS.has(k));
+      if (unknown.length > 0) throw new Error(`WB-001 invalid event: unknown field ${unknown.join(', ')}`);
+      const ttl = (row as { ttl_hours?: unknown }).ttl_hours;
+      if (ttl !== undefined && ttl !== null && !Number.isInteger(ttl)) {
+        throw new Error(`WB-001 invalid event: ttl_hours must be an integer (got ${String(ttl)})`);
+      }
       try {
         return bus.emit(db, config, row).event_id;
       } catch (err) {
@@ -54,7 +64,7 @@ function wickedBusDouble(path: string): EngineBus {
         return hit.event_id;
       }
     },
-    async busRead(afterId, limit, typePrefix) {
+    async busRead(afterId, limit, typePrefix, includeExpired) {
       const { db } = handle(path);
       const tail = (db.prepare('SELECT COALESCE(MAX(event_id), 0) AS m FROM events').get() as { m: number }).m;
       if (afterId > tail) return JSON.stringify({ next: 0, rows: [] });
@@ -66,7 +76,7 @@ function wickedBusDouble(path: string): EngineBus {
                AND (? IS NULL OR substr(event_type, 1, length(?)) = ?)
              ORDER BY event_id LIMIT ?`,
           )
-          .all(afterId, tail, Date.now(), typePrefix ?? null, typePrefix ?? null, typePrefix ?? null, limit) as Array<
+          .all(afterId, tail, includeExpired === true ? Number.MIN_SAFE_INTEGER : Date.now(), typePrefix ?? null, typePrefix ?? null, typePrefix ?? null, limit) as Array<
           Record<string, unknown> & { event_id: number; payload: string }
         >
       ).map((r) => {

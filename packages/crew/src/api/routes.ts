@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
-import { busUnavailableWarning } from '../core/bus-notice.js';
+import { busSeamsOffWarning, busUnavailableWarning } from '../core/bus-notice.js';
 import { PlanSchema, toLaunchPlan } from './plan-schema.js';
 import type { RecordedStallFrame } from './stall-frame-index.js';
 import { z } from 'zod';
@@ -21,7 +21,6 @@ import type {
 import { resolveCursorUnit } from '../core/cursor.js';
 import { detectRefusal, type GateCache, type GateCacheEntry } from './gate-cache.js';
 import type { ElicitationCache } from './elicitation-cache.js';
-import { QeGateCache } from '../qe/gate-events.js';
 import { acceptanceRequirementOf, buildAcceptanceView } from '../qe/acceptance.js';
 import { runIdentityOf, wireIdentity } from '../core/run-identity.js';
 import { buildEvidenceBundle, coreUnitId, evidenceFilename } from './evidence.js';
@@ -967,10 +966,6 @@ export function registerRoutes(
   adapter: CoreAdapter,
   gateCache: GateCache,
   elicitationCache: ElicitationCache,
-  // Defaulted so a caller that never arms the bus seam (tests drive this
-  // function directly) gets the same behavior as an unarmed daemon: an empty
-  // cache, `busEvent: null`, and the lazy ledger read doing all the work.
-  qeGateEvents: QeGateCache = new QeGateCache(),
   // Defaulted for the same reason: tests that drive this function directly get
   // the projects surface with no bus (events skipped) and a fresh index.
   projects: ProjectRoutesDeps = { bus: null, index: new MembershipIndex(), log: () => undefined },
@@ -1192,6 +1187,8 @@ export function registerRoutes(
       // and runs un-teamed. A daemon-level notice (status stays ok: it serves); the per-run
       // `transport:"none"` record lands with P1.
       ...(adapter.busUnavailable != null ? [busUnavailableWarning(adapter.busUnavailable)] : []),
+      // wicked-core#631: the engine has the bus but not the calls crew reaches it through.
+      ...(adapter.busSeamsOff != null ? [busSeamsOffWarning(adapter.busSeamsOff)] : []),
     ];
     return {
       status: 'ok',
@@ -2980,7 +2977,6 @@ export function registerRoutes(
       runId: id,
       repo,
       requirement,
-      gateEvents: qeGateEvents,
       ...(qeRunId !== undefined && qeRunId !== '' ? { qeRunId } : {}),
       // AW-14 (arch-R13a + R16): the conformance section reads the same wires the standalone
       // `/governance/claims` and `/runs/:id/events` routes serve, but run-scoped and resolved

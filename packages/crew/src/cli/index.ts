@@ -59,7 +59,6 @@ interface BootstrapOpts {
   engineExec: boolean;
   busDbPath: string;
   preRuleExecBusDbPath: string;
-  qeGateEvents: boolean;
   /** The CROSS-PRODUCT bus (F-043): the interactive seams, the project bus, the /ws relay AND the
    *  spawned bridge meet here — see `interactive/bus-location.ts` for the resolution. */
   crewBus: CrewBusLocation;
@@ -101,13 +100,6 @@ function parseBootstrap(args: string[]): BootstrapOpts {
   const engineExec =
     hasFlag(args, '--engine-exec') ||
     (process.env['WICKED_BUS_EXEC'] !== undefined && process.env['WICKED_BUS_EXEC'] !== '');
-  // OPT-IN (Phase 6a, same shape as --engine-exec): consume the QE gate's bus
-  // events (`wicked.qe.gate.*` + `wicked.qe.deploy.completed`) into the
-  // acceptance freshness cache. Default OFF → the acceptance route lazy-reads
-  // the ledger on demand, which needs no bus at all.
-  const qeGateEvents =
-    hasFlag(args, '--qe-gate-events') ||
-    (process.env['WICKED_QE_GATE_EVENTS'] !== undefined && process.env['WICKED_QE_GATE_EVENTS'] !== '');
   // An explicit bus db (--bus-db / WICKED_BUS_DB) — the first choice of the crew bus below.
   const explicitBusDb = flag(args, '--bus-db') ?? process.env['WICKED_BUS_DB'];
   // The CROSS-PRODUCT bus (acceptance findings F-042/F-043) — the interactive seams, the project
@@ -166,9 +158,7 @@ function parseBootstrap(args: string[]): BootstrapOpts {
   // Project-bound docs launch FILED runs; unbound (Unfiled) docs launch unfiled governed runs
   // (CREW-UX-4 — slice U made Unfiled first-class, so nothing else answers them). Opt-out:
   //   --no-interactive-draft-events   or   WICKED_INTERACTIVE_DRAFT_EVENTS=0|false|no|off|""
-  // The bus db follows the SAME resolution as the QE seam — explicit --bus-db / WICKED_BUS_DB wins,
-  // otherwise wicked-bus's own default (which honors WICKED_BUS_DATA_DIR): interactive's service
-  // resolves its bus exactly that way, so by default the two meet on the same db.
+  // The bus is the daemon's one crew bus (`crewBus` below), reached through the engine.
   const interactiveDraftEvents =
     !hasFlag(args, '--no-interactive-draft-events') &&
     !isFalsy(process.env['WICKED_INTERACTIVE_DRAFT_EVENTS']);
@@ -205,7 +195,7 @@ function parseBootstrap(args: string[]): BootstrapOpts {
   // Remove with the fallback once crew's wicked-core-ts floor carries `Core.busConnectionStats`.
   const preRuleExecBusDbPath = flag(args, '--bus-db') ?? process.env['WICKED_BUS_DB'] ?? join(stateHomeOfDb(dbPath), 'bus.db');
   return {
-    dbPath, port, stub, engineExec, busDbPath, preRuleExecBusDbPath, qeGateEvents, crewBus, governanceStore,
+    dbPath, port, stub, engineExec, busDbPath, preRuleExecBusDbPath, crewBus, governanceStore,
     interactiveDraftEvents, interactiveEditEvents, interactiveChatEvents, interactiveDemoEvents,
     interactiveSeats,
   };
@@ -368,16 +358,6 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
   });
   adapterRef = adapter;
   const serverOptions = {
-    ...(opts.qeGateEvents
-      ? {
-          qeGateEvents: {
-            enabled: true,
-            // The daemon's one bus (wicked-core#631): crew reads a bus only through the engine
-            // that holds it, so the QE tap reads the crew bus like every other seam.
-            dbPath: crewBus.dbPath,
-          },
-        }
-      : {}),
     ...(opts.interactiveDraftEvents
       ? {
           interactiveDraftEvents: {
@@ -523,7 +503,6 @@ async function main(): Promise<void> {
         '                                  see `wicked-crew governance replay`\n' +
         '  --stub                          Use stub engine (env: WICKED_CORE_STUB=1)\n' +
         '  --engine-exec                   Arm event-driven execution seam (env: WICKED_BUS_EXEC)\n' +
-        '  --qe-gate-events                Consume QE gate bus events (env: WICKED_QE_GATE_EVENTS)\n' +
         '  --no-interactive-draft-events   Disable interactive draft answering (env: WICKED_INTERACTIVE_DRAFT_EVENTS=0)\n' +
         '  --no-interactive-edit-events    Disable interactive edit answering (env: WICKED_INTERACTIVE_EDIT_EVENTS=0)\n' +
         '  --no-interactive-chat-events    Disable interactive chat answering (env: WICKED_INTERACTIVE_CHAT_EVENTS=0)\n' +
@@ -559,7 +538,6 @@ async function main(): Promise<void> {
       engineExec: adapter.engineExec,
       // The bus the engine was handed (DES-TEAMING-002 T0: every boot, not only --engine-exec).
       busDb: adapter.busDbPath,
-      qeGateEvents: opts.qeGateEvents || undefined,
       // What ARMED, not what was asked for (crew#309): a stub-engine daemon refuses the four
       // interactive answering seams (see `api/server.ts`), and an evidence harness that reads
       // this line must not be told a seam is live when nothing is holding its cursor.

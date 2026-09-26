@@ -41,11 +41,12 @@ function code(text: string): string {
   return text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`])\/\/.*$/gm, '$1');
 }
 
-/** Module specifiers that are, or load, a SQLite library. `wicked-ledger/<subpath>` is allowed
- *  only where the subpath is SQLite-free (`manifest`); its root and store subpaths load
- *  better-sqlite3. */
+/** Module specifiers that are, or load, a SQLite library: better-sqlite3, `node:sqlite`, sqlite3,
+ *  wicked-bus (any subpath), and wicked-ledger — which is an ALLOWLIST: only its SQLite-free
+ *  `manifest` subpath may be loaded; its root, its store subpaths and any subpath added later
+ *  count. */
 const SQLITE_MODULE =
-  /['"`](better-sqlite3|node:sqlite|sqlite3|wicked-bus(\/[^'"`]*)?|wicked-ledger(\/(domain-store|migrate|runtime|oracle-queries|bus-emit))?)['"`]/g;
+  /['"`](better-sqlite3|node:sqlite|sqlite3|wicked-bus(\/[^'"`]*)?|wicked-ledger(?!\/manifest['"`])(\/[^'"`]*)?)['"`]/g;
 
 /** Type-only imports/re-exports (`import type … from '…'`, `export type … from '…'`): erased. */
 const TYPE_ONLY = /\b(import|export)\s+type\b[^;]*?\bfrom\s+['"][^'"]+['"]/g;
@@ -105,6 +106,7 @@ describe('in-daemon crew loads no SQLite library (wicked-core#631)', () => {
       `createRequire(import.meta.url).resolve('wicked-bus/package.json');`,
       `import { VERDICT_VALUES } from 'wicked-ledger';`,
       `import { DomainStore } from 'wicked-ledger/domain-store';`,
+      `import { x } from 'wicked-ledger/some-later-subpath';`,
     ]) {
       expect(sqliteModules(planted), planted).toHaveLength(1);
     }

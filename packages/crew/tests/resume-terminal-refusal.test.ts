@@ -25,7 +25,6 @@ import { describe, expect, it, vi } from 'vitest';
 import { registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
-import { QeGateCache } from '../src/qe/gate-events.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
 import { DeliveryIndex } from '../src/api/delivery-index.js';
 import { DeliveryDerivationCache } from '../src/api/delivery-cache.js';
@@ -115,7 +114,6 @@ function buildApp(
     mockAdapter as unknown as CoreAdapter,
     new GateCache(),
     new ElicitationCache(),
-    new QeGateCache(),
     { bus: null, index: new MembershipIndex(), log: () => undefined },
     { audit: AuditLog.noop(), authMode: 'off' },
     {

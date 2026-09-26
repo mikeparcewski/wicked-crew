@@ -28,7 +28,6 @@ import { DEFAULT_SETTINGS, type DiagnosticsResponse, HealthResponse, SessionView
 import { INTERACTIVE_CHAT_WORKFLOW_DEF, startInteractiveChatSubscriber } from '../src/interactive/chat-events.js';
 import { INTERACTIVE_DRAFT_WORKFLOW_DEF, startInteractiveDraftSubscriber } from '../src/interactive/draft-events.js';
 import { INTERACTIVE_EDIT_WORKFLOW_DEF, startInteractiveEditSubscriber } from '../src/interactive/edit-events.js';
-import { QeGateCache } from '../src/qe/gate-events.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
 import { setCrewStateHome } from '../src/projects/state-home.js';
 import { pluginSourceAt } from '../src/skills/plugin-source.js';
@@ -129,7 +128,6 @@ function routes(runtime: RuntimeDeps, adapter: Partial<Record<string, unknown>> 
     { ping: async () => 'pong', ...adapter } as unknown as CoreAdapter,
     new GateCache(),
     new ElicitationCache(),
-    new QeGateCache(),
     { bus: null, index: new MembershipIndex(), log: () => undefined },
     { audit: AuditLog.noop(), authMode: 'off' },
     runtime,

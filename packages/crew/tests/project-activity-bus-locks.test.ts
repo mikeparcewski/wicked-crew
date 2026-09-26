@@ -24,7 +24,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { buildActivityPage } from '../src/projects/activity.js';
 import { CoreAdapter } from '../src/core/adapter.js';
-import { busTesting } from '../src/core/bus.js';
+import { busTesting, emitOnBus } from '../src/core/bus.js';
 import { removeScratch } from './setup/scratch.js';
 
 const require = createRequire(import.meta.url);
@@ -92,6 +92,35 @@ describe('project activity feed vs the engine holding the bus (F-E2E-021)', () =
       // A second feed read sees both rows through the same, still-healthy bus.
       const again = await buildActivityPage(adapter, 'proj-1', [], dbPath, undefined, 50);
       expect(again.entries.map((e) => e.id)).toEqual(['bus:2', 'bus:1']);
+    } finally {
+      adapter.close();
+      if (savedBus === undefined) delete process.env['WICKED_BUS_DB'];
+      else process.env['WICKED_BUS_DB'] = savedBus;
+      removeScratch(dataDir);
+    }
+  });
+
+  it('the feed is history: a row past its 72 h TTL still shows (nothing sweeps the daemon bus)', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'crew-activity-expired-'));
+    const dbPath = join(dataDir, 'bus.db');
+    const savedBus = process.env['WICKED_BUS_DB'];
+    const adapter = new CoreAdapter({ dbPath: join(dataDir, 'core.db'), stub: true, busDbPath: dbPath });
+    try {
+      // `ttl_hours: -1` writes a row whose `expires_at` is already behind it: what every row older
+      // than the bus TTL (72 h by default) looks like.
+      await emitOnBus(dbPath, {
+        event_type: 'wicked.interactive.status.posted',
+        domain: 'wicked-interactive',
+        payload: { project_id: 'proj-old', document_id: 'doc-old' },
+        ttl_hours: -1,
+      });
+      await emitOnBus(dbPath, {
+        event_type: 'wicked.interactive.status.posted',
+        domain: 'wicked-interactive',
+        payload: { project_id: 'proj-old', document_id: 'doc-new' },
+      });
+      const page = await buildActivityPage(adapter, 'proj-old', [], dbPath, undefined, 50);
+      expect(page.entries.map((e) => e.ref).sort()).toEqual(['doc-new', 'doc-old']);
     } finally {
       adapter.close();
       if (savedBus === undefined) delete process.env['WICKED_BUS_DB'];
