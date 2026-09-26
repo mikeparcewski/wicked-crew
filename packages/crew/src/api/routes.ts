@@ -1271,31 +1271,49 @@ export function registerRoutes(
   }));
 
   // The actor audit trail (task #88): who launched/steered/governed what.
-  // Read-only (observer trust); newest first; `?runId=` / `?action=` / `?limit=`.
-  app.get(`${V}/audit`, async (req, reply) => {
-    const q = req.query as { runId?: string | string[]; action?: string | string[]; limit?: string | string[] };
-    const first = (v: string | string[] | undefined): string | undefined =>
-      (Array.isArray(v) ? v[0] : v)?.trim() || undefined;
-    const runId = first(q.runId);
-    const action = first(q.action);
-    const limitRaw = first(q.limit);
-    // Reject partial-numeric strings like "10abc" — parseInt accepts those,
-    // Number() is strict and returns NaN for them (Copilot, #250).
-    const limit = limitRaw !== undefined ? Number(limitRaw) : undefined;
-    if (limitRaw !== undefined && (!Number.isFinite(limit) || (limit as number) < 1 || !Number.isInteger(limit))) {
-      return reply.code(400).send({ error: '`limit` must be a positive integer' });
-    }
-    try {
-      const entries = await audit.read({
-        ...(runId !== undefined ? { runId } : {}),
-        ...(action !== undefined ? { action } : {}),
-        ...(limit !== undefined ? { limit } : {}),
-      });
-      return { entries };
-    } catch (err) {
-      return reply.code(500).send({ error: message(err) });
-    }
-  });
+  // Read-only (observer trust); newest first; `?runId=` / `?action=` / `?limit=` / `?since=`.
+  // `since` (unix millis, inclusive) is the lower time bound a skin's "while you were away"
+  // handover reads — the trail since the operator's last visit (studio wave 2b).
+  app.get(
+    `${V}/audit`,
+    { config: { manifest: { responseType: 'AuditPage', statusCodes: [200, 400, 500] } } },
+    async (req, reply) => {
+      const q = req.query as {
+        runId?: string | string[];
+        action?: string | string[];
+        limit?: string | string[];
+        since?: string | string[];
+      };
+      const first = (v: string | string[] | undefined): string | undefined =>
+        (Array.isArray(v) ? v[0] : v)?.trim() || undefined;
+      const runId = first(q.runId);
+      const action = first(q.action);
+      const limitRaw = first(q.limit);
+      // Reject partial-numeric strings like "10abc" — parseInt accepts those,
+      // Number() is strict and returns NaN for them (Copilot, #250).
+      const limit = limitRaw !== undefined ? Number(limitRaw) : undefined;
+      if (limitRaw !== undefined && (!Number.isFinite(limit) || (limit as number) < 1 || !Number.isInteger(limit))) {
+        return reply.code(400).send({ error: '`limit` must be a positive integer' });
+      }
+      // Same strict parse as `limit`, but zero is a valid clock (the epoch).
+      const sinceRaw = first(q.since);
+      const since = sinceRaw !== undefined ? Number(sinceRaw) : undefined;
+      if (sinceRaw !== undefined && (!Number.isInteger(since) || (since as number) < 0)) {
+        return reply.code(400).send({ error: '`since` must be a non-negative integer (unix millis)' });
+      }
+      try {
+        const entries = await audit.read({
+          ...(runId !== undefined ? { runId } : {}),
+          ...(action !== undefined ? { action } : {}),
+          ...(limit !== undefined ? { limit } : {}),
+          ...(since !== undefined ? { since } : {}),
+        });
+        return { entries };
+      } catch (err) {
+        return reply.code(500).send({ error: message(err) });
+      }
+    },
+  );
 
   // Report the actually-bound port/host (honours --port / CREW_PORT / port 0).
   app.get(`${V}/config`, async () => {
