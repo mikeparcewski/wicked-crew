@@ -78,11 +78,40 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
   }
 
   async function launchHeld(sessionId: string, extra: Record<string, unknown> = {}): Promise<void> {
+    // TEMP DIAG: a watchdog that dumps what it can WITHOUT the actor while the launch hangs.
+    let step = 'fetch POST /runs';
+    const t0 = Date.now();
+    const dog = setInterval(() => {
+      void (async () => {
+        const { readdirSync, readFileSync, existsSync } = await import('node:fs');
+        const safe = (f: () => unknown) => { try { return f(); } catch (x) { return String(x); } };
+        const race = <T,>(p: Promise<T>) => Promise.race([p, new Promise((r) => setTimeout(() => r('TIMEOUT(2s)'), 2000))]);
+        console.error('T8WATCH', JSON.stringify({
+          sessionId, step, elapsed: Date.now() - t0,
+          rows: safe(() => busRows(sessionId).map((r) => r.event_type)),
+          allTeamRows: safe(() => crewBusHandle(busPath, { create: false }).prepare("SELECT count(*) AS n FROM events").all()),
+          dir: safe(() => readdirSync(dir)),
+          outbox: safe(() => (existsSync(join(dir, 'team-outbox.ndjson')) ? readFileSync(join(dir, 'team-outbox.ndjson'), 'utf8').slice(0, 2000) : 'none')),
+          bridge: safe(() => (adapter as unknown as { core: { busBridgeState(): string } }).core.busBridgeState()),
+          view: await race((async () => { const v = await viewOf(sessionId); return v ? [v.session.status, v.units.map((u) => u.status)] : 'no view'; })()),
+          team: await race(adapter.runTeam(sessionId).catch((x) => String(x))),
+        }));
+      })();
+    }, 7000);
+    try {
+      await launchHeldInner(sessionId, extra, (s) => { step = s; });
+    } finally {
+      clearInterval(dog);
+    }
+  }
+
+  async function launchHeldInner(sessionId: string, extra: Record<string, unknown>, mark: (s: string) => void): Promise<void> {
     const res = await fetch(
       `${baseUrl}/api/v1/runs`,
       json({ problem: 'add SSO login', sessionId, clisJson: SEATS, plan: { steps: [{ catalog: 'build' }] }, ...extra }),
     );
     expect(res.status, await res.clone().text()).toBe(201);
+    mark('waiting for awaiting_human');
     try {
       await waitFor('the plan_approval pause', async () =>
         (await viewOf(sessionId))?.session.status === 'awaiting_human' ? true : undefined,
@@ -145,7 +174,9 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
   });
 
   it('(a)(f) every team row reaches /ws as teamEvent, tagged project_id; plan.proposed{by:"human"} precedes the first dispatch', async () => {
+    console.error('T8STEP projectCreate start', Date.now());
     const project = await adapter.projectCreate('t8-project');
+    console.error('T8STEP projectCreate done', Date.now());
     await launchHeld('t8-a', { projectId: project.id });
     await waitFor('the relayed plan.proposed', () =>
       teamFrames('t8-a').some((f) => f.event.event_type === 'wicked.team.plan.proposed') ? true : undefined,
