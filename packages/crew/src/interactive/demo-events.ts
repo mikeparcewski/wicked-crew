@@ -78,7 +78,6 @@ import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../project
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { BusEvent } from 'wicked-bus';
 import {
   DOC_CREATED,
   DOC_NAME,
@@ -119,8 +118,7 @@ import {
   workerToolCallDeniedLine,
 } from './council-outcome.js';
 import { busSubscriberErrorReporter } from './bus-subscriber-errors.js';
-import { openCrewBus, tapBus } from '../core/bus-tap.js';
-import { emitOnBus } from '../core/bus-writer.js';
+import { emitOnBus, requireEngineBus, tapBus, type BusEvent } from '../core/bus.js';
 
 // ── Vocabulary constants (interactive's, verbatim — src/service/events.js is the truth) ──────
 
@@ -545,8 +543,7 @@ export function specSelfCheck(spec: string): string | null {
 
 /** Options for {@link startInteractiveDemoSubscriber}. */
 export interface InteractiveDemoOptions {
-  /** Bus SQLite db path. Omit to let wicked-bus resolve its own default
-   *  (honors `WICKED_BUS_DATA_DIR`) — where interactive's service emits unless redirected. */
+  /** The bus db the daemon handed its engine (core/bus.ts); without one the seam does not arm. */
   dbPath?: string;
   /** Poll cadence, ms (default 2000; tests shorten it). */
   pollIntervalMs?: number;
@@ -675,15 +672,14 @@ export async function startInteractiveDemoSubscriber(
 ): Promise<InteractiveDemoSubscription | null> {
   const log = opts.log ?? ((m: string) => console.error(m));
 
-  // crew#679: this seam reads the bus through a read-only tap on crew's long-lived handle and
-  // writes through the one bus writer — never a write on the engine's bus file through crew's
-  // own SQLite. Opened here so an unopenable bus disables the seam before anything is armed.
+  // This seam reads and writes the bus through the engine that holds it (wicked-core#631,
+  // core/bus.ts). Checked here so a bus no engine holds disables the seam before anything is armed.
   let busDbPath: string;
   try {
-    busDbPath = openCrewBus(opts.dbPath);
+    busDbPath = requireEngineBus(opts.dbPath);
   } catch (err) {
     log(
-      `[interactive-demo] could not open the bus db${
+      `[interactive-demo] has no bus${
         opts.dbPath !== undefined ? ` at ${opts.dbPath}` : ''
       } — governed demo authoring disabled: ${err instanceof Error ? err.message : String(err)}`,
     );
@@ -740,7 +736,7 @@ export async function startInteractiveDemoSubscriber(
 
   /** Emit onto interactive's vocabulary as the `wi-crew` producer. Never throws into the
    *  caller: narration/announce failures are logged — a lost status line must not kill the
-   *  subscription, and a duplicate demo.requested (WB-002) is the idempotency key WORKING. */
+   *  subscription, and a duplicate demo.requested (its key already on the bus) is the idempotency key WORKING. */
   async function emitInteractive(
     type: string,
     payload: Record<string, unknown>,
@@ -759,11 +755,6 @@ export async function startInteractiveDemoSubscriber(
       });
       return true;
     } catch (err) {
-      const code = (err as { error?: string }).error;
-      if (code === 'WB-002') {
-        // Duplicate idempotency key — the emit already happened (redelivery race). Success.
-        return true;
-      }
       log(
         `[interactive-demo] emit ${type} failed: ${err instanceof Error ? err.message : String(err)}`,
       );
@@ -1032,7 +1023,7 @@ export async function startInteractiveDemoSubscriber(
     }
 
     // Spec installed — NOW ask the (model-free) service to record it. The deterministic key
-    // makes a re-announce a WB-002 no-op; distinct keys per authoring generation keep a
+    // makes a re-announce a no-op (the key resolves to the existing row); distinct keys per authoring generation keep a
     // legitimate re-record from deduping against the first one.
     const idemKey =
       flight.leg === 'spec'
@@ -1040,7 +1031,7 @@ export async function startInteractiveDemoSubscriber(
         : demoReauthorIdempotencyKey(documentId, flight.version ?? 0);
     const emitted = await emitInteractive(DEMO_REQUESTED, docScope(documentId, projectId), idemKey);
     if (!emitted) {
-      // The bus refused the announce (non-WB-002): the spec IS installed but the recording was
+      // The bus refused the announce: the spec IS installed but the recording was
       // never requested. Fail HONEST — and say exactly where things stand, because unlike the
       // sibling seams the doc is half-advanced (spec on disk, no video).
       ledger.recordFailure(key);
@@ -1496,7 +1487,7 @@ export async function startInteractiveDemoSubscriber(
     logError(recorderFailureLine(failure, record.runId));
   }
 
-  const subRecorder = tapBus({
+  const subRecorder = await tapBus({
     dbPath: busDbPath,
     filter: INTERACTIVE_DEMO_RECORDER_BUS_FILTER,
     pollIntervalMs: opts.pollIntervalMs ?? 2000,
@@ -1510,7 +1501,7 @@ export async function startInteractiveDemoSubscriber(
     }),
   });
 
-  const subCreated = tapBus({
+  const subCreated = await tapBus({
     dbPath: busDbPath,
     filter: INTERACTIVE_DEMO_BUS_FILTER,
     // Live triggers only: replaying a bus backlog would answer docs whose demos the assist
@@ -1528,7 +1519,7 @@ export async function startInteractiveDemoSubscriber(
     }),
   });
 
-  const subFeedback = tapBus({
+  const subFeedback = await tapBus({
     dbPath: busDbPath,
     filter: INTERACTIVE_DEMO_FEEDBACK_BUS_FILTER,
     pollIntervalMs: opts.pollIntervalMs ?? 2000,

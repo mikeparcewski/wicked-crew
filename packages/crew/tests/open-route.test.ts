@@ -76,7 +76,6 @@ describe('POST /open (crew#273)', () => {
       new ElicitationCache(),
       undefined,
       undefined,
-      undefined,
       { openWithOs: opener },
     );
     await app.ready();

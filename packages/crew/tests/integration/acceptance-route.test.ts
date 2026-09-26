@@ -9,10 +9,6 @@
 // (`sessionsDetail`, `listRepos`, `runEvents`) are stubbed exactly as gate-route.test.ts stubs
 // them, because the branch matrix here is over run shape × ledger state × run lifetime, not over
 // engine behavior — the functional test drives the same route through a real stub-engine run.
-//
-// The last block proves the OPT-IN bus seam end to end: a server created with qeGateEvents enabled
-// against a temp bus db sees a `wicked.qe.gate.passed` emitted through the real wicked-bus API
-// surface on the route's `busEvent` — while the gate decision itself keeps coming from the ledger.
 
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
@@ -442,71 +438,5 @@ describe('GET /runs/:id/acceptance', () => {
     const res = await getAcceptance(RESCUED_DONE);
     expect(res.body['acceptance']).toMatchObject({ verdict: { verdict: 'PASS' }, attribution: { kind: 'run-window' } });
     expect(res.body['gate']).toMatchObject({ satisfied: true, verdict: 'PASS' });
-  });
-});
-
-describe('opt-in bus seam (qeGateEvents)', () => {
-  it('folds a real wicked-bus gate event into the route response; ledger still decides the gate', async () => {
-    const busDir = mkdtempSync(join(tmpdir(), 'acceptance-bus-'));
-    const busDbPath = join(busDir, 'bus.db');
-    const bus = await import('wicked-bus');
-    // Create the db BEFORE the server subscribes, then start a server with the seam armed.
-    const db = bus.openDb({ db_path: busDbPath });
-    const app2 = await createServer(adapter, {
-      qeGateEvents: { enabled: true, dbPath: busDbPath, pollIntervalMs: 50 },
-    });
-    await app2.listen({ port: 0, host: '127.0.0.1' });
-    const addr = app2.server.address();
-    const base2 = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`;
-    try {
-      // The wire contract, verbatim (old gate.mjs → garden's qe skills): 8 canonical
-      // payload fields under wicked.qe.gate.passed, DEC-00010 idempotency key shape.
-      bus.emit(db, bus.loadConfig(), {
-        event_type: 'wicked.qe.gate.passed',
-        domain: 'qe',
-        subdomain: 'gate',
-        payload: {
-          run_id: QE_RUN_ID,
-          context: 'da838fff-9bd7-45df-a452-853516bdd7ae',
-          gate_verdict: 'PASS',
-          exit_code: 0,
-          verdict_summary: '15/15 assertions passed',
-          mode: 'gate',
-          completed_at: '2026-08-12T03:00:00Z',
-          scenario_count: 1,
-        },
-        idempotency_key: 'qe:gate.result:da838fff-9bd7-45df-a452-853516bdd7ae:deadbeefdeadbeef:0',
-      });
-
-      // The durable subscriber polls; wait for the event to surface on the route.
-      let busEvent: Record<string, unknown> | null = null;
-      for (let i = 0; i < 100 && busEvent === null; i++) {
-        const res = await fetch(`${base2}/api/v1/runs/${GOVERNED}/acceptance`);
-        const body = (await res.json()) as { busEvent: Record<string, unknown> | null };
-        busEvent = body.busEvent;
-        if (busEvent === null) await new Promise((r) => setTimeout(r, 50));
-      }
-      expect(busEvent, 'the armed seam must surface the gate event').not.toBeNull();
-      expect(busEvent).toMatchObject({
-        eventType: 'wicked.qe.gate.passed',
-        runId: QE_RUN_ID,
-        gateVerdict: 'PASS',
-        scenarioCount: 1,
-      });
-
-      // And the ledger remains the system of record: same gate answer as the bus-less server.
-      const res = await fetch(`${base2}/api/v1/runs/${GOVERNED}/acceptance`);
-      const body = (await res.json()) as Record<string, unknown>;
-      expect(body['gate']).toMatchObject({ satisfied: true, verdict: 'PASS' });
-    } finally {
-      await app2.close(); // stops the subscriber via the onClose hook
-      removeScratch(busDir);
-    }
-  });
-
-  it('a server WITHOUT the seam serves the same gate answers with busEvent null', async () => {
-    const res = await getAcceptance(GOVERNED);
-    expect(res.body['busEvent']).toBeNull();
-    expect(res.body['gate']).toMatchObject({ satisfied: true });
   });
 });

@@ -10,7 +10,9 @@ export default defineConfig({
     //                           operator's real home — crew#396. Guarded by
     //                           tests/harness-hygiene.test.ts; do not remove.
     //   isolate-workflow-overlay redirects the workflow overlay dir away from the real ~/.config.
-    setupFiles: ['./tests/setup/hermetic-home.ts', './tests/setup/isolate-workflow-overlay.ts'],
+    //   bus-double              answers the engine bus calls (src/core/bus.ts) for a bus file no
+    //                           engine is attached to — a fake-adapter seam test's temp bus.
+    setupFiles: ['./tests/setup/hermetic-home.ts', './tests/setup/isolate-workflow-overlay.ts', './tests/setup/bus-double.ts'],
     testTimeout: 30000,
     // crew#649: 15 s was the in-suite deadline the `test_targeted` floor kept blowing on a loaded
     // host — the same run's failures never reproduced when re-run on their own, and the verdict

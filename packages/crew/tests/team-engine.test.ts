@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
 import { CoreAdapter, engineSupportsPlanLaunch } from '../src/core/adapter.js';
-import { crewBusHandle } from '../src/core/bus-handle.js';
+import { busTesting, readBus } from '../src/core/bus.js';
 import { createServer } from '../src/api/server.js';
 import type {
   CatalogResponse,
@@ -58,15 +58,13 @@ async function waitFor<T>(what: string, probeFn: () => Promise<T | undefined> | 
 interface BusRow {
   event_id: number;
   event_type: string;
-  payload: string;
+  payload: { by?: string; kind?: string; run_id?: string };
 }
 
 describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine and bus', () => {
   const savedBus = process.env['WICKED_BUS_DB'];
   let dir: string;
   let busPath: string;
-  /** Crew's bus connections in this file: held, never closed (see beforeAll). */
-  const held: unknown[] = [];
   let adapter: CoreAdapter;
   let app: Awaited<ReturnType<typeof createServer>>;
   let baseUrl: string;
@@ -78,13 +76,9 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
       (f): f is TeamEventFrame & Record<string, unknown> =>
         f['type'] === 'teamEvent' && (f as unknown as TeamEventFrame).event.payload.run_id === run,
     );
-  const busRows = (run: string): BusRow[] =>
-    crewBusHandle(busPath, { create: false })
-      .prepare(
-        `SELECT event_id, event_type, payload FROM events
-          WHERE event_type LIKE 'wicked.team.%' AND json_extract(payload, '$.run_id') = ? ORDER BY event_id`,
-      )
-      .all(run) as BusRow[];
+  // Read through the engine that holds the bus (src/core/bus.ts), as the daemon does.
+  const busRows = async (run: string): Promise<BusRow[]> =>
+    ((await readBus(busPath, 'wicked.team.')) as unknown as BusRow[]).filter((r) => r.payload.run_id === run);
 
   async function viewOf(runId: string): Promise<SessionView | undefined> {
     return (await adapter.sessionsDetail()).find((v) => v.session.id === runId);
@@ -101,18 +95,16 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
     );
   }
 
+  // The REAL engine answers every bus call here: the test double (tests/setup/bus-double.ts) is off,
+  // so an engine without Core.busEmit/busRead fails this file instead of the double standing in.
+  const double = busTesting.unattached;
+
   beforeAll(async () => {
+    busTesting.unattached = undefined;
     baseSkillOff();
     dir = mkdtempSync(join(tmpdir(), 'team-engine-'));
     busPath = join(dir, 'bus.db');
-    // The daemon's boot creates the bus (schema included) before the engine spawns, and HOLDS that
-    // connection for the life of the process. Holding it is load-bearing: a dropped better-sqlite3
-    // connection is closed when V8 collects it, and a close on this file, while the engine holds
-    // it through its own SQLite copy, wins EXCLUSIVE (the engine's POSIX locks are invisible to
-    // it), checkpoints and unlinks bus.db-wal under the engine. The engine then writes every team
-    // fact into its unlinked WAL: it reports them published, nothing else ever sees them, and each
-    // wait on a relayed frame or a bus row times out (crew main red after #675, F-E2E-021's class).
-    held.push((await import('wicked-bus')).openDb({ db_path: busPath }));
+    // The engine creates and holds the bus; crew opens no SQLite of its own (wicked-core#631).
     adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: true, busDbPath: busPath });
     app = await createServer(adapter, {
       auditPath: join(dir, 'audit.log'),
@@ -133,6 +125,7 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
   });
 
   afterAll(async () => {
+    busTesting.unattached = double;
     ws?.close();
     await app?.close();
     adapter?.close();
@@ -148,7 +141,7 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
       teamFrames('t8-a').some((f) => f.event.event_type === 'wicked.team.plan.proposed') ? true : undefined,
     );
     // Every row on the bus for the run arrived, in event_id order, each tagged with the project.
-    const rows = busRows('t8-a');
+    const rows = await busRows('t8-a');
     await waitFor('every row relayed', () => (teamFrames('t8-a').length >= rows.length ? true : undefined));
     const relayed = teamFrames('t8-a');
     expect(relayed.map((f) => f.event.event_id)).toEqual(rows.map((r) => r.event_id));
@@ -158,8 +151,8 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
 
     // Approve: the first unit dispatches only after the human plan fact.
     expect((await fetch(`${baseUrl}/api/v1/runs/t8-a/gate`, json({ approve: true }))).status).toBe(200);
-    const claimed = await waitFor('the first step.claimed', () =>
-      busRows('t8-a').find((r) => r.event_type === 'wicked.team.step.claimed'),
+    const claimed = await waitFor('the first step.claimed', async () =>
+      (await busRows('t8-a')).find((r) => r.event_type === 'wicked.team.step.claimed'),
     );
     expect(proposed.event.event_id).toBeLessThan(claimed.event_id);
   });
@@ -175,7 +168,7 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
     );
     const all = [...team.rows, ...team.units.flatMap((u) => u.rows)].map((r) => r.event_id).sort((a, b) => a - b);
     // The engine keeps publishing for the running unit: compare up to the route's newest row.
-    expect(all).toEqual(busRows('t8-a').map((r) => r.event_id).filter((id) => id <= Math.max(...all)));
+    expect(all).toEqual((await busRows('t8-a')).map((r) => r.event_id).filter((id) => id <= Math.max(...all)));
     expect(team.units.length).toBeGreaterThan(0);
     expect(team.units[0]?.rows.map((r) => r.event_type)).toContain('wicked.team.step.claimed');
 
@@ -204,12 +197,11 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
     const body = { plan: { steps: [{ catalog: 'build', id: 'make' }, { catalog: 'test', id: 'prove' }] } };
     const first = await fetch(`${baseUrl}/api/v1/runs/t8-c/plan`, json(body));
     expect(first.status, await first.clone().text()).toBe(200);
-    const edits = () =>
-      busRows('t8-c').filter((r) => {
-        const p = JSON.parse(r.payload) as { by?: string; kind?: string };
-        return r.event_type === 'wicked.team.plan.proposed' && p.by === 'human' && p.kind === 'edit';
-      });
-    await waitFor('the edit fact', () => (edits().length === 1 ? true : undefined));
+    const edits = async () =>
+      (await busRows('t8-c')).filter(
+        (r) => r.event_type === 'wicked.team.plan.proposed' && r.payload.by === 'human' && r.payload.kind === 'edit',
+      );
+    await waitFor('the edit fact', async () => ((await edits()).length === 1 ? true : undefined));
     expect(confirms).toBe(1);
     // The gate is answered and the run moved on: the repeat is a mid-run edit (proposePlan), and
     // the engine refuses it (the plan already has those steps, or the run already finished).
@@ -217,7 +209,7 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
     expect(again.status, await again.clone().text()).toBe(409);
     expect(confirms).toBe(1);
     await new Promise((r) => setTimeout(r, 300));
-    expect(edits()).toHaveLength(1);
+    expect(await edits()).toHaveLength(1);
   });
 
   it.skipIf(!ENGINE_HAS_T8_BINDINGS)('(e) GET /catalog: the engine catalog, every entry in its exact shape', async () => {
@@ -291,7 +283,7 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
     await launchHeld('t8-mid');
     expect((await fetch(`${baseUrl}/api/v1/runs/t8-mid/gate`, json({ approve: true }))).status).toBe(200);
     await waitFor('the run past its plan gate', async () =>
-      busRows('t8-mid').some((r) => r.event_type === 'wicked.team.step.claimed') &&
+      (await busRows('t8-mid')).some((r) => r.event_type === 'wicked.team.step.claimed') &&
       (await viewOf('t8-mid'))?.session.status === 'executing'
         ? true
         : undefined,

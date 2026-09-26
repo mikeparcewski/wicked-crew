@@ -151,7 +151,7 @@ export function buildGeneratedApiApp(): FastifyInstance {
       done(err as Error);
     }
   });
-  registerRoutes(app, adapter, new GateCache(), new ElicitationCache(), undefined, undefined, undefined, {
+  registerRoutes(app, adapter, new GateCache(), new ElicitationCache(), undefined, undefined, {
     interactiveBridges: pool,
     docGrounding: new DocGroundingStore(),
   });

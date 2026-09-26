@@ -4,7 +4,6 @@ import { join, dirname } from 'node:path';
 import { closeSync, mkdirSync, openSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { CoreAdapter } from '../core/adapter.js';
-import { crewBusHandle } from '../core/bus-handle.js';
 import { engineBusHandoff, type BusUnavailable } from '../core/engine-bus.js';
 import { ensureBridgesOnPath, ensurePiLauncherCommand, PI_ACP_COMMAND_ENV } from '../core/bridge-path.js';
 import { bridgeReaper, reapOrphansAtBoot, startOrphanSweep } from '../core/bridge-reaper.js';
@@ -60,9 +59,6 @@ interface BootstrapOpts {
   engineExec: boolean;
   busDbPath: string;
   preRuleExecBusDbPath: string;
-  qeGateEvents: boolean;
-  /** Bus db for the QE subscription; `undefined` = wicked-bus's own default resolution. */
-  qeBusDbPath: string | undefined;
   /** The CROSS-PRODUCT bus (F-043): the interactive seams, the project bus, the /ws relay AND the
    *  spawned bridge meet here — see `interactive/bus-location.ts` for the resolution. */
   crewBus: CrewBusLocation;
@@ -104,19 +100,8 @@ function parseBootstrap(args: string[]): BootstrapOpts {
   const engineExec =
     hasFlag(args, '--engine-exec') ||
     (process.env['WICKED_BUS_EXEC'] !== undefined && process.env['WICKED_BUS_EXEC'] !== '');
-  // OPT-IN (Phase 6a, same shape as --engine-exec): consume the QE gate's bus
-  // events (`wicked.qe.gate.*` + `wicked.qe.deploy.completed`) into the
-  // acceptance freshness cache. Default OFF → the acceptance route lazy-reads
-  // the ledger on demand, which needs no bus at all.
-  const qeGateEvents =
-    hasFlag(args, '--qe-gate-events') ||
-    (process.env['WICKED_QE_GATE_EVENTS'] !== undefined && process.env['WICKED_QE_GATE_EVENTS'] !== '');
-  // Which bus db the QE subscription reads: an EXPLICIT --bus-db / WICKED_BUS_DB
-  // wins; otherwise wicked-bus's own default (`~/.something-wicked/wicked-bus/bus.db`) —
-  // the db the QE pipeline's CLI emits to. Deliberately NOT the exec seam's
-  // `~/.wicked-crew/bus.db` fallback: that default is crew-private, and the QE
-  // events are cross-product traffic that never lands there.
-  const qeBusDbPath = flag(args, '--bus-db') ?? process.env['WICKED_BUS_DB'];
+  // An explicit bus db (--bus-db / WICKED_BUS_DB) — the first choice of the crew bus below.
+  const explicitBusDb = flag(args, '--bus-db') ?? process.env['WICKED_BUS_DB'];
   // The CROSS-PRODUCT bus (acceptance findings F-042/F-043) — the interactive seams, the project
   // bus, the /ws relay (which used to open wicked-bus's default REGARDLESS of --bus-db) and the
   // bridge crew spawns (handed the directory as WICKED_BUS_DATA_DIR, bridge-pool.ts) all meet on
@@ -126,7 +111,7 @@ function parseBootstrap(args: string[]): BootstrapOpts {
   let crewBus: CrewBusLocation;
   try {
     crewBus = resolveCrewBus({
-      explicitDb: qeBusDbPath,
+      explicitDb: explicitBusDb,
       envDataDir: process.env['WICKED_BUS_DATA_DIR'],
       coreDbPath: dbPath,
     });
@@ -173,9 +158,7 @@ function parseBootstrap(args: string[]): BootstrapOpts {
   // Project-bound docs launch FILED runs; unbound (Unfiled) docs launch unfiled governed runs
   // (CREW-UX-4 — slice U made Unfiled first-class, so nothing else answers them). Opt-out:
   //   --no-interactive-draft-events   or   WICKED_INTERACTIVE_DRAFT_EVENTS=0|false|no|off|""
-  // The bus db follows the SAME resolution as the QE seam — explicit --bus-db / WICKED_BUS_DB wins,
-  // otherwise wicked-bus's own default (which honors WICKED_BUS_DATA_DIR): interactive's service
-  // resolves its bus exactly that way, so by default the two meet on the same db.
+  // The bus is the daemon's one crew bus (`crewBus` below), reached through the engine.
   const interactiveDraftEvents =
     !hasFlag(args, '--no-interactive-draft-events') &&
     !isFalsy(process.env['WICKED_INTERACTIVE_DRAFT_EVENTS']);
@@ -212,28 +195,17 @@ function parseBootstrap(args: string[]): BootstrapOpts {
   // Remove with the fallback once crew's wicked-core-ts floor carries `Core.busConnectionStats`.
   const preRuleExecBusDbPath = flag(args, '--bus-db') ?? process.env['WICKED_BUS_DB'] ?? join(stateHomeOfDb(dbPath), 'bus.db');
   return {
-    dbPath, port, stub, engineExec, busDbPath, preRuleExecBusDbPath, qeGateEvents, qeBusDbPath, crewBus, governanceStore,
+    dbPath, port, stub, engineExec, busDbPath, preRuleExecBusDbPath, crewBus, governanceStore,
     interactiveDraftEvents, interactiveEditEvents, interactiveChatEvents, interactiveDemoEvents,
     interactiveSeats,
   };
 }
 
-/** Open the daemon's crew bus handle (creating the file and its directory); the reason when it
- *  cannot, else `undefined`. */
-function probeCrewBus(dbPath: string): BusUnavailable | undefined {
-  try {
-    mkdirSync(dirname(dbPath), { recursive: true });
-    crewBusHandle(dbPath, { create: true }).prepare('SELECT 1').all();
-    return undefined;
-  } catch (err) {
-    return { dbPath, reason: err instanceof Error ? err.message : String(err), kind: 'probe_open' };
-  }
-}
-
-/** Probe the pre-T0 exec bus an engine without the one-connection rule would get — a plain file
- *  open, NOT a SQLite connection: this runs before the engine spawns and no connection in this
- *  process holds that file (it is not the crew bus), so the close here drops nobody's locks. */
-function probePreRuleExecBus(dbPath: string): BusUnavailable | undefined {
+/** Probe a bus file before the engine spawns — its directory made, the file created or opened: a
+ *  plain file open, NOT a SQLite connection (crew opens none, core/bus.ts). No connection in this
+ *  process holds the file yet (the engine has not spawned), so the close here drops nobody's
+ *  locks. The reason when it cannot, else `undefined`. */
+function probeBusFile(dbPath: string): BusUnavailable | undefined {
   try {
     mkdirSync(dirname(dbPath), { recursive: true });
     closeSync(openSync(dbPath, 'a'));
@@ -283,13 +255,11 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
   }
   const { crewBus } = opts;
   console.error(`[crew] cross-product bus: ${crewBus.dbPath} (${crewBus.source})`);
-  // DES-TEAMING-002 T0: open the daemon's ONE long-lived crew bus handle BEFORE the engine spawns
-  // (core/bus-handle.ts — each SQLite library in this process holds its bus connection for the
-  // process's life), and learn here whether the bus opens at all. It does not → ONE line, the
-  // engine is handed no bus (it runs un-teamed), and /health.warnings carries the notice.
-  // wicked-bus (better-sqlite3 underneath) does not create a missing parent: the sidecar dir —
-  // or an explicit dir — must exist before the seams open the db, or every seam disables itself.
-  const busUnavailable = probeCrewBus(crewBus.dbPath);
+  // DES-TEAMING-002 T0: learn BEFORE the engine spawns whether the bus file opens at all (the
+  // engine's SQLite does not create a missing parent). It does not → ONE line, the engine is
+  // handed no bus (it runs un-teamed), crew's seams do not arm (they reach the bus only through
+  // the engine, core/bus.ts), and /health.warnings carries the notice.
+  const busUnavailable = probeBusFile(crewBus.dbPath);
   if (busUnavailable !== undefined) {
     console.error(
       `[crew] bus unavailable: cannot open ${crewBus.dbPath} (${busUnavailable.reason}) — the engine runs without a bus (un-teamed)` +
@@ -364,7 +334,7 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
     !engineRule && opts.engineExec
       ? opts.preRuleExecBusDbPath === crewBus.dbPath
         ? busUnavailable
-        : probePreRuleExecBus(opts.preRuleExecBusDbPath)
+        : probeBusFile(opts.preRuleExecBusDbPath)
       : undefined;
   if (preRuleExecUnavailable !== undefined && opts.preRuleExecBusDbPath !== crewBus.dbPath) {
     console.error(
@@ -388,14 +358,6 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
   });
   adapterRef = adapter;
   const serverOptions = {
-    ...(opts.qeGateEvents
-      ? {
-          qeGateEvents: {
-            enabled: true,
-            ...(opts.qeBusDbPath !== undefined ? { dbPath: opts.qeBusDbPath } : {}),
-          },
-        }
-      : {}),
     ...(opts.interactiveDraftEvents
       ? {
           interactiveDraftEvents: {
@@ -541,7 +503,6 @@ async function main(): Promise<void> {
         '                                  see `wicked-crew governance replay`\n' +
         '  --stub                          Use stub engine (env: WICKED_CORE_STUB=1)\n' +
         '  --engine-exec                   Arm event-driven execution seam (env: WICKED_BUS_EXEC)\n' +
-        '  --qe-gate-events                Consume QE gate bus events (env: WICKED_QE_GATE_EVENTS)\n' +
         '  --no-interactive-draft-events   Disable interactive draft answering (env: WICKED_INTERACTIVE_DRAFT_EVENTS=0)\n' +
         '  --no-interactive-edit-events    Disable interactive edit answering (env: WICKED_INTERACTIVE_EDIT_EVENTS=0)\n' +
         '  --no-interactive-chat-events    Disable interactive chat answering (env: WICKED_INTERACTIVE_CHAT_EVENTS=0)\n' +
@@ -577,7 +538,6 @@ async function main(): Promise<void> {
       engineExec: adapter.engineExec,
       // The bus the engine was handed (DES-TEAMING-002 T0: every boot, not only --engine-exec).
       busDb: adapter.busDbPath,
-      qeGateEvents: opts.qeGateEvents || undefined,
       // What ARMED, not what was asked for (crew#309): a stub-engine daemon refuses the four
       // interactive answering seams (see `api/server.ts`), and an evidence harness that reads
       // this line must not be told a seam is live when nothing is holding its cursor.

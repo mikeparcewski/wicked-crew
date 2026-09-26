@@ -171,9 +171,8 @@ ledgers are still read; `WICKED_QE_LEDGER_DIR` overrides) — **deny-dominates**
 The route always answers 200 for a known run: "no ledger", "no verdict", and "FAIL" are real answers
 about the gate, not errors in the request. It sits beside `GET /runs/:id/evidence` deliberately —
 evidence is what the *run* recorded about itself; acceptance is what the *QE pipeline* recorded
-about the repo the run worked on. Two systems of record, two routes. (`serve --qe-gate-events` also
-subscribes the daemon to the QE pipeline's `wicked.qe.gate.*` bus events for freshness; without it
-the route lazy-reads the ledger on demand — no bus required.)
+about the repo the run worked on. Two systems of record, two routes. The route reads the ledger on
+demand; it needs no bus.
 
 ### Conformance, beside the QE verdict *(crew 0.8, AW-14)*
 

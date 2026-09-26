@@ -157,7 +157,6 @@ describe('POST /chats/:id/messages — refuse mid-turn, correlate replies (F-REC
       new ElicitationCache(),
       undefined,
       undefined,
-      undefined,
       { chatTurns: turns, chatTranscripts: transcripts, signedIn: () => null },
     );
     await app.ready();

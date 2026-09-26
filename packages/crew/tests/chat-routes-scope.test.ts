@@ -87,7 +87,7 @@ beforeEach(async () => {
   sendReaches = null;
   chatScopes = new ChatScopeIndex(join(base, 'chats'));
   app = Fastify({ logger: false });
-  registerRoutes(app, fakeAdapter(), new GateCache(), new ElicitationCache(), undefined, undefined, undefined, {
+  registerRoutes(app, fakeAdapter(), new GateCache(), new ElicitationCache(), undefined, undefined, {
     chatScopes,
     // Never the real dotfile probe: the suite must not read the developer's worker home.
     signedIn: (seatKey) => signedIn(seatKey),

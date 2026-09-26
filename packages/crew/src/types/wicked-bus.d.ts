@@ -1,10 +1,10 @@
 /**
  * Minimal type surface for `wicked-bus` (plain-JS package, ships no types).
  *
- * Only the slice crew uses is declared: the tap's read-only helpers
- * (`matchesFilter`, `loadConfig`, `resolveDbPath`), and the `openDb`/`emit`/
- * `subscribe` the TESTS use to put real events on a real bus. In-daemon crew
- * never calls those (crew#679, tests/bus-no-write.test.ts). Shapes are transcribed from wicked-bus
+ * wicked-bus is a TEST dependency only: the tests use `openDb`/`emit`/`subscribe`
+ * to put real events on a real bus. In-daemon crew never loads it — crew reaches
+ * the bus only through the engine (core/bus.ts, wicked-core#631;
+ * tests/bus-no-write.test.ts). Shapes are transcribed from wicked-bus
  * `lib/{db,subscribe,emit,config}.js` (v2.3.x); loose on purpose where the
  * upstream is (`db` is an opaque handle here — better-sqlite3's type is not a
  * dependency this package needs).

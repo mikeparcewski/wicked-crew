@@ -149,7 +149,7 @@ describe('no code path writes outside the skills root (design v3.2 §1)', () => 
     s.store.seed();
     const runtime = new SkillsRuntime({ store: s.store, log: () => undefined });
     const app = Fastify({ logger: false });
-    registerRoutes(app, memoryAdapter(), new GateCache(), new ElicitationCache(), undefined, undefined, undefined, { skills: runtime });
+    registerRoutes(app, memoryAdapter(), new GateCache(), new ElicitationCache(), undefined, undefined, { skills: runtime });
     await app.ready();
     try {
       const codexSkills = join(s.home, '.codex', 'skills');

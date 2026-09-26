@@ -86,7 +86,7 @@ describe('skills_root is NOT a setting (PUT/GET /settings)', () => {
 
   const build = (adapter: CoreAdapter): FastifyInstance => {
     const fastify = Fastify({ logger: false });
-    registerRoutes(fastify, adapter, new GateCache(), new ElicitationCache(), undefined, undefined, { audit, authMode: 'off' }, { skills: runtime });
+    registerRoutes(fastify, adapter, new GateCache(), new ElicitationCache(), undefined, { audit, authMode: 'off' }, { skills: runtime });
     return fastify;
   };
 

@@ -1,5 +1,6 @@
 import { createRequire } from 'node:module';
 import type { BusUnavailable } from './engine-bus.js';
+import { attachEngineBus, detachEngineBus, type EngineBus } from './bus.js';
 import { mkdir, access, readFile, writeFile, chmod, rm } from 'node:fs/promises';
 import { existsSync, readdirSync, readFileSync, renameSync } from 'node:fs';
 import { join, dirname, resolve, isAbsolute, relative, sep } from 'node:path';
@@ -448,6 +449,12 @@ type TeamMethods = {
  *  an older addon has no such method. */
 interface BusBridgeMethods {
   busBridgeState?(): string;
+  /** wicked-core#631 (wicked-core-ts ≥ the release carrying it): emit one wicked-bus row on the
+   *  engine's bus; resolves to its event id (a key already on the bus → the existing row's id). */
+  busEmit?(eventJson: string): Promise<number>;
+  /** wicked-core#631: rows after a cursor, filtered by type prefix (live ones unless
+   *  `includeExpired`) — JSON `{ next, rows }`. */
+  busRead?(afterId: number, limit: number, typePrefix?: string | null, includeExpired?: boolean | null): Promise<string>;
 }
 
 type CoreHandleFull = CoreHandle &
@@ -1238,6 +1245,11 @@ export class CoreAdapter {
   /** Why the engine has no usable bus — the boot probe's failure, or the engine could not arm its
    *  bus bridge on the handed bus within its bound — else `null`. */
   readonly busUnavailable: BusUnavailable | null;
+  /** The bus file whose seams are off because the linked engine has no `Core.busEmit`/`busRead`
+   *  (wicked-core#631) — `/health.warnings` says so — else `null`. */
+  readonly busSeamsOff: string | null = null;
+  /** The engine's bus calls, attached for `busDbPath` (core/bus.ts); `null` without a bus. */
+  private engineBus: EngineBus | null = null;
   /**
    * `true` when this adapter drives the DETERMINISTIC OFFLINE engine (`Core.spawnStub`) rather
    * than the production one — i.e. the `StubDispatcher` (every seat votes for the first roster
@@ -1361,6 +1373,24 @@ export class CoreAdapter {
         const reason = `the engine could not arm its bus bridge: ${state.reason ?? 'no reason given'}`;
         this.busUnavailable = { dbPath: this.busDbPath, reason: state.reason ?? 'no reason given', kind: 'bridge_not_armed' };
         console.error(`[crew] bus unavailable: ${this.busDbPath} (${reason}) — the engine launches nothing from the bus`);
+      }
+    }
+    // wicked-core#631: crew's seams write and read this bus through the engine that holds it —
+    // crew opens no SQLite of its own (core/bus.ts). An engine without the bus calls leaves every
+    // seam unarmed (each logs why); crew does not fall back to a second library.
+    if (this.busDbPath !== undefined) {
+      const core = this.core;
+      if (typeof core.busEmit === 'function' && typeof core.busRead === 'function') {
+        this.engineBus = {
+          busEmit: (eventJson) => core.busEmit!(eventJson),
+          busRead: (afterId, limit, typePrefix, includeExpired) => core.busRead!(afterId, limit, typePrefix, includeExpired),
+        };
+        attachEngineBus(this.busDbPath, this.engineBus);
+      } else {
+        (this as { busSeamsOff: string | null }).busSeamsOff = this.busDbPath;
+        console.error(
+          `[crew] the linked wicked-core-ts has no Core.busEmit/busRead (wicked-core#631) — crew's bus seams on ${this.busDbPath} stay off; upgrade the engine`,
+        );
       }
     }
     // The ONE subscribe() for the process. Error-first callback (index.d.ts:56):
@@ -3371,6 +3401,7 @@ export class CoreAdapter {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    if (this.engineBus !== null && this.busDbPath !== undefined) detachEngineBus(this.busDbPath, this.engineBus);
     this.listeners.clear();
     this.subscription.close();
   }

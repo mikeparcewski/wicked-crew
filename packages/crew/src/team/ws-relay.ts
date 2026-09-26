@@ -7,21 +7,18 @@
  * files it, as every CoreEvent frame is. No CoreEvent variant carries a team event, and crew never
  * puts a team row on the bus (tests/team-no-publish.test.ts).
  *
- * READ-ONLY, by necessity. The bus file is the engine's too (T0), and the engine writes it through
- * its bundled SQLite while crew holds it through better-sqlite3: two SQLite copies in one process,
- * whose POSIX locks do not exclude each other (sqlite.org/howtocorrupt.html §2.2.1). A crew write
- * concurrent with an engine write corrupts the file. A wicked-bus `subscribe` writes (it registers
- * a subscription and acks a durable cursor per row), so the relay does not use one: it is a
- * read-only tap (`core/bus-tap.ts`) on crew's one long-lived bus handle, its cursor in memory,
- * starting at the newest row (`latest`). Nothing is lost that matters: the bus is the durable
- * record and `GET /runs/:id/team` reads it back, so a restart needs no stored cursor.
+ * READ-ONLY. The bus file is the engine's (T0), and crew reads it through the engine that holds it
+ * (`Core.busRead`, wicked-core#631, core/bus.ts) — crew opens no SQLite of its own. The relay is a
+ * tap with its cursor in memory, starting at the newest row (`latest`). Nothing is lost that
+ * matters: the bus is the durable record and `GET /runs/:id/team` reads it back, so a restart needs
+ * no stored cursor.
  *
- * Posture: loud, non-fatal. A bus that cannot be opened → one log line and `null`; `/ws` then
+ * Posture: loud, non-fatal. A bus no engine holds → one log line and `null`; `/ws` then
  * carries no team frames. A read that fails (the engine mid-checkpoint) is logged and retried on
  * the next poll.
  */
 
-import { tapBus } from '../core/bus-tap.js';
+import { tapBus } from '../core/bus.js';
 import { broadcast as broadcastToWs } from '../events/bus.js';
 import type { CoreEvent } from '../core/types.js';
 
@@ -53,7 +50,7 @@ export async function startTeamWsRelay(opts: TeamRelayOptions): Promise<TeamRela
   const send = opts.broadcast ?? broadcastToWs;
   let lastError: string | null = null;
   try {
-    return tapBus({
+    return await tapBus({
       dbPath: opts.dbPath,
       filter: RELAY_FILTER,
       pollIntervalMs: opts.pollIntervalMs ?? 2000,

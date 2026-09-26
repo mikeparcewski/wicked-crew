@@ -227,7 +227,7 @@ describe('the routes — PUT /settings, GET /health, GET /diagnostics, publish /
 
   const build = (adapter: CoreAdapter): FastifyInstance => {
     const fastify = Fastify({ logger: false });
-    registerRoutes(fastify, adapter, new GateCache(), new ElicitationCache(), undefined, undefined, undefined, { skills: runtime });
+    registerRoutes(fastify, adapter, new GateCache(), new ElicitationCache(), undefined, undefined, { skills: runtime });
     return fastify;
   };
 

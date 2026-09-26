@@ -44,8 +44,8 @@
  * its own reason.
  */
 
-import type { Verdict } from 'wicked-ledger';
-import { VERDICT_VALUES } from 'wicked-ledger';
+import type { Verdict } from 'wicked-ledger/manifest';
+import { VERDICT_VALUES } from 'wicked-ledger/manifest';
 import type {
   GovernanceClaim,
   RecordedEvent,
@@ -63,7 +63,6 @@ import type {
   RunLinkage,
 } from './ledger.js';
 import { describeAttribution, readAcceptanceState, summarizeManifest } from './ledger.js';
-import type { QeGateCache, QeGateEventEntry } from './gate-events.js';
 import type { RunConformance } from './conformance.js';
 import { resolveConformance } from './conformance.js';
 
@@ -366,8 +365,6 @@ export interface AcceptanceView {
    * headline. Never claims guardrailed for an unenforced, ungoverned, or unverifiable run.
    */
   conformance: RunConformance;
-  /** The latest matching `wicked.qe.*` bus event, when the bus seam is armed and one was seen. */
-  busEvent: QeGateEventEntry | null;
 }
 
 /**
@@ -469,15 +466,13 @@ export function runWindowFromEvents(
 /**
  * Assemble the acceptance view for one crew run: read the run's event log,
  * read the ledger SCOPED TO THIS RUN (a read-only canonical-JSON read — the
- * fallback that needs no bus), resolve the gate, and attach the freshest
- * matching bus event when the opt-in subscription has seen one.
+ * read that needs no bus) and resolve the gate.
  */
 export async function buildAcceptanceView(opts: {
   runId: string;
   repo: RepoEntry | null;
   /** What the run must prove ({@link acceptanceRequirementOf}). */
   requirement: AcceptanceRequirement;
-  gateEvents: QeGateCache;
   qeRunId?: string;
   /**
    * Loader for the conformance store's claims (the adapter's `listConformanceClaims`). Optional so
@@ -537,16 +532,6 @@ export async function buildAcceptanceView(opts: {
     events: eventRows,
   });
 
-  // Freshness signal only — the ledger stays the system of record for the
-  // gate. Keyed by the QE run id when the ledger named one, else by context
-  // (the gate emitter's `context` is the QE project id).
-  const busEvent =
-    (state?.verdict !== null && state?.verdict !== undefined
-      ? opts.gateEvents.forRun(state.verdict.run_id)
-      : undefined) ??
-    (state?.run != null ? opts.gateEvents.forContext(state.run.project_id) : undefined) ??
-    null;
-
   return {
     runId: opts.runId,
     repo:
@@ -593,6 +578,5 @@ export async function buildAcceptanceView(opts: {
         : null,
     gate,
     conformance,
-    busEvent,
   };
 }

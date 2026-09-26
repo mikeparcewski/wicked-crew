@@ -23,8 +23,7 @@
 import { broadcast } from '../events/bus.js';
 import type { CoreEvent } from '../core/types.js';
 import { busSubscriberErrorReporter } from '../interactive/bus-subscriber-errors.js';
-import { tapBus, type BusTap } from '../core/bus-tap.js';
-import { emitOnBus } from '../core/bus-writer.js';
+import { emitOnBus, tapBus, type BusTap } from '../core/bus.js';
 
 /** Crew's bus DOMAIN COLUMN value — the product-scoped plugin name, matching the repo precedent
  *  (`INTERACTIVE_DOMAIN = 'wicked-interactive'`). The EVENT TYPES carry the §4 grammar's bare
@@ -40,8 +39,8 @@ export const MEMBERSHIP_ATTACHED = 'wicked.crew.membership.attached';
 export const MEMBERSHIP_DETACHED = 'wicked.crew.membership.detached';
 
 export interface ProjectBus {
-  /** Emit one post-commit project event (through the bus writer). Never rejects; WB-002
-   *  (duplicate key) is success. */
+  /** Emit one post-commit project event (through the engine, core/bus.ts). Never rejects; a key
+   *  already on the bus is success. */
   emit(type: string, payload: Record<string, unknown>, idempotencyKey: string): Promise<boolean>;
   /** The resolved bus db path (the activity feed's read side opens the same file). */
   dbPath: string | null;
@@ -49,7 +48,7 @@ export interface ProjectBus {
 }
 
 export interface ProjectBusOptions {
-  /** Bus db path; omit for wicked-bus's own resolution (honors WICKED_BUS_DATA_DIR). */
+  /** The bus db the daemon handed its engine (core/bus.ts); without one the seam does not arm. */
   dbPath?: string;
   /** Poll cadence for the /ws bridge subscriber, ms (tests shorten it). */
   pollIntervalMs?: number;
@@ -65,16 +64,15 @@ export interface ProjectBusOptions {
 export async function startProjectBus(opts: ProjectBusOptions = {}): Promise<ProjectBus | null> {
   const log = opts.log ?? ((): void => undefined);
 
-  // Both halves ride crew's one bus mechanism (crew#679): the bridge is a read-only tap on crew's
-  // long-lived handle, and every emit goes to the one bus writer — never a write on the engine's
-  // bus file through crew's own SQLite.
+  // Both halves go through the engine that holds the bus (wicked-core#631, core/bus.ts): the
+  // bridge is a tap over `Core.busRead`, every emit is `Core.busEmit` — crew opens no SQLite.
   let dbPath: string;
   let bridge: BusTap;
   try {
     // The /ws liveness bridge: interactive events that name a project become `projectActivity`
     // frames. Consumers that don't know the frame ignore it (additive CoreEvent contract). A lost
     // liveness frame is not retried — the durable read (`/projects/:id/activity`) is the record.
-    bridge = tapBus({
+    bridge = await tapBus({
       dbPath: opts.dbPath,
       filter: INTERACTIVE_FILTER,
       pollIntervalMs: opts.pollIntervalMs ?? 2000,
@@ -102,7 +100,7 @@ export async function startProjectBus(opts: ProjectBusOptions = {}): Promise<Pro
     dbPath = bridge.dbPath;
   } catch (err) {
     log(
-      `[projects] could not open the bus db${
+      `[projects] has no bus${
         opts.dbPath !== undefined ? ` at ${opts.dbPath}` : ''
       } — project events disabled: ${err instanceof Error ? err.message : String(err)}`,
     );
@@ -121,8 +119,6 @@ export async function startProjectBus(opts: ProjectBusOptions = {}): Promise<Pro
       });
       return true;
     } catch (err) {
-      const code = (err as { error?: string }).error;
-      if (code === 'WB-002') return true; // duplicate key — the emit already happened
       log(`[projects] emit ${type} failed: ${err instanceof Error ? err.message : String(err)}`);
       return false;
     }

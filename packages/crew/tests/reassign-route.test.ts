@@ -79,7 +79,6 @@ describe('POST /runs/:id/reassign — the manual operator lever (crew#442)', () 
       new GateCache(),
       new ElicitationCache(),
       undefined,
-      undefined,
       { audit, authMode: 'off' },
     );
   });

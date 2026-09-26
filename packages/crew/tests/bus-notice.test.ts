@@ -31,3 +31,51 @@ describe('busUnavailableWarning', () => {
     });
   });
 });
+
+// wicked-core#631: an engine without Core.busEmit/busRead leaves every bus seam off — said on
+// /health.warnings, not only on the console.
+import { afterAll } from 'vitest';
+import { createRequire } from 'node:module';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { CoreAdapter } from '../src/core/adapter.js';
+import { createServer } from '../src/api/server.js';
+import { removeScratch } from './setup/scratch.js';
+
+describe('an engine without busEmit/busRead (wicked-core#631)', () => {
+  const dirs: string[] = [];
+  afterAll(() => dirs.forEach(removeScratch));
+
+  it('puts "bus seams off" on /health.warnings', async () => {
+    const proto = (createRequire(import.meta.url)('wicked-core-ts') as { Core: { prototype: Record<string, unknown> } }).Core.prototype;
+    const saved = { busEmit: proto['busEmit'], busRead: proto['busRead'] };
+    const savedBus = process.env['WICKED_BUS_DB'];
+    const dir = mkdtempSync(join(tmpdir(), 'bus-seams-off-'));
+    dirs.push(dir);
+    delete proto['busEmit'];
+    delete proto['busRead'];
+    let adapter: CoreAdapter | undefined;
+    try {
+      adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: true, busDbPath: join(dir, 'bus.db') });
+    } finally {
+      Object.assign(proto, saved);
+    }
+    try {
+      const app = await createServer(adapter, { auditPath: join(dir, 'audit.log') });
+      try {
+        const res = await app.inject({ method: 'GET', url: '/api/v1/health' });
+        const warnings = (res.json() as { warnings?: Array<{ kind: string; message: string }> }).warnings ?? [];
+        const off = warnings.find((w) => w.kind === 'bus.seams_off');
+        expect(off?.message).toMatch(/^bus seams off: engine lacks busEmit\/busRead/);
+        expect(off?.message).toContain(join(dir, 'bus.db'));
+      } finally {
+        await app.close();
+      }
+    } finally {
+      adapter.close();
+      if (savedBus === undefined) delete process.env['WICKED_BUS_DB'];
+      else process.env['WICKED_BUS_DB'] = savedBus;
+    }
+  });
+});

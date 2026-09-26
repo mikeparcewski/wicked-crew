@@ -47,7 +47,6 @@ function buildApp(signedIn: (seatKey: string, workerConfigRoot?: string) => bool
     new ElicitationCache(),
     undefined,
     undefined,
-    undefined,
     { seatHealth: new SeatHealthTracker(), signedIn },
   );
   return app;
@@ -159,7 +158,7 @@ describe('GET /roster with seat sign-in (seat sign-in)', () => {
       } as unknown as Parameters<SeatHealthTracker['ingest']>[0]);
     }
     const local = Fastify({ logger: false });
-    registerRoutes(local, {} as unknown as CoreAdapter, new GateCache(), new ElicitationCache(), undefined, undefined, undefined, {
+    registerRoutes(local, {} as unknown as CoreAdapter, new GateCache(), new ElicitationCache(), undefined, undefined, {
       seatHealth: tracker,
       signedIn: (seatKey) => seatKey === 'claude',
     });

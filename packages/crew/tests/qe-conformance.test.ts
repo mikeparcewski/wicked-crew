@@ -16,7 +16,6 @@ import {
   resolveEnforcement,
 } from '../src/qe/conformance.js';
 import { buildAcceptanceView } from '../src/qe/acceptance.js';
-import { QeGateCache } from '../src/qe/gate-events.js';
 import type { GovernanceClaim, RecordedEvent } from '../src/core/types.js';
 
 /** A minimal store claim. */
@@ -268,7 +267,6 @@ describe('buildAcceptanceView — the conformance section rides the acceptance b
       runId: 'run-1',
       repo: null,
       requirement: { declared: false, phases: [] },
-      gateEvents: new QeGateCache(),
       claims: async () => [
         claim({
           claim_id: 'clm-deny',
@@ -295,7 +293,6 @@ describe('buildAcceptanceView — the conformance section rides the acceptance b
       runId: 'run-1',
       repo: null,
       requirement: { declared: false, phases: [] },
-      gateEvents: new QeGateCache(),
       claims: async () => {
         throw new Error('claims wire down');
       },
@@ -314,7 +311,6 @@ describe('buildAcceptanceView — the conformance section rides the acceptance b
       runId: 'run-1',
       repo: null,
       requirement: { declared: false, phases: [] },
-      gateEvents: new QeGateCache(),
     });
     expect(view.conformance.claimsAvailable).toBe(false);
     expect(view.conformance.enforcement.status).toBe('unverifiable');

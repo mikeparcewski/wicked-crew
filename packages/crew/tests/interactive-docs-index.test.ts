@@ -85,7 +85,6 @@ describe('GET /interactive/docs — daemon-wide, non-spawning', () => {
       mockAdapter as unknown as CoreAdapter,
       new GateCache(),
       new ElicitationCache(),
-      undefined,
       { bus: null, index: new MembershipIndex(), log: () => undefined, settings },
       undefined,
       { docRuns },

@@ -10,14 +10,14 @@
 // "wrong # of entries in index"), the engine spooled its required facts to the outbox and plan
 // launches never reached their gate (crew main 3d203e8, tests/team-engine.test.ts timeouts).
 //
-// So the relay polls through crew's one long-lived handle, keeps its cursor in memory (it starts
-// at the newest row: `latest`, as before), and issues no write at all.
+// So the relay reads through the engine that holds the bus (src/core/bus.ts, wicked-core#631 —
+// here the test double, tests/setup/bus-double.ts), keeps its cursor in memory (it starts at the
+// newest row: `latest`, as before), and issues no write at all.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { crewBusHandle } from '../src/core/bus-handle.js';
 import { startTeamWsRelay, type TeamRelay } from '../src/team/ws-relay.js';
 import { removeScratch } from './setup/scratch.js';
 
@@ -55,8 +55,9 @@ async function until<T>(probe: () => T | undefined): Promise<T> {
 }
 
 /** Every row count the relay could have written through a wicked-bus subscription. */
-function writeFootprint(): Record<string, number> {
-  const db = crewBusHandle(busPath, { create: false });
+async function writeFootprint(): Promise<Record<string, number>> {
+  const bus = await import('wicked-bus');
+  const db = bus.openDb({ db_path: busPath }) as { prepare(sql: string): { all(): unknown[] } };
   const count = (t: string) => (db.prepare(`SELECT count(*) AS n FROM ${t}`).all()[0] as { n: number }).n;
   return { subscriptions: count('subscriptions'), cursors: count('cursors'), delivery_attempts: count('delivery_attempts') };
 }
@@ -97,13 +98,13 @@ describe('the team relay (read-only)', () => {
   });
 
   it('writes nothing to the bus: no subscription, no cursor, no delivery row', async () => {
-    const before = writeFootprint();
+    const before = await writeFootprint();
     const frames: Frame[] = [];
     relay = await startTeamWsRelay({ dbPath: busPath, projectOf: () => undefined, pollIntervalMs: 10, broadcast: (f) => frames.push(f as unknown as Frame) });
     await emitRows([{ type: 'wicked.team.path.started', run: 'r1' }, { type: 'wicked.team.path.ended', run: 'r1' }]);
     // Many poll intervals: every row has been seen (and, through a subscription, acked).
     await new Promise((r) => setTimeout(r, 300));
-    expect(writeFootprint()).toEqual(before);
+    expect(await writeFootprint()).toEqual(before);
   });
 
   it('a bus that cannot be opened is null (logged), never a throw', async () => {

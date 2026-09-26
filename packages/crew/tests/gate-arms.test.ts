@@ -130,7 +130,7 @@ describe('POST /runs/:id/gate — the arms reach the adapter (DES-L1 PR-2)', () 
       }),
     };
     app = Fastify({ logger: false });
-    registerRoutes(app, mockAdapter as unknown as CoreAdapter, new GateCache(), new ElicitationCache(), undefined, undefined, {
+    registerRoutes(app, mockAdapter as unknown as CoreAdapter, new GateCache(), new ElicitationCache(), undefined, {
       audit,
       authMode: 'off',
     });

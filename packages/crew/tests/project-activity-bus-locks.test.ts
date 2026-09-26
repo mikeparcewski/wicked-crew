@@ -1,30 +1,31 @@
-// F-E2E-021 — the project activity feed must read the bus through the SAME SQLite library the
-// daemon's long-lived wicked-bus subscribers use.
+// F-E2E-021 — the project activity feed reads the bus without dropping the locks of the one
+// connection that holds it.
 //
-// The daemon holds better-sqlite3 connections on bus.db for its whole life (interactive seams,
-// /ws relay, project bridge); in WAL mode each keeps a SHARED lock on the db file from its first
-// read until close. SQLite's locks are POSIX advisory locks: the kernel drops every lock the
-// PROCESS holds on a file when ANY descriptor for that file is closed. A single SQLite library
-// instance defers such closes while siblings hold locks — a SECOND instance in the process
-// (`node:sqlite`, which the feed used to open read-only and close per GET) does not know about
-// the first and released the seams' locks. The next short-lived external emitter (`wicked-bus
-// emit`, what wicked-estate spawns) then obtained the EXCLUSIVE lock on its own close,
-// checkpointed and UNLINKED bus.db-wal/-shm under the seams, whose polls failed with
-// "database disk image is malformed" every 2 s for the rest of the daemon's life.
+// The daemon's bus file is held for the life of the process by ONE connection: the engine's
+// (DES-TEAMING-002 T0), in WAL mode, keeping a SHARED lock from its first read. SQLite's locks are
+// POSIX advisory locks: the kernel drops every lock the PROCESS holds on a file when ANY descriptor
+// for that file is closed, and a second SQLite library in the process does not know about the
+// first. The feed once read through `node:sqlite` (open read-only, close per GET) and later
+// through crew's own better-sqlite3 handle; a close by either released the holder's locks, and the
+// next short-lived external emitter (`wicked-bus emit`, what wicked-estate spawns) obtained the
+// EXCLUSIVE lock on its own close, checkpointed and UNLINKED bus.db-wal/-shm under the daemon,
+// whose reads failed with "database disk image is malformed" for the rest of its life.
 //
-// This test drives that exact sequence with the REAL `wicked-bus emit` CLI as the external
-// emitter and asserts the sidecar inodes survive the feed read and the subscriber keeps reading.
-// With the `node:sqlite` read in place, the second external emit unlinks both sidecars here.
+// Since wicked-core#631 crew opens no SQLite at all: the feed reads through the engine that holds
+// the bus (`Core.busRead`, src/core/bus.ts). This test drives the sequence with the REAL engine as
+// the holder and the REAL `wicked-bus emit` CLI as the external emitter, and asserts the sidecar
+// inodes survive the feed reads and the engine keeps reading every row.
 
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import * as bus from 'wicked-bus';
 import { buildActivityPage } from '../src/projects/activity.js';
-import type { CoreAdapter } from '../src/core/adapter.js';
+import { CoreAdapter } from '../src/core/adapter.js';
+import { busTesting, emitOnBus } from '../src/core/bus.js';
+import { removeScratch } from './setup/scratch.js';
 
 const require = createRequire(import.meta.url);
 /** The real `wicked-bus` CLI entry — the process wicked-estate spawns to emit (`WICKED_ESTATE_EMIT_PROGRAM`). */
@@ -59,59 +60,96 @@ function externalEmit(dataDir: string, n: number): void {
   expect(r.status, `wicked-bus emit #${n} failed: ${r.stderr}${r.stdout}`).toBe(0);
 }
 
-describe('project activity feed vs the daemon bus subscribers (F-E2E-021)', () => {
-  it('reads the interactive half without dropping the subscribers locks: external emitter closes leave bus.db-wal/-shm in place and the subscriber keeps reading', async () => {
-    const dataDir = mkdtempSync(join(tmpdir(), 'crew-fe2e021-'));
-    const dbPath = join(dataDir, 'bus.db');
-
-    // The daemon side: one long-lived subscriber connection, exactly how the seams open theirs
-    // (typed locally: crew never depends on better-sqlite3's types, it reaches it through wicked-bus).
-    const seam = bus.openDb({ db_path: dbPath }) as unknown as {
-      prepare(sql: string): { get(): unknown };
-      close(): void;
-    };
-    const seamCount = (): number =>
-      (seam.prepare('SELECT COUNT(*) AS n FROM events').get() as { n: number }).n;
-    expect(seamCount()).toBe(0); // first read: from here the WAL-mode SHARED lock is held for life
-
-    const wal = inode(`${dbPath}-wal`);
-    const shm = inode(`${dbPath}-shm`);
-    expect(wal, 'bus.db-wal exists once the seam opened the WAL').not.toBeNull();
-    expect(shm, 'bus.db-shm exists once the seam opened the WAL').not.toBeNull();
-
-    // Control: an external emitter's close cannot take the EXCLUSIVE lock past the seam, so the
-    // sidecars stay and the seam sees the row.
-    externalEmit(dataDir, 1);
-    expect([inode(`${dbPath}-wal`), inode(`${dbPath}-shm`)]).toEqual([wal, shm]);
-    expect(seamCount()).toBe(1);
-
-    // The read under test: the activity feed's interactive half (a GET /projects/:id/activity).
-    const adapter = { runEvents: async () => [] } as unknown as CoreAdapter;
-    const page = await buildActivityPage(adapter, 'proj-1', [], dbPath, undefined, 50);
-    expect(page.entries.map((e) => e.id)).toEqual(['bus:1']);
-    expect(page.entries[0]?.source).toBe('interactive');
-
-    // The external emitter again. With a second SQLite library behind the feed read, THIS close
-    // unlinked both sidecars (the seam's kernel locks were gone) — the F-E2E-021 failure.
-    externalEmit(dataDir, 2);
-    expect(inode(`${dbPath}-wal`), 'bus.db-wal must survive an external close after the feed read').toBe(wal);
-    expect(inode(`${dbPath}-shm`), 'bus.db-shm must survive an external close after the feed read').toBe(shm);
-
-    // …and the subscriber still reads a consistent view (no SQLITE_CORRUPT), including the new row.
-    expect(seamCount()).toBe(2);
-
-    // A second feed read sees both rows through the same, still-healthy bus.
-    const again = await buildActivityPage(adapter, 'proj-1', [], dbPath, undefined, 50);
-    expect(again.entries.map((e) => e.id)).toEqual(['bus:2', 'bus:1']);
-
-    seam.close();
+describe('project activity feed vs the engine holding the bus (F-E2E-021)', () => {
+  // The REAL engine answers the bus calls: the test double is off for this file.
+  const double = busTesting.unattached;
+  beforeAll(() => {
+    busTesting.unattached = undefined;
+  });
+  afterAll(() => {
+    busTesting.unattached = double;
   });
 
-  it('a missing bus db yields an empty interactive half, never an error', async () => {
+  it('reads the interactive half through the engine: external emitter closes leave bus.db-wal/-shm in place and every row is read', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'crew-fe2e021-'));
+    const dbPath = join(dataDir, 'bus.db');
+    const savedBus = process.env['WICKED_BUS_DB'];
+    // The daemon side: the engine is handed the bus and holds it (its launch bridge opens it at
+    // spawn and reads the tail, so the WAL-mode SHARED lock is held from here on).
+    const adapter = new CoreAdapter({ dbPath: join(dataDir, 'core.db'), stub: true, busDbPath: dbPath });
+    try {
+      const wal = inode(`${dbPath}-wal`);
+      const shm = inode(`${dbPath}-shm`);
+      expect(wal, 'bus.db-wal exists once the engine opened the WAL').not.toBeNull();
+      expect(shm, 'bus.db-shm exists once the engine opened the WAL').not.toBeNull();
+
+      // Control: an external emitter's close cannot take the EXCLUSIVE lock past the engine.
+      externalEmit(dataDir, 1);
+      expect([inode(`${dbPath}-wal`), inode(`${dbPath}-shm`)]).toEqual([wal, shm]);
+
+      // The read under test: the activity feed's interactive half (a GET /projects/:id/activity).
+      const page = await buildActivityPage(adapter, 'proj-1', [], dbPath, undefined, 50);
+      expect(page.entries.map((e) => e.id)).toEqual(['bus:1']);
+      expect(page.entries[0]?.source).toBe('interactive');
+
+      // The external emitter again: with a second SQLite library behind the feed read, THIS close
+      // unlinked both sidecars — the F-E2E-021 failure.
+      externalEmit(dataDir, 2);
+      expect(inode(`${dbPath}-wal`), 'bus.db-wal must survive an external close after the feed read').toBe(wal);
+      expect(inode(`${dbPath}-shm`), 'bus.db-shm must survive an external close after the feed read').toBe(shm);
+
+      // A second feed read sees both rows through the same, still-healthy bus.
+      const again = await buildActivityPage(adapter, 'proj-1', [], dbPath, undefined, 50);
+      expect(again.entries.map((e) => e.id)).toEqual(['bus:2', 'bus:1']);
+    } finally {
+      adapter.close();
+      if (savedBus === undefined) delete process.env['WICKED_BUS_DB'];
+      else process.env['WICKED_BUS_DB'] = savedBus;
+      removeScratch(dataDir);
+    }
+  });
+
+  it('the feed is history: a row past its 72 h TTL still shows (nothing sweeps the daemon bus)', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'crew-activity-expired-'));
+    const dbPath = join(dataDir, 'bus.db');
+    const savedBus = process.env['WICKED_BUS_DB'];
+    const adapter = new CoreAdapter({ dbPath: join(dataDir, 'core.db'), stub: true, busDbPath: dbPath });
+    try {
+      // `ttl_hours: -1` writes a row whose `expires_at` is already behind it: what every row older
+      // than the bus TTL (72 h by default) looks like.
+      await emitOnBus(dbPath, {
+        event_type: 'wicked.interactive.status.posted',
+        domain: 'wicked-interactive',
+        payload: { project_id: 'proj-old', document_id: 'doc-old' },
+        ttl_hours: -1,
+      });
+      await emitOnBus(dbPath, {
+        event_type: 'wicked.interactive.status.posted',
+        domain: 'wicked-interactive',
+        payload: { project_id: 'proj-old', document_id: 'doc-new' },
+      });
+      const page = await buildActivityPage(adapter, 'proj-old', [], dbPath, undefined, 50);
+      expect(page.entries.map((e) => e.ref).sort()).toEqual(['doc-new', 'doc-old']);
+    } finally {
+      adapter.close();
+      if (savedBus === undefined) delete process.env['WICKED_BUS_DB'];
+      else process.env['WICKED_BUS_DB'] = savedBus;
+      removeScratch(dataDir);
+    }
+  });
+
+  it('a bus no engine holds yields an empty interactive half, never an error, and creates nothing', async () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'crew-fe2e021-missing-'));
-    const adapter = { runEvents: async () => [] } as unknown as CoreAdapter;
-    const page = await buildActivityPage(adapter, 'proj-1', [], join(dataDir, 'absent', 'bus.db'), undefined, 50);
-    expect(page.entries).toEqual([]);
-    expect(inode(join(dataDir, 'absent', 'bus.db')), 'a read-only feed read must not create a bus db').toBeNull();
+    const double = busTesting.unattached;
+    busTesting.unattached = undefined; // the daemon has no double: an unheld bus is just absent
+    try {
+      const adapter = { runEvents: async () => [] } as unknown as CoreAdapter;
+      const page = await buildActivityPage(adapter, 'proj-1', [], join(dataDir, 'absent', 'bus.db'), undefined, 50);
+      expect(page.entries).toEqual([]);
+      expect(inode(join(dataDir, 'absent', 'bus.db')), 'a feed read must not create a bus db').toBeNull();
+    } finally {
+      busTesting.unattached = double;
+      removeScratch(dataDir);
+    }
   });
 });

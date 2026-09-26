@@ -50,7 +50,6 @@ describe('memory-management routes (DES-MEM-FACETED-001)', () => {
       new ElicitationCache(),
       undefined,
       undefined,
-      undefined,
       { callEstateTool: estateTool as (t: string, a: Record<string, unknown>) => Promise<unknown> },
     );
     await app.ready();

@@ -26,3 +26,22 @@ export function busUnavailableWarning(u: BusUnavailableNotice): HealthBusWarning
         'the engine runs without a bus (un-teamed); fix the path or its permissions and restart the daemon';
   return { kind: 'bus.unavailable', severity: 'warning', message };
 }
+
+export interface HealthBusSeamsOffWarning {
+  kind: 'bus.seams_off';
+  severity: 'warning';
+  message: string;
+}
+
+/** The `/health.warnings` notice for a daemon whose engine was handed the bus at `dbPath` but has
+ *  no `Core.busEmit`/`Core.busRead` (wicked-core#631): crew reaches the bus only through the
+ *  engine, so every bus seam is off. */
+export function busSeamsOffWarning(dbPath: string): HealthBusSeamsOffWarning {
+  return {
+    kind: 'bus.seams_off',
+    severity: 'warning',
+    message:
+      `bus seams off: engine lacks busEmit/busRead (wicked-core#631) — crew's bus seams on ${dbPath} ` +
+      '(interactive answering and relay, project events, team relay) are off; link a wicked-core-ts that carries them',
+  };
+}
