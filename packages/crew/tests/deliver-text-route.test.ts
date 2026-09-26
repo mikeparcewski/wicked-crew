@@ -136,11 +136,12 @@ describe('GET /runs/:id/deliver-text (crew#524)', () => {
     expect(text!.body).toContain(`Delivered by [wicked-crew](https://wc.wickedagile.com) run \`${RUN_ID}\`.`);
   });
 
-  it('names the workflow DEFINITION for a user-registered workflow whose view carries the engine instance id', async () => {
-    // `sessionsDetail()` patches `wf-<uuid>` back to a name for BUILT-INS only; a user-registered
-    // workflow is resolved here by phase sequence (fix, verify + the appended deliver).
+  it('names the workflow the ENGINE RECORDED for a run whose view carries the engine instance id (seam X2)', async () => {
+    // The adapter resolves the name from the engine's record (the launch's `sessionStarted`) and
+    // attaches it as `run_identity`; the route names that, never a phase-sequence guess.
     const v = view();
     v.session.workflow_id = `wf-${RUN_ID}`;
+    v.session.run_identity = { kind: 'workflow', name: 'custom-bug', user_plan: false, system: false };
     const phase = (id: string, kind: PhaseDef['kind'], role: PhaseDef['role']): PhaseDef => ({
       id, kind, gate_type: null, gate: 'auto', executes_code: false, verified_evidence: false,
       required_deliverables: [], depends_on: [], role, skill_ref: null, allowed_skills: [], validator_pin: null,

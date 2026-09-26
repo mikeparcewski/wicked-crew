@@ -45,7 +45,7 @@ import {
 } from './delivery-index.js';
 
 /** What the cache classifies (crew#481): the whole run view — the deliver unit and the def
- *  (`workflow_id` → `resolveRunWorkflow`) are two of `runCanDeliver`'s inputs, so candidacy needs
+ *  (the run's recorded name → `runWorkflowDef`) are two of `runCanDeliver`'s inputs, so candidacy needs
  *  the view, not the session facts alone. */
 export type CacheView = SessionView;
 
@@ -75,7 +75,7 @@ export interface DeliveryDerivationCacheDeps {
   /** A run the `DeliveryIndex` already answers needs no derivation — the read path
    *  short-circuits on the recorded URL before it ever consults this cache. */
   isDelivered: (runId: string) => boolean;
-  /** Def-awareness (crew#481 / D-14): `runCanDeliver(view, resolveRunWorkflow(view, workflows))` in
+  /** Def-awareness (crew#481 / D-14): `runCanDeliver(view, runWorkflowDef(view, workflows))` in
    *  the daemon — a completed run whose def has no deliver unit and no code-work phase is NOT a
    *  candidate (never derived, never cached; `read` answers `'none'` from the same predicate the
    *  campaigns rollup and the resume 409 apply). Absent ⇒ every completed repo-scoped run is a

@@ -50,12 +50,9 @@ import type {
   GovernanceClaim,
   RecordedEvent,
   RepoEntry,
-  SessionView,
   WorkflowDef,
 } from '../core/types.js';
 import { basename } from 'node:path';
-import { DELIVER_PHASE_ID } from '../core/deliver.js';
-import { DELIVERABLE_FLOOR_PHASE_ID } from '../core/deliverable-floor.js';
 import type {
   QeAcceptanceState,
   QeAttribution,
@@ -89,53 +86,6 @@ export const VERDICT_TO_STATUS: Record<Verdict, string> = {
 export function acceptancePhaseIds(workflow: WorkflowDef | null): string[] {
   if (workflow === null) return [];
   return workflow.phases.filter((p) => p.verified_evidence === true).map((p) => p.id);
-}
-
-/**
- * Resolve the workflow DEFINITION a run was launched with.
- *
- * The engine stores `workflow_id` as an instance id (`wf-<session-uuid>`), and
- * `sessionsDetail()` patches it back to the definition name by matching phase
- * sequences — against BUILT-INS only, so a run of a user-registered workflow
- * still carries the instance id here. The acceptance requirement lives on the
- * DEFINITION, so this falls back to the same phase-sequence match over the
- * full registry (built-ins + user workflows). Free-text runs are excluded by
- * construction: their planned units are `u1`, `u2`, … — not phase ids — and
- * they declare nothing.
- *
- * PER-RUN COMPOSITION (crew#293/#311, default-on since crew#393): a launch can append run-scoped
- * phases the definition never had — the deliverable floor, then the deliver phase — so a
- * delivered run's unit sequence is `<def's phases…, [verify-deliverables,] [deliver]>`. When the
- * exact sequence matches nothing, the trailing appendages are stripped (in reverse composition
- * order) and the match retried: the acceptance requirement lives on the DEFINITION, and a run
- * must not lose its gate because it also delivered. A def that carries its own `deliver` phase
- * (an operator overlay) still wins the EXACT match first, so stripping never mistakes a declared
- * phase for an appendage.
- */
-export function resolveRunWorkflow(
-  run: SessionView,
-  workflows: WorkflowDef[],
-): WorkflowDef | null {
-  const direct = workflows.find((w) => w.id === run.session.workflow_id);
-  if (direct !== undefined) return direct;
-  if (!run.session.workflow_id.startsWith('wf-')) return null;
-  const phases = [...run.units]
-    .sort((a, b) => a.ord - b.ord)
-    .map((u) => {
-      const colonIdx = u.id.indexOf(':');
-      return colonIdx >= 0 ? u.id.slice(colonIdx + 1) : '';
-    });
-  if (phases.length === 0 || phases.some((p) => p === '' || /^u\d+$/.test(p))) return null;
-  const bySequence = (seq: string[]): WorkflowDef | null =>
-    workflows.find(
-      (w) => w.phases.length === seq.length && w.phases.every((p, i) => p.id === seq[i]),
-    ) ?? null;
-  const exact = bySequence(phases);
-  if (exact !== null) return exact;
-  const stripped = [...phases];
-  if (stripped[stripped.length - 1] === DELIVER_PHASE_ID) stripped.pop();
-  if (stripped[stripped.length - 1] === DELIVERABLE_FLOOR_PHASE_ID) stripped.pop();
-  return stripped.length < phases.length ? bySequence(stripped) : null;
 }
 
 /** The gate's resolution of one run's acceptance requirement. */

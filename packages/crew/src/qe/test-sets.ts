@@ -25,10 +25,10 @@
  */
 
 import type { CoreAdapter } from '../core/adapter.js';
-import type { Actor, AuditEntry, SessionView, WorkflowDef } from '../core/types.js';
+import type { Actor, AuditEntry, SessionView } from '../core/types.js';
 import type { AuditLog } from '../api/audit.js';
 import { coreUnitId } from '../api/evidence.js';
-import { resolveRunWorkflow } from './acceptance.js';
+import { runNameOf } from '../core/run-identity.js';
 import {
   QE_AUTHOR_TESTS_WORKFLOW,
   QE_VERIFY_PHASE_ID,
@@ -132,8 +132,6 @@ export interface RegisterTestSetDeps {
   adapter: Pick<CoreAdapter, 'sessionsDetail' | 'workOutput' | 'listRepos'>;
   audit: AuditLog;
   index: TestSetIndex;
-  /** The registry the run's workflow is resolved against (`adapter.listWorkflows()`). */
-  workflows: () => WorkflowDef[];
   /** The delivered PR URL for a run, when one is recorded (`DeliveryIndex.urlFor`). */
   deliveryUrlFor?: (runId: string) => string | undefined;
   /** The launch-time label group, when one was filed (`GroupIndex.attachOf`). */
@@ -141,10 +139,9 @@ export interface RegisterTestSetDeps {
   log?: (msg: string) => void;
 }
 
-/** Whether this run IS a `qe-author-tests` run (by id, or by phase sequence for an instance id). */
-export function isQeAuthorRun(run: SessionView, workflows: WorkflowDef[]): boolean {
-  if (typeof run.session.workflow_id !== 'string') return false;
-  return resolveRunWorkflow(run, workflows)?.id === QE_AUTHOR_TESTS_WORKFLOW;
+/** Whether this run IS a `qe-author-tests` run — by its recorded name (`runNameOf`, seam X2). */
+export function isQeAuthorRun(run: SessionView): boolean {
+  return runNameOf(run) === QE_AUTHOR_TESTS_WORKFLOW;
 }
 
 /** Build the record from the run view + the verify report (pure — tests drive it directly). */
@@ -198,7 +195,7 @@ export async function registerTestSetForRun(deps: RegisterTestSetDeps, runId: st
   const views = await deps.adapter.sessionsDetail();
   const view = views.find((v) => v.session.id === runId);
   if (view === undefined) return null;
-  if (!isQeAuthorRun(view, deps.workflows())) return null;
+  if (!isQeAuthorRun(view)) return null;
   const verify = view.units.find((u) => u.id.endsWith(`:${QE_VERIFY_PHASE_ID}`));
   let report: QeVerifyReport | null = null;
   if (verify !== undefined) {

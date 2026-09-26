@@ -1339,7 +1339,6 @@ export async function createServer(
               adapter,
               audit,
               index: testSets,
-              workflows: () => adapter.listWorkflows(),
               deliveryUrlFor: (runId) => deliveryIndex.urlFor(runId),
               labelFor: (runId) => {
                 const attach = groupIndex.attachOf(runId);

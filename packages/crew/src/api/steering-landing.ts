@@ -44,8 +44,8 @@ import { promises as fsp } from 'node:fs';
 import { join } from 'node:path';
 
 import type { CoreAdapter } from '../core/adapter.js';
-import type { Actor, ConformanceRule, SessionView, WorkflowDef } from '../core/types.js';
-import { resolveRunWorkflow } from '../qe/acceptance.js';
+import type { Actor, ConformanceRule, SessionView } from '../core/types.js';
+import { runNameOf } from '../core/run-identity.js';
 import { coreUnitId } from './evidence.js';
 import { STEERING_PROPOSAL_FILENAME, STEERING_TYPES, steeringInboxDir } from './governance-steering.js';
 export { STEERING_PROPOSAL_FILENAME } from './governance-steering.js';
@@ -107,13 +107,12 @@ export interface SteeringLandingResult {
   error?: string;
 }
 
-/** True when this run IS a steering-author run (by workflow id, or — for runs whose stored
- *  `workflow_id` is core's `wf-<uuid>` instance id — by exact phase sequence). Defensive on a
- *  view without a `workflow_id` (partial-stub adapters in tests; a free-text run has no def):
- *  "not steering-author" is the honest answer there, and the legacy gate path must not 500. */
-export function isSteeringAuthorRun(run: SessionView, workflows: WorkflowDef[]): boolean {
-  if (typeof run.session.workflow_id !== 'string') return false;
-  return resolveRunWorkflow(run, workflows)?.id === STEERING_AUTHOR_WORKFLOW;
+/** True when this run IS a steering-author run — its NAME, as the engine recorded it
+ *  (`runNameOf`, seam X2: the preset or the registered workflow, never a phase-sequence guess).
+ *  A run with no name (a user plan, free text, a partial stub in tests) is "not steering-author",
+ *  and the legacy gate path must not 500 on it. */
+export function isSteeringAuthorRun(run: SessionView): boolean {
+  return runNameOf(run) === STEERING_AUTHOR_WORKFLOW;
 }
 
 /**

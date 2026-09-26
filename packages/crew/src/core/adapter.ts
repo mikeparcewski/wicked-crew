@@ -49,7 +49,11 @@ import { BUG_FIX_SWEEP_INSTRUCTIONS, composeDeliverWorkflow, DELIVER_PHASE_ID, d
 import { engineCampaignDef, engineRosterJson } from './engine-roster.js';
 import { QE_AUTHOR_TESTS_WORKFLOW_DEF } from '../qe/author-workflow.js';
 import { CAMPAIGN_WORKFLOW_PREFIX } from '../campaigns/plan.js';
-import { composeDeliverableFloor, DELIVERABLE_FLOOR_PHASE_ID } from './deliverable-floor.js';
+import { composeDeliverableFloor } from './deliverable-floor.js';
+import { isSyntheticWorkflowId, resolveRunIdentity, wireIdentity, withSystemFlag } from './run-identity.js';
+
+/** A run in one of these statuses never records another launch frame. */
+const TERMINAL_RUN_STATUSES: ReadonlySet<string> = new Set(['completed', 'cancelled', 'failed']);
 import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
 import { applyGovernanceStoreEnv, isStoreSpec, type GovernanceStoreLocation } from './governance-store.js';
 
@@ -646,17 +650,17 @@ const CORE_SEEDED_WORKFLOWS = new Set(['feature', 'bug', 'migration', 'onboardin
 // the moment core's defs move. As of FINDING-049 these defs are never written to core's overlay dir
 // (see CORE_SEEDED_WORKFLOWS).
 
-export const BUILTIN_WORKFLOWS: WorkflowDef[] = [
+// `is_system` is NOT spelled on these defs: `withSystemFlag` stamps it from `SYSTEM_WORKFLOWS`
+// (core/run-identity.ts), the one list keyed by name that also classifies served runs (seam X2).
+export const BUILTIN_WORKFLOWS: WorkflowDef[] = ([
   {
     id: 'chat',
-    is_system: true,
     phases: [
       { id: 'explore', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
     ],
   },
   {
     id: 'onboarding',
-    is_system: true,
     phases: [
       { id: 'index', executor: { type: 'tool', cmd: ['wicked-estate', 'index', '{repo_root}', '--db', '{code_graph_db}'] }, kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
       { id: 'annotate', executor: { type: 'tool', cmd: ['wicked-estate', 'clusters', '--annotate', '--db', '{code_graph_db}'] }, kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['index'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
@@ -714,7 +718,6 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = [
     // exactly FINDING-011, still live because the fix only landed in the core JSON the runtime ignores.
     // Guarded by builtin-overlay-shadow.test.ts (survey-repo is now in MIRRORED_IDS).
     id: 'survey-repo',
-    is_system: true,
     phases: [
       { id: 'structure', kind: 'recon', instructions: 'Map the repository layout only: top-level directories, entry points, and where source, tests, config, and docs live. Do not analyze languages, dependencies, or conventions — later phases cover those.', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
       { id: 'stack', kind: 'recon', instructions: 'Identify the technology stack from the manifests (package.json, Cargo.toml, pyproject.toml, ...): languages, frameworks, build tools, key dependencies. Build on the structure summary provided as prior context; do not re-map the layout.', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['structure'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
@@ -760,7 +763,6 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = [
     // so proposals land in the same queue the studio Memories/Policies surfaces review. Onboarding IS
     // about the repo, so the skill tags learnings `repo:`/`project:`.
     id: 'capture-learnings',
-    is_system: true,
     phases: [
       { id: 'churn', kind: 'recon', instructions: "Phase 1/3 CHURN: produce a ranked list of this repo's most actively-changed files and directories over the last ~12 months, plus the repo's real name (manifest or git remote) and parent project. Use the skill's bounded/sampled git-churn method — never stream the whole history. Do not read code deeply yet; the next phase targets these areas.", gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: 'wicked-garden-repo-learn', allowed_skills: [], validator_pin: null },
       { id: 'hotspots', kind: 'recon', instructions: "Phase 2/3 HOTSPOTS: cross-reference the prior churn ranking with wicked-estate hotspot / blast-radius signals to find the load-bearing code, then READ it through the estate shim (`wicked-garden run scripts/_estate_client.py --readonly call …`, the skill's grounding path) to build a real technical understanding of how the system fits together — not a file listing. Reuse wicked-garden-search for the hotspot signals; follow the skill.", gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['churn'], role: 'neutral', skill_ref: 'wicked-garden-repo-learn', allowed_skills: [], validator_pin: null },
@@ -769,7 +771,6 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = [
   },
   {
     id: 'domain-graph-slice',
-    is_system: true,
     phases: [
       { id: 'identify', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
       { id: 'extract', kind: 'build', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['identify'], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: null },
@@ -778,7 +779,6 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = [
   },
   {
     id: 'memories',
-    is_system: true,
     phases: [
       { id: 'gather', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
       { id: 'store', kind: 'build', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['gather'], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: null },
@@ -803,7 +803,6 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = [
     // `_writeBuiltinOverlay` write is the only way core resolves the id — the same delivery
     // mechanism every crew drop-in uses.
     id: 'steering-author',
-    is_system: true,
     phases: [
       { id: 'analyze', kind: 'recon', instructions: 'Read the operator intent and every file or directory listed in the problem statement. Identify candidate steering rules: durable, prescriptive statements a coding agent must follow, each classified into one steering type (architecture, development, security, testing, operations, compliance, design-ux). For each candidate note the statement, steering type, severity, and the evidence in the source material. Analysis only — do not write any rule to any store, and do not emit final rule JSON yet.', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
       { id: 'propose', kind: 'recon', instructions: 'From the prior analysis, emit the PROPOSED steering rules as one JSON array. Each entry is a conformance-rule object: id (PAT-<digits> for rule_type "pattern", POL-<digits> for "policy"), rule_type, statement, severity (info|warn|error|critical), confidence (a NUMBER 0..1), steering_type (default to the type named in the problem statement), provenance {"source":"chat"}, and — only where the source material supports them — the enforcement fields applies_to (array of phase tokens or globs), excludes, weight, obligations (array of strings), criteria (ONE string, never a list). Omit targets, effect and trigger unless you can express them in the store schema exactly: targets is a {language, layer, framework} facet OBJECT (never a file list — files belong in applies_to), and trigger is a structured condition object (never prose). SAVE that JSON array (bare array, no prose, no code fences) to the absolute proposal file path named in the problem statement (create parent directories if needed, overwrite if present), AND include the same array in your reply for the human reviewer. This output is a PROPOSAL for the human gate: the proposal file is an artifact for review, and rules land in the governance store only after approval, written crew-side — do not write any rule to any store yourself.', gate_type: 'value', gate: { human_confirm: { unconditional: true } }, executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['analyze'], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: null },
@@ -811,7 +810,6 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = [
   },
   {
     id: 'collab',
-    is_system: true,
     phases: [
       { id: 'propose', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: null },
       { id: 'critique', kind: 'review', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['propose'], role: 'evaluator', skill_ref: null, allowed_skills: [], validator_pin: null },
@@ -868,7 +866,7 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = [
       { id: 'domain-graph', executor: { type: 'tool', cmd: ['wicked-core', 'domain-graph', '--db', '{code_graph_db}', '--out', 'requirements_graph.json'] }, kind: 'build', gate_type: 'strategy', gate: { human_confirm: { unconditional: false } }, executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['coverage'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
     ],
   },
-];
+] satisfies WorkflowDef[]).map(withSystemFlag);
 
 /**
  * Chat is not available in this deployment at all — a capability gap, never a bad request.
@@ -2076,45 +2074,62 @@ export class CoreAdapter {
     return JSON.parse(await this.core.sessions()) as string[];
   }
 
-  /** Every run + its ordered units. */
+  /**
+   * Each run's launch name as the engine RECORDED it — `sessionStarted.workflowId` from its event
+   * log (the preset, the registered def, `<run>:plan-<rev>`, or `null` for free text). Immutable
+   * once written, so it is read once per run: a run whose log holds no `sessionStarted` is memoized
+   * only once it is terminal (a live run's frame may not be flushed yet; a finished run's never
+   * will be). Seam X2 — the one input `resolveRunIdentity` needs that the session record lacks.
+   */
+  private readonly launchedWorkflows = new Map<string, string | null | undefined>();
+
+  private async launchedWorkflowOf(view: SessionView): Promise<string | null | undefined> {
+    const id = view.session.id;
+    if (this.launchedWorkflows.has(id)) return this.launchedWorkflows.get(id);
+    let events: RecordedEvent[] | null;
+    try {
+      events = await this.runEvents(id);
+    } catch {
+      return undefined;
+    }
+    if (events === null) return undefined;
+    const started = events.find((e) => e.type === 'sessionStarted') as Record<string, unknown> | undefined;
+    // The engine spells it `workflowId` on the frame (core-ts `CoreEventJson`).
+    const raw = started?.['workflowId'];
+    const launched = started === undefined ? undefined : typeof raw === 'string' ? raw : null;
+    if (launched !== undefined || TERMINAL_RUN_STATUSES.has(view.session.status)) {
+      this.launchedWorkflows.set(id, launched);
+    }
+    return launched;
+  }
+
+  /**
+   * Every run + its ordered units, each with its `run_identity` (seam X2) resolved from the engine's
+   * record — its plan state, else its recorded launch — never from its phase sequence.
+   *
+   * `workflow_id` is still rewritten from the engine's synthetic `wf-<run>` to the resolved NAME
+   * for skins that read it (studio's run-kind list, until it reads `run_identity.system`); a run
+   * with no name (a user plan, free text, unknown) keeps the engine's id.
+   */
   async sessionsDetail(): Promise<SessionView[]> {
     const views = JSON.parse(await this.core.sessionsDetail()) as SessionView[];
-    // The Rust core always stores workflow_id as 'wf-<session-uuid>' (an instance ID, not the
-    // definition name). Patch it back to the definition name so the studio's chat/work filters work.
-    // phase_ref is only set on executed units and uses format 'wf-<uuid>:unit-N' (not the phase id).
-    // The phase id is reliably embedded in the unit id as '<session-uuid>:<phase-id>'.
+    const needsLaunch = (v: SessionView): boolean =>
+      (v.session as { team_plan?: unknown }).team_plan == null &&
+      typeof v.session.workflow_id === 'string' &&
+      isSyntheticWorkflowId(v.session.workflow_id);
+    const pending = views.filter(needsLaunch);
+    const launched = new Map<string, string | null | undefined>();
+    // Bounded fan-out: the first read after boot visits each such run's log once (memoized after).
+    for (let i = 0; i < pending.length; i += 8) {
+      const batch = pending.slice(i, i + 8);
+      const got = await Promise.all(batch.map((v) => this.launchedWorkflowOf(v)));
+      batch.forEach((v, k) => launched.set(v.session.id, got[k]));
+    }
     for (const view of views) {
-      if (view.session.workflow_id?.startsWith('wf-')) {
-        const phases = [...view.units].sort((a, b) => a.ord - b.ord).map((u) => {
-          const colonIdx = u.id.indexOf(':');
-          return colonIdx >= 0 ? u.id.slice(colonIdx + 1) : '';
-        });
-        if (view.units.length === 1) {
-          // Single-unit chat sessions have phase id 'explore' (from the chat workflow def).
-          // 'u1' is ambiguous — it appears on any single-unit run without an explicit workflow,
-          // including Do Work runs, so we leave those unpatched rather than misclassify them.
-          const phase = phases[0] ?? '';
-          if (phase === 'explore') view.session.workflow_id = 'chat';
-        } else {
-          // Multi-unit: match against builtin workflow defs by phase sequence. A delivered run
-          // (crew#293, default-on for code-work launches since crew#393) carries run-scoped
-          // appendages the def never had — [verify-deliverables,] [deliver] at the tail — so
-          // when the exact sequence matches nothing they are stripped and the match retried:
-          // a feature run must not lose its name on the wire because it also delivered.
-          const bySequence = (seq: string[]): WorkflowDef | undefined =>
-            BUILTIN_WORKFLOWS.find(
-              (def) => def.phases.length === seq.length &&
-                def.phases.every((p, i) => p.id === seq[i]),
-            );
-          let match = bySequence(phases);
-          if (!match) {
-            const stripped = [...phases];
-            if (stripped[stripped.length - 1] === DELIVER_PHASE_ID) stripped.pop();
-            if (stripped[stripped.length - 1] === DELIVERABLE_FLOOR_PHASE_ID) stripped.pop();
-            if (stripped.length < phases.length) match = bySequence(stripped);
-          }
-          if (match) view.session.workflow_id = match.id;
-        }
+      const identity = wireIdentity(resolveRunIdentity(view, launched.get(view.session.id)));
+      view.session.run_identity = identity;
+      if (identity.name !== null && isSyntheticWorkflowId(view.session.workflow_id ?? '')) {
+        view.session.workflow_id = identity.name;
       }
     }
     return views;
@@ -3007,17 +3022,18 @@ export class CoreAdapter {
     const result: WorkflowDef[] = [];
     for (const w of BUILTIN_WORKFLOWS) {
       const override = this.userWorkflows.get(w.id);
-      if (!seen.has(w.id)) { seen.add(w.id); result.push(override ?? w); }
+      if (!seen.has(w.id)) { seen.add(w.id); result.push(withSystemFlag(override ?? w)); }
     }
     for (const w of this.userWorkflows.values()) {
-      if (!seen.has(w.id)) { seen.add(w.id); result.push(w); }
+      if (!seen.has(w.id)) { seen.add(w.id); result.push(withSystemFlag(w)); }
     }
     return result;
   }
 
   getWorkflow(id: string): WorkflowDef | null {
     this.hydrateFromOverlay();
-    return this.userWorkflows.get(id) ?? BUILTIN_WORKFLOWS.find((w) => w.id === id) ?? null;
+    const def = this.userWorkflows.get(id) ?? BUILTIN_WORKFLOWS.find((w) => w.id === id) ?? null;
+    return def === null ? null : withSystemFlag(def);
   }
 
   /** Write a built-in workflow definition to the Rust overlay dir (and hot-register when possible).

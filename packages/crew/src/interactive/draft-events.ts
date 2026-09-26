@@ -173,7 +173,6 @@ export const INTERACTIVE_DRAFT_WORKFLOW = 'interactive-draft';
  */
 export const INTERACTIVE_DRAFT_WORKFLOW_DEF: WorkflowDef = {
   id: INTERACTIVE_DRAFT_WORKFLOW,
-  is_system: true,
   phases: [
     {
       id: 'outline',

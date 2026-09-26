@@ -44,7 +44,7 @@ import { DeliveryDerivationCache } from '../src/api/delivery-cache.js';
 import { AuditLog } from '../src/api/audit.js';
 import { GroupIndex } from '../src/api/group-index.js';
 import { buildGroups, sessionsById } from '../src/campaigns/rollup.js';
-import { resolveRunWorkflow } from '../src/qe/acceptance.js';
+import { runWorkflowDef } from '../src/core/run-identity.js';
 import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
 import { QE_AUTHOR_TESTS_WORKFLOW_DEF } from '../src/qe/author-workflow.js';
 import { DELIVER_PHASE_ID } from '../src/core/deliver.js';
@@ -154,7 +154,7 @@ describe('runCanDeliver — the answer per shipped def (D-14; the des-review-L8 
   it('def === null (free-text wf-…, or a def the registry no longer holds) ⇒ true — never narrowed on a guess', () => {
     const v = view('r', { repo_ref: 'repo', workdir: '/wt', units: [unit('r:u1'), unit('r:u2')] });
     expect(runCanDeliver(v, null)).toBe(true);
-    expect(resolveRunWorkflow(v, SHIPPED)).toBeNull(); // and that IS what the registry answers for it
+    expect(runWorkflowDef(v, SHIPPED)).toBeNull(); // and that IS what the registry answers for it
   });
 
   it('phaseIdOf reads the `<base>:<phase>` suffix and answers "" for a colon-less id', () => {
@@ -239,7 +239,7 @@ function build(
     runBranchIsEmpty: probes.runBranchIsEmpty ?? (async () => false),
   };
   const deliveryIndex = new DeliveryIndex();
-  const canDeliver = (v: SessionView) => runCanDeliver(v, resolveRunWorkflow(v, adapter.listWorkflows()));
+  const canDeliver = (v: SessionView) => runCanDeliver(v, runWorkflowDef(v, adapter.listWorkflows()));
   const cache = new DeliveryDerivationCache({
     listViews: () => adapter.sessionsDetail() as Promise<SessionView[]>,
     probes: full,
@@ -358,7 +358,7 @@ describe('GET /runs, GET /runs/:id and the campaigns rollup — one predicate, e
       groupIndex,
       deliveryUrlFor: () => undefined,
       vacuity: { worktreeExists: () => true, worktreeIsClean, runBranchIsEmpty: async () => false },
-      canDeliver: (view) => runCanDeliver(view, resolveRunWorkflow(view, SHIPPED)),
+      canDeliver: (view) => runCanDeliver(view, runWorkflowDef(view, SHIPPED)),
     });
     expect(groups).toEqual([
       { label: 'onboarding-batch', runs: [{ runId: 'run-capture', status: 'completed', delivery: 'none' }] },

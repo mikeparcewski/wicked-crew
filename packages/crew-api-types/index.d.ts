@@ -468,6 +468,61 @@ export interface AgentSession {
    * this field.
    */
   chat_grounded?: boolean;
+  /**
+   * The engine's plan state (wicked-core `TeamPlanState`, DES-TEAMING-002 §8.4-§8.6; api-types
+   * 0.46.0 types the engine field) — present on a run launched from a PLAN or a PRESET, ABSENT on
+   * every other run (a registered def, the free-text planner) and on a team run before its launch
+   * is scored. Engine-computed; typed here only as far as a skin reads it. Read the run's kind from
+   * {@link AgentSession.run_identity}, which is resolved from this.
+   */
+  team_plan?: TeamPlanState;
+  /**
+   * What this run IS (seam X2; api-types 0.46.0) — daemon-resolved at DTO assembly on BOTH
+   * `GET /runs` and `GET /runs/:id` from the engine's own record (the plan state above, else the
+   * launch's recorded `sessionStarted`), never from the run's phase sequence. Always present on a
+   * 0.46.0+ daemon; ABSENT from an older one. `system` replaces a skin's own list of system
+   * workflow ids.
+   */
+  run_identity?: RunIdentity;
+}
+
+/**
+ * The fields of the engine's `TeamPlanState` a skin reads (the engine sends more — every field is
+ * engine-computed and additive).
+ */
+export interface TeamPlanState {
+  /** The last plan rev assigned (accepted or held). `0` = none yet. */
+  rev: number;
+  /** The last ACCEPTED plan rev. `0` = no plan accepted yet. */
+  accepted_rev: number;
+  /** The preset the launch named. ABSENT on a user plan. */
+  preset?: string;
+}
+
+/**
+ * What a run is (seam X2; api-types 0.46.0), resolved by the daemon from the engine's record.
+ *
+ *   - `'preset'`    — launched from a preset; `name` is the preset.
+ *   - `'user_plan'` — launched from a user-composed plan (the engine's per-run `<run>:plan-<rev>`
+ *                     def); `name` is `null`.
+ *   - `'workflow'`  — launched on a registered workflow def; `name` is its id (a crew-composed
+ *                     per-run delivery/floor def reads as its base).
+ *   - `'free_text'` — no workflow and no plan: the free-text planner; `name` is `null`.
+ *   - `'unknown'`   — the daemon has no record of what the launch named (a run predating the
+ *                     engine's event log, or an engine without the log read); `name` is `null`.
+ */
+export interface RunIdentity {
+  kind: 'preset' | 'user_plan' | 'workflow' | 'free_text' | 'unknown';
+  /** The preset or workflow name — `null` unless `kind` is `'preset'` or `'workflow'`. */
+  name: string | null;
+  /** `kind === 'user_plan'`, spelled out. */
+  user_plan: boolean;
+  /**
+   * A machine-owned run (chat, onboarding, the interactive document and video seams, …): skins keep
+   * it off delivery surfaces. Keyed by `name` against the daemon's ONE list — the same list that
+   * stamps `WorkflowDef.is_system` on `GET /workflows`.
+   */
+  system: boolean;
 }
 
 /** An ordered unit of work within a run (`WorkUnit`). */
@@ -512,6 +567,14 @@ export interface WorkUnit {
    * planned before the field existed, and on an older engine.
    */
   base_skill_ref?: string | null;
+  /**
+   * The phase-catalog entry this unit instantiates (`build`, `review`, …) when it was planned from
+   * a catalog-composed plan — a preset or a user plan (wicked-core `WorkUnit.catalog`,
+   * DES-TEAMING-002 T3; api-types 0.46.0 types the engine field). ABSENT on every other unit.
+   */
+  catalog?: string;
+  /** TRUE on a unit of a TEAM run (planned from the per-run plan def); ABSENT otherwise. Engine field. */
+  team_run?: boolean;
 }
 
 /** A run plus its ordered units (`SessionView`) — the shape `GET /runs` returns. */

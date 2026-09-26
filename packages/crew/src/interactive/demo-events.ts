@@ -226,7 +226,6 @@ export const INTERACTIVE_DEMO_REAUTHOR_WORKFLOW = 'interactive-demo-reauthor';
  */
 export const INTERACTIVE_DEMO_WORKFLOW_DEF: WorkflowDef = {
   id: INTERACTIVE_DEMO_WORKFLOW,
-  is_system: true,
   phases: [
     {
       id: 'scenes',
@@ -283,7 +282,6 @@ export const INTERACTIVE_DEMO_WORKFLOW_DEF: WorkflowDef = {
  */
 export const INTERACTIVE_DEMO_REAUTHOR_WORKFLOW_DEF: WorkflowDef = {
   id: INTERACTIVE_DEMO_REAUTHOR_WORKFLOW,
-  is_system: true,
   phases: [
     {
       id: 'respec',

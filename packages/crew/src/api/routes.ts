@@ -17,13 +17,13 @@ import type {
   RecordedEvent,
   RepoEntry,
   RepoFinding,
-  WorkflowDef,
 } from '../core/types.js';
 import { resolveCursorUnit } from '../core/cursor.js';
 import { detectRefusal, type GateCache, type GateCacheEntry } from './gate-cache.js';
 import type { ElicitationCache } from './elicitation-cache.js';
 import { QeGateCache } from '../qe/gate-events.js';
-import { buildAcceptanceView, resolveRunWorkflow } from '../qe/acceptance.js';
+import { buildAcceptanceView } from '../qe/acceptance.js';
+import { runIdentityOf, runWorkflowDef, wireIdentity } from '../core/run-identity.js';
 import { buildEvidenceBundle, coreUnitId, evidenceFilename } from './evidence.js';
 import { outputUnavailableReason, resolveUnit, unitKeysFor } from './unit-output.js';
 import type {
@@ -762,7 +762,7 @@ export interface RuntimeDeps {
    *  reads then answer the stat-only tri-state until a test sweeps or warms it explicitly. */
   deliveryCache?: DeliveryDerivationCache;
   /** Def-awareness for the delivery derivation (crew#481 / D-14) — `createServer` injects the
-   *  `runCanDeliver(view, resolveRunWorkflow(view, adapter.listWorkflows()))` closure it also hands
+   *  `runCanDeliver(view, runWorkflowDef(view, adapter.listWorkflows()))` closure it also hands
    *  its cache, so the campaigns rollup and the run DTOs classify from ONE predicate. A
    *  directly-driven route set derives the same closure over the adapter's registry when it has
    *  one, else every completed repo-scoped run stays a candidate (today's read). */
@@ -1098,6 +1098,9 @@ export function registerRoutes(
   };
   const decorateRun = (view: SessionView): SessionView => {
     const conflictStrand = normalizeStranded(view);
+    // Seam X2: what the run IS — the adapter attaches it from the engine's record; a view from a
+    // directly-driven adapter gets it resolved from its record here, so it is always served.
+    view.session.run_identity = wireIdentity(runIdentityOf(view));
     view.session.project_id = projects.index.projectOf(view.session.id) ?? null;
     // Wave 6 (F-4R2-006): the interactive document this run answered, from the seams' handoff
     // ledgers — `null` = genuinely not a document run, so the field is ALWAYS present on served runs.
@@ -2067,10 +2070,6 @@ export function registerRoutes(
     return { run: decorateRun(run) };
   });
 
-  /** The full workflow registry, or `[]` on a directly-driven route set whose fake adapter has none. */
-  const listWorkflowsSafe = (): WorkflowDef[] =>
-    typeof (adapter as Partial<CoreAdapter>).listWorkflows === 'function' ? adapter.listWorkflows() : [];
-
   // ── Deliver text (crew#524 / F-3R2-014) — the PR title + body a run's delivery carries ──
   // `gh pr create --fill` gave wicked-studio#249 a mid-word title and an EMPTY body. The deliver
   // script now asks this route for the text composed from the PERSISTED RUN RECORD: the intent,
@@ -2088,11 +2087,10 @@ export function registerRoutes(
       const run = views.find((v) => v.session.id === id);
       if (!run) return reply.code(404).send({ error: 'Run not found' });
       const origin = boundOrigin(app.server.address());
-      // The workflow DEFINITION (a user-registered workflow's view carries the engine instance id).
-      const def = resolveRunWorkflow(run, listWorkflowsSafe());
+      // The run's preset or workflow NAME, as the engine recorded it (seam X2).
       const text = composeDeliverText(
         factsFromRun(decorateRun(run), runUrlFor(origin, id), {
-          workflowId: def?.id ?? null,
+          workflowId: runIdentityOf(run).name,
           revisesPr: retryIndex.revisesPrFor(id) ?? null,
         }),
       );
@@ -2223,7 +2221,7 @@ export function registerRoutes(
             // crew#524: the post-hoc lift composes its PR text from the run record it already
             // holds (the fallback), and names this daemon so the script can re-ask at delivery.
             const origin = boundOrigin(app.server.address());
-            const def = resolveRunWorkflow(run, listWorkflowsSafe());
+            const workflowName = runIdentityOf(run).name;
             const revising = retryIndex.revisesPrFor(id);
             let revisesPr: { number: number; headRef: string; url: string } | null = null;
             if (revising !== undefined) {
@@ -2242,7 +2240,7 @@ export function registerRoutes(
               runId: id,
               apiOrigin: origin,
               facts: factsFromRun(run, runUrlFor(origin, id), {
-                workflowId: def?.id ?? null,
+                workflowId: workflowName,
                 revisesPr: revisesPr === null ? null : { number: revisesPr.number, url: revisesPr.url },
               }),
               revisesPr,
@@ -2965,11 +2963,10 @@ export function registerRoutes(
     const run = views.find((v) => v.session.id === id);
     if (!run) return reply.code(404).send({ error: 'Run not found' });
 
-    // `sessionsDetail()` patches workflow_id back to the definition name for
-    // BUILT-INS; runs of user-registered workflows still carry the instance id,
-    // so resolve by phase sequence over the full registry. A free-text run
-    // resolves to no workflow, which reads as "declares no requirement".
-    const workflow = resolveRunWorkflow(run, adapter.listWorkflows());
+    // The def registered under the run's recorded name — its preset or workflow (seam X2), never
+    // a phase-sequence guess. A user plan or a free-text run has no def, which reads as "declares
+    // no requirement".
+    const workflow = runWorkflowDef(run, adapter.listWorkflows());
 
     let repo = null;
     if (run.session.repo_ref !== null) {
@@ -3080,13 +3077,11 @@ export function registerRoutes(
     }
     // The steering-author landing (crew#388): decided — and the gate prompt captured — BEFORE
     // the confirm, because a terminal-phase approve prunes the gate cache and moves the run out
-    // of `awaiting_human`. The landing itself runs AFTER a successful approve only.
-    // (`listWorkflows` is presence-guarded for partial-stub adapters — a registry-less adapter
-    // cannot be hosting a steering-author run, and the legacy gate path must not 500 over it.)
+    // of `awaiting_human`. The landing itself runs AFTER a successful approve only. The run is
+    // classified by its recorded name (seam X2), so a partial-stub adapter with no registry cannot
+    // 500 the legacy gate path here.
     const steeringPropose =
-      parsed.data.approve &&
-      typeof adapter.listWorkflows === 'function' &&
-      isSteeringAuthorRun(run, adapter.listWorkflows());
+      parsed.data.approve && isSteeringAuthorRun(run);
     const gatePrompt = steeringPropose ? gateCache.get(id)?.prompt : undefined;
     try {
       // All five positionals, explicit `undefined` for the absent ones (DES-L1 PR-2; the
@@ -3190,9 +3185,7 @@ export function registerRoutes(
       // POST /runs/:id/gate would — the "no side door" rule (task #88) holds for the landing
       // write too (crew#388). Prompt captured pre-confirm; see the gate route.
       const steeringPropose =
-        gated &&
-        typeof adapter.listWorkflows === 'function' &&
-        isSteeringAuthorRun(run, adapter.listWorkflows());
+        gated && isSteeringAuthorRun(run);
       const gatePrompt = steeringPropose ? gateCache.get(id)?.prompt : undefined;
       const status = gated ? await adapter.confirmGate(id, true) : await adapter.resumeRun(id);
       // A resume of a gated run IS a gate approval — audit it as one, so the
@@ -3276,7 +3269,7 @@ export function registerRoutes(
           `this build cannot approve the gate on your behalf (no confirmGate); approve via POST /runs/${id}/gate, then reassign`,
       });
     }
-    if (gated && typeof adapter.listWorkflows === 'function' && isSteeringAuthorRun(run, adapter.listWorkflows())) {
+    if (gated && isSteeringAuthorRun(run)) {
       return reply.code(409).send({
         error: `run ${id} is awaiting a steering-author propose gate — approve or reject it via POST /runs/${id}/gate (the approve lands the proposal); reassign is not a review of the rules`,
       });
