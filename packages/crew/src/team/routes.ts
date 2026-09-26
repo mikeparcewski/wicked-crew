@@ -4,15 +4,17 @@
  *
  *   GET  /runs/:id/team         the engine's persisted team state (`Core.runTeam`) joined with the
  *                               run's `wicked.team.*` bus rows and the folded ledger each gate read
- *   POST /runs/:id/plan         a plan edit at a `plan_approval` gate (`confirmGate … edit_plan`)
+ *   POST /runs/:id/plan         a plan edit: at a `plan_approval` gate the gate answer
+ *                               (`confirmGate … edit_plan`), otherwise a mid-run edit (`Core.proposePlan`)
  *   POST /team/outbox/replay    `Core.replayTeamOutbox`: the team outbox onto the bus
  *   GET  /catalog               the engine's phase catalog
- *   POST /plans/preview         the engine's floor fill of a draft plan
+ *   POST /plans/preview         the launch's decision over a draft plan (`Core.previewPlan`)
  *
  * The live stream is the relay (`team/ws-relay.ts`). An addon without a binding answers 501.
  */
 
 import type { FastifyInstance } from 'fastify';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { CoreAdapter } from '../core/adapter.js';
 import { PlanLaunchUnsupportedError, TeamUnsupportedError } from '../core/adapter.js';
@@ -21,6 +23,7 @@ import type {
   Actor,
   SessionStatus,
   CatalogResponse,
+  EditPlanResponse,
   RunTeamResponse,
   RunTeamUnit,
   RunTeamView,
@@ -39,17 +42,16 @@ export const EditPlanSchema = z
   .object({ plan: PlanSchema, requestId: z.string().min(1).max(128).optional() })
   .strict();
 
-/** The 501 for a plan edit off a `plan_approval` gate: the engine has no mid-run edit command yet. */
-const MID_RUN_EDIT =
-  "mid-run plan edits need the engine's proposePlan (not in wicked-core-ts yet); today a plan edit " +
-  'answers a plan_approval gate';
-/** The engine's refusal of an edit when the paused run's open gate is not a plan approval. */
+/** The engine's refusal of a gate edit when the paused run's open gate is not a plan approval:
+ *  the run is paused at another gate, so the edit is a mid-run one. */
 const NO_PLAN_GATE = /no plan_approval gate open/;
 export const PlanPreviewSchema = z
   .object({
     plan: PlanSchema,
     projectId: z.string().min(1).optional(),
     humanConfirm: z.string().min(1).optional(),
+    repoRef: z.string().min(1).optional(),
+    deliver: z.enum(['pr', 'none']).optional(),
   })
   .strict();
 
@@ -169,9 +171,9 @@ export function registerTeamRoutes(
       config: {
         manifest: {
           requestType: 'EditPlanBody',
-          responseType: '{ status: SessionStatus }',
-          // 501: off a plan_approval gate (a mid-run edit needs proposePlan) or no plan gate in the
-          // addon; 409: the engine refused the edit.
+          responseType: 'EditPlanResponse',
+          // 409: the engine refused the edit (its reason); 501: the addon lacks the gate edit or
+          // Core.proposePlan.
           statusCodes: [200, 400, 404, 409, 501],
         },
       },
@@ -184,21 +186,52 @@ export function registerTeamRoutes(
       }
       const run = await findRun(id);
       if (run === undefined) return reply.code(404).send({ error: 'Run not found' });
-      if (run.session.status !== 'awaiting_human') {
-        return reply.code(501).send({ error: `${MID_RUN_EDIT} (status: ${run.session.status})` });
+      const plan = toLaunchPlan(parsed.data.plan);
+      if (run.session.status === 'awaiting_human') {
+        try {
+          // The edit IS the gate answer (T3): the engine proposes it (`plan.proposed{by:"human",
+          // kind:"edit"}`), floor-fills and accepts it, or refuses it and re-opens the gate.
+          const status = await adapter.confirmGate(id, true, undefined, 'edit_plan', undefined, plan);
+          // WHO answered the gate, like every other gate answer (POST /runs/:id/gate).
+          audit.record('gate.decided', actorOf(req), {
+            runId: id,
+            detail: { approve: true, action: 'edit_plan', planSteps: parsed.data.plan.steps.length, status },
+          });
+          // confirmGate resolves the engine's status token, a SessionStatus spelling.
+          const body: EditPlanResponse = { status: status as SessionStatus };
+          return body;
+        } catch (err) {
+          // Paused at another gate (a unit gate, a team pause): no plan gate to answer, so the edit
+          // is a mid-run one, below. Every other refusal is the answer.
+          if (!NO_PLAN_GATE.test(message(err))) {
+            return reply.code(unsupported(err) ? 501 : 409).send({ error: message(err) });
+          }
+        }
       }
+      // T8 (c): a mid-run edit. The engine holds it for the run's next step boundary (ratchet and
+      // floor fill apply) and its author approved it, so no gate opens; the proposal says what it
+      // does to the run (band, high risk, the floor steps it adds). Idempotent by requestId: a body
+      // without one gets a fresh id minted for this POST, so only a caller-sent id makes a retry
+      // safe. The engine refuses a plan awaiting approval (edit it at the gate), a started deliver
+      // step, and a finished or unplanned run: each is a 409 carrying its reason.
+      const requestId = parsed.data.requestId ?? randomUUID();
       try {
-        // The edit IS the gate answer (T3): the engine proposes it (`plan.proposed{by:"human",
-        // kind:"edit"}`), floor-fills and accepts it, or refuses it and re-opens the gate.
-        const status = await adapter.confirmGate(id, true, undefined, 'edit_plan', undefined, toLaunchPlan(parsed.data.plan));
-        // WHO answered the gate, like every other gate answer (POST /runs/:id/gate).
-        audit.record('gate.decided', actorOf(req), {
+        const proposal = await adapter.proposePlan(id, plan, requestId);
+        audit.record('plan.edit.proposed', actorOf(req), {
           runId: id,
-          detail: { approve: true, action: 'edit_plan', planSteps: parsed.data.plan.steps.length, status },
+          detail: {
+            requestId,
+            proposalId: proposal.proposal_id,
+            duplicate: proposal.duplicate,
+            planSteps: parsed.data.plan.steps.length,
+            band: proposal.band,
+            highRisk: proposal.high_risk,
+            floorAdded: proposal.floor_added,
+          },
         });
-        return { status };
+        const body: EditPlanResponse = proposal;
+        return body;
       } catch (err) {
-        if (NO_PLAN_GATE.test(message(err))) return reply.code(501).send({ error: `${MID_RUN_EDIT}: ${message(err)}` });
         return reply.code(unsupported(err) ? 501 : 409).send({ error: message(err) });
       }
     },
@@ -247,13 +280,19 @@ export function registerTeamRoutes(
         return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
       }
       try {
-        return await adapter.previewPlan(
-          toLaunchPlan(parsed.data.plan),
-          parsed.data.projectId,
-          parsed.data.humanConfirm,
-        );
+        // The preview is the launch's own decision, so it takes what the launch would: the repo
+        // (its graph scores the touch set) and, for a delivering launch, the deliver step. A plan
+        // launch delivers only on an explicit `deliver: "pr"` (POST /runs defaults a plan to none).
+        const d = parsed.data;
+        return await adapter.previewPlan(toLaunchPlan(d.plan), {
+          ...(d.projectId !== undefined ? { projectId: d.projectId } : {}),
+          ...(d.humanConfirm !== undefined ? { humanConfirm: d.humanConfirm } : {}),
+          ...(d.repoRef !== undefined ? { repoRef: d.repoRef } : {}),
+          deliver: d.deliver === 'pr',
+        });
       } catch (err) {
-        // The engine's refusal of the draft (compose, the override in auto mode, …) is the answer.
+        // The engine's refusal of the draft (compose, the override in auto mode, an unregistered
+        // repo, …) is the answer.
         return reply.code(unsupported(err) ? 501 : 400).send({ error: message(err) });
       }
     },

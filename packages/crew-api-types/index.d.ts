@@ -6429,18 +6429,51 @@ export interface RunTeamResponse {
 }
 
 /**
- * `POST /runs/:id/plan` body: a plan edit. Today the edit answers a `plan_approval` gate; a run off
- * that gate answers 501 (a mid-run edit needs the engine's `proposePlan`, not in core-ts yet).
+ * `POST /runs/:id/plan` body: a plan edit. At a `plan_approval` gate the edit IS the gate answer
+ * (the engine proposes, floor-fills and accepts it, or refuses it and re-opens the gate) and the
+ * route answers `{ status }`. Anywhere else on a live planned run (running, or paused at another
+ * gate) it is a MID-RUN edit (`Core.proposePlan`): `plan.steps` are the steps to ADD, held and
+ * applied at the run's next step boundary — its author approved it, so no gate opens — and the
+ * route answers {@link PlanProposalResponse}. A mid-run edit carries no `touch` / `override`.
  */
 export interface EditPlanBody {
   plan: LaunchPlan;
   /**
-   * The caller's id for this edit (DES-002 §6.1: the `plan.proposed` source of a mid-run human
-   * edit), so a retried POST proposes once. Accepted now; used once the engine's `proposePlan`
-   * lands (a gate edit is keyed on its gate id).
+   * The caller's id for this edit: the engine's idempotency key for a mid-run edit, so a retried
+   * POST carrying the same id proposes once (`duplicate: true`). Omitted ⇒ the daemon mints a
+   * fresh UUID for that POST, so an omitted-id retry is a SECOND edit — send one to retry safely.
+   * A gate edit is keyed on its gate, not on this id.
    */
   requestId?: string;
 }
+
+/** `POST /runs/:id/plan` at a `plan_approval` gate: the run's status after the gate answer. */
+export interface EditPlanGateResponse {
+  status: SessionStatus;
+}
+
+/**
+ * `POST /runs/:id/plan` mid-run: the engine's `PlanProposal` (`Core.proposePlan`), what the held
+ * edit does to the run — read off the dry run it was validated by, since the author's own edit
+ * opens no gate. Refusals (a plan awaiting approval — edit it at the gate —, a started deliver
+ * step, a finished or unplanned run, an edit the revision refuses) answer 409 with the engine
+ * reason.
+ */
+export interface PlanProposalResponse {
+  /** The `plan.proposed` id the edit is published under. */
+  proposal_id: string;
+  /** `true`: this `requestId` was already taken — nothing new is held or published. */
+  duplicate: boolean;
+  /** The floor band of the rev the edit makes (`"40-69"`, …); `null` for a duplicate. */
+  band: string | null;
+  /** §8.5's high-risk rule on that rev: `true` = the edit moved the run into high risk. `null` for a duplicate. */
+  high_risk: boolean | null;
+  /** The floor phase types (catalog ids) the edit adds; empty for a duplicate. */
+  floor_added: string[];
+}
+
+/** `POST /runs/:id/plan`: a gate answer (`status`) or a mid-run proposal (`proposal_id`). */
+export type EditPlanResponse = EditPlanGateResponse | PlanProposalResponse;
 
 /** `POST /team/outbox/replay`: the engine's replay of `<state home>/team-outbox.ndjson`. */
 export interface TeamOutboxReplayReport {
@@ -6453,10 +6486,25 @@ export interface TeamOutboxReplayReport {
   failures: Array<[string, string]>;
 }
 
-/** One phase type of the engine's catalog (`GET /catalog`): a `PhaseDef` keyed by its catalog `id`. */
+/** One phase type of the engine's catalog (`GET /catalog`, `Core.catalog`), in catalog order —
+ *  the row studio's phase picker renders. */
 export interface CatalogEntry {
   id: string;
-  [k: string]: unknown;
+  kind: StageKindPhase;
+  role: PhaseRole;
+  gate: GateSpec;
+  gate_type: GateType | null;
+  executes_code: boolean;
+  /** `"tool"`: a step of this entry supplies its own command (`deliver`); else `"agent"`. */
+  executor: 'agent' | 'tool';
+  validator_pin: string | null;
+  /** The entry carries a validator pin (a step may not remove or swap it). */
+  pinned: boolean;
+  /** That pin is the evidence floor. */
+  evidence_floor: boolean;
+  skill_ref: string | null;
+  /** The entry's one-line description; `null` when it has none. */
+  description: string | null;
 }
 
 /** `GET /catalog`. */
@@ -6464,20 +6512,53 @@ export interface CatalogResponse {
   entries: CatalogEntry[];
 }
 
-/** `POST /plans/preview` body: a draft plan, previewed in a project's scope and gate mode. */
+/** `POST /plans/preview` body: a draft plan, previewed as the `POST /runs {plan}` launch with the
+ *  same fields would decide it. */
 export interface PlanPreviewBody {
   plan: LaunchPlan;
+  /** Only matters to a preset name, so it does not change a plan's preview. */
   projectId?: string;
   /** The launch's gate mode (`humanConfirm` on `POST /runs`); absent = auto. */
   humanConfirm?: string;
+  /** The registered repo the launch would run on: a behavioural `touch` set is scored against its
+   *  code graph at the base the launch would start from (read locally, no fetch). An unregistered
+   *  repo is a 400. Absent ⇒ the fail-closed score (`graph: "unavailable"`). */
+  repoRef?: string;
+  /** The launch's delivery (`deliver` on `POST /runs`): `"pr"` hands the engine the launch's
+   *  deliver step, so the preview's floor carries `deliver` as the launch's would. Absent or
+   *  `"none"` ⇒ no deliver step (a plan launch's own default). */
+  deliver?: 'pr' | 'none';
 }
 
-/** `POST /plans/preview`: the engine's floor fill of the draft (§8.5), as a launch would compute it. */
+/**
+ * `POST /plans/preview`: the engine's `PlanPreview` (`Core.previewPlan`) — what the launch would
+ * compute (precheck, intent score, floor fill, approval matrix, planning checks), persisting and
+ * publishing nothing. A refusal (the launch's own, an unregistered repo) is a 400.
+ */
 export interface PlanPreviewResponse {
-  /** The floor-filled steps; each carries `added_by` and, when the floor added it, `floor_reason`. */
-  steps: TeamPlanStep[];
-  /** The catalog ids the floor added. */
-  added_by_floor: string[];
+  /** The intent score (§8.2), its deterministic part, one reason per contribution. */
+  score: number;
+  deterministic: number;
+  reasons: string[];
+  /** The destructive signal the floor fill reads. */
+  destructive: boolean;
+  /** The floor band the score lands in (`"40-69"`, `"70-100"`, …). */
   band: string;
   high_risk: boolean;
+  /** The floor phase types the plan owes, in order. The steps the floor ADDED are the `steps`
+   *  with `added_by: "floor"`. */
+  floor: string[];
+  /** The floor override as recorded (manual mode only). */
+  floor_override: TeamPlanOverride | null;
+  /** The floor-filled steps; each carries `added_by`, and `floor_reason` when the floor added it. */
+  steps: TeamPlanStep[];
+  /** The def the run would plan from (`compose` of `steps`). */
+  def: WorkflowDef;
+  /** `true` ⇒ the launch would pause at a `plan_approval` gate before its first unit. */
+  pauses: boolean;
+  pause_reason: 'manual_mode' | 'high_risk' | 'override' | (string & {}) | null;
+  /** `"ready"`: the score read the repo's code graph. `"not_needed"`: a docs-only touch set (or no
+   *  creator and no touch set). `"unavailable"`: the fail-closed score (no repo, no or a stale
+   *  graph, no declared scope — `reasons` says which). */
+  graph: 'ready' | 'not_needed' | 'unavailable';
 }

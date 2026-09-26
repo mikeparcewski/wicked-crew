@@ -33,6 +33,7 @@ import type {
   PresetStep,
   CatalogEntry,
   PlanPreviewResponse,
+  PlanProposalResponse,
   RunTeamView,
   TeamOutboxReplayReport,
   Project,
@@ -409,18 +410,27 @@ type PresetMethods = {
 
 /**
  * The team bindings (DES-TEAMING-002 T8). ALL optional: `runTeam` / `replayTeamOutbox` land with
- * seam P1; `catalog` / `previewPlan` are the engine's catalog and floor fill (`src/catalog.rs`,
- * `plan::floor_fill`) as bindings. Each resolves a JSON string; an addon without one answers 501.
+ * seam P1; `catalog` / `previewPlan` / `proposePlan` with core#630 (the engine's catalog, the
+ * launch's own decision as a dry run, the mid-run plan edit). Each resolves a JSON string; an
+ * addon without one answers 501.
  */
 type TeamMethods = {
   /** `RunTeamView` JSON, or the literal `null` for a run that is not a team run; rejects for an unknown run. */
   runTeam?(runId: string): Promise<string>;
   /** The outbox replay report JSON; rejects when the engine has no bus or no state home. */
   replayTeamOutbox?(): Promise<string>;
-  /** The phase catalog: a JSON array of `PhaseDef` entries, in catalog order. */
+  /** The phase catalog: a JSON array of `CatalogEntry` rows, in catalog order. */
   catalog?(): Promise<string>;
-  /** The floor fill of a draft plan: `{steps, added_by_floor, band, high_risk}`; rejects a refused plan with the reason. */
-  previewPlan?(planJson: string, projectId?: string | null, humanConfirm?: string | null): Promise<string>;
+  /** The launch's decision over a draft plan as `PlanPreview` JSON; rejects with the launch's refusal. */
+  previewPlan?(
+    planJson: string,
+    projectId?: string | null,
+    humanConfirm?: string | null,
+    repoRef?: string | null,
+    deliverStepJson?: string | null,
+  ): Promise<string>;
+  /** A mid-run plan edit, held for the next step boundary: `PlanProposal` JSON; idempotent by `requestId`. */
+  proposePlan?(runId: string, planJson: string, requestId: string): Promise<string>;
 };
 
 /** DES-TEAMING-002 T0 (wicked-core-ts ≥ the release carrying it): what arming the engine's bus
@@ -2186,15 +2196,45 @@ export class CoreAdapter {
     return JSON.parse(await fn.call(this.core)) as CatalogEntry[];
   }
 
-  /** The engine's floor fill of a draft plan, as a launch in `projectId` would compute it.
-   *  TODO(DES-TEAMING-002 T8 follow-up): the `PlanPreviewResponse` cast is unchecked. The engine's
-   *  `plan::FloorFilled` carries `floor` / `def` / `floor_override`, not `added_by_floor`; pin this
-   *  shape against the core binding (`Core.previewPlan`) when it lands. */
-  async previewPlan(plan: LaunchPlan, projectId?: string, humanConfirm?: string): Promise<PlanPreviewResponse> {
+  /** What a `POST /runs {plan}` launch with the same fields would decide, persisting nothing
+   *  (`Core.previewPlan`): `repoRef` is the repo the launch runs on (its graph scores the touch
+   *  set), and `deliver` hands the engine the launch's deliver step, as `launchRun` does. */
+  async previewPlan(
+    plan: LaunchPlan,
+    opts: { projectId?: string; humanConfirm?: string; repoRef?: string; deliver?: boolean } = {},
+  ): Promise<PlanPreviewResponse> {
     const fn = this.requireTeam(this.core.previewPlan, 'Previewing a plan', 'previewPlan');
+    const deliverStep =
+      opts.deliver === true
+        ? JSON.stringify(
+            // The launch's own step for a plan (`deliverStep(null, [], input)`); the run id is a
+            // placeholder: it only shapes the push command, which a preview never runs.
+            this.deliverStep(null, [], {
+              sessionId: 'plan-preview',
+              problem: '',
+              clisJson: '[]',
+              ...(opts.repoRef !== undefined ? { repoRef: opts.repoRef } : {}),
+            }),
+          )
+        : null;
     return JSON.parse(
-      await fn.call(this.core, JSON.stringify(plan), projectId ?? null, humanConfirm ?? null),
+      await fn.call(
+        this.core,
+        JSON.stringify(plan),
+        opts.projectId ?? null,
+        opts.humanConfirm ?? null,
+        opts.repoRef ?? null,
+        deliverStep,
+      ),
     ) as PlanPreviewResponse;
+  }
+
+  /** A mid-run plan edit (`Core.proposePlan`): the steps to add, held for the run's next step
+   *  boundary and approved by its author. Idempotent by `requestId`; rejects with the engine's
+   *  refusal (a plan awaiting approval, a started deliver step, a finished or unplanned run, …). */
+  async proposePlan(runId: string, plan: LaunchPlan, requestId: string): Promise<PlanProposalResponse> {
+    const fn = this.requireTeam(this.core.proposePlan, 'Editing a running plan', 'proposePlan');
+    return JSON.parse(await fn.call(this.core, runId, JSON.stringify(plan), requestId)) as PlanProposalResponse;
   }
 
   // ── Projects (DES-PROJECT-001) ──────────────────────────────────────────────

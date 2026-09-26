@@ -946,6 +946,7 @@ respondsWith<Wire.RunTeamResponse, ReturnType<typeof joinTeam>>();
 respondsWith<Wire.TeamOutboxReplayReport, Awaited<ReturnType<CoreAdapter['replayTeamOutbox']>>>();
 respondsWith<Wire.CatalogEntry[], Awaited<ReturnType<CoreAdapter['catalog']>>>();
 respondsWith<Wire.PlanPreviewResponse, Awaited<ReturnType<CoreAdapter['previewPlan']>>>();
+respondsWith<Wire.PlanProposalResponse, Awaited<ReturnType<CoreAdapter['proposePlan']>>>();
 // Steering (STEERING program) — the import batch and the "add with chat" authoring launch.
 accepts<z.input<typeof SteeringImportSchema>, Wire.SteeringImportBody>();
 accepts<z.input<typeof SteeringAuthorSchema>, Wire.SteeringAuthorBody>();
