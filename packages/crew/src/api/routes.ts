@@ -3054,12 +3054,21 @@ export function registerRoutes(
         .code(409)
         .send({ error: `Run is not awaiting a human gate (status: ${run.session.status})` });
     }
-    // api-types 0.44.0: a decision that names its gate answers THAT gate or nothing. An open gate
-    // the daemon cannot resolve (no cache, no durable row, no log binding, or a log recording no
-    // open gate) proves no change, so the status check above stands alone — as it did before `ord`.
+    // api-types 0.44.0: a decision that names its gate answers THAT gate or nothing. When the
+    // daemon cannot tell which gate is open (no cache, no durable row, no log binding, or a log
+    // recording no open gate) it cannot confirm the named one either, so it refuses — the skin
+    // re-reads the gate and the person decides again. A request without `ord` is unchanged.
     if (parsed.data.ord !== undefined) {
       const open = await resolveOpenGate(id);
-      if (open !== null && open !== 'no-log' && open.ord !== parsed.data.ord) {
+      if (open === null || open === 'no-log') {
+        return reply.code(409).send({
+          error:
+            `Gate unknown: this decision names the gate before unit ${parsed.data.ord}, but the daemon cannot `
+            + 'tell which gate is open on this run — refresh and decide again.',
+          code: 'gate_unknown',
+        });
+      }
+      if (open.ord !== parsed.data.ord) {
         return reply.code(409).send({
           error:
             `Gate changed: this decision was made on the gate before unit ${parsed.data.ord}, but the open gate `

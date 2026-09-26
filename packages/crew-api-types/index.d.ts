@@ -817,9 +817,9 @@ export interface GateDecision {
    * /runs/:id/gate` served it (api-types 0.44.0, additive). When present the daemon compares it to
    * the run's open gate and answers **409** `{ error, code: 'gate_changed', openOrd }` on a
    * mismatch, confirming nothing: the gate was answered elsewhere or replaced while the decision
-   * waited (a skin's undo window). An open gate the daemon cannot resolve proves no change, so the
-   * decision proceeds under the existing `awaiting_human` check. Absent = today's behaviour. An
-   * older daemon's strict schema refuses the key with a 400 — omit it against such servers.
+   * waited (a skin's undo window). When the daemon cannot tell which gate is open it answers
+   * **409** `{ error, code: 'gate_unknown' }` — refresh the gate and decide again. Absent = today's
+   * behaviour (no gate check).
    */
   ord?: number;
 }
