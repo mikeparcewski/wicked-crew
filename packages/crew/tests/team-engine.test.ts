@@ -16,10 +16,12 @@ import type { RunTeamResponse, SessionView, TeamEventFrame } from '../src/core/t
 import { removeScratch } from './setup/scratch.js';
 import { baseSkillOff } from './setup/base-skill-off.js';
 
-const probe = new CoreAdapter({ dbPath: join(mkdtempSync(join(tmpdir(), 'team-probe-')), 'core.db'), stub: true });
+const probeDir = mkdtempSync(join(tmpdir(), 'team-probe-'));
+const probe = new CoreAdapter({ dbPath: join(probeDir, 'core.db'), stub: true });
 const ENGINE_HAS_TEAM_READ =
   typeof (probe as unknown as { core: { runTeam?: unknown } }).core.runTeam === 'function' && engineSupportsPlanLaunch();
 probe.close();
+removeScratch(probeDir);
 
 const SEATS = JSON.stringify([
   { key: 'alpha', display_name: 'Alpha', binary: 'alpha', headless_invocation: 'alpha {PROMPT}' },
@@ -143,7 +145,7 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
     expect(proposed.event.event_id).toBeLessThan(claimed.event_id);
   });
 
-  it('(b) the read route: transport, the run rows, every unit with its rows; the snapshot when the rows are gone', async () => {
+  it('(b) the read route: transport, the run rows, every unit with its rows', async () => {
     const res = await fetch(`${baseUrl}/api/v1/runs/t8-a/team`);
     expect(res.status, await res.clone().text()).toBe(200);
     const team = (await res.json()) as RunTeamResponse;
@@ -153,19 +155,14 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
       expect.arrayContaining(['wicked.team.path.started', 'wicked.team.plan.proposed', 'wicked.team.plan.accepted']),
     );
     const all = [...team.rows, ...team.units.flatMap((u) => u.rows)].map((r) => r.event_id).sort((a, b) => a - b);
-    expect(all).toEqual(busRows('t8-a').map((r) => r.event_id));
+    // The engine keeps publishing for the running unit: compare up to the route's newest row.
+    expect(all).toEqual(busRows('t8-a').map((r) => r.event_id).filter((id) => id <= Math.max(...all)));
     expect(team.units.length).toBeGreaterThan(0);
     expect(team.units[0]?.rows.map((r) => r.event_type)).toContain('wicked.team.step.claimed');
 
-    crewBusHandle(busPath, { create: false })
-      .prepare(`DELETE FROM events WHERE json_extract(payload, '$.run_id') = ?`)
-      .run('t8-a');
-    const bare = (await (await fetch(`${baseUrl}/api/v1/runs/t8-a/team`)).json()) as RunTeamResponse;
-    expect(bare.rows).toEqual([]);
-    expect(bare.transport).toBe('bus');
-    expect(bare.units.map((u) => u.ord)).toEqual(team.units.map((u) => u.ord));
-    expect(bare.units[0]?.transport).toBe('bus');
-    expect(bare.units.every((u) => u.rows.length === 0)).toBe(true);
+    // "The snapshot when the rows are gone" is pinned in team-surface.test.ts, where crew's library
+    // is the bus file's only writer: deleting rows here, under a live engine writing the same file
+    // through its own SQLite copy, is the two-library write that corrupts it (team-relay.test.ts).
   });
 
   it('(b) an un-teamed run answers units: []', async () => {

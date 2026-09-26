@@ -112,9 +112,10 @@ async function seedBus(busPath: string, rows: Array<{ type: string; payload: Rec
 describe('GET /runs/:id/team (T8 (b))', () => {
   let ctx: Awaited<ReturnType<typeof boot>>;
   let busPath: string;
+  let busDir: string;
 
   beforeEach(async () => {
-    const busDir = mkdtempSync(join(tmpdir(), 'team-bus-'));
+    busDir = mkdtempSync(join(tmpdir(), 'team-bus-'));
     busPath = join(busDir, 'bus.db');
     ctx = await boot('team-read', busPath);
     runs(ctx.adapter, [{ id: 'r1', status: 'executing' }, { id: 'plain', status: 'completed' }]);
@@ -124,6 +125,7 @@ describe('GET /runs/:id/team (T8 (b))', () => {
     await ctx.app.close();
     ctx.adapter.close();
     removeScratch(ctx.dir);
+    removeScratch(busDir);
   });
 
   it('404 for an unknown run', async () => {

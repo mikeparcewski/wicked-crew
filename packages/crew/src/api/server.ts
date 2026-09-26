@@ -834,7 +834,6 @@ export async function createServer(
             ? { pollIntervalMs: options.teamWsRelay.pollIntervalMs }
             : {}),
           log: (m) => app.log.warn(m),
-          logError: (m) => app.log.error(m),
         });
   if (teamRelay !== null) {
     app.log.info('team /ws relay armed (team rows → teamEvent)');
