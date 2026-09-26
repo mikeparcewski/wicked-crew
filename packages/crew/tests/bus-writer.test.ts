@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createRequire } from 'node:module';
 import { crewBusHandle } from '../src/core/bus-handle.js';
 import { BusWriteError, busWriterTesting, emitOnBus } from '../src/core/bus-writer.js';
 import { removeScratch } from './setup/scratch.js';
@@ -92,5 +93,31 @@ describe('emitOnBus (the single bus writer)', () => {
     busWriterTesting.childScript = EXITS_BEFORE_ITS_ANSWER_IS_READ;
     await expect(emitOnBus(busPath, row(1))).resolves.toBe(7);
   });
+
+  it('opens a bus another process holds locked past the busy timeout: it retries, it does not fail the emit', async () => {
+    // Another process (this test) holds the write lock on a bus with no schema yet for 6 s —
+    // longer than wicked-bus's 5 s busy timeout, the way a busy engine can hold the daemon's bus
+    // while the writer's first open runs the schema DDL (crew#680 CI: "cannot open the bus:
+    // database is locked").
+    type Db = { exec(sql: string): unknown; close(): void };
+    const Database = createRequire(createRequire(import.meta.url).resolve('wicked-bus'))('better-sqlite3') as new (p: string) => Db;
+    const holder = new Database(busPath);
+    holder.exec('PRAGMA journal_mode = WAL');
+    holder.exec('BEGIN EXCLUSIVE');
+    let held = true;
+    const unlock = (): void => {
+      if (!held) return;
+      held = false;
+      holder.exec('COMMIT');
+      holder.close();
+    };
+    const release = setTimeout(unlock, 6_000);
+    try {
+      expect(await emitOnBus(busPath, row(1))).toBeGreaterThan(0);
+    } finally {
+      clearTimeout(release);
+      unlock();
+    }
+  }, 20_000);
 });
 

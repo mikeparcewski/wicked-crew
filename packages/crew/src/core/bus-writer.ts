@@ -51,6 +51,9 @@ export class BusWriteError extends Error {
 /** Exit after this long with nothing to write. */
 const IDLE_MS = 30_000;
 
+/** How long the child retries a locked open; inside the per-request answer bound below. */
+const OPEN_RETRY_MS = 12_000;
+
 /** Test seam only: the child's script (a stub writer) and the per-request answer bound. */
 export const busWriterTesting: { childScript: string | undefined; timeoutMs: number } = {
   childScript: undefined,
@@ -64,12 +67,24 @@ const [busUrl, dbPath] = process.argv.slice(1);
 const bus = await import(busUrl);
 const override = { db_path: dbPath };
 let db, config;
-try {
-  config = bus.loadConfig(override);
-  db = bus.openDb(override);
-} catch (err) {
-  process.stderr.write('cannot open the bus: ' + (err && err.message ? err.message : String(err)));
-  process.exit(1);
+// The engine may hold the bus's write lock past wicked-bus's 5 s busy timeout, or SQLite may answer
+// BUSY at once (a deferred transaction that cannot upgrade), while the first open runs the schema
+// DDL: retry a locked open for up to OPEN_RETRY_MS before failing.
+const openBy = Date.now() + ${OPEN_RETRY_MS};
+for (;;) {
+  try {
+    config = bus.loadConfig(override);
+    db = bus.openDb(override);
+    break;
+  } catch (err) {
+    const msg = err && err.message ? err.message : String(err);
+    if (/locked|busy/i.test(msg) && Date.now() < openBy) {
+      await new Promise((r) => setTimeout(r, 100));
+      continue;
+    }
+    process.stderr.write('cannot open the bus: ' + msg);
+    process.exit(1);
+  }
 }
 const out = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
 createInterface({ input: process.stdin })
