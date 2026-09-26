@@ -18,7 +18,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { CoreAdapter } from '../core/adapter.js';
 import { PlanLaunchUnsupportedError, TeamUnsupportedError } from '../core/adapter.js';
-import { crewBusHandle } from '../core/bus-handle.js';
+import { readBus } from '../core/bus.js';
 import type {
   Actor,
   SessionStatus,
@@ -77,30 +77,25 @@ function unteamed(runId: string, status: SessionStatus): RunTeamResponse {
   };
 }
 
-/** The run's `wicked.team.*` rows, by `event_id`; `[]` when the bus is absent or unreadable. */
-function busRows(busDbPath: string | undefined, runId: string): TeamRow[] {
+/** The run's `wicked.team.*` rows, by `event_id`, read through the engine that holds the bus
+ *  (core/bus.ts); `[]` when the bus is absent or unreadable. */
+async function busRows(busDbPath: string | undefined, runId: string): Promise<TeamRow[]> {
   if (busDbPath === undefined) return [];
   try {
-    // The daemon's ONE long-lived crew handle on the bus (core/bus-handle.ts), never a
-    // per-request open/close, which would release the locks the engine's connection holds.
-    const rows = crewBusHandle(busDbPath, { create: false })
-      .prepare(
-        `SELECT event_id, event_type, payload, emitted_at FROM events
-          WHERE event_type LIKE 'wicked.team.%' AND json_extract(payload, '$.run_id') = ?
-          ORDER BY event_id`,
-      )
-      .all(runId) as Array<{ event_id: number; event_type: string; payload: string; emitted_at: number }>;
-    return rows.map(
-      (r) =>
-        ({
-          event_id: r.event_id,
-          event_type: r.event_type,
-          payload: JSON.parse(r.payload) as unknown,
-          emitted_at: r.emitted_at,
-        }) as TeamRow,
-    );
+    const rows = await readBus(busDbPath, 'wicked.team.');
+    return rows
+      .filter((r) => (r.payload as { run_id?: unknown } | null)?.run_id === runId)
+      .map(
+        (r) =>
+          ({
+            event_id: r.event_id,
+            event_type: r.event_type,
+            payload: r.payload,
+            emitted_at: r.emitted_at,
+          }) as TeamRow,
+      );
   } catch {
-    // No bus file / no events table: the engine's snapshot still answers.
+    // No engine bus / an unreadable one: the engine's snapshot still answers.
     return [];
   }
 }
@@ -158,7 +153,7 @@ export function registerTeamRoutes(
         if (run === undefined) return reply.code(404).send({ error: 'Run not found' });
         const view = await adapter.runTeam(id);
         if (view === null) return unteamed(id, run.session.status);
-        return joinTeam(view, busRows(adapter.busDbPath, id));
+        return joinTeam(view, await busRows(adapter.busDbPath, id));
       } catch (err) {
         return reply.code(unsupported(err) ? 501 : 500).send({ error: message(err) });
       }

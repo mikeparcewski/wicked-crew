@@ -113,7 +113,7 @@ describe('two isolated --db daemons never share a bus (F-043)', () => {
     const busA = resolveCrewBus({ coreDbPath: join(homeA, 'core.db') });
     const busB = resolveCrewBus({ coreDbPath: join(homeB, 'core.db') });
     expect(busA.dbPath).not.toBe(busB.dbPath);
-    // What the CLI does before the seams open their db (better-sqlite3 creates no parents).
+    // What the CLI boot probe does before the engine opens the db (SQLite creates no parents).
     mkdirSync(dirname(busA.dbPath), { recursive: true });
     mkdirSync(dirname(busB.dbPath), { recursive: true });
 

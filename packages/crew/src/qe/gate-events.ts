@@ -14,7 +14,7 @@
  *     payload: run_id, project_id (emitted alongside a PASS)
  *
  * Consumption is OPT-IN behind crew's existing bus seam (like `--bus-db` /
- * `WICKED_BUS_EXEC`): when armed, a read-only bus tap (core/bus-tap.ts) folds each
+ * `WICKED_BUS_EXEC`): when armed, a tap on the engine's bus (core/bus.ts) folds each
  * event into this in-memory cache so acceptance reads see gate results the
  * moment they happen; when the bus is absent, nothing here runs and the
  * acceptance route's lazy ledger read is the (always-correct) fallback. The
@@ -22,9 +22,8 @@
  * gate decision, so a lost or replayed event can never flip a verdict.
  */
 
-import type { BusEvent } from 'wicked-bus';
 import { busSubscriberErrorReporter } from '../interactive/bus-subscriber-errors.js';
-import { tapBus, type BusTap } from '../core/bus-tap.js';
+import { tapBus, type BusEvent, type BusTap } from '../core/bus.js';
 
 /** The gate-result event types (the old gate.mjs wire contract, verbatim). */
 export const QE_GATE_EVENT_TYPES = [
@@ -147,9 +146,7 @@ export class QeGateCache {
 /** Options for {@link startQeGateSubscriber}. */
 export interface QeGateSubscriberOptions {
   /**
-   * Bus SQLite db path. Omit to let wicked-bus resolve its own default
-   * (`~/.something-wicked/wicked-bus/bus.db`) — which is where the QE
-   * pipeline's CLI emits unless redirected, so the default is usually right.
+   * The bus db the daemon handed its engine (core/bus.ts); without one the seam does not arm.
    */
   dbPath?: string;
   /** Poll cadence, ms (default 5000; tests use a short interval). */
@@ -183,11 +180,10 @@ export async function startQeGateSubscriber(
 ): Promise<QeGateSubscription | null> {
   const log = opts.log ?? ((m: string) => console.error(m));
 
-  // A read-only tap on crew's long-lived bus handle (crew#679): this bus may be the engine's own
-  // file (`--bus-db`, or WICKED_BUS_DATA_DIR), so crew never writes it through its own SQLite.
+  // A tap over the engine that holds the daemon's bus (wicked-core#631, core/bus.ts).
   let tap: BusTap;
   try {
-    tap = tapBus({
+    tap = await tapBus({
       dbPath: opts.dbPath,
       filter: QE_BUS_FILTER,
       pollIntervalMs: opts.pollIntervalMs ?? 5000,
@@ -205,7 +201,7 @@ export async function startQeGateSubscriber(
     });
   } catch (err) {
     log(
-      `[qe-gate-events] could not open the bus db${opts.dbPath !== undefined ? ` at ${opts.dbPath}` : ''} — gate events disabled: ${
+      `[qe-gate-events] has no bus${opts.dbPath !== undefined ? ` at ${opts.dbPath}` : ''} — gate events disabled: ${
         err instanceof Error ? err.message : String(err)
       }`,
     );

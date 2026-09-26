@@ -1,5 +1,6 @@
-// crew#679 through the REAL engine on a real bus: crew's migrated seams run beside the engine's
-// team publishing without writing the bus through crew's own SQLite.
+// crew#679 / wicked-core#631 through the REAL engine on a real bus: crew's seams run beside the
+// engine's team publishing, and every bus row crew writes or reads goes through the engine
+// (`Core.busEmit` / `Core.busRead`, src/core/bus.ts) — crew opens no SQLite of its own.
 //
 // The daemon's bus file is the engine's too (DES-TEAMING-002 T0). Before crew#679 the project bus
 // and the interactive /ws relay armed wicked-bus `subscribe` (register + ack per row) and `emit`
@@ -9,12 +10,12 @@
 // why tests/team-engine.test.ts runs with both seams OFF.
 //
 // Here both are ON, beside the team relay, while plan launches make the engine publish team facts
-// and crew emits project/membership/interactive events through the one bus writer. Pinned:
+// and crew emits project/membership/interactive events through the engine. Pinned:
 //   - every plan launch reaches its plan_approval gate (the engine's bus stayed writable);
-//   - every interactive event crew emitted comes back through the read-only tap as a /ws frame,
-//     each launch's emits in the order they were sent, and the project events landed on the bus;
-//   - the bus passes `quick_check`, and crew registered nothing: no subscription, cursor, delivery
-//     or dead-letter row.
+//   - every interactive event crew emitted comes back through the tap as a /ws frame, each
+//     launch's emits in the order they were sent, and the project events landed on the bus;
+//   - the bus passes `quick_check` (read once at the end through a read-only connection this test
+//     never closes).
 // Skipped on an addon without `Core.runTeam` or the plan approval gate, as team-engine is.
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
@@ -24,7 +25,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
 import { CoreAdapter, engineSupportsPlanLaunch } from '../src/core/adapter.js';
-import { crewBusHandle } from '../src/core/bus-handle.js';
+import { readBus } from '../src/core/bus.js';
+import { createRequire } from 'node:module';
 import { createServer } from '../src/api/server.js';
 import type { SessionView } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
@@ -69,15 +71,12 @@ describe.skipIf(!ENGINE_HAS_TEAM)('crew seams beside the real engine on one bus 
   let baseUrl: string;
   let ws: WebSocket;
   const frames: Array<Record<string, unknown>> = [];
+  /** Test-side connections to the bus: held for the life of the process, never closed. */
+  const held: unknown[] = [];
 
-  const count = (sql: string): number => {
-    try {
-      return (crewBusHandle(busPath, { create: false }).prepare(sql).all()[0] as { n: number }).n;
-    } catch (err) {
-      if (err instanceof Error && /no such table/.test(err.message)) return 0;
-      throw err;
-    }
-  };
+  /** Live rows of `type` (an exact type, or a prefix ending in `.`), read through the engine. */
+  const count = async (type: string): Promise<number> =>
+    (await readBus(busPath, type)).filter((r) => (type.endsWith('.') ? true : r.event_type === type)).length;
 
   async function viewOf(runId: string): Promise<SessionView | undefined> {
     return (await adapter.sessionsDetail()).find((v) => v.session.id === runId);
@@ -87,9 +86,7 @@ describe.skipIf(!ENGINE_HAS_TEAM)('crew seams beside the real engine on one bus 
     baseSkillOff();
     dir = mkdtempSync(join(tmpdir(), 'bus-seams-engine-'));
     busPath = join(dir, 'bus.db');
-    // As `serve` boots: crew's one long-lived handle opens (and creates) the bus BEFORE the engine
-    // spawns, and is never closed. Nothing else in crew opens the file.
-    crewBusHandle(busPath, { create: true });
+    // As `serve` boots: the engine is handed the bus and opens (and creates) it; crew opens nothing.
     adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: true, busDbPath: busPath });
     app = await createServer(adapter, {
       auditPath: join(dir, 'audit.log'),
@@ -118,7 +115,7 @@ describe.skipIf(!ENGINE_HAS_TEAM)('crew seams beside the real engine on one bus 
     else process.env['WICKED_BUS_DB'] = savedBus;
   });
 
-  it('plan launches reach their gate while crew emits and taps the same bus; crew writes nothing through its SQLite', async () => {
+  it('plan launches reach their gate while crew emits and taps the same bus through the engine', async () => {
     const created = await fetch(`${baseUrl}/api/v1/projects`, json({ name: 'bus-679' }));
     expect(created.status, await created.clone().text()).toBe(201);
     const projectId = ((await created.json()) as { project: { id: string } }).project.id;
@@ -168,17 +165,19 @@ describe.skipIf(!ENGINE_HAS_TEAM)('crew seams beside the real engine on one bus 
     }
 
     // The project events crew emitted landed, beside the engine's team facts.
-    await waitFor('the membership rows', () =>
-      count(`SELECT count(*) AS n FROM events WHERE event_type = 'wicked.crew.membership.attached'`) >= LAUNCHES ? true : undefined,
+    await waitFor('the membership rows', async () =>
+      (await count('wicked.crew.membership.attached')) >= LAUNCHES ? true : undefined,
     );
-    expect(count(`SELECT count(*) AS n FROM events WHERE event_type = 'wicked.crew.project.created'`)).toBe(1);
-    expect(count(`SELECT count(*) AS n FROM events WHERE event_type LIKE 'wicked.team.%'`)).toBeGreaterThan(0);
+    expect(await count('wicked.crew.project.created')).toBe(1);
+    expect(await count('wicked.team.')).toBeGreaterThan(0);
     expect(frames.some((f) => f['type'] === 'teamEvent')).toBe(true);
 
-    // The file is sound, and no crew seam registered, acked or dead-lettered anything on it.
-    expect(crewBusHandle(busPath, { create: false }).pragma('quick_check')).toEqual([{ quick_check: 'ok' }]);
-    for (const table of ['subscriptions', 'cursors', 'delivery_attempts', 'dead_letters']) {
-      expect(count(`SELECT count(*) AS n FROM ${table}`), table).toBe(0);
-    }
+    // The file is sound. Read-only and never closed: a close here would drop the engine's locks.
+    const Database = createRequire(createRequire(import.meta.url).resolve('wicked-bus'))('better-sqlite3') as new (
+      path: string,
+      opts: { readonly: boolean },
+    ) => { pragma(sql: string): unknown };
+    held.push(new Database(busPath, { readonly: true }));
+    expect((held[held.length - 1] as { pragma(sql: string): unknown }).pragma('quick_check')).toEqual([{ quick_check: 'ok' }]);
   });
 });

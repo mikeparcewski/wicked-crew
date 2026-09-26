@@ -44,8 +44,8 @@
  * its own reason.
  */
 
-import type { Verdict } from 'wicked-ledger';
-import { VERDICT_VALUES } from 'wicked-ledger';
+import type { Verdict } from 'wicked-ledger/manifest';
+import { VERDICT_VALUES } from 'wicked-ledger/manifest';
 import type {
   GovernanceClaim,
   RecordedEvent,

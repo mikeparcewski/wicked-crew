@@ -15,7 +15,8 @@
 //     engine bus line), the daemon still serves, and `/health.warnings` carries `bus.unavailable`.
 //  E. an engine WITHOUT the one-connection rule (no `Core.busConnectionStats` — what crew CI links
 //     until the engine half is on wicked-core main) gets exactly the pre-T0 handoff: no bus on a
-//     default boot, one line saying why; crew's seams still use the crew bus.
+//     default boot, one line saying why; crew's seams do not arm either (crew reaches a bus only
+//     through the engine that holds it, wicked-core#631).
 //  F. an engine without the rule, `--engine-exec` and an unopenable `--bus-db`: the unavailable bus
 //     dominates — no bus is handed, exec mediation is off, and `/health.warnings` says so.
 //  G. an INHERITED `WICKED_BUS_DB` naming an unopenable bus: crew decides "no bus" and the engine
@@ -300,7 +301,7 @@ describe.runIf(existsSync(CLI))('T0 bus handoff — one daemon, one bus file (DE
     expect(daemon.ready['busDb']).toBeUndefined();
     expect(daemon.stderr()).toContain('predates the one-connection bus rule');
     await createProject(daemon.port, 't0-e');
-    await waitForRow(crewBus, 'wicked.crew.project.', (r) => r.payload.includes('t0-e'));
+    expect(rows(crewBus, 'wicked.crew.project.')).toEqual([]);
   }, 120_000);
 
   it.runIf(!engineHasRule)('F. an engine without the rule + --engine-exec + an unopenable --bus-db: the unavailable bus dominates', async () => {

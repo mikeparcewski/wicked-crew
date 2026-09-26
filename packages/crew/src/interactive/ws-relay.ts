@@ -39,8 +39,7 @@ import { LOCAL_ACTOR } from '../api/auth.js';
 import { INTERACTIVE_DOMAIN, INTERACTIVE_PRODUCER } from './draft-events.js';
 import type { Actor } from '../core/types.js';
 import { busSubscriberErrorReporter } from './bus-subscriber-errors.js';
-import { tapBus, type BusTap } from '../core/bus-tap.js';
-import { emitOnBus } from '../core/bus-writer.js';
+import { emitOnBus, tapBus, type BusTap } from '../core/bus.js';
 
 const V = API_PREFIX;
 
@@ -74,15 +73,15 @@ export const EmitInteractiveEventSchema = z
 
 export interface InteractiveRelay {
   /**
-   * Emit one interactive event onto the bus. Returns true on success (or on WB-002, a duplicate
-   * key — the emit already happened); logs and returns false otherwise. Never rejects.
+   * Emit one interactive event onto the bus. Returns true on success (a key already on the bus is
+   * success — the emit already happened); logs and returns false otherwise. Never rejects.
    */
   emitInteractive(type: string, payload: Record<string, unknown>, idempotencyKey: string): Promise<boolean>;
   stop(): Promise<void>;
 }
 
 export interface InteractiveRelayOptions {
-  /** Bus db path; omit for wicked-bus's own resolution (honors WICKED_BUS_DATA_DIR). */
+  /** The bus db the daemon handed its engine (core/bus.ts); without one the relay does not arm. */
   dbPath?: string;
   /** Poll cadence for the relay subscriber, ms (tests shorten it). */
   pollIntervalMs?: number;
@@ -110,9 +109,9 @@ export async function startInteractiveWsRelay(
 ): Promise<InteractiveRelay | null> {
   const log = opts.log ?? ((): void => undefined);
 
-  // Both halves ride crew's one bus mechanism (crew#679): the relay is a read-only tap on crew's
-  // long-lived handle, the emit direction goes to the one bus writer — never a write on the
-  // engine's bus file through crew's own SQLite.
+  // Both halves go through the engine that holds the bus (wicked-core#631, core/bus.ts): the
+  // relay is a tap over `Core.busRead`, the emit direction is `Core.busEmit` — crew opens no
+  // SQLite of its own.
   //
   // Half 1 — bus → /ws. No retry: a lost liveness frame is noise, and the durable feed is the record.
   //
@@ -121,7 +120,7 @@ export async function startInteractiveWsRelay(
   // its own emission actually landed on the bus.
   let tap: BusTap;
   try {
-    tap = tapBus({
+    tap = await tapBus({
       dbPath: opts.dbPath,
       filter: RELAY_FILTER,
       pollIntervalMs: opts.pollIntervalMs ?? 2000,
@@ -156,7 +155,7 @@ export async function startInteractiveWsRelay(
     });
   } catch (err) {
     log(
-      `[interactive-relay] could not open the bus db${
+      `[interactive-relay] has no bus${
         opts.dbPath !== undefined ? ` at ${opts.dbPath}` : ''
       } — the interactive /ws relay is disabled: ${err instanceof Error ? err.message : String(err)}`,
     );
@@ -181,8 +180,6 @@ export async function startInteractiveWsRelay(
       });
       return true;
     } catch (err) {
-      const code = (err as { error?: string }).error;
-      if (code === 'WB-002') return true; // duplicate key — the emit already happened
       log(
         `[interactive-relay] emit ${type} failed: ${err instanceof Error ? err.message : String(err)}`,
       );

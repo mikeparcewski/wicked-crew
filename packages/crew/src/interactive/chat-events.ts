@@ -52,7 +52,6 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { BusEvent } from 'wicked-bus';
 import {
   DOC_NAME,
   DRAFT_COMPLETED,
@@ -82,8 +81,7 @@ import {
   workerToolCallDeniedLine,
 } from './council-outcome.js';
 import { busSubscriberErrorReporter } from './bus-subscriber-errors.js';
-import { openCrewBus, tapBus } from '../core/bus-tap.js';
-import { emitOnBus } from '../core/bus-writer.js';
+import { emitOnBus, requireEngineBus, tapBus, type BusEvent } from '../core/bus.js';
 
 // ── Vocabulary constants (interactive's, verbatim — src/service/events.js is the truth) ──────
 
@@ -332,8 +330,7 @@ export function chatProblem(
 
 /** Options for {@link startInteractiveChatSubscriber}. */
 export interface InteractiveChatOptions {
-  /** Bus SQLite db path. Omit to let wicked-bus resolve its own default
-   *  (honors `WICKED_BUS_DATA_DIR`) — where interactive's service emits unless redirected. */
+  /** The bus db the daemon handed its engine (core/bus.ts); without one the seam does not arm. */
   dbPath?: string;
   /** Poll cadence, ms (default 2000; tests shorten it). */
   pollIntervalMs?: number;
@@ -473,15 +470,14 @@ export async function startInteractiveChatSubscriber(
   const log = opts.log ?? ((m: string) => console.error(m));
   let draftSkillHeld = false; // set at arm time (draft-skill.ts); read at launch for the task clause
 
-  // crew#679: this seam reads the bus through a read-only tap on crew's long-lived handle and
-  // writes through the one bus writer — never a write on the engine's bus file through crew's
-  // own SQLite. Opened here so an unopenable bus disables the seam before anything is armed.
+  // This seam reads and writes the bus through the engine that holds it (wicked-core#631,
+  // core/bus.ts). Checked here so a bus no engine holds disables the seam before anything is armed.
   let busDbPath: string;
   try {
-    busDbPath = openCrewBus(opts.dbPath);
+    busDbPath = requireEngineBus(opts.dbPath);
   } catch (err) {
     log(
-      `[interactive-chat] could not open the bus db${
+      `[interactive-chat] has no bus${
         opts.dbPath !== undefined ? ` at ${opts.dbPath}` : ''
       } — governed iteration disabled: ${err instanceof Error ? err.message : String(err)}`,
     );
@@ -521,7 +517,7 @@ export async function startInteractiveChatSubscriber(
 
   /** Emit onto interactive's vocabulary as the `wi-crew` producer. Never throws into the
    *  caller: narration/announce failures are logged — a lost status line must not kill the
-   *  subscription, and a duplicate announce (WB-002) is the idempotency key WORKING. */
+   *  subscription, and a duplicate announce (its key already on the bus) is the idempotency key WORKING. */
   async function emitInteractive(
     type: string,
     payload: Record<string, unknown>,
@@ -538,11 +534,6 @@ export async function startInteractiveChatSubscriber(
       });
       return true;
     } catch (err) {
-      const code = (err as { error?: string }).error;
-      if (code === 'WB-002') {
-        // Duplicate idempotency key — the emit already happened (redelivery race). Success.
-        return true;
-      }
       log(
         `[interactive-chat] emit ${type} failed: ${err instanceof Error ? err.message : String(err)}`,
       );
@@ -763,14 +754,14 @@ export async function startInteractiveChatSubscriber(
     }
     // Announce on the SAME wire the first draft rides (ADR-0019 D5: by path — the service
     // reads the file and lands it as a generated version). The deterministic per-ask key
-    // makes a re-announce a WB-002 no-op.
+    // makes a re-announce a no-op (the key resolves to the existing row).
     const emitted = await emitInteractive(
       DRAFT_COMPLETED,
       { ...docScope(documentId, projectId), html_path: outPath },
       `crew:interactive.chat:${key}`,
     );
     if (!emitted) {
-      // The bus refused the announce (non-WB-002): the revision exists on disk but never
+      // The bus refused the announce: the revision exists on disk but never
       // reached the service. Fail HONEST — leaving the row launched-but-never-closed would
       // silently eat a redelivery of this ask (the launch gate is `ledger.has`).
       ledger.recordFailure(key);
@@ -1114,7 +1105,7 @@ export async function startInteractiveChatSubscriber(
     await launchAsk(queued);
   }
 
-  const sub = tapBus({
+  const sub = await tapBus({
     dbPath: busDbPath,
     filter: INTERACTIVE_CHAT_BUS_FILTER,
     // Live triggers only: replaying a bus backlog would answer asks whose moment has passed.

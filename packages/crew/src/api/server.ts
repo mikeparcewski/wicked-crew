@@ -113,7 +113,7 @@ export interface CreateServerOptions {
    */
   qeGateEvents?: {
     enabled: boolean;
-    /** Bus db path; omit for wicked-bus's own default resolution. */
+    /** The bus db; omit for the one the adapter handed its engine (`busDbPath`, core/bus.ts). */
     dbPath?: string;
     /** Poll cadence, ms (tests shorten it). */
     pollIntervalMs?: number;
@@ -127,7 +127,7 @@ export interface CreateServerOptions {
    */
   interactiveDraftEvents?: {
     enabled: boolean;
-    /** Bus db path; omit for wicked-bus's own default resolution (honors WICKED_BUS_DATA_DIR). */
+    /** The bus db; omit for the one the adapter handed its engine (`busDbPath`, core/bus.ts). */
     dbPath?: string;
     /** Poll cadence, ms (tests shorten it). */
     pollIntervalMs?: number;
@@ -154,7 +154,7 @@ export interface CreateServerOptions {
    */
   interactiveEditEvents?: {
     enabled: boolean;
-    /** Bus db path; omit for wicked-bus's own default resolution (honors WICKED_BUS_DATA_DIR). */
+    /** The bus db; omit for the one the adapter handed its engine (`busDbPath`, core/bus.ts). */
     dbPath?: string;
     /** Poll cadence, ms (tests shorten it). */
     pollIntervalMs?: number;
@@ -185,7 +185,7 @@ export interface CreateServerOptions {
    */
   interactiveDemoEvents?: {
     enabled: boolean;
-    /** Bus db path; omit for wicked-bus's own default resolution (honors WICKED_BUS_DATA_DIR). */
+    /** The bus db; omit for the one the adapter handed its engine (`busDbPath`, core/bus.ts). */
     dbPath?: string;
     /** Poll cadence, ms (tests shorten it). */
     pollIntervalMs?: number;
@@ -212,7 +212,7 @@ export interface CreateServerOptions {
    */
   interactiveChatEvents?: {
     enabled: boolean;
-    /** Bus db path; omit for wicked-bus's own default resolution (honors WICKED_BUS_DATA_DIR). */
+    /** The bus db; omit for the one the adapter handed its engine (`busDbPath`, core/bus.ts). */
     dbPath?: string;
     /** Poll cadence, ms (tests shorten it). */
     pollIntervalMs?: number;
@@ -239,7 +239,7 @@ export interface CreateServerOptions {
    */
   projectEvents?: {
     disabled?: boolean;
-    /** Bus db path; omit for wicked-bus's own default resolution (honors WICKED_BUS_DATA_DIR). */
+    /** The bus db; omit for the one the adapter handed its engine (`busDbPath`, core/bus.ts). */
     dbPath?: string;
     /** Poll cadence for the /ws activity bridge, ms (tests shorten it). */
     pollIntervalMs?: number;
@@ -270,7 +270,7 @@ export interface CreateServerOptions {
   };
   interactiveWsRelay?: {
     disabled?: boolean;
-    /** Bus db path; omit for wicked-bus's own default resolution. */
+    /** The bus db; omit for the one the adapter handed its engine (`busDbPath`, core/bus.ts). */
     dbPath?: string;
     /** Poll cadence, ms (tests shorten it). */
     pollIntervalMs?: number;
@@ -695,13 +695,18 @@ export async function createServer(
       );
     }
   };
+  // Crew reaches a bus only through the engine that holds it (wicked-core#631, core/bus.ts): a seam
+  // with no bus db of its own reads and writes the one this adapter handed its engine.
+  const engineBusDb = typeof adapter.busDbPath === 'string' ? adapter.busDbPath : undefined;
+  const busOf = (dbPath: string | undefined): { dbPath?: string } => {
+    const bus = dbPath ?? engineBusDb;
+    return bus !== undefined ? { dbPath: bus } : {};
+  };
   const projectBus =
     options?.projectEvents?.disabled === true
       ? null
       : await startProjectBus({
-          ...(options?.projectEvents?.dbPath !== undefined
-            ? { dbPath: options.projectEvents.dbPath }
-            : {}),
+          ...busOf(options?.projectEvents?.dbPath),
           ...(options?.projectEvents?.pollIntervalMs !== undefined
             ? { pollIntervalMs: options.projectEvents.pollIntervalMs }
             : {}),
@@ -786,9 +791,7 @@ export async function createServer(
     options?.interactiveWsRelay?.disabled === true
       ? null
       : await startInteractiveWsRelay({
-          ...(options?.interactiveWsRelay?.dbPath !== undefined
-            ? { dbPath: options.interactiveWsRelay.dbPath }
-            : {}),
+          ...busOf(options?.interactiveWsRelay?.dbPath),
           ...(options?.interactiveWsRelay?.pollIntervalMs !== undefined
             ? { pollIntervalMs: options.interactiveWsRelay.pollIntervalMs }
             : {}),
@@ -823,7 +826,7 @@ export async function createServer(
   // The team relay (DES-TEAMING-002 §4.5): every team row the engine publishes becomes a
   // `teamEvent` frame on the same /ws socket, tagged with the run's project. Only where the engine
   // has a bus: no bus, no team rows.
-  const teamBusDb = typeof adapter.busDbPath === 'string' ? adapter.busDbPath : undefined;
+  const teamBusDb = engineBusDb;
   const teamRelay =
     options?.teamWsRelay?.disabled === true || teamBusDb === undefined
       ? null
@@ -875,7 +878,7 @@ export async function createServer(
   if (options?.qeGateEvents?.enabled === true) {
     const { dbPath, pollIntervalMs } = options.qeGateEvents;
     const sub = await startQeGateSubscriber(qeGateCache, {
-      ...(dbPath !== undefined ? { dbPath } : {}),
+      ...busOf(dbPath),
       ...(pollIntervalMs !== undefined ? { pollIntervalMs } : {}),
       log: (m) => app.log.warn(m),
       logError: (m) => app.log.error(m),
@@ -890,7 +893,7 @@ export async function createServer(
 
   // ── A STUB ENGINE NEVER ANSWERS ANOTHER PRODUCT'S TRAFFIC (crew#309) ────────────────────────
   //
-  // The four seams below are ANSWERERS: each taps the bus (core/bus-tap.ts) and replies
+  // The four seams below are ANSWERERS: each taps the bus (core/bus.ts) and replies
   // to wicked-interactive's events by LAUNCHING A GOVERNED RUN. Under `serve --stub` the engine is
   // `Core.spawnStub` — a `StubDispatcher` (every seat votes for the first roster option, no
   // subprocess) plus a `StubStepRunner` (fixed text, no CLI) — so such a run resolves every phase
@@ -939,7 +942,7 @@ export async function createServer(
   if (options?.interactiveDraftEvents?.enabled === true && !refuseStubSeam('interactive-draft')) {
     const o = options.interactiveDraftEvents;
     draftSub = await startInteractiveDraftSubscriber(adapter, {
-      ...(o.dbPath !== undefined ? { dbPath: o.dbPath } : {}),
+      ...busOf(o.dbPath),
       ...(o.pollIntervalMs !== undefined ? { pollIntervalMs: o.pollIntervalMs } : {}),
       ...(o.heartbeatMs !== undefined ? { heartbeatMs: o.heartbeatMs } : {}),
       ...(o.ledgerPath !== undefined ? { ledgerPath: o.ledgerPath } : {}),
@@ -980,7 +983,7 @@ export async function createServer(
   if (options?.interactiveEditEvents?.enabled === true && !refuseStubSeam('interactive-edit')) {
     const o = options.interactiveEditEvents;
     editSub = await startInteractiveEditSubscriber(adapter, {
-      ...(o.dbPath !== undefined ? { dbPath: o.dbPath } : {}),
+      ...busOf(o.dbPath),
       ...(o.pollIntervalMs !== undefined ? { pollIntervalMs: o.pollIntervalMs } : {}),
       ...(o.heartbeatMs !== undefined ? { heartbeatMs: o.heartbeatMs } : {}),
       ...(o.ledgerPath !== undefined ? { ledgerPath: o.ledgerPath } : {}),
@@ -1019,7 +1022,7 @@ export async function createServer(
   if (options?.interactiveDemoEvents?.enabled === true && !refuseStubSeam('interactive-demo')) {
     const o = options.interactiveDemoEvents;
     demoSub = await startInteractiveDemoSubscriber(adapter, {
-      ...(o.dbPath !== undefined ? { dbPath: o.dbPath } : {}),
+      ...busOf(o.dbPath),
       ...(o.pollIntervalMs !== undefined ? { pollIntervalMs: o.pollIntervalMs } : {}),
       ...(o.heartbeatMs !== undefined ? { heartbeatMs: o.heartbeatMs } : {}),
       ...(o.ledgerPath !== undefined ? { ledgerPath: o.ledgerPath } : {}),
@@ -1053,7 +1056,7 @@ export async function createServer(
   if (options?.interactiveChatEvents?.enabled === true && !refuseStubSeam('interactive-chat')) {
     const o = options.interactiveChatEvents;
     chatSub = await startInteractiveChatSubscriber(adapter, {
-      ...(o.dbPath !== undefined ? { dbPath: o.dbPath } : {}),
+      ...busOf(o.dbPath),
       ...(o.pollIntervalMs !== undefined ? { pollIntervalMs: o.pollIntervalMs } : {}),
       ...(o.heartbeatMs !== undefined ? { heartbeatMs: o.heartbeatMs } : {}),
       ...(o.ledgerPath !== undefined ? { ledgerPath: o.ledgerPath } : {}),

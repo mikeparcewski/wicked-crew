@@ -4,33 +4,19 @@
  * Two sources, one normalized shape:
  * - CREW: the durable core-event log of the project's `crew.run`/`crew.chat` members
  *   (`adapter.runEvents` — the same log `/runs/:id/events` serves), entry id `crew:<run>:<seq>`.
- * - INTERACTIVE: `wicked.interactive.*` bus events carrying this `project_id`, read directly
- *   from the bus SQLite READ-ONLY through the SAME SQLite library wicked-bus itself uses
- *   (better-sqlite3, resolved from wicked-bus's own location — wicked-bus exposes
- *   subscribe-cursors, not ad-hoc history queries, and a durable cursor per feed-read would turn
- *   a GET into a write), entry id `bus:<event_id>`.
- *
- * WHY NOT `node:sqlite` (F-E2E-021): this daemon already holds long-lived better-sqlite3
- * connections on the very same bus.db (the interactive seams, the /ws relay, the project bridge).
- * SQLite's file locks are POSIX advisory locks, which the kernel releases for the WHOLE process the
- * moment ANY descriptor for that file is closed. One SQLite library instance protects itself (it
- * defers the close while sibling connections hold locks); a SECOND library instance in the same
- * process — Node's bundled SQLite behind `node:sqlite` — knows nothing about the first, so its
- * `close()` here silently released every lock the seams held on bus.db and bus.db-shm. The next
- * short-lived external emitter (`wicked-bus emit`, what wicked-estate spawns after an index) then
- * won the EXCLUSIVE lock on its own close, checkpointed and UNLINKED bus.db-wal/-shm under the
- * seams, whose reads decayed into "database disk image is malformed" on every poll for the life
- * of the daemon. Rule: ONE SQLite library per database file per process — this read goes through
- * wicked-bus's better-sqlite3, and (DES-TEAMING-002 T0) through the daemon's ONE long-lived crew bus
- * handle (`core/bus-handle.ts`): the engine's rusqlite now shares this file too, and a per-request
- * close would release ITS locks exactly as `node:sqlite`'s did the seams'.
+ * - INTERACTIVE: `wicked.interactive.*` bus events carrying this `project_id`, read through the
+ *   engine that holds the bus (`Core.busRead`, core/bus.ts — wicked-core#631), entry id
+ *   `bus:<event_id>`. Crew opens no SQLite of its own: a second SQLite library on the engine's bus
+ *   file in the same process drops the engine's POSIX locks on its close (F-E2E-021), which is
+ *   why this read used to need a long-lived handle and now needs none. The newest 1000 live
+ *   interactive rows for the project are read.
  *
  * Newest-first, cursor on `(ts, id)` — an opaque `<ts>:<id>` token, base64url. The merge is
  * recomputed per read; members are few and the log excludes high-volume frames, so the simple
  * full-merge is the honest v1 (the ADR explicitly rejects a new store here).
  */
 
-import { crewBusHandle } from '../core/bus-handle.js';
+import { readBus } from '../core/bus.js';
 import type { CoreAdapter } from '../core/adapter.js';
 import type { ActivityEntry } from '../core/types.js';
 
@@ -125,24 +111,16 @@ async function interactiveEntries(
   if (busDbPath === null) return [];
   const entries: ActivityEntry[] = [];
   try {
-    // The daemon's ONE long-lived crew handle on the bus (core/bus-handle.ts) — never a
-    // per-request open/close, which would release the locks the engine's connection holds.
-    const db = crewBusHandle(busDbPath, { create: false });
-    const rows = db
-      .prepare(
-        `SELECT event_id, event_type, payload, emitted_at FROM events
-         WHERE event_type LIKE 'wicked.interactive.%'
-           AND json_extract(payload, '$.project_id') = ?
-         ORDER BY emitted_at DESC LIMIT 1000`,
-      )
-      .all(projectId) as { event_id: number; event_type: string; payload: string; emitted_at: number }[];
+    const rows = (await readBus(busDbPath, 'wicked.interactive.'))
+      .filter((r) => (r.payload as { project_id?: unknown } | null)?.project_id === projectId)
+      .sort((x, y) => y.emitted_at - x.emitted_at)
+      .slice(0, 1000);
     for (const row of rows) {
-      let payload: Record<string, unknown> | null = null;
-      try {
-        payload = JSON.parse(row.payload) as Record<string, unknown>;
-      } catch {
-        /* raw stays the string */
-      }
+      // The engine parses the payload; one that is not a JSON object stays in `raw` as stored.
+      const payload =
+        row.payload !== null && typeof row.payload === 'object' && !Array.isArray(row.payload)
+          ? (row.payload as Record<string, unknown>)
+          : null;
       entries.push({
         id: `bus:${row.event_id}`,
         ts: row.emitted_at,
@@ -157,7 +135,7 @@ async function interactiveEntries(
       });
     }
   } catch {
-    // No bus db / schema mismatch — the interactive half is empty, never an error:
+    // No engine bus / an unreadable one — the interactive half is empty, never an error:
     // a project with no bound docs must not 500 its activity feed.
     return entries;
   }
