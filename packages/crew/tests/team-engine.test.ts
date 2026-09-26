@@ -173,11 +173,18 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
     expect(res.status, await res.clone().text()).toBe(201);
     const team = (await (await fetch(`${baseUrl}/api/v1/runs/t8-plain/team`)).json()) as RunTeamResponse;
     expect(team.units).toEqual([]);
-    expect(team.transport).toBe('none');
+    expect(team.teamed).toBe(false);
+    expect(team.transport).toBeNull();
   });
 
-  it('(c) POST /runs/:id/plan: the engine publishes plan.proposed{by:"human", kind:"edit"} once; a repeat is refused', async () => {
+  it('(c) POST /runs/:id/plan: the engine publishes plan.proposed{by:"human", kind:"edit"} once; a repeat off the gate never reaches the engine', async () => {
     await launchHeld('t8-c');
+    let confirms = 0;
+    const real = adapter.confirmGate.bind(adapter);
+    adapter.confirmGate = (...args: Parameters<CoreAdapter['confirmGate']>) => {
+      confirms++;
+      return real(...args);
+    };
     const body = { plan: { steps: [{ catalog: 'build', id: 'make' }, { catalog: 'test', id: 'prove' }] } };
     const first = await fetch(`${baseUrl}/api/v1/runs/t8-c/plan`, json(body));
     expect(first.status, await first.clone().text()).toBe(200);
@@ -187,8 +194,12 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
         return r.event_type === 'wicked.team.plan.proposed' && p.by === 'human' && p.kind === 'edit';
       });
     await waitFor('the edit fact', () => (edits().length === 1 ? true : undefined));
+    expect(confirms).toBe(1);
+    // The gate is answered and the run moved on: crew refuses the repeat itself (a mid-run edit is
+    // the engine's proposePlan, not in core-ts yet) — the engine is never asked twice.
     const again = await fetch(`${baseUrl}/api/v1/runs/t8-c/plan`, json(body));
-    expect(again.status).toBe(409);
+    expect(again.status).toBe(501);
+    expect(confirms).toBe(1);
     await new Promise((r) => setTimeout(r, 300));
     expect(edits()).toHaveLength(1);
   });

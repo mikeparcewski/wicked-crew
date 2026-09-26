@@ -11,7 +11,7 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter } from '../src/core/adapter.js';
@@ -132,22 +132,36 @@ describe('GET /runs/:id/team (T8 (b))', () => {
     expect(res.status).toBe(404);
   });
 
-  it('an un-teamed run answers transport "none" with units: []', async () => {
+  it('a run that is not a team run answers teamed: false with no transport (never the "none" outage)', async () => {
     stubCore(ctx.adapter, 'runTeam', () => Promise.resolve('null'));
     const res = await fetch(`${ctx.baseUrl}/api/v1/runs/plain/team`);
     expect(res.status).toBe(200);
     const body = (await res.json()) as RunTeamResponse;
     expect(body).toEqual({
       runId: 'plain',
-      transport: 'none',
-      reason: 'not a team run',
+      teamed: false,
+      transport: null,
+      reason: null,
       streamFloor: null,
       planRev: null,
       pending: null,
-      ended: false,
+      // `plain` is completed: ended follows the run's status, never a constant.
+      ended: true,
       units: [],
       rows: [],
     });
+    const live = (await (await fetch(`${ctx.baseUrl}/api/v1/runs/r1/team`)).json()) as RunTeamResponse;
+    expect(live.teamed).toBe(false);
+    expect(live.ended).toBe(false);
+  });
+
+  it('a TEAMED run that fell back answers teamed: true, transport "none" with its reason', async () => {
+    const fellBack = { ...SNAPSHOT, transport: 'none', reason: 'the bus refused path.started' };
+    stubCore(ctx.adapter, 'runTeam', () => Promise.resolve(JSON.stringify(fellBack)));
+    const body = (await (await fetch(`${ctx.baseUrl}/api/v1/runs/r1/team`)).json()) as RunTeamResponse;
+    expect(body.teamed).toBe(true);
+    expect(body.transport).toBe('none');
+    expect(body.reason).toBe('the bus refused path.started');
   });
 
   it('the attempt rows by event_id with the folded ledger; a late fold is labelled unused', async () => {
@@ -166,6 +180,7 @@ describe('GET /runs/:id/team (T8 (b))', () => {
     const res = await fetch(`${ctx.baseUrl}/api/v1/runs/r1/team`);
     expect(res.status, await res.clone().text()).toBe(200);
     const body = (await res.json()) as RunTeamResponse;
+    expect(body.teamed).toBe(true);
     expect(body.transport).toBe('bus');
     expect(body.rows.map((r) => r.event_type)).toEqual(['wicked.team.path.started']);
     const [u1, u2] = body.units;
@@ -242,29 +257,49 @@ describe('commands (T8 (c), (d), P1)', () => {
     removeScratch(ctx.dir);
   });
 
-  it('POST /runs/:id/plan answers the plan_approval gate with the edit (confirmGate edit_plan)', async () => {
+  it('POST /runs/:id/plan answers the plan_approval gate with the edit (confirmGate edit_plan), audited as gate.decided', async () => {
     const plan = { steps: [{ catalog: 'build', id: 'make' }], touch: ['src/a.ts'] };
-    const res = await fetch(`${ctx.baseUrl}/api/v1/runs/r1/plan`, json({ plan }));
+    const res = await fetch(`${ctx.baseUrl}/api/v1/runs/r1/plan`, json({ plan, requestId: 'req-1' }));
     expect(res.status, await res.clone().text()).toBe(200);
     expect(await res.json()).toEqual({ status: 'executing' });
     expect(gated).toHaveLength(1);
     const [runId, approve, amend, action, scope, planJson] = gated[0]!;
     expect([runId, approve, amend, action, scope]).toEqual(['r1', true, undefined, 'edit_plan', undefined]);
     expect(JSON.parse(planJson as string)).toEqual(plan);
+    // Recorded like every other gate answer: gate.decided with the arm.
+    const auditPath = join(ctx.dir, 'audit.log');
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline && !(existsSync(auditPath) && readFileSync(auditPath, 'utf8').includes('gate.decided'))) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    const entries = readFileSync(auditPath, 'utf8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l) as { action: string; runId?: string; detail?: Record<string, unknown> });
+    const decided = entries.filter((e) => e.action === 'gate.decided');
+    expect(decided).toHaveLength(1);
+    expect(decided[0]).toMatchObject({ runId: 'r1', detail: { approve: true, action: 'edit_plan', planSteps: 1 } });
   });
 
-  it('POST /runs/:id/plan: 404 unknown, 409 not at a gate, 409 an engine refusal, 400 a bad body, 501 no plan gate', async () => {
+  it('POST /runs/:id/plan: 404 unknown, 501 off a plan_approval gate (mid-run edits need proposePlan), 400 a bad body, 409 another refusal, 501 no plan gate', async () => {
     expect((await fetch(`${ctx.baseUrl}/api/v1/runs/nope/plan`, json({ plan: { steps: [{ catalog: 'build' }] } }))).status).toBe(404);
-    expect((await fetch(`${ctx.baseUrl}/api/v1/runs/busy/plan`, json({ plan: { steps: [{ catalog: 'build' }] } }))).status).toBe(409);
+    const midRun = await fetch(`${ctx.baseUrl}/api/v1/runs/busy/plan`, json({ plan: { steps: [{ catalog: 'build' }] } }));
+    expect(midRun.status).toBe(501);
+    expect(((await midRun.json()) as { error: string }).error).toMatch(/mid-run plan edits need the engine's proposePlan/);
     expect((await fetch(`${ctx.baseUrl}/api/v1/runs/r1/plan`, json({ plan: { steps: [] } }))).status).toBe(400);
     expect((await fetch(`${ctx.baseUrl}/api/v1/runs/r1/plan`, json({ plan: { steps: [{ catalog: 'build' }] }, x: 1 }))).status).toBe(400);
     expect(gated).toHaveLength(0);
     stubCore(ctx.adapter, 'confirmGate', () =>
       Promise.reject(new Error('run r1 has no plan_approval gate open — an edited plan answers only a plan approval gate')),
     );
-    const refused = await fetch(`${ctx.baseUrl}/api/v1/runs/r1/plan`, json({ plan: { steps: [{ catalog: 'build' }] } }));
+    // Paused, but at another gate: the engine says so, and that is the same missing capability.
+    const otherGate = await fetch(`${ctx.baseUrl}/api/v1/runs/r1/plan`, json({ plan: { steps: [{ catalog: 'build' }] } }));
+    expect(otherGate.status).toBe(501);
+    expect(((await otherGate.json()) as { error: string }).error).toMatch(/proposePlan/);
+    stubCore(ctx.adapter, 'confirmGate', () => Promise.reject(new Error('plan_refused: unknown catalog entry `nope`')));
+    const refused = await fetch(`${ctx.baseUrl}/api/v1/runs/r1/plan`, json({ plan: { steps: [{ catalog: 'nope' }] } }));
     expect(refused.status).toBe(409);
-    expect(((await refused.json()) as { error: string }).error).toMatch(/plan_approval/);
+    expect(((await refused.json()) as { error: string }).error).toMatch(/nope/);
     ctx.adapter.supportsPlanLaunch = () => false;
     expect((await fetch(`${ctx.baseUrl}/api/v1/runs/r1/plan`, json({ plan: { steps: [{ catalog: 'build' }] } }))).status).toBe(501);
   });
