@@ -255,9 +255,16 @@ describe.skipIf(!ENGINE_HAS_PLANS)('run identity through the real engine', () =>
     const res = await fetch(`${baseUrl}/api/v1/runs/${v.session.id}/acceptance`);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { requirement: { declared: boolean; phases: string[] } };
-    const declared = adapter.getWorkflow('feature')!.phases.filter((p) => p.verified_evidence === true).map((p) => p.id);
-    expect(declared.length).toBeGreaterThan(0);
-    expect(body.requirement).toEqual({ declared: true, phases: declared });
+    // The requirement is the run's own `test` steps (by catalog), not the def under its name; an
+    // engine whose catalog predates `verified_evidence` declares it and fails closed instead.
+    expect(body.requirement.declared).toBe(true);
+    if ((await adapter.verifiedEvidenceCatalog()) !== null) {
+      const tests = v.units.filter((u) => u.catalog === 'test').map((u) => u.id.slice(v.session.id.length + 1));
+      expect(tests.length).toBeGreaterThan(0);
+      expect(body.requirement.phases).toEqual(tests);
+    } else {
+      expect(body.requirement.phases).toEqual([]);
+    }
     expect(v.session.run_identity).toEqual({ kind: 'preset', name: 'feature', user_plan: false, system: false });
     expect(runIdentityOf(v).catalog).toContain('build');
     expect(v.session.workflow_id).toBe('feature');
