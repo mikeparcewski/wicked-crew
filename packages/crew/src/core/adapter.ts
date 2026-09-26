@@ -50,7 +50,13 @@ import { engineCampaignDef, engineRosterJson } from './engine-roster.js';
 import { QE_AUTHOR_TESTS_WORKFLOW_DEF } from '../qe/author-workflow.js';
 import { CAMPAIGN_WORKFLOW_PREFIX } from '../campaigns/plan.js';
 import { composeDeliverableFloor } from './deliverable-floor.js';
-import { isSyntheticWorkflowId, resolveRunIdentity, wireIdentity, withSystemFlag } from './run-identity.js';
+import {
+  isSyntheticWorkflowId,
+  resolveRunIdentity,
+  verifiedEvidenceCatalog,
+  wireIdentity,
+  withSystemFlag,
+} from './run-identity.js';
 
 /** A run in one of these statuses never records another launch frame. */
 const TERMINAL_RUN_STATUSES: ReadonlySet<string> = new Set(['completed', 'cancelled', 'failed']);
@@ -2204,6 +2210,27 @@ export class CoreAdapter {
     const fn = this.requireTeam(this.core.replayTeamOutbox, 'Replaying the team outbox', 'replayTeamOutbox');
     return JSON.parse(await fn.call(this.core)) as TeamOutboxReplayReport;
   }
+
+  /**
+   * The catalog ids whose entry declares `verified_evidence` (seam X2: a plan run's acceptance is
+   * the steps it contains that re-verify evidence). `null` when the engine has no catalog binding
+   * or its catalog does not carry the flag — callers fail closed on it. The catalog is compiled
+   * into the engine, so a known answer is read once.
+   */
+  async verifiedEvidenceCatalog(): Promise<ReadonlySet<string> | null> {
+    if (this._verifiedEvidenceCatalog !== undefined) return this._verifiedEvidenceCatalog;
+    let entries: CatalogEntry[];
+    try {
+      entries = await this.catalog();
+    } catch {
+      return null;
+    }
+    const set = verifiedEvidenceCatalog(entries);
+    if (set !== null) this._verifiedEvidenceCatalog = set;
+    return set;
+  }
+
+  private _verifiedEvidenceCatalog: ReadonlySet<string> | undefined;
 
   /** The engine's phase catalog. */
   async catalog(): Promise<CatalogEntry[]> {

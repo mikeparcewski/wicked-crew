@@ -22,8 +22,8 @@ import { resolveCursorUnit } from '../core/cursor.js';
 import { detectRefusal, type GateCache, type GateCacheEntry } from './gate-cache.js';
 import type { ElicitationCache } from './elicitation-cache.js';
 import { QeGateCache } from '../qe/gate-events.js';
-import { buildAcceptanceView } from '../qe/acceptance.js';
-import { runIdentityOf, runWorkflowDef, wireIdentity } from '../core/run-identity.js';
+import { acceptanceRequirementOf, buildAcceptanceView } from '../qe/acceptance.js';
+import { runIdentityOf, wireIdentity } from '../core/run-identity.js';
 import { buildEvidenceBundle, coreUnitId, evidenceFilename } from './evidence.js';
 import { outputUnavailableReason, resolveUnit, unitKeysFor } from './unit-output.js';
 import type {
@@ -2963,10 +2963,12 @@ export function registerRoutes(
     const run = views.find((v) => v.session.id === id);
     if (!run) return reply.code(404).send({ error: 'Run not found' });
 
-    // The def registered under the run's recorded name — its preset or workflow (seam X2), never
-    // a phase-sequence guess. A user plan or a free-text run has no def, which reads as "declares
-    // no requirement".
-    const workflow = runWorkflowDef(run, adapter.listWorkflows());
+    // What the run must prove, from what it CONTAINS (seam X2): a plan or preset run's steps whose
+    // catalog entry re-verifies evidence, a registered workflow's def, nothing for free text — and
+    // an unknown run (or one the daemon cannot read) is declared and denied with the reason.
+    const verifiedCatalog =
+      typeof adapter.verifiedEvidenceCatalog === 'function' ? await adapter.verifiedEvidenceCatalog() : null;
+    const requirement = acceptanceRequirementOf(run, adapter.listWorkflows(), verifiedCatalog);
 
     let repo = null;
     if (run.session.repo_ref !== null) {
@@ -2977,7 +2979,7 @@ export function registerRoutes(
     return buildAcceptanceView({
       runId: id,
       repo,
-      workflow,
+      requirement,
       gateEvents: qeGateEvents,
       ...(qeRunId !== undefined && qeRunId !== '' ? { qeRunId } : {}),
       // AW-14 (arch-R13a + R16): the conformance section reads the same wires the standalone

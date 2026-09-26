@@ -267,7 +267,7 @@ describe('buildAcceptanceView — the conformance section rides the acceptance b
     const view = await buildAcceptanceView({
       runId: 'run-1',
       repo: null,
-      workflow: null,
+      requirement: { declared: false, phases: [] },
       gateEvents: new QeGateCache(),
       claims: async () => [
         claim({
@@ -294,7 +294,7 @@ describe('buildAcceptanceView — the conformance section rides the acceptance b
     const view = await buildAcceptanceView({
       runId: 'run-1',
       repo: null,
-      workflow: null,
+      requirement: { declared: false, phases: [] },
       gateEvents: new QeGateCache(),
       claims: async () => {
         throw new Error('claims wire down');
@@ -313,7 +313,7 @@ describe('buildAcceptanceView — the conformance section rides the acceptance b
     const view = await buildAcceptanceView({
       runId: 'run-1',
       repo: null,
-      workflow: null,
+      requirement: { declared: false, phases: [] },
       gateEvents: new QeGateCache(),
     });
     expect(view.conformance.claimsAvailable).toBe(false);

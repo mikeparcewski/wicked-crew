@@ -229,7 +229,15 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
       'description', 'evidence_floor', 'executes_code', 'executor', 'gate', 'gate_type', 'id', 'kind', 'pinned',
       'role', 'skill_ref', 'validator_pin',
     ];
-    for (const e of entries) expect(Object.keys(e).sort(), e.id).toEqual(keys);
+    // `verified_evidence` (wicked-core catalog-verified-evidence; api-types 0.46.0) is additive: an
+    // engine that carries it carries it on every entry, and it names exactly the entries whose step
+    // is an acceptance requirement (crew#683 reads it for a plan run's acceptance).
+    const flagged = entries.some((e) => 'verified_evidence' in e);
+    const want = flagged ? [...keys, 'verified_evidence'].sort() : keys;
+    for (const e of entries) expect(Object.keys(e).sort(), e.id).toEqual(want);
+    if (flagged) {
+      expect(entries.filter((e) => e.verified_evidence === true).map((e) => e.id)).toEqual(['test', 'domain_coverage']);
+    }
     expect(entries.map((e) => e.id)).toEqual(expect.arrayContaining(['understand', 'build', 'review', 'deliver']));
     const deliver = entries.find((e) => e.id === 'deliver')!;
     expect(deliver.executor).toBe('tool');

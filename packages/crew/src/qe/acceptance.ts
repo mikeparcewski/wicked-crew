@@ -50,8 +50,10 @@ import type {
   GovernanceClaim,
   RecordedEvent,
   RepoEntry,
+  SessionView,
   WorkflowDef,
 } from '../core/types.js';
+import { runIdentityOf, runWorkflowDef } from '../core/run-identity.js';
 import { basename } from 'node:path';
 import type {
   QeAcceptanceState,
@@ -88,6 +90,83 @@ export function acceptancePhaseIds(workflow: WorkflowDef | null): string[] {
   return workflow.phases.filter((p) => p.verified_evidence === true).map((p) => p.id);
 }
 
+/**
+ * A run's acceptance requirement, read from what the run CONTAINS (seam X2, round 2).
+ *
+ *   - A preset or user-plan run: its units whose catalog entry declares `verified_evidence`
+ *     (`test`, `domain_coverage` today — read from the engine's `Core.catalog()`, never a list
+ *     here). No registered def is consulted, so a preset whose def is deleted, and a user plan
+ *     (which has none), declare exactly what they will run.
+ *   - A non-team run of a registered workflow: that def's `verified_evidence` phases.
+ *   - A free-text run: nothing.
+ *   - Anything the daemon cannot read — an UNKNOWN run, a plan run whose steps carry no catalog
+ *     ids yet, an engine whose catalog does not say which entries carry verified evidence, a
+ *     workflow run whose def is no longer registered — is DECLARED and fails closed: `failClosed`
+ *     names why, and the gate denies with that reason whatever the ledger holds.
+ */
+export interface AcceptanceRequirement {
+  declared: boolean;
+  phases: string[];
+  /** Set when the requirement could not be read: the gate denies with this reason. */
+  failClosed?: string;
+}
+
+/** The unit's phase id — the `<run>:<phase>` suffix. */
+function unitPhaseId(unitId: string): string {
+  const at = unitId.indexOf(':');
+  return at >= 0 ? unitId.slice(at + 1) : unitId;
+}
+
+/**
+ * Resolve {@link AcceptanceRequirement} for a run. `verifiedCatalog` is the set of catalog ids whose
+ * entry declares `verified_evidence` (`null`: the engine's catalog does not say — fail closed for a
+ * plan run). Pure.
+ */
+export function acceptanceRequirementOf(
+  view: SessionView,
+  workflows: WorkflowDef[],
+  verifiedCatalog: ReadonlySet<string> | null,
+): AcceptanceRequirement {
+  const identity = runIdentityOf(view);
+  const closed = (why: string): AcceptanceRequirement => ({
+    declared: true,
+    phases: [],
+    failClosed: `${why} (unknown ⇒ deny)`,
+  });
+  switch (identity.kind) {
+    case 'unknown':
+      return closed(
+        "the run's identity is unknown — the daemon has no record of what its launch named, so its acceptance requirement cannot be read",
+      );
+    case 'free_text':
+      return { declared: false, phases: [] };
+    case 'workflow': {
+      const def = runWorkflowDef(view, workflows);
+      if (def === null) {
+        return closed(`the run's workflow \`${identity.name ?? '?'}\` is not registered, so its acceptance requirement cannot be read`);
+      }
+      const phases = acceptancePhaseIds(def);
+      return { declared: phases.length > 0, phases };
+    }
+    case 'preset':
+    case 'user_plan': {
+      const units = [...(view.units ?? [])].sort((a, b) => a.ord - b.ord);
+      if (units.length === 0) return closed("the run's plan has no planned steps yet");
+      if (units.some((u) => typeof u.catalog !== 'string' || u.catalog === '')) {
+        return closed("the run's steps do not all carry a catalog id, so which of them re-verify evidence cannot be read");
+      }
+      if (verifiedCatalog === null) {
+        return closed(
+          "the engine's phase catalog does not say which entries declare verified evidence (an engine before `CatalogEntry.verified_evidence`)",
+        );
+      }
+      const phases = units.filter((u) => verifiedCatalog.has(u.catalog as string)).map((u) => unitPhaseId(u.id));
+      return { declared: phases.length > 0, phases };
+    }
+  }
+}
+
+
 /** The gate's resolution of one run's acceptance requirement. */
 export interface AcceptanceGateResolution {
   /** Whether the run's workflow declares an acceptance requirement at all. */
@@ -118,11 +197,17 @@ function asVerdict(value: string): Verdict | null {
 export function resolveAcceptanceGate(
   required: boolean,
   state: QeAcceptanceState | null,
+  failClosed?: string,
 ): AcceptanceGateResolution {
   const verdictValue = state?.verdict?.verdict ?? null;
   const verdict = verdictValue !== null ? asVerdict(verdictValue) : null;
   const runStatus = verdict !== null ? (VERDICT_TO_STATUS[verdict] ?? 'inconclusive') : null;
-  const base = { required, verdict, runStatus };
+  const base = { required: required || failClosed !== undefined, verdict, runStatus };
+
+  if (failClosed !== undefined) {
+    // The requirement itself could not be read: deny, naming why — never a vacuous pass.
+    return { ...base, satisfied: false, reason: failClosed };
+  }
 
   if (!required) {
     // Vacuous, and labeled as such: nothing was required, so nothing is held.
@@ -390,7 +475,8 @@ export function runWindowFromEvents(
 export async function buildAcceptanceView(opts: {
   runId: string;
   repo: RepoEntry | null;
-  workflow: WorkflowDef | null;
+  /** What the run must prove ({@link acceptanceRequirementOf}). */
+  requirement: AcceptanceRequirement;
   gateEvents: QeGateCache;
   qeRunId?: string;
   /**
@@ -406,8 +492,8 @@ export async function buildAcceptanceView(opts: {
    */
   events?: (runId: string) => Promise<RecordedEvent[] | null>;
 }): Promise<AcceptanceView> {
-  const phases = acceptancePhaseIds(opts.workflow);
-  const required = phases.length > 0;
+  const { phases, failClosed } = opts.requirement;
+  const required = opts.requirement.declared;
 
   // The run's durable event log, read FIRST: it is both the conformance section's enforcement
   // record and the ledger read's linkage — a verdict is this run's only if its QE run falls inside
@@ -429,7 +515,7 @@ export async function buildAcceptanceView(opts: {
       : { run: runWindowFromEvents(eventRows, opts.runId, eventsError) };
 
   const state = opts.repo !== null ? await readAcceptanceState(opts.repo.root_path, subject) : null;
-  const gate = resolveAcceptanceGate(required, state);
+  const gate = resolveAcceptanceGate(required, state, failClosed);
 
   // The conformance half. Loader failures are NAMED, not flattened into an empty list — the
   // section's own resolution turns "unreadable" into "not claimed clean" (deny-dominates).

@@ -177,3 +177,13 @@ export function runWorkflowDef(view: SessionView, workflows: WorkflowDef[]): Wor
   if (name === null) return null;
   return workflows.find((w) => w.id === name) ?? null;
 }
+
+/**
+ * The catalog ids whose entry declares `verified_evidence`, from `Core.catalog()`'s entries —
+ * `null` when the catalog does not carry the flag (an older engine), so no caller mistakes "not
+ * said" for "none".
+ */
+export function verifiedEvidenceCatalog(entries: ReadonlyArray<{ id: string; verified_evidence?: boolean }>): ReadonlySet<string> | null {
+  if (entries.length === 0 || entries.some((e) => typeof e.verified_evidence !== 'boolean')) return null;
+  return new Set(entries.filter((e) => e.verified_evidence === true).map((e) => e.id));
+}

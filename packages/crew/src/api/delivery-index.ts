@@ -25,7 +25,7 @@ import type { AuditLog } from './audit.js';
 import type { AgentSession, SessionView, WorkUnit, WorkflowDef } from '../core/types.js';
 import { execCapped } from '../core/exec.js';
 import { DELIVER_LIFT_CONFLICT_MARKER, DELIVER_PHASE_ID } from '../core/deliver.js';
-import { runWorkflowDef } from '../core/run-identity.js';
+import { runIdentityOf, runWorkflowDef } from '../core/run-identity.js';
 
 /** What `AgentSession.delivery` + `deliverUrl` spell on the wire (api-types 0.18.0, crew#393). */
 export interface DeliveryState {
@@ -66,11 +66,21 @@ export function phaseIdOf(unitId: string): string {
  * completed runs then read `delivery: 'none'` instead of the stranded/vacuous a live worktree used
  * to earn them (the board's "nine runs need you" after onboarding). A code-work run launched with
  * `deliver: 'none'` stays a candidate: its work is on `wicked/<id>`, liftable post hoc.
+ *
+ * A PRESET or USER-PLAN run (seam X2) is judged by what it CONTAINS, never by a def looked up by
+ * name: it could deliver when one of its planned units does code work (`executes_code`, not the
+ * evaluator's — the same rule as {@link isCodeWorkDef}, over the units the engine planned). With
+ * no planned units yet it stays a candidate. `def` is not read for such a run.
  */
 export function runCanDeliver(view: SessionView, def: WorkflowDef | null): boolean {
+  const units = view.units ?? [];
   // A planned `deliver` step: by phase id, or by its catalog id on a preset/user-plan run.
-  if ((view.units ?? []).some((u) => phaseIdOf(u.id) === DELIVER_PHASE_ID || u.catalog === DELIVER_PHASE_ID)) {
+  if (units.some((u) => phaseIdOf(u.id) === DELIVER_PHASE_ID || u.catalog === DELIVER_PHASE_ID)) {
     return true;
+  }
+  const kind = view.session !== undefined ? runIdentityOf(view).kind : 'unknown';
+  if (kind === 'preset' || kind === 'user_plan') {
+    return units.length === 0 || units.some((u) => u.executes_code === true && u.role !== 'evaluator');
   }
   if (def === null) return true;
   return isCodeWorkDef(def);

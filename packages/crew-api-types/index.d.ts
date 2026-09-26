@@ -6565,6 +6565,12 @@ export interface CatalogEntry {
   pinned: boolean;
   /** That pin is the evidence floor. */
   evidence_floor: boolean;
+  /**
+   * The entry declares re-verified evidence: a step of it is an acceptance requirement of the run
+   * that contains it (`test`, `domain_coverage`). ABSENT from an engine before the flag (api-types
+   * 0.46.0) — the daemon then fails a plan run's acceptance closed rather than guess.
+   */
+  verified_evidence?: boolean;
   skill_ref: string | null;
   /** The entry's one-line description; `null` when it has none. */
   description: string | null;
