@@ -34,8 +34,8 @@ const json = (body: unknown): RequestInit => ({
   body: JSON.stringify(body),
 });
 
-async function waitFor<T>(what: string, probeFn: () => Promise<T | undefined> | T | undefined, ms = 60_000): Promise<T> {
-  const deadline = Date.now() + ms;
+async function waitFor<T>(what: string, probeFn: () => Promise<T | undefined> | T | undefined): Promise<T> {
+  const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
     const got = await probeFn();
     if (got !== undefined) return got;
@@ -54,6 +54,8 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
   const savedBus = process.env['WICKED_BUS_DB'];
   let dir: string;
   let busPath: string;
+  /** Crew's bus connections in this file: held, never closed (see beforeAll). */
+  const held: unknown[] = [];
   let adapter: CoreAdapter;
   let app: Awaited<ReturnType<typeof createServer>>;
   let baseUrl: string;
@@ -73,164 +75,33 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
       )
       .all(run) as BusRow[];
 
-  /** TEMP DIAG: the same question asked three ways — the engine's persisted view, crew's
-   *  in-process handle, and a SEPARATE process reading the file — so a hang says who is blind. */
-  async function hangReport(tag: string, runId: string): Promise<string> {
-    const { readFileSync, existsSync, readdirSync, statSync } = await import('node:fs');
-    const { spawnSync } = await import('node:child_process');
-    const safe = (f: () => unknown) => { try { return f(); } catch (x) { return String(x); } };
-    const race = <T,>(p: Promise<T>, ms: number) =>
-      Promise.race([p, new Promise<'TIMEOUT'>((r) => setTimeout(() => r('TIMEOUT'), ms))]);
-    const child = spawnSync(process.execPath, ['-e', `
-      const D = require(require.resolve('better-sqlite3', { paths: [require.resolve('wicked-bus')] }));
-      const db = new D(process.argv[1], { readonly: true, fileMustExist: true });
-      const rows = db.prepare("SELECT event_id, event_type FROM events WHERE event_type LIKE 'wicked.team.%' AND json_extract(payload,'$.run_id') = ? ORDER BY event_id").all(process.argv[2]);
-      const max = db.prepare('SELECT MAX(event_id) AS m FROM events').get();
-      process.stdout.write(JSON.stringify({ max, rows: rows.map((r) => r.event_id + ':' + r.event_type) }));
-    `, busPath, runId], { encoding: 'utf8', timeout: 10000, cwd: process.cwd() });
-    return 'T8HANG ' + tag + ' ' + JSON.stringify({
-      runId,
-      team: await race(adapter.runTeam(runId).catch((x) => String(x)), 3000),
-      view: await race(viewOf(runId).then((v) => (v ? [v.session.status, v.units.map((u) => u.status)] : 'none')), 3000),
-      crewRows: safe(() => busRows(runId).map((r) => `${r.event_id}:${r.event_type}`)),
-      crewMax: safe(() => crewBusHandle(busPath, { create: false }).prepare('SELECT MAX(event_id) AS m FROM events').all()),
-      childProcess: child.stdout || child.stderr || String(child.error),
-      frames: teamFrames(runId).map((f) => `${f.event.event_id}:${f.event.event_type}`),
-      files: safe(() => readdirSync(dir).filter((f) => f.startsWith('bus') || f.startsWith('team')).map((f) => `${f}:${statSync(join(dir, f)).size}`)),
-      outbox: safe(() => (existsSync(join(dir, 'team-outbox.ndjson')) ? readFileSync(join(dir, 'team-outbox.ndjson'), 'utf8').slice(0, 1500) : 'none')),
-    });
-  }
-
-  /** TEMP DIAG: a bounded wait that fails with the hang report instead of the test timeout. */
-  async function waitOrReport<T>(tag: string, runId: string, probe: () => T | undefined): Promise<T> {
-    const deadline = Date.now() + 15_000;
-    while (Date.now() < deadline) {
-      const got = probe();
-      if (got !== undefined) return got;
-      await new Promise((r) => setTimeout(r, 50));
-    }
-    throw new Error(await hangReport(tag, runId));
-  }
-
   async function viewOf(runId: string): Promise<SessionView | undefined> {
     return (await adapter.sessionsDetail()).find((v) => v.session.id === runId);
   }
 
   async function launchHeld(sessionId: string, extra: Record<string, unknown> = {}): Promise<void> {
-    // TEMP DIAG: a watchdog that dumps what it can WITHOUT the actor while the launch hangs.
-    let step = 'fetch POST /runs';
-    const t0 = Date.now();
-    // A synchronous tick: if it stops, the JS thread is blocked.
-    const tick = setInterval(() => process.stderr.write(`T8TICK ${sessionId} ${step} ${Date.now() - t0}\n`), 1000);
-    // An off-thread dumper: a worker thread reads the bus file and the state dir every 3 s, so a
-    // blocked main thread still leaves a record.
-    const { Worker } = await import('node:worker_threads');
-    const worker = new Worker(
-      `const { parentPort, workerData } = require('node:worker_threads');
-       const fs = require('node:fs'); const path = require('node:path');
-       const t0 = Date.now();
-       setInterval(() => {
-         let outbox = 'none';
-         try { outbox = fs.readFileSync(path.join(workerData.dir, 'team-outbox.ndjson'), 'utf8').slice(0, 1500); } catch {}
-         let ls = ''; try { ls = fs.readdirSync(workerData.dir).map((f) => f + ':' + fs.statSync(path.join(workerData.dir, f)).size).join(','); } catch (e) { ls = String(e); }
-         process.stderr.write('T8WORKER ' + (Date.now() - t0) + ' ' + ls + ' OUTBOX ' + JSON.stringify(outbox) + '\\n');
-       }, 3000);`,
-      { eval: true, workerData: { dir } },
-    );
-    worker.unref();
-    const dog = setInterval(() => {
-      void (async () => {
-        const { readdirSync, readFileSync, existsSync } = await import('node:fs');
-        const safe = (f: () => unknown) => { try { return f(); } catch (x) { return String(x); } };
-        const race = <T,>(p: Promise<T>) => Promise.race([p, new Promise((r) => setTimeout(() => r('TIMEOUT(2s)'), 2000))]);
-        console.error('T8WATCH', JSON.stringify({
-          sessionId, step, elapsed: Date.now() - t0,
-          rows: safe(() => busRows(sessionId).map((r) => r.event_type)),
-          allTeamRows: safe(() => crewBusHandle(busPath, { create: false }).prepare("SELECT count(*) AS n FROM events").all()),
-          dir: safe(() => readdirSync(dir)),
-          outbox: safe(() => (existsSync(join(dir, 'team-outbox.ndjson')) ? readFileSync(join(dir, 'team-outbox.ndjson'), 'utf8').slice(0, 2000) : 'none')),
-          bridge: safe(() => (adapter as unknown as { core: { busBridgeState(): string } }).core.busBridgeState()),
-          view: await race((async () => { const v = await viewOf(sessionId); return v ? [v.session.status, v.units.map((u) => u.status)] : 'no view'; })()),
-          team: await race(adapter.runTeam(sessionId).catch((x) => String(x))),
-        }));
-      })();
-    }, 7000);
-    try {
-      await launchHeldInner(sessionId, extra, (s) => { step = s; });
-    } finally {
-      clearInterval(dog);
-      clearInterval(tick);
-      await worker.terminate();
-    }
-  }
-
-  async function launchHeldInner(sessionId: string, extra: Record<string, unknown>, mark: (s: string) => void): Promise<void> {
     const res = await fetch(
       `${baseUrl}/api/v1/runs`,
       json({ problem: 'add SSO login', sessionId, clisJson: SEATS, plan: { steps: [{ catalog: 'build' }] }, ...extra }),
     );
     expect(res.status, await res.clone().text()).toBe(201);
-    mark('waiting for awaiting_human');
-    process.stderr.write(`T8STEP POST /runs answered ${res.status}\n`);
-    // TEMP DIAG: every probe is bounded, and what each one saw is kept for the failure message.
-    const seen: string[] = [];
-    const tStart = Date.now();
-    const race = <T,>(p: Promise<T>, ms: number) =>
-      Promise.race([p, new Promise<'TIMEOUT'>((r) => setTimeout(() => r('TIMEOUT'), ms))]);
-    let reached = false;
-    while (Date.now() - tStart < 20_000) {
-      const t = Date.now();
-      const v = await race(viewOf(sessionId), 3000);
-      const status = v === 'TIMEOUT' ? 'sessionsDetail TIMEOUT' : (v?.session.status ?? 'no view');
-      seen.push(`${t - tStart}ms:${status}(${Date.now() - t}ms)`);
-      if (status === 'awaiting_human') { reached = true; break; }
-      await new Promise((r) => setTimeout(r, 250));
-    }
-    if (!reached) {
-      const { readFileSync, existsSync, readdirSync } = await import('node:fs');
-      const safe = (f: () => unknown) => { try { return f(); } catch (x) { return String(x); } };
-      const team = await race(adapter.runTeam(sessionId).catch((x) => String(x)), 3000);
-      throw new Error('T8HANG ' + JSON.stringify({
-        sessionId, seen: seen.slice(-40), team,
-        rows: safe(() => busRows(sessionId).map((r) => r.event_type)),
-        dir: safe(() => readdirSync(dir)),
-        outbox: safe(() => (existsSync(join(dir, 'team-outbox.ndjson')) ? readFileSync(join(dir, 'team-outbox.ndjson'), 'utf8').slice(0, 1500) : 'none')),
-        bridge: safe(() => (adapter as unknown as { core: { busBridgeState(): string } }).core.busBridgeState()),
-      }));
-    }
-    try {
-      await waitFor('the plan_approval pause', async () =>
-        (await viewOf(sessionId))?.session.status === 'awaiting_human' ? true : undefined,
-        20_000,
-      );
-    } catch (e) {
-      // TEMP DIAG (crew main red after #675): what the engine is doing when the pause never comes.
-      const v = await viewOf(sessionId);
-      const safe = async (f: () => unknown) => { try { return await f(); } catch (x) { return String(x); } };
-      const { readdirSync, readFileSync, existsSync } = await import('node:fs');
-      console.error('T8DIAG', JSON.stringify({
-        sessionId,
-        status: v?.session.status,
-        units: v?.units.map((u) => [u.id, u.status]),
-        team: await safe(() => adapter.runTeam(sessionId)),
-        bridge: await safe(() => (adapter as unknown as { core: { busBridgeState(): string } }).core.busBridgeState()),
-        open: await safe(() => adapter.interactionRequests(sessionId, 'open')),
-        rows: await safe(() => busRows(sessionId).map((r) => r.event_type)),
-        quick: await safe(() => crewBusHandle(busPath, { create: false }).prepare('PRAGMA quick_check').all()),
-        dir: await safe(() => readdirSync(dir)),
-        outbox: await safe(() => (existsSync(join(dir, 'team-outbox.ndjson')) ? readFileSync(join(dir, 'team-outbox.ndjson'), 'utf8').slice(0, 3000) : 'none')),
-        events: await safe(async () => (await adapter.runEvents(sessionId))?.map((e) => (e as { type?: string }).type)),
-      }));
-      throw e;
-    }
+    await waitFor('the plan_approval pause', async () =>
+      (await viewOf(sessionId))?.session.status === 'awaiting_human' ? true : undefined,
+    );
   }
 
   beforeAll(async () => {
     baseSkillOff();
     dir = mkdtempSync(join(tmpdir(), 'team-engine-'));
     busPath = join(dir, 'bus.db');
-    // The daemon's boot creates the bus (schema included) before the engine spawns.
-    (await import('wicked-bus')).openDb({ db_path: busPath });
+    // The daemon's boot creates the bus (schema included) before the engine spawns, and HOLDS that
+    // connection for the life of the process. Holding it is load-bearing: a dropped better-sqlite3
+    // connection is closed when V8 collects it, and a close on this file, while the engine holds
+    // it through its own SQLite copy, wins EXCLUSIVE (the engine's POSIX locks are invisible to
+    // it), checkpoints and unlinks bus.db-wal under the engine. The engine then writes every team
+    // fact into its unlinked WAL: it reports them published, nothing else ever sees them, and each
+    // wait on a relayed frame or a bus row times out (crew main red after #675, F-E2E-021's class).
+    held.push((await import('wicked-bus')).openDb({ db_path: busPath }));
     adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: true, busDbPath: busPath });
     app = await createServer(adapter, {
       auditPath: join(dir, 'audit.log'),
@@ -260,16 +131,14 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
   });
 
   it('(a)(f) every team row reaches /ws as teamEvent, tagged project_id; plan.proposed{by:"human"} precedes the first dispatch', async () => {
-    console.error('T8STEP projectCreate start', Date.now());
     const project = await adapter.projectCreate('t8-project');
-    console.error('T8STEP projectCreate done', Date.now());
     await launchHeld('t8-a', { projectId: project.id });
-    await waitOrReport('relayed plan.proposed', 't8-a', () =>
+    await waitFor('the relayed plan.proposed', () =>
       teamFrames('t8-a').some((f) => f.event.event_type === 'wicked.team.plan.proposed') ? true : undefined,
     );
     // Every row on the bus for the run arrived, in event_id order, each tagged with the project.
     const rows = busRows('t8-a');
-    await waitOrReport('every row relayed', 't8-a', () => (teamFrames('t8-a').length >= rows.length ? true : undefined));
+    await waitFor('every row relayed', () => (teamFrames('t8-a').length >= rows.length ? true : undefined));
     const relayed = teamFrames('t8-a');
     expect(relayed.map((f) => f.event.event_id)).toEqual(rows.map((r) => r.event_id));
     expect(relayed.every((f) => f.project_id === project.id)).toBe(true);
@@ -278,7 +147,7 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
 
     // Approve: the first unit dispatches only after the human plan fact.
     expect((await fetch(`${baseUrl}/api/v1/runs/t8-a/gate`, json({ approve: true }))).status).toBe(200);
-    const claimed = await waitOrReport('the first step.claimed', 't8-a', () =>
+    const claimed = await waitFor('the first step.claimed', () =>
       busRows('t8-a').find((r) => r.event_type === 'wicked.team.step.claimed'),
     );
     expect(proposed.event.event_id).toBeLessThan(claimed.event_id);
@@ -329,7 +198,7 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
         const p = JSON.parse(r.payload) as { by?: string; kind?: string };
         return r.event_type === 'wicked.team.plan.proposed' && p.by === 'human' && p.kind === 'edit';
       });
-    await waitOrReport('the edit fact', 't8-c', () => (edits().length === 1 ? true : undefined));
+    await waitFor('the edit fact', () => (edits().length === 1 ? true : undefined));
     expect(confirms).toBe(1);
     // The gate is answered and the run moved on: crew refuses the repeat itself (a mid-run edit is
     // the engine's proposePlan, not in core-ts yet) — the engine is never asked twice.
