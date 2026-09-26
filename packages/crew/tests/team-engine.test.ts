@@ -54,6 +54,8 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
   const savedBus = process.env['WICKED_BUS_DB'];
   let dir: string;
   let busPath: string;
+  /** Crew's bus connections in this file: held, never closed (see beforeAll). */
+  const held: unknown[] = [];
   let adapter: CoreAdapter;
   let app: Awaited<ReturnType<typeof createServer>>;
   let baseUrl: string;
@@ -92,8 +94,14 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
     baseSkillOff();
     dir = mkdtempSync(join(tmpdir(), 'team-engine-'));
     busPath = join(dir, 'bus.db');
-    // The daemon's boot creates the bus (schema included) before the engine spawns.
-    (await import('wicked-bus')).openDb({ db_path: busPath });
+    // The daemon's boot creates the bus (schema included) before the engine spawns, and HOLDS that
+    // connection for the life of the process. Holding it is load-bearing: a dropped better-sqlite3
+    // connection is closed when V8 collects it, and a close on this file, while the engine holds
+    // it through its own SQLite copy, wins EXCLUSIVE (the engine's POSIX locks are invisible to
+    // it), checkpoints and unlinks bus.db-wal under the engine. The engine then writes every team
+    // fact into its unlinked WAL: it reports them published, nothing else ever sees them, and each
+    // wait on a relayed frame or a bus row times out (crew main red after #675, F-E2E-021's class).
+    held.push((await import('wicked-bus')).openDb({ db_path: busPath }));
     adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: true, busDbPath: busPath });
     app = await createServer(adapter, {
       auditPath: join(dir, 'audit.log'),
