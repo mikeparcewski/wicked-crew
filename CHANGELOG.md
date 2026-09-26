@@ -47,6 +47,9 @@ mentioned only where a daemon release depends on them.
   sending no `routingMethod`) keeps the honest council line (F-4R2-007), `evaluator_distinct` /
   `tool` keep the wording they had.
 
+### Fixed
+- **The teamEvent relay no longer writes the engine's bus (crew main red after #675).** The relay armed through wicked-bus `subscribe`, which registers a subscription and acks a durable cursor on every row, through better-sqlite3, on the bus file the engine writes through its bundled SQLite. Two SQLite copies in one process do not see each other's POSIX locks, so concurrent writes corrupted the bus (`database disk image is malformed`; `quick_check`: "wrong # of entries in index"): the engine spooled its required team facts to the outbox and plan launches never reached `plan_approval` (`tests/team-engine.test.ts` timed out on main). The relay now polls through crew's one long-lived bus handle with an in-memory cursor starting at the newest row, and issues no write (`tests/team-relay.test.ts`). `tests/team-engine.test.ts` no longer deletes bus rows under a live engine (the rows-deleted case stays in `team-surface`, where crew is the only writer), and both team suites remove their scratch dirs.
+
 ## [0.7.40] — 2026-09-23
 
 ### Added
