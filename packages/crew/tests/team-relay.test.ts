@@ -14,7 +14,7 @@
 // at the newest row: `latest`, as before), and issues no write at all.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { crewBusHandle } from '../src/core/bus-handle.js';
@@ -106,9 +106,11 @@ describe('the team relay (read-only)', () => {
     expect(writeFootprint()).toEqual(before);
   });
 
-  it('a bus that is not there yet is null (logged), never a throw', async () => {
+  it('a bus that cannot be opened is null (logged), never a throw', async () => {
     const lines: string[] = [];
-    const r = await startTeamWsRelay({ dbPath: join(dir, 'absent', 'bus.db'), projectOf: () => undefined, log: (m) => lines.push(m) });
+    // A path under a regular FILE: neither the directory nor the db can ever be created.
+    writeFileSync(join(dir, 'not-a-dir'), '');
+    const r = await startTeamWsRelay({ dbPath: join(dir, 'not-a-dir', 'bus.db'), projectOf: () => undefined, log: (m) => lines.push(m) });
     expect(r).toBeNull();
     expect(lines.join('\n')).toMatch(/team-relay/);
   });

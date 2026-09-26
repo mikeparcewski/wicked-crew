@@ -40,8 +40,11 @@ describe('crew bus handle (T0 connection rule)', () => {
       const busPath = join(dir, 'bus.db');
       const before = crewBusHandleOpens();
       const old = crewBusHandle(busPath, { create: true });
-      old.prepare("CREATE TABLE t (v TEXT)").run();
-      old.prepare("INSERT INTO t VALUES ('old')").run();
+      // The handle is read-only by type (crew#679); seeding a scratch file with no engine on it
+      // reaches the driver's own `run` underneath.
+      const seed = old as unknown as { prepare(s: string): { run(): unknown } };
+      seed.prepare('CREATE TABLE t (v TEXT)').run();
+      seed.prepare("INSERT INTO t VALUES ('old')").run();
       for (const suffix of ['', '-wal', '-shm']) {
         try {
           unlinkSync(`${busPath}${suffix}`);

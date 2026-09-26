@@ -34,8 +34,6 @@ import {
   DEMO_URL_MAX,
   INTERACTIVE_DEMO_BUS_FILTER,
   INTERACTIVE_DEMO_FEEDBACK_BUS_FILTER,
-  INTERACTIVE_DEMO_BUS_PLUGIN,
-  INTERACTIVE_DEMO_FEEDBACK_BUS_PLUGIN,
   INTERACTIVE_DEMO_WORKFLOW,
   INTERACTIVE_DEMO_WORKFLOW_DEF,
   INTERACTIVE_DEMO_REAUTHOR_WORKFLOW,
@@ -320,11 +318,9 @@ describe('the demo workflow defs (workflows-as-data)', () => {
 });
 
 describe('bus identity constants', () => {
-  it('subscribes on exact-type, domain-guarded filters under dedicated plugin names', () => {
+  it('subscribes on exact-type, domain-guarded filters ', () => {
     expect(INTERACTIVE_DEMO_BUS_FILTER).toBe('wicked.interactive.doc.created@wicked-interactive');
     expect(INTERACTIVE_DEMO_FEEDBACK_BUS_FILTER).toBe('wicked.interactive.feedback.processed@wicked-interactive');
-    expect(INTERACTIVE_DEMO_BUS_PLUGIN).toBe('wicked-crew-interactive-demo');
-    expect(INTERACTIVE_DEMO_FEEDBACK_BUS_PLUGIN).toBe('wicked-crew-interactive-demo-feedback');
     expect(DEMO_REQUESTED).toBe('wicked.interactive.demo.requested');
     expect(DEMO_SPEC_FILE).toBe('demo.spec.mjs');
   });

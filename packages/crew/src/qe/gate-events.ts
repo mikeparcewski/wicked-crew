@@ -14,7 +14,7 @@
  *     payload: run_id, project_id (emitted alongside a PASS)
  *
  * Consumption is OPT-IN behind crew's existing bus seam (like `--bus-db` /
- * `WICKED_BUS_EXEC`): when armed, a durable wicked-bus subscriber folds each
+ * `WICKED_BUS_EXEC`): when armed, a read-only bus tap (core/bus-tap.ts) folds each
  * event into this in-memory cache so acceptance reads see gate results the
  * moment they happen; when the bus is absent, nothing here runs and the
  * acceptance route's lazy ledger read is the (always-correct) fallback. The
@@ -24,6 +24,7 @@
 
 import type { BusEvent } from 'wicked-bus';
 import { busSubscriberErrorReporter } from '../interactive/bus-subscriber-errors.js';
+import { tapBus, type BusTap } from '../core/bus-tap.js';
 
 /** The gate-result event types (the old gate.mjs wire contract, verbatim). */
 export const QE_GATE_EVENT_TYPES = [
@@ -36,13 +37,11 @@ export const QE_GATE_EVENT_TYPES = [
 export const QE_DEPLOY_EVENT_TYPE = 'wicked.qe.deploy.completed';
 
 /**
- * One durable-subscription filter covering both families above
+ * One tap filter covering both families above
  * (`prefix.**` = one or more remaining segments in wicked-bus filter grammar).
  */
 export const QE_BUS_FILTER = 'wicked.qe.**';
 
-/** Subscriber identity on the bus (registration + cursor resume key). */
-export const QE_BUS_PLUGIN = 'wicked-crew';
 
 /** A folded gate/deploy event, as the acceptance route serves it. */
 export interface QeGateEventEntry {
@@ -167,16 +166,14 @@ export interface QeGateSubscription {
 }
 
 /**
- * Start the durable `wicked.qe.**` subscriber and fold events into `cache`.
+ * Tap `wicked.qe.**` and fold events into `cache`.
  *
- * Graceful degradation, matching how other wicked consumers subscribe
- * (wicked-brain's memory subscriber): wicked-bus is dynamically imported, and
- * a missing package / unopenable db returns `null` instead of throwing — the
+ * Graceful degradation: an unopenable db returns `null` instead of throwing — the
  * caller opted in, so the degradation is LOGGED, but a daemon must still boot
  * on a machine whose bus is broken (acceptance falls back to lazy ledger
  * reads, which never needed the bus).
  *
- * `cursor_init: 'latest'`: the cache is a live freshness signal, not history —
+ * The tap starts at the newest row: the cache is a live freshness signal, not history —
  * replaying an old bus backlog into it would let a stale event masquerade as
  * fresh. History belongs to the ledger.
  */
@@ -186,21 +183,26 @@ export async function startQeGateSubscriber(
 ): Promise<QeGateSubscription | null> {
   const log = opts.log ?? ((m: string) => console.error(m));
 
-  let bus: typeof import('wicked-bus');
+  // A read-only tap on crew's long-lived bus handle (crew#679): this bus may be the engine's own
+  // file (`--bus-db`, or WICKED_BUS_DATA_DIR), so crew never writes it through its own SQLite.
+  let tap: BusTap;
   try {
-    bus = await import('wicked-bus');
-  } catch (err) {
-    log(
-      `[qe-gate-events] wicked-bus is not importable — gate events disabled, acceptance stays on lazy ledger reads: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    );
-    return null;
-  }
-
-  let db: unknown;
-  try {
-    db = bus.openDb(opts.dbPath !== undefined ? { db_path: opts.dbPath } : {});
+    tap = tapBus({
+      dbPath: opts.dbPath,
+      filter: QE_BUS_FILTER,
+      pollIntervalMs: opts.pollIntervalMs ?? 5000,
+      // The handler only folds into an in-memory map and never throws by construction.
+      handler: (event: BusEvent) => {
+        cache.ingest(event.event_type, event.payload);
+      },
+      onError: busSubscriberErrorReporter({
+        describe: (err, event) =>
+          `[qe-gate-events] handler error on event ${String(event?.event_id ?? '?')}: ${err.message}`,
+        log,
+        logError: opts.logError,
+        pollIntervalMs: opts.pollIntervalMs ?? 5000,
+      }),
+    });
   } catch (err) {
     log(
       `[qe-gate-events] could not open the bus db${opts.dbPath !== undefined ? ` at ${opts.dbPath}` : ''} — gate events disabled: ${
@@ -210,28 +212,7 @@ export async function startQeGateSubscriber(
     return null;
   }
 
-  const sub = bus.subscribe({
-    db,
-    plugin: QE_BUS_PLUGIN,
-    filter: QE_BUS_FILTER,
-    cursor_init: 'latest',
-    pollIntervalMs: opts.pollIntervalMs ?? 5000,
-    // The handler only folds into an in-memory map; a retry loop or DLQ entry
-    // for it would be noise. It never throws by construction.
-    maxRetries: 0,
-    handler: (event: BusEvent) => {
-      cache.ingest(event.event_type, event.payload);
-    },
-    onError: busSubscriberErrorReporter({
-      describe: (err, event) =>
-        `[qe-gate-events] handler error on event ${String(event?.event_id ?? '?')}: ${err.message}`,
-      log,
-      logError: opts.logError,
-      pollIntervalMs: opts.pollIntervalMs ?? 5000,
-    }),
-  });
-
   return {
-    stop: () => sub.stop(),
+    stop: () => tap.stop(),
   };
 }

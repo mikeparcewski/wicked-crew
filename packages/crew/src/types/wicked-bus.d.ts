@@ -1,9 +1,10 @@
 /**
  * Minimal type surface for `wicked-bus` (plain-JS package, ships no types).
  *
- * Only the slice this daemon uses is declared — the durable subscriber path
- * (`openDb` + `subscribe`) plus the `emit`/`loadConfig` pair the tests use to
- * put real events on a real bus. Shapes are transcribed from wicked-bus
+ * Only the slice crew uses is declared: the tap's read-only helpers
+ * (`matchesFilter`, `loadConfig`, `resolveDbPath`), and the `openDb`/`emit`/
+ * `subscribe` the TESTS use to put real events on a real bus. In-daemon crew
+ * never calls those (crew#679, tests/bus-no-write.test.ts). Shapes are transcribed from wicked-bus
  * `lib/{db,subscribe,emit,config}.js` (v2.3.x); loose on purpose where the
  * upstream is (`db` is an opaque handle here — better-sqlite3's type is not a
  * dependency this package needs).
@@ -73,6 +74,9 @@ declare module 'wicked-bus' {
 
   /** Managed long-running subscriber (durable cursor; at-least-once). */
   export function subscribe(opts: SubscribeOptions): BusSubscription;
+
+  /** Does an event match a subscription filter (`prefix.*`, `prefix.**`, `*@domain`, exact)? */
+  export function matchesFilter(eventType: string, domain: string, filter: string): boolean;
 
   /** The bus SQLite file a config resolves to (`config.db_path` or `<dataDir>/bus.db`). */
   export function resolveDbPath(config?: Record<string, unknown>): string;

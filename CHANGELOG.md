@@ -48,6 +48,19 @@ mentioned only where a daemon release depends on them.
   `tool` keep the wording they had.
 
 ### Fixed
+- **crew#679 — in-daemon crew never writes the engine's bus through its own SQLite.** Since T0 the
+  engine holds the daemon's bus file through its bundled SQLite; crew's seams wrote the same file
+  through better-sqlite3 (wicked-bus `subscribe` registers and acks per row, `emit` inserts, `openDb`
+  migrates), and two SQLite copies in one process do not see each other's POSIX locks, so a
+  concurrent write could corrupt the bus. Reads now go through one read-only tap on crew's
+  long-lived bus handle (`core/bus-tap.ts`, cursor in memory from the newest row); crew's writes go
+  to one bus writer, a child process that owns them (`core/bus-writer.ts`), as the engine exposes no
+  emit crew could call. Moved: the project bus, the interactive `/ws` relay, the draft/edit/chat/demo
+  answering seams, the QE gate feed and the team relay. Their per-seam `subscribe`/`emit`/`openDb`
+  paths and wicked-bus plugin identities are gone; a restart no longer resumes a stored cursor
+  (every seam asked for `latest` with no retries). `tests/bus-no-write.test.ts` fails the build if
+  crew source loads wicked-bus to write; `tests/bus-seams-engine.test.ts` runs the migrated seams
+  beside the real engine's team publishing.
 - **crew main red after #675: `tests/team-engine.test.ts` let V8 close its bus connection.** Its `beforeAll` opened the bus with wicked-bus `openDb` and dropped the handle. When V8 collected it, better-sqlite3 closed the connection; with the engine holding the same file through its own SQLite copy (whose POSIX locks the closing connection cannot see), the close won EXCLUSIVE, checkpointed and unlinked `bus.db-wal` under the engine. The engine then wrote every team fact into its unlinked WAL: it reported them published, nothing else could read them, and the waits on relayed frames and bus rows timed out (flaky: only when the collection landed after the engine opened the WAL). The suite now holds the connection for the life of the file, as the daemon does. (b) and (c) failed as knock-ons of the same invisible bus.
 - **The teamEvent relay no longer writes the engine's bus.** Found while reproducing the above, and independent of it: the relay armed through wicked-bus `subscribe`, which registers a subscription and acks a durable cursor on every row through better-sqlite3, on the file the engine writes through its bundled SQLite. Two SQLite copies in one process do not see each other's POSIX locks, so concurrent writes corrupt the file (`database disk image is malformed`, `quick_check` "wrong # of entries in index"; reproduced with the suite's connection held). The relay now polls through crew's one long-lived bus handle with an in-memory cursor starting at the newest row, and issues no write (`tests/team-relay.test.ts`). `tests/team-engine.test.ts` no longer deletes bus rows under a live engine (the rows-deleted case stays in `team-surface`), and both team suites remove their scratch dirs.
 

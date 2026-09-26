@@ -26,7 +26,6 @@ import {
   DRAFT_COMPLETED,
   STATUS_POSTED,
   INTERACTIVE_BUS_FILTER,
-  INTERACTIVE_BUS_PLUGIN,
   INTERACTIVE_PRODUCER,
   INTERACTIVE_DRAFT_WORKFLOW,
   INTERACTIVE_DRAFT_WORKFLOW_DEF,
@@ -357,10 +356,8 @@ describe('the interactive-draft workflow def (workflows-as-data)', () => {
 });
 
 describe('bus identity constants', () => {
-  it('subscribes on an exact-type, domain-guarded filter under a dedicated plugin name', () => {
+  it('subscribes on an exact-type, domain-guarded filter ', () => {
     expect(INTERACTIVE_BUS_FILTER).toBe('wicked.interactive.doc.created@wicked-interactive');
-    // NOT the qe seam's `wicked-crew` — independent cursors, independently stoppable.
-    expect(INTERACTIVE_BUS_PLUGIN).toBe('wicked-crew-interactive-draft');
     expect(INTERACTIVE_PRODUCER).toBe('wi-crew');
   });
 

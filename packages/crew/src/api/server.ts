@@ -890,7 +890,7 @@ export async function createServer(
 
   // ── A STUB ENGINE NEVER ANSWERS ANOTHER PRODUCT'S TRAFFIC (crew#309) ────────────────────────
   //
-  // The four seams below are ANSWERERS: each opens a durable wicked-bus subscription and replies
+  // The four seams below are ANSWERERS: each taps the bus (core/bus-tap.ts) and replies
   // to wicked-interactive's events by LAUNCHING A GOVERNED RUN. Under `serve --stub` the engine is
   // `Core.spawnStub` — a `StubDispatcher` (every seat votes for the first roster option, no
   // subprocess) plus a `StubStepRunner` (fixed text, no CLI) — so such a run resolves every phase
@@ -899,7 +899,8 @@ export async function createServer(
   // approved outline — moving on…", "Gate approved the draft…". Nothing ran. Nothing was written.
   // Two gate approvals were announced anyway.
   //
-  // Worse than fabricating locally: the durable cursor is keyed by PLUGIN NAME
+  // Worse than fabricating locally (until crew#679 moved the seams to in-memory taps): the durable
+  // cursor was keyed by PLUGIN NAME
   // (`wicked-crew-interactive-draft`), so on the shared bus a stub daemon and the production
   // daemon are ONE consumer group — a frame claimed by the stub is a frame the real daemon never
   // sees. That is what wicked-crew#309 recorded: bus rows 242632–242643 carry a complete draft
