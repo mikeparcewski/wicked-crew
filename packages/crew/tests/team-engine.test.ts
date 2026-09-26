@@ -133,6 +133,32 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
     expect(res.status, await res.clone().text()).toBe(201);
     mark('waiting for awaiting_human');
     process.stderr.write(`T8STEP POST /runs answered ${res.status}\n`);
+    // TEMP DIAG: every probe is bounded, and what each one saw is kept for the failure message.
+    const seen: string[] = [];
+    const tStart = Date.now();
+    const race = <T,>(p: Promise<T>, ms: number) =>
+      Promise.race([p, new Promise<'TIMEOUT'>((r) => setTimeout(() => r('TIMEOUT'), ms))]);
+    let reached = false;
+    while (Date.now() - tStart < 20_000) {
+      const t = Date.now();
+      const v = await race(viewOf(sessionId), 3000);
+      const status = v === 'TIMEOUT' ? 'sessionsDetail TIMEOUT' : (v?.session.status ?? 'no view');
+      seen.push(`${t - tStart}ms:${status}(${Date.now() - t}ms)`);
+      if (status === 'awaiting_human') { reached = true; break; }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    if (!reached) {
+      const { readFileSync, existsSync, readdirSync } = await import('node:fs');
+      const safe = (f: () => unknown) => { try { return f(); } catch (x) { return String(x); } };
+      const team = await race(adapter.runTeam(sessionId).catch((x) => String(x)), 3000);
+      throw new Error('T8HANG ' + JSON.stringify({
+        sessionId, seen: seen.slice(-40), team,
+        rows: safe(() => busRows(sessionId).map((r) => r.event_type)),
+        dir: safe(() => readdirSync(dir)),
+        outbox: safe(() => (existsSync(join(dir, 'team-outbox.ndjson')) ? readFileSync(join(dir, 'team-outbox.ndjson'), 'utf8').slice(0, 1500) : 'none')),
+        bridge: safe(() => (adapter as unknown as { core: { busBridgeState(): string } }).core.busBridgeState()),
+      }));
+    }
     try {
       await waitFor('the plan_approval pause', async () =>
         (await viewOf(sessionId))?.session.status === 'awaiting_human' ? true : undefined,
