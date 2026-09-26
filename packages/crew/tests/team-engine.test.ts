@@ -12,7 +12,14 @@ import { WebSocket } from 'ws';
 import { CoreAdapter, engineSupportsPlanLaunch } from '../src/core/adapter.js';
 import { crewBusHandle } from '../src/core/bus-handle.js';
 import { createServer } from '../src/api/server.js';
-import type { RunTeamResponse, SessionView, TeamEventFrame } from '../src/core/types.js';
+import type {
+  CatalogResponse,
+  PlanPreviewResponse,
+  PlanProposalResponse,
+  RunTeamResponse,
+  SessionView,
+  TeamEventFrame,
+} from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
 import { baseSkillOff } from './setup/base-skill-off.js';
 
@@ -20,6 +27,10 @@ const probeDir = mkdtempSync(join(tmpdir(), 'team-probe-'));
 const probe = new CoreAdapter({ dbPath: join(probeDir, 'core.db'), stub: true });
 const ENGINE_HAS_TEAM_READ =
   typeof (probe as unknown as { core: { runTeam?: unknown } }).core.runTeam === 'function' && engineSupportsPlanLaunch();
+// T8 (c)/(e): the catalog, the plan preview and the mid-run plan edit as engine bindings.
+const ENGINE_HAS_T8_BINDINGS = ['catalog', 'previewPlan', 'proposePlan'].every(
+  (m) => typeof (probe as unknown as { core: Record<string, unknown> }).core[m] === 'function',
+);
 probe.close();
 removeScratch(probeDir);
 
@@ -182,7 +193,7 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
     expect(team.transport).toBeNull();
   });
 
-  it('(c) POST /runs/:id/plan: the engine publishes plan.proposed{by:"human", kind:"edit"} once; a repeat off the gate never reaches the engine', async () => {
+  it('(c) POST /runs/:id/plan: the engine publishes plan.proposed{by:"human", kind:"edit"} once; a repeat off the gate is the engine\'s refusal', async () => {
     await launchHeld('t8-c');
     let confirms = 0;
     const real = adapter.confirmGate.bind(adapter);
@@ -200,12 +211,111 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
       });
     await waitFor('the edit fact', () => (edits().length === 1 ? true : undefined));
     expect(confirms).toBe(1);
-    // The gate is answered and the run moved on: crew refuses the repeat itself (a mid-run edit is
-    // the engine's proposePlan, not in core-ts yet) — the engine is never asked twice.
+    // The gate is answered and the run moved on: the repeat is a mid-run edit (proposePlan), and
+    // the engine refuses it (the plan already has those steps, or the run already finished).
     const again = await fetch(`${baseUrl}/api/v1/runs/t8-c/plan`, json(body));
-    expect(again.status).toBe(501);
+    expect(again.status, await again.clone().text()).toBe(409);
     expect(confirms).toBe(1);
     await new Promise((r) => setTimeout(r, 300));
     expect(edits()).toHaveLength(1);
+  });
+
+  it.skipIf(!ENGINE_HAS_T8_BINDINGS)('(e) GET /catalog: the engine catalog, every entry in its exact shape', async () => {
+    const res = await fetch(`${baseUrl}/api/v1/catalog`);
+    expect(res.status, await res.clone().text()).toBe(200);
+    const { entries } = (await res.json()) as CatalogResponse;
+    expect(entries.length).toBeGreaterThan(0);
+    const keys = [
+      'description', 'evidence_floor', 'executes_code', 'executor', 'gate', 'gate_type', 'id', 'kind', 'pinned',
+      'role', 'skill_ref', 'validator_pin',
+    ];
+    for (const e of entries) expect(Object.keys(e).sort(), e.id).toEqual(keys);
+    expect(entries.map((e) => e.id)).toEqual(expect.arrayContaining(['understand', 'build', 'review', 'deliver']));
+    const deliver = entries.find((e) => e.id === 'deliver')!;
+    expect(deliver.executor).toBe('tool');
+    const build = entries.find((e) => e.id === 'build')!;
+    expect(build).toMatchObject({ role: 'creator', executes_code: true, executor: 'agent', pinned: true, evidence_floor: true });
+    expect(build.validator_pin).toEqual(expect.any(String));
+  });
+
+  it.skipIf(!ENGINE_HAS_T8_BINDINGS)('(e) POST /plans/preview: the launch decision in the engine shape; floor steps are marked; nothing is launched', async () => {
+    const before = (await adapter.sessionsDetail()).length;
+    const res = await fetch(`${baseUrl}/api/v1/plans/preview`, json({ plan: { steps: [{ catalog: 'build' }] } }));
+    expect(res.status, await res.clone().text()).toBe(200);
+    const p = (await res.json()) as PlanPreviewResponse;
+    expect(Object.keys(p).sort()).toEqual([
+      'band', 'def', 'destructive', 'deterministic', 'floor', 'floor_override', 'graph', 'high_risk', 'pause_reason',
+      'pauses', 'reasons', 'score', 'steps',
+    ]);
+    // No declared scope: the fail-closed score, high risk, and the launch would pause for approval.
+    expect(p.graph).toBe('unavailable');
+    expect(p.high_risk).toBe(true);
+    expect(p.pauses).toBe(true);
+    expect(p.pause_reason).toBe('high_risk');
+    const added = p.steps.filter((s) => s.added_by === 'floor');
+    expect(added.length).toBeGreaterThan(0);
+    for (const s of added) expect(s.floor_reason, s.id).toEqual(expect.any(String));
+    expect(p.steps.find((s) => s.catalog === 'build')?.added_by).toBe('plan');
+    expect(p.def.phases.map((ph) => ph.id)).toEqual(p.steps.map((s) => s.id));
+    expect((await adapter.sessionsDetail()).length).toBe(before);
+  });
+
+  it.skipIf(!ENGINE_HAS_T8_BINDINGS)('(e) POST /plans/preview: deliver "pr" puts the launch deliver step in the floor; a refused draft and an unknown repo are 400s', async () => {
+    const delivered = await fetch(`${baseUrl}/api/v1/plans/preview`, json({ plan: { steps: [{ catalog: 'build' }] }, deliver: 'pr' }));
+    expect(delivered.status, await delivered.clone().text()).toBe(200);
+    const p = (await delivered.json()) as PlanPreviewResponse;
+    expect(p.floor).toContain('deliver');
+    expect(p.steps.at(-1)).toMatchObject({ catalog: 'deliver', id: 'deliver' });
+
+    const refused = await fetch(`${baseUrl}/api/v1/plans/preview`, json({ plan: { steps: [{ catalog: 'nope' }] } }));
+    expect(refused.status).toBe(400);
+    expect(((await refused.json()) as { error: string }).error).toMatch(/nope/);
+    const unknownRepo = await fetch(
+      `${baseUrl}/api/v1/plans/preview`,
+      json({ plan: { steps: [{ catalog: 'build' }] }, repoRef: 'no-such-repo' }),
+    );
+    expect(unknownRepo.status).toBe(400);
+    expect(((await unknownRepo.json()) as { error: string }).error).toMatch(/no-such-repo/);
+  });
+
+  it.skipIf(!ENGINE_HAS_T8_BINDINGS)('(c) POST /runs/:id/plan mid-run: proposePlan holds the edit and answers its band; a repeated requestId is a duplicate; refusals are 409s', async () => {
+    // Past its plan gate and running: the plan is accepted and the first step claimed.
+    await launchHeld('t8-mid');
+    expect((await fetch(`${baseUrl}/api/v1/runs/t8-mid/gate`, json({ approve: true }))).status).toBe(200);
+    await waitFor('the run past its plan gate', async () =>
+      busRows('t8-mid').some((r) => r.event_type === 'wicked.team.step.claimed') &&
+      (await viewOf('t8-mid'))?.session.status === 'executing'
+        ? true
+        : undefined,
+    );
+    const edit = { plan: { steps: [{ catalog: 'review', id: 'second-look' }] }, requestId: 'mid-1' };
+    const res = await fetch(`${baseUrl}/api/v1/runs/t8-mid/plan`, json(edit));
+    expect(res.status, await res.clone().text()).toBe(200);
+    const proposal = (await res.json()) as PlanProposalResponse;
+    expect(Object.keys(proposal).sort()).toEqual(['band', 'duplicate', 'floor_added', 'high_risk', 'proposal_id']);
+    expect(proposal.duplicate).toBe(false);
+    expect(proposal.proposal_id).toEqual(expect.any(String));
+    expect(proposal.band).toEqual(expect.any(String));
+    expect(typeof proposal.high_risk).toBe('boolean');
+    expect(Array.isArray(proposal.floor_added)).toBe(true);
+
+    const again = await fetch(`${baseUrl}/api/v1/runs/t8-mid/plan`, json(edit));
+    expect(again.status).toBe(200);
+    expect(await again.json()).toEqual({ ...proposal, duplicate: true, band: null, high_risk: null, floor_added: [] });
+
+    // An edit that carries `touch` belongs to the launch plan: the engine refuses it, 409 with its reason.
+    const touched = await fetch(
+      `${baseUrl}/api/v1/runs/t8-mid/plan`,
+      json({ plan: { steps: [{ catalog: 'test' }], touch: ['src/a.ts'] }, requestId: 'mid-2' }),
+    );
+    expect(touched.status).toBe(409);
+    expect(((await touched.json()) as { error: string }).error).toMatch(/touch/);
+
+    // A finished run's plan no longer changes.
+    expect((await fetch(`${baseUrl}/api/v1/runs/t8-mid/cancel`, { method: 'POST' })).status).toBe(200);
+    await waitFor('the cancel', async () => ((await viewOf('t8-mid'))?.session.status === 'cancelled' ? true : undefined));
+    const finished = await fetch(`${baseUrl}/api/v1/runs/t8-mid/plan`, json({ ...edit, requestId: 'mid-3' }));
+    expect(finished.status).toBe(409);
+    expect(((await finished.json()) as { error: string }).error).toMatch(/finished/);
   });
 });

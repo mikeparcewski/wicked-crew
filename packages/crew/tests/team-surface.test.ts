@@ -3,7 +3,7 @@
 // without a binding). The engine end to end is tests/team-engine.test.ts.
 //
 //   GET  /runs/:id/team          the engine's snapshot (`Core.runTeam`) + the run's bus rows (T8 (b))
-//   POST /runs/:id/plan          a plan edit at a plan_approval gate (T8 (c), T3)
+//   POST /runs/:id/plan          a plan edit: the plan_approval gate answer (T3), else `Core.proposePlan` (T8 (c))
 //   POST /runs/:id/gate          team_transport and team_dispute answers (T8 (d), P1)
 //   POST /team/outbox/replay     `Core.replayTeamOutbox` (P1)
 //   GET  /catalog                `Core.catalog` (T8)
@@ -283,27 +283,109 @@ describe('commands (T8 (c), (d), P1)', () => {
     expect(decided[0]).toMatchObject({ runId: 'r1', detail: { approve: true, action: 'edit_plan', planSteps: 1 } });
   });
 
-  it('POST /runs/:id/plan: 404 unknown, 501 off a plan_approval gate (mid-run edits need proposePlan), 400 a bad body, 409 another refusal, 501 no plan gate', async () => {
+  it('POST /runs/:id/plan: 404 unknown, 400 a bad body, 409 a refused gate edit, 501 no plan gate in the addon', async () => {
     expect((await fetch(`${ctx.baseUrl}/api/v1/runs/nope/plan`, json({ plan: { steps: [{ catalog: 'build' }] } }))).status).toBe(404);
-    const midRun = await fetch(`${ctx.baseUrl}/api/v1/runs/busy/plan`, json({ plan: { steps: [{ catalog: 'build' }] } }));
-    expect(midRun.status).toBe(501);
-    expect(((await midRun.json()) as { error: string }).error).toMatch(/mid-run plan edits need the engine's proposePlan/);
     expect((await fetch(`${ctx.baseUrl}/api/v1/runs/r1/plan`, json({ plan: { steps: [] } }))).status).toBe(400);
     expect((await fetch(`${ctx.baseUrl}/api/v1/runs/r1/plan`, json({ plan: { steps: [{ catalog: 'build' }] }, x: 1 }))).status).toBe(400);
+    expect((await fetch(`${ctx.baseUrl}/api/v1/runs/r1/plan`, json({ plan: { steps: [{ catalog: 'build' }] }, requestId: '' }))).status).toBe(400);
     expect(gated).toHaveLength(0);
-    stubCore(ctx.adapter, 'confirmGate', () =>
-      Promise.reject(new Error('run r1 has no plan_approval gate open — an edited plan answers only a plan approval gate')),
-    );
-    // Paused, but at another gate: the engine says so, and that is the same missing capability.
-    const otherGate = await fetch(`${ctx.baseUrl}/api/v1/runs/r1/plan`, json({ plan: { steps: [{ catalog: 'build' }] } }));
-    expect(otherGate.status).toBe(501);
-    expect(((await otherGate.json()) as { error: string }).error).toMatch(/proposePlan/);
     stubCore(ctx.adapter, 'confirmGate', () => Promise.reject(new Error('plan_refused: unknown catalog entry `nope`')));
     const refused = await fetch(`${ctx.baseUrl}/api/v1/runs/r1/plan`, json({ plan: { steps: [{ catalog: 'nope' }] } }));
     expect(refused.status).toBe(409);
     expect(((await refused.json()) as { error: string }).error).toMatch(/nope/);
     ctx.adapter.supportsPlanLaunch = () => false;
     expect((await fetch(`${ctx.baseUrl}/api/v1/runs/r1/plan`, json({ plan: { steps: [{ catalog: 'build' }] } }))).status).toBe(501);
+  });
+
+  describe('mid-run (T8 (c): Core.proposePlan)', () => {
+    const PROPOSAL = { proposal_id: 'p-abc', duplicate: false, band: '70-100', high_risk: true, floor_added: ['review'] };
+    let proposed: unknown[][];
+
+    beforeEach(() => {
+      proposed = [];
+      stubCore(ctx.adapter, 'proposePlan', (...args: unknown[]) => {
+        proposed.push(args);
+        return Promise.resolve(JSON.stringify(PROPOSAL));
+      });
+    });
+
+    it('a running run: the edit goes to proposePlan with the body requestId, and the engine proposal is the answer (audited)', async () => {
+      const plan = { steps: [{ catalog: 'review', id: 'second-look' }] };
+      const res = await fetch(`${ctx.baseUrl}/api/v1/runs/busy/plan`, json({ plan, requestId: 'req-7' }));
+      expect(res.status, await res.clone().text()).toBe(200);
+      expect(await res.json()).toEqual(PROPOSAL);
+      expect(gated).toHaveLength(0);
+      expect(proposed).toHaveLength(1);
+      const [runId, planJson, requestId] = proposed[0]!;
+      expect(runId).toBe('busy');
+      expect(JSON.parse(planJson as string)).toEqual(plan);
+      expect(requestId).toBe('req-7');
+      const auditPath = join(ctx.dir, 'audit.log');
+      const deadline = Date.now() + 5000;
+      while (Date.now() < deadline && !(existsSync(auditPath) && readFileSync(auditPath, 'utf8').includes('plan.edit.proposed'))) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      const entry = readFileSync(auditPath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l) as { action: string; runId?: string; detail?: Record<string, unknown> })
+        .find((e) => e.action === 'plan.edit.proposed');
+      expect(entry).toMatchObject({
+        runId: 'busy',
+        detail: { requestId: 'req-7', proposalId: 'p-abc', duplicate: false, planSteps: 1, band: '70-100', highRisk: true },
+      });
+    });
+
+    it('a POST without a requestId gets one minted for it: a fresh id per POST', async () => {
+      const body = json({ plan: { steps: [{ catalog: 'review' }] } });
+      expect((await fetch(`${ctx.baseUrl}/api/v1/runs/busy/plan`, body)).status).toBe(200);
+      expect((await fetch(`${ctx.baseUrl}/api/v1/runs/busy/plan`, json({ plan: { steps: [{ catalog: 'review' }] } }))).status).toBe(200);
+      const ids = proposed.map((a) => a[2] as string);
+      expect(ids).toHaveLength(2);
+      for (const id of ids) expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+      expect(ids[0]).not.toBe(ids[1]);
+    });
+
+    it('a duplicate requestId answers the engine duplicate (200, band null)', async () => {
+      const dup = { proposal_id: 'p-abc', duplicate: true, band: null, high_risk: null, floor_added: [] };
+      stubCore(ctx.adapter, 'proposePlan', () => Promise.resolve(JSON.stringify(dup)));
+      const res = await fetch(`${ctx.baseUrl}/api/v1/runs/busy/plan`, json({ plan: { steps: [{ catalog: 'review' }] }, requestId: 'req-7' }));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual(dup);
+    });
+
+    it('paused at another gate (no plan_approval open): the edit is proposed mid-run, not refused', async () => {
+      stubCore(ctx.adapter, 'confirmGate', (...args: unknown[]) => {
+        gated.push(args);
+        return Promise.reject(new Error('run r1 has no plan_approval gate open — an edited plan answers only a plan approval gate'));
+      });
+      const res = await fetch(`${ctx.baseUrl}/api/v1/runs/r1/plan`, json({ plan: { steps: [{ catalog: 'review' }] }, requestId: 'req-9' }));
+      expect(res.status, await res.clone().text()).toBe(200);
+      expect(await res.json()).toEqual(PROPOSAL);
+      expect(gated).toHaveLength(1);
+      expect(proposed.map((a) => [a[0], a[2]])).toEqual([['r1', 'req-9']]);
+    });
+
+    it('the engine refusal is a 409 carrying its reason', async () => {
+      for (const reason of [
+        "run busy's deliver step has started: nothing can be added after the push",
+        'run busy: a plan is awaiting approval; edit it at the gate (the edit is the gate answer)',
+        'run busy is finished (Completed): its plan no longer changes',
+        'run busy was not launched with a plan: there is no plan to edit',
+      ]) {
+        stubCore(ctx.adapter, 'proposePlan', () => Promise.reject(new Error(reason)));
+        const res = await fetch(`${ctx.baseUrl}/api/v1/runs/busy/plan`, json({ plan: { steps: [{ catalog: 'review' }] } }));
+        expect(res.status, reason).toBe(409);
+        expect(((await res.json()) as { error: string }).error).toBe(reason);
+      }
+    });
+
+    it('501 on an addon without Core.proposePlan', async () => {
+      dropCore(ctx.adapter, 'proposePlan');
+      const res = await fetch(`${ctx.baseUrl}/api/v1/runs/busy/plan`, json({ plan: { steps: [{ catalog: 'review' }] } }));
+      expect(res.status).toBe(501);
+      expect(((await res.json()) as { error: string }).error).toMatch(/proposePlan/);
+    });
   });
 
   it('a team_transport pause: approve, approve "continue without team", reject reach confirmGate as given', async () => {
@@ -365,28 +447,64 @@ describe('GET /catalog and POST /plans/preview (T8 (e))', () => {
     expect(await res.json()).toEqual({ entries });
   });
 
-  it('POST /plans/preview hands the draft to the engine and answers its floor fill verbatim', async () => {
+  const FILL = {
+    score: 100,
+    deterministic: 100,
+    reasons: ['no declared scope'],
+    destructive: false,
+    band: '70-100',
+    high_risk: true,
+    floor: ['test_plan', 'build'],
+    floor_override: null,
+    steps: [
+      { catalog: 'test_plan', id: 'test_plan', added_by: 'floor', floor_reason: 'band 70-100 requires test_plan' },
+      { catalog: 'build', id: 'build', added_by: 'plan' },
+    ],
+    def: { id: 'preview:plan-1', phases: [] },
+    pauses: true,
+    pause_reason: 'high_risk',
+    graph: 'unavailable',
+  };
+
+  it('POST /plans/preview hands the draft (with the launch repo) to the engine and answers its preview verbatim', async () => {
     const seen: unknown[][] = [];
-    const fill = {
-      steps: [
-        { catalog: 'test_plan', id: 'test_plan', added_by: 'floor', floor_reason: 'band 70-100 requires test_plan' },
-        { catalog: 'build', id: 'build', added_by: 'plan' },
-      ],
-      added_by_floor: ['test_plan'],
-      band: '70-100',
-      high_risk: true,
-    };
     stubCore(ctx.adapter, 'previewPlan', (...args: unknown[]) => {
       seen.push(args);
-      return Promise.resolve(JSON.stringify(fill));
+      return Promise.resolve(JSON.stringify(FILL));
     });
     const plan = { steps: [{ catalog: 'build' }] };
-    const res = await fetch(`${ctx.baseUrl}/api/v1/plans/preview`, json({ plan, projectId: 'p1', humanConfirm: 'before:1' }));
+    const res = await fetch(
+      `${ctx.baseUrl}/api/v1/plans/preview`,
+      json({ plan, projectId: 'p1', humanConfirm: 'before:1', repoRef: 'repo-x' }),
+    );
     expect(res.status, await res.clone().text()).toBe(200);
-    expect(await res.json()).toEqual(fill);
+    expect(await res.json()).toEqual(FILL);
     expect(seen).toHaveLength(1);
     expect(JSON.parse(seen[0]![0] as string)).toEqual(plan);
-    expect(seen[0]!.slice(1)).toEqual(['p1', 'before:1']);
+    // (planJson, projectId, humanConfirm, repoRef, deliverStepJson): an undelivered launch has no deliver step.
+    expect(seen[0]!.slice(1)).toEqual(['p1', 'before:1', 'repo-x', null]);
+  });
+
+  it('POST /plans/preview with deliver: "pr" hands the engine the launch deliver step; "none" and omitted hand none', async () => {
+    const seen: unknown[][] = [];
+    stubCore(ctx.adapter, 'previewPlan', (...args: unknown[]) => {
+      seen.push(args);
+      return Promise.resolve(JSON.stringify(FILL));
+    });
+    const plan = { steps: [{ catalog: 'build' }] };
+    expect((await fetch(`${ctx.baseUrl}/api/v1/plans/preview`, json({ plan, repoRef: 'repo-x', deliver: 'pr' }))).status).toBe(200);
+    expect((await fetch(`${ctx.baseUrl}/api/v1/plans/preview`, json({ plan, repoRef: 'repo-x', deliver: 'none' }))).status).toBe(200);
+    expect((await fetch(`${ctx.baseUrl}/api/v1/plans/preview`, json({ plan }))).status).toBe(200);
+    expect(seen).toHaveLength(3);
+    const step = JSON.parse(seen[0]![4] as string) as { catalog: string; id: string; executor: { type: string; cmd: string[] }; validator_pin: string };
+    expect(step.catalog).toBe('deliver');
+    expect(step.id).toBe('deliver');
+    expect(step.executor.type).toBe('tool');
+    expect(step.executor.cmd.length).toBeGreaterThan(0);
+    expect(typeof step.validator_pin).toBe('string');
+    expect(seen[0]!.slice(1, 4)).toEqual([null, null, 'repo-x']);
+    expect(seen[1]![4]).toBeNull();
+    expect(seen[2]!.slice(1)).toEqual([null, null, null, null]);
   });
 
   it('a refused draft is a 400 with the engine reason; a bad body a 400 that asks nothing', async () => {

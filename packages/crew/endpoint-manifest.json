@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.44.0",
+  "apiTypesVersion": "0.45.0",
   "endpoints": [
     {
       "method": "GET",
@@ -899,7 +899,7 @@
       "method": "POST",
       "path": "/api/v1/runs/:id/plan",
       "requestType": "EditPlanBody",
-      "responseType": "{ status: SessionStatus }",
+      "responseType": "EditPlanResponse",
       "statusCodes": [
         200,
         400,
