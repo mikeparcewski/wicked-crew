@@ -106,7 +106,7 @@ async function seedBus(busPath: string, rows: Array<{ type: string; payload: Rec
       idempotency_key: `seed-${busPath}-${n++}`,
     });
   }
-  return db;
+  return db as unknown as { prepare(sql: string): { run(...args: unknown[]): unknown } };
 }
 
 describe('GET /runs/:id/team (T8 (b))', () => {

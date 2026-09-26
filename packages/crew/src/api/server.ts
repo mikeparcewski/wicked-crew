@@ -45,6 +45,7 @@ import { ProjectSettingsStore } from '../projects/settings.js';
 import { crewStateHome } from '../projects/state-home.js';
 import { startProjectBus, MEMBERSHIP_ATTACHED, membershipAttachedKey } from '../projects/events.js';
 import { startInteractiveWsRelay, registerInteractiveEventRoutes } from '../interactive/ws-relay.js';
+import { startTeamWsRelay } from '../team/ws-relay.js';
 import { MembershipIndex } from '../projects/membership-index.js';
 import { writeRunEvidencePointer } from '../projects/charter.js';
 import {
@@ -258,6 +259,15 @@ export interface CreateServerOptions {
    * wicked.interactive.** bus event is bridged onto the /ws stream as an `interactiveEvent`
    * frame so the studio needs exactly ONE socket. `disabled: true` turns it off (tests).
    */
+  /**
+   * DES-TEAMING-002 §4.5 (T8) — the team-row → `/ws` relay (`teamEvent` frames). Armed
+   * when the adapter hands the engine a bus (`busDbPath`); `disabled: true` turns it off.
+   */
+  teamWsRelay?: {
+    disabled?: boolean;
+    /** Poll cadence, ms (tests shorten it). */
+    pollIntervalMs?: number;
+  };
   interactiveWsRelay?: {
     disabled?: boolean;
     /** Bus db path; omit for wicked-bus's own default resolution. */
@@ -807,6 +817,29 @@ export async function createServer(
     app.log.info('interactive /ws relay armed (filter wicked.interactive.** → interactiveEvent)');
     app.addHook('onClose', async () => {
       await interactiveRelay.stop();
+    });
+  }
+
+  // The team relay (DES-TEAMING-002 §4.5): every team row the engine publishes becomes a
+  // `teamEvent` frame on the same /ws socket, tagged with the run's project. Only where the engine
+  // has a bus: no bus, no team rows.
+  const teamBusDb = typeof adapter.busDbPath === 'string' ? adapter.busDbPath : undefined;
+  const teamRelay =
+    options?.teamWsRelay?.disabled === true || teamBusDb === undefined
+      ? null
+      : await startTeamWsRelay({
+          dbPath: teamBusDb,
+          projectOf: (runId) => membershipIndex.projectOf(runId),
+          ...(options?.teamWsRelay?.pollIntervalMs !== undefined
+            ? { pollIntervalMs: options.teamWsRelay.pollIntervalMs }
+            : {}),
+          log: (m) => app.log.warn(m),
+          logError: (m) => app.log.error(m),
+        });
+  if (teamRelay !== null) {
+    app.log.info('team /ws relay armed (team rows → teamEvent)');
+    app.addHook('onClose', async () => {
+      await teamRelay.stop();
     });
   }
 

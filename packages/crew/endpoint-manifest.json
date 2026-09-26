@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.41.0",
+  "apiTypesVersion": "0.42.0",
   "endpoints": [
     {
       "method": "GET",
@@ -64,6 +64,16 @@
         200,
         404,
         409,
+        501
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/catalog",
+      "requestType": null,
+      "responseType": "CatalogResponse",
+      "statusCodes": [
+        200,
         501
       ]
     },
@@ -342,6 +352,17 @@
       "requestType": null,
       "responseType": null,
       "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/plans/preview",
+      "requestType": "PlanPreviewBody",
+      "responseType": "PlanPreviewResponse",
+      "statusCodes": [
+        200,
+        400,
+        501
+      ]
     },
     {
       "method": "GET",
@@ -872,6 +893,19 @@
     },
     {
       "method": "POST",
+      "path": "/api/v1/runs/:id/plan",
+      "requestType": "EditPlanBody",
+      "responseType": "{ status: SessionStatus }",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        409,
+        501
+      ]
+    },
+    {
+      "method": "POST",
       "path": "/api/v1/runs/:id/reassign",
       "requestType": "ReassignRequest",
       "responseType": null,
@@ -888,6 +922,17 @@
       "requestType": null,
       "responseType": null,
       "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/runs/:id/team",
+      "requestType": null,
+      "responseType": "RunTeamResponse",
+      "statusCodes": [
+        200,
+        404,
+        501
+      ]
     },
     {
       "method": "GET",
@@ -1091,6 +1136,17 @@
         400,
         409,
         503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/team/outbox/replay",
+      "requestType": null,
+      "responseType": "TeamOutboxReplayReport",
+      "statusCodes": [
+        200,
+        409,
+        501
       ]
     },
     {

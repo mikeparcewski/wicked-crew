@@ -3450,7 +3450,8 @@ export interface LaunchRunBody {
    * it, and holds it at a `plan_approval` gate (`awaiting_human{gate_kind:"plan_approval"}`) when
    * the approval matrix says so: always in manual mode, and in auto mode when high risk (band
    * 70-100 or destructive). Mutually exclusive with `workflow` (a plan or a preset).
-   * `deliver: "pr"` with a plan is not wired yet (DES-TEAMING-002 T8) and answers 400.
+   * `deliver: "pr"` with a plan (api-types 0.42.0, T8) hands the engine the deliver step, which it
+   * appends to the plan and puts in the floor; `deliver` omitted with a plan means `"none"`.
    */
   plan?: LaunchPlan;
   /**

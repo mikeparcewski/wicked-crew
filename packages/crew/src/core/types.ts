@@ -21,7 +21,13 @@
 
 export type * from 'wicked-crew-api-types';
 
-import type { SystemSettings } from 'wicked-crew-api-types';
+import type { RunTeamResponse, RunTeamUnit, SystemSettings } from 'wicked-crew-api-types';
+
+/** `Core.runTeam`'s JSON (DES-TEAMING-002 P1): the persisted half of `GET /runs/:id/team`, before
+ *  crew joins the bus rows and the folded ledger onto it. */
+export type RunTeamView = Omit<RunTeamResponse, 'units' | 'rows'> & {
+  units: Array<Omit<RunTeamUnit, 'rows' | 'ledger'>>;
+};
 
 import { DEFAULT_BASE_SKILL_REF, type BaseSkillPolicy } from '../skills/base-skill.js';
 
