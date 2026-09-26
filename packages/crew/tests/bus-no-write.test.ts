@@ -7,9 +7,11 @@
 // `openDb` (migrations) all write. So in crew source:
 //
 //   1. wicked-bus is loaded as a VALUE only by the tap, and only for its read-only helpers; no
-//      dynamic import and no require of it anywhere else (bus-handle resolves better-sqlite3 through
-//      it, bus-writer resolves its path for the child). Without the module, no seam can call
-//      subscribe/ack/register/emit/openDb.
+//      dynamic import, require, `createRequire(x)('wicked-bus')` or re-export of it anywhere else
+//      (bus-handle resolves better-sqlite3 through it, bus-writer resolves its path for the child).
+//      Without the module, no seam can call subscribe/ack/register/emit/openDb.
+//   1b. no SQLite library (`better-sqlite3`, `node:sqlite`) is named outside the bus handle, and no
+//      SQL runs through a connection's `.exec('…')`;
 //   2. no `<x>.subscribe(` / `.ack(` / `.register(` / `.emit(` / `.openDb(` / `.poll(` call on a
 //      wicked-bus binding, outside the writer's child script;
 //   3. every SQL string prepared on crew's bus handle is a SELECT, and only the handle sets PRAGMAs;
@@ -59,10 +61,28 @@ function valueImports(text: string): string[][] {
   return out;
 }
 
-/** Dynamic loads of wicked-bus: `import('wicked-bus')`, `require('wicked-bus')`, `.resolve('wicked-bus')`. */
+/** Every call that names wicked-bus: `import('wicked-bus')`, `require(…)`, `createRequire(x)('wicked-bus')`,
+ *  `.resolve('wicked-bus/package.json')` — the callee text (or `)` for a call on a call) and the literal. */
 function dynamicLoads(text: string): string[] {
-  return text.match(/\b(import|require|resolve)\s*\(\s*['"]wicked-bus(\/[^'"]*)?['"]\s*\)/g) ?? [];
+  return text.match(/([\w$.]+|\))\s*\(\s*['"]wicked-bus(\/[^'"]*)?['"]\s*\)/g) ?? [];
 }
+
+/** Re-exports of wicked-bus values: `export { emit } from 'wicked-bus'`, `export * from 'wicked-bus'`. */
+function reExports(text: string): string[] {
+  return text.match(/\bexport\s+(?!type\b)[^;]*?\bfrom\s+['"]wicked-bus['"]/g) ?? [];
+}
+
+/** SQL run straight on a connection: `.exec('…')` / `.exec(`…`)` (a RegExp `.exec(x)` takes no literal). */
+function execCalls(text: string): string[] {
+  return text.match(/\.exec\s*\(\s*['"`]/g) ?? [];
+}
+
+/** A SQLite library named anywhere in code: `'better-sqlite3'`, `'node:sqlite'` (import, require, resolve). */
+function sqliteLibs(text: string): string[] {
+  return text.match(/['"](better-sqlite3|node:sqlite)['"]/g) ?? [];
+}
+/** The one file that opens crew's bus connection (read-only by type). */
+const HANDLE = 'core/bus-handle.ts';
 
 /** Calls of a wicked-bus write (or its read-and-ack poll) on a binding: `bus.emit(`, `wb.subscribe(`. */
 function busWriteCalls(text: string): string[] {
@@ -105,6 +125,14 @@ describe('in-daemon crew never writes the bus through its own SQLite (crew#679)'
       `bus.ack(db, c, 1); bus.register(db, {}); bus.openDb({});`,
     ].join('\n');
     expect(dynamicLoads(planted)).toHaveLength(1);
+    expect(dynamicLoads(`const bus = createRequire(import.meta.url)('wicked-bus');`)).toEqual([`)('wicked-bus')`]);
+    expect(reExports(`export { emit, subscribe } from 'wicked-bus';`)).toHaveLength(1);
+    expect(reExports(`export * from 'wicked-bus';`)).toHaveLength(1);
+    expect(reExports(`export type { BusEvent } from 'wicked-bus';`)).toEqual([]);
+    expect(execCalls(`db.exec('INSERT INTO events VALUES (1)');`)).toHaveLength(1);
+    expect(execCalls(`const m = /a/.exec(text);`)).toEqual([]);
+    expect(sqliteLibs(`import Database from 'better-sqlite3';`)).toHaveLength(1);
+    expect(sqliteLibs(`const { DatabaseSync } = await import('node:sqlite');`)).toHaveLength(1);
     expect(busWriteCalls(planted)).toHaveLength(5);
     expect(valueImports(`import { emit, subscribe } from 'wicked-bus';`)).toEqual([['emit', 'subscribe']]);
     expect(valueImports(`import type { BusEvent } from 'wicked-bus';`)).toEqual([]);
@@ -123,10 +151,19 @@ describe('in-daemon crew never writes the bus through its own SQLite (crew#679)'
   it('nothing else loads wicked-bus: no dynamic import, and a path resolve only where sanctioned', () => {
     const offenders = files.flatMap((f) =>
       dynamicLoads(f.code)
-        .filter((hit) => !(RESOLVERS.has(f.rel) && /^resolve/.test(hit)))
+        .filter((hit) => !(RESOLVERS.has(f.rel) && /^[\w$.]*\.resolve\s*\(/.test(hit)))
         .map((hit) => `${f.rel}: ${hit}`),
     );
     expect(offenders).toEqual([]);
+  });
+
+  it('nothing re-exports wicked-bus values', () => {
+    expect(files.flatMap((f) => reExports(f.code).map((hit) => `${f.rel}: ${hit}`))).toEqual([]);
+  });
+
+  it('no SQLite library is named outside the bus handle, and no SQL runs through .exec(', () => {
+    expect(files.filter((f) => f.rel !== HANDLE && sqliteLibs(f.code).length > 0).map((f) => f.rel)).toEqual([]);
+    expect(files.flatMap((f) => execCalls(withoutChild(f)).map((hit) => `${f.rel}: ${hit}`))).toEqual([]);
   });
 
   it('no subscribe/ack/register/emit/openDb/poll call on a wicked-bus binding', () => {

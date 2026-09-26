@@ -12,7 +12,7 @@
 // and crew emits project/membership/interactive events through the one bus writer. Pinned:
 //   - every plan launch reaches its plan_approval gate (the engine's bus stayed writable);
 //   - every interactive event crew emitted comes back through the read-only tap as a /ws frame,
-//     in order, and the project events landed on the bus;
+//     each launch's emits in the order they were sent, and the project events landed on the bus;
 //   - the bus passes `quick_check`, and crew registered nothing: no subscription, cursor, delivery
 //     or dead-letter row.
 // Skipped on an addon without `Core.runTeam` or the plan approval gate, as team-engine is.
@@ -151,7 +151,7 @@ describe.skipIf(!ENGINE_HAS_TEAM)('crew seams beside the real engine on one bus 
       );
     }
 
-    // Every emit came back through the read-only tap, in the order the writer landed them.
+    // Every emit came back through the read-only tap.
     const relayedDocs = (): string[] =>
       frames
         .filter((f) => f['type'] === 'interactiveEvent')
@@ -159,10 +159,13 @@ describe.skipIf(!ENGINE_HAS_TEAM)('crew seams beside the real engine on one bus 
         .filter((d) => d.startsWith('doc-'));
     await waitFor('every interactive emit relayed', () => (relayedDocs().length >= emitted.length ? true : undefined));
     expect([...relayedDocs()].sort()).toEqual([...emitted].sort());
-    const ids = frames
-      .filter((f) => f['type'] === 'interactiveEvent')
-      .map((f) => (f['event'] as { event_id: number }).event_id);
-    expect(ids).toEqual([...ids].sort((a, b) => a - b));
+    // Each launch's emits were sent one after another (each awaited its 202): they come back in
+    // that order. A writer or tap that reordered rows fails here.
+    const relayed = relayedDocs();
+    for (let i = 0; i < LAUNCHES; i++) {
+      const mine = relayed.filter((d) => d.startsWith(`doc-${i}-`));
+      expect(mine).toEqual(Array.from({ length: EMITS_PER_LAUNCH }, (_, k) => `doc-${i}-${k}`));
+    }
 
     // The project events crew emitted landed, beside the engine's team facts.
     await waitFor('the membership rows', () =>

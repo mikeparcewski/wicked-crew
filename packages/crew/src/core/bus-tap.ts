@@ -11,8 +11,11 @@
  * A tap polls through crew's one long-lived bus handle (`core/bus-handle.ts`, never closed) with its
  * cursor in memory, starting at the newest row (`latest`, what every seam asked wicked-bus for), and
  * issues no write. Rows are matched with wicked-bus's own `matchesFilter`, so a filter means what it
- * meant under `subscribe`. What a restart loses is what `latest` + `maxRetries: 0` never promised:
- * rows emitted while the daemon was down, and a retry of a failed handler.
+ * meant under `subscribe`. The difference is a restart: under `subscribe` each seam resumed its
+ * stored cursor and received the rows emitted while the daemon was down; a tap starts at the
+ * newest row, so a restart skips them. A failed handler is still not retried (every seam ran
+ * `maxRetries: 0`). A bus file replaced under the same path is followed: the tap restarts its
+ * cursor at the new file's first row.
  *
  * Crew's bus WRITES go through the one bus writer instead (`core/bus-writer.ts`).
  * tests/bus-no-write.test.ts fails the build if in-daemon code calls subscribe/ack/register/emit.
@@ -94,7 +97,14 @@ export function tapBus(opts: BusTapOptions): BusTap {
   const poll = async (): Promise<void> => {
     let rows: Array<Record<string, unknown> & { event_id: number; event_type: string; domain: string }>;
     try {
-      db = crewBusHandle(dbPath, { create: false }); // the same handle, unless the file was replaced
+      const current = crewBusHandle(dbPath, { create: false });
+      if (current !== db) {
+        // A different handle means the path names a NEW file (deleted and recreated): its event
+        // ids restart, so the old cursor would wait past rows this file will not reach for a long
+        // time. Everything in the new file is new to this tap.
+        db = current;
+        cursor = 0;
+      }
       rows = db
         .prepare(`SELECT * FROM events WHERE event_id > ? ORDER BY event_id LIMIT ${BATCH}`)
         .all(cursor) as typeof rows;

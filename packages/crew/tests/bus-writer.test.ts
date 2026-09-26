@@ -1,13 +1,13 @@
 // crew#679 — the one bus writer: crew's rows land from a child process, in the order crew emitted
-// them, a duplicate key is refused as WB-002 (the seams treat that as success), and the daemon
-// process never opens a writing connection on the file.
+// them; a duplicate key is refused as WB-002 (the seams treat that as success); a writer that never
+// answers is bounded and replaced; an answer the child wrote before exiting is never reported failed.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { crewBusHandle } from '../src/core/bus-handle.js';
-import { BusWriteError, emitOnBus } from '../src/core/bus-writer.js';
+import { BusWriteError, busWriterTesting, emitOnBus } from '../src/core/bus-writer.js';
 import { removeScratch } from './setup/scratch.js';
 
 let dir: string;
@@ -17,7 +17,29 @@ beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'bus-writer-'));
   busPath = join(dir, 'bus.db');
 });
-afterEach(() => removeScratch(dir));
+afterEach(() => {
+  busWriterTesting.childScript = undefined;
+  busWriterTesting.timeoutMs = 15_000;
+  removeScratch(dir);
+});
+
+/** Stub children: they read request lines and answer (or don't) without touching any bus. */
+const NEVER_ANSWERS = `process.stdin.resume();`;
+// The writer process exits at once; the answer reaches its stdout pipe 300 ms later, from a
+// grandchild that holds the same pipe. So the parent sees \`exit\` before the answer is read —
+// the order Node allows for real ('exit' may fire before the stdio streams are drained).
+const EXITS_BEFORE_ITS_ANSWER_IS_READ = `
+import { createInterface } from 'node:readline';
+import { spawn } from 'node:child_process';
+createInterface({ input: process.stdin }).on('line', (line) => {
+  const { id } = JSON.parse(line);
+  const answer = JSON.stringify({ id, ok: true, event_id: 7 });
+  spawn(process.execPath, ['-e', 'setTimeout(() => process.stdout.write(process.argv[1] + "\\\\n"), 300)', answer], {
+    stdio: ['ignore', 'inherit', 'inherit'],
+  });
+  process.exit(0);
+});
+`;
 
 const row = (n: number, key = `k-${n}-${Math.random()}`) => ({
   event_type: 'wicked.interactive.status.posted',
@@ -51,4 +73,24 @@ describe('emitOnBus (the single bus writer)', () => {
     expect(err).toBeInstanceOf(BusWriteError);
     expect((err as Error).message).toMatch(/bus writer/);
   });
+
+  it('a writer that never answers is bounded: the emit rejects, and the next emit gets a fresh child', async () => {
+    busWriterTesting.childScript = NEVER_ANSWERS;
+    busWriterTesting.timeoutMs = 300;
+    const started = Date.now();
+    const err = await emitOnBus(busPath, row(1)).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BusWriteError);
+    expect((err as Error).message).toMatch(/did not answer/);
+    expect(Date.now() - started).toBeLessThan(5_000);
+    // The wedged child was dropped: the real writer answers the next emit.
+    busWriterTesting.childScript = undefined;
+    busWriterTesting.timeoutMs = 15_000;
+    expect(await emitOnBus(busPath, row(2))).toBeGreaterThan(0);
+  });
+
+  it('an answer read after the writer exited is delivered, never reported as a failure', async () => {
+    busWriterTesting.childScript = EXITS_BEFORE_ITS_ANSWER_IS_READ;
+    await expect(emitOnBus(busPath, row(1))).resolves.toBe(7);
+  });
 });
+

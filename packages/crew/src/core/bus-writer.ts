@@ -13,7 +13,9 @@
  * One writer per bus file, spawned on the first emit, fed NDJSON on stdin and answering one line
  * per request, in order (so crew's rows land in the order crew emitted them). It exits when crew
  * has had nothing to write for {@link IDLE_MS}; the next emit spawns a fresh one. A writer that
- * dies fails its pending emits (the seams log and report them as they did a refused emit).
+ * dies fails its unanswered emits once its output is drained; one that stays alive but does not
+ * answer within 15 s is killed and replaced (the seams log and report a failed emit as they did a
+ * refused one).
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -49,6 +51,12 @@ export class BusWriteError extends Error {
 /** Exit after this long with nothing to write. */
 const IDLE_MS = 30_000;
 
+/** Test seam only: the child's script (a stub writer) and the per-request answer bound. */
+export const busWriterTesting: { childScript: string | undefined; timeoutMs: number } = {
+  childScript: undefined,
+  timeoutMs: 15_000,
+};
+
 // The child: open the bus once, emit each line's row, answer `{ id, ok, event_id | error, message }`.
 const CHILD = `
 import { createInterface } from 'node:readline';
@@ -81,6 +89,8 @@ createInterface({ input: process.stdin })
 interface Pending {
   resolve: (eventId: number) => void;
   reject: (err: Error) => void;
+  /** The answer bound: a writer that stays alive but never answers must not wedge its caller. */
+  timer: NodeJS.Timeout;
 }
 interface Writer {
   child: ChildProcess;
@@ -117,7 +127,7 @@ function hold(w: Writer, on: boolean): void {
 function writerFor(dbPath: string): Writer {
   const existing = writers.get(dbPath);
   if (existing !== undefined) return existing;
-  const child = spawn(process.execPath, ['--input-type=module', '-e', CHILD, wickedBusUrl(), dbPath], {
+  const child = spawn(process.execPath, ['--input-type=module', '-e', busWriterTesting.childScript ?? CHILD, wickedBusUrl(), dbPath], {
     // The daemon's governance store never reaches a child it does not own (crew#495).
     env: childEnvWithBootEstateDb(),
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -129,7 +139,8 @@ function writerFor(dbPath: string): Writer {
   child.stderr?.on('data', (b: Buffer) => {
     stderr = (stderr + b.toString()).slice(-2000);
   });
-  createInterface({ input: child.stdout! }).on('line', (line) => {
+  const answers = createInterface({ input: child.stdout! });
+  answers.on('line', (line) => {
     let msg: { id?: number; ok?: boolean; event_id?: number; error?: string; message?: string };
     try {
       msg = JSON.parse(line) as typeof msg;
@@ -139,22 +150,43 @@ function writerFor(dbPath: string): Writer {
     const p = msg.id !== undefined ? w.pending.get(msg.id) : undefined;
     if (p === undefined) return;
     w.pending.delete(msg.id!);
+    clearTimeout(p.timer);
     if (msg.ok === true) p.resolve(msg.event_id ?? 0);
     else p.reject(new BusWriteError(msg.message ?? 'bus emit refused', msg.error ?? undefined));
     settle(dbPath, w);
   });
-  const fail = (why: string): void => {
-    if (writers.get(dbPath) === w) writers.delete(dbPath);
-    if (w.idle !== null) clearTimeout(w.idle);
+  let why = 'closed its output';
+  const fail = (): void => {
+    retire(dbPath, w);
     const err = new BusWriteError(`bus writer for ${dbPath} ${why}${stderr !== '' ? `: ${stderr.trim()}` : ''}`);
-    for (const p of w.pending.values()) p.reject(err);
+    for (const p of w.pending.values()) {
+      clearTimeout(p.timer);
+      p.reject(err);
+    }
     w.pending.clear();
   };
-  // A write to a writer that just died is EPIPE: its pending emits fail through `exit` below.
+  // A write to a writer that just died is EPIPE: its pending emits fail when its output closes.
   child.stdin?.on('error', () => undefined);
-  child.on('error', (err) => fail(`failed: ${err.message}`));
-  child.on('exit', (code, signal) => fail(`exited (${signal ?? code})`));
+  // `exit` can fire before stdout is drained: it only retires the writer (the next emit spawns a
+  // fresh one). Pending emits are failed once every answer line has been read — a row the child
+  // committed and answered is never reported as failed.
+  child.on('exit', (code, signal) => {
+    why = `exited (${signal ?? code})`;
+    retire(dbPath, w);
+  });
+  child.on('error', (err) => {
+    why = `failed: ${err.message}`;
+    fail();
+  });
+  answers.on('close', fail);
   return w;
+}
+
+/** Drop a writer so the next emit spawns a fresh one. */
+function retire(dbPath: string, w: Writer): void {
+  if (writers.get(dbPath) === w) writers.delete(dbPath);
+  if (w.idle !== null) clearTimeout(w.idle);
+  w.idle = null;
 }
 
 /** Nothing owed: stop keeping the daemon alive, and retire the writer if it stays idle. */
@@ -184,7 +216,16 @@ export function emitOnBus(dbPath: string, row: BusRow): Promise<number> {
   hold(w, true);
   const id = nextId++;
   return new Promise<number>((res, rej) => {
-    w.pending.set(id, { resolve: res, reject: rej });
+    const timer = setTimeout(() => {
+      if (!w.pending.delete(id)) return;
+      // A live writer that does not answer is wedged: fail this emit, kill it and drop it, so the
+      // next emit gets a fresh child (its other pending emits fail when its output closes).
+      retire(key, w);
+      w.child.kill('SIGKILL');
+      rej(new BusWriteError(`bus writer for ${key} did not answer within ${busWriterTesting.timeoutMs} ms`));
+    }, busWriterTesting.timeoutMs);
+    timer.unref();
+    w.pending.set(id, { resolve: res, reject: rej, timer });
     w.child.stdin?.write(`${JSON.stringify({ id, row })}\n`);
   });
 }
