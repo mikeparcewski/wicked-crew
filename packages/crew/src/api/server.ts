@@ -64,6 +64,10 @@ import { ChatTranscriptStore } from './chat-transcripts.js';
 import { sweepDeliveredWorktree } from './worktree-sweep.js';
 import { installEndpointManifestHook } from './endpoint-manifest.js';
 import { WorkerStallWatchdog } from './stall-watchdog.js';
+import { StandingOrderStore } from '../standing-orders/store.js';
+import { StandingOrderEvaluator, type GateFact } from '../standing-orders/evaluator.js';
+import { registerStandingOrderRoutes } from '../standing-orders/routes.js';
+import { seatParser } from '../standing-orders/parse.js';
 import { applyWorkerConfigRoot } from './seat-signin.js';
 import { registeredSkillRefs } from '../skills/core-closure.js';
 import type { PluginSource } from '../skills/plugin-source.js';
@@ -270,6 +274,8 @@ export interface CreateServerOptions {
   auth?: AuthOptions;
   /** Audit-trail path override (tests). Default `~/.wicked-crew/audit.log` / `WICKED_CREW_AUDIT_LOG`. */
   auditPath?: string;
+  /** Standing-orders store override (tests). Default `<state home>/standing-orders.json`. */
+  standingOrdersPath?: string;
   /** Eval-run-history root override (tests). Default the state home's `evals/` /
    *  `WICKED_CREW_EVAL_STORE`. Symmetric with `auditPath` — a createServer-driven test isolates its
    *  eval history here instead of writing the operator's real `~/.wicked-crew/evals/`. */
@@ -363,6 +369,9 @@ export async function createServer(
   // test); costs one array push per route at boot, nothing per request.
   app.decorate('endpointManifest', installEndpointManifestHook(app));
   const gateCache = new GateCache();
+  // Standing orders (behaviour 10): armed once the routes (and so THE gate decision path) exist;
+  // the event relays above it read it late-bound.
+  let standingOrderEvaluator: StandingOrderEvaluator | null = null;
   const elicitationCache = new ElicitationCache();
   const terminals = new TerminalHub();
   // Per-seat runtime health (crew#274): folded from the single CoreEvent subscription below,
@@ -818,6 +827,11 @@ export async function createServer(
       : await startTeamWsRelay({
           dbPath: teamBusDb,
           projectOf: (runId) => membershipIndex.projectOf(runId),
+          // Standing orders (behaviour 10) read the same team rows: a finding can wake the operator.
+          broadcast: (frame) => {
+            broadcast(frame);
+            void standingOrderEvaluator?.onTeamFrame(frame);
+          },
           ...(options?.teamWsRelay?.pollIntervalMs !== undefined
             ? { pollIntervalMs: options.teamWsRelay.pollIntervalMs }
             : {}),
@@ -1236,6 +1250,9 @@ export async function createServer(
     const session = typeof event.session === 'string' ? event.session : undefined;
     const projectId = session !== undefined ? membershipIndex.projectOf(session) : undefined;
     broadcast(projectId !== undefined ? ({ ...rewritten, project_id: projectId } as CoreEvent) : rewritten);
+    // Standing orders (behaviour 10): a gate that opened may be one an order answers, holds or
+    // reports — after the gate cache folded it, so the order's decision carries the right ord.
+    void standingOrderEvaluator?.onEvent(event);
     // The delivered-PR record (CREW-UX-8, crew#321): resolved once per run at its terminal
     // frame, best-effort, off the hot path — see `resolveRunDelivery` above for why BOTH
     // terminal frames trigger it and why a failed deliver is a no-op. THEN the delivery-
@@ -1470,7 +1487,7 @@ export async function createServer(
   // handler serves. One resolution, two consumers.
   const studioRoot = options?.studioRoot ?? defaultStudioRoot();
 
-  registerRoutes(
+  const registered = registerRoutes(
     app,
     adapter,
     gateCache,
@@ -1526,6 +1543,48 @@ export async function createServer(
       linkChatRun,
     },
   );
+
+  // Standing orders (Studio OS behaviour 10): the store, the evaluator over THE gate decision path
+  // (`registered.decideGate`), and the routes. See src/standing-orders/.
+  const standingOrders = new StandingOrderStore(
+    options?.standingOrdersPath,
+    (m) => app.log.warn(m),
+  );
+  standingOrderEvaluator = new StandingOrderEvaluator({
+    store: standingOrders,
+    decideGate: registered.decideGate,
+    audit,
+    runFacts: async (runId) => {
+      const v = (await adapter.sessionsDetail()).find((x) => x.session.id === runId);
+      if (v === undefined) return undefined;
+      const own = v.session.project_id;
+      return {
+        projectId: typeof own === 'string' && own !== 'default' ? own : membershipIndex.projectOf(runId),
+        problem: v.session.problem,
+        phaseOf: (ord) => v.units.find((u) => u.ord === ord)?.phase_ref ?? undefined,
+      };
+    },
+    openGates: async () => {
+      if (typeof adapter.interactionRequests !== 'function') return [];
+      const rows = (await adapter.interactionRequests(undefined, 'open')) ?? [];
+      return rows
+        .filter((r) => r.kind === 'gate' && typeof r.ord === 'number')
+        .map((r): GateFact => ({
+          runId: r.session_id,
+          ord: r.ord as number,
+          reviewingOrd: r.reviewing_ord,
+          gateKind: typeof r['gate_kind'] === 'string' ? r['gate_kind'] : '',
+          prompt: r.prompt,
+        }));
+    },
+    log: (m) => app.log.warn(m),
+  });
+  registerStandingOrderRoutes(app, {
+    store: standingOrders,
+    evaluator: standingOrderEvaluator,
+    audit,
+    parse: seatParser({ adapter, roster: rosterWithStanding }),
+  });
 
   // The UI-emittable direction of the interactive seam. Registered unconditionally (a null relay
   // answers 503, not 404) and BEFORE the static/SPA fallback below, like every other API route.

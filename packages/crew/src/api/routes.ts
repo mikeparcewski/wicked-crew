@@ -704,6 +704,17 @@ function withServedSeq(
   });
 }
 
+/** What `registerRoutes` hands back to the server assembly: the ONE gate decision path, for the
+ *  daemon-side actors that answer gates (standing orders, behaviour 10). */
+export interface RegisteredRoutes {
+  decideGate: (
+    id: string,
+    decision: unknown,
+    actor: import('../core/types.js').Actor,
+    extraDetail?: Record<string, unknown>,
+  ) => Promise<{ code: number; body: unknown }>;
+}
+
 export interface RuntimeDeps {
   /** DES-L9: how `revisesPr` is resolved to a PR head branch (`gh pr view`, 5 s). Injectable so
    *  route tests answer without gh; production uses `core/deliver.ts::resolvePullRequest`. */
@@ -978,7 +989,7 @@ export function registerRoutes(
   // Defaulted likewise: a directly-driven route set gets a fresh (all-active) health map and the
   // real OS opener — tests inject both through this seam.
   runtime: RuntimeDeps = {},
-): void {
+): RegisteredRoutes {
   const { audit } = security;
   const seatHealth = runtime.seatHealth ?? new SeatHealthTracker();
   const openWithOs = runtime.openWithOs ?? openWithSystemDefault;
@@ -3026,33 +3037,27 @@ export function registerRoutes(
     return gateCache.rebuild(id, events) ?? null;
   }
 
-  // The steering gate (§11.1). approve+amend = approve-with-steer; approve:false = reject (cancels).
-  app.post(
-    `${V}/runs/:id/gate`,
-    {
-      config: {
-        manifest: {
-          requestType: 'GateDecision',
-          responseType: '{ status: SessionStatus; landing?: SteeringLandingResult }',
-          // 409 twice over: a run not awaiting a human gate, and an engine refusal at confirm.
-          // 501: an edited plan on an addon without the plan approval gate (DES-TEAMING-002 T3).
-          statusCodes: [200, 400, 404, 409, 501],
-        },
-      },
-    },
-    async (req, reply) => {
-    const { id } = req.params as { id: string };
-    const parsed = GateSchema.safeParse(req.body);
+  /**
+   * THE gate decision path. `POST /runs/:id/gate` answers with it, and so does a standing order
+   * (behaviour 10) — the same awaiting check, the same ord check and 409 `gate_changed` /
+   * `gate_unknown`, the same `confirmGate`, the same `gate.decided` audit. There is no side path:
+   * an order is just another actor, named on the audit line (`extraDetail.standingOrder`).
+   */
+  async function decideGate(
+    id: string,
+    decision: unknown,
+    actor: import('../core/types.js').Actor,
+    extraDetail: Record<string, unknown> = {},
+  ): Promise<{ code: number; body: unknown }> {
+    const parsed = GateSchema.safeParse(decision);
     if (!parsed.success) {
-      return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
+      return { code: 400, body: invalidBody(parsed.error, 'Invalid request body') };
     }
     const views = await adapter.sessionsDetail();
     const run = views.find((v) => v.session.id === id);
-    if (!run) return reply.code(404).send({ error: 'Run not found' });
+    if (!run) return { code: 404, body: { error: 'Run not found' } };
     if (run.session.status !== 'awaiting_human') {
-      return reply
-        .code(409)
-        .send({ error: `Run is not awaiting a human gate (status: ${run.session.status})` });
+      return { code: 409, body: { error: `Run is not awaiting a human gate (status: ${run.session.status})` } };
     }
     // api-types 0.44.0: a decision that names its gate answers THAT gate or nothing. When the
     // daemon cannot tell which gate is open (no cache, no durable row, no log binding, or a log
@@ -3061,21 +3066,21 @@ export function registerRoutes(
     if (parsed.data.ord !== undefined) {
       const open = await resolveOpenGate(id);
       if (open === null || open === 'no-log') {
-        return reply.code(409).send({
+        return { code: 409, body: {
           error:
             `Gate unknown: this decision names the gate before unit ${parsed.data.ord}, but the daemon cannot `
             + 'tell which gate is open on this run — refresh and decide again.',
           code: 'gate_unknown',
-        });
+        } };
       }
       if (open.ord !== parsed.data.ord) {
-        return reply.code(409).send({
+        return { code: 409, body: {
           error:
             `Gate changed: this decision was made on the gate before unit ${parsed.data.ord}, but the open gate `
             + `is before unit ${open.ord} — it was answered or replaced. Read the open gate before deciding.`,
           code: 'gate_changed',
           openOrd: open.ord,
-        });
+        } };
       }
     }
     // The steering-author landing (crew#388): decided — and the gate prompt captured — BEFORE
@@ -3101,7 +3106,7 @@ export function registerRoutes(
       // WHO approved/rejected — the gate-decision audit (task #88). The engine
       // records THAT the gate resolved (interaction_requests / gateDecided);
       // only this HTTP layer knows the authenticated principal behind it.
-      audit.record('gate.decided', actorOf(req), {
+      audit.record('gate.decided', actor, {
         runId: id,
         detail: {
           approve: parsed.data.approve,
@@ -3110,6 +3115,7 @@ export function registerRoutes(
           ...(parsed.data.amendScope !== undefined ? { amendScope: parsed.data.amendScope } : {}),
           ...(parsed.data.plan !== undefined ? { planSteps: parsed.data.plan.steps.length } : {}),
           ...(parsed.data.ord !== undefined ? { ord: parsed.data.ord } : {}),
+          ...extraDetail,
           status,
         },
       });
@@ -3122,16 +3128,37 @@ export function registerRoutes(
       // text (an operator who wants different rules rejects and re-authors). A reject lands
       // nothing — the run cancels and the proposal stays an artifact.
       const landing = steeringPropose
-        ? await landSteeringProposal({ adapter, audit, actor: actorOf(req) }, run, gatePrompt)
+        ? await landSteeringProposal({ adapter, audit, actor }, run, gatePrompt)
         : undefined;
-      return reply.send({ status, ...(landing !== undefined ? { landing } : {}) });
+      return { code: 200, body: { status, ...(landing !== undefined ? { landing } : {}) } };
     } catch (err) {
       if (err instanceof PlanLaunchUnsupportedError) {
-        return reply.code(501).send({ error: message(err) });
+        return { code: 501, body: { error: message(err) } };
       }
-      return reply.code(409).send({ error: message(err) });
+      return { code: 409, body: { error: message(err) } };
     }
-  });
+  }
+
+  // The steering gate (§11.1). approve+amend = approve-with-steer; approve:false = reject (cancels).
+  app.post(
+    `${V}/runs/:id/gate`,
+    {
+      config: {
+        manifest: {
+          requestType: 'GateDecision',
+          responseType: '{ status: SessionStatus; landing?: SteeringLandingResult }',
+          // 409 twice over: a run not awaiting a human gate, and an engine refusal at confirm.
+          // 501: an edited plan on an addon without the plan approval gate (DES-TEAMING-002 T3).
+          statusCodes: [200, 400, 404, 409, 501],
+        },
+      },
+    },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const out = await decideGate(id, req.body, actorOf(req));
+      return reply.code(out.code).send(out.body);
+    },
+  );
 
   // Cancel a running or paused run (distinct third action, §11.1).
   app.post(`${V}/runs/:id/cancel`, async (req, reply) => {
@@ -5036,4 +5063,6 @@ export function registerRoutes(
     pool: interactiveBridges,
     log: (m) => app.log.warn(m),
   });
+
+  return { decideGate };
 }

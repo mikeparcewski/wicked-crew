@@ -74,6 +74,8 @@ import type {
 } from '../src/projects/routes.js';
 import type { PutPresetSchema } from '../src/presets/routes.js';
 import type { EditPlanSchema, PlanPreviewSchema, joinTeam } from '../src/team/routes.js';
+import type { CreateStandingOrderSchema, ParseStandingOrderSchema, StandingAwaySchema } from '../src/standing-orders/routes.js';
+import type { StandingOrdersState as ServedStandingOrdersState } from '../src/standing-orders/store.js';
 import type { DEFAULT_SETTINGS } from '../src/core/types.js';
 
 /** Compile-time: what the daemon PRODUCES must satisfy what the contract PUBLISHES. */
@@ -942,6 +944,13 @@ respondsWith<Wire.Preset[], Awaited<ReturnType<CoreAdapter['listPresets']>>>();
 // team reads produce the published shapes.
 accepts<z.input<typeof EditPlanSchema>, Wire.EditPlanBody>();
 accepts<z.input<typeof PlanPreviewSchema>, Wire.PlanPreviewBody>();
+// Standing orders (behaviour 10): every body the contract names is one the routes accept, and the
+// served state is the contract's.
+accepts<z.input<typeof CreateStandingOrderSchema>, Wire.CreateStandingOrderBody>();
+accepts<z.input<typeof ParseStandingOrderSchema>, Wire.ParseStandingOrderBody>();
+accepts<z.input<typeof StandingAwaySchema>, Wire.StandingAwayBody>();
+const servedStandingOrders = (s: ServedStandingOrdersState): Wire.StandingOrdersState => s;
+void servedStandingOrders;
 respondsWith<Wire.RunTeamResponse, ReturnType<typeof joinTeam>>();
 respondsWith<Wire.TeamOutboxReplayReport, Awaited<ReturnType<CoreAdapter['replayTeamOutbox']>>>();
 respondsWith<Wire.CatalogEntry[], Awaited<ReturnType<CoreAdapter['catalog']>>>();
