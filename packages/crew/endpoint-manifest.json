@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.49.0",
+  "apiTypesVersion": "0.50.0",
   "endpoints": [
     {
       "method": "GET",
@@ -1158,6 +1158,58 @@
         400,
         409,
         503
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/standing-orders",
+      "requestType": null,
+      "responseType": "StandingOrdersState",
+      "statusCodes": [
+        200
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/standing-orders",
+      "requestType": "CreateStandingOrderBody",
+      "responseType": "{ order: StandingOrder }",
+      "statusCodes": [
+        201,
+        400
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/standing-orders/:id",
+      "requestType": null,
+      "responseType": "{ removed: true }",
+      "statusCodes": [
+        200,
+        404
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/standing-orders/away",
+      "requestType": "StandingAwayBody",
+      "responseType": "StandingOrdersState",
+      "statusCodes": [
+        200,
+        400
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/standing-orders/parse",
+      "requestType": "ParseStandingOrderBody",
+      "responseType": "ParsedStandingOrder",
+      "statusCodes": [
+        200,
+        400,
+        409,
+        422,
+        502
       ]
     },
     {

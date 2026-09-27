@@ -6724,3 +6724,74 @@ export interface PlanPreviewResponse {
    *  manual mode's alone (an auto-mode launch may still pause once the PA's scope lands high). */
   graph: 'ready' | 'not_needed' | 'unavailable' | 'pending_pa_scope';
 }
+
+// ── Standing orders (Studio OS behaviour 10; api-types 0.50.0) ─────────────────────────────────
+
+/**
+ * A standing order's structured rule — parsed from plain words by a seat and CONFIRMED by the
+ * operator before it is stored. `trigger.phase` is the phase the gate reviews (the reviewed unit's
+ * `phase_ref`) or `*`. The invariant: `approve` never answers the deliver gate, a plan approval,
+ * an escalation, a failure or a triage gate, and never a finding (the create route refuses a rule
+ * that approves `deliver`, `plan_approval` or a finding with a 400 `order_refused`).
+ */
+export interface StandingOrderRule {
+  scope: { kind: 'all' } | { kind: 'project'; projectId: string };
+  trigger: { kind: 'gate'; phase: string } | { kind: 'finding'; severity: 'high' | 'medium' | '*' };
+  action: 'approve' | 'hold' | 'notify';
+  activeWhen: 'away' | 'always';
+}
+
+export interface StandingOrder {
+  id: string;
+  /** The operator's own words. */
+  text: string;
+  rule: StandingOrderRule;
+  /** Unix millis. */
+  createdAt: number;
+}
+
+/** An outbound message a `notify` order wanted sent. Only ever QUEUED — the daemon sends nothing. */
+export interface QueuedStandingMessage {
+  id: string;
+  orderId: string;
+  orderText: string;
+  runId: string | null;
+  text: string;
+  /** Unix millis. */
+  at: number;
+  status: 'queued';
+}
+
+/** `GET /standing-orders`, and the answer to `PUT /standing-orders/away`. */
+export interface StandingOrdersState {
+  away: boolean;
+  /** Unix millis the flag turned on; `null` while present. */
+  awaySince: number | null;
+  orders: StandingOrder[];
+  outbox: QueuedStandingMessage[];
+}
+
+/** `PUT /standing-orders/away`. */
+export interface StandingAwayBody {
+  away: boolean;
+}
+
+/** `POST /standing-orders/parse` — the plain words one seat reads. */
+export interface ParseStandingOrderBody {
+  text: string;
+}
+
+/** `POST /standing-orders/parse`'s 200: the rule to show back for confirmation. `refused` is set
+ *  when storing it would be refused (the invariant), in plain words. A 422 carries the seat's own
+ *  `answer` when it could not produce a rule; 409 = no seat can take a turn; 502 = the seat failed. */
+export interface ParsedStandingOrder {
+  rule: StandingOrderRule;
+  seat: string;
+  refused?: string;
+}
+
+/** `POST /standing-orders` — the confirmed rule. 201 `{ order }`. */
+export interface CreateStandingOrderBody {
+  text: string;
+  rule: StandingOrderRule;
+}
