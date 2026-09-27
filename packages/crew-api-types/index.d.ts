@@ -5563,6 +5563,36 @@ export interface DiagnosticsGovernance {
   findings: DiagnosticsGovernanceFinding[];
 }
 
+/** `POST /governance/deadletters/replay` body (api-types 0.51.0): replay THIS daemon's dead-letter
+ *  outbox into its own governance store. `dryRun: true` folds the outbox and moves nothing. */
+export interface GovernanceReplayBody {
+  dryRun?: boolean;
+}
+
+/** `POST /governance/deadletters/replay` answer (api-types 0.51.0) — the `governance replay` CLI's
+ *  outcome. A dry run carries `fold` (what the outbox holds) and `blocker`: why a real replay could
+ *  not run on this daemon (in-memory store, an engine without the binding), `null` when it can. A
+ *  real replay reports what landed (`replayed`), what an earlier replay had already landed
+ *  (`alreadyPresent`, `null` on an engine that does not say) and what did not (`failed` — those
+ *  entries are back on the live outbox and stay dead letters). 409: no governance store / a replay
+ *  already running / a blocker; 501: the engine cannot replay. */
+export interface GovernanceReplayOutcome {
+  outbox: string;
+  store: { path: string; source: DiagnosticsGovernanceStoreSource };
+  /** Where a real replay archived the drained outbox; `null` on a dry run. */
+  archive: string | null;
+  read: number;
+  replayed: number;
+  alreadyPresent: number | null;
+  failed: number;
+  dryRun: boolean;
+  /** The same-event conflation caveat the CLI prints, or `null`. */
+  note: string | null;
+  /** Dry run only: the outbox fold (the `/diagnostics` dead-letter block minus the legacy pointer). */
+  fold?: Omit<DiagnosticsGovernanceDeadletters, 'legacyOutbox'>;
+  blocker: string | null;
+}
+
 /** The skills seam's state as `GET /diagnostics` reports it (skills keystone, api-types 0.28.0). */
 export type DiagnosticsSkillsState = 'published' | 'fallback' | 'blocked' | 'config-error' | 'disabled';
 

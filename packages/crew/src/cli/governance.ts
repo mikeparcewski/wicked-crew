@@ -300,9 +300,19 @@ export async function replayOutbox(
   if (outboxArg === undefined) throw new UsageError('missing <outbox.ndjson>');
   const outbox = resolve(outboxArg);
   if (!existsSync(outbox)) throw new UsageError(`outbox not found: ${outbox}`);
-  const dryRun = args.includes('--dry-run');
-  const store = replayTarget(args, env);
+  return replayOutboxInto(outbox, replayTarget(args, env), { dryRun: args.includes('--dry-run') });
+}
 
+/**
+ * The replay itself, over a resolved outbox and target store — shared by the CLI (which resolves
+ * both from its arguments) and the daemon's `POST /governance/deadletters/replay` (which replays
+ * its OWN outbox into its OWN store). Same drain order, same refusals, same outcome.
+ */
+export async function replayOutboxInto(
+  outbox: string,
+  store: GovernanceStoreLocation,
+  { dryRun }: { dryRun: boolean },
+): Promise<{ outcome: ReplayOutcome; exitCode: 0 | 1 }> {
   if (dryRun) {
     // A dry run folds the FILE and touches no store — so the same target configuration a daemon
     // runs with (`:memory:` included) is inspectable; the refusal below guards only a real replay.
