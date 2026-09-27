@@ -38,9 +38,6 @@ export function seatParser(deps: SeatParserDeps): (text: string) => Promise<Pars
     if (seat === undefined) {
       return { ok: false, code: 409, error: 'no seat can take a turn to read the order — sign a seat in from the System page' };
     }
-    const projects = adapter.projectsSupported()
-      ? (await adapter.projectList()).map((p) => ({ id: p.id, name: p.name }))
-      : [];
     const chatId = `standing-order-parse-${randomUUID()}`;
     const cwd = mkdtempSync(join(tmpdir(), 'crew-order-parse-'));
     let off: () => void = () => undefined;
@@ -57,6 +54,10 @@ export function seatParser(deps: SeatParserDeps): (text: string) => Promise<Pars
           }
         });
       });
+      // Inside the try: a project list that fails is the parse's 502, never an unhandled 500.
+      const projects = adapter.projectsSupported()
+        ? (await adapter.projectList()).map((p) => ({ id: p.id, name: p.name }))
+        : [];
       const opened = await adapter.chatOpen(chatId, [seat], cwd);
       if (!opened.some((s) => s.ok)) {
         return { ok: false, code: 502, error: `the ${seat} seat could not open: ${opened[0]?.error ?? 'refused'}` };

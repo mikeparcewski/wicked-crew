@@ -183,6 +183,10 @@ export class StandingOrderStore {
 
   /** Queue a message an order wants sent — recorded as the order's `standing-order.notified`. */
   queue(o: StandingOrder, runId: string, text: string): QueuedMessage {
+    // Idempotent: the same order's same message about the same run is queued once, so a gate
+    // still open after a restart (the boot sweep sees it again) does not queue it twice.
+    const queued = this.state.outbox.find((m) => m.orderId === o.id && m.runId === runId && m.text === text);
+    if (queued !== undefined) return queued;
     const messageId = randomUUID();
     this.write('standing-order.notified', orderActor(o), {
       runId,

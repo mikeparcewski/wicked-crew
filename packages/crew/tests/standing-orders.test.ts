@@ -244,6 +244,23 @@ describe('StandingOrderEvaluator', () => {
     expect(h.decided.map((d) => d.decision)).toEqual([{ approve: true, ord: 1 }]);
   });
 
+  it('a gate still open after a restart does not queue its notice twice (codex on #686)', async () => {
+    const h = harness({ r1: { projectId: 'A', phases: ['intake', 'design'] } });
+    h.store.add('tell me about any gate', gateRule('*', 'notify', undefined, 'always'), HUMAN);
+    h.setOpen([{ runId: 'r1', ord: 1, reviewingOrd: 0, gateKind: 'def', prompt: 'go?' }]);
+    await h.evaluator.sweep();
+    // A fresh evaluator over the same store: what a restart's boot sweep is.
+    const again = new StandingOrderEvaluator({
+      store: h.store,
+      decideGate: async () => ({ code: 200, body: {} }),
+      audit: { record: () => Date.now() },
+      runFacts: async () => ({ projectId: 'A', problem: 'problem r1', phaseOf: () => 'intake', firstOrd: 0, landsDoctrine: false }),
+      openGates: async () => [{ runId: 'r1', ord: 1, reviewingOrd: 0, gateKind: 'def', prompt: 'go?' }],
+    });
+    await again.sweep();
+    expect(h.store.snapshot().outbox).toHaveLength(1);
+  });
+
   it('a sweep with no active gate order never reads the engine (the boot sweep of every daemon)', async () => {
     const h = harness({ r1: { projectId: 'A', phases: ['intake', 'design'] } });
     await h.evaluator.sweep(); // no orders
@@ -370,6 +387,14 @@ describe('the seat parse', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('a project list that fails is a 502 from the parse, not a thrown 500 (codex on #686)', async () => {
+    const { adapter } = fakeAdapter(null);
+    (adapter as unknown as { projectList: unknown }).projectList = async () => {
+      throw new Error('engine gone');
+    };
+    expect(await seatParser({ adapter, roster })('x')).toMatchObject({ ok: false, code: 502, error: 'engine gone' });
   });
 
   it('a FAILED turn is a failure even when its text holds a rule-shaped object (codex on #686)', async () => {
