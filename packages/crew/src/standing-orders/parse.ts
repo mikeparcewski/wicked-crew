@@ -62,6 +62,8 @@ export function seatParser(deps: SeatParserDeps): (text: string) => Promise<Pars
       await adapter.chatSend(chatId, parsePrompt(text, projects), [seat]);
       const answer = await reply;
       if (answer === null) return { ok: false, code: 502, error: `the ${seat} seat did not answer in ${timeoutMs / 1000} s` };
+      // A failed turn is a failure, whatever its text holds — never a rule to confirm (codex on #686).
+      if (!answer.ok) return { ok: false, code: 502, error: `the ${seat} seat's turn failed`, answer: answer.text };
       const rule = ruleFromAnswer(answer.text);
       if (rule === undefined) {
         return { ok: false, code: 422, error: 'the seat could not turn the words into a rule — try plainer words', answer: answer.text };

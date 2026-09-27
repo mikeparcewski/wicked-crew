@@ -294,7 +294,7 @@ describe('the seat parse', () => {
     expect(ruleFromAnswer('{"action":"launch"}')).toBeUndefined();
   });
 
-  function fakeAdapter(reply: string | null) {
+  function fakeAdapter(reply: string | null, ok = true) {
     let listener: ((e: CoreEvent) => void) | null = null;
     const calls: string[] = [];
     const adapter = {
@@ -312,7 +312,7 @@ describe('the seat parse', () => {
       },
       chatSend: async (id: string, text: string) => {
         calls.push(`send ${text.includes('p-a: Project A') ? 'with-projects' : 'no-projects'}`);
-        if (reply !== null) setTimeout(() => listener?.({ type: 'chatReply', chat: id, cliKey: 'claude', text: reply, ok: true } as unknown as CoreEvent), 5);
+        if (reply !== null) setTimeout(() => listener?.({ type: 'chatReply', chat: id, cliKey: 'claude', text: reply, ok } as unknown as CoreEvent), 5);
         return ['claude'];
       },
       chatClose: async () => {
@@ -340,5 +340,10 @@ describe('the seat parse', () => {
     expect(await seatParser({ adapter: silent.adapter, roster, timeoutMs: 30 })('x')).toMatchObject({ ok: false, code: 502 });
     expect(silent.calls).toContain('close');
     expect(await seatParser({ adapter: silent.adapter, roster: () => [] })('x')).toMatchObject({ ok: false, code: 409 });
+  });
+
+  it('a FAILED turn is a failure even when its text holds a rule-shaped object (codex on #686)', async () => {
+    const failed = fakeAdapter(JSON.stringify(gateRule('intake', 'approve')), false);
+    expect(await seatParser({ adapter: failed.adapter, roster })('x')).toMatchObject({ ok: false, code: 502 });
   });
 });
