@@ -14,10 +14,12 @@
  *   notify  — the message is QUEUED: the store records `standing-order.notified` (its outbox).
  *             Nothing is sent: outbound always waits.
  *
- * THE INVARIANT: an order approves only a phase-review gate (`def`, `run_level`, `terminal`). The
- * deliver gate, a plan approval (whose risk band is not on the gate — so none, fail closed), an
- * escalation, a failure and a triage are never answered by an order, and neither is any gate of a
- * steering-author run (its approval lands doctrine).
+ * THE INVARIANT: an order approves only a phase-review gate (`def`, `run_level`, `terminal`), or —
+ * as a TRUST RECEIPT (brainstorm idea 13) — the plan approval of a run in its own project, of its
+ * own preset, whose OPEN plan gate reports band `0-19` and no high risk (read off the gate's own
+ * `gate.opened` row; unreadable = fail closed). The deliver gate, an escalation, a failure and a
+ * triage are never answered by an order, and neither is any gate of a steering-author run (its
+ * approval lands doctrine).
  *
  * A gate's PHASE, for matching, is the reviewed unit's `phase_ref` (the upcoming unit's when
  * nothing has run). The gate before the run's first unit, with nothing to review, is also
@@ -27,7 +29,14 @@
 import type { AuditLog } from '../api/audit.js';
 import type { RegisteredRoutes } from '../api/routes.js';
 import type { CoreEvent } from '../core/types.js';
-import { orderActor, type StandingOrder, type StandingOrderStore } from './store.js';
+import {
+  orderActor,
+  PLAN_APPROVAL_PHASE,
+  TRUSTED_PLAN_BAND,
+  type StandingOrder,
+  type StandingOrderRule,
+  type StandingOrderStore,
+} from './store.js';
 
 /** The only gate kinds an order may approve. */
 export const APPROVABLE_GATE_KINDS: ReadonlySet<string> = new Set(['def', 'run_level', 'terminal']);
@@ -58,6 +67,27 @@ export interface RunFacts {
   landsDoctrine: boolean;
   /** The band the run's accepted plan landed in (`team_plan.accepted.band`); undefined when unscored. */
   band: string | undefined;
+  /** The preset the launch named (`team_plan.preset`); undefined on a user plan or a workflow. */
+  preset?: string | undefined;
+}
+
+/** The OPEN plan gate's own reading of the plan it holds (its `gate.opened` row). */
+export interface PlanGateRisk {
+  band: string;
+  highRisk: boolean;
+}
+
+/** Whether an order may answer this plan gate: the trust receipt's every condition, re-read. */
+export function planOrderMayApprove(
+  rule: StandingOrderRule,
+  run: Pick<RunFacts, 'landsDoctrine' | 'projectId' | 'preset'>,
+  risk: PlanGateRisk | undefined,
+): boolean {
+  if (rule.trigger.kind !== 'gate' || rule.trigger.phase !== PLAN_APPROVAL_PHASE) return false;
+  if (rule.scope.kind !== 'project' || rule.scope.projectId !== run.projectId) return false;
+  if (rule.trigger.band !== TRUSTED_PLAN_BAND || rule.trigger.preset === undefined) return false;
+  if (run.preset === undefined || rule.trigger.preset !== run.preset || run.landsDoctrine) return false;
+  return risk !== undefined && !risk.highRisk && risk.band === TRUSTED_PLAN_BAND;
 }
 
 /**
@@ -88,6 +118,8 @@ export interface EvaluatorDeps {
   runFacts: (runId: string) => Promise<RunFacts | undefined>;
   /** The engine's open gate rows (a sweep); `[]` when the engine cannot say. */
   openGates: () => Promise<GateFact[]>;
+  /** The run's OPEN plan gate's band and risk; undefined when it cannot be read (fail closed). */
+  planGate?: (runId: string) => Promise<PlanGateRisk | undefined>;
   log?: (msg: string) => void;
 }
 
@@ -162,14 +194,24 @@ export class StandingOrderEvaluator {
     const run = await this.deps.runFacts(g.runId);
     if (run === undefined) return;
     const { phase, unitPhase } = gatePhase(run, g.ord, g.reviewingOrd);
-    const matching = orders.filter(
-      (o) =>
-        this.inScope(o, run.projectId) &&
-        o.rule.trigger.kind === 'gate' &&
-        (o.rule.trigger.phase === '*' || o.rule.trigger.phase === phase || o.rule.trigger.phase === unitPhase) &&
+    // A plan gate is also matched by a plan-approval order (the trust receipt), on the band of the
+    // plan the gate holds — at the first plan gate the run has no accepted band yet.
+    const planGate = g.gateKind === PLAN_APPROVAL_PHASE;
+    const planOrder = (o: StandingOrder): boolean => o.rule.trigger.kind === 'gate' && o.rule.trigger.phase === PLAN_APPROVAL_PHASE;
+    const risk = planGate && orders.some(planOrder) ? await this.planRisk(g.runId) : undefined;
+    const matching = orders.filter((o) => {
+      if (!this.inScope(o, run.projectId) || o.rule.trigger.kind !== 'gate') return false;
+      const t = o.rule.trigger;
+      if (planOrder(o)) {
+        return planGate && (t.band === undefined || t.band === risk?.band) && (t.preset === undefined || t.preset === run.preset);
+      }
+      return (
+        (t.phase === '*' || t.phase === phase || t.phase === unitPhase) &&
         // A band-scoped order matches only a run scored into that band; an unscored run never does.
-        (o.rule.trigger.band === undefined || o.rule.trigger.band === run.band),
-    );
+        (t.band === undefined || t.band === run.band) &&
+        (t.preset === undefined || t.preset === run.preset)
+      );
+    });
     const subject = `gate:${g.runId}:${g.ord}`;
     const holds = matching.filter((o) => o.rule.action === 'hold');
     const approves = matching.filter((o) => o.rule.action === 'approve');
@@ -184,9 +226,14 @@ export class StandingOrderEvaluator {
       if (!this.once(`${subject}:${o.id}`)) continue;
       this.notify(o, g.runId, `${run.problem}: the ${phase || g.gateKind} gate is waiting on you`);
     }
-    // THE INVARIANT: only a phase-review gate, and never under a hold.
-    const approver = approves[0];
-    if (approver === undefined || holds.length > 0 || !orderMayApprove(g.gateKind, run)) return;
+    // THE INVARIANT: only a phase-review gate — or a plan gate the trust receipt covers in full —
+    // and never under a hold.
+    const approver = planGate
+      ? approves.find((o) => planOrderMayApprove(o.rule, run, risk))
+      : orderMayApprove(g.gateKind, run)
+        ? approves[0]
+        : undefined;
+    if (approver === undefined || holds.length > 0) return;
     if (!this.once(`${subject}:approve`)) return;
     const out = await this.deps.decideGate(g.runId, { approve: true, ord: g.ord }, orderActor(approver), {
       standingOrder: { id: approver.id, text: approver.text },
@@ -196,6 +243,17 @@ export class StandingOrderEvaluator {
         `[standing-orders] order ${approver.id} did not answer the gate before unit ${g.ord} on ${g.runId}: ` +
           `${out.code} ${JSON.stringify(out.body)}`,
       );
+    }
+  }
+
+  /** The open plan gate's band and risk; undefined (fail closed) when it cannot be read. */
+  private async planRisk(runId: string): Promise<PlanGateRisk | undefined> {
+    if (this.deps.planGate === undefined) return undefined;
+    try {
+      return await this.deps.planGate(runId);
+    } catch (err) {
+      this.log(`[standing-orders] cannot read the plan gate of ${runId}: ${String(err)}`);
+      return undefined;
     }
   }
 

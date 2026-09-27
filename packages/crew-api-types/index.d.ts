@@ -6844,8 +6844,12 @@ export interface PlanPreviewResponse {
 export interface StandingOrderRule {
   scope: { kind: 'all' } | { kind: 'project'; projectId: string };
   /** `band` (api-types 0.53.0, optional): the order matches only a run whose accepted plan landed in
-   *  that band (`"0-19"`, …); a run with no scored plan never matches a band-scoped order. */
-  trigger: { kind: 'gate'; phase: string; band?: string | undefined } | { kind: 'finding'; severity: 'high' | 'medium' | '*' };
+   *  that band (`"0-19"`, …); a run with no scored plan never matches a band-scoped order.
+   *  `preset` (api-types 0.56.0, optional): only a run launched from that preset (`team_plan.preset`).
+   *  `phase: "plan_approval"` with `action: "approve"` is a TRUST RECEIPT (0.56.0): accepted only
+   *  with `band: "0-19"`, a `preset` and a `project` scope, and it answers a run's plan gate only
+   *  when that open gate itself reports band 0-19 and no high risk. `deliver` is never approvable. */
+  trigger: { kind: 'gate'; phase: string; band?: string | undefined; preset?: string | undefined } | { kind: 'finding'; severity: 'high' | 'medium' | '*' };
   action: 'approve' | 'hold' | 'notify';
   activeWhen: 'away' | 'always';
 }

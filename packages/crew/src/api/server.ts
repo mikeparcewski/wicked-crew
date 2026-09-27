@@ -69,7 +69,8 @@ import { StandingOrderStore } from '../standing-orders/store.js';
 import { StandingOrderEvaluator, type GateFact } from '../standing-orders/evaluator.js';
 import { registerStandingOrderRoutes } from '../standing-orders/routes.js';
 import { seatParser } from '../standing-orders/parse.js';
-import { registerGateHistoryRoute, runBand, runProject } from '../standing-orders/history.js';
+import { registerGateHistoryRoute, runBand, runPreset, runProject } from '../standing-orders/history.js';
+import { busRows, openPlanGateRisk } from '../team/routes.js';
 import { isSteeringAuthorRun } from './steering-landing.js';
 import { applyWorkerConfigRoot } from './seat-signin.js';
 import { registeredSkillRefs } from '../skills/core-closure.js';
@@ -1565,6 +1566,7 @@ export async function createServer(
       return {
         projectId: runProject(v, runId, (id) => membershipIndex.projectOf(id)),
         band: runBand(v),
+        preset: runPreset(v),
         problem: v.session.problem,
         phaseOf: (ord) => v.units.find((u) => u.ord === ord)?.phase_ref ?? undefined,
         firstOrd: v.units.length === 0 ? undefined : Math.min(...v.units.map((u) => u.ord)),
@@ -1584,6 +1586,8 @@ export async function createServer(
           prompt: r.prompt,
         }));
     },
+    // Brainstorm idea 13: a plan-approval trust order re-reads the open plan gate's own band.
+    planGate: async (runId) => openPlanGateRisk(await busRows(adapter.busDbPath, runId)),
     log: (m) => app.log.warn(m),
   });
   // The decided-gate history (brainstorm ideas 7 and 8): a seat's track record, and the preview
