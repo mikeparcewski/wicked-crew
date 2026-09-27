@@ -4603,7 +4603,7 @@ export function registerRoutes(
     }
     if (edit.data.content !== undefined || edit.data.reach !== undefined) {
       try {
-        const done = await approveEdited(estateTool, id, edit.data);
+        const done = await approveEdited(estateTool, id, edit.data, (runId) => projects.index.projectOf(runId));
         return reply.code(done.status).send(done.body);
       } catch (err) {
         return estateUpstreamError(reply, err);

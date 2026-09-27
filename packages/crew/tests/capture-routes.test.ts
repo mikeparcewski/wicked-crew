@@ -30,7 +30,7 @@ const PNG_B64 =
 
 type EstateStub = ReturnType<typeof vi.fn>;
 
-function buildApp(adapter: Record<string, unknown>, estate: EstateStub): FastifyInstance {
+function buildApp(adapter: Record<string, unknown>, estate: EstateStub, index = new MembershipIndex()): FastifyInstance {
   const app = Fastify({ logger: false });
   app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body, done) => {
     if (!body) return done(null, undefined);
@@ -45,7 +45,7 @@ function buildApp(adapter: Record<string, unknown>, estate: EstateStub): Fastify
     adapter as unknown as CoreAdapter,
     new GateCache(),
     new ElicitationCache(),
-    { bus: null, index: new MembershipIndex(), log: () => undefined },
+    { bus: null, index, log: () => undefined },
     { audit: AuditLog.noop(), authMode: 'off' },
     { callEstateTool: estate as (t: string, a: Record<string, unknown>) => Promise<unknown> },
   );
@@ -246,6 +246,37 @@ describe('POST /proposals/:id/approve {content?, reach?} — accept with an edit
     const submit = estate.mock.calls.find((c) => c[0] === 'proposal.submit')![1] as Record<string, unknown>;
     expect(submit['facets']).toEqual({ project: 'proj-1', repo: 'upload-api', cli: 'claude' });
     expect((submit['payload'] as Record<string, unknown>)['reach']).toBe('project');
+  });
+
+  it('an accept that keeps an already project-scoped row as filed is a plain approve — no copy', async () => {
+    stubEstate(pending({ payload: { content: 'We chose Postgres', tier: 'semantic', capture: 'decision' } }));
+    const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/p1/approve', payload: { reach: 'project' } });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json()).toEqual({ outcome: 'promoted', active_id: 'proposal:p2' });
+    expect(estate.mock.calls).toEqual([
+      ['proposal.list', { state: 'pending' }],
+      ['proposal.approve', { id: 'p1' }],
+    ]);
+  });
+
+  it("keeping a row in its project when the worker filed no project facet scopes the copy to the capture run's project", async () => {
+    const index = new MembershipIndex();
+    index.set('r-cap', 'proj-7');
+    await app.close();
+    app = buildApp({ sessionsDetail: vi.fn().mockResolvedValue([]), listRepos: vi.fn().mockResolvedValue([]) }, estate, index);
+    await app.ready();
+    stubEstate(pending({ facets: {} }));
+    const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/p1/approve', payload: { reach: 'project' } });
+    expect(res.statusCode, res.body).toBe(200);
+    const submit = estate.mock.calls.find((c) => c[0] === 'proposal.submit')![1] as Record<string, unknown>;
+    expect(submit['facets']).toEqual({ project: 'proj-7' });
+  });
+
+  it('refuses to keep a row in a project nobody can name, writing nothing', async () => {
+    stubEstate(pending({ facets: {}, provenance: {} }));
+    const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/p1/approve', payload: { reach: 'project' } });
+    expect(res.statusCode).toBe(400);
+    expect(estate.mock.calls.map((c) => c[0])).toEqual(['proposal.list']);
   });
 
   it('refuses to let a decision or an intent cross projects, writing nothing', async () => {

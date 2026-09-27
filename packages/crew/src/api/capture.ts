@@ -233,15 +233,25 @@ export type EditedApproval = { status: number; body: Record<string, unknown> };
  * Accept a pending MEMORY proposal WITH an edit — submit the edited copy, reject the original,
  * approve the copy — and return the copy's approve outcome plus `edited: {from, to}`. A
  * `reach: "pattern"` copy drops the `project` and `repo` facets (it may now be recalled on any
- * project); it is refused on a decision or an intent, which are always the project's.
+ * project); it is refused on a decision or an intent, which are always the project's. A
+ * `reach: "project"` row keeps (or, when the worker filed none, gains) the project facet — the
+ * capture run's project, read from `projectOf(provenance.run_id)`. When nothing changes, the
+ * original is approved as filed (no copy).
  */
 export async function approveEdited(
   estateTool: EstateTool,
   id: string,
   edit: z.infer<typeof ApproveEditSchema>,
+  projectOf: (runId: string) => string | undefined,
 ): Promise<EditedApproval> {
   const listed = (await estateTool('proposal.list', { state: 'pending' })) as {
-    proposals?: { id: string; kind_type: string; payload: unknown; facets: Record<string, string> }[];
+    proposals?: {
+      id: string;
+      kind_type: string;
+      payload: unknown;
+      facets: Record<string, string>;
+      provenance?: Record<string, string>;
+    }[];
   };
   const row = (listed.proposals ?? []).find((p) => p.id === id);
   if (row === undefined) return { status: 404, body: { error: `no pending proposal ${id}` } };
@@ -261,7 +271,19 @@ export async function approveEdited(
     delete facets['project'];
     delete facets['repo'];
   } else if (edit.reach === 'project' && facets['project'] === undefined) {
-    return { status: 400, body: { error: `proposal ${id} names no project to keep it in` } };
+    const runId = row.provenance?.['run_id'];
+    const project = runId === undefined ? undefined : projectOf(runId);
+    if (project === undefined) {
+      return { status: 400, body: { error: `proposal ${id} names no project to keep it in, and no project files the run that proposed it` } };
+    }
+    facets['project'] = project;
+  }
+  const sameFacets =
+    Object.keys(facets).length === Object.keys(row.facets).length &&
+    Object.entries(facets).every(([k, v]) => row.facets[k] === v);
+  if ((edit.content === undefined || edit.content === payload['content']) && sameFacets) {
+    // Nothing the store keeps would change: approve the original as filed.
+    return { status: 200, body: (await estateTool('proposal.approve', { id })) as Record<string, unknown> };
   }
   if (edit.content !== undefined) payload['content'] = edit.content;
   if (edit.reach !== undefined) payload['reach'] = edit.reach;
