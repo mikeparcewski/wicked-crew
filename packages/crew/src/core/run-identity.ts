@@ -30,19 +30,17 @@ import type { RunIdentity, SessionView, WorkflowDef } from './types.js';
 import { baseWorkflowId } from './deliver-text.js';
 
 /**
- * The machine-owned workflows (and, once they migrate, presets) — keyed by NAME, so a preset and
- * the def it replaces classify alike. Studio hides these from its delivery surfaces and its
- * work-mode selector; `GET /workflows` serves `is_system: true` for exactly these ids.
+ * The machine-owned workflows and presets — keyed by NAME, so a preset and the def it replaces
+ * classify alike (`chat` and `onboarding` are engine built-in presets since DES-TEAMING-002
+ * M3/M4). Studio hides these from its delivery surfaces and its work-mode selector;
+ * `GET /workflows` serves `is_system: true` for exactly these ids, and `GET /presets` serves
+ * `system: true` for a preset of one of these names.
  */
 export const SYSTEM_WORKFLOWS: ReadonlySet<string> = new Set([
   'chat',
   'onboarding',
-  'survey-repo',
   'capture-learnings',
-  'domain-graph-slice',
-  'memories',
   'steering-author',
-  'collab',
   // The interactive document and video seams (`interactive/*-events.ts`).
   'interactive-chat',
   'interactive-demo',
@@ -68,6 +66,15 @@ export function withSystemFlag<T extends WorkflowDef>(def: T): T {
   const rest = { ...def };
   delete rest.is_system;
   return rest;
+}
+
+/**
+ * A preset with its `system` flag set from {@link SYSTEM_WORKFLOWS} — the preset's half of the one
+ * classification (DES-TEAMING-002 §11.3: delivery classification reads the preset's system flag
+ * where it read the def's `is_system`).
+ */
+export function withPresetSystemFlag<T extends { name: string }>(preset: T): T & { system: boolean } {
+  return { ...preset, system: isSystemWorkflow(preset.name) };
 }
 
 /**

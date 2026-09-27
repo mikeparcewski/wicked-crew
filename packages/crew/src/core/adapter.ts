@@ -56,6 +56,7 @@ import {
   resolveRunIdentity,
   verifiedEvidenceCatalog,
   wireIdentity,
+  withPresetSystemFlag,
   withSystemFlag,
 } from './run-identity.js';
 
@@ -623,15 +624,16 @@ function addonAtLeast(maj: number, min: number, pat: number): boolean {
 }
 
 // ── Built-in workflow definitions (crew#44) ──────────────────────────────────
-// Static mirrors of wicked-core workflow defs: feature, bug, migration, survey-repo,
-// domain-graph-slice, memories, collab, onboarding, chat, and domain-extraction.
+// Static mirrors of wicked-core workflow defs: feature, bug, migration and domain-extraction, plus
+// crew's own defs. `chat` and `onboarding` are engine built-in PRESETS (DES-TEAMING-002 M3/M4),
+// launched by the same name with no def here; `survey-repo`, `memories`, `domain-graph-slice` and
+// `collab` are deleted (nothing launched them).
 // Swap for `this.core.listWorkflowsJson()` / `this.core.getWorkflowJson(id)` once
 // the wicked-core-ts NAPI methods land.
 /**
  * The ids wicked-core seeds itself, in `WorkflowRegistry::with_defaults()`.
  *
- * `launchRun`'s generic drop-in overlay write SKIPS every id in this set (`onboarding` is written
- * by the onboarding path instead — see the end of this comment, it is the one deliberate exception).
+ * `launchRun`'s generic drop-in overlay write SKIPS every id in this set.
  * A file in that dir shadows the compiled built-in
  * *wholesale* — `register` overwrites by id and `load_dir` runs after `with_defaults` — so writing
  * this hand-transcribed mirror over the real def silently replaces it with a copy missing whatever
@@ -640,16 +642,10 @@ function addonAtLeast(maj: number, min: number, pat: number): boolean {
  * `bug.verify` and `migration.verify` — the entire content of core's gate-floor change, undone by a
  * file write, with no error and a workflow still reporting the right id and phases (FINDING-049).
  *
- * The write exists for the ids core does NOT seed (chat, survey-repo, domain-graph-slice,
- * memories, domain-extraction): for those the overlay is the only reason they resolve at all, so
- * it stays.
- *
- * The exception: `onboarding` is core-seeded AND still written, by the onboarding path rather than
- * by the generic one. Deliberate — that def's executor cmds are baked with runtime `--db` paths, so
- * it shadows core's copy with a real customization rather than a stale transcription. It is the one
- * shadow that earns its keep, and the reason this set gates the generic write specifically.
+ * The write exists for the ids core does NOT seed (domain-extraction and crew's own defs): for
+ * those the overlay is the only reason they resolve at all, so it stays.
  */
-const CORE_SEEDED_WORKFLOWS = new Set(['feature', 'bug', 'migration', 'onboarding', 'collab']);
+const CORE_SEEDED_WORKFLOWS = new Set(['feature', 'bug', 'migration']);
 
 // `EVIDENCE_FLOOR_PIN` (imported from ./deliver.js, defined once) is carried on the Evaluator phase
 // of feature/bug/migration AND, since wicked-core F-039, on their code-writing Creator phases
@@ -666,30 +662,6 @@ const CORE_SEEDED_WORKFLOWS = new Set(['feature', 'bug', 'migration', 'onboardin
 // `is_system` is NOT spelled on these defs: `withSystemFlag` stamps it from `SYSTEM_WORKFLOWS`
 // (core/run-identity.ts), the one list keyed by name that also classifies served runs (seam X2).
 export const BUILTIN_WORKFLOWS: WorkflowDef[] = ([
-  {
-    id: 'chat',
-    phases: [
-      { id: 'explore', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-    ],
-  },
-  {
-    id: 'onboarding',
-    phases: [
-      { id: 'index', executor: { type: 'tool', cmd: ['wicked-estate', 'index', '{repo_root}', '--db', '{code_graph_db}'] }, kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-      { id: 'annotate', executor: { type: 'tool', cmd: ['wicked-estate', 'clusters', '--annotate', '--db', '{code_graph_db}'] }, kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['index'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-      // index → annotate, and NOT a third `domain` phase running `wicked-core domain-graph`. That
-      // phase could never pass: domain-graph fails closed below 1.0 front-half coverage, and nothing
-      // in this workflow annotates a single symbol, so coverage was 0.0 on every repo — every
-      // registration ended sessionFailed after the two phases that matter had both succeeded
-      // (FINDING-068). domain-graph belongs to `domain-extraction`, downstream of the agentic
-      // extract+coverage phases that produce its precondition. Mirrors core's `onboarding_def()`.
-      //
-      // The `{repo_root}` / `{code_graph_db}` placeholders are core's, substituted per run from the
-      // launch's `repoRef` (wicked-core#179). This package used to bake absolute paths in here and
-      // write the result to one shared overlay file per launch — which concurrent registrations
-      // raced, indexing one repo's tree under another repo's name (FINDING-075, #196).
-    ],
-  },
   {
     id: 'feature',
     phases: [
@@ -724,21 +696,6 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = ([
     ],
   },
   {
-    // MUST stay byte-identical to wicked-core/workflows/survey-repo.json — crew's overlay write is the
-    // ONLY def the engine resolves at runtime (core does not seed survey-repo), so a stale mirror here
-    // silently runs the OLD def. The pre-fix mirror carried 3 phases with no `instructions` and no
-    // `synthesize`, so survey-repo ran 3 near-identical prompts and produced no run-level synthesis —
-    // exactly FINDING-011, still live because the fix only landed in the core JSON the runtime ignores.
-    // Guarded by builtin-overlay-shadow.test.ts (survey-repo is now in MIRRORED_IDS).
-    id: 'survey-repo',
-    phases: [
-      { id: 'structure', kind: 'recon', instructions: 'Map the repository layout only: top-level directories, entry points, and where source, tests, config, and docs live. Do not analyze languages, dependencies, or conventions — later phases cover those.', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-      { id: 'stack', kind: 'recon', instructions: 'Identify the technology stack from the manifests (package.json, Cargo.toml, pyproject.toml, ...): languages, frameworks, build tools, key dependencies. Build on the structure summary provided as prior context; do not re-map the layout.', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['structure'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-      { id: 'conventions', kind: 'recon', instructions: 'Identify the working conventions: naming, module boundaries, test placement and style, lint/format configuration, CI expectations. Build on the prior phases\' outputs provided as context; do not re-survey structure or stack.', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['stack'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-      { id: 'synthesize', kind: 'recon', instructions: 'Do not re-survey the repository. Merge the three prior phase outputs provided as context into one coherent survey — structure, then stack, then conventions — resolving overlaps and flagging any contradictions between them.', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['structure', 'stack', 'conventions'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-    ],
-  },
-  {
     // capture-learnings (DES-MEM-FACETED-001 write side, onboarding): survey a just-indexed repo,
     // then propose its durable learnings — BOTH faceted MEMORIES and repo POLICIES — as inert estate
     // `proposal.submit` proposals (through garden's estate shim) a human later reviews.
@@ -757,7 +714,7 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = ([
     //     SINGLE `capture` phase emits both from the one shared understanding — splitting derive-
     //     memories / derive-policies would re-run a council over the same context for no new evidence.
     //   • Reuse already lives below the run: the reusable unit is the SKILL (and hotspot-read is
-    //     already a reusable capability via `wicked-garden-search`; survey via `survey-repo`).
+    //     already a reusable capability via `wicked-garden-search`).
     //
     // The METHOD lives in the garden skill `wicked-garden-repo-learn`, referenced per-phase by
     // `skill_ref` — the engine emits only a short `Invoke your skill "wicked-garden:repo-learn"…`
@@ -783,21 +740,6 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = ([
     ],
   },
   {
-    id: 'domain-graph-slice',
-    phases: [
-      { id: 'identify', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-      { id: 'extract', kind: 'build', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['identify'], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: null },
-      { id: 'validate', kind: 'review', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['extract'], role: 'evaluator', skill_ref: null, allowed_skills: [], validator_pin: null },
-    ],
-  },
-  {
-    id: 'memories',
-    phases: [
-      { id: 'gather', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-      { id: 'store', kind: 'build', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['gather'], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: null },
-    ],
-  },
-  {
     // "Add with chat" for the Steering surface (STEERING program) — the dedicated entry point
     // behind POST /governance/steering/author. TH-12 propose-as-gate: the run analyzes the
     // operator's intent + the named files/dirs, then the TERMINAL `propose` phase emits the
@@ -812,22 +754,13 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = ([
     // as the launch's extra write root) — because parsing the proposal out of prose transcript
     // is a fallback, not a design (the landing reads the file first).
     //
-    // Crew-authored drop-in (like `chat`): NOT in CORE_SEEDED_WORKFLOWS, so launchRun's
+    // Crew-authored drop-in: NOT in CORE_SEEDED_WORKFLOWS, so launchRun's
     // `_writeBuiltinOverlay` write is the only way core resolves the id — the same delivery
     // mechanism every crew drop-in uses.
     id: 'steering-author',
     phases: [
       { id: 'analyze', kind: 'recon', instructions: 'Read the operator intent and every file or directory listed in the problem statement. Identify candidate steering rules: durable, prescriptive statements a coding agent must follow, each classified into one steering type (architecture, development, security, testing, operations, compliance, design-ux). For each candidate note the statement, steering type, severity, and the evidence in the source material. Analysis only — do not write any rule to any store, and do not emit final rule JSON yet.', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
       { id: 'propose', kind: 'recon', instructions: 'From the prior analysis, emit the PROPOSED steering rules as one JSON array. Each entry is a conformance-rule object: id (PAT-<digits> for rule_type "pattern", POL-<digits> for "policy"), rule_type, statement, severity (info|warn|error|critical), confidence (a NUMBER 0..1), steering_type (default to the type named in the problem statement), provenance {"source":"chat"}, and — only where the source material supports them — the enforcement fields applies_to (array of phase tokens or globs), excludes, weight, obligations (array of strings), criteria (ONE string, never a list). Omit targets, effect and trigger unless you can express them in the store schema exactly: targets is a {language, layer, framework} facet OBJECT (never a file list — files belong in applies_to), and trigger is a structured condition object (never prose). SAVE that JSON array (bare array, no prose, no code fences) to the absolute proposal file path named in the problem statement (create parent directories if needed, overwrite if present), AND include the same array in your reply for the human reviewer. This output is a PROPOSAL for the human gate: the proposal file is an artifact for review, and rules land in the governance store only after approval, written crew-side — do not write any rule to any store yourself.', gate_type: 'value', gate: { human_confirm: { unconditional: true } }, executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['analyze'], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: null },
-    ],
-  },
-  {
-    id: 'collab',
-    phases: [
-      { id: 'propose', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: null },
-      { id: 'critique', kind: 'review', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['propose'], role: 'evaluator', skill_ref: null, allowed_skills: [], validator_pin: null },
-      { id: 'revise', kind: 'recon', gate_type: 'strategy', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['critique'], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: null },
-      { id: 'verdict', kind: 'review', gate_type: 'value', gate: { human_confirm: { unconditional: false } }, executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['revise'], role: 'evaluator', skill_ref: null, allowed_skills: [], validator_pin: null },
     ],
   },
   // The governed test-authoring workflow (wave 6 — F-7R2-003/004/005/012/014/015, R4-r2): recon →
@@ -2193,9 +2126,9 @@ export class CoreAdapter {
 
   async putPreset(name: string, steps: PresetStep[], projectId?: string, createdBy?: string): Promise<Preset> {
     const fn = this.requirePresets(this.core.putPreset, 'Saving a preset');
-    return JSON.parse(
-      await fn.call(this.core, name, JSON.stringify(steps), projectId ?? null, createdBy ?? null),
-    ) as Preset;
+    return withPresetSystemFlag(
+      JSON.parse(await fn.call(this.core, name, JSON.stringify(steps), projectId ?? null, createdBy ?? null)) as Preset,
+    );
   }
 
   async deletePreset(name: string, projectId?: string): Promise<boolean> {
@@ -2217,7 +2150,7 @@ export class CoreAdapter {
 
   async listPresets(projectId?: string): Promise<Preset[]> {
     const fn = this.requirePresets(this.core.listPresets, 'Listing presets');
-    return JSON.parse(await fn.call(this.core, projectId ?? null)) as Preset[];
+    return (JSON.parse(await fn.call(this.core, projectId ?? null)) as Preset[]).map(withPresetSystemFlag);
   }
 
   // ── Team (DES-TEAMING-002 T8) ───────────────────────────────────────────────
@@ -2703,9 +2636,10 @@ export class CoreAdapter {
       problem: `Onboard repository: ${repoName}`,
       sessionId: runId,
       // The run's seat pool is the seats the WORKFLOW can use (F-2R2-010): onboarding is two tool
-      // phases routed to the `wicked-estate` executor, so its pool is empty — not the whole roster
-      // dressed up as a 5-seat run with four signed-out seats.
-      clisJson: JSON.stringify(this.seatsForWorkflow('onboarding')),
+      // steps routed to the `wicked-estate` executor, so its pool is empty — not the whole roster
+      // dressed up as a 5-seat run with four signed-out seats. `onboarding` is the engine's
+      // built-in PRESET (DES-TEAMING-002 M4), read from the engine's store.
+      clisJson: JSON.stringify(await this.seatsForWorkflow('onboarding')),
       workflow: 'onboarding',
       repoRef: repoId,
     });
@@ -2727,19 +2661,26 @@ export class CoreAdapter {
   }
 
   /**
-   * The roster a run of `workflowId` should carry as its seat pool. A workflow whose every phase
-   * runs a TOOL executor convenes no council and dispatches no seat, so its pool is `[]` — the
-   * engine routes each unit `tool` without consulting the pool (verified against the engine: an
-   * onboarding launch with `clis: []` distributes both units to `wicked-estate`). Any workflow
-   * with an agent phase — or one this daemon cannot read — gets the full roster, as before.
+   * The roster a run of `workflowId` should carry as its seat pool. A workflow or preset whose
+   * every phase (step) runs a TOOL executor convenes no council and dispatches no seat, so its pool
+   * is `[]` — the engine routes each unit `tool` without consulting the pool (verified against the
+   * engine: an onboarding launch with `clis: []` distributes both units to `wicked-estate`). Any
+   * one with an agent phase — or one this daemon cannot read — gets the full roster, as before.
+   * A registered def is read first; otherwise the preset the name launches (the engine resolves a
+   * launch the same way: DES-TEAMING-002 §8.4).
    */
-  seatsForWorkflow(workflowId: string): unknown[] {
+  async seatsForWorkflow(workflowId: string): Promise<unknown[]> {
     const def = this.getWorkflow(workflowId);
+    const executors: Array<{ type?: unknown } | undefined> =
+      def !== null
+        ? def.phases.map((p) => p.executor)
+        : ((await this.presetNamed(workflowId))?.steps ?? []).map(
+            (s) => s['executor'] as { type?: unknown } | undefined,
+          );
     // The roster WITH standing when the daemon wired one (F-RECON-002/003) — `launchRun` then
     // benches `council_eligible: false` seats through `engineRosterJson`.
-    if (def === null || def.phases.length === 0) return this.launchRoster();
-    const toolOnly = def.phases.every((p) => p.executor?.type === 'tool');
-    return toolOnly ? [] : this.launchRoster();
+    if (executors.length === 0) return this.launchRoster();
+    return executors.every((e) => e?.type === 'tool') ? [] : this.launchRoster();
   }
 
   /** Return the onboarding run id for a repo (undefined if not launched this session). */

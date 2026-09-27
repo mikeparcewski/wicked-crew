@@ -94,7 +94,7 @@ async function trail(pred: (entries: AuditEntry[]) => boolean, ms = 5_000): Prom
 describe('§4.8 — isCodeWorkDef equals the LIVE POST /runs deliver-default rule for every shipped def', () => {
   it('drives POST /runs per shipped def (no `deliver`) and reads the closure\'s decision off the run.launched trail', async () => {
     const shipped: WorkflowDef[] = adapter.listWorkflows();
-    expect(shipped.map((w) => w.id)).toEqual(expect.arrayContaining(['feature', 'bug', 'onboarding', 'capture-learnings', 'qe-author-tests']));
+    expect(shipped.map((w) => w.id)).toEqual(expect.arrayContaining(['feature', 'bug', 'capture-learnings', 'qe-author-tests']));
     const decided: Array<{ id: string; deliver: unknown; defaulted: unknown }> = [];
     for (const def of shipped) {
       const { status, body } = await post('/api/v1/runs', {
@@ -118,7 +118,17 @@ describe('§4.8 — isCodeWorkDef equals the LIVE POST /runs deliver-default rul
     // Sanity on the table itself (the des-review-L8 answer per def), so the pin cannot pass vacuously.
     const pr = decided.filter((d) => d.deliver === 'pr').map((d) => d.id).sort();
     expect(pr).toEqual(expect.arrayContaining(['feature', 'bug', 'migration', 'qe-author-tests']));
-    expect(pr).not.toEqual(expect.arrayContaining(['onboarding']));
+    expect(pr).not.toEqual(expect.arrayContaining(['capture-learnings']));
     expect(decided.find((d) => d.id === 'capture-learnings')?.deliver).toBe('none');
+
+    // M3 (DES-TEAMING-002): `chat` is no def now — the engine's built-in preset — and a repo-scoped
+    // chat launch with no `deliver` still defaults to 'none', as its deleted def did.
+    expect(shipped.map((w) => w.id)).not.toContain('chat');
+    const chat = await post('/api/v1/runs', { problem: '§4.8 chat preset', clisJson: SEATS, workflow: 'chat', repoRef: 'repo-alpha' });
+    expect(chat.status, JSON.stringify(chat.body)).toBe(201);
+    const chatRun = chat.body['runId'] as string;
+    const isChat = (e: AuditEntry) => e.action === 'run.launched' && e.runId === chatRun;
+    const chatLaunched = (await trail((es) => es.some(isChat))).filter(isChat);
+    expect(chatLaunched[0]?.detail).toMatchObject({ deliver: 'none', deliverDefaulted: true });
   }, 60_000);
 });

@@ -104,7 +104,7 @@ afterAll(async () => {
 describe('onboarding launched through POST /repos against the real engine (F-E2E-011)', () => {
   it('hands the engine NO seats and the run gets past distribution to its first tool unit', async () => {
     // The daemon's own pool for the workflow — `[]`, and this test does not change that.
-    expect(adapter.seatsForWorkflow('onboarding')).toEqual([]);
+    expect(await adapter.seatsForWorkflow('onboarding')).toEqual([]);
 
     // "Register & onboard": register, then launch onboarding — one request, as the studio sends it.
     const res = await fetch(`${baseUrl}/api/v1/repos`, {
@@ -171,5 +171,16 @@ describe('onboarding launched through POST /repos against the real engine (F-E2E
       expect(calls.some((c) => /^clusters --annotate /.test(c)), `annotate never ran; calls: ${calls.join(' | ')}`).toBe(true);
       expect(session.status, `terminal status; trail: ${trail}`).toBe('completed');
     }
+
+    // 5. (DES-TEAMING-002 M4) `onboarding` launched as the engine's built-in PRESET: the served run
+    //    names it (studio's onboard state matches `workflow_id === 'onboarding'`), is classified
+    //    system, and its units are the two catalog `run` steps — no `pa-scope` step, because a
+    //    tool-only plan has no creator step to scope.
+    expect(session.run_identity).toMatchObject({ kind: 'preset', name: 'onboarding', system: true });
+    expect(session.workflow_id).toBe('onboarding');
+    expect(view!.units.map((u) => [u.ord, u.catalog])).toEqual([
+      [1, 'run'],
+      [2, 'run'],
+    ]);
   }, 120_000);
 });

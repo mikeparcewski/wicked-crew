@@ -62,7 +62,7 @@ export function phaseIdOf(unitId: string): string {
  * operator overlay's own), when the def is unknown (`null` — a free-text `wf-…` run or a def the
  * registry no longer holds: today's candidacy, never narrowed on a guess), or when the def does
  * code work ({@link isCodeWorkDef}). FALSE only for a RESOLVED def with no deliver unit and no
- * code-work phase — `onboarding`, `capture-learnings`, `domain-graph-slice`, `chat`, … — whose
+ * code-work phase — `capture-learnings`, `steering-author`, … — whose
  * completed runs then read `delivery: 'none'` instead of the stranded/vacuous a live worktree used
  * to earn them (the board's "nine runs need you" after onboarding). A code-work run launched with
  * `deliver: 'none'` stays a candidate: its work is on `wicked/<id>`, liftable post hoc.
