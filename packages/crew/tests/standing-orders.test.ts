@@ -5,7 +5,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Fastify from 'fastify';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent, RosterSeat } from '../src/core/types.js';
@@ -340,6 +340,18 @@ describe('the seat parse', () => {
     expect(await seatParser({ adapter: silent.adapter, roster, timeoutMs: 30 })('x')).toMatchObject({ ok: false, code: 502 });
     expect(silent.calls).toContain('close');
     expect(await seatParser({ adapter: silent.adapter, roster: () => [] })('x')).toMatchObject({ ok: false, code: 409 });
+  });
+
+  it('a seat that will not open is a 502 that leaves no reply timer armed (codex on #686)', async () => {
+    const { adapter } = fakeAdapter(null);
+    (adapter as unknown as { chatOpen: unknown }).chatOpen = async (_id: string, clis: string[]) => [{ cliKey: clis[0]!, ok: false, error: 'signed out' }];
+    vi.useFakeTimers();
+    try {
+      expect(await seatParser({ adapter, roster })('x')).toMatchObject({ ok: false, code: 502 });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('a FAILED turn is a failure even when its text holds a rule-shaped object (codex on #686)', async () => {

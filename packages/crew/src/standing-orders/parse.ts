@@ -44,9 +44,11 @@ export function seatParser(deps: SeatParserDeps): (text: string) => Promise<Pars
     const chatId = `standing-order-parse-${randomUUID()}`;
     const cwd = mkdtempSync(join(tmpdir(), 'crew-order-parse-'));
     let off: () => void = () => undefined;
+    // Cleared in `finally`: an early return (the seat would not open) must not leave it armed.
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const reply = new Promise<{ text: string; ok: boolean } | null>((resolve) => {
-        const timer = setTimeout(() => resolve(null), timeoutMs);
+        timer = setTimeout(() => resolve(null), timeoutMs);
         off = adapter.onEvent((e: CoreEvent) => {
           const ev = e as unknown as { type?: string; chat?: string; text?: string; ok?: boolean };
           if (ev.type === 'chatReply' && ev.chat === chatId) {
@@ -72,6 +74,7 @@ export function seatParser(deps: SeatParserDeps): (text: string) => Promise<Pars
     } catch (err) {
       return { ok: false, code: 502, error: err instanceof Error ? err.message : String(err) };
     } finally {
+      clearTimeout(timer);
       off();
       await adapter.chatClose(chatId).catch(() => undefined);
       rmSync(cwd, { recursive: true, force: true });
