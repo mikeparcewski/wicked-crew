@@ -70,6 +70,16 @@ export const ApproveEditSchema = z
   })
   .strict();
 
+/** `POST /proposals` body — one preference a person files from a skin (studio's takes). Strict: the
+ *  kind, tier and capture marker are the daemon's, never the caller's. */
+export const FileProposalSchema = z
+  .object({
+    content: z.string().trim().min(1).max(4000),
+    project: z.string().trim().min(1).max(128).optional(),
+    source: z.string().trim().min(1).max(256).optional(),
+  })
+  .strict();
+
 /** Where a capture's materials land: a per-run inbox on the daemon host (the steering-author
  *  pattern — runs read the daemon's filesystem; only paths ride the problem statement). */
 export function captureInboxDir(runId: string): string {

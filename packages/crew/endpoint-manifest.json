@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.53.0",
+  "apiTypesVersion": "0.54.0",
   "endpoints": [
     {
       "method": "GET",
@@ -655,6 +655,17 @@
       "responseType": "ListProposalsResponse",
       "statusCodes": [
         200,
+        400,
+        502
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/proposals",
+      "requestType": "FileProposalBody",
+      "responseType": "FileProposalResponse",
+      "statusCodes": [
+        201,
         400,
         502
       ]
