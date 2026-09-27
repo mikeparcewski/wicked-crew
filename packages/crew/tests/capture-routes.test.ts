@@ -343,12 +343,12 @@ describe('POST /proposals/:id/approve {content?, reach?} — accept with an edit
     expect(estate.mock.calls.map((c) => c[0])).toEqual(['proposal.list']);
   });
 
-  it('refuses to let a decision or an intent cross projects, writing nothing', async () => {
-    for (const capture of ['decision', 'intent']) {
+  it('refuses to let a decision, an intent, or a memory no capture filed cross projects, writing nothing', async () => {
+    for (const capture of ['decision', 'intent', undefined]) {
       estate.mockReset();
-      stubEstate(pending({ payload: { content: 'We chose Postgres', tier: 'semantic', capture } }));
+      stubEstate(pending({ payload: { content: 'We chose Postgres', tier: 'semantic', ...(capture !== undefined ? { capture } : {}) } }));
       const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/p1/approve', payload: { reach: 'pattern' } });
-      expect(res.statusCode, capture).toBe(400);
+      expect(res.statusCode, String(capture)).toBe(400);
       expect(estate.mock.calls.map((c) => c[0])).toEqual(['proposal.list']);
     }
   });

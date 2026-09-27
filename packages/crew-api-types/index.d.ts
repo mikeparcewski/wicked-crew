@@ -5883,7 +5883,7 @@ export interface ApproveProposalBody {
   /** The edited memory text (replaces `payload.content`). */
   content?: string;
   /** `"pattern"`: the copy drops its `project`/`repo` facets, so it may be recalled on ANY project
-   *  (the human act that lets a pattern cross projects; refused on a decision or an intent).
+   *  (the human act that lets a pattern cross projects; refused on anything but a captured memory, `payload.capture: "memory"`).
    *  `"project"`: it stays scoped to its project — gaining the proposing run's project as its
    *  `project` facet when the worker filed none (400 when no project files that run). An accept
    *  that changes nothing the store keeps approves the original as filed (no copy, no `edited`). */

@@ -187,7 +187,8 @@ export function registerCaptureRoutes(app: FastifyInstance): void {
           requestType: 'CaptureBody',
           responseType: 'CaptureResponse',
           // Every non-201 besides the body 400s is POST /runs' own answer, passed through.
-          statusCodes: [201, 400, 404, 409, 422, 501],
+          // 413: a body past CAPTURE_BODY_LIMIT, refused by the framework before the handler.
+          statusCodes: [201, 400, 404, 409, 413, 422, 501],
         },
       },
     },
@@ -248,7 +249,8 @@ export type EditedApproval = { status: number; body: Record<string, unknown> };
  * the original is still in the queue for the person to reject), never a 502 inviting a retry that
  * would promote a second copy. A
  * `reach: "pattern"` copy drops the `project` and `repo` facets (it may now be recalled on any
- * project); it is refused on a decision or an intent, which are always the project's. A
+ * project); it is refused on anything but a captured memory (`payload.capture: "memory"`) — a
+ * decision or an intent is always the project's, and a memory no capture filed is not this verb's. A
  * `reach: "project"` row keeps (or, when the worker filed none, gains) the project facet — the
  * capture run's project, read from `projectOf(provenance.run_id)`. When nothing changes, the
  * original is approved as filed (no copy).
@@ -300,8 +302,9 @@ async function acceptEdited(
   }
   const payload = { ...(typeof row.payload === 'object' && row.payload !== null ? row.payload : {}) } as Record<string, unknown>;
   const capture = payload['capture'];
-  if (edit.reach === 'pattern' && (capture === 'decision' || capture === 'intent')) {
-    return { status: 400, body: { error: `a ${capture} stays with its project — only a memory can cross projects` } };
+  if (edit.reach === 'pattern' && capture !== 'memory') {
+    const what = typeof capture === 'string' ? `a ${capture}` : 'a proposal that is not a captured memory';
+    return { status: 400, body: { error: `${what} stays with its project — only a captured memory can cross projects` } };
   }
   const facets = { ...row.facets };
   if (edit.reach === 'pattern') {
