@@ -84,6 +84,7 @@ import {
   registerGovernanceSteeringRoutes,
 } from './governance-steering.js';
 import { isSteeringAuthorRun, landSteeringProposal } from './steering-landing.js';
+import { ApproveEditSchema, approveEdited, registerCaptureRoutes } from './capture.js';
 import { registerTestingRoutes } from './testing.js';
 import { registerSkillsRoutes } from './skills.js';
 import { disabledSkillsHealth, type SkillsRuntime } from '../skills/runtime.js';
@@ -4576,7 +4577,16 @@ export function registerRoutes(
   // with no extra estate call and no landing.
   app.post(
     `${V}/proposals/:id/approve`,
-    { config: { manifest: { responseType: 'ApproveProposalResponse', statusCodes: [200, 400, 502] } } },
+    {
+      config: {
+        manifest: {
+          requestType: 'ApproveProposalBody',
+          responseType: 'ApproveProposalResponse',
+          // 404: an accept-with-edit naming no pending proposal.
+          statusCodes: [200, 400, 404, 502],
+        },
+      },
+    },
     async (req, reply) => {
     // Normalize ONCE and use the trimmed value throughout — an id like `%20pol1%20`
     // decodes to a padded, non-empty string that would otherwise ride upstream as-is
@@ -4584,6 +4594,20 @@ export function registerRoutes(
     const id = (req.params as { id: string }).id.trim();
     if (id === '') {
       return reply.code(400).send({ error: '`id` is required' });
+    }
+    // An accept WITH an edit (capture review, api-types 0.48.0): the edited copy replaces the
+    // original in the same queue — see `approveEdited`. No body / `{}` is the plain approve below.
+    const edit = ApproveEditSchema.safeParse(req.body ?? {});
+    if (!edit.success) {
+      return reply.code(400).send(invalidBody(edit.error, 'Invalid approve body'));
+    }
+    if (edit.data.content !== undefined || edit.data.reach !== undefined) {
+      try {
+        const done = await approveEdited(estateTool, id, edit.data);
+        return reply.code(done.status).send(done.body);
+      } catch (err) {
+        return estateUpstreamError(reply, err);
+      }
     }
     let approved: ApproveProposalResponse;
     try {
@@ -4860,6 +4884,10 @@ export function registerRoutes(
 
   // ── Projects (DES-PROJECT-001) — the 9-route experience-plane surface ────────
   registerProjectRoutes(app, adapter, { ...projects, settings: projectSettings }, security);
+
+  // ── Capture (Studio OS behaviour 8) — notes and photos → a project-filed run whose output is
+  // proposals in the queue above; the launch is POST /runs itself (api/capture.ts).
+  registerCaptureRoutes(app);
 
   // ── Presets (DES-TEAMING-002 §8.4, seam C2) — saved phase selections in the engine's store;
   // a launch names one via `workflow`, and the ENGINE resolves it.

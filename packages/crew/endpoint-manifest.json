@@ -432,6 +432,20 @@
       "statusCodes": []
     },
     {
+      "method": "POST",
+      "path": "/api/v1/projects/:id/capture",
+      "requestType": "CaptureBody",
+      "responseType": "CaptureResponse",
+      "statusCodes": [
+        201,
+        400,
+        404,
+        409,
+        422,
+        501
+      ]
+    },
+    {
       "method": "GET",
       "path": "/api/v1/projects/:id/graph",
       "requestType": null,
@@ -623,11 +637,12 @@
     {
       "method": "POST",
       "path": "/api/v1/proposals/:id/approve",
-      "requestType": null,
+      "requestType": "ApproveProposalBody",
       "responseType": "ApproveProposalResponse",
       "statusCodes": [
         200,
         400,
+        404,
         502
       ]
     },
