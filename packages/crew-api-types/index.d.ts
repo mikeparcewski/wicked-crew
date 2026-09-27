@@ -6725,7 +6725,7 @@ export interface PlanPreviewResponse {
   graph: 'ready' | 'not_needed' | 'unavailable' | 'pending_pa_scope';
 }
 
-// ── Standing orders (Studio OS behaviour 10; api-types 0.48.0) ─────────────────────────────────
+// ── Standing orders (Studio OS behaviour 10; api-types 0.49.0) ─────────────────────────────────
 
 /**
  * A standing order's structured rule — parsed from plain words by a seat and CONFIRMED by the
