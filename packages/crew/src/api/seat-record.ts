@@ -92,6 +92,8 @@ export function foldRunIntoSeats(
   for (const raw of sorted) {
     const e = raw as Frame;
     const ord = num(e['ord']);
+    const inWindow = e.ts >= since;
+    if (inWindow) touched = true;
     // Ownership is tracked from the whole log (a unit distributed before the window may run in it).
     if (e.type === 'unitDistributed' && ord !== undefined && str(e['cli']) !== undefined) {
       owner.set(ord, e['cli'] as string);
@@ -102,9 +104,7 @@ export function foldRunIntoSeats(
       if (next !== undefined) owner.set(ord, next);
       continue;
     }
-    if (!(e.ts >= since)) continue;
-    touched = true;
-    if (ord === undefined) continue;
+    if (!inWindow || ord === undefined) continue;
     const cli = ownerOf(ord);
     switch (e.type) {
       case 'unitDispatched': {
@@ -205,7 +205,11 @@ export async function seatRecord(
   const since = opts.now - opts.days * 86_400_000;
   const candidates = views
     .filter((v) => runTouchesWindow(v, since))
-    .sort((a, b) => (num(b.session.created_at) ?? Infinity) - (num(a.session.created_at) ?? Infinity));
+    // Newest launch first; an undated run (no `run.launched` record) sorts LAST, so a pile of
+    // pre-field runs can never crowd a dated run out of the cap. Ties by id, for a stable read.
+    .sort((a, b) =>
+      ((num(b.session.created_at) ?? -Infinity) - (num(a.session.created_at) ?? -Infinity)) ||
+      a.session.id.localeCompare(b.session.id));
   const read = candidates.slice(0, SEAT_RECORD_RUN_CAP);
   const seats = new Map<string, SeatRecord>();
   for (const v of read) {

@@ -96,6 +96,22 @@ describe('the seat record fold', () => {
     expect(await seatRecord([RUN_A], async () => null, { days: 7, now: NOW })).toBeNull();
   });
 
+  it('counts a bench when the run\'s only in-window event is a distribution', () => {
+    const seats = new Map<string, SeatRecord>();
+    const run = view('run-c', [unit(0, 'codex', 'build')], { benched_seats: [{ cli: 'pi', reason: 'signed out', source: 'launcher' }] });
+    foldRunIntoSeats(seats, run, [ev('unitDistributed', NOW - HOUR, { ord: 0, cli: 'codex' })], NOW - 7 * DAY);
+    expect(seats.get('pi')?.benched).toBe(1);
+  });
+
+  it('reads dated runs before undated ones when the cap cuts', async () => {
+    const undated = Array.from({ length: SEAT_RECORD_RUN_CAP }, (_, i) => view(`u${i}`, []));
+    const dated = view('dated', [], { created_at: Math.floor((NOW - HOUR) / 1000) });
+    const reads: string[] = [];
+    const out = await seatRecord([...undated, dated], async (id) => { reads.push(id); return []; }, { days: 7, now: NOW });
+    expect(reads[0]).toBe('dated');
+    expect(out?.truncated).toBe(true);
+  });
+
   it('caps the runs it reads and says so', async () => {
     const many = Array.from({ length: SEAT_RECORD_RUN_CAP + 3 }, (_, i) => view(`r${i}`, []));
     const out = await seatRecord(many, async () => [], { days: 7, now: NOW });
