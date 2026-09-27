@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.50.0",
+  "apiTypesVersion": "0.51.0",
   "endpoints": [
     {
       "method": "GET",
@@ -178,6 +178,19 @@
       "requestType": null,
       "responseType": null,
       "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/governance/deadletters/replay",
+      "requestType": "GovernanceReplayBody",
+      "responseType": "GovernanceReplayOutcome",
+      "statusCodes": [
+        200,
+        400,
+        409,
+        500,
+        501
+      ]
     },
     {
       "method": "GET",

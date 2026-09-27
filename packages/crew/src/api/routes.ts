@@ -9,7 +9,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, humanGatePhaseIds, settingsFilePath } from '../core/adapter.js';
+import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, GovernanceReplayUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, humanGatePhaseIds, settingsFilePath } from '../core/adapter.js';
 import { codeGraphDb, codeGraphErrorStatus, requirementsGraph } from '../core/repoPaths.js';
 import type {
   CodeGraphData,
@@ -122,6 +122,8 @@ import {
 } from './diagnostics.js';
 import { GovernanceDiagnostics } from './governance-health.js';
 import { legacyHomeOutboxPath } from '../core/governance-store.js';
+import { UsageError, replayOutboxInto } from '../cli/governance.js';
+import { foldDeadletters } from './governance-health.js';
 import { RetryIndex } from './retry-index.js';
 import { GroupIndex } from './group-index.js';
 import { RunTimingIndex, recordRunLaunched } from './run-timing-index.js';
@@ -3709,6 +3711,68 @@ export function registerRoutes(
     const claims = await adapter.listConformanceClaims();
     return { claims };
   });
+
+  // Replay THIS daemon's governance dead-letter outbox into its own store — the
+  // `wicked-crew governance replay` CLI (crew#495) as a route, so a skin can offer the repair
+  // beside the count it shows (`/diagnostics.governance.deadletters`). `dryRun: true` folds the
+  // outbox and moves nothing, and says up front whether a real replay could run at all
+  // (`blocker`); a real replay drains exactly as the CLI does (archive first, entries that fail
+  // go back onto the live outbox and stay dead letters). One replay at a time per daemon.
+  let deadletterReplayInFlight = false;
+  app.post(
+    `${V}/governance/deadletters/replay`,
+    {
+      config: {
+        manifest: {
+          requestType: 'GovernanceReplayBody',
+          responseType: 'GovernanceReplayOutcome',
+          statusCodes: [200, 400, 409, 500, 501],
+        },
+      },
+    },
+    async (req, reply) => {
+      const parsed = z.object({ dryRun: z.boolean().optional() }).strict().safeParse(req.body ?? {});
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+      const dryRun = parsed.data.dryRun === true;
+      const store = adapter.governanceStore ?? null;
+      if (store === null) {
+        return reply.code(409).send({ error: 'this daemon resolved no governance store — there is nothing to replay into' });
+      }
+      const blocker = store.dbPath === ':memory:'
+        ? 'the governance store is in-memory — name a durable store before replaying'
+        : !CoreAdapter.replayEmitOutboxSupported()
+          ? 'the installed engine cannot replay a dead-letter outbox — upgrade wicked-core-ts'
+          : null;
+      const outbox = store.outboxPath;
+      if (!existsSync(outbox)) {
+        // No outbox = no dead letters: a zero outcome, never an error.
+        const fold = await foldDeadletters(outbox);
+        return {
+          outbox, store: { path: store.displayPath, source: store.source }, archive: null,
+          read: 0, replayed: 0, alreadyPresent: null, failed: 0, dryRun, note: null,
+          ...(dryRun ? { fold } : {}), blocker,
+        };
+      }
+      if (!dryRun && blocker !== null) return reply.code(blocker.startsWith('the installed engine') ? 501 : 409).send({ error: blocker });
+      if (!dryRun && deadletterReplayInFlight) return reply.code(409).send({ error: 'a dead-letter replay is already running' });
+      if (!dryRun) deadletterReplayInFlight = true;
+      try {
+        const { outcome } = await replayOutboxInto(outbox, store, { dryRun });
+        if (!dryRun) {
+          audit.record('governance.deadletters.replayed', actorOf(req), {
+            detail: { read: outcome.read, replayed: outcome.replayed, failed: outcome.failed },
+          });
+        }
+        return { ...outcome, blocker: dryRun ? blocker : null };
+      } catch (err) {
+        if (err instanceof GovernanceReplayUnsupportedError) return reply.code(501).send({ error: message(err) });
+        if (err instanceof UsageError) return reply.code(409).send({ error: message(err) });
+        return reply.code(500).send({ error: message(err) });
+      } finally {
+        if (!dryRun) deadletterReplayInFlight = false;
+      }
+    },
+  );
 
   // Normalize a `?repo=` query: Fastify parses a repeated `?repo=a&repo=b` into a `string[]` (take
   // the first), and the value is TRIMMED so it's both validated and PASSED trimmed — a `?repo=%20x%20`
