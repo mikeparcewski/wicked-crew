@@ -6941,3 +6941,27 @@ export interface DecidedGate {
 export interface DecidedGatesResponse {
   gates: DecidedGate[];
 }
+
+// ── Freeze deliveries (api-types 0.55.0) ───────────────────────────────────────────────────────
+
+/**
+ * `GET|PUT /deliveries/freeze` — the one switch that holds every deliver gate. While `frozen`, an
+ * approve of a gate that would run a deliver unit answers 409 `{code: "deliveries_frozen"}` and
+ * `POST /runs/:id/deliver` refuses the same way; the gate stays open, so unfreezing lets the same
+ * approve through. A run launched with `deliverGate: "auto"` has no gate and is not held.
+ * Audited as `deliveries.frozen {reason?}` / `deliveries.unfrozen`; a restart keeps the freeze.
+ */
+export interface DeliveryFreezeState {
+  frozen: boolean;
+  /** ISO time it was turned on; `null` while thawed. */
+  since: string | null;
+  /** The actor id that turned it on; `null` while thawed. */
+  by: string | null;
+  reason: string | null;
+}
+
+/** `PUT /deliveries/freeze`. `reason` (1–500 chars) is kept only when freezing. */
+export interface PutDeliveryFreezeBody {
+  frozen: boolean;
+  reason?: string;
+}
