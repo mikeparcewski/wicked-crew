@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.52.0",
+  "apiTypesVersion": "0.53.0",
   "endpoints": [
     {
       "method": "GET",
@@ -164,6 +164,17 @@
       "requestType": null,
       "responseType": null,
       "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/gates/decided",
+      "requestType": null,
+      "responseType": "DecidedGatesResponse",
+      "statusCodes": [
+        200,
+        400,
+        500
+      ]
     },
     {
       "method": "GET",

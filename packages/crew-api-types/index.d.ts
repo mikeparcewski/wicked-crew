@@ -6822,7 +6822,9 @@ export interface PlanPreviewResponse {
  */
 export interface StandingOrderRule {
   scope: { kind: 'all' } | { kind: 'project'; projectId: string };
-  trigger: { kind: 'gate'; phase: string } | { kind: 'finding'; severity: 'high' | 'medium' | '*' };
+  /** `band` (api-types 0.53.0, optional): the order matches only a run whose accepted plan landed in
+   *  that band (`"0-19"`, …); a run with no scored plan never matches a band-scoped order. */
+  trigger: { kind: 'gate'; phase: string; band?: string | undefined } | { kind: 'finding'; severity: 'high' | 'medium' | '*' };
   action: 'approve' | 'hold' | 'notify';
   activeWhen: 'away' | 'always';
 }
@@ -6880,4 +6882,41 @@ export interface ParsedStandingOrder {
 export interface CreateStandingOrderBody {
   text: string;
   rule: StandingOrderRule;
+}
+
+// ── Decided-gate history (api-types 0.53.0) ────────────────────────────────────────────────────
+
+/**
+ * One decided gate — `GET /gates/decided?since=<unix ms>` (newest first, at most 1000). One row per
+ * `gate.decided` audit line, joined to the engine's gate row for the same `(run, ord)` and to the
+ * run. What a skin needs for a seat's track record on a step, and for the preview of a proposed
+ * standing order (`phase` and `orderApprovable` are the order evaluator's own readings).
+ */
+export interface DecidedGate {
+  runId: string;
+  /** The unit the gate paused before; `null` when the decision named none (a plan edit). */
+  ord: number | null;
+  /** Unix millis. */
+  decidedAt: number;
+  decision: 'approve' | 'request_changes' | 'reject' | 'edit_plan';
+  /** Who decided: a person's actor id, or `standing-order:<id>`. */
+  actor: string;
+  /** A standing order decided it (the actor is `standing-order:<id>`). */
+  byOrder: boolean;
+  /** The engine's gate kind (`def`, `run_level`, `terminal`, `deliver`, `plan_approval`, …); `null` when unknown. */
+  gateKind: string | null;
+  /** The phase an order's trigger matches (`intake`, or the reviewed unit's phase); `null` when unknown. */
+  phase: string | null;
+  projectId: string | null;
+  /** The band the run's accepted plan landed in; `null` for an unscored run. */
+  band: string | null;
+  /** The unit whose work the gate judged (the newest creator before the gate) and its seat; `null` when none. */
+  creator: { seat: string; phase: string | null; ord: number } | null;
+  /** A standing order could have approved this gate (a phase-review gate of a run that lands no doctrine). */
+  orderApprovable: boolean;
+}
+
+/** `GET /gates/decided`'s 200. A malformed `since` answers 400. */
+export interface DecidedGatesResponse {
+  gates: DecidedGate[];
 }
