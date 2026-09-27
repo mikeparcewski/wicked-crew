@@ -16,7 +16,12 @@
  *
  * THE INVARIANT: an order approves only a phase-review gate (`def`, `run_level`, `terminal`). The
  * deliver gate, a plan approval (whose risk band is not on the gate — so none, fail closed), an
- * escalation, a failure and a triage are never answered by an order.
+ * escalation, a failure and a triage are never answered by an order, and neither is any gate of a
+ * steering-author run (its approval lands doctrine).
+ *
+ * A gate's PHASE, for matching, is the reviewed unit's `phase_ref` (the upcoming unit's when
+ * nothing has run). The gate before the run's first unit, with nothing to review, is also
+ * `intake` — the name studio and operators use for it (`IntakePlan.isIntakeGate`).
  */
 
 import type { AuditLog } from '../api/audit.js';
@@ -47,6 +52,10 @@ export interface RunFacts {
   projectId: string | undefined;
   problem: string;
   phaseOf: (ord: number) => string | undefined;
+  /** The run's first unit ord — the gate before it, with nothing to review, is the INTAKE gate. */
+  firstOrd: number | undefined;
+  /** Approving this run's gate would land doctrine (a steering-author run): never an order's call. */
+  landsDoctrine: boolean;
 }
 
 export interface EvaluatorDeps {
@@ -131,12 +140,14 @@ export class StandingOrderEvaluator {
     if (orders.length === 0) return;
     const run = await this.deps.runFacts(g.runId);
     if (run === undefined) return;
-    const phase = run.phaseOf(g.reviewingOrd ?? g.ord) ?? '';
+    const unitPhase = run.phaseOf(g.reviewingOrd ?? g.ord) ?? '';
+    const intake = g.reviewingOrd === null && g.ord === run.firstOrd;
+    const phase = intake ? 'intake' : unitPhase;
     const matching = orders.filter(
       (o) =>
         this.inScope(o, run.projectId) &&
         o.rule.trigger.kind === 'gate' &&
-        (o.rule.trigger.phase === '*' || o.rule.trigger.phase === phase),
+        (o.rule.trigger.phase === '*' || o.rule.trigger.phase === phase || o.rule.trigger.phase === unitPhase),
     );
     const subject = `gate:${g.runId}:${g.ord}`;
     const holds = matching.filter((o) => o.rule.action === 'hold');
@@ -154,7 +165,7 @@ export class StandingOrderEvaluator {
     }
     // THE INVARIANT: only a phase-review gate, and never under a hold.
     const approver = approves[0];
-    if (approver === undefined || holds.length > 0 || !APPROVABLE_GATE_KINDS.has(g.gateKind)) return;
+    if (approver === undefined || holds.length > 0 || !APPROVABLE_GATE_KINDS.has(g.gateKind) || run.landsDoctrine) return;
     if (!this.once(`${subject}:approve`)) return;
     const out = await this.deps.decideGate(g.runId, { approve: true, ord: g.ord }, orderActor(approver), {
       standingOrder: { id: approver.id, text: approver.text },

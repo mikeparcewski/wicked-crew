@@ -44,7 +44,7 @@ export function parsePrompt(text: string, projects: Array<{ id: string; name: st
   return [
     'Turn this standing order into ONE JSON object and answer with the JSON only, no prose.',
     'Shape: {"scope":{"kind":"all"} or {"kind":"project","projectId":"<id>"},',
-    ' "trigger":{"kind":"gate","phase":"<phase name, e.g. intake, design, build, test, review, or *>"}',
+    ' "trigger":{"kind":"gate","phase":"<intake (the gate before a run starts), understand, design, build, test, review, deliver, or * for any gate>"}',
     '  or {"kind":"finding","severity":"high"|"medium"|"*"},',
     ' "action":"approve"|"hold"|"notify", "activeWhen":"away"|"always"}.',
     '"wake me", "tell me", "ping me" = notify. "hold", "keep", "wait" = hold. "auto-approve", "clear" = approve.',

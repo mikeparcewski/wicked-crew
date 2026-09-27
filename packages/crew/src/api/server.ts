@@ -68,6 +68,7 @@ import { StandingOrderStore } from '../standing-orders/store.js';
 import { StandingOrderEvaluator, type GateFact } from '../standing-orders/evaluator.js';
 import { registerStandingOrderRoutes } from '../standing-orders/routes.js';
 import { seatParser } from '../standing-orders/parse.js';
+import { isSteeringAuthorRun } from './steering-landing.js';
 import { applyWorkerConfigRoot } from './seat-signin.js';
 import { registeredSkillRefs } from '../skills/core-closure.js';
 import type { PluginSource } from '../skills/plugin-source.js';
@@ -1562,6 +1563,8 @@ export async function createServer(
         projectId: typeof own === 'string' && own !== 'default' ? own : membershipIndex.projectOf(runId),
         problem: v.session.problem,
         phaseOf: (ord) => v.units.find((u) => u.ord === ord)?.phase_ref ?? undefined,
+        firstOrd: v.units.length === 0 ? undefined : Math.min(...v.units.map((u) => u.ord)),
+        landsDoctrine: isSteeringAuthorRun(v),
       };
     },
     openGates: async () => {

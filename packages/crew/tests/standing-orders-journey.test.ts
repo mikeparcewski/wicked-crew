@@ -28,10 +28,10 @@ function view(id: string, projectId: string, phases: string[]) {
   return {
     session: {
       id, workflow_id: 'feature', problem: `work on ${projectId}`, entity_mode: 'shared', collection_scope: null,
-      clis: ['claude'], status: 'awaiting_human', human_confirm: 'all', unit_ix: 1, attempt: 0, workdir: null,
+      clis: ['claude'], status: 'awaiting_human', human_confirm: 'all', unit_ix: 0, attempt: 0, workdir: null,
       repo_ref: null, extra_write_roots: [], archived_at: null, archive_note: null, project_id: projectId,
     },
-    units: phases.map((phase, ord) => ({ id: `${id}:${ord}`, ord, phase_ref: phase, status: ord === 0 ? 'done' : 'pending' })),
+    units: phases.map((phase, ord) => ({ id: `${id}:${ord}`, ord, phase_ref: phase, status: 'pending' })),
   };
 }
 
@@ -42,7 +42,8 @@ const confirmCalls: unknown[][] = [];
 
 beforeAll(async () => {
   scratch = mkdtempSync(join(tmpdir(), 'crew-standing-orders-'));
-  const views = [view('run-a', 'A', ['intake', 'design']), view('run-b', 'B', ['intake', 'design']), view('run-d', 'A', ['build', 'deliver'])];
+  // The intake gate is the engine's pre-run gate: before the run's FIRST unit, reviewing nothing.
+  const views = [view('run-a', 'A', ['understand', 'build']), view('run-b', 'B', ['understand', 'build']), view('run-d', 'A', ['build', 'deliver'])];
   const adapter = {
     stub: true,
     projectsSupported: () => false,
@@ -117,7 +118,7 @@ describe('standing orders — the behaviour-10 journey', () => {
     expect(wide.statusCode).toBe(201);
 
     // Not away yet: the order is dormant.
-    emit({ type: 'awaitingHuman', session: 'run-b', ord: 1, reviewingOrd: 0, prompt: 'Approve intake?', gateKind: 'def' } as CoreEvent);
+    emit({ type: 'awaitingHuman', session: 'run-b', ord: 0, reviewingOrd: null, prompt: 'Approve unit 0 before it runs?', gateKind: 'run_level' } as CoreEvent);
     await new Promise((r) => setTimeout(r, 200));
     expect(confirmCalls).toEqual([]);
 
@@ -125,7 +126,7 @@ describe('standing orders — the behaviour-10 journey', () => {
     expect(away.statusCode).toBe(200);
 
     const opened = Date.now();
-    emit({ type: 'awaitingHuman', session: 'run-a', ord: 1, reviewingOrd: 0, prompt: 'Approve intake?', gateKind: 'def' } as CoreEvent);
+    emit({ type: 'awaitingHuman', session: 'run-a', ord: 0, reviewingOrd: null, prompt: 'Approve unit 0 before it runs?', gateKind: 'run_level' } as CoreEvent);
     emit({ type: 'awaitingHuman', session: 'run-d', ord: 1, reviewingOrd: 0, prompt: 'Deliver?', gateKind: 'deliver' } as CoreEvent);
     expect(await until(() => confirmCalls.some((c) => c[0] === 'run-a'), 5000)).toBe(true);
     expect(Date.now() - opened).toBeLessThan(5000);
@@ -143,7 +144,7 @@ describe('standing orders — the behaviour-10 journey', () => {
     expect(decided!.actor.id).toBe(`standing-order:${orderId}`);
     expect(decided!.detail).toMatchObject({
       approve: true,
-      ord: 1,
+      ord: 0,
       standingOrder: { id: orderId, text: 'Auto-approve intake on project A' },
     });
     expect(trail.entries.some((e) => e.action === 'gate.decided' && e.runId === 'run-d')).toBe(false);

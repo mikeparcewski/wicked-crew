@@ -67,7 +67,7 @@ describe('StandingOrderStore', () => {
   });
 });
 
-function harness(runs: Record<string, { projectId?: string; phases: string[] }>, decideCode = 200) {
+function harness(runs: Record<string, { projectId?: string; phases: string[]; steering?: boolean }>, decideCode = 200) {
   const store = StandingOrderStore.memory();
   const decided: Array<{ id: string; decision: unknown; actor: { id: string; kind: string }; extra?: Record<string, unknown> }> = [];
   const audited: Array<{ action: string; actor: { id: string }; runId?: string; detail?: Record<string, unknown> }> = [];
@@ -87,7 +87,9 @@ function harness(runs: Record<string, { projectId?: string; phases: string[] }>,
     },
     runFacts: async (runId): Promise<RunFacts | undefined> => {
       const r = runs[runId];
-      return r === undefined ? undefined : { projectId: r.projectId, problem: `problem ${runId}`, phaseOf: (ord) => r.phases[ord] };
+      return r === undefined
+        ? undefined
+        : { projectId: r.projectId, problem: `problem ${runId}`, phaseOf: (ord) => r.phases[ord], firstOrd: 0, landsDoctrine: r.steering === true };
     },
     openGates: async () => open,
     log: (m) => logs.push(m),
@@ -109,6 +111,24 @@ describe('StandingOrderEvaluator', () => {
     expect(h.decided).toEqual([
       { id: 'r1', decision: { approve: true, ord: 1 }, actor: { id: `standing-order:${o.id}`, kind: 'system', trust: 'operator' }, extra: { standingOrder: { id: o.id, text: o.text } } },
     ]);
+  });
+
+  it('"intake" is the pre-run gate: before the first unit, reviewing nothing — not a later gate', async () => {
+    const h = harness({ r1: { projectId: 'A', phases: ['understand', 'build'] } });
+    h.store.setAway(true);
+    h.store.add('approve intake', gateRule('intake', 'approve', 'A'));
+    await h.evaluator.onEvent(gate('r1', 1, 'def', 0)); // after understand: not intake
+    expect(h.decided).toEqual([]);
+    await h.evaluator.onEvent(gate('r1', 0, 'run_level', null)); // before unit 0: intake
+    expect(h.decided.map((d) => d.decision)).toEqual([{ approve: true, ord: 0 }]);
+  });
+
+  it('never approves a gate of a steering-author run (its approval lands doctrine)', async () => {
+    const h = harness({ r1: { projectId: 'A', phases: ['understand', 'build'], steering: true } });
+    h.store.setAway(true);
+    h.store.add('approve anything', gateRule('*', 'approve'));
+    await h.evaluator.onEvent(gate('r1', 1, 'def', 0));
+    expect(h.decided).toEqual([]);
   });
 
   it('an `always` order acts while present', async () => {
