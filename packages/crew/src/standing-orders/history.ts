@@ -57,6 +57,12 @@ export function runBand(view: SessionView): string | undefined {
   return typeof band === 'string' && band !== '' ? band : undefined;
 }
 
+/** The preset the run's launch named (`team_plan.preset`); undefined on a user plan or a workflow. */
+export function runPreset(view: SessionView): string | undefined {
+  const preset = (view.session as { team_plan?: { preset?: unknown } | null }).team_plan?.preset;
+  return typeof preset === 'string' && preset !== '' ? preset : undefined;
+}
+
 /** The run's project: its own filing, else the membership index (the evaluator's reading). */
 export function runProject(view: SessionView | undefined, runId: string, projectOf: (id: string) => string | undefined): string | undefined {
   const own = view?.session.project_id;

@@ -8,7 +8,8 @@ import Fastify from 'fastify';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 
 import type { CoreAdapter } from '../src/core/adapter.js';
-import type { CoreEvent, RosterSeat } from '../src/core/types.js';
+import type { CoreEvent, RosterSeat, TeamRow } from '../src/core/types.js';
+import { openPlanGateRisk } from '../src/team/routes.js';
 import { StandingOrderEvaluator, type GateFact, type RunFacts } from '../src/standing-orders/evaluator.js';
 import { seatParser } from '../src/standing-orders/parse.js';
 import { registerStandingOrderRoutes, ruleFromAnswer, type ParseOutcome } from '../src/standing-orders/routes.js';
@@ -78,9 +79,40 @@ describe('StandingOrderStore — the audit trail is the record', () => {
     expect(refusal(gateRule('deliver', 'hold'))).toBeNull();
     expect(refusal(gateRule('intake', 'approve'))).toBeNull();
   });
+
+  it('a plan approval may be trusted only for ONE project\'s band 0-19 runs of ONE preset (brainstorm idea 13)', () => {
+    const plan = (over: Partial<{ scope: StandingOrderRule['scope']; band: string; preset: string }>): StandingOrderRule => ({
+      scope: over.scope ?? { kind: 'project', projectId: 'A' },
+      trigger: {
+        kind: 'gate', phase: 'plan_approval',
+        ...(over.band !== undefined ? { band: over.band } : {}),
+        ...(over.preset !== undefined ? { preset: over.preset } : {}),
+      },
+      action: 'approve',
+      activeWhen: 'always',
+    });
+    expect(refusal(plan({ band: '0-19', preset: 'bugfix' }))).toBeNull();
+    expect(refusal(plan({ band: '20-39', preset: 'bugfix' }))).toMatch(/band 0-19/);
+    expect(refusal(plan({ band: '0-19' }))).toMatch(/preset/);
+    expect(refusal(plan({ preset: 'bugfix' }))).toMatch(/band 0-19/);
+    expect(refusal(plan({ scope: { kind: 'all' }, band: '0-19', preset: 'bugfix' }))).toMatch(/project/);
+    // The deliver gate is never trusted, however narrow the rule.
+    expect(refusal({ ...plan({ band: '0-19', preset: 'bugfix' }), trigger: { kind: 'gate', phase: 'deliver', band: '0-19', preset: 'bugfix' } })).toMatch(/deliver gate/);
+  });
 });
 
-function harness(runs: Record<string, { projectId?: string; phases: string[]; steering?: boolean; band?: string }>, decideCode = 200) {
+interface HarnessRun {
+  projectId?: string;
+  phases: string[];
+  steering?: boolean;
+  band?: string;
+  /** `team_plan.preset` — the preset the launch named. */
+  preset?: string;
+  /** The OPEN plan gate's own band and risk, off its `gate.opened` row; absent = unreadable. */
+  planGate?: { band: string; highRisk: boolean };
+}
+
+function harness(runs: Record<string, HarnessRun>, decideCode = 200) {
   const audited: Array<{ action: string; actor: { id: string }; runId?: string; detail?: Record<string, unknown> }> = [];
   const audit = {
     record: (action: string, actor: { id: string }, fields?: { runId?: string; detail?: Record<string, unknown> }) => {
@@ -104,8 +136,9 @@ function harness(runs: Record<string, { projectId?: string; phases: string[]; st
       const r = runs[runId];
       return r === undefined
         ? undefined
-        : { projectId: r.projectId, problem: `problem ${runId}`, phaseOf: (ord) => r.phases[ord], firstOrd: 0, landsDoctrine: r.steering === true, band: r.band };
+        : { projectId: r.projectId, problem: `problem ${runId}`, phaseOf: (ord) => r.phases[ord], firstOrd: 0, landsDoctrine: r.steering === true, band: r.band, preset: r.preset };
     },
+    planGate: async (runId) => runs[runId]?.planGate,
     openGates: async () => {
       reads.n += 1;
       return open;
@@ -163,6 +196,45 @@ describe('StandingOrderEvaluator', () => {
     expect(h.decided).toEqual([]);
     await h.evaluator.onEvent(gate('low', 1));
     expect(h.decided.map((d) => d.id)).toEqual(['low']);
+  });
+
+  it('a plan-trust order approves the plan gate of a matching band 0-19 run, and never its deliver gate (idea 13)', async () => {
+    const low = { band: '0-19', highRisk: false };
+    const h = harness({
+      match: { projectId: 'A', phases: ['build', 'review', 'deliver'], preset: 'bugfix', planGate: low },
+      otherPreset: { projectId: 'A', phases: ['build'], preset: 'feature', planGate: low },
+      otherProject: { projectId: 'B', phases: ['build'], preset: 'bugfix', planGate: low },
+      midBand: { projectId: 'A', phases: ['build'], preset: 'bugfix', planGate: { band: '20-39', highRisk: false } },
+      highRisk: { projectId: 'A', phases: ['build'], preset: 'bugfix', planGate: { band: '0-19', highRisk: true } },
+      unreadable: { projectId: 'A', phases: ['build'], preset: 'bugfix' },
+    });
+    const o = h.store.add('Trust bugfix runs on A at band 0-19: skip plan approval', {
+      scope: { kind: 'project', projectId: 'A' },
+      trigger: { kind: 'gate', phase: 'plan_approval', band: '0-19', preset: 'bugfix' },
+      action: 'approve',
+      activeWhen: 'always',
+    }, HUMAN);
+    for (const id of ['otherPreset', 'otherProject', 'midBand', 'highRisk', 'unreadable']) {
+      await h.evaluator.onEvent(gate(id, 0, 'plan_approval', null));
+    }
+    expect(h.decided).toEqual([]);
+    await h.evaluator.onEvent(gate('match', 0, 'plan_approval', null));
+    expect(h.decided).toEqual([
+      { id: 'match', decision: { approve: true, ord: 0 }, actor: { id: `standing-order:${o.id}`, kind: 'system', trust: 'operator' }, extra: { standingOrder: { id: o.id, text: o.text } } },
+    ]);
+    // The same run's unit gates and its deliver gate still wait for a person.
+    await h.evaluator.onEvent(gate('match', 1, 'def', 0));
+    await h.evaluator.onEvent(gate('match', 2, 'deliver', 1));
+    expect(h.decided).toHaveLength(1);
+  });
+
+  it('a wildcard or band-only approve still never answers a plan gate', async () => {
+    const h = harness({ r1: { projectId: 'A', phases: ['build'], preset: 'bugfix', band: '0-19', planGate: { band: '0-19', highRisk: false } } });
+    h.store.add('approve band 0-19 on A', {
+      scope: { kind: 'project', projectId: 'A' }, trigger: { kind: 'gate', phase: '*', band: '0-19' }, action: 'approve', activeWhen: 'always',
+    }, HUMAN);
+    await h.evaluator.onEvent(gate('r1', 0, 'plan_approval', null));
+    expect(h.decided).toEqual([]);
   });
 
   it('an `always` order acts while present', async () => {
@@ -416,5 +488,31 @@ describe('the seat parse', () => {
   it('a FAILED turn is a failure even when its text holds a rule-shaped object (codex on #686)', async () => {
     const failed = fakeAdapter(JSON.stringify(gateRule('intake', 'approve')), false);
     expect(await seatParser({ adapter: failed.adapter, roster })('x')).toMatchObject({ ok: false, code: 502 });
+  });
+});
+
+describe('openPlanGateRisk — the open plan gate\'s own band, off its gate.opened row (idea 13)', () => {
+  const row = (event_id: number, event_type: string, payload: Record<string, unknown>): TeamRow =>
+    ({ event_id, event_type, payload: { run_id: 'r1', ord: null, ...payload }, emitted_at: event_id }) as unknown as TeamRow;
+
+  it('reads the newest undecided plan_approval gate', () => {
+    const rows = [
+      row(1, 'wicked.team.gate.opened', { kind: 'plan_approval', gate_id: 'g1', band: '40-69', high_risk: true }),
+      row(2, 'wicked.team.gate.decided', { gate_id: 'g1', decision: 'human_approved' }),
+      row(3, 'wicked.team.gate.opened', { kind: 'unit_review', gate_id: 'u1', band: '0-19' }),
+      row(4, 'wicked.team.gate.opened', { kind: 'plan_approval', gate_id: 'g2', band: '0-19', high_risk: false }),
+    ];
+    expect(openPlanGateRisk(rows)).toEqual({ band: '0-19', highRisk: false });
+  });
+
+  it('no open plan gate, or one without a band, reads as unknown (the order fails closed)', () => {
+    expect(openPlanGateRisk([])).toBeUndefined();
+    expect(openPlanGateRisk([
+      row(1, 'wicked.team.gate.opened', { kind: 'plan_approval', gate_id: 'g1', band: '0-19' }),
+      row(2, 'wicked.team.gate.decided', { gate_id: 'g1' }),
+    ])).toBeUndefined();
+    expect(openPlanGateRisk([row(1, 'wicked.team.gate.opened', { kind: 'plan_approval', gate_id: 'g1', high_risk: false })])).toBeUndefined();
+    // A row that does not say its risk is not "low risk" (codex on #693).
+    expect(openPlanGateRisk([row(1, 'wicked.team.gate.opened', { kind: 'plan_approval', gate_id: 'g1', band: '0-19' })])).toBeUndefined();
   });
 });

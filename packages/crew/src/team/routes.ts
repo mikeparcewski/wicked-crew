@@ -79,7 +79,7 @@ function unteamed(runId: string, status: SessionStatus): RunTeamResponse {
 
 /** The run's `wicked.team.*` rows, by `event_id`, read through the engine that holds the bus
  *  (core/bus.ts); `[]` when the bus is absent or unreadable. */
-async function busRows(busDbPath: string | undefined, runId: string): Promise<TeamRow[]> {
+export async function busRows(busDbPath: string | undefined, runId: string): Promise<TeamRow[]> {
   if (busDbPath === undefined) return [];
   try {
     // History: a finished run's rows stay readable past the bus TTL (nothing sweeps the daemon's bus).
@@ -99,6 +99,30 @@ async function busRows(busDbPath: string | undefined, runId: string): Promise<Te
     // No engine bus / an unreadable one: the engine's snapshot still answers.
     return [];
   }
+}
+
+/**
+ * The OPEN plan gate's own reading of the plan it holds: the newest `gate.opened{kind:"plan_approval"}`
+ * no `gate.decided` answered, with its `band` and `high_risk` (brainstorm idea 13 — a plan-approval
+ * trust order re-reads these before it answers). `undefined` when no plan gate is open or the row
+ * does not state both its band and a boolean `high_risk`: the caller fails closed.
+ */
+export function openPlanGateRisk(rows: readonly TeamRow[]): { band: string; highRisk: boolean } | undefined {
+  const sorted = [...rows].sort((a, b) => a.event_id - b.event_id);
+  const payload = (r: TeamRow): Record<string, unknown> => (r.payload ?? {}) as unknown as Record<string, unknown>;
+  const decided = new Set(
+    sorted.filter((r) => r.event_type === 'wicked.team.gate.decided').map((r) => payload(r)['gate_id']),
+  );
+  const open = sorted
+    .filter((r) => r.event_type === 'wicked.team.gate.opened' && payload(r)['kind'] === 'plan_approval')
+    .filter((r) => !decided.has(payload(r)['gate_id']))
+    .pop();
+  if (open === undefined) return undefined;
+  const band = payload(open)['band'];
+  const highRisk = payload(open)['high_risk'];
+  // Fail closed: a row that does not SAY its band and its risk is not a reading of them.
+  if (typeof band !== 'string' || band === '' || typeof highRisk !== 'boolean') return undefined;
+  return { band, highRisk };
 }
 
 const fold = (ord: unknown, attempt: unknown) => `ledger.folded#${String(ord)}:${String(attempt)}`;

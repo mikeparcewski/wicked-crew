@@ -11,7 +11,9 @@
  * its own under the state home (a new top-level entry there is one core's worker fence refuses).
  *
  * THE INVARIANT lives here as a validation (`refusal`) and again in the evaluator: an order never
- * approves the deliver gate, never approves a plan approval, and never approves a finding.
+ * approves the deliver gate and never approves a finding. It approves a plan approval only as a
+ * TRUST RECEIPT (brainstorm idea 13): one project, one preset, and the lowest band (`0-19`) — and
+ * the evaluator re-reads the open plan gate's own band and risk before it answers.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -29,8 +31,14 @@ export const StandingOrderRuleSchema = z
       // `phase`: the phase the gate reviews (the reviewed unit's `phase_ref`), `intake` (the gate
       // before the run's first unit), or `*` for any gate. `band` (optional): only a run whose
       // accepted plan landed in that band (`"0-19"`, …); a run with no scored plan never matches.
+      // `preset` (optional): only a run launched from that preset (`team_plan.preset`).
       z
-        .object({ kind: z.literal('gate'), phase: z.string().min(1).max(64), band: z.string().min(1).max(16).optional() })
+        .object({
+          kind: z.literal('gate'),
+          phase: z.string().min(1).max(64),
+          band: z.string().min(1).max(16).optional(),
+          preset: z.string().min(1).max(128).optional(),
+        })
         .strict(),
       z.object({ kind: z.literal('finding'), severity: z.enum(['high', 'medium', '*']) }).strict(),
     ]),
@@ -68,7 +76,12 @@ export interface StandingOrdersState {
 }
 
 /** Phases whose gate an order may never approve, by name. */
-const NEVER_APPROVED_PHASES: ReadonlySet<string> = new Set(['deliver', 'plan_approval']);
+const NEVER_APPROVED_PHASES: ReadonlySet<string> = new Set(['deliver']);
+
+/** The phase name a plan-approval trust order triggers on. */
+export const PLAN_APPROVAL_PHASE = 'plan_approval';
+/** The only band whose plan approval an order may answer: the lowest. */
+export const TRUSTED_PLAN_BAND = '0-19';
 
 /** Why a rule may not be stored, or null. The code invariant, stated once for creation. */
 export function refusal(rule: StandingOrderRule): string | null {
@@ -76,6 +89,17 @@ export function refusal(rule: StandingOrderRule): string | null {
   if (rule.trigger.kind === 'finding') return 'an order cannot approve a finding — hold or notify on it';
   if (NEVER_APPROVED_PHASES.has(rule.trigger.phase)) {
     return `an order never answers the ${rule.trigger.phase} gate — it always waits for you`;
+  }
+  if (rule.trigger.phase === PLAN_APPROVAL_PHASE) {
+    if (rule.trigger.band !== TRUSTED_PLAN_BAND) {
+      return `an order answers the plan_approval gate only for band ${TRUSTED_PLAN_BAND} runs — every other plan waits for you`;
+    }
+    if (rule.trigger.preset === undefined) {
+      return 'an order answers the plan_approval gate only for runs of one preset — name the preset';
+    }
+    if (rule.scope.kind !== 'project') {
+      return 'an order answers the plan_approval gate only within one project — scope it to the project';
+    }
   }
   return null;
 }
