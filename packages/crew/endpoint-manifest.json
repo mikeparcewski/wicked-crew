@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.51.0",
+  "apiTypesVersion": "0.52.0",
   "endpoints": [
     {
       "method": "GET",
@@ -768,6 +768,17 @@
       "requestType": null,
       "responseType": null,
       "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/roster/record",
+      "requestType": null,
+      "responseType": "SeatRecordResponse",
+      "statusCodes": [
+        200,
+        400,
+        503
+      ]
     },
     {
       "method": "GET",
