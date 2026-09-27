@@ -56,6 +56,29 @@ export interface RunFacts {
   firstOrd: number | undefined;
   /** Approving this run's gate would land doctrine (a steering-author run): never an order's call. */
   landsDoctrine: boolean;
+  /** The band the run's accepted plan landed in (`team_plan.accepted.band`); undefined when unscored. */
+  band: string | undefined;
+}
+
+/**
+ * The phase a gate is matched on: `intake` for the gate before the run's first unit with nothing
+ * to review, else the reviewed unit's phase (the upcoming unit's when nothing has run). `unitPhase`
+ * is the unit's own phase either way. The ONE reading, shared with the decided-gate history.
+ */
+export function gatePhase(
+  run: Pick<RunFacts, 'phaseOf' | 'firstOrd'>,
+  ord: number,
+  reviewingOrd: number | null,
+): { phase: string; unitPhase: string } {
+  const unitPhase = run.phaseOf(reviewingOrd ?? ord) ?? '';
+  const intake = reviewingOrd === null && ord === run.firstOrd;
+  return { phase: intake ? 'intake' : unitPhase, unitPhase };
+}
+
+/** THE INVARIANT as a predicate: an order may approve only a phase-review gate of a run whose
+ *  approval lands no doctrine. */
+export function orderMayApprove(gateKind: string, run: Pick<RunFacts, 'landsDoctrine'>): boolean {
+  return APPROVABLE_GATE_KINDS.has(gateKind) && !run.landsDoctrine;
 }
 
 export interface EvaluatorDeps {
@@ -138,14 +161,14 @@ export class StandingOrderEvaluator {
     if (orders.length === 0) return;
     const run = await this.deps.runFacts(g.runId);
     if (run === undefined) return;
-    const unitPhase = run.phaseOf(g.reviewingOrd ?? g.ord) ?? '';
-    const intake = g.reviewingOrd === null && g.ord === run.firstOrd;
-    const phase = intake ? 'intake' : unitPhase;
+    const { phase, unitPhase } = gatePhase(run, g.ord, g.reviewingOrd);
     const matching = orders.filter(
       (o) =>
         this.inScope(o, run.projectId) &&
         o.rule.trigger.kind === 'gate' &&
-        (o.rule.trigger.phase === '*' || o.rule.trigger.phase === phase || o.rule.trigger.phase === unitPhase),
+        (o.rule.trigger.phase === '*' || o.rule.trigger.phase === phase || o.rule.trigger.phase === unitPhase) &&
+        // A band-scoped order matches only a run scored into that band; an unscored run never does.
+        (o.rule.trigger.band === undefined || o.rule.trigger.band === run.band),
     );
     const subject = `gate:${g.runId}:${g.ord}`;
     const holds = matching.filter((o) => o.rule.action === 'hold');
@@ -163,7 +186,7 @@ export class StandingOrderEvaluator {
     }
     // THE INVARIANT: only a phase-review gate, and never under a hold.
     const approver = approves[0];
-    if (approver === undefined || holds.length > 0 || !APPROVABLE_GATE_KINDS.has(g.gateKind) || run.landsDoctrine) return;
+    if (approver === undefined || holds.length > 0 || !orderMayApprove(g.gateKind, run)) return;
     if (!this.once(`${subject}:approve`)) return;
     const out = await this.deps.decideGate(g.runId, { approve: true, ord: g.ord }, orderActor(approver), {
       standingOrder: { id: approver.id, text: approver.text },

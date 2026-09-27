@@ -68,6 +68,7 @@ import { StandingOrderStore } from '../standing-orders/store.js';
 import { StandingOrderEvaluator, type GateFact } from '../standing-orders/evaluator.js';
 import { registerStandingOrderRoutes } from '../standing-orders/routes.js';
 import { seatParser } from '../standing-orders/parse.js';
+import { registerGateHistoryRoute, runBand, runProject } from '../standing-orders/history.js';
 import { isSteeringAuthorRun } from './steering-landing.js';
 import { applyWorkerConfigRoot } from './seat-signin.js';
 import { registeredSkillRefs } from '../skills/core-closure.js';
@@ -1555,9 +1556,9 @@ export async function createServer(
     runFacts: async (runId) => {
       const v = (await adapter.sessionsDetail()).find((x) => x.session.id === runId);
       if (v === undefined) return undefined;
-      const own = v.session.project_id;
       return {
-        projectId: typeof own === 'string' && own !== 'default' ? own : membershipIndex.projectOf(runId),
+        projectId: runProject(v, runId, (id) => membershipIndex.projectOf(id)),
+        band: runBand(v),
         problem: v.session.problem,
         phaseOf: (ord) => v.units.find((u) => u.ord === ord)?.phase_ref ?? undefined,
         firstOrd: v.units.length === 0 ? undefined : Math.min(...v.units.map((u) => u.ord)),
@@ -1578,6 +1579,16 @@ export async function createServer(
         }));
     },
     log: (m) => app.log.warn(m),
+  });
+  // The decided-gate history (brainstorm ideas 7 and 8): a seat's track record, and the preview
+  // of what a proposed order would have done — read with the evaluator's own phase and invariant.
+  registerGateHistoryRoute(app, {
+    audit,
+    views: () => adapter.sessionsDetail(),
+    gateRows: async () =>
+      typeof adapter.interactionRequests === 'function' ? ((await adapter.interactionRequests(undefined, undefined)) ?? []) : [],
+    projectOf: (id) => membershipIndex.projectOf(id),
+    landsDoctrine: isSteeringAuthorRun,
   });
   registerStandingOrderRoutes(app, {
     store: standingOrders,

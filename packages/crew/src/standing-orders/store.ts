@@ -27,8 +27,11 @@ export const StandingOrderRuleSchema = z
     ]),
     trigger: z.discriminatedUnion('kind', [
       // `phase`: the phase the gate reviews (the reviewed unit's `phase_ref`), `intake` (the gate
-      // before the run's first unit), or `*` for any gate.
-      z.object({ kind: z.literal('gate'), phase: z.string().min(1).max(64) }).strict(),
+      // before the run's first unit), or `*` for any gate. `band` (optional): only a run whose
+      // accepted plan landed in that band (`"0-19"`, …); a run with no scored plan never matches.
+      z
+        .object({ kind: z.literal('gate'), phase: z.string().min(1).max(64), band: z.string().min(1).max(16).optional() })
+        .strict(),
       z.object({ kind: z.literal('finding'), severity: z.enum(['high', 'medium', '*']) }).strict(),
     ]),
     action: z.enum(['approve', 'hold', 'notify']),

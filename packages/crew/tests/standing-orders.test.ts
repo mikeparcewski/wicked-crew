@@ -80,7 +80,7 @@ describe('StandingOrderStore — the audit trail is the record', () => {
   });
 });
 
-function harness(runs: Record<string, { projectId?: string; phases: string[]; steering?: boolean }>, decideCode = 200) {
+function harness(runs: Record<string, { projectId?: string; phases: string[]; steering?: boolean; band?: string }>, decideCode = 200) {
   const audited: Array<{ action: string; actor: { id: string }; runId?: string; detail?: Record<string, unknown> }> = [];
   const audit = {
     record: (action: string, actor: { id: string }, fields?: { runId?: string; detail?: Record<string, unknown> }) => {
@@ -104,7 +104,7 @@ function harness(runs: Record<string, { projectId?: string; phases: string[]; st
       const r = runs[runId];
       return r === undefined
         ? undefined
-        : { projectId: r.projectId, problem: `problem ${runId}`, phaseOf: (ord) => r.phases[ord], firstOrd: 0, landsDoctrine: r.steering === true };
+        : { projectId: r.projectId, problem: `problem ${runId}`, phaseOf: (ord) => r.phases[ord], firstOrd: 0, landsDoctrine: r.steering === true, band: r.band };
     },
     openGates: async () => {
       reads.n += 1;
@@ -147,6 +147,22 @@ describe('StandingOrderEvaluator', () => {
     h.store.add('approve anything', gateRule('*', 'approve'), HUMAN);
     await h.evaluator.onEvent(gate('r1', 1, 'def', 0));
     expect(h.decided).toEqual([]);
+  });
+
+  it('a band-scoped order approves only a run whose accepted plan is in that band (brainstorm idea 8)', async () => {
+    const h = harness({
+      low: { projectId: 'A', phases: ['build', 'review'], band: '0-19' },
+      mid: { projectId: 'A', phases: ['build', 'review'], band: '40-69' },
+      none: { projectId: 'A', phases: ['build', 'review'] },
+    });
+    h.store.add('Always approve band 0-19 unit reviews on A', {
+      scope: { kind: 'project', projectId: 'A' }, trigger: { kind: 'gate', phase: '*', band: '0-19' }, action: 'approve', activeWhen: 'always',
+    }, HUMAN);
+    await h.evaluator.onEvent(gate('mid', 1));
+    await h.evaluator.onEvent(gate('none', 1));
+    expect(h.decided).toEqual([]);
+    await h.evaluator.onEvent(gate('low', 1));
+    expect(h.decided.map((d) => d.id)).toEqual(['low']);
   });
 
   it('an `always` order acts while present', async () => {
@@ -254,7 +270,7 @@ describe('StandingOrderEvaluator', () => {
       store: h.store,
       decideGate: async () => ({ code: 200, body: {} }),
       audit: { record: () => Date.now() },
-      runFacts: async () => ({ projectId: 'A', problem: 'problem r1', phaseOf: () => 'intake', firstOrd: 0, landsDoctrine: false }),
+      runFacts: async () => ({ projectId: 'A', problem: 'problem r1', phaseOf: () => 'intake', firstOrd: 0, landsDoctrine: false, band: undefined }),
       openGates: async () => [{ runId: 'r1', ord: 1, reviewingOrd: 0, gateKind: 'def', prompt: 'go?' }],
     });
     await again.sweep();
