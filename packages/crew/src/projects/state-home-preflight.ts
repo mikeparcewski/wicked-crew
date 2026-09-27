@@ -79,6 +79,10 @@ export const STATE_HOME_ROOT_ENVS: ReadonlyArray<{ variable: string; creates: st
   // stays ok. Refuse-only: crew never seeds the file, so an existing placement is the config
   // error the boot names; nothing to fence, no registry row (rule 6 — one fence change per RC).
   { variable: 'WICKED_CREW_SYSTEM_SETTINGS', creates: 'the system settings file `PUT /settings` writes', fenced: false },
+  // Studio OS behaviour 8: every capture writes its inbox here before its run launches; under the
+  // state home that unregistered entry would refuse the capture's own launch. Refuse-only, like the
+  // settings file: crew seeds nothing there at boot.
+  { variable: 'WICKED_CAPTURE_INBOX_DIR', creates: 'the capture inbox a capture run must READ', fenced: false },
 ];
 
 /**

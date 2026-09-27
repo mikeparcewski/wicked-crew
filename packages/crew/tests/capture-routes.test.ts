@@ -23,6 +23,7 @@ import { AuditLog } from '../src/api/audit.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { LaunchRunInput } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
+import { assertWickedRootsOutsideStateHome, StateHomePlacementError } from '../src/projects/state-home-preflight.js';
 
 // A 1x1 PNG — the "whiteboard photo".
 const PNG_B64 =
@@ -135,6 +136,12 @@ describe('POST /projects/:id/capture — capture into the proposal queue', () =>
     const again = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'p', sessionId: runId } });
     expect(again.statusCode, again.body).toBe(201);
     expect((launchRun.mock.calls[2]![0] as LaunchRunInput).extraWriteRoots).toBeUndefined();
+  });
+
+  it('the daemon refuses to boot with the capture inbox inside its state home (codex on #687)', () => {
+    const home = join(tmpdir(), 'crew-state-home');
+    expect(() => assertWickedRootsOutsideStateHome({ WICKED_CAPTURE_INBOX_DIR: join(home, 'capture-inbox') }, home)).toThrow(StateHomePlacementError);
+    expect(() => assertWickedRootsOutsideStateHome({ WICKED_CAPTURE_INBOX_DIR: join(tmpdir(), 'elsewhere') }, home)).not.toThrow();
   });
 
   it('400s a capture with nothing in it, and launches nothing', async () => {
