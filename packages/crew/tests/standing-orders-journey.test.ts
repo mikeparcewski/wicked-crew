@@ -140,6 +140,8 @@ describe('standing orders — the behaviour-10 journey', () => {
     expect(away.statusCode).toBe(200);
 
     const opened = Date.now();
+    // Away now, and the order is active: project B's intake gate is still out of its scope.
+    emit({ type: 'awaitingHuman', session: 'run-b', ord: 0, reviewingOrd: null, prompt: 'Approve unit 0 before it runs?', gateKind: 'run_level' } as CoreEvent);
     emit({ type: 'awaitingHuman', session: 'run-a', ord: 0, reviewingOrd: null, prompt: 'Approve unit 0 before it runs?', gateKind: 'run_level' } as CoreEvent);
     emit({ type: 'awaitingHuman', session: 'run-d', ord: 1, reviewingOrd: 0, prompt: 'Deliver?', gateKind: 'deliver' } as CoreEvent);
     expect(await until(() => confirmCalls.some((c) => c[0] === 'run-a'), 5000)).toBe(true);
