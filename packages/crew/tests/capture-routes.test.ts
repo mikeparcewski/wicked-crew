@@ -249,7 +249,7 @@ describe('POST /proposals/:id/approve {content?, reach?} — accept with an edit
     expect(estate).toHaveBeenCalledWith('proposal.approve', { id: 'p2' });
   });
 
-  it('a failed approve of the copy leaves the original pending: nothing is rejected, the error surfaces', async () => {
+  it('a failed approve of the copy leaves the original pending and withdraws the copy; the error surfaces', async () => {
     stubEstate(pending());
     const base = estate.getMockImplementation()!;
     estate.mockImplementation(async (tool: string, args: Record<string, unknown>) => {
@@ -258,7 +258,9 @@ describe('POST /proposals/:id/approve {content?, reach?} — accept with an edit
     });
     const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/p1/approve', payload: { content: 'x', reach: 'pattern' } });
     expect(res.statusCode).toBe(502);
-    expect(estate.mock.calls.map((c) => c[0])).not.toContain('proposal.reject');
+    // Only the copy is withdrawn — a retry then leaves no stray duplicate pending in review.
+    const rejected = estate.mock.calls.filter((c) => c[0] === 'proposal.reject').map((c) => c[1]);
+    expect(rejected).toEqual([{ id: 'p2' }]);
   });
 
   it('a reject that fails after the copy is approved answers 200 with originalPending — no 502 inviting a second copy', async () => {

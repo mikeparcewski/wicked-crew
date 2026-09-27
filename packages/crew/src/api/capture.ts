@@ -242,7 +242,8 @@ export type EditedApproval = { status: number; body: Record<string, unknown> };
 /**
  * Accept a pending MEMORY proposal WITH an edit — submit the edited copy, approve the copy, then
  * reject the original — and return the copy's approve outcome plus `edited: {from, to}`. The
- * original stays pending until the copy is approved, so a failed approve loses nothing; a reject
+ * original stays pending until the copy is approved, so a failed approve loses nothing (the copy is
+ * withdrawn, so a retry leaves no duplicate pending); a reject
  * that fails AFTER the approve answers 200 with `edited.originalPending: true` (the edit landed;
  * the original is still in the queue for the person to reject), never a 502 inviting a retry that
  * would promote a second copy. A
@@ -306,8 +307,16 @@ export async function approveEdited(
   if (typeof submitted.id !== 'string' || submitted.id === '') {
     throw new Error('proposal.submit returned no id for the edited copy');
   }
-  const approved = (await estateTool('proposal.approve', { id: submitted.id })) as Record<string, unknown>;
-  const edited: Record<string, unknown> = { from: id, to: submitted.id };
+  const copy = submitted.id;
+  let approved: Record<string, unknown>;
+  try {
+    approved = (await estateTool('proposal.approve', { id: copy })) as Record<string, unknown>;
+  } catch (err) {
+    // Withdraw the copy so a retry of this accept leaves no stray duplicate pending in review.
+    await estateTool('proposal.reject', { id: copy }).catch(() => undefined);
+    throw err;
+  }
+  const edited: Record<string, unknown> = { from: id, to: copy };
   try {
     await estateTool('proposal.reject', { id });
   } catch {
