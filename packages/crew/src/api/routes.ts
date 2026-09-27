@@ -125,6 +125,7 @@ import { legacyHomeOutboxPath } from '../core/governance-store.js';
 import { UsageError, replayOutboxInto } from '../cli/governance.js';
 import { foldDeadletters } from './governance-health.js';
 import { RetryIndex } from './retry-index.js';
+import { SEAT_RECORD_DEFAULT_DAYS, SEAT_RECORD_MAX_DAYS, seatRecord } from './seat-record.js';
 import { GroupIndex } from './group-index.js';
 import { RunTimingIndex, recordRunLaunched } from './run-timing-index.js';
 import { GuidanceIndex } from './guidance-index.js';
@@ -1351,6 +1352,41 @@ export function registerRoutes(
   const rosterWithStanding: RosterWithStanding =
     runtime.rosterWithStanding ?? rosterWithStandingFactory({ seatHealth, signedIn });
   app.get(`${V}/roster`, async () => ({ roster: rosterWithStanding() }));
+
+  // Each seat's week (studio's weekly 1:1 per agent; api-types 0.52.0): units, first pass, rework,
+  // stalls, bench and cost, folded from the runs' durable event logs by `seatRecord` — nothing new
+  // is stored. The daemon's remembered stall frames join the engine's, as on `/runs/:id/events`.
+  app.get(
+    `${V}/roster/record`,
+    { config: { manifest: { responseType: 'SeatRecordResponse', statusCodes: [200, 400, 503] } } },
+    async (req, reply) => {
+      const raw = (req.query as { days?: string | string[] }).days;
+      let days = SEAT_RECORD_DEFAULT_DAYS;
+      if (raw !== undefined) {
+        const one = Array.isArray(raw) ? undefined : raw;
+        const n = one !== undefined && /^[1-9][0-9]?$/.test(one) ? Number(one) : NaN;
+        if (!(n >= 1 && n <= SEAT_RECORD_MAX_DAYS)) {
+          return reply.code(400).send({ error: `Invalid ?days — expected one whole number from 1 to ${SEAT_RECORD_MAX_DAYS}, got ${JSON.stringify(raw)}` });
+        }
+        days = n;
+      }
+      const views = (await adapter.sessionsDetail()).map(decorateRun);
+      const out = await seatRecord(
+        views,
+        async (id) => {
+          const engine = await adapter.runEvents(id);
+          if (engine === null) return null;
+          const daemon = runtime.stallFrames?.(id) ?? [];
+          return daemon.length === 0 ? engine : [...engine, ...(daemon as unknown as RecordedEvent[])];
+        },
+        { days, now: Date.now() },
+      );
+      if (out === null) {
+        return reply.code(503).send({ error: 'Seat records are unavailable: this wicked-core build has no event-log read binding' });
+      }
+      return out;
+    },
+  );
 
   // Open a file/folder with the OS default application (crew#273) — the studio Files tab's
   // click-to-open. The open MUST happen daemon-side (the SPA cannot spawn a process), which is

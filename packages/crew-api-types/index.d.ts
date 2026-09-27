@@ -777,6 +777,62 @@ export interface RosterSeatCouncilBench {
   window_ms: number;
 }
 
+/**
+ * `GET /roster/record?days=N` (api-types 0.52.0): each seat's record over the last N days (default 7,
+ * max 30), folded from the runs' durable event logs (studio's weekly 1:1 per agent). Nothing new is
+ * stored; the window is by event time. A unit's seat is `unitDistributed.cli` (moved by
+ * `unitReassigned.newCli`), else the unit row's `assigned_cli`. 503 when the engine has no event-log
+ * read binding (a missing binding is not an empty week).
+ */
+export interface SeatRecordResponse {
+  days: number;
+  /** Window start, unix MILLIS. */
+  since: number;
+  /** Window end (the read time), unix MILLIS. */
+  until: number;
+  /** Runs whose event log was read. */
+  runsRead: number;
+  /** True when the daemon's per-read run cap cut the read (the oldest runs in the window were skipped). */
+  truncated: boolean;
+  /** Seats with any record in the window, by key. A roster seat absent here had no units and no bench. */
+  seats: SeatRecord[];
+}
+
+/** One seat's week (`SeatRecordResponse.seats[]`). */
+export interface SeatRecord {
+  /** The roster key. */
+  cli: string;
+  /** Distinct units the seat was dispatched on in the window. */
+  units: number;
+  /** Units of this seat with a gate evaluation in the window. */
+  gated: number;
+  /** Of `gated`: the FIRST evaluation passed (`gateEvaluated.combined` and no `denial`). */
+  firstPass: number;
+  /** Units the seat ran first that were dispatched again (a retry or a send-back) or given a `unitReworkAmended`. */
+  rework: number;
+  /** Distinct units that went quiet (`workerStalled`, engine or daemon watchdog) while the seat ran them. */
+  stalls: number;
+  /** Runs in the window whose `benched_seats` names the seat. */
+  benched: number;
+  /** Bench reason → runs. */
+  benchReasons: Record<string, number>;
+  /** Summed `cliUsage.costUsd` where a price was known; `null` when no usage frame carried one (never `0` for "unknown"). */
+  costUsd: number | null;
+  /** Usage frames that carried a price. */
+  costedUsage: number;
+  /** Phase (`phase_ref`, else `stage`) → the same counts, so a move can name the phase. */
+  byPhase: Record<string, SeatPhaseRecord>;
+}
+
+/** One phase's slice of a {@link SeatRecord}. */
+export interface SeatPhaseRecord {
+  units: number;
+  gated: number;
+  firstPass: number;
+  rework: number;
+  stalls: number;
+}
+
 /** A seat's auth reading (`RosterSeat.auth`; api-types 0.35.0). */
 export type SeatAuth = 'signed_in' | 'signed_out' | 'not_required' | 'unknown';
 
