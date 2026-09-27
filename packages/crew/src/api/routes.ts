@@ -3743,6 +3743,9 @@ export function registerRoutes(
         : !CoreAdapter.replayEmitOutboxSupported()
           ? 'the installed engine cannot replay a dead-letter outbox — upgrade wicked-core-ts'
           : null;
+      // Checked FIRST, for both modes: a running replay has renamed the live outbox to its archive,
+      // so any read now would report a false zero while those dead letters are still in flight.
+      if (deadletterReplayInFlight) return reply.code(409).send({ error: 'a dead-letter replay is already running' });
       const outbox = store.outboxPath;
       if (!existsSync(outbox)) {
         // No outbox = no dead letters: a zero outcome, never an error.
@@ -3754,7 +3757,6 @@ export function registerRoutes(
         };
       }
       if (!dryRun && blocker !== null) return reply.code(blocker.startsWith('the installed engine') ? 501 : 409).send({ error: blocker });
-      if (!dryRun && deadletterReplayInFlight) return reply.code(409).send({ error: 'a dead-letter replay is already running' });
       if (!dryRun) deadletterReplayInFlight = true;
       try {
         const { outcome } = await replayOutboxInto(outbox, store, { dryRun });

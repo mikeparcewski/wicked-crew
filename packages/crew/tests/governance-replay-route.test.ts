@@ -144,6 +144,24 @@ describe('POST /api/v1/governance/deadletters/replay', () => {
     expect(audit.body).toContain('governance.deadletters.replayed');
   });
 
+  it('while a real replay runs, both modes answer 409 — never a false zero off the renamed outbox', async () => {
+    seed([REC('wicked.crew.governance.conformance_recorded', 'no shared store (x)', 1_000)]);
+    vi.spyOn(CoreAdapter, 'replayEmitOutboxSupported').mockReturnValue(true);
+    let release: () => void = () => {};
+    vi.spyOn(CoreAdapter, 'replayEmitOutbox').mockImplementation(
+      () => new Promise((resolve) => {
+        release = () => resolve({ read: 1, replayed: 1, already_present: 0, failed: [] } as unknown as Awaited<ReturnType<typeof CoreAdapter.replayEmitOutbox>>);
+      }),
+    );
+    const first = app.inject({ method: 'POST', url: '/api/v1/governance/deadletters/replay', payload: {} });
+    // Let the first request reach the engine call (the outbox is renamed by then).
+    await vi.waitFor(() => expect(existsSync(location.outboxPath)).toBe(false));
+    expect((await post({})).status).toBe(409);
+    expect((await post({ dryRun: true })).status).toBe(409);
+    release();
+    expect((await first).statusCode).toBe(200);
+  });
+
   it('a real replay on an engine without the binding is refused (501) with the outbox untouched', async () => {
     seed([REC('wicked.crew.governance.conformance_recorded', 'no shared store (x)', 1_000)]);
     const before = readFileSync(location.outboxPath, 'utf8');
