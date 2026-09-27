@@ -275,8 +275,6 @@ export interface CreateServerOptions {
   auth?: AuthOptions;
   /** Audit-trail path override (tests). Default `~/.wicked-crew/audit.log` / `WICKED_CREW_AUDIT_LOG`. */
   auditPath?: string;
-  /** Standing-orders store override (tests). Default `<state home>/standing-orders.json`. */
-  standingOrdersPath?: string;
   /** Eval-run-history root override (tests). Default the state home's `evals/` /
    *  `WICKED_CREW_EVAL_STORE`. Symmetric with `auditPath` — a createServer-driven test isolates its
    *  eval history here instead of writing the operator's real `~/.wicked-crew/evals/`. */
@@ -1547,10 +1545,9 @@ export async function createServer(
 
   // Standing orders (Studio OS behaviour 10): the store, the evaluator over THE gate decision path
   // (`registered.decideGate`), and the routes. See src/standing-orders/.
-  const standingOrders = new StandingOrderStore(
-    options?.standingOrdersPath,
-    (m) => app.log.warn(m),
-  );
+  // The durable record is the audit trail (store.ts): fold it once, here.
+  const standingOrders = new StandingOrderStore(audit);
+  await standingOrders.hydrate(audit, (m) => app.log.warn(m));
   standingOrderEvaluator = new StandingOrderEvaluator({
     store: standingOrders,
     decideGate: registered.decideGate,
@@ -1585,7 +1582,6 @@ export async function createServer(
   registerStandingOrderRoutes(app, {
     store: standingOrders,
     evaluator: standingOrderEvaluator,
-    audit,
     parse: seatParser({ adapter, roster: rosterWithStanding }),
   });
 

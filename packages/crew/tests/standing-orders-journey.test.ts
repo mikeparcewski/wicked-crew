@@ -65,7 +65,6 @@ beforeAll(async () => {
   app = await createServer(adapter, {
     auth: { mode: 'off' },
     auditPath: join(scratch, 'audit.log'),
-    standingOrdersPath: join(scratch, 'standing-orders.json'),
     projectEvents: { disabled: true },
     interactiveWsRelay: { disabled: true },
     stallWatchdog: { enabled: false },

@@ -15,7 +15,9 @@ import { fileURLToPath } from 'node:url';
 const SRC = fileURLToPath(new URL('../src', import.meta.url));
 
 /** The files that may name the team types: they subscribe to and read the engine's rows. */
-const READERS = new Set(['team/ws-relay.ts', 'team/routes.ts']);
+// Standing orders (behaviour 10) READ team rows too: a `wicked.team.finding.raised` can wake the
+// operator. It emits nothing (rule 2 below holds it to that).
+const READERS = new Set(['team/ws-relay.ts', 'team/routes.ts', 'standing-orders/evaluator.ts']);
 
 function sources(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {

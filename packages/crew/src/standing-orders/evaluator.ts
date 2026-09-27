@@ -11,7 +11,7 @@
  *   approve — answers the gate through `decideGate`, THE gate decision path `POST /runs/:id/gate`
  *             uses (ord check, 409 gate_changed / gate_unknown, confirmGate, `gate.decided` audit).
  *             The actor is the order. A refusal (a person got there first) is logged, never retried.
- *   notify  — the message is QUEUED in the store's outbox and `standing-order.notified` recorded.
+ *   notify  — the message is QUEUED: the store records `standing-order.notified` (its outbox).
  *             Nothing is sent: outbound always waits.
  *
  * THE INVARIANT: an order approves only a phase-review gate (`def`, `run_level`, `terminal`). The
@@ -26,8 +26,8 @@
 
 import type { AuditLog } from '../api/audit.js';
 import type { RegisteredRoutes } from '../api/routes.js';
-import type { Actor, CoreEvent } from '../core/types.js';
-import type { StandingOrder, StandingOrderStore } from './store.js';
+import type { CoreEvent } from '../core/types.js';
+import { orderActor, type StandingOrder, type StandingOrderStore } from './store.js';
 
 /** The only gate kinds an order may approve. */
 export const APPROVABLE_GATE_KINDS: ReadonlySet<string> = new Set(['def', 'run_level', 'terminal']);
@@ -66,10 +66,6 @@ export interface EvaluatorDeps {
   /** The engine's open gate rows (a sweep); `[]` when the engine cannot say. */
   openGates: () => Promise<GateFact[]>;
   log?: (msg: string) => void;
-}
-
-export function orderActor(o: StandingOrder): Actor {
-  return { id: `standing-order:${o.id}`, kind: 'system', trust: 'operator' };
 }
 
 export class StandingOrderEvaluator {
@@ -202,11 +198,8 @@ export class StandingOrderEvaluator {
     }
   }
 
+  /** The store records it (`standing-order.notified`, the order as actor) — queued, never sent. */
   private notify(o: StandingOrder, runId: string, text: string): void {
-    const queued = this.deps.store.queue({ orderId: o.id, orderText: o.text, runId, text, at: Date.now() });
-    this.deps.audit.record('standing-order.notified', orderActor(o), {
-      runId,
-      detail: { standingOrder: { id: o.id, text: o.text }, messageId: queued.id, queued: true, text },
-    });
+    this.deps.store.queue(o, runId, text);
   }
 }

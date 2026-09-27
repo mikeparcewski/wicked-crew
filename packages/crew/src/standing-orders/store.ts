@@ -3,19 +3,21 @@
  *
  * Plain-words rules for when the operator is busy or away, kept as STRUCTURED rules the operator
  * confirmed (never a guess: the seat's parse is shown back and only the confirmed rule is stored).
- * One JSON file in the daemon's state home — `{ away, awaySince, orders, outbox }` — rewritten
- * whole on every change (tmp + rename), read once at boot. A torn or unreadable file is said loud
- * and treated as empty rather than guessed at.
+ *
+ * The durable record is the AUDIT TRAIL, like retry lineage and guidance (`GuidanceIndex`): every
+ * change is one entry — `standing-order.created {standingOrder, rule}`, `standing-order.retired`,
+ * `standing-order.away {away}`, `standing-order.notified {standingOrder, messageId, text}` (the
+ * queued outbox) — and this class is the in-memory fold of them, hydrated once at boot. No file of
+ * its own under the state home (a new top-level entry there is one core's worker fence refuses).
  *
  * THE INVARIANT lives here as a validation (`refusal`) and again in the evaluator: an order never
  * approves the deliver gate, never approves a plan approval, and never approves a finding.
  */
 
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
 import { z } from 'zod';
-import { crewStateHome } from '../projects/state-home.js';
+import type { AuditLog } from '../api/audit.js';
+import type { Actor, AuditEntry } from '../core/types.js';
 
 export const StandingOrderRuleSchema = z
   .object({
@@ -24,7 +26,8 @@ export const StandingOrderRuleSchema = z
       z.object({ kind: z.literal('project'), projectId: z.string().min(1) }).strict(),
     ]),
     trigger: z.discriminatedUnion('kind', [
-      // `phase`: the phase the gate reviews (the reviewed unit's `phase_ref`), or `*` for any gate.
+      // `phase`: the phase the gate reviews (the reviewed unit's `phase_ref`), `intake` (the gate
+      // before the run's first unit), or `*` for any gate.
       z.object({ kind: z.literal('gate'), phase: z.string().min(1).max(64) }).strict(),
       z.object({ kind: z.literal('finding'), severity: z.enum(['high', 'medium', '*']) }).strict(),
     ]),
@@ -74,53 +77,75 @@ export function refusal(rule: StandingOrderRule): string | null {
   return null;
 }
 
-export function defaultStandingOrdersPath(): string {
-  return join(crewStateHome(), 'standing-orders.json');
+/** The trail actions this store folds, oldest first. */
+export const STANDING_ORDER_ACTIONS = [
+  'standing-order.created',
+  'standing-order.retired',
+  'standing-order.away',
+  'standing-order.notified',
+] as const;
+
+export function orderActor(o: Pick<StandingOrder, 'id'>): Actor {
+  return { id: `standing-order:${o.id}`, kind: 'system', trust: 'operator' };
 }
 
-const EMPTY: StandingOrdersState = { away: false, awaySince: null, orders: [], outbox: [] };
-
 export class StandingOrderStore {
-  private state: StandingOrdersState;
+  private state: StandingOrdersState = { away: false, awaySince: null, orders: [], outbox: [] };
 
-  constructor(
-    readonly path: string = defaultStandingOrdersPath(),
-    private readonly warn: (msg: string) => void = (m) => console.warn(m),
-    private readonly persist = true,
-  ) {
-    this.state = this.load();
-  }
+  constructor(private readonly audit: Pick<AuditLog, 'record'>) {}
 
-  /** An in-memory store for directly-driven route sets (never writes the operator's home). */
-  static memory(): StandingOrderStore {
-    return new StandingOrderStore('(memory)', () => undefined, false);
-  }
-
-  private load(): StandingOrdersState {
-    if (!this.persist || !existsSync(this.path)) return structuredClone(EMPTY);
+  /** Fold the trail's standing-order entries (best-effort: an unreadable trail starts empty, said). */
+  async hydrate(trail: Pick<AuditLog, 'readAll'>, log?: (msg: string) => void): Promise<void> {
     try {
-      const raw = JSON.parse(readFileSync(this.path, 'utf8')) as Partial<StandingOrdersState>;
-      const orders = (Array.isArray(raw.orders) ? raw.orders : []).filter(
-        (o) => typeof o?.id === 'string' && StandingOrderRuleSchema.safeParse(o.rule).success,
-      );
-      return {
-        away: raw.away === true,
-        awaySince: typeof raw.awaySince === 'number' ? raw.awaySince : null,
-        orders,
-        outbox: Array.isArray(raw.outbox) ? raw.outbox : [],
-      };
+      // One full-file scan; the trail answers newest first, so replay it reversed (append order).
+      const mine: ReadonlySet<string> = new Set(STANDING_ORDER_ACTIONS);
+      const entries: AuditEntry[] = (await trail.readAll()).filter((e) => mine.has(e.action));
+      for (const e of entries.reverse()) this.fold(e);
     } catch (err) {
-      this.warn(`[standing-orders] cannot read ${this.path} — starting with no orders: ${String(err)}`);
-      return structuredClone(EMPTY);
+      log?.(`[standing-orders] hydrate failed — no orders until restart: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
-  private save(): void {
-    if (!this.persist) return;
-    mkdirSync(dirname(this.path), { recursive: true });
-    const tmp = `${this.path}.tmp`;
-    writeFileSync(tmp, JSON.stringify(this.state, null, 2), 'utf8');
-    renameSync(tmp, this.path);
+  private fold(e: AuditEntry): void {
+    const d = (e.detail ?? {}) as Record<string, unknown>;
+    const so = d['standingOrder'] as { id?: unknown; text?: unknown } | undefined;
+    switch (e.action) {
+      case 'standing-order.created': {
+        const rule = StandingOrderRuleSchema.safeParse(d['rule']);
+        if (typeof so?.id !== 'string' || typeof so.text !== 'string' || !rule.success) return;
+        this.state.orders.push({ id: so.id, text: so.text, rule: rule.data, createdAt: e.ts });
+        return;
+      }
+      case 'standing-order.retired':
+        if (typeof so?.id === 'string') this.state.orders = this.state.orders.filter((o) => o.id !== so.id);
+        return;
+      case 'standing-order.away':
+        if (typeof d['away'] === 'boolean') {
+          this.state.away = d['away'];
+          this.state.awaySince = d['away'] ? e.ts : null;
+        }
+        return;
+      case 'standing-order.notified':
+        if (typeof so?.id !== 'string' || typeof d['messageId'] !== 'string' || typeof d['text'] !== 'string') return;
+        this.state.outbox.push({
+          id: d['messageId'],
+          orderId: so.id,
+          orderText: typeof so.text === 'string' ? so.text : '',
+          runId: e.runId ?? null,
+          text: d['text'],
+          at: e.ts,
+          status: 'queued',
+        });
+        return;
+      default:
+        return;
+    }
+  }
+
+  /** Record one change and fold it, so memory and the trail cannot disagree. */
+  private write(action: string, actor: Actor, fields: { runId?: string; detail: Record<string, unknown> }): void {
+    const ts = this.audit.record(action, actor, fields) || Date.now();
+    this.fold({ ts, action, actor, ...(fields.runId !== undefined ? { runId: fields.runId } : {}), detail: fields.detail });
   }
 
   snapshot(): StandingOrdersState {
@@ -135,32 +160,33 @@ export class StandingOrderStore {
     return this.state.orders;
   }
 
-  setAway(away: boolean, now = Date.now()): void {
-    if (this.state.away === away) return;
-    this.state.away = away;
-    this.state.awaySince = away ? now : null;
-    this.save();
-  }
-
-  add(text: string, rule: StandingOrderRule, now = Date.now()): StandingOrder {
-    const order: StandingOrder = { id: randomUUID().slice(0, 8), text, rule, createdAt: now };
-    this.state.orders.push(order);
-    this.save();
-    return order;
-  }
-
-  remove(id: string): boolean {
-    const before = this.state.orders.length;
-    this.state.orders = this.state.orders.filter((o) => o.id !== id);
-    if (this.state.orders.length === before) return false;
-    this.save();
+  /** Returns whether the flag changed. */
+  setAway(away: boolean, actor: Actor): boolean {
+    if (this.state.away === away) return false;
+    this.write('standing-order.away', actor, { detail: { away } });
     return true;
   }
 
-  queue(msg: Omit<QueuedMessage, 'id' | 'status'>): QueuedMessage {
-    const queued: QueuedMessage = { ...msg, id: randomUUID().slice(0, 8), status: 'queued' };
-    this.state.outbox.push(queued);
-    this.save();
-    return queued;
+  add(text: string, rule: StandingOrderRule, actor: Actor): StandingOrder {
+    const id = randomUUID().slice(0, 8);
+    this.write('standing-order.created', actor, { detail: { standingOrder: { id, text }, rule } });
+    return this.state.orders.find((o) => o.id === id)!;
+  }
+
+  remove(id: string, actor: Actor): boolean {
+    const o = this.state.orders.find((x) => x.id === id);
+    if (o === undefined) return false;
+    this.write('standing-order.retired', actor, { detail: { standingOrder: { id, text: o.text } } });
+    return true;
+  }
+
+  /** Queue a message an order wants sent — recorded as the order's `standing-order.notified`. */
+  queue(o: StandingOrder, runId: string, text: string): QueuedMessage {
+    const messageId = randomUUID().slice(0, 8);
+    this.write('standing-order.notified', orderActor(o), {
+      runId,
+      detail: { standingOrder: { id: o.id, text: o.text }, messageId, queued: true, text },
+    });
+    return this.state.outbox[this.state.outbox.length - 1]!;
   }
 }

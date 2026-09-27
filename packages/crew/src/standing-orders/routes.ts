@@ -13,7 +13,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { API_PREFIX } from '../api/api-prefix.js';
-import type { AuditLog } from '../api/audit.js';
 import { LOCAL_ACTOR } from '../api/auth.js';
 import type { Actor } from '../core/types.js';
 import type { StandingOrderEvaluator } from './evaluator.js';
@@ -35,7 +34,6 @@ export type ParseOutcome =
 export interface StandingOrderRouteDeps {
   store: StandingOrderStore;
   evaluator: StandingOrderEvaluator;
-  audit: Pick<AuditLog, 'record'>;
   parse: (text: string) => Promise<ParseOutcome>;
 }
 
@@ -68,7 +66,7 @@ export function ruleFromAnswer(answer: string): StandingOrderRule | undefined {
 }
 
 export function registerStandingOrderRoutes(app: FastifyInstance, deps: StandingOrderRouteDeps): void {
-  const { store, evaluator, audit } = deps;
+  const { store, evaluator } = deps;
   const actorOf = (req: { actor?: Actor }): Actor => req.actor ?? LOCAL_ACTOR;
   const invalid = (error: z.ZodError) => ({ error: 'Invalid request body', details: error.issues });
 
@@ -84,10 +82,7 @@ export function registerStandingOrderRoutes(app: FastifyInstance, deps: Standing
     async (req, reply) => {
       const parsed = StandingAwaySchema.safeParse(req.body);
       if (!parsed.success) return reply.code(400).send(invalid(parsed.error));
-      const was = store.away;
-      store.setAway(parsed.data.away);
-      if (was !== parsed.data.away) audit.record('standing-order.away', actorOf(req), { detail: { away: parsed.data.away } });
-      if (parsed.data.away && !was) await evaluator.sweep();
+      if (store.setAway(parsed.data.away, actorOf(req)) && parsed.data.away) await evaluator.sweep();
       return store.snapshot();
     },
   );
@@ -119,8 +114,7 @@ export function registerStandingOrderRoutes(app: FastifyInstance, deps: Standing
       if (!parsed.success) return reply.code(400).send(invalid(parsed.error));
       const refused = refusal(parsed.data.rule);
       if (refused !== null) return reply.code(400).send({ error: refused, code: 'order_refused' });
-      const order = store.add(parsed.data.text, parsed.data.rule);
-      audit.record('standing-order.created', actorOf(req), { detail: { standingOrder: { id: order.id, text: order.text }, rule: order.rule } });
+      const order = store.add(parsed.data.text, parsed.data.rule, actorOf(req));
       await evaluator.sweep();
       return reply.code(201).send({ order });
     },
@@ -130,8 +124,7 @@ export function registerStandingOrderRoutes(app: FastifyInstance, deps: Standing
     `${V}/standing-orders/:id`,
     { config: { manifest: { responseType: '{ removed: true }', statusCodes: [200, 404] } } },
     async (req, reply) => {
-      if (!store.remove(req.params.id)) return reply.code(404).send({ error: 'Standing order not found' });
-      audit.record('standing-order.retired', actorOf(req), { detail: { standingOrder: { id: req.params.id } } });
+      if (!store.remove(req.params.id, actorOf(req))) return reply.code(404).send({ error: 'Standing order not found' });
       return { removed: true };
     },
   );

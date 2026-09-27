@@ -13,6 +13,7 @@ import { StandingOrderEvaluator, type GateFact, type RunFacts } from '../src/sta
 import { seatParser } from '../src/standing-orders/parse.js';
 import { registerStandingOrderRoutes, ruleFromAnswer, type ParseOutcome } from '../src/standing-orders/routes.js';
 import { refusal, StandingOrderStore, type StandingOrderRule } from '../src/standing-orders/store.js';
+import { AuditLog } from '../src/api/audit.js';
 import { removeScratch } from './setup/scratch.js';
 
 const scratch = mkdtempSync(join(tmpdir(), 'crew-so-unit-'));
@@ -25,37 +26,47 @@ const gateRule = (phase: string, action: StandingOrderRule['action'], projectId?
   activeWhen,
 });
 
-describe('StandingOrderStore', () => {
-  it('round-trips the flag, orders and outbox through its file', () => {
-    const path = join(scratch, 'rt.json');
-    const a = new StandingOrderStore(path);
-    const o = a.add('approve intake on A', gateRule('intake', 'approve', 'A'), 10);
-    a.setAway(true, 20);
-    a.queue({ orderId: o.id, orderText: o.text, runId: 'r1', text: 'hello', at: 30 });
-    const b = new StandingOrderStore(path);
+const HUMAN = { id: 'local', kind: 'human', trust: 'admin' } as const;
+
+describe('StandingOrderStore — the audit trail is the record', () => {
+  it('every change is one trail entry, and a fresh store folds the trail back to the same state', async () => {
+    const path = join(scratch, 'rt-audit.log');
+    const trail = new AuditLog(path);
+    const a = new StandingOrderStore(trail);
+    const o = a.add('approve intake on A', gateRule('intake', 'approve', 'A'), HUMAN);
+    const gone = a.add('hold delivers', gateRule('deliver', 'hold'), HUMAN);
+    expect(a.setAway(true, HUMAN)).toBe(true);
+    expect(a.setAway(true, HUMAN)).toBe(false); // no change, no entry
+    a.queue(o, 'r1', 'hello');
+    expect(a.remove(gone.id, HUMAN)).toBe(true);
+    expect(a.remove(gone.id, HUMAN)).toBe(false);
+    await trail.flush();
+    expect((await trail.readAll()).map((e) => e.action).reverse()).toEqual([
+      'standing-order.created', 'standing-order.created', 'standing-order.away', 'standing-order.notified', 'standing-order.retired',
+    ]);
+    const b = new StandingOrderStore(AuditLog.noop());
+    await b.hydrate(new AuditLog(path));
+    expect(b.snapshot()).toEqual(a.snapshot());
     const s = b.snapshot();
     expect(s.away).toBe(true);
-    expect(s.awaySince).toBe(20);
-    expect(s.orders).toEqual([{ id: o.id, text: 'approve intake on A', rule: gateRule('intake', 'approve', 'A'), createdAt: 10 }]);
-    expect(s.outbox).toMatchObject([{ orderId: o.id, runId: 'r1', text: 'hello', status: 'queued' }]);
-    expect(b.remove(o.id)).toBe(true);
-    expect(b.remove(o.id)).toBe(false);
-    expect(new StandingOrderStore(path).orders()).toEqual([]);
+    expect(s.orders.map((x) => x.text)).toEqual(['approve intake on A']);
+    expect(s.outbox).toMatchObject([{ orderId: o.id, orderText: o.text, runId: 'r1', text: 'hello', status: 'queued' }]);
   });
 
-  it('an unreadable file is said and read as empty, never guessed at', () => {
-    const path = join(scratch, 'torn.json');
-    writeFileSync(path, '{"away": tru', 'utf8');
+  it('an unreadable trail is said and starts empty, never guessed at', async () => {
     const warned: string[] = [];
-    const s = new StandingOrderStore(path, (m) => warned.push(m));
+    const s = new StandingOrderStore(AuditLog.noop());
+    await s.hydrate({ readAll: async () => { throw new Error('EACCES'); } }, (m) => warned.push(m));
     expect(s.snapshot()).toEqual({ away: false, awaySince: null, orders: [], outbox: [] });
-    expect(warned[0]).toMatch(/cannot read/);
+    expect(warned[0]).toMatch(/hydrate failed/);
   });
 
-  it('drops a stored order whose rule no longer validates', () => {
-    const path = join(scratch, 'bad-rule.json');
-    writeFileSync(path, JSON.stringify({ away: false, orders: [{ id: 'x', text: 't', rule: { action: 'launch' } }], outbox: [] }));
-    expect(new StandingOrderStore(path).orders()).toEqual([]);
+  it('a created entry whose rule no longer validates is skipped', async () => {
+    const path = join(scratch, 'bad-rule-audit.log');
+    writeFileSync(path, JSON.stringify({ ts: 1, action: 'standing-order.created', actor: HUMAN, detail: { standingOrder: { id: 'x', text: 't' }, rule: { action: 'launch' } } }) + '\n');
+    const s = new StandingOrderStore(AuditLog.noop());
+    await s.hydrate(new AuditLog(path));
+    expect(s.orders()).toEqual([]);
   });
 
   it('the invariant: approve never names deliver, a plan approval or a finding', () => {
@@ -68,9 +79,15 @@ describe('StandingOrderStore', () => {
 });
 
 function harness(runs: Record<string, { projectId?: string; phases: string[]; steering?: boolean }>, decideCode = 200) {
-  const store = StandingOrderStore.memory();
-  const decided: Array<{ id: string; decision: unknown; actor: { id: string; kind: string }; extra?: Record<string, unknown> }> = [];
   const audited: Array<{ action: string; actor: { id: string }; runId?: string; detail?: Record<string, unknown> }> = [];
+  const audit = {
+    record: (action: string, actor: { id: string }, fields?: { runId?: string; detail?: Record<string, unknown> }) => {
+      audited.push({ action, actor, ...(fields?.runId !== undefined ? { runId: fields.runId } : {}), ...(fields?.detail !== undefined ? { detail: fields.detail } : {}) });
+      return Date.now();
+    },
+  };
+  const store = new StandingOrderStore(audit);
+  const decided: Array<{ id: string; decision: unknown; actor: { id: string; kind: string }; extra?: Record<string, unknown> }> = [];
   let open: GateFact[] = [];
   const logs: string[] = [];
   const evaluator = new StandingOrderEvaluator({
@@ -79,12 +96,7 @@ function harness(runs: Record<string, { projectId?: string; phases: string[]; st
       decided.push({ id, decision, actor, ...(extra !== undefined ? { extra } : {}) });
       return decideCode === 200 ? { code: 200, body: { status: 'executing' } } : { code: decideCode, body: { code: 'gate_changed' } };
     },
-    audit: {
-      record: (action, actor, fields) => {
-        audited.push({ action, actor, ...(fields?.runId !== undefined ? { runId: fields.runId } : {}), ...(fields?.detail !== undefined ? { detail: fields.detail } : {}) });
-        return Date.now();
-      },
-    },
+    audit,
     runFacts: async (runId): Promise<RunFacts | undefined> => {
       const r = runs[runId];
       return r === undefined
@@ -103,10 +115,10 @@ const gate = (runId: string, ord: number, gateKind = 'def', reviewingOrd: number
 describe('StandingOrderEvaluator', () => {
   it('an away order is dormant while present and acts once away', async () => {
     const h = harness({ r1: { projectId: 'A', phases: ['intake', 'design'] } });
-    const o = h.store.add('approve intake on A', gateRule('intake', 'approve', 'A'));
+    const o = h.store.add('approve intake on A', gateRule('intake', 'approve', 'A'), HUMAN);
     await h.evaluator.onEvent(gate('r1', 1));
     expect(h.decided).toEqual([]);
-    h.store.setAway(true);
+    h.store.setAway(true, HUMAN);
     await h.evaluator.onEvent(gate('r1', 1));
     expect(h.decided).toEqual([
       { id: 'r1', decision: { approve: true, ord: 1 }, actor: { id: `standing-order:${o.id}`, kind: 'system', trust: 'operator' }, extra: { standingOrder: { id: o.id, text: o.text } } },
@@ -115,8 +127,8 @@ describe('StandingOrderEvaluator', () => {
 
   it('"intake" is the pre-run gate: before the first unit, reviewing nothing — not a later gate', async () => {
     const h = harness({ r1: { projectId: 'A', phases: ['understand', 'build'] } });
-    h.store.setAway(true);
-    h.store.add('approve intake', gateRule('intake', 'approve', 'A'));
+    h.store.setAway(true, HUMAN);
+    h.store.add('approve intake', gateRule('intake', 'approve', 'A'), HUMAN);
     await h.evaluator.onEvent(gate('r1', 1, 'def', 0)); // after understand: not intake
     expect(h.decided).toEqual([]);
     await h.evaluator.onEvent(gate('r1', 0, 'run_level', null)); // before unit 0: intake
@@ -125,23 +137,23 @@ describe('StandingOrderEvaluator', () => {
 
   it('never approves a gate of a steering-author run (its approval lands doctrine)', async () => {
     const h = harness({ r1: { projectId: 'A', phases: ['understand', 'build'], steering: true } });
-    h.store.setAway(true);
-    h.store.add('approve anything', gateRule('*', 'approve'));
+    h.store.setAway(true, HUMAN);
+    h.store.add('approve anything', gateRule('*', 'approve'), HUMAN);
     await h.evaluator.onEvent(gate('r1', 1, 'def', 0));
     expect(h.decided).toEqual([]);
   });
 
   it('an `always` order acts while present', async () => {
     const h = harness({ r1: { projectId: 'A', phases: ['intake', 'design'] } });
-    h.store.add('always approve intake', gateRule('intake', 'approve', undefined, 'always'));
+    h.store.add('always approve intake', gateRule('intake', 'approve', undefined, 'always'), HUMAN);
     await h.evaluator.onEvent(gate('r1', 1));
     expect(h.decided).toHaveLength(1);
   });
 
   it('scope and phase must both match; a run_level gate reads the upcoming unit\'s phase', async () => {
     const h = harness({ a: { projectId: 'A', phases: ['intake', 'design'] }, b: { projectId: 'B', phases: ['intake', 'design'] } });
-    h.store.setAway(true);
-    h.store.add('approve design on A', gateRule('design', 'approve', 'A'));
+    h.store.setAway(true, HUMAN);
+    h.store.add('approve design on A', gateRule('design', 'approve', 'A'), HUMAN);
     await h.evaluator.onEvent(gate('b', 1, 'def', 1)); // project B
     await h.evaluator.onEvent(gate('a', 1, 'def', 0)); // reviews intake
     expect(h.decided).toEqual([]);
@@ -153,8 +165,8 @@ describe('StandingOrderEvaluator', () => {
     'THE INVARIANT: a %s gate is never answered, even by a wildcard approve',
     async (kind) => {
       const h = harness({ r1: { projectId: 'A', phases: ['build', 'deliver'] } });
-      h.store.setAway(true);
-      h.store.add('approve anything', gateRule('*', 'approve'));
+      h.store.setAway(true, HUMAN);
+      h.store.add('approve anything', gateRule('*', 'approve'), HUMAN);
       await h.evaluator.onEvent(gate('r1', 1, kind));
       expect(h.decided).toEqual([]);
     },
@@ -162,13 +174,13 @@ describe('StandingOrderEvaluator', () => {
 
   it('hold wins over approve and is recorded once, naming the order', async () => {
     const h = harness({ r1: { projectId: 'A', phases: ['intake', 'design'] } });
-    h.store.setAway(true);
-    h.store.add('approve everything', gateRule('*', 'approve'));
-    const hold = h.store.add('hold intake on A', gateRule('intake', 'hold', 'A'));
+    h.store.setAway(true, HUMAN);
+    h.store.add('approve everything', gateRule('*', 'approve'), HUMAN);
+    const hold = h.store.add('hold intake on A', gateRule('intake', 'hold', 'A'), HUMAN);
     await h.evaluator.onEvent(gate('r1', 1));
     await h.evaluator.onEvent(gate('r1', 1)); // the same gate again (a replayed frame)
     expect(h.decided).toEqual([]);
-    expect(h.audited).toEqual([
+    expect(h.audited.filter((a) => a.action === 'standing-order.held')).toEqual([
       {
         action: 'standing-order.held',
         actor: { id: `standing-order:${hold.id}`, kind: 'system', trust: 'operator' },
@@ -180,21 +192,25 @@ describe('StandingOrderEvaluator', () => {
 
   it('notify QUEUES the message and records it — nothing is sent', async () => {
     const h = harness({ r1: { projectId: 'A', phases: ['intake', 'design'] } });
-    h.store.setAway(true);
-    const n = h.store.add('tell me about intake gates', gateRule('intake', 'notify'));
+    h.store.setAway(true, HUMAN);
+    const n = h.store.add('tell me about intake gates', gateRule('intake', 'notify'), HUMAN);
     await h.evaluator.onEvent(gate('r1', 1));
     const outbox = h.store.snapshot().outbox;
     expect(outbox).toHaveLength(1);
     expect(outbox[0]).toMatchObject({ orderId: n.id, runId: 'r1', status: 'queued' });
     expect(outbox[0]!.text).toMatch(/intake gate is waiting/);
-    expect(h.audited[0]).toMatchObject({ action: 'standing-order.notified', runId: 'r1', detail: { queued: true, messageId: outbox[0]!.id } });
+    expect(h.audited.find((a) => a.action === 'standing-order.notified')).toMatchObject({
+      actor: { id: `standing-order:${n.id}` },
+      runId: 'r1',
+      detail: { queued: true, messageId: outbox[0]!.id },
+    });
     expect(h.decided).toEqual([]);
   });
 
   it('a HIGH finding wakes you through the queue; a medium one does not match a high order', async () => {
     const h = harness({ r1: { projectId: 'A', phases: ['build'] } });
-    h.store.setAway(true);
-    h.store.add('wake me for any HIGH', { scope: { kind: 'all' }, trigger: { kind: 'finding', severity: 'high' }, action: 'notify', activeWhen: 'away' });
+    h.store.setAway(true, HUMAN);
+    h.store.add('wake me for any HIGH', { scope: { kind: 'all' }, trigger: { kind: 'finding', severity: 'high' }, action: 'notify', activeWhen: 'away' }, HUMAN);
     const row = (severity: string, id: string) =>
       ({ type: 'teamEvent', event: { event_type: 'wicked.team.finding.raised', payload: { run_id: 'r1', finding_id: id, severity, claim: 'null deref' } } }) as unknown as CoreEvent;
     await h.evaluator.onTeamFrame(row('medium', 'f1'));
@@ -205,8 +221,8 @@ describe('StandingOrderEvaluator', () => {
 
   it('a refusal from the gate path (409: a person got there first) is logged, not retried', async () => {
     const h = harness({ r1: { projectId: 'A', phases: ['intake', 'design'] } }, 409);
-    h.store.setAway(true);
-    h.store.add('approve intake', gateRule('intake', 'approve'));
+    h.store.setAway(true, HUMAN);
+    h.store.add('approve intake', gateRule('intake', 'approve'), HUMAN);
     await h.evaluator.onEvent(gate('r1', 1));
     await h.evaluator.onEvent(gate('r1', 1));
     expect(h.decided).toHaveLength(1);
@@ -215,8 +231,8 @@ describe('StandingOrderEvaluator', () => {
 
   it('a sweep answers a gate that was already open', async () => {
     const h = harness({ r1: { projectId: 'A', phases: ['intake', 'design'] } });
-    h.store.setAway(true);
-    h.store.add('approve intake', gateRule('intake', 'approve'));
+    h.store.setAway(true, HUMAN);
+    h.store.add('approve intake', gateRule('intake', 'approve'), HUMAN);
     h.setOpen([{ runId: 'r1', ord: 1, reviewingOrd: 0, gateKind: 'def', prompt: 'go?' }]);
     await h.evaluator.sweep();
     expect(h.decided.map((d) => d.decision)).toEqual([{ approve: true, ord: 1 }]);
@@ -227,7 +243,7 @@ describe('standing-order routes', () => {
   async function app(parse: (t: string) => Promise<ParseOutcome> = async () => ({ ok: false, code: 409, error: 'no seat' })) {
     const h = harness({ r1: { projectId: 'A', phases: ['intake', 'design'] } });
     const a = Fastify({ logger: false });
-    registerStandingOrderRoutes(a, { store: h.store, evaluator: h.evaluator, audit: { record: () => 0 }, parse });
+    registerStandingOrderRoutes(a, { store: h.store, evaluator: h.evaluator, parse });
     await a.ready();
     return { a, h };
   }
