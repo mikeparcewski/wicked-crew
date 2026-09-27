@@ -285,6 +285,9 @@ describe('POST /proposals/:id/approve {content?, reach?} — accept with an edit
     await new Promise((r) => setTimeout(r, 20));
     const second = await app.inject({ method: 'POST', url: '/api/v1/proposals/p1/approve', payload: { content: 'y' } });
     expect(second.statusCode).toBe(409);
+    // Nor may a plain approve or a reject decide the original while its edit is promoting a copy.
+    expect((await app.inject({ method: 'POST', url: '/api/v1/proposals/p1/approve' })).statusCode).toBe(409);
+    expect((await app.inject({ method: 'POST', url: '/api/v1/proposals/p1/reject' })).statusCode).toBe(409);
     release();
     expect((await first).statusCode).toBe(200);
     expect(estate.mock.calls.filter((c) => c[0] === 'proposal.submit')).toHaveLength(1);

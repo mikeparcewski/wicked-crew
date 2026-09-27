@@ -84,7 +84,7 @@ import {
   registerGovernanceSteeringRoutes,
 } from './governance-steering.js';
 import { isSteeringAuthorRun, landSteeringProposal } from './steering-landing.js';
-import { ApproveEditSchema, approveEdited, captureLaunchRoots, registerCaptureRoutes } from './capture.js';
+import { ApproveEditSchema, approveEdited, captureLaunchRoots, editInFlight, registerCaptureRoutes } from './capture.js';
 import { registerTestingRoutes } from './testing.js';
 import { registerSkillsRoutes } from './skills.js';
 import { disabledSkillsHealth, type SkillsRuntime } from '../skills/runtime.js';
@@ -4613,6 +4613,9 @@ export function registerRoutes(
         return estateUpstreamError(reply, err);
       }
     }
+    if (editInFlight(id)) {
+      return reply.code(409).send({ error: `proposal ${id} is already being accepted` });
+    }
     let approved: ApproveProposalResponse;
     try {
       approved = (await estateTool('proposal.approve', { id })) as ApproveProposalResponse;
@@ -4696,11 +4699,15 @@ export function registerRoutes(
   // POST /proposals/:id/reject → proposal.reject → { ok: true }.
   app.post(
     `${V}/proposals/:id/reject`,
-    { config: { manifest: { responseType: 'RejectProposalResponse', statusCodes: [200, 400, 502] } } },
+    // 409: an accept-with-edit of this proposal is in flight (api/capture.ts).
+    { config: { manifest: { responseType: 'RejectProposalResponse', statusCodes: [200, 400, 409, 502] } } },
     async (req, reply) => {
     const { id } = req.params as { id: string };
     if (id.trim() === '') {
       return reply.code(400).send({ error: '`id` is required' });
+    }
+    if (editInFlight(id.trim())) {
+      return reply.code(409).send({ error: `proposal ${id.trim()} is being accepted` });
     }
     try {
       return (await estateTool('proposal.reject', { id })) as RejectProposalResponse;

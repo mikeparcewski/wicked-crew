@@ -277,6 +277,12 @@ export async function approveEdited(
 /** The proposal ids with an accept-with-edit in flight (see {@link approveEdited}). */
 const editsInFlight = new Set<string>();
 
+/** A plain approve or a reject of a proposal whose accept-with-edit is in flight is refused (409):
+ *  it would decide the original while the edit is promoting its copy. */
+export function editInFlight(id: string): boolean {
+  return editsInFlight.has(id);
+}
+
 async function acceptEdited(
   estateTool: EstateTool,
   id: string,
