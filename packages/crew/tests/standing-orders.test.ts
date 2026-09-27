@@ -91,6 +91,7 @@ function harness(runs: Record<string, { projectId?: string; phases: string[]; st
   const store = new StandingOrderStore(audit);
   const decided: Array<{ id: string; decision: unknown; actor: { id: string; kind: string }; extra?: Record<string, unknown> }> = [];
   let open: GateFact[] = [];
+  const reads = { n: 0 };
   const logs: string[] = [];
   const evaluator = new StandingOrderEvaluator({
     store,
@@ -105,10 +106,13 @@ function harness(runs: Record<string, { projectId?: string; phases: string[]; st
         ? undefined
         : { projectId: r.projectId, problem: `problem ${runId}`, phaseOf: (ord) => r.phases[ord], firstOrd: 0, landsDoctrine: r.steering === true };
     },
-    openGates: async () => open,
+    openGates: async () => {
+      reads.n += 1;
+      return open;
+    },
     log: (m) => logs.push(m),
   });
-  return { store, evaluator, decided, audited, logs, setOpen: (g: GateFact[]) => (open = g) };
+  return { store, evaluator, decided, audited, logs, reads, setOpen: (g: GateFact[]) => (open = g) };
 }
 
 const gate = (runId: string, ord: number, gateKind = 'def', reviewingOrd: number | null = ord - 1): CoreEvent =>
@@ -238,6 +242,18 @@ describe('StandingOrderEvaluator', () => {
     h.setOpen([{ runId: 'r1', ord: 1, reviewingOrd: 0, gateKind: 'def', prompt: 'go?' }]);
     await h.evaluator.sweep();
     expect(h.decided.map((d) => d.decision)).toEqual([{ approve: true, ord: 1 }]);
+  });
+
+  it('a sweep with no active gate order never reads the engine (the boot sweep of every daemon)', async () => {
+    const h = harness({ r1: { projectId: 'A', phases: ['intake', 'design'] } });
+    await h.evaluator.sweep(); // no orders
+    h.store.add('approve intake', gateRule('intake', 'approve'), HUMAN); // dormant: not away
+    h.store.add('wake me for HIGH', { scope: { kind: 'all' }, trigger: { kind: 'finding', severity: 'high' }, action: 'notify', activeWhen: 'always' }, HUMAN);
+    await h.evaluator.sweep();
+    expect(h.reads.n).toBe(0);
+    h.store.setAway(true, HUMAN);
+    await h.evaluator.sweep();
+    expect(h.reads.n).toBe(1);
   });
 });
 

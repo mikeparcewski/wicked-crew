@@ -107,6 +107,8 @@ export class StandingOrderEvaluator {
 
   /** Re-read the engine's open gates (the away flag turned on, or an order was added). */
   async sweep(): Promise<void> {
+    // No active gate order, nothing a sweep could do: never touch the engine for it.
+    if (!this.deps.store.orders().some((o) => this.active(o) && o.rule.trigger.kind === 'gate')) return;
     let gates: GateFact[];
     try {
       gates = await this.deps.openGates();
