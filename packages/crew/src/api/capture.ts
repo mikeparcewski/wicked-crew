@@ -10,7 +10,7 @@
  *                                (`proposal.submit`), reviewed on `/proposals` like everything else.
  *
  * And the review's "edit" verb, {@link approveEdited}: estate has no proposal edit, so an accept WITH
- * an edit submits the edited copy to the same queue, rejects the original and approves the copy.
+ * an edit submits the edited copy to the same queue, approves the copy, then rejects the original.
  *
  * Confidentiality ("patterns cross projects; client details never do") is estate's facet admission:
  * a memory faceted `project:<id>` is recalled only under an intent naming that project, and the
@@ -230,8 +230,12 @@ type EstateTool = (tool: string, args: Record<string, unknown>) => Promise<unkno
 export type EditedApproval = { status: number; body: Record<string, unknown> };
 
 /**
- * Accept a pending MEMORY proposal WITH an edit — submit the edited copy, reject the original,
- * approve the copy — and return the copy's approve outcome plus `edited: {from, to}`. A
+ * Accept a pending MEMORY proposal WITH an edit — submit the edited copy, approve the copy, then
+ * reject the original — and return the copy's approve outcome plus `edited: {from, to}`. The
+ * original stays pending until the copy is approved, so a failed approve loses nothing; a reject
+ * that fails AFTER the approve answers 200 with `edited.originalPending: true` (the edit landed;
+ * the original is still in the queue for the person to reject), never a 502 inviting a retry that
+ * would promote a second copy. A
  * `reach: "pattern"` copy drops the `project` and `repo` facets (it may now be recalled on any
  * project); it is refused on a decision or an intent, which are always the project's. A
  * `reach: "project"` row keeps (or, when the worker filed none, gains) the project facet — the
@@ -292,7 +296,12 @@ export async function approveEdited(
   if (typeof submitted.id !== 'string' || submitted.id === '') {
     throw new Error('proposal.submit returned no id for the edited copy');
   }
-  await estateTool('proposal.reject', { id });
   const approved = (await estateTool('proposal.approve', { id: submitted.id })) as Record<string, unknown>;
-  return { status: 200, body: { ...approved, edited: { from: id, to: submitted.id } } };
+  const edited: Record<string, unknown> = { from: id, to: submitted.id };
+  try {
+    await estateTool('proposal.reject', { id });
+  } catch {
+    edited['originalPending'] = true;
+  }
+  return { status: 200, body: { ...approved, edited } };
 }

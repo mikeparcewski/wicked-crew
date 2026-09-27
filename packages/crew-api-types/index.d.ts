@@ -5875,8 +5875,8 @@ export type ApproveProposalResponse =
 /**
  * `POST /proposals/:id/approve` body (api-types 0.48.0) — present only for an accept WITH an edit;
  * no body (or `{}`) is the plain approve. estate has no proposal edit, so the daemon submits the
- * edited copy to the same queue (`payload.edited_from = <id>`), rejects the original and approves
- * the copy. Memory proposals only (400 otherwise; 404 when `id` is not pending).
+ * edited copy to the same queue (`payload.edited_from = <id>`), approves it, then rejects the
+ * original. Memory proposals only (400 otherwise; 404 when `id` is not pending).
  */
 export interface ApproveProposalBody {
   /** The edited memory text (replaces `payload.content`). */
@@ -5893,6 +5893,9 @@ export interface ApproveProposalBody {
 export interface ProposalEdit {
   from: string;
   to: string;
+  /** The copy was approved but rejecting the original failed: it is still pending, for the person
+   *  to reject. Absent when the original was rejected. */
+  originalPending?: true;
 }
 
 // ── Capture (Studio OS behaviour 8, api-types 0.48.0) ─────────────────────────────

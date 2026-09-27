@@ -213,7 +213,7 @@ describe('POST /proposals/:id/approve {content?, reach?} — accept with an edit
     await app.close();
   });
 
-  it('submits the edited copy, rejects the original, approves the copy; a pattern leaves the project', async () => {
+  it('submits the edited copy, approves the copy, then rejects the original; a pattern leaves the project', async () => {
     stubEstate(pending());
     const res = await app.inject({
       method: 'POST',
@@ -223,7 +223,7 @@ describe('POST /proposals/:id/approve {content?, reach?} — accept with an edit
     expect(res.statusCode, res.body).toBe(200);
     expect(res.json()).toEqual({ outcome: 'promoted', active_id: 'proposal:p2', edited: { from: 'p1', to: 'p2' } });
     const calls = estate.mock.calls.map((c) => c[0]);
-    expect(calls).toEqual(['proposal.list', 'proposal.submit', 'proposal.reject', 'proposal.approve']);
+    expect(calls).toEqual(['proposal.list', 'proposal.submit', 'proposal.approve', 'proposal.reject']);
     expect(estate).toHaveBeenCalledWith('proposal.list', { state: 'pending' });
     expect(estate).toHaveBeenCalledWith('proposal.submit', {
       kind_type: 'memory',
@@ -233,6 +233,34 @@ describe('POST /proposals/:id/approve {content?, reach?} — accept with an edit
     });
     expect(estate).toHaveBeenCalledWith('proposal.reject', { id: 'p1' });
     expect(estate).toHaveBeenCalledWith('proposal.approve', { id: 'p2' });
+  });
+
+  it('a failed approve of the copy leaves the original pending: nothing is rejected, the error surfaces', async () => {
+    stubEstate(pending());
+    const base = estate.getMockImplementation()!;
+    estate.mockImplementation(async (tool: string, args: Record<string, unknown>) => {
+      if (tool === 'proposal.approve') throw new Error('estate timed out');
+      return base(tool, args);
+    });
+    const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/p1/approve', payload: { content: 'x', reach: 'pattern' } });
+    expect(res.statusCode).toBe(502);
+    expect(estate.mock.calls.map((c) => c[0])).not.toContain('proposal.reject');
+  });
+
+  it('a reject that fails after the copy is approved answers 200 with originalPending — no 502 inviting a second copy', async () => {
+    stubEstate(pending());
+    const base = estate.getMockImplementation()!;
+    estate.mockImplementation(async (tool: string, args: Record<string, unknown>) => {
+      if (tool === 'proposal.reject') throw new Error('estate crashed');
+      return base(tool, args);
+    });
+    const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/p1/approve', payload: { content: 'x', reach: 'pattern' } });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json()).toEqual({
+      outcome: 'promoted',
+      active_id: 'proposal:p2',
+      edited: { from: 'p1', to: 'p2', originalPending: true },
+    });
   });
 
   it('an edit that keeps the project reach keeps every facet', async () => {
