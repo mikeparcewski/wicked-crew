@@ -39,12 +39,18 @@ let scratch: string;
 let app: FastifyInstance;
 let emit: (e: CoreEvent) => void = () => undefined;
 const confirmCalls: unknown[][] = [];
+// The engine's open gate rows, as `interactionRequests(undefined, 'open')` answers them.
+let openRows: Array<Record<string, unknown>> = [];
 
-beforeAll(async () => {
-  scratch = mkdtempSync(join(tmpdir(), 'crew-standing-orders-'));
+function stubAdapter(): CoreAdapter {
   // The intake gate is the engine's pre-run gate: before the run's FIRST unit, reviewing nothing.
-  const views = [view('run-a', 'A', ['understand', 'build']), view('run-b', 'B', ['understand', 'build']), view('run-d', 'A', ['build', 'deliver'])];
-  const adapter = {
+  const views = [
+    view('run-a', 'A', ['understand', 'build']),
+    view('run-b', 'B', ['understand', 'build']),
+    view('run-d', 'A', ['build', 'deliver']),
+    view('run-c', 'A', ['understand', 'build']),
+  ];
+  return {
     stub: true,
     projectsSupported: () => false,
     getSettings: async () => ({}),
@@ -55,14 +61,17 @@ beforeAll(async () => {
     },
     sessionsDetail: async () => views,
     listRepos: async () => [],
-    interactionRequests: async () => [],
+    interactionRequests: async (runId?: string) => openRows.filter((r) => runId === undefined || r['session_id'] === runId),
     runEvents: async () => null,
     confirmGate: async (...args: unknown[]) => {
       confirmCalls.push(args);
       return 'executing';
     },
   } as unknown as CoreAdapter;
-  app = await createServer(adapter, {
+}
+
+async function boot(): Promise<FastifyInstance> {
+  const server = await createServer(stubAdapter(), {
     auth: { mode: 'off' },
     auditPath: join(scratch, 'audit.log'),
     projectEvents: { disabled: true },
@@ -70,7 +79,13 @@ beforeAll(async () => {
     stallWatchdog: { enabled: false },
     studioRoot: join(scratch, 'no-studio'),
   });
-  await app.ready();
+  await server.ready();
+  return server;
+}
+
+beforeAll(async () => {
+  scratch = mkdtempSync(join(tmpdir(), 'crew-standing-orders-'));
+  app = await boot();
 });
 
 afterAll(async () => {
@@ -147,5 +162,17 @@ describe('standing orders — the behaviour-10 journey', () => {
       standingOrder: { id: orderId, text: 'Auto-approve intake on project A' },
     });
     expect(trail.entries.some((e) => e.action === 'gate.decided' && e.runId === 'run-d')).toBe(false);
+  });
+
+  it('after a restart, the orders and the away flag come back from the trail and answer a gate that was ALREADY open (codex on #686)', async () => {
+    await app.close(); // flushes the trail the next daemon hydrates from
+    confirmCalls.length = 0;
+    // Opened while the daemon was down: no live frame will ever arrive for it.
+    openRows = [
+      { session_id: 'run-c', kind: 'gate', ord: 0, reviewing_ord: null, gate_kind: 'run_level', prompt: 'Approve unit 0 before it runs?', created_at: Date.now() },
+    ];
+    app = await boot();
+    expect(await until(() => confirmCalls.some((c) => c[0] === 'run-c'), 5000)).toBe(true);
+    expect(confirmCalls.find((c) => c[0] === 'run-c')![1]).toBe(true);
   });
 });

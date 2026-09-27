@@ -1584,6 +1584,10 @@ export async function createServer(
     evaluator: standingOrderEvaluator,
     parse: seatParser({ adapter, roster: rosterWithStanding }),
   });
+  // Orders hydrated from the trail act on gates ALREADY open: one sweep of the engine's open gate
+  // rows at boot. It also covers any gate that opened before the evaluator existed (the live
+  // subscription above reads it late-bound); every later gate arrives as a live frame.
+  void standingOrderEvaluator.sweep().catch((err) => app.log.warn(`[standing-orders] boot sweep failed: ${String(err)}`));
 
   // The UI-emittable direction of the interactive seam. Registered unconditionally (a null relay
   // answers 503, not 404) and BEFORE the static/SPA fallback below, like every other API route.
