@@ -4599,7 +4599,7 @@ export function registerRoutes(
     if (id === '') {
       return reply.code(400).send({ error: '`id` is required' });
     }
-    // An accept WITH an edit (capture review, api-types 0.48.0): the edited copy replaces the
+    // An accept WITH an edit (capture review, api-types 0.49.0): the edited copy replaces the
     // original in the same queue — see `approveEdited`. No body / `{}` is the plain approve below.
     const edit = ApproveEditSchema.safeParse(req.body ?? {});
     if (!edit.success) {

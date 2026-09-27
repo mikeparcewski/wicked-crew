@@ -5873,7 +5873,7 @@ export type ApproveProposalResponse =
   | { outcome: 'handed_off'; payload: unknown; landing?: PolicyLandingResult };
 
 /**
- * `POST /proposals/:id/approve` body (api-types 0.48.0) — present only for an accept WITH an edit;
+ * `POST /proposals/:id/approve` body (api-types 0.49.0) — present only for an accept WITH an edit;
  * no body (or `{}`) is the plain approve. estate has no proposal edit, so the daemon submits the
  * edited copy to the same queue (`payload.edited_from = <id>`), approves it, then rejects the
  * original. Memory proposals only (400 otherwise; 404 when `id` is not pending; 409 while another
@@ -5899,7 +5899,7 @@ export interface ProposalEdit {
   originalPending?: true;
 }
 
-// ── Capture (Studio OS behaviour 8, api-types 0.48.0) ─────────────────────────────
+// ── Capture (Studio OS behaviour 8, api-types 0.49.0) ─────────────────────────────
 
 /** One dropped text file (a transcript, meeting notes). */
 export interface CaptureTextFile {
