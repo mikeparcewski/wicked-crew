@@ -84,6 +84,7 @@ import {
   registerGovernanceSteeringRoutes,
 } from './governance-steering.js';
 import { isSteeringAuthorRun, landSteeringProposal } from './steering-landing.js';
+import { ApproveEditSchema, approveEdited, captureLaunchRoots, editInFlight, registerCaptureRoutes } from './capture.js';
 import { registerTestingRoutes } from './testing.js';
 import { registerSkillsRoutes } from './skills.js';
 import { disabledSkillsHealth, type SkillsRuntime } from '../skills/runtime.js';
@@ -1676,6 +1677,10 @@ export function registerRoutes(
       // (`core/engine-roster.ts`), so a signed-out seat is never convened, never a judge.
       clisJson: b.clisJson ?? JSON.stringify(rosterWithStanding()),
     };
+    // A capture launch (api/capture.ts) reads its materials from a per-run inbox outside every
+    // sandbox: the capture route registered it under the run id it minted.
+    const captureRoot = captureLaunchRoots.get(input.sessionId);
+    if (captureRoot !== undefined) input.extraWriteRoots = [captureRoot];
     if (b.entityMode !== undefined) input.entityMode = b.entityMode;
     if (b.humanConfirm !== undefined) input.humanConfirm = b.humanConfirm;
     // F-E2E-030: only the explicit `'auto'` opts out of the engine's deliver gate. `'human'` and
@@ -4576,7 +4581,16 @@ export function registerRoutes(
   // with no extra estate call and no landing.
   app.post(
     `${V}/proposals/:id/approve`,
-    { config: { manifest: { responseType: 'ApproveProposalResponse', statusCodes: [200, 400, 502] } } },
+    {
+      config: {
+        manifest: {
+          requestType: 'ApproveProposalBody',
+          responseType: 'ApproveProposalResponse',
+          // 404: an accept-with-edit naming no pending proposal; 409: one already in flight for it.
+          statusCodes: [200, 400, 404, 409, 502],
+        },
+      },
+    },
     async (req, reply) => {
     // Normalize ONCE and use the trimmed value throughout — an id like `%20pol1%20`
     // decodes to a padded, non-empty string that would otherwise ride upstream as-is
@@ -4584,6 +4598,23 @@ export function registerRoutes(
     const id = (req.params as { id: string }).id.trim();
     if (id === '') {
       return reply.code(400).send({ error: '`id` is required' });
+    }
+    // An accept WITH an edit (capture review, api-types 0.49.0): the edited copy replaces the
+    // original in the same queue — see `approveEdited`. No body / `{}` is the plain approve below.
+    const edit = ApproveEditSchema.safeParse(req.body ?? {});
+    if (!edit.success) {
+      return reply.code(400).send(invalidBody(edit.error, 'Invalid approve body'));
+    }
+    if (edit.data.content !== undefined || edit.data.reach !== undefined) {
+      try {
+        const done = await approveEdited(estateTool, id, edit.data, (runId) => projects.index.projectOf(runId));
+        return reply.code(done.status).send(done.body);
+      } catch (err) {
+        return estateUpstreamError(reply, err);
+      }
+    }
+    if (editInFlight(id)) {
+      return reply.code(409).send({ error: `proposal ${id} is already being accepted` });
     }
     let approved: ApproveProposalResponse;
     try {
@@ -4668,11 +4699,15 @@ export function registerRoutes(
   // POST /proposals/:id/reject → proposal.reject → { ok: true }.
   app.post(
     `${V}/proposals/:id/reject`,
-    { config: { manifest: { responseType: 'RejectProposalResponse', statusCodes: [200, 400, 502] } } },
+    // 409: an accept-with-edit of this proposal is in flight (api/capture.ts).
+    { config: { manifest: { responseType: 'RejectProposalResponse', statusCodes: [200, 400, 409, 502] } } },
     async (req, reply) => {
     const { id } = req.params as { id: string };
     if (id.trim() === '') {
       return reply.code(400).send({ error: '`id` is required' });
+    }
+    if (editInFlight(id.trim())) {
+      return reply.code(409).send({ error: `proposal ${id.trim()} is being accepted` });
     }
     try {
       return (await estateTool('proposal.reject', { id })) as RejectProposalResponse;
@@ -4860,6 +4895,10 @@ export function registerRoutes(
 
   // ── Projects (DES-PROJECT-001) — the 9-route experience-plane surface ────────
   registerProjectRoutes(app, adapter, { ...projects, settings: projectSettings }, security);
+
+  // ── Capture (Studio OS behaviour 8) — notes and photos → a project-filed run whose output is
+  // proposals in the queue above; the launch is POST /runs itself (api/capture.ts).
+  registerCaptureRoutes(app);
 
   // ── Presets (DES-TEAMING-002 §8.4, seam C2) — saved phase selections in the engine's store;
   // a launch names one via `workflow`, and the ENGINE resolves it.

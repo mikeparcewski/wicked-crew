@@ -5869,8 +5869,69 @@ export interface PolicyLandingResult {
  * predating the policy→steering landing (forward-additive, DES-MEM-FACETED-001 §5.2).
  */
 export type ApproveProposalResponse =
-  | { outcome: 'promoted'; active_id: string }
+  | { outcome: 'promoted'; active_id: string; edited?: ProposalEdit }
   | { outcome: 'handed_off'; payload: unknown; landing?: PolicyLandingResult };
+
+/**
+ * `POST /proposals/:id/approve` body (api-types 0.49.0) — present only for an accept WITH an edit;
+ * no body (or `{}`) is the plain approve. estate has no proposal edit, so the daemon submits the
+ * edited copy to the same queue (`payload.edited_from = <id>`), approves it, then rejects the
+ * original. Memory proposals only (400 otherwise; 404 when `id` is not pending; 409 while another
+ * accept of the same `id` is in flight).
+ */
+export interface ApproveProposalBody {
+  /** The edited memory text (replaces `payload.content`). */
+  content?: string;
+  /** `"pattern"`: the copy drops its `project`/`repo` facets, so it may be recalled on ANY project
+   *  (the human act that lets a pattern cross projects; refused on anything but a captured memory, `payload.capture: "memory"`).
+   *  `"project"`: it stays scoped to its project — gaining the proposing run's project as its
+   *  `project` facet when the worker filed none (400 when no project files that run). An accept
+   *  that changes nothing the store keeps approves the original as filed (no copy, no `edited`). */
+  reach?: 'project' | 'pattern';
+}
+
+/** An accept-with-edit's trail: the original proposal (now rejected) and the approved copy. */
+export interface ProposalEdit {
+  from: string;
+  to: string;
+  /** The copy was approved but rejecting the original failed: it is still pending, for the person
+   *  to reject. Absent when the original was rejected. */
+  originalPending?: true;
+}
+
+// ── Capture (Studio OS behaviour 8, api-types 0.49.0) ─────────────────────────────
+
+/** One dropped text file (a transcript, meeting notes). */
+export interface CaptureTextFile {
+  name: string;
+  text: string;
+}
+
+/** One dropped photo, read by a vision-capable seat. `mediaType` is image/png, image/jpeg,
+ *  image/gif or image/webp. */
+export interface CaptureImageFile {
+  name: string;
+  mediaType: string;
+  dataBase64: string;
+}
+
+/**
+ * `POST /projects/:id/capture` body: notes and/or files (at least one). The daemon lands them in a
+ * per-run inbox and launches a repo-less run filed to the project (through `POST /runs`, so its
+ * refusals are that route's). The run's output is proposals in the `/proposals` queue — each with
+ * `kind_type: "memory"` (or `"policy:<type>"` for a rule), `payload.capture` = `intent` |
+ * `decision` | `memory` | `rule`, `provenance.run_id` = the returned `runId`, and `facets.project`
+ * unless the team marked a memory `payload.reach: "pattern"` (the user decides on accept).
+ */
+export interface CaptureBody {
+  notes?: string;
+  files?: Array<CaptureTextFile | CaptureImageFile>;
+}
+
+/** `POST /projects/:id/capture` → 201. */
+export interface CaptureResponse {
+  runId: string;
+}
 
 /** `POST /proposals/:id/reject` → 200. */
 export interface RejectProposalResponse {
