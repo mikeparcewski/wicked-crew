@@ -5976,6 +5976,27 @@ export interface ApproveProposalBody {
   reach?: 'project' | 'pattern';
 }
 
+/**
+ * `POST /proposals` body (api-types 0.54.0) — a skin files ONE preference into the review queue
+ * (studio's takes: "prefers takes like X", filed when a person picks one of two candidate outputs).
+ * The daemon files it as `kind_type: "memory"` with `payload {content, tier: "semantic",
+ * capture: "preference", source?}`; the kind is never the caller's (unknown keys are a 400).
+ * Nothing is learned until the person accepts it on `/proposals`.
+ */
+export interface FileProposalBody {
+  /** The preference in words (1–4000 chars, trimmed). */
+  content: string;
+  /** Becomes the `project` facet, so the preference is recalled on that project only. */
+  project?: string;
+  /** Where the pick was made, e.g. `doc:<docId>@v3` (kept on the payload). */
+  source?: string;
+}
+
+/** `POST /proposals` → 201: the pending proposal's id. */
+export interface FileProposalResponse {
+  id: string;
+}
+
 /** An accept-with-edit's trail: the original proposal (now rejected) and the approved copy. */
 export interface ProposalEdit {
   from: string;

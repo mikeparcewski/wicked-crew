@@ -84,7 +84,7 @@ import {
   registerGovernanceSteeringRoutes,
 } from './governance-steering.js';
 import { isSteeringAuthorRun, landSteeringProposal } from './steering-landing.js';
-import { ApproveEditSchema, approveEdited, captureLaunchRoots, editInFlight, registerCaptureRoutes } from './capture.js';
+import { ApproveEditSchema, approveEdited, captureLaunchRoots, editInFlight, FileProposalSchema, registerCaptureRoutes } from './capture.js';
 import { registerTestingRoutes } from './testing.js';
 import { registerSkillsRoutes } from './skills.js';
 import { disabledSkillsHealth, type SkillsRuntime } from '../skills/runtime.js';
@@ -4693,6 +4693,44 @@ export function registerRoutes(
       return estateUpstreamError(reply, err);
     }
   });
+
+  // POST /proposals {content, project?, source?} → proposal.submit → 201 { id } (api-types 0.54.0).
+  // A skin files ONE preference into the same review queue — studio's "takes": the person picks one
+  // of two candidate outputs, and the pick becomes "prefers takes like X", learned only once they
+  // accept it here. The kind (`memory`), tier and `capture: "preference"` marker are the daemon's; a
+  // caller cannot file a policy through this door (the schema is strict). `project` becomes the
+  // `project` facet, so the preference is recalled on that project only.
+  app.post(
+    `${V}/proposals`,
+    {
+      config: {
+        manifest: { requestType: 'FileProposalBody', responseType: 'FileProposalResponse', statusCodes: [201, 400, 502] },
+      },
+    },
+    async (req, reply) => {
+      const parsed = FileProposalSchema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        return reply.code(400).send(invalidBody(parsed.error, 'Invalid proposal body'));
+      }
+      const { content, project, source } = parsed.data;
+      const payload: Record<string, unknown> = { content, tier: 'semantic', capture: 'preference' };
+      if (source !== undefined) payload.source = source;
+      let submitted: { id?: unknown };
+      try {
+        submitted = (await estateTool('proposal.submit', {
+          kind_type: 'memory',
+          payload,
+          facets: project !== undefined ? { project } : {},
+        })) as { id?: unknown };
+      } catch (err) {
+        return estateUpstreamError(reply, err);
+      }
+      if (typeof submitted?.id !== 'string' || submitted.id === '') {
+        return reply.code(502).send({ error: 'proposal.submit returned no id' });
+      }
+      return reply.code(201).send({ id: submitted.id });
+    },
+  );
 
   // POST /proposals/:id/approve → proposal.approve →
   //   { outcome:'promoted', active_id }              — a MEMORY proposal, now an active memory (complete);
