@@ -263,6 +263,26 @@ describe('POST /proposals/:id/approve {content?, reach?} — accept with an edit
     expect(rejected).toEqual([{ id: 'p2' }]);
   });
 
+  it('two accepts of one proposal at once promote ONE copy: the second is a 409 (codex on #687)', async () => {
+    stubEstate(pending());
+    const base = estate.getMockImplementation()!;
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    estate.mockImplementation(async (tool: string, args: Record<string, unknown>) => {
+      if (tool === 'proposal.approve') await held;
+      return base(tool, args);
+    });
+    const first = app.inject({ method: 'POST', url: '/api/v1/proposals/p1/approve', payload: { content: 'x' } });
+    await new Promise((r) => setTimeout(r, 20));
+    const second = await app.inject({ method: 'POST', url: '/api/v1/proposals/p1/approve', payload: { content: 'y' } });
+    expect(second.statusCode).toBe(409);
+    release();
+    expect((await first).statusCode).toBe(200);
+    expect(estate.mock.calls.filter((c) => c[0] === 'proposal.submit')).toHaveLength(1);
+  });
+
   it('a reject that fails after the copy is approved answers 200 with originalPending — no 502 inviting a second copy', async () => {
     stubEstate(pending());
     const base = estate.getMockImplementation()!;

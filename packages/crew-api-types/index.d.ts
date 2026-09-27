@@ -5876,7 +5876,8 @@ export type ApproveProposalResponse =
  * `POST /proposals/:id/approve` body (api-types 0.48.0) — present only for an accept WITH an edit;
  * no body (or `{}`) is the plain approve. estate has no proposal edit, so the daemon submits the
  * edited copy to the same queue (`payload.edited_from = <id>`), approves it, then rejects the
- * original. Memory proposals only (400 otherwise; 404 when `id` is not pending).
+ * original. Memory proposals only (400 otherwise; 404 when `id` is not pending; 409 while another
+ * accept of the same `id` is in flight).
  */
 export interface ApproveProposalBody {
   /** The edited memory text (replaces `payload.content`). */

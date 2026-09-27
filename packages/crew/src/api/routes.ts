@@ -4586,8 +4586,8 @@ export function registerRoutes(
         manifest: {
           requestType: 'ApproveProposalBody',
           responseType: 'ApproveProposalResponse',
-          // 404: an accept-with-edit naming no pending proposal.
-          statusCodes: [200, 400, 404, 502],
+          // 404: an accept-with-edit naming no pending proposal; 409: one already in flight for it.
+          statusCodes: [200, 400, 404, 409, 502],
         },
       },
     },

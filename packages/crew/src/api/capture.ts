@@ -259,6 +259,28 @@ export async function approveEdited(
   edit: z.infer<typeof ApproveEditSchema>,
   projectOf: (runId: string) => string | undefined,
 ): Promise<EditedApproval> {
+  // estate has no compare-and-swap: two accepts of one proposal racing (a double click, two tabs)
+  // would each promote a copy. One daemon, so one accept per proposal at a time is enough.
+  if (editsInFlight.has(id)) {
+    return { status: 409, body: { error: `proposal ${id} is already being accepted` } };
+  }
+  editsInFlight.add(id);
+  try {
+    return await acceptEdited(estateTool, id, edit, projectOf);
+  } finally {
+    editsInFlight.delete(id);
+  }
+}
+
+/** The proposal ids with an accept-with-edit in flight (see {@link approveEdited}). */
+const editsInFlight = new Set<string>();
+
+async function acceptEdited(
+  estateTool: EstateTool,
+  id: string,
+  edit: z.infer<typeof ApproveEditSchema>,
+  projectOf: (runId: string) => string | undefined,
+): Promise<EditedApproval> {
   const listed = (await estateTool('proposal.list', { state: 'pending' })) as {
     proposals?: {
       id: string;
