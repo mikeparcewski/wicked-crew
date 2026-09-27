@@ -35,6 +35,8 @@ describe('StandingOrderStore — the audit trail is the record', () => {
     const a = new StandingOrderStore(trail);
     const o = a.add('approve intake on A', gateRule('intake', 'approve', 'A'), HUMAN);
     const gone = a.add('hold delivers', gateRule('deliver', 'hold'), HUMAN);
+    // Full UUIDs: a retire removes every order with its id (codex on #686).
+    expect(o.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
     expect(a.setAway(true, HUMAN)).toBe(true);
     expect(a.setAway(true, HUMAN)).toBe(false); // no change, no entry
     a.queue(o, 'r1', 'hello');

@@ -168,7 +168,8 @@ export class StandingOrderStore {
   }
 
   add(text: string, rule: StandingOrderRule, actor: Actor): StandingOrder {
-    const id = randomUUID().slice(0, 8);
+    // The full UUID: retiring an order removes every order with its id, so ids must never collide.
+    const id = randomUUID();
     this.write('standing-order.created', actor, { detail: { standingOrder: { id, text }, rule } });
     return this.state.orders.find((o) => o.id === id)!;
   }
@@ -182,7 +183,7 @@ export class StandingOrderStore {
 
   /** Queue a message an order wants sent — recorded as the order's `standing-order.notified`. */
   queue(o: StandingOrder, runId: string, text: string): QueuedMessage {
-    const messageId = randomUUID().slice(0, 8);
+    const messageId = randomUUID();
     this.write('standing-order.notified', orderActor(o), {
       runId,
       detail: { standingOrder: { id: o.id, text: o.text }, messageId, queued: true, text },
