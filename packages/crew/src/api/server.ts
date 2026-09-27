@@ -26,6 +26,7 @@ import {
   canDeliverResolver,
   type VacuityProbes,
 } from './delivery-index.js';
+import { DeliveryFreeze } from './delivery-freeze.js';
 import { DeliveryDerivationCache } from './delivery-cache.js';
 import { coreUnitId } from './evidence.js';
 import { registerClient, broadcast } from '../events/bus.js';
@@ -603,6 +604,10 @@ export async function createServer(
   // trail's `run.delivered` entries so `session.delivery` survives a daemon restart.
   const deliveryIndex = new DeliveryIndex();
   await deliveryIndex.hydrate(audit, (m) => app.log.warn(m));
+  // Freeze deliveries (idea 15): same durable pattern — the trail's `deliveries.frozen` /
+  // `deliveries.unfrozen` entries, so a restart keeps the freeze on.
+  const deliveryFreeze = new DeliveryFreeze();
+  await deliveryFreeze.hydrate(audit, (m) => app.log.warn(m));
   // Wave 6 (F-7R2-014): the test sets `qe-author-tests` runs registered — same durable pattern,
   // hydrated from the trail's `testing.testset.registered` entries, fed at each terminal frame.
   const testSets = new TestSetIndex();
@@ -1501,6 +1506,7 @@ export async function createServer(
     { audit, authMode: auth.mode },
     {
       seatHealth,
+      deliveryFreeze,
       // wicked-studio#284: the watchdog's remembered frames ride `GET /runs/:id/events`.
       stallFrames: (runId) => stallFrameIndex.framesFor(runId),
       // The SAME standing accessor the seams and the adapter launch with (F-RECON-002/003).

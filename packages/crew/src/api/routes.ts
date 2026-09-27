@@ -126,6 +126,7 @@ import { UsageError, replayOutboxInto } from '../cli/governance.js';
 import { foldDeadletters } from './governance-health.js';
 import { RetryIndex } from './retry-index.js';
 import { SEAT_RECORD_DEFAULT_DAYS, SEAT_RECORD_MAX_DAYS, seatRecord } from './seat-record.js';
+import { DeliveryFreeze, frozenRefusal, isDeliverUnit, registerDeliveryFreezeRoutes } from './delivery-freeze.js';
 import { GroupIndex } from './group-index.js';
 import { RunTimingIndex, recordRunLaunched } from './run-timing-index.js';
 import { GuidanceIndex } from './guidance-index.js';
@@ -719,6 +720,9 @@ export interface RegisteredRoutes {
 }
 
 export interface RuntimeDeps {
+  /** Freeze deliveries (studio idea 15) — `createServer` hydrates one from the audit trail so a
+   *  restart keeps the freeze; a directly-driven route set gets a fresh (thawed) switch. */
+  deliveryFreeze?: DeliveryFreeze;
   /** DES-L9: how `revisesPr` is resolved to a PR head branch (`gh pr view`, 5 s). Injectable so
    *  route tests answer without gh; production uses `core/deliver.ts::resolvePullRequest`. */
   resolvePullRequest?: (repoRoot: string, number: number) => Promise<PullRequestResolution>;
@@ -995,6 +999,8 @@ export function registerRoutes(
 ): RegisteredRoutes {
   const { audit } = security;
   const seatHealth = runtime.seatHealth ?? new SeatHealthTracker();
+  const deliveryFreeze = runtime.deliveryFreeze ?? new DeliveryFreeze();
+  registerDeliveryFreezeRoutes(app, { freeze: deliveryFreeze, audit });
   const openWithOs = runtime.openWithOs ?? openWithSystemDefault;
   const signedIn = runtime.signedIn ?? signedInHeuristic;
   const retryIndex = runtime.retryIndex ?? new RetryIndex();
@@ -2209,6 +2215,8 @@ export function registerRoutes(
       const views = await adapter.sessionsDetail();
       const run = views.find((v) => v.session.id === id);
       if (!run) return reply.code(404).send({ error: 'Run not found' });
+      // Freeze deliveries (idea 15): nothing pushes while the switch is on.
+      if (deliveryFreeze.state().frozen) return reply.code(409).send(frozenRefusal(deliveryFreeze.state()));
       // crew#418/#432: a run stranded by a recoverable deliver lift failure reads `failed` from the
       // engine but IS liftable post-hoc — normalize its status to `completed` so this route
       // accepts it, exactly as the run wire and the resume route see it.
@@ -3119,6 +3127,23 @@ export function registerRoutes(
           code: 'gate_changed',
           openOrd: open.ord,
         } };
+      }
+    }
+    // Freeze deliveries (idea 15): an APPROVE that would run the run's deliver unit is held while
+    // the switch is on — the gate stays open, so unfreezing lets the same approve through. The gate
+    // is the named one, else the open one, else the unit the run's cursor points at.
+    if (parsed.data.approve && deliveryFreeze.state().frozen) {
+      let gateOrd: number | undefined = parsed.data.ord;
+      if (gateOrd === undefined) {
+        const open = await resolveOpenGate(id);
+        gateOrd = open !== null && open !== 'no-log' ? open.ord : undefined;
+      }
+      const units = run.units ?? [];
+      const gated = gateOrd !== undefined
+        ? units.find((u) => u.ord === gateOrd)
+        : [...units].sort((a, b) => a.ord - b.ord)[run.session.unit_ix];
+      if (gated !== undefined && isDeliverUnit(gated)) {
+        return { code: 409, body: frozenRefusal(deliveryFreeze.state()) };
       }
     }
     // The steering-author landing (crew#388): decided — and the gate prompt captured — BEFORE

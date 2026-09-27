@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.54.0",
+  "apiTypesVersion": "0.55.0",
   "endpoints": [
     {
       "method": "GET",
@@ -148,6 +148,25 @@
       "requestType": null,
       "responseType": null,
       "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/deliveries/freeze",
+      "requestType": null,
+      "responseType": "DeliveryFreezeState",
+      "statusCodes": [
+        200
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/deliveries/freeze",
+      "requestType": "PutDeliveryFreezeBody",
+      "responseType": "DeliveryFreezeState",
+      "statusCodes": [
+        200,
+        400
+      ]
     },
     {
       "method": "GET",
