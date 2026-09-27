@@ -204,15 +204,25 @@ describe('acceptance and delivery read what the run CONTAINS (seam X2, round 2)'
 });
 
 describe('the system list is ONE list', () => {
-  it('GET /workflows stamps is_system from SYSTEM_WORKFLOWS and nowhere else', () => {
+  it('GET /workflows stamps is_system and GET /presets stamps system from SYSTEM_WORKFLOWS and nowhere else', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'x2-system-'));
     const adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: true });
     try {
       for (const def of adapter.listWorkflows()) {
         expect(def.is_system === true, def.id).toBe(SYSTEM_WORKFLOWS.has(def.id));
       }
-      expect(adapter.getWorkflow('chat')?.is_system).toBe(true);
+      expect(adapter.getWorkflow('capture-learnings')?.is_system).toBe(true);
       expect(adapter.getWorkflow('feature')?.is_system).toBeUndefined();
+      // M3/M4: `chat` and `onboarding` are the engine's built-in presets, not defs — the preset
+      // carries the same name-keyed flag, so a surface classifies them exactly as before.
+      expect(adapter.getWorkflow('chat')).toBeNull();
+      expect(adapter.getWorkflow('onboarding')).toBeNull();
+      if (adapter.presetsSupported()) {
+        const presets = await adapter.listPresets();
+        for (const p of presets) expect(p.system, p.name).toBe(SYSTEM_WORKFLOWS.has(p.name));
+        const flag = (name: string) => presets.find((p) => p.name === name)?.system;
+        expect([flag('chat'), flag('onboarding'), flag('feature')]).toEqual([true, true, false]);
+      }
     } finally {
       adapter.close();
       removeScratch(dir);

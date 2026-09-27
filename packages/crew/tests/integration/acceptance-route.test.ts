@@ -184,9 +184,10 @@ beforeAll(async () => {
 
   adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: true });
   adapter.sessionsDetail = async () => [
-    // `feature` declares the requirement on its `test` phase; `survey-repo` declares none.
+    // `feature` declares the requirement on its `test` phase; `capture-learnings` declares none.
+    // (`survey-repo`, the ungoverned def used here before, was deleted in DES-TEAMING-002 wave 1.)
     view(GOVERNED, 'feature', 'repo-ledger'),
-    view(UNGOVERNED, 'survey-repo', 'repo-ledger'),
+    view(UNGOVERNED, 'capture-learnings', 'repo-ledger'),
     view(REPOLESS, 'feature', null),
     view(BARE_REPO_RUN, 'feature', 'repo-bare'),
     view(FRESH, 'feature', 'repo-ledger'),

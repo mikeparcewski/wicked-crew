@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CoreAdapter } from '../src/core/adapter.js';
+import { CoreAdapter, RETIRED_OVERLAY_IDS } from '../src/core/adapter.js';
 import { removeScratch } from './setup/scratch.js';
 
 let dir: string;
@@ -95,12 +95,36 @@ describe('a stale onboarding overlay is cleared on startup', () => {
 
   it('leaves a clean overlay dir alone', () => {
     // Startup must not invent work on the ordinary path, and must not touch other ids.
-    const other = join(overlayDir, 'chat.json');
-    writeFileSync(other, JSON.stringify({ id: 'chat', phases: [] }), 'utf8');
+    const other = join(overlayDir, 'my-flow.json');
+    writeFileSync(other, JSON.stringify({ id: 'my-flow', phases: [] }), 'utf8');
 
     adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: true });
 
     expect(existsSync(other)).toBe(true);
     expect(existsSync(join(overlayDir, 'onboarding.json.superseded-by-crew197'))).toBe(false);
+  });
+});
+
+// Review of wicked-crew#688: older crews wrote the retired drop-ins (`chat`, `survey-repo`,
+// `memories`, `domain-graph-slice`) into this persistent dir. Left there, the engine's startup
+// `load_dir` keeps the deleted workflows launchable and crew hydrates them as user workflows.
+describe('the overlays of workflows retired by DES-TEAMING-002 wave 1 are parked on startup', () => {
+  it('renames each one aside before the engine loads the dir; nothing is hydrated or served', () => {
+    for (const id of RETIRED_OVERLAY_IDS) {
+      writeFileSync(join(overlayDir, `${id}.json`), JSON.stringify({ id, phases: [{ id: 'x', kind: 'recon' }] }), 'utf8');
+    }
+    const kept = join(overlayDir, 'my-flow.json');
+    writeFileSync(kept, JSON.stringify({ id: 'my-flow', phases: [{ id: 'x', kind: 'recon' }] }), 'utf8');
+
+    adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: true });
+
+    for (const id of RETIRED_OVERLAY_IDS) {
+      expect(existsSync(join(overlayDir, `${id}.json`)), id).toBe(false);
+      expect(existsSync(join(overlayDir, `${id}.json.retired-des-teaming-002`)), id).toBe(true);
+    }
+    expect(existsSync(kept), 'a user workflow is left alone').toBe(true);
+    const served = adapter.listWorkflows().map((w) => w.id);
+    for (const id of RETIRED_OVERLAY_IDS) expect(served, id).not.toContain(id);
+    expect(served).toContain('my-flow');
   });
 });

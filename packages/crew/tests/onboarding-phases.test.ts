@@ -25,17 +25,45 @@
 //
 // So the def must now carry core's PLACEHOLDERS and no absolute path. Core substitutes them per run
 // from the launch's `repoRef` (wicked-core#179), which is per-run state, not shared state.
-import { describe, expect, it } from 'vitest';
-import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
+//
+// ── DES-TEAMING-002 M4 ─────────────────────────────────────────────────────────────────────────
+// `onboarding` is no longer a def crew mirrors: it is the engine's built-in PRESET, and a launch
+// naming it runs the preset's steps. So these assertions read those steps from the engine's store
+// (a real stub-engine adapter), unchanged in substance: each step is a phase of the composed plan.
+process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
-// Resolved once, eagerly, and THROWN on rather than left optional. A `find` plus `!` in every case
-// means a rename surfaces as a TypeError inside whichever assertion happens to run first, burying
-// the one sentence that would explain it.
-const onboarding = (() => {
-  const found = BUILTIN_WORKFLOWS.find((w) => w.id === 'onboarding');
-  if (!found) throw new Error('no `onboarding` entry in BUILTIN_WORKFLOWS — renamed or removed?');
-  return found;
-})();
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { CoreAdapter } from '../src/core/adapter.js';
+import type { WorkflowDef } from '../src/core/types.js';
+import { removeScratch } from './setup/scratch.js';
+
+type Step = { id: string; catalog: string; executor?: WorkflowDef['phases'][number]['executor'] };
+
+let dir: string;
+let adapter: CoreAdapter;
+// Resolved once and THROWN on rather than left optional: a rename surfaces as the one sentence that
+// explains it, not as a TypeError inside whichever assertion happens to run first.
+const onboarding: { phases: Step[] } = { phases: [] };
+
+beforeAll(async () => {
+  dir = mkdtempSync(join(tmpdir(), 'onboarding-phases-'));
+  adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: true });
+  const preset = await adapter.presetNamed('onboarding');
+  if (!preset) throw new Error('no built-in `onboarding` preset in the engine — renamed or removed?');
+  onboarding.phases = preset.steps.map((s) => ({
+    id: s.id,
+    catalog: s.catalog,
+    executor: s['executor'] as Step['executor'],
+  }));
+});
+
+afterAll(() => {
+  adapter?.close();
+  if (dir) removeScratch(dir);
+});
 
 describe('the onboarding def', () => {
   it('is index → annotate, and nothing downstream of them (FINDING-068)', () => {
@@ -72,6 +100,10 @@ describe('the onboarding def', () => {
           `belong to, every other repo's run would use them (FINDING-075)`,
       ).toEqual([]);
     }
+  });
+
+  it('is tool-only (`run` steps): no creator and no evaluator step, so evaluator ≠ creator has nothing to route and the run needs no seat (DES-TEAMING-002 §11.3)', () => {
+    expect(onboarding.phases.map((p) => p.catalog)).toEqual(['run', 'run']);
   });
 
   it('passes the index phase a repo root, and by placeholder (FINDING-075)', () => {

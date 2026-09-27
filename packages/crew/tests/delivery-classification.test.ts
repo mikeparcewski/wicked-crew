@@ -96,21 +96,15 @@ function unitsOf(runId: string, def: WorkflowDef, extra: string[] = []): WorkUni
   );
 }
 
-const NEVER_DELIVERS = [
-  'chat',
-  'onboarding',
-  'survey-repo',
-  'capture-learnings',
-  'domain-graph-slice',
-  'memories',
-  'steering-author',
-  'collab',
-];
+// `chat` and `onboarding` are engine built-in PRESETS (DES-TEAMING-002 M3/M4) with no def here: a
+// preset run is judged by its planned units — the preset case below. `survey-repo`, `memories`,
+// `domain-graph-slice` and `collab` were deleted.
+const NEVER_DELIVERS = ['capture-learnings', 'steering-author'];
 const CANDIDATES = ['feature', 'bug', 'migration', 'qe-author-tests'];
 
 describe('isCodeWorkDef — the role clause (the LIVE-rule equivalence pin is tests/delivery-classification-launch-rule.test.ts, adjudicated §4.8)', () => {
   it('an evaluator-only executes_code phase is NOT code work (the role clause), a creator/neutral one is', () => {
-    const base = BUILTIN_WORKFLOWS.find((w) => w.id === 'chat')!;
+    const base = BUILTIN_WORKFLOWS.find((w) => w.id === 'capture-learnings')!;
     const evaluatorOnly: WorkflowDef = {
       ...base,
       phases: base.phases.map((p) => ({ ...p, executes_code: true, role: 'evaluator' })),
@@ -137,6 +131,22 @@ describe('runCanDeliver — the answer per shipped def (D-14; the des-review-L8 
     expect(def, `shipped def ${id} exists`).toBeDefined();
     const v = view('r', { workflow_id: id, repo_ref: 'repo', workdir: '/wt', units: unitsOf('r', def!) });
     expect(runCanDeliver(v, def!)).toBe(true);
+  });
+
+  // M3/M4: the `chat` and `onboarding` PRESET runs, as the engine plans them (catalog `understand`
+  // and `run` units, none writes code, none is an evaluator), still read "can never deliver" — the
+  // answer their deleted defs gave — from their units, with no def.
+  it.each([
+    ['chat', [{ id: 'explore', catalog: 'understand' }]],
+    ['onboarding', [{ id: 'index', catalog: 'run' }, { id: 'annotate', catalog: 'run' }]],
+  ])('the %s preset run: no deliver unit, no code-work unit ⇒ false (no def needed)', (preset, planned) => {
+    const units = planned.map((u, i) =>
+      unit(`r:${u.id}`, { ord: i + 1, catalog: u.catalog, executes_code: false, role: 'neutral' } as Partial<WorkUnit>),
+    );
+    const v = view('r', { repo_ref: 'repo', workdir: '/wt', units });
+    (v.session as { team_plan?: unknown }).team_plan = { preset, rev: 1, accepted_rev: 1 };
+    expect(runWorkflowDef(v, SHIPPED)).toBeNull();
+    expect(runCanDeliver(v, null)).toBe(false);
   });
 
   it('a `<uuid>:deliver` unit ⇒ true whatever the def (an operator overlay carrying deliver)', () => {

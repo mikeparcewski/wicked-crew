@@ -53,25 +53,30 @@ afterEach(() => {
 });
 
 describe('seatsForWorkflow', () => {
-  it('a workflow whose every phase is a tool executor (onboarding) gets NO seats', () => {
-    const def = adapter.getWorkflow('onboarding') as WorkflowDef;
-    expect(def.phases.every((p) => p.executor?.type === 'tool')).toBe(true);
-    expect(adapter.seatsForWorkflow('onboarding')).toEqual([]);
+  it('a workflow whose every phase is a tool executor (onboarding) gets NO seats', async () => {
+    // `onboarding` is the engine's built-in PRESET (DES-TEAMING-002 M4): no def here, its steps are
+    // what a launch naming it runs. Every step is a Tool (`run`), and none is an evaluator, so
+    // evaluator ≠ creator has no unit to place on a distinct seat: the empty pool is not refused.
+    expect(adapter.getWorkflow('onboarding')).toBeNull();
+    const preset = await adapter.presetNamed('onboarding');
+    expect(preset?.steps.map((s) => s.catalog)).toEqual(['run', 'run']);
+    expect(preset?.steps.every((s) => (s['executor'] as WorkflowDef['phases'][number]['executor'])?.type === 'tool')).toBe(true);
+    expect(await adapter.seatsForWorkflow('onboarding')).toEqual([]);
   });
 
-  it('a workflow with an agent phase keeps the full roster, and so does an unknown workflow (the engine names it)', () => {
-    expect(adapter.seatsForWorkflow('feature')).toEqual(ROSTER);
-    expect(adapter.seatsForWorkflow('no-such-workflow')).toEqual(ROSTER);
+  it('a workflow with an agent phase keeps the full roster, and so does an unknown workflow (the engine names it)', async () => {
+    expect(await adapter.seatsForWorkflow('feature')).toEqual(ROSTER);
+    expect(await adapter.seatsForWorkflow('no-such-workflow')).toEqual(ROSTER);
   });
 
-  it('F-RECON-002/003: once the daemon wires a roster provider, agent workflows get the roster WITH standing (launchRun then benches council_eligible:false); tool-only stays []', () => {
+  it('F-RECON-002/003: once the daemon wires a roster provider, agent workflows get the roster WITH standing (launchRun then benches council_eligible:false); tool-only stays []', async () => {
     const standing = ROSTER.map((s) => (s.key === 'codex' ? { ...s, auth: 'signed_out', council_eligible: false } : { ...s, council_eligible: true }));
     expect(adapter.launchRoster()).toEqual(ROSTER); // no provider yet → the raw registry
     adapter.setRosterProvider(() => standing.map((s) => ({ ...s })));
     expect(adapter.launchRoster()).toEqual(standing);
-    expect(adapter.seatsForWorkflow('feature')).toEqual(standing);
-    expect(adapter.seatsForWorkflow('no-such-workflow')).toEqual(standing);
-    expect(adapter.seatsForWorkflow('onboarding')).toEqual([]);
+    expect(await adapter.seatsForWorkflow('feature')).toEqual(standing);
+    expect(await adapter.seatsForWorkflow('no-such-workflow')).toEqual(standing);
+    expect(await adapter.seatsForWorkflow('onboarding')).toEqual([]);
   });
 });
 

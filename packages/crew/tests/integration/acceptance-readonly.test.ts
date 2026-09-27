@@ -41,6 +41,8 @@ const FRESH_LEGACY_RUN = 'fresh-legacy-run';
 const ONBOARD_RUN = '4f67808a-ac94-4ce5-adda-68e3197ccc2e';
 /** Positive control: a run whose lifetime contains the fixture's QE run — the PASS IS its evidence. */
 const CONTAINING_RUN = 'containing-run';
+/** A pre-migration `onboarding` run record: named by the deleted def, no plan state, no catalog. */
+const LEGACY_ONBOARD_RUN = 'legacy-onboard-run';
 /** A run over a checkout whose ledger holds a record that is not valid JSON. */
 const BROKEN_LEDGER_RUN = 'broken-ledger-run';
 
@@ -56,6 +58,26 @@ function view(id: string, workflowId: string, repoRef: string): SessionView {
   return {
     session: { id, status: 'failed', workflow_id: workflowId, repo_ref: repoRef },
     units: [],
+  } as unknown as SessionView;
+}
+
+/**
+ * An `onboarding` run as the engine records it since DES-TEAMING-002 M4: a run of the built-in
+ * PRESET (`team_plan.preset`), its two units the catalog `run` steps.
+ */
+function onboardingPresetView(id: string, repoRef: string): SessionView {
+  return {
+    session: {
+      id,
+      status: 'failed',
+      workflow_id: `wf-${id}`,
+      repo_ref: repoRef,
+      team_plan: { preset: 'onboarding', rev: 1, accepted_rev: 1 },
+    },
+    units: [
+      { id: `${id}:index`, ord: 1, status: 'done', catalog: 'run' },
+      { id: `${id}:annotate`, ord: 2, status: 'failed', catalog: 'run' },
+    ],
   } as unknown as SessionView;
 }
 
@@ -143,7 +165,8 @@ beforeAll(async () => {
   adapter.sessionsDetail = async () => [
     view(CLEAN_RUN, 'feature', 'repo-clean'),
     view(FRESH_LEGACY_RUN, 'feature', 'repo-legacy'),
-    view(ONBOARD_RUN, 'onboarding', 'repo-legacy'),
+    onboardingPresetView(ONBOARD_RUN, 'repo-legacy'),
+    view(LEGACY_ONBOARD_RUN, 'onboarding', 'repo-legacy'),
     view(CONTAINING_RUN, 'feature', 'repo-legacy'),
     view(BROKEN_LEDGER_RUN, 'feature', 'repo-broken'),
   ];
@@ -153,6 +176,8 @@ beforeAll(async () => {
     repoEntry('repo-broken', broken),
   ];
   adapter.runEvents = async (runId: string) => historyOf(runId);
+  // The engine's catalog answer: the entries whose step re-verifies evidence.
+  adapter.verifiedEvidenceCatalog = async () => new Set(['test', 'domain_coverage']);
 
   app = await createServer(adapter);
   await app.listen({ port: 0, host: '127.0.0.1' });
@@ -225,6 +250,15 @@ describe('GET /runs/:id/acceptance is read-only (F-E2E-013)', () => {
     expect(res.body['requirement']).toEqual({ declared: false, phases: [] });
     expect(res.body['gate']).toMatchObject({ required: false, satisfied: true, verdict: null, runStatus: null });
     expect(res.body['acceptance']).toMatchObject({ found: true, verdict: null, qeRun: null, manifest: null, ledgerVerdicts: 1 });
+    expect(porcelain(legacy)).toBe('');
+  });
+
+  it('DES-TEAMING-002 M4: a PRE-migration onboarding record (named by the deleted def) is declared and denied, never vacuous — unknown ⇒ deny (seam X2)', async () => {
+    const res = await getAcceptance(LEGACY_ONBOARD_RUN);
+    expect(res.status).toBe(200);
+    expect(res.body['requirement']).toMatchObject({ declared: true, phases: [] });
+    expect(res.body['gate']).toMatchObject({ required: true, satisfied: false });
+    expect(field<{ reason: string }>(res.body, 'gate').reason).toMatch(/`onboarding` is not registered/);
     expect(porcelain(legacy)).toBe('');
   });
 

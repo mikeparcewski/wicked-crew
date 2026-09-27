@@ -3808,8 +3808,8 @@ export interface PhaseDef {
    *  run `cmd` directly. */
   executor?: PhaseExecutor;
   /** Per-phase agent instructions folded into the unit prompt by the engine (core PhaseDef.instructions,
-   * Option<String>). Absent = no extra instruction. Mirrors of core drop-ins that carry it (e.g.
-   * survey-repo) MUST reproduce it verbatim or the runtime def diverges from core's — FINDING-011. */
+   * Option<String>). Absent = no extra instruction. Mirrors of core drop-ins that carry it MUST
+   * reproduce it verbatim or the runtime def diverges from core's — FINDING-011. */
   instructions?: string | null;
   gate_type: GateType | null;
   gate: GateSpec;
@@ -4165,6 +4165,13 @@ export interface Preset {
   created_by: string;
   /** Unix millis. */
   updated_at: number;
+  /**
+   * A machine-owned preset (`chat`, `onboarding`, …): keep it off delivery surfaces and the work-mode
+   * selector. The preset's half of the one name-keyed classification that stamps
+   * `WorkflowDef.is_system` and `run_identity.system` (DES-TEAMING-002 §11.3). The daemon stamps it
+   * on every preset it serves (api-types 0.48.0); absent from an older daemon.
+   */
+  system?: boolean;
   [k: string]: unknown;
 }
 

@@ -16,9 +16,10 @@
 // This is the other half, and it is the one that stops the shadowing: the write is now scoped to
 // the ids core does NOT seed, which is the only reason the write existed.
 //
-// What is deliberately NOT asserted here: that the overlay dir is empty. Six drop-ins legitimately
-// live there, and the onboarding path deliberately shadows core's `onboarding` with a def carrying
-// runtime-baked `--db` paths. Scoping, not silence, is the property.
+// What is deliberately NOT asserted here: that the overlay dir is empty. The drop-ins crew writes
+// (core's `domain-extraction`, crew's own defs) legitimately live there. Scoping, not silence, is
+// the property. (`onboarding` and `chat` are engine built-in presets since DES-TEAMING-002 M3/M4:
+// crew writes no def for either.)
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -81,10 +82,15 @@ describe('launching a built-in does not shadow core', () => {
   });
 
   it('still writes the drop-ins, which core does not seed', async () => {
-    // The mirror of `survey-repo` is the ONLY reason core can resolve that id — remove this write
-    // and the fix above turns a silent ungating into a hard "unknown workflow" on six workflows.
-    await launched('survey-repo');
-    expect(existsSync(join(overlayDir, 'survey-repo.json'))).toBe(true);
+    // The mirror of `domain-extraction` is the ONLY reason core can resolve that id — remove this
+    // write and the fix above turns a silent ungating into a hard "unknown workflow".
+    await launched('domain-extraction');
+    expect(existsSync(join(overlayDir, 'domain-extraction.json'))).toBe(true);
+  });
+
+  it('writes no def for an engine built-in preset (DES-TEAMING-002 M3/M4)', async () => {
+    await launched('chat');
+    expect(existsSync(join(overlayDir, 'chat.json'))).toBe(false);
   });
 });
 
@@ -125,12 +131,8 @@ const MIRRORED_IDS = [
   'bug',
   'migration',
   'domain-extraction',
-  'domain-graph-slice',
-  // survey-repo is a core DROP-IN crew writes (its overlay write is the only def the engine resolves
-  // at runtime), so its mirror CAN reach the engine — yet it was excluded here, which is why the
-  // stale 3-phase mirror (no instructions, no synthesize) ran in production while the 4-phase fix sat
-  // unused in core's JSON (FINDING-011). Guarding it makes the mirror drift a build failure.
-  'survey-repo',
+  // `survey-repo` and `domain-graph-slice` were guarded here until DES-TEAMING-002 wave 1 deleted
+  // both workflows (core and crew): nothing to mirror, nothing to guard.
 ];
 
 const coreDefs: Record<string, WorkflowDef | null> = Object.fromEntries(
@@ -148,7 +150,7 @@ describe.skipIf(SKIP_CORE_CHECKS)('mirror matches wicked-core', () => {
   // FINDING-084: this list covered only the three mirrors crew does NOT write. The five it DOES
   // write — core's drop-ins — were unchecked, and `domain-extraction` drifted: crew carried
   // `4a4b10bf4277bd34` while core had moved to `e7f84b91d030fdcc`. Because the write is the
-  // delivery mechanism for those ids (see the survey-repo case above), the stale value reached the
+  // delivery mechanism for those ids (see the drop-in case above), the stale value reached the
   // engine and a governed run gated on the PRE-substance-rule validator — and restored itself after
   // being fixed by hand, because the write repeats on every launch.
   //

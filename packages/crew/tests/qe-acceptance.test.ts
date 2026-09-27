@@ -72,7 +72,7 @@ describe('acceptancePhaseIds', () => {
     expect(acceptancePhaseIds(byId.get('feature') ?? null)).toEqual(['test']);
     expect(acceptancePhaseIds(byId.get('bug') ?? null)).toEqual(['verify']);
     expect(acceptancePhaseIds(byId.get('migration') ?? null)).toEqual(['verify']);
-    expect(acceptancePhaseIds(byId.get('chat') ?? null)).toEqual([]);
+    expect(acceptancePhaseIds(byId.get('capture-learnings') ?? null)).toEqual([]);
     expect(acceptancePhaseIds(null)).toEqual([]);
   });
 });

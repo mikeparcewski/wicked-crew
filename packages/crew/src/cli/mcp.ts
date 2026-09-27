@@ -75,7 +75,7 @@ export async function runMcpServer(port: number): Promise<void> {
     {
       problem: z.string().min(1).describe('The task description / problem statement for the run'),
       workflow: z.string().optional().describe(
-        'Workflow id (e.g. "feature", "bug", "survey-repo"). ' +
+        'Workflow id (e.g. "feature", "bug", "domain-extraction"). ' +
         'Use list_workflows to see available ids.',
       ),
       repo: z.string().optional().describe(
