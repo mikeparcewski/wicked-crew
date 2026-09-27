@@ -1107,6 +1107,44 @@ function quarantineStaleOnboardingOverlay(): void {
   }
 }
 
+/**
+ * The drop-in ids crew wrote into the overlay dir before DES-TEAMING-002 wave 1 retired them:
+ * `chat` is the engine's built-in preset now, and `survey-repo`, `memories` and
+ * `domain-graph-slice` are deleted. Exported for the quarantine test.
+ */
+export const RETIRED_OVERLAY_IDS = ['chat', 'survey-repo', 'memories', 'domain-graph-slice'] as const;
+
+/**
+ * Park the overlay files older crews wrote for {@link RETIRED_OVERLAY_IDS}.
+ *
+ * `_writeBuiltinOverlay` wrote each of these on first launch, and the overlay dir is PERSISTENT: on
+ * an upgraded host the engine's startup `load_dir` would keep the deleted workflows launchable, and
+ * `hydrateFromOverlay` would serve them on `GET /workflows` as user workflows, where they are no
+ * longer on the system list (review of wicked-crew#688). Renamed, not deleted, like the onboarding
+ * quarantine above: the evidence stays, and a name retired by operator decision (2026-09-26) is
+ * not a workflow any more — save a preset instead.
+ */
+function quarantineRetiredOverlays(): void {
+  for (const id of RETIRED_OVERLAY_IDS) {
+    const stale = join(workflowOverlayDir(), `${id}.json`);
+    if (!existsSync(stale)) continue;
+    const parked = `${stale}.retired-des-teaming-002`;
+    try {
+      renameSync(stale, parked);
+      console.warn(
+        `[workflows] parked ${stale} → ${parked}: \`${id}\` is retired (DES-TEAMING-002 wave 1` +
+          `${id === 'chat' ? '; chat is the engine\'s built-in preset' : '; the workflow is deleted'}).`,
+      );
+    } catch (err) {
+      console.error(
+        `[workflows] FAILED to park the retired overlay ${stale}: ${
+          err instanceof Error ? err.message : String(err)
+        }. The engine will keep resolving \`${id}\` from it until it is removed by hand.`,
+      );
+    }
+  }
+}
+
 /** The ids of a workflow's phases that carry a HUMAN gate (`human_confirm` unconditional, or the
  * conditional `human_confirm_if`) — i.e. the phases that will PAUSE for a person.
  *
@@ -1258,6 +1296,7 @@ export class CoreAdapter {
     // BEFORE the Core spawns: the actor reads the overlay dir at startup, so a stale
     // `onboarding.json` has to be out of the way by then or it shadows the built-in def.
     quarantineStaleOnboardingOverlay();
+    quarantineRetiredOverlays();
 
     // DES-TEAMING-002 T0: the engine gets the daemon's bus on EVERY boot (`WICKED_BUS_DB`); exec
     // mediation stays a separate switch (`WICKED_BUS_EXEC`), set only under `engineExec`, and the
