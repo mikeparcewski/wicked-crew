@@ -78,6 +78,15 @@ export function captureInboxDir(runId: string): string {
   return join(home, '.wicked', 'capture-inbox', runId);
 }
 
+/**
+ * The capture inbox of each capture launch in flight, keyed by its run id. A worker's boundary is
+ * {sandbox, extraWriteRoots, ~/.claude/plugins} — even READS outside it are denied — so the run must
+ * declare its inbox as an extra root (the steering-author inbox does the same). `POST /runs` takes
+ * no roots from its body; it reads this in-process entry for the run id the capture route minted
+ * (a fresh UUID), so the root is never something a caller can ask for.
+ */
+export const captureLaunchRoots = new Map<string, string>();
+
 const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
 
 /** Caller names are display text, never paths: basename + charset scrub + an index prefix. */
@@ -203,6 +212,7 @@ export function registerCaptureRoutes(app: FastifyInstance): void {
       await fsp.writeFile(briefPath, captureBrief(projectId, paths), 'utf8');
       // The launch IS `POST /runs` — injected, so this route owns no second launch path.
       const auth = req.headers.authorization;
+      captureLaunchRoots.set(runId, dir);
       const launched = await app.inject({
         method: 'POST',
         url: `${V}/runs`,
@@ -214,7 +224,7 @@ export function registerCaptureRoutes(app: FastifyInstance): void {
           plan: { steps: [{ catalog: 'understand', id: 'capture' }] },
           deliver: 'none',
         },
-      });
+      }).finally(() => captureLaunchRoots.delete(runId));
       if (launched.statusCode !== 201) {
         await fsp.rm(dir, { recursive: true, force: true });
         return reply.code(launched.statusCode).type('application/json').send(launched.body);

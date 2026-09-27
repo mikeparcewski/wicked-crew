@@ -84,7 +84,7 @@ import {
   registerGovernanceSteeringRoutes,
 } from './governance-steering.js';
 import { isSteeringAuthorRun, landSteeringProposal } from './steering-landing.js';
-import { ApproveEditSchema, approveEdited, registerCaptureRoutes } from './capture.js';
+import { ApproveEditSchema, approveEdited, captureLaunchRoots, registerCaptureRoutes } from './capture.js';
 import { registerTestingRoutes } from './testing.js';
 import { registerSkillsRoutes } from './skills.js';
 import { disabledSkillsHealth, type SkillsRuntime } from '../skills/runtime.js';
@@ -1677,6 +1677,10 @@ export function registerRoutes(
       // (`core/engine-roster.ts`), so a signed-out seat is never convened, never a judge.
       clisJson: b.clisJson ?? JSON.stringify(rosterWithStanding()),
     };
+    // A capture launch (api/capture.ts) reads its materials from a per-run inbox outside every
+    // sandbox: the capture route registered it under the run id it minted.
+    const captureRoot = captureLaunchRoots.get(input.sessionId);
+    if (captureRoot !== undefined) input.extraWriteRoots = [captureRoot];
     if (b.entityMode !== undefined) input.entityMode = b.entityMode;
     if (b.humanConfirm !== undefined) input.humanConfirm = b.humanConfirm;
     // F-E2E-030: only the explicit `'auto'` opts out of the engine's deliver gate. `'human'` and

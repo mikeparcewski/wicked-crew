@@ -108,6 +108,8 @@ describe('POST /projects/:id/capture — capture into the proposal queue', () =>
     expect(input.repoRef).toBeUndefined();
     const dir = join(inbox, runId);
     expect(input.problem).toContain(join(dir, 'CAPTURE.md'));
+    // The inbox is outside every sandbox: the run declares it, or the worker cannot read the brief.
+    expect(input.extraWriteRoots).toEqual([dir]);
 
     // The materials, byte-exact; caller names are display text, never paths.
     const files = readdirSync(dir).sort();
@@ -121,6 +123,18 @@ describe('POST /projects/:id/capture — capture into the proposal queue', () =>
     for (const cls of ['"capture":"intent"', '"capture":"decision"', '"capture":"memory"']) expect(brief).toContain(cls);
     expect(brief).toContain('{"project":"proj-1"}');
     expect(brief).toContain('"reach":"pattern"');
+  });
+
+  it('a plain POST /runs naming a run id gets no extra root — only the capture route declares one', async () => {
+    const res = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'p', sessionId: 'r-plain' } });
+    expect(res.statusCode, res.body).toBe(201);
+    expect((launchRun.mock.calls[0]![0] as LaunchRunInput).extraWriteRoots).toBeUndefined();
+    const cap = await app.inject({ method: 'POST', url: '/api/v1/projects/proj-1/capture', payload: { notes: 'n' } });
+    const { runId } = cap.json() as { runId: string };
+    // The entry lives only while the capture's own launch is in flight.
+    const again = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'p', sessionId: runId } });
+    expect(again.statusCode, again.body).toBe(201);
+    expect((launchRun.mock.calls[2]![0] as LaunchRunInput).extraWriteRoots).toBeUndefined();
   });
 
   it('400s a capture with nothing in it, and launches nothing', async () => {
