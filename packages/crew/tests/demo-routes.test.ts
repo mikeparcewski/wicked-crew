@@ -295,6 +295,16 @@ describe('the Demo experience routes', () => {
     expect(await stage('g3')).toBe('recording');
   });
 
+  it('a record the engine rejected is no plan gate, and its script cannot be edited', async () => {
+    reviewedRoot('x1');
+    const run = demoRun('x1', 'record', 'awaiting_human');
+    run.units[2]!.status = 'rejected';
+    sessionsDetail.mockResolvedValue([run]);
+    expect(((await app.inject({ method: 'GET', url: '/api/v1/runs/x1/demo' })).json() as { stage: string }).stage).toBe('recording');
+    const put = await app.inject({ method: 'PUT', url: '/api/v1/runs/x1/demo/script', payload: { content: '# edited' } });
+    expect(put.statusCode).toBe(409);
+  });
+
   it('a review the engine judged NOT PASS is the review gate, rejected, with its verdict read', async () => {
     reviewedRoot('f1');
     const failed = demoRun('f1', 'review', 'awaiting_human');

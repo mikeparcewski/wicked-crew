@@ -142,7 +142,10 @@ export function demoStage(view: SessionView): DemoStage {
     const done = (id: string): boolean => stepUnit(view, id)?.status === 'done';
     // After `review`: its own gate when it passed, the engine's escalation gate when it did not.
     if (done('review') || stepUnit(view, 'review')?.status === 'rejected') return 'review_gate';
-    if (done('plan') && !done('record')) return 'plan_gate';
+    // Only while `record` has not started: a record the engine rejected parks at ITS escalation gate,
+    // which is no plan gate (the script is not editable once the recorder has run).
+    const record = stepUnit(view, 'record')?.status;
+    if (done('plan') && (record === 'pending' || record === 'distributed')) return 'plan_gate';
   }
   if (step === 'plan') return 'planning';
   if (step === 'record') return 'recording';
