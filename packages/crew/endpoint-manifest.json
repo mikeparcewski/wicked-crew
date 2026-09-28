@@ -619,6 +619,13 @@
       "statusCodes": []
     },
     {
+      "method": "QUERY",
+      "path": "/api/v1/projects/:projectId/interactive/*",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
       "method": "TRACE",
       "path": "/api/v1/projects/:projectId/interactive/*",
       "requestType": null,
