@@ -11,7 +11,7 @@
 // the real council roster.
 
 import Fastify from 'fastify';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
@@ -46,9 +46,9 @@ const READ_ONLY_DEF = {
 } as unknown as WorkflowDef;
 
 type MockAdapter = {
-  launchRun: ReturnType<typeof vi.fn>;
-  getSettings: ReturnType<typeof vi.fn>;
-  getWorkflow: ReturnType<typeof vi.fn>;
+  launchRun: Mock;
+  getSettings: Mock;
+  getWorkflow: Mock;
 };
 
 function buildApp(mockAdapter: MockAdapter): FastifyInstance {

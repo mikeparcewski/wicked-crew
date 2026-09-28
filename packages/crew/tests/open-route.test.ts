@@ -8,7 +8,7 @@ import { join } from 'node:path';
 // every allowed root (incl. traversal) — plus the 200 spawn-success and 502 spawn-failure ends.
 
 import Fastify from 'fastify';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
@@ -45,13 +45,13 @@ function view(id: string, workdir: string | null) {
 }
 
 type MockAdapter = {
-  sessionsDetail: ReturnType<typeof vi.fn>;
-  listRepos: ReturnType<typeof vi.fn>;
+  sessionsDetail: Mock;
+  listRepos: Mock;
 };
 
 describe('POST /open (crew#273)', () => {
   let mockAdapter: MockAdapter;
-  let opener: ReturnType<typeof vi.fn>;
+  let opener: Mock;
   let app: FastifyInstance;
 
   beforeEach(async () => {

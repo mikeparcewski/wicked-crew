@@ -14,7 +14,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { existsSync, mkdtempSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
@@ -29,7 +29,7 @@ import { assertWickedRootsOutsideStateHome, StateHomePlacementError } from '../s
 const PNG_B64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 
-type EstateStub = ReturnType<typeof vi.fn>;
+type EstateStub = Mock;
 
 function buildApp(adapter: Record<string, unknown>, estate: EstateStub, index = new MembershipIndex()): FastifyInstance {
   const app = Fastify({ logger: false });
@@ -56,7 +56,7 @@ function buildApp(adapter: Record<string, unknown>, estate: EstateStub, index = 
 describe('POST /projects/:id/capture — capture into the proposal queue', () => {
   let inbox: string;
   let app: FastifyInstance;
-  let launchRun: ReturnType<typeof vi.fn>;
+  let launchRun: Mock;
   const prevInbox = process.env.WICKED_CAPTURE_INBOX_DIR;
 
   beforeEach(async () => {

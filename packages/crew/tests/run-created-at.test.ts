@@ -14,7 +14,7 @@ import Fastify from 'fastify';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
@@ -27,12 +27,12 @@ import type { FastifyInstance } from 'fastify';
 import { removeScratch } from './setup/scratch.js';
 
 type MockAdapter = {
-  sessionsDetail: ReturnType<typeof vi.fn>;
-  sessions: ReturnType<typeof vi.fn>;
-  launchRun: ReturnType<typeof vi.fn>;
-  projectMembers: ReturnType<typeof vi.fn>;
-  projectMemberAttach: ReturnType<typeof vi.fn>;
-  projectMemberDetach: ReturnType<typeof vi.fn>;
+  sessionsDetail: Mock;
+  sessions: Mock;
+  launchRun: Mock;
+  projectMembers: Mock;
+  projectMemberAttach: Mock;
+  projectMemberDetach: Mock;
 };
 
 function view(id: string): SessionView {

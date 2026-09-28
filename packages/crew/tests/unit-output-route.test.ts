@@ -11,7 +11,7 @@
 // during triage, so the one case that most needed an answer was the case that gave none.
 
 import Fastify from 'fastify';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
@@ -77,9 +77,9 @@ function workflowRun(): SessionView {
 }
 
 type MockAdapter = {
-  sessionsDetail: ReturnType<typeof vi.fn>;
-  workOutput: ReturnType<typeof vi.fn>;
-  sessions: ReturnType<typeof vi.fn>;
+  sessionsDetail: Mock;
+  workOutput: Mock;
+  sessions: Mock;
 };
 
 function buildApp(mockAdapter: MockAdapter): FastifyInstance {

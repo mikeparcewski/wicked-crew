@@ -21,7 +21,7 @@
 // Fastify inject() with a mock adapter (no NAPI), mirroring run-delivery-field.test.ts.
 
 import Fastify from 'fastify';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, type Mock } from 'vitest';
 import { registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
@@ -35,10 +35,10 @@ import type { SessionView } from '../src/core/types.js';
 import type { FastifyInstance } from 'fastify';
 
 type MockAdapter = {
-  sessionsDetail: ReturnType<typeof vi.fn>;
-  sessions: ReturnType<typeof vi.fn>;
-  resumeRun: ReturnType<typeof vi.fn>;
-  confirmGate: ReturnType<typeof vi.fn>;
+  sessionsDetail: Mock;
+  sessions: Mock;
+  resumeRun: Mock;
+  confirmGate: Mock;
 };
 
 function view(

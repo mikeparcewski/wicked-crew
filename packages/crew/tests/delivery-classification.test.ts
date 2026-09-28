@@ -23,7 +23,7 @@
 // Fastify inject() with a mock adapter (no NAPI), mirroring delivery-cache.test.ts.
 
 import Fastify from 'fastify';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, type Mock } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
@@ -227,8 +227,8 @@ describe('deliveryStateOf / deliveryStateWithVacuity — canDeliver = false answ
 });
 
 type MockAdapter = {
-  sessionsDetail: ReturnType<typeof vi.fn>;
-  sessions: ReturnType<typeof vi.fn>;
+  sessionsDetail: Mock;
+  sessions: Mock;
   listWorkflows: () => WorkflowDef[];
 };
 
