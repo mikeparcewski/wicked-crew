@@ -7209,7 +7209,8 @@ export type McpUpstreamKind = 'mcp-stdio' | 'mcp-http';
 /**
  * A tool's class, from its own `tools/list` annotations (never from a carrier): `read` when
  * `readOnlyHint` is true; else `destructive` unless `destructiveHint` is false; else `write`. A tool
- * with no annotations is `write`. An operator's `classOverride` wins.
+ * with no annotations, or with neither `readOnlyHint` nor `destructiveHint`, is `write`. An
+ * operator's `classOverride` wins.
  */
 export type McpToolClass = 'read' | 'write' | 'destructive';
 /**
@@ -7350,6 +7351,12 @@ export interface McpPreviewResponse {
   serverInfo: { name: string; version: string } | null;
   tools: McpPreviewTool[];
   diff: McpToolDiff | null;
+  /**
+   * Each tool's decision per phase role × seat × mode under the current policies and approvals,
+   * judged as if this preview were saved now (api-types 0.63.0); see `withdrawOnSave`. `null` when
+   * the engine cannot preview.
+   */
+  policies?: McpPolicyPreviewResponse | null;
 }
 
 /** `POST /mcp/servers`. No `previewHash`, or one that is unknown or expired, is a 409. */
@@ -7476,4 +7483,130 @@ export interface McpCallRecord {
 export interface McpCallCompletedFrame {
   type: 'mcpCallCompleted';
   record: McpCallRecord;
+}
+
+// ── MCP policies: the preview matrix and approvals (DES-MCP-TOOLS-001 §4.5, §4.7, §8, slice S6; api-types 0.63.0) ──
+
+/** A policy decision: `ask` = the call waits for the operator's approval (it does not run). */
+export type McpDecision = 'allow' | 'ask' | 'deny';
+/**
+ * The phase role a matrix row stands for: `creator` = a creator phase with full write posture;
+ * `evaluator` = an evaluator phase (read-only); `recon` = a neutral phase with a read-only posture.
+ */
+export type McpPhaseRole = 'creator' | 'evaluator' | 'recon';
+/** The run's mode (studio's launch autonomy): Gate every step / Gate by risk / Auto. */
+export type McpRunMode = 'ask' | 'balanced' | 'autonomous';
+
+/** One matrix cell: what a call from a unit of this shape would get now. Nothing is recorded. */
+export interface McpPolicyCell {
+  role: McpPhaseRole;
+  seat: string;
+  mode: McpRunMode;
+  phaseId?: string;
+  decision: McpDecision;
+  /** The class the engine judged (the tool's override, else its annotations; none = `write`). */
+  class: McpToolClass;
+  /** The rules that decided: `engine:*` gates first, then steering rule ids (each a Steering row). */
+  ruleIds: string[];
+  obligations: string[];
+  reason: string | null;
+}
+
+/** Whether a tool is approved in each ledger, and by which token (`server` = `mcp:<server>`). */
+export interface McpApprovalState {
+  /** `MCP-FIRST-USE`: the first use of a server asks in every mode until approved. */
+  firstUse: 'server' | 'tool' | null;
+  /** `MCP-POSTURE-WRITE`: in balanced mode a write asks until approved. */
+  write: 'server' | 'tool' | null;
+}
+
+export interface McpPolicyPreviewTool {
+  subject: string;
+  server: string;
+  tool: string;
+  class: McpToolClass;
+  status: McpToolStatus;
+  /** The server and the tool are both enabled. */
+  enabled: boolean;
+  /** What the broker sends the engine: enabled and `registered`; otherwise D-5 denies it. */
+  registered: boolean;
+  approval: McpApprovalState;
+  /** One per role × seat × mode, in `roles`, `seats`, `modes` order. */
+  cells: McpPolicyCell[];
+}
+
+/** `POST /mcp/policies/preview`. Every field narrows; none = every tool, role, seat and mode. */
+export interface McpPolicyPreviewBody {
+  /** One tool: `mcp:<server>/<tool>`. */
+  subject?: string;
+  server?: string;
+  phaseRole?: McpPhaseRole;
+  seat?: string;
+  mode?: McpRunMode;
+  /** A workflow phase id a policy may name (`review`, `build`, ...). */
+  phaseId?: string;
+}
+
+/** `POST /mcp/policies/preview`'s 200, and `McpPreviewResponse.policies`. */
+export interface McpPolicyPreviewResponse {
+  roles: McpPhaseRole[];
+  seats: string[];
+  modes: McpRunMode[];
+  phaseId: string | null;
+  /**
+   * Server previews only (`[]` elsewhere): the approvals saving this preview withdraws, because a
+   * saved tool's schema changed. The cells are judged under the CURRENT approvals, so a tool listed
+   * here (or every tool, when `mcp:<server>` is listed) asks again after the save.
+   */
+  withdrawOnSave: string[];
+  tools: McpPolicyPreviewTool[];
+}
+
+/** An approved subject and the ledgers that hold it. */
+export interface McpApproval {
+  subject: string;
+  scope: 'server' | 'tool';
+  firstUse: boolean;
+  write: boolean;
+}
+
+/** A registered, enabled tool that would ask in balanced mode, and why. */
+export interface McpPendingApproval {
+  subject: string;
+  server: string;
+  tool: string;
+  class: McpToolClass;
+  needs: Array<'first-use' | 'write'>;
+}
+
+export interface McpLedgerState {
+  id: string;
+  /** `false` = the mcp-defaults pack was not seeded; approvals are refused (503). */
+  present: boolean;
+  /** A retired first-use ledger still asks: the engine reads it either way. */
+  retired: boolean;
+}
+
+/** `GET /mcp/approvals`. */
+export interface McpApprovalsResponse {
+  approved: McpApproval[];
+  pending: McpPendingApproval[];
+  ledgers: { firstUse: McpLedgerState; write: McpLedgerState };
+}
+
+/**
+ * `POST /mcp/approvals`, an audited edit of the ledger rules' `excludes`. `mcp:<server>` approves
+ * the server's FIRST USE (`MCP-FIRST-USE`); its write tools still ask in balanced mode.
+ * `mcp:<server>/<tool>` approves that tool's first use and its writes (`MCP-POSTURE-WRITE` too).
+ * An approval never lifts an engine gate or an explicit deny rule.
+ */
+export interface McpApprovalBody {
+  subject: string;
+}
+
+/** `POST /mcp/approvals` and `DELETE /mcp/approvals/:subject`: the ledger rules the edit changed. */
+export interface McpApprovalResponse {
+  subject: string;
+  approved: boolean;
+  rulesChanged: string[];
 }

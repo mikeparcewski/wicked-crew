@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.62.0",
+  "apiTypesVersion": "0.63.0",
   "endpoints": [
     {
       "method": "GET",
@@ -361,6 +361,40 @@
       ]
     },
     {
+      "method": "GET",
+      "path": "/api/v1/mcp/approvals",
+      "requestType": null,
+      "responseType": "McpApprovalsResponse",
+      "statusCodes": [
+        200,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/mcp/approvals",
+      "requestType": "McpApprovalBody",
+      "responseType": "McpApprovalResponse",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        503
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/mcp/approvals/:subject",
+      "requestType": null,
+      "responseType": "McpApprovalResponse",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        503
+      ]
+    },
+    {
       "method": "POST",
       "path": "/api/v1/mcp/call",
       "requestType": "McpCallBody",
@@ -376,6 +410,20 @@
         502,
         503,
         504
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/mcp/policies/preview",
+      "requestType": "McpPolicyPreviewBody",
+      "responseType": "McpPolicyPreviewResponse",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        501,
+        502,
+        503
       ]
     },
     {

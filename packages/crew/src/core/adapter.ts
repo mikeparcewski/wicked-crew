@@ -319,6 +319,9 @@ type GovernanceMethods = {
   // JSON) into the knowledge store under the `evals:<name>` scope. Resolves to a JSON
   // `{ imported, scope, embedded }` object. Ships with `governanceEvals` (0.7.5).
   governanceCorpusImport?(argsJson: string): Promise<string>;
+  // DES-MCP-TOOLS-001 S6: the MCP policy preview over synthetic unit cells, recorded nowhere.
+  // Optional: no released addon carries it yet (it lands after core-ts 0.7.30).
+  previewMcpCalls?(requestJson: string): Promise<string>;
 };
 
 /** Chat sessions (core#134): warm ACP seat pool + group fan-out. */
@@ -2934,6 +2937,19 @@ export class CoreAdapter {
    */
   steeringSupported(): boolean {
     return typeof this.core.steeringImport === 'function';
+  }
+
+  /**
+   * The MCP policy preview (DES-MCP-TOOLS-001 S6): `{calls, cells}` → `[{subject, cells}]` JSON,
+   * judged by the same evaluation the broker's `evaluateMcpCall` runs, and recorded nowhere.
+   * Throws `mcp_preview_unsupported` on an addon that predates the binding (the route answers 501).
+   */
+  async previewMcpCalls(requestJson: string): Promise<string> {
+    const preview = this.core.previewMcpCalls;
+    if (typeof preview !== 'function') {
+      throw new Error('mcp_preview_unsupported: the installed wicked-core-ts predates the MCP policy preview; upgrade the engine');
+    }
+    return preview.call(this.core, requestJson);
   }
 
   /**

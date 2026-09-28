@@ -13,6 +13,18 @@
  *   POST   /mcp/call                    the broker (§6, slice S3): `{token, subject, args?}` from the garden
  *                                       shim; judged, budgeted, invoked, scrubbed, output-judged, recorded
  *
+ * Slice S6 (the policy preview and the approvals, `mcp/policies.ts`):
+ *
+ *   POST   /mcp/policies/preview        `{subject?, server?, phaseRole?, seat?, mode?, phaseId?}` → each
+ *                                       tool's decision per role × seat × mode; nothing is recorded
+ *   GET    /mcp/approvals               the approved subjects, the tools that would ask, the two ledgers
+ *   POST   /mcp/approvals               `{subject}`: a server joins `MCP-FIRST-USE` excludes; a tool joins
+ *                                       that and `MCP-POSTURE-WRITE` (audited rule upserts)
+ *   DELETE /mcp/approvals/:subject      removes it from both (`:subject` URL-encoded)
+ *
+ * `POST /mcp/servers/preview` also answers the matrix (`policies`); a save that changes a saved
+ * tool's schema, and a removal, withdraw the approvals that named it, BEFORE the registry changes.
+ *
  * The secret value is in no response, log, audit entry or file (D-2); tests/mcp-registry.test.ts
  * scans all of them, a malformed secret body included.
  */
@@ -20,9 +32,11 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 
-import type { Actor } from '../core/types.js';
+import type { Actor, McpApprovalResponse, McpPreviewResponse } from '../core/types.js';
 import { MCP_SERVER_NAME_RE } from '../mcp/classify.js';
 import type { McpBroker } from '../mcp/broker.js';
+import type { McpPolicies } from '../mcp/policies.js';
+import { MCP_PREVIEW_ROLES, MCP_RUN_MODES, McpLedgerEditError } from '../mcp/policies.js';
 import { McpRegistryError, type McpRegistry } from '../mcp/registry.js';
 import { McpRegistryCorruptError } from '../mcp/registry-store.js';
 import { parseSecretRef, SecretStoreError } from '../mcp/secrets.js';
@@ -96,18 +110,39 @@ export const McpCallSchema = z
     args: z.record(z.string(), z.unknown()).optional(),
   })
   .strict();
+export const McpPolicyPreviewSchema = z
+  .object({
+    subject: z.string().min(1).max(256).optional(),
+    server: serverName.optional(),
+    phaseRole: z.enum(MCP_PREVIEW_ROLES as [string, ...string[]]).optional(),
+    seat: z.string().regex(/^[A-Za-z0-9_.-]{1,64}$/).optional(),
+    mode: z.enum(MCP_RUN_MODES as [string, ...string[]]).optional(),
+    phaseId: z.string().regex(/^[A-Za-z0-9_.-]{1,128}$/).optional(),
+  })
+  .strict()
+  .refine((b) => b.subject === undefined || b.server === undefined, { message: 'give subject or server, not both' });
+export const McpApprovalSchema = z.object({ subject: z.string().min(5).max(256) }).strict();
 
 export interface McpRouteDeps {
   /** Absent = a directly-driven route set with no registry seam → 503. */
   registry?: McpRegistry;
   /** The broker's call path (S3). Absent → `POST /mcp/call` answers 503. */
   broker?: McpBroker;
+  /** The preview and approvals (S6). Absent → those routes answer 503; the S2 routes are unchanged. */
+  policies?: McpPolicies;
   audit: Pick<AuditLog, 'record'>;
   actorOf: (req: FastifyRequest) => Actor;
 }
 
 function invalidBody(reply: FastifyReply, err: z.ZodError): FastifyReply {
   return reply.code(400).send({ error: err.issues.map((i) => `${i.path.join('.') || 'body'}: ${i.message}`).join('; ') });
+}
+
+/** A ledger edit that failed part-way still changed rules: audit what it left changed. */
+function auditPartial(deps: McpRouteDeps, req: FastifyRequest, err: unknown, subjects: string[]): void {
+  if (!(err instanceof McpLedgerEditError) || err.changed.length === 0) return;
+  deps.audit.record('mcp.approval.partial', deps.actorOf(req), { detail: { subjects, rules: err.changed } });
+  for (const id of err.changed) deps.audit.record('governance.rule.upserted', deps.actorOf(req), { detail: { id, source: 'mcp-approval', partial: true } });
 }
 
 function fail(reply: FastifyReply, err: unknown): FastifyReply {
@@ -162,7 +197,15 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
       const parsed = McpServerConfigSchema.safeParse(req.body);
       if (!parsed.success) return invalidBody(reply, parsed.error);
       try {
-        return await r.preview(toConfig(parsed.data));
+        const preview = await r.preview(toConfig(parsed.data));
+        if (deps.policies === undefined) return preview;
+        let policies: McpPreviewResponse['policies'] = null;
+        try {
+          policies = await deps.policies.previewUnsaved(preview.server, preview.tools);
+        } catch {
+          policies = null; // the registry preview stands; the matrix is disclosed as unavailable
+        }
+        return { ...preview, policies };
       } catch (err) {
         return fail(reply, err);
       }
@@ -178,6 +221,17 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
       const parsed = SaveMcpServerSchema.safeParse(req.body ?? {});
       if (!parsed.success) return invalidBody(reply, parsed.error);
       try {
+        // A saved tool whose schema changed loses its approvals BEFORE the save lands, so a failed
+        // withdrawal refuses the save rather than leaving an approval over a schema nobody approved.
+        const held = parsed.data.previewHash === undefined ? null : r.peekPreview(parsed.data.previewHash);
+        if (held !== null && deps.policies !== undefined) {
+          const tokens = await deps.policies.withdrawnBySave(held);
+          if (tokens.length > 0) {
+            const rules = await deps.policies.withdraw(tokens).catch((e: unknown) => { auditPartial(deps, req, e, tokens); throw e; });
+            deps.audit.record('mcp.approval.withdrawn', deps.actorOf(req), { detail: { subjects: tokens, rules, why: 'schema_changed' } });
+            for (const id of rules) deps.audit.record('governance.rule.upserted', deps.actorOf(req), { detail: { id, source: 'mcp-approval' } });
+          }
+        }
         const server = await r.save(parsed.data.previewHash);
         deps.audit.record('mcp.server.saved', deps.actorOf(req), {
           detail: { name: server.name, kind: server.kind, tools: server.tools.length, authRef: server.auth?.ref ?? null },
@@ -214,6 +268,15 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
       const r = registry(reply);
       if (r === null) return reply;
       try {
+        await r.get(req.params.name); // 404 before anything is withdrawn
+        if (deps.policies !== undefined) {
+          const tokens = await deps.policies.tokensOf(req.params.name);
+          if (tokens.length > 0) {
+            const rules = await deps.policies.withdraw(tokens).catch((e: unknown) => { auditPartial(deps, req, e, tokens); throw e; });
+            deps.audit.record('mcp.approval.withdrawn', deps.actorOf(req), { detail: { subjects: tokens, rules, why: 'server_removed' } });
+            for (const id of rules) deps.audit.record('governance.rule.upserted', deps.actorOf(req), { detail: { id, source: 'mcp-approval' } });
+          }
+        }
         await r.remove(req.params.name);
         deps.audit.record('mcp.server.removed', deps.actorOf(req), { detail: { name: req.params.name } });
         return { removed: req.params.name };
@@ -296,4 +359,92 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
       }
     },
   );
+
+  // ── S6: the policy preview and the approvals ────────────────────────────────────────────────
+  const policies = (reply: FastifyReply): McpPolicies | null => {
+    if (deps.registry !== undefined && deps.policies !== undefined) return deps.policies;
+    void reply.code(503).send({ error: 'MCP policies are not configured on this daemon', code: 'mcp_unavailable' });
+    return null;
+  };
+
+  app.post(
+    `${V}/mcp/policies/preview`,
+    { config: { manifest: { requestType: 'McpPolicyPreviewBody', responseType: 'McpPolicyPreviewResponse', statusCodes: [200, 400, 404, 501, 502, 503] } } },
+    async (req, reply) => {
+      const p = policies(reply);
+      if (p === null) return reply;
+      const parsed = McpPolicyPreviewSchema.safeParse(req.body ?? {});
+      if (!parsed.success) return invalidBody(reply, parsed.error);
+      try {
+        const b = parsed.data;
+        return await p.preview({
+          subject: b.subject,
+          server: b.server,
+          phaseRole: b.phaseRole as McpPolicyQueryRole,
+          seat: b.seat,
+          mode: b.mode as McpPolicyQueryMode,
+          phaseId: b.phaseId,
+        });
+      } catch (err) {
+        return fail(reply, err);
+      }
+    },
+  );
+
+  app.get(
+    `${V}/mcp/approvals`,
+    { config: { manifest: { responseType: 'McpApprovalsResponse', statusCodes: [200, 503] } } },
+    async (_req, reply) => {
+      const p = policies(reply);
+      if (p === null) return reply;
+      try {
+        return await p.approvals();
+      } catch (err) {
+        return fail(reply, err);
+      }
+    },
+  );
+
+  app.post(
+    `${V}/mcp/approvals`,
+    { config: { manifest: { requestType: 'McpApprovalBody', responseType: 'McpApprovalResponse', statusCodes: [200, 400, 404, 503] } } },
+    async (req, reply) => {
+      const p = policies(reply);
+      if (p === null) return reply;
+      const parsed = McpApprovalSchema.safeParse(req.body);
+      if (!parsed.success) return invalidBody(reply, parsed.error);
+      try {
+        const subject = parsed.data.subject;
+        const rules = await p.approve(subject).catch((e: unknown) => { auditPartial(deps, req, e, [subject]); throw e; });
+        deps.audit.record('mcp.approval.granted', deps.actorOf(req), { detail: { subject, rules } });
+        for (const id of rules) deps.audit.record('governance.rule.upserted', deps.actorOf(req), { detail: { id, source: 'mcp-approval' } });
+        const body: McpApprovalResponse = { subject, approved: true, rulesChanged: rules };
+        return body;
+      } catch (err) {
+        return fail(reply, err);
+      }
+    },
+  );
+
+  app.delete<{ Params: { subject: string } }>(
+    `${V}/mcp/approvals/:subject`,
+    { config: { manifest: { responseType: 'McpApprovalResponse', statusCodes: [200, 400, 404, 503] } } },
+    async (req, reply) => {
+      const p = policies(reply);
+      if (p === null) return reply;
+      try {
+        const subject = req.params.subject;
+        const rules = await p.revoke(subject).catch((e: unknown) => { auditPartial(deps, req, e, [subject]); throw e; });
+        deps.audit.record('mcp.approval.revoked', deps.actorOf(req), { detail: { subject, rules } });
+        for (const id of rules) deps.audit.record('governance.rule.upserted', deps.actorOf(req), { detail: { id, source: 'mcp-approval' } });
+        const body: McpApprovalResponse = { subject, approved: false, rulesChanged: rules };
+        return body;
+      } catch (err) {
+        return fail(reply, err);
+      }
+    },
+  );
 }
+
+type McpPolicyQueryRole = import('../mcp/policies.js').McpPolicyQuery['phaseRole'];
+type McpPolicyQueryMode = import('../mcp/policies.js').McpPolicyQuery['mode'];

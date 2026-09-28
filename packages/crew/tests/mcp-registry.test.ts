@@ -417,7 +417,9 @@ describe('classification and subjects', () => {
   it('derives the class from annotations (§4.2, D-4)', () => {
     expect(deriveToolClass(null)).toBe('write');
     expect(deriveToolClass({ readOnlyHint: true, destructiveHint: true })).toBe('read');
-    expect(deriveToolClass({ title: 'x' })).toBe('destructive');
+    // No readOnlyHint and no destructiveHint = no hints declared = write, as the engine derives it (S6 parity).
+    expect(deriveToolClass({ title: 'x' })).toBe('write');
+    expect(deriveToolClass({ openWorldHint: true })).toBe('write');
     expect(deriveToolClass({ destructiveHint: true })).toBe('destructive');
     expect(deriveToolClass({ destructiveHint: false })).toBe('write');
     expect(deriveToolClass({ readOnlyHint: false, destructiveHint: false })).toBe('write');
