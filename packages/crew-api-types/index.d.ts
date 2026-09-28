@@ -7387,3 +7387,93 @@ export interface McpSecretResponse {
   ref: string;
   set: true;
 }
+
+// ── MCP broker call path (DES-MCP-TOOLS-001 §6, §8 `POST /mcp/call`; slice S3) ─────────────────
+
+/** `POST /mcp/call`: what the garden shim sends. `token` is the worker's `WICKED_MCP_TOKEN`. */
+export interface McpCallBody {
+  token: string;
+  /** `mcp:<server>/<tool>`. */
+  subject: string;
+  /** The tool's arguments (a JSON object); absent = `{}`. */
+  args?: Record<string, unknown>;
+}
+
+/** How a brokered call ended. Every outcome but `ok` means the result was not handed back. */
+export type McpCallOutcome =
+  /** The call ran; `result` is the scrubbed upstream result (it may itself be a tool error, `isError`). */
+  | 'ok'
+  /** Refused by a policy or an engine gate before anything ran (403). The worker continues. */
+  | 'denied'
+  /** Waits for the operator's approval (first use of a server, or the run's mode) (409). */
+  | 'pending_approval'
+  /** The call ran, but the output policy withheld its result (403). */
+  | 'withheld'
+  /** The unit's call budget is spent (429). */
+  | 'budget_exhausted'
+  /** The tool failed 5 times in a row and is refused for 60 s (503). */
+  | 'breaker_open'
+  /** The upstream failed (502) or timed out (504). */
+  | 'upstream_error'
+  /** The call could not be judged, scrubbed or recorded: refused, fail closed (500). */
+  | 'guard_error';
+
+/** Who decided a call: an engine gate (`engine:mcp-*`), a steering rule, or the broker itself. */
+export type McpDecisionBy = string;
+
+/** `POST /mcp/call`'s answer, on every status. Never carries a secret; `result` only on `ok`. */
+export interface McpCallResponse {
+  outcome: McpCallOutcome;
+  subject: string;
+  /** The call record's span id (`GET /mcp/usage` and the run's Governance panel resolve it). */
+  callId: string | null;
+  /** The scrubbed `tools/call` result — only when `outcome` is `ok`. */
+  result?: Record<string, unknown>;
+  /** The rules or gates that decided (deny, ask, withheld). */
+  ruleIds: string[];
+  /** Why the result is not handed back; absent on `ok`. */
+  reason?: string;
+  /** What the worker can do instead. */
+  remedy?: string;
+  /** `pending_approval` only: the subject the operator is asked to approve. */
+  pending_approval?: string;
+  /** `denied` / `withheld`: the call was refused (the unit continues). */
+  denied?: true;
+}
+
+export type McpCallDecision = 'allow' | 'ask' | 'deny' | 'guard_error';
+
+/**
+ * One call record (`<state home>/mcp/calls.ndjson`), OTel span shaped. Arguments and results are
+ * NEVER captured: only the subject, the decision, timings and the byte count.
+ */
+export interface McpCallRecord {
+  /** The run id, or `null` when the token resolved to no unit (a guard error before judging). */
+  traceId: string | null;
+  spanId: string;
+  /** The unit, `<ord>:<attempt>`; `null` with `traceId`. */
+  parentSpanId: string | null;
+  name: 'mcp.tool.call';
+  start: string;
+  end: string;
+  ms: number;
+  status: { code: 'ok' | 'error'; errorClass: string | null };
+  decision: { decision: McpCallDecision; by: McpDecisionBy; ruleIds: string[]; claimId: string | null };
+  outcome: McpCallOutcome;
+  attrs: {
+    'mcp.subject': string;
+    'mcp.class': McpToolClass | null;
+    'mcp.kind': McpUpstreamKind | null;
+    'wicked.seat': string | null;
+    'wicked.phase': string | null;
+    'wicked.carrier': 'shim';
+    'bytes.out': number;
+    retries: number;
+  };
+}
+
+/** The `/ws` frame each call record rides (additive CoreEvent contract: skins that don't know it ignore it). */
+export interface McpCallCompletedFrame {
+  type: 'mcpCallCompleted';
+  record: McpCallRecord;
+}

@@ -45,6 +45,9 @@ import { crewStateHome } from '../projects/state-home.js';
 import { homedir } from 'node:os';
 import { discoverMcpServers } from '../mcp/discovery.js';
 import { probeMcpServer } from '../mcp/probe.js';
+import { budgetFromEnv, MCP_CALL_COMPLETED, McpBroker } from '../mcp/broker.js';
+import { McpCallRecordFile } from '../mcp/call-records.js';
+import { emitOnBus } from '../core/bus.js';
 import { McpRegistry } from '../mcp/registry.js';
 import { McpRegistryStore } from '../mcp/registry-store.js';
 import { platformSecretStore } from '../mcp/secrets.js';
@@ -1445,6 +1448,36 @@ export async function createServer(
   // handler serves. One resolution, two consumers.
   const studioRoot = options?.studioRoot ?? defaultStudioRoot();
 
+  // DES-MCP-TOOLS-001 S2: the registry over `<state home>/mcp` (created on the first save).
+  const mcpRegistry = new McpRegistry({
+    store: new McpRegistryStore(),
+    secrets: platformSecretStore(),
+    probe: probeMcpServer,
+    // Read the worker home at request time: `PUT /settings` can move it (applyWorkerConfigRoot).
+    discover: (managed) => discoverMcpServers({ home: homedir(), workerHome: process.env['WICKED_WORKER_HOME'] ?? null }, managed),
+  });
+  // S3: every brokered call is judged by the in-process engine (the token registry is the
+  // engine's, process-global), recorded to `<state home>/mcp/calls.ndjson`, and published on /ws
+  // and the engine's bus. A bus that is not attached only loses the event; the record is the record.
+  const mcpBroker = new McpBroker({
+    registry: mcpRegistry,
+    engine: () => CoreAdapter.mcpEngineGate(),
+    records: new McpCallRecordFile(),
+    budgetPerUnit: budgetFromEnv(),
+    log: (m) => app.log.warn(m),
+    publish: async (record) => {
+      broadcast({ type: 'mcpCallCompleted', record } as unknown as CoreEvent);
+      if (engineBusDb === undefined) return;
+      await emitOnBus(engineBusDb, {
+        event_type: MCP_CALL_COMPLETED,
+        domain: 'wicked-crew',
+        subdomain: 'mcp',
+        payload: record,
+        producer_id: 'wicked-crew',
+        idempotency_key: `${MCP_CALL_COMPLETED}:${record.spanId}`,
+      });
+    },
+  });
   const registered = registerRoutes(
     app,
     adapter,
@@ -1495,13 +1528,9 @@ export async function createServer(
       ...(skillsRuntime !== undefined ? { skills: skillsRuntime } : {}),
       // DES-MCP-TOOLS-001 S2: the registry over `<state home>/mcp` (created on the first save).
       // Route tests drive `registerMcpRoutes` over their own registry (tests/mcp-registry.test.ts).
-      mcp: new McpRegistry({
-        store: new McpRegistryStore(),
-        secrets: platformSecretStore(),
-        probe: probeMcpServer,
-        // Read the worker home at request time: `PUT /settings` can move it (applyWorkerConfigRoot).
-        discover: (managed) => discoverMcpServers({ home: homedir(), workerHome: process.env['WICKED_WORKER_HOME'] ?? null }, managed),
-      }),
+      mcp: mcpRegistry,
+      // DES-MCP-TOOLS-001 S3: the broker's call path over that registry.
+      mcpBroker,
       // wicked-core#411 / crew#497: the live state-home classification the routes report and gate on.
       stateHome: stateHomeWatch,
       // Routes that say something to the thread (a refused chat seat, F-2R2-007) emit through the
@@ -1642,6 +1671,12 @@ export interface StartedServer {
   host: string;
 }
 
+/** The URL a worker on this host reaches the daemon at: a wildcard bind is reached on loopback. */
+export function brokerUrlFor(host: string, port: number): string {
+  const h = host === '0.0.0.0' || host === '' ? '127.0.0.1' : host === '::' ? '::1' : host;
+  return `http://${h.includes(':') ? `[${h}]` : h}:${port}`;
+}
+
 export async function startServer(
   adapter: CoreAdapter,
   port = 7701,
@@ -1654,5 +1689,9 @@ export async function startServer(
   const boundPort = typeof addr === 'object' && addr ? addr.port : port;
   const boundHost = typeof addr === 'object' && addr ? addr.address : host;
   app.log.info(`wicked-crew daemon listening on ${boundHost}:${boundPort}`);
+  // DES-MCP-TOOLS-001 S1/S3: the in-process engine hands each governed worker this URL (with its
+  // `WICKED_MCP_TOKEN`) as `WICKED_CREW_URL`, so the garden shim reaches THIS daemon's broker. The
+  // engine reads the daemon's own env at every spawn; a daemon that never listened hands none.
+  process.env['WICKED_CREW_URL'] = brokerUrlFor(boundHost, boundPort);
   return { app, port: boundPort, host: boundHost };
 }

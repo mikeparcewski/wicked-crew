@@ -25,6 +25,7 @@ import type {
   McpServersResponse,
   McpServerTestResponse,
   McpTool,
+  McpToolAnnotations,
   McpToolClass,
   McpToolDiff,
   McpToolStatus,
@@ -51,6 +52,14 @@ export class McpRegistryError extends Error {
   ) {
     super(message);
   }
+}
+
+/** What the registry holds for one brokered call's subject. */
+export interface McpCallTarget {
+  config: McpUpstreamConfig;
+  annotations: McpToolAnnotations | null;
+  classOverride: McpToolClass | null;
+  registered: boolean;
 }
 
 interface HeldPreview {
@@ -265,6 +274,34 @@ export class McpRegistry {
     if (ref.includes(value)) throw new McpRegistryError(400, 'secret_in_ref', 'the secret must not appear in its own reference; choose a different value');
     await this.deps.secrets.set(name, value);
     return ref;
+  }
+
+  /**
+   * The broker's resolution of one subject (§6 step 2). `null` = no server of that name. A server
+   * that is disabled, a tool that is disabled, `gone`, never saved, or whose schema changed since it
+   * was saved reads `registered: false`, which the engine denies (D-5).
+   */
+  async resolveCall(server: string, tool: string): Promise<McpCallTarget | null> {
+    const s = (await this.deps.store.read()).servers.find((x) => x.name === server);
+    if (s === undefined) return null;
+    const t = s.tools.find((x) => x.name === tool);
+    return {
+      config: configOf(s),
+      annotations: t?.annotations ?? null,
+      classOverride: t?.classOverride ?? null,
+      registered: s.enabled && t !== undefined && t.enabled && toolStatus(t) === 'registered',
+    };
+  }
+
+  /**
+   * The secret a call to `config` is made with, resolved at the moment of the call and nowhere
+   * else. `missing` = the server names a secret that resolves to nothing: the call is not made
+   * unauthenticated.
+   */
+  async callSecret(config: McpUpstreamConfig): Promise<{ secret: string | null; missing: boolean }> {
+    if (config.auth === null) return { secret: null, missing: false };
+    const secret = await resolveSecret(config.auth.ref, this.deps.secrets, this.env);
+    return { secret, missing: secret === null };
   }
 
   // ── internals ──────────────────────────────────────────────────────────────────────────────

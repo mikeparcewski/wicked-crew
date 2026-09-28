@@ -89,6 +89,7 @@ import { registerTestingRoutes } from './testing.js';
 import { DEMO_PRESET, demoLaunchRoots, registerDemoRoutes } from './demo.js';
 import { registerSkillsRoutes } from './skills.js';
 import { registerMcpRoutes } from './mcp.js';
+import type { McpBroker } from '../mcp/broker.js';
 import type { McpRegistry } from '../mcp/registry.js';
 import { disabledSkillsHealth, type SkillsRuntime } from '../skills/runtime.js';
 import { phaseSkillFindings, withPhaseSkillGaps, type PhaseSkillArming, type RunSkillGapIndex } from '../skills/phase-skill-gaps.js';
@@ -909,6 +910,8 @@ export interface RuntimeDeps {
    *  `<state home>/mcp`; a directly-driven route set gets none and `/mcp/*` answers 503 unless a
    *  test injects one over a scratch dir. */
   mcp?: McpRegistry;
+  /** The MCP broker's call path (DES-MCP-TOOLS-001 S3) over that registry; absent → `POST /mcp/call` 503. */
+  mcpBroker?: McpBroker;
   /** crew#661 — each drafting seam's ARM-TIME skill outcome: the subsystems whose phases run without
    *  a declared skill (`/diagnostics.skills.phaseSkillGaps` + `skills.phase-skill` findings, and
    *  `/health.warnings`). Absent = nothing armed here (a directly-driven route set): no gaps. */
@@ -5412,6 +5415,7 @@ export function registerRoutes(
   // Preview-bound saves, the tool diff on test, and a secret route that never answers the value.
   registerMcpRoutes(app, {
     ...(runtime.mcp !== undefined ? { registry: runtime.mcp } : {}),
+    ...(runtime.mcpBroker !== undefined ? { broker: runtime.mcpBroker } : {}),
     audit,
     actorOf,
   });

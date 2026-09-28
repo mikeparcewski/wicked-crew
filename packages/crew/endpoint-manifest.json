@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.61.0",
+  "apiTypesVersion": "0.62.0",
   "endpoints": [
     {
       "method": "GET",
@@ -358,6 +358,24 @@
       "responseType": "InteractiveDocsListing",
       "statusCodes": [
         200
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/mcp/call",
+      "requestType": "McpCallBody",
+      "responseType": "McpCallResponse",
+      "statusCodes": [
+        200,
+        400,
+        401,
+        403,
+        409,
+        429,
+        500,
+        502,
+        503,
+        504
       ]
     },
     {
