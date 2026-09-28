@@ -18,6 +18,7 @@
 
 import { execFile } from 'node:child_process';
 import { readlink } from 'node:fs/promises';
+import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 
 /** One process row: its parent, cumulative CPU seconds, and command name. */
 export interface ProcRow {
@@ -53,7 +54,7 @@ export function parseCpuTime(raw: string): number {
 
 function run(cmd: string, args: string[]): Promise<string> {
   return new Promise((resolve) => {
-    execFile(cmd, args, { encoding: 'utf8', timeout: 8_000, maxBuffer: 8 * 1024 * 1024, windowsHide: true }, (_err, stdout) => {
+    execFile(cmd, args, { encoding: 'utf8', timeout: 8_000, maxBuffer: 8 * 1024 * 1024, windowsHide: true, env: childEnvWithBootEstateDb() }, (_err, stdout) => {
       // lsof exits 1 when one of the pids has already gone; its stdout for the rest still counts.
       resolve(typeof stdout === 'string' ? stdout : '');
     });
