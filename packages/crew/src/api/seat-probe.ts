@@ -37,6 +37,8 @@ import { execFile } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
+import { childEnvWithBootEstateDb } from '../core/governance-store.js';
+
 /** A probe process's outcome, as the runner reports it. `error` is set when it never ran to exit
  *  (not installed, timed out, killed). */
 export interface ProbeOutput {
@@ -117,7 +119,8 @@ export function classifyProbe(seatKey: string, out: ProbeOutput): boolean | null
 /** The production runner: `execFile` with a timeout, never a shell. */
 export const execProbe: ProbeRunner = (cmd, args, env, timeoutMs) =>
   new Promise((resolve) => {
-    execFile(cmd, args, { env, timeout: timeoutMs, windowsHide: true, maxBuffer: 256 * 1024 }, (err, stdout, stderr) => {
+    // The engine-only store variables go back to their BOOT values, as for every crew child (crew#495).
+    execFile(cmd, args, { env: childEnvWithBootEstateDb(env), timeout: timeoutMs, windowsHide: true, maxBuffer: 256 * 1024 }, (err, stdout, stderr) => {
       // A non-zero exit carries its exit code as a NUMBER `code`; a spawn failure (ENOENT) a
       // string one; a timeout kills the child (`killed`, no code).
       const e = err as { code?: unknown; killed?: boolean; message: string } | null;
