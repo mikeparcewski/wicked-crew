@@ -176,6 +176,7 @@ describe('RunLivenessSampler: the daemon process tree, attributed by worktree cw
       [11, '/repo/wicked-worktrees/run-a/tmp/wicked-checks/base'],
       [12, '/repo/wicked-worktrees/run-b'],
       [99, '/repo/wicked-worktrees/run-a'], // not a descendant of the daemon
+      [13, '/repo/wicked-worktrees/run-a2'], // a different run whose id merely starts with run-a
     ]);
     const sampler = new RunLivenessSampler(
       { table: async () => rows, cwds: async (pids) => new Map(pids.flatMap((p) => (cwd.has(p) ? [[p, cwd.get(p) as string] as const] : []))) },
@@ -187,6 +188,7 @@ describe('RunLivenessSampler: the daemon process tree, attributed by worktree cw
       { pid: 11, ppid: 10, cpuSec: b, comm: 'node vitest' },
       { pid: 12, ppid: 1, cpuSec: c, comm: 'claude' },
       { pid: 99, ppid: 7, cpuSec: stray, comm: 'cargo' },
+      { pid: 13, ppid: 1, cpuSec: stray, comm: 'cargo' },
     ];
     rows = at(1, 0, 1, 0);
     expect(await sampler.busy(['run-a', 'run-b'])).toEqual(new Map()); // baseline
@@ -195,6 +197,7 @@ describe('RunLivenessSampler: the daemon process tree, attributed by worktree cw
     const busy = await sampler.busy(['run-a', 'run-b']);
     expect([...busy.keys()]).toEqual(['run-a']);
     expect(busy.get('run-a')).toMatch(/node vitest pid 11/);
+    expect(busy.get('run-a')).not.toMatch(/cargo/);
   });
 });
 

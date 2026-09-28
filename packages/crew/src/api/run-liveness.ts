@@ -145,7 +145,9 @@ export class RunLivenessSampler {
       next.set(d.pid, { cpuSec: d.cpuSec, at });
       const cwd = cwds.get(d.pid);
       if (cwd === undefined) continue;
-      const runId = runIds.find((id) => cwd.includes(id));
+      // A path SEGMENT equal to the run id (`…/wicked-worktrees/<id>/…`), never a substring.
+      const segments = cwd.split('/');
+      const runId = runIds.find((id) => segments.includes(id));
       if (runId === undefined) continue;
       const before = this.prev.get(d.pid);
       if (before === undefined) continue; // baseline
