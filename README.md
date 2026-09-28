@@ -61,6 +61,36 @@ curl -X POST http://127.0.0.1:7701/api/v1/runs \
 wicked-crew start --problem "Fix the flaky retry test" --workflow bug
 ```
 
+### Start on login
+
+A daemon started by hand dies with the machine. Register it as a per-user login service instead:
+
+```bash
+npm install -g wicked-crew                 # the service needs a durable install, not the npx cache
+wicked-crew serve --install-service        # add the serve options you want, e.g. --port 7702
+wicked-crew status                         # the daemon's runs once it is up
+wicked-crew serve --uninstall-service      # stop and remove it
+```
+
+- **macOS:** a LaunchAgent at `~/Library/LaunchAgents/com.wickedagile.wicked-crew.plist` (RunAtLoad,
+  KeepAlive), loaded into your login session. Restart it with
+  `launchctl kickstart -k gui/$(id -u)/com.wickedagile.wicked-crew`.
+- **Linux:** a systemd user unit at `~/.config/systemd/user/wicked-crew.service` (Restart=on-failure).
+  Run `loginctl enable-linger $USER` so it starts at boot without a login session.
+- **Windows:** not automated; `--install-service` prints a Task Scheduler recipe.
+
+The service manager starts the daemon with an almost empty environment, so the install captures
+`PATH`, `HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `CREW_PORT`, `GH_ACCOUNT` and every `WICKED_*`
+variable from the shell that runs it. Run the install again after you change them.
+`CLAUDE_CONFIG_DIR` matters: the daemon fences its workers away from a non-default Claude config
+directory only when it knows that directory. Tokens (`GH_TOKEN` and any variable whose name carries
+TOKEN, SECRET, PASS, KEY, CREDENTIAL, BEARER, COOKIE or SESSION) are never written into the unit file. The install names them, and the
+deliver phase then pushes with gh's keyring login, checked against `GH_ACCOUNT`. The daemon logs to
+`<state home>/daemon-stdout.log`. The install refuses while a hand-started daemon holds the port.
+
+`wicked-crew status` with no daemon answering exits 1 with one line: start it with
+`wicked-crew serve` (or `--install-service`), or, when the service is installed, read its log.
+
 The CLI surface is `wicked-crew serve|start|resume|gate|status|mcp|governance` — `mcp` runs a
 stdio MCP server (crew-as-a-tool for coding agents), `gate` answers a pending human gate from the
 terminal, `governance replay <outbox>` drains governance events the engine could not store.

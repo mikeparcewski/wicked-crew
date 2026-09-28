@@ -32,6 +32,17 @@ import { versionLines } from '../core/versions.js';
 import { DAEMON_PORT_ENV, DEFAULT_DAEMON_PORT, daemonPortSource, resolveDaemonPort } from './port.js';
 import { INTERACTIVE_DEFAULT_RANGE, INTERACTIVE_SPEC_ENV, resolveInteractiveSpec } from '../interactive/bridge-pool.js';
 import { defaultInteractiveRoot, legacyHomeDocsNotice, recorderBrowsersPath } from '../interactive/bridge-root.js';
+import {
+  INSTALL_SERVICE_FLAG,
+  UNINSTALL_SERVICE_FLAG,
+  installService,
+  installedService,
+  listeningPid,
+  runCommand,
+  servicePlatform,
+  uninstallService,
+} from './service.js';
+import { homedir } from 'node:os';
 
 const [, , command, ...argv] = process.argv;
 
@@ -507,9 +518,19 @@ async function main(): Promise<void> {
         '  --no-interactive-edit-events    Disable interactive edit answering (env: WICKED_INTERACTIVE_EDIT_EVENTS=0)\n' +
         '  --no-interactive-chat-events    Disable interactive chat answering (env: WICKED_INTERACTIVE_CHAT_EVENTS=0)\n' +
         '  --no-interactive-demo-events    Disable interactive demo answering (env: WICKED_INTERACTIVE_DEMO_EVENTS=0)\n' +
+        `  ${INSTALL_SERVICE_FLAG}               Start the daemon at login instead of now (crew#551): write and load a\n` +
+        '                                  per-user LaunchAgent (macOS) or systemd user unit (Linux) that runs\n' +
+        '                                  `wicked-crew serve` with the other options given here. The service keeps\n' +
+        '                                  PATH, HOME, CLAUDE_CONFIG_DIR, CODEX_HOME, CREW_PORT, GH_ACCOUNT and WICKED_*\n' +
+        '                                  from this shell (never a token); log: <state home>/daemon-stdout.log.\n' +
+        '                                  Refuses while a hand-started daemon holds the port.\n' +
+        `  ${UNINSTALL_SERVICE_FLAG}             Stop and remove that login service\n` +
         '  -h, --help                      Print this help'
       );
       process.exit(0);
+    }
+    if (hasFlag(argv, INSTALL_SERVICE_FLAG) || hasFlag(argv, UNINSTALL_SERVICE_FLAG)) {
+      process.exit(await runServiceVerb(argv));
     }
     const opts = parseBootstrap(argv);
     // Boot sweep (crew#285): bridges orphaned by a PRIOR daemon generation are
@@ -651,7 +672,8 @@ const STATUS_USAGE = [
   'Usage: wicked-crew status [--run <id>] [--port <n>]',
   '',
   'Print the runs (or one run) of the daemon on this host as JSON. Exit 1 with a one-line remedy',
-  'when no daemon answers, exit 1 on a non-2xx answer.',
+  'when no daemon answers (with the login service installed, the remedy names its log), exit 1 on a',
+  'non-2xx answer.',
   '',
   'Options:',
   '  --run <id>       one run (alias: --session <id>); default: the run list',
@@ -671,9 +693,50 @@ const GATE_USAGE = [
   '  -h, --help       this text',
 ].join('\n');
 
-/** The one remedy line for "no daemon answering" — operator terms, no stack. */
+/** The one remedy line for "no daemon answering" — operator terms, no stack. With the login service
+ *  installed the remedy is its log, not a second hand-started daemon. */
 function noDaemonRemedy(port: number): string {
-  return `wicked-crew: no daemon answering on 127.0.0.1:${port} — start it with \`wicked-crew serve\` (crew#551)`;
+  const head = `wicked-crew: no daemon answering on 127.0.0.1:${port}`;
+  const service = installedService();
+  if (service !== null) {
+    return `${head} — the login service is installed but the daemon is not up; read ${service.logPath ?? service.unitPath}`;
+  }
+  return `${head} — start it with \`wicked-crew serve\` (or at every login: \`wicked-crew serve ${INSTALL_SERVICE_FLAG}\`)`;
+}
+
+/** `serve --install-service` / `--uninstall-service` (crew#551): exit code of the verb. */
+async function runServiceVerb(args: string[]): Promise<number> {
+  const deps = {
+    platform: servicePlatform(),
+    home: homedir(),
+    uid: process.getuid?.() ?? 0,
+    run: runCommand,
+    log: (line: string) => console.log(line),
+  };
+  if (hasFlag(args, UNINSTALL_SERVICE_FLAG)) return uninstallService(deps);
+  const port = resolveDaemonPort(args);
+  const db = flag(args, '--db');
+  return installService(
+    {
+      cliPath: process.argv[1] ?? '',
+      nodePath: process.execPath,
+      serveArgs: args,
+      env: process.env,
+      stateHome: db !== undefined ? stateHomeOfDb(db) : crewStateHome(),
+      port,
+    },
+    {
+      ...deps,
+      portHolder: async () => {
+        try {
+          await fetch(`http://127.0.0.1:${port}/api/v1/health`, { signal: AbortSignal.timeout(3000) });
+        } catch (err) {
+          if (isConnectionFailure(err)) return null;
+        }
+        return { pid: listeningPid(port) };
+      },
+    },
+  );
 }
 
 export { withBearerHeader } from './bearer.js';
