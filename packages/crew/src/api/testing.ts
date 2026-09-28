@@ -56,6 +56,9 @@ import type { MembershipIndex } from '../projects/membership-index.js';
 
 const V = API_PREFIX;
 
+/** How long `POST /testing/recon` waits on a fan's engine launch before it acks 202 (crew#471). */
+export const RECON_ACK_WAIT_MS = 2_000;
+
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -380,10 +383,11 @@ export function registerTestingRoutes(
         manifest: {
           requestType: 'TestingReconBody',
           responseType: 'TestingReconResponse',
+          // 202: a fan the engine is still launching (crew#471 — the node ids are final);
           // 404: unknown projectId; 409: archived project / engine busy; 500: a launch failed
           // AFTER earlier fanned runs started (the body names them — nothing is hidden);
           // 501: projectId on an addon without the project bindings.
-          statusCodes: [201, 400, 404, 409, 500, 501],
+          statusCodes: [201, 202, 400, 404, 409, 500, 501],
         },
       },
     },
@@ -455,68 +459,104 @@ export function registerTestingRoutes(
           clis: deps.roster(),
           ungated: b.ungated === true,
         });
-        try {
-          await adapter.launchCampaign(built.def);
-        } catch (err) {
+        // crew#471: the engine plans every node's units inside `launchCampaign`, on its one actor,
+        // so a detailed brief over two large repos held this POST for minutes and the client gave
+        // up at 30 s with no run ids. The launch is waited on for RECON_ACK_WAIT_MS only: a quick
+        // answer (or a quick refusal) keeps today's 201 / 409 / 500; a launch still planning past
+        // that is ACKED with 202 and `launching: true` — the node run ids are deterministic, so
+        // the caller can follow them now — and its bookkeeping (trail entries, project filing)
+        // lands when the engine answers. A late refusal is written to the trail
+        // (`campaign.launch_failed`) and the log, never dropped.
+        const launch = adapter.launchCampaign(built.def);
+        const early = await Promise.race([
+          launch.then(
+            () => ({ settled: true as const, error: null }),
+            (err: unknown) => ({ settled: true as const, error: err }),
+          ),
+          new Promise<{ settled: false }>((resolve) => {
+            setTimeout(() => resolve({ settled: false }), RECON_ACK_WAIT_MS).unref();
+          }),
+        ]);
+        if (early.settled && early.error !== null) {
           // Nothing launched (the engine validates-then-persists the def as one unit): answer
           // with the campaign-route posture — 409 for a state conflict, else 500 (the def is
           // DAEMON-built from already-validated inputs, so a reject here is ours, not "fix
           // your request").
-          const msg = message(err);
+          const msg = message(early.error);
           const busy = /already exists|already launched|busy|in flight/i.test(msg);
           return reply.code(busy ? 409 : 500).send({ error: msg });
         }
-        audit.record('campaign.launched', actorOf(req), {
-          detail: {
-            campaignId: campaign,
-            nodes: built.def.nodes.length,
-            edges: 0,
-            policy: built.def.policy,
-            maxConcurrency: built.def.max_concurrency,
-            recon: true,
-            ...gateDetail,
-            ...(b.projectId !== undefined ? { projectId: b.projectId } : {}),
-            repoRefs: scope.repos.map((r) => r.id),
-          },
-        });
-        // Campaign nodes are UNFILED at the engine seam (`RunSpec::to_launch_spec` pins
-        // `project_id: None` — filing rides the daemon, per the engine's own doc), so a
-        // projectId recon files each sibling here: the membership row via the projects surface,
-        // then the same post-commit index/event half `POST /runs` performs. The node run ids
-        // are deterministic (`{campaign}:{node}:a0`), so the rows land before any run finishes.
-        let projectAttachError: string | undefined;
-        for (const [i, runId] of built.runIds.entries()) {
-          if (b.projectId !== undefined) {
-            try {
-              const { member } = await adapter.projectMemberAttach(
-                b.projectId,
-                'crew.run',
-                runId,
-                { campaign, recon: true },
-                actorOf(req).id,
-              );
-              fileIntoProject(runId, member.attached_at);
-            } catch (err) {
-              // The campaign is LIVE — failing the request now would report a launch that
-              // happened as one that did not. Name the filing gap instead (the chats-route
-              // idiom): the operator can re-attach via POST /projects/:id/members.
-              projectAttachError ??= message(err);
-              req.log.warn({ runId, projectId: b.projectId }, `recon run filing failed: ${message(err)}`);
+        /** Everything that follows a launch the engine accepted; answers the filing gap, if any. */
+        const afterLaunch = async (): Promise<string | undefined> => {
+          audit.record('campaign.launched', actorOf(req), {
+            detail: {
+              campaignId: campaign,
+              nodes: built.def.nodes.length,
+              edges: 0,
+              policy: built.def.policy,
+              maxConcurrency: built.def.max_concurrency,
+              recon: true,
+              ...gateDetail,
+              ...(b.projectId !== undefined ? { projectId: b.projectId } : {}),
+              repoRefs: scope.repos.map((r) => r.id),
+            },
+          });
+          // Campaign nodes are UNFILED at the engine seam (`RunSpec::to_launch_spec` pins
+          // `project_id: None` — filing rides the daemon, per the engine's own doc), so a
+          // projectId recon files each sibling here: the membership row via the projects surface,
+          // then the same post-commit index/event half `POST /runs` performs. The node run ids
+          // are deterministic (`{campaign}:{node}:a0`), so the rows land before any run finishes.
+          let projectAttachError: string | undefined;
+          for (const [i, runId] of built.runIds.entries()) {
+            if (b.projectId !== undefined) {
+              try {
+                const { member } = await adapter.projectMemberAttach(
+                  b.projectId,
+                  'crew.run',
+                  runId,
+                  { campaign, recon: true },
+                  actorOf(req).id,
+                );
+                fileIntoProject(runId, member.attached_at);
+              } catch (err) {
+                // The campaign is LIVE — failing the request now would report a launch that
+                // happened as one that did not. Name the filing gap instead (the chats-route
+                // idiom): the operator can re-attach via POST /projects/:id/members.
+                projectAttachError ??= message(err);
+                req.log.warn({ runId, projectId: b.projectId }, `recon run filing failed: ${message(err)}`);
+              }
             }
+            // The same trail entry POST /runs writes — each node IS a run launch this route
+            // caused, findable by the same `?action=run.launched` query, grouped by the label — and
+            // the shared helper stamps `created_at` from the SAME durable ts (Copilot #466).
+            recordRunLaunched(audit, deps.runTimingIndex, actorOf(req), runId, {
+              campaign,
+              recon: true,
+              ...gateDetail,
+              repoRef: scope.repos[i]!.id,
+              ...(b.projectId !== undefined ? { projectId: b.projectId } : {}),
+              ...(b.channel !== undefined ? { channel: b.channel } : {}),
+              ...(b.actor !== undefined ? { actor: b.actor } : {}),
+            });
           }
-          // The same trail entry POST /runs writes — each node IS a run launch this route
-          // caused, findable by the same `?action=run.launched` query, grouped by the label — and
-          // the shared helper stamps `created_at` from the SAME durable ts (Copilot #466).
-          recordRunLaunched(audit, deps.runTimingIndex, actorOf(req), runId, {
+          return projectAttachError;
+        };
+        if (!early.settled) {
+          void launch.then(afterLaunch, (err: unknown) => {
+            audit.record('campaign.launch_failed', actorOf(req), {
+              detail: { campaignId: campaign, recon: true, error: message(err), runIds: built.runIds },
+            });
+            req.log.error({ campaign }, `recon campaign launch failed after the ack: ${message(err)}`);
+          });
+          return reply.code(202).send({
+            runId: built.runIds[0]!,
+            runIds: built.runIds,
             campaign,
-            recon: true,
-            ...gateDetail,
-            repoRef: scope.repos[i]!.id,
-            ...(b.projectId !== undefined ? { projectId: b.projectId } : {}),
-            ...(b.channel !== undefined ? { channel: b.channel } : {}),
-            ...(b.actor !== undefined ? { actor: b.actor } : {}),
+            campaignRegistered: true,
+            launching: true,
           });
         }
+        const projectAttachError = await afterLaunch();
         return reply.code(201).send({
           runId: built.runIds[0]!,
           runIds: built.runIds,

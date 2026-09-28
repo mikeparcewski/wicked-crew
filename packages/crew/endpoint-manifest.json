@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.59.0",
+  "apiTypesVersion": "0.60.0",
   "endpoints": [
     {
       "method": "GET",
@@ -490,6 +490,19 @@
     },
     {
       "method": "POST",
+      "path": "/api/v1/memory/retire-item",
+      "requestType": "RetireMemoryItemBody",
+      "responseType": "RetireMemoryResponse",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        501,
+        502
+      ]
+    },
+    {
+      "method": "POST",
       "path": "/api/v1/open",
       "requestType": null,
       "responseType": null,
@@ -937,7 +950,7 @@
       "method": "POST",
       "path": "/api/v1/runs",
       "requestType": "LaunchRunBody",
-      "responseType": "{ runId: string }",
+      "responseType": "LaunchRunResponse",
       "statusCodes": [
         201,
         400,
@@ -1475,6 +1488,7 @@
       "responseType": "TestingReconResponse",
       "statusCodes": [
         201,
+        202,
         400,
         404,
         409,

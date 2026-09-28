@@ -8,6 +8,7 @@ import { engineBusHandoff, type BusUnavailable } from '../core/engine-bus.js';
 import { ensureBridgesOnPath, ensurePiLauncherCommand, PI_ACP_COMMAND_ENV } from '../core/bridge-path.js';
 import { bridgeReaper, reapOrphansAtBoot, startOrphanSweep } from '../core/bridge-reaper.js';
 import { daemonSignalLog } from '../core/daemon-signal-log.js';
+import { shutdownWithDeadline } from '../core/shutdown.js';
 import { startServer } from '../api/server.js';
 import { resolveAuthMode } from '../api/auth.js';
 import { crewStateHome, setCrewStateHome, stateHomeOfDb } from '../projects/state-home.js';
@@ -433,7 +434,7 @@ function installShutdownHandlers(): void {
   const shutdown = (): void => {
     if (shuttingDown) return;
     shuttingDown = true;
-    void (async () => {
+    shutdownWithDeadline(async () => {
       // Reap bridge children BEFORE this process goes away — the ACP bridges (crew#285: the
       // engine's in-memory kill handles die with the daemon) and the interactive bridge trees
       // the pool spawned (F-W1-103: the npm wrapper AND its server child). This is the last
@@ -452,8 +453,7 @@ function installShutdownHandlers(): void {
       } catch {
         /* already closed */
       }
-      process.exit(0);
-    })();
+    }, (code) => process.exit(code));
   };
   process.on('SIGTERM', () => {
     const at = Date.now();

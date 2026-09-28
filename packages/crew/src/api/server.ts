@@ -72,6 +72,7 @@ import { sweepDeliveredWorktree } from './worktree-sweep.js';
 import { installEndpointManifestHook } from './endpoint-manifest.js';
 import { WorkerStallWatchdog } from './stall-watchdog.js';
 import { RunLivenessSampler } from './run-liveness.js';
+import { resumeRunningCampaigns } from '../campaign/boot-resume.js';
 import { StandingOrderStore } from '../standing-orders/store.js';
 import { StandingOrderEvaluator, type GateFact } from '../standing-orders/evaluator.js';
 import { registerStandingOrderRoutes } from '../standing-orders/routes.js';
@@ -1648,6 +1649,9 @@ export async function createServer(
   // rows at boot. It also covers any gate that opened before the evaluator existed (the live
   // subscription above reads it late-bound); every later gate arrives as a live frame.
   void standingOrderEvaluator.sweep().catch((err) => app.log.warn(`[standing-orders] boot sweep failed: ${String(err)}`));
+  // crew#471: a campaign the previous daemon left `running` is crash-resumed by the engine (its
+  // node runs froze with that process) — asked once, at boot, never for a paused one.
+  void resumeRunningCampaigns(adapter, (m) => app.log.warn(m));
 
   // The UI-emittable direction of the interactive seam. Registered unconditionally (a null relay
   // answers 503, not 404) and BEFORE the static/SPA fallback below, like every other API route.

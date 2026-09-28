@@ -1,4 +1,4 @@
-import type { FastifyInstance, FastifyReply } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { busSeamsOffWarning, busUnavailableWarning } from '../core/bus-notice.js';
 import { PlanSchema, toLaunchPlan } from './plan-schema.js';
 import type { RecordedStallFrame } from './stall-frame-index.js';
@@ -103,7 +103,15 @@ import type { EvalRunStore } from './eval-store.js';
 import { noEligibleSeatBody, parseNoEligibleSeat } from '../core/engine-roster.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
 import { boundOrigin, InteractiveBridgePool } from '../interactive/bridge-pool.js';
-import { composeDeliverText, factsFromRun, framedDeliverText, runUrlFor } from '../core/deliver-text.js';
+import {
+  composeDeliverText,
+  configuredPublicOrigin,
+  extractFollowUps,
+  factsFromRun,
+  FOLLOW_UPS_MAX,
+  framedDeliverText,
+  runUrlFor,
+} from '../core/deliver-text.js';
 import { resolvePullRequest as resolvePullRequestViaGh, type PullRequestResolution } from '../core/deliver.js';
 import type { DocGroundingStore } from '../interactive/doc-grounding.js';
 import { registerInteractiveProxy } from '../interactive/proxy-routes.js';
@@ -112,6 +120,7 @@ import { registerInteractiveDocList } from '../interactive/doc-list-routes.js';
 import type { DocLedgerSweep } from '../interactive/doc-ledger-sweep.js';
 import { MembershipIndex } from '../projects/membership-index.js';
 import { MEMBERSHIP_ATTACHED, membershipAttachedKey } from '../projects/events.js';
+import { resolveLinkedIssues, type LinkedIssue, type LinkedIssuesResult } from '../core/linked-issues.js';
 import { AuditLog } from './audit.js';
 import {
   AcpFoldCache,
@@ -157,6 +166,11 @@ export { API_PREFIX } from './api-prefix.js';
 import { API_PREFIX } from './api-prefix.js';
 
 const V = API_PREFIX;
+
+/** How long `GET /health` waits on the engine's actor before answering `ping: "busy"` (crew#471). */
+export const HEALTH_PING_WAIT_MS = 1_000;
+/** `HealthResponse.ping` while the engine's actor is occupied: the daemon serves, the engine is busy. */
+export const ENGINE_BUSY_PING = 'busy';
 
 // Daemon version reported by /health — read from package.json so it never drifts
 // from the shipped version across releases. Resolves the package root from the
@@ -454,6 +468,12 @@ const RegisterRepoSchema = z
     // defaults to ~/.wicked/repos/<name>.
     rootPath: z.string().optional(),
     gitUrl: z.string().optional(),
+    /** crew#496: the project the register form had selected — the onboarding run is filed there
+     *  (membership `crew.run`), not left unfiled while the repo joins the project. */
+    projectId: z.string().min(1).max(128).optional(),
+    /** crew#496 / crew#632: the launch surface and caller, recorded on the run's launch entry. */
+    channel: z.enum(['studio', 'cli', 'api']).optional(),
+    actor: z.string().min(1).max(256).optional(),
   })
   .strict()
   .refine(
@@ -466,6 +486,15 @@ const RegisterRepoSchema = z
     },
     { message: 'Provide gitUrl (remote clone) or rootPath (local registration), or both.' },
   );
+
+/** `POST /repos/:id/onboard`'s optional body (crew#496): where to file the run, and who asked. */
+const OnboardBodySchema = z
+  .object({
+    projectId: z.string().min(1).max(128).optional(),
+    channel: z.enum(['studio', 'cli', 'api']).optional(),
+    actor: z.string().min(1).max(256).optional(),
+  })
+  .strict();
 
 /**
  * The launch body. Every field but `problem` is optional, which is what made stripping dangerous:
@@ -667,6 +696,16 @@ export const RetireMemorySchema = z.object({
   scope_prefix: z.string(),
 }).strict();
 
+/** `POST /memory/retire-item` body (studio#206): ONE memory, by its `memory_id` from `GET /memory`.
+ *  `.strict()`: a stray `scope_prefix` is a 400, never read as a wider erase than one row. */
+export const RetireMemoryItemSchema = z.object({
+  memory_id: z.string().min(1).max(512),
+}).strict();
+
+/** The error an estate from before wicked-estate#188 answers to `memory.erase {id}`: it knows only the
+ *  subtree erase, so it refuses the call (deleting nothing) for want of a `scope_prefix`. */
+const ESTATE_NO_ERASE_BY_ID = /scope_prefix \(non-empty\) required/i;
+
 /**
  * A SKIN-OWNED settings key (crew#323): one lowercase segment under the `studio.` namespace,
  * e.g. `studio.appearance`, `studio.notifications`. The daemon never interprets these values —
@@ -743,6 +782,9 @@ export interface RuntimeDeps {
   /** DES-L9: how `revisesPr` is resolved to a PR head branch (`gh pr view`, 5 s). Injectable so
    *  route tests answer without gh; production uses `core/deliver.ts::resolvePullRequest`. */
   resolvePullRequest?: (repoRoot: string, number: number) => Promise<PullRequestResolution>;
+  /** crew#627: how the issues a launch's intent links are read (`gh issue view`, 5 s each).
+   *  Injectable so route tests answer without gh; production uses `core/linked-issues.ts`. */
+  resolveLinkedIssues?: (problem: string, repoRoot: string | undefined, repoRef: string | undefined) => Promise<LinkedIssuesResult>;
   seatHealth?: SeatHealthTracker;
   /** wicked-studio#284: the stall watchdog's remembered frames for a run — merged into
    *  `GET /runs/:id/events` at serve time so a reloaded page sees the `workerStalled` /
@@ -1085,6 +1127,27 @@ export function registerRoutes(
     (await adapter.listRepos()).find((r) => r.id === repoRef)?.root_path;
   /** DES-L9: PR number → head branch, through `gh pr view` unless the runtime injected an answerer. */
   const resolvePullRequest = runtime.resolvePullRequest ?? resolvePullRequestViaGh;
+  /** crew#627: the intent's linked issues, read under the daemon's identity at launch. */
+  const readLinkedIssues = runtime.resolveLinkedIssues ?? ((p: string, root: string | undefined, ref: string | undefined) => resolveLinkedIssues(p, root, ref));
+  /** crew#550 P-7: the follow-ups the run's evaluator units flagged, read from their captured output.
+   *  A unit whose output cannot be read contributes nothing (the section then says what WAS read);
+   *  an adapter without transcripts (a directly-driven route set) reads as "not read" — absent. */
+  const evaluatorFollowUps = async (view: SessionView): Promise<string[] | undefined> => {
+    if (typeof adapter.workOutput !== 'function') return undefined;
+    const evaluators = view.units.filter((u) => u.role === 'evaluator').sort((a, b) => a.ord - b.ord);
+    const out: string[] = [];
+    for (const u of evaluators) {
+      let text: string | null = null;
+      try {
+        text = await adapter.workOutput(coreUnitId(view.session.id, u));
+      } catch {
+        text = null;
+      }
+      if (text === null) continue;
+      for (const x of extractFollowUps(text)) if (!out.includes(x)) out.push(x);
+    }
+    return out.slice(0, FOLLOW_UPS_MAX);
+  };
   // The run-DTO joins (DES-UX-001 §8.2/§8.3, DES-UX-002 §7.2): `project_id` from the membership
   // record — `null` = genuinely unfiled, so the field is ALWAYS present on served runs —
   // `retry_of` from the lineage index and `guidance` from the guidance index, each set only
@@ -1190,13 +1253,31 @@ export function registerRoutes(
   // still gets the ONE actor shape via this accessor.
   const actorOf = (req: { actor?: import('../core/types.js').Actor }) => req.actor ?? LOCAL_ACTOR;
   // Liveness — also proves the actor + event pump are up.
+  //
+  // crew#471: the engine's ping is a round trip through its single-writer actor, and a launch that
+  // plans many units holds that actor for minutes. Awaiting it made `/health` go dark exactly when
+  // an operator needed to know the daemon was up, and each waiting probe pinned a libuv worker
+  // thread the rest of the read path needs. So at most ONE ping is in flight (later probes join it)
+  // and `/health` waits for it at most HEALTH_PING_WAIT_MS: past that it answers `ping: "busy"` —
+  // the daemon serves, the engine is occupied.
+  let pingInFlight: Promise<string> | null = null;
+  const enginePing = (): Promise<string> => {
+    pingInFlight ??= adapter.ping().finally(() => {
+      pingInFlight = null;
+    });
+    let timer: NodeJS.Timeout | undefined;
+    const busy = new Promise<string>((resolve) => {
+      timer = setTimeout(() => resolve(ENGINE_BUSY_PING), HEALTH_PING_WAIT_MS);
+    });
+    return Promise.race([pingInFlight, busy]).finally(() => clearTimeout(timer));
+  };
   // `config.manifest` on the routes below (TH-11): the declaration channel the endpoint manifest
   // reads — type names bind to `wicked-crew-api-types` exports where one exists, structural
   // spellings where the contract has no name, statusCodes list every code the route answers on
   // purpose. Declared on the highest-traffic run-lifecycle routes first; the manifest records
   // null / [] for the rest ("where declared", never invented). See src/api/endpoint-manifest.ts.
   app.get(`${V}/health`, { config: { manifest: { statusCodes: [200] } } }, async () => {
-    const ping = await adapter.ping();
+    const ping = await enginePing();
     // F-E2E-030: what this deployment can keep. A composer reads `capabilities.deliverGate`
     // before it promises "pauses at the deliver gate"; a stub-driven route set without the
     // probe honestly reports no gate.
@@ -1660,30 +1741,66 @@ export function registerRoutes(
   // Registered repos → target-repo picker.
   app.get(`${V}/repos`, async () => ({ repos: await adapter.listRepos() }));
 
+  /** Filing for an onboarding run: what `POST /runs` does for a launch, for the runs `POST /repos`
+   *  and `POST /repos/:id/onboard` start (crew#496). The launch entry (`run.launched`, which dates
+   *  the run and names who started it) is always written; with a `projectId` the run joins that
+   *  project. The run is LIVE by then, so a filing failure is named in the answer, never a 4xx. */
+  const recordOnboardingLaunch = async (
+    req: FastifyRequest,
+    runId: string,
+    repoId: string,
+    opts: { projectId?: string | undefined; channel?: string | undefined; actor?: string | undefined },
+  ): Promise<string | undefined> => {
+    recordRunLaunched(audit, runTimingIndex, actorOf(req), runId, {
+      workflow: 'onboarding',
+      repoRef: repoId,
+      ...(opts.projectId !== undefined ? { projectId: opts.projectId } : {}),
+      ...(opts.channel !== undefined ? { channel: opts.channel } : {}),
+      ...(opts.actor !== undefined ? { actor: opts.actor } : {}),
+    });
+    if (opts.projectId === undefined) return undefined;
+    try {
+      const { member } = await adapter.projectMemberAttach(opts.projectId, 'crew.run', runId, { onboarding: true }, actorOf(req).id);
+      projects.index.set(runId, opts.projectId);
+      projects.bus?.emit(
+        MEMBERSHIP_ATTACHED,
+        { project_id: opts.projectId, member: { kind: 'crew.run', ref: runId }, actor: actorOf(req).id },
+        membershipAttachedKey(opts.projectId, 'crew.run', runId, member.attached_at),
+      );
+      return undefined;
+    } catch (err) {
+      req.log.warn({ runId, projectId: opts.projectId }, `onboarding run filing failed: ${message(err)}`);
+      return message(err);
+    }
+  };
+
   app.post(`${V}/repos`, async (req, reply) => {
     const parsed = RegisterRepoSchema.safeParse(req.body);
     if (!parsed.success) {
       return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
     }
-    const { name, rootPath, gitUrl } = parsed.data;
+    const { name, rootPath, gitUrl, projectId, channel, actor } = parsed.data;
+    let repo: RepoEntry | undefined;
+    let runId: string;
     try {
       if (gitUrl) {
         // Remote: clone to rootPath (if provided) or default ~/.wicked/repos/<name>,
         // register, and launch onboarding run.
-        const { repoId, runId } = await adapter.cloneAndRegisterRepo(name, gitUrl, rootPath);
+        const cloned = await adapter.cloneAndRegisterRepo(name, gitUrl, rootPath);
+        runId = cloned.runId;
         const repos = await adapter.listRepos();
-        const repo = repos.find((r) => r.id === repoId);
+        repo = repos.find((r) => r.id === cloned.repoId);
         if (!repo) return reply.code(500).send({ error: 'Repo registered but could not be retrieved' });
-        return reply.code(201).send({ repo, onboardRunId: runId });
       } else {
         // Local: register then launch onboarding run.
-        const repo = await adapter.registerRepo(name, rootPath!);
-        const runId = await adapter.launchOnboardingRun(repo.id, name);
-        return reply.code(201).send({ repo, onboardRunId: runId });
+        repo = await adapter.registerRepo(name, rootPath!);
+        runId = await adapter.launchOnboardingRun(repo.id, name);
       }
     } catch (err) {
       return reply.code(400).send({ error: message(err) });
     }
+    const projectAttachError = await recordOnboardingLaunch(req, runId, repo.id, { projectId, channel, actor });
+    return reply.code(201).send({ repo, onboardRunId: runId, ...(projectAttachError !== undefined ? { projectAttachError } : {}) });
   });
 
   // Return the onboarding run id for a repo (so the UI can navigate to it).
@@ -1699,12 +1816,16 @@ export function registerRoutes(
     const repos = await adapter.listRepos();
     const repo = repos.find((r) => r.id === id);
     if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
+    const body = OnboardBodySchema.safeParse(req.body ?? {});
+    if (!body.success) return reply.code(400).send(invalidBody(body.error, 'Invalid request body'));
+    let runId: string;
     try {
-      const runId = await adapter.launchOnboardingRun(repo.id, repo.name);
-      return reply.code(201).send({ runId });
+      runId = await adapter.launchOnboardingRun(repo.id, repo.name);
     } catch (err) {
       return reply.code(400).send({ error: message(err) });
     }
+    const projectAttachError = await recordOnboardingLaunch(req, runId, repo.id, body.data);
+    return reply.code(201).send({ runId, ...(projectAttachError !== undefined ? { projectAttachError } : {}) });
   });
 
   // Launch a run (replaces POST /sessions). `clisJson` defaults to the roster;
@@ -1715,7 +1836,7 @@ export function registerRoutes(
       config: {
         manifest: {
           requestType: 'LaunchRunBody',
-          responseType: '{ runId: string }',
+          responseType: 'LaunchRunResponse',
           // 404/409: unknown project / unknown campaignId (wicked-studio#27) /
           // archived-or-synthesized project + busy engine + the state-home blocker
           // (`state_home_unregistered`) + a roster with no eligible seat (`no_eligible_seat`,
@@ -1887,6 +2008,25 @@ export function registerRoutes(
         throw err;
       }
     }
+    // crew#627: a workflow run's intent may name its work only by issue ("fix #541"), and the
+    // worker cannot read GitHub. The daemon reads each linked issue now and appends its text to the
+    // problem, inside a marked block the deliver text takes back out. Workflow launches only: the
+    // free-text planner turns sentences into units, so issue text there would become work units.
+    let linkedIssues: LinkedIssue[] | undefined;
+    if (b.workflow !== undefined) {
+      // Best-effort by contract: reading issues never fails the launch it decorates. A resolver
+      // fault (the repo list unreadable, say) launches the run on its intent alone and is logged.
+      try {
+        const root = b.repoRef !== undefined ? await repoRootOf(b.repoRef) : undefined;
+        const linked = await readLinkedIssues(b.problem, root, b.repoRef);
+        if (linked.block !== null) {
+          input.problem = `${b.problem.trimEnd()}\n\n${linked.block}`;
+          linkedIssues = linked.issues;
+        }
+      } catch (err) {
+        req.log.warn(`linked-issue resolution failed; launching on the intent alone: ${message(err)}`);
+      }
+    }
     try {
       const runId = await adapter.launchRun(input);
       // crew#641/#642 (item 5): when a run is promoted from a chat, record how many seats
@@ -1944,6 +2084,8 @@ export function registerRoutes(
         // crew#632: launch surface and caller identity — human-readable provenance on the audit trail.
         ...(b.channel !== undefined ? { channel: b.channel } : {}),
         ...(b.actor !== undefined ? { actor: b.actor } : {}),
+        // crew#627: which linked issues the daemon read into the problem, and which it could not.
+        ...(linkedIssues !== undefined ? { linkedIssues } : {}),
       });
       // Stamp the index live so the field is served without waiting for a daemon restart.
       if (chatSeatCount !== undefined && chatGrounded !== undefined) {
@@ -1969,7 +2111,7 @@ export function registerRoutes(
       // crew#619: retain the chat transcript for the run's lifetime so Continue-in-Build prefill
       // is always reproducible even if the chat is idle-reclaimed before the run finishes.
       if (b.chatId !== undefined) runtime.linkChatRun?.(b.chatId, runId);
-      return reply.code(201).send({ runId });
+      return reply.code(201).send({ runId, ...(linkedIssues !== undefined ? { linkedIssues } : {}) });
     } catch (err) {
       const msg = message(err);
       // DES-TEAMING-002 T3: a plan on an engine without the plan approval gate is an "upgrade the
@@ -2167,12 +2309,13 @@ export function registerRoutes(
       const views = await adapter.sessionsDetail();
       const run = views.find((v) => v.session.id === id);
       if (!run) return reply.code(404).send({ error: 'Run not found' });
-      const origin = boundOrigin(app.server.address());
+      const followUps = await evaluatorFollowUps(run);
       // The run's preset or workflow NAME, as the engine recorded it (seam X2).
       const text = composeDeliverText(
-        factsFromRun(decorateRun(run), runUrlFor(origin, id), {
+        factsFromRun(decorateRun(run), runUrlFor(configuredPublicOrigin(), id), {
           workflowId: runIdentityOf(run).name,
           revisesPr: retryIndex.revisesPrFor(id) ?? null,
+          ...(followUps !== undefined ? { followUps } : {}),
         }),
       );
       return reply.type('text/plain; charset=utf-8').send(framedDeliverText(text));
@@ -2319,12 +2462,14 @@ export function registerRoutes(
               }
               revisesPr = { number: revising.number, headRef: again.pr.headRef, url: again.pr.url };
             }
+            const followUps = await evaluatorFollowUps(run);
             result = await deliverExec(workdir, s.problem ?? undefined, {
               runId: id,
               apiOrigin: origin,
-              facts: factsFromRun(run, runUrlFor(origin, id), {
+              facts: factsFromRun(run, runUrlFor(configuredPublicOrigin(), id), {
                 workflowId: workflowName,
                 revisesPr: revisesPr === null ? null : { number: revisesPr.number, url: revisesPr.url },
+                ...(followUps !== undefined ? { followUps } : {}),
               }),
               revisesPr,
             });
@@ -4950,10 +5095,12 @@ export function registerRoutes(
   //     applied HERE as post-filters over that complete set (see below) — filtering, not retrieval.
   //   • list returns { memory_id, scope, content, tier, facets, created_at }; facets ride through to
   //     MemoryItem.facets, powering the surface's facet filter.
-  //   • RETIRE is SUBTREE-scoped, never per-id. estate exposes NO per-memory delete: `memory.erase`
-  //     hard-deletes EVERY memory whose scope equals or descends from `scope_prefix`, and refuses an
-  //     empty prefix (a total-wipe guard). So retire takes a `scope_prefix` and reports how many
-  //     memories the subtree wipe removed — the UI must show the operator the subtree, not one row.
+  //   • RETIRE comes in two widths. `POST /memory/retire { scope_prefix }` is SUBTREE-scoped:
+  //     `memory.erase {scope_prefix}` hard-deletes EVERY memory whose scope equals or descends from
+  //     the prefix, and refuses an empty prefix (a total-wipe guard) — the UI must show the operator
+  //     the subtree. `POST /memory/retire-item { memory_id }` (studio#206) removes exactly ONE memory
+  //     through `memory.erase {id}` (wicked-estate#188); an older estate refuses that call without
+  //     deleting anything, and the route answers 501 naming the upgrade — never a subtree fallback.
 
   // GET /memory?query=&scope_prefix=&facets=<json>&limit= → memory.list + post-filter → { memories }.
   app.get(
@@ -5068,9 +5215,9 @@ export function registerRoutes(
     },
   );
 
-  // POST /memory/retire { scope_prefix } → memory.erase → { erased }. SUBTREE-scoped (no per-id
-  // delete in estate); an empty scope_prefix is refused at the route (a 400 BEFORE any spawn) — the
-  // same total-wipe guard estate enforces with -32602.
+  // POST /memory/retire { scope_prefix } → memory.erase → { erased }. SUBTREE-scoped (the per-item
+  // delete is /memory/retire-item below); an empty scope_prefix is refused at the route (a 400
+  // BEFORE any spawn) — the same total-wipe guard estate enforces with -32602.
   app.post(
     `${V}/memory/retire`,
     {
@@ -5091,7 +5238,7 @@ export function registerRoutes(
       if (scopePrefix === '') {
         return reply.code(400).send({
           error:
-            '`scope_prefix` must not be empty — memory.erase is subtree-scoped (no per-id delete) and refuses a total wipe',
+            '`scope_prefix` must not be empty — this retire is subtree-scoped and refuses a total wipe (one memory: POST /memory/retire-item)',
         });
       }
       try {
@@ -5104,6 +5251,55 @@ export function registerRoutes(
         const body: RetireMemoryResponse = { erased: deleted };
         return body;
       } catch (err) {
+        return estateUpstreamError(reply, err);
+      }
+    },
+  );
+
+  // POST /memory/retire-item { memory_id } → memory.erase { id } → { erased: 1 } (studio#206). Removes
+  // exactly ONE memory: the id is the only target sent, so no reading of it can widen to a subtree.
+  // 404 when estate holds no memory with that id (it erased 0). 501 when the estate predates
+  // wicked-estate#188: it refuses an id-only erase for want of `scope_prefix`, deleting nothing.
+  app.post(
+    `${V}/memory/retire-item`,
+    {
+      config: {
+        manifest: {
+          requestType: 'RetireMemoryItemBody',
+          responseType: 'RetireMemoryResponse',
+          statusCodes: [200, 400, 404, 501, 502],
+        },
+      },
+    },
+    async (req, reply) => {
+      const parsed = RetireMemoryItemSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return reply.code(400).send(invalidBody(parsed.error, 'Invalid retire request'));
+      }
+      const memoryId = parsed.data.memory_id.trim();
+      if (memoryId === '') return reply.code(400).send({ error: '`memory_id` must not be empty' });
+      try {
+        const raw = await estateTool('memory.erase', { id: memoryId });
+        const deleted =
+          typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>)['deleted_count'] : undefined;
+        if (typeof deleted !== 'number') {
+          throw new EstateMcpError('memory.erase returned an unexpected shape');
+        }
+        if (deleted === 0) return reply.code(404).send({ error: `no memory ${memoryId}` });
+        if (deleted !== 1) {
+          // An id names one memory; any other count is estate misbehaving, and it is reported as such.
+          return reply.code(502).send({ error: `memory.erase {id} removed ${deleted} memories, expected 1` });
+        }
+        const body: RetireMemoryResponse = { erased: 1 };
+        return body;
+      } catch (err) {
+        if (err instanceof EstateMcpError && err.code === -32602 && ESTATE_NO_ERASE_BY_ID.test(err.message)) {
+          return reply.code(501).send({
+            error:
+              'this wicked-estate cannot erase one memory by id (it needs wicked-estate#188); upgrade wicked-estate-mcp — nothing was deleted',
+            code: 'estate_upgrade_required',
+          });
+        }
         return estateUpstreamError(reply, err);
       }
     },

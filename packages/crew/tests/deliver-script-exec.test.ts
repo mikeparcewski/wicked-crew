@@ -19,7 +19,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { deliverPrScript, type DeliverScriptOptions } from '../src/core/deliver.js';
-import { composeDeliverText, deliverTitle, factsFromWorkflow, framedDeliverText } from '../src/core/deliver-text.js';
+import { commitSubject, composeDeliverText, deliverTitle, factsFromWorkflow, framedDeliverText } from '../src/core/deliver-text.js';
 
 const RUN_ID = '1bc72c20-0457-425f-b4cb-215a40e68e1e';
 
@@ -756,6 +756,28 @@ describe('deliver script — composed PR text (crew#524)', () => {
     expect(git(fx.origin, 'log', '-1', '--format=%b', `wicked/${RUN_ID}`)).toContain('Fixes #214');
   }, 60_000);
 
+  it('crew#550: a title past 72 characters keeps the whole PR title; the commit subject stops at 72 and the body opens with the full title', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'fix.ts'), 'export const fixed = true;\n');
+    const long = "Run failure card: headline truncated at '(Failed):' and 'sign a seat in' — the remedy line never renders";
+    expect(long.length).toBeGreaterThan(72);
+    const runText = framedDeliverText({ title: long, body: '## Intent\n\nfix issue #214\n\nFixes #214\n' });
+    const daemon = await fakeDaemon((id) => (id === RUN_ID ? { status: 200, body: runText } : null));
+    daemons.push(daemon);
+
+    const r = await runDeliver(fx, { intent: INTENT, script: { runId: RUN_ID, apiOrigin: daemon.origin } });
+
+    expect(r.status).toBe(0);
+    expect(r.pr!.title).toBe(long);
+    const subject = git(fx.origin, 'log', '-1', '--format=%s', `wicked/${RUN_ID}`).trim();
+    expect([...subject].length).toBeLessThanOrEqual(72);
+    expect(subject.endsWith('…')).toBe(true);
+    expect(long.startsWith(subject.slice(0, -1).trimEnd())).toBe(true);
+    const body = git(fx.origin, 'log', '-1', '--format=%b', `wicked/${RUN_ID}`);
+    expect(body.split('\n')[0]).toBe(long);
+    expect(body).toContain('Fixes #214');
+  }, 60_000);
+
   it('falls back to the launch-time text — and SAYS so — when the daemon does not know the run', async () => {
     const fx = fixture();
     writeFileSync(join(fx.workdir, 'fix.ts'), 'export const fixed = true;\n');
@@ -780,15 +802,21 @@ describe('deliver script — composed PR text (crew#524)', () => {
     // BC-72: the `bug` workflow's conventional prefix rides the fallback title too.
     expect(r.pr!.title).toBe(deliverTitle(INTENT, RUN_ID, 'bug'));
     expect(r.pr!.title.startsWith('fix: ')).toBe(true);
-    expect(r.pr!.title.length).toBeLessThanOrEqual(72);
-    expect(r.pr!.title.endsWith('…')).toBe(true); // word-boundary cut, never `…aga`
+    // crew#550 P-1: the PR title runs to GitHub's 256 — this one fits whole; only the commit subject is cut.
+    expect(r.pr!.title.length).toBeLessThanOrEqual(256);
+    expect(r.pr!.title.endsWith('…')).toBe(false);
     expect(r.pr!.body).toBe(`${expected.body}\n`);
     expect(r.pr!.body).toContain('Fixes #214');
     expect(r.pr!.body).toContain('Refs: #211'); // `wicked-studio#211` on a wicked-studio delivery (W3-K2)
     expect(r.pr!.body).toContain(`- Run: [\`${RUN_ID}\`](${daemon.origin}/runs/${RUN_ID})`);
     expect(r.pr!.body).toContain('workflow `bug` · repo `wicked-studio`');
     expect(r.pr!.body).toContain('Not available at composition time');
-    expect(git(fx.origin, 'log', '-1', '--format=%s', `wicked/${RUN_ID}`).trim()).toBe(expected.title);
+    // The commit subject is the composed 72-column cut (word boundary, never `…aga`), the body the full title.
+    const subject = commitSubject(expected.title);
+    expect(subject.length).toBeLessThanOrEqual(72);
+    expect(subject.endsWith('…')).toBe(true);
+    expect(git(fx.origin, 'log', '-1', '--format=%s', `wicked/${RUN_ID}`).trim()).toBe(subject);
+    expect(git(fx.origin, 'log', '-1', '--format=%b', `wicked/${RUN_ID}`).split('\n')[0]).toBe(expected.title);
   }, 60_000);
 
   it('REJECTS a 200 that is not framed as title / blank / body and falls back, saying so (Copilot on #525)', async () => {
@@ -850,15 +878,18 @@ describe('deliver script — composed PR text (crew#524)', () => {
 
     expect(r.status).toBe(0);
     expect(existsSync(marker)).toBe(false); // nothing in the intent ran
-    // The title is the first line as plain words, cut at a word boundary (≤ 72, one line, code
+    // The title is the first line as plain words, cut at a word boundary (≤ 256, one line, code
     // markers stripped) — nothing in it was expanded. WHERE the cut lands depends on the length of
     // the temp path (short `/tmp/…` on Linux, long `/var/folders/…` on macOS), so the composer is
     // the oracle, not a literal.
     expect(r.pr!.title).toBe(deliverTitle(hostile, RUN_ID));
     expect(r.pr!.title.startsWith("x'; touch")).toBe(true);
-    expect(r.pr!.title.endsWith('…')).toBe(true);
-    expect(r.pr!.title.length).toBeLessThanOrEqual(72);
+    expect(r.pr!.title.length).toBeLessThanOrEqual(256); // crew#550: GitHub's limit, not git's 72
     expect(r.pr!.title).not.toContain('\n');
+    // The commit subject is still ≤ 72 and still nothing but text.
+    const subject = git(fx.origin, 'log', '-1', '--format=%s', `wicked/${RUN_ID}`).trim();
+    expect(subject).toBe(commitSubject(r.pr!.title));
+    expect([...subject].length).toBeLessThanOrEqual(72);
     expect(r.pr!.title).not.toContain('`');
     expect(r.pr!.body).toContain(`touch ${marker}`); // the intent rides as TEXT, verbatim
     expect(r.pr!.body).toContain('$(touch'); // unexpanded

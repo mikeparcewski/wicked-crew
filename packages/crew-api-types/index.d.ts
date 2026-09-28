@@ -184,6 +184,8 @@ export type RoutingInfo =
 export interface HealthResponse {
   status: string;
   version: string;
+  /** The engine actor's answer (`"ok"`), or `"busy"` when the actor did not answer within ~1 s
+   *  (crew#471): the daemon serves while the engine is occupied — a large launch is planning. */
   ping: string;
   capabilities?: HealthCapabilities;
   /**
@@ -3516,6 +3518,14 @@ export interface TestingReconResponse {
   /** Present only when the fan was campaign-registered with a `projectId` and filing a sibling
    *  into the project failed — the runs are LIVE; re-attach via POST /projects/:id/members. */
   projectAttachError?: string;
+  /**
+   * `true` on a **202**: the engine was still launching the fan when the daemon answered (crew#471 —
+   * it plans every node's units before it replies, which held the POST for minutes). The `runIds`
+   * are final (deterministic node ids) and can be followed now; the trail entries and project
+   * filing land when the engine answers, and a late refusal is audited as `campaign.launch_failed`.
+   * Absent on a 201.
+   */
+  launching?: true;
 }
 
 // ── The governed test-authoring launch (wave 6; api-types 0.36.0) ──────────────────────────────
@@ -3814,6 +3824,29 @@ export interface LaunchRunBody {
    * guard as `channel` above.
    */
   actor?: string;
+}
+
+/**
+ * One issue a launch's intent linked (`#N`, `owner/repo#N`, an issue URL) and whether the daemon
+ * could read it (crew#627, additive). A governed worker cannot read GitHub, so for a workflow launch
+ * the daemon reads each linked issue under its own identity (`gh issue view`, at most 5) and appends
+ * the title, state, body and comments to the problem the engine plans from, inside a marked block.
+ * `resolved: false` names why (`error`) — shown, never skipped.
+ */
+export interface LinkedIssue {
+  ref: string;
+  resolved: boolean;
+  /** Present when `resolved`. */
+  title?: string;
+  /** Present when not `resolved`: why, in one line. */
+  error?: string;
+}
+
+/** The `POST /runs` 201 body. `linkedIssues` (crew#627, additive) is present when the intent of a
+ *  workflow launch named at least one issue; absent otherwise and on an older daemon. */
+export interface LaunchRunResponse {
+  runId: string;
+  linkedIssues?: LinkedIssue[];
 }
 
 /**
@@ -6227,16 +6260,26 @@ export interface MemoryCoverageResponse {
 }
 
 /**
- * `POST /memory/retire` body. Retire is SUBTREE-scoped, never per-id: estate `memory.erase`
- * hard-deletes EVERY memory whose scope equals or descends from `scope_prefix`. `scope_prefix` is
- * required and must be non-empty (estate refuses a total wipe) — the surface must show the operator
- * the whole subtree it will remove, not a single row.
+ * `POST /memory/retire` body. This retire is SUBTREE-scoped: estate `memory.erase` hard-deletes
+ * EVERY memory whose scope equals or descends from `scope_prefix`. `scope_prefix` is required and
+ * must be non-empty (estate refuses a total wipe) — the surface must show the operator the whole
+ * subtree it will remove. To remove ONE row, use {@link RetireMemoryItemBody}.
  */
 export interface RetireMemoryBody {
   scope_prefix: string;
 }
 
-/** `POST /memory/retire` → 200. The number of memories the subtree wipe deleted. */
+/**
+ * `POST /memory/retire-item` body (studio#206; api-types 0.60.0): exactly ONE memory, by the
+ * `memory_id` `GET /memory` listed. 404 when no memory has that id; 501 `estate_upgrade_required`
+ * when the estate predates erase-by-id (wicked-estate#188) — nothing is deleted then.
+ */
+export interface RetireMemoryItemBody {
+  memory_id: string;
+}
+
+/** `POST /memory/retire` / `POST /memory/retire-item` → 200. How many memories were deleted
+ *  (always 1 for `retire-item`). */
 export interface RetireMemoryResponse {
   erased: number;
 }
