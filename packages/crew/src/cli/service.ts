@@ -21,6 +21,8 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, unlinkSync, writeFil
 import { homedir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 
+import { childEnvWithBootEstateDb } from '../core/governance-store.js';
+
 export const SERVICE_LABEL = 'com.wickedagile.wicked-crew';
 export const SYSTEMD_UNIT_NAME = 'wicked-crew.service';
 export const INSTALL_SERVICE_FLAG = '--install-service';
@@ -56,6 +58,8 @@ const ENV_ALLOW = new Set([
   'GH_ACCOUNT',
 ]);
 const SECRET_NAME = /TOKEN|SECRET|PASS|KEY|CREDENTIAL|BEARER|COOKIE|SESSION/i;
+/** A value carrying a credential in URL userinfo (`postgres://user:pass@host/db`). */
+const SECRET_VALUE = /^[a-z][a-z0-9+.-]*:\/\/[^/@\s]*:[^/@\s]*@/i;
 
 export interface CapturedEnv {
   env: Record<string, string>;
@@ -71,7 +75,7 @@ export function captureServiceEnv(source: NodeJS.ProcessEnv = process.env): Capt
     const value = source[name];
     if (value === undefined) continue;
     const wanted = ENV_ALLOW.has(name) || name.startsWith('WICKED_');
-    if (SECRET_NAME.test(name)) {
+    if (SECRET_NAME.test(name) || (wanted && SECRET_VALUE.test(value))) {
       if (wanted || name === 'GH_TOKEN' || name === 'GITHUB_TOKEN') omitted.push(name);
       continue;
     }
@@ -208,7 +212,7 @@ export interface CommandResult {
 export type CommandRunner = (cmd: string, args: string[]) => CommandResult;
 
 export const runCommand: CommandRunner = (cmd, args) => {
-  const r = spawnSync(cmd, args, { encoding: 'utf8' });
+  const r = spawnSync(cmd, args, { encoding: 'utf8', env: childEnvWithBootEstateDb(process.env) });
   return { status: r.error ? 127 : r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? (r.error?.message ?? '') };
 };
 
@@ -334,8 +338,10 @@ export async function installService(input: InstallInput, deps: ServiceDeps): Pr
   deps.log(`  env:  ${Object.keys(env).join(', ') || '(none)'}`);
   if (omitted.length > 0) {
     deps.log(
-      `  not written to the unit (secret-shaped): ${omitted.join(', ')} — the service uses the gh keyring login` +
-        (env['GH_ACCOUNT'] !== undefined ? ' checked against GH_ACCOUNT' : ''),
+      `  not written to the unit (secret-shaped): ${omitted.join(', ')} — the service runs without them` +
+        (omitted.includes('GH_TOKEN')
+          ? `; the deliver phase pushes with gh's keyring login${env['GH_ACCOUNT'] !== undefined ? ', checked against GH_ACCOUNT' : ''}`
+          : ''),
     );
   }
   if (deps.platform === 'linux') {

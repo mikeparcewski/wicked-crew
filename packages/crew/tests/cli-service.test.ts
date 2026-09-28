@@ -68,6 +68,7 @@ describe('captureServiceEnv', () => {
       WICKED_WORKER_HOME: '/h/.wicked-worker',
       WICKED_CREW_TOKEN: 'bearer',
       WICKED_BEARER: 'b',
+      WICKED_ESTATE_DB: 'postgres://u:pw@db/gov',
       WICKED_SESSION_COOKIE: 'c',
       CREW_PORT: '7702',
       RANDOM: 'no',
@@ -80,7 +81,7 @@ describe('captureServiceEnv', () => {
       PATH: '/bin',
       WICKED_WORKER_HOME: '/h/.wicked-worker',
     });
-    expect(omitted).toEqual(['GH_TOKEN', 'WICKED_BEARER', 'WICKED_CREW_TOKEN', 'WICKED_SESSION_COOKIE']);
+    expect(omitted).toEqual(['GH_TOKEN', 'WICKED_BEARER', 'WICKED_CREW_TOKEN', 'WICKED_ESTATE_DB', 'WICKED_SESSION_COOKIE']);
   });
 
   it('forwards the serve options minus the service flags', () => {
