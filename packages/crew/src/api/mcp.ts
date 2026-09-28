@@ -10,6 +10,8 @@
  *   POST   /mcp/servers/:name/test      probe again: health plus the tool diff
  *   PATCH  /mcp/tools/:subject          `{enabled?, classOverride?}`; `:subject` is `mcp:<server>/<tool>`, URL-encoded
  *   PUT    /mcp/servers/:name/secret    `{value}` → the OS keychain; answers `{ref, set: true}`, never the value
+ *   POST   /mcp/call                    the broker (§6, slice S3): `{token, subject, args?}` from the garden
+ *                                       shim; judged, budgeted, invoked, scrubbed, output-judged, recorded
  *
  * The secret value is in no response, log, audit entry or file (D-2); tests/mcp-registry.test.ts
  * scans all of them, a malformed secret body included.
@@ -20,6 +22,7 @@ import { z } from 'zod';
 
 import type { Actor } from '../core/types.js';
 import { MCP_SERVER_NAME_RE } from '../mcp/classify.js';
+import type { McpBroker } from '../mcp/broker.js';
 import { McpRegistryError, type McpRegistry } from '../mcp/registry.js';
 import { McpRegistryCorruptError } from '../mcp/registry-store.js';
 import { parseSecretRef, SecretStoreError } from '../mcp/secrets.js';
@@ -86,9 +89,19 @@ export const PutMcpSecretSchema = z
   })
   .strict();
 
+export const McpCallSchema = z
+  .object({
+    token: z.string().min(1).max(256),
+    subject: z.string().min(1).max(512),
+    args: z.record(z.string(), z.unknown()).optional(),
+  })
+  .strict();
+
 export interface McpRouteDeps {
   /** Absent = a directly-driven route set with no registry seam → 503. */
   registry?: McpRegistry;
+  /** The broker's call path (S3). Absent → `POST /mcp/call` answers 503. */
+  broker?: McpBroker;
   audit: Pick<AuditLog, 'record'>;
   actorOf: (req: FastifyRequest) => Actor;
 }
@@ -239,6 +252,26 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
       } catch (err) {
         return fail(reply, err);
       }
+    },
+  );
+
+  // The broker (§6). The body carries a worker's arguments: a malformed one is refused without
+  // echoing any of it, and nothing of the body is logged or audited (the call record is the record).
+  app.post(
+    `${V}/mcp/call`,
+    { config: { manifest: { requestType: 'McpCallBody', responseType: 'McpCallResponse', statusCodes: [200, 400, 401, 403, 409, 429, 500, 502, 503, 504] } } },
+    async (req, reply) => {
+      if (deps.broker === undefined) return reply.code(503).send({ error: 'the MCP broker is not configured on this daemon', code: 'mcp_unavailable' });
+      const parsed = McpCallSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: `body: ${parsed.error.issues.map((i) => `${i.path.join('.') || 'body'} ${i.code}`).join('; ')}`, code: 'bad_request' });
+      }
+      const answer = await deps.broker.call({
+        token: parsed.data.token,
+        subject: parsed.data.subject,
+        ...(parsed.data.args !== undefined ? { args: parsed.data.args } : {}),
+      });
+      return reply.code(answer.status).send(answer.body);
     },
   );
 

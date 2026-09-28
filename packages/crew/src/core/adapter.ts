@@ -501,6 +501,18 @@ interface CoreConstructor {
    *  Its PRESENCE is the capability: napi ignores an undeclared object field, so an older addon
    *  would drop a plan and run the launch unplanned and UNGATED. */
   supportsPlanLaunch?(): boolean;
+  /** DES-MCP-TOOLS-001 S1 (wicked-core-ts ≥ the release carrying it): judge and record ONE brokered
+   *  MCP call for the unit a worker's `WICKED_MCP_TOKEN` is bound to. Rejects with `invalid_token:`,
+   *  `bad_request:` or `guard_error:`. */
+  evaluateMcpCall?(requestJson: string): Promise<string>;
+  /** DES-MCP-TOOLS-001 S3: the output decision over a brokered call's scrubbed result. */
+  evaluateMcpOutput?(requestJson: string): Promise<string>;
+}
+
+/** The engine's two MCP broker calls (`Core.evaluateMcpCall` / `Core.evaluateMcpOutput`). */
+export interface McpEngineGate {
+  evaluateCall(requestJson: string): Promise<string>;
+  evaluateOutput(requestJson: string): Promise<string>;
 }
 
 /** The engine's replay report (`Core.replayEmitOutbox`), parsed. */
@@ -1400,6 +1412,21 @@ export class CoreAdapter {
    * store FILE that does not exist yet counts as 0: nothing has landed, which is a number, not an
    * unknown (the engine's read-only open refuses a missing file, and that refusal is not "unknown").
    */
+  /**
+   * The engine's MCP broker gate (DES-MCP-TOOLS-001 §6 steps 3 and 8), or `null` on an addon without
+   * BOTH `Core.evaluateMcpCall` and `Core.evaluateMcpOutput`: the broker then refuses every call
+   * (`guard_error`), never runs one unjudged. Read at call time: tests swap the statics.
+   */
+  static mcpEngineGate(): McpEngineGate | null {
+    const call = Core.evaluateMcpCall;
+    const output = Core.evaluateMcpOutput;
+    if (typeof call !== 'function' || typeof output !== 'function') return null;
+    return {
+      evaluateCall: (requestJson: string) => call.call(Core, requestJson),
+      evaluateOutput: (requestJson: string) => output.call(Core, requestJson),
+    };
+  }
+
   /** Whether the linked engine follows the one-connection bus rule (`Core.busConnectionStats`,
    *  DES-TEAMING-002 T0) and may therefore be handed the daemon's bus on every boot. */
   static engineHoldsBusConnection(): boolean {

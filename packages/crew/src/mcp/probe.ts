@@ -67,7 +67,11 @@ function objectOrNull(raw: unknown): Record<string, unknown> | null {
   return raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : null;
 }
 
-function transportFor(config: McpUpstreamConfig, secret: string | null): { transport: Transport; stderrTail: () => string } {
+/**
+ * The transport to one upstream, with the hardened env (stdio) or the auth header (http). Shared by
+ * the probe and the broker's call path (`invoke.ts`), so both reach an upstream the same way.
+ */
+export function transportFor(config: McpUpstreamConfig, secret: string | null): { transport: Transport; stderrTail: () => string } {
   if (config.kind === 'mcp-stdio') {
     const env: Record<string, string> = { ...getDefaultEnvironment() };
     if (config.auth?.env !== undefined && secret !== null) env[config.auth.env] = secret;
