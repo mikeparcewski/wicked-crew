@@ -8,7 +8,7 @@
 //          happy accept, happy decline, happy cancel, restore-on-error
 
 import Fastify from 'fastify';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
@@ -36,8 +36,8 @@ function makeEntry(opts: { options?: string[] | null; elicitationId?: string } =
 // ── Test harness ───────────────────────────────────────────────────────────────
 
 type MockAdapter = {
-  sessions: ReturnType<typeof vi.fn>;
-  resolveElicitation: ReturnType<typeof vi.fn>;
+  sessions: Mock;
+  resolveElicitation: Mock;
 };
 
 function buildApp(

@@ -12,7 +12,7 @@
 // any other estate/transport failure → 502).
 
 import Fastify, { type FastifyInstance } from 'fastify';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
@@ -20,13 +20,13 @@ import { EstateMcpError } from '../src/core/estate-mcp-client.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 
 type MockAdapter = {
-  sessionsDetail: ReturnType<typeof vi.fn>;
-  listRepos: ReturnType<typeof vi.fn>;
+  sessionsDetail: Mock;
+  listRepos: Mock;
 };
 
 describe('memory-management routes (DES-MEM-FACETED-001)', () => {
   let app: FastifyInstance;
-  let estateTool: ReturnType<typeof vi.fn>;
+  let estateTool: Mock;
 
   beforeEach(async () => {
     const mockAdapter: MockAdapter = {

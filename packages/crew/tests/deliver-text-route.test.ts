@@ -7,7 +7,7 @@
 // said — the run record does, and this is where the script reads it.
 
 import Fastify, { type FastifyInstance } from 'fastify';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
@@ -84,7 +84,7 @@ afterEach(async () => {
 async function buildApp(
   views: SessionView[],
   workflows: WorkflowDef[] = [],
-): Promise<{ app: FastifyInstance; setOrigin: ReturnType<typeof vi.fn> }> {
+): Promise<{ app: FastifyInstance; setOrigin: Mock }> {
   const setOrigin = vi.fn();
   const mockAdapter = {
     sessionsDetail: vi.fn(async () => views),

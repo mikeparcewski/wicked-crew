@@ -11,7 +11,7 @@
 // estate -32602 → 400; any other estate/transport failure → 502).
 
 import Fastify, { type FastifyInstance } from 'fastify';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
@@ -19,16 +19,16 @@ import { EstateMcpError } from '../src/core/estate-mcp-client.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 
 type MockAdapter = {
-  sessionsDetail: ReturnType<typeof vi.fn>;
-  listRepos: ReturnType<typeof vi.fn>;
+  sessionsDetail: Mock;
+  listRepos: Mock;
   // The policy→steering landing seam (DES-MEM-FACETED-001 §5.2).
-  steeringSupported: ReturnType<typeof vi.fn>;
-  upsertConformanceRule: ReturnType<typeof vi.fn>;
+  steeringSupported: Mock;
+  upsertConformanceRule: Mock;
 };
 
 describe('proposal queue routes (DES-MEM-FACETED-001 §5.0)', () => {
   let app: FastifyInstance;
-  let proposalTool: ReturnType<typeof vi.fn>;
+  let proposalTool: Mock;
   let adapter: MockAdapter;
 
   beforeEach(async () => {

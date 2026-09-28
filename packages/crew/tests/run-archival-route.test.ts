@@ -7,7 +7,7 @@
 //   GET  /runs             — archived excluded by default, returned with ?include=archived
 
 import Fastify from 'fastify';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
@@ -15,8 +15,8 @@ import type { CoreAdapter } from '../src/core/adapter.js';
 import type { FastifyInstance } from 'fastify';
 
 type MockAdapter = {
-  sessionsDetail: ReturnType<typeof vi.fn>;
-  archiveRun: ReturnType<typeof vi.fn>;
+  sessionsDetail: Mock;
+  archiveRun: Mock;
 };
 
 function view(id: string, archivedAt: number | null) {

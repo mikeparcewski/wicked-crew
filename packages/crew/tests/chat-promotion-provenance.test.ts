@@ -13,7 +13,7 @@ import Fastify from 'fastify';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
@@ -53,7 +53,7 @@ describe('crew#641 item 5 — chat-promotion provenance is absent when the chat 
   let app: FastifyInstance;
   let audit: AuditLog;
   let dir: string;
-  let chatSeats: ReturnType<typeof vi.fn>;
+  let chatSeats: Mock;
 
   beforeEach(async () => {
     dir = mkdtempSync(join(tmpdir(), 'crew-chat-promotion-'));

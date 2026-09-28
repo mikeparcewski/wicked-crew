@@ -6,7 +6,7 @@
 // only file a memory: the kind, tier and `capture` marker are the daemon's, never the caller's.
 
 import Fastify, { type FastifyInstance } from 'fastify';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
@@ -14,16 +14,16 @@ import { EstateMcpError } from '../src/core/estate-mcp-client.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 
 type MockAdapter = {
-  sessionsDetail: ReturnType<typeof vi.fn>;
-  listRepos: ReturnType<typeof vi.fn>;
+  sessionsDetail: Mock;
+  listRepos: Mock;
   // The policy→steering landing seam (DES-MEM-FACETED-001 §5.2).
-  steeringSupported: ReturnType<typeof vi.fn>;
-  upsertConformanceRule: ReturnType<typeof vi.fn>;
+  steeringSupported: Mock;
+  upsertConformanceRule: Mock;
 };
 
 describe('POST /proposals — file a preference memory (api-types 0.54.0)', () => {
   let app: FastifyInstance;
-  let proposalTool: ReturnType<typeof vi.fn>;
+  let proposalTool: Mock;
   let adapter: MockAdapter;
 
   beforeEach(async () => {
