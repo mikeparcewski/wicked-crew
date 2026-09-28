@@ -52,7 +52,7 @@ afterEach(() => {
 const SPEC: ServiceSpec = {
   program: ['/usr/local/bin/node', '/opt/crew/dist/cli/index.js', 'serve', '--port', '7702'],
   env: { PATH: '/usr/bin:/bin', CLAUDE_CONFIG_DIR: '/srv/op/alt & co/.claude', WICKED_X: '100%' },
-  logPath: '/srv/op/.wicked-crew/daemon-stdout.log',
+  logPath: '/srv/op/100% crew/daemon-stdout.log',
   workingDir: '/srv/op',
 };
 
@@ -67,6 +67,8 @@ describe('captureServiceEnv', () => {
       GH_TOKEN: 'secret',
       WICKED_WORKER_HOME: '/h/.wicked-worker',
       WICKED_CREW_TOKEN: 'bearer',
+      WICKED_BEARER: 'b',
+      WICKED_SESSION_COOKIE: 'c',
       CREW_PORT: '7702',
       RANDOM: 'no',
     });
@@ -78,7 +80,7 @@ describe('captureServiceEnv', () => {
       PATH: '/bin',
       WICKED_WORKER_HOME: '/h/.wicked-worker',
     });
-    expect(omitted).toEqual(['GH_TOKEN', 'WICKED_CREW_TOKEN']);
+    expect(omitted).toEqual(['GH_TOKEN', 'WICKED_BEARER', 'WICKED_CREW_TOKEN', 'WICKED_SESSION_COOKIE']);
   });
 
   it('forwards the serve options minus the service flags', () => {
@@ -118,16 +120,21 @@ describe('unit rendering', () => {
     expect(text).toContain('ExecStart="/usr/local/bin/node" "/opt/crew/dist/cli/index.js" "serve" "--port" "7702"');
     expect(text).toContain('Environment="CLAUDE_CONFIG_DIR=/srv/op/alt & co/.claude"');
     expect(text).toContain('Environment="WICKED_X=100%%"');
+    expect(text).toContain('StandardError=append:/srv/op/100%% crew/daemon-stdout.log');
     expect(text).toContain('Restart=on-failure');
     expect(text).toContain('WantedBy=default.target');
     expect(logPathFromUnit(text)).toBe(SPEC.logPath);
   });
 });
 
-function fakeDeps(platform: 'darwin' | 'linux', home: string, holder: { pid: number | null } | null = null) {
+function fakeDeps(platform: 'darwin' | 'linux', home: string, holder: { pid: number | null } | null = null, servicePid: number | null = null) {
   const calls: string[] = [];
   const lines: string[] = [];
   const run: CommandRunner = (cmd, args) => {
+    // `launchctl print` is a read (is the service's process the one on the port?) — not recorded.
+    if (cmd === 'launchctl' && args[0] === 'print') {
+      return servicePid === null ? { status: 113, stdout: '', stderr: 'Could not find service' } : { status: 0, stdout: `\tstate = running\n\tpid = ${servicePid}\n`, stderr: '' };
+    }
     calls.push([cmd, ...args].join(' '));
     return { status: 0, stdout: '', stderr: '' };
   };
@@ -166,8 +173,8 @@ describe('installService / uninstallService', () => {
     const unit = serviceUnitPath('darwin', home)!;
     mkdirSync(dirname(unit), { recursive: true });
     writeFileSync(unit, 'old');
-    // The daemon answering on the port IS the installed service — not a refusal.
-    const { deps, calls } = fakeDeps('darwin', home, { pid: 42 });
+    // The daemon answering on the port IS the installed service (same pid) — not a refusal.
+    const { deps, calls } = fakeDeps('darwin', home, { pid: 42 }, 42);
     expect(await installService(INPUT(home), deps)).toBe(0);
     expect(calls).toEqual([`launchctl bootout gui/501/com.wickedagile.wicked-crew`, `launchctl bootstrap gui/501 ${unit}`]);
   });
@@ -179,6 +186,18 @@ describe('installService / uninstallService', () => {
     expect(lines.join('\n')).toContain('pid 4242');
     expect(calls).toEqual([]);
     expect(existsSync(serviceUnitPath('darwin', home)!)).toBe(false);
+  });
+
+  it('refuses a re-install while a DIFFERENT process holds the port (the service is not the holder)', async () => {
+    const home = tmpHome();
+    const unit = serviceUnitPath('darwin', home)!;
+    mkdirSync(dirname(unit), { recursive: true });
+    writeFileSync(unit, 'old');
+    const { deps, calls, lines } = fakeDeps('darwin', home, { pid: 4242 }, 42);
+    expect(await installService(INPUT(home), deps)).toBe(1);
+    expect(lines.join('\n')).toContain('pid 4242');
+    expect(calls).toEqual([]);
+    expect(readFileSync(unit, 'utf8')).toBe('old');
   });
 
   it('refuses to install a service that runs from the npx cache', async () => {

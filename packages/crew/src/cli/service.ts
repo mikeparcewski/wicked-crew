@@ -55,7 +55,7 @@ const ENV_ALLOW = new Set([
   // The deliver push identity pin (crew#549 / F-RC1-010) — an account NAME, not a credential.
   'GH_ACCOUNT',
 ]);
-const SECRET_NAME = /TOKEN|SECRET|PASSWORD|PASSWD|KEY|CREDENTIAL/i;
+const SECRET_NAME = /TOKEN|SECRET|PASS|KEY|CREDENTIAL|BEARER|COOKIE|SESSION/i;
 
 export interface CapturedEnv {
   env: Record<string, string>;
@@ -152,8 +152,9 @@ export function renderSystemdUnit(spec: ServiceSpec): string {
     `ExecStart=${spec.program.map(sdQuote).join(' ')}`,
     `WorkingDirectory=${sdQuote(spec.workingDir)}`,
     ...Object.entries(spec.env).map(([k, v]) => `Environment=${sdQuote(`${k}=${v}`)}`),
-    `StandardOutput=append:${spec.logPath}`,
-    `StandardError=append:${spec.logPath}`,
+    // `append:` takes the rest of the line as the path (no quoting); `%` is a specifier, so doubled.
+    `StandardOutput=append:${spec.logPath.replace(/%/g, '%%')}`,
+    `StandardError=append:${spec.logPath.replace(/%/g, '%%')}`,
     'Restart=on-failure',
     'RestartSec=5',
     '',
@@ -170,7 +171,7 @@ export function logPathFromUnit(text: string): string | null {
     return plist[1].replace(/&apos;/g, "'").replace(/&quot;/g, '"').replace(/&gt;/g, '>').replace(/&lt;/g, '<').replace(/&amp;/g, '&');
   }
   const unit = /^StandardError=append:(.+)$/m.exec(text);
-  return unit?.[1] ?? null;
+  return unit?.[1]?.replace(/%%/g, '%') ?? null;
 }
 
 /** An installed service on this host: its unit path and the log it writes, or `null`. */
@@ -288,13 +289,19 @@ export async function installService(input: InstallInput, deps: ServiceDeps): Pr
   const alreadyInstalled = existsSync(unitPath);
   // Never touch a hand-started daemon on the same port: refuse and name its pid.
   const holder = await deps.portHolder();
-  if (holder !== null && !alreadyInstalled) {
-    const who = holder.pid !== null ? `pid ${holder.pid}` : 'another process';
-    deps.log(
-      `wicked-crew: a daemon is already running on 127.0.0.1:${input.port} (${who}) and it is not the login service. ` +
-        'Stop it first, then run `wicked-crew serve --install-service` again.',
-    );
-    return 1;
+  // Only the installed service's own process may hold the port (a re-install reloads it). Anything
+  // else (a hand-started daemon, another program) is refused, named by pid, and left alone.
+  if (holder !== null) {
+    const servicePid = alreadyInstalled ? runningServicePid(deps) : null;
+    const isService = servicePid !== null && (holder.pid === null || holder.pid === servicePid);
+    if (!isService) {
+      const who = holder.pid !== null ? `pid ${holder.pid}` : 'a process lsof could not name';
+      deps.log(
+        `wicked-crew: 127.0.0.1:${input.port} is already held by ${who}, which is not the login service. ` +
+          'Stop it first (a hand-started daemon: its terminal, or `kill <pid>`), then run `wicked-crew serve --install-service` again.',
+      );
+      return 1;
+    }
   }
   mkdirSync(dirname(unitPath), { recursive: true });
   mkdirSync(dirname(logPath), { recursive: true });
@@ -336,6 +343,21 @@ export async function installService(input: InstallInput, deps: ServiceDeps): Pr
   }
   deps.log('The daemon is starting; `wicked-crew status` answers once it is up.');
   return 0;
+}
+
+/** The pid of the loaded service's running process, or `null` (not loaded, not running, unknown). */
+export function runningServicePid(deps: Pick<ServiceDeps, 'platform' | 'uid' | 'run'>): number | null {
+  if (deps.platform === 'darwin') {
+    const r = deps.run('launchctl', ['print', `gui/${deps.uid}/${SERVICE_LABEL}`]);
+    const m = r.status === 0 ? /^\s*pid = (\d+)$/m.exec(r.stdout) : null;
+    return m?.[1] !== undefined ? Number(m[1]) : null;
+  }
+  if (deps.platform === 'linux') {
+    const r = deps.run('systemctl', ['--user', 'show', '-p', 'MainPID', '--value', SYSTEMD_UNIT_NAME]);
+    const pid = Number(r.stdout.trim());
+    return r.status === 0 && Number.isInteger(pid) && pid > 0 ? pid : null;
+  }
+  return null;
 }
 
 export function uninstallService(deps: Pick<ServiceDeps, 'platform' | 'home' | 'uid' | 'run' | 'log'>): number {
