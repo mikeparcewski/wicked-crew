@@ -34,10 +34,15 @@ export function parseMcpSubject(subject: string): { server: string; tool: string
   return { server, tool: rest.slice(slash + 1) };
 }
 
-/** The class `tools/list` annotations imply (§4.2). `null` annotations = none declared = `write` (D-4). */
+/**
+ * The class `tools/list` annotations imply (§4.2), exactly as the engine's `mcp_gate::classify`
+ * derives it (`tests/mcp-policies.test.ts` pins the two against each other): `null` annotations, or
+ * annotations carrying neither `readOnlyHint` nor `destructiveHint`, = none declared = `write` (D-4).
+ */
 export function deriveToolClass(annotations: McpToolAnnotations | null): McpToolClass {
   if (annotations === null) return 'write';
   if (annotations.readOnlyHint === true) return 'read';
+  if (annotations.readOnlyHint === undefined && annotations.destructiveHint === undefined) return 'write';
   if (annotations.destructiveHint !== false) return 'destructive';
   return 'write';
 }

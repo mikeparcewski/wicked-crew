@@ -90,6 +90,7 @@ import { DEMO_PRESET, demoLaunchRoots, registerDemoRoutes } from './demo.js';
 import { registerSkillsRoutes } from './skills.js';
 import { registerMcpRoutes } from './mcp.js';
 import type { McpBroker } from '../mcp/broker.js';
+import { McpPolicies } from '../mcp/policies.js';
 import type { McpRegistry } from '../mcp/registry.js';
 import { disabledSkillsHealth, type SkillsRuntime } from '../skills/runtime.js';
 import { phaseSkillFindings, withPhaseSkillGaps, type PhaseSkillArming, type RunSkillGapIndex } from '../skills/phase-skill-gaps.js';
@@ -5413,9 +5414,19 @@ export function registerRoutes(
 
   // ── MCP tools registry (DES-MCP-TOOLS-001 S2) — upstream servers, their tools, their secrets ─
   // Preview-bound saves, the tool diff on test, and a secret route that never answers the value.
+  // S6: the policy preview and the approvals, over the same registry and the engine's rule store.
+  const mcpPolicies =
+    runtime.mcp !== undefined
+      ? new McpPolicies(runtime.mcp, {
+          listRules: () => adapter.listConformanceRules(),
+          upsertRule: (rule) => adapter.upsertConformanceRule(rule),
+          previewCalls: (json) => adapter.previewMcpCalls(json),
+        })
+      : undefined;
   registerMcpRoutes(app, {
     ...(runtime.mcp !== undefined ? { registry: runtime.mcp } : {}),
     ...(runtime.mcpBroker !== undefined ? { broker: runtime.mcpBroker } : {}),
+    ...(mcpPolicies !== undefined ? { policies: mcpPolicies } : {}),
     audit,
     actorOf,
   });

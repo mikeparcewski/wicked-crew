@@ -46,7 +46,7 @@ export const HEALTH_FAILING_AFTER = 3;
 /** A refusal the routes map to a status code. */
 export class McpRegistryError extends Error {
   constructor(
-    readonly status: 400 | 404 | 409 | 501 | 502,
+    readonly status: 400 | 404 | 409 | 501 | 502 | 503,
     readonly code: string,
     message: string,
   ) {
@@ -178,6 +178,13 @@ export class McpRegistry {
       return record;
     });
     return this.view(saved);
+  }
+
+  /** What a held preview would register: its server name and each tool's schema hash (S6). */
+  peekPreview(previewHash: string): { name: string; tools: Array<{ name: string; schemaHash: string }> } | null {
+    const held = this.previews.get(previewHash);
+    if (held === undefined || held.expiresAt <= this.now()) return null;
+    return { name: held.config.name, tools: held.tools.map((t) => ({ name: t.name, schemaHash: t.schemaHash })) };
   }
 
   async setServerEnabled(name: string, enabled: boolean): Promise<McpServer> {
