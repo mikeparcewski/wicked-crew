@@ -452,6 +452,22 @@ describe('budget and breaker', () => {
     expect(budgetFromEnv({ WICKED_MCP_CALL_BUDGET: 'lots' })).toBe(200);
   });
 
+  it('a broker built without budgetPerUnit takes its budget from WICKED_MCP_CALL_BUDGET', async () => {
+    const prior = process.env['WICKED_MCP_CALL_BUDGET'];
+    process.env['WICKED_MCP_CALL_BUDGET'] = '1';
+    try {
+      await boot();
+    } finally {
+      if (prior === undefined) delete process.env['WICKED_MCP_CALL_BUDGET'];
+      else process.env['WICKED_MCP_CALL_BUDGET'] = prior;
+    }
+    expect((await mcpCall('mcp:fx/wt_note')).status).toBe(200);
+    const second = await mcpCall('mcp:fx/wt_note');
+    expect(second.status).toBe(429);
+    expect(second.body.outcome).toBe('budget_exhausted');
+    expect(counted('wt_note')).toBe(1);
+  });
+
   it('opens after 5 consecutive failures, refuses for 60 s, then lets one call through', async () => {
     await boot();
     for (let i = 0; i < BREAKER_THRESHOLD; i++) expect((await mcpCall('mcp:fx/wt_crash_write')).status).toBe(502);
