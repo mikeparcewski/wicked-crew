@@ -87,6 +87,8 @@ import { isSteeringAuthorRun, landSteeringProposal } from './steering-landing.js
 import { ApproveEditSchema, approveEdited, captureLaunchRoots, editInFlight, FileProposalSchema, registerCaptureRoutes } from './capture.js';
 import { registerTestingRoutes } from './testing.js';
 import { registerSkillsRoutes } from './skills.js';
+import { registerMcpRoutes } from './mcp.js';
+import type { McpRegistry } from '../mcp/registry.js';
 import { disabledSkillsHealth, type SkillsRuntime } from '../skills/runtime.js';
 import { phaseSkillFindings, withPhaseSkillGaps, type PhaseSkillArming, type RunSkillGapIndex } from '../skills/phase-skill-gaps.js';
 import {
@@ -860,6 +862,10 @@ export interface RuntimeDeps {
    *  (seeded from the installed plugin, published); a directly-driven route set gets none and
    *  `/skills*` answers 503 unless a test injects one over a fixture root. */
   skills?: SkillsRuntime;
+  /** The MCP tools registry (DES-MCP-TOOLS-001 S2) — `createServer` builds one over
+   *  `<state home>/mcp`; a directly-driven route set gets none and `/mcp/*` answers 503 unless a
+   *  test injects one over a scratch dir. */
+  mcp?: McpRegistry;
   /** crew#661 — each drafting seam's ARM-TIME skill outcome: the subsystems whose phases run without
    *  a declared skill (`/diagnostics.skills.phaseSkillGaps` + `skills.phase-skill` findings, and
    *  `/health.warnings`). Absent = nothing armed here (a directly-driven route set): no gaps. */
@@ -5186,6 +5192,14 @@ export function registerRoutes(
   // directly-driven route set answers 503 unless a test injects one over a fixture root.
   registerSkillsRoutes(app, {
     ...(runtime.skills !== undefined ? { runtime: runtime.skills } : {}),
+    audit,
+    actorOf,
+  });
+
+  // ── MCP tools registry (DES-MCP-TOOLS-001 S2) — upstream servers, their tools, their secrets ─
+  // Preview-bound saves, the tool diff on test, and a secret route that never answers the value.
+  registerMcpRoutes(app, {
+    ...(runtime.mcp !== undefined ? { registry: runtime.mcp } : {}),
     audit,
     actorOf,
   });
