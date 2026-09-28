@@ -569,17 +569,28 @@ export const LaunchSchema = z.object({
   path: ['revisesPr'],
 });
 
+/** The escalation arms (wicked-core#469 / #467): approve-shaped, no `amend` / `amendScope`.
+ *  `extend` | `targeted` | `accept_partial` answer the gate of a repo-checks floor that did not
+ *  finish (`repo_checks_timeout`) — the engine re-runs the floor on the tree as it stands with 2×
+ *  bounds, the targeted test set, or the unfinished checks waived; `accept_suggestion` adopts the
+ *  evaluator's discarded, pinned edit as the creator's amendment. The ENGINE refuses each at any
+ *  other gate (a 409 naming the gate it answers). */
+export const ESCALATION_ACTIONS = ['extend', 'targeted', 'accept_partial', 'accept_suggestion'] as const;
+const isEscalationAction = (a: string | undefined): boolean =>
+  a !== undefined && (ESCALATION_ACTIONS as readonly string[]).includes(a);
+
 /** `POST /runs/:id/gate` (api-types 0.38.0 `GateDecision`; DES-L1 PR-2). Additive arms: `action`
  *  names the arm (`approve` | `request_changes` | `reject`; absent = today's two-arm mapping of
  *  `approve`), `amendScope` says where an approve's `amend` lands (`cursor` = the gated unit, today's
  *  behaviour | `creator` = the first creator phase at/after the cursor — an intake steer reaches the
  *  phase that implements). `request_changes` sends a NOT-PASS review back to the creator with the
  *  findings in context (`amend` = the operator's note). A disagreement between `action` and
- *  `approve` is a 400 that names both. */
+ *  `approve` is a 400 that names both. The escalation arms ({@link ESCALATION_ACTIONS}) require
+ *  `approve: true` and take no `amend` / `amendScope` / `plan`. */
 export const GateSchema = z.object({
   approve: z.boolean(),
   amend: z.string().optional(),
-  action: z.enum(['approve', 'request_changes', 'reject', 'edit_plan']).optional(),
+  action: z.enum(['approve', 'request_changes', 'reject', 'edit_plan', ...ESCALATION_ACTIONS]).optional(),
   amendScope: z.enum(['cursor', 'creator']).optional(),
   /** DES-TEAMING-002 T3 — approve a `plan_approval` gate WITH AN EDIT (`GateDecision.plan`). */
   plan: PlanSchema.optional(),
@@ -587,8 +598,12 @@ export const GateSchema = z.object({
    *  open gate is a 409 `gate_changed`: the decision was made on a gate that is no longer open. */
   ord: z.number().int().nonnegative().optional(),
 }).strict().refine(
-  (b) => b.action === undefined || (b.action === 'approve' || b.action === 'edit_plan') === b.approve,
-  { message: '`action` disagrees with `approve`: request_changes and reject require approve: false; approve and edit_plan require approve: true', path: ['action'] },
+  (b) => b.action === undefined
+    || (b.action === 'approve' || b.action === 'edit_plan' || isEscalationAction(b.action)) === b.approve,
+  { message: '`action` disagrees with `approve`: request_changes and reject require approve: false; approve, edit_plan, extend, targeted, accept_partial and accept_suggestion require approve: true', path: ['action'] },
+).refine(
+  (b) => !isEscalationAction(b.action) || (b.amend === undefined && b.amendScope === undefined && b.plan === undefined),
+  { message: 'extend, targeted, accept_partial and accept_suggestion take no amend, amendScope or plan — the engine re-runs the floor or adopts the pinned edit as it stands', path: ['action'] },
 ).refine(
   (b) => (b.action === 'edit_plan') === (b.plan !== undefined) || (b.action === undefined && b.plan !== undefined),
   { message: 'an edited plan answers a plan_approval gate: `plan` needs approve: true with `action` omitted or edit_plan, and edit_plan needs `plan`', path: ['plan'] },
