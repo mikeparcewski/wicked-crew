@@ -1745,6 +1745,9 @@ export function registerRoutes(
         return reply.code(409).send(stateHomeBlockerBody(stateHome));
       }
     }
+    // crew#645: an expired login reads signed out BEFORE routing — wait (bounded) for every seat's
+    // missing or stale login check, so the standing below is the seats' own answer.
+    if (b.clisJson === undefined) await rosterWithStanding.ready?.();
     const input: LaunchRunInput = {
       problem: b.problem,
       sessionId: b.sessionId ?? randomUUID(),

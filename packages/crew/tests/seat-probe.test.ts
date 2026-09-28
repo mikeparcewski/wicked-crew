@@ -20,8 +20,10 @@ import {
   PROBE_TTL_SIGNED_IN_MS,
   SeatProbe,
   classifyProbe,
+  classifyVerify,
   execProbe,
   probeCommand,
+  verifyCommand,
   type ProbeOutput,
   type ProbeRunner,
 } from '../src/api/seat-probe.js';
@@ -220,5 +222,103 @@ describe("the engine's real refusal frames flip the roster within the run (crew#
     await probe.refresh('claude', undefined);
     t.ingest(ev({ type: 'councilSeatFailed', session: 'r', cli: 'claude', kind: 'non_zero_exit', stdout: 'Not logged in · Please run /login', stderr: '', detail: '', reason: 'not_logged_in' }));
     expect(r()[0]).toMatchObject({ auth: 'signed_out', auth_source: 'seat-stderr' });
+  });
+});
+
+// crew#645 (reopened): a status command reads the STORED login, so an OAuth session that expired
+// and cannot be refreshed still says `loggedIn: true`. The probe makes one live request when the
+// status command says signed in; the seat's refusal of it signs the seat out BEFORE routing. Seats
+// with nothing to ask say their login is unverified.
+describe('an expired login reads signed_out before routing (crew#645)', () => {
+  const EXPIRED: ProbeOutput = {
+    code: 1,
+    stdout: '',
+    stderr: 'Failed to authenticate: OAuth session expired and could not be refreshed',
+  };
+  /** The status command answers `status`; the live check answers `live`. */
+  const twoStep = (status: ProbeOutput, live: ProbeOutput) => {
+    const calls: Array<{ cmd: string; args: string[] }> = [];
+    const run: ProbeRunner = async (cmd, args) => {
+      calls.push({ cmd, args });
+      return args[0] === 'auth' || args[0] === 'login' ? status : live;
+    };
+    return { run, calls };
+  };
+
+  it('the live check runs under the seat config dir, with no tools, MCP or session file', () => {
+    const c = verifyCommand('claude', '/w', {}, '/h')!;
+    expect(c.cmd).toBe('claude');
+    expect(c.args).toEqual(expect.arrayContaining(['-p', '--no-session-persistence', '--strict-mcp-config', '--tools', '']));
+    expect(c.env['CLAUDE_CONFIG_DIR']).toBe('/w/claude');
+    expect(verifyCommand('codex', '/w', {}, '/h')).toMatchObject({ cmd: 'codex', args: expect.arrayContaining(['exec', '--ephemeral', '--sandbox', 'read-only']) });
+    expect(verifyCommand('codex', '/w', {}, '/h')!.env['CODEX_HOME']).toBe('/w/codex');
+    for (const k of ['pi', 'copilot', 'opencode', 'agy']) expect(verifyCommand(k, '/w', {}, '/h')).toBeNull();
+    expect(classifyVerify({ code: 0, stdout: 'OK', stderr: '' })).toBe(true);
+    expect(classifyVerify(EXPIRED)).toBe(false);
+    expect(classifyVerify({ code: 1, stdout: '', stderr: 'unexpected status 401 Unauthorized: Missing bearer' })).toBe(false);
+    // A timeout, a quota, a network error: the live check cannot tell.
+    expect(classifyVerify({ code: null, stdout: '', stderr: '', error: 'killed' })).toBeNull();
+    expect(classifyVerify({ code: 1, stdout: '', stderr: 'You have exceeded your rate limit' })).toBeNull();
+  });
+
+  it('status says loggedIn but the session is expired → signed_out, verified live, benched for the engine', async () => {
+    const { run, calls } = twoStep(LOGGED_IN_CLAUDE, EXPIRED);
+    const probe = new SeatProbe({ run, env: {}, home: '/h' });
+    const roster = rosterWithStandingFactory({
+      seatHealth: new SeatHealthTracker(),
+      registry: () => [{ ...CLAUDE }],
+      signedIn: () => true,
+      env: { WICKED_WORKER_HOME: '/w' },
+      probe,
+    });
+    // The launch path: wait for the login check, then read the roster it routes on.
+    await roster.ready!();
+    const claude = roster()[0]!;
+    expect(calls.map((c) => c.args[0])).toEqual(['auth', '-p']);
+    expect(claude).toMatchObject({ auth: 'signed_out', signed_in: false, auth_source: 'probe', login_check: 'live', council_eligible: false });
+    expect(String(claude['auth_evidence'])).toContain('OAuth session expired');
+    expect(toEngineSeat(claude)).toMatchObject({ health: { usable: false } });
+  });
+
+  it('a live answer reads verified; a live check that cannot tell keeps the status answer and says so', async () => {
+    const ok = twoStep(LOGGED_IN_CLAUDE, { code: 0, stdout: 'OK', stderr: '' });
+    const p1 = new SeatProbe({ run: ok.run, env: {}, home: '/h' });
+    const r1 = rosterWithStandingFactory({ seatHealth: new SeatHealthTracker(), registry: () => [{ ...CLAUDE }], signedIn: () => true, env: {}, probe: p1 });
+    await r1.ready!();
+    expect(r1()[0]).toMatchObject({ auth: 'signed_in', login_check: 'live', council_eligible: true });
+    expect(r1()[0]!['login_note']).toBeUndefined();
+
+    const slow = twoStep(LOGGED_IN_CLAUDE, { code: null, stdout: '', stderr: '', error: 'timed out' });
+    const p2 = new SeatProbe({ run: slow.run, env: {}, home: '/h' });
+    const r2 = rosterWithStandingFactory({ seatHealth: new SeatHealthTracker(), registry: () => [{ ...CLAUDE }], signedIn: () => true, env: {}, probe: p2 });
+    await r2.ready!();
+    expect(r2()[0]).toMatchObject({ auth: 'signed_in', login_check: 'status', council_eligible: true });
+    expect(String(r2()[0]!['login_note'])).toMatch(/^login unverified/);
+  });
+
+  it('a seat with a login check that has not answered is not routed to; a seat with none says "login unverified"', async () => {
+    let release: (o: ProbeOutput) => void = () => undefined;
+    const run: ProbeRunner = () => new Promise((r) => (release = r));
+    const probe = new SeatProbe({ run, env: {}, home: '/h' });
+    const roster = rosterWithStandingFactory({
+      seatHealth: new SeatHealthTracker(),
+      registry: () => [{ ...CLAUDE }, { ...PI }, { key: 'opencode', display_name: 'opencode', binary: 'opencode', enabled_for_council: true }],
+      signedIn: (k) => (k === 'opencode' ? false : true),
+      env: {},
+      probe,
+    });
+    const seats = roster();
+    expect(seats[0]).toMatchObject({ auth: 'unknown', login_check: 'unverified', council_eligible: false });
+    expect(String(seats[0]!['council_ineligible_reason'])).toContain('login not verified yet');
+    // No status command: the file decides, and the roster says it was not verified.
+    for (const s of seats.slice(1)) {
+      expect(s).toMatchObject({ login_check: 'unverified', council_eligible: true });
+      expect(String(s['login_note'])).toMatch(/^login unverified — nothing asked \w+ whether its login works/);
+    }
+    // The launch wait is bounded: a check that never answers does not hold a launch forever.
+    const t0 = Date.now();
+    await probe.ensureFresh(['claude'], undefined, 50);
+    expect(Date.now() - t0).toBeLessThan(5_000);
+    release(NOT_LOGGED_IN_CLAUDE);
   });
 });

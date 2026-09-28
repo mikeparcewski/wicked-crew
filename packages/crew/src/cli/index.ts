@@ -589,7 +589,7 @@ async function main(): Promise<void> {
       sessionId: flag(argv, '--session') ?? randomUUID(),
       // The roster WITH the daemon's standing (F-RECON-002/003): `bootstrap` started the server,
       // which wired the adapter's roster provider — a signed-out seat is benched here too.
-      clisJson: JSON.stringify(adapter.launchRoster()),
+      clisJson: JSON.stringify(await adapter.readyLaunchRoster()),
       channel: 'cli',
     };
     if (humanConfirm !== undefined) launchBody['humanConfirm'] = humanConfirm;

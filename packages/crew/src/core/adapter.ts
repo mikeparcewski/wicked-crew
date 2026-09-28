@@ -1274,16 +1274,23 @@ export class CoreAdapter {
    * `council_eligible` to bench on and signed-out seats were convened. Resolved LAZILY, like the
    * origin above: the adapter exists before the tracker that knows the seats' standing does.
    */
-  private rosterProvider: (() => unknown[]) | null = null;
+  private rosterProvider: ((() => unknown[]) & { ready?: () => Promise<void> }) | null = null;
 
   /** Hand the adapter the daemon's standing roster accessor (see `launchRoster`). */
-  setRosterProvider(get: () => unknown[]): void {
+  setRosterProvider(get: (() => unknown[]) & { ready?: () => Promise<void> }): void {
     this.rosterProvider = get;
   }
 
   /** The seat pool a launch from this adapter carries: standing-decorated when wired, else raw. */
   launchRoster(): unknown[] {
     return this.rosterProvider !== null ? this.rosterProvider() : CoreAdapter.roster();
+  }
+
+  /** {@link launchRoster} after the seats' login checks answered (bounded, crew#645): an expired
+   *  login reads signed out before the launch routes work to it. */
+  async readyLaunchRoster(): Promise<unknown[]> {
+    await this.rosterProvider?.ready?.();
+    return this.launchRoster();
   }
 
   constructor(opts: CoreAdapterOptions) {
@@ -2718,8 +2725,8 @@ export class CoreAdapter {
           );
     // The roster WITH standing when the daemon wired one (F-RECON-002/003) — `launchRun` then
     // benches `council_eligible: false` seats through `engineRosterJson`.
-    if (executors.length === 0) return this.launchRoster();
-    return executors.every((e) => e?.type === 'tool') ? [] : this.launchRoster();
+    if (executors.length === 0) return this.readyLaunchRoster();
+    return executors.every((e) => e?.type === 'tool') ? [] : this.readyLaunchRoster();
   }
 
   /** Return the onboarding run id for a repo (undefined if not launched this session). */

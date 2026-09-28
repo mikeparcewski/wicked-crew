@@ -105,10 +105,26 @@ export interface SeatStanding {
   auth_evidence?: string;
   /** Present with `auth_source: 'probe'`: ISO-8601 of the probe the reading is from. */
   probed_at?: string;
+  /** How far `auth` was VERIFIED (crew#645): `live` — the seat answered an authenticated request,
+   *  or refused one for want of a credential (its own words decided); `status` — only the CLI's
+   *  status command answered, which reads the stored login and not the session (an expired OAuth
+   *  login still reads signed in there); `unverified` — nothing asked the seat (no status command,
+   *  or its check has not answered or could not tell). */
+  login_check: LoginCheck;
+  /** Present unless `login_check` is `live`: why the login is not verified, in the operator's words
+   *  (it starts "login unverified"). */
+  login_note?: string;
   council_eligible: boolean;
   /** Present when `council_eligible` is false: the one reason, in the operator's words. */
   council_ineligible_reason?: string;
 }
+
+/** See {@link SeatStanding.login_check}. */
+export type LoginCheck = 'live' | 'status' | 'unverified';
+
+/** The probe input: its answer, `'pending'` for a probed seat whose check has not answered yet,
+ *  `undefined` for a seat with no probe. */
+export type ProbeInput = SeatProbeReading | 'pending' | undefined;
 
 /** A seat whose `auth` lets it take a turn — the ONE predicate the roster and the chat share. */
 export function authUsable(auth: SeatAuth): boolean {
@@ -119,8 +135,9 @@ export function seatStanding(
   seat: StandingSeat,
   signedIn: boolean | null,
   authFailure: SeatAuthFailure | null = null,
-  probe: SeatProbeReading | undefined = undefined,
+  probeInput: ProbeInput = undefined,
 ): SeatStanding {
+  const probe = probeInput === 'pending' ? undefined : probeInput;
   // F-A45-006: the seat's OWN report beats the file probe. The fresh rig's pi read `signed_in`
   // off a present-but-empty `auth.json` while every ballot failed "No API key found"; when the seat
   // itself says it has no credential, `auth` is `signed_out` — the free tier does not apply either
@@ -138,8 +155,10 @@ export function seatStanding(
           }
         : seatAuth(seat, signedIn);
   const auth = read.auth;
+  const login = loginCheck(seat.key, authFailure, probeInput);
   const base: SeatStanding = {
     ...read,
+    ...login,
     council_eligible: true,
   };
   if (seat.enabled_for_council === false) {
@@ -155,6 +174,18 @@ export function seatStanding(
           : read.auth_source === 'probe'
             ? `signed out — the seat's own auth check says it cannot authenticate (${read.auth_evidence ?? 'not logged in'}); sign it in from the System page`
             : 'signed out — a council would bench this seat on its first ballot; sign it in from the System page',
+    };
+  }
+  // crew#645: a seat that HAS a login check which has not answered is not routed to on the file's
+  // word — a launch waits for the check (`SeatProbe.ensureFresh`), and anything that routes before
+  // it answers (the seconds after a boot) leaves the seat out of the council. `auth` stays
+  // `unknown`, so a chat still offers it (a chat is not a council; its first refusal signs it out).
+  if (probeInput === 'pending' && authFailure === null) {
+    return {
+      ...base,
+      council_eligible: false,
+      council_ineligible_reason:
+        "login not verified yet — the seat's own auth check is still running; a launch waits for it, so launch again in a few seconds",
     };
   }
   // (R5 / R5b, DES-L3 PR-3D) No `inactive` arm and no crew council bench any more: `health.status`
@@ -208,4 +239,26 @@ export function chatSeatAdmission(seat: StandingSeat, auth: SeatAuth, scoped: bo
     );
   }
   return reasons.length === 0 ? { ok: true } : { ok: false, reason: reasons.join('; '), source };
+}
+
+/** How far the seat's login was verified, and why not further (crew#645). */
+function loginCheck(key: string, authFailure: SeatAuthFailure | null, probe: ProbeInput): { login_check: LoginCheck; login_note?: string } {
+  if (authFailure !== null) return { login_check: 'live' };
+  if (probe === 'pending') {
+    return { login_check: 'unverified', login_note: "login unverified — the seat's own auth check has not answered yet" };
+  }
+  if (probe === undefined) {
+    return {
+      login_check: 'unverified',
+      login_note: `login unverified — nothing asked ${key} whether its login works (no auth-status check), so its sign-in is read from its credential file; its first refused turn signs it out`,
+    };
+  }
+  if (probe.signedIn === null) {
+    return { login_check: 'unverified', login_note: `login unverified — the seat's own auth check could not tell (${probe.detail})` };
+  }
+  if (probe.check === 'live') return { login_check: 'live' };
+  return {
+    login_check: 'status',
+    login_note: `login unverified — only the CLI's status command answered, and it reads the stored login, not the session (${probe.detail})`,
+  };
 }
