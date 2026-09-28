@@ -133,7 +133,7 @@ describe('deliverPrScript (the hardened field script)', () => {
     // A GUARD, NOT A SILENT DROP: every exclusion is reported with its reason.
     expect(script).toContain('deliver: EXCLUDED ($RN): $F');
     // `--cleanup=whitespace`: a `commit.cleanup=strip` config must not eat the `## …` headings (W3-K1).
-    expect(script).toContain('git diff --cached --quiet || git commit -q --cleanup=whitespace -F "$TD/text"');
+    expect(script).toContain('git diff --cached --quiet || git commit -q --cleanup=whitespace -F "$TD/commit"');
     // The commit precedes both the rebase (which refuses a dirty tree) and the push.
     expect(script.indexOf('git add -u')).toBeLessThan(script.indexOf('git rebase'));
     expect(script.indexOf('git commit')).toBeLessThan(script.indexOf('git push -u origin'));
@@ -180,7 +180,7 @@ describe('deliverPrScript (the hardened field script)', () => {
     );
     // The commit message IS that text (git takes the first paragraph as the subject); the cleanup
     // mode keeps the `## …` headings under a `commit.cleanup=strip` config (W3-K1).
-    expect(withIntent).toContain('git commit -q --cleanup=whitespace -F "$TD/text"');
+    expect(withIntent).toContain('git commit -q --cleanup=whitespace -F "$TD/commit"');
     // No origin ⇒ no callback is even attempted, and the output SAYS which text is used (Copilot
     // on #525) — every branch names its reason.
     expect(script).toContain("API=''");
@@ -475,7 +475,9 @@ describe('composeDeliverWorkflow (per-run composition)', () => {
     const deliver = composed.phases[composed.phases.length - 1]!;
     const cmd = (deliver.executor as { cmd: string[] }).cmd[2]!;
     expect(cmd).toContain("API='http://127.0.0.1:7701'");
-    expect(cmd).toContain('- Run: [`run-123`](http://127.0.0.1:7701/runs/run-123)');
+    // crew#550 P-2: the daemon's loopback origin is the callback, never the PR's run link.
+    expect(cmd).toContain('- Run: `run-123`');
+    expect(cmd).not.toContain('127.0.0.1:7701/runs/run-123');
     expect(cmd).toContain('workflow `feature` · repo `wicked-crew`');
     expect(cmd).toContain('Fixes #9');
     for (const p of feature.phases) expect(cmd).toContain(`| \`${p.id}\` | ${p.kind} | ${p.role} |`);

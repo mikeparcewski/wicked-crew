@@ -11,7 +11,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   DELIVER_TITLE_MAX,
+  COMMIT_SUBJECT_MAX,
   boundedTitle,
+  commitSubject,
   conventionalPrefix,
   composeDeliverText,
   deliverTitle,
@@ -22,11 +24,15 @@ import {
   issueRefs,
   parseFramedDeliverText,
   runUrlFor,
+  configuredPublicOrigin,
+  configuredTrailers,
   urlPathSegment,
   EMBEDDED_INTENT_CAP,
   baseWorkflowId,
   boundIntentForEmbedding,
   composeEmbeddedDeliverText,
+  extractFollowUps,
+  FOLLOW_UPS_MAX,
 } from '../src/core/deliver-text.js';
 import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
 import type { SessionView, WorkUnit } from '../src/core/types.js';
@@ -134,14 +140,16 @@ function runView(): SessionView {
   };
 }
 
-describe('deliverTitle — ≤72 characters, never cut mid-word (F-3R2-014)', () => {
+describe('deliverTitle / commitSubject — never cut mid-word (F-3R2-014); the PR title runs to 256, the commit subject to 72 (crew#550)', () => {
   it('is the intent’s first line when it fits', () => {
     expect(deliverTitle('add the attention-reason helper', RUN_ID)).toBe('add the attention-reason helper');
   });
 
   it('cuts the F-3R2-014 intent at a word boundary with an ellipsis, inside 72 characters', () => {
-    const title = deliverTitle(INTENT, RUN_ID);
-    expect(title.length).toBeLessThanOrEqual(DELIVER_TITLE_MAX);
+    // crew#550 P-1: the PR title is the whole first line — GitHub allows 256 characters.
+    expect(deliverTitle(INTENT, RUN_ID)).toBe(INTENT.split('\n')[0]!.trim());
+    const title = commitSubject(deliverTitle(INTENT, RUN_ID));
+    expect(title.length).toBeLessThanOrEqual(COMMIT_SUBJECT_MAX);
     expect(title.endsWith('…')).toBe(true);
     // The headline the finding recorded ended in `aga` — a word cut in half. Never again: the
     // characters before the ellipsis are a complete word of the intent.
@@ -168,7 +176,7 @@ describe('deliverTitle — ≤72 characters, never cut mid-word (F-3R2-014)', ()
 
   it('drops dangling punctuation before the ellipsis', () => {
     const line = `${'word '.repeat(13)}(paren, and a much longer tail that will not fit at all`;
-    const title = deliverTitle(line, RUN_ID);
+    const title = commitSubject(deliverTitle(line, RUN_ID));
     expect(title.length).toBeLessThanOrEqual(72);
     expect(title).toMatch(/[a-z]…$/);
   });
@@ -176,23 +184,27 @@ describe('deliverTitle — ≤72 characters, never cut mid-word (F-3R2-014)', ()
   it('names the run when the intent is blank, and never exceeds the cap even for one huge token', () => {
     expect(deliverTitle('', RUN_ID)).toBe(`wicked-crew run ${RUN_ID}`);
     expect(deliverTitle('   \n\t\n', RUN_ID)).toBe(`wicked-crew run ${RUN_ID}`);
-    const huge = deliverTitle('x'.repeat(200), RUN_ID);
-    expect(huge.length).toBe(72);
+    const huge = deliverTitle('x'.repeat(300), RUN_ID);
+    expect(huge.length).toBe(DELIVER_TITLE_MAX);
     expect(huge.endsWith('…')).toBe(true);
+    const subject = commitSubject(huge);
+    expect(subject.length).toBe(COMMIT_SUBJECT_MAX);
+    expect(subject.endsWith('…')).toBe(true);
   });
 
   it('a blank intent with a LONG caller-supplied run id goes through the same bounded cut — never mid-id (Copilot on #525)', () => {
     // LaunchSchema only requires a non-empty sessionId and the CLI passes `--session` through.
-    const longId = `campaign-${'a'.repeat(90)}`;
+    const longId = `campaign-${'a'.repeat(250)}`;
     const title = deliverTitle('', longId);
-    expect(title.length).toBeLessThanOrEqual(72);
+    expect(title.length).toBeLessThanOrEqual(DELIVER_TITLE_MAX);
     expect(title).toBe('wicked-crew run…'); // the word boundary before the id; the body carries the id in full
-    // A 56-char id still fits whole (16 + 56 = 72).
+    // A 56-char id still fits the commit subject whole (16 + 56 = 72).
     const fits = `r-${'b'.repeat(54)}`;
-    expect(deliverTitle('', fits)).toBe(`wicked-crew run ${fits}`);
-    expect(deliverTitle('', fits).length).toBe(72);
-    // One more character and it is cut at the boundary, not inside the id.
-    expect(deliverTitle('', `${fits}c`)).toBe('wicked-crew run…');
+    expect(commitSubject(deliverTitle('', fits))).toBe(`wicked-crew run ${fits}`);
+    expect(commitSubject(deliverTitle('', fits)).length).toBe(72);
+    // One more character and the SUBJECT is cut at the boundary, not inside the id.
+    expect(commitSubject(deliverTitle('', `${fits}c`))).toBe('wicked-crew run…');
+    expect(deliverTitle('', `${fits}c`)).toBe(`wicked-crew run ${fits}c`);
   });
 
   it('removes control characters — a title is one line', () => {
@@ -255,7 +267,7 @@ describe('issueRefs — `Fixes #N` from a closing verb, everything else as Refs'
 });
 
 describe('composeDeliverText from the persisted run (GET /runs/:id/deliver-text)', () => {
-  const facts = factsFromRun(runView(), runUrlFor('http://127.0.0.1:7701', RUN_ID));
+  const facts = factsFromRun(runView(), runUrlFor('https://studio.example.test', RUN_ID));
   const text = composeDeliverText(facts);
 
   it('reads the run view: base workflow id, repo, intent, checks, evaluator', () => {
@@ -273,7 +285,7 @@ describe('composeDeliverText from the persisted run (GET /runs/:id/deliver-text)
     expect(factsFromRun(v, null).workflowId).toBe(`wf-${RUN_ID}`);
     expect(factsFromRun(v, null, { workflowId: 'custom-bug' }).workflowId).toBe('custom-bug');
     expect(facts.repoRef).toBe('wicked-studio');
-    expect(facts.runUrl).toBe(`http://127.0.0.1:7701/runs/${RUN_ID}`);
+    expect(facts.runUrl).toBe(`https://studio.example.test/runs/${RUN_ID}`);
     // Units are ordered by ord, whatever order the view listed them in.
     expect(facts.phases.map((p) => p.id)).toEqual(['triage', 'reproduce', 'fix', 'verify', 'deliver']);
     expect(facts.phases.map((p) => p.seat)).toEqual(['codex', 'pi', 'claude', 'pi', 'tool']);
@@ -285,12 +297,12 @@ describe('composeDeliverText from the persisted run (GET /runs/:id/deliver-text)
 
   it('carries every section the finding asked for — nothing is empty', () => {
     const { title, body } = text;
-    expect(title.length).toBeLessThanOrEqual(72);
+    expect(title.length).toBeLessThanOrEqual(DELIVER_TITLE_MAX);
     expect(body).toContain('## Intent');
     expect(body).toContain('Found by the seed-surfaces suite (wicked-studio#211, scenario CLN-2)'); // the intent verbatim
     expect(body).toContain('\nFixes #214\n');
     expect(body).toContain('Refs: #211'); // `wicked-studio#211` on a wicked-studio delivery (W3-K2)
-    expect(body).toContain(`- Run: [\`${RUN_ID}\`](http://127.0.0.1:7701/runs/${RUN_ID})`);
+    expect(body).toContain(`- Run: [\`${RUN_ID}\`](https://studio.example.test/runs/${RUN_ID})`);
     expect(body).toContain('workflow `bug` · repo `wicked-studio`');
     // Phases with seats and gate outcomes.
     expect(body).toContain('| `triage` | recon | neutral | codex | auto | approved |');
@@ -423,21 +435,24 @@ describe('deliverTitle — conventional prefix, no bare-URL titles, cuts outside
   it('cuts at the last word boundary OUTSIDE a quoted or bracketed phrase (crew#550 P-1)', () => {
     // The #273 headline: the old cut landed inside `'sign a seat in'`.
     const line = "Run failure card: headline truncated at '(Failed):' and 'sign a seat in' when the failed unit is a seat sign-in";
-    const title = boundedTitle(line);
+    // The PR title keeps the whole line (GitHub's 256); the 72-column commit subject is where the cut lands.
+    expect(deliverTitle(line, RUN_ID)).toBe(line);
+    expect(commitSubject(line)).toBe("Run failure card: headline truncated at '(Failed):' and…");
+    const title = boundedTitle(line, 72);
     expect(title.length).toBeLessThanOrEqual(72);
     expect(title).toBe("Run failure card: headline truncated at '(Failed):' and…");
     // A parenthesised phrase that would straddle the cut is dropped whole.
     const parens = `${'word '.repeat(9)}(a parenthetical remark that runs well past the seventy-two column limit) tail`;
-    const t2 = boundedTitle(parens);
+    const t2 = boundedTitle(parens, 72);
     expect(t2).toBe(`${'word '.repeat(8)}word…`);
     // An apostrophe inside a word is not a quote: `daemon's` never opens a phrase.
     const apos = "Fix the daemon's gh login handling when the active account flips between sessions again";
-    const t3 = boundedTitle(apos);
+    const t3 = boundedTitle(apos, 72);
     expect(t3.length).toBeLessThanOrEqual(72);
     expect(t3.startsWith("Fix the daemon's gh login handling when the active account flips")).toBe(true);
     // No depth-0 boundary at all inside the room ⇒ any word boundary, still never mid-word.
     const allQuoted = `"${'quoted words '.repeat(10)}"`;
-    const t4 = boundedTitle(allQuoted);
+    const t4 = boundedTitle(allQuoted, 72);
     expect(t4.length).toBeLessThanOrEqual(72);
     expect(t4.endsWith('…')).toBe(true);
     expect(allQuoted.startsWith(t4.slice(0, -1))).toBe(true);
@@ -453,7 +468,7 @@ describe('composeDeliverText from the workflow definition (the script’s embedd
     workflowId: bug.id,
     repoRef: 'wicked-studio',
     phases: bug.phases,
-    runUrl: runUrlFor('http://127.0.0.1:7701/', RUN_ID),
+    runUrl: runUrlFor('https://studio.example.test/', RUN_ID),
   });
   const { title, body } = composeDeliverText(facts);
 
@@ -462,7 +477,7 @@ describe('composeDeliverText from the workflow definition (the script’s embedd
     expect(title).toBe(deliverTitle(INTENT, RUN_ID, 'bug'));
     expect(title.startsWith('fix: ')).toBe(true);
     expect(body).toContain('\nFixes #214\n');
-    expect(body).toContain(`- Run: [\`${RUN_ID}\`](http://127.0.0.1:7701/runs/${RUN_ID})`);
+    expect(body).toContain(`- Run: [\`${RUN_ID}\`](https://studio.example.test/runs/${RUN_ID})`);
     expect(body).toContain('workflow `bug` · repo `wicked-studio`');
     for (const p of bug.phases) expect(body).toContain(`| \`${p.id}\` | ${p.kind} | ${p.role} |`);
     expect(body).toContain('From the workflow definition at launch');
@@ -501,29 +516,32 @@ describe('framing — one shape for the daemon answer, the embedded fallback and
     expect(parseFramedDeliverText('title\n\nbody\n')).toEqual({ title: 'title', body: 'body' });
   });
 
-  it('builds the run bookmark from an origin, tolerating a trailing slash', () => {
-    expect(runUrlFor('http://127.0.0.1:7701', 'r1')).toBe('http://127.0.0.1:7701/runs/r1');
-    expect(runUrlFor('http://[::1]:7701/', 'a b')).toBe('http://[::1]:7701/runs/a%20b');
-    expect(runUrlFor('http://localhost:7701', 'r1')).toBe('http://localhost:7701/runs/r1');
-    expect(runUrlFor('http://127.255.0.9:1', 'r1')).toBe('http://127.255.0.9:1/runs/r1');
+  it('builds the run link from the configured PUBLIC origin, tolerating a trailing slash (crew#550 P-2)', () => {
+    expect(runUrlFor('https://studio.example.test', 'r1')).toBe('https://studio.example.test/runs/r1');
+    expect(runUrlFor('https://studio.example.test/', 'a b')).toBe('https://studio.example.test/runs/a%20b');
+    // An operator may name a LAN studio on purpose: the origin is configured, never the bound address.
+    expect(runUrlFor('http://192.168.1.5:7701', 'r1')).toBe('http://192.168.1.5:7701/runs/r1');
     expect(runUrlFor(null, 'r1')).toBeNull();
     expect(runUrlFor('', 'r1')).toBeNull();
+    expect(configuredPublicOrigin({})).toBeNull();
+    expect(configuredPublicOrigin({ WICKED_CREW_PUBLIC_ORIGIN: '  ' })).toBeNull();
+    expect(configuredPublicOrigin({ WICKED_CREW_PUBLIC_ORIGIN: ' https://studio.example.test ' })).toBe('https://studio.example.test');
   });
 
-  it('links the run ONLY for a loopback origin — a LAN host never lands in a PR body (W3-K4)', () => {
-    for (const origin of ['http://192.168.1.5:7701', 'http://10.0.0.2:7701', 'https://crew.corp.example:443', 'http://[fe80::1]:7701', 'not a url']) {
+  it('never links a loopback origin — a daemon-local URL opens only on the daemon host (crew#550 P-2)', () => {
+    for (const origin of ['http://127.0.0.1:7701', 'http://localhost:7701', 'http://[::1]:7701/', 'http://127.255.0.9:1', 'ftp://studio.example.test', 'not a url']) {
       expect(runUrlFor(origin, RUN_ID)).toBeNull();
     }
-    const facts = factsFromRun(runView(), runUrlFor('http://192.168.1.5:7701', RUN_ID));
+    const facts = factsFromRun(runView(), runUrlFor('http://127.0.0.1:7701', RUN_ID));
     const { body } = composeDeliverText(facts);
     expect(body).toContain(`- Run: \`${RUN_ID}\``); // the id is still named
-    expect(body).not.toContain('192.168.1.5');
+    expect(body).not.toMatch(/127\.0\.0\.1|localhost/);
     // The LINKED form labels the run with the same one-line code span — a newline or backtick in
     // a caller-supplied id cannot break the entry or the Markdown.
     const odd = runView();
     odd.session.id = 'r`1\nx';
-    const linked = composeDeliverText(factsFromRun(odd, runUrlFor('http://127.0.0.1:7701', odd.session.id))).body;
-    expect(linked).toContain('- Run: [`r1 x`](http://127.0.0.1:7701/runs/r%601%0Ax)');
+    const linked = composeDeliverText(factsFromRun(odd, runUrlFor('https://studio.example.test', odd.session.id))).body;
+    expect(linked).toContain('- Run: [`r1 x`](https://studio.example.test/runs/r%601%0Ax)');
   });
 
   it('bounds the intent the SCRIPT embeds and says so; the run-derived text is never bounded (E2BIG)', () => {
@@ -610,5 +628,104 @@ describe('BC-72 / BC-73 — the generated title prefix and trailer carry no iden
     odd.session.id = 'r`1\nx /opt/nope @who';
     const oddBody = composeDeliverText(factsFromRun(odd, null)).body;
     expect(oddBody.split('\n\n').pop()).toBe('Delivered-By: wicked-crew run r`1 x /opt/nope @who');
+  });
+});
+
+describe('crew#635 — every issue a closing verb names is closed; another repository stays Refs', () => {
+  it('a closing verb carries over a list — `fix #618, #619 and #620` closes all three', () => {
+    expect(issueRefs('Fix #618, #619 and #620 — the stall trio', 'wicked-crew')).toEqual({ fixes: ['#618', '#619', '#620'], refs: [] });
+    expect(issueRefs('closes #1 & #2 + #3 / #4', null).fixes).toEqual(['#1', '#2', '#3', '#4']);
+    expect(issueRefs('Resolves wicked-crew#618/#619', 'wicked-crew').fixes).toEqual(['#618', '#619']);
+    // A list ends at the first word that is not a ref: `refs #4` is not closed by `fix #3,`.
+    expect(issueRefs('fix #3, refs #4', null)).toEqual({ fixes: ['#3'], refs: ['#4'] });
+  });
+
+  it('an `owner/repo#N` in ANOTHER repository stays Refs even under a closing verb (a cross-repo half)', () => {
+    expect(issueRefs('fixes mikeparcewski/wicked-core#541 and #12', 'wicked-crew')).toEqual({
+      fixes: ['#12'],
+      refs: ['mikeparcewski/wicked-core#541'],
+    });
+    // The delivery repository's own `owner/repo#N` still closes.
+    expect(issueRefs('fixes mikeparcewski/wicked-crew#7', 'wicked-crew').fixes).toEqual(['mikeparcewski/wicked-crew#7']);
+  });
+
+  it('the body says why a Refs issue stays open', () => {
+    const { body } = composeDeliverText(
+      factsFromWorkflow({ runId: RUN_ID, intent: 'fix #618; see #700', workflowId: 'bug', repoRef: 'wicked-crew', phases: [], runUrl: null }),
+    );
+    expect(body).toContain('\nFixes #618\nRefs: #700\n');
+    expect(body).toContain('Refs are not closed by this PR');
+  });
+});
+
+describe('crew#550 — attribution trailers and the linked-issues block', () => {
+  it('reads well-formed trailers from WICKED_CREW_DELIVER_TRAILERS and drops the rest', () => {
+    expect(configuredTrailers({})).toEqual([]);
+    expect(
+      configuredTrailers({
+        WICKED_CREW_DELIVER_TRAILERS: 'Co-Authored-By: Crew Bot <bot@example.test>\nnot a trailer\n\nReviewed-By: A Person <a@example.test>\nBad:\u0007 x',
+      }),
+    ).toEqual(['Co-Authored-By: Crew Bot <bot@example.test>', 'Reviewed-By: A Person <a@example.test>']);
+  });
+
+  it('the commit message ends with the configured trailers after Delivered-By', () => {
+    const facts = { ...factsFromRun(runView(), null), trailers: ['Co-Authored-By: Crew Bot <bot@example.test>'] };
+    const { body } = composeDeliverText(facts);
+    expect(body.endsWith(`\n\nDelivered-By: wicked-crew run ${RUN_ID}\nCo-Authored-By: Crew Bot <bot@example.test>`)).toBe(true);
+  });
+
+  it('the daemon’s linked-issues block never reaches the PR: not the intent, not the refs', () => {
+    const v = runView();
+    v.session.problem = 'fix #541\n\n<!-- wicked-crew:linked-issues -->\n## Linked issues\n\n### #541: the bug\nsee also #999 and fixes #998\n<!-- /wicked-crew:linked-issues -->';
+    const facts = factsFromRun(v, null);
+    expect(facts.intent).toBe('fix #541');
+    const { body } = composeDeliverText(facts);
+    expect(body).toContain('\nFixes #541\n');
+    expect(body).not.toContain('#999');
+    expect(body).not.toContain('#998');
+    expect(body).not.toContain('Linked issues');
+  });
+});
+
+// crew#550 P-7: the evaluator's residuals land on the PR instead of evaporating in its log.
+describe('evaluator follow-ups (crew#550 P-7)', () => {
+  it('reads the list under a FOLLOW-UPS: heading, in its common spellings', () => {
+    const verdict = [
+      'VERDICT: APPROVE',
+      'The fix is correct.',
+      '',
+      'FOLLOW-UPS:',
+      '- add the remedy line and link to the failure card',
+      '- the sibling comment at L40 still says',
+      '  "retry" (continuation)',
+      '',
+      'Unrelated trailing prose.',
+    ].join('\n');
+    expect(extractFollowUps(verdict)).toEqual([
+      'add the remedy line and link to the failure card',
+      'the sibling comment at L40 still says "retry" (continuation)',
+    ]);
+    expect(extractFollowUps('## Follow-ups\n\n1. one\n2) two')).toEqual(['one', 'two']);
+    expect(extractFollowUps('**Follow ups:** file an issue for the flaky test')).toEqual(['file an issue for the flaky test']);
+  });
+
+  it('reads none / no block as no follow-ups, de-duplicates and caps', () => {
+    expect(extractFollowUps('VERDICT: APPROVE\nFOLLOW-UPS: none')).toEqual([]);
+    expect(extractFollowUps('VERDICT: APPROVE, nothing else to add')).toEqual([]);
+    expect(extractFollowUps('FOLLOW-UPS:\n- a\n- a\n\nFollow-ups:\n- b')).toEqual(['a', 'b']);
+    const many = `FOLLOW-UPS:\n${Array.from({ length: 20 }, (_, i) => `- item ${i}`).join('\n')}`;
+    expect(extractFollowUps(many)).toHaveLength(FOLLOW_UPS_MAX);
+  });
+
+  it('renders ## Follow-ups with each item, "none" when read and empty, and nothing when not read', () => {
+    const base = factsFromRun(runView(), null);
+    const withItems = composeDeliverText({ ...base, followUps: ['add the remedy line', 'a | pipe'] }).body;
+    expect(withItems).toContain('## Follow-ups\n\n- add the remedy line\n- a \\| pipe\n');
+    // The section sits before the footer, after the evaluator gate.
+    expect(withItems.indexOf('## Follow-ups')).toBeGreaterThan(withItems.indexOf('## Evaluator gate'));
+    expect(withItems.indexOf('## Follow-ups')).toBeLessThan(withItems.indexOf('Delivered by'));
+    expect(composeDeliverText({ ...base, followUps: [] }).body).toContain('## Follow-ups\n\n_None flagged by the evaluator._');
+    expect(composeDeliverText(base).body).not.toContain('## Follow-ups');
+    expect(factsFromRun(runView(), null, { followUps: ['x'] }).followUps).toEqual(['x']);
   });
 });

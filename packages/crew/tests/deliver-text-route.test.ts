@@ -108,7 +108,7 @@ async function buildApp(
 }
 
 describe('GET /runs/:id/deliver-text (crew#524)', () => {
-  it('answers text/plain framed as title / blank / body, composed from the run record with a link to THIS daemon', async () => {
+  it('answers text/plain framed as title / blank / body, composed from the run record, naming the run without a loopback link', async () => {
     const { app } = await buildApp([view()]);
     const addr = app.server.address();
     const port = typeof addr === 'object' && addr ? addr.port : 0;
@@ -122,8 +122,10 @@ describe('GET /runs/:id/deliver-text (crew#524)', () => {
     // DES-L9: the workflow's conventional prefix (`bug` → `fix:`).
     expect(text!.title).toBe('fix: the archive controls never render');
     expect(text!.body).toContain('Fixes #214');
-    // The run link points at the daemon that answered — its own bound origin.
-    expect(text!.body).toContain(`- Run: [\`${RUN_ID}\`](http://127.0.0.1:${port}/runs/${RUN_ID})`);
+    // crew#550 P-2: the daemon's own loopback origin is never the PR's run link (it opens only on
+    // this host); with no public origin configured the run is named, not linked.
+    expect(text!.body).toContain(`- Run: \`${RUN_ID}\``);
+    expect(text!.body).not.toContain(`127.0.0.1:${port}/runs/`);
     expect(text!.body).toContain('workflow `bug` · repo `wicked-studio`');
     expect(text!.body).toContain('| `fix` | build | creator | claude | auto | approved |');
     expect(text!.body).toContain('| `verify` | test | evaluator | pi | human if verdict not pass | approved |');

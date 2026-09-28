@@ -92,6 +92,8 @@ import {
   factsFromWorkflow,
   framedDeliverText,
   runUrlFor,
+  configuredPublicOrigin,
+  commitSubject,
   urlPathSegment,
   type DeliverTextFacts,
 } from './deliver-text.js';
@@ -191,7 +193,7 @@ export type GhExec = (
   opts: { cwd: string; timeoutMs: number },
 ) => Promise<{ stdout: string; stderr: string; code: number | null }>;
 
-const defaultGhExec: GhExec = (args, opts) =>
+export const defaultGhExec: GhExec = (args, opts) =>
   new Promise((resolve) => {
     // The daemon's governance-store variables never ride into a child (crew#495): the boot value is
     // restored and the exported store URL is stripped, the same helper every other spawn site uses.
@@ -368,6 +370,13 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
   const api = apiOriginLiteral(opts.apiOrigin);
   const fallbackLines = heredocLines(framedDeliverText(fallback));
   const heredoc = heredocDelimiter(fallbackLines);
+  // crew#550: the PR title may run to GitHub's 256 characters, the commit subject stays at git's 72.
+  // The subject is composed here from the same title; the script puts it above the full text when
+  // the two differ, so the commit body opens with the whole title.
+  const subjectLines = heredocLines(commitSubject(fallback.title));
+  const fallbackTitleLines = heredocLines(fallback.title);
+  // Never the text heredoc's own delimiter, so each heredoc has exactly one closing line.
+  const subjectHeredoc = heredocDelimiter([...fallbackLines, ...subjectLines, ...fallbackTitleLines, heredoc]);
   // The run id for the daemon URL: the LAUNCH id when the composer knows it, pre-encoded as one
   // strict path segment (only `[A-Za-z0-9._~%-]` survive, so the single-quoted literal is safe);
   // otherwise derived from the branch at run time and percent-encoded byte-wise by the script.
@@ -524,6 +533,18 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     heredoc,
     'fi',
     'TITLE=$(sed -n 1p "$TD/text")',
+    `cat > "$TD/subject" <<'${subjectHeredoc}'`,
+    ...subjectLines,
+    subjectHeredoc,
+    `cat > "$TD/fbtitle" <<'${subjectHeredoc}'`,
+    ...fallbackTitleLines,
+    subjectHeredoc,
+    // The subject for the title actually used: the composed one when the daemon's title is the
+    // embedded fallback's; else (the daemon titled it differently) a plain word-boundary cut at 72.
+    'if [ "$(cat "$TD/fbtitle")" != "$TITLE" ]; then printf \'%s\\n\' "$TITLE" | awk \'{ if (length($0) <= 72) print; else { s = substr($0, 1, 71); sub(/ [^ ]*$/, "", s); print s "…" } }\' > "$TD/subject"; fi',
+    // The commit message: the text verbatim when its title fits the subject width, else the 72-column
+    // subject, a blank line, then the text (whose first line is the full title) — crew#550.
+    'if [ "$(cat "$TD/subject")" = "$TITLE" ]; then cp "$TD/text" "$TD/commit"; else { cat "$TD/subject"; echo; cat "$TD/text"; } > "$TD/commit"; fi',
     "sed '1,2d' \"$TD/text\" > \"$TD/body\"",
     // (c0) DELIVER PREFLIGHT (crew#426) — a governed run that bumps an internal WORKSPACE package's
     // version (e.g. packages/crew-api-types) leaves its version-derived codegen AND the lockfile
@@ -636,7 +657,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // `--cleanup=whitespace`, NOT git's default for `-F`: an operator/repo `commit.cleanup=strip`
     // would otherwise treat every `## Intent` / `## Run` / `## Phases` heading as a `#` comment and
     // strip it from the commit body (review W3-K1).
-    'git diff --cached --quiet || git commit -q --cleanup=whitespace -F "$TD/text"',
+    'git diff --cached --quiet || git commit -q --cleanup=whitespace -F "$TD/commit"',
     // (c2) NOTHING TO DELIVER — no staged work AND no commits of its own. Fail LOUDLY before the
     // remote is touched: an empty ref pushed under a run id is worse than a failed phase.
     'if [ -n "$TARGET" ]; then A=$(git rev-list --count "origin/$TARGET..$B"); [ "$A" -ge 1 ] || { echo "deliver: nothing to deliver — the run added no commit on top of PR #$PRNUM"; exit 1; }; else',
@@ -882,7 +903,7 @@ export function deliverPresetStep(
     workflowId: presetName,
     repoRef: launch.repoRef ?? null,
     phases,
-    runUrl: runUrlFor(apiOrigin, runId),
+    runUrl: runUrlFor(configuredPublicOrigin(), runId),
     revisesPr: revisesPr === null ? null : { number: revisesPr.number, url: revisesPr.url },
   });
   const phase = deliverPrPhase([], intent, {
@@ -928,7 +949,7 @@ export function composeDeliverWorkflow(
     workflowId: base.id,
     repoRef: launch.repoRef ?? null,
     phases: base.phases,
-    runUrl: runUrlFor(apiOrigin, runId),
+    runUrl: runUrlFor(configuredPublicOrigin(), runId),
     revisesPr: revisesPr === null ? null : { number: revisesPr.number, url: revisesPr.url },
   });
   return {

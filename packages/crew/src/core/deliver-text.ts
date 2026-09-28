@@ -29,9 +29,16 @@
  */
 
 import type { GateSpec, PhaseDef, SessionView, WorkUnit } from './types.js';
+import { stripLinkedIssues } from './linked-issues.js';
 
-/** The PR title / commit subject cap — git's conventional subject width. */
-export const DELIVER_TITLE_MAX = 72;
+/**
+ * The PR title cap — GitHub's own limit (crew#550 P-1: a 72-character cap on the PR title still
+ * severed the intent inside a quoted phrase). The COMMIT subject keeps git's conventional width,
+ * {@link COMMIT_SUBJECT_MAX}; a longer title then opens the commit body in full.
+ */
+export const DELIVER_TITLE_MAX = 256;
+/** The commit subject cap — git's conventional subject width (crew#550). */
+export const COMMIT_SUBJECT_MAX = 72;
 
 /** One phase of the run, with as much as is known about it at composition time. */
 export interface DeliverPhaseFact {
@@ -92,10 +99,17 @@ export interface DeliverTextFacts {
   verdicts: DeliverVerdictFact[];
   /** DES-L9: the open pull request this run REVISES (its commits land there; no new PR). */
   revisesPr?: { number: number; url: string } | null;
+  /** crew#550: extra git trailers for the commit (`Co-Authored-By: …`), from
+   *  {@link DELIVER_TRAILERS_ENV}; absent/empty = only the `Delivered-By:` trailer. */
+  trailers?: string[];
+  /** crew#550 P-7: the follow-ups the evaluator flagged (its `FOLLOW-UPS:` block, read from the
+   *  evaluator units' output by {@link extractFollowUps}). `[]` = read, none flagged; absent = not
+   *  read (a definition-time composition), and the section is left out. */
+  followUps?: string[];
 }
 
 export interface DeliverText {
-  /** ≤ {@link DELIVER_TITLE_MAX} characters, one line, never cut mid-word. */
+  /** The PR title: ≤ {@link DELIVER_TITLE_MAX} characters, one line, never cut mid-word. */
   title: string;
   /** Markdown; never empty. */
   body: string;
@@ -185,7 +199,7 @@ export function conventionalPrefix(workflowId: string | null | undefined): strin
 
 /**
  * The PR title / commit subject: the intent's first line, whole when it fits, otherwise cut at the
- * last word boundary that leaves room for a single `…` — so the result is ≤ 72 characters and never
+ * last word boundary that leaves room for a single `…` — so the result is ≤ 256 characters and never
  * ends mid-word (the F-3R2-014 headline `…scenario CLN-2) aga`). Dangling punctuation before the
  * ellipsis is dropped. A blank intent names the run instead — through the SAME bounded cut, so a
  * long caller-supplied session id (the CLI passes `--session` through) is never cut mid-id either
@@ -209,15 +223,15 @@ export function deliverTitle(intent: string, runId: string, workflowId?: string 
 const OPENERS: Record<string, string> = { '(': ')', '[': ']', '{': '}', '"': '"', '`': '`', '“': '”', '‘': '’' };
 
 /**
- * `line` whole when it fits, else cut at a word boundary with a single `…` — ≤ 72 characters —
+ * `line` whole when it fits, else cut at a word boundary with a single `…` — ≤ `max` characters —
  * choosing the LAST boundary at nesting depth 0: never inside a quoted or bracketed phrase (crew#550
  * P-1: `… truncated at '(Failed):' and 'sign a seat…`). A straight apostrophe opens a quote only
  * after a space or at the start (so `daemon's` is a word, not a quote). When no depth-0 boundary
  * exists inside the room, any word boundary is taken; a single 72+ character token is cut hard.
  */
-export function boundedTitle(line: string): string {
-  if (line.length <= DELIVER_TITLE_MAX) return line;
-  const room = DELIVER_TITLE_MAX - 1; // one character is the ellipsis
+export function boundedTitle(line: string, max: number = DELIVER_TITLE_MAX): string {
+  if (line.length <= max) return line;
+  const room = max - 1; // one character is the ellipsis
   const head = line.slice(0, room + 1); // one past the room: a space HERE means the room ends a word
   const stack: string[] = [];
   let lastAnyCut = -1;
@@ -246,13 +260,41 @@ export function boundedTitle(line: string): string {
   return `${kept}…`;
 }
 
+/**
+ * The commit subject for a PR title (crew#550): the title itself when it fits git's 72-character
+ * subject width, else the same depth-aware word-boundary cut at 72. The deliver script puts the
+ * full title at the top of the commit body whenever the two differ.
+ */
+export function commitSubject(title: string): string {
+  return boundedTitle(title, COMMIT_SUBJECT_MAX);
+}
+
 // ── issue references ───────────────────────────────────────────────────────────────────────────
 
-/** `fix issue #214`, `fixes #7`, `closes wicked-studio#3`, `resolved: #9` — a closing verb + a ref. */
-const CLOSING_REF =
-  /\b(?:fix(?:es|ed)?|close[sd]?|resolve[sd]?)\b(?:\s+(?:issue|bug|for))?\s*:?\s*((?:[\w.-]+\/)?[\w.-]+)?#(\d+)\b/gi;
+/** One `#N` / `repo#N` / `owner/repo#N` inside a closing list. */
+const ONE_REF = String.raw`(?:(?:[\w.-]+\/)?[\w.-]+)?#\d+\b`;
+/**
+ * `fix issue #214`, `fixes #7`, `closes wicked-studio#3`, `resolved: #9` — a closing verb + a ref —
+ * and a LIST after one verb (crew#635: `fix #618, #619 and #620` closed only #618, so every merge
+ * left the rest open): refs joined by `,` / `and` / `&` / `+` / `/` all ride the one verb.
+ */
+const CLOSING_LIST = new RegExp(
+  String.raw`\b(?:fix(?:es|ed)?|close[sd]?|resolve[sd]?)\b(?:\s+(?:issues?|bugs?|for))?\s*:?\s*(` +
+    ONE_REF +
+    String.raw`(?:\s*(?:,|&|\+|\/|\band\b)?\s*` +
+    ONE_REF +
+    `)*)`,
+  'gi',
+);
 /** Any `#N`, `repo#N` or `owner/repo#N` not glued to a word/path (so `a/b#1` is one ref, `#1a` none). */
 const ANY_REF = /(?<![\w/#])((?:[\w.-]+\/)?[\w.-]+)?#(\d+)\b/g;
+
+/** Does `owner/repo#N` name the delivery repository (`repoRef`, the registered repo id)? */
+function sameRepo(ref: string, repoRef: string | null | undefined): boolean {
+  if (repoRef === undefined || repoRef === null || repoRef === '') return false;
+  const m = /^[\w.-]+\/([\w.-]+)#\d+$/.exec(ref);
+  return m !== null && m[1]!.toLowerCase() === repoRef.toLowerCase();
+}
 
 /**
  * The issues the intent names, split into the ones it says it fixes and the rest.
@@ -263,7 +305,10 @@ const ANY_REF = /(?<![\w/#])((?:[\w.-]+\/)?[\w.-]+)?#(\d+)\b/g;
  * on a wicked-studio delivery must close #214). Any other owner-less `repo#N` rides verbatim as
  * information; `owner/repo#N` is left exactly as written.
  */
-export function issueRefs(intent: string, repoRef?: string | null): IssueRefs {
+export function issueRefs(rawIntent: string, repoRef?: string | null): IssueRefs {
+  // The daemon's linked-issues block (crew#627) is issue TEXT, not the intent: its mentions are
+  // never the run's references.
+  const intent = stripLinkedIssues(rawIntent);
   const normalize = (prefix: string | undefined, n: string): string => {
     if (prefix === undefined || prefix === '') return `#${n}`;
     if (!prefix.includes('/') && repoRef !== undefined && repoRef !== null && prefix === repoRef) return `#${n}`;
@@ -271,9 +316,15 @@ export function issueRefs(intent: string, repoRef?: string | null): IssueRefs {
   };
   const fixes: string[] = [];
   const refs: string[] = [];
-  for (const m of intent.matchAll(CLOSING_REF)) {
-    const ref = normalize(m[1], m[2]!);
-    if (!fixes.includes(ref)) fixes.push(ref);
+  for (const list of intent.matchAll(CLOSING_LIST)) {
+    // Inside a matched list a ref may follow `/` (`#618/#619`), which ANY_REF's guard refuses.
+    for (const m of list[1]!.matchAll(/((?:[\w.-]+\/)?[\w.-]+)?#(\d+)\b/g)) {
+      const ref = normalize(m[1], m[2]!);
+      // crew#635: an `owner/repo#N` in ANOTHER repository stays `Refs:` even under a closing verb —
+      // merging this PR must not close an issue whose share of the work lives elsewhere.
+      if (ref.includes('/') && !sameRepo(ref, repoRef)) continue;
+      if (!fixes.includes(ref)) fixes.push(ref);
+    }
   }
   for (const m of intent.matchAll(ANY_REF)) {
     const ref = normalize(m[1], m[2]!);
@@ -361,13 +412,17 @@ const FOOTER_LINK = '[wicked-crew](https://wc.wickedagile.com)';
 export function composeDeliverText(f: DeliverTextFacts, links: IssueRefs = issueRefs(f.intent, f.repoRef)): DeliverText {
   const title = deliverTitle(f.intent, f.runId, f.workflowId);
   const { fixes, refs } = links;
-  const intent = f.intent.replace(/\r\n?/g, '\n').replace(CONTROL_CHARS, ' ').trim();
+  const intent = stripLinkedIssues(f.intent).replace(/\r\n?/g, '\n').replace(CONTROL_CHARS, ' ').trim();
   const out: string[] = [];
 
   out.push('## Intent', '', intent === '' ? '_(the run recorded no intent)_' : intent, '');
   if (fixes.length > 0 || refs.length > 0) {
     for (const x of fixes) out.push(`Fixes ${x}`);
-    if (refs.length > 0) out.push(`Refs: ${refs.join(', ')}`);
+    if (refs.length > 0) {
+      out.push(`Refs: ${refs.join(', ')}`);
+      // crew#635: say why a Refs issue stays open, so "a human closes it" is a stated step.
+      out.push('', "_Refs are not closed by this PR: the intent did not say it fixes them. Close any this PR resolves by hand._");
+    }
     out.push('');
   }
 
@@ -451,6 +506,14 @@ export function composeDeliverText(f: DeliverTextFacts, links: IssueRefs = issue
   }
   out.push('');
 
+  // crew#550 P-7: what the evaluator said should happen NEXT lands on the PR, not only in its log.
+  if (f.followUps !== undefined) {
+    out.push('## Follow-ups', '');
+    if (f.followUps.length === 0) out.push('_None flagged by the evaluator._');
+    else for (const x of f.followUps) out.push(`- ${cell(x, FOLLOW_UP_MAX_CHARS)}`);
+    out.push('');
+  }
+
   out.push(
     '---',
     '',
@@ -459,6 +522,7 @@ export function composeDeliverText(f: DeliverTextFacts, links: IssueRefs = issue
     // A git TRAILER (`Token: value`, the message's last paragraph) — the commit this text becomes
     // names the pipeline that authored it (review-benchmark-prs D4), machine-readable.
     `Delivered-By: wicked-crew run ${oneLine(f.runId)}`,
+    ...(f.trailers ?? []),
   );
   return { title, body: out.join('\n') };
 }
@@ -595,14 +659,20 @@ export function baseWorkflowId(workflowId: string, runId: string): string {
 export function factsFromRun(
   view: SessionView,
   runUrl: string | null,
-  resolved: { workflowId?: string | null; revisesPr?: { number: number; url: string } | null } = {},
+  resolved: {
+    workflowId?: string | null;
+    revisesPr?: { number: number; url: string } | null;
+    /** crew#550: the evaluator follow-ups, when the caller read the evaluator units' output. */
+    followUps?: string[];
+  } = {},
 ): DeliverTextFacts {
   const s = view.session;
   const units = [...view.units].sort((a, b) => a.ord - b.ord);
   const checks = units.flatMap(checksOf);
   return {
     runId: s.id,
-    intent: s.problem ?? '',
+    // crew#627: the daemon's linked-issues block is taken back out — the PR names the intent.
+    intent: stripLinkedIssues(s.problem ?? ''),
     // An explicit `null` is the resolver's answer (a user plan, free text): no workflow line, never
     // the engine's synthetic `wf-<run>` id.
     workflowId: resolved.workflowId !== undefined ? resolved.workflowId : baseWorkflowId(s.workflow_id, s.id),
@@ -633,6 +703,8 @@ export function factsFromRun(
         reason: u.denial_reason,
       })),
     revisesPr: resolved.revisesPr ?? null,
+    trailers: configuredTrailers(),
+    ...(resolved.followUps !== undefined ? { followUps: resolved.followUps } : {}),
   };
 }
 
@@ -648,7 +720,7 @@ export function factsFromWorkflow(input: {
 }): DeliverTextFacts {
   return {
     runId: input.runId,
-    intent: input.intent ?? '',
+    intent: stripLinkedIssues(input.intent ?? ''),
     workflowId: input.workflowId,
     repoRef: input.repoRef,
     runUrl: input.runUrl,
@@ -665,7 +737,39 @@ export function factsFromWorkflow(input: {
     checksNote: null,
     verdicts: [],
     revisesPr: input.revisesPr ?? null,
+    trailers: configuredTrailers(),
   };
+}
+
+/**
+ * The environment variable naming extra commit trailers for delivered work (crew#550), one per
+ * line — e.g. `Co-Authored-By: Name <address>`. Only well-formed single-line `Token: value`
+ * trailers are kept; anything else is dropped rather than breaking the commit's trailer block.
+ */
+export const DELIVER_TRAILERS_ENV = 'WICKED_CREW_DELIVER_TRAILERS';
+const TRAILER_LINE = /^[A-Za-z][A-Za-z0-9-]*: \S.*$/;
+
+/** The configured trailers, validated; `[]` when none. */
+export function configuredTrailers(env: NodeJS.ProcessEnv = process.env): string[] {
+  const raw = env[DELIVER_TRAILERS_ENV];
+  if (raw === undefined || raw.trim() === '') return [];
+  return raw
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l !== '' && !/[\u0000-\u001f\u007f]/.test(l) && TRAILER_LINE.test(l) && l.length <= 200);
+}
+
+/**
+ * The environment variable naming the PUBLIC origin a PR's run link may use (crew#550 P-2) — the
+ * studio address a reviewer can open (`https://studio.example.com`). Unset, a PR body names the run
+ * id and carries no link: the daemon's own loopback address opens only on the daemon's host.
+ */
+export const PUBLIC_ORIGIN_ENV = 'WICKED_CREW_PUBLIC_ORIGIN';
+
+/** The configured public origin, or `null`. */
+export function configuredPublicOrigin(env: NodeJS.ProcessEnv = process.env): string | null {
+  const raw = env[PUBLIC_ORIGIN_ENV]?.trim();
+  return raw === undefined || raw === '' ? null : raw;
 }
 
 /**
@@ -687,18 +791,72 @@ function isLoopbackHost(host: string): boolean {
 }
 
 /**
- * The studio bookmark for a run under a daemon origin (`http://127.0.0.1:7701/runs/<id>`), or
- * null. LOOPBACK ORIGINS ONLY (review W3-K4): a daemon bound to a LAN host or IP would otherwise
- * put that host into a public PR body; the run id itself is always named in the text.
+ * The run link for a PR body under the configured PUBLIC origin ({@link configuredPublicOrigin}),
+ * or null (crew#550 P-2). Never a loopback URL: `http://127.0.0.1:<port>/runs/<id>` opens only on
+ * the daemon's own host, so a PR carrying it gave every other reader a dead link. A loopback,
+ * unparseable or non-http(s) origin yields no link; the run id itself is always named in the text.
  */
 export function runUrlFor(origin: string | null | undefined, runId: string): string | null {
   if (origin === null || origin === undefined || origin === '') return null;
-  let host: string;
+  let url: URL;
   try {
-    host = new URL(origin).hostname;
+    url = new URL(origin);
   } catch {
     return null;
   }
-  if (!isLoopbackHost(host)) return null;
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
+  if (isLoopbackHost(url.hostname)) return null;
   return `${origin.replace(/\/+$/, '')}/runs/${urlPathSegment(runId)}`;
+}
+
+// ── evaluator follow-ups (crew#550 P-7) ────────────────────────────────────────────────────────
+
+/** At most this many follow-ups ride a PR body; each is cut to {@link FOLLOW_UP_MAX_CHARS}. */
+export const FOLLOW_UPS_MAX = 10;
+export const FOLLOW_UP_MAX_CHARS = 300;
+
+/** The heading an evaluator writes its residuals under: `FOLLOW-UPS:`, `Follow-ups:`, `## Follow ups`. */
+const FOLLOW_UPS_HEADING = /^\s*(?:#{1,6}\s*)?\**\s*follow[- ]?ups?\s*\**\s*:?\s*\**\s*(.*)$/i;
+const LIST_ITEM = /^\s*(?:[-*•]|\d+[.)])\s+(.+)$/;
+const NONE_WORD = /^(?:none|n\/a|nothing|no follow[- ]?ups?)\.?$/i;
+
+/**
+ * The follow-ups an evaluator's output flags (crew#550 P-7): the list under its `FOLLOW-UPS:`
+ * heading (or the heading line's own text), ending at the first line that is neither an item nor
+ * the continuation of one. `none` / `n/a` yields nothing. Every block in the text is read, in order,
+ * de-duplicated, capped at {@link FOLLOW_UPS_MAX}.
+ */
+export function extractFollowUps(text: string): string[] {
+  const out: string[] = [];
+  const push = (item: string): void => {
+    const t = item.replace(/\s+/g, ' ').trim();
+    if (t === '' || NONE_WORD.test(t) || out.includes(t) || out.length >= FOLLOW_UPS_MAX) return;
+    out.push(t);
+  };
+  const lines = text.replace(/\r\n?/g, '\n').split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const head = FOLLOW_UPS_HEADING.exec(lines[i]!);
+    if (head === null) continue;
+    const inline = head[1]!.trim();
+    if (inline !== '') push(inline);
+    let current: string | null = null;
+    let j = i + 1;
+    for (; j < lines.length; j++) {
+      const line = lines[j]!;
+      const item = LIST_ITEM.exec(line);
+      if (item !== null) {
+        if (current !== null) push(current);
+        current = item[1]!;
+      } else if (line.trim() === '') {
+        if (current !== null || inline !== '') break; // a blank line after the list ends it
+      } else if (current !== null && /^\s{2,}\S/.test(line)) {
+        current += ` ${line.trim()}`; // an indented continuation of the item
+      } else {
+        break;
+      }
+    }
+    if (current !== null) push(current);
+    i = j - 1;
+  }
+  return out;
 }

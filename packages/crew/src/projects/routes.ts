@@ -398,6 +398,28 @@ export function registerProjectRoutes(
           membershipAttachedKey(id, kind, ref, member.attached_at),
         );
       }
+      // crew#496: a repo joining a project brings its onboarding run along. Studio's register form
+      // registers the repo (which launches onboarding) and THEN attaches it to the selected
+      // project, so without this every onboarding run sat unfiled beside a project that listed
+      // its repo. Only a run no project holds yet; a failure is logged, never the attach's answer.
+      if (kind === 'crew.repo') {
+        const onboardRun = typeof adapter.getOnboardRunId === 'function' ? adapter.getOnboardRunId(ref) : undefined;
+        if (onboardRun !== undefined && index.projectOf(onboardRun) === undefined) {
+          try {
+            const filed = await adapter.projectMemberAttach(id, 'crew.run', onboardRun, { onboarding: true }, attachedBy);
+            index.set(onboardRun, id);
+            if (filed.created) {
+              bus?.emit(
+                MEMBERSHIP_ATTACHED,
+                { project_id: id, member: { kind: 'crew.run', ref: onboardRun }, actor: actorOf(req).id, surface: attachedBy ?? 'api' },
+                membershipAttachedKey(id, 'crew.run', onboardRun, filed.member.attached_at),
+              );
+            }
+          } catch (err) {
+            req.log.warn({ projectId: id, runId: onboardRun }, `onboarding run filing failed: ${message(err)}`);
+          }
+        }
+      }
       return reply.code(created ? 201 : 200).send({ member, created });
     } catch (err) {
       return reply.code(engineErrorStatus(err)).send({ error: message(err) });

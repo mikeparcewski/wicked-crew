@@ -1,7 +1,8 @@
 // Route tests for the memory-management surface (DES-MEM-FACETED-001):
 //   GET  /api/v1/memory           → memory.list (complete browse) + query/facet/limit post-filter
 //   GET  /api/v1/memory/coverage  → memory.coverage
-//   POST /api/v1/memory/retire    → memory.erase  (SUBTREE-scoped — no per-id delete in estate)
+//   POST /api/v1/memory/retire    → memory.erase {scope_prefix}  (SUBTREE-scoped)
+//   POST /api/v1/memory/retire-item → memory.erase {id}  (exactly ONE memory — studio#206)
 //
 // Fastify inject() with a mock adapter and a STUBBED estate-mcp client (runtime.callEstateTool) —
 // no `wicked-estate-mcp` process is ever spawned. Covers: browse calls memory.list with only
@@ -294,6 +295,58 @@ describe('memory-management routes (DES-MEM-FACETED-001)', () => {
 
     expect(res.statusCode).toBe(502);
     expect((res.json() as { error: string }).error).toContain('unexpected shape');
+  });
+
+  // ── POST /memory/retire-item (studio#206: one row, never its scope subtree) ──────
+
+  it('retires ONE memory by id: sends only `id` to memory.erase, never a scope_prefix', async () => {
+    estateTool.mockResolvedValueOnce({ deleted_count: 1 });
+
+    const res = await app.inject({ method: 'POST', url: '/api/v1/memory/retire-item', payload: { memory_id: 'm1' } });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ erased: 1 });
+    expect(estateTool).toHaveBeenCalledTimes(1);
+    expect(estateTool).toHaveBeenCalledWith('memory.erase', { id: 'm1' });
+  });
+
+  it('404s an id estate does not hold (it erased 0)', async () => {
+    estateTool.mockResolvedValueOnce({ deleted_count: 0 });
+
+    const res = await app.inject({ method: 'POST', url: '/api/v1/memory/retire-item', payload: { memory_id: 'gone' } });
+
+    expect(res.statusCode).toBe(404);
+    expect((res.json() as { error: string }).error).toContain('gone');
+  });
+
+  it('refuses a scope_prefix beside the id (strict) and an empty id, never calling the client', async () => {
+    for (const payload of [{ memory_id: 'm1', scope_prefix: 'org:acme' }, { memory_id: '' }, { memory_id: '   ' }, {}]) {
+      const res = await app.inject({ method: 'POST', url: '/api/v1/memory/retire-item', payload });
+      expect(res.statusCode, JSON.stringify(payload)).toBe(400);
+    }
+    expect(estateTool).not.toHaveBeenCalled();
+  });
+
+  it('answers 501 estate_upgrade_required when the estate predates erase-by-id, with no fallback erase', async () => {
+    estateTool.mockRejectedValueOnce(new EstateMcpError('scope_prefix (non-empty) required for erase', -32602));
+
+    const res = await app.inject({ method: 'POST', url: '/api/v1/memory/retire-item', payload: { memory_id: 'm1' } });
+
+    expect(res.statusCode).toBe(501);
+    const body = res.json() as { error: string; code: string };
+    expect(body.code).toBe('estate_upgrade_required');
+    expect(body.error).toContain('nothing was deleted');
+    // Exactly the one id-only call: the route never retries as a subtree erase.
+    expect(estateTool).toHaveBeenCalledTimes(1);
+    expect(estateTool).toHaveBeenCalledWith('memory.erase', { id: 'm1' });
+  });
+
+  it('502s an erase that reports more than one deletion for one id', async () => {
+    estateTool.mockResolvedValueOnce({ deleted_count: 3 });
+
+    const res = await app.inject({ method: 'POST', url: '/api/v1/memory/retire-item', payload: { memory_id: 'm1' } });
+
+    expect(res.statusCode).toBe(502);
   });
 
   // ── POST /memory/retire ───────────────────────────────────────────────────────
