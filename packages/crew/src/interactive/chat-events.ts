@@ -265,27 +265,28 @@ export function readDocHead(docsRoot: string, documentId: string): DocHead | nul
 }
 
 /**
- * Contract (b)'s kind half: `true` when a doc of this manifest kind is this seam's to answer.
+ * Contract (b)'s kind half: `true` when a doc of this manifest kind is THIS seam's to answer.
  * `source` is the spec's spelling (recorded by no released interactive yet, accepted for the
  * day a manifest carries it); `doc` is the absent-default every REAL source (and plain html)
  * doc reads as — interactive's initManifest keeps non-demo kinds implicit. Explicit foreign
- * kinds (`demo`, anything future) belong to their own loops.
+ * kinds belong to their own loops.
  */
-export function isAnswerableDocKind(kind: string): boolean {
+export function chatSeamAnswers(kind: string): boolean {
   return kind === 'source' || kind === 'doc';
 }
 
-/** The thread's answer to an ask on a doc no seam answers (F-RECON-013) — demo gets the specific
- *  remedy, any other foreign kind the generic one. Mirrors the proxy's 422 (`askRefusalFor`). */
+/**
+ * `true` when SOME seam answers a thread ask on a doc of this kind — the proxy refuses the rest
+ * with a typed 422 (`askRefusalFor`). A `demo` doc's asks are the demo seam's (crew#501,
+ * `demo-events.ts` `handleChatAsk`): injected into the live authoring run, or a new spec run.
+ */
+export function isAnswerableDocKind(kind: string): boolean {
+  return chatSeamAnswers(kind) || kind === 'demo';
+}
+
+/** The thread's answer to an ask on a doc no seam answers (F-RECON-013). Mirrors the proxy's 422
+ *  (`askRefusalFor`). */
 export function foreignKindAskMessage(kind: string): string {
-  if (kind === 'demo') {
-    return (
-      'Asks on demo storyboards are not supported yet — a demo is re-authored from STEP feedback, not from ' +
-      'the thread. Nothing was launched for this message. To change the demo, highlight the step and send ' +
-      'that as feedback (the demo seam re-authors the spec and re-records); to retry the recording as ' +
-      'authored, use Re-record.'
-    );
-  }
   return (
     `Asks on documents of kind '${kind}' have no answering seam on this daemon — nothing was launched for ` +
     'this message.'
@@ -799,7 +800,7 @@ export async function startInteractiveChatSubscriber(
     const { ask, key } = queued;
     const docsRoot = resolveDocsRoot(ask.projectId);
     const doc = readDocHead(docsRoot, ask.documentId);
-    if (doc === null || !isAnswerableDocKind(doc.kind)) {
+    if (doc === null || !chatSeamAnswers(doc.kind)) {
       // The doc moved out from under a parked ask (deleted / never ours). Not an error the
       // thread needs — contract (b) simply stopped holding.
       log(
@@ -1064,7 +1065,12 @@ export async function startInteractiveChatSubscriber(
       log(`[interactive-chat] chat.posted for unknown doc ${ask.documentId} under ${docsRoot} — ignored`);
       return;
     }
-    if (!isAnswerableDocKind(doc.kind)) {
+    if (doc.kind === 'demo') {
+      // crew#501: the demo seam answers asks on demo docs (demo-events.ts `handleChatAsk`).
+      log(`[interactive-chat] doc ${ask.documentId} is a demo — its asks are the demo seam's`);
+      return;
+    }
+    if (!chatSeamAnswers(doc.kind)) {
       // F-RECON-013: NOT a silent decline. The proxy refuses such an ask with a typed 422 before it
       // reaches the bus (proxy-routes.ts `askRefusalFor`); one that still arrives (an older skin, a
       // direct bridge client) gets an honest `error` status on the thread — the thread would
@@ -1076,7 +1082,7 @@ export async function startInteractiveChatSubscriber(
         message: foreignKindAskMessage(doc.kind),
       });
       log(
-        `[interactive-chat] doc ${ask.documentId} has kind '${doc.kind}' — demo (and other foreign-kind) docs are not ` +
+        `[interactive-chat] doc ${ask.documentId} has kind '${doc.kind}' — foreign-kind docs are not ` +
           `this seam's to answer; the ask was declined on the thread with an error status, not dropped`,
       );
       return;

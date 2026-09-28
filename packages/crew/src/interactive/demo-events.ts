@@ -105,7 +105,9 @@ import {
   parseStructuralFeedback,
   type StructuralHandoff,
 } from './edit-events.js';
-import { readDocHead } from './chat-events.js';
+import { CHAT_POSTED, chatKey, isIterationAsk, parseChatPosted, readDocHead } from './chat-events.js';
+import { interactiveSpec } from './bridge-pool.js';
+import { registerDeliverableCheck, type DeliverableCheck } from '../core/deliverable-floor.js';
 import { resolveInteractiveRoot } from './bridge-root.js';
 import { InteractiveHandoffLedger } from './ledger.js';
 import { crewStateHome } from '../projects/state-home.js';
@@ -151,6 +153,8 @@ export const RECORDER_ERROR_SOURCE = 'recorder';
 export const INTERACTIVE_DEMO_BUS_FILTER = `${DOC_CREATED}@${INTERACTIVE_DOMAIN}`;
 export const INTERACTIVE_DEMO_FEEDBACK_BUS_FILTER = `${FEEDBACK_PROCESSED}@${INTERACTIVE_DOMAIN}`;
 export const INTERACTIVE_DEMO_RECORDER_BUS_FILTER = `${STATUS_POSTED}@${INTERACTIVE_DOMAIN}`;
+/** crew#501: thread asks on demo docs (the chat seam skips them). */
+export const INTERACTIVE_DEMO_ASK_BUS_FILTER = `${CHAT_POSTED}@${INTERACTIVE_DOMAIN}`;
 
 /** The one file the whole demo pipeline pivots on (interactive demo.js `DEMO_SPEC`):
  *  `recordDemo` refuses to record until `<docDir>/demo.spec.mjs` exists. */
@@ -215,10 +219,13 @@ export const INTERACTIVE_DEMO_REAUTHOR_WORKFLOW = 'interactive-demo-reauthor';
  * wording). So both workflows' build phases demand a prose report of what they wrote: the
  * phase's own reviewable substance, not decoration.
  *
- * All gates are `auto` with `validator_pin: null` — no human gate — because the acceptance
- * gate for a demo is the RECORDING itself: the service executes the spec (a broken selector
- * fails the record with a step-precise error status) and the user judges the video on the
- * storyboard, then refines through the same loop. The assist skill's interactive scene-plan
+ * All gates are `auto` with `validator_pin: null` — no human gate. What proves a spec before it
+ * is installed is deterministic, not a vote: the crew#311 deliverable floor (the file exists and
+ * this run wrote it) and then the DRY RUN (crew#500/#565, {@link demoDryRunCheck}) — the spec is
+ * executed headless and READ-ONLY by interactive's own recorder, and the first step that fails,
+ * or that sends anything but a GET, fails the RUN. Nothing is installed and nothing is recorded
+ * until both pass; the user then judges the video on the storyboard and refines through the same
+ * loop. The assist skill's interactive scene-plan
  * confirmation (Step 8a.5) was an editorial affordance of a conversational session; the
  * governed loop's editorial channel is the step-feedback path below.
  */
@@ -229,7 +236,7 @@ export const INTERACTIVE_DEMO_WORKFLOW_DEF: WorkflowDef = {
       id: 'scenes',
       kind: 'recon',
       instructions:
-        'Plan the demo — and in this phase USE NO TOOLS AT ALL: no web fetch, no shell, no file reads, no writes. Work from the task text alone (the target application URL and the user\'s brief); inspecting the app is the NEXT phase\'s job, and a tool use here breaks that phase\'s ability to write the spec, which kills the whole demo. Decompose the brief into 3-6 named scenes — each a short capability label stating what the viewer should take away (good: "Create a document"; bad: "Click the New button"), covering setup/context beats, the main value moments, and the payoff. Merge trivial setup steps, split compound flows — a demo that is one scene for a multi-step brief is not a demo. For each scene note the click-path you EXPECT (navigation, the kind of control to look for, waits) and a one-sentence narration line that states the capability, not the on-screen data; say plainly that the selectors are expectations for the next phase to confirm against the live page. Never invent app features the brief and the URL do not support. Output the scene plan as plain text.',
+        'Plan the demo — and in this phase USE NO TOOLS AT ALL: no web fetch, no shell, no file reads, no writes. Work from the task text alone (the target application URL and the user\'s brief); inspecting the app is the NEXT phase\'s job, and a tool use here breaks that phase\'s ability to write the spec, which kills the whole demo. Decompose the brief into 3-6 named scenes — each a short capability label stating what the viewer should take away (good: "Create a document"; bad: "Click the New button"), covering setup/context beats, the main value moments, and the payoff. Merge trivial setup steps, split compound flows — a demo that is one scene for a multi-step brief is not a demo. For each scene note the click-path you EXPECT (navigation, the kind of control to look for, waits) and a one-sentence narration line that states the capability, not the on-screen data; say plainly that the selectors are expectations for the next phase to confirm against the live page. Never invent app features the brief and the URL do not support. The recording is READ-ONLY — it can never submit, launch, approve, reject, delete, create, cancel or save anything on the app — so a scene that shows such an action shows the control and narrates what it does, without pressing it. Output the scene plan as plain text.',
       gate_type: 'value',
       gate: 'auto',
       executes_code: false,
@@ -245,7 +252,7 @@ export const INTERACTIVE_DEMO_WORKFLOW_DEF: WorkflowDef = {
       id: 'spec',
       kind: 'build',
       instructions:
-        'FIRST inspect the live target application yourself: curl the HTML of the URL named in the task and of every further page the scene plan visits (use curl — the target is often a plain-HTTP or localhost app a web-fetch tool cannot reach), so every selector you use provably exists on the page; never guess a selector, and correct the scene plan wherever the real page contradicts it. THEN, using the scene plan from the prior phase, write the COMPLETE Playwright demo spec and SAVE it to the absolute output file named in the task (create parent directories if needed, overwrite if present) — the file on disk is the deliverable, so write it before you finish. THEN REPORT IN PROSE, in at least 120 words, what you inspected and what you wrote: name the pages you fetched and the selectors they gave you, walk the reader through every step in order (its label, the selectors and waits it uses, and the capability its narration states), call out any scene-plan beat you merged, split, or dropped and why, and end with the absolute path you wrote — a reply that is only the path is an unreviewable phase and will be rejected. Contract (wicked-interactive demo.spec.mjs): a plain, standalone ES module with NO imports that exports const meta = { url, title, and optionally steps, captions, captionHoldMs } and export async function run({ page, step, meta }) — the service supplies page (Playwright) and step; begin run() with await page.goto(meta.url); wrap EVERY meaningful action in await step(label, async () => { ... }, { say, holdMs }) with one step per scene and the scene\'s capability name as the label; narrate the meaningful beats via say (the capability, not the on-screen data); prefer stable selectors (roles, text, ids) and await your waits (waitForURL, waitForSelector) so the recording captures settled UI; NEVER write credentials or secrets into the spec — read them from process.env at run time.',
+        'FIRST inspect the live target application yourself: curl the HTML of the URL named in the task and of every further page the scene plan visits (use curl — the target is often a plain-HTTP or localhost app a web-fetch tool cannot reach), so every selector you use provably exists on the page; never guess a selector, and correct the scene plan wherever the real page contradicts it. THEN, using the scene plan from the prior phase, write the COMPLETE Playwright demo spec and SAVE it to the absolute output file named in the task (create parent directories if needed, overwrite if present) — the file on disk is the deliverable, so write it before you finish. THEN REPORT IN PROSE, in at least 120 words, what you inspected and what you wrote: name the pages you fetched and the selectors they gave you, walk the reader through every step in order (its label, the selectors and waits it uses, and the capability its narration states), call out any scene-plan beat you merged, split, or dropped and why, and end with the absolute path you wrote — a reply that is only the path is an unreviewable phase and will be rejected. Contract (wicked-interactive demo.spec.mjs): a plain, standalone ES module with NO imports that exports const meta = { url, title, and optionally steps, captions, captionHoldMs } and export async function run({ page, step, meta }) — the service supplies page (Playwright) and step; begin run() with await page.goto(meta.url); wrap EVERY meaningful action in await step(label, async () => { ... }, { say, holdMs }) with one step per scene and the scene\'s capability name as the label; narrate the meaningful beats via say (the capability, not the on-screen data); prefer stable selectors (roles, text, ids) and await your waits (waitForURL, waitForSelector) so the recording captures settled UI; THE RECORDING IS READ-ONLY AND THE NEXT PHASE PROVES IT: crew executes your spec in a headless browser before anything is installed or recorded, the recorder blocks every request that is not a GET (and every WebSocket message the page sends) and fails the step that sent it, and the run FAILS on the first step that does not work — so never submit a form or press a control that launches, approves, rejects, deletes, creates, cancels or saves anything (to show such an action, show the control and narrate what it would do, without pressing it), and after every click await the URL or text that click must produce (waitForURL / waitForSelector), because a click whose effect nothing waits for passes while recording nothing; NEVER write credentials or secrets into the spec — read them from process.env at run time.',
       gate_type: 'execution',
       gate: 'auto',
       executes_code: false,
@@ -285,7 +292,7 @@ export const INTERACTIVE_DEMO_REAUTHOR_WORKFLOW_DEF: WorkflowDef = {
       id: 'respec',
       kind: 'build',
       instructions:
-        'Read the current demo spec and the feedback JSON named in the task; re-author the spec so the recorded demo fulfils every feedback item, and SAVE the complete revised spec to the exact absolute output file named in the task (create parent directories if needed, overwrite if present) — the file on disk is the deliverable, so write it before you finish. Work from the two files and the current spec\'s own selectors — do NOT fetch the live application in this phase; if a feedback item needs a control the current spec never touches, choose the most robust selector the item\'s storyboard fragment supports and say so in your report rather than guessing silently. THEN REPORT IN PROSE, in at least 120 words, what changed: take each feedback item in turn, say which step(s) you altered and how the revised selectors/waits/narration answer it, note anything you deliberately left untouched, and end with the absolute path you wrote — a reply that is only the path is an unreviewable phase and will be rejected. Each feedback item carries the user\'s instruction plus the storyboard fragment of the step it targets (the step\'s label appears in the fragment text) — change the matching step(s) and leave unrelated steps untouched unless the instruction asks for a restructure. Keep the same executable contract as the current spec: a plain, standalone ES module with NO imports exporting const meta = { url, title, ... } and export async function run({ page, step, meta }); begin run() with await page.goto(meta.url); wrap every meaningful action in await step(label, fn, { say, holdMs }); narrate capabilities via say; prefer stable selectors and await your waits; NEVER write credentials or secrets into the spec — read them from process.env at run time.',
+        'Read the current demo spec and the feedback JSON named in the task; re-author the spec so the recorded demo fulfils every feedback item, and SAVE the complete revised spec to the exact absolute output file named in the task (create parent directories if needed, overwrite if present) — the file on disk is the deliverable, so write it before you finish. Work from the two files and the current spec\'s own selectors — do NOT fetch the live application in this phase; if a feedback item needs a control the current spec never touches, choose the most robust selector the item\'s storyboard fragment supports and say so in your report rather than guessing silently. THEN REPORT IN PROSE, in at least 120 words, what changed: take each feedback item in turn, say which step(s) you altered and how the revised selectors/waits/narration answer it, note anything you deliberately left untouched, and end with the absolute path you wrote — a reply that is only the path is an unreviewable phase and will be rejected. Each feedback item carries the user\'s instruction plus the storyboard fragment of the step it targets (the step\'s label appears in the fragment text) — change the matching step(s) and leave unrelated steps untouched unless the instruction asks for a restructure. Keep the same executable contract as the current spec: a plain, standalone ES module with NO imports exporting const meta = { url, title, ... } and export async function run({ page, step, meta }); begin run() with await page.goto(meta.url); wrap every meaningful action in await step(label, fn, { say, holdMs }); narrate capabilities via say; prefer stable selectors and await your waits; THE RECORDING IS READ-ONLY AND THE NEXT PHASE PROVES IT: crew executes your spec in a headless browser before anything is installed or recorded, the recorder blocks every request that is not a GET (and every WebSocket message the page sends) and fails the step that sent it, and the run FAILS on the first step that does not work — so never submit a form or press a control that launches, approves, rejects, deletes, creates, cancels or saves anything (to show such an action, show the control and narrate what it would do, without pressing it), and after every click await the URL or text that click must produce (waitForURL / waitForSelector), because a click whose effect nothing waits for passes while recording nothing; NEVER write credentials or secrets into the spec — read them from process.env at run time.',
       gate_type: 'execution',
       gate: 'auto',
       executes_code: false,
@@ -432,7 +439,12 @@ export function recorderFailureLine(f: DemoRecordingFailure, runId?: string): st
  * must land at. Deliberately NO doc-workspace path: the unbound worker could not read or
  * write it anyway (wicked-core#294) — crew installs the spec at finalize.
  */
-export function demoProblem(doc: DemoDocCreated, outPath: string, grounding?: DemoGrounding): string {
+export function demoProblem(
+  doc: DemoDocCreated,
+  outPath: string,
+  grounding?: DemoGrounding,
+  followUp?: DemoFollowUp,
+): string {
   const brief =
     doc.brief.trim().length > 0
       ? oneLine(doc.brief, 2000)
@@ -450,9 +462,20 @@ export function demoProblem(doc: DemoDocCreated, outPath: string, grounding?: De
         `to learn its routes and stable selectors before you inspect the live page; never treat a sibling ` +
         `repository in the same project as this app. `
       : '';
+  // crew#501: a thread ask re-authors the demo from scratch — the brief still frames it, the ask
+  // wins where they conflict, and the last failure says what not to repeat.
+  const follow =
+    followUp !== undefined
+      ? `The user's follow-up on the demo thread (it takes precedence over the brief where they conflict): ` +
+        `${oneLine(followUp.text, 1500)} ` +
+        (followUp.lastFailure !== undefined ? `Why the last attempt failed: ${oneLine(followUp.lastFailure, 600)} ` : '') +
+        (followUp.previousSpecPath !== undefined
+          ? `The previous spec is at ${followUp.previousSpecPath} — read it first, keep what worked, fix what failed. `
+          : '')
+      : '';
   return (
     `Author the Playwright demo spec for the wicked-interactive demo document "${doc.documentId}". ` +
-    `Target application URL: ${doc.url} The user's brief: ${brief} ${source}` +
+    `Target application URL: ${doc.url} The user's brief: ${brief} ${source}${follow}` +
     `The finished spec MUST be written to exactly this absolute file path: ${outPath}`
   );
 }
@@ -488,6 +511,49 @@ export function demoReauthorProblem(
     `The user asked: ${gist.length > 0 ? gist : '(no instruction text)'} ` +
     `The revised spec MUST be written to exactly this absolute file path: ${outPath}`
   );
+}
+
+/** The id of the dry-run phase appended after the deliverable floor (crew#500). */
+export const DEMO_DRY_RUN_PHASE_ID = 'dry-run-spec';
+/** The marker the dry-run phase's failing branch prints first (greppable; asserted by tests). */
+export const DEMO_DRY_RUN_FAILURE_MARKER = '[wicked-crew] DEMO DRY RUN FAILED';
+
+/**
+ * The dry-run program, run as `node -e <script> <npm spec> <spec file>`: it asks the SAME
+ * wicked-interactive the daemon's bridges run (`npx --yes <spec> dry-run <file> --json`,
+ * interactive >= 0.9.4) to execute the spec headless and read-only, and exits with its verdict.
+ * The verdict line is the FIRST thing printed, so a failed run's reason (`stepFailed.detail`,
+ * capped) names the step, the cause and the remedy. Node rather than a shell for the reasons the
+ * deliverable floor gives; `npx` is resolved off PATH exactly as the bridge pool spawns it.
+ */
+export function demoDryRunScript(): string {
+  return [
+    'const cp=require("node:child_process");',
+    'const spec=process.argv[1],file=process.argv[2];',
+    'const win=process.platform==="win32";',
+    'const q=(a)=>win&&/[\\s"]/.test(a)?JSON.stringify(a):a;',
+    'const r=cp.spawnSync("npx",["--yes",spec,"dry-run",file,"--json"].map(q),{encoding:"utf8",shell:win,maxBuffer:8*1024*1024});',
+    `const FAIL=${JSON.stringify(DEMO_DRY_RUN_FAILURE_MARKER)};`,
+    'if(r.error){console.log(FAIL+" — npx could not be started ("+r.error.message+"); the spec was not installed or recorded.");process.exit(1)}',
+    'const lines=String(r.stdout||"").trim().split(/\\r?\\n/);let v=null;',
+    'for(let i=lines.length-1;i>=0&&v===null;i--){try{const o=JSON.parse(lines[i]);if(o&&typeof o.ok==="boolean")v=o}catch(e){}}',
+    'if(r.status===0&&v&&v.ok){console.log("[wicked-crew] demo dry run PASSED — "+v.steps+" step(s) ran read-only in a headless browser; the spec is installed and recorded next.");process.exit(0)}',
+    'if(v&&!v.ok){console.log(FAIL+" ["+v.code+"] "+v.error+(v.remedy?" Remedy: "+v.remedy+".":"")+" The spec was not installed and nothing was recorded.");process.exit(1)}',
+    'console.log(FAIL+" — "+spec+" dry-run exited "+r.status+" without a verdict: "+String(r.stderr||r.stdout||"").trim().slice(-600));process.exit(1);',
+  ].join('');
+}
+
+/** The behaviour check (crew#500/#565) registered for a demo run's spec deliverable. */
+export function demoDryRunCheck(specPath: string, spec: string = interactiveSpec()): DeliverableCheck {
+  return { id: DEMO_DRY_RUN_PHASE_ID, cmd: [process.execPath, '-e', demoDryRunScript(), spec, specPath] };
+}
+
+/** A thread ask on a demo doc (crew#501): what the user said, why the last attempt failed, and
+ *  the spec that attempt used (copied into the new run's inbox) when there was one. */
+export interface DemoFollowUp {
+  text: string;
+  lastFailure?: string | undefined;
+  previousSpecPath?: string | undefined;
 }
 
 /** Deterministic bus idempotency key for the FIRST record request this seam may trigger per
@@ -613,11 +679,17 @@ interface InFlight {
   /** The launch-scoped app-source snapshots grounding a first-spec run (F-046); removed on every
    *  terminal path so the inbox never accretes dead clones. */
   snapshotDirs: string[];
-  /** The def's OWN phase count. The run executes one MORE unit — the crew#311 deliverable
-   *  floor `launchRun` appends per-run from `requireDeliverables` — so this is what the
-   *  "is this the writing phase" branches key on, and `agentPhaseCount + 1` is the run's
-   *  real length for the "phase N/M" display. */
+  /** The def's OWN phase count. The run executes two MORE units — the crew#311 deliverable
+   *  floor (`agentPhaseCount + 1`) and the crew#500 dry run (`agentPhaseCount + 2`), both appended
+   *  per-run from `requireDeliverables` — so this is what the "is this the writing phase" branches
+   *  key on, and `agentPhaseCount + 2` is the run's real length for the "phase N/M" display. */
   agentPhaseCount: number;
+  /** The bus idempotency key of the recording this run may request (a first spec, a re-author
+   *  and each thread ask earn their own). */
+  recordKey: string;
+  /** Thread notes that arrived while this flight was still a pre-launch placeholder (crew#501);
+   *  injected into the run the moment it exists. */
+  pendingNotes?: string[] | undefined;
   /** The most recent real narration line (phase transitions overwrite it; the heartbeat repeats it). */
   narration: string;
   /** The governed run id (the in-flight map key), stamped on narration as `run_id` (F-4R2-005). */
@@ -700,15 +772,38 @@ export async function startInteractiveDemoSubscriber(
     return null;
   }
 
-  const ledger = new InteractiveHandoffLedger(
-    opts.ledgerPath ?? join(defaultStateDir(), 'interactive-demo-ledger.json'),
-  );
+  const ledgerPath = opts.ledgerPath ?? join(defaultStateDir(), 'interactive-demo-ledger.json');
+  const ledger = new InteractiveHandoffLedger(ledgerPath);
   const demoDir = opts.demoDir ?? join(defaultStateDir(), 'interactive-demos');
   const heartbeatMs = opts.heartbeatMs ?? 15_000;
   const resolveDocsRoot = opts.resolveDocsRoot ?? (() => resolveInteractiveRoot(null));
   const groundingStore = opts.groundingStore;
   const inFlight = new Map<string, InFlight>(); // runId → live state (pre-launch placeholders included)
   let closed = false; // set by stop(): a handler mid-snapshot must never launch after shutdown
+  // Why a doc's last attempt failed (a failed spec run's reason, or the recorder's typed failure) —
+  // handed to the run a thread ask launches, so it does not repeat the mistake (crew#501).
+  const lastFailures = new Map<string, string>();
+
+  /** A demo's creation record, kept beside the seam's ledger so a thread ask can author the demo
+   *  again (crew#501): the target URL and the brief ride only on `doc.created`. Crew state — never
+   *  under the demo dir, whose run inboxes are worker write roots. */
+  const demoDocsDir = join(dirname(ledgerPath), 'interactive-demo-docs');
+  function rememberDemoDoc(doc: DemoDocCreated): void {
+    try {
+      mkdirSync(demoDocsDir, { recursive: true });
+      writeFileSync(join(demoDocsDir, `${doc.documentId}.json`), JSON.stringify(doc), 'utf8');
+    } catch (err) {
+      log(`[interactive-demo] could not record doc ${doc.documentId} for later asks: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  function recallDemoDoc(documentId: string): DemoDocCreated | null {
+    try {
+      const raw = JSON.parse(readFileSync(join(demoDocsDir, `${documentId}.json`), 'utf8')) as Record<string, unknown>;
+      return parseDemoDocCreated(DOC_CREATED, { ...raw, document_id: raw['documentId'], kind: 'demo', project_id: raw['projectId'] });
+    } catch {
+      return null;
+    }
+  }
 
   /** Best-effort removal of a run's app-source snapshots (F-046) — a leftover is a disk-space
    *  wart, never a correctness one. Empties the array it is handed. */
@@ -845,6 +940,12 @@ export async function startInteractiveDemoSubscriber(
     const isFloorOrd = (e: CoreEvent): boolean =>
       typeof (e as { ord?: unknown }).ord === 'number' &&
       (e as { ord: number }).ord > flight.agentPhaseCount;
+    // F-056 (crew#501): narration is keyed on the UNIT. The engine distributes every unit up front
+    // and each frame names its ord, so the scenes unit's frames must never read as the spec's.
+    const ordOf = (e: CoreEvent): number => (typeof (e as { ord?: unknown }).ord === 'number' ? (e as { ord: number }).ord : 0);
+    const planning = (e: CoreEvent): boolean => ordOf(e) < flight.agentPhaseCount;
+    const floorOrd = flight.agentPhaseCount + 1;
+    const dryRunOrd = flight.agentPhaseCount + 2;
 
     if (event.type === 'councilConvened') {
       if (isFloorOrd(event)) return;
@@ -860,7 +961,7 @@ export async function startInteractiveDemoSubscriber(
       if (isFloorOrd(event)) return;
       // One helper narrates the frame by `routingMethod` (S5 `teamed` = "Routed …", a recorded
       // council = "Council picked …" honest about its benched seats, F-4R2-007).
-      narrate(flight, unitDistributedLine(event, `to write ${authoring}`));
+      narrate(flight, unitDistributedLine(event, planning(event) ? 'to plan the demo scenes' : `to write ${authoring}`));
       return;
     }
 
@@ -869,9 +970,11 @@ export async function startInteractiveDemoSubscriber(
       // writing phase; both then run the crew#311 deliverable floor. Narrate whichever the ord
       // actually is rather than assuming a count.
       const ord = typeof event.ord === 'number' ? event.ord : 0;
-      const runPhaseCount = flight.agentPhaseCount + 1;
+      const runPhaseCount = dryRunOrd;
       const line =
-        ord > flight.agentPhaseCount
+        ord >= dryRunOrd
+          ? 'dry-running the spec read-only in a headless browser — every step must work before anything is recorded…'
+          : ord === floorOrd
           ? 'checking the spec file was actually written…'
           : ord >= flight.agentPhaseCount
             ? `inspecting the app and writing ${authoring}…`
@@ -887,7 +990,13 @@ export async function startInteractiveDemoSubscriber(
     }
 
     if (event.type === 'unitOutputCaptured') {
-      narrate(flight, `Spec work finished — the governance gate is reviewing it…`);
+      if (isFloorOrd(event)) return; // the tool phases' verdicts are narrated at their gate
+      narrate(
+        flight,
+        planning(event)
+          ? 'Scene plan finished — the governance gate is reviewing it…'
+          : 'Spec work finished — the governance gate is reviewing it…',
+      );
       return;
     }
 
@@ -895,9 +1004,13 @@ export async function startInteractiveDemoSubscriber(
       const ord = typeof event.ord === 'number' ? event.ord : 0;
       narrate(
         flight,
-        ord > flight.agentPhaseCount
-          ? 'Spec file verified on disk — installing it and starting the recording…'
-          : 'Gate approved the spec — checking the file landed…',
+        ord >= dryRunOrd
+          ? 'Dry run passed — every step works read-only; installing the spec and starting the recording…'
+          : ord === floorOrd
+            ? 'Spec file verified on disk — dry-running it read-only in a headless browser…'
+            : ord < flight.agentPhaseCount
+              ? 'Gate approved the scene plan — inspecting the app and writing the spec next…'
+              : 'Gate approved the spec — checking the file landed…',
       );
       return;
     }
@@ -947,12 +1060,14 @@ export async function startInteractiveDemoSubscriber(
       ledger.recordFailure(flight.key);
       const why =
         flight.failureDetail !== undefined ? ` Reason: ${oneLine(flight.failureDetail, 600)}` : '';
+      if (flight.failureDetail !== undefined) lastFailures.set(flight.documentId, oneLine(flight.failureDetail, 600));
       emitStatus({
         ...docScope(flight.documentId, flight.projectId),
         state: 'error',
         message:
           `The crew run authoring this demo's spec ${event.type === 'runCancelled' ? 'was cancelled' : 'failed'} ` +
-          `(run ${runId}).${why} Inspect it via the crew API (GET /api/v1/runs/${runId}); no recording was triggered.`,
+          `(run ${runId}).${why} No recording was triggered. Say what to change on this thread and crew ` +
+          `authors a new spec from it (run details: GET /api/v1/runs/${runId}).`,
       });
       log(`[interactive-demo] run ${runId} for ${flight.key} ended: ${event.type}`);
     }
@@ -1025,11 +1140,7 @@ export async function startInteractiveDemoSubscriber(
     // Spec installed — NOW ask the (model-free) service to record it. The deterministic key
     // makes a re-announce a no-op (the key resolves to the existing row); distinct keys per authoring generation keep a
     // legitimate re-record from deduping against the first one.
-    const idemKey =
-      flight.leg === 'spec'
-        ? demoIdempotencyKey(documentId)
-        : demoReauthorIdempotencyKey(documentId, flight.version ?? 0);
-    const emitted = await emitInteractive(DEMO_REQUESTED, docScope(documentId, projectId), idemKey);
+    const emitted = await emitInteractive(DEMO_REQUESTED, docScope(documentId, projectId), flight.recordKey);
     if (!emitted) {
       // The bus refused the announce: the spec IS installed but the recording was
       // never requested. Fail HONEST — and say exactly where things stand, because unlike the
@@ -1077,6 +1188,7 @@ export async function startInteractiveDemoSubscriber(
       runDir: string;
       outPath: string;
       agentPhaseCount: number;
+      recordKey: string;
       /** Per-doc council roster override from the create request (#631); takes precedence over `opts.clisJson`. */
       clisJson?: string | undefined;
       /** Launch channel from the create request (#632) — recorded in the run's launched audit entry. */
@@ -1121,6 +1233,9 @@ export async function startInteractiveDemoSubscriber(
       projectGraphBinding = decision.binding;
       log(`run ${runId}: ${decision.reason}`);
     }
+    // crew#500/#565: the spec's behaviour check — composed after the deliverable floor by the
+    // launch below, consumed there; dropped on every path so a failed launch leaves nothing armed.
+    const dropCheck = registerDeliverableCheck(runId, input.outPath, demoDryRunCheck(input.outPath));
     return adapter
       .launchRun({
         problem: input.problem,
@@ -1174,6 +1289,7 @@ export async function startInteractiveDemoSubscriber(
           outPath: input.outPath,
           snapshotDirs,
           agentPhaseCount: input.agentPhaseCount,
+          recordKey: input.recordKey,
           narration: '',
         };
         flight.narration =
@@ -1192,6 +1308,17 @@ export async function startInteractiveDemoSubscriber(
         flight.heartbeat.unref?.();
         inFlight.set(runId, flight);
         log(`[interactive-demo] ${input.key} → governed run ${runId} (${input.leg}, spec → ${input.outPath})`);
+        for (const note of flight.pendingNotes?.splice(0) ?? []) {
+          adapter.injectWorkerMessage(runId, note, 'all').catch((err: unknown) =>
+            emitStatus({
+              ...docScope(flight.documentId, flight.projectId),
+              state: 'error',
+              message:
+                `Crew could not pass your note to the run authoring this demo (run ${runId}): ` +
+                `${err instanceof Error ? err.message : String(err)}. Once that run lands, send it again.`,
+            }),
+          );
+        }
       })
       .catch((err: unknown) => {
         // A launch that never happened keeps no flight and no snapshot (a replayed frame
@@ -1211,7 +1338,8 @@ export async function startInteractiveDemoSubscriber(
         // Re-throw so the bus (maxRetries 0) dead-letters the frame — visible, replayable,
         // and incapable of hot-looping.
         throw err instanceof Error ? err : new Error(reason);
-      });
+      })
+      .finally(dropCheck);
   }
 
   async function handleDocCreated(event: BusEvent): Promise<void> {
@@ -1228,8 +1356,23 @@ export async function startInteractiveDemoSubscriber(
       return;
     }
     if (docBusy(doc.documentId)) return;
+    // What a later thread ask needs to author the demo again (crew#501): the target and the brief.
+    rememberDemoDoc(doc);
+    await authorSpec(doc, {
+      key: doc.documentId,
+      runDir: join(demoDir, doc.documentId),
+      recordKey: demoIdempotencyKey(doc.documentId),
+      pickup: 'A governed crew picked up your demo brief — planning the scenes and authoring the click-path…',
+    });
+  }
 
-    const runDir = join(demoDir, doc.documentId);
+  /** The first-spec workflow for `doc` — from its creation, or (crew#501) from a thread ask. The
+   *  caller has checked the ledger and that the doc is not busy. */
+  async function authorSpec(
+    doc: DemoDocCreated,
+    spec: { key: string; runDir: string; recordKey: string; pickup: string; followUp?: DemoFollowUp; previousSpec?: string },
+  ): Promise<void> {
+    const { runDir } = spec;
     const outPath = join(runDir, DEMO_SPEC_FILE);
     const runId = randomUUID();
 
@@ -1238,7 +1381,7 @@ export async function startInteractiveDemoSubscriber(
     // could start a second snapshot+launch, and stop()'s sweep could not find a half-made clone.
     // Register the flight FIRST; every exit path below must endFlight() it.
     const placeholder: InFlight = {
-      key: doc.documentId,
+      key: spec.key,
       leg: 'spec',
       documentId: doc.documentId,
       projectId: doc.projectId,
@@ -1246,6 +1389,7 @@ export async function startInteractiveDemoSubscriber(
       outPath,
       snapshotDirs: [],
       agentPhaseCount: INTERACTIVE_DEMO_WORKFLOW_DEF.phases.length,
+      recordKey: spec.recordKey,
       narration: 'Crew run launched — authoring your demo…',
     };
     inFlight.set(runId, placeholder);
@@ -1256,12 +1400,32 @@ export async function startInteractiveDemoSubscriber(
       endFlight(runId);
       throw err;
     }
-    mkdirSync(runDir, { recursive: true });
+    try {
+      mkdirSync(runDir, { recursive: true });
+    } catch (err) {
+      // The doc must not read busy forever over an inbox that could not be made.
+      endFlight(runId);
+      const why = err instanceof Error ? err.message : String(err);
+      emitStatus({ ...docScope(doc.documentId, doc.projectId), state: 'error', message: `Crew could not create this demo's run directory (${why}); nothing was launched.` });
+      throw err;
+    }
+    // A thread ask re-authors from the spec the last attempt used, copied into THIS run's inbox
+    // (the doc workspace is outside the worker's boundary, wicked-core#294).
+    let followUp = spec.followUp;
+    if (followUp !== undefined && spec.previousSpec !== undefined) {
+      const previousSpecPath = join(runDir, 'previous.spec.mjs');
+      try {
+        copyFileSync(spec.previousSpec, previousSpecPath);
+        followUp = { ...followUp, previousSpecPath };
+      } catch {
+        /* no previous spec to learn from — author from the brief and the ask alone */
+      }
+    }
 
     emitStatus({
       ...docScope(doc.documentId, doc.projectId),
       state: 'processing',
-      message: 'A governed crew picked up your demo brief — planning the scenes and authoring the click-path…',
+      message: spec.pickup,
     });
 
     // F-046: WHICH repository is this app? The create request's `repo_ref(s)` (recorded by the
@@ -1335,16 +1499,17 @@ export async function startInteractiveDemoSubscriber(
     }
 
     await launchFlight({
-      key: doc.documentId,
+      key: spec.key,
       leg: 'spec',
       documentId: doc.documentId,
       projectId: doc.projectId,
       version: undefined,
-      problem: demoProblem(doc, outPath, subjects.length > 0 ? { subjects } : undefined),
+      problem: demoProblem(doc, outPath, subjects.length > 0 ? { subjects } : undefined, followUp),
       workflow: INTERACTIVE_DEMO_WORKFLOW,
       runDir,
       outPath,
       agentPhaseCount: INTERACTIVE_DEMO_WORKFLOW_DEF.phases.length,
+      recordKey: spec.recordKey,
       clisJson: docClisJson,
       channel: docChannel,
       actor: docActor,
@@ -1415,6 +1580,7 @@ export async function startInteractiveDemoSubscriber(
       outPath,
       snapshotDirs: [],
       agentPhaseCount: INTERACTIVE_DEMO_REAUTHOR_WORKFLOW_DEF.phases.length,
+      recordKey: demoReauthorIdempotencyKey(handoff.documentId, handoff.version),
       narration: 'Crew run launched — re-authoring your demo…',
     });
     try {
@@ -1456,6 +1622,7 @@ export async function startInteractiveDemoSubscriber(
       runDir,
       outPath,
       agentPhaseCount: INTERACTIVE_DEMO_REAUTHOR_WORKFLOW_DEF.phases.length,
+      recordKey: demoReauthorIdempotencyKey(handoff.documentId, handoff.version),
       runId,
     });
   }
@@ -1484,7 +1651,99 @@ export async function startInteractiveDemoSubscriber(
       ...(specRun !== undefined ? { runId: specRun.runId } : {}),
     };
     recorderFailures.set(failure.documentId, record);
+    lastFailures.set(
+      failure.documentId,
+      `the recording failed${failure.error.step !== undefined ? ` at step ${failure.error.step.index} (${failure.error.step.label})` : ''}: ` +
+        `${failure.error.kind} — ${failure.error.message}`,
+    );
     logError(recorderFailureLine(failure, record.runId));
+  }
+
+  /**
+   * crew#501 — a thread ask on a DEMO doc is answered here (the chat seam answers source/doc
+   * docs, and skips demo ones). Before this the proxy refused it with a 422 whose remedy
+   * ("highlight a step", "Re-record") needed a storyboard a failed first spec never lands, so a
+   * demo whose first spec was wrong could not be fixed from the product at all.
+   *  - a run is authoring this doc NOW → the ask is injected into it (the worker reads it at its
+   *    next turn), and the thread says so;
+   *  - otherwise → a new first-spec run: the brief, the ask (which wins where they conflict), why
+   *    the last attempt failed, and the previous spec when there was one. It passes the same
+   *    floor and dry run, and lands as a new version when it records.
+   */
+  async function handleChatAsk(event: BusEvent): Promise<void> {
+    const ask = parseChatPosted(event.event_type, event.payload);
+    if (ask === null || !isIterationAsk(ask.text)) return;
+    const docsRoot = resolveDocsRoot(ask.projectId);
+    const head = readDocHead(docsRoot, ask.documentId);
+    if (head === null || head.kind !== 'demo') return; // not a demo — the chat seam's business
+    const key = `${ask.documentId}:ask:${chatKey(ask.documentId, event.event_id, ask.sourceMessageId)}`;
+    if (ledger.has(key)) {
+      log(`[interactive-demo] ask ${key} already answered (run ${ledger.get(key)?.runId}) — replay ignored`);
+      return;
+    }
+    for (const f of inFlight.values()) if (f.key === key) return;
+
+    const live = [...inFlight.entries()].find(([, f]) => f.documentId === ask.documentId);
+    if (live !== undefined) {
+      const [runId, flight] = live;
+      if (flight.heartbeat === undefined) {
+        // Still a pre-launch placeholder (grounding, snapshots): the note waits on the flight and
+        // is injected the moment the run exists (launchFlight).
+        (flight.pendingNotes ??= []).push(`The user added on the demo thread: ${oneLine(ask.text, 1500)}`);
+        ledger.recordLaunch(key, runId);
+        emitStatus({
+          ...docScope(ask.documentId, ask.projectId),
+          state: 'processing',
+          message: 'Crew is starting the run that authors this demo — your note goes to it the moment it starts.',
+        });
+        return;
+      }
+      try {
+        await adapter.injectWorkerMessage(runId, `The user added on the demo thread: ${oneLine(ask.text, 1500)}`, 'all');
+        ledger.recordLaunch(key, runId);
+        emitStatus({
+          ...docScope(ask.documentId, ask.projectId),
+          state: 'processing',
+          message: `Crew passed your note to the run authoring this demo (run ${runId}) — the worker reads it at its next turn.`,
+        });
+      } catch (err) {
+        emitStatus({
+          ...docScope(ask.documentId, ask.projectId),
+          state: 'error',
+          message:
+            `Crew could not pass your note to the run authoring this demo (run ${runId}): ` +
+            `${err instanceof Error ? err.message : String(err)}. Nothing was sent; once that run lands, ` +
+            `send it again and crew authors a new spec from it.`,
+        });
+      }
+      return;
+    }
+
+    const doc = recallDemoDoc(ask.documentId);
+    if (doc === null) {
+      emitStatus({
+        ...docScope(ask.documentId, ask.projectId),
+        state: 'error',
+        message:
+          'Crew has no record of this demo\'s target URL and brief (it was created before this daemon kept them), ' +
+          'so it cannot author a new spec from your note. Nothing was launched. Create the demo again from the Video composer.',
+      });
+      return;
+    }
+    const eventTag = ask.sourceMessageId !== undefined ? `m-${ask.sourceMessageId}` : `e${event.event_id}`;
+    const safeTag = eventTag.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 64);
+    const previousSpec = join(docsRoot, ask.documentId, DEMO_SPEC_FILE);
+    await authorSpec(
+      { ...doc, ...(ask.projectId !== undefined ? { projectId: ask.projectId } : {}) },
+      {
+        key,
+        runDir: join(demoDir, `${ask.documentId}-ask-${safeTag}`),
+        recordKey: `crew:interactive.demo:${ask.documentId}:ask:${safeTag}`,
+        pickup: 'A governed crew picked up your note — authoring a new click-path for this demo from it…',
+        followUp: { text: ask.text, lastFailure: lastFailures.get(ask.documentId) },
+        ...(existsSync(previousSpec) ? { previousSpec } : {}),
+      },
+    );
   }
 
   const subRecorder = await tapBus({
@@ -1519,6 +1778,20 @@ export async function startInteractiveDemoSubscriber(
     }),
   });
 
+  const subAsk = await tapBus({
+    dbPath: busDbPath,
+    filter: INTERACTIVE_DEMO_ASK_BUS_FILTER,
+    pollIntervalMs: opts.pollIntervalMs ?? 2000,
+    handler: (event: BusEvent) => handleChatAsk(event),
+    onError: busSubscriberErrorReporter({
+      describe: (err, event) =>
+        `[interactive-demo] ask handler error on event ${String(event?.event_id ?? '?')}: ${err.message}`,
+      log,
+      logError: opts.logError,
+      pollIntervalMs: opts.pollIntervalMs ?? 2000,
+    }),
+  });
+
   const subFeedback = await tapBus({
     dbPath: busDbPath,
     filter: INTERACTIVE_DEMO_FEEDBACK_BUS_FILTER,
@@ -1547,6 +1820,7 @@ export async function startInteractiveDemoSubscriber(
       await subCreated.stop();
       await subFeedback.stop();
       await subRecorder.stop();
+      await subAsk.stop();
     },
   };
 }
