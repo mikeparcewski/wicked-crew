@@ -43,6 +43,12 @@ import { TestSetIndex, registerTestSetForRun } from '../qe/test-sets.js';
 import { DocGroundingStore } from '../interactive/doc-grounding.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
 import { crewStateHome } from '../projects/state-home.js';
+import { homedir } from 'node:os';
+import { discoverMcpServers } from '../mcp/discovery.js';
+import { probeMcpServer } from '../mcp/probe.js';
+import { McpRegistry } from '../mcp/registry.js';
+import { McpRegistryStore } from '../mcp/registry-store.js';
+import { platformSecretStore } from '../mcp/secrets.js';
 import { startProjectBus, MEMBERSHIP_ATTACHED, membershipAttachedKey } from '../projects/events.js';
 import { startInteractiveWsRelay, registerInteractiveEventRoutes } from '../interactive/ws-relay.js';
 import { startTeamWsRelay } from '../team/ws-relay.js';
@@ -1562,6 +1568,15 @@ export async function createServer(
       interactiveBridgeBusDataDir: options?.interactiveBridge?.busDataDir ?? null,
       docGrounding,
       ...(skillsRuntime !== undefined ? { skills: skillsRuntime } : {}),
+      // DES-MCP-TOOLS-001 S2: the registry over `<state home>/mcp` (created on the first save).
+      // Route tests drive `registerMcpRoutes` over their own registry (tests/mcp-registry.test.ts).
+      mcp: new McpRegistry({
+        store: new McpRegistryStore(),
+        secrets: platformSecretStore(),
+        probe: probeMcpServer,
+        // Read the worker home at request time: `PUT /settings` can move it (applyWorkerConfigRoot).
+        discover: (managed) => discoverMcpServers({ home: homedir(), workerHome: process.env['WICKED_WORKER_HOME'] ?? null }, managed),
+      }),
       // wicked-core#411 / crew#497: the live state-home classification the routes report and gate on.
       stateHome: stateHomeWatch,
       // Routes that say something to the thread (a refused chat seat, F-2R2-007) emit through the

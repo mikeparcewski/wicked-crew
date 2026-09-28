@@ -7017,3 +7017,189 @@ export interface PutDeliveryFreezeBody {
   frozen: boolean;
   reason?: string;
 }
+
+// ── MCP tools registry (DES-MCP-TOOLS-001 §5, §8, slice S2; api-types 0.58.0) ─────────────────
+
+/** How crew reaches an upstream MCP server. */
+export type McpUpstreamKind = 'mcp-stdio' | 'mcp-http';
+/**
+ * A tool's class, from its own `tools/list` annotations (never from a carrier): `read` when
+ * `readOnlyHint` is true; else `destructive` unless `destructiveHint` is false; else `write`. A tool
+ * with no annotations is `write`. An operator's `classOverride` wins.
+ */
+export type McpToolClass = 'read' | 'write' | 'destructive';
+/**
+ * `registered`: the schema the operator saved is the one the server lists. `unregistered`: the
+ * schema changed, or the server added the tool after the save; it is denied until previewed and
+ * saved again. `gone`: the server no longer lists it (kept so old records resolve).
+ */
+export type McpToolStatus = 'registered' | 'unregistered' | 'gone';
+/** `failing` after 3 consecutive failed probes; `never` = no probe has succeeded yet. */
+export type McpHealthState = 'ok' | 'failing' | 'never';
+/** `none` = the server needs no secret; `missing` = its reference resolves to nothing. */
+export type McpAuthState = 'none' | 'set' | 'missing';
+
+/** The spec's tool annotations, only the fields it defines. */
+export interface McpToolAnnotations {
+  title?: string;
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
+}
+
+/**
+ * Where a server's secret comes from and where crew injects it. The registry stores this
+ * reference only, never a value. `ref` is `keychain:wicked-mcp/<name>` (written by
+ * `PUT /mcp/servers/:name/secret`) or `env:<NAME>` (the daemon's env). An `mcp-stdio` server gets
+ * the value in env variable `env`; an `mcp-http` server in header `header`, after `prefix`.
+ */
+export interface McpAuthConfig {
+  ref: string;
+  env?: string;
+  header?: string;
+  prefix?: string;
+}
+
+/** `POST /mcp/servers/preview`. `mcp-stdio` takes `command` (+ `args`); `mcp-http` takes `url`. */
+export interface McpServerConfigBody {
+  /** 1–63 of `a-z 0-9 _ -`; the `<server>` of the subject `mcp:<server>/<tool>`. */
+  name: string;
+  kind: McpUpstreamKind;
+  command?: string;
+  args?: string[];
+  url?: string;
+  auth?: McpAuthConfig | null;
+}
+
+export interface McpHealth {
+  state: McpHealthState;
+  consecutiveFailures: number;
+  checkedAt: string | null;
+  /** The last probe's error, with any secret scrubbed out. */
+  lastError: string | null;
+}
+
+export interface McpTool {
+  name: string;
+  /** The policy token: `mcp:<server>/<tool>`. */
+  subject: string;
+  description: string | null;
+  annotations: McpToolAnnotations | null;
+  inputSchema: Record<string, unknown> | null;
+  derivedClass: McpToolClass;
+  classOverride: McpToolClass | null;
+  /** `classOverride ?? derivedClass`: what a policy sees. */
+  class: McpToolClass;
+  enabled: boolean;
+  status: McpToolStatus;
+  /** The saved schema's hash; `null` = never saved. */
+  schemaHash: string | null;
+  /** The hash the last probe saw. */
+  observedSchemaHash: string;
+}
+
+export interface McpServer {
+  name: string;
+  kind: McpUpstreamKind;
+  command: string | null;
+  args: string[];
+  url: string | null;
+  auth: McpAuthConfig | null;
+  authState: McpAuthState;
+  enabled: boolean;
+  health: McpHealth;
+  registeredAt: string;
+  updatedAt: string;
+  tools: McpTool[];
+  /** Over the tools that are not `gone`. */
+  counts: { total: number; enabled: number; registered: number; read: number; write: number; destructive: number };
+}
+
+/**
+ * A server configured in a CLI's own home, by name only (never its command, URL or env).
+ * `origin: 'worker'` is a server in a seat's worker home, which no wicked-handed server may be.
+ */
+export interface McpDiscoveredServer {
+  name: string;
+  cli: string;
+  origin: 'operator' | 'worker';
+  /** The config file, relative to `~` or `<worker home>`. */
+  source: string;
+  /** Whether a registered server has the same name. */
+  managed: boolean;
+}
+
+/** `GET /mcp/servers`. */
+export interface McpServersResponse {
+  servers: McpServer[];
+  discovered: McpDiscoveredServer[];
+}
+
+/** The difference between the registered tools and a probe, by tool name. */
+export interface McpToolDiff {
+  added: string[];
+  removed: string[];
+  changed: string[];
+  unchanged: string[];
+}
+
+export interface McpPreviewTool {
+  name: string;
+  subject: string;
+  description: string | null;
+  annotations: McpToolAnnotations | null;
+  inputSchema: Record<string, unknown> | null;
+  class: McpToolClass;
+  schemaHash: string;
+}
+
+/**
+ * `POST /mcp/servers/preview`'s 200. Save it with `POST /mcp/servers {previewHash}` before
+ * `expiresAt`. `diff` compares with the registered server of the same name, `null` when none.
+ * A server that does not answer is a 502 `probe_failed`.
+ */
+export interface McpPreviewResponse {
+  previewHash: string;
+  expiresAt: string;
+  server: { name: string; kind: McpUpstreamKind; command: string | null; args: string[]; url: string | null; auth: McpAuthConfig | null };
+  serverInfo: { name: string; version: string } | null;
+  tools: McpPreviewTool[];
+  diff: McpToolDiff | null;
+}
+
+/** `POST /mcp/servers`. No `previewHash`, or one that is unknown or expired, is a 409. */
+export interface SaveMcpServerBody {
+  previewHash?: string;
+}
+
+/** `PATCH /mcp/servers/:name`. */
+export interface PatchMcpServerBody {
+  enabled: boolean;
+}
+
+/** `PATCH /mcp/tools/:subject` (subject URL-encoded). At least one field. */
+export interface PatchMcpToolBody {
+  enabled?: boolean;
+  classOverride?: McpToolClass | null;
+}
+
+/** `POST /mcp/servers/:name/test`'s 200: a failed probe is `ok: false` and counts toward `failing`. */
+export interface McpServerTestResponse {
+  ok: boolean;
+  error: string | null;
+  /** `null` when the probe failed. */
+  diff: McpToolDiff | null;
+  server: McpServer;
+}
+
+/** `PUT /mcp/servers/:name/secret`: one line, 8–8192 characters. */
+export interface PutMcpSecretBody {
+  value: string;
+}
+
+/** The value is never echoed; `ref` goes into the server's `auth.ref`. 501 = no OS secret store. */
+export interface McpSecretResponse {
+  ref: string;
+  set: true;
+}

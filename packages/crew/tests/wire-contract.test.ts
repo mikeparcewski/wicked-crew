@@ -50,6 +50,14 @@ import type {
   SkillRevisionSchema,
 } from '../src/api/skills.js';
 import type { SkillsStore, SnapshotManifest } from '../src/skills/store.js';
+import type {
+  McpServerConfigSchema,
+  PatchMcpServerSchema,
+  PatchMcpToolSchema,
+  PutMcpSecretSchema,
+  SaveMcpServerSchema,
+} from '../src/api/mcp.js';
+import type { McpRegistry } from '../src/mcp/registry.js';
 import type { SkillsHealth, SkillsHealthFindingKind } from '../src/skills/runtime.js';
 import type { PluginSource } from '../src/skills/plugin-source.js';
 import type { CappedFileRead, WorktreeDiff } from '../src/api/run-files.js';
@@ -1006,6 +1014,18 @@ accepts<z.input<typeof SkillRevisionSchema>, Wire.SkillRevisionBody>();
 accepts<z.input<typeof PutSkillFileSchema>, Wire.PutSkillFileBody>();
 accepts<z.input<typeof AddSkillSchema>, Wire.AddSkillBody>();
 accepts<z.input<typeof ReplaceSkillSchema>, Wire.ReplaceSkillBody>();
+
+// ── api-types 0.58.0 — the MCP tools registry (DES-MCP-TOOLS-001 S2) ─────────────────────────────
+accepts<z.input<typeof McpServerConfigSchema>, Wire.McpServerConfigBody>();
+accepts<z.input<typeof SaveMcpServerSchema>, Wire.SaveMcpServerBody>();
+accepts<z.input<typeof PatchMcpServerSchema>, Wire.PatchMcpServerBody>();
+accepts<z.input<typeof PatchMcpToolSchema>, Wire.PatchMcpToolBody>();
+accepts<z.input<typeof PutMcpSecretSchema>, Wire.PutMcpSecretBody>();
+respondsWith<Wire.McpServersResponse, Awaited<ReturnType<McpRegistry['list']>>>();
+respondsWith<Wire.McpPreviewResponse, Awaited<ReturnType<McpRegistry['preview']>>>();
+respondsWith<Wire.McpServer, Awaited<ReturnType<McpRegistry['save']>>>();
+respondsWith<Wire.McpServerTestResponse, Awaited<ReturnType<McpRegistry['test']>>>();
+respondsWith<Wire.McpTool, Awaited<ReturnType<McpRegistry['patchTool']>>>();
 // NO skills setting is on the wire (codex round 5 / coordinator decision): the root is
 // `<state home>/skills`, full stop — `skills_root` is retired with its env override (a configurable
 // root let a PUT aim seeding at `~/.codex/skills`), and `skills_mirror` was withdrawn before it

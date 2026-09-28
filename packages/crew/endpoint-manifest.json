@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.57.0",
+  "apiTypesVersion": "0.58.0",
   "endpoints": [
     {
       "method": "GET",
@@ -358,6 +358,101 @@
       "responseType": "InteractiveDocsListing",
       "statusCodes": [
         200
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/mcp/servers",
+      "requestType": null,
+      "responseType": "McpServersResponse",
+      "statusCodes": [
+        200,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/mcp/servers",
+      "requestType": "SaveMcpServerBody",
+      "responseType": "McpServer",
+      "statusCodes": [
+        201,
+        400,
+        409,
+        503
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/mcp/servers/:name",
+      "requestType": null,
+      "responseType": "{ removed: string }",
+      "statusCodes": [
+        200,
+        404,
+        503
+      ]
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/v1/mcp/servers/:name",
+      "requestType": "PatchMcpServerBody",
+      "responseType": "McpServer",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        503
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/mcp/servers/:name/secret",
+      "requestType": "PutMcpSecretBody",
+      "responseType": "McpSecretResponse",
+      "statusCodes": [
+        200,
+        400,
+        501,
+        502,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/mcp/servers/:name/test",
+      "requestType": null,
+      "responseType": "McpServerTestResponse",
+      "statusCodes": [
+        200,
+        404,
+        409,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/mcp/servers/preview",
+      "requestType": "McpServerConfigBody",
+      "responseType": "McpPreviewResponse",
+      "statusCodes": [
+        200,
+        400,
+        409,
+        502,
+        503
+      ]
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/v1/mcp/tools/:subject",
+      "requestType": "PatchMcpToolBody",
+      "responseType": "McpTool",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        503
       ]
     },
     {
