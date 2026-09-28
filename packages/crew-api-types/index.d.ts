@@ -736,6 +736,17 @@ export interface RosterSeat {
    * check has not answered yet reads `unknown`, never `signed_in` off its file.
    */
   probed_at?: string;
+  /**
+   * How far `auth` was VERIFIED (crew#645): `live` — the seat answered an authenticated request, or
+   * refused one for want of a credential (a status command reads the stored login, so an expired
+   * OAuth login still reads signed in there; the daemon makes one short live request when it says
+   * signed in); `status` — only the status command answered (the live request could not tell);
+   * `unverified` — nothing asked the seat (it has no status command, or its check has not answered
+   * or could not tell). Optional on the wire: a daemon before it sends none.
+   */
+  login_check?: 'live' | 'status' | 'unverified';
+  /** Present unless `login_check` is `live`: why, in the operator's words ("login unverified — …"). */
+  login_note?: string;
   /** Present when `auth` is `not_required`: the free tier the seat answers on. */
   free_tier?: string;
   /**

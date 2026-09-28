@@ -59,9 +59,28 @@ No daemon restart is needed. The seat's next check picks up the new entry.
    a seat signed in from the System page turns green within a poll or two. Changing the worker home
    discards every answer. Until the first check answers, a probed seat reads `unknown`, not
    `signed_in`, because a credential file is not a working login.
+
+   A status command reads the stored login and never asks the provider. An OAuth login whose
+   token expired and cannot be refreshed still reads signed in there (crew#645). So when the
+   status command says signed in, the daemon also sends one short live request under the same
+   configuration home: `claude -p` on haiku with no tools, no MCP servers and no session file, or
+   `codex exec --ephemeral --sandbox read-only`, asking for the single word "OK". If the seat
+   refuses it for want of a credential, it reads `signed_out` and its words become the
+   `auth_evidence`. If the request times out or fails for another reason, the status answer stands.
 3. **The credential file** (no `auth_source`). For seats with no status command (pi, copilot,
    opencode, agy), the daemon checks that a credential-shaped file exists. A file can prove that a
    login happened, not that it still works; the seat's own refusal (1) is what catches that.
+
+`login_check` says how far the reading was verified. `live` means the seat answered (or refused) an
+authenticated request. `status` means only the status command answered. `unverified` means nothing
+asked the seat: it has no status command, or its check has not answered or could not tell. Unless
+the check is `live`, `login_note` explains why, starting "login unverified".
+
+A launch (`POST /runs` with no `clisJson`, the adapter's own launches and `wicked-crew start`) first
+waits, for up to 20 seconds, for any seat whose check is missing or stale. So an expired login reads
+`signed_out` before the launch routes work. A probed seat whose check still has not answered is
+`council_eligible: false` ("login not verified yet"). Its `auth` stays `unknown`, so a chat still
+offers it.
 
 A seat whose `auth` is `signed_out` is `council_eligible: false`. At launch, the daemon hands the
 engine such a seat as benched (`health.usable: false`), so no unit is routed to it. If the bench

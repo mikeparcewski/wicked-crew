@@ -49,6 +49,8 @@ describe('seatStanding — what a council would do with the seat, as far as the 
     expect(seatStanding({ key: 'claude', enabled_for_council: true }, true)).toEqual({
       auth: 'signed_in',
       council_eligible: true,
+      // crew#645: nothing asked the seat, and the standing says so.
+      login_check: 'unverified', login_note: expect.stringMatching(/^login unverified/),
     });
   });
 
@@ -67,6 +69,7 @@ describe('seatStanding — what a council would do with the seat, as far as the 
       free_tier: FREE_TIER_SEATS['opencode'],
       free_tier_source: 'crew-heuristic',
       council_eligible: true,
+      login_check: 'unverified', login_note: expect.stringMatching(/^login unverified/),
     });
   });
 
@@ -79,7 +82,7 @@ describe('seatStanding — what a council would do with the seat, as far as the 
   });
 
   it('unknown auth is eligible: refusing a seat the daemon cannot read would bench working keychain seats', () => {
-    expect(seatStanding({ key: 'agy' }, null)).toEqual({ auth: 'unknown', council_eligible: true });
+    expect(seatStanding({ key: 'agy' }, null)).toEqual({ auth: 'unknown', council_eligible: true, login_check: 'unverified', login_note: expect.stringMatching(/^login unverified/) });
   });
 
   it('the seat’s runtime health is not an INPUT any more — an observed error never makes a seat ineligible (R5); a disabled seat is not eligible', () => {
@@ -87,7 +90,12 @@ describe('seatStanding — what a council would do with the seat, as far as the 
     // one bench is the engine's per-run ballot ledger, so there is nothing left for health to decide.
     expect(seatStanding({ key: 'claude', enabled_for_council: true }, true).council_eligible).toBe(true);
     const disabled = seatStanding({ key: 'claude', enabled_for_council: false }, true);
-    expect(disabled).toEqual({ auth: 'signed_in', council_eligible: false, council_ineligible_reason: 'not enabled for council' });
+    expect(disabled).toEqual({
+      auth: 'signed_in',
+      council_eligible: false,
+      council_ineligible_reason: 'not enabled for council',
+      login_check: 'unverified', login_note: expect.stringMatching(/^login unverified/),
+    });
   });
 });
 

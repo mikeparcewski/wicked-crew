@@ -24,8 +24,10 @@ import { signedInHeuristic } from './seat-signin.js';
 import { SeatProbe } from './seat-probe.js';
 import { seatStanding, chatSeatAdmission, type StandingSeat } from './seat-standing.js';
 
-/** The accessor: the registry roster WITH crew's standing, freshly read on every call. */
-export type RosterWithStanding = () => RosterSeat[];
+/** The accessor: the registry roster WITH crew's standing, freshly read on every call. `ready`
+ *  (crew#645), awaited by a launch before it reads the roster, waits — bounded — for every seat's
+ *  missing or stale login check, so an expired login reads `signed_out` before work is routed. */
+export type RosterWithStanding = (() => RosterSeat[]) & { ready?: () => Promise<void> };
 
 export interface RosterStandingDeps {
   /** The daemon's per-seat runtime health + council evidence (councilSeatFailed, auth refusals). */
@@ -57,9 +59,12 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
   const env = deps.env ?? process.env;
   const probe =
     deps.probe !== undefined ? deps.probe : deps.signedIn === undefined && deps.registry === undefined ? new SeatProbe() : null;
-  const accessor = (): RosterSeat[] => {
+  const liveRoot = (): string | undefined => {
     const workerRoot = env['WICKED_WORKER_HOME'];
-    const root = workerRoot === '' ? undefined : workerRoot;
+    return workerRoot === '' ? undefined : workerRoot;
+  };
+  const accessor: RosterWithStanding = (): RosterSeat[] => {
+    const root = liveRoot();
     return (registry() as RosterSeat[]).map((seat) => {
       const key = String(seat.key);
       const health = seatHealth.healthFor(key);
@@ -85,7 +90,7 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
         // worker's 401, an auth ACP fallback) overrides the file probe — `auth` flips, not only
         // `council_eligible`, and the evidence rides on the wire.
         seatHealth.authFailureFor(key),
-        probed,
+        probed ?? (probe?.probes(key) === true ? 'pending' : undefined),
       );
       // F-W1-005 (wave-1 P6): the chat admission verdict the daemon itself applies when `POST /chats`
       // picks its default seats — the SAME `chatSeatAdmission` call, for both scope modes — so the
@@ -105,6 +110,17 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
       };
     });
   };
+  if (probe !== null) {
+    accessor.ready = async () => {
+      let keys: string[];
+      try {
+        keys = (registry() as RosterSeat[]).map((s) => String(s.key));
+      } catch {
+        return; // no roster: the launch reads (and reports) the same failure itself
+      }
+      await probe.ensureFresh(keys, liveRoot());
+    };
+  }
   // Warm the probe at boot, so the first launch after a restart already routes on the seat's own
   // answer (a probe runs in the background; the roster read itself never waits on one).
   if (probe !== null) {
