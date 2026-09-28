@@ -52,7 +52,7 @@ import { InteractiveHandoffLedger } from './ledger.js';
 import { DRAFT_SKILL, draftQualityClause, draftSkillArmLine, withDraftSkill, type SkillHeld } from './draft-skill.js';
 import { crewStateHome } from '../projects/state-home.js';
 import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
-import { readDocHead } from './chat-events.js';
+import { DEMO_DOC_MOVED_MESSAGE, readDocHead } from './chat-events.js';
 import { resolveInteractiveRoot } from './bridge-root.js';
 import type { CoreAdapter } from '../core/adapter.js';
 import type { CoreEvent, LaunchRunInput, WorkflowDef } from '../core/types.js';
@@ -66,6 +66,7 @@ import { busSubscriberErrorReporter } from './bus-subscriber-errors.js';
 import { emitOnBus, requireEngineBus, tapBus, type BusEvent } from '../core/bus.js';
 
 // ── Vocabulary constants (interactive's, verbatim — src/service/events.js is the truth) ──────
+
 
 export const FEEDBACK_PROCESSED = 'wicked.interactive.feedback.processed';
 export const EDIT_COMPLETED = 'wicked.interactive.edit.completed';
@@ -324,15 +325,6 @@ export interface InteractiveEditOptions {
    *  (`WICKED_INTERACTIVE_ROOT` › `~/wicked-interactive/docs`); the server wires the
    *  per-project `interactiveRoot` setting through here. */
   resolveDocsRoot?: (projectId: string | undefined) => string;
-  /** Is the DEMO seam actually armed in this process? Probed per event (the demo seam arms
-   *  after this one, and can fail to arm at all — bus missing, workflow registration refused).
-   *  The kind gate above hands demo docs to that seam; when it is NOT there, handing off is
-   *  handing off to NOBODY — the canvas would sit on a handoff no seam ever answers and no
-   *  status ever closes. So an un-armed demo seam turns the silent skip into an honest error
-   *  status (see `handleFeedbackProcessed`). Default: `() => false` — a caller that does not
-   *  wire the probe has no demo seam to hand anything to, and saying so out loud beats
-   *  guessing. */
-  demoSeamArmed?: () => boolean;
   /** Called after a launch that FILED the run into a project (the handoff carried
    *  `project_id`). The server wires this to the same post-commit half the launch route
    *  performs: tag the run in the live membership index + emit `wicked.crew.membership.attached`
@@ -692,43 +684,27 @@ export async function startInteractiveEditSubscriber(
     const handoff = parseStructuralFeedback(event.event_type, event.payload);
     if (handoff === null) return;
 
-    // THE KIND GATE (CREW-UX-9): the frame carries no `kind`, so the doc's own manifest is
-    // the truth. A demo doc's step feedback means "re-author demo.spec.mjs and re-record"
-    // (assist SKILL.md Step 8c) — the demo seam's business; answering it here would land a
-    // storyboard-text edit the next re-record overwrites, while the user's actual ask (change
-    // the demo) dies. Fail-open on an unreadable manifest: that is this seam's pre-CREW-UX-9
-    // behavior, and the demo seam requires a READABLE demo manifest — one answerer either way.
+    // THE KIND GATE (CREW-UX-9): the frame carries no `kind`, so the doc's own manifest is the
+    // truth. A demo doc's step feedback means "re-author the demo and re-record" — answering it
+    // here would land a storyboard-text edit the next re-record overwrites. Demos are made by the
+    // Demo experience's `demo` preset now (studio#373, M9b), which re-records a chapter at its own
+    // review gate; a demo DOCUMENT has no answerer, so the handoff is declined with an honest error
+    // status rather than dropped. Fail-open on an unreadable manifest: this seam's old behaviour.
     const docsRoot = (opts.resolveDocsRoot ?? (() => resolveInteractiveRoot(null)))(
       handoff.projectId,
     );
     const head = readDocHead(docsRoot, handoff.documentId);
     if (head !== null && head.kind === 'demo') {
-      // …but ONLY when the demo seam is actually there to take it. Skipping into a seam that
-      // never armed is a silent drop: no run, no status, a canvas that waits forever. Say so.
-      if (!(opts.demoSeamArmed ?? (() => false))()) {
-        emitStatus({
-          ...docScope(handoff.documentId, handoff.projectId),
-          version: handoff.version,
-          state: 'error',
-          message:
-            `This is a demo document: changing it means re-authoring its demo spec and ` +
-            `re-recording, which the crew's demo seam does — and that seam is not running on ` +
-            `this daemon. Nothing was changed. Start crew with the interactive demo events ` +
-            `enabled (drop --no-interactive-demo-events / WICKED_INTERACTIVE_DEMO_EVENTS), then ` +
-            `resubmit this feedback.`,
-        });
-        // DELIBERATELY no ledger row: this handoff was NOT answered, it was declined. An
-        // operator who arms the demo seam and replays the frame must get a real re-author run,
-        // and the launch gate is `ledger.has` — a row here would eat that replay forever.
-        log(
-          `[interactive-edit] doc ${handoff.documentId} is a demo but the demo seam is NOT armed ` +
-            `— handoff v${handoff.version} answered with an honest error status, not silently dropped`,
-        );
-        return;
-      }
+      emitStatus({
+        ...docScope(handoff.documentId, handoff.projectId),
+        version: handoff.version,
+        state: 'error',
+        message: DEMO_DOC_MOVED_MESSAGE,
+      });
+      // DELIBERATELY no ledger row: this handoff was NOT answered, it was declined.
       log(
-        `[interactive-edit] doc ${handoff.documentId} is a demo — its step feedback re-authors ` +
-          `the spec (demo seam), not the storyboard; handoff v${handoff.version} skipped here`,
+        `[interactive-edit] doc ${handoff.documentId} is a demo document — handoff v${handoff.version} ` +
+          `declined with an honest error status (demos are made in the Demo experience)`,
       );
       return;
     }

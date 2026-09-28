@@ -41,10 +41,11 @@ export const SYSTEM_WORKFLOWS: ReadonlySet<string> = new Set([
   'onboarding',
   'capture-learnings',
   'steering-author',
-  // The interactive document and video seams (`interactive/*-events.ts`).
+  // The Demo experience's preset (api/demo.ts, studio#373): launched from Demo mode with its demo
+  // root, never from a general preset picker; it delivers nothing.
+  'demo',
+  // The interactive document seams (`interactive/*-events.ts`).
   'interactive-chat',
-  'interactive-demo',
-  'interactive-demo-reauthor',
   'interactive-draft',
   'interactive-edit',
 ]);

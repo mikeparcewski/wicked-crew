@@ -84,7 +84,7 @@ describe('STATIC — every non-execCapped child-process call in src/ routes its 
           const lineText = src.split('\n')[line - 1] ?? '';
           if (/^\s*\w+\([^)]*\)\s*:\s*[\w<>[\]|.\s]+;\s*$/.test(lineText)) continue;
           // A line that IS a string literal is program text for ANOTHER process — a Tool phase's
-          // `node -e` script (demo-events.ts `demoDryRunScript`). wicked-core spawns that program
+          // `node -e` script (the former demo seam's `demoDryRunScript` was one). wicked-core spawns that program
           // with its hardened env (the store variable stripped, FINDING-067), and whatever it spawns
           // inherits that env: it is not a crew child and never sees the daemon's export.
           if (/^\s*'[^']*spawn/.test(lineText)) continue;

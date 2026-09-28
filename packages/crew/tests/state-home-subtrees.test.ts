@@ -103,6 +103,13 @@ const STATE_HOME_JOIN_RE =
 /** Identifiers a state-home join may name instead of a literal — resolved here so the audit stays exact. */
 const KNOWN_CONSTANTS: Record<string, string> = { SKILLS_DIRNAME, REPO_GRAPHS_DIRNAME };
 
+/**
+ * Crew-owned entries whose writer crew deleted, kept in the registry so a host that already has them
+ * keeps launching (the fence still classifies them). M9b (wicked-studio#373): the interactive-demo
+ * pipeline (`interactive/demo-events.ts`) wrote the ledger and the per-demo dirs.
+ */
+const RETIRED_ENTRIES = new Set(['interactive-demo-ledger.json', 'interactive-demos']);
+
 describe('state-home-subtrees.json — the registry itself', () => {
   it('is well-formed: version 1, every entry has exactly one of name/prefix, an owner, a source and a worker_read verdict; names are unique', () => {
     expect(registry.version).toBe(1);
@@ -202,6 +209,11 @@ describe('STATIC — every state-home join in src/ names a registered entry', ()
           STATE_HOME_ROOT_ENVS.filter((r) => r.fenced).map((r) => r.variable),
           `registry entry ${key} (crew, env ${e.env}) names a variable the boot does not refuse inside the state home — add it to STATE_HOME_ROOT_ENVS (projects/state-home-preflight.ts) as fenced, or drop the entry`,
         ).toContain(e.env);
+        continue;
+      }
+      if (RETIRED_ENTRIES.has(key)) {
+        // Retired, not dead weight: nothing in src/ writes it any more, and the registry keeps it.
+        expect([...found].some((f) => f === key || f.startsWith(key)), `retired registry entry ${key} is joined in src/ again — drop it from RETIRED_ENTRIES`).toBe(false);
         continue;
       }
       expect([...found].some((f) => f === key || f.startsWith(key)), `registry entry ${key} (crew) has no join in src/`).toBe(true);

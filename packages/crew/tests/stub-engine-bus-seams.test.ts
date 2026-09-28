@@ -62,7 +62,7 @@ function fakeAdapter(stub: boolean): CoreAdapter {
   } as unknown as CoreAdapter;
 }
 
-/** Boot the daemon with all four answering seams enabled, on a bus db of this test's own. */
+/** Boot the daemon with all three answering seams enabled, on a bus db of this test's own. */
 async function bootWithSeams(stub: boolean): Promise<Awaited<ReturnType<typeof createServer>>> {
   const dbPath = join(tmp, 'bus.db');
   const seam = { enabled: true, dbPath, pollIntervalMs: 60_000 };
@@ -70,7 +70,6 @@ async function bootWithSeams(stub: boolean): Promise<Awaited<ReturnType<typeof c
     projectEvents: { disabled: true },
     interactiveDraftEvents: { ...seam, ledgerPath: join(tmp, 'draft.json'), draftDir: join(tmp, 'drafts') },
     interactiveEditEvents: { ...seam, ledgerPath: join(tmp, 'edit.json'), editDir: join(tmp, 'edits') },
-    interactiveDemoEvents: { ...seam, ledgerPath: join(tmp, 'demo.json'), demoDir: join(tmp, 'demos') },
     interactiveChatEvents: { ...seam, ledgerPath: join(tmp, 'chat.json'), chatDir: join(tmp, 'chats') },
   });
 }

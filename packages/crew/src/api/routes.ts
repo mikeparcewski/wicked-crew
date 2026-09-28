@@ -86,6 +86,7 @@ import {
 import { isSteeringAuthorRun, landSteeringProposal } from './steering-landing.js';
 import { ApproveEditSchema, approveEdited, captureLaunchRoots, editInFlight, FileProposalSchema, registerCaptureRoutes } from './capture.js';
 import { registerTestingRoutes } from './testing.js';
+import { DEMO_PRESET, demoLaunchRoots, registerDemoRoutes } from './demo.js';
 import { registerSkillsRoutes } from './skills.js';
 import { registerMcpRoutes } from './mcp.js';
 import type { McpRegistry } from '../mcp/registry.js';
@@ -1854,6 +1855,13 @@ export function registerRoutes(
       return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
     }
     const b = parsed.data;
+    // The demo preset launches only from POST /projects/:id/demo (api/demo.ts), which mints the run's
+    // demo root and brief first: launched here directly it would have neither.
+    if (b.workflow === DEMO_PRESET && (b.sessionId === undefined || !demoLaunchRoots.has(b.sessionId))) {
+      return reply.code(400).send({
+        error: 'the demo preset launches from POST /projects/:id/demo, which makes its demo root and brief; POST /runs does not take it directly',
+      });
+    }
     // wicked-core#411 / crew#497: the state-home blocker, judged BEFORE anything is resolved or
     // committed. While the handed skills snapshot derives a state home with an entry the worker
     // Read fence cannot classify, the engine refuses this launch at intake (and an engine before
@@ -1881,6 +1889,9 @@ export function registerRoutes(
     // sandbox: the capture route registered it under the run id it minted.
     const captureRoot = captureLaunchRoots.get(input.sessionId);
     if (captureRoot !== undefined) input.extraWriteRoots = [captureRoot];
+    // A demo launch (api/demo.ts) writes every file into the demo root the demo route minted for it.
+    const demoRoot = demoLaunchRoots.get(input.sessionId);
+    if (demoRoot !== undefined) input.extraWriteRoots = [demoRoot];
     if (b.entityMode !== undefined) input.entityMode = b.entityMode;
     if (b.humanConfirm !== undefined) input.humanConfirm = b.humanConfirm;
     // F-E2E-030: only the explicit `'auto'` opts out of the engine's deliver gate. `'human'` and
@@ -5311,6 +5322,8 @@ export function registerRoutes(
   // ── Capture (Studio OS behaviour 8) — notes and photos → a project-filed run whose output is
   // proposals in the queue above; the launch is POST /runs itself (api/capture.ts).
   registerCaptureRoutes(app);
+  // The Demo experience (studio#373): the demo preset's launch, view, files and script edit.
+  registerDemoRoutes(app, adapter);
 
   // ── Presets (DES-TEAMING-002 §8.4, seam C2) — saved phase selections in the engine's store;
   // a launch names one via `workflow`, and the ENGINE resolves it.

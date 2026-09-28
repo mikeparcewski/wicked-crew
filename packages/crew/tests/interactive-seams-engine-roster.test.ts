@@ -1,4 +1,4 @@
-// F-RECON-002/003: the interactive seams (draft / edit / chat / demo) launch with the roster WITH
+// F-RECON-002/003: the interactive seams (draft / edit / chat) launch with the roster WITH
 // crew's standing, so a signed-out seat reaches the engine benched instead of being convened or
 // elected. Each seam is armed over a real temp bus with a FAKE adapter that captures `launchRun`'s
 // input; the capture is then translated exactly as the real `launchRun` does (`engineRosterJson`)
@@ -19,7 +19,6 @@ import type { CoreEvent, LaunchRunInput, WorkflowDef } from '../src/core/types.j
 import { startInteractiveChatSubscriber, CHAT_POSTED } from '../src/interactive/chat-events.js';
 import { startInteractiveDraftSubscriber, DOC_CREATED } from '../src/interactive/draft-events.js';
 import { startInteractiveEditSubscriber, FEEDBACK_PROCESSED } from '../src/interactive/edit-events.js';
-import { startInteractiveDemoSubscriber } from '../src/interactive/demo-events.js';
 import { removeScratch } from './setup/scratch.js';
 
 const registrySeat = { display_name: 'x', binary: 'x', enabled_for_council: true, headless_invocation: 'x {PROMPT}' };
@@ -130,16 +129,6 @@ describe('interactive seams launch with the standing roster (F-RECON-002/003)', 
       structural_items: [{ selector: 'slide-2-heading-1', instruction: 'make this punchier', fragment: '<h2 data-wid="slide-2-heading-1">One bus</h2>' }],
       ts: new Date().toISOString(),
     });
-    await waitFor(() => engine.launches.length === 1);
-    expectEngineBench(engine.launches[0]!.clisJson);
-  });
-
-  it('demo seam: doc.created(kind:demo) launches with the standing roster — the seat the recon saw ELECTED is benched', async () => {
-    const engine = fakeAdapter();
-    seedDoc('checkout-demo', 'demo');
-    const sub = await startInteractiveDemoSubscriber(engine.asAdapter(), { ...common(), ledgerPath: join(dir, 'd.json'), demoDir: join(dir, 'demos') });
-    subs.push(sub!);
-    await emit(DOC_CREATED, 'docs', { document_id: 'checkout-demo', kind: 'demo', url: 'https://staging.example.com/app', brief: 'show sign-in', ts: new Date().toISOString() });
     await waitFor(() => engine.launches.length === 1);
     expectEngineBench(engine.launches[0]!.clisJson);
   });

@@ -119,7 +119,7 @@ export const LINEAGE_MAX_HOPS = 16;
  * "recorder", code, error, remedy, install_command, step?, retryable: false}` with the stable codes
  * `recorder_browser_missing` · `recorder_browser_install_failed` · `recorder_launch_failed` ·
  * `recording_spec_missing` · `recording_spec_invalid` · `recording_step_failed` · `recording_failed`
- * · `recording_in_flight` — the frame `interactive/demo-events.ts` relays to
+ * · `recording_in_flight` — the frame the former demo seam relayed to
  * `GET /diagnostics.recentErrors` (F-RECON-013 companion). `POST /api/events` refuses a second
  * `demo.requested` for a doc mid-recording (`409 recording_in_flight`), `GET /api/preflight` carries
  * the recorder snapshot, and `wicked-interactive doctor [--install]` is the operator remedy. A 0.9.1
@@ -137,8 +137,8 @@ export const LINEAGE_MAX_HOPS = 16;
  * recycles it into `npx wicked-interactive@^0.9.3`.
  *
  * 0.9.4 (wicked-interactive #243 — crew#565/#500): the floor follows 0.9.4 because the demo seam's
- * spec run now ends in a DRY RUN (`npx <this spec> dry-run <spec> --json`, `demo-events.ts`
- * `demoDryRunCheck`) that 0.9.3 does not have — against it the phase fails closed ("without a
+ * spec run ended in a DRY RUN (`npx <this spec> dry-run <spec> --json`, the former demo seam's
+ * `demoDryRunCheck`, deleted with M9b — studio#373) that 0.9.3 does not have — against it the phase fails closed ("without a
  * verdict") — and 0.9.4's recorder is READ-ONLY (every non-GET request and every page → server
  * WebSocket frame is blocked and fails its step as `side_effect_blocked`). A bridge already running
  * 0.9.3 is still adopted until it restarts; the dry run, which always resolves this range, is what

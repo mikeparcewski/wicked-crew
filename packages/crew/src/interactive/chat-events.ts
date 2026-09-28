@@ -277,16 +277,24 @@ export function chatSeamAnswers(kind: string): boolean {
 
 /**
  * `true` when SOME seam answers a thread ask on a doc of this kind — the proxy refuses the rest
- * with a typed 422 (`askRefusalFor`). A `demo` doc's asks are the demo seam's (crew#501,
- * `demo-events.ts` `handleChatAsk`): injected into the live authoring run, or a new spec run.
+ * with a typed 422 (`askRefusalFor`). A `demo` document has no answerer: demos are made in
+ * studio's Demo mode (the `demo` preset, studio#373).
  */
 export function isAnswerableDocKind(kind: string): boolean {
-  return chatSeamAnswers(kind) || kind === 'demo';
+  return chatSeamAnswers(kind);
 }
+
+/** Why a demo DOCUMENT's feedback or ask has no answerer (studio#373, M9b): demos are made by a
+ *  governed run of the `demo` preset in studio's Demo mode, which re-records at its review gate. */
+export const DEMO_DOC_MOVED_MESSAGE =
+  'This is a demo document. Demos are made in studio\'s Demo mode now (a governed demo run: plan, ' +
+  'record, review), which re-records a chapter from its review gate. Nothing was changed; start a new ' +
+  'demo there.';
 
 /** The thread's answer to an ask on a doc no seam answers (F-RECON-013). Mirrors the proxy's 422
  *  (`askRefusalFor`). */
 export function foreignKindAskMessage(kind: string): string {
+  if (kind === 'demo') return DEMO_DOC_MOVED_MESSAGE;
   return (
     `Asks on documents of kind '${kind}' have no answering seam on this daemon — nothing was launched for ` +
     'this message.'
@@ -1063,11 +1071,6 @@ export async function startInteractiveChatSubscriber(
     const doc = readDocHead(docsRoot, ask.documentId);
     if (doc === null) {
       log(`[interactive-chat] chat.posted for unknown doc ${ask.documentId} under ${docsRoot} — ignored`);
-      return;
-    }
-    if (doc.kind === 'demo') {
-      // crew#501: the demo seam answers asks on demo docs (demo-events.ts `handleChatAsk`).
-      log(`[interactive-chat] doc ${ask.documentId} is a demo — its asks are the demo seam's`);
       return;
     }
     if (!chatSeamAnswers(doc.kind)) {

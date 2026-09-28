@@ -216,42 +216,6 @@ export function deliverableFloorPhase(
 }
 
 /**
- * BEHAVIOUR CHECKS for a declared deliverable (crew#500).
- *
- * The floor proves an artifact EXISTS. Some artifacts can also be proven to WORK, deterministically
- * and without a model: a demo spec can be executed headless before it is installed. A launcher that
- * has such a check registers it here, keyed by the run id and the deliverable's absolute path,
- * BEFORE it launches;
- * {@link composeDeliverableFloor} consumes the registration and appends the check as one more Tool
- * phase after the floor, so a failing check fails the RUN — the same exit-code contract as the floor.
- *
- * Why a registry and not a launch field: the check belongs to the ARTIFACT the launcher declared,
- * and `requireDeliverables` is where the launcher declares it; this keeps the one per-run
- * composition path (`adapter.launchRun`) unchanged. The registry is in-process and crew-owned —
- * nothing a worker can write reaches it (the run's write roots hold only the artifact). A
- * registration is consumed by the first composition that declares its path; the returned function
- * drops one a launch never composed (the launch failed before it got there).
- */
-export interface DeliverableCheck {
-  /** Phase id — must not collide with the base def's phases or the floor's. */
-  id: string;
-  /** The Tool phase argv; `cmd[0]` must be an absolute interpreter (see {@link deliverableFloorPhase}). */
-  cmd: string[];
-}
-
-const deliverableChecks = new Map<string, DeliverableCheck>();
-const checkKey = (runId: string, path: string): string => `${runId}\u0000${path}`;
-
-/** Register a behaviour check for run `runId`'s deliverable at `path` (see {@link DeliverableCheck}). */
-export function registerDeliverableCheck(runId: string, path: string, check: DeliverableCheck): () => void {
-  const key = checkKey(runId, path);
-  deliverableChecks.set(key, check);
-  return () => {
-    if (deliverableChecks.get(key) === check) deliverableChecks.delete(key);
-  };
-}
-
-/**
  * Compose a PER-RUN def: `base`'s phases (untouched — the shared def is never mutated) plus the
  * deliverable floor appended last, under a run-scoped id. Mirrors `composeDeliverWorkflow`'s
  * contract exactly, including the id charset/length rules `registerWorkflow` enforces and the
@@ -302,19 +266,5 @@ export function composeDeliverableFloor(
     ...base.phases,
     deliverableFloorPhase(paths, launchedAtMs, last !== undefined ? [last.id] : []),
   ];
-  // Behaviour checks run after the floor: a check over a missing artifact would only restate it.
-  for (const p of paths) {
-    const check = deliverableChecks.get(checkKey(runId, p));
-    if (check === undefined) continue;
-    if (phases.some((ph) => ph.id === check.id)) {
-      throw new Error(`deliverable check '${check.id}' collides with a phase of '${base.id}'`);
-    }
-    deliverableChecks.delete(checkKey(runId, p));
-    phases.push({
-      ...deliverableFloorPhase([p], launchedAtMs, [phases[phases.length - 1]!.id]),
-      id: check.id,
-      executor: { type: 'tool', cmd: check.cmd },
-    });
-  }
   return { id: composedId, phases };
 }

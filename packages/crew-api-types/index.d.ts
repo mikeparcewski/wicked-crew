@@ -6159,6 +6159,109 @@ export interface CaptureResponse {
   runId: string;
 }
 
+// ── The Demo experience (wicked-studio#373, api-types 0.61.0) ────────────────────────────────
+
+/**
+ * `POST /projects/:id/demo` body: the app to film, who the demo is for and what to show. The daemon
+ * mints the run's demo root, writes the brief there and launches the built-in `demo` preset (the
+ * wicked-garden demo skill's plan → record → review) through `POST /runs`, so its refusals are that
+ * route's. The demo root is the run's only extra write root; a caller never names it.
+ */
+export interface DemoLaunchBody {
+  /** The running app (http or https). The recorder is read-only against it. */
+  url: string;
+  audience: string;
+  show: string;
+  /** The roster to seat the team from, as `POST /runs` takes it. Omit for the daemon's roster. */
+  clisJson?: string;
+}
+
+/** `POST /projects/:id/demo` → 201. */
+export interface DemoLaunchResponse {
+  runId: string;
+}
+
+/** `PUT /runs/:id/demo/script` body: the presenter's edit of `script.md` (plan gate only; ≤ 256 KB). */
+export interface DemoScriptBody {
+  content: string;
+}
+
+/**
+ * Where a demo run stands. `preparing` covers the PA's scope step and any phase the floor added before
+ * `plan`; `team_gate` is the team plan's approval gate (`plan_approval`: the run holds a plan rev past
+ * the accepted one), which opens before `plan` runs and is answered like any gate; `plan_gate` and `review_gate` are the run's human gates (answered through `POST /runs/:id/gate`:
+ * approve, or `action: 'request_changes'` with the note as `amend` — at the plan gate it re-runs `plan`,
+ * at the review gate it rewinds to `record`). The review gate is the one after `review` passed, or the
+ * engine's escalation gate when the review did not pass (`review.rejected`).
+ */
+export type DemoStage =
+  | 'preparing'
+  | 'team_gate'
+  | 'planning'
+  | 'plan_gate'
+  | 'recording'
+  | 'reviewing'
+  | 'review_gate'
+  | 'done'
+  | 'failed';
+
+/** One chapter of the plan's `chapters.json`, with whether its segment has been recorded. */
+export interface DemoChapter {
+  /** `NN-slug` — the segment key record.mjs re-records by. */
+  key: string;
+  title: string;
+  blurb: string;
+  tags: string[];
+  resets: string[];
+  recorded: boolean;
+}
+
+/** A chapter marker of the stitched MP4 (record.mjs's `chapters.md`). */
+export interface DemoMarker {
+  /** `m:ss`. */
+  at: string;
+  sec: number;
+  title: string;
+}
+
+/** One finding of the reviewer's verdict block. */
+export interface DemoFinding {
+  at: string;
+  chapter: string;
+  issue: string;
+  verdict: 're-encode' | 're-record' | 'fix-app';
+}
+
+/** `GET /runs/:id/demo` → 200 (404 for a run that is not a demo run). */
+export interface DemoView {
+  runId: string;
+  /** From the brief the daemon wrote. */
+  url: string | null;
+  audience: string | null;
+  stage: DemoStage;
+  /** `script.md` — the presenter script (null until `plan` writes it). */
+  script: string | null;
+  chapters: DemoChapter[];
+  markers: DemoMarker[];
+  /** Root-relative paths for `GET /runs/:id/demo/file?path=`. */
+  sheets: Array<{ name: 'chapters' | 'joins' | 'end'; path: string }>;
+  video: { path: string; bytes: number } | null;
+  /** From the recorder's `recording.json`: true only when every stitched segment was recorded read-only;
+   *  null before a stitch (or from a recorder without the guard). */
+  recording: { readOnly: boolean | null };
+  /**
+   * The reviewer's last output and its parsed verdict block (empty until `review` has finished).
+   * `rejected`: the engine judged the review NOT PASS, so the review gate is its escalation gate — a
+   * failed review cannot be accepted: approve re-runs the reviewer, `request_changes` sends the note back
+   * to `record`, reject cancels the run.
+   */
+  review: { verdict: 'accept' | 'changes' | null; findings: DemoFinding[]; text: string | null; rejected: boolean };
+  /** The seats that recorded and reviewed — evaluator ≠ creator puts them apart. */
+  seats: { recorder: string | null; reviewer: string | null };
+  /** The script says which data is synthetic. */
+  syntheticLabelled: boolean;
+}
+
 /** `POST /proposals/:id/reject` → 200. */
 export interface RejectProposalResponse {
   ok: true;

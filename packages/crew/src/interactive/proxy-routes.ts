@@ -51,7 +51,7 @@ import {
   type DocGroundingStore,
 } from './doc-grounding.js';
 import { projectDocsRoot } from './project-root.js';
-import { CHAT_POSTED, isAnswerableDocKind, isIterationAsk, readDocHead } from './chat-events.js';
+import { CHAT_POSTED, DEMO_DOC_MOVED_MESSAGE, isAnswerableDocKind, isIterationAsk, readDocHead } from './chat-events.js';
 import { DOC_NAME } from './draft-events.js';
 
 /** The bridge route whose request crew reads before forwarding (F-046) — exact path, any query. */
@@ -233,7 +233,10 @@ export function askRefusalFor(documentId: string, kind: string): InteractiveAskR
     code: 'ask_unsupported_for_doc_kind',
     document_id: documentId,
     doc_kind: kind,
-    error: `asks on documents of kind '${kind}' have no answering seam on this daemon. Nothing was sent.`,
+    error:
+      kind === 'demo'
+        ? DEMO_DOC_MOVED_MESSAGE
+        : `asks on documents of kind '${kind}' have no answering seam on this daemon. Nothing was sent.`,
     remedy: 'open the document in the surface that owns its kind, or create a source document for a governed draft.',
   };
 }
