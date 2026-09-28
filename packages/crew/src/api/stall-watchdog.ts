@@ -89,6 +89,9 @@ export const SWEEP_ENGINE_TIMEOUT_MS = 10_000;
 /** Bound on the `error` excerpt an escalation frame / audit entry carries. */
 const ESCALATION_ERROR_EXCERPT_CHARS = 300;
 
+/** A run is sampled for process liveness once it has been quiet this long (crew#629). */
+export const LIVENESS_SAMPLE_AFTER_MS = 60_000;
+
 /**
  * Races `promise` against a timer so a hung engine call can never pin the sweep's re-entrancy
  * guard forever (crew#442). Rejects with a distinct, greppable message on timeout; the timer is
@@ -118,9 +121,11 @@ export interface ExecutingRun {
   /** The run's own seat pool (`session.clis`), in roster order — the failover candidates a
    *  reassign may route to (perf#4). Absent/empty = no pool known: reassign in place. */
   seats?: string[];
-  /** Seats a failover must NOT land on (DES-L3 PR-3E, F-RC1-012 / crew#436): when the cursor is
-   *  an EVALUATOR, every seat that built work it reviews — evaluator ≠ creator holds across a
-   *  stall reassign too. Absent/empty = no constraint (a free-text unit carries no role). */
+  /** Seats a failover must NOT land on, so evaluator ≠ creator holds across a stall reassign
+   *  (DES-L3 PR-3E; crew#638, crew#583): an EVALUATOR cursor avoids the seats that built the
+   *  work it reviews, a CREATOR cursor avoids the run's evaluator seats, and a unit the engine
+   *  routed `evaluator_distinct` avoids the seat it was routed away from. Absent/empty = no
+   *  constraint (a free-text unit carries no role). */
   avoid?: string[];
   /** What runs the cursor unit (crew #580 / #581): a `tool` unit is the engine's own command —
    *  there is no seat to fail over to, so the escalation stage NOTIFIES instead of reassigning.
@@ -180,6 +185,14 @@ export interface StallWatchdogDeps {
    * operator's cancel is the failure mode this whole seam exists to prevent.
    */
   onTurnTimeout?: (info: { session: string; ord?: number; attempt?: number }) => void;
+  /**
+   * Process liveness (crew#629): for the given quiet runs, the ones whose own processes (the
+   * worker, a test runner or build it started, the checks floor) burned CPU since the last sweep,
+   * mapped to a short description of the busiest process. A busy run is not silent: its clock
+   * re-arms exactly as an event would. The daemon wires `RunLivenessSampler`; absent = the
+   * frame-only clock.
+   */
+  busy?: (runIds: string[]) => Promise<ReadonlyMap<string, string>>;
   /** Clock (tests stub it). */
   now?: () => number;
   /** Wired to the daemon's warn logger — a stall is an operator-attention signal. */
@@ -213,6 +226,15 @@ export class WorkerStallWatchdog {
    * Pruned with the run, like the budget.
    */
   private readonly stalledSeats = new Map<string, Set<string>>();
+  /**
+   * run id → the ord whose worker RETURNED (`unitOutputCaptured`) and whose gate evaluation is in
+   * flight (crew#581). Cleared by the next dispatch. A reassign here would start a second creator
+   * over finished work, so the watchdog notifies instead.
+   */
+  private readonly evaluating = new Map<string, number>();
+  /** run id → `unitOutputDelta` frames since the last dispatch: ≤ 1 is a startup banner, no work
+   *  (crew#638), which is how an exhausted budget names a seat that produced nothing. */
+  private readonly outputSinceDispatch = new Map<string, number>();
   private readonly now: () => number;
   private readonly log: (m: string) => void;
   private handle: NodeJS.Timeout | null = null;
@@ -231,6 +253,14 @@ export class WorkerStallWatchdog {
     this.lastEventAt.set(session, this.now());
     if (typeof event.ord === 'number') this.lastOrd.set(session, event.ord);
     this.quietPeriods.delete(session);
+    if (event.type === 'unitDispatched' || event.type === 'unitReassigned') {
+      this.evaluating.delete(session);
+      this.outputSinceDispatch.set(session, 0);
+    } else if (event.type === 'unitOutputDelta') {
+      this.outputSinceDispatch.set(session, (this.outputSinceDispatch.get(session) ?? 0) + 1);
+    } else if (event.type === 'unitOutputCaptured' && typeof event.ord === 'number') {
+      this.evaluating.set(session, event.ord);
+    }
     // The engine's own turn ceiling fired (perf#4: `stepStatus: "timed_out"` — a NEW value; the
     // old shared "cancelled" spelling deliberately triggers nothing, because on an old engine it
     // is indistinguishable from an operator's Ctrl-C). Surface it as what it is: the last-resort
@@ -293,10 +323,13 @@ export class WorkerStallWatchdog {
           this.quietPeriods.delete(key);
           this.escalationCount.delete(key);
           this.stalledSeats.delete(key);
+          this.evaluating.delete(key);
+          this.outputSinceDispatch.delete(key);
         }
       }
       const thresholdMs = await this.thresholdMs();
       const escalation = await this.escalationArmed(thresholdMs);
+      const busy = await this.busyRuns(executing);
       const now = this.now();
       for (const run of executing) {
         const last = this.lastEventAt.get(run.id);
@@ -306,6 +339,20 @@ export class WorkerStallWatchdog {
           // existed is unknowable, so the quiet clock starts HERE; the threshold still trips
           // one full quiet period later, which is exactly the restart-survival the issue asks.
           this.lastEventAt.set(run.id, now);
+          continue;
+        }
+        const reading = busy.get(run.id);
+        if (reading !== undefined) {
+          // crew#629: the run's own processes are working (a test runner, a build, the floor).
+          // A running child is not a stall: re-arm the clock as an event would.
+          if (now - last >= thresholdMs) {
+            this.log(
+              `[stall-watchdog] run ${run.id} quiet on the relay for ${((now - last) / 60_000).toFixed(1)} min ` +
+                `but busy (${reading}) — not a stall`,
+            );
+          }
+          this.lastEventAt.set(run.id, now);
+          this.quietPeriods.delete(run.id);
           continue;
         }
         const quietForMs = now - last;
@@ -358,6 +405,30 @@ export class WorkerStallWatchdog {
   stop(): void {
     if (this.handle !== null) clearInterval(this.handle);
     this.handle = null;
+  }
+
+  /**
+   * The runs quiet for at least a minute whose processes are busy (crew#629). Sampled every sweep
+   * while any run is quiet, so the CPU comparison spans one sweep interval. A failing or slow
+   * probe reads as "no run busy": the frame-only clock, never a false proof of life.
+   */
+  private async busyRuns(executing: ExecutingRun[]): Promise<ReadonlyMap<string, string>> {
+    const empty = new Map<string, string>();
+    if (this.deps.busy === undefined) return empty;
+    const now = this.now();
+    const quiet = executing
+      .map((r) => r.id)
+      .filter((id) => {
+        const last = this.lastEventAt.get(id);
+        return last !== undefined && now - last >= LIVENESS_SAMPLE_AFTER_MS;
+      });
+    if (quiet.length === 0) return empty;
+    try {
+      return await withTimeout(this.deps.busy(quiet), SWEEP_ENGINE_TIMEOUT_MS, 'process liveness');
+    } catch (err) {
+      this.log(`[stall-watchdog] process liveness read failed: ${String(err)}`);
+      return empty;
+    }
   }
 
   /** Threshold in ms — an unset/invalid setting falls back to the 15-minute default. */
@@ -439,24 +510,33 @@ export class WorkerStallWatchdog {
       // deliver scripts raced on one branch); the engine now kills the running child on a
       // supersede, so an automatic reassign would only be a kill-and-retry loop burning the
       // budget. Surface it for a human instead; no budget consumed, `stalledSeats` untouched.
-      frame = { ...base, action: 'notify', outcome: 'ok', needsYou: true };
+      frame = { ...base, action: 'notify', outcome: 'ok', needsYou: true, reason: 'tool_unit' };
       this.deps.log?.(
         `stall watchdog: run ${run.id} unit ${ord ?? '?'} is a tool command running for ` +
           `${Math.round(quietForMs / 60_000)} min — no seat to fail over to; Cancel run stops it, ` +
           `POST /runs/${run.id}/reassign re-runs it`,
       );
+    } else if (ord !== undefined && this.evaluating.get(run.id) === ord) {
+      // crew#581: the worker returned and its gate evaluation (floor, validator, judge) is in
+      // flight. A reassign would start a second creator over finished work in the same worktree.
+      frame = { ...base, action: 'notify', outcome: 'ok', needsYou: true, reason: 'evaluating' };
     } else if (escalation.action === 'notify') {
       // The fail-loud rung: surface for a human, touch nothing. No budget — notifying is free.
       frame = { ...base, action: 'notify', outcome: 'ok', needsYou: true };
     } else {
       const used = this.escalationCount.get(run.id) ?? 0;
+      const pick = this.pickFailoverSeat(run);
       if (used >= escalation.maxPerRun) {
+        // crew#638: the automatic attempts produced nothing past a startup banner — say so, so the
+        // human reads "the seat produced no output", not a generic stall.
+        const noOutput = used > 0 && (this.outputSinceDispatch.get(run.id) ?? 0) <= 1;
         frame = {
           ...base,
           action: 'reassign',
           outcome: 'exhausted',
           needsYou: true,
           escalations: used,
+          ...(noOutput ? { reason: 'no_output' as const } : {}),
         };
       } else if (ord === undefined) {
         // Cannot name the cursor unit — the engine would reject any ord we invent. Loud, no
@@ -469,6 +549,18 @@ export class WorkerStallWatchdog {
           escalations: used,
           error: 'cursor unit unknown: the run listing carried no ord for this run',
         };
+      } else if (pick.target === undefined && pick.avoided.length > 0) {
+        // crew#638 / crew#583: every other seat is one evaluator ≠ creator forbids. Moving the
+        // unit there would let one seat create and evaluate the same work, so a human decides.
+        frame = {
+          ...base,
+          action: 'notify',
+          outcome: 'ok',
+          needsYou: true,
+          reason: 'evaluator_distinct',
+          avoided: pick.avoided,
+          ...(run.cli !== undefined ? { previousCli: run.cli } : {}),
+        };
       } else {
         // Budget is consumed by the ATTEMPT, success or not — a rejecting engine call must not
         // be retried indefinitely on the platform's own initiative.
@@ -479,7 +571,7 @@ export class WorkerStallWatchdog {
         // pool, or the pool is exhausted) falls back to the in-place recycle — still safe, the
         // engine supersedes the stale turn either way. `run.cli` unknown keeps today's shape:
         // pass nothing and let the engine's council pick.
-        const target = this.pickFailoverSeat(run);
+        const target = pick.target;
         if (run.cli !== undefined) {
           // Remember the stalled seat — watchdog-local, per-run; NEVER an error record (a
           // stalled seat must not be conflated with an errored one for resume exclusion).
@@ -504,6 +596,7 @@ export class WorkerStallWatchdog {
             escalations: used + 1,
             ...(seat !== undefined ? { cli: seat } : {}),
             ...(run.cli !== undefined ? { previousCli: run.cli } : {}),
+            ...(pick.avoided.length > 0 ? { avoided: pick.avoided } : {}),
           };
         } catch (err) {
           frame = {
@@ -524,8 +617,14 @@ export class WorkerStallWatchdog {
     const where = `run ${run.id}${ord !== undefined ? ` (unit ${ord})` : ''}`;
     const quiet = `${(quietForMs / 60_000).toFixed(1)} min silent`;
     if (frame.action === 'notify') {
+      const why =
+        frame.reason === 'evaluator_distinct'
+          ? ` (every other seat is one evaluator ≠ creator forbids: ${(frame.avoided ?? []).join(', ')})`
+          : frame.reason === 'evaluating'
+            ? ' (the worker returned; its gate evaluation is in flight)'
+            : '';
       this.log(
-        `[stall-watchdog] ESCALATED ${where}: ${quiet} — action notify (fail-loud): ` +
+        `[stall-watchdog] ESCALATED ${where}: ${quiet} — action notify (fail-loud)${why}: ` +
           `needs-you frame broadcast, the run was NOT touched`,
       );
     } else if (frame.outcome === 'ok') {
@@ -543,7 +642,9 @@ export class WorkerStallWatchdog {
     } else if (frame.outcome === 'exhausted') {
       this.log(
         `[stall-watchdog] ESCALATION EXHAUSTED for ${where}: ${quiet} and the per-run budget ` +
-          `(${escalation.maxPerRun}) is spent — needs-you frame broadcast; a human must intervene`,
+          `(${escalation.maxPerRun}) is spent` +
+          (frame.reason === 'no_output' ? ' — the reassigned seat produced no output' : '') +
+          ` — needs-you frame broadcast; a human must intervene`,
       );
     } else {
       this.log(
@@ -575,17 +676,20 @@ export class WorkerStallWatchdog {
    * other seat already stalled here) — the caller then recycles in place, which is today's
    * (still safe) behaviour. Pool order is `session.clis` order: deterministic, no health
    * heuristics — the per-run budget bounds how far the rotation can walk.
+   *
+   * `avoided` lists the candidates `run.avoid` excluded (evaluator ≠ creator). When it is
+   * non-empty and no target is left, the caller escalates to a human instead of recycling in
+   * place (crew#638).
    */
-
-  private pickFailoverSeat(run: ExecutingRun): string | undefined {
-    if (run.cli === undefined) return undefined; // unknown current seat → council re-pick
+  private pickFailoverSeat(run: ExecutingRun): { target: string | undefined; avoided: string[] } {
+    if (run.cli === undefined) return { target: undefined, avoided: [] }; // council re-pick
     const stalled = this.stalledSeats.get(run.id);
-    // DES-L3 PR-3E: never onto a seat the cursor evaluator reviews (`avoid` — the creators'
-    // seats); no distinct candidate left ⇒ in-place recycle, as before.
     const avoid = run.avoid ?? [];
-    return (run.seats ?? []).find(
-      (s) => s !== run.cli && !(stalled?.has(s) ?? false) && !avoid.includes(s),
-    );
+    const candidates = (run.seats ?? []).filter((s) => s !== run.cli && !(stalled?.has(s) ?? false));
+    return {
+      target: candidates.find((s) => !avoid.includes(s)),
+      avoided: candidates.filter((s) => avoid.includes(s)),
+    };
   }
 
   /** Returns the independent detection/action latches for this quiet period. */

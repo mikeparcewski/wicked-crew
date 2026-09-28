@@ -1286,6 +1286,22 @@ export type WorkerStallEscalatedFrame = {
   escalations?: number;
   /** outcome `failed`: bounded excerpt of what the recovery call threw. */
   error?: string;
+  /**
+   * Why the watchdog did not do a plain reassign (crew#638 / #581 / #580; additive, absent on older
+   * daemons): `tool_unit` — the cursor is the engine's own command, nothing to fail over to;
+   * `evaluating` — the worker returned and its gate evaluation is in flight, a reassign would start
+   * a second creator; `evaluator_distinct` — every other seat is one evaluator ≠ creator forbids
+   * (see `avoided`), so the unit was left for a human; `no_output` (outcome `exhausted`) — the
+   * reassigned seat produced nothing past a startup banner.
+   */
+  reason?: 'tool_unit' | 'evaluating' | 'evaluator_distinct' | 'no_output';
+  /**
+   * The seats the failover pick excluded under evaluator ≠ creator (crew#638; additive): a
+   * creator cursor avoids the run's evaluator seats, an evaluator cursor the seats that built its
+   * work, an `evaluator_distinct`-routed unit the seat it was routed away from. Present on an `ok`
+   * reassign that skipped one and on a `reason: 'evaluator_distinct'` notify; absent otherwise.
+   */
+  avoided?: string[];
 };
 
 export interface RecordedEvent extends CoreEvent {
