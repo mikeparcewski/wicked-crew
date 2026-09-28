@@ -98,6 +98,13 @@ export const AUTH_REFUSAL_PATTERNS: RegExp[] = [
   /invalid api key/i,
   /authentication (failed|required)/i,
   /missing (api[ _-]?key|credentials?)/i,
+  // crew#645: claude's expired login — "Failed to authenticate: OAuth session expired and could not
+  // be refreshed" — said nothing any pattern above matched, so four failed ballots flipped nothing.
+  /failed to authenticate/i,
+  /oauth (session|token) (has )?expired/i,
+  // crew#645: a free tier the installed CLI is too old to use ("OpenCode 1.18.0 or newer is
+  // required to use the free tier") — the seat cannot answer until it is upgraded.
+  /required to use the free tier/i,
 ];
 
 /** Whether a failure detail / stderr says the seat has no usable credential. */
@@ -214,11 +221,19 @@ export class SeatHealthTracker {
       case 'councilSeatFailed': {
         const cli = str(event.cli);
         const kind = str((event as { kind?: unknown }).kind);
-        const detail = str(event.detail) ?? str((event as { stderr?: unknown }).stderr) ?? '';
+        // crew#630: the engine's real frame is `{kind: 'non_zero_exit', reason: 'not_logged_in',
+        // stdout: 'Not logged in · Please run /login', stderr: '', detail: ''}` — claude prints its
+        // refusal on STDOUT and the classified cause rides `reason`, neither of which was read, so
+        // four failed ballots left the roster at `signed_in`. Every text field is read now.
+        const reason = str((event as { reason?: unknown }).reason);
+        const texts = [event.detail, (event as { stderr?: unknown }).stderr, (event as { stdout?: unknown }).stdout]
+          .map(str)
+          .filter((t): t is string => t !== undefined);
+        const said = texts.find(isAuthRefusal);
         // F-A45-006: a ballot the seat lost to its own missing credential (`not_logged_in`, or
-        // stderr saying "No API key found") flips `auth`, whatever the file probe read.
-        if (cli !== undefined && (kind === 'not_logged_in' || isAuthRefusal(detail))) {
-          this.recordAuthFailure(cli, detail !== '' ? detail : (kind ?? 'not logged in'), 'ballot', at, session);
+        // its own words saying "No API key found") flips `auth`, whatever the file probe read.
+        if (cli !== undefined && (kind === 'not_logged_in' || reason === 'not_logged_in' || said !== undefined)) {
+          this.recordAuthFailure(cli, said ?? texts[0] ?? 'not logged in', 'ballot', at, session);
         }
         // (R5b) An observed error — stamped, never counted: the engine benches the seat for the
         // run at its own ballot threshold and says so in `unitDistributed.degradedReason`; crew

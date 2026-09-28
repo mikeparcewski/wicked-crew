@@ -35,6 +35,7 @@
  */
 
 import type {SeatAuthFailure} from './seat-health.js';
+import type {SeatProbeReading} from './seat-probe.js';
 
 /** The seat's auth state, read for what it MEANS for the seat's usability. */
 export type SeatAuth = 'signed_in' | 'signed_out' | 'not_required' | 'unknown';
@@ -95,10 +96,15 @@ export interface SeatStanding {
   free_tier_source?: FreeTierSource;
   /** Where `auth` came from (F-A45-006): `seat-stderr` = the seat ITSELF reported no credential
    *  (a council ballot, a worker failure or the ACP handshake said "No API key found" / 401 …),
-   *  which overrides the credential-file probe; absent = the probe (`signed_in`) decided. */
-  auth_source?: 'seat-stderr';
-  /** Present with `auth_source: 'seat-stderr'`: the seat's own words, bounded. */
+   *  which overrides everything else; `probe` (crew#630) = the seat's own auth-status command
+   *  answered (`seat-probe.ts`), which overrides the credential-file heuristic; absent = the
+   *  file heuristic (`signed_in`) decided. */
+  auth_source?: 'seat-stderr' | 'probe';
+  /** Present with `auth_source: 'seat-stderr'`, and with `probe` when it read signed out: the
+   *  seat's own words, bounded. */
   auth_evidence?: string;
+  /** Present with `auth_source: 'probe'`: ISO-8601 of the probe the reading is from. */
+  probed_at?: string;
   council_eligible: boolean;
   /** Present when `council_eligible` is false: the one reason, in the operator's words. */
   council_ineligible_reason?: string;
@@ -113,15 +119,24 @@ export function seatStanding(
   seat: StandingSeat,
   signedIn: boolean | null,
   authFailure: SeatAuthFailure | null = null,
+  probe: SeatProbeReading | undefined = undefined,
 ): SeatStanding {
   // F-A45-006: the seat's OWN report beats the file probe. The fresh rig's pi read `signed_in`
   // off a present-but-empty `auth.json` while every ballot failed "No API key found"; when the seat
   // itself says it has no credential, `auth` is `signed_out` — the free tier does not apply either
   // (a seat that answers on a free tier does not say "No API key") — and the evidence rides along.
-  const read =
+  // crew#630: next, the seat's own auth-status command, when it answered; the file last.
+  const read: Pick<SeatStanding, 'auth' | 'auth_source' | 'auth_evidence' | 'probed_at' | 'free_tier' | 'free_tier_source'> =
     authFailure !== null
       ? { auth: 'signed_out' as const, auth_source: 'seat-stderr' as const, auth_evidence: authFailure.detail }
-      : seatAuth(seat, signedIn);
+      : probe !== undefined && probe.signedIn !== null
+        ? {
+            auth: probe.signedIn ? ('signed_in' as const) : ('signed_out' as const),
+            auth_source: 'probe' as const,
+            probed_at: probe.probedAt,
+            ...(probe.signedIn ? {} : { auth_evidence: probe.detail }),
+          }
+        : seatAuth(seat, signedIn);
   const auth = read.auth;
   const base: SeatStanding = {
     ...read,
@@ -137,7 +152,9 @@ export function seatStanding(
       council_ineligible_reason:
         authFailure !== null
           ? `signed out — the seat itself reported no credential (${authFailure.source}: ${authFailure.detail}); sign it in from the System page`
-          : 'signed out — a council would bench this seat on its first ballot; sign it in from the System page',
+          : read.auth_source === 'probe'
+            ? `signed out — the seat's own auth check says it cannot authenticate (${read.auth_evidence ?? 'not logged in'}); sign it in from the System page`
+            : 'signed out — a council would bench this seat on its first ballot; sign it in from the System page',
     };
   }
   // (R5 / R5b, DES-L3 PR-3D) No `inactive` arm and no crew council bench any more: `health.status`

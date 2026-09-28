@@ -724,9 +724,18 @@ export interface RosterSeat {
    * while every ballot failed. Absent = the probe decided (and since 0.36.0 the probe itself needs
    * a credential-SHAPED file, never mere presence).
    */
-  auth_source?: 'seat-stderr';
-  /** Present with `auth_source: 'seat-stderr'`: the seat's own words, bounded. */
+  auth_source?: 'seat-stderr' | 'probe';
+  /** Present with `auth_source: 'seat-stderr'`, and with `probe` when it read signed out: the
+   *  seat's own words, bounded. */
   auth_evidence?: string;
+  /**
+   * Present with `auth_source: 'probe'` (crew#630): ISO-8601 of the seat's own auth-status check
+   * (`claude auth status`, `codex login status`) under the seat's configuration home, which then
+   * decided `auth` and `signed_in` over the credential file. The daemon re-checks in the
+   * background (a signed-in answer after 5 minutes, any other after 30 s). A probed seat whose
+   * check has not answered yet reads `unknown`, never `signed_in` off its file.
+   */
+  probed_at?: string;
   /** Present when `auth` is `not_required`: the free tier the seat answers on. */
   free_tier?: string;
   /**
