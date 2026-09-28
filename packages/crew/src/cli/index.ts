@@ -84,8 +84,6 @@ interface BootstrapOpts {
   interactiveEditEvents: boolean;
   /** DEFAULT ON (CREW-UX-5): answer wicked-interactive conversational iteration asks (chat.posted) with a governed revision run. */
   interactiveChatEvents: boolean;
-  /** DEFAULT ON (CREW-UX-9): answer wicked-interactive demo docs (doc.created kind:demo + their step feedback) with a governed spec-authoring run. */
-  interactiveDemoEvents: boolean;
   /** Seat roster override for the draft/edit/chat runs (JSON array); `undefined` = production roster. */
   interactiveSeats: string | undefined;
 }
@@ -188,13 +186,6 @@ function parseBootstrap(args: string[]): BootstrapOpts {
   const interactiveChatEvents =
     !hasFlag(args, '--no-interactive-chat-events') &&
     !isFalsy(process.env['WICKED_INTERACTIVE_CHAT_EVENTS']);
-  // DEFAULT ON (CREW-UX-9, same rationale): answer wicked-interactive's demo docs —
-  // `doc.created` (kind:demo) authors `demo.spec.mjs` and triggers the model-free recording;
-  // a demo doc's step feedback (`feedback.processed`, manifest kind demo) re-authors it.
-  // Opt-out: --no-interactive-demo-events or WICKED_INTERACTIVE_DEMO_EVENTS=0|false|no|off|""
-  const interactiveDemoEvents =
-    !hasFlag(args, '--no-interactive-demo-events') &&
-    !isFalsy(process.env['WICKED_INTERACTIVE_DEMO_EVENTS']);
   // Deterministic-worker override for harnesses (a JSON AgenticCli array); unset = the roster.
   const interactiveSeats = process.env['WICKED_INTERACTIVE_SEATS'];
   // DES-TEAMING-002 T0: ONE bus per daemon. The engine (`WICKED_BUS_DB`, every boot), exec
@@ -208,7 +199,7 @@ function parseBootstrap(args: string[]): BootstrapOpts {
   const preRuleExecBusDbPath = flag(args, '--bus-db') ?? process.env['WICKED_BUS_DB'] ?? join(stateHomeOfDb(dbPath), 'bus.db');
   return {
     dbPath, port, stub, engineExec, busDbPath, preRuleExecBusDbPath, crewBus, governanceStore,
-    interactiveDraftEvents, interactiveEditEvents, interactiveChatEvents, interactiveDemoEvents,
+    interactiveDraftEvents, interactiveEditEvents, interactiveChatEvents,
     interactiveSeats,
   };
 }
@@ -398,15 +389,6 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
           },
         }
       : {}),
-    ...(opts.interactiveDemoEvents
-      ? {
-          interactiveDemoEvents: {
-            enabled: true,
-            dbPath: crewBus.dbPath,
-            ...(opts.interactiveSeats !== undefined ? { clisJson: opts.interactiveSeats } : {}),
-          },
-        }
-      : {}),
     // Projects (DES-PROJECT-001): default-ON, loud-non-fatal. Bus-db resolution follows the
     // cross-product seams above — `wicked.crew.project.*`, the interactive activity bridge and the
     // /ws relay are cross-product traffic, and the bridge crew spawns must meet them on ONE db
@@ -517,7 +499,6 @@ async function main(): Promise<void> {
         '  --no-interactive-draft-events   Disable interactive draft answering (env: WICKED_INTERACTIVE_DRAFT_EVENTS=0)\n' +
         '  --no-interactive-edit-events    Disable interactive edit answering (env: WICKED_INTERACTIVE_EDIT_EVENTS=0)\n' +
         '  --no-interactive-chat-events    Disable interactive chat answering (env: WICKED_INTERACTIVE_CHAT_EVENTS=0)\n' +
-        '  --no-interactive-demo-events    Disable interactive demo answering (env: WICKED_INTERACTIVE_DEMO_EVENTS=0)\n' +
         `  ${INSTALL_SERVICE_FLAG}               Start the daemon at login instead of now (crew#551): write and load a\n` +
         '                                  per-user LaunchAgent (macOS) or systemd user unit (Linux) that runs\n' +
         '                                  `wicked-crew serve` with the other options given here. The service keeps\n' +
@@ -559,13 +540,12 @@ async function main(): Promise<void> {
       engineExec: adapter.engineExec,
       // The bus the engine was handed (DES-TEAMING-002 T0: every boot, not only --engine-exec).
       busDb: adapter.busDbPath,
-      // What ARMED, not what was asked for (crew#309): a stub-engine daemon refuses the four
+      // What ARMED, not what was asked for (crew#309): a stub-engine daemon refuses the three
       // interactive answering seams (see `api/server.ts`), and an evidence harness that reads
       // this line must not be told a seam is live when nothing is holding its cursor.
       interactiveDraftEvents: (opts.interactiveDraftEvents && !adapter.stub) || undefined,
       interactiveEditEvents: (opts.interactiveEditEvents && !adapter.stub) || undefined,
       interactiveChatEvents: (opts.interactiveChatEvents && !adapter.stub) || undefined,
-      interactiveDemoEvents: (opts.interactiveDemoEvents && !adapter.stub) || undefined,
       startupMs: Math.round(performance.now() - t0),
     });
   } else if (command === 'start') {

@@ -110,7 +110,6 @@ beforeAll(async () => {
     interactiveDraftEvents: { enabled: false, ledgerPath: join(dir, 'draft-ledger.json') },
     interactiveEditEvents: { enabled: false, ledgerPath: join(dir, 'edit-ledger.json') },
     interactiveChatEvents: { enabled: false, ledgerPath: join(dir, 'chat-ledger.json') },
-    interactiveDemoEvents: { enabled: false, ledgerPath: join(dir, 'demo-ledger.json') },
   });
   await app.listen({ port: 0, host: '127.0.0.1' });
   const addr = app.server.address();

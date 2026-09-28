@@ -83,6 +83,9 @@ export const STATE_HOME_ROOT_ENVS: ReadonlyArray<{ variable: string; creates: st
   // state home that unregistered entry would refuse the capture's own launch. Refuse-only, like the
   // settings file: crew seeds nothing there at boot.
   { variable: 'WICKED_CAPTURE_INBOX_DIR', creates: 'the capture inbox a capture run must READ', fenced: false },
+  // The Demo experience (studio#373): every demo launch mints its demo root here before its run
+  // launches — the same refusal as the capture inbox, for the same reason.
+  { variable: 'WICKED_DEMO_DIR', creates: 'the demo root a demo run writes its script, video and contact sheets to', fenced: false },
 ];
 
 /**
