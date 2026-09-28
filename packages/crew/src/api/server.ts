@@ -1485,14 +1485,17 @@ export async function createServer(
     if (body === '' || body === undefined || body === null) return done(null, undefined);
     try {
       done(null, JSON.parse(body as string));
-    } catch (err) {
+    } catch {
       // A syntactically invalid body is the CLIENT's error: without an explicit statusCode
       // Fastify reports a parser error as a 500, which misfiles "you sent `{not json`" as a
       // server fault — on the elicitation answer path that told an operator the daemon broke
       // when their request did. 400 matches Fastify's own default JSON parser
       // (FST_ERR_CTP_INVALID_JSON) and every schema-level 400 these routes already return.
-      (err as Error & { statusCode?: number }).statusCode = 400;
-      done(err as Error);
+      // The message is a fixed one, never JSON.parse's: V8 quotes the body around the bad token
+      // (`Unexpected token 's', ..."{"value": sk-…"... is not valid JSON`), and Fastify both
+      // answers and logs it, so an unquoted `PUT /mcp/servers/:name/secret` value would leave the
+      // broker in the response and the log (DES-MCP-TOOLS-001 D-2).
+      done(Object.assign(new Error('the request body is not valid JSON'), { statusCode: 400, code: 'FST_ERR_CTP_INVALID_JSON' }));
     }
   });
 
