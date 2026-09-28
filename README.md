@@ -84,7 +84,7 @@ The service manager starts the daemon with an almost empty environment, so the i
 variable from the shell that runs it. Run the install again after you change them.
 `CLAUDE_CONFIG_DIR` matters: the daemon fences its workers away from a non-default Claude config
 directory only when it knows that directory. Tokens (`GH_TOKEN` and any variable whose name carries
-TOKEN, SECRET, KEY or PASSWORD) are never written into the unit file. The install names them, and the
+TOKEN, SECRET, PASS, KEY, CREDENTIAL, BEARER, COOKIE or SESSION) are never written into the unit file. The install names them, and the
 deliver phase then pushes with gh's keyring login, checked against `GH_ACCOUNT`. The daemon logs to
 `<state home>/daemon-stdout.log`. The install refuses while a hand-started daemon holds the port.
 
