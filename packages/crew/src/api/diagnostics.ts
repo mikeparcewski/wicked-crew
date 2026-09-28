@@ -238,24 +238,38 @@ export function defaultSeatVersionPinSource(): SeatVersionPinSource | null {
 export class SeatVersionPinCache {
   private value: { at: number; pins: SeatVersionPin[] } | null = null;
   private inFlight: Promise<SeatVersionPin[] | null> | null = null;
+  private failedAt: number | null = null;
 
   constructor(
     private readonly source: SeatVersionPinSource | null = defaultSeatVersionPinSource(),
     private readonly ttlMs: number = 5 * 60_000,
   ) {}
 
+  /** Due a probe: no answer, or the last answer (or the last failed attempt) is a TTL old. */
+  private stale(): boolean {
+    const now = Date.now();
+    if (this.failedAt !== null && now - this.failedAt < this.ttlMs) return false;
+    return this.value === null || now - this.value.at >= this.ttlMs;
+  }
+
   /** A fresh-enough answer, probing when stale; `null` when there is no source. */
   async get(): Promise<SeatVersionPin[] | null> {
     if (this.source === null) return null;
-    if (this.value !== null && Date.now() - this.value.at < this.ttlMs) return this.value.pins;
+    if (!this.stale()) return this.value?.pins ?? null;
     if (this.inFlight !== null) return this.inFlight;
     const source = this.source;
     this.inFlight = source()
       .then((pins) => {
         this.value = { at: Date.now(), pins };
+        this.failedAt = null;
         return pins;
       })
-      .catch(() => this.value?.pins ?? null)
+      .catch(() => {
+        // A failed refresh backs off for one TTL too: without this a persistent failure would
+        // re-probe on every roster read once the last good answer aged out.
+        this.failedAt = Date.now();
+        return this.value?.pins ?? null;
+      })
       .finally(() => {
         this.inFlight = null;
       });
@@ -264,9 +278,7 @@ export class SeatVersionPinCache {
 
   /** The last answer for `cli`, without waiting; a stale or empty cache starts a refresh. */
   read(cli: string): SeatVersionPin | undefined {
-    if (this.source !== null && (this.value === null || Date.now() - this.value.at >= this.ttlMs)) {
-      void this.get();
-    }
+    if (this.source !== null && this.stale()) void this.get();
     return this.value?.pins.find((p) => p.cli === cli);
   }
 }

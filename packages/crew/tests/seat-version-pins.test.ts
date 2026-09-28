@@ -101,6 +101,18 @@ describe('SeatVersionPinCache', () => {
     fail = true;
     expect((await cache.get())?.length).toBe(4);
   });
+
+  it('backs off for one TTL after a failed refresh instead of re-probing on every read', async () => {
+    let calls = 0;
+    const cache = new SeatVersionPinCache(async () => {
+      calls += 1;
+      throw new Error('probe failed');
+    }, 60_000);
+    expect(await cache.get()).toBeNull();
+    for (let i = 0; i < 5; i++) expect(cache.read('opencode')).toBeUndefined();
+    expect(await cache.get()).toBeNull();
+    expect(calls).toBe(1);
+  });
 });
 
 describe('/diagnostics acp.byCli carries the pin (core#581)', () => {
