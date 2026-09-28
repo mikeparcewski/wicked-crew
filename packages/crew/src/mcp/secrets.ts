@@ -14,6 +14,8 @@
 
 import { spawn } from 'node:child_process';
 
+import { childEnvWithBootEstateDb } from '../core/governance-store.js';
+
 export const KEYCHAIN_SERVICE = 'wicked-mcp';
 const KEYCHAIN_PREFIX = `keychain:${KEYCHAIN_SERVICE}/`;
 const ENV_PREFIX = 'env:';
@@ -105,7 +107,8 @@ interface Ran {
 /** Spawn with an optional stdin payload and a hard timeout. Output is returned, never logged. */
 function run(cmd: string, args: string[], stdin: string | null, timeoutMs = 10_000): Promise<Ran> {
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    // crew#495: the daemon's exported governance store never reaches a child crew spawns.
+    const child = spawn(cmd, args, { stdio: ['pipe', 'pipe', 'pipe'], env: childEnvWithBootEstateDb() });
     let stdout = '';
     child.stdout.on('data', (d: Buffer) => (stdout += d.toString('utf8')));
     child.stderr.on('data', () => undefined);
