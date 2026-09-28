@@ -928,8 +928,29 @@ export interface GateDecision {
    * `unitDispatched{attempt: last + 1}`); requires `approve: false` — a disagreement between
    * `action` and `approve` answers 400, a gate with no creator phase before it 409. An older
    * daemon's strict schema rejects the key with a 400 — omit it against such servers.
+   *
+   * The ESCALATION arms (additive; wicked-core#469 / #467, engine ≥ the core-ts release after
+   * 0.7.30): all require `approve: true` and take no `amend` / `amendScope` / `plan` (a 400
+   * otherwise). `'extend'` | `'targeted'` | `'accept_partial'` answer the escalation gate of a
+   * repo-checks floor that did not finish (`gateEscalated.denialSource: 'repo_checks_timeout'`):
+   * the engine re-runs the floor on the tree as it stands — the seat does not run again — with
+   * every check under 2× its bound, with the repo's declared `test_targeted` in place of the full
+   * test set (no targeted command ⇒ the test set is waived), or with the checks that did not
+   * finish waived; the re-run goes through the ordinary gate and waived checks are named in
+   * `gateEvaluated.floorNote`. `'accept_suggestion'` answers an evaluator's worktree-guard denial
+   * whose edit was restored and pinned (`gateEscalated.suggestionRef`): the engine applies the
+   * pinned edit and rewinds to the creator (`unitReworkAmended{scope: 'accept_suggestion'}`).
+   * The engine refuses each at any other gate — a 409 — and the gate stays open.
    */
-  action?: 'approve' | 'request_changes' | 'reject' | 'edit_plan';
+  action?:
+    | 'approve'
+    | 'request_changes'
+    | 'reject'
+    | 'edit_plan'
+    | 'extend'
+    | 'targeted'
+    | 'accept_partial'
+    | 'accept_suggestion';
   /**
    * Where an approve's `amend` lands (api-types 0.38.0, additive; same release as `action`).
    * Absent = `'cursor'` (today: the gated unit's description). `'creator'` — the first creator
@@ -2200,10 +2221,12 @@ export interface UnitReworkAmendedEvent {
    * 0.7.27): `'cursor'` — the gated unit, today's approve-with-steer (`GateDecision.amendScope`
    * absent or `'cursor'`); `'creator'` — the first creator phase at/after the cursor
    * (`amendScope: 'creator'`); `'request_changes'` — the creator phase the gate rewound to, and
-   * `amendment` then carries the evaluator's full findings + the operator's note. ABSENT on an
-   * engine before the field — read as `'cursor'`.
+   * `amendment` then carries the evaluator's full findings + the operator's note;
+   * `'accept_suggestion'` (wicked-core#467) — the same rewind after the operator adopted the
+   * evaluator's pinned edit, and `amendment` names it. ABSENT on an engine before the field — read
+   * as `'cursor'`.
    */
-  scope?: 'cursor' | 'creator' | 'request_changes';
+  scope?: 'cursor' | 'creator' | 'request_changes' | 'accept_suggestion';
 }
 
 /** P2 — a worker's ApplyStepResult arrived and output is ready to be gated. Fires before GateDecided.
