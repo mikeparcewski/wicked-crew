@@ -777,7 +777,31 @@ export interface RosterSeat {
    * a reader must tolerate absence today.
    */
   council_bench?: RosterSeatCouncilBench;
+  /**
+   * (core#581) Present on a seat whose ACP config pins `verified_version`, once the daemon's
+   * probe has answered: the build the seat's input-governance admission was proven against and
+   * what the binary reports now. `matched: false` with `governanceClaimed: true` means the engine
+   * fails the seat's ACP governance closed at every spawn.
+   */
+  version_pin?: SeatVersionPin;
   [k: string]: unknown;
+}
+
+/**
+ * One pinned seat's `--version` reading (core#581): `RosterSeat.version_pin` and
+ * `AcpCliDiagnostics.versionPin`. Read the way the engine's spawn-time check reads it: the pin
+ * matches only the first line of `--version`, trimmed; `observed` is the first non-empty line,
+ * `null` when the binary did not answer.
+ */
+export interface SeatVersionPin {
+  cli: string;
+  binary: string;
+  pinned: string;
+  observed: string | null;
+  matched: boolean;
+  governanceClaimed: boolean;
+  /** The operator-facing reason when a governed seat's pin does not hold; else `null`. */
+  disclosure: string | null;
 }
 
 /** `RosterSeat.council_bench` (api-types 0.35.0).
@@ -5562,6 +5586,9 @@ export interface AcpCliDiagnostics {
   lastStartedTs: number | null;
   /** Epoch ms of the newest `acpFallback`, or `null` when none recorded. */
   lastFallbackTs: number | null;
+  /** (core#581) The seat's ACP version pin, probed now — present only for a pinned seat, which
+   *  lists here even with no ACP events yet (zero counts). */
+  versionPin?: SeatVersionPin;
 }
 
 /** The ACP fold of `GET /diagnostics` — keyed by `cliKey` (`claude`, `pi`, `codex`, …). */

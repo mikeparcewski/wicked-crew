@@ -19,6 +19,7 @@
 
 import { CoreAdapter } from '../core/adapter.js';
 import type { RosterSeat } from '../core/types.js';
+import { seatVersionPins, type SeatVersionPinCache } from './diagnostics.js';
 import type { SeatHealthTracker } from './seat-health.js';
 import { signedInHeuristic } from './seat-signin.js';
 import { SeatProbe } from './seat-probe.js';
@@ -44,6 +45,9 @@ export interface RosterStandingDeps {
    *  `signedIn` nor `registry` is injected (the daemon), none otherwise — a test that fixes the
    *  sign-in reading gets exactly that reading. `null` turns it off. */
   probe?: SeatProbe | null;
+  /** The seats' ACP version-pin readings (core#581, `diagnostics.ts`). Default: the daemon's
+   *  shared cache under the same rule as `probe`; `null` turns it off. */
+  versionPins?: SeatVersionPinCache | null;
 }
 
 /**
@@ -59,6 +63,12 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
   const env = deps.env ?? process.env;
   const probe =
     deps.probe !== undefined ? deps.probe : deps.signedIn === undefined && deps.registry === undefined ? new SeatProbe() : null;
+  const versionPins =
+    deps.versionPins !== undefined
+      ? deps.versionPins
+      : deps.signedIn === undefined && deps.registry === undefined
+        ? seatVersionPins
+        : null;
   const liveRoot = (): string | undefined => {
     const workerRoot = env['WICKED_WORKER_HOME'];
     return workerRoot === '' ? undefined : workerRoot;
@@ -98,10 +108,15 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
       // client-side copy of the rule). Additive on the wire (`RosterSeat` index signature until
       // api-types 0.39.0 types it).
       const standingSeat = seat as unknown as StandingSeat;
+      // core#581: a pinned seat whose binary no longer matches the build its ACP admission was
+      // proven against says so here (read from the cache; a stale cache refreshes in the
+      // background). Absent for an unpinned seat and until the first probe answers.
+      const versionPin = versionPins?.read(key);
       return {
         ...seat,
         health,
         signed_in: signed,
+        ...(versionPin !== undefined ? { version_pin: versionPin } : {}),
         ...standing,
         chat_admission: {
           unscoped: chatSeatAdmission(standingSeat, standing.auth, false),

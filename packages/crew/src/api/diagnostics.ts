@@ -24,6 +24,7 @@ import { createRequire } from 'node:module';
 import { basename, join } from 'node:path';
 import { createInterface } from 'node:readline';
 
+import { CoreAdapter } from '../core/adapter.js';
 import { execCapped } from '../core/exec.js';
 import { stateHomeOfDb } from '../projects/state-home.js';
 
@@ -37,6 +38,8 @@ export interface AcpCliFold {
   fallbackKinds: Record<string, number>;
   lastStartedTs: number | null;
   lastFallbackTs: number | null;
+  /** The seat's ACP version pin, probed now (core#581) — present only for a pinned seat. */
+  versionPin?: SeatVersionPin;
 }
 
 /** Bounds on the fold's work — the events dir grows one file per run forever, and this fold
@@ -150,6 +153,148 @@ async function foldOneFile(path: string, byCli: Record<string, AcpCliFold>): Pro
   }
 }
 
+// ── Seat version pins (core#581) ─────────────────────────────────────────────
+
+/**
+ * One pinned seat's reading: the build its ACP input-governance admission was proven against
+ * (`pinned`, the registry's `acp.verified_version`), what the binary reports now (`observed`),
+ * and whether the pin holds. `matched: false` on a seat with `governanceClaimed: true` means the
+ * engine fails that seat's governance closed at every spawn. Before this surface it said so only
+ * on a governed turn, so a drifted seat looked healthy everywhere an operator looks between runs.
+ */
+export interface SeatVersionPin {
+  cli: string;
+  binary: string;
+  pinned: string;
+  observed: string | null;
+  matched: boolean;
+  governanceClaimed: boolean;
+  disclosure: string | null;
+}
+
+/** Where readings come from: the probe below, or a test's fixture. */
+export type SeatVersionPinSource = () => Promise<SeatVersionPin[]>;
+
+/** The registry fields the probe reads. */
+interface PinnedSeat {
+  key?: unknown;
+  acp?: { binary?: unknown; verified_version?: unknown; acp_input_governance?: unknown } | null;
+}
+
+/**
+ * Read each pinned seat's `--version` the way the engine's spawn-time check does
+ * (`probe_resolved_binary_version`, wicked-core `acp_runner.rs`): stdout then stderr, the pin
+ * matches only the FIRST line trimmed, byte for byte; `observed` is the first non-empty line, for
+ * a human. A probe that cannot run reads `observed: null`, `matched: false`, as in the engine.
+ */
+export async function probeSeatVersionPins(roster: unknown[], exec: ExecLike): Promise<SeatVersionPin[]> {
+  const pinned = (roster as PinnedSeat[]).filter(
+    (seat) => typeof seat.acp?.verified_version === 'string' && typeof seat.acp?.binary === 'string',
+  );
+  return Promise.all(
+    pinned.map(async (seat) => {
+      const cli = String(seat.key);
+      const binary = String(seat.acp?.binary);
+      const pin = String(seat.acp?.verified_version);
+      const governanceClaimed = seat.acp?.acp_input_governance === true;
+      let combined: string | null = null;
+      try {
+        const { stdout, stderr } = await exec(binary, ['--version'], { timeout: 10_000 });
+        combined = stdout + stderr;
+      } catch {
+        combined = null;
+      }
+      const lines = combined === null ? [] : combined.split('\n').map((l) => l.trim());
+      const matched = combined !== null && (lines[0] ?? '') === pin;
+      const observed = lines.find((l) => l !== '') ?? null;
+      const disclosure =
+        matched || !governanceClaimed
+          ? null
+          : `seat '${cli}' is admitted to ACP input governance against the exact build \`${pin}\`, but \`${binary}\` ` +
+            (observed === null ? 'did not answer `--version`' : `reports \`${observed}\``) +
+            ' — so its governance fails closed and every governed turn on it runs unchecked. Re-prove the ' +
+            'installed build and move the pin, or pin the install so it cannot drift.';
+      return { cli, binary, pinned: pin, observed, matched, governanceClaimed, disclosure };
+    }),
+  );
+}
+
+/**
+ * The daemon's source: the engine's production roster, probed with {@link execCapped}. `null`
+ * under a test runner — a test-built server never spawns CLI children by default (the
+ * {@link engineBinaryVersions} rule).
+ */
+export function defaultSeatVersionPinSource(): SeatVersionPinSource | null {
+  if (process.env['VITEST'] !== undefined || process.env['NODE_ENV'] === 'test') return null;
+  return async () => probeSeatVersionPins(CoreAdapter.roster(), execCapped as ExecLike);
+}
+
+/**
+ * A TTL cache of the pin readings, shared by `/diagnostics` (which awaits a fresh-enough answer)
+ * and the roster (which is synchronous: it reads the last answer and refreshes in the background).
+ * Each refresh spawns one bounded `--version` per pinned seat, so it runs at most once per TTL. A
+ * failed probe keeps the previous answer; with no source at all every read is `null`.
+ */
+export class SeatVersionPinCache {
+  private value: { at: number; pins: SeatVersionPin[] } | null = null;
+  private inFlight: Promise<SeatVersionPin[] | null> | null = null;
+
+  constructor(
+    private readonly source: SeatVersionPinSource | null = defaultSeatVersionPinSource(),
+    private readonly ttlMs: number = 5 * 60_000,
+  ) {}
+
+  /** A fresh-enough answer, probing when stale; `null` when there is no source. */
+  async get(): Promise<SeatVersionPin[] | null> {
+    if (this.source === null) return null;
+    if (this.value !== null && Date.now() - this.value.at < this.ttlMs) return this.value.pins;
+    if (this.inFlight !== null) return this.inFlight;
+    const source = this.source;
+    this.inFlight = source()
+      .then((pins) => {
+        this.value = { at: Date.now(), pins };
+        return pins;
+      })
+      .catch(() => this.value?.pins ?? null)
+      .finally(() => {
+        this.inFlight = null;
+      });
+    return this.inFlight;
+  }
+
+  /** The last answer for `cli`, without waiting; a stale or empty cache starts a refresh. */
+  read(cli: string): SeatVersionPin | undefined {
+    if (this.source !== null && (this.value === null || Date.now() - this.value.at >= this.ttlMs)) {
+      void this.get();
+    }
+    return this.value?.pins.find((p) => p.cli === cli);
+  }
+}
+
+/** The daemon's one pin cache: the roster and `/diagnostics` read the same answer. */
+export const seatVersionPins = new SeatVersionPinCache();
+
+/** `byCli` with each pinned seat's reading attached — a pinned seat with no ACP events yet still
+ *  lists, with zero counts, so a drifted seat nobody has used is visible too. */
+export function withVersionPins(
+  byCli: Record<string, AcpCliFold>,
+  pins: SeatVersionPin[] | null,
+): Record<string, AcpCliFold> {
+  if (pins === null || pins.length === 0) return byCli;
+  const out: Record<string, AcpCliFold> = { ...byCli };
+  for (const pin of pins) {
+    const fold = out[pin.cli] ?? {
+      sessionsStarted: 0,
+      fallbacks: 0,
+      fallbackKinds: {},
+      lastStartedTs: null,
+      lastFallbackTs: null,
+    };
+    out[pin.cli] = { ...fold, versionPin: pin };
+  }
+  return out;
+}
+
 /**
  * A short-TTL, in-flight-deduplicated cache around {@link foldAcpEvents}. The events dir holds
  * one file per run (139+ observed), so the fold is real IO — briefly caching keeps a dashboard
@@ -160,9 +305,18 @@ export class AcpFoldCache {
   private value: { at: number; byCli: Record<string, AcpCliFold> } | null = null;
   private inFlight: Promise<Record<string, AcpCliFold>> | null = null;
 
-  constructor(private readonly ttlMs: number = 15_000) {}
+  constructor(
+    private readonly ttlMs: number = 15_000,
+    /** core#581: each pinned seat's version reading rides its `byCli` entry. */
+    private readonly pins: SeatVersionPinCache = seatVersionPins,
+  ) {}
 
   async get(eventsDir: string): Promise<Record<string, AcpCliFold>> {
+    const [byCli, pins] = await Promise.all([this.fold(eventsDir), this.pins.get()]);
+    return withVersionPins(byCli, pins);
+  }
+
+  private async fold(eventsDir: string): Promise<Record<string, AcpCliFold>> {
     const now = Date.now();
     if (this.value !== null && now - this.value.at < this.ttlMs) return this.value.byCli;
     if (this.inFlight !== null) return this.inFlight;
