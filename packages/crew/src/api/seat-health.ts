@@ -100,7 +100,8 @@ export const AUTH_REFUSAL_PATTERNS: RegExp[] = [
   /missing (api[ _-]?key|credentials?)/i,
   // crew#645: claude's expired login — "Failed to authenticate: OAuth session expired and could not
   // be refreshed" — said nothing any pattern above matched, so four failed ballots flipped nothing.
-  /failed to authenticate/i,
+  // Keyed on the OAuth words, never a bare "failed to authenticate" (a unit's own `git push` to a
+  // remote says that too, and it says nothing about the seat's login — codex review of #696).
   /oauth (session|token) (has )?expired/i,
   // crew#645: a free tier the installed CLI is too old to use ("OpenCode 1.18.0 or newer is
   // required to use the free tier") — the seat cannot answer until it is upgraded.

@@ -200,6 +200,12 @@ describe("the engine's real refusal frames flip the roster within the run (crew#
     t3.ingest(ev({ type: 'stepFailed', session: 'r', ord: 1, failureKind: 'workerError', detail: 'Failed to authenticate: OAuth session expired and could not be refreshed' }));
     expect(roster(t3)()[0]).toMatchObject({ auth: 'signed_out' });
 
+    // …but a unit's own push failing to authenticate to a remote is not the seat's login.
+    const t5 = new SeatHealthTracker();
+    t5.ingest(ev({ type: 'unitDistributed', session: 'r', ord: 1, cli: 'claude' }));
+    t5.ingest(ev({ type: 'stepFailed', session: 'r', ord: 1, failureKind: 'workerError', detail: '(cli `claude` exited 1) fatal: Failed to authenticate to github.com' }));
+    expect(roster(t5)()[0]).toMatchObject({ auth: 'signed_in' });
+
     // crew#645: a free tier the installed CLI is too old for is a seat that cannot answer.
     const t4 = new SeatHealthTracker();
     t4.ingest(ev({ type: 'councilSeatFailed', session: 'r', cli: 'claude', kind: 'non_zero_exit', stderr: 'Error from provider (Console): OpenCode 1.18.0 or newer is required to use the free tier', stdout: '', detail: '', reason: null }));

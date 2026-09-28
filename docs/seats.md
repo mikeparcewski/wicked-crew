@@ -31,23 +31,14 @@ copied config dir), `.claude.json` comes along but the token does not: the new p
 different service name. Every headless `claude` under the new dir then prints
 `Not logged in · Please run /login`, while the file still looks signed in.
 
-The remedy is either of:
+The remedy is to sign in once under the new dir, with the seat's `login_invocation`:
 
-1. Sign in once under the new dir (the seat's `login_invocation`):
+```sh
+CLAUDE_CONFIG_DIR="<worker home>/claude" claude    # then /login
+```
 
-   ```sh
-   CLAUDE_CONFIG_DIR="<worker home>/claude" claude    # then /login
-   ```
-
-2. On macOS, copy the keychain item to the new service name (no secret leaves the keychain):
-
-   ```sh
-   old=$(printf '%s' "<old worker home>/claude" | shasum -a 256 | cut -c1-8)
-   new=$(printf '%s' "<new worker home>/claude" | shasum -a 256 | cut -c1-8)
-   security find-generic-password -s "Claude Code-credentials-$old" -w \
-     | xargs -0 -I{} security add-generic-password -s "Claude Code-credentials-$new" \
-         -a "<account name shown on the old item>" -w {}
-   ```
+(Re-keying the old keychain item to the new service name in Keychain Access also works. Do not
+script it through `security … -w`: that prints the token and puts it on a command line.)
 
 No daemon restart is needed. The seat's next check picks up the new entry.
 
@@ -58,7 +49,7 @@ No daemon restart is needed. The seat's next check picks up the new entry.
 
 1. **The seat's own refusal** (`auth_source: "seat-stderr"`). A ballot, a unit or an ACP handshake
    in which the seat said it has no working credential ("Not logged in", "No API key found",
-   "Failed to authenticate: OAuth session expired …", a 401) sets `signed_out` for 30 minutes, or
+   "OAuth session expired …", a 401) sets `signed_out` for 30 minutes, or
    until the seat's next successful output. The engine's frame is read in full: `kind`, `reason`
    (`not_logged_in`), `stderr`, `stdout` and `detail`. This flips the roster within the same run.
 2. **The seat's auth-status check** (`auth_source: "probe"`, with `probed_at`). For claude
