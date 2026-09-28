@@ -48,6 +48,7 @@ import {
   type SkillHeld,
 } from './draft-skill.js';
 import { crewStateHome } from '../projects/state-home.js';
+import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
 import { runDirInsideRepo, snapshotRepo, type SnapshotFailureReason } from './repo-snapshot.js';
 import { resolveInteractiveRoot } from './bridge-root.js';
 import {
@@ -1018,22 +1019,26 @@ export async function startInteractiveDraftSubscriber(
     // proxy recorded them, keyed by this doc — waited for, bounded, when the create is still
     // answering), else the ones the brief names, else the project's sole repo, else NONE. Never
     // the project's first member: that grounded a brochure about wicked-studio on wicked-core.
-    // Unbound docs skip this entirely and launch exactly as before.
+    // Unbound docs are never repo-grounded (the proxy refuses a repo on an Unfiled create).
     let decision: GroundingDecision | undefined;
-    let docClisJson: string | undefined;
-    let docChannel: 'studio' | 'cli' | 'api' | undefined;
-    let docActor: string | undefined;
+    // The sidecar sits beside the doc; a refused partition (bridge-root.ts) throws here and the
+    // frame goes unanswered — fail closed, like the sibling seams' docs-root reads. An UNFILED doc
+    // reads its binding too (studio#302): the proxy records the create's seat choice and
+    // provenance under the default mount, and only the repo grounding is project-only.
+    const binding =
+      groundingStore !== undefined
+        ? await groundingStore.waitFor(
+            resolveDocsRoot(doc.projectId),
+            doc.documentId,
+            doc.projectId ?? DEFAULT_PROJECT_ID,
+            GROUNDING_BINDING_WAIT_MS,
+          )
+        : undefined;
+    const docClisJson = binding?.clis_json;
+    const docChannel = binding?.channel;
+    const docActor = binding?.actor;
     if (doc.projectId !== undefined) {
-      // The sidecar sits beside the doc; a refused partition (bridge-root.ts) throws here and the
-      // frame goes unanswered — fail closed, like the sibling seams' docs-root reads.
-      const binding =
-        groundingStore !== undefined
-          ? await groundingStore.waitFor(resolveDocsRoot(doc.projectId), doc.documentId, doc.projectId, GROUNDING_BINDING_WAIT_MS)
-          : undefined;
       decision = await resolveGroundingRepos(adapter, doc.projectId, doc.brief, binding?.repo_refs, log);
-      docClisJson = binding?.clis_json;
-      docChannel = binding?.channel;
-      docActor = binding?.actor;
     }
 
     emitStatus({
