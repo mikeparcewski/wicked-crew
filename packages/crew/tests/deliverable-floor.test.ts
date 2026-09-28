@@ -16,6 +16,7 @@ import {
   composeDeliverableFloor,
   deliverableFloorPhase,
   deliverableFloorScript,
+  registerDeliverableCheck,
 } from '../src/core/deliverable-floor.js';
 import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
 import type { PhaseDef, WorkflowDef } from '../src/core/types.js';
@@ -247,6 +248,27 @@ describe('the floor PhaseDef', () => {
 
 describe('composeDeliverableFloor (per-run, never mutating the shared def)', () => {
   const base = BUILTIN_WORKFLOWS.find((w) => w.id === 'feature')!;
+
+  it('crew#500: a registered behaviour check runs AFTER the floor, as one more Tool phase — consumed by the composition', () => {
+    const check = { id: 'dry-run-spec', cmd: [process.execPath, '-e', 'process.exit(0)', '/tmp/demo.spec.mjs'] };
+    const drop = registerDeliverableCheck('/tmp/demo.spec.mjs', check);
+    const composed = composeDeliverableFloor(base, 'run-chk', ['/tmp/other.html', '/tmp/demo.spec.mjs'], 1_756_000_000_000);
+    const ids = composed.phases.map((p: PhaseDef) => p.id);
+    expect(ids.slice(-2)).toEqual([DELIVERABLE_FLOOR_PHASE_ID, 'dry-run-spec']);
+    const phase = composed.phases[composed.phases.length - 1]!;
+    expect(phase.executor).toEqual({ type: 'tool', cmd: check.cmd });
+    expect(phase.depends_on).toEqual([DELIVERABLE_FLOOR_PHASE_ID]);
+    expect(phase.gate).toBe('auto');
+    expect(phase.role).toBe('neutral');
+    // Consumed: the next run over the same path composes no check it never registered.
+    const again = composeDeliverableFloor(base, 'run-chk2', ['/tmp/demo.spec.mjs']);
+    expect(again.phases.map((p: PhaseDef) => p.id).slice(-1)).toEqual([DELIVERABLE_FLOOR_PHASE_ID]);
+    drop(); // a no-op once consumed
+    // And a registration a launch never composed is dropped by its handle.
+    const drop2 = registerDeliverableCheck('/tmp/demo.spec.mjs', check);
+    drop2();
+    expect(composeDeliverableFloor(base, 'run-chk3', ['/tmp/demo.spec.mjs']).phases.map((p: PhaseDef) => p.id).slice(-1)).toEqual([DELIVERABLE_FLOOR_PHASE_ID]);
+  });
 
   it('appends the floor last under a run-scoped id and leaves the base untouched', () => {
     const before = JSON.stringify(base);

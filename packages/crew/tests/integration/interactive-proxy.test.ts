@@ -518,7 +518,7 @@ describe('interactive proxy — doc create interception (F-046)', () => {
   }, 30_000);
 });
 
-describe('F-RECON-013 — a chat ask on a demo doc is refused with a typed 422 BEFORE the bridge sees it', () => {
+describe('F-RECON-013 — a chat ask on a doc NO seam answers is refused with a typed 422 BEFORE the bridge sees it (a demo doc\'s ask is answered since crew#501)', () => {
   const ask = (documentId: string, text = 'The recording failed — what do I do now to get the demo recorded?') =>
     JSON.stringify({ event_type: 'wicked.interactive.chat.posted', payload: { role: 'user', text, document_id: documentId, source_message_id: 'dmsg-9' } });
   const post = (project: string, body: string) =>
@@ -530,22 +530,24 @@ describe('F-RECON-013 — a chat ask on a demo doc is refused with a typed 422 B
     writeFileSync(join(root, name, '_v0.html'), '<section>x</section>');
   }
 
-  it('demo doc: 422 ask_unsupported_for_doc_kind with the remedy, nothing emitted; source doc + kindless doc + unknown doc: forwarded to the bridge', async () => {
+  it('a foreign-kind doc: 422 ask_unsupported_for_doc_kind, nothing emitted; demo + source + kindless + unknown docs: forwarded to the bridge', async () => {
     const boundRoot = join(dir, 'bound-docs');
+    seed(boundRoot, 'a-storyboard', 'storyboard');
     seed(boundRoot, 'a-demo', 'demo');
     seed(boundRoot, 'a-source', 'source');
     seed(boundRoot, 'kindless');
 
-    const refused = await post('p-bound', ask('a-demo'));
+    const refused = await post('p-bound', ask('a-storyboard'));
     expect(refused.status).toBe(422);
     const body = (await refused.json()) as { code: string; error: string; document_id: string; doc_kind: string; remedy: string };
     expect(body.code).toBe('ask_unsupported_for_doc_kind');
-    expect(body.document_id).toBe('a-demo');
-    expect(body.doc_kind).toBe('demo');
-    expect(body.error).toMatch(/demo storyboards are not supported yet/);
-    expect(body.remedy).toMatch(/highlight the step/);
+    expect(body.document_id).toBe('a-storyboard');
+    expect(body.doc_kind).toBe('storyboard');
+    expect(body.error).toMatch(/have no answering seam/);
 
-    for (const doc of ['a-source', 'kindless', 'never-created']) {
+    // crew#501: a demo doc's ask reaches the bus — the demo seam injects it into the live spec run
+    // or authors a new spec from it — so the one thing a failed demo's thread can do now works.
+    for (const doc of ['a-demo', 'a-source', 'kindless', 'never-created']) {
       const ok = await post('p-bound', ask(doc));
       expect(ok.status, doc).toBe(200);
       const echoed = (await ok.json()) as { ok: boolean; received: string };

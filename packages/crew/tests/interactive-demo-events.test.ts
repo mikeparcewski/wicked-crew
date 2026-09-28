@@ -48,7 +48,17 @@ import {
   RECORDER_ERROR_SOURCE,
   RECORDER_BROWSER_MISSING,
   parseRecorderError,
+  DEMO_DRY_RUN_PHASE_ID,
+  DEMO_DRY_RUN_FAILURE_MARKER,
+  demoDryRunCheck,
+  demoDryRunScript,
+  INTERACTIVE_DEMO_ASK_BUS_FILTER,
 } from '../src/interactive/demo-events.js';
+import { CHAT_POSTED } from '../src/interactive/chat-events.js';
+import { composeDeliverableFloor, DELIVERABLE_FLOOR_PHASE_ID } from '../src/core/deliverable-floor.js';
+import { interactiveSpec } from '../src/interactive/bridge-pool.js';
+import { spawnSync } from 'node:child_process';
+import { chmodSync } from 'node:fs';
 import { DOC_CREATED, STATUS_POSTED, INTERACTIVE_PRODUCER, parseSourceDocCreated } from '../src/interactive/draft-events.js';
 import { DocGroundingStore } from '../src/interactive/doc-grounding.js';
 import { existsSync as fileExists, readdirSync, statSync, readFileSync as readText } from 'node:fs';
@@ -465,6 +475,23 @@ describe('startInteractiveDemoSubscriber (real bus, fake engine)', () => {
         ...overrides,
       },
       producer_id: 'wi-service',
+    });
+  }
+
+  async function emitChatPosted(
+    bus: typeof import('wicked-bus'),
+    documentId: string,
+    text: string,
+    overrides: Record<string, unknown> = {},
+  ) {
+    const db = bus.openDb({ db_path: busDb });
+    const config = bus.loadConfig({ db_path: busDb });
+    bus.emit(db, config, {
+      event_type: CHAT_POSTED,
+      domain: 'wicked-interactive',
+      subdomain: 'chat',
+      payload: { document_id: documentId, role: 'user', text, ts: new Date().toISOString(), ...overrides },
+      producer_id: 'wi-ui',
     });
   }
 
@@ -1031,6 +1058,153 @@ describe('startInteractiveDemoSubscriber (real bus, fake engine)', () => {
     expect(sub.ledger.get('checkout-demo')?.failedAt).toBeTruthy();
   });
 
+  it('crew#500/#565: the spec run is composed with the floor AND a read-only dry run — an unrunnable or mutating spec fails the RUN before anything is installed', async () => {
+    const bus = await import('wicked-bus');
+    const engine = fakeAdapter();
+    makeDemoWorkspace('checkout-demo');
+    // Compose exactly as adapter.launchRun does for a requireDeliverables launch.
+    const composed: WorkflowDef[] = [];
+    (engine as unknown as { launchesComposed: WorkflowDef[] }).launchesComposed = composed;
+    const adapter = engine.asAdapter();
+    const launch = adapter.launchRun.bind(adapter);
+    (adapter as unknown as { launchRun: unknown }).launchRun = async (input: LaunchRunInput) => {
+      const base = engine.registered.find((w) => w.id === input.workflow)!;
+      composed.push(composeDeliverableFloor(base, input.sessionId, input.requireDeliverables ?? []));
+      return launch(input);
+    };
+    const sub = await startInteractiveDemoSubscriber(adapter, {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'demo-ledger.json'),
+      demoDir: join(dir, 'demos'),
+      clisJson: SEATS,
+      resolveDocsRoot: () => docsRoot,
+      log: () => {},
+    });
+    subs.push(sub!);
+    armProbe(bus);
+    await emitDocCreated(bus);
+    await waitFor(() => composed.length === 1);
+    const outPath = join(dir, 'demos', 'checkout-demo', DEMO_SPEC_FILE);
+    const ids = composed[0]!.phases.map((p) => p.id);
+    expect(ids).toEqual(['scenes', 'spec', DELIVERABLE_FLOOR_PHASE_ID, DEMO_DRY_RUN_PHASE_ID]);
+    const dry = composed[0]!.phases[3]!;
+    expect(dry.depends_on).toEqual([DELIVERABLE_FLOOR_PHASE_ID]);
+    expect(dry.executor).toEqual({ type: 'tool', cmd: [process.execPath, '-e', demoDryRunScript(), interactiveSpec(), outPath] });
+    // The narration is keyed on the UNIT (F-056): the scenes unit never reads as the spec's.
+    const runId = engine.launches[0]!.sessionId;
+    const lines = (): string[] =>
+      probeEvents.filter((e) => e.event_type === STATUS_POSTED).map((e) => String((e.payload as { message?: string }).message));
+    engine.fire({ type: 'unitDistributed', session: runId, ord: 1, cli: 'pi', routingMethod: 'council' } as unknown as CoreEvent);
+    await waitFor(() => lines().some((l) => /plan the demo scenes/.test(l)));
+    engine.fire({ type: 'gateDecided', session: runId, ord: 1, allow: true } as unknown as CoreEvent);
+    await waitFor(() => lines().some((l) => /Gate approved the scene plan/.test(l)));
+    engine.fire({ type: 'gateDecided', session: runId, ord: 3, allow: true } as unknown as CoreEvent);
+    await waitFor(() => lines().some((l) => /dry-running it read-only/.test(l)));
+    engine.fire({ type: 'unitDispatched', session: runId, ord: 4 } as unknown as CoreEvent);
+    await waitFor(() => lines().some((l) => /Crew phase 4\/4: dry-running the spec/.test(l)));
+    expect(lines().some((l) => /Spec work finished|Gate approved the spec —/.test(l)), 'no spec line before the spec unit').toBe(false);
+    // The dry run failing is the RUN failing: an error naming the step, and no recording.
+    engine.fire({ type: 'stepFailed', session: runId, ord: 4, detail: `${DEMO_DRY_RUN_FAILURE_MARKER} [side_effect_blocked] step 3 (Launch) sent POST /api/v1/runs` } as unknown as CoreEvent);
+    engine.fire({ type: 'sessionFailed', session: runId, ord: 4 } as unknown as CoreEvent);
+    await waitFor(() => lines().some((l) => /side_effect_blocked/.test(l)));
+    const err = lines().find((l) => /side_effect_blocked/.test(l))!;
+    expect(err).toMatch(/No recording was triggered/);
+    expect(err).toMatch(/Say what to change on this thread/);
+    expect(probeEvents.some((e) => e.event_type === DEMO_REQUESTED)).toBe(false);
+  });
+
+  it('crew#501: a thread ask on a demo with no run in flight authors a NEW spec from the brief + the ask + the last failure + the previous spec, and records it under its own key', async () => {
+    const bus = await import('wicked-bus');
+    const engine = fakeAdapter();
+    const docDir = makeDemoWorkspace('checkout-demo', { spec: VALID_SPEC });
+    const sub = await startSub(engine);
+    armProbe(bus);
+    // The first spec run: created, then failed in its dry run.
+    await emitDocCreated(bus);
+    await waitFor(() => engine.launches.length === 1);
+    engine.fire({ type: 'stepFailed', session: engine.launches[0]!.sessionId, ord: 4, detail: `${DEMO_DRY_RUN_FAILURE_MARKER} [recording_step_failed] step 1 (Open the project) waitForURL timeout` } as unknown as CoreEvent);
+    engine.fire({ type: 'sessionFailed', session: engine.launches[0]!.sessionId, ord: 4 } as unknown as CoreEvent);
+    await waitFor(() => sub.inFlightDocs().length === 0);
+
+    await emitChatPosted(bus, 'checkout-demo', 'The project cards are on /projects — open the first one from there.', { source_message_id: 'm-1' });
+    await waitFor(() => engine.launches.length === 2);
+    const ask = engine.launches[1]!;
+    expect(ask.workflow).toBe(INTERACTIVE_DEMO_WORKFLOW);
+    const runDir = join(dir, 'demos', 'checkout-demo-ask-m-m-1');
+    expect(ask.extraWriteRoots).toEqual([runDir]);
+    expect(ask.requireDeliverables).toEqual([join(runDir, DEMO_SPEC_FILE)]);
+    expect(ask.problem).toContain('https://staging.example.com/app'); // the brief's target, from the doc record
+    expect(ask.problem).toContain('open the first one from there');
+    expect(ask.problem).toMatch(/Why the last attempt failed: .*step 1 \(Open the project\)/);
+    expect(ask.problem).toContain(join(runDir, 'previous.spec.mjs'));
+    expect(readFileSync(join(runDir, 'previous.spec.mjs'), 'utf8')).toBe(VALID_SPEC);
+    expect(ask.problem).not.toMatch(/[\n\r]/);
+
+    // It lands like any spec — installed, then recorded under the ASK's key (never the first spec's).
+    writeFileSync(join(runDir, DEMO_SPEC_FILE), VALID_SPEC.replace('Sign in', 'Open the project'), 'utf8');
+    engine.fire({ type: 'sessionCompleted', session: ask.sessionId });
+    await waitFor(() => probeEvents.some((e) => e.event_type === DEMO_REQUESTED));
+    const req = probeEvents.find((e) => e.event_type === DEMO_REQUESTED)!;
+    expect(req.idempotency_key).toBe('crew:interactive.demo:checkout-demo:ask:m-m-1');
+    expect(readFileSync(join(docDir, DEMO_SPEC_FILE), 'utf8')).toContain('Open the project');
+
+    // A resend of the same message is a replay, not a second run.
+    await emitChatPosted(bus, 'checkout-demo', 'The project cards are on /projects — open the first one from there.', { source_message_id: 'm-1' });
+    await new Promise((r) => setTimeout(r, 250));
+    expect(engine.launches.length).toBe(2);
+  });
+
+  it('crew#501: a thread ask while the spec run is live is INJECTED into that run, and the thread says so', async () => {
+    const bus = await import('wicked-bus');
+    const engine = fakeAdapter();
+    makeDemoWorkspace('checkout-demo');
+    const injected: Array<{ runId: string; message: string; target: string }> = [];
+    const adapter = Object.assign(engine.asAdapter(), {
+      injectWorkerMessage: async (runId: string, message: string, target: string) => {
+        injected.push({ runId, message, target });
+        return 'ok';
+      },
+    }) as CoreAdapterType;
+    const sub = await startInteractiveDemoSubscriber(adapter, {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'demo-ledger.json'),
+      demoDir: join(dir, 'demos'),
+      clisJson: SEATS,
+      resolveDocsRoot: () => docsRoot,
+      log: () => {},
+    });
+    subs.push(sub!);
+    armProbe(bus);
+    await emitDocCreated(bus);
+    await waitFor(() => engine.launches.length === 1);
+    await emitChatPosted(bus, 'checkout-demo', 'Keep it read-only: do not launch anything.');
+    await waitFor(() => injected.length === 1);
+    expect(injected[0]).toEqual({ runId: engine.launches[0]!.sessionId, message: 'The user added on the demo thread: Keep it read-only: do not launch anything.', target: 'all' });
+    await waitFor(() =>
+      probeEvents.some((e) => e.event_type === STATUS_POSTED && /passed your note to the run authoring this demo/.test(String((e.payload as { message?: string }).message))),
+    );
+    expect(engine.launches.length, 'no second run while one is live').toBe(1);
+  });
+
+  it('crew#501: an ask on a demo crew has no creation record for says so on the thread and launches nothing', async () => {
+    const bus = await import('wicked-bus');
+    const engine = fakeAdapter();
+    makeDemoWorkspace('old-demo');
+    await startSub(engine);
+    armProbe(bus);
+    await emitChatPosted(bus, 'old-demo', 'Try again please.');
+    await waitFor(() =>
+      probeEvents.some((e) => e.event_type === STATUS_POSTED && (e.payload as { state?: string }).state === 'error'),
+    );
+    const err = probeEvents.find((e) => e.event_type === STATUS_POSTED && (e.payload as { state?: string }).state === 'error')!;
+    expect(String((err.payload as { message?: string }).message)).toMatch(/no record of this demo's target URL/);
+    expect(engine.launches.length).toBe(0);
+  });
+
   it('HONEST FAILURE: a launch that never happened writes no ledger row (a replay can retry)', async () => {
     const bus = await import('wicked-bus');
     const engine = fakeAdapter();
@@ -1356,5 +1530,67 @@ describe('startInteractiveDemoSubscriber — a symlinked partition is refused on
     await waitFor(() => engine.launches.length === 1);
     expect(engine.launches[0]!.projectId).toBe('p-b');
     expect(engine.launches[0]!.workflow).toBe(INTERACTIVE_DEMO_REAUTHOR_WORKFLOW);
+  });
+});
+
+// ── crew#500/#565: the dry-run phase's program, EXECUTED against a stand-in npx ────────────────
+describe('demoDryRunScript (executed, not grepped)', () => {
+  const POSIX = process.platform !== 'win32';
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'crew-dryrun-'));
+  });
+  afterEach(() => removeScratch(dir));
+
+  /** A fake `npx` on PATH that prints `out` and exits `code`, recording its argv. */
+  function run(out: string, code: number): { status: number | null; stdout: string; argv: string } {
+    const bin = join(dir, 'bin');
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, 'npx'), `#!/bin/sh\necho "$@" > "${join(dir, 'argv')}"\nprintf '%s\\n' '${out}'\nexit ${code}\n`, 'utf8');
+    chmodSync(join(bin, 'npx'), 0o755);
+    const check = demoDryRunCheck('/inbox/demo.spec.mjs', 'wicked-interactive@^0.9.4');
+    const r = spawnSync(check.cmd[0]!, check.cmd.slice(1), {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: `${bin}:${process.env['PATH'] ?? ''}` },
+    });
+    return { status: r.status, stdout: r.stdout, argv: fileExists(join(dir, 'argv')) ? readText(join(dir, 'argv'), 'utf8').trim() : '' };
+  }
+
+  it.skipIf(!POSIX)('PASSES on the recorder\'s ok verdict, running the pinned interactive read-only', () => {
+    const r = run(JSON.stringify({ ok: true, steps: 3 }), 0);
+    expect(r.status).toBe(0);
+    expect(r.argv).toBe('--yes wicked-interactive@^0.9.4 dry-run /inbox/demo.spec.mjs --json');
+    expect(r.stdout).toMatch(/demo dry run PASSED — 3 step\(s\)/);
+  });
+
+  it.skipIf(!POSIX)('FAILS with the typed verdict FIRST (step, cause, remedy) when a step writes or breaks', () => {
+    const verdict = { ok: false, code: 'side_effect_blocked', error: 'step 2 (Launch a bug run) sent POST http://x/api/v1/runs', remedy: 're-author step 2' };
+    const r = run(JSON.stringify(verdict), 1);
+    expect(r.status).toBe(1);
+    expect(r.stdout.startsWith(`${DEMO_DRY_RUN_FAILURE_MARKER} [side_effect_blocked] step 2 (Launch a bug run)`)).toBe(true);
+    expect(r.stdout).toMatch(/Remedy: re-author step 2\./);
+    expect(r.stdout).toMatch(/not installed and nothing was recorded/);
+  });
+
+  it.skipIf(!POSIX)('FAILS CLOSED on an exit 0 with no verdict (an old interactive without dry-run) or a non-zero exit', () => {
+    const noVerdict = run('usage: wicked-interactive <create|serve>', 0);
+    expect(noVerdict.status).toBe(1);
+    expect(noVerdict.stdout).toMatch(/without a verdict/);
+    const crashed = run('boom', 3);
+    expect(crashed.status).toBe(1);
+    expect(crashed.stdout.startsWith(DEMO_DRY_RUN_FAILURE_MARKER)).toBe(true);
+  });
+
+  it('the spec and brief instructions carry the read-only + dry-run rule the recorder enforces', () => {
+    const spec = INTERACTIVE_DEMO_WORKFLOW_DEF.phases[1]!.instructions ?? '';
+    const respec = INTERACTIVE_DEMO_REAUTHOR_WORKFLOW_DEF.phases[0]!.instructions ?? '';
+    for (const text of [spec, respec]) {
+      expect(text).toMatch(/THE RECORDING IS READ-ONLY/);
+      expect(text).toMatch(/every request that is not a GET/);
+      expect(text).toMatch(/never submit a form or press a control that launches, approves/);
+      expect(text).toMatch(/await the URL or text that click must produce/);
+    }
+    expect(INTERACTIVE_DEMO_WORKFLOW_DEF.phases[0]!.instructions).toMatch(/READ-ONLY/);
+    expect(INTERACTIVE_DEMO_ASK_BUS_FILTER).toBe(`${CHAT_POSTED}@wicked-interactive`);
   });
 });

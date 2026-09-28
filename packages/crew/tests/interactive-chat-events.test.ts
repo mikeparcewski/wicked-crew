@@ -38,6 +38,7 @@ import {
   chatIdempotencyKey,
   readDocHead,
   isAnswerableDocKind,
+  chatSeamAnswers,
   chatProblem,
   startInteractiveChatSubscriber,
 } from '../src/interactive/chat-events.js';
@@ -160,7 +161,10 @@ describe('readDocHead (contract b — the versions.json read)', () => {
     expect(readDocHead(root, 'real-source-doc')?.kind).toBe('doc');
     expect(isAnswerableDocKind('doc')).toBe(true);
     expect(isAnswerableDocKind('source')).toBe(true);
-    expect(isAnswerableDocKind('demo')).toBe(false);
+    // crew#501: a demo doc's asks are answered too — by the demo seam, not this one.
+    expect(isAnswerableDocKind('demo')).toBe(true);
+    expect(chatSeamAnswers('demo')).toBe(false);
+    expect(chatSeamAnswers('doc')).toBe(true);
     expect(isAnswerableDocKind('storyboard')).toBe(false);
   });
 
@@ -620,33 +624,36 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     await waitFor(() => engine.launches.length === 1);
   });
 
-  it('KIND/EXISTENCE FILTER (contract b): demo docs and unknown docs are never answered — a kindless (real source) doc is', async () => {
+  it('KIND/EXISTENCE FILTER (contract b): demo docs are the demo seam\'s, foreign kinds are declined, unknown docs ignored — a kindless (real source) doc is answered', async () => {
     const bus = await import('wicked-bus');
     const engine = fakeAdapter();
     seedDoc('demo-doc', { kind: 'demo' });
+    seedDoc('odd-doc', { kind: 'storyboard' });
     seedDoc('kindless-doc'); // the real source-doc manifest shape: no kind field at all
     const sub = await startSub(engine);
     subs.push(sub!);
     armProbe(bus);
 
     await emitChatPosted(bus, 'demo-doc', { project_id: 'proj-7' });
+    await emitChatPosted(bus, 'odd-doc', { project_id: 'proj-7' });
     await emitChatPosted(bus, 'never-created');
     await new Promise((r) => setTimeout(r, 300));
     expect(engine.launches.length).toBe(0);
     expect(sub!.ledger.size()).toBe(0);
-    // F-RECON-013: the demo ask is DECLINED ON THE THREAD (an error status naming what to do instead) —
-    // not dropped into a log line while the canvas shows "generating". The unknown doc stays silent
-    // (nothing to post to).
+    // F-RECON-013: a foreign-kind ask is DECLINED ON THE THREAD — not dropped into a log line while
+    // the canvas shows "generating". crew#501: a DEMO doc's ask is the demo seam's to answer, so this
+    // seam posts nothing for it. The unknown doc stays silent (nothing to post to).
     await waitFor(() =>
       probeEvents.some((e) => e.event_type === STATUS_POSTED && e.producer_id === INTERACTIVE_PRODUCER && (e.payload as { state?: string }).state === 'error'),
     );
+    await new Promise((r) => setTimeout(r, 200));
     const declined = probeEvents.filter((e) => e.event_type === STATUS_POSTED && (e.payload as { state?: string }).state === 'error');
     expect(declined.length).toBe(1);
     const pl = declined[0]!.payload as { document_id: string; project_id?: string; message: string };
-    expect(pl.document_id).toBe('demo-doc');
+    expect(pl.document_id).toBe('odd-doc');
     expect(pl.project_id).toBe('proj-7');
-    expect(pl.message).toMatch(/demo storyboards are not supported yet/);
-    expect(pl.message).toMatch(/highlight the step/);
+    expect(pl.message).toMatch(/kind 'storyboard' have no answering seam/);
+    expect(probeEvents.some((e) => (e.payload as { document_id?: string }).document_id === 'demo-doc' && e.event_type === STATUS_POSTED)).toBe(false);
 
     // …while the kindless manifest — what interactive ACTUALLY writes for a source doc — is answered.
     await emitChatPosted(bus, 'kindless-doc', { source_message_id: 'm-kindless' });

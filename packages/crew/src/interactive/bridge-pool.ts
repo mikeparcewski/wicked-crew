@@ -135,11 +135,19 @@ export const LINEAGE_MAX_HOPS = 16;
  * third {@link BridgeEnv} key this pool now hands every bridge, which is ALSO the rollout vehicle:
  * a running 0.9.2 bridge's sidecar lacks the key, {@link bridgeEnvMatches} says no, and the pool
  * recycles it into `npx wicked-interactive@^0.9.3`.
+ *
+ * 0.9.4 (wicked-interactive #243 — crew#565/#500): the floor follows 0.9.4 because the demo seam's
+ * spec run now ends in a DRY RUN (`npx <this spec> dry-run <spec> --json`, `demo-events.ts`
+ * `demoDryRunCheck`) that 0.9.3 does not have — against it the phase fails closed ("without a
+ * verdict") — and 0.9.4's recorder is READ-ONLY (every non-GET request and every page → server
+ * WebSocket frame is blocked and fails its step as `side_effect_blocked`). A bridge already running
+ * 0.9.3 is still adopted until it restarts; the dry run, which always resolves this range, is what
+ * keeps a mutating spec from ever being installed for it to record.
  */
 /** The package crew starts as the interactive bridge — named in CODE exactly once. */
 const INTERACTIVE_PACKAGE = 'wicked-interactive';
 /** The range crew needs when nothing overrides it (see F-081 above). */
-export const INTERACTIVE_DEFAULT_RANGE = '^0.9.3';
+export const INTERACTIVE_DEFAULT_RANGE = '^0.9.4';
 /** The env override of the RANGE (not the package). */
 export const INTERACTIVE_SPEC_ENV = 'WICKED_INTERACTIVE_SPEC';
 /** The default spec — what the daemon spawns with no override. */

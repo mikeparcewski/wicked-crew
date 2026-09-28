@@ -210,8 +210,8 @@ export function isDocEventsPost(method: string | undefined, target: string): boo
 
 /**
  * Crew's 422 on an ask no seam can answer (F-RECON-013): a `chat.posted` USER ask on a document
- * whose manifest kind has no answering seam — today `demo`, whose storyboard is re-authored from
- * STEP feedback (highlight a step) and re-recorded, never revised from a thread ask. The bridge
+ * whose manifest kind has no answering seam (a `demo` doc's asks are the demo seam's since
+ * crew#501, so today only a kind no seam knows). The bridge
  * would have accepted the emit (200) and the chat seam would have declined it in a log line, so
  * the thread showed "generating" until its silence budget blamed the service. Refused HERE, before
  * the bridge sees it, so the sender learns at once — the studio's own send-failure path renders
@@ -229,19 +229,6 @@ export interface InteractiveAskRefusal {
  *  (chat-events.ts `isAnswerableDocKind`). */
 export function askRefusalFor(documentId: string, kind: string): InteractiveAskRefusal | null {
   if (isAnswerableDocKind(kind)) return null;
-  if (kind === 'demo') {
-    return {
-      code: 'ask_unsupported_for_doc_kind',
-      document_id: documentId,
-      doc_kind: kind,
-      error:
-        'asks on demo storyboards are not supported yet — a demo is re-authored from step feedback, not ' +
-        'from the thread. Nothing was sent.',
-      remedy:
-        'highlight the step to change and send that as feedback (the demo seam re-authors the spec and ' +
-        're-records), or use Re-record to retry the recording as authored.',
-    };
-  }
   return {
     code: 'ask_unsupported_for_doc_kind',
     document_id: documentId,
