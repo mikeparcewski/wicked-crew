@@ -142,7 +142,7 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
 
   app.post(
     `${V}/mcp/servers/preview`,
-    { config: { manifest: { requestType: 'McpServerConfigBody', responseType: 'McpPreviewResponse', statusCodes: [200, 400, 502, 503] } } },
+    { config: { manifest: { requestType: 'McpServerConfigBody', responseType: 'McpPreviewResponse', statusCodes: [200, 400, 409, 502, 503] } } },
     async (req, reply) => {
       const r = registry(reply);
       if (r === null) return reply;
@@ -212,7 +212,7 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
 
   app.post<{ Params: { name: string } }>(
     `${V}/mcp/servers/:name/test`,
-    { config: { manifest: { responseType: 'McpServerTestResponse', statusCodes: [200, 404, 503] } } },
+    { config: { manifest: { responseType: 'McpServerTestResponse', statusCodes: [200, 404, 409, 503] } } },
     async (req, reply) => {
       const r = registry(reply);
       if (r === null) return reply;

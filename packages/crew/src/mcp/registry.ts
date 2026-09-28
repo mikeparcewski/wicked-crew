@@ -31,7 +31,7 @@ import type {
   McpUpstreamKind,
 } from '../core/types.js';
 import { canonicalJson, deriveToolClass, effectiveToolClass, mcpSubject, parseMcpSubject, sha256Hex, toolSchemaHash } from './classify.js';
-import type { McpUpstreamConfig, ProbedTool, Prober } from './probe.js';
+import type { McpUpstreamConfig, ProbedTool, ProbeResult, Prober } from './probe.js';
 import type { McpRegistryStore, McpServerRecord, McpToolRecord } from './registry-store.js';
 import { keychainRef, parseSecretRef, resolveSecret, secretIsSet, type SecretStore } from './secrets.js';
 
@@ -45,7 +45,7 @@ export const HEALTH_FAILING_AFTER = 3;
 /** A refusal the routes map to a status code. */
 export class McpRegistryError extends Error {
   constructor(
-    readonly status: 404 | 409 | 501 | 502,
+    readonly status: 400 | 404 | 409 | 501 | 502,
     readonly code: string,
     message: string,
   ) {
@@ -95,7 +95,8 @@ export class McpRegistry {
   }
 
   async preview(config: McpUpstreamConfig): Promise<McpPreviewResponse> {
-    const result = await this.deps.probe(config, await this.secretFor(config.auth));
+    const result = await this.probe(config);
+    if ('missingSecret' in result) throw new McpRegistryError(409, 'secret_missing', result.error);
     if (!result.ok) throw new McpRegistryError(502, 'probe_failed', `the server did not answer tools/list: ${result.error}`);
     const tools = result.tools.map((t) => ({ ...t, schemaHash: toolSchemaHash(t) }));
     const previewHash = sha256Hex(canonicalJson({ config, tools: tools.map((t) => [t.name, t.schemaHash]) }));
@@ -210,11 +211,16 @@ export class McpRegistry {
   async test(name: string): Promise<McpServerTestResponse> {
     const current = this.find((await this.deps.store.read()).servers, name);
     const config = configOf(current);
-    const result = await this.deps.probe(config, await this.secretFor(config.auth));
+    const result = await this.probe(config);
     const stamp = new Date(this.now()).toISOString();
     let diff: McpToolDiff | null = null;
     const rec = await this.deps.store.mutate((file) => {
       const s = this.find(file.servers, name);
+      // A save with a different config landed while the probe ran: the result describes a server
+      // that is no longer registered, so it is not applied to the new one.
+      if (canonicalJson(configOf(s)) !== canonicalJson(config)) {
+        throw new McpRegistryError(409, 'server_changed', `${name} was saved again while it was being tested; test it again`);
+      }
       if (!result.ok) {
         const failures = s.health.consecutiveFailures + 1;
         const state = failures >= HEALTH_FAILING_AFTER ? 'failing' : s.health.state;
@@ -254,8 +260,11 @@ export class McpRegistry {
     if (!this.deps.secrets.available) {
       throw new McpRegistryError(501, 'secret_store_unavailable', 'this platform has no OS secret store; reference a daemon env variable instead (auth.ref "env:<NAME>")');
     }
+    const ref = keychainRef(name);
+    // The route answers and audits the reference, so a value it contains would be echoed there.
+    if (ref.includes(value)) throw new McpRegistryError(400, 'secret_in_ref', 'the secret must not appear in its own reference; choose a different value');
     await this.deps.secrets.set(name, value);
-    return keychainRef(name);
+    return ref;
   }
 
   // ── internals ──────────────────────────────────────────────────────────────────────────────
@@ -274,8 +283,18 @@ export class McpRegistry {
     while (this.previews.size > PREVIEW_CACHE_MAX) this.previews.delete(this.previews.keys().next().value as string);
   }
 
-  private async secretFor(auth: McpAuthConfig | null): Promise<string | null> {
-    return auth === null ? null : resolveSecret(auth.ref, this.deps.secrets, this.env);
+  /**
+   * Probe with the server's secret. A server whose `auth` names a secret that resolves to nothing
+   * is NOT probed unauthenticated (that would register what an anonymous caller sees): it fails
+   * without connecting.
+   */
+  private async probe(config: McpUpstreamConfig): Promise<ProbeResult | { ok: false; error: string; missingSecret: true }> {
+    if (config.auth === null) return this.deps.probe(config, null);
+    const secret = await resolveSecret(config.auth.ref, this.deps.secrets, this.env);
+    if (secret === null) {
+      return { ok: false, error: `auth.ref ${config.auth.ref} resolves to no secret: set it, then try again`, missingSecret: true };
+    }
+    return this.deps.probe(config, secret);
   }
 
   private async authState(auth: McpAuthConfig | null): Promise<McpAuthState> {

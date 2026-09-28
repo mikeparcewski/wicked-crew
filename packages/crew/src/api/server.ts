@@ -45,10 +45,10 @@ import { ProjectSettingsStore } from '../projects/settings.js';
 import { crewStateHome } from '../projects/state-home.js';
 import { homedir } from 'node:os';
 import { discoverMcpServers } from '../mcp/discovery.js';
-import { probeMcpServer, type Prober } from '../mcp/probe.js';
+import { probeMcpServer } from '../mcp/probe.js';
 import { McpRegistry } from '../mcp/registry.js';
 import { McpRegistryStore } from '../mcp/registry-store.js';
-import { platformSecretStore, type SecretStore } from '../mcp/secrets.js';
+import { platformSecretStore } from '../mcp/secrets.js';
 import { startProjectBus, MEMBERSHIP_ATTACHED, membershipAttachedKey } from '../projects/events.js';
 import { startInteractiveWsRelay, registerInteractiveEventRoutes } from '../interactive/ws-relay.js';
 import { startTeamWsRelay } from '../team/ws-relay.js';
@@ -289,9 +289,6 @@ export interface CreateServerOptions {
    *  `WICKED_CREW_EVAL_STORE`. Symmetric with `auditPath` — a createServer-driven test isolates its
    *  eval history here instead of writing the operator's real `~/.wicked-crew/evals/`. */
   evalStoreRoot?: string;
-  /** The MCP tools registry seams (tests): a fake secret store and prober, and the registry dir.
-   *  Default: the OS keychain, a real probe, `<state home>/mcp`. */
-  mcp?: { secrets?: SecretStore; probe?: Prober; dir?: string };
   // (The crew#274 §3 seat-health `--version` recovery probe is retired — perf recon fix #3.
   // Readiness lives engine-side as the wicked-core#355 dispatch bench; the tracker recovers a
   // seat on its next real `ok` output. The `seatHealthProbe` option is gone with it.)
@@ -1572,10 +1569,11 @@ export async function createServer(
       docGrounding,
       ...(skillsRuntime !== undefined ? { skills: skillsRuntime } : {}),
       // DES-MCP-TOOLS-001 S2: the registry over `<state home>/mcp` (created on the first save).
+      // Route tests drive `registerMcpRoutes` over their own registry (tests/mcp-registry.test.ts).
       mcp: new McpRegistry({
-        store: new McpRegistryStore(options?.mcp?.dir),
-        secrets: options?.mcp?.secrets ?? platformSecretStore(),
-        probe: options?.mcp?.probe ?? probeMcpServer,
+        store: new McpRegistryStore(),
+        secrets: platformSecretStore(),
+        probe: probeMcpServer,
         // Read the worker home at request time: `PUT /settings` can move it (applyWorkerConfigRoot).
         discover: (managed) => discoverMcpServers({ home: homedir(), workerHome: process.env['WICKED_WORKER_HOME'] ?? null }, managed),
       }),

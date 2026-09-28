@@ -222,15 +222,36 @@ describe('a secret never leaves the broker (D-2)', () => {
     }
   });
 
-  it('an env: reference resolves from the daemon env and reports missing when unset', async () => {
-    const saved = await previewAndSave(stdioConfig({ auth: { ref: 'env:WKD_TEST_MCP_TOKEN', env: 'FIXTURE_TOKEN' } }));
-    expect(saved.authState).toBe('missing');
+  it('an unset secret fails closed: no unauthenticated probe; an env: reference resolves from the daemon env', async () => {
+    const auth = { ref: 'env:WKD_TEST_MCP_TOKEN', env: 'FIXTURE_TOKEN' };
+    writeSpec({ tools: [{ name: 'wt_whoami', description: 'token=${TOKEN}', inputSchema: { type: 'object' } }] });
+    const refused = await call('POST', '/mcp/servers/preview', stdioConfig({ auth }));
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json()).toMatchObject({ code: 'secret_missing' });
+
+    process.env['WKD_TEST_MCP_TOKEN'] = 'wkd-env-secret-value';
+    try {
+      const saved = await previewAndSave(stdioConfig({ auth }));
+      expect(saved.authState).toBe('set');
+      expect(toolOf(saved, 'wt_whoami').description).toBe(`token=${SECRET_REDACTION}`);
+    } finally {
+      delete process.env['WKD_TEST_MCP_TOKEN'];
+    }
+    // Unset again: the listing says so, and a test probe fails without connecting.
+    expect(((await call('GET', '/mcp/servers')).json() as McpServersResponse).servers[0]?.authState).toBe('missing');
+    const tested = (await call('POST', '/mcp/servers/fx/test')).json() as McpServerTestResponse;
+    expect(tested.ok).toBe(false);
+    expect(tested.error).toContain('resolves to no secret');
   });
 
   it('the secret route refuses a short or multi-line value and a bad name', async () => {
     expect((await call('PUT', '/mcp/servers/fx/secret', { value: 'short' })).statusCode).toBe(400);
     expect((await call('PUT', '/mcp/servers/fx/secret', { value: 'two\nlines-here' })).statusCode).toBe(400);
     expect((await call('PUT', '/mcp/servers/Bad%20Name/secret', { value: 'long-enough-value' })).statusCode).toBe(400);
+    // A value inside its own reference would be echoed by the answer and the audit entry.
+    const inRef = await call('PUT', '/mcp/servers/abc12345/secret', { value: 'abc12345' });
+    expect(inRef.statusCode).toBe(400);
+    expect(inRef.json()).toMatchObject({ code: 'secret_in_ref' });
     expect(secrets.values.size).toBe(0);
   });
 
@@ -337,6 +358,40 @@ describe('the tool diff: a changed schema is unregistered again (D-5)', () => {
     expect(back).toMatchObject({ state: 'ok', consecutiveFailures: 0, lastError: null });
   });
 
+  it('a test whose server was saved again mid-probe is refused, not applied to the new config', async () => {
+    await previewAndSave();
+    const gate: { release?: () => void; parked?: () => void } = {};
+    const held = new Promise<void>((r) => (gate.release = r));
+    const parked = new Promise<void>((r) => (gate.parked = r));
+    let calls = 0;
+    const racing = new McpRegistry({
+      store: new McpRegistryStore(join(base, 'state', 'mcp')),
+      secrets,
+      probe: async (config, secret) => {
+        calls += 1;
+        if (calls === 1) {
+          gate.parked?.();
+          await held;
+        }
+        return probeMcpServer(config, secret);
+      },
+      discover: () => [],
+    });
+    const testing = racing.test('fx');
+    await parked;
+    // While the first probe is parked, fx is saved again with different args.
+    writeSpec({ tools: [BASE_TOOLS[0]!] });
+    const altSpec = join(base, 'spec-alt.json');
+    writeFileSync(altSpec, JSON.stringify({ tools: [BASE_TOOLS[1]!] }));
+    const preview = await racing.preview({ name: 'fx', kind: 'mcp-stdio', command: process.execPath, args: [FIXTURE_SERVER, altSpec], url: null, auth: null });
+    await racing.save(preview.previewHash);
+    gate.release?.();
+    await expect(testing).rejects.toMatchObject({ status: 409, code: 'server_changed' });
+    const now = await racing.get('fx');
+    expect(now.args).toEqual([FIXTURE_SERVER, altSpec]);
+    expect(now.tools.filter((t) => t.status === 'registered').map((t) => t.name)).toEqual(['wt_note']);
+  });
+
   it('disable, remove and unknown names', async () => {
     secrets.values.set('fx', 'wkd-secret-value');
     await previewAndSave(stdioConfig({ auth: { ref: 'keychain:wicked-mcp/fx', env: 'FIXTURE_TOKEN' } }));
@@ -389,10 +444,14 @@ describe('discovery: names only', () => {
     put(home, '.config/opencode/opencode.json', JSON.stringify({ mcp: { sentry: { url: `https://x?token=${secret}` } } }));
     put(worker, 'copilot/mcp-config.json', JSON.stringify({ mcpServers: { stray: { command: 'x' } } }));
     put(worker, 'claude/.claude.json', '{broken');
+    // An instance seat's root (core#591), and a directory that only looks like one.
+    put(worker, 'claude-2/.claude.json', JSON.stringify({ mcpServers: { second: { command: 'x' } } }));
+    put(worker, 'claude-2.bak/.claude.json', JSON.stringify({ mcpServers: { debris: { command: 'x' } } }));
 
     const found = discoverMcpServers({ home, workerHome: worker }, new Set(['jira']));
     expect(found).toEqual([
       { name: 'github', cli: 'claude', origin: 'operator', source: '~/.claude.json', managed: false },
+      { name: 'second', cli: 'claude', origin: 'worker', source: '<worker home>/claude-2/.claude.json', managed: false },
       { name: 'jira', cli: 'codex', origin: 'operator', source: '~/.codex/config.toml', managed: true },
       { name: 'quoted.one', cli: 'codex', origin: 'operator', source: '~/.codex/config.toml', managed: false },
       { name: 'stray', cli: 'copilot', origin: 'worker', source: '<worker home>/copilot/mcp-config.json', managed: false },
@@ -400,6 +459,24 @@ describe('discovery: names only', () => {
     ]);
     expect(JSON.stringify(found)).not.toContain(secret);
     expect(codexServerNames('')).toEqual([]);
+    // A torn table header names nothing.
+    expect(codexServerNames(`[mcp_servers.${secret}\ncommand = "x"\n`)).toEqual([]);
+  });
+
+  it('the registry listing carries discovery through, names only', async () => {
+    const home = join(base, 'home');
+    const secret = 'wkd-config-token-654321';
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, '.claude.json'), JSON.stringify({ mcpServers: { github: { command: 'gh-mcp', args: ['--token', secret] } } }));
+    const listing = new McpRegistry({
+      store: new McpRegistryStore(join(base, 'state', 'mcp')),
+      secrets,
+      probe: probeMcpServer,
+      discover: (managed) => discoverMcpServers({ home, workerHome: null }, managed),
+    });
+    const listed = await listing.list();
+    expect(listed.discovered.map((d) => d.name)).toEqual(['github']);
+    expect(JSON.stringify(listed)).not.toContain(secret);
   });
 });
 
