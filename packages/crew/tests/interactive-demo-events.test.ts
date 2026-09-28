@@ -1190,6 +1190,38 @@ describe('startInteractiveDemoSubscriber (real bus, fake engine)', () => {
     expect(engine.launches.length, 'no second run while one is live').toBe(1);
   });
 
+  it('crew#501: a note sent while the spec run is still starting waits on the flight and is injected the moment the run exists', async () => {
+    const bus = await import('wicked-bus');
+    const engine = fakeAdapter();
+    makeDemoWorkspace('checkout-demo');
+    const injected: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const base = engine.asAdapter();
+    const adapter = Object.assign(base, {
+      injectWorkerMessage: async (_runId: string, message: string) => { injected.push(message); return 'ok'; },
+      // Hold the launch open: the flight stays a pre-launch placeholder until released.
+      launchRun: async (input: LaunchRunInput) => { await gate; engine.launches.push(input); return input.sessionId; },
+    }) as CoreAdapterType;
+    const sub = await startInteractiveDemoSubscriber(adapter, {
+      dbPath: busDb, pollIntervalMs: 25, heartbeatMs: 60_000, ledgerPath: join(dir, 'demo-ledger.json'),
+      demoDir: join(dir, 'demos'), clisJson: SEATS, resolveDocsRoot: () => docsRoot, log: () => {},
+    });
+    subs.push(sub!);
+    armProbe(bus);
+    await emitDocCreated(bus);
+    await waitFor(() => sub!.inFlightDocs().length === 1);
+    await emitChatPosted(bus, 'checkout-demo', 'Only show the dashboard.');
+    await waitFor(() =>
+      probeEvents.some((e) => e.event_type === STATUS_POSTED && /your note goes to it the moment it starts/.test(String((e.payload as { message?: string }).message))),
+    );
+    expect(injected).toEqual([]);
+    release();
+    await waitFor(() => injected.length === 1);
+    expect(injected[0]).toBe('The user added on the demo thread: Only show the dashboard.');
+    expect(engine.launches.length).toBe(1);
+  });
+
   it('crew#501: an ask on a demo crew has no creation record for says so on the thread and launches nothing', async () => {
     const bus = await import('wicked-bus');
     const engine = fakeAdapter();

@@ -687,6 +687,9 @@ interface InFlight {
   /** The bus idempotency key of the recording this run may request (a first spec, a re-author
    *  and each thread ask earn their own). */
   recordKey: string;
+  /** Thread notes that arrived while this flight was still a pre-launch placeholder (crew#501);
+   *  injected into the run the moment it exists. */
+  pendingNotes?: string[] | undefined;
   /** The most recent real narration line (phase transitions overwrite it; the heartbeat repeats it). */
   narration: string;
   /** The governed run id (the in-flight map key), stamped on narration as `run_id` (F-4R2-005). */
@@ -1232,7 +1235,7 @@ export async function startInteractiveDemoSubscriber(
     }
     // crew#500/#565: the spec's behaviour check — composed after the deliverable floor by the
     // launch below, consumed there; dropped on every path so a failed launch leaves nothing armed.
-    const dropCheck = registerDeliverableCheck(input.outPath, demoDryRunCheck(input.outPath));
+    const dropCheck = registerDeliverableCheck(runId, input.outPath, demoDryRunCheck(input.outPath));
     return adapter
       .launchRun({
         problem: input.problem,
@@ -1305,6 +1308,17 @@ export async function startInteractiveDemoSubscriber(
         flight.heartbeat.unref?.();
         inFlight.set(runId, flight);
         log(`[interactive-demo] ${input.key} → governed run ${runId} (${input.leg}, spec → ${input.outPath})`);
+        for (const note of flight.pendingNotes?.splice(0) ?? []) {
+          adapter.injectWorkerMessage(runId, note, 'all').catch((err: unknown) =>
+            emitStatus({
+              ...docScope(flight.documentId, flight.projectId),
+              state: 'error',
+              message:
+                `Crew could not pass your note to the run authoring this demo (run ${runId}): ` +
+                `${err instanceof Error ? err.message : String(err)}. Once that run lands, send it again.`,
+            }),
+          );
+        }
       })
       .catch((err: unknown) => {
         // A launch that never happened keeps no flight and no snapshot (a replayed frame
@@ -1386,7 +1400,15 @@ export async function startInteractiveDemoSubscriber(
       endFlight(runId);
       throw err;
     }
-    mkdirSync(runDir, { recursive: true });
+    try {
+      mkdirSync(runDir, { recursive: true });
+    } catch (err) {
+      // The doc must not read busy forever over an inbox that could not be made.
+      endFlight(runId);
+      const why = err instanceof Error ? err.message : String(err);
+      emitStatus({ ...docScope(doc.documentId, doc.projectId), state: 'error', message: `Crew could not create this demo's run directory (${why}); nothing was launched.` });
+      throw err;
+    }
     // A thread ask re-authors from the spec the last attempt used, copied into THIS run's inbox
     // (the doc workspace is outside the worker's boundary, wicked-core#294).
     let followUp = spec.followUp;
@@ -1665,11 +1687,14 @@ export async function startInteractiveDemoSubscriber(
     if (live !== undefined) {
       const [runId, flight] = live;
       if (flight.heartbeat === undefined) {
-        // Still a pre-launch placeholder: there is no run to hand the note to yet.
+        // Still a pre-launch placeholder (grounding, snapshots): the note waits on the flight and
+        // is injected the moment the run exists (launchFlight).
+        (flight.pendingNotes ??= []).push(`The user added on the demo thread: ${oneLine(ask.text, 1500)}`);
+        ledger.recordLaunch(key, runId);
         emitStatus({
           ...docScope(ask.documentId, ask.projectId),
-          state: 'error',
-          message: 'Crew is starting the run that authors this demo — nothing was sent. Send your note again in a moment and it goes straight to that run.',
+          state: 'processing',
+          message: 'Crew is starting the run that authors this demo — your note goes to it the moment it starts.',
         });
         return;
       }

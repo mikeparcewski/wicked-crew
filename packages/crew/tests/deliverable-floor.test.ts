@@ -251,7 +251,9 @@ describe('composeDeliverableFloor (per-run, never mutating the shared def)', () 
 
   it('crew#500: a registered behaviour check runs AFTER the floor, as one more Tool phase — consumed by the composition', () => {
     const check = { id: 'dry-run-spec', cmd: [process.execPath, '-e', 'process.exit(0)', '/tmp/demo.spec.mjs'] };
-    const drop = registerDeliverableCheck('/tmp/demo.spec.mjs', check);
+    const drop = registerDeliverableCheck('run-chk', '/tmp/demo.spec.mjs', check);
+    // Keyed by RUN: another run declaring the same path composes no check it never registered.
+    expect(composeDeliverableFloor(base, 'run-other', ['/tmp/demo.spec.mjs']).phases.map((p: PhaseDef) => p.id).slice(-1)).toEqual([DELIVERABLE_FLOOR_PHASE_ID]);
     const composed = composeDeliverableFloor(base, 'run-chk', ['/tmp/other.html', '/tmp/demo.spec.mjs'], 1_756_000_000_000);
     const ids = composed.phases.map((p: PhaseDef) => p.id);
     expect(ids.slice(-2)).toEqual([DELIVERABLE_FLOOR_PHASE_ID, 'dry-run-spec']);
@@ -260,12 +262,12 @@ describe('composeDeliverableFloor (per-run, never mutating the shared def)', () 
     expect(phase.depends_on).toEqual([DELIVERABLE_FLOOR_PHASE_ID]);
     expect(phase.gate).toBe('auto');
     expect(phase.role).toBe('neutral');
-    // Consumed: the next run over the same path composes no check it never registered.
-    const again = composeDeliverableFloor(base, 'run-chk2', ['/tmp/demo.spec.mjs']);
+    // Consumed: composing the same run again finds no check.
+    const again = composeDeliverableFloor(base, 'run-chk', ['/tmp/demo.spec.mjs']);
     expect(again.phases.map((p: PhaseDef) => p.id).slice(-1)).toEqual([DELIVERABLE_FLOOR_PHASE_ID]);
     drop(); // a no-op once consumed
     // And a registration a launch never composed is dropped by its handle.
-    const drop2 = registerDeliverableCheck('/tmp/demo.spec.mjs', check);
+    const drop2 = registerDeliverableCheck('run-chk3', '/tmp/demo.spec.mjs', check);
     drop2();
     expect(composeDeliverableFloor(base, 'run-chk3', ['/tmp/demo.spec.mjs']).phases.map((p: PhaseDef) => p.id).slice(-1)).toEqual([DELIVERABLE_FLOOR_PHASE_ID]);
   });
