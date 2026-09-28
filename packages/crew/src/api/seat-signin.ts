@@ -15,7 +15,9 @@
 //   a file can prove a login HAPPENED, but its absence proves nothing when the secret lives in
 //   the OS keychain — and `false` would send an operator to re-login a working seat.
 // - `true` is "a credential artifact exists", NOT "the credential still works". An expired
-//   OAuth token reads `true` here; seat HEALTH (crew#274) is what catches it failing live.
+//   OAuth token reads `true` here. For claude and codex the roster therefore asks the seat's own
+//   auth-status command (`seat-probe.ts`, crew#630) and reads this file only until it answers;
+//   for every seat, the seat's own refusal (seat-health.ts) overrides both.
 //
 // Per-seat rules (each documented at its branch). EVERY known seat is probed under its OWN root
 // in the worker home (wicked-core#410, F-010: the engine now runs codex/pi/copilot/opencode seats

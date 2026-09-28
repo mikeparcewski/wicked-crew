@@ -21,6 +21,7 @@ import { CoreAdapter } from '../core/adapter.js';
 import type { RosterSeat } from '../core/types.js';
 import type { SeatHealthTracker } from './seat-health.js';
 import { signedInHeuristic } from './seat-signin.js';
+import { SeatProbe } from './seat-probe.js';
 import { seatStanding, chatSeatAdmission, type StandingSeat } from './seat-standing.js';
 
 /** The accessor: the registry roster WITH crew's standing, freshly read on every call. */
@@ -37,6 +38,10 @@ export interface RosterStandingDeps {
   registry?: () => unknown[];
   /** Where `WICKED_WORKER_HOME` is read from at call time (default `process.env`). */
   env?: NodeJS.ProcessEnv;
+  /** The live seat credential probe (crew#630, `seat-probe.ts`). Default: a real one when neither
+   *  `signedIn` nor `registry` is injected (the daemon), none otherwise — a test that fixes the
+   *  sign-in reading gets exactly that reading. `null` turns it off. */
+  probe?: SeatProbe | null;
 }
 
 /**
@@ -50,12 +55,26 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
   const signedIn = deps.signedIn ?? signedInHeuristic;
   const registry = deps.registry ?? (() => CoreAdapter.roster());
   const env = deps.env ?? process.env;
-  return (): RosterSeat[] => {
+  const probe =
+    deps.probe !== undefined ? deps.probe : deps.signedIn === undefined && deps.registry === undefined ? new SeatProbe() : null;
+  const accessor = (): RosterSeat[] => {
     const workerRoot = env['WICKED_WORKER_HOME'];
+    const root = workerRoot === '' ? undefined : workerRoot;
     return (registry() as RosterSeat[]).map((seat) => {
       const key = String(seat.key);
       const health = seatHealth.healthFor(key);
-      const signed = signedIn(key, workerRoot === '' ? undefined : workerRoot);
+      // crew#630: the seat's own auth-status answer (cached; never awaited here). A probed seat
+      // whose probe has not answered yet does not read `signed_in` off its file — a credential
+      // file is not a working login (a moved worker home keeps `.claude.json` and loses the
+      // keychain token) — it reads `unknown` until the probe answers.
+      const probed = probe?.read(key, root);
+      const heuristic = signedIn(key, root);
+      const signed =
+        probed !== undefined && probed.signedIn !== null
+          ? probed.signedIn
+          : probe?.probes(key) === true && heuristic === true
+            ? null
+            : heuristic;
       // (R5b, DES-L3 PR-3D) No crew-side council bench any more: the engine's per-run ballot ledger
       // (`session.benched_seats`) is the one bench, so there is no bench reading to pass and no
       // health reading to weigh — the roster's standing is the auth picture alone.
@@ -66,6 +85,7 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
         // worker's 401, an auth ACP fallback) overrides the file probe — `auth` flips, not only
         // `council_eligible`, and the evidence rides on the wire.
         seatHealth.authFailureFor(key),
+        probed,
       );
       // F-W1-005 (wave-1 P6): the chat admission verdict the daemon itself applies when `POST /chats`
       // picks its default seats — the SAME `chatSeatAdmission` call, for both scope modes — so the
@@ -85,4 +105,16 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
       };
     });
   };
+  // Warm the probe at boot, so the first launch after a restart already routes on the seat's own
+  // answer (a probe runs in the background; the roster read itself never waits on one).
+  if (probe !== null) {
+    setImmediate(() => {
+      try {
+        accessor();
+      } catch {
+        /* no roster yet: the first real read probes */
+      }
+    }).unref();
+  }
+  return accessor;
 }
