@@ -1077,8 +1077,8 @@ describe('stall escalation — evaluator ≠ creator across a failover (PR-3E, F
     expect(reassigns).toEqual([{ runId: 'r-eval', ord: 2, cli: 'pi' }]);
   });
 
-  it('no distinct candidate outside `avoid` ⇒ in-place recycle, as before', async () => {
-    const { wd, reassigns, tick } = build({
+  it('no distinct candidate outside `avoid` ⇒ a human decides (crew#638), the run is not touched', async () => {
+    const { wd, frames, reassigns, tick } = build({
       runs: [{ id: 'r-eval2', ord: 2, cli: 'claude', seats: ['claude', 'codex'], avoid: ['codex'] }],
     });
     wd.ingest(ev({ type: 'unitOutputDelta', session: 'r-eval2', ord: 2, text: 'x' }));
@@ -1086,7 +1086,13 @@ describe('stall escalation — evaluator ≠ creator across a failover (PR-3E, F
     await wd.sweep();
     tick(15 * MIN);
     await wd.sweep();
-    expect(reassigns).toEqual([{ runId: 'r-eval2', ord: 2, cli: 'claude' }]);
+    expect(reassigns).toEqual([]);
+    expect(escalatedOf(frames)[0]).toMatchObject({
+      action: 'notify',
+      needsYou: true,
+      reason: 'evaluator_distinct',
+      avoided: ['codex'],
+    });
   });
 });
 

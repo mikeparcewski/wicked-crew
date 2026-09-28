@@ -65,6 +65,7 @@ import { ChatTranscriptStore } from './chat-transcripts.js';
 import { sweepDeliveredWorktree } from './worktree-sweep.js';
 import { installEndpointManifestHook } from './endpoint-manifest.js';
 import { WorkerStallWatchdog } from './stall-watchdog.js';
+import { RunLivenessSampler } from './run-liveness.js';
 import { StandingOrderStore } from '../standing-orders/store.js';
 import { StandingOrderEvaluator, type GateFact } from '../standing-orders/evaluator.js';
 import { registerStandingOrderRoutes } from '../standing-orders/routes.js';
@@ -316,6 +317,9 @@ export interface CreateServerOptions {
     escalateAction?: 'reassign' | 'notify';
     /** Per-run automatic-reassign budget override — bypasses the settings read (tests). */
     maxEscalations?: number;
+    /** Process-liveness override (crew#629): default = the daemon's own process tree
+     *  (`RunLivenessSampler`); tests pass a stub or `null` (frame-only clock). */
+    busy?: ((runIds: string[]) => Promise<ReadonlyMap<string, string>>) | null;
   };
   /**
    * The background delivery-derivation cache's sweep (GET /runs p99): every `sweepIntervalMs`
@@ -1094,15 +1098,24 @@ export async function createServer(
           // candidates. Views with no units (older engines, stub adapters) keep the historical
           // `unit_ix` fallback.
           const cursor = resolveCursorUnit(v);
-          // DES-L3 PR-3E (F-RC1-012): an EVALUATOR cursor must never fail over onto a seat
-          // that built the work it reviews — the creators' seats ride as `avoid`. A free-text
-          // unit carries no role → no constraint (today's pick).
-          const avoid =
-            cursor?.role === 'evaluator'
-              ? v.units
-                  .filter((u) => (u as { role?: unknown }).role === 'creator' && u.assigned_cli != null)
-                  .map((u) => u.assigned_cli as string)
-              : [];
+          // Evaluator ≠ creator across a failover: an EVALUATOR cursor avoids the seats that
+          // built the work it reviews (DES-L3 PR-3E), a CREATOR cursor avoids the run's
+          // evaluator seats (crew#638), and a unit the engine routed `evaluator_distinct`
+          // avoids the seat it was routed away from (crew#583). A free-text unit carries no role
+          // and no such routing → no constraint.
+          const seatsOfRole = (role: string): string[] =>
+            v.units
+              .filter((u) => (u as { role?: unknown }).role === role && u.assigned_cli != null)
+              .map((u) => u.assigned_cli as string);
+          const cursorUnit = cursor === undefined ? undefined : v.units.find((u) => u.ord === cursor.ord);
+          const routing = cursorUnit?.routing;
+          const avoid = [
+            ...new Set([
+              ...(cursor?.role === 'evaluator' ? seatsOfRole('creator') : []),
+              ...(cursor?.role === 'creator' ? seatsOfRole('evaluator') : []),
+              ...(routing?.method === 'evaluator_distinct' ? [routing.was] : []),
+            ]),
+          ].filter((s) => s !== cursor?.cli);
           return {
             id: v.session.id,
             ord: cursor?.ord ?? v.session.unit_ix,
@@ -1168,6 +1181,14 @@ export async function createServer(
         { runId: session, detail },
       );
     },
+    // crew#629: a unit whose own processes are working (a test runner, a build) is not silent.
+    ...(options?.stallWatchdog?.busy === null
+      ? {}
+      : {
+          busy:
+            options?.stallWatchdog?.busy ??
+            ((sampler) => (runIds: string[]) => sampler.busy(runIds))(new RunLivenessSampler()),
+        }),
     log: (m) => app.log.warn(m),
   });
 
