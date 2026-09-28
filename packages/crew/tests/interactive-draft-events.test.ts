@@ -1772,4 +1772,50 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     );
     expect(probeEvents.some((e) => e.event_type === DRAFT_COMPLETED)).toBe(false);
   });
+
+  // studio#302: the Document composer's seat choice rides the create (crew#631 records it on the
+  // doc's grounding binding) and the governed draft convenes exactly those seats — for a filed doc
+  // AND for an unfiled one (the default mount; its binding sits under the default docs root).
+  const CHOSEN = JSON.stringify([
+    { key: 'claude', display_name: 'Claude', binary: 'claude', headless_invocation: 'claude -p {PROMPT}' },
+  ]);
+
+  it.each([
+    ['a project-bound doc', 'proj-7' as string | undefined],
+    ['an UNFILED doc', undefined],
+  ])('studio#302: %s launches on the seats named on its create, not the arm-time roster', async (_label, projectId) => {
+    const bus = await import('wicked-bus');
+    const engine = fakeAdapter();
+    const docsRoot = join(dir, 'docs');
+    mkdirSync(docsRoot, { recursive: true });
+    const grounding = new DocGroundingStore();
+    grounding.record(docsRoot, 'seat-doc', {
+      project_id: projectId ?? 'default',
+      repo_refs: [],
+      clis_json: CHOSEN,
+      channel: 'studio',
+    });
+    const launched: Array<[string, Record<string, unknown>]> = [];
+    const sub = await startInteractiveDraftSubscriber(engine.asAdapter(), {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'ledger.json'),
+      draftDir: join(dir, 'drafts'),
+      clisJson: SEATS,
+      groundingStore: grounding,
+      resolveDocsRoot: () => docsRoot,
+      onRunLaunched: (runId, detail) => launched.push([runId, detail]),
+      log: () => {},
+    });
+    subs.push(sub!);
+
+    await emitDocCreated(bus, 'seat-doc', projectId !== undefined ? { project_id: projectId } : {});
+    await waitFor(() => engine.launches.length === 1);
+    const launch = engine.launches[0]!;
+    expect(launch.clisJson).toBe(CHOSEN);
+    expect('projectId' in launch).toBe(projectId !== undefined);
+    await waitFor(() => launched.length === 1);
+    expect(launched[0]![1]).toMatchObject({ channel: 'studio' });
+  });
 });
