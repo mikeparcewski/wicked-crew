@@ -404,6 +404,117 @@ describe('deliver script, driven for real (crew#317)', () => {
     expect(r.output).toContain('deliver: pushing as whoever (GH_ACCOUNT not set — not pinned)');
   }, 60_000);
 
+  // (crew#549 / F-RC1-010) THE CREDENTIAL CROSS-CHECK. `gh api user` says who GH is; it says
+  // nothing about the credential `git push` will use, and on the RC1 rig the two disagreed — the
+  // run pushed under an account the operator had not chosen. An https remote whose credential
+  // helper answers a DIFFERENT login must refuse, naming both, before anything is staged.
+  it('REFUSES when gh’s login and git’s credential for the remote disagree — naming both, nothing pushed', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const z = 3;\n');
+    // An https remote (only https has a git credential) and a helper answering another account.
+    git(fx.workdir, 'remote', 'set-url', 'origin', 'https://github.com/o/r.git');
+    git(fx.workdir, 'config', 'credential.helper', "!printf 'username=other-bot\\npassword=x\\n'");
+
+    const r = await runDeliver(fx, { gh: { login: 'release-bot' } });
+
+    expect(r.status).not.toBe(0);
+    expect(r.output).toContain(
+      "deliver: identity mismatch — gh's active login is release-bot but git's credential for github.com is other-bot",
+    );
+    expect(r.output).toContain('The push would use other-bot, not release-bot.');
+    // Before any fetch or staging: the work is still untracked, the remote untouched, tree kept.
+    expect(git(fx.workdir, 'status', '--porcelain')).toContain('?? work.ts');
+    expect(originBranches(fx)).toEqual(['main']);
+    expect(existsSync(fx.workdir)).toBe(true);
+  }, 60_000);
+
+  it("REFUSES when origin's own URL authenticates as another account — the URL wins over the helper", async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const z = 3;\n');
+    // A username-qualified remote tells git which account to authenticate as, whatever a helper
+    // would answer for the bare host — so a helper that AGREES with gh must not rescue it.
+    git(fx.workdir, 'remote', 'set-url', 'origin', 'https://other-bot@github.com/o/r.git');
+    git(fx.workdir, 'config', 'credential.helper', "!printf 'username=release-bot\\npassword=x\\n'");
+
+    const r = await runDeliver(fx, { gh: { login: 'release-bot' } });
+
+    expect(r.status).not.toBe(0);
+    expect(r.output).toContain(
+      "deliver: identity mismatch — gh's active login is release-bot but origin's URL authenticates as other-bot",
+    );
+    expect(r.output).toContain('The push would use other-bot, not release-bot.');
+    expect(git(fx.workdir, 'status', '--porcelain')).toContain('?? work.ts');
+    expect(originBranches(fx)).toEqual(['main']);
+  }, 60_000);
+
+  it("a URL username that AGREES with gh is disclosed and the check goes on", async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const z = 3;\n');
+    // An unroutable loopback port: the identity block runs in full and the fetch after it fails
+    // AT ONCE (connection refused), so this test never waits on the network.
+    git(fx.workdir, 'remote', 'set-url', 'origin', 'https://release-bot@127.0.0.1:1/o/r.git');
+    git(fx.workdir, 'config', 'credential.helper', "!printf 'username=release-bot\\npassword=x\\n'");
+
+    const r = await runDeliver(fx, { gh: { login: 'release-bot' } });
+
+    expect(r.output).toContain('deliver: origin authenticates as release-bot (agrees with gh)');
+    expect(r.output).not.toContain('identity mismatch');
+    // (It then fails on the unreachable https remote's fetch; nothing was pushed.)
+    expect(originBranches(fx)).toEqual(['main']);
+  }, 60_000);
+
+  it('a credential that names a TOKEN, not an account, is disclosed as unresolved — never a refusal', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const z = 3;\n');
+    // Unroutable loopback again: past the identity block the fetch fails at once (see above).
+    git(fx.workdir, 'remote', 'set-url', 'origin', 'https://127.0.0.1:1/o/r.git');
+    git(fx.workdir, 'config', 'credential.helper', "!printf 'username=x-access-token\\npassword=ghp\\n'");
+
+    const r = await runDeliver(fx, { gh: { login: 'release-bot' } });
+
+    expect(r.output).toContain("deliver: git's credential for 127.0.0.1:1 is a token (x-access-token)");
+    expect(r.output).toContain('gh reports release-bot');
+    expect(r.output).not.toContain('identity mismatch');
+    // (It then fails on the unreachable https remote's fetch — the identity block let it through,
+    //  which is the assertion; nothing was pushed either way.)
+    expect(originBranches(fx)).toEqual(['main']);
+  }, 60_000);
+
+  it('agreeing logins are disclosed and the delivery proceeds', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const z = 3;\n');
+    // A local remote has no git credential — the phase says so rather than going quiet.
+    const r = await runDeliver(fx, { gh: { login: 'release-bot' } });
+    expect(r.status).toBe(0);
+    expect(r.output).toContain('no git credential applies');
+    expect(originBranches(fx)).toContain(`wicked/${RUN_ID}`);
+  }, 60_000);
+
+  it('the CONFIGURED deliver identity (the setting) refuses a differing gh login with GH_ACCOUNT unset', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const z = 3;\n');
+
+    const r = await runDeliver(fx, {
+      gh: { login: 'someone-else' },
+      script: { deliverIdentity: 'release-bot' },
+    });
+
+    expect(r.status).not.toBe(0);
+    expect(r.output).toContain("GH_ACCOUNT is release-bot but gh's active login is someone-else");
+    expect(originBranches(fx)).toEqual(['main']);
+
+    // …and the setting WINS over a differing env var (a daemon started with a stale export).
+    const fx2 = fixture();
+    writeFileSync(join(fx2.workdir, 'work.ts'), 'export const z = 3;\n');
+    const r2 = await runDeliver(fx2, {
+      gh: { login: 'release-bot' },
+      env: { GH_ACCOUNT: 'stale-bot' },
+      script: { deliverIdentity: 'release-bot' },
+    });
+    expect(r2.status).toBe(0);
+    expect(r2.output).toContain('deliver: pushing as release-bot');
+  }, 60_000);
+
   // ── DES-L9 / crew#550 — REVISION mode ───────────────────────────────────────────────────────
   it('REVISION: pushes exactly the run’s commits onto the PR’s branch, opens no PR, comments the record, prints the PR URL last', async () => {
     const fx = fixture({ worktree: false });

@@ -439,6 +439,15 @@ export interface AgentSession {
   /** Wave 6 (F-7R2-006): the seats BENCHED for this run — never convened, never a failover or
    *  judge target. Absent (never `[]`) when none / on an older engine. */
   benched_seats?: BenchedSeat[];
+  /**
+   * The run's APPROVED INTENT AMENDMENTS, in the order a human decided them (wicked-core#555;
+   * additive, engine ≥ the core-ts release after 0.7.30) — the `amend_intent` arm of a gate
+   * ({@link GateDecision.action}). Each amendment is appended to every unit at or after the
+   * gate's cursor, so the acceptance list each LATER EVALUATOR is handed changed with the
+   * decision. Render them beside the run's original intent: this is what was withdrawn or
+   * changed, and when. ABSENT (never `[]`) on an unamended run and on an older engine.
+   */
+  intent_amendments?: IntentAmendment[];
   /** crew#661: the declared skills this run's phases ran WITHOUT (the published skills snapshot did not
    *  hold them when the launching subsystem armed) — the run proceeded DEGRADED, and says so here.
    *  ABSENT (never `[]`) when the run launched fully armed, and on a daemon before this field. */
@@ -594,6 +603,26 @@ export interface WorkUnit {
   catalog?: string;
   /** TRUE on a unit of a TEAM run (planned from the per-run plan def); ABSENT otherwise. Engine field. */
   team_run?: boolean;
+  /**
+   * TRUE when this unit's phase declared `requires_capture_report` (wicked-core#535 / BC-80) —
+   * carried from the def at plan time. ABSENT on every other unit and on an older engine.
+   */
+  requires_capture_report?: boolean;
+  /**
+   * What the capture phase REPORTED, read from its output marker by the gate fold
+   * (wicked-core#535 / BC-80): `derived` learnings, `submitted` proposals, `failed` submissions.
+   * Present once a capture unit emitted a well-formed marker — whether it passed or denied, so the
+   * counts are readable beside the denial. ABSENT on every other unit, on a capture unit whose
+   * marker was MISSING (that denies; the denial is the record), and on an older engine.
+   */
+  capture_report?: CaptureReport;
+}
+
+/** The counts a capture phase reported (`WorkUnit.capture_report`; wicked-core#535). */
+export interface CaptureReport {
+  derived: number;
+  submitted: number;
+  failed: number;
 }
 
 /** A run plus its ordered units (`SessionView`) — the shape `GET /runs` returns. */
@@ -987,6 +1016,15 @@ export interface GateDecision {
    * whose edit was restored and pinned (`gateEscalated.suggestionRef`): the engine applies the
    * pinned edit and rewinds to the creator (`unitReworkAmended{scope: 'accept_suggestion'}`).
    * The engine refuses each at any other gate — a 409 — and the gate stays open.
+   *
+   * `'amend_intent'` (additive; wicked-core#555, engine ≥ the core-ts release after 0.7.30)
+   * approves the gate AND AMENDS THE RUN'S INTENT: `amend` carries what the acceptance list now
+   * says (required, non-empty), `approve: true`, and no `amendScope` — the scope IS every unit at
+   * or after the cursor, which is what makes it reach the LATER EVALUATOR. Before it, nothing
+   * amended the list an evaluator is handed, so a mid-run descope could only end in a relaunch.
+   * The engine appends the text to those units' descriptions, records it on the run
+   * (`AgentSession.intent_amendments`) and emits `intentAmended`. Refused at a plan or team gate,
+   * and with empty text — a 409 with the gate left open.
    */
   action?:
     | 'approve'
@@ -996,7 +1034,8 @@ export interface GateDecision {
     | 'extend'
     | 'targeted'
     | 'accept_partial'
-    | 'accept_suggestion';
+    | 'accept_suggestion'
+    | 'amend_intent';
   /**
    * Where an approve's `amend` lands (api-types 0.38.0, additive; same release as `action`).
    * Absent = `'cursor'` (today: the gated unit's description). `'creator'` — the first creator
@@ -2388,6 +2427,16 @@ export interface UnitDistributedEvent {
   agreement_pct?: number | null;
   /** @deprecated api-types 0.36.0 — the engine emits `degradedReason`; removed in 0.37. */
   degraded_reason?: string | null;
+}
+
+/** One APPROVED INTENT AMENDMENT (`AgentSession.intent_amendments`; wicked-core#555). */
+export interface IntentAmendment {
+  /** The human's own words — what the run's acceptance list now says. */
+  text: string;
+  /** The gate's cursor unit `ord`: the first unit the amendment reached. */
+  ord: number;
+  /** When it was decided, unix millis. */
+  at: number;
 }
 
 /** One seat the wave-6 engine BENCHED for a run (`AgentSession.benched_seats`, F-7R2-006): never
@@ -4010,6 +4059,14 @@ export interface PhaseDef {
   gate_type: GateType | null;
   gate: GateSpec;
   executes_code: boolean;
+  /**
+   * The phase must REPORT what it captured (wicked-core#535 / BC-80; additive, engine ≥ the
+   * release carrying it — an older engine's strict def parser refuses the key). Its output must
+   * carry `wicked-capture-report {"derived": N, "submitted": M, "failed": K}`; a missing marker, a
+   * failed submission and proposals derived but never submitted each deny the unit into the human
+   * gate. An honest `0/0/0` passes. Absent/false ⇒ not parsed (every phase but `capture`).
+   */
+  requires_capture_report?: boolean;
   verified_evidence: boolean;
   required_deliverables: string[];
   depends_on: string[];
@@ -4211,6 +4268,18 @@ export interface SystemSettings {
    * `base_skill_refused`); the finding is an `error`.
    */
   baseSkillPolicy?: 'warn' | 'require';
+  /**
+   * The DELIVER IDENTITY (crew#549; additive): the GitHub login the deliver phase must push as.
+   * The deliver script reads `gh api user` AND asks git which credential it would use for the
+   * remote's host, and REFUSES — before anything is staged, committed or pushed — when either
+   * disagrees with this login (or, with nothing configured, when those two disagree with each
+   * other). `''`/absent ⇒ the `GH_ACCOUNT` env var decides, and unset there means the phase
+   * pushes as whatever login gh holds, said aloud on the gate card.
+   *
+   * A LOGIN ONLY — never a token. The credential itself stays in gh's keyring or in the daemon's
+   * `GH_TOKEN`; `GET /settings` returns this login and no secret ever.
+   */
+  deliverIdentityLogin?: string;
   /**
    * The stall watchdog's DETECTION threshold (crew#287; api-types 0.18.0 — previously a
    * daemon-local extension): minutes a run in `executing` may go without ANY engine event on the

@@ -238,4 +238,8 @@ export const DEFAULT_SETTINGS: CrewSystemSettings = {
   // shim, signalled only by a /health warning). `baseSkillRef: ''` is the one OFF switch.
   baseSkillRef: DEFAULT_BASE_SKILL_REF,
   baseSkillPolicy: 'require',
+  // crew#549 — the deliver identity is UNSET by default: no login is baked into crew, and an
+  // operator who configures none keeps today's behaviour (the phase pushes as whatever login gh
+  // holds, and refuses when gh and git's credential disagree with each other).
+  deliverIdentityLogin: '',
 };

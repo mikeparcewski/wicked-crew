@@ -146,10 +146,24 @@ export interface DeliverScriptOptions {
    *  `wicked/<run>` onto `refs/heads/<headRef>` (the PR gains exactly the run's commits), proves the
    *  remote tip, comments the run record on the PR and prints `url` last; no `gh pr create`. */
   revisesPr?: RevisedPullRequest | null;
-  /** The daemon's configured push identity (`GH_ACCOUNT`) for the gate card; `null` = unset. */
+  /** The daemon's configured push identity (the `deliverIdentityLogin` setting, else
+   *  `GH_ACCOUNT`) for the gate card; `null` = unset. */
   ghAccount?: string | null;
   /** Whether `GH_TOKEN` is exported in the daemon environment — presence only, never the value. */
   ghTokenPinned?: boolean;
+  /** (crew#549) The DELIVER IDENTITY from system settings (`deliverIdentityLogin`) — the login the
+   *  push must run as, baked into the script so the refusal holds even when the daemon was started
+   *  without `GH_ACCOUNT` exported. A token is NEVER carried here (or anywhere in the settings):
+   *  the credential stays in gh's keyring or in `GH_TOKEN`. `null`/absent ⇒ `GH_ACCOUNT` decides.
+   *  Refused at compose time when it is not a GitHub login, so nothing unsafe is spliced. */
+  deliverIdentity?: string | null;
+}
+
+/** A GitHub login as GitHub itself allows it — alphanumerics and single hyphens, ≤ 39 chars. The
+ *  ONE validator for the deliver identity: the setting's 400 and the script's splice share it, so
+ *  a value that passed the route can always be baked into a single-quoted shell literal. */
+export function isGitHubLogin(login: string): boolean {
+  return /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/.test(login);
 }
 
 /** The pull request a revision run pushes onto (DES-L9). `headRef` is a same-repository branch. */
@@ -389,6 +403,14 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     if (!isSafeRefName(revises.headRef)) throw new Error(`revisesPr #${revises.number}: head branch name cannot be a push target: ${JSON.stringify(revises.headRef)}`);
     if (!SAFE_PR_URL.test(revises.url)) throw new Error(`revisesPr #${revises.number}: not a pull request URL: ${JSON.stringify(revises.url)}`);
   }
+  // (crew#549) The configured deliver identity, baked as a single-quoted literal. Fail CLOSED at
+  // compose time on anything that is not a GitHub login: a run that silently delivered under an
+  // unchecked identity is the defect, and a value that reached a shell literal unvalidated would
+  // be worse than either.
+  const identity = (opts.deliverIdentity ?? '').trim();
+  if (identity !== '' && !isGitHubLogin(identity)) {
+    throw new Error(`deliver identity: not a GitHub login: ${JSON.stringify(identity)}`);
+  }
   const prNum = revises === null ? '' : String(revises.number);
   const target = revises === null ? '' : revises.headRef;
   const prUrl = revises === null ? '' : revises.url;
@@ -406,11 +428,60 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // token's login) holds, disclosed on the gate card, never switched at push time. Unset ⇒
     // today's behaviour, now said aloud. No account name is baked into crew code (env-driven).
     'L=$(gh api user -q .login 2>/dev/null || true)',
+    // (crew#549) The CONFIGURED identity is the system setting `deliverIdentityLogin` — baked
+    // here at compose time, validated against the GitHub login charset before it is spliced —
+    // and the `GH_ACCOUNT` env var when the setting is empty (still supported; the setting wins
+    // so a daemon started without the export is not silently unpinned). `GH_ACCOUNT` is then the
+    // ONE name the refusals use, whichever source set it.
+    `CFG='${identity}'`,
+    'if [ -n "$CFG" ]; then GH_ACCOUNT="$CFG"; fi',
     'if [ -n "${GH_ACCOUNT:-}" ]; then',
     '  [ "$L" = "$GH_ACCOUNT" ] || { echo "deliver: identity mismatch — GH_ACCOUNT is $GH_ACCOUNT but gh\'s active login is ${L:-unreadable}; nothing was staged, committed or pushed. Fix the daemon\'s gh login (switch gh\'s active account, or export GH_TOKEN in the daemon environment) and approve to retry the deliver phase"; exit 1; }',
     '  if [ -n "${GH_TOKEN:-}" ]; then echo "deliver: pushing as $L (GH_ACCOUNT pinned by GH_TOKEN)"; else echo "deliver: pushing as $L (GH_ACCOUNT from the gh keyring — export GH_TOKEN to pin it)"; fi',
     'elif [ -n "$L" ]; then echo "deliver: pushing as $L (GH_ACCOUNT not set — not pinned)"',
     'else echo "deliver: pushing as an unknown login (gh not authenticated; GH_ACCOUNT not set — not pinned)"; fi',
+    // (crew#549 / F-RC1-010) THE CREDENTIAL CROSS-CHECK. `gh api user` says who gh is; it says
+    // NOTHING about the credential `git push` will use. On the RC1 rig those two disagreed —
+    // `git credential fill` handed git one account while `gh api user` reported another — and the
+    // run pushed under an identity the operator had not chosen (or took a 403 that hard-failed
+    // it). So ask git itself, for the remote's own host, BEFORE anything is fetched or staged,
+    // and REFUSE when both logins are concrete and differ — naming both, whether or not an
+    // identity is configured. `GIT_TERMINAL_PROMPT=0` keeps a helperless host from prompting (it
+    // errors instead, which reads as unresolved). Only an https remote has a git credential; an
+    // ssh or local remote authenticates another way, so the check does not apply and says so.
+    // A placeholder username (`x-access-token`, `oauth2`, `token`) identifies a TOKEN, not an
+    // account: unresolved, disclosed, never a refusal (the token's own login is what `gh api
+    // user` already reported).
+    //
+    // THE REMOTE'S OWN USERNAME COMES FIRST (codex review on #727). A remote spelled
+    // `https://other-bot@github.com/o/r.git` tells git which account to authenticate as, and git
+    // uses it whatever the helper would have answered for the bare host. Stripping it and asking
+    // only about the host left exactly the defect this guard exists for alive: gh reports
+    // `release-bot`, the URL says `other-bot`, the helper agrees with gh, and the push goes out as
+    // `other-bot`. So the URL username is read, refused against gh's login when both are concrete,
+    // and passed INTO the credential query so the helper answers for the account git will use.
+    'RU=$(git remote get-url origin 2>/dev/null || true)',
+    'case "$RU" in',
+    '  https://*)',
+    '    RH=${RU#https://}; RH=${RH%%/*}; RU_USER=""',
+    '    case "$RH" in *@*) RU_USER=${RH%@*}; RH=${RH##*@};; esac',
+    // A `user:password@host` remote carries the secret in the URL; take the user, never the rest.
+    '    case "$RU_USER" in *:*) RU_USER=${RU_USER%%:*};; esac',
+    '    case "${RU_USER:-}" in',
+    '      ""|x-access-token|oauth2|token|PRIVATE-TOKEN) ;;',
+    '      *) if [ -n "$L" ] && [ "$RU_USER" != "$L" ]; then echo "deliver: identity mismatch — gh\'s active login is $L but origin\'s URL authenticates as $RU_USER (https://$RU_USER@$RH/…); nothing was staged, committed or pushed. The push would use $RU_USER, not $L. Point origin at https://$RH/… and pin ONE identity (export GH_TOKEN in the daemon environment, or fix the credential helper for $RH), then approve to retry the deliver phase"; exit 1; fi',
+    '         echo "deliver: origin authenticates as $RU_USER (agrees with gh)";; esac',
+    '    GC=$(printf "protocol=https\\nhost=%s\\n%s\\n" "$RH" "${RU_USER:+username=$RU_USER}" | GIT_TERMINAL_PROMPT=0 git credential fill 2>/dev/null | sed -n "s/^username=//p" | head -1 || true)',
+    '    case "${GC:-}" in',
+    '      "") echo "deliver: git\'s credential identity for $RH is unresolved (no credential helper answered) — the push uses whatever the helper hands git at push time";;',
+    '      x-access-token|oauth2|token|PRIVATE-TOKEN) echo "deliver: git\'s credential for $RH is a token ($GC), so it names no account — gh reports ${L:-an unknown login}";;',
+    '      *)',
+    '        if [ -n "$L" ] && [ "$GC" != "$L" ]; then echo "deliver: identity mismatch — gh\'s active login is $L but git\'s credential for $RH is $GC; nothing was staged, committed or pushed. The push would use $GC, not $L. Pin ONE identity (export GH_TOKEN in the daemon environment, or fix the credential helper for $RH) and approve to retry the deliver phase"; exit 1; fi',
+    '        echo "deliver: git\'s credential for $RH is $GC (agrees with gh)";;',
+    '    esac;;',
+    '  "") echo "deliver: this worktree has no origin remote — no git credential applies";;',
+    '  *) echo "deliver: origin is not an https remote — no git credential applies (ssh keys or a local path authenticate the push)";;',
+    'esac',
     // REVISION MODE inputs (DES-L9 / crew#550) — baked at compose time from the resolved PR, each
     // validated against a strict charset before it is spliced into a single-quoted literal. Empty
     // TARGET ⇒ today's new-PR delivery.
@@ -840,14 +911,22 @@ export function deliverGateInstructions(opts: DeliverScriptOptions): string {
     pr !== null
       ? `Pushes wicked/<run> onto pull request #${pr.number} (branch ${pr.headRef}); no new PR.`
       : 'Pushes the run branch wicked/<run> to origin and opens a pull request; merge stays human.';
-  const account = opts.ghAccount ?? null;
+  // (crew#549) The SETTING wins over the env var, and the card names which one it read, because
+  // "pin it now if it must differ" is not an instruction an operator can follow without knowing
+  // where the pin lives.
+  const configured = (opts.deliverIdentity ?? '').trim();
+  const account = configured !== '' ? configured : (opts.ghAccount ?? null);
+  const source = configured !== '' ? 'the deliver identity setting' : 'GH_ACCOUNT';
   const who =
     account !== null && account !== ''
       ? opts.ghTokenPinned === true
-        ? `Push identity: GH_ACCOUNT=${account}, pinned by GH_TOKEN — the phase refuses if gh's login differs at push time.`
-        : `Push identity: GH_ACCOUNT=${account} from the gh keyring — the login can change between the check and the push; export GH_TOKEN to pin it. The phase refuses if gh's login differs.`
-      : 'Push identity: GH_ACCOUNT is not set — pushes as whatever login gh holds.';
-  return `${target} ${who}`;
+        ? `Push identity: ${account} (${source}), pinned by GH_TOKEN — the phase refuses if gh's login differs at push time.`
+        : `Push identity: ${account} (${source}) against the gh keyring — the login can change between the check and the push; export GH_TOKEN to pin it. The phase refuses if gh's login differs.`
+      : 'Push identity: none configured — pushes as whatever login gh holds (set the deliver identity in system settings to pin it).';
+  // Whatever is configured, the phase also asks git which credential IT would use for the
+  // remote's host and refuses when the two logins disagree — the flip that pushed under an
+  // unintended account (F-RC1-010).
+  return `${target} ${who} It refuses if gh's login and git's credential for the remote disagree.`;
 }
 
 /**
@@ -875,6 +954,8 @@ export interface DeliverLaunchContext {
   ghAccount?: string | null;
   /** Whether `GH_TOKEN` is exported in the daemon environment (presence only). */
   ghTokenPinned?: boolean;
+  /** (crew#549) The `deliverIdentityLogin` system setting — the login the push must run as. */
+  deliverIdentity?: string | null;
 }
 
 /**
@@ -913,6 +994,7 @@ export function deliverPresetStep(
     revisesPr,
     ghAccount: launch.ghAccount ?? null,
     ghTokenPinned: launch.ghTokenPinned === true,
+    deliverIdentity: launch.deliverIdentity ?? null,
   });
   return {
     catalog: 'deliver',
@@ -965,6 +1047,7 @@ export function composeDeliverWorkflow(
         revisesPr,
         ghAccount: launch.ghAccount ?? null,
         ghTokenPinned: launch.ghTokenPinned === true,
+        deliverIdentity: launch.deliverIdentity ?? null,
       }),
     ],
   };
