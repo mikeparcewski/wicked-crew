@@ -205,7 +205,10 @@ beforeAll(async () => {
     ].join('\n'),
   );
 
-  adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: false });
+  // The engine's db in a directory of its own: its parent is the daemon's state home, and the
+  // fixtures above must not sit inside it (the state-home registry would flag each one).
+  mkdirSync(join(dir, 'state'));
+  adapter = new CoreAdapter({ dbPath: join(dir, 'state', 'core.db'), stub: false });
   baseSkillOff();
   app = await createServer(adapter);
   await app.listen({ port: 0, host: '127.0.0.1' });
