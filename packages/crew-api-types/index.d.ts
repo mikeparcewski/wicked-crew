@@ -5095,7 +5095,25 @@ export interface ChatUsage {
  */
 export type ChatTranscriptRecord =
   | { at: number; turnId: string; kind: 'user'; text: string; seats: string[] }
-  | { at: number; turnId: string; kind: 'seat'; cliKey: string; text: string; ok: boolean; usage: ChatUsage | null };
+  | { at: number; turnId: string; kind: 'seat'; cliKey: string; text: string; ok: boolean; usage: ChatUsage | null }
+  /**
+   * The citation verdicts of the `seat` record with the same `turnId` + `cliKey` (api-types 0.68.0,
+   * crew#561) — a SEPARATE record because the transcript is append-only and verification finishes
+   * after the reply is stored. A reader folds it onto that reply; a skin that does not know this
+   * kind ignores it (the `kind` discriminant is the extension point). Present only for a reply that
+   * cited something; the live frame is {@link ChatCitationsFrame}, with the same fields.
+   */
+  | {
+      at: number;
+      turnId: string;
+      kind: 'citations';
+      cliKey: string;
+      verified: number;
+      unverifiable: number;
+      corrected: number;
+      unchecked: number;
+      items: ChatCitationItem[];
+    };
 
 /** `GET /chats/:id` → 200. */
 export interface ChatDetailResponse {
