@@ -510,6 +510,19 @@
       ]
     },
     {
+      "method": "POST",
+      "path": "/api/v1/mcp/tools",
+      "requestType": "McpToolsBody",
+      "responseType": "McpToolsResponse",
+      "statusCodes": [
+        200,
+        400,
+        401,
+        500,
+        503
+      ]
+    },
+    {
       "method": "PATCH",
       "path": "/api/v1/mcp/tools/:subject",
       "requestType": "PatchMcpToolBody",

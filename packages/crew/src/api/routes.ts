@@ -5424,7 +5424,7 @@ export function registerRoutes(
         })
       : undefined;
   registerMcpRoutes(app, {
-    ...(runtime.mcp !== undefined ? { registry: runtime.mcp } : {}),
+    ...(runtime.mcp !== undefined ? { registry: runtime.mcp, toolLister: () => CoreAdapter.mcpToolLister() } : {}),
     ...(runtime.mcpBroker !== undefined ? { broker: runtime.mcpBroker } : {}),
     ...(mcpPolicies !== undefined ? { policies: mcpPolicies } : {}),
     audit,

@@ -14,6 +14,8 @@
  *   PUT    /mcp/servers/:name/secret    `{value}` → the OS keychain; answers `{ref, set: true}`, never the value
  *   POST   /mcp/call                    the broker (§6, slice S3): `{token, subject, args?}` from the garden
  *                                       shim; judged, budgeted, invoked, scrubbed, output-judged, recorded
+ *   POST   /mcp/tools                   `{token}` from the garden shim's `list` (slice S4): the tools the
+ *                                       token's unit may try, judged with no arguments, recorded nowhere
  *
  * Slice S6 (the policy preview and the approvals, `mcp/policies.ts`):
  *
@@ -40,6 +42,7 @@ import type { McpBroker } from '../mcp/broker.js';
 import type { McpPolicies } from '../mcp/policies.js';
 import { MCP_PREVIEW_ROLES, MCP_RUN_MODES, McpLedgerEditError } from '../mcp/policies.js';
 import { McpRegistryError, type McpRegistry } from '../mcp/registry.js';
+import { listUnitTools } from '../mcp/tool-list.js';
 import { McpRegistryCorruptError } from '../mcp/registry-store.js';
 import { parseSecretRef, SecretStoreError } from '../mcp/secrets.js';
 import type { McpUpstreamConfig } from '../mcp/probe.js';
@@ -140,6 +143,7 @@ export const McpCallSchema = z
     args: z.record(z.string(), z.unknown()).optional(),
   })
   .strict();
+export const McpToolsSchema = z.object({ token: z.string().min(1).max(256) }).strict();
 export const McpPolicyPreviewSchema = z
   .object({
     subject: z.string().min(1).max(256).optional(),
@@ -158,6 +162,8 @@ export interface McpRouteDeps {
   registry?: McpRegistry;
   /** The broker's call path (S3). Absent → `POST /mcp/call` answers 503. */
   broker?: McpBroker;
+  /** `Core.listMcpTools` for `POST /mcp/tools` (S4), read per request. Absent → that route answers 503. */
+  toolLister?: () => ((requestJson: string) => Promise<string>) | null;
   /** The preview and approvals (S6). Absent → those routes answer 503; the S2 routes are unchanged. */
   policies?: McpPolicies;
   audit: Pick<AuditLog, 'record'>;
@@ -367,6 +373,26 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
         subject: parsed.data.subject,
         ...(parsed.data.args !== undefined ? { args: parsed.data.args } : {}),
       });
+      return reply.code(answer.status).send(answer.body);
+    },
+  );
+
+  // The unit's tool list (S4). Like the call, the token travels in the body so it never reaches a
+  // request log, and nothing of the body is logged or audited.
+  app.post(
+    `${V}/mcp/tools`,
+    { config: { manifest: { requestType: 'McpToolsBody', responseType: 'McpToolsResponse', statusCodes: [200, 400, 401, 500, 503] } } },
+    async (req, reply) => {
+      const registry = deps.registry;
+      const toolLister = deps.toolLister;
+      if (registry === undefined || toolLister === undefined) {
+        return reply.code(503).send({ error: 'the MCP registry is not configured on this daemon', code: 'mcp_unavailable' });
+      }
+      const parsed = McpToolsSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: `body: ${parsed.error.issues.map((i) => `${i.path.join('.') || 'body'} ${i.code}`).join('; ')}`, code: 'bad_request' });
+      }
+      const answer = await listUnitTools({ registry, lister: toolLister }, parsed.data.token);
       return reply.code(answer.status).send(answer.body);
     },
   );
