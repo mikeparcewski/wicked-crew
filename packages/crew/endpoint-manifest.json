@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.64.0",
+  "apiTypesVersion": "0.65.0",
   "endpoints": [
     {
       "method": "GET",
