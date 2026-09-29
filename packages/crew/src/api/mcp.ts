@@ -4,6 +4,8 @@
  *   GET    /mcp/servers                 upstreams, their tools (class, subject, status), health,
  *                                       auth state, and the servers discovered in CLI homes (names only)
  *   POST   /mcp/servers/preview         probe (10 s, hardened env): tools, classes and a previewHash
+ *                                       (`kind: "rest"`, slice S5a: the tools of an OpenAPI 3 document,
+ *                                       each pinned to the base `url`; see `mcp/rest.ts`)
  *   POST   /mcp/servers                 save: `{previewHash}` only; missing, unknown or expired → 409
  *   PATCH  /mcp/servers/:name           `{enabled}`
  *   DELETE /mcp/servers/:name           remove the server and the keychain secret it owns
@@ -41,6 +43,7 @@ import { McpRegistryError, type McpRegistry } from '../mcp/registry.js';
 import { McpRegistryCorruptError } from '../mcp/registry-store.js';
 import { parseSecretRef, SecretStoreError } from '../mcp/secrets.js';
 import type { McpUpstreamConfig } from '../mcp/probe.js';
+import { parseBaseUrl, REST_SPEC_MAX_BYTES } from '../mcp/rest.js';
 import { API_PREFIX } from './api-prefix.js';
 import type { AuditLog } from './audit.js';
 
@@ -61,16 +64,39 @@ const AuthSchema = z
 export const McpServerConfigSchema = z
   .object({
     name: serverName,
-    kind: z.enum(['mcp-stdio', 'mcp-http']),
+    kind: z.enum(['mcp-stdio', 'mcp-http', 'rest']),
     command: z.string().min(1).max(4096).optional(),
     args: z.array(z.string().max(4096)).max(64).optional(),
     url: z.string().max(4096).optional(),
     auth: AuthSchema.nullable().optional(),
+    openapiUrl: z.string().max(4096).optional(),
+    openapi: z
+      .record(z.string(), z.unknown())
+      .refine((d) => Buffer.byteLength(JSON.stringify(d), 'utf8') <= REST_SPEC_MAX_BYTES, { message: `the OpenAPI document is at most ${REST_SPEC_MAX_BYTES} bytes` })
+      .optional(),
+    operations: z.array(z.string().min(1).max(256)).min(1).max(512).optional(),
   })
   .strict()
   .superRefine((c, ctx) => {
     const issue = (path: string, message: string): void => ctx.addIssue({ code: z.ZodIssueCode.custom, path: [path], message });
-    if (c.kind === 'mcp-stdio') {
+    const httpUrl = (raw: string | undefined): boolean => {
+      try {
+        const u = new URL(raw ?? '');
+        return u.protocol === 'https:' || u.protocol === 'http:';
+      } catch {
+        return false;
+      }
+    };
+    if (c.kind !== 'rest' && (c.openapiUrl !== undefined || c.openapi !== undefined || c.operations !== undefined)) {
+      issue('openapi', 'openapiUrl, openapi and operations are for a rest server');
+    }
+    if (c.kind === 'rest') {
+      if (c.command !== undefined || c.args !== undefined) issue('command', 'a rest server takes a base url, not a command');
+      if (parseBaseUrl(c.url ?? null) === null) issue('url', 'a rest server needs an http(s) base url with no credentials, query or fragment');
+      if ((c.openapiUrl === undefined) === (c.openapi === undefined)) issue('openapi', 'a rest server takes openapiUrl or openapi (the document), exactly one');
+      if (c.openapiUrl !== undefined && !httpUrl(c.openapiUrl)) issue('openapiUrl', 'openapiUrl must be an http(s) url');
+      if (c.auth != null && (c.auth.header === undefined || c.auth.env !== undefined)) issue('auth', 'a rest server injects its secret into one header: auth.header, no auth.env');
+    } else if (c.kind === 'mcp-stdio') {
       if (c.command === undefined) issue('command', 'an mcp-stdio server needs a command');
       if (c.url !== undefined) issue('url', 'an mcp-stdio server takes no url');
       if (c.auth != null && (c.auth.env === undefined || c.auth.header !== undefined)) issue('auth', 'an mcp-stdio server injects its secret into one env variable: auth.env, no auth.header');
@@ -159,6 +185,9 @@ function toConfig(body: z.infer<typeof McpServerConfigSchema>): McpUpstreamConfi
     command: body.command ?? null,
     args: body.args ?? [],
     url: body.url ?? null,
+    ...(body.kind === 'rest'
+      ? { openapiUrl: body.openapiUrl ?? null, openapi: body.openapi ?? null, operations: body.operations ?? null }
+      : {}),
     auth:
       body.auth == null
         ? null

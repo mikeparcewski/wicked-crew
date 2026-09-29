@@ -11,7 +11,10 @@
  *       (`WICKED_MCP_CALL_BUDGET` overrides it).
  *  5.   **Breaker.** After {@link BREAKER_THRESHOLD} consecutive upstream failures a tool is refused
  *       for {@link BREAKER_OPEN_MS}; then one call is let through, and one more failure reopens it.
- *  6.   **Invoke** with a deadline. The upstream's secret is resolved here, and only here.
+ *  6.   **Invoke** with a deadline. The upstream's secret is resolved here, and only here. A `rest`
+ *       tool (slice S5a, `rest.ts`) sends only its allowlisted arguments, and only to its pinned
+ *       base URL: a request that would leave it is refused unsent, recorded as `guard_error`
+ *       (`rest_host_escape`, I6).
  *  7.   **Retry** READ tools only, at most {@link MAX_READ_RETRIES} times, and only on transport
  *       errors, 429 and 5xx. A write or destructive tool is never retried: a second attempt could
  *       apply the write twice.
@@ -239,10 +242,17 @@ export class McpBroker {
     let result: UpstreamToolResult | null = null;
     for (let attempt = 0; ; attempt++) {
       try {
-        result = await this.invoke(target.config, secret, parts.tool, call.args, this.timeoutMs);
+        result = await this.invoke(target.config, secret, parts.tool, call.args, this.timeoutMs, target.rest);
         break;
       } catch (err) {
         const failure = classifyUpstreamError(err);
+        if (failure.errorClass === 'boundary') {
+          // I6: a REST request that would leave its pinned host was refused before it was sent (or a
+          // redirect off the host was not followed). Not the tool's failure, so the breaker is not
+          // moved; recorded as a guard_error, which fails closed.
+          const reason = scrubResult(`${body.subject} was refused: ${failure.message}`, secrets);
+          return this.refuse(span, 'guard_error', 'guard_error', 'broker:rest-host-pin', verdict.ruleIds, reason, 'call it with arguments that keep the request on the API\'s own host and path', 'rest_host_escape');
+        }
         if (verdict.class === 'read' && failure.retryable && attempt < MAX_READ_RETRIES) {
           span.retries += 1;
           await this.sleep(200 * (attempt + 1));

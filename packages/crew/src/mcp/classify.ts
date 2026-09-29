@@ -8,13 +8,13 @@
  *   `destructiveHint !== false` (the MCP spec default); else `write`. A tool with NO annotations
  *   is `write` (D-4).
  * - The SCHEMA HASH covers everything a policy or an operator approved: description, input and
- *   output schema, and annotations. Any change sends the tool back to unregistered (D-5) until it
+ *   output schema, annotations, and a `rest` tool's request mapping. Any change sends the tool back to unregistered (D-5) until it
  *   is previewed and saved again.
  */
 
 import { createHash } from 'node:crypto';
 
-import type { McpToolAnnotations, McpToolClass } from '../core/types.js';
+import type { McpRestMapping, McpToolAnnotations, McpToolClass } from '../core/types.js';
 
 /** A server name: a lowercase token that is safe inside `mcp:<server>/<tool>` and a keychain account. */
 export const MCP_SERVER_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
@@ -80,6 +80,8 @@ export interface HashedToolShape {
   inputSchema: Record<string, unknown> | null;
   outputSchema: Record<string, unknown> | null;
   annotations: McpToolAnnotations | null;
+  /** A `rest` tool's request mapping: part of what was approved, so a changed mapping re-registers. */
+  rest?: McpRestMapping | null;
 }
 
 export function toolSchemaHash(tool: HashedToolShape): string {
@@ -90,6 +92,8 @@ export function toolSchemaHash(tool: HashedToolShape): string {
       inputSchema: tool.inputSchema,
       outputSchema: tool.outputSchema,
       annotations: tool.annotations,
+      // Only when present, so an MCP tool's hash is what it was before REST upstreams existed.
+      ...(tool.rest != null ? { rest: tool.rest } : {}),
     }),
   );
 }

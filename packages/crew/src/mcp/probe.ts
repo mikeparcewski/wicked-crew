@@ -17,7 +17,8 @@ import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotoc
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 
-import type { McpAuthConfig, McpToolAnnotations, McpUpstreamKind } from '../core/types.js';
+import type { McpAuthConfig, McpRestMapping, McpToolAnnotations, McpUpstreamKind } from '../core/types.js';
+import { probeRestServer } from './rest.js';
 import { scrubSecrets } from './secrets.js';
 
 export const MCP_PROBE_TIMEOUT_MS = 10_000;
@@ -33,6 +34,12 @@ export interface McpUpstreamConfig {
   args: string[];
   url: string | null;
   auth: McpAuthConfig | null;
+  /** `rest` only (slice S5a): where the OpenAPI document is fetched from. */
+  openapiUrl?: string | null;
+  /** `rest` only: the OpenAPI document as pasted (instead of `openapiUrl`). */
+  openapi?: Record<string, unknown> | null;
+  /** `rest` only: the operations to wrap; `null`/absent = all. */
+  operations?: string[] | null;
 }
 
 export interface ProbedTool {
@@ -41,10 +48,12 @@ export interface ProbedTool {
   inputSchema: Record<string, unknown> | null;
   outputSchema: Record<string, unknown> | null;
   annotations: McpToolAnnotations | null;
+  /** A `rest` tool's request mapping; absent/`null` for an MCP server's tool. */
+  rest?: McpRestMapping | null;
 }
 
 export type ProbeResult =
-  | { ok: true; serverInfo: { name: string; version: string } | null; tools: ProbedTool[] }
+  | { ok: true; serverInfo: { name: string; version: string } | null; tools: ProbedTool[]; skipped?: string[] }
   | { ok: false; error: string };
 
 export type Prober = (config: McpUpstreamConfig, secret: string | null) => Promise<ProbeResult>;
@@ -72,6 +81,7 @@ function objectOrNull(raw: unknown): Record<string, unknown> | null {
  * the probe and the broker's call path (`invoke.ts`), so both reach an upstream the same way.
  */
 export function transportFor(config: McpUpstreamConfig, secret: string | null): { transport: Transport; stderrTail: () => string } {
+  if (config.kind === 'rest') throw new Error('a rest upstream is not an MCP server; it has no MCP transport');
   if (config.kind === 'mcp-stdio') {
     const env: Record<string, string> = { ...getDefaultEnvironment() };
     if (config.auth?.env !== undefined && secret !== null) env[config.auth.env] = secret;
@@ -92,6 +102,7 @@ export function transportFor(config: McpUpstreamConfig, secret: string | null): 
 
 /** The real prober. Every string it returns has `secret` scrubbed out. */
 export const probeMcpServer: Prober = async (config, secret) => {
+  if (config.kind === 'rest') return probeRestServer(config, secret);
   const secrets = secret === null ? [] : [secret];
   const { transport, stderrTail } = transportFor(config, secret);
   const client = new Client({ name: 'wicked-crew-mcp-probe', version: '1' }, { capabilities: {} });

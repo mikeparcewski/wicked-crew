@@ -10,6 +10,8 @@
  * - Every failure is classified ({@link classifyUpstreamError}) so the broker can decide whether a
  *   retry is allowed (step 7: transport errors, 429 and 5xx only) and what the call record says.
  *
+ * A `rest` upstream is not an MCP server: its tools are single HTTP requests (`rest.ts`).
+ *
  * The result is returned RAW: the broker scrubs it (D-2) before anything else sees it.
  */
 
@@ -17,23 +19,15 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 
+import type { McpRestMapping } from '../core/types.js';
 import { transportFor, type McpUpstreamConfig } from './probe.js';
+import { invokeRestTool } from './rest.js';
+import { UpstreamCallError } from './upstream-error.js';
 
 /** The default per-call deadline (connect + call). */
 export const MCP_CALL_TIMEOUT_MS = 30_000;
 
-/** Why an upstream call failed. */
-export type UpstreamErrorClass = 'transport' | 'timeout' | 'http' | 'protocol';
-
-export class UpstreamCallError extends Error {
-  constructor(
-    readonly errorClass: UpstreamErrorClass,
-    readonly retryable: boolean,
-    message: string,
-  ) {
-    super(message);
-  }
-}
+export { UpstreamCallError, type UpstreamErrorClass } from './upstream-error.js';
 
 /** A `tools/call` result as the upstream sent it (`content`, `structuredContent?`, `isError?`, ...). */
 export type UpstreamToolResult = Record<string, unknown>;
@@ -44,6 +38,8 @@ export type Invoker = (
   tool: string,
   args: Record<string, unknown>,
   timeoutMs: number,
+  /** A `rest` tool's request mapping (slice S5a); `null` for an MCP server's tool. */
+  rest?: McpRestMapping | null,
 ) => Promise<UpstreamToolResult>;
 
 /**
@@ -67,7 +63,12 @@ export function classifyUpstreamError(err: unknown): UpstreamCallError {
 }
 
 /** The real invoker. */
-export const invokeMcpTool: Invoker = async (config, secret, tool, args, timeoutMs) => {
+export const invokeMcpTool: Invoker = async (config, secret, tool, args, timeoutMs, rest = null) => {
+  if (config.kind === 'rest') {
+    // A REST tool is one pinned HTTP request, built from its allowlisted arguments (I6).
+    if (rest === null) throw new UpstreamCallError('protocol', false, `${tool} has no REST mapping; test and save the server again`);
+    return invokeRestTool(config, secret, rest, args, timeoutMs);
+  }
   const { transport, stderrTail } = transportFor(config, secret);
   const client = new Client({ name: 'wicked-crew-mcp-broker', version: '1' }, { capabilities: {} });
   let timer: NodeJS.Timeout | undefined;
