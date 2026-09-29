@@ -17,7 +17,7 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
@@ -56,6 +56,10 @@ function initRepo(root: string, file: string, body: string): string {
 
 const itemOf = (items: readonly ChatCitationItem[], raw: string): ChatCitationItem | undefined =>
   items.find((i) => i.raw === raw);
+
+/** The deterministic verdicts, with a budget no loaded CI host can exhaust: these tests are about
+ *  WHAT the pass decides, and the bound has its own tests below. */
+const BIG_BUDGET = { budgetMs: 600_000 } as const;
 
 describe('extractCitations — what is a citation, and what is prose', () => {
   const roots: CitationRoot[] = [
@@ -130,7 +134,7 @@ describe('verifyCitations — against two real repos (the RC1 Phase 6 defect)', 
   it('marks a fabricated SHA unverified and names what it checked, while every real SHA verifies', async () => {
     const text = `alpha ${alphaSha.slice(0, 7)} landed it; beta ${betaSha.slice(0, 7)} followed. ` +
       'The deliver gate now defaults on: crew `6d77153`.';
-    const got = await verifyCitations(text, roots);
+    const got = await verifyCitations(text, roots, undefined, BIG_BUDGET);
     expect(itemOf(got.items, alphaSha.slice(0, 7))).toMatchObject({ status: 'verified', resolved: 'alpha' });
     expect(itemOf(got.items, betaSha.slice(0, 7))).toMatchObject({ status: 'verified', resolved: 'beta' });
     const fabricated = itemOf(got.items, '6d77153');
@@ -141,7 +145,7 @@ describe('verifyCitations — against two real repos (the RC1 Phase 6 defect)', 
   });
 
   it('corrects a SHA attributed to the wrong repo instead of calling it fake', async () => {
-    const got = await verifyCitations(`beta ${alphaSha.slice(0, 8)}`, roots);
+    const got = await verifyCitations(`beta ${alphaSha.slice(0, 8)}`, roots, undefined, BIG_BUDGET);
     expect(got.items).toHaveLength(1);
     expect(got.items[0]).toMatchObject({ status: 'corrected', resolved: 'alpha' });
     expect(got.items[0]?.note).toMatch(/is in alpha, not beta/);
@@ -151,7 +155,7 @@ describe('verifyCitations — against two real repos (the RC1 Phase 6 defect)', 
     const text =
       'See `alpha/src/foo.ts`. `build_worker_command` is at `alpha/src/foo.ts:4`, and line ' +
       '`alpha/src/foo.ts:3` is the body.';
-    const got = await verifyCitations(text, roots);
+    const got = await verifyCitations(text, roots, undefined, BIG_BUDGET);
     expect(itemOf(got.items, 'alpha/src/foo.ts')).toMatchObject({ status: 'verified' });
     // The symbol the sentence named is on line 2, not the cited 4 — a correction, not a verdict on
     // the whole answer, and never an edit of the seat's text.
@@ -164,21 +168,21 @@ describe('verifyCitations — against two real repos (the RC1 Phase 6 defect)', 
   });
 
   it('resolves a bare file name through the repo index, and marks a line past the end', async () => {
-    const got = await verifyCitations('`foo.ts:3` holds it, not `foo.ts:900`', roots);
+    const got = await verifyCitations('`foo.ts:3` holds it, not `foo.ts:900`', roots, undefined, BIG_BUDGET);
     expect(itemOf(got.items, 'foo.ts:3')).toMatchObject({ status: 'verified' });
     expect(itemOf(got.items, 'foo.ts:900')).toMatchObject({ status: 'unverified' });
     expect(itemOf(got.items, 'foo.ts:900')?.note).toMatch(/5 lines/);
   });
 
   it('marks a path that is in no repo, and a symbol the cited file does not contain', async () => {
-    const got = await verifyCitations('`alpha/src/nope.ts` and `alpha/src/foo.ts:ghost_symbol`', roots);
+    const got = await verifyCitations('`alpha/src/nope.ts` and `alpha/src/foo.ts:ghost_symbol`', roots, undefined, BIG_BUDGET);
     expect(itemOf(got.items, 'alpha/src/nope.ts')).toMatchObject({ status: 'unverified' });
     expect(itemOf(got.items, 'alpha/src/foo.ts:ghost_symbol')).toMatchObject({ status: 'unverified' });
     expect(itemOf(got.items, 'alpha/src/foo.ts:ghost_symbol')?.note).toMatch(/does not contain ghost_symbol/);
   });
 
   it('drops a bare prose look-alike rather than marking it — a false mark is worse than a miss', async () => {
-    const got = await verifyCitations('nothing.here resolves anywhere', roots);
+    const got = await verifyCitations('nothing.here resolves anywhere', roots, undefined, BIG_BUDGET);
     expect(got.items).toEqual([]);
     expect(citationsFrame({ chat: 'c', cliKey: 'claude' }, got)).toBeNull();
   });
@@ -198,6 +202,69 @@ describe('verifyCitations — against two real repos (the RC1 Phase 6 defect)', 
     );
     expect(got.items.map((i) => i.status)).toEqual(['verified', 'unchecked', 'unchecked']);
     expect(got.unchecked).toBe(2);
+  });
+
+  it('never resolves out of the read roots — a `..` into a look-alike sibling is unverified', async () => {
+    // `/…/alpha-secrets/private.ts` starts with the string `/…/alpha`, so a prefix check would have
+    // admitted it (independent review of #722, HIGH). The roots ARE the scope.
+    const sibling = join(scratch, 'alpha-secrets');
+    mkdirSync(sibling, { recursive: true });
+    writeFileSync(join(sibling, 'private.ts'), 'const secret = 1;\n', 'utf8');
+    const got = await verifyCitations('see `alpha/../alpha-secrets/private.ts:1`', roots, undefined, BIG_BUDGET);
+    expect(got.items).toHaveLength(1);
+    expect(got.items[0]).toMatchObject({ status: 'unverified' });
+    expect(got.items[0]?.note).toMatch(/no such file/);
+  });
+
+  it('a tracked file that is gone from the working tree is not "verified"', async () => {
+    // `git ls-files` lists what is TRACKED; the bare-name index must not confirm a file that is not
+    // there (independent review of #722).
+    const alpha = roots[0]!.absRoot;
+    rmSync(join(alpha, 'src/foo.ts'));
+    try {
+      const got = await verifyCitations('`foo.ts:3` is where it lives', roots, undefined, BIG_BUDGET);
+      expect(got.items[0]).toMatchObject({ status: 'unverified' });
+    } finally {
+      writeFileSync(
+        join(alpha, 'src/foo.ts'),
+        ['// header', 'export function build_worker_command() {', '  return 1;', '}', ''].join('\n'),
+        'utf8',
+      );
+    }
+  });
+
+  it('a SHA whose sweep ran out of budget mid-repos is unchecked, never "in no repo"', async () => {
+    let ticks = 0;
+    const deps: ChatCitationDeps = {
+      ...chatCitationDeps(),
+      // Start and the candidate check are inside the budget; the first between-roots read is not.
+      now: () => (ticks++ < 2 ? 0 : 10_000),
+    };
+    const got = await verifyCitations('beta 6d77153 maybe', roots, deps, { budgetMs: 100 });
+    expect(got.items).toHaveLength(1);
+    expect(got.items[0]).toMatchObject({ kind: 'sha', status: 'unchecked' });
+    expect(got.items[0]?.note).toMatch(/could not all be checked/);
+    expect(got.unverifiable).toBe(0);
+  });
+
+  it('a git check that FAILED is unchecked, never a fabrication — a real SHA is never branded', async () => {
+    // The worst failure this feature could have: a slow or broken `git cat-file` marking a REAL
+    // commit UNVERIFIED. An error is an error (independent review of #722 follow-up).
+    const deps: ChatCitationDeps = {
+      ...chatCitationDeps(),
+      commitExists: async () => 'error',
+    };
+    const got = await verifyCitations(`alpha ${alphaSha.slice(0, 7)}`, roots, deps, BIG_BUDGET);
+    expect(got.items[0]).toMatchObject({ kind: 'sha', status: 'unchecked' });
+    expect(got.items[0]?.note).toMatch(/could not all be checked/);
+    expect(got.unverifiable).toBe(0);
+  });
+
+  it('a repository that could not be LISTED leaves a bare name unchecked, not missing', async () => {
+    const deps: ChatCitationDeps = { ...chatCitationDeps(), listFiles: async () => null };
+    const got = await verifyCitations('`foo.ts:3` is where it lives', roots, deps, BIG_BUDGET);
+    expect(got.items[0]).toMatchObject({ status: 'unchecked' });
+    expect(got.items[0]?.note).toMatch(/could not be listed/);
   });
 
   it('honours the item cap', async () => {

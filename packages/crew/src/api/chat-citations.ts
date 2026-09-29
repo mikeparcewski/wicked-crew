@@ -21,7 +21,7 @@
  * | `path`   | `crew/src/api/routes.ts`          | the file exists under a read root |
  * | `line`   | `routes.ts:2264`, `x.ts:80-90`    | the file exists AND has that many lines; when a symbol is named right before the ref, that the symbol is ON that line — otherwise the line it IS on, as a CORRECTION |
  * | `symbol` | `execute_wrapped.rs:build_worker_command` | the file exists AND contains the symbol |
- * | `sha`    | `6d77153`, 7–40 hex               | `git cat-file -e <sha>^{commit}` in the repo the text names, else in any read root |
+ * | `sha`    | `6d77153`, 7–40 hex               | `git rev-parse --verify --quiet <sha>^{commit}` in the repo the text names, else in any read root |
  *
  * # Why a false positive is worse than a miss
  *
@@ -48,7 +48,7 @@
  */
 
 import { readFileSync, statSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 
 import { execCapped } from '../core/exec.js';
 
@@ -100,14 +100,34 @@ export interface ChatCitationsFrame {
 
 /** At most this many citations are checked per reply; the rest are `unchecked`. */
 export const DEFAULT_MAX_ITEMS = 80;
-/** Wall-clock budget for one reply's pass, ms. Overrun ⇒ the remainder is `unchecked`. */
-export const DEFAULT_BUDGET_MS = 3000;
-/** Per-git-call timeout, ms. */
-const GIT_TIMEOUT_MS = 2000;
+/**
+ * Wall-clock budget for one reply's pass, ms. Overrun ⇒ the remainder is `unchecked`.
+ *
+ * 15 s, not 3: the pass runs entirely off the reply's path (nothing waits on it but the marks
+ * appearing a moment later), and the number worth protecting is COVERAGE, not latency. The RC1
+ * Phase 6 answer cited 26 SHAs over 9 repos — a fabricated one sweeps every root — and on a loaded
+ * desktop a `git cat-file` spawn is not always instant, so a 3 s budget would have reported most of
+ * that answer `unchecked`, which reads like the feature is not working. The budget exists so the
+ * work is BOUNDED, not so it is fast; it is re-read between citations AND between roots.
+ */
+export const DEFAULT_BUDGET_MS = 15_000;
+/** Per-git-call timeout, ms. Generous on purpose: a spawn on a loaded desktop is not instant, and
+ *  a timeout is an ERROR (`unchecked`), never an "absent" — the whole pass is bounded anyway. */
+const GIT_TIMEOUT_MS = 10_000;
 /** A file bigger than this is not read for a line/symbol check (it is a citation, not a corpus). */
 const MAX_READ_BYTES = 4 * 1024 * 1024;
 /** How far back a `line` citation looks for the symbol the sentence names. */
 const SYMBOL_CONTEXT_CHARS = 200;
+
+/**
+ * The answer to "is this commit in this repo?" — THREE states, not two.
+ *
+ * `git cat-file -e` exits 1 for an object that is not there and something else (or nothing, on a
+ * timeout) when the CHECK failed. Collapsing those into `false` is how a real SHA gets branded
+ * UNVERIFIED on a loaded desktop, which is the one failure this feature must not have: a false mark
+ * teaches the reader to ignore marks.
+ */
+export type CommitCheck = 'present' | 'absent' | 'error';
 
 /** The reads the pass needs — injected so the whole thing is testable without a repo or git. */
 export interface ChatCitationDeps {
@@ -115,10 +135,10 @@ export interface ChatCitationDeps {
   fileExists(abs: string): boolean;
   /** The file's lines, or `null` when it cannot be read (missing, too big, binary). */
   readLines(abs: string): string[] | null;
-  /** Repo-relative paths tracked in the root — used to resolve a bare `name.ext` citation. */
-  listFiles(absRoot: string): Promise<string[]>;
-  /** `git cat-file -e <sha>^{commit}` in the root: does the commit exist there? */
-  commitExists(absRoot: string, sha: string): Promise<boolean>;
+  /** Repo-relative paths tracked in the root, or `null` when the listing itself failed. */
+  listFiles(absRoot: string): Promise<string[] | null>;
+  /** `git cat-file -e <sha>^{commit}` in the root — see {@link CommitCheck}. */
+  commitExists(absRoot: string, sha: string): Promise<CommitCheck>;
   now(): number;
 }
 
@@ -267,18 +287,25 @@ export function chatCitationDeps(): ChatCitationDeps {
         });
         return stdout.split('\n').filter((l) => l.length > 0);
       } catch {
-        return [];
+        // A listing that FAILED is not an empty repo (see {@link CommitCheck} for the same rule).
+        return null;
       }
     },
     async commitExists(absRoot, sha) {
       try {
-        await execCapped('git', ['-C', absRoot, 'cat-file', '-e', `${sha}^{commit}`], {
+        // `rev-parse --verify --quiet`, not `cat-file -e`: cat-file exits 128 ("Not a valid object
+        // name") for a commit that is simply absent, which is indistinguishable from 128 for "not a
+        // git repository". rev-parse separates them — 0 present, 1 absent, 128 the repo/tool is
+        // wrong — and that separation is the whole point (see {@link CommitCheck}).
+        await execCapped('git', ['-C', absRoot, 'rev-parse', '--verify', '--quiet', `${sha}^{commit}`], {
           timeout: GIT_TIMEOUT_MS,
           windowsHide: true,
         });
-        return true;
-      } catch {
-        return false;
+        return 'present';
+      } catch (err: unknown) {
+        // EXIT 1 is git's own "this repo has no such commit" — the only answer that means absent. A
+        // timeout (`killed`, no numeric code), a missing git, or 128 (not a repository) is an ERROR.
+        return (err as { code?: unknown }).code === 1 ? 'absent' : 'error';
       }
     },
     now: () => Date.now(),
@@ -315,6 +342,17 @@ interface Resolved {
  * runs on the crew#618-REWRITTEN reply, where every host path under a read root is already
  * repo-relative — and a host path outside every read root is unverifiable by construction.
  */
+function under(root: CitationRoot, rest: string): Resolved | undefined {
+  const abs = resolve(join(root.absRoot, rest));
+  // INSIDE the root, by path boundary — not by string prefix. A cited `alpha/../alpha-secrets/x.ts`
+  // resolves to a SIBLING directory whose name merely starts with the root's ("/r/alpha-secrets"
+  // vs "/r/alpha"), which a `startsWith` admits; the chat's read roots are the scope, so a citation
+  // that leaves them is not resolvable here at all (independent review of #722, HIGH).
+  const rel = relative(root.absRoot, abs);
+  if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) return undefined;
+  return { abs, root };
+}
+
 function resolvePath(path: string, roots: readonly CitationRoot[]): Resolved | undefined {
   const slash = path.indexOf('/');
   if (slash > 0) {
@@ -322,14 +360,14 @@ function resolvePath(path: string, roots: readonly CitationRoot[]): Resolved | u
     const rest = path.slice(slash + 1);
     for (const root of roots) {
       if (repoAliases(root).includes(head)) {
-        const abs = resolve(join(root.absRoot, rest));
-        if (abs.startsWith(root.absRoot)) return { abs, root };
+        const at = under(root, rest);
+        if (at !== undefined) return at;
       }
     }
   }
   for (const root of roots) {
-    const abs = resolve(join(root.absRoot, path));
-    if (abs.startsWith(root.absRoot)) return { abs, root };
+    const at = under(root, path);
+    if (at !== undefined) return at;
   }
   return undefined;
 }
@@ -360,12 +398,19 @@ export async function verifyCitations(
   const items: ChatCitationItem[] = [];
   /** Basename → repo-relative paths, per root; built ONCE and only if a bare name needs it. */
   let basenames: Map<string, Resolved[]> | undefined;
+  /** A root whose listing failed: a bare name that is "in no repo" may simply be in that one. */
+  let indexPartial = false;
 
   const indexBasenames = async (): Promise<Map<string, Resolved[]>> => {
     if (basenames !== undefined) return basenames;
     const index = new Map<string, Resolved[]>();
     for (const root of roots) {
-      for (const rel of await deps.listFiles(root.absRoot)) {
+      const listed = await deps.listFiles(root.absRoot);
+      if (listed === null) {
+        indexPartial = true;
+        continue;
+      }
+      for (const rel of listed) {
         const base = rel.split('/').pop();
         if (base === undefined) continue;
         const hits = index.get(base);
@@ -381,14 +426,19 @@ export async function verifyCitations(
   /** The file a path/line/symbol citation names, or how it failed. */
   const locate = async (
     c: RawCitation,
-  ): Promise<{ at: Resolved } | { miss: 'none' | 'ambiguous' | 'prose' }> => {
+  ): Promise<{ at: Resolved } | { miss: 'none' | 'ambiguous' | 'prose' | 'unknown' }> => {
     const path = c.path!;
     const direct = resolvePath(path, roots);
     if (direct !== undefined && deps.fileExists(direct.abs)) return { at: direct };
     if (!path.includes('/')) {
-      const hits = (await indexBasenames()).get(path) ?? [];
+      // `git ls-files` lists what is TRACKED, which is not the same as what is on disk: a file
+      // deleted from the working tree is still listed, and reporting it `verified` would be exactly
+      // the kind of false confirmation this pass exists to stop (independent review of #722).
+      const hits = ((await indexBasenames()).get(path) ?? []).filter((h) => deps.fileExists(h.abs));
       if (hits.length === 1) return { at: hits[0]! };
       if (hits.length > 1) return { miss: 'ambiguous' };
+      // A repo the daemon could not LIST cannot be said to lack the file.
+      if (indexPartial) return { miss: 'unknown' };
       // A bare name that is in no repo and carries no line/symbol suffix was probably prose.
       return { miss: c.kind === 'path' ? 'prose' : 'none' };
     }
@@ -408,17 +458,38 @@ export async function verifyCitations(
 
     if (c.kind === 'sha') {
       const named = c.repo !== undefined ? roots.find((r) => r.name === c.repo) : undefined;
-      if (named !== undefined && (await deps.commitExists(named.absRoot, c.raw))) {
-        items.push({ raw: c.raw, kind: 'sha', status: 'verified', resolved: named.name });
+      const inNamed = named !== undefined ? await deps.commitExists(named.absRoot, c.raw) : 'absent';
+      if (inNamed === 'present') {
+        items.push({ raw: c.raw, kind: 'sha', status: 'verified', resolved: named!.name });
         continue;
       }
       let elsewhere: CitationRoot | undefined;
+      // The budget is re-read BETWEEN roots, not only between citations: one fabricated SHA over
+      // nine roots is nine git calls, and a slow root must not let one citation outlast the whole
+      // reply's budget (independent review of #722). A sweep that did not FINISH — budget gone, or
+      // a repo the check errored on — says `unchecked`: "in no repo" is a claim it did not earn.
+      let swept = inNamed !== 'error';
       for (const root of roots) {
         if (root === named) continue;
-        if (await deps.commitExists(root.absRoot, c.raw)) {
+        if (deps.now() - started > budgetMs) {
+          swept = false;
+          break;
+        }
+        const found = await deps.commitExists(root.absRoot, c.raw);
+        if (found === 'present') {
           elsewhere = root;
           break;
         }
+        if (found === 'error') swept = false;
+      }
+      if (elsewhere === undefined && !swept) {
+        items.push({
+          raw: c.raw,
+          kind: 'sha',
+          status: 'unchecked',
+          note: "this chat's repositories could not all be checked for that commit",
+        });
+        continue;
       }
       if (elsewhere === undefined) {
         items.push({
@@ -447,6 +518,15 @@ export async function verifyCitations(
     const found = await locate(c);
     if ('miss' in found) {
       if (found.miss === 'prose') continue; // never a mark on prose
+      if (found.miss === 'unknown') {
+        items.push({
+          raw: c.raw,
+          kind: c.kind,
+          status: 'unchecked',
+          note: "a repository in this chat's scope could not be listed, so this file was not looked for",
+        });
+        continue;
+      }
       items.push({
         raw: c.raw,
         kind: c.kind,
