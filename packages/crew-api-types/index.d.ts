@@ -4012,6 +4012,29 @@ export interface WorkflowDef {
   base_skill_ref?: string | null;
 }
 
+/** A drop-in workflow definition the ENGINE refused, with the engine's own reason (wicked-crew#718). */
+export interface RefusedWorkflow {
+  /** The def's id, as its file named it. */
+  id: string;
+  /**
+   * wicked-core's refusal, verbatim — e.g. `gate evaluates nothing: write-a-note — the phase
+   * declares executes_code but pins no validator and has no human gate, so its gate would approve
+   * with nothing checked.`
+   */
+  reason: string;
+}
+
+/**
+ * `GET /workflows` (wicked-crew#718). `workflows` is what the ENGINE accepted — the only defs a
+ * launch can name. `unavailable` is the drop-ins it refused, with its reason, so a def that cannot
+ * be launched is NAMED rather than offered and then 400'd `unknown workflow`. Absent on a daemon
+ * older than the release carrying it (read it as `[]`).
+ */
+export interface WorkflowsResponse {
+  workflows: WorkflowDef[];
+  unavailable?: RefusedWorkflow[];
+}
+
 /** Top-level requirements_graph.json artifact (schema 1.0.0). */
 export interface DomainGraph {
   metadata: { schema_version: string; migration_mode: string; source?: string };
@@ -7342,6 +7365,16 @@ export interface McpServerConfigBody {
   openapi?: Record<string, unknown>;
   /** `rest` only: the operations to wrap, by `operationId` or tool name; absent = all. */
   operations?: string[];
+  /**
+   * The secret VALUE this server's keychain entry will hold (wicked-crew#719). The preview is
+   * probed with it and it is held with the preview; `POST /mcp/servers` writes it to the OS store
+   * as part of the save, so the secret and the registry row commit together — studio used to write
+   * the keychain itself first, and a failure between the two writes left a keychain entry with no
+   * server, or a server whose secret never landed. Requires `auth.ref` =
+   * `keychain:wicked-mcp/<name>`; `501` when the platform has no OS secret store. It is in no
+   * response, log, audit entry or file.
+   */
+  secret?: string;
 }
 
 /**

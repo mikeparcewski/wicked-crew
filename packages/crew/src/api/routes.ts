@@ -4213,15 +4213,28 @@ export function registerRoutes(
 
   // ── Workflow viewer + builder (crew#44) ───────────────────────────────────
 
+  // (crew#718) The catalog is what the ENGINE will honour, not what parses as `{id, phases[]}`.
+  // A drop-in core refused at boot ("gate evaluates nothing: …") used to be listed here and
+  // offered in studio's selector, and the launch then 400'd `unknown workflow` — the operator
+  // learnt about it only from the failed launch. `workflowCatalog()` asks core's own validator:
+  // the refused def leaves `workflows` (so it cannot be launched) and appears in `unavailable`
+  // with core's verbatim reason (so its author is told why, and what to fix).
   app.get(`${V}/workflows`, async () => {
-    const workflows = adapter.listWorkflows();
-    return { workflows };
+    const { workflows, unavailable } = await adapter.workflowCatalog();
+    return { workflows, unavailable };
   });
 
   app.get(`${V}/workflows/:id`, async (req, reply) => {
     const { id } = req.params as { id: string };
     const workflow = adapter.getWorkflow(id);
-    if (!workflow) return reply.code(404).send({ error: `workflow '${id}' not found` });
+    if (!workflow) {
+      // (crew#718) Distinguish "no such workflow" from "the engine refused yours", and say why.
+      const refusal = await adapter.workflowRefusal(id);
+      if (refusal !== null) {
+        return reply.code(404).send({ error: `workflow '${id}' was refused by the engine: ${refusal}`, reason: refusal });
+      }
+      return reply.code(404).send({ error: `workflow '${id}' not found` });
+    }
     // humanGates: the phases that will PAUSE for a person even under humanConfirm:none (core#208).
     // Surfaced so an operator can see a workflow's gates BEFORE launching it (FINDING-023).
     return { workflow, humanGates: humanGatePhaseIds(workflow) };

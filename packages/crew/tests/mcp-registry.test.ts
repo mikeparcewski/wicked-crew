@@ -158,18 +158,12 @@ describe('a secret never leaves the broker (D-2)', () => {
       tools: [...BASE_TOOLS, { name: 'wt_echo_secret', description: 'token is ${TOKEN}; daemon env ${LEAK}', inputSchema: { type: 'object', default: '${TOKEN}' } }],
     });
 
-    const put = await call('PUT', '/mcp/servers/fx/secret', { value: secret });
-    expect(put.statusCode, put.body).toBe(200);
-    expect(put.json()).toEqual({ ref: 'keychain:wicked-mcp/fx', set: true });
-    expect(secrets.values.get('fx')).toBe(secret);
-
-    // A malformed body is answered without any of it.
-    const malformed = await call('PUT', '/mcp/servers/fx/secret', undefined, `{"value": "${secret}`);
-    expect(malformed.statusCode).toBe(400);
-
+    // (crew#719) The value rides the PREVIEW and is committed by the save: nothing is in the OS
+    // store until the registry row lands, so the pair can no longer half-write.
     const auth = { ref: 'keychain:wicked-mcp/fx', env: 'FIXTURE_TOKEN' };
-    const preview = await call('POST', '/mcp/servers/preview', stdioConfig({ auth }));
+    const preview = await call('POST', '/mcp/servers/preview', stdioConfig({ auth, secret }));
     expect(preview.statusCode, preview.body).toBe(200);
+    expect(secrets.values.has('fx'), 'a preview writes no secret').toBe(false);
     const echoed = (preview.json() as McpPreviewResponse).tools.find((t) => t.name === 'wt_echo_secret');
     // The upstream got the secret (it echoed it), the probe scrubbed it, and the daemon's own env
     // did not reach the upstream (the hardened env).
@@ -178,7 +172,17 @@ describe('a secret never leaves the broker (D-2)', () => {
 
     const saved = await call('POST', '/mcp/servers', { previewHash: (preview.json() as McpPreviewResponse).previewHash });
     expect(saved.statusCode, saved.body).toBe(201);
+    expect(secrets.values.get('fx'), 'the save commits the staged secret').toBe(secret);
     expect((saved.json() as McpServer).authState).toBe('set');
+
+    // A re-key of the registered server: a malformed body is answered without any of it.
+    const malformed = await call('PUT', '/mcp/servers/fx/secret', undefined, `{"value": "${secret}`);
+    expect(malformed.statusCode).toBe(400);
+    const put = await call('PUT', '/mcp/servers/fx/secret', { value: secret });
+    expect(put.statusCode, put.body).toBe(200);
+    expect(put.json()).toEqual({ ref: 'keychain:wicked-mcp/fx', set: true });
+    expect(secrets.values.get('fx')).toBe(secret);
+
     expect((await call('POST', '/mcp/servers/fx/test')).json()).toMatchObject({ ok: true });
     const listed = (await call('GET', '/mcp/servers')).json() as McpServersResponse;
     expect(listed.servers[0]?.auth).toEqual(auth);
@@ -208,10 +212,10 @@ describe('a secret never leaves the broker (D-2)', () => {
     const seen: Array<string | undefined> = [];
     const upstream = await startHttpUpstream(seen, secret);
     try {
-      await call('PUT', '/mcp/servers/web/secret', { value: secret });
       const url = `http://127.0.0.1:${(upstream.address() as AddressInfo).port}/mcp`;
-      const saved = await previewAndSave({ name: 'web', kind: 'mcp-http', url, auth: { ref: 'keychain:wicked-mcp/web', header: 'Authorization', prefix: 'Bearer ' } });
+      const saved = await previewAndSave({ name: 'web', kind: 'mcp-http', url, secret, auth: { ref: 'keychain:wicked-mcp/web', header: 'Authorization', prefix: 'Bearer ' } });
       expect(saved.authState).toBe('set');
+      expect(secrets.values.get('web')).toBe(secret);
       expect(toolOf(saved, 'web_lookup').description).toBe(`authorized as ${SECRET_REDACTION}`);
       expect(seen.length).toBeGreaterThan(0);
       for (const h of seen) expect(h).toBe(`Bearer ${secret}`);
@@ -253,6 +257,69 @@ describe('a secret never leaves the broker (D-2)', () => {
     expect(inRef.statusCode).toBe(400);
     expect(inRef.json()).toMatchObject({ code: 'secret_in_ref' });
     expect(secrets.values.size).toBe(0);
+  });
+
+  // crew#719: the secret and the registry row commit TOGETHER.
+  //
+  // Studio used to write the keychain itself (`PUT /mcp/servers/:name/secret`) and then save the
+  // server, because `preview` refuses to probe an authenticated upstream without a secret. A
+  // failure between the two writes left either a keychain entry with no server — invisible,
+  // because a keychain service's entries cannot be enumerated — or a server whose secret never
+  // landed. The value is now STAGED with the preview and written inside the save.
+  it('a failed save takes the staged secret back out, and a re-key needs a server that references it', async () => {
+    const secret = `wkd-sentinel-${randomUUID()}`;
+    const auth = { ref: 'keychain:wicked-mcp/fx', env: 'FIXTURE_TOKEN' };
+
+    // 1. A staged secret must belong to THIS server's own keychain entry: an `env:` reference is
+    //    read from the daemon's environment, and an unauthenticated server has nowhere to put it.
+    for (const bad of [{ auth: { ref: 'env:WKD_TEST_MCP_TOKEN', env: 'FIXTURE_TOKEN' } }, { auth: null }]) {
+      const refused = await call('POST', '/mcp/servers/preview', stdioConfig({ ...bad, secret }));
+      expect(refused.statusCode, refused.body).toBe(400);
+      expect(refused.json()).toMatchObject({ code: 'secret_not_staged_here' });
+    }
+    expect(secrets.values.size, 'a refused preview writes nothing').toBe(0);
+
+    // 2. A save whose REGISTRY write fails leaves no keychain entry behind.
+    const failing = new McpRegistry({
+      store: {
+        read: async () => ({ version: 1, servers: [] }),
+        mutate: async () => {
+          throw new Error('registry.json could not be written');
+        },
+      } as unknown as McpRegistryStore,
+      secrets,
+      probe: probeMcpServer,
+      discover: () => [],
+      now: () => clock,
+    });
+    const held = await failing.preview({ name: 'fx', kind: 'mcp-stdio', command: process.execPath, args: [FIXTURE_SERVER, specPath], url: null, auth }, secret);
+    expect(secrets.values.has('fx'), 'the preview stages, it does not write').toBe(false);
+    await expect(failing.save(held.previewHash)).rejects.toThrow(/registry.json could not be written/);
+    expect(secrets.values.has('fx'), 'a failed save leaves no orphan secret').toBe(false);
+
+    // 3. A re-key for a name no registered server references is refused, and writes nothing —
+    //    that write was the first half of the non-atomic add.
+    const orphan = await call('PUT', '/mcp/servers/nosuch/secret', { value: secret });
+    expect(orphan.statusCode, orphan.body).toBe(404);
+    expect(orphan.json()).toMatchObject({ code: 'unknown_server' });
+    expect(secrets.values.size).toBe(0);
+
+    // 4. …and refused for a REGISTERED server whose auth.ref points somewhere else, where the
+    //    value would sit unreachable.
+    process.env['WKD_TEST_MCP_TOKEN'] = 'wkd-env-secret-value';
+    try {
+      writeSpec({ tools: BASE_TOOLS });
+      await previewAndSave(stdioConfig({ auth: { ref: 'env:WKD_TEST_MCP_TOKEN', env: 'FIXTURE_TOKEN' } }));
+    } finally {
+      delete process.env['WKD_TEST_MCP_TOKEN'];
+    }
+    const elsewhere = await call('PUT', '/mcp/servers/fx/secret', { value: secret });
+    expect(elsewhere.statusCode, elsewhere.body).toBe(400);
+    expect(elsewhere.json()).toMatchObject({ code: 'secret_not_referenced' });
+    expect(secrets.values.size).toBe(0);
+
+    for (const body of answered) expect(body).not.toContain(secret);
+    for (const line of logs) expect(line).not.toContain(secret);
   });
 
   it('scrubSecrets replaces every occurrence, in keys too, longest secret first', () => {
