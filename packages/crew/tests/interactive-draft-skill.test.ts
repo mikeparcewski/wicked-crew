@@ -267,10 +267,20 @@ describe('draftFloorVerdict — the rule named, and only what a count without a 
     expect(draftFloorVerdict(report({ pages: 9 }), NO_BUDGET).verdict).toBe('pass');
   });
 
-  it('an answer that is not a report is UNAVAILABLE — never rounded to a pass', () => {
+  it('an answer that is not the report is UNAVAILABLE — never rounded to a pass (codex review)', () => {
     expect(draftFloorVerdict(null, EXACT_2).verdict).toBe('unavailable');
     expect(draftFloorVerdict('boom', EXACT_2).verdict).toBe('unavailable');
-    expect(draftFloorVerdict({}, EXACT_2).verdict).toBe('pass'); // a report with no checks breaches nothing
+    // Red before the review fix: `{}` and a schema drift judged nothing and answered `pass`, so a
+    // breaching draft landed on a self-check whose report the floor could not read.
+    expect(draftFloorVerdict({}, EXACT_2).verdict).toBe('unavailable');
+    expect(draftFloorVerdict({ checks: {} }, EXACT_2).verdict).toBe('unavailable');
+    expect(draftFloorVerdict({ checks: { claims: { ok: true } } }, EXACT_2).verdict).toBe('unavailable');
+    expect(draftFloorVerdict({ checks: { claims: { ok: 'yes' }, contrast: { ok: true } } }, EXACT_2).verdict).toBe(
+      'unavailable',
+    );
+    const drifted = draftFloorVerdict({ ...(report() as object), verdict: 'FAIL', failed: ['claims'] }, EXACT_2);
+    expect(drifted.verdict, 'a report that declares itself FAILED is never a pass').toBe('fail');
+    expect(drifted.breaches[0]).toContain('reports FAIL on claims');
   });
 });
 

@@ -259,12 +259,24 @@ function kindList(byKind: unknown): string {
     .join(', ');
 }
 
+/** A check record with a boolean `ok` — the shape the floor judges. `null` for anything else. */
+function checkRecord(value: unknown): { ok?: unknown; [k: string]: unknown } | null {
+  if (typeof value !== 'object' || value === null) return null;
+  return typeof (value as { ok?: unknown }).ok === 'boolean' ? (value as { ok?: unknown }) : null;
+}
+
 /**
  * The verdict, from the self-check's own `--json` report (pure — this is what the tests pin).
  *
  * `claims` and `contrast` are deterministic over the file alone, so their failure IS a breach.
  * `pages` is only a breach when the count already exceeds the budget (see the module note): a
  * count below an `--exact` budget is unproven without a render and is reported as unverified.
+ *
+ * The report's SHAPE is judged first (codex review): a report whose `checks.claims` /
+ * `checks.contrast` are missing or carry no boolean `ok` is not this floor's report — a schema
+ * drift, or another program's output — and answers `unavailable`, never `pass`. And a report that
+ * declares itself FAILED for a reason this floor does not recognise is a breach in its own right:
+ * the floor reports the check's own `failed` list rather than passing a document the check refused.
  */
 export function draftFloorVerdict(report: unknown, budget: PageBudget): DraftFloorVerdict {
   if (typeof report !== 'object' || report === null) {
@@ -275,6 +287,21 @@ export function draftFloorVerdict(report: unknown, budget: PageBudget): DraftFlo
     };
   }
   const rep = report as SelfCheckReport;
+  const checks = rep.checks;
+  if (
+    typeof checks !== 'object' ||
+    checks === null ||
+    checkRecord(checks.claims) === null ||
+    checkRecord(checks.contrast) === null
+  ) {
+    return {
+      verdict: 'unavailable',
+      breaches: [],
+      summary:
+        `the draft floor could not be re-derived: ${DRAFT_SELF_CHECK_SCRIPT} answered JSON that is not its ` +
+        `report (no checks.claims / checks.contrast verdict) — the floor judges nothing it cannot read`,
+    };
+  }
   const claims = rep.checks?.claims;
   const contrast = rep.checks?.contrast;
   const pages = rep.checks?.pages;
@@ -301,6 +328,15 @@ export function draftFloorVerdict(report: unknown, budget: PageBudget): DraftFlo
       `pages: the brief's budget is ${budget.pages} printed page(s)${budget.exact ? ' exactly' : ' at most'} and the ` +
         `document already declares ${count} — a page-size/count breach (the count is a lower bound: it cannot see a ` +
         `wrapper that overflows its sheet)`,
+    );
+  }
+  // The check refused the document for a reason this floor does not know how to name: report the
+  // refusal as the check stated it, never a pass (codex review).
+  if (breaches.length === 0 && rep.verdict === 'FAIL') {
+    const failed = Array.isArray(rep.failed) ? rep.failed.filter((f): f is string => typeof f === 'string') : [];
+    breaches.push(
+      `the self-check reports FAIL on ${failed.length > 0 ? failed.join(', ') : 'a floor this check names'} — ` +
+        `a verdict this floor cannot attribute to one rule, so the document is not published on it`,
     );
   }
   if (breaches.length > 0) {
