@@ -371,7 +371,11 @@ describe('bridge pool keying + discovery (§7.2)', () => {
     writeFileSync(join(dir, LOCK_NAME), JSON.stringify({ port: 4400 })); // no pid
     expect(readLock(dir)).toBeNull();
     writeFileSync(join(dir, LOCK_NAME), JSON.stringify({ port: 4400, pid: 42 }));
-    expect(readLock(dir)).toEqual({ host: '127.0.0.1', port: 4400, pid: 42 });
+    // crew#510: the lockfile's own `startedAt` rides along as the bridge INSTANCE marker; a
+    // lockfile that carries none reads as null (nothing to check a sidecar against).
+    expect(readLock(dir)).toEqual({ host: '127.0.0.1', port: 4400, pid: 42, startedAt: null });
+    writeFileSync(join(dir, LOCK_NAME), JSON.stringify({ port: 4400, pid: 42, startedAt: '2026-09-29T10:00:00.000Z' }));
+    expect(readLock(dir)?.startedAt).toBe('2026-09-29T10:00:00.000Z');
   });
 
   it('pidAlive is honest about this process and about a pid that cannot exist', () => {

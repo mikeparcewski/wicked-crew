@@ -62,7 +62,7 @@
  */
 
 import { spawn as nodeSpawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { join, resolve } from 'node:path';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
@@ -225,6 +225,10 @@ export interface LiveBridge {
   host: string;
   port: number;
   pid: number;
+  /** The lockfile's own `startedAt` (ADR-0022), when it carries one: the bridge INSTANCE marker a
+   *  sidecar is checked against, so a reused pid is never mistaken for the bridge crew recorded
+   *  (crew#510). Null when the lockfile predates the field or does not carry it. */
+  startedAt?: string | null;
 }
 
 /** The 503 the proxy renders as `{"code":"bridge_unavailable","hint":...}` (§5.6). */
@@ -272,6 +276,13 @@ export interface CrewSidecar {
    *  keeping the bridge alive for as long as the pid stays taken (crew #606 review, MED-2). Absent
    *  on a sidecar written before this field existed — pid liveness is all those can be checked by. */
   ownerStartedAt?: string;
+  /** The BRIDGE instance this sidecar is about: the lockfile's own `startedAt` at the moment crew
+   *  recorded it (crew#510). A pid alone does not identify a process for longer than that pid
+   *  stays taken, so `pid` + this marker is what licenses an adopt or a recycle; a live lockfile
+   *  that does not carry the same marker is a DIFFERENT bridge that merely inherited the pid.
+   *  Absent on a sidecar written before this field existed (checked the legacy way — see
+   *  {@link sidecarNamesBridge} — and upgraded on the next adopt). */
+  bridgeStartedAt?: string;
 }
 
 /** Injectable IO — the integration suite substitutes a fake bridge for the real `npx` spawn. */
@@ -351,10 +362,62 @@ export function readCrewSidecar(root: string): CrewSidecar | null {
       startedAt: typeof raw.startedAt === 'string' ? raw.startedAt : '',
       ...(typeof raw.ownerPid === 'number' ? { ownerPid: raw.ownerPid } : {}),
       ...(typeof raw.ownerStartedAt === 'string' ? { ownerStartedAt: raw.ownerStartedAt } : {}),
+      ...(typeof raw.bridgeStartedAt === 'string' && raw.bridgeStartedAt !== ''
+        ? { bridgeStartedAt: raw.bridgeStartedAt }
+        : {}),
     };
   } catch {
     return null;
   }
+}
+
+/**
+ * Clock slack on the legacy (pre-{@link CrewSidecar.bridgeStartedAt}) instance check, in ms.
+ *
+ * Crew writes the sidecar only after the bridge answered `/api/health`, so the bridge's own
+ * lockfile `startedAt` always PRECEDES the sidecar's `startedAt` — by the health round trip. The
+ * two timestamps are written by two processes, so a millisecond of non-monotonicity is possible;
+ * one second absorbs that without weakening the check, because the stale sidecar this catches
+ * names a bridge that started after crew recorded a DIFFERENT one on that pid.
+ */
+export const SIDECAR_LOCK_SKEW_MS = 1_000;
+
+/** What a sidecar says about the bridge whose lockfile is live right now. */
+export type SidecarMatch =
+  /** This sidecar is about THIS bridge instance: it may be adopted, claimed, or recycled. */
+  | 'names-it'
+  /** It names this pid, but the live bridge is a different INSTANCE — the recorded bridge died and
+   *  its pid was reused. Never an adopt-silently and never a kill licence (crew#510). */
+  | 'stale'
+  /** It is about some other pid entirely. */
+  | 'other-pid';
+
+/**
+ * Is `sidecar` about the bridge `live`'s lockfile names (crew#510)?
+ *
+ * A pid identifies a process only for as long as that pid stays taken. `writeSidecar` records the
+ * bridge's lockfile `startedAt` beside the pid, so the pair names ONE bridge instance: a lockfile
+ * whose marker differs was written by a different bridge that inherited the pid — an operator's
+ * `wicked-interactive serve`, another daemon's pool — and crew must neither adopt it as its own
+ * nor recycle (SIGTERM/SIGKILL) it, which is the "never kill a process crew did not start" rule.
+ *
+ * A sidecar written before the marker existed is checked the only way it can be: the bridge's
+ * lockfile cannot have been written AFTER crew recorded the sidecar (crew records it once the
+ * bridge is already answering), so a lockfile that started later is a different bridge. When
+ * neither side carries a timestamp there is nothing to check and the pid stands alone — today's
+ * behaviour, and the next adopt upgrades the sidecar with the marker.
+ */
+export function sidecarNamesBridge(sidecar: CrewSidecar, live: LiveBridge): SidecarMatch {
+  if (sidecar.pid !== live.pid) return 'other-pid';
+  const liveStart = live.startedAt ?? null;
+  if (sidecar.bridgeStartedAt !== undefined) {
+    return liveStart === sidecar.bridgeStartedAt ? 'names-it' : 'stale';
+  }
+  if (liveStart === null) return 'names-it'; // nothing to compare (pre-marker lockfile)
+  const lockMs = Date.parse(liveStart);
+  const recordedMs = Date.parse(sidecar.startedAt);
+  if (!Number.isFinite(lockMs) || !Number.isFinite(recordedMs)) return 'names-it';
+  return lockMs > recordedMs + SIDECAR_LOCK_SKEW_MS ? 'stale' : 'names-it';
 }
 
 function describeEnv(env: BridgeEnv): string {
@@ -383,7 +446,12 @@ export function readLock(root: string): LiveBridge | null {
   try {
     const raw = JSON.parse(readFileSync(join(root, LOCK_NAME), 'utf8')) as Partial<LiveBridge>;
     if (typeof raw.port !== 'number' || typeof raw.pid !== 'number') return null;
-    return { host: typeof raw.host === 'string' && raw.host !== '' ? raw.host : '127.0.0.1', port: raw.port, pid: raw.pid };
+    return {
+      host: typeof raw.host === 'string' && raw.host !== '' ? raw.host : '127.0.0.1',
+      port: raw.port,
+      pid: raw.pid,
+      startedAt: typeof raw.startedAt === 'string' && raw.startedAt !== '' ? raw.startedAt : null,
+    };
   } catch {
     return null;
   }
@@ -602,9 +670,24 @@ export class InteractiveBridgePool {
   private async adoptOrRecycle(root: string, live: LiveBridge): Promise<LiveBridge> {
     const expected = bridgeEnvFor(this.io);
     const sidecar = readCrewSidecar(root);
-    if (sidecar !== null && sidecar.pid === live.pid) {
+    const match: SidecarMatch = sidecar === null ? 'other-pid' : sidecarNamesBridge(sidecar, live);
+    // crew#510: a sidecar that names this pid but a DIFFERENT bridge instance is about a bridge
+    // that died and left its pid to somebody else's. It is discarded — it describes a process that
+    // is gone — and the live bridge takes the adopt-with-a-warning path below: never adopted as
+    // crew's own, and never recycled, because crew did not start it.
+    if (sidecar !== null && match === 'stale') {
+      this.io.log?.(
+        `interactive bridge pid ${live.pid} for ${root} is NOT the bridge crew recorded on that pid ` +
+          `(the lockfile started ${live.startedAt ?? '(unknown)'}, the record says ` +
+          `${sidecar.bridgeStartedAt ?? sidecar.startedAt}) — the recorded bridge is gone and its pid was ` +
+          `reused, so the stale record is discarded and this bridge is treated as one crew did not start`,
+      );
+      this.discardSidecar(root);
+      return this.adoptUnrecorded(root, live, expected);
+    }
+    if (sidecar !== null && match === 'names-it') {
       if (bridgeEnvMatches(sidecar.env, expected)) {
-        this.claimSidecar(root, sidecar);
+        this.claimSidecar(root, sidecar, live);
         return live;
       }
       const owner = sidecar.ownerPid;
@@ -643,6 +726,14 @@ export class InteractiveBridgePool {
       await this.terminate(root, live.pid, owner);
       return this.start(root, live.pid);
     }
+    return this.adoptUnrecorded(root, live, expected);
+  }
+
+  /** A bridge nobody recorded (an operator's terminal `wicked-interactive serve`, a pre-upgrade
+   *  bridge, or one whose record turned out to be about a dead predecessor on the same pid —
+   *  crew#510): adopted as-is, with a warning naming what it may be missing and the fix. Never
+   *  claimed as crew's and never killed. */
+  private adoptUnrecorded(root: string, live: LiveBridge, expected: BridgeEnv): LiveBridge {
     if (Object.keys(expected).length > 0) {
       this.io.log?.(
         `adopting interactive bridge pid ${live.pid} for ${root}, which this daemon did not start: it may not ` +
@@ -661,6 +752,10 @@ export class InteractiveBridgePool {
    * and its owner, so no replacement is started beside a bridge that may still be running and the
    * sidecar that records it is never touched. ESRCH is not a failure — the bridge left before we
    * signalled — but even then the pid has to be observed gone.
+   *
+   * Once the exit IS proven, the sidecar is dropped (crew#510): it records a pid that no longer
+   * exists, and a record left behind is exactly what a later pid reuse reads as crew's own bridge.
+   * The replacement writes a fresh one; a start that then fails leaves no claim on that pid at all.
    */
   private async terminate(root: string, pid: number, owner: number | undefined): Promise<void> {
     const kill = this.io.kill ?? ((p: number, sig: NodeJS.Signals): void => void process.kill(p, sig));
@@ -695,6 +790,7 @@ export class InteractiveBridgePool {
       while (alive(pid) && Date.now() < hard) await sleep(25);
     }
     if (alive(pid)) refuse(`still running ${graceMs + hardMs} ms after SIGTERM and SIGKILL`);
+    this.discardSidecar(root); // the pid is PROVEN gone — its record is now a lie (crew#510)
   }
 
   /**
@@ -831,7 +927,7 @@ export class InteractiveBridgePool {
           );
         }
         if (lineage === 'ours') {
-          this.writeSidecar(root, healthy.pid, bridgeEnv);
+          this.writeSidecar(root, healthy, bridgeEnv);
         } else {
           this.io.log?.(
             `cannot tell whether interactive bridge pid ${healthy.pid} for ${root} descends from the child this daemon spawned ` +
@@ -852,12 +948,29 @@ export class InteractiveBridgePool {
 
   /** Adopting a crew-started bridge makes THIS daemon its owner (F-W1-103): rewrite the sidecar's
    *  `ownerPid` — pid, env and `startedAt` untouched — so the orphan sweeps, which reap a crew
-   *  bridge whose owner daemon is gone, see it in use. Best-effort, like {@link writeSidecar}. */
-  private claimSidecar(root: string, sidecar: CrewSidecar): void {
+   *  bridge whose owner daemon is gone, see it in use. A pre-crew#510 record is also stamped with
+   *  the live bridge's instance marker here, which is the one moment that marker is provable
+   *  without having spawned the bridge: the sidecar was just judged to be about THIS instance.
+   *  Best-effort, like {@link writeSidecar}. */
+  private claimSidecar(root: string, sidecar: CrewSidecar, live: LiveBridge): void {
     const mine = ownerIdentity();
-    if (sidecar.ownerPid === mine.ownerPid && sidecar.ownerStartedAt === mine.ownerStartedAt) return;
+    const marker =
+      sidecar.bridgeStartedAt ?? (typeof live.startedAt === 'string' ? live.startedAt : undefined);
+    if (
+      sidecar.ownerPid === mine.ownerPid &&
+      sidecar.ownerStartedAt === mine.ownerStartedAt &&
+      sidecar.bridgeStartedAt === marker
+    ) {
+      return;
+    }
     // What crew recorded at the spawn stays; only the owner identity changes hands.
-    const recorded: CrewSidecar = { pid: sidecar.pid, env: sidecar.env, startedBy: sidecar.startedBy, startedAt: sidecar.startedAt };
+    const recorded: CrewSidecar = {
+      pid: sidecar.pid,
+      env: sidecar.env,
+      startedBy: sidecar.startedBy,
+      startedAt: sidecar.startedAt,
+      ...(marker !== undefined ? { bridgeStartedAt: marker } : {}),
+    };
     try {
       writeFileSync(join(root, CREW_SIDECAR_NAME), JSON.stringify({ ...recorded, ...mine }, null, 2), 'utf8');
     } catch (err) {
@@ -865,12 +978,34 @@ export class InteractiveBridgePool {
     }
   }
 
+  /** Drop a sidecar that provably describes a bridge that is GONE (crew#510): the pid it names has
+   *  been observed to belong to another process, or has been proven to have exited. Leaving it
+   *  would let a later pid reuse read as crew's own bridge. Best-effort: the adopt-time checks
+   *  above already refuse to trust it, so a file that cannot be removed costs a repeated warning,
+   *  never a wrong decision. */
+  private discardSidecar(root: string): void {
+    try {
+      rmSync(join(root, CREW_SIDECAR_NAME), { force: true });
+    } catch (err) {
+      this.io.debug?.(`could not remove the stale ${CREW_SIDECAR_NAME} in ${root}: ${(err as Error).message}`);
+    }
+  }
+
   /** Record which pid crew started and with which env, so a later adopt can tell ours from a
    *  sibling daemon's (see {@link adoptOrRecycle}). Only ever called for a pid whose lineage from
    *  this daemon's own spawn is PROVEN (see {@link start}). Best-effort: an unwritable sidecar only
    *  costs the adopt-time check, never the start. */
-  private writeSidecar(root: string, pid: number, env: BridgeEnv): void {
-    const sidecar: CrewSidecar = { pid, env, startedBy: 'wicked-crew', startedAt: new Date().toISOString(), ...ownerIdentity() };
+  private writeSidecar(root: string, bridge: LiveBridge, env: BridgeEnv): void {
+    const sidecar: CrewSidecar = {
+      pid: bridge.pid,
+      env,
+      startedBy: 'wicked-crew',
+      startedAt: new Date().toISOString(),
+      // The instance this record is about (crew#510) — the bridge's own lockfile marker, so a
+      // later pid reuse cannot read as this bridge.
+      ...(typeof bridge.startedAt === 'string' ? { bridgeStartedAt: bridge.startedAt } : {}),
+      ...ownerIdentity(),
+    };
     try {
       writeFileSync(join(root, CREW_SIDECAR_NAME), JSON.stringify(sidecar, null, 2), 'utf8');
     } catch (err) {

@@ -18,7 +18,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { recorderBrowsersPath } from '../../src/interactive/bridge-root.js';
@@ -35,6 +35,7 @@ import {
   pidAlive,
   processStartedAt,
   readCrewSidecar,
+  sidecarNamesBridge,
   spawnLineage,
   type BridgePoolIo,
 } from '../../src/interactive/bridge-pool.js';
@@ -381,7 +382,6 @@ describe('the spawn env + the sidecar (F-042 / F-043)', () => {
   it('ADOPTS a bridge nobody recorded (operator-run / pre-upgrade) with a warning that names the pid and the fix — never kills it', async () => {
     const root = join(dir, 'root-c');
     // An operator's own `wicked-interactive serve`: no sidecar, no crew env.
-    const { mkdirSync } = await import('node:fs');
     mkdirSync(root, { recursive: true });
     const child = spawn(process.execPath, ['-e', FAKE_BRIDGE, root], { stdio: 'ignore', env: { ...process.env } });
     children.push(child);
@@ -471,7 +471,11 @@ describe('recycling fails closed (codex r4 on #506)', () => {
     expect(err).toBeInstanceOf(BridgeUnavailableError);
     expect((err as Error).message).toContain(`pid ${pid}`);
     expect((err as Error).message).toContain('still answering');
-    expect(sidecarBytes(root)).toBe(sidecar);
+    // crew#510: `terminate()` drops the record once the pid is PROVEN gone — here the injected
+    // liveness probe claimed it left, so the record goes and nothing is claimed on that pid. A
+    // record left behind is what let a later daemon recycle (kill) a bridge it never started.
+    expect(sidecarBytes(root)).toBeNull();
+    void sidecar;
     expect(sleeper).not.toBeNull();
     await waitFor(() => !pidAlive(sleeper!.pid!)); // ours, so it is stopped
     expect(pidAlive(pid)).toBe(true);
@@ -568,5 +572,98 @@ describe('recycling fails closed (codex r4 on #506)', () => {
     expect(parentPidOf(0)).toBeNull();
     expect(parentPidOf(-1)).toBeNull();
     expect(parentPidOf(2 ** 22 + 12345)).toBeNull();
+  }, 30_000);
+});
+
+describe('a sidecar names a bridge INSTANCE, not a pid (crew#510)', () => {
+  it('sidecarNamesBridge: the recorded lockfile marker decides; a different (or missing) marker is STALE; a pre-marker record is judged by "the lockfile cannot post-date the record"', () => {
+    const live = { host: '127.0.0.1', port: 1, pid: 42, startedAt: '2026-09-29T10:00:00.000Z' };
+    const base = { env: {}, startedBy: 'wicked-crew' as const, startedAt: '2026-09-29T10:00:01.000Z' };
+    // With the marker: equal → this instance; anything else → a different bridge on the same pid.
+    expect(sidecarNamesBridge({ ...base, pid: 42, bridgeStartedAt: live.startedAt }, live)).toBe('names-it');
+    expect(sidecarNamesBridge({ ...base, pid: 42, bridgeStartedAt: '2026-09-29T09:00:00.000Z' }, live)).toBe('stale');
+    expect(sidecarNamesBridge({ ...base, pid: 42, bridgeStartedAt: live.startedAt }, { ...live, startedAt: null })).toBe('stale');
+    expect(sidecarNamesBridge({ ...base, pid: 7, bridgeStartedAt: live.startedAt }, live)).toBe('other-pid');
+    // Pre-marker record: crew records it AFTER the bridge answers, so a lockfile that started
+    // later is a different bridge; one that started before (or within the clock skew) is this one.
+    expect(sidecarNamesBridge({ ...base, pid: 42 }, live)).toBe('names-it');
+    expect(sidecarNamesBridge({ ...base, pid: 42 }, { ...live, startedAt: '2026-09-29T10:00:01.500Z' })).toBe('names-it');
+    expect(sidecarNamesBridge({ ...base, pid: 42 }, { ...live, startedAt: '2026-09-29T10:05:00.000Z' })).toBe('stale');
+    // Nothing to compare (a lockfile without the field, an unparseable stamp) → the pid stands alone.
+    expect(sidecarNamesBridge({ ...base, pid: 42 }, { ...live, startedAt: null })).toBe('names-it');
+    expect(sidecarNamesBridge({ ...base, pid: 42, startedAt: 'not a date' }, live)).toBe('names-it');
+  });
+
+  it('records the live lockfile\'s startedAt as the instance marker when it starts a bridge', async () => {
+    const root = join(dir, 'root-marker');
+    const bridge = await poolWith({ origin: 'http://127.0.0.1:60785', bus: join(dir, 'state', 'bus') }).ensure(root);
+    const lockJson = JSON.parse(readFileSync(join(root, LOCK_NAME), 'utf8')) as { startedAt: string };
+    const sidecar = readCrewSidecar(root)!;
+    expect(sidecar.pid).toBe(bridge.pid);
+    expect(sidecar.bridgeStartedAt).toBe(lockJson.startedAt);
+  }, 30_000);
+
+  it('a STALE sidecar on a reused pid is never a kill licence: the foreign bridge that holds the pid is adopted with a warning, not recycled, and the stale record is dropped', async () => {
+    const root = join(dir, 'root-reused-pid');
+    // A bridge crew never started (an operator's `wicked-interactive serve`, or another daemon's
+    // pool) is answering on this root.
+    mkdirSync(root, { recursive: true });
+    const foreignPid = await operatorBridge(root);
+    const foreignLock = JSON.parse(readFileSync(join(root, LOCK_NAME), 'utf8')) as { startedAt: string };
+    // Crew's record from a PREVIOUS bridge that died and left this pid behind: same pid, a
+    // different env pair, an owner daemon that is gone, and the dead bridge's own marker.
+    const deadOwner = spawnSync(process.execPath, ['-e', 'process.exit(0)']).pid ?? 999_999;
+    expect(pidAlive(deadOwner)).toBe(false);
+    writeFileSync(
+      join(root, CREW_SIDECAR_NAME),
+      JSON.stringify({
+        pid: foreignPid,
+        env: { WICKED_CREW_API: 'http://127.0.0.1:60785', WICKED_BUS_DATA_DIR: join(dir, 'state', 'bus') },
+        startedBy: 'wicked-crew',
+        startedAt: '2026-01-01T00:00:00.000Z',
+        bridgeStartedAt: '2026-01-01T00:00:00.000Z',
+        ownerPid: deadOwner,
+      }),
+      'utf8',
+    );
+    expect(foreignLock.startedAt).not.toBe('2026-01-01T00:00:00.000Z');
+
+    const logged: string[] = [];
+    const spawnsBefore = spawns.length;
+    const adopted = await poolWith(
+      { origin: 'http://127.0.0.1:7701', bus: join(dir, 'other', 'bus') },
+      (m) => logged.push(m),
+    ).ensure(root);
+
+    expect(adopted.pid).toBe(foreignPid);
+    expect(pidAlive(foreignPid), 'a bridge crew did not start must never be killed on a stale record').toBe(true);
+    expect(spawns.length).toBe(spawnsBefore);
+    expect(logged.some((m) => m.includes('pid was reused'))).toBe(true);
+    expect(logged.some((m) => m.includes('recycling'))).toBe(false);
+    expect(sidecarBytes(root), 'the record describes a bridge that is gone').toBeNull();
+  }, 30_000);
+
+  it('a pre-crew#510 record that IS about the live bridge is adopted and upgraded with the instance marker', async () => {
+    const root = join(dir, 'root-marker-upgrade');
+    const pair = { origin: 'http://127.0.0.1:60785', bus: join(dir, 'state', 'bus') };
+    const bridge = await poolWith(pair).ensure(root);
+    const recorded = readCrewSidecar(root)!;
+    const { bridgeStartedAt: marker, ...legacy } = recorded;
+    expect(marker).toBeDefined();
+    writeFileSync(join(root, CREW_SIDECAR_NAME), JSON.stringify(legacy), 'utf8');
+    expect(readCrewSidecar(root)?.bridgeStartedAt).toBeUndefined();
+
+    const logged: string[] = [];
+    const spawnsBefore = spawns.length;
+    const adopted = await poolWith(pair, (m) => logged.push(m)).ensure(root);
+
+    expect(adopted.pid).toBe(bridge.pid);
+    expect(spawns.length).toBe(spawnsBefore);
+    expect(logged).toEqual([]);
+    const upgraded = readCrewSidecar(root)!;
+    expect(upgraded.bridgeStartedAt).toBe(marker);
+    expect(upgraded.pid).toBe(recorded.pid);
+    expect(upgraded.env).toEqual(recorded.env);
+    expect(upgraded.startedAt).toBe(recorded.startedAt);
   }, 30_000);
 });
