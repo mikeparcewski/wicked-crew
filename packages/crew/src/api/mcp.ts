@@ -26,6 +26,12 @@
  *                                       that and `MCP-POSTURE-WRITE` (audited rule upserts)
  *   DELETE /mcp/approvals/:subject      removes it from both (`:subject` URL-encoded)
  *
+ * Slice S7 (the usage fold, `mcp/usage.ts`):
+ *
+ *   GET    /mcp/usage                   `?days=1-30&subject&seat&decision` → counts, the decision split
+ *                                       (allow / ask / deny / guard_error), error rate, p50/p95/p99,
+ *                                       per-tool, per-server, tool × seat × run, chains, per day
+ *
  * `POST /mcp/servers/preview` also answers the matrix (`policies`); a save that changes a saved
  * tool's schema, and a removal, withdraw the approvals that named it, BEFORE the registry changes.
  *
@@ -36,7 +42,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 
-import type { Actor, McpApprovalResponse, McpPreviewResponse } from '../core/types.js';
+import type { Actor, McpApprovalResponse, McpCallDecision, McpPreviewResponse, McpUsageResponse } from '../core/types.js';
 import { MCP_SERVER_NAME_RE } from '../mcp/classify.js';
 import type { McpBroker } from '../mcp/broker.js';
 import type { McpPolicies } from '../mcp/policies.js';
@@ -45,6 +51,8 @@ import { McpRegistryError, type McpRegistry } from '../mcp/registry.js';
 import { listUnitTools } from '../mcp/tool-list.js';
 import { McpRegistryCorruptError } from '../mcp/registry-store.js';
 import { parseSecretRef, SecretStoreError } from '../mcp/secrets.js';
+import type { McpCallRecordSource } from '../mcp/call-records.js';
+import { foldMcpUsage, MCP_USAGE_DECISIONS, MCP_USAGE_DEFAULT_DAYS, MCP_USAGE_MAX_DAYS } from '../mcp/usage.js';
 import type { McpUpstreamConfig } from '../mcp/probe.js';
 import { parseBaseUrl, REST_SPEC_MAX_BYTES } from '../mcp/rest.js';
 import { API_PREFIX } from './api-prefix.js';
@@ -156,6 +164,14 @@ export const McpPolicyPreviewSchema = z
   .strict()
   .refine((b) => b.subject === undefined || b.server === undefined, { message: 'give subject or server, not both' });
 export const McpApprovalSchema = z.object({ subject: z.string().min(5).max(256) }).strict();
+export const McpUsageQuerySchema = z
+  .object({
+    days: z.coerce.number().int().min(1).max(MCP_USAGE_MAX_DAYS).optional(),
+    subject: z.string().min(1).max(512).optional(),
+    seat: z.string().regex(/^[A-Za-z0-9_.-]{1,64}$/).optional(),
+    decision: z.enum(MCP_USAGE_DECISIONS as [string, ...string[]]).optional(),
+  })
+  .strict();
 
 export interface McpRouteDeps {
   /** Absent = a directly-driven route set with no registry seam → 503. */
@@ -166,6 +182,10 @@ export interface McpRouteDeps {
   toolLister?: () => ((requestJson: string) => Promise<string>) | null;
   /** The preview and approvals (S6). Absent → those routes answer 503; the S2 routes are unchanged. */
   policies?: McpPolicies;
+  /** The call records the usage fold reads (S7). Absent → `GET /mcp/usage` answers 503. */
+  usage?: McpCallRecordSource;
+  /** The usage window's end; tests pin it. Default `Date.now`. */
+  now?: () => number;
   audit: Pick<AuditLog, 'record'>;
   actorOf: (req: FastifyRequest) => Actor;
 }
@@ -501,6 +521,39 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
       } catch (err) {
         return fail(reply, err);
       }
+    },
+  );
+
+  // ── S7: the usage fold over the call records ────────────────────────────────────────────────
+  app.get(
+    `${V}/mcp/usage`,
+    { config: { manifest: { responseType: 'McpUsageResponse', statusCodes: [200, 400, 503] } } },
+    async (req, reply) => {
+      if (deps.usage === undefined) {
+        return reply.code(503).send({ error: 'MCP usage is not configured on this daemon', code: 'mcp_unavailable' });
+      }
+      const parsed = McpUsageQuerySchema.safeParse(req.query ?? {});
+      if (!parsed.success) return invalidBody(reply, parsed.error);
+      const q = parsed.data;
+      const now = (deps.now ?? Date.now)();
+      let read: Awaited<ReturnType<McpCallRecordSource['read']>>;
+      try {
+        read = await deps.usage.read(now);
+      } catch (err) {
+        return reply.code(503).send({ error: `the MCP call records could not be read: ${err instanceof Error ? err.message : String(err)}`, code: 'records_unreadable' });
+      }
+      const body: McpUsageResponse = foldMcpUsage(
+        read.records,
+        {
+          days: q.days ?? MCP_USAGE_DEFAULT_DAYS,
+          ...(q.subject !== undefined ? { subject: q.subject } : {}),
+          ...(q.seat !== undefined ? { seat: q.seat } : {}),
+          ...(q.decision !== undefined ? { decision: q.decision as McpCallDecision } : {}),
+        },
+        now,
+        read.skipped,
+      );
+      return body;
     },
   );
 }
