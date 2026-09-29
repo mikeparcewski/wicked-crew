@@ -452,11 +452,26 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // A placeholder username (`x-access-token`, `oauth2`, `token`) identifies a TOKEN, not an
     // account: unresolved, disclosed, never a refusal (the token's own login is what `gh api
     // user` already reported).
+    //
+    // THE REMOTE'S OWN USERNAME COMES FIRST (codex review on #727). A remote spelled
+    // `https://other-bot@github.com/o/r.git` tells git which account to authenticate as, and git
+    // uses it whatever the helper would have answered for the bare host. Stripping it and asking
+    // only about the host left exactly the defect this guard exists for alive: gh reports
+    // `release-bot`, the URL says `other-bot`, the helper agrees with gh, and the push goes out as
+    // `other-bot`. So the URL username is read, refused against gh's login when both are concrete,
+    // and passed INTO the credential query so the helper answers for the account git will use.
     'RU=$(git remote get-url origin 2>/dev/null || true)',
     'case "$RU" in',
     '  https://*)',
-    '    RH=${RU#https://}; RH=${RH%%/*}; RH=${RH##*@}',
-    '    GC=$(printf "protocol=https\\nhost=%s\\n\\n" "$RH" | GIT_TERMINAL_PROMPT=0 git credential fill 2>/dev/null | sed -n "s/^username=//p" | head -1 || true)',
+    '    RH=${RU#https://}; RH=${RH%%/*}; RU_USER=""',
+    '    case "$RH" in *@*) RU_USER=${RH%@*}; RH=${RH##*@};; esac',
+    // A `user:password@host` remote carries the secret in the URL; take the user, never the rest.
+    '    case "$RU_USER" in *:*) RU_USER=${RU_USER%%:*};; esac',
+    '    case "${RU_USER:-}" in',
+    '      ""|x-access-token|oauth2|token|PRIVATE-TOKEN) ;;',
+    '      *) if [ -n "$L" ] && [ "$RU_USER" != "$L" ]; then echo "deliver: identity mismatch — gh\'s active login is $L but origin\'s URL authenticates as $RU_USER (https://$RU_USER@$RH/…); nothing was staged, committed or pushed. The push would use $RU_USER, not $L. Point origin at https://$RH/… and pin ONE identity (export GH_TOKEN in the daemon environment, or fix the credential helper for $RH), then approve to retry the deliver phase"; exit 1; fi',
+    '         echo "deliver: origin authenticates as $RU_USER (agrees with gh)";; esac',
+    '    GC=$(printf "protocol=https\\nhost=%s\\n%s\\n" "$RH" "${RU_USER:+username=$RU_USER}" | GIT_TERMINAL_PROMPT=0 git credential fill 2>/dev/null | sed -n "s/^username=//p" | head -1 || true)',
     '    case "${GC:-}" in',
     '      "") echo "deliver: git\'s credential identity for $RH is unresolved (no credential helper answered) — the push uses whatever the helper hands git at push time";;',
     '      x-access-token|oauth2|token|PRIVATE-TOKEN) echo "deliver: git\'s credential for $RH is a token ($GC), so it names no account — gh reports ${L:-an unknown login}";;',

@@ -428,6 +428,39 @@ describe('deliver script, driven for real (crew#317)', () => {
     expect(existsSync(fx.workdir)).toBe(true);
   }, 60_000);
 
+  it("REFUSES when origin's own URL authenticates as another account — the URL wins over the helper", async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const z = 3;\n');
+    // A username-qualified remote tells git which account to authenticate as, whatever a helper
+    // would answer for the bare host — so a helper that AGREES with gh must not rescue it.
+    git(fx.workdir, 'remote', 'set-url', 'origin', 'https://other-bot@github.com/o/r.git');
+    git(fx.workdir, 'config', 'credential.helper', "!printf 'username=release-bot\\npassword=x\\n'");
+
+    const r = await runDeliver(fx, { gh: { login: 'release-bot' } });
+
+    expect(r.status).not.toBe(0);
+    expect(r.output).toContain(
+      "deliver: identity mismatch — gh's active login is release-bot but origin's URL authenticates as other-bot",
+    );
+    expect(r.output).toContain('The push would use other-bot, not release-bot.');
+    expect(git(fx.workdir, 'status', '--porcelain')).toContain('?? work.ts');
+    expect(originBranches(fx)).toEqual(['main']);
+  }, 60_000);
+
+  it("a URL username that AGREES with gh is disclosed and the check goes on", async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const z = 3;\n');
+    git(fx.workdir, 'remote', 'set-url', 'origin', 'https://release-bot@github.com/o/r.git');
+    git(fx.workdir, 'config', 'credential.helper', "!printf 'username=release-bot\\npassword=x\\n'");
+
+    const r = await runDeliver(fx, { gh: { login: 'release-bot' } });
+
+    expect(r.output).toContain('deliver: origin authenticates as release-bot (agrees with gh)');
+    expect(r.output).not.toContain('identity mismatch');
+    // (It then fails on the unreachable https remote's fetch; nothing was pushed.)
+    expect(originBranches(fx)).toEqual(['main']);
+  }, 60_000);
+
   it('a credential that names a TOKEN, not an account, is disclosed as unresolved — never a refusal', async () => {
     const fx = fixture();
     writeFileSync(join(fx.workdir, 'work.ts'), 'export const z = 3;\n');
