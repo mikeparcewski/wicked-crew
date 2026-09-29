@@ -16,7 +16,7 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 
-import type { McpAuthConfig, McpHealth, McpToolAnnotations, McpToolClass, McpUpstreamKind } from '../core/types.js';
+import type { McpAuthConfig, McpHealth, McpRestMapping, McpToolAnnotations, McpToolClass, McpUpstreamKind } from '../core/types.js';
 import { crewStateHome } from '../projects/state-home.js';
 
 export const MCP_STATE_DIRNAME = 'mcp';
@@ -41,6 +41,8 @@ export interface McpToolRecord {
   observedSchemaHash: string;
   /** `false` = the last probe no longer lists the tool (`gone`, kept so old records resolve). */
   present: boolean;
+  /** A `rest` tool's request mapping (slice S5a); absent/`null` for an MCP server's tool. */
+  rest?: McpRestMapping | null;
 }
 
 export interface McpServerRecord {
@@ -50,6 +52,10 @@ export interface McpServerRecord {
   args: string[];
   url: string | null;
   auth: McpAuthConfig | null;
+  /** `rest` only (slice S5a): the OpenAPI URL, or the pasted document; the operations picked. */
+  openapiUrl?: string | null;
+  openapi?: Record<string, unknown> | null;
+  operations?: string[] | null;
   enabled: boolean;
   health: McpHealth;
   registeredAt: string;

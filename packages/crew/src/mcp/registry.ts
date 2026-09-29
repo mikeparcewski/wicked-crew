@@ -21,6 +21,7 @@ import type {
   McpAuthState,
   McpDiscoveredServer,
   McpPreviewResponse,
+  McpRestMapping,
   McpServer,
   McpServersResponse,
   McpServerTestResponse,
@@ -57,6 +58,8 @@ export class McpRegistryError extends Error {
 /** What the registry holds for one brokered call's subject. */
 export interface McpCallTarget {
   config: McpUpstreamConfig;
+  /** A `rest` tool's request mapping (slice S5a); `null` for an MCP server's tool. */
+  rest: McpRestMapping | null;
   annotations: McpToolAnnotations | null;
   classOverride: McpToolClass | null;
   registered: boolean;
@@ -106,7 +109,10 @@ export class McpRegistry {
   async preview(config: McpUpstreamConfig): Promise<McpPreviewResponse> {
     const result = await this.probe(config);
     if ('missingSecret' in result) throw new McpRegistryError(409, 'secret_missing', result.error);
-    if (!result.ok) throw new McpRegistryError(502, 'probe_failed', `the server did not answer tools/list: ${result.error}`);
+    if (!result.ok) {
+      const what = config.kind === 'rest' ? 'the OpenAPI document could not be imported' : 'the server did not answer tools/list';
+      throw new McpRegistryError(502, 'probe_failed', `${what}: ${result.error}`);
+    }
     const tools = result.tools.map((t) => ({ ...t, schemaHash: toolSchemaHash(t) }));
     const previewHash = sha256Hex(canonicalJson({ config, tools: tools.map((t) => [t.name, t.schemaHash]) }));
     const expiresAt = this.now() + PREVIEW_TTL_MS;
@@ -125,8 +131,10 @@ export class McpRegistry {
         inputSchema: t.inputSchema,
         class: deriveToolClass(t.annotations),
         schemaHash: t.schemaHash,
+        ...(config.kind === 'rest' ? { rest: t.rest ?? null } : {}),
       })),
       diff: existing === undefined ? null : diffTools(existing.tools, tools),
+      ...(result.skipped !== undefined && result.skipped.length > 0 ? { skipped: result.skipped } : {}),
     };
   }
 
@@ -161,6 +169,7 @@ export class McpRegistry {
           schemaHash: t.schemaHash,
           observedSchemaHash: t.schemaHash,
           present: true,
+          ...(t.rest != null ? { rest: t.rest } : {}),
         };
       });
       for (const old of prior?.tools ?? []) {
@@ -249,6 +258,8 @@ export class McpRegistry {
         const now = probed.find((p) => p.name === t.name);
         t.present = now !== undefined;
         if (now !== undefined) t.observedSchemaHash = now.schemaHash;
+        // The mapping a REST call is made with stays the SAVED one: a changed mapping is a changed
+        // schema hash, so the tool is unregistered (D-5) until it is previewed and saved again.
       }
       for (const p of probed) {
         if (s.tools.some((t) => t.name === p.name)) continue;
@@ -263,6 +274,7 @@ export class McpRegistry {
           schemaHash: null,
           observedSchemaHash: p.schemaHash,
           present: true,
+          ...(p.rest != null ? { rest: p.rest } : {}),
         });
       }
       s.health = { state: 'ok', consecutiveFailures: 0, checkedAt: stamp, lastError: null };
@@ -294,6 +306,7 @@ export class McpRegistry {
     const t = s.tools.find((x) => x.name === tool);
     return {
       config: configOf(s),
+      rest: t?.rest ?? null,
       annotations: t?.annotations ?? null,
       classOverride: t?.classOverride ?? null,
       registered: s.enabled && t !== undefined && t.enabled && toolStatus(t) === 'registered',
@@ -371,11 +384,30 @@ export class McpRegistry {
 }
 
 function configOf(s: McpServerRecord): McpUpstreamConfig {
-  return { name: s.name, kind: s.kind, command: s.command, args: s.args, url: s.url, auth: s.auth };
+  const base: McpUpstreamConfig = { name: s.name, kind: s.kind, command: s.command, args: s.args, url: s.url, auth: s.auth };
+  if (s.kind !== 'rest') return base;
+  return { ...base, openapiUrl: s.openapiUrl ?? null, openapi: s.openapi ?? null, operations: s.operations ?? null };
 }
 
-function configView(c: McpUpstreamConfig): { name: string; kind: McpUpstreamKind; command: string | null; args: string[]; url: string | null; auth: McpAuthConfig | null } {
-  return { name: c.name, kind: c.kind, command: c.command, args: c.args, url: c.url, auth: c.auth };
+interface ConfigView {
+  name: string;
+  kind: McpUpstreamKind;
+  command: string | null;
+  args: string[];
+  url: string | null;
+  auth: McpAuthConfig | null;
+  openapiUrl?: string | null;
+  operations?: string[] | null;
+}
+
+/** What a response shows of a config. A pasted OpenAPI document is not echoed back. */
+function configView(c: McpUpstreamConfig): ConfigView {
+  const view: ConfigView = { name: c.name, kind: c.kind, command: c.command, args: c.args, url: c.url, auth: c.auth };
+  if (c.kind === 'rest') {
+    view.openapiUrl = c.openapiUrl ?? null;
+    view.operations = c.operations ?? null;
+  }
+  return view;
 }
 
 export function toolStatus(t: Pick<McpToolRecord, 'present' | 'schemaHash' | 'observedSchemaHash'>): McpToolStatus {
@@ -387,6 +419,7 @@ function toolView(server: string, t: McpToolRecord): McpTool {
   const derivedClass = deriveToolClass(t.annotations);
   return {
     name: t.name,
+    ...(t.rest != null ? { rest: t.rest } : {}),
     subject: mcpSubject(server, t.name),
     description: t.description,
     annotations: t.annotations,
