@@ -2,7 +2,9 @@
  * The `/api/v1/skills*` surface (skills keystone, design v3 §API) — a FILE MANAGER over the
  * daemon-owned garden plugin root, with guards on every write/enable and CAS everywhere.
  *
- *   GET  /skills                       manifest + revision + the current snapshot
+ *   GET  /skills                       manifest + revision + the current snapshot + the INSTALLED
+ *                                      plugin's identity (wicked-studio#388: whether the root is
+ *                                      behind the plugin on disk)
  *   GET  /skills/:name/files           the skill's OWN files (nested skills are their own)
  *   GET  /skills/:name/files/*path     typed capped read (`?side=baseline` for the shipped copy)
  *   PUT  /skills/:name/files/*path     write one file (guards; CAS)
@@ -38,6 +40,7 @@ import { z } from 'zod';
 import type { Actor, SkillReadResult } from '../core/types.js';
 import { SkillPathError } from '../skills/contain.js';
 import { finding } from '../skills/guards.js';
+import { installedPluginState } from '../skills/installed.js';
 import type { SkillsRuntime } from '../skills/runtime.js';
 import {
   RevisionMismatchError,
@@ -174,7 +177,9 @@ export function registerSkillsRoutes(app: FastifyInstance, deps: SkillsRouteDeps
       guarded(reply, () => {
         const s = store();
         const manifest = s.manifest();
-        return { manifest, revision: manifest.revision, root: s.root, current: s.currentSnapshot() };
+        // (wicked-studio#388) The plugin ON DISK, so the page can say when the root — and therefore
+        // every published snapshot — is behind the operator's install.
+        return { manifest, revision: manifest.revision, root: s.root, current: s.currentSnapshot(), installed: installedPluginState() };
       }),
   );
 

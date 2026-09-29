@@ -2889,6 +2889,30 @@ export interface SkillsManifestResponse {
      *  `recorded.reasons` is `null` for a row written before per-reason portability (0.34.0). */
     drift?: SnapshotRowDrift[];
   } | null;
+  /**
+   * The wicked-garden plugin INSTALLED on this host right now (wicked-studio#388) — so a surface
+   * can say when the daemon's baseline, and therefore every snapshot published from it, is behind
+   * the operator's install. `null` = no plugin is installed (the unseeded case the 503 covers);
+   * absent on a daemon older than the release carrying it. Compare `installed.baseline` with
+   * `manifest.baseline`: different = Refresh baseline, then Publish.
+   */
+  installed?: InstalledPlugin | null;
+}
+
+/** `SkillsManifestResponse.installed` — the live plugin's identity (wicked-studio#388). */
+export interface InstalledPlugin {
+  source: { kind: SkillSourceKind; path: string; plugin_version: string };
+  /** HEAD sha for a `checkout` source; `null` otherwise (or when git could not answer). */
+  git_sha: string | null;
+  /**
+   * The content hash of the INSTALLED bundle, comparable with `SkillManifest.baseline` — the same
+   * identity `POST /skills/refresh-baseline` decides on, never the version string (two installs of
+   * one version with different bytes are two baselines). `null` when the bundle could not be read,
+   * and then `unreadable` says why: a comparison crew could not make is stated, not reported as
+   * agreement.
+   */
+  baseline: string | null;
+  unreadable: string | null;
 }
 
 /** The identity of a portability-rule table (api-types 0.36.0, F-083): its version and the

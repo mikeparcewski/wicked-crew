@@ -552,8 +552,9 @@ describe('portability per reason on the wire (F-079; api-types 0.34.0)', () => {
     expect(body.skill).toMatchObject({ portable: false, portability: { portable: false, reasons: ['cwd-script', 'skill-dir-var'], evidence: ['skills/gamma/refs/extra.md:1', 'skills/gamma/refs/extra.md:2'] } });
     const after = await manifest();
     expect(after.manifest.skills['wicked-garden-gamma']?.portability?.reasons).toEqual(['cwd-script', 'skill-dir-var']);
-    // The GET shape itself is unchanged: {manifest, revision, root, current}.
-    expect(Object.keys(after).sort()).toEqual(['current', 'manifest', 'revision', 'root']);
+    // The GET shape: {manifest, revision, root, current} plus `installed` — the live plugin's
+    // identity, so a surface can say when the root is behind the install (wicked-studio#388).
+    expect(Object.keys(after).sort()).toEqual(['current', 'installed', 'manifest', 'revision', 'root']);
     // Published: the snapshot row carries the same claim and the view excludes gamma now.
     const pub = await app.inject({ method: 'POST', url: '/api/v1/skills/publish', payload: { expectedRevision: body.revision } });
     expect(pub.statusCode).toBe(200);
