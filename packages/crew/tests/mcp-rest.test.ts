@@ -273,6 +273,11 @@ describe('PROVING (S5a): an unmapped argument is dropped', () => {
     expect(built.url.href).toBe('https://api.example.com/v1/issues/7?expand=x');
     expect(built.droppedArgs).toEqual(['Host', 'extra']);
     expect(Object.keys(built.init.headers).map((h) => h.toLowerCase())).not.toContain('host');
+    // A map wider than the allowlist never sends the extra argument.
+    const wide = { ...tool!.rest, queryMap: { ...tool!.rest.queryMap, token: 'token' } };
+    const narrowed = buildRestRequest({ name: 't', kind: 'rest', command: null, args: [], url: 'https://api.example.com/v1', auth: null }, null, wide, { id: '7', token: 'leak' });
+    expect(narrowed.url.search).toBe('');
+    expect(narrowed.droppedArgs).toEqual(['token']);
   });
 });
 

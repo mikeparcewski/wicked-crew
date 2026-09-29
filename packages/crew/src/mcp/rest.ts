@@ -232,7 +232,8 @@ function paramsOf(doc: Json, pathItem: Json, op: Json): Param[] {
       if (!isObj(p) || typeof p['name'] !== 'string' || p['name'] === '') continue;
       const where = p['in'];
       if (where !== 'path' && where !== 'query' && where !== 'header') continue; // cookie: never mapped
-      merged.set(`${where}:${p['name']}`, {
+      // Header names are case-insensitive: `X-Trace` and `x-trace` are one header, one argument.
+      merged.set(`${where}:${where === 'header' ? p['name'].toLowerCase() : p['name']}`, {
         name: p['name'],
         in: where,
         required: where === 'path' || p['required'] === true,
@@ -498,6 +499,9 @@ export function buildRestRequest(
   if (base === null) throw new RestBoundaryError('the server has no valid base url to pin the request to');
   const allowed = new Set(mapping.argAllowlist);
   const droppedArgs = Object.keys(args).filter((k) => !allowed.has(k)).sort();
+  // Only allowlisted arguments are ever read, whatever the maps say (a map is never wider than it).
+  const sent: Record<string, unknown> = Object.fromEntries(Object.entries(args).filter(([k]) => allowed.has(k)));
+  args = sent;
   const pathValues: Record<string, string> = {};
   for (const [arg, variable] of Object.entries(mapping.pathMap)) {
     if (args[arg] !== undefined) pathValues[variable] = scalar(args[arg], `the path argument ${arg}`);
@@ -517,6 +521,7 @@ export function buildRestRequest(
     if (v === undefined || v === null || forbidden.has(h.toLowerCase())) continue;
     const text = scalar(v, `the header argument ${arg}`);
     if (/[\r\n\0]/.test(text)) throw new UpstreamCallError('protocol', false, `the header argument ${arg} must be one line`);
+    if (Object.keys(headers).some((k) => k.toLowerCase() === h.toLowerCase())) continue; // one argument per header: the first wins
     headers[h] = text;
   }
   let body: string | undefined;
