@@ -17,6 +17,7 @@ import {
   resetBearerAdviceLatch,
   warnIfUnauthorizedWithoutBearer,
 } from '../src/cli/bearer.js';
+import { CrewHttpError, probeFailureMessage } from '../src/cli/mcp.js';
 
 const TOKEN = 'test-crew-token-abc';
 
@@ -83,5 +84,28 @@ describe('warnIfUnauthorizedWithoutBearer', () => {
   it('stays quiet when a bearer was sent, whatever the status', () => {
     expect(warnIfUnauthorizedWithoutBearer(401, { [CLIENT_TOKEN_ENV]: TOKEN }, say)).toBeNull();
     expect(said).toEqual([]);
+  });
+});
+
+// ── `wicked-crew mcp`'s startup probe: a refusal is not unreachability ────────────────────────────
+//
+// `/api/v1/health` is a protected path (`api/auth.ts` isProtectedPath), so under a team runtime with
+// no bearer the mcp server's startup probe gets a 401 — and reporting "Cannot reach daemon" for that
+// is both false and throws away the advice the refusal carries (codex review of #723).
+
+describe('probeFailureMessage', () => {
+  it('reports a refusal as an answer, keeping its body (and the bearer advice)', () => {
+    const advice = missingBearerAdvice({}) ?? '';
+    const refusal = new CrewHttpError(`GET /health → 401: {"error":"unauthorized"}\n${advice}`, 401);
+    const msg = probeFailureMessage(refusal, 7701);
+    expect(msg).toContain('answered the health probe with 401');
+    expect(msg).toContain(CLIENT_TOKEN_ENV);
+    expect(msg).not.toMatch(/Cannot reach daemon/);
+  });
+
+  it('still reports a transport failure as unreachable, with the start command', () => {
+    const msg = probeFailureMessage(new TypeError('fetch failed'), 7701);
+    expect(msg).toContain('Cannot reach daemon at port 7701');
+    expect(msg).toContain('wicked-crew serve --port 7701');
   });
 });
