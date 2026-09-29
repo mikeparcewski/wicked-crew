@@ -279,6 +279,32 @@ describe('PROVING (S5a): an unmapped argument is dropped', () => {
     expect(narrowed.url.search).toBe('');
     expect(narrowed.droppedArgs).toEqual(['token']);
   });
+
+  it('a header is one argument whatever its case', () => {
+    const spec = {
+      openapi: '3.0.3',
+      info: { title: 'Trace', version: '1' },
+      paths: {
+        '/x': {
+          parameters: [{ name: 'X-Trace', in: 'header', schema: { type: 'string' } }],
+          get: { operationId: 'getX', parameters: [{ name: 'x-trace', in: 'header', schema: { type: 'string' } }] },
+        },
+      },
+    };
+    const [tool] = importOpenApi(spec as never, {}).tools;
+    // The import merges the two spellings into one parameter: the operation's wins.
+    expect(tool!.rest.argAllowlist).toEqual(['x-trace']);
+    expect(Object.values(tool!.rest.headerMap)).toEqual(['x-trace']);
+    // A mapping that still carries both spellings sends one header: the first argument wins.
+    const both = { ...tool!.rest, argAllowlist: ['X-Trace', 'x-trace'], headerMap: { 'X-Trace': 'X-Trace', 'x-trace': 'x-trace' } };
+    const built = buildRestRequest(
+      { name: 't', kind: 'rest', command: null, args: [], url: 'https://api.example.com/v1', auth: null },
+      null,
+      both,
+      { 'X-Trace': 'a', 'x-trace': 'b' },
+    );
+    expect(Object.entries(built.init.headers).filter(([k]) => k.toLowerCase() === 'x-trace')).toEqual([['X-Trace', 'a']]);
+  });
 });
 
 describe('PROVING (S5a): an off-host request is refused (I6)', () => {
