@@ -116,7 +116,7 @@ import {
   framedDeliverText,
   runUrlFor,
 } from '../core/deliver-text.js';
-import { resolvePullRequest as resolvePullRequestViaGh, type PullRequestResolution } from '../core/deliver.js';
+import { isGitHubLogin, resolvePullRequest as resolvePullRequestViaGh, type PullRequestResolution } from '../core/deliver.js';
 import type { DocGroundingStore } from '../interactive/doc-grounding.js';
 import { registerInteractiveProxy } from '../interactive/proxy-routes.js';
 import { registerInteractiveDocDelete } from '../interactive/doc-delete-routes.js';
@@ -621,11 +621,16 @@ const isEscalationAction = (a: string | undefined): boolean =>
  *  phase that implements). `request_changes` sends a NOT-PASS review back to the creator with the
  *  findings in context (`amend` = the operator's note). A disagreement between `action` and
  *  `approve` is a 400 that names both. The escalation arms ({@link ESCALATION_ACTIONS}) require
- *  `approve: true` and take no `amend` / `amendScope` / `plan`. */
+ *  `approve: true` and take no `amend` / `amendScope` / `plan`.
+ *
+ *  `amend_intent` (wicked-core#555) approves the gate AND AMENDS THE RUN'S INTENT: `amend` is
+ *  what the acceptance list now says (required, non-empty), `approve: true`, and no `amendScope`
+ *  — an intent amendment reaches every unit at or after the cursor, which is what makes it reach
+ *  the LATER EVALUATOR. It is the only arm that can descope a run mid-flight. */
 export const GateSchema = z.object({
   approve: z.boolean(),
   amend: z.string().optional(),
-  action: z.enum(['approve', 'request_changes', 'reject', 'edit_plan', ...ESCALATION_ACTIONS]).optional(),
+  action: z.enum(['approve', 'request_changes', 'reject', 'edit_plan', 'amend_intent', ...ESCALATION_ACTIONS]).optional(),
   amendScope: z.enum(['cursor', 'creator']).optional(),
   /** DES-TEAMING-002 T3 — approve a `plan_approval` gate WITH AN EDIT (`GateDecision.plan`). */
   plan: PlanSchema.optional(),
@@ -634,8 +639,17 @@ export const GateSchema = z.object({
   ord: z.number().int().nonnegative().optional(),
 }).strict().refine(
   (b) => b.action === undefined
-    || (b.action === 'approve' || b.action === 'edit_plan' || isEscalationAction(b.action)) === b.approve,
-  { message: '`action` disagrees with `approve`: request_changes and reject require approve: false; approve, edit_plan, extend, targeted, accept_partial and accept_suggestion require approve: true', path: ['action'] },
+    || (b.action === 'approve' || b.action === 'edit_plan' || b.action === 'amend_intent' || isEscalationAction(b.action)) === b.approve,
+  { message: '`action` disagrees with `approve`: request_changes and reject require approve: false; approve, edit_plan, amend_intent, extend, targeted, accept_partial and accept_suggestion require approve: true', path: ['action'] },
+).refine(
+  // (wicked-core#555) An intent amendment IS its text: an empty one amends nothing, and the arm's
+  // scope is every unit at or after the cursor — which is what makes it reach the evaluator — so
+  // `amendScope` cannot narrow it. Both are 400s here rather than a 409 from the engine.
+  (b) => b.action !== 'amend_intent' || (b.amend !== undefined && b.amend.trim() !== ''),
+  { message: 'amend_intent needs `amend`: what the run\'s acceptance list now says (approve without an action to proceed unamended)', path: ['amend'] },
+).refine(
+  (b) => b.action !== 'amend_intent' || (b.amendScope === undefined && b.plan === undefined),
+  { message: 'amend_intent takes no amendScope or plan — an intent amendment reaches every unit at or after the cursor, which is what makes it reach the evaluator', path: ['amendScope'] },
 ).refine(
   (b) => !isEscalationAction(b.action) || (b.amend === undefined && b.amendScope === undefined && b.plan === undefined),
   { message: 'extend, targeted, accept_partial and accept_suggestion take no amend, amendScope or plan — the engine re-runs the floor or adopts the pinned edit as it stands', path: ['action'] },
@@ -4777,6 +4791,22 @@ export function registerRoutes(
           .send({ error: 'workerStallMaxEscalations must be an integer between 1 and 10' });
       }
     }
+    // deliverIdentityLogin (crew#549): the login the deliver phase must push as. A typo here
+    // would be an identity the script can never match — every delivery would refuse — so an
+    // invalid value is a 400, never a silently-dropped key. `''` clears it (back to GH_ACCOUNT).
+    // A LOGIN, never a token: the same validator the deliver script's splice uses.
+    if (Object.hasOwn(patch, 'deliverIdentityLogin')) {
+      const login = patch.deliverIdentityLogin;
+      if (typeof login !== 'string' || (login !== '' && !isGitHubLogin(login.trim()))) {
+        return reply.code(400).send({
+          error:
+            'deliverIdentityLogin must be a GitHub login (letters, digits and single hyphens, '
+            + 'up to 39 characters), or "" to fall back to the GH_ACCOUNT environment variable. '
+            + 'It is a login, never a token — the credential stays in gh\'s keyring or GH_TOKEN.',
+        });
+      }
+      if (typeof login === 'string') patch.deliverIdentityLogin = login.trim();
+    }
     // deliverDefault (crew#393): the repo-scoped launch delivery default. Two values only —
     // this knob decides whether completed code runs open PRs, so a typo must be a 400, never
     // a silently-dropped key that leaves the operator believing they flipped it.
@@ -4847,6 +4877,7 @@ export function registerRoutes(
       'workerStallEscalateAction',
       'workerStallMaxEscalations',
       'deliverDefault',
+      'deliverIdentityLogin',
       'baseSkillRef',
       'baseSkillPolicy',
     ];

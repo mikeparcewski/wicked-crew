@@ -46,7 +46,7 @@ import type {
 import { DEFAULT_SETTINGS } from './types.js';
 import { BASE_SKILL_REF_SHAPE } from '../skills/base-skill.js';
 import { execCapped } from './exec.js';
-import { BUG_FIX_SWEEP_INSTRUCTIONS, composeDeliverWorkflow, DELIVER_PHASE_ID, deliverPresetStep, EVIDENCE_FLOOR_PIN } from './deliver.js';
+import { BUG_FIX_SWEEP_INSTRUCTIONS, composeDeliverWorkflow, DELIVER_PHASE_ID, deliverPresetStep, EVIDENCE_FLOOR_PIN, isGitHubLogin } from './deliver.js';
 import { engineCampaignDef, engineRosterJson } from './engine-roster.js';
 import { QE_AUTHOR_TESTS_WORKFLOW_DEF } from '../qe/author-workflow.js';
 import { CAMPAIGN_WORKFLOW_PREFIX } from '../campaigns/plan.js';
@@ -803,7 +803,13 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = ([
     phases: [
       { id: 'churn', kind: 'recon', instructions: "Phase 1/3 CHURN: produce a ranked list of this repo's most actively-changed files and directories over the last ~12 months, plus the repo's real name (manifest or git remote) and parent project. Use the skill's bounded/sampled git-churn method — never stream the whole history. Do not read code deeply yet; the next phase targets these areas.", gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: 'wicked-garden-repo-learn', allowed_skills: [], validator_pin: null },
       { id: 'hotspots', kind: 'recon', instructions: "Phase 2/3 HOTSPOTS: cross-reference the prior churn ranking with wicked-estate hotspot / blast-radius signals to find the load-bearing code, then READ it through the estate shim (`wicked-garden run scripts/_estate_client.py --readonly call …`, the skill's grounding path) to build a real technical understanding of how the system fits together — not a file listing. Reuse wicked-garden-search for the hotspot signals; follow the skill.", gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['churn'], role: 'neutral', skill_ref: 'wicked-garden-repo-learn', allowed_skills: [], validator_pin: null },
-      { id: 'capture', kind: 'build', instructions: "Phase 3/3 CAPTURE: from the prior churn + hotspot understanding, submit durable learnings as estate proposals through the shim's `propose` per the skill's capture contract — BOTH memories (facts / how-it-works) and policies (enforced conventions), one proposal per item, tagged repo/project. Each is inert until human review; never include secrets or personal data; capturing nothing is acceptable.", gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['hotspots'], role: 'creator', skill_ref: 'wicked-garden-repo-learn', allowed_skills: [], validator_pin: null },
+      // (BC-80, wicked-core#535) `requires_capture_report`: the engine's capture-report floor reads
+      // the phase's output marker, so a capture run whose skill loaded and never ran can no longer
+      // report `completed` with 0 proposals — a missing marker, a failed submission and proposals
+      // derived but never submitted each deny into the human gate. An honest 0 passes. The
+      // instruction MANDATES the marker; garden's repo-learn skill carries the same contract, and
+      // the counts land on the unit (`capture_report`), which `GET /runs/:id` serves.
+      { id: 'capture', kind: 'build', instructions: "Phase 3/3 CAPTURE: from the prior churn + hotspot understanding, submit durable learnings as estate proposals through the shim's `propose` per the skill's capture contract — BOTH memories (facts / how-it-works) and policies (enforced conventions), one proposal per item, tagged repo/project. Each is inert until human review; never include secrets or personal data; capturing nothing is acceptable. END your output with the report line `wicked-capture-report {\"derived\": N, \"submitted\": M, \"failed\": K}` — always, including a degrade or a legitimate 0; a submission counts only when the shim answered ok.", gate_type: 'value', gate: 'auto', executes_code: false, requires_capture_report: true, verified_evidence: false, required_deliverables: [], depends_on: ['hotspots'], role: 'creator', skill_ref: 'wicked-garden-repo-learn', allowed_skills: [], validator_pin: null },
     ],
   },
   {
@@ -1686,6 +1692,23 @@ export class CoreAdapter {
     return engineSupportsPlanLaunch();
   }
 
+  /** (crew#549) The CONFIGURED deliver identity — the `deliverIdentityLogin` setting, read at
+   *  launch. Cached on the instance for the synchronous compose paths (`deliverStep`), refreshed
+   *  by every `launchRun`, so a `PUT /settings` takes effect on the next launch and a settings
+   *  read never sits on the launch path twice. `''` ⇒ nothing configured (`GH_ACCOUNT` decides).
+   *  A LOGIN only: no token is ever read here. */
+  private deliverIdentityLogin = '';
+
+  private async refreshDeliverIdentity(): Promise<void> {
+    try {
+      this.deliverIdentityLogin = (await this.getSettings()).deliverIdentityLogin ?? '';
+    } catch {
+      // A settings file that cannot be read leaves the identity unconfigured rather than
+      // failing the launch — the deliver script still cross-checks gh against git's credential.
+      this.deliverIdentityLogin = '';
+    }
+  }
+
   /** The launcher's `deliver` step for a plan (`name` null) or a preset launch (DES-TEAMING-002
    *  §8.5): the engine appends it to the plan and puts it in the floor. */
   private deliverStep(name: string | null, phases: PhaseDef[], input: LaunchRunInput): ReturnType<typeof deliverPresetStep> {
@@ -1695,11 +1718,15 @@ export class CoreAdapter {
       revisesPr: input.revisesPr ?? null,
       ghAccount: process.env['GH_ACCOUNT'] ?? null,
       ghTokenPinned: typeof process.env['GH_TOKEN'] === 'string' && process.env['GH_TOKEN'] !== '',
+      deliverIdentity: this.deliverIdentityLogin,
     });
   }
 
   /** Launch an interactive, resumable run → the run id. */
   async launchRun(input: LaunchRunInput): Promise<string> {
+    // (crew#549) Read the configured deliver identity BEFORE anything composes the deliver
+    // phase: the compose paths below are synchronous and bake it into the script.
+    await this.refreshDeliverIdentity();
     const opts: LaunchOptions = {
       problem: input.problem,
       sessionId: input.sessionId,
@@ -1912,6 +1939,9 @@ export class CoreAdapter {
             revisesPr: input.revisesPr ?? null,
             ghAccount: process.env['GH_ACCOUNT'] ?? null,
             ghTokenPinned: typeof process.env['GH_TOKEN'] === 'string' && process.env['GH_TOKEN'] !== '',
+            // crew#549 — the configured deliver identity, baked into the script so the refusal
+            // holds on a daemon started without GH_ACCOUNT exported.
+            deliverIdentity: this.deliverIdentityLogin,
           });
         }
       }
@@ -3419,6 +3449,18 @@ export class CoreAdapter {
       if ('graphNodeLimit' in parsed) {
         const v = parsed.graphNodeLimit;
         if (typeof v !== 'number' || !Number.isInteger(v) || v < 1 || v > 10000) delete parsed.graphNodeLimit;
+      }
+      // deliverIdentityLogin (crew#549): a LOGIN, and the same charset PUT /settings enforces —
+      // a hand-edited settings.json must not enable a value the API rejects (and must never be
+      // able to put anything but a login into the deliver script's shell literal). Anything else
+      // is dropped, which leaves the identity unconfigured rather than unpinned-and-unsaid.
+      if ('deliverIdentityLogin' in parsed) {
+        const v = parsed.deliverIdentityLogin;
+        if (typeof v !== 'string' || (v.trim() !== '' && !isGitHubLogin(v.trim()))) {
+          delete parsed.deliverIdentityLogin;
+        } else {
+          parsed.deliverIdentityLogin = v.trim();
+        }
       }
       // workerStallMinutes (crew#287): positive minutes; a hand-edited zero/negative/NaN would
       // make the stall watchdog fire on every sweep, so drop it and fall back to the default.
