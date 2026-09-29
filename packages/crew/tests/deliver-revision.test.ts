@@ -247,18 +247,40 @@ describe('RetryIndex — the revised PR hydrates from the run.launched trail ent
 });
 
 describe('the deliver gate card (DES-L9 §4) — push target + identity with its pin source', () => {
+  /** (crew#549) Every card states the credential cross-check: gh's login alone never decided
+   *  which credential `git push` uses, and that difference is what pushed under the wrong
+   *  account on the RC1 rig. */
+  const CROSS = " It refuses if gh's login and git's credential for the remote disagree.";
+
   it('names the revised PR or the new-PR push, and the identity: pinned by GH_TOKEN / keyring / not set', () => {
     expect(deliverGateInstructions({ revisesPr: { number: 273, headRef: HEAD, url: URL_273 }, ghAccount: 'release-bot', ghTokenPinned: true })).toBe(
-      `Pushes wicked/<run> onto pull request #273 (branch ${HEAD}); no new PR. Push identity: GH_ACCOUNT=release-bot, pinned by GH_TOKEN — the phase refuses if gh's login differs at push time.`,
+      `Pushes wicked/<run> onto pull request #273 (branch ${HEAD}); no new PR. Push identity: release-bot (GH_ACCOUNT), pinned by GH_TOKEN — the phase refuses if gh's login differs at push time.${CROSS}`,
     );
     expect(deliverGateInstructions({ ghAccount: 'release-bot', ghTokenPinned: false })).toBe(
-      "Pushes the run branch wicked/<run> to origin and opens a pull request; merge stays human. Push identity: GH_ACCOUNT=release-bot from the gh keyring — the login can change between the check and the push; export GH_TOKEN to pin it. The phase refuses if gh's login differs.",
+      `Pushes the run branch wicked/<run> to origin and opens a pull request; merge stays human. Push identity: release-bot (GH_ACCOUNT) against the gh keyring — the login can change between the check and the push; export GH_TOKEN to pin it. The phase refuses if gh's login differs.${CROSS}`,
     );
     expect(deliverGateInstructions({})).toBe(
-      'Pushes the run branch wicked/<run> to origin and opens a pull request; merge stays human. Push identity: GH_ACCOUNT is not set — pushes as whatever login gh holds.',
+      `Pushes the run branch wicked/<run> to origin and opens a pull request; merge stays human. Push identity: none configured — pushes as whatever login gh holds (set the deliver identity in system settings to pin it).${CROSS}`,
     );
     // Never the token itself.
     expect(deliverGateInstructions({ ghAccount: 'a', ghTokenPinned: true })).not.toMatch(/ghp_|gho_/);
+  });
+
+  it('(crew#549) names WHERE the pin lives: the setting wins over the env var', () => {
+    // "pin it now if it must differ" is not an instruction an operator can follow without
+    // knowing which knob holds the pin.
+    expect(
+      deliverGateInstructions({ deliverIdentity: 'release-bot', ghAccount: 'stale-bot', ghTokenPinned: false }),
+    ).toContain('Push identity: release-bot (the deliver identity setting)');
+    expect(deliverGateInstructions({ ghAccount: 'env-bot' })).toContain('Push identity: env-bot (GH_ACCOUNT)');
+    expect(deliverGateInstructions({})).toContain('set the deliver identity in system settings');
+    for (const card of [
+      deliverGateInstructions({ deliverIdentity: 'release-bot' }),
+      deliverGateInstructions({ ghAccount: 'env-bot' }),
+      deliverGateInstructions({}),
+    ]) {
+      expect(card).toContain(CROSS.trim());
+    }
   });
 });
 

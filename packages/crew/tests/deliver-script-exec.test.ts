@@ -450,7 +450,9 @@ describe('deliver script, driven for real (crew#317)', () => {
   it("a URL username that AGREES with gh is disclosed and the check goes on", async () => {
     const fx = fixture();
     writeFileSync(join(fx.workdir, 'work.ts'), 'export const z = 3;\n');
-    git(fx.workdir, 'remote', 'set-url', 'origin', 'https://release-bot@github.com/o/r.git');
+    // An unroutable loopback port: the identity block runs in full and the fetch after it fails
+    // AT ONCE (connection refused), so this test never waits on the network.
+    git(fx.workdir, 'remote', 'set-url', 'origin', 'https://release-bot@127.0.0.1:1/o/r.git');
     git(fx.workdir, 'config', 'credential.helper', "!printf 'username=release-bot\\npassword=x\\n'");
 
     const r = await runDeliver(fx, { gh: { login: 'release-bot' } });
@@ -464,12 +466,13 @@ describe('deliver script, driven for real (crew#317)', () => {
   it('a credential that names a TOKEN, not an account, is disclosed as unresolved — never a refusal', async () => {
     const fx = fixture();
     writeFileSync(join(fx.workdir, 'work.ts'), 'export const z = 3;\n');
-    git(fx.workdir, 'remote', 'set-url', 'origin', 'https://github.com/o/r.git');
+    // Unroutable loopback again: past the identity block the fetch fails at once (see above).
+    git(fx.workdir, 'remote', 'set-url', 'origin', 'https://127.0.0.1:1/o/r.git');
     git(fx.workdir, 'config', 'credential.helper', "!printf 'username=x-access-token\\npassword=ghp\\n'");
 
     const r = await runDeliver(fx, { gh: { login: 'release-bot' } });
 
-    expect(r.output).toContain("deliver: git's credential for github.com is a token (x-access-token)");
+    expect(r.output).toContain("deliver: git's credential for 127.0.0.1:1 is a token (x-access-token)");
     expect(r.output).toContain('gh reports release-bot');
     expect(r.output).not.toContain('identity mismatch');
     // (It then fails on the unreachable https remote's fetch — the identity block let it through,
