@@ -154,7 +154,7 @@ describe('GET /diagnostics names every subsystem whose phases armed without thei
     const gaps = diag.skills.phaseSkillGaps;
     expect(gaps?.map(withoutRemedy)).toEqual([
       { subsystem: 'interactive-chat', workflow: 'interactive-chat', phases: ['understand', 'revise'], skill: DRAFT, gen: 1, armedAt: 1_700_000_000_000 },
-      { subsystem: 'interactive-draft', workflow: 'interactive-draft', phases: ['outline', 'draft'], skill: DRAFT, gen: 1, armedAt: 1_700_000_000_000 },
+      { subsystem: 'interactive-draft', workflow: 'interactive-draft', phases: ['draft'], skill: DRAFT, gen: 1, armedAt: 1_700_000_000_000 },
       { subsystem: 'interactive-edit', workflow: 'interactive-edit', phases: ['edit'], skill: DRAFT, gen: 1, armedAt: 1_700_000_000_000 },
     ]);
     for (const g of gaps!) {

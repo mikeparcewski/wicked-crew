@@ -615,6 +615,43 @@ describe('interactive bridge trees (F-W1-103)', () => {
     expect(signals).toEqual([]);
   });
 
+  it('a STALE record is no licence for the sweep either: the live lockfile names a DIFFERENT bridge instance on that pid (crew#510)', () => {
+    // Red before the instance check reached the reaper: crew's own bridge on pid 98034 died, an
+    // operator's `wicked-interactive serve --root <same root>` inherited the pid, and the boot
+    // sweep SIGTERMed it on the strength of the dead bridge's record — the one rule this gate
+    // exists to hold ("never kill a process crew did not start").
+    const signals: number[] = [];
+    const reaped = reapOrphansAtBoot({
+      list: () => [WRAPPER_4400, SERVER_4400].join('\n'),
+      cwdInWorktree: () => false,
+      sidecar: sidecars({
+        [PROJ]: { pid: 98034, ownerPid: DEAD_OWNER, bridgeStartedAt: '2026-09-01T00:00:00.000Z' },
+      }),
+      // The bridge answering in that root today started later: a different instance.
+      lock: () => ({ host: '127.0.0.1', port: 4400, pid: 98034, startedAt: '2026-09-29T09:00:00.000Z' }),
+      ownerAlive: ownerGone(DEAD_OWNER),
+      kill: (pid) => signals.push(pid),
+    });
+    expect(reaped).toEqual([]);
+    expect(signals).toEqual([]);
+  });
+
+  it('a record that IS about the live bridge instance is still reaped when its owner is gone', () => {
+    const signals: number[] = [];
+    const reaped = reapOrphansAtBoot({
+      list: () => [WRAPPER_4400, SERVER_4400].join('\n'),
+      cwdInWorktree: () => false,
+      sidecar: sidecars({
+        [PROJ]: { pid: 98034, ownerPid: DEAD_OWNER, bridgeStartedAt: '2026-09-29T09:00:00.000Z' },
+      }),
+      lock: () => ({ host: '127.0.0.1', port: 4400, pid: 98034, startedAt: '2026-09-29T09:00:00.000Z' }),
+      ownerAlive: ownerGone(DEAD_OWNER),
+      kill: (pid) => signals.push(pid),
+    });
+    expect(reaped.sort(byNumber)).toEqual([96633, 98034]);
+    expect(signals.sort(byNumber)).toEqual([96633, 98034]);
+  });
+
   it('the live sweep escalates an interactive tree like any orphan: SIGTERM on sight, SIGKILL for whatever is still listed one tick later', () => {
     const signals: Array<[number, NodeJS.Signals | 0]> = [];
     const io = {

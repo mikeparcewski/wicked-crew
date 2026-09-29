@@ -324,11 +324,26 @@ describe('resolveProjectRepo (CREW-UX-8: the project → repo binding)', () => {
 describe('the interactive-draft workflow def (workflows-as-data)', () => {
   const def = INTERACTIVE_DRAFT_WORKFLOW_DEF;
 
-  it('is outline → draft, creator-role build second, unique phase ids', () => {
+  it('is ONE creator phase that plans then writes — no neutral recon phase can author the deliverable (crew#621)', () => {
+    // Red before the collapse: the def was ['outline', 'draft'], and the neutral `outline` phase —
+    // instructed "Do NOT write HTML and do NOT create any files in this phase" — authored the whole
+    // 26.6 KB document in its output for the creator to paste. A phase whose instruction the run
+    // ignores is not a phase; the split is deleted rather than gated.
     expect(def.id).toBe(INTERACTIVE_DRAFT_WORKFLOW);
-    expect(def.phases.map((p) => p.id)).toEqual(['outline', 'draft']);
-    expect(def.phases[1]?.role).toBe('creator');
-    expect(def.phases[1]?.depends_on).toEqual(['outline']);
+    expect(def.phases.map((p) => p.id)).toEqual(['draft']);
+    expect(def.phases[0]?.role).toBe('creator');
+    expect(def.phases[0]?.kind).toBe('build');
+    expect(def.phases[0]?.depends_on).toEqual([]);
+    expect(def.phases.some((p) => p.kind === 'recon')).toBe(false);
+    expect(def.phases.some((p) => p.role === 'neutral')).toBe(false);
+  });
+
+  it('the one phase is told to PLAN first and then WRITE, and to leave no placeholder copy (crew#621/#504)', () => {
+    const draft = def.phases[0]?.instructions ?? '';
+    expect(draft).toMatch(/PLAN, then WRITE/);
+    expect(draft).toMatch(/state a short outline/i);
+    expect(draft).toMatch(/NO placeholder copy/i);
+    expect(draft).toMatch(/label every mock visibly/i);
   });
 
   it('keeps every phase instruction single-line (the same PTY constraint as the problem)', () => {
@@ -347,7 +362,7 @@ describe('the interactive-draft workflow def (workflows-as-data)', () => {
   });
 
   it('carries the draft-production contract from the assist skill (Step 5), adapted', () => {
-    const draft = def.phases[1]?.instructions ?? '';
+    const draft = def.phases[0]?.instructions ?? '';
     expect(draft).toContain('data-wid'); // the INV-2 discipline: never mint anchors
     expect(draft).toMatch(/do NOT add data-wid/i);
     expect(draft).toContain('self-contained HTML');
@@ -585,14 +600,14 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     const before = beats();
     await waitFor(() => beats() >= before + 2);
 
-    // Phase transition narration folds the run's own events into the thread. 2/3, not 2/2: the
+    // Phase transition narration folds the run's own events into the thread. 1/2, not 1/1: the
     // run carries the crew#311 deliverable floor as a third unit.
-    engine.fire({ type: 'unitDispatched', session: launch.sessionId, ord: 2, attempt: 0 });
+    engine.fire({ type: 'unitDispatched', session: launch.sessionId, ord: 1, attempt: 0 });
     await waitFor(() =>
       probeEvents.some(
         (e) =>
           e.event_type === STATUS_POSTED &&
-          String((e.payload as { message?: string }).message).includes('2/3'),
+          String((e.payload as { message?: string }).message).includes('1/2'),
       ),
     );
 
@@ -604,16 +619,16 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
           e.event_type === STATUS_POSTED &&
           String((e.payload as { message?: string }).message).includes(needle),
       );
-    engine.fire({ type: 'councilConvened', session: launch.sessionId, ord: 2, clis: ['a', 'b', 'c'] });
+    engine.fire({ type: 'councilConvened', session: launch.sessionId, ord: 1, clis: ['a', 'b', 'c'] });
     await waitFor(narrated('3-seat council'));
-    engine.fire({ type: 'unitDistributed', session: launch.sessionId, ord: 2, cli: 'stub', agreement_pct: 100 });
+    engine.fire({ type: 'unitDistributed', session: launch.sessionId, ord: 1, cli: 'stub', agreement_pct: 100 });
     await waitFor(narrated('picked stub'));
     // wicked-core#590 S5: a `teamed` frame (no council convened; the council-only fields are null)
     // is narrated as a routing, never as a council pick.
     engine.fire({
       type: 'unitDistributed',
       session: launch.sessionId,
-      ord: 2,
+      ord: 1,
       cli: 'stub',
       routingMethod: 'teamed',
       agreementPct: null,
@@ -631,16 +646,16 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
           /council|agreement|picked/i.test(String((e.payload as { message?: string }).message)),
       ),
     ).toEqual([]);
-    engine.fire({ type: 'toolInvoked', session: launch.sessionId, ord: 2, attempt: 0, tools: ['Write', 'Write', 'Read'] });
+    engine.fire({ type: 'toolInvoked', session: launch.sessionId, ord: 1, attempt: 0, tools: ['Write', 'Write', 'Read'] });
     await waitFor(narrated('using Write, Read'));
-    engine.fire({ type: 'gateDecided', session: launch.sessionId, ord: 2, allow: true });
+    engine.fire({ type: 'gateDecided', session: launch.sessionId, ord: 1, allow: true });
     await waitFor(narrated('checking the file landed'));
     // Wave 6: the honest gate (F-7R2-005) and the fenced worker (F-7R2-012) reach the thread, and
     // every line is stamped per run + unit (F-4R2-005) so a skin keys narration per unit.
     engine.fire({
       type: 'gateEvaluated',
       session: launch.sessionId,
-      ord: 2,
+      ord: 1,
       ungated: true,
       ungatedReason: 'no judge: no eligible judge seat distinct from creator `stub`',
     } as unknown as CoreEvent);
@@ -648,7 +663,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     engine.fire({
       type: 'workerToolCallDenied',
       session: launch.sessionId,
-      ord: 2,
+      ord: 1,
       attempt: 0,
       cli: 'stub',
       carrier: 'acp',
@@ -663,13 +678,13 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
       (e) => e.event_type === STATUS_POSTED && String((e.payload as { message?: string }).message).includes('UNGATED'),
     );
     expect((stamped!.payload as { run_id?: string }).run_id).toBe(launch.sessionId);
-    expect((stamped!.payload as { unit_ord?: number }).unit_ord).toBe(2);
+    expect((stamped!.payload as { unit_ord?: number }).unit_ord).toBe(1);
     // The floor's own gate is what says "landing it now" — the draft is announced once the
     // FILE is verified, never on the strength of the worker's reply alone (crew#311).
-    engine.fire({ type: 'unitDispatched', session: launch.sessionId, ord: 3, attempt: 0 });
-    await waitFor(narrated('3/3'));
-    engine.fire({ type: 'gateDecided', session: launch.sessionId, ord: 3, allow: true });
-    await waitFor(narrated('landing it now'));
+    engine.fire({ type: 'unitDispatched', session: launch.sessionId, ord: 2, attempt: 0 });
+    await waitFor(narrated('2/2'));
+    engine.fire({ type: 'gateDecided', session: launch.sessionId, ord: 2, allow: true });
+    await waitFor(narrated('re-deriving the draft floor'));
 
     // The worker "wrote" the draft; completion announces it by path with the deterministic key.
     mkdirSync(join(draftDir, 'spike-doc'), { recursive: true });
@@ -777,6 +792,167 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     expect(sub!.ledger.get('spike-doc')?.failedAt).toBeTruthy();
   });
 
+  // ── crew#621 / crew#504: the document floor, re-derived by crew ────────────────────────────
+  //
+  // Both agent phases used to gate `ungated: true`, so a document that breached the brief's hard
+  // constraints — a ~3.4-page web layout for a two-page A4 brief, literal placeholder copy,
+  // invented "acceptance record" proof rows — reached the canvas as "done" on the worker's word.
+  // The seam now re-runs the `wicked-garden-draft` self-check on the SAVED file before it
+  // announces, and a breach fails the draft naming the rule.
+  it('does NOT land a draft that breaches the document floor: no draft.completed, an error naming the rule, the failure recorded', async () => {
+    const bus = await import('wicked-bus');
+    const engine = fakeAdapter();
+    const draftDir = join(dir, 'drafts');
+    const checked: string[] = [];
+    const sub = await startInteractiveDraftSubscriber(engine.asAdapter(), {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'ledger.json'),
+      draftDir,
+      clisJson: SEATS,
+      skillHeld: () => true, // the floor is armed only when the skill is published
+      draftFloorIo: {
+        gardenRoot: () => '/garden',
+        run: async (argv: string[]) => {
+          checked.push(argv.join(' '));
+          return {
+            stdout: JSON.stringify({
+              checks: {
+                claims: { ok: false, by_kind: { placeholder: 1, 'mock-unlabelled': 1 } },
+                contrast: { ok: true, contrast_failures: 0, size_failures: 0 },
+                pages: { pages: 4, budget: 2, exact: true, verified: false, summary: 'pages: 4 (html-estimate)' },
+              },
+            }),
+            code: 1,
+          };
+        },
+      },
+      log: () => {},
+    });
+    subs.push(sub!);
+    armProbe(bus);
+
+    // "two pages" in the brief → an exact budget of 2, which the floor is run with.
+    await emitDocCreated(bus, 'spike-doc', { project_id: 'proj-7', brief: 'a two pages A4 brochure' });
+    await waitFor(() => engine.launches.length === 1);
+    const launch = engine.launches[0]!;
+    const outPath = join(draftDir, 'spike-doc', 'spike-doc-v1.html');
+    mkdirSync(join(draftDir, 'spike-doc'), { recursive: true });
+    writeFileSync(outPath, '<html><body><p>TODO: the customer quote</p></body></html>', 'utf8');
+    engine.fire({ type: 'sessionCompleted', session: launch.sessionId });
+
+    await waitFor(() =>
+      probeEvents.some(
+        (e) =>
+          e.event_type === STATUS_POSTED &&
+          (e.payload as { state?: string }).state === 'error' &&
+          String((e.payload as { message?: string }).message).includes('document floor'),
+      ),
+    );
+    const err = probeEvents
+      .filter((e) => e.event_type === STATUS_POSTED && (e.payload as { state?: string }).state === 'error')
+      .pop()!;
+    const message = String((err.payload as { message?: string }).message);
+    expect(message).toContain('1 placeholder');
+    expect(message).toContain('1 mock-unlabelled');
+    expect(message).toContain('budget is 2 printed page(s)');
+    expect(message).toContain(outPath);
+    // The check ran on the SAVED file, with the budget the brief implied.
+    expect(checked[0]).toContain(outPath);
+    expect(checked[0]).toContain('--pages 2 --exact');
+    // Nothing was landed on the canvas, and the doc is not marked emitted.
+    await new Promise((r) => setTimeout(r, 200));
+    expect(probeEvents.filter((e) => e.event_type === DRAFT_COMPLETED)).toEqual([]);
+    expect(sub!.ledger.get('spike-doc')?.emittedAt).toBeUndefined();
+  });
+
+  it('keeps the document BUSY while the floor is still judging it — an iteration ask must not race the first draft (codex on crew#725)', async () => {
+    // Red before the finalizing gate: `sessionCompleted` dropped the doc from `inFlight` before
+    // the (up to 120 s) floor ran, so `inFlightDocs()` — what the chat seam serializes asks on —
+    // reported the doc idle while its first draft was still being judged.
+    const bus = await import('wicked-bus');
+    const engine = fakeAdapter();
+    const draftDir = join(dir, 'drafts');
+    let release: (() => void) | null = null;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    const sub = await startInteractiveDraftSubscriber(engine.asAdapter(), {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'ledger.json'),
+      draftDir,
+      clisJson: SEATS,
+      skillHeld: () => true,
+      draftFloorIo: {
+        gardenRoot: () => '/garden',
+        run: async () => {
+          await held; // the floor is still running
+          return { stdout: JSON.stringify({ checks: { claims: { ok: true }, contrast: { ok: true } } }), code: 0 };
+        },
+      },
+      log: () => {},
+    });
+    subs.push(sub!);
+
+    await emitDocCreated(bus, 'spike-doc', { project_id: 'proj-7' });
+    await waitFor(() => engine.launches.length === 1);
+    const launch = engine.launches[0]!;
+    const outPath = join(draftDir, 'spike-doc', 'spike-doc-v1.html');
+    mkdirSync(join(draftDir, 'spike-doc'), { recursive: true });
+    writeFileSync(outPath, '<html><body><h1>Draft</h1></body></html>', 'utf8');
+    engine.fire({ type: 'sessionCompleted', session: launch.sessionId });
+
+    // The run is terminal and its flight is gone, but the doc is NOT free: the floor is judging it.
+    await new Promise((r) => setTimeout(r, 100));
+    expect(sub!.inFlightDocs()).toContain('spike-doc');
+    release!();
+    await waitFor(() => sub!.ledger.get('spike-doc')?.emittedAt !== undefined);
+    await waitFor(() => !sub!.inFlightDocs().includes('spike-doc'));
+  });
+
+  it('lands the draft when the floor passes, and discloses a floor that could not be re-derived', async () => {
+    const bus = await import('wicked-bus');
+    const engine = fakeAdapter();
+    const draftDir = join(dir, 'drafts');
+    const sub = await startInteractiveDraftSubscriber(engine.asAdapter(), {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'ledger.json'),
+      draftDir,
+      clisJson: SEATS,
+      skillHeld: () => true,
+      // No plugin root on this machine: the floor cannot run, which is DISCLOSED, never a pass
+      // and never a failure of document generation.
+      draftFloorIo: { gardenRoot: () => null },
+      log: () => {},
+    });
+    subs.push(sub!);
+    armProbe(bus);
+
+    await emitDocCreated(bus, 'spike-doc', { project_id: 'proj-7' });
+    await waitFor(() => engine.launches.length === 1);
+    const launch = engine.launches[0]!;
+    const outPath = join(draftDir, 'spike-doc', 'spike-doc-v1.html');
+    mkdirSync(join(draftDir, 'spike-doc'), { recursive: true });
+    writeFileSync(outPath, '<html><body><h1>Draft</h1></body></html>', 'utf8');
+    engine.fire({ type: 'sessionCompleted', session: launch.sessionId });
+
+    await waitFor(() => probeEvents.some((e) => e.event_type === DRAFT_COMPLETED));
+    expect(
+      probeEvents.some(
+        (e) =>
+          e.event_type === STATUS_POSTED &&
+          String((e.payload as { message?: string }).message).includes('could not be re-derived'),
+      ),
+      'the reader is told the floor did not run',
+    ).toBe(true);
+    expect(sub!.ledger.get('spike-doc')?.emittedAt).toBeTruthy();
+  });
+
   // ── crew#311: the deliverable floor ────────────────────────────────────────────────────────
   //
   // THE REPRODUCER, at the seam. A draft run's worker had its Write policy-denied, so no file
@@ -818,12 +994,12 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     engine.fire({
       type: 'stepFailed',
       session: launch.sessionId,
-      ord: 3,
+      ord: 2,
       attempt: 0,
       detail: denied,
       failureKind: 'workerError',
     });
-    engine.fire({ type: 'sessionFailed', session: launch.sessionId, ord: 3 });
+    engine.fire({ type: 'sessionFailed', session: launch.sessionId, ord: 2 });
 
     await waitFor(() =>
       probeEvents.some(

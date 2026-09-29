@@ -65,7 +65,14 @@
 
 import { spawnSync } from 'node:child_process';
 import { isAbsolute } from 'node:path';
-import { ownerAlive, readCrewSidecar, type CrewSidecar } from '../interactive/bridge-pool.js';
+import {
+  ownerAlive,
+  readCrewSidecar,
+  readLock,
+  sidecarNamesBridge,
+  type CrewSidecar,
+  type LiveBridge,
+} from '../interactive/bridge-pool.js';
 import { childEnvWithBootEstateDb } from './governance-store.js';
 
 /**
@@ -308,14 +315,27 @@ export function parseOrphanedInteractiveBridges(listing: string): OrphanedIntera
  * (`ownerStartedAt` no longer matches — a recycled pid must not keep a bridge alive for weeks). A
  * live owner (the spawner, or a daemon that adopted the bridge and stamped itself) is using it; a
  * sidecar without an owner is of unproven ownership and left alone.
+ *
+ * A recorded pid is not a recorded BRIDGE (crew#510, codex review): the sidecar must also be about
+ * the bridge whose lockfile is live in that root — `sidecarNamesBridge`, the same judgement the
+ * pool's adopt path makes. Without it a record left by crew's own bridge that died licensed a kill
+ * of whatever process later inherited its pid under that root (an operator's
+ * `wicked-interactive serve`, another daemon's pool), which is the one rule this gate exists to
+ * hold. A root whose lockfile is gone or names another pid keeps today's behaviour: the pid is
+ * judged on the record alone, because there is no live bridge to compare it with.
  */
 function orphanedInteractiveTargets(listing: string, io: BridgeReaperIo): number[] {
   const sidecarOf = io.sidecar ?? readCrewSidecar;
+  const lockOf = io.lock ?? readLock;
   const isOwnerAlive = io.ownerAlive ?? ownerAlive;
   const targets: number[] = [];
   for (const { root, pids } of parseOrphanedInteractiveBridges(listing)) {
     const sidecar = sidecarOf(root);
     if (sidecar === null || !pids.includes(sidecar.pid)) continue;
+    const live = lockOf(root);
+    // The live bridge on that pid is a DIFFERENT instance than the one crew recorded: the record
+    // is stale and licenses nothing.
+    if (live !== null && live.pid === sidecar.pid && sidecarNamesBridge(sidecar, live) !== 'names-it') continue;
     const owner = sidecar.ownerPid;
     if (owner === undefined || !Number.isInteger(owner) || owner <= 0) continue; // unproven ownership: not ours to kill
     if (isOwnerAlive(sidecar)) continue; // the same daemon incarnation still owns it
@@ -471,6 +491,9 @@ export interface BridgeReaperIo {
   list?: () => string | null;
   /** Interactive-orphan gate: crew's sidecar for a docs root (F-W1-103); injectable so tests avoid real files. */
   sidecar?: (root: string) => CrewSidecar | null;
+  /** Interactive-orphan gate: the live `.wi-serve.json` for a docs root, so a sidecar is checked
+   *  against the bridge INSTANCE and not just its pid (crew#510). Injectable for tests. */
+  lock?: (root: string) => LiveBridge | null;
   /** Interactive-orphan gate: is the daemon the sidecar names as owner still THAT daemon — pid AND
    *  start time ({@link ownerAlive}), so a recycled pid reads as "owner gone"? Injectable for tests. */
   ownerAlive?: (sidecar: CrewSidecar) => boolean;

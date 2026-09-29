@@ -14,6 +14,14 @@ export function canSymlink(): boolean {
   } catch {
     return false;
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    // The probe must ANSWER, never throw (crew#488): a cleanup that fails — a read-only or
+    // vanished temp dir, a Windows handle still open — would turn `skipIf(!canSymlink())` into a
+    // hard error in the suites this guard exists to keep runnable. A leftover temp dir under
+    // `tmpdir()` is the lesser cost, and the OS reclaims it.
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* the probe's answer is what matters */
+    }
   }
 }

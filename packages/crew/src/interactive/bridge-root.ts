@@ -53,10 +53,15 @@ export const ROOT_ENV = 'WICKED_INTERACTIVE_ROOT';
 export const PROJECTS_DIR = 'projects';
 
 /**
- * A project id that can be a directory name: one path segment, no separators, never `.`/`..`.
- * Engine-minted ids are `proj_<ms><seq>`; the reserved `default` never reaches this check.
+ * A project id that can be a directory name: one path segment, no separators, never `.`/`..`, and
+ * BOUNDED (crew#488). Engine-minted ids are `proj_<ms><seq>`; the reserved `default` never reaches
+ * this check. Shape alone let an absurdly long id through, and a directory-name limit is per
+ * platform (255 bytes on ext4/APFS, and the whole path is capped on Windows), so an over-long
+ * segment failed as an opaque `mkdir` error in the bridge pool rather than as the refusal this
+ * check exists to give. 128 is well inside every platform's limit and far above any minted id.
  */
-const PARTITION_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+export const PARTITION_SEGMENT_MAX = 128;
+const PARTITION_SEGMENT = new RegExp(`^[A-Za-z0-9][A-Za-z0-9._-]{0,${PARTITION_SEGMENT_MAX - 1}}$`);
 
 /**
  * The SHARED default docs root: `<crew state home>/interactive/docs` (crew 0.7.35, D-L7-1 /
@@ -150,7 +155,11 @@ export function legacyHomeDocsNotice(
  */
 export function partitionedInteractiveRoot(projectId: string, stateHome: string = crewStateHome()): string {
   if (!PARTITION_SEGMENT.test(projectId)) {
-    throw new Error(`project id ${JSON.stringify(projectId)} cannot name an interactive docs partition`);
+    throw new Error(
+      `project id ${JSON.stringify(projectId.slice(0, PARTITION_SEGMENT_MAX))}${projectId.length > PARTITION_SEGMENT_MAX ? '…' : ''} ` +
+        `cannot name an interactive docs partition (one path segment of at most ${PARTITION_SEGMENT_MAX} characters, ` +
+        `starting with a letter or digit)`,
+    );
   }
   return resolve(partitionsBase(stateHome), projectId);
 }

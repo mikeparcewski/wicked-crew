@@ -15,11 +15,16 @@ import { INTERACTIVE_DRAFT_WORKFLOW_DEF } from '../src/interactive/draft-events.
 import { INTERACTIVE_EDIT_WORKFLOW_DEF } from '../src/interactive/edit-events.js';
 import {
   DRAFT_SELF_CHECK_LAUNCHER,
+  DRAFT_SELF_CHECK_SCRIPT,
   DRAFT_SKILL,
+  draftFloorArgv,
+  draftFloorVerdict,
   draftQualityClause,
   draftSkillArmLine,
   pageBudgetFor,
+  runDraftFloor,
   withDraftSkill,
+  type PageBudget,
 } from '../src/interactive/draft-skill.js';
 import { SkillsRuntime } from '../src/skills/runtime.js';
 import type { SkillsStore } from '../src/skills/store.js';
@@ -43,12 +48,12 @@ describe('withDraftSkill', () => {
       ...INTERACTIVE_DRAFT_WORKFLOW_DEF,
       phases: [
         ...INTERACTIVE_DRAFT_WORKFLOW_DEF.phases,
-        { ...INTERACTIVE_DRAFT_WORKFLOW_DEF.phases[1]!, id: 'floor', executor: { type: 'tool', cmd: ['true'] } },
+        { ...INTERACTIVE_DRAFT_WORKFLOW_DEF.phases[0]!, id: 'floor', executor: { type: 'tool', cmd: ['true'] } },
       ],
     };
     const out = withDraftSkill(def, true);
-    expect(out.phases[2]!.skill_ref).toBeNull();
-    expect(out.phases[1]!.skill_ref).toBe(DRAFT_SKILL);
+    expect(out.phases[1]!.skill_ref).toBeNull();
+    expect(out.phases[0]!.skill_ref).toBe(DRAFT_SKILL);
   });
 });
 
@@ -164,5 +169,179 @@ describe('a seam registers the STAMPED def only when the snapshot holds the skil
     subs.push(sub2!);
     expect(bare.registered[0]!.phases.map((p) => p.skill_ref)).toEqual([null, null]);
     expect(bare.logs.some((l) => l.includes("does not hold 'wicked-garden-draft'"))).toBe(true);
+  });
+});
+
+// ── THE DRAFT FLOOR: crew re-derives the skill's verdict from the artifact (crew#621 / crew#504) ──
+//
+// Before this, both agent phases of `interactive-draft` gated `ungated: true` and the only thing
+// between a breaching document and the user's canvas was the worker's own word: the brochure that
+// shipped was a ~3.4-page web layout for a two-page A4 brief, with literal placeholder copy and
+// invented "acceptance record" proof rows. Crew cannot pin an engine validator (no vault
+// provisioning through napi), so it re-runs the skill's own self-check on the SAVED file and
+// judges its report. These pin that judgement.
+
+const EXACT_2: PageBudget = { pages: 2, exact: true, source: 'brief' };
+const NO_BUDGET: PageBudget = { pages: null, exact: false, source: 'style-default' };
+
+/** A self-check report shaped like `scripts/draft/self_check.py --json`. */
+function report(over: {
+  claims?: boolean;
+  byKind?: Record<string, number>;
+  contrast?: boolean;
+  contrastFailures?: number;
+  pages?: number | null;
+  pagesVerified?: boolean;
+} = {}): unknown {
+  return {
+    check: 'draft-self-check',
+    verdict: 'PASS',
+    checks: {
+      claims: { ok: over.claims ?? true, by_kind: over.byKind ?? {}, findings: [], summary: 'claims: clean' },
+      contrast: {
+        ok: over.contrast ?? true,
+        contrast_failures: over.contrastFailures ?? 0,
+        size_failures: 0,
+        summary: 'contrast: ok',
+      },
+      pages: {
+        pages: over.pages === undefined ? 2 : over.pages,
+        budget: 2,
+        exact: true,
+        verified: over.pagesVerified ?? true,
+        summary: 'pages: 2 (chrome-render) vs budget = 2 — within',
+      },
+    },
+  };
+}
+
+describe('draftFloorVerdict — the rule named, and only what a count without a render can prove', () => {
+  it('a clean report passes', () => {
+    expect(draftFloorVerdict(report(), EXACT_2)).toEqual({
+      verdict: 'pass',
+      breaches: [],
+      summary: 'the draft floor met every rule on the saved document',
+    });
+  });
+
+  it('failed claims are a breach naming the finding kinds and the rule (crew#504: placeholder copy, unlabelled mock evidence)', () => {
+    const v = draftFloorVerdict(report({ claims: false, byKind: { placeholder: 1, 'mock-unlabelled': 2 } }), EXACT_2);
+    expect(v.verdict).toBe('fail');
+    expect(v.breaches).toHaveLength(1);
+    expect(v.breaches[0]).toContain('1 placeholder');
+    expect(v.breaches[0]).toContain('2 mock-unlabelled');
+    expect(v.breaches[0]).toMatch(/no placeholder copy may ship/);
+  });
+
+  it('failed contrast is a breach naming the pair count and the floor', () => {
+    const v = draftFloorVerdict(report({ contrast: false, contrastFailures: 3 }), EXACT_2);
+    expect(v.verdict).toBe('fail');
+    expect(v.breaches[0]).toContain('3 text/background pair(s) below the 4.5:1 floor');
+  });
+
+  it('a page count ABOVE the budget is a page-size/count breach — even unverified, because the count is a lower bound', () => {
+    const v = draftFloorVerdict(report({ pages: 4, pagesVerified: false }), EXACT_2);
+    expect(v.verdict).toBe('fail');
+    expect(v.breaches[0]).toContain('budget is 2 printed page(s) exactly');
+    expect(v.breaches[0]).toContain('declares 4');
+  });
+
+  it('a page count BELOW an exact budget is NOT a breach — only a render can judge that, so it is reported unverified', () => {
+    const v = draftFloorVerdict(report({ pages: 1, pagesVerified: false }), EXACT_2);
+    expect(v.verdict).toBe('unverified');
+    expect(v.breaches).toEqual([]);
+    expect(v.summary).toMatch(/page count is UNVERIFIED/);
+  });
+
+  it('every breach is reported together, not just the first', () => {
+    const v = draftFloorVerdict(
+      report({ claims: false, byKind: { 'cite-off': 9 }, contrast: false, pages: 4 }),
+      EXACT_2,
+    );
+    expect(v.verdict).toBe('fail');
+    expect(v.breaches).toHaveLength(3);
+    expect(v.summary).toContain('3 breach(es)');
+  });
+
+  it('no page budget (a web page / prose doc) never produces a page breach', () => {
+    expect(draftFloorVerdict(report({ pages: 9 }), NO_BUDGET).verdict).toBe('pass');
+  });
+
+  it('an answer that is not the report is UNAVAILABLE — never rounded to a pass (codex review)', () => {
+    expect(draftFloorVerdict(null, EXACT_2).verdict).toBe('unavailable');
+    expect(draftFloorVerdict('boom', EXACT_2).verdict).toBe('unavailable');
+    // Red before the review fix: `{}` and a schema drift judged nothing and answered `pass`, so a
+    // breaching draft landed on a self-check whose report the floor could not read.
+    expect(draftFloorVerdict({}, EXACT_2).verdict).toBe('unavailable');
+    expect(draftFloorVerdict({ checks: {} }, EXACT_2).verdict).toBe('unavailable');
+    expect(draftFloorVerdict({ checks: { claims: { ok: true } } }, EXACT_2).verdict).toBe('unavailable');
+    expect(draftFloorVerdict({ checks: { claims: { ok: 'yes' }, contrast: { ok: true } } }, EXACT_2).verdict).toBe(
+      'unavailable',
+    );
+    const drifted = draftFloorVerdict({ ...(report() as object), verdict: 'FAIL', failed: ['claims'] }, EXACT_2);
+    expect(drifted.verdict, 'a report that declares itself FAILED is never a pass').toBe('fail');
+    expect(drifted.breaches[0]).toContain('reports FAIL on claims');
+  });
+});
+
+describe('draftFloorArgv — the same inputs the worker clause names, minus --render', () => {
+  it('names the launcher, the script, the budget, the snapshots and --json; never --render', () => {
+    const argv = draftFloorArgv('/garden', '/out/doc.html', EXACT_2, ['/snap/a', '/snap/b']);
+    expect(argv[0]).toBe(join('/garden', 'scripts', 'wicked-garden.mjs'));
+    expect(argv.slice(1, 4)).toEqual(['run', DRAFT_SELF_CHECK_SCRIPT, '/out/doc.html']);
+    expect(argv).toContain('--exact');
+    expect(argv.join(' ')).toContain('--pages 2');
+    expect(argv.join(' ')).toContain('--repo /snap/a --repo /snap/b');
+    expect(argv).toContain('--json');
+    expect(argv).not.toContain('--render');
+  });
+
+  it('a web page has no page budget and is judged on screen; no snapshot means no --repo', () => {
+    const argv = draftFloorArgv('/garden', '/out/doc.html', NO_BUDGET, [], { style: 'web' });
+    expect(argv).toContain('--no-pages');
+    expect(argv.join(' ')).toContain('--mode screen --min-font-pt 0');
+    expect(argv).not.toContain('--repo');
+  });
+});
+
+describe('runDraftFloor — never throws, and a floor that cannot run says so', () => {
+  it('no installed garden plugin root → unavailable, naming what could not be run', async () => {
+    const v = await runDraftFloor('/out/doc.html', EXACT_2, [], {}, { gardenRoot: () => null });
+    expect(v.verdict).toBe('unavailable');
+    expect(v.summary).toContain(DRAFT_SELF_CHECK_SCRIPT);
+  });
+
+  it('a non-JSON answer (no Python behind the launcher) → unavailable with the exit code', async () => {
+    const v = await runDraftFloor('/out/doc.html', EXACT_2, [], {}, {
+      gardenRoot: () => '/garden',
+      run: async () => ({ stdout: 'Traceback (most recent call last):', code: 1 }),
+    });
+    expect(v.verdict).toBe('unavailable');
+    expect(v.summary).toContain('exited 1');
+  });
+
+  it('a spawn that throws → unavailable, never a rejection the seam has to catch', async () => {
+    const v = await runDraftFloor('/out/doc.html', EXACT_2, [], {}, {
+      gardenRoot: () => '/garden',
+      run: async () => {
+        throw new Error('spawn ENOENT');
+      },
+    });
+    expect(v.verdict).toBe('unavailable');
+    expect(v.summary).toContain('spawn ENOENT');
+  });
+
+  it('runs the check on the saved file and answers its verdict', async () => {
+    const seen: string[][] = [];
+    const v = await runDraftFloor('/out/doc.html', EXACT_2, ['/snap'], { style: 'brochure' }, {
+      gardenRoot: () => '/garden',
+      run: async (argv) => {
+        seen.push(argv);
+        return { stdout: JSON.stringify(report({ claims: false, byKind: { placeholder: 1 } })), code: 1 };
+      },
+    });
+    expect(v.verdict).toBe('fail');
+    expect(v.breaches[0]).toContain('1 placeholder');
+    expect(seen[0]?.join(' ')).toContain('--repo /snap');
   });
 });

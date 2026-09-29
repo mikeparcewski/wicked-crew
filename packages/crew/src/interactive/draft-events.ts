@@ -44,7 +44,10 @@ import {
   draftQualityClause,
   draftSkillArmLine,
   pageBudgetFor,
+  runDraftFloor,
   withDraftSkill,
+  type DraftFloorIo,
+  type PageBudget,
   type SkillHeld,
 } from './draft-skill.js';
 import { crewStateHome } from '../projects/state-home.js';
@@ -150,9 +153,28 @@ export const GROUNDING_BINDING_WAIT_MS = 3000;
 export const INTERACTIVE_DRAFT_WORKFLOW = 'interactive-draft';
 
 /**
- * The governed workflow that produces a first draft. Two agent phases — outline (recon) then
- * draft (build, creator role) — so the run narrates a real phase transition and the drafting
- * worker builds on a planned structure instead of one-shotting the whole document.
+ * The governed workflow that produces a first draft: ONE creator phase that plans, then writes.
+ *
+ * ## Why one phase (crew#621)
+ *
+ * It used to be two — a neutral `outline` recon phase, then the `draft` creator — and the split
+ * was prose. On the brochure run the neutral phase, whose instruction ended "Do NOT write HTML and
+ * do NOT create any files in this phase", authored the ENTIRE 26.6 KB deliverable in its output
+ * and signed off with "the HTML above is the complete deliverable; save it"; the creator phase then
+ * only wrote that HTML to disk. $1.23 of the run's $1.81 was spent inside the read-only phase, and
+ * both phases gated `ungated: true`, so nothing noticed. evaluator≠creator / neutral-recon
+ * separation on this seam was a label: a defect in the "planning" phase's grounding was inherited
+ * verbatim by a creator whose self-check could not see it.
+ *
+ * The engine already fences the neutral phase's WRITE (its `mkdir` and its `Write` were denied);
+ * what nothing could fence is a recon phase PRODUCING the artifact in its output. Crew cannot pin a
+ * validator on a phase's output (see `interactive/draft-skill.ts`), and killing a run whose worker
+ * planned-then-drafted in one unit would take the user's document with it. So the phase model is
+ * made honest instead of gated: one creator unit whose instruction is "plan the document first,
+ * then write it" — one honest phase beats two nominal ones. The plan is still narrated (the worker
+ * states its outline before it writes) and the document is still floored, by the two deterministic
+ * checks that judge the ARTIFACT: the draft floor (`runDraftFloor`, the skill's own self-check
+ * re-derived by crew before the draft is published) and the crew#311 deliverable floor.
  *
  * The phase `instructions` adapt the draft-production contract from interactive's assist skill
  * (Step 5): honor the brief/sources/style, ground content in what the brief supports, produce a
@@ -161,8 +183,11 @@ export const INTERACTIVE_DRAFT_WORKFLOW = 'interactive-draft';
  * instructions onto the unit description with a single-line separator, and the PTY seat runner
  * refuses any prompt carrying an embedded newline (wicked-core FINDING-011).
  *
- * All gates are `auto` with `validator_pin: null` — no human gate, no deterministic floor —
- * because the acceptance gate for a draft is the INTERACTIVE side (the service's INV-2
+ * The gate is `auto` with `validator_pin: null` — crew cannot provision an engine validator
+ * (`interactive/draft-skill.ts`) — so the run's deterministic floors sit on the ARTIFACT: the
+ * crew#311 deliverable floor (the file exists, carries bytes, and was written by this run) and
+ * crew's re-derivation of the skill's self-check before the draft is published (crew#621/#504).
+ * Beyond those the acceptance gate for a draft is the INTERACTIVE side (the service's INV-2
  * instrument+theme pipeline and the user's own eyes on the canvas). Registered via
  * `adapter.registerWorkflow()` at arm time (validate-before-persist, hot-registered into the
  * engine), not added to BUILTIN_WORKFLOWS: this def is crew-only data owned by this seam, not a
@@ -172,32 +197,16 @@ export const INTERACTIVE_DRAFT_WORKFLOW_DEF: WorkflowDef = {
   id: INTERACTIVE_DRAFT_WORKFLOW,
   phases: [
     {
-      id: 'outline',
-      kind: 'recon',
-      instructions:
-        'Plan the document, do not write it yet: read the brief (and any source files/folders named in the task, expanding ~), then produce a concise outline — the sections in order, the key points each section carries, and the tone/format guidance the draft phase must honor for the requested style (web = rich scrollable page; ppt = fixed landscape slides; brochure = landscape print pages; doc = minimal content-first prose). Never invent facts, numbers, or claims the brief and sources do not support; where material is thin, plan honest placeholder copy that says what belongs there. Output the outline as plain text. Do NOT write HTML and do NOT create any files in this phase.',
-      gate_type: 'value',
-      gate: 'auto',
-      executes_code: false,
-      verified_evidence: false,
-      required_deliverables: [],
-      depends_on: [],
-      role: 'neutral',
-      skill_ref: null,
-      allowed_skills: [],
-      validator_pin: null,
-    },
-    {
       id: 'draft',
       kind: 'build',
       instructions:
-        'Using the outline from the prior phase, write the COMPLETE first-draft HTML document and SAVE it to the absolute output file named in the task (create parent directories if needed, overwrite if present) — the file on disk is the deliverable, so write it before you finish and end your reply with the absolute path you wrote. Contract: a full self-contained HTML document (inline CSS, no external network resources, no build step); honor the requested style/format and the brief; keep every fact grounded in the brief/sources — never fabricate figures; do NOT add data-wid attributes anywhere (the wicked-interactive service instruments its own anchors); keep the markup semantic and well-formed (balanced tags) so the instrumentation pass lands cleanly.',
+        'PLAN, then WRITE — in this one phase. First read the brief (and any source files/folders named in the task, expanding ~) and state a short outline in your reply: the sections in order, the key points each carries, and the format the requested style implies (web = rich scrollable page; ppt = fixed landscape slides; brochure = landscape print pages; doc = minimal content-first prose). Then write the COMPLETE first-draft HTML document to the absolute output file named in the task (create parent directories if needed, overwrite if present) — the file on disk is the deliverable, so write it before you finish and end your reply with the absolute path you wrote. Contract: a full self-contained HTML document (inline CSS, no external network resources, no build step); honor the requested style/format and the page budget in the task; keep every fact grounded in the brief/sources and cite it — never fabricate a figure, a URL or an audit row, and label every mock visibly; leave NO placeholder copy in the document (say what is missing in your reply instead); do NOT add data-wid attributes anywhere (the wicked-interactive service instruments its own anchors); keep the markup semantic and well-formed (balanced tags) so the instrumentation pass lands cleanly.',
       gate_type: 'execution',
       gate: 'auto',
       executes_code: false,
       verified_evidence: false,
       required_deliverables: [],
-      depends_on: ['outline'],
+      depends_on: [],
       role: 'creator',
       skill_ref: null,
       allowed_skills: [],
@@ -566,6 +575,9 @@ export interface InteractiveDraftOptions {
    *  the server wires the per-project `interactiveRoot` setting through here, like the sibling seams.
    *  Only consulted when a `groundingStore` is wired. */
   resolveDocsRoot?: (projectId: string | undefined) => string;
+  /** Injectable IO for the draft floor crew re-derives at finalize (crew#621/#504) — tests
+   *  substitute the plugin root and the check's answer; the daemon passes nothing. */
+  draftFloorIo?: DraftFloorIo;
   /** Diagnostics sink (default: console.error). */
   log?: (message: string) => void;
   /** Error-level logger for connection-fatal subscriber errors (the /diagnostics ring folds it); defaults to `log`. */
@@ -602,6 +614,10 @@ interface InFlight {
    *  await so `inFlightDocs()` reports the doc busy — Copilot round 2); set once the launch
    *  resolves. */
   heartbeat?: ReturnType<typeof setInterval> | undefined;
+  /** What crew's re-derivation of the draft floor needs at finalize (crew#621/#504): the page
+   *  budget the brief implied and the requested style, so the check runs with the same inputs the
+   *  worker's clause named. */
+  floor?: { budget: PageBudget; style: string } | undefined;
   /** The engine's own reason for the most recent failed unit (`stepFailed.detail`, a bounded
    *  excerpt of the worker/tool output). Carried so the terminal error status names WHY —
    *  crucially, the crew#311 deliverable-floor report, which says exactly which artifact was
@@ -691,6 +707,12 @@ export async function startInteractiveDraftSubscriber(
   const agentPhaseCount = INTERACTIVE_DRAFT_WORKFLOW_DEF.phases.length;
   const phaseCount = agentPhaseCount + 1;
   const inFlight = new Map<string, InFlight>(); // runId → live state (pre-launch placeholders included)
+  // Documents whose run is terminal but whose FINALIZE is still running — the draft floor's
+  // re-derivation and the announce (codex on crew#725). The doc must stay BUSY across that window:
+  // `inFlightDocs()` is what serializes the chat seam's asks (CREW-UX-5 contract (c)), and a floor
+  // that takes seconds — up to its 120 s bound — would otherwise let an iteration ask launch
+  // against the placeholder while the first draft was still being judged.
+  const finalizing = new Set<string>();
   let closed = false; // set by stop(): a handler mid-snapshot must never launch after shutdown
 
   /** Emit onto interactive's vocabulary as the `wi-crew` producer. Never throws into the
@@ -813,8 +835,9 @@ export async function startInteractiveDraftSubscriber(
       const council = seats > 0 ? `a ${seats}-seat council` : 'a council';
       narrate(
         flight,
-        `Convening ${council} to pick who ${ord >= agentPhaseCount ? 'writes the draft' : 'plans the outline'}…`,
+        `Convening ${council} to pick who plans and writes the draft…`,
       );
+      void ord;
       return;
     }
 
@@ -834,9 +857,7 @@ export async function startInteractiveDraftSubscriber(
         flight,
         ord > agentPhaseCount
           ? `Crew phase ${ord}/${phaseCount}: checking the draft file was actually written (${phase})…`
-          : ord >= agentPhaseCount
-            ? `Crew phase ${ord}/${phaseCount}: writing the draft (${phase})…`
-            : `Crew phase ${ord}/${phaseCount}: ${phase} — planning the document…`,
+          : `Crew phase ${ord}/${phaseCount}: planning and writing the draft (${phase})…`,
       );
       return;
     }
@@ -858,10 +879,8 @@ export async function startInteractiveDraftSubscriber(
       narrate(
         flight,
         ord > agentPhaseCount
-          ? 'Draft file verified on disk — landing it now…'
-          : ord >= agentPhaseCount
-            ? 'Gate approved the draft — checking the file landed…'
-            : `Gate approved ${phaseName(ord)} — moving on…`,
+          ? 'Draft file verified on disk — re-deriving the draft floor…'
+          : 'Gate approved the draft — checking the file landed…',
       );
       return;
     }
@@ -891,10 +910,14 @@ export async function startInteractiveDraftSubscriber(
 
     if (event.type === 'sessionCompleted') {
       endFlight(runId);
+      // The doc stays busy until the floor and the announce are done (codex on crew#725).
+      finalizing.add(flight.documentId);
       // The announce awaits the bus writer; a throw is logged, as a synchronous one was.
-      finalize(flight, runId).catch((err: unknown) =>
-        log(`[interactive-draft] finalizing run ${runId} failed: ${err instanceof Error ? err.message : String(err)}`),
-      );
+      finalize(flight, runId)
+        .catch((err: unknown) =>
+          log(`[interactive-draft] finalizing run ${runId} failed: ${err instanceof Error ? err.message : String(err)}`),
+        )
+        .finally(() => finalizing.delete(flight.documentId));
       return;
     }
 
@@ -924,8 +947,6 @@ export async function startInteractiveDraftSubscriber(
   });
 
   async function finalize(flight: InFlight, runId: string): Promise<void> {
-    // The run is terminal — its grounding snapshots are done serving reads, on every branch below.
-    removeSnapshots(flight);
     const { documentId, projectId, outPath } = flight;
     let ok = false;
     try {
@@ -934,6 +955,8 @@ export async function startInteractiveDraftSubscriber(
       ok = false;
     }
     if (!ok) {
+      // The run is terminal — its grounding snapshots are done serving reads.
+      removeSnapshots(flight);
       ledger.recordFailure(documentId);
       emitStatus({
         ...docScope(documentId, projectId),
@@ -942,6 +965,45 @@ export async function startInteractiveDraftSubscriber(
       });
       log(`[interactive-draft] run ${runId} completed but ${outPath} is missing/empty`);
       return;
+    }
+    // THE DRAFT FLOOR (crew#621 / crew#504): the document's own verdict, re-derived by crew from
+    // the artifact before it is published — the same `wicked-garden-draft` self-check the worker
+    // was told to run, on the same inputs (hence BEFORE the snapshots go: the claims scan traces
+    // every number and URL to them). A breach fails the draft naming the rule; a floor that could
+    // not run is published with that said, never rounded to a pass. Armed only when the skill is
+    // actually published — a run that got no quality clause was never held to this contract.
+    const floorVerdict = draftSkillHeld
+      ? await runDraftFloor(
+          outPath,
+          flight.floor?.budget ?? { pages: null, exact: false, source: 'unknown' },
+          flight.snapshotDirs,
+          { ...(flight.floor !== undefined ? { style: flight.floor.style } : {}) },
+          opts.draftFloorIo ?? {},
+        )
+      : null;
+    removeSnapshots(flight);
+    if (floorVerdict !== null) {
+      log(`[interactive-draft] run ${runId} draft floor: ${floorVerdict.verdict} — ${floorVerdict.summary}`);
+    }
+    if (floorVerdict?.verdict === 'fail') {
+      ledger.recordFailure(documentId);
+      emitStatus({
+        ...docScope(documentId, projectId),
+        state: 'error',
+        message:
+          `The draft did not meet the document floor, so it was not landed on the canvas (run ${runId}). ` +
+          `${floorVerdict.breaches.join(' ')} The file crew checked is at ${outPath}; ask again — ` +
+          `the brief's hard constraints are part of the deliverable, not a preference.`,
+      });
+      return;
+    }
+    if (floorVerdict?.verdict === 'unverified' || floorVerdict?.verdict === 'unavailable') {
+      // Disclosed, not silently passed: the reader is told which floor could not be re-derived.
+      emitStatus({
+        ...docScope(documentId, projectId),
+        state: 'working',
+        message: `Draft floor: ${floorVerdict.summary}.`,
+      });
     }
     // ADR-0019 D5: announce by path — the service reads the file itself, so a large draft
     // never rides the bus payload. The deterministic key makes a re-announce a no-op (the key resolves to the existing row).
@@ -1012,6 +1074,7 @@ export async function startInteractiveDraftSubscriber(
       outPath,
       snapshotDirs: [],
       narration: 'Crew run launched — working on your draft…',
+      floor: { budget: pageBudgetFor(doc.brief, doc.style), style: doc.style },
     };
     inFlight.set(runId, flight);
 
@@ -1340,7 +1403,9 @@ export async function startInteractiveDraftSubscriber(
 
   return {
     ledger,
-    inFlightDocs: () => [...new Set([...inFlight.values()].map((f) => f.documentId))],
+    inFlightDocs: () => [
+      ...new Set([...[...inFlight.values()].map((f) => f.documentId), ...finalizing]),
+    ],
     stop: async () => {
       closed = true; // a handler mid-snapshot sees this and never launches (Copilot round 2)
       offCoreEvents();
@@ -1355,6 +1420,7 @@ export async function startInteractiveDraftSubscriber(
         // die with the daemon, so nothing is still reading the snapshot.
         if (flight !== undefined) removeSnapshots(flight);
       }
+      finalizing.clear(); // nothing is finalizing after the subscriber detaches
       await sub.stop();
     },
   };
