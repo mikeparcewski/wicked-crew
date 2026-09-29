@@ -233,5 +233,9 @@ $ WICKED_CREW_TOKENS=~/.config/wicked-crew/tokens.json wicked-crew start …
 wicked-crew: the daemon requires auth and this CLI sent no bearer — set WICKED_CREW_TOKEN=<token
 from your tokens.json>. Note WICKED_CREW_TOKENS (plural, set here) is the DAEMON's token-file path,
 not the client's bearer.
-wicked-crew: start failed: 401 …
+launch failed (401): Authentication required: send Authorization: Bearer <token>
 ```
+
+(The second line is the verb's own failure report, so its shape differs per verb — `start` prints
+`launch failed (<status>): …`, `gate` and `status` print `wicked-crew: <verb> failed: <status> …`.
+The advice line above it is the same for every verb, and is printed once per process.)
