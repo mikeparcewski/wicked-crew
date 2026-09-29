@@ -867,6 +867,52 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     expect(sub!.ledger.get('spike-doc')?.emittedAt).toBeUndefined();
   });
 
+  it('keeps the document BUSY while the floor is still judging it — an iteration ask must not race the first draft (codex on crew#725)', async () => {
+    // Red before the finalizing gate: `sessionCompleted` dropped the doc from `inFlight` before
+    // the (up to 120 s) floor ran, so `inFlightDocs()` — what the chat seam serializes asks on —
+    // reported the doc idle while its first draft was still being judged.
+    const bus = await import('wicked-bus');
+    const engine = fakeAdapter();
+    const draftDir = join(dir, 'drafts');
+    let release: (() => void) | null = null;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    const sub = await startInteractiveDraftSubscriber(engine.asAdapter(), {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'ledger.json'),
+      draftDir,
+      clisJson: SEATS,
+      skillHeld: () => true,
+      draftFloorIo: {
+        gardenRoot: () => '/garden',
+        run: async () => {
+          await held; // the floor is still running
+          return { stdout: JSON.stringify({ checks: { claims: { ok: true }, contrast: { ok: true } } }), code: 0 };
+        },
+      },
+      log: () => {},
+    });
+    subs.push(sub!);
+
+    await emitDocCreated(bus, 'spike-doc', { project_id: 'proj-7' });
+    await waitFor(() => engine.launches.length === 1);
+    const launch = engine.launches[0]!;
+    const outPath = join(draftDir, 'spike-doc', 'spike-doc-v1.html');
+    mkdirSync(join(draftDir, 'spike-doc'), { recursive: true });
+    writeFileSync(outPath, '<html><body><h1>Draft</h1></body></html>', 'utf8');
+    engine.fire({ type: 'sessionCompleted', session: launch.sessionId });
+
+    // The run is terminal and its flight is gone, but the doc is NOT free: the floor is judging it.
+    await new Promise((r) => setTimeout(r, 100));
+    expect(sub!.inFlightDocs()).toContain('spike-doc');
+    release!();
+    await waitFor(() => sub!.ledger.get('spike-doc')?.emittedAt !== undefined);
+    await waitFor(() => !sub!.inFlightDocs().includes('spike-doc'));
+  });
+
   it('lands the draft when the floor passes, and discloses a floor that could not be re-derived', async () => {
     const bus = await import('wicked-bus');
     const engine = fakeAdapter();

@@ -707,6 +707,12 @@ export async function startInteractiveDraftSubscriber(
   const agentPhaseCount = INTERACTIVE_DRAFT_WORKFLOW_DEF.phases.length;
   const phaseCount = agentPhaseCount + 1;
   const inFlight = new Map<string, InFlight>(); // runId → live state (pre-launch placeholders included)
+  // Documents whose run is terminal but whose FINALIZE is still running — the draft floor's
+  // re-derivation and the announce (codex on crew#725). The doc must stay BUSY across that window:
+  // `inFlightDocs()` is what serializes the chat seam's asks (CREW-UX-5 contract (c)), and a floor
+  // that takes seconds — up to its 120 s bound — would otherwise let an iteration ask launch
+  // against the placeholder while the first draft was still being judged.
+  const finalizing = new Set<string>();
   let closed = false; // set by stop(): a handler mid-snapshot must never launch after shutdown
 
   /** Emit onto interactive's vocabulary as the `wi-crew` producer. Never throws into the
@@ -904,10 +910,14 @@ export async function startInteractiveDraftSubscriber(
 
     if (event.type === 'sessionCompleted') {
       endFlight(runId);
+      // The doc stays busy until the floor and the announce are done (codex on crew#725).
+      finalizing.add(flight.documentId);
       // The announce awaits the bus writer; a throw is logged, as a synchronous one was.
-      finalize(flight, runId).catch((err: unknown) =>
-        log(`[interactive-draft] finalizing run ${runId} failed: ${err instanceof Error ? err.message : String(err)}`),
-      );
+      finalize(flight, runId)
+        .catch((err: unknown) =>
+          log(`[interactive-draft] finalizing run ${runId} failed: ${err instanceof Error ? err.message : String(err)}`),
+        )
+        .finally(() => finalizing.delete(flight.documentId));
       return;
     }
 
@@ -1393,7 +1403,9 @@ export async function startInteractiveDraftSubscriber(
 
   return {
     ledger,
-    inFlightDocs: () => [...new Set([...inFlight.values()].map((f) => f.documentId))],
+    inFlightDocs: () => [
+      ...new Set([...[...inFlight.values()].map((f) => f.documentId), ...finalizing]),
+    ],
     stop: async () => {
       closed = true; // a handler mid-snapshot sees this and never launches (Copilot round 2)
       offCoreEvents();
@@ -1408,6 +1420,7 @@ export async function startInteractiveDraftSubscriber(
         // die with the daemon, so nothing is still reading the snapshot.
         if (flight !== undefined) removeSnapshots(flight);
       }
+      finalizing.clear(); // nothing is finalizing after the subscriber detaches
       await sub.stop();
     },
   };
