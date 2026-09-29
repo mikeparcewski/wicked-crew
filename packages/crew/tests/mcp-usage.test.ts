@@ -96,6 +96,11 @@ describe('nearestRank', () => {
     expect(nearestRank(ms, 0.95)).toBe(19); // ceil(19)  = 19th
     expect(nearestRank(ms, 0.99)).toBe(20); // ceil(19.8) = 20th
     expect(nearestRank([5], 0.95)).toBe(5);
+    // A fractional rank below .5 separates ceil from round and floor: n = 12, q = 0.95 → ceil(11.4) = 12th.
+    const twelve = Array.from({ length: 12 }, (_, i) => (i + 1) * 10); // 10..120
+    expect(nearestRank(twelve, 0.95)).toBe(120); // round would give the 11th (110)
+    expect(nearestRank(twelve, 0.5)).toBe(60); // ceil(6) = 6th; a 0-based floor index would give 70
+    expect(nearestRank(twelve, 0.99)).toBe(120); // ceil(11.88) = 12th
     expect(nearestRank([], 0.5)).toBeNull();
   });
 });
