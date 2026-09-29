@@ -1202,7 +1202,12 @@ export async function createServer(
         },
         result,
       );
-      if (out !== null) broadcast(out as unknown as CoreEvent);
+      if (out !== null) {
+        broadcast(out as unknown as CoreEvent);
+        // ...and into the transcript, so a reload still shows the marks (api-types 0.68.0): the
+        // verdicts are their own append-only record, folded onto their reply by the reader.
+        chatTranscripts.recordCitations(out);
+      }
     } catch (err: unknown) {
       // Loud-non-fatal: a reply is never held hostage to its own verification.
       app.log.warn(

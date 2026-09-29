@@ -30,7 +30,7 @@
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join, sep } from 'node:path';
 
-import type { ChatTranscriptRecord, ChatUsage, CoreEvent } from '../core/types.js';
+import type { ChatCitationItem, ChatTranscriptRecord, ChatUsage, CoreEvent } from '../core/types.js';
 import { crewStateHome } from '../projects/state-home.js';
 import { CHAT_ID } from './chat-scope.js';
 
@@ -165,6 +165,43 @@ export class ChatTranscriptStore {
       text,
       ok: frame['ok'] === true,
       usage: usageOf(frame['usage']),
+    });
+  }
+
+  /**
+   * The citation verdicts of a reply already recorded (crew#561): appended as their OWN record,
+   * because the transcript is append-only and verification finishes AFTER the reply is stored. A
+   * reader folds it onto the `seat` record with the same `turnId` + `cliKey` — which is what keeps
+   * a fabricated SHA marked across a reload, instead of rendering as plain text again.
+   *
+   * Only a STAMPED frame is recorded: without a `turn_id` there is no reply to fold it onto (the
+   * same rule {@link observe} applies), and a straggler must never recreate a dropped file.
+   */
+  recordCitations(frame: {
+    chat: string;
+    cliKey: string;
+    turn_id?: string;
+    verified: number;
+    unverifiable: number;
+    corrected: number;
+    unchecked: number;
+    items: ChatCitationItem[];
+  }): void {
+    if (frame.turn_id === undefined) return;
+    const file = this.fileOf(frame.chat);
+    // No file ⇒ no reply was ever recorded for this chat (a reclaimed id, a refused chat id): a
+    // citations record alone would recreate a transcript that has nothing to fold onto.
+    if (file === null || !existsSync(file)) return;
+    this.append(frame.chat, {
+      at: this.now(),
+      turnId: frame.turn_id,
+      kind: 'citations',
+      cliKey: frame.cliKey,
+      verified: frame.verified,
+      unverifiable: frame.unverifiable,
+      corrected: frame.corrected,
+      unchecked: frame.unchecked,
+      items: frame.items,
     });
   }
 

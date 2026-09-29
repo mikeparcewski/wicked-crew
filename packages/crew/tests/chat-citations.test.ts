@@ -320,6 +320,7 @@ describe('the server wiring: one chatCitations frame per reply, after the rewrit
       chatOpen: async (_id: string, clis: string[]) => clis.map((c) => ({ cliKey: c, ok: true })),
       chatScopeApplied: async () => true,
       chatSeats: async () => ['claude'],
+      chatSend: async () => ['claude'],
       chatClose: async () => undefined,
     } as unknown as CoreAdapter;
 
@@ -375,6 +376,17 @@ describe('the server wiring: one chatCitations frame per reply, after the rewrit
     expect(opened.statusCode).toBe(201);
     chatCwdParent = dirname((opened.json() as { scope: { cwd: string } }).scope.cwd);
 
+    // A REAL send, so the turn index opens a turn and the reply below is stamped the way the
+    // daemon stamps it — which is also what lets the verdicts be recorded on the transcript.
+    const sent = await app.inject({
+      method: 'POST',
+      url: '/api/v1/chats/cite-1/messages',
+      payload: { text: 'summarize the last commits' },
+    });
+    expect(sent.statusCode).toBe(202);
+    const turnId = (sent.json() as { turnId?: string }).turnId;
+    expect(typeof turnId).toBe('string');
+
     // The seat answers with a host-absolute path (crew#618 rewrites it), a real SHA and a
     // fabricated one — the RC1 Phase 6 shape.
     emit({
@@ -400,10 +412,20 @@ describe('the server wiring: one chatCitations frame per reply, after the rewrit
     const frame = frames[0]!;
     expect(frame.chat).toBe('cite-1');
     expect(frame.cliKey).toBe('claude');
+    expect(frame.turn_id).toBe(turnId); // stamped with the turn it verified
     expect(frame.verified).toBe(2); // the rewritten path and the real sha
     expect(frame.unverifiable).toBe(1);
     expect(itemOf(frame.items, '6d77153')).toMatchObject({ kind: 'sha', status: 'unverified' });
     expect(itemOf(frame.items, 'alpha/src/foo.ts')).toMatchObject({ kind: 'path', status: 'verified' });
+
+    // ...and the verdicts are in the transcript, so a reload still shows the marks (crew#561 /
+    // api-types 0.68.0). The reply record carries the turn; the citations record folds onto it.
+    const detail = await app.inject({ method: 'GET', url: '/api/v1/chats/cite-1' });
+    const records = (detail.json() as { messages: Record<string, unknown>[] }).messages;
+    const cited = records.find((r) => r['kind'] === 'citations');
+    expect(cited).toMatchObject({ kind: 'citations', cliKey: 'claude', verified: 2, unverifiable: 1 });
+    const replyRecord = records.find((r) => r['kind'] === 'seat');
+    expect(cited?.['turnId']).toBe(replyRecord?.['turnId']);
 
     await app.inject({ method: 'DELETE', url: '/api/v1/chats/cite-1' });
   }, 30_000);
