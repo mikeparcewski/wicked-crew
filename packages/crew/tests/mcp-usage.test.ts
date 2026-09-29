@@ -198,6 +198,15 @@ describe('foldMcpUsage over the fixture, against hand-computed numbers', () => {
     expect(u.daily.reduce((n, d) => n + d.calls, 0)).toBe(u.totals.calls);
   });
 
+  it('a start written with an offset lands on its UTC day and orders by its instant', () => {
+    const late = rec('2026-09-27T23:30:00.000-02:00', SEARCH, 'allow', 5, { run: 'rz' }); // = 09-28T01:30Z
+    const early = rec('2026-09-28T02:10:00.000+02:00', CREATE, 'allow', 5, { run: 'rz' }); // = 09-28T00:10Z
+    const u = foldMcpUsage([late, early], { days: 1 }, NOW);
+    expect(u.daily.find((d) => d.day === '2026-09-28')?.calls).toBe(2);
+    expect(u.chains).toEqual([{ from: CREATE, to: SEARCH, count: 1, runs: 1 }]);
+    expect(u.tools.find((t) => t.subject === SEARCH)?.lastCall).toBe('2026-09-28T01:30:00.000Z');
+  });
+
   it('foldChains caps at 20, most frequent first', () => {
     const many: McpCallRecord[] = [];
     for (let i = 0; i < 25; i++) {

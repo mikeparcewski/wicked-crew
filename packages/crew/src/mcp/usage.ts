@@ -83,7 +83,7 @@ function groupBy<K>(records: readonly McpCallRecord[], key: (r: McpCallRecord) =
   return out;
 }
 
-const byStart = (a: McpCallRecord, b: McpCallRecord): number => a.start.localeCompare(b.start) || a.spanId.localeCompare(b.spanId);
+const byStart = (a: McpCallRecord, b: McpCallRecord): number => Date.parse(a.start) - Date.parse(b.start) || a.spanId.localeCompare(b.spanId);
 const newest = (records: readonly McpCallRecord[]): McpCallRecord => records.reduce((n, r) => (byStart(r, n) > 0 ? r : n));
 const seatOf = (r: McpCallRecord): string | null => r.attrs['wicked.seat'];
 const subjectOf = (r: McpCallRecord): string => r.attrs['mcp.subject'];
@@ -122,10 +122,13 @@ export function foldChains(records: readonly McpCallRecord[], subject?: string):
 export function foldMcpUsage(records: readonly McpCallRecord[], query: McpUsageQuery, now: number, skipped = 0): McpUsageResponse {
   const days = query.days ?? MCP_USAGE_DEFAULT_DAYS;
   const since = now - days * DAY_MS;
-  const inWindow = records.filter((r) => {
+  // Every start is re-spelled as UTC ISO (the broker writes that already; a line written with an
+  // offset must still land on its UTC day and order by its instant).
+  const inWindow: McpCallRecord[] = [];
+  for (const r of records) {
     const t = Date.parse(r.start);
-    return Number.isFinite(t) && t >= since && t <= now;
-  });
+    if (Number.isFinite(t) && t >= since && t <= now) inWindow.push({ ...r, start: new Date(t).toISOString() });
+  }
   const seats = [...new Set(inWindow.map(seatOf).filter((s): s is string => s !== null))].sort();
   const unitFiltered = inWindow.filter(
     (r) => (query.seat === undefined || seatOf(r) === query.seat) && (query.decision === undefined || r.decision.decision === query.decision),
