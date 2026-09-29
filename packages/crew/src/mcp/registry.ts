@@ -35,7 +35,7 @@ import type {
 import { canonicalJson, deriveToolClass, effectiveToolClass, mcpSubject, parseMcpSubject, sha256Hex, toolSchemaHash } from './classify.js';
 import type { McpUpstreamConfig, ProbedTool, ProbeResult, Prober } from './probe.js';
 import type { McpRegistryStore, McpServerRecord, McpToolRecord } from './registry-store.js';
-import { keychainRef, parseSecretRef, resolveSecret, secretIsSet, type SecretStore } from './secrets.js';
+import { KEYCHAIN_SERVICE, keychainRef, parseSecretRef, resolveSecret, secretIsSet, type SecretStore } from './secrets.js';
 
 /** How long a preview can be saved. */
 export const PREVIEW_TTL_MS = 15 * 60 * 1000;
@@ -47,7 +47,9 @@ export const HEALTH_FAILING_AFTER = 3;
 /** A refusal the routes map to a status code. */
 export class McpRegistryError extends Error {
   constructor(
-    readonly status: 400 | 404 | 409 | 501 | 502 | 503,
+    // 500: the registry and the OS secret store disagree and crew could not reconcile them
+    // (crew#719, `secret_orphaned`) — the message names what was left behind.
+    readonly status: 400 | 404 | 409 | 500 | 501 | 502 | 503,
     readonly code: string,
     message: string,
   ) {
@@ -80,6 +82,15 @@ interface HeldPreview {
   config: McpUpstreamConfig;
   tools: Array<ProbedTool & { schemaHash: string }>;
   expiresAt: number;
+  /**
+   * (crew#719) The secret this preview was PROBED with, held in memory for the preview's TTL and
+   * committed to the OS store by `save`, beside the registry row. `null` = the caller staged none
+   * (an unauthenticated server, an `env:` reference, or a re-save of a secret already stored).
+   *
+   * It is never written to the registry file, answered by a route, logged or audited — the same
+   * rule as every other secret value in this module. A preview that expires takes it with it.
+   */
+  secret: string | null;
 }
 
 export interface McpRegistryDeps {
@@ -117,8 +128,25 @@ export class McpRegistry {
     return this.view(this.find(file.servers, name));
   }
 
-  async preview(config: McpUpstreamConfig): Promise<McpPreviewResponse> {
-    const result = await this.probe(config);
+  /**
+   * Probe `config` and hold exactly what it showed, for `save` (crew#719: with `stagedSecret`, the
+   * secret this server's own keychain reference will hold — probed with now, written only when the
+   * save commits, so the OS store and the registry row land together or not at all).
+   */
+  async preview(config: McpUpstreamConfig, stagedSecret: string | null = null): Promise<McpPreviewResponse> {
+    if (stagedSecret !== null) {
+      if (!this.deps.secrets.available) {
+        throw new McpRegistryError(501, 'secret_store_unavailable', 'this platform has no OS secret store; reference a daemon env variable instead (auth.ref "env:<NAME>")');
+      }
+      if (config.auth === null || config.auth.ref !== keychainRef(config.name)) {
+        throw new McpRegistryError(400, 'secret_not_staged_here', `a staged secret is stored as this server's own keychain entry, so auth.ref must be ${keychainRef(config.name)}`);
+      }
+      // The reference is answered back and audited, so a value it contains would be echoed there.
+      if (config.auth.ref.includes(stagedSecret)) {
+        throw new McpRegistryError(400, 'secret_in_ref', 'the secret must not appear in its own reference; choose a different value');
+      }
+    }
+    const result = await this.probe(config, stagedSecret);
     if ('missingSecret' in result) throw new McpRegistryError(409, 'secret_missing', result.error);
     if (!result.ok) {
       const what = config.kind === 'rest' ? 'the OpenAPI document could not be imported' : 'the server did not answer tools/list';
@@ -127,7 +155,7 @@ export class McpRegistry {
     const tools = result.tools.map((t) => ({ ...t, schemaHash: toolSchemaHash(t) }));
     const previewHash = sha256Hex(canonicalJson({ config, tools: tools.map((t) => [t.name, t.schemaHash]) }));
     const expiresAt = this.now() + PREVIEW_TTL_MS;
-    this.hold(previewHash, { config, tools, expiresAt });
+    this.hold(previewHash, { config, tools, expiresAt, secret: stagedSecret });
     const existing = (await this.deps.store.read()).servers.find((s) => s.name === config.name);
     return {
       previewHash,
@@ -165,7 +193,20 @@ export class McpRegistry {
     }
     this.previews.delete(previewHash);
     const stamp = new Date(this.now()).toISOString();
-    const saved = await this.deps.store.mutate((file) => {
+    // (crew#719) The staged secret and the registry row commit TOGETHER. Studio used to write the
+    // keychain itself and then save, so a failure between the two left a keychain entry with no
+    // server — invisible, because nothing can enumerate the entries of a keychain service — or a
+    // server whose secret never landed. The write happens here, inside the save, and a save that
+    // then fails puts the entry back exactly as it was; the only residue left is one this call
+    // NAMES.
+    //
+    // The PRIOR value is read first (review of PR #724, HIGH). A re-key of a registered server
+    // whose registry write then failed used to leave the NEW secret behind under an unchanged row:
+    // the credential its running calls use had silently changed, which is a worse outcome than the
+    // orphan this was written to prevent. `null` = no prior value, and then the rollback deletes.
+    const prior = held.secret === null ? null : await this.deps.secrets.get(held.config.name);
+    if (held.secret !== null) await this.deps.secrets.set(held.config.name, held.secret);
+    const saved = await this.restoreSecretOnFailure(held.config.name, held.secret !== null, prior, () => this.deps.store.mutate((file) => {
       const prior = file.servers.find((s) => s.name === held.config.name);
       const tools: McpToolRecord[] = held.tools.map((t) => {
         const was = prior?.tools.find((p) => p.name === t.name);
@@ -196,8 +237,41 @@ export class McpRegistry {
       };
       file.servers = [...file.servers.filter((s) => s.name !== record.name), record];
       return record;
-    });
+    }));
     return this.view(saved);
+  }
+
+  /**
+   * Run `commit`; if it throws and this save had written the OS secret store, put the entry back
+   * exactly as it was — deleted when there was no `prior` value, restored to `prior` when there
+   * was (crew#719, review of PR #724). Either way the registry row and the credential it
+   * references end up as they were before the save.
+   *
+   * A rollback that ALSO fails is reported rather than swallowed: the operator is told what was
+   * left behind and under which account, because nothing else can find a keychain entry for them.
+   */
+  private async restoreSecretOnFailure<T>(name: string, wrote: boolean, prior: string | null, commit: () => Promise<T>): Promise<T> {
+    try {
+      return await commit();
+    } catch (err) {
+      if (!wrote) throw err;
+      try {
+        if (prior === null) await this.deps.secrets.delete(name);
+        else await this.deps.secrets.set(name, prior);
+      } catch (rollback) {
+        const why = err instanceof Error ? err.message : String(err);
+        const also = rollback instanceof Error ? rollback.message : String(rollback);
+        const left = prior === null
+          ? 'its secret could not be taken back out'
+          : 'the secret it replaced could not be put back, so the entry now holds the value this save staged';
+        throw new McpRegistryError(
+          500,
+          'secret_orphaned',
+          `${name} was not registered (${why}) and ${left} (${also}); fix the "${KEYCHAIN_SERVICE}" keychain entry for account "${name}" by hand`,
+        );
+      }
+      throw err;
+    }
   }
 
   /** What a held preview would register: its server name and each tool's schema hash (S6). */
@@ -224,7 +298,16 @@ export class McpRegistry {
       file.servers = file.servers.filter((x) => x.name !== name);
       return s;
     });
-    if (removed.auth?.ref === keychainRef(name) && this.deps.secrets.available) await this.deps.secrets.delete(name);
+    if (removed.auth?.ref === keychainRef(name) && this.deps.secrets.available) {
+      try {
+        await this.deps.secrets.delete(name);
+      } catch (err) {
+        // (crew#719) The row is already gone, so the secret is now unreachable by any route. Say
+        // so — the alternative is a silent orphan in the operator's keychain.
+        const why = err instanceof Error ? err.message : String(err);
+        throw new McpRegistryError(500, 'secret_orphaned', `${name} was removed but its secret could not be deleted (${why}); remove the "${KEYCHAIN_SERVICE}" keychain entry for account "${name}" by hand`);
+      }
+    }
   }
 
   async patchTool(subject: string, patch: { enabled?: boolean | undefined; classOverride?: McpToolClass | null | undefined }): Promise<McpTool> {
@@ -302,6 +385,14 @@ export class McpRegistry {
     const ref = keychainRef(name);
     // The route answers and audits the reference, so a value it contains would be echoed there.
     if (ref.includes(value)) throw new McpRegistryError(400, 'secret_in_ref', 'the secret must not appear in its own reference; choose a different value');
+    // (crew#719) RE-KEY ONLY. A secret written for a name no registered server references is an
+    // orphan nothing can find again — a keychain service's entries cannot be enumerated — and it
+    // was the first half of the non-atomic add: secret, then save, with a window between them.
+    // A NEW server's secret is staged with its preview and committed by `save`.
+    const server = this.find((await this.deps.store.read()).servers, name);
+    if (server.auth?.ref !== ref) {
+      throw new McpRegistryError(400, 'secret_not_referenced', `${name} does not reference ${ref} (auth.ref is ${server.auth?.ref ?? 'unset'}), so a secret stored there would be unreachable; stage it with the preview instead`);
+    }
     await this.deps.secrets.set(name, value);
     return ref;
   }
@@ -381,9 +472,11 @@ export class McpRegistry {
    * is NOT probed unauthenticated (that would register what an anonymous caller sees): it fails
    * without connecting.
    */
-  private async probe(config: McpUpstreamConfig): Promise<ProbeResult | { ok: false; error: string; missingSecret: true }> {
+  private async probe(config: McpUpstreamConfig, staged: string | null = null): Promise<ProbeResult | { ok: false; error: string; missingSecret: true }> {
     if (config.auth === null) return this.deps.probe(config, null);
-    const secret = await resolveSecret(config.auth.ref, this.deps.secrets, this.env);
+    // (crew#719) A staged secret is probed with instead of being written first. The caller has
+    // already checked it belongs to THIS server's keychain reference.
+    const secret = staged ?? (await resolveSecret(config.auth.ref, this.deps.secrets, this.env));
     if (secret === null) {
       return { ok: false, error: `auth.ref ${config.auth.ref} resolves to no secret: set it, then try again`, missingSecret: true };
     }

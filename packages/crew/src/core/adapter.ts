@@ -169,6 +169,56 @@ export function readOverlayWorkflows(
   return out;
 }
 
+/** A drop-in workflow definition the ENGINE refused, with the engine's own reason (crew#718). */
+export interface RefusedWorkflow {
+  /** The def's id, as the file named it. */
+  id: string;
+  /** Core's refusal, verbatim — e.g. `gate evaluates nothing: write-a-note — the phase declares
+   *  executes_code but pins no validator and has no human gate …`. */
+  reason: string;
+}
+
+/** Ask CORE's parser which drop-in defs it will actually honour (crew#718).
+ *
+ * {@link readOverlayWorkflows} checks a `{id, phases[]}` shape, which is not the engine's contract:
+ * `WorkflowRegistry::load_dir` runs `refuse_reserved_id` + `WorkflowDef::validate()` and SKIPS the
+ * file it rejects, loudly, on the daemon's stderr. So the catalog listed defs the engine had thrown
+ * away at boot and the launch then 400'd `unknown workflow` — the MCP S8 dogfood's F-3, on a
+ * hand-authored drop-in whose `executes_code` phase pinned no validator ("gate evaluates nothing").
+ *
+ * The same doctrine {@link CoreAdapter.registerWorkflow} states for the WRITE path applies here:
+ * core's parser is the authority, so it is what we ask. Enumerating `validate()`'s rules in
+ * TypeScript would be a second copy of core's schema — the drift that produced this defect.
+ * `register` is the engine's `registerWorkflow` binding, which validates before it registers and
+ * is idempotent on id, so re-offering a def the engine already loaded at boot is a same-content
+ * overwrite; a def added to the dir after boot becomes launchable rather than being listed and
+ * refused.
+ *
+ * `is_system` is stripped first, exactly as the two write paths do: it is crew's own display flag
+ * and core's strict def parser rejects the key.
+ *
+ * Pure (no adapter state) so it is unit-testable without spawning a Core, like
+ * {@link readOverlayWorkflows}.
+ */
+export async function judgeOverlayWorkflows(
+  defs: readonly WorkflowDef[],
+  register: (json: string) => Promise<string>,
+): Promise<{ accepted: WorkflowDef[]; refused: RefusedWorkflow[] }> {
+  const accepted: WorkflowDef[] = [];
+  const refused: RefusedWorkflow[] = [];
+  for (const def of defs) {
+    const overlayDef = { ...(def as WorkflowDef & { is_system?: boolean }) };
+    delete overlayDef.is_system;
+    try {
+      await register(JSON.stringify(overlayDef));
+      accepted.push(def);
+    } catch (err) {
+      refused.push({ id: def.id, reason: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  return { accepted, refused };
+}
+
 // The native addon is a CommonJS cdylib (`index.node`); load it with a CJS
 // require even though this daemon is ESM. This module is the ONLY place that
 // touches wicked-core-ts (DES-STUDIO-001 §5.2/§5.3), so the FINALIZING
@@ -3114,6 +3164,56 @@ export class CoreAdapter {
     }
   }
 
+  /** Core's verdict on each hydrated drop-in, run ONCE per process (the same lifetime as
+   *  {@link hydrateFromOverlay} and as core's own boot-time `load_dir`). */
+  private overlayVerdicts: Promise<void> | null = null;
+
+  /** id → core's refusal reason, for the drop-ins `judgeOverlayOnce` dropped. */
+  private readonly overlayRefusals = new Map<string, string>();
+
+  /** Drop the refused defs from `userWorkflows` and remember why, asking core's parser (crew#718).
+   *
+   * A build with no `registerWorkflow` binding has no validator to ask, so nothing is judged and
+   * the catalog reads exactly as it did before — the same floor {@link registerWorkflow} draws,
+   * on the read side where there is no state to corrupt. `registerWorkflow` has been declared
+   * (non-optional) in wicked-core-ts since 0.4.0. */
+  private judgeOverlayOnce(): Promise<void> {
+    this.overlayVerdicts ??= (async (): Promise<void> => {
+      this.hydrateFromOverlay();
+      const core = this.core as unknown as Record<string, unknown>;
+      const register = core['registerWorkflow'];
+      if (typeof register !== 'function') return;
+      const { refused } = await judgeOverlayWorkflows(
+        [...this.userWorkflows.values()],
+        (json) => (register as (j: string) => Promise<string>).call(this.core, json),
+      );
+      for (const r of refused) {
+        this.userWorkflows.delete(r.id);
+        this.overlayRefusals.set(r.id, r.reason);
+        console.warn(
+          `wicked-crew: drop-in workflow '${r.id}' is NOT in the catalog — the engine refused it: ${r.reason}`,
+        );
+      }
+    })();
+    return this.overlayVerdicts;
+  }
+
+  /** The workflow catalog `GET /workflows` serves: the defs the ENGINE accepted, plus the drop-ins
+   *  it refused with its own reason, so an unlaunchable def is named instead of offered (crew#718). */
+  async workflowCatalog(): Promise<{ workflows: WorkflowDef[]; unavailable: RefusedWorkflow[] }> {
+    await this.judgeOverlayOnce();
+    return {
+      workflows: this.listWorkflows(),
+      unavailable: [...this.overlayRefusals].map(([id, reason]) => ({ id, reason })),
+    };
+  }
+
+  /** Core's refusal reason for `id`, or `null` when the engine never refused it (crew#718). */
+  async workflowRefusal(id: string): Promise<string | null> {
+    await this.judgeOverlayOnce();
+    return this.overlayRefusals.get(id) ?? null;
+  }
+
   listWorkflows(): WorkflowDef[] {
     this.hydrateFromOverlay();
     // Builtins first (stable ordering), but user-registered workflows take precedence when
@@ -3250,6 +3350,9 @@ export class CoreAdapter {
 
     await writeFile(path, JSON.stringify(overlayDef, null, 2), 'utf8');
     this.userWorkflows.set(def.id, def);
+    // (crew#718) This def just passed core's own validator, so any earlier refusal under the same
+    // id is stale — the catalog must offer the replacement, not keep naming the version it refused.
+    this.overlayRefusals.delete(def.id);
     return def.id;
   }
 

@@ -11,7 +11,10 @@
  *   DELETE /mcp/servers/:name           remove the server and the keychain secret it owns
  *   POST   /mcp/servers/:name/test      probe again: health plus the tool diff
  *   PATCH  /mcp/tools/:subject          `{enabled?, classOverride?}`; `:subject` is `mcp:<server>/<tool>`, URL-encoded
- *   PUT    /mcp/servers/:name/secret    `{value}` → the OS keychain; answers `{ref, set: true}`, never the value
+ *   PUT    /mcp/servers/:name/secret    `{value}` → the OS keychain; answers `{ref, set: true}`, never the value.
+ *                                       RE-KEY only (crew#719): the server must already reference
+ *                                       `keychain:wicked-mcp/<name>`. A new server's secret rides
+ *                                       `secret` on the PREVIEW body and is written by the save.
  *   POST   /mcp/call                    the broker (§6, slice S3): `{token, subject, args?}` from the garden
  *                                       shim; judged, budgeted, invoked, scrubbed, output-judged, recorded
  *   POST   /mcp/tools                   `{token}` from the garden shim's `list` (slice S4): the tools the
@@ -61,6 +64,12 @@ import type { AuditLog } from './audit.js';
 const V = API_PREFIX;
 const serverName = z.string().regex(MCP_SERVER_NAME_RE, 'a server name is 1-63 of a-z 0-9 _ -, starting with a letter or digit');
 const toolClass = z.enum(['read', 'write', 'destructive']);
+/** A pasted secret VALUE. Shared by the staged-secret preview field and `PUT …/secret` (crew#719). */
+const secretValue = z
+  .string()
+  .min(8, 'a secret is at least 8 characters')
+  .max(8192)
+  .refine((v) => !/[\r\n\0]/.test(v), { message: 'a secret is one line' });
 
 const AuthSchema = z
   .object({
@@ -86,6 +95,13 @@ export const McpServerConfigSchema = z
       .refine((d) => Buffer.byteLength(JSON.stringify(d), 'utf8') <= REST_SPEC_MAX_BYTES, { message: `the OpenAPI document is at most ${REST_SPEC_MAX_BYTES} bytes` })
       .optional(),
     operations: z.array(z.string().min(1).max(256)).min(1).max(512).optional(),
+    /**
+     * (crew#719) The secret VALUE this server's keychain entry will hold. The preview is probed
+     * with it and it is held with the preview; `POST /mcp/servers` writes it to the OS store as
+     * part of the save, so the secret and the registry row commit together. Requires
+     * `auth.ref` = `keychain:wicked-mcp/<name>`. It is in no response, log, audit entry or file.
+     */
+    secret: secretValue.optional(),
   })
   .strict()
   .superRefine((c, ctx) => {
@@ -134,15 +150,7 @@ export const PatchMcpToolSchema = z
   .object({ enabled: z.boolean().optional(), classOverride: toolClass.nullable().optional() })
   .strict()
   .refine((p) => p.enabled !== undefined || p.classOverride !== undefined, { message: 'set enabled, classOverride or both' });
-export const PutMcpSecretSchema = z
-  .object({
-    value: z
-      .string()
-      .min(8, 'a secret is at least 8 characters')
-      .max(8192)
-      .refine((v) => !/[\r\n\0]/.test(v), { message: 'a secret is one line' }),
-  })
-  .strict();
+export const PutMcpSecretSchema = z.object({ value: secretValue }).strict();
 
 export const McpCallSchema = z
   .object({
@@ -249,14 +257,14 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
 
   app.post(
     `${V}/mcp/servers/preview`,
-    { config: { manifest: { requestType: 'McpServerConfigBody', responseType: 'McpPreviewResponse', statusCodes: [200, 400, 409, 502, 503] } } },
+    { config: { manifest: { requestType: 'McpServerConfigBody', responseType: 'McpPreviewResponse', statusCodes: [200, 400, 409, 501, 502, 503] } } },
     async (req, reply) => {
       const r = registry(reply);
       if (r === null) return reply;
       const parsed = McpServerConfigSchema.safeParse(req.body);
       if (!parsed.success) return invalidBody(reply, parsed.error);
       try {
-        const preview = await r.preview(toConfig(parsed.data));
+        const preview = await r.preview(toConfig(parsed.data), parsed.data.secret ?? null);
         if (deps.policies === undefined) return preview;
         let policies: McpPreviewResponse['policies'] = null;
         try {
@@ -273,7 +281,7 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
 
   app.post(
     `${V}/mcp/servers`,
-    { config: { manifest: { requestType: 'SaveMcpServerBody', responseType: 'McpServer', statusCodes: [201, 400, 409, 503] } } },
+    { config: { manifest: { requestType: 'SaveMcpServerBody', responseType: 'McpServer', statusCodes: [201, 400, 409, 500, 502, 503] } } },
     async (req, reply) => {
       const r = registry(reply);
       if (r === null) return reply;
@@ -322,7 +330,7 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
 
   app.delete<{ Params: { name: string } }>(
     `${V}/mcp/servers/:name`,
-    { config: { manifest: { responseType: '{ removed: string }', statusCodes: [200, 404, 503] } } },
+    { config: { manifest: { responseType: '{ removed: string }', statusCodes: [200, 404, 500, 502, 503] } } },
     async (req, reply) => {
       const r = registry(reply);
       if (r === null) return reply;
@@ -417,10 +425,13 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
     },
   );
 
+  // (crew#719) RE-KEY only: the server must already be registered and already reference this
+  // keychain entry. A NEW server's secret is staged with its preview (`secret` on the preview
+  // body) and committed by the save, so the two can no longer half-land.
   app.put<{ Params: { name: string } }>(
     `${V}/mcp/servers/:name/secret`,
     {
-      config: { manifest: { requestType: 'PutMcpSecretBody', responseType: 'McpSecretResponse', statusCodes: [200, 400, 501, 502, 503] } },
+      config: { manifest: { requestType: 'PutMcpSecretBody', responseType: 'McpSecretResponse', statusCodes: [200, 400, 404, 501, 502, 503] } },
     },
     async (req, reply) => {
       const r = registry(reply);

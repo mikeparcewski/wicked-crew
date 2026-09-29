@@ -4213,15 +4213,43 @@ export function registerRoutes(
 
   // ── Workflow viewer + builder (crew#44) ───────────────────────────────────
 
+  // (crew#718) Start the engine's verdict pass at registration, so every SYNC reader of
+  // `listWorkflows()` / `getWorkflow()` (the deliver resolver, the acceptance fold, the launch
+  // lookup) sees the judged catalog from the first request rather than after the first catalog GET.
+  // The pass is memoized: the handlers below await the same promise.
+  // Guarded like `listWorkflows` at :1110 — the endpoint-manifest collector registers these routes
+  // against a partial adapter that carries neither.
+  if (typeof (adapter as Partial<CoreAdapter>).workflowCatalog === 'function') {
+    void adapter.workflowCatalog().catch((err: unknown) => {
+      app.log.warn(`wicked-crew: the workflow overlay could not be judged (${message(err)}); the catalog lists what parsed`);
+    });
+  }
+
+  // (crew#718) The catalog is what the ENGINE will honour, not what parses as `{id, phases[]}`.
+  // A drop-in core refused at boot ("gate evaluates nothing: …") used to be listed here and
+  // offered in studio's selector, and the launch then 400'd `unknown workflow` — the operator
+  // learnt about it only from the failed launch. `workflowCatalog()` asks core's own validator:
+  // the refused def leaves `workflows` (so it cannot be launched) and appears in `unavailable`
+  // with core's verbatim reason (so its author is told why, and what to fix).
   app.get(`${V}/workflows`, async () => {
-    const workflows = adapter.listWorkflows();
-    return { workflows };
+    const { workflows, unavailable } = await adapter.workflowCatalog();
+    return { workflows, unavailable };
   });
 
   app.get(`${V}/workflows/:id`, async (req, reply) => {
     const { id } = req.params as { id: string };
+    // (crew#718) JUDGE FIRST (review of PR #724, MEDIUM). `getWorkflow` only hydrates the overlay
+    // dir; `workflowRefusal` is what runs the engine's verdict pass and drops the defs it refused.
+    // Read the other way round, the FIRST request for a refused drop-in answered 200 with the def
+    // the engine had thrown away — and this route is where the launch looks it up.
+    const refusal = await adapter.workflowRefusal(id);
+    if (refusal !== null) {
+      return reply.code(404).send({ error: `workflow '${id}' was refused by the engine: ${refusal}`, reason: refusal });
+    }
     const workflow = adapter.getWorkflow(id);
-    if (!workflow) return reply.code(404).send({ error: `workflow '${id}' not found` });
+    if (!workflow) {
+      return reply.code(404).send({ error: `workflow '${id}' not found` });
+    }
     // humanGates: the phases that will PAUSE for a person even under humanConfirm:none (core#208).
     // Surfaced so an operator can see a workflow's gates BEFORE launching it (FINDING-023).
     return { workflow, humanGates: humanGatePhaseIds(workflow) };
