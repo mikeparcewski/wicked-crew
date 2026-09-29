@@ -217,6 +217,39 @@ describe('the policy preview matrix (S6 proving test)', () => {
     expect(new Set(echo.cells.map((c) => c.ruleIds.join()))).toEqual(new Set(['engine:mcp-unregistered']));
   });
 
+  it('an engine answer it cannot read, or an unnamed engine failure, is a 502 preview_failed, never a 500', async () => {
+    await register();
+    let answer: () => Promise<string> = async () => 'not json';
+    const odd = new McpPolicies(registry, {
+      listRules: () => adapter.listConformanceRules(),
+      upsertRule: (r) => adapter.upsertConformanceRule(r),
+      previewCalls: () => answer(),
+    });
+    const other = Fastify();
+    registerMcpRoutes(other, { registry, policies: odd, audit, actorOf: () => LOCAL_ACTOR });
+    await other.ready();
+    try {
+      const ask = () => other.inject({ method: 'POST', url: '/api/v1/mcp/policies/preview', payload: { server: 'fx' } });
+      const answers: Array<[string, () => Promise<string>]> = [
+        ['unparsable', async () => 'not json'],
+        ['not an array', async () => JSON.stringify({ subject: 'mcp:fx/wt_echo', cells: [] })],
+        ['one row short', async () => JSON.stringify([{ subject: 'mcp:fx/wt_echo', cells: [] }])],
+        ['a row without cells', async () => JSON.stringify(TOOLS.map((t) => ({ subject: `mcp:fx/${t.name}` })))],
+        ['an unnamed engine throw', async () => { throw new Error('addon panicked'); }],
+      ];
+      for (const [why, a] of answers) {
+        answer = a;
+        const res = await ask();
+        expect(res.statusCode, `${why}: ${res.body}`).toBe(502);
+        expect((res.json() as { code: string }).code, why).toBe('preview_failed');
+      }
+      answer = async () => { throw new Error('bad_request: a seat is a name'); };
+      expect((await ask()).statusCode).toBe(400);
+    } finally {
+      await other.close();
+    }
+  });
+
   it('answers the matrix on a server preview, judged as if saved now', async () => {
     const first = (await call('POST', '/mcp/servers/preview', { name: 'fx', kind: 'mcp-stdio', command: process.execPath, args: [FIXTURE_SERVER, specPath] })).json() as McpPreviewResponse;
     expect(first.policies?.withdrawOnSave).toEqual([]);
