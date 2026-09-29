@@ -7705,3 +7705,109 @@ export interface McpApprovalResponse {
   approved: boolean;
   rulesChanged: string[];
 }
+
+// ── MCP usage: the fold over the call records (DES-MCP-TOOLS-001 §7 Usage, §8 `GET /mcp/usage`; slice S7; api-types 0.66.0) ──
+
+/** Every call record in a window, split by the broker's decision. */
+export interface McpDecisionCounts {
+  allow: number;
+  ask: number;
+  deny: number;
+  guard_error: number;
+}
+
+/**
+ * The numbers a set of call records folds to. `ran` counts the calls the broker let through
+ * (`decision: allow`); the error rate and the latency percentiles are over those calls only, since
+ * a denied or asked call never reached an upstream. Percentiles are nearest-rank: the value at
+ * position `ceil(q * n)` of the sorted durations. `null` = no call ran.
+ */
+export interface McpUsageStats {
+  calls: number;
+  decisions: McpDecisionCounts;
+  ran: number;
+  /** Ran calls whose status is `error` (an upstream failure or a tool error, `isError`). */
+  errors: number;
+  errorRate: number | null;
+  p50Ms: number | null;
+  p95Ms: number | null;
+  p99Ms: number | null;
+}
+
+/** One tool's row of the per-tool table. */
+export interface McpUsageTool extends McpUsageStats {
+  subject: string;
+  server: string;
+  tool: string;
+  /** The class the engine judged on the newest record; `null` = never judged (a guard error). */
+  class: McpToolClass | null;
+  /** The seats that called it, sorted. */
+  seats: string[];
+  lastCall: string;
+}
+
+/** One server's totals: its row's "last used" and "calls over the window". */
+export interface McpUsageServer {
+  server: string;
+  calls: number;
+  decisions: McpDecisionCounts;
+  lastCall: string;
+}
+
+/** The drill-down: one tool × seat × run. `runId: null` = calls the broker refused before judging. */
+export interface McpUsageRun {
+  subject: string;
+  seat: string | null;
+  runId: string | null;
+  calls: number;
+  decisions: McpDecisionCounts;
+  /** Ran calls whose status is `error`, as in {@link McpUsageStats}. */
+  errors: number;
+  lastCall: string;
+}
+
+/**
+ * A tool chain: `from` then `to`, two consecutive calls of one unit attempt (by start time), with
+ * different subjects. `count` = how often; `runs` = in how many runs.
+ */
+export interface McpUsageChain {
+  from: string;
+  to: string;
+  count: number;
+  runs: number;
+}
+
+/** One UTC day the window touches (its first day is partial), days with no calls included. */
+export interface McpUsageDay {
+  day: string;
+  calls: number;
+  decisions: McpDecisionCounts;
+}
+
+/**
+ * `GET /mcp/usage?days&subject&seat&decision`. `days` is 1-30 (default 7); the window is the last
+ * `days` × 24 h. Every filter narrows every section, except `chains`: a chain is folded from the
+ * unit's calls under the seat and decision filters, then kept when either end is `subject`.
+ * Records older than 30 days are folded into `calls-daily.ndjson` and are not in any window.
+ */
+export interface McpUsageResponse {
+  days: number;
+  since: string;
+  until: string;
+  filters: { subject: string | null; seat: string | null; decision: McpCallDecision | null };
+  totals: McpUsageStats;
+  /** Most calls first, then by subject. */
+  tools: McpUsageTool[];
+  /** Most calls first, then by name. */
+  servers: McpUsageServer[];
+  /** Newest first, at most 200. */
+  runs: McpUsageRun[];
+  /** Most frequent first, at most 20. */
+  chains: McpUsageChain[];
+  /** Oldest first. */
+  daily: McpUsageDay[];
+  /** The seats seen in the window before any filter (the seat filter's options), sorted. */
+  seats: string[];
+  /** Lines of `calls.ndjson` that did not parse as a call record. */
+  skipped: number;
+}

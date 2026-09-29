@@ -1459,10 +1459,12 @@ export async function createServer(
   // S3: every brokered call is judged by the in-process engine (the token registry is the
   // engine's, process-global), recorded to `<state home>/mcp/calls.ndjson`, and published on /ws
   // and the engine's bus. A bus that is not attached only loses the event; the record is the record.
+  // S7: the same file (one serialized chain) is what `GET /mcp/usage` reads back and folds.
+  const mcpCallRecords = new McpCallRecordFile();
   const mcpBroker = new McpBroker({
     registry: mcpRegistry,
     engine: () => CoreAdapter.mcpEngineGate(),
-    records: new McpCallRecordFile(),
+    records: mcpCallRecords,
     budgetPerUnit: budgetFromEnv(),
     log: (m) => app.log.warn(m),
     publish: async (record) => {
@@ -1531,6 +1533,8 @@ export async function createServer(
       mcp: mcpRegistry,
       // DES-MCP-TOOLS-001 S3: the broker's call path over that registry.
       mcpBroker,
+      // DES-MCP-TOOLS-001 S7: the call records the usage fold reads.
+      mcpCalls: mcpCallRecords,
       // wicked-core#411 / crew#497: the live state-home classification the routes report and gate on.
       stateHome: stateHomeWatch,
       // Routes that say something to the thread (a refused chat seat, F-2R2-007) emit through the

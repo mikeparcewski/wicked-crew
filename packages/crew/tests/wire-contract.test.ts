@@ -61,6 +61,7 @@ import type {
 } from '../src/api/mcp.js';
 import type { McpRegistry } from '../src/mcp/registry.js';
 import type { McpPolicies } from '../src/mcp/policies.js';
+import type { foldMcpUsage } from '../src/mcp/usage.js';
 import type { SkillsHealth, SkillsHealthFindingKind } from '../src/skills/runtime.js';
 import type { PluginSource } from '../src/skills/plugin-source.js';
 import type { CappedFileRead, WorktreeDiff } from '../src/api/run-files.js';
@@ -1036,6 +1037,9 @@ accepts<z.input<typeof McpApprovalSchema>, Wire.McpApprovalBody>();
 respondsWith<Wire.McpPolicyPreviewResponse, Awaited<ReturnType<McpPolicies['preview']>>>();
 respondsWith<Wire.McpPolicyPreviewResponse, Awaited<ReturnType<McpPolicies['previewUnsaved']>>>();
 respondsWith<Wire.McpApprovalsResponse, Awaited<ReturnType<McpPolicies['approvals']>>>();
+
+// ── api-types 0.66.0 — MCP usage: the fold over the call records (DES-MCP-TOOLS-001 S7) ──
+respondsWith<Wire.McpUsageResponse, ReturnType<typeof foldMcpUsage>>();
 // NO skills setting is on the wire (codex round 5 / coordinator decision): the root is
 // `<state home>/skills`, full stop — `skills_root` is retired with its env override (a configurable
 // root let a PUT aim seeding at `~/.codex/skills`), and `skills_mirror` was withdrawn before it

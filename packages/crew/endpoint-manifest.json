@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.65.0",
+  "apiTypesVersion": "0.66.0",
   "endpoints": [
     {
       "method": "GET",
@@ -531,6 +531,17 @@
         200,
         400,
         404,
+        503
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/mcp/usage",
+      "requestType": null,
+      "responseType": "McpUsageResponse",
+      "statusCodes": [
+        200,
+        400,
         503
       ]
     },
