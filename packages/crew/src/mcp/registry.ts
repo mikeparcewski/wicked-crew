@@ -197,11 +197,16 @@ export class McpRegistry {
     // keychain itself and then save, so a failure between the two left a keychain entry with no
     // server — invisible, because nothing can enumerate the entries of a keychain service — or a
     // server whose secret never landed. The write happens here, inside the save, and a save that
-    // then fails takes the entry back out; the only residue left is one this call NAMES.
-    const wroteSecret = held.secret !== null;
-    const secretExisted = wroteSecret && (await this.deps.secrets.has(held.config.name));
+    // then fails puts the entry back exactly as it was; the only residue left is one this call
+    // NAMES.
+    //
+    // The PRIOR value is read first (review of PR #724, HIGH). A re-key of a registered server
+    // whose registry write then failed used to leave the NEW secret behind under an unchanged row:
+    // the credential its running calls use had silently changed, which is a worse outcome than the
+    // orphan this was written to prevent. `null` = no prior value, and then the rollback deletes.
+    const prior = held.secret === null ? null : await this.deps.secrets.get(held.config.name);
     if (held.secret !== null) await this.deps.secrets.set(held.config.name, held.secret);
-    const saved = await this.rollBackSecretOnFailure(held.config.name, wroteSecret && !secretExisted, () => this.deps.store.mutate((file) => {
+    const saved = await this.restoreSecretOnFailure(held.config.name, held.secret !== null, prior, () => this.deps.store.mutate((file) => {
       const prior = file.servers.find((s) => s.name === held.config.name);
       const tools: McpToolRecord[] = held.tools.map((t) => {
         const was = prior?.tools.find((p) => p.name === t.name);
@@ -237,27 +242,32 @@ export class McpRegistry {
   }
 
   /**
-   * Run `commit`; if it throws and `undo` is set, take the keychain entry this save just created
-   * back out (crew#719). A rollback that ALSO fails is reported rather than swallowed: the operator
-   * is told which keychain entry was left behind, because nothing else can find it for them.
+   * Run `commit`; if it throws and this save had written the OS secret store, put the entry back
+   * exactly as it was — deleted when there was no `prior` value, restored to `prior` when there
+   * was (crew#719, review of PR #724). Either way the registry row and the credential it
+   * references end up as they were before the save.
    *
-   * `undo` is false when the account already held a value: the row is unchanged, so its `auth.ref`
-   * still resolves — deleting it would destroy a working credential to tidy up a failed save.
+   * A rollback that ALSO fails is reported rather than swallowed: the operator is told what was
+   * left behind and under which account, because nothing else can find a keychain entry for them.
    */
-  private async rollBackSecretOnFailure<T>(name: string, undo: boolean, commit: () => Promise<T>): Promise<T> {
+  private async restoreSecretOnFailure<T>(name: string, wrote: boolean, prior: string | null, commit: () => Promise<T>): Promise<T> {
     try {
       return await commit();
     } catch (err) {
-      if (!undo) throw err;
+      if (!wrote) throw err;
       try {
-        await this.deps.secrets.delete(name);
+        if (prior === null) await this.deps.secrets.delete(name);
+        else await this.deps.secrets.set(name, prior);
       } catch (rollback) {
         const why = err instanceof Error ? err.message : String(err);
         const also = rollback instanceof Error ? rollback.message : String(rollback);
+        const left = prior === null
+          ? 'its secret could not be taken back out'
+          : 'the secret it replaced could not be put back, so the entry now holds the value this save staged';
         throw new McpRegistryError(
           500,
           'secret_orphaned',
-          `${name} was not registered (${why}) and its secret could not be taken back out (${also}); remove the "${KEYCHAIN_SERVICE}" keychain entry for account "${name}" by hand`,
+          `${name} was not registered (${why}) and ${left} (${also}); fix the "${KEYCHAIN_SERVICE}" keychain entry for account "${name}" by hand`,
         );
       }
       throw err;

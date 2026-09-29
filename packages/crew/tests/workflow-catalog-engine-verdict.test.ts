@@ -96,6 +96,23 @@ it('the catalog omits a drop-in the engine refused and names core\'s reason', as
   expect(workflows.find((w) => w.id === 'feature')).toBeDefined();
 });
 
+it('workflowRefusal judges on FIRST call, so a by-id lookup never serves a refused def', async () => {
+  // (review of PR #724, MEDIUM) `GET /workflows/:id` reads the refusal BEFORE `getWorkflow`,
+  // because `getWorkflow` only hydrates the overlay dir. A fresh adapter that is asked by id
+  // first — the launch's own lookup path — must not answer with the def the engine threw away.
+  const fresh = new CoreAdapter({ dbPath: join(dir, 'byid.db'), stub: true });
+  try {
+    expect(await fresh.workflowRefusal('dogfood-ungated')).toMatch(/gate evaluates nothing/);
+    expect(
+      fresh.getWorkflow('dogfood-ungated'),
+      'the verdict pass ran, so every later sync reader is clean too',
+    ).toBeNull();
+    expect(fresh.getWorkflow('dogfood-sound')).not.toBeNull();
+  } finally {
+    fresh.close();
+  }
+});
+
 it('workflowRefusal answers for the refused id only', async () => {
   expect(await adapter.workflowRefusal('dogfood-ungated')).toMatch(/gate evaluates nothing/);
   expect(await adapter.workflowRefusal('dogfood-sound')).toBeNull();

@@ -297,6 +297,16 @@ describe('a secret never leaves the broker (D-2)', () => {
     await expect(failing.save(held.previewHash)).rejects.toThrow(/registry.json could not be written/);
     expect(secrets.values.has('fx'), 'a failed save leaves no orphan secret').toBe(false);
 
+    // 2b. (review of PR #724, HIGH) A RE-KEY staged through the preview, whose registry write then
+    //     fails, puts the PRIOR value back. Leaving the new one behind under an unchanged row would
+    //     silently change the credential the server's running calls use — worse than the orphan
+    //     this whole change exists to prevent.
+    secrets.values.set('fx', 'the-live-secret-value');
+    const rekey = await failing.preview({ name: 'fx', kind: 'mcp-stdio', command: process.execPath, args: [FIXTURE_SERVER, specPath], url: null, auth }, secret);
+    await expect(failing.save(rekey.previewHash)).rejects.toThrow(/registry.json could not be written/);
+    expect(secrets.values.get('fx'), 'the live credential is untouched by a failed save').toBe('the-live-secret-value');
+    secrets.values.delete('fx');
+
     // 3. A re-key for a name no registered server references is refused, and writes nothing —
     //    that write was the first half of the non-atomic add.
     const orphan = await call('PUT', '/mcp/servers/nosuch/secret', { value: secret });
