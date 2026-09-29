@@ -19,6 +19,7 @@ import {
   InteractivePartitionRefusedError,
   legacyHomeDocsNotice,
   legacyHomeDocsRoot,
+  PARTITION_SEGMENT_MAX,
   partitionedInteractiveRoot,
   partitionsBase,
   preparePartitionedInteractiveRoot,
@@ -149,6 +150,27 @@ describe('resolveProjectInteractiveRoot (crew#472 — the default root is partit
     }
     // The partition never escapes the projects dir.
     expect(partitionedInteractiveRoot('a..', STATE_HOME)).toBe(join(LEGACY, PROJECTS_DIR, 'a..'));
+  });
+
+  it('BOUNDS the segment (crew#488): an over-long id is refused by name, not by an opaque mkdir error', () => {
+    // Red before the bound: shape alone passed, so a 4 KB id was resolved into a path the bridge
+    // pool then failed to `mkdir` — a per-platform limit reported as an ENAMETOOLONG deep in a spawn.
+    const longest = 'p'.repeat(PARTITION_SEGMENT_MAX);
+    expect(partitionedInteractiveRoot(longest, STATE_HOME)).toBe(join(LEGACY, PROJECTS_DIR, longest));
+    const tooLong = 'p'.repeat(PARTITION_SEGMENT_MAX + 1);
+    expect(() => partitionedInteractiveRoot(tooLong, STATE_HOME)).toThrow(/at most 128 characters/);
+    // The refusal does not echo 4 KB of id into the error (and so into the 500 and the log).
+    const absurd = 'p'.repeat(4096);
+    const err = ((): Error => {
+      try {
+        partitionedInteractiveRoot(absurd, STATE_HOME);
+      } catch (e) {
+        return e as Error;
+      }
+      throw new Error('expected a refusal');
+    })();
+    expect(err.message.length).toBeLessThan(400);
+    expect(err.message).toContain('…');
   });
 });
 
