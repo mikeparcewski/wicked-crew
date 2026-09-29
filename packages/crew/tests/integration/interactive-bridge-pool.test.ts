@@ -129,6 +129,20 @@ async function operatorBridge(root: string, env: NodeJS.ProcessEnv = { ...proces
   return child.pid!;
 }
 
+/** A sidecar left by a bridge that DIED, naming a pid something else now holds (crew#510): a
+ *  different env pair, an owner daemon that is gone, and the dead bridge's own instance marker. */
+function staleRecord(pid: number, ownerPid: number, busDir: string): string {
+  const recorded: Record<string, unknown> = {
+    pid,
+    env: { WICKED_CREW_API: 'http://127.0.0.1:60785', WICKED_BUS_DATA_DIR: busDir },
+    startedBy: 'wicked-crew',
+    startedAt: '2026-01-01T00:00:00.000Z',
+    bridgeStartedAt: '2026-01-01T00:00:00.000Z',
+    ownerPid,
+  };
+  return JSON.stringify(recorded);
+}
+
 function sidecarBytes(root: string): string | null {
   return existsSync(join(root, CREW_SIDECAR_NAME)) ? readFileSync(join(root, CREW_SIDECAR_NAME), 'utf8') : null;
 }
@@ -614,18 +628,7 @@ describe('a sidecar names a bridge INSTANCE, not a pid (crew#510)', () => {
     // different env pair, an owner daemon that is gone, and the dead bridge's own marker.
     const deadOwner = spawnSync(process.execPath, ['-e', 'process.exit(0)']).pid ?? 999_999;
     expect(pidAlive(deadOwner)).toBe(false);
-    writeFileSync(
-      join(root, CREW_SIDECAR_NAME),
-      JSON.stringify({
-        pid: foreignPid,
-        env: { WICKED_CREW_API: 'http://127.0.0.1:60785', WICKED_BUS_DATA_DIR: join(dir, 'state', 'bus') },
-        startedBy: 'wicked-crew',
-        startedAt: '2026-01-01T00:00:00.000Z',
-        bridgeStartedAt: '2026-01-01T00:00:00.000Z',
-        ownerPid: deadOwner,
-      }),
-      'utf8',
-    );
+    writeFileSync(join(root, CREW_SIDECAR_NAME), staleRecord(foreignPid, deadOwner, join(dir, 'state', 'bus')), 'utf8');
     expect(foreignLock.startedAt).not.toBe('2026-01-01T00:00:00.000Z');
 
     const logged: string[] = [];

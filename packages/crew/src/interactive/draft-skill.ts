@@ -25,6 +25,7 @@
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import type { WorkflowDef } from '../core/types.js';
+import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 import { discoverLivePlugin } from '../skills/plugin-source.js';
 
 /** The skill's name as the snapshot keys it (path-derived: `skills/draft/SKILL.md` → `wicked-garden-draft`). */
@@ -378,7 +379,14 @@ export interface DraftFloorIo {
 
 function runNode(argv: string[], timeoutMs: number): Promise<{ stdout: string; code: number | null }> {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(process.execPath, argv, { stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs });
+    // The child's env goes through `childEnvWithBootEstateDb` like every other spawn in src/
+    // (crew#495, `tests/governance-child-env.test.ts`): a daemon-exported governance store must
+    // not reach the self-check's Python.
+    const child = spawn(process.execPath, argv, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: timeoutMs,
+      env: childEnvWithBootEstateDb(),
+    });
     let stdout = '';
     child.stdout?.on('data', (d: Buffer) => {
       stdout += d.toString();
