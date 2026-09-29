@@ -203,10 +203,39 @@ HTTP 401.
 |---|---|
 | `WICKED_RUNTIME=team` | Forces auth required (deny-dominant — an explicit `WICKED_CREW_AUTH=off` cannot override it). |
 | `WICKED_CREW_AUTH` | `required` \| `off` (default `off`). Any other value fails the boot. |
-| `WICKED_CREW_TOKENS` | Token file path (default `~/.config/wicked-crew/tokens.json`). |
+| `WICKED_CREW_TOKENS` | **Daemon side.** Token file path (default `~/.config/wicked-crew/tokens.json`) — who may call this daemon. Grants a client nothing. |
+| `WICKED_CREW_TOKEN` | **Client side.** The bearer the `wicked-crew` CLI sends as `Authorization: Bearer <token>` on every daemon call, `start` and the `mcp` verbs included. One character from the plural above, opposite meaning — see below. |
 | `WICKED_CREW_AUTH_CONFIG` | auth.json path (default `~/.config/wicked-crew/auth.json`). |
 | `WICKED_CREW_ALLOWED_ORIGINS` | Comma-separated CORS allowlist for required mode (default: any origin). |
 | `WICKED_CREW_AUDIT_LOG` | Audit trail path (default `~/.wicked-crew/audit.log`). |
 
 The daemon's readiness line reports the resolved mode:
 `WICKED_CREW_READY {"mode":"serve", …, "auth":"required"}`.
+
+### `WICKED_CREW_TOKEN` vs `WICKED_CREW_TOKENS`
+
+They differ by one character and mean opposite things, so they are worth stating side by side:
+
+| | `WICKED_CREW_TOKEN` (singular) | `WICKED_CREW_TOKENS` (plural) |
+|---|---|---|
+| Whose | the **client's** (the `wicked-crew` CLI) | the **daemon's** |
+| Value | a token from `tokens.json` | a **path** to `tokens.json` |
+| Effect | sent as `Authorization: Bearer <token>` | decides which tokens the daemon accepts |
+| Set it where | the shell you run `wicked-crew start`, `gate`, `mcp`… in | the environment the daemon serves in |
+
+Setting only the plural in a client shell sends no bearer, so **every** verb answers 401. The plural
+is **not** accepted as an alias (its value is a path, which would 401 identically, one step further
+from the cause): instead, the first 401/403 a bearer-less CLI receives prints one line naming the
+variable that was missing, and says the plural is the daemon's token file if it finds it set.
+
+```
+$ WICKED_CREW_TOKENS=~/.config/wicked-crew/tokens.json wicked-crew start …
+wicked-crew: the daemon requires auth and this CLI sent no bearer — set WICKED_CREW_TOKEN=<token
+from your tokens.json>. Note WICKED_CREW_TOKENS (plural, set here) is the DAEMON's token-file path,
+not the client's bearer.
+launch failed (401): Authentication required: send Authorization: Bearer <token>
+```
+
+(The second line is the verb's own failure report, so its shape differs per verb — `start` prints
+`launch failed (<status>): …`, `gate` and `status` print `wicked-crew: <verb> failed: <status> …`.
+The advice line above it is the same for every verb, and is printed once per process.)

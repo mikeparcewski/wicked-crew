@@ -15,7 +15,34 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 
+import { missingBearerAdvice, withBearerHeader } from './bearer.js';
+
 // ─── Crew daemon client ───────────────────────────────────────────────────────
+
+/** The daemon ANSWERED and refused — distinct from "no daemon there", which is a transport error. */
+export class CrewHttpError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'CrewHttpError';
+    this.status = status;
+  }
+}
+
+/**
+ * What to say when the startup health probe fails. A refusal is not unreachability: reporting
+ * "Cannot reach daemon" for a 401 is false AND it throws away the bearer advice the refusal
+ * carries (#637, codex review of #723).
+ */
+export function probeFailureMessage(err: unknown, port: number): string {
+  if (err instanceof CrewHttpError) {
+    return `[wicked-crew mcp] the daemon at port ${port} answered the health probe with ${err.status}: ${err.message}`;
+  }
+  return (
+    `[wicked-crew mcp] Cannot reach daemon at port ${port}. ` +
+    `Start it first with: wicked-crew serve --port ${port}`
+  );
+}
 
 class CrewClient {
   private readonly base: string;
@@ -24,19 +51,28 @@ class CrewClient {
     this.base = `http://127.0.0.1:${port}/api/v1`;
   }
 
+  /** The failure for a non-2xx: under a team runtime with no bearer, name the variable (#637). */
+  private static async failure(verb: string, path: string, res: Response): Promise<CrewHttpError> {
+    const head = `${verb} ${path} → ${res.status}: ${await res.text()}`;
+    const advice = res.status === 401 || res.status === 403 ? missingBearerAdvice() : null;
+    return new CrewHttpError(advice === null ? head : `${head}\n${advice}`, res.status);
+  }
+
   async get(path: string): Promise<unknown> {
-    const res = await fetch(`${this.base}${path}`);
-    if (!res.ok) throw new Error(`GET ${path} → ${res.status}: ${await res.text()}`);
+    // withBearerHeader: these verbs bypassed it entirely, so every one of them 401'd under a team
+    // runtime with nothing said about why (#637, same class as the `wicked-crew start` regression).
+    const res = await fetch(`${this.base}${path}`, withBearerHeader(undefined));
+    if (!res.ok) throw await CrewClient.failure('GET', path, res);
     return res.json();
   }
 
   async post(path: string, body: unknown): Promise<unknown> {
-    const res = await fetch(`${this.base}${path}`, {
+    const res = await fetch(`${this.base}${path}`, withBearerHeader({
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-    });
-    if (!res.ok) throw new Error(`POST ${path} → ${res.status}: ${await res.text()}`);
+    }));
+    if (!res.ok) throw await CrewClient.failure('POST', path, res);
     return res.json();
   }
 }
@@ -54,15 +90,14 @@ export async function runMcpServer(port: number): Promise<void> {
 
   // Probe the daemon before advertising ourselves — fail loudly if unreachable.
   // Capture the version from the health response so serverInfo stays in sync with the daemon.
+  // `/api/v1/health` IS a protected path (api/auth.ts `isProtectedPath`), so under a team runtime
+  // with no bearer this probe gets a 401, not a transport failure — hence probeFailureMessage.
   let daemonVersion = '0.0.0';
   try {
     const health = await client.get('/health') as { version?: string };
     if (typeof health.version === 'string') daemonVersion = health.version;
-  } catch {
-    throw new Error(
-      `[wicked-crew mcp] Cannot reach daemon at port ${port}. ` +
-      `Start it first with: wicked-crew serve --port ${port}`,
-    );
+  } catch (err) {
+    throw new Error(probeFailureMessage(err, port));
   }
 
   const server = new McpServer({ name: 'wicked-crew', version: daemonVersion });
