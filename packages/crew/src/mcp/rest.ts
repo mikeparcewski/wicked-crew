@@ -116,11 +116,19 @@ export function pinnedUrl(base: URL, pathTemplate: string, values: Record<string
   const prefix = basePath(base);
   url.pathname = `${prefix}${filled}`;
   // The URL parser normalizes `.`/`..` segments and may re-read the path; check what it produced.
-  if (url.origin !== base.origin) throw new RestBoundaryError(`the request to ${url.origin} leaves the pinned host ${base.origin}`);
-  if (prefix !== '' && url.pathname !== prefix && !url.pathname.startsWith(`${prefix}/`)) {
-    throw new RestBoundaryError(`the request path ${url.pathname} leaves the pinned base path ${prefix}`);
-  }
+  const escape = boundaryEscape(base, url);
+  if (escape !== null) throw new RestBoundaryError(escape);
   return url;
+}
+
+/** Why `url` is outside `base` (another origin, or a path off the base path); `null` = inside. */
+export function boundaryEscape(base: URL, url: URL): string | null {
+  if (url.origin !== base.origin) return `the request to ${url.origin} leaves the pinned host ${base.origin}`;
+  const prefix = basePath(base);
+  if (prefix !== '' && url.pathname !== prefix && !url.pathname.startsWith(`${prefix}/`)) {
+    return `the request path ${url.pathname} leaves the pinned base path ${prefix}`;
+  }
+  return null;
 }
 
 // ── The OpenAPI document ────────────────────────────────────────────────────────────────────
@@ -431,6 +439,10 @@ export type RestFetch = typeof fetch;
  * The `rest` probe: read the OpenAPI document and wrap its operations. The auth header goes to the
  * document's URL only when it is on the base URL's own origin. Every string returned has the
  * secret scrubbed out.
+ *
+ * The document's URL is NOT pinned to the base URL, by design: it is the operator's own input at
+ * preview time (an API's spec often lives elsewhere, e.g. a docs host), not a worker's call, and it
+ * carries no secret off the API's origin. The host pin (I6) is on the tools' calls.
  */
 export async function probeRestServer(config: McpUpstreamConfig, secret: string | null, fetchImpl: RestFetch = fetch): Promise<ProbeResult> {
   const secrets = secret === null ? [] : [secret];
@@ -554,9 +566,8 @@ export async function invokeRestTool(
       target = null;
     }
     const base = parseBaseUrl(config.url);
-    if (target !== null && base !== null && target.origin !== base.origin) {
-      throw new RestBoundaryError(`the API redirected to ${target.origin}, off the pinned host ${base.origin}; not followed`);
-    }
+    const escape = target !== null && base !== null ? boundaryEscape(base, target) : null;
+    if (escape !== null) throw new RestBoundaryError(`the API redirected off its pin (${escape}); not followed`);
     throw new UpstreamCallError('http', false, `the API answered HTTP ${res.status} (a redirect); redirects are not followed`);
   }
   if (res.status === 429 || res.status >= 500) {

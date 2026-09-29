@@ -298,11 +298,17 @@ describe('PROVING (S5a): an off-host request is refused (I6)', () => {
     expect(api.seen).toHaveLength(1);
     expect(other.seen).toHaveLength(0);
     expect(recorded()[0]?.status.errorClass).toBe('rest_host_escape');
-    // A same-host redirect is not followed either; it is an upstream error, not an escape.
+    expect(r.body.reason).toContain('leaves the pinned host');
+    // A redirect off the base path, on the same host, is an escape too.
+    apiRespond = () => ({ status: 302, headers: { location: '/admin' } });
+    const offPath = await mcpCall('mcp:tracker/getIssue', { id: '1' });
+    expect(offPath.body.outcome).toBe('guard_error');
+    expect(offPath.body.reason).toContain('leaves the pinned base path /v1');
+    // A redirect inside the pin is not followed either; it is an upstream error, not an escape.
     apiRespond = () => ({ status: 301, headers: { location: '/v1/elsewhere' } });
     const same = await mcpCall('mcp:tracker/getIssue', { id: '1' });
     expect(same.body.outcome).toBe('upstream_error');
-    expect(api.seen.map((s) => s.url)).toEqual(['/v1/issues/1', '/v1/issues/1']);
+    expect(api.seen.map((s) => s.url)).toEqual(['/v1/issues/1', '/v1/issues/1', '/v1/issues/1']);
   });
 
   it('pinnedUrl refuses every way out: dot segments, a scheme-relative path, a path off the base', () => {
@@ -376,6 +382,8 @@ describe('the OpenAPI import', () => {
       tracker({ url: 'https://u:p@x.example' }),
       tracker({ url: 'https://x.example/?q=1' }),
       tracker({ openapiUrl: 'https://x.example/o.json' }),
+      tracker({ openapi: undefined, openapiUrl: 'https://user:pw@x.example/o.json' }),
+      tracker({ openapi: undefined, openapiUrl: 'file:///etc/passwd' }),
       tracker({ openapi: undefined }),
       tracker({ auth: { ref: 'env:TOKEN', env: 'TOKEN' } }),
       tracker({ command: 'node' }),

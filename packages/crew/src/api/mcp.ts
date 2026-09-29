@@ -95,6 +95,10 @@ export const McpServerConfigSchema = z
       if (parseBaseUrl(c.url ?? null) === null) issue('url', 'a rest server needs an http(s) base url with no credentials, query or fragment');
       if ((c.openapiUrl === undefined) === (c.openapi === undefined)) issue('openapi', 'a rest server takes openapiUrl or openapi (the document), exactly one');
       if (c.openapiUrl !== undefined && !httpUrl(c.openapiUrl)) issue('openapiUrl', 'openapiUrl must be an http(s) url');
+      // The URL is stored and answered back, so it may not carry credentials: a secret goes in auth.ref.
+      if (c.openapiUrl !== undefined && httpUrl(c.openapiUrl) && new URL(c.openapiUrl).username + new URL(c.openapiUrl).password !== '') {
+        issue('openapiUrl', 'openapiUrl must not carry credentials; reference the secret with auth.ref');
+      }
       if (c.auth != null && (c.auth.header === undefined || c.auth.env !== undefined)) issue('auth', 'a rest server injects its secret into one header: auth.header, no auth.env');
     } else if (c.kind === 'mcp-stdio') {
       if (c.command === undefined) issue('command', 'an mcp-stdio server needs a command');
