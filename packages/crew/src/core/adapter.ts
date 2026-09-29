@@ -510,6 +510,8 @@ interface CoreConstructor {
   evaluateMcpCall?(requestJson: string): Promise<string>;
   /** DES-MCP-TOOLS-001 S3: the output decision over a brokered call's scrubbed result. */
   evaluateMcpOutput?(requestJson: string): Promise<string>;
+  /** DES-MCP-TOOLS-001 S4: the token's unit's visible tool list, judged and recorded nowhere. */
+  listMcpTools?(requestJson: string): Promise<string>;
 }
 
 /** The engine's two MCP broker calls (`Core.evaluateMcpCall` / `Core.evaluateMcpOutput`). */
@@ -1428,6 +1430,17 @@ export class CoreAdapter {
       evaluateCall: (requestJson: string) => call.call(Core, requestJson),
       evaluateOutput: (requestJson: string) => output.call(Core, requestJson),
     };
+  }
+
+  /**
+   * The engine's tool list for a token's unit (`Core.listMcpTools`, DES-MCP-TOOLS-001 §8, slice S4),
+   * or `null` on an addon without it: `POST /mcp/tools` then answers 503, never an unjudged list.
+   * Read at call time: tests swap the static.
+   */
+  static mcpToolLister(): ((requestJson: string) => Promise<string>) | null {
+    const list = Core.listMcpTools;
+    if (typeof list !== 'function') return null;
+    return (requestJson: string) => list.call(Core, requestJson);
   }
 
   /** Whether the linked engine follows the one-connection bus rule (`Core.busConnectionStats`,

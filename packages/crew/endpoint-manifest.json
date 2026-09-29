@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.64.0",
+  "apiTypesVersion": "0.65.0",
   "endpoints": [
     {
       "method": "GET",
@@ -506,6 +506,19 @@
         400,
         409,
         502,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/mcp/tools",
+      "requestType": "McpToolsBody",
+      "responseType": "McpToolsResponse",
+      "statusCodes": [
+        200,
+        400,
+        401,
+        500,
         503
       ]
     },

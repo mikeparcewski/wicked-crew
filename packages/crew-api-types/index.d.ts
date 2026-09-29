@@ -7548,6 +7548,38 @@ export interface McpCallCompletedFrame {
   record: McpCallRecord;
 }
 
+// ── The unit's tool list (DES-MCP-TOOLS-001 §8, slice S4; api-types 0.65.0) ─────────────────────
+
+/**
+ * `POST /mcp/tools`: what the garden shim's `list` sends. The token travels in the body, never the
+ * query string, so it stays out of request logs.
+ */
+export interface McpToolsBody {
+  token: string;
+}
+
+/** One tool the token's unit may try, judged now with no arguments. A certain deny is left out. */
+export interface McpVisibleTool {
+  /** `mcp:<server>/<tool>`. */
+  subject: string;
+  class: McpToolClass;
+  /** `allow` = a call runs; `ask` = it waits for the operator's approval. */
+  decision: 'allow' | 'ask';
+  ruleIds: string[];
+  /** Why a call would ask. */
+  reason?: string;
+  /** The tool's description, from the server's `tools/list`. */
+  description: string | null;
+  /** The tool's argument JSON schema, from `tools/list`. */
+  inputSchema: Record<string, unknown> | null;
+}
+
+/** `POST /mcp/tools`'s answer: the unit the token is bound to and its tools. */
+export interface McpToolsResponse {
+  unit: { runId: string; ord: number; attempt: number; phase: string; seat: string };
+  tools: McpVisibleTool[];
+}
+
 // ── MCP policies: the preview matrix and approvals (DES-MCP-TOOLS-001 §4.5, §4.7, §8, slice S6; api-types 0.63.0) ──
 
 /** A policy decision: `ask` = the call waits for the operator's approval (it does not run). */

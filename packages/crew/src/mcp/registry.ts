@@ -65,6 +65,17 @@ export interface McpCallTarget {
   registered: boolean;
 }
 
+/** A registered, enabled tool, as the tool list judges it (`callableTools`). */
+export interface McpCallableTool {
+  server: string;
+  tool: string;
+  kind: McpUpstreamKind;
+  annotations: McpToolAnnotations | null;
+  classOverride: McpToolClass | null;
+  description: string | null;
+  inputSchema: Record<string, unknown> | null;
+}
+
 interface HeldPreview {
   config: McpUpstreamConfig;
   tools: Array<ProbedTool & { schemaHash: string }>;
@@ -311,6 +322,31 @@ export class McpRegistry {
       classOverride: t?.classOverride ?? null,
       registered: s.enabled && t !== undefined && t.enabled && toolStatus(t) === 'registered',
     };
+  }
+
+  /**
+   * Every tool a call could reach right now (slice S4, the shim's `list`): enabled servers, and
+   * their enabled tools whose saved schema is the one last seen. Anything else is D-5 and would be
+   * refused by the broker, so it is never offered.
+   */
+  async callableTools(): Promise<McpCallableTool[]> {
+    const out: McpCallableTool[] = [];
+    for (const s of (await this.deps.store.read()).servers) {
+      if (!s.enabled) continue;
+      for (const t of s.tools) {
+        if (!t.enabled || toolStatus(t) !== 'registered') continue;
+        out.push({
+          server: s.name,
+          tool: t.name,
+          kind: s.kind,
+          annotations: t.annotations,
+          classOverride: t.classOverride,
+          description: t.description,
+          inputSchema: t.inputSchema,
+        });
+      }
+    }
+    return out;
   }
 
   /**
