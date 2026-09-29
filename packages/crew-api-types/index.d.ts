@@ -5114,7 +5114,7 @@ export type ChatSeatRefusedFrame = {
   project_id?: string;
 };
 
-// ── Chat citations (crew#561, F-RC1-117; api-types 0.69.0) ───────────────────
+// ── Chat citations (crew#561, F-RC1-117; api-types 0.67.0) ───────────────────
 //
 // A seat's answer cites paths, `path:line` / `path:symbol` refs and commit SHAs, and nothing used
 // to check them: on the RC1 Phase 6 re-run 2 of 26 cited SHAs existed in no repo and three line
