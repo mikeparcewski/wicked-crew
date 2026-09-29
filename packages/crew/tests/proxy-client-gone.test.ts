@@ -80,21 +80,37 @@ describe('forward() — client-disconnect suppression (real HTTP servers)', () =
     } as unknown as ProjectSettingsStore;
     const adapter: CoreAdapter = {} as unknown as CoreAdapter;
 
-    // 3. Fastify proxy app; stateHome = temp dir so projectDocsRoot returns a well-formed path
-    const app = Fastify({ logger: false });
+    // 3. Fastify proxy app; stateHome = temp dir so projectDocsRoot returns a well-formed path.
+    //
+    //    The captured log is what makes the suppression FALSIFIABLE (#637). The predecessor of
+    //    this assertion was `process.on('unhandledRejection')` + `toHaveLength(0)`, which cannot
+    //    fire: the route `await`s forward(), so Fastify owns any rejection and the process never
+    //    sees an unhandled one — and after `reply.hijack()` Fastify does not run the error handler
+    //    either, so neither hook observes the failure. Deleting all four `clientGone` guards left
+    //    the suite 6/6 green (re-confirmed on this head: neutralising the guards passes both a
+    //    rejection listener and an error handler).
+    //
+    //    The one observable INSIDE the guard is its own `req.log.info` line, so this test captures
+    //    the app log: the suppression is proven by the info line's PRESENCE, and the absence of
+    //    any error-level line. With the guards removed, the info line is never written and the
+    //    first assertion fails.
+    const logLines: { level: number; msg?: string }[] = [];
+    const app = Fastify({
+      logger: {
+        level: 'info',
+        stream: {
+          write: (line: string) => {
+            try { logLines.push(JSON.parse(line) as { level: number; msg?: string }); }
+            catch { /* non-JSON line: not something we assert on */ }
+          },
+        },
+      },
+    });
     registerInteractiveProxy(app, adapter, { pool, settings, stateHome: dir });
     await app.listen({ port: 0, host: '127.0.0.1' });
     const appPort = (app.server.address() as { port: number }).port;
 
-    // 4. Install an explicit unhandledRejection listener — if forward() rejects instead of
-    //    resolving, the rejection lands here and we assert it did not occur. Without this
-    //    listener the test relies on vitest's passive detection, which silently passes when
-    //    the rejection is swallowed before vitest sees it.
-    const unhandledRejections: unknown[] = [];
-    const rejectionHandler = (reason: unknown) => { unhandledRejections.push(reason); };
-    process.on('unhandledRejection', rejectionHandler);
-
-    // 5. Client makes a GET (not a create — takes the forward() branch, not forwardCreate)
+    // 4. Client makes a GET (not a create — takes the forward() branch, not forwardCreate)
     //    and destroys the socket once the proxied 200 header arrives.
     let got200 = false;
     await new Promise<void>((resolve, reject) => {
@@ -106,22 +122,32 @@ describe('forward() — client-disconnect suppression (real HTTP servers)', () =
         // We got the forwarded 200 — now simulate tab close
         req.destroy();
         clearTimeout(timer);
-        // Give the ECONNRESET time to propagate through the proxy to the upstream
-        setTimeout(resolve, 250);
+        resolve();
       });
       req.end();
     });
 
-    // 6. Cleanup (close after assertions so unhandled rejections fire before close)
-    await new Promise((r) => setTimeout(r, 100));
-    process.off('unhandledRejection', rejectionHandler);
+    // 5. Wait for the guard's own line rather than for a fixed interval: the ECONNRESET takes as
+    //    long as the host is busy, and a sleep long enough on an idle machine is a flake on a
+    //    loaded one.
+    const suppressed = (): { level: number; msg?: string }[] => logLines.filter(
+      (l) => l.level === 30 && typeof l.msg === 'string' && l.msg.startsWith('proxy: client disconnected'),
+    );
+    const deadline = Date.now() + 4000;
+    while (suppressed().length === 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
     await app.close();
     await new Promise<void>((r) => upstream.close(() => r()));
 
     expect(got200).toBe(true);
-    // An unhandled rejection here means forward() rejected instead of resolving — the suppression is broken.
-    expect(unhandledRejections).toHaveLength(0);
-  }, 8000);
+    // The guard ran: its info line is the only place this message is written (proxy-routes.ts,
+    // inside `if (clientGone && isClientGoneError(err))`). No line ⇒ no suppression.
+    expect(suppressed().length).toBeGreaterThanOrEqual(1);
+    // And the disconnect was not ALSO reported as a failure.
+    expect(logLines.filter((l) => l.level >= 50).map((l) => l.msg)).toEqual([]);
+  }, 12_000);
 
   it('upstream error WITHOUT client close → forward() rejects (surfaces as 502)', async () => {
     // An upstream that immediately errors with ECONNRESET (refuses the connection)

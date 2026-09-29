@@ -720,12 +720,14 @@ async function runServiceVerb(args: string[]): Promise<number> {
 }
 
 export { withBearerHeader } from './bearer.js';
-import { withBearerHeader } from './bearer.js';
+import { warnIfUnauthorizedWithoutBearer, withBearerHeader } from './bearer.js';
 
 /** `fetch` against the local daemon: injects `WICKED_CREW_TOKEN` as a bearer if set; a connection failure exits 1 with the remedy; anything else propagates. */
 async function daemonFetch(port: number, url: string, init?: RequestInit): Promise<Response> {
   try {
-    return await fetch(url, withBearerHeader(init));
+    const res = await fetch(url, withBearerHeader(init));
+    warnIfUnauthorizedWithoutBearer(res.status);
+    return res;
   } catch (err) {
     if (isConnectionFailure(err)) {
       console.error(noDaemonRemedy(port));

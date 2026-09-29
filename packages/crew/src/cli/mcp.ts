@@ -15,6 +15,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 
+import { missingBearerAdvice, withBearerHeader } from './bearer.js';
+
 // ─── Crew daemon client ───────────────────────────────────────────────────────
 
 class CrewClient {
@@ -24,19 +26,28 @@ class CrewClient {
     this.base = `http://127.0.0.1:${port}/api/v1`;
   }
 
+  /** The failure line for a non-2xx: under a team runtime with no bearer, name the variable (#637). */
+  private static async failure(verb: string, path: string, res: Response): Promise<Error> {
+    const head = `${verb} ${path} → ${res.status}: ${await res.text()}`;
+    const advice = res.status === 401 || res.status === 403 ? missingBearerAdvice() : null;
+    return new Error(advice === null ? head : `${head}\n${advice}`);
+  }
+
   async get(path: string): Promise<unknown> {
-    const res = await fetch(`${this.base}${path}`);
-    if (!res.ok) throw new Error(`GET ${path} → ${res.status}: ${await res.text()}`);
+    // withBearerHeader: these verbs bypassed it entirely, so every one of them 401'd under a team
+    // runtime with nothing said about why (#637, same class as the `wicked-crew start` regression).
+    const res = await fetch(`${this.base}${path}`, withBearerHeader(undefined));
+    if (!res.ok) throw await CrewClient.failure('GET', path, res);
     return res.json();
   }
 
   async post(path: string, body: unknown): Promise<unknown> {
-    const res = await fetch(`${this.base}${path}`, {
+    const res = await fetch(`${this.base}${path}`, withBearerHeader({
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-    });
-    if (!res.ok) throw new Error(`POST ${path} → ${res.status}: ${await res.text()}`);
+    }));
+    if (!res.ok) throw await CrewClient.failure('POST', path, res);
     return res.json();
   }
 }
