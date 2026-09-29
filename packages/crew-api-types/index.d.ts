@@ -4998,6 +4998,60 @@ export type ChatSeatRefusedFrame = {
   project_id?: string;
 };
 
+// ── Chat citations (crew#561, F-RC1-117; api-types 0.67.0) ───────────────────
+//
+// A seat's answer cites paths, `path:line` / `path:symbol` refs and commit SHAs, and nothing used
+// to check them: on the RC1 Phase 6 re-run 2 of 26 cited SHAs existed in no repo and three line
+// refs were off, rendered as plain text a reader could not tell apart from the real ones. The
+// daemon verifies each citation against the very read roots it handed the seats and publishes the
+// verdicts; the seat's TEXT is never edited — a skin MARKS it from these items.
+
+/** What class of thing a citation is. */
+export type ChatCitationKind = 'path' | 'line' | 'symbol' | 'sha';
+
+/**
+ * The verdict on one citation.
+ *  - `verified` — it exists, exactly as cited;
+ *  - `corrected` — it exists, but not where the reply said (`resolved` is the real place);
+ *  - `unverified` — it is not in the chat's scope (the fabricated-SHA case);
+ *  - `unchecked` — the bounded pass did not reach it. NOT a claim either way.
+ */
+export type ChatCitationStatus = 'verified' | 'corrected' | 'unverified' | 'unchecked';
+
+/** One citation as verified. `raw` is the token EXACTLY as it appears in the reply, so a skin can
+ *  find it in the rendered text without re-parsing. */
+export interface ChatCitationItem {
+  raw: string;
+  kind: ChatCitationKind;
+  status: ChatCitationStatus;
+  /** Where the thing actually is: `alpha/src/foo.ts:2069` for a corrected line ref, the repo name
+   *  for a SHA, the defining line for a symbol. Absent when there is nothing to add. */
+  resolved?: string;
+  /** Why, in one short phrase — a skin's hover text. */
+  note?: string;
+}
+
+/**
+ * DAEMON-SYNTHETIC (like {@link ChatSeatRefusedFrame}): ONE frame per terminal `chatReply` of a
+ * chat that has read roots, broadcast AFTER that reply (verification never delays an answer) and
+ * stamped with the reply's own `turn_id`. ABSENT — never empty — when the reply cites nothing, when
+ * the chat has no read roots to verify against, and for a not-ok reply (a refusal or eviction line
+ * cites nothing a reader would paste). The counts match `items`; `unverifiable` counts `unverified`
+ * only, so `unchecked` is never read as a fabrication.
+ */
+export type ChatCitationsFrame = {
+  type: 'chatCitations';
+  chat: string;
+  cliKey: string;
+  turn_id?: string;
+  verified: number;
+  unverifiable: number;
+  corrected: number;
+  unchecked: number;
+  items: ChatCitationItem[];
+  project_id?: string;
+};
+
 /** One live chat on `GET /chats` (FINDING-027 gap 4; scope fields with crew#502). */
 export interface ChatSummary {
   chatId: string;

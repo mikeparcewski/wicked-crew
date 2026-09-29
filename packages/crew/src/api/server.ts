@@ -2,7 +2,7 @@ import Fastify from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
 import fastifyStatic from '@fastify/static';
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { WebSocket } from 'ws';
 import { registerRoutes } from './routes.js';
@@ -17,6 +17,13 @@ import { GroupIndex } from './group-index.js';
 import { RunTimingIndex, recordRunLaunched } from './run-timing-index.js';
 import { GuidanceIndex } from './guidance-index.js';
 import { ChatScopeIndex, reapStaleChatNamespaces } from './chat-scope.js';
+import {
+  chatCitationDeps,
+  citationsFrame,
+  verifyCitations,
+  type ChatCitationDeps,
+  type VerifyOptions,
+} from './chat-citations.js';
 import {
   DeliveryIndex,
   deliverUnitOf,
@@ -331,6 +338,19 @@ export interface CreateServerOptions {
     disabled?: boolean;
     source?: () => PluginSource | null;
     provisionVenv?: VenvProvisioner;
+  };
+  /**
+   * Chat citation verification (crew#561). DEFAULT-ON: every terminal `chatReply` of a chat with
+   * read roots has its cited paths, `path:line` / `path:symbol` refs and commit SHAs checked
+   * against those roots, and the verdicts ride `/ws` as one `chatCitations` frame. The pass runs
+   * AFTER the reply is broadcast, so it never delays an answer, and it is bounded (see
+   * `chat-citations.ts`). `disabled: true` turns it off; `deps` / `limits` let a test drive it
+   * without a repo, a git or the default budget.
+   */
+  chatCitations?: {
+    disabled?: boolean;
+    deps?: ChatCitationDeps;
+    limits?: VerifyOptions;
   };
 }
 
@@ -1148,6 +1168,48 @@ export async function createServer(
   // written from the stamped frames below, dropped with the chat on `chatClosed`, served on
   // `GET /chats/:id.messages`.
   const chatTranscripts = new ChatTranscriptStore();
+  // Chat citations (crew#561, F-RC1-117): what the seat CITED, checked against the very read roots
+  // the daemon handed it. Runs off the reply's own path — after the broadcast below — and publishes
+  // one `chatCitations` frame per reply; the seat's text is never edited.
+  const citationsDisabled = options?.chatCitations?.disabled === true;
+  const citationDeps = options?.chatCitations?.deps ?? chatCitationDeps();
+  const citationLimits = options?.chatCitations?.limits;
+  async function verifyReplyCitations(frame: CoreEvent, projectId: string | undefined): Promise<void> {
+    const f = frame as CoreEvent & Record<string, unknown>;
+    const chatId = typeof f['chat'] === 'string' ? f['chat'] : undefined;
+    const cliKey = typeof f['cliKey'] === 'string' ? f['cliKey'] : undefined;
+    const text = typeof f['text'] === 'string' ? f['text'] : '';
+    // A NOT-ok reply is the daemon's/engine's own reason line (an eviction, a refusal): it cites
+    // nothing the reader would paste, so it is not verified — and never marked.
+    if (chatId === undefined || cliKey === undefined || text === '' || f['ok'] === false) return;
+    const scope = chatScopes.get(chatId);
+    // No scope (a chat this daemon did not open, or `kind: 'none'`/`system`) ⇒ nothing to verify
+    // AGAINST. Saying "unverified" then would blame the seat for the daemon's missing roots.
+    if (scope === undefined || scope.repos.length === 0) return;
+    const roots = scope.repos.map((r) => ({ absRoot: resolvePath(r.rootPath), name: r.name }));
+    const turnId = typeof f['turn_id'] === 'string' ? f['turn_id'] : undefined;
+    // A chat is filed by its CHAT id (`crew.chat` membership), so the project of a chat frame is
+    // looked up by that — the run-keyed lookup on the relay above answers `undefined` for chats.
+    const project = projectId ?? membershipIndex.projectOf(chatId);
+    try {
+      const result = await verifyCitations(text, roots, citationDeps, citationLimits);
+      const out = citationsFrame(
+        {
+          chat: chatId,
+          cliKey,
+          ...(turnId !== undefined ? { turn_id: turnId } : {}),
+          ...(project !== undefined ? { project_id: project } : {}),
+        },
+        result,
+      );
+      if (out !== null) broadcast(out as unknown as CoreEvent);
+    } catch (err: unknown) {
+      // Loud-non-fatal: a reply is never held hostage to its own verification.
+      app.log.warn(
+        `[chat] citation verification failed for ${chatId}/${cliKey}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
   // crew#619: see declaration of chatRetained/runToChat above (before the hydration block).
   // linkChatRun populates both maps and is called from the hydration block (function-hoisted)
   // and from the launch route (via RoutesRuntime.linkChatRun).
@@ -1208,6 +1270,9 @@ export async function createServer(
     const session = typeof event.session === 'string' ? event.session : undefined;
     const projectId = session !== undefined ? membershipIndex.projectOf(session) : undefined;
     broadcast(projectId !== undefined ? ({ ...rewritten, project_id: projectId } as CoreEvent) : rewritten);
+    // crew#561: the citations in that reply, checked against the chat's read roots — AFTER the
+    // broadcast (the answer is never delayed by verification) and never awaited on this path.
+    if (!citationsDisabled && rewritten.type === 'chatReply') void verifyReplyCitations(rewritten, projectId);
     // Standing orders (behaviour 10): a gate that opened may be one an order answers, holds or
     // reports — after the gate cache folded it, so the order's decision carries the right ord.
     void standingOrderEvaluator?.onEvent(event);
