@@ -26,6 +26,11 @@ import type { z } from 'zod';
 import type * as Wire from 'wicked-crew-api-types';
 import type { UnitDistributedEventJson } from 'wicked-core-ts';
 import type { ChatSummary, CoreAdapter } from '../src/core/adapter.js';
+import type {
+  ChatCitationItem,
+  ChatCitationStatus,
+  ChatCitationsFrame,
+} from '../src/api/chat-citations.js';
 import type { QeAuthorPlan } from '../src/qe/author-workflow.js';
 import type { TestSet } from '../src/qe/test-sets.js';
 import type { TestingAuthorSchema } from '../src/api/testing.js';
@@ -575,6 +580,14 @@ respondsWith<
 >();
 respondsWith<Wire.ChatDetailResponse, { chatId: string; seats: string[]; scope: Wire.ChatScope | null }>();
 respondsWith<Wire.ChatListResponse, { chats: ChatSummary[] }>();
+// crew#561 (api-types 0.67.0) — the citation verdicts, both directions: the frame the daemon
+// broadcasts IS the published one, and the published statuses/kinds are exactly the ones the
+// verifier can produce (a new status on either side breaks this file rather than a skin's render).
+respondsWith<Wire.ChatCitationsFrame, ChatCitationsFrame>();
+respondsWith<ChatCitationsFrame, Wire.ChatCitationsFrame>();
+respondsWith<Wire.ChatCitationItem, ChatCitationItem>();
+respondsWith<Wire.ChatCitationStatus, ChatCitationStatus>();
+respondsWith<ChatCitationStatus, Wire.ChatCitationStatus>();
 // The REQUEST the proxy reads IS the published create body (both directions), and every frame the
 // four seams emit on `status.posted` satisfies the published `InteractiveStatusPosted` once
 // `emitInteractive` stamps `ts` (codex on #506: request/frame mappings, not just refusals).
