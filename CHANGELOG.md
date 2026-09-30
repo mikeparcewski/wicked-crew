@@ -3,7 +3,8 @@
 All notable changes to **wicked-crew** (the daemon package, npm `wicked-crew`) are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
-adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Entries before this file
+adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
+(0.x: minor versions may contain breaking changes). Entries before this file
 existed (everything ≤ 0.7.0) are backfilled from git history and release tags; the sibling
 workspace packages `wicked-crew-api-types` and `agent-acp-bridges` version independently and are
 mentioned only where a daemon release depends on them.
