@@ -18,9 +18,11 @@
  * WORKER grounding client (DES-GROUNDING-001), which allow-lists the estate MCP `--readonly`
  * precisely so a worker can never mutate the operator's stores.
  *
- * `WICKED_MEMORY_DB` is pinned to the operator global store (`${WICKED_HOME:-~/.wicked}/memory.db`,
- * matching the server's own default in `wicked-estate-mcp/src/main.rs`) so the queue is read/written
- * where the operator's memories actually live, regardless of the daemon's cwd/home.
+ * `WICKED_MEMORY_DB` is pinned to the store THIS DAEMON owns — `<state home>/mcp/memory.db` for an
+ * isolated state home, and the operator global store (`${WICKED_HOME:-~/.wicked}/memory.db`,
+ * matching the server's own default in `wicked-estate-mcp/src/main.rs`) for the default one. See
+ * {@link resolveMemoryDbPath}: before F5 it was always the global store, so a throwaway daemon on
+ * a free port listed — and could retire — the operator's real memories.
  *
  * # Framing (mirrors `wicked-estate-mcp/src/main.rs`)
  *
@@ -33,11 +35,13 @@
  */
 
 import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { mcpStateDir } from '../mcp/registry-store.js';
+import { crewStateHome, defaultStateHome } from '../projects/state-home.js';
 import { childEnvWithBootEstateDb } from './governance-store.js';
 
 /** The MCP protocol version crew declares in the handshake (the version the estate server speaks). */
@@ -81,7 +85,7 @@ export class EstateMcpError extends Error {
 /** Injectable IO — tests substitute a fake MCP (a spawned node script) for the real `wicked-estate-mcp`. */
 export interface EstateMcpIo {
   /** Spawn the server process (stdio piped). Defaults to `wicked-estate-mcp`, NON-`--readonly`,
-   *  with `WICKED_MEMORY_DB` pinned to the operator global store. */
+   *  with `WICKED_MEMORY_DB` pinned to this daemon's store ({@link resolveMemoryDbPath}). */
   spawn?: () => ChildProcess;
   /** Overall deadline for the handshake + call round-trip. Defaults to {@link DEFAULT_ESTATE_MCP_TIMEOUT_MS}. */
   timeoutMs?: number;
@@ -94,24 +98,76 @@ export function estateMcpExe(env: NodeJS.ProcessEnv = process.env): string {
   return override !== undefined && override !== '' ? override : 'wicked-estate-mcp';
 }
 
-/** The operator global memory store path: `WICKED_MEMORY_DB` wins, else `${WICKED_HOME:-~/.wicked}/memory.db`. */
+/**
+ * The memory store this daemon reads and writes.
+ *
+ * ## F5 (ship-proof C7) — it FOLLOWS `--db`, like every other durable store
+ *
+ * This resolved from `homedir()` unconditionally, so a brand-new state home on a free port
+ * (`--db <scratch>/core.db`) showed **596 of the operator's real memories** on Steering →
+ * Memories, and a Retire click there would have erased a row from their store. Every other
+ * crew-side durable store resolves through `crewStateHome()` — the crew#330 / #351 / #353 escape,
+ * a fourth time, and this one is a DATA-ISOLATION defect rather than stray disk use.
+ *
+ * The ladder, most specific first:
+ *
+ *  1. `WICKED_MEMORY_DB` — the explicit instruction wins, as it does at every other store's own
+ *     resolution site.
+ *  2. An **isolated** state home (anything but the default) gets its OWN store, under the state
+ *     home: `<state home>/mcp/memory.db`. This is the fix — a test daemon, a rig, a second port
+ *     can no longer see, or retire, a row in the operator's store. `WICKED_HOME` does NOT outrank
+ *     it: that variable names the operator's GLOBAL store, not this daemon's.
+ *
+ *     WHY UNDER `mcp/` AND NOT `<state home>/memory.db`. The top level of the state home is an
+ *     EXPLICIT registry (`tests/fixtures/state-home-subtrees.json`, mirrored in
+ *     `projects/state-home-registry.ts`) that **wicked-core embeds** to build the worker Read
+ *     fence, and `Core::launch_run` REFUSES at intake, naming the entry, when it finds a top-level
+ *     entry the registry does not classify. A new top-level `memory.db` would therefore refuse
+ *     EVERY governed run on the installed engine until the same entry shipped in a wicked-core
+ *     release — strictly worse than the defect, and precisely on the isolated state homes this
+ *     fixes. `mcp/` is already a registered, worker-denied subtree owned by crew and is where the
+ *     estate MCP's own daemon-side state belongs, so this needs no fence change and is safe on the
+ *     engine that is already released. Promoting it to `<state home>/memory.db` is a two-repo
+ *     change (one fence change per RC) and deliberately not smuggled in here.
+ *  3. The **default** state home (`~/.wicked-crew`) keeps `${WICKED_HOME:-~/.wicked}/memory.db`.
+ *     Deliberate, and the reason there is no migration to do: that file is not crew's private
+ *     store, it is the operator's global one — the estate MCP's own default
+ *     (`wicked-estate-mcp/src/main.rs`) and the path garden's `mem` skills read. Moving the
+ *     default daemon off it would SPLIT a single-state-home user's memories from their own CLI,
+ *     which is the "must not lose sight of their memories" case. So isolation is keyed on "is this
+ *     the default daemon", and an existing user's store neither moves nor needs copying.
+ *
+ * `resolve` on both sides of the comparison, so an unnormalised `--db ./.wicked-crew/core.db`
+ * spelling of the default home is still recognised as the default daemon.
+ */
 export function resolveMemoryDbPath(env: NodeJS.ProcessEnv = process.env): string {
   const explicit = env['WICKED_MEMORY_DB'];
   if (explicit !== undefined && explicit !== '') return explicit;
+  const stateHome = crewStateHome();
+  if (resolve(stateHome) !== resolve(defaultStateHome(homedir()))) return join(mcpStateDir(), 'memory.db');
   const home = env['WICKED_HOME'];
   const base = home !== undefined && home !== '' ? home : join(homedir(), '.wicked');
   return join(base, 'memory.db');
 }
 
-/** The default spawn: `wicked-estate-mcp` with no `--readonly` flag and WICKED_MEMORY_DB pinned.
+/** The default spawn: `wicked-estate-mcp` with no `--readonly` flag and WICKED_MEMORY_DB pinned
+ *  to this daemon's own store (F5 — never the operator's global one from a throwaway state home).
  *  The server resolves its GRAPH store from `WICKED_ESTATE_DB`, which the daemon exports as its
  *  own governance store (crew#495) — the child gets the process's BOOT-TIME value back instead
  *  (`childEnvWithBootEstateDb`): the daemon's sidecar is the engine's business, and a newer estate
  *  binary must never migrate that file's schema past what the engine's vendored store opens. */
 function defaultSpawn(env: NodeJS.ProcessEnv): ChildProcess {
+  const memoryDb = resolveMemoryDbPath(env);
+  // The server opens the file; nothing guarantees its PARENT exists on a state home that has
+  // never held one. Idempotent, and never for an operator-named path outside our own trees.
+  try {
+    mkdirSync(dirname(memoryDb), { recursive: true });
+  } catch {
+    // A parent that cannot be created is the server's error to report, with its own message.
+  }
   return nodeSpawn(estateMcpExe(env), [], {
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...childEnvWithBootEstateDb(env), WICKED_MEMORY_DB: resolveMemoryDbPath(env) },
+    env: { ...childEnvWithBootEstateDb(env), WICKED_MEMORY_DB: memoryDb },
     windowsHide: true,
   });
 }

@@ -8,7 +8,7 @@
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
@@ -17,6 +17,7 @@ import {
   estateMcpExe,
   resolveMemoryDbPath,
 } from '../src/core/estate-mcp-client.js';
+import { defaultStateHome, setCrewStateHome } from '../src/projects/state-home.js';
 import { removeScratch } from './setup/scratch.js';
 
 // A fake estate-mcp server. argv: [logPath, mode]. Modes: 'ok' (mcp result), 'rpcerror' (JSON-RPC
@@ -154,6 +155,8 @@ describe('callEstateTool', () => {
 });
 
 describe('resolveMemoryDbPath', () => {
+  afterEach(() => setCrewStateHome(undefined));
+
   it('honors WICKED_MEMORY_DB when set', () => {
     expect(resolveMemoryDbPath({ WICKED_MEMORY_DB: '/custom/mem.db' })).toBe('/custom/mem.db');
   });
@@ -163,6 +166,55 @@ describe('resolveMemoryDbPath', () => {
   it('defaults to ~/.wicked/memory.db when neither is set', () => {
     const p = resolveMemoryDbPath({});
     expect(p.endsWith(join('.wicked', 'memory.db'))).toBe(true);
+  });
+
+  // ── F5 (ship-proof C7) — THE MEMORY STORE FOLLOWS `--db` LIKE EVERY OTHER STORE ──────────────
+  //
+  // A brand-new state home on a free port (`--db <scratch>/core.db`) showed 596 of the operator's
+  // real memories on Steering → Memories, and a Retire click there would have erased a row from
+  // their store. Every other durable store resolves through `crewStateHome()`; memory resolved
+  // from `homedir()` unconditionally — the crew#330/#351/#353 escape, a fourth time.
+  //
+  // The DEFAULT state home deliberately keeps `~/.wicked/memory.db`: that file is not crew's
+  // private store, it is the operator's global one — the estate MCP's own default and what
+  // garden's `mem` skills read. Moving the default daemon off it would split a single-state-home
+  // user's memories from their own CLI. So isolation is keyed on "is this the default daemon".
+  it('an ISOLATED state home gets its OWN memory store — two state homes never share one', () => {
+    setCrewStateHome('/scratch/rig-a');
+    const a = resolveMemoryDbPath({});
+    setCrewStateHome('/scratch/rig-b');
+    const b = resolveMemoryDbPath({});
+
+    // Under `mcp/`, not the top level: the top level of the state home is core's embedded Read-fence
+    // registry, and an unregistered top-level `memory.db` would refuse every governed run at intake
+    // on the released engine — worse than the defect, and exactly on these state homes.
+    expect(a).toBe(join('/scratch/rig-a', 'mcp', 'memory.db'));
+    expect(b).toBe(join('/scratch/rig-b', 'mcp', 'memory.db'));
+    expect(a).not.toBe(b);
+    // The C7 signature: both resolved to the operator's host-global store.
+    for (const p of [a, b]) expect(p.endsWith(join('.wicked', 'memory.db'))).toBe(false);
+    // And the path is INSIDE the state home — a registered, worker-denied subtree of it.
+    for (const [home, p] of [['/scratch/rig-a', a], ['/scratch/rig-b', b]] as const) {
+      expect(p.startsWith(join(home, 'mcp'))).toBe(true);
+    }
+  });
+
+  it('an isolated state home ignores WICKED_HOME — that names the GLOBAL store, not this daemon', () => {
+    setCrewStateHome('/scratch/rig-a');
+    expect(resolveMemoryDbPath({ WICKED_HOME: '/opt/wk' })).toBe(join('/scratch/rig-a', 'mcp', 'memory.db'));
+  });
+
+  it('WICKED_MEMORY_DB still outranks the state home — the explicit instruction is the specific one', () => {
+    setCrewStateHome('/scratch/rig-a');
+    expect(resolveMemoryDbPath({ WICKED_MEMORY_DB: '/custom/mem.db' })).toBe('/custom/mem.db');
+  });
+
+  it('the DEFAULT state home keeps the operator global store — a single-state-home user loses nothing', () => {
+    setCrewStateHome(defaultStateHome(homedir()));
+    expect(resolveMemoryDbPath({})).toBe(join(homedir(), '.wicked', 'memory.db'));
+    // A relative/unnormalised spelling of the same directory is the same daemon.
+    setCrewStateHome(join(homedir(), '.wicked-crew', '.', ''));
+    expect(resolveMemoryDbPath({})).toBe(join(homedir(), '.wicked', 'memory.db'));
   });
 });
 
