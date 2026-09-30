@@ -135,6 +135,12 @@ describe('readDeliverOriginUrl — git is the authority (F2)', () => {
     return root;
   }
 
+  // 30 s, not vitest's default 5 s: these cases fork `git init` + `git config` + `git remote add`
+  // over three temp checkouts, and on a loaded host (a CI runner sharing a box, a developer running
+  // several suites at once) that has been measured past the default and failed for the clock rather
+  // than for the behaviour. The assertions are unchanged.
+  const IO_TIMEOUT_MS = 30_000;
+
   it('answers the configured URL', async () => {
     await expect(readDeliverOriginUrl(repo('https://github.com/owner/repo.git'))).resolves.toBe(
       'https://github.com/owner/repo.git',
@@ -148,16 +154,16 @@ describe('readDeliverOriginUrl — git is the authority (F2)', () => {
     const local = repo('/var/tmp/origin.git');
     await expect(readDeliverOriginUrl(local)).resolves.toBe('/var/tmp/origin.git');
     expect(classifyDeliverOrigin(await readDeliverOriginUrl(local))).toBe('local');
-  });
+  }, IO_TIMEOUT_MS);
 
   it("answers '' — read and ABSENT — for a repo with no origin remote", async () => {
     await expect(readDeliverOriginUrl(repo(null))).resolves.toBe('');
-  });
+  }, IO_TIMEOUT_MS);
 
   it('answers null when git could not say: a directory that is no checkout', async () => {
     const root = mkdtempSync(join(tmpdir(), 'crew-f2-origin-'));
     roots.push(root);
     mkdirSync(join(root, 'plain'));
     await expect(readDeliverOriginUrl(join(root, 'plain'))).resolves.toBeNull();
-  });
+  }, IO_TIMEOUT_MS);
 });
