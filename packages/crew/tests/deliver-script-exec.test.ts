@@ -1230,3 +1230,54 @@ describe('deliver script — the preflight must not weaken the verified tree (wi
     expect(files).toEqual(['packages/crew/endpoint-manifest.json', 'work.ts']);
   }, 90_000);
 });
+
+// ── F2 (ship-proof C7) — A NON-GITHUB ORIGIN ─────────────────────────────────────────────────────
+//
+// On a local, SSH, GitLab, ADO or Gitea origin the phase PUSHED THE BRANCH and then died on
+// `gh pr create`: "none of the git remotes configured for this repository point to a known GitHub
+// host", `exit 1`, no fallback and no push-only mode. Approving the retry re-ran the identical
+// refusal; rejecting cancelled the run. So the run could never reach a terminal state while the
+// irreversible side effect had already happened.
+//
+// gh is the authority on whether a remote is a GitHub remote: it resolves the remotes itself and
+// its refusal is that verdict. So the push-only success path opens on THAT message and on nothing
+// else — every other gh failure (auth, validation, a missing gh) stays exactly as loud as before,
+// which is what keeps GitHub Enterprise Server users (where gh succeeds) unaffected.
+describe('deliver script — a non-GitHub origin delivers the branch and the run reaches a terminal state (F2)', () => {
+  /** gh's own refusal for a remote it cannot resolve to a GitHub repository. */
+  const NOT_GITHUB =
+    'none of the git remotes configured for this repository point to a known GitHub host. Use `gh auth login` to authenticate with a host';
+
+  it('pushes the branch, says no PR was opened and why, and EXITS 0', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const z = 3;\n');
+
+    const r = await runDeliver(fx, { intent: 'ship it', gh: { failWith: NOT_GITHUB } });
+
+    // The branch really is on the remote, with the run's commit — the delivery, re-derived.
+    expect(git(fx.origin, 'rev-parse', `wicked/${RUN_ID}`).trim()).not.toBe('');
+    expect(git(fx.origin, 'show', '--name-only', '--format=', `wicked/${RUN_ID}`)).toContain('work.ts');
+    // The run reaches a terminal state instead of dying after the side effect.
+    expect(r.status).toBe(0);
+    // gh's own words are kept, and the phase says plainly what did and did not happen.
+    expect(r.output).toContain(NOT_GITHUB);
+    expect(r.output).toContain(`deliver: pushed ${`wicked/${RUN_ID}`} to origin`);
+    expect(r.output).toContain('no pull request was opened');
+    expect(r.output).toContain('that remote is not a GitHub host gh can resolve');
+    // It never claims a PR: nothing downstream may read a pull-request URL out of this output.
+    expect(r.output).not.toMatch(/https:\/\/\S+\/pull\/\d+/);
+  }, 60_000);
+
+  it('EVERY other gh failure stays loud — a GHES / auth / missing-gh failure is not push-only', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const z = 3;\n');
+
+    const r = await runDeliver(fx, {
+      gh: { failWith: 'HTTP 401: Bad credentials (https://api.github.com/graphql)' },
+    });
+
+    expect(r.status).not.toBe(0);
+    expect(r.output).toContain('deliver: gh pr create failed');
+    expect(r.output).not.toContain('no pull request was opened');
+  }, 60_000);
+});

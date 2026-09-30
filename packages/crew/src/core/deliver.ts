@@ -151,6 +151,11 @@ export interface DeliverScriptOptions {
   ghAccount?: string | null;
   /** Whether `GH_TOKEN` is exported in the daemon environment — presence only, never the value. */
   ghTokenPinned?: boolean;
+  /** (F2) The repo's `git remote get-url origin`, read at compose time so the deliver GATE CARD
+   *  says what will actually happen. `undefined`/`null` ⇒ it could not be read (the card keeps the
+   *  generic sentence); `''` ⇒ read, and the repository has NO `origin` remote. The SCRIPT never
+   *  uses this — it asks git itself at delivery time. */
+  originUrl?: string | null;
   /** (crew#549) The DELIVER IDENTITY from system settings (`deliverIdentityLogin`) — the login the
    *  push must run as, baked into the script so the refusal holds even when the daemon was started
    *  without `GH_ACCOUNT` exported. A token is NEVER carried here (or anywhere in the settings):
@@ -216,6 +221,39 @@ export const defaultGhExec: GhExec = (args, opts) =>
       resolve({ stdout: String(stdout ?? ''), stderr: String(stderr ?? ''), code });
     });
   });
+
+/**
+ * `git remote get-url origin` in `rootPath` — the deliver gate's origin preflight (F2).
+ *
+ *  - the trimmed URL when git answered one;
+ *  - `''` when git said there is NO such remote — the one answer that licenses the card to claim
+ *    "this repository has no origin";
+ *  - `null` for everything else (git missing, a timeout, a root that is not a checkout). "Could
+ *    not read it" is not a licence to claim anything about it either way, so the card keeps its
+ *    generic sentence.
+ *
+ * A run worktree shares its repository's remotes and does not exist yet at compose time, so this
+ * reads the REGISTERED repo root. Bounded to 5 s, once per delivering launch.
+ */
+export async function readDeliverOriginUrl(rootPath: string): Promise<string | null> {
+  const res = await new Promise<{ stdout: string; stderr: string; code: number | null }>((resolve) => {
+    execFile(
+      'git',
+      ['remote', 'get-url', 'origin'],
+      { cwd: rootPath, timeout: 5_000, encoding: 'utf8', env: childEnvWithBootEstateDb(process.env) },
+      (err, stdout, stderr) => {
+        const code = err === null ? 0 : typeof (err as { code?: unknown }).code === 'number' ? (err as { code: number }).code : null;
+        resolve({ stdout: String(stdout ?? ''), stderr: String(stderr ?? ''), code });
+      },
+    );
+  });
+  if (res.code === 0) {
+    const url = res.stdout.trim();
+    // git can exit 0 with nothing for a remote configured with an empty URL — unknown, not absent.
+    return url === '' ? null : url;
+  }
+  return /no such remote/i.test(res.stderr) ? '' : null;
+}
 
 /**
  * Resolve `revisesPr` (a PR number) to the head branch the run will base on and push to — the
@@ -826,7 +864,34 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     '  if COUT=$(gh pr comment "$PRNUM" --body-file "$TD/body" 2>&1); then echo "deliver: run record commented on pull request #$PRNUM"; else echo "$COUT"; echo "deliver: could not comment on pull request #$PRNUM — the commits landed; the record is in the commit message"; fi',
     '  URL="$PRURL"',
     'else',
-    '  if ! OUT=$(gh pr create --head "$B" --title "$TITLE" --body-file "$TD/body" 2>&1); then echo "$OUT"; echo "deliver: gh pr create failed for $B — no PR was opened"; exit 1; fi',
+    // (e2) A NON-GITHUB ORIGIN DELIVERS THE BRANCH (F2). `gh pr create` failing used to be
+    // `exit 1` with no fallback and no push-only mode, so on a local, SSH, GitLab, ADO or Gitea
+    // origin the phase PUSHED THE BRANCH — step (d), above, already happened — and then died on
+    // "none of the git remotes configured for this repository point to a known GitHub host".
+    // Approving the retry re-ran the identical refusal; rejecting cancelled the run. The run could
+    // never reach a terminal state while the one irreversible side effect was already done.
+    //
+    // gh is the AUTHORITY on whether a remote is a GitHub remote — it resolves the remotes itself
+    // and that refusal IS its verdict — so the push-only success path opens on that message and on
+    // nothing else. Every other gh failure (auth, validation, rate limit, a gh that is not
+    // installed) stays exactly as loud as it was, which is what keeps a GitHub Enterprise Server
+    // origin — where gh succeeds — on the pull-request path. No forge integration is invented
+    // here: the pushed branch IS the delivery, and the phase says so and says where to take it.
+    //
+    // Done is still RE-DERIVED before the claim: the remote ref must be ahead of the base. And
+    // nothing may read a pull request out of this output — there is no URL in it, so `prUrlFrom`
+    // answers null and the run's `delivery` never reads `delivered`.
+    '  if ! OUT=$(gh pr create --head "$B" --title "$TITLE" --body-file "$TD/body" 2>&1); then',
+    '    echo "$OUT"',
+    '    case "$OUT" in',
+    '      *"point to a known GitHub host"*)',
+    '        P=$(git rev-list --count "$D..origin/$B")',
+    '        [ "$P" -ge 1 ] || { echo "deliver: $B is not ahead of $D on the remote after the push — refusing to report a delivery with no commits"; exit 1; }',
+    '        echo "deliver: pushed $B to origin ($(git remote get-url origin)) with $P commit(s) on top of $D, and no pull request was opened because that remote is not a GitHub host gh can resolve. The branch IS the delivery — open the pull/merge request for $B on your forge; merge stays human.";',
+    '        exit 0;;',
+    '    esac',
+    '    echo "deliver: gh pr create failed for $B — no PR was opened"; exit 1',
+    '  fi',
     '  echo "$OUT"',
     // (f) DONE IS RE-DERIVED, NOT ASSERTED — twice, from two independent facts, before the phase
     // is allowed to report a delivery:
@@ -905,12 +970,88 @@ export function deliverPrPhase(
  * from the gh keyring (the login can flip between this check and the push — export `GH_TOKEN` to
  * pin it), or unset (pushes as whatever login gh holds). Never the token, never a live probe.
  */
+/**
+ * How a `git remote get-url origin` value reads for the deliver gate card (F2).
+ *
+ *  - `'none'`    — no `origin` remote at all (`''`), or nothing could be read (`null`/absent). The
+ *                  two are told apart by the caller: `''` means READ AND ABSENT, and only that one
+ *                  licenses a claim about it.
+ *  - `'local'`   — a filesystem path or `file://` URL: a bare clone, a fixture, a sibling checkout.
+ *                  `gh` cannot open a pull request against it and never will.
+ *  - `'github'`  — `github.com` (or a subdomain of it).
+ *  - `'other'`   — some other host. Deliberately NOT called "not GitHub": a GitHub Enterprise
+ *                  Server install is an arbitrary hostname, and gh — which resolves the remote
+ *                  itself — is the only authority on whether it can open a pull request there.
+ */
+export type DeliverOriginKind = 'none' | 'local' | 'github' | 'other';
+
+/** The host of a git remote URL — `https://`/`ssh://` URLs and the scp-like `git@host:owner/repo`
+ *  spelling — or `null` when the value names no host (a path). */
+export function originRemoteHost(url: string): string | null {
+  const trimmed = url.trim();
+  if (trimmed === '') return null;
+  const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):\/\/(?:[^@/]*@)?([^/:]+)/.exec(trimmed);
+  if (scheme !== null) return scheme[1]!.toLowerCase() === 'file' ? null : scheme[2]!.toLowerCase();
+  // scp-like: `[user@]host:path`, and never a Windows drive letter (`C:\repos\x`).
+  const scp = /^(?:[^@/\\]+@)?([A-Za-z0-9._-]{2,}):(?!\/)/.exec(trimmed);
+  return scp !== null ? scp[1]!.toLowerCase() : null;
+}
+
+/** {@link DeliverOriginKind} for an origin URL read at compose time. */
+export function classifyDeliverOrigin(url: string | null | undefined): DeliverOriginKind {
+  if (url === null || url === undefined || url.trim() === '') return 'none';
+  const host = originRemoteHost(url);
+  if (host === null) return 'local';
+  return host === 'github.com' || host.endsWith('.github.com') ? 'github' : 'other';
+}
+
+/**
+ * The gate card's first sentence for a NEW-PR delivery — what will ACTUALLY happen (F2).
+ *
+ * It used to promise "pushes its branch → opens a pull request" unconditionally. On a local, SSH,
+ * GitLab, ADO or Gitea origin that was a false promise twice over: the phase pushed the branch and
+ * then died on `gh pr create`, so the operator consented to a pull request that could not exist and
+ * got an irreversible push plus a run that could not reach a terminal state. The push-only success
+ * path in the script fixes the outcome; this fixes the consent.
+ *
+ * `null`/absent origin ⇒ the generic sentence, unchanged: "could not read it" is not a licence to
+ * claim anything about it either way.
+ */
+export function newPrTargetSentence(originUrl: string | null | undefined): string {
+  const kind = classifyDeliverOrigin(originUrl);
+  const branch = 'the run branch wicked/<run>';
+  if (kind === 'github') {
+    return `Pushes ${branch} to origin and opens a pull request; merge stays human.`;
+  }
+  if (kind === 'local') {
+    return (
+      `Pushes ${branch} to origin (${(originUrl ?? '').trim()}) — a local path, not a GitHub ` +
+      'remote: NO pull request is opened and the pushed branch IS the delivery.'
+    );
+  }
+  if (kind === 'other') {
+    const host = originRemoteHost((originUrl ?? '').trim()) ?? 'that host';
+    return (
+      `Pushes ${branch} to origin (${host}) and opens a pull request only if gh resolves ${host} ` +
+      'as a GitHub host it is logged in to; otherwise no pull request is opened and the pushed ' +
+      'branch IS the delivery. Merge stays human.'
+    );
+  }
+  if (originUrl === '') {
+    return (
+      `Pushes ${branch} to origin — but this repository has no \`origin\` remote, so the push ` +
+      'will fail and nothing will be delivered. Add the remote first.'
+    );
+  }
+  return `Pushes ${branch} to origin and opens a pull request; merge stays human.`;
+}
+
 export function deliverGateInstructions(opts: DeliverScriptOptions): string {
   const pr = opts.revisesPr ?? null;
   const target =
     pr !== null
       ? `Pushes wicked/<run> onto pull request #${pr.number} (branch ${pr.headRef}); no new PR.`
-      : 'Pushes the run branch wicked/<run> to origin and opens a pull request; merge stays human.';
+      : newPrTargetSentence(opts.originUrl);
   // (crew#549) The SETTING wins over the env var, and the card names which one it read, because
   // "pin it now if it must differ" is not an instruction an operator can follow without knowing
   // where the pin lives.
@@ -954,6 +1095,9 @@ export interface DeliverLaunchContext {
   ghAccount?: string | null;
   /** Whether `GH_TOKEN` is exported in the daemon environment (presence only). */
   ghTokenPinned?: boolean;
+  /** (F2) The repo's `git remote get-url origin`, for the gate card's target sentence.
+   *  `null`/absent = unreadable; `''` = read, and there is no `origin` remote. */
+  originUrl?: string | null;
   /** (crew#549) The `deliverIdentityLogin` system setting — the login the push must run as. */
   deliverIdentity?: string | null;
 }
@@ -994,6 +1138,7 @@ export function deliverPresetStep(
     revisesPr,
     ghAccount: launch.ghAccount ?? null,
     ghTokenPinned: launch.ghTokenPinned === true,
+    originUrl: launch.originUrl ?? null,
     deliverIdentity: launch.deliverIdentity ?? null,
   });
   return {
@@ -1047,6 +1192,9 @@ export function composeDeliverWorkflow(
         revisesPr,
         ghAccount: launch.ghAccount ?? null,
         ghTokenPinned: launch.ghTokenPinned === true,
+        // F2 — the origin the push will actually go to, so the gate card cannot promise a pull
+        // request on a remote that can never carry one.
+        originUrl: launch.originUrl ?? null,
         deliverIdentity: launch.deliverIdentity ?? null,
       }),
     ],
