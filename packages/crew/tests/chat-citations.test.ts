@@ -40,7 +40,15 @@ import type { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
 
-/** A git repo with one file and one commit; returns the commit sha. */
+/**
+ * A git repo with one file and one commit; returns the commit sha.
+ *
+ * The commit is AMENDED until its 7-character prefix carries BOTH a digit and an `a-f` letter,
+ * because that is exactly what `SHA_RE`'s guard requires of a citation ("a word, a date or a
+ * number is not a SHA") and every test here cites `sha.slice(0, 7)`. A random sha whose prefix is
+ * all decimal digits is ~3.7 % of commits, and it made this suite red on CI for a reason that had
+ * nothing to do with the change under test — the extractor was right and the fixture was unlucky.
+ */
 function initRepo(root: string, file: string, body: string): string {
   mkdirSync(dirname(join(root, file)), { recursive: true });
   writeFileSync(join(root, file), body, 'utf8');
@@ -51,7 +59,17 @@ function initRepo(root: string, file: string, body: string): string {
   git('config', 'user.name', 'T');
   git('add', '-A');
   git('commit', '-q', '-m', 'one');
-  return git('rev-parse', 'HEAD').trim();
+  const citable = (sha: string): boolean => {
+    const head = sha.slice(0, 7);
+    return /[0-9]/.test(head) && /[a-f]/.test(head);
+  };
+  let sha = git('rev-parse', 'HEAD').trim();
+  for (let n = 0; n < 50 && !citable(sha); n++) {
+    git('commit', '-q', '--amend', '-m', `one ${n}`);
+    sha = git('rev-parse', 'HEAD').trim();
+  }
+  if (!citable(sha)) throw new Error(`could not mint a citable commit sha in this repo (last: ${sha})`);
+  return sha;
 }
 
 const itemOf = (items: readonly ChatCitationItem[], raw: string): ChatCitationItem | undefined =>
