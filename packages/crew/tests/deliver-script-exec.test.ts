@@ -13,12 +13,13 @@
 // prepends the fake bin, which is sourced AFTER path_helper and does win.
 
 import { execFile, execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { deliverPrScript, type DeliverScriptOptions } from '../src/core/deliver.js';
+import { deliverExclusionReason } from '../src/core/deliver-exclusions.js';
 import { commitSubject, composeDeliverText, deliverTitle, factsFromWorkflow, framedDeliverText } from '../src/core/deliver-text.js';
 
 const RUN_ID = '1bc72c20-0457-425f-b4cb-215a40e68e1e';
@@ -26,6 +27,18 @@ const RUN_ID = '1bc72c20-0457-425f-b4cb-215a40e68e1e';
 /** git with a hermetic identity — no dependence on the developer's ~/.gitconfig. */
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', ['-c', 'commit.gpgsign=false', ...args], { cwd, encoding: 'utf8' });
+}
+
+/** Every non-ignored untracked path in `cwd`, repo-relative, git's own spelling. */
+function untrackedOf(cwd: string): string[] {
+  return git(cwd, 'ls-files', '--others', '--exclude-standard').split('\n').filter((l) => l !== '');
+}
+
+/** {@link deliverExclusionReason} with the file's real size (F3's drift guard). */
+function tsExclusion(cwd: string, rel: string): string | null {
+  let size: number | null = null;
+  try { size = statSync(join(cwd, rel)).size; } catch { /* raced away — unknown size */ }
+  return deliverExclusionReason(rel, size);
 }
 
 interface Fixture {
@@ -318,6 +331,11 @@ describe('deliver script, driven for real (crew#317)', () => {
     // An oversized (>1 MiB) untracked blob with an unremarkable name — caught by the size cap.
     writeFileSync(join(fx.workdir, 'rec.bin'), Buffer.alloc(1_600_000, 7)); // oversize-1mib
 
+    // F3 DRIFT GUARD, half 1 — what the TS classifier (the one the deliver-gate diff reads) keeps
+    // over the tree the script is ABOUT to classify in shell.
+    const untrackedBefore = untrackedOf(fx.workdir);
+    const keptByTs = untrackedBefore.filter((p) => tsExclusion(fx.workdir, p) === null).sort();
+
     const r = await runDeliver(fx, { intent: 'ship the feature' });
 
     expect(r.status).toBe(0);
@@ -345,6 +363,15 @@ describe('deliver script, driven for real (crew#317)', () => {
     for (const p of ['bus.db', 'socket.path', 'deploy.key', 'coverage/', 'tmp/', 'rec.bin']) {
       expect(status).toContain(p);
     }
+
+    // F3 DRIFT GUARD (`core/deliver-exclusions.ts`) — the deliver gate's consent diffstat is
+    // computed over the untracked set the TS classifier keeps, while THIS shell decided the push.
+    // The two are necessarily separate implementations, so they are pinned against each other on
+    // exactly this tree, both ways:
+    //   • what TS kept beforehand == the untracked paths the script actually committed;
+    //   • of what the script left behind, TS keeps nothing.
+    expect(keptByTs).toEqual(['feature.ts']);
+    expect(untrackedOf(fx.workdir).filter((p) => tsExclusion(fx.workdir, p) === null)).toEqual([]);
   }, 60_000);
 
   // ── DES-L9 D-18 — IDENTITY (crew#549 / F-RC1-010) ─────────────────────────────────────────────

@@ -8,8 +8,10 @@
 // read-only by construction: `fs` reads and `git diff`/`git status` — zero write capability, a
 // strictly smaller threat surface than `/open` handing the path to an OS opener.
 
-import { constants as fsConstants, promises as fsp } from 'node:fs';
+import { constants as fsConstants, promises as fsp, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
+import { deliverExclusionByName, deliverExclusionReason } from '../core/deliver-exclusions.js';
 
 /** File-content cap (DES-FEEDBACK-002 §3.3): past this, `content` holds the first 512 KB and
  *  `truncated: true` — the studio renders a labeled truncation banner, never a silent amputation. */
@@ -376,10 +378,35 @@ export async function worktreeDiff(
     ['status', '--porcelain', '-z', '-uall', ...limit],
     { timeout: GIT_TIMEOUT_MS, cwd: workdir },
   );
-  const untracked = statusOut
+  const candidates = statusOut
     .split('\0')
     .filter((entry) => entry.startsWith('?? '))
     .map((entry) => entry.slice(3));
+  // F3 — THE WHOLE-WORKTREE DIFF IS A PREVIEW OF THE PUSH, so it carries exactly what the push
+  // carries. `deliverPrScript`'s crew#434 classifier drops scratch dirs, databases, sockets, key
+  // material, `.DS_Store` and unrecognised files over 1 MiB; this pass used to append every one of
+  // them, so the deliver gate's consent diffstat read "109 files changed, +258, -2" for a commit
+  // that pushed 4 files, +47, -2. The number on a consent surface has to be the number that ships.
+  //
+  // A NARROWED request (`relPath`) is exempt: the caller asked about exactly one file it can see in
+  // `GET /runs/:id/files`, and answering "no changes" for a scratch file it deliberately opened
+  // would be a different lie. Only the aggregate — the one the diffstat is computed from — is
+  // filtered.
+  //
+  // Name rules FIRST, and only a path that survives all of them is stat'd (codex review, MEDIUM):
+  // a worktree carrying 100 000 files under `tmp/` would otherwise cost 100 000 synchronous stats
+  // on the daemon's event loop to reject paths the directory rule rejects without a size.
+  const untracked = relPath !== undefined ? candidates : candidates.filter((file) => {
+    if (deliverExclusionByName(file) !== null) return false;
+    let size: number | null = null;
+    try {
+      size = statSync(join(workdir, file)).size;
+    } catch {
+      // Unreadable/raced away: an unknown size is never treated as oversize (the shell's
+      // `wc -c < "$F" 2>/dev/null || echo 0` degrades the same way).
+    }
+    return deliverExclusionReason(file, size) === null;
+  });
   for (const file of untracked) {
     // Cap is in BYTES; `out.length` counts UTF-16 code units. `>=`: exactly-at-cap is
     // already done — spawning one more git only to discard its output is waste (Copilot, #305).

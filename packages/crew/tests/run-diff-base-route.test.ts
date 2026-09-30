@@ -233,8 +233,20 @@ describe('GET /runs/:id/diff?base= (CREW-UX-1, DES-UX-001 §8.1)', () => {
   });
 
   it('the byte-accurate 1 MB cap holds on a base diff', async () => {
-    const huge = join(workdir, 'huge-untracked.txt');
-    writeFileSync(huge, `${'y'.repeat(120)}\n`.repeat(Math.ceil((DIFF_OUTPUT_CAP_BYTES * 2) / 121)));
+    // TWO untracked files of ~0.7 MB each, not one of 2 MB: since F3 the aggregate diff carries
+    // exactly what the push carries, and the push drops any unrecognised untracked file over
+    // 1 MiB (`deliverExclusionReason` → `oversize-1mib`). A single 2 MB file would therefore be
+    // excluded and prove nothing about the cap — these two are each under the size rule and
+    // together breach it.
+    // MULTIBYTE content (codex review, LOW): with pure ASCII a `diff.length` cap would pass this
+    // test, so "byte-accurate" would go unproven. `é` is 2 UTF-8 bytes, so 60 of them + a newline
+    // is 121 BYTES but 61 code units — the same byte arithmetic as before, over a string the cap's
+    // boundary back-off actually has to handle.
+    const big = `${'é'.repeat(60)}\n`.repeat(Math.ceil(700_000 / 121));
+    const hugeA = join(workdir, 'huge-untracked-a.txt');
+    const hugeB = join(workdir, 'huge-untracked-b.txt');
+    writeFileSync(hugeA, big);
+    writeFileSync(hugeB, big);
     try {
       const res = await getDiff('run-1', { base: 'merge-base' });
       expect(res.statusCode).toBe(200);
@@ -242,7 +254,8 @@ describe('GET /runs/:id/diff?base= (CREW-UX-1, DES-UX-001 §8.1)', () => {
       expect(truncated).toBe(true);
       expect(Buffer.byteLength(diff, 'utf8')).toBeLessThanOrEqual(DIFF_OUTPUT_CAP_BYTES);
     } finally {
-      rmSync(huge, { force: true });
+      rmSync(hugeA, { force: true });
+      rmSync(hugeB, { force: true });
     }
   });
 
