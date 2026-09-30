@@ -34,11 +34,31 @@ describe('the deliver gate names the real origin (F2)', () => {
     ]) {
       expect(classifyDeliverOrigin(url)).toBe('local');
       const s = newPrTargetSentence(url);
-      expect(s).toContain('a local path, not a GitHub remote');
-      expect(s).toContain('NO pull request is opened and the pushed branch IS the delivery');
+      expect(s).toContain('a local path, so no pull request can be opened against it');
+      // NOT a flat "no pull request is opened": `gh pr create` resolves every configured remote,
+      // not only origin, so this read establishes the push DESTINATION and states the pull
+      // request as the condition it is (codex review, MEDIUM).
+      expect(s).toContain('unless another remote in this checkout is a GitHub repository gh resolves');
+      expect(s).toContain('the pushed branch IS the delivery');
       // The exact over-claim C7 caught must be gone.
       expect(s).not.toContain('opens a pull request;');
     }
+  });
+
+  it('a scp-style remote with an ABSOLUTE path is a HOST, not a local path (codex review, LOW)', () => {
+    // `git@example.com:/srv/git/repo.git` is valid scp syntax; an earlier `(?!\/)` guard rejected
+    // it and called a real remote a local path. A single-letter host is a host too.
+    expect(originRemoteHost('git@example.com:/srv/git/repo.git')).toBe('example.com');
+    expect(classifyDeliverOrigin('git@example.com:/srv/git/repo.git')).toBe('other');
+    expect(originRemoteHost('h:path/to/repo.git')).toBe('h');
+    // A Windows drive is still a PATH, excluded by shape rather than by host length.
+    expect(originRemoteHost('C:\\repos\\x')).toBeNull();
+    expect(originRemoteHost('C:/repos/x')).toBeNull();
+    // `file:///p` has an EMPTY authority: it names no host, and must not be read as a host named
+    // `file` (which is what dropping the old `(?!\/)` guard exposed).
+    expect(originRemoteHost('file:///var/tmp/origin.git')).toBeNull();
+    expect(classifyDeliverOrigin('file:///var/tmp/origin.git')).toBe('local');
+    expect(classifyDeliverOrigin('C:\\repos\\x')).toBe('local');
   });
 
   it('a GITHUB origin keeps the promise it can keep', () => {
@@ -84,7 +104,7 @@ describe('the deliver gate names the real origin (F2)', () => {
 
   it('the whole card carries it: origin sentence + identity + the credential cross-check', () => {
     const card = deliverGateInstructions({ originUrl: '/tmp/origin.git', ghAccount: 'release-bot', ghTokenPinned: true });
-    expect(card).toContain('a local path, not a GitHub remote');
+    expect(card).toContain('a local path, so no pull request can be opened against it');
     expect(card).toContain('Push identity: release-bot (GH_ACCOUNT), pinned by GH_TOKEN');
     expect(card).toContain("It refuses if gh's login and git's credential for the remote disagree.");
   });
@@ -119,6 +139,12 @@ describe('readDeliverOriginUrl — git is the authority (F2)', () => {
     await expect(readDeliverOriginUrl(repo('https://github.com/owner/repo.git'))).resolves.toBe(
       'https://github.com/owner/repo.git',
     );
+    // The PUSH url wins where one is configured (codex review, HIGH): `git push origin` uses
+    // `remote.origin.pushurl`, so a card about the push must read the push url.
+    const split = repo('https://github.com/owner/repo.git');
+    execFileSync('git', ['config', 'remote.origin.pushurl', 'ssh://git@gitlab.example/owner/repo.git'], { cwd: split });
+    await expect(readDeliverOriginUrl(split)).resolves.toBe('ssh://git@gitlab.example/owner/repo.git');
+    expect(classifyDeliverOrigin(await readDeliverOriginUrl(split))).toBe('other');
     const local = repo('/var/tmp/origin.git');
     await expect(readDeliverOriginUrl(local)).resolves.toBe('/var/tmp/origin.git');
     expect(classifyDeliverOrigin(await readDeliverOriginUrl(local))).toBe('local');

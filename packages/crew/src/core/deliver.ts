@@ -223,7 +223,13 @@ export const defaultGhExec: GhExec = (args, opts) =>
   });
 
 /**
- * `git remote get-url origin` in `rootPath` — the deliver gate's origin preflight (F2).
+ * `git remote get-url --push origin` in `rootPath` — the deliver gate's origin preflight (F2).
+ *
+ * `--push` because the sentence is about the PUSH: `git push origin` uses `remote.origin.pushurl`
+ * when one is configured, so a repo whose FETCH url is GitHub while its PUSH url is not (or the
+ * reverse) would otherwise get a card describing a destination the branch never reaches (codex
+ * review of this PR, HIGH). With no `pushurl` configured git answers the fetch url, so the common
+ * case is unchanged.
  *
  *  - the trimmed URL when git answered one;
  *  - `''` when git said there is NO such remote — the one answer that licenses the card to claim
@@ -239,7 +245,7 @@ export async function readDeliverOriginUrl(rootPath: string): Promise<string | n
   const res = await new Promise<{ stdout: string; stderr: string; code: number | null }>((resolve) => {
     execFile(
       'git',
-      ['remote', 'get-url', 'origin'],
+      ['remote', 'get-url', '--push', 'origin'],
       { cwd: rootPath, timeout: 5_000, encoding: 'utf8', env: childEnvWithBootEstateDb(process.env) },
       (err, stdout, stderr) => {
         const code = err === null ? 0 : typeof (err as { code?: unknown }).code === 'number' ? (err as { code: number }).code : null;
@@ -873,7 +879,9 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     //
     // gh is the AUTHORITY on whether a remote is a GitHub remote — it resolves the remotes itself
     // and that refusal IS its verdict — so the push-only success path opens on that message and on
-    // nothing else. Every other gh failure (auth, validation, rate limit, a gh that is not
+    // nothing else. The pattern requires BOTH halves of the diagnostic, in order, rather than one
+    // fragment (codex review of this PR, MEDIUM), while skipping the leading "none of the" and the
+    // point/points verb so a gh wording tweak cannot silently re-open the F2 hole. Every other gh failure (auth, validation, rate limit, a gh that is not
     // installed) stays exactly as loud as it was, which is what keeps a GitHub Enterprise Server
     // origin — where gh succeeds — on the pull-request path. No forge integration is invented
     // here: the pushed branch IS the delivery, and the phase says so and says where to take it.
@@ -884,7 +892,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     '  if ! OUT=$(gh pr create --head "$B" --title "$TITLE" --body-file "$TD/body" 2>&1); then',
     '    echo "$OUT"',
     '    case "$OUT" in',
-    '      *"point to a known GitHub host"*)',
+    '      *"git remotes configured for this repository"*"known GitHub host"*)',
     '        P=$(git rev-list --count "$D..origin/$B")',
     '        [ "$P" -ge 1 ] || { echo "deliver: $B is not ahead of $D on the remote after the push — refusing to report a delivery with no commits"; exit 1; }',
     '        echo "deliver: pushed $B to origin ($(git remote get-url origin)) with $P commit(s) on top of $D, and no pull request was opened because that remote is not a GitHub host gh can resolve. The branch IS the delivery — open the pull/merge request for $B on your forge; merge stays human.";',
@@ -990,10 +998,21 @@ export type DeliverOriginKind = 'none' | 'local' | 'github' | 'other';
 export function originRemoteHost(url: string): string | null {
   const trimmed = url.trim();
   if (trimmed === '') return null;
-  const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):\/\/(?:[^@/]*@)?([^/:]+)/.exec(trimmed);
-  if (scheme !== null) return scheme[1]!.toLowerCase() === 'file' ? null : scheme[2]!.toLowerCase();
-  // scp-like: `[user@]host:path`, and never a Windows drive letter (`C:\repos\x`).
-  const scp = /^(?:[^@/\\]+@)?([A-Za-z0-9._-]{2,}):(?!\/)/.exec(trimmed);
+  // Any `scheme://…` is decided HERE, authority or not: `file:///p` has an empty authority and
+  // names no host, and so does any other schemed URL written without one.
+  const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):\/\//.exec(trimmed);
+  if (scheme !== null) {
+    if (scheme[1]!.toLowerCase() === 'file') return null;
+    const authority = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/(?:[^@/]*@)?([^/:]+)/.exec(trimmed);
+    return authority !== null ? authority[1]!.toLowerCase() : null;
+  }
+  // A Windows drive is a PATH, excluded by shape rather than by "a host is at least two letters"
+  // — which also rejected the single-letter host `h:path` (codex review of this PR, LOW).
+  if (/^[A-Za-z]:[\\/]/.test(trimmed)) return null;
+  // scp-like: `[user@]host:path`. The path may be ABSOLUTE (`git@example.com:/srv/git/repo.git`
+  // is valid scp syntax) — an earlier `(?!\/)` guard rejected exactly that and called a real
+  // remote a local path (codex review, LOW).
+  const scp = /^(?:[^@/\\]+@)?([A-Za-z0-9._-]+):/.exec(trimmed);
   return scp !== null ? scp[1]!.toLowerCase() : null;
 }
 
@@ -1024,9 +1043,14 @@ export function newPrTargetSentence(originUrl: string | null | undefined): strin
     return `Pushes ${branch} to origin and opens a pull request; merge stays human.`;
   }
   if (kind === 'local') {
+    // NOT a flat "no pull request is opened": `gh pr create` resolves every configured remote, not
+    // only `origin`, so a checkout whose origin is a path while some other remote is a GitHub
+    // repository can still get one (codex review of this PR, MEDIUM). The push DESTINATION is what
+    // this read establishes; the pull request is stated as the condition it actually is.
     return (
-      `Pushes ${branch} to origin (${(originUrl ?? '').trim()}) — a local path, not a GitHub ` +
-      'remote: NO pull request is opened and the pushed branch IS the delivery.'
+      `Pushes ${branch} to origin (${(originUrl ?? '').trim()}) — a local path, so no pull request ` +
+      'can be opened against it: unless another remote in this checkout is a GitHub repository gh ' +
+      'resolves, the pushed branch IS the delivery.'
     );
   }
   if (kind === 'other') {

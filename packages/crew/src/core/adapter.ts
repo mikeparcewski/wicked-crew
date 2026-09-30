@@ -1709,48 +1709,56 @@ export class CoreAdapter {
     }
   }
 
-  /** The origin the deliver push will actually go to (F2): `null` = not read, `''` = no remote. */
-  private deliverOriginUrl: string | null = null;
-
   /**
-   * Read the launch repo's `git remote get-url origin` (F2) so the deliver GATE CARD says what
-   * will actually happen. The card used to promise "pushes its branch and opens a pull request"
+   * The origin the deliver push will actually go to (F2) so the deliver GATE CARD says what will
+   * actually happen. The card used to promise "pushes its branch and opens a pull request"
    * whatever the origin was — on a local path, an SSH, GitLab, ADO or Gitea remote, the phase
    * pushed the branch and then died on `gh pr create`, so the operator had consented to a pull
    * request that could not exist.
    *
-   * ONE `git remote get-url` per delivering launch, in the registered repo's root (a run worktree
-   * shares its repo's remotes, and the worktree does not exist yet at compose time). Everything
-   * that can go wrong leaves `null` — "could not read it" is not a licence to claim anything about
-   * it either way, and the card keeps its generic sentence. Only git's own "no such remote"
-   * becomes `''`, the one answer that licenses "there is no origin".
+   * RETURNED, never stashed on the adapter (codex review of the F2 PR, HIGH): two concurrent
+   * delivering launches on different repos would otherwise interleave their `await` with the
+   * synchronous composition that reads it, and one launch's card would name the other repo's
+   * origin. The value is launch-local from here on.
+   *
+   * ONE `git remote get-url --push` per delivering launch, in the registered repo's root (a run
+   * worktree shares its repo's remotes, and the worktree does not exist yet at compose time).
+   * `null` for everything that can go wrong — "could not read it" is not a licence to claim
+   * anything about it either way, and the card keeps its generic sentence. Only git's own "no such
+   * remote" becomes `''`, the one answer that licenses "there is no origin".
    */
-  private async refreshDeliverOrigin(repoRef: string | null | undefined): Promise<void> {
-    this.deliverOriginUrl = null;
-    if (repoRef === null || repoRef === undefined || repoRef === '') return;
+  private async resolveDeliverOrigin(repoRef: string | null | undefined): Promise<string | null> {
+    if (repoRef === null || repoRef === undefined || repoRef === '') return null;
     try {
       const repos = await this.listRepos();
       const hit = repos.find(
         (r) => r.id === repoRef || r.name === repoRef || r.root_path.split(/[\\/]/).filter((x) => x !== '').pop() === repoRef,
       );
-      if (hit === undefined || hit.root_path === '') return;
-      this.deliverOriginUrl = await readDeliverOriginUrl(hit.root_path);
+      if (hit === undefined || hit.root_path === '') return null;
+      return await readDeliverOriginUrl(hit.root_path);
     } catch {
       // An engine that cannot list repos leaves the origin UNKNOWN — the card keeps its generic
       // sentence rather than claim anything. `readDeliverOriginUrl` owns the git-side verdicts.
+      return null;
     }
   }
 
   /** The launcher's `deliver` step for a plan (`name` null) or a preset launch (DES-TEAMING-002
    *  §8.5): the engine appends it to the plan and puts it in the floor. */
-  private deliverStep(name: string | null, phases: PhaseDef[], input: LaunchRunInput): ReturnType<typeof deliverPresetStep> {
+  private deliverStep(
+    name: string | null,
+    phases: PhaseDef[],
+    input: LaunchRunInput,
+    /** (F2) The origin this launch resolved — launch-local, never adapter state. */
+    originUrl: string | null,
+  ): ReturnType<typeof deliverPresetStep> {
     return deliverPresetStep(name, phases, input.sessionId, input.problem, {
       repoRef: input.repoRef ?? null,
       apiOrigin: this.deliverApiOrigin?.() ?? null,
       revisesPr: input.revisesPr ?? null,
       ghAccount: process.env['GH_ACCOUNT'] ?? null,
       ghTokenPinned: typeof process.env['GH_TOKEN'] === 'string' && process.env['GH_TOKEN'] !== '',
-      originUrl: this.deliverOriginUrl,
+      originUrl,
       deliverIdentity: this.deliverIdentityLogin,
     });
   }
@@ -1762,7 +1770,7 @@ export class CoreAdapter {
     await this.refreshDeliverIdentity();
     // (F2) And the origin the push would go to — read once, for the gate card's target sentence.
     // Only a delivering launch composes a deliver phase, so only a delivering launch pays for it.
-    if (input.deliver === 'pr') await this.refreshDeliverOrigin(input.repoRef);
+    const deliverOriginUrl = input.deliver === 'pr' ? await this.resolveDeliverOrigin(input.repoRef) : null;
     const opts: LaunchOptions = {
       problem: input.problem,
       sessionId: input.sessionId,
@@ -1883,7 +1891,7 @@ export class CoreAdapter {
       // T8: a delivering plan hands the engine its deliver step, exactly as a preset launch does.
       if (input.deliver === 'pr') {
         (opts as LaunchOptions & { deliverStepJson?: string }).deliverStepJson = JSON.stringify(
-          this.deliverStep(null, [], input),
+          this.deliverStep(null, [], input, deliverOriginUrl),
         );
       }
     }
@@ -1904,7 +1912,7 @@ export class CoreAdapter {
         );
       }
       if (!this.supportsPlanLaunch()) throw new PlanLaunchUnsupportedError('Delivering a preset launch');
-      const step = this.deliverStep(input.workflow, this.getWorkflow(input.workflow)?.phases ?? [], input);
+      const step = this.deliverStep(input.workflow, this.getWorkflow(input.workflow)?.phases ?? [], input, deliverOriginUrl);
       (opts as LaunchOptions & { deliverStepJson?: string }).deliverStepJson = JSON.stringify(step);
       opts.workflow = input.workflow;
     } else if (input.workflow !== undefined) {
@@ -1977,7 +1985,7 @@ export class CoreAdapter {
             ghTokenPinned: typeof process.env['GH_TOKEN'] === 'string' && process.env['GH_TOKEN'] !== '',
             // F2 — the origin the push will actually go to, so the gate card cannot promise a
             // pull request on a remote that can never carry one.
-            originUrl: this.deliverOriginUrl,
+            originUrl: deliverOriginUrl,
             // crew#549 — the configured deliver identity, baked into the script so the refusal
             // holds on a daemon started without GH_ACCOUNT exported.
             deliverIdentity: this.deliverIdentityLogin,
@@ -2418,19 +2426,24 @@ export class CoreAdapter {
   ): Promise<PlanPreviewResponse> {
     const fn = this.requireTeam(this.core.previewPlan, 'Previewing a plan', 'previewPlan');
     // (F2) The preview shows the deliver step's gate-card text, so it reads the same origin the
-    // launch would.
-    if (opts.deliver === true) await this.refreshDeliverOrigin(opts.repoRef);
+    // launch would. Local to this call, like the launch's.
+    const previewOriginUrl = opts.deliver === true ? await this.resolveDeliverOrigin(opts.repoRef) : null;
     const deliverStep =
       opts.deliver === true
         ? JSON.stringify(
             // The launch's own step for a plan (`deliverStep(null, [], input)`); the run id is a
             // placeholder: it only shapes the push command, which a preview never runs.
-            this.deliverStep(null, [], {
-              sessionId: 'plan-preview',
-              problem: '',
-              clisJson: '[]',
-              ...(opts.repoRef !== undefined ? { repoRef: opts.repoRef } : {}),
-            }),
+            this.deliverStep(
+              null,
+              [],
+              {
+                sessionId: 'plan-preview',
+                problem: '',
+                clisJson: '[]',
+                ...(opts.repoRef !== undefined ? { repoRef: opts.repoRef } : {}),
+              },
+              previewOriginUrl,
+            ),
           )
         : null;
     return JSON.parse(
