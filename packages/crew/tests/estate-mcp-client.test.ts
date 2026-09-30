@@ -7,7 +7,7 @@
 // needed. Mirrors the spawned-subprocess pattern in mcp-server.test.ts.
 
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -15,6 +15,9 @@ import {
   callEstateTool,
   EstateMcpError,
   estateMcpExe,
+  memoryStoreIsolationNotice,
+  resolveMemoryDb,
+  sameDirectory,
   resolveMemoryDbPath,
 } from '../src/core/estate-mcp-client.js';
 import { defaultStateHome, setCrewStateHome } from '../src/projects/state-home.js';
@@ -155,7 +158,11 @@ describe('callEstateTool', () => {
 });
 
 describe('resolveMemoryDbPath', () => {
-  afterEach(() => setCrewStateHome(undefined));
+  const scratch: string[] = [];
+  afterEach(() => {
+    setCrewStateHome(undefined);
+    for (const d of scratch.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
 
   it('honors WICKED_MEMORY_DB when set', () => {
     expect(resolveMemoryDbPath({ WICKED_MEMORY_DB: '/custom/mem.db' })).toBe('/custom/mem.db');
@@ -207,6 +214,66 @@ describe('resolveMemoryDbPath', () => {
   it('WICKED_MEMORY_DB still outranks the state home — the explicit instruction is the specific one', () => {
     setCrewStateHome('/scratch/rig-a');
     expect(resolveMemoryDbPath({ WICKED_MEMORY_DB: '/custom/mem.db' })).toBe('/custom/mem.db');
+  });
+
+  // codex review of this PR, MEDIUM: an operator who has always run ONE daemon on a CUSTOM --db
+  // lands on the isolated arm and sees an empty store. Nothing distinguishes them from a throwaway
+  // test daemon, so there is no signal to adopt the global store on — and adopting it is the
+  // defect. The choice is: isolate, and SAY SO, once.
+  it('an isolated daemon with no store of its own NAMES the global store it is not reading', () => {
+    const root = mkdtempSync(join(tmpdir(), 'crew-f5-'));
+    scratch.push(root);
+    const stateHome = join(root, 'state-home');
+    const globalHome = join(root, 'global');
+    mkdirSync(join(stateHome, 'mcp'), { recursive: true });
+    mkdirSync(globalHome, { recursive: true });
+    writeFileSync(join(globalHome, 'memory.db'), 'SQLite format 3\0');
+    setCrewStateHome(stateHome);
+
+    expect(resolveMemoryDb({ WICKED_HOME: globalHome })).toEqual({
+      path: join(stateHome, 'mcp', 'memory.db'),
+      source: 'state-home',
+    });
+    const notice = memoryStoreIsolationNotice({ WICKED_HOME: globalHome });
+    expect(notice).not.toBeNull();
+    expect(notice).toContain(join(stateHome, 'mcp', 'memory.db'));
+    expect(notice).toContain(join(globalHome, 'memory.db'));
+    expect(notice).toContain('no run of this daemon can see or retire those memories');
+    expect(notice).toContain(`WICKED_MEMORY_DB=${join(globalHome, 'memory.db')}`);
+
+    // Nothing to say once this daemon has a store of its own …
+    writeFileSync(join(stateHome, 'mcp', 'memory.db'), 'SQLite format 3\0');
+    expect(memoryStoreIsolationNotice({ WICKED_HOME: globalHome })).toBeNull();
+    // … nor when the operator named a store explicitly …
+    rmSync(join(stateHome, 'mcp', 'memory.db'));
+    expect(memoryStoreIsolationNotice({ WICKED_HOME: globalHome, WICKED_MEMORY_DB: '/x/mem.db' })).toBeNull();
+    // … nor when there is no global store to have been using.
+    rmSync(join(globalHome, 'memory.db'));
+    expect(memoryStoreIsolationNotice({ WICKED_HOME: globalHome })).toBeNull();
+    // … nor on the default daemon, which reads the global store.
+    setCrewStateHome(undefined);
+    expect(memoryStoreIsolationNotice({ WICKED_HOME: globalHome })).toBeNull();
+  });
+
+  // "is this the default daemon" is decided by `sameDirectory`. A lexical compare called a
+  // symlinked home, a differently-cased spelling on a case-insensitive filesystem and a Windows
+  // junction ISOLATED, and handed the daemon an empty store (codex review, MEDIUM). Tested on
+  // scratch directories rather than on the real `~/.wicked-crew`: a test must not write into HOME.
+  it('sameDirectory follows a symlink and a spelling — the default-daemon test that decides it', () => {
+    const root = mkdtempSync(join(tmpdir(), 'crew-f5-'));
+    scratch.push(root);
+    const real = join(root, 'real-state-home');
+    mkdirSync(real, { recursive: true });
+    const link = join(root, 'alias');
+    symlinkSync(real, link, 'dir');
+
+    expect(sameDirectory(link, real)).toBe(true);
+    expect(sameDirectory(join(root, 'alias', '.', ''), real)).toBe(true);
+    expect(sameDirectory(join(real, '..', 'real-state-home'), real)).toBe(true);
+    expect(sameDirectory(join(root, 'other'), real)).toBe(false);
+    // Neither side exists: a lexical answer, and still the right one.
+    expect(sameDirectory(join(root, 'ghost', '.'), join(root, 'ghost'))).toBe(true);
+    expect(sameDirectory(join(root, 'ghost'), join(root, 'phantom'))).toBe(false);
   });
 
   it('the DEFAULT state home keeps the operator global store — a single-state-home user loses nothing', () => {

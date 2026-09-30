@@ -35,7 +35,7 @@
  */
 
 import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
-import { mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -130,25 +130,101 @@ export function estateMcpExe(env: NodeJS.ProcessEnv = process.env): string {
  *     engine that is already released. Promoting it to `<state home>/memory.db` is a two-repo
  *     change (one fence change per RC) and deliberately not smuggled in here.
  *  3. The **default** state home (`~/.wicked-crew`) keeps `${WICKED_HOME:-~/.wicked}/memory.db`.
- *     Deliberate, and the reason there is no migration to do: that file is not crew's private
- *     store, it is the operator's global one — the estate MCP's own default
- *     (`wicked-estate-mcp/src/main.rs`) and the path garden's `mem` skills read. Moving the
- *     default daemon off it would SPLIT a single-state-home user's memories from their own CLI,
- *     which is the "must not lose sight of their memories" case. So isolation is keyed on "is this
- *     the default daemon", and an existing user's store neither moves nor needs copying.
+ *     Deliberate: that file is not crew's private store, it is the operator's global one — the
+ *     estate MCP's own default (`wicked-estate-mcp/src/main.rs`) and the path garden's `mem`
+ *     skills read. Moving the default daemon off it would SPLIT that user's memories from their
+ *     own CLI, which is the "must not lose sight of their memories" case. So isolation is keyed on
+ *     "is this the default daemon", and the default daemon's store neither moves nor needs copying.
  *
- * `resolve` on both sides of the comparison, so an unnormalised `--db ./.wicked-crew/core.db`
- * spelling of the default home is still recognised as the default daemon.
+ * ## The migration case, and what was chosen (codex review of this PR, MEDIUM)
+ *
+ * Arm 3 covers the DEFAULT state home only. An operator who has always run one daemon on a CUSTOM
+ * `--db` now lands on arm 2 and sees an empty store where 596 memories used to be. Nothing
+ * distinguishes that operator from a throwaway test daemon on a free port — both are `--db
+ * <somewhere>` — so there is no signal to adopt the global store on, and adopting it is the defect.
+ *
+ * The choice: **isolate, and SAY SO.** {@link memoryStoreIsolationNotice} prints one line, once,
+ * when this daemon's own store does not exist yet while the operator's global store does — naming
+ * both paths and the one-line remedy (`WICKED_MEMORY_DB=<global>`) for an operator who wants the
+ * old behaviour. NOT a silent adoption, and not a read-only fallback either: this client is
+ * deliberately non-`--readonly` because it must approve and reject proposals, so a read-only
+ * degrade would break the queue it exists for.
+ *
+ * ## Recognising the default home
+ *
+ * Both sides are compared by REALPATH where the directory exists, falling back to `resolve`:
+ * `--db ./.wicked-crew/core.db`, a symlinked home, a differently-cased spelling on a
+ * case-insensitive filesystem and a Windows junction all name the default daemon, and a lexical
+ * compare would have called them isolated (codex review, MEDIUM).
  */
-export function resolveMemoryDbPath(env: NodeJS.ProcessEnv = process.env): string {
+
+/** Where {@link resolveMemoryDb} got its answer — `explicit` is the operator's own instruction. */
+export type MemoryDbSource = 'explicit' | 'state-home' | 'global';
+
+/** A directory path as the filesystem spells it, or its lexical normalisation when it does not
+ *  exist yet (a state home is created lazily). */
+function canonical(dir: string): string {
+  try {
+    return realpathSync(resolve(dir));
+  } catch {
+    return resolve(dir);
+  }
+}
+
+/**
+ * Do these two paths name the SAME directory? By realpath where they exist, lexically where they
+ * do not. Exported because it is the load-bearing half of "is this the default daemon": a lexical
+ * compare called a symlinked home, a differently-cased spelling on a case-insensitive filesystem
+ * and a Windows junction ISOLATED, and handed the daemon an empty store (codex review, MEDIUM).
+ */
+export function sameDirectory(a: string, b: string): boolean {
+  return canonical(a) === canonical(b);
+}
+
+/** Whether this daemon runs in the DEFAULT state home — the one whose memory store is the
+ *  operator's global one. */
+function inDefaultStateHome(): boolean {
+  return sameDirectory(crewStateHome(), defaultStateHome(homedir()));
+}
+
+/** {@link resolveMemoryDbPath} with the reason, for the callers that need to know which arm won. */
+export function resolveMemoryDb(env: NodeJS.ProcessEnv = process.env): { path: string; source: MemoryDbSource } {
   const explicit = env['WICKED_MEMORY_DB'];
-  if (explicit !== undefined && explicit !== '') return explicit;
-  const stateHome = crewStateHome();
-  if (resolve(stateHome) !== resolve(defaultStateHome(homedir()))) return join(mcpStateDir(), 'memory.db');
+  if (explicit !== undefined && explicit !== '') return { path: explicit, source: 'explicit' };
+  if (!inDefaultStateHome()) return { path: join(mcpStateDir(), 'memory.db'), source: 'state-home' };
   const home = env['WICKED_HOME'];
   const base = home !== undefined && home !== '' ? home : join(homedir(), '.wicked');
-  return join(base, 'memory.db');
+  return { path: join(base, 'memory.db'), source: 'global' };
 }
+
+/**
+ * The one line an isolated daemon prints when its OWN memory store does not exist yet while the
+ * operator's global store does: the migration case said out loud instead of silently showing an
+ * empty Memories page (codex review of this PR, MEDIUM). `null` whenever there is nothing to say —
+ * the explicit variable was set, this is the default daemon, this daemon's store already exists,
+ * or there is no global store to have been using.
+ */
+export function memoryStoreIsolationNotice(env: NodeJS.ProcessEnv = process.env): string | null {
+  const { path, source } = resolveMemoryDb(env);
+  if (source !== 'state-home') return null;
+  if (existsSync(path)) return null;
+  const home = env['WICKED_HOME'];
+  const global = join(home !== undefined && home !== '' ? home : join(homedir(), '.wicked'), 'memory.db');
+  if (!existsSync(global)) return null;
+  return (
+    `wicked-crew: this daemon's memory store is ${path} (its own, derived from --db) and it is empty. ` +
+    `A store exists at ${global} — the operator-global one every default daemon and the wicked-garden ` +
+    'mem skills use. It is NOT read from here, so no run of this daemon can see or retire those ' +
+    `memories. To use it anyway, start the daemon with WICKED_MEMORY_DB=${global}.`
+  );
+}
+export function resolveMemoryDbPath(env: NodeJS.ProcessEnv = process.env): string {
+  return resolveMemoryDb(env).path;
+}
+
+/** The isolation notice is printed ONCE per process — a spawn-per-call client would otherwise
+ *  repeat it on every operator click. */
+let isolationNoticePrinted = false;
 
 /** The default spawn: `wicked-estate-mcp` with no `--readonly` flag and WICKED_MEMORY_DB pinned
  *  to this daemon's own store (F5 — never the operator's global one from a throwaway state home).
@@ -157,13 +233,23 @@ export function resolveMemoryDbPath(env: NodeJS.ProcessEnv = process.env): strin
  *  (`childEnvWithBootEstateDb`): the daemon's sidecar is the engine's business, and a newer estate
  *  binary must never migrate that file's schema past what the engine's vendored store opens. */
 function defaultSpawn(env: NodeJS.ProcessEnv): ChildProcess {
-  const memoryDb = resolveMemoryDbPath(env);
-  // The server opens the file; nothing guarantees its PARENT exists on a state home that has
-  // never held one. Idempotent, and never for an operator-named path outside our own trees.
-  try {
-    mkdirSync(dirname(memoryDb), { recursive: true });
-  } catch {
-    // A parent that cannot be created is the server's error to report, with its own message.
+  const { path: memoryDb, source } = resolveMemoryDb(env);
+  if (!isolationNoticePrinted) {
+    const notice = memoryStoreIsolationNotice(env);
+    if (notice !== null) process.stderr.write(`${notice}\n`);
+    isolationNoticePrinted = true;
+  }
+  // The server opens the file; nothing guarantees its PARENT exists on a state home that has never
+  // held one. Only for a path WE derived: creating a hierarchy under an operator-named
+  // `WICKED_MEMORY_DB` with daemon privileges is not this function's business (codex review, LOW).
+  // A parent that cannot be created is the server's error to report, and it does: the client caps
+  // and surfaces the child's stderr on `EstateMcpError`.
+  if (source !== 'explicit') {
+    try {
+      mkdirSync(dirname(memoryDb), { recursive: true });
+    } catch {
+      // Left to the server to report with its own message.
+    }
   }
   return nodeSpawn(estateMcpExe(env), [], {
     stdio: ['pipe', 'pipe', 'pipe'],
