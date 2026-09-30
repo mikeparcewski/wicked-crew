@@ -11,7 +11,7 @@
 import { constants as fsConstants, promises as fsp, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
-import { deliverExclusionReason } from '../core/deliver-exclusions.js';
+import { deliverExclusionByName, deliverExclusionReason } from '../core/deliver-exclusions.js';
 
 /** File-content cap (DES-FEEDBACK-002 §3.3): past this, `content` holds the first 512 KB and
  *  `truncated: true` — the studio renders a labeled truncation banner, never a silent amputation. */
@@ -392,7 +392,12 @@ export async function worktreeDiff(
   // `GET /runs/:id/files`, and answering "no changes" for a scratch file it deliberately opened
   // would be a different lie. Only the aggregate — the one the diffstat is computed from — is
   // filtered.
+  //
+  // Name rules FIRST, and only a path that survives all of them is stat'd (codex review, MEDIUM):
+  // a worktree carrying 100 000 files under `tmp/` would otherwise cost 100 000 synchronous stats
+  // on the daemon's event loop to reject paths the directory rule rejects without a size.
   const untracked = relPath !== undefined ? candidates : candidates.filter((file) => {
+    if (deliverExclusionByName(file) !== null) return false;
     let size: number | null = null;
     try {
       size = statSync(join(workdir, file)).size;

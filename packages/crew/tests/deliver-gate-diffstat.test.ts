@@ -23,7 +23,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { worktreeDiff } from '../src/api/run-files.js';
-import { deliverExclusionReason } from '../src/core/deliver-exclusions.js';
+import { deliverExclusionByName, deliverExclusionReason } from '../src/core/deliver-exclusions.js';
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync(
@@ -111,6 +111,19 @@ describe('the deliver gate diffstat is computed over exactly the set that will b
     // aggregate — the set the consent diffstat is computed from — is filtered.
     const { diff } = await worktreeDiff(root, 'tmp/wicked-checks/f0.log');
     expect(filesIn(diff)).toEqual(['tmp/wicked-checks/f0.log']);
+  });
+
+  it('the NAME rules need no stat — a scratch tree costs zero filesystem calls to reject', () => {
+    // codex review, MEDIUM: the aggregate pass used to stat every candidate before any name rule
+    // ran, so 100 000 files under `tmp/` meant 100 000 synchronous stats on the daemon's event
+    // loop. Only a path that survives every name rule is stat'd now.
+    expect(deliverExclusionByName('tmp/wicked-checks/f0.log')).toBe('scratch-dir');
+    expect(deliverExclusionByName('bus.db')).toBe('denylisted-name');
+    expect(deliverExclusionByName('socket.path')).toBe('socket-name');
+    expect(deliverExclusionByName('a/.DS_Store')).toBe('ds-store');
+    // The size rule is the ONLY one it does not answer — that is what makes the stat lazy.
+    expect(deliverExclusionByName('rec.bin')).toBeNull();
+    expect(deliverExclusionReason('rec.bin', 1048577)).toBe('oversize-1mib');
   });
 
   it('the classifier names a reason for each excluded class and null for the run product', () => {

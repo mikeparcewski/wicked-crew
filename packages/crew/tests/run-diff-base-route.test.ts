@@ -238,7 +238,11 @@ describe('GET /runs/:id/diff?base= (CREW-UX-1, DES-UX-001 §8.1)', () => {
     // 1 MiB (`deliverExclusionReason` → `oversize-1mib`). A single 2 MB file would therefore be
     // excluded and prove nothing about the cap — these two are each under the size rule and
     // together breach it.
-    const big = `${'y'.repeat(120)}\n`.repeat(Math.ceil(700_000 / 121));
+    // MULTIBYTE content (codex review, LOW): with pure ASCII a `diff.length` cap would pass this
+    // test, so "byte-accurate" would go unproven. `é` is 2 UTF-8 bytes, so 60 of them + a newline
+    // is 121 BYTES but 61 code units — the same byte arithmetic as before, over a string the cap's
+    // boundary back-off actually has to handle.
+    const big = `${'é'.repeat(60)}\n`.repeat(Math.ceil(700_000 / 121));
     const hugeA = join(workdir, 'huge-untracked-a.txt');
     const hugeB = join(workdir, 'huge-untracked-b.txt');
     writeFileSync(hugeA, big);
