@@ -356,7 +356,7 @@ describe('deliver script, driven for real (crew#317)', () => {
     const create = r.ghCalls.find((c) => c.startsWith('pr create')) ?? '';
     expect(create).toContain('pr create --repo acme/widgets --head');
     expect(r.output).not.toContain('FAKE-TOKEN');
-  });
+  }, 60_000);
 
   it('R1: REFUSES when origin was re-pointed since the card was approved — nothing staged or pushed (Copilot)', async () => {
     const fx = fixture();
@@ -371,7 +371,41 @@ describe('deliver script, driven for real (crew#317)', () => {
     expect(originBranches(fx)).not.toContain(`wicked/${RUN_ID}`);
     expect(r.ghCalls.some((c) => c.startsWith('pr create'))).toBe(false);
     expect(git(fx.workdir, 'status', '--porcelain')).toContain('README.md');
-  });
+  }, 60_000);
+
+  // The drift check PARSES the URL (codex review): a look-alike host, or a path that merely ends
+  // in the repository, is refused; every honest spelling of the same repository passes.
+  it.each([
+    'https://evil.example/github.com/acme/widgets',
+    'git@evilgithub.com:acme/widgets.git',
+    'ssh://git@github.com.evil.example/acme/widgets',
+  ])('R1 drift: a look-alike origin %s is refused, nothing pushed', async (lookAlike) => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'README.md'), 'base\nchanged\n');
+    const r = await runDeliver(fx, {
+      intent: 'look-alike origin',
+      script: { runId: RUN_ID, originUrl: 'https://github.com/acme/widgets.git' },
+      originPushUrl: lookAlike,
+    });
+    expect(r.output).toContain('deliver: origin no longer points at acme/widgets');
+    expect(originBranches(fx)).not.toContain(`wicked/${RUN_ID}`);
+  }, 60_000);
+
+  it.each([
+    'git@github.com:acme/widgets.git',
+    'ssh://git@GitHub.com:22/acme/widgets/',
+    'https://github.com/acme/widgets',
+  ])('R1 drift: the honest spelling %s passes and the push lands', async (same) => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'README.md'), 'base\nchanged\n');
+    const r = await runDeliver(fx, {
+      intent: 'same origin',
+      script: { runId: RUN_ID, originUrl: 'https://github.com/acme/widgets.git' },
+      originPushUrl: same,
+    });
+    expect(r.output).not.toContain('origin no longer points at');
+    expect(r.status).toBe(0);
+  }, 60_000);
 
   it('R1: a non-github.com origin bakes no --repo — gh still resolves it (the push-only path keys on that)', async () => {
     const fx = fixture();
@@ -381,7 +415,7 @@ describe('deliver script, driven for real (crew#317)', () => {
     const create = r.ghCalls.find((c) => c.startsWith('pr create')) ?? '';
     expect(create).toContain('pr create --head');
     expect(create).not.toContain('--repo');
-  });
+  }, 60_000);
 
   it('EXCLUDES untracked scratch/key-material and reports each exclusion, while product rides (crew#434)', async () => {
     const fx = fixture();

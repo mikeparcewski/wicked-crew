@@ -598,12 +598,18 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // R1 (Copilot on crew#736): the card the operator approved named GHREPO; if origin was
     // re-pointed since (the run can wait at its gate for hours), the push would leave for another
     // repository than the one consented to. Refuse before anything is fetched, staged or pushed.
-    // Only the host+path is compared — the URL itself (it may carry a token) is never printed.
+    // The URL is PARSED, not globbed (codex review, HIGH: `*github.com/o/r` also matched
+    // `https://evil.example/github.com/o/r` and `git@evilgithub.com:o/r`): the host — userinfo and
+    // port stripped, lowercased — must be exactly github.com and the path exactly GHREPO (a
+    // trailing `/` or `.git` dropped). The URL itself (it may carry a token) is never printed.
     'if [ -n "$GHREPO" ]; then',
-    '  case "$(git remote get-url --push origin 2>/dev/null)" in',
-    '    *"github.com/$GHREPO"|*"github.com/$GHREPO.git"|*"github.com/$GHREPO/"|*"github.com:$GHREPO"|*"github.com:$GHREPO.git") ;;',
-    '    *) echo "deliver: origin no longer points at $GHREPO, the repository this delivery was approved for — nothing was staged, committed or pushed. Point origin back at $GHREPO, or reject and relaunch against the new remote"; exit 1;;',
+    '  OU=$(git remote get-url --push origin 2>/dev/null || true)',
+    '  case "$OU" in',
+    '    *://*) OH=${OU#*://}; OH=${OH%%/*}; OH=${OH##*@}; OH=${OH%%:*}; OP=${OU#*://*/};;',
+    '    *) OH=${OU%%:*}; OH=${OH##*@}; OP=${OU#*:};;',
     '  esac',
+    "  OH=$(printf '%s' \"$OH\" | tr 'A-Z' 'a-z'); OP=${OP%/}; OP=${OP%.git}",
+    '  if [ "$OH" != github.com ] || [ "$OP" != "$GHREPO" ]; then echo "deliver: origin no longer points at $GHREPO, the repository this delivery was approved for — nothing was staged, committed or pushed. Point origin back at $GHREPO, or reject and relaunch against the new remote"; exit 1; fi',
     'fi',
     // (a) The run branch: wicked/<worktree-basename> (the engine names run worktrees by run id),
     // falling back to the currently checked-out branch when that ref does not exist.
