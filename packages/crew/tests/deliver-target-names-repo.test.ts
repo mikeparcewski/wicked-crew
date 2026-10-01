@@ -43,6 +43,9 @@ describe('the deliver card names the GitHub repository and the real branch (R1, 
       );
       expect(s).not.toMatch(/FAKE-TOKEN|x-access-token|<run>/);
     }
+    // GitHub's ssh-over-443 endpoint is a push host too; another *.github.com names no repository.
+    expect(githubRepoOf(`ssh://git@ssh.github.com:443/${SLUG}.git`)).toBe(SLUG);
+    expect(githubRepoOf(`git@gist.github.com:${SLUG}.git`)).toBeNull();
     // Not github.com, or not an owner/name path: no slug is invented.
     expect(githubRepoOf('git@gitlab.com:group/proj.git')).toBeNull();
     expect(githubRepoOf('/srv/git/repo.git')).toBeNull();
@@ -65,6 +68,8 @@ describe('the deliver card names the GitHub repository and the real branch (R1, 
   it('a campaign-shaped id takes the engine\'s colon tier; any other unsafe id names no guess (Copilot)', () => {
     expect(newPrTargetSentence(`git@github.com:${SLUG}.git`, 'recon-7:alpha:a0')).toContain('Pushes branch wicked/recon-7-alpha-a0 to');
     expect(newPrTargetSentence(`git@github.com:${SLUG}.git`, 'has space:x')).toContain('Pushes the run branch to');
+    // Whitespace is not trimmed away: the engine hashes `" run "`, so no `wicked/run` is announced.
+    expect(newPrTargetSentence(`git@github.com:${SLUG}.git`, ' run ')).toContain('Pushes the run branch to');
   });
 
   it('with no run yet (the launch) it says "the run branch", never a placeholder', () => {

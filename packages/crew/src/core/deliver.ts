@@ -602,16 +602,26 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // `https://evil.example/github.com/o/r` and `git@evilgithub.com:o/r`): the host — userinfo and
     // port stripped, lowercased — must be exactly github.com and the path exactly GHREPO (a
     // trailing `/` or `.git` dropped). The URL itself (it may carry a token) is never printed.
+    // EVERY push URL is checked (`--all`): `git push origin` pushes to each `remote.origin.pushurl`,
+    // so a second one would receive the branch unnamed (Copilot on crew#736). The host must be
+    // github.com or ssh.github.com — the same two `githubRepoOf` names a repository for.
     'if [ -n "$GHREPO" ]; then',
-    '  OU=$(git remote get-url --push origin 2>/dev/null || true)',
-    '  case "$OU" in',
-    '    *://*) OH=${OU#*://}; OH=${OH%%/*}; OH=${OH##*@}; OH=${OH%%:*}; OP=${OU#*://*/};;',
-    '    *) OH=${OU%%:*}; OH=${OH##*@}; OP=${OU#*:};;',
-    '  esac',
+    "  GL=$(printf '%s' \"$GHREPO\" | tr 'A-Z' 'a-z'); ODRIFT=''; OANY=''",
+    '  while IFS= read -r OU; do',
+    '    [ -n "$OU" ] || continue; OANY=1',
+    '    case "$OU" in',
+    '      *://*) OH=${OU#*://}; OH=${OH%%/*}; OH=${OH##*@}; OH=${OH%%:*}; OP=${OU#*://*/};;',
+    '      *) OH=${OU%%:*}; OH=${OH##*@}; OP=${OU#*:};;',
+    '    esac',
     // GitHub owner/repo names are case-insensitive: compare lowercased, keep GHREPO's spelling
-    // for `--repo` (codex review, MEDIUM).
-    "  OH=$(printf '%s' \"$OH\" | tr 'A-Z' 'a-z'); OP=${OP%/}; OP=$(printf '%s' \"${OP%.git}\" | tr 'A-Z' 'a-z'); GL=$(printf '%s' \"$GHREPO\" | tr 'A-Z' 'a-z')",
-    '  if [ "$OH" != github.com ] || [ "$OP" != "$GL" ]; then echo "deliver: origin no longer points at $GHREPO, the repository this delivery was approved for — nothing was staged, committed or pushed. Point origin back at $GHREPO, or reject and relaunch against the new remote"; exit 1; fi',
+    // for `--repo` (codex review, MEDIUM). An absolute scp path (`git@github.com:/o/r`) is the same
+    // repository: the leading `/` goes.
+    "    OH=$(printf '%s' \"$OH\" | tr 'A-Z' 'a-z'); OP=${OP#/}; OP=${OP%/}; OP=$(printf '%s' \"${OP%.git}\" | tr 'A-Z' 'a-z')",
+    '    case "$OH" in github.com|ssh.github.com) [ "$OP" = "$GL" ] || ODRIFT=1;; *) ODRIFT=1;; esac',
+    '  done <<GHREPO_URLS',
+    '$(git remote get-url --push --all origin 2>/dev/null || true)',
+    'GHREPO_URLS',
+    '  if [ -n "$ODRIFT" ] || [ -z "$OANY" ]; then echo "deliver: origin no longer points at $GHREPO (or also pushes elsewhere), the repository this delivery was approved for — nothing was staged, committed or pushed. Point origin back at $GHREPO alone, or reject and relaunch against the new remote"; exit 1; fi',
     'fi',
     // (a) The run branch: wicked/<worktree-basename> (the engine names run worktrees by run id),
     // falling back to the currently checked-out branch when that ref does not exist.
@@ -1128,6 +1138,9 @@ export function classifyDeliverOrigin(url: string | null | undefined): DeliverOr
  * `null`/absent origin ⇒ the generic sentence, unchanged: "could not read it" is not a licence to
  * claim anything about it either way.
  */
+/** The hosts a GitHub repository is pushed to: the web host and the ssh-over-443 endpoint. */
+const GITHUB_PUSH_HOSTS = new Set(['github.com', 'ssh.github.com']);
+
 /**
  * `owner/repo` of a github.com origin URL — `https://[user[:token]@]github.com/owner/repo(.git)`,
  * `ssh://git@github.com/owner/repo`, `git@github.com:owner/repo.git` — or `null` when the value is
@@ -1137,6 +1150,11 @@ export function classifyDeliverOrigin(url: string | null | undefined): DeliverOr
 export function githubRepoOf(url: string | null | undefined): string | null {
   if (classifyDeliverOrigin(url) !== 'github') return null;
   const trimmed = (url ?? '').trim();
+  // Only the two hosts a repository is pushed to (`ssh.github.com` is GitHub's ssh-over-443
+  // endpoint). Another `*.github.com` (gist, api) names no repository `--repo` could open on —
+  // the card keeps its generic sentence and gh resolves the remote itself. The script's drift
+  // check accepts exactly these two hosts too (Copilot on crew#736).
+  if (!GITHUB_PUSH_HOSTS.has(originRemoteHost(trimmed) ?? '')) return null;
   const schemed = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/(?:[^@/]*@)?[^/]+\/(.*)$/.exec(trimmed);
   const scp = schemed === null ? /^(?:[^@/\\]+@)?[A-Za-z0-9._-]+:(.*)$/.exec(trimmed) : null;
   const path = (schemed ?? scp)?.[1] ?? null;
@@ -1152,7 +1170,9 @@ export function githubRepoOf(url: string | null | undefined): string | null {
 /** The run branch the deliver script pushes — `wicked/<run id>` (the engine names run worktrees by
  *  run id and the script pushes `wicked/<worktree basename>`) — or `null` when the run is unknown. */
 export function deliverRunBranch(runId: string | null | undefined): string | null {
-  const id = (runId ?? '').trim();
+  // The id as the engine receives it — NOT trimmed: `" run "` takes the engine's hash tier, and a
+  // trim here would announce `wicked/run` (Copilot on crew#736).
+  const id = runId ?? '';
   if (/^[A-Za-z0-9._-]+$/.test(id)) return `wicked/${id}`;
   // The engine's hashless COLON tier (core#345/#347): an id whose only illegal char is `:` (a
   // campaign-shaped `<label>:<repo>:a0`) names its worktree and branch with each `:` as `-`

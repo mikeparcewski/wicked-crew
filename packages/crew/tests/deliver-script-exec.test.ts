@@ -191,7 +191,8 @@ async function runDeliver(
       join(bin, 'git'),
       [
         '#!/bin/sh',
-        'if [ "$1" = remote ] && [ "$2" = get-url ] && [ "$3" = --push ] && [ "$4" = origin ]; then echo "$GIT_STUB_ORIGIN_PUSH_URL"; exit 0; fi',
+        // `remote get-url --push [--all] origin` — the env value may hold several newline-separated URLs.
+        'if [ "$1" = remote ] && [ "$2" = get-url ] && [ "$3" = --push ]; then printf "%s\\n" "$GIT_STUB_ORIGIN_PUSH_URL"; exit 0; fi',
         `exec '${realGit}' "$@"`,
       ].join('\n'),
     );
@@ -367,7 +368,7 @@ describe('deliver script, driven for real (crew#317)', () => {
       originPushUrl: 'git@github.com:someone-else/widgets.git',
     });
     expect(r.status).not.toBe(0);
-    expect(r.output).toContain('deliver: origin no longer points at acme/widgets, the repository this delivery was approved for');
+    expect(r.output).toContain('deliver: origin no longer points at acme/widgets (or also pushes elsewhere), the repository this delivery was approved for');
     expect(originBranches(fx)).not.toContain(`wicked/${RUN_ID}`);
     expect(r.ghCalls.some((c) => c.startsWith('pr create'))).toBe(false);
     expect(git(fx.workdir, 'status', '--porcelain')).toContain('README.md');
@@ -379,6 +380,8 @@ describe('deliver script, driven for real (crew#317)', () => {
     'https://evil.example/github.com/acme/widgets',
     'git@evilgithub.com:acme/widgets.git',
     'ssh://git@github.com.evil.example/acme/widgets',
+    // A SECOND push URL would receive the branch unnamed (Copilot): every one must be the approved repo.
+    'git@github.com:acme/widgets.git\ngit@github.com:someone-else/widgets.git',
   ])('R1 drift: a look-alike origin %s is refused, nothing pushed', async (lookAlike) => {
     const fx = fixture();
     writeFileSync(join(fx.workdir, 'README.md'), 'base\nchanged\n');
@@ -396,6 +399,8 @@ describe('deliver script, driven for real (crew#317)', () => {
     'ssh://git@GitHub.com:22/acme/widgets/',
     'https://github.com/acme/widgets',
     'https://github.com/ACME/Widgets.git',
+    'ssh://git@ssh.github.com:443/acme/widgets.git',
+    'git@github.com:/acme/widgets.git',
   ])('R1 drift: the honest spelling %s passes and the push lands', async (same) => {
     const fx = fixture();
     writeFileSync(join(fx.workdir, 'README.md'), 'base\nchanged\n');
