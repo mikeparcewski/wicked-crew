@@ -4210,6 +4210,23 @@ export interface CodeGraphData {
  * checkout's in-tree graph is ignored and no live graph exists yet; re-run onboarding), else the
  * daemon's own sentence. Both absent when `graph` is present.
  */
+/**
+ * `GET /api/v1/repos/:id/deliver-target` (R3) — where a delivering launch on this repo would push,
+ * read by the same origin preflight the deliver gate card uses (crew#730). `sentence` is the gate's
+ * own target sentence for a run not yet started ("the run branch"); show it verbatim.
+ *  - `github`  — a github.com origin; `githubRepo` is its `owner/repo`;
+ *  - `local`   — a filesystem path or `file://` URL: no pull request can be opened against it;
+ *  - `other`   — another host: a pull request opens only if gh resolves it as a GitHub host;
+ *  - `none`    — the checkout has no `origin` remote: the push will fail;
+ *  - `unknown` — the origin could not be read; the sentence claims nothing either way.
+ */
+export interface DeliverTargetResponse {
+  repo: string;
+  origin: 'github' | 'local' | 'other' | 'none' | 'unknown';
+  githubRepo: string | null;
+  sentence: string;
+}
+
 export interface RepoGraphResponse {
   graph: CodeGraphData | null;
   reason?: string;

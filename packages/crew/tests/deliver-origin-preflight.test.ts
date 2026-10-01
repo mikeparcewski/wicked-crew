@@ -69,8 +69,9 @@ describe('the deliver gate names the real origin (F2)', () => {
       'https://user@github.com/owner/repo',
     ]) {
       expect(classifyDeliverOrigin(url)).toBe('github');
+      // R1: the sentence names the repository the pull request opens on (owner/repo off the URL).
       expect(newPrTargetSentence(url)).toBe(
-        'Pushes the run branch wicked/<run> to origin and opens a pull request; merge stays human.',
+        'Pushes the run branch to owner/repo on GitHub and opens a pull request there; merge stays human.',
       );
     }
   });
@@ -97,7 +98,7 @@ describe('the deliver gate names the real origin (F2)', () => {
   });
 
   it('an origin that could NOT be read claims nothing either way — the card keeps its old sentence', () => {
-    const generic = 'Pushes the run branch wicked/<run> to origin and opens a pull request; merge stays human.';
+    const generic = 'Pushes the run branch to origin and opens a pull request; merge stays human.';
     expect(newPrTargetSentence(null)).toBe(generic);
     expect(newPrTargetSentence(undefined)).toBe(generic);
   });
@@ -114,7 +115,7 @@ describe('the deliver gate names the real origin (F2)', () => {
       revisesPr: { number: 273, headRef: 'feature/x', url: 'https://github.com/o/r/pull/273' },
       originUrl: '/tmp/origin.git',
     });
-    expect(card).toContain('Pushes wicked/<run> onto pull request #273 (branch feature/x); no new PR.');
+    expect(card).toContain('Pushes the run branch onto pull request #273 (branch feature/x); no new PR.');
     expect(card).not.toContain('a local path');
   });
 });

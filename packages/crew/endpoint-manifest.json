@@ -962,6 +962,16 @@
     },
     {
       "method": "GET",
+      "path": "/api/v1/repos/:id/deliver-target",
+      "requestType": null,
+      "responseType": "DeliverTargetResponse",
+      "statusCodes": [
+        200,
+        404
+      ]
+    },
+    {
+      "method": "GET",
       "path": "/api/v1/repos/:id/domain-graph",
       "requestType": null,
       "responseType": null,

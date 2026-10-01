@@ -120,7 +120,9 @@ describe('deliverPrScript (the hardened field script)', () => {
 
   it('pushes -u and opens the PR with gh, URL as the last line', () => {
     expect(script).toContain('git push -u origin "$B"');
-    expect(script).toContain('gh pr create --head "$B" --title "$TITLE" --body-file "$TD/body"');
+    // R1: bound to the repository the consent card named when the origin is github.com (empty
+    // GHREPO otherwise — gh resolves the remote itself).
+    expect(script).toContain('gh pr create ${GHREPO:+--repo "$GHREPO"} --head "$B" --title "$TITLE" --body-file "$TD/body"');
     const lines = script.trimEnd().split('\n');
     expect(lines[lines.length - 1]).toBe('echo "$URL"');
   });
@@ -308,7 +310,7 @@ describe('deliverPrScript (the hardened field script)', () => {
 
   it('captures gh’s output and status separately — no `| tail -1` verdict laundering', () => {
     expect(script).toContain(
-      'if ! OUT=$(gh pr create --head "$B" --title "$TITLE" --body-file "$TD/body" 2>&1); then',
+      'if ! OUT=$(gh pr create ${GHREPO:+--repo "$GHREPO"} --head "$B" --title "$TITLE" --body-file "$TD/body" 2>&1); then',
     );
     expect(script).not.toContain('--fill');
     expect(script).toContain('deliver: gh pr create failed for $B — no PR was opened');

@@ -46,7 +46,7 @@ import type {
 import { DEFAULT_SETTINGS } from './types.js';
 import { BASE_SKILL_REF_SHAPE } from '../skills/base-skill.js';
 import { execCapped } from './exec.js';
-import { BUG_FIX_SWEEP_INSTRUCTIONS, composeDeliverWorkflow, DELIVER_PHASE_ID, deliverPresetStep, EVIDENCE_FLOOR_PIN, isGitHubLogin, readDeliverOriginUrl } from './deliver.js';
+import { BUG_FIX_SWEEP_INSTRUCTIONS, composeDeliverWorkflow, DELIVER_PHASE_ID, deliverPresetStep, deliverRepoFor, EVIDENCE_FLOOR_PIN, isGitHubLogin, readDeliverOriginUrl } from './deliver.js';
 import { engineCampaignDef, engineRosterJson } from './engine-roster.js';
 import { QE_AUTHOR_TESTS_WORKFLOW_DEF } from '../qe/author-workflow.js';
 import { CAMPAIGN_WORKFLOW_PREFIX } from '../campaigns/plan.js';
@@ -1731,9 +1731,7 @@ export class CoreAdapter {
     if (repoRef === null || repoRef === undefined || repoRef === '') return null;
     try {
       const repos = await this.listRepos();
-      const hit = repos.find(
-        (r) => r.id === repoRef || r.name === repoRef || r.root_path.split(/[\\/]/).filter((x) => x !== '').pop() === repoRef,
-      );
+      const hit = deliverRepoFor(repos, repoRef);
       if (hit === undefined || hit.root_path === '') return null;
       return await readDeliverOriginUrl(hit.root_path);
     } catch {

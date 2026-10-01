@@ -316,6 +316,33 @@ describe('deliver script, driven for real (crew#317)', () => {
     expect(git(fx.workdir, 'status', '--porcelain').trim()).toBe('');
   }, 60_000);
 
+  it('R1: opens the pull request ON the github.com repository the consent card named (`--repo owner/repo`)', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'README.md'), 'base\nchanged\n');
+    // The card's compose-time origin read named acme/widgets; gh must not pick another base
+    // (a `gh repo set-default`, an `upstream` remote) behind the operator's consent.
+    const r = await runDeliver(fx, {
+      intent: 'bind the PR target',
+      // Userinfo assembled at runtime: no credential-shaped literal in the source.
+      script: { runId: RUN_ID, originUrl: ['https://', 'x-access-token', ':', 'FAKE-TOKEN', '@github.com/acme/widgets.git'].join('') },
+    });
+    expect(r.status).toBe(0);
+    // `ghCalls` keeps the full argv (the stub's `.argv` record is written after its arg loop shifts).
+    const create = r.ghCalls.find((c) => c.startsWith('pr create')) ?? '';
+    expect(create).toContain('pr create --repo acme/widgets --head');
+    expect(r.output).not.toContain('FAKE-TOKEN');
+  });
+
+  it('R1: a non-github.com origin bakes no --repo — gh still resolves it (the push-only path keys on that)', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'README.md'), 'base\nchanged\n');
+    const r = await runDeliver(fx, { intent: 'no binding', script: { runId: RUN_ID, originUrl: fx.origin } });
+    expect(r.status).toBe(0);
+    const create = r.ghCalls.find((c) => c.startsWith('pr create')) ?? '';
+    expect(create).toContain('pr create --head');
+    expect(create).not.toContain('--repo');
+  });
+
   it('EXCLUDES untracked scratch/key-material and reports each exclusion, while product rides (crew#434)', async () => {
     const fx = fixture();
     // The run's product: a tracked edit and an untracked new source file (neither is scratch).

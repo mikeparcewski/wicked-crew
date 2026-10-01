@@ -207,8 +207,10 @@ export interface DeliverScriptOptions {
   ghTokenPinned?: boolean;
   /** (F2) The repo's `git remote get-url origin`, read at compose time so the deliver GATE CARD
    *  says what will actually happen. `undefined`/`null` ⇒ it could not be read (the card keeps the
-   *  generic sentence); `''` ⇒ read, and the repository has NO `origin` remote. The SCRIPT never
-   *  uses this — it asks git itself at delivery time. */
+   *  generic sentence); `''` ⇒ read, and the repository has NO `origin` remote. The script asks git
+   *  itself where to push at delivery time; the one thing it takes from here is the github.com
+   *  `owner/repo` the card names, as `gh pr create --repo` (R1), so the PR opens where the operator
+   *  consented to. */
   originUrl?: string | null;
   /** (crew#549) The DELIVER IDENTITY from system settings (`deliverIdentityLogin`) — the login the
    *  push must run as, baked into the script so the refusal holds even when the daemon was started
@@ -509,6 +511,12 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
   if (identity !== '' && !isGitHubLogin(identity)) {
     throw new Error(`deliver identity: not a GitHub login: ${JSON.stringify(identity)}`);
   }
+  // R1: the repository the consent card names IS the one `gh pr create` opens on. Without `--repo`
+  // gh resolves the base itself (a `gh repo set-default`, an `upstream` remote), so "opens a pull
+  // request there" could name one repository while the PR opened on another (codex review, HIGH).
+  // `githubRepoOf` admits only `[A-Za-z0-9._-]+/[A-Za-z0-9._-]+`, safe in a single-quoted literal;
+  // a non-github.com origin bakes '' and gh keeps resolving it (the push-only path keys on that).
+  const ghRepo = githubRepoOf(opts.originUrl) ?? '';
   const prNum = revises === null ? '' : String(revises.number);
   const target = revises === null ? '' : revises.headRef;
   const prUrl = revises === null ? '' : revises.url;
@@ -586,6 +594,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     `PRNUM='${prNum}'`,
     `TARGET='${target}'`,
     `PRURL='${prUrl}'`,
+    `GHREPO='${ghRepo}'`,
     // (a) The run branch: wicked/<worktree-basename> (the engine names run worktrees by run id),
     // falling back to the currently checked-out branch when that ref does not exist.
     'R=$(basename "$PWD")',
@@ -949,7 +958,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // Done is still RE-DERIVED before the claim: the remote ref must be ahead of the base. And
     // nothing may read a pull request out of this output — there is no URL in it, so `prUrlFrom`
     // answers null and the run's `delivery` never reads `delivered`.
-    '  if ! OUT=$(gh pr create --head "$B" --title "$TITLE" --body-file "$TD/body" 2>&1); then',
+    '  if ! OUT=$(gh pr create ${GHREPO:+--repo "$GHREPO"} --head "$B" --title "$TITLE" --body-file "$TD/body" 2>&1); then',
     '    echo "$OUT"',
     '    case "$OUT" in',
     '      *"git remotes configured for this repository"*"known GitHub host"*)',
@@ -1101,11 +1110,51 @@ export function classifyDeliverOrigin(url: string | null | undefined): DeliverOr
  * `null`/absent origin ⇒ the generic sentence, unchanged: "could not read it" is not a licence to
  * claim anything about it either way.
  */
-export function newPrTargetSentence(originUrl: string | null | undefined): string {
+/**
+ * `owner/repo` of a github.com origin URL — `https://[user[:token]@]github.com/owner/repo(.git)`,
+ * `ssh://git@github.com/owner/repo`, `git@github.com:owner/repo.git` — or `null` when the value is
+ * not a github.com URL with exactly an owner/name path. Credentials never survive: only the path is
+ * read (R1, ship-prove-3).
+ */
+export function githubRepoOf(url: string | null | undefined): string | null {
+  if (classifyDeliverOrigin(url) !== 'github') return null;
+  const trimmed = (url ?? '').trim();
+  const schemed = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/(?:[^@/]*@)?[^/]+\/(.*)$/.exec(trimmed);
+  const scp = schemed === null ? /^(?:[^@/\\]+@)?[A-Za-z0-9._-]+:(.*)$/.exec(trimmed) : null;
+  const path = (schemed ?? scp)?.[1] ?? null;
+  if (path === null) return null;
+  const segs = path.replace(/[?#].*$/, '').split('/').filter((x) => x !== '');
+  if (segs.length !== 2) return null;
+  const owner = segs[0]!;
+  const name = segs[1]!.replace(/\.git$/i, '');
+  const part = /^[A-Za-z0-9._-]+$/;
+  return part.test(owner) && part.test(name) && name !== '' ? `${owner}/${name}` : null;
+}
+
+/** The run branch the deliver script pushes — `wicked/<run id>` (the engine names run worktrees by
+ *  run id and the script pushes `wicked/<worktree basename>`) — or `null` when the run is unknown. */
+export function deliverRunBranch(runId: string | null | undefined): string | null {
+  const id = (runId ?? '').trim();
+  return /^[A-Za-z0-9._-]+$/.test(id) ? `wicked/${id}` : null;
+}
+
+/**
+ * The gate card's first sentence for a NEW-PR delivery — what will ACTUALLY happen (F2). `runId`
+ * names the branch (R2: the card used to print the literal placeholder `wicked/<run>`); without
+ * one — the LAUNCH composer, before the run exists — it says "the run branch". The same sentence
+ * is what `GET /repos/:id/deliver-target` answers, so launch and gate cannot disagree (R3).
+ */
+export function newPrTargetSentence(originUrl: string | null | undefined, runId?: string | null): string {
   const kind = classifyDeliverOrigin(originUrl);
-  const branch = 'the run branch wicked/<run>';
+  const runBranch = deliverRunBranch(runId);
+  const branch = runBranch !== null ? `branch ${runBranch}` : 'the run branch';
   if (kind === 'github') {
-    return `Pushes ${branch} to origin and opens a pull request; merge stays human.`;
+    // R1: name the GitHub repository the pull request opens on, read off the origin URL (never
+    // crew's registry label, never a credential).
+    const repo = githubRepoOf(originUrl);
+    return repo !== null
+      ? `Pushes ${branch} to ${repo} on GitHub and opens a pull request there; merge stays human.`
+      : `Pushes ${branch} to origin and opens a pull request; merge stays human.`;
   }
   if (kind === 'local') {
     // NOT a flat "no pull request is opened": `gh pr create` resolves every configured remote, not
@@ -1135,12 +1184,49 @@ export function newPrTargetSentence(originUrl: string | null | undefined): strin
   return `Pushes ${branch} to origin and opens a pull request; merge stays human.`;
 }
 
+/** Where a delivering launch on a repo would push, as `GET /repos/:id/deliver-target` answers it
+ *  (R3): `'unknown'` when the origin could not be read — the sentence then claims nothing. */
+export type DeliverTargetOrigin = DeliverOriginKind | 'unknown';
+
+export interface DeliverTargetView {
+  origin: DeliverTargetOrigin;
+  /** `owner/repo` for a github.com origin, else `null`. */
+  githubRepo: string | null;
+  /** {@link newPrTargetSentence} for the launch (no run yet): the deliver gate's own sentence. */
+  sentence: string;
+}
+
+/** The launch-time reading of the same origin preflight the deliver gate uses (R3, crew#730). */
+export function deliverTargetView(originUrl: string | null | undefined): DeliverTargetView {
+  const unread = originUrl === null || originUrl === undefined;
+  return {
+    origin: unread ? 'unknown' : classifyDeliverOrigin(originUrl),
+    githubRepo: githubRepoOf(originUrl),
+    sentence: newPrTargetSentence(originUrl),
+  };
+}
+
+/** The registered repo a launch's `repoRef` names — by id, then name, then checkout basename: the
+ *  ONE matcher the launch's origin read and `GET /repos/:id/deliver-target` share. */
+export function deliverRepoFor<R extends { id: string; name: string; root_path: string }>(
+  repos: readonly R[],
+  repoRef: string,
+): R | undefined {
+  // Three passes, so the precedence is real: an exact id never loses to an earlier repo whose
+  // name or checkout basename collides with it (codex review, MEDIUM).
+  return (
+    repos.find((r) => r.id === repoRef) ??
+    repos.find((r) => r.name === repoRef) ??
+    repos.find((r) => r.root_path.split(/[\\/]/).filter((x) => x !== '').pop() === repoRef)
+  );
+}
+
 export function deliverGateInstructions(opts: DeliverScriptOptions): string {
   const pr = opts.revisesPr ?? null;
   const target =
     pr !== null
-      ? `Pushes wicked/<run> onto pull request #${pr.number} (branch ${pr.headRef}); no new PR.`
-      : newPrTargetSentence(opts.originUrl);
+      ? `Pushes ${deliverRunBranch(opts.runId) ?? 'the run branch'} onto pull request #${pr.number} (branch ${pr.headRef}); no new PR.`
+      : newPrTargetSentence(opts.originUrl, opts.runId);
   // (crew#549) The SETTING wins over the env var, and the card names which one it read, because
   // "pin it now if it must differ" is not an instruction an operator can follow without knowing
   // where the pin lives.

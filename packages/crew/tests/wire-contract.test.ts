@@ -71,6 +71,7 @@ import type { SkillsHealth, SkillsHealthFindingKind } from '../src/skills/runtim
 import type { PluginSource } from '../src/skills/plugin-source.js';
 import type { CappedFileRead, WorktreeDiff } from '../src/api/run-files.js';
 import type { DeliveryState } from '../src/api/delivery-index.js';
+import type { DeliverTargetView } from '../src/core/deliver.js';
 import type { AcpCliFold, RecentError, StoreFileEntry } from '../src/api/diagnostics.js';
 import type {
   GovernanceDeadletters,
@@ -625,6 +626,8 @@ respondsWith<string | undefined, Wire.AgentSession['guidance']>();
 // a state on either side breaks this file), and the terminal-resume 409 body must satisfy the
 // published `ResumeRefusal`.
 respondsWith<Wire.AgentSession['delivery'], DeliveryState['delivery']>();
+// R3 (ship-prove-3): `GET /repos/:id/deliver-target` answers `{ repo, ...deliverTargetView(origin) }`.
+respondsWith<Wire.DeliverTargetResponse, { repo: string } & DeliverTargetView>();
 respondsWith<DeliveryState['delivery'] | undefined, Wire.AgentSession['delivery']>();
 respondsWith<Wire.ResumeRefusal, { error: string; recovery: 'retry' | 'deliver' }>();
 

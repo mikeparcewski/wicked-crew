@@ -117,7 +117,10 @@ import {
   runUrlFor,
 } from '../core/deliver-text.js';
 import {
+  deliverRepoFor,
+  deliverTargetView,
   isGitHubLogin,
+  readDeliverOriginUrl,
   resolvePullRequest as resolvePullRequestViaGh,
   type PullRequestResolution,
 } from '../core/deliver.js';
@@ -4636,6 +4639,22 @@ export function registerRoutes(
       return reply.code(500).send({ error: message(err) });
     }
   });
+
+  // R3 (ship-prove-3): what a delivering launch on this repo would push and where — read by the
+  // SAME origin preflight the deliver gate card uses (crew#730), so the launch composer cannot
+  // promise "opens a PR" on an origin that can never carry one. Read-only: one
+  // `git remote get-url --push origin` in the registered checkout; nothing is pushed or probed.
+  app.get(
+    `${V}/repos/:id/deliver-target`,
+    { config: { manifest: { responseType: 'DeliverTargetResponse', statusCodes: [200, 404] } } },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const repo = deliverRepoFor(await adapter.listRepos(), id);
+      if (repo === undefined) return reply.code(404).send({ error: `Repo ${id} not found` });
+      const originUrl = repo.root_path === '' ? null : await readDeliverOriginUrl(repo.root_path);
+      return reply.send({ repo: repo.id, ...deliverTargetView(originUrl) });
+    },
+  );
 
   app.get(`${V}/repos/:id/git-history`, async (req, reply) => {
     const { id } = req.params as { id: string };
