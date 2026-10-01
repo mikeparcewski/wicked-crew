@@ -395,6 +395,7 @@ describe('deliver script, driven for real (crew#317)', () => {
     'git@github.com:acme/widgets.git',
     'ssh://git@GitHub.com:22/acme/widgets/',
     'https://github.com/acme/widgets',
+    'https://github.com/ACME/Widgets.git',
   ])('R1 drift: the honest spelling %s passes and the push lands', async (same) => {
     const fx = fixture();
     writeFileSync(join(fx.workdir, 'README.md'), 'base\nchanged\n');

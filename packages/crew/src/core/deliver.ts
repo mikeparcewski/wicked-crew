@@ -608,8 +608,10 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     '    *://*) OH=${OU#*://}; OH=${OH%%/*}; OH=${OH##*@}; OH=${OH%%:*}; OP=${OU#*://*/};;',
     '    *) OH=${OU%%:*}; OH=${OH##*@}; OP=${OU#*:};;',
     '  esac',
-    "  OH=$(printf '%s' \"$OH\" | tr 'A-Z' 'a-z'); OP=${OP%/}; OP=${OP%.git}",
-    '  if [ "$OH" != github.com ] || [ "$OP" != "$GHREPO" ]; then echo "deliver: origin no longer points at $GHREPO, the repository this delivery was approved for — nothing was staged, committed or pushed. Point origin back at $GHREPO, or reject and relaunch against the new remote"; exit 1; fi',
+    // GitHub owner/repo names are case-insensitive: compare lowercased, keep GHREPO's spelling
+    // for `--repo` (codex review, MEDIUM).
+    "  OH=$(printf '%s' \"$OH\" | tr 'A-Z' 'a-z'); OP=${OP%/}; OP=$(printf '%s' \"${OP%.git}\" | tr 'A-Z' 'a-z'); GL=$(printf '%s' \"$GHREPO\" | tr 'A-Z' 'a-z')",
+    '  if [ "$OH" != github.com ] || [ "$OP" != "$GL" ]; then echo "deliver: origin no longer points at $GHREPO, the repository this delivery was approved for — nothing was staged, committed or pushed. Point origin back at $GHREPO, or reject and relaunch against the new remote"; exit 1; fi',
     'fi',
     // (a) The run branch: wicked/<worktree-basename> (the engine names run worktrees by run id),
     // falling back to the currently checked-out branch when that ref does not exist.
