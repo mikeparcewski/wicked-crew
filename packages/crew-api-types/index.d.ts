@@ -4203,14 +4203,6 @@ export interface CodeGraphData {
 }
 
 /**
- * `GET /repos/:id/graph` → 200 (api-types 0.35.0, F-2R2-005). `graph: null` = the repo's code
- * graph has not been built (nothing at its registered graph path) — and `reason` says WHY, so a
- * consumer of this route alone can tell "not indexed" from "empty": the same finding text the
- * repos wire carries when the engine has one (`finding` — e.g. `in_tree_code_graph_ignored`: a
- * checkout's in-tree graph is ignored and no live graph exists yet; re-run onboarding), else the
- * daemon's own sentence. Both absent when `graph` is present.
- */
-/**
  * `GET /api/v1/repos/:id/deliver-target` (R3) — where a delivering launch on this repo would push,
  * read by the same origin preflight the deliver gate card uses (crew#730). `sentence` is the gate's
  * own target sentence for a run not yet started ("the run branch"); show it verbatim.
@@ -4227,6 +4219,14 @@ export interface DeliverTargetResponse {
   sentence: string;
 }
 
+/**
+ * `GET /repos/:id/graph` → 200 (api-types 0.35.0, F-2R2-005). `graph: null` = the repo's code
+ * graph has not been built (nothing at its registered graph path) — and `reason` says WHY, so a
+ * consumer of this route alone can tell "not indexed" from "empty": the same finding text the
+ * repos wire carries when the engine has one (`finding` — e.g. `in_tree_code_graph_ignored`: a
+ * checkout's in-tree graph is ignored and no live graph exists yet; re-run onboarding), else the
+ * daemon's own sentence. Both absent when `graph` is present.
+ */
 export interface RepoGraphResponse {
   graph: CodeGraphData | null;
   reason?: string;
