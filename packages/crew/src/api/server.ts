@@ -29,7 +29,7 @@ import {
   deliverUnitOf,
   gitRunBranchIsEmpty,
   gitWorktreeIsClean,
-  prUrlFrom,
+  deliveryRecordFrom,
   canDeliverResolver,
   type VacuityProbes,
 } from './delivery-index.js';
@@ -641,7 +641,7 @@ export async function createServer(
   const deliveryCache = new DeliveryDerivationCache({
     listViews: () => adapter.sessionsDetail(),
     probes: vacuityProbes,
-    isDelivered: (runId) => deliveryIndex.urlFor(runId) !== undefined,
+    isDelivered: (runId) => deliveryIndex.isDelivered(runId),
     canDeliver,
     log: (m) => app.log.warn(m),
     // Non-probe derivation throws are defects — error level, so the diagnostics ring sees them.
@@ -670,7 +670,7 @@ export async function createServer(
     try {
       // Resume/retry re-terminals: already resolved once, and a terminal run's PR URL never
       // changes — never re-read, never double-write the trail.
-      if (deliveryIndex.urlFor(runId) !== undefined) return;
+      if (deliveryIndex.isDelivered(runId)) return;
       const views = await adapter.sessionsDetail();
       const view = views.find((v) => v.session.id === runId);
       if (view === undefined) return;
@@ -681,16 +681,16 @@ export async function createServer(
       if (unit === null || unit.status !== 'done') return;
       const output = await adapter.workOutput(coreUnitId(runId, unit));
       if (output === null) return;
-      const url = prUrlFrom(output);
-      if (url === null) return;
+      // A PR URL, or (N1) a push-only delivery to an origin gh cannot resolve to GitHub — a
+      // delivery too, so the run reads `delivery: 'pushed'` and never `'stranded'`.
+      const record = deliveryRecordFrom(output);
+      if (record === null) return;
       // The durable record first, then the read-side index — the same write order as
       // `guidance.set`, so the index can only LAG a crash (rehydrated at next boot), never
       // hold a record the trail does not.
-      audit.record('run.delivered', DAEMON_ACTOR, {
-        runId,
-        detail: { url },
-      });
-      deliveryIndex.set(runId, url);
+      audit.record('run.delivered', DAEMON_ACTOR, { runId, detail: record });
+      if ('url' in record) deliveryIndex.set(runId, record.url);
+      else deliveryIndex.setPushed(runId, record.pushed);
     } catch (err) {
       app.log.warn(
         `[runs] delivery resolution for ${runId} failed (field absent until restart replays the trail): ${

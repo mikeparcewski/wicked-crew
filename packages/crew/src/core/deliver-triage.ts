@@ -46,6 +46,7 @@ import {
   DELIVER_BASE_MOVED_MARKER,
   DELIVER_LIFT_CONFLICT_MARKER,
   DELIVER_PREFLIGHT_CHANGED_MARKER,
+  DELIVER_PUSH_REJECTED_MARKER,
 } from './deliver.js';
 
 /** The engine's lift-conflict remedy (`LiftOutcome::Conflict`) — crew's marker plus the engine's words. */
@@ -64,7 +65,9 @@ export const ENGINE_CHECKS_MUTATED_PHRASE = "deliver: the repository's checks pa
 
 /**
  * What kind of deliver refusal a failed deliver unit's excerpt carries.
- * - `lift_conflict` — the engine's lift or the script's rebase/push hit a collision (recoverable);
+ * - `lift_conflict` — the engine's lift or the script's rebase hit a collision (recoverable);
+ * - `push_rejected` — the REMOTE refused the push after the commit (hook, auth, transport, a moved
+ *   run branch); the engine parks the run at its deliver-refusal gate, and an approve retries (N4);
  * - `run_branch_refused` — the worktree is not on its run branch; nothing was touched (engine);
  * - `lift_apply_failed` — the lift could not be applied cleanly, partial worktree (engine);
  * - `snapshot_failed` — the worktree could not be snapshotted before delivery (engine);
@@ -76,6 +79,7 @@ export const ENGINE_CHECKS_MUTATED_PHRASE = "deliver: the repository's checks pa
  */
 export type DeliverFailureKind =
   | 'lift_conflict'
+  | 'push_rejected'
   | 'run_branch_refused'
   | 'lift_apply_failed'
   | 'snapshot_failed'
@@ -117,6 +121,20 @@ const ENGINE = (kind: DeliverFailureKind): DeliverFailureTriage => ({
 });
 
 /**
+ * Which of the two post-commit markers appears LAST in a deliver transcript — `null` when neither
+ * does. The script prints its own marker as its last line, so the last one is the script's verdict;
+ * an earlier one may be remote-controlled text echoed from `git push`.
+ */
+export function lastDeliverMarker(
+  text: string,
+): typeof DELIVER_LIFT_CONFLICT_MARKER | typeof DELIVER_PUSH_REJECTED_MARKER | null {
+  const lift = text.lastIndexOf(DELIVER_LIFT_CONFLICT_MARKER);
+  const push = text.lastIndexOf(DELIVER_PUSH_REJECTED_MARKER);
+  if (lift === -1 && push === -1) return null;
+  return push > lift ? DELIVER_PUSH_REJECTED_MARKER : DELIVER_LIFT_CONFLICT_MARKER;
+}
+
+/**
  * Classify a failed deliver unit's excerpt (`stepFailed.detail`, or the unit's `denial_reason`).
  * `null` when the text carries no deliver refusal at all — a spawn/infra failure (`bash: gh:
  * command not found`), or a unit that is not the deliver phase — so callers fall back to their
@@ -124,6 +142,12 @@ const ENGINE = (kind: DeliverFailureKind): DeliverFailureTriage => ({
  */
 export function triageDeliverFailure(detail: string | null | undefined): DeliverFailureTriage | null {
   if (typeof detail !== 'string' || detail.length === 0) return null;
+  // The script prints its OWN marker last; text before it can be the remote's (a pre-receive hook
+  // may print anything, `deliver: LIFT-CONFLICT` included). So the LAST marker decides (codex
+  // review of N4) — a refused push is never read as a liftable strand.
+  if (lastDeliverMarker(detail) === DELIVER_PUSH_REJECTED_MARKER) {
+    return { kind: 'push_rejected', author: 'script', disposition: 'escalate', recoverable: false };
+  }
   if (detail.includes(DELIVER_LIFT_CONFLICT_MARKER)) {
     return {
       kind: 'lift_conflict',

@@ -87,6 +87,7 @@
 import { execFile } from 'node:child_process';
 import { childEnvWithBootEstateDb } from './governance-store.js';
 import type { PhaseDef, WorkflowDef } from './types.js';
+import { DELIVER_STRANDED_SENTINEL } from './deliver-exclusions.js';
 import {
   composeEmbeddedDeliverText,
   factsFromWorkflow,
@@ -119,8 +120,10 @@ export const DELIVER_PHASE_ID = 'deliver';
 
 /**
  * The sentinel the deliver script prints when the RUN'S WORK has been committed but its LIFT did
- * not complete (crew#418/#432): a rebase conflict or any failed push. The work is safe on its
- * `wicked/<id>` branch; an operator can fix the remote condition and retry delivery.
+ * not complete (crew#418): a rebase onto the remote default branch hit a conflict outside the
+ * changelog. The work is safe on its `wicked/<id>` branch; an operator resolves the collision and
+ * retries delivery. A push the REMOTE refused is not a lift collision and carries
+ * {@link DELIVER_PUSH_REJECTED_MARKER} instead (N4).
  *
  * crew keys the "stranded, recoverable" reinterpretation on this EXACT substring appearing in
  * the deliver unit's `denial_reason` (which carries the head+TAIL excerpt of the script's
@@ -130,6 +133,57 @@ export const DELIVER_PHASE_ID = 'deliver';
  * terminal run failures exactly as before (the crew#400 refusal-vs-infra posture).
  */
 export const DELIVER_LIFT_CONFLICT_MARKER = 'deliver: LIFT-CONFLICT';
+
+/**
+ * The sentinel the deliver script prints LAST when the REMOTE REFUSED the push after the run's work
+ * was committed and its lift came out clean (N4, ship re-proof): a pre-receive hook, a protected
+ * ref, an auth 403, a transport failure, or a non-fast-forward on the run branch. It used to carry
+ * {@link DELIVER_LIFT_CONFLICT_MARKER}, which mislabelled a refusal as a lift collision — the lift
+ * read `unchanged` — and, because the engine EXEMPTS that marker from its deterministic
+ * deliver-refusal arm, sent the failure to the LLM triage judge, which re-ran the push once with no
+ * gate. Without the lift marker the failure takes the engine's deterministic arm: the run parks at
+ * an `escalation` gate on the deliver unit, and nothing is pushed again until a human approves.
+ * The untracked recovery sentinel ({@link DELIVER_STRANDED_SENTINEL}) still keeps the worktree.
+ */
+export const DELIVER_PUSH_REJECTED_MARKER = 'deliver: PUSH-REJECTED';
+
+/**
+ * The machine line the deliver script prints LAST on a successful PUSH-ONLY delivery (N1, the half
+ * of F2 that did not hold): the branch is on the remote, and no pull request was opened because gh
+ * could not resolve the origin to a GitHub repository. `deliver: PUSHED-NO-PR <branch> <remote>` —
+ * the branch has no spaces (git forbids them in a ref), and the remote is the rest of the line.
+ * The daemon reads it from the APPROVED deliver unit's output ({@link pushedOnlyFrom}) into the
+ * durable `run.delivered` record, so the run reads `delivery: 'pushed'` instead of `'stranded'`.
+ */
+export const DELIVER_PUSHED_NO_PR_MARKER = 'deliver: PUSHED-NO-PR';
+
+/** What a push-only delivery left on the record: the branch, and the remote it is on. */
+export interface PushedOnlyDelivery {
+  branch: string;
+  /** The origin's push URL, with any `user[:password]@` userinfo removed. */
+  remote: string;
+}
+
+/** A remote URL with its userinfo removed — `https://tok@host/r` → `https://host/r`. A scp-like
+ *  `git@host:path` keeps its user (it names an SSH login, not a secret). */
+export function remoteWithoutUserinfo(url: string): string {
+  return url.trim().replace(/^([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^@/]*@/, '$1');
+}
+
+/**
+ * The push-only delivery a deliver transcript records, or `null`. The LAST
+ * {@link DELIVER_PUSHED_NO_PR_MARKER} line wins. Whether it outranks a PR URL in the same transcript
+ * is decided by position in `deliveryRecordFrom` (`api/delivery-index.ts`): the script's verdict is
+ * the last of the two, and anything earlier may be the remote's echo.
+ */
+export function pushedOnlyFrom(text: string): PushedOnlyDelivery | null {
+  let found: PushedOnlyDelivery | null = null;
+  for (const line of text.split('\n')) {
+    const m = /^deliver: PUSHED-NO-PR (\S+) (.+)$/.exec(line.trimEnd());
+    if (m !== null) found = { branch: m[1]!, remote: remoteWithoutUserinfo(m[2]!) };
+  }
+  return found;
+}
 
 /** What the script carries for its PR/commit text (crew#524). All optional: the bare script still
  *  composes a title and a body from the intent alone. */
@@ -593,7 +647,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // A failed PUSH happens after the product was committed. Keep its worktree from being reaped
     // by leaving this reserved, untracked recovery sentinel; it is removed HERE (before staging)
     // so a normal delivery never sees it, and a retry removes it before another attempt (crew#432).
-    'S=.wicked-crew-delivery-stranded',
+    `S=${DELIVER_STRANDED_SENTINEL}`,
     'rm -f -- "$S"',
     // (c1) COMMIT THE RUN'S WORK (crew#317). Agents write files; they do not commit — which is
     // the premise of core#291 and the reason `d1bc72c2` pushed a branch identical to origin/main.
@@ -755,6 +809,9 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     'while IFS= read -r -d "" F; do',
     '  [ -n "$F" ] || continue',
     '  BN=${F##*/}; RN=""',
+    // The recovery sentinel is removed above, so this arm is the ONE predicate's first rule, kept
+    // here so `deliverExclusionByName` and this classifier stay the same ladder (N2).
+    '  [ "$F" = "$S" ] && RN="delivery-sentinel"',
     // Classify on a LOWERCASED basename so DEPLOY.KEY / .ENV / SOCKET.PATH cannot bypass the
     // denylist by case (review, #439).
     '  LBN=$(printf "%s" "$BN" | tr "[:upper:]" "[:lower:]")',
@@ -838,17 +895,20 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     '[ "$A" -ge 1 ] || { echo "deliver: nothing to deliver — the run produced no committed change (after rebasing onto $D, $B carries no commit of its own); nothing was pushed"; exit 1; }',
     'fi',
     // (d) Push. Any push failure happens AFTER the work was committed and its branch was proven
-    // ahead. It is therefore a recoverable lift failure, whether the remote branch moved, auth
-    // returned 403, the transport is down, or a hook rejected it. Preserve git's own output AND
-    // print the marker last, so crew strands the run and POST /runs/:id/deliver can retry it.
+    // ahead, whether the remote branch moved, auth returned 403, the transport is down, or a hook
+    // rejected it. It is a REFUSAL BY THE REMOTE, not a lift collision (N4): the lift already came
+    // out clean. Preserve git's own output, leave the recovery sentinel, and print
+    // DELIVER_PUSH_REJECTED_MARKER last — never the LIFT-CONFLICT marker — so the engine takes its
+    // deterministic deliver-refusal arm and parks the run at a gate; nothing pushes again until a
+    // human approves the retry.
     // A revision pushes the run branch ONTO the PR's head branch (`$B:refs/heads/$TARGET`) — the
     // PR gains exactly the run's commits; a rejection there is the same recoverable strand.
     '_push() { if [ -n "$TARGET" ]; then git push origin "$B:refs/heads/$TARGET"; else git push -u origin "$B"; fi; }',
     'if PUSHOUT=$(_push 2>&1); then echo "$PUSHOUT"; else',
     '  echo "$PUSHOUT"',
     '  case "$PUSHOUT" in',
-    `    *non-fast-forward*|*"fetch first"*|*"[rejected]"*|*"Updates were rejected"*) : > "$S"; echo "${DELIVER_LIFT_CONFLICT_MARKER} — push of $B was rejected because the remote branch moved (non-fast-forward); rebase and re-run; nothing was pushed"; exit 1;;`,
-    `    *) : > "$S"; PUSHERR="\${PUSHOUT:0:96} ... \${PUSHOUT: -128}"; PUSHERR=\${PUSHERR//$'\\n'/ }; echo "deliver: git push of $B failed after commit: $PUSHERR; retry POST /runs/:id/deliver; nothing was pushed; ${DELIVER_LIFT_CONFLICT_MARKER}"; exit 1;;`,
+    `    *non-fast-forward*|*"fetch first"*|*"[rejected]"*|*"Updates were rejected"*) : > "$S"; echo "deliver: the remote refused the push of $B because its branch moved (non-fast-forward); the work is committed on $B and nothing was pushed — approve to retry the deliver phase; ${DELIVER_PUSH_REJECTED_MARKER}"; exit 1;;`,
+    `    *) : > "$S"; PUSHERR="\${PUSHOUT:0:96} ... \${PUSHOUT: -128}"; PUSHERR=\${PUSHERR//$'\\n'/ }; echo "deliver: the remote refused the push of $B after commit: $PUSHERR; the work is committed on $B and nothing was pushed — fix the remote condition, then approve to retry the deliver phase; ${DELIVER_PUSH_REJECTED_MARKER}"; exit 1;;`,
     '  esac',
     'fi',
     // (e) Open the PR with gh's OUTPUT and EXIT STATUS captured separately (crew#317). The old
@@ -895,7 +955,12 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     '      *"git remotes configured for this repository"*"known GitHub host"*)',
     '        P=$(git rev-list --count "$D..origin/$B")',
     '        [ "$P" -ge 1 ] || { echo "deliver: $B is not ahead of $D on the remote after the push — refusing to report a delivery with no commits"; exit 1; }',
-    '        echo "deliver: pushed $B to origin ($(git remote get-url origin)) with $P commit(s) on top of $D, and no pull request was opened because that remote is not a GitHub host gh can resolve. The branch IS the delivery — open the pull/merge request for $B on your forge; merge stays human.";',
+    // The PUSH url, with any `user[:password]@` userinfo stripped before it reaches the transcript
+    // (codex review of N1: a push URL can carry a deploy token).
+    '        R=$(git remote get-url --push origin | sed -E "s#^([A-Za-z][A-Za-z0-9+.-]*://)[^@/]*@#\\1#")',
+    '        echo "deliver: pushed $B to origin ($R) with $P commit(s) on top of $D, and no pull request was opened because that remote is not a GitHub host gh can resolve. The branch IS the delivery — open the pull/merge request for $B on your forge; merge stays human.";',
+    // N1: the machine line the daemon records the push-only delivery from — LAST, one line.
+    `        echo "${DELIVER_PUSHED_NO_PR_MARKER} $B $R";`,
     '        exit 0;;',
     '    esac',
     '    echo "deliver: gh pr create failed for $B — no PR was opened"; exit 1',

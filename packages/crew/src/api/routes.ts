@@ -116,7 +116,11 @@ import {
   framedDeliverText,
   runUrlFor,
 } from '../core/deliver-text.js';
-import { isGitHubLogin, resolvePullRequest as resolvePullRequestViaGh, type PullRequestResolution } from '../core/deliver.js';
+import {
+  isGitHubLogin,
+  resolvePullRequest as resolvePullRequestViaGh,
+  type PullRequestResolution,
+} from '../core/deliver.js';
 import type { DocGroundingStore } from '../interactive/doc-grounding.js';
 import { registerInteractiveProxy } from '../interactive/proxy-routes.js';
 import { registerInteractiveDocDelete } from '../interactive/doc-delete-routes.js';
@@ -150,7 +154,8 @@ import {
   gitRunBranchIsEmpty,
   gitWorktreeIsClean,
   isDeliverConflictStranded,
-  prUrlFrom,
+  deliveryRecordFrom,
+  pushedState,
   canDeliverResolver,
   type DeliveryState,
   type VacuityProbes,
@@ -1065,6 +1070,15 @@ function singleSeatDisclosure(
   };
 }
 
+/** N1: why a post-hoc deliver answers 409 for a branch already on a non-GitHub origin. */
+function pushedOnlyRefusal(runId: string, pushed: { branch: string; remote: string }): string {
+  return (
+    `run ${runId} is delivered as a pushed branch: ${pushed.branch} is on ${pushed.remote}, and no ` +
+    'pull request can be opened there because that origin is not a GitHub host gh can resolve — ' +
+    'open the pull/merge request on your forge; merge stays human'
+  );
+}
+
 export function registerRoutes(
   app: FastifyInstance,
   adapter: CoreAdapter,
@@ -1129,7 +1143,7 @@ export function registerRoutes(
     new DeliveryDerivationCache({
       listViews: () => adapter.sessionsDetail(),
       probes: vacuityProbes,
-      isDelivered: (runId) => deliveryIndex.urlFor(runId) !== undefined,
+      isDelivered: (runId) => deliveryIndex.isDelivered(runId),
       canDeliver,
     });
   const deliverExec = runtime.deliverExec ?? runDeliverScript;
@@ -1215,6 +1229,9 @@ export function registerRoutes(
   const resolveDelivery = (view: SessionView, conflictStrand: boolean): DeliveryState => {
     const url = deliveryIndex.urlFor(view.session.id);
     if (url !== undefined) return { delivery: 'delivered', deliverUrl: url };
+    // N1: a branch pushed to a non-GitHub origin IS the delivery — never 'stranded'.
+    const pushed = deliveryIndex.pushedFor(view.session.id);
+    if (pushed !== undefined) return pushedState(pushed);
     if (conflictStrand) return { delivery: 'stranded' };
     return deliveryCache.read(view);
   };
@@ -1259,6 +1276,8 @@ export function registerRoutes(
     const state = resolveDelivery(view, conflictStrand);
     view.session.delivery = state.delivery;
     if (state.deliverUrl !== undefined) view.session.deliverUrl = state.deliverUrl;
+    if (state.deliverBranch !== undefined) view.session.deliverBranch = state.deliverBranch;
+    if (state.deliverRemote !== undefined) view.session.deliverRemote = state.deliverRemote;
     // crew#641/#642 (item 5): chat promotion provenance — ABSENT when not a chat-promoted run.
     const chatSeatCount = runTimingIndex.chatSeatCountFor(view.session.id);
     if (chatSeatCount !== undefined) view.session.chat_seat_count = chatSeatCount;
@@ -2411,6 +2430,12 @@ export function registerRoutes(
       // double-open. The index only ever holds real runs, so this needs no store round-trip.
       const existing = deliveryIndex.urlFor(id);
       if (existing !== undefined) return { prUrl: existing };
+      // N1: a run whose branch is already on a non-GitHub origin has nothing left to lift, and no
+      // pull request can be opened from here — say so instead of pushing the branch again.
+      const pushedAlready = deliveryIndex.pushedFor(id);
+      if (pushedAlready !== undefined) {
+        return reply.code(409).send({ error: pushedOnlyRefusal(id, pushedAlready) });
+      }
       const views = await adapter.sessionsDetail();
       const run = views.find((v) => v.session.id === id);
       if (!run) return reply.code(404).send({ error: 'Run not found' });
@@ -2541,7 +2566,19 @@ export function registerRoutes(
           error: `deliver failed (exit ${result.status}): ${deliverErrorTail(result.output)}`,
         });
       }
-      const url = prUrlFrom(result.output);
+      // The SAME parser the in-run record uses: the script's push-only verdict outranks a URL a
+      // remote hook echoed earlier in the transcript (Copilot on crew#734).
+      const record = deliveryRecordFrom(result.output);
+      const url = record !== null && 'url' in record ? record.url : null;
+      const pushedOnly = record !== null && 'pushed' in record ? record.pushed : null;
+      if (pushedOnly !== null) {
+        // N1: the script pushed the branch and gh could resolve no GitHub repository for the
+        // origin. That IS a delivery — record it, so the run reads `delivery: 'pushed'` — but there
+        // is no PR URL to answer with, so the reply says what happened instead of a 200 `prUrl`.
+        audit.record('run.delivered', actorOf(req), { runId: id, detail: { pushed: pushedOnly, via: 'post-hoc' } });
+        deliveryIndex.setPushed(id, pushedOnly);
+        return reply.code(409).send({ error: pushedOnlyRefusal(id, pushedOnly) });
+      }
       if (url === null) {
         // Exit 0 with no URL should be unreachable (the script re-derives its own success),
         // but a delivery nothing can be pointed at is never recorded (crew#317).
@@ -3468,6 +3505,8 @@ export function registerRoutes(
           ? `run ${id} is cancelled — a terminal run cannot be resumed; relaunch the work as a new run with POST /runs {"retryOf":"${id}"}`
           : state.delivery === 'stranded'
             ? `run ${id} is already completed — nothing to resume; its unlifted work is on the wicked/${id} branch: deliver it with POST /runs/${id}/deliver`
+            : state.delivery === 'pushed'
+              ? `run ${id} is already completed and delivered — its branch ${state.deliverBranch ?? `wicked/${id}`} is on ${state.deliverRemote ?? 'origin'} (no pull request: that origin is not a GitHub host gh can resolve); nothing to resume`
             : state.delivery === 'vacuous'
               ? `run ${id} is already completed, but VACUOUSLY — its units produced no work to resume or deliver; relaunch with POST /runs {"retryOf":"${id}"}`
               : `run ${id} is already completed — nothing to resume; relaunch the work as a new run with POST /runs {"retryOf":"${id}"}`;
@@ -5416,6 +5455,7 @@ export function registerRoutes(
     // Wave 6 (F-7R2-014): the registered test sets ride beside the campaigns + groups.
     testSets,
     deliveryUrlFor: (runId) => deliveryIndex.urlFor(runId),
+    deliveryPushedFor: (runId) => deliveryIndex.pushedFor(runId),
     vacuity: vacuityProbes,
     // A non-probe derivation throw in the rollup is a defect — error level, loud in diagnostics.
     logDefect: (m) => app.log.error(m),

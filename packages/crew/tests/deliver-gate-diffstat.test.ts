@@ -104,6 +104,20 @@ describe('the deliver gate diffstat is computed over exactly the set that will b
   // 109-file tree takes ~20 s to produce the wrong answer. After it, 4 forks.
   }, 60_000);
 
+  it("N2: a failed attempt's recovery sentinel is NOT counted on the retry gate — 4 files, as pushed", async () => {
+    const root = c7Worktree();
+    // The empty, untracked marker the deliver script leaves when the remote refuses a push; the
+    // retry's script removes it before staging, so the commit never carries it.
+    write(root, '.wicked-crew-delivery-stranded', '');
+    const { diff } = await worktreeDiff(root);
+    const files = filesIn(diff);
+    expect(files).not.toContain('.wicked-crew-delivery-stranded');
+    expect(files.length).toBe(4);
+    expect(deliverExclusionByName('.wicked-crew-delivery-stranded')).toBe('delivery-sentinel');
+    // Only the root-level sentinel is the script's: a same-named product file deeper down rides.
+    expect(deliverExclusionByName('docs/.wicked-crew-delivery-stranded')).toBeNull();
+  }, 60_000);
+
   it('a NARROWED request still answers about the one file the caller opened', async () => {
     const root = c7Worktree();
     // `GET /runs/:id/diff?path=tmp/…` is a deliberate ask about a file the caller can see in
