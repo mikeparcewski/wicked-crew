@@ -118,7 +118,6 @@ import {
 } from '../core/deliver-text.js';
 import {
   isGitHubLogin,
-  pushedOnlyFrom,
   resolvePullRequest as resolvePullRequestViaGh,
   type PullRequestResolution,
 } from '../core/deliver.js';
@@ -155,7 +154,7 @@ import {
   gitRunBranchIsEmpty,
   gitWorktreeIsClean,
   isDeliverConflictStranded,
-  prUrlFrom,
+  deliveryRecordFrom,
   pushedState,
   canDeliverResolver,
   type DeliveryState,
@@ -2567,8 +2566,11 @@ export function registerRoutes(
           error: `deliver failed (exit ${result.status}): ${deliverErrorTail(result.output)}`,
         });
       }
-      const url = prUrlFrom(result.output);
-      const pushedOnly = url === null ? pushedOnlyFrom(result.output) : null;
+      // The SAME parser the in-run record uses: the script's push-only verdict outranks a URL a
+      // remote hook echoed earlier in the transcript (Copilot on crew#734).
+      const record = deliveryRecordFrom(result.output);
+      const url = record !== null && 'url' in record ? record.url : null;
+      const pushedOnly = record !== null && 'pushed' in record ? record.pushed : null;
       if (pushedOnly !== null) {
         // N1: the script pushed the branch and gh could resolve no GitHub repository for the
         // origin. That IS a delivery — record it, so the run reads `delivery: 'pushed'` — but there

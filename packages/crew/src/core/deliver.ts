@@ -172,11 +172,12 @@ export function remoteWithoutUserinfo(url: string): string {
 
 /**
  * The push-only delivery a deliver transcript records, or `null`. The LAST
- * {@link DELIVER_PUSHED_NO_PR_MARKER} line wins (the script prints it last), and a transcript that
- * also carries a pull-request URL answers `null`: a recorded PR always outranks a push-only reading.
+ * {@link DELIVER_PUSHED_NO_PR_MARKER} line wins. The marker is the script's own final verdict and
+ * the PR path never prints it, so it is AUTHORITATIVE over any `/pull/<n>` URL earlier in the same
+ * transcript: `git push` echoes the remote's output, and a hook can print anything (Copilot on
+ * crew#734).
  */
 export function pushedOnlyFrom(text: string): PushedOnlyDelivery | null {
-  if (/https:\/\/\S+\/pull\/\d+/.test(text)) return null;
   let found: PushedOnlyDelivery | null = null;
   for (const line of text.split('\n')) {
     const m = /^deliver: PUSHED-NO-PR (\S+) (.+)$/.exec(line.trimEnd());

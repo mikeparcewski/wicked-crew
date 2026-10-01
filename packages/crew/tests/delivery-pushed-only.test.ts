@@ -25,6 +25,9 @@ import {
   isDeliverConflictStranded,
 } from '../src/api/delivery-index.js';
 import { AuditLog } from '../src/api/audit.js';
+import { GroupIndex } from '../src/api/group-index.js';
+import { buildGroups, enrichCampaign, sessionsById } from '../src/campaigns/rollup.js';
+import type { Campaign } from '../src/core/types.js';
 import { pushedOnlyFrom, remoteWithoutUserinfo } from '../src/core/deliver.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { SessionView } from '../src/core/types.js';
@@ -78,10 +81,16 @@ describe('N1 — the record a push-only deliver transcript yields', () => {
     });
   });
 
-  it('a PR URL always outranks a push-only reading', () => {
-    const both = `${PUSH_ONLY_TAIL}\nhttps://github.com/o/r/pull/9`;
-    expect(deliveryRecordFrom(both)).toEqual({ url: 'https://github.com/o/r/pull/9' });
-    expect(pushedOnlyFrom(both)).toBeNull();
+  it("the script's final PUSHED-NO-PR verdict outranks a /pull/<n> URL a remote hook echoed (Copilot on crew#734)", () => {
+    const hooked = `remote: see https://github.com/o/r/pull/9\n${PUSH_ONLY_TAIL}`;
+    expect(deliveryRecordFrom(hooked)).toEqual({
+      pushed: { branch: 'wicked/run-p', remote: '/srv/remote.git' },
+    });
+    expect(pushedOnlyFrom(hooked)).toEqual({ branch: 'wicked/run-p', remote: '/srv/remote.git' });
+    // The PR path never prints the marker — there, the URL is the record.
+    expect(deliveryRecordFrom('pushed\nhttps://github.com/o/r/pull/9')).toEqual({
+      url: 'https://github.com/o/r/pull/9',
+    });
   });
 
   it('a transcript with neither records nothing', () => {
@@ -234,5 +243,29 @@ describe('N1 — both run DTOs say the branch is on the remote', () => {
       runs: { session: Record<string, unknown> }[];
     };
     expect(list.runs.find((r) => r.session['id'] === 'run-p')!.session['delivery']).toBe('pushed');
+  });
+});
+
+describe('N1 — the campaigns rollup carries the pushed state and its fields (Copilot on crew#734)', () => {
+  it('a DAG node, an attached run and a label-group member all read pushed with branch + remote', async () => {
+    const pushed = { branch: 'wicked/run-p', remote: '/srv/remote.git' };
+    const views = [view('camp:n1:a0', '/wt/n1'), view('run-att', '/wt/att'), view('run-grp', '/wt/grp')];
+    const groupIndex = new GroupIndex();
+    groupIndex.set('run-att', { campaignId: 'camp' });
+    groupIndex.set('run-grp', { label: 'batch' });
+    const deps = {
+      groupIndex,
+      deliveryUrlFor: () => undefined,
+      deliveryPushedFor: () => pushed,
+      // The worktrees "exist" — before N1 every one of these read 'stranded'.
+      vacuity: { worktreeExists: () => true, worktreeIsClean: async () => false, runBranchIsEmpty: async () => false },
+    };
+    const campaign = { id: 'camp', node_run_id: { n1: 'camp:n1:a0' } } as unknown as Campaign;
+    const enriched = await enrichCampaign(campaign, sessionsById(views), deps);
+    const expected = { delivery: 'pushed', deliverBranch: 'wicked/run-p', deliverRemote: '/srv/remote.git' };
+    expect(enriched.node_delivery?.['n1']).toEqual(expected);
+    expect(enriched.attached_runs).toEqual([{ runId: 'run-att', status: 'completed', ...expected }]);
+    const groups = await buildGroups(sessionsById(views), deps);
+    expect(groups).toEqual([{ label: 'batch', runs: [{ runId: 'run-grp', status: 'completed', ...expected }] }]);
   });
 });

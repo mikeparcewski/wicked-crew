@@ -443,15 +443,17 @@ export function prUrlFrom(text: string): string | null {
 export type DeliveryRecord = { url: string } | { pushed: PushedOnlyDelivery };
 
 /**
- * The delivery an APPROVED deliver unit's transcript records, or `null` (nothing to record): a PR
- * URL wins; else (N1) the script's push-only line — the branch is on an origin gh could not resolve
- * to a GitHub repository, so no PR exists and none can be opened from here.
+ * The delivery an APPROVED deliver unit's transcript records, or `null` (nothing to record).
+ * (N1) The script's push-only line is checked FIRST: it is the script's own final verdict, the PR
+ * path never prints it, and a `/pull/<n>` URL earlier in such a transcript can only be text the
+ * remote echoed during `git push` (Copilot on crew#734). Otherwise the PR URL — the PR path's
+ * last line.
  */
 export function deliveryRecordFrom(output: string): DeliveryRecord | null {
-  const url = prUrlFrom(output);
-  if (url !== null) return { url };
   const pushed = pushedOnlyFrom(output);
-  return pushed === null ? null : { pushed };
+  if (pushed !== null) return { pushed };
+  const url = prUrlFrom(output);
+  return url === null ? null : { url };
 }
 
 /**
