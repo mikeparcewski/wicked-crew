@@ -2,8 +2,8 @@
 //
 // The engine reports a run `failed` whenever a Tool phase exits non-zero, and the deliver phase
 // is a Tool phase. But when the ONLY thing that failed was the LIFT — the hardened deliver script
-// refused on a rebase conflict the changelog union merge could not clear, or a non-fast-forward
-// push, printing its DELIVER_LIFT_CONFLICT_MARKER — the run's WORK is complete and committed on
+// refused on a rebase conflict the changelog union merge could not clear (a rejected push no longer
+// strands since N4 — it parks at the engine gate), printing its DELIVER_LIFT_CONFLICT_MARKER — the run's WORK is complete and committed on
 // its `wicked/<id>` branch. crew reinterprets that exact shape on the wire as `completed` +
 // `delivery: 'stranded'` (recoverable via POST /runs/:id/deliver), consistently across GET
 // /runs(/:id), the resume refusal, and the post-hoc deliver route. The engine's durable `failed`
@@ -30,7 +30,7 @@ import { MembershipIndex } from '../src/projects/membership-index.js';
 import { DeliveryIndex, gitWorktreeIsClean } from '../src/api/delivery-index.js';
 import { AuditLog } from '../src/api/audit.js';
 import { runDeliverScript } from '../src/api/post-hoc-deliver.js';
-import { DELIVER_LIFT_CONFLICT_MARKER } from '../src/core/deliver.js';
+import { DELIVER_LIFT_CONFLICT_MARKER, DELIVER_PUSH_REJECTED_MARKER } from '../src/core/deliver.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { RuntimeDeps } from '../src/api/routes.js';
 import type { SessionView, WorkUnit } from '../src/core/types.js';
@@ -402,7 +402,7 @@ describe('crew#418 A — strand then lift, end-to-end on real git', () => {
     expect(after.run.session['deliverUrl']).toBe('https://github.com/o/r/pull/71');
   }, 90_000);
 
-  it('a REAL push 403 reaches the failed run wire as stranded and POST /deliver retries after repair (crew#432)', async () => {
+  it('a REAL push 403 is a PUSH-REJECTED refusal, not a strand — the wire never relabels it completed (N4)', async () => {
     const fx = fixture();
     writeFileSync(join(fx.workdir, 'auth-retry.ts'), 'export const retried = true;\n');
     git(fx.workdir, 'add', '--', 'auth-retry.ts');
@@ -413,16 +413,24 @@ describe('crew#418 A — strand then lift, end-to-end on real git', () => {
     const first = await runDeliverScript(fx.workdir, 'auth retry', undefined, fx.env);
     expect(first.status).not.toBe(0);
     expect(first.output).toContain('HTTP 403 authentication failed');
-    expect(first.output).toContain(DELIVER_LIFT_CONFLICT_MARKER);
+    // The lift was clean; the REMOTE refused. That is not a lift collision (N4): without the
+    // LIFT-CONFLICT marker the engine parks the run at its deliver-refusal gate, and nothing is
+    // pushed again until a human approves — the LLM triage never sees it.
+    expect(first.output).not.toContain(DELIVER_LIFT_CONFLICT_MARKER);
+    expect(first.output).toContain(DELIVER_PUSH_REJECTED_MARKER);
     expect(originBranches(fx)).toEqual(['main']);
+    // The committed work is still kept: the recovery sentinel holds the worktree.
+    expect(existsSync(join(fx.workdir, '.wicked-crew-delivery-stranded'))).toBe(true);
 
+    // Should such a unit ever reach the wire as `failed`, it is a FAILURE — never `completed` +
+    // `stranded`, which would offer a post-hoc push that bypasses the gate.
     const units = [
       unit({ id: `${RUN_ID}:build`, ord: 3, status: 'done' }),
       unit({
         id: `${RUN_ID}:deliver`,
         ord: 5,
         status: 'rejected',
-        denial_reason: `Worker FAILED on unit 5: ${first.output.slice(-400)}`,
+        denial_reason: `deliver refused on unit 5: ${first.output.slice(-400)}`,
         tool_cmd: ['bash', '-lc', 'gh pr create --head "$B" --fill'],
       }),
     ];
@@ -434,19 +442,13 @@ describe('crew#418 A — strand then lift, end-to-end on real git', () => {
     apps.push(app);
     await app.ready();
 
-    const stranded = (await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN_ID}` })).json() as {
+    const read = (await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN_ID}` })).json() as {
       run: { session: Record<string, unknown>; units: WorkUnit[] };
     };
-    expect(stranded.run.session['status']).toBe('completed');
-    expect(stranded.run.session['delivery']).toBe('stranded');
-    const deliver = stranded.run.units.find((u) => u.id.endsWith(':deliver'))!;
+    expect(read.run.session['status']).toBe('failed');
+    expect(read.run.session['delivery']).not.toBe('stranded');
+    const deliver = read.run.units.find((u) => u.id.endsWith(':deliver'))!;
     expect(deliver.denial_reason).toContain('HTTP 403 authentication failed');
-
-    rmSync(hook);
-    const retried = await app.inject({ method: 'POST', url: `/api/v1/runs/${RUN_ID}/deliver` });
-    expect(retried.statusCode).toBe(200);
-    expect((retried.json() as { prUrl: string }).prUrl).toBe('https://github.com/o/r/pull/71');
-    expect(originBranches(fx)).toContain(`wicked/${RUN_ID}`);
   }, 90_000);
 });
 

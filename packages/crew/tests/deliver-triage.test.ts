@@ -14,6 +14,7 @@ import {
   DELIVER_BASE_MOVED_MARKER,
   DELIVER_LIFT_CONFLICT_MARKER,
   DELIVER_PREFLIGHT_CHANGED_MARKER,
+  DELIVER_PUSH_REJECTED_MARKER,
 } from '../src/core/deliver.js';
 import {
   ENGINE_CHECKS_MUTATED_PHRASE,
@@ -163,10 +164,22 @@ describe('triageDeliverFailure (wicked-core#431 follow-through)', () => {
       disposition: 'escalate',
       recoverable: true,
     });
+    // N4: a push the remote refused is its own kind — never a lift conflict, never a post-hoc lift.
     const push =
-      'remote: HTTP 403 authentication failed\ndeliver: git push of wicked/x failed after commit: … ; ' +
-      `retry POST /runs/:id/deliver; nothing was pushed; ${DELIVER_LIFT_CONFLICT_MARKER}`;
-    expect(triageDeliverFailure(push)).toMatchObject({ kind: 'lift_conflict', author: 'script', recoverable: true });
+      'remote: HTTP 403 authentication failed\ndeliver: the remote refused the push of wicked/x after commit: … ; ' +
+      `the work is committed on wicked/x and nothing was pushed — fix the remote condition, then approve to retry the deliver phase; ${DELIVER_PUSH_REJECTED_MARKER}`;
+    expect(triageDeliverFailure(push)).toEqual({
+      kind: 'push_rejected',
+      author: 'script',
+      disposition: 'escalate',
+      recoverable: false,
+    });
+    // A pre-receive hook may print ANYTHING — the lift marker included. The script's own marker is
+    // LAST, and the last marker decides (codex review of N4): still a refused push, never a strand.
+    const hostile =
+      `remote: ${DELIVER_LIFT_CONFLICT_MARKER} (a hook said so)\n` +
+      `deliver: the remote refused the push of wicked/x after commit: …; ${DELIVER_PUSH_REJECTED_MARKER}`;
+    expect(triageDeliverFailure(hostile)?.kind).toBe('push_rejected');
     const moved =
       'deliver: the engine verified this work against f57069d but origin/main is now 9f3c1a2 — refusing to rebase past ' +
       'the verified base; approve to retry the deliver phase (the engine lifts onto the new tip and re-runs the repository ' +
@@ -237,12 +250,12 @@ describe('triageDeliverFailure (wicked-core#431 follow-through)', () => {
       expect([...excerpt].slice(0, 220).join(''), kind).not.toContain('deliver: the ');
       expect(triageDeliverFailure(excerpt), kind).toMatchObject({ kind, author: 'script', disposition: 'escalate', recoverable: false });
     }
-    // And the existing LIFT-CONFLICT push-failure line, which trails its marker the same way.
+    // And the PUSH-REJECTED push-failure line (N4), which trails its marker the same way.
     const pushFail =
       chatter +
-      'remote: HTTP 403 authentication failed\ndeliver: git push of wicked/x failed after commit: remote: HTTP 403 ... authentication failed; ' +
-      `retry POST /runs/:id/deliver; nothing was pushed; ${DELIVER_LIFT_CONFLICT_MARKER}`;
-    expect(triageDeliverFailure(framed(`${'-'.repeat(300)}\n${pushFail}`))?.kind).toBe('lift_conflict');
+      'remote: HTTP 403 authentication failed\ndeliver: the remote refused the push of wicked/x after commit: remote: HTTP 403 ... authentication failed; ' +
+      `the work is committed on wicked/x and nothing was pushed — fix the remote condition, then approve to retry the deliver phase; ${DELIVER_PUSH_REJECTED_MARKER}`;
+    expect(triageDeliverFailure(framed(`${'-'.repeat(300)}\n${pushFail}`))?.kind).toBe('push_rejected');
   });
 
   it('answers null for a spawn/infra failure, an ordinary worker transcript, exclusion notes alone, and empty input', () => {

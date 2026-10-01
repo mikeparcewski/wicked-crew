@@ -24,14 +24,29 @@
 import type { AuditLog } from './audit.js';
 import type { AgentSession, SessionView, WorkUnit, WorkflowDef } from '../core/types.js';
 import { execCapped } from '../core/exec.js';
-import { DELIVER_LIFT_CONFLICT_MARKER, DELIVER_PHASE_ID } from '../core/deliver.js';
+import { lastDeliverMarker } from '../core/deliver-triage.js';
+import {
+  DELIVER_LIFT_CONFLICT_MARKER,
+  DELIVER_PHASE_ID,
+  pushedOnlyFrom,
+  type PushedOnlyDelivery,
+} from '../core/deliver.js';
 import { runIdentityOf, runWorkflowDef } from '../core/run-identity.js';
 
 /** What `AgentSession.delivery` + `deliverUrl` spell on the wire (api-types 0.18.0, crew#393). */
 export interface DeliveryState {
-  delivery: 'delivered' | 'stranded' | 'vacuous' | 'none';
+  delivery: 'delivered' | 'pushed' | 'stranded' | 'vacuous' | 'none';
   /** Present exactly when `delivery === 'delivered'`. */
   deliverUrl?: string;
+  /** Present exactly when `delivery === 'pushed'` (N1): the run branch that is on the remote. */
+  deliverBranch?: string;
+  /** Present exactly when `delivery === 'pushed'`: the remote it was pushed to, userinfo removed. */
+  deliverRemote?: string;
+}
+
+/** The wire spelling of a recorded push-only delivery (N1). */
+export function pushedState(p: PushedOnlyDelivery): DeliveryState {
+  return { delivery: 'pushed', deliverBranch: p.branch, deliverRemote: p.remote };
 }
 
 /**
@@ -125,6 +140,10 @@ export function canDeliverResolver(
  * assembly from three facts and nothing else:
  *
  *   1. a recorded PR URL (the `run.delivered` trail via {@link DeliveryIndex}) ⇒ `'delivered'`;
+ *   1b. a recorded PUSH-ONLY delivery (N1: the branch is on a non-GitHub origin, no PR could be
+ *      opened — the same trail, `detail.pushed`) ⇒ `'pushed'`. Without it, every successful
+ *      delivery to a local/SSH/GitLab origin read `'stranded'` ("sitting uncommitted… No PR is on
+ *      record") and offered a post-hoc "open a PR" that cannot succeed;
  *   2. otherwise a COMPLETED repo-scoped run whose worktree still exists on disk ⇒ `'stranded'`
  *      — reviewable work nobody lifted into a PR. This is a derivation over the run record's
  *      existing fields (`status`, `repo_ref`, `workdir`) plus one stat, so runs recorded BEFORE
@@ -147,8 +166,11 @@ export function deliveryStateOf(
   url: string | undefined,
   worktreeExists: (path: string) => boolean,
   canDeliver: boolean = true,
+  pushed?: PushedOnlyDelivery,
 ): DeliveryState {
   if (url !== undefined) return { delivery: 'delivered', deliverUrl: url };
+  // A recorded push is a delivery, whatever the def or the worktree say — like a recorded PR.
+  if (pushed !== undefined) return pushedState(pushed);
   if (!canDeliver) return { delivery: 'none' };
   if (
     session.status === 'completed' &&
@@ -226,8 +248,10 @@ export async function deliveryStateWithVacuity(
   url: string | undefined,
   probes: VacuityProbes,
   canDeliver: boolean = true,
+  pushed?: PushedOnlyDelivery,
 ): Promise<DeliveryState> {
-  const state = deliveryStateOf(session, url, probes.worktreeExists, canDeliver);
+  const state = deliveryStateOf(session, url, probes.worktreeExists, canDeliver, pushed);
+  if (state.delivery === 'pushed') return state;
   // A run that could never have delivered is 'none' by definition (crew#481): no probe can turn
   // "nothing was ever liftable" into vacuous — and the git pair must not be spent finding out.
   if (!canDeliver) return state;
@@ -415,6 +439,21 @@ export function prUrlFrom(text: string): string | null {
   return matches === null ? null : (matches[matches.length - 1] ?? null);
 }
 
+/** What an approved deliver unit's transcript puts on the `run.delivered` trail (`detail`). */
+export type DeliveryRecord = { url: string } | { pushed: PushedOnlyDelivery };
+
+/**
+ * The delivery an APPROVED deliver unit's transcript records, or `null` (nothing to record): a PR
+ * URL wins; else (N1) the script's push-only line — the branch is on an origin gh could not resolve
+ * to a GitHub repository, so no PR exists and none can be opened from here.
+ */
+export function deliveryRecordFrom(output: string): DeliveryRecord | null {
+  const url = prUrlFrom(output);
+  if (url !== null) return { url };
+  const pushed = pushedOnlyFrom(output);
+  return pushed === null ? null : { pushed };
+}
+
 /**
  * This run's deliver unit, or `null`. The composed id suffix (`<base>:deliver`) is the
  * primary key; the `tool_cmd` probe is the fallback for an operator OVERLAY that carried the
@@ -428,13 +467,14 @@ export function deliverUnitOf(view: SessionView): WorkUnit | null {
 }
 
 /**
- * Is this a `failed` run whose ONLY failure was a recoverable deliver LIFT failure (crew#418/#432)?
+ * Is this a `failed` run whose ONLY failure was a recoverable deliver LIFT failure (crew#418)?
  *
  * The deliver phase is the LAST phase, so a rejected deliver unit whose `denial_reason` carries
  * the deliver script's {@link DELIVER_LIFT_CONFLICT_MARKER} — with EVERY non-deliver unit still
  * `done` — means the run's WORK is complete and committed on its `wicked/<id>` branch: only the
  * lift into origin could not complete (a rebase conflict the changelog union merge could not
- * clear, a non-fast-forward push, or a transport/auth/remote rejection). The engine reports the run `failed` because a Tool phase exited
+ * clear, or the engine's own lift conflict). A push the REMOTE refused no longer carries the marker
+ * (N4): it parks at the engine's deliver-refusal gate instead. The engine reports the run `failed` because a Tool phase exited
  * non-zero; crew reinterprets THIS shape on the wire as `completed` + `delivery: 'stranded'`
  * (recoverable via `POST /runs/:id/deliver`) — the same wire-derivation posture as `delivery`
  * itself, leaving the engine's durable `failed` record untouched. The deliver unit stays
@@ -455,11 +495,15 @@ export function isDeliverConflictStranded(view: SessionView): boolean {
   // A rejected unit that is NOT the deliver phase = a genuine work/build/test failure, not a
   // clean run whose only casualty was the lift.
   if (view.units.some((u) => u.id !== deliver.id && u.status === 'rejected')) return false;
-  return (deliver.denial_reason ?? '').includes(DELIVER_LIFT_CONFLICT_MARKER);
+  // The LAST marker decides (codex review of N4): a refused push whose remote echoed the lift
+  // marker is still a refused push, never a liftable strand.
+  return lastDeliverMarker(deliver.denial_reason ?? '') === DELIVER_LIFT_CONFLICT_MARKER;
 }
 
 export class DeliveryIndex {
   private readonly runToUrl = new Map<string, string>();
+  /** N1: runs whose deliver phase pushed the branch and could open no PR (a non-GitHub origin). */
+  private readonly runToPushed = new Map<string, PushedOnlyDelivery>();
 
   /**
    * Load deliveries from EVERY `run.delivered` entry in the trail — exhaustively, not capped
@@ -472,16 +516,38 @@ export class DeliveryIndex {
    */
   async hydrate(audit: AuditLog, log?: (msg: string) => void): Promise<void> {
     try {
-      const seen = new Set<string>();
+      // `decided`: the run's record is settled (a PR URL, or a malformed newest write).
+      // `pushedOnly`: the newest entry was a push-only record (N1) — still open to an OLDER PR URL,
+      // because a recorded PR always outranks a push (the same precedence `setPushed` keeps live;
+      // codex review of N1). A malformed entry OLDER than a push changes nothing.
+      const decided = new Set<string>();
+      const pushedOnly = new Set<string>();
       for (const entry of await audit.readAll({ action: 'run.delivered' })) {
         if (typeof entry.runId !== 'string') continue;
-        if (seen.has(entry.runId)) continue;
-        // Newest entry decides, even when malformed — marking the run seen BEFORE the url
-        // check keeps a corrupt newest write from resurrecting an older one (the #312 rule).
-        seen.add(entry.runId);
+        if (decided.has(entry.runId)) continue;
         const url = entry.detail?.['url'];
-        if (typeof url !== 'string' || url === '') continue;
-        this.runToUrl.set(entry.runId, url);
+        if (typeof url === 'string' && url !== '') {
+          decided.add(entry.runId);
+          this.runToPushed.delete(entry.runId);
+          this.runToUrl.set(entry.runId, url);
+          continue;
+        }
+        if (pushedOnly.has(entry.runId)) continue;
+        const pushed = entry.detail?.['pushed'] as { branch?: unknown; remote?: unknown } | undefined;
+        if (
+          pushed !== undefined &&
+          pushed !== null &&
+          typeof pushed.branch === 'string' &&
+          pushed.branch !== '' &&
+          typeof pushed.remote === 'string'
+        ) {
+          pushedOnly.add(entry.runId);
+          this.runToPushed.set(entry.runId, { branch: pushed.branch, remote: pushed.remote });
+          continue;
+        }
+        // Newest entry decides, even when malformed — a corrupt newest write never resurrects an
+        // older one (the #312 rule).
+        decided.add(entry.runId);
       }
     } catch (err) {
       log?.(
@@ -494,7 +560,24 @@ export class DeliveryIndex {
 
   /** Record the run's delivered PR URL (idempotent — the newest write wins). */
   set(runId: string, url: string): void {
+    this.runToPushed.delete(runId);
     this.runToUrl.set(runId, url);
+  }
+
+  /** Record a PUSH-ONLY delivery (N1). A recorded PR URL is never downgraded by it. */
+  setPushed(runId: string, pushed: PushedOnlyDelivery): void {
+    if (this.runToUrl.has(runId)) return;
+    this.runToPushed.set(runId, pushed);
+  }
+
+  /** The recorded push-only delivery for this run, or `undefined` (N1). */
+  pushedFor(runId: string): PushedOnlyDelivery | undefined {
+    return this.runToPushed.get(runId);
+  }
+
+  /** Did this run deliver at all — a PR on record OR a pushed branch on record? */
+  isDelivered(runId: string): boolean {
+    return this.runToUrl.has(runId) || this.runToPushed.has(runId);
   }
 
   /**

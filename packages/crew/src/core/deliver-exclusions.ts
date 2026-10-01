@@ -32,6 +32,16 @@
  * files a *preview* of the push counts.
  */
 
+/**
+ * The deliver script's untracked RECOVERY SENTINEL (crew#432): a failed push leaves this empty file
+ * at the worktree root so the engine's terminal reap never removes a worktree whose work was
+ * committed but not delivered, and the next attempt removes it before staging. It is never part of
+ * the push, so it is never part of the consent diffstat either (N2, ship re-proof): the retry gate
+ * read "5 files changed" for a commit of 4 because this predicate did not know the name. The
+ * script's `S=` line is generated FROM this constant, so the name cannot drift between the two.
+ */
+export const DELIVER_STRANDED_SENTINEL = '.wicked-crew-delivery-stranded';
+
 /** Basename globs that mean "scratch or key material, never a run's product" (crew#434). */
 const DENYLISTED = [
   /\.db$/, /\.db-wal$/, /\.db-shm$/,
@@ -65,6 +75,8 @@ export const OVERSIZE_BYTES = 1048576;
  * `denylisted-name`, exactly as the shell's `[ -n "$RN" ] ||` guards do.
  */
 export function deliverExclusionByName(relPath: string): string | null {
+  // The script's own recovery sentinel, at the worktree root only — the shell's first arm.
+  if (relPath === DELIVER_STRANDED_SENTINEL) return 'delivery-sentinel';
   const base = relPath.slice(relPath.lastIndexOf('/') + 1);
   // The script classifies on a LOWERCASED basename so DEPLOY.KEY / .ENV / SOCKET.PATH cannot
   // bypass the denylist by case (crew#439).

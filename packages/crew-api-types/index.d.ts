@@ -309,12 +309,18 @@ export interface AgentSession {
    *
    *   - `'delivered'` — a PR was opened for this run (by the deliver phase, or post-hoc via
    *     `POST /runs/:id/deliver`); `deliverUrl` carries the PR URL.
+   *   - `'pushed'`    — (api-types 0.69.0, N1) the run's branch was PUSHED and that is the whole
+   *     delivery: no pull request could be opened because the origin is not a GitHub host gh can
+   *     resolve (a local path, SSH, GitLab, ADO, Gitea…). `deliverBranch` + `deliverRemote` say
+   *     what is where. Nothing is left to lift, so no post-hoc deliver is offered (`POST
+   *     /runs/:id/deliver` answers 409); opening the pull/merge request is the forge's, by hand.
    *   - `'stranded'`  — reviewable work nobody lifted, reached two ways: a COMPLETED repo-scoped
    *     run with no recorded PR whose worktree still exists on disk AND carries work (derived
    *     honestly for OLD runs too — records written before this field existed strand the same
-   *     way); OR (crew#418) a run whose deliver phase hit a LIFT collision — a rebase conflict or
-   *     non-fast-forward push — which the daemon reinterprets from the engine's `failed` to
-   *     `completed`+`stranded`: its work is committed on the `wicked/<id>` branch (the engine
+   *     way); OR (crew#418) a run whose deliver phase hit a LIFT collision — a rebase conflict
+   *     (a push the remote REFUSED no longer strands: since 0.69.0 it parks the run at the
+   *     engine's deliver-refusal gate, N4) — which the daemon reinterprets from the engine's
+   *     `failed` to `completed`+`stranded`: its work is committed on the `wicked/<id>` branch (the engine
    *     reaps the now-clean worktree, but never the branch), recoverable via `POST /runs/:id/
    *     deliver`, which stands a throwaway worktree back up from that branch to lift it.
    *   - `'vacuous'`   — a COMPLETED repo-scoped run whose surviving worktree carries NO
@@ -337,7 +343,7 @@ export interface AgentSession {
    * FAILURE of a deliver phase is not spelled here; it is `units[].status === 'rejected'`
    * plus `denial_reason` (crew#318's message), both already on the list wire.
    */
-  delivery?: 'delivered' | 'stranded' | 'vacuous' | 'none';
+  delivery?: 'delivered' | 'pushed' | 'stranded' | 'vacuous' | 'none';
   /**
    * The delivered PR's URL (crew#393; api-types 0.18.0) — present exactly when
    * `delivery === 'delivered'`; absent otherwise (absence is the one spelling, never `null`).
@@ -348,6 +354,13 @@ export interface AgentSession {
    * idempotent against the existing branch) and `'none'` after it is cleaned up.
    */
   deliverUrl?: string;
+  /** The pushed run branch (api-types 0.69.0, N1) — present exactly when `delivery === 'pushed'`. */
+  deliverBranch?: string;
+  /**
+   * The remote the branch was pushed to (api-types 0.69.0, N1), with any URL userinfo removed —
+   * present exactly when `delivery === 'pushed'`. May be a filesystem path (a local bare origin).
+   */
+  deliverRemote?: string;
   /**
    * The campaign this AD-HOC run was attached to at launch (`LaunchRunBody.campaignId`;
    * wicked-studio#27, api-types 0.19.0) — daemon-joined at DTO assembly on `GET /runs` and
@@ -5604,8 +5617,12 @@ export interface Campaign {
  * `delivery === 'delivered'`.
  */
 export interface CampaignNodeDelivery {
-  delivery: 'delivered' | 'stranded' | 'vacuous' | 'none';
+  delivery: 'delivered' | 'pushed' | 'stranded' | 'vacuous' | 'none';
   deliverUrl?: string;
+  /** Present exactly when `delivery === 'pushed'` (api-types 0.69.0, N1). */
+  deliverBranch?: string;
+  /** Present exactly when `delivery === 'pushed'`; userinfo removed. */
+  deliverRemote?: string;
 }
 
 /**
@@ -5618,8 +5635,12 @@ export interface CampaignNodeDelivery {
 export interface AttachedRunView {
   runId: string;
   status: SessionStatus;
-  delivery: 'delivered' | 'stranded' | 'vacuous' | 'none';
+  delivery: 'delivered' | 'pushed' | 'stranded' | 'vacuous' | 'none';
   deliverUrl?: string;
+  /** Present exactly when `delivery === 'pushed'` (api-types 0.69.0, N1). */
+  deliverBranch?: string;
+  /** Present exactly when `delivery === 'pushed'`; userinfo removed. */
+  deliverRemote?: string;
 }
 
 /**

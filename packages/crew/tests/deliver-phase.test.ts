@@ -6,6 +6,7 @@
 // guard, the rebase-before-push step, and — the one deliberate change from the field overlay —
 // no gh account name baked into crew code (the env-driven GH_ACCOUNT guard replaces it).
 
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -82,20 +83,39 @@ describe('deliverPrScript (the hardened field script)', () => {
     expect(script).toContain(`${LIFT_CONFLICT_MARKER} — rebase`);
   });
 
-  // crew#418/#432 — a rejected push happens after the run work was committed. Both a remote
-  // branch race and auth/transport/hook failures must strand recoverably for a post-hoc retry.
-  it('marks every push failure as a recoverable LIFT-CONFLICT', () => {
+  // crew#432 + N4 — a rejected push happens after the run work was committed, so the worktree is kept
+  // (the sentinel). But it is a refusal BY THE REMOTE, not a lift collision: it carries
+  // PUSH-REJECTED, never LIFT-CONFLICT, so the engine parks it at its deterministic gate instead of
+  // handing it to an LLM triage that may re-push without one.
+  it('marks every push failure PUSH-REJECTED — never a LIFT-CONFLICT (N4)', () => {
     // DES-L9: one push seam — the new-PR push (`-u origin "$B"`) or, for a revision, the refspec
     // onto the PR's head branch — captured the same way, so every failure takes the arms below.
     expect(script).toContain('_push() { if [ -n "$TARGET" ]; then git push origin "$B:refs/heads/$TARGET"; else git push -u origin "$B"; fi; }');
     expect(script).toContain('if PUSHOUT=$(_push 2>&1); then');
-    expect(script).toMatch(/\*non-fast-forward\*[^\n]*LIFT-CONFLICT[^\n]*non-fast-forward[^\n]*nothing was pushed/);
+    const nffArm = script.split('\n').find((l) => l.includes('*non-fast-forward*'))!;
+    expect(nffArm).toMatch(/non-fast-forward[^\n]*nothing was pushed[^\n]*deliver: PUSH-REJECTED"; exit 1;;/);
+    expect(nffArm).toContain(': > "$S"');
+    expect(nffArm).not.toContain('LIFT-CONFLICT');
     // The catch-all carries the same marker — auth/network/hook failures preserve committed work.
-    const plainArm = script.split('\n').find((l) => l.includes('deliver: git push of $B failed'))!;
-    expect(plainArm).toContain('LIFT-CONFLICT');
+    const plainArm = script.split('\n').find((l) => l.includes('the remote refused the push of $B after commit'))!;
+    expect(plainArm).toContain('deliver: PUSH-REJECTED');
+    expect(plainArm).not.toContain('LIFT-CONFLICT');
     expect(plainArm).toContain('PUSHERR="${PUSHOUT:0:96}');
     expect(plainArm).toContain(': > "$S"');
-    expect(plainArm).toContain('retry POST /runs/:id/deliver');
+    expect(plainArm).toContain('approve to retry the deliver phase');
+    // The push-only lines never put a credential in the transcript: the push URL is read once,
+    // userinfo stripped, and both lines print that (codex review of N1).
+    const rLine = script.split('\n').find((l) => l.trim().startsWith('R=$(git remote get-url --push origin'))!;
+    const stripped = execFileSync(
+      'bash',
+      ['-c', `git() { echo "https://deploy-token:s3cret@gitlab.example.com/o/r.git"; }; ${rLine.trim()}; printf '%s' "$R"`],
+      { encoding: 'utf8' },
+    );
+    expect(stripped).toBe('https://gitlab.example.com/o/r.git');
+    expect(script).toContain('echo "deliver: PUSHED-NO-PR $B $R";');
+    expect(script).not.toMatch(/PUSHED-NO-PR \$B \$\(git remote/);
+    // The ONLY script line that still strands is the rebase conflict.
+    expect(script.split('\n').filter((l) => l.includes('LIFT-CONFLICT')).length).toBe(1);
   });
 
   it('pushes -u and opens the PR with gh, URL as the last line', () => {

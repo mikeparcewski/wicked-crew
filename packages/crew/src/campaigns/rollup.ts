@@ -27,10 +27,12 @@ import {
   deliveryStateOf,
   deliveryStateWithVacuity,
   isDeliverConflictStranded,
+  pushedState,
   type DeliveryState,
   type VacuityProbes,
 } from '../api/delivery-index.js';
 import type { GroupIndex } from '../api/group-index.js';
+import type { PushedOnlyDelivery } from '../core/deliver.js';
 import type { TestSetIndex } from '../qe/test-sets.js';
 
 /** The delivery machinery shared with the run DTOs — injected by `registerRoutes`. */
@@ -41,6 +43,8 @@ export interface RollupDeps {
   testSets?: TestSetIndex;
   /** The `DeliveryIndex` record (the durable `run.delivered` fact). */
   deliveryUrlFor: (runId: string) => string | undefined;
+  /** N1: the recorded push-only delivery (a non-GitHub origin) — absent on a route set that has none. */
+  deliveryPushedFor?: (runId: string) => PushedOnlyDelivery | undefined;
   /** The shared TTL-memoized probes behind `'stranded'`/`'vacuous'`. */
   vacuity: VacuityProbes;
   /** ERROR-level channel — only a NON-probe derivation throw (a defect) is reported here; the
@@ -67,6 +71,8 @@ async function deliveryOf(view: SessionView, deps: RollupDeps): Promise<Campaign
   // brain crew#418 removes, on a surface whose charter is truthful per-node delivery.
   const url = deps.deliveryUrlFor(view.session.id);
   if (url !== undefined) return { delivery: 'delivered', deliverUrl: url };
+  const pushed = deps.deliveryPushedFor?.(view.session.id);
+  if (pushed !== undefined) return pushedState(pushed);
   if (isDeliverConflictStranded(view)) return { delivery: 'stranded' };
   const canDeliver = deps.canDeliver?.(view) ?? true;
   let state: DeliveryState;
@@ -91,6 +97,8 @@ async function deliveryOf(view: SessionView, deps: RollupDeps): Promise<Campaign
   return {
     delivery: state.delivery,
     ...(state.deliverUrl !== undefined ? { deliverUrl: state.deliverUrl } : {}),
+    ...(state.deliverBranch !== undefined ? { deliverBranch: state.deliverBranch } : {}),
+    ...(state.deliverRemote !== undefined ? { deliverRemote: state.deliverRemote } : {}),
   };
 }
 

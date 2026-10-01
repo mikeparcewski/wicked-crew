@@ -250,6 +250,38 @@ describe('POST /runs/:id/deliver — post-hoc delivery, driven for real (crew#39
     expect(execCalls()).toBe(1);
   }, 60_000);
 
+  it('N1: a NON-GITHUB origin — the branch is pushed, the run reads pushed (never stranded), and a second call pushes nothing', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'fix.ts'), 'export const fixed = true;\n');
+    const env = {
+      ...fx.env,
+      GH_STUB_FAIL:
+        'none of the git remotes configured for this repository point to a known GitHub host. Use `gh auth login` to authenticate with a host',
+    };
+    const { app, execCalls } = buildApp([view(RUN_ID, { repo_ref: 'repo-1', workdir: fx.workdir })], env);
+    apps.push(app);
+    await app.ready();
+
+    const res = await app.inject({ method: 'POST', url: `/api/v1/runs/${RUN_ID}/deliver` });
+    // No PR URL exists to answer with, so it is not a 200 {prUrl} — but the push DID happen.
+    expect(res.statusCode).toBe(409);
+    expect((res.json() as { error: string }).error).toContain('delivered as a pushed branch');
+    expect(originBranches(fx)).toContain(`wicked/${RUN_ID}`);
+
+    const after = (await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN_ID}` })).json() as {
+      run: { session: Record<string, unknown> };
+    };
+    expect(after.run.session['delivery']).toBe('pushed');
+    expect(after.run.session['deliverBranch']).toBe(`wicked/${RUN_ID}`);
+    expect(after.run.session['deliverRemote']).toBe(fx.origin);
+    expect('deliverUrl' in after.run.session).toBe(false);
+
+    // Nothing is left to lift: the route says so and never runs the script again.
+    const again = await app.inject({ method: 'POST', url: `/api/v1/runs/${RUN_ID}/deliver` });
+    expect(again.statusCode).toBe(409);
+    expect(execCalls()).toBe(1);
+  }, 60_000);
+
   it('CONFLICT: a rebase conflict is a loud 409 with nothing pushed; the run stays stranded', async () => {
     const fx = fixture();
     // main moves under the stranded run…

@@ -18,7 +18,14 @@ import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { deliverPrScript, type DeliverScriptOptions } from '../src/core/deliver.js';
+import {
+  DELIVER_LIFT_CONFLICT_MARKER,
+  DELIVER_PUSHED_NO_PR_MARKER,
+  DELIVER_PUSH_REJECTED_MARKER,
+  deliverPrScript,
+  type DeliverScriptOptions,
+} from '../src/core/deliver.js';
+import { deliveryRecordFrom } from '../src/api/delivery-index.js';
 import { deliverExclusionReason } from '../src/core/deliver-exclusions.js';
 import { commitSubject, composeDeliverText, deliverTitle, factsFromWorkflow, framedDeliverText } from '../src/core/deliver-text.js';
 
@@ -330,6 +337,9 @@ describe('deliver script, driven for real (crew#317)', () => {
     writeFileSync(join(fx.workdir, 'tmp', 'pytest-of-x'), 'b\n');
     // An oversized (>1 MiB) untracked blob with an unremarkable name — caught by the size cap.
     writeFileSync(join(fx.workdir, 'rec.bin'), Buffer.alloc(1_600_000, 7)); // oversize-1mib
+    // N2: the empty recovery sentinel a PREVIOUS failed attempt left behind (the retry-gate shape).
+    // The script removes it before staging, so it never ships — the TS predicate must agree.
+    writeFileSync(join(fx.workdir, '.wicked-crew-delivery-stranded'), '');
 
     // F3 DRIFT GUARD, half 1 — what the TS classifier (the one the deliver-gate diff reads) keeps
     // over the tree the script is ABOUT to classify in shell.
@@ -684,7 +694,7 @@ describe('deliver script, driven for real (crew#317)', () => {
     expect(r.lastLine).not.toContain('http');
   }, 60_000);
 
-  it('STRANDS a failed push with git’s error intact, then succeeds after the remote is repaired (crew#432)', async () => {
+  it('KEEPS the work on a REFUSED push — PUSH-REJECTED, never a LIFT-CONFLICT (N4) — then succeeds after the remote is repaired (crew#432)', async () => {
     const fx = fixture();
     writeFileSync(join(fx.workdir, 'work.ts'), 'export const preserved = true;\n');
     git(fx.workdir, 'add', '--', 'work.ts');
@@ -698,9 +708,13 @@ describe('deliver script, driven for real (crew#317)', () => {
 
     expect(failed.status).not.toBe(0);
     expect(failed.output).toContain('HTTP 403 authentication failed');
-    expect(failed.output).toContain('deliver: LIFT-CONFLICT');
-    // The marker is last so core retains it in the run-unit denial tail and exposes the strand.
-    expect(failed.lastLine).toContain('deliver: LIFT-CONFLICT');
+    // N4: a push the REMOTE refused is not a lift collision (the lift was clean). It must not carry
+    // the LIFT-CONFLICT marker — the engine exempts that marker from its deterministic
+    // deliver-refusal gate and hands it to an LLM triage, which re-ran the push with no gate.
+    expect(failed.output).not.toContain(DELIVER_LIFT_CONFLICT_MARKER);
+    // Its own marker is last, so it survives the engine's tail excerpt.
+    expect(failed.lastLine).toContain(DELIVER_PUSH_REJECTED_MARKER);
+    expect(failed.lastLine).toContain('approve to retry the deliver phase');
     expect(originBranches(fx)).toEqual(['main']);
     // The committed work remains on the local run branch, ready for post-hoc delivery.
     expect(git(fx.workdir, 'rev-list', '--count', `main..wicked/${RUN_ID}`).trim()).toBe('1');
@@ -1266,6 +1280,12 @@ describe('deliver script — a non-GitHub origin delivers the branch and the run
     expect(r.output).toContain('that remote is not a GitHub host gh can resolve');
     // It never claims a PR: nothing downstream may read a pull-request URL out of this output.
     expect(r.output).not.toMatch(/https:\/\/\S+\/pull\/\d+/);
+    // N1: the LAST line is the machine record the daemon turns into `delivery: 'pushed'` — the
+    // branch and the push remote, exactly; without it the run read 'stranded'.
+    expect(r.lastLine).toBe(`${DELIVER_PUSHED_NO_PR_MARKER} wicked/${RUN_ID} ${fx.origin}`);
+    expect(deliveryRecordFrom(r.output)).toEqual({
+      pushed: { branch: `wicked/${RUN_ID}`, remote: fx.origin },
+    });
   }, 60_000);
 
   it('EVERY other gh failure stays loud — a GHES / auth / missing-gh failure is not push-only', async () => {
