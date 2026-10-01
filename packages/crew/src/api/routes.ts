@@ -2532,6 +2532,10 @@ export function registerRoutes(
                 ...(followUps !== undefined ? { followUps } : {}),
               }),
               revisesPr,
+              // R1 (Copilot on crew#736): the post-hoc delivery binds `gh pr create --repo` to the
+              // origin's GitHub repository too, read now from the worktree (it shares its repo's
+              // remotes), so the PR opens where origin points rather than where gh's default does.
+              originUrl: await readDeliverOriginUrl(workdir),
             });
           } finally {
             if (cw !== null) await cw(); // tear the throwaway down whether the lift succeeded or threw

@@ -4206,7 +4206,8 @@ export interface CodeGraphData {
  * `GET /api/v1/repos/:id/deliver-target` (R3) — where a delivering launch on this repo would push,
  * read by the same origin preflight the deliver gate card uses (crew#730). `sentence` is the gate's
  * own target sentence for a run not yet started ("the run branch"); show it verbatim.
- *  - `github`  — a github.com origin; `githubRepo` is its `owner/repo`;
+ *  - `github`  — a github.com origin; `githubRepo` is its `owner/repo` on github.com or
+ *                ssh.github.com, and `null` on another `*.github.com` host (gist, api);
  *  - `local`   — a filesystem path or `file://` URL: no pull request can be opened against it;
  *  - `other`   — another host: a pull request opens only if gh resolves it as a GitHub host;
  *  - `none`    — the checkout has no `origin` remote: the push will fail;

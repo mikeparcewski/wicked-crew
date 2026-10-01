@@ -1175,8 +1175,11 @@ export function deliverRunBranch(runId: string | null | undefined): string | nul
   const id = runId ?? '';
   // The charset alone is not a git ref component: `.run`, `run..next`, `run.lock`, `run.` are
   // illegal refs the engine must sanitize, so they name no branch here (Copilot on crew#736).
+  // NTFS reserved device stems (`CON`, `con.txt`, `COM1`…) are rewritten and hashed by the
+  // engine's `sanitize_worktree_id` too, so they name no branch either (Copilot on crew#736).
+  const reserved = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i;
   const refSafe = (x: string): boolean =>
-    /^[A-Za-z0-9._-]+$/.test(x) && !x.startsWith('.') && !x.startsWith('-') && !x.includes('..') && !x.endsWith('.') && !x.endsWith('.lock');
+    /^[A-Za-z0-9._-]+$/.test(x) && !x.startsWith('.') && !x.startsWith('-') && !x.includes('..') && !x.endsWith('.') && !x.endsWith('.lock') && !reserved.test(x);
   if (refSafe(id)) return `wicked/${id}`;
   // The engine's hashless COLON tier (core#345/#347): an id whose only illegal char is `:` (a
   // campaign-shaped `<label>:<repo>:a0`) names its worktree and branch with each `:` as `-`
@@ -1240,7 +1243,8 @@ export type DeliverTargetOrigin = DeliverOriginKind | 'unknown';
 
 export interface DeliverTargetView {
   origin: DeliverTargetOrigin;
-  /** `owner/repo` for a github.com origin, else `null`. */
+  /** `owner/repo` for an origin on github.com or ssh.github.com; `null` otherwise — including a
+   *  `github` origin on another `*.github.com` host (gist, api), which names no repository. */
   githubRepo: string | null;
   /** {@link newPrTargetSentence} for the launch (no run yet): the deliver gate's own sentence. */
   sentence: string;

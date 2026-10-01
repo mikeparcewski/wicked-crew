@@ -408,6 +408,41 @@ describe('POST /runs/:id/deliver — post-hoc delivery, driven for real (crew#39
   });
 });
 
+// R1 (Copilot on crew#736): the post-hoc delivery binds `gh pr create --repo` to origin's GitHub
+// repository like the gated one — the route reads the worktree's push URL and hands it on.
+describe('POST /runs/:id/deliver — the post-hoc delivery carries the origin it pushes to (R1)', () => {
+  it('passes the worktree\'s push URL as originUrl, so the script can bind --repo and check drift', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'fix.ts'), 'export const fixed = true;\n');
+    execFileSync('git', ['config', 'remote.origin.pushurl', 'https://github.com/acme/widgets.git'], { cwd: fx.workdir });
+    const seen: Array<string | null | undefined> = [];
+    const mockAdapter = {
+      sessionsDetail: vi.fn(async () => [view(RUN_ID, { repo_ref: 'repo-1', workdir: fx.workdir })]),
+      sessions: vi.fn(async () => [RUN_ID]),
+    } as unknown as CoreAdapter;
+    const app = Fastify({ logger: false });
+    registerRoutes(
+      app,
+      mockAdapter,
+      new GateCache(),
+      new ElicitationCache(),
+      { bus: null, index: new MembershipIndex(), log: () => undefined },
+      { audit: AuditLog.noop(), authMode: 'off' },
+      {
+        deliveryIndex: new DeliveryIndex(),
+        deliverExec: async (_workdir, _intent, opts) => {
+          seen.push(opts?.originUrl);
+          return { status: 1, output: 'deliver: stub stops here' };
+        },
+      },
+    );
+    apps.push(app);
+    await app.ready();
+    await app.inject({ method: 'POST', url: `/api/v1/runs/${RUN_ID}/deliver` });
+    expect(seen).toEqual(['https://github.com/acme/widgets.git']);
+  });
+});
+
 // ── DES-L9 / crew#550 — a stranded REVISION re-pushes onto its PR's branch, never a new PR ────────
 //
 // The run revised PR #273 (its worktree was cut from `origin/wicked/prior-run`), committed its work,
