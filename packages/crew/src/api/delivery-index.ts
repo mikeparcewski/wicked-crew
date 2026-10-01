@@ -28,6 +28,7 @@ import { lastDeliverMarker } from '../core/deliver-triage.js';
 import {
   DELIVER_LIFT_CONFLICT_MARKER,
   DELIVER_PHASE_ID,
+  DELIVER_PUSHED_NO_PR_MARKER,
   pushedOnlyFrom,
   type PushedOnlyDelivery,
 } from '../core/deliver.js';
@@ -444,16 +445,20 @@ export type DeliveryRecord = { url: string } | { pushed: PushedOnlyDelivery };
 
 /**
  * The delivery an APPROVED deliver unit's transcript records, or `null` (nothing to record).
- * (N1) The script's push-only line is checked FIRST: it is the script's own final verdict, the PR
- * path never prints it, and a `/pull/<n>` URL earlier in such a transcript can only be text the
- * remote echoed during `git push` (Copilot on crew#734). Otherwise the PR URL — the PR path's
- * last line.
+ *
+ * The script ends each success path with its own verdict on stdout: the PR URL (`echo "$URL"`) or,
+ * on a non-GitHub origin (N1), the `deliver: PUSHED-NO-PR` line. Text before that verdict can be the
+ * remote's — `git push` output is echoed, and a hook may print a `/pull/<n>` URL or even a forged
+ * marker line (Copilot on crew#734, both directions). So whichever of the two appears LAST is the
+ * script's verdict.
  */
 export function deliveryRecordFrom(output: string): DeliveryRecord | null {
   const pushed = pushedOnlyFrom(output);
-  if (pushed !== null) return { pushed };
   const url = prUrlFrom(output);
-  return url === null ? null : { url };
+  if (pushed === null) return url === null ? null : { url };
+  if (url === null) return { pushed };
+  const markerAt = output.lastIndexOf(DELIVER_PUSHED_NO_PR_MARKER);
+  return output.lastIndexOf(url) > markerAt ? { url } : { pushed };
 }
 
 /**

@@ -91,6 +91,11 @@ describe('N1 — the record a push-only deliver transcript yields', () => {
     expect(deliveryRecordFrom('pushed\nhttps://github.com/o/r/pull/9')).toEqual({
       url: 'https://github.com/o/r/pull/9',
     });
+    // …and a hook that FORGES the marker before gh's real URL cannot downgrade the PR (Copilot on
+    // crew#734, second round): the script's verdict is the later of the two.
+    expect(
+      deliveryRecordFrom('remote: deliver: PUSHED-NO-PR fake-branch fake-remote\nhttps://github.com/o/r/pull/12'),
+    ).toEqual({ url: 'https://github.com/o/r/pull/12' });
   });
 
   it('a transcript with neither records nothing', () => {

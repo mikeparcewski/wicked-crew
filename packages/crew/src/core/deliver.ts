@@ -172,10 +172,9 @@ export function remoteWithoutUserinfo(url: string): string {
 
 /**
  * The push-only delivery a deliver transcript records, or `null`. The LAST
- * {@link DELIVER_PUSHED_NO_PR_MARKER} line wins. The marker is the script's own final verdict and
- * the PR path never prints it, so it is AUTHORITATIVE over any `/pull/<n>` URL earlier in the same
- * transcript: `git push` echoes the remote's output, and a hook can print anything (Copilot on
- * crew#734).
+ * {@link DELIVER_PUSHED_NO_PR_MARKER} line wins. Whether it outranks a PR URL in the same transcript
+ * is decided by position in `deliveryRecordFrom` (`api/delivery-index.ts`): the script's verdict is
+ * the last of the two, and anything earlier may be the remote's echo.
  */
 export function pushedOnlyFrom(text: string): PushedOnlyDelivery | null {
   let found: PushedOnlyDelivery | null = null;
