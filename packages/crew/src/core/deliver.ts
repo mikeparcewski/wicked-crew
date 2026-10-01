@@ -1173,12 +1173,18 @@ export function deliverRunBranch(runId: string | null | undefined): string | nul
   // The id as the engine receives it — NOT trimmed: `" run "` takes the engine's hash tier, and a
   // trim here would announce `wicked/run` (Copilot on crew#736).
   const id = runId ?? '';
-  if (/^[A-Za-z0-9._-]+$/.test(id)) return `wicked/${id}`;
+  // The charset alone is not a git ref component: `.run`, `run..next`, `run.lock`, `run.` are
+  // illegal refs the engine must sanitize, so they name no branch here (Copilot on crew#736).
+  const refSafe = (x: string): boolean =>
+    /^[A-Za-z0-9._-]+$/.test(x) && !x.startsWith('.') && !x.startsWith('-') && !x.includes('..') && !x.endsWith('.') && !x.endsWith('.lock');
+  if (refSafe(id)) return `wicked/${id}`;
   // The engine's hashless COLON tier (core#345/#347): an id whose only illegal char is `:` (a
   // campaign-shaped `<label>:<repo>:a0`) names its worktree and branch with each `:` as `-`
   // (Copilot on crew#736). Any other shape takes the engine's hash-suffixed tier, which is not
   // re-derived here — the card then says "the run branch" rather than guess.
-  if (/^[A-Za-z0-9._-]+(?::[A-Za-z0-9._-]+)+$/.test(id)) return `wicked/${id.replaceAll(':', '-')}`;
+  if (/^[A-Za-z0-9._-]+(?::[A-Za-z0-9._-]+)+$/.test(id) && refSafe(id.replaceAll(':', '-'))) {
+    return `wicked/${id.replaceAll(':', '-')}`;
+  }
   return null;
 }
 

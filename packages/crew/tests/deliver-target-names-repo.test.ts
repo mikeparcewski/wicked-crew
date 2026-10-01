@@ -70,6 +70,10 @@ describe('the deliver card names the GitHub repository and the real branch (R1, 
     expect(newPrTargetSentence(`git@github.com:${SLUG}.git`, 'has space:x')).toContain('Pushes the run branch to');
     // Whitespace is not trimmed away: the engine hashes `" run "`, so no `wicked/run` is announced.
     expect(newPrTargetSentence(`git@github.com:${SLUG}.git`, ' run ')).toContain('Pushes the run branch to');
+    // In the charset but not a legal git ref component: no branch is announced (Copilot).
+    for (const id of ['.run', 'run..next', 'run.lock', 'run.', '-run', 'a:run.lock']) {
+      expect(newPrTargetSentence(`git@github.com:${SLUG}.git`, id), id).toContain('Pushes the run branch to');
+    }
   });
 
   it('with no run yet (the launch) it says "the run branch", never a placeholder', () => {
