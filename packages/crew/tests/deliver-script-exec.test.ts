@@ -141,7 +141,15 @@ interface GhStub {
  */
 async function runDeliver(
   fx: Fixture,
-  opts: { intent?: string; gh?: GhStub; env?: Record<string, string>; script?: DeliverScriptOptions } = {},
+  opts: {
+    intent?: string;
+    gh?: GhStub;
+    env?: Record<string, string>;
+    script?: DeliverScriptOptions;
+    /** R1: what `git remote get-url --push origin` answers inside the script (a `git` shim; every
+     *  other git call reaches the real git, so the push still lands on the bare fixture). */
+    originPushUrl?: string;
+  } = {},
 ): Promise<{ status: number; output: string; lastLine: string; pr: PrCreateCall | null; comment: string | null; ghCalls: string[] }> {
   const home = join(fx.root, 'home');
   const bin = join(fx.root, 'bin');
@@ -177,6 +185,23 @@ async function runDeliver(
     ].join('\n'),
   );
   chmodSync(join(bin, 'gh'), 0o755);
+  if (opts.originPushUrl !== undefined) {
+    const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+    writeFileSync(
+      join(bin, 'git'),
+      [
+        '#!/bin/sh',
+        // `remote get-url --push --all origin` — the env value may hold several newline-separated URLs.
+        // Only the FULL invocation, so a script that dropped `--all` falls through to real git and the
+        // multi-URL case fails (Copilot on crew#736).
+        'if [ "$1" = remote ] && [ "$2" = get-url ] && [ "$3" = --push ] && [ "$4" = --all ] && [ "$5" = origin ] && [ $# -eq 5 ]; then printf "%s\\n" "$GIT_STUB_ORIGIN_PUSH_URL"; exit 0; fi',
+        `exec '${realGit}' "$@"`,
+      ].join('\n'),
+    );
+    chmodSync(join(bin, 'git'), 0o755);
+  } else if (existsSync(join(bin, 'git'))) {
+    rmSync(join(bin, 'git'));
+  }
 
   const record = join(fx.root, `gh-record-${Date.now()}-${Math.random().toString(16).slice(2)}`);
   const res = await new Promise<{ status: number; stdout: string; stderr: string }>((resolve) => {
@@ -201,6 +226,7 @@ async function runDeliver(
           GH_STUB_API_FAIL: opts.gh?.apiFails === true ? '1' : '',
           GH_STUB_PR_STATE: opts.gh?.prState ?? '',
           GH_STUB_COMMENT_FAIL: opts.gh?.commentFailWith ?? '',
+          GIT_STUB_ORIGIN_PUSH_URL: opts.originPushUrl ?? '',
           // DES-L9: the identity block reads GH_TOKEN's PRESENCE for its disclosure line — keep the
           // fixture deterministic whatever the developer's shell exported.
           GH_TOKEN: '',
@@ -314,6 +340,90 @@ describe('deliver script, driven for real (crew#317)', () => {
     const files = git(fx.origin, 'show', '--name-only', '--format=', `wicked/${RUN_ID}`).trim();
     expect(files.split('\n').sort()).toEqual(['README.md', 'attentionReason.ts']);
     expect(git(fx.workdir, 'status', '--porcelain').trim()).toBe('');
+  }, 60_000);
+
+  it('R1: opens the pull request ON the github.com repository the consent card named (`--repo owner/repo`)', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'README.md'), 'base\nchanged\n');
+    // The card's compose-time origin read named acme/widgets; gh must not pick another base
+    // (a `gh repo set-default`, an `upstream` remote) behind the operator's consent. Userinfo is
+    // assembled at runtime: no credential-shaped literal in the source.
+    const consented = ['https://', 'x-access-token', ':', 'FAKE-TOKEN', '@github.com/acme/widgets.git'].join('');
+    const r = await runDeliver(fx, {
+      intent: 'bind the PR target',
+      script: { runId: RUN_ID, originUrl: consented },
+      originPushUrl: 'https://github.com/acme/widgets.git',
+    });
+    expect(r.status).toBe(0);
+    // `ghCalls` keeps the full argv (the stub's `.argv` record is written after its arg loop shifts).
+    const create = r.ghCalls.find((c) => c.startsWith('pr create')) ?? '';
+    expect(create).toContain('pr create --repo acme/widgets --head');
+    expect(r.output).not.toContain('FAKE-TOKEN');
+  }, 60_000);
+
+  it('R1: REFUSES when origin was re-pointed since the card was approved — nothing staged or pushed (Copilot)', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'README.md'), 'base\nchanged\n');
+    const r = await runDeliver(fx, {
+      intent: 'origin drifted',
+      script: { runId: RUN_ID, originUrl: 'git@github.com:acme/widgets.git' },
+      originPushUrl: 'git@github.com:someone-else/widgets.git',
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.output).toContain('deliver: origin no longer points at acme/widgets (or also pushes elsewhere), the repository this delivery was approved for');
+    expect(originBranches(fx)).not.toContain(`wicked/${RUN_ID}`);
+    expect(r.ghCalls.some((c) => c.startsWith('pr create'))).toBe(false);
+    expect(git(fx.workdir, 'status', '--porcelain')).toContain('README.md');
+  }, 60_000);
+
+  // The drift check PARSES the URL (codex review): a look-alike host, or a path that merely ends
+  // in the repository, is refused; every honest spelling of the same repository passes.
+  it.each([
+    'https://evil.example/github.com/acme/widgets',
+    'git@evilgithub.com:acme/widgets.git',
+    'ssh://git@github.com.evil.example/acme/widgets',
+    // A SECOND push URL would receive the branch unnamed (Copilot): every one must be the approved repo.
+    'git@github.com:acme/widgets.git\ngit@github.com:someone-else/widgets.git',
+  ])('R1 drift: a look-alike origin %s is refused, nothing pushed', async (lookAlike) => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'README.md'), 'base\nchanged\n');
+    const r = await runDeliver(fx, {
+      intent: 'look-alike origin',
+      script: { runId: RUN_ID, originUrl: 'https://github.com/acme/widgets.git' },
+      originPushUrl: lookAlike,
+    });
+    expect(r.output).toContain('deliver: origin no longer points at acme/widgets');
+    expect(originBranches(fx)).not.toContain(`wicked/${RUN_ID}`);
+  }, 60_000);
+
+  it.each([
+    'git@github.com:acme/widgets.git',
+    'ssh://git@GitHub.com:22/acme/widgets/',
+    'https://github.com/acme/widgets',
+    'https://github.com/ACME/Widgets.git',
+    'ssh://git@ssh.github.com:443/acme/widgets.git',
+    'git@github.com:/acme/widgets.git',
+    'https://github.com/ACME/Widgets.GIT',
+  ])('R1 drift: the honest spelling %s passes and the push lands', async (same) => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'README.md'), 'base\nchanged\n');
+    const r = await runDeliver(fx, {
+      intent: 'same origin',
+      script: { runId: RUN_ID, originUrl: 'https://github.com/acme/widgets.git' },
+      originPushUrl: same,
+    });
+    expect(r.output).not.toContain('origin no longer points at');
+    expect(r.status).toBe(0);
+  }, 60_000);
+
+  it('R1: a non-github.com origin bakes no --repo — gh still resolves it (the push-only path keys on that)', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'README.md'), 'base\nchanged\n');
+    const r = await runDeliver(fx, { intent: 'no binding', script: { runId: RUN_ID, originUrl: fx.origin } });
+    expect(r.status).toBe(0);
+    const create = r.ghCalls.find((c) => c.startsWith('pr create')) ?? '';
+    expect(create).toContain('pr create --head');
+    expect(create).not.toContain('--repo');
   }, 60_000);
 
   it('EXCLUDES untracked scratch/key-material and reports each exclusion, while product rides (crew#434)', async () => {

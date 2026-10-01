@@ -254,13 +254,13 @@ describe('the deliver gate card (DES-L9 §4) — push target + identity with its
 
   it('names the revised PR or the new-PR push, and the identity: pinned by GH_TOKEN / keyring / not set', () => {
     expect(deliverGateInstructions({ revisesPr: { number: 273, headRef: HEAD, url: URL_273 }, ghAccount: 'release-bot', ghTokenPinned: true })).toBe(
-      `Pushes wicked/<run> onto pull request #273 (branch ${HEAD}); no new PR. Push identity: release-bot (GH_ACCOUNT), pinned by GH_TOKEN — the phase refuses if gh's login differs at push time.${CROSS}`,
+      `Pushes the run branch onto pull request #273 (branch ${HEAD}); no new PR. Push identity: release-bot (GH_ACCOUNT), pinned by GH_TOKEN — the phase refuses if gh's login differs at push time.${CROSS}`,
     );
     expect(deliverGateInstructions({ ghAccount: 'release-bot', ghTokenPinned: false })).toBe(
-      `Pushes the run branch wicked/<run> to origin and opens a pull request; merge stays human. Push identity: release-bot (GH_ACCOUNT) against the gh keyring — the login can change between the check and the push; export GH_TOKEN to pin it. The phase refuses if gh's login differs.${CROSS}`,
+      `Pushes the run branch to origin and opens a pull request; merge stays human. Push identity: release-bot (GH_ACCOUNT) against the gh keyring — the login can change between the check and the push; export GH_TOKEN to pin it. The phase refuses if gh's login differs.${CROSS}`,
     );
     expect(deliverGateInstructions({})).toBe(
-      `Pushes the run branch wicked/<run> to origin and opens a pull request; merge stays human. Push identity: none configured — pushes as whatever login gh holds (set the deliver identity in system settings to pin it).${CROSS}`,
+      `Pushes the run branch to origin and opens a pull request; merge stays human. Push identity: none configured — pushes as whatever login gh holds (set the deliver identity in system settings to pin it).${CROSS}`,
     );
     // Never the token itself.
     expect(deliverGateInstructions({ ghAccount: 'a', ghTokenPinned: true })).not.toMatch(/ghp_|gho_/);

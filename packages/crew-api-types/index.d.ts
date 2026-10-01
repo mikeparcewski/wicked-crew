@@ -4203,6 +4203,24 @@ export interface CodeGraphData {
 }
 
 /**
+ * `GET /api/v1/repos/:id/deliver-target` (R3) — where a delivering launch on this repo would push,
+ * read by the same origin preflight the deliver gate card uses (crew#730). `sentence` is the gate's
+ * own target sentence for a run not yet started ("the run branch"); show it verbatim.
+ *  - `github`  — a github.com origin; `githubRepo` is its `owner/repo` on github.com or
+ *                ssh.github.com, and `null` on another `*.github.com` host (gist, api);
+ *  - `local`   — a filesystem path or `file://` URL: no pull request can be opened against it;
+ *  - `other`   — another host: a pull request opens only if gh resolves it as a GitHub host;
+ *  - `none`    — the checkout has no `origin` remote: the push will fail;
+ *  - `unknown` — the origin could not be read; the sentence claims nothing either way.
+ */
+export interface DeliverTargetResponse {
+  repo: string;
+  origin: 'github' | 'local' | 'other' | 'none' | 'unknown';
+  githubRepo: string | null;
+  sentence: string;
+}
+
+/**
  * `GET /repos/:id/graph` → 200 (api-types 0.35.0, F-2R2-005). `graph: null` = the repo's code
  * graph has not been built (nothing at its registered graph path) — and `reason` says WHY, so a
  * consumer of this route alone can tell "not indexed" from "empty": the same finding text the
