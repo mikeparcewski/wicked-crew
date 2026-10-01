@@ -62,6 +62,11 @@ describe('the deliver card names the GitHub repository and the real branch (R1, 
     for (const card of [gh, local, revision]) expect(card).not.toContain('<run>');
   });
 
+  it('a campaign-shaped id takes the engine\'s colon tier; any other unsafe id names no guess (Copilot)', () => {
+    expect(newPrTargetSentence(`git@github.com:${SLUG}.git`, 'recon-7:alpha:a0')).toContain('Pushes branch wicked/recon-7-alpha-a0 to');
+    expect(newPrTargetSentence(`git@github.com:${SLUG}.git`, 'has space:x')).toContain('Pushes the run branch to');
+  });
+
   it('with no run yet (the launch) it says "the run branch", never a placeholder', () => {
     expect(newPrTargetSentence(`git@github.com:${SLUG}.git`)).toBe(
       `Pushes the run branch to ${SLUG} on GitHub and opens a pull request there; merge stays human.`,

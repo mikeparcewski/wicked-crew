@@ -595,6 +595,16 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     `TARGET='${target}'`,
     `PRURL='${prUrl}'`,
     `GHREPO='${ghRepo}'`,
+    // R1 (Copilot on crew#736): the card the operator approved named GHREPO; if origin was
+    // re-pointed since (the run can wait at its gate for hours), the push would leave for another
+    // repository than the one consented to. Refuse before anything is fetched, staged or pushed.
+    // Only the host+path is compared — the URL itself (it may carry a token) is never printed.
+    'if [ -n "$GHREPO" ]; then',
+    '  case "$(git remote get-url --push origin 2>/dev/null)" in',
+    '    *"github.com/$GHREPO"|*"github.com/$GHREPO.git"|*"github.com/$GHREPO/"|*"github.com:$GHREPO"|*"github.com:$GHREPO.git") ;;',
+    '    *) echo "deliver: origin no longer points at $GHREPO, the repository this delivery was approved for — nothing was staged, committed or pushed. Point origin back at $GHREPO, or reject and relaunch against the new remote"; exit 1;;',
+    '  esac',
+    'fi',
     // (a) The run branch: wicked/<worktree-basename> (the engine names run worktrees by run id),
     // falling back to the currently checked-out branch when that ref does not exist.
     'R=$(basename "$PWD")',
@@ -1135,7 +1145,13 @@ export function githubRepoOf(url: string | null | undefined): string | null {
  *  run id and the script pushes `wicked/<worktree basename>`) — or `null` when the run is unknown. */
 export function deliverRunBranch(runId: string | null | undefined): string | null {
   const id = (runId ?? '').trim();
-  return /^[A-Za-z0-9._-]+$/.test(id) ? `wicked/${id}` : null;
+  if (/^[A-Za-z0-9._-]+$/.test(id)) return `wicked/${id}`;
+  // The engine's hashless COLON tier (core#345/#347): an id whose only illegal char is `:` (a
+  // campaign-shaped `<label>:<repo>:a0`) names its worktree and branch with each `:` as `-`
+  // (Copilot on crew#736). Any other shape takes the engine's hash-suffixed tier, which is not
+  // re-derived here — the card then says "the run branch" rather than guess.
+  if (/^[A-Za-z0-9._-]+(?::[A-Za-z0-9._-]+)+$/.test(id)) return `wicked/${id.replaceAll(':', '-')}`;
+  return null;
 }
 
 /**
