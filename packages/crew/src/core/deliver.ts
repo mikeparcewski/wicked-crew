@@ -616,7 +616,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // GitHub owner/repo names are case-insensitive: compare lowercased, keep GHREPO's spelling
     // for `--repo` (codex review, MEDIUM). An absolute scp path (`git@github.com:/o/r`) is the same
     // repository: the leading `/` goes.
-    "    OH=$(printf '%s' \"$OH\" | tr 'A-Z' 'a-z'); OP=${OP#/}; OP=${OP%/}; OP=$(printf '%s' \"${OP%.git}\" | tr 'A-Z' 'a-z')",
+    "    OH=$(printf '%s' \"$OH\" | tr 'A-Z' 'a-z'); OP=$(printf '%s' \"$OP\" | tr 'A-Z' 'a-z'); OP=${OP#/}; OP=${OP%/}; OP=${OP%.git}",
     '    case "$OH" in github.com|ssh.github.com) [ "$OP" = "$GL" ] || ODRIFT=1;; *) ODRIFT=1;; esac',
     '  done <<GHREPO_URLS',
     '$(git remote get-url --push --all origin 2>/dev/null || true)',

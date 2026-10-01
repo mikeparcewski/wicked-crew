@@ -191,8 +191,10 @@ async function runDeliver(
       join(bin, 'git'),
       [
         '#!/bin/sh',
-        // `remote get-url --push [--all] origin` — the env value may hold several newline-separated URLs.
-        'if [ "$1" = remote ] && [ "$2" = get-url ] && [ "$3" = --push ]; then printf "%s\\n" "$GIT_STUB_ORIGIN_PUSH_URL"; exit 0; fi',
+        // `remote get-url --push --all origin` — the env value may hold several newline-separated URLs.
+        // Only the FULL invocation, so a script that dropped `--all` falls through to real git and the
+        // multi-URL case fails (Copilot on crew#736).
+        'if [ "$1" = remote ] && [ "$2" = get-url ] && [ "$3" = --push ] && [ "$4" = --all ] && [ "$5" = origin ] && [ $# -eq 5 ]; then printf "%s\\n" "$GIT_STUB_ORIGIN_PUSH_URL"; exit 0; fi',
         `exec '${realGit}' "$@"`,
       ].join('\n'),
     );
@@ -401,6 +403,7 @@ describe('deliver script, driven for real (crew#317)', () => {
     'https://github.com/ACME/Widgets.git',
     'ssh://git@ssh.github.com:443/acme/widgets.git',
     'git@github.com:/acme/widgets.git',
+    'https://github.com/ACME/Widgets.GIT',
   ])('R1 drift: the honest spelling %s passes and the push lands', async (same) => {
     const fx = fixture();
     writeFileSync(join(fx.workdir, 'README.md'), 'base\nchanged\n');
