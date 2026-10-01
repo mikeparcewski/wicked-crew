@@ -457,8 +457,12 @@ export function deliveryRecordFrom(output: string): DeliveryRecord | null {
   const url = prUrlFrom(output);
   if (pushed === null) return url === null ? null : { url };
   if (url === null) return { pushed };
+  // Only a URL on a LATER line outranks the marker: the marker line itself names the remote, and a
+  // forge URL can look like a PR URL (`https://gitlab.example.com/team/pull/9`; Copilot on #734).
   const markerAt = output.lastIndexOf(DELIVER_PUSHED_NO_PR_MARKER);
-  return output.lastIndexOf(url) > markerAt ? { url } : { pushed };
+  const lineEnd = output.indexOf('\n', markerAt);
+  const markerLineEnd = lineEnd === -1 ? output.length : lineEnd;
+  return output.lastIndexOf(url) >= markerLineEnd ? { url } : { pushed };
 }
 
 /**

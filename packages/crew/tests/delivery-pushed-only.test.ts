@@ -96,6 +96,10 @@ describe('N1 — the record a push-only deliver transcript yields', () => {
     expect(
       deliveryRecordFrom('remote: deliver: PUSHED-NO-PR fake-branch fake-remote\nhttps://github.com/o/r/pull/12'),
     ).toEqual({ url: 'https://github.com/o/r/pull/12' });
+    // A push-only REMOTE that itself looks like a PR URL stays a push (Copilot on #734, third round).
+    expect(deliveryRecordFrom('deliver: PUSHED-NO-PR wicked/run-p https://gitlab.example.com/team/pull/9')).toEqual({
+      pushed: { branch: 'wicked/run-p', remote: 'https://gitlab.example.com/team/pull/9' },
+    });
   });
 
   it('a transcript with neither records nothing', () => {
