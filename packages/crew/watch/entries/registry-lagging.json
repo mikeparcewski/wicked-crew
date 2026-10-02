@@ -1,0 +1,12 @@
+{
+  "id": "registry-lagging",
+  "version": 1,
+  "on": { "source": "internal", "type": "registry.tick" },
+  "filter": {},
+  "check": "deterministic:lag",
+  "params": {},
+  "threshold": { "queue_depth": 384, "tail_lag_ms": 60000 },
+  "emit": { "as": "flag", "severity": "info", "watch_kind": "problem", "attach": null, "rate": { "per_run": 5 } },
+  "priority": "p0",
+  "enabled": true
+}

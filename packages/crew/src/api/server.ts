@@ -85,6 +85,9 @@ import { resumeRunningCampaigns } from '../campaign/boot-resume.js';
 import { StandingOrderStore } from '../standing-orders/store.js';
 import { StandingOrderEvaluator, type GateFact } from '../standing-orders/evaluator.js';
 import { registerStandingOrderRoutes } from '../standing-orders/routes.js';
+import { WatchRegistry } from '../watch/registry.js';
+import { registerWatchRoutes } from './watch-routes.js';
+import { callEstateTool } from '../core/estate-mcp-client.js';
 import { seatParser } from '../standing-orders/parse.js';
 import { registerGateHistoryRoute, runBand, runPreset, runProject } from '../standing-orders/history.js';
 import { busRows, openPlanGateRisk } from '../team/routes.js';
@@ -250,6 +253,18 @@ export interface CreateServerOptions {
     /** Poll cadence, ms (tests shorten it). */
     pollIntervalMs?: number;
   };
+  /**
+   * The watch registry (DES-TRIGGER-REGISTRY-001, TR-W5a): advisory key-point checks over the
+   * daemon fan-in, relayed as `watchEvent` frames. Arms only where the engine holds a bus;
+   * `disabled: true` turns it off (health then says watching is not configured).
+   */
+  watch?: {
+    disabled?: boolean;
+    entriesDir?: string;
+    pollIntervalMs?: number;
+    flushMs?: number;
+    tickMs?: number;
+  };
   interactiveWsRelay?: {
     disabled?: boolean;
     /** The bus db; omit for the one the adapter handed its engine (`busDbPath`, core/bus.ts). */
@@ -378,6 +393,9 @@ export async function createServer(
   // Standing orders (behaviour 10): armed once the routes (and so THE gate decision path) exist;
   // the event relays above it read it late-bound.
   let standingOrderEvaluator: StandingOrderEvaluator | null = null;
+  // The watch registry (TR-W5a): built after the relays below; the fan-in and the watchdog tee
+  // read it late-bound, exactly as they read the standing-orders evaluator.
+  let watchRegistry: WatchRegistry | null = null;
   const elicitationCache = new ElicitationCache();
   const terminals = new TerminalHub();
   // Per-seat runtime health (crew#274): folded from the single CoreEvent subscription below,
@@ -846,6 +864,59 @@ export async function createServer(
     });
   }
 
+  // The watch registry (DES-TRIGGER-REGISTRY-001, TR-W5a). Advisory by construction: it is handed
+  // no gate, reassign or policy dependency (tests/watch-no-authority.test.ts). It arms in the
+  // background (the boot replay re-reads each live run's events); until then, and without a bus,
+  // `GET /watch/health` says why it is not watching.
+  if (options?.watch?.disabled !== true) {
+    const registry = new WatchRegistry({
+      dbPath: engineBusDb,
+      ...(options?.watch?.entriesDir !== undefined ? { entriesDir: options.watch.entriesDir } : {}),
+      settings: async () => (await adapter.getSettings()).watch,
+      projectOf: (runId) => membershipIndex.projectOf(runId),
+      liveRuns: async () =>
+        (await adapter.sessionsDetail())
+          .filter((v) => !['completed', 'cancelled', 'failed'].includes(v.session.status))
+          .map((v) => v.session.id),
+      runEvents: (runId) => adapter.runEvents(runId),
+      broadcast: (frame) => broadcast(frame),
+      auditEmitFailed: (detail) => {
+        audit.record('watch.emit.failed', { id: 'watch-registry', kind: 'system', trust: 'admin' }, { detail });
+      },
+      // A proposal row goes to the existing review queue, never self-applied (§4.11). The check
+      // names the queue item in `facts.proposal` ({kind_type, payload, facets?}).
+      submitProposal: async (finding) => {
+        const proposal = finding.facts['proposal'] as
+          | { kind_type?: unknown; payload?: unknown; facets?: unknown }
+          | undefined;
+        if (typeof proposal?.kind_type !== 'string' || typeof proposal.payload !== 'object' || proposal.payload === null) {
+          throw new Error('a proposal row must carry facts.proposal {kind_type, payload}');
+        }
+        await callEstateTool('proposal.submit', {
+          kind_type: proposal.kind_type,
+          payload: { ...(proposal.payload as Record<string, unknown>), source: `watch:${finding.watch_id}` },
+          facets: typeof proposal.facets === 'object' && proposal.facets !== null ? proposal.facets : {},
+        });
+      },
+      log: (m) => app.log.warn(m),
+      ...(options?.watch?.pollIntervalMs !== undefined ? { pollIntervalMs: options.watch.pollIntervalMs } : {}),
+      ...(options?.watch?.flushMs !== undefined ? { flushMs: options.watch.flushMs } : {}),
+      ...(options?.watch?.tickMs !== undefined ? { tickMs: options.watch.tickMs } : {}),
+    });
+    watchRegistry = registry;
+    const arming = registry
+      .arm()
+      .then(() => {
+        if (registry.armed) app.log.info('watch registry armed (watch rows → watchEvent)');
+      })
+      .catch((err) => app.log.warn(`[watch] arm failed: ${String(err)}`));
+    app.addHook('onClose', async () => {
+      await arming;
+      await registry.stop();
+    });
+  }
+  registerWatchRoutes(app, { registry: () => watchRegistry, audit });
+
   /** The post-commit half of a project-FILED launch, shared with the launch route (§2.2/§4):
    *  the engine already attached the crew.run membership atomically with the launch — here we
    *  tag future /ws frames and announce the attach on the project bus. */
@@ -1121,6 +1192,8 @@ export async function createServer(
         detail,
       });
       stallFrameIndex.record(frame, ts);
+      // The watch registry's watchdog source (§4.6): an O(1) push, never awaited.
+      watchRegistry?.offerWatchdog(frame as unknown as { type: string; session?: string } & Record<string, unknown>);
     },
     // The engine's own turn ceiling fired (`stepStatus: "timed_out"`, perf#4) — audit it as
     // what it is, distinct from an operator cancel. Never sent by older engines; the ambiguous
@@ -1281,6 +1354,8 @@ export async function createServer(
     // Standing orders (behaviour 10): a gate that opened may be one an order answers, holds or
     // reports — after the gate cache folded it, so the order's decision carries the right ord.
     void standingOrderEvaluator?.onEvent(event);
+    // The watch registry (TR-W5a, G3): synchronous, O(1), never awaited, never throws.
+    watchRegistry?.offer(event);
     // The delivered-PR record (CREW-UX-8, crew#321): resolved once per run at its terminal
     // frame, best-effort, off the hot path — see `resolveRunDelivery` above for why BOTH
     // terminal frames trigger it and why a failed deliver is a no-op. THEN the delivery-
@@ -1612,6 +1687,8 @@ export async function createServer(
       broadcast: (frame) => broadcast(frame),
       // crew#619: retain a chat's transcript for the lifetime of its promoted run.
       linkChatRun,
+      // TR-W5a: the `watch.*` settings guard validates against the registry's entries.
+      watchRegistry: () => watchRegistry,
     },
   );
 

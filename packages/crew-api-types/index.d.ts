@@ -4266,6 +4266,12 @@ export interface SystemSettings {
   /** Max nodes returned by wicked-estate graph-view (default 150). */
   graphNodeLimit: number;
   /**
+   * The watch registry's operator settings (TR-W5a, api-types 0.73.0): only `enabled` and
+   * `threshold` of a shipped entry, and the LLM lane switch. A `watch` patch needs a human actor
+   * (a worker's bearer is refused 403); the daemon stamps who changed what and when.
+   */
+  watch?: WatchSettings;
+  /**
    * Base directory for the ENGINE-OWNED worker CLI config homes (the claude worker home is
    * `<root>/claude`). The daemon applies it as env `WICKED_WORKER_HOME` at boot and on every
    * settings change; the engine reads that env per worker spawn (acp_runner.rs), so a change
@@ -7251,8 +7257,45 @@ export type WatchCoverage =
 /** `GET /watch?project=&kind=&run=&since=&limit=`: the feed fold, newest first. */
 export interface WatchFeedResponse {
   findings: WatchFinding[];
+  /**
+   * The clearing rows of the findings on this page (a late join folds them as the live
+   * `watch_finding.cleared` frames would: Fixed, Dismissed, rolled up). api-types 0.73.0.
+   */
+  cleared?: WatchFindingCleared[];
   /** Present with `run=` only. */
   coverage?: WatchCoverage[];
+}
+
+/**
+ * Where an entry's key point comes from. `core`: a CoreEvent from the daemon fan-in. `bus`: a pulled
+ * 4-segment bus type. `watchdog`: a stall-watchdog frame (`workerStalled`, …). `internal`: the
+ * registry's own tick or check-failure report (`registry-lagging`, `registry-check-failed`).
+ * (api-types 0.73.0 adds `watchdog` and `internal`.)
+ */
+export type WatchEntrySource = 'core' | 'bus' | 'watchdog' | 'internal';
+
+/** Who changed one operator setting of an entry, and when (stamped by the daemon, never the caller). */
+export interface WatchSettingStamp {
+  by: string;
+  /** Unix millis. */
+  at: number;
+}
+
+/** One entry's operator override in `SystemSettings.watch.entries`. */
+export interface WatchEntryOverride {
+  enabled?: boolean;
+  /** Merged over the shipped threshold, validated by the entry's check. */
+  threshold?: Record<string, unknown>;
+  /** Daemon-stamped; a caller cannot set these. */
+  enabled_changed?: WatchSettingStamp;
+  threshold_changed?: WatchSettingStamp;
+}
+
+/** `SystemSettings.watch`. */
+export interface WatchSettings {
+  entries?: Record<string, WatchEntryOverride>;
+  /** The LLM lane (off by default; TR-W9). */
+  llm?: boolean;
 }
 
 /**
@@ -7265,8 +7308,8 @@ export interface WatchEntry {
   id: string;
   /** Bumped on any semantic change; part of every finding key. */
   version: number;
-  /** `core`: a CoreEvent `type` from the daemon fan-in. `bus`: a 4-segment `wicked.<domain>.<noun>.<verb>` type. */
-  on: { source: 'core' | 'bus'; type: string };
+  /** See {@link WatchEntrySource}. A `bus` type is a 4-segment `wicked.<domain>.<noun>.<verb>` type. */
+  on: { source: WatchEntrySource; type: string };
   /** JSON-path equality, AND of keys; an array means "any of". */
   filter: Record<string, unknown>;
   check: string;

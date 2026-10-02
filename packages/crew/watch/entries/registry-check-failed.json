@@ -1,0 +1,12 @@
+{
+  "id": "registry-check-failed",
+  "version": 1,
+  "on": { "source": "internal", "type": "registry.check_failed" },
+  "filter": {},
+  "check": "deterministic:check_failed",
+  "params": {},
+  "threshold": { "failures": 3, "window_minutes": 10 },
+  "emit": { "as": "flag", "severity": "info", "watch_kind": "problem", "attach": null, "rate": { "per_run": 5 } },
+  "priority": "p0",
+  "enabled": true
+}
