@@ -67,7 +67,7 @@ describe('system settings follow the state home (crew#756)', () => {
   it('migrates once: an upgraded non-default daemon starts from a COPY of the shared file, and its writes stay home', async () => {
     const prevHome = process.env['HOME'];
     process.env['HOME'] = join(dir, 'home');
-    const legacy = join(dir, 'home', '.config', 'wicked-core', 'settings.json');
+    const legacy = join(dir, 'home', '.config/wicked-core', 'settings.json');
     mkdirSync(join(legacy, '..'), { recursive: true });
     writeFileSync(legacy, JSON.stringify({ deliverDefault: 'none', graphNodeLimit: 77 }));
     const a = new CoreAdapter({ dbPath: join(dir, 'rig', 'core.db'), stub: true });
