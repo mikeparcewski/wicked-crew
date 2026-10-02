@@ -25,7 +25,8 @@
 
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { createReadStream, promises as fsp } from 'node:fs';
+import { constants as fsConstants, createReadStream, promises as fsp } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { extname, join, relative, resolve, sep } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
@@ -40,6 +41,7 @@ import type {
 } from 'wicked-crew-api-types';
 import type { CoreAdapter } from '../core/adapter.js';
 import type { SessionView, WorkUnit } from '../core/types.js';
+import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 import { API_PREFIX } from './api-prefix.js';
 import { coreUnitId } from './evidence.js';
 
@@ -139,7 +141,12 @@ export function runFfmpeg(args: string[], timeoutMs: number): Promise<FfmpegOutc
       resolveOutcome(o);
     };
     let stderr = '';
-    const child = spawn(bin, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+    // crew#495: no child of the daemon inherits a daemon-exported governance store.
+    const child = spawn(bin, args, {
+      stdio: ['ignore', 'ignore', 'pipe'],
+      windowsHide: true,
+      env: childEnvWithBootEstateDb(process.env),
+    });
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
       settle({ kind: 'timeout' });
@@ -160,11 +167,19 @@ export function runFfmpeg(args: string[], timeoutMs: number): Promise<FfmpegOutc
 type DemoExportAnswer = { status: number; body: DemoExportResponse | { error: string; hint?: string } };
 
 /**
- * Encode one export of a run's stitched MP4. The encoder writes a temporary file beside the target,
- * renamed into place only once it is whole, so a half-written GIF is never served and a failed or
- * killed encode leaves the previous export (or nothing) behind.
+ * Encode one export of a run's stitched MP4. The run's workers can write its demo root, so ffmpeg never
+ * touches it: the MP4 is copied into a daemon-private staging directory, encoded there, and only the
+ * finished file is published back, after `stillExportable` confirms the run has not resumed (a review
+ * gate answered with `request_changes` during the encode re-opens `record`) and `demo-video/` still
+ * resolves where it did. Publication is an exclusive copy to a fresh name inside `demo-video/` and a
+ * rename, so a half-written export is never served and a failed or killed encode leaves nothing behind.
  */
-async function encodeDemoExport(runId: string, format: DemoExportFormat, atSec: number | undefined): Promise<DemoExportAnswer> {
+async function encodeDemoExport(
+  runId: string,
+  format: DemoExportFormat,
+  atSec: number | undefined,
+  stillExportable: () => Promise<boolean>,
+): Promise<DemoExportAnswer> {
   const root = demoRootDir(runId);
   const input = await containedPath(root, 'demo-video/demo.mp4');
   const inputSize = input === null ? null : await fsp.stat(input).then((st) => (st.isFile() ? st.size : null), () => null);
@@ -177,17 +192,21 @@ async function encodeDemoExport(runId: string, format: DemoExportFormat, atSec: 
   if (outDir === null) return { status: 409, body: { error: 'this demo has no demo-video/ directory' } };
   const name = DEMO_EXPORT_FILE[format];
   const ext = extname(name);
-  const tmp = join(outDir, `.export-${randomUUID()}${ext}`);
-  let args: string[];
-  let at: number | undefined;
-  if (format === 'gif') {
-    args = ['-y', '-i', input, '-vf', DEMO_GIF_FILTER, '-loop', '0', tmp];
-  } else {
-    // Default: one second into the first chapter (the title card is past), or 1 s with no markers.
-    at = atSec ?? (parseMarkers(await readText(root, 'demo-video/chapters.md'))[0]?.sec ?? 0) + 1;
-    args = ['-y', '-ss', String(at), '-i', input, '-frames:v', '1', '-q:v', '3', '-update', '1', tmp];
-  }
+  const staging = await fsp.mkdtemp(join(tmpdir(), 'wicked-crew-demo-export-'));
+  const source = join(staging, 'source.mp4');
+  const encoded = join(staging, `export${ext}`);
+  let published: string | null = null;
   try {
+    await fsp.copyFile(input, source);
+    let args: string[];
+    let at: number | undefined;
+    if (format === 'gif') {
+      args = ['-y', '-i', source, '-vf', DEMO_GIF_FILTER, '-loop', '0', encoded];
+    } else {
+      // Default: one second into the first chapter (the title card is past), or 1 s with no markers.
+      at = atSec ?? (parseMarkers(await readText(root, 'demo-video/chapters.md'))[0]?.sec ?? 0) + 1;
+      args = ['-y', '-ss', String(at), '-i', source, '-frames:v', '1', '-q:v', '3', '-update', '1', encoded];
+    }
     const outcome = await runFfmpeg(args, DEMO_EXPORT_TIMEOUT_MS[format]);
     if (outcome.kind === 'missing') {
       return { status: 503, body: { error: 'ffmpeg not found on the daemon host', hint: DEMO_FFMPEG_HINT } };
@@ -198,22 +217,27 @@ async function encodeDemoExport(runId: string, format: DemoExportFormat, atSec: 
     if (outcome.kind === 'failed') {
       return { status: 502, body: { error: `ffmpeg failed (exit ${outcome.code}): ${outcome.stderr.trim().slice(-300)}` } };
     }
-    const bytes = await fsp.stat(tmp).then((st) => (st.isFile() ? st.size : 0), () => 0);
+    const bytes = await fsp.stat(encoded).then((st) => (st.isFile() ? st.size : 0), () => 0);
     if (bytes === 0) {
       return {
         status: 422,
         body: { error: at !== undefined ? `no frame at ${at} s: the video is shorter` : `ffmpeg wrote no ${format}` },
       };
     }
-    // The encode took seconds: re-resolve the directory before the rename, so a `demo-video` swapped
-    // for a symlink meanwhile is never written through (the run's workers can write the root).
+    if (!(await stillExportable())) {
+      return { status: 409, body: { error: 'the run resumed during the encode; the export was discarded' } };
+    }
     if ((await containedPath(root, 'demo-video')) !== outDir) {
       return { status: 409, body: { error: 'demo-video/ changed during the encode; nothing was written' } };
     }
-    await fsp.rename(tmp, join(outDir, name));
+    published = join(outDir, `.export-${randomUUID()}${ext}`);
+    await fsp.copyFile(encoded, published, fsConstants.COPYFILE_EXCL);
+    await fsp.rename(published, join(outDir, name));
+    published = null;
     return { status: 200, body: { format, path: `demo-video/${name}`, bytes } };
   } finally {
-    await fsp.rm(tmp, { force: true });
+    if (published !== null) await fsp.rm(published, { force: true });
+    await fsp.rm(staging, { recursive: true, force: true });
   }
 }
 
@@ -641,7 +665,15 @@ export function registerDemoRoutes(app: FastifyInstance, adapter: CoreAdapter): 
         return reply.code(409).send({ error: `a ${format} export of this demo is already running; try again when it ends` });
       }
       if (pending === undefined) {
-        pending = { atSec, answer: encodeDemoExport(id, format, atSec).finally(() => exportsInFlight.delete(key)) };
+        // Re-read at publication: a gate answered during the encode may have resumed the recorder.
+        const stillExportable = async (): Promise<boolean> => {
+          const now = await demoRun(id);
+          return now !== null && DEMO_EXPORT_STAGES.has(demoStage(now));
+        };
+        pending = {
+          atSec,
+          answer: encodeDemoExport(id, format, atSec, stillExportable).finally(() => exportsInFlight.delete(key)),
+        };
         exportsInFlight.set(key, pending);
       }
       const answer = await pending.answer;

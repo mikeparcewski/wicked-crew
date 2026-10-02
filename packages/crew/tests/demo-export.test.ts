@@ -14,7 +14,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
@@ -183,7 +183,12 @@ describe('POST /runs/:id/demo/export (EP-C3)', { timeout: 30_000 }, () => {
     expect(res.json()).toEqual(answer);
     expect(contractBodyAccepted).toBe(true);
     const argv = argvOf(0);
-    expect(argv[argv.indexOf('-i') + 1]).toMatch(/demo-video[\\/]demo\.mp4$/);
+    // ffmpeg never touches the worker-writable root: it reads a staged copy and writes beside it.
+    const staged = argv[argv.indexOf('-i') + 1]!;
+    expect(staged.startsWith(root)).toBe(false);
+    expect(argv[argv.length - 1]!.startsWith(root)).toBe(false);
+    expect(argv[argv.length - 1]!.startsWith(dirname(staged))).toBe(true);
+    expect(existsSync(dirname(staged)), 'the staging directory is removed').toBe(false);
     expect(argv[argv.indexOf('-vf') + 1]).toContain('palettegen');
     expect(argv[argv.indexOf('-vf') + 1]).toContain('paletteuse');
     expect(argv[argv.indexOf('-loop') + 1]).toBe('0');
@@ -260,8 +265,24 @@ describe('POST /runs/:id/demo/export (EP-C3)', { timeout: 30_000 }, () => {
     symlinkSync(outside, join(root, 'demo-video'));
     const res = await pending;
     expect(res.statusCode, res.body).toBe(409);
+    // ffmpeg wrote only into its staging directory, never through the swapped path.
+    expect(argvOf(0)[argvOf(0).length - 1]!.startsWith(root)).toBe(false);
     expect(readdirSync(outside)).toEqual([]);
     removeScratch(outside);
+  });
+
+  it('a gate answered during the encode that resumes the recorder discards the export (409)', async () => {
+    const root = stitchedRoot('d1');
+    process.env.FAKE_FFMPEG_SLEEP_MS = '800';
+    const pending = exportReq('d1', { format: 'gif' });
+    for (let i = 0; i < 100 && spawns() === 0; i++) await new Promise((r) => setTimeout(r, 20));
+    // request_changes at the review gate rewinds to record: the run is recording again.
+    sessionsDetail.mockResolvedValue([demoRun('d1', 'demo', true)]);
+    const res = await pending;
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.body).toContain('resumed');
+    expect(existsSync(join(root, 'demo-video', 'demo.gif'))).toBe(false);
+    expect(readdirSync(join(root, 'demo-video')).sort()).toEqual(['chapters.md', 'demo.mp4']);
   });
 
   it('an in-root symlinked MP4 still exports into demo-video/, the path the answer names', async () => {
