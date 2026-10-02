@@ -288,8 +288,11 @@ export class SeatHealthTracker {
         // by every new run. A launcher bench is crew's own reading and never comes back this way.
         const cli = str(event.cli);
         const reason = str((event as { reason?: unknown }).reason);
-        const source = str((event as { source?: unknown }).source) ?? 'worker';
-        if (cli === undefined || reason === undefined || source === 'launcher') return;
+        const source = str((event as { source?: unknown }).source);
+        // Only the engine's IN-RUN benches are carried: a `worker` or `judge` refusal. A launcher
+        // bench is crew's own reading, and a frame with no (or an unknown) source is malformed —
+        // neither may bench a seat for the window.
+        if (cli === undefined || reason === undefined || (source !== 'worker' && source !== 'judge')) return;
         this.recentBenches.set(cli, { at, reason, source, ...(session !== undefined ? { session } : {}) });
         this.stampError(cli, at);
         // The run moves its units OFF the benched seat: the refusing unit fails over (a

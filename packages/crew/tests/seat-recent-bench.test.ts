@@ -121,13 +121,18 @@ describe('a seat the engine benched in a run is benched at the next launch (seat
     expect(tracker.recentBenchFor('copilot', now + 2_000)).toBeNull();
   });
 
-  it("carries only the engine's in-run bench: a launcher bench, or a frame with no seat or reason, changes nothing", () => {
+  it("carries only the engine's in-run bench (worker or judge): a launcher bench, or a frame with no seat, reason or known source, changes nothing", () => {
     const tracker = new SeatHealthTracker();
     tracker.ingest(ev({ type: 'seatBenched', session: RUN, ord: 1, cli: 'codex', reason: 'signed out', source: 'launcher' }));
     tracker.ingest(ev({ type: 'seatBenched', session: RUN, ord: 1, reason: 'quota_exhausted' }));
     tracker.ingest(ev({ type: 'seatBenched', session: RUN, ord: 1, cli: 'opencode' }));
+    // A frame with no source, or one the engine does not emit, is malformed: it benches nothing.
+    tracker.ingest(ev({ type: 'seatBenched', session: RUN, ord: 1, cli: 'claude', reason: 'quota_exhausted' }));
+    tracker.ingest(ev({ type: 'seatBenched', session: RUN, ord: 1, cli: 'copilot', reason: 'quota_exhausted', source: 'ballot' }));
     expect(tracker.recentBenchFor('codex')).toBeNull();
     expect(tracker.recentBenchFor('opencode')).toBeNull();
+    expect(tracker.recentBenchFor('claude')).toBeNull();
+    expect(tracker.recentBenchFor('copilot')).toBeNull();
     expect(eligibleSeatKeys(rosterOver(tracker)())).toEqual(['claude', 'copilot', 'opencode']);
   });
 
