@@ -10,6 +10,21 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.46] — 2026-10-01
+
+Patch release: fixes the red post-publish smoke of 0.7.45 (S04 "bug-run (mixed roster)", release
+run 36946090323).
+
+### Changed
+- **Pin `wicked-core-ts` `^0.7.34` (was `^0.7.33`).** The engine half of the fix below: a seat
+  benched mid-run is never handed another unit of that run, and the bench is on the wire
+  (`seatBenched`, wicked-core#689). The lockfile locks `wicked-core-ts` and its five platform
+  binaries at 0.7.34. The bundled studio skin stays `^0.5.19` (bundle marker 0.5.19, unchanged).
+- **The release smoke runs wicked-ci at `99bbc30`** (wicked-ci#36; was v1.3.2 `201d42d`): S04
+  asserts the teamed routing of wicked-core#590 S5 instead of the removed ballots, and labels the
+  dead-but-signed-in gap `F-SMOKE-004` (core-ts 0.7.33) / `F-SMOKE-005` (crew < 0.7.46), both of
+  which this release must PASS.
+
 ### Fixed
 - **A seat that reads signed in but refused its work in a recent run is benched at the next
   launch.** crew 0.7.45's release smoke (wicked-ci S04, run 36946090323) caught it: since
@@ -3370,7 +3385,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.45...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.46...HEAD
+[0.7.46]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.45...v0.7.46
 [0.7.45]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.40...v0.7.45
 [0.7.40]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.39...v0.7.40
 [0.7.39]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.38...v0.7.39
