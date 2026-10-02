@@ -54,7 +54,7 @@ const pointCheck: WatchCheck = {
   paramsSchema: z.object({}).strict() as unknown as z.ZodType<Record<string, unknown>>,
   thresholdSchema: z.object({}).strict() as unknown as z.ZodType<Record<string, unknown>>,
   evaluate(input) {
-    const e = input.event as { ord?: number; attempt?: number; clear?: boolean };
+    const e = (input.source === 'bus' ? input.event['payload'] : input.event) as { ord?: number; attempt?: number; clear?: boolean };
     const subject = `${e.ord}:${e.attempt}:testPoint`;
     if (e.clear === true) return [{ op: 'clear', subject }];
     return [
@@ -636,6 +636,143 @@ describe('restart (test 7)', () => {
     await r.arm();
     expect(r.health().replay).toEqual({ core_gap: true });
     expect(r.coverage('run-g')).toEqual([{ entry_id: 'point', state: 'not_checked', reason: 'the daemon was down' }]);
+  });
+});
+
+describe('Copilot round 1', () => {
+  it('registry-check-failed: a quiet window closes the episode AND clears its flag; the next burst is one new live flag', async () => {
+    let now = 1_000_000;
+    const r = makeRegistry({ now: () => now, entriesDir: entriesDir([entry('boom', { check: 'deterministic:test_throws' })]) });
+    await r.arm();
+    for (let i = 0; i < 3; i++) r.offer(point('run-t', i, 1));
+    await r.flush();
+    now += 11 * 60_000; // past the 10-min window
+    for (let i = 3; i < 6; i++) r.offer(point('run-t', i, 1));
+    await r.flush();
+    const rows = (await watchRows()).filter((x) => x.payload['entry_id'] === 'registry-check-failed');
+    const raised = rows.filter((x) => x.event_type === WATCH_FINDING_RAISED);
+    const cleared = rows.filter((x) => x.event_type === WATCH_FINDING_CLEARED);
+    expect(raised).toHaveLength(2);
+    expect(cleared.map((c) => c.payload['watch_id'])).toEqual([raised[0]!.payload['watch_id']]);
+  });
+
+  it('a resolve that arrives while its raise is on its way to the bus is not lost', async () => {
+    const saved = busTesting.unattached!;
+    const gate: { release: (() => void) | null } = { release: null };
+    let holdNext = false;
+    busTesting.unattached = (path) => {
+      const inner = saved(path);
+      return {
+        busRead: (...a) => inner.busRead(...a),
+        busEmit: async (json) => {
+          if (holdNext) {
+            holdNext = false;
+            await new Promise<void>((res) => (gate.release = res));
+          }
+          return inner.busEmit(json);
+        },
+      };
+    };
+    try {
+      const r = makeRegistry({ entriesDir: entriesDir([entry('point')]) });
+      await r.arm();
+      holdNext = true;
+      r.offer(point('run-i', 1, 1));
+      const flushing = r.flush();
+      while (gate.release === null) await new Promise((res) => setImmediate(res)); // the raise is in flight
+      r.offer(point('run-i', 1, 1, { clear: true }));
+      await new Promise((res) => setTimeout(res, 20)); // the registry processes the resolve
+      gate.release();
+      await flushing;
+      await r.flush();
+      const rows = (await watchRows()).filter((x) => x.payload['entry_id'] === 'point');
+      expect(rows.map((x) => [x.event_type, x.payload['reason'] ?? null])).toEqual([
+        [WATCH_FINDING_RAISED, null],
+        [WATCH_FINDING_CLEARED, 'resolved'],
+      ]);
+    } finally {
+      busTesting.unattached = saved;
+    }
+  });
+
+  it('a clearing queued behind a raise that is then dropped is skipped (never an orphan)', async () => {
+    const saved = busTesting.unattached!;
+    let failRaise = false;
+    busTesting.unattached = (path) => {
+      const inner = saved(path);
+      return {
+        busRead: (...a) => inner.busRead(...a),
+        busEmit: async (json) => {
+          if (failRaise && (JSON.parse(json) as { event_type: string }).event_type === WATCH_FINDING_RAISED) throw new Error('WB-001 refused');
+          return inner.busEmit(json);
+        },
+      };
+    };
+    try {
+      const r = makeRegistry({ entriesDir: entriesDir([entry('point')]) });
+      await r.arm();
+      failRaise = true;
+      r.offer(point('run-o', 1, 1));
+      r.offer(point('run-o', 1, 1, { clear: true }));
+      await r.flush();
+      expect((await watchRows()).filter((x) => x.payload['entry_id'] === 'point')).toEqual([]);
+    } finally {
+      busTesting.unattached = saved;
+    }
+  });
+
+  it('an override with a bad threshold is not half-applied: the entry keeps its shipped enabled too', async () => {
+    const r = makeRegistry();
+    await r.arm();
+    r.applySettings({ entries: { 'registry-lagging': { enabled: false, threshold: { queue_depth: -5 } } } });
+    const h = r.health();
+    expect(h.entries.off).toEqual([]);
+    expect(h.entries.refused).toEqual([expect.objectContaining({ id: 'registry-lagging', reason: expect.stringMatching(/threshold override ignored/) })]);
+  });
+
+  it('one unreadable run at boot does not make every other run read "the daemon was down"', async () => {
+    const r = makeRegistry({
+      entriesDir: entriesDir([entry('point')]),
+      liveRuns: async () => ['run-bad', 'run-good'],
+      runEvents: async (id) => (id === 'run-bad' ? null : []),
+    });
+    await r.arm();
+    expect(r.health().replay).toEqual({ core_gap: true });
+    expect(r.coverage('run-bad')).toEqual([{ entry_id: 'point', state: 'not_checked', reason: 'the daemon was down' }]);
+    expect(r.coverage('run-good')).toEqual([{ entry_id: 'point', state: 'not_checked', reason: 'no test point yet' }]);
+    expect(r.coverage('run-new')).toEqual([{ entry_id: 'point', state: 'not_checked', reason: 'no test point yet' }]);
+  });
+
+  it('a bus row emitted after the replay read the bus, before the live pull armed, is still evaluated (no loss window)', async () => {
+    const { emitOnBus } = await import('../src/core/bus.js');
+    let emitted = false;
+    const r = makeRegistry({
+      entriesDir: entriesDir([entry('point'), entry('bus-point', { on: { source: 'bus', type: 'wicked.qe.test_point.recorded' } })]),
+      liveRuns: async () => ['run-b'],
+      runEvents: async () => [{ ...point('run-b', 1, 1), ts: 1, seq: 1 } as unknown as RecordedEvent],
+      // Called while the replay FLUSHES its rows — after it read the bus history. The row lands then.
+      projectOf: () => {
+        if (!emitted) {
+          emitted = true;
+          void emitOnBus(busPath, {
+            event_type: 'wicked.qe.test_point.recorded',
+            domain: 'wicked-qe',
+            subdomain: 'qe',
+            producer_id: 'test',
+            idempotency_key: 'tp-1',
+            payload: { run_id: 'run-b', ord: 7, attempt: 1 },
+          });
+        }
+        return undefined;
+      },
+    });
+    await r.arm();
+    const deadline = Date.now() + 3000;
+    while (!r.feed({ run: 'run-b' }).findings.some((f) => f.entry_id === 'bus-point') && Date.now() < deadline) {
+      await new Promise((res) => setTimeout(res, 20));
+      await r.flush();
+    }
+    expect(r.feed({ run: 'run-b' }).findings.filter((f) => f.entry_id === 'bus-point').map((f) => f.ord)).toEqual([7]);
   });
 });
 

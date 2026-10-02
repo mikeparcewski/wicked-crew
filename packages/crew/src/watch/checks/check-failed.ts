@@ -8,7 +8,7 @@
  */
 
 import { z } from 'zod';
-import type { WatchCheck } from '../types.js';
+import type { CheckOutput, WatchCheck } from '../types.js';
 
 const Threshold = z
   .object({
@@ -36,14 +36,19 @@ export const checkFailedCheck: WatchCheck<Record<string, never>, Threshold> = {
     const windowMs = t.window_minutes * 60_000;
     const ep = (state.bag.get(entryId) as Episode | undefined) ?? { times: [], open: null };
     state.bag.set(entryId, ep);
-    // A quiet window closes the episode: the next burst is a new flag.
+    // A quiet window closes the episode AND clears its flag: the next burst is a new flag.
+    const out: CheckOutput[] = [];
     const last = ep.times[ep.times.length - 1];
-    if (ep.open !== null && last !== undefined && now - last > windowMs) ep.open = null;
+    if (ep.open !== null && last !== undefined && now - last > windowMs) {
+      out.push({ op: 'clear', subject: `check-failed:${entryId}:${ep.open}` });
+      ep.open = null;
+    }
     ep.times = ep.times.filter((x) => now - x <= windowMs);
     ep.times.push(now);
-    if (ep.open !== null || ep.times.length < t.failures) return [];
+    if (ep.open !== null || ep.times.length < t.failures) return out;
     ep.open = now;
     return [
+      ...out,
       {
         op: 'raise',
         subject: `check-failed:${entryId}:${ep.open}`,

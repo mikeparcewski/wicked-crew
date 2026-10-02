@@ -129,12 +129,16 @@ export function applyOverrides(
     const o = settings?.entries?.[e.id];
     if (o === undefined) return e;
     let next: LoadedEntry = e;
-    if (typeof o.enabled === 'boolean') next = { ...next, enabled: o.enabled };
+    // Validated FIRST: a bad threshold leaves the whole override unapplied (enabled included).
     if (o.threshold !== undefined) {
       const parsed = checks.get(e.check)?.thresholdSchema.safeParse({ ...e.threshold, ...o.threshold });
-      if (parsed?.success === true) next = { ...next, threshold: parsed.data as Record<string, unknown> };
-      else problems.push({ id: e.id, reason: `threshold override ignored: ${parsed ? zodReason(parsed.error) : 'no check'}` });
+      if (parsed?.success !== true) {
+        problems.push({ id: e.id, reason: `threshold override ignored: ${parsed ? zodReason(parsed.error) : 'no check'}` });
+        return e;
+      }
+      next = { ...next, threshold: parsed.data as Record<string, unknown> };
     }
+    if (typeof o.enabled === 'boolean') next = { ...next, enabled: o.enabled };
     return next;
   });
   return { entries: out, problems };

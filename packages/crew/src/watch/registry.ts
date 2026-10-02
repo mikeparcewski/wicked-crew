@@ -104,7 +104,12 @@ export class WatchRegistry {
   private shedTickQueued = false;
   private dbPath: string | null = null;
   private readonly runStates = new Map<string, Map<string, RunWatchState>>();
-  private coreGap = false;
+  /** Live runs whose persisted events could not be read at boot (their coverage says so). */
+  private readonly gapRuns = new Set<string>();
+  /** The live runs could not even be listed at boot: every unseen run's coverage says so. */
+  private listGap = false;
+  /** While the boot replay runs, live bus rows wait here (the pull is armed BEFORE the replay). */
+  private busHold: KeyPointInput[] | null = null;
   private readonly now: () => number;
   private readonly sourceState: WatchHealth['sources'] = { bus: 'down', core: 'down', watchdog: 'down' };
 
@@ -180,7 +185,16 @@ export class WatchRegistry {
     this.accepting = true;
     this.sourceState.core = 'ok';
     this.sourceState.watchdog = 'ok';
+    // The live pull starts at the bus tail BEFORE the replay reads history, so no row can fall in
+    // between; what it delivers meanwhile is held and processed after the replay (duplicates of a
+    // replayed row resolve to the same key).
+    this.busHold = [];
+    await this.armBusPull(dbPath, log);
     await this.replay(dbPath, log);
+    const held = this.busHold;
+    this.busHold = null;
+    for (const input of held) await this.process(input);
+    await emitter.flush();
     if (this.opts.broadcast !== undefined) {
       this.relay = await startWatchWsRelay({
         dbPath,
@@ -190,7 +204,6 @@ export class WatchRegistry {
         log,
       });
     }
-    await this.armBusPull(dbPath, log);
     emitter.start();
     const tickMs = this.opts.tickMs ?? 30_000;
     if (tickMs > 0) {
@@ -214,6 +227,10 @@ export class WatchRegistry {
         dbPath,
         wants: (type) => this.router.wants('bus', type) !== null,
         handle: async (input) => {
+          if (this.busHold !== null) {
+            this.busHold.push(input);
+            return;
+          }
           await this.process(input);
           await this.emitter?.flush();
         },
@@ -235,14 +252,14 @@ export class WatchRegistry {
       runs = await this.opts.liveRuns();
     } catch (err) {
       log(`[watch] replay skipped (cannot list live runs): ${message(err)}`);
-      this.coreGap = true;
+      this.listGap = true;
       return;
     }
     const inputs: KeyPointInput[] = [];
     for (const runId of runs) {
       const events = this.opts.runEvents === undefined ? null : await this.opts.runEvents(runId).catch(() => null);
       if (events === null) {
-        this.coreGap = true;
+        this.gapRuns.add(runId);
         continue;
       }
       for (const e of events) {
@@ -470,7 +487,7 @@ export class WatchRegistry {
         thresholds_changed: thresholds,
       },
       llm: { enabled: false, inflight: 0, timeouts: 0, skipped_no_seat: 0 },
-      replay: { core_gap: this.coreGap },
+      replay: { core_gap: this.listGap || this.gapRuns.size > 0 },
     };
   }
 
@@ -518,7 +535,7 @@ export class WatchRegistry {
         continue;
       }
       const state = this.runStates.get(runId)?.get(e.id);
-      if (state === undefined && this.coreGap) {
+      if (state === undefined && (this.listGap || this.gapRuns.has(runId))) {
         out.push({ entry_id: e.id, state: 'not_checked', reason: 'the daemon was down' });
         continue;
       }

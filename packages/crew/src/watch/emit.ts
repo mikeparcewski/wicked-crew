@@ -160,6 +160,8 @@ export class WatchEmitter {
   private readonly queuedKeys = new Set<string>();
   /** Raised rows dropped after their retries (a clearing that depends on one is skipped). */
   private readonly failedKeys = new Set<string>();
+  /** Raised rows taken out of `pending` and on their way to the bus (a clearing can still find them). */
+  private readonly inflight = new Map<string, WatchFinding>();
   private readonly rate = new Map<string, RateState>();
   private timer: NodeJS.Timeout | null = null;
   private flushing: Promise<void> | null = null;
@@ -320,7 +322,8 @@ export class WatchEmitter {
   clearById(watchId: string, how: { reason: 'resolved' } | { reason: 'dismissed'; dismissed_by: string }, re = 'resolved'): boolean {
     const row = this.feed.get(watchId);
     const queuedRaise = this.pending.find((p) => p.eventType === WATCH_FINDING_RAISED && (p.payload as WatchFinding).watch_id === watchId);
-    const raised = row?.raised ?? (queuedRaise?.payload as WatchFinding | undefined);
+    const unacked = (queuedRaise?.payload as WatchFinding | undefined) ?? this.inflight.get(watchId);
+    const raised = row?.raised ?? unacked;
     if (raised === undefined || (row !== undefined && row.cleared !== null) || this.queuedKeys.has(clearedKey(watchId))) return false;
     const payload = {
       run_id: raised.run_id,
@@ -335,7 +338,8 @@ export class WatchEmitter {
       ...(raised.project_id !== undefined ? { project_id: raised.project_id } : {}),
       ...how,
     } as WatchFindingCleared;
-    this.push(WATCH_FINDING_CLEARED, payload, false);
+    // Not yet acknowledged: the clearing waits on its raise, and is skipped if that raise is dropped.
+    this.push(WATCH_FINDING_CLEARED, payload, false, row === undefined ? { dependsOn: watchId } : {});
     return true;
   }
 
@@ -364,7 +368,14 @@ export class WatchEmitter {
   private async drain(): Promise<void> {
     while (this.pending.length > 0) {
       const batch = this.pending.splice(0, BATCH);
-      for (const p of batch) await this.emitOne(p);
+      for (const p of batch) if (p.eventType === WATCH_FINDING_RAISED) this.inflight.set(p.key, p.payload as WatchFinding);
+      for (const p of batch) {
+        try {
+          await this.emitOne(p);
+        } finally {
+          this.inflight.delete(p.key);
+        }
+      }
     }
   }
 
