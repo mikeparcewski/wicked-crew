@@ -188,7 +188,7 @@ describe("POST /runs on the engine's NoEligibleSeat intake refusal (wicked-core#
       payload: { problem: 'fix the thing', sessionId: 'run-live-roster' },
     });
     expect(res.statusCode).toBe(201);
-    expect(res.json()).toEqual({ runId: 'run-live-roster' });
+    expect(res.json()).toEqual({ runId: 'run-live-roster', freeText: { notice: expect.any(String) } }); // crew#755: no workflow named
     expect(launched).toEqual(['run-live-roster']);
   });
 });

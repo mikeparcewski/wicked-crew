@@ -600,3 +600,24 @@ export class DeliveryIndex {
     return this.runToUrl.get(runId);
   }
 }
+
+/**
+ * crew#755: what a launch with neither a workflow nor a plan ran, in the `POST /runs` 201 body.
+ * The engine's free-text planner makes ONE unit, the brief verbatim (wicked-core D-11).
+ */
+export const FREE_TEXT_NOTICE =
+  'No workflow or plan was named, so this run uses the engine\'s free-text planner: one step, the brief verbatim, ' +
+  'with no phases, no checks and no delivery. To have work done and checked, name a workflow (GET /workflows) or a plan.';
+
+/**
+ * crew#755: a COMPLETED free-text run with no repo and no write root of its own could change
+ * nothing — it has no worktree and no declared root — so it reads `'vacuous'` (the did-nothing
+ * spelling; recovery: a retry launch) instead of `'none'`. Repo-bound free-text runs already get the
+ * vacuity probes (they are delivery candidates); every other run keeps its state. Pure.
+ */
+export function freeTextVacuity(view: SessionView, state: DeliveryState): DeliveryState {
+  const s = view.session;
+  if (state.delivery !== 'none' || s.status !== 'completed' || s.repo_ref != null) return state;
+  if ((s.extra_write_roots ?? []).length > 0) return state;
+  return runIdentityOf(view).kind === 'free_text' ? { delivery: 'vacuous' } : state;
+}

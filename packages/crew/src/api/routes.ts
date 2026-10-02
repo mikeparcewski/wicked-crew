@@ -162,6 +162,8 @@ import {
   deliveryRecordFrom,
   pushedState,
   canDeliverResolver,
+  FREE_TEXT_NOTICE,
+  freeTextVacuity,
   type DeliveryState,
   type VacuityProbes,
 } from './delivery-index.js';
@@ -1280,7 +1282,7 @@ export function registerRoutes(
     if (channel !== undefined) view.session.channel = channel;
     const launchActor = runTimingIndex.launchActorFor(view.session.id);
     if (launchActor !== undefined) view.session.launch_actor = launchActor;
-    const state = resolveDelivery(view, conflictStrand);
+    const state = freeTextVacuity(view, resolveDelivery(view, conflictStrand));
     view.session.delivery = state.delivery;
     if (state.deliverUrl !== undefined) view.session.deliverUrl = state.deliverUrl;
     if (state.deliverBranch !== undefined) view.session.deliverBranch = state.deliverBranch;
@@ -2177,7 +2179,11 @@ export function registerRoutes(
       // crew#619: retain the chat transcript for the run's lifetime so Continue-in-Build prefill
       // is always reproducible even if the chat is idle-reclaimed before the run finishes.
       if (b.chatId !== undefined) runtime.linkChatRun?.(b.chatId, runId);
-      return reply.code(201).send({ runId, ...(linkedIssues !== undefined ? { linkedIssues } : {}) });
+      // crew#755: a launch that named neither a workflow nor a plan runs the engine's free-text
+      // planner (one unit, the brief verbatim). Say so in the answer, with how to get work done,
+      // instead of letting it pass for a launch of real work.
+      const freeText = input.workflow === undefined && input.plan === undefined ? { freeText: { notice: FREE_TEXT_NOTICE } } : {};
+      return reply.code(201).send({ runId, ...(linkedIssues !== undefined ? { linkedIssues } : {}), ...freeText });
     } catch (err) {
       const msg = message(err);
       // DES-TEAMING-002 T3: a plan on an engine without the plan approval gate is an "upgrade the

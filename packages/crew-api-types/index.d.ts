@@ -343,6 +343,8 @@ export interface AgentSession {
    *     spelling of the vacuous-completion class. Derived with the same two read-only git
    *     instruments the engine's own evidence floor uses; any probe failure keeps `'stranded'`
    *     (vacuity is only ever asserted on positive reads).
+   *     (crew#755; api-types 0.76.0) Also a COMPLETED repo-less free-text run (no workflow, no plan)
+   *     with no write root of its own: it had nowhere to change anything, so it reads vacuous.
    *   - `'none'`     — everything else: repo-less runs, non-terminal runs, failed/cancelled
    *     runs, and completed runs whose worktree is gone.
    *
@@ -3961,6 +3963,12 @@ export interface LinkedIssue {
 export interface LaunchRunResponse {
   runId: string;
   linkedIssues?: LinkedIssue[];
+  /**
+   * (crew#755; api-types 0.76.0) PRESENT when the launch named neither a `workflow` nor a `plan`:
+   * the run uses the engine's free-text planner (one step, the brief verbatim; no phases, checks or
+   * delivery), and `notice` says so in words a composer can show. ABSENT on every other launch.
+   */
+  freeText?: { notice: string };
 }
 
 /**
