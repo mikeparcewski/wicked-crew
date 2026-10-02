@@ -6,7 +6,7 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter, settingsFilePath } from '../src/core/adapter.js';
@@ -16,14 +16,19 @@ import { removeScratch } from './setup/scratch.js';
 
 const armedHome = crewStateHome();
 const armedSettings = process.env['WICKED_CREW_SYSTEM_SETTINGS'];
+const realHome = process.env['HOME'];
 let dir: string;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'settings-state-home-'));
   delete process.env['WICKED_CREW_SYSTEM_SETTINGS'];
+  // Never read (or seed from) the operator's real shared settings file (Copilot on #760).
+  process.env['HOME'] = join(dir, 'home');
 });
 
 afterEach(() => {
+  if (realHome === undefined) delete process.env['HOME'];
+  else process.env['HOME'] = realHome;
   setCrewStateHome(armedHome);
   if (armedSettings === undefined) delete process.env['WICKED_CREW_SYSTEM_SETTINGS'];
   else process.env['WICKED_CREW_SYSTEM_SETTINGS'] = armedSettings;
@@ -85,6 +90,47 @@ describe('system settings follow the state home (crew#756)', () => {
       a.close();
       if (prevHome === undefined) delete process.env['HOME'];
       else process.env['HOME'] = prevHome;
+    }
+  });
+
+  it('no shared file at the first read: the home starts its own empty file, and a later shared file is never imported (Copilot)', async () => {
+    const a = new CoreAdapter({ dbPath: join(dir, 'iso', 'core.db'), stub: true });
+    try {
+      setCrewStateHome(join(dir, 'iso'));
+      await a.getSettings();
+      expect(JSON.parse(readFileSync(join(dir, 'iso', 'daemon-settings.json'), 'utf8'))).toEqual({});
+      const shared = join(dir, 'home', '.config/wicked-core', 'settings.json');
+      mkdirSync(join(shared, '..'), { recursive: true });
+      writeFileSync(shared, JSON.stringify({ graphNodeLimit: 42 }));
+      expect((await a.getSettings()).graphNodeLimit).not.toBe(42);
+    } finally {
+      a.close();
+    }
+  });
+
+  it('a shared file that is not valid JSON is never copied as the seed; the home starts empty (Copilot)', async () => {
+    const shared = join(dir, 'home', '.config/wicked-core', 'settings.json');
+    mkdirSync(join(shared, '..'), { recursive: true });
+    writeFileSync(shared, '{"graphNodeLimit": 4');
+    const a = new CoreAdapter({ dbPath: join(dir, 'iso2', 'core.db'), stub: true });
+    try {
+      setCrewStateHome(join(dir, 'iso2'));
+      await a.getSettings();
+      expect(JSON.parse(readFileSync(join(dir, 'iso2', 'daemon-settings.json'), 'utf8'))).toEqual({});
+    } finally {
+      a.close();
+    }
+  });
+
+  it('a settings write publishes whole: no partial file is ever visible at the settings path', async () => {
+    const a = new CoreAdapter({ dbPath: join(dir, 'w', 'core.db'), stub: true });
+    try {
+      setCrewStateHome(join(dir, 'w'));
+      await Promise.all(Array.from({ length: 8 }, (_, i) => a.updateSettings({ graphNodeLimit: 10 + i })));
+      expect(() => JSON.parse(readFileSync(join(dir, 'w', 'daemon-settings.json'), 'utf8'))).not.toThrow();
+      expect(readdirSync(join(dir, 'w')).filter((n) => n.includes('.tmp'))).toEqual([]);
+    } finally {
+      a.close();
     }
   });
 

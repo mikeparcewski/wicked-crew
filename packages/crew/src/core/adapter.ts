@@ -1,8 +1,8 @@
 import { createRequire } from 'node:module';
 import type { BusUnavailable } from './engine-bus.js';
 import { attachEngineBus, detachEngineBus, type EngineBus } from './bus.js';
-import { mkdir, access, readFile, writeFile, chmod, rm, copyFile } from 'node:fs/promises';
-import { constants as fsConstants, existsSync, readdirSync, readFileSync, renameSync } from 'node:fs';
+import { mkdir, access, readFile, writeFile, chmod, rm, link, rename } from 'node:fs/promises';
+import { existsSync, readdirSync, readFileSync, renameSync } from 'node:fs';
 import { join, dirname, resolve, isAbsolute, relative, sep } from 'node:path';
 import { isPlainRunId, WALKTHROUGH_AUTHOR_SUBDIR, walkthroughRootDir } from './walkthrough-root.js';
 import { crewStateHome, isDefaultStateHome } from '../projects/state-home.js';
@@ -144,17 +144,45 @@ function sharedSettingsFilePath(): string {
 async function seedStateHomeSettings(path: string): Promise<void> {
   const override = process.env['WICKED_CREW_SYSTEM_SETTINGS'];
   if ((override !== undefined && override !== '') || isDefaultStateHome() || existsSync(path)) return;
-  const shared = sharedSettingsFilePath();
-  if (!existsSync(shared)) return;
+  // The seed is a VALIDATED snapshot: the shared file's text only when it parses as a JSON object,
+  // else an empty object — so a missing, partial or corrupt shared file starts the home empty and is
+  // never retried (Copilot on #760). Published with `link`, which is atomic and never replaces an
+  // existing file: a racing first read either publishes or finds a complete file.
+  let body = '{}';
   try {
-    await mkdir(dirname(path), { recursive: true });
-    await copyFile(shared, path, fsConstants.COPYFILE_EXCL);
+    const raw = await readFile(sharedSettingsFilePath(), 'utf8');
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) body = raw;
   } catch {
-    /* a racing first read already seeded it, or the shared file is unreadable: read what is there */
+    /* absent or not JSON: start empty */
   }
+  await publishSettingsFile(path, body, false);
 }
 
-
+/**
+ * Write a settings file WHOLE: the text goes to a sibling temp file, then is published — by
+ * `rename` (replacing) or `link` (only when absent). A reader never sees a partial file. The temp
+ * name keeps the target's name as its prefix, so inside a state home it stays a registered
+ * `daemon-*` entry while it exists.
+ */
+async function publishSettingsFile(path: string, body: string, replace: boolean): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  const tmp = `${path}.tmp.${process.pid}.${randomUUID()}`;
+  await writeFile(tmp, body, 'utf8');
+  try {
+    if (replace) {
+      await rename(tmp, path);
+    } else {
+      try {
+        await link(tmp, path);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      }
+    }
+  } finally {
+    await rm(tmp, { force: true });
+  }
+}
 
 /**
  * Per-key ceiling on a `studio.*` settings value, as the UTF-8 byte length of its JSON form.
@@ -3724,9 +3752,7 @@ export class CoreAdapter {
   async updateSettings(patch: Partial<CrewSystemSettings>): Promise<CrewSystemSettings> {
     const current = await this.getSettings();
     const next = { ...current, ...patch };
-    const path = settingsFilePath();
-    await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, JSON.stringify(next, null, 2), 'utf8');
+    await publishSettingsFile(settingsFilePath(), JSON.stringify(next, null, 2), true);
     return next;
   }
 
