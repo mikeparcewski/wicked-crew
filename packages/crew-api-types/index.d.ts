@@ -7242,8 +7242,8 @@ export interface WatchEntry {
   };
   priority: WatchPriority;
   enabled: boolean;
-  /** The threshold in plain words, for "When Studio speaks up". Set by `GET /watch/entries`. */
-  threshold_text?: string;
+  /** The threshold in plain words, for "When Studio speaks up". Always set on `GET /watch/entries`. */
+  threshold_text: string;
 }
 
 /** Who changed an operator-adjustable entry setting, and when (read from the `settings.updated` audit entry). */
