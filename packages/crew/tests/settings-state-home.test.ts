@@ -6,7 +6,7 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter, settingsFilePath } from '../src/core/adapter.js';
@@ -42,6 +42,20 @@ describe('system settings follow the state home (crew#756)', () => {
     expect(settingsFilePath()).toBe(join(homedir(), '.config/wicked-core', 'settings.json'));
     setCrewStateHome(undefined);
     expect(settingsFilePath()).toBe(join(homedir(), '.config/wicked-core', 'settings.json'));
+  });
+
+  it('the default state home reached through a link is still the default (codex)', () => {
+    const prevHome = process.env['HOME'];
+    process.env['HOME'] = join(dir, 'home');
+    try {
+      mkdirSync(join(dir, 'home', '.wicked-crew'), { recursive: true });
+      symlinkSync(join(dir, 'home', '.wicked-crew'), join(dir, 'crew-link'));
+      setCrewStateHome(join(dir, 'crew-link'));
+      expect(settingsFilePath()).toBe(join(dir, 'home', '.config/wicked-core', 'settings.json'));
+    } finally {
+      if (prevHome === undefined) delete process.env['HOME'];
+      else process.env['HOME'] = prevHome;
+    }
   });
 
   it('WICKED_CREW_SYSTEM_SETTINGS still wins over both', () => {

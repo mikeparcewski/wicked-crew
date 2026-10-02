@@ -25,7 +25,8 @@
  */
 
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { existsSync, realpathSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 
 /**
  * Set once at bootstrap from the `--db` parent; `undefined` for library consumers and unit tests
@@ -58,9 +59,30 @@ export function crewStateHome(): string {
   return configuredStateHome ?? defaultStateHome(homedir());
 }
 
-/** Is the daemon on the historical default state home (`~/.wicked-crew`, or none configured)? */
+/**
+ * Is the daemon on the historical default state home (`~/.wicked-crew`, or none configured)? Compared
+ * by IDENTITY, not spelling: a `--db` reached through a link or alias of `~/.wicked-crew` is still the
+ * default (codex on #760). Each side is the realpath of its deepest existing ancestor plus the rest.
+ */
 export function isDefaultStateHome(): boolean {
-  return configuredStateHome === undefined || resolve(configuredStateHome) === resolve(defaultStateHome(homedir()));
+  return configuredStateHome === undefined || realSpelling(configuredStateHome) === realSpelling(defaultStateHome(homedir()));
+}
+
+function realSpelling(p: string): string {
+  const abs = resolve(p);
+  const rest: string[] = [];
+  let prefix = abs;
+  while (!existsSync(prefix)) {
+    const parent = dirname(prefix);
+    if (parent === prefix) return abs;
+    rest.unshift(basename(prefix));
+    prefix = parent;
+  }
+  try {
+    return join(realpathSync.native(prefix), ...rest);
+  } catch {
+    return abs;
+  }
 }
 
 /**
