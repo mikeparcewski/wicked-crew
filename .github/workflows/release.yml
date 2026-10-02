@@ -71,8 +71,10 @@ jobs:
   # release run red: the publish is NOT reverted — the playbook deprecates the version and the set
   # stays FIXED-UNVERIFIED until a green smoke. A true pre-`latest` gate (publish under dist-tag
   # `next`, promote on PASS) is decision D-L10-1, owed; this is the post-publish default. The
-  # harness is pinned by SHA (`wicked_ci_ref` empty ⇒ the same commit) — re-pin to the v1.3.2 tag's
-  # SHA when wicked-ci cuts it (the new S09/S10 checks for crew#551/#493 ride that tag).
+  # harness is pinned by SHA, in BOTH the `uses:` line and `wicked_ci_ref` (move them together). It
+  # is pinned to wicked-ci main after wicked-ci#36 (S04 asserts the teamed routing of wicked-core#590
+  # S5, F-SMOKE-004 / F-SMOKE-005); never re-pin to an older ref such as v1.3.2, whose S04 still
+  # asserts the removed ballots.
   version:
     needs: release
     runs-on: ubuntu-latest
