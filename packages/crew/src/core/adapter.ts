@@ -2050,13 +2050,21 @@ export class CoreAdapter {
         : null;
     let mintedHere = false;
     if (evidenceRoot !== null) {
+      // Created EXCLUSIVELY, so ownership is decided by the filesystem, not by a check before it:
+      // two launches racing on one id cannot both believe they made the root (Copilot on #758).
+      await mkdir(dirname(evidenceRoot), { recursive: true });
+      try {
+        await mkdir(evidenceRoot);
+        mintedHere = true;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      }
       const author = join(evidenceRoot, WALKTHROUGH_AUTHOR_SUBDIR);
-      mintedHere = !existsSync(evidenceRoot);
-      await mkdir(author, { recursive: true });
       (opts as LaunchOptions & { evidenceRoot?: string }).evidenceRoot = evidenceRoot;
       opts.extraWriteRoots = [...(opts.extraWriteRoots ?? []), author];
     }
     try {
+      if (evidenceRoot !== null) await mkdir(join(evidenceRoot, WALKTHROUGH_AUTHOR_SUBDIR), { recursive: true });
       return await this.handedToEngine('run', input.sessionId, () => this.core.launchRun(opts), input.workflow);
     } catch (err) {
       if (evidenceRoot !== null && mintedHere) await rm(evidenceRoot, { recursive: true, force: true }).catch(() => undefined);

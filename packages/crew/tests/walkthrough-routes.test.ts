@@ -327,6 +327,21 @@ describe('GET /runs/:id/walkthrough — the recording view (WT-W1)', () => {
       expect((await app.inject({ method: 'GET', url: '/api/v1/runs/f1/walkthrough/file?step=build&path=capture/c1.png' })).statusCode).toBe(404);
     });
 
+    it('with no step, serves the SAME pair the view defaults to — never an older take while a newer walkthrough is being written (Copilot)', async () => {
+      const ev = join(roots, 'f3');
+      const units: UnitSpec[] = [
+        { step: 'build', catalog: 'build', status: 'done' },
+        { step: 'wp1', catalog: 'walkthrough_plan', status: 'done' },
+        { step: 'wr1', catalog: 'walkthrough_review', status: 'done' },
+        { step: 'wp2', catalog: 'walkthrough_plan', status: 'distributed' },
+      ];
+      sessionsDetail.mockResolvedValue([run('f3', ev, units)]);
+      proofRoot(ev, 'wr1', { 'result.json': RESULT_PASS, 'capture/c1.png': 'old' });
+      expect((await view('f3')).body.planStepId).toBe('wp2');
+      expect((await app.inject({ method: 'GET', url: '/api/v1/runs/f3/walkthrough/file?path=capture/c1.png' })).statusCode).toBe(404);
+      expect((await app.inject({ method: 'GET', url: '/api/v1/runs/f3/walkthrough/file?step=wr1&path=capture/c1.png' })).statusCode).toBe(200);
+    });
+
     it('never serves the author dir: the storyline is the test plan, not evidence', async () => {
       const ev = join(roots, 'f2');
       sessionsDetail.mockResolvedValue([run('f2', ev, PAIR('done', 'done'))]);

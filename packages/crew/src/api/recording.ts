@@ -802,6 +802,15 @@ export function walkthroughPairs(view: SessionView): WalkthroughPair[] {
   return pairs.sort((a, b) => (a.plan ?? a.review)!.ord - (b.plan ?? b.review)!.ord);
 }
 
+/** The pair the view and the file route read: the newest, or the one `step` (its review or plan step id) names. */
+function selectPair(view: SessionView, step: string | undefined): WalkthroughPair | undefined {
+  const pairs = walkthroughPairs(view);
+  if (step === undefined) return pairs.at(-1);
+  return pairs.find(
+    (p) => (p.review !== null && stepIdOf(view, p.review) === step) || (p.plan !== null && stepIdOf(view, p.plan) === step),
+  );
+}
+
 /**
  * The proof root of a recorder step: `<evidence root>/<step>`, only when it is a plain directory
  * directly under the evidence root (never through a planted link), else `null`.
@@ -916,11 +925,7 @@ async function walkthroughChapters(root: string | null, result: Record<string, u
 /** Everything studio renders for one walkthrough pair (the newest, or the one `step` names). */
 export async function walkthroughView(view: SessionView, step?: string): Promise<WalkthroughView | null> {
   const runId = view.session.id;
-  const pairs = walkthroughPairs(view);
-  const pair =
-    step === undefined
-      ? pairs.at(-1)
-      : pairs.find((p) => (p.review !== null && stepIdOf(view, p.review) === step) || (p.plan !== null && stepIdOf(view, p.plan) === step));
+  const pair = selectPair(view, step);
   if (step !== undefined && pair === undefined) return null;
   const evidenceRoot = (view.session as { evidence_root?: unknown }).evidence_root;
   const hasEvidenceRoot = typeof evidenceRoot === 'string' && evidenceRoot !== '';
@@ -1017,8 +1022,9 @@ export function registerWalkthroughRoutes(app: FastifyInstance, adapter: CoreAda
       }
       const run = await runById(id);
       if (run === null) return reply.code(404).send({ error: 'no run with that id' });
-      const pairs = walkthroughPairs(run).filter((p) => p.review !== null);
-      const pair = q.step === undefined ? pairs.at(-1) : pairs.find((p) => stepIdOf(run, p.review!) === q.step || (p.plan !== null && stepIdOf(run, p.plan) === q.step));
+      // The same pair the view shows: with no step, a newer walkthrough still being written has no
+      // files yet, and an older take is never served in its place.
+      const pair = selectPair(run, q.step);
       const root = pair?.review != null ? await proofRootOf(run, pair.review) : null;
       if (root === null) return reply.code(404).send({ error: 'this run has no recorded walkthrough there' });
       const target = await containedPath(root, q.path);
