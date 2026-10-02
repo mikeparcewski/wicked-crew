@@ -120,6 +120,33 @@ const AUTH_FALLBACK_KINDS = new Set(['auth_required', 'auth_failed', 'unauthenti
  *  since — the same window as the council bench; an ok unit output clears it at once. */
 export const AUTH_FAILURE_WINDOW_MS = 30 * 60 * 1000;
 
+/**
+ * How long a seat the ENGINE benched in a run (`seatBenched`) stays out of the next launches with
+ * no ok output since. After this the seat is eligible again: if it is still dead, its next run
+ * finds out with one refused turn and benches it again; an ok output (a chat turn, a unit the
+ * operator sent there) clears the bench at once.
+ */
+export const SEAT_BENCH_WINDOW_MS = 30 * 60 * 1000;
+
+/**
+ * A seat the engine benched in a run, carried to the next launches (`seatBenched`, wicked-core
+ * after #590 S5). Since S5 no ballot finds a dead seat before routing, so a seat that reads signed
+ * in but cannot work (out of quota, say) is only found when its first unit refuses. Without this,
+ * every new run handed that seat a unit again.
+ */
+export interface SeatRecentBench {
+  /** ISO-8601 of the bench. */
+  at: string;
+  /** ISO-8601 of when the seat is eligible again ({@link SEAT_BENCH_WINDOW_MS} after `at`). */
+  until: string;
+  /** The engine's bench reason, as it persisted it (`quota_exhausted (no success in the run)`). */
+  reason: string;
+  /** Who benched it in the run: the unit's `worker`, or a `judge`. */
+  source: string;
+  /** The run that benched it, when the frame named one. */
+  run?: string;
+}
+
 /** A seat's own report that it has no credential (`RosterSeat.auth_evidence`). */
 export interface SeatAuthFailure {
   /** ISO-8601 of the report. */
@@ -144,6 +171,9 @@ export class SeatHealthTracker {
   private readonly assignments = new Map<string, string>();
   /** cli key → the seat's latest own "no credential" report (F-A45-006), cleared by an ok output. */
   private readonly authFailures = new Map<string, { at: number; detail: string; source: SeatAuthFailure['source']; session?: string }>();
+  /** cli key → the engine's latest in-run bench of the seat (`seatBenched`), cleared by an ok
+   *  output or by {@link SEAT_BENCH_WINDOW_MS}. */
+  private readonly recentBenches = new Map<string, { at: number; reason: string; source: string; session?: string }>();
   /** Default `since` for seats that have never changed state. */
   private readonly startedAt = new Date().toISOString();
 
@@ -242,6 +272,20 @@ export class SeatHealthTracker {
         if (cli !== undefined && kind !== undefined && kind !== 'benched') this.stampError(cli, at);
         return;
       }
+      case 'seatBenched': {
+        // The engine benched this seat for the run on its worker's or judge's own refusal
+        // (`not_logged_in`, `quota_exhausted`, `not_installed`, `approval_unavailable`). Crew
+        // classifies nothing here (R5): it carries the ENGINE's verdict to the next launches for
+        // a bounded window, so a seat that reads signed in but cannot work is not handed a unit
+        // by every new run. A launcher bench is crew's own reading and never comes back this way.
+        const cli = str(event.cli);
+        const reason = str((event as { reason?: unknown }).reason);
+        const source = str((event as { source?: unknown }).source) ?? 'worker';
+        if (cli === undefined || reason === undefined || source === 'launcher') return;
+        this.recentBenches.set(cli, { at, reason, source, ...(session !== undefined ? { session } : {}) });
+        this.stampError(cli, at);
+        return;
+      }
       case 'acpFallback': {
         const cliKey = str((event as { cliKey?: unknown }).cliKey);
         const fallbackKind = str((event as { fallbackKind?: unknown }).fallbackKind);
@@ -303,6 +347,7 @@ export class SeatHealthTracker {
       ...(prev?.lastErrorAt !== undefined ? { lastErrorAt: prev.lastErrorAt } : {}),
     });
     this.authFailures.delete(key); // …and the seat's own "no credential" report (F-A45-006)
+    this.recentBenches.delete(key); // …and a run's bench of it: the seat just did work
   }
 
   /** Record a seat's own "no credential" report (F-A45-006) — the newest report wins. */
@@ -348,6 +393,28 @@ export class SeatHealthTracker {
     return {
       at: new Date(rec.at).toISOString(),
       detail: rec.detail,
+      source: rec.source,
+      ...(rec.session !== undefined ? { run: rec.session } : {}),
+    };
+  }
+
+  /**
+   * The engine's latest in-run bench of the seat (`seatBenched`) inside
+   * {@link SEAT_BENCH_WINDOW_MS} with no ok output since, or `null`. `seatStanding` reads it as
+   * `council_eligible: false` with the reason and the time it lifts, so the next launch benches the
+   * seat up front (`health.usable: false`) and the operator sees why on the roster.
+   */
+  recentBenchFor(key: string, nowMs = Date.now()): SeatRecentBench | null {
+    const rec = this.recentBenches.get(key);
+    if (rec === undefined) return null;
+    if (nowMs - rec.at >= SEAT_BENCH_WINDOW_MS) {
+      this.recentBenches.delete(key);
+      return null;
+    }
+    return {
+      at: new Date(rec.at).toISOString(),
+      until: new Date(rec.at + SEAT_BENCH_WINDOW_MS).toISOString(),
+      reason: rec.reason,
       source: rec.source,
       ...(rec.session !== undefined ? { run: rec.session } : {}),
     };

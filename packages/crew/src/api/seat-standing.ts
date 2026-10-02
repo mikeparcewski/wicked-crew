@@ -34,7 +34,7 @@
  * and the one bench is the engine's per-run ballot ledger.
  */
 
-import type {SeatAuthFailure} from './seat-health.js';
+import type {SeatAuthFailure, SeatRecentBench} from './seat-health.js';
 import type {SeatProbeReading} from './seat-probe.js';
 
 /** The seat's auth state, read for what it MEANS for the seat's usability. */
@@ -136,6 +136,7 @@ export function seatStanding(
   signedIn: boolean | null,
   authFailure: SeatAuthFailure | null = null,
   probeInput: ProbeInput = undefined,
+  recentBench: SeatRecentBench | null = null,
 ): SeatStanding {
   const probe = probeInput === 'pending' ? undefined : probeInput;
   // F-A45-006: the seat's OWN report beats the file probe. The fresh rig's pi read `signed_in`
@@ -176,6 +177,23 @@ export function seatStanding(
             : 'signed out — a council would bench this seat on its first ballot; sign it in from the System page',
     };
   }
+  // A seat the ENGINE benched in a recent run on its own refusal (`seatBenched`: out of quota, not
+  // installed, signed out at work time) stays out of councils until the window lifts or it does
+  // work again (`SeatHealthTracker.recentBenchFor`). Its sign-in may read fine — that is the case
+  // this exists for: since wicked-core#590 S5 no ballot finds such a seat before routing, and every
+  // new run handed it a unit. The reason leads with the engine's cause token, so the engine's
+  // `degradedReason` names it (`copilot (recent quota_exhausted — launcher)`).
+  if (recentBench !== null) {
+    const cause = recentBench.reason.split(' (', 1)[0]!.trim();
+    const run = recentBench.run !== undefined ? ` in run ${recentBench.run.slice(0, 8)}` : '';
+    return {
+      ...base,
+      council_eligible: false,
+      council_ineligible_reason:
+        `recent ${cause} — the engine benched it${run} at ${hhmm(recentBench.at)} (${recentBench.source}: ` +
+        `${recentBench.reason}); eligible again at ${hhmm(recentBench.until)}, or sooner once it completes a turn`,
+    };
+  }
   // crew#645: a seat that HAS a login check which has not answered is not routed to on the file's
   // word — a launch waits for the check (`SeatProbe.ensureFresh`), and anything that routes before
   // it answers (the seconds after a boot) leaves the seat out of the council. `auth` stays
@@ -188,12 +206,12 @@ export function seatStanding(
         "login not verified yet — the seat's own auth check is still running; a launch waits for it, so launch again in a few seconds",
     };
   }
-  // (R5 / R5b, DES-L3 PR-3D) No `inactive` arm and no crew council bench any more: `health.status`
-  // is always `active` (observed errors stamp `lastErrorAt` only), and the one bench is the
-  // engine's per-run ballot ledger, read from the run (`session.benched_seats`,
-  // `unitDistributed.degradedReason`) — never predicted here from a cross-run count. The runtime
-  // health reading is therefore no longer an INPUT to standing: the parameter is gone rather than
-  // silenced, so a caller cannot think it still decides something.
+  // (R5 / R5b, DES-L3 PR-3D) No `inactive` arm and no crew-classified bench: `health.status` is
+  // always `active` (observed errors stamp `lastErrorAt` only). The only bench read here is the
+  // ENGINE's own (`recentBench` above — its verdict, carried for a bounded window), never one crew
+  // predicts from its own count of failures. The runtime health reading is therefore not an INPUT
+  // to standing: the parameter is gone rather than silenced, so a caller cannot think it still
+  // decides something.
   return base;
 }
 
@@ -239,6 +257,11 @@ export function chatSeatAdmission(seat: StandingSeat, auth: SeatAuth, scoped: bo
     );
   }
   return reasons.length === 0 ? { ok: true } : { ok: false, reason: reasons.join('; '), source };
+}
+
+/** `HH:MMZ` of an ISO-8601 stamp, for a reason an operator reads at a glance. */
+function hhmm(iso: string): string {
+  return `${iso.slice(11, 16)}Z`;
 }
 
 /** How far the seat's login was verified, and why not further (crew#645). */
