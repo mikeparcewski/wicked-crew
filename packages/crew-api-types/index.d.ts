@@ -237,6 +237,13 @@ export interface HealthCapabilities {
    * as `false`: group such a daemon's runs one session per run.
    */
   runChatId?: boolean;
+  /**
+   * Repo-bound runs get an EVIDENCE ROOT for walkthroughs (WT-W1, api-types 0.74.0): the engine
+   * addon takes `LaunchOptions.evidenceRoot` (wicked-core-ts ≥ 0.7.35), so a walkthrough step on a
+   * run launched now can record and pass. `GET /runs/:id/walkthrough` answers on every daemon that
+   * has the field. ABSENT or `false` — a walkthrough step on this daemon's runs fails closed.
+   */
+  walkthroughRoots?: boolean;
 }
 
 /** One `GET /health.warnings[]` entry (additive; wicked-core#411 / wicked-crew#497). */
@@ -521,6 +528,14 @@ export interface AgentSession {
    * workflow ids.
    */
   run_identity?: RunIdentity;
+  /**
+   * The run's EVIDENCE ROOT (WT-W1, DES-walkthrough-proof §4.2; api-types 0.74.0), minted by the
+   * daemon for every repo-bound run on an engine that takes it: `<root>/author/<plan step>/` is
+   * the walkthrough author's write dir, `<root>/<review step>/` the proof root only the jailed
+   * `walkthrough_review` Tool writes. Read the walkthrough through `GET /runs/:id/walkthrough`, not
+   * from this path. ABSENT on a repo-less run, on an engine before the field, and on older runs.
+   */
+  evidence_root?: string;
 }
 
 /**
@@ -6531,6 +6546,124 @@ export interface DemoExportResponse {
   /** `demo-video/demo.gif` or `demo-video/poster.jpg` (root-relative). */
   path: string;
   bytes: number;
+}
+
+// ── Walkthroughs: the recording view (WT-W1, DES-walkthrough-proof §4.10; api-types 0.74.0) ──────
+
+/**
+ * Where a walkthrough stands (`WalkthroughView.state`), read from the run's walkthrough pair — the
+ * `walkthrough_plan` unit (the author, an evaluator) and the `walkthrough_review` unit (the jailed
+ * engine-run recorder) — and the recorder's files in the proof root.
+ *
+ *   - `authoring`     the author has not finished the storyline (also: the run has no walkthrough
+ *                     step yet — `stepId` is then `null` and `cause` says so);
+ *   - `linting`       the author's storyline was refused by its pinned lint (the unit was denied;
+ *                     its escalation gate is open, `cause` is the lint's reason);
+ *   - `starting_app`, `recording`, `judging`
+ *                     the recorder is queued or running: its `progress.json` names the phase;
+ *   - `passed`, `failed`, `inconclusive`
+ *                     the recorder finished: `result.json`'s `overall` (PASS / FAIL / INCONCLUSIVE).
+ *                     A finished recorder with no readable `result.json` reads `inconclusive` with
+ *                     `cause: 'no_result'`.
+ */
+export type WalkthroughState =
+  | 'authoring'
+  | 'linting'
+  | 'starting_app'
+  | 'recording'
+  | 'judging'
+  | 'passed'
+  | 'failed'
+  | 'inconclusive';
+
+/** One chapter's verdict, as the recorder's judge wrote it (§4.5). */
+export type WalkthroughVerdict = 'PASS' | 'FAIL' | 'INCONCLUSIVE';
+
+/** One check of a chapter: what was captured on screen or underneath, and whether its verifier passed. */
+export interface WalkthroughCheck {
+  id: string;
+  /** `on_screen`, `saved_state`, `events`, `side_effects`, `output`, `must_not_happen`, `cross_check`. */
+  kind: string;
+  /** The plain sentence the check proves. */
+  sentence: string;
+  /** `null` when the check never ran (its `ctx.check` was not reached, or the take was refused). */
+  passed: boolean | null;
+  /** Seconds into the chapter when the check was captured; `null` when it never ran. */
+  atSec: number | null;
+  /** Proof-root-relative paths (for `GET /runs/:id/walkthrough/file`). */
+  evidence: string[];
+  vaultEntry: string | null;
+  detail: string | null;
+}
+
+/** A capped leg of a chapter (§4.5 "the honest cap"): e.g. the provider leg ran against a sink. */
+export interface WalkthroughLeg {
+  leg: string;
+  claim_level: string;
+  reason: string;
+}
+
+/** One chapter of a walkthrough: the demo chapter plus its verdict and checks. */
+export interface WalkthroughChapter extends DemoChapter {
+  /** 1-based position and the chapter count, for "chapter 2 of 5". */
+  index: number;
+  total: number;
+  /** `null` until the judge has written it. */
+  verdict: WalkthroughVerdict | null;
+  /** How many takes the recorder made of this chapter (failed takes are kept, never stitched). */
+  takes: number;
+  /** Seconds into the chapter of the first failing check; `null` unless it failed. */
+  failedAtSec: number | null;
+  /** The failing frame (proof-root-relative), when the recorder kept one. */
+  failedFrame: string | null;
+  /** The plan step ids this chapter proves. */
+  proves: string[];
+  legs: WalkthroughLeg[];
+  checks: WalkthroughCheck[];
+}
+
+/**
+ * Per plan step, whether a sealed walkthrough proves it (§4.9). Computed at every read, never stored.
+ * `checked`: every proving chapter of the newest sealed walkthrough passed; `failed`: one failed;
+ * `claimed`: the step passed its own gate and no sealed chapter proves it; `owned_by_you`: the
+ * accepted plan's override removed the walkthrough pair.
+ */
+export type WalkthroughCheckState = 'checked' | 'failed' | 'claimed' | 'owned_by_you';
+
+export interface WalkthroughStepState {
+  stepId: string;
+  checkState: WalkthroughCheckState;
+  provedBy: Array<{ chapter: string; atSec: number | null }>;
+}
+
+/**
+ * `GET /runs/:id/walkthrough?step=` → 200 for every known run (404 for an unknown run, or a `step`
+ * that names no walkthrough step of it). `step` is the `walkthrough_review` step id (or its author's
+ * `walkthrough_plan` step id); omitted, the NEWEST pair. Studio polls it, as Demo mode polls `DemoView`.
+ */
+export interface WalkthroughView {
+  runId: string;
+  /** The `walkthrough_review` step id; `null` when the run has no walkthrough step. */
+  stepId: string | null;
+  /** The `walkthrough_plan` step that authored it; `null` when there is none. */
+  planStepId: string | null;
+  state: WalkthroughState;
+  /** Why the state is what it is, when there is something to say (`no_walkthrough`, `no_evidence_root`,
+   *  the recorder's own causes such as `unjailed_host`, `fixture_unavailable`, `storyline_refused`). */
+  cause: string | null;
+  /** Evaluator ≠ creator: the seat that wrote the checks, and the seats that built what they check. */
+  seat: { evaluator: string | null; builders: string[] };
+  /** The tree id the recorder recorded (`git archive` of it is what ran). */
+  tree: string | null;
+  /** Always `false`: a later creator step re-inserts the pair after it (§4.8). Kept so an old plan shape reads honestly. */
+  stale: false;
+  /** The take's seal was found in the engine store and matches the files on disk (WT-W2). */
+  sealed: boolean;
+  /** Proof-root-relative paths of the stitched take; `null` until there is one. */
+  video: { mp4: string | null; poster: string | null; markers: DemoMarker[] };
+  chapters: WalkthroughChapter[];
+  /** Per plan step, the check state (filled once acceptance reads the seal, WT-W2; `[]` until then). */
+  steps: WalkthroughStepState[];
 }
 
 /** `POST /proposals/:id/reject` → 200. */

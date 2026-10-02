@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.73.0",
+  "apiTypesVersion": "0.74.0",
   "endpoints": [
     {
       "method": "GET",
@@ -1314,6 +1314,30 @@
       "requestType": null,
       "responseType": null,
       "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/runs/:id/walkthrough",
+      "requestType": null,
+      "responseType": "WalkthroughView",
+      "statusCodes": [
+        200,
+        400,
+        404
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/runs/:id/walkthrough/file",
+      "requestType": null,
+      "responseType": "binary (video/mp4, image/png, text)",
+      "statusCodes": [
+        200,
+        206,
+        400,
+        404,
+        416
+      ]
     },
     {
       "method": "POST",

@@ -92,6 +92,12 @@ describe('hermetic env arming (tests/setup/hermetic-home.ts)', () => {
     expectArmed('WICKED_CREW_KNOWLEDGE_DB', join(homedir(), '.wicked-estate'));
   });
 
+  it('the walkthrough evidence roots are armed away from the real ~/.wicked (WT-W1)', () => {
+    // Every repo-bound launch mints `<WICKED_WALKTHROUGH_DIR>/<runId>/author`; un-armed, a test
+    // launch would create it under the operator's home.
+    expectArmed('WICKED_WALKTHROUGH_DIR', join(homedir(), '.wicked'));
+  });
+
   it('the daemon STATE HOME is armed away from the real ~/.wicked-crew — the skills root has no override of its own, by design', () => {
     // Every `createServer` boot runs the skills seam over `<state home>/skills` (skills keystone,
     // codex round 5: the root is not a setting and has no env override — `WICKED_CREW_SKILLS_ROOT`

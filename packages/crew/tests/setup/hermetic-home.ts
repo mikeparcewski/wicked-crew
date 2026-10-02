@@ -90,6 +90,9 @@ process.env['WICKED_CREW_SYSTEM_SETTINGS'] = join(base, 'wicked-core-settings.js
 process.env['WICKED_CREW_AUDIT_LOG'] = join(base, 'audit.log');
 process.env['WICKED_CREW_PROJECT_GRAPH_ROOT'] = join(base, 'project-graphs');
 process.env['WICKED_CREW_KNOWLEDGE_DB'] = join(base, 'knowledge.db');
+// WT-W1: every repo-bound launch mints an evidence root (`api/recording.ts` walkthroughRootDir) —
+// un-armed, a test launch would create `~/.wicked/walkthroughs/<runId>` in the operator's home.
+process.env['WICKED_WALKTHROUGH_DIR'] = join(base, 'walkthroughs');
 // The daemon STATE HOME itself (crew#353's seam): every durable store without a per-store override
 // — and the skills root, which has NO override by design (skills keystone, codex round 5: the root
 // is `<state home>/skills`, full stop; `WICKED_CREW_SKILLS_ROOT` is retired) — resolves under

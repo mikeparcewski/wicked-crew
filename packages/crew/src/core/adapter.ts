@@ -4,6 +4,7 @@ import { attachEngineBus, detachEngineBus, type EngineBus } from './bus.js';
 import { mkdir, access, readFile, writeFile, chmod, rm } from 'node:fs/promises';
 import { existsSync, readdirSync, readFileSync, renameSync } from 'node:fs';
 import { join, dirname, resolve, isAbsolute, relative, sep } from 'node:path';
+import { isPlainRunId, WALKTHROUGH_AUTHOR_SUBDIR, walkthroughRootDir } from './walkthrough-root.js';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -2034,7 +2035,50 @@ export class CoreAdapter {
           'deliverable floor to',
       );
     }
-    return this.handedToEngine('run', input.sessionId, () => this.core.launchRun(opts), input.workflow);
+    // WT-W1 (DES-walkthrough-proof §4.2, O7): every REPO-BOUND run gets an evidence root, minted
+    // here so every launch path (POST /runs, onboarding, the interactive seams) gets one. Write roots
+    // are launch-declared only, so a walkthrough the ratchet inserts mid-run needs its author dir to
+    // exist from the start. Only `<root>/author` widens the boundary: the proof roots under the
+    // evidence root are the jailed recorder's alone. On an addon that cannot take the field nothing
+    // is minted (napi would drop it silently, and a walkthrough step on such a run fails closed at
+    // its pinned validator); a launch the engine refuses removes the root only when THIS launch
+    // created it — a duplicate run id must never delete the first run's evidence (codex on #758). A
+    // caller-chosen run id that is not one plain path segment gets no root at all.
+    const evidenceRoot =
+      input.repoRef !== undefined && isPlainRunId(input.sessionId) && this.evidenceRootsSupported()
+        ? walkthroughRootDir(input.sessionId)
+        : null;
+    let mintedHere = false;
+    if (evidenceRoot !== null) {
+      // Created EXCLUSIVELY, so ownership is decided by the filesystem, not by a check before it:
+      // two launches racing on one id cannot both believe they made the root (Copilot on #758).
+      await mkdir(dirname(evidenceRoot), { recursive: true });
+      try {
+        await mkdir(evidenceRoot);
+        mintedHere = true;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      }
+      const author = join(evidenceRoot, WALKTHROUGH_AUTHOR_SUBDIR);
+      (opts as LaunchOptions & { evidenceRoot?: string }).evidenceRoot = evidenceRoot;
+      opts.extraWriteRoots = [...(opts.extraWriteRoots ?? []), author];
+    }
+    try {
+      if (evidenceRoot !== null) await mkdir(join(evidenceRoot, WALKTHROUGH_AUTHOR_SUBDIR), { recursive: true });
+      return await this.handedToEngine('run', input.sessionId, () => this.core.launchRun(opts), input.workflow);
+    } catch (err) {
+      if (evidenceRoot !== null && mintedHere) await rm(evidenceRoot, { recursive: true, force: true }).catch(() => undefined);
+      throw err;
+    }
+  }
+
+  /**
+   * Does the installed addon take `LaunchOptions.evidenceRoot` (WT-C2, wicked-core-ts ≥ 0.7.35)?
+   * Fail closed on version: napi ignores an undeclared field, so an older addon would launch a run
+   * whose walkthrough could never pass while crew believed it had a root. Also `/health.capabilities.walkthroughRoots`.
+   */
+  evidenceRootsSupported(): boolean {
+    return addonAtLeast(0, 7, 35);
   }
 
   /** Resume a run from its persisted cursor → the status token. */
