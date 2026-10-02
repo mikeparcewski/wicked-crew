@@ -7154,12 +7154,8 @@ export interface WatchFinding {
   rolled_up: number;
 }
 
-/**
- * The payload of `wicked.crew.watch_finding.cleared`: the raised row `watch_id` names is resolved
- * (a later attempt passed, the worker produced output), dismissed by the operator ("Seen, not a
- * problem"), or replaced by a roll-up (`replaced_by`).
- */
-export interface WatchFindingCleared {
+/** The fields every `wicked.crew.watch_finding.cleared` payload carries. */
+export interface WatchFindingClearedBase {
   run_id: string | null;
   ord: number | null;
   attempt: number | null;
@@ -7170,14 +7166,19 @@ export interface WatchFindingCleared {
   watch_id: string;
   entry_id: string;
   entry_version: number;
-  /** Closed on purpose: no clearing reason is allow-like. */
-  reason: 'resolved' | 'dismissed' | 'rolled_up';
-  /** For `reason: "dismissed"`: who dismissed it (the human predicate's subject). */
-  dismissed_by?: string;
-  /** For `reason: "rolled_up"`: the roll-up row that replaces this one. */
-  replaced_by?: string;
   project_id?: string;
 }
+
+/**
+ * The payload of `wicked.crew.watch_finding.cleared`, discriminated on `reason`: the raised row
+ * `watch_id` names is resolved (a later attempt passed, the worker produced output), dismissed by
+ * the operator ("Seen, not a problem": `dismissed_by` says who), or replaced by a roll-up
+ * (`replaced_by` names it). The set is closed on purpose: no clearing reason is allow-like.
+ */
+export type WatchFindingCleared =
+  | (WatchFindingClearedBase & { reason: 'resolved' })
+  | (WatchFindingClearedBase & { reason: 'dismissed'; dismissed_by: string })
+  | (WatchFindingClearedBase & { reason: 'rolled_up'; replaced_by: string });
 
 export interface WatchEventPayloads {
   'wicked.crew.watch_finding.raised': WatchFinding;
@@ -7200,13 +7201,14 @@ export interface WatchEventFrame {
   project_id?: string;
 }
 
-/** What one check can see on one run. Studio never renders an empty list as "all clear" when an entry was `not_checked`. */
-export interface WatchCoverage {
-  entry_id: string;
-  state: 'checked' | 'not_checked';
-  /** Why it was not checked, in plain words ("no declared scope", "the daemon was down"). */
-  reason?: string;
-}
+/**
+ * What one check can see on one run. Studio never renders an empty list as "all clear" when an entry
+ * was `not_checked`; a `not_checked` entry always says why, in plain words ("no declared scope", "the
+ * daemon was down").
+ */
+export type WatchCoverage =
+  | { entry_id: string; state: 'checked' }
+  | { entry_id: string; state: 'not_checked'; reason: string };
 
 /** `GET /watch?project=&kind=&run=&since=&limit=`: the feed fold, newest first. */
 export interface WatchFeedResponse {

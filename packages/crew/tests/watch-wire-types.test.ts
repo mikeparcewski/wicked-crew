@@ -56,7 +56,7 @@ const runless: WatchFinding = {
   model: { seat: 'codex', model: 'gpt-5', latency_ms: 812 },
 };
 
-const cleared: WatchFindingCleared = {
+const cleared = {
   run_id: 'r-88',
   ord: 5,
   attempt: 2,
@@ -68,7 +68,7 @@ const cleared: WatchFindingCleared = {
   entry_version: 1,
   reason: 'resolved',
   project_id: 'kes',
-};
+} satisfies WatchFindingCleared;
 
 const dismissed: WatchFindingCleared = {
   ...cleared,
@@ -83,6 +83,12 @@ const noAllowReason: WatchFindingCleared['reason'] = 'allow';
 const noAllowEmit: WatchEntry['emit']['as'] = 'approve';
 // @ts-expect-error -- `needs` is not a watch kind: needs-you stays studio's own fold
 const noNeedsKind: WatchFinding['watch_kind'] = 'needs';
+// @ts-expect-error -- a dismissal says who dismissed it
+const noAnonymousDismissal: WatchFindingCleared = { ...cleared, reason: 'dismissed' };
+// @ts-expect-error -- a roll-up names the row that replaces it
+const noBareRollUp: WatchFindingCleared = { ...cleared, reason: 'rolled_up' };
+// @ts-expect-error -- a `not_checked` entry always says why
+const noSilentGap: WatchCoverage = { entry_id: 'scope-drift', state: 'not_checked' };
 
 const rolledUp: WatchFindingCleared = { ...cleared, reason: 'rolled_up', replaced_by: 'w-2' };
 
@@ -166,8 +172,9 @@ describe('watch wire contract (TR-W4)', () => {
     expect(runless.run_id).toBeNull();
     expect(rolledUp.replaced_by).toBe('w-2');
     expect(busEntry.on.source).toBe('bus');
-    expect(feed.coverage?.[0]?.state).toBe('not_checked');
+    const gap = feed.coverage?.[0];
+    expect(gap?.state === 'not_checked' ? gap.reason : null).toBe('no declared scope');
     expect(health.entries.refused).toHaveLength(1);
-    expect([noAllowReason, noAllowEmit, noNeedsKind]).toHaveLength(3);
+    expect([noAllowReason, noAllowEmit, noNeedsKind, noAnonymousDismissal, noBareRollUp, noSilentGap]).toHaveLength(6);
   });
 });
