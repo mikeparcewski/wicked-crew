@@ -15,6 +15,9 @@ import type {
   WatchFinding,
   WatchFindingCleared,
   WatchHealth,
+  WatchEntrySource,
+  WatchSettings,
+  SystemSettings,
 } from 'wicked-crew-api-types';
 
 const raised: WatchFinding = {
@@ -176,5 +179,40 @@ describe('watch wire contract (TR-W4)', () => {
     expect(gap?.state === 'not_checked' ? gap.reason : null).toBe('no declared scope');
     expect(health.entries.refused).toHaveLength(1);
     expect([noAllowReason, noAllowEmit, noNeedsKind, noAnonymousDismissal, noBareRollUp, noSilentGap]).toHaveLength(6);
+  });
+});
+
+// TR-W5a (api-types 0.73.0): the runtime's additions — internal and watchdog sources, the feed's
+// clearing rows for a late join, and the operator settings with daemon-set stamps.
+const internalEntry: WatchEntry = {
+  id: 'registry-lagging',
+  version: 1,
+  on: { source: 'internal', type: 'registry.tick' },
+  filter: {},
+  check: 'deterministic:lag',
+  params: {},
+  threshold: { queue_depth: 384, tail_lag_ms: 60000 },
+  emit: { as: 'flag', severity: 'info', watch_kind: 'problem', attach: null, rate: { per_run: 5 } },
+  priority: 'p0',
+  enabled: true,
+  threshold_text: 'When 384 or more events are waiting',
+};
+const watchdogSource: WatchEntrySource = 'watchdog';
+// @ts-expect-error — no other source exists
+const noOtherSource: WatchEntrySource = 'timer';
+const lateJoin: WatchFeedResponse = { findings: [raised], cleared: [{ ...rolledUp }] };
+const watchSettings: WatchSettings = {
+  entries: { 'registry-lagging': { enabled: false, enabled_changed: { by: 'maria', at: 1 } } },
+  llm: false,
+};
+const viaSystem: SystemSettings['watch'] = watchSettings;
+
+describe('watch wire contract (TR-W5a additions)', () => {
+  it('types internal/watchdog sources, the late-join clearings and the watch settings', () => {
+    expect(internalEntry.on.source).toBe('internal');
+    expect(watchdogSource).toBe('watchdog');
+    expect(noOtherSource).toBe('timer');
+    expect(lateJoin.cleared).toHaveLength(1);
+    expect(viaSystem?.entries?.['registry-lagging']?.enabled_changed?.by).toBe('maria');
   });
 });

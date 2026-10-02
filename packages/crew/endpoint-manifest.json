@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.72.0",
+  "apiTypesVersion": "0.73.0",
   "endpoints": [
     {
       "method": "GET",
@@ -1666,6 +1666,49 @@
         409,
         500,
         501
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/watch",
+      "requestType": null,
+      "responseType": "WatchFeedResponse",
+      "statusCodes": [
+        200,
+        400
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/watch/:watch_id/dismiss",
+      "requestType": null,
+      "responseType": "{ dismissed: true; watch_id: string }",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        409,
+        502,
+        503
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/watch/entries",
+      "requestType": null,
+      "responseType": "{ entries: WatchEntry[] }",
+      "statusCodes": [
+        200
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/watch/health",
+      "requestType": null,
+      "responseType": "WatchHealth",
+      "statusCodes": [
+        200
       ]
     },
     {

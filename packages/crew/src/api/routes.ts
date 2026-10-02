@@ -106,6 +106,8 @@ import { BASE_SKILL_POLICIES, BASE_SKILL_REF_SHAPE, baseSkillRemedy } from '../s
 import type { EvalRunStore } from './eval-store.js';
 import { noEligibleSeatBody, parseNoEligibleSeat } from '../core/engine-roster.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
+import type { WatchRegistry } from '../watch/registry.js';
+import { isHumanOperator } from './watch-routes.js';
 import { boundOrigin, InteractiveBridgePool } from '../interactive/bridge-pool.js';
 import {
   composeDeliverText,
@@ -802,6 +804,8 @@ export interface RegisteredRoutes {
 }
 
 export interface RuntimeDeps {
+  /** The watch registry (TR-W5a), for the `watch.*` settings guard; absent or `null` = no registry. */
+  watchRegistry?: () => WatchRegistry | null;
   /** Freeze deliveries (studio idea 15) — `createServer` hydrates one from the audit trail so a
    *  restart keeps the freeze; a directly-driven route set gets a fresh (thawed) switch. */
   deliveryFreeze?: DeliveryFreeze;
@@ -4932,6 +4936,30 @@ export function registerRoutes(
         });
       }
     }
+    // The watch registry's switches (DES-TRIGGER-REGISTRY-001 §4.2, TR-W5a): only `enabled` and
+    // `threshold` of a shipped entry, and `llm`. Turning a watcher off is the one way to make the
+    // platform stop telling the operator something, so only a PERSON may do it — the "human"
+    // predicate decision capture uses; a worker's bearer gets 403. A bad patch is a 400 naming the
+    // key (never a silent drop), and the daemon stamps who changed what and when.
+    let watchNext: import('wicked-crew-api-types').WatchSettings | undefined;
+    if (Object.hasOwn(patch, 'watch')) {
+      const actor = actorOf(req);
+      if (!isHumanOperator(actor)) {
+        return reply.code(403).send({ error: 'Only a person can change what is watched (watch.* settings); a worker or system actor cannot' });
+      }
+      const registry = runtime.watchRegistry?.() ?? null;
+      if (registry === null) {
+        return reply.code(400).send({ error: 'watch: watching is not configured on this daemon' });
+      }
+      const problem = registry.validateSettingsPatch((patch as { watch?: unknown }).watch);
+      if (problem !== null) return reply.code(400).send({ error: problem });
+      watchNext = registry.mergeSettings(
+        (await adapter.getSettings()).watch,
+        (patch as { watch: import('wicked-crew-api-types').WatchSettings }).watch,
+        actor.id,
+        Date.now(),
+      );
+    }
     // Only known engine keys and validated `studio.*` keys are persisted. A key that is
     // NEITHER is dropped, not refused: request bodies are forward-additive too (DES-STUDIO-001
     // §5.1), so an older daemon meeting a newer client's engine key must not fail the whole
@@ -4963,11 +4991,13 @@ export function registerRoutes(
     for (const key of studioKeys) {
       (safe as Record<string, unknown>)[key] = (patch as Record<string, unknown>)[key];
     }
+    if (watchNext !== undefined) safe.watch = watchNext;
     // `Object.hasOwn`, NOT `k in safe`: `in` walks the prototype chain, so a dropped key named
     // `toString` / `valueOf` / `constructor` would test as "kept" and vanish from `ignored` —
     // the exact silent drop this route exists to end.
     const ignored = Object.keys(patch).filter((k) => !Object.hasOwn(safe, k));
     const settings = await adapter.updateSettings(safe);
+    if (watchNext !== undefined) runtime.watchRegistry?.()?.applySettings(settings.watch);
     // Re-apply the worker-config root to this process's env (seat sign-in). The engine reads
     // WICKED_WORKER_HOME per worker spawn — never cached — so this alone makes the change live
     // at the next spawn: no daemon restart, no engine restart.
@@ -4982,7 +5012,12 @@ export function registerRoutes(
     // `changed` names every persisted key, engine and `studio.*` alike; `ignored` (present only
     // when there is one) is where a dropped unknown key stops being invisible.
     audit.record('settings.updated', actorOf(req), {
-      detail: { changed: Object.keys(safe), ...(ignored.length > 0 ? { ignored } : {}) },
+      detail: {
+        changed: Object.keys(safe),
+        ...(ignored.length > 0 ? { ignored } : {}),
+        // Which watchers were switched or re-thresholded (health reads the stamps; this is the trail).
+        ...(watchNext !== undefined ? { watch: (patch as { watch: unknown }).watch } : {}),
+      },
     });
     return { settings };
   });
