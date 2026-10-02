@@ -961,7 +961,8 @@ export async function walkthroughView(view: SessionView, step?: string): Promise
     state = s !== null && RUNNING_STATES.has(s) ? (s as WalkthroughState) : 'starting_app';
   } else {
     const overall = str(result?.overall);
-    if (overall !== null && OVERALL[overall] !== undefined) {
+    // Own keys only (Copilot on #758): `constructor` / `__proto__` must never read as a verdict.
+    if (overall !== null && Object.hasOwn(OVERALL, overall)) {
       state = OVERALL[overall] as WalkthroughState;
       cause = str(result?.cause);
     } else {

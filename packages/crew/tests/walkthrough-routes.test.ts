@@ -251,6 +251,16 @@ describe('GET /runs/:id/walkthrough — the recording view (WT-W1)', () => {
     expect((await view('r9')).body).toMatchObject({ state: 'inconclusive', cause: 'no_evidence_root' });
   });
 
+  it('an overall that names an Object.prototype member is no verdict: inconclusive / no_result (Copilot)', async () => {
+    const ev = join(roots, 'r13');
+    sessionsDetail.mockResolvedValue([run('r13', ev, PAIR('done', 'done'))]);
+    const dir = proofRoot(ev, 'walkthrough_review', { 'result.json': { overall: 'constructor', chapters: [] } });
+    for (const overall of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+      writeFileSync(join(dir, 'result.json'), JSON.stringify({ overall, chapters: [] }));
+      expect((await view('r13')).body).toMatchObject({ state: 'inconclusive', cause: 'no_result' });
+    }
+  });
+
   it('defaults to the NEWEST pair; ?step= picks a pair by its review or plan step id; an unknown step is 404', async () => {
     const ev = join(roots, 'r10');
     const units: UnitSpec[] = [
