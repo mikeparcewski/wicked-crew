@@ -231,6 +231,12 @@ export interface HealthCapabilities {
    * on such a daemon.
    */
   seatChipOnCreate?: boolean;
+  /**
+   * `AgentSession.chat_id` is served on every run launched from a chat, terminal ones included
+   * (C1; crew ≥ the release carrying api-types 0.71.0). ABSENT on a daemon before the field — read
+   * as `false`: group such a daemon's runs one session per run.
+   */
+  runChatId?: boolean;
 }
 
 /** One `GET /health.warnings[]` entry (additive; wicked-core#411 / wicked-crew#497). */
@@ -492,6 +498,13 @@ export interface AgentSession {
    * this field.
    */
   chat_grounded?: boolean;
+  /**
+   * The chat this run was launched from (`LaunchRunBody.chatId`; C1, api-types 0.71.0) — on EVERY
+   * run, terminal ones included, and after a daemon restart (read back from the `run.launched`
+   * trail entry). ABSENT — never `null` — when the run was not launched from a chat, or on a daemon
+   * before the field: check `GET /health.capabilities.runChatId` before grouping runs by chat.
+   */
+  chat_id?: string;
   /**
    * The engine's plan state (wicked-core `TeamPlanState`, DES-TEAMING-002 §8.4-§8.6; api-types
    * 0.46.0 types the engine field) — present on a run launched from a PLAN or a PRESET, ABSENT on

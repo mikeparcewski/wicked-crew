@@ -1286,6 +1286,9 @@ export function registerRoutes(
     if (chatSeatCount !== undefined) view.session.chat_seat_count = chatSeatCount;
     const chatGrounded = runTimingIndex.chatGroundedFor(view.session.id);
     if (chatGrounded !== undefined) view.session.chat_grounded = chatGrounded;
+    // C1: the chat the run was launched from, on every run (terminal ones too) — ABSENT otherwise.
+    const chatId = runTimingIndex.chatIdFor(view.session.id);
+    if (chatId !== undefined) view.session.chat_id = chatId;
     return view;
   };
   // Resolved ONCE and shared by the project routes (which read/write `interactiveRoot`) and the
@@ -1325,10 +1328,13 @@ export function registerRoutes(
     // F-E2E-030: what this deployment can keep. A composer reads `capabilities.deliverGate`
     // before it promises "pauses at the deliver gate"; a stub-driven route set without the
     // probe honestly reports no gate.
-    const capabilities =
-      typeof adapter.engineCapabilities === 'function'
+    const capabilities = {
+      ...(typeof adapter.engineCapabilities === 'function'
         ? adapter.engineCapabilities()
-        : { deliverGate: false, revisesPr: false, chatIdOnLaunch: false, seatChipOnCreate: false };
+        : { deliverGate: false, revisesPr: false, chatIdOnLaunch: false, seatChipOnCreate: false }),
+      // C1: `AgentSession.chat_id` is served from the daemon's own launch index, whatever the engine.
+      runChatId: true,
+    };
     // wicked-core#411 / crew#497: the state-home blocker rides the health probe as a WARNING. The
     // daemon still SERVES (status stays ok — studio must load and show the blocker) but refuses to
     // launch while the state home holds an entry the worker Read fence cannot classify. Re-surveyed
