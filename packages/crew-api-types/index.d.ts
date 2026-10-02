@@ -7075,6 +7075,211 @@ export interface TeamEventFrame {
   project_id?: string;
 }
 
+// ── The watch registry wire contract (DES-TRIGGER-REGISTRY-001 §4.5; TR-W4; api-types 0.70.0) ──
+//
+// The registry is advisory by construction: a watch row can never allow, approve or block. Its
+// facts are two bus types owned by crew (`wicked.crew.watch_finding.{raised,cleared}`), relayed
+// onto `/ws` as {@link WatchEventFrame} by a bus tap (never broadcast directly, so the socket and
+// the record cannot disagree). Types only: the runtime lands in TR-W5a, and a daemon without it
+// simply never sends these frames or serves these routes.
+
+/** The two bus types the watch registry publishes. */
+export type WatchEventType = 'wicked.crew.watch_finding.raised' | 'wicked.crew.watch_finding.cleared';
+
+/** How a watch row is meant: a contradiction in the work's own evidence, a look-worthy flag, or a candidate rule for the review queue. */
+export type WatchEmitAs = 'finding' | 'flag' | 'proposal';
+export type WatchSeverity = 'high' | 'medium' | 'info';
+/** The Watchtower's kind column. There is no `needs` kind: needs-you stays studio's own fold. */
+export type WatchKind = 'problem' | 'decision' | 'done' | 'quiet' | 'delivery';
+/** `p0` is never shed; `p1` is shed after `p2` when the push ring overflows. */
+export type WatchPriority = 'p0' | 'p1' | 'p2';
+
+/** Where in the run a watch row points: "Jump in" scrolls to the nearest event at or after `at`. */
+export interface WatchAnchor {
+  run_id: string;
+  ord: number | null;
+  attempt: number | null;
+  /** Unix millis of the source event. */
+  at: number;
+}
+
+/** One piece of evidence a watch row cites. `run_event` names a persisted CoreEvent; `bus_row` a bus row. */
+export interface WatchEvidenceRef {
+  kind: 'run_event' | 'bus_row' | (string & {});
+  type: string;
+  ord?: number | null;
+  attempt?: number | null;
+  /** For `bus_row`: the cited row's `event_id`. */
+  event_id?: number;
+}
+
+/**
+ * The payload of `wicked.crew.watch_finding.raised`. Its first six fields are the team
+ * envelope's (`DES-TEAMING-002` §4.4). `watch_id` is `"w-"` + the deterministic key over
+ * (`run_id | "-"`, `entry_id`, `entry_version`, `subject`), so a replay or a redelivery resolves to
+ * the same row.
+ */
+export interface WatchFinding {
+  /** `null` for a row no run owns (a registry-internal flag such as `registry-lagging`). */
+  run_id: string | null;
+  ord: number | null;
+  attempt: number | null;
+  /** `"watch:<entry_id>@<entry_version>"`. */
+  by: string;
+  /** Unix millis the row was produced. */
+  at: number;
+  /** What it answers: `"<CoreEvent type>#<ord>:<attempt>"`, or a bus source row's idempotency key. */
+  re: string;
+  watch_id: string;
+  entry_id: string;
+  entry_version: number;
+  /** `"deterministic:<name>"` or `"llm:<prompt-ref>@<n>"`. */
+  check: string;
+  kind: WatchEmitAs;
+  severity: WatchSeverity;
+  watch_kind: WatchKind;
+  /** `"gate"`: render as one line on the open gate's existing row, never a new row. */
+  attach: 'gate' | null;
+  /** The run's project membership, as the relay tags frames; absent when the run is unfiled. */
+  project_id?: string;
+  /** The one plain sentence the Watchtower shows. */
+  sentence: string;
+  /** Entry-specific facts, at most 4 KB, redacted. */
+  facts: Record<string, unknown>;
+  anchor: WatchAnchor | null;
+  evidence: WatchEvidenceRef[];
+  /** Set for an `llm:*` check only. */
+  model: { seat: string; model: string; latency_ms: number } | null;
+  /** How many later rows this roll-up stands for (`0` on an ordinary row). */
+  rolled_up: number;
+}
+
+/** The fields every `wicked.crew.watch_finding.cleared` payload carries. */
+export interface WatchFindingClearedBase {
+  run_id: string | null;
+  ord: number | null;
+  attempt: number | null;
+  by: string;
+  at: number;
+  re: string;
+  /** The raised row this clears. */
+  watch_id: string;
+  entry_id: string;
+  entry_version: number;
+  project_id?: string;
+}
+
+/**
+ * The payload of `wicked.crew.watch_finding.cleared`, discriminated on `reason`: the raised row
+ * `watch_id` names is resolved (a later attempt passed, the worker produced output), dismissed by
+ * the operator ("Seen, not a problem": `dismissed_by` says who), or replaced by a roll-up
+ * (`replaced_by` names it). The set is closed on purpose: no clearing reason is allow-like.
+ */
+export type WatchFindingCleared =
+  | (WatchFindingClearedBase & { reason: 'resolved' })
+  | (WatchFindingClearedBase & { reason: 'dismissed'; dismissed_by: string })
+  | (WatchFindingClearedBase & { reason: 'rolled_up'; replaced_by: string });
+
+export interface WatchEventPayloads {
+  'wicked.crew.watch_finding.raised': WatchFinding;
+  'wicked.crew.watch_finding.cleared': WatchFindingCleared;
+}
+
+/** One watch bus row, discriminated on `event_type`. */
+export type WatchBusEvent = {
+  [K in WatchEventType]: { event_type: K; payload: WatchEventPayloads[K] };
+}[WatchEventType];
+
+/**
+ * A `/ws` frame carrying one `wicked.crew.watch_finding.*` bus row, relayed verbatim (the
+ * {@link TeamEventFrame} pattern). `project_id` is set when the run's membership files it.
+ */
+export interface WatchEventFrame {
+  type: 'watchEvent';
+  /** The whole bus row as wicked-bus delivers it. */
+  event: WatchBusEvent & { event_id: number; [k: string]: unknown };
+  project_id?: string;
+}
+
+/**
+ * What one check can see on one run. Studio never renders an empty list as "all clear" when an entry
+ * was `not_checked`; a `not_checked` entry always says why, in plain words ("no declared scope", "the
+ * daemon was down").
+ */
+export type WatchCoverage =
+  | { entry_id: string; state: 'checked' }
+  | { entry_id: string; state: 'not_checked'; reason: string };
+
+/** `GET /watch?project=&kind=&run=&since=&limit=`: the feed fold, newest first. */
+export interface WatchFeedResponse {
+  findings: WatchFinding[];
+  /** Present with `run=` only. */
+  coverage?: WatchCoverage[];
+}
+
+/**
+ * One registry entry (`packages/crew/watch/entries/<id>.json`), as `GET /watch/entries` serves it:
+ * the effective entry (the operator's `enabled` / `threshold` override applied) plus its threshold
+ * in plain words. The schema has no allow-like `emit.as` value.
+ */
+export interface WatchEntry {
+  /** Stable, `[a-z0-9-]{3,48}`; equals the file name. */
+  id: string;
+  /** Bumped on any semantic change; part of every finding key. */
+  version: number;
+  /** `core`: a CoreEvent `type` from the daemon fan-in. `bus`: a 4-segment `wicked.<domain>.<noun>.<verb>` type. */
+  on: { source: 'core' | 'bus'; type: string };
+  /** JSON-path equality, AND of keys; an array means "any of". */
+  filter: Record<string, unknown>;
+  check: string;
+  params: Record<string, unknown>;
+  threshold: Record<string, unknown>;
+  emit: {
+    as: WatchEmitAs;
+    severity: WatchSeverity;
+    watch_kind: WatchKind;
+    attach: 'gate' | null;
+    /** Past `per_run`, one roll-up replaces the rest. */
+    rate: { per_run: number };
+  };
+  priority: WatchPriority;
+  enabled: boolean;
+  /** The threshold in plain words, for "When Studio speaks up". Always set on `GET /watch/entries`. */
+  threshold_text: string;
+}
+
+/** Who changed an operator-adjustable entry setting, and when (read from the `settings.updated` audit entry). */
+export interface WatchEntryChange {
+  id: string;
+  by: string;
+  /** Unix millis. */
+  at: number;
+}
+
+/** `GET /watch/health`. Every turned-off entry and every changed threshold is listed with who and when. */
+export interface WatchHealth {
+  /** The registry is running. `false` ⇒ `reason` says why. */
+  armed: boolean;
+  reason: string | null;
+  sources: {
+    bus: 'ok' | 'lagging' | 'down' | (string & {});
+    core: 'ok' | 'lagging' | 'down' | (string & {});
+    watchdog: 'ok' | 'lagging' | 'down' | (string & {});
+  };
+  queue: { depth: number; hwm: number; shed_by_priority: Record<WatchPriority, number> };
+  tail_lag_ms: number;
+  emit: { failed: number };
+  entries: {
+    loaded: number;
+    refused: Array<{ id: string; reason: string }>;
+    off: WatchEntryChange[];
+    thresholds_changed: WatchEntryChange[];
+  };
+  llm: { enabled: boolean; inflight: number; timeouts: number; skipped_no_seat: number };
+  /** `core_gap: true`: runs that started and ended while the daemon was down were not evaluated this boot. */
+  replay?: { core_gap: boolean };
+}
+
 /** One `wicked.team.*` bus row as `GET /runs/:id/team` returns it. */
 export type TeamRow = TeamBusEvent & {
   event_id: number;

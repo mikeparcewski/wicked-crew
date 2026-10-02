@@ -10,6 +10,9 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Added
+- **The watch registry's wire contract, ahead of its runtime (`wicked-crew-api-types` 0.70.0; DES-TRIGGER-REGISTRY-001 slice TR-W4).** Types only: `WatchFinding` (the `wicked.crew.watch_finding.raised` payload: the team envelope's six fields, `watch_id`, the entry and check, `kind` finding / flag / proposal, `severity`, `watch_kind`, `attach: "gate"`, the plain `sentence`, redacted `facts`, the jump `anchor`, cited `evidence`, the `model` of an LLM check and `rolled_up`), `WatchFindingCleared` (resolved, dismissed or rolled up), the `WatchBusEvent` union, the `/ws` `WatchEventFrame` (`type: "watchEvent"`, the bus row relayed verbatim, as `TeamEventFrame`), `WatchEntry` (one registry entry plus its threshold in plain words), `WatchCoverage` (`checked` / `not_checked` with the reason), `WatchFeedResponse` for `GET /watch` and `WatchHealth` for `GET /watch/health`. No allow-like value exists anywhere in the contract: a watch row can never allow, approve or block. The daemon serves none of it yet (TR-W5a); `tests/watch-wire-types.test.ts` pins the spec's own example payloads at typecheck.
+
 ## [0.7.46] — 2026-10-01
 
 Patch release: fixes the red post-publish smoke of 0.7.45 (S04 "bug-run (mixed roster)", release
