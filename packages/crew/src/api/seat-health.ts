@@ -292,6 +292,17 @@ export class SeatHealthTracker {
         if (cli === undefined || reason === undefined || source === 'launcher') return;
         this.recentBenches.set(cli, { at, reason, source, ...(session !== undefined ? { session } : {}) });
         this.stampError(cli, at);
+        // The run moves its units OFF the benched seat: the refusing unit fails over (a
+        // `stepFailed` naming the new seat, no `unitReassigned`) and a later one is re-seated
+        // before it runs. So none of this run's units is on that seat any more, and an ok output
+        // for one of them must not be read as the benched seat recovering (it ran elsewhere).
+        // An operator's explicit reassign back onto the seat re-records the assignment.
+        if (session !== undefined) {
+          const prefix = `${session}:`;
+          for (const [key, seat] of [...this.assignments]) {
+            if (seat === cli && key.startsWith(prefix)) this.assignments.delete(key);
+          }
+        }
         return;
       }
       case 'acpFallback': {

@@ -98,6 +98,19 @@ describe('a seat the engine benched in a run is benched at the next launch (seat
     expect(rosterOver(tracker)().find((s) => s.key === 'copilot')!.council_eligible).toBe(true);
   });
 
+  it("an ok output of a unit that was planned on the benched seat but failed over does NOT clear the bench (it ran elsewhere)", () => {
+    const tracker = new SeatHealthTracker();
+    const now = Date.now();
+    // The run planned unit 2 on copilot; copilot refused, the engine benched it and failed the unit
+    // over to opencode (a stepFailed, no unitReassigned), and unit 2 then completed there.
+    tracker.ingest(ev({ type: 'unitDistributed', session: RUN, ord: 2, cli: 'copilot', routingMethod: 'evaluator_distinct' }));
+    tracker.ingest(copilotBenched(now));
+    tracker.ingest(ev({ type: 'stepFailed', session: RUN, ord: 2, attempt: 0, detail: "seat 'copilot' failed (worker error); failing over to 'opencode' (seats worker-failed on this unit: 1/3)", failureKind: 'workerError' }));
+    tracker.ingest(ev({ type: 'unitOutputCaptured', session: RUN, ord: 2, attempt: 1, outputBytes: 10, stepStatus: 'ok', governed: false }));
+    expect(tracker.recentBenchFor('copilot', now + 1_000)).toMatchObject({ reason: 'quota_exhausted (no success in the run)' });
+    expect(rosterOver(tracker)().find((s) => s.key === 'copilot')!.council_eligible).toBe(false);
+  });
+
   it('recovers at once when the seat answers a chat turn (chatReply ok), but not on a failed one', () => {
     const tracker = new SeatHealthTracker();
     const now = Date.now();
