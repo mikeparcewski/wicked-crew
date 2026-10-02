@@ -108,6 +108,9 @@ export const DEMO_EXPORT_TIMEOUT_MS: Record<DemoExportFormat, number> = { gif: 1
 export const DEMO_GIF_FILTER =
   'fps=10,scale=720:-1:flags=lanczos,split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=3';
 
+/** The stages an export may run in: no worker of the run is running, so none can write the root. */
+const DEMO_EXPORT_STAGES: ReadonlySet<DemoStage> = new Set<DemoStage>(['review_gate', 'done', 'failed']);
+
 /** What each export writes, inside the run's `demo-video/`. */
 const DEMO_EXPORT_FILE: Readonly<Record<DemoExportFormat, string>> = { gif: 'demo.gif', poster: 'poster.jpg' };
 
@@ -198,6 +201,11 @@ async function encodeDemoExport(runId: string, format: DemoExportFormat, atSec: 
         status: 422,
         body: { error: at !== undefined ? `no frame at ${at} s: the video is shorter` : `ffmpeg wrote no ${format}` },
       };
+    }
+    // The encode took seconds: re-resolve the directory before the rename, so a `demo-video` swapped
+    // for a symlink meanwhile is never written through (the run's workers can write the root).
+    if ((await containedPath(root, 'demo-video')) !== outDir) {
+      return { status: 409, body: { error: 'demo-video/ changed during the encode; nothing was written' } };
     }
     await fsp.rename(tmp, join(outDir, name));
     return { status: 200, body: { format, path: `demo-video/${name}`, bytes } };
@@ -614,7 +622,13 @@ export function registerDemoRoutes(app: FastifyInstance, adapter: CoreAdapter): 
       const { id } = req.params as { id: string };
       const parsed = DemoExportSchema.safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send({ error: 'Invalid export body', details: parsed.error.issues });
-      if ((await demoRun(id)) === null) return reply.code(404).send({ error: 'no demo run with that id' });
+      const run = await demoRun(id);
+      if (run === null) return reply.code(404).send({ error: 'no demo run with that id' });
+      // Only while none of the run's workers can write the root: at the review gate, or once the run
+      // has ended. The export reads and writes inside that root across a seconds-long encode.
+      if (!DEMO_EXPORT_STAGES.has(demoStage(run))) {
+        return reply.code(409).send({ error: 'a demo can be exported at the review gate or once the run has ended' });
+      }
       const { format, atSec } = parsed.data;
       const key = `${id}\0${format}\0${atSec ?? ''}`;
       let pending = exportsInFlight.get(key);

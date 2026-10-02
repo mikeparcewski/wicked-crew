@@ -12,7 +12,7 @@
 
 import Fastify, { type FastifyInstance } from 'fastify';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
@@ -54,20 +54,26 @@ function buildApp(adapter: Record<string, unknown>): FastifyInstance {
   return app;
 }
 
-/** A finished demo run (plan → record → review, all done). */
-function demoRun(id: string, preset = 'demo') {
+/** A finished demo run (plan → record → review, all done), or one still recording. */
+function demoRun(id: string, preset = 'demo', recording = false) {
   const steps = ['pa-scope', 'plan', 'record', 'review'];
   return {
     session: {
       id,
-      status: 'completed',
-      unit_ix: steps.length,
+      status: recording ? 'executing' : 'completed',
+      unit_ix: recording ? 2 : steps.length,
       workflow_id: `${id}:plan-2`,
       problem: 'Make a demo',
       extra_write_roots: [],
       team_plan: { rev: 2, accepted_rev: 2, preset },
     },
-    units: steps.map((s, i) => ({ id: `${id}:${s}`, session_id: id, ord: i + 1, status: 'done', assigned_cli: null })),
+    units: steps.map((s, i) => ({
+      id: `${id}:${s}`,
+      session_id: id,
+      ord: i + 1,
+      status: recording && i >= 2 ? 'pending' : 'done',
+      assigned_cli: null,
+    })),
   };
 }
 
@@ -147,7 +153,7 @@ describe('POST /runs/:id/demo/export (EP-C3)', { timeout: 30_000 }, () => {
     process.env.FAKE_FFMPEG_LOG = logDir;
     delete process.env.FAKE_FFMPEG_MODE;
     delete process.env.FAKE_FFMPEG_SLEEP_MS;
-    sessionsDetail = vi.fn().mockResolvedValue([demoRun('d1'), demoRun('nd', 'bug')]);
+    sessionsDetail = vi.fn().mockResolvedValue([demoRun('d1'), demoRun('nd', 'bug'), demoRun('rec', 'demo', true)]);
     app = buildApp({
       sessionsDetail,
       workOutput: vi.fn().mockResolvedValue(null),
@@ -244,6 +250,20 @@ describe('POST /runs/:id/demo/export (EP-C3)', { timeout: 30_000 }, () => {
     expect(spawns()).toBe(1);
   });
 
+  it('a demo-video/ swapped for a symlink during the encode is never written through', async () => {
+    const root = stitchedRoot('d1');
+    const outside = mkdtempSync(join(tmpdir(), 'demo-export-outside-'));
+    process.env.FAKE_FFMPEG_SLEEP_MS = '800';
+    const pending = exportReq('d1', { format: 'gif' });
+    for (let i = 0; i < 100 && spawns() === 0; i++) await new Promise((r) => setTimeout(r, 20));
+    renameSync(join(root, 'demo-video'), join(root, 'moved'));
+    symlinkSync(outside, join(root, 'demo-video'));
+    const res = await pending;
+    expect(res.statusCode, res.body).toBe(409);
+    expect(readdirSync(outside)).toEqual([]);
+    removeScratch(outside);
+  });
+
   it('a missing ffmpeg answers 503 with the install hint', async () => {
     stitchedRoot('d1');
     process.env.WICKED_FFMPEG = join(logDir, 'no-such-ffmpeg');
@@ -282,11 +302,16 @@ describe('POST /runs/:id/demo/export (EP-C3)', { timeout: 30_000 }, () => {
     expect(readdirSync(join(root, 'demo-video')).sort()).toEqual(['chapters.md', 'demo.mp4']);
   });
 
-  it('refuses: no stitched MP4 yet (409), not a demo run (404), a bad body (400)', async () => {
+  it('refuses: no stitched MP4 yet (409), a run still recording (409), not a demo run (404), a bad body (400)', async () => {
     mkdirSync(join(demos, 'd1'), { recursive: true });
     expect((await exportReq('d1', { format: 'gif' })).statusCode).toBe(409);
     expect((await exportReq('nd', { format: 'gif' })).statusCode).toBe(404);
     expect((await exportReq('nope', { format: 'gif' })).statusCode).toBe(404);
+    // While the recorder runs, its worker can write the root: no export until the review gate.
+    stitchedRoot('rec');
+    const recording = await exportReq('rec', { format: 'gif' });
+    expect(recording.statusCode, recording.body).toBe(409);
+    expect(recording.body).toContain('review gate');
     stitchedRoot('d1');
     for (const body of [{ format: 'webm' }, { format: 'poster', atSec: -1 }, { format: 'gif', atSec: 3 }, { format: 'gif', path: '/etc' }, {}]) {
       expect((await exportReq('d1', body)).statusCode, JSON.stringify(body)).toBe(400);
