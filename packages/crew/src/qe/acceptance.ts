@@ -93,9 +93,9 @@ export function acceptancePhaseIds(workflow: WorkflowDef | null): string[] {
  * A run's acceptance requirement, read from what the run CONTAINS (seam X2, round 2).
  *
  *   - A preset or user-plan run: its units whose catalog entry declares `verified_evidence`
- *     (`test`, `domain_coverage` today — read from the engine's `Core.catalog()`, never a list
- *     here). No registered def is consulted, so a preset whose def is deleted, and a user plan
- *     (which has none), declare exactly what they will run.
+ *     (`test`, `walkthrough_review`, `domain_coverage` today — read from the engine's
+ *     `Core.catalog()`, never a list here). No registered def is consulted, so a preset whose def
+ *     is deleted, and a user plan (which has none), declare exactly what they will run.
  *   - A non-team run of a registered workflow: that def's `verified_evidence` phases.
  *   - A free-text run: nothing.
  *   - Anything the daemon cannot read — an UNKNOWN run, a plan run whose steps carry no catalog

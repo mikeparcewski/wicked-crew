@@ -241,7 +241,13 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
     const want = flagged ? [...keys, 'verified_evidence'].sort() : keys;
     for (const e of entries) expect(Object.keys(e).sort(), e.id).toEqual(want);
     if (flagged) {
-      expect(entries.filter((e) => e.verified_evidence === true).map((e) => e.id)).toEqual(['test', 'domain_coverage']);
+      // wicked-core#691 (DES-walkthrough-proof §4.3, C1) adds `walkthrough_review`, a verified-evidence
+      // Tool step inserted after `test` in catalog order. CI builds the engine from core main while the
+      // published wicked-core-ts may predate it, so pin the exact set for whichever engine is linked.
+      const walkthrough = entries.some((e) => e.id === 'walkthrough_review');
+      expect(entries.filter((e) => e.verified_evidence === true).map((e) => e.id)).toEqual(
+        walkthrough ? ['test', 'walkthrough_review', 'domain_coverage'] : ['test', 'domain_coverage'],
+      );
     }
     expect(entries.map((e) => e.id)).toEqual(expect.arrayContaining(['understand', 'build', 'review', 'deliver']));
     const deliver = entries.find((e) => e.id === 'deliver')!;
