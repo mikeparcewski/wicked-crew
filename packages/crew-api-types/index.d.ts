@@ -6657,12 +6657,29 @@ export interface WalkthroughView {
   tree: string | null;
   /** Always `false`: a later creator step re-inserts the pair after it (§4.8). Kept so an old plan shape reads honestly. */
   stale: false;
-  /** The take's seal was found in the engine store and matches the files on disk (WT-W2). */
+  /** The take's seal was found in the engine store and every re-check against the files on disk held (WT-W2). */
   sealed: boolean;
   /** Proof-root-relative paths of the stitched take; `null` until there is one. */
   video: { mp4: string | null; poster: string | null; markers: DemoMarker[] };
   chapters: WalkthroughChapter[];
-  /** Per plan step, the check state (filled once acceptance reads the seal, WT-W2; `[]` until then). */
+  /** Per creator step, the check state from THIS pair's take — computed at every read from its re-verified seal (WT-W2). */
+  steps: WalkthroughStepState[];
+}
+
+/**
+ * `GET /runs/:id/acceptance` → `walkthrough` (WT-W2, DES-walkthrough-proof §4.9; api-types 0.75.0):
+ * the walkthrough half of the gate. One row per `walkthrough_review` step the run's requirement names,
+ * each re-verified at this read — the seal (the last `WALKTHROUGH-SEAL` line of the recorder's
+ * engine-captured output), `bundle_sha` recomputed from the proof root, and the proof root's stamped
+ * ledger verdicts against the sealed chapter verdicts. The gate is deny-dominates across the repo
+ * ledger and every row: a missing, mismatched ("changed after it was sealed") or non-PASS seal
+ * denies. ABSENT when the requirement names no walkthrough step.
+ */
+export interface RunAcceptanceWalkthrough {
+  roots: Array<{ stepId: string; sealed: boolean; satisfied: boolean; reason: string }>;
+  /** Every row's seal held. */
+  sealed: boolean;
+  /** Per creator step, from the NEWEST walkthrough of the run. */
   steps: WalkthroughStepState[];
 }
 

@@ -65,7 +65,7 @@ import type {
 import { describeAttribution, readAcceptanceState, summarizeManifest } from './ledger.js';
 import type { RunConformance } from './conformance.js';
 import { resolveConformance } from './conformance.js';
-import type { WalkthroughStepState } from 'wicked-crew-api-types';
+import type { RunAcceptanceWalkthrough, WalkthroughStepState } from 'wicked-crew-api-types';
 import type { WalkthroughGate } from './walkthrough-acceptance.js';
 
 /**
@@ -387,11 +387,7 @@ export interface AcceptanceView {
    * seal held; `steps` = the per-creator-step `checkState` from the newest walkthrough. ABSENT when the
    * run's requirement names no walkthrough step.
    */
-  walkthrough?: {
-    roots: Array<{ stepId: string; sealed: boolean; satisfied: boolean; reason: string }>;
-    sealed: boolean;
-    steps: WalkthroughStepState[];
-  };
+  walkthrough?: RunAcceptanceWalkthrough;
   /**
    * The governance half, BESIDE the QE gate (AW-14 / arch-R13a + R16): this run's conformance
    * claims (wiki rule ids cited), its enforcement status, and the deny-dominates `guardrailed`
