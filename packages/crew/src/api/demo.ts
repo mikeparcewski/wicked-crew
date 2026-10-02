@@ -198,14 +198,18 @@ async function encodeDemoExport(
   let published: string | null = null;
   try {
     await fsp.copyFile(input, source);
+    // The input is read as an MP4 and nothing else, from the local file alone: a worker-written
+    // `demo.mp4` that is really a playlist (HLS, concat) naming media outside the root is refused by the
+    // demuxer instead of followed with the daemon's permissions.
+    const demux = ['-f', 'mov', '-protocol_whitelist', 'file', '-i', source];
     let args: string[];
     let at: number | undefined;
     if (format === 'gif') {
-      args = ['-y', '-i', source, '-vf', DEMO_GIF_FILTER, '-loop', '0', encoded];
+      args = ['-y', ...demux, '-vf', DEMO_GIF_FILTER, '-loop', '0', encoded];
     } else {
       // Default: one second into the first chapter (the title card is past), or 1 s with no markers.
       at = atSec ?? (parseMarkers(await readText(root, 'demo-video/chapters.md'))[0]?.sec ?? 0) + 1;
-      args = ['-y', '-ss', String(at), '-i', source, '-frames:v', '1', '-q:v', '3', '-update', '1', encoded];
+      args = ['-y', '-ss', String(at), ...demux, '-frames:v', '1', '-q:v', '3', '-update', '1', encoded];
     }
     const outcome = await runFfmpeg(args, DEMO_EXPORT_TIMEOUT_MS[format]);
     if (outcome.kind === 'missing') {

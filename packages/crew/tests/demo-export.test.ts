@@ -192,6 +192,8 @@ describe('POST /runs/:id/demo/export (EP-C3)', { timeout: 30_000 }, () => {
     expect(argv[argv.indexOf('-vf') + 1]).toContain('palettegen');
     expect(argv[argv.indexOf('-vf') + 1]).toContain('paletteuse');
     expect(argv[argv.indexOf('-loop') + 1]).toBe('0');
+    // The input is demuxed as MP4 from the local file only: never as a playlist naming other media.
+    expect(argv.slice(argv.indexOf('-i') - 4, argv.indexOf('-i'))).toEqual(['-f', 'mov', '-protocol_whitelist', 'file']);
     expect(readFileSync(join(root, 'demo-video', 'demo.gif'), 'utf8')).toBe('GIF89a-fake');
     // Only the finished file is left: the encode wrote to a temporary name and renamed it.
     expect(readdirSync(join(root, 'demo-video')).sort()).toEqual(['chapters.md', 'demo.gif', 'demo.mp4']);
@@ -368,6 +370,28 @@ describe('POST /runs/:id/demo/export (EP-C3)', { timeout: 30_000 }, () => {
   });
 
   const hasFfmpeg = spawnSync('ffmpeg', ['-version'], { stdio: 'ignore' }).status === 0;
+  // Defense in depth: ffmpeg 8 already refuses an HLS playlist with a non-standard extension on its
+  // own; the forced `-f mov -protocol_whitelist file` (pinned in the GIF case's argv) keeps an older
+  // host ffmpeg from following one too.
+  it.skipIf(!hasFfmpeg)('with the host ffmpeg: a demo.mp4 that is really a playlist naming media outside the root is refused', async () => {
+    const root = stitchedRoot('d1');
+    delete process.env.WICKED_FFMPEG;
+    const outside = mkdtempSync(join(tmpdir(), 'demo-export-secret-'));
+    const secret = join(outside, 'secret.mp4');
+    expect(
+      spawnSync('ffmpeg', ['-y', '-f', 'lavfi', '-i', 'testsrc=size=64x48:rate=5:duration=2', '-c:v', 'mpeg4', secret], { stdio: 'ignore' }).status,
+    ).toBe(0);
+    writeFileSync(join(root, 'demo-video', 'demo.mp4'), `ffconcat version 1.0\nfile '${secret}'\n`);
+    const res = await exportReq('d1', { format: 'poster', atSec: 0 });
+    expect(res.statusCode, res.body).toBe(502);
+    expect(existsSync(join(root, 'demo-video', 'poster.jpg'))).toBe(false);
+    writeFileSync(join(root, 'demo-video', 'demo.mp4'), `#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\nfile://${secret}\n#EXT-X-ENDLIST\n`);
+    const hls = await exportReq('d1', { format: 'gif' });
+    expect(hls.statusCode, hls.body).toBe(502);
+    expect(existsSync(join(root, 'demo-video', 'demo.gif'))).toBe(false);
+    removeScratch(outside);
+  });
+
   it.skipIf(!hasFfmpeg)('with the host ffmpeg: a real GIF and a real JPEG poster from a real MP4', async () => {
     const root = stitchedRoot('d1', '| 0:00 | Introduction |\n');
     delete process.env.WICKED_FFMPEG;
