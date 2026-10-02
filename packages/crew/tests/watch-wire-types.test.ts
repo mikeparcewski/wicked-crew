@@ -76,6 +76,14 @@ const dismissed: WatchFindingCleared = {
   dismissed_by: 'operator',
 };
 
+// No allow-like value is assignable anywhere a watch row could carry authority.
+// @ts-expect-error -- `allow` is not a clearing reason
+const noAllowReason: WatchFindingCleared['reason'] = 'allow';
+// @ts-expect-error -- an entry cannot emit an allow / approve / deny
+const noAllowEmit: WatchEntry['emit']['as'] = 'approve';
+// @ts-expect-error -- `needs` is not a watch kind: needs-you stays studio's own fold
+const noNeedsKind: WatchFinding['watch_kind'] = 'needs';
+
 const rolledUp: WatchFindingCleared = { ...cleared, reason: 'rolled_up', replaced_by: 'w-2' };
 
 const frame: WatchEventFrame = {
@@ -160,5 +168,6 @@ describe('watch wire contract (TR-W4)', () => {
     expect(busEntry.on.source).toBe('bus');
     expect(feed.coverage?.[0]?.state).toBe('not_checked');
     expect(health.entries.refused).toHaveLength(1);
+    expect([noAllowReason, noAllowEmit, noNeedsKind]).toHaveLength(3);
   });
 });

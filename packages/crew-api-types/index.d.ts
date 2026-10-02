@@ -7170,7 +7170,8 @@ export interface WatchFindingCleared {
   watch_id: string;
   entry_id: string;
   entry_version: number;
-  reason: 'resolved' | 'dismissed' | 'rolled_up' | (string & {});
+  /** Closed on purpose: no clearing reason is allow-like. */
+  reason: 'resolved' | 'dismissed' | 'rolled_up';
   /** For `reason: "dismissed"`: who dismissed it (the human predicate's subject). */
   dismissed_by?: string;
   /** For `reason: "rolled_up"`: the roll-up row that replaces this one. */
