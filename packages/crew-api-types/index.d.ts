@@ -6502,6 +6502,31 @@ export interface DemoView {
   syntheticLabelled: boolean;
 }
 
+/** What `POST /runs/:id/demo/export` makes (EP-C3; api-types 0.72.0). The MP4 itself needs no export: download `video.path`. */
+export type DemoExportFormat = 'gif' | 'poster';
+
+/**
+ * `POST /runs/:id/demo/export` body (EP-C3; api-types 0.72.0). `gif` encodes the stitched MP4 into
+ * `demo-video/demo.gif` (two-pass palette, 10 fps, 720 px wide); `poster` writes one frame to
+ * `demo-video/poster.jpg`. The daemon encodes with ffmpeg off its event loop and a timeout (GIF 180 s,
+ * poster 30 s). Refusals: 400 a bad body, 404 not a demo run, 409 no stitched MP4 yet, 422 no frame
+ * at `atSec`, 502 ffmpeg failed, 503 no ffmpeg on the daemon host (`hint` says how to install it),
+ * 504 the encode ran past its timeout. A second identical request while one encodes joins it.
+ */
+export interface DemoExportBody {
+  format: DemoExportFormat;
+  /** Poster only: the frame, in seconds from the start (0 … 86400). Default: the first chapter marker + 1 s, or 1 s with no markers. */
+  atSec?: number;
+}
+
+/** `POST /runs/:id/demo/export` → 200: the file, ready for `GET /runs/:id/demo/file?path=`. */
+export interface DemoExportResponse {
+  format: DemoExportFormat;
+  /** `demo-video/demo.gif` or `demo-video/poster.jpg` (root-relative). */
+  path: string;
+  bytes: number;
+}
+
 /** `POST /proposals/:id/reject` → 200. */
 export interface RejectProposalResponse {
   ok: true;

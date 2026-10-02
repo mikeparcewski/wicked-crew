@@ -10,6 +10,9 @@
  *                                  the reviewer's verdicts (the review gate), and the chaptered MP4.
  *   GET  /runs/:id/demo/file       one file of the root (a contact sheet, the MP4 — with Range).
  *   PUT  /runs/:id/demo/script     the presenter's edit of `script.md` while the plan gate is open.
+ *   POST /runs/:id/demo/export     a GIF (`demo-video/demo.gif`) or a poster frame (`demo-video/poster.jpg`)
+ *                                  of the stitched MP4, encoded by ffmpeg with an ASYNC spawn and a
+ *                                  timeout (EP-C3): the daemon keeps answering while it encodes.
  *
  * The gates are the run's ordinary gates (`POST /runs/:id/gate`): approve, or `request_changes` with a
  * note — at the plan gate it re-runs `plan`, at the review gate it rewinds to `record` (re-record one
@@ -20,13 +23,16 @@
  * renders are served.
  */
 
+import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createReadStream, promises as fsp } from 'node:fs';
-import { extname, join, relative, resolve, sep } from 'node:path';
+import { dirname, extname, join, relative, resolve, sep } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type {
   DemoChapter,
+  DemoExportFormat,
+  DemoExportResponse,
   DemoFinding,
   DemoMarker,
   DemoStage,
@@ -53,6 +59,7 @@ const DEMO_FILE_TYPES: Readonly<Record<string, string>> = {
   '.mp4': 'video/mp4',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
+  '.gif': 'image/gif',
   '.md': 'text/markdown; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
 };
@@ -81,6 +88,123 @@ export const DemoLaunchSchema = z
   .strict();
 
 export const DemoScriptSchema = z.object({ content: z.string().min(1) }).strict();
+
+export const DemoExportSchema = z
+  .object({
+    format: z.enum(['gif', 'poster']),
+    /** The poster's frame, in seconds from the start. Poster only. */
+    atSec: z.number().finite().min(0).max(24 * 60 * 60).optional(),
+  })
+  .strict()
+  .refine((b) => b.format === 'poster' || b.atSec === undefined, { message: '`atSec` applies to a poster only', path: ['atSec'] });
+
+/**
+ * How long one encode may run before it is killed (EP-C3). A GIF re-encodes the whole video (the bound
+ * interactive's encoder uses); a poster decodes one frame. Mutable only so a test can shorten it.
+ */
+export const DEMO_EXPORT_TIMEOUT_MS: Record<DemoExportFormat, number> = { gif: 180_000, poster: 30_000 };
+
+/** Interactive's GIF filter (`src/service/demo.js` `ffmpegGifEncoder`): two-pass palette so colours do not band, 10 fps, 720 px. */
+export const DEMO_GIF_FILTER =
+  'fps=10,scale=720:-1:flags=lanczos,split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=3';
+
+/** What each export writes, inside the run's `demo-video/`. */
+const DEMO_EXPORT_FILE: Readonly<Record<DemoExportFormat, string>> = { gif: 'demo.gif', poster: 'poster.jpg' };
+
+export const DEMO_FFMPEG_HINT =
+  'install ffmpeg (e.g. `brew install ffmpeg` / `apt install ffmpeg`) on the daemon host, or set WICKED_FFMPEG to its path';
+
+type FfmpegOutcome =
+  | { kind: 'ok' }
+  | { kind: 'missing' }
+  | { kind: 'timeout' }
+  | { kind: 'failed'; code: number | null; stderr: string };
+
+/**
+ * Run ffmpeg without blocking the event loop: an async `spawn`, its stderr tail kept for the error,
+ * SIGKILL past `timeoutMs`. Never `spawnSync` (review N6: a 180 s synchronous encode would stall
+ * every route the daemon serves, `/health` included).
+ */
+export function runFfmpeg(args: string[], timeoutMs: number): Promise<FfmpegOutcome> {
+  const bin = process.env.WICKED_FFMPEG || 'ffmpeg';
+  return new Promise((resolveOutcome) => {
+    let settled = false;
+    const settle = (o: FfmpegOutcome): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolveOutcome(o);
+    };
+    let stderr = '';
+    const child = spawn(bin, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      settle({ kind: 'timeout' });
+    }, timeoutMs);
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr = (stderr + chunk.toString('utf8')).slice(-2000);
+    });
+    child.on('error', (err: NodeJS.ErrnoException) => {
+      settle(err.code === 'ENOENT' || err.code === 'EACCES' ? { kind: 'missing' } : { kind: 'failed', code: null, stderr: err.message });
+    });
+    child.on('close', (code) => {
+      settle(code === 0 ? { kind: 'ok' } : { kind: 'failed', code, stderr });
+    });
+  });
+}
+
+/** One export's HTTP answer. */
+type DemoExportAnswer = { status: number; body: DemoExportResponse | { error: string; hint?: string } };
+
+/**
+ * Encode one export of a run's stitched MP4. The encoder writes a temporary file beside the target,
+ * renamed into place only once it is whole, so a half-written GIF is never served and a failed or
+ * killed encode leaves the previous export (or nothing) behind.
+ */
+async function encodeDemoExport(runId: string, format: DemoExportFormat, atSec: number | undefined): Promise<DemoExportAnswer> {
+  const root = demoRootDir(runId);
+  const input = await containedPath(root, 'demo-video/demo.mp4');
+  const inputSize = input === null ? null : await fsp.stat(input).then((st) => (st.isFile() ? st.size : null), () => null);
+  if (input === null || inputSize === null || inputSize === 0) {
+    return { status: 409, body: { error: 'this demo has no stitched demo-video/demo.mp4 yet' } };
+  }
+  const outDir = dirname(input);
+  const name = DEMO_EXPORT_FILE[format];
+  const ext = extname(name);
+  const tmp = join(outDir, `.export-${randomUUID()}${ext}`);
+  let args: string[];
+  let at: number | undefined;
+  if (format === 'gif') {
+    args = ['-y', '-i', input, '-vf', DEMO_GIF_FILTER, '-loop', '0', tmp];
+  } else {
+    // Default: one second into the first chapter (the title card is past), or 1 s with no markers.
+    at = atSec ?? (parseMarkers(await readText(root, 'demo-video/chapters.md'))[0]?.sec ?? 0) + 1;
+    args = ['-y', '-ss', String(at), '-i', input, '-frames:v', '1', '-q:v', '3', '-update', '1', tmp];
+  }
+  try {
+    const outcome = await runFfmpeg(args, DEMO_EXPORT_TIMEOUT_MS[format]);
+    if (outcome.kind === 'missing') {
+      return { status: 503, body: { error: 'ffmpeg not found on the daemon host', hint: DEMO_FFMPEG_HINT } };
+    }
+    if (outcome.kind === 'timeout') {
+      return { status: 504, body: { error: `the ${format} encode ran past ${DEMO_EXPORT_TIMEOUT_MS[format] / 1000} s and was stopped` } };
+    }
+    if (outcome.kind === 'failed') {
+      return { status: 502, body: { error: `ffmpeg failed (exit ${outcome.code}): ${outcome.stderr.trim().slice(-300)}` } };
+    }
+    const bytes = await fsp.stat(tmp).then((st) => (st.isFile() ? st.size : 0), () => 0);
+    if (bytes === 0) {
+      return {
+        status: 422,
+        body: { error: at !== undefined ? `no frame at ${at} s: the video is shorter` : `ffmpeg wrote no ${format}` },
+      };
+    }
+    await fsp.rename(tmp, join(outDir, name));
+    return { status: 200, body: { format, path: `demo-video/${name}`, bytes } };
+  } finally {
+    await fsp.rm(tmp, { force: true });
+  }
+}
 
 /** The brief the demo run reads (the problem statement stays one short line: worker prompts are capped). */
 export function demoBrief(root: string, b: { url: string; audience: string; show: string }): string {
@@ -366,6 +490,8 @@ export function parseRange(header: string | undefined, size: number): { start: n
 }
 
 export function registerDemoRoutes(app: FastifyInstance, adapter: CoreAdapter): void {
+  // One encode per run, format and frame at a time: a double click joins the encode in flight.
+  const exportsInFlight = new Map<string, Promise<DemoExportAnswer>>();
   const demoRun = async (id: string): Promise<SessionView | null> => {
     const views = await adapter.sessionsDetail();
     const run = views.find((v) => v.session.id === id);
@@ -470,6 +596,34 @@ export function registerDemoRoutes(app: FastifyInstance, adapter: CoreAdapter): 
         .header('content-range', `bytes ${range.start}-${range.end}/${st.size}`)
         .header('content-length', String(range.end - range.start + 1));
       return reply.send(createReadStream(target, { start: range.start, end: range.end }));
+    },
+  );
+
+  app.post(
+    `${V}/runs/:id/demo/export`,
+    {
+      config: {
+        manifest: {
+          requestType: 'DemoExportBody',
+          responseType: 'DemoExportResponse',
+          statusCodes: [200, 400, 404, 409, 422, 502, 503, 504],
+        },
+      },
+    },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const parsed = DemoExportSchema.safeParse(req.body ?? {});
+      if (!parsed.success) return reply.code(400).send({ error: 'Invalid export body', details: parsed.error.issues });
+      if ((await demoRun(id)) === null) return reply.code(404).send({ error: 'no demo run with that id' });
+      const { format, atSec } = parsed.data;
+      const key = `${id}\0${format}\0${atSec ?? ''}`;
+      let pending = exportsInFlight.get(key);
+      if (pending === undefined) {
+        pending = encodeDemoExport(id, format, atSec).finally(() => exportsInFlight.delete(key));
+        exportsInFlight.set(key, pending);
+      }
+      const answer = await pending;
+      return reply.code(answer.status).send(answer.body);
     },
   );
 
