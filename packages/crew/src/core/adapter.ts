@@ -1,10 +1,11 @@
 import { createRequire } from 'node:module';
 import type { BusUnavailable } from './engine-bus.js';
 import { attachEngineBus, detachEngineBus, type EngineBus } from './bus.js';
-import { mkdir, access, readFile, writeFile, chmod, rm } from 'node:fs/promises';
-import { existsSync, readdirSync, readFileSync, renameSync } from 'node:fs';
+import { mkdir, access, readFile, writeFile, chmod, rm, copyFile } from 'node:fs/promises';
+import { constants as fsConstants, existsSync, readdirSync, readFileSync, renameSync } from 'node:fs';
 import { join, dirname, resolve, isAbsolute, relative, sep } from 'node:path';
 import { isPlainRunId, WALKTHROUGH_AUTHOR_SUBDIR, walkthroughRootDir } from './walkthrough-root.js';
+import { crewStateHome, isDefaultStateHome } from '../projects/state-home.js';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -120,8 +121,40 @@ function workflowOverlayDir(): string {
 export function settingsFilePath(): string {
   const override = process.env['WICKED_CREW_SYSTEM_SETTINGS'];
   if (override !== undefined && override !== '') return override;
+  // crew#756: a daemon on a NON-default state home (a proof lane, a second install) keeps its
+  // settings beside its other stores, so changing its theme never rewrites the operator's real file.
+  // `daemon-settings.json` is a `daemon-*` name the state-home registry already classifies
+  // (operator-owned, no worker read), so the worker Read fence needs no change. The default state
+  // home keeps the historical location.
+  if (!isDefaultStateHome()) return join(crewStateHome(), 'daemon-settings.json');
+  return sharedSettingsFilePath();
+}
+
+/** The historical machine-wide settings file — the default state home's, and the one-time seed of any other (crew#756). */
+function sharedSettingsFilePath(): string {
   return join(homedir(), '.config', 'wicked-core', 'settings.json');
 }
+
+/**
+ * crew#756 migration, once: a non-default state home with no settings file of its own starts from a
+ * COPY of the shared file, so a daemon upgraded onto this rule keeps its configuration while every
+ * later write stays in its own state home. Exclusive copy (never overwrites); a missing shared file
+ * is no seed. A daemon with an explicit `WICKED_CREW_SYSTEM_SETTINGS` or on the default home skips it.
+ */
+async function seedStateHomeSettings(path: string): Promise<void> {
+  const override = process.env['WICKED_CREW_SYSTEM_SETTINGS'];
+  if ((override !== undefined && override !== '') || isDefaultStateHome() || existsSync(path)) return;
+  const shared = sharedSettingsFilePath();
+  if (!existsSync(shared)) return;
+  try {
+    await mkdir(dirname(path), { recursive: true });
+    await copyFile(shared, path, fsConstants.COPYFILE_EXCL);
+  } catch {
+    /* a racing first read already seeded it, or the shared file is unreadable: read what is there */
+  }
+}
+
+
 
 /**
  * Per-key ceiling on a `studio.*` settings value, as the UTF-8 byte length of its JSON form.
@@ -3556,6 +3589,7 @@ export class CoreAdapter {
   // ── System settings ───────────────────────────────────────────────────────
 
   async getSettings(): Promise<CrewSystemSettings> {
+    await seedStateHomeSettings(settingsFilePath());
     try {
       const raw = await readFile(settingsFilePath(), 'utf8');
       const parsed = JSON.parse(raw) as Partial<CrewSystemSettings>;

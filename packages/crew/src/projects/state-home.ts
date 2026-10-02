@@ -58,6 +58,11 @@ export function crewStateHome(): string {
   return configuredStateHome ?? defaultStateHome(homedir());
 }
 
+/** Is the daemon on the historical default state home (`~/.wicked-crew`, or none configured)? */
+export function isDefaultStateHome(): boolean {
+  return configuredStateHome === undefined || resolve(configuredStateHome) === resolve(defaultStateHome(homedir()));
+}
+
 /**
  * A core-db path → the state home it implies. Pure and exported so the bootstrap and the
  * regression tests spell the derivation once: `dirname` of the ABSOLUTE db path, so a relative
