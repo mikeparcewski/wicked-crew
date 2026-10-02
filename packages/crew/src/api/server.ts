@@ -552,7 +552,7 @@ export async function createServer(
     }
   } catch (err) {
     app.log.warn(
-      `[runs] launch-index hydrate failed (prior runs read as not-a-retry / ungrouped / undated until restart): ${
+      `[runs] launch-index hydrate failed (prior runs read as not-a-retry / ungrouped / undated, without their chat_id link, until restart): ${
         err instanceof Error ? err.message : String(err)
       }`,
     );

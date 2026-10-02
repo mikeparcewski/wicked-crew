@@ -39,6 +39,13 @@ export class RunTimingIndex {
   private readonly runToChatSeatCount = new Map<string, number>();
   /** runId → whether the promoted chat was graph-grounded (`AgentSession.chat_grounded`; crew#641/#642). */
   private readonly runToChatGrounded = new Map<string, boolean>();
+  /**
+   * runId → the chat it was launched from (`AgentSession.chat_id`; C1, api-types 0.71.0), for EVERY
+   * run, terminal ones included. crew#619's `runToChat` in `server.ts` is the transcript-retention
+   * hold and releases a run at its terminal frame; this is the permanent read-side index, fed by
+   * the same `run.launched` entries.
+   */
+  private readonly runToChatId = new Map<string, string>();
 
   /**
    * Consume pre-read `run.launched` entries — the seam that lets `createServer` feed this index
@@ -62,6 +69,9 @@ export class RunTimingIndex {
       if (typeof sc === 'number') this.runToChatSeatCount.set(runId, sc);
       const cg = detail?.['chatGrounded'];
       if (typeof cg === 'boolean') this.runToChatGrounded.set(runId, cg);
+      // C1: the chat↔run link crew#619 already makes durable, read back for every run.
+      const chatId = detail?.['chatId'];
+      if (typeof chatId === 'string' && chatId.length > 0) this.runToChatId.set(runId, chatId);
     }
   }
 
@@ -77,7 +87,7 @@ export class RunTimingIndex {
       this.hydrateFromLaunchEntries(await audit.readAll({ action: 'run.launched' }));
     } catch (err) {
       log?.(
-        `[runs] run-timing-index hydrate failed (prior runs read as undated until restart): ${
+        `[runs] run-timing-index hydrate failed (prior runs read as undated and lose their chat_id link until restart): ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
@@ -122,6 +132,16 @@ export class RunTimingIndex {
   setChatPromotion(runId: string, seatCount: number, grounded: boolean): void {
     this.runToChatSeatCount.set(runId, seatCount);
     this.runToChatGrounded.set(runId, grounded);
+  }
+
+  /** Record the chat a run was launched from (C1). */
+  setChatId(runId: string, chatId: string): void {
+    this.runToChatId.set(runId, chatId);
+  }
+
+  /** The chat the run was launched from, or `undefined` (ABSENT when it was not launched from one). */
+  chatIdFor(runId: string): string | undefined {
+    return this.runToChatId.get(runId);
   }
 
   /** The warm seat count at chat-promotion, or `undefined` (ABSENT when not a chat-promoted run). */
@@ -194,6 +214,11 @@ export function recordRunLaunched(
   const la = detail['actor'];
   if (typeof la === 'string' && la.length > 0 && runTimingIndex !== undefined) {
     runTimingIndex.setLaunchActor(runId, la);
+  }
+  // C1: the chat link, live — the same field a restart rehydrates from this entry.
+  const chatId = detail['chatId'];
+  if (typeof chatId === 'string' && chatId.length > 0 && runTimingIndex !== undefined) {
+    runTimingIndex.setChatId(runId, chatId);
   }
   return ts;
 }
