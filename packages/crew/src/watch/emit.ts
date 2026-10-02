@@ -71,9 +71,36 @@ export interface FeedRow {
 }
 
 /** The in-memory feed: keyed by `watch_id`, plus the (run, entry, subject) → `watch_id` index. */
+/** Rows the feed holds (the routes serve at most 500): the bus stays the full record. */
+const FEED_MAX_ROWS = 20_000;
+/** Rate states held, one per (run, entry); an evicted one is rebuilt from the feed if it recurs. */
+const RATE_MAX = 5_000;
+
+/**
+ * The in-memory feed, BOUNDED (the daemon's bus is never swept, so a lifetime fold would grow
+ * without limit): past `maxRows` the oldest cleared row goes first, then the oldest row. The bus
+ * stays the record; an evicted row re-raised by a replay resolves to its existing bus row.
+ */
 export class WatchFeed {
   readonly rows = new Map<string, FeedRow>();
   private readonly orphanClears = new Map<string, WatchFindingCleared>();
+  /** Cleared rows in clearing order: the first eviction candidates. */
+  private readonly clearedOrder = new Set<string>();
+
+  constructor(private readonly maxRows = FEED_MAX_ROWS) {}
+
+  get orphanCount(): number {
+    return this.orphanClears.size;
+  }
+
+  private evict(): void {
+    while (this.rows.size > this.maxRows) {
+      const victim = this.clearedOrder.values().next().value ?? this.rows.keys().next().value;
+      if (victim === undefined) return;
+      this.rows.delete(victim);
+      this.clearedOrder.delete(victim);
+    }
+  }
 
   has(watchId: string): boolean {
     return this.rows.has(watchId);
@@ -88,12 +115,22 @@ export class WatchFeed {
     const orphan = this.orphanClears.get(f.watch_id) ?? null;
     this.orphanClears.delete(f.watch_id);
     this.rows.set(f.watch_id, { raised: f, cleared: orphan });
+    if (orphan !== null) this.clearedOrder.add(f.watch_id);
+    this.evict();
   }
 
   addCleared(c: WatchFindingCleared): void {
     const row = this.rows.get(c.watch_id);
-    if (row === undefined) this.orphanClears.set(c.watch_id, c);
-    else if (row.cleared === null) row.cleared = c;
+    if (row === undefined) {
+      this.orphanClears.set(c.watch_id, c);
+      if (this.orphanClears.size > this.maxRows) {
+        const oldest = this.orphanClears.keys().next().value;
+        if (oldest !== undefined) this.orphanClears.delete(oldest);
+      }
+    } else if (row.cleared === null) {
+      row.cleared = c;
+      this.clearedOrder.add(c.watch_id);
+    }
   }
 
   /** Fold one bus row (the boot hydrate). */
@@ -163,6 +200,8 @@ export class WatchEmitter {
   /** Raised rows taken out of `pending` and on their way to the bus (a clearing can still find them). */
   private readonly inflight = new Map<string, WatchFinding>();
   private readonly rate = new Map<string, RateState>();
+  /** The newest watch row on the bus at hydrate: an emit resolving to an id at or below it found an OLD row. */
+  private hydratedTail = 0;
   private timer: NodeJS.Timeout | null = null;
   private flushing: Promise<void> | null = null;
   private readonly now: () => number;
@@ -176,7 +215,10 @@ export class WatchEmitter {
   /** Hydrate the feed once from the bus history (§4.8 step 1). */
   async hydrate(): Promise<number> {
     const rows = await readBus(this.deps.dbPath, WATCH_FINDING_PREFIX, { history: true });
-    for (const r of rows) this.feed.foldBusRow(r.event_type, r.payload);
+    for (const r of rows) {
+      this.feed.foldBusRow(r.event_type, r.payload);
+      if (r.event_id > this.hydratedTail) this.hydratedTail = r.event_id;
+    }
     return rows.length;
   }
 
@@ -211,6 +253,10 @@ export class WatchEmitter {
       }
       s = { plain, rollup };
       this.rate.set(k, s);
+      if (this.rate.size > RATE_MAX) {
+        const oldest = this.rate.keys().next().value;
+        if (oldest !== undefined && oldest !== k) this.rate.delete(oldest);
+      }
     }
     return s;
   }
@@ -388,9 +434,10 @@ export class WatchEmitter {
     const idempotency = p.eventType === WATCH_FINDING_RAISED ? raisedKeyOf(p.payload as WatchFinding) : clearedKey(p.payload.watch_id);
     const wasNew = p.eventType === WATCH_FINDING_RAISED && !this.feed.has(p.payload.watch_id);
     let lastErr: unknown = null;
+    let eventId = 0;
     for (let i = 0; i <= RETRY_MS.length; i++) {
       try {
-        await emitOnBus(this.deps.dbPath, {
+        eventId = await emitOnBus(this.deps.dbPath, {
           event_type: p.eventType,
           domain: WATCH_BUS_DOMAIN,
           subdomain: WATCH_BUS_SUBDOMAIN,
@@ -428,7 +475,9 @@ export class WatchEmitter {
     if (p.eventType === WATCH_FINDING_RAISED) this.feed.addRaised(p.payload as WatchFinding);
     else this.feed.addCleared(p.payload as WatchFindingCleared);
     this.deps.onAck?.(p.eventType, p.payload);
-    if (p.proposal && wasNew && this.deps.submitProposal !== undefined) {
+    // An emit that resolved to a row older than this boot's hydrate (one the bounded feed had
+    // evicted) is not new: its proposal was filed when it was first raised.
+    if (p.proposal && wasNew && eventId > this.hydratedTail && this.deps.submitProposal !== undefined) {
       try {
         await this.deps.submitProposal(p.payload as WatchFinding);
       } catch (err) {

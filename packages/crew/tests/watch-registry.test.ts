@@ -776,6 +776,25 @@ describe('Copilot round 1', () => {
   });
 });
 
+describe('Copilot round 2: the fold is bounded', () => {
+  it('the feed keeps the newest rows up to its cap (cleared rows go first), orphan clearings capped too', async () => {
+    const { WatchFeed } = await import('../src/watch/emit.js');
+    const feed = new WatchFeed(3);
+    const row = (id: string, at: number) => ({ watch_id: id, at, run_id: 'r', entry_id: 'e', rolled_up: 0 }) as unknown as WatchFinding;
+    feed.addRaised(row('w-1', 1));
+    feed.addRaised(row('w-2', 2));
+    feed.addCleared({ watch_id: 'w-2', reason: 'resolved' } as never);
+    feed.addRaised(row('w-3', 3));
+    feed.addRaised(row('w-4', 4)); // over the cap: the oldest CLEARED row (w-2) goes first
+    expect([...feed.rows.keys()]).toEqual(['w-1', 'w-3', 'w-4']);
+    feed.addRaised(row('w-5', 5)); // none cleared: the oldest goes
+    expect([...feed.rows.keys()]).toEqual(['w-3', 'w-4', 'w-5']);
+    // Orphan clearings (a clearing whose raise is not held) are capped too.
+    for (let i = 0; i < 10; i++) feed.addCleared({ watch_id: `w-x${i}`, reason: 'resolved' } as never);
+    expect(feed.orphanCount).toBeLessThanOrEqual(3);
+  });
+});
+
 describe('run state is bounded', () => {
   it('evicts the oldest RUN past the cap even when the run-less bucket is oldest', async () => {
     const r = makeRegistry({ entriesDir: entriesDir([entry('point', { emit: { as: 'flag', severity: 'info', watch_kind: 'problem', attach: null, rate: { per_run: 1 } } })]) });
