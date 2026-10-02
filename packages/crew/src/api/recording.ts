@@ -1,4 +1,10 @@
 /**
+ * The recording views (DES-walkthrough-proof §4.10: `api/demo.ts` renamed `api/recording.ts`) — the
+ * Demo experience and the walkthrough, which share `parseChapters`, `parseMarkers` and
+ * `containedPath`.
+ *
+ * ## Demo
+ *
  * The Demo experience (wicked-studio#373, migration M9b): a demo of a local app, made by a governed
  * run of the built-in `demo` preset — the wicked-garden demo skill's plan → record → review.
  *
@@ -21,6 +27,30 @@
  * Every file is read from the root the daemon minted for THIS run id, never from a path a caller or a
  * worker names: `path` is resolved inside it, symlinks included, and only the deliverable types studio
  * renders are served.
+ *
+ * ## Walkthrough (WT-W1)
+ *
+ * Every repo-bound run gets an EVIDENCE ROOT (`walkthroughRootDir`, minted by `CoreAdapter.launchRun`
+ * and persisted by the engine as `session.evidence_root`). Under it, `author/<plan step>/` is the
+ * walkthrough author's write dir and `<review step>/` is the PROOF ROOT only the jailed
+ * `walkthrough_review` Tool writes.
+ *
+ *   GET  /runs/:id/walkthrough?step=             the `WalkthroughView` of the newest (or the named) pair.
+ *   GET  /runs/:id/walkthrough/file?step=&path=  one file of that pair's proof root (Range for the MP4).
+ *
+ * What the view reads from a proof root (the recorder's files, DES-walkthrough-proof §4.4):
+ *
+ *   result.json      `{overall, cause?, reason?, tree?, chapters: [{key, title?, verdict, takes?,
+ *                    failed_at_sec?, failed_frame?, proves?, legs?, checks?: [{id, kind, sentence,
+ *                    passed, at_sec, evidence?, vault_entry?, detail?}]}]}` — the engine itself writes
+ *                    `{overall: INCONCLUSIVE, cause, reason, chapters: []}` when it cannot record.
+ *   progress.json    `{state: 'starting_app' | 'recording' | 'judging', chapter?}` while it runs.
+ *   chapters.json    the chapter list (the demo shape), before the judge has written verdicts.
+ *   demo-video/      `demo.mp4`, `poster.jpg`, `chapters.md` (markers), `segments/<key>/segment.mp4`.
+ *
+ * The proof root is read only when it is a plain directory directly under the evidence root (a link
+ * planted at the step path is never followed — the engine's `check_proof_root` rule), and every file
+ * inside it through `containedPath`.
  */
 
 import { spawn } from 'node:child_process';
@@ -38,12 +68,19 @@ import type {
   DemoMarker,
   DemoStage,
   DemoView,
+  WalkthroughChapter,
+  WalkthroughCheck,
+  WalkthroughLeg,
+  WalkthroughState,
+  WalkthroughVerdict,
+  WalkthroughView,
 } from 'wicked-crew-api-types';
 import type { CoreAdapter } from '../core/adapter.js';
 import type { SessionView, WorkUnit } from '../core/types.js';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 import { API_PREFIX } from './api-prefix.js';
 import { coreUnitId } from './evidence.js';
+import { WALKTHROUGH_AUTHOR_SUBDIR } from '../core/walkthrough-root.js';
 
 const V = API_PREFIX;
 
@@ -708,6 +745,296 @@ export function registerDemoRoutes(app: FastifyInstance, adapter: CoreAdapter): 
       if (target === null) return reply.code(409).send({ error: 'the plan has not written script.md' });
       await fsp.writeFile(target, parsed.data.content, 'utf8');
       return { bytes };
+    },
+  );
+}
+
+// ── Walkthrough (WT-W1, DES-walkthrough-proof §4.2, §4.10) ────────────────────────────────────
+
+/** The catalog id of the walkthrough author (an evaluator agent step). */
+export const WALKTHROUGH_PLAN_CATALOG = 'walkthrough_plan';
+/** The catalog id of the walkthrough recorder (the jailed, engine-run Tool step). */
+export const WALKTHROUGH_REVIEW_CATALOG = 'walkthrough_review';
+export { WALKTHROUGH_AUTHOR_SUBDIR, walkthroughRootDir } from '../core/walkthrough-root.js';
+
+/** What `/walkthrough/file` serves, by extension: the demo's deliverable types (the take is a demo). */
+const WALKTHROUGH_FILE_TYPES = DEMO_FILE_TYPES;
+
+/** The biggest recorder file the view parses (result, progress, chapter list). */
+const WALKTHROUGH_JSON_MAX_BYTES = 4 * 1024 * 1024;
+
+/** The step id of a unit (`<run>:<step>` → `<step>`). */
+function stepIdOf(view: SessionView, unit: WorkUnit): string {
+  const prefix = `${view.session.id}:`;
+  return unit.id.startsWith(prefix) ? unit.id.slice(prefix.length) : unit.id;
+}
+
+/** One walkthrough pair of a run: the recorder unit and the author unit it records. */
+interface WalkthroughPair {
+  review: WorkUnit | null;
+  plan: WorkUnit | null;
+}
+
+/**
+ * The run's walkthrough pairs in plan order. A recorder pairs with the author its `depends_on` names,
+ * else the nearest author before it (the engine's `author_step_for`); an author with no recorder after
+ * it yet is a pair of its own (the walkthrough is still being written).
+ */
+export function walkthroughPairs(view: SessionView): WalkthroughPair[] {
+  const units = [...view.units].sort((a, b) => a.ord - b.ord);
+  const plans = units.filter((u) => u.catalog === WALKTHROUGH_PLAN_CATALOG);
+  const pairs: WalkthroughPair[] = [];
+  const paired = new Set<WorkUnit>();
+  for (const review of units.filter((u) => u.catalog === WALKTHROUGH_REVIEW_CATALOG)) {
+    const before = plans.filter((p) => p.ord < review.ord);
+    const deps = (review as { depends_on?: unknown }).depends_on;
+    const named = Array.isArray(deps) ? before.find((p) => deps.includes(stepIdOf(view, p))) : undefined;
+    const plan = named ?? before.at(-1) ?? null;
+    if (plan !== null) paired.add(plan);
+    pairs.push({ review, plan });
+  }
+  for (const plan of plans) {
+    if (!paired.has(plan) && !pairs.some((p) => p.review !== null && p.review.ord > plan.ord)) {
+      pairs.push({ review: null, plan });
+    }
+  }
+  return pairs.sort((a, b) => (a.review ?? a.plan)!.ord - (b.review ?? b.plan)!.ord);
+}
+
+/**
+ * The proof root of a recorder step: `<evidence root>/<step>`, only when it is a plain directory
+ * directly under the evidence root (never through a planted link), else `null`.
+ */
+async function proofRootOf(view: SessionView, review: WorkUnit): Promise<string | null> {
+  const evidence = (view.session as { evidence_root?: unknown }).evidence_root;
+  if (typeof evidence !== 'string' || evidence === '') return null;
+  const step = stepIdOf(view, review);
+  if (!/^[A-Za-z0-9._-]+$/.test(step) || step.startsWith('.') || step.toLowerCase() === WALKTHROUGH_AUTHOR_SUBDIR) return null;
+  const dir = join(evidence, step);
+  try {
+    const st = await fsp.lstat(dir);
+    if (st.isSymbolicLink() || !st.isDirectory()) return null;
+    const real = await fsp.realpath(dir);
+    if (real !== join(await fsp.realpath(evidence), step)) return null;
+    return real;
+  } catch {
+    return null;
+  }
+}
+
+/** A proof-root JSON file, parsed, or `undefined` when it is absent, oversized, outside the root or not JSON. */
+async function readRootJson(root: string, rel: string): Promise<unknown> {
+  const path = await containedPath(root, rel);
+  if (path === null) return undefined;
+  try {
+    const st = await fsp.stat(path);
+    if (!st.isFile() || st.size > WALKTHROUGH_JSON_MAX_BYTES) return undefined;
+    return JSON.parse(await fsp.readFile(path, 'utf8')) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+const OVERALL: Readonly<Record<string, WalkthroughState>> = { PASS: 'passed', FAIL: 'failed', INCONCLUSIVE: 'inconclusive' };
+const RUNNING_STATES: ReadonlySet<string> = new Set(['starting_app', 'recording', 'judging']);
+
+const str = (v: unknown): string | null => (typeof v === 'string' && v !== '' ? v : null);
+const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+const strs = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
+const record = (v: unknown): Record<string, unknown> | null =>
+  v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+
+function parseVerdict(v: unknown): WalkthroughVerdict | null {
+  return v === 'PASS' || v === 'FAIL' || v === 'INCONCLUSIVE' ? v : null;
+}
+
+function parseChecks(v: unknown): WalkthroughCheck[] {
+  const out: WalkthroughCheck[] = [];
+  for (const raw of Array.isArray(v) ? v : []) {
+    const c = record(raw);
+    if (c === null || str(c.id) === null) continue;
+    out.push({
+      id: c.id as string,
+      kind: str(c.kind) ?? 'unknown',
+      sentence: str(c.sentence) ?? '',
+      passed: typeof c.passed === 'boolean' ? c.passed : null,
+      atSec: num(c.at_sec),
+      evidence: strs(c.evidence),
+      vaultEntry: str(c.vault_entry),
+      detail: str(c.detail),
+    });
+  }
+  return out;
+}
+
+function parseLegs(v: unknown): WalkthroughLeg[] {
+  const out: WalkthroughLeg[] = [];
+  for (const raw of Array.isArray(v) ? v : []) {
+    const l = record(raw);
+    if (l === null || str(l.leg) === null) continue;
+    out.push({ leg: l.leg as string, claim_level: str(l.claim_level) ?? '', reason: str(l.reason) ?? '' });
+  }
+  return out;
+}
+
+/** The chapters: the planned list (`chapters.json`), then any chapter only the judge's result names. */
+async function walkthroughChapters(root: string | null, result: Record<string, unknown> | null): Promise<WalkthroughChapter[]> {
+  const planned = root === null ? [] : parseChapters(await readText(root, 'chapters.json'));
+  const judged = new Map<string, Record<string, unknown>>();
+  for (const raw of Array.isArray(result?.chapters) ? (result.chapters as unknown[]) : []) {
+    const c = record(raw);
+    const key = str(c?.key);
+    if (c !== null && key !== null && /^[a-z0-9][a-z0-9-]*$/.test(key) && !judged.has(key)) judged.set(key, c);
+  }
+  const base = [...planned];
+  for (const [key, c] of judged) {
+    if (!base.some((p) => p.key === key)) base.push({ key, title: str(c.title) ?? key, blurb: '', tags: [], resets: [] });
+  }
+  return Promise.all(
+    base.map(async (ch, i) => {
+      const j = judged.get(ch.key) ?? null;
+      const frame = str(j?.failed_frame);
+      const verdict = parseVerdict(j?.verdict);
+      return {
+        ...ch,
+        recorded: root !== null && (await isFile(root, `demo-video/segments/${ch.key}/segment.mp4`)),
+        index: i + 1,
+        total: base.length,
+        verdict,
+        takes: Math.max(1, Math.trunc(num(j?.takes) ?? 1)),
+        failedAtSec: verdict === 'FAIL' ? num(j?.failed_at_sec) : null,
+        failedFrame: root !== null && frame !== null && (await isFile(root, frame)) ? frame : null,
+        proves: strs(j?.proves),
+        legs: parseLegs(j?.legs),
+        checks: parseChecks(j?.checks),
+      };
+    }),
+  );
+}
+
+/** Everything studio renders for one walkthrough pair (the newest, or the one `step` names). */
+export async function walkthroughView(view: SessionView, step?: string): Promise<WalkthroughView | null> {
+  const runId = view.session.id;
+  const pairs = walkthroughPairs(view);
+  const pair =
+    step === undefined
+      ? pairs.at(-1)
+      : pairs.find((p) => (p.review !== null && stepIdOf(view, p.review) === step) || (p.plan !== null && stepIdOf(view, p.plan) === step));
+  if (step !== undefined && pair === undefined) return null;
+  const evidenceRoot = (view.session as { evidence_root?: unknown }).evidence_root;
+  const hasEvidenceRoot = typeof evidenceRoot === 'string' && evidenceRoot !== '';
+  const review = pair?.review ?? null;
+  const plan = pair?.plan ?? null;
+  const root = review !== null ? await proofRootOf(view, review) : null;
+  const resultRaw = root !== null ? await readRootJson(root, 'result.json') : undefined;
+  const result = record(resultRaw);
+  const bound = review ?? plan;
+  const builders: string[] = [];
+  for (const u of [...view.units].sort((a, b) => a.ord - b.ord)) {
+    if (bound !== null && u.ord >= bound.ord) break;
+    if (u.role === 'creator' && u.assigned_cli !== null && u.assigned_cli !== undefined && !builders.includes(u.assigned_cli)) {
+      builders.push(u.assigned_cli);
+    }
+  }
+
+  let state: WalkthroughState;
+  let cause: string | null = null;
+  if (pair === undefined) {
+    state = 'authoring';
+    cause = 'no_walkthrough';
+  } else if (plan !== null && (plan.status === 'pending' || plan.status === 'distributed')) {
+    state = 'authoring';
+  } else if (plan !== null && plan.status === 'rejected') {
+    state = 'linting';
+    cause = plan.denial_reason ?? 'storyline_refused';
+  } else if (review === null || review.status === 'pending') {
+    state = 'starting_app';
+  } else if (review.status === 'distributed') {
+    const progress = root !== null ? record(await readRootJson(root, 'progress.json')) : null;
+    const s = str(progress?.state);
+    state = s !== null && RUNNING_STATES.has(s) ? (s as WalkthroughState) : 'starting_app';
+  } else {
+    const overall = str(result?.overall);
+    if (overall !== null && OVERALL[overall] !== undefined) {
+      state = OVERALL[overall] as WalkthroughState;
+      cause = str(result?.cause);
+    } else {
+      state = 'inconclusive';
+      cause = hasEvidenceRoot ? 'no_result' : 'no_evidence_root';
+    }
+  }
+
+  const mp4 = root !== null && ((await fileSize(root, 'demo-video/demo.mp4')) ?? 0) > 0 ? 'demo-video/demo.mp4' : null;
+  const poster = root !== null && (await isFile(root, 'demo-video/poster.jpg')) ? 'demo-video/poster.jpg' : null;
+  const markers = root !== null ? parseMarkers(await readText(root, 'demo-video/chapters.md')) : [];
+  return {
+    runId,
+    stepId: review !== null ? stepIdOf(view, review) : null,
+    planStepId: plan !== null ? stepIdOf(view, plan) : null,
+    state,
+    cause,
+    seat: { evaluator: plan?.assigned_cli ?? null, builders },
+    tree: str(result?.tree),
+    stale: false,
+    sealed: false,
+    video: { mp4, poster, markers },
+    chapters: await walkthroughChapters(root, result),
+    steps: [],
+  };
+}
+
+export function registerWalkthroughRoutes(app: FastifyInstance, adapter: CoreAdapter): void {
+  const runById = async (id: string): Promise<SessionView | null> =>
+    (await adapter.sessionsDetail()).find((v) => v.session.id === id) ?? null;
+
+  app.get(
+    `${V}/runs/:id/walkthrough`,
+    { config: { manifest: { responseType: 'WalkthroughView', statusCodes: [200, 400, 404] } } },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const step = (req.query as { step?: unknown }).step;
+      if (step !== undefined && typeof step !== 'string') return reply.code(400).send({ error: '`step` names one step, once' });
+      const run = await runById(id);
+      if (run === null) return reply.code(404).send({ error: 'no run with that id' });
+      const view = await walkthroughView(run, step);
+      if (view === null) return reply.code(404).send({ error: `run ${id} has no walkthrough step named ${String(step)}` });
+      return view;
+    },
+  );
+
+  app.get(
+    `${V}/runs/:id/walkthrough/file`,
+    { config: { manifest: { responseType: 'binary (video/mp4, image/png, text)', statusCodes: [200, 206, 400, 404, 416] } } },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const q = req.query as { path?: unknown; step?: unknown };
+      if (typeof q.path !== 'string') return reply.code(400).send({ error: '`path` is required, once' });
+      if (q.step !== undefined && typeof q.step !== 'string') return reply.code(400).send({ error: '`step` names one step, once' });
+      const type = WALKTHROUGH_FILE_TYPES[extname(q.path).toLowerCase()];
+      if (type === undefined) {
+        return reply.code(400).send({ error: `\`path\` must be one of ${Object.keys(WALKTHROUGH_FILE_TYPES).join(', ')}` });
+      }
+      const run = await runById(id);
+      if (run === null) return reply.code(404).send({ error: 'no run with that id' });
+      const pairs = walkthroughPairs(run).filter((p) => p.review !== null);
+      const pair = q.step === undefined ? pairs.at(-1) : pairs.find((p) => stepIdOf(run, p.review!) === q.step || (p.plan !== null && stepIdOf(run, p.plan) === q.step));
+      const root = pair?.review != null ? await proofRootOf(run, pair.review) : null;
+      if (root === null) return reply.code(404).send({ error: 'this run has no recorded walkthrough there' });
+      const target = await containedPath(root, q.path);
+      const st = target === null ? null : await fsp.stat(target).catch(() => null);
+      if (target === null || st === null || !st.isFile()) return reply.code(404).send({ error: `no such walkthrough file: ${q.path}` });
+      reply.header('content-type', type).header('accept-ranges', 'bytes').header('cache-control', 'no-store');
+      const range = parseRange(req.headers.range, st.size);
+      if (range === 'bad') return reply.code(416).header('content-range', `bytes */${st.size}`).send();
+      if (range === null) {
+        reply.header('content-length', String(st.size));
+        return reply.send(createReadStream(target));
+      }
+      reply
+        .code(206)
+        .header('content-range', `bytes ${range.start}-${range.end}/${st.size}`)
+        .header('content-length', String(range.end - range.start + 1));
+      return reply.send(createReadStream(target, { start: range.start, end: range.end }));
     },
   );
 }

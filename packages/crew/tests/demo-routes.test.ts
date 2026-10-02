@@ -19,7 +19,7 @@ import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
 import { AuditLog } from '../src/api/audit.js';
-import { parseRange, parseReview } from '../src/api/demo.js';
+import { parseRange, parseReview } from '../src/api/recording.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { LaunchRunInput } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';

@@ -86,6 +86,9 @@ export const STATE_HOME_ROOT_ENVS: ReadonlyArray<{ variable: string; creates: st
   // The Demo experience (studio#373): every demo launch mints its demo root here before its run
   // launches — the same refusal as the capture inbox, for the same reason.
   { variable: 'WICKED_DEMO_DIR', creates: 'the demo root a demo run writes its script, video and contact sheets to', fenced: false },
+  // WT-W1: every repo-bound launch mints its evidence root here (the walkthrough author's dir and the
+  // recorder's proof roots) before its run launches — the same refusal as the demo root.
+  { variable: 'WICKED_WALKTHROUGH_DIR', creates: 'the evidence root a run\'s walkthrough author and recorder write to', fenced: false },
 ];
 
 /**
