@@ -4,9 +4,10 @@
 //
 //   - POST /runs with neither `workflow` nor `plan` answers 201 WITH `freeText.notice`, naming what
 //     was applied and how to get work done; a launch that names one carries no such field;
-//   - a COMPLETED repo-less free-text run with no write root of its own could change nothing, so it
-//     reads `delivery: 'vacuous'` (the existing did-nothing spelling, recovery: retry), not `none`;
-//     a repo-bound free-text run already gets the vacuity probes, and a named-workflow run is unchanged.
+//   - a COMPLETED repo-less free-text run with no write root of its own had nowhere to change
+//     anything: it reads `outcome: 'text_only'` (it answered in text, and changed, checked and
+//     delivered nothing), never as plain completed work. `delivery` is untouched (a text answer is
+//     not "vacuous"); a repo-bound free-text run already gets the vacuity probes.
 
 import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
@@ -83,19 +84,21 @@ describe('a launch with no workflow says what it ran, and a run that could chang
     expect('freeText' in (res.json() as object)).toBe(false);
   });
 
-  it('a completed repo-less free-text run with no write root reads vacuous; others keep their delivery', async () => {
+  it('a completed repo-less free-text run with no write root reads outcome text_only (delivery untouched); others carry no outcome', async () => {
     sessionsDetail.mockResolvedValue([
       run('ft-empty', { kind: 'free_text' }),
       run('ft-roots', { kind: 'free_text', roots: ['/x/inbox'] }),
       run('ft-live', { kind: 'free_text', status: 'executing' }),
+      run('ft-repo', { kind: 'free_text', repo: 'shop' }),
       run('wf-done', { kind: 'workflow' }),
     ]);
     const res = await app.inject({ method: 'GET', url: '/api/v1/runs' });
     expect(res.statusCode, res.body).toBe(200);
     const runs = (res.json() as { runs: SessionView[] }).runs;
-    const delivery = Object.fromEntries(runs.map((v) => [v.session.id, (v.session as { delivery?: string }).delivery]));
-    expect(delivery).toEqual({ 'ft-empty': 'vacuous', 'ft-roots': 'none', 'ft-live': 'none', 'wf-done': 'none' });
+    const of = (k: 'outcome' | 'delivery') => Object.fromEntries(runs.map((v) => [v.session.id, (v.session as unknown as Record<string, unknown>)[k]]));
+    expect(of('outcome')).toEqual({ 'ft-empty': 'text_only', 'ft-roots': undefined, 'ft-live': undefined, 'ft-repo': undefined, 'wf-done': undefined });
+    expect(of('delivery')['ft-empty']).toBe('none');
     const one = await app.inject({ method: 'GET', url: '/api/v1/runs/ft-empty' });
-    expect((one.json() as { run: SessionView }).run.session).toMatchObject({ delivery: 'vacuous' });
+    expect((one.json() as { run: SessionView }).run.session).toMatchObject({ outcome: 'text_only', delivery: 'none' });
   });
 });

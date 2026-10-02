@@ -163,7 +163,7 @@ import {
   pushedState,
   canDeliverResolver,
   FREE_TEXT_NOTICE,
-  freeTextVacuity,
+  freeTextOutcome,
   type DeliveryState,
   type VacuityProbes,
 } from './delivery-index.js';
@@ -1282,8 +1282,11 @@ export function registerRoutes(
     if (channel !== undefined) view.session.channel = channel;
     const launchActor = runTimingIndex.launchActorFor(view.session.id);
     if (launchActor !== undefined) view.session.launch_actor = launchActor;
-    const state = freeTextVacuity(view, resolveDelivery(view, conflictStrand));
+    const state = resolveDelivery(view, conflictStrand);
     view.session.delivery = state.delivery;
+    // crew#755: a completed repo-less free-text run answered in text and changed nothing — say so.
+    const outcome = freeTextOutcome(view);
+    if (outcome !== undefined) view.session.outcome = outcome;
     if (state.deliverUrl !== undefined) view.session.deliverUrl = state.deliverUrl;
     if (state.deliverBranch !== undefined) view.session.deliverBranch = state.deliverBranch;
     if (state.deliverRemote !== undefined) view.session.deliverRemote = state.deliverRemote;

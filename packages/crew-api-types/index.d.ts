@@ -343,8 +343,6 @@ export interface AgentSession {
    *     spelling of the vacuous-completion class. Derived with the same two read-only git
    *     instruments the engine's own evidence floor uses; any probe failure keeps `'stranded'`
    *     (vacuity is only ever asserted on positive reads).
-   *     (crew#755; api-types 0.76.0) Also a COMPLETED repo-less free-text run (no workflow, no plan)
-   *     with no write root of its own: it had nowhere to change anything, so it reads vacuous.
    *   - `'none'`     — everything else: repo-less runs, non-terminal runs, failed/cancelled
    *     runs, and completed runs whose worktree is gone.
    *
@@ -359,6 +357,13 @@ export interface AgentSession {
    * plus `denial_reason` (crew#318's message), both already on the list wire.
    */
   delivery?: 'delivered' | 'pushed' | 'stranded' | 'vacuous' | 'none';
+  /**
+   * (crew#755; api-types 0.76.0) `'text_only'` on a COMPLETED free-text run (launched with neither a
+   * workflow nor a plan) that had no repo and no write root of its own: whatever it did, it did in
+   * text — nothing was changed, checked or delivered. Show it as such, never as plain completed
+   * work. ABSENT on every other run (and on a daemon before the field).
+   */
+  outcome?: 'text_only';
   /**
    * The delivered PR's URL (crew#393; api-types 0.18.0) — present exactly when
    * `delivery === 'delivered'`; absent otherwise (absence is the one spelling, never `null`).
