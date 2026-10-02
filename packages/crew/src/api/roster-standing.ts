@@ -101,6 +101,10 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
         // `council_eligible`, and the evidence rides on the wire.
         seatHealth.authFailureFor(key),
         probed ?? (probe?.probes(key) === true ? 'pending' : undefined),
+        // The engine's own in-run bench of the seat, carried to this launch for a bounded window
+        // (`seatBenched`, SEAT_BENCH_WINDOW_MS): a seat that reads signed in but refused its work
+        // in a recent run is benched up front instead of being handed a unit again.
+        seatHealth.recentBenchFor(key),
       );
       // F-W1-005 (wave-1 P6): the chat admission verdict the daemon itself applies when `POST /chats`
       // picks its default seats — the SAME `chatSeatAdmission` call, for both scope modes — so the

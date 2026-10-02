@@ -10,6 +10,26 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+- **A seat that reads signed in but refused its work in a recent run is benched at the next
+  launch.** crew 0.7.45's release smoke (wicked-ci S04, run 36946090323) caught it: since
+  wicked-core#590 S5 no ballot finds a dead seat before routing, so a seat whose sign-in looks fine
+  but which cannot work (the smoke's copilot, out of quota) was handed units by every new run. The
+  engine now reports its own in-run bench (`seatBenched {cli, reason, source}`, wicked-core-ts
+  0.7.34). The seat-health tracker carries that verdict for `SEAT_BENCH_WINDOW_MS` (30 minutes),
+  and the roster reads the seat `council_eligible: false`, for example
+  `recent quota_exhausted — the engine benched it in run 1a2b3c4d at 21:10Z (worker: …); eligible
+  again at 21:40Z, or sooner once it completes a turn`. The launch hands the engine that as its
+  launcher bench (`health.usable: false`), so `degradedReason` names it and no unit is planned on
+  it. After the window the seat is eligible again. If it is still dead, its next run benches it
+  again after one refused turn. An ok output clears it at once. With every seat recently benched,
+  the launch is refused at once with `409 no_eligible_seat` naming each seat and its cause. Crew
+  classifies nothing itself (R5): this only carries the engine's verdict. The bench is in memory,
+  so a daemon restart forgets it and the next run finds out again with one turn. Tests:
+  `tests/seat-recent-bench.test.ts` and `tests/integration/seat-bench-next-launch.test.ts`. On
+  core-ts 0.7.33 the integration test fails: the dead seat is dispatched twice and the roster still
+  reads it eligible.
+
 ## [0.7.45] — 2026-10-01
 
 ### Changed
