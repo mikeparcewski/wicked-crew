@@ -207,9 +207,9 @@ describe('GET /runs/:id/walkthrough — the recording view (WT-W1)', () => {
     expect(ch.legs).toEqual([{ leg: 'provider', claim_level: 'machinery-verified', reason: 'the provider is a sink' }]);
     expect(ch.checks[0]).toEqual({ id: 'c1', kind: 'on_screen', sentence: 'The receipt reads Paid', passed: true, atSec: 4.2, evidence: ['capture/c1.png'], vaultEntry: 'v-1', detail: null });
     expect(ch.checks[1]).toMatchObject({ id: 'c2', vaultEntry: null, evidence: ['capture/c2.parsed.json'] });
-    // The seal is WT-W2's: nothing is sealed, and no step state is computed, in this slice.
+    // WT-W2: the recorder's output carries no seal here, so nothing is sealed and the build step is only claimed.
     expect(body.sealed).toBe(false);
-    expect(body.steps).toEqual([]);
+    expect(body.steps).toEqual([{ stepId: 'build', checkState: 'claimed', provedBy: [] }]);
   });
 
   it('failed: overall FAIL keeps the failing second and frame (contained to the proof root)', async () => {

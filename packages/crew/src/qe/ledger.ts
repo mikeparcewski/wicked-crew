@@ -517,3 +517,48 @@ export function summarizeManifest(manifest: EvidenceManifest): QeManifestSummary
     },
   };
 }
+
+/** One ledger verdict a walkthrough recorder stamped (WT-W2), with the stamps read off the verdict or its run. */
+export interface StampedLedgerVerdict {
+  verdict: VerdictRecord;
+  /** The chapter key the row is about (`chapter`, else the run's `scenario_id`); `null` when neither names one. */
+  chapter: string | null;
+  tree: string | null;
+  take: number | null;
+}
+
+/**
+ * The verdicts of a PROOF ROOT's own ledger (`<proofRoot>/.wicked-qe/`) stamped with `crew_run_id` =
+ * `runId` and `step_id` = `stepId` (on the verdict or on its run), newest first — the rows a
+ * walkthrough's recorder writes, one run and one verdict per chapter per take (DES-walkthrough-proof
+ * §4.4 step 6). Read-only, canonical JSON only, like {@link readAcceptanceState}. A ledger that does
+ * not exist reads `found: false`; one that cannot be parsed reads `error`.
+ */
+export function readStampedVerdicts(
+  proofRoot: string,
+  runId: string,
+  stepId: string,
+): { found: boolean; rows: StampedLedgerVerdict[]; error?: string } {
+  const root = qeLedgerRoot(proofRoot);
+  if (!existsSync(root)) return { found: false, rows: [] };
+  try {
+    const rows: StampedLedgerVerdict[] = [];
+    for (const v of listCanonical<VerdictRecord>(root, 'verdicts')) {
+      const run = getCanonical<RunRecord>(root, 'runs', v.run_id);
+      const field = (name: string): unknown => (v as unknown as Record<string, unknown>)[name] ?? (run as unknown as Record<string, unknown> | null)?.[name];
+      if (field(CREW_RUN_ID_FIELD) !== runId || field('step_id') !== stepId) continue;
+      const chapter = field('chapter') ?? (run as unknown as Record<string, unknown> | null)?.['scenario_id'];
+      const tree = field('tree');
+      const take = field('take');
+      rows.push({
+        verdict: v,
+        chapter: typeof chapter === 'string' && chapter !== '' ? chapter : null,
+        tree: typeof tree === 'string' && tree !== '' ? tree : null,
+        take: typeof take === 'number' && Number.isFinite(take) ? take : null,
+      });
+    }
+    return { found: true, rows };
+  } catch (err) {
+    return { found: true, rows: [], error: err instanceof Error ? err.message : String(err) };
+  }
+}

@@ -80,7 +80,9 @@ import type { SessionView, WorkUnit } from '../core/types.js';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 import { API_PREFIX } from './api-prefix.js';
 import { coreUnitId } from './evidence.js';
-import { WALKTHROUGH_AUTHOR_SUBDIR } from '../core/walkthrough-root.js';
+import { stepIdOf, walkthroughProofRoot } from '../core/walkthrough-root.js';
+import { resolveWalkthroughGate, walkthroughCheckStates, type WalkthroughGate } from '../qe/walkthrough-acceptance.js';
+import type { WalkthroughStepState } from 'wicked-crew-api-types';
 
 const V = API_PREFIX;
 
@@ -763,12 +765,6 @@ const WALKTHROUGH_FILE_TYPES = DEMO_FILE_TYPES;
 /** The biggest recorder file the view parses (result, progress, chapter list). */
 const WALKTHROUGH_JSON_MAX_BYTES = 4 * 1024 * 1024;
 
-/** The step id of a unit (`<run>:<step>` → `<step>`). */
-function stepIdOf(view: SessionView, unit: WorkUnit): string {
-  const prefix = `${view.session.id}:`;
-  return unit.id.startsWith(prefix) ? unit.id.slice(prefix.length) : unit.id;
-}
-
 /** One walkthrough pair of a run: the recorder unit and the author unit it records. */
 interface WalkthroughPair {
   review: WorkUnit | null;
@@ -809,27 +805,6 @@ function selectPair(view: SessionView, step: string | undefined): WalkthroughPai
   return pairs.find(
     (p) => (p.review !== null && stepIdOf(view, p.review) === step) || (p.plan !== null && stepIdOf(view, p.plan) === step),
   );
-}
-
-/**
- * The proof root of a recorder step: `<evidence root>/<step>`, only when it is a plain directory
- * directly under the evidence root (never through a planted link), else `null`.
- */
-async function proofRootOf(view: SessionView, review: WorkUnit): Promise<string | null> {
-  const evidence = (view.session as { evidence_root?: unknown }).evidence_root;
-  if (typeof evidence !== 'string' || evidence === '') return null;
-  const step = stepIdOf(view, review);
-  if (!/^[A-Za-z0-9._-]+$/.test(step) || step.startsWith('.') || step.toLowerCase() === WALKTHROUGH_AUTHOR_SUBDIR) return null;
-  const dir = join(evidence, step);
-  try {
-    const st = await fsp.lstat(dir);
-    if (st.isSymbolicLink() || !st.isDirectory()) return null;
-    const real = await fsp.realpath(dir);
-    if (real !== join(await fsp.realpath(evidence), step)) return null;
-    return real;
-  } catch {
-    return null;
-  }
 }
 
 /** A proof-root JSON file, parsed, or `undefined` when it is absent, oversized, outside the root or not JSON. */
@@ -922,8 +897,42 @@ async function walkthroughChapters(root: string | null, result: Record<string, u
   );
 }
 
+/** One recorder step's gate: its proof root and the seal in its persisted output (WT-W2). */
+async function recorderGate(adapter: Pick<CoreAdapter, 'workOutput'>, view: SessionView, review: WorkUnit): Promise<WalkthroughGate> {
+  const output = await adapter.workOutput(coreUnitId(view.session.id, review)).catch(() => null);
+  return resolveWalkthroughGate({
+    runId: view.session.id,
+    stepId: stepIdOf(view, review),
+    proofRoot: await walkthroughProofRoot(view, review),
+    output,
+  });
+}
+
+/**
+ * The walkthrough half of `GET /runs/:id/acceptance` (WT-W2): one gate per `walkthrough_review` step
+ * the requirement names (`phases`, step ids), and the per-creator-step check states from the NEWEST
+ * walkthrough (only a sealed one proves anything).
+ */
+export async function walkthroughAcceptance(
+  adapter: Pick<CoreAdapter, 'workOutput'>,
+  view: SessionView,
+  phases: string[],
+): Promise<{ gates: WalkthroughGate[]; steps: WalkthroughStepState[] }> {
+  const wanted = new Set(phases);
+  const reviews = view.units.filter((u) => u.catalog === WALKTHROUGH_REVIEW_CATALOG && wanted.has(stepIdOf(view, u)));
+  if (reviews.length === 0) return { gates: [], steps: [] };
+  const gates = await Promise.all(reviews.map((u) => recorderGate(adapter, view, u)));
+  const newestReview = walkthroughPairs(view).filter((p) => p.review !== null).at(-1)?.review ?? null;
+  const newest = newestReview !== null ? (gates.find((g) => g.stepId === stepIdOf(view, newestReview)) ?? null) : null;
+  return { gates, steps: walkthroughCheckStates(view, newest) };
+}
+
 /** Everything studio renders for one walkthrough pair (the newest, or the one `step` names). */
-export async function walkthroughView(view: SessionView, step?: string): Promise<WalkthroughView | null> {
+export async function walkthroughView(
+  view: SessionView,
+  step?: string,
+  adapter?: Pick<CoreAdapter, 'workOutput'>,
+): Promise<WalkthroughView | null> {
   const runId = view.session.id;
   const pair = selectPair(view, step);
   if (step !== undefined && pair === undefined) return null;
@@ -931,7 +940,7 @@ export async function walkthroughView(view: SessionView, step?: string): Promise
   const hasEvidenceRoot = typeof evidenceRoot === 'string' && evidenceRoot !== '';
   const review = pair?.review ?? null;
   const plan = pair?.plan ?? null;
-  const root = review !== null ? await proofRootOf(view, review) : null;
+  const root = review !== null ? await walkthroughProofRoot(view, review) : null;
   const resultRaw = root !== null ? await readRootJson(root, 'result.json') : undefined;
   const result = record(resultRaw);
   const bound = review ?? plan;
@@ -974,6 +983,8 @@ export async function walkthroughView(view: SessionView, step?: string): Promise
   const mp4 = root !== null && ((await fileSize(root, 'demo-video/demo.mp4')) ?? 0) > 0 ? 'demo-video/demo.mp4' : null;
   const poster = root !== null && (await isFile(root, 'demo-video/poster.jpg')) ? 'demo-video/poster.jpg' : null;
   const markers = root !== null ? parseMarkers(await readText(root, 'demo-video/chapters.md')) : [];
+  // WT-W2: the take is trusted only through its seal, re-verified at this read.
+  const gate = review !== null && adapter !== undefined ? await recorderGate(adapter, view, review) : null;
   return {
     runId,
     stepId: review !== null ? stepIdOf(view, review) : null,
@@ -983,10 +994,10 @@ export async function walkthroughView(view: SessionView, step?: string): Promise
     seat: { evaluator: plan?.assigned_cli ?? null, builders },
     tree: str(result?.tree),
     stale: false,
-    sealed: false,
+    sealed: gate?.sealed ?? false,
     video: { mp4, poster, markers },
     chapters: await walkthroughChapters(root, result),
-    steps: [],
+    steps: gate !== null ? walkthroughCheckStates(view, gate) : [],
   };
 }
 
@@ -1003,7 +1014,7 @@ export function registerWalkthroughRoutes(app: FastifyInstance, adapter: CoreAda
       if (step !== undefined && typeof step !== 'string') return reply.code(400).send({ error: '`step` names one step, once' });
       const run = await runById(id);
       if (run === null) return reply.code(404).send({ error: 'no run with that id' });
-      const view = await walkthroughView(run, step);
+      const view = await walkthroughView(run, step, adapter);
       if (view === null) return reply.code(404).send({ error: `run ${id} has no walkthrough step named ${String(step)}` });
       return view;
     },
@@ -1026,7 +1037,7 @@ export function registerWalkthroughRoutes(app: FastifyInstance, adapter: CoreAda
       // The same pair the view shows: with no step, a newer walkthrough still being written has no
       // files yet, and an older take is never served in its place.
       const pair = selectPair(run, q.step);
-      const root = pair?.review != null ? await proofRootOf(run, pair.review) : null;
+      const root = pair?.review != null ? await walkthroughProofRoot(run, pair.review) : null;
       if (root === null) return reply.code(404).send({ error: 'this run has no recorded walkthrough there' });
       const target = await containedPath(root, q.path);
       const st = target === null ? null : await fsp.stat(target).catch(() => null);
