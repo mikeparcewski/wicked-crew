@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.71.0",
+  "apiTypesVersion": "0.72.0",
   "endpoints": [
     {
       "method": "GET",
@@ -1141,6 +1141,22 @@
       "statusCodes": [
         200,
         404
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/:id/demo/export",
+      "requestType": "DemoExportBody",
+      "responseType": "DemoExportResponse",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        409,
+        422,
+        502,
+        503,
+        504
       ]
     },
     {

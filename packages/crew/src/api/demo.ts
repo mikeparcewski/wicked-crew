@@ -10,6 +10,9 @@
  *                                  the reviewer's verdicts (the review gate), and the chaptered MP4.
  *   GET  /runs/:id/demo/file       one file of the root (a contact sheet, the MP4 — with Range).
  *   PUT  /runs/:id/demo/script     the presenter's edit of `script.md` while the plan gate is open.
+ *   POST /runs/:id/demo/export     a GIF (`demo-video/demo.gif`) or a poster frame (`demo-video/poster.jpg`)
+ *                                  of the stitched MP4, encoded by ffmpeg with an ASYNC spawn and a
+ *                                  timeout (EP-C3): the daemon keeps answering while it encodes.
  *
  * The gates are the run's ordinary gates (`POST /runs/:id/gate`): approve, or `request_changes` with a
  * note — at the plan gate it re-runs `plan`, at the review gate it rewinds to `record` (re-record one
@@ -20,13 +23,17 @@
  * renders are served.
  */
 
+import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { createReadStream, promises as fsp } from 'node:fs';
+import { constants as fsConstants, createReadStream, promises as fsp } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { extname, join, relative, resolve, sep } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type {
   DemoChapter,
+  DemoExportFormat,
+  DemoExportResponse,
   DemoFinding,
   DemoMarker,
   DemoStage,
@@ -34,6 +41,7 @@ import type {
 } from 'wicked-crew-api-types';
 import type { CoreAdapter } from '../core/adapter.js';
 import type { SessionView, WorkUnit } from '../core/types.js';
+import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 import { API_PREFIX } from './api-prefix.js';
 import { coreUnitId } from './evidence.js';
 
@@ -53,6 +61,7 @@ const DEMO_FILE_TYPES: Readonly<Record<string, string>> = {
   '.mp4': 'video/mp4',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
+  '.gif': 'image/gif',
   '.md': 'text/markdown; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
 };
@@ -81,6 +90,160 @@ export const DemoLaunchSchema = z
   .strict();
 
 export const DemoScriptSchema = z.object({ content: z.string().min(1) }).strict();
+
+export const DemoExportSchema = z
+  .object({
+    format: z.enum(['gif', 'poster']),
+    /** The poster's frame, in seconds from the start. Poster only. */
+    atSec: z.number().finite().min(0).max(24 * 60 * 60).optional(),
+  })
+  .strict()
+  .refine((b) => b.format === 'poster' || b.atSec === undefined, { message: '`atSec` applies to a poster only', path: ['atSec'] });
+
+/**
+ * How long one encode may run before it is killed (EP-C3). A GIF re-encodes the whole video (the bound
+ * interactive's encoder uses); a poster decodes one frame. Mutable only so a test can shorten it.
+ */
+export const DEMO_EXPORT_TIMEOUT_MS: Record<DemoExportFormat, number> = { gif: 180_000, poster: 30_000 };
+
+/** Interactive's GIF filter (`src/service/demo.js` `ffmpegGifEncoder`): two-pass palette so colours do not band, 10 fps, 720 px. */
+export const DEMO_GIF_FILTER =
+  'fps=10,scale=720:-1:flags=lanczos,split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=3';
+
+/** The stages an export may run in: no worker of the run is running, so none can write the root. */
+const DEMO_EXPORT_STAGES: ReadonlySet<DemoStage> = new Set<DemoStage>(['review_gate', 'done', 'failed']);
+
+/** What each export writes, inside the run's `demo-video/`. */
+const DEMO_EXPORT_FILE: Readonly<Record<DemoExportFormat, string>> = { gif: 'demo.gif', poster: 'poster.jpg' };
+
+export const DEMO_FFMPEG_HINT =
+  'install ffmpeg (e.g. `brew install ffmpeg` / `apt install ffmpeg`) on the daemon host, or set WICKED_FFMPEG to its path';
+
+type FfmpegOutcome =
+  | { kind: 'ok' }
+  | { kind: 'missing' }
+  | { kind: 'timeout' }
+  | { kind: 'failed'; code: number | null; stderr: string };
+
+/**
+ * Run ffmpeg without blocking the event loop: an async `spawn`, its stderr tail kept for the error,
+ * SIGKILL past `timeoutMs`. Never `spawnSync` (review N6: a 180 s synchronous encode would stall
+ * every route the daemon serves, `/health` included).
+ */
+export function runFfmpeg(args: string[], timeoutMs: number): Promise<FfmpegOutcome> {
+  const bin = process.env.WICKED_FFMPEG || 'ffmpeg';
+  return new Promise((resolveOutcome) => {
+    let settled = false;
+    const settle = (o: FfmpegOutcome): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolveOutcome(o);
+    };
+    let stderr = '';
+    // crew#495: no child of the daemon inherits a daemon-exported governance store.
+    const child = spawn(bin, args, {
+      stdio: ['ignore', 'ignore', 'pipe'],
+      windowsHide: true,
+      env: childEnvWithBootEstateDb(process.env),
+    });
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      settle({ kind: 'timeout' });
+    }, timeoutMs);
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr = (stderr + chunk.toString('utf8')).slice(-2000);
+    });
+    child.on('error', (err: NodeJS.ErrnoException) => {
+      settle(err.code === 'ENOENT' || err.code === 'EACCES' ? { kind: 'missing' } : { kind: 'failed', code: null, stderr: err.message });
+    });
+    child.on('close', (code) => {
+      settle(code === 0 ? { kind: 'ok' } : { kind: 'failed', code, stderr });
+    });
+  });
+}
+
+/** One export's HTTP answer. */
+type DemoExportAnswer = { status: number; body: DemoExportResponse | { error: string; hint?: string } };
+
+/**
+ * Encode one export of a run's stitched MP4. The run's workers can write its demo root, so ffmpeg never
+ * touches it: the MP4 is copied into a daemon-private staging directory, encoded there, and only the
+ * finished file is published back, after `stillExportable` confirms the run has not resumed (a review
+ * gate answered with `request_changes` during the encode re-opens `record`) and `demo-video/` still
+ * resolves where it did. Publication is an exclusive copy to a fresh name inside `demo-video/` and a
+ * rename, so a half-written export is never served and a failed or killed encode leaves nothing behind.
+ */
+async function encodeDemoExport(
+  runId: string,
+  format: DemoExportFormat,
+  atSec: number | undefined,
+  stillExportable: () => Promise<boolean>,
+): Promise<DemoExportAnswer> {
+  const root = demoRootDir(runId);
+  const input = await containedPath(root, 'demo-video/demo.mp4');
+  const inputSize = input === null ? null : await fsp.stat(input).then((st) => (st.isFile() ? st.size : null), () => null);
+  if (input === null || inputSize === null || inputSize === 0) {
+    return { status: 409, body: { error: 'this demo has no stitched demo-video/demo.mp4 yet' } };
+  }
+  // The output directory is resolved on its own, not from the input: an in-root symlink
+  // `demo-video/demo.mp4 -> ../elsewhere/x.mp4` must not move the export away from the path served.
+  const outDir = await containedPath(root, 'demo-video');
+  if (outDir === null) return { status: 409, body: { error: 'this demo has no demo-video/ directory' } };
+  const name = DEMO_EXPORT_FILE[format];
+  const ext = extname(name);
+  const staging = await fsp.mkdtemp(join(tmpdir(), 'wicked-crew-demo-export-'));
+  const source = join(staging, 'source.mp4');
+  const encoded = join(staging, `export${ext}`);
+  let published: string | null = null;
+  try {
+    await fsp.copyFile(input, source);
+    // The input is read as an MP4 and nothing else, from the local file alone: a worker-written
+    // `demo.mp4` that is really a playlist (HLS, concat) naming media outside the root is refused by the
+    // demuxer instead of followed with the daemon's permissions.
+    const demux = ['-f', 'mov', '-protocol_whitelist', 'file', '-i', source];
+    let args: string[];
+    let at: number | undefined;
+    if (format === 'gif') {
+      args = ['-y', ...demux, '-vf', DEMO_GIF_FILTER, '-loop', '0', encoded];
+    } else {
+      // Default: one second into the first chapter (the title card is past), or 1 s with no markers.
+      at = atSec ?? (parseMarkers(await readText(root, 'demo-video/chapters.md'))[0]?.sec ?? 0) + 1;
+      args = ['-y', '-ss', String(at), ...demux, '-frames:v', '1', '-q:v', '3', '-update', '1', encoded];
+    }
+    const outcome = await runFfmpeg(args, DEMO_EXPORT_TIMEOUT_MS[format]);
+    if (outcome.kind === 'missing') {
+      return { status: 503, body: { error: 'ffmpeg not found on the daemon host', hint: DEMO_FFMPEG_HINT } };
+    }
+    if (outcome.kind === 'timeout') {
+      return { status: 504, body: { error: `the ${format} encode ran past ${DEMO_EXPORT_TIMEOUT_MS[format] / 1000} s and was stopped` } };
+    }
+    if (outcome.kind === 'failed') {
+      return { status: 502, body: { error: `ffmpeg failed (exit ${outcome.code}): ${outcome.stderr.trim().slice(-300)}` } };
+    }
+    const bytes = await fsp.stat(encoded).then((st) => (st.isFile() ? st.size : 0), () => 0);
+    if (bytes === 0) {
+      return {
+        status: 422,
+        body: { error: at !== undefined ? `no frame at ${at} s: the video is shorter` : `ffmpeg wrote no ${format}` },
+      };
+    }
+    if (!(await stillExportable())) {
+      return { status: 409, body: { error: 'the run resumed during the encode; the export was discarded' } };
+    }
+    if ((await containedPath(root, 'demo-video')) !== outDir) {
+      return { status: 409, body: { error: 'demo-video/ changed during the encode; nothing was written' } };
+    }
+    published = join(outDir, `.export-${randomUUID()}${ext}`);
+    await fsp.copyFile(encoded, published, fsConstants.COPYFILE_EXCL);
+    await fsp.rename(published, join(outDir, name));
+    published = null;
+    return { status: 200, body: { format, path: `demo-video/${name}`, bytes } };
+  } finally {
+    if (published !== null) await fsp.rm(published, { force: true });
+    await fsp.rm(staging, { recursive: true, force: true });
+  }
+}
 
 /** The brief the demo run reads (the problem statement stays one short line: worker prompts are capped). */
 export function demoBrief(root: string, b: { url: string; audience: string; show: string }): string {
@@ -366,6 +529,10 @@ export function parseRange(header: string | undefined, size: number): { start: n
 }
 
 export function registerDemoRoutes(app: FastifyInstance, adapter: CoreAdapter): void {
+  // One encode per run and format at a time, since each format writes one file. An identical request
+  // (a double click) joins the encode in flight; a different poster frame is refused until it ends,
+  // so two encodes never race to replace the same file.
+  const exportsInFlight = new Map<string, { atSec: number | undefined; answer: Promise<DemoExportAnswer> }>();
   const demoRun = async (id: string): Promise<SessionView | null> => {
     const views = await adapter.sessionsDetail();
     const run = views.find((v) => v.session.id === id);
@@ -470,6 +637,51 @@ export function registerDemoRoutes(app: FastifyInstance, adapter: CoreAdapter): 
         .header('content-range', `bytes ${range.start}-${range.end}/${st.size}`)
         .header('content-length', String(range.end - range.start + 1));
       return reply.send(createReadStream(target, { start: range.start, end: range.end }));
+    },
+  );
+
+  app.post(
+    `${V}/runs/:id/demo/export`,
+    {
+      config: {
+        manifest: {
+          requestType: 'DemoExportBody',
+          responseType: 'DemoExportResponse',
+          statusCodes: [200, 400, 404, 409, 422, 502, 503, 504],
+        },
+      },
+    },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const parsed = DemoExportSchema.safeParse(req.body ?? {});
+      if (!parsed.success) return reply.code(400).send({ error: 'Invalid export body', details: parsed.error.issues });
+      const run = await demoRun(id);
+      if (run === null) return reply.code(404).send({ error: 'no demo run with that id' });
+      // Only while none of the run's workers can write the root: at the review gate, or once the run
+      // has ended. The export reads and writes inside that root across a seconds-long encode.
+      if (!DEMO_EXPORT_STAGES.has(demoStage(run))) {
+        return reply.code(409).send({ error: 'a demo can be exported at the review gate or once the run has ended' });
+      }
+      const { format, atSec } = parsed.data;
+      const key = `${id}\0${format}`;
+      let pending = exportsInFlight.get(key);
+      if (pending !== undefined && pending.atSec !== atSec) {
+        return reply.code(409).send({ error: `a ${format} export of this demo is already running; try again when it ends` });
+      }
+      if (pending === undefined) {
+        // Re-read at publication: a gate answered during the encode may have resumed the recorder.
+        const stillExportable = async (): Promise<boolean> => {
+          const now = await demoRun(id);
+          return now !== null && DEMO_EXPORT_STAGES.has(demoStage(now));
+        };
+        pending = {
+          atSec,
+          answer: encodeDemoExport(id, format, atSec, stillExportable).finally(() => exportsInFlight.delete(key)),
+        };
+        exportsInFlight.set(key, pending);
+      }
+      const answer = await pending.answer;
+      return reply.code(answer.status).send(answer.body);
     },
   );
 
