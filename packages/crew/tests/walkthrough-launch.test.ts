@@ -94,6 +94,23 @@ describe('the evidence root minted at launch (WT-W1)', () => {
     expect(existsSync(join(walkDir, 'run-e'))).toBe(false);
   });
 
+  it('a run id that is not one plain path segment gets no evidence root, and nothing is created outside the walkthrough dir (codex)', async () => {
+    // `../escaped-<n>` would land beside the walkthrough dir, inside this test's own scratch dir.
+    const name = `escaped-${process.pid}`;
+    await adapter.launchRun({ problem: 'p', sessionId: `../${name}`, clisJson: '[]', workflow: 'bug', repoRef: 'shop' });
+    expect('evidenceRoot' in launched[0]!).toBe(false);
+    expect(existsSync(join(dir, name))).toBe(false);
+    expect(() => walkthroughRootDir('../x')).toThrow(/plain/);
+  });
+
+  it('a refused launch never removes an evidence root it did not create — a duplicate run id keeps the first run\'s (codex)', async () => {
+    const existing = join(walkDir, 'run-dup', 'author', 'walkthrough_plan');
+    mkdirSync(existing, { recursive: true });
+    stubCore(adapter, 'launchRun', () => Promise.reject(new Error('session run-dup already exists')));
+    await expect(adapter.launchRun({ problem: 'p', sessionId: 'run-dup', clisJson: '[]', workflow: 'bug', repoRef: 'shop' })).rejects.toThrow('already exists');
+    expect(existsSync(existing)).toBe(true);
+  });
+
   it('defaults to <home>/.wicked/walkthroughs/<runId>, and the variable is refused inside the state home', () => {
     delete process.env['WICKED_WALKTHROUGH_DIR'];
     const home = process.env['HOME'] ?? process.env['USERPROFILE'] ?? '/tmp';

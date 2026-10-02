@@ -4,7 +4,7 @@ import { attachEngineBus, detachEngineBus, type EngineBus } from './bus.js';
 import { mkdir, access, readFile, writeFile, chmod, rm } from 'node:fs/promises';
 import { existsSync, readdirSync, readFileSync, renameSync } from 'node:fs';
 import { join, dirname, resolve, isAbsolute, relative, sep } from 'node:path';
-import { WALKTHROUGH_AUTHOR_SUBDIR, walkthroughRootDir } from './walkthrough-root.js';
+import { isPlainRunId, WALKTHROUGH_AUTHOR_SUBDIR, walkthroughRootDir } from './walkthrough-root.js';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -2041,10 +2041,17 @@ export class CoreAdapter {
     // exist from the start. Only `<root>/author` widens the boundary: the proof roots under the
     // evidence root are the jailed recorder's alone. On an addon that cannot take the field nothing
     // is minted (napi would drop it silently, and a walkthrough step on such a run fails closed at
-    // its pinned validator); a launch the engine refuses leaves no root behind.
-    const evidenceRoot = input.repoRef !== undefined && this.evidenceRootsSupported() ? walkthroughRootDir(input.sessionId) : null;
+    // its pinned validator); a launch the engine refuses removes the root only when THIS launch
+    // created it — a duplicate run id must never delete the first run's evidence (codex on #758). A
+    // caller-chosen run id that is not one plain path segment gets no root at all.
+    const evidenceRoot =
+      input.repoRef !== undefined && isPlainRunId(input.sessionId) && this.evidenceRootsSupported()
+        ? walkthroughRootDir(input.sessionId)
+        : null;
+    let mintedHere = false;
     if (evidenceRoot !== null) {
       const author = join(evidenceRoot, WALKTHROUGH_AUTHOR_SUBDIR);
+      mintedHere = !existsSync(evidenceRoot);
       await mkdir(author, { recursive: true });
       (opts as LaunchOptions & { evidenceRoot?: string }).evidenceRoot = evidenceRoot;
       opts.extraWriteRoots = [...(opts.extraWriteRoots ?? []), author];
@@ -2052,7 +2059,7 @@ export class CoreAdapter {
     try {
       return await this.handedToEngine('run', input.sessionId, () => this.core.launchRun(opts), input.workflow);
     } catch (err) {
-      if (evidenceRoot !== null) await rm(evidenceRoot, { recursive: true, force: true }).catch(() => undefined);
+      if (evidenceRoot !== null && mintedHere) await rm(evidenceRoot, { recursive: true, force: true }).catch(() => undefined);
       throw err;
     }
   }

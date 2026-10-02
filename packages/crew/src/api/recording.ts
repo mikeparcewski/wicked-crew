@@ -793,12 +793,13 @@ export function walkthroughPairs(view: SessionView): WalkthroughPair[] {
     if (plan !== null) paired.add(plan);
     pairs.push({ review, plan });
   }
+  // An author no recorder resolves to is a pair of its own: its walkthrough is still being written.
   for (const plan of plans) {
-    if (!paired.has(plan) && !pairs.some((p) => p.review !== null && p.review.ord > plan.ord)) {
-      pairs.push({ review: null, plan });
-    }
+    if (!paired.has(plan)) pairs.push({ review: null, plan });
   }
-  return pairs.sort((a, b) => (a.review ?? a.plan)!.ord - (b.review ?? b.plan)!.ord);
+  // Newest = the latest AUTHOR (a pair's age is when its storyline was written); a recorder with no
+  // author before it sorts by its own position.
+  return pairs.sort((a, b) => (a.plan ?? a.review)!.ord - (b.plan ?? b.review)!.ord);
 }
 
 /**

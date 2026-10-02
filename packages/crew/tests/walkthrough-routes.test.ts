@@ -275,6 +275,22 @@ describe('GET /runs/:id/walkthrough — the recording view (WT-W1)', () => {
     expect(unknown.status).toBe(404);
   });
 
+  it('an author no recorder resolves to is its own (newest) pair, even with a recorder after it (codex)', async () => {
+    const ev = join(roots, 'r12');
+    const units: UnitSpec[] = [
+      { step: 'build', catalog: 'build', status: 'done' },
+      { step: 'p1', catalog: 'walkthrough_plan', status: 'done' },
+      { step: 'p2', catalog: 'walkthrough_plan', status: 'distributed' },
+      { step: 'r1', catalog: 'walkthrough_review', status: 'done' },
+    ];
+    const r = run('r12', ev, units);
+    (r.units[3] as Record<string, unknown>).depends_on = ['p1'];
+    sessionsDetail.mockResolvedValue([r]);
+    const newest = (await view('r12')).body;
+    expect([newest.stepId, newest.planStepId, newest.state]).toEqual([null, 'p2', 'authoring']);
+    expect((await view('r12', 'r1')).body.planStepId).toBe('p1');
+  });
+
   it('never reads a proof root through a link planted at the step path', async () => {
     const ev = join(roots, 'r11');
     const elsewhere = join(roots, 'elsewhere');
