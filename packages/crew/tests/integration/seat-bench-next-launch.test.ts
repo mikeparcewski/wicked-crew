@@ -225,7 +225,10 @@ describe('(2) the next launch benches it up front', () => {
   it('GET /roster reads the dead seat ineligible, with the cause and when it lifts', () => {
     const dead = rosterAfter1.find((s) => s['key'] === DEAD)!;
     expect(dead['council_eligible']).toBe(false);
-    expect(String(dead['council_ineligible_reason'])).toMatch(/^recent quota_exhausted — the engine benched it in run it-seat-b at \d\d:\d\dZ .*eligible again at \d\d:\d\dZ/);
+    // `seatStanding` names the run by its first eight characters (`it-seat-`).
+    expect(String(dead['council_ineligible_reason'])).toMatch(
+      new RegExp(`^recent quota_exhausted — the engine benched it in run ${RUN_1.slice(0, 8)} at \\d\\d:\\d\\dZ .*eligible again at \\d\\d:\\d\\dZ`),
+    );
     for (const key of [BUILDER, OTHER]) expect(rosterAfter1.find((s) => s['key'] === key)!['council_eligible']).toBe(true);
   });
 

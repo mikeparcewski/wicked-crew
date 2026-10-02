@@ -98,6 +98,16 @@ describe('a seat the engine benched in a run is benched at the next launch (seat
     expect(rosterOver(tracker)().find((s) => s.key === 'copilot')!.council_eligible).toBe(true);
   });
 
+  it('recovers at once when the seat answers a chat turn (chatReply ok), but not on a failed one', () => {
+    const tracker = new SeatHealthTracker();
+    const now = Date.now();
+    tracker.ingest(copilotBenched(now));
+    tracker.ingest(ev({ type: 'chatReply', chat: 'c1', cliKey: 'copilot', text: 'quota', ok: false, usage: null }));
+    expect(tracker.recentBenchFor('copilot', now + 1_000)).not.toBeNull();
+    tracker.ingest(ev({ type: 'chatReply', chat: 'c1', cliKey: 'copilot', text: 'hello', ok: true, usage: null }));
+    expect(tracker.recentBenchFor('copilot', now + 2_000)).toBeNull();
+  });
+
   it("carries only the engine's in-run bench: a launcher bench, or a frame with no seat or reason, changes nothing", () => {
     const tracker = new SeatHealthTracker();
     tracker.ingest(ev({ type: 'seatBenched', session: RUN, ord: 1, cli: 'codex', reason: 'signed out', source: 'launcher' }));

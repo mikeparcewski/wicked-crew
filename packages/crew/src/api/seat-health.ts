@@ -272,6 +272,14 @@ export class SeatHealthTracker {
         if (cli !== undefined && kind !== undefined && kind !== 'benched') this.stampError(cli, at);
         return;
       }
+      case 'chatReply': {
+        // A seat that ANSWERED a chat turn did work: the same recovery an ok unit output is. A
+        // chat may seat a council-benched seat (chat admission reads `auth` only), so this is how
+        // a recently benched seat that has recovered says so before the window lifts.
+        const cliKey = str((event as { cliKey?: unknown }).cliKey);
+        if (cliKey !== undefined && (event as { ok?: unknown }).ok === true) this.markActive(cliKey, at);
+        return;
+      }
       case 'seatBenched': {
         // The engine benched this seat for the run on its worker's or judge's own refusal
         // (`not_logged_in`, `quota_exhausted`, `not_installed`, `approval_unavailable`). Crew
