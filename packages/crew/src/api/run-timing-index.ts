@@ -87,7 +87,7 @@ export class RunTimingIndex {
       this.hydrateFromLaunchEntries(await audit.readAll({ action: 'run.launched' }));
     } catch (err) {
       log?.(
-        `[runs] run-timing-index hydrate failed (prior runs read as undated until restart): ${
+        `[runs] run-timing-index hydrate failed (prior runs read as undated and lose their chat_id link until restart): ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
