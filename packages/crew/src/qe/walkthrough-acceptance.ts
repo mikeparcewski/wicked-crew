@@ -182,11 +182,20 @@ export async function resolveWalkthroughGate(opts: {
       ((row.take ?? 0) === (prev.take ?? 0) && (row.verdict.created_at ?? '') > (prev.verdict.created_at ?? ''));
     if (later) newest.set(row.chapter, row);
   }
+  // Exact chapter-set agreement (codex on #759): every sealed chapter has its own stamped verdict on
+  // the sealed tree, equal to the sealed one, and the ledger holds no chapter the seal omits.
+  const sealedKeys = new Set(seal.chapters.map((c) => c.key));
   for (const c of seal.chapters) {
     const row = newest.get(c.key);
-    if (row !== undefined && row.verdict.verdict !== c.verdict) {
+    if (row === undefined) {
+      return deny(`chapter ${c.key} has no stamped ledger verdict on tree ${seal.tree ?? '?'} (missing ⇒ deny)`, false, seal.overall, chapters);
+    }
+    if (row.verdict.verdict !== c.verdict) {
       return changed(`chapter ${c.key}: the ledger's newest stamped verdict is ${row.verdict.verdict}, the seal ${c.verdict}`);
     }
+  }
+  for (const key of newest.keys()) {
+    if (!sealedKeys.has(key)) return changed(`the ledger holds a stamped verdict for chapter ${key}, which the seal does not list`);
   }
 
   if (result.overall !== seal.overall) return changed(`result.json says ${String(result.overall)}, the seal ${seal.overall}`);

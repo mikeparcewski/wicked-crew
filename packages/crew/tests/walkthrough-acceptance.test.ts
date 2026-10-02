@@ -227,6 +227,25 @@ describe('resolveWalkthroughGate (WT-W2)', () => {
     expect(g.reason).toMatch(/ledger/);
   });
 
+  it('every sealed chapter needs its own stamped ledger verdict on the sealed tree, and the ledger may not hold a chapter the seal omits (codex)', async () => {
+    // The ledger holds only chapter 01; the seal lists 01 and 02.
+    recordProofRoot(root, [{ key: '01-pay-once', verdict: 'PASS' }], { overall: 'PASS' });
+    const missing = await resolveWalkthroughGate({ runId: RUN, stepId: STEP, proofRoot: root, output: sealLine(root, PASSING) });
+    expect(missing.satisfied).toBe(false);
+    expect(missing.reason).toMatch(/02-receipt has no stamped ledger verdict/);
+    removeScratch(root);
+    // Rows on another tree do not count for the sealed one.
+    recordProofRoot(root, PASSING, { tree: 'tree-OTHER' });
+    const otherTree = await resolveWalkthroughGate({ runId: RUN, stepId: STEP, proofRoot: root, output: sealLine(root, PASSING) });
+    expect(otherTree.satisfied).toBe(false);
+    removeScratch(root);
+    // The ledger holds a chapter the seal does not list.
+    recordProofRoot(root, [...PASSING, { key: '03-extra', verdict: 'FAIL' }], { overall: 'PASS' });
+    const extra = await resolveWalkthroughGate({ runId: RUN, stepId: STEP, proofRoot: root, output: sealLine(root, PASSING) });
+    expect(extra.satisfied).toBe(false);
+    expect(extra.reason).toMatch(/03-extra/);
+  });
+
   it('an earlier take\'s FAIL rows stay listed and do not deny the sealed later take', async () => {
     recordProofRoot(root, [{ key: '01-pay-once', verdict: 'FAIL', take: 1 }]);
     recordProofRoot(root, [{ key: '01-pay-once', verdict: 'PASS', take: 2 }]);
