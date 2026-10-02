@@ -26,7 +26,7 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createReadStream, promises as fsp } from 'node:fs';
-import { dirname, extname, join, relative, resolve, sep } from 'node:path';
+import { extname, join, relative, resolve, sep } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type {
@@ -171,7 +171,10 @@ async function encodeDemoExport(runId: string, format: DemoExportFormat, atSec: 
   if (input === null || inputSize === null || inputSize === 0) {
     return { status: 409, body: { error: 'this demo has no stitched demo-video/demo.mp4 yet' } };
   }
-  const outDir = dirname(input);
+  // The output directory is resolved on its own, not from the input: an in-root symlink
+  // `demo-video/demo.mp4 -> ../elsewhere/x.mp4` must not move the export away from the path served.
+  const outDir = await containedPath(root, 'demo-video');
+  if (outDir === null) return { status: 409, body: { error: 'this demo has no demo-video/ directory' } };
   const name = DEMO_EXPORT_FILE[format];
   const ext = extname(name);
   const tmp = join(outDir, `.export-${randomUUID()}${ext}`);
@@ -498,8 +501,10 @@ export function parseRange(header: string | undefined, size: number): { start: n
 }
 
 export function registerDemoRoutes(app: FastifyInstance, adapter: CoreAdapter): void {
-  // One encode per run, format and frame at a time: a double click joins the encode in flight.
-  const exportsInFlight = new Map<string, Promise<DemoExportAnswer>>();
+  // One encode per run and format at a time, since each format writes one file. An identical request
+  // (a double click) joins the encode in flight; a different poster frame is refused until it ends,
+  // so two encodes never race to replace the same file.
+  const exportsInFlight = new Map<string, { atSec: number | undefined; answer: Promise<DemoExportAnswer> }>();
   const demoRun = async (id: string): Promise<SessionView | null> => {
     const views = await adapter.sessionsDetail();
     const run = views.find((v) => v.session.id === id);
@@ -630,13 +635,16 @@ export function registerDemoRoutes(app: FastifyInstance, adapter: CoreAdapter): 
         return reply.code(409).send({ error: 'a demo can be exported at the review gate or once the run has ended' });
       }
       const { format, atSec } = parsed.data;
-      const key = `${id}\0${format}\0${atSec ?? ''}`;
+      const key = `${id}\0${format}`;
       let pending = exportsInFlight.get(key);
+      if (pending !== undefined && pending.atSec !== atSec) {
+        return reply.code(409).send({ error: `a ${format} export of this demo is already running; try again when it ends` });
+      }
       if (pending === undefined) {
-        pending = encodeDemoExport(id, format, atSec).finally(() => exportsInFlight.delete(key));
+        pending = { atSec, answer: encodeDemoExport(id, format, atSec).finally(() => exportsInFlight.delete(key)) };
         exportsInFlight.set(key, pending);
       }
-      const answer = await pending;
+      const answer = await pending.answer;
       return reply.code(answer.status).send(answer.body);
     },
   );

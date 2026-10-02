@@ -264,6 +264,33 @@ describe('POST /runs/:id/demo/export (EP-C3)', { timeout: 30_000 }, () => {
     removeScratch(outside);
   });
 
+  it('an in-root symlinked MP4 still exports into demo-video/, the path the answer names', async () => {
+    const root = stitchedRoot('d1');
+    mkdirSync(join(root, 'recordings'), { recursive: true });
+    renameSync(join(root, 'demo-video', 'demo.mp4'), join(root, 'recordings', 'source.mp4'));
+    symlinkSync(join('..', 'recordings', 'source.mp4'), join(root, 'demo-video', 'demo.mp4'));
+    const res = await exportReq('d1', { format: 'gif' });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(existsSync(join(root, 'demo-video', 'demo.gif'))).toBe(true);
+    expect(readdirSync(join(root, 'recordings'))).toEqual(['source.mp4']);
+  });
+
+  it('a different poster frame while one encodes is refused (409); the same frame joins', async () => {
+    stitchedRoot('d1');
+    process.env.FAKE_FFMPEG_SLEEP_MS = '600';
+    const first = exportReq('d1', { format: 'poster', atSec: 2 });
+    for (let i = 0; i < 100 && spawns() === 0; i++) await new Promise((r) => setTimeout(r, 20));
+    const [other, same] = await Promise.all([
+      exportReq('d1', { format: 'poster', atSec: 9 }),
+      exportReq('d1', { format: 'poster', atSec: 2 }),
+    ]);
+    expect(other.statusCode, other.body).toBe(409);
+    expect(other.body).toContain('already running');
+    expect((await first).statusCode).toBe(200);
+    expect(same.statusCode).toBe(200);
+    expect(spawns()).toBe(1);
+  });
+
   it('a missing ffmpeg answers 503 with the install hint', async () => {
     stitchedRoot('d1');
     process.env.WICKED_FFMPEG = join(logDir, 'no-such-ffmpeg');
