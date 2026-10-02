@@ -51,7 +51,7 @@ function expectedBundle(root: string): string {
     }
   };
   walk(root);
-  files.sort();
+  files.sort((a, b) => Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8')));
   const lines = files.map((rel) => `${createHash('sha256').update(readFileSync(join(root, rel))).digest('hex')}  ${rel}\n`).join('');
   return createHash('sha256').update(lines, 'utf8').digest('hex');
 }
@@ -111,12 +111,15 @@ describe('the seal and the bundle (WT-W2)', () => {
   afterEach(() => removeScratch(dir));
 
   it('parseSeal reads the LAST seal line of the output; a malformed or absent seal is null', () => {
-    const a = 'WALKTHROUGH-SEAL {"bundle_sha":"' + 'a'.repeat(64) + '","overall":"FAIL","chapters":[]}';
+    const a = 'WALKTHROUGH-SEAL {"bundle_sha":"' + 'a'.repeat(64) + '","overall":"FAIL","chapters":[],"tree":"t"}';
     const b = 'WALKTHROUGH-SEAL {"bundle_sha":"' + 'b'.repeat(64) + '","overall":"PASS","chapters":[{"key":"01-a","verdict":"PASS"}],"tree":"t"}';
     expect(parseSeal(`noise\n${a}\nmore\n${b}\ntail`)).toMatchObject({ bundle_sha: 'b'.repeat(64), overall: 'PASS', tree: 't', chapters: [{ key: '01-a', verdict: 'PASS' }] });
     expect(parseSeal('WALKTHROUGH-SEAL {not json')).toBeNull();
     expect(parseSeal('WALKTHROUGH-SEAL {"overall":"PASS","chapters":[]}')).toBeNull();
     expect(parseSeal('no seal here')).toBeNull();
+    // The tree binds the seal to the recorded take (Copilot on #759): a seal without one is refused.
+    expect(parseSeal('WALKTHROUGH-SEAL {"bundle_sha":"' + 'c'.repeat(64) + '","overall":"PASS","chapters":[]}')).toBeNull();
+    expect(parseSeal('WALKTHROUGH-SEAL {"bundle_sha":"' + 'c'.repeat(64) + '","overall":"PASS","chapters":[],"tree":""}')).toBeNull();
     expect(parseSeal(null)).toBeNull();
   });
 
@@ -132,6 +135,15 @@ describe('the seal and the bundle (WT-W2)', () => {
     expect(await computeBundleSha(root)).toEqual(first);
     writeFileSync(join(root, 'capture', 'c1.parsed.json'), '[]');
     expect(((await computeBundleSha(root)) as { sha: string }).sha).not.toBe((first as { sha: string }).sha);
+    // UTF-8 byte order, as LC_ALL=C sorts (Copilot on #759): U+E000 (EE 80 80) sorts before U+10000 (F0 90 80 80),
+    // which UTF-16 code-unit order (a JS string compare) gets the other way round.
+    writeFileSync(join(root, 'capture', '\u{E000}.json'), '1');
+    writeFileSync(join(root, 'capture', '\u{10000}.json'), '2');
+    expect(await computeBundleSha(root)).toMatchObject({ ok: true, sha: expectedBundle(root) });
+    // A same-size rewrite is seen too (the memo keys on change time, not size alone).
+    const before = ((await computeBundleSha(root)) as { sha: string }).sha;
+    writeFileSync(join(root, 'capture', '\u{E000}.json'), '9');
+    expect(((await computeBundleSha(root)) as { sha: string }).sha).not.toBe(before);
     symlinkSync(join(dir, 'elsewhere'), join(root, 'capture', 'link.json'));
     expect(await computeBundleSha(root)).toMatchObject({ ok: false, error: expect.stringMatching(/link/) });
   });
@@ -337,6 +349,7 @@ describe('GET /runs/:id/acceptance and the walkthrough view read the proof roots
   let sessionsDetail: Mock;
   let workOutput: Mock;
   let catalogIds: Mock;
+  let listRepos: Mock;
 
   const planRun = (withTest: boolean): SessionView => {
     const steps: Array<[string, string, string]> = [
@@ -375,6 +388,7 @@ describe('GET /runs/:id/acceptance and the walkthrough view read the proof roots
     sessionsDetail = vi.fn();
     workOutput = vi.fn().mockResolvedValue(null);
     catalogIds = vi.fn().mockResolvedValue(new Set(['build', 'test', 'walkthrough_plan', 'walkthrough_review']));
+    listRepos = vi.fn().mockResolvedValue([]);
     app = Fastify({ logger: false });
     registerRoutes(
       app,
@@ -384,7 +398,7 @@ describe('GET /runs/:id/acceptance and the walkthrough view read the proof roots
         catalogIds,
         verifiedEvidenceCatalog: vi.fn().mockResolvedValue(new Set(['test', 'walkthrough_review'])),
         listWorkflows: () => [],
-        listRepos: vi.fn().mockResolvedValue([]),
+        listRepos,
         projectMembers: vi.fn().mockResolvedValue([]),
         listConformanceClaims: vi.fn().mockResolvedValue([]),
         runEvents: vi.fn().mockResolvedValue([]),
@@ -434,6 +448,22 @@ describe('GET /runs/:id/acceptance and the walkthrough view read the proof roots
     const both = (await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN}/acceptance` })).json() as { gate: { satisfied: boolean; reason: string } };
     expect(both.gate.satisfied).toBe(false);
     expect(both.gate.reason).toMatch(/no repo context/);
+  });
+
+  it('a walkthrough-only plan still denies when the repo ledger exists but cannot be read (Copilot)', async () => {
+    const repoRoot = join(dir, 'repo');
+    mkdirSync(join(repoRoot, '.wicked-qe', 'verdicts'), { recursive: true });
+    writeFileSync(join(repoRoot, '.wicked-qe', 'verdicts', 'broken.json'), '{not json');
+    const r = planRun(false);
+    (r.session as unknown as { repo_ref: string }).repo_ref = 'shop';
+    sessionsDetail.mockResolvedValue([r]);
+    const root = join(ev, STEP);
+    recordProofRoot(root, PASSING);
+    workOutput.mockResolvedValue(sealLine(root, PASSING));
+    listRepos.mockResolvedValue([{ id: 'shop', name: 'shop', root_path: repoRoot, default_branch: 'main', registered_at: 0 }]);
+    const body = (await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN}/acceptance` })).json() as { gate: { satisfied: boolean; reason: string } };
+    expect(body.gate.satisfied).toBe(false);
+    expect(body.gate.reason).toMatch(/could not be read/);
   });
 
   it('a step naming a catalog the engine does not define denies the run by name', async () => {

@@ -550,7 +550,8 @@ export async function buildAcceptanceView(opts: {
   const state = opts.repo !== null ? await readAcceptanceState(opts.repo.root_path, subject) : null;
   // Deny-dominates across the repo ledger too: on a run whose requirement is walkthroughs only, a
   // verdict the repo ledger DOES attribute to this run still counts — a FAIL there denies.
-  const repoCounts = required || (walkIds.size > 0 && state?.verdict != null);
+  // An unreadable repo ledger counts too: it cannot say whether it attributes a denial (Copilot on #759).
+  const repoCounts = required || (walkIds.size > 0 && (state?.verdict != null || state?.error !== undefined));
   const gate = combineWalkthroughGates(resolveAcceptanceGate(repoCounts, state, failClosed), walkGates, opts.requirement.declared, failClosed);
 
   // The conformance half. Loader failures are NAMED, not flattened into an empty list — the

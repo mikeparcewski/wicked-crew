@@ -23,7 +23,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { promises as fsp } from 'node:fs';
+import { createReadStream, promises as fsp } from 'node:fs';
 import { join } from 'node:path';
 import type { WalkthroughStepState } from 'wicked-crew-api-types';
 import type { SessionView } from '../core/types.js';
@@ -34,7 +34,7 @@ export const SEAL_PREFIX = 'WALKTHROUGH-SEAL ';
 
 /** The fields of a seal acceptance reads. */
 export interface WalkthroughSeal {
-  tree: string | null;
+  tree: string;
   storyline_sha: string | null;
   bundle_sha: string;
   overall: string;
@@ -59,6 +59,8 @@ export function parseSeal(output: string | null): WalkthroughSeal | null {
     if (o === null || typeof o !== 'object' || Array.isArray(o)) return null;
     if (typeof o.bundle_sha !== 'string' || !/^[0-9a-f]{64}$/.test(o.bundle_sha)) return null;
     if (typeof o.overall !== 'string' || !Array.isArray(o.chapters)) return null;
+    // The tree binds the seal to the recorded take; without it ledger rows of any tree could match.
+    if (typeof o.tree !== 'string' || o.tree === '') return null;
     const chapters: WalkthroughSeal['chapters'] = [];
     for (const c of o.chapters as unknown[]) {
       const ch = c as Record<string, unknown> | null;
@@ -66,7 +68,7 @@ export function parseSeal(output: string | null): WalkthroughSeal | null {
       chapters.push({ key: ch.key, verdict: ch.verdict });
     }
     const s = (v: unknown): string | null => (typeof v === 'string' && v !== '' ? v : null);
-    return { tree: s(o.tree), storyline_sha: s(o.storyline_sha), bundle_sha: o.bundle_sha, overall: o.overall, chapters, edited_by: s(o.edited_by) };
+    return { tree: o.tree, storyline_sha: s(o.storyline_sha), bundle_sha: o.bundle_sha, overall: o.overall, chapters, edited_by: s(o.edited_by) };
   }
   return null;
 }
@@ -99,10 +101,11 @@ export async function computeBundleSha(
   try {
     const err = await walk(proofRoot, '');
     if (err !== null) return { ok: false, error: err };
-    files.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    // UTF-8 byte order, as `LC_ALL=C sort` orders the lines (a JS string compare is UTF-16 order).
+    files.sort((a, b) => Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8')));
     const outer = createHash('sha256');
     for (const rel of files) {
-      const inner = createHash('sha256').update(await fsp.readFile(join(proofRoot, rel))).digest('hex');
+      const inner = await fileSha256(join(proofRoot, rel));
       outer.update(`${inner}  ${rel}\n`, 'utf8');
     }
     return { ok: true, sha: outer.digest('hex'), files: files.length };
@@ -110,6 +113,27 @@ export async function computeBundleSha(
     return { ok: false, error: `the proof root could not be read: ${e instanceof Error ? e.message : String(e)}` };
   }
 }
+
+/**
+ * One file's sha256, STREAMED (a stitched take is a video; the walkthrough view is polled). Memoized on
+ * the file's identity and change time (`dev`, `ino`, `size`, `mtimeMs`, `ctimeMs`): any write changes
+ * `ctime`, which a same-uid process cannot set back, so a rewritten file is always re-hashed.
+ */
+async function fileSha256(path: string): Promise<string> {
+  const st = await fsp.stat(path, { bigint: true });
+  const key = `${path}\0${st.dev}\0${st.ino}\0${st.size}\0${st.mtimeNs}\0${st.ctimeNs}`;
+  const hit = HASH_MEMO.get(key);
+  if (hit !== undefined) return hit;
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer);
+  const hex = hash.digest('hex');
+  if (HASH_MEMO.size >= HASH_MEMO_MAX) HASH_MEMO.delete(HASH_MEMO.keys().next().value as string);
+  HASH_MEMO.set(key, hex);
+  return hex;
+}
+
+const HASH_MEMO = new Map<string, string>();
+const HASH_MEMO_MAX = 4096;
 
 /** One walkthrough step's acceptance. */
 export interface WalkthroughGate {
@@ -174,7 +198,7 @@ export async function resolveWalkthroughGate(opts: {
   const newest = new Map<string, (typeof ledger.rows)[number]>();
   for (const row of ledger.rows) {
     if (row.chapter === null) continue;
-    if (seal.tree !== null && row.tree !== null && row.tree !== seal.tree) continue;
+    if (row.tree !== seal.tree) continue;
     const prev = newest.get(row.chapter);
     const later =
       prev === undefined ||
@@ -188,7 +212,7 @@ export async function resolveWalkthroughGate(opts: {
   for (const c of seal.chapters) {
     const row = newest.get(c.key);
     if (row === undefined) {
-      return deny(`chapter ${c.key} has no stamped ledger verdict on tree ${seal.tree ?? '?'} (missing ⇒ deny)`, false, seal.overall, chapters);
+      return deny(`chapter ${c.key} has no stamped ledger verdict on tree ${seal.tree} (missing ⇒ deny)`, false, seal.overall, chapters);
     }
     if (row.verdict.verdict !== c.verdict) {
       return changed(`chapter ${c.key}: the ledger's newest stamped verdict is ${row.verdict.verdict}, the seal ${c.verdict}`);
@@ -212,7 +236,7 @@ export async function resolveWalkthroughGate(opts: {
     stepId,
     sealed: true,
     satisfied: true,
-    reason: `walkthrough \`${stepId}\`: PASS — ${seal.chapters.length} chapter${seal.chapters.length === 1 ? '' : 's'} sealed at tree ${seal.tree ?? '?'}, bundle and ledger re-verified`,
+    reason: `walkthrough \`${stepId}\`: PASS — ${seal.chapters.length} chapter${seal.chapters.length === 1 ? '' : 's'} sealed at tree ${seal.tree}, bundle and ledger re-verified`,
     overall: seal.overall,
     chapters,
   };
