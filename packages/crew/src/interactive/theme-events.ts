@@ -222,19 +222,29 @@ export function checkThemeTokens(tokens: unknown): ThemeCheck {
 
 // ── Contrast (WCAG 2.x relative luminance) ────────────────────────────────────────────────────
 
-/** `[r, g, b]` in 0..255 for a hex, rgb()/rgba() or hsl()/hsla() colour; `null` when not computable (`var()`). */
+/**
+ * `[r, g, b]` in 0..255 for an OPAQUE hex, rgb()/rgba() or hsl()/hsla() colour; `null` when not
+ * computable — `var()`, or any alpha below 1 (codex r1: a translucent text colour composites over
+ * whatever is behind it, so its contrast cannot be known here and must not pass).
+ */
 export function parseColor(v: string): [number, number, number] | null {
   const s = v.trim();
   const hex = /^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/iu.exec(s);
   if (hex !== null) {
     const h = hex[1]!;
     if (h.length === 3) return [parseInt(h[0]! + h[0]!, 16), parseInt(h[1]! + h[1]!, 16), parseInt(h[2]! + h[2]!, 16)];
+    if (h.length === 8 && parseInt(h.slice(6, 8), 16) < 255) return null;
     return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
   }
   const fn = /^(rgba?|hsla?)\(\s*([^)]*)\)$/iu.exec(s);
   if (fn === null) return null;
   const nums = fn[2]!.split(',').map((x) => x.trim());
   if (nums.length < 3) return null;
+  if (nums.length >= 4) {
+    const a = nums[3]!;
+    const alpha = a.endsWith('%') ? Number(a.slice(0, -1)) / 100 : Number(a);
+    if (!Number.isFinite(alpha) || alpha < 1) return null;
+  }
   const n = (x: string, max: number): number | null => {
     const pct = x.endsWith('%');
     const val = Number(pct ? x.slice(0, -1) : x);
@@ -290,7 +300,7 @@ export function checkThemeContrast(tokens: Record<string, unknown>): ThemeCheck 
   const bg = colors['background'];
   if (typeof text !== 'string' || typeof bg !== 'string') return reject('missing-key:colors.text_primary|background');
   const ratio = contrastRatio(text, bg);
-  if (ratio === null) return { ok: false, reason: 'contrast-not-checkable:colors.text_primary on colors.background (use #hex, rgb() or hsl())' };
+  if (ratio === null) return { ok: false, reason: 'contrast-not-checkable:colors.text_primary on colors.background (use an opaque #hex, rgb() or hsl(); no var(), no alpha below 1)' };
   if (ratio < MIN_TEXT_CONTRAST) return { ok: false, reason: `contrast-too-low:${ratio.toFixed(2)}:1 for colors.text_primary on colors.background (needs ${MIN_TEXT_CONTRAST}:1)` };
   return { ok: true };
 }
@@ -468,6 +478,10 @@ export async function startInteractiveThemeSubscriber(
     flight.narration = message;
     void emitStatus({ ...docScope(flight.documentId, flight.projectId), state: 'working', message, ...narrationStamps(flight) });
   };
+  /** The ledger row a flight folds onto; a run that ended inside the launch call needs it first. */
+  const ensureRow = (flight: InFlight, runId: string): void => {
+    if (!ledger.has(flight.key)) ledger.recordLaunch(flight.key, runId);
+  };
   const endFlight = (runId: string): InFlight | undefined => {
     const flight = inFlight.get(runId);
     if (flight !== undefined) {
@@ -509,6 +523,7 @@ export async function startInteractiveThemeSubscriber(
       case 'sessionFailed':
       case 'runCancelled': {
         endFlight(runId);
+        ensureRow(flight, runId);
         ledger.recordFailure(flight.key);
         const why = flight.failureDetail !== undefined ? ` Reason: ${oneLine(flight.failureDetail, 600)}` : '';
         void emitStatus({
@@ -525,6 +540,7 @@ export async function startInteractiveThemeSubscriber(
 
   async function finalize(flight: InFlight, runId: string): Promise<void> {
     const { documentId, projectId, key, outputPath } = flight;
+    ensureRow(flight, runId);
     const result = collectThemeResult(outputPath);
     if ('error' in result) {
       ledger.recordFailure(key);
@@ -592,26 +608,8 @@ export async function startInteractiveThemeSubscriber(
       log(`run ${runId}: ${decision.reason}`);
     }
 
-    try {
-      const input: LaunchRunInput = {
-        problem: themeProblem(learned, handoffPath),
-        sessionId: runId,
-        clisJson: opts.clisJson ?? JSON.stringify(rosterOf(adapter, opts.roster)),
-        workflow: INTERACTIVE_THEME_WORKFLOW,
-        ...(learned.projectId !== undefined ? { projectId: learned.projectId } : {}),
-        ...(projectGraphBinding !== null ? { projectGraph: projectGraphBinding } : {}),
-        extraWriteRoots: [runDir],
-        requireDeliverables: [outputPath],
-      };
-      await adapter.launchRun(input);
-    } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
-      await emitStatus({ ...docScope(learned.documentId, learned.projectId), state: 'error', message: `Crew could not start a run to learn this theme: ${reason}.` });
-      log(`[interactive-theme] launch for ${key} failed: ${reason}`);
-      return;
-    }
-    ledger.recordLaunch(key, runId);
-    if (learned.projectId !== undefined) opts.onRunFiled?.(runId, learned.projectId);
+    // The flight is registered BEFORE the engine is called (codex r1): a run whose terminal frame
+    // lands during the launch call must still find its flight. A refused launch retracts it.
     const flight: InFlight = {
       key,
       documentId: learned.documentId,
@@ -625,6 +623,29 @@ export async function startInteractiveThemeSubscriber(
       }, heartbeatMs),
     };
     inFlight.set(runId, flight);
+    try {
+      const input: LaunchRunInput = {
+        problem: themeProblem(learned, handoffPath),
+        sessionId: runId,
+        clisJson: opts.clisJson ?? JSON.stringify(rosterOf(adapter, opts.roster)),
+        workflow: INTERACTIVE_THEME_WORKFLOW,
+        ...(learned.projectId !== undefined ? { projectId: learned.projectId } : {}),
+        ...(projectGraphBinding !== null ? { projectGraph: projectGraphBinding } : {}),
+        extraWriteRoots: [runDir],
+        requireDeliverables: [outputPath],
+      };
+      await adapter.launchRun(input);
+    } catch (err) {
+      endFlight(runId);
+      const reason = err instanceof Error ? err.message : String(err);
+      await emitStatus({ ...docScope(learned.documentId, learned.projectId), state: 'error', message: `Crew could not start a run to learn this theme: ${reason}.` });
+      log(`[interactive-theme] launch for ${key} failed: ${reason}`);
+      return;
+    }
+    // A run that already ended inside the launch call was finalized by the event fold and holds its
+    // row (with its outcome) already; otherwise the row is written now, so a replay never launches twice.
+    if (!ledger.has(key)) ledger.recordLaunch(key, runId);
+    if (learned.projectId !== undefined) opts.onRunFiled?.(runId, learned.projectId);
     log(`[interactive-theme] launched run ${runId} for ${key}`);
   }
 

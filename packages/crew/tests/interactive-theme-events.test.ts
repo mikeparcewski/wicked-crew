@@ -125,14 +125,11 @@ describe('the token grammar (interactive\'s, ported field for field) + contrast'
     expect(bad((t) => ({ ...t, fonts: { ...t.fonts, body: 'Inter; x' } }))).toEqual({ ok: false, reason: 'theme-rejected:value-outside-grammar:fonts.body' });
     expect(bad((t) => ({ ...t, extra: { a: 1 } }))).toEqual({ ok: false, reason: 'theme-rejected:unknown-key:extra' });
     expect(bad((t) => ({ ...t, colors: { ...t.colors, hover: '#fff' } }))).toEqual({ ok: false, reason: 'theme-rejected:unknown-key:colors.hover' });
-    expect(bad((t) => {
-      const { card: _card, ...rest } = t;
-      return rest;
-    })).toEqual({ ok: false, reason: 'theme-rejected:missing-group:card' });
-    expect(bad((t) => {
-      const { gap_xs: _g, ...spacing } = t.spacing;
-      return { ...t, spacing };
-    })).toEqual({ ok: false, reason: 'theme-rejected:missing-key:spacing.gap_xs' });
+    expect(bad((t) => Object.fromEntries(Object.entries(t).filter(([k]) => k !== 'card')))).toEqual({ ok: false, reason: 'theme-rejected:missing-group:card' });
+    expect(bad((t) => ({ ...t, spacing: Object.fromEntries(Object.entries(t.spacing).filter(([k]) => k !== 'gap_xs')) }))).toEqual({
+      ok: false,
+      reason: 'theme-rejected:missing-key:spacing.gap_xs',
+    });
     expect(checkThemeTokens('nope')).toEqual({ ok: false, reason: 'theme-rejected:not-an-object' });
     expect(checkThemeTokens({ ...TOKENS, name: 'bad<name>' })).toEqual({ ok: false, reason: 'theme-rejected:value-outside-grammar:name' });
   });
@@ -159,6 +156,15 @@ describe('the token grammar (interactive\'s, ported field for field) + contrast'
     expect((r as { reason: string }).reason).toMatch(/^contrast-too-low:1\.92:1/); // #BBBBBB on white
     const unknowable = { ...TOKENS, colors: { ...TOKENS.colors, background: 'var(--wi-bg)' } };
     expect((checkThemeContrast(unknowable) as { reason: string }).reason).toMatch(/^contrast-not-checkable/);
+    // codex r1: a translucent text or background colour (rgba/hsla alpha < 1, #rrggbbaa) composites
+    // over whatever is behind it — its contrast cannot be computed here, so it is refused, never passed.
+    for (const text of ['rgba(30, 41, 59, 0.2)', 'hsla(220, 40%, 20%, 0.5)', '#1E293B33']) {
+      const r2 = checkThemeContrast({ ...TOKENS, colors: { ...TOKENS.colors, text_primary: text } });
+      expect(r2.ok, text).toBe(false);
+      expect((r2 as { reason: string }).reason, text).toMatch(/^contrast-not-checkable/);
+    }
+    expect(parseColor('rgba(0,0,0,1)')).toEqual([0, 0, 0]);
+    expect(parseColor('#000000ff')).toEqual([0, 0, 0]);
     // The combined check: grammar first, then contrast.
     expect(validateThemeTokens(low)).toMatchObject({ ok: false });
   });
@@ -349,6 +355,42 @@ describe('startInteractiveThemeSubscriber (real bus, fake engine, stub writer)',
     }
     expect(puts).toHaveLength(0);
     expect(statuses().filter((s) => s['state'] === 'complete')).toHaveLength(0);
+  });
+
+  it('codex r1: a run whose terminal frame lands DURING the launch call is still finalized (the flight is registered before the engine is called)', async () => {
+    const bus = await import('wicked-bus');
+    const engine = fakeAdapter();
+    const base = engine.asAdapter();
+    // An engine that completes synchronously inside launchRun: the frame arrives before launchRun resolves.
+    const fast = {
+      ...base,
+      launchRun: async (input: LaunchRunInput) => {
+        engine.launches.push(input);
+        const out = (input.requireDeliverables as string[])[0]!;
+        writeFileSync(out, JSON.stringify(TOKENS));
+        engine.fire({ type: 'sessionCompleted', session: input.sessionId } as CoreEvent);
+        return input.sessionId;
+      },
+    } as unknown as CoreAdapter;
+    const sub = await startInteractiveThemeSubscriber(fast, {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'ledger.json'),
+      editDir: join(dir, 'edits'),
+      clisJson: SEATS,
+      putLearnedTheme: async (documentId, projectId, tokens) => {
+        puts.push({ documentId, projectId, tokens });
+        return { version: 3 };
+      },
+      log: () => {},
+    });
+    subs.push(sub!);
+    armProbe(bus);
+    await emitLearned(bus, { ts: '2026-10-03T18:00:00Z' });
+    await waitFor(() => puts.length === 1);
+    await waitFor(() => statuses().some((s) => s['state'] === 'complete'));
+    expect(sub!.inFlightDocs()).toEqual([]);
   });
 
   it('a run that fails, or a writer interactive refuses, is an error status — the document is unchanged', async () => {

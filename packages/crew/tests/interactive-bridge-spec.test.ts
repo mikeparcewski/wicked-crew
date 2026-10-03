@@ -35,7 +35,7 @@ describe('the wicked-interactive spec crew resolves', () => {
     expect(INTERACTIVE_SPEC).not.toBe('wicked-interactive');
   });
 
-  it('floors at 0.9.4 — the read-only recorder + dry-run the demo seam runs (crew#565/#500), on top of 0.9.3\'s per-root bus identity + loud refusal (F-RC1-120), crew-api fail-closed (F-RC1-122), browsers-path remedies (F-RC1-121), on top of 0.9.2\'s typed recorder contract (F-RECON-012/013/014)', () => {
+  it('floors at 0.10.0 — the learned-theme PUT + CREW review.completed (EP-I1/EP-I2, R-I) the theme and review seams need, on top of 0.9.4\'s read-only recorder + dry-run (crew#565/#500), 0.9.3\'s per-root bus identity (F-RC1-120) and 0.9.2\'s typed recorder contract (F-RECON-012/013/014)', () => {
     const range = INTERACTIVE_SPEC.split('@')[1] ?? '';
     expect(range).toBe(INTERACTIVE_DEFAULT_RANGE);
     const m = /^\^?(\d+)\.(\d+)\.(\d+)/.exec(range);
@@ -44,8 +44,9 @@ describe('the wicked-interactive spec crew resolves', () => {
     // 0.8.x never picked up 0.9.0 (F-081: the caret was a compiled constant — a silent freeze); 0.9.1
     // answers the recorder routes without the typed frames (F-RECON-012/014 shipped in 0.9.2); a
     // 0.9.2 bridge shares ONE bus cursor with every other bridge on the db (F-RC1-120, fixed 0.9.3).
-    // 0.9.3 has no `dry-run` and records whatever a spec clicks (crew#565, fixed 0.9.4).
-    expect(maj * 1_000_000 + min * 1_000 + pat).toBeGreaterThanOrEqual(0 * 1_000_000 + 9 * 1_000 + 4);
+    // 0.9.3 has no `dry-run` and records whatever a spec clicks (crew#565, fixed 0.9.4). 0.9.x has no
+    // `PUT /d/:doc/api/theme/learned`, so a validated theme would fail at the bridge (EP-C4, fixed 0.10.0).
+    expect(maj * 1_000_000 + min * 1_000 + pat).toBeGreaterThanOrEqual(0 * 1_000_000 + 10 * 1_000 + 0);
   });
 
   it('WICKED_INTERACTIVE_SPEC overrides the RANGE when it is a semver range; anything else is ignored and NAMED (F-081)', () => {
@@ -65,9 +66,11 @@ describe('the wicked-interactive spec crew resolves', () => {
     // (F-RC1-120: one bus cursor shared by every bridge on the db; fixed by 0.9.3's per-root identity).
     expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '^0.9.1' }).belowFloor).toBe(true);
     expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '^0.9.2' }).belowFloor).toBe(true);
-    // …and 0.9.3 (no dry-run, a recorder that performs writes — crew#565/#500, fixed 0.9.4).
+    // …and 0.9.3 (no dry-run, a recorder that performs writes — crew#565/#500, fixed 0.9.4), and 0.9.4
+    // itself now (no learned-theme route — EP-C4 writes through it; shipped 0.10.0).
     expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '^0.9.3' }).belowFloor).toBe(true);
-    expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '^0.9.4' }).belowFloor).toBeUndefined();
+    expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '^0.9.4' }).belowFloor).toBe(true);
+    expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '^0.10.0' }).belowFloor).toBeUndefined();
     expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '0.10.0-rc.1' }).belowFloor).toBeUndefined();
     // An upper-bound-only range has no floor to compare — accepted, not flagged.
     expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '<1.0.0' })).toEqual({ spec: 'wicked-interactive@<1.0.0', range: '<1.0.0', source: 'env' });
