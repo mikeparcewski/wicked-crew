@@ -1,0 +1,13 @@
+{
+  "id": "claim-vs-evidence",
+  "version": 1,
+  "on": { "source": "core", "type": "gateEvaluated" },
+  "join": [{ "source": "core", "type": "repoChecksEvaluated" }],
+  "filter": {},
+  "check": "deterministic:claim_vs_evidence",
+  "params": {},
+  "threshold": {},
+  "emit": { "as": "finding", "severity": "high", "watch_kind": "problem", "attach": null, "rate": { "per_run": 6 } },
+  "priority": "p1",
+  "enabled": true
+}

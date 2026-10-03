@@ -100,14 +100,16 @@ describe('the watch registry on the daemon', () => {
     const h = (await (await call('GET', '/api/v1/watch/health', TOKENS.operator)).json()) as WatchHealth;
     expect(h.armed).toBe(true);
     expect(h.reason).toBeNull();
-    expect(h.entries).toMatchObject({ loaded: 5, refused: [], off: [] });
+    expect(h.entries).toMatchObject({ loaded: 7, refused: [], off: [] });
     expect(h.llm.enabled).toBe(false);
     const { entries } = (await (await call('GET', '/api/v1/watch/entries', TOKENS.operator)).json()) as { entries: WatchEntry[] };
     expect(entries.map((e) => [e.id, e.enabled])).toEqual([
+      ['claim-vs-evidence', true],
       ['deliver-audit', true],
       ['quiet-after-claim', true],
       ['registry-check-failed', true],
       ['registry-lagging', true],
+      ['risky-call', true],
       ['ungated', true],
     ]);
     expect(entries.every((e) => e.threshold_text.length > 0)).toBe(true);
@@ -161,8 +163,10 @@ describe('the watch registry on the daemon', () => {
       findings: [],
       cleared: [],
       coverage: [
+        { entry_id: 'claim-vs-evidence', state: 'not_checked', reason: 'no step has run its checks yet' },
         { entry_id: 'deliver-audit', state: 'not_checked', reason: 'nothing was delivered on this run yet' },
         { entry_id: 'quiet-after-claim', state: 'not_checked', reason: 'no step has handed back yet' },
+        { entry_id: 'risky-call', state: 'not_checked', reason: 'no governed tool call has reached a gate yet' },
         { entry_id: 'ungated', state: 'not_checked', reason: 'no step has reached its gate yet' },
       ],
     });

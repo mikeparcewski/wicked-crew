@@ -73,9 +73,21 @@ export interface RegistryStats {
   tailLagMs: number;
 }
 
+/** What a check may know about a steering rule (TR-W6 `warned_rule`): never the whole store. */
+export interface WatchRuleBrief {
+  effect?: string | undefined;
+  severity: string;
+}
+
 export interface CheckCtx {
   now(): number;
   stats(): RegistryStats;
+  /**
+   * TR-W6: the registry's bounded snapshot of the daemon's steering rules by id (refreshed on a
+   * cadence, never per frame). Absent on a registry without a rule source; rejects when the store
+   * cannot be read — a check treats both as "not classifiable", never as "no rule fired".
+   */
+  rules?: () => Promise<ReadonlyMap<string, WatchRuleBrief>>;
 }
 
 /** What a check returns: a row to raise, or a raised row (by subject) that has resolved. */
@@ -98,6 +110,14 @@ export type CheckOutput =
       kind?: 'finding' | 'flag';
       re: string;
       evidence?: WatchEvidenceRef[];
+      /**
+       * TR-W6: set only when the row is for an EARLIER key point than the one being evaluated (a
+       * frame a check kept and classified later): that key point's own time and replay provenance,
+       * so the anchor is the source event's and a replayed row over the rate is still dropped.
+       * Absent = the evaluated input's.
+       */
+      at?: number;
+      replay?: boolean;
     }
   | { op: 'clear'; subject: string };
 

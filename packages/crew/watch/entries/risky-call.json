@@ -1,0 +1,12 @@
+{
+  "id": "risky-call",
+  "version": 1,
+  "on": { "source": "core", "type": "governanceHookFired" },
+  "filter": { "decision": ["allow", "allow_with_conditions"] },
+  "check": "deterministic:warned_rule",
+  "params": {},
+  "threshold": {},
+  "emit": { "as": "flag", "severity": "medium", "watch_kind": "problem", "attach": null, "rate": { "per_run": 8 } },
+  "priority": "p2",
+  "enabled": true
+}

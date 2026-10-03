@@ -40,7 +40,7 @@ import { applyOverrides, loadEntries, SHIPPED_ENTRIES_DIR, validateWatchPatch, t
 import { PushRing } from './ring.js';
 import { Router } from './router.js';
 import { replayBusRows, startBusPull, startWatchWsRelay, type BusPull, type WatchRelay } from './sources.js';
-import type { CheckCtx, KeyPointInput, LoadedEntry, RunWatchState, WatchCheck } from './types.js';
+import type { CheckCtx, KeyPointInput, LoadedEntry, RunWatchState, WatchCheck, WatchRuleBrief } from './types.js';
 
 /** Run states kept for coverage after a run ends (oldest dropped first). */
 const RUN_STATE_CAP = 500;
@@ -49,6 +49,13 @@ const FEED_LIMIT_MAX = 500;
 const CHECK_FAILED_ENTRY = 'registry-check-failed';
 
 export interface WatchRegistryOptions {
+  /**
+   * TR-W6: the daemon's steering rules, read for `warned_rule` and cached for {@link RULES_SNAPSHOT_TTL_MS}.
+   * Absent = checks see no `ctx.rules` (coverage says the store is not readable once a rule fires).
+   */
+  rules?: () => Promise<ReadonlyArray<{ id: string; effect?: string | undefined; severity: string; retired?: boolean | undefined }>>;
+  /** Test seam: the per-ask deadline on that read (default {@link RULES_READ_DEADLINE_MS}). */
+  rulesDeadlineMs?: number;
   /** The bus the daemon handed its engine; `undefined` = no bus, no watching. */
   dbPath: string | undefined;
   entriesDir?: string;
@@ -80,6 +87,11 @@ export interface WatchRegistryOptions {
 }
 
 export type DismissResult = 'dismissed' | 'not_found' | 'already_cleared' | 'emit_failed';
+
+/** TR-W6: how long one `listConformanceRules` read serves the warned-rule check. */
+export const RULES_SNAPSHOT_TTL_MS = 30_000;
+/** TR-W6: how long a check waits on that read — well below the deterministic lane's 1 s timeout. */
+export const RULES_READ_DEADLINE_MS = 400;
 
 export class WatchRegistry {
   private armedFlag = false;
@@ -357,8 +369,62 @@ export class WatchRegistry {
     return s;
   }
 
+  private rulesSnapshot: { at: number; map: ReadonlyMap<string, WatchRuleBrief> } | null = null;
+  private rulesInFlight: { startedAt: number; promise: Promise<ReadonlyMap<string, WatchRuleBrief>> } | null = null;
+
+  /**
+   * TR-W6: one store read per TTL, shared by every check that asks in the window.
+   *
+   * The ask has a DEADLINE below the deterministic lane's timeout (codex r1): a slow read must not
+   * get the evaluation abandoned mid-way (its dedupe state would move while its output is dropped).
+   * Past the deadline the ask is refused — the check keeps the frame and classifies it on a later
+   * one — while the read itself goes on and fills the snapshot when it lands. A read that has not
+   * settled within one TTL is abandoned: the next ask starts a new one (a hung store never pins the
+   * slot), and a late answer from an abandoned read never overwrites a newer snapshot.
+   */
+  private readRules(): Promise<ReadonlyMap<string, WatchRuleBrief>> {
+    const source = this.opts.rules;
+    if (source === undefined) return Promise.reject(new Error('no rule source'));
+    const now = this.now();
+    if (this.rulesSnapshot !== null && now - this.rulesSnapshot.at < RULES_SNAPSHOT_TTL_MS) return Promise.resolve(this.rulesSnapshot.map);
+    if (this.rulesInFlight === null || now - this.rulesInFlight.startedAt >= RULES_SNAPSHOT_TTL_MS) {
+      const flight: { startedAt: number; promise: Promise<ReadonlyMap<string, WatchRuleBrief>> } = { startedAt: now, promise: Promise.resolve(new Map()) };
+      flight.promise = Promise.resolve()
+        .then(source)
+        .then((list) => {
+          const map = new Map<string, WatchRuleBrief>();
+          for (const r of list) if (r.retired !== true) map.set(r.id, { effect: r.effect, severity: r.severity });
+          // Only the read that still owns the slot may publish (an abandoned one is stale by definition).
+          if (this.rulesInFlight === flight) this.rulesSnapshot = { at: this.now(), map };
+          return map as ReadonlyMap<string, WatchRuleBrief>;
+        })
+        .finally(() => {
+          if (this.rulesInFlight === flight) this.rulesInFlight = null;
+        });
+      flight.promise.catch(() => undefined); // an ask past its deadline no longer listens
+      this.rulesInFlight = flight;
+    }
+    const read = this.rulesInFlight.promise;
+    const deadlineMs = this.opts.rulesDeadlineMs ?? RULES_READ_DEADLINE_MS;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`the rules read timed out after ${deadlineMs} ms`)), deadlineMs);
+      timer.unref();
+      read.then(
+        (map) => {
+          clearTimeout(timer);
+          resolve(map);
+        },
+        (err: unknown) => {
+          clearTimeout(timer);
+          reject(err instanceof Error ? err : new Error(String(err)));
+        },
+      );
+    });
+  }
+
   private ctx(): CheckCtx {
     return {
+      ...(this.opts.rules !== undefined ? { rules: () => this.readRules() } : {}),
       now: this.now,
       stats: () => {
         const r = this.ring.stats();
@@ -383,7 +449,7 @@ export class WatchRegistry {
       state.seen.add(input.type);
       const outputs = await this.lane.run(check, entry, input, state, this.ctx());
       for (const out of outputs) {
-        if (out.op === 'raise') emitter.raise(entry, input.runId, out, input.at, input.replay === true);
+        if (out.op === 'raise') emitter.raise(entry, input.runId, out, out.at ?? input.at, out.replay ?? input.replay === true);
         else emitter.clear(entry, input.runId, out.subject, { reason: 'resolved' });
       }
     }

@@ -170,11 +170,12 @@ describe('the shipped entries and the router joins', () => {
     const filtered = entries.map((e) => (e.id === 'deliver-audit' ? { ...e, filter: { outcome: 'lifted' } } : e));
     const r = new Router(filtered);
     expect(r.wants('core', 'repoChecksEvaluated')).toBe('p1');
-    expect(r.route(core({ type: 'repoChecksEvaluated', ord: 1 })).map((e) => e.id)).toEqual(['deliver-audit']);
+    // TR-W6: claim-vs-evidence joins the same floor frame.
+    expect(r.route(core({ type: 'repoChecksEvaluated', ord: 1 })).map((e) => e.id).sort()).toEqual(['claim-vs-evidence', 'deliver-audit']);
     expect(r.route(core({ type: 'deliverLiftEvaluated', outcome: 'skipped' })).map((e) => e.id)).toEqual([]);
-    expect(r.route(core({ type: 'gateEvaluated', ord: 1 })).map((e) => e.id).sort()).toEqual(['deliver-audit', 'quiet-after-claim', 'ungated']);
+    expect(r.route(core({ type: 'gateEvaluated', ord: 1 })).map((e) => e.id).sort()).toEqual(['claim-vs-evidence', 'deliver-audit', 'quiet-after-claim', 'ungated']);
     // Joins never count as an entry "of" a source (the internal ticks walk only triggers).
-    expect(r.entriesOf('core').map((e) => e.id).sort()).toEqual(['deliver-audit', 'ungated']);
+    expect(r.entriesOf('core').map((e) => e.id).sort()).toEqual(['claim-vs-evidence', 'deliver-audit', 'risky-call', 'ungated']);
   });
 
   it('the loader refuses a join from the internal source and a bus join that is not 4 segments', async () => {

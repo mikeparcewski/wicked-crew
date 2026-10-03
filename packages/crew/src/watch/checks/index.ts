@@ -6,10 +6,12 @@
 
 import type { WatchCheck } from '../types.js';
 import { checkFailedCheck } from './check-failed.js';
+import { claimVsEvidenceCheck } from './claim-vs-evidence.js';
 import { deliverAuditCheck } from './deliver-audit.js';
 import { lagCheck } from './lag.js';
 import { quietAfterClaimCheck } from './quiet-after-claim.js';
 import { ungatedCheck } from './ungated.js';
+import { warnedRuleCheck } from './warned-rule.js';
 
 export const SHIPPED_CHECKS: ReadonlyMap<string, WatchCheck> = new Map<string, WatchCheck>([
   [lagCheck.name, lagCheck as unknown as WatchCheck],
@@ -18,4 +20,7 @@ export const SHIPPED_CHECKS: ReadonlyMap<string, WatchCheck> = new Map<string, W
   [deliverAuditCheck.name, deliverAuditCheck as unknown as WatchCheck],
   [ungatedCheck.name, ungatedCheck as unknown as WatchCheck],
   [quietAfterClaimCheck.name, quietAfterClaimCheck as unknown as WatchCheck],
+  // TR-W6
+  [claimVsEvidenceCheck.name, claimVsEvidenceCheck as unknown as WatchCheck],
+  [warnedRuleCheck.name, warnedRuleCheck as unknown as WatchCheck],
 ]);
