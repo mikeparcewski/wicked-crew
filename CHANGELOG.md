@@ -10,6 +10,19 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.48] — 2026-10-03
+
+Feature release for the studio rebuild's next live proofs: everything crew main gained since 0.7.47
+(waves 6–7 of the 2026-10 build plan, crew lane). The daemon now records decisions from studio chat
+(the pair framing: an approval yields a decision written from the proposal), shows what was
+considered · set aside · cited for chat turns and run units, serves the artifact-editor registry
+(`GET /editors`, the hashed bundle route with its content policy, the grants route; third-party
+installs are refused), learns a document's theme from a grabbed page through a governed run
+(validated, then written through wicked-interactive ≥ 0.10.0 — the default bridge range is now
+`^0.10.0`), and ships two more watch entries (`claim-vs-evidence`, `risky-call`).
+`wicked-crew-api-types` 0.87.0 is the matching wire contract. The bundled studio skin stays
+`^0.5.19`; `wicked-core-ts` stays `^0.7.35`.
+
 - **Watching: claims against evidence, and the rules you asked to be warned about (`wicked-crew-api-types` 0.87.0; DES-TRIGGER-REGISTRY-001 slice TR-W6).** Two shipped watch entries, both advisory, both reading only fields the engine computed (no regex over transcripts):
   - `claim-vs-evidence` (`deterministic:claim_vs_evidence`). **Evaluator arm:** a `gateEvaluated` with `evaluatorVerdict: "PASS"` while the `repoChecksEvaluated` emitted just before that gate says `passed: false` → one **high finding**, "Said it passed; its own checks failed (lint)". **Creator arm:** `repoChecksEvaluated{floor: "creator", passed: false}` → one **medium finding**, "Handed back as finished; its own checks failed (lint)" — a creator that hands back output has claimed it is finished, and the engine's creator floor failing is the structural contradiction (the `evaluatorVerdict` is null for creator units, so an evaluator-only check would miss it). Failing check names come from `checks[]` (exit code, timeout, spawn error). A floor is evidence for its own gate only (the gate consumes it). A floor that could not run (`outcome: "not_run"`) is never "its checks failed" — neither arm speaks and coverage says the checks could not run; a floor that hit its bound says "did not finish". A later attempt whose gate is `combined: true` **clears** the unit's open findings (the feed shows them as fixed). Coverage says "not checked" with the gate's `floorNote` when no floor ran.
   - `risky-call` (`deterministic:warned_rule`). On a `governanceHookFired` that was not a deny (`allow` or `allow_with_conditions`), each id in `firedPolicies` (TR-W2, wicked-core-ts ≥ 0.7.35) whose steering rule has `effect: warn` → one **flag** naming the rule id and the tool (severity = the rule's), "A rule you asked to be warned about fired on Bash: OPS-WATCH-001." — never the rule's text and never the command (no operator text on the bus). The effect is read from the daemon's own store through the registry's bounded snapshot (`WatchRegistryOptions.rules`, one `listConformanceRules` per 30 s) — no second matcher. On an engine whose frames carry no `firedPolicies`, coverage says "the engine is too old". The read has a 400 ms deadline (below the check lane's timeout); a frame whose rules could not be read in time is kept and classified on the run's next readable frame — never dropped — and coverage says "could not be classified" while any is waiting.
@@ -3464,7 +3477,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.47...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.48...HEAD
+[0.7.48]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.47...v0.7.48
 [0.7.47]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.46...v0.7.47
 [0.7.46]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.45...v0.7.46
 [0.7.45]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.40...v0.7.45
