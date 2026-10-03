@@ -44,19 +44,29 @@ export function matchesFilter(filter: Record<string, unknown>, event: unknown): 
   return true;
 }
 
+interface Routed {
+  entry: LoadedEntry;
+  /** A joined key point (TR-W5b): routed unfiltered, for the check to fold. */
+  joined: boolean;
+}
+
 export class Router {
-  private readonly byKey = new Map<string, LoadedEntry[]>();
+  private readonly byKey = new Map<string, Routed[]>();
   private readonly priorityByKey = new Map<string, WatchPriority>();
 
   constructor(entries: readonly LoadedEntry[]) {
     for (const e of entries) {
       if (!e.enabled) continue;
-      const key = `${e.on.source}\u0000${e.on.type}`;
-      const list = this.byKey.get(key) ?? [];
-      list.push(e);
-      this.byKey.set(key, list);
-      const prev = this.priorityByKey.get(key);
-      if (prev === undefined || RANK[e.priority] < RANK[prev]) this.priorityByKey.set(key, e.priority);
+      const points = [{ point: e.on, joined: false }, ...(e.join ?? []).map((point) => ({ point, joined: true }))];
+      for (const { point, joined } of points) {
+        const key = `${point.source}\u0000${point.type}`;
+        const list = this.byKey.get(key) ?? [];
+        if (list.some((r) => r.entry.id === e.id)) continue; // a join naming the trigger's own type
+        list.push({ entry: e, joined });
+        this.byKey.set(key, list);
+        const prev = this.priorityByKey.get(key);
+        if (prev === undefined || RANK[e.priority] < RANK[prev]) this.priorityByKey.set(key, e.priority);
+      }
     }
   }
 
@@ -69,7 +79,7 @@ export class Router {
   route(input: KeyPointInput): LoadedEntry[] {
     const list = this.byKey.get(`${input.source}\u0000${input.type}`);
     if (list === undefined) return [];
-    return list.filter((e) => matchesFilter(e.filter, input.event));
+    return list.filter((r) => r.joined || matchesFilter(r.entry.filter, input.event)).map((r) => r.entry);
   }
 
   /** Every bus type an enabled entry listens for (the bus pull reads only these). */
@@ -79,6 +89,8 @@ export class Router {
 
   /** Enabled entries of one source (coverage, internal ticks). */
   entriesOf(source: WatchEntrySource): LoadedEntry[] {
-    return [...this.byKey.entries()].filter(([k]) => k.startsWith(`${source}\u0000`)).flatMap(([, v]) => v);
+    return [...this.byKey.entries()]
+      .filter(([k]) => k.startsWith(`${source}\u0000`))
+      .flatMap(([, v]) => v.filter((r) => !r.joined).map((r) => r.entry));
   }
 }

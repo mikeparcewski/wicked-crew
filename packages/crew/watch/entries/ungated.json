@@ -1,0 +1,13 @@
+{
+  "id": "ungated",
+  "version": 1,
+  "on": { "source": "core", "type": "gateEvaluated" },
+  "join": [{ "source": "core", "type": "unitOutputCaptured" }],
+  "filter": {},
+  "check": "deterministic:ungated",
+  "params": {},
+  "threshold": {},
+  "emit": { "as": "flag", "severity": "info", "watch_kind": "problem", "attach": null, "rate": { "per_run": 5 } },
+  "priority": "p1",
+  "enabled": true
+}

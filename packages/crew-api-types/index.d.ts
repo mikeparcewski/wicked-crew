@@ -7517,6 +7517,12 @@ export interface WatchEntry {
   version: number;
   /** See {@link WatchEntrySource}. A `bus` type is a 4-segment `wicked.<domain>.<noun>.<verb>` type. */
   on: { source: WatchEntrySource; type: string };
+  /**
+   * (api-types 0.81.0, TR-W5b) The key points the check JOINS to its trigger — "the same unit's
+   * `repoChecksEvaluated`", "the cursor unit's latest `unitOutputCaptured`". They reach the check
+   * unfiltered so it can fold them; only `on` (with `filter`) triggers a row. Absent = none.
+   */
+  join?: Array<{ source: Exclude<WatchEntrySource, 'internal'>; type: string }>;
   /** JSON-path equality, AND of keys; an array means "any of". */
   filter: Record<string, unknown>;
   check: string;

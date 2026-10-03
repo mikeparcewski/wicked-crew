@@ -292,7 +292,7 @@ export class WatchEmitter {
       ...this.envelope(entry, runId, ord, attempt, out.re),
       watch_id: watchIdOf(runId, entry.id, entry.version, subject),
       check: entry.check,
-      kind: entry.emit.as,
+      kind: out.kind ?? entry.emit.as,
       severity: out.severity ?? entry.emit.severity,
       watch_kind: entry.emit.watch_kind,
       attach: entry.emit.attach,

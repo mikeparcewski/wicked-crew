@@ -104,7 +104,8 @@ function entriesDir(extra: Record<string, unknown>[]): string {
   const d = join(dir, 'entries');
   mkdirSync(d, { recursive: true });
   for (const { id, ...rest } of [
-    ...loadEntries(SHIPPED_ENTRIES_DIR, SHIPPED_CHECKS).entries.map((e) => ({ ...e })),
+    // The INTERNAL shipped entries only: the run-scoped ones (TR-W5b) have their own tests.
+    ...loadEntries(SHIPPED_ENTRIES_DIR, SHIPPED_CHECKS).entries.filter((e) => e.on.source === 'internal').map((e) => ({ ...e })),
     ...extra,
   ] as Array<Record<string, unknown>>) {
     writeFileSync(join(d, `${String(id)}.json`), JSON.stringify({ id, ...rest }));
@@ -163,12 +164,15 @@ describe('watch keys (test 1)', () => {
 });
 
 describe('the loader (test 4)', () => {
-  it('ships exactly the two internal entries, both enabled', () => {
+  it('ships the two internal entries and the three TR-W5b entries, all enabled', () => {
     const { entries, refused } = loadEntries(SHIPPED_ENTRIES_DIR, SHIPPED_CHECKS);
     expect(refused).toEqual([]);
     expect(entries.map((e) => [e.id, e.enabled, e.on.source])).toEqual([
+      ['deliver-audit', true, 'core'],
+      ['quiet-after-claim', true, 'watchdog'],
       ['registry-check-failed', true, 'internal'],
       ['registry-lagging', true, 'internal'],
+      ['ungated', true, 'core'],
     ]);
   });
 
@@ -346,7 +350,7 @@ describe('arming', () => {
     const h = r.health();
     expect(h.armed).toBe(false);
     expect(h.reason).toMatch(/no event bus/);
-    expect(h.entries.loaded).toBe(2);
+    expect(h.entries.loaded).toBe(5);
     // Coverage of a run never reads as clean when watching is off.
     const r2 = makeRegistry({ dbPath: undefined, entriesDir: entriesDir([entry('point')]) });
     await r2.arm();

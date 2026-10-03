@@ -19,6 +19,12 @@ export interface LoadedEntry {
   id: string;
   version: number;
   on: { source: WatchEntrySource; type: string };
+  /**
+   * TR-W5b: the key points the check JOINS to its trigger (DES §4.3 rows 1, 3, 5 — "joined to the
+   * same unit's …"). Routed to the check unfiltered so it can fold them; only `on` triggers a row.
+   * Absent = none.
+   */
+  join?: Array<{ source: Exclude<WatchEntrySource, 'internal'>; type: string }>;
   filter: Record<string, unknown>;
   check: string;
   params: Record<string, unknown>;
@@ -84,6 +90,12 @@ export type CheckOutput =
       attempt?: number | null;
       /** Overrides the entry's severity (a warned rule carries the rule's own). */
       severity?: WatchSeverity;
+      /**
+       * TR-W5b: overrides the entry's `emit.as` between `finding` and `flag` (one entry, several
+       * arms: deliver-audit's unverified lift is a finding, its skipped lift a flag). Never a
+       * proposal, never anything allow-like.
+       */
+      kind?: 'finding' | 'flag';
       re: string;
       evidence?: WatchEvidenceRef[];
     }
