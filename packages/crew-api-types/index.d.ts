@@ -6081,9 +6081,9 @@ export interface DiagnosticsSkillsFinding {
    *  (`warning`, crew#661) = a subsystem's phases declare a skill the published snapshot did not hold
    *  when it armed, so they run without it — one per `DiagnosticsSkills.phaseSkillGaps` entry;
    *  `skills.garden` (`error`, api-types 0.78.0, crew#753) = the installed wicked-garden is older
-   *  than the daemon requires (`GardenRequiredBody.required`), so it is not used: found at seed
-   *  (the runtime is `config-error` and the engine is handed a refusal path) or recorded on the
-   *  current baseline. Rides `/health.warnings` too; launches and onboarding answer 422
+   *  than the daemon requires (`GardenRequiredBody.required`), so it is not used: found at seed,
+   *  the runtime is `config-error` and the engine is handed a refusal path. Rides
+   *  `/health.warnings` too; launches and onboarding answer 422
    *  `garden_required` until a newer garden is installed and published. */
   kind:
     | 'skills.fallback'

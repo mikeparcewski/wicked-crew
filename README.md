@@ -58,12 +58,12 @@ the installer's copy (`<config dir>/plugins/wicked-garden`), where `<config dir>
 `$CLAUDE_CONFIG_DIR` or `~/.claude`. To use another garden root on purpose, point
 `WICKED_CREW_SKILLS_SOURCE` at it. Without garden, `/health` reports the missing base skill as an
 error. Every launch and every **Register & onboard** is refused with that reason, and nothing is
-registered. A garden older than 12.40.0 is never used: `/health` carries a `skills.garden` error
-that names the version found, where it was found, and the version required. Launches and onboarding
-answer `422 garden_required` until a newer garden is installed. After a first install, restart the
-daemon. A daemon that already holds skills from an older garden needs `POST
-/api/v1/skills/refresh-baseline` then `POST /api/v1/skills/publish`; a restart alone keeps its
-published skills.
+registered. A garden older than 12.40.0 is never used. At first boot, `/health` carries a
+`skills.garden` error that names the version found, where it was found, and the version required.
+Launches and onboarding answer `422 garden_required` until a newer garden is installed and the
+daemon restarts. A refresh (`POST /api/v1/skills/refresh-baseline`) from an older garden is refused
+with the same words. Skills a daemon already published are kept as published until the next
+refresh and publish.
 
 `serve` starts the daemon on `http://127.0.0.1:7701` (`--port` / `CREW_PORT` override) and serves
 the bundled **wicked-studio** console same-origin — open the URL to launch and steer runs, answer

@@ -172,8 +172,7 @@ describe('skills_root is NOT a setting (PUT/GET /settings)', () => {
 
   it('the skills.source WARNING follows the CURRENT baseline live (design v3.6): present after an installer-copy seed (said once per boot); a refresh that finds the SAME bytes in the marketplace cache re-records the provenance (codex on #491) and the warning is gone — before any publish', async () => {
     const warning = `seeded from the installer copy at ${FIXTURE_PLUGIN}; register the plugin with Claude Code (marketplace) to receive marketplace updates`;
-    // At the garden minimum (crew#753): an older automatic source would add a blocking skills.garden finding.
-    let source: PluginSource = { path: FIXTURE_PLUGIN, kind: 'installer-copy', plugin_version: REQUIRED_GARDEN_VERSION };
+    let source: PluginSource = { path: FIXTURE_PLUGIN, kind: 'installer-copy', plugin_version: '1.0.0' };
     const sc = scaffold({ source: () => source });
     try {
       const lines: string[] = [];
@@ -184,7 +183,7 @@ describe('skills_root is NOT a setting (PUT/GET /settings)', () => {
       expect(health.findings).toEqual([{ kind: 'skills.source', severity: 'warning', message: warning }]);
       expect(seeding.health().findings).toEqual([{ kind: 'skills.source', severity: 'warning', message: warning }]);
       expect(lines.find((l) => l.startsWith('[skills] seeded '))).toBe(
-        `[skills] seeded ${sc.root} from the installer-managed wicked-garden copy (plugins/wicked-garden — the LAST-resort source, design v3.6; not the marketplace cache) at ${FIXTURE_PLUGIN}, plugin version ${REQUIRED_GARDEN_VERSION}, source kind installer-copy`,
+        `[skills] seeded ${sc.root} from the installer-managed wicked-garden copy (plugins/wicked-garden — the LAST-resort source, design v3.6; not the marketplace cache) at ${FIXTURE_PLUGIN}, plugin version 1.0.0, source kind installer-copy`,
       );
       expect(lines.filter((l) => l === `[skills] skills.source: ${warning}`)).toHaveLength(1);
       // A second boot over the seeded root: the warning persists (the baseline is still the copy), said once again.
@@ -196,7 +195,7 @@ describe('skills_root is NOT a setting (PUT/GET /settings)', () => {
       // moved, and the manifest records it: kind, path, revision; the baseline key (the content hash)
       // is unchanged, no publish happened, and the warning is gone with the provenance.
       const before = sc.store.revision();
-      source = { path: sc.upstream, kind: 'claude-plugin-cache', plugin_version: REQUIRED_GARDEN_VERSION };
+      source = { path: sc.upstream, kind: 'claude-plugin-cache', plugin_version: '1.0.0' };
       const refreshed = sc.store.refreshBaseline(before);
       expect(refreshed.verdict).toBe('clear');
       expect(refreshed.baseline).toBe(refreshed.previous_baseline);
@@ -553,7 +552,7 @@ describe('daemon boot (createServer) — the root is <state home>/skills; the fe
   it('seeded from the installer-managed copy (design v3.6): published and exported like any source, plus the persistent skills.source WARNING in GET /diagnostics naming the copy; the manifest carries kind installer-copy on the wire', async () => {
     const root = join(dir, 'skills');
     delete process.env[SKILLS_SNAPSHOT_ENGINE_ENV];
-    const app = await createServer(adapter, options({ source: () => ({ path: FIXTURE_PLUGIN, kind: 'installer-copy', plugin_version: REQUIRED_GARDEN_VERSION }) }));
+    const app = await createServer(adapter, options({ source: () => ({ path: FIXTURE_PLUGIN, kind: 'installer-copy', plugin_version: '1.0.0' }) }));
     try {
       const real = realpathSync(join(root, 'snapshots', '000001'));
       expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]).toBe(real); // no degradation: the engine is handed a verified snapshot

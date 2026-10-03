@@ -13,7 +13,7 @@ mentioned only where a daemon release depends on them.
 - **crew needs wicked-garden ≥ 12.40.0, says so, and never uses an older one (`wicked-crew-api-types` 0.78.0; crew#753).** A crew-only install could not onboard. Register & onboard answered a 400, but it had already created the repo row, and an old garden plugin copy was silently used. Changes:
   - The README's install section states the requirement and the one install command (`npx wicked-installer install wicked-garden`).
   - Automatic discovery passes over an installed garden older than `REQUIRED_GARDEN_VERSION` (12.40.0, the garden whose QE ledger rows carry the crew run id and whose recorder seals a take) with a `too-old` finding. The daemon reports a blocking `skills.garden` error naming the version found, where it was found, the version required and the install command. It hands the engine a refusal path, so the engine cannot fall back to the old plugin either.
-  - A current baseline recorded from an older automatically discovered garden raises the same finding.
+  - `POST /skills/refresh-baseline` from an older garden is refused with the same words. A generation already published is kept as published.
   - The finding rides `/health.warnings`. `POST /runs`, `POST /repos` and `POST /repos/:id/onboard` answer 422 `garden_required` (`GardenRequiredBody`) while it holds.
   - With no garden at all, the base skill's existing error now names the minimum. `POST /repos` and `POST /repos/:id/onboard` judge the intake refusals (garden, state-home blocker, missing base skill) BEFORE anything is registered, so a refused onboard creates no repo row. Core has no unregister, so the refusal is judged up front.
   - An explicit `WICKED_CREW_SKILLS_SOURCE` is deliberate and is not judged.

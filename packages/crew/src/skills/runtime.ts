@@ -78,7 +78,7 @@ import type { LaunchNotice } from '../core/adapter.js';
 import type { CoreEvent, SkillManifest } from '../core/types.js';
 import { applySkillsSnapshotEnv, BOOT_SKILLS_SNAPSHOT, canonicalCrewStateHome, SKILLS_SNAPSHOT_ENGINE_ENV } from './engine-env.js';
 import { applyBaseSkillEnv, BASE_SKILL_REF_ENGINE_ENV, baseSkillPosture, normalizeBaseSkillRef, type BaseSkillConfig, type BaseSkillPolicy, type BaseSkillPosture } from './base-skill.js';
-import { GARDEN_INSTALL_COMMAND, gardenMeetsMinimum, REQUIRED_GARDEN_VERSION, SKILLS_SOURCE_ENV, type PluginSource } from './plugin-source.js';
+import { GARDEN_INSTALL_COMMAND, REQUIRED_GARDEN_VERSION, SKILLS_SOURCE_ENV, type PluginSource } from './plugin-source.js';
 import { REFUSED_DIRNAME } from './root-names.js';
 import { SkillsSourceUnavailableError, type CurrentSnapshot, type SkillsStore } from './store.js';
 
@@ -128,20 +128,6 @@ export function gardenTooOldFinding(found: { version: string; path: string }, wh
     severity: 'error',
     message: `wicked-garden ${found.version} (${what} at ${found.path}) is older than the required ${REQUIRED_GARDEN_VERSION}, so it is not used and every launch and onboarding is refused — install wicked-garden >= ${REQUIRED_GARDEN_VERSION} (\`${GARDEN_INSTALL_COMMAND}\`), then POST /skills/refresh-baseline and POST /skills/publish (or restart the daemon)`,
   };
-}
-
-/**
- * crew#753: the CURRENT baseline was captured from an automatically discovered garden older than
- * the minimum (an install that predates the check). An explicit source (`checkout` / `directory`)
- * is deliberate and is not judged. `null` when the baseline meets the minimum.
- */
-function baselineGardenFinding(m: SkillManifest): SkillsHealthFinding | null {
-  const current = m.baselines[m.baseline];
-  if (current === undefined) return null;
-  const { kind, path } = current.source;
-  const version = current.plugin_version;
-  if ((kind !== 'claude-plugin-cache' && kind !== 'installer-copy') || gardenMeetsMinimum(version)) return null;
-  return gardenTooOldFinding({ version, path }, 'the published skills baseline');
 }
 
 /** How many drifted rows the `skills.stale-rules` message names — the count carries the rest. */
@@ -200,7 +186,7 @@ export type SkillsHealthState = 'published' | 'fallback' | 'blocked' | 'config-e
 
 /** `skills.stale-rules` (F-083) is emitted ahead of its `wicked-crew-api-types` declaration — the next api-types cut adds it to `DiagnosticsSkillsFinding.kind`. */
 /** `skills.base-skill` (crew#554 / DES-L4 PR-⑧): the configured base skill is not in the published generation — an ERROR (the engine refuses launches at intake; `'require'` is the only policy). */
-/** `skills.garden` (crew#753): the installed wicked-garden is older than {@link REQUIRED_GARDEN_VERSION} — an ERROR; launches and onboarding are refused until a newer garden is installed. */
+/** `skills.garden` (crew#753): the installed wicked-garden found at seed is older than {@link REQUIRED_GARDEN_VERSION} — an ERROR; launches and onboarding are refused until a newer garden is installed. */
 export type SkillsHealthFindingKind = 'skills.fallback' | 'skills.blocked' | 'skills.config' | 'skills.source' | 'skills.manifest' | 'skills.stale-rules' | 'skills.base-skill' | 'skills.phase-skill' | 'skills.garden';
 
 export interface SkillsHealthFinding {
@@ -385,8 +371,8 @@ export class SkillsRuntime {
         baseSkill: null,
       });
     }
-    const extra = [sourceFinding(manifest), baselineGardenFinding(manifest)].filter((f): f is SkillsHealthFinding => f !== null);
-    return this.withBaseSkill(extra.length === 0 ? base : { ...base, findings: [...base.findings, ...extra] });
+    const source = sourceFinding(manifest);
+    return this.withBaseSkill(source === null ? base : { ...base, findings: [...base.findings, source] });
   }
 
   /** The reported block carries the base skill posture and its finding (crew#554) — the seam's one answer to "is the discipline skill handed". */
