@@ -1175,6 +1175,12 @@ export interface CoreEvent {
   elicitationId?: string;
   /** `elicitationCreated`: an ordered set of valid responses; `null` / absent = free-text. */
   options?: string[] | null;
+  /**
+   * `elicitationCreated` (C3; wicked-core-ts >= 0.7.35, api-types 0.83.0): the index into `options`
+   * of the option the PRODUCER of the options recommends (the field's JSON Schema `default`).
+   * ABSENT ⇒ nothing is preselected.
+   */
+  recommended?: number;
   /** PTY terminal frames (`terminalOpened`/`terminalOutput`/`terminalExited`): the terminal id. */
   id?: string;
   /**
@@ -4512,6 +4518,13 @@ export interface ElicitationInfo {
   message: string;
   /** Ordered set of valid responses; `null` means free-text. */
   options: string[] | null;
+  /**
+   * (C3, api-types 0.83.0) The index into `options` the producer of the options recommends —
+   * relayed from the engine's `elicitationCreated.recommended`, kept only when it names one of
+   * `options`. ABSENT ⇒ nothing is preselected (and a skin's Enter stays inert until a choice has
+   * focus, DESIGN-interaction rule 6).
+   */
+  recommended?: number;
   receivedAt: string;
 }
 
