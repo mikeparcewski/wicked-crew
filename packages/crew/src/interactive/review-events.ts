@@ -194,6 +194,16 @@ export function reviewHandoffKey(documentId: string, version: number, reviewers:
   return `${documentId}:review:${reviewPartitionOf(projectId)}:v${version}:${[...reviewers].sort().join('+')}`;
 }
 
+/**
+ * Is `key` a review row of `documentId` in a project OTHER than `projectId`? The delete sweep keeps
+ * those (codex r2): deleting one project's document must not make the same-named document of
+ * another project forget that it was reviewed.
+ */
+export function isAnotherProjectsReviewKey(key: string, documentId: string, projectId: string | undefined): boolean {
+  const reviews = `${documentId}:review:`;
+  return key.startsWith(reviews) && !key.startsWith(`${reviews}${reviewPartitionOf(projectId)}:`);
+}
+
 export function reviewProblem(req: ReviewRequest, handoffPath: string): string {
   const names = req.reviewers.map((id) => REVIEWERS[id].title).join(', ');
   return (

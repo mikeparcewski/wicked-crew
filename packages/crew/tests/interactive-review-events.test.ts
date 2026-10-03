@@ -14,6 +14,7 @@ import type { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent, LaunchRunInput, SessionView, WorkflowDef } from '../src/core/types.js';
 import { registerInteractiveDocChecks } from '../src/interactive/doc-checks-routes.js';
 import { INTERACTIVE_PRODUCER, STATUS_POSTED } from '../src/interactive/draft-events.js';
+import { sweepDocLedgers } from '../src/interactive/doc-ledger-sweep.js';
 import { InteractiveHandoffLedger } from '../src/interactive/ledger.js';
 import {
   INTERACTIVE_REVIEW_BUS_FILTER,
@@ -25,6 +26,7 @@ import {
   authoringRunsFromLedgers,
   editRunsBefore,
   extractReviewReport,
+  isAnotherProjectsReviewKey,
   interactiveReviewWorkflowDef,
   parseReviewRequested,
   resultsFromReport,
@@ -216,6 +218,24 @@ describe('who wrote it', () => {
     removeScratch(dir);
   });
 
+  it('codex r2: deleting a document sweeps ITS review rows from the handoff ledger and spares the same-named document of another project', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'crew-irev-sweep-'));
+    const edit = new InteractiveHandoffLedger(join(dir, 'edit.json'));
+    const mine = reviewHandoffKey('brochure', 3, ['qe'], 'kes');
+    const theirs = reviewHandoffKey('brochure', 3, ['qe'], 'other');
+    const unfiled = reviewHandoffKey('brochure', 3, ['qe']);
+    for (const key of ['brochure:v1', mine, theirs, unfiled, 'brochure-two:v1']) edit.recordLaunch(key, `run-${key}`);
+    expect([mine, theirs, unfiled].map((key) => isAnotherProjectsReviewKey(key, 'brochure', 'kes'))).toEqual([false, true, true]);
+    expect(isAnotherProjectsReviewKey('brochure:v1', 'brochure', 'kes')).toBe(false);
+    expect(isAnotherProjectsReviewKey(unfiled, 'brochure', undefined)).toBe(false);
+    const sweep = sweepDocLedgers('brochure', [{ name: 'edit', ledger: edit, path: '' }], (key) => isAnotherProjectsReviewKey(key, 'brochure', 'kes'));
+    expect(sweep.removed_keys.sort()).toEqual(['brochure:v1', mine].sort());
+    expect(edit.rows().map(([key]) => key).sort()).toEqual(['brochure-two:v1', theirs, unfiled].sort());
+    // Without a predicate the sweep is what it always was: every row of the name.
+    expect(sweepDocLedgers('brochure', [{ name: 'edit', ledger: edit, path: '' }]).removed_keys.sort()).toEqual([theirs, unfiled].sort());
+    removeScratch(dir);
+  });
+
   it('the review roster is the roster without the authors (by cli key)', () => {
     const roster = [{ key: 'claude' }, { key: 'codex' }, { key: 'agy' }, 'odd'];
     expect(rosterWithout(roster, ['claude#2', 'agy'])).toEqual([{ key: 'codex' }, 'odd']);
@@ -267,6 +287,15 @@ describe('the verdict store (wicked-ledger canonical rows) + the read-back', () 
     removeDocReviews(join(dir, '_reviews'), 'brochure', undefined);
     expect([existsSync(other), existsSync(unfiled)]).toEqual([true, false]);
     removeDocReviews(join(dir, 'no-such-dir'), 'brochure', 'kes');
+    // codex r2: the retire fact arrives on the bus with whatever `document_id` its emitter wrote.
+    // A name that is not a document name never becomes a path — nothing outside the root is touched.
+    writeFileSync(join(dir, 'sentinel.txt'), 'keep me');
+    for (const evil of ['../../', '..', '.', '', 'a/b', '_reviews']) {
+      removeDocReviews(join(dir, '_reviews'), evil, undefined);
+      expect(() => reviewRootOf(join(dir, '_reviews'), undefined, evil)).toThrow(/not a document name/u);
+    }
+    expect(existsSync(join(dir, 'sentinel.txt'))).toBe(true);
+    expect(existsSync(other)).toBe(true);
     removeScratch(dir);
   });
 });

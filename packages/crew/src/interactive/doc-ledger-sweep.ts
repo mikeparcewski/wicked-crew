@@ -48,15 +48,16 @@ export interface DocLedgerSweep {
 
 /**
  * Sweep one document's rows out of every given ledger. Never throws; see the module doc for the
- * per-ledger isolation and live-instance-first rules.
+ * per-ledger isolation and live-instance-first rules. `keep` spares rows of the name that belong
+ * to another project's document (EP-C2: review rows carry their project).
  */
-export function sweepDocLedgers(documentId: string, sources: DocLedgerSource[]): DocLedgerSweep {
+export function sweepDocLedgers(documentId: string, sources: DocLedgerSource[], keep?: (key: string) => boolean): DocLedgerSweep {
   const removed: string[] = [];
   const errors: { ledger: string; error: string }[] = [];
   for (const source of sources) {
     try {
       const ledger = source.ledger ?? new InteractiveHandoffLedger(source.path);
-      removed.push(...ledger.removeDoc(documentId));
+      removed.push(...ledger.removeDoc(documentId, keep));
     } catch (err) {
       errors.push({
         ledger: source.name,

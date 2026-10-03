@@ -68,8 +68,16 @@ export function reviewPartitionOf(projectId: string | undefined): string {
   return /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u.test(projectId) ? `p-${projectId}` : `x-${Buffer.from(projectId, 'utf8').toString('hex')}`;
 }
 
-/** A document's review root: `<reviewsDir>/<project partition>/<doc>` (its ledger is `<root>/.wicked-qe/`). */
+/** interactive's document-name grammar (`draft-events.ts` `DOC_NAME`): the only thing that may become a path segment here. */
+const DOCUMENT_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/u;
+
+/**
+ * A document's review root: `<reviewsDir>/<project partition>/<doc>` (its ledger is
+ * `<root>/.wicked-qe/`). Throws for anything that is not a document name: the id reaches here from
+ * bus payloads too (`doc.retired`), and `../..` must never become a path (codex r2).
+ */
 export function reviewRootOf(reviewsDir: string, projectId: string | undefined, documentId: string): string {
+  if (!DOCUMENT_NAME.test(documentId)) throw new Error(`"${documentId.slice(0, 80)}" is not a document name`);
   return join(reviewsDir, reviewPartitionOf(projectId), documentId);
 }
 
@@ -146,8 +154,10 @@ export function writeReviewVerdicts(reviewRoot: string, rows: ReviewVerdictWrite
 /**
  * Drop a deleted document's recorded reviews, so a later document of the same name does not inherit
  * them — in ITS project's partition only (`projectId` absent = Unfiled): the same name in another
- * project is another document. Idempotent.
+ * project is another document. Idempotent; a name that is not a document name removes nothing.
  */
 export function removeDocReviews(reviewsDir: string, documentId: string, projectId: string | undefined): void {
+  // Not a document name = no document of that name was ever reviewed: nothing to remove, and no path is built.
+  if (!DOCUMENT_NAME.test(documentId)) return;
   rmSync(reviewRootOf(reviewsDir, projectId, documentId), { recursive: true, force: true });
 }

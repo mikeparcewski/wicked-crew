@@ -45,7 +45,7 @@ import { TerminalHub, registerTerminalWs } from '../events/terminals.js';
 import { INTERACTIVE_DRAFT_WORKFLOW_DEF, startInteractiveDraftSubscriber } from '../interactive/draft-events.js';
 import { INTERACTIVE_EDIT_WORKFLOW_DEF, startInteractiveEditSubscriber } from '../interactive/edit-events.js';
 import { putLearnedThemeViaBridge, startInteractiveThemeSubscriber } from '../interactive/theme-events.js';
-import { authoringRunsFromLedgers, readDocVersionViaBridge, startInteractiveReviewSubscriber } from '../interactive/review-events.js';
+import { authoringRunsFromLedgers, isAnotherProjectsReviewKey, readDocVersionViaBridge, startInteractiveReviewSubscriber } from '../interactive/review-events.js';
 import { REVIEWS_DIRNAME, removeDocReviews } from '../interactive/review-ledger.js';
 import { InteractiveBridgePool, boundOrigin } from '../interactive/bridge-pool.js';
 import { INTERACTIVE_CHAT_WORKFLOW_DEF, startInteractiveChatSubscriber } from '../interactive/chat-events.js';
@@ -840,7 +840,8 @@ export async function createServer(
   const docReviewsDir = (): string =>
     reviewSub?.reviewsDir ?? join(options?.interactiveEditEvents?.editDir ?? join(crewStateDir, 'interactive-edits'), REVIEWS_DIRNAME);
   const dropDocLedgerRows = (documentId: string, projectId?: string): DocLedgerSweep => {
-    const sweep = sweepDocLedgers(documentId, docLedgerSources());
+    // EP-C2: a review row names its project, so the same-named document of ANOTHER project keeps its rows.
+    const sweep = sweepDocLedgers(documentId, docLedgerSources(), (key) => isAnotherProjectsReviewKey(key, documentId, projectId));
     // EP-C2: the document's recorded reviews go with it — a later document of the same name must
     // not inherit them (the same ghost the ledger rows would be). Its own project's only: the
     // review store is partitioned per project, like the docs roots.
