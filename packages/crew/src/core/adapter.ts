@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module';
 import type { BusUnavailable } from './engine-bus.js';
 import { attachEngineBus, detachEngineBus, type EngineBus } from './bus.js';
-import { mkdir, access, readFile, writeFile, chmod, rm, link, rename } from 'node:fs/promises';
+import { mkdir, access, readFile, writeFile, chmod, rm, link, rename, realpath, stat } from 'node:fs/promises';
 import { existsSync, readdirSync, readFileSync, renameSync } from 'node:fs';
 import { join, dirname, resolve, isAbsolute, relative, sep } from 'node:path';
 import { isPlainRunId, WALKTHROUGH_AUTHOR_SUBDIR, walkthroughRootDir } from './walkthrough-root.js';
@@ -165,11 +165,25 @@ async function seedStateHomeSettings(path: string): Promise<void> {
  * name keeps the target's name as its prefix, so inside a state home it stays a registered
  * `daemon-*` entry while it exists.
  */
-async function publishSettingsFile(path: string, body: string, replace: boolean): Promise<void> {
+async function publishSettingsFile(linkPath: string, body: string, replace: boolean): Promise<void> {
+  // A replacing write goes THROUGH a settings-file link to its target and keeps the file's mode, as
+  // the in-place `writeFile` it replaces did (Copilot r2 on #760): `rename` would swap the link for a
+  // plain file and publish the temp file's default (umask) mode over a 0600 file.
+  let path = linkPath;
+  let mode: number | undefined;
+  if (replace) {
+    try {
+      path = await realpath(linkPath);
+      mode = (await stat(path)).mode & 0o777;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+  }
   await mkdir(dirname(path), { recursive: true });
   const tmp = `${path}.tmp.${process.pid}.${randomUUID()}`;
   await writeFile(tmp, body, 'utf8');
   try {
+    if (mode !== undefined) await chmod(tmp, mode);
     if (replace) {
       await rename(tmp, path);
     } else {

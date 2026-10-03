@@ -6,7 +6,7 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter, settingsFilePath } from '../src/core/adapter.js';
@@ -129,6 +129,30 @@ describe('system settings follow the state home (crew#756)', () => {
       await Promise.all(Array.from({ length: 8 }, (_, i) => a.updateSettings({ graphNodeLimit: 10 + i })));
       expect(() => JSON.parse(readFileSync(join(dir, 'w', 'daemon-settings.json'), 'utf8'))).not.toThrow();
       expect(readdirSync(join(dir, 'w')).filter((n) => n.includes('.tmp'))).toEqual([]);
+    } finally {
+      a.close();
+    }
+  });
+
+  it('a settings write keeps the file\'s mode, and writes THROUGH a settings-file link (Copilot r2 on #760)', async () => {
+    const a = new CoreAdapter({ dbPath: join(dir, 'm', 'core.db'), stub: true });
+    try {
+      setCrewStateHome(join(dir, 'm'));
+      const path = join(dir, 'm', 'daemon-settings.json');
+      mkdirSync(join(dir, 'm'), { recursive: true });
+      writeFileSync(path, '{}');
+      chmodSync(path, 0o600);
+      await a.updateSettings({ graphNodeLimit: 11 });
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+      // A settings file that is a link (a dotfiles checkout, say) stays a link; its target is updated.
+      const target = join(dir, 'dotfiles-settings.json');
+      writeFileSync(target, '{}');
+      rmSync(path);
+      symlinkSync(target, path);
+      await a.updateSettings({ graphNodeLimit: 12 });
+      expect(lstatSync(path).isSymbolicLink()).toBe(true);
+      expect((JSON.parse(readFileSync(target, 'utf8')) as { graphNodeLimit: number }).graphNodeLimit).toBe(12);
+      expect(readdirSync(dir).filter((n) => n.includes('.tmp'))).toEqual([]);
     } finally {
       a.close();
     }
