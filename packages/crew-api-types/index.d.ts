@@ -2579,7 +2579,13 @@ export interface ConformanceRule {
   statement: string;
   severity: 'info' | 'warn' | 'error' | 'critical';
   confidence: number;
-  targets: { language?: string; layer?: string; framework?: string };
+  /**
+   * Facets. `language` / `layer` / `framework` are wildcards (absent = every value). `project`
+   * (api-types 0.77.0, DC-S3; engine >= wicked-core-ts 0.7.35) is ASYMMETRIC: a rule with no project
+   * applies everywhere; a rule with one is recalled only for that project. A landed policy proposal
+   * keeps its `project` facet here.
+   */
+  targets: { language?: string; layer?: string; framework?: string; project?: string };
   symbol_ref?: string;
   compliance?: { framework: string; control_id: string };
   /** Where the rule came from. Doc-ingested rules keep `path@sha#id` in `ref`; UI/chat-authored
@@ -2623,6 +2629,8 @@ export interface ConformanceRule {
    * pre-bump binding), so a `since`/`until` filter cannot assert an undated rule in range.
    */
   created_at?: number;
+  /** (api-types 0.77.0, DC-S1/DC-S3) The rule ids this rule replaces. Absent when it replaces none. */
+  supersedes?: string[];
 }
 
 /** Facet query for `GET /governance/rules/preview`. All fields are optional. */
@@ -6335,6 +6343,12 @@ export interface PolicyLandingResult {
   ruleId?: string;
   /** The steering type derived from the proposal's `kind_type` (`policy:<type>`). Present on `landed`. */
   steering_type?: SteeringType;
+  /**
+   * (api-types 0.77.0, DC-S3) The project the landed rule is scoped to — the proposal's `project`
+   * facet, kept as `targets.project` and confirmed by reading the rule back. Absent on a landing
+   * with no project (the rule applies everywhere).
+   */
+  project?: string;
   /** Present iff `outcome:"failed"` — the loud reason the rule did not land. */
   error?: string;
 }

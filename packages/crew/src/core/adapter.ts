@@ -434,6 +434,11 @@ type GovernanceMethods = {
   // `deny_unknown_fields` — an old engine ACCEPTS a steering-field write and persists a rule
   // that enforces differently than the caller wrote).
   steeringImport?(batchJson: string): Promise<string>;
+  // DC-S1 (wicked-core-ts >= 0.7.35): the project-aware rule query. Optional, and THE presence
+  // sentinel for project rules (`projectRulesSupported()`): the same addon added `Targets.project`
+  // and `supersedes`, so an engine without this binding would accept a rule carrying them and drop
+  // them (`Targets` has no `deny_unknown_fields`), landing a project rule as a global one.
+  considerRules?(queryJson: string): Promise<string>;
   // TESTING surface (crew-testing): governance EVALS over the steering-rule store. Takes a JSON
   // `{ type?, corpus?, knowledgeDb?, dbPath }` args object and resolves to the serde
   // `GovernanceEvalReport` JSON (snake_case — passed through to the wire verbatim).
@@ -3221,6 +3226,20 @@ export class CoreAdapter {
    */
   steeringSupported(): boolean {
     return typeof this.core.steeringImport === 'function';
+  }
+
+  /**
+   * DC-S3 (DES-decision-capture §5.3): does the engine keep a rule's `targets.project`? The same
+   * presence pattern as {@link steeringSupported}: `considerRules` shipped with the field. Without
+   * it a project-scoped landing fails loud instead of landing everywhere.
+   */
+  projectRulesSupported(): boolean {
+    return typeof this.core.considerRules === 'function';
+  }
+
+  /** One conformance rule as the store holds it now (retired rows included); `null` when absent. */
+  async readConformanceRule(id: string): Promise<ConformanceRule | null> {
+    return (await this.listConformanceRules()).find((r) => r.id === id) ?? null;
   }
 
   /**
