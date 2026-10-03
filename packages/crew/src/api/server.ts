@@ -5,6 +5,7 @@ import { existsSync } from 'node:fs';
 import { join, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { WebSocket } from 'ws';
+import { DecisionLedger } from '../decisions/ledger.js';
 import { registerRoutes } from './routes.js';
 import { ErrorRing, teeStreamWithErrorRing } from './diagnostics.js';
 import { GateCache } from './gate-cache.js';
@@ -1689,8 +1690,18 @@ export async function createServer(
       linkChatRun,
       // TR-W5a: the `watch.*` settings guard validates against the registry's entries.
       watchRegistry: () => watchRegistry,
+      // DC-S4a: the decision ledger under the state home (registered `decisions`, fenced from
+      // workers by core); facts ride the project bus (ids only). WICKED_DECISIONS picks the mode.
+      decisionLedger: new DecisionLedger(),
+      decisionsEmit: projectBus !== null ? (type, payload, key) => projectBus.emit(type, payload, key) : null,
     },
   );
+  // DC-S4a §6: records whose landing a restart interrupted are re-driven, idempotently (the review
+  // proposal is keyed by the decision id). Off the boot path; a failure is a logged outcome.
+  if (registered.decisions !== null) {
+    const decisionsService = registered.decisions;
+    decisionsService.track(decisionsService.redrive());
+  }
 
   // Standing orders (Studio OS behaviour 10): the store, the evaluator over THE gate decision path
   // (`registered.decideGate`), and the routes. See src/standing-orders/.

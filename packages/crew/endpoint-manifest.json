@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.79.0",
+  "apiTypesVersion": "0.80.0",
   "endpoints": [
     {
       "method": "GET",
@@ -148,6 +148,85 @@
       "requestType": null,
       "responseType": null,
       "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/decisions",
+      "requestType": null,
+      "responseType": "ListDecisionsResponse",
+      "statusCodes": [
+        200,
+        400,
+        403
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/decisions/:id/dismiss",
+      "requestType": "DismissDecisionBody",
+      "responseType": "{ ok: true }",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        409,
+        502
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/decisions/:id/remember",
+      "requestType": "RememberDecisionBody",
+      "responseType": "RememberDecisionResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        409,
+        502
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/decisions/:id/same",
+      "requestType": "SameDecisionBody",
+      "responseType": "{ rule_id?: string }",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        409,
+        502
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/decisions/:id/undo",
+      "requestType": null,
+      "responseType": "{ ok: true }",
+      "statusCodes": [
+        200,
+        403,
+        404,
+        409,
+        502
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/decisions/:id/widen",
+      "requestType": null,
+      "responseType": "{ rule_id: string }",
+      "statusCodes": [
+        200,
+        403,
+        404,
+        409,
+        502
+      ]
     },
     {
       "method": "GET",

@@ -8541,3 +8541,132 @@ export interface McpUsageResponse {
   /** Lines of `calls.ndjson` that did not parse as a call record. */
   skipped: number;
 }
+
+// ── Decision capture (DES-decision-capture §4.2.1 / §4.6; DC-S4a, api-types 0.80.0) ──────────────
+
+/** The laya codebook's decision types. `none` is crew's label for "no decision". */
+export type DecisionType = 'rule' | 'correction' | 'scope' | 'exception' | 'choice' | 'confirmation' | 'none';
+
+/** Where the operator's words entered crew. S4a records the three structured hosts. */
+export type DecisionHost = 'studio-chat' | 'gate' | 'elicitation' | 'inject' | 'capture' | 'claude-code';
+
+/** The deterministic templates (`derive.ts`). Only `T1-always` and `T2-never` can auto-remember. */
+export type DecisionTemplateId =
+  | 'T1-always'
+  | 'T2-never'
+  | 'T3-before'
+  | 'T4-prefer'
+  | 'T5-must'
+  | 'T6-only'
+  | 'in-your-words';
+
+/** How the derivation routed a decision (§4.4): the first that applies wins. */
+export type DecisionRoute = 'ledger' | 'offer' | 'auto' | 'restated' | 'maybe-restated' | 'conflict';
+
+/** The latest outcome of a decision. `recorded` = no outcome yet (ledger-only, or still landing). */
+export type DecisionState =
+  | 'recorded'
+  | 'offered'
+  | 'remembered'
+  | 'undone'
+  | 'dismissed'
+  | 'restated'
+  | 'widened'
+  | 'landing_failed';
+
+/** Why an offered decision was dismissed (a label for the laya v3 flywheel). */
+export type DecisionDismissReason = 'not-a-rule' | 'one-off' | 'wrong-type' | 'wrong-scope' | 'not-the-same' | 'undone';
+
+/**
+ * One decision as studio renders it (`GET /decisions`, operator+). ORIGIN (`origin.words`) comes
+ * ONLY from crew's ledger: a proposal payload carries just the decision id, so a forged payload
+ * has no ORIGIN. Words are never on the bus.
+ */
+export interface DecisionView {
+  id: string;
+  /** Epoch ms the words were recorded. */
+  at: number;
+  project_id: string | null;
+  host: DecisionHost;
+  origin: {
+    actor: { id: string; kind: 'human'; trust: TrustLevel };
+    auth_mode: 'off' | 'required';
+    run_id?: string;
+    ord?: number;
+    gate_id?: string;
+    elicitation_id?: string;
+    chat_id?: string;
+    turn_id?: string;
+    /** The verbatim words (masked where a secret was found; then `redacted: true`). */
+    words: string;
+    /** A bare gate approve/reject or a picked elicitation option, when there were no words. */
+    choice?: string;
+    words_source: 'typed' | 'operator-files' | 'cli-transcript';
+    redacted: boolean;
+  };
+  /** The derived rule: the statement crew would remember, never the model's paraphrase. */
+  derived: {
+    statement: string | null;
+    polarity: 'do' | 'dont' | null;
+    key: string | null;
+    scope: 'project' | 'everywhere';
+    steering_type: SteeringType;
+    template: DecisionTemplateId | null;
+    exclusions: string[];
+  };
+  route: DecisionRoute;
+  state: DecisionState;
+  /** How it was remembered (present once `remembered`). */
+  how?: 'auto' | 'chip' | 'needs-you';
+  proposal_id?: string;
+  rule_id?: string;
+  /** The in-force rule this restates (`restated`) or contradicts (`conflict`). */
+  restates_rule_id?: string;
+  conflicts_rule_id?: string;
+  /** Edits the operator made at Remember; ORIGIN keeps the original words. */
+  edits?: { statement?: string; scope?: 'project' | 'everywhere'; steering_type?: SteeringType };
+  /** The loud reason a landing failed (`landing_failed`). */
+  error?: string;
+  /** B8: the same rule decided in ≥ 2 projects — "Make it apply everywhere". */
+  widen?: { projects: string[] };
+}
+
+/** `GET /decisions?project=&chat=&run=&state=&since=` (operator+). Newest first. */
+export interface ListDecisionsResponse {
+  decisions: DecisionView[];
+  /** `off` | `ledger` | `on` — the `WICKED_DECISIONS` switch this daemon runs under. */
+  mode: 'off' | 'ledger' | 'on';
+}
+
+/** `POST /decisions/:id/remember` body. An edited `statement` is recorded in `edits`. */
+export interface RememberDecisionBody {
+  scope?: 'project' | 'everywhere';
+  steering_type?: SteeringType;
+  statement?: string;
+}
+
+/** `POST /decisions/:id/remember` → the landed rule. */
+export interface RememberDecisionResponse {
+  rule_id: string;
+  proposal_id: string;
+  project?: string;
+}
+
+/** `POST /decisions/:id/dismiss` body. */
+export interface DismissDecisionBody {
+  reason: DecisionDismissReason;
+}
+
+/** `POST /decisions/:id/same` body — resolves a `maybe-restated` decision. */
+export interface SameDecisionBody {
+  same: boolean;
+}
+
+/** `/ws` frame: a decision's state changed (no words). */
+export interface DecisionChangedFrame {
+  type: 'decisionChanged';
+  id: string;
+  state: DecisionState;
+  rule_id?: string;
+  project_id: string | null;
+}

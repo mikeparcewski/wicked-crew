@@ -3237,6 +3237,22 @@ export class CoreAdapter {
     return typeof this.core.considerRules === 'function';
   }
 
+  /**
+   * DC-S1 "considered · set aside" (DES-decision-capture §4.2.2): the in-force rules for a query
+   * carrying `projects`, and the ones set aside with the reason. Throws on an engine without the
+   * binding — callers probe {@link projectRulesSupported} first (an old `RuleQuery` rejects `projects`).
+   */
+  async considerRules(query: { projects?: string[]; steering_type?: string }): Promise<{
+    in_force: ConformanceRule[];
+    set_aside: Array<{ id: string; statement: string; reason: 'out_of_scope' | 'replaced' | 'retired' }>;
+  }> {
+    const consider = this.core.considerRules;
+    if (typeof consider !== 'function') {
+      throw new Error('considerRules is not supported by this wicked-core build (needs wicked-core-ts >= 0.7.35)');
+    }
+    return parseEngineJson(await consider.call(this.core, JSON.stringify(query)), 'considerRules');
+  }
+
   /** One conformance rule as the store holds it now (retired rows included); `null` when absent. */
   async readConformanceRule(id: string): Promise<ConformanceRule | null> {
     return (await this.listConformanceRules()).find((r) => r.id === id) ?? null;
