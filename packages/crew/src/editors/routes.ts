@@ -28,7 +28,7 @@ import { LOCAL_ACTOR, trustAtLeast } from '../api/auth.js';
 import type { Actor, EditorGrantsResponse, ListEditorsResponse } from '../core/types.js';
 import { bundleHeaders } from './csp.js';
 import { PackInstallError, previewPackInstall, type PackCheckRunner } from './pack-install.js';
-import { EDITOR_ID, EDITOR_VERSION, EditorRegistry, type EditorRecord } from './registry.js';
+import { EDITOR_ID, EDITOR_VERSION, EditorRegistry, notRealEntry, type EditorRecord } from './registry.js';
 
 const V = '/api/v1';
 
@@ -179,6 +179,13 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
 
 /** Re-hash on every serve: a bundle that changed on disk is refused, never served. */
 export function serveBundle(record: EditorRecord, reply: FastifyReply, log?: (msg: string) => void): FastifyReply {
+  // The same fence as discovery, re-applied per serve (codex r1): an entry swapped for a link after
+  // boot is refused before a byte is read.
+  const problem = notRealEntry(record.entryPath, 'file');
+  if (problem !== null) {
+    log?.(`[editors] ${record.manifest.id}: entry is ${problem} at serve time; refused`);
+    return reply.code(404).send({ error: 'no such editor bundle' });
+  }
   let buf: Buffer;
   try {
     buf = readFileSync(record.entryPath);

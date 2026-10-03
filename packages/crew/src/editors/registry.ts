@@ -21,7 +21,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 
@@ -86,6 +86,24 @@ export function sha256Of(buf: Buffer): string {
   return createHash('sha256').update(buf).digest('hex');
 }
 
+/**
+ * A path is served from the bundle only if it IS what it looks like: a real directory or a real
+ * file, never a link (codex r1 — a link under `editors/` could point outside the bundle and be
+ * served as first-party). `null` = fine; else the reason.
+ */
+export function notRealEntry(path: string, want: 'dir' | 'file'): string | null {
+  let meta;
+  try {
+    meta = lstatSync(path);
+  } catch {
+    return 'missing';
+  }
+  if (meta.isSymbolicLink()) return 'a symlink (not followed)';
+  if (want === 'dir' && !meta.isDirectory()) return 'not a directory';
+  if (want === 'file' && !meta.isFile()) return 'not a file';
+  return null;
+}
+
 /** The entry must be ONE self-contained file: nothing loaded from outside it (§5.2; the CSP would block it anyway). */
 export function externalReferences(html: string): string[] {
   const out: string[] = [];
@@ -113,8 +131,18 @@ export function discoverStudioEditors(
   if (!existsSync(dir)) return [];
   const out: Array<Omit<EditorRecord, 'enabled'>> = [];
   for (const name of readdirSync(dir).sort()) {
+    const dirProblem = notRealEntry(join(dir, name), 'dir');
+    if (dirProblem !== null) {
+      if (dirProblem !== 'not a directory') log?.(`[editors] ${name}: editor directory is ${dirProblem}; skipped`);
+      continue;
+    }
     const manifestPath = join(dir, name, 'editor.json');
     if (!existsSync(manifestPath)) continue;
+    const manifestProblem = notRealEntry(manifestPath, 'file');
+    if (manifestProblem !== null) {
+      log?.(`[editors] ${name}: editor.json is ${manifestProblem}; skipped`);
+      continue;
+    }
     let manifest: EditorManifest;
     try {
       const parsed = EditorManifestSchema.safeParse(JSON.parse(readFileSync(manifestPath, 'utf8')));
@@ -136,9 +164,13 @@ export function discoverStudioEditors(
       continue;
     }
     const entryPath = join(dir, name, manifest.entry);
+    const entryProblem = notRealEntry(entryPath, 'file');
+    if (entryProblem !== null) {
+      log?.(`[editors] ${manifest.id}: entry ${manifest.entry} is ${entryProblem}; skipped`);
+      continue;
+    }
     let buf: Buffer;
     try {
-      if (!statSync(entryPath).isFile()) throw new Error('not a file');
       buf = readFileSync(entryPath);
     } catch (err) {
       log?.(`[editors] ${manifest.id}: entry unreadable (${err instanceof Error ? err.message : String(err)})`);

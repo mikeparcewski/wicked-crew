@@ -4,7 +4,7 @@
 // set), human-only install/remove/enable under auth=required, and third-party installs refused after
 // garden's fail-closed gate has run and the approval list has been read (EP-C8 is later).
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -15,7 +15,7 @@ import type { EditorGrantsResponse, EditorView, InstallEditorRefusal, ListEditor
 import { BUNDLE_CSP_BASE, bundleHeaders, requestOrigin, shellCsp } from '../src/editors/csp.js';
 import { gardenPackCheck, previewPackInstall, PackInstallError, type PackCheckRunner } from '../src/editors/pack-install.js';
 import { EditorRegistry, EDITORS_STATE_FILENAME, discoverStudioEditors, externalReferences, sha256Of } from '../src/editors/registry.js';
-import { registerEditorRoutes } from '../src/editors/routes.js';
+import { registerEditorRoutes, serveBundle } from '../src/editors/routes.js';
 
 const scratches: string[] = [];
 afterEach(() => {
@@ -78,6 +78,50 @@ describe('the registry', () => {
     }
     expect(logs.find((l) => l.includes('wicked-external'))).toMatch(/outside itself/);
     expect(logs.find((l) => l.includes('wicked-fat'))).toMatch(/over its 10-byte cap/);
+  });
+
+  it('codex r1: a symlinked editor directory, manifest or entry is never followed — skipped with the reason, and never served', () => {
+    const root = studioRoot();
+    const outside = mkdtempSync(join(tmpdir(), 'editors-outside-'));
+    scratches.push(outside);
+    mkdirSync(join(outside, 'wicked-linked'), { recursive: true });
+    writeFileSync(join(outside, 'wicked-linked', 'editor.json'), JSON.stringify(manifest('wicked-linked')));
+    writeFileSync(join(outside, 'wicked-linked', 'index.html'), PAGE_HTML);
+    symlinkSync(join(outside, 'wicked-linked'), join(root, 'editors', 'wicked-linked'));
+    mkdirSync(join(root, 'editors', 'wicked-linkedentry'));
+    writeFileSync(join(root, 'editors', 'wicked-linkedentry', 'editor.json'), JSON.stringify(manifest('wicked-linkedentry')));
+    writeFileSync(join(outside, 'entry.html'), PAGE_HTML);
+    symlinkSync(join(outside, 'entry.html'), join(root, 'editors', 'wicked-linkedentry', 'index.html'));
+    mkdirSync(join(root, 'editors', 'wicked-linkedmanifest'));
+    writeFileSync(join(outside, 'editor.json'), JSON.stringify(manifest('wicked-linkedmanifest')));
+    symlinkSync(join(outside, 'editor.json'), join(root, 'editors', 'wicked-linkedmanifest', 'editor.json'));
+    writeFileSync(join(root, 'editors', 'wicked-linkedmanifest', 'index.html'), PAGE_HTML);
+    const logs: string[] = [];
+    const found = discoverStudioEditors(root, (m) => logs.push(m));
+    expect(found.map((r) => r.manifest.id)).toEqual(['wicked-doc', 'wicked-page']);
+    for (const id of ['wicked-linked', 'wicked-linkedentry', 'wicked-linkedmanifest']) {
+      expect(logs.find((l) => l.includes(id)), id).toMatch(/symlink/);
+    }
+    // And at serve time: an entry replaced by a link after discovery is refused, not read through.
+    const reg = new EditorRegistry({ stateHome: mkdtempSync(join(tmpdir(), 'editors-home-')), studioRoot: root });
+    const page = reg.get('wicked-page')!;
+    rmSync(page.entryPath);
+    symlinkSync(join(outside, 'entry.html'), page.entryPath);
+    const sent: Array<{ code: number; body: unknown }> = [];
+    const reply = {
+      code(c: number) {
+        return { send: (b: unknown) => sent.push({ code: c, body: b }) };
+      },
+      header() {
+        return this;
+      },
+      type() {
+        return { send: (b: unknown) => sent.push({ code: 200, body: b }) };
+      },
+    } as unknown as Parameters<typeof serveBundle>[1];
+    serveBundle(page, reply, (m) => logs.push(m));
+    expect(sent[0]!.code).toBe(404);
+    expect(logs.at(-1)).toMatch(/symlink/);
   });
 
   it('externalReferences: scripts, stylesheets and frames loaded from outside the file are named; inline, data:, blob: are fine', () => {
