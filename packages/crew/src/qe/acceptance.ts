@@ -65,7 +65,7 @@ import type {
 import { describeAttribution, readAcceptanceState, summarizeManifest } from './ledger.js';
 import type { RunConformance } from './conformance.js';
 import { resolveConformance } from './conformance.js';
-import type { RunAcceptanceWalkthrough, WalkthroughStepState } from 'wicked-crew-api-types';
+import type { RunAcceptanceSummary, RunAcceptanceWalkthrough, WalkthroughStepState } from 'wicked-crew-api-types';
 import type { WalkthroughGate } from './walkthrough-acceptance.js';
 
 /**
@@ -388,6 +388,8 @@ export interface AcceptanceView {
    * run's requirement names no walkthrough step.
    */
   walkthrough?: RunAcceptanceWalkthrough;
+  /** (WT-W3, api-types 0.82.0) The deliver card's acceptance line. Always present. */
+  summary: RunAcceptanceSummary;
   /**
    * The governance half, BESIDE the QE gate (AW-14 / arch-R13a + R16): this run's conformance
    * claims (wiki rule ids cited), its enforcement status, and the deny-dominates `guardrailed`
@@ -520,7 +522,7 @@ export async function buildAcceptanceView(opts: {
    * seal ({@link WalkthroughGate}), and the per-step check states. Their step ids are taken OUT of the
    * repo ledger's share of the requirement: a walkthrough's verdicts live in its proof root.
    */
-  walkthroughs?: { gates: WalkthroughGate[]; steps: WalkthroughStepState[] };
+  walkthroughs?: { gates: WalkthroughGate[]; steps: WalkthroughStepState[]; newest?: WalkthroughGate | null };
 }): Promise<AcceptanceView> {
   const { phases, failClosed } = opts.requirement;
   const walkGates = opts.walkthroughs?.gates ?? [];
@@ -629,8 +631,54 @@ export async function buildAcceptanceView(opts: {
           },
         }
       : {}),
+    summary: acceptanceSummary(gate, walkGates, opts.walkthroughs?.steps ?? [], opts.walkthroughs?.newest),
     conformance,
   };
+}
+
+const SUMMARY_REASON_MAX = 200;
+
+/**
+ * WT-W3: the deliver card's one acceptance line (`RunAcceptanceSummary`), from the resolved gate and
+ * the newest walkthrough — "Checked by a walkthrough: 3 of 3 steps at a1b2c3d." The deliver text cites
+ * the counts and the tree, never a root path (DES-walkthrough-proof §7, N6).
+ */
+export function acceptanceSummary(
+  gate: AcceptanceGateResolution,
+  walkGates: readonly WalkthroughGate[],
+  steps: readonly WalkthroughStepState[],
+  /** The walkthrough `steps` were computed from (the newest AUTHOR's pair); defaults to the last gate. */
+  newestGate?: WalkthroughGate | null,
+): RunAcceptanceSummary {
+  const newest = newestGate ?? walkGates.at(-1);
+  const count = (s: WalkthroughStepState['checkState']): number => steps.filter((x) => x.checkState === s).length;
+  const walkthrough =
+    newest !== undefined
+      ? {
+          checked: count('checked'),
+          failed: count('failed'),
+          ownedByYou: count('owned_by_you'),
+          steps: steps.length,
+          sealed: walkGates.every((g) => g.sealed),
+          tree: newest.tree,
+        }
+      : null;
+  let line: string;
+  if (!gate.required) {
+    line = 'Nothing had to be proved before delivery.';
+  } else if (gate.satisfied && walkthrough !== null) {
+    const at = walkthrough.tree !== null ? ` at ${walkthrough.tree.slice(0, 7)}` : '';
+    const yours = walkthrough.ownedByYou > 0 ? `; ${walkthrough.ownedByYou} left to your own testing` : '';
+    line = `Checked by a walkthrough: ${walkthrough.checked} of ${walkthrough.steps} step${walkthrough.steps === 1 ? '' : 's'}${at}${yours}.`;
+  } else if (gate.satisfied) {
+    line = 'Accepted: the checks this run had to pass have passed.';
+  } else {
+    // The deliver text never names a path (§7 N6): ledger reasons carry the ledger root; drop them.
+    const pathless = gate.reason.replace(/(?:[A-Za-z]:)?[\\/](?:[^\s`'"(),;]+[\\/])+[^\s`'"(),;]*/g, '…');
+    const reason = pathless.length > SUMMARY_REASON_MAX ? `${pathless.slice(0, SUMMARY_REASON_MAX - 1)}…` : pathless;
+    line = `Not accepted yet: ${reason}`;
+  }
+  return { required: gate.required, satisfied: gate.satisfied, line, walkthrough };
 }
 
 /**
