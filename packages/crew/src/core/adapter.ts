@@ -11,6 +11,7 @@ import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import type { Core as CoreHandle, LaunchOptions, Subscription } from 'wicked-core-ts';
 import type {
+  EditorGrantsResponse,
   CoreEvent,
   LaunchRunInput,
   LaunchPlan,
@@ -3269,6 +3270,31 @@ export class CoreAdapter {
       throw new Error('mcp_preview_unsupported: the installed wicked-core-ts predates the MCP policy preview; upgrade the engine');
     }
     return preview.call(this.core, requestJson);
+  }
+
+  /** EP-C1: does the engine carry `evaluate_editor_grants` (EP-K1; wicked-core-ts >= 0.7.35)? */
+  editorGrantsSupported(): boolean {
+    return typeof this.core.evaluateEditorGrants === 'function';
+  }
+
+  /**
+   * EP-C1 (DES-artifact-editor-plugins §6.2): the engine's decided permission set for one editor —
+   * the EDITOR-GRANTS ledger + the EDITOR-BUILTIN posture over the subject tokens, deny dominates,
+   * recording nothing. Throws on an engine without the binding (the route answers 501).
+   */
+  async evaluateEditorGrants(request: {
+    editorId: string;
+    version: string;
+    sha256: string;
+    permissions: string[];
+    project?: string;
+    firstParty: boolean;
+  }): Promise<EditorGrantsResponse> {
+    const evaluate = this.core.evaluateEditorGrants;
+    if (typeof evaluate !== 'function') {
+      throw new Error('editor_grants_unsupported: the installed wicked-core-ts predates editor grants (EP-K1); upgrade the engine');
+    }
+    return parseEngineJson(await evaluate.call(this.core, JSON.stringify(request)), 'evaluateEditorGrants');
   }
 
   /**
