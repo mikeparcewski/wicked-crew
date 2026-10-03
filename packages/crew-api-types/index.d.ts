@@ -5233,7 +5233,8 @@ export type ChatSeatRefusedFrame = {
 // verdicts; the seat's TEXT is never edited — a skin MARKS it from these items.
 
 /** What class of thing a citation is. */
-export type ChatCitationKind = 'path' | 'line' | 'symbol' | 'sha';
+/** `rule` (api-types 0.85.0, DC-S7): a `[rule:<id>]` the reply wrote — "cited by the step — unchecked", never a followed count. */
+export type ChatCitationKind = 'path' | 'line' | 'symbol' | 'sha' | 'rule';
 
 /**
  * The verdict on one citation.
@@ -5347,7 +5348,13 @@ export type ChatTranscriptRecord =
    * The live frame is {@link ChatDecisionsFrame}. The seats' `wicked-decisions` blocks themselves
    * never reach the transcript (they are cut from the reply before it is persisted or broadcast).
    */
-  | { at: number; turnId: string; kind: 'decisions'; items: DecisionView[] };
+  | { at: number; turnId: string; kind: 'decisions'; items: DecisionView[] }
+  /**
+   * A crew-authored preface the seats received with the operator's message of `turnId` (api-types
+   * 0.85.0, DC-S7): the rules remembered since they last heard from crew. Disclosed here so the
+   * operator sees exactly what crew added; the `user` record keeps the operator's own words.
+   */
+  | { at: number; turnId: string; kind: 'system'; text: string };
 
 /** `GET /chats/:id` → 200. */
 export interface ChatDetailResponse {
@@ -8771,4 +8778,52 @@ export interface DiagnosticsDecisions {
   unclassified_turns: number;
   /** Turns that produced at least one decision record. */
   recorded_turns: number;
+}
+
+// ── Considered · set aside · cited (unchecked) (DES-decision-capture §4.7; DC-S7, api-types 0.85.0) ──
+
+export interface ConsiderationRule {
+  id: string;
+  statement: string;
+  severity: 'info' | 'warn' | 'error' | 'critical';
+  steering_type?: SteeringType;
+  /** Present on a project-scoped rule. */
+  project?: string;
+}
+
+export interface ConsiderationSetAside {
+  id: string;
+  statement: string;
+  /** The engine's reasons, plus crew's `not_confirmed`: a decision offered for this project, not yet remembered. */
+  reason: 'out_of_scope' | 'replaced' | 'retired' | 'not_confirmed';
+}
+
+/**
+ * A `[rule:<id>]` the reply or step wrote. `unchecked` = the id is in force and the step cited it —
+ * whether it FOLLOWED it is not checked (DES-rule-check will say); `unverified` = not an in-force
+ * rule here (invented, or another project's). Never summed into a "followed" count.
+ */
+export interface ConsiderationCitation {
+  id: string;
+  /** The seat (`cliKey`) or the unit id that wrote it. */
+  by: string;
+  status: 'unchecked' | 'unverified';
+  label: string;
+}
+
+/**
+ * `GET /chats/:id/turns/:turnId/considered` and `GET /runs/:id/units/:unitKey/considered?attempt=`
+ * (operator+): what the seats were given to consider, what was set aside, and what they cited.
+ */
+export interface Consideration {
+  subject: { kind: 'chat'; chat_id: string; turn_id: string } | { kind: 'unit'; run_id: string; ord: number; attempt: number };
+  /** `considered:<chat>:<turn>` or `considered:<run>:<ord>:<attempt>` — the bus fact's idempotency key. */
+  key: string;
+  project_id: string | null;
+  /** Severity-ordered (critical → info). */
+  considered: ConsiderationRule[];
+  set_aside: ConsiderationSetAside[];
+  cited: ConsiderationCitation[];
+  /** `considerRules` (the engine's project-aware read), `global-only` (an engine without it), or `unavailable`. */
+  source: 'considerRules' | 'global-only' | 'unavailable';
 }

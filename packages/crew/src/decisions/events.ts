@@ -12,6 +12,8 @@ export const DECISION_UNDONE = 'wicked.crew.decision.undone';
 export const DECISION_DISMISSED = 'wicked.crew.decision.dismissed';
 export const DECISION_RESTATED = 'wicked.crew.decision.restated';
 export const DECISION_WIDENED = 'wicked.crew.decision.widened';
+/** DC-S7 (§4.6): counts and ids only — `considered:<chat>:<turn>` / `considered:<run>:<ord>:<attempt>`. */
+export const RULE_CONSIDERED = 'wicked.crew.rule.considered';
 
 export interface DecisionBusEmit {
   (type: string, payload: Record<string, unknown>, idempotencyKey: string): Promise<boolean>;

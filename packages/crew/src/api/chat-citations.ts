@@ -61,7 +61,7 @@ export interface CitationRoot {
 }
 
 /** What class of thing a citation is. */
-export type ChatCitationKind = 'path' | 'line' | 'symbol' | 'sha';
+export type ChatCitationKind = 'path' | 'line' | 'symbol' | 'sha' | 'rule';
 
 /**
  * The verdict on one citation.
@@ -154,6 +154,24 @@ export interface RawCitation {
   symbol?: string;
   /** The repo a `sha` citation's sentence named, when it named one. */
   repo?: string;
+  /** The id of a `rule` citation (`[rule:<id>]`, DC-S7). */
+  ruleId?: string;
+}
+
+/** DC-S7 (§4.7): the label on a cited in-force rule. It is a citation, never a "followed" verdict. */
+export const RULE_CITED_LABEL = 'cited by the step — unchecked';
+export const RULE_UNKNOWN_LABEL = 'not an in-force rule here';
+/** `[rule:<id>]` — ids are `proposal:<uuid>`, `OPS-WATCH-001`, `path@sha#id` shapes; no spaces, no brackets. */
+const RULE_CITATION_RE = /\[rule:([A-Za-z0-9][A-Za-z0-9_.:@#/-]{0,119})\]/gu;
+
+/** Every `[rule:<id>]` in a text, once each, in order. */
+export function extractRuleCitations(text: string): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(RULE_CITATION_RE)) {
+    const id = m[1]!;
+    if (!out.includes(id)) out.push(id);
+  }
+  return out;
 }
 
 // ── Extraction ───────────────────────────────────────────────────────────────
@@ -247,6 +265,10 @@ export function extractCitations(text: string, roots: readonly CitationRoot[]): 
     push({ raw, kind: 'symbol', path, symbol: suffix });
   }
 
+  for (const m of text.matchAll(RULE_CITATION_RE)) {
+    push({ raw: m[0]!, kind: 'rule', ruleId: m[1]! });
+  }
+
   for (const m of text.matchAll(SHA_RE)) {
     const sha = m[1]!;
     // A word, a date or a number is not a SHA: a real one carries both a digit and an a-f letter.
@@ -313,6 +335,8 @@ export function chatCitationDeps(): ChatCitationDeps {
 }
 
 export interface VerifyOptions {
+  /** DC-S7: the in-force rule ids of the chat's project; `null`/absent = not readable (rule citations stay `unchecked`). */
+  ruleIds?: ReadonlySet<string> | null;
   maxItems?: number;
   budgetMs?: number;
 }
@@ -446,6 +470,18 @@ export async function verifyCitations(
   };
 
   for (const c of candidates) {
+    if (c.kind === 'rule') {
+      // DC-S7: a rule citation costs no I/O and is never a claim either way — `unchecked` with the
+      // cited label when the id is in force (or when no in-force set could be read), `unverified`
+      // when it is not an in-force rule here. It never counts as `verified`.
+      const known = opts.ruleIds;
+      items.push(
+        known === undefined || known === null || known.has(c.ruleId!)
+          ? { raw: c.raw, kind: 'rule', status: 'unchecked', note: RULE_CITED_LABEL }
+          : { raw: c.raw, kind: 'rule', status: 'unverified', note: RULE_UNKNOWN_LABEL },
+      );
+      continue;
+    }
     if (items.length >= maxItems || deps.now() - started > budgetMs) {
       items.push({
         raw: c.raw,

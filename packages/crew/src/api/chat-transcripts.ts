@@ -144,6 +144,11 @@ export class ChatTranscriptStore {
     this.append(chatId, { at: this.now(), turnId, kind: 'user', text, seats: [...seats] });
   }
 
+  /** DC-S7: a crew-authored preface the seats received with that turn's message — disclosed, verbatim. */
+  appendSystem(chatId: string, turnId: string, text: string): void {
+    this.append(chatId, { at: this.now(), turnId, kind: 'system', text });
+  }
+
   /**
    * Fold one STAMPED frame (call with `chatTurns.decorate(event)`'s result): a seat's `chatReply`
    * carrying `turn_id` becomes a `seat` record — ok or not (an eviction's `ok: false` text names the

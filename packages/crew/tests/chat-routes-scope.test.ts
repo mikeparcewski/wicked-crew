@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ChatScopeIndex } from '../src/api/chat-scope.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { GateCache } from '../src/api/gate-cache.js';
-import { registerRoutes } from '../src/api/routes.js';
+import { registerRoutes, type RegisteredRoutes } from '../src/api/routes.js';
 import { CoreAdapter } from '../src/core/adapter.js';
 
 let base: string;
@@ -28,6 +28,8 @@ let entityCount: (dbPath: string) => Promise<number> = async () => 1;
 let broadcast: unknown[];
 /** chatId → the seats that actually warmed, filled by the adapter's `chatOpen` wrapper. */
 let warmByChat: Map<string, string[]>;
+/** What `registerRoutes` handed back (DC-S7: the consideration service's per-chat state). */
+let registered: RegisteredRoutes;
 /** When set, decides what a send REACHES — used to model a turn that reaches fewer seats than are
  *  warm (a transient engine drop), which is the only broadcast that can tell "roster" from "reach". */
 let sendReaches: ((chatId: string, targets?: string[]) => string[]) | null = null;
@@ -87,7 +89,7 @@ beforeEach(async () => {
   sendReaches = null;
   chatScopes = new ChatScopeIndex(join(base, 'chats'));
   app = Fastify({ logger: false });
-  registerRoutes(app, fakeAdapter(), new GateCache(), new ElicitationCache(), undefined, undefined, {
+  registered = registerRoutes(app, fakeAdapter(), new GateCache(), new ElicitationCache(), undefined, undefined, {
     chatScopes,
     // Never the real dotfile probe: the suite must not read the developer's worker home.
     signedIn: (seatKey) => signedIn(seatKey),
@@ -789,5 +791,30 @@ describe('POST /chats — named scope kinds (studio#323 R4)', () => {
     const res = await open({ chatId: 'bad', clis: ['claude'], scopeKind: 'galaxy' });
     expect(res.statusCode).toBe(400);
     expect(chatOpen).not.toHaveBeenCalled();
+  });
+});
+
+describe('DC-S7 — the rules a chat\'s seats were told about (codex r1)', () => {
+  it('an open the engine REFUSED leaves no "told" state behind: the id is not preface-eligible (a later send only seeds)', async () => {
+    chatOpen.mockImplementationOnce(async () => {
+      throw new Error('engine refused the open');
+    });
+    const res = await open({ chatId: 'c-fail', clis: ['claude'], repoRefs: ['alpha'] });
+    expect(res.statusCode).toBe(400);
+    const rule = {
+      id: 'proposal:r1',
+      rule_type: 'policy' as const,
+      statement: 'Never force-push to main.',
+      severity: 'warn' as const,
+      confidence: 1,
+      targets: {},
+      provenance: { source: 'proposal', source_kinds: [] },
+    };
+    // Not opened here ⇒ seeded on the first send, never prefaced on it.
+    expect(await registered.considerations.prefaceForSend('c-fail', { inForce: [rule] })).toBeNull();
+    // And a chat that DID open is preface-eligible from its open onwards.
+    const ok = await open({ chatId: 'c-ok', clis: ['claude'], repoRefs: ['alpha'] });
+    expect(ok.statusCode).toBe(201);
+    expect(await registered.considerations.prefaceForSend('c-ok', { inForce: [rule] })).toContain('[rule:proposal:r1]');
   });
 });
