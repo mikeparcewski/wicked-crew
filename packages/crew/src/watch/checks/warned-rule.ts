@@ -30,6 +30,9 @@ interface Waiting {
   tool: string;
   decision: string;
   ids: string[];
+  /** The frame's own time and replay provenance — the row it yields later is anchored to THEM. */
+  at: number;
+  replay: boolean;
 }
 
 interface Bag {
@@ -84,7 +87,7 @@ export const warnedRuleCheck: WatchCheck<Record<string, never>, Record<string, n
     const frame: Waiting | null =
       ids.length === 0
         ? null
-        : { ord: num(e['ord']), attempt: num(e['attempt']), tool: typeof e['toolName'] === 'string' && e['toolName'] !== '' ? e['toolName'] : 'a tool', decision, ids };
+        : { ord: num(e['ord']), attempt: num(e['attempt']), tool: typeof e['toolName'] === 'string' && e['toolName'] !== '' ? e['toolName'] : 'a tool', decision, ids, at: input.at, replay: input.replay === true };
     if (frame === null && bag.waiting.length === 0) return [];
     if (ctx.rules === undefined) {
       if (frame !== null) bag.lost++;
@@ -121,6 +124,8 @@ export const warnedRuleCheck: WatchCheck<Record<string, never>, Record<string, n
           ord: f.ord,
           attempt: f.attempt,
           re: `governanceHookFired#${f.ord ?? '-'}:${f.attempt ?? '-'}`,
+          // A kept frame's row carries the frame's own time and provenance (codex r2).
+          ...(f !== frame ? { at: f.at, replay: f.replay } : {}),
         });
       }
     }

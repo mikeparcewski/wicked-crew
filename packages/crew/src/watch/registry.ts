@@ -449,7 +449,7 @@ export class WatchRegistry {
       state.seen.add(input.type);
       const outputs = await this.lane.run(check, entry, input, state, this.ctx());
       for (const out of outputs) {
-        if (out.op === 'raise') emitter.raise(entry, input.runId, out, input.at, input.replay === true);
+        if (out.op === 'raise') emitter.raise(entry, input.runId, out, out.at ?? input.at, out.replay ?? input.replay === true);
         else emitter.clear(entry, input.runId, out.subject, { reason: 'resolved' });
       }
     }

@@ -110,6 +110,14 @@ export type CheckOutput =
       kind?: 'finding' | 'flag';
       re: string;
       evidence?: WatchEvidenceRef[];
+      /**
+       * TR-W6: set only when the row is for an EARLIER key point than the one being evaluated (a
+       * frame a check kept and classified later): that key point's own time and replay provenance,
+       * so the anchor is the source event's and a replayed row over the rate is still dropped.
+       * Absent = the evaluated input's.
+       */
+      at?: number;
+      replay?: boolean;
     }
   | { op: 'clear'; subject: string };
 

@@ -213,17 +213,20 @@ describe('deterministic:warned_rule (risky-call) — fixture table (test 2)', ()
     const ctx: CheckCtx = { now: () => 0, stats: () => ({ queueDepth: 0, queueHwm: 0, shedTotal: 0, tailLagMs: 0 }), rules: async () => (readable ? RULES : Promise.reject(new Error('store locked'))) };
     const state: RunWatchState = { runId: 'run-1', seen: new Set(), bag: new Map() };
     const subjects = (o: CheckOutput[]) => o.flatMap((x) => (x.op === 'raise' ? [x.subject] : []));
-    expect(await warnedRuleCheck.evaluate(hook(1, 0, 'allow', ['OPS-WATCH-001']), state, {}, {}, ctx)).toEqual([]);
-    expect(await warnedRuleCheck.evaluate(hook(2, 0, 'allow', ['OPS-WATCH-003'], 'Write'), state, {}, {}, ctx)).toEqual([]);
+    expect(await warnedRuleCheck.evaluate({ ...hook(1, 0, 'allow', ['OPS-WATCH-001']), at: 100, replay: true }, state, {}, {}, ctx)).toEqual([]);
+    expect(await warnedRuleCheck.evaluate({ ...hook(2, 0, 'allow', ['OPS-WATCH-003'], 'Write'), at: 200 }, state, {}, {}, ctx)).toEqual([]);
     expect(warnedRuleCheck.coverage(state)).toMatchObject({ state: 'not_checked', reason: expect.stringMatching(/could not be read/) });
     readable = true;
     // The next frame fires nothing itself, and still drains what was waiting — in order, each with its own unit and tool.
-    const drained = await warnedRuleCheck.evaluate(hook(3, 0, 'allow', []), state, {}, {}, ctx);
+    const drained = await warnedRuleCheck.evaluate({ ...hook(3, 0, 'allow', []), at: 300 }, state, {}, {}, ctx);
     expect(subjects(drained)).toEqual(['1:0:warned:OPS-WATCH-001', '2:0:warned:OPS-WATCH-003']);
     expect(drained.map((x) => (x.op === 'raise' ? x.sentence : ''))).toEqual([
       'A rule you asked to be warned about fired on Bash: OPS-WATCH-001.',
       'A rule you asked to be warned about fired on Write: OPS-WATCH-003.',
     ]);
+    // codex r2: a kept frame keeps ITS OWN time and replay provenance — not the draining frame's
+    // (a replayed row over the rate must still be dropped, never rolled up a second time).
+    expect(drained.map((x) => (x.op === 'raise' ? [x.at, x.replay] : null))).toEqual([[100, true], [200, false]]);
     expect(warnedRuleCheck.coverage(state)).toEqual({ state: 'checked' });
     // Nothing is raised twice.
     expect(await warnedRuleCheck.evaluate(hook(1, 0, 'allow', ['OPS-WATCH-001']), state, {}, {}, ctx)).toEqual([]);
