@@ -178,7 +178,7 @@ describe('the shipped entries and the router joins', () => {
     // floor frame without it is not routed there.
     expect(r.route(core({ type: 'repoChecksEvaluated', ord: 1, floor: 'creator' })).map((e) => e.id).sort()).toEqual(['claim-vs-evidence', 'deliver-audit', 'scope-drift']);
     // Joins never count as an entry "of" a source (the internal ticks walk only triggers).
-    expect(r.entriesOf('core').map((e) => e.id).sort()).toEqual(['claim-vs-evidence', 'deliver-audit', 'risky-call', 'scope-drift', 'ungated']);
+    expect(r.entriesOf('core').map((e) => e.id).sort()).toEqual(['added-by-hand', 'claim-vs-evidence', 'deliver-audit', 'risky-call', 'scope-drift', 'ungated', 'what-catches']);
   });
 
   it('the loader refuses a join from the internal source and a bus join that is not 4 segments', async () => {

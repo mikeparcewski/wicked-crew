@@ -1,0 +1,16 @@
+{
+  "id": "what-catches",
+  "version": 1,
+  "on": { "source": "core", "type": "sessionCompleted" },
+  "join": [
+    { "source": "core", "type": "sessionFailed" },
+    { "source": "core", "type": "runCancelled" }
+  ],
+  "filter": {},
+  "check": "deterministic:what_catches",
+  "params": {},
+  "threshold": { "times": 3, "window_days": 30 },
+  "emit": { "as": "proposal", "severity": "info", "watch_kind": "decision", "attach": null, "rate": { "per_run": 1000 } },
+  "priority": "p2",
+  "enabled": true
+}

@@ -96,16 +96,17 @@ function call(method: string, path: string, token?: string, body?: unknown): Pro
 }
 
 describe('the watch registry on the daemon', () => {
-  it('arms on the engine bus and lists the shipped entries (two internal, three TR-W5b, two TR-W6, one TR-W7)', async () => {
+  it('arms on the engine bus and lists the shipped entries (two internal, three TR-W5b, two TR-W6, one TR-W7, two WT-W4)', async () => {
     const h = (await (await call('GET', '/api/v1/watch/health', TOKENS.operator)).json()) as WatchHealth;
     expect(h.armed).toBe(true);
     expect(h.reason).toBeNull();
-    expect(h.entries).toMatchObject({ loaded: 8, refused: [], off: [] });
+    expect(h.entries).toMatchObject({ loaded: 10, refused: [], off: [] });
     // TR-W7: scope-drift listens on the bus, so the pull is armed on the engine's bus.
     expect(h.sources.bus).toBe('ok');
     expect(h.llm.enabled).toBe(false);
     const { entries } = (await (await call('GET', '/api/v1/watch/entries', TOKENS.operator)).json()) as { entries: WatchEntry[] };
     expect(entries.map((e) => [e.id, e.enabled])).toEqual([
+      ['added-by-hand', true],
       ['claim-vs-evidence', true],
       ['deliver-audit', true],
       ['quiet-after-claim', true],
@@ -114,6 +115,7 @@ describe('the watch registry on the daemon', () => {
       ['risky-call', true],
       ['scope-drift', true],
       ['ungated', true],
+      ['what-catches', true],
     ]);
     expect(entries.every((e) => e.threshold_text.length > 0)).toBe(true);
   });
@@ -166,12 +168,14 @@ describe('the watch registry on the daemon', () => {
       findings: [],
       cleared: [],
       coverage: [
+        { entry_id: 'added-by-hand', state: 'not_checked', reason: 'the run has not ended yet' },
         { entry_id: 'claim-vs-evidence', state: 'not_checked', reason: 'no step has run its checks yet' },
         { entry_id: 'deliver-audit', state: 'not_checked', reason: 'nothing was delivered on this run yet' },
         { entry_id: 'quiet-after-claim', state: 'not_checked', reason: 'no step has handed back yet' },
         { entry_id: 'risky-call', state: 'not_checked', reason: 'no governed tool call has reached a gate yet' },
         { entry_id: 'scope-drift', state: 'not_checked', reason: 'no creator floor has run yet' },
         { entry_id: 'ungated', state: 'not_checked', reason: 'no step has reached its gate yet' },
+        { entry_id: 'what-catches', state: 'not_checked', reason: 'the run has not ended yet' },
       ],
     });
   });

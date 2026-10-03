@@ -1,0 +1,16 @@
+{
+  "id": "added-by-hand",
+  "version": 1,
+  "on": { "source": "core", "type": "sessionCompleted" },
+  "join": [
+    { "source": "core", "type": "sessionFailed" },
+    { "source": "core", "type": "runCancelled" }
+  ],
+  "filter": {},
+  "check": "deterministic:added_by_hand",
+  "params": { "catalog": ["test", "test_plan", "walkthrough_plan", "walkthrough_review", "review", "critique"] },
+  "threshold": { "consecutive": 5 },
+  "emit": { "as": "proposal", "severity": "info", "watch_kind": "decision", "attach": null, "rate": { "per_run": 1000 } },
+  "priority": "p2",
+  "enabled": true
+}
