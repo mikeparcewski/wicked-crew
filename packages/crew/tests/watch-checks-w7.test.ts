@@ -138,6 +138,13 @@ describe('deterministic:scope_drift — fixture table (test 2)', () => {
     expect(coverage.reason).toMatch(/no declared scope/);
   });
 
+  it('a DECLARED empty scope (touch_source user, no paths) covers nothing: every changed path is outside, and coverage is checked (codex: an empty set is not "none")', async () => {
+    const { raised, coverage } = await run([plan([], { touch_source: 'user' }), floor(3, 0, [['M', 'src/b.ts'], ['A', 'docs/x.md']])]);
+    expect(raised.map((r) => r.subject)).toEqual(['3:0:drift:src/b.ts', '3:0:drift:docs/x.md']);
+    expect(raised[0]!.facts).toMatchObject({ declared: 0, touch_source: 'user' });
+    expect(coverage).toEqual({ state: 'checked' });
+  });
+
   it('an old plan.accepted row (no touch, no touch_source — an engine before TR-W1a) reads as none, and says so', async () => {
     const { raised, coverage } = await run([plan(undefined), floor(3, 0, [['M', 'src/b.ts']])]);
     expect(raised).toEqual([]);

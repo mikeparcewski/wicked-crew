@@ -23,7 +23,8 @@
  * Coverage (§4.7, G7):
  *   - "no declared scope" when `touch_source` is `none`, or absent — an old row reads as none, and an
  *     engine before TR-W1a cannot be told apart from a plan that declared nothing, so the reason
- *     names both;
+ *     names both. A DECLARED empty set (a source with no paths) is not none: it covers nothing, so
+ *     every change is outside it and the run is checked;
  *   - not checked when the TOUCH set itself was cut at 64: what lies outside the listed paths cannot
  *     be known, so nothing is flagged rather than flagging what may be in scope;
  *   - a truncated CHANGE list is still judged on the paths it names, and the fact says it was cut
@@ -121,10 +122,14 @@ function bagOf(state: RunWatchState): Bag {
 
 const floorKey = (f: Pick<Floor, 'ord' | 'attempt'>): string => `${f.ord ?? '-'}:${f.attempt ?? '-'}`;
 
-/** The declared scope a judgement can use, or `null` when it cannot judge (none, empty, or cut). */
+/**
+ * The declared scope a judgement can use, or `null` when it cannot judge (none, or cut). A DECLARED
+ * empty set (`touch_source` user/pa_scope with no paths) is usable and covers nothing: every change
+ * is outside it — only `none` means "nothing was declared" (codex on #787: an empty set is not none).
+ */
 function usableTouch(bag: Bag): Touch | null {
   const t = bag.touch;
-  if (t === null || t.source === 'none' || t.paths.length === 0 || t.truncated) return null;
+  if (t === null || t.source === 'none' || t.truncated) return null;
   return t;
 }
 
@@ -220,7 +225,7 @@ export const scopeDriftCheck: WatchCheck<Record<string, never>, ScopeDriftThresh
       const n = bag.waiting.length + bag.lost;
       return { state: 'not_checked', reason: `no accepted plan has reached the registry yet (${n} creator floor${n === 1 ? '' : 's'} wait for it)` };
     }
-    if (bag.touch.source === 'none' || bag.touch.paths.length === 0) {
+    if (bag.touch.source === 'none') {
       return {
         state: 'not_checked',
         reason: bag.touch.fromOldRow
