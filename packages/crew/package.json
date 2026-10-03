@@ -37,7 +37,7 @@
     "agent-acp-bridges": "^1.1.1",
     "fastify": "^5.12.1",
     "pi-acp": "^0.0.32",
-    "wicked-core-ts": "^0.7.34",
+    "wicked-core-ts": "^0.7.35",
     "wicked-ledger": "^0.4.0",
     "yaml": "^2.4.2",
     "zod": "^3.23.0"
