@@ -156,6 +156,7 @@ import { GroupIndex } from './group-index.js';
 import { RunTimingIndex, recordRunLaunched } from './run-timing-index.js';
 import { GuidanceIndex } from './guidance-index.js';
 import {
+  DELIVER_REQUESTED_ACTION,
   DeliveryIndex,
   gitRunBranchIsEmpty,
   gitWorktreeIsClean,
@@ -1291,6 +1292,15 @@ export function registerRoutes(
     if (launchActor !== undefined) view.session.launch_actor = launchActor;
     const state = resolveDelivery(view, conflictStrand);
     view.session.delivery = state.delivery;
+    // crew#762: was delivery asked for? The launch's decision (`deliver: 'pr'`), a post-hoc attempt
+    // or a delivery on record says yes; a launch that said `deliver: 'none'` with neither says no.
+    // ABSENT when the daemon holds no launch record and no attempt (never fabricated).
+    const launchDeliver = runTimingIndex.launchDeliverFor(view.session.id);
+    if (launchDeliver === 'pr' || deliveryIndex.wasRequested(view.session.id) || deliveryIndex.isDelivered(view.session.id)) {
+      view.session.deliver_requested = true;
+    } else if (launchDeliver === 'none') {
+      view.session.deliver_requested = false;
+    }
     // crew#755: a completed repo-less free-text run answered in text and changed nothing — say so.
     const outcome = freeTextOutcome(view);
     if (outcome !== undefined) view.session.outcome = outcome;
@@ -2546,6 +2556,10 @@ export function registerRoutes(
         });
       }
       deliverInFlight.add(id);
+      // crew#762: the attempt is the durable fact "delivery was requested" — recorded BEFORE the
+      // script runs, so a lift that then fails still reads requested after a reload or restart.
+      audit.record(DELIVER_REQUESTED_ACTION, actorOf(req), { runId: id, detail: { via: 'post-hoc' } });
+      deliveryIndex.markRequested(id);
       // The worktree the script runs in. Usually the run's own; but the engine REAPS a
       // failed-deliver run's worktree once its work is committed (crew#418/#432) — the work then lives
       // on the `wicked/<id>` branch. For such a strand, stand a throwaway worktree back up from

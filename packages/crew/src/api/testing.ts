@@ -532,6 +532,8 @@ export function registerTestingRoutes(
             recordRunLaunched(audit, deps.runTimingIndex, actorOf(req), runId, {
               campaign,
               recon: true,
+              // crew#762: a recon launch carries no deliver phase — the resolved decision, recorded.
+              deliver: 'none',
               ...gateDetail,
               repoRef: scope.repos[i]!.id,
               ...(b.projectId !== undefined ? { projectId: b.projectId } : {}),
@@ -621,6 +623,7 @@ export function registerTestingRoutes(
         recordRunLaunched(audit, deps.runTimingIndex, actorOf(req), runId, {
           campaign,
           recon: true,
+          deliver: 'none', // crew#762: no deliver phase on a recon launch
           ...gateDetail,
           ...(target !== null ? { repoRef: target.id } : {}),
           ...(b.projectId !== undefined ? { projectId: b.projectId } : {}),

@@ -360,6 +360,7 @@ export function registerGovernanceSteeringRoutes(
         // shared helper stamps `created_at` from the SAME durable ts (Copilot #466).
         recordRunLaunched(audit, deps.runTimingIndex, actorOf(req), runId, {
           workflow: 'steering-author',
+          deliver: 'none', // crew#762: a steering-author run writes rules, it never delivers a PR
           steeringType: type,
           sources: sources.length,
           ...(b.repoRef !== undefined ? { repoRef: b.repoRef } : {}),

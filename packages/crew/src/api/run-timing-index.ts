@@ -46,6 +46,8 @@ export class RunTimingIndex {
    * the same `run.launched` entries.
    */
   private readonly runToChatId = new Map<string, string>();
+  /** crew#762: the RESOLVED delivery decision the launch recorded (`detail.deliver`). */
+  private readonly runToLaunchDeliver = new Map<string, 'pr' | 'none'>();
 
   /**
    * Consume pre-read `run.launched` entries — the seam that lets `createServer` feed this index
@@ -72,6 +74,8 @@ export class RunTimingIndex {
       // C1: the chat↔run link crew#619 already makes durable, read back for every run.
       const chatId = detail?.['chatId'];
       if (typeof chatId === 'string' && chatId.length > 0) this.runToChatId.set(runId, chatId);
+      const deliver = detail?.['deliver'];
+      if (deliver === 'pr' || deliver === 'none') this.runToLaunchDeliver.set(runId, deliver);
     }
   }
 
@@ -137,6 +141,16 @@ export class RunTimingIndex {
   /** Record the chat a run was launched from (C1). */
   setChatId(runId: string, chatId: string): void {
     this.runToChatId.set(runId, chatId);
+  }
+
+  /** Record the launch's resolved delivery decision (crew#762). */
+  setLaunchDeliver(runId: string, deliver: 'pr' | 'none'): void {
+    this.runToLaunchDeliver.set(runId, deliver);
+  }
+
+  /** What the launch decided about delivery (`'pr'` / `'none'`), or `undefined` when there is no launch record. */
+  launchDeliverFor(runId: string): 'pr' | 'none' | undefined {
+    return this.runToLaunchDeliver.get(runId);
   }
 
   /** The chat the run was launched from, or `undefined` (ABSENT when it was not launched from one). */
@@ -219,6 +233,11 @@ export function recordRunLaunched(
   const chatId = detail['chatId'];
   if (typeof chatId === 'string' && chatId.length > 0 && runTimingIndex !== undefined) {
     runTimingIndex.setChatId(runId, chatId);
+  }
+  // crew#762: the launch's delivery decision, live — the same field a restart rehydrates.
+  const deliver = detail['deliver'];
+  if ((deliver === 'pr' || deliver === 'none') && runTimingIndex !== undefined) {
+    runTimingIndex.setLaunchDeliver(runId, deliver);
   }
   return ts;
 }

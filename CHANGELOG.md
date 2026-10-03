@@ -10,6 +10,12 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+- **A run says whether its delivery was asked for (`wicked-crew-api-types` 0.79.0; crew#762).** `delivery: 'stranded'` on a completed run with no deliver unit covered two cases: a run launched with `deliver: "none"`, kept locally as asked, and a run whose post-hoc `POST /runs/:id/deliver` failed. After a reload, studio could not tell them apart (the studio#424 fix depends on it). `AgentSession.deliver_requested` is that durable fact.
+  - `true` when the launch resolved `deliver: 'pr'`, when a post-hoc delivery was attempted, or when a delivery is on record. The attempt is audited as `run.deliver_requested` before the script runs, whatever came of it.
+  - `false` when the launch resolved `deliver: 'none'` and nothing was attempted since.
+  - Absent when the daemon holds no launch record and no attempt. It is never fabricated.
+  - Both facts are rehydrated from the trail at boot (`RunTimingIndex.launchDeliverFor`, `DeliveryIndex.wasRequested`), so a restart keeps the answer.
+  - Tests: `tests/deliver-requested.test.ts` (red on the previous main).
 - **crew needs wicked-garden ≥ 12.40.0, says so, and never uses an older one (`wicked-crew-api-types` 0.78.0; crew#753).** A crew-only install could not onboard. Register & onboard answered a 400, but it had already created the repo row, and an old garden plugin copy was silently used. Changes:
   - The README's install section states the requirement and the one install command (`npx wicked-installer install wicked-garden`).
   - Automatic discovery passes over an installed garden older than `REQUIRED_GARDEN_VERSION` (12.40.0, the garden whose QE ledger rows carry the crew run id and whose recorder seals a take) with a `too-old` finding. The daemon reports a blocking `skills.garden` error naming the version found, where it was found, the version required and the install command. It hands the engine a refusal path, so the engine cannot fall back to the old plugin either.

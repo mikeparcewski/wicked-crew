@@ -1363,6 +1363,7 @@ export async function startInteractiveDraftSubscriber(
     }
     if (doc.projectId !== undefined) opts.onRunFiled?.(runId, doc.projectId);
     opts.onRunLaunched?.(runId, {
+      deliver: 'none', // crew#762: a document draft publishes a document, it never delivers a PR
       ...(docChannel !== undefined ? { channel: docChannel } : {}),
       ...(docActor !== undefined ? { actor: docActor } : {}),
     });
