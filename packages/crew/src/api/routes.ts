@@ -395,6 +395,12 @@ export function policyProposalToRule(
     };
   }
   const language = facets?.['language'];
+  const project = facets?.['project'];
+  const targets: ConformanceRule['targets'] = {};
+  if (typeof language === 'string' && language !== '') targets.language = language;
+  // DC-S3: the `project` facet is the rule's `targets.project` — a project decision lands scoped to
+  // that project, never everywhere (E3). The caller probes the engine and reads the rule back.
+  if (typeof project === 'string' && project !== '') targets.project = project;
   const rule: ConformanceRule = {
     id: `proposal:${proposalId}`,
     rule_type: 'policy',
@@ -405,10 +411,10 @@ export function policyProposalToRule(
     // REQUIRED engine-side (f32, no serde default, INV-C2 `[0,1]`); the payload carries none, so a
     // fixed authority — the same 0.8 the steering-author landing defaults to.
     confidence: 0.8,
-    // Only the `language` facet maps onto the engine's Targets facet object; `repo`/`project`
-    // facets have no ConformanceRule slot and are dropped (see the route's open question).
-    targets: typeof language === 'string' && language !== '' ? { language } : {},
-    provenance: { source: 'proposal', source_kinds: [] },
+    // `language` and `project` map onto the engine's Targets; a `repo` facet has no rule slot.
+    targets,
+    // The landed rule names the proposal it came from (DC-S3), the same id it is keyed on.
+    provenance: { source: 'proposal', ref: `proposal:${proposalId}`, source_kinds: [] },
     steering_type: steeringType as SteeringType,
   };
   return { rule, steeringType: steeringType as SteeringType };
@@ -4242,6 +4248,22 @@ export function registerRoutes(
             });
           }
         }
+        // DC-S3: `targets.project` and `supersedes` shipped with `considerRules` (wicked-core-ts
+        // 0.7.35). An older engine would accept and drop them, so a project rule would land
+        // everywhere: refuse, naming the fields (codex on DC-S3).
+        if (!adapter.projectRulesSupported() && rule !== null && typeof rule === 'object') {
+          const carried = [
+            ...(rule.targets?.project !== undefined ? ['targets.project'] : []),
+            ...(rule.supersedes !== undefined ? ['supersedes'] : []),
+          ];
+          if (carried.length > 0) {
+            return reply.code(501).send({
+              error:
+                `the installed engine would silently drop ${carried.map((f) => `\`${f}\``).join(', ')} ` +
+                'and land the rule everywhere; upgrade wicked-core-ts (>= 0.7.35)',
+            });
+          }
+        }
         await adapter.upsertConformanceRule(rule);
         audit.record('governance.rule.upserted', actorOf(req), { detail: { id: rule?.id } });
         return { status: 'ok' };
@@ -5228,12 +5250,47 @@ export function registerRoutes(
     if ('error' in built) {
       return landFailed(built.error);
     }
+    const project = built.rule.targets.project;
+    // DC-S3 probe (DES-decision-capture §5.3): an engine without project rules would accept
+    // `targets.project` and drop it, landing a project decision everywhere. Fail loud, write nothing.
+    if (project !== undefined && !adapter.projectRulesSupported()) {
+      return landFailed(
+        `the approved policy proposal is scoped to project \`${project}\`, but the installed engine ` +
+          'cannot keep a rule\'s project and would land it everywhere; upgrade wicked-core-ts (>= 0.7.35)',
+      );
+    }
     try {
       await adapter.upsertConformanceRule(built.rule);
     } catch (err) {
       return landFailed(
         `the store refused the steering rule derived from the approved policy proposal: ${message(err)}`,
       );
+    }
+    // DC-S3 read-back: what the store holds must still carry the project and the proposal ref. A
+    // mismatch retires the just-written rule (retire, never delete) so it never applies everywhere.
+    let lost: string | null;
+    try {
+      const stored = await adapter.readConformanceRule(built.rule.id);
+      lost =
+        stored === null
+          ? 'the rule is not in the store'
+          : (stored.targets?.project ?? undefined) !== project
+            ? `targets.project reads back ${JSON.stringify(stored.targets?.project ?? null)}, not ${JSON.stringify(project ?? null)}`
+            : stored.provenance?.ref !== built.rule.provenance.ref
+              ? `provenance.ref reads back ${JSON.stringify(stored.provenance?.ref ?? null)}, not ${JSON.stringify(built.rule.provenance.ref)}`
+              : null;
+    } catch (err) {
+      lost = `the rule could not be read back (${message(err)})`;
+    }
+    if (lost !== null) {
+      let retired: string;
+      try {
+        await adapter.retireConformanceRule(built.rule.id);
+        retired = `rule ${built.rule.id} was retired`;
+      } catch (err) {
+        retired = `retiring rule ${built.rule.id} FAILED (${message(err)}); retire it by hand via DELETE ${V}/governance/rules/${built.rule.id}`;
+      }
+      return landFailed(`the engine did not keep the landed rule as written: ${lost}; ${retired}`);
     }
     audit.record('governance.rule.upserted', actorOf(req), {
       detail: {
@@ -5242,12 +5299,14 @@ export function registerRoutes(
         via: 'proposal-approve',
         steeringType: built.steeringType,
         proposalId: id,
+        ...(project !== undefined ? { project } : {}),
       },
     });
     const landing: PolicyLandingResult = {
       outcome: 'landed',
       ruleId: built.rule.id,
       steering_type: built.steeringType,
+      ...(project !== undefined ? { project } : {}),
     };
     return { outcome: 'handed_off', payload: approved.payload, landing };
   });

@@ -24,6 +24,10 @@ type MockAdapter = {
   // The policy→steering landing seam (DES-MEM-FACETED-001 §5.2).
   steeringSupported: Mock;
   upsertConformanceRule: Mock;
+  // DC-S3: the project-rule probe, the read-back and the retire of a rule the engine changed.
+  projectRulesSupported: Mock;
+  readConformanceRule: Mock;
+  retireConformanceRule: Mock;
 };
 
 describe('proposal queue routes (DES-MEM-FACETED-001 §5.0)', () => {
@@ -37,6 +41,13 @@ describe('proposal queue routes (DES-MEM-FACETED-001 §5.0)', () => {
       listRepos: vi.fn().mockResolvedValue([]),
       steeringSupported: vi.fn().mockReturnValue(true),
       upsertConformanceRule: vi.fn().mockResolvedValue(undefined),
+      projectRulesSupported: vi.fn().mockReturnValue(true),
+      // The store keeps exactly what was written (the read-back of a faithful engine).
+      readConformanceRule: vi.fn(async (id: string) => {
+        const calls = adapter.upsertConformanceRule.mock.calls as Array<[{ id: string }]>;
+        return [...calls].reverse().find(([r]) => r.id === id)?.[0] ?? null;
+      }),
+      retireConformanceRule: vi.fn().mockResolvedValue(true),
     };
     const mockAdapter: MockAdapter = adapter;
     proposalTool = vi.fn();
@@ -165,9 +176,103 @@ describe('proposal queue routes (DES-MEM-FACETED-001 §5.0)', () => {
       severity: 'error',
       confidence: 0.8,
       targets: { language: 'rust' },
-      provenance: { source: 'proposal', source_kinds: [] },
+      provenance: { source: 'proposal', ref: 'proposal:pol1', source_kinds: [] },
       steering_type: 'security',
     });
+  });
+
+  // ── DC-S3: a policy landing keeps its project and its proposal ref ─────────
+
+  const projectProposal = (id: string) => ({
+    proposals: [
+      {
+        id,
+        kind_type: 'policy:development',
+        payload: { rule: 'always run the linter before commit', severity: 'warn' },
+        facets: { project: 'proj-a', language: 'ts' },
+        provenance: {},
+        state: 'approved',
+        created_at: 1,
+      },
+    ],
+  });
+
+  it('a project-faceted proposal lands with targets.project and ref proposal:<id>, read back intact (DC-S3)', async () => {
+    proposalTool
+      .mockResolvedValueOnce({ outcome: 'handed_off', payload: { rule: 'always run the linter before commit', severity: 'warn' } })
+      .mockResolvedValueOnce(projectProposal('pp1'));
+
+    const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/pp1/approve' });
+
+    expect(res.statusCode).toBe(200);
+    expect(adapter.upsertConformanceRule).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'proposal:pp1',
+        targets: { language: 'ts', project: 'proj-a' },
+        provenance: { source: 'proposal', ref: 'proposal:pp1', source_kinds: [] },
+      }),
+    );
+    expect(adapter.readConformanceRule).toHaveBeenCalledWith('proposal:pp1');
+    expect((res.json() as { landing: unknown }).landing).toEqual({
+      outcome: 'landed',
+      ruleId: 'proposal:pp1',
+      steering_type: 'development',
+      project: 'proj-a',
+    });
+    expect(adapter.retireConformanceRule).not.toHaveBeenCalled();
+  });
+
+  it('an engine without project rules fails a project landing loud and writes nothing — never global (DC-S3)', async () => {
+    adapter.projectRulesSupported.mockReturnValue(false);
+    proposalTool
+      .mockResolvedValueOnce({ outcome: 'handed_off', payload: { rule: 'always run the linter before commit', severity: 'warn' } })
+      .mockResolvedValueOnce(projectProposal('pp2'));
+
+    const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/pp2/approve' });
+
+    expect(res.statusCode).toBe(200);
+    const landing = (res.json() as { landing: { outcome: string; error: string } }).landing;
+    expect(landing.outcome).toBe('failed');
+    expect(landing.error).toMatch(/project `proj-a`/);
+    expect(adapter.upsertConformanceRule).not.toHaveBeenCalled();
+  });
+
+  it('an engine without project rules still lands a proposal that names no project (global, as before)', async () => {
+    adapter.projectRulesSupported.mockReturnValue(false);
+    proposalTool
+      .mockResolvedValueOnce({ outcome: 'handed_off', payload: { rule: 'prefer composition' } })
+      .mockResolvedValueOnce({
+        proposals: [{ id: 'pp3', kind_type: 'policy:architecture', payload: { rule: 'prefer composition' }, facets: {}, provenance: {}, state: 'approved', created_at: 3 }],
+      });
+
+    const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/pp3/approve' });
+
+    expect((res.json() as { landing: { outcome: string } }).landing.outcome).toBe('landed');
+    expect(adapter.upsertConformanceRule).toHaveBeenCalledWith(expect.objectContaining({ targets: {} }));
+  });
+
+  it('a read-back that lost targets.project retires the rule and fails the landing loud — never global (DC-S3)', async () => {
+    adapter.readConformanceRule.mockImplementationOnce(async (id: string) => ({
+      id,
+      rule_type: 'policy',
+      statement: 'always run the linter before commit',
+      severity: 'warn',
+      confidence: 0.8,
+      targets: { language: 'ts' },
+      provenance: { source: 'proposal', ref: id, source_kinds: [] },
+      steering_type: 'development',
+    }));
+    proposalTool
+      .mockResolvedValueOnce({ outcome: 'handed_off', payload: { rule: 'always run the linter before commit', severity: 'warn' } })
+      .mockResolvedValueOnce(projectProposal('pp4'));
+
+    const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/pp4/approve' });
+
+    const landing = (res.json() as { landing: { outcome: string; error: string } }).landing;
+    expect(landing.outcome).toBe('failed');
+    expect(landing.error).toMatch(/targets\.project/);
+    expect(landing.error).toMatch(/retired/);
+    expect(adapter.retireConformanceRule).toHaveBeenCalledWith('proposal:pp4');
   });
 
   it('defaults a missing severity to warn and empty targets when the proposal has no language facet', async () => {
