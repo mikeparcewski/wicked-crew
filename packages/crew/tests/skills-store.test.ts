@@ -208,7 +208,7 @@ describe('seed (design v3 §1/§4/§5)', () => {
   it('names the fix when no plugin is installed (design v3.6): the installer, or registering the plugin with Claude Code', () => {
     const none = scaffold({ source: () => null });
     try {
-      expect(() => none.store.seed()).toThrow(/install wicked-garden first — `npx wicked-installer install wicked-garden`, or register the plugin with Claude Code/);
+      expect(() => none.store.seed()).toThrow(/install wicked-garden >= \d+\.\d+\.\d+ first — `npx wicked-installer install wicked-garden`, or register the plugin with Claude Code/);
       expect(() => none.store.seed()).toThrow(/neither the marketplace cache .* nor the installer-managed copy/);
     } finally {
       removeScratch(none.base);

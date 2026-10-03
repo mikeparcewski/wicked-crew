@@ -75,6 +75,25 @@ import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 /** Explicit plugin-source override — the seam tests and proof scripts aim at a fixture plugin. */
 export const SKILLS_SOURCE_ENV = 'WICKED_CREW_SKILLS_SOURCE';
 
+/**
+ * The oldest wicked-garden this daemon uses (crew#753). Automatic discovery passes over an installed
+ * plugin older than this with a `too-old` finding, and the daemon reports it as a blocking
+ * `skills.garden` error naming found vs required, so an old copy is never used without a word.
+ * 12.40.0 is the garden the walkthrough proof reads: its QE ledger rows carry the crew run id
+ * (WT-G4) and its demo recorder seals a take (WT-G1); the draft skill (12.35.0) and the verdict
+ * vocabulary (12.37.0) come with it. An explicit `WICKED_CREW_SKILLS_SOURCE` is deliberate and
+ * is not judged.
+ */
+export const REQUIRED_GARDEN_VERSION = '12.40.0';
+
+/** The one install command the README, the findings and the refusals name. */
+export const GARDEN_INSTALL_COMMAND = 'npx wicked-installer install wicked-garden';
+
+/** Whether `version` is at least the required garden (SemVer precedence; an unparsable version is not). */
+export function gardenMeetsMinimum(version: string, required: string = REQUIRED_GARDEN_VERSION): boolean {
+  return parseSemver(version) !== null && compareSemver(version, required) >= 0;
+}
+
 /** Relative path of the Claude Code plugin manifest inside a plugin root. */
 export const PLUGIN_MANIFEST_REL = join('.claude-plugin', 'plugin.json');
 
@@ -336,13 +355,15 @@ export function installerCopyDir(configDir: string): string {
 }
 
 /** Why discovery passed over something that EXISTS (an absent path is never a finding) — logged by the daemon, asserted by tests. */
-export type DiscoveryFindingKind = 'symlink' | 'non-semver-name' | 'version-mismatch' | 'no-manifest';
+export type DiscoveryFindingKind = 'symlink' | 'non-semver-name' | 'version-mismatch' | 'no-manifest' | 'too-old';
 
 export interface DiscoveryFinding {
   kind: DiscoveryFindingKind;
   /** The entry judged — the CANONICAL path (below the once-resolved config dir). */
   path: string;
   message: string;
+  /** `too-old` only: the plugin version found (crew#753). */
+  version?: string;
 }
 
 /** What discovery answered and what it passed over on the way (design v3.6; codex on #491). */
@@ -438,6 +459,8 @@ export interface DiscoverOptions {
   home?: string;
   /** Test seam — see `DiscoveryHooks`. */
   hooks?: DiscoveryHooks;
+  /** The minimum garden for the automatic tiers (default {@link REQUIRED_GARDEN_VERSION}). */
+  requiredVersion?: string;
 }
 
 /**
@@ -463,14 +486,26 @@ export function discoverLivePluginDetailed(opts: DiscoverOptions = {}): Discover
     const root = realPluginRoot(dir); // the ONE realpath of a config dir in all of discovery
     if (root !== null && !roots.includes(root)) roots.push(root);
   }
+  // crew#753: an installed garden older than the minimum is passed over by name, never used.
+  const required = opts.requiredVersion ?? REQUIRED_GARDEN_VERSION;
+  const usable = (candidate: PluginSource | null): PluginSource | null => {
+    if (candidate === null || gardenMeetsMinimum(candidate.plugin_version, required)) return candidate;
+    findings.push({
+      kind: 'too-old',
+      path: candidate.path,
+      version: candidate.plugin_version,
+      message: `${candidate.path}: wicked-garden ${candidate.plugin_version} is older than the required ${required}; not used`,
+    });
+    return null;
+  };
   let source: PluginSource | null = null;
   for (const root of roots) {
-    source = cacheCandidate(root, findings, hooks);
+    source = usable(cacheCandidate(root, findings, hooks));
     if (source !== null) break;
   }
   if (source === null) {
     for (const root of roots) {
-      source = copyCandidate(root, findings, hooks);
+      source = usable(copyCandidate(root, findings, hooks));
       if (source !== null) break;
     }
   }

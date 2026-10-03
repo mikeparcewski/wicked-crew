@@ -198,7 +198,15 @@ import {
   type CatalogView,
 } from './guards.js';
 import { LiveGenerations } from './live-generations.js';
-import { discoverLivePluginDetailed, gitStateOf, PluginSourceSymlinkError, type PluginSource } from './plugin-source.js';
+import {
+  discoverLivePluginDetailed,
+  GARDEN_INSTALL_COMMAND,
+  gitStateOf,
+  PluginSourceSymlinkError,
+  REQUIRED_GARDEN_VERSION,
+  type DiscoveryFinding,
+  type PluginSource,
+} from './plugin-source.js';
 import {
   existsIn,
   extractPluginRootRefs,
@@ -311,11 +319,19 @@ export class SkillsUnseededError extends Error {
 
 /** No plugin source could be found to seed or refresh from — crew does not vendor garden (v3 §8; the discovery order is design v3.6, plugin-source.ts). */
 export class SkillsSourceUnavailableError extends Error {
-  constructor(detail: string) {
+  /**
+   * crew#753: discovery found an installed garden but it is older than the required minimum, so it
+   * was passed over. `null` when nothing was installed at all.
+   */
+  readonly tooOld: { path: string; version: string } | null;
+  constructor(detail: string, tooOld: { path: string; version: string } | null = null) {
     super(
-      `no wicked-garden plugin source: ${detail} — install wicked-garden first — \`npx wicked-installer install wicked-garden\`, or register the plugin with Claude Code`,
+      tooOld !== null
+        ? `wicked-garden ${tooOld.version} found at ${tooOld.path} is older than the required ${REQUIRED_GARDEN_VERSION}; it is not used — install wicked-garden >= ${REQUIRED_GARDEN_VERSION} (\`${GARDEN_INSTALL_COMMAND}\`) and restart`
+        : `no wicked-garden plugin source: ${detail} — install wicked-garden >= ${REQUIRED_GARDEN_VERSION} first — \`${GARDEN_INSTALL_COMMAND}\`, or register the plugin with Claude Code`,
     );
     this.name = 'SkillsSourceUnavailableError';
+    this.tooOld = tooOld;
   }
 }
 
@@ -722,6 +738,8 @@ export class SkillsStore {
   private readonly registeredRefs: () => ReadonlySet<string>;
   private readonly provisionVenv: VenvProvisioner;
   private readonly sourceFn: () => PluginSource | null;
+  /** What the last automatic discovery passed over (crew#753: names a too-old garden in the refusal). */
+  private lastDiscoveryFindings: DiscoveryFinding[] = [];
   readonly now: () => string;
   private readonly warn: (message: string) => void;
   /** Generations live runs may still read — the reaper keeps them (fed by `observeEvent`). */
@@ -757,6 +775,7 @@ export class SkillsStore {
       (() => {
         const { source, findings } = discoverLivePluginDetailed();
         for (const f of findings) this.warn(`[skills] skills.discovery ${f.kind}: ${f.message}`);
+        this.lastDiscoveryFindings = findings;
         return source;
       });
     this.now = opts.now ?? (() => new Date().toISOString());
@@ -1531,8 +1550,12 @@ export class SkillsStore {
   }
 
   private requireSource(detail: string): PluginSource {
+    this.lastDiscoveryFindings = [];
     const source = this.sourceFn();
-    if (source === null) throw new SkillsSourceUnavailableError(detail);
+    if (source === null) {
+      const old = this.lastDiscoveryFindings.find((f) => f.kind === 'too-old' && f.version !== undefined);
+      throw new SkillsSourceUnavailableError(detail, old !== undefined ? { path: old.path, version: old.version as string } : null);
+    }
     return source;
   }
 

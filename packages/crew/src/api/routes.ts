@@ -103,6 +103,7 @@ import {
   type StateHomeWatch,
 } from '../projects/state-home-preflight.js';
 import { BASE_SKILL_POLICIES, BASE_SKILL_REF_SHAPE, baseSkillRemedy } from '../skills/base-skill.js';
+import { REQUIRED_GARDEN_VERSION } from '../skills/plugin-source.js';
 import type { EvalRunStore } from './eval-store.js';
 import { noEligibleSeatBody, parseNoEligibleSeat } from '../core/engine-roster.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
@@ -1314,6 +1315,17 @@ export function registerRoutes(
   // driving this function directly (tests) has no hooks, so downstream code
   // still gets the ONE actor shape via this accessor.
   const actorOf = (req: { actor?: import('../core/types.js').Actor }) => req.actor ?? LOCAL_ACTOR;
+  // crew#753: the blocking `skills.garden` finding (an installed garden older than the minimum), or
+  // `null`. Read from the skills runtime's cached health; no seam ⇒ nothing to judge.
+  const gardenBlocker = (): { kind: string; severity: string; message: string } | null => {
+    const f = runtime.skills?.health().findings.find((x) => x.kind === 'skills.garden' && x.severity === 'error');
+    return f === undefined ? null : { kind: f.kind, severity: f.severity, message: f.message };
+  };
+  /** The typed 422 a launch or onboard answers while {@link gardenBlocker} holds. */
+  const gardenRefusalBody = (): { code: 'garden_required'; error: string; required: string } | null => {
+    const f = gardenBlocker();
+    return f === null ? null : { code: 'garden_required', error: f.message, required: REQUIRED_GARDEN_VERSION };
+  };
   // Liveness — also proves the actor + event pump are up.
   //
   // crew#471: the engine's ping is a round trip through its single-writer actor, and a launch that
@@ -1372,6 +1384,8 @@ export function registerRoutes(
     const warnings = [
       ...(stateHome === null ? [] : stateHome.findings.map((f) => ({ kind: f.kind, severity: f.severity, message: f.message }))),
       ...(baseSkill?.finding ? [{ kind: baseSkill.finding.kind, severity: baseSkill.finding.severity, message: baseSkill.finding.message }] : []),
+      // crew#753: a garden older than the minimum is a blocking finding on the first screen too.
+      ...[gardenBlocker()].filter((f): f is NonNullable<typeof f> => f !== null),
       ...phaseSkillFindings(runtime.phaseSkills?.gaps() ?? []),
       // DES-TEAMING-002 T0: the daemon's bus did not open at boot, so the engine was handed none
       // and runs un-teamed. A daemon-level notice (status stays ok: it serves); the per-run
@@ -1841,11 +1855,37 @@ export function registerRoutes(
     }
   };
 
+  /**
+   * crew#753: what refuses an onboarding launch, judged BEFORE anything is registered — so a
+   * refused onboard leaves no repo row (core has no unregister). The same three intake refusals a
+   * launch meets: a garden older than the minimum (422 `garden_required`), the state-home blocker
+   * (409) and a base skill the handed generation lacks, e.g. no garden at all (422
+   * `base_skill_refused`). `null` when the launch would be admitted.
+   */
+  const onboardRefusal = async (): Promise<{ status: number; body: unknown } | null> => {
+    const garden = gardenRefusalBody();
+    if (garden !== null) return { status: 422, body: garden };
+    if (runtime.stateHome !== undefined) {
+      const stateHome = await runtime.stateHome.refresh();
+      if (stateHome.refusesLaunches) return { status: 409, body: stateHomeBlockerBody(stateHome) };
+    }
+    const posture = runtime.skills?.baseSkill() ?? null;
+    if (posture !== null && !posture.present && posture.finding !== null) {
+      return {
+        status: 422,
+        body: { code: 'base_skill_refused', error: posture.finding.message, baseSkill: posture, remedy: baseSkillRemedy(posture.inCatalog) },
+      };
+    }
+    return null;
+  };
+
   app.post(`${V}/repos`, async (req, reply) => {
     const parsed = RegisterRepoSchema.safeParse(req.body);
     if (!parsed.success) {
       return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
     }
+    const refused = await onboardRefusal();
+    if (refused !== null) return reply.code(refused.status).send(refused.body);
     const { name, rootPath, gitUrl, projectId, channel, actor } = parsed.data;
     let repo: RepoEntry | undefined;
     let runId: string;
@@ -1885,6 +1925,8 @@ export function registerRoutes(
     if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
     const body = OnboardBodySchema.safeParse(req.body ?? {});
     if (!body.success) return reply.code(400).send(invalidBody(body.error, 'Invalid request body'));
+    const refused = await onboardRefusal();
+    if (refused !== null) return reply.code(refused.status).send(refused.body);
     let runId: string;
     try {
       runId = await adapter.launchOnboardingRun(repo.id, repo.name);
@@ -1940,6 +1982,9 @@ export function registerRoutes(
         return reply.code(409).send(stateHomeBlockerBody(stateHome));
       }
     }
+    // crew#753: a garden older than the minimum refuses the launch by name (found vs required).
+    const garden = gardenRefusalBody();
+    if (garden !== null) return reply.code(422).send(garden);
     // crew#645: an expired login reads signed out BEFORE routing — wait (bounded) for every seat's
     // missing or stale login check, so the standing below is the seats' own answer.
     if (b.clisJson === undefined) await rosterWithStanding.ready?.();

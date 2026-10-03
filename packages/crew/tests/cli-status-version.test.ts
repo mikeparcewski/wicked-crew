@@ -140,7 +140,7 @@ describe('wicked-crew status / gate against an answering daemon', () => {
 
   it('status: a daemon whose base skill is REQUIRED and not handed says so on stderr — the remedy names the installer; stdout stays the runs JSON; exit 0 (F-W1-102)', async () => {
     const message =
-      'the base skill "wicked-garden-governed-worker" (baseSkillRef — the role-keyed discipline every governed unit follows) is REQUIRED but no published snapshot is handed to the engine: the engine refuses every launch at intake until a generation holding it is published — install wicked-garden (npx wicked-installer install wicked-garden), POST /skills/refresh-baseline, then POST /skills/publish; set baseSkillRef "" (PUT /settings) to turn the base skill off explicitly';
+      'the base skill "wicked-garden-governed-worker" (baseSkillRef — the role-keyed discipline every governed unit follows) is REQUIRED but no published snapshot is handed to the engine: the engine refuses every launch at intake until a generation holding it is published — install wicked-garden >= 12.40.0 (npx wicked-installer install wicked-garden), POST /skills/refresh-baseline, then POST /skills/publish; set baseSkillRef "" (PUT /settings) to turn the base skill off explicitly';
     const port = await stubDaemonRoutes({
       '/api/v1/runs': '[]',
       '/api/v1/health': JSON.stringify({

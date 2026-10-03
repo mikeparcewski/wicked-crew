@@ -46,6 +46,25 @@ wicked-crew serve
 Or use the family installer — [`npx wicked-installer`](https://www.npmjs.com/package/wicked-installer)
 installs/updates the whole wicked-\* family, crew included.
 
+**crew needs wicked-garden ≥ 12.40.0.** Garden ships the skills every governed worker follows,
+including the base skill `wicked-garden-governed-worker`. crew does not vendor it, so install it once:
+
+```bash
+npx wicked-installer install wicked-garden    # or install the wicked-garden plugin in Claude Code
+```
+
+crew finds garden in Claude Code's plugin cache (`<config dir>/plugins/cache/wicked-garden/…`) or in
+the installer's copy (`<config dir>/plugins/wicked-garden`), where `<config dir>` is
+`$CLAUDE_CONFIG_DIR` or `~/.claude`. To use another garden root on purpose, point
+`WICKED_CREW_SKILLS_SOURCE` at it. Without garden, `/health` reports the missing base skill as an
+error. Every launch and every **Register & onboard** is refused with that reason, and nothing is
+registered. A garden older than 12.40.0 is never used: `/health` carries a `skills.garden` error
+that names the version found, where it was found, and the version required. Launches and onboarding
+answer `422 garden_required` until a newer garden is installed. After a first install, restart the
+daemon. A daemon that already holds skills from an older garden needs `POST
+/api/v1/skills/refresh-baseline` then `POST /api/v1/skills/publish`; a restart alone keeps its
+published skills.
+
 `serve` starts the daemon on `http://127.0.0.1:7701` (`--port` / `CREW_PORT` override) and serves
 the bundled **wicked-studio** console same-origin — open the URL to launch and steer runs, answer
 human gates, and browse projects and evidence. Durable state lives in `~/.wicked-crew/` (`--db`

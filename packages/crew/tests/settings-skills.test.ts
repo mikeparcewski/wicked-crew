@@ -27,7 +27,7 @@ import { CoreAdapter, settingsFilePath } from '../src/core/adapter.js';
 import { DEFAULT_SETTINGS, type DiagnosticsResponse, type HealthResponse, type SkillsManifestResponse, type SystemSettings } from '../src/core/types.js';
 import { crewStateHome, setCrewStateHome } from '../src/projects/state-home.js';
 import { BOOT_SKILLS_SNAPSHOT, canonicalCrewStateHome, SKILLS_SNAPSHOT_ENGINE_ENV } from '../src/skills/engine-env.js';
-import { pluginSourceAt, type PluginSource } from '../src/skills/plugin-source.js';
+import { pluginSourceAt, REQUIRED_GARDEN_VERSION, type PluginSource } from '../src/skills/plugin-source.js';
 import { assertSkillsRootFenced, canonicalPath, SkillsRootUnfencedError, userCliDirs } from '../src/skills/root-fence.js';
 import { refusalPath, SkillsRuntime } from '../src/skills/runtime.js';
 import { COPILOT_VIEW_SKILLS_REL, resolveSkillsRoot, SKILLS_DIRNAME } from '../src/skills/store.js';
@@ -172,7 +172,8 @@ describe('skills_root is NOT a setting (PUT/GET /settings)', () => {
 
   it('the skills.source WARNING follows the CURRENT baseline live (design v3.6): present after an installer-copy seed (said once per boot); a refresh that finds the SAME bytes in the marketplace cache re-records the provenance (codex on #491) and the warning is gone — before any publish', async () => {
     const warning = `seeded from the installer copy at ${FIXTURE_PLUGIN}; register the plugin with Claude Code (marketplace) to receive marketplace updates`;
-    let source: PluginSource = { path: FIXTURE_PLUGIN, kind: 'installer-copy', plugin_version: '1.0.0' };
+    // At the garden minimum (crew#753): an older automatic source would add a blocking skills.garden finding.
+    let source: PluginSource = { path: FIXTURE_PLUGIN, kind: 'installer-copy', plugin_version: REQUIRED_GARDEN_VERSION };
     const sc = scaffold({ source: () => source });
     try {
       const lines: string[] = [];
@@ -183,7 +184,7 @@ describe('skills_root is NOT a setting (PUT/GET /settings)', () => {
       expect(health.findings).toEqual([{ kind: 'skills.source', severity: 'warning', message: warning }]);
       expect(seeding.health().findings).toEqual([{ kind: 'skills.source', severity: 'warning', message: warning }]);
       expect(lines.find((l) => l.startsWith('[skills] seeded '))).toBe(
-        `[skills] seeded ${sc.root} from the installer-managed wicked-garden copy (plugins/wicked-garden — the LAST-resort source, design v3.6; not the marketplace cache) at ${FIXTURE_PLUGIN}, plugin version 1.0.0, source kind installer-copy`,
+        `[skills] seeded ${sc.root} from the installer-managed wicked-garden copy (plugins/wicked-garden — the LAST-resort source, design v3.6; not the marketplace cache) at ${FIXTURE_PLUGIN}, plugin version ${REQUIRED_GARDEN_VERSION}, source kind installer-copy`,
       );
       expect(lines.filter((l) => l === `[skills] skills.source: ${warning}`)).toHaveLength(1);
       // A second boot over the seeded root: the warning persists (the baseline is still the copy), said once again.
@@ -195,7 +196,7 @@ describe('skills_root is NOT a setting (PUT/GET /settings)', () => {
       // moved, and the manifest records it: kind, path, revision; the baseline key (the content hash)
       // is unchanged, no publish happened, and the warning is gone with the provenance.
       const before = sc.store.revision();
-      source = { path: sc.upstream, kind: 'claude-plugin-cache', plugin_version: '1.0.0' };
+      source = { path: sc.upstream, kind: 'claude-plugin-cache', plugin_version: REQUIRED_GARDEN_VERSION };
       const refreshed = sc.store.refreshBaseline(before);
       expect(refreshed.verdict).toBe('clear');
       expect(refreshed.baseline).toBe(refreshed.previous_baseline);
@@ -552,7 +553,7 @@ describe('daemon boot (createServer) — the root is <state home>/skills; the fe
   it('seeded from the installer-managed copy (design v3.6): published and exported like any source, plus the persistent skills.source WARNING in GET /diagnostics naming the copy; the manifest carries kind installer-copy on the wire', async () => {
     const root = join(dir, 'skills');
     delete process.env[SKILLS_SNAPSHOT_ENGINE_ENV];
-    const app = await createServer(adapter, options({ source: () => ({ path: FIXTURE_PLUGIN, kind: 'installer-copy', plugin_version: '1.0.0' }) }));
+    const app = await createServer(adapter, options({ source: () => ({ path: FIXTURE_PLUGIN, kind: 'installer-copy', plugin_version: REQUIRED_GARDEN_VERSION }) }));
     try {
       const real = realpathSync(join(root, 'snapshots', '000001'));
       expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]).toBe(real); // no degradation: the engine is handed a verified snapshot
@@ -602,7 +603,7 @@ describe('daemon boot (createServer) — the root is <state home>/skills; the fe
       // no generation that could hold it, so under `require` (D-8) the variable is exported all the
       // same and the second finding is an ERROR — the engine refuses a launch at intake.
       expect(skills.findings.map((f) => f.kind)).toEqual(['skills.fallback', 'skills.base-skill']);
-      expect(skills.findings[0]?.message).toContain('install wicked-garden first');
+      expect(skills.findings[0]?.message).toContain(`install wicked-garden >= ${REQUIRED_GARDEN_VERSION} first`);
       expect(skills.findings[1]?.severity).toBe('error');
       expect(skills.baseSkill).toMatchObject({ name: DEFAULT_SETTINGS.baseSkillRef, present: false, gen: null, engineInput: DEFAULT_SETTINGS.baseSkillRef });
       // F-W1-102 — the crew-only install (no wicked-garden at all): /health must never read "status ok,
