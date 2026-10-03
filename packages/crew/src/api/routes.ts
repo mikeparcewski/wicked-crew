@@ -185,6 +185,7 @@ import { DecisionLedger } from '../decisions/ledger.js';
 import { DecisionError, DecisionService } from '../decisions/land.js';
 import { ingestDecision } from '../decisions/ingest.js';
 import { registerDecisionRoutes } from '../decisions/routes.js';
+import { ChatDecisionRecorder } from '../decisions/chat-recorder.js';
 import type { DecisionBusEmit } from '../decisions/events.js';
 import { resolveDecisionsMode, type DecisionsMode } from '../decisions/types.js';
 
@@ -729,6 +730,8 @@ export interface RegisteredRoutes {
   ) => Promise<{ code: number; body: unknown }>;
   /** DC-S4a: the decision service (null when capture is not wired) — the boot re-drive uses it. */
   decisions: DecisionService | null;
+  /** DC-S4b: the studio chat recorder (null when capture, the transcript store or the fan-out is not wired). */
+  chatRecorder: ChatDecisionRecorder | null;
 }
 
 export interface RuntimeDeps {
@@ -1118,6 +1121,18 @@ export function registerRoutes(
         })
       : null;
   if (decisions !== null) registerDecisionRoutes(app, decisions);
+  // DC-S4b: the studio chat host. The recorder writes the transcript's `decisions` record and the
+  // `chatDecisions` frame, so without the store or the /ws fan-out there is no chat host at all.
+  const chatRecorder: ChatDecisionRecorder | null =
+    decisions !== null && chatTranscripts !== undefined && runtime.broadcast !== undefined
+      ? new ChatDecisionRecorder({
+          service: decisions,
+          transcripts: chatTranscripts,
+          broadcast: runtime.broadcast,
+          projectOf: (chat) => projects.index.projectOf(chat),
+          log: (m) => app.log.warn(m),
+        })
+      : null;
   /** Repo root for a repo ref, from the registry — shared by the reprovision path below. */
   const repoRootOf = async (repoRef: string): Promise<string | undefined> =>
     (await adapter.listRepos()).find((r) => r.id === repoRef)?.root_path;
@@ -1413,6 +1428,8 @@ export function registerRoutes(
         // Is the governance evidence LANDING (crew#495): the store, the records on it, the dead
         // letters — with a `governance.deadletter` finding the moment the outbox holds one.
         governance,
+        // DC-S4b: the chat recorder's per-CLI `wicked-decisions` compliance (null without the chat host).
+        decisions: chatRecorder?.diagnostics() ?? null,
         // The state-home classification (wicked-core#411 / crew#497): which state home the worker
         // Read fence classifies, every entry it cannot classify there (top level and skills root),
         // who classified (the engine, or crew's registry copy on an older addon) and whether that
@@ -3055,6 +3072,8 @@ export function registerRoutes(
         // reached, and the operator's message joins the transcript with exactly those seats.
         chatTurns.reconcile(id, turn.turnId, seats);
         chatTranscripts?.appendUser(id, turn.turnId, parsed.data.text, seats);
+        // DC-S4b: who said it, to whom — the recorder matches the seats' quotes against THIS message.
+        chatRecorder?.noteSend(id, turn.turnId, actorOf(req), parsed.data.text, seats);
       }
       // crew#641: re-state single-seat degradation on every turn so it is visible in the transcript.
       // Decided from `warmRoster` — the seats that are WARM — never from `seats`, which is only the
@@ -5761,5 +5780,5 @@ export function registerRoutes(
     log: (m) => app.log.warn(m),
   });
 
-  return { decideGate, decisions };
+  return { decideGate, decisions, chatRecorder };
 }

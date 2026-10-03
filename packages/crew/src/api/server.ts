@@ -6,6 +6,7 @@ import { join, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { WebSocket } from 'ws';
 import { DecisionLedger } from '../decisions/ledger.js';
+import type { ChatDecisionRecorder } from '../decisions/chat-recorder.js';
 import { registerRoutes } from './routes.js';
 import { ErrorRing, teeStreamWithErrorRing } from './diagnostics.js';
 import { GateCache } from './gate-cache.js';
@@ -397,6 +398,8 @@ export async function createServer(
   // The watch registry (TR-W5a): built after the relays below; the fan-in and the watchdog tee
   // read it late-bound, exactly as they read the standing-orders evaluator.
   let watchRegistry: WatchRegistry | null = null;
+  // DC-S4b: the studio chat recorder, handed back by `registerRoutes` below (it needs the service built there).
+  let chatDecisionRecorder: ChatDecisionRecorder | null = null;
   const elicitationCache = new ElicitationCache();
   const terminals = new TerminalHub();
   // Per-seat runtime health (crew#274): folded from the single CoreEvent subscription below,
@@ -1321,6 +1324,12 @@ export async function createServer(
     seatHealth.ingest(event);
     if (event.type === 'chatClosed' && typeof event.chat === 'string') {
       chatScopes.closed(event.chat);
+      // DC-S4b: whatever the chat's open turns gathered is recorded now — into the ledger and onto
+      // /ws. The transcript's `decisions` record follows the transcript's OWN retention (D-13): a
+      // non-retained chat's file is dropped below before this settles, and `recordDecisions` never
+      // recreates a gone file; a chat retained for its promoted run keeps the file and gets the
+      // record. Nothing a reader could still open is missing it (codex r1, answered).
+      void chatDecisionRecorder?.closed(event.chat);
       // crew#619: retain the transcript when a promoted run is still live — the chat may be
       // idle-TTL'd before the run finishes, and Continue-in-Build needs the transcript.
       const retaining = chatRetained.get(event.chat);
@@ -1337,6 +1346,25 @@ export async function createServer(
     // broadcast (/ws → studio render/promote). `observe`'s own rewrite pass is then a no-op.
     const rewritten = chatTranscripts.rewriteEvent(stamped);
     chatTranscripts.observe(rewritten);
+    // DC-S4b: the seat's `wicked-decisions` block was cut out of the reply above; the recorder takes
+    // it (once) and, when every seat of the turn has answered, records the operator's words — off
+    // the hot path, never awaited here. A `chatSessionFailed` ends a seat's part with no reply.
+    if (rewritten.type === 'chatReply' || rewritten.type === 'chatSessionFailed') {
+      const f = rewritten as CoreEvent & Record<string, unknown>;
+      const chat = typeof f['chat'] === 'string' ? f['chat'] : undefined;
+      const cliKey = typeof f['cliKey'] === 'string' ? f['cliKey'] : undefined;
+      if (chat !== undefined && cliKey !== undefined) {
+        const block = rewritten.type === 'chatReply' ? chatTranscripts.takeDecisionsBlock(chat, cliKey) : null;
+        void chatDecisionRecorder?.onReply({
+          chat,
+          cliKey,
+          ...(typeof f['turn_id'] === 'string' ? { turnId: f['turn_id'] } : {}),
+          ok: f['ok'] === true,
+          block,
+          kind: rewritten.type === 'chatReply' ? 'reply' : 'failed',
+        });
+      }
+    }
     chatTurns.observe(event);
     // Only feed the watchdog when its sweep is (or will be) armed: sweeping is what
     // prunes its per-run maps, so ingesting while disabled grows without bound
@@ -1698,6 +1726,7 @@ export async function createServer(
   );
   // DC-S4a §6: records whose landing a restart interrupted are re-driven, idempotently (the review
   // proposal is keyed by the decision id). Off the boot path; a failure is a logged outcome.
+  chatDecisionRecorder = registered.chatRecorder;
   if (registered.decisions !== null) {
     const decisionsService = registered.decisions;
     decisionsService.track(decisionsService.redrive());

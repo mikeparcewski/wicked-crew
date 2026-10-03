@@ -5339,7 +5339,15 @@ export type ChatTranscriptRecord =
       corrected: number;
       unchecked: number;
       items: ChatCitationItem[];
-    };
+    }
+  /**
+   * The decisions recorded from the operator's message of `turnId` (api-types 0.84.0, DC-S4b) — a
+   * SEPARATE record, like `citations`, because derivation runs after the seats' replies are stored. A
+   * reader folds it onto the turn's `user` record; a skin that does not know this kind ignores it.
+   * The live frame is {@link ChatDecisionsFrame}. The seats' `wicked-decisions` blocks themselves
+   * never reach the transcript (they are cut from the reply before it is persisted or broadcast).
+   */
+  | { at: number; turnId: string; kind: 'decisions'; items: DecisionView[] };
 
 /** `GET /chats/:id` → 200. */
 export interface ChatDetailResponse {
@@ -5959,6 +5967,8 @@ export interface DiagnosticsResponse {
    *  `DiagnosticsStateHome`. `null` on a daemon booted without the watch (some tests); ABSENT on a
    *  daemon before this field. */
   stateHome?: DiagnosticsStateHome | null;
+  /** The studio chat recorder's per-CLI format compliance (api-types 0.84.0, DC-S4b); `null` without the chat host. */
+  decisions?: DiagnosticsDecisions | null;
 }
 
 // ── Diagnostics — governance store + dead letters (api-types 0.31.0, crew#495 / F-022) ─────────
@@ -8732,4 +8742,33 @@ export interface DecisionChangedFrame {
   state: DecisionState;
   rule_id?: string;
   project_id: string | null;
+}
+
+/**
+ * `/ws` frame (api-types 0.84.0, DC-S4b): the decisions recorded from ONE chat turn's operator
+ * message, once every seat of the turn has answered (or the turn went stale). Mirrors
+ * {@link ChatCitationsFrame}; the same items land in the transcript as a `decisions` record.
+ */
+export interface ChatDecisionsFrame {
+  type: 'chatDecisions';
+  chat: string;
+  turn_id: string;
+  items: DecisionView[];
+  project_id?: string;
+}
+
+/**
+ * `GET /diagnostics.decisions` (api-types 0.84.0, DC-S4b): the studio chat recorder's format
+ * compliance per seat CLI — how often a seat ended its reply with a well-formed `wicked-decisions`
+ * block (§4.3.3 measures the rate per CLI). `null` on a daemon without the chat host.
+ */
+export interface DiagnosticsDecisions {
+  /** The `WICKED_DECISIONS` switch this daemon runs under. */
+  mode: 'off' | 'ledger' | 'on';
+  /** Per `cliKey`: replies seen, well-formed blocks, malformed blocks. */
+  recorder: Record<string, { replies: number; blocks: number; malformed: number }>;
+  /** Turns whose recorder seat posted no usable block. The words were still recorded, unlabelled. */
+  unclassified_turns: number;
+  /** Turns that produced at least one decision record. */
+  recorded_turns: number;
 }

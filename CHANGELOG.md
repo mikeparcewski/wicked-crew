@@ -10,6 +10,12 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+- **The studio chat is a decision host (`wicked-crew-api-types` 0.84.0; DES-DECISION-CAPTURE slice DC-S4b, with DOC-4's pair framing).** Every chat seat's scope statement (`AGENTS.md` / `CLAUDE.md`) gains a `## Decisions` section asking it to end each reply with a fenced `wicked-decisions` JSON block that labels the OPERATOR'S words of the turn (the codebook's keys: `quote`, `decision_text`, `type`, `codify`, `ambiguous`, `steering_type`, `approves_proposal`, `same_as`). The block never reaches a reader: crew cuts it from the `chatReply` before persist and broadcast, and the streamed `chatDelta` frames hold back a tail that could still become the fence, then drop everything from the fence on until the reply.
+  - The recorder is deterministic: the first `claude` seat of the turn's audience, else the first seat in roster order. Its items become records only when the quote is found (whitespace-normalised) in the SAME turn's operator message — the model may label words, never invent them. The other seats' items are `labels.votes`. Words are recorded from the actor who SENT the message, so an agent token's chat message records nothing.
+  - DOC-4: a go-ahead that `approves_proposal` carries `decision_text` written from the seat's approved proposal; that text is the record's statement and the record names the proposal (previous turn, recorder seat). "lets do it" after a proposal yields a decision whose text is the proposal's — never auto.
+  - Fails open, no regex fallback: a missing or malformed block leaves the turn unclassified (counted) and the operator's words are STILL recorded, so the deterministic derivation runs with no model at all. The decisions ride `/ws` as `chatDecisions {chat, turn_id, items}` and land in the transcript as a `decisions` record (`ChatTranscriptRecord`), the `citations` pattern. `GET /diagnostics.decisions` reports the per-CLI block compliance (`DiagnosticsDecisions`).
+  - Tests: `tests/decisions-chat-recorder.test.ts` and the `## Decisions` directive case in `tests/chat-scope.test.ts` (the directive stays ≤ 700 bytes), both red on the previous main.
+
 ## [0.7.47] — 2026-10-03
 
 Minor-feature release for the studio rebuild's live proofs: everything crew main gained since 0.7.46

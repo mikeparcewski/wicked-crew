@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   ChatScopeIndex,
+  CHAT_DECISIONS_DIRECTIVE,
   CHAT_GROUNDING_COMMAND,
   chatScopeStatement,
   chatScratchBase,
@@ -930,5 +931,31 @@ describe('resolveChatScope — named scope kinds (studio#323 R4)', () => {
     expect(allText).toMatch(/## Scope: everything/);
     expect(allText).toMatch(/every repository registered with this daemon/);
     expect(allText).toContain('`/srv/repos/gamma`');
+  });
+});
+
+describe('DC-S4b: the Decisions section of the scope statement', () => {
+  it('every statement ends its seats\' replies with a wicked-decisions block: the directive is the pinned snapshot, carries the codebook\'s keys, and fits 700 bytes', () => {
+    const text = chatScopeStatement('c10', {
+      kind: 'none',
+      repos: [],
+      cwd: join(base, 'c10'),
+      graph: { bound: false, reason: 'x' },
+      dangling: [],
+    } as unknown as Parameters<typeof chatScopeStatement>[1]);
+    const start = text.indexOf('## Decisions');
+    expect(start).toBeGreaterThan(text.indexOf('## Answer format'));
+    const end = text.indexOf('\n## ', start + 1);
+    const section = end === -1 ? text.slice(start) : text.slice(start, end + 1);
+    expect(section).toBe(CHAT_DECISIONS_DIRECTIVE);
+    expect(section).toMatch(/```wicked-decisions/);
+    for (const key of ['quote', 'decision_text', 'type', 'codify', 'ambiguous', 'steering_type', 'approves_proposal', 'same_as']) {
+      expect(section).toContain(`"${key}"`);
+    }
+    // The §4.3.3 cap: a seat reads the whole statement, but the directive stays small.
+    expect(Buffer.byteLength(section, 'utf8')).toBeLessThanOrEqual(700);
+    // A system chat gets the same directive (every seat, every scope kind).
+    const sys = chatScopeStatement('c11', { kind: 'system', repos: [], cwd: join(base, 'c11'), graph: { bound: false, reason: 'system' }, dangling: [] } as unknown as Parameters<typeof chatScopeStatement>[1]);
+    expect(sys).toContain(CHAT_DECISIONS_DIRECTIVE);
   });
 });
