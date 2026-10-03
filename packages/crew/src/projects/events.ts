@@ -112,7 +112,8 @@ export async function startProjectBus(opts: ProjectBusOptions = {}): Promise<Pro
       await emitOnBus(dbPath, {
         event_type: type,
         domain: CREW_BUS_DOMAIN,
-        subdomain: type.startsWith('wicked.crew.membership.') ? 'membership' : 'project',
+        // The noun segment (`project`, `membership`, and DC-S4a's `decision`) is the subdomain.
+        subdomain: type.split('.')[2] ?? 'project',
         payload: { ts: new Date().toISOString(), ...payload },
         producer_id: CREW_PRODUCER,
         idempotency_key: idempotencyKey,

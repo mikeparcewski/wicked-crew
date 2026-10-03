@@ -27,7 +27,6 @@ import { buildEvidenceBundle, coreUnitId, evidenceFilename } from './evidence.js
 import { outputUnavailableReason, resolveUnit, unitKeysFor } from './unit-output.js';
 import type {
   ApproveProposalResponse,
-  ConformanceRule,
   LaunchRunInput,
   ListMemoriesResponse,
   ListProposalsResponse,
@@ -38,7 +37,6 @@ import type {
   RetireMemoryResponse,
   SessionStatus,
   SessionView,
-  SteeringType,
 } from '../core/types.js';
 import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
 import { callEstateTool, EstateMcpError } from '../core/estate-mcp-client.js';
@@ -182,6 +180,13 @@ import { LOCAL_ACTOR, type AuthMode } from './auth.js';
 // value lives in the leaf module api-prefix.ts to keep unit-output.ts out of this file's cycle.
 export { API_PREFIX } from './api-prefix.js';
 import { API_PREFIX } from './api-prefix.js';
+import { landPolicyRule, policyProposalToRule } from './policy-landing.js';
+import { DecisionLedger } from '../decisions/ledger.js';
+import { DecisionError, DecisionService } from '../decisions/land.js';
+import { ingestDecision } from '../decisions/ingest.js';
+import { registerDecisionRoutes } from '../decisions/routes.js';
+import type { DecisionBusEmit } from '../decisions/events.js';
+import { resolveDecisionsMode, type DecisionsMode } from '../decisions/types.js';
 
 const V = API_PREFIX;
 
@@ -330,97 +335,8 @@ function isStringRecord(v: unknown): v is Record<string, string> {
   );
 }
 
-/**
- * Map an APPROVED policy proposal (estate `proposal.approve` → `handed_off`) into a steering
- * ConformanceRule (DES-MEM-FACETED-001 §5.2). A policy proposal's `kind_type` is
- * `policy:<steering_type>` and its `payload` is `{ rule, severity }`; estate writes NOTHING for it
- * (the AW-11 "no rules.write on estate" invariant) and hands the payload back for crew — the ONE
- * governed rules-write path — to land. Returns the rule to upsert plus the resolved steering type,
- * or a loud `error` string when the proposal cannot be shaped into a valid rule (a malformed
- * `kind_type` / missing `rule` / out-of-enum `severity`) — the caller reports it as a failed
- * landing, never a silent drop (the crew#388 anti-silent-loss doctrine).
- *
- * The rule id is DETERMINISTIC (`proposal:<id>`) so a re-driven landing UPSERTS the same rule
- * (idempotent) instead of minting a duplicate; it sits OUTSIDE the reserved `PAT-/POL-` namespace,
- * which UI/chat/proposal-authored rules are free to do (INV-C1). The rule carries NO `effect`
- * (recall-only — exactly what `{rule, severity}` supports: an enforcement rule would need a
- * non-blank `applies_to`, which the payload does not carry, and INV-S3 fails such a rule closed).
- * `steering_type` is validated against the vocabulary here so the engine's INV-S1 never rejects it
- * as an unknown page.
- */
-export function policyProposalToRule(
-  proposalId: string,
-  kindType: string,
-  payload: unknown,
-  facets: Record<string, string> | undefined,
-): { rule: ConformanceRule; steeringType: SteeringType } | { error: string } {
-  const steeringType = kindType.startsWith('policy:') ? kindType.slice('policy:'.length) : '';
-  if (!STEERING_TYPES.has(steeringType)) {
-    return {
-      error:
-        `the approved proposal's kind_type ${JSON.stringify(kindType)} does not name a steering ` +
-        `type — expected \`policy:<${STEERING_TYPE_VALUES.join('|')}>\``,
-    };
-  }
-  const body =
-    typeof payload === 'object' && payload !== null && !Array.isArray(payload)
-      ? (payload as Record<string, unknown>)
-      : {};
-  const statement = typeof body['rule'] === 'string' ? (body['rule'] as string).trim() : '';
-  if (statement === '') {
-    return {
-      error:
-        'the approved policy proposal payload has no `rule` string to make a rule statement from',
-    };
-  }
-  const rawSeverity = body['severity'];
-  // Normalize common LLM drift before the enum check: a model naturally writes the English word
-  // "warning", but the engine's enum is the short "warn" (info/error/critical are already the
-  // natural words). Tolerate case/whitespace too. A capture worker that says "warning" must still
-  // land its policy — otherwise every derived policy at the middle band silently fails to land.
-  const normSeverity =
-    typeof rawSeverity === 'string'
-      ? (() => {
-          const s = rawSeverity.trim().toLowerCase();
-          return s === 'warning' ? 'warn' : s;
-        })()
-      : rawSeverity;
-  const severity =
-    normSeverity === 'info' || normSeverity === 'warn' || normSeverity === 'error' || normSeverity === 'critical'
-      ? normSeverity
-      : undefined;
-  if (rawSeverity !== undefined && severity === undefined) {
-    return {
-      error:
-        `the approved policy proposal payload has an invalid severity ${JSON.stringify(rawSeverity)} — ` +
-        'expected info|warn|error|critical (or the natural "warning" for warn)',
-    };
-  }
-  const language = facets?.['language'];
-  const project = facets?.['project'];
-  const targets: ConformanceRule['targets'] = {};
-  if (typeof language === 'string' && language !== '') targets.language = language;
-  // DC-S3: the `project` facet is the rule's `targets.project` — a project decision lands scoped to
-  // that project, never everywhere (E3). The caller probes the engine and reads the rule back.
-  if (typeof project === 'string' && project !== '') targets.project = project;
-  const rule: ConformanceRule = {
-    id: `proposal:${proposalId}`,
-    rule_type: 'policy',
-    statement,
-    // A policy proposal SHOULD carry severity; a missing one defaults to `warn` (the middle band)
-    // rather than failing the landing, but a present-but-garbage one fails loud above.
-    severity: severity ?? 'warn',
-    // REQUIRED engine-side (f32, no serde default, INV-C2 `[0,1]`); the payload carries none, so a
-    // fixed authority — the same 0.8 the steering-author landing defaults to.
-    confidence: 0.8,
-    // `language` and `project` map onto the engine's Targets; a `repo` facet has no rule slot.
-    targets,
-    // The landed rule names the proposal it came from (DC-S3), the same id it is keyed on.
-    provenance: { source: 'proposal', ref: `proposal:${proposalId}`, source_kinds: [] },
-    steering_type: steeringType as SteeringType,
-  };
-  return { rule, steeringType: steeringType as SteeringType };
-}
+// `policyProposalToRule` lives beside THE landing (policy-landing.ts); re-exported for its callers.
+export { policyProposalToRule } from './policy-landing.js';
 
 /** A JSON object whose every value is a number (a coverage breakdown map). */
 function isNumberRecord(v: unknown): v is Record<string, number> {
@@ -811,9 +727,17 @@ export interface RegisteredRoutes {
     actor: import('../core/types.js').Actor,
     extraDetail?: Record<string, unknown>,
   ) => Promise<{ code: number; body: unknown }>;
+  /** DC-S4a: the decision service (null when capture is not wired) — the boot re-drive uses it. */
+  decisions: DecisionService | null;
 }
 
 export interface RuntimeDeps {
+  /** DC-S4a decision capture: the ledger (`<state home>/decisions`), absent = capture off. */
+  decisionLedger?: DecisionLedger;
+  /** `WICKED_DECISIONS` (off | ledger | on); defaults to `resolveDecisionsMode()`. */
+  decisionsMode?: DecisionsMode;
+  /** The bus emit for `wicked.crew.decision.*` facts (ids only, never words); absent = no bus. */
+  decisionsEmit?: DecisionBusEmit | null;
   /** The watch registry (TR-W5a), for the `watch.*` settings guard; absent or `null` = no registry. */
   watchRegistry?: () => WatchRegistry | null;
   /** Freeze deliveries (studio idea 15) — `createServer` hydrates one from the audit trail so a
@@ -1175,6 +1099,25 @@ export function registerRoutes(
   // default is the real spawn-per-call `wicked-estate-mcp` client; route tests inject a stub so no
   // process is ever spawned.
   const estateTool = runtime.callEstateTool ?? callEstateTool;
+  // DC-S4a: decision capture over the structured hosts (gate note, elicitation, inject). Words are
+  // recorded post-commit, off the request path, and only from a human actor (decisions/ingest.ts).
+  const decisions: DecisionService | null =
+    runtime.decisionLedger !== undefined
+      ? new DecisionService({
+          ledger: runtime.decisionLedger,
+          mode: runtime.decisionsMode ?? resolveDecisionsMode(),
+          authMode: security.authMode,
+          estateTool,
+          adapter,
+          audit,
+          emit: runtime.decisionsEmit ?? null,
+          ...(runtime.broadcast !== undefined
+            ? { broadcast: (frame) => runtime.broadcast?.(frame as unknown as CoreEvent) }
+            : {}),
+          log: (m) => app.log.warn(m),
+        })
+      : null;
+  if (decisions !== null) registerDecisionRoutes(app, decisions);
   /** Repo root for a repo ref, from the registry — shared by the reprovision path below. */
   const repoRootOf = async (repoRef: string): Promise<string | undefined> =>
     (await adapter.listRepos()).find((r) => r.id === repoRef)?.root_path;
@@ -3517,6 +3460,19 @@ export function registerRoutes(
           status,
         },
       });
+      // DC-S4a host: the gate note (amend / request_changes text) — a bare approve or reject is a
+      // `choice`. Post-commit, off the request path; a non-human actor (a standing order) records nothing.
+      if (decisions !== null) {
+        decisions.track(ingestDecision(decisions, {
+          host: 'gate',
+          actor,
+          words: parsed.data.amend ?? '',
+          choice: parsed.data.action ?? (parsed.data.approve ? 'approve' : 'reject'),
+          projectId: projects.index.projectOf(id) ?? null,
+          runId: id,
+          ...(parsed.data.ord !== undefined ? { ord: parsed.data.ord } : {}),
+        }));
+      }
       // APPROVE of the steering-author propose gate = the doctrine's landing moment: the
       // approved proposal is written to the governance store with `provenance.source: "chat"`,
       // audited per rule, idempotent on replay, and LOUD on failure — the response carries the
@@ -3647,6 +3603,16 @@ export function registerRoutes(
     try {
       await adapter.injectWorkerMessage(id, parsed.data.message, parsed.data.target);
       audit.record('run.injected', actorOf(req), { runId: id, detail: { target: parsed.data.target } });
+      // DC-S4a host: the operator's mid-run steering text (review S9).
+      if (decisions !== null) {
+        decisions.track(ingestDecision(decisions, {
+          host: 'inject',
+          actor: actorOf(req),
+          words: parsed.data.message,
+          projectId: projects.index.projectOf(id) ?? null,
+          runId: id,
+        }));
+      }
       return reply.send({ status: 'ok' });
     } catch (err) {
       return reply.code(409).send({ error: message(err) });
@@ -3913,6 +3879,19 @@ export function registerRoutes(
       runId: id,
       detail: { elicitationId: taken.entry.elicitationId, action: body.action },
     });
+    // DC-S4a host: a free-text answer is words; a picked option (or a decline) is a `choice`.
+    if (decisions !== null) {
+      const picked = taken.entry.options !== null;
+      decisions.track(ingestDecision(decisions, {
+        host: 'elicitation',
+        actor: actorOf(req),
+        words: response !== null && !picked ? response : '',
+        ...(response !== null && picked ? { choice: response } : body.action !== 'accept' ? { choice: body.action } : {}),
+        projectId: projects.index.projectOf(id) ?? null,
+        runId: id,
+        elicitationId: taken.entry.elicitationId,
+      }));
+    }
     return { status: 'resolved' };
   });
 
@@ -5253,6 +5232,42 @@ export function registerRoutes(
     if (editInFlight(id)) {
       return reply.code(409).send({ error: `proposal ${id} is already being accepted` });
     }
+    // DC-S4a: a proposal THIS ledger filed for a decision lands through `remember()` — the one
+    // landing path, with the human check inside it (§4.5). A payload naming an id the ledger does
+    // not know is an ordinary policy proposal (no ORIGIN claim) and takes the path below.
+    let decisionId = decisions?.deps.ledger.decisionForProposal(id) ?? null;
+    if (decisions !== null && decisionId === null) {
+      // The ledger links a proposal to its decision only once the `offered` outcome is written; a
+      // proposal crew filed but has not linked yet (the publish window, or a crash in it) names a
+      // decision this ledger HOLDS — it must still land through `remember()` (codex on DC-S4a).
+      try {
+        const pending = (await estateTool('proposal.list', { state: 'pending' })) as ListProposalsResponse;
+        const named = (pending.proposals.find((p) => p.id === id)?.payload as { decision?: { id?: unknown } } | undefined)?.decision?.id;
+        if (typeof named === 'string' && decisions.deps.ledger.record(named) !== null) decisionId = named;
+      } catch (err) {
+        return estateUpstreamError(reply, err);
+      }
+    }
+    if (decisions !== null && decisionId !== null) {
+      try {
+        const landed = await decisions.remember(decisionId, actorOf(req), { how: 'needs-you' });
+        const view = decisions.deps.ledger.view(decisionId);
+        const landing: PolicyLandingResult = {
+          outcome: 'landed',
+          ruleId: landed.rule_id,
+          ...(view !== null ? { steering_type: view.edits?.steering_type ?? view.derived.steering_type } : {}),
+          ...(landed.project !== undefined ? { project: landed.project } : {}),
+        };
+        return {
+          outcome: 'handed_off',
+          payload: { rule: view?.edits?.statement ?? view?.derived.statement ?? '', severity: 'warn', capture: 'decision', decision: { id: decisionId } },
+          landing,
+        } satisfies ApproveProposalResponse;
+      } catch (err) {
+        if (err instanceof DecisionError) return reply.code(err.status).send({ error: err.message });
+        throw err;
+      }
+    }
     let approved: ApproveProposalResponse;
     try {
       approved = (await estateTool('proposal.approve', { id })) as ApproveProposalResponse;
@@ -5309,64 +5324,12 @@ export function registerRoutes(
     if ('error' in built) {
       return landFailed(built.error);
     }
-    const project = built.rule.targets.project;
-    // DC-S3 probe (DES-decision-capture §5.3): an engine without project rules would accept
-    // `targets.project` and drop it, landing a project decision everywhere. Fail loud, write nothing.
-    if (project !== undefined && !adapter.projectRulesSupported()) {
-      return landFailed(
-        `the approved policy proposal is scoped to project \`${project}\`, but the installed engine ` +
-          'cannot keep a rule\'s project and would land it everywhere; upgrade wicked-core-ts (>= 0.7.35)',
-      );
-    }
-    try {
-      await adapter.upsertConformanceRule(built.rule);
-    } catch (err) {
-      return landFailed(
-        `the store refused the steering rule derived from the approved policy proposal: ${message(err)}`,
-      );
-    }
-    // DC-S3 read-back: what the store holds must still carry the project and the proposal ref. A
-    // mismatch retires the just-written rule (retire, never delete) so it never applies everywhere.
-    let lost: string | null;
-    try {
-      const stored = await adapter.readConformanceRule(built.rule.id);
-      lost =
-        stored === null
-          ? 'the rule is not in the store'
-          : (stored.targets?.project ?? undefined) !== project
-            ? `targets.project reads back ${JSON.stringify(stored.targets?.project ?? null)}, not ${JSON.stringify(project ?? null)}`
-            : stored.provenance?.ref !== built.rule.provenance.ref
-              ? `provenance.ref reads back ${JSON.stringify(stored.provenance?.ref ?? null)}, not ${JSON.stringify(built.rule.provenance.ref)}`
-              : null;
-    } catch (err) {
-      lost = `the rule could not be read back (${message(err)})`;
-    }
-    if (lost !== null) {
-      let retired: string;
-      try {
-        await adapter.retireConformanceRule(built.rule.id);
-        retired = `rule ${built.rule.id} was retired`;
-      } catch (err) {
-        retired = `retiring rule ${built.rule.id} FAILED (${message(err)}); retire it by hand via DELETE ${V}/governance/rules/${built.rule.id}`;
-      }
-      return landFailed(`the engine did not keep the landed rule as written: ${lost}; ${retired}`);
-    }
-    audit.record('governance.rule.upserted', actorOf(req), {
-      detail: {
-        id: built.rule.id,
-        source: 'proposal',
-        via: 'proposal-approve',
-        steeringType: built.steeringType,
-        proposalId: id,
-        ...(project !== undefined ? { project } : {}),
-      },
+    // THE landing (probe, upsert, read-back, audit) — shared with the decision landing (DC-S4a).
+    const landing = await landPolicyRule({ adapter, audit }, built, actorOf(req), {
+      via: 'proposal-approve',
+      proposalId: id,
     });
-    const landing: PolicyLandingResult = {
-      outcome: 'landed',
-      ruleId: built.rule.id,
-      steering_type: built.steeringType,
-      ...(project !== undefined ? { project } : {}),
-    };
+    if (landing.outcome === 'failed') return landFailed(landing.error ?? 'the landing failed');
     return { outcome: 'handed_off', payload: approved.payload, landing };
   });
 
@@ -5382,6 +5345,17 @@ export function registerRoutes(
     }
     if (editInFlight(id.trim())) {
       return reply.code(409).send({ error: `proposal ${id.trim()} is being accepted` });
+    }
+    // DC-S4a B12: rejecting a decision's proposal dismisses the decision too (one object, two places).
+    const rejectedDecision = decisions?.deps.ledger.decisionForProposal(id.trim()) ?? null;
+    if (decisions !== null && rejectedDecision !== null) {
+      try {
+        await decisions.dismiss(rejectedDecision, actorOf(req), 'not-a-rule');
+        return { ok: true } satisfies RejectProposalResponse;
+      } catch (err) {
+        if (err instanceof DecisionError) return reply.code(err.status).send({ error: err.message });
+        throw err;
+      }
     }
     try {
       return (await estateTool('proposal.reject', { id })) as RejectProposalResponse;
@@ -5786,5 +5760,5 @@ export function registerRoutes(
     log: (m) => app.log.warn(m),
   });
 
-  return { decideGate };
+  return { decideGate, decisions };
 }
