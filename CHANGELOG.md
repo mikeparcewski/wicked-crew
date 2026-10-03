@@ -10,6 +10,8 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+- **Pin `wicked-core-ts` `^0.7.36` (was `^0.7.35`).** The engine release carrying the testing-rule floor (WT-C3: obligations at `plan.compose`, the walkthrough after the last creator, `plan.accepted.rules[]`), the seeded testing starter rules TST-1001..1003 with the STEERING testing section (WT-C4), and the `watch_finding.*` event catalog (TR-W3). It is the engine WT-W4's discovery proposals and the Watchtower's testing-rule floor read from. The lockfile pins the main package and all five platform binaries at 0.7.36, and `tests/fixtures/core-workflow-skill-refs.json` is regenerated from core's `workflows/*.json` at `core-ts-v0.7.36` (the refs are unchanged; only the version key moves).
+
 ## [0.7.49] — 2026-10-03
 
 Feature release, hours after 0.7.48: "Review this page". The daemon answers
