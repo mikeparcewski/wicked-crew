@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.85.0",
+  "apiTypesVersion": "0.86.0",
   "endpoints": [
     {
       "method": "GET",
@@ -273,6 +273,77 @@
       "requestType": null,
       "responseType": null,
       "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/editors",
+      "requestType": null,
+      "responseType": "ListEditorsResponse",
+      "statusCodes": [
+        200,
+        403
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/editors",
+      "requestType": null,
+      "responseType": "InstallEditorRefusal",
+      "statusCodes": [
+        400,
+        403,
+        404,
+        422,
+        501
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/editors/:id",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": [
+        403,
+        404,
+        409
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/editors/:id/:version/entry",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": [
+        200,
+        404,
+        409
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/editors/:id/enabled",
+      "requestType": null,
+      "responseType": "EditorView",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/editors/:id/grants",
+      "requestType": null,
+      "responseType": "EditorGrantsResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        501,
+        502
+      ]
     },
     {
       "method": "GET",

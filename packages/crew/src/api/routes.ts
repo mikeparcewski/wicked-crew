@@ -188,6 +188,10 @@ import { ingestDecision } from '../decisions/ingest.js';
 import { registerDecisionRoutes } from '../decisions/routes.js';
 import { ChatDecisionRecorder } from '../decisions/chat-recorder.js';
 import { ConsiderationService } from '../decisions/consider.js';
+import { gardenPackCheck, type PackCheckRunner } from '../editors/pack-install.js';
+import { EditorRegistry } from '../editors/registry.js';
+import { registerEditorRoutes } from '../editors/routes.js';
+import { discoverLivePlugin } from '../skills/plugin-source.js';
 import type { DecisionBusEmit } from '../decisions/events.js';
 import { resolveDecisionsMode, type DecisionsMode } from '../decisions/types.js';
 
@@ -866,6 +870,10 @@ export interface RuntimeDeps {
   /** The studio asset root `createServer` resolved (bundled or overridden) — diagnostics reads
    *  the bundle's shipped version manifest from it. Absent = headless = `studioBundle: null`. */
   studioRoot?: string;
+  /** EP-C1 (tests): the `pack check` runner `POST /editors` uses; default = garden's script as a child. */
+  packCheck?: PackCheckRunner;
+  /** EP-C1 (tests): where `daemon-editors.json` lives; default = the crew state home. */
+  editorsStateHome?: string;
   /** The eval RUN history store behind `/testing/evals[/:id]` — `createServer` builds one over the
    *  daemon state home so every `POST /testing/evals/run` is recorded; a directly-driven route set
    *  (tests) gets one only when it injects it, so a test that never touches the eval routes writes
@@ -1136,6 +1144,20 @@ export function registerRoutes(
     ...(chatTranscripts !== undefined ? { transcripts: chatTranscripts } : {}),
     projectOf: (id) => projects.index.projectOf(id),
     emit: runtime.decisionsEmit ?? null,
+    log: (m) => app.log.warn(m),
+  });
+  // EP-C1 (DES-artifact-editor-plugins §9.1): the editor registry — first-party editors discovered
+  // in studio's bundle, flags in `daemon-editors.json` — and its routes. Pack installs are refused
+  // until EP-C8, after garden's gate has run and the approval list has been read.
+  const editorRegistry = new EditorRegistry({
+    ...(runtime.editorsStateHome !== undefined ? { stateHome: runtime.editorsStateHome } : {}),
+    ...(runtime.studioRoot !== undefined ? { studioRoot: runtime.studioRoot } : {}),
+    log: (m) => app.log.warn(m),
+  });
+  registerEditorRoutes(app, {
+    registry: editorRegistry,
+    adapter,
+    packCheck: runtime.packCheck ?? gardenPackCheck(discoverLivePlugin()?.path ?? null),
     log: (m) => app.log.warn(m),
   });
   const chatRecorder: ChatDecisionRecorder | null =

@@ -8,6 +8,7 @@ import type { WebSocket } from 'ws';
 import { DecisionLedger } from '../decisions/ledger.js';
 import type { ChatDecisionRecorder } from '../decisions/chat-recorder.js';
 import type { ConsiderationService } from '../decisions/consider.js';
+import { requestOrigin, shellCsp } from '../editors/csp.js';
 import { registerRoutes } from './routes.js';
 import { ErrorRing, teeStreamWithErrorRing } from './diagnostics.js';
 import { GateCache } from './gate-cache.js';
@@ -1839,6 +1840,9 @@ export async function createServer(
         if (p.endsWith('/index.html')) {
           // HTML must revalidate so a redeploy's new asset hashes are picked up.
           reply.header('Cache-Control', 'no-cache');
+          // EP-C1 (§8.2): the shell says what any frame in it may point at — crew's editors route,
+          // crew's interactive proxy, blob: and data:. A self-navigating plugin can reach nothing else.
+          reply.header('Content-Security-Policy', shellCsp(requestOrigin(reply.request)));
         } else if (p.includes('/assets/')) {
           // Content-addressed (hashed) assets are immutable.
           reply.header('Cache-Control', 'public, max-age=31536000, immutable');
@@ -1856,6 +1860,7 @@ export async function createServer(
         !req.url.startsWith('/ws')
       ) {
         reply.header('Cache-Control', 'no-cache');
+        reply.header('Content-Security-Policy', shellCsp(requestOrigin(req)));
         // `root` is dist/studio, so the shell is at 'index.html' (not
         // 'studio/index.html'): sendFile resolves relative to root.
         return reply.type('text/html').sendFile('index.html');

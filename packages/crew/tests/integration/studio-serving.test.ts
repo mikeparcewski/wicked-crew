@@ -94,6 +94,21 @@ describe('studio serving (static + SPA fallback alongside API/WS)', () => {
     expect(fallback.headers['cache-control']).toBe('no-cache');
   });
 
+  it('EP-C1 (§8.2): the shell and its SPA fallback carry the frame-src policy for the request\'s own origin; assets and the API do not', async () => {
+    const root = await app.inject({ method: 'GET', url: '/', headers: { host: 'localhost:7701' } });
+    expect(root.headers['content-security-policy']).toBe(
+      'frame-src http://localhost:7701/api/v1/editors/ http://localhost:7701/api/v1/projects/ blob: data:',
+    );
+    const fallback = await app.inject({ method: 'GET', url: '/runs/does-not-exist', headers: { host: '127.0.0.1:61741' } });
+    expect(fallback.headers['content-security-policy']).toBe(
+      'frame-src http://127.0.0.1:61741/api/v1/editors/ http://127.0.0.1:61741/api/v1/projects/ blob: data:',
+    );
+    const asset = await app.inject({ method: 'GET', url: '/assets/index-abc123.js' });
+    expect(asset.headers['content-security-policy']).toBeUndefined();
+    const health = await app.inject({ method: 'GET', url: '/api/v1/health' });
+    expect(health.headers['content-security-policy']).toBeUndefined();
+  });
+
   it('a non-GET to a non-API path is 404 JSON, not the SPA shell', async () => {
     const res = await app.inject({ method: 'POST', url: '/some/random/path' });
     expect(res.statusCode).toBe(404);

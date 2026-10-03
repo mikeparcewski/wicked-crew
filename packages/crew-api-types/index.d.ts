@@ -8827,3 +8827,122 @@ export interface Consideration {
   /** `considerRules` (the engine's project-aware read), `global-only` (an engine without it), or `unavailable`. */
   source: 'considerRules' | 'global-only' | 'unavailable';
 }
+
+// ── Artifact editors (DES-artifact-editor-plugins §5.2, §6, §8.2; EP-C1, api-types 0.86.0) ───────
+
+/** What a plugin can ask for (§6.1). There is no permission for network calls, agents or gates. */
+export type EditorPermission =
+  | 'artifact.read'
+  | 'artifact.write'
+  | 'selection.chip'
+  | 'composer.draft'
+  | 'checks.read'
+  | 'checks.contribute'
+  | 'sources.read'
+  | 'media.read'
+  | 'artifact.export'
+  | 'ui.fullscreen'
+  | 'network.media';
+
+/**
+ * One registered editor, as Settings → Editors renders it. No path is on the wire: the bundle is
+ * fetched at `entry_url` (`GET /editors/:id/:version/entry`, the §8.2 headers, re-hashed per serve).
+ * First-party editors ship inside studio's bundle (`<studio dist>/editors/<id>/editor.json` +
+ * `index.html`, ids `wicked-*`) and are discovered at boot; third-party editors arrive as garden
+ * packs and cannot be installed before the install-time conformance run (EP-C8).
+ */
+export interface EditorView {
+  id: string;
+  title: string;
+  version: string;
+  /** wicked.editor protocol versions it speaks. */
+  protocol: number[];
+  /** Artifact kinds it can open. */
+  kinds: string[];
+  sizes: Array<'inline' | 'pane' | 'full'>;
+  panels?: Array<'checks'>;
+  /** Each with the reason shown at install. The GRANTED set is `GET /editors/:id/grants`. */
+  permissions: Array<{ id: EditorPermission; why: string }>;
+  /** The full sha256 of the entry file, pinned when the registry read it. */
+  sha256: string;
+  bytes: number;
+  first_party: boolean;
+  enabled: boolean;
+  source: 'studio-bundle';
+  entry_url: string;
+}
+
+/** `GET /editors` (operator+). */
+export interface ListEditorsResponse {
+  editors: EditorView[];
+  /** Why `POST /editors` answers 501 today: third-party installs wait on EP-C8. */
+  installs: 'refused_until_conformance';
+}
+
+/** `POST /editors` body (human-only): a pack directory holding `wicked-pack.json`. */
+export interface InstallEditorBody {
+  packRoot: string;
+}
+
+/** One finding of garden's `pack check --json`. */
+export interface PackCheckFinding {
+  level: 'error' | 'warn';
+  code: string;
+  message: string;
+  path?: string;
+}
+
+/** The verdict of garden's `pack check --json` (the fail-closed gate every install runs first). */
+export interface PackCheckResult {
+  ok: boolean;
+  errors: PackCheckFinding[];
+  warnings: PackCheckFinding[];
+}
+
+/**
+ * `POST /editors` → 501: the pack passed garden's gate, and this is what the install WOULD ask the
+ * operator to approve (§3.2 "Add these") once third-party installs open (EP-C8). Nothing was written.
+ */
+export interface InstallEditorRefusal {
+  code: 'third_party_editors_not_available';
+  error: string;
+  check: PackCheckResult;
+  pack: {
+    name: string;
+    vendor: string;
+    version: string;
+    editors: Array<{ id: string; title: string; version: string; kinds: string[]; permissions: Array<{ id: string; why: string }> }>;
+    blocks: Array<{ id: string; label: string; produces_kind: string; skills: string[] }>;
+    /** The pack's skill directories, approved together with its editors and blocks. */
+    skills: string[];
+  };
+}
+
+/** `POST /editors/:id/enabled` body (human-only). */
+export interface SetEditorEnabledBody {
+  enabled: boolean;
+}
+
+/** One decided permission (the engine's `evaluate_editor_grants`, EP-K1). */
+export interface EditorGrant {
+  permission: EditorPermission | string;
+  decision: 'allow' | 'ask' | 'deny';
+  /** The steering rules that decided it. */
+  ruleIds: string[];
+  /** The ledger entry an operator's "allow" adds to `EDITOR-GRANTS.excludes` (`editor:<id>@<version>#<sha256>/<permission>`). */
+  token: string;
+}
+
+/**
+ * `GET /editors/:id/grants?project=` (operator+): the engine's decided set for this editor's version
+ * and hash (a changed hash is a new token and asks again), deny dominating. The host fetches it
+ * before `host.hello` and on every settings/rule change, and enforces it on every request.
+ */
+export interface EditorGrantsResponse {
+  editorId: string;
+  version: string;
+  sha256: string;
+  project: string | null;
+  firstParty: boolean;
+  grants: EditorGrant[];
+}
