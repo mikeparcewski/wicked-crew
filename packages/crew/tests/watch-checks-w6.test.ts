@@ -201,11 +201,32 @@ describe('deterministic:warned_rule (risky-call) — fixture table (test 2)', ()
     expect(locked.raised).toEqual([]);
     expect(warnedRuleCheck.coverage(locked.state)).toEqual({ state: 'not_checked', reason: 'the rule store could not be read, so fired rules could not be classified' });
     const noSource = await run(warnedRuleCheck, [hook(1, 0, 'allow', ['OPS-WATCH-001'])], ctxWith(null));
-    expect(warnedRuleCheck.coverage(noSource.state)).toMatchObject({ state: 'not_checked' });
+    expect(warnedRuleCheck.coverage(noSource.state)).toEqual({ state: 'not_checked', reason: 'the rule store could not be read, so fired rules could not be classified' });
     const fine = await run(warnedRuleCheck, [hook(1, 0, 'allow', [])]);
     expect(warnedRuleCheck.coverage(fine.state)).toEqual({ state: 'checked' });
     const none = await run(warnedRuleCheck, []);
     expect(warnedRuleCheck.coverage(none.state)).toEqual({ state: 'not_checked', reason: 'no governed tool call has reached a gate yet' });
+  });
+
+  it('codex r1: a frame whose rules could not be read is KEPT and classified on the run\'s next readable frame — never dropped; coverage returns to checked once nothing is waiting', async () => {
+    let readable = false;
+    const ctx: CheckCtx = { now: () => 0, stats: () => ({ queueDepth: 0, queueHwm: 0, shedTotal: 0, tailLagMs: 0 }), rules: async () => (readable ? RULES : Promise.reject(new Error('store locked'))) };
+    const state: RunWatchState = { runId: 'run-1', seen: new Set(), bag: new Map() };
+    const subjects = (o: CheckOutput[]) => o.flatMap((x) => (x.op === 'raise' ? [x.subject] : []));
+    expect(await warnedRuleCheck.evaluate(hook(1, 0, 'allow', ['OPS-WATCH-001']), state, {}, {}, ctx)).toEqual([]);
+    expect(await warnedRuleCheck.evaluate(hook(2, 0, 'allow', ['OPS-WATCH-003'], 'Write'), state, {}, {}, ctx)).toEqual([]);
+    expect(warnedRuleCheck.coverage(state)).toMatchObject({ state: 'not_checked', reason: expect.stringMatching(/could not be read/) });
+    readable = true;
+    // The next frame fires nothing itself, and still drains what was waiting — in order, each with its own unit and tool.
+    const drained = await warnedRuleCheck.evaluate(hook(3, 0, 'allow', []), state, {}, {}, ctx);
+    expect(subjects(drained)).toEqual(['1:0:warned:OPS-WATCH-001', '2:0:warned:OPS-WATCH-003']);
+    expect(drained.map((x) => (x.op === 'raise' ? x.sentence : ''))).toEqual([
+      'A rule you asked to be warned about fired on Bash: OPS-WATCH-001.',
+      'A rule you asked to be warned about fired on Write: OPS-WATCH-003.',
+    ]);
+    expect(warnedRuleCheck.coverage(state)).toEqual({ state: 'checked' });
+    // Nothing is raised twice.
+    expect(await warnedRuleCheck.evaluate(hook(1, 0, 'allow', ['OPS-WATCH-001']), state, {}, {}, ctx)).toEqual([]);
   });
 
   it('severity mapping: critical/error → high, warn → medium, info/unknown → info', () => {
@@ -242,6 +263,45 @@ describe('the registry\'s rule snapshot and the shipped set', () => {
     expect(reads).toBe(2);
     const bare = new WatchRegistry({ dbPath: undefined, settings: async () => undefined, projectOf: () => undefined });
     expect((bare as unknown as { ctx(): CheckCtx }).ctx().rules).toBeUndefined();
+  });
+
+  it('codex r1: a rules read that does not settle is refused at the deadline (below the lane\'s timeout), a slow read still fills the snapshot, and a hung read does not pin the slot past one TTL', async () => {
+    let now = 1_000;
+    let reads = 0;
+    const gates: Array<(v: Array<{ id: string; effect?: string; severity: string }>) => void> = [];
+    const registry = new WatchRegistry({
+      dbPath: undefined,
+      settings: async () => undefined,
+      projectOf: () => undefined,
+      now: () => now,
+      rulesDeadlineMs: 20,
+      rules: () => {
+        reads++;
+        return new Promise((resolve) => gates.push(resolve));
+      },
+    });
+    const ctx = (registry as unknown as { ctx(): CheckCtx }).ctx();
+    await expect(ctx.rules!()).rejects.toThrow(/timed out/);
+    // Same window: the read in flight is shared, not restarted.
+    await expect(ctx.rules!()).rejects.toThrow(/timed out/);
+    expect(reads).toBe(1);
+    // The slow read lands: the snapshot serves the next ask at once.
+    gates[0]!([{ id: 'OPS-WATCH-001', effect: 'warn', severity: 'warn' }]);
+    expect([...(await ctx.rules!()).keys()]).toEqual(['OPS-WATCH-001']);
+    // A read that never settles is abandoned after one TTL — the next ask starts a new one.
+    now += RULES_SNAPSHOT_TTL_MS + 1;
+    await expect(ctx.rules!()).rejects.toThrow(/timed out/);
+    expect(reads).toBe(2);
+    now += RULES_SNAPSHOT_TTL_MS + 1;
+    const third = ctx.rules!();
+    await new Promise((r) => setImmediate(r)); // the source is called on the next microtask
+    expect(reads).toBe(3);
+    gates[2]!([{ id: 'OPS-WATCH-009', effect: 'warn', severity: 'info' }]);
+    expect([...(await third).keys()]).toEqual(['OPS-WATCH-009']);
+    // The abandoned read settling late never overwrites the newer snapshot.
+    gates[1]!([{ id: 'STALE', effect: 'warn', severity: 'info' }]);
+    await new Promise((r) => setTimeout(r, 5));
+    expect([...(await ctx.rules!()).keys()]).toEqual(['OPS-WATCH-009']);
   });
 
   it('both checks are shipped and both entries load enabled with the right triggers, joins and filters', () => {

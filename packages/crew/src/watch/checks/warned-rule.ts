@@ -23,15 +23,29 @@
 import { z } from 'zod';
 import type { CheckOutput, WatchCheck, WatchRuleBrief } from '../types.js';
 
+/** A frame whose fired rules could not be classified yet (the store read was refused or slow). */
+interface Waiting {
+  ord: number | null;
+  attempt: number | null;
+  tool: string;
+  decision: string;
+  ids: string[];
+}
+
 interface Bag {
   /** Hook frames that carried `firedPolicies` (an array, possibly empty). */
   hooks: number;
   /** Hook frames from an engine before TR-W2 (no `firedPolicies`): this projection cannot tell. */
   silent: number;
-  /** Frames that fired rules while the store could not be read. */
-  unreadable: number;
+  /** Frames kept for the run's next readable frame (codex r1: an unreadable store drops nothing). */
+  waiting: Waiting[];
+  /** Frames that could not be kept (no rule source at all, or more than {@link WAITING_MAX} waiting). */
+  lost: number;
   raised: Set<string>;
 }
+
+/** Frames one run may hold for a later read; past it they are counted lost and coverage says so. */
+const WAITING_MAX = 50;
 
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 
@@ -54,7 +68,7 @@ export const warnedRuleCheck: WatchCheck<Record<string, never>, Record<string, n
   paramsSchema: z.object({}).strict() as unknown as z.ZodType<Record<string, never>>,
   thresholdSchema: z.object({}).strict() as unknown as z.ZodType<Record<string, never>>,
   async evaluate(input, state, _params, _threshold, ctx) {
-    const bag = (state.bag.get('warned') as Bag | undefined) ?? { hooks: 0, silent: 0, unreadable: 0, raised: new Set() };
+    const bag = (state.bag.get('warned') as Bag | undefined) ?? ({ hooks: 0, silent: 0, waiting: [], lost: 0, raised: new Set() } satisfies Bag);
     state.bag.set('warned', bag);
     if (input.type !== 'governanceHookFired') return [];
     const e = input.event;
@@ -67,45 +81,55 @@ export const warnedRuleCheck: WatchCheck<Record<string, never>, Record<string, n
     }
     bag.hooks++;
     const ids = [...new Set(fired.filter((x): x is string => typeof x === 'string' && x !== ''))];
-    if (ids.length === 0) return [];
-    let rules: ReadonlyMap<string, WatchRuleBrief> | null = null;
-    try {
-      rules = ctx.rules !== undefined ? await ctx.rules() : null;
-    } catch {
-      rules = null;
-    }
-    if (rules === null) {
-      bag.unreadable++;
+    const frame: Waiting | null =
+      ids.length === 0
+        ? null
+        : { ord: num(e['ord']), attempt: num(e['attempt']), tool: typeof e['toolName'] === 'string' && e['toolName'] !== '' ? e['toolName'] : 'a tool', decision, ids };
+    if (frame === null && bag.waiting.length === 0) return [];
+    if (ctx.rules === undefined) {
+      if (frame !== null) bag.lost++;
       return [];
     }
-    const ord = num(e['ord']);
-    const attempt = num(e['attempt']);
-    const tool = typeof e['toolName'] === 'string' && e['toolName'] !== '' ? e['toolName'] : 'a tool';
+    let rules: ReadonlyMap<string, WatchRuleBrief>;
+    try {
+      rules = await ctx.rules();
+    } catch {
+      // Not classifiable now: keep the frame for the run's next readable one — never "no rule fired".
+      if (frame !== null) {
+        if (bag.waiting.length < WAITING_MAX) bag.waiting.push(frame);
+        else bag.lost++;
+      }
+      return [];
+    }
+    const todo = frame !== null ? [...bag.waiting, frame] : bag.waiting;
+    bag.waiting = [];
     const out: CheckOutput[] = [];
-    for (const id of ids) {
-      const rule = rules.get(id);
-      if (rule === undefined || rule.effect !== 'warn') continue;
-      const subject = `${ord ?? '-'}:${attempt ?? '-'}:warned:${id}`;
-      if (bag.raised.has(subject)) continue;
-      bag.raised.add(subject);
-      out.push({
-        op: 'raise',
-        subject,
-        kind: 'flag',
-        severity: watchSeverityOf(rule.severity),
-        sentence: `A rule you asked to be warned about fired on ${tool}: ${id}.`,
-        facts: { rule_id: id, tool, effect: 'warn', rule_severity: rule.severity, decision },
-        ord,
-        attempt,
-        re: `governanceHookFired#${ord ?? '-'}:${attempt ?? '-'}`,
-      });
+    for (const f of todo) {
+      for (const id of f.ids) {
+        const rule = rules.get(id);
+        if (rule === undefined || rule.effect !== 'warn') continue;
+        const subject = `${f.ord ?? '-'}:${f.attempt ?? '-'}:warned:${id}`;
+        if (bag.raised.has(subject)) continue;
+        bag.raised.add(subject);
+        out.push({
+          op: 'raise',
+          subject,
+          kind: 'flag',
+          severity: watchSeverityOf(rule.severity),
+          sentence: `A rule you asked to be warned about fired on ${f.tool}: ${id}.`,
+          facts: { rule_id: id, tool: f.tool, effect: 'warn', rule_severity: rule.severity, decision: f.decision },
+          ord: f.ord,
+          attempt: f.attempt,
+          re: `governanceHookFired#${f.ord ?? '-'}:${f.attempt ?? '-'}`,
+        });
+      }
     }
     return out;
   },
   coverage(state) {
     const bag = state.bag.get('warned') as Bag | undefined;
     if (bag !== undefined && bag.hooks > 0) {
-      if (bag.unreadable > 0) return { state: 'not_checked', reason: 'the rule store could not be read, so fired rules could not be classified' };
+      if (bag.waiting.length > 0 || bag.lost > 0) return { state: 'not_checked', reason: 'the rule store could not be read, so fired rules could not be classified' };
       return { state: 'checked' };
     }
     if (bag !== undefined && bag.silent > 0) {
