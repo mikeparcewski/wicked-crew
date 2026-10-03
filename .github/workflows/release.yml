@@ -72,7 +72,9 @@ jobs:
   # stays FIXED-UNVERIFIED until a green smoke. A true pre-`latest` gate (publish under dist-tag
   # `next`, promote on PASS) is decision D-L10-1, owed; this is the post-publish default. The
   # harness is pinned by SHA, in BOTH the `uses:` line and `wicked_ci_ref` (move them together). It
-  # is pinned to wicked-ci main after wicked-ci#36 (S04 asserts the teamed routing of wicked-core#590
+  # is pinned to wicked-ci main after wicked-ci#37 (S08 counts a chat turn's own records — crew 0.7.48's
+  # per-turn `decisions` transcript record failed the old "exactly 2 records" check, run 37140085699 —
+  # on top of wicked-ci#36: S04 asserts the teamed routing of wicked-core#590
   # S5, F-SMOKE-004 / F-SMOKE-005); never re-pin to an older ref such as v1.3.2, whose S04 still
   # asserts the removed ballots.
   version:
@@ -100,7 +102,7 @@ jobs:
     needs: [release, version]
     permissions:
       contents: read
-    uses: mikeparcewski/wicked-ci/.github/workflows/smoke.yml@99bbc30e5e2de8152455427a7c73972081fad5cf # main after wicked-ci#36 (S04 teamed routing)
+    uses: mikeparcewski/wicked-ci/.github/workflows/smoke.yml@bbb3a036dbf4a8dd13a3d678fcb10955acc4fe9c # main after wicked-ci#37 (S08 counts the turn's own records: crew >= 0.7.48 appends a `decisions` record per chat turn)
     with:
       crew_version: ${{ needs.version.outputs.version }}
       # wicked-ci #30 (release verdict crew 0.7.35 §Smoke gate): on a CROSS-REPO workflow_call GitHub
@@ -108,4 +110,4 @@ jobs:
       # default fell back to `github.sha` — crew's own tag commit — and the harness checkout failed
       # ("not our ref"); the smoke gate never ran inside the release run. Pin the harness ref
       # EXPLICITLY to the same SHA as the `uses:` line above (move both together on every re-pin).
-      wicked_ci_ref: 99bbc30e5e2de8152455427a7c73972081fad5cf
+      wicked_ci_ref: bbb3a036dbf4a8dd13a3d678fcb10955acc4fe9c
