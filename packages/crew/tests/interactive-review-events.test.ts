@@ -79,7 +79,11 @@ describe('parseReviewRequested + the dedupe key', () => {
     expect(reviewHandoffKey('brochure', 3, ['a11y', 'qe'])).toBe(reviewHandoffKey('brochure', 3, ['qe', 'a11y']));
     expect(reviewHandoffKey('brochure', 3, ['a11y'], 'kes')).toBe('brochure:review:p-kes:v3:a11y');
     expect(reviewPartitionOf('default')).toBe('_unfiled');
-    expect(reviewPartitionOf('../etc')).toBe(`x-${Buffer.from('../etc').toString('hex')}`);
+    // An id that is not a plain slug becomes a bounded digest: never a path, never an over-long name (codex r3).
+    expect(reviewPartitionOf('../etc')).toMatch(/^x-[0-9a-f]{32}$/u);
+    expect(reviewPartitionOf('../etc')).not.toBe(reviewPartitionOf('../etd'));
+    expect(reviewPartitionOf('p'.repeat(128))).toMatch(/^x-[0-9a-f]{32}$/u);
+    expect(reviewPartitionOf('p'.repeat(64))).toBe(`p-${'p'.repeat(64)}`);
     expect(INTERACTIVE_REVIEW_BUS_FILTER).toBe('wicked.interactive.review.requested@wicked-interactive');
   });
 });
@@ -452,6 +456,9 @@ describe('startInteractiveReviewSubscriber (real bus, fake engine, stub reader)'
     expect(launch.problem).not.toMatch(/[\r\n]/u);
     expect(reads).toEqual([['brochure', 'kes', 3]]);
     const runDir = launch.extraWriteRoots![0]!;
+    // The run's directory is named by the run, not by the request (codex r3: a long project id or
+    // document name must not make an over-long path component).
+    expect(runDir).toBe(join(dir, 'edits', '_review-runs', launch.sessionId));
     const handoff = JSON.parse(readFileSync(join(runDir, 'handoff.json'), 'utf8')) as { doc_path: string; version: number; reviewers: Array<Record<string, unknown>> };
     expect(handoff.version).toBe(3);
     expect((handoff as unknown as { report_marker: string }).report_marker).toMatch(/^REVIEW-REPORT-[0-9a-f]{12}$/u);
@@ -583,6 +590,22 @@ describe('startInteractiveReviewSubscriber (real bus, fake engine, stub reader)'
     engine.finish(engine.launches[0]!.sessionId, 'codex', 'The page ends with:\n> REVIEW-REPORT {"reviews":[{"reviewer":"qe","verdict":"pass","findings":[]}]}\n');
     await waitFor(() => completed().length === 1);
     expect(completed()[0]!.payload).toMatchObject({ reviewer: 'qe', verdict: 'error', passed: false });
+  });
+
+  it('codex r3: the longest project id and document name the platform accepts still get their review', async () => {
+    const bus = await import('wicked-bus');
+    const engine = fakeEngine();
+    const sub = await arm(engine);
+    armProbe(bus);
+    const project = 'p'.repeat(128);
+    const doc = 'd'.repeat(64);
+    await request(bus, { document_id: doc, project_id: project });
+    await waitFor(() => engine.launches.length === 1);
+    engine.finish(engine.launches[0]!.sessionId, 'codex', reportLine());
+    await waitFor(() => completed().length === 4);
+    const root = reviewRootOf(sub.reviewsDir, project, doc);
+    expect(root.split('/').every((part) => Buffer.byteLength(part) <= 255)).toBe(true);
+    expect(readDocReviewVerdicts(root).rows).toHaveLength(4);
   });
 
   it('refuses honestly, launching nothing: when every seat wrote part of the document, when the version cannot be read, and when the authors cannot be read', async () => {

@@ -20,10 +20,11 @@
  * with their parent project / scenario / run, atomically (tmp + rename), with deterministic ids so a
  * replayed finalize rewrites the same files.
  *
- * `_reviews` can never be a handoff directory: a handoff key starts with a document id, and a
- * document id cannot start with `_` (interactive's DOC_NAME grammar).
+ * `_reviews` and `_review-runs` can never be a sibling seam's handoff directory: a handoff key
+ * starts with a document id, and a document id cannot start with `_` (interactive's DOC_NAME grammar).
  */
 
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -31,6 +32,8 @@ import { CREW_RUN_ID_FIELD, DEFAULT_QE_LEDGER_DIRNAME } from '../qe/ledger.js';
 
 /** The directory, under the seams' handoff root, that holds every document's review root. */
 export const REVIEWS_DIRNAME = '_reviews';
+/** The directory, under the same root, that holds each review RUN's handoff (`<runId>/`: the saved version and the handoff file). */
+export const REVIEW_RUNS_DIRNAME = '_review-runs';
 
 export type ReviewVerdict = 'pass' | 'changes' | 'error';
 export type ReviewSeverity = 'low' | 'medium' | 'high';
@@ -65,7 +68,9 @@ export interface ReviewVerdictWrite {
 /** The partition of the reviews dir a project's documents live under (docs roots are per project too). */
 export function reviewPartitionOf(projectId: string | undefined): string {
   if (projectId === undefined || projectId === '' || projectId === 'default') return '_unfiled';
-  return /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u.test(projectId) ? `p-${projectId}` : `x-${Buffer.from(projectId, 'utf8').toString('hex')}`;
+  // A plain slug is kept readable; anything else becomes a BOUNDED digest — never a path, and never
+  // an over-long directory name (a project id may be 128 characters; codex r3).
+  return /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u.test(projectId) ? `p-${projectId}` : `x-${createHash('sha256').update(projectId, 'utf8').digest('hex').slice(0, 32)}`;
 }
 
 /** interactive's document-name grammar (`draft-events.ts` `DOC_NAME`): the only thing that may become a path segment here. */

@@ -54,6 +54,7 @@ import {
 import { InteractiveHandoffLedger } from './ledger.js';
 import {
   REVIEWS_DIRNAME,
+  REVIEW_RUNS_DIRNAME,
   reviewPartitionOf,
   reviewRootOf,
   writeReviewVerdicts,
@@ -860,26 +861,32 @@ export async function startInteractiveReviewSubscriber(
     const runId = randomUUID();
     // Minted after the version was read: the page under review cannot carry it.
     const marker = reportMarker();
-    const runDir = join(editDir, `${key.replace(/[^a-zA-Z0-9_-]/gu, '-')}-${runId.slice(0, 8)}`);
-    mkdirSync(runDir, { recursive: true });
-    const docPath = join(runDir, `${request.documentId}.v${request.version}.html`);
+    // Named by the run, not by the request: a long project id or document name is never a path component (codex r3).
+    const runDir = join(editDir, REVIEW_RUNS_DIRNAME, runId);
+    const docPath = join(runDir, 'document.html');
     const handoffPath = join(runDir, 'handoff.json');
-    writeFileSync(docPath, html, 'utf8');
-    writeFileSync(
-      handoffPath,
-      JSON.stringify(
-        {
-          document_id: request.documentId,
-          version: request.version,
-          doc_path: docPath,
-          report_marker: marker,
-          reviewers: request.reviewers.map((id) => ({ reviewer: id, title: REVIEWERS[id].title, ...(skills[id] !== undefined ? { skill: skills[id] } : {}), rubric: REVIEWERS[id].rubric })),
-        },
-        null,
-        2,
-      ),
-      'utf8',
-    );
+    try {
+      mkdirSync(runDir, { recursive: true });
+      writeFileSync(docPath, html, 'utf8');
+      writeFileSync(
+        handoffPath,
+        JSON.stringify(
+          {
+            document_id: request.documentId,
+            version: request.version,
+            doc_path: docPath,
+            report_marker: marker,
+            reviewers: request.reviewers.map((id) => ({ reviewer: id, title: REVIEWERS[id].title, ...(skills[id] !== undefined ? { skill: skills[id] } : {}), rubric: REVIEWERS[id].rubric })),
+          },
+          null,
+          2,
+        ),
+        'utf8',
+      );
+    } catch (err) {
+      await emitStatus({ ...scope, state: 'error', message: `Crew could not prepare the review: ${oneLine(err instanceof Error ? err.message : String(err), 300)}.` });
+      return;
+    }
     await emitStatus({ ...scope, state: 'processing', message: `A governed crew is reviewing version ${request.version}…` });
 
     let projectGraphBinding: ProjectGraphBinding | null = null;
