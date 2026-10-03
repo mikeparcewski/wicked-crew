@@ -3,7 +3,8 @@
 // The adapter is a stub engine handed a bus (`busDbPath`), so the rows below go through the
 // engine's own `Core.busEmit` / `Core.busRead` — the catalog and wire checks a live daemon applies.
 //
-//   - health answers and the registry arms on the engine bus; only the two internal entries load;
+//   - health answers and the registry arms on the engine bus; the two internal entries and the three
+//     TR-W5b entries load;
 //   - test 8: a `watch.*` settings patch from a worker bearer is 403 (even at admin trust), from a
 //     person it lands, writes `settings.updated`, and shows in `health.entries.off` with who/when;
 //   - a bad `watch` patch is a 400 naming the key; a person-only dismiss refuses a worker;
@@ -95,16 +96,19 @@ function call(method: string, path: string, token?: string, body?: unknown): Pro
 }
 
 describe('the watch registry on the daemon', () => {
-  it('arms on the engine bus and lists only the two internal entries', async () => {
+  it('arms on the engine bus and lists the shipped entries (two internal, three TR-W5b)', async () => {
     const h = (await (await call('GET', '/api/v1/watch/health', TOKENS.operator)).json()) as WatchHealth;
     expect(h.armed).toBe(true);
     expect(h.reason).toBeNull();
-    expect(h.entries).toMatchObject({ loaded: 2, refused: [], off: [] });
+    expect(h.entries).toMatchObject({ loaded: 5, refused: [], off: [] });
     expect(h.llm.enabled).toBe(false);
     const { entries } = (await (await call('GET', '/api/v1/watch/entries', TOKENS.operator)).json()) as { entries: WatchEntry[] };
     expect(entries.map((e) => [e.id, e.enabled])).toEqual([
+      ['deliver-audit', true],
+      ['quiet-after-claim', true],
       ['registry-check-failed', true],
       ['registry-lagging', true],
+      ['ungated', true],
     ]);
     expect(entries.every((e) => e.threshold_text.length > 0)).toBe(true);
   });
@@ -152,7 +156,16 @@ describe('the watch registry on the daemon', () => {
     expect((await call('GET', '/api/v1/watch?kind=needs', TOKENS.operator)).status).toBe(400);
     expect((await call('GET', '/api/v1/watch?limit=0', TOKENS.operator)).status).toBe(400);
     const ok = (await (await call('GET', '/api/v1/watch?run=r-1', TOKENS.operator)).json()) as Record<string, unknown>;
-    expect(ok).toEqual({ findings: [], cleared: [], coverage: [] });
+    // A run the registry has seen nothing of: each run-scoped entry says it has not checked yet.
+    expect(ok).toEqual({
+      findings: [],
+      cleared: [],
+      coverage: [
+        { entry_id: 'deliver-audit', state: 'not_checked', reason: 'nothing was delivered on this run yet' },
+        { entry_id: 'quiet-after-claim', state: 'not_checked', reason: 'no step has handed back yet' },
+        { entry_id: 'ungated', state: 'not_checked', reason: 'no step has reached its gate yet' },
+      ],
+    });
   });
 
   it('/ws carries a watchEvent frame for a watch row the engine took on its bus', async () => {

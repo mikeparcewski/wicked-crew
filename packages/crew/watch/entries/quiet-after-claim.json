@@ -1,0 +1,16 @@
+{
+  "id": "quiet-after-claim",
+  "version": 1,
+  "on": { "source": "watchdog", "type": "workerStalled" },
+  "join": [
+    { "source": "core", "type": "unitOutputCaptured" },
+    { "source": "core", "type": "gateEvaluated" }
+  ],
+  "filter": {},
+  "check": "deterministic:quiet_after_claim",
+  "params": {},
+  "threshold": {},
+  "emit": { "as": "finding", "severity": "medium", "watch_kind": "quiet", "attach": null, "rate": { "per_run": 5 } },
+  "priority": "p1",
+  "enabled": true
+}

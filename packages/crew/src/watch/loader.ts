@@ -32,6 +32,10 @@ const EntrySchema = z
     id: z.string().regex(ID, 'id must be [a-z0-9-]{3,48}'),
     version: z.number().int().min(1),
     on: z.object({ source: z.enum(['core', 'bus', 'watchdog', 'internal']), type: z.string().min(1).max(128) }).strict(),
+    join: z
+      .array(z.object({ source: z.enum(['core', 'bus', 'watchdog']), type: z.string().min(1).max(128) }).strict())
+      .max(4)
+      .optional(),
     filter: z.record(z.unknown()).default({}),
     check: z.string().min(1),
     params: z.record(z.unknown()).default({}),
@@ -70,8 +74,10 @@ export function validateEntry(raw: unknown, fileId: string, checks: ReadonlyMap<
   if (!parsed.success) return { id: fileId, reason: zodReason(parsed.error) };
   const e = parsed.data;
   if (e.id !== fileId) return { id: fileId, reason: `id "${e.id}" differs from the file name "${fileId}.json"` };
-  if (e.on.source === 'bus' && !BUS_TYPE.test(e.on.type)) {
-    return { id: e.id, reason: `bus type "${e.on.type}" is not a 4-segment wicked.<domain>.<noun>.<verb> type` };
+  for (const point of [e.on, ...(e.join ?? [])]) {
+    if (point.source === 'bus' && !BUS_TYPE.test(point.type)) {
+      return { id: e.id, reason: `bus type "${point.type}" is not a 4-segment wicked.<domain>.<noun>.<verb> type` };
+    }
   }
   const check = checks.get(e.check);
   if (check === undefined) return { id: e.id, reason: `unknown check "${e.check}"` };
@@ -79,8 +85,10 @@ export function validateEntry(raw: unknown, fileId: string, checks: ReadonlyMap<
   if (!params.success) return { id: e.id, reason: `params: ${zodReason(params.error)}` };
   const threshold = check.thresholdSchema.safeParse(e.threshold);
   if (!threshold.success) return { id: e.id, reason: `threshold: ${zodReason(threshold.error)}` };
+  const { join, ...rest } = e;
   return {
-    ...e,
+    ...rest,
+    ...(join !== undefined && join.length > 0 ? { join } : {}),
     params: params.data as Record<string, unknown>,
     threshold: threshold.data as Record<string, unknown>,
   };

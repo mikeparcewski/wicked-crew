@@ -1,0 +1,17 @@
+{
+  "id": "deliver-audit",
+  "version": 1,
+  "on": { "source": "core", "type": "deliverLiftEvaluated" },
+  "join": [
+    { "source": "core", "type": "repoChecksEvaluated" },
+    { "source": "core", "type": "unitOutputCaptured" },
+    { "source": "core", "type": "gateEvaluated" }
+  ],
+  "filter": {},
+  "check": "deterministic:deliver_audit",
+  "params": {},
+  "threshold": {},
+  "emit": { "as": "finding", "severity": "high", "watch_kind": "problem", "attach": null, "rate": { "per_run": 5 } },
+  "priority": "p1",
+  "enabled": true
+}
