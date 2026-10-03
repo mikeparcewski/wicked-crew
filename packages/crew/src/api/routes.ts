@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, GovernanceReplayUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, humanGatePhaseIds, settingsFilePath } from '../core/adapter.js';
 import { codeGraphDb, codeGraphErrorStatus, requirementsGraph } from '../core/repoPaths.js';
 import type {
+  ConformanceRule,
   CodeGraphData,
   CoreEvent,
   RecordedEvent,
@@ -2769,6 +2770,8 @@ export function registerRoutes(
               : `chat ${chatId} is already open on this daemon; DELETE /chats/${chatId} first, or omit chatId to mint a fresh one`,
         });
       }
+      // DC-S7: the in-force rules the statement lists; recorded as "told" only once the open succeeds.
+      let inForceAtOpen: ConformanceRule[] = [];
       // Everything below either ends in `chatScopes.set(chatId, …, token)` or releases the reservation.
       try {
       // The scope (crew#502): explicit repos (`repoRefs`, the legacy `repoRef` merged in) or the
@@ -2800,9 +2803,8 @@ export function registerRoutes(
         // Cleans up only what it created itself on failure (Copilot, #518).
         // DC-S7: the seats learn the project's in-force rules from the statement (cap 20, severity
         // order); the service remembers what they were told so a later landing can be prefaced.
-        const inForceAtOpen = (await considerations.inForceFor(scope.projectId ?? null)).rules;
+        inForceAtOpen = (await considerations.inForceFor(scope.projectId ?? null)).rules;
         prepareChatScratch(chatId, scope, inForceAtOpen);
-        considerations.noteChatOpen(chatId, inForceAtOpen);
       } catch (err) {
         chatScopes.release(chatId, token);
         return reply
@@ -2989,6 +2991,9 @@ export function registerRoutes(
           const roots: ChatRepoRoot[] = scope.repos.map((r) => ({ absRoot: resolve(r.rootPath), name: r.name }));
           chatTranscripts.registerRoots(chatId, roots);
         }
+        // DC-S7: only a chat that actually OPENED is preface-eligible — recorded here, after the scope
+        // is published, so a refused open leaves no per-chat state behind (codex r1).
+        considerations.noteChatOpen(chatId, inForceAtOpen);
         // The thread learns of every refused seat the way it learns of everything else — a frame
         // on /ws — AFTER the scope is published, so a reader never sees a refusal for a chat it
         // cannot yet look up.

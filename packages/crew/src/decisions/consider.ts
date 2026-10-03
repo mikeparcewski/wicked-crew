@@ -116,8 +116,10 @@ export class ConsiderationService {
 
   /**
    * The preface the next send carries, or `null`: the rules in force now that the seats have not
-   * been told about. A chat this daemon did not open (a restart) is only seeded — never prefaced,
-   * because nothing is known about what its seats were told.
+   * been told about. A chat this daemon did not open (a restart) is SEEDED on its first send —
+   * nothing is known about what its seats were told, so the current set stands in for the open
+   * statement and that send carries no preface; a rule that lands after the seed is new to the
+   * seats and IS prefaced on the send after (codex r1, wording fixed: "seeded, then prefaced").
    */
   async prefaceForSend(chat: string, opts: { inForce?: ReadonlyArray<ConformanceRule> } = {}): Promise<string | null> {
     const rules = opts.inForce ?? (await this.inForceFor(this.deps.projectOf(chat) ?? null)).rules;

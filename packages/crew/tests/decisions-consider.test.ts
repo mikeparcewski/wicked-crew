@@ -271,8 +271,10 @@ describe('how seats learn the rules', () => {
     expect(first).toContain('[rule:proposal:k1] Always run the repo checks before a walkthrough.');
     expect(first).toContain('</wicked-context>');
     expect(await h.svc.prefaceForSend('c1', { inForce: [GLOBAL, KESTREL] })).toBeNull();
-    // A chat this daemon did not open (a restart): the first send only seeds, never prefaces.
+    // A chat this daemon did not open (a restart): the first send only SEEDS (no preface — nothing
+    // is known about what its seats were told); a rule landing after the seed is prefaced.
     expect(await h.svc.prefaceForSend('c9', { inForce: [GLOBAL] })).toBeNull();
+    expect(await h.svc.prefaceForSend('c9', { inForce: [GLOBAL, KESTREL] })).toBe(rulesPreface([KESTREL]));
     h.svc.chatClosed('c1');
     expect(await h.svc.prefaceForSend('c1', { inForce: [GLOBAL, KESTREL] })).toBeNull();
   });
