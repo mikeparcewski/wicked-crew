@@ -10,6 +10,16 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.47] — 2026-10-03
+
+Minor-feature release for the studio rebuild's live proofs: everything crew main gained since 0.7.46
+(waves 2–5 of the 2026-10 build plan). The daemon now carries the watch registry and its first five
+entries (`/watch`, `watchEvent`), decision capture (`/decisions`, ledger mode by default), the
+producer's `recommended` option on elicitations, `chat_id` on every run (`capabilities.runChatId`),
+the garden ≥ 12.40.0 requirement (`garden_required`), walkthrough roots, sealed acceptance and the
+storyline edit (WT-W1..W3), and `deliver_requested`. `wicked-crew-api-types` 0.83.0 is the matching
+wire contract. The bundled studio skin stays `^0.5.19`; `wicked-core-ts` stays `^0.7.35`.
+
 - **An elicitation names the option its producer recommends (`wicked-crew-api-types` 0.83.0; DES-STUDIO-REBUILD C3-crew).** The engine's `elicitationCreated` carries `recommended`, the index into `options` that the producer of the options recommends (C3-core, wicked-core-ts 0.7.35). Crew now relays it on `GET /runs/:id/elicitation` (`ElicitationInfo.recommended`), keeping it only when it names one of the options. An out-of-range, fractional or non-number index is dropped, never clamped, and so is any index on a free-text elicitation. Absent means nothing is preselected. Gates carry no recommendation, because the engine's `awaitingHuman` has no options to recommend from. Tests: `tests/elicitation-recommended.test.ts` was red on the previous main.
 - **Edit a walkthrough's checks while it is escalated, and one acceptance line for the deliver card (`wicked-crew-api-types` 0.82.0; DES-WALKTHROUGH-PROOF-001 slice WT-W3).**
   - `PUT /runs/:id/walkthrough/storyline?step=` (`PutStorylineBody` → `PutStorylineResponse`) is "Edit the check" (§4.8). It is accepted **only while that walkthrough's escalation gate is open**: the run is parked, and the open gate is the gate of a denied `walkthrough_review` or `walkthrough_plan` unit of that pair. Otherwise it answers 409 `no_open_escalation`. Only a human actor may edit (403), the body is limited to 256 KB (413), and an unknown step is 404.
@@ -3430,7 +3440,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.46...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.47...HEAD
+[0.7.47]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.46...v0.7.47
 [0.7.46]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.45...v0.7.46
 [0.7.45]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.40...v0.7.45
 [0.7.40]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.39...v0.7.40
