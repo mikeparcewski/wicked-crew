@@ -862,7 +862,7 @@ export interface RuntimeDeps {
   /** The governed doc-delete's handoff-ledger sweep (crew#338) — `createServer` wires the real
    *  four-ledger sweep (live seam instances first, ledger files as fallback); a directly-driven
    *  route set gets an INERT one so unit tests never touch ~/.wicked-crew. */
-  dropDocLedgerRows?: (documentId: string) => DocLedgerSweep;
+  dropDocLedgerRows?: (documentId: string, projectId?: string) => DocLedgerSweep;
   /** EP-C2 — where the interactive-review seam records documents' reviews (`<handoff root>/_reviews`).
    *  Absent = the default handoff root under the daemon's state home (read-only here). */
   docReviewsDir?: () => string;

@@ -97,7 +97,8 @@ export interface InteractiveRelayOptions {
    * relay's nature (cursor starts at `latest`, no retries) — the governed route stays the
    * guaranteed path. A throw is caught and logged; it never takes the relay down.
    */
-  onDocRetired?: (documentId: string) => void;
+  /** `projectId`: the retired doc's project, when the fact carries one (an Unfiled doc's does not). */
+  onDocRetired?: (documentId: string, projectId?: string) => void;
 }
 
 /**
@@ -131,11 +132,12 @@ export async function startInteractiveWsRelay(
         // no matter WHO retired it. After the broadcast on purpose — the UI learning the doc is
         // gone must not wait on (or be lost to) a failing sweep.
         if (event.event_type === 'wicked.interactive.doc.retired' && opts.onDocRetired) {
-          const payload = event.payload as { document_id?: unknown } | null | undefined;
+          const payload = event.payload as { document_id?: unknown; project_id?: unknown } | null | undefined;
           const documentId = payload?.document_id;
+          const projectId = typeof payload?.project_id === 'string' && payload.project_id.length > 0 ? payload.project_id : undefined;
           if (typeof documentId === 'string' && documentId.length > 0) {
             try {
-              opts.onDocRetired(documentId);
+              opts.onDocRetired(documentId, projectId);
             } catch (err) {
               log(
                 `[interactive-relay] doc.retired ledger sweep for ${documentId} failed (the governed ` +

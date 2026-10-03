@@ -69,7 +69,7 @@ export interface DocDeleteDeps {
   actorOf: (req: { actor?: Actor }) => Actor;
   /** The four-ledger sweep (`server.ts` wires the real one over the armed seams + their files;
    *  a directly-driven route set gets an inert default so unit tests never touch ~/.wicked-crew). */
-  dropDocLedgerRows: (documentId: string) => DocLedgerSweep;
+  dropDocLedgerRows: (documentId: string, projectId?: string) => DocLedgerSweep;
   env?: NodeJS.ProcessEnv;
   /** The daemon state home the DEFAULT docs root hangs off (crew ≥ 0.7.35, D-L7-1; tests point it at a scratch dir). */
   stateHome?: string;
@@ -224,7 +224,7 @@ export function registerInteractiveDocDelete(
       // Interactive's half is settled (retired now, already retired, or nothing there to
       // retire). Crew's half runs in EVERY one of those cases — a 404 with ghost rows is
       // precisely the hand-deleted-workspace mess this route exists to clean up.
-      const sweep = dropDocLedgerRows(doc);
+      const sweep = dropDocLedgerRows(doc, projectId);
       const retiredNow = upstream.status === 200 && upstream.body['already_retired'] !== true;
 
       if (upstream.status === 200 || sweep.removed_keys.length > 0) {

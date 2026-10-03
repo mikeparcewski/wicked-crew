@@ -24,7 +24,7 @@
  * document id cannot start with `_` (interactive's DOC_NAME grammar).
  */
 
-import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { CREW_RUN_ID_FIELD, DEFAULT_QE_LEDGER_DIRNAME } from '../qe/ledger.js';
@@ -145,16 +145,9 @@ export function writeReviewVerdicts(reviewRoot: string, rows: ReviewVerdictWrite
 
 /**
  * Drop a deleted document's recorded reviews, so a later document of the same name does not inherit
- * them. Like the handoff-ledger sweep it rides beside (`doc-ledger-sweep.ts`), it is keyed by the
- * document NAME alone — every project partition's `<doc>` root goes. Idempotent.
+ * them — in ITS project's partition only (`projectId` absent = Unfiled): the same name in another
+ * project is another document. Idempotent.
  */
-export function removeDocReviews(reviewsDir: string, documentId: string): void {
-  let partitions: string[];
-  try {
-    partitions = readdirSync(reviewsDir);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
-    throw err;
-  }
-  for (const partition of partitions) rmSync(join(reviewsDir, partition, documentId), { recursive: true, force: true });
+export function removeDocReviews(reviewsDir: string, documentId: string, projectId: string | undefined): void {
+  rmSync(reviewRootOf(reviewsDir, projectId, documentId), { recursive: true, force: true });
 }

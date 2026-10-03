@@ -839,12 +839,13 @@ export async function createServer(
    *  seam's handoff root, so no new state-home entry exists. */
   const docReviewsDir = (): string =>
     reviewSub?.reviewsDir ?? join(options?.interactiveEditEvents?.editDir ?? join(crewStateDir, 'interactive-edits'), REVIEWS_DIRNAME);
-  const dropDocLedgerRows = (documentId: string): DocLedgerSweep => {
+  const dropDocLedgerRows = (documentId: string, projectId?: string): DocLedgerSweep => {
     const sweep = sweepDocLedgers(documentId, docLedgerSources());
     // EP-C2: the document's recorded reviews go with it — a later document of the same name must
-    // not inherit them (the same ghost the ledger rows would be).
+    // not inherit them (the same ghost the ledger rows would be). Its own project's only: the
+    // review store is partitioned per project, like the docs roots.
     try {
-      removeDocReviews(docReviewsDir(), documentId);
+      removeDocReviews(docReviewsDir(), documentId, projectId);
       return sweep;
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
@@ -873,8 +874,8 @@ export async function createServer(
           // crew#338 — a retirement that bypassed the governed DELETE route (direct bridge call,
           // another tool) still drops the doc's ledger rows. Idempotent, so overlapping with the
           // route's own synchronous sweep is harmless.
-          onDocRetired: (documentId) => {
-            const sweep = dropDocLedgerRows(documentId);
+          onDocRetired: (documentId, projectId) => {
+            const sweep = dropDocLedgerRows(documentId, projectId);
             if (sweep.removed_keys.length > 0) {
               app.log.info(
                 `[interactive] doc.retired(${documentId}): dropped handoff-ledger row(s) ${sweep.removed_keys.join(', ')}`,
