@@ -2453,6 +2453,23 @@ export class CoreAdapter {
 
   private _verifiedEvidenceCatalog: ReadonlySet<string> | undefined;
 
+  /**
+   * Every catalog id the engine defines (WT-W2): a plan step naming one outside it fails its
+   * acceptance requirement closed. `null` when the catalog cannot be read. Cached once read.
+   */
+  async catalogIds(): Promise<ReadonlySet<string> | null> {
+    if (this._catalogIds !== undefined) return this._catalogIds;
+    try {
+      const entries = await this.catalog();
+      this._catalogIds = new Set(entries.map((e) => e.id));
+      return this._catalogIds;
+    } catch {
+      return null;
+    }
+  }
+
+  private _catalogIds: ReadonlySet<string> | undefined;
+
   /** The engine's phase catalog. */
   async catalog(): Promise<CatalogEntry[]> {
     const fn = this.requireTeam(this.core.catalog, 'Reading the phase catalog', 'catalog');

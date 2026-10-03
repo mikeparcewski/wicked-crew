@@ -86,7 +86,7 @@ import {
 import { isSteeringAuthorRun, landSteeringProposal } from './steering-landing.js';
 import { ApproveEditSchema, approveEdited, captureLaunchRoots, editInFlight, FileProposalSchema, registerCaptureRoutes } from './capture.js';
 import { registerTestingRoutes } from './testing.js';
-import { DEMO_PRESET, demoLaunchRoots, registerDemoRoutes, registerWalkthroughRoutes } from './recording.js';
+import { DEMO_PRESET, demoLaunchRoots, registerDemoRoutes, registerWalkthroughRoutes, walkthroughAcceptance } from './recording.js';
 import { registerSkillsRoutes } from './skills.js';
 import { registerMcpRoutes } from './mcp.js';
 import type { McpBroker } from '../mcp/broker.js';
@@ -3284,7 +3284,10 @@ export function registerRoutes(
     // an unknown run (or one the daemon cannot read) is declared and denied with the reason.
     const verifiedCatalog =
       typeof adapter.verifiedEvidenceCatalog === 'function' ? await adapter.verifiedEvidenceCatalog() : null;
-    const requirement = acceptanceRequirementOf(run, adapter.listWorkflows(), verifiedCatalog);
+    const knownCatalog = typeof adapter.catalogIds === 'function' ? await adapter.catalogIds() : null;
+    const requirement = acceptanceRequirementOf(run, adapter.listWorkflows(), verifiedCatalog, knownCatalog);
+    // WT-W2: every walkthrough step the requirement names is resolved from its proof root and seal.
+    const walkthroughs = await walkthroughAcceptance(adapter, run, requirement.phases);
 
     let repo = null;
     if (run.session.repo_ref !== null) {
@@ -3303,6 +3306,7 @@ export function registerRoutes(
       // unit both appear on the page humans actually look at.
       claims: () => adapter.listConformanceClaims(),
       events: (rid) => adapter.runEvents(rid),
+      ...(walkthroughs.gates.length > 0 ? { walkthroughs } : {}),
     });
   });
 

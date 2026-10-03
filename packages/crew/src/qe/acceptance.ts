@@ -65,6 +65,8 @@ import type {
 import { describeAttribution, readAcceptanceState, summarizeManifest } from './ledger.js';
 import type { RunConformance } from './conformance.js';
 import { resolveConformance } from './conformance.js';
+import type { RunAcceptanceWalkthrough, WalkthroughStepState } from 'wicked-crew-api-types';
+import type { WalkthroughGate } from './walkthrough-acceptance.js';
 
 /**
  * Verdict → run-status, 1:1 with garden's qe `accept` action (VERDICT_TO_STATUS)
@@ -125,6 +127,12 @@ export function acceptanceRequirementOf(
   view: SessionView,
   workflows: WorkflowDef[],
   verifiedCatalog: ReadonlySet<string> | null,
+  /**
+   * Every catalog id the engine defines (WT-W2, S12). A plan step naming one outside it fails the
+   * requirement closed — an engine downgrade must never shrink what a run has to prove. `null` /
+   * omitted: the engine's full list is not known, and the verified-set rule alone applies.
+   */
+  knownCatalog: ReadonlySet<string> | null = null,
 ): AcceptanceRequirement {
   const identity = runIdentityOf(view);
   const closed = (why: string): AcceptanceRequirement => ({
@@ -159,6 +167,14 @@ export function acceptanceRequirementOf(
       if (units.length === 0) return closed("the run's plan has no planned steps yet");
       if (units.some((u) => typeof u.catalog !== 'string' || u.catalog === '')) {
         return closed("the run's steps do not all carry a catalog id, so which of them re-verify evidence cannot be read");
+      }
+      if (knownCatalog !== null) {
+        const unknown = units.find((u) => !knownCatalog.has(u.catalog as string));
+        if (unknown !== undefined) {
+          return closed(
+            `step \`${unitPhaseId(unknown.id)}\` names catalog \`${unknown.catalog as string}\`, which this engine does not define`,
+          );
+        }
       }
       if (verifiedCatalog === null) {
         return closed(
@@ -366,6 +382,13 @@ export interface AcceptanceView {
   } | null;
   gate: AcceptanceGateResolution;
   /**
+   * The walkthrough half (WT-W2, DES-walkthrough-proof §4.9): one row per `walkthrough_review` step the
+   * requirement names, each re-verified against its seal at this read; `sealed` = every such step's
+   * seal held; `steps` = the per-creator-step `checkState` from the newest walkthrough. ABSENT when the
+   * run's requirement names no walkthrough step.
+   */
+  walkthrough?: RunAcceptanceWalkthrough;
+  /**
    * The governance half, BESIDE the QE gate (AW-14 / arch-R13a + R16): this run's conformance
    * claims (wiki rule ids cited), its enforcement status, and the deny-dominates `guardrailed`
    * headline. Never claims guardrailed for an unenforced, ungoverned, or unverifiable run.
@@ -492,9 +515,19 @@ export async function buildAcceptanceView(opts: {
    * unknown enforcement state is never reported guardrailed (arch-R16).
    */
   events?: (runId: string) => Promise<RecordedEvent[] | null>;
+  /**
+   * WT-W2: the run's walkthrough steps the requirement names, each resolved against its proof root and
+   * seal ({@link WalkthroughGate}), and the per-step check states. Their step ids are taken OUT of the
+   * repo ledger's share of the requirement: a walkthrough's verdicts live in its proof root.
+   */
+  walkthroughs?: { gates: WalkthroughGate[]; steps: WalkthroughStepState[] };
 }): Promise<AcceptanceView> {
   const { phases, failClosed } = opts.requirement;
-  const required = opts.requirement.declared;
+  const walkGates = opts.walkthroughs?.gates ?? [];
+  const walkIds = new Set(walkGates.map((g) => g.stepId));
+  // The repo ledger owes evidence for every required phase that is not a walkthrough. This is the
+  // repo ledger's share only; the run-level declaration stays `opts.requirement.declared` (Copilot on #759).
+  const repoRequired = opts.requirement.declared && (walkIds.size === 0 || phases.some((p) => !walkIds.has(p)));
 
   // The run's durable event log, read FIRST: it is both the conformance section's enforcement
   // record and the ledger read's linkage — a verdict is this run's only if its QE run falls inside
@@ -516,7 +549,11 @@ export async function buildAcceptanceView(opts: {
       : { run: runWindowFromEvents(eventRows, opts.runId, eventsError) };
 
   const state = opts.repo !== null ? await readAcceptanceState(opts.repo.root_path, subject) : null;
-  const gate = resolveAcceptanceGate(required, state, failClosed);
+  // Deny-dominates across the repo ledger too: on a run whose requirement is walkthroughs only, a
+  // verdict the repo ledger DOES attribute to this run still counts — a FAIL there denies.
+  // An unreadable repo ledger counts too: it cannot say whether it attributes a denial (Copilot on #759).
+  const repoCounts = repoRequired || (walkIds.size > 0 && (state?.verdict != null || state?.error !== undefined));
+  const gate = combineWalkthroughGates(resolveAcceptanceGate(repoCounts, state, failClosed), walkGates, opts.requirement.declared, failClosed);
 
   // The conformance half. Loader failures are NAMED, not flattened into an empty list — the
   // section's own resolution turns "unreadable" into "not claimed clean" (deny-dominates).
@@ -544,7 +581,7 @@ export async function buildAcceptanceView(opts: {
       opts.repo !== null
         ? { id: opts.repo.id, name: opts.repo.name, rootPath: opts.repo.root_path }
         : null,
-    requirement: { declared: required, phases },
+    requirement: { declared: opts.requirement.declared, phases },
     acceptance:
       state !== null
         ? {
@@ -583,6 +620,37 @@ export async function buildAcceptanceView(opts: {
           }
         : null,
     gate,
+    ...(walkGates.length > 0
+      ? {
+          walkthrough: {
+            roots: walkGates.map((g) => ({ stepId: g.stepId, sealed: g.sealed, satisfied: g.satisfied, reason: g.reason })),
+            sealed: walkGates.every((g) => g.sealed),
+            steps: opts.walkthroughs?.steps ?? [],
+          },
+        }
+      : {}),
     conformance,
   };
+}
+
+/**
+ * Deny-dominates across the repo ledger's gate and every walkthrough step's (WT-W2): satisfied only
+ * when each is; the reason is every denial, in that order, or the passes when nothing denies. A
+ * requirement that could not be read (`failClosed`) keeps its own resolution.
+ */
+export function combineWalkthroughGates(
+  repo: AcceptanceGateResolution,
+  walkthroughs: WalkthroughGate[],
+  declared: boolean,
+  failClosed?: string,
+): AcceptanceGateResolution {
+  if (walkthroughs.length === 0 || failClosed !== undefined) return repo;
+  const repoCounts = repo.required;
+  const denials = [
+    ...(repoCounts && !repo.satisfied ? [repo.reason] : []),
+    ...walkthroughs.filter((w) => !w.satisfied).map((w) => w.reason),
+  ];
+  if (denials.length > 0) return { ...repo, required: declared, satisfied: false, reason: denials.join('; ') };
+  const passes = [...(repoCounts ? [repo.reason] : []), ...walkthroughs.map((w) => w.reason)];
+  return { ...repo, required: declared, satisfied: true, reason: passes.join('; ') };
 }
