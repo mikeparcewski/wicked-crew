@@ -199,7 +199,7 @@ describe('a state home the fence cannot classify — said at boot, on /diagnosti
 
     const res = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'fix the thing', sessionId: 'run-after-repair' } });
     expect(res.statusCode).toBe(201);
-    expect(res.json()).toEqual({ runId: 'run-after-repair' });
+    expect(res.json()).toEqual({ runId: 'run-after-repair', freeText: { notice: expect.any(String) } }); // crew#755: no workflow named
     expect(launched).toEqual(['run-after-repair']);
   });
 

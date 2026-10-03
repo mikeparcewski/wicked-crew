@@ -303,7 +303,8 @@ describe('wicked-studio#27 — ad-hoc grouping + campaigns rollup', () => {
     await launch({ problem: 'attached', sessionId: 'run-c', campaignId: 'camp-1' });
     const ungrouped = await launch({ problem: 'plain', sessionId: 'run-p' });
     expect(ungrouped.status).toBe(201);
-    expect(Object.keys(ungrouped.body)).toEqual(['runId']);
+    // No grouping key on the 201; a launch with no workflow also carries its free-text notice (crew#755).
+    expect(Object.keys(ungrouped.body)).toEqual(['runId', 'freeText']);
     // The engine input carries NO grouping key on any launch — grouped or not, the launch is
     // byte-identical to pre-0.19 behavior.
     expect(launchInputs).toHaveLength(3);

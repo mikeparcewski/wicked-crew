@@ -358,6 +358,13 @@ export interface AgentSession {
    */
   delivery?: 'delivered' | 'pushed' | 'stranded' | 'vacuous' | 'none';
   /**
+   * (crew#755; api-types 0.76.0) `'text_only'` on a COMPLETED free-text run (launched with neither a
+   * workflow nor a plan) that had no repo and no write root of its own: whatever it did, it did in
+   * text — nothing was changed, checked or delivered. Show it as such, never as plain completed
+   * work. ABSENT on every other run (and on a daemon before the field).
+   */
+  outcome?: 'text_only';
+  /**
    * The delivered PR's URL (crew#393; api-types 0.18.0) — present exactly when
    * `delivery === 'delivered'`; absent otherwise (absence is the one spelling, never `null`).
    *
@@ -3961,6 +3968,12 @@ export interface LinkedIssue {
 export interface LaunchRunResponse {
   runId: string;
   linkedIssues?: LinkedIssue[];
+  /**
+   * (crew#755; api-types 0.76.0) PRESENT when the launch named neither a `workflow` nor a `plan`:
+   * the run uses the engine's free-text planner (one step, the brief verbatim; no phases, checks or
+   * delivery), and `notice` says so in words a composer can show. ABSENT on every other launch.
+   */
+  freeText?: { notice: string };
 }
 
 /**

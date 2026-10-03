@@ -585,7 +585,9 @@ async function main(): Promise<void> {
       console.error(`launch failed (${launchRes.status}): ${errBody.error ?? launchRes.statusText}`);
       process.exit(1);
     }
-    const { runId } = (await launchRes.json()) as { runId: string };
+    const { runId, freeText } = (await launchRes.json()) as { runId: string; freeText?: { notice: string } };
+    // crew#755: say on stderr what a launch with no --workflow ran (stdout stays the ready line).
+    if (freeText !== undefined) console.warn(`[crew] ${freeText.notice}`);
     printReady({ mode: 'start', port, db: opts.dbPath, run: runId, startupMs: Math.round(performance.now() - t0) });
   } else if (command === 'resume') {
     const sessionId = flag(argv, '--session');

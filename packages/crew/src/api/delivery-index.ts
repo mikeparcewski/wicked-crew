@@ -600,3 +600,24 @@ export class DeliveryIndex {
     return this.runToUrl.get(runId);
   }
 }
+
+/**
+ * crew#755: what a launch with neither a workflow nor a plan ran, in the `POST /runs` 201 body.
+ * The engine's free-text planner makes ONE unit, the brief verbatim (wicked-core D-11).
+ */
+export const FREE_TEXT_NOTICE =
+  'No workflow or plan was named, so this run uses the engine\'s free-text planner: one step, the brief verbatim, ' +
+  'with no phases, no checks and no delivery. To have work done and checked, name a workflow (GET /workflows) or a plan.';
+
+/**
+ * crew#755: a COMPLETED free-text run with no repo and no write root of its own had nowhere to
+ * change anything — no worktree, no declared root — so whatever it did, it did in TEXT: nothing was
+ * changed, checked or delivered. `'text_only'` says exactly that, true by construction; it does not
+ * claim the text was empty (a free-text answer can be useful), so `delivery` is left as it is.
+ * `undefined` for every other run. Pure.
+ */
+export function freeTextOutcome(view: SessionView): 'text_only' | undefined {
+  const s = view.session;
+  if (s.status !== 'completed' || s.repo_ref != null || (s.extra_write_roots ?? []).length > 0) return undefined;
+  return runIdentityOf(view).kind === 'free_text' ? 'text_only' : undefined;
+}
