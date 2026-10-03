@@ -6079,7 +6079,12 @@ export interface DiagnosticsSkillsFinding {
    *  an `error` under `'require'` (the engine refuses every launch at intake); cleared by a publish
    *  that hands it. Also carried as `DiagnosticsSkills.baseSkill.finding`; `skills.phase-skill`
    *  (`warning`, crew#661) = a subsystem's phases declare a skill the published snapshot did not hold
-   *  when it armed, so they run without it — one per `DiagnosticsSkills.phaseSkillGaps` entry. */
+   *  when it armed, so they run without it — one per `DiagnosticsSkills.phaseSkillGaps` entry;
+   *  `skills.garden` (`error`, api-types 0.78.0, crew#753) = the installed wicked-garden is older
+   *  than the daemon requires (`GardenRequiredBody.required`), so it is not used: found at seed
+   *  (the runtime is `config-error` and the engine is handed a refusal path) or recorded on the
+   *  current baseline. Rides `/health.warnings` too; launches and onboarding answer 422
+   *  `garden_required` until a newer garden is installed and published. */
   kind:
     | 'skills.fallback'
     | 'skills.blocked'
@@ -6088,9 +6093,23 @@ export interface DiagnosticsSkillsFinding {
     | 'skills.manifest'
     | 'skills.stale-rules'
     | 'skills.base-skill'
-    | 'skills.phase-skill';
+    | 'skills.phase-skill'
+    | 'skills.garden';
   severity: 'warning' | 'error';
   message: string;
+}
+
+/**
+ * The 422 `POST /runs`, `POST /repos` and `POST /repos/:id/onboard` answer while the installed
+ * wicked-garden is older than the daemon requires (api-types 0.78.0, crew#753). `error` names the
+ * version found, where, the version required and the install command. Nothing was launched or
+ * registered. A daemon with NO garden answers the base skill's 422 `base_skill_refused` instead.
+ */
+export interface GardenRequiredBody {
+  code: 'garden_required';
+  error: string;
+  /** The minimum wicked-garden version, e.g. `"12.40.0"`. */
+  required: string;
 }
 
 /**

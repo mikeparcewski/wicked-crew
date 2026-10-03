@@ -27,6 +27,7 @@ import { resumeRunningCampaigns } from '../src/campaign/boot-resume.js';
 import { shutdownWithDeadline } from '../src/core/shutdown.js';
 import { LINKED_ISSUES_OPEN } from '../src/core/linked-issues.js';
 import { removeScratch } from './setup/scratch.js';
+import { baseSkillOff } from './setup/base-skill-off.js';
 import type { AuditEntry, CampaignDef, LaunchRunInput, RepoEntry } from '../src/core/types.js';
 import type { Campaign } from 'wicked-crew-api-types';
 
@@ -209,6 +210,9 @@ describe('crew#471 — the daemon stays answerable while the engine is busy', ()
 
 describe('crew#496 — onboarding runs are filed and dated', () => {
   function onboardingAdapter(a: CoreAdapter, attaches: Array<{ projectId: string; kind: string; ref: string }>): void {
+    // Run mechanics, not grounding: with no published generation a daemon refuses an onboard before it
+    // registers anything (crew#753), so these filing cases turn the base skill off (tests/setup/base-skill-off.ts).
+    baseSkillOff();
     a.registerRepo = async (name: string, rootPath: string) => ({ id: `repo-${name}`, name, root_path: rootPath, default_branch: 'main', registered_at: 3 });
     a.launchOnboardingRun = async (repoId: string) => `onboard-${repoId}`;
     a.projectMemberAttach = async (projectId: string, kind: string, ref: string) => {

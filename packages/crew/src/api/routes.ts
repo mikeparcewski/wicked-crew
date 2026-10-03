@@ -1322,7 +1322,7 @@ export function registerRoutes(
     return f === undefined ? null : { kind: f.kind, severity: f.severity, message: f.message };
   };
   /** The typed 422 a launch or onboard answers while {@link gardenBlocker} holds. */
-  const gardenRefusalBody = (): { code: 'garden_required'; error: string; required: string } | null => {
+  const gardenRefusalBody = (): import('wicked-crew-api-types').GardenRequiredBody | null => {
     const f = gardenBlocker();
     return f === null ? null : { code: 'garden_required', error: f.message, required: REQUIRED_GARDEN_VERSION };
   };
