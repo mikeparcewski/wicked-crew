@@ -12,8 +12,25 @@ export interface ElicitationEntry {
   message: string;
   /** Ordered set of valid responses; `null` means free-text. */
   options: string[] | null;
+  /**
+   * (C3, api-types 0.83.0) The index into `options` the PRODUCER of the options recommends (the
+   * engine's `elicitationCreated.recommended`). Absent ⇒ nothing is preselected. Never set on a
+   * free-text elicitation, and dropped when it does not name one of `options`.
+   */
+  recommended?: number;
   /** When the daemon observed the elicitation — ISO-8601. */
   receivedAt: string;
+}
+
+/**
+ * C3: the producer's recommended option index, kept only when it names one of `options` — a
+ * non-negative integer below `options.length`. Anything else is dropped (absent ⇒ nothing
+ * preselected), never clamped or guessed.
+ */
+export function recommendedIndex(raw: unknown, options: readonly unknown[] | null | undefined): number | undefined {
+  if (!Array.isArray(options) || options.length === 0) return undefined;
+  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 0 || raw >= options.length) return undefined;
+  return raw;
 }
 
 /** Session statuses that mean the run will never elicit again. */
@@ -57,6 +74,7 @@ export class ElicitationCache {
       elicitationId: entry.elicitationId,
       message: entry.message,
       options: entry.options ?? null,
+      ...(recommendedIndex(entry.recommended, entry.options) !== undefined ? { recommended: entry.recommended as number } : {}),
       receivedAt: new Date().toISOString(),
     });
     this.bumpGen(entry.runId);
@@ -126,11 +144,14 @@ export class ElicitationCache {
     if (typeof runId !== 'string') return;
 
     if (event.type === 'elicitationCreated') {
+      const options = Array.isArray(event.options) ? event.options : null;
+      const recommended = recommendedIndex(event.recommended, options);
       this.create({
         runId,
         elicitationId: String(event.elicitationId ?? ''),
         message: String(event.message ?? ''),
-        options: Array.isArray(event.options) ? event.options : null,
+        options,
+        ...(recommended !== undefined ? { recommended } : {}),
       });
     } else if (event.type === 'elicitationResolved') {
       const entry = this.entries.get(runId);
