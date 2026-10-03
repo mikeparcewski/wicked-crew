@@ -44,6 +44,8 @@ import { registerClient, broadcast } from '../events/bus.js';
 import { TerminalHub, registerTerminalWs } from '../events/terminals.js';
 import { INTERACTIVE_DRAFT_WORKFLOW_DEF, startInteractiveDraftSubscriber } from '../interactive/draft-events.js';
 import { INTERACTIVE_EDIT_WORKFLOW_DEF, startInteractiveEditSubscriber } from '../interactive/edit-events.js';
+import { putLearnedThemeViaBridge, startInteractiveThemeSubscriber } from '../interactive/theme-events.js';
+import { InteractiveBridgePool, boundOrigin } from '../interactive/bridge-pool.js';
 import { INTERACTIVE_CHAT_WORKFLOW_DEF, startInteractiveChatSubscriber } from '../interactive/chat-events.js';
 import { PhaseSkillArming, RunSkillGapIndex } from '../skills/phase-skill-gaps.js';
 import { resolveProjectInteractiveRoot } from '../interactive/bridge-root.js';
@@ -199,6 +201,21 @@ export interface CreateServerOptions {
    * FIFO per doc. When absent (the default), the topic goes unanswered — the pre-CREW-UX-5
    * state.
    */
+  /**
+   * Opt-in governed theme learning (DES-artifact-editor-plugins §7.6, EP-C4): a durable subscriber
+   * answers `wicked.interactive.theme.learned` with one `interactive-theme` run that reads the
+   * grabbed render in place and writes design tokens; crew validates shape, grammar and contrast
+   * and writes them THROUGH interactive (`PUT /d/:doc/api/theme/learned {tokens, apply:true}`).
+   * Shares the edit seam's ledger and handoff root. When absent, a grab learns nothing.
+   */
+  interactiveThemeEvents?: {
+    enabled: boolean;
+    dbPath?: string;
+    pollIntervalMs?: number;
+    heartbeatMs?: number;
+    clisJson?: string;
+    resolveDocsRoot?: (projectId: string | undefined) => string;
+  };
   interactiveChatEvents?: {
     enabled: boolean;
     /** The bus db; omit for the one the adapter handed its engine (`busDbPath`, core/bus.ts). */
@@ -759,6 +776,7 @@ export async function createServer(
   // is still preferred over its file once armed; the seams themselves arm further down.
   let draftSub: Awaited<ReturnType<typeof startInteractiveDraftSubscriber>> = null;
   let editSub: Awaited<ReturnType<typeof startInteractiveEditSubscriber>> = null;
+  let themeSub: Awaited<ReturnType<typeof startInteractiveThemeSubscriber>> = null;
   let chatSub: Awaited<ReturnType<typeof startInteractiveChatSubscriber>> = null;
 
   /** The crew-side half of deleting an interactive doc (crew#338): drop the doc's replay-dedup
@@ -1064,6 +1082,42 @@ export async function createServer(
     if (editSub !== null) {
       const sub = editSub;
       app.log.info('interactive-edit subscription armed (filter wicked.interactive.feedback.processed)');
+      app.addHook('onClose', async () => {
+        await sub.stop();
+      });
+    }
+  }
+
+  // ONE interactive bridge pool per daemon (two pools over one docs root would race each other
+  // into starting duplicate bridges): built here so the theme seam below and the proxy routes
+  // share it. The origin is read LAZILY off the bound server (#298); the bus dir is the daemon's.
+  const interactiveBridges = new InteractiveBridgePool({
+    log: (m) => app.log.warn(m),
+    debug: (m) => app.log.debug(m),
+    studioOrigin: () => boundOrigin(app.server.address()),
+    busDataDir: options?.interactiveBridge?.busDataDir ?? null,
+  });
+
+  // EP-C4: theme learning. Shares the edit seam's ledger instance (one file, one writer) and its
+  // handoff root; writes the validated tokens through the doc's bridge.
+  if (options?.interactiveThemeEvents?.enabled === true && !refuseStubSeam('interactive-theme')) {
+    const o = options.interactiveThemeEvents;
+    const resolveDocsRoot = o.resolveDocsRoot ?? interactiveDocsRoot;
+    themeSub = await startInteractiveThemeSubscriber(adapter, {
+      ...busOf(o.dbPath),
+      ...(o.pollIntervalMs !== undefined ? { pollIntervalMs: o.pollIntervalMs } : {}),
+      ...(o.heartbeatMs !== undefined ? { heartbeatMs: o.heartbeatMs } : {}),
+      ...(o.clisJson !== undefined ? { clisJson: o.clisJson } : {}),
+      ...(editSub !== null ? { ledger: editSub.ledger } : {}),
+      roster: rosterWithStanding,
+      putLearnedTheme: putLearnedThemeViaBridge(interactiveBridges, resolveDocsRoot),
+      onRunFiled: fileRun,
+      log: (m) => app.log.warn(m),
+      logError: (m) => app.log.error(m),
+    });
+    if (themeSub !== null) {
+      const sub = themeSub;
+      app.log.info('interactive-theme subscription armed (filter wicked.interactive.theme.learned)');
       app.addHook('onClose', async () => {
         await sub.stop();
       });
@@ -1716,6 +1770,8 @@ export async function createServer(
       evalStore,
       // F-043/F-046: the bridge's bus dir and the create-time grounding store reach the proxy.
       interactiveBridgeBusDataDir: options?.interactiveBridge?.busDataDir ?? null,
+      // EP-C4: the one pool, shared with the theme seam above.
+      interactiveBridges,
       docGrounding,
       ...(skillsRuntime !== undefined ? { skills: skillsRuntime } : {}),
       // DES-MCP-TOOLS-001 S2: the registry over `<state home>/mcp` (created on the first save).

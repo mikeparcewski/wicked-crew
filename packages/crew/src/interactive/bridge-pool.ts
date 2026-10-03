@@ -147,7 +147,12 @@ export const LINEAGE_MAX_HOPS = 16;
 /** The package crew starts as the interactive bridge — named in CODE exactly once. */
 const INTERACTIVE_PACKAGE = 'wicked-interactive';
 /** The range crew needs when nothing overrides it (see F-081 above). */
-export const INTERACTIVE_DEFAULT_RANGE = '^0.9.4';
+/**
+ * 0.10.0 (EP-I1 + EP-I2, R-I): CREW may emit `review.completed`, and `PUT /d/:doc/api/theme/learned`
+ * exists — the route crew's theme seam (EP-C4) writes through. A 0.9.x bridge has no such route, so
+ * a validated theme would fail at the bridge (codex r1 on EP-C4): the floor follows.
+ */
+export const INTERACTIVE_DEFAULT_RANGE = '^0.10.0';
 /** The env override of the RANGE (not the package). */
 export const INTERACTIVE_SPEC_ENV = 'WICKED_INTERACTIVE_SPEC';
 /** The default spec — what the daemon spawns with no override. */
