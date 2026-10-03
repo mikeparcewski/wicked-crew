@@ -304,6 +304,13 @@ export class WatchEmitter {
       model: null,
       rolled_up: rolledUp,
     });
+    // WT-W4: a PROJECT-scoped row is not a run's rate. `rate.per_run` bounds what one run may say;
+    // project rows are bounded by their own key (one per draft) and would otherwise share one run-less
+    // bucket per entry for the daemon's life, rolling up — and no longer filing — past it (codex on #788).
+    if (out.project !== undefined) {
+      this.push(WATCH_FINDING_RAISED, base(out.subject, 0, out.sentence), entry.emit.as === 'proposal', {});
+      return;
+    }
     if (rate.plain < entry.emit.rate.per_run) {
       rate.plain++;
       this.push(WATCH_FINDING_RAISED, base(out.subject, 0, out.sentence), entry.emit.as === 'proposal', { plainOf: rate });

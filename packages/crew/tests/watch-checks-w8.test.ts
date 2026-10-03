@@ -76,6 +76,13 @@ describe('addedByHandProposals — a step a person added to N consecutive launch
     expect(addedByHandProposals(snap(five), PARAMS, { consecutive: 6 })).toEqual([]);
   });
 
+  it('an UNKNOWN run (its records could not be read) stays in the launch order and breaks the streak: unknown is never "added" (codex on #788)', () => {
+    const hand = { human_added: ['test'] };
+    const runs = [run('a', hand), run('b', hand), run('c', { unknown: true }), run('d', hand), run('e', hand), run('f', hand)];
+    expect(addedByHandProposals(snap(runs), PARAMS, T5)).toEqual([]);
+    expect(addedByHandProposals(snap(runs), PARAMS, { consecutive: 3 }).map((p) => p.evidence.run_ids)).toEqual([['d', 'e', 'f']]);
+  });
+
   it('runs are ordered by launch time whatever order the snapshot lists them in', () => {
     const hand = { human_added: ['test'] };
     const shuffled = [run('e', hand), run('a', hand), run('c'), run('d', hand), run('b', hand)].map((r, i) => ({ ...r, launched_at: NOW - (5 - 'abcde'.indexOf(r.run_id)) * DAY + i }));
@@ -277,9 +284,12 @@ describe('makeDiscoverySource — the project view the registry hands to the che
     const first = await source('proj-1');
     expect(first.project_id).toBe('proj-1');
     expect(first.unreadable).toBe(1); // r3: no event log
-    expect(first.runs.map((r) => r.run_id)).toEqual(['r1', 'r2']); // launch order; r3 unreadable; chat-9 is not a run
+    // Launch order (created_at, then id); r3 stays in it as an UNKNOWN run (codex on #788: it may break a
+    // streak, so it is never dropped); chat-9 is not a run.
+    expect(first.runs.map((r) => r.run_id)).toEqual(['r1', 'r3', 'r2']);
     expect(first.runs[0]).toEqual({ run_id: 'r1', kind: 'feature', launched_at: NOW - 5 * DAY, human_added: ['walkthrough_plan', 'walkthrough_review'], walkthrough: 'FAIL', test: 'PASS' });
-    expect(first.runs[1]).toEqual({ run_id: 'r2', kind: 'feature', launched_at: NOW - 1 * DAY, human_added: [], walkthrough: null, test: null });
+    expect(first.runs[1]).toEqual({ run_id: 'r3', kind: 'feature', launched_at: NOW - 5 * DAY, human_added: [], walkthrough: null, test: null, unknown: true });
+    expect(first.runs[2]).toEqual({ run_id: 'r2', kind: 'feature', launched_at: NOW - 1 * DAY, human_added: [], walkthrough: null, test: null });
     expect(verdicts).toEqual(['/nowhere:r1', '/nowhere:r2']); // only runs with a test step and a repo are read
     // Terminal runs are cached; the live one is re-read; the unreadable one is retried.
     reads.length = 0;
@@ -407,6 +417,30 @@ describe('the shipped discovery entries', () => {
     again.offer(ended('r8'));
     await again.flush();
     expect(await watchRows()).toHaveLength(2);
+    expect(submitted).toHaveLength(2);
+  });
+
+  it('project-scoped proposal rows are not a run\'s rate: past per_run they are still plain rows and still filed (codex on #788)', async () => {
+    const d = join(dir, 'entries-rate1');
+    mkdirSync(d, { recursive: true });
+    for (const e of loadEntries(SHIPPED_ENTRIES_DIR, SHIPPED_CHECKS).entries.filter((x) => x.on.source === 'internal' || x.id === 'added-by-hand')) {
+      writeFileSync(join(d, `${e.id}.json`), JSON.stringify(e.id === 'added-by-hand' ? { ...e, emit: { ...e.emit, rate: { per_run: 1 } } } : e));
+    }
+    const submitted: WatchFinding[] = [];
+    const two = { human_added: ['test', 'walkthrough_review'] };
+    const r = makeRegistry({
+      entriesDir: d,
+      discovery: async () => snap([run('r1', two), run('r2', two), run('r3', two), run('r4', two), run('r5', two)]),
+      submitProposal: async (f) => void submitted.push(f),
+    });
+    await r.arm();
+    r.offer(ended('r5'));
+    await r.flush();
+    const rows = (await watchRows()).filter((x) => x.payload.entry_id === 'added-by-hand');
+    expect(rows.map((x) => [x.event_type, x.payload.rolled_up, x.payload.facts['catalog']])).toEqual([
+      [WATCH_FINDING_RAISED, 0, 'test'],
+      [WATCH_FINDING_RAISED, 0, 'walkthrough_review'],
+    ]);
     expect(submitted).toHaveLength(2);
   });
 

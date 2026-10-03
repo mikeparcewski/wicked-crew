@@ -23,6 +23,9 @@
  *
  * The draft hash is over the RULE text, not the count: a sixth consecutive run re-derives the same
  * draft and raises nothing new. A changed set of observed kinds is a new draft.
+ *
+ * A run whose records could not be read stays in the view as `unknown` (nothing added, no verdicts):
+ * it breaks a streak it sits inside and never counts as a hit — unknown is never "yes".
  */
 
 import { createHash } from 'node:crypto';

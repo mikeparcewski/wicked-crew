@@ -95,6 +95,11 @@ export interface DiscoveryRun {
   walkthrough: string | null;
   /** The QE verdict the acceptance gate attributes to the run's `test` step, `null` when none is. */
   test: string | null;
+  /**
+   * The run's records could not be read: it stays in the launch order (it may break a streak) with
+   * nothing added, no walkthrough and no test — unknown is never "yes". Counted in `unreadable`.
+   */
+  unknown?: true;
 }
 
 /** WT-W4: the project-level view the discovery checks count over. */

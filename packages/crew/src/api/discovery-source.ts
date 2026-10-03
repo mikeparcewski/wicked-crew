@@ -147,8 +147,13 @@ export function makeDiscoverySource(deps: DiscoverySourceDeps): (projectId: stri
       } catch {
         events = null;
       }
+      const created = (v.session as { created_at?: unknown }).created_at;
+      const createdAt = typeof created === 'number' && Number.isFinite(created) ? created : null;
       if (events === null) {
+        // Unknown, never dropped (codex on #788): the run keeps its place in the launch order, where it
+        // breaks any streak that would otherwise skip over it; nothing about it reads as "yes".
         unreadable += 1;
+        runs.push({ run_id: id, kind: v.session.workflow_id, launched_at: createdAt ?? 0, human_added: [], walkthrough: null, test: null, unknown: true });
         continue;
       }
       const units = [...(v.units ?? [])].sort((a, b) => a.ord - b.ord);
@@ -164,10 +169,9 @@ export function makeDiscoverySource(deps: DiscoverySourceDeps): (projectId: stri
         const repo = repos.find((r) => r.id === v.session.repo_ref);
         if (repo !== undefined) test = await testVerdict(repo.root_path, id, events).catch(() => null);
       }
-      const created = (v.session as { created_at?: unknown }).created_at;
       let firstTs = Number.POSITIVE_INFINITY;
       for (const e of events) if (typeof e.ts === 'number' && Number.isFinite(e.ts) && e.ts < firstTs) firstTs = e.ts;
-      const launchedAt = typeof created === 'number' && Number.isFinite(created) ? created : Number.isFinite(firstTs) ? firstTs : 0;
+      const launchedAt = createdAt ?? (Number.isFinite(firstTs) ? firstTs : 0);
       const run: DiscoveryRun = {
         run_id: id,
         kind: v.session.workflow_id,
