@@ -261,8 +261,9 @@ export class WatchEmitter {
     return s;
   }
 
-  private envelope(entry: LoadedEntry, runId: string | null, ord: number | null, attempt: number | null, re: string) {
-    const projectId = runId !== null ? this.deps.projectOf(runId) : undefined;
+  private envelope(entry: LoadedEntry, runId: string | null, ord: number | null, attempt: number | null, re: string, project?: string) {
+    // WT-W4: a project-scoped row names its project itself (it has no run to look one up from).
+    const projectId = project ?? (runId !== null ? this.deps.projectOf(runId) : undefined);
     return {
       run_id: runId,
       ord,
@@ -289,7 +290,7 @@ export class WatchEmitter {
     const ord = out.ord ?? null;
     const attempt = out.attempt ?? null;
     const base = (subject: string, rolledUp: number, sentence: string): WatchFinding => ({
-      ...this.envelope(entry, runId, ord, attempt, out.re),
+      ...this.envelope(entry, runId, ord, attempt, out.re, out.project),
       watch_id: watchIdOf(runId, entry.id, entry.version, subject),
       check: entry.check,
       kind: out.kind ?? entry.emit.as,
@@ -303,6 +304,13 @@ export class WatchEmitter {
       model: null,
       rolled_up: rolledUp,
     });
+    // WT-W4: a PROJECT-scoped row is not a run's rate. `rate.per_run` bounds what one run may say;
+    // project rows are bounded by their own key (one per draft) and would otherwise share one run-less
+    // bucket per entry for the daemon's life, rolling up — and no longer filing — past it (codex on #788).
+    if (out.project !== undefined) {
+      this.push(WATCH_FINDING_RAISED, base(out.subject, 0, out.sentence), entry.emit.as === 'proposal', {});
+      return;
+    }
     if (rate.plain < entry.emit.rate.per_run) {
       rate.plain++;
       this.push(WATCH_FINDING_RAISED, base(out.subject, 0, out.sentence), entry.emit.as === 'proposal', { plainOf: rate });
@@ -344,7 +352,7 @@ export class WatchEmitter {
     this.push(WATCH_FINDING_RAISED, row, false, { restore: { rate, att, to: prev } });
     if (prev !== undefined) {
       this.push(WATCH_FINDING_CLEARED, {
-        ...this.envelope(entry, runId, ord, attempt, out.re),
+        ...this.envelope(entry, runId, ord, attempt, out.re, out.project),
         watch_id: prev.watchId,
         reason: 'rolled_up',
         replaced_by: row.watch_id,

@@ -94,6 +94,7 @@ import { StandingOrderStore } from '../standing-orders/store.js';
 import { StandingOrderEvaluator, type GateFact } from '../standing-orders/evaluator.js';
 import { registerStandingOrderRoutes } from '../standing-orders/routes.js';
 import { WatchRegistry } from '../watch/registry.js';
+import { makeDiscoverySource } from './discovery-source.js';
 import { registerWatchRoutes } from './watch-routes.js';
 import { callEstateTool } from '../core/estate-mcp-client.js';
 import { seatParser } from '../standing-orders/parse.js';
@@ -943,6 +944,17 @@ export async function createServer(
       // TR-W6 `warned_rule`: the fired rule ids are classified against the daemon's own steering
       // store (effect: warn), read on a cadence by the registry — never per frame.
       rules: () => adapter.listConformanceRules(),
+      // WT-W4 discovery: the project view the two discovery entries count over (the run's plan rows on
+      // the bus, the recorder's seal, the ledger's attributed test verdict), read per project on a
+      // cadence with a deadline — never per frame. Proposals go to the review queue below; nothing lands.
+      discovery: makeDiscoverySource({
+        dbPath: engineBusDb,
+        runsOf: (projectId) => membershipIndex.runsOf(projectId),
+        sessions: () => adapter.sessionsDetail(),
+        runEvents: (runId) => adapter.runEvents(runId),
+        workOutput: (unitId) => adapter.workOutput(unitId),
+        repos: () => adapter.listRepos(),
+      }),
       broadcast: (frame) => broadcast(frame),
       auditEmitFailed: (detail) => {
         audit.record('watch.emit.failed', { id: 'watch-registry', kind: 'system', trust: 'admin' }, { detail });

@@ -51,4 +51,11 @@ export class MembershipIndex {
   projectOf(runOrChatId: string): string | undefined {
     return this.runToProject.get(runOrChatId);
   }
+
+  /** WT-W4: every run or chat id the index maps to `projectId` (the discovery view's member set). */
+  runsOf(projectId: string): string[] {
+    const out: string[] = [];
+    for (const [id, project] of this.runToProject) if (project === projectId) out.push(id);
+    return out;
+  }
 }

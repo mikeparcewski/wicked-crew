@@ -20,7 +20,9 @@ const SRC = fileURLToPath(new URL('../src', import.meta.url));
 // TR-W7: the watch registry's scope-drift check READS `wicked.team.plan.accepted` (the run's declared
 // scope, pulled off the bus by the registry). It names the type to recognise the row; it emits nothing
 // (rule 2 holds it to that; tests/watch-no-authority.test.ts holds the whole registry to advisory).
-const READERS = new Set(['team/ws-relay.ts', 'team/routes.ts', 'standing-orders/evaluator.ts', 'watch/checks/scope-drift.ts']);
+// WT-W4: the discovery view READS `wicked.team.plan.*` rows (who put which step in the plan). It emits
+// nothing either.
+const READERS = new Set(['team/ws-relay.ts', 'team/routes.ts', 'standing-orders/evaluator.ts', 'watch/checks/scope-drift.ts', 'api/discovery-source.ts']);
 
 function sources(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {

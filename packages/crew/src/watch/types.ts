@@ -79,6 +79,38 @@ export interface WatchRuleBrief {
   severity: string;
 }
 
+/** WT-W4: one run of a project as discovery sees it (DES-walkthrough-proof §4.13). */
+export interface DiscoveryRun {
+  run_id: string;
+  /** What the run was launched as (`workflow_id`: a workflow, a preset or `plan`). */
+  kind: string;
+  /** Launch instant, epoch ms. */
+  launched_at: number;
+  /**
+   * Catalog ids a PERSON put in the plan (`plan.proposed{by:"human"}` steps the PA's proposal did not
+   * carry; floor-added never; PA additions never), less any an accepted override removed. Sorted.
+   */
+  human_added: string[];
+  /** The newest `walkthrough_review` seal's `overall` (`PASS` | `FAIL` | …), `null` when none was recorded. */
+  walkthrough: string | null;
+  /** The QE verdict the acceptance gate attributes to the run's `test` step, `null` when none is. */
+  test: string | null;
+  /**
+   * The run's records could not be read: it stays in the launch order (it may break a streak) with
+   * nothing added, no walkthrough and no test — unknown is never "yes". Counted in `unreadable`.
+   */
+  unknown?: true;
+}
+
+/** WT-W4: the project-level view the discovery checks count over. */
+export interface DiscoverySnapshot {
+  project_id: string;
+  /** Oldest launch first. */
+  runs: DiscoveryRun[];
+  /** Runs of the project whose records could not be read (unknown, never "no"). */
+  unreadable: number;
+}
+
 export interface CheckCtx {
   now(): number;
   stats(): RegistryStats;
@@ -88,6 +120,12 @@ export interface CheckCtx {
    * cannot be read — a check treats both as "not classifiable", never as "no rule fired".
    */
   rules?: () => Promise<ReadonlyMap<string, WatchRuleBrief>>;
+  /**
+   * WT-W4: the project view discovery counts over, for the run's project (bounded, cached per
+   * project by the registry). Absent on a registry without a source; `null` when the run belongs to
+   * no project; rejects when the view cannot be read in time and no earlier view exists.
+   */
+  discovery?: (runId: string) => Promise<DiscoverySnapshot | null>;
 }
 
 /** What a check returns: a row to raise, or a raised row (by subject) that has resolved. */
@@ -118,6 +156,12 @@ export type CheckOutput =
        */
       at?: number;
       replay?: boolean;
+      /**
+       * WT-W4: makes the row PROJECT-scoped instead of run-scoped — `run_id: null`, `anchor: null`,
+       * `project_id` = this — so a fact about the project (a discovery proposal) is one row however
+       * many of its runs re-derive it. The subject must then carry the project.
+       */
+      project?: string;
     }
   | { op: 'clear'; subject: string };
 

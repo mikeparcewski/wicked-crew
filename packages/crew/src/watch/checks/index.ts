@@ -8,6 +8,7 @@ import type { WatchCheck } from '../types.js';
 import { checkFailedCheck } from './check-failed.js';
 import { claimVsEvidenceCheck } from './claim-vs-evidence.js';
 import { deliverAuditCheck } from './deliver-audit.js';
+import { addedByHandCheck, whatCatchesCheck } from './discovery.js';
 import { lagCheck } from './lag.js';
 import { quietAfterClaimCheck } from './quiet-after-claim.js';
 import { scopeDriftCheck } from './scope-drift.js';
@@ -26,4 +27,7 @@ export const SHIPPED_CHECKS: ReadonlyMap<string, WatchCheck> = new Map<string, W
   [warnedRuleCheck.name, warnedRuleCheck as unknown as WatchCheck],
   // TR-W7
   [scopeDriftCheck.name, scopeDriftCheck as unknown as WatchCheck],
+  // WT-W4 (DES-walkthrough-proof §4.13: discovery, propose-only)
+  [addedByHandCheck.name, addedByHandCheck as unknown as WatchCheck],
+  [whatCatchesCheck.name, whatCatchesCheck as unknown as WatchCheck],
 ]);
