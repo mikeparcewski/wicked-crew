@@ -139,11 +139,13 @@ describe('system settings follow the state home (crew#756)', () => {
     try {
       setCrewStateHome(join(dir, 'm'));
       const path = join(dir, 'm', 'daemon-settings.json');
-      mkdirSync(join(dir, 'm'), { recursive: true });
-      writeFileSync(path, '{}');
-      chmodSync(path, 0o600);
-      await a.updateSettings({ graphNodeLimit: 11 });
+      // A first write is created owner-only: its text is never readable by others, even as a temp file (codex).
+      await a.updateSettings({ graphNodeLimit: 10 });
       expect(statSync(path).mode & 0o777).toBe(0o600);
+      writeFileSync(path, '{}');
+      chmodSync(path, 0o640);
+      await a.updateSettings({ graphNodeLimit: 11 });
+      expect(statSync(path).mode & 0o777).toBe(0o640);
       // A settings file that is a link (a dotfiles checkout, say) stays a link; its target is updated.
       const target = join(dir, 'dotfiles-settings.json');
       writeFileSync(target, '{}');

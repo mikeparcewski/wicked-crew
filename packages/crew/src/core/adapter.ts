@@ -181,7 +181,9 @@ async function publishSettingsFile(linkPath: string, body: string, replace: bool
   }
   await mkdir(dirname(path), { recursive: true });
   const tmp = `${path}.tmp.${process.pid}.${randomUUID()}`;
-  await writeFile(tmp, body, 'utf8');
+  // Created exclusively and owner-only, so the text is never readable by others while it is a
+  // temp file; the existing file's mode is applied before it is published (codex on #760).
+  await writeFile(tmp, body, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
   try {
     if (mode !== undefined) await chmod(tmp, mode);
     if (replace) {
