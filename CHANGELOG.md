@@ -10,6 +10,18 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.49] — 2026-10-03
+
+Feature release, hours after 0.7.48: "Review this page". The daemon answers
+`wicked.interactive.review.requested` with one governed, read-only review run — Intent, A11y, Copy
+and Quality, never by a seat that wrote the document — records one wicked-ledger verdict per
+reviewer, announces `review.completed` from that record, and serves the document's checks at
+`GET /projects/:projectId/interactive/docs/:doc/checks`. `wicked-crew-api-types` 0.88.0 is the
+matching wire contract. The release smoke is re-pinned to the wicked-ci harness that counts a chat
+turn's own records (0.7.48's smoke failed one S08 assertion on the new per-turn `decisions`
+transcript record; the package itself was sound). The bundled studio skin stays `^0.5.19`;
+`wicked-core-ts` stays `^0.7.35`.
+
 - **"Review this page": four reviewers, one governed run, never the document's own authors (`wicked-crew-api-types` 0.88.0; DES-ARTIFACT-EDITOR-PLUGINS slice EP-C2).** A new seam, `interactive-review` (`src/interactive/review-events.ts`, the sibling of the edit and theme seams), answers wicked-interactive's `wicked.interactive.review.requested {document_id, version, reviewers}` with ONE governed run — one read-only phase that reviews the saved version once per requested reviewer (Intent `match`, A11y `a11y`, Copy `copy`, Quality `qe`; each loads its garden skill when the published snapshot holds it, a built-in rubric otherwise) and ends with one `REVIEW-REPORT-<nonce> {json}` line (the nonce is minted per run after the version was saved, so a report line quoted from the reviewed page is never the review).
   - **Not the author's seat.** The seats that wrote the document (the creator units of its draft, edit and chat runs, read from the seams' ledgers) are taken off the review run's roster AND passed as the launch's `excludeSeats` (EP-K3, wicked-core-ts ≥ 0.7.35; `LaunchRunInput.excludeSeats`, refused on an older addon) — so neither the reviewer nor its judge wrote what is under review. With no authoring run on record nothing is excluded and every verdict says so (`by.author_known: false`); when every seat is an author the review is refused with a plain status.
   - **One verdict record.** Crew writes one wicked-ledger verdict row per reviewer, stamped with `crew_run_id`, into the document's review root (`<handoff root>/_reviews/<project>/<doc>/.wicked-qe/`, canonical JSON with `doc`, `version`, `review_verdict`, `findings`), reads the rows back, and only then emits `wicked.interactive.review.completed {document_id, version, reviewer, verdict, passed, findings}` per reviewer. There is no crew review ledger. A reviewer the report leaves out, a reviewer whose findings cannot be read, and a run that fails, are recorded and announced as `error` — never a guessed pass; a `pass` that still lists findings is `changes`.
@@ -3486,7 +3498,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.48...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.49...HEAD
+[0.7.49]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.48...v0.7.49
 [0.7.48]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.47...v0.7.48
 [0.7.47]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.46...v0.7.47
 [0.7.46]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.45...v0.7.46
