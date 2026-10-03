@@ -1,0 +1,13 @@
+{
+  "id": "scope-drift",
+  "version": 1,
+  "on": { "source": "core", "type": "repoChecksEvaluated" },
+  "join": [{ "source": "bus", "type": "wicked.team.plan.accepted" }],
+  "filter": { "floor": "creator" },
+  "check": "deterministic:scope_drift",
+  "params": {},
+  "threshold": { "min_paths": 1 },
+  "emit": { "as": "flag", "severity": "medium", "watch_kind": "problem", "attach": null, "rate": { "per_run": 5 } },
+  "priority": "p1",
+  "enabled": true
+}

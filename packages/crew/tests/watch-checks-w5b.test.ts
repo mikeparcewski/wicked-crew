@@ -174,8 +174,11 @@ describe('the shipped entries and the router joins', () => {
     expect(r.route(core({ type: 'repoChecksEvaluated', ord: 1 })).map((e) => e.id).sort()).toEqual(['claim-vs-evidence', 'deliver-audit']);
     expect(r.route(core({ type: 'deliverLiftEvaluated', outcome: 'skipped' })).map((e) => e.id)).toEqual([]);
     expect(r.route(core({ type: 'gateEvaluated', ord: 1 })).map((e) => e.id).sort()).toEqual(['claim-vs-evidence', 'deliver-audit', 'quiet-after-claim', 'ungated']);
+    // TR-W7: scope-drift triggers on the same floor frame but its filter wants `floor: "creator"`, so a
+    // floor frame without it is not routed there.
+    expect(r.route(core({ type: 'repoChecksEvaluated', ord: 1, floor: 'creator' })).map((e) => e.id).sort()).toEqual(['claim-vs-evidence', 'deliver-audit', 'scope-drift']);
     // Joins never count as an entry "of" a source (the internal ticks walk only triggers).
-    expect(r.entriesOf('core').map((e) => e.id).sort()).toEqual(['claim-vs-evidence', 'deliver-audit', 'risky-call', 'ungated']);
+    expect(r.entriesOf('core').map((e) => e.id).sort()).toEqual(['claim-vs-evidence', 'deliver-audit', 'risky-call', 'scope-drift', 'ungated']);
   });
 
   it('the loader refuses a join from the internal source and a bus join that is not 4 segments', async () => {
