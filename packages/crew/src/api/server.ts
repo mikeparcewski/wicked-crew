@@ -906,6 +906,9 @@ export async function createServer(
           .filter((v) => !['completed', 'cancelled', 'failed'].includes(v.session.status))
           .map((v) => v.session.id),
       runEvents: (runId) => adapter.runEvents(runId),
+      // TR-W6 `warned_rule`: the fired rule ids are classified against the daemon's own steering
+      // store (effect: warn), read on a cadence by the registry — never per frame.
+      rules: () => adapter.listConformanceRules(),
       broadcast: (frame) => broadcast(frame),
       auditEmitFailed: (detail) => {
         audit.record('watch.emit.failed', { id: 'watch-registry', kind: 'system', trust: 'admin' }, { detail });

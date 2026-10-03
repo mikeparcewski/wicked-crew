@@ -40,7 +40,7 @@ import { applyOverrides, loadEntries, SHIPPED_ENTRIES_DIR, validateWatchPatch, t
 import { PushRing } from './ring.js';
 import { Router } from './router.js';
 import { replayBusRows, startBusPull, startWatchWsRelay, type BusPull, type WatchRelay } from './sources.js';
-import type { CheckCtx, KeyPointInput, LoadedEntry, RunWatchState, WatchCheck } from './types.js';
+import type { CheckCtx, KeyPointInput, LoadedEntry, RunWatchState, WatchCheck, WatchRuleBrief } from './types.js';
 
 /** Run states kept for coverage after a run ends (oldest dropped first). */
 const RUN_STATE_CAP = 500;
@@ -49,6 +49,11 @@ const FEED_LIMIT_MAX = 500;
 const CHECK_FAILED_ENTRY = 'registry-check-failed';
 
 export interface WatchRegistryOptions {
+  /**
+   * TR-W6: the daemon's steering rules, read for `warned_rule` and cached for {@link RULES_SNAPSHOT_TTL_MS}.
+   * Absent = checks see no `ctx.rules` (coverage says the store is not readable once a rule fires).
+   */
+  rules?: () => Promise<ReadonlyArray<{ id: string; effect?: string | undefined; severity: string; retired?: boolean | undefined }>>;
   /** The bus the daemon handed its engine; `undefined` = no bus, no watching. */
   dbPath: string | undefined;
   entriesDir?: string;
@@ -80,6 +85,9 @@ export interface WatchRegistryOptions {
 }
 
 export type DismissResult = 'dismissed' | 'not_found' | 'already_cleared' | 'emit_failed';
+
+/** TR-W6: how long one `listConformanceRules` read serves the warned-rule check. */
+export const RULES_SNAPSHOT_TTL_MS = 30_000;
 
 export class WatchRegistry {
   private armedFlag = false;
@@ -357,8 +365,32 @@ export class WatchRegistry {
     return s;
   }
 
+  private rulesSnapshot: { at: number; map: ReadonlyMap<string, WatchRuleBrief> } | null = null;
+  private rulesInFlight: Promise<ReadonlyMap<string, WatchRuleBrief>> | null = null;
+
+  /** TR-W6: one store read per TTL, shared by every check that asks in the window. */
+  private readRules(): Promise<ReadonlyMap<string, WatchRuleBrief>> {
+    const source = this.opts.rules;
+    if (source === undefined) return Promise.reject(new Error('no rule source'));
+    const now = this.now();
+    if (this.rulesSnapshot !== null && now - this.rulesSnapshot.at < RULES_SNAPSHOT_TTL_MS) return Promise.resolve(this.rulesSnapshot.map);
+    if (this.rulesInFlight !== null) return this.rulesInFlight;
+    this.rulesInFlight = source()
+      .then((list) => {
+        const map = new Map<string, WatchRuleBrief>();
+        for (const r of list) if (r.retired !== true) map.set(r.id, { effect: r.effect, severity: r.severity });
+        this.rulesSnapshot = { at: this.now(), map };
+        return map as ReadonlyMap<string, WatchRuleBrief>;
+      })
+      .finally(() => {
+        this.rulesInFlight = null;
+      });
+    return this.rulesInFlight;
+  }
+
   private ctx(): CheckCtx {
     return {
+      ...(this.opts.rules !== undefined ? { rules: () => this.readRules() } : {}),
       now: this.now,
       stats: () => {
         const r = this.ring.stats();

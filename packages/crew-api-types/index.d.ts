@@ -1797,8 +1797,15 @@ export interface GovernanceHookFiredEvent {
   ord: number;
   attempt: number;
   toolName: string;
-  decision: 'allow' | 'deny';
+  /** `allow_with_conditions` (typed from api-types 0.87.0): the engine permits with obligations. */
+  decision: 'allow' | 'deny' | 'allow_with_conditions';
   denyingPolicy: string | null;
+  /**
+   * (TR-W2, wicked-core-ts >= 0.7.35; api-types 0.87.0) EVERY steering rule that fired on this
+   * call, whatever the decision — the `warn` class included, which an allow decision used to drop.
+   * The watch registry's `risky-call` entry projects the warn-effect ones. Absent on an older engine.
+   */
+  firedPolicies?: string[];
 }
 
 /** P2 — a pinned deterministic validator was attached; confirms the governance floor is armed. */
@@ -2102,6 +2109,32 @@ export type RepoChecksEvaluatedEvent = {
    *  `typecheck`/`lint`/`test` script, …) — the reason an empty `checks` is empty; `null` when
    *  detection succeeded. */
   detectError?: string | null;
+  /**
+   * (wicked-core#469; typed here from api-types 0.87.0) How the floor ended: `passed` | `failed` |
+   * `timed_out` | `not_run`. A floor that did not finish, or could not run at all (no write
+   * boundary — see `sandboxError`), is never "its checks failed". Absent on an older engine.
+   */
+  outcome?: string;
+  /**
+   * (wicked-core#467; typed here from api-types 0.87.0) Whose floor this was: `creator` (the seat
+   * handed back output and the engine ran the repo checks on its tree — a failing one is the
+   * structural "handed back as finished, its own checks failed", TR-W6) or `verify` (the
+   * code-verifying unit's, and the deliver re-check). Absent on an older engine.
+   */
+  floor?: string;
+  /**
+   * (wicked-core#467) A creator transcript's "pre-existing failure" claim, judged against the
+   * baseline diff: `verdict` is `claim_rejected` | `claim_confirmed` | `unverified`. `null` when no
+   * claim was made or the floor was green.
+   */
+  claim?: { phrase: string; check: string; verdict: string } | null;
+  /**
+   * (TR-W1b, wicked-core-ts >= 0.7.35) The repo-relative paths the step changed, `git diff-tree
+   * --name-status` baseline → floor tree. Absent when the tree did not change; capped at 200 with
+   * `changedTruncated: true`.
+   */
+  changed?: Array<{ status: string; path: string }>;
+  changedTruncated?: boolean;
 };
 
 // ── wicked-core#431 gate / deliver evidence (F-3R2-013 / -010 / -009; api-types 0.33.0) ──────────
