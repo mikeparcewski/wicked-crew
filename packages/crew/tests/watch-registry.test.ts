@@ -164,7 +164,7 @@ describe('watch keys (test 1)', () => {
 });
 
 describe('the loader (test 4)', () => {
-  it('ships the two internal entries, the three TR-W5b entries and the two TR-W6 entries, all enabled', () => {
+  it('ships the two internal entries, the three TR-W5b entries, the two TR-W6 entries and the TR-W7 entry, all enabled', () => {
     const { entries, refused } = loadEntries(SHIPPED_ENTRIES_DIR, SHIPPED_CHECKS);
     expect(refused).toEqual([]);
     expect(entries.map((e) => [e.id, e.enabled, e.on.source])).toEqual([
@@ -174,6 +174,7 @@ describe('the loader (test 4)', () => {
       ['registry-check-failed', true, 'internal'],
       ['registry-lagging', true, 'internal'],
       ['risky-call', true, 'core'],
+      ['scope-drift', true, 'core'],
       ['ungated', true, 'core'],
     ]);
   });
@@ -352,7 +353,7 @@ describe('arming', () => {
     const h = r.health();
     expect(h.armed).toBe(false);
     expect(h.reason).toMatch(/no event bus/);
-    expect(h.entries.loaded).toBe(7);
+    expect(h.entries.loaded).toBe(8);
     // Coverage of a run never reads as clean when watching is off.
     const r2 = makeRegistry({ dbPath: undefined, entriesDir: entriesDir([entry('point')]) });
     await r2.arm();

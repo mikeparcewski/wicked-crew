@@ -10,6 +10,7 @@ import { claimVsEvidenceCheck } from './claim-vs-evidence.js';
 import { deliverAuditCheck } from './deliver-audit.js';
 import { lagCheck } from './lag.js';
 import { quietAfterClaimCheck } from './quiet-after-claim.js';
+import { scopeDriftCheck } from './scope-drift.js';
 import { ungatedCheck } from './ungated.js';
 import { warnedRuleCheck } from './warned-rule.js';
 
@@ -23,4 +24,6 @@ export const SHIPPED_CHECKS: ReadonlyMap<string, WatchCheck> = new Map<string, W
   // TR-W6
   [claimVsEvidenceCheck.name, claimVsEvidenceCheck as unknown as WatchCheck],
   [warnedRuleCheck.name, warnedRuleCheck as unknown as WatchCheck],
+  // TR-W7
+  [scopeDriftCheck.name, scopeDriftCheck as unknown as WatchCheck],
 ]);
