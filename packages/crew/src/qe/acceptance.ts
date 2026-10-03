@@ -525,8 +525,9 @@ export async function buildAcceptanceView(opts: {
   const { phases, failClosed } = opts.requirement;
   const walkGates = opts.walkthroughs?.gates ?? [];
   const walkIds = new Set(walkGates.map((g) => g.stepId));
-  // The repo ledger owes evidence for every required phase that is not a walkthrough.
-  const required = opts.requirement.declared && (walkIds.size === 0 || phases.some((p) => !walkIds.has(p)));
+  // The repo ledger owes evidence for every required phase that is not a walkthrough. This is the
+  // repo ledger's share only; the run-level declaration stays `opts.requirement.declared` (Copilot on #759).
+  const repoRequired = opts.requirement.declared && (walkIds.size === 0 || phases.some((p) => !walkIds.has(p)));
 
   // The run's durable event log, read FIRST: it is both the conformance section's enforcement
   // record and the ledger read's linkage — a verdict is this run's only if its QE run falls inside
@@ -551,7 +552,7 @@ export async function buildAcceptanceView(opts: {
   // Deny-dominates across the repo ledger too: on a run whose requirement is walkthroughs only, a
   // verdict the repo ledger DOES attribute to this run still counts — a FAIL there denies.
   // An unreadable repo ledger counts too: it cannot say whether it attributes a denial (Copilot on #759).
-  const repoCounts = required || (walkIds.size > 0 && (state?.verdict != null || state?.error !== undefined));
+  const repoCounts = repoRequired || (walkIds.size > 0 && (state?.verdict != null || state?.error !== undefined));
   const gate = combineWalkthroughGates(resolveAcceptanceGate(repoCounts, state, failClosed), walkGates, opts.requirement.declared, failClosed);
 
   // The conformance half. Loader failures are NAMED, not flattened into an empty list — the
@@ -580,7 +581,7 @@ export async function buildAcceptanceView(opts: {
       opts.repo !== null
         ? { id: opts.repo.id, name: opts.repo.name, rootPath: opts.repo.root_path }
         : null,
-    requirement: { declared: required, phases },
+    requirement: { declared: opts.requirement.declared, phases },
     acceptance:
       state !== null
         ? {

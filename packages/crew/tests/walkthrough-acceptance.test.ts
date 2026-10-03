@@ -425,8 +425,10 @@ describe('GET /runs/:id/acceptance and the walkthrough view read the proof roots
     workOutput.mockImplementation(async (unitId: string) => (unitId.endsWith(':4') || unitId.includes(STEP) ? sealLine(root, PASSING) : null));
     const res = await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN}/acceptance` });
     expect(res.statusCode, res.body).toBe(200);
-    const body = res.json() as { gate: { satisfied: boolean; reason: string }; walkthrough: { sealed: boolean; roots: Array<{ stepId: string; sealed: boolean; satisfied: boolean }>; steps: Array<{ stepId: string; checkState: string }> } };
+    const body = res.json() as { gate: { satisfied: boolean; reason: string }; requirement: { declared: boolean; phases: string[] }; walkthrough: { sealed: boolean; roots: Array<{ stepId: string; sealed: boolean; satisfied: boolean }>; steps: Array<{ stepId: string; checkState: string }> } };
     expect(body.gate.satisfied).toBe(true);
+    // The run's requirement stays declared on a walkthrough-only plan (Copilot on #759, r2).
+    expect(body.requirement).toEqual({ declared: true, phases: [STEP] });
     expect(body.walkthrough.sealed).toBe(true);
     expect(body.walkthrough.roots).toEqual([expect.objectContaining({ stepId: STEP, sealed: true, satisfied: true })]);
     expect(body.walkthrough.steps).toEqual([{ stepId: 'build', checkState: 'checked', provedBy: [{ chapter: '01-pay-once', atSec: null }] }]);
