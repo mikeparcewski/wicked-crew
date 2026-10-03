@@ -1,10 +1,11 @@
 import { createRequire } from 'node:module';
 import type { BusUnavailable } from './engine-bus.js';
 import { attachEngineBus, detachEngineBus, type EngineBus } from './bus.js';
-import { mkdir, access, readFile, writeFile, chmod, rm } from 'node:fs/promises';
+import { mkdir, access, readFile, writeFile, chmod, rm, link, rename, realpath, stat } from 'node:fs/promises';
 import { existsSync, readdirSync, readFileSync, renameSync } from 'node:fs';
 import { join, dirname, resolve, isAbsolute, relative, sep } from 'node:path';
 import { isPlainRunId, WALKTHROUGH_AUTHOR_SUBDIR, walkthroughRootDir } from './walkthrough-root.js';
+import { crewStateHome, isDefaultStateHome } from '../projects/state-home.js';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -120,7 +121,83 @@ function workflowOverlayDir(): string {
 export function settingsFilePath(): string {
   const override = process.env['WICKED_CREW_SYSTEM_SETTINGS'];
   if (override !== undefined && override !== '') return override;
+  // crew#756: a daemon on a NON-default state home (a proof lane, a second install) keeps its
+  // settings beside its other stores, so changing its theme never rewrites the operator's real file.
+  // `daemon-settings.json` is a `daemon-*` name the state-home registry already classifies
+  // (operator-owned, no worker read), so the worker Read fence needs no change. The default state
+  // home keeps the historical location.
+  if (!isDefaultStateHome()) return join(crewStateHome(), 'daemon-settings.json');
+  return sharedSettingsFilePath();
+}
+
+/** The historical machine-wide settings file — the default state home's, and the one-time seed of any other (crew#756). */
+function sharedSettingsFilePath(): string {
   return join(homedir(), '.config', 'wicked-core', 'settings.json');
+}
+
+/**
+ * crew#756 migration, once: a non-default state home with no settings file of its own starts from a
+ * COPY of the shared file, so a daemon upgraded onto this rule keeps its configuration while every
+ * later write stays in its own state home. Exclusive copy (never overwrites); a missing shared file
+ * is no seed. A daemon with an explicit `WICKED_CREW_SYSTEM_SETTINGS` or on the default home skips it.
+ */
+async function seedStateHomeSettings(path: string): Promise<void> {
+  const override = process.env['WICKED_CREW_SYSTEM_SETTINGS'];
+  if ((override !== undefined && override !== '') || isDefaultStateHome() || existsSync(path)) return;
+  // The seed is a VALIDATED snapshot: the shared file's text only when it parses as a JSON object,
+  // else an empty object — so a missing, partial or corrupt shared file starts the home empty and is
+  // never retried (Copilot on #760). Published with `link`, which is atomic and never replaces an
+  // existing file: a racing first read either publishes or finds a complete file.
+  let body = '{}';
+  try {
+    const raw = await readFile(sharedSettingsFilePath(), 'utf8');
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) body = raw;
+  } catch {
+    /* absent or not JSON: start empty */
+  }
+  await publishSettingsFile(path, body, false);
+}
+
+/**
+ * Write a settings file WHOLE: the text goes to a sibling temp file, then is published — by
+ * `rename` (replacing) or `link` (only when absent). A reader never sees a partial file. The temp
+ * name keeps the target's name as its prefix, so inside a state home it stays a registered
+ * `daemon-*` entry while it exists.
+ */
+async function publishSettingsFile(linkPath: string, body: string, replace: boolean): Promise<void> {
+  // A replacing write goes THROUGH a settings-file link to its target and keeps the file's mode, as
+  // the in-place `writeFile` it replaces did (Copilot r2 on #760): `rename` would swap the link for a
+  // plain file and publish the temp file's default (umask) mode over a 0600 file.
+  let path = linkPath;
+  let mode: number | undefined;
+  if (replace) {
+    try {
+      path = await realpath(linkPath);
+      mode = (await stat(path)).mode & 0o777;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+  }
+  await mkdir(dirname(path), { recursive: true });
+  const tmp = `${path}.tmp.${process.pid}.${randomUUID()}`;
+  // Created exclusively and owner-only, so the text is never readable by others while it is a
+  // temp file; the existing file's mode is applied before it is published (codex on #760).
+  await writeFile(tmp, body, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+  try {
+    if (mode !== undefined) await chmod(tmp, mode);
+    if (replace) {
+      await rename(tmp, path);
+    } else {
+      try {
+        await link(tmp, path);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      }
+    }
+  } finally {
+    await rm(tmp, { force: true });
+  }
 }
 
 /**
@@ -3556,6 +3633,7 @@ export class CoreAdapter {
   // ── System settings ───────────────────────────────────────────────────────
 
   async getSettings(): Promise<CrewSystemSettings> {
+    await seedStateHomeSettings(settingsFilePath());
     try {
       const raw = await readFile(settingsFilePath(), 'utf8');
       const parsed = JSON.parse(raw) as Partial<CrewSystemSettings>;
@@ -3690,9 +3768,7 @@ export class CoreAdapter {
   async updateSettings(patch: Partial<CrewSystemSettings>): Promise<CrewSystemSettings> {
     const current = await this.getSettings();
     const next = { ...current, ...patch };
-    const path = settingsFilePath();
-    await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, JSON.stringify(next, null, 2), 'utf8');
+    await publishSettingsFile(settingsFilePath(), JSON.stringify(next, null, 2), true);
     return next;
   }
 
