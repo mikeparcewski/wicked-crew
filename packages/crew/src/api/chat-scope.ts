@@ -635,6 +635,33 @@ async function ownGraph(
 export const CHAT_GROUNDING_COMMAND =
   'wicked-garden run scripts/_estate_client.py --readonly call \'{"tool":"SearchEntity","arguments":{"name":"<symbol>"}}\'';
 
+/**
+ * DC-S4b (DES-decision-capture §4.3.3 + DOC-4): the directive that makes every seat end its reply
+ * with a fenced `wicked-decisions` block labelling the OPERATOR'S words of the turn. It inlines the
+ * codebook's contract (garden `skills/mem/refs/decision-report.md`, DC-S5: the same keys and
+ * vocabulary) because a chat seat has no skill loaded and no path to garden's refs. The block never
+ * reaches a reader: crew cuts it from the reply and the stream (`chat-transcripts.ts`), matches each
+ * quote against the same turn's message, and records the words — with the labels as suggestions
+ * only (crew decides what is remembered; a missing block costs nothing but the labels).
+ */
+const CHAT_DECISIONS_LINES: ReadonlyArray<string> = [
+  '## Decisions',
+  '',
+  'End every reply with this block, one item per operator decision (read the message with your',
+  'previous reply: a go-ahead approves what you proposed):',
+  '',
+  '```wicked-decisions',
+  '{"items":[{"quote":"<operator words, exact>","decision_text":"<one sentence; for a go-ahead,',
+  'from your proposal>","type":"rule|correction|scope|exception|choice|confirmation","codify":false,',
+  '"ambiguous":false,"steering_type":"architecture|development|security|testing|operations|',
+  'compliance|design-ux","approves_proposal":false,"same_as":null}]}',
+  '```',
+  '',
+  'No decision: `{"items":[]}`. `codify`: a standing rule in their own words. `same_as`: the',
+  "in-force rule it restates. Label only the operator's words; crew decides.",
+];
+export const CHAT_DECISIONS_DIRECTIVE = `${CHAT_DECISIONS_LINES.join('\n')}\n\n`;
+
 export function chatScopeStatement(chatId: string, scope: ChatScope): string {
   const lines: string[] = [
     '# Chat scope',
@@ -761,6 +788,8 @@ export function chatScopeStatement(chatId: string, scope: ChatScope): string {
     'be grounded, say so in one line rather than asserting it.',
     '',
   );
+  // DC-S4b: every seat, every scope kind — the recorder is chosen from the turn's audience.
+  lines.push(...CHAT_DECISIONS_LINES, '');
   if (scope.projectId !== undefined) {
     lines.push('## Project', '', `This chat is filed into project \`${scope.projectId}\`.`, '');
   }

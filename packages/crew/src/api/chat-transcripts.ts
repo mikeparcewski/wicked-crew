@@ -30,7 +30,8 @@
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join, sep } from 'node:path';
 
-import type { ChatCitationItem, ChatTranscriptRecord, ChatUsage, CoreEvent } from '../core/types.js';
+import type { ChatCitationItem, ChatTranscriptRecord, ChatUsage, CoreEvent, DecisionView } from '../core/types.js';
+import { DecisionFenceFilter, splitDecisionsBlock } from '../decisions/chat-recorder.js';
 import { crewStateHome } from '../projects/state-home.js';
 import { CHAT_ID } from './chat-scope.js';
 
@@ -94,6 +95,10 @@ export class ChatTranscriptStore {
   private readonly now: () => number;
   /** Per-chat roots registered at open time, used to rewrite absolute host paths (crew#618). */
   private readonly chatRoots = new Map<string, ReadonlyArray<ChatRepoRoot>>();
+  /** DC-S4b: the `chatDelta` fence filter (per chat + seat) — a `wicked-decisions` block never streams. */
+  private readonly fence = new DecisionFenceFilter();
+  /** DC-S4b: the block body cut from a seat's latest `chatReply`, until the recorder takes it. */
+  private readonly blocks = new Map<string, string>();
 
   constructor(opts: { dir?: string; now?: () => number } = {}) {
     this.dir = opts.dir ?? defaultChatTranscriptsDir();
@@ -229,21 +234,63 @@ export class ChatTranscriptStore {
    * repo-relative form that studio renders and promotes from (Acceptance 1).
    */
   rewriteEvent(event: CoreEvent): CoreEvent {
-    if (event.type !== 'chatReply') return event;
     const frame = event as CoreEvent & Record<string, unknown>;
     const chatId = typeof frame['chat'] === 'string' ? frame['chat'] : undefined;
+    const cliKey = typeof frame['cliKey'] === 'string' ? frame['cliKey'] : undefined;
+    if (event.type === 'chatDelta') {
+      // DC-S4b (review S4 / N8): the streamed reply never shows the block — a tail that could still
+      // become the fence is held back, and from the fence on nothing streams until the reply.
+      if (chatId === undefined || cliKey === undefined) return event;
+      const rawText = typeof frame['text'] === 'string' ? frame['text'] : '';
+      const text = this.fence.delta(chatId, cliKey, rawText);
+      return text === rawText ? event : ({ ...(frame as unknown as CoreEvent), text } as CoreEvent);
+    }
+    if (event.type !== 'chatReply') return event;
     if (chatId === undefined) return event;
-    const roots = this.chatRoots.get(chatId);
-    if (roots === undefined || roots.length === 0) return event;
     const rawText = typeof frame['text'] === 'string' ? frame['text'] : '';
-    const text = rewriteHostPaths(rawText, roots);
+    let text = rawText;
+    if (cliKey !== undefined) {
+      // DC-S4b: the reply is the clean full text; the block is kept for the recorder (one take).
+      this.fence.reset(chatId, cliKey);
+      const split = splitDecisionsBlock(text);
+      text = split.text;
+      const key = `${chatId}\u0000${cliKey}`;
+      if (split.block !== null) this.blocks.set(key, split.block);
+      else this.blocks.delete(key);
+    }
+    const roots = this.chatRoots.get(chatId);
+    if (roots !== undefined && roots.length > 0) text = rewriteHostPaths(text, roots);
     if (text === rawText) return event;
     return { ...(frame as unknown as CoreEvent), text } as CoreEvent;
+  }
+
+  /**
+   * DC-S4b: the `wicked-decisions` block body {@link rewriteEvent} cut from this seat's latest reply,
+   * handed over ONCE (a second call answers `null`). Call right after `rewriteEvent` for the reply.
+   */
+  takeDecisionsBlock(chatId: string, cliKey: string): string | null {
+    const key = `${chatId}\u0000${cliKey}`;
+    const block = this.blocks.get(key) ?? null;
+    this.blocks.delete(key);
+    return block;
+  }
+
+  /**
+   * DC-S4b: the decisions recorded from one turn's operator message, appended as their OWN record
+   * (the `citations` pattern: the transcript is append-only and derivation finishes after the
+   * replies are stored). A reader folds it onto the turn's `user` record. Only a chat that has a
+   * transcript gets one: a record alone must never recreate a dropped file.
+   */
+  recordDecisions(frame: { chat: string; turnId: string; items: DecisionView[] }): void {
+    const file = this.fileOf(frame.chat);
+    if (file === null || !existsSync(file)) return;
+    this.append(frame.chat, { at: this.now(), turnId: frame.turnId, kind: 'decisions', items: frame.items });
   }
 
   /** The chat is gone (`chatClosed`, any reason): its transcript goes with it. */
   drop(chatId: string): void {
     this.chatRoots.delete(chatId);
+    for (const key of [...this.blocks.keys()]) if (key.startsWith(`${chatId}\u0000`)) this.blocks.delete(key);
     const file = this.fileOf(chatId);
     if (file !== null) rmSync(file, { force: true });
   }
