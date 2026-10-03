@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.81.0",
+  "apiTypesVersion": "0.82.0",
   "endpoints": [
     {
       "method": "GET",
@@ -1416,6 +1416,21 @@
         400,
         404,
         416
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/runs/:id/walkthrough/storyline",
+      "requestType": "PutStorylineBody",
+      "responseType": "PutStorylineResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        409,
+        413,
+        503
       ]
     },
     {

@@ -5600,7 +5600,8 @@ export function registerRoutes(
   registerCaptureRoutes(app);
   // The Demo experience (studio#373): the demo preset's launch, view, files and script edit.
   registerDemoRoutes(app, adapter);
-  registerWalkthroughRoutes(app, adapter);
+  // WT-W3: the storyline PUT checks the open gate through the same resolution the gate routes use.
+  registerWalkthroughRoutes(app, adapter, { resolveOpenGate, audit });
 
   // ── Presets (DES-TEAMING-002 §8.4, seam C2) — saved phase selections in the engine's store;
   // a launch names one via `workflow`, and the ENGINE resolves it.

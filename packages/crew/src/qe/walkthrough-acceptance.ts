@@ -135,6 +135,8 @@ export interface WalkthroughGate {
   reason: string;
   /** The sealed overall verdict; `null` when there is no usable seal. */
   overall: string | null;
+  /** (WT-W3) The tree the seal binds, for the deliver card's "checked at <tree>"; `null` when there is no seal. */
+  tree: string | null;
   /** The sealed chapters with what each proves (from the bundle-verified `result.json`). */
   chapters: Array<{ key: string; verdict: string; proves: string[] }>;
 }
@@ -147,17 +149,20 @@ export async function resolveWalkthroughGate(opts: {
   output: string | null;
 }): Promise<WalkthroughGate> {
   const { runId, stepId, proofRoot } = opts;
+  let tree: string | null = null;
   const deny = (reason: string, sealed = false, overall: string | null = null, chapters: WalkthroughGate['chapters'] = []): WalkthroughGate => ({
     stepId,
     sealed,
     satisfied: false,
     reason: `walkthrough \`${stepId}\`: ${reason}`,
     overall,
+    tree,
     chapters,
   });
   if (proofRoot === null) return deny('no proof root on this run — nothing was recorded there (missing ⇒ deny)');
   const seal = parseSeal(opts.output);
   if (seal === null) return deny('not sealed — its recorder\'s output carries no well-formed WALKTHROUGH-SEAL line (missing ⇒ deny)');
+  tree = seal.tree;
   const changed = (why: string): WalkthroughGate => deny(`walkthrough evidence changed after it was sealed (${why}) (tampered ⇒ deny)`);
   const bundle = await computeBundleSha(proofRoot);
   if (!bundle.ok) return changed(bundle.error);
@@ -228,6 +233,7 @@ export async function resolveWalkthroughGate(opts: {
     satisfied: true,
     reason: `walkthrough \`${stepId}\`: PASS — ${seal.chapters.length} chapter${seal.chapters.length === 1 ? '' : 's'} sealed at tree ${seal.tree}, bundle and ledger re-verified`,
     overall: seal.overall,
+    tree,
     chapters,
   };
 }

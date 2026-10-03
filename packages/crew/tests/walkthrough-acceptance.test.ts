@@ -313,6 +313,7 @@ describe('walkthroughCheckStates (WT-W2, §4.9)', () => {
     satisfied: false,
     reason: '',
     overall: 'FAIL',
+    tree: 'a1b2c3d4',
     chapters: [
       { key: '01-a', verdict: 'PASS', proves: ['build'] },
       { key: '02-b', verdict: 'FAIL', proves: ['build-2'] },

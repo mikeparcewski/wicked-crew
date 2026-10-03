@@ -6740,6 +6740,50 @@ export interface RunAcceptanceWalkthrough {
   steps: WalkthroughStepState[];
 }
 
+/**
+ * `GET /runs/:id/acceptance` → `summary` (WT-W3, DES-walkthrough-proof §4.8/§7; api-types 0.82.0): the
+ * deliver card's ONE acceptance line, computed at the same read as the gate. `line` is plain words
+ * ("Checked by a walkthrough: 3 of 3 steps at a1b2c3d."); it cites counts and the tree, never a path.
+ */
+export interface RunAcceptanceSummary {
+  /** The run had something to prove (`gate.required`). */
+  required: boolean;
+  /** Deny-dominates across the repo ledger and every walkthrough (`gate.satisfied`). */
+  satisfied: boolean;
+  line: string;
+  /** From the newest walkthrough; `null` when the requirement names none. */
+  walkthrough: {
+    checked: number;
+    failed: number;
+    ownedByYou: number;
+    /** Creator steps with a check state. */
+    steps: number;
+    /** Every walkthrough seal held. */
+    sealed: boolean;
+    /** The tree the newest seal binds; `null` with no seal. */
+    tree: string | null;
+  } | null;
+}
+
+/**
+ * `PUT /runs/:id/walkthrough/storyline?step=` body (WT-W3, §4.8 "Edit the check"): the whole storyline
+ * module text. Accepted only while that walkthrough's escalation gate is open (409
+ * `no_open_escalation` otherwise), only from a human actor (403), at most 256 KB (413).
+ */
+export interface PutStorylineBody {
+  storyline: string;
+}
+
+/** `PUT /runs/:id/walkthrough/storyline` → 200: crew wrote `author/<planStepId>/storyline.mjs`, marked `edited_by: human`. */
+export interface PutStorylineResponse {
+  runId: string;
+  planStepId: string;
+  sha256: string;
+  edited_by: 'human';
+  /** ISO-8601. */
+  at: string;
+}
+
 /** `POST /proposals/:id/reject` → 200. */
 export interface RejectProposalResponse {
   ok: true;

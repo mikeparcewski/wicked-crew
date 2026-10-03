@@ -54,7 +54,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { constants as fsConstants, createReadStream, promises as fsp } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { extname, join, relative, resolve, sep } from 'node:path';
@@ -76,11 +76,13 @@ import type {
   WalkthroughView,
 } from 'wicked-crew-api-types';
 import type { CoreAdapter } from '../core/adapter.js';
-import type { SessionView, WorkUnit } from '../core/types.js';
+import type { Actor, PutStorylineResponse, SessionView, WorkUnit } from '../core/types.js';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 import { API_PREFIX } from './api-prefix.js';
 import { coreUnitId } from './evidence.js';
-import { stepIdOf, walkthroughProofRoot } from '../core/walkthrough-root.js';
+import { stepIdOf, WALKTHROUGH_AUTHOR_SUBDIR, walkthroughProofRoot } from '../core/walkthrough-root.js';
+import { LOCAL_ACTOR } from './auth.js';
+import type { AuditLog } from './audit.js';
 import { resolveWalkthroughGate, walkthroughCheckStates, type WalkthroughGate } from '../qe/walkthrough-acceptance.js';
 import type { WalkthroughStepState } from 'wicked-crew-api-types';
 
@@ -917,14 +919,14 @@ export async function walkthroughAcceptance(
   adapter: Pick<CoreAdapter, 'workOutput'>,
   view: SessionView,
   phases: string[],
-): Promise<{ gates: WalkthroughGate[]; steps: WalkthroughStepState[] }> {
+): Promise<{ gates: WalkthroughGate[]; steps: WalkthroughStepState[]; newest: WalkthroughGate | null }> {
   const wanted = new Set(phases);
   const reviews = view.units.filter((u) => u.catalog === WALKTHROUGH_REVIEW_CATALOG && wanted.has(stepIdOf(view, u)));
-  if (reviews.length === 0) return { gates: [], steps: [] };
+  if (reviews.length === 0) return { gates: [], steps: [], newest: null };
   const gates = await Promise.all(reviews.map((u) => recorderGate(adapter, view, u)));
   const newestReview = walkthroughPairs(view).filter((p) => p.review !== null).at(-1)?.review ?? null;
   const newest = newestReview !== null ? (gates.find((g) => g.stepId === stepIdOf(view, newestReview)) ?? null) : null;
-  return { gates, steps: walkthroughCheckStates(view, newest) };
+  return { gates, steps: walkthroughCheckStates(view, newest), newest };
 }
 
 /** Everything studio renders for one walkthrough pair (the newest, or the one `step` names). */
@@ -1001,9 +1003,164 @@ export async function walkthroughView(
   };
 }
 
-export function registerWalkthroughRoutes(app: FastifyInstance, adapter: CoreAdapter): void {
+/** The biggest storyline the operator may PUT (the demo module shape is a few KB). */
+export const STORYLINE_MAX_BYTES = 256 * 1024;
+/** The storyline file the author writes, and crew's edit marker beside it (WT-W3). */
+export const STORYLINE_FILE = 'storyline.mjs';
+export const STORYLINE_EDIT_FILE = 'storyline.edit.json';
+
+/** What crew writes beside an operator-edited storyline: who edited it, when, and what. */
+export interface StorylineEditMarker {
+  edited_by: 'human';
+  actor: string;
+  at: string;
+  sha256: string;
+  /** The escalated unit the edit answers (its `ord`). */
+  ord: number;
+}
+
+const PLAIN_SEGMENT = /^[A-Za-z0-9._-]+$/;
+
+/** A refusal whose message is safe to return (relative names only, never an absolute path). */
+export class StorylineWriteError extends Error {}
+
+/**
+ * WT-W3 (DES-walkthrough-proof §4.8 "Edit the check"): write the operator's storyline for the pair's
+ * author step — `<evidence_root>/author/<plan step>/storyline.mjs` plus `storyline.edit.json`
+ * (`edited_by: "human"`) — atomically (temp file + rename), refusing any path that does not resolve
+ * to a plain directory under the evidence root's `author/` (a planted link cannot redirect the write).
+ */
+export async function writeStoryline(
+  evidenceRoot: string,
+  planStepId: string,
+  text: string,
+  marker: Omit<StorylineEditMarker, 'sha256' | 'edited_by'>,
+): Promise<StorylineEditMarker> {
+  if (!PLAIN_SEGMENT.test(planStepId) || planStepId.startsWith('.')) {
+    throw new StorylineWriteError(`step id ${JSON.stringify(planStepId)} is not a plain path segment`);
+  }
+  const authorRoot = join(evidenceRoot, WALKTHROUGH_AUTHOR_SUBDIR);
+  const dir = join(authorRoot, planStepId);
+  // One level at a time, each checked with lstat BEFORE anything is created under it: a planted link
+  // at `author/` or `author/<step>` is refused, never followed (codex on WT-W3).
+  for (const p of [authorRoot, dir]) {
+    const st = await fsp.lstat(p).catch((err: NodeJS.ErrnoException) => {
+      if (err.code === 'ENOENT') return null;
+      throw err;
+    });
+    if (st === null) await fsp.mkdir(p, { mode: 0o755 });
+    else if (st.isSymbolicLink() || !st.isDirectory()) throw new StorylineWriteError(`${relative(evidenceRoot, p)} is not a plain directory`);
+  }
+  const expected = join(await fsp.realpath(evidenceRoot), WALKTHROUGH_AUTHOR_SUBDIR, planStepId);
+  const realDir = await fsp.realpath(dir);
+  if (realDir !== expected) throw new StorylineWriteError('the author directory resolves outside the evidence root');
+  const sha256 = createHash('sha256').update(text, 'utf8').digest('hex');
+  const full: StorylineEditMarker = { edited_by: 'human', sha256, ...marker };
+  const put = async (name: string, body: string): Promise<void> => {
+    const target = join(realDir, name);
+    const existing = await fsp.lstat(target).catch(() => null);
+    if (existing !== null && !existing.isFile()) throw new StorylineWriteError(`${name} exists and is not a plain file`);
+    const tmp = join(realDir, `.${name}.${randomUUID()}.tmp`);
+    await fsp.writeFile(tmp, body, { mode: 0o644, flag: 'wx' });
+    // No unit runs while the run is parked on the escalation (one cursor), so nothing should swap the
+    // directory under us; re-check anyway before the rename publishes the file.
+    if ((await fsp.realpath(dir)) !== expected) {
+      await fsp.rm(tmp, { force: true });
+      throw new StorylineWriteError('the author directory changed while the storyline was written');
+    }
+    await fsp.rename(tmp, target);
+  };
+  // The marker first, then the storyline: a crash between them leaves a marker whose sha names no
+  // storyline on disk, which the recorder treats as "not edited" — never a stale `human` on agent text.
+  await put(STORYLINE_EDIT_FILE, `${JSON.stringify(full, null, 2)}\n`);
+  await put(STORYLINE_FILE, text);
+  return full;
+}
+
+export interface WalkthroughRouteDeps {
+  /** The run's open gate (the routes' shared resolution); `'no-log'` = this build cannot say. */
+  resolveOpenGate?: (runId: string) => Promise<{ ord: number } | null | 'no-log'>;
+  audit?: AuditLog;
+}
+
+export function registerWalkthroughRoutes(app: FastifyInstance, adapter: CoreAdapter, deps: WalkthroughRouteDeps = {}): void {
   const runById = async (id: string): Promise<SessionView | null> =>
     (await adapter.sessionsDetail()).find((v) => v.session.id === id) ?? null;
+
+  // WT-W3: the operator edits the checks while the pair's escalation is open, then approves.
+  app.put(
+    `${V}/runs/:id/walkthrough/storyline`,
+    {
+      config: {
+        manifest: { requestType: 'PutStorylineBody', responseType: 'PutStorylineResponse', statusCodes: [200, 400, 403, 404, 409, 413, 503] },
+      },
+      bodyLimit: STORYLINE_MAX_BYTES + 4096,
+    },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const step = (req.query as { step?: unknown }).step;
+      if (step !== undefined && typeof step !== 'string') return reply.code(400).send({ error: '`step` names one step, once' });
+      const body = req.body as { storyline?: unknown } | undefined;
+      const text = body?.storyline;
+      if (typeof text !== 'string' || text.trim() === '') return reply.code(400).send({ error: '`storyline` (the storyline module text) is required' });
+      if (Buffer.byteLength(text, 'utf8') > STORYLINE_MAX_BYTES) {
+        return reply.code(413).send({ error: `the storyline is over ${STORYLINE_MAX_BYTES} bytes` });
+      }
+      const actor = (req as { actor?: Actor }).actor ?? LOCAL_ACTOR;
+      // The checks are the test plan a walkthrough proves the work against: only a person edits them.
+      if (actor.kind !== 'human') return reply.code(403).send({ error: 'only a human operator edits the walkthrough checks' });
+      const run = await runById(id);
+      if (run === null) return reply.code(404).send({ error: 'no run with that id' });
+      // Every pair the selector names (an author recorded by two reviews names both), or the newest.
+      const named =
+        step === undefined
+          ? [selectPair(run, undefined)].filter((p): p is WalkthroughPair => p !== undefined)
+          : walkthroughPairs(run).filter(
+              (p) => (p.review !== null && stepIdOf(run, p.review) === step) || (p.plan !== null && stepIdOf(run, p.plan) === step),
+            );
+      if (named.length === 0) return reply.code(404).send({ error: `run ${id} has no walkthrough step named ${String(step)}` });
+      // Accepted ONLY while that pair's escalation gate is open: the run is parked on a denied unit of
+      // the pair (the cursor stays on it, §4.8), and the open gate is that unit's.
+      const noEscalation = (why: string) => reply.code(409).send({ error: `the storyline can be edited only while this walkthrough's escalation is open: ${why}`, code: 'no_open_escalation' });
+      if (run.session.status !== 'awaiting_human') return noEscalation(`the run is ${run.session.status}`);
+      if (deps.resolveOpenGate === undefined) return reply.code(503).send({ error: 'this daemon cannot resolve the open gate' });
+      const open = await deps.resolveOpenGate(id);
+      if (open === 'no-log') return reply.code(503).send({ error: 'gate history is unavailable: this wicked-core build has no event-log read binding' });
+      if (open === null) return noEscalation('no gate is open');
+      const isEscalated = (u: WorkUnit | null): u is WorkUnit => u !== null && u.ord === open.ord && u.denial_reason !== null;
+      const pair = named.find((p) => isEscalated(p.review) || isEscalated(p.plan));
+      if (pair === undefined) return noEscalation(`the open gate is before unit ${open.ord}, not a denied step of this walkthrough`);
+      if (pair.plan === null) return reply.code(409).send({ error: 'this walkthrough has no author step whose storyline could be edited', code: 'no_author' });
+      const escalated = isEscalated(pair.review) ? pair.review : pair.plan;
+      const evidenceRoot = (run.session as { evidence_root?: unknown }).evidence_root;
+      if (typeof evidenceRoot !== 'string' || evidenceRoot === '') return reply.code(409).send({ error: 'this run has no evidence root', code: 'no_evidence_root' });
+      const planStepId = stepIdOf(run, pair.plan);
+      let marker: StorylineEditMarker;
+      try {
+        marker = await writeStoryline(evidenceRoot, planStepId, text, { actor: actor.id, at: new Date().toISOString(), ord: escalated.ord });
+      } catch (err) {
+        // A refusal says what was wrong in relative names; any other failure says only that it failed.
+        const why = err instanceof StorylineWriteError ? err.message : 'the author directory could not be written';
+        return reply.code(409).send({ error: `the storyline was not written: ${why}`, code: 'write_refused' });
+      }
+      // The escalation could have been answered while the file was written: say so, rather than a
+      // 200 that implies the next recording uses it (codex on WT-W3).
+      const after = await deps.resolveOpenGate(id);
+      const still = (await runById(id))?.session.status === 'awaiting_human' && after !== null && after !== 'no-log' && after.ord === open.ord;
+      if (!still) {
+        return reply.code(409).send({
+          error: 'the storyline was written, but the escalation was answered meanwhile; open the walkthrough again before relying on it',
+          code: 'escalation_closed',
+        });
+      }
+      deps.audit?.record('walkthrough.storyline.edited', actor, {
+        runId: id,
+        detail: { planStepId, ord: escalated.ord, sha256: marker.sha256, bytes: Buffer.byteLength(text, 'utf8') },
+      });
+      const out: PutStorylineResponse = { runId: id, planStepId, sha256: marker.sha256, edited_by: 'human', at: marker.at };
+      return out;
+    },
+  );
 
   app.get(
     `${V}/runs/:id/walkthrough`,
