@@ -27,7 +27,7 @@ import { CoreAdapter, settingsFilePath } from '../src/core/adapter.js';
 import { DEFAULT_SETTINGS, type DiagnosticsResponse, type HealthResponse, type SkillsManifestResponse, type SystemSettings } from '../src/core/types.js';
 import { crewStateHome, setCrewStateHome } from '../src/projects/state-home.js';
 import { BOOT_SKILLS_SNAPSHOT, canonicalCrewStateHome, SKILLS_SNAPSHOT_ENGINE_ENV } from '../src/skills/engine-env.js';
-import { pluginSourceAt, type PluginSource } from '../src/skills/plugin-source.js';
+import { pluginSourceAt, REQUIRED_GARDEN_VERSION, type PluginSource } from '../src/skills/plugin-source.js';
 import { assertSkillsRootFenced, canonicalPath, SkillsRootUnfencedError, userCliDirs } from '../src/skills/root-fence.js';
 import { refusalPath, SkillsRuntime } from '../src/skills/runtime.js';
 import { COPILOT_VIEW_SKILLS_REL, resolveSkillsRoot, SKILLS_DIRNAME } from '../src/skills/store.js';
@@ -602,7 +602,7 @@ describe('daemon boot (createServer) — the root is <state home>/skills; the fe
       // no generation that could hold it, so under `require` (D-8) the variable is exported all the
       // same and the second finding is an ERROR — the engine refuses a launch at intake.
       expect(skills.findings.map((f) => f.kind)).toEqual(['skills.fallback', 'skills.base-skill']);
-      expect(skills.findings[0]?.message).toContain('install wicked-garden first');
+      expect(skills.findings[0]?.message).toContain(`install wicked-garden >= ${REQUIRED_GARDEN_VERSION} first`);
       expect(skills.findings[1]?.severity).toBe('error');
       expect(skills.baseSkill).toMatchObject({ name: DEFAULT_SETTINGS.baseSkillRef, present: false, gen: null, engineInput: DEFAULT_SETTINGS.baseSkillRef });
       // F-W1-102 — the crew-only install (no wicked-garden at all): /health must never read "status ok,

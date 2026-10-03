@@ -936,6 +936,8 @@ respondsWith<SkillsHealthFindingKind, Wire.DiagnosticsSkillsFinding['kind']>();
 respondsWith<Wire.DiagnosticsSkillsFinding['kind'], 'skills.stale-rules'>();
 respondsWith<Wire.DiagnosticsSkillsFinding['kind'], 'skills.source'>();
 respondsWith<Wire.DiagnosticsSkillsFinding['kind'], 'skills.manifest'>();
+// crew#753 (api-types 0.78.0): an installed garden older than the minimum.
+respondsWith<Wire.DiagnosticsSkillsFinding['kind'], 'skills.garden'>();
 respondsWith<Wire.AcpCliDiagnostics, AcpCliFold>();
 respondsWith<AcpCliFold, Wire.AcpCliDiagnostics>();
 respondsWith<Wire.DiagnosticsRecentError, RecentError>();

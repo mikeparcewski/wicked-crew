@@ -29,6 +29,7 @@
  */
 
 import type { SkillsHealthFinding } from './runtime.js';
+import { GARDEN_INSTALL_COMMAND, REQUIRED_GARDEN_VERSION } from './plugin-source.js';
 import type { BaseSkillPosture as WireBaseSkillPosture } from 'wicked-crew-api-types';
 
 /** The engine-config variable wicked-core reads at intake (`workflow::BASE_SKILL_REF_ENV`). */
@@ -122,7 +123,7 @@ export function baseSkillPosture(
 }
 
 /** The installer command that brings the plugin shipping the default base skill (F-W1-102: a crew-only install boots a daemon that refuses every launch until it is present). */
-export const BASE_SKILL_INSTALL_HINT = 'npx wicked-installer install wicked-garden';
+export const BASE_SKILL_INSTALL_HINT = GARDEN_INSTALL_COMMAND;
 
 /**
  * The ONE remedy every surface quotes — the `skills.base-skill` finding (`/health.baseSkill.finding`,
@@ -134,7 +135,7 @@ export const BASE_SKILL_INSTALL_HINT = 'npx wicked-installer install wicked-gard
 export function baseSkillRemedy(inCatalog: boolean): string {
   const step = inCatalog
     ? 'it is in the catalog — POST /skills/publish hands it to the next launch'
-    : `install wicked-garden (${BASE_SKILL_INSTALL_HINT}), POST /skills/refresh-baseline, then POST /skills/publish`;
+    : `install wicked-garden >= ${REQUIRED_GARDEN_VERSION} (${BASE_SKILL_INSTALL_HINT}), POST /skills/refresh-baseline, then POST /skills/publish`;
   return `${step}; set baseSkillRef "" (PUT /settings) to turn the base skill off explicitly`;
 }
 
