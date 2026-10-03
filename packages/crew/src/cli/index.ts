@@ -83,6 +83,7 @@ interface BootstrapOpts {
   /** DEFAULT ON (#261): answer wicked-interactive structural feedback handoffs with a governed edit run. */
   interactiveEditEvents: boolean;
   interactiveThemeEvents: boolean;
+  interactiveReviewEvents: boolean;
   /** DEFAULT ON (CREW-UX-5): answer wicked-interactive conversational iteration asks (chat.posted) with a governed revision run. */
   interactiveChatEvents: boolean;
   /** Seat roster override for the draft/edit/chat runs (JSON array); `undefined` = production roster. */
@@ -185,6 +186,12 @@ function parseBootstrap(args: string[]): BootstrapOpts {
   const interactiveThemeEvents =
     !hasFlag(args, '--no-interactive-theme-events') &&
     !isFalsy(process.env['WICKED_INTERACTIVE_THEME_EVENTS']);
+  // DEFAULT ON (EP-C2, same rationale): answer "Review this page" (`review.requested`) with one
+  // governed `interactive-review` run — the four reviewers, never the document's own authors.
+  // Opt-out: --no-interactive-review-events or WICKED_INTERACTIVE_REVIEW_EVENTS=0|false|no|off|""
+  const interactiveReviewEvents =
+    !hasFlag(args, '--no-interactive-review-events') &&
+    !isFalsy(process.env['WICKED_INTERACTIVE_REVIEW_EVENTS']);
   // DEFAULT ON (CREW-UX-5, same rationale): answer wicked-interactive's conversational
   // iteration asks (`chat.posted`, role:user on an existing kind:source doc) with a governed
   // `interactive-chat` run — the doc thread's plain send had NO answerer since the ad-hoc
@@ -206,7 +213,7 @@ function parseBootstrap(args: string[]): BootstrapOpts {
   const preRuleExecBusDbPath = flag(args, '--bus-db') ?? process.env['WICKED_BUS_DB'] ?? join(stateHomeOfDb(dbPath), 'bus.db');
   return {
     dbPath, port, stub, engineExec, busDbPath, preRuleExecBusDbPath, crewBus, governanceStore,
-    interactiveDraftEvents, interactiveEditEvents, interactiveThemeEvents, interactiveChatEvents,
+    interactiveDraftEvents, interactiveEditEvents, interactiveThemeEvents, interactiveReviewEvents, interactiveChatEvents,
     interactiveSeats,
   };
 }
@@ -396,6 +403,15 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
           },
         }
       : {}),
+    ...(opts.interactiveReviewEvents
+      ? {
+          interactiveReviewEvents: {
+            enabled: true,
+            dbPath: crewBus.dbPath,
+            ...(opts.interactiveSeats !== undefined ? { clisJson: opts.interactiveSeats } : {}),
+          },
+        }
+      : {}),
     ...(opts.interactiveChatEvents
       ? {
           interactiveChatEvents: {
@@ -562,6 +578,7 @@ async function main(): Promise<void> {
       interactiveDraftEvents: (opts.interactiveDraftEvents && !adapter.stub) || undefined,
       interactiveEditEvents: (opts.interactiveEditEvents && !adapter.stub) || undefined,
       interactiveThemeEvents: (opts.interactiveThemeEvents && !adapter.stub) || undefined,
+      interactiveReviewEvents: (opts.interactiveReviewEvents && !adapter.stub) || undefined,
       interactiveChatEvents: (opts.interactiveChatEvents && !adapter.stub) || undefined,
       startupMs: Math.round(performance.now() - t0),
     });

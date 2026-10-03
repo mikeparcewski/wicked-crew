@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.87.0",
+  "apiTypesVersion": "0.88.0",
   "endpoints": [
     {
       "method": "GET",
@@ -1051,6 +1051,18 @@
         500,
         502,
         503
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/projects/:projectId/interactive/docs/:doc/checks",
+      "requestType": null,
+      "responseType": "DocChecksResponse",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        500
       ]
     },
     {

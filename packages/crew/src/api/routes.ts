@@ -129,7 +129,10 @@ import {
 import type { DocGroundingStore } from '../interactive/doc-grounding.js';
 import { registerInteractiveProxy } from '../interactive/proxy-routes.js';
 import { registerInteractiveDocDelete } from '../interactive/doc-delete-routes.js';
+import { registerInteractiveDocChecks } from '../interactive/doc-checks-routes.js';
+import { crewStateHome } from '../projects/state-home.js';
 import { registerInteractiveDocList } from '../interactive/doc-list-routes.js';
+import { REVIEWS_DIRNAME } from '../interactive/review-ledger.js';
 import type { DocLedgerSweep } from '../interactive/doc-ledger-sweep.js';
 import { MembershipIndex } from '../projects/membership-index.js';
 import { MEMBERSHIP_ATTACHED, membershipAttachedKey } from '../projects/events.js';
@@ -860,6 +863,9 @@ export interface RuntimeDeps {
    *  four-ledger sweep (live seam instances first, ledger files as fallback); a directly-driven
    *  route set gets an INERT one so unit tests never touch ~/.wicked-crew. */
   dropDocLedgerRows?: (documentId: string) => DocLedgerSweep;
+  /** EP-C2 — where the interactive-review seam records documents' reviews (`<handoff root>/_reviews`).
+   *  Absent = the default handoff root under the daemon's state home (read-only here). */
+  docReviewsDir?: () => string;
   /** The daemon's in-process error-level log ring (diagnostics) — `createServer` tees the pino
    *  stream into one; a directly-driven route set (tests) gets an honestly-empty tail. */
   errorRing?: ErrorRing;
@@ -5870,6 +5876,12 @@ export function registerRoutes(
   registerInteractiveDocList(app, adapter, {
     settings: projectSettings,
     pool: interactiveBridges,
+    log: (m) => app.log.warn(m),
+  });
+
+  // EP-C2: the ONE checks read of a document — the reviewers' recorded verdicts, read-only.
+  registerInteractiveDocChecks(app, adapter, {
+    reviewsDir: runtime.docReviewsDir ?? (() => join(crewStateHome(), 'interactive-edits', REVIEWS_DIRNAME)),
     log: (m) => app.log.warn(m),
   });
 

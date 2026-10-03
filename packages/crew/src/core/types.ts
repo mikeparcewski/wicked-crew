@@ -155,6 +155,13 @@ export interface LaunchRunInput {
    * Omit for runs whose evidence is the worktree diff — those are the engine's to floor.
    */
   requireDeliverables?: string[];
+  /**
+   * (EP-K3, wicked-core-ts >= 0.7.35) Seats never to convene as a JUDGE on this run — cli keys or
+   * seat instances (`claude#2`). The engine UNIONS them into its own computed exclusion (the work
+   * author, the team monitors), so the list can only narrow the judge choice, never widen it. The
+   * interactive-review seam fills it with the seats that wrote the document under review (EP-C2).
+   */
+  excludeSeats?: string[];
 }
 
 /** Default `workerStallMinutes` (crew#287): silent minutes before the stall watchdog fires. */

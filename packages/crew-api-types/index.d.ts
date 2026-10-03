@@ -4902,6 +4902,63 @@ export interface InteractiveStatusPosted {
   unit_ord?: number;
 }
 
+// ── EP-C2: a document's checks — the four reviewers (api-types 0.88.0) ─────────────────────────
+
+/** The four reviewers, by `wicked.interactive.review.requested`'s schema id (Intent = `match`, Quality = `qe`). */
+export type DocReviewerId = 'match' | 'a11y' | 'copy' | 'qe';
+
+/** Where a document check came from, in the checks panel's words. */
+export type DocCheckSource = 'review:intent' | 'review:a11y' | 'review:copy' | 'review:quality';
+
+/** One thing a reviewer found. A finding never edits the document; fixing it is the operator's choice. */
+export interface DocCheckFinding {
+  /** The `data-wid` the finding is about; `null` = unanchored (the host says so, and checks the anchor against its own inventory). */
+  wid: string | null;
+  severity: 'low' | 'medium' | 'high';
+  sentence: string;
+}
+
+/**
+ * One reviewer's verdict on one saved version of a document — a wicked-ledger verdict row, stamped
+ * with the crew run that produced it (`run_id`). There is no second verdict store.
+ */
+export interface DocCheck {
+  /** The ledger verdict row's id. */
+  id: string;
+  source: DocCheckSource;
+  reviewer: DocReviewerId;
+  /** The version that was reviewed. A check on an older version than the one asked for is shown "on version N". */
+  version: number;
+  /** `pass` (nothing needs changing) · `fail` (changes asked for) · `inconclusive` (the reviewer could not run). */
+  state: 'pass' | 'fail' | 'inconclusive';
+  /** One plain sentence: why this state. */
+  sentence: string;
+  findings: DocCheckFinding[];
+  /**
+   * Who reviewed. `evaluator` is true only when the document's authoring runs are on record AND the
+   * reviewing seat is not one of their seats — shown, never inferred. `author_known: false` (a version
+   * the operator typed, or runs no longer on record) means no seat could be excluded, and says so.
+   */
+  by: { seat: string | null; evaluator: boolean; excluded_seats: string[]; author_known: boolean };
+  /** The skill the reviewer loaded; `null` when it worked from the built-in rubric (the skill is not installed). */
+  skill: string | null;
+  run_id: string;
+  /** ISO-8601: when the verdict was recorded. */
+  at: string;
+}
+
+/**
+ * `GET /projects/:projectId/interactive/docs/:doc/checks?version=` → 200. Per reviewer, the newest
+ * verdict at or below `version` (every version when omitted) — so a newer review replaces an older
+ * one, and an older one stays visible until then. `checks: []` = never reviewed.
+ */
+export interface DocChecksResponse {
+  document_id: string;
+  /** The `version` asked for; `null` when the query named none. */
+  version: number | null;
+  checks: DocCheck[];
+}
+
 /**
  * One row of `GET /projects/:projectId/interactive/api/docs` (crew#472) — the bridge's own
  * `GET /api/docs` row (interactive's `listDocs` shape, relayed field-for-field) stamped with the

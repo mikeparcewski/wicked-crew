@@ -45,6 +45,8 @@ import { TerminalHub, registerTerminalWs } from '../events/terminals.js';
 import { INTERACTIVE_DRAFT_WORKFLOW_DEF, startInteractiveDraftSubscriber } from '../interactive/draft-events.js';
 import { INTERACTIVE_EDIT_WORKFLOW_DEF, startInteractiveEditSubscriber } from '../interactive/edit-events.js';
 import { putLearnedThemeViaBridge, startInteractiveThemeSubscriber } from '../interactive/theme-events.js';
+import { authoringRunsFromLedgers, readDocVersionViaBridge, startInteractiveReviewSubscriber } from '../interactive/review-events.js';
+import { REVIEWS_DIRNAME, removeDocReviews } from '../interactive/review-ledger.js';
 import { InteractiveBridgePool, boundOrigin } from '../interactive/bridge-pool.js';
 import { INTERACTIVE_CHAT_WORKFLOW_DEF, startInteractiveChatSubscriber } from '../interactive/chat-events.js';
 import { PhaseSkillArming, RunSkillGapIndex } from '../skills/phase-skill-gaps.js';
@@ -209,6 +211,21 @@ export interface CreateServerOptions {
    * Shares the edit seam's ledger and handoff root. When absent, a grab learns nothing.
    */
   interactiveThemeEvents?: {
+    enabled: boolean;
+    dbPath?: string;
+    pollIntervalMs?: number;
+    heartbeatMs?: number;
+    clisJson?: string;
+    resolveDocsRoot?: (projectId: string | undefined) => string;
+  };
+  /**
+   * Opt-in governed document reviews (DES-artifact-editor-plugins §7.6, EP-C2): a durable subscriber
+   * answers `wicked.interactive.review.requested` with one read-only `interactive-review` run (the
+   * four reviewers; the document's own authors are kept out of the roster and the judge choice),
+   * records one wicked-ledger verdict row per reviewer and announces `review.completed` from the
+   * record. Shares the edit seam's ledger and handoff root. When absent, a request goes unanswered.
+   */
+  interactiveReviewEvents?: {
     enabled: boolean;
     dbPath?: string;
     pollIntervalMs?: number;
@@ -777,6 +794,7 @@ export async function createServer(
   let draftSub: Awaited<ReturnType<typeof startInteractiveDraftSubscriber>> = null;
   let editSub: Awaited<ReturnType<typeof startInteractiveEditSubscriber>> = null;
   let themeSub: Awaited<ReturnType<typeof startInteractiveThemeSubscriber>> = null;
+  let reviewSub: Awaited<ReturnType<typeof startInteractiveReviewSubscriber>> = null;
   let chatSub: Awaited<ReturnType<typeof startInteractiveChatSubscriber>> = null;
 
   /** The crew-side half of deleting an interactive doc (crew#338): drop the doc's replay-dedup
@@ -817,8 +835,22 @@ export async function createServer(
         join(crewStateDir, 'interactive-chat-ledger.json'),
     },
   ];
-  const dropDocLedgerRows = (documentId: string): DocLedgerSweep =>
-    sweepDocLedgers(documentId, docLedgerSources());
+  /** Where the interactive-review seam records every document's reviews (EP-C2): under the edit
+   *  seam's handoff root, so no new state-home entry exists. */
+  const docReviewsDir = (): string =>
+    reviewSub?.reviewsDir ?? join(options?.interactiveEditEvents?.editDir ?? join(crewStateDir, 'interactive-edits'), REVIEWS_DIRNAME);
+  const dropDocLedgerRows = (documentId: string): DocLedgerSweep => {
+    const sweep = sweepDocLedgers(documentId, docLedgerSources());
+    // EP-C2: the document's recorded reviews go with it — a later document of the same name must
+    // not inherit them (the same ghost the ledger rows would be).
+    try {
+      removeDocReviews(docReviewsDir(), documentId);
+      return sweep;
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      return { ...sweep, ok: false, errors: [...(sweep.errors ?? []), { ledger: 'reviews', error }] };
+    }
+  };
   // Wave 6 (F-4R2-006 root fix): the document ↔ run binding as a direct read off the SAME four
   // ledgers — `AgentSession.document_id` on the run DTO and `GET /runs?doc=`.
   const docRuns = new DocRunIndex(docLedgerSources, { log: (m) => app.log.warn(m) });
@@ -1121,6 +1153,37 @@ export async function createServer(
     if (themeSub !== null) {
       const sub = themeSub;
       app.log.info('interactive-theme subscription armed (filter wicked.interactive.theme.learned)');
+      app.addHook('onClose', async () => {
+        await sub.stop();
+      });
+    }
+  }
+
+  // EP-C2: document reviews. Shares the edit seam's ledger instance and handoff root; reads the
+  // version under review through the doc's bridge; keeps the document's authors (the creator seats
+  // of its draft, edit and chat runs) out of the review.
+  if (options?.interactiveReviewEvents?.enabled === true && !refuseStubSeam('interactive-review')) {
+    const o = options.interactiveReviewEvents;
+    const resolveDocsRoot = o.resolveDocsRoot ?? interactiveDocsRoot;
+    reviewSub = await startInteractiveReviewSubscriber(adapter, {
+      ...busOf(o.dbPath),
+      ...(o.pollIntervalMs !== undefined ? { pollIntervalMs: o.pollIntervalMs } : {}),
+      ...(o.heartbeatMs !== undefined ? { heartbeatMs: o.heartbeatMs } : {}),
+      ...(o.clisJson !== undefined ? { clisJson: o.clisJson } : {}),
+      ...(editSub !== null ? { ledger: editSub.ledger } : {}),
+      ...(options?.interactiveEditEvents?.ledgerPath !== undefined ? { ledgerPath: options.interactiveEditEvents.ledgerPath } : {}),
+      ...(options?.interactiveEditEvents?.editDir !== undefined ? { editDir: options.interactiveEditEvents.editDir } : {}),
+      roster: rosterWithStanding,
+      readDocVersion: readDocVersionViaBridge(interactiveBridges, resolveDocsRoot),
+      authoringRuns: (documentId, version) => authoringRunsFromLedgers(docLedgerSources(), documentId, version),
+      skillHeld,
+      onRunFiled: fileRun,
+      log: (m) => app.log.warn(m),
+      logError: (m) => app.log.error(m),
+    });
+    if (reviewSub !== null) {
+      const sub = reviewSub;
+      app.log.info('interactive-review subscription armed (filter wicked.interactive.review.requested)');
       app.addHook('onClose', async () => {
         await sub.stop();
       });
@@ -1775,6 +1838,8 @@ export async function createServer(
       interactiveBridgeBusDataDir: options?.interactiveBridge?.busDataDir ?? null,
       // EP-C4: the one pool, shared with the theme seam above.
       interactiveBridges,
+      // EP-C2: where the checks read finds a document's recorded reviews.
+      docReviewsDir,
       docGrounding,
       ...(skillsRuntime !== undefined ? { skills: skillsRuntime } : {}),
       // DES-MCP-TOOLS-001 S2: the registry over `<state home>/mcp` (created on the first save).
