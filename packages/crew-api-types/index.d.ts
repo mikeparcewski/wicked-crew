@@ -365,6 +365,17 @@ export interface AgentSession {
    */
   outcome?: 'text_only';
   /**
+   * (crew#762; api-types 0.79.0) Was delivery ASKED FOR on this run? A durable fact, so a skin can
+   * tell a run kept locally as asked from one whose delivery was attempted and did not land, also
+   * after a reload or a daemon restart. `stranded` with no deliver unit covers both.
+   *   - `true`: the launch resolved `deliver: 'pr'`, OR a post-hoc `POST /runs/:id/deliver` was
+   *     attempted (recorded before the script runs, whatever came of it), OR a delivery is on record.
+   *   - `false`: the launch resolved `deliver: 'none'` and nothing was attempted since.
+   *   - ABSENT: this daemon holds no launch record for the run and no attempt (a pre-field run, or a
+   *     daemon before the field). Never fabricated.
+   */
+  deliver_requested?: boolean;
+  /**
    * The delivered PR's URL (crew#393; api-types 0.18.0) — present exactly when
    * `delivery === 'delivered'`; absent otherwise (absence is the one spelling, never `null`).
    *

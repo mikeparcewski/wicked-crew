@@ -511,8 +511,13 @@ export function isDeliverConflictStranded(view: SessionView): boolean {
   return lastDeliverMarker(deliver.denial_reason ?? '') === DELIVER_LIFT_CONFLICT_MARKER;
 }
 
+/** crew#762: the audit action a post-hoc delivery ATTEMPT records before it runs — the durable "it was asked for". */
+export const DELIVER_REQUESTED_ACTION = 'run.deliver_requested';
+
 export class DeliveryIndex {
   private readonly runToUrl = new Map<string, string>();
+  /** crew#762: runs a post-hoc delivery was attempted for (`run.deliver_requested`), whatever came of it. */
+  private readonly requested = new Set<string>();
   /** N1: runs whose deliver phase pushed the branch and could open no PR (a non-GitHub origin). */
   private readonly runToPushed = new Map<string, PushedOnlyDelivery>();
 
@@ -560,6 +565,10 @@ export class DeliveryIndex {
         // older one (the #312 rule).
         decided.add(entry.runId);
       }
+      // crew#762: every post-hoc attempt on record (one more ~20 ms filtered scan, same try).
+      for (const entry of await audit.readAll({ action: DELIVER_REQUESTED_ACTION })) {
+        if (typeof entry.runId === 'string') this.requested.add(entry.runId);
+      }
     } catch (err) {
       log?.(
         `[runs] delivery-index hydrate failed (prior runs read as undelivered until restart): ${
@@ -584,6 +593,16 @@ export class DeliveryIndex {
   /** The recorded push-only delivery for this run, or `undefined` (N1). */
   pushedFor(runId: string): PushedOnlyDelivery | undefined {
     return this.runToPushed.get(runId);
+  }
+
+  /** crew#762: record that a post-hoc delivery was attempted for this run (the audit entry is the caller's). */
+  markRequested(runId: string): void {
+    this.requested.add(runId);
+  }
+
+  /** crew#762: was a post-hoc delivery attempted for this run (recorded, whatever its outcome)? */
+  wasRequested(runId: string): boolean {
+    return this.requested.has(runId);
   }
 
   /** Did this run deliver at all — a PR on record OR a pushed branch on record? */
