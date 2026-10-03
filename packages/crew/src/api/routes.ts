@@ -4248,6 +4248,22 @@ export function registerRoutes(
             });
           }
         }
+        // DC-S3: `targets.project` and `supersedes` shipped with `considerRules` (wicked-core-ts
+        // 0.7.35). An older engine would accept and drop them, so a project rule would land
+        // everywhere: refuse, naming the fields (codex on DC-S3).
+        if (!adapter.projectRulesSupported() && rule !== null && typeof rule === 'object') {
+          const carried = [
+            ...(rule.targets?.project !== undefined ? ['targets.project'] : []),
+            ...(rule.supersedes !== undefined ? ['supersedes'] : []),
+          ];
+          if (carried.length > 0) {
+            return reply.code(501).send({
+              error:
+                `the installed engine would silently drop ${carried.map((f) => `\`${f}\``).join(', ')} ` +
+                'and land the rule everywhere; upgrade wicked-core-ts (>= 0.7.35)',
+            });
+          }
+        }
         await adapter.upsertConformanceRule(rule);
         audit.record('governance.rule.upserted', actorOf(req), { detail: { id: rule?.id } });
         return { status: 'ok' };

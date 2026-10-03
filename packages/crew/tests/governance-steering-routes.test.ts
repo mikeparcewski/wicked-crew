@@ -262,6 +262,25 @@ describe('POST /api/v1/governance/rules — steering-field writes', () => {
     expect(status).toBe(200);
     expect(upsertedRules).toEqual([steering]);
   });
+
+  it('answers 501 for a project-scoped or superseding rule on an engine without project rules — never a global rule (DC-S3, codex)', async () => {
+    steeringSupported = true;
+    const prior = adapter.projectRulesSupported.bind(adapter);
+    adapter.projectRulesSupported = () => false;
+    try {
+      upsertedRules = [];
+      const scoped = { ...rule({ id: 'PAT-P1' }), targets: { project: 'proj-a' } };
+      const a = await send('POST', '/api/v1/governance/rules', scoped);
+      expect(a.status).toBe(501);
+      expect(JSON.stringify(a.body)).toMatch(/targets\.project/);
+      const superseding = { ...rule({ id: 'PAT-P2' }), supersedes: ['PAT-P1'] };
+      const b = await send('POST', '/api/v1/governance/rules', superseding);
+      expect(b.status).toBe(501);
+      expect(upsertedRules).toEqual([]);
+    } finally {
+      adapter.projectRulesSupported = prior;
+    }
+  });
 });
 
 describe('the old policy WRITE surface, folded (STEERING)', () => {
