@@ -215,6 +215,8 @@ export interface ChatRecorderDeps {
   now?: () => number;
   /** A turn whose seats never all answer is closed after this (default: the turn index's stale budget). */
   staleAfterMs?: number;
+  /** DC-S7: every finalized turn is handed on (the Consideration + its fact), before the words are judged. */
+  onTurnRecorded?: (chat: string, turnId: string) => Promise<void>;
   log?: (msg: string) => void;
 }
 
@@ -343,6 +345,12 @@ export class ChatDecisionRecorder {
   }
 
   private async record(turn: TurnState): Promise<void> {
+    // DC-S7: what the seats considered and cited this turn — whoever sent the message.
+    if (this.deps.onTurnRecorded !== undefined) {
+      await this.deps.onTurnRecorded(turn.chat, turn.turnId).catch((err: unknown) =>
+        this.log(`[decisions] considered for chat ${turn.chat} turn ${turn.turnId}: ${err instanceof Error ? err.message : String(err)}`),
+      );
+    }
     // §4.3.1: an agent's words are not a decision source. The block was still stripped and counted.
     if (turn.actor.kind !== 'human') return;
     const recorder = pickRecorder(turn.seats);

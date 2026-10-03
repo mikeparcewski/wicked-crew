@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import type { WebSocket } from 'ws';
 import { DecisionLedger } from '../decisions/ledger.js';
 import type { ChatDecisionRecorder } from '../decisions/chat-recorder.js';
+import type { ConsiderationService } from '../decisions/consider.js';
 import { registerRoutes } from './routes.js';
 import { ErrorRing, teeStreamWithErrorRing } from './diagnostics.js';
 import { GateCache } from './gate-cache.js';
@@ -400,6 +401,9 @@ export async function createServer(
   let watchRegistry: WatchRegistry | null = null;
   // DC-S4b: the studio chat recorder, handed back by `registerRoutes` below (it needs the service built there).
   let chatDecisionRecorder: ChatDecisionRecorder | null = null;
+  // DC-S7: considered · set aside · cited — the rule reads behind the citation verifier, the unit hook
+  // and the chat open/send paths (built by `registerRoutes`).
+  let considerations: ConsiderationService | null = null;
   const elicitationCache = new ElicitationCache();
   const terminals = new TerminalHub();
   // Per-seat runtime health (crew#274): folded from the single CoreEvent subscription below,
@@ -1261,15 +1265,18 @@ export async function createServer(
     if (chatId === undefined || cliKey === undefined || text === '' || f['ok'] === false) return;
     const scope = chatScopes.get(chatId);
     // No scope (a chat this daemon did not open, or `kind: 'none'`/`system`) ⇒ nothing to verify
-    // AGAINST. Saying "unverified" then would blame the seat for the daemon's missing roots.
-    if (scope === undefined || scope.repos.length === 0) return;
+    // AGAINST. Saying "unverified" then would blame the seat for the daemon's missing roots. A
+    // `[rule:<id>]` citation (DC-S7) needs no root, so a root-less chat still gets those marked.
+    if (scope === undefined || (scope.repos.length === 0 && !text.includes('[rule:'))) return;
     const roots = scope.repos.map((r) => ({ absRoot: resolvePath(r.rootPath), name: r.name }));
     const turnId = typeof f['turn_id'] === 'string' ? f['turn_id'] : undefined;
     // A chat is filed by its CHAT id (`crew.chat` membership), so the project of a chat frame is
     // looked up by that — the run-keyed lookup on the relay above answers `undefined` for chats.
     const project = projectId ?? membershipIndex.projectOf(chatId);
     try {
-      const result = await verifyCitations(text, roots, citationDeps, citationLimits);
+      // DC-S7: the in-force rule ids for the chat's project (null = not readable → rule citations stay unchecked).
+      const ruleIds = considerations !== null ? await considerations.inForceIds(project ?? null) : null;
+      const result = await verifyCitations(text, roots, citationDeps, { ...citationLimits, ruleIds });
       const out = citationsFrame(
         {
           chat: chatId,
@@ -1330,6 +1337,7 @@ export async function createServer(
       // recreates a gone file; a chat retained for its promoted run keeps the file and gets the
       // record. Nothing a reader could still open is missing it (codex r1, answered).
       void chatDecisionRecorder?.closed(event.chat);
+      considerations?.chatClosed(event.chat);
       // crew#619: retain the transcript when a promoted run is still live — the chat may be
       // idle-TTL'd before the run finishes, and Continue-in-Build needs the transcript.
       const retaining = chatRetained.get(event.chat);
@@ -1385,6 +1393,13 @@ export async function createServer(
     void standingOrderEvaluator?.onEvent(event);
     // The watch registry (TR-W5a, G3): synchronous, O(1), never awaited, never throws.
     watchRegistry?.offer(event);
+    // DC-S7: a unit attempt's output landed — what its rules were, and which it cited (one fact per
+    // (run, ord, attempt); the read itself answers GET …/considered). Off the hot path.
+    if (event.type === 'unitOutputCaptured' && session !== undefined) {
+      const ev = event as CoreEvent & { ord?: unknown; unitOrd?: unknown; attempt?: unknown };
+      const ord = typeof ev.ord === 'number' ? ev.ord : typeof ev.unitOrd === 'number' ? ev.unitOrd : undefined;
+      if (ord !== undefined) void considerations?.onUnitCaptured(session, ord, typeof ev.attempt === 'number' ? ev.attempt : 0);
+    }
     // The delivered-PR record (CREW-UX-8, crew#321): resolved once per run at its terminal
     // frame, best-effort, off the hot path — see `resolveRunDelivery` above for why BOTH
     // terminal frames trigger it and why a failed deliver is a no-op. THEN the delivery-
@@ -1727,6 +1742,7 @@ export async function createServer(
   // DC-S4a §6: records whose landing a restart interrupted are re-driven, idempotently (the review
   // proposal is keyed by the decision id). Off the boot path; a failure is a logged outcome.
   chatDecisionRecorder = registered.chatRecorder;
+  considerations = registered.considerations;
   if (registered.decisions !== null) {
     const decisionsService = registered.decisions;
     decisionsService.track(decisionsService.redrive());

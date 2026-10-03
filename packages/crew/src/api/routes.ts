@@ -175,7 +175,7 @@ import {
   type DeliverScriptResult,
   type WorktreeReprovisioner,
 } from './post-hoc-deliver.js';
-import { LOCAL_ACTOR, type AuthMode } from './auth.js';
+import { LOCAL_ACTOR, type AuthMode, trustAtLeast } from './auth.js';
 // Re-exported so existing `import { API_PREFIX } from './routes.js'` callers keep working; the
 // value lives in the leaf module api-prefix.ts to keep unit-output.ts out of this file's cycle.
 export { API_PREFIX } from './api-prefix.js';
@@ -186,6 +186,7 @@ import { DecisionError, DecisionService } from '../decisions/land.js';
 import { ingestDecision } from '../decisions/ingest.js';
 import { registerDecisionRoutes } from '../decisions/routes.js';
 import { ChatDecisionRecorder } from '../decisions/chat-recorder.js';
+import { ConsiderationService } from '../decisions/consider.js';
 import type { DecisionBusEmit } from '../decisions/events.js';
 import { resolveDecisionsMode, type DecisionsMode } from '../decisions/types.js';
 
@@ -732,6 +733,8 @@ export interface RegisteredRoutes {
   decisions: DecisionService | null;
   /** DC-S4b: the studio chat recorder (null when capture, the transcript store or the fan-out is not wired). */
   chatRecorder: ChatDecisionRecorder | null;
+  /** DC-S7: considered · set aside · cited, and the rules the seats were told about. */
+  considerations: ConsiderationService;
 }
 
 export interface RuntimeDeps {
@@ -1123,6 +1126,17 @@ export function registerRoutes(
   if (decisions !== null) registerDecisionRoutes(app, decisions);
   // DC-S4b: the studio chat host. The recorder writes the transcript's `decisions` record and the
   // `chatDecisions` frame, so without the store or the /ws fan-out there is no chat host at all.
+  // DC-S7: considered · set aside · cited (unchecked) for chat turns and run units, and how the
+  // seats learn the rules (the statement at open, a disclosed preface on the next send after a rule
+  // lands). Fail-soft on an engine or a stub without the rule reads.
+  const considerations = new ConsiderationService({
+    adapter,
+    ...(runtime.decisionLedger !== undefined ? { ledger: runtime.decisionLedger } : {}),
+    ...(chatTranscripts !== undefined ? { transcripts: chatTranscripts } : {}),
+    projectOf: (id) => projects.index.projectOf(id),
+    emit: runtime.decisionsEmit ?? null,
+    log: (m) => app.log.warn(m),
+  });
   const chatRecorder: ChatDecisionRecorder | null =
     decisions !== null && chatTranscripts !== undefined && runtime.broadcast !== undefined
       ? new ChatDecisionRecorder({
@@ -1130,6 +1144,7 @@ export function registerRoutes(
           transcripts: chatTranscripts,
           broadcast: runtime.broadcast,
           projectOf: (chat) => projects.index.projectOf(chat),
+          onTurnRecorded: (chat, turnId) => considerations.onChatTurn(chat, turnId),
           log: (m) => app.log.warn(m),
         })
       : null;
@@ -2783,7 +2798,11 @@ export function registerRoutes(
       const { scope, engine } = resolution;
       try {
         // Cleans up only what it created itself on failure (Copilot, #518).
-        prepareChatScratch(chatId, scope);
+        // DC-S7: the seats learn the project's in-force rules from the statement (cap 20, severity
+        // order); the service remembers what they were told so a later landing can be prefaced.
+        const inForceAtOpen = (await considerations.inForceFor(scope.projectId ?? null)).rules;
+        prepareChatScratch(chatId, scope, inForceAtOpen);
+        considerations.noteChatOpen(chatId, inForceAtOpen);
       } catch (err) {
         chatScopes.release(chatId, token);
         return reply
@@ -3066,7 +3085,15 @@ export function registerRoutes(
     // Sync, same tick as `inFlight`: the window is closed before anything yields.
     const turn = chatTurns.begin(id, audience, parsed.data.text);
     try {
-      const seats = await adapter.chatSend(id, parsed.data.text, parsed.data.targets);
+      // DC-S7: a rule remembered since the seats last heard from crew rides this send as a
+      // crew-authored preface — disclosed below as a `system` transcript record; the `user` record
+      // keeps the operator's own words.
+      const preface = await considerations.prefaceForSend(id);
+      const seats = await adapter.chatSend(
+        id,
+        preface !== null ? `${preface}\n\n${parsed.data.text}` : parsed.data.text,
+        parsed.data.targets,
+      );
       if (turn !== null) {
         // The engine's answer is the truth: the reserved audience is squared with the seats it
         // reached, and the operator's message joins the transcript with exactly those seats.
@@ -3074,6 +3101,7 @@ export function registerRoutes(
         chatTranscripts?.appendUser(id, turn.turnId, parsed.data.text, seats);
         // DC-S4b: who said it, to whom — the recorder matches the seats' quotes against THIS message.
         chatRecorder?.noteSend(id, turn.turnId, actorOf(req), parsed.data.text, seats);
+        if (preface !== null) chatTranscripts?.appendSystem(id, turn.turnId, preface);
       }
       // crew#641: re-state single-seat degradation on every turn so it is visible in the transcript.
       // Decided from `warmRoster` — the seats that are WARM — never from `seats`, which is only the
@@ -3276,6 +3304,44 @@ export function registerRoutes(
     if (output !== null) return reply.send({ output });
     return reply.send({ output: null, outputUnavailable: outputUnavailableReason(unit) });
   });
+
+  // DC-S7 (§4.6): what the seats considered, set aside and cited for one chat turn or one unit
+  // attempt. Operator+ (the rules are the project's doctrine). A cited rule is "unchecked", never
+  // "followed" (B4). 404 when the transcript holds no such turn, or the run has no such unit.
+  const operatorOnlyRead = (req: FastifyRequest, reply: FastifyReply): boolean => {
+    const actor = actorOf(req);
+    if (trustAtLeast(actor, 'operator')) return true;
+    void reply.code(403).send({ error: `Insufficient trust: considered needs 'operator' (you are '${actor.trust}')` });
+    return false;
+  };
+  app.get(
+    `${V}/chats/:id/turns/:turnId/considered`,
+    { config: { manifest: { responseType: 'Consideration', statusCodes: [200, 403, 404] } } },
+    async (req, reply) => {
+      if (!operatorOnlyRead(req, reply)) return reply;
+      const { id, turnId } = req.params as { id: string; turnId: string };
+      const c = await considerations.forChatTurn(id, turnId);
+      if (c === null) return reply.code(404).send({ error: `chat ${id} holds no turn ${turnId}` });
+      return c;
+    },
+  );
+  app.get(
+    `${V}/runs/:id/units/:unitKey/considered`,
+    { config: { manifest: { responseType: 'Consideration', statusCodes: [200, 400, 403, 404] } } },
+    async (req, reply) => {
+      if (!operatorOnlyRead(req, reply)) return reply;
+      const { id, unitKey } = req.params as { id: string; unitKey: string };
+      const raw = (req.query as { attempt?: string | string[] }).attempt;
+      const attemptRaw = Array.isArray(raw) ? raw[0] : raw;
+      const attempt = attemptRaw === undefined || attemptRaw === '' ? 0 : Number(attemptRaw);
+      if (!Number.isInteger(attempt) || attempt < 0) {
+        return reply.code(400).send({ error: '`attempt` must be a non-negative integer' });
+      }
+      const c = await considerations.forUnit(id, unitKey, attempt);
+      if (c === null) return reply.code(404).send({ error: `run ${id} has no unit '${unitKey}'` });
+      return c;
+    },
+  );
 
   // The whole run as one auditable JSON attachment: the run, its units (each with
   // the captured transcript), and the decision trail read back from core's durable
@@ -5780,5 +5846,5 @@ export function registerRoutes(
     log: (m) => app.log.warn(m),
   });
 
-  return { decideGate, decisions, chatRecorder };
+  return { decideGate, decisions, chatRecorder, considerations };
 }

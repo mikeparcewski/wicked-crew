@@ -38,6 +38,8 @@
  * `POST /chats` response and `GET /chats/:id` for the UI (studio's New Chat).
  */
 
+import { rulesStatementLines } from '../decisions/rules-text.js';
+import type { ConformanceRule } from '../core/types.js';
 import { randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -662,7 +664,7 @@ const CHAT_DECISIONS_LINES: ReadonlyArray<string> = [
 ];
 export const CHAT_DECISIONS_DIRECTIVE = `${CHAT_DECISIONS_LINES.join('\n')}\n\n`;
 
-export function chatScopeStatement(chatId: string, scope: ChatScope): string {
+export function chatScopeStatement(chatId: string, scope: ChatScope, rules?: ReadonlyArray<ConformanceRule>): string {
   const lines: string[] = [
     '# Chat scope',
     '',
@@ -788,6 +790,8 @@ export function chatScopeStatement(chatId: string, scope: ChatScope): string {
     'be grounded, say so in one line rather than asserting it.',
     '',
   );
+  // DC-S7 (§4.7): the project's in-force rules, as `[rule:<id>]` lines the seat can cite.
+  if (rules !== undefined && rules.length > 0) lines.push(...rulesStatementLines(rules), '');
   // DC-S4b: every seat, every scope kind — the recorder is chosen from the turn's audience.
   lines.push(...CHAT_DECISIONS_LINES, '');
   if (scope.projectId !== undefined) {
@@ -807,7 +811,7 @@ export function chatScopeStatement(chatId: string, scope: ChatScope): string {
  * `mode` applies only on creation), and each instruction file is unlinked before it is written
  * exclusively (`wx`) so a planted link cannot redirect the write.
  */
-export function prepareChatScratch(chatId: string, scope: ChatScope): void {
+export function prepareChatScratch(chatId: string, scope: ChatScope, rules?: ReadonlyArray<ConformanceRule>): void {
   const base = resolve(scope.cwd, '..');
   // The WHOLE chain below the OS temp dir is created and validated one segment at a time (Copilot,
   // #518): a recursive mkdir would follow a planted symlink at `<tmp>/wicked-crew-chats` (the
@@ -845,7 +849,7 @@ export function prepareChatScratch(chatId: string, scope: ChatScope): void {
   try {
     assertRealOwnedDirectory(scope.cwd, 'chat scratch root');
     chmodSync(scope.cwd, 0o700);
-    const statement = chatScopeStatement(chatId, scope);
+    const statement = chatScopeStatement(chatId, scope, rules);
     for (const name of ['AGENTS.md', 'CLAUDE.md']) {
       const file = join(scope.cwd, name);
       rmSync(file, { force: true }); // removes a planted LINK itself, never its target
