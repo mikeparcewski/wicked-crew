@@ -5,8 +5,8 @@
  * pushed: the tap awaits each row's handler (route, check, emit) before it reads on, so its
  * in-memory cursor advances only after the row's outputs were emitted or recorded as failed. When
  * the lanes are slow the tap simply reads later; the bus is the buffer. Armed only while an enabled
- * entry listens on the bus (the first is TR-W7's `scope-drift`, joined to `wicked.team.plan.accepted`;
- * none did in TR-W5a).
+ * entry listens on the bus (the first is TR-W7's `scope-drift`, joined to the team's `plan.accepted`
+ * row; none did in TR-W5a).
  *
  * RELAY. Watch rows reach `/ws` as `{type:"watchEvent", event:<bus row>, project_id?}` through a tap
  * of `wicked.crew.watch_finding.**`, the team relay's pattern (`team/ws-relay.ts`). The registry
