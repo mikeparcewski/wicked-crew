@@ -132,13 +132,16 @@ export class InteractiveHandoffLedger {
    * (tmp + rename, like every other write) and ONLY when something was actually removed, so a
    * sweep of a doc this ledger never answered does not create or rewrite the file.
    *
+   * `keep` (EP-C2): rows of the name that are NOT this document's — a review row of the same-named
+   * document in another project (`<doc>:review:<project partition>:…` carries its project) — stay.
+   *
    * @returns the removed keys (empty = nothing to remove).
    */
-  removeDoc(documentId: string): string[] {
+  removeDoc(documentId: string, keep?: (key: string) => boolean): string[] {
     const prefix = `${documentId}:`;
     const removed: string[] = [];
     for (const key of Object.keys(this.entries)) {
-      if (key === documentId || key.startsWith(prefix)) {
+      if ((key === documentId || key.startsWith(prefix)) && keep?.(key) !== true) {
         delete this.entries[key];
         removed.push(key);
       }

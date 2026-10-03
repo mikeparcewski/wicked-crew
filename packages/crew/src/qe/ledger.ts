@@ -562,3 +562,73 @@ export function readStampedVerdicts(
     return { found: true, rows: [], error: err instanceof Error ? err.message : String(err) };
   }
 }
+
+/** One review verdict of a document, as the interactive-review seam recorded it (EP-C2). */
+export interface DocReviewLedgerRow {
+  /** The ledger verdict row's id. */
+  id: string;
+  /** The crew run that reviewed (`crew_run_id`). */
+  runId: string;
+  doc: string;
+  version: number;
+  /** The reviewer's schema id (`match` | `a11y` | `copy` | `qe`). */
+  reviewer: string;
+  /** `pass` | `changes` | `error` (`review_verdict`; the ledger's own `verdict` is PASS | FAIL | INCONCLUSIVE). */
+  reviewVerdict: string;
+  findings: unknown[];
+  /** The seat that ran the review, when the run named one. */
+  seat: string | null;
+  /** The seats the launch excluded (the document's authors). */
+  excludedSeats: string[];
+  /** Whether the document's authoring runs were found (an empty exclusion with `false` = author unknown). */
+  authorKnown: boolean;
+  skill: string | null;
+  reason: string | null;
+  createdAt: string;
+}
+
+/**
+ * The review verdicts in a document's REVIEW ROOT ledger (`<reviewRoot>/.wicked-qe/`), newest first —
+ * the rows the interactive-review seam writes, one per reviewer per review run, each stamped with
+ * `crew_run_id` (DES-artifact-editor-plugins §7.6). Read-only, canonical JSON only, like
+ * {@link readStampedVerdicts}; `runId` narrows to one review run. A ledger that does not exist reads
+ * `found: false`; one that cannot be parsed reads `error` — never a cleaner answer.
+ */
+export function readDocReviewVerdicts(
+  reviewRoot: string,
+  runId?: string,
+): { found: boolean; rows: DocReviewLedgerRow[]; error?: string } {
+  const root = join(reviewRoot, DEFAULT_QE_LEDGER_DIRNAME);
+  if (!existsSync(root)) return { found: false, rows: [] };
+  try {
+    const rows: DocReviewLedgerRow[] = [];
+    for (const v of listCanonical<VerdictRecord>(root, 'verdicts')) {
+      const r = v as unknown as Record<string, unknown>;
+      const stamp = r[CREW_RUN_ID_FIELD];
+      if (typeof stamp !== 'string' || stamp === '') continue;
+      if (runId !== undefined && stamp !== runId) continue;
+      const doc = r['doc'];
+      const version = r['version'];
+      const reviewVerdict = r['review_verdict'];
+      if (typeof doc !== 'string' || typeof version !== 'number' || !Number.isInteger(version) || typeof reviewVerdict !== 'string') continue;
+      rows.push({
+        id: v.id,
+        runId: stamp,
+        doc,
+        version,
+        reviewer: typeof v.reviewer === 'string' ? v.reviewer : '',
+        reviewVerdict,
+        findings: Array.isArray(r['findings']) ? (r['findings'] as unknown[]) : [],
+        seat: typeof r['seat'] === 'string' && r['seat'] !== '' ? r['seat'] : null,
+        excludedSeats: Array.isArray(r['excluded_seats']) ? (r['excluded_seats'] as unknown[]).filter((s): s is string => typeof s === 'string') : [],
+        authorKnown: r['author_known'] === true,
+        skill: typeof r['skill'] === 'string' && r['skill'] !== '' ? r['skill'] : null,
+        reason: typeof v.reason === 'string' && v.reason !== '' ? v.reason : null,
+        createdAt: v.created_at,
+      });
+    }
+    return { found: true, rows };
+  } catch (err) {
+    return { found: true, rows: [], error: err instanceof Error ? err.message : String(err) };
+  }
+}

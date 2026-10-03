@@ -702,6 +702,11 @@ function addonSupportsExtraWriteRoots(): boolean {
   return addonAtLeast(0, 6, 1);
 }
 
+/** Does the installed addon understand `LaunchOptions.excludeSeats` (EP-K3, >= 0.7.35)? Same doctrine. */
+function addonSupportsExcludeSeats(): boolean {
+  return addonAtLeast(0, 7, 35);
+}
+
 /**
  * Does the installed addon understand `LaunchOptions.projectGraph` (≥ 0.7.1)?
  *
@@ -1904,6 +1909,17 @@ export class CoreAdapter {
         );
       }
       opts.extraWriteRoots = input.extraWriteRoots;
+    }
+    if (input.excludeSeats !== undefined && input.excludeSeats.length > 0) {
+      // Fail CLOSED on an old addon (napi ignores undeclared fields): a silently-dropped exclusion
+      // would let the seat that wrote the work judge it — the one thing the caller asked to rule out.
+      if (!addonSupportsExcludeSeats()) {
+        throw new Error(
+          'excludeSeats needs wicked-core-ts >= 0.7.35; the installed addon would silently ignore it ' +
+            'and a seat the launch excluded could judge the run',
+        );
+      }
+      opts.excludeSeats = input.excludeSeats;
     }
     // SAFETY NET (grounding follow-on #1): ANY project-filed launch that did not already resolve a
     // project-graph binding gets one here, so no future project-filed caller can silently ship a run
