@@ -140,7 +140,7 @@ describe('the seal and the bundle (WT-W2)', () => {
     writeFileSync(join(root, 'capture', '\u{E000}.json'), '1');
     writeFileSync(join(root, 'capture', '\u{10000}.json'), '2');
     expect(await computeBundleSha(root)).toMatchObject({ ok: true, sha: expectedBundle(root) });
-    // A same-size rewrite is seen too (the memo keys on change time, not size alone).
+    // A same-size rewrite is seen too (every check re-reads the bytes; nothing is memoized).
     const before = ((await computeBundleSha(root)) as { sha: string }).sha;
     writeFileSync(join(root, 'capture', '\u{E000}.json'), '9');
     expect(((await computeBundleSha(root)) as { sha: string }).sha).not.toBe(before);

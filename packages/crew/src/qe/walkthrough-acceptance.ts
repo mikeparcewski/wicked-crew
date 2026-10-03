@@ -115,25 +115,15 @@ export async function computeBundleSha(
 }
 
 /**
- * One file's sha256, STREAMED (a stitched take is a video; the walkthrough view is polled). Memoized on
- * the file's identity and change time (`dev`, `ino`, `size`, `mtimeMs`, `ctimeMs`): any write changes
- * `ctime`, which a same-uid process cannot set back, so a rewritten file is always re-hashed.
+ * One file's sha256, STREAMED (a stitched take is a video; the walkthrough view is polled). Never
+ * memoized: a stat key cannot prove the bytes are unchanged (a shared writable mapping can change a
+ * page without another mtime/ctime update), and the gate must read what is on disk now (codex on #759).
  */
 async function fileSha256(path: string): Promise<string> {
-  const st = await fsp.stat(path, { bigint: true });
-  const key = `${path}\0${st.dev}\0${st.ino}\0${st.size}\0${st.mtimeNs}\0${st.ctimeNs}`;
-  const hit = HASH_MEMO.get(key);
-  if (hit !== undefined) return hit;
   const hash = createHash('sha256');
   for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer);
-  const hex = hash.digest('hex');
-  if (HASH_MEMO.size >= HASH_MEMO_MAX) HASH_MEMO.delete(HASH_MEMO.keys().next().value as string);
-  HASH_MEMO.set(key, hex);
-  return hex;
+  return hash.digest('hex');
 }
-
-const HASH_MEMO = new Map<string, string>();
-const HASH_MEMO_MAX = 4096;
 
 /** One walkthrough step's acceptance. */
 export interface WalkthroughGate {
