@@ -63,6 +63,7 @@ import {
   NotARegularFileError,
   UnresolvableDiffBaseError,
   branchDiff,
+  isGitStopped,
   isPlainRef,
   readFileCapped,
   worktreeDiff,
@@ -1760,6 +1761,14 @@ export function registerRoutes(
           error: "diff output exceeds the server's execution buffer — narrow the request with ?path=",
         });
       }
+      // crew#790: git stopped before it answered (the daemon's 10 s timeout on a busy host) is not a
+      // server fault to report as a bare 500 — say it is busy and when to ask again.
+      if (isGitStopped(err)) {
+        return reply
+          .code(503)
+          .header('retry-after', '5')
+          .send({ error: 'git did not answer in time — the host is busy; try again shortly', code: 'diff_busy' });
+      }
       return reply.code(500).send({ error: message(err) });
     };
     const worktreeLive = typeof workdir === 'string' && workdir.length > 0 && existsSync(workdir);
@@ -1826,7 +1835,22 @@ export function registerRoutes(
       });
     }
     const rel = resolved.target === undefined ? undefined : relative(workdir, resolved.target);
+    // crew#790: with no `?base=`, the baseline is the engine-recorded `base_commit` (the commit the
+    // run's worktree forked from), not HEAD — a delivered run has committed its work, so a HEAD diff
+    // read empty. Committed and uncommitted run work both show; `base` names it. A recorded base
+    // that does not resolve in the worktree falls back to HEAD (the pre-#790 answer), never a 400 for
+    // a parameter the caller did not send.
+    const recordedBase = (resolved.session as { base_commit?: unknown }).base_commit;
+    const defaultBase =
+      (rawBase === undefined || rawBase === '') && typeof recordedBase === 'string' && isPlainRef(recordedBase) ? recordedBase : undefined;
     try {
+      if (defaultBase !== undefined) {
+        try {
+          return { ...(await worktreeDiff(workdir, rel, defaultBase)), source: 'worktree' as const, base: defaultBase };
+        } catch (err) {
+          if (!(err instanceof UnresolvableDiffBaseError)) throw err;
+        }
+      }
       return { ...(await worktreeDiff(workdir, rel, rawBase)), source: 'worktree' as const };
     } catch (err) {
       return diffError(err);

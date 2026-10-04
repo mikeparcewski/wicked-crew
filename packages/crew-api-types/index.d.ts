@@ -1010,7 +1010,7 @@ export interface RunFileContent {
 export interface RunDiff {
   /** Unified diff text (`git diff --no-color --no-ext-diff HEAD`), cut at 1 MB when `truncated`. */
   diff: string;
-  /** The diff exceeded the 1 MB output cap and was cut. */
+  /** The diff exceeded the 1 MB output cap and was cut (or, crew#790, ran out of its time budget). */
   truncated: boolean;
   /**
    * Where the diff was read from (wave 6, F-7R2-013; api-types 0.36.0): `worktree` — the live run
@@ -1025,7 +1025,12 @@ export interface RunDiff {
   branch?: string;
   /** `source: 'branch'` — the base commit the branch was diffed against: the engine's recorded
    *  `AgentSession.base_commit` when it has one, else the branch's merge-base with the default
-   *  branch; `?base=<ref>` overrides it with a plain in-repo ref. */
+   *  branch; `?base=<ref>` overrides it with a plain in-repo ref. `source: 'worktree'` (crew#790)
+   *  — present when no `?base=` was sent and the worktree was diffed against the recorded
+   *  `base_commit` (committed AND uncommitted run work); absent when the baseline was HEAD (no
+   *  recorded base, or it does not resolve in the worktree). `truncated` is also `true` when the
+   *  untracked-file pass stopped at its time budget on a busy host; a git stopped before it
+   *  answered is 503 `{ code: "diff_busy" }` with `Retry-After`. */
   base?: string;
 }
 
