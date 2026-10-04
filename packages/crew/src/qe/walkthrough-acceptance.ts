@@ -242,6 +242,18 @@ export async function resolveWalkthroughGate(opts: {
 const PAIR_CATALOGS = new Set(['walkthrough_plan', 'walkthrough_review']);
 
 /**
+ * The accepted plan's floor override removed the walkthrough pair (§4.9): end-to-end testing is the
+ * operator's, so every finished creator step reads `owned_by_you` — and the acceptance read carries
+ * the walkthrough block even though no `walkthrough_review` step is left to resolve (#791).
+ */
+export function pairRemovedByOverride(view: SessionView): boolean {
+  const accepted = (view.session as { team_plan?: { accepted?: { floor_override?: { remove?: unknown } | null } | null } | null }).team_plan
+    ?.accepted;
+  const removed = accepted?.floor_override?.remove;
+  return Array.isArray(removed) && removed.some((r) => typeof r === 'string' && PAIR_CATALOGS.has(r));
+}
+
+/**
  * `checkState` per creator step (§4.9), computed, never stored. `newest` is the newest walkthrough's
  * gate (only a SEALED one proves anything); `atSec` per chapter is not sealed, so it is `null` here.
  * One row per creator step that is proved by a sealed chapter or passed its own gate.
@@ -250,10 +262,7 @@ export function walkthroughCheckStates(
   view: SessionView,
   newest: WalkthroughGate | null,
 ): WalkthroughStepState[] {
-  const accepted = (view.session as { team_plan?: { accepted?: { floor_override?: { remove?: unknown } | null } | null } | null }).team_plan
-    ?.accepted;
-  const removed = accepted?.floor_override?.remove;
-  const ownedByYou = Array.isArray(removed) && removed.some((r) => typeof r === 'string' && PAIR_CATALOGS.has(r));
+  const ownedByYou = pairRemovedByOverride(view);
   const out: WalkthroughStepState[] = [];
   for (const u of [...view.units].sort((a, b) => a.ord - b.ord)) {
     if (u.role !== 'creator') continue;

@@ -3441,7 +3441,7 @@ export function registerRoutes(
       // unit both appear on the page humans actually look at.
       claims: () => adapter.listConformanceClaims(),
       events: (rid) => adapter.runEvents(rid),
-      ...(walkthroughs.gates.length > 0 ? { walkthroughs } : {}),
+      ...(walkthroughs.gates.length > 0 || walkthroughs.ownedByYou ? { walkthroughs } : {}),
     });
   });
 

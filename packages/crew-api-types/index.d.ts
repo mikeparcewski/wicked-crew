@@ -6839,7 +6839,8 @@ export interface WalkthroughView {
   /** Proof-root-relative paths of the stitched take; `null` until there is one. */
   video: { mp4: string | null; poster: string | null; markers: DemoMarker[] };
   chapters: WalkthroughChapter[];
-  /** Per creator step, the check state from THIS pair's take — computed at every read from its re-verified seal (WT-W2). */
+  /** Per creator step, the check state from THIS pair's take — computed at every read from its re-verified seal (WT-W2).
+   *  With no pair because the accepted plan's override removed it, every finished creator step `owned_by_you` (0.88.1). */
   steps: WalkthroughStepState[];
 }
 
@@ -6850,7 +6851,9 @@ export interface WalkthroughView {
  * engine-captured output), `bundle_sha` recomputed from the proof root, and the proof root's stamped
  * ledger verdicts against the sealed chapter verdicts. The gate is deny-dominates across the repo
  * ledger and every row: a missing, mismatched ("changed after it was sealed") or non-PASS seal
- * denies. ABSENT when the requirement names no walkthrough step.
+ * denies. ABSENT when the requirement names no walkthrough step — except when the accepted plan's floor
+ * override removed the walkthrough pair (§4.9; api-types 0.88.1): then it is present with `roots: []`,
+ * `sealed: true` (nothing to seal) and every finished creator step `owned_by_you`.
  */
 export interface RunAcceptanceWalkthrough {
   roots: Array<{ stepId: string; sealed: boolean; satisfied: boolean; reason: string }>;
@@ -6871,7 +6874,8 @@ export interface RunAcceptanceSummary {
   /** Deny-dominates across the repo ledger and every walkthrough (`gate.satisfied`). */
   satisfied: boolean;
   line: string;
-  /** From the newest walkthrough; `null` when the requirement names none. */
+  /** From the newest walkthrough; `null` when the requirement names none — unless the accepted plan's
+   *  override removed the pair (then `tree` is `null` and `ownedByYou` counts the operator's steps). */
   walkthrough: {
     checked: number;
     failed: number;

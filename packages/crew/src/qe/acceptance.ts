@@ -521,8 +521,10 @@ export async function buildAcceptanceView(opts: {
    * WT-W2: the run's walkthrough steps the requirement names, each resolved against its proof root and
    * seal ({@link WalkthroughGate}), and the per-step check states. Their step ids are taken OUT of the
    * repo ledger's share of the requirement: a walkthrough's verdicts live in its proof root.
+   * `ownedByYou`: the accepted plan's floor override removed the pair (§4.9, #791) — the block is
+   * served with no roots so the `owned_by_you` steps reach the wire.
    */
-  walkthroughs?: { gates: WalkthroughGate[]; steps: WalkthroughStepState[]; newest?: WalkthroughGate | null };
+  walkthroughs?: { gates: WalkthroughGate[]; steps: WalkthroughStepState[]; newest?: WalkthroughGate | null; ownedByYou?: boolean };
 }): Promise<AcceptanceView> {
   const { phases, failClosed } = opts.requirement;
   const walkGates = opts.walkthroughs?.gates ?? [];
@@ -622,7 +624,7 @@ export async function buildAcceptanceView(opts: {
           }
         : null,
     gate,
-    ...(walkGates.length > 0
+    ...(walkGates.length > 0 || opts.walkthroughs?.ownedByYou === true
       ? {
           walkthrough: {
             roots: walkGates.map((g) => ({ stepId: g.stepId, sealed: g.sealed, satisfied: g.satisfied, reason: g.reason })),
@@ -631,7 +633,13 @@ export async function buildAcceptanceView(opts: {
           },
         }
       : {}),
-    summary: acceptanceSummary(gate, walkGates, opts.walkthroughs?.steps ?? [], opts.walkthroughs?.newest),
+    summary: acceptanceSummary(
+      gate,
+      walkGates,
+      opts.walkthroughs?.steps ?? [],
+      opts.walkthroughs?.newest,
+      opts.walkthroughs?.ownedByYou === true,
+    ),
     conformance,
   };
 }
@@ -649,29 +657,31 @@ export function acceptanceSummary(
   steps: readonly WalkthroughStepState[],
   /** The walkthrough `steps` were computed from (the newest AUTHOR's pair); defaults to the last gate. */
   newestGate?: WalkthroughGate | null,
+  /** The accepted plan's override removed the pair (§4.9, #791): no walkthrough ran; the steps are the operator's. */
+  pairRemoved = false,
 ): RunAcceptanceSummary {
   const newest = newestGate ?? walkGates.at(-1);
   const count = (s: WalkthroughStepState['checkState']): number => steps.filter((x) => x.checkState === s).length;
   const walkthrough =
-    newest !== undefined
+    newest !== undefined || pairRemoved
       ? {
           checked: count('checked'),
           failed: count('failed'),
           ownedByYou: count('owned_by_you'),
           steps: steps.length,
           sealed: walkGates.every((g) => g.sealed),
-          tree: newest.tree,
+          tree: newest?.tree ?? null,
         }
       : null;
+  const yours = walkthrough !== null && walkthrough.ownedByYou > 0 ? `; ${walkthrough.ownedByYou} left to your own testing` : '';
   let line: string;
   if (!gate.required) {
-    line = 'Nothing had to be proved before delivery.';
-  } else if (gate.satisfied && walkthrough !== null) {
+    line = `Nothing had to be proved before delivery${yours}.`;
+  } else if (gate.satisfied && walkthrough !== null && newest !== undefined) {
     const at = walkthrough.tree !== null ? ` at ${walkthrough.tree.slice(0, 7)}` : '';
-    const yours = walkthrough.ownedByYou > 0 ? `; ${walkthrough.ownedByYou} left to your own testing` : '';
     line = `Checked by a walkthrough: ${walkthrough.checked} of ${walkthrough.steps} step${walkthrough.steps === 1 ? '' : 's'}${at}${yours}.`;
   } else if (gate.satisfied) {
-    line = 'Accepted: the checks this run had to pass have passed.';
+    line = `Accepted: the checks this run had to pass have passed${yours}.`;
   } else {
     // The deliver text never names a path (§7 N6): ledger reasons carry the ledger root; drop them.
     const pathless = gate.reason.replace(/(?:[A-Za-z]:)?[\\/](?:[^\s`'"(),;]+[\\/])+[^\s`'"(),;]*/g, '…');

@@ -253,6 +253,19 @@ describe('acceptanceSummary — the deliver card acceptance line (WT-W3)', () =>
     expect(acceptanceSummary(gate({ required: false }), [], []).line).toBe('Nothing had to be proved before delivery.');
     expect(acceptanceSummary(gate({}), [], [])).toEqual({ required: true, satisfied: true, line: 'Accepted: the checks this run had to pass have passed.', walkthrough: null });
   });
+  it('the override removed the pair: no walkthrough ran, the steps are the operator\'s and the line says so (#791)', () => {
+    const yours = steps('owned_by_you', 'owned_by_you');
+    expect(acceptanceSummary(gate({ required: false }), [], yours, null, true)).toEqual({
+      required: false,
+      satisfied: true,
+      line: 'Nothing had to be proved before delivery; 2 left to your own testing.',
+      walkthrough: { checked: 0, failed: 0, ownedByYou: 2, steps: 2, sealed: true, tree: null },
+    });
+    expect(acceptanceSummary(gate({}), [], yours, null, true).line).toBe(
+      'Accepted: the checks this run had to pass have passed; 2 left to your own testing.',
+    );
+    expect(acceptanceSummary(gate({ satisfied: false, reason: 'no verdict' }), [], yours, null, true).line).toBe('Not accepted yet: no verdict');
+  });
   it('the line never names a path, also when the ledger reason does', () => {
     expect(acceptanceSummary(gate({}), [walk()], steps('checked')).line).not.toMatch(/\//);
     const denied = acceptanceSummary(gate({ satisfied: false, reason: 'no verdict in /srv/home/op/repo/.wicked-qe (missing ⇒ deny)' }), [], []);
