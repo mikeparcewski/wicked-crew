@@ -570,6 +570,21 @@ describe('the issue #776 batch through the REAL engine seam (stub engine, real a
       a.close();
     }
   });
+
+  it('the preview recall materializes the same defaults (codex on #793)', async () => {
+    const a = new CoreAdapter({ dbPath: join(dir, 'issue-776-preview.db'), stub: true });
+    try {
+      (a as unknown as { core: Record<string, unknown> })['core']['recallRulesPreview'] = async () =>
+        JSON.stringify([rule({ id: 'PAT-321' }), rule({ id: 'PAT-322', steering_type: 'testing', weight: 0.5, applies_to: ['tests/'] })]);
+      const rows = await a.recallRulesPreview({});
+      expect(rows.map((r) => [r.id, r.steering_type, r.weight, r.applies_to, r.excludes])).toEqual([
+        ['PAT-321', 'architecture', 1, [], []],
+        ['PAT-322', 'testing', 0.5, ['tests/'], []],
+      ]);
+    } finally {
+      a.close();
+    }
+  });
 });
 
 describe('the steering-author drop-in workflow (TH-12 propose-as-gate)', () => {
