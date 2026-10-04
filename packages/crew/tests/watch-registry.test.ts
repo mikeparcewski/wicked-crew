@@ -900,6 +900,31 @@ describe('a finding folded into a roll-up clears when it resolves (#780)', () =>
     expect(new Set(ids).size).toBe(ids.length);
   });
 
+  it('a clear and more raises inside ONE unflushed batch: positions only move forward, no watch_id is ever reused (codex review of the #780 fix)', async () => {
+    const r = makeRegistry({ entriesDir: entriesDir([rated()]) });
+    await r.arm();
+    for (let i = 1; i <= 4; i++) r.offer(point('run-x', i, 1)); // roll-up of 3, 4 waiting in the batch
+    r.offer(point('run-x', 3, 1, { clear: true })); // corrected in the batch: stands for 4
+    r.offer(point('run-x', 5, 1)); // coalesces onto it: stands for 4, 5
+    r.offer(point('run-x', 6, 1));
+    await r.flush();
+    expect((await liveRollups('run-x')).map(([n]) => n)).toEqual([3]);
+    for (const i of [4, 5]) {
+      r.offer(point('run-x', i, 1, { clear: true }));
+      await r.flush();
+    }
+    r.offer(point('run-x', 7, 1));
+    await r.flush();
+    expect((await liveRollups('run-x')).map(([n]) => n)).toEqual([2]);
+    for (const i of [6, 7]) {
+      r.offer(point('run-x', i, 1, { clear: true }));
+      await r.flush();
+    }
+    expect(await liveRollups('run-x')).toEqual([]);
+    const ids = await raisedIds();
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
   it('a burst folded in one batch clears one by one; a dismissed roll-up is not reopened by a later clear', async () => {
     const r = makeRegistry({ entriesDir: entriesDir([rated()]) });
     await r.arm();
