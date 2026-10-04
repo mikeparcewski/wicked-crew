@@ -64,6 +64,35 @@ export function scrubFacts(facts: Record<string, unknown> | undefined): Record<s
   return Buffer.byteLength(JSON.stringify(out), 'utf8') <= FACTS_MAX_BYTES ? out : { truncated: true };
 }
 
+/**
+ * #780: how many folded findings a roll-up row names (by short id) — enough that a resolved one
+ * leaves the roll-up and the last one clears it. Past this the roll-up still counts, but cannot
+ * know when it is empty (`rolled_ids_complete: false`), so it never clears by itself.
+ */
+export const ROLLUP_TRACK_MAX = 50;
+
+/** The short id a roll-up row names a folded finding by: 16 hex chars of its would-be `watch_id`. */
+export function foldedId(watchId: string): string {
+  return watchId.slice(2, 18);
+}
+
+/** A roll-up row's facts: the latest finding's facts plus what the roll-up stands for, within the 4 KB cap. */
+function rollupFacts(facts: Record<string, unknown> | undefined, meta: RollupMeta): Record<string, unknown> {
+  const scrubbed = scrub(facts ?? {}) as Record<string, unknown>;
+  const merged = { ...scrubbed, ...meta };
+  return Buffer.byteLength(JSON.stringify(merged), 'utf8') <= FACTS_MAX_BYTES ? merged : { truncated: true, ...meta };
+}
+
+/** What a roll-up row records about itself (in `facts`, so a restart rebuilds the chain from the bus). */
+interface RollupMeta {
+  /** The chain position: names the row (`rollup:<attempt>#<seq>`), independent of the count. */
+  rollup_seq: number;
+  /** The folded findings still open, by {@link foldedId}. */
+  rolled_ids: string[];
+  /** Every folded finding is named in `rolled_ids` (false past {@link ROLLUP_TRACK_MAX}). */
+  rolled_ids_complete: boolean;
+}
+
 /** One feed row: the raised payload, and its clearing once one was acknowledged. */
 export interface FeedRow {
   raised: WatchFinding;
@@ -162,7 +191,7 @@ interface Pending {
   /** A plain row's rate count: given back when the row is dropped (it never reached the bus). */
   plainOf?: RateState;
   /** A roll-up row: where its chain stood before it, restored when the row is dropped. */
-  restore?: { rate: RateState; att: string; to: { n: number; watchId: string } | undefined };
+  restore?: { rate: RateState; att: string; to: RollupChain | undefined };
   /** A clearing that means something only once this raised row is on the bus (skipped if it was dropped). */
   dependsOn?: string;
 }
@@ -183,10 +212,23 @@ export interface EmitterDeps {
   onAck?: (eventType: string, payload: WatchFinding | WatchFindingCleared) => void;
 }
 
+/**
+ * One attempt's roll-up chain: `n` is the newest row's position (`rollup:<att>#<n>`), `watchId` that
+ * row, `count` how many findings it stands for, `open` which of them (by {@link foldedId}) are still
+ * unresolved, `complete` whether `open` names every one (#780).
+ */
+interface RollupChain {
+  n: number;
+  watchId: string;
+  count: number;
+  open: string[];
+  complete: boolean;
+}
+
 /** Rate state per (run, entry): plain rows raised, and the live roll-up chain per attempt. */
 interface RateState {
   plain: number;
-  rollup: Map<string, { n: number; watchId: string }>;
+  rollup: Map<string, RollupChain>;
 }
 
 export class WatchEmitter {
@@ -245,11 +287,23 @@ export class WatchEmitter {
     if (s === undefined) {
       // Rebuilt from the feed after a restart, so the count and the roll-up chain carry on.
       const { plain, rollups } = this.feed.countFor(runId, entryId);
-      const rollup = new Map<string, { n: number; watchId: string }>();
+      const rollup = new Map<string, RollupChain>();
       for (const r of rollups) {
         const att = String(r.attempt ?? '-');
         const prev = rollup.get(att);
-        if (prev === undefined || r.rolled_up > prev.n) rollup.set(att, { n: r.rolled_up, watchId: r.watch_id });
+        // A row from before #780 carries no seq: its count was its position. Its folded findings are
+        // unnamed, so it can never clear by itself (`complete: false`) — as before.
+        const seq = typeof r.facts['rollup_seq'] === 'number' ? r.facts['rollup_seq'] : r.rolled_up;
+        const ids = r.facts['rolled_ids'];
+        if (prev === undefined || seq > prev.n) {
+          rollup.set(att, {
+            n: seq,
+            watchId: r.watch_id,
+            count: r.rolled_up,
+            open: Array.isArray(ids) ? ids.filter((x): x is string => typeof x === 'string') : [],
+            complete: r.facts['rolled_ids_complete'] === true,
+          });
+        }
       }
       s = { plain, rollup };
       this.rate.set(k, s);
@@ -289,7 +343,7 @@ export class WatchEmitter {
     const rate = this.rateOf(runId, entry.id);
     const ord = out.ord ?? null;
     const attempt = out.attempt ?? null;
-    const base = (subject: string, rolledUp: number, sentence: string): WatchFinding => ({
+    const base = (subject: string, rolledUp: number, sentence: string, meta?: RollupMeta): WatchFinding => ({
       ...this.envelope(entry, runId, ord, attempt, out.re, out.project),
       watch_id: watchIdOf(runId, entry.id, entry.version, subject),
       check: entry.check,
@@ -298,7 +352,7 @@ export class WatchEmitter {
       watch_kind: entry.emit.watch_kind,
       attach: entry.emit.attach,
       sentence: capString(sentence, SENTENCE_MAX),
-      facts: scrubFacts(out.facts),
+      facts: meta === undefined ? scrubFacts(out.facts) : rollupFacts(out.facts, meta),
       anchor: runId !== null ? { run_id: runId, ord, attempt, at: anchorAt } : null,
       evidence: out.evidence ?? [],
       model: null,
@@ -317,19 +371,33 @@ export class WatchEmitter {
       return;
     }
     if (replay) return;
-    // Over the rate: the next roll-up row for this attempt replaces the previous one.
+    // Over the rate: the next roll-up row for this attempt replaces the previous one. It names the
+    // findings it stands for (#780), so one that resolves leaves it and the last one clears it.
     const att = String(attempt ?? '-');
     const prev = rate.rollup.get(att);
+    // A roll-up already cleared (every finding resolved, or dismissed) is not continued: the next
+    // finding past the rate opens a fresh one — under a new position, never a reused watch_id.
+    const prevLive = prev !== undefined && !this.closed(prev.watchId) ? prev : undefined;
+    const fid = foldedId(watchId);
+    if (prevLive !== undefined && prevLive.open.includes(fid)) return; // already counted there
     const n = (prev?.n ?? 0) + 1;
-    const row = base(`rollup:${att}#${n}`, n, `${n} more like this on this run (latest: ${out.sentence})`);
-    rate.rollup.set(att, { n, watchId: row.watch_id });
+    const count = (prevLive?.count ?? 0) + 1;
+    const all = [...(prevLive?.open ?? []), fid];
+    const complete = (prevLive?.complete ?? true) && all.length <= ROLLUP_TRACK_MAX;
+    const open = all.slice(0, ROLLUP_TRACK_MAX);
+    const row = base(`rollup:${att}#${n}`, count, `${count} more like this on this run (latest: ${out.sentence})`, {
+      rollup_seq: n,
+      rolled_ids: open,
+      rolled_ids_complete: complete,
+    });
+    rate.rollup.set(att, { n, watchId: row.watch_id, count, open, complete });
     // Coalesce a burst: while the previous roll-up row has not reached the bus yet, it is REPLACED
     // in the batch (its clearing would only name a row nobody ever saw), and a waiting clearing
     // that pointed at it now points at the new row.
-    const waiting = prev === undefined ? -1 : this.pending.findIndex((p) => p.eventType === WATCH_FINDING_RAISED && p.key === prev.watchId);
-    if (prev !== undefined && waiting !== -1) {
+    const waiting = prevLive === undefined ? -1 : this.pending.findIndex((p) => p.eventType === WATCH_FINDING_RAISED && p.key === prevLive.watchId);
+    if (prevLive !== undefined && waiting !== -1) {
       const replaced = this.pending[waiting]!;
-      this.queuedKeys.delete(prev.watchId);
+      this.queuedKeys.delete(prevLive.watchId);
       this.queuedKeys.add(row.watch_id);
       this.failedKeys.delete(row.watch_id);
       // The chain falls back to where the REPLACED row would have restored it.
@@ -342,7 +410,7 @@ export class WatchEmitter {
       };
       for (const p of this.pending) {
         const c = p.payload as { reason?: string; replaced_by?: string };
-        if (p.eventType === WATCH_FINDING_CLEARED && c.reason === 'rolled_up' && c.replaced_by === prev.watchId) {
+        if (p.eventType === WATCH_FINDING_CLEARED && c.reason === 'rolled_up' && c.replaced_by === prevLive.watchId) {
           c.replaced_by = row.watch_id;
           p.dependsOn = row.watch_id;
         }
@@ -350,14 +418,94 @@ export class WatchEmitter {
       return;
     }
     this.push(WATCH_FINDING_RAISED, row, false, { restore: { rate, att, to: prev } });
-    if (prev !== undefined) {
+    if (prevLive !== undefined) {
       this.push(WATCH_FINDING_CLEARED, {
         ...this.envelope(entry, runId, ord, attempt, out.re, out.project),
-        watch_id: prev.watchId,
+        watch_id: prevLive.watchId,
         reason: 'rolled_up',
         replaced_by: row.watch_id,
       }, false, { dependsOn: row.watch_id });
     }
+  }
+
+  /** The row is cleared, or its clearing is already queued. */
+  private closed(watchId: string): boolean {
+    const row = this.feed.get(watchId);
+    return (row !== undefined && row.cleared !== null) || this.queuedKeys.has(clearedKey(watchId));
+  }
+
+  /** A raised row this emitter knows: on the bus (the feed), on its way there, or waiting in the batch. */
+  private raisedPayload(watchId: string): WatchFinding | undefined {
+    return (
+      this.feed.get(watchId)?.raised ??
+      this.inflight.get(watchId) ??
+      (this.pending.find((p) => p.eventType === WATCH_FINDING_RAISED && p.key === watchId)?.payload as WatchFinding | undefined)
+    );
+  }
+
+  /**
+   * #780: a finding that was folded into a roll-up (it never had a row of its own) resolved. It leaves
+   * the roll-up: the roll-up is re-issued with the lower count (the `cleared{rolled_up}` + `raised`
+   * pair, as when it grows), or, when it stood for nothing else, its row clears as resolved. A
+   * subject no roll-up names (never raised at all) clears nothing.
+   */
+  private clearFolded(entry: LoadedEntry, runId: string | null, watchId: string, re: string): boolean {
+    const rate = this.rateOf(runId, entry.id);
+    const fid = foldedId(watchId);
+    for (const [att, chain] of rate.rollup) {
+      if (!chain.open.includes(fid)) continue;
+      if (this.closed(chain.watchId)) return false; // dismissed or resolved already: nothing to reopen
+      const open = chain.open.filter((x) => x !== fid);
+      const count = Math.max(0, chain.count - 1);
+      if (count === 0 || (open.length === 0 && chain.complete)) {
+        rate.rollup.set(att, { ...chain, count: 0, open: [] });
+        return this.clearById(chain.watchId, { reason: 'resolved' }, re);
+      }
+      const prevRow = this.raisedPayload(chain.watchId);
+      if (prevRow === undefined) return false;
+      const meta: RollupMeta = { rollup_seq: chain.n, rolled_ids: open, rolled_ids_complete: chain.complete };
+      const sentence = prevRow.sentence.replace(/^\d+ more like this/, `${count} more like this`);
+      // Not on the bus yet: the waiting row is corrected in the batch (nobody has seen it).
+      const waiting = this.pending.find((p) => p.eventType === WATCH_FINDING_RAISED && p.key === chain.watchId);
+      if (waiting !== undefined) {
+        waiting.payload = { ...prevRow, rolled_up: count, sentence, facts: { ...prevRow.facts, ...meta } };
+        rate.rollup.set(att, { ...chain, count, open });
+        return true;
+      }
+      const n = chain.n + 1;
+      const row: WatchFinding = {
+        ...prevRow,
+        at: this.now(),
+        re,
+        watch_id: watchIdOf(runId, entry.id, entry.version, `rollup:${att}#${n}`),
+        rolled_up: count,
+        sentence,
+        facts: { ...prevRow.facts, ...meta, rollup_seq: n },
+      };
+      rate.rollup.set(att, { n, watchId: row.watch_id, count, open, complete: chain.complete });
+      this.push(WATCH_FINDING_RAISED, row, false, { restore: { rate, att, to: chain } });
+      this.push(
+        WATCH_FINDING_CLEARED,
+        {
+          run_id: prevRow.run_id,
+          ord: prevRow.ord,
+          attempt: prevRow.attempt,
+          by: prevRow.by,
+          at: this.now(),
+          re,
+          watch_id: chain.watchId,
+          entry_id: prevRow.entry_id,
+          entry_version: prevRow.entry_version,
+          ...(prevRow.project_id !== undefined ? { project_id: prevRow.project_id } : {}),
+          reason: 'rolled_up',
+          replaced_by: row.watch_id,
+        } as WatchFindingCleared,
+        false,
+        { dependsOn: row.watch_id },
+      );
+      return true;
+    }
+    return false;
   }
 
   /** Queue the clearing of the row `subject` names (no-op when it was never raised or is already cleared). */
@@ -369,7 +517,9 @@ export class WatchEmitter {
     re = 'resolved',
   ): boolean {
     const watchId = watchIdOf(runId, entry.id, entry.version, subject);
-    return this.clearById(watchId, how, re);
+    // A finding with a row of its own clears that row; one folded into a roll-up leaves it (#780).
+    if (this.raisedPayload(watchId) !== undefined || how.reason !== 'resolved') return this.clearById(watchId, how, re);
+    return this.clearFolded(entry, runId, watchId, re);
   }
 
   /** Queue the clearing of `watchId` (dismiss uses this directly). */

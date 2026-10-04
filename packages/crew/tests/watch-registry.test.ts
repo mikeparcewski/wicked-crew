@@ -839,3 +839,82 @@ describe('settings', () => {
     expect(r.entries().find((e) => e.id === 'registry-lagging')).toMatchObject({ threshold: { queue_depth: 100, tail_lag_ms: 60000 }, threshold_text: expect.stringMatching(/^When 100 or more events are waiting/) });
   });
 });
+
+describe('a finding folded into a roll-up clears when it resolves (#780)', () => {
+  const rated = () => entry('point', { emit: { as: 'flag', severity: 'medium', watch_kind: 'problem', attach: null, rate: { per_run: 2 } } });
+  /** The live roll-up rows of a run, oldest first: [rolled_up, sentence]. */
+  async function liveRollups(run: string): Promise<Array<[number, string]>> {
+    const rows = (await watchRows()).filter((x) => x.payload['run_id'] === run);
+    const cleared = new Set(rows.filter((x) => x.event_type === WATCH_FINDING_CLEARED).map((x) => x.payload['watch_id']));
+    return rows
+      .filter((x) => x.event_type === WATCH_FINDING_RAISED)
+      .map((x) => x.payload as unknown as WatchFinding)
+      .filter((f) => f.rolled_up > 0 && !cleared.has(f.watch_id))
+      .map((f) => [f.rolled_up, f.sentence]);
+  }
+  async function raisedIds(): Promise<string[]> {
+    return (await watchRows()).filter((x) => x.event_type === WATCH_FINDING_RAISED).map((x) => String(x.payload['watch_id']));
+  }
+
+  it('each folded finding that resolves leaves the roll-up; the last one clears it; a restart keeps the count', async () => {
+    const opts: Partial<WatchRegistryOptions> = { entriesDir: entriesDir([rated()]) };
+    const r = makeRegistry(opts);
+    await r.arm();
+    for (let i = 1; i <= 4; i++) {
+      r.offer(point('run-c', i, 1));
+      await r.flush();
+    }
+    expect((await liveRollups('run-c')).map(([n]) => n)).toEqual([2]);
+    // Point 3 resolves: it is one of the roll-up's two; the roll-up now stands for one.
+    r.offer(point('run-c', 3, 1, { clear: true }));
+    await r.flush();
+    expect(await liveRollups('run-c')).toEqual([[1, '1 more like this on this run (latest: Point 4 attempt 1.)']]);
+    // A subject that was never raised clears nothing.
+    const before = (await watchRows()).length;
+    r.offer(point('run-c', 99, 1, { clear: true }));
+    await r.flush();
+    expect((await watchRows()).length).toBe(before);
+    // Point 4 resolves: nothing is left in the roll-up, so its row clears as resolved.
+    r.offer(point('run-c', 4, 1, { clear: true }));
+    await r.flush();
+    expect(await liveRollups('run-c')).toEqual([]);
+    const lastClear = (await watchRows()).filter((x) => x.event_type === WATCH_FINDING_CLEARED).at(-1)!;
+    expect(lastClear.payload['reason']).toBe('resolved');
+    // A new finding past the rate opens a fresh roll-up row (a new watch_id, never a reused one).
+    r.offer(point('run-c', 5, 1));
+    r.offer(point('run-c', 6, 1));
+    await r.flush();
+    expect((await liveRollups('run-c')).map(([n]) => n)).toEqual([2]);
+    // Restart: the roll-up remembers which findings it stands for.
+    registries.splice(registries.indexOf(r), 1);
+    await r.stop();
+    const second = makeRegistry(opts);
+    await second.arm();
+    second.offer(point('run-c', 5, 1, { clear: true }));
+    await second.flush();
+    expect((await liveRollups('run-c')).map(([n]) => n)).toEqual([1]);
+    second.offer(point('run-c', 6, 1, { clear: true }));
+    await second.flush();
+    expect(await liveRollups('run-c')).toEqual([]);
+    const ids = await raisedIds();
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it('a burst folded in one batch clears one by one; a dismissed roll-up is not reopened by a later clear', async () => {
+    const r = makeRegistry({ entriesDir: entriesDir([rated()]) });
+    await r.arm();
+    for (let i = 1; i <= 5; i++) r.offer(point('run-b', i, 1));
+    await r.flush();
+    expect((await liveRollups('run-b')).map(([n]) => n)).toEqual([3]);
+    r.offer(point('run-b', 3, 1, { clear: true }));
+    await r.flush();
+    expect((await liveRollups('run-b')).map(([n]) => n)).toEqual([2]);
+    const live = r.feed({ run: 'run-b' }).findings.filter((f) => f.rolled_up === 2)[0]!;
+    expect(await r.dismiss(live.watch_id, 'maria')).toBe('dismissed');
+    const before = (await watchRows()).length;
+    r.offer(point('run-b', 4, 1, { clear: true }));
+    await r.flush();
+    expect((await watchRows()).length).toBe(before);
+    expect(await liveRollups('run-b')).toEqual([]);
+  });
+});
