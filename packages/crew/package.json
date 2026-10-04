@@ -1,6 +1,6 @@
 {
   "name": "wicked-crew",
-  "version": "0.7.49",
+  "version": "0.8.0",
   "description": "wicked-crew daemon — thin REST+WS bridge to the wicked-core engine via wicked-core-ts",
   "repository": {
     "type": "git",
@@ -37,7 +37,7 @@
     "agent-acp-bridges": "^1.1.1",
     "fastify": "^5.12.1",
     "pi-acp": "^0.0.32",
-    "wicked-core-ts": "^0.7.36",
+    "wicked-core-ts": "^0.7.37",
     "wicked-ledger": "^0.4.0",
     "yaml": "^2.4.2",
     "zod": "^3.23.0"
@@ -53,7 +53,7 @@
     "vitest": "^5.0.2",
     "wicked-bus": "^2.3.5",
     "wicked-crew-api-types": "*",
-    "wicked-studio": "^0.5.19"
+    "wicked-studio": "^0.6.0"
   },
   "engines": {
     "node": ">=22.0.0"
