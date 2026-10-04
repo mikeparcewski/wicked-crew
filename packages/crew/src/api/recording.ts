@@ -37,6 +37,7 @@
  *
  *   GET  /runs/:id/walkthrough?step=             the `WalkthroughView` of the newest (or the named) pair.
  *   GET  /runs/:id/walkthrough/file?step=&path=  one file of that pair's proof root (Range for the MP4).
+ *   GET  /runs/:id/walkthrough/storyline?step=   the author's storyline, for "Edit the check" (#782).
  *
  * What the view reads from a proof root (the recorder's files, DES-walkthrough-proof §4.4):
  *
@@ -76,7 +77,7 @@ import type {
   WalkthroughView,
 } from 'wicked-crew-api-types';
 import type { CoreAdapter } from '../core/adapter.js';
-import type { Actor, PutStorylineResponse, SessionView, WorkUnit } from '../core/types.js';
+import type { Actor, PutStorylineResponse, SessionView, WalkthroughStorylineView, WorkUnit } from '../core/types.js';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 import { API_PREFIX } from './api-prefix.js';
 import { coreUnitId } from './evidence.js';
@@ -1080,6 +1081,94 @@ export async function writeStoryline(
   return full;
 }
 
+/** A read refusal whose message is safe to return (relative names only, never an absolute path). */
+export class StorylineReadError extends Error {
+  constructor(
+    message: string,
+    readonly code: 'read_refused' | 'too_large',
+  ) {
+    super(message);
+  }
+}
+
+/**
+ * #782: the storyline the operator is asked to edit — `<evidence_root>/author/<plan step>/storyline.mjs`
+ * — read the way {@link writeStoryline} writes it: every level lstat-checked (a planted link at
+ * `author/`, `author/<step>` or the file is refused, never followed), the directory's real path pinned
+ * under the evidence root, the file at most {@link STORYLINE_MAX_BYTES}, and the opened inode re-checked
+ * against the pinned path after the read. `null` when the author has not written one. `marker` is the
+ * edit marker only when its `sha256` names this text (the recorder's rule) — a CANDIDATE: the author
+ * directory is the worker's to write, so the route trusts it only with the daemon's own audit row.
+ */
+export async function readStoryline(
+  evidenceRoot: string,
+  planStepId: string,
+): Promise<{ text: string; sha256: string; marker: { at: string | null } | null } | null> {
+  if (!PLAIN_SEGMENT.test(planStepId) || planStepId.startsWith('.')) {
+    throw new StorylineReadError(`step id ${JSON.stringify(planStepId)} is not a plain path segment`, 'read_refused');
+  }
+  const authorRoot = join(evidenceRoot, WALKTHROUGH_AUTHOR_SUBDIR);
+  const dir = join(authorRoot, planStepId);
+  const file = join(dir, STORYLINE_FILE);
+  for (const [p, wantDir] of [
+    [authorRoot, true],
+    [dir, true],
+    [file, false],
+  ] as const) {
+    const st = await fsp.lstat(p).catch((err: NodeJS.ErrnoException) => {
+      if (err.code === 'ENOENT' || err.code === 'ENOTDIR') return null;
+      throw err;
+    });
+    if (st === null) return null;
+    if (st.isSymbolicLink() || (wantDir ? !st.isDirectory() : !st.isFile())) {
+      throw new StorylineReadError(`${relative(evidenceRoot, p)} is not a plain ${wantDir ? 'directory' : 'file'}`, 'read_refused');
+    }
+    if (!wantDir && st.size > STORYLINE_MAX_BYTES) {
+      throw new StorylineReadError(`the storyline is over ${STORYLINE_MAX_BYTES} bytes`, 'too_large');
+    }
+  }
+  const expected = join(await fsp.realpath(evidenceRoot), WALKTHROUGH_AUTHOR_SUBDIR, planStepId);
+  if ((await fsp.realpath(dir)) !== expected) throw new StorylineReadError('the author directory resolves outside the evidence root', 'read_refused');
+  // O_NOFOLLOW: a link swapped in after the lstat is refused by the open itself, not followed.
+  const fh = await fsp.open(file, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0)).catch((err: NodeJS.ErrnoException) => {
+    if (err.code === 'ENOENT') return null;
+    if (err.code === 'ELOOP') throw new StorylineReadError(`${relative(evidenceRoot, file)} is not a plain file`, 'read_refused');
+    throw err;
+  });
+  if (fh === null) return null;
+  let text: string;
+  try {
+    const st = await fh.stat();
+    if (!st.isFile()) throw new StorylineReadError(`${relative(evidenceRoot, file)} is not a plain file`, 'read_refused');
+    if (st.size > STORYLINE_MAX_BYTES) throw new StorylineReadError(`the storyline is over ${STORYLINE_MAX_BYTES} bytes`, 'too_large');
+    text = await fh.readFile({ encoding: 'utf8' });
+    // O_NOFOLLOW guards only the last component, and Node has no openat: a parent swapped for a link
+    // between the realpath check and the open would be traversed (codex on #794). So the file that WAS
+    // opened must be the one at the pinned real path, checked after the read: the directory still
+    // resolves to the expected path, and the plain file there is the same inode the read came from.
+    const pinned = await fsp.realpath(dir).catch(() => null);
+    const there = await fsp.lstat(join(expected, STORYLINE_FILE)).catch(() => null);
+    if (pinned !== expected || there === null || there.isSymbolicLink() || there.dev !== st.dev || there.ino !== st.ino) {
+      throw new StorylineReadError('the author directory changed while the storyline was read', 'read_refused');
+    }
+  } finally {
+    await fh.close();
+  }
+  const sha256 = createHash('sha256').update(text, 'utf8').digest('hex');
+  let marker: { at: string | null } | null = null;
+  const markerPath = join(expected, STORYLINE_EDIT_FILE);
+  const mst = await fsp.lstat(markerPath).catch(() => null);
+  if (mst !== null && mst.isFile() && mst.size <= 64 * 1024) {
+    try {
+      const m = JSON.parse(await fsp.readFile(markerPath, 'utf8')) as Partial<StorylineEditMarker>;
+      if (m.edited_by === 'human' && m.sha256 === sha256) marker = { at: typeof m.at === 'string' ? m.at : null };
+    } catch {
+      // An unreadable marker is no marker: the text reads as the author's.
+    }
+  }
+  return { text, sha256, marker };
+}
+
 export interface WalkthroughRouteDeps {
   /** The run's open gate (the routes' shared resolution); `'no-log'` = this build cannot say. */
   resolveOpenGate?: (runId: string) => Promise<{ ord: number } | null | 'no-log'>;
@@ -1161,6 +1250,54 @@ export function registerWalkthroughRoutes(app: FastifyInstance, adapter: CoreAda
         detail: { planStepId, ord: escalated.ord, sha256: marker.sha256, bytes: Buffer.byteLength(text, 'utf8') },
       });
       const out: PutStorylineResponse = { runId: id, planStepId, sha256: marker.sha256, edited_by: 'human', at: marker.at };
+      return out;
+    },
+  );
+
+  // #782: the read side of "Edit the check" — the author's storyline, so a client can prefill the edit.
+  app.get(
+    `${V}/runs/:id/walkthrough/storyline`,
+    { config: { manifest: { responseType: 'WalkthroughStorylineView', statusCodes: [200, 400, 404, 409, 413] } } },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const step = (req.query as { step?: unknown }).step;
+      if (step !== undefined && typeof step !== 'string') return reply.code(400).send({ error: '`step` names one step, once' });
+      const run = await runById(id);
+      if (run === null) return reply.code(404).send({ error: 'no run with that id' });
+      const pair = selectPair(run, step);
+      if (pair === undefined) return reply.code(404).send({ error: `run ${id} has no walkthrough step named ${String(step)}` });
+      if (pair.plan === null) return reply.code(409).send({ error: 'this walkthrough has no author step whose storyline could be read', code: 'no_author' });
+      const evidenceRoot = (run.session as { evidence_root?: unknown }).evidence_root;
+      if (typeof evidenceRoot !== 'string' || evidenceRoot === '') return reply.code(409).send({ error: 'this run has no evidence root', code: 'no_evidence_root' });
+      const planStepId = stepIdOf(run, pair.plan);
+      let read: Awaited<ReturnType<typeof readStoryline>>;
+      try {
+        read = await readStoryline(evidenceRoot, planStepId);
+      } catch (err) {
+        if (err instanceof StorylineReadError) {
+          return err.code === 'too_large'
+            ? reply.code(413).send({ error: err.message, code: 'too_large' })
+            : reply.code(409).send({ error: `the storyline was not read: ${err.message}`, code: 'read_refused' });
+        }
+        return reply.code(409).send({ error: 'the storyline was not read: the author directory could not be read', code: 'read_refused' });
+      }
+      if (read === null) return reply.code(404).send({ error: `the author step ${planStepId} has not written a storyline yet`, code: 'no_storyline' });
+      // The marker sits in the worker-writable author directory, so on its own it could be forged
+      // (codex on #794). `edited_by: human` needs the daemon's own record of the PUT too: the
+      // `walkthrough.storyline.edited` audit row for this run, step and sha.
+      let edited = false;
+      if (read.marker !== null && deps.audit !== undefined) {
+        const rows = await deps.audit.readAll({ runId: id, action: 'walkthrough.storyline.edited' }).catch(() => []);
+        edited = rows.some((r) => r.detail?.['planStepId'] === planStepId && r.detail?.['sha256'] === read.sha256);
+      }
+      const out: WalkthroughStorylineView = {
+        runId: id,
+        planStepId,
+        storyline: read.text,
+        sha256: read.sha256,
+        edited_by: edited ? 'human' : null,
+        at: edited ? (read.marker?.at ?? null) : null,
+      };
       return out;
     },
   );

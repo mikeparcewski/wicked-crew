@@ -7,7 +7,7 @@
 //   GET /api/v1/runs/:id/acceptance → summary          the deliver card's acceptance line.
 
 import Fastify, { type FastifyInstance } from 'fastify';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -62,7 +62,7 @@ describe('PUT /runs/:id/walkthrough/storyline (WT-W3)', () => {
   let app: FastifyInstance;
   let gates: GateCache;
   let view: ReturnType<typeof runView>;
-  let audited: Array<{ action: string; detail?: Record<string, unknown> }>;
+  let audited: Array<{ action: string; runId?: string; detail?: Record<string, unknown> }>;
   let afterWrite: ReturnType<typeof runView> | null;
 
   beforeEach(async () => {
@@ -74,10 +74,16 @@ describe('PUT /runs/:id/walkthrough/storyline (WT-W3)', () => {
     gates = new GateCache();
     audited = [];
     const audit = AuditLog.noop();
-    audit.record = ((action: string, _actor: unknown, fields?: { detail?: Record<string, unknown> }) => {
-      audited.push({ action, ...(fields?.detail !== undefined ? { detail: fields.detail } : {}) });
+    audit.record = ((action: string, _actor: unknown, fields?: { runId?: string; detail?: Record<string, unknown> }) => {
+      audited.push({ action, ...(fields?.runId !== undefined ? { runId: fields.runId } : {}), ...(fields?.detail !== undefined ? { detail: fields.detail } : {}) });
       return 0;
     }) as AuditLog['record'];
+    // The storyline read (#782) confirms an edit marker against the daemon's own audit rows.
+    audit.readAll = (async (f?: { runId?: string; action?: string }) =>
+      audited
+        .filter((e) => (f?.runId === undefined || e.runId === f.runId) && (f?.action === undefined || e.action === f.action))
+        .map((e) => ({ ts: 0, actor: 'human-1', ...e }))
+        .reverse()) as unknown as AuditLog['readAll'];
     app = Fastify({ logger: false });
     app.decorateRequest('actor', null as unknown as never);
     app.addHook('onRequest', async (req) => {
@@ -140,7 +146,7 @@ describe('PUT /runs/:id/walkthrough/storyline (WT-W3)', () => {
     const dir = join(evidence, 'author', 'walkthrough_plan');
     expect(readFileSync(join(dir, 'storyline.mjs'), 'utf8')).toBe(STORY);
     expect(JSON.parse(readFileSync(join(dir, 'storyline.edit.json'), 'utf8'))).toMatchObject({ edited_by: 'human', actor: 'human-1', sha256: sha, ord: 3 });
-    expect(audited).toContainEqual({ action: 'walkthrough.storyline.edited', detail: { planStepId: 'walkthrough_plan', ord: 3, sha256: sha, bytes: STORY.length } });
+    expect(audited).toContainEqual({ action: 'walkthrough.storyline.edited', runId: 'r1', detail: { planStepId: 'walkthrough_plan', ord: 3, sha256: sha, bytes: STORY.length } });
   });
 
   it("the author's own lint escalation (a denied walkthrough_plan) also accepts an edit", async () => {
@@ -204,6 +210,89 @@ describe('PUT /runs/:id/walkthrough/storyline (WT-W3)', () => {
     view = two;
     openGate(4);
     expect((await put({ storyline: STORY }, { 'x-actor': 'human' }, '?step=walkthrough_plan')).statusCode).toBe(200);
+  });
+
+  // #782: "Edit the check" needs the author's storyline to edit — the read side of the PUT above.
+  describe('GET /runs/:id/walkthrough/storyline (#782)', () => {
+    const get = (q = '', headers: Record<string, string> = { 'x-actor': 'human' }) =>
+      app.inject({ method: 'GET', url: `/api/v1/runs/r1/walkthrough/storyline${q}`, headers });
+    const authorDir = (): string => join(evidence, 'author', 'walkthrough_plan');
+    const sha = (t: string): string => createHash('sha256').update(t).digest('hex');
+
+    it('before the author wrote one: 404 no_storyline', async () => {
+      const res = await get();
+      expect(res.statusCode).toBe(404);
+      expect(res.json()).toMatchObject({ code: 'no_storyline' });
+    });
+
+    it("the author's storyline, at any run status, with its sha and no edit marker", async () => {
+      view = runView('r1', evidence, 'executing', { reviewDenial: null });
+      mkdirSync(authorDir(), { recursive: true });
+      writeFileSync(join(authorDir(), 'storyline.mjs'), STORY);
+      const res = await get();
+      expect(res.statusCode, res.body).toBe(200);
+      expect(res.json()).toEqual({ runId: 'r1', planStepId: 'walkthrough_plan', storyline: STORY, sha256: sha(STORY), edited_by: null, at: null });
+      // ?step= names the author or its recorder; both reach the same file.
+      expect((await get('?step=walkthrough_review')).json()).toMatchObject({ planStepId: 'walkthrough_plan', sha256: sha(STORY) });
+      expect((await get('?step=walkthrough_plan')).json()).toMatchObject({ planStepId: 'walkthrough_plan', sha256: sha(STORY) });
+    });
+
+    it('after the operator edited it: the edited text, edited_by human and when — and the sha the PUT returned', async () => {
+      openGate(3);
+      const edited = STORY.replace('npm start', 'npm run dev');
+      const putRes = await put({ storyline: edited });
+      expect(putRes.statusCode, putRes.body).toBe(200);
+      const res = await get();
+      expect(res.statusCode, res.body).toBe(200);
+      const body = res.json() as { storyline: string; sha256: string; edited_by: string | null; at: string | null };
+      expect(body.storyline).toBe(edited);
+      expect(body.sha256).toBe((putRes.json() as { sha256: string }).sha256);
+      expect(body.edited_by).toBe('human');
+      expect(body.at).toBe((putRes.json() as { at: string }).at);
+    });
+
+    it('a marker whose sha names another text is not an edit (the author rewrote the file after)', async () => {
+      mkdirSync(authorDir(), { recursive: true });
+      writeFileSync(join(authorDir(), 'storyline.edit.json'), JSON.stringify({ edited_by: 'human', actor: 'h', at: '2026-10-04T00:00:00Z', sha256: sha('older'), ord: 3 }));
+      writeFileSync(join(authorDir(), 'storyline.mjs'), STORY);
+      expect((await get()).json()).toMatchObject({ edited_by: null, at: null, sha256: sha(STORY) });
+    });
+
+    it('a marker the worker wrote itself (matching sha, no PUT behind it) is not an edit (codex on #794)', async () => {
+      mkdirSync(authorDir(), { recursive: true });
+      writeFileSync(join(authorDir(), 'storyline.edit.json'), JSON.stringify({ edited_by: 'human', actor: 'h', at: '2026-10-04T00:00:00Z', sha256: sha(STORY), ord: 3 }));
+      writeFileSync(join(authorDir(), 'storyline.mjs'), STORY);
+      expect((await get()).json()).toMatchObject({ edited_by: null, at: null, sha256: sha(STORY) });
+    });
+
+    it('never follows a planted link: at author/<step> or at the file itself (409 read_refused, no absolute path)', async () => {
+      const outside = join(roots, 'elsewhere');
+      mkdirSync(outside);
+      writeFileSync(join(outside, 'storyline.mjs'), 'export default { secret: true };\n');
+      symlinkSync(outside, authorDir());
+      let res = await get();
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toMatchObject({ code: 'read_refused', error: expect.not.stringMatching(new RegExp(roots)) });
+      removeScratch(authorDir());
+      mkdirSync(authorDir());
+      symlinkSync(join(outside, 'storyline.mjs'), join(authorDir(), 'storyline.mjs'));
+      res = await get();
+      expect(res.statusCode).toBe(409);
+      expect(res.body).not.toMatch(/secret/);
+    });
+
+    it('an unknown step is 404, a run without an evidence root is 409 no_evidence_root, an unknown run is 404', async () => {
+      expect((await get('?step=nope')).statusCode).toBe(404);
+      view = runView('r1', null, 'executing');
+      expect((await get()).json()).toMatchObject({ code: 'no_evidence_root' });
+      expect((await app.inject({ method: 'GET', url: '/api/v1/runs/zz/walkthrough/storyline', headers: { 'x-actor': 'human' } })).statusCode).toBe(404);
+    });
+
+    it('an oversize storyline file is refused (413), never streamed whole', async () => {
+      mkdirSync(authorDir(), { recursive: true });
+      writeFileSync(join(authorDir(), 'storyline.mjs'), 'x'.repeat(256 * 1024 + 1));
+      expect((await get()).statusCode).toBe(413);
+    });
   });
 });
 
