@@ -2908,9 +2908,16 @@ export class CoreAdapter {
    */
   private readonly onboardingInFlight = new Map<string, Promise<string>>();
 
-  /** Register a local git repo → the persisted `RepoEntry`. */
+  /**
+   * Register a local git repo → the persisted `RepoEntry`. The path is resolved to its REAL path
+   * first (crew#778): the engine mints run worktrees under the registered root, and codex's Seatbelt
+   * sandbox refuses a writable root with a symlink component — a repo registered as `/tmp/link-repo`
+   * (or anything under macOS's `/tmp`, itself a symlink) was accepted and then failed every codex
+   * unit. A path that does not resolve is handed on as typed, so the engine's own refusal names it.
+   */
   async registerRepo(name: string, rootPath: string): Promise<RepoEntry> {
-    return JSON.parse(await this.core.registerRepo(name, rootPath)) as RepoEntry;
+    const real = await realpath(rootPath).catch(() => rootPath);
+    return JSON.parse(await this.core.registerRepo(name, real)) as RepoEntry;
   }
 
   /**
