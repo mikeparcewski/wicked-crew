@@ -6908,6 +6908,24 @@ export interface PutStorylineResponse {
   at: string;
 }
 
+/**
+ * `GET /runs/:id/walkthrough/storyline?step=` → 200 (#782; api-types 0.89.0): the author's storyline
+ * — `author/<planStepId>/storyline.mjs` — so "Edit the check" can prefill the box and send the edit
+ * back through `PUT` ({@link PutStorylineBody}). Readable at any run status. `step` names the author or
+ * its recorder (default: the newest pair). 404 `no_storyline` before the author wrote one; 409
+ * `no_author` / `no_evidence_root` / `read_refused` (a link or a non-file, never followed); 413 over
+ * 256 KB. `edited_by` / `at` come from crew's edit marker only when its `sha256` names THIS text.
+ */
+export interface WalkthroughStorylineView {
+  runId: string;
+  planStepId: string;
+  storyline: string;
+  sha256: string;
+  edited_by: 'human' | null;
+  /** ISO-8601 of the operator's edit; `null` when the text is the author's. */
+  at: string | null;
+}
+
 /** `POST /proposals/:id/reject` → 200. */
 export interface RejectProposalResponse {
   ok: true;
