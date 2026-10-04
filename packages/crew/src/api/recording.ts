@@ -83,7 +83,7 @@ import { coreUnitId } from './evidence.js';
 import { stepIdOf, WALKTHROUGH_AUTHOR_SUBDIR, walkthroughProofRoot } from '../core/walkthrough-root.js';
 import { LOCAL_ACTOR } from './auth.js';
 import type { AuditLog } from './audit.js';
-import { resolveWalkthroughGate, walkthroughCheckStates, type WalkthroughGate } from '../qe/walkthrough-acceptance.js';
+import { pairRemovedByOverride, resolveWalkthroughGate, walkthroughCheckStates, type WalkthroughGate } from '../qe/walkthrough-acceptance.js';
 import type { WalkthroughStepState } from 'wicked-crew-api-types';
 
 const V = API_PREFIX;
@@ -919,14 +919,17 @@ export async function walkthroughAcceptance(
   adapter: Pick<CoreAdapter, 'workOutput'>,
   view: SessionView,
   phases: string[],
-): Promise<{ gates: WalkthroughGate[]; steps: WalkthroughStepState[]; newest: WalkthroughGate | null }> {
+): Promise<{ gates: WalkthroughGate[]; steps: WalkthroughStepState[]; newest: WalkthroughGate | null; ownedByYou: boolean }> {
   const wanted = new Set(phases);
   const reviews = view.units.filter((u) => u.catalog === WALKTHROUGH_REVIEW_CATALOG && wanted.has(stepIdOf(view, u)));
-  if (reviews.length === 0) return { gates: [], steps: [], newest: null };
+  // #791: the override removed the pair, so there is no review to resolve — the creator steps are
+  // still reported, each `owned_by_you` (§4.9), instead of the block vanishing.
+  const ownedByYou = pairRemovedByOverride(view);
+  if (reviews.length === 0) return { gates: [], steps: ownedByYou ? walkthroughCheckStates(view, null) : [], newest: null, ownedByYou };
   const gates = await Promise.all(reviews.map((u) => recorderGate(adapter, view, u)));
   const newestReview = walkthroughPairs(view).filter((p) => p.review !== null).at(-1)?.review ?? null;
   const newest = newestReview !== null ? (gates.find((g) => g.stepId === stepIdOf(view, newestReview)) ?? null) : null;
-  return { gates, steps: walkthroughCheckStates(view, newest), newest };
+  return { gates, steps: walkthroughCheckStates(view, newest), newest, ownedByYou };
 }
 
 /** Everything studio renders for one walkthrough pair (the newest, or the one `step` names). */
@@ -999,7 +1002,7 @@ export async function walkthroughView(
     sealed: gate?.sealed ?? false,
     video: { mp4, poster, markers },
     chapters: await walkthroughChapters(root, result),
-    steps: gate !== null ? walkthroughCheckStates(view, gate) : [],
+    steps: gate !== null ? walkthroughCheckStates(view, gate) : pairRemovedByOverride(view) ? walkthroughCheckStates(view, null) : [],
   };
 }
 

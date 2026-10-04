@@ -469,6 +469,42 @@ describe('GET /runs/:id/acceptance and the walkthrough view read the proof roots
     expect(body.gate.reason).toMatch(/could not be read/);
   });
 
+  it('the accepted plan\'s override removed the pair: the block is present with owned_by_you steps and the line counts them (#791, §4.9)', async () => {
+    const r = planRun(false);
+    // The override took the walkthrough pair out of the accepted plan: only the creator step ran.
+    r.units.splice(1);
+    (r.session as unknown as { unit_ix: number }).unit_ix = 1;
+    (r.session as unknown as { team_plan: unknown }).team_plan = {
+      rev: 1,
+      accepted_rev: 1,
+      accepted: { floor_override: { remove: ['walkthrough_plan', 'walkthrough_review'], reason: 'I will test it myself' } },
+    };
+    sessionsDetail.mockResolvedValue([r]);
+    const res = await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN}/acceptance` });
+    expect(res.statusCode, res.body).toBe(200);
+    const body = res.json() as {
+      walkthrough?: { roots: unknown[]; sealed: boolean; steps: Array<{ stepId: string; checkState: string }> };
+      summary: { line: string; walkthrough: { ownedByYou: number; steps: number; checked: number; tree: string | null } | null };
+    };
+    expect(body.walkthrough).toEqual({ roots: [], sealed: true, steps: [{ stepId: 'build', checkState: 'owned_by_you', provedBy: [] }] });
+    expect(body.summary.walkthrough).toEqual({ checked: 0, failed: 0, ownedByYou: 1, steps: 1, sealed: true, tree: null });
+    expect(body.summary.line).toBe('Nothing had to be proved before delivery; 1 left to your own testing.');
+    expect(body.summary.line).not.toMatch(/Checked by a walkthrough/);
+    const v = (await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN}/walkthrough` })).json() as WalkthroughView;
+    expect(v.steps.map((s) => [s.stepId, s.checkState])).toEqual([['build', 'owned_by_you']]);
+  });
+
+  it('no walkthrough step and no override: the block stays absent and the summary has no walkthrough (unchanged)', async () => {
+    const r = planRun(false);
+    r.units.splice(1);
+    (r.session as unknown as { unit_ix: number }).unit_ix = 1;
+    sessionsDetail.mockResolvedValue([r]);
+    const body = (await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN}/acceptance` })).json() as { walkthrough?: unknown; summary: { walkthrough: unknown; line: string } };
+    expect(body.walkthrough).toBeUndefined();
+    expect(body.summary.walkthrough).toBeNull();
+    expect(body.summary.line).not.toMatch(/your own testing/);
+  });
+
   it('a step naming a catalog the engine does not define denies the run by name', async () => {
     const r = planRun(false);
     (r.units[0] as { catalog: string }).catalog = 'build_v9';
