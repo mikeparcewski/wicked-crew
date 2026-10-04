@@ -193,6 +193,19 @@ export async function branchDiff(
 }
 
 const GIT_TIMEOUT_MS = 10_000;
+/** How long the untracked-file pass may run before the answer is cut (`truncated: true`, crew#790). */
+export const UNTRACKED_BUDGET_MS = 8_000;
+
+/**
+ * A git the daemon (its timeout) or the host stopped before it answered: `killed` / a terminating
+ * signal on the execFile error. Not the caller's fault and not a broken repo — the route answers 503
+ * `diff_busy` so a client retries instead of reading a bare 500 (crew#790).
+ */
+export function isGitStopped(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false;
+  const e = err as { killed?: unknown; signal?: unknown };
+  return e.killed === true || (typeof e.signal === 'string' && e.signal !== '');
+}
 
 // ── Diff base (DES-UX-001 §8.1, CREW-UX-1) ─────────────────────────────────────────────────────
 
@@ -237,7 +250,7 @@ export function isPlainRef(base: string): boolean {
  *  than masquerading as a 400 "unresolvable base" (Copilot, #307). */
 async function gitQuery(workdir: string, args: string[]): Promise<string | null> {
   try {
-    const { stdout } = await execCapped('git', args, { timeout: GIT_TIMEOUT_MS, cwd: workdir });
+    const { stdout } = await execCapped('git', args, { timeout: GIT_TIMEOUT_MS, cwd: workdir, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' } });
     return stdout.trim();
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') throw err;
@@ -334,9 +347,14 @@ export async function worktreeDiff(
   workdir: string,
   relPath?: string,
   base?: string,
+  opts: { budgetMs?: number } = {},
 ): Promise<WorktreeDiff> {
+  const started = Date.now();
+  const budgetMs = opts.budgetMs ?? UNTRACKED_BUDGET_MS;
   const limit = relPath === undefined ? [] : ['--', relPath];
+  const env = { ...process.env, GIT_OPTIONAL_LOCKS: '0' };
   let out = '';
+  let outOfTime = false;
 
   // Resolve the baseline BEFORE any diff pass: a bad `base` must 400 without partial output.
   let baseRev = 'HEAD';
@@ -360,7 +378,7 @@ export async function worktreeDiff(
     const { stdout } = await execCapped(
       'git',
       ['diff', '--no-color', '--no-ext-diff', baseRev, ...limit],
-      { timeout: GIT_TIMEOUT_MS, cwd: workdir },
+      { timeout: GIT_TIMEOUT_MS, cwd: workdir, env },
     );
     out = stdout;
   } catch (err) {
@@ -376,7 +394,7 @@ export async function worktreeDiff(
   const { stdout: statusOut } = await execCapped(
     'git',
     ['status', '--porcelain', '-z', '-uall', ...limit],
-    { timeout: GIT_TIMEOUT_MS, cwd: workdir },
+    { timeout: GIT_TIMEOUT_MS, cwd: workdir, env },
   );
   const candidates = statusOut
     .split('\0')
@@ -411,11 +429,17 @@ export async function worktreeDiff(
     // Cap is in BYTES; `out.length` counts UTF-16 code units. `>=`: exactly-at-cap is
     // already done — spawning one more git only to discard its output is waste (Copilot, #305).
     if (Buffer.byteLength(out, 'utf8') >= DIFF_OUTPUT_CAP_BYTES) break;
+    // crew#790: one git per untracked file, and a busy host makes each one slow — an executing run's
+    // diff ran past every client timeout. Past the budget the answer stops and says it is cut.
+    if (Date.now() - started >= budgetMs) {
+      outOfTime = true;
+      break;
+    }
     try {
       const { stdout } = await execCapped(
         'git',
         ['diff', '--no-color', '--no-ext-diff', '--no-index', '--', '/dev/null', file],
-        { timeout: GIT_TIMEOUT_MS, cwd: workdir },
+        { timeout: GIT_TIMEOUT_MS, cwd: workdir, env },
       );
       out += stdout;
     } catch (err) {
@@ -438,5 +462,5 @@ export async function worktreeDiff(
     while (end > 0 && (outBytes[end]! & 0xc0) === 0x80) end--; // land on a sequence boundary
     return { diff: outBytes.subarray(0, end).toString('utf8'), truncated: true };
   }
-  return { diff: out, truncated: false };
+  return { diff: out, truncated: outOfTime };
 }
