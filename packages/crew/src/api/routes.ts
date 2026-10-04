@@ -43,7 +43,7 @@ import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
 import { callEstateTool, EstateMcpError } from '../core/estate-mcp-client.js';
 import { SeatHealthTracker } from './seat-health.js';
 import { applyWorkerConfigRoot, signedInHeuristic } from './seat-signin.js';
-import { chatSeatAdmission } from './seat-standing.js';
+import { chatSeatAdmission, noCredentialCause } from './seat-standing.js';
 import { rosterWithStandingFactory, type RosterWithStanding } from './roster-standing.js';
 import { ChatTurnIndex } from './chat-turns.js';
 import type { ChatRepoRoot, ChatTranscriptStore } from './chat-transcripts.js';
@@ -2937,7 +2937,7 @@ export function registerRoutes(
               cliKey: key,
               reason:
                 authFailure !== null
-                  ? `not seated — the seat itself reported no credential (${authFailure.source}: ${authFailure.detail}); sign it in from the System page`
+                  ? `not seated — the seat itself reported no credential (${noCredentialCause(authFailure)}); sign it in from the System page`
                   : 'not seated — signed out; sign it in from the System page',
               source: 'auth',
             });
