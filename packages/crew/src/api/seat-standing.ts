@@ -50,15 +50,31 @@ const PLAIN_EVIDENCE_MAX = 120;
 export function plainEvidence(detail: string): string | null {
   const t = detail.trim();
   if (t === '' || t.length > PLAIN_EVIDENCE_MAX || /[\r\n{}\[\]]/.test(t)) return null;
-  // Any path: absolute POSIX, `~`, a drive letter, or a backslash.
-  if (/(^|[\s('"=:])(\/|~\/|[A-Za-z]:[\\/])|\\/.test(t)) return null;
+  // Any separator at all: absolute, relative (`.wicked-worker/claude/…`), `~/`, a drive letter, a
+  // URL without a scheme (`example.com/<account>/…`) — none can be told apart from a harmless `a/b`
+  // cheaply and safely, so a slash or a backslash keeps the words out of the sentence (codex on #797).
+  if (/[\\/]/.test(t)) return null;
   return t;
 }
 
-/** `auth_evidence` with the operator's home directory written `~` (crew#771: screen shares and recordings). */
-export function homeless(detail: string): string {
-  const home = homedir();
-  return home.length > 1 ? detail.split(home).join('~') : detail;
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * `auth_evidence` with the operator's home directory written `~` (crew#771: screen shares and
+ * recordings). Only the home as a whole path segment — `/home/al` never eats the start of
+ * `/home/alice` — and in every separator spelling: `/`, `\`, and the JSON-escaped `\\` a Windows
+ * home takes inside a CLI's JSON status (codex on #797). A root home (`/`) is left alone.
+ */
+export function homeless(detail: string, home: string = homedir()): string {
+  const trimmed = home.replace(/[\\/]+$/, '');
+  if (trimmed === '') return detail;
+  const back = trimmed.replace(/\//g, '\\');
+  const spellings = new Set([trimmed, trimmed.replace(/\\/g, '/'), back, back.replace(/\\/g, '\\\\')]);
+  let out = detail;
+  for (const h of [...spellings].sort((a, b) => b.length - a.length)) out = out.replace(new RegExp(`${escapeRegExp(h)}(?=$|[\\\\/\\s"'),;:])`, 'g'), '~');
+  return out;
 }
 
 /** The seat's auth state, read for what it MEANS for the seat's usability. */

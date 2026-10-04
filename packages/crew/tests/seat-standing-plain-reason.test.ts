@@ -6,7 +6,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-import { plainEvidence, seatStanding } from '../src/api/seat-standing.js';
+import { homeless, plainEvidence, seatStanding } from '../src/api/seat-standing.js';
 
 const HOME = homedir();
 const RAW = JSON.stringify({
@@ -45,5 +45,20 @@ describe('a signed-out seat reads as one plain sentence (crew#771)', () => {
     expect(plainEvidence('line one\nline two')).toBeNull();
     expect(plainEvidence('x'.repeat(200))).toBeNull();
     expect(plainEvidence('')).toBeNull();
+    // codex on #797: relative paths and scheme-less URLs carry account names too.
+    expect(plainEvidence('could not read .wicked-worker/claude/projects/auth.json')).toBeNull();
+    expect(plainEvidence('open example.com/someone/auth.json')).toBeNull();
+    expect(plainEvidence('HTTP 401: invalid x-api-key')).toBe('HTTP 401: invalid x-api-key');
+  });
+
+  it('homeless replaces the home only as a whole path segment, in every separator spelling (codex on #797)', () => {
+    expect(homeless('could not read /home/alice/.claude/auth.json', '/home/al')).toBe('could not read /home/alice/.claude/auth.json');
+    expect(homeless('could not read /home/al/.claude/auth.json', '/home/al')).toBe('could not read ~/.claude/auth.json');
+    expect(homeless('home is /home/al', '/home/al/')).toBe('home is ~');
+    expect(homeless('C:\\Users\\alice\\.claude\\auth.json', 'C:\\Users\\alice')).toBe('~\\.claude\\auth.json');
+    expect(homeless('C:/Users/alice/.claude', 'C:\\Users\\alice')).toBe('~/.claude');
+    // Inside a CLI's JSON status a Windows home is written with doubled backslashes.
+    expect(homeless(JSON.stringify({ configDirectory: 'C:\\Users\\alice\\.claude' }), 'C:\\Users\\alice')).toBe('{"configDirectory":"~\\\\.claude"}');
+    expect(homeless('anything at /', '/')).toBe('anything at /');
   });
 });
