@@ -62,7 +62,7 @@ describe('PUT /runs/:id/walkthrough/storyline (WT-W3)', () => {
   let app: FastifyInstance;
   let gates: GateCache;
   let view: ReturnType<typeof runView>;
-  let audited: Array<{ action: string; detail?: Record<string, unknown> }>;
+  let audited: Array<{ action: string; runId?: string; detail?: Record<string, unknown> }>;
   let afterWrite: ReturnType<typeof runView> | null;
 
   beforeEach(async () => {
@@ -74,10 +74,16 @@ describe('PUT /runs/:id/walkthrough/storyline (WT-W3)', () => {
     gates = new GateCache();
     audited = [];
     const audit = AuditLog.noop();
-    audit.record = ((action: string, _actor: unknown, fields?: { detail?: Record<string, unknown> }) => {
-      audited.push({ action, ...(fields?.detail !== undefined ? { detail: fields.detail } : {}) });
+    audit.record = ((action: string, _actor: unknown, fields?: { runId?: string; detail?: Record<string, unknown> }) => {
+      audited.push({ action, ...(fields?.runId !== undefined ? { runId: fields.runId } : {}), ...(fields?.detail !== undefined ? { detail: fields.detail } : {}) });
       return 0;
     }) as AuditLog['record'];
+    // The storyline read (#782) confirms an edit marker against the daemon's own audit rows.
+    audit.readAll = (async (f?: { runId?: string; action?: string }) =>
+      audited
+        .filter((e) => (f?.runId === undefined || e.runId === f.runId) && (f?.action === undefined || e.action === f.action))
+        .map((e) => ({ ts: 0, actor: 'human-1', ...e }))
+        .reverse()) as unknown as AuditLog['readAll'];
     app = Fastify({ logger: false });
     app.decorateRequest('actor', null as unknown as never);
     app.addHook('onRequest', async (req) => {
@@ -140,7 +146,7 @@ describe('PUT /runs/:id/walkthrough/storyline (WT-W3)', () => {
     const dir = join(evidence, 'author', 'walkthrough_plan');
     expect(readFileSync(join(dir, 'storyline.mjs'), 'utf8')).toBe(STORY);
     expect(JSON.parse(readFileSync(join(dir, 'storyline.edit.json'), 'utf8'))).toMatchObject({ edited_by: 'human', actor: 'human-1', sha256: sha, ord: 3 });
-    expect(audited).toContainEqual({ action: 'walkthrough.storyline.edited', detail: { planStepId: 'walkthrough_plan', ord: 3, sha256: sha, bytes: STORY.length } });
+    expect(audited).toContainEqual({ action: 'walkthrough.storyline.edited', runId: 'r1', detail: { planStepId: 'walkthrough_plan', ord: 3, sha256: sha, bytes: STORY.length } });
   });
 
   it("the author's own lint escalation (a denied walkthrough_plan) also accepts an edit", async () => {
@@ -248,6 +254,13 @@ describe('PUT /runs/:id/walkthrough/storyline (WT-W3)', () => {
     it('a marker whose sha names another text is not an edit (the author rewrote the file after)', async () => {
       mkdirSync(authorDir(), { recursive: true });
       writeFileSync(join(authorDir(), 'storyline.edit.json'), JSON.stringify({ edited_by: 'human', actor: 'h', at: '2026-10-04T00:00:00Z', sha256: sha('older'), ord: 3 }));
+      writeFileSync(join(authorDir(), 'storyline.mjs'), STORY);
+      expect((await get()).json()).toMatchObject({ edited_by: null, at: null, sha256: sha(STORY) });
+    });
+
+    it('a marker the worker wrote itself (matching sha, no PUT behind it) is not an edit (codex on #794)', async () => {
+      mkdirSync(authorDir(), { recursive: true });
+      writeFileSync(join(authorDir(), 'storyline.edit.json'), JSON.stringify({ edited_by: 'human', actor: 'h', at: '2026-10-04T00:00:00Z', sha256: sha(STORY), ord: 3 }));
       writeFileSync(join(authorDir(), 'storyline.mjs'), STORY);
       expect((await get()).json()).toMatchObject({ edited_by: null, at: null, sha256: sha(STORY) });
     });
