@@ -441,11 +441,13 @@ describe('POST /api/v1/governance/steering/author — "add with chat" as a gover
     expect(launch.problem).toContain("'operations' steering type");
     expect(launch.problem).toContain('Codify the deploy-freeze rules');
     expect(launch.problem).toContain(`- ${dir}`);
-    // The landing contract (crew#388): the problem names the per-run machine-readable proposal
-    // file, and the launch declares the inbox as the run's extra write root so the propose phase
-    // may actually write it — the file the gate handler's landing reads FIRST.
+    // #789: the propose phase hands the rules back in its REPLY (the output contract the landing
+    // reads), never as a file under the home config — the seat's sandbox refuses that write every
+    // time, and the unit then reported "submitted 0 / failed 2" for the designed path.
     const inbox = steeringInboxDir('steer-run-1');
-    expect(launch.problem).toContain(join(inbox, 'proposed-rules.json'));
+    expect(launch.problem).not.toContain('proposed-rules.json');
+    expect(launch.problem).not.toMatch(/write the proposed rules JSON array to/i);
+    expect(launch.problem).toMatch(/reply/i);
     expect(launch.extraWriteRoots).toEqual([inbox]);
     expect(existsSync(inbox)).toBe(true); // created for every authoring run, documents or not
   });
@@ -593,6 +595,9 @@ describe('the steering-author drop-in workflow (TH-12 propose-as-gate)', () => {
     expect(def).not.toBeNull();
     expect(def!.phases.map((p) => p.id)).toEqual(['analyze', 'propose']);
     const propose = def!.phases[1]!;
+    // #789: the propose phase REPLIES with the array; it is never told to save a file.
+    expect(propose.instructions).not.toMatch(/SAVE|proposal file|absolute .*path/i);
+    expect(propose.instructions).toMatch(/reply/i);
     expect(propose.gate).toEqual({ human_confirm: { unconditional: true } });
     expect(propose.role).toBe('creator');
     // What GET /workflows/:id reports as humanGates — the operator sees the gate BEFORE launch.

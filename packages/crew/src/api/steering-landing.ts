@@ -14,13 +14,13 @@
  * ## The design
  *
  * The landing is CREW-side, on APPROVE of the propose gate — the run keeps writing nothing to the
- * store. The proposal is read machine-readably first: the propose phase now ALSO writes the
- * proposed-rules JSON to a declared per-run artifact (`<steering inbox>/proposed-rules.json`,
- * inside the run's own `extraWriteRoots`) — an ARTIFACT of the proposal, not a store write, so
- * evaluator≠creator holds. Parsing the propose unit's stored transcript is the FALLBACK (runs
- * launched before this fix, or a worker that ignored the file contract), and the cached gate
- * prompt is the last resort (the transcript is written only on approval, so a store hiccup there
- * still has the prompt core composed FROM that output).
+ * store. Since #789 the propose phase hands the rules back in its REPLY — one ```json fenced
+ * array — and the landing reads them from the propose unit's stored output: that is the designed
+ * path. A `<steering inbox>/proposed-rules.json` is still read FIRST when one exists (runs launched
+ * before #789 were told to write it; a seat's sandbox refused that write outside its workspace
+ * every time, which is why it is no longer asked for), and the cached gate prompt is the last
+ * resort (the output is stored only on approval, so a store hiccup there still has the prompt core
+ * composed FROM that output).
  *
  * Invariants:
  *  - AUDITABLE — every landed rule records `governance.rule.upserted` with the chat provenance

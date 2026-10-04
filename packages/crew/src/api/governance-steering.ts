@@ -141,11 +141,10 @@ export function steeringInboxDir(runId: string): string {
 }
 
 /**
- * The propose phase's machine-readable artifact (crew#388): the file — inside
- * {@link steeringInboxDir} — the workflow tells the worker to write the proposed-rules JSON
- * array to, and the FIRST place the post-approval landing (`api/steering-landing.ts`) reads.
- * One spelling, exported: the author route composes it into the problem statement, the landing
- * derives the same path from the run id.
+ * The proposed-rules file in {@link steeringInboxDir} that the post-approval landing
+ * (`api/steering-landing.ts`) reads first when it exists (crew#388). Since #789 no worker is asked
+ * to write it — the propose phase replies with the array and the landing reads the stored output —
+ * so it is present only for runs launched before that, or put there by hand.
  */
 export const STEERING_PROPOSAL_FILENAME = 'proposed-rules.json';
 
@@ -325,13 +324,10 @@ export function registerGovernanceSteeringRoutes(
       }
       const type = b.type ?? DEFAULT_STEERING_TYPE;
       const sources = [...(b.paths ?? []), ...docPaths];
-      // The per-run proposal artifact (crew#388): the propose phase writes the proposed-rules
-      // JSON here (its instructions name "the absolute proposal file path in the problem
-      // statement"), and the gate handler's landing reads THIS file first — machine-readable by
-      // design, with transcript parsing only as the fallback. The path is per-run and inside
-      // the inbox the launch declares as an extra write root, so the write is governed and the
-      // run still writes NOTHING to any store (evaluator≠creator).
-      const proposalPath = join(dir, STEERING_PROPOSAL_FILENAME);
+      // #789: the propose phase hands the rules back in its REPLY (one ```json fenced array), and
+      // the gate handler's landing reads them from the unit's stored output. The problem used to
+      // name a file in this inbox for the worker to write; the seat's sandbox refuses a write
+      // outside its workspace every time, so the run reported a failed write for the designed path.
       const problem = [
         `Author steering rules for the '${type}' steering type (use it as the default steering_type for every proposed rule without a better fit).`,
         '',
@@ -341,7 +337,7 @@ export function registerGovernanceSteeringRoutes(
           ? ['', 'Analyze these files/directories on this machine:', ...sources.map((s) => `- ${s}`)]
           : []),
         '',
-        `Proposal file (for the propose phase): write the proposed rules JSON array to exactly this absolute path: ${proposalPath}`,
+        'Proposal (for the propose phase): reply with the proposed rules as ONE ```json fenced JSON array. The reply is the proposal; do not write it to a file.',
       ].join('\n');
       try {
         await adapter.launchRun({
@@ -349,9 +345,8 @@ export function registerGovernanceSteeringRoutes(
           sessionId: runId,
           clisJson: JSON.stringify(deps.roster()),
           workflow: 'steering-author',
-          // The proposal artifact lands in the per-run inbox, which sits OUTSIDE any unit
-          // sandbox/worktree — without this declaration the engine's boundary denies the one
-          // file the landing is designed to read (the crew#263 shape).
+          // The per-run inbox (inline documents the run reads) sits OUTSIDE any unit worktree;
+          // declared so the engine's boundary lets the run reach it (the crew#263 shape).
           extraWriteRoots: [dir],
           ...(b.repoRef !== undefined ? { repoRef: b.repoRef } : {}),
         });
