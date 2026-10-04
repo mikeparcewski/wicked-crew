@@ -34,7 +34,7 @@ process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { execFileSync } from 'node:child_process';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -242,7 +242,9 @@ describe('functional: the 6a acceptance gate over a real daemon + real ledger', 
     // The requirement came from the user-registered workflow, resolved through
     // the phase sequence (the engine reports an instance workflow id).
     expect(body['requirement']).toEqual({ declared: true, phases: ['accept'] });
-    expect(body['repo']).toMatchObject({ name: 'qe-accept-ws', rootPath: workspace });
+    // A repo is registered by its real path (#778): on macOS the tmpdir is under /var, a symlink
+    // to /private/var, so the stored root is the resolved one.
+    expect(body['repo']).toMatchObject({ name: 'qe-accept-ws', rootPath: realpathSync(workspace) });
     // The ledger IS found and reported — as what the repo holds, not as this run's evidence.
     expect(body['acceptance']).toMatchObject({
       ledgerDir: '.wicked-testing',
