@@ -130,22 +130,35 @@ describe('GET /runs/:id/diff — every finished run answers with its change set 
     expect(old.base).toBeUndefined();
   });
 
-  it.skipIf(process.platform === 'win32')('a git the host stopped before it answered is 503 diff_busy with Retry-After, never a bare 500', async () => {
-    const shim = join(base, 'shim');
+  const withShim = async (name: string, script: string, fn: () => Promise<void>): Promise<void> => {
+    const shim = join(base, name);
     mkdirSync(shim, { recursive: true });
-    // A git that is killed by a signal before it answers: what the daemon's timeout does to a slow git.
-    writeFileSync(join(shim, 'git'), '#!/bin/sh\nkill -TERM $$\n');
+    writeFileSync(join(shim, 'git'), script);
     chmodSync(join(shim, 'git'), 0o755);
     const prior = process.env['PATH'];
     process.env['PATH'] = `${shim}${delimiter}${prior ?? ''}`;
     try {
-      const res = await getDiff('run-delivered');
-      expect(res.statusCode, res.body).toBe(503);
-      expect(res.json()).toMatchObject({ code: 'diff_busy' });
-      expect(res.headers['retry-after']).toBeDefined();
+      await fn();
     } finally {
       process.env['PATH'] = prior;
     }
+  };
+
+  it.skipIf(process.platform === 'win32')('a git the daemon\'s 10 s timeout stopped (a busy host) is 503 diff_busy with Retry-After, never a bare 500', async () => {
+    // A git slower than the timeout: Node kills it (`killed: true`) — what a load-300 host did.
+    await withShim('shim-slow', '#!/bin/sh\nexec sleep 25\n', async () => {
+      const res = await getDiff('run-delivered');
+      expect(res.statusCode, res.body).toBe(503);
+      expect(res.json()).toMatchObject({ code: 'diff_busy' });
+      expect(res.headers['retry-after']).toBe('5');
+    });
+  });
+
+  it.skipIf(process.platform === 'win32')('a git that died of its own signal is a real fault: 500, not "busy, retry" (codex on #795)', async () => {
+    await withShim('shim-crash', '#!/bin/sh\nkill -SEGV $$\n', async () => {
+      const res = await getDiff('run-delivered');
+      expect(res.statusCode, res.body).toBe(500);
+    });
   });
 
   it('the untracked pass stops at its time budget and says truncated (an executing run answers in bounded time)', async () => {

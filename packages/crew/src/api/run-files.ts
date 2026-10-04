@@ -197,14 +197,15 @@ const GIT_TIMEOUT_MS = 10_000;
 export const UNTRACKED_BUDGET_MS = 8_000;
 
 /**
- * A git the daemon (its timeout) or the host stopped before it answered: `killed` / a terminating
- * signal on the execFile error. Not the caller's fault and not a broken repo — the route answers 503
- * `diff_busy` so a client retries instead of reading a bare 500 (crew#790).
+ * A git the DAEMON stopped before it answered — execFile's `timeout` fired and Node killed the child
+ * (`killed: true`). Not the caller's fault and not a broken repo, so the route answers 503
+ * `diff_busy` and a client retries instead of reading a bare 500 (crew#790). Only that: a git that
+ * died of its own signal (SIGSEGV, SIGABRT, a crashed diff driver) is a real fault and stays a 500
+ * — telling a client to retry a deterministic crash would hide it (codex on #795).
  */
 export function isGitStopped(err: unknown): boolean {
   if (typeof err !== 'object' || err === null) return false;
-  const e = err as { killed?: unknown; signal?: unknown };
-  return e.killed === true || (typeof e.signal === 'string' && e.signal !== '');
+  return (err as { killed?: unknown }).killed === true;
 }
 
 // ── Diff base (DES-UX-001 §8.1, CREW-UX-1) ─────────────────────────────────────────────────────
