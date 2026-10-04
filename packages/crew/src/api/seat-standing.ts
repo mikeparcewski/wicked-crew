@@ -34,8 +34,48 @@
  * and the one bench is the engine's per-run ballot ledger.
  */
 
+import { homedir } from 'node:os';
 import type {SeatAuthFailure, SeatRecentBench} from './seat-health.js';
 import type {SeatProbeReading} from './seat-probe.js';
+
+/** The longest piece of a seat's own words that may ride in the plain sentence. */
+const PLAIN_EVIDENCE_MAX = 120;
+
+/**
+ * crew#771: a seat's own words, when they are one short plain line — what the plain sentence
+ * (`council_ineligible_reason`, a chat refusal) may quote. `null` for anything else: a JSON blob
+ * (claude's `auth status` prints its whole config, two home paths included), a path, several lines
+ * or a long text. Those stay in `auth_evidence`, the technical-details field.
+ */
+export function plainEvidence(detail: string): string | null {
+  const t = detail.trim();
+  if (t === '' || t.length > PLAIN_EVIDENCE_MAX || /[\r\n{}\[\]]/.test(t)) return null;
+  // Any separator at all: absolute, relative (`.wicked-worker/claude/…`), `~/`, a drive letter, a
+  // URL without a scheme (`example.com/<account>/…`) — none can be told apart from a harmless `a/b`
+  // cheaply and safely, so a slash or a backslash keeps the words out of the sentence (codex on #797).
+  if (/[\\/]/.test(t)) return null;
+  return t;
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * `auth_evidence` with the operator's home directory written `~` (crew#771: screen shares and
+ * recordings). Only the home as a whole path segment — `/home/al` never eats the start of
+ * `/home/alice` — and in every separator spelling: `/`, `\`, and the JSON-escaped `\\` a Windows
+ * home takes inside a CLI's JSON status (codex on #797). A root home (`/`) is left alone.
+ */
+export function homeless(detail: string, home: string = homedir()): string {
+  const trimmed = home.replace(/[\\/]+$/, '');
+  if (trimmed === '') return detail;
+  const back = trimmed.replace(/\//g, '\\');
+  const spellings = new Set([trimmed, trimmed.replace(/\\/g, '/'), back, back.replace(/\\/g, '\\\\')]);
+  let out = detail;
+  for (const h of [...spellings].sort((a, b) => b.length - a.length)) out = out.replace(new RegExp(`${escapeRegExp(h)}(?=$|[\\\\/\\s"'),;:])`, 'g'), '~');
+  return out;
+}
 
 /** The seat's auth state, read for what it MEANS for the seat's usability. */
 export type SeatAuth = 'signed_in' | 'signed_out' | 'not_required' | 'unknown';
@@ -119,6 +159,18 @@ export interface SeatStanding {
   council_ineligible_reason?: string;
 }
 
+/** The cause a "no credential" sentence names: `<source>: <its own words>` when they are plain, else the source alone (crew#771). */
+export function noCredentialCause(failure: Pick<SeatAuthFailure, 'source' | 'detail'>): string {
+  const words = plainEvidence(failure.detail);
+  return words === null ? failure.source : `${failure.source}: ${words}`;
+}
+
+/** What a signed-out probe says, in the sentence: its own plain words, else "it is not logged in". */
+function probeWords(evidence: string | undefined): string {
+  const words = evidence === undefined ? null : plainEvidence(evidence);
+  return words === null ? 'it is not logged in' : `it cannot authenticate (${words})`;
+}
+
 /** See {@link SeatStanding.login_check}. */
 export type LoginCheck = 'live' | 'status' | 'unverified';
 
@@ -146,13 +198,13 @@ export function seatStanding(
   // crew#630: next, the seat's own auth-status command, when it answered; the file last.
   const read: Pick<SeatStanding, 'auth' | 'auth_source' | 'auth_evidence' | 'probed_at' | 'free_tier' | 'free_tier_source'> =
     authFailure !== null
-      ? { auth: 'signed_out' as const, auth_source: 'seat-stderr' as const, auth_evidence: authFailure.detail }
+      ? { auth: 'signed_out' as const, auth_source: 'seat-stderr' as const, auth_evidence: homeless(authFailure.detail) }
       : probe !== undefined && probe.signedIn !== null
         ? {
             auth: probe.signedIn ? ('signed_in' as const) : ('signed_out' as const),
             auth_source: 'probe' as const,
             probed_at: probe.probedAt,
-            ...(probe.signedIn ? {} : { auth_evidence: probe.detail }),
+            ...(probe.signedIn ? {} : { auth_evidence: homeless(probe.detail) }),
           }
         : seatAuth(seat, signedIn);
   const auth = read.auth;
@@ -171,9 +223,9 @@ export function seatStanding(
       council_eligible: false,
       council_ineligible_reason:
         authFailure !== null
-          ? `signed out — the seat itself reported no credential (${authFailure.source}: ${authFailure.detail}); sign it in from the System page`
+          ? `signed out — the seat itself reported no credential (${noCredentialCause(authFailure)}); sign it in from the System page`
           : read.auth_source === 'probe'
-            ? `signed out — the seat's own auth check says it cannot authenticate (${read.auth_evidence ?? 'not logged in'}); sign it in from the System page`
+            ? `signed out — the seat's own auth check says ${probeWords(read.auth_evidence)}; sign it in from the System page`
             : 'signed out — a council would bench this seat on its first ballot; sign it in from the System page',
     };
   }
