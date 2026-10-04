@@ -4547,6 +4547,17 @@ export interface BlastRadius {
    * hot symbol. When non-zero, an empty `dependents` still never means "safe".
    */
   unresolved: number;
+  /**
+   * Completeness causes from estate (wicked-estate#222, estate >= 0.18.0; api-types 0.91.0, crew#751),
+   * ABSENT on an older estate. `depth_horizon_reached`: the depth horizon stopped the walk with
+   * dependents beyond it; `node_cap_reached`: the node budget dropped reachable nodes;
+   * `searched_depth`: the horizon that applied (re-ask with a larger one); `truncated_dependents`:
+   * rows estate had but cut to fit its output budget. Any of them set ⇒ `dependents` is partial.
+   */
+  depth_horizon_reached?: boolean;
+  node_cap_reached?: boolean;
+  searched_depth?: number;
+  truncated_dependents?: number;
 }
 
 /** An open elicitation as `GET /runs/:id/elicitation` returns it (DES-002). */
@@ -5663,6 +5674,17 @@ export interface ProjectBlastRadius {
   missingRepos: string[];
   linkage: ProjectGraphLinkage;
   note: string;
+  /**
+   * Completeness causes from estate (wicked-estate#222, estate >= 0.18.0; api-types 0.91.0, crew#751),
+   * ABSENT on an older estate. `depth_horizon_reached`: the depth horizon stopped the walk with
+   * dependents beyond it; `node_cap_reached`: the node budget dropped reachable nodes;
+   * `searched_depth`: the horizon that applied (re-ask with a larger one); `truncated_dependents`:
+   * rows estate had but cut to fit its output budget. Any of them set ⇒ `dependents` is partial.
+   */
+  depth_horizon_reached?: boolean;
+  node_cap_reached?: boolean;
+  searched_depth?: number;
+  truncated_dependents?: number;
 }
 
 /** `GET /projects/:id/graph/search?name=` — exact-name symbol resolution across member repos. */

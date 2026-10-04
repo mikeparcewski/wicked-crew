@@ -1063,9 +1063,27 @@ export async function projectBlastRadius(
     ['blast-radius', name, '--db', q.dbPath, '--json'],
     { timeout: QUERY_TIMEOUT_MS },
   );
-  const raw = JSON.parse(stdout) as { dependents?: RawHit[]; unresolved?: number; target?: string };
+  const raw = JSON.parse(stdout) as {
+    dependents?: RawHit[];
+    unresolved?: number;
+    target?: string;
+    truncated_dependents?: unknown;
+    searched_depth?: unknown;
+    depth_horizon_reached?: unknown;
+    node_cap_reached?: unknown;
+  };
   const { hits, byRepo } = attributeHits(raw.dependents, q.labels);
+  // crew#751: estate's completeness causes (wicked-estate#222), carried through verbatim when the
+  // installed estate reports them, and ABSENT when it does not — never a fabricated `false`, which
+  // would read as "the walk was complete" on an estate that cannot say.
+  const causes = {
+    ...(typeof raw.depth_horizon_reached === 'boolean' ? { depth_horizon_reached: raw.depth_horizon_reached } : {}),
+    ...(typeof raw.node_cap_reached === 'boolean' ? { node_cap_reached: raw.node_cap_reached } : {}),
+    ...(typeof raw.searched_depth === 'number' ? { searched_depth: raw.searched_depth } : {}),
+    ...(typeof raw.truncated_dependents === 'number' ? { truncated_dependents: raw.truncated_dependents } : {}),
+  };
   return {
+    ...causes,
     projectId: q.status.projectId,
     target: typeof raw.target === 'string' ? raw.target : name,
     dependents: hits,
