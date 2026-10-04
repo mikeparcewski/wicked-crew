@@ -535,6 +535,43 @@ describe('CoreAdapter.importSteeringRules — the engine seam', () => {
   });
 });
 
+describe('the issue #776 batch through the REAL engine seam (stub engine, real addon)', () => {
+  it('every imported rule reads back with steering_type, weight, applies_to and excludes; the policy rejection names its reason', async () => {
+    // The engine serializes its serde defaults ABSENT (`steering_type` architecture, `weight` 1.0,
+    // empty `applies_to` / `excludes`): the import kept them, but the browse wire dropped them and
+    // studio read null. The listing materializes the defaults so every row carries all four.
+    const a = new CoreAdapter({ dbPath: join(dir, 'issue-776.db'), stub: true });
+    try {
+      const prov = { source: 'ui', source_kinds: ['doc'] };
+      const batch = [
+        { id: 'PAT-311', rule_type: 'pattern', steering_type: 'architecture', severity: 'warn', confidence: 0.9, weight: 1.0, statement: 'Keep the booking rules in one module.', applies_to: ['src/'], excludes: ['tests/'], targets: {}, provenance: prov },
+        { id: 'PAT-312', rule_type: 'pattern', steering_type: 'development', severity: 'warn', confidence: 0.9, weight: 1.0, statement: 'Every bug fix lands with a test that fails first.', applies_to: [], excludes: [], targets: {}, provenance: prov },
+        { id: 'POL-311', rule_type: 'policy', steering_type: 'security', severity: 'error', confidence: 0.95, weight: 1.0, effect: 'deny', trigger: { contains: 'rm -rf /' }, statement: 'Never run a destructive shell command against the repository root.', applies_to: [], excludes: [], targets: {}, provenance: prov },
+        { id: 'PAT-313', rule_type: 'pattern', steering_type: 'testing', severity: 'warn', confidence: 0.85, weight: 0.8, statement: 'A test names the behaviour it checks.', applies_to: ['tests/'], excludes: [], targets: {}, provenance: prov },
+      ];
+      const results = await a.importSteeringRules(
+        batch.map((r) => ({ kind: 'rule', rule: r as unknown as ConformanceRule })),
+        'architecture',
+      );
+      expect(results.map((r) => r.status)).toEqual(['imported', 'imported', 'rejected', 'imported']);
+      // The policy is refused by the engine's INV-S3 (an effect with no applies_to enforces
+      // nothing) and the per-entry result says so — the reason the page renders.
+      expect(results[2]!.error).toMatch(/applies_to/);
+      const byId = new Map((await a.listConformanceRules()).map((r) => [r.id, r]));
+      const pick = (id: string) => {
+        const r = byId.get(id)!;
+        return { steering_type: r.steering_type, weight: r.weight, applies_to: r.applies_to, excludes: r.excludes };
+      };
+      expect(pick('PAT-311')).toEqual({ steering_type: 'architecture', weight: 1, applies_to: ['src/'], excludes: ['tests/'] });
+      expect(pick('PAT-312')).toEqual({ steering_type: 'development', weight: 1, applies_to: [], excludes: [] });
+      expect(pick('PAT-313')).toEqual({ steering_type: 'testing', weight: expect.closeTo(0.8, 5), applies_to: ['tests/'], excludes: [] });
+      expect(byId.has('POL-311')).toBe(false);
+    } finally {
+      a.close();
+    }
+  });
+});
+
 describe('the steering-author drop-in workflow (TH-12 propose-as-gate)', () => {
   it('is served, terminal `propose` phase gated by an UNCONDITIONAL human confirm', () => {
     const def = adapter.getWorkflow('steering-author');

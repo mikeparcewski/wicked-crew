@@ -1353,6 +1353,24 @@ export interface LaunchNotice {
 }
 export type LaunchListener = (notice: LaunchNotice) => void;
 
+/**
+ * The engine serializes a rule's serde DEFAULTS as absent keys (`steering_type` architecture,
+ * `weight` 1.0, empty `applies_to` / `excludes` — `skip_serializing_if` in wicked-governance's
+ * `conformance.rs`). The import kept those values, but the browse wire then carried no key, and a
+ * client that reads absence as null showed the first entry of an `architecture` import as untyped
+ * and every 1.0 weight / empty scope as missing (#776). The read side materializes the four
+ * defaults so every row says what the engine stored. Values the engine did serialize pass through.
+ */
+export function withRuleDefaults(rule: ConformanceRule): ConformanceRule {
+  return {
+    ...rule,
+    steering_type: rule.steering_type ?? 'architecture',
+    weight: rule.weight ?? 1,
+    applies_to: rule.applies_to ?? [],
+    excludes: rule.excludes ?? [],
+  };
+}
+
 export class CoreAdapter {
   private readonly core: CoreHandleFull;
   private readonly subscription: Subscription;
@@ -3096,7 +3114,7 @@ export class CoreAdapter {
     // the fetch must not silently withdraw retired rows (a steering engine's default excludes
     // them — with the bare call, `?status=retired` / `include_retired=true` answered [] for every
     // engine-retired rule, a vacuous facet). Pre-0.7.5 bindings ignore the extra args.
-    return JSON.parse(await this.core.listConformanceRules(null, true)) as ConformanceRule[];
+    return (JSON.parse(await this.core.listConformanceRules(null, true)) as ConformanceRule[]).map(withRuleDefaults);
   }
 
   /** All recorded conformance claims (governance decisions). */
@@ -3181,7 +3199,7 @@ export class CoreAdapter {
       if (typeof scalar === 'string' && scalar.length > 0) cleanQuery[k] = scalar;
     }
     const json = await this.core.recallRulesPreview(JSON.stringify(cleanQuery));
-    return JSON.parse(json) as ConformanceRule[];
+    return (JSON.parse(json) as ConformanceRule[]).map(withRuleDefaults);
   }
 
   // ── Governance wiki management (wiki-mgmt) ─────────────────────────────────
