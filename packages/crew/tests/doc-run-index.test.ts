@@ -160,3 +160,29 @@ describe('GET /runs — document_id on the DTO and the ?doc= filter', () => {
     expect((await app.inject({ method: 'GET', url: '/api/v1/runs', query: { doc: ' ' } })).statusCode).toBe(400);
   });
 });
+
+describe('kindsOf — the kind comes from the row key, not the ledger file it sits in (#785)', () => {
+  let dir: string;
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), 'doc-run-kinds-'));
+  });
+  afterAll(() => removeScratch(dir));
+
+  it('a document only reviewed, or only theme-learned, reads review / theme, never edit', () => {
+    // Theme learning (EP-C4) and reviews (EP-C2) keep their rows in the EDIT seam's ledger on purpose.
+    const edit = new InteractiveHandoffLedger(join(dir, 'edit.json'));
+    edit.recordLaunch('doc-reviewed:review:proj-1:v2:a11y,copy', 'run-r');
+    edit.recordLaunch('doc-themed:theme:1791000000000', 'run-t');
+    edit.recordLaunch('doc-edited:v3', 'run-e');
+    edit.recordLaunch('doc-both:v1', 'run-b1');
+    edit.recordLaunch('doc-both:review:proj-1:v1:copy', 'run-b2');
+    const index = new DocRunIndex(() => [{ name: 'edit', ledger: edit, path: join(dir, 'edit.json') }]);
+    expect(index.kindsOf('doc-reviewed')).toEqual(['review']);
+    expect(index.kindsOf('doc-themed')).toEqual(['theme']);
+    expect(index.kindsOf('doc-edited')).toEqual(['edit']);
+    expect(index.kindsOf('doc-both')).toEqual(['edit', 'review']);
+    // The run ↔ document binding is unchanged: review and theme runs belong to their document.
+    expect(index.documentOf('run-r')).toBe('doc-reviewed');
+    expect(index.runsOf('doc-themed')).toEqual(['run-t']);
+  });
+});
