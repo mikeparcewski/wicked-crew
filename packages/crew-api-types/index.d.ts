@@ -5009,8 +5009,10 @@ export interface InteractiveDocsListing {
   unreachable: InteractiveDocsUnreachable[];
 }
 
-/** The seams that can answer a document (the handoff ledgers). */
-export type InteractiveSeamKind = 'draft' | 'edit' | 'chat' | 'demo' | (string & {});
+/** The seams that can answer a document (the handoff ledgers). `theme` (EP-C4 theme learning) and
+ *  `review` (EP-C2 reviews) keep their rows in the edit seam's ledger and are told apart by the row
+ *  key (api-types 0.90.0, crew#785): a document only reviewed reads `review`, never `edit`. */
+export type InteractiveSeamKind = 'draft' | 'edit' | 'chat' | 'demo' | 'theme' | 'review' | (string & {});
 
 /** One document on the daemon-wide listing (api-types 0.36.0). */
 export interface InteractiveDocIndexRow {

@@ -34,6 +34,19 @@ export function documentIdOfKey(key: string): string {
   return i === -1 ? key : key.slice(0, i);
 }
 
+/**
+ * The kind a ledger row names (#785): two seams keep their rows in the EDIT seam's ledger on purpose
+ * (no new state-home entry) — theme learning (`<doc>:theme:<ts>`, EP-C4) and reviews
+ * (`<doc>:review:<project>:v<n>:<reviewers>`, EP-C2) — so the key's shape decides, not the file:
+ * a document that was only reviewed must not read as structurally edited. Any other key is the
+ * seam's own kind.
+ */
+export function kindOfKey(seam: string, key: string): string {
+  const second = key.split(':', 2)[1];
+  if (second === 'theme' || second === 'review') return second;
+  return seam;
+}
+
 /** Default freshness of one ledger read; the ledgers are small JSON files. */
 export const DOC_RUN_INDEX_TTL_MS = 2_000;
 
@@ -48,7 +61,7 @@ export class DocRunIndex {
     at: number;
     byRun: Map<string, string>;
     byDoc: Map<string, string[]>;
-    /** document id → the seams (`draft` | `edit` | `chat` | `demo`) whose ledgers hold a row for it. */
+    /** document id → the kinds whose rows name it (`draft` | `edit` | `chat` | `demo` | `theme` | `review`). */
     kinds: Map<string, Set<string>>;
   } | null = null;
 
@@ -82,7 +95,7 @@ export class DocRunIndex {
           if (doc === '') continue;
           if (!byRun.has(entry.runId)) byRun.set(entry.runId, doc);
           const set = kinds.get(doc) ?? new Set<string>();
-          set.add(source.name);
+          set.add(kindOfKey(source.name, key));
           kinds.set(doc, set);
         }
       } catch (err) {
@@ -115,8 +128,8 @@ export class DocRunIndex {
     return [...(this.refresh().byDoc.get(documentId) ?? [])];
   }
 
-  /** The seams that answered this document (`draft` | `edit` | `chat` | `demo`, source order; `[]`
-   *  when none) — the `kinds` a daemon-wide docs listing shows per document. */
+  /** The kinds that answered this document (`draft` | `edit` | `chat` | `demo` | `theme` | `review`,
+   *  first-seen order; `[]` when none; {@link kindOfKey}) — the `kinds` a daemon-wide docs listing shows. */
   kindsOf(documentId: string): string[] {
     return [...(this.refresh().kinds.get(documentId) ?? [])];
   }
