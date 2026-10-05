@@ -1014,10 +1014,21 @@ export class ChatScopeIndex {
     return token;
   }
 
-  /** Give a reservation back (the open failed before `set`) — only the holder's own. */
-  release(chatId: string, token: number): void {
+  /** Whether `token` still holds the reservation for `chatId` (an open in flight that was not
+   *  cancelled by a DELETE / `chatClosed` meanwhile). */
+  owns(chatId: string, token: number): boolean {
     const slot = this.slots.get(chatId);
-    if (slot?.state === 'reserved' && slot.token === token) this.slots.delete(chatId);
+    return slot?.state === 'reserved' && slot.token === token;
+  }
+
+  /** Give a reservation back (the open failed before `set`) — only the holder's own. True when it
+   *  WAS the holder's: the caller may then remove what the open prepared (a scratch root shared by
+   *  id), and must not when a newer open holds the id (codex on #808 r3, 3). */
+  release(chatId: string, token: number): boolean {
+    const slot = this.slots.get(chatId);
+    if (slot?.state !== 'reserved' || slot.token !== token) return false;
+    this.slots.delete(chatId);
+    return true;
   }
 
   /**

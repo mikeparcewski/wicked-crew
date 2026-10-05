@@ -1879,7 +1879,17 @@ export async function createServer(
       broadcast: (frame) => broadcast(frame),
       // ASK-C1: DELETE /chats/:id on an ask path closes through the same fold an engine
       // `chatClosed` takes (scope slot, decisions, considerations, retention-aware transcript).
-      closeChat: (frame) => onEngineEvent(frame),
+      closeChat: (frame, runId) => {
+        // End cancels the path's run: its retention hold goes first, so the fold drops the
+        // transcript with the chat (a reused id starts empty — codex on #808 r3, 1).
+        if (runId !== undefined && typeof frame.chat === 'string') {
+          const retaining = chatRetained.get(frame.chat);
+          retaining?.delete(runId);
+          if (retaining !== undefined && retaining.size === 0) chatRetained.delete(frame.chat);
+          runToChat.delete(runId);
+        }
+        onEngineEvent(frame);
+      },
       // crew#619: retain a chat's transcript for the lifetime of its promoted run.
       linkChatRun,
       // TR-W5a: the `watch.*` settings guard validates against the registry's entries.

@@ -34,6 +34,9 @@ let warmByChat: Map<string, string[]>;
 let sendReaches: ((chatId: string, targets?: string[]) => string[]) | null = null;
 /** When set, `projectMemberAttach` parks until released — the open-in-flight window (codex on #808 r2, 3+4). */
 let holdAttach: { promise: Promise<void>; release: () => void } | null = null;
+/** When set, the NEXT `listRepos` (scope resolution, before the scratch root is written) parks until
+ *  released — the stale-open window (codex on #808 r3, 3). */
+let holdReposOnce: { promise: Promise<void>; release: () => void } | null = null;
 /** Records exactly what the route hands the engine: `(chatId, clis, cwd, scope)`. */
 const chatOpen = vi.fn(async (...args: [string, string[], string?, unknown?]) =>
   args[1].map((c) => ({ cliKey: c, ok: true })),
@@ -42,30 +45,19 @@ const chatOpen = vi.fn(async (...args: [string, string[], string?, unknown?]) =>
 /** The adapter surface `POST /chats` / `GET /chats/:id` / `DELETE /chats/:id` actually touch. */
 function fakeAdapter(): CoreAdapter {
   return {
-    listRepos: async () => [
-      {
-        id: 'r1',
-        name: 'alpha',
-        root_path: '/srv/repos/alpha',
-        default_branch: 'main',
-        registered_at: 1,
-        code_graph_db: graphFile,
-      },
-    ],
-    // Wraps the `chatOpen` spy (so every `mockImplementationOnce` in a test still applies) and
-    // records which seats actually WARMED for that chat. Without this the roster was the constant
-    // `['claude']`, which made the fixture structurally incapable of expressing a two-warm-seat
-    // chat — the case `singleSeat` must NOT fire on (review of #651, defect 2).
+    listRepos: async () => {
+      const held = holdReposOnce;
+      holdReposOnce = null;
+      if (held !== null) await held.promise;
+      return repos();
+    },
     chatOpen: async (...args: [string, string[], string?, unknown?]) => {
       const out = await chatOpen(...args);
       warmByChat.set(args[0], out.filter((s) => s.ok).map((s) => s.cliKey));
       return out;
     },
     chatScopeApplied: async () => applied,
-    // The WARM ROSTER of that chat — what `singleSeat` must be decided from.
     chatSeats: async (chatId: string) => warmByChat.get(chatId) ?? [],
-    // The seats a turn REACHES: the named targets narrowed to what is warm, else everyone warm.
-    // A targeted send returning one seat is not a one-seat chat, and this fixture can now say so.
     chatSend: async (chatId: string, _text: string, targets?: string[]) => {
       if (sendReaches !== null) return sendReaches(chatId, targets);
       const warm = warmByChat.get(chatId) ?? [];
@@ -73,7 +65,6 @@ function fakeAdapter(): CoreAdapter {
     },
     chatClose: async () => undefined,
     chatList: async () => [],
-    // Only `p-live` exists: any other id is the route's 404 (codex on #664 — shape before lookup).
     projectGet: async (id: string) => (id === 'p-live' ? { id, status: 'active' } : null),
     projectMemberAttach: async () => {
       if (holdAttach !== null) await holdAttach.promise;
@@ -82,6 +73,20 @@ function fakeAdapter(): CoreAdapter {
     projectMemberDetach: async () => true,
   } as unknown as CoreAdapter;
 }
+
+function repos() {
+  return [
+    {
+      id: 'r1',
+      name: 'alpha',
+      root_path: '/srv/repos/alpha',
+      default_branch: 'main',
+      registered_at: 1,
+      code_graph_db: graphFile,
+    },
+  ];
+}
+
 
 beforeEach(async () => {
   base = mkdtempSync(join(tmpdir(), 'chat-routes-scope-'));
@@ -331,6 +336,27 @@ describe('ASK-C1 — an ask starts a path: the open records eligibility and a ch
       chats: [{ chatId: 'live', seats: ['claude'], idleSecs: null, cwd, codeGraphDb: graphFile, readRoots: ['/srv/repos/alpha'] }],
     });
     holdAttach = null;
+  });
+
+  it('codex on #808 r3 (3): an open parked in scope resolution, closed, and overtaken by a reopen of its id neither rewrites nor removes the newcomer\'s scratch root', async () => {
+    let releaseRepos: () => void = () => undefined;
+    holdReposOnce = { promise: new Promise<void>((r) => { releaseRepos = r; }), release: () => releaseRepos() };
+    // `primary` names an ineligible seat: without the ownership check this open would reach the
+    // 400 arm and remove the root it shares with the newcomer.
+    const stale = open({ chatId: 'live', clis: ['claude'], repoRefs: ['alpha'], primary: 'codex' });
+    await new Promise((r) => setTimeout(r, 20));
+    expect((await app.inject({ method: 'DELETE', url: '/api/v1/chats/live' })).statusCode).toBe(200);
+    const fresh = await open({ chatId: 'live', clis: ['claude'], repoRefs: ['alpha'] });
+    expect(fresh.statusCode).toBe(201);
+    const cwd = (fresh.json() as { scope: { cwd: string } }).scope.cwd;
+    const stamp = readFileSync(join(cwd, 'AGENTS.md'), 'utf8');
+    releaseRepos();
+    const res = await stale;
+    expect(res.statusCode).toBe(409);
+    expect((res.json() as { error: string }).error).toMatch(/closed while it was being opened/);
+    expect(existsSync(cwd), 'the newcomer keeps its root').toBe(true);
+    expect(readFileSync(join(cwd, 'AGENTS.md'), 'utf8'), 'and its statement').toBe(stamp);
+    expect(chatScopes.get('live')?.cwd).toBe(cwd);
   });
 });
 

@@ -99,13 +99,27 @@ export class AskPathIndex {
   }
 
   /** A later message added an answer step. Returns the new step id. */
+  /** A message of this chat is in flight right now (launching or continuing). */
+  busy(chatId: string): boolean {
+    return this.paths.get(chatId)?.busy === true;
+  }
+
+  /** The continuation the engine accepted landed on the chat: records the step — only on the
+   *  generation that holds the lease (codex on #808 r3, 2: a continuation of a closed-and-reopened
+   *  chat must not write into the newcomer's record). */
+  continued(chatId: string, lease: number, stepId: string): boolean {
+    const p = this.paths.get(chatId);
+    if (p === undefined || p.generation !== lease) return false;
+    p.steps.push(stepId);
+    return true;
+  }
+
+  /** The id the NEXT answer step takes (`answer-N`); nothing is recorded until {@link continued}. */
   nextStep(chatId: string): string {
     const p = this.paths.get(chatId);
-    const n = (p?.steps.length ?? 0) + 1;
-    const stepId = `answer-${n}`;
-    p?.steps.push(stepId);
-    return stepId;
+    return `answer-${(p?.steps.length ?? 0) + 1}`;
   }
+
 
   /** A re-seat: the named seats are eligible (a sign-in fixed). */
   admit(chatId: string, seats: readonly string[]): string[] {

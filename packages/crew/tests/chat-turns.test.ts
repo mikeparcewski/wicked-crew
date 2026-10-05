@@ -145,6 +145,8 @@ describe('POST /chats/:id/messages — an ask starts a PATH; refuse mid-turn; co
   let holdFor: Map<string, { promise: Promise<void>; release: () => void }>;
   /** When set, `cancelRun` parks until released (codex on #808 r2, 2). */
   let holdCancel: { promise: Promise<void>; release: () => void } | null;
+  /** When set, the status read (`sessionsDetail`) parks until released (codex on #808 r3, 2). */
+  let holdStatus: { promise: Promise<void>; release: () => void } | null;
   /** The rules in force, as the fake engine's `considerRules` answers (codex on #808 r2, 7+8). */
   let rulesNow: Array<{ id: string; statement: string; severity: string; targets: Record<string, unknown> }>;
   const gate = (): { promise: Promise<void>; release: () => void } => {
@@ -165,6 +167,7 @@ describe('POST /chats/:id/messages — an ask starts a PATH; refuse mid-turn; co
     holdPropose = null;
     holdFor = new Map();
     holdCancel = null;
+    holdStatus = null;
     rulesNow = [];
     closeChat = vi.fn();
     turns = new ChatTurnIndex();
@@ -187,7 +190,10 @@ describe('POST /chats/:id/messages — an ask starts a PATH; refuse mid-turn; co
         },
         projectRulesSupported: () => true,
         considerRules: async () => ({ in_force: rulesNow, set_aside: [] }),
-        sessionsDetail: async () => [{ session: { id: 'run-1', status: runStatus }, units: [] }],
+        sessionsDetail: async () => {
+          if (holdStatus !== null) await holdStatus.promise;
+          return [{ session: { id: 'run-1', status: runStatus }, units: [] }];
+        },
         proposePlan: async (runId: string, plan: unknown, requestId: string) => {
           if (holdPropose !== null) await holdPropose.promise;
           proposed.push({ runId, plan, requestId });
@@ -370,6 +376,39 @@ describe('POST /chats/:id/messages — an ask starts a PATH; refuse mid-turn; co
     expect(launched.map((l) => (l['plan'] as { steps: Array<{ instructions: string }> }).steps[0]!.instructions)).toEqual(['A-refuse-me', 'B']);
   });
 
+  it('codex on #808 r3 (2): a continuation parked on its status read while the chat is closed and its id reopened lands NOTHING on the newcomer', async () => {
+    opened('e057', ['claude'], 'claude');
+    await send({ text: 'Q1' });
+    holdStatus = gate();
+    const q2 = send({ text: 'Q2' }); // generation 1, parked on sessionsDetail
+    await new Promise((r) => setTimeout(r, 20));
+    expect((await app.inject({ method: 'DELETE', url: '/api/v1/chats/e057' })).statusCode).toBe(200);
+    opened('e057', ['claude'], 'claude'); // generation 2
+    holdStatus.release();
+    const res = await q2;
+    expect(res.statusCode).toBe(409);
+    expect((res.json() as { error: string }).error).toMatch(/closed while the message was in flight/);
+    expect(proposed, 'no proposal reached the engine for the cancelled run').toHaveLength(0);
+    expect(askPaths.get('e057')!.steps, 'the newcomer\'s record is untouched').toEqual([]);
+    expect(transcripts.read('e057').filter((r) => r.text === 'Q2')).toEqual([]);
+    // The newcomer launches as usual.
+    expect((await send({ text: 'Q1 again' })).statusCode).toBe(202);
+    expect(askPaths.view('e057')).toMatchObject({ runId: 'run-2', stepId: 'answer-1' });
+  });
+
+  it('codex on #808 r3 (4): a re-seat while the FIRST message is launching is 409 turn_in_flight — the launch roster is already captured', async () => {
+    opened('e057', ['claude'], 'claude');
+    holdLaunch = gate();
+    const first = send({ text: 'Q1' });
+    await new Promise((r) => setTimeout(r, 20));
+    const reseat = await app.inject({ method: 'POST', url: '/api/v1/chats/e057/seats', payload: { clis: ['opencode'] } });
+    expect(reseat.statusCode).toBe(409);
+    expect(reseat.json()).toMatchObject({ code: 'turn_in_flight' });
+    expect(askPaths.get('e057')!.eligible).toEqual(['claude']);
+    holdLaunch.release();
+    expect((await first).statusCode).toBe(202);
+  });
+
   it('codex on #808 r2 (2): DELETE folds the close BEFORE it awaits the cancel — nothing of the closed chat lands after an await', async () => {
     opened('e057', ['claude'], 'claude');
     await send({ text: 'Q1' });
@@ -436,6 +475,7 @@ describe('POST /chats/:id/messages — an ask starts a PATH; refuse mid-turn; co
     expect((await app.inject({ method: 'DELETE', url: '/api/v1/chats/e057' })).statusCode).toBe(200);
     expect(closeChat).toHaveBeenCalledTimes(1);
     expect(closeChat.mock.calls[0]![0]).toMatchObject({ type: 'chatClosed', chat: 'e057', reason: 'closed' });
+    expect(closeChat.mock.calls[0]![1], 'the path run whose retention hold the fold releases').toBe('run-1');
     expect((await app.inject({ method: 'GET', url: '/api/v1/chats' })).json()).toEqual({ chats: [{ chatId: 'pool-only', seats: ['claude'], idleSecs: 3 }] });
   });
 

@@ -797,8 +797,11 @@ export interface RuntimeDeps {
   askPaths?: AskPathIndex;
   /** (ASK-C1) Close a chat the engine holds no row for: the server feeds the synthetic
    *  `chatClosed` frame through its own event fold (and /ws), so DELETE closes exactly the way an
-   *  engine close did. Absent (tests): the route closes the scope slot and broadcasts. */
-  closeChat?: (frame: CoreEvent) => void;
+   *  engine close did. `runId` is the path's run, cancelled by this close: its retention hold on
+   *  the transcript (crew#619) is released first, so a chat that reuses the id does not inherit
+   *  the ended conversation (codex on #808 r3, 1). Absent (tests): the route closes the scope
+   *  slot and broadcasts. */
+  closeChat?: (frame: CoreEvent, runId?: string) => void;
   /** DES-L5 (D-13): the chat transcript at rest — `GET /chats/:id.messages`. Absent ⇒ nothing is
    *  persisted and the field is omitted (a directly-driven route in tests). */
   chatTranscripts?: ChatTranscriptStore;
@@ -2872,9 +2875,15 @@ export function registerRoutes(
         // DC-S7: the seats learn the project's in-force rules from the statement (cap 20, severity
         // order); the service remembers what they were told so a later landing can be prefaced.
         inForceAtOpen = (await considerations.inForceFor(scope.projectId ?? null)).rules;
+        // The scratch root is shared by id: an open whose reservation a DELETE cancelled while it
+        // was resolving must not write (or later remove) the root a newer open now holds
+        // (codex on #808 r3, 3).
+        if (!chatScopes.owns(chatId, token)) {
+          return reply.code(409).send({ error: `chat ${chatId} was closed while it was being opened; open it again` });
+        }
         prepareChatScratch(chatId, scope, inForceAtOpen);
       } catch (err) {
-        chatScopes.release(chatId, token);
+        if (chatScopes.release(chatId, token)) removeChatScratch(scope.cwd, chatScopes.base);
         return reply
           .code(500)
           .send({ error: `cannot prepare the chat's scratch root ${scope.cwd}: ${message(err)}` });
@@ -2922,8 +2931,7 @@ export function registerRoutes(
         else refused.push({ cliKey: key, reason: admission.reason, source: admission.source });
       }
       if (clis.length === 0) {
-        chatScopes.release(chatId, token);
-        removeChatScratch(scope.cwd, chatScopes.base);
+        if (chatScopes.release(chatId, token)) removeChatScratch(scope.cwd, chatScopes.base);
         return reply.code(409).send({
           error:
             (scoped
@@ -2940,8 +2948,7 @@ export function registerRoutes(
         // nothing — the chat is a path its first message launches, and the engine picks the PA
         // then (`path.started.selection`). Crew owns eligibility; the engine owns the pick.
         if (b.primary !== undefined && !clis.includes(b.primary)) {
-          chatScopes.release(chatId, token);
-          removeChatScratch(scope.cwd, chatScopes.base);
+          if (chatScopes.release(chatId, token)) removeChatScratch(scope.cwd, chatScopes.base);
           return reply.code(400).send({
             error:
               `primary names a seat that is not eligible for this chat: ${b.primary}` +
@@ -3032,9 +3039,9 @@ export function registerRoutes(
         });
       } catch (err) {
         // Nothing warmed: the scratch root prepared above must not linger — removed under the SAME
-        // base the resolver created it in (Copilot, #518), fail-closed like every removal.
-        chatScopes.release(chatId, token);
-        removeChatScratch(scope.cwd, chatScopes.base);
+        // base the resolver created it in (Copilot, #518), fail-closed like every removal; only
+        // while the root is still this open's (codex on #808 r3, 3).
+        if (chatScopes.release(chatId, token)) removeChatScratch(scope.cwd, chatScopes.base);
         return reply.code(400).send({ error: message(err) });
       }
       } finally {
@@ -3195,11 +3202,21 @@ export function registerRoutes(
           status,
         });
       }
+      // The status read awaited: the chat may have been closed (and its id reopened) meanwhile —
+      // nothing of this message may land on the newcomer (codex on #808 r3, 2).
+      if (askPaths.get(id)?.generation !== lease) {
+        if (turn !== null) chatTurns.abort(id, turn.turnId);
+        return reply.code(409).send({ error: `chat '${id}' was closed while the message was in flight; nothing was sent` });
+      }
       const stepId = askPaths.nextStep(id);
       const pending = await considerations.pendingPreface(id);
       await adapter.proposePlan(path.runId, { steps: [answerStep(stepId, withPreface(pending.preface))] }, turnId);
       await adapter.confirmGate(path.runId, true);
       askPaths.release(id, lease);
+      if (!askPaths.continued(id, lease, stepId)) {
+        // Closed between the proposal and here: the DELETE cancelled the run this was accepted on.
+        return reply.code(409).send({ error: `chat '${id}' was closed while the message was in flight; its path was cancelled` });
+      }
       pending.commit();
       persistAccepted(pending.preface, () => undefined);
       return reply.code(202).send({ seats: voice, turnId, runId: path.runId, stepId, ...singleSeat202 });
@@ -3255,6 +3272,14 @@ export function registerRoutes(
           error: `chat '${id}' has launched its path (${launched.runId}); its seats are fixed for this ask — open a new chat to seat ${clis.join(', ')}`,
           chatId: id,
           runId: launched.runId,
+        });
+      }
+      if (launched?.busy === true) {
+        // The first message is launching with the roster as it stands (codex on #808 r3, 4).
+        return reply.code(409).send({
+          code: 'turn_in_flight' as const,
+          error: `chat '${id}' is launching its path with the seats as they stand — a seat added now would never reach the run. Nothing was re-seated.`,
+          chatId: id,
         });
       }
       try {
@@ -3391,7 +3416,7 @@ export function registerRoutes(
       // drop) and the /ws fan-out — the same path an engine `chatClosed` took. Folded BEFORE the
       // awaited cancel: a close that lands after an await can land on a chat that reused the id
       // meanwhile (codex on #808 r2, 2); after this line nothing of the closed chat is pending.
-      if (runtime.closeChat !== undefined) runtime.closeChat(frame);
+      if (runtime.closeChat !== undefined) runtime.closeChat(frame, path?.runId);
       else {
         chatScopes.closed(id);
         runtime.broadcast?.(frame);
