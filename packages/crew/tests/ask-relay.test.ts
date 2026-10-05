@@ -349,6 +349,33 @@ describe('AskRelay — the reply', () => {
     expect(h.paths.view('c1')).toMatchObject({ pa: 'codex' });
   });
 
+  it('codex on #810 r5 (1): a CACHED previous-attempt unit does not decide the fold — the reply re-reads the durable record, whose last_attempt moves the boundary to the retry', async () => {
+    const units: RelayUnit[] = [{ id: 'run-1:answer-1', ord: 1, status: 'distributed', assigned_cli: 'claude', last_attempt: 1 }];
+    const h = harness({ pa: 'claude', units });
+    await h.relay.onCoreEvent({ type: 'unitOutputDelta', session: 'run-1', ord: 1, attempt: 1, text: 'first try\n' } as CoreEvent); // caches attempt 1's unit
+    h.relay.onTeamRow(row('wicked.team.step.completed', { run_id: 'run-1', step_id: 'answer-1', status: 'timed_out', tree: null, output_bytes: 0, output_ref: 'unit:run-1:1:1' }));
+    // The retry on codex: every frame of attempt 2 is missed (the engine's live queue is bounded), its row is late.
+    h.units[0] = { id: 'run-1:answer-1', ord: 1, status: 'done', assigned_cli: 'codex', last_attempt: 2 };
+    await h.relay.onCoreEvent({ type: 'unitDone', session: 'run-1', ord: 1 } as CoreEvent);
+    expect(h.emitted.filter((f) => f.type === 'chatReply'), 'the attempt-1 row does not grade attempt 2\'s stored answer').toEqual([]);
+    h.relay.onTeamRow(row('wicked.team.step.completed', { run_id: 'run-1', step_id: 'answer-1', status: 'ok', tree: null, output_bytes: 10, output_ref: 'unit:run-1:1:2' }));
+    await new Promise((r) => setTimeout(r, 5));
+    const replies = h.emitted.filter((f) => f.type === 'chatReply');
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toMatchObject({ ok: true, cliKey: 'codex', text: 'The answer.\nSecond line.' });
+  });
+
+  it('codex on #810 r5 (2): the grace reply grades itself by THIS attempt\'s capture — a previous attempt\'s timed_out capture is dropped when the boundary advances', async () => {
+    const h = harness({ pa: 'codex', units: [{ id: 'run-1:answer-1', ord: 1, status: 'done', assigned_cli: 'codex', last_attempt: 1 }] });
+    await h.relay.onCoreEvent({ type: 'unitOutputCaptured', session: 'run-1', ord: 1, attempt: 0, outputBytes: 0, stepStatus: 'timed_out', governed: false } as CoreEvent);
+    await h.relay.onCoreEvent({ type: 'unitDispatched', session: 'run-1', ord: 1, attempt: 1 } as CoreEvent); // the retry; its capture is missed, no row ever (un-teamed)
+    await h.relay.onCoreEvent({ type: 'unitDone', session: 'run-1', ord: 1 } as CoreEvent);
+    await new Promise((r) => setTimeout(r, 120));
+    const replies = h.emitted.filter((f) => f.type === 'chatReply');
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toMatchObject({ ok: true, text: 'The answer.\nSecond line.' });
+  });
+
   it('codex on #810 r1 (8): two unitDone deliveries folded WITHOUT awaiting each other emit one reply', async () => {
     const h = harness({ pa: 'codex' });
     h.relay.onTeamRow(completed());

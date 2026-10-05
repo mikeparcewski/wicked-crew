@@ -326,6 +326,9 @@ export class AskRelay {
       if (prev !== undefined) {
         this.units.get(runId)?.delete(ord);
         this.tails.delete(`${runId}:${ord}`);
+        // The previous attempt's capture status must not grade this one's reply (r5, 2).
+        const cap = this.captured.get(runId)?.get(ord);
+        if (cap !== undefined && cap.attempt < attempt) this.captured.get(runId)?.delete(ord);
       }
     }
   }
@@ -386,11 +389,13 @@ export class AskRelay {
     return path?.pa ?? 'pa';
   }
 
-  private async unit(runId: string, ord: number): Promise<RelayUnit | null> {
+  private async unit(runId: string, ord: number, fresh = false): Promise<RelayUnit | null> {
     const byOrd = this.nestedOne(this.units, runId);
     const cached = byOrd.get(ord);
-    // A unit with no seat yet is re-read (the seat is assigned at dispatch).
-    if (cached !== undefined && (cached === null || cached.assigned_cli !== null)) return cached;
+    // A unit with no seat yet is re-read (the seat is assigned at dispatch). A FRESH read (the
+    // fold / reply boundary) bypasses the cache: the engine's live queue is bounded and may have
+    // dropped the frames of a retry, so the durable record decides the attempt and the seat (r5, 1).
+    if (!fresh && cached !== undefined && (cached === null || cached.assigned_cli !== null)) return cached;
     const startedUnder = this.attemptOf(runId, ord);
     let found: RelayUnit | null = null;
     try {
@@ -429,15 +434,33 @@ export class AskRelay {
     const key = `${runId}:${ord}`;
     if (this.replied.has(key)) return;
     this.replied.add(key);
-    const unit = await this.unit(runId, ord);
+    const unit = await this.unit(runId, ord, true);
     if (this.deps.paths.chatOf(runId) !== chatId) return; // ended meanwhile: nothing lands on a reuse
     if (unit === null) {
       this.replied.delete(key); // nothing went out: a later fold may still answer
       return;
     }
-    const pa = this.paOf(runId, chatId, unit);
+    // The fresh read may have moved the boundary (a retry whose frames were missed): the row of
+    // THAT attempt decides, or none yet — then this fold waits for it like any other (r5, 1).
     const row = this.rowFor(runId, ord);
-    const capturedStatus = this.captured.get(runId)?.get(ord)?.stepStatus;
+    if (row === undefined && via === 'fold') {
+      this.replied.delete(key);
+      if (!this.waiting.has(key)) {
+        const timer = setTimeout(() => {
+          this.waiting.delete(key);
+          if (this.deps.paths.chatOf(runId) !== chatId) return;
+          this.log(`[ask-relay] ${key}: no step.completed row within ${this.rowGraceMs} ms — answering from the record (un-teamed run?)`);
+          void this.reply(runId, chatId, ord, 'grace');
+        }, this.rowGraceMs);
+        timer.unref?.();
+        this.waiting.set(key, { timer });
+      }
+      return;
+    }
+    const pa = this.paOf(runId, chatId, unit);
+    const boundary = this.attemptOf(runId, ord);
+    const cap = this.captured.get(runId)?.get(ord);
+    const capturedStatus = cap !== undefined && (boundary === undefined || cap.attempt === boundary) ? cap.stepStatus : undefined;
     let text: string | null = null;
     try {
       text = await this.deps.workOutput(unit.id);
