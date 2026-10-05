@@ -250,6 +250,9 @@ export class ChatDecisionRecorder {
    *  to the transcript or /ws (the id may belong to a newer conversation by then). */
   private readonly epochs = new Map<string, number>();
   private readonly closeDrainMs: number;
+  /** (chat, turnId) → replies that arrived BEFORE the route recorded the send (ASK-C2: the PA can
+   *  answer while the route still awaits the engine's acceptance). Replayed by `noteSend`. */
+  private readonly early = new Map<string, { at: number; replies: ChatReplyInput[] }>();
 
   constructor(private readonly deps: ChatRecorderDeps) {
     this.now = deps.now ?? Date.now;
@@ -280,7 +283,8 @@ export class ChatDecisionRecorder {
     // until some reply happens to arrive. Tracked, never awaited on the route.
     this.track(this.sweep());
     const prev = this.lastTurn.get(chat);
-    this.turns.set(ChatDecisionRecorder.key(chat, turnId), {
+    const key = ChatDecisionRecorder.key(chat, turnId);
+    this.turns.set(key, {
       chat,
       turnId,
       at: this.now(),
@@ -291,24 +295,55 @@ export class ChatDecisionRecorder {
       ...(prev !== undefined ? { prevTurnId: prev } : {}),
     });
     this.lastTurn.set(chat, turnId);
+    // A reply that beat the send record (codex on #810 r3, 3) is folded now.
+    const early = this.early.get(key);
+    if (early !== undefined) {
+      this.early.delete(key);
+      for (const r of early.replies) this.track(this.fold(r, false)); // counted when it first arrived
+    }
+  }
+
+  /** ASK-C2: the turn's audience as the engine settled it (a random pick's PA, a re-pick) — the
+   *  recorder is chosen from THIS set, so a turn reserved for the eligible roster records the
+   *  PA's block, not a seat that never answered. */
+  reconcile(chat: string, turnId: string, seats: readonly string[]): void {
+    const turn = this.turns.get(ChatDecisionRecorder.key(chat, turnId));
+    if (turn === undefined) return;
+    turn.seats = [...new Set(seats)];
   }
 
   /** A seat ended its part of a turn. Resolves once any recording it triggered has settled. */
-  async onReply(input: ChatReplyInput): Promise<void> {
+  onReply(input: ChatReplyInput): Promise<void> {
+    return this.fold(input, true);
+  }
+
+  private async fold(input: ChatReplyInput, count: boolean): Promise<void> {
     let parsed: ParsedDecisionsBlock | null = null;
     if (input.kind !== 'failed') {
       const c = this.counter(input.cliKey);
-      c.replies += 1;
+      if (count) c.replies += 1;
       if (input.block !== null) {
         parsed = parseDecisionsBlock(input.block);
-        if (parsed === null) c.malformed += 1;
-        else c.blocks += 1;
+        if (count) {
+          if (parsed === null) c.malformed += 1;
+          else c.blocks += 1;
+        }
       }
     }
     await this.sweep();
     if (input.turnId === undefined) return;
-    const turn = this.turns.get(ChatDecisionRecorder.key(input.chat, input.turnId));
-    if (turn === undefined) return; // a turn this daemon never saw sent (a restart): nothing to record
+    const key = ChatDecisionRecorder.key(input.chat, input.turnId);
+    const turn = this.turns.get(key);
+    if (turn === undefined) {
+      // Either a turn this daemon never saw sent (a restart) — nothing to record — or a reply that
+      // beat the route's send record (the engine accepted and answered while the route still
+      // awaited): held for `noteSend`, bounded (ASK-C2; codex on #810 r3, 3).
+      if (input.kind === 'failed') return;
+      const slot = this.early.get(key) ?? { at: this.now(), replies: [] };
+      if (slot.replies.length < 8) slot.replies.push({ ...input, block: input.block });
+      this.early.set(key, slot);
+      return;
+    }
     turn.replies.set(input.cliKey, parsed);
     if (turn.seats.every((s) => turn.replies.has(s))) await this.finalize(turn);
   }
@@ -361,6 +396,7 @@ export class ChatDecisionRecorder {
 
   private async sweep(): Promise<void> {
     const now = this.now();
+    for (const [key, slot] of [...this.early]) if (now - slot.at >= this.staleAfterMs) this.early.delete(key);
     for (const turn of [...this.turns.values()]) {
       if (now - turn.at >= this.staleAfterMs) await this.finalize(turn);
     }

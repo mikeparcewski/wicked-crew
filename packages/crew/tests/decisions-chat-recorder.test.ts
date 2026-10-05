@@ -487,3 +487,42 @@ describe('codex on #808 r6: a sweep snapshot cannot re-record a finalized turn; 
     expect(h.logs.some((l) => /recorded in the ledger after the chat closed/.test(l))).toBe(true);
   });
 });
+
+describe('ASK-C2 (codex on #810 r1, 7): reconcile narrows a turn\'s audience to the voice the engine settled', () => {
+  it('a turn reserved for the eligible roster records the PA\'s block once the audience is reconciled to the PA; without it the recorder waits for a seat that never answers', async () => {
+    const h = harness();
+    const human = { kind: 'human', id: 'op' } as never;
+    const items = [{ quote: 'we ship on friday', decision_text: 'Ship on Friday.', type: 'rule', codify: true, ambiguous: false, steering_type: 'operations', approves_proposal: false, same_as: null }];
+    // Random pick: the audience is [claude, codex]; the engine picked codex.
+    h.recorder.noteSend('c1', 't1', human, 'we ship on friday', ['claude', 'codex']);
+    h.recorder.reconcile('c1', 't1', ['codex']);
+    await h.recorder.onReply({ chat: 'c1', cliKey: 'codex', turnId: 't1', ok: true, block: JSON.stringify({ items }) }); // the body, as the transcript rewrite hands it
+    await h.recorder.idle();
+    expect(h.recorder.diagnostics().recorded_turns, 'codex is the recorder of a codex-only turn').toBe(1);
+    expect(h.recorder.diagnostics().unclassified_turns).toBe(0);
+    // Unknown turn: a no-op.
+    h.recorder.reconcile('c1', 'nope', ['codex']);
+  });
+});
+
+describe('ASK-C2 (codex on #810 r3, 3): a reply that beats the send record is held and folded when noteSend arrives', () => {
+  it('onReply before noteSend → buffered; noteSend replays it → the turn is recorded with the PA\'s block; a stale buffer is swept', async () => {
+    const h = harness({ staleAfterMs: 1_000 });
+    const human = { kind: 'human', id: 'op' } as never;
+    const items = [{ quote: 'we ship on friday', decision_text: 'Ship on Friday.', type: 'rule', codify: true, ambiguous: false, steering_type: 'operations', approves_proposal: false, same_as: null }];
+    await h.recorder.onReply({ chat: 'c1', cliKey: 'codex', turnId: 't1', ok: true, block: JSON.stringify({ items }) });
+    expect(h.recorder.diagnostics().recorded_turns).toBe(0);
+    h.recorder.noteSend('c1', 't1', human, 'we ship on friday', ['codex']);
+    await h.recorder.idle();
+    expect(h.recorder.diagnostics().recorded_turns).toBe(1);
+    expect(h.recorder.diagnostics().unclassified_turns).toBe(0);
+    expect(h.recorder.diagnostics().recorder['codex'], 'the replay does not recount the reply (codex on #810 r4, 4)').toEqual({ replies: 1, blocks: 1, malformed: 0 });
+    // A buffered reply nobody claims is swept once stale.
+    await h.recorder.onReply({ chat: 'c2', cliKey: 'codex', turnId: 't9', ok: true, block: null });
+    h.tick(2_000);
+    h.recorder.noteSend('c3', 't3', human, 'trigger', ['codex']); // sweeps
+    h.recorder.noteSend('c2', 't9', human, 'late send', ['codex']); // nothing to replay: the turn waits for codex
+    await h.recorder.idle();
+    expect(h.recorder.diagnostics().recorded_turns).toBe(1);
+  });
+});

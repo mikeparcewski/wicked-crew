@@ -54,25 +54,30 @@ describe('rosterWithStandingFactory', () => {
       signedIn: (key) => (key === 'codex' ? false : true),
       env: { WICKED_WORKER_HOME: '' },
     })();
-    const of = (key: string) => roster.find((s) => s.key === key)!['chat_admission'] as { unscoped: { ok: boolean; reason?: string; source?: string }; scoped: { ok: boolean; reason?: string; source?: string } };
-    // No ACP adapter (this fixture's `claude` carries none): F-W1-003 = A — refused in BOTH modes,
-    // because chat runs on ACP-adapter seats only (was: admitted unscoped).
-    expect(of('claude').unscoped).toEqual({ ok: false, reason: expect.stringMatching(/no ACP adapter/), source: 'scope' });
-    expect(of('claude').scoped).toEqual({ ok: false, reason: expect.stringMatching(/no ACP adapter/), source: 'scope' });
-    // Signed out: refused in BOTH modes, source auth (the reason names the remedy).
+    const of = (key: string) => roster.find((s) => s.key === key)!['chat_admission'] as { unscoped: { ok: boolean; reason?: string; source?: string }; scoped: { ok: boolean; reason?: string; source?: string }; scoped_bound: { ok: boolean; reason?: string; source?: string } };
+    // ASK-C2 (codex on #810 r9): the verdicts are the ASK's. No ACP adapter (this fixture's `claude`
+    // carries none): standing admits it unscoped and on a single-repo (bound) ask; a wider
+    // repository scope the run cannot bind refuses it.
+    expect(of('claude').unscoped).toEqual({ ok: true });
+    expect(of('claude').scoped).toEqual({ ok: false, reason: expect.stringMatching(/cannot bind/), source: 'scope' });
+    expect(of('claude').scoped_bound).toEqual({ ok: true });
+    // Signed out: refused in EVERY mode, source auth (the reason names the remedy).
     expect(of('codex').unscoped).toEqual({ ok: false, reason: expect.stringMatching(/signed out/), source: 'auth' });
     expect(of('codex').scoped.ok).toBe(false);
     expect(of('codex').scoped.source).toBe('auth');
-    // pi: an adapter that asks no permissions and arms no sandbox — unscoped yes, scoped no.
+    expect(of('codex').scoped_bound.ok).toBe(false);
+    // pi: an adapter that asks no permissions and arms no sandbox — unscoped yes, bound yes, wider scope no.
     expect(of('pi').unscoped).toEqual({ ok: true });
-    expect(of('pi').scoped).toEqual({ ok: false, reason: expect.stringMatching(/asks no permissions/), source: 'scope' });
-    // A governed adapter sits in both.
-    expect(of('governed')).toEqual({ unscoped: { ok: true }, scoped: { ok: true } });
+    expect(of('pi').scoped).toEqual({ ok: false, reason: expect.stringMatching(/scope the ask to one repository/), source: 'scope' });
+    expect(of('pi').scoped_bound).toEqual({ ok: true });
+    // A governed adapter sits in every mode.
+    expect(of('governed')).toEqual({ unscoped: { ok: true }, scoped: { ok: true }, scoped_bound: { ok: true } });
     // The verdict IS the pre-filter's: the same function, the same inputs.
     for (const key of ['claude', 'codex', 'pi', 'governed']) {
       const seat = roster.find((s) => s.key === key)!;
-      expect(of(key).scoped).toEqual(chatSeatAdmission(seat as unknown as Parameters<typeof chatSeatAdmission>[0], seat.auth!, true));
-      expect(of(key).unscoped).toEqual(chatSeatAdmission(seat as unknown as Parameters<typeof chatSeatAdmission>[0], seat.auth!, false));
+      expect(of(key).scoped).toEqual(chatSeatAdmission(seat as unknown as Parameters<typeof chatSeatAdmission>[0], seat.auth!, true, 'path'));
+      expect(of(key).scoped_bound).toEqual(chatSeatAdmission(seat as unknown as Parameters<typeof chatSeatAdmission>[0], seat.auth!, true, 'path-bound'));
+      expect(of(key).unscoped).toEqual(chatSeatAdmission(seat as unknown as Parameters<typeof chatSeatAdmission>[0], seat.auth!, false, 'path'));
     }
   });
 

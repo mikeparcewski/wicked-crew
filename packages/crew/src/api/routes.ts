@@ -1040,7 +1040,7 @@ function singleSeatDisclosure(
     refusalsKnown: known,
     message:
       // "warm" on a turn: the claim is about the roster as it stands, not about how it got there.
-      `This chat has one ${at === 'open' ? 'seat' : 'warm seat'} (${warmed}); it cannot disagree with itself. ` +
+      `This chat has one eligible seat (${warmed}); it cannot disagree with itself. ` +
       refusalClause +
       'The single-seat root cause is tracked as wicked-core#563; this chat makes it visible.',
   };
@@ -2905,6 +2905,9 @@ export function registerRoutes(
       // and `system` (studio#323 R4: the platform itself, no repository) read none, so they take the
       // unscoped admission and open on an engine that predates chat scope.
       const scoped = scope.kind !== 'none' && scope.kind !== 'system';
+      // ASK-C2: a single-repo ask launches BOUND (the run holds the repository read-only), so every
+      // seat in standing is eligible; a wider repository scope keeps the structural rule.
+      const admissionKind = scope.kind === 'repos' && scope.repos.length === 1 ? 'path-bound' : 'path';
       const refused: ChatSeatRefusal[] = [];
       // The standing roster, read ONCE: the default admission below and the engine-drop
       // attribution after `chatOpen` both consult it (F-A45-011).
@@ -2930,6 +2933,7 @@ export function registerRoutes(
           seat as { key: string; enabled_for_council?: boolean; acp?: { acp_input_governance?: boolean; os_sandbox?: boolean } | null },
           seat.auth ?? 'unknown',
           scoped,
+          admissionKind,
         );
         if (admission.ok) clis.push(key);
         else refused.push({ cliKey: key, reason: admission.reason, source: admission.source });
@@ -2938,12 +2942,11 @@ export function registerRoutes(
         if (chatScopes.release(chatId, token)) removeChatScratch(scope.cwd, chatScopes.base);
         return reply.code(409).send({
           error:
-            (scoped
-              ? 'no seat in the roster can be held to a scoped chat (an ACP adapter admitted to input ' +
-                'governance, or `os_sandbox = true` on its [cli.acp] record) and take a turn; open the ' +
-                'chat unscoped, sign a seat in, or name seats with `clis`'
-              : 'no seat in the roster can take a turn (every seat is signed out); sign a seat in from ' +
-                'the System page, or name seats with `clis`') + ' — see refused',
+            (scoped && admissionKind === 'path'
+              ? 'no seat in standing can be held to an ask that reads several repositories (or a project) ' +
+                'the run cannot bind; scope the ask to one repository, sign a seat in, or open it unscoped'
+              : 'no seat in the roster can take a turn (every seat is signed out or disabled); sign a seat ' +
+                'in from the System page, or name seats with `clis`') + ' — see refused',
           refused,
         });
       }
@@ -3119,12 +3122,23 @@ export function registerRoutes(
     const repoRef = scope !== undefined && scope.kind === 'repos' && scope.repos.length === 1 ? scope.repos[0]!.id : undefined;
     const projectId = scope?.projectId;
     const voice = path.pa !== null ? [path.pa] : [];
+    // The turn is reserved for the voice — or, for a random pick (no PA yet), for the whole
+    // eligible roster: the relay narrows it to the PA when `path.started` names one (ASK-C2), so
+    // the PA's frames are stamped with this turn and a second message is refused meanwhile.
+    const audience = voice.length > 0 ? voice : path.eligible;
     // crew#641/#650 re-stated for a path: ONE eligible seat means no distinct reviewer and no
     // helper — said on every turn (the engine's `member.joined{seat:null}` says it on the bus).
     const singleSeat202 =
       path.eligible.length === 1
         ? { singleSeat: singleSeatDisclosure(path.eligible[0]!, chatScopes.refusedOf(id), 'turn') }
         : {};
+    // F6: a message while the PA is still answering — the previous turn has no reply yet (the
+    // run may already wait at its gate while the relay's reply is a bus poll away; codex on #810
+    // r1, 3) — is refused: nothing is sent, the composer keeps the draft.
+    const pendingTurn = chatTurns.inFlight(id);
+    if (pendingTurn !== null) {
+      return reply.code(409).send(turnInFlightBody(id, pendingTurn, 'Nothing was sent.'));
+    }
     // One message at a time per chat, on this daemon: the reservation covers the launch, and a
     // continuation's status read → proposal → approval (two continuations racing would both
     // read `awaiting_human` and both hold an edit; the second's approval then fails).
@@ -3137,7 +3151,7 @@ export function registerRoutes(
         ...(path.runId !== undefined ? { runId: path.runId } : {}),
       });
     }
-    const turn = chatTurns.begin(id, voice, text);
+    const turn = chatTurns.begin(id, audience, text);
     const turnId = turn?.turnId ?? randomUUID();
     // What an ACCEPTED message records — the engine has it, so a persistence failure here is
     // logged, never a retraction of a turn that is already being answered (codex on #808 r2, 9).
@@ -3146,7 +3160,21 @@ export function registerRoutes(
         after();
         if (preface !== null) chatTranscripts?.appendSystem(id, turnId, preface);
         chatTranscripts?.appendUser(id, turnId, text, voice);
-        chatRecorder?.noteSend(id, turnId, actorOf(req), text, voice);
+        // The recorder's audience is the turn's AS THE TURN INDEX HOLDS IT NOW: the eligible roster
+        // for a random pick, or the PA the relay narrowed it to during the engine awaits above
+        // (`path.started` / `path.repicked` may land before this record exists — ASK-C2, codex on
+        // #810 r2, 3).
+        const settled = chatTurns.turnsOf(id).find((t) => t.turnId === turnId)?.seats;
+        const pa = askPaths.get(id)?.pa ?? null;
+        chatRecorder?.noteSend(
+          id,
+          turnId,
+          actorOf(req),
+          text,
+          // The turn index's voice; a turn already ended by an early reply names none, so the
+          // path's PA stands in; the reserved audience last.
+          settled !== undefined && settled.length > 0 ? settled : pa !== null ? [pa] : audience,
+        );
       } catch (err) {
         app.log.warn(`chat ${id}: turn ${turnId} was accepted by the engine but not fully recorded: ${message(err)}`);
       }
@@ -3296,7 +3324,9 @@ export function registerRoutes(
       try {
         // ASK-C1: a re-seat re-admits the named seats that pass admission NOW (a sign-in fixed)
         // into the path's eligible roster; nothing is warmed and the engine is not called.
-        const scopedChat = (chatScopes.get(id)?.kind ?? 'none') !== 'none' && chatScopes.get(id)?.kind !== 'system';
+        const scopeNow = chatScopes.get(id);
+        const scopedChat = (scopeNow?.kind ?? 'none') !== 'none' && scopeNow?.kind !== 'system';
+        const reseatKind = scopeNow?.kind === 'repos' && scopeNow.repos.length === 1 ? 'path-bound' : 'path';
         const standingNow = rosterWithStanding();
         const seats = clis.map((cliKey) => {
           const seat = standingNow.find((s) => String(s.key) === cliKey);
@@ -3305,6 +3335,7 @@ export function registerRoutes(
             seat as { key: string; enabled_for_council?: boolean; acp?: { acp_input_governance?: boolean; os_sandbox?: boolean } | null },
             seat.auth ?? 'unknown',
             scopedChat,
+            reseatKind,
           );
           return admission.ok ? { cliKey, ok: true } : { cliKey, ok: false, error: admission.reason };
         });

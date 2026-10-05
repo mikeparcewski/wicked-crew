@@ -285,14 +285,47 @@ export type ChatAdmission = { ok: true } | { ok: false; reason: string; source: 
  * `council_eligible` / health are deliberately NOT consulted here — a seat benched in councils can
  * still answer a chat, and saying otherwise would refuse a working seat.
  */
-export function chatSeatAdmission(seat: StandingSeat, auth: SeatAuth, scoped: boolean): ChatAdmission {
+export function chatSeatAdmission(
+  seat: StandingSeat,
+  auth: SeatAuth,
+  scoped: boolean,
+  /** `pool`: the warm chat pool (an ACP session held read-only — the structural rules below).
+   *  `path` (ASK-C1/C2, DES-ASK-TEAM-CHAT-001 §4.2): an ask is a team RUN. The seat's standing
+   *  (signed in, enabled) is the gate; the structural rule stays ONLY where the run itself cannot
+   *  hold the repositories read-only — a scoped ask that is not bound to one repository (several
+   *  repos, a project, everything): no worktree, no guard, no default sandbox (codex on #810 r9).
+   *  `path-bound`: a single-repo ask — the run is bound (worktree snapshot + guard + mutation
+   *  check), so every seat in standing is eligible, wrapped ones included. */
+  kind: 'pool' | 'path' | 'path-bound' = 'pool',
+): ChatAdmission {
   const reasons: string[] = [];
   let source: ChatRefusalSource = 'scope';
   if (!authUsable(auth)) {
     reasons.push('signed out — it cannot take a turn until it is signed in from the System page');
     source = 'auth';
   }
+  if (seat.enabled_for_council === false) {
+    reasons.push('disabled for the council, so it takes no turn');
+  }
+  if (kind === 'path-bound' || (kind === 'path' && !scoped)) {
+    return reasons.length === 0 ? { ok: true } : { ok: false, reason: reasons.join('; '), source };
+  }
   const acp = seat.acp ?? undefined;
+  if (kind === 'path') {
+    // A scoped ask the run cannot bind: the seat must hold itself read-only.
+    if (acp === undefined) {
+      reasons.push(
+        'it has no ACP adapter and this ask reads several repositories (or a project) the run cannot bind, ' +
+          'so nothing would hold them read-only for it — scope the ask to one repository to include it',
+      );
+    } else if (acp.acp_input_governance !== true && acp.os_sandbox !== true) {
+      reasons.push(
+        'its ACP adapter asks no permissions and its record arms no OS sandbox, and this ask reads several ' +
+          'repositories (or a project) the run cannot bind — scope the ask to one repository to include it',
+      );
+    }
+    return reasons.length === 0 ? { ok: true } : { ok: false, reason: reasons.join('; '), source };
+  }
   if (acp === undefined) {
     // F-W1-003 = A (approved 2026-09-15): chat runs on ACP-adapter seats only, scoped AND
     // unscoped. A seat with no ACP adapter is a WRAPPED seat — it does governed work in runs, but

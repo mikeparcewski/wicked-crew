@@ -231,6 +231,8 @@ describe('POST /chats/:id/messages — an ask starts a PATH; refuse mid-turn; co
 
   /** The chat as `POST /chats` leaves it: eligible seats recorded, nothing warmed. */
   const opened = (chatId: string, eligible: string[], primary?: string) => askPaths.open(chatId, eligible, primary);
+  /** The PA answered: the relay's chatReply through the fold ends the turn (ASK-C2). */
+  const answered = (chatId = 'e057', cliKey = 'claude') => stamp({ type: 'chatReply', chat: chatId, cliKey, text: 'A', ok: true } as CoreEvent);
   const send = (body: Record<string, unknown>, chatId = 'e057') =>
     app.inject({ method: 'POST', url: `/api/v1/chats/${chatId}/messages`, payload: body });
 
@@ -277,6 +279,16 @@ describe('POST /chats/:id/messages — an ask starts a PATH; refuse mid-turn; co
     opened('e057', ['claude', 'opencode'], 'claude');
     const first = await send({ text: 'Q1' });
     const turn1 = (first.json() as { turnId: string }).turnId;
+    // (a) ASK-C2 / codex on #810 r1 (3): the previous TURN has no reply yet — refused whatever the
+    // run's status says (the run may wait at its gate while the reply is a bus poll away).
+    runStatus = 'awaiting_human';
+    const pending = await send({ text: 'Q2 before the reply' });
+    expect(pending.statusCode).toBe(409);
+    expect((pending.json() as { code: string }).code).toBe('turn_in_flight');
+    expect(proposed, 'nothing reached the engine').toHaveLength(0);
+    answered();
+    // (b) the reply landed but the run is still executing (a helper turn, a review): refused with
+    // the run named.
     runStatus = 'executing';
     const busy = await send({ text: 'Q2 too soon' });
     expect(busy.statusCode).toBe(409);
@@ -318,6 +330,7 @@ describe('POST /chats/:id/messages — an ask starts a PATH; refuse mid-turn; co
   it('codex on #808 (1): two CONCURRENT continuations → exactly one proposal + approval; the loser is 409 turn_in_flight (the reservation spans status read → proposal → approval)', async () => {
     opened('e057', ['claude'], 'claude');
     await send({ text: 'Q1' });
+    answered();
     let release: () => void = () => undefined;
     holdPropose = { promise: new Promise<void>((r) => { release = r; }), release: () => release() };
     const a = send({ text: 'Q2-a' });
@@ -329,8 +342,9 @@ describe('POST /chats/:id/messages — an ask starts a PATH; refuse mid-turn; co
     expect(proposed, 'ONE continuation reached the engine').toHaveLength(1);
     expect(approved, 'and ONE approval (a launch is not approved — it has no gate yet)').toEqual(['run-1']);
     const loser = ra.statusCode === 409 ? ra : rb;
-    expect(loser.json()).toMatchObject({ code: 'turn_in_flight', runId: 'run-1' });
-    // The reservation is released with the reply: a third message continues.
+    expect(loser.json()).toMatchObject({ code: 'turn_in_flight' }); // the winner's turn is pending (ASK-C2 F6)
+    // The reservation is released with the reply: a third message continues once the PA answered.
+    answered();
     expect((await send({ text: 'Q3' })).statusCode).toBe(202);
     expect(proposed).toHaveLength(2);
   });
@@ -379,6 +393,7 @@ describe('POST /chats/:id/messages — an ask starts a PATH; refuse mid-turn; co
   it('codex on #808 r3 (2): a continuation parked on its status read while the chat is closed and its id reopened lands NOTHING on the newcomer', async () => {
     opened('e057', ['claude'], 'claude');
     await send({ text: 'Q1' });
+    answered();
     holdStatus = gate();
     const q2 = send({ text: 'Q2' }); // generation 1, parked on sessionsDetail
     await new Promise((r) => setTimeout(r, 20));
@@ -440,6 +455,23 @@ describe('POST /chats/:id/messages — an ask starts a PATH; refuse mid-turn; co
     expect(cancelled).toEqual(['run-1']);
   });
 
+  it('codex on #810 r2 (3): the decision recorder hears the audience the turn index holds at ACCEPTANCE — a re-pick that lands during the continuation awaits is not lost', async () => {
+    opened('e057', ['claude', 'opencode']); // random: the turn is reserved for both
+    const first = await send({ text: 'Q1' });
+    const turn1 = (first.json() as { turnId: string }).turnId;
+    expect(turns.turnsOf('e057')[0]!.seats).toEqual(['claude', 'opencode']);
+    turns.reconcile('e057', turn1, ['opencode']); // the relay learned the PA from path.started
+    answered('e057', 'opencode');
+    holdPropose = gate();
+    const q2 = send({ text: 'Q2' });
+    await new Promise((r) => setTimeout(r, 20));
+    const live = turns.turnsOf('e057')[0]!;
+    turns.reconcile('e057', live.turnId, ['opencode']); // the relay learned the PA mid-await
+    holdPropose.release();
+    expect((await q2).statusCode).toBe(202);
+    expect(turns.turnsOf('e057')[0]!.seats, 'the turn index holds the settled voice the route reads at acceptance').toEqual(['opencode']);
+  });
+
   it('codex on #808 r2 (2): DELETE folds the close BEFORE it awaits the cancel — nothing of the closed chat lands after an await', async () => {
     opened('e057', ['claude'], 'claude');
     await send({ text: 'Q1' });
@@ -467,6 +499,7 @@ describe('POST /chats/:id/messages — an ask starts a PATH; refuse mid-turn; co
   it('codex on #808 r2 (7+8): a refused continuation does not consume a fresh rule; the accepted retry carries it in the step and the transcript shows the system row', async () => {
     opened('e057', ['claude'], 'claude');
     await send({ text: 'Q1' }); // seeds what the seats were told (no rules yet)
+    answered();
     rulesNow = [{ id: 'R1', statement: 'Cite the file for every claim', severity: 'high', targets: {} }];
     runStatus = 'executing';
     const refused = await send({ text: 'Q2' });
@@ -474,6 +507,7 @@ describe('POST /chats/:id/messages — an ask starts a PATH; refuse mid-turn; co
     runStatus = 'awaiting_human';
     const ok = await send({ text: 'Q2' });
     expect(ok.statusCode).toBe(202);
+    answered();
     const step = (proposed[0]!.plan as { steps: Array<{ instructions: string }> }).steps[0]!;
     expect(step.instructions, 'the fresh rule rides the accepted step').toMatch(/\[rule:R1\][\s\S]*Q2$/);
     const rows = transcripts.read('e057');

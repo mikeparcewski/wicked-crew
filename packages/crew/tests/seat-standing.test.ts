@@ -155,3 +155,24 @@ describe('chatSeatAdmission — the default seats of a chat, and WHY a seat is n
     expect(both.reason.split('; ')).toHaveLength(2);
   });
 });
+
+describe('ASK-C2 path admission (codex on #810 r9): standing is the gate where the run is bound; the structural rule stays where it is not', () => {
+  const wrapped = { key: 'codex', enabled_for_council: true } as never;
+  const permissionless = { key: 'pi', enabled_for_council: true, acp: { acp_input_governance: false, os_sandbox: false } } as never;
+  const governed = { key: 'claude', enabled_for_council: true, acp: { acp_input_governance: true, os_sandbox: false } } as never;
+  it('path-bound (one repository): every seat in standing', () => {
+    expect(chatSeatAdmission(wrapped, 'signed_in', true, 'path-bound')).toEqual({ ok: true });
+    expect(chatSeatAdmission(permissionless, 'signed_in', true, 'path-bound')).toEqual({ ok: true });
+    expect(chatSeatAdmission(wrapped, 'signed_out', true, 'path-bound')).toMatchObject({ ok: false, source: 'auth' });
+    expect(chatSeatAdmission({ key: 'agy', enabled_for_council: false } as never, 'signed_in', true, 'path-bound')).toMatchObject({ ok: false, reason: expect.stringMatching(/disabled/) });
+  });
+  it('path, unscoped: standing only; path, scoped but unbound (several repos / a project): the seat must hold itself read-only', () => {
+    expect(chatSeatAdmission(wrapped, 'signed_in', false, 'path')).toEqual({ ok: true });
+    expect(chatSeatAdmission(wrapped, 'signed_in', true, 'path')).toMatchObject({ ok: false, reason: expect.stringMatching(/cannot bind/) });
+    expect(chatSeatAdmission(permissionless, 'signed_in', true, 'path')).toMatchObject({ ok: false, reason: expect.stringMatching(/scope the ask to one repository/) });
+    expect(chatSeatAdmission(governed, 'signed_in', true, 'path')).toEqual({ ok: true });
+  });
+  it('pool (default): unchanged — a wrapped seat is never a pool seat', () => {
+    expect(chatSeatAdmission(wrapped, 'signed_in', false)).toMatchObject({ ok: false, reason: expect.stringMatching(/no ACP adapter/) });
+  });
+});
