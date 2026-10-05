@@ -3119,6 +3119,10 @@ export function registerRoutes(
     const repoRef = scope !== undefined && scope.kind === 'repos' && scope.repos.length === 1 ? scope.repos[0]!.id : undefined;
     const projectId = scope?.projectId;
     const voice = path.pa !== null ? [path.pa] : [];
+    // The turn is reserved for the voice — or, for a random pick (no PA yet), for the whole
+    // eligible roster: the relay narrows it to the PA when `path.started` names one (ASK-C2), so
+    // the PA's frames are stamped with this turn and a second message is refused meanwhile.
+    const audience = voice.length > 0 ? voice : path.eligible;
     // crew#641/#650 re-stated for a path: ONE eligible seat means no distinct reviewer and no
     // helper — said on every turn (the engine's `member.joined{seat:null}` says it on the bus).
     const singleSeat202 =
@@ -3137,7 +3141,7 @@ export function registerRoutes(
         ...(path.runId !== undefined ? { runId: path.runId } : {}),
       });
     }
-    const turn = chatTurns.begin(id, voice, text);
+    const turn = chatTurns.begin(id, audience, text);
     const turnId = turn?.turnId ?? randomUUID();
     // What an ACCEPTED message records — the engine has it, so a persistence failure here is
     // logged, never a retraction of a turn that is already being answered (codex on #808 r2, 9).

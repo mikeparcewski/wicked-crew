@@ -337,7 +337,9 @@ describe('the server wiring: one chatCitations frame per reply, after the rewrit
       ],
       // ASK-C1: an ask starts a path — the send launches one run on the fake engine.
       launchRun: async () => 'run-cite',
-      sessionsDetail: async () => [{ session: { id: 'run-cite', status: 'awaiting_human' }, units: [] }],
+      // ASK-C2: the path's answer unit, as the relay resolves it (id `<run>:answer-1`, the PA's seat).
+      sessionsDetail: async () => [{ session: { id: 'run-cite', status: 'awaiting_human' }, units: [{ id: 'run-cite:answer-1', ord: 1, status: 'done', assigned_cli: 'claude' }] }],
+      workOutput: async () => 'The stored answer.',
       proposePlan: async () => ({ ok: true }),
       confirmGate: async () => 'awaiting_human',
       cancelRun: async () => 'cancelled',
@@ -452,6 +454,23 @@ describe('the server wiring: one chatCitations frame per reply, after the rewrit
 
     await app.inject({ method: 'DELETE', url: '/api/v1/chats/cite-1' });
   }, 30_000);
+
+  it('ASK-C2 wiring: the path run\'s unitOutputDelta reaches /ws as a chatDelta for the PA, stamped with the message\'s turn; a unitDone with no step.completed row yet emits no reply', async () => {
+    const opened = await app.inject({ method: 'POST', url: '/api/v1/chats', payload: { chatId: 'relay-1', clis: ['claude'], repoRefs: ['alpha'] } });
+    expect(opened.statusCode, opened.body).toBe(201);
+    const sent = await app.inject({ method: 'POST', url: '/api/v1/chats/relay-1/messages', payload: { text: 'what answers?' } });
+    expect(sent.statusCode, sent.body).toBe(202);
+    const { turnId } = sent.json() as { turnId: string };
+    received.length = 0;
+    emit({ type: 'unitOutputDelta', session: 'run-cite', ord: 1, attempt: 1, text: 'HELP: who?\nTyping…\n' } as CoreEvent);
+    await waitFor(() => received.some((f) => f.type === 'chatDelta'), 'the relayed chatDelta');
+    const delta = received.find((f) => f.type === 'chatDelta') as CoreEvent & Record<string, unknown>;
+    expect(delta).toMatchObject({ type: 'chatDelta', chat: 'relay-1', cliKey: 'claude', text: 'Typing…\n', turn_id: turnId });
+    emit({ type: 'unitDone', session: 'run-cite', ord: 1 } as CoreEvent);
+    await new Promise((r) => setTimeout(r, 60));
+    expect(received.filter((f) => f.type === 'chatReply'), 'the reply waits for the row that names its text').toEqual([]);
+    await app.inject({ method: 'DELETE', url: '/api/v1/chats/relay-1' });
+  });
 
   it('codex on #808 r3 (1): End drops the ended path\'s transcript with the chat even though its run was still retaining it — a chat that reuses the id starts empty', async () => {
     const opened = await app.inject({ method: 'POST', url: '/api/v1/chats', payload: { chatId: 'cite-3', clis: ['claude'], repoRefs: ['alpha'] } });

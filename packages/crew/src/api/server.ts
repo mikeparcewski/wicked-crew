@@ -62,13 +62,15 @@ import { discoverMcpServers } from '../mcp/discovery.js';
 import { probeMcpServer } from '../mcp/probe.js';
 import { budgetFromEnv, MCP_CALL_COMPLETED, McpBroker } from '../mcp/broker.js';
 import { McpCallRecordFile } from '../mcp/call-records.js';
-import { emitOnBus } from '../core/bus.js';
+import { emitOnBus, type BusEvent } from '../core/bus.js';
 import { McpRegistry } from '../mcp/registry.js';
 import { McpRegistryStore } from '../mcp/registry-store.js';
 import { platformSecretStore } from '../mcp/secrets.js';
 import { startProjectBus, MEMBERSHIP_ATTACHED, membershipAttachedKey } from '../projects/events.js';
 import { startInteractiveWsRelay, registerInteractiveEventRoutes } from '../interactive/ws-relay.js';
 import { startTeamWsRelay } from '../team/ws-relay.js';
+import { AskPathIndex } from './ask-paths.js';
+import { AskRelay } from './ask-relay.js';
 import { MembershipIndex } from '../projects/membership-index.js';
 import { writeRunEvidencePointer } from '../projects/charter.js';
 import {
@@ -589,6 +591,9 @@ export async function createServer(
   // `run.launched` entries that carry a `chatId`) and kept in sync by the event loop.
   const chatRetained = new Map<string, Set<string>>();
   const runToChat = new Map<string, string>();
+  // ASK-C1/C2: the daemon's record of each chat's ask path (which run answers which chat, the PA,
+  // the reviewer, the helpers) — written by the routes, read by the relay below. In-memory.
+  const askPaths = new AskPathIndex();
   // Retry lineage (CREW-UX-3) + ad-hoc group attach (wicked-studio#27): both durable records
   // live in the trail's `run.launched` entries, so ONE exhaustive scan feeds both indexes —
   // boot stays at three full-file trail scans, not four (the crew#321 consolidation note).
@@ -918,9 +923,12 @@ export async function createServer(
           dbPath: teamBusDb,
           projectOf: (runId) => membershipIndex.projectOf(runId),
           // Standing orders (behaviour 10) read the same team rows: a finding can wake the operator.
+          // ASK-C2: the ask relay reads them too (path.started → the PA; step.completed → the
+          // reply's text source).
           broadcast: (frame) => {
             broadcast(frame);
             void standingOrderEvaluator?.onTeamFrame(frame);
+            askRelay.onTeamRow((frame as unknown as { event?: BusEvent }).event);
           },
           ...(options?.teamWsRelay?.pollIntervalMs !== undefined
             ? { pollIntervalMs: options.teamWsRelay.pollIntervalMs }
@@ -1388,6 +1396,20 @@ export async function createServer(
   // CoreEvent stream below; `POST /chats/:id/messages` refuses a send to a busy seat and the
   // chat frames leave here stamped with the `turn_id` they answer.
   const chatTurns = new ChatTurnIndex();
+  // ASK-C2 (DES-ASK-TEAM-CHAT-001 §5.2): the ask relay — the answer unit's deltas as chatDelta, the
+  // step.completed row's output as the chatReply, both fed back through the fold below so the turn
+  // index stamps them and the transcript/recorder/citations/ws consumers are unchanged.
+  const askRelay = new AskRelay({
+    paths: askPaths,
+    turns: chatTurns,
+    workOutput: (unitId) => adapter.workOutput(unitId),
+    units: async (runId) => {
+      const view = (await adapter.sessionsDetail()).find((v) => v.session.id === runId);
+      return (view?.units ?? []).map((u) => ({ id: u.id, ord: u.ord, status: String(u.status), assigned_cli: u.assigned_cli ?? null }));
+    },
+    fold: (frame) => onEngineEvent(frame),
+    log: (m) => app.log.warn(m),
+  });
   // Chat transcripts at rest (DES-L5, D-13): one JSONL per LIVE chat under `<state home>/chats/`,
   // written from the stamped frames below, dropped with the chat on `chatClosed`, served on
   // `GET /chats/:id.messages`.
@@ -1472,6 +1494,9 @@ export async function createServer(
     gateCache.ingest(event);
     elicitationCache.ingest(event);
     seatHealth.ingest(event);
+    // ASK-C2: a path run's unit frames become the chat's frames (re-entering this fold as
+    // chatDelta / chatReply, which the relay ignores — no recursion).
+    if (event.type === 'unitOutputDelta' || event.type === 'unitDone') void askRelay.onCoreEvent(event);
     if (event.type === 'chatClosed' && typeof event.chat === 'string') {
       chatScopes.closed(event.chat);
       // DC-S4b: whatever the chat's open turns gathered is recorded now — into the ledger and onto
@@ -1877,6 +1902,8 @@ export async function createServer(
       // Routes that say something to the thread (a refused chat seat, F-2R2-007) emit through the
       // SAME /ws fan-out the engine's frames take.
       broadcast: (frame) => broadcast(frame),
+      // ASK-C1/C2: the ask-path index the routes write and the relay reads.
+      askPaths,
       // ASK-C1: DELETE /chats/:id on an ask path closes through the same fold an engine
       // `chatClosed` takes (scope slot, decisions, considerations, retention-aware transcript).
       closeChat: async (frame, runId, ticket) => {
@@ -1887,6 +1914,7 @@ export async function createServer(
           retaining?.delete(runId);
           if (retaining !== undefined && retaining.size === 0) chatRetained.delete(frame.chat);
           runToChat.delete(runId);
+          askRelay.forget(runId);
         }
         // The recorder settles the chat's open turns NOW — resolving the project while the index
         // still names this chat's (the id is parked `closing` until the fold below frees it), and

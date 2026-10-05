@@ -22,7 +22,8 @@ const SRC = fileURLToPath(new URL('../src', import.meta.url));
 // (rule 2 holds it to that; tests/watch-no-authority.test.ts holds the whole registry to advisory).
 // WT-W4: the discovery view READS `wicked.team.plan.*` rows (who put which step in the plan). It emits
 // nothing either.
-const READERS = new Set(['team/ws-relay.ts', 'team/routes.ts', 'standing-orders/evaluator.ts', 'watch/checks/scope-drift.ts', 'api/discovery-source.ts']);
+// ASK-C2: the ask relay reads path.started / member.joined / step.completed rows (never emits).
+const READERS = new Set(['team/ws-relay.ts', 'team/routes.ts', 'standing-orders/evaluator.ts', 'watch/checks/scope-drift.ts', 'api/discovery-source.ts', 'api/ask-relay.ts']);
 
 function sources(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {
