@@ -10,6 +10,13 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-10-05
+
+The bundled UI is wicked-studio 0.6.1: the operator's corrections to the released Desk
+(DES-STUDIO-REBUILD-001 Amendment 5, as revised). No daemon code changed.
+
+- **Bundle wicked-studio `^0.6.1` (was `^0.6.0`).** `build:with-studio` copies the installed studio's `dist/`, so this pin is what ships as the default local skin. Studio 0.6.1: the session is the running chat and a finished `demo` run's recording plays in it as an inline artifact that grows into the video editor (chapters, narration, export) — the run's block no longer links to a separate run page, its ⋯ opens the session sheet with Steps, Changes and Evidence; the Desk rail is Desk · Watchtower · the sessions list · Skills · MCP tools · Steering · Health · "Additional settings" (Configuration, Repositories, Workflows, Evals, Theme) with no Notifications entry; `/everything` (Sessions, Everything made, Helpers, Handed over) carries what the retired list pages carried and the §5.4 moves (`/projects`, `/chats`, `/work`, `/execute`, bare `/runs`, `/vibe`, `/demo`, `/p/:id`) redirect to it; and a signed-out CLI helper's Sign in shows the one terminal command from the roster's `login_invocation`, with Copy and "I've signed in — check again" that re-reads `GET /roster`.
+
 ## [0.8.0] — 2026-10-04
 
 The minor that ships the studio rebuild: the bundled UI is now wicked-studio 0.6.0, and in it the
@@ -3522,7 +3529,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.49...v0.8.0
 [0.7.49]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.48...v0.7.49
 [0.7.48]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.47...v0.7.48
