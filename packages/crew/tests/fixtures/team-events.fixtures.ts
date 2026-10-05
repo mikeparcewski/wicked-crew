@@ -23,7 +23,7 @@ export const TEAM_EVENT_FIXTURES = [
   },
   {
     event_type: "wicked.team.plan.accepted",
-    payload: {"run_id": "r1", "ord": null, "attempt": null, "by": "engine", "at": 1758700000004, "re": null, "plan_rev": 1, "workflow_id": "r1:plan-1", "band": "40-69", "high_risk": false, "mode": "manual", "steps": [{"catalog": "understand", "id": "understand", "added_by": "plan"}, {"catalog": "test_plan", "id": "test-plan", "added_by": "floor", "floor_reason": "band 40-69 requires test_plan"}], "override": {"remove": ["review"], "reason": "docs-only change"}, "proposal_id": "p-0123456789abcdef0123456789abcdef"},
+    payload: {"run_id": "r1", "ord": null, "attempt": null, "by": "engine", "at": 1758700000004, "re": null, "plan_rev": 1, "workflow_id": "r1:plan-1", "band": "40-69", "high_risk": false, "mode": "manual", "steps": [{"catalog": "understand", "id": "understand", "added_by": "plan"}, {"catalog": "test_plan", "id": "test-plan", "added_by": "floor", "floor_reason": "band 40-69 requires test_plan"}], "override": {"remove": ["review"], "reason": "docs-only change"}, "proposal_id": "p-0123456789abcdef0123456789abcdef", "touch": ["src/team/", "src/actor.rs"], "touch_source": "pa_scope"},
   },
   {
     event_type: "wicked.team.plan.refused",
@@ -47,7 +47,7 @@ export const TEAM_EVENT_FIXTURES = [
   },
   {
     event_type: "wicked.team.finding.raised",
-    payload: {"run_id": "r1", "ord": 3, "attempt": 1, "by": "claude#2", "at": 1758700000010, "re": "checkpoint.reached#17", "raise_seq": 4, "finding_id": "f-7bf84000911d564c", "member_id": "m1", "line_key": null, "anchor": null, "anchor_source": null, "severity": "high", "path": "src/retire.ts", "line": 41, "evidence": "fetchCoverage(scope).then(setCount)", "claim": "the fetch is never cancelled", "suggestion": null, "tree": "t-k", "in_diff": true, "corroborated_by": []},
+    payload: {"run_id": "r1", "ord": 3, "attempt": 1, "by": "claude#2", "at": 1758700000010, "re": "checkpoint.reached#17", "raise_seq": 4, "finding_id": "f-7bf84000911d564c", "member_id": "m1", "line_key": "l-7bf84000911d564c", "anchor": null, "anchor_source": null, "severity": "high", "path": "src/retire.ts", "line": 41, "evidence": "fetchCoverage(scope).then(setCount)", "claim": "the fetch is never cancelled", "suggestion": null, "tree": "t-k", "in_diff": true, "corroborated_by": [], "carried_from_attempt": null},
   },
   {
     event_type: "wicked.team.advice.delivered",
@@ -75,7 +75,7 @@ export const TEAM_EVENT_FIXTURES = [
   },
   {
     event_type: "wicked.team.step.reviewed",
-    payload: {"run_id": "r1", "ord": 4, "attempt": 1, "by": "claude#1", "at": 1758700000017, "re": "step.completed#test-plan", "step_id": "test-plan", "verdict": "rejected", "to": "member", "reason": "covers only the happy path"},
+    payload: {"run_id": "r1", "ord": 4, "attempt": 1, "by": "claude#1", "at": 1758700000017, "re": "step.completed#test-plan", "step_id": "test-plan", "verdict": "rejected", "to": "member", "reason": "covers only the happy path", "reviewed_attempt": null},
   },
   {
     event_type: "wicked.team.finding.settled",
@@ -120,5 +120,21 @@ export const TEAM_EVENT_FIXTURES = [
   {
     event_type: "wicked.team.path.ended",
     payload: {"run_id": "r1", "ord": null, "attempt": null, "by": "engine", "at": 1758700000025, "re": null, "status": "completed"},
+  },
+  {
+    event_type: "wicked.team.path.repicked",
+    payload: {"run_id": "r1", "ord": 1, "attempt": 1, "by": "engine", "at": 1758700000026, "re": null, "from": "claude#1", "to": "codex", "reason": "timed_out", "selection": "random", "pick_seq": 1},
+  },
+  {
+    event_type: "wicked.team.finding.raised",
+    payload: {"run_id": "r1", "ord": 3, "attempt": 1, "by": "claude#2", "at": 1758700000026, "re": null, "raise_seq": 5, "finding_id": "f-3f16b20f4131ddc7", "member_id": "m1", "line_key": "l-3f16b20f4131ddc7", "anchor": null, "anchor_source": "none", "severity": "medium", "target": "output", "path": "answer-1", "line": 2, "evidence": "The retire flow cancels its fetch on unmount.", "claim": "the answer asserts cancellation the code does not show", "suggestion": "cite the effect cleanup", "tree": "t-k", "in_diff": false, "corroborated_by": [], "carried_from_attempt": null},
+  },
+  {
+    event_type: "wicked.team.help.answered",
+    payload: {"run_id": "r1", "ord": 3, "attempt": 1, "by": "claude#2", "at": 1758700000027, "re": "help.requested#h-173a7b6f9ad38fce2f578afd2aa1be38", "help_id": "h-173a7b6f9ad38fce2f578afd2aa1be38", "answer_id": "t-8", "answer": null, "evidence": [], "outcome": "timed_out", "error": "member turn exceeded 240 s"},
+  },
+  {
+    event_type: "wicked.team.member.joined",
+    payload: {"run_id": "r1", "ord": 3, "attempt": 1, "by": "engine", "at": 1758700000028, "re": null, "member_id": "m1", "open_seq": 2, "seat": null, "role": "monitor", "status": "failed", "reason": "no distinct signed-in seat", "error": "only claude is signed in"},
   },
 ] satisfies Wire.TeamBusEvent[];

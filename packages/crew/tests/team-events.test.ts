@@ -33,6 +33,8 @@ function keyParts(ev: Wire.TeamBusEvent): string[] {
     case 'wicked.team.path.started':
     case 'wicked.team.path.ended':
       return [];
+    case 'wicked.team.path.repicked':
+      return [String(ev.payload.pick_seq)];
     case 'wicked.team.path.scored':
       return [ev.payload.score_source];
     case 'wicked.team.plan.proposed':
@@ -106,6 +108,10 @@ const ENGINE_KEYS = [
   '8d1d1f6e960c61422d2c33cff742f6c5',
   'e4b13241087ea34f29f7508ab089b566',
   '8741e4e2305194adf64fedb610c1d12a',
+  '6801a7c425b0492bae48fc28bb7538fd',
+  '90d0992402c6961990fd4132ba689970',
+  'b894dd61906c0914cb64544de00a69bc',
+  '6c4b6dbd19e6db42c358e9e1557e1d7f',
 ];
 
 describe('team keys (DES-TEAMING-002 §4.1)', () => {
@@ -133,9 +139,9 @@ describe('team payloads (DES-TEAMING-002 §6)', () => {
     expect(TEAM_EVENT_FIXTURES.map((ev) => ({ type: ev.event_type, payload: ev.payload }))).toEqual(ENGINE_FIXTURES);
   });
 
-  it('covers all 25 types, every one four segments under wicked.team', () => {
+  it('covers all 26 types, every one four segments under wicked.team', () => {
     const types = new Set(TEAM_EVENT_FIXTURES.map((ev) => ev.event_type));
-    expect(types.size).toBe(25);
+    expect(types.size).toBe(26);
     for (const t of types) expect(t).toMatch(/^wicked\.team\.[a-z_]+\.[a-z_]+$/);
   });
 });

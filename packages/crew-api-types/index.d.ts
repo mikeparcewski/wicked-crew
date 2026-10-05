@@ -7116,7 +7116,9 @@ export type TeamEventType =
   | 'wicked.team.ledger.folded'
   | 'wicked.team.gate.opened'
   | 'wicked.team.gate.decided'
-  | 'wicked.team.path.ended';
+  | 'wicked.team.path.ended'
+  /** (DES-ASK-TEAM-CHAT-001 §4.1; core ASK-K1a) The PA changed mid-path. */
+  | 'wicked.team.path.repicked';
 
 /** The fields every team payload carries. */
 export interface TeamEnvelope {
@@ -7216,6 +7218,15 @@ export type TeamPlanAcceptedPayload = TeamEnvelope & {
   steps: TeamPlanStep[];
   override: TeamPlanOverride | null;
   proposal_id: string | null;
+  /**
+   * (core TR-W1a) This rev's declared touch unioned with every earlier accepted rev's, first-seen
+   * order, capped; absent on rows written before the field existed. `touch_source` names where
+   * THIS rev's declared touch came from: `user` (the launch), `pa_scope` (the PA's SCOPE answer,
+   * or — DES-TEAMING-002 rev 15 — the touch a first-creator PA `PLAN+` declared), `none`.
+   */
+  touch?: string[];
+  touch_truncated?: boolean;
+  touch_source?: 'user' | 'pa_scope' | 'none' | (string & {});
 };
 
 export type TeamPlanRefusedPayload = TeamEnvelope & {
@@ -7227,7 +7238,12 @@ export type TeamPlanRefusedPayload = TeamEnvelope & {
 export type TeamMemberJoinedPayload = TeamEnvelope & {
   member_id: string;
   open_seq: number;
-  seat: string;
+  /**
+   * (DES-ASK-TEAM-CHAT-001 §4.6; core ASK-K3a) `null` on a `status: 'failed'` row published when
+   * no distinct seat exists to seat the member on (one signed-in seat); `member_id`/`open_seq`
+   * are still minted, so the row keeps its key.
+   */
+  seat: string | null;
   role: 'monitor' | (string & {});
   status: 'attached' | 'failed' | (string & {});
   reason: string;
@@ -7271,6 +7287,12 @@ export type TeamFindingRaisedPayload = TeamEnvelope & {
   anchor: string | null;
   anchor_source: 'graph' | 'hunk' | 'none' | (string & {}) | null;
   severity: 'high' | 'medium' | (string & {});
+  /**
+   * (DES-ASK-TEAM-CHAT-001 §4.6; core ASK-K3a) What the finding cites: a line of the settled tree
+   * (`tree`, absent on old rows) or a line of the step's output (`output`: `path` is the step id,
+   * `line` a line of the output; the bar is `medium`).
+   */
+  target?: 'tree' | 'output' | (string & {});
   path: string;
   line: number;
   evidence: string;
@@ -7279,6 +7301,8 @@ export type TeamFindingRaisedPayload = TeamEnvelope & {
   tree: string;
   in_diff: boolean;
   corroborated_by: string[];
+  /** (core T6) The attempt that first raised it, when a redriven attempt carried it; else null. */
+  carried_from_attempt?: number | null;
 };
 
 export type TeamAdviceDeliveredPayload = TeamEnvelope & {
@@ -7311,8 +7335,16 @@ export type TeamHelpRequestedPayload = TeamEnvelope & {
 export type TeamHelpAnsweredPayload = TeamEnvelope & {
   help_id: string;
   answer_id: string;
-  answer: string;
+  /** `null` when `outcome` is not `answered` (core ASK-K3a). */
+  answer: string | null;
   evidence: string[];
+  /**
+   * (DES-ASK-TEAM-CHAT-001 §4.5; core ASK-K3a) The help turn's terminal outcome, a fact on the row
+   * S owns — never inferred from a missing row. Absent on old rows (= `answered`).
+   */
+  outcome?: 'answered' | 'timed_out' | 'failed' | 'no_member' | (string & {});
+  /** Why, for a non-`answered` outcome. */
+  error?: string | null;
 };
 
 export type TeamChangeRequestedPayload = TeamEnvelope & {
@@ -7335,6 +7367,8 @@ export type TeamStepReviewedPayload = TeamEnvelope & {
   verdict: 'accepted' | 'rejected' | (string & {});
   to: 'member' | 'pa' | (string & {}) | null;
   reason: string;
+  /** (core T6) The attempt of `step_id` the verdict is about; null on rows written before it existed. */
+  reviewed_attempt?: number | null;
 };
 
 export type TeamFindingSettledPayload = TeamEnvelope & {
@@ -7490,6 +7524,21 @@ export type TeamPathEndedPayload = TeamEnvelope & {
   status: 'completed' | 'failed' | 'cancelled' | (string & {});
 };
 
+/**
+ * (DES-ASK-TEAM-CHAT-001 §4.1; core ASK-K1a) `wicked.team.path.repicked` (E): a PA step's attempt
+ * ended for a seat cause (`timed_out`, `failed`, a seat refusal's class) and another eligible seat
+ * took over as the PA. The envelope's `ord`/`attempt` name the step; it is redispatched as
+ * attempt+1 on `to`. Keyed by `pick_seq`, the engine's per-run re-pick counter (from 1).
+ */
+export type TeamPathRepickedPayload = TeamEnvelope & {
+  from: string;
+  to: string;
+  reason: string;
+  /** Always `'random'`: a re-pick is never the operator's choice. */
+  selection: 'random' | (string & {});
+  pick_seq: number;
+};
+
 /** Each team event type's payload. */
 export interface TeamEventPayloads {
   'wicked.team.path.started': TeamPathStartedPayload;
@@ -7517,6 +7566,7 @@ export interface TeamEventPayloads {
   'wicked.team.gate.opened': TeamGateOpenedPayload;
   'wicked.team.gate.decided': TeamGateDecidedPayload;
   'wicked.team.path.ended': TeamPathEndedPayload;
+  'wicked.team.path.repicked': TeamPathRepickedPayload;
 }
 
 /** One team bus row, discriminated on `event_type`. */
