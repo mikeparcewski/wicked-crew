@@ -504,3 +504,24 @@ describe('ASK-C2 (codex on #810 r1, 7): reconcile narrows a turn\'s audience to 
     h.recorder.reconcile('c1', 'nope', ['codex']);
   });
 });
+
+describe('ASK-C2 (codex on #810 r3, 3): a reply that beats the send record is held and folded when noteSend arrives', () => {
+  it('onReply before noteSend → buffered; noteSend replays it → the turn is recorded with the PA\'s block; a stale buffer is swept', async () => {
+    const h = harness({ staleAfterMs: 1_000 });
+    const human = { kind: 'human', id: 'op' } as never;
+    const items = [{ quote: 'we ship on friday', decision_text: 'Ship on Friday.', type: 'rule', codify: true, ambiguous: false, steering_type: 'operations', approves_proposal: false, same_as: null }];
+    await h.recorder.onReply({ chat: 'c1', cliKey: 'codex', turnId: 't1', ok: true, block: JSON.stringify({ items }) });
+    expect(h.recorder.diagnostics().recorded_turns).toBe(0);
+    h.recorder.noteSend('c1', 't1', human, 'we ship on friday', ['codex']);
+    await h.recorder.idle();
+    expect(h.recorder.diagnostics().recorded_turns).toBe(1);
+    expect(h.recorder.diagnostics().unclassified_turns).toBe(0);
+    // A buffered reply nobody claims is swept once stale.
+    await h.recorder.onReply({ chat: 'c2', cliKey: 'codex', turnId: 't9', ok: true, block: null });
+    h.tick(2_000);
+    h.recorder.noteSend('c3', 't3', human, 'trigger', ['codex']); // sweeps
+    h.recorder.noteSend('c2', 't9', human, 'late send', ['codex']); // nothing to replay: the turn waits for codex
+    await h.recorder.idle();
+    expect(h.recorder.diagnostics().recorded_turns).toBe(1);
+  });
+});

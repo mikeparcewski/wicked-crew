@@ -194,6 +194,7 @@ export class AskRelay {
         const ref = refOf(outputRef);
         if (ref === null) return;
         this.nested(this.rows, runId, ref.ord).set(ref.attempt, { stepId, status, attempt: ref.attempt });
+        this.noteAttempt(runId, ref.ord, ref.attempt); // one monotonic boundary across rows and frames (r3, 1)
         // A fold is waiting for this very row (the row came late on the poll): the reply is due.
         const key = `${runId}:${ref.ord}`;
         if (this.waiting.has(key) && ref.attempt >= this.attemptOf(runId, ref.ord)) {
@@ -246,9 +247,10 @@ export class AskRelay {
     const unit = await this.unit(runId, ord);
     if (this.deps.paths.chatOf(runId) !== chatId) return; // ended meanwhile (r1, 4)
     if (unit === null || answerStepOf(runId, unit.id) === null) return; // not the PA's answer: no chat frame
+    // Superseded during the await: neither streamed nor allowed to name the PA (r3, 2).
+    if (attempt !== undefined && attempt < this.attemptOf(runId, ord)) return;
     const pa = this.paOf(runId, chatId, unit);
     if (event.type === 'unitOutputDelta') {
-      if (attempt !== undefined && attempt < this.attemptOf(runId, ord)) return; // superseded during the await
       const text = typeof f['text'] === 'string' ? f['text'] : '';
       const shown = this.deltaText(`${runId}:${ord}`, text);
       if (shown !== '') this.deps.fold({ type: 'chatDelta', chat: chatId, cliKey: pa, text: shown } as CoreEvent);
@@ -325,12 +327,13 @@ export class AskRelay {
     }
   }
 
-  /** The attempt the fold settles for (run, ord): the latest seen, else the latest row's, else 1. */
+  /** The attempt the fold settles for (run, ord): the latest the engine's frames OR the team rows
+   *  named — one monotonic boundary (r3, 1) — else 1. */
   private attemptOf(runId: string, ord: number): number {
-    const seen = this.attempts.get(runId)?.get(ord);
-    if (seen !== undefined) return seen;
+    const seen = this.attempts.get(runId)?.get(ord) ?? 0;
     const rows = this.rows.get(runId)?.get(ord);
-    return rows !== undefined && rows.size > 0 ? Math.max(...rows.keys()) : 1;
+    const fromRows = rows !== undefined && rows.size > 0 ? Math.max(...rows.keys()) : 0;
+    return Math.max(seen, fromRows, 1);
   }
 
   private rowFor(runId: string, ord: number): CompletedRow | undefined {
@@ -372,6 +375,7 @@ export class AskRelay {
     const cached = byOrd.get(ord);
     // A unit with no seat yet is re-read (the seat is assigned at dispatch).
     if (cached !== undefined && (cached === null || cached.assigned_cli !== null)) return cached;
+    const startedUnder = this.attemptOf(runId, ord);
     let found: RelayUnit | null = null;
     try {
       found = (await this.deps.units(runId)).find((u) => u.ord === ord) ?? null;
@@ -380,8 +384,11 @@ export class AskRelay {
       return cached ?? null;
     }
     // Not found: not cached (the unit may be planned later — a continuation adds answer-N). A run
-    // forgotten during the read (End) stays forgotten (r2, 4).
-    if (found !== null && this.units.has(runId)) this.nestedOne(this.units, runId).set(ord, found);
+    // forgotten during the read (End) stays forgotten (r2, 4); a read that started under an attempt
+    // the engine has since superseded is not cached either — it may name the old seat (r3, 2).
+    if (found !== null && this.units.has(runId) && this.attemptOf(runId, ord) === startedUnder) {
+      this.nestedOne(this.units, runId).set(ord, found);
+    }
     return found;
   }
 

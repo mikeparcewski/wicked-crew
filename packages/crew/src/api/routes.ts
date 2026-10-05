@@ -3162,7 +3162,16 @@ export function registerRoutes(
         // (`path.started` / `path.repicked` may land before this record exists — ASK-C2, codex on
         // #810 r2, 3).
         const settled = chatTurns.turnsOf(id).find((t) => t.turnId === turnId)?.seats;
-        chatRecorder?.noteSend(id, turnId, actorOf(req), text, settled !== undefined && settled.length > 0 ? settled : audience);
+        const pa = askPaths.get(id)?.pa ?? null;
+        chatRecorder?.noteSend(
+          id,
+          turnId,
+          actorOf(req),
+          text,
+          // The turn index's voice; a turn already ended by an early reply names none, so the
+          // path's PA stands in; the reserved audience last.
+          settled !== undefined && settled.length > 0 ? settled : pa !== null ? [pa] : audience,
+        );
       } catch (err) {
         app.log.warn(`chat ${id}: turn ${turnId} was accepted by the engine but not fully recorded: ${message(err)}`);
       }

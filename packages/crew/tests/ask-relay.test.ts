@@ -272,6 +272,48 @@ describe('AskRelay — the reply', () => {
     expect(reads).toBe(2);
   });
 
+  it('codex on #810 r3 (1): the attempt boundary is ONE across rows and frames — a row for attempt 2 then a delta of attempt 1 (no attempt-2 frame seen) is dropped, and the fold joins the attempt-2 row', async () => {
+    const h = harness({ pa: 'codex' });
+    h.relay.onTeamRow(row('wicked.team.step.completed', { run_id: 'run-1', step_id: 'answer-1', status: 'timed_out', tree: null, output_bytes: 0, output_ref: 'unit:run-1:1:1' }));
+    h.relay.onTeamRow(row('wicked.team.step.completed', { run_id: 'run-1', step_id: 'answer-1', status: 'ok', tree: null, output_bytes: 10, output_ref: 'unit:run-1:1:2' }));
+    await h.relay.onCoreEvent({ type: 'unitOutputDelta', session: 'run-1', ord: 1, attempt: 1, text: 'old text\n' } as CoreEvent);
+    expect(h.emitted, 'the attempt-1 straggler is dropped').toEqual([]);
+    await h.relay.onCoreEvent({ type: 'unitDone', session: 'run-1', ord: 1 } as CoreEvent);
+    const replies = h.emitted.filter((f) => f.type === 'chatReply');
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toMatchObject({ ok: true, text: 'The answer.\nSecond line.' });
+  });
+
+  it('codex on #810 r3 (2): a unit read held across a re-dispatch neither caches the old seat nor lets it name the PA', async () => {
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((r) => { release = r; });
+    let reads = 0;
+    const units: RelayUnit[] = [{ id: 'run-1:answer-1', ord: 1, status: 'distributed', assigned_cli: 'claude' }];
+    const paths = new AskPathIndex();
+    const turns = new ChatTurnIndex();
+    paths.open('c1', ['claude', 'codex']); // random: pa null
+    turns.begin('c1', ['claude', 'codex'], 'Q1');
+    paths.started('c1', 1, 'run-1', 'answer-1');
+    const emitted: Array<CoreEvent & Record<string, unknown>> = [];
+    const relay = new AskRelay({
+      paths,
+      turns,
+      units: async () => { reads += 1; if (reads === 1) await held; return units.map((u) => ({ ...u })); },
+      workOutput: async () => 'x',
+      fold: (f) => emitted.push(f as CoreEvent & Record<string, unknown>),
+    });
+    const oldDelta = relay.onCoreEvent({ type: 'unitOutputDelta', session: 'run-1', ord: 1, attempt: 1, text: 'old\n' } as CoreEvent); // read parked
+    await relay.onCoreEvent({ type: 'unitDispatched', session: 'run-1', ord: 1, attempt: 2 } as CoreEvent); // re-pick: attempt 2
+    units[0] = { ...units[0]!, assigned_cli: 'codex' };
+    release();
+    await oldDelta;
+    expect(emitted, 'the superseded delta streamed nothing').toEqual([]);
+    expect(paths.view('c1')!.pa, 'the old seat did not name the PA').toBeNull();
+    await relay.onCoreEvent({ type: 'unitOutputDelta', session: 'run-1', ord: 1, attempt: 2, text: 'new\n' } as CoreEvent);
+    expect(emitted[0]).toMatchObject({ type: 'chatDelta', cliKey: 'codex', text: 'new\n' });
+    expect(reads, 'the stale read was not cached: attempt 2 read the run view afresh').toBe(2);
+  });
+
   it('codex on #810 r1 (8): two unitDone deliveries folded WITHOUT awaiting each other emit one reply', async () => {
     const h = harness({ pa: 'codex' });
     h.relay.onTeamRow(completed());
