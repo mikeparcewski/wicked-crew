@@ -145,6 +145,9 @@ export class AskRelay {
   private readonly replied = new Set<string>();
   /** `${run}:${ord}` → the partial last line of the delta stream (a control line may split). */
   private readonly tails = new Map<string, string>();
+  /** Runs a terminal frame has ended: no later fold, row, grace or read continuation may speak
+   *  for them (codex on #810 r10, 2). */
+  private readonly ended = new Set<string>();
   private readonly rowGraceMs: number;
 
   constructor(private readonly deps: AskRelayDeps) {
@@ -219,6 +222,7 @@ export class AskRelay {
     if (runId === undefined) return;
     const chatId = this.deps.paths.chatOf(runId);
     if (chatId === undefined) return;
+    if (this.ended.has(runId) && event.type !== 'runCancelled' && event.type !== 'sessionFailed') return;
     if (event.type === 'runCancelled') {
       await this.terminal(runId, chatId, undefined, 'the run was cancelled');
       return;
@@ -249,6 +253,7 @@ export class AskRelay {
     }
     const unit = await this.unit(runId, ord);
     if (this.deps.paths.chatOf(runId) !== chatId) return; // ended meanwhile (r1, 4)
+    if (this.ended.has(runId)) return; // a terminal frame settled the turn during the read (r10, 2)
     if (unit === undefined) {
       // The run view did not answer. Live typing is best-effort (dropped); a FOLD is not — it is
       // held for its row / the grace, whose reply re-reads the record (r7, 1).
@@ -281,7 +286,7 @@ export class AskRelay {
    *  `rowGraceMs`, after which the reply is read from the record anyway. */
   private awaitRow(runId: string, chatId: string, ord: number): void {
     const key = `${runId}:${ord}`;
-    if (this.waiting.has(key) || this.replied.has(key)) return;
+    if (this.ended.has(runId) || this.waiting.has(key) || this.replied.has(key)) return;
     const timer = setTimeout(() => {
       this.waiting.delete(key);
       if (this.deps.paths.chatOf(runId) !== chatId) return;
@@ -302,6 +307,7 @@ export class AskRelay {
     for (const key of [...this.waiting.keys()]) if (key.startsWith(prefix)) this.stopWaiting(key);
     for (const key of [...this.tails.keys()]) if (key.startsWith(prefix)) this.tails.delete(key);
     for (const key of [...this.replied]) if (key.startsWith(prefix)) this.replied.delete(key);
+    this.ended.delete(runId);
   }
 
   // ── internals ─────────────────────────────────────────────────────────────────────────────
@@ -453,6 +459,7 @@ export class AskRelay {
     this.replied.add(key);
     const unit = await this.unit(runId, ord, true);
     if (this.deps.paths.chatOf(runId) !== chatId) return; // ended meanwhile: nothing lands on a reuse
+    if (this.ended.has(runId)) return; // a terminal frame settled the turn during the read (r10, 2)
     if (unit === null || (unit !== undefined && answerStepOf(runId, unit.id) === null)) {
       // No such unit, or not the PA's answer (a waiter armed on a failed read for a reviewer's
       // ord — r8, 1): nothing went out, nothing to say.
@@ -498,6 +505,7 @@ export class AskRelay {
       this.log(`[ask-relay] work_output(${unit.id}) failed: ${err instanceof Error ? err.message : String(err)}`);
     }
     if (this.deps.paths.chatOf(runId) !== chatId) return; // r1, 4
+    if (this.ended.has(runId)) return; // r10, 2
     const status = row?.status ?? capturedStatus ?? (text !== null ? 'ok' : 'failed');
     const ok = status === 'ok' && text !== null;
     const stepId = row?.stepId ?? answerStepOf(runId, unit.id) ?? `answer (ord ${ord})`;
@@ -541,55 +549,55 @@ export class AskRelay {
    *  The run view is read with a bounded retry; if it still cannot be read, the turn is ended
    *  without the unit's facts rather than left pending (r8, 2). */
   private async terminal(runId: string, chatId: string, ord: number | undefined, why: string): Promise<void> {
-    // The run is over: no armed waiter may answer from the record meanwhile (its grace could fire
-    // during the retry below).
+    // The run is over: the fence goes up first — no armed waiter answers from the record meanwhile
+    // (its grace could fire during the retry below), no read continuation arms a new one, no later
+    // fold or row speaks (r10, 2).
+    this.ended.add(runId);
     const runPrefix = `${runId}:`;
     for (const key of [...this.waiting.keys()]) if (key.startsWith(runPrefix)) this.stopWaiting(key);
     const all = await this.unitsRetrying(runId);
     if (this.deps.paths.chatOf(runId) !== chatId) return;
-    if (all === undefined) {
-      // Nothing certified about the units: the chat's pending turn still ends — once per run
-      // (`<run>:terminal`), every armed waiter of the run stopped and its key reserved so no later
-      // row or grace answers twice, and one failed reply per seat the turn is still waiting on
-      // (the PA when known; else the reserved audience — a reply only ends a turn for a seat it
-      // names) (codex on #810 r9, 2+3).
-      const terminalKey = `${runId}:terminal`;
-      if (this.replied.has(terminalKey)) return;
-      this.replied.add(terminalKey);
-      if (ord !== undefined) this.replied.add(`${runId}:${ord}`);
-      for (const seat of this.voicesFor(chatId)) {
-        this.deps.fold({
-          type: 'chatReply',
-          chat: chatId,
-          cliKey: seat,
-          text: `${seat} did not answer: ${why} (the run view could not be read)`,
-          ok: false,
-          run_id: runId,
-          ...(ord !== undefined ? { ord } : {}),
-        } as CoreEvent);
-      }
-      return;
-    }
-    // The run view answered: every pending answer unit ends.
-    const targets = all
-      .filter((u) => answerStepOf(runId, u.id) !== null && (ord === undefined || u.ord === ord) && !this.replied.has(`${runId}:${u.ord}`))
-      .map((u) => u.ord);
-    for (const o of targets) {
-      const key = `${runId}:${o}`;
-      if (this.replied.has(key)) continue;
-      const unit = all.find((u) => u.ord === o)!;
+    // The answer units the run view names for this terminal (none when it could not be read, when
+    // the run died before its units existed, or when the ord is not an answer).
+    const named =
+      all === undefined
+        ? []
+        : all.filter((u) => answerStepOf(runId, u.id) !== null && (ord === undefined || u.ord === ord) && !this.replied.has(`${runId}:${u.ord}`));
+    let spoke = false;
+    for (const unit of named) {
+      const key = `${runId}:${unit.ord}`;
       this.replied.add(key);
-      this.stopWaiting(key);
       this.tails.delete(key);
-      const pa = this.paOf(runId, chatId, unit);
+      // The unit's seat, the path's PA, else every seat the turn still waits on (a random pick
+      // cancelled before its seat was assigned names none — r10, 1).
+      const voices = unit.assigned_cli !== null ? [this.paOf(runId, chatId, unit)] : this.voicesFor(chatId);
+      for (const seat of voices) {
+        this.deps.fold({ type: 'chatReply', chat: chatId, cliKey: seat, text: `${seat} did not answer: ${why}`, ok: false, run_id: runId, ord: unit.ord } as CoreEvent);
+      }
+      spoke = true;
+    }
+    if (spoke) return;
+    // No answer unit could speak (unreadable run view, a run that died before its units existed,
+    // a terminal for a non-answer ord): the chat's PENDING turn still ends — once per run, for
+    // every seat it waits on; nothing pending, nothing to say (r9 2+3, r10 1).
+    const terminalKey = `${runId}:terminal`;
+    if (this.replied.has(terminalKey)) return;
+    if (this.deps.turns.turnsOf(chatId).length === 0) return;
+    // An answer of this run already spoke (a reply, a grace, an earlier terminal): the turn it
+    // ended is not re-ended here.
+    if ([...this.replied].some((k) => k.startsWith(runPrefix) && k !== terminalKey)) return;
+    this.replied.add(terminalKey);
+    if (ord !== undefined) this.replied.add(`${runId}:${ord}`);
+    const detail = all === undefined ? ' (the run view could not be read)' : '';
+    for (const seat of this.voicesFor(chatId)) {
       this.deps.fold({
         type: 'chatReply',
         chat: chatId,
-        cliKey: pa,
-        text: `${pa} did not answer: ${why}`,
+        cliKey: seat,
+        text: `${seat} did not answer: ${why}${detail}`,
         ok: false,
         run_id: runId,
-        ord: o,
+        ...(ord !== undefined ? { ord } : {}),
       } as CoreEvent);
     }
   }

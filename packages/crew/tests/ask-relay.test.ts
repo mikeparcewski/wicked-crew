@@ -517,6 +517,59 @@ describe('AskRelay — the reply', () => {
     expect(out.filter((f) => f.type === 'chatReply'), 'said once').toHaveLength(2);
   });
 
+  it('codex on #810 r10 (1): a run that dies before its units exist (sessionFailed{ord:0}, units []) or a random pick cancelled before its seat was assigned still ends the pending turn for every seat it waits on', async () => {
+    const mk = (units: RelayUnit[]) => {
+      const paths = new AskPathIndex();
+      const turns = new ChatTurnIndex();
+      paths.open('c1', ['claude', 'codex']); // random: pa null
+      const t = turns.begin('c1', ['claude', 'codex'], 'Q1')!;
+      paths.started('c1', 1, 'run-1', 'answer-1');
+      const out: Array<CoreEvent & Record<string, unknown>> = [];
+      const relay = new AskRelay({ paths, turns, units: async () => units, workOutput: async () => null, fold: (f) => { const st = turns.decorate(f); turns.observe(f); out.push(st as CoreEvent & Record<string, unknown>); } });
+      return { relay, turns, out, t };
+    };
+    const dead = mk([]);
+    await dead.relay.onCoreEvent({ type: 'sessionFailed', session: 'run-1', ord: 0 } as CoreEvent);
+    expect(dead.out.filter((f) => f.type === 'chatReply').map((f) => [f['cliKey'], f['ok'], f['turn_id']])).toEqual([['claude', false, dead.t.turnId], ['codex', false, dead.t.turnId]]);
+    expect(dead.turns.turnsOf('c1')).toEqual([]);
+    const unassigned = mk([{ id: 'run-1:answer-1', ord: 1, status: 'distributing', assigned_cli: null, last_attempt: 0 }]);
+    await unassigned.relay.onCoreEvent({ type: 'runCancelled', session: 'run-1', tool_children_killed: 0 } as CoreEvent);
+    expect(unassigned.out.filter((f) => f.type === 'chatReply').map((f) => [f['cliKey'], f['ord']])).toEqual([['claude', 1], ['codex', 1]]);
+    expect(unassigned.turns.turnsOf('c1')).toEqual([]);
+  });
+
+  it('codex on #810 r10 (2): the run-level terminal fence — a read continuation after the terminal arms nothing, a later grace/row speaks nothing, and a cancellation after the turn was already settled says nothing more', async () => {
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((r) => { release = r; });
+    let reads = 0;
+    const paths = new AskPathIndex();
+    const turns = new ChatTurnIndex();
+    paths.open('c1', ['codex'], 'codex');
+    turns.begin('c1', ['codex'], 'Q1');
+    paths.started('c1', 1, 'run-1', 'answer-1');
+    const out: Array<CoreEvent & Record<string, unknown>> = [];
+    const relay = new AskRelay({
+      paths,
+      turns,
+      units: async () => { reads += 1; if (reads === 1) { await held; throw new Error('late failure'); } throw new Error('down'); },
+      workOutput: async () => 'late text',
+      fold: (f) => { const st = turns.decorate(f); turns.observe(f); out.push(st as CoreEvent & Record<string, unknown>); },
+      rowGraceMs: 40,
+    });
+    const fold = relay.onCoreEvent({ type: 'unitDone', session: 'run-1', ord: 1 } as CoreEvent); // its read is parked
+    await relay.onCoreEvent({ type: 'runCancelled', session: 'run-1', tool_children_killed: 0 } as CoreEvent); // exhausts its reads, settles the turn
+    expect(out.filter((f) => f.type === 'chatReply')).toHaveLength(1);
+    release();
+    await fold; // the parked read rejects: no new waiter
+    await new Promise((r) => setTimeout(r, 100)); // a grace would have fired
+    relay.onTeamRow(row('wicked.team.step.completed', { run_id: 'run-1', step_id: 'answer-1', status: 'ok', tree: null, output_bytes: 10, output_ref: 'unit:run-1:1:0' }));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(out.filter((f) => f.type === 'chatReply'), 'said once').toHaveLength(1);
+    // Sequential: a chat whose turn was already settled gets no second failure from a later terminal.
+    await relay.onCoreEvent({ type: 'sessionFailed', session: 'run-1', ord: 1 } as CoreEvent);
+    expect(out.filter((f) => f.type === 'chatReply')).toHaveLength(1);
+  });
+
   it('codex on #810 r1 (8): two unitDone deliveries folded WITHOUT awaiting each other emit one reply', async () => {
     const h = harness({ pa: 'codex' });
     h.relay.onTeamRow(completed());
