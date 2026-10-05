@@ -1408,6 +1408,7 @@ export async function createServer(
       return (view?.units ?? []).map((u) => ({ id: u.id, ord: u.ord, status: String(u.status), assigned_cli: u.assigned_cli ?? null }));
     },
     fold: (frame) => onEngineEvent(frame),
+    recorderReconcile: (chat, turnId, seats) => chatDecisionRecorder?.reconcile(chat, turnId, seats),
     log: (m) => app.log.warn(m),
   });
   // Chat transcripts at rest (DES-L5, D-13): one JSONL per LIVE chat under `<state home>/chats/`,
@@ -1494,9 +1495,9 @@ export async function createServer(
     gateCache.ingest(event);
     elicitationCache.ingest(event);
     seatHealth.ingest(event);
-    // ASK-C2: a path run's unit frames become the chat's frames (re-entering this fold as
-    // chatDelta / chatReply, which the relay ignores — no recursion).
-    if (event.type === 'unitOutputDelta' || event.type === 'unitDone') void askRelay.onCoreEvent(event);
+    // ASK-C2: a path run's unit + terminal frames become the chat's frames (re-entering this fold
+    // as chatDelta / chatReply, which the relay ignores — no recursion).
+    if (typeof event.session === 'string') void askRelay.onCoreEvent(event);
     if (event.type === 'chatClosed' && typeof event.chat === 'string') {
       chatScopes.closed(event.chat);
       // DC-S4b: whatever the chat's open turns gathered is recorded now — into the ledger and onto

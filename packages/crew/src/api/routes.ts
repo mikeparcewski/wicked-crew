@@ -3129,6 +3129,13 @@ export function registerRoutes(
       path.eligible.length === 1
         ? { singleSeat: singleSeatDisclosure(path.eligible[0]!, chatScopes.refusedOf(id), 'turn') }
         : {};
+    // F6: a message while the PA is still answering — the previous turn has no reply yet (the
+    // run may already wait at its gate while the relay's reply is a bus poll away; codex on #810
+    // r1, 3) — is refused: nothing is sent, the composer keeps the draft.
+    const pendingTurn = chatTurns.inFlight(id);
+    if (pendingTurn !== null) {
+      return reply.code(409).send(turnInFlightBody(id, pendingTurn, 'Nothing was sent.'));
+    }
     // One message at a time per chat, on this daemon: the reservation covers the launch, and a
     // continuation's status read → proposal → approval (two continuations racing would both
     // read `awaiting_human` and both hold an edit; the second's approval then fails).
@@ -3150,7 +3157,9 @@ export function registerRoutes(
         after();
         if (preface !== null) chatTranscripts?.appendSystem(id, turnId, preface);
         chatTranscripts?.appendUser(id, turnId, text, voice);
-        chatRecorder?.noteSend(id, turnId, actorOf(req), text, voice);
+        // The recorder's audience is the turn's (the eligible roster for a random pick); the relay
+        // narrows both to the PA when `path.started` names it (ASK-C2).
+        chatRecorder?.noteSend(id, turnId, actorOf(req), text, audience);
       } catch (err) {
         app.log.warn(`chat ${id}: turn ${turnId} was accepted by the engine but not fully recorded: ${message(err)}`);
       }

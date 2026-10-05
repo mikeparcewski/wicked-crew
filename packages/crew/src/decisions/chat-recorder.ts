@@ -293,6 +293,15 @@ export class ChatDecisionRecorder {
     this.lastTurn.set(chat, turnId);
   }
 
+  /** ASK-C2: the turn's audience as the engine settled it (a random pick's PA, a re-pick) — the
+   *  recorder is chosen from THIS set, so a turn reserved for the eligible roster records the
+   *  PA's block, not a seat that never answered. */
+  reconcile(chat: string, turnId: string, seats: readonly string[]): void {
+    const turn = this.turns.get(ChatDecisionRecorder.key(chat, turnId));
+    if (turn === undefined) return;
+    turn.seats = [...new Set(seats)];
+  }
+
   /** A seat ended its part of a turn. Resolves once any recording it triggered has settled. */
   async onReply(input: ChatReplyInput): Promise<void> {
     let parsed: ParsedDecisionsBlock | null = null;
