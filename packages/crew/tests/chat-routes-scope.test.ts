@@ -191,46 +191,21 @@ describe('POST /chats — scope lifecycle over a fake engine', () => {
     expect((await open({ chatId: 'live', clis: ['claude'] })).statusCode).toBe(201);
   });
 
-  it('the DEFAULT seats of a SCOPED open are pre-filtered to admissible adapters; an unscoped open keeps the whole roster (W5)', async () => {
+  it('the DEFAULT seats of an ask are every seat in STANDING — an ask is a team run, so the pool\'s ACP pre-filter does not apply (W5 re-cut for ASK-C2); a disabled seat is named', async () => {
     const spy = vi.spyOn(CoreAdapter, 'roster').mockReturnValue([
       { key: 'claude', acp: { acp_input_governance: true, os_sandbox: false } },
       { key: 'pi', acp: { acp_input_governance: false, os_sandbox: false } },
       { key: 'codex', acp: { acp_input_governance: false, os_sandbox: true } },
-      { key: 'agy' },
+      { key: 'agy', enabled_for_council: false },
     ]);
     try {
       const scopedRes = await open({ chatId: 'dflt-scoped', repoRefs: ['alpha'] });
       expect(scopedRes.statusCode).toBe(201);
-      expect((scopedRes.json() as { seats: { cliKey: string }[] }).seats.map((x) => x.cliKey)).toEqual(['claude', 'codex']);
-      // F-2R2-007: the two dropped seats are NAMED with their reasons — on the response…
+      expect((scopedRes.json() as { seats: { cliKey: string }[] }).seats.map((x) => x.cliKey)).toEqual(['claude', 'pi', 'codex']);
       const scopedBody = scopedRes.json() as { refused: { cliKey: string; reason: string }[] };
-      expect(scopedBody.refused.map((r) => r.cliKey)).toEqual(['pi', 'agy']);
-      expect(scopedBody.refused[0]!.reason).toMatch(/asks no permissions/);
-      expect(scopedBody.refused[1]!.reason).toMatch(/no ACP adapter/);
-      // …and in the thread, one frame per refused seat, AFTER the scope is published.
-      expect(broadcast).toEqual([
-        { type: 'chatSeatRefused', chat: 'dflt-scoped', cliKey: 'pi', reason: scopedBody.refused[0]!.reason, source: 'scope' },
-        { type: 'chatSeatRefused', chat: 'dflt-scoped', cliKey: 'agy', reason: scopedBody.refused[1]!.reason, source: 'scope' },
-      ]);
-      broadcast = [];
-      // F-W1-003 = A: an UNSCOPED open no longer keeps the whole roster — the wrapped seat `agy`
-      // (no ACP adapter) is refused in this mode too, named with the ACP-seat reason.
-      const plain = await open({ chatId: 'dflt-plain' });
-      expect(plain.statusCode).toBe(201);
-      expect((plain.json() as { seats: { cliKey: string }[] }).seats.map((x) => x.cliKey)).toEqual(['claude', 'pi', 'codex']);
-      const plainBody = plain.json() as { refused: { cliKey: string; reason: string }[] };
-      expect(plainBody.refused.map((r) => r.cliKey)).toEqual(['agy']);
-      expect(plainBody.refused[0]!.reason).toMatch(/no ACP adapter/);
-      expect(broadcast).toEqual([
-        { type: 'chatSeatRefused', chat: 'dflt-plain', cliKey: 'agy', reason: plainBody.refused[0]!.reason, source: 'scope' },
-      ]);
-      // A roster with no admissible seat cannot open a scoped chat by default — said plainly, with the list.
-      spy.mockReturnValue([{ key: 'pi', acp: { acp_input_governance: false, os_sandbox: false } }]);
-      const none = await open({ chatId: 'dflt-none', repoRefs: ['alpha'] });
-      expect(none.statusCode).toBe(409);
-      expect((none.json() as { error: string }).error).toMatch(/no seat in the roster can be held/);
-      expect((none.json() as { refused: { cliKey: string }[] }).refused.map((r) => r.cliKey)).toEqual(['pi']);
-      expect(existsSync(join(base, 'chats', 'dflt-none'))).toBe(false);
+      expect(scopedBody.refused.map((r) => r.cliKey)).toEqual(['agy']);
+      expect(scopedBody.refused[0]!.reason).toMatch(/disabled for the council/);
+      expect(broadcast).toEqual([{ type: 'chatSeatRefused', chat: 'dflt-scoped', cliKey: 'agy', reason: scopedBody.refused[0]!.reason, source: 'scope' }]);
     } finally {
       spy.mockRestore();
     }
@@ -298,23 +273,22 @@ describe('ASK-C1 — an ask starts a path: the open records eligibility and a ch
     expect((await app.inject({ method: 'GET', url: '/api/v1/chats/reseat' })).json()).toMatchObject({ seats: ['claude', 'opencode'] });
     expect(chatOpen).not.toHaveBeenCalled();
     expect((await app.inject({ method: 'POST', url: '/api/v1/chats/nope/seats', payload: { clis: ['claude'] } })).statusCode).toBe(404);
-    // codex on #808 (4): a re-seat ADMITS, it does not blindly admit — pi cannot be held read-only
-    // in a scoped chat, and an unknown key is refused by name; the eligible roster is unchanged.
+    // codex on #808 (4): a re-seat ADMITS, it does not blindly admit — an unknown key is refused
+    // by name (a wrapped seat like pi IS eligible on a path, ASK-C2); the roster grows by pi only.
     const bad = await app.inject({ method: 'POST', url: '/api/v1/chats/reseat/seats', payload: { clis: ['pi', 'nobody'] } });
     expect(bad.statusCode).toBe(200);
-    expect((bad.json() as { seats: { cliKey: string; ok: boolean }[] }).seats.map((s) => s.ok)).toEqual([false, false]);
-    expect((bad.json() as { refused: { cliKey: string; reason: string }[] }).refused.map((r) => r.cliKey)).toEqual(['pi', 'nobody']);
-    expect((await app.inject({ method: 'GET', url: '/api/v1/chats/reseat' })).json()).toMatchObject({ seats: ['claude', 'opencode'] });
+    expect((bad.json() as { seats: { cliKey: string; ok: boolean }[] }).seats.map((s) => s.ok)).toEqual([true, false]);
+    expect((bad.json() as { refused: { cliKey: string; reason: string }[] }).refused.map((r) => r.cliKey)).toEqual(['nobody']);
+    expect((await app.inject({ method: 'GET', url: '/api/v1/chats/reseat' })).json()).toMatchObject({ seats: ['claude', 'opencode', 'pi'] });
   });
 
-  it('codex on #808 (4) + r2 (5): seats NAMED in `clis` go through the SAME admission as the default roster — structure AND sign-in (the launch hands the engine that standing; a signed-out seat would only be benched there)', async () => {
-    // pi has no input governance and no sandbox: refused in a scoped chat even when named.
-    const scopedPi = await open({ chatId: 'named-pi', clis: ['claude', 'pi'], repoRefs: ['alpha'] });
-    expect(scopedPi.statusCode).toBe(201);
-    const body = scopedPi.json() as { seats: { cliKey: string; ok: boolean }[]; refused: { cliKey: string; reason: string }[] };
-    expect(body.seats, 'the 201 seats are the ELIGIBLE roster; a refusal is on `refused`').toEqual([{ cliKey: 'claude', ok: true }]);
-    expect(body.refused.map((r) => r.cliKey)).toEqual(['pi']);
-    expect(body.refused[0]!.reason).toMatch(/asks no permissions/);
+  it('codex on #808 (4) + r2 (5) / ASK-C2: seats NAMED in `clis` go through the SAME admission as the default roster — the seat\'s STANDING; an ask is a team run, so the pool\'s ACP rules do not apply (pi and codex are eligible)', async () => {
+    const both = await open({ chatId: 'named-pi', clis: ['claude', 'pi'], repoRefs: ['alpha'] });
+    expect(both.statusCode).toBe(201);
+    const body = both.json() as { seats: { cliKey: string; ok: boolean }[]; refused: { cliKey: string; reason: string }[] };
+    expect(body.seats, 'a wrapped / permission-less ACP seat is eligible on a PATH').toEqual([{ cliKey: 'claude', ok: true }, { cliKey: 'pi', ok: true }]);
+    expect(body.refused).toEqual([]);
+    expect((await app.inject({ method: 'GET', url: '/api/v1/chats/named-pi' })).json()).toMatchObject({ seats: ['claude', 'pi'] });
     // A key the roster does not know is refused by name.
     const unknown = await open({ chatId: 'named-unknown', clis: ['claude', 'nobody'], repoRefs: ['alpha'] });
     expect(unknown.statusCode).toBe(201);
@@ -477,7 +451,7 @@ describe('POST /chats — named scope kinds (studio#323 R4)', () => {
     expect((res.json() as { scope: { kind: string } }).scope.kind).toBe('system');
   });
 
-  it("scopeKind 'everything' reads every registered repo and applies the SCOPED seat admission", async () => {
+  it("scopeKind 'everything' reads every registered repo; every seat in standing is eligible (ASK-C2)", async () => {
     const spy = vi.spyOn(CoreAdapter, 'roster').mockReturnValue([
       { key: 'claude', acp: { acp_input_governance: true, os_sandbox: false } },
       { key: 'pi', acp: { acp_input_governance: false, os_sandbox: false } },
@@ -488,8 +462,8 @@ describe('POST /chats — named scope kinds (studio#323 R4)', () => {
       const body = res.json() as { scope: { kind: string; repos: { rootPath: string }[]; cwd: string }; refused: { cliKey: string }[] };
       expect(body.scope.kind).toBe('everything');
       expect(body.scope.repos.map((r) => r.rootPath)).toEqual(['/srv/repos/alpha']);
-      expect(body.refused.map((r) => r.cliKey)).toEqual(['pi']);
-      expect((res.json() as { seats: { cliKey: string }[] }).seats.map((x) => x.cliKey)).toEqual(['claude']);
+      expect(body.refused, 'an ask admits every seat in standing (ASK-C2)').toEqual([]);
+      expect((res.json() as { seats: { cliKey: string }[] }).seats.map((x) => x.cliKey)).toEqual(['claude', 'pi']);
       expect(chatScopes.engineOf('all')).toEqual({ cwd: body.scope.cwd, codeGraphDb: null, readRoots: ['/srv/repos/alpha'] });
       expect(chatOpen).not.toHaveBeenCalled();
     } finally {

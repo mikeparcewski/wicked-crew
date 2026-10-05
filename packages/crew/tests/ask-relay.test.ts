@@ -458,6 +458,53 @@ describe('AskRelay — the reply', () => {
     expect(emitted.filter((f) => f.type === 'chatReply' && f['ord'] === 2)).toEqual([expect.objectContaining({ ok: true, text: 'Second.' })]);
   });
 
+  it('codex on #810 r8 (1): a waiter armed on a failed read for a NON-answer unit (the reviewer\'s) answers nothing once the read recovers', async () => {
+    let failNext = true;
+    const paths = new AskPathIndex();
+    const turns = new ChatTurnIndex();
+    paths.open('c1', ['codex'], 'codex');
+    turns.begin('c1', ['codex'], 'Q1');
+    paths.started('c1', 1, 'run-1', 'answer-1');
+    const emitted: Array<CoreEvent & Record<string, unknown>> = [];
+    const relay = new AskRelay({
+      paths,
+      turns,
+      units: async () => { if (failNext) { failNext = false; throw new Error('run view unavailable'); } return [{ id: 'run-1:review-1', ord: 2, status: 'done', assigned_cli: 'claude', last_attempt: 0 }]; },
+      workOutput: async () => 'reviewer text',
+      fold: (f) => emitted.push(f as CoreEvent & Record<string, unknown>),
+      rowGraceMs: 60,
+    });
+    await relay.onCoreEvent({ type: 'unitDone', session: 'run-1', ord: 2 } as CoreEvent);
+    await new Promise((r) => setTimeout(r, 120));
+    expect(emitted).toEqual([]);
+    expect(paths.view('c1')).toMatchObject({ pa: 'codex' });
+  });
+
+  it('codex on #810 r8 (2): a terminal frame met by a transient read failure is NOT lost — the read is retried, and if it still fails the turn ends with ok:false', async () => {
+    let fails = 1;
+    const paths = new AskPathIndex();
+    const turns = new ChatTurnIndex();
+    paths.open('c1', ['codex'], 'codex');
+    turns.begin('c1', ['codex'], 'Q1');
+    paths.started('c1', 1, 'run-1', 'answer-1');
+    const emitted: Array<CoreEvent & Record<string, unknown>> = [];
+    const relay = new AskRelay({
+      paths,
+      turns,
+      units: async () => { if (fails > 0) { fails -= 1; throw new Error('run view unavailable'); } return [{ id: 'run-1:answer-1', ord: 1, status: 'failed', assigned_cli: 'codex', last_attempt: 0 }]; },
+      workOutput: async () => null,
+      fold: (f) => emitted.push(f as CoreEvent & Record<string, unknown>),
+    });
+    await relay.onCoreEvent({ type: 'sessionFailed', session: 'run-1', ord: 1 } as CoreEvent); // one failed read, then the retry succeeds
+    expect(emitted.filter((f) => f.type === 'chatReply')).toEqual([expect.objectContaining({ ok: false, cliKey: 'codex', ord: 1, text: expect.stringMatching(/the run failed at this step/) })]);
+    // The read never recovers: the turn still ends.
+    fails = 99;
+    const relay2 = new AskRelay({ paths, turns, units: async () => { throw new Error('down'); }, workOutput: async () => null, fold: (f) => emitted.push(f as CoreEvent & Record<string, unknown>) });
+    await relay2.onCoreEvent({ type: 'runCancelled', session: 'run-1', tool_children_killed: 0 } as CoreEvent);
+    const last = emitted.filter((f) => f.type === 'chatReply').at(-1)!;
+    expect(last).toMatchObject({ ok: false, cliKey: 'codex', run_id: 'run-1', text: expect.stringMatching(/the run was cancelled \(the run view could not be read\)/) });
+  });
+
   it('codex on #810 r1 (8): two unitDone deliveries folded WITHOUT awaiting each other emit one reply', async () => {
     const h = harness({ pa: 'codex' });
     h.relay.onTeamRow(completed());

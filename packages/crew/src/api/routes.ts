@@ -2930,6 +2930,7 @@ export function registerRoutes(
           seat as { key: string; enabled_for_council?: boolean; acp?: { acp_input_governance?: boolean; os_sandbox?: boolean } | null },
           seat.auth ?? 'unknown',
           scoped,
+          'path',
         );
         if (admission.ok) clis.push(key);
         else refused.push({ cliKey: key, reason: admission.reason, source: admission.source });
@@ -3330,6 +3331,7 @@ export function registerRoutes(
             seat as { key: string; enabled_for_council?: boolean; acp?: { acp_input_governance?: boolean; os_sandbox?: boolean } | null },
             seat.auth ?? 'unknown',
             scopedChat,
+            'path',
           );
           return admission.ok ? { cliKey, ok: true } : { cliKey, ok: false, error: admission.reason };
         });

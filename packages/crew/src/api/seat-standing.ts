@@ -285,13 +285,26 @@ export type ChatAdmission = { ok: true } | { ok: false; reason: string; source: 
  * `council_eligible` / health are deliberately NOT consulted here — a seat benched in councils can
  * still answer a chat, and saying otherwise would refuse a working seat.
  */
-export function chatSeatAdmission(seat: StandingSeat, auth: SeatAuth, scoped: boolean): ChatAdmission {
+export function chatSeatAdmission(
+  seat: StandingSeat,
+  auth: SeatAuth,
+  scoped: boolean,
+  /** `pool`: the warm chat pool (an ACP session held read-only — the structural rules below).
+   *  `path` (ASK-C1/C2, DES-ASK-TEAM-CHAT-001 §4.2): an ask is a team RUN — the PA answers in a
+   *  run unit under the run's own posture, as every wrapped seat does governed work — so the ACP
+   *  rules of the pool do not apply; the seat's standing (signed in, enabled) is the whole gate. */
+  kind: 'pool' | 'path' = 'pool',
+): ChatAdmission {
   const reasons: string[] = [];
   let source: ChatRefusalSource = 'scope';
   if (!authUsable(auth)) {
     reasons.push('signed out — it cannot take a turn until it is signed in from the System page');
     source = 'auth';
   }
+  if (seat.enabled_for_council === false) {
+    reasons.push('disabled for the council, so it takes no turn');
+  }
+  if (kind === 'path') return reasons.length === 0 ? { ok: true } : { ok: false, reason: reasons.join('; '), source };
   const acp = seat.acp ?? undefined;
   if (acp === undefined) {
     // F-W1-003 = A (approved 2026-09-15): chat runs on ACP-adapter seats only, scoped AND

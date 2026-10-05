@@ -453,8 +453,11 @@ export class AskRelay {
     this.replied.add(key);
     const unit = await this.unit(runId, ord, true);
     if (this.deps.paths.chatOf(runId) !== chatId) return; // ended meanwhile: nothing lands on a reuse
-    if (unit === null) {
-      this.replied.delete(key); // nothing went out: a later fold may still answer
+    if (unit === null || (unit !== undefined && answerStepOf(runId, unit.id) === null)) {
+      // No such unit, or not the PA's answer (a waiter armed on a failed read for a reviewer's
+      // ord — r8, 1): nothing went out, nothing to say.
+      this.replied.delete(key);
+      this.stopWaiting(key);
       return;
     }
     // The fresh read may have moved the boundary (a retry whose frames were missed): the row of
@@ -509,28 +512,53 @@ export class AskRelay {
     } as CoreEvent);
   }
 
-  /** A terminal frame with no fold: the answer unit(s) still pending end the turn with `ok:false`. */
-  private async terminal(runId: string, chatId: string, ord: number | undefined, why: string): Promise<void> {
-    let targets: number[];
-    if (ord !== undefined) targets = [ord];
-    else {
-      // The run ended: every answer unit of the run that has not replied.
-      let all: RelayUnit[] = [];
+  /** The run view, retried a few times — a terminal fact must not be lost to one failed read. */
+  private async unitsRetrying(runId: string): Promise<RelayUnit[] | undefined> {
+    for (let i = 0; i < 3; i += 1) {
       try {
-        all = await this.deps.units(runId);
-      } catch {
-        all = [];
+        return await this.deps.units(runId);
+      } catch (err) {
+        this.log(`[ask-relay] cannot read the units of ${runId} (${i + 1}/3): ${err instanceof Error ? err.message : String(err)}`);
+        await new Promise((r) => setTimeout(r, 300));
       }
-      if (this.deps.paths.chatOf(runId) !== chatId) return;
-      targets = all.filter((u) => answerStepOf(runId, u.id) !== null && !this.replied.has(`${runId}:${u.ord}`)).map((u) => u.ord);
     }
+    return undefined;
+  }
+
+  /** A terminal frame with no fold: the answer unit(s) still pending end the turn with `ok:false`.
+   *  The run view is read with a bounded retry; if it still cannot be read, the turn is ended
+   *  without the unit's facts rather than left pending (r8, 2). */
+  private async terminal(runId: string, chatId: string, ord: number | undefined, why: string): Promise<void> {
+    const all = await this.unitsRetrying(runId);
+    if (this.deps.paths.chatOf(runId) !== chatId) return;
+    if (all === undefined) {
+      // Nothing certified about the units: the chat's pending turn still ends — one failed reply
+      // from the PA as the path knows it, for the ord named (or none).
+      const key = ord !== undefined ? `${runId}:${ord}` : undefined;
+      if (key !== undefined) {
+        if (this.replied.has(key)) return;
+        this.replied.add(key);
+        this.stopWaiting(key);
+      }
+      const pa = this.deps.paths.get(chatId)?.pa ?? 'pa';
+      this.deps.fold({
+        type: 'chatReply',
+        chat: chatId,
+        cliKey: pa,
+        text: `${pa} did not answer: ${why} (the run view could not be read)`,
+        ok: false,
+        run_id: runId,
+        ...(ord !== undefined ? { ord } : {}),
+      } as CoreEvent);
+      return;
+    }
+    const targets = all
+      .filter((u) => answerStepOf(runId, u.id) !== null && (ord === undefined || u.ord === ord) && !this.replied.has(`${runId}:${u.ord}`))
+      .map((u) => u.ord);
     for (const o of targets) {
       const key = `${runId}:${o}`;
       if (this.replied.has(key)) continue;
-      const unit = await this.unit(runId, o);
-      if (this.deps.paths.chatOf(runId) !== chatId) return;
-      if (unit === null || unit === undefined || answerStepOf(runId, unit.id) === null) continue;
-      if (this.replied.has(key)) continue;
+      const unit = all.find((u) => u.ord === o)!;
       this.replied.add(key);
       this.stopWaiting(key);
       this.tails.delete(key);
