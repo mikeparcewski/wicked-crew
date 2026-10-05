@@ -315,17 +315,19 @@ export class ChatDecisionRecorder {
 
   /** The chat is gone: whatever its open turns gathered is recorded now. */
   async closed(chat: string): Promise<void> {
-    // The chat's epoch moves first: a recording that started before (or a sweep that still holds
-    // one of its turns) can no longer write to this id's transcript or /ws (codex on #808 r6, 1).
-    this.epochs.set(chat, (this.epochs.get(chat) ?? 0) + 1);
-    for (const turn of [...this.turns.values()]) {
-      if (turn.chat === chat) await this.finalize(turn);
-    }
-    // A recording a sweep (or a reply) started earlier is still this chat's: the close waits for
-    // it — bounded, since the chain can await an engine read that never answers (codex on #808
-    // r6, 2); past the bound the epoch fence above keeps its late writes off a reused id.
     // Wall clock on purpose: the injected `now` is the turn-staleness clock (tests freeze it).
     const deadline = Date.now() + this.closeDrainMs;
+    // The chat's pending turns are finalized now — STARTED, not awaited one by one: each registers
+    // its recording in `inFlightByChat` synchronously, so the bounded drain below covers them too
+    // (codex on #808 r7: a pending turn's recording can await an engine read that never answers).
+    for (const turn of [...this.turns.values()]) {
+      if (turn.chat === chat) void this.finalize(turn);
+    }
+    // Then the chat's epoch moves: every recording started so far (before the close or by it)
+    // carries the old epoch — it completes into this chat within the bound, and past the bound it
+    // can no longer write to this id's transcript or /ws (a reuse may own them; r6, 1).
+    this.epochs.set(chat, (this.epochs.get(chat) ?? 0) + 1);
+    // The close waits for the chat's recordings — bounded (r6, 2).
     for (;;) {
       const pending = this.inFlightByChat.get(chat);
       if (pending === undefined || pending.size === 0) break;

@@ -446,6 +446,25 @@ describe('codex on #808 r6: a sweep snapshot cannot re-record a finalized turn; 
     expect(h.transcripts.read('Y').filter((r) => r.kind === 'decisions'), 'nothing of old Y on the new Y').toEqual([]);
   });
 
+  it('(r7) a PENDING turn (never swept) whose recording hangs on its engine read: closed() still returns at the bound and the late recording is fenced', async () => {
+    const h = harness({ staleAfterMs: 1_000 });
+    let releaseX: () => void = () => undefined;
+    const parkedX = new Promise<void>((r) => { releaseX = r; });
+    const recorder = build(h, (chat) => (chat === 'X' ? parkedX : undefined), 100);
+    recorder.noteSend('X', 'tx', human, 'x words', ['claude']); // pending, not stale: the close finalizes it
+    const t0 = Date.now();
+    await recorder.closed('X');
+    expect(Date.now() - t0, 'the close returned at the bound').toBeLessThan(2_000);
+    expect(h.logs.some((l) => /still in flight after 100 ms/.test(l))).toBe(true);
+    h.transcripts.appendUser('X', 'tx2', 'new life', ['claude']);
+    h.frames.length = 0;
+    releaseX();
+    await recorder.idle();
+    expect(h.frames.filter((f) => f.type === 'chatDecisions' && f.chat === 'X')).toEqual([]);
+    expect(h.transcripts.read('X').filter((r) => r.kind === 'decisions')).toEqual([]);
+    expect(h.logs.some((l) => /recorded in the ledger after the chat closed/.test(l))).toBe(true);
+  });
+
   it('(2) closed() is bounded: a recording hung on its engine read does not block the close; when it finally settles it is fenced off the reused id (ledger only)', async () => {
     const h = harness({ staleAfterMs: 1_000 });
     let releaseX: () => void = () => undefined;
