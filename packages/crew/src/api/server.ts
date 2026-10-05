@@ -346,6 +346,11 @@ export interface CreateServerOptions {
    * `enabled` defaults to ON in the daemon and OFF under a test runner (VITEST /
    * NODE_ENV=test), the seat-health-probe posture.
    */
+  /** The seats' standing (tests: a sign-in answer instead of the credential-file heuristic and
+   *  the live auth-status probes, so admission is host-independent). */
+  seats?: {
+    signedIn?: (seatKey: string, workerRoot?: string) => boolean | null;
+  };
   stallWatchdog?: {
     enabled?: boolean;
     /** Sweep cadence, ms (default 30 s; tests shorten it). */
@@ -453,7 +458,10 @@ export async function createServer(
   // `runtime.rosterWithStanding`), the four interactive seams (`roster`), and the adapter's own
   // launches (`setRosterProvider` → `seatsForWorkflow` / `wicked-crew start`). Read at call time,
   // so a seat signed in from the System page is eligible on the very next launch.
-  const rosterWithStanding = rosterWithStandingFactory({ seatHealth });
+  const rosterWithStanding = rosterWithStandingFactory({
+    seatHealth,
+    ...(options?.seats?.signedIn !== undefined ? { signedIn: options.seats.signedIn } : {}),
+  });
   // Runtime-guarded, not typed away: the integration suites drive `createServer` over PARTIAL fake
   // adapters (cast to `CoreAdapter`) that never grew this method — the real adapter always has it.
   if (typeof (adapter as { setRosterProvider?: unknown }).setRosterProvider === 'function') {
@@ -1460,7 +1468,7 @@ export async function createServer(
     // prefill remains reproducible across a daemon restart (crew#619).
     chatTranscripts.clearOrphaned(new Set(chatRetained.keys()));
   }
-  const offEvent = adapter.onEvent((event) => {
+  const onEngineEvent = (event: CoreEvent): void => {
     gateCache.ingest(event);
     elicitationCache.ingest(event);
     seatHealth.ingest(event);
@@ -1674,7 +1682,8 @@ export async function createServer(
         }
       })();
     }
-  });
+  };
+  const offEvent = adapter.onEvent(onEngineEvent);
   // Skills keystone (codex round 4): every launch the daemon hands the engine — run, resume, gate
   // answer, campaign — opens a generation pin BEFORE the engine call, released only by the engine's
   // `skillsSnapshotHanded` report or the terminal frame (live-generations.ts). Unregistered on
@@ -1868,6 +1877,29 @@ export async function createServer(
       // Routes that say something to the thread (a refused chat seat, F-2R2-007) emit through the
       // SAME /ws fan-out the engine's frames take.
       broadcast: (frame) => broadcast(frame),
+      // ASK-C1: DELETE /chats/:id on an ask path closes through the same fold an engine
+      // `chatClosed` takes (scope slot, decisions, considerations, retention-aware transcript).
+      closeChat: async (frame, runId, ticket) => {
+        // End cancels the path's run: its retention hold goes first, so the fold drops the
+        // transcript with the chat (a reused id starts empty — codex on #808 r3, 1).
+        if (runId !== undefined && typeof frame.chat === 'string') {
+          const retaining = chatRetained.get(frame.chat);
+          retaining?.delete(runId);
+          if (retaining !== undefined && retaining.size === 0) chatRetained.delete(frame.chat);
+          runToChat.delete(runId);
+        }
+        // The recorder settles the chat's open turns NOW — resolving the project while the index
+        // still names this chat's (the id is parked `closing` until the fold below frees it), and
+        // writing the transcript's decisions record before the file is dropped. A deferred close
+        // could otherwise file the ended chat's words under a replacement's project and append
+        // them to its transcript (codex on #808 r4, 1). The fold's own call then finds nothing.
+        if (typeof frame.chat === 'string') await chatDecisionRecorder?.closed(frame.chat);
+        // The id is held for this close alone (no timer, a second DELETE joined); the fold frees
+        // it. Not held any more = settled elsewhere: nothing to fold (codex on #808 r5, 1+2).
+        if (typeof frame.chat !== 'string' || !chatScopes.isHeld(frame.chat, ticket)) return;
+        chatScopes.closeHeld(frame.chat, ticket);
+        onEngineEvent(frame);
+      },
       // crew#619: retain a chat's transcript for the lifetime of its promoted run.
       linkChatRun,
       // TR-W5a: the `watch.*` settings guard validates against the registry's entries.

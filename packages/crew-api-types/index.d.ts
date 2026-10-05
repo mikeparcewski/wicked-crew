@@ -216,6 +216,15 @@ export interface HealthCapabilities {
   /** See {@link HealthResponse} — the engine's deliver gate exists (wicked-core-ts ≥ 0.7.24). */
   deliverGate: boolean;
   /**
+   * (DES-ASK-TEAM-CHAT-001 §5.1; api-types 0.92.0) An ask starts a PATH: `POST /chats` resolves
+   * eligibility and warms nothing, the first `POST /chats/:id/messages` launches one team run
+   * (one PA, picked at random among the eligible seats unless `primary` names one; a reviewer
+   * member), later messages continue it, and the reply is the PA's `step.completed` output. The
+   * whole behaviour contract — launch, continue, output review — needs wicked-core-ts ≥ 0.7.38;
+   * ABSENT or `false` means this daemon still fans a send out to every warm seat.
+   */
+  askPath?: boolean;
+  /**
    * `LaunchRunBody.revisesPr` is accepted (crew#550; crew ≥ 0.7.36). ABSENT on a daemon before
    * the field — read as `false`: do not send `revisesPr` to such a daemon.
    */
@@ -1140,6 +1149,11 @@ export interface LaunchPlan {
   steps: Array<{ catalog: string; id?: string | undefined; [k: string]: unknown }>;
   touch?: string[];
   override?: TeamPlanOverride;
+  /**
+   * (DES-TEAMING-002 §6.1 `plan.proposed.monitors`; core ASK-K1b) How many members the plan asks
+   * for; the supervisor seats `min(max(band monitors, asked), 3)`. An ask asks for one reviewer.
+   */
+  monitors?: { asked: number };
 }
 
 /**
@@ -5158,6 +5172,12 @@ export interface ChatOpenBody {
    *   - `none`       — the legacy unscoped chat; takes neither `projectId` nor `repoRefs`.
    */
   scopeKind?: ChatScopeRequestKind;
+  /**
+   * (DES-ASK-TEAM-CHAT-001 §4.1; api-types 0.92.0) The seat the operator CHOSE as the primary
+   * agent — one of the eligible seats, else 400. Omitted: the engine picks one at random
+   * (`path.started.selection: "random"`).
+   */
+  primary?: string;
 }
 
 /** The scope a `POST /chats` caller may name (api-types 0.39.0, studio#323 R4). */
@@ -5312,6 +5332,9 @@ export interface ChatMessageResponse {
    * and only `POST /chats` → 201, which performed the open, says anything about that moment.
    */
   singleSeat?: ChatSingleSeatDegradation;
+  /** (api-types 0.92.0) The ask path this message launched or continued, and its answer step. */
+  runId?: string;
+  stepId?: string;
 }
 
 /**
@@ -5480,6 +5503,25 @@ export interface ChatDetailResponse {
    * "session continues" without history). Unbounded — a reply may be up to the engine's cap.
    */
   messages?: ChatTranscriptRecord[];
+  /**
+   * (DES-ASK-TEAM-CHAT-001 §5.1; api-types 0.92.0) The chat's path once its first message
+   * launched it: the run, the PA and how it was picked, the reviewer member (null until one
+   * attached) and the helpers that answered. Absent before the first message and on a daemon
+   * without `capabilities.askPath`.
+   */
+  path?: ChatPathView;
+}
+
+/** (api-types 0.92.0) A chat's ask path — see {@link ChatDetailResponse.path}. */
+export interface ChatPathView {
+  runId: string;
+  /** The primary agent's seat key, `null` until `path.started` has been seen. */
+  pa: string | null;
+  selection: 'chosen' | 'random';
+  reviewer: string | null;
+  helpers: string[];
+  /** The answer step the last message added (`answer-N`). */
+  stepId: string;
 }
 
 // ── Project code graph (DES-PROJECT-001; the co-located multi-repo graph) ──────
@@ -7360,6 +7402,11 @@ export type TeamStepCompletedPayload = TeamEnvelope & {
   tree: string | null;
   output_bytes: number;
   output_ref: string;
+  /**
+   * (core ASK-K3c) The attempt's `[team advice]` boundary block reached a seat turn. Omitted
+   * when false (old rows read false).
+   */
+  answers_presented?: boolean;
 };
 
 export type TeamStepReviewedPayload = TeamEnvelope & {

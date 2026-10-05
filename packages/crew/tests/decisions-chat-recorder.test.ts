@@ -378,3 +378,112 @@ describe('ChatDecisionRecorder', () => {
     expect(h.ledger.list()).toHaveLength(0);
   });
 });
+
+describe('codex on #808 r5 (3): closed() drains every recording of the chat, including one a sweep started', () => {
+  it('a stale turn finalized by another chat\'s sweep is still in flight when the chat closes — closed() resolves only after it settled', async () => {
+    const h = harness({ staleAfterMs: 1_000 });
+    let releaseRecord: () => void = () => undefined;
+    const parked = new Promise<void>((r) => { releaseRecord = r; });
+    const recorder = new ChatDecisionRecorder({
+      service: h.service,
+      transcripts: h.transcripts,
+      broadcast: () => undefined,
+      projectOf: () => 'P1',
+      now: () => h.service.deps.now?.() ?? Date.now(),
+      staleAfterMs: 1_000,
+      onTurnRecorded: async (chat) => {
+        if (chat === 'x') await parked;
+      },
+    });
+    const human = { kind: 'human', id: 'op' } as never;
+    recorder.noteSend('x', 't1', human, 'decide this', ['claude']);
+    h.tick(2_000); // x's turn is stale
+    recorder.noteSend('other', 't9', human, 'hello', ['claude']); // the sweep finalizes x:t1 — its recording parks
+    await new Promise((r) => setTimeout(r, 10));
+    let closedResolved = false;
+    const closing = recorder.closed('x').then(() => { closedResolved = true; });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(closedResolved, 'the close waits for the recording the sweep started').toBe(false);
+    releaseRecord();
+    await closing;
+    expect(closedResolved).toBe(true);
+    await recorder.idle();
+  });
+});
+
+describe('codex on #808 r6: a sweep snapshot cannot re-record a finalized turn; a hung recording is bounded and fenced', () => {
+  const human = { kind: 'human', id: 'op' } as never;
+  const build = (h: ReturnType<typeof harness>, parkFor: (chat: string) => Promise<void> | undefined, closeDrainMs?: number) =>
+    new ChatDecisionRecorder({
+      service: h.service,
+      transcripts: h.transcripts,
+      broadcast: (f) => h.frames.push(f),
+      projectOf: () => 'P1',
+      now: () => h.service.deps.now?.() ?? Date.now(),
+      staleAfterMs: 1_000,
+      ...(closeDrainMs !== undefined ? { closeDrainMs } : {}),
+      onTurnRecorded: async (chat) => { await parkFor(chat); },
+      log: (m) => h.logs.push(m),
+    });
+
+  it('(1) a sweep whose snapshot holds [X, Y] and is parked on X does not record Y again after Y was closed and finalized', async () => {
+    const h = harness({ staleAfterMs: 1_000 });
+    let releaseX: () => void = () => undefined;
+    const parkedX = new Promise<void>((r) => { releaseX = r; });
+    const recorder = build(h, (chat) => (chat === 'X' ? parkedX : undefined));
+    recorder.noteSend('X', 'tx', human, 'x words', ['claude']);
+    recorder.noteSend('Y', 'ty', human, 'y words', ['claude']);
+    h.tick(2_000);
+    recorder.noteSend('Z', 'tz', human, 'sweep trigger', ['claude']); // the sweep snapshot: [X, Y, Z]; parks on X
+    await new Promise((r) => setTimeout(r, 10));
+    await recorder.closed('Y'); // Y finalized + drained here
+    const before = recorder.diagnostics().recorded_turns;
+    // Y's id is reused: a new conversation's transcript.
+    h.transcripts.appendUser('Y', 'ty2', 'new life', ['claude']);
+    releaseX();
+    await recorder.idle();
+    expect(recorder.diagnostics().recorded_turns - before, 'the sweep recorded X (Z is not stale), not Y again').toBe(1);
+    expect(h.transcripts.read('Y').filter((r) => r.kind === 'decisions'), 'nothing of old Y on the new Y').toEqual([]);
+  });
+
+  it('(r7) a PENDING turn (never swept) whose recording hangs on its engine read: closed() still returns at the bound and the late recording is fenced', async () => {
+    const h = harness({ staleAfterMs: 1_000 });
+    let releaseX: () => void = () => undefined;
+    const parkedX = new Promise<void>((r) => { releaseX = r; });
+    const recorder = build(h, (chat) => (chat === 'X' ? parkedX : undefined), 100);
+    recorder.noteSend('X', 'tx', human, 'x words', ['claude']); // pending, not stale: the close finalizes it
+    const t0 = Date.now();
+    await recorder.closed('X');
+    expect(Date.now() - t0, 'the close returned at the bound').toBeLessThan(2_000);
+    expect(h.logs.some((l) => /still in flight after 100 ms/.test(l))).toBe(true);
+    h.transcripts.appendUser('X', 'tx2', 'new life', ['claude']);
+    h.frames.length = 0;
+    releaseX();
+    await recorder.idle();
+    expect(h.frames.filter((f) => f.type === 'chatDecisions' && f.chat === 'X')).toEqual([]);
+    expect(h.transcripts.read('X').filter((r) => r.kind === 'decisions')).toEqual([]);
+    expect(h.logs.some((l) => /recorded in the ledger after the chat closed/.test(l))).toBe(true);
+  });
+
+  it('(2) closed() is bounded: a recording hung on its engine read does not block the close; when it finally settles it is fenced off the reused id (ledger only)', async () => {
+    const h = harness({ staleAfterMs: 1_000 });
+    let releaseX: () => void = () => undefined;
+    const parkedX = new Promise<void>((r) => { releaseX = r; });
+    const recorder = build(h, (chat) => (chat === 'X' ? parkedX : undefined), 100);
+    recorder.noteSend('X', 'tx', human, 'x words', ['claude']);
+    h.tick(2_000);
+    recorder.noteSend('Z', 'tz', human, 'sweep trigger', ['claude']); // starts X's recording, parked
+    await new Promise((r) => setTimeout(r, 10));
+    const t0 = Date.now();
+    await recorder.closed('X');
+    expect(Date.now() - t0, 'the close returned at the bound').toBeLessThan(2_000);
+    expect(h.logs.some((l) => /still in flight after 100 ms/.test(l))).toBe(true);
+    h.transcripts.appendUser('X', 'tx2', 'new life', ['claude']); // the id reused
+    h.frames.length = 0;
+    releaseX();
+    await recorder.idle();
+    expect(h.frames.filter((f) => f.type === 'chatDecisions' && f.chat === 'X'), 'no chatDecisions frame for the ended chat').toEqual([]);
+    expect(h.transcripts.read('X').filter((r) => r.kind === 'decisions'), 'nothing appended to the reused id').toEqual([]);
+    expect(h.logs.some((l) => /recorded in the ledger after the chat closed/.test(l))).toBe(true);
+  });
+});

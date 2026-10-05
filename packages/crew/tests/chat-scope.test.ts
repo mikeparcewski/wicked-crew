@@ -610,6 +610,26 @@ describe('the scratch root and its statement', () => {
     // Unknown ids are no-ops everywhere.
     index.closed('never');
     expect(index.beginClose('never')).toBeUndefined();
+    // ASK-C1 (codex on #808 r5): holdClose parks the id with NO timer until the holder settles it;
+    // a reopen is refused meanwhile, a second hold joins (null), an engine close changes nothing,
+    // and only the holder's ticket frees it.
+    const t8 = index.reserve('k')!;
+    prepareChatScratch('k', scopeFor('k'));
+    index.set('k', scopeFor('k'), t8);
+    const ticket = index.holdClose('k')!;
+    expect(existsSync(join(base, 'k'))).toBe(false);
+    expect(index.stateOf('k')).toBe('held');
+    expect(index.reserve('k')).toBeNull();
+    expect(index.holdClose('k'), 'a second DELETE joins').toBeNull();
+    index.closed('k'); // an engine frame: the hold stands
+    expect(index.stateOf('k')).toBe('held');
+    await new Promise((r) => setTimeout(r, 60)); // no grace timer frees a held id
+    expect(index.stateOf('k')).toBe('held');
+    expect(index.closeHeld('k', ticket + 1), 'not another ticket').toBe(false);
+    expect(index.isHeld('k', ticket)).toBe(true);
+    expect(index.closeHeld('k', ticket)).toBe(true);
+    expect(index.has('k')).toBe(false);
+    expect(index.holdClose('free-id'), 'a free id is held too (nothing may open it mid-fold)').not.toBeNull();
     // abortToClosing parks a reservation whose engine close is still on its way; closed() frees it.
     const t6 = index.reserve('f')!;
     index.abortToClosing('f', t6);

@@ -46,6 +46,8 @@ export interface LaunchRunInput {
   sessionId: string;
   /** JSON array of `AgenticCli` seats — the council roster. */
   clisJson: string;
+  /** (DES-TEAMING-002 §8.1; core ASK-K1a) The PA the operator chose; omitted ⇒ a random eligible seat. */
+  primary?: string;
   /** `shared` (default) | `isolated`. */
   entityMode?: string;
   /** Human-confirm gate policy: `none` (default) | `all` | `before:<ord>`. */

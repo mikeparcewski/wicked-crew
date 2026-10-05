@@ -382,7 +382,8 @@ describe('GET /health capabilities (F-E2E-030)', () => {
     // DES-L9: `revisesPr` rides beside `deliverGate` — a stub-driven route set honestly reports neither.
     // crew#619: `chatIdOnLaunch` is a crew-side constant so it is always false when engineCapabilities throws.
     // C1: `runChatId` is served by the daemon's own launch index, so it is true whatever the engine.
-    expect(res.json().capabilities).toEqual({ deliverGate: false, revisesPr: false, chatIdOnLaunch: false, seatChipOnCreate: false, runChatId: true, walkthroughRoots: false });
+    // ASK-C1: `askPath` is the core-ts floor (0.7.38) — unknown engine, no capability.
+    expect(res.json().capabilities).toEqual({ deliverGate: false, revisesPr: false, chatIdOnLaunch: false, seatChipOnCreate: false, runChatId: true, walkthroughRoots: false, askPath: false });
     await app.close();
   });
 });

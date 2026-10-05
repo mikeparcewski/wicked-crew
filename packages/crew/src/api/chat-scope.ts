@@ -953,6 +953,9 @@ export function removeChatScratch(cwd: string, base: string = chatScratchBase())
 type ChatSlot =
   /** An open is in flight: reserved synchronously before the route's first `await`. */
   | { state: 'reserved'; token: number }
+  /** A DELETE on this daemon is closing the id and has not settled: no timer frees it (the
+   *  holder does, with its ticket), so nothing the close awaits can land on a reuse. */
+  | { state: 'held'; ticket: number }
   /** The chat is open; its scratch root exists and its seats are reading the statement there.
    *  `refused` (F-A45-011): every requested/default seat NOT seated at open, with its reason and
    *  source — served on `GET /chats/:id` so the studio's admission copy survives a reload. */
@@ -1014,10 +1017,21 @@ export class ChatScopeIndex {
     return token;
   }
 
-  /** Give a reservation back (the open failed before `set`) — only the holder's own. */
-  release(chatId: string, token: number): void {
+  /** Whether `token` still holds the reservation for `chatId` (an open in flight that was not
+   *  cancelled by a DELETE / `chatClosed` meanwhile). */
+  owns(chatId: string, token: number): boolean {
     const slot = this.slots.get(chatId);
-    if (slot?.state === 'reserved' && slot.token === token) this.slots.delete(chatId);
+    return slot?.state === 'reserved' && slot.token === token;
+  }
+
+  /** Give a reservation back (the open failed before `set`) — only the holder's own. True when it
+   *  WAS the holder's: the caller may then remove what the open prepared (a scratch root shared by
+   *  id), and must not when a newer open holds the id (codex on #808 r3, 3). */
+  release(chatId: string, token: number): boolean {
+    const slot = this.slots.get(chatId);
+    if (slot?.state !== 'reserved' || slot.token !== token) return false;
+    this.slots.delete(chatId);
+    return true;
   }
 
   /**
@@ -1096,13 +1110,42 @@ export class ChatScopeIndex {
   }
 
   /**
+   * `DELETE /chats/:id` for an ask path (ASK-C1; codex on #808 r5): remove the root now and HOLD
+   * the id — parked with no grace timer — until the close that owns the ticket settles
+   * ({@link closeHeld}); a reopen meanwhile is refused (`reserve` → null), a second DELETE joins
+   * (`null` here: a close is already in progress). A reserved id is cancelled the same way (its
+   * open's `set` fails). A free id is held too, so nothing can open it while the fold is pending.
+   */
+  holdClose(chatId: string): number | null {
+    const slot = this.slots.get(chatId);
+    if (slot?.state === 'held' || slot?.state === 'closing') return null;
+    if (slot?.state === 'live') removeChatScratch(slot.scope.cwd, this.base);
+    const ticket = this.nextToken++;
+    this.slots.set(chatId, { state: 'held', ticket });
+    return ticket;
+  }
+
+  /** Whether `ticket` still holds the close of `chatId`. */
+  isHeld(chatId: string, ticket: number): boolean {
+    const slot = this.slots.get(chatId);
+    return slot?.state === 'held' && slot.ticket === ticket;
+  }
+
+  /** The held close settled: free the id — only the holder's own. */
+  closeHeld(chatId: string, ticket: number): boolean {
+    if (!this.isHeld(chatId, ticket)) return false;
+    this.slots.delete(chatId);
+    return true;
+  }
+
+  /**
    * `DELETE /chats/:id`: remove the root now and park the id until the engine's `chatClosed` (or
    * the grace) frees it. A reserved id is cancelled instead (the in-flight open cleans up on its
    * failed `set`). Returns the scope that was live, if any.
    */
   beginClose(chatId: string): ChatScope | undefined {
     const slot = this.slots.get(chatId);
-    if (slot === undefined || slot.state === 'closing') return undefined;
+    if (slot === undefined || slot.state === 'closing' || slot.state === 'held') return undefined;
     if (slot.state === 'live') removeChatScratch(slot.scope.cwd, this.base);
     // A RESERVED id is parked too, not freed (Copilot, #518): the in-flight open will find its
     // reservation gone, tear the engine chat down and that close's `chatClosed` is still to come —
@@ -1134,6 +1177,9 @@ export class ChatScopeIndex {
       this.slots.set(chatId, { state: 'closing', timer });
       return;
     }
+    // A HELD close settles on its own ticket (`closeHeld`); an engine frame meanwhile (none comes
+    // for an ask path) changes nothing.
+    if (slot.state === 'held') return;
     if (slot.state === 'closing') clearTimeout(slot.timer);
     if (slot.state === 'live') removeChatScratch(slot.scope.cwd, this.base);
     this.slots.delete(chatId);

@@ -335,15 +335,20 @@ describe('the server wiring: one chatCitations frame per reply, after the rewrit
           code_graph_db: null,
         },
       ],
-      chatOpen: async (_id: string, clis: string[]) => clis.map((c) => ({ cliKey: c, ok: true })),
-      chatScopeApplied: async () => true,
-      chatSeats: async () => ['claude'],
-      chatSend: async () => ['claude'],
+      // ASK-C1: an ask starts a path — the send launches one run on the fake engine.
+      launchRun: async () => 'run-cite',
+      sessionsDetail: async () => [{ session: { id: 'run-cite', status: 'awaiting_human' }, units: [] }],
+      proposePlan: async () => ({ ok: true }),
+      confirmGate: async () => 'awaiting_human',
+      cancelRun: async () => 'cancelled',
       chatClose: async () => undefined,
     } as unknown as CoreAdapter;
 
     app = await createServer(adapter, {
       auth: { mode: 'off' },
+      // ASK-C1: admission now applies to the named seat too; the answer is injected so the test does
+      // not read this host's worker-home credentials.
+      seats: { signedIn: () => true },
       auditPath: join(scratch, 'audit.log'),
       evalStoreRoot: join(scratch, 'evals'),
       projectEvents: { disabled: true },
@@ -391,7 +396,7 @@ describe('the server wiring: one chatCitations frame per reply, after the rewrit
       url: '/api/v1/chats',
       payload: { chatId: 'cite-1', clis: ['claude'], repoRefs: ['alpha'] },
     });
-    expect(opened.statusCode).toBe(201);
+    expect(opened.statusCode, opened.body).toBe(201);
     chatCwdParent = dirname((opened.json() as { scope: { cwd: string } }).scope.cwd);
 
     // A REAL send, so the turn index opens a turn and the reply below is stamped the way the
@@ -448,13 +453,25 @@ describe('the server wiring: one chatCitations frame per reply, after the rewrit
     await app.inject({ method: 'DELETE', url: '/api/v1/chats/cite-1' });
   }, 30_000);
 
+  it('codex on #808 r3 (1): End drops the ended path\'s transcript with the chat even though its run was still retaining it — a chat that reuses the id starts empty', async () => {
+    const opened = await app.inject({ method: 'POST', url: '/api/v1/chats', payload: { chatId: 'cite-3', clis: ['claude'], repoRefs: ['alpha'] } });
+    expect(opened.statusCode, opened.body).toBe(201);
+    expect((await app.inject({ method: 'POST', url: '/api/v1/chats/cite-3/messages', payload: { text: 'first life' } })).statusCode).toBe(202);
+    expect((await app.inject({ method: 'GET', url: '/api/v1/chats/cite-3' })).json()).toMatchObject({ messages: [expect.objectContaining({ text: 'first life' })] });
+    expect((await app.inject({ method: 'DELETE', url: '/api/v1/chats/cite-3' })).statusCode).toBe(200);
+    const again = await app.inject({ method: 'POST', url: '/api/v1/chats', payload: { chatId: 'cite-3', clis: ['claude'], repoRefs: ['alpha'] } });
+    expect(again.statusCode, again.body).toBe(201);
+    expect((await app.inject({ method: 'GET', url: '/api/v1/chats/cite-3' })).json()).toMatchObject({ messages: [] });
+    await app.inject({ method: 'DELETE', url: '/api/v1/chats/cite-3' });
+  });
+
   it('says nothing for a reply that cites nothing, and nothing for a failed reply', async () => {
     const opened = await app.inject({
       method: 'POST',
       url: '/api/v1/chats',
       payload: { chatId: 'cite-2', clis: ['claude'], repoRefs: ['alpha'] },
     });
-    expect(opened.statusCode).toBe(201);
+    expect(opened.statusCode, opened.body).toBe(201);
 
     emit({ type: 'chatReply', chat: 'cite-2', cliKey: 'claude', ok: true, text: 'Nothing to cite here.' } as unknown as CoreEvent);
     emit({
