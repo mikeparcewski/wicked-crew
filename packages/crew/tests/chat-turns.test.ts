@@ -455,6 +455,23 @@ describe('POST /chats/:id/messages — an ask starts a PATH; refuse mid-turn; co
     expect(cancelled).toEqual(['run-1']);
   });
 
+  it('codex on #810 r2 (3): the decision recorder hears the audience the turn index holds at ACCEPTANCE — a re-pick that lands during the continuation awaits is not lost', async () => {
+    opened('e057', ['claude', 'opencode']); // random: the turn is reserved for both
+    const first = await send({ text: 'Q1' });
+    const turn1 = (first.json() as { turnId: string }).turnId;
+    expect(turns.turnsOf('e057')[0]!.seats).toEqual(['claude', 'opencode']);
+    turns.reconcile('e057', turn1, ['opencode']); // the relay learned the PA from path.started
+    answered('e057', 'opencode');
+    holdPropose = gate();
+    const q2 = send({ text: 'Q2' });
+    await new Promise((r) => setTimeout(r, 20));
+    const live = turns.turnsOf('e057')[0]!;
+    turns.reconcile('e057', live.turnId, ['opencode']); // the relay learned the PA mid-await
+    holdPropose.release();
+    expect((await q2).statusCode).toBe(202);
+    expect(turns.turnsOf('e057')[0]!.seats, 'the turn index holds the settled voice the route reads at acceptance').toEqual(['opencode']);
+  });
+
   it('codex on #808 r2 (2): DELETE folds the close BEFORE it awaits the cancel — nothing of the closed chat lands after an await', async () => {
     opened('e057', ['claude'], 'claude');
     await send({ text: 'Q1' });

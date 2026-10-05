@@ -199,14 +199,16 @@ describe('AskRelay — the reply', () => {
     expect(h.emitted.filter((f) => f.type === 'chatReply')).toEqual([]);
   });
 
-  it('codex on #810 r1 (6): a terminal frame with no fold (stepFailed / unitDenied / sessionFailed / runCancelled) ends the turn with ok:false — once', async () => {
+  it('codex on #810 r1 (6) + r2 (1): a RUN-terminal frame with no fold (sessionFailed / runCancelled) ends the turn with ok:false — once; stepFailed / unitDenied alone do NOT (the engine fails over or escalates)', async () => {
     const h = harness({ pa: 'codex' });
-    await h.relay.onCoreEvent({ type: 'stepFailed', session: 'run-1', ord: 1, attempt: 1, detail: 'boom', failureKind: 'worker_crash' } as CoreEvent);
+    await h.relay.onCoreEvent({ type: 'stepFailed', session: 'run-1', ord: 1, attempt: 1, detail: 'timed out; failing over', failureKind: 'timeout' } as CoreEvent);
+    await h.relay.onCoreEvent({ type: 'unitDenied', session: 'run-1', ord: 1 } as CoreEvent);
+    expect(h.emitted.filter((f) => f.type === 'chatReply'), 'an attempt failure is not the answer\'s end').toEqual([]);
     await h.relay.onCoreEvent({ type: 'sessionFailed', session: 'run-1', ord: 1 } as CoreEvent);
     await h.relay.onCoreEvent({ type: 'runCancelled', session: 'run-1', tool_children_killed: 0 } as CoreEvent);
     const replies = h.emitted.filter((f) => f.type === 'chatReply');
     expect(replies).toHaveLength(1);
-    expect(replies[0]).toMatchObject({ ok: false, cliKey: 'codex', text: expect.stringMatching(/did not answer: the worker failed \(worker_crash\)/), run_id: 'run-1', ord: 1 });
+    expect(replies[0]).toMatchObject({ ok: false, cliKey: 'codex', text: expect.stringMatching(/did not answer: the run failed at this step/), run_id: 'run-1', ord: 1 });
     // A reviewer unit's failure is not the PA's reply.
     const other = harness({ pa: 'codex' });
     await other.relay.onCoreEvent({ type: 'unitDenied', session: 'run-1', ord: 2 } as CoreEvent);
@@ -215,6 +217,59 @@ describe('AskRelay — the reply', () => {
     const cancelled = harness({ pa: 'codex' });
     await cancelled.relay.onCoreEvent({ type: 'runCancelled', session: 'run-1', tool_children_killed: 0 } as CoreEvent);
     expect(cancelled.emitted.filter((f) => f.type === 'chatReply').map((f) => [f['ord'], f['ok']])).toEqual([[1, false]]);
+  });
+
+  it('codex on #810 r2 (1): the F2 failover — capture timed_out → path.repicked → stepFailed(attempt 1, "failing over") → attempt 2 on the new seat → ONE reply, the retry\'s, ok:true', async () => {
+    const unit: RelayUnit = { id: 'run-1:answer-1', ord: 1, status: 'distributed', assigned_cli: 'claude' };
+    const h = harness({ pa: 'claude', units: [unit] });
+    await h.relay.onCoreEvent({ type: 'unitDispatched', session: 'run-1', ord: 1, attempt: 1 } as CoreEvent);
+    await h.relay.onCoreEvent({ type: 'unitOutputCaptured', session: 'run-1', ord: 1, attempt: 1, outputBytes: 0, stepStatus: 'timed_out', governed: true } as CoreEvent);
+    h.relay.onTeamRow(row('wicked.team.step.completed', { run_id: 'run-1', step_id: 'answer-1', status: 'timed_out', tree: null, output_bytes: 0, output_ref: 'unit:run-1:1:1' }));
+    h.units[0] = { ...unit, assigned_cli: 'codex' };
+    h.relay.onTeamRow(row('wicked.team.path.repicked', { run_id: 'run-1', from: 'claude', to: 'codex', reason: 'timed_out', selection: 'random', pick_seq: 1 }));
+    await h.relay.onCoreEvent({ type: 'stepFailed', session: 'run-1', ord: 1, attempt: 1, detail: 'step budget exhausted; failing over to codex', failureKind: 'timeout' } as CoreEvent);
+    await h.relay.onCoreEvent({ type: 'unitDispatched', session: 'run-1', ord: 1, attempt: 2 } as CoreEvent);
+    await h.relay.onCoreEvent({ type: 'unitOutputCaptured', session: 'run-1', ord: 1, attempt: 2, outputBytes: 10, stepStatus: 'ok', governed: true } as CoreEvent);
+    h.relay.onTeamRow(row('wicked.team.step.completed', { run_id: 'run-1', step_id: 'answer-1', status: 'ok', tree: null, output_bytes: 10, output_ref: 'unit:run-1:1:2' }));
+    await h.relay.onCoreEvent({ type: 'unitDone', session: 'run-1', ord: 1 } as CoreEvent);
+    const replies = h.emitted.filter((f) => f.type === 'chatReply');
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toMatchObject({ ok: true, cliKey: 'codex', text: 'The answer.\nSecond line.', ord: 1 });
+  });
+
+  it('codex on #810 r2 (2): a delta of a SUPERSEDED attempt is dropped, and a partial line never crosses attempts', async () => {
+    const h = harness({ pa: 'codex' });
+    await h.relay.onCoreEvent({ type: 'unitOutputDelta', session: 'run-1', ord: 1, attempt: 1, text: 'HE' } as CoreEvent); // a partial line of attempt 1
+    await h.relay.onCoreEvent({ type: 'unitDispatched', session: 'run-1', ord: 1, attempt: 2 } as CoreEvent);
+    await h.relay.onCoreEvent({ type: 'unitOutputDelta', session: 'run-1', ord: 1, attempt: 1, text: 'old worker text\n' } as CoreEvent); // straggler
+    await h.relay.onCoreEvent({ type: 'unitOutputDelta', session: 'run-1', ord: 1, attempt: 2, text: 'LP: not a control line here\n' } as CoreEvent);
+    expect(h.emitted.map((f) => [f.type, f['text']])).toEqual([['chatDelta', 'LP: not a control line here\n']]);
+  });
+
+  it('codex on #810 r2 (4): a unit read that resolves after End does not recreate the forgotten run\'s cache', async () => {
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((r) => { release = r; });
+    let reads = 0;
+    const paths = new AskPathIndex();
+    paths.open('c1', ['codex'], 'codex');
+    paths.started('c1', 1, 'run-1', 'answer-1');
+    const relay = new AskRelay({
+      paths,
+      turns: new ChatTurnIndex(),
+      units: async () => { reads += 1; await held; return [{ id: 'run-1:answer-1', ord: 1, status: 'done', assigned_cli: 'codex' }]; },
+      workOutput: async () => 'x',
+      fold: () => undefined,
+    });
+    const first = relay.onCoreEvent({ type: 'unitOutputDelta', session: 'run-1', ord: 1, attempt: 1, text: 'a\n' } as CoreEvent);
+    paths.close('c1');
+    relay.forget('run-1');
+    release();
+    await first;
+    // A later run reusing the id reads afresh (nothing was cached for the forgotten run).
+    paths.open('c1', ['codex'], 'codex');
+    paths.started('c1', 2, 'run-1', 'answer-1');
+    await relay.onCoreEvent({ type: 'unitOutputDelta', session: 'run-1', ord: 1, attempt: 1, text: 'b\n' } as CoreEvent);
+    expect(reads).toBe(2);
   });
 
   it('codex on #810 r1 (8): two unitDone deliveries folded WITHOUT awaiting each other emit one reply', async () => {

@@ -3157,9 +3157,12 @@ export function registerRoutes(
         after();
         if (preface !== null) chatTranscripts?.appendSystem(id, turnId, preface);
         chatTranscripts?.appendUser(id, turnId, text, voice);
-        // The recorder's audience is the turn's (the eligible roster for a random pick); the relay
-        // narrows both to the PA when `path.started` names it (ASK-C2).
-        chatRecorder?.noteSend(id, turnId, actorOf(req), text, audience);
+        // The recorder's audience is the turn's AS THE TURN INDEX HOLDS IT NOW: the eligible roster
+        // for a random pick, or the PA the relay narrowed it to during the engine awaits above
+        // (`path.started` / `path.repicked` may land before this record exists — ASK-C2, codex on
+        // #810 r2, 3).
+        const settled = chatTurns.turnsOf(id).find((t) => t.turnId === turnId)?.seats;
+        chatRecorder?.noteSend(id, turnId, actorOf(req), text, settled !== undefined && settled.length > 0 ? settled : audience);
       } catch (err) {
         app.log.warn(`chat ${id}: turn ${turnId} was accepted by the engine but not fully recorded: ${message(err)}`);
       }

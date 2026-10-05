@@ -17,8 +17,10 @@
  * successful retry. A fold whose row has not arrived (the bus poll is 2 s) waits for it; past
  * `rowGraceMs` the reply is read from the record anyway, with `ok` from the engine's own
  * `unitOutputCaptured.stepStatus` — the un-teamed run of §8 F7 publishes no team row at all, and its
- * answer still arrives (r1, 5). A terminal frame for the answer unit with no fold (`stepFailed`,
- * `unitDenied`, `sessionFailed`, `runCancelled`) ends the turn with `ok:false` (r1, 6).
+ * answer still arrives (r1, 5). A RUN-terminal frame with no fold (`sessionFailed{ord}`,
+ * `runCancelled`) ends the turn with `ok:false` (r1, 6); `stepFailed` / `unitDenied` are NOT
+ * terminal — the engine fails over (a re-pick re-dispatches the ord, §8 F2) or opens an escalation
+ * gate whose Approve re-dispatches it, and a failed run says so with `sessionFailed` (r2, 1).
  *
  * The PA: the team rows (`path.started`, `path.repicked`) are authoritative; the unit's assigned seat
  * is the fallback while none has arrived, and the unit record is re-read on every new attempt (a
@@ -222,19 +224,23 @@ export class AskRelay {
     const attempt = typeof f['attempt'] === 'number' ? f['attempt'] : undefined;
     if (attempt !== undefined) this.noteAttempt(runId, ord, attempt);
     if (event.type === 'unitDispatched') return; // the attempt is noted; the seat is re-read on use
+    // A straggler of a superseded attempt (the engine drains a replaced worker's buffered output
+    // with its original label): not the voice any more (r2, 2).
+    if (attempt !== undefined && attempt < this.attemptOf(runId, ord)) return;
     if (event.type === 'unitOutputCaptured') {
       const stepStatus = typeof f['stepStatus'] === 'string' ? f['stepStatus'] : 'ok';
       this.nestedOne(this.captured, runId).set(ord, { attempt: attempt ?? this.attemptOf(runId, ord), stepStatus });
       return;
     }
-    if (event.type === 'stepFailed' || event.type === 'unitDenied' || event.type === 'sessionFailed') {
-      const why =
-        event.type === 'stepFailed'
-          ? `the worker failed (${typeof f['failureKind'] === 'string' ? f['failureKind'] : 'failure'})`
-          : event.type === 'unitDenied'
-            ? 'the gate denied the step'
-            : 'the run failed at this step';
-      await this.terminal(runId, chatId, ord, why);
+    if (event.type === 'stepFailed' || event.type === 'unitDenied') {
+      // An ATTEMPT ended badly — not the answer's end: the engine fails over to another seat
+      // (`path.repicked` + attempt+1) or opens an escalation gate whose Approve re-dispatches the
+      // ord; a run that gives up says so with `sessionFailed`. The stream of this attempt is over.
+      this.tails.delete(`${runId}:${ord}`);
+      return;
+    }
+    if (event.type === 'sessionFailed') {
+      await this.terminal(runId, chatId, ord, 'the run failed at this step');
       return;
     }
     const unit = await this.unit(runId, ord);
@@ -242,6 +248,7 @@ export class AskRelay {
     if (unit === null || answerStepOf(runId, unit.id) === null) return; // not the PA's answer: no chat frame
     const pa = this.paOf(runId, chatId, unit);
     if (event.type === 'unitOutputDelta') {
+      if (attempt !== undefined && attempt < this.attemptOf(runId, ord)) return; // superseded during the await
       const text = typeof f['text'] === 'string' ? f['text'] : '';
       const shown = this.deltaText(`${runId}:${ord}`, text);
       if (shown !== '') this.deps.fold({ type: 'chatDelta', chat: chatId, cliKey: pa, text: shown } as CoreEvent);
@@ -309,8 +316,12 @@ export class AskRelay {
     const prev = byOrd.get(ord);
     if (prev === undefined || attempt > prev) {
       byOrd.set(ord, attempt);
-      // A new attempt may sit on another seat (a re-pick): the cached unit is stale.
-      if (prev !== undefined) this.units.get(runId)?.delete(ord);
+      // A new attempt may sit on another seat (a re-pick): the cached unit is stale, and the
+      // previous attempt's partial line must not complete a line of this one (r2, 2).
+      if (prev !== undefined) {
+        this.units.get(runId)?.delete(ord);
+        this.tails.delete(`${runId}:${ord}`);
+      }
     }
   }
 
@@ -338,10 +349,10 @@ export class AskRelay {
     // narrow it to the voice, so the PA's frames are stamped and nobody else is "pending". The
     // decision recorder's audience follows (r1, 7).
     for (const turn of this.deps.turns.turnsOf(chatId)) {
-      if (!turn.seats.includes(cli) || turn.seats.length > 1) {
-        this.deps.turns.reconcile(chatId, turn.turnId, [cli]);
-        this.deps.recorderReconcile?.(chatId, turn.turnId, [cli]);
-      }
+      if (!turn.seats.includes(cli) || turn.seats.length > 1) this.deps.turns.reconcile(chatId, turn.turnId, [cli]);
+      // Always told (idempotent): the recorder's turn may be created after this (the route
+      // records an accepted send after its engine awaits) and then reads the turn index (r2, 3).
+      this.deps.recorderReconcile?.(chatId, turn.turnId, [cli]);
     }
   }
 
@@ -368,8 +379,9 @@ export class AskRelay {
       this.log(`[ask-relay] cannot read the units of ${runId}: ${err instanceof Error ? err.message : String(err)}`);
       return cached ?? null;
     }
-    // Not found: not cached (the unit may be planned later — a continuation adds answer-N).
-    if (found !== null) this.nestedOne(this.units, runId).set(ord, found);
+    // Not found: not cached (the unit may be planned later — a continuation adds answer-N). A run
+    // forgotten during the read (End) stays forgotten (r2, 4).
+    if (found !== null && this.units.has(runId)) this.nestedOne(this.units, runId).set(ord, found);
     return found;
   }
 
