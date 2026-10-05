@@ -2898,15 +2898,14 @@ export function registerRoutes(
       const standing = rosterWithStanding();
       // ASK-C1: admission applies to the DEFAULT roster and to seats NAMED in `clis` alike — the
       // engine no longer refuses a seat at open (nothing is warmed), so this is the only gate
-      // between a request and the eligible roster the path launches with. A named seat passes
-      // the STRUCTURAL rule (an ACP adapter that can be held read-only) but not the sign-in
-      // heuristic: naming it is the operator's word that it is signed in (the heuristic reads a
-      // credential file, and a real auth failure surfaces on the path's run as a seat failure).
-      // An unknown key is refused by name.
-      const named = b.clis !== undefined;
-      const candidates: Array<(typeof standing)[number] | { key: string }> = named
-        ? b.clis!.map((key) => standing.find((s) => String(s.key) === key) ?? { key })
-        : standing;
+      // between a request and the eligible roster the path launches with. The sign-in standing
+      // is part of it for a named seat too: the launch hands the engine the same standing roster,
+      // which benches a signed-out seat (codex on #808 r2, 5) — admitting it here would only move
+      // the refusal to a launch that cannot start. An unknown key is refused by name.
+      const candidates: Array<(typeof standing)[number] | { key: string }> =
+        b.clis !== undefined
+          ? b.clis.map((key) => standing.find((s) => String(s.key) === key) ?? { key })
+          : standing;
       const clis: string[] = [];
       for (const seat of candidates) {
         const key = String(seat.key);
@@ -2916,7 +2915,7 @@ export function registerRoutes(
         }
         const admission = chatSeatAdmission(
           seat as { key: string; enabled_for_council?: boolean; acp?: { acp_input_governance?: boolean; os_sandbox?: boolean } | null },
-          named ? 'unknown' : (seat.auth ?? 'unknown'),
+          seat.auth ?? 'unknown',
           scoped,
         );
         if (admission.ok) clis.push(key);
@@ -2954,7 +2953,6 @@ export function registerRoutes(
           cliKey,
           ok: true,
         }));
-        askPaths.open(chatId, clis, b.primary);
         let projectAttachError: string | undefined;
         let attachedMemberId: string | undefined;
         if (b.projectId !== undefined) {
@@ -2981,10 +2979,12 @@ export function registerRoutes(
         }
         if (!chatScopes.set(chatId, scope, token, refused, engine)) {
           // The reservation was cancelled while the open was in flight — an engine `chatClosed` or a
-          // `DELETE` for this id (Copilot, #518). Nothing was recorded; tear the chat down (engine
-          // session, scratch root, and the filing just made) instead of returning a stale 201.
-          askPaths.close(chatId);
-          removeChatScratch(scope.cwd, chatScopes.base);
+          // `DELETE` for this id (Copilot, #518). Nothing was recorded; tear the chat down (scratch
+          // root and the filing just made) instead of returning a stale 201. No path record exists
+          // yet (it is published below, after the scope is committed), and the scratch root is this
+          // open's only while no newer open holds the id — a replacement opened meanwhile shares the
+          // directory (codex on #808 r2, 3).
+          if (!chatScopes.has(chatId)) removeChatScratch(scope.cwd, chatScopes.base);
           if (b.projectId !== undefined && attachedMemberId !== undefined) {
             await adapter.projectMemberDetach(b.projectId, attachedMemberId).catch(() => false);
             projects.index.delete(chatId);
@@ -2993,6 +2993,9 @@ export function registerRoutes(
             error: `chat ${chatId} was closed while it was being opened; open it again`,
           });
         }
+        // ASK-C1: the path record — published only now, with the scope committed, so a message
+        // cannot launch against a scope that is still being filed (codex on #808 r2, 4).
+        askPaths.open(chatId, clis, b.primary);
         // Register roots for path rewriting (crew#618): absolute host paths in seat replies are
         // rewritten to repo-relative form before being stored in the transcript.
         if (chatTranscripts !== undefined && scope.repos.length > 0) {
@@ -3107,7 +3110,8 @@ export function registerRoutes(
     // One message at a time per chat, on this daemon: the reservation covers the launch, and a
     // continuation's status read → proposal → approval (two continuations racing would both
     // read `awaiting_human` and both hold an edit; the second's approval then fails).
-    if (!askPaths.reserve(id)) {
+    const lease = askPaths.reserve(id);
+    if (lease === null) {
       return reply.code(409).send({
         code: 'turn_in_flight' as const,
         error: `${path.pa ?? 'the primary agent'} is still answering the previous message in this chat — wait for the reply. Nothing was sent.`,
@@ -3117,16 +3121,29 @@ export function registerRoutes(
     }
     const turn = chatTurns.begin(id, voice, text);
     const turnId = turn?.turnId ?? randomUUID();
+    // What an ACCEPTED message records — the engine has it, so a persistence failure here is
+    // logged, never a retraction of a turn that is already being answered (codex on #808 r2, 9).
+    const persistAccepted = (preface: string | null, after: () => void): void => {
+      try {
+        after();
+        if (preface !== null) chatTranscripts?.appendSystem(id, turnId, preface);
+        chatTranscripts?.appendUser(id, turnId, text, voice);
+        chatRecorder?.noteSend(id, turnId, actorOf(req), text, voice);
+      } catch (err) {
+        app.log.warn(`chat ${id}: turn ${turnId} was accepted by the engine but not fully recorded: ${message(err)}`);
+      }
+    };
     // DC-S7: the rules the chat's seats were told about ride the step's instructions, as the
-    // preface rode a pool send; the scope statement carries the rules in force for the project.
-    const preface = await considerations.prefaceForSend(id);
-    const instructions = preface !== null ? `${preface}\n\n${text}` : text;
+    // preface rode a pool send; told only once the send is accepted (`commit`).
+    const withPreface = (preface: string | null): string => (preface !== null ? `${preface}\n\n${text}` : text);
     try {
       if (path.runId === undefined) {
         const stepId = 'answer-1';
         const generation = path.generation;
         const roster = rosterWithStanding().filter((seat) => path.eligible.includes(String(seat.key)));
         const rules = (await considerations.inForceFor(scope?.projectId ?? null)).rules;
+        const pending = await considerations.pendingPreface(id, { inForce: rules });
+        const instructions = withPreface(pending.preface);
         const input: LaunchRunInput = {
           problem: scope !== undefined ? chatScopeStatement(id, scope, rules) : text,
           sessionId: randomUUID(),
@@ -3143,27 +3160,28 @@ export function registerRoutes(
           if (turn !== null) chatTurns.abort(id, turn.turnId);
           return reply.code(409).send({ error: `chat '${id}' was closed while its path was launching; the run was cancelled` });
         }
-        runtime.linkChatRun?.(id, runId);
-        recordRunLaunched(audit, runTimingIndex, actorOf(req), runId, {
-          chatId: id,
-          askPath: true,
-          ...(repoRef !== undefined ? { repoRef } : {}),
-          ...(projectId !== undefined ? { projectId } : {}),
-          deliver: repoRef !== undefined ? 'pr' : 'none',
+        pending.commit();
+        persistAccepted(pending.preface, () => {
+          runtime.linkChatRun?.(id, runId);
+          recordRunLaunched(audit, runTimingIndex, actorOf(req), runId, {
+            chatId: id,
+            askPath: true,
+            ...(repoRef !== undefined ? { repoRef } : {}),
+            ...(projectId !== undefined ? { projectId } : {}),
+            deliver: repoRef !== undefined ? 'pr' : 'none',
+          });
         });
-        chatTranscripts?.appendUser(id, turnId, text, voice);
-        chatRecorder?.noteSend(id, turnId, actorOf(req), text, voice);
         return reply.code(202).send({ seats: voice, turnId, runId, stepId, ...singleSeat202 });
       }
       const view = (await adapter.sessionsDetail()).find((v) => v.session.id === path.runId);
       if (view === undefined) {
-        askPaths.release(id);
+        askPaths.release(id, lease);
         if (turn !== null) chatTurns.abort(id, turn.turnId);
         return reply.code(409).send({ error: `chat '${id}': its path ${path.runId} is gone — open a new chat` });
       }
       const status = String(view.session.status);
       if (status !== 'awaiting_human') {
-        askPaths.release(id);
+        askPaths.release(id, lease);
         if (turn !== null) chatTurns.abort(id, turn.turnId);
         const who = path.pa ?? 'the primary agent';
         return reply.code(409).send({
@@ -3178,14 +3196,15 @@ export function registerRoutes(
         });
       }
       const stepId = askPaths.nextStep(id);
-      await adapter.proposePlan(path.runId, { steps: [answerStep(stepId, instructions)] }, turnId);
+      const pending = await considerations.pendingPreface(id);
+      await adapter.proposePlan(path.runId, { steps: [answerStep(stepId, withPreface(pending.preface))] }, turnId);
       await adapter.confirmGate(path.runId, true);
-      askPaths.release(id);
-      chatTranscripts?.appendUser(id, turnId, text, voice);
-      chatRecorder?.noteSend(id, turnId, actorOf(req), text, voice);
+      askPaths.release(id, lease);
+      pending.commit();
+      persistAccepted(pending.preface, () => undefined);
       return reply.code(202).send({ seats: voice, turnId, runId: path.runId, stepId, ...singleSeat202 });
     } catch (err) {
-      askPaths.release(id);
+      askPaths.release(id, lease);
       if (turn !== null) chatTurns.abort(id, turn.turnId);
       return reply.code(400).send({ error: message(err) });
     }
@@ -3214,7 +3233,10 @@ export function registerRoutes(
         return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
       }
       const engine = chatScopes.engineOf(id);
-      if (engine === undefined) {
+      // ASK-C1: a chat is open here when it has a path record (every open leaves one, scoped or
+      // not) — the engine scope alone is the pool-era test.
+      const launched = askPaths.get(id);
+      if (engine === undefined && launched === undefined) {
         return reply.code(404).send({
           error: `chat ${id} is not open on this daemon — open a chat first, then re-seat into it`,
         });
@@ -3225,6 +3247,16 @@ export function registerRoutes(
       if (inFlight !== null) {
         return reply.code(409).send(turnInFlightBody(id, inFlight, 'No seat was re-warmed.'));
       }
+      // ASK-C1: the path's roster is handed to the engine at launch and never updated after —
+      // a seat admitted later would be reported eligible and never reach the run (codex on #808
+      // r2, 6). Re-seat before the first message; after it, a new chat.
+      if (launched?.runId !== undefined) {
+        return reply.code(409).send({
+          error: `chat '${id}' has launched its path (${launched.runId}); its seats are fixed for this ask — open a new chat to seat ${clis.join(', ')}`,
+          chatId: id,
+          runId: launched.runId,
+        });
+      }
       try {
         // ASK-C1: a re-seat re-admits the named seats that pass admission NOW (a sign-in fixed)
         // into the path's eligible roster; nothing is warmed and the engine is not called.
@@ -3233,10 +3265,9 @@ export function registerRoutes(
         const seats = clis.map((cliKey) => {
           const seat = standingNow.find((s) => String(s.key) === cliKey);
           if (seat === undefined) return { cliKey, ok: false, error: `seat '${cliKey}' is not in the roster` };
-          // Named by the operator: the structural rule only (as at open).
           const admission = chatSeatAdmission(
             seat as { key: string; enabled_for_council?: boolean; acp?: { acp_input_governance?: boolean; os_sandbox?: boolean } | null },
-            'unknown',
+            seat.auth ?? 'unknown',
             scopedChat,
           );
           return admission.ok ? { cliKey, ok: true } : { cliKey, ok: false, error: admission.reason };
@@ -3349,7 +3380,6 @@ export function registerRoutes(
     // through the same `chatClosed` fold a pool chat used (dropped unless a promoted run retains it).
     const path = askPaths.close(id);
     try {
-      if (path?.runId !== undefined) await adapter.cancelRun(path.runId).catch(() => undefined);
       const projectId = projects.index.projectOf(id) ?? undefined;
       const frame = {
         type: 'chatClosed',
@@ -3358,12 +3388,15 @@ export function registerRoutes(
         ...(projectId !== undefined ? { project_id: projectId } : {}),
       } as CoreEvent;
       // The server's fold (scope slot, decisions, considerations, retention-aware transcript
-      // drop) and the /ws fan-out — the same path an engine `chatClosed` took.
+      // drop) and the /ws fan-out — the same path an engine `chatClosed` took. Folded BEFORE the
+      // awaited cancel: a close that lands after an await can land on a chat that reused the id
+      // meanwhile (codex on #808 r2, 2); after this line nothing of the closed chat is pending.
       if (runtime.closeChat !== undefined) runtime.closeChat(frame);
       else {
         chatScopes.closed(id);
         runtime.broadcast?.(frame);
       }
+      if (path?.runId !== undefined) await adapter.cancelRun(path.runId).catch(() => undefined);
       return { ok: true };
     } catch (err) {
       return reply.code(400).send({ error: message(err) });

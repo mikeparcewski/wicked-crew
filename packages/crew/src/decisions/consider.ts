@@ -122,15 +122,35 @@ export class ConsiderationService {
    * seats and IS prefaced on the send after (codex r1, wording fixed: "seeded, then prefaced").
    */
   async prefaceForSend(chat: string, opts: { inForce?: ReadonlyArray<ConformanceRule> } = {}): Promise<string | null> {
+    const pending = await this.pendingPreface(chat, opts);
+    pending.commit();
+    return pending.preface;
+  }
+
+  /**
+   * {@link prefaceForSend} in two steps: the preface now, the bookkeeping ("told") only when the
+   * caller's send is ACCEPTED (`commit`). A send the engine refuses — a path not at its turn gate,
+   * a proposal that fails — must not consume the fresh rules, or the retry delivers nothing
+   * (codex on #808 r2, 7). The seed of an unknown chat is recorded at once: nothing was told,
+   * and the current set stands in for the open statement either way.
+   */
+  async pendingPreface(
+    chat: string,
+    opts: { inForce?: ReadonlyArray<ConformanceRule> } = {},
+  ): Promise<{ preface: string | null; commit: () => void }> {
     const rules = opts.inForce ?? (await this.inForceFor(this.deps.projectOf(chat) ?? null)).rules;
     const seen = this.seen.get(chat);
     if (seen === undefined) {
       this.seen.set(chat, new Set(rules.map((r) => r.id)));
-      return null;
+      return { preface: null, commit: () => undefined };
     }
     const fresh = rules.filter((r) => !seen.has(r.id));
-    for (const r of rules) seen.add(r.id);
-    return fresh.length > 0 ? rulesPreface(fresh) : null;
+    return {
+      preface: fresh.length > 0 ? rulesPreface(fresh) : null,
+      commit: () => {
+        for (const r of rules) seen.add(r.id);
+      },
+    };
   }
 
   chatClosed(chat: string): void {

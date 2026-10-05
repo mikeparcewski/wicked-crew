@@ -346,6 +346,11 @@ export interface CreateServerOptions {
    * `enabled` defaults to ON in the daemon and OFF under a test runner (VITEST /
    * NODE_ENV=test), the seat-health-probe posture.
    */
+  /** The seats' standing (tests: a sign-in answer instead of the credential-file heuristic and
+   *  the live auth-status probes, so admission is host-independent). */
+  seats?: {
+    signedIn?: (seatKey: string, workerRoot?: string) => boolean | null;
+  };
   stallWatchdog?: {
     enabled?: boolean;
     /** Sweep cadence, ms (default 30 s; tests shorten it). */
@@ -453,7 +458,10 @@ export async function createServer(
   // `runtime.rosterWithStanding`), the four interactive seams (`roster`), and the adapter's own
   // launches (`setRosterProvider` → `seatsForWorkflow` / `wicked-crew start`). Read at call time,
   // so a seat signed in from the System page is eligible on the very next launch.
-  const rosterWithStanding = rosterWithStandingFactory({ seatHealth });
+  const rosterWithStanding = rosterWithStandingFactory({
+    seatHealth,
+    ...(options?.seats?.signedIn !== undefined ? { signedIn: options.seats.signedIn } : {}),
+  });
   // Runtime-guarded, not typed away: the integration suites drive `createServer` over PARTIAL fake
   // adapters (cast to `CoreAdapter`) that never grew this method — the real adapter always has it.
   if (typeof (adapter as { setRosterProvider?: unknown }).setRosterProvider === 'function') {

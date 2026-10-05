@@ -32,6 +32,8 @@ let warmByChat: Map<string, string[]>;
 /** When set, decides what a send REACHES — used to model a turn that reaches fewer seats than are
  *  warm (a transient engine drop), which is the only broadcast that can tell "roster" from "reach". */
 let sendReaches: ((chatId: string, targets?: string[]) => string[]) | null = null;
+/** When set, `projectMemberAttach` parks until released — the open-in-flight window (codex on #808 r2, 3+4). */
+let holdAttach: { promise: Promise<void>; release: () => void } | null = null;
 /** Records exactly what the route hands the engine: `(chatId, clis, cwd, scope)`. */
 const chatOpen = vi.fn(async (...args: [string, string[], string?, unknown?]) =>
   args[1].map((c) => ({ cliKey: c, ok: true })),
@@ -70,8 +72,14 @@ function fakeAdapter(): CoreAdapter {
       return targets === undefined ? warm : targets.filter((t) => warm.includes(t));
     },
     chatClose: async () => undefined,
+    chatList: async () => [],
     // Only `p-live` exists: any other id is the route's 404 (codex on #664 — shape before lookup).
     projectGet: async (id: string) => (id === 'p-live' ? { id, status: 'active' } : null),
+    projectMemberAttach: async () => {
+      if (holdAttach !== null) await holdAttach.promise;
+      return { member: { id: 'm-1', attached_at: 1 }, created: true };
+    },
+    projectMemberDetach: async () => true,
   } as unknown as CoreAdapter;
 }
 
@@ -276,7 +284,7 @@ describe('ASK-C1 — an ask starts a path: the open records eligibility and a ch
     expect((await app.inject({ method: 'GET', url: '/api/v1/chats/reseat' })).json()).toMatchObject({ seats: ['claude', 'opencode'] });
   });
 
-  it('codex on #808 (4): seats NAMED in `clis` pass the structural admission rule (no engine refuses them any more) but not the sign-in heuristic', async () => {
+  it('codex on #808 (4) + r2 (5): seats NAMED in `clis` go through the SAME admission as the default roster — structure AND sign-in (the launch hands the engine that standing; a signed-out seat would only be benched there)', async () => {
     // pi has no input governance and no sandbox: refused in a scoped chat even when named.
     const scopedPi = await open({ chatId: 'named-pi', clis: ['claude', 'pi'], repoRefs: ['alpha'] });
     expect(scopedPi.statusCode).toBe(201);
@@ -284,17 +292,45 @@ describe('ASK-C1 — an ask starts a path: the open records eligibility and a ch
     expect(body.seats, 'the 201 seats are the ELIGIBLE roster; a refusal is on `refused`').toEqual([{ cliKey: 'claude', ok: true }]);
     expect(body.refused.map((r) => r.cliKey)).toEqual(['pi']);
     expect(body.refused[0]!.reason).toMatch(/asks no permissions/);
-    expect((await app.inject({ method: 'GET', url: '/api/v1/chats/named-pi' })).json()).toMatchObject({ seats: ['claude'] });
-    // A key the roster does not know is refused by name; naming a signed-out seat is the operator's
-    // word (the heuristic reads a credential file) — the path launches with it.
+    // A key the roster does not know is refused by name.
+    const unknown = await open({ chatId: 'named-unknown', clis: ['claude', 'nobody'], repoRefs: ['alpha'] });
+    expect(unknown.statusCode).toBe(201);
+    expect((unknown.json() as { seats: { cliKey: string; ok: boolean }[] }).seats).toEqual([{ cliKey: 'claude', ok: true }]);
+    expect((unknown.json() as { refused: { cliKey: string; reason: string }[] }).refused[0]).toMatchObject({ cliKey: 'nobody', reason: expect.stringMatching(/not in the roster/) });
+    // A named seat that is signed out is refused like a default one — nothing is launched that
+    // the engine would bench on arrival.
     signedIn = () => false;
-    const named = await open({ chatId: 'named-out', clis: ['claude', 'nobody'], repoRefs: ['alpha'] });
-    expect(named.statusCode).toBe(201);
-    expect((named.json() as { seats: { cliKey: string; ok: boolean }[] }).seats).toEqual([{ cliKey: 'claude', ok: true }]);
-    expect((named.json() as { refused: { cliKey: string; reason: string }[] }).refused[0]).toMatchObject({ cliKey: 'nobody', reason: expect.stringMatching(/not in the roster/) });
-    // ...while the DEFAULT roster still refuses a signed-out seat up front (F-2R2-009 above).
-    const dflt = await open({ chatId: 'dflt-out', repoRefs: ['alpha'] });
-    expect((dflt.json() as { refused: { cliKey: string; reason: string }[] }).refused.find((r) => r.cliKey === 'claude')?.reason).toMatch(/signed out/);
+    const out = await open({ chatId: 'named-out', clis: ['claude'], repoRefs: ['alpha'] });
+    expect(out.statusCode).toBe(409);
+    expect((out.json() as { refused: { cliKey: string; reason: string }[] }).refused[0]).toMatchObject({ cliKey: 'claude', reason: expect.stringMatching(/signed out/) });
+    expect(existsSync(join(base, 'chats', 'named-out')), 'a refused open leaves no root').toBe(false);
+  });
+
+  it('codex on #808 r2 (3+4): the path record is published only once the scope is COMMITTED; an open cancelled mid-flight never touches the replacement that reused the id', async () => {
+    let releaseAttach: () => void = () => undefined;
+    holdAttach = { promise: new Promise<void>((r) => { releaseAttach = r; }), release: () => releaseAttach() };
+    const first = open({ chatId: 'live', clis: ['claude'], repoRefs: ['alpha'], projectId: 'p-live' });
+    await new Promise((r) => setTimeout(r, 20));
+    // Mid-open: no path yet — a message finds nothing to launch against, and the list is empty.
+    expect((await app.inject({ method: 'POST', url: '/api/v1/chats/live/messages', payload: { text: 'too early' } })).statusCode).toBe(409);
+    expect((await app.inject({ method: 'GET', url: '/api/v1/chats' })).json()).toEqual({ chats: [] });
+    // End it while it is still opening, then reuse the id.
+    expect((await app.inject({ method: 'DELETE', url: '/api/v1/chats/live' })).statusCode).toBe(200);
+    const second = await open({ chatId: 'live', clis: ['claude'], repoRefs: ['alpha'] });
+    expect(second.statusCode).toBe(201);
+    const cwd = (second.json() as { scope: { cwd: string } }).scope.cwd;
+    expect(existsSync(cwd)).toBe(true);
+    // The first open resumes: its reservation is gone — 409, and the replacement is untouched.
+    holdAttach.release();
+    const res = await first;
+    expect(res.statusCode).toBe(409);
+    expect((res.json() as { error: string }).error).toMatch(/closed while it was being opened/);
+    expect(existsSync(cwd), 'the replacement keeps its scratch root').toBe(true);
+    expect(chatScopes.get('live')?.cwd).toBe(cwd);
+    expect((await app.inject({ method: 'GET', url: '/api/v1/chats' })).json()).toEqual({
+      chats: [{ chatId: 'live', seats: ['claude'], idleSecs: null, cwd, codeGraphDb: graphFile, readRoots: ['/srv/repos/alpha'] }],
+    });
+    holdAttach = null;
   });
 });
 

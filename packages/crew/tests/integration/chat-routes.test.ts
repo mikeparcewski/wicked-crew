@@ -21,7 +21,9 @@ let baseUrl: string;
 beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), 'chat-routes-'));
   adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: true });
-  app = await createServer(adapter);
+  // ASK-C1: admission applies to the named seat (sign-in included); answered here so the stub
+  // daemon does not read this host's worker-home credentials.
+  app = await createServer(adapter, { seats: { signedIn: () => true } });
   await app.listen({ port: 0, host: '127.0.0.1' });
   const addr = app.server.address();
   baseUrl = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`;
@@ -46,17 +48,25 @@ describe('chat routes (stub engine)', () => {
     expect(res.status).toBe(400);
   });
 
-  it('POST /chats surfaces the engine capability error honestly (stub has no ACP runner)', async () => {
+  it('ASK-C1: POST /chats on the stub engine opens a PATH record (201, nothing warmed) — the engine is not asked anything until the first message; DELETE frees it', async () => {
     const res = await fetch(`${baseUrl}/api/v1/chats`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ chatId: 'c1', clis: ['claude'] }),
     });
-    // The stub engine's core rejects chat (no ACP runner) — the route must relay
-    // that as an error, never a fake 201 with zero seats.
-    expect(res.status).toBeGreaterThanOrEqual(400);
-    const body = (await res.json()) as { error?: string };
-    expect(body.error ?? '').toMatch(/chat unsupported|ACP/i);
+    // Before ASK-C1 this was the engine's "chat unsupported (no ACP runner)" relayed as an error;
+    // an ask is now a path its first message launches, so the open touches no engine chat pool.
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { seats: { cliKey: string; ok: boolean }[]; refused: unknown[] };
+    expect(body.seats).toEqual([{ cliKey: 'claude', ok: true }]);
+    expect(body.refused).toEqual([]);
+    // Listed by this daemon (codex on #808, 7), then gone once closed — the later tests read an
+    // empty enumerate surface.
+    const listed = (await (await fetch(`${baseUrl}/api/v1/chats`)).json()) as { chats: { chatId: string }[] };
+    expect(listed.chats.map((c) => c.chatId)).toEqual(['c1']);
+    expect((await fetch(`${baseUrl}/api/v1/chats/c1`, { method: 'DELETE' })).status).toBe(200);
+    const after = (await (await fetch(`${baseUrl}/api/v1/chats`)).json()) as { chats: unknown[] };
+    expect(after.chats).toEqual([]);
   });
 
   // crew#502: the scope is resolved and validated BEFORE any seat warms — so these reach a

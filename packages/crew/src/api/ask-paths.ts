@@ -71,17 +71,20 @@ export class AskPathIndex {
     return g;
   }
 
-  /** Reserve the chat for one message (a launch or a continuation): false when one is in flight. */
-  reserve(chatId: string): boolean {
+  /** Reserve the chat for one message (a launch or a continuation): the lease (the chat's
+   *  generation) to hand back to {@link release}; `null` when a message is in flight. */
+  reserve(chatId: string): number | null {
     const p = this.paths.get(chatId);
-    if (p === undefined || p.busy === true) return false;
+    if (p === undefined || p.busy === true) return null;
     p.busy = true;
-    return true;
+    return p.generation;
   }
 
-  release(chatId: string): void {
+  /** Give a lease back — only the generation that holds it (codex on #808 r2, 1: a request of a
+   *  closed-and-reopened chat must not free the newcomer's reservation). */
+  release(chatId: string, lease: number): void {
     const p = this.paths.get(chatId);
-    if (p !== undefined) p.busy = false;
+    if (p !== undefined && p.generation === lease) p.busy = false;
   }
 
   /** The first message launched the run; `stepId` is its answer step. False when the chat was

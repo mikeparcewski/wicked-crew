@@ -346,6 +346,9 @@ describe('the server wiring: one chatCitations frame per reply, after the rewrit
 
     app = await createServer(adapter, {
       auth: { mode: 'off' },
+      // ASK-C1: admission now applies to the named seat too; the answer is injected so the test does
+      // not read this host's worker-home credentials.
+      seats: { signedIn: () => true },
       auditPath: join(scratch, 'audit.log'),
       evalStoreRoot: join(scratch, 'evals'),
       projectEvents: { disabled: true },

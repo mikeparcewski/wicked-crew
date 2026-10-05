@@ -140,6 +140,18 @@ describe('POST /chats/:id/messages — an ask starts a PATH; refuse mid-turn; co
   let holdLaunch: { promise: Promise<void>; release: () => void } | null;
   /** When set, `proposePlan` parks until released — the continuation window (codex on #808, 1). */
   let holdPropose: { promise: Promise<void>; release: () => void } | null;
+  /** Per message text: a launch that parks until released (codex on #808 r2, 1 — two launches of
+   *  two generations in flight at once). */
+  let holdFor: Map<string, { promise: Promise<void>; release: () => void }>;
+  /** When set, `cancelRun` parks until released (codex on #808 r2, 2). */
+  let holdCancel: { promise: Promise<void>; release: () => void } | null;
+  /** The rules in force, as the fake engine's `considerRules` answers (codex on #808 r2, 7+8). */
+  let rulesNow: Array<{ id: string; statement: string; severity: string; targets: Record<string, unknown> }>;
+  const gate = (): { promise: Promise<void>; release: () => void } => {
+    let release: () => void = () => undefined;
+    const promise = new Promise<void>((r) => { release = r; });
+    return { promise, release: () => release() };
+  };
   /** The server's event fold, as `registerRoutes` is handed it (codex on #808, 5). */
   let closeChat: ReturnType<typeof vi.fn>;
 
@@ -151,6 +163,9 @@ describe('POST /chats/:id/messages — an ask starts a PATH; refuse mid-turn; co
     runStatus = 'awaiting_human';
     holdLaunch = null;
     holdPropose = null;
+    holdFor = new Map();
+    holdCancel = null;
+    rulesNow = [];
     closeChat = vi.fn();
     turns = new ChatTurnIndex();
     askPaths = new AskPathIndex();
@@ -162,12 +177,16 @@ describe('POST /chats/:id/messages — an ask starts a PATH; refuse mid-turn; co
       {
         launchRun: async (input: Record<string, unknown>) => {
           launched.push(input);
+          const n = launched.length;
+          const text = (input['plan'] as { steps: Array<{ instructions: string }> }).steps[0]!.instructions;
           if (holdLaunch !== null) await holdLaunch.promise;
-          if ((input['plan'] as { steps: Array<{ instructions: string }> }).steps[0]!.instructions === 'refuse-me') {
-            throw new Error('engine refused this launch');
-          }
-          return `run-${launched.length}`;
+          const held = holdFor.get(text);
+          if (held !== undefined) await held.promise;
+          if (text.endsWith('refuse-me')) throw new Error('engine refused this launch');
+          return `run-${n}`;
         },
+        projectRulesSupported: () => true,
+        considerRules: async () => ({ in_force: rulesNow, set_aside: [] }),
         sessionsDetail: async () => [{ session: { id: 'run-1', status: runStatus }, units: [] }],
         proposePlan: async (runId: string, plan: unknown, requestId: string) => {
           if (holdPropose !== null) await holdPropose.promise;
@@ -180,6 +199,7 @@ describe('POST /chats/:id/messages — an ask starts a PATH; refuse mid-turn; co
           return 'awaiting_human';
         },
         cancelRun: async (runId: string) => {
+          if (holdCancel !== null) await holdCancel.promise;
           cancelled.push(runId);
           return 'cancelled';
         },
@@ -327,6 +347,81 @@ describe('POST /chats/:id/messages — an ask starts a PATH; refuse mid-turn; co
     expect(cancelled, 'the orphan run was cancelled').toEqual(['run-1']);
     expect(askPaths.view('e057'), 'the newcomer has no path').toBeUndefined();
     expect(turns.inFlight('e057')).toBeNull();
+  });
+
+  it('codex on #808 r2 (1): a request of an OLD generation cannot free the newcomer\'s reservation — the lease is the generation', async () => {
+    opened('e057', ['claude'], 'claude');
+    holdFor.set('A-refuse-me', gate());
+    holdFor.set('B', gate());
+    const a = send({ text: 'A-refuse-me' }); // generation 1, parked
+    await new Promise((r) => setTimeout(r, 20));
+    expect((await app.inject({ method: 'DELETE', url: '/api/v1/chats/e057' })).statusCode).toBe(200);
+    opened('e057', ['claude'], 'claude'); // generation 2
+    const b = send({ text: 'B' }); // parked, holds generation 2's reservation
+    await new Promise((r) => setTimeout(r, 20));
+    holdFor.get('A-refuse-me')!.release(); // A is refused by the engine: its catch releases ITS lease only
+    expect((await a).statusCode).toBe(400);
+    const c = await send({ text: 'C' });
+    expect(c.statusCode, 'B still holds the chat').toBe(409);
+    expect((c.json() as { code: string }).code).toBe('turn_in_flight');
+    holdFor.get('B')!.release();
+    expect((await b).statusCode).toBe(202);
+    expect(askPaths.view('e057')).toMatchObject({ runId: 'run-2' });
+    expect(launched.map((l) => (l['plan'] as { steps: Array<{ instructions: string }> }).steps[0]!.instructions)).toEqual(['A-refuse-me', 'B']);
+  });
+
+  it('codex on #808 r2 (2): DELETE folds the close BEFORE it awaits the cancel — nothing of the closed chat lands after an await', async () => {
+    opened('e057', ['claude'], 'claude');
+    await send({ text: 'Q1' });
+    holdCancel = gate();
+    const del = app.inject({ method: 'DELETE', url: '/api/v1/chats/e057' });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(closeChat, 'the fold ran while the cancel is still pending').toHaveBeenCalledTimes(1);
+    expect(cancelled).toEqual([]);
+    holdCancel.release();
+    expect((await del).statusCode).toBe(200);
+    expect(cancelled).toEqual(['run-1']);
+    expect(closeChat).toHaveBeenCalledTimes(1);
+  });
+
+  it('codex on #808 r2 (6): a re-seat after the path launched is 409 — the roster the run holds cannot be changed; before it, the seat is admitted', async () => {
+    opened('e057', ['claude'], 'claude');
+    await send({ text: 'Q1' });
+    const after = await app.inject({ method: 'POST', url: '/api/v1/chats/e057/seats', payload: { clis: ['opencode'] } });
+    expect(after.statusCode).toBe(409);
+    expect(after.json()).toMatchObject({ runId: 'run-1' });
+    expect((after.json() as { error: string }).error).toMatch(/seats are fixed/);
+    expect(askPaths.get('e057')!.eligible).toEqual(['claude']);
+  });
+
+  it('codex on #808 r2 (7+8): a refused continuation does not consume a fresh rule; the accepted retry carries it in the step and the transcript shows the system row', async () => {
+    opened('e057', ['claude'], 'claude');
+    await send({ text: 'Q1' }); // seeds what the seats were told (no rules yet)
+    rulesNow = [{ id: 'R1', statement: 'Cite the file for every claim', severity: 'high', targets: {} }];
+    runStatus = 'executing';
+    const refused = await send({ text: 'Q2' });
+    expect(refused.statusCode).toBe(409);
+    runStatus = 'awaiting_human';
+    const ok = await send({ text: 'Q2' });
+    expect(ok.statusCode).toBe(202);
+    const step = (proposed[0]!.plan as { steps: Array<{ instructions: string }> }).steps[0]!;
+    expect(step.instructions, 'the fresh rule rides the accepted step').toMatch(/\[rule:R1\][\s\S]*Q2$/);
+    const rows = transcripts.read('e057');
+    const system = rows.find((r) => r.kind === 'system');
+    expect(system?.text, 'the injected words are on the record').toMatch(/\[rule:R1\]/);
+    // Told once: a third message carries no preface.
+    expect((await send({ text: 'Q3' })).statusCode).toBe(202);
+    expect((proposed[1]!.plan as { steps: Array<{ instructions: string }> }).steps[0]!.instructions).toBe('Q3');
+  });
+
+  it('codex on #808 r2 (9): a transcript write that throws AFTER the engine accepted the turn is logged, not a 400 that retracts the turn', async () => {
+    opened('e057', ['claude'], 'claude');
+    const spy = vi.spyOn(transcripts, 'appendUser').mockImplementationOnce(() => { throw new Error('ENOSPC'); });
+    const res = await send({ text: 'Q1' });
+    expect(res.statusCode).toBe(202);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(turns.inFlight('e057', ['claude'])!.busy, 'the turn stands').toEqual(['claude']);
+    expect(askPaths.view('e057')).toMatchObject({ runId: 'run-1' });
   });
 
   it('codex on #808 (5+7): DELETE closes through the server\'s fold (the synthetic chatClosed frame); GET /chats lists this daemon\'s paths beside the engine pool', async () => {
