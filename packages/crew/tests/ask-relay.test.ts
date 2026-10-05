@@ -422,6 +422,42 @@ describe('AskRelay — the reply', () => {
     expect(h.emitted.filter((f) => f.type === 'chatReply')).toEqual([expect.objectContaining({ ok: true, cliKey: 'codex' })]);
   });
 
+  it('codex on #810 r7 (1): a failed UNCACHED read at the fold does not lose the fold — the ord waits for its row, and the row answers', async () => {
+    let failNext = true;
+    const paths = new AskPathIndex();
+    const turns = new ChatTurnIndex();
+    paths.open('c1', ['codex'], 'codex');
+    turns.begin('c1', ['codex'], 'Q1');
+    paths.started('c1', 1, 'run-1', 'answer-1');
+    const emitted: Array<CoreEvent & Record<string, unknown>> = [];
+    const relay = new AskRelay({
+      paths,
+      turns,
+      units: async () => { if (failNext) { failNext = false; throw new Error('run view unavailable'); } return [{ id: 'run-1:answer-1', ord: 1, status: 'done', assigned_cli: 'codex', last_attempt: 0 }]; },
+      workOutput: async () => 'The answer.',
+      fold: (f) => emitted.push(f as CoreEvent & Record<string, unknown>),
+      rowGraceMs: 60,
+    });
+    await relay.onCoreEvent({ type: 'unitDone', session: 'run-1', ord: 1 } as CoreEvent); // nothing cached; the read fails once
+    expect(emitted).toEqual([]);
+    relay.onTeamRow(row('wicked.team.step.completed', { run_id: 'run-1', step_id: 'answer-1', status: 'ok', tree: null, output_bytes: 10, output_ref: 'unit:run-1:1:0' }));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(emitted.filter((f) => f.type === 'chatReply')).toEqual([expect.objectContaining({ ok: true, cliKey: 'codex', text: 'The answer.' })]);
+    // And with no row at all, the grace answers from the record once the read recovers.
+    failNext = true;
+    const relay2 = new AskRelay({
+      paths,
+      turns,
+      units: async () => { if (failNext) { failNext = false; throw new Error('run view unavailable'); } return [{ id: 'run-1:answer-2', ord: 2, status: 'done', assigned_cli: 'codex', last_attempt: 0 }]; },
+      workOutput: async () => 'Second.',
+      fold: (f) => emitted.push(f as CoreEvent & Record<string, unknown>),
+      rowGraceMs: 60,
+    });
+    await relay2.onCoreEvent({ type: 'unitDone', session: 'run-1', ord: 2 } as CoreEvent);
+    await new Promise((r) => setTimeout(r, 120));
+    expect(emitted.filter((f) => f.type === 'chatReply' && f['ord'] === 2)).toEqual([expect.objectContaining({ ok: true, text: 'Second.' })]);
+  });
+
   it('codex on #810 r1 (8): two unitDone deliveries folded WITHOUT awaiting each other emit one reply', async () => {
     const h = harness({ pa: 'codex' });
     h.relay.onTeamRow(completed());

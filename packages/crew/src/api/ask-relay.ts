@@ -249,7 +249,13 @@ export class AskRelay {
     }
     const unit = await this.unit(runId, ord);
     if (this.deps.paths.chatOf(runId) !== chatId) return; // ended meanwhile (r1, 4)
-    if (unit === null || unit === undefined || answerStepOf(runId, unit.id) === null) return; // not the PA's answer: no chat frame
+    if (unit === undefined) {
+      // The run view did not answer. Live typing is best-effort (dropped); a FOLD is not — it is
+      // held for its row / the grace, whose reply re-reads the record (r7, 1).
+      if (event.type === 'unitDone') this.awaitRow(runId, chatId, ord);
+      return;
+    }
+    if (unit === null || answerStepOf(runId, unit.id) === null) return; // not the PA's answer: no chat frame
     // Superseded during the await: neither streamed nor allowed to name the PA (r3, 2).
     if (this.superseded(runId, ord, attempt)) return;
     const pa = this.paOf(runId, chatId, unit);
@@ -268,7 +274,14 @@ export class AskRelay {
       await this.reply(runId, chatId, ord, 'fold');
       return;
     }
-    if (this.waiting.has(key)) return;
+    this.awaitRow(runId, chatId, ord);
+  }
+
+  /** A fold with no row of its attempt yet: wait for the row (the bus poll is 2 s) — bounded by
+   *  `rowGraceMs`, after which the reply is read from the record anyway. */
+  private awaitRow(runId: string, chatId: string, ord: number): void {
+    const key = `${runId}:${ord}`;
+    if (this.waiting.has(key) || this.replied.has(key)) return;
     const timer = setTimeout(() => {
       this.waiting.delete(key);
       if (this.deps.paths.chatOf(runId) !== chatId) return;
@@ -404,7 +417,9 @@ export class AskRelay {
       found = (await this.deps.units(runId)).find((u) => u.ord === ord) ?? null;
     } catch (err) {
       this.log(`[ask-relay] cannot read the units of ${runId}: ${err instanceof Error ? err.message : String(err)}`);
-      return fresh ? undefined : (cached ?? null);
+      // `undefined` = the read failed (nothing certified); a cache is good enough for a non-fresh
+      // caller; `null` is reserved for "no such unit" (r7, 1).
+      return fresh ? undefined : (cached ?? undefined);
     }
     // Not found: not cached (the unit may be planned later — a continuation adds answer-N). A run
     // forgotten during the read (End) stays forgotten (r2, 4); a read that started under an attempt
@@ -449,16 +464,7 @@ export class AskRelay {
     const row = unit === undefined ? undefined : this.rowFor(runId, ord);
     if ((row === undefined || unit === undefined) && via !== 'grace') {
       this.replied.delete(key);
-      if (!this.waiting.has(key)) {
-        const timer = setTimeout(() => {
-          this.waiting.delete(key);
-          if (this.deps.paths.chatOf(runId) !== chatId) return;
-          this.log(`[ask-relay] ${key}: no step.completed row within ${this.rowGraceMs} ms — answering from the record (un-teamed run?)`);
-          void this.reply(runId, chatId, ord, 'grace');
-        }, this.rowGraceMs);
-        timer.unref?.();
-        this.waiting.set(key, { timer });
-      }
+      this.awaitRow(runId, chatId, ord);
       return;
     }
     if (unit === undefined) {
