@@ -335,10 +335,12 @@ describe('the server wiring: one chatCitations frame per reply, after the rewrit
           code_graph_db: null,
         },
       ],
-      chatOpen: async (_id: string, clis: string[]) => clis.map((c) => ({ cliKey: c, ok: true })),
-      chatScopeApplied: async () => true,
-      chatSeats: async () => ['claude'],
-      chatSend: async () => ['claude'],
+      // ASK-C1: an ask starts a path — the send launches one run on the fake engine.
+      launchRun: async () => 'run-cite',
+      sessionsDetail: async () => [{ session: { id: 'run-cite', status: 'awaiting_human' }, units: [] }],
+      proposePlan: async () => ({ ok: true }),
+      confirmGate: async () => 'awaiting_human',
+      cancelRun: async () => 'cancelled',
       chatClose: async () => undefined,
     } as unknown as CoreAdapter;
 

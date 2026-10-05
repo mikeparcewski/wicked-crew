@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { registerRoutes } from '../src/api/routes.js';
+import { AskPathIndex } from '../src/api/ask-paths.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
@@ -103,7 +104,6 @@ describe('crew#641 item 5 — chat-promotion provenance is absent when the chat 
       payload: { problem: 'promoted from a ghost chat', clisJson: '[]', chatId: 'ghost' },
     });
     expect(res.statusCode).toBe(201);
-    expect(chatSeats).toHaveBeenCalledWith('ghost');
 
     const detail = await app.inject({ method: 'GET', url: '/api/v1/runs/run-b' });
     expect(detail.statusCode).toBe(200);
@@ -143,6 +143,7 @@ describe('crew#655 — chat-promotion provenance on the path that carries a valu
   let audit: AuditLog;
   let dir: string;
   let chatScopes: ChatScopeIndex;
+  let askPaths: AskPathIndex;
   let runTimingIndex: RunTimingIndex;
 
   /** A live scope for `chatId`, grounded or not — what `chatScopes.engineOf` answers from. */
@@ -161,6 +162,8 @@ describe('crew#655 — chat-promotion provenance on the path that carries a valu
 
   /** `grounded` decides the scope's `codeGraphDb` — a path (grounded) or `null` (not). */
   const arm = async (chatId: string, warmSeats: string[], grounded: boolean): Promise<void> => {
+    askPaths = new AskPathIndex();
+    askPaths.open(chatId, warmSeats);
     dir = mkdtempSync(join(tmpdir(), 'crew-chat-promotion-positive-'));
     audit = new AuditLog(join(dir, 'audit.log'), () => undefined);
     chatScopes = new ChatScopeIndex(join(dir, 'chats'));
@@ -192,7 +195,7 @@ describe('crew#655 — chat-promotion provenance on the path that carries a valu
       new ElicitationCache(),
       { bus: null, index: new MembershipIndex(), log: () => undefined },
       { audit, authMode: 'off' },
-      { runTimingIndex, chatScopes },
+      { runTimingIndex, chatScopes, askPaths },
     );
     await app.ready();
   };

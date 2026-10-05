@@ -194,41 +194,6 @@ describe('GET /roster + POST /chats with the seat’s own evidence (F-A45-006 / 
     expect((await roster()).filter((s) => s.key !== 'pi').every((s) => s.auth === 'signed_in' && s.council_eligible)).toBe(true);
   });
 
-  it('a seat the ENGINE dropped at dispatch is named in refused (source budget), on the 201, on GET /chats/:id, and in the thread — the fresh-rig gap', async () => {
-    // Default chips claude·pi·opencode, scoped; the engine warms claude + opencode and simply omits pi.
-    seatsOf = (clis) => clis.filter((c) => c !== 'pi').map((c) => ({ cliKey: c, ok: true }));
-    const res = await open({ chatId: 'proj-chat', repoRefs: ['alpha'] });
-    expect(res.statusCode).toBe(201);
-    const body = res.json() as { seats: Array<{ cliKey: string }>; refused: Refusal[] };
-    expect(body.seats.map((s) => s.cliKey)).toEqual(['claude', 'opencode']);
-    expect(body.refused).toHaveLength(1);
-    expect(body.refused[0]).toMatchObject({ cliKey: 'pi', source: 'budget' });
-    expect(body.refused[0]!.reason).toMatch(/did not warm it within its dispatch budget/);
-    // …GET /chats/:id carries the same list…
-    const detail = (await app.inject({ method: 'GET', url: '/api/v1/chats/proj-chat' })).json() as { refused: Refusal[] | null };
-    expect(detail.refused).toEqual(body.refused);
-    // …and the thread got one frame, with the source.
-    expect(broadcast).toEqual([{ type: 'chatSeatRefused', chat: 'proj-chat', cliKey: 'pi', reason: body.refused[0]!.reason, source: 'budget' }]);
-  });
-
-  it('the dropped seat’s cause is the most specific the daemon knows: its own "no credential" report (auth) beats the engine’s drop (budget); repeated ballot timeouts no longer bench a seat daemon-wide (PR-3D)', async () => {
-    seatsOf = (clis) => clis.filter((c) => c !== 'pi').map((c) => ({ cliKey: c, ok: true }));
-    // An EXPLICIT clis list (the studio's default chips are sent explicitly) bypasses admission —
-    // the drop is only visible after the engine answered.
-    seatHealth.ingest(ev({ type: 'councilSeatFailed', session: 'run-2', cli: 'pi', kind: 'timed_out', detail: 'ballot timed out' }));
-    seatHealth.ingest(ev({ type: 'councilSeatFailed', session: 'run-3', cli: 'pi', kind: 'timed_out', detail: 'ballot timed out' }));
-    // Two timeouts used to bench pi for 30 min daemon-wide (`source: 'bench'`, "benched by this
-    // daemon"). The bench is the ENGINE's per-run business now (R5b / BC-15): crew records the
-    // failures but names no cause of its own, so the drop keeps the engine's — `budget`.
-    const dropped = (await open({ chatId: 'bench-chat', clis: ['claude', 'pi', 'opencode'] })).json() as { refused: Refusal[] };
-    expect(dropped.refused[0]).toMatchObject({ cliKey: 'pi', source: 'budget' });
-    expect(dropped.refused[0]!.reason).not.toMatch(/benched by this daemon/);
-    seatHealth.ingest(ev({ type: 'councilSeatFailed', session: 'run-4', cli: 'pi', kind: 'not_logged_in', detail: 'No API key found for anthropic' }));
-    const auth = (await open({ chatId: 'auth-chat', clis: ['claude', 'pi', 'opencode'] })).json() as { refused: Refusal[] };
-    expect(auth.refused[0]).toMatchObject({ cliKey: 'pi', source: 'auth' });
-    expect(auth.refused[0]!.reason).toMatch(/reported no credential \(ballot: No API key found/);
-  });
-
   it('a DEFAULT seat the roster already reads signed out is refused up front with source auth, and never handed to the engine', async () => {
     seatHealth.ingest(ev({ type: 'councilSeatFailed', session: 'run-5', cli: 'pi', kind: 'not_logged_in', detail: 'No API key found' }));
     const handed: string[][] = [];
@@ -238,7 +203,9 @@ describe('GET /roster + POST /chats with the seat’s own evidence (F-A45-006 / 
     };
     const res = await open({ chatId: 'dflt-chat' });
     expect(res.statusCode).toBe(201);
-    expect(handed).toEqual([['claude', 'opencode']]);
+    // ASK-C1: nothing is handed to the engine at open; the eligible seats are the chat's seats.
+    expect(handed).toEqual([]);
+    expect((res.json() as { seats: Array<{ cliKey: string }> }).seats.map((x) => x.cliKey)).toEqual(['claude', 'opencode']);
     const body = res.json() as { refused: Refusal[] };
     expect(body.refused).toEqual([expect.objectContaining({ cliKey: 'pi', source: 'auth' })]);
   });

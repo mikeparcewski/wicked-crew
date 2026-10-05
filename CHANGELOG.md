@@ -10,6 +10,23 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+- **An ask starts a path (ASK-C1; DES-ASK-TEAM-CHAT-001 §5.1, Amendment 6).** `POST /chats` resolves
+  the scope and the ELIGIBLE seats and warms nothing; the first `POST /chats/:id/messages` launches
+  ONE team run on the engine — a user-composed plan of one `understand` step at the turn gate with
+  the message as its instructions, one reviewer asked for, the eligible roster, the operator's
+  `primary` (new body field) or a random pick by the engine — and every later message continues
+  the same run (`propose_plan(answer-N)` + `confirm_gate(Approve)`), 409 `turn_in_flight` while the
+  path is executing. The fan-out of a send to every warm seat is deleted. `DELETE /chats/:id`
+  cancels the path; `GET /chats/:id` carries `path` (run, PA, selection, reviewer, helpers, step);
+  `GET /health.capabilities.askPath` (= wicked-core-ts ≥ 0.7.38) tells a studio which behaviour it
+  is talking to. api-types **0.92.0**: `HealthCapabilities.askPath`, `ChatOpenBody.primary`,
+  `ChatMessageResponse.runId/stepId`, `ChatDetailResponse.path` (`ChatPathView`),
+  `LaunchPlan.monitors`, `TeamStepCompletedPayload.answers_presented`. The chat route tests that
+  encoded the warm pool (engine refusals at open, re-seat via `chatOpen`, singleSeat decided from
+  warm seats) are replaced by the path's: launch body, continue, 409, cancel, transcript, provenance
+  from eligibility. The relay that turns the PA's `step.completed` output into the `chatReply`
+  frame is ASK-C2.
+
 ## [0.8.1] — 2026-10-05
 
 The bundled UI is wicked-studio 0.6.1: the operator's corrections to the released Desk

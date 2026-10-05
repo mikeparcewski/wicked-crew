@@ -129,15 +129,11 @@ describe('POST /chats — scope lifecycle over a fake engine', () => {
     expect(agents).toContain('the store is pinned by `WICKED_ESTATE_DB`');
     expect(agents).not.toMatch(/MCP/);
     expect(existsSync(join(body.scope.cwd, 'CLAUDE.md'))).toBe(true);
-    // What the engine was handed.
-    expect(chatOpen).toHaveBeenCalledTimes(1);
-    expect(chatOpen.mock.calls[0]).toEqual([
-      'live',
-      ['claude'],
-      body.scope.cwd,
-      { codeGraphDb: graphFile, readRoots: ['/srv/repos/alpha'] },
-    ]);
+    // ASK-C1 (DES-ASK-TEAM-CHAT-001 §5.1): the open warms NOTHING — the chat is a path its first
+    // message launches; the seats are the eligible roster and the engine scope is recorded for it.
+    expect(chatOpen).toHaveBeenCalledTimes(0);
     expect(chatScopes.get('live')?.cwd).toBe(body.scope.cwd);
+    expect(chatScopes.engineOf('live')).toEqual({ cwd: body.scope.cwd, codeGraphDb: graphFile, readRoots: ['/srv/repos/alpha'] });
   });
 
   it('refuses to re-open a chat id this daemon already holds (409) BEFORE touching its root or the engine', async () => {
@@ -146,7 +142,7 @@ describe('POST /chats — scope lifecycle over a fake engine', () => {
     const again = await open({ chatId: 'live', clis: ['claude'] });
     expect(again.statusCode).toBe(409);
     expect((again.json() as { error: string }).error).toMatch(/already open/);
-    expect(chatOpen).toHaveBeenCalledTimes(1);
+    expect(chatOpen).toHaveBeenCalledTimes(0);
     expect(readFileSync(join(base, 'chats', 'live', 'AGENTS.md'), 'utf8')).toBe(stamp);
   });
 
@@ -169,54 +165,6 @@ describe('POST /chats — scope lifecycle over a fake engine', () => {
     expect((await open({ chatId: 'live', clis: ['claude'] })).statusCode).toBe(201);
   });
 
-  it('a scoped open on an engine that PREDATES scope (row without the fields) is REFUSED (501) with the seats and torn down; an unscoped one proceeds', async () => {
-    applied = false;
-    const res = await open({ chatId: 'old-engine', clis: ['claude'], repoRefs: ['alpha'] });
-    expect(res.statusCode).toBe(501);
-    const body = res.json() as { error: string; seats: unknown[] };
-    expect(body.error).toMatch(/predates chat scope/);
-    expect(body.seats).toEqual([{ cliKey: 'claude', ok: true }]);
-    expect(existsSync(join(base, 'chats', 'old-engine'))).toBe(false);
-    // The engine chat was closed again, so its `chatClosed` is still on its way: the id is parked
-    // as closing (no scope, no reuse) until that event frees it.
-    expect(chatScopes.get('old-engine')).toBeUndefined();
-    expect(chatScopes.stateOf('old-engine')).toBe('closing');
-    chatScopes.closed('old-engine');
-    expect(chatScopes.has('old-engine')).toBe(false);
-    // `null` with a seat reporting warm — NO row at all — is "nothing warmed", not an engine
-    // version guess (independent review, W1): 409 with the seats, torn down.
-    applied = null;
-    const res2 = await open({ chatId: 'unconfirmed', clis: ['claude'], repoRefs: ['alpha'] });
-    expect(res2.statusCode).toBe(409);
-    const body2 = res2.json() as { error: string; seats: unknown[] };
-    expect(body2.error).toMatch(/nothing warmed/);
-    expect(body2.seats).toHaveLength(1);
-    expect(existsSync(join(base, 'chats', 'unconfirmed'))).toBe(false);
-    // An UNSCOPED chat promises nothing beyond its scratch root and opens regardless.
-    const plain = await open({ chatId: 'plain', clis: ['claude'] });
-    expect(plain.statusCode).toBe(201);
-    expect((plain.json() as { scope: { kind: string } }).scope.kind).toBe('none');
-  });
-
-  it('a scoped open where EVERY seat fails reports the per-seat reasons (409 + seats) before any engine probe, tears down, and frees the id (W1)', async () => {
-    chatOpen.mockImplementationOnce(async (...args: [string, string[], string?, unknown?]) =>
-      args[1].map((c) => ({ cliKey: c, ok: false, error: `seat '${c}' cannot join a SCOPED chat: its ACP adapter asks no permissions` })),
-    );
-    applied = null; // what the adapter returns when the engine holds no row — must NOT read as a version problem
-    const res = await open({ chatId: 'pi-only', clis: ['pi', 'codex'], repoRefs: ['alpha'] });
-    expect(res.statusCode).toBe(409);
-    const body = res.json() as { error: string; seats: { cliKey: string; ok: boolean; error?: string }[] };
-    expect(body.error).toMatch(/no seat warmed \(2 failed\)/);
-    expect(body.seats.map((s) => s.cliKey)).toEqual(['pi', 'codex']);
-    expect(body.seats[0]!.error).toMatch(/cannot join a SCOPED chat/);
-    expect(body.error).not.toMatch(/upgrade the engine/);
-    expect(existsSync(join(base, 'chats', 'pi-only'))).toBe(false);
-    expect(chatScopes.has('pi-only')).toBe(false);
-    // The id is free again immediately (the engine dropped the scope itself; no chatClosed will come).
-    applied = true;
-    expect((await open({ chatId: 'pi-only', clis: ['claude'], repoRefs: ['alpha'] })).statusCode).toBe(201);
-  });
-
   it('the DEFAULT seats of a SCOPED open are pre-filtered to admissible adapters; an unscoped open keeps the whole roster (W5)', async () => {
     const spy = vi.spyOn(CoreAdapter, 'roster').mockReturnValue([
       { key: 'claude', acp: { acp_input_governance: true, os_sandbox: false } },
@@ -227,7 +175,7 @@ describe('POST /chats — scope lifecycle over a fake engine', () => {
     try {
       const scopedRes = await open({ chatId: 'dflt-scoped', repoRefs: ['alpha'] });
       expect(scopedRes.statusCode).toBe(201);
-      expect(chatOpen.mock.calls.at(-1)![1]).toEqual(['claude', 'codex']);
+      expect((scopedRes.json() as { seats: { cliKey: string }[] }).seats.map((x) => x.cliKey)).toEqual(['claude', 'codex']);
       // F-2R2-007: the two dropped seats are NAMED with their reasons — on the response…
       const scopedBody = scopedRes.json() as { refused: { cliKey: string; reason: string }[] };
       expect(scopedBody.refused.map((r) => r.cliKey)).toEqual(['pi', 'agy']);
@@ -243,7 +191,7 @@ describe('POST /chats — scope lifecycle over a fake engine', () => {
       // (no ACP adapter) is refused in this mode too, named with the ACP-seat reason.
       const plain = await open({ chatId: 'dflt-plain' });
       expect(plain.statusCode).toBe(201);
-      expect(chatOpen.mock.calls.at(-1)![1]).toEqual(['claude', 'pi', 'codex']);
+      expect((plain.json() as { seats: { cliKey: string }[] }).seats.map((x) => x.cliKey)).toEqual(['claude', 'pi', 'codex']);
       const plainBody = plain.json() as { refused: { cliKey: string; reason: string }[] };
       expect(plainBody.refused.map((r) => r.cliKey)).toEqual(['agy']);
       expect(plainBody.refused[0]!.reason).toMatch(/no ACP adapter/);
@@ -273,7 +221,7 @@ describe('POST /chats — scope lifecycle over a fake engine', () => {
     try {
       const res = await open({ chatId: 'auth-scoped', repoRefs: ['alpha'] });
       expect(res.statusCode).toBe(201);
-      expect(chatOpen.mock.calls.at(-1)![1]).toEqual(['claude', 'opencode']);
+      expect((res.json() as { seats: { cliKey: string }[] }).seats.map((x) => x.cliKey)).toEqual(['claude', 'opencode']);
       const body = res.json() as { refused: { cliKey: string; reason: string }[] };
       expect(body.refused).toHaveLength(1);
       expect(body.refused[0]!.cliKey).toBe('codex');
@@ -291,202 +239,6 @@ describe('POST /chats — scope lifecycle over a fake engine', () => {
     }
   });
 
-  it('a REQUESTED seat the engine refuses joins `refused` with the engine\'s reason, and reaches the thread', async () => {
-    chatOpen.mockImplementationOnce(async (...args: [string, string[], string?, unknown?]) =>
-      args[1].map((c) => (c === 'pi' ? { cliKey: c, ok: false, error: "seat 'pi' cannot join a SCOPED chat: its ACP adapter asks no permissions" } : { cliKey: c, ok: true })),
-    );
-    const res = await open({ chatId: 'req', clis: ['claude', 'pi'], repoRefs: ['alpha'] });
-    expect(res.statusCode).toBe(201);
-    const body = res.json() as { seats: { cliKey: string; ok: boolean }[]; refused: { cliKey: string; reason: string }[] };
-    expect(body.seats.map((s) => [s.cliKey, s.ok])).toEqual([['claude', true], ['pi', false]]);
-    expect(body.refused).toEqual([{ cliKey: 'pi', reason: "seat 'pi' cannot join a SCOPED chat: its ACP adapter asks no permissions", source: 'engine' }]);
-    expect(broadcast).toEqual([{ type: 'chatSeatRefused', chat: 'req', cliKey: 'pi', reason: body.refused[0]!.reason, source: 'engine' }]);
-  });
-
-  it('a chatClosed that lands while an open is in flight cancels it: nothing is recorded and the chat is torn down', async () => {
-    // The fake engine "closes" the chat between chatOpen and the route's publish step.
-    chatOpen.mockImplementationOnce(async (...args: [string, string[], string?, unknown?]) => {
-      chatScopes.closed(args[0]);
-      return args[1].map((c) => ({ cliKey: c, ok: true }));
-    });
-    const res = await open({ chatId: 'racy', clis: ['claude'], repoRefs: ['alpha'] });
-    expect(res.statusCode).toBe(409);
-    expect((res.json() as { error: string }).error).toMatch(/closed while it was being opened/);
-    // Nothing recorded — but the id is PARKED (closing), not freed (hardening): the route's own
-    // teardown `chatClose` has a `chatClosed` still to come, and a reuse of the id in between must
-    // not lose its chat to it. That event (or the grace) frees the id.
-    expect(chatScopes.get('racy')).toBeUndefined();
-    expect(chatScopes.stateOf('racy')).toBe('closing');
-    expect(existsSync(join(base, 'chats', 'racy'))).toBe(false);
-    chatScopes.closed('racy'); // the teardown's chatClosed lands
-    expect(chatScopes.has('racy')).toBe(false);
-  });
-});
-
-describe('POST /chats/:id/seats — re-seat named seats on a LIVE chat (F-W1-005, the retry lever)', () => {
-  it('re-runs chatOpen with the IDENTICAL engine scope; a warmed seat leaves `refused`; the engine\'s refusal folds in and reaches the thread', async () => {
-    // Open with an explicit list where the engine refuses pi (the 201 records it as refused: engine).
-    chatOpen.mockImplementationOnce(async (...args: [string, string[], string?, unknown?]) =>
-      args[1].map((c) => (c === 'pi' ? { cliKey: c, ok: false, error: "seat 'pi' cannot join a SCOPED chat: its ACP adapter asks no permissions" } : { cliKey: c, ok: true })),
-    );
-    const opened = await open({ chatId: 'reseat', repoRefs: ['r1'], clis: ['claude', 'pi'] });
-    expect(opened.statusCode).toBe(201);
-    const openCall = chatOpen.mock.calls[0]!;
-    expect((opened.json() as { refused: { cliKey: string }[] }).refused.map((r) => r.cliKey)).toEqual(['pi']);
-    broadcast.length = 0;
-
-    // Retry pi: the engine now seats it (say the operator set os_sandbox and re-registered).
-    const retry = await app.inject({ method: 'POST', url: '/api/v1/chats/reseat/seats', payload: { clis: ['pi'] } });
-    expect(retry.statusCode).toBe(200);
-    expect(retry.json()).toEqual({ chatId: 'reseat', seats: [{ cliKey: 'pi', ok: true }], refused: [] });
-    // The SAME cwd + graph + read roots the open handed the engine — never a re-resolved scope
-    // (a different scope would evict every warm seat).
-    const retryCall = chatOpen.mock.calls[1]!;
-    expect(retryCall[0]).toBe('reseat');
-    expect(retryCall[1]).toEqual(['pi']);
-    expect(retryCall[2]).toBe(openCall[2]);
-    expect(retryCall[3]).toEqual(openCall[3]);
-    expect(broadcast, 'a seated retry broadcasts no refusal').toEqual([]);
-    // The detail no longer names pi as refused.
-    expect((await app.inject({ method: 'GET', url: '/api/v1/chats/reseat' })).json()).toMatchObject({ refused: [] });
-
-    // Retry a seat the engine STILL refuses: the refusal replaces its entry and reaches /ws.
-    chatOpen.mockImplementationOnce(async () => [{ cliKey: 'codex', ok: false, error: "no ACP config for 'codex'" }]);
-    const again = await app.inject({ method: 'POST', url: '/api/v1/chats/reseat/seats', payload: { clis: ['codex'] } });
-    expect(again.statusCode).toBe(200);
-    expect(again.json()).toEqual({
-      chatId: 'reseat',
-      seats: [{ cliKey: 'codex', ok: false, error: "no ACP config for 'codex'" }],
-      refused: [{ cliKey: 'codex', reason: "no ACP config for 'codex'", source: 'engine' }],
-    });
-    expect(broadcast).toEqual([{ type: 'chatSeatRefused', chat: 'reseat', cliKey: 'codex', reason: "no ACP config for 'codex'", source: 'engine' }]);
-  });
-
-  it('an unknown or closed chat is 404 (never a fresh chat); a bad body is 400; no engine call either way', async () => {
-    const before = chatOpen.mock.calls.length;
-    expect((await app.inject({ method: 'POST', url: '/api/v1/chats/nope/seats', payload: { clis: ['claude'] } })).statusCode).toBe(404);
-    await open({ chatId: 'gone', repoRefs: ['r1'] });
-    await app.inject({ method: 'DELETE', url: '/api/v1/chats/gone' });
-    expect((await app.inject({ method: 'POST', url: '/api/v1/chats/gone/seats', payload: { clis: ['claude'] } })).statusCode).toBe(404);
-    expect((await app.inject({ method: 'POST', url: '/api/v1/chats/nope/seats', payload: { clis: [] } })).statusCode).toBe(400);
-    expect((await app.inject({ method: 'POST', url: '/api/v1/chats/nope/seats', payload: {} })).statusCode).toBe(400);
-    // Only the DELETE-d chat's own open reached the engine.
-    expect(chatOpen.mock.calls.length - before).toBe(1);
-  });
-});
-
-describe('crew#641 — single-seat degradation disclosed on open and every turn', () => {
-  it('201 carries singleSeat when exactly one seat warmed and at least one was refused — FAILS on main (field absent)', async () => {
-    // claude warms; pi is refused by the engine.
-    chatOpen.mockImplementationOnce(async (...args: [string, string[], string?, unknown?]) =>
-      args[1].map((c) => (c === 'pi' ? { cliKey: c, ok: false, error: "seat 'pi' cannot join a SCOPED chat: its ACP adapter asks no permissions" } : { cliKey: c, ok: true })),
-    );
-    const res = await open({ chatId: 'single', clis: ['claude', 'pi'], repoRefs: ['alpha'] });
-    expect(res.statusCode).toBe(201);
-    const body = res.json() as {
-      seats: { cliKey: string; ok: boolean }[];
-      refused: { cliKey: string }[];
-      singleSeat?: { degraded: boolean; warmed: string; refused: { cliKey: string }[]; message: string };
-    };
-    expect(body.singleSeat).toBeDefined();
-    expect(body.singleSeat!.degraded).toBe(true);
-    expect(body.singleSeat!.warmed).toBe('claude');
-    expect(body.singleSeat!.refused.map((r) => r.cliKey)).toContain('pi');
-    expect(body.singleSeat!.message).toMatch(/one seat/);
-    expect(body.singleSeat!.message).toMatch(/wicked-core#563/);
-    // No disclosure of refused seats if not present in PI's reason.
-    expect(body.singleSeat!.message).toMatch(/pi/);
-  });
-
-  // The boundary the first cut of this feature could not express: TWO warm seats WITH a refusal.
-  // `refused.length > 0` is satisfied, so only the seat count can keep the disclosure quiet — and on
-  // the 202 the count was read from the seats the TURN REACHED, which a targeted send makes 1.
-  const openTwoWarmOneRefused = async (chatId: string) => {
-    chatOpen.mockImplementationOnce(async (...args: [string, string[], string?, unknown?]) =>
-      args[1].map((c) => (c === 'pi' ? { cliKey: c, ok: false, error: "seat 'pi' refused" } : { cliKey: c, ok: true })),
-    );
-    const res = await open({ chatId, clis: ['claude', 'opencode', 'pi'], repoRefs: ['alpha'] });
-    expect(res.statusCode).toBe(201);
-    const body = res.json() as { seats: { cliKey: string; ok: boolean }[]; refused: unknown[]; singleSeat?: unknown };
-    expect(body.seats.filter((s) => s.ok).map((s) => s.cliKey)).toEqual(['claude', 'opencode']);
-    expect(body.refused.length).toBe(1);
-    expect(body.singleSeat, 'two warm seats are not a degraded chat').toBeUndefined();
-    return body;
-  };
-
-  it('202 carries NO singleSeat on a BROADCAST to a two-warm-seat chat — including when the turn REACHES only one of them', async () => {
-    await openTwoWarmOneRefused('two-warm-broadcast');
-    // (a) the ordinary broadcast: both warm seats answer.
-    const all = await app.inject({
-      method: 'POST',
-      url: '/api/v1/chats/two-warm-broadcast/messages',
-      payload: { text: 'hello both' },
-    });
-    expect(all.statusCode).toBe(202);
-    const allBody = all.json() as { seats: string[]; singleSeat?: unknown };
-    expect(allBody.seats).toEqual(['claude', 'opencode']);
-    expect(allBody.singleSeat).toBeUndefined();
-
-    // (b) a SECOND two-warm-seat chat where the engine REACHES only one seat on a broadcast (a
-    // transient drop). A separate chat, because the first one's turn is still in flight. The chat
-    // still has two warm seats and can still disagree with itself, so the 202 must report WHICH
-    // seat answered without claiming the chat is degraded. This is the broadcast that can tell the
-    // roster from the reach — assertion (a) alone passes on either derivation.
-    await openTwoWarmOneRefused('two-warm-partial');
-    sendReaches = () => ['claude'];
-    const partial = await app.inject({
-      method: 'POST',
-      url: '/api/v1/chats/two-warm-partial/messages',
-      payload: { text: 'anyone there?' },
-    });
-    expect(partial.statusCode).toBe(202);
-    const partialBody = partial.json() as { seats: string[]; singleSeat?: unknown };
-    expect(partialBody.seats).toEqual(['claude']);
-    expect(partialBody.singleSeat, 'one seat REACHED is not a one-seat chat').toBeUndefined();
-  });
-
-  it('202 carries NO singleSeat on a TARGETED send to ONE seat of a two-warm-seat chat — the turn reached one seat, the chat still has two', async () => {
-    await openTwoWarmOneRefused('two-warm-targeted');
-    const res = await app.inject({
-      method: 'POST',
-      url: '/api/v1/chats/two-warm-targeted/messages',
-      payload: { text: 'just you, claude', targets: ['claude'] },
-    });
-    expect(res.statusCode).toBe(202);
-    const body = res.json() as { seats: string[]; singleSeat?: { message: string } };
-    // The turn reached exactly one seat…
-    expect(body.seats).toEqual(['claude']);
-    // …and that is NOT a degraded chat: opencode is still warm and can still disagree.
-    expect(body.singleSeat, 'a targeted send must not fabricate a single-seat degradation').toBeUndefined();
-  });
-
-  it('201 carries NO singleSeat when two or more seats are warm', async () => {
-    // Both claude and opencode warm; no refused.
-    const res = await open({ chatId: 'two', clis: ['claude', 'opencode'], repoRefs: ['alpha'] });
-    expect(res.statusCode).toBe(201);
-    const body = res.json() as { singleSeat?: unknown };
-    expect(body.singleSeat).toBeUndefined();
-  });
-
-  it('202 carries singleSeat when the chat has one warm seat and refused seats are on record — FAILS on main (field absent)', async () => {
-    // Set up a single-seat chat (claude warm, pi refused by engine).
-    chatOpen.mockImplementationOnce(async (...args: [string, string[], string?, unknown?]) =>
-      args[1].map((c) => (c === 'pi' ? { cliKey: c, ok: false, error: "seat 'pi' refused" } : { cliKey: c, ok: true })),
-    );
-    await open({ chatId: 'msg-single', clis: ['claude', 'pi'], repoRefs: ['alpha'] });
-    // fakeAdapter.chatSend returns ['claude'] (one warm seat).
-    const msgRes = await app.inject({
-      method: 'POST',
-      url: '/api/v1/chats/msg-single/messages',
-      payload: { text: 'hello' },
-    });
-    expect(msgRes.statusCode).toBe(202);
-    const body = msgRes.json() as { seats: string[]; singleSeat?: { degraded: boolean; warmed: string } };
-    expect(body.seats).toEqual(['claude']);
-    expect(body.singleSeat).toBeDefined();
-    expect(body.singleSeat!.degraded).toBe(true);
-    expect(body.singleSeat!.warmed).toBe('claude');
-  });
 });
 
 // crew#650 — the other branch of #641's condition. `singleSeat` was gated on `refused.length > 0`,
@@ -502,190 +254,31 @@ type SingleSeat = {
   message: string;
 };
 
-describe('crew#650 — singleSeat is disclosed with NO refusals at all', () => {
-  it('201 carries singleSeat for a chat opened with exactly one seat and nothing refused', async () => {
-    const res = await open({ chatId: 'solo', clis: ['claude'], repoRefs: ['alpha'] });
-    expect(res.statusCode).toBe(201);
-    const body = res.json() as {
-      seats: { cliKey: string; ok: boolean }[];
-      refused: unknown[];
-      singleSeat?: SingleSeat;
-    };
-    expect(body.seats.filter((s) => s.ok).map((s) => s.cliKey)).toEqual(['claude']);
-    expect(body.refused).toEqual([]);
-    expect(body.singleSeat, 'one warm seat cannot disagree with itself, refusals or not').toBeDefined();
-    expect(body.singleSeat!.degraded).toBe(true);
-    expect(body.singleSeat!.warmed).toBe('claude');
-    // The refusal list rides along as EVIDENCE and is empty; it is not what triggers the field.
-    expect(body.singleSeat!.refused).toEqual([]);
-    expect(body.singleSeat!.message).toMatch(/one seat \(claude\)/);
-    expect(body.singleSeat!.message).toMatch(/wicked-core#563/);
-    // …and it must NOT invent a refusal clause with nothing after it.
-    expect(body.singleSeat!.message, 'no "Refused:" clause when nothing was refused').not.toMatch(/Refused:/);
-    // The daemon just opened this chat, so the empty list is a RECORD, not a gap.
-    expect(body.singleSeat!.refusalsKnown).toBe(true);
-    // The 201 is the ONE route that witnessed the open, so it alone may describe it (third review
-    // of #658). Pinned here so the tense rule is not "quietly correct" in one direction only.
-    expect(body.singleSeat!.message, 'the open route may state what it just observed').toMatch(
-      /opened with a single seat/,
-    );
+describe('ASK-C1 — an ask starts a path: the open records eligibility and a chosen primary, warms nothing', () => {
+  it('`primary` must be one of the eligible seats (400 names the eligible list); a valid one is recorded as the chosen PA', async () => {
+    const bad = await open({ chatId: 'pick-bad', clis: ['claude', 'pi'], repoRefs: ['alpha'], primary: 'codex' });
+    expect(bad.statusCode).toBe(400);
+    expect((bad.json() as { error: string }).error).toMatch(/primary names a seat that is not eligible.*claude, pi/);
+    expect(existsSync(join(base, 'chats', 'pick-bad')), 'a refused open frees its root').toBe(false);
+    const good = await open({ chatId: 'pick', clis: ['claude', 'pi'], repoRefs: ['alpha'], primary: 'pi' });
+    expect(good.statusCode).toBe(201);
+    expect((good.json() as { seats: { cliKey: string; ok: boolean }[] }).seats).toEqual([
+      { cliKey: 'claude', ok: true },
+      { cliKey: 'pi', ok: true },
+    ]);
+    expect(chatOpen, 'the engine warms nothing at open').not.toHaveBeenCalled();
+    // No path yet: the first message launches it.
+    expect((await app.inject({ method: 'GET', url: '/api/v1/chats/pick' })).json()).not.toHaveProperty('path');
   });
 
-  it('202 carries singleSeat on every turn of that chat', async () => {
-    await open({ chatId: 'solo-msg', clis: ['claude'], repoRefs: ['alpha'] });
-    const res = await app.inject({
-      method: 'POST',
-      url: '/api/v1/chats/solo-msg/messages',
-      payload: { text: 'hello' },
-    });
-    expect(res.statusCode).toBe(202);
-    const body = res.json() as { seats: string[]; singleSeat?: SingleSeat };
-    expect(body.seats).toEqual(['claude']);
-    expect(body.singleSeat).toBeDefined();
-    expect(body.singleSeat!.warmed).toBe('claude');
-    expect(body.singleSeat!.refused).toEqual([]);
-    expect(body.singleSeat!.message).not.toMatch(/Refused:/);
-    expect(body.singleSeat!.refusalsKnown, 'this daemon opened it — the empty list is a record').toBe(true);
-    // A TURN never describes the open, even when it happens to be right: this same route serves the
-    // chat that opened with two seats and lost one, and one sentence cannot be true for both.
-    expect(body.singleSeat!.message, 'a turn has no standing to describe the open').not.toMatch(
-      /opened with a single seat/,
-    );
-    expect(body.singleSeat!.message).toMatch(/one warm seat \(claude\)/);
-  });
-
-  it('a chat that OPENED with two warm seats and lost one to a release is not described as opened with one', async () => {
-    // The third review's HIGH, and nothing about it is unknown: both seats warm at open, so the
-    // record is a legitimate KNOWN `[]`. Then `opencode` blows its turn budget and the engine
-    // releases it (chat-turns.ts), which the fixture models by shrinking the warm roster. `refused`
-    // still describes OPEN TIME, `warmRoster` describes NOW, and a sentence built from both is false
-    // the moment they diverge.
-    await open({ chatId: 'duo-released', clis: ['claude', 'opencode'], repoRefs: ['alpha'] });
-    expect(warmByChat.get('duo-released')).toEqual(['claude', 'opencode']);
-    expect(chatScopes.refusedOf('duo-released'), 'both warmed: a real, known, empty record').toEqual([]);
-    warmByChat.set('duo-released', ['claude']); // opencode released mid-session
-
-    const res = await app.inject({
-      method: 'POST',
-      url: '/api/v1/chats/duo-released/messages',
-      payload: { text: 'still there?' },
-    });
-    expect(res.statusCode).toBe(202);
-    const body = res.json() as { seats: string[]; singleSeat?: SingleSeat };
-    expect(body.singleSeat, 'one warm seat now — the disclosure is still owed').toBeDefined();
-    expect(body.singleSeat!.warmed).toBe('claude');
-    expect(body.singleSeat!.refusalsKnown, 'the record is real and empty; nothing here is unknown').toBe(true);
-    expect(
-      body.singleSeat!.message,
-      'it was opened with TWO seats — the turn route cannot see that, so it must not claim otherwise',
-    ).not.toMatch(/opened with a single seat/);
-    expect(body.singleSeat!.message, 'and no seat was refused — it was released').not.toMatch(/no other seat was refused/);
-    expect(body.singleSeat!.message).not.toMatch(/Refused:/);
-  });
-
-  it('202 still discloses for a single-seat chat this daemon did not open (post-restart: refusals unknown)', async () => {
-    // A restarted daemon holds no scope for a chat the engine still has warm: `refusedOf` answers
-    // `undefined`. That is "the refusals are unknown", not "the chat gained a seat" — the first guard
-    // read it as the latter and went silent.
-    warmByChat.set('survivor', ['claude']);
-    expect(chatScopes.refusedOf('survivor')).toBeUndefined();
-    const res = await app.inject({
-      method: 'POST',
-      url: '/api/v1/chats/survivor/messages',
-      payload: { text: 'still one seat?' },
-    });
-    expect(res.statusCode).toBe(202);
-    const body = res.json() as { seats: string[]; singleSeat?: SingleSeat };
-    expect(body.seats).toEqual(['claude']);
-    expect(body.singleSeat, 'the chat is single-seated whether or not this daemon remembers why').toBeDefined();
-    expect(body.singleSeat!.warmed).toBe('claude');
-    expect(body.singleSeat!.refused).toEqual([]);
-    // The prose FIRST, because that is the defect: this chat may have opened with ['claude','pi']
-    // and had pi refused, and the record is GONE rather than empty (review of #658). Asserting
-    // "opened with a single seat — no other seat was refused" here is two falsehoods in one
-    // sentence. Unknown is a third state and `[]` cannot carry it.
-    expect(
-      body.singleSeat!.message,
-      'the chat may have been opened with two seats, one refused — this daemon cannot know',
-    ).not.toMatch(/no other seat was refused/);
-    expect(body.singleSeat!.message, 'never assert a refusal that was not observed').not.toMatch(/Refused:/);
-    expect(body.singleSeat!.message).toMatch(/UNKNOWN/);
-    expect(body.singleSeat!.message).toMatch(/no refusal record/);
-    // …and the same distinction for a machine reader: `refused: []` is as ambiguous as the sentence.
-    expect(body.singleSeat!.refusalsKnown, 'this daemon has no refusal record for that chat').toBe(false);
-  });
-
-  it('the UNKNOWN record and a KNOWN-empty one are different answers, on the wire and in the prose', async () => {
-    // The distinction #651 got right for chat-promotion provenance (`null` for unreadable, `[]` for
-    // empty) applied here: if these two responses cannot be told apart, the disclosure is guessing.
-    await open({ chatId: 'known-empty', clis: ['claude'], repoRefs: ['alpha'] });
-    const known = await app.inject({
-      method: 'POST',
-      url: '/api/v1/chats/known-empty/messages',
-      payload: { text: 'hello' },
-    });
-    expect(chatScopes.refusedOf('known-empty')).toEqual([]);
-
-    warmByChat.set('unknown-record', ['claude']);
-    expect(chatScopes.refusedOf('unknown-record')).toBeUndefined();
-    const unknown = await app.inject({
-      method: 'POST',
-      url: '/api/v1/chats/unknown-record/messages',
-      payload: { text: 'hello' },
-    });
-
-    const k = (known.json() as { singleSeat?: SingleSeat }).singleSeat!;
-    const u = (unknown.json() as { singleSeat?: SingleSeat }).singleSeat!;
-    // Same seat, same empty array — everything a consumer sees must still separate them.
-    expect(k.warmed).toBe(u.warmed);
-    expect(k.refused).toEqual(u.refused);
-    // The prose must already separate them. On a TURN neither may describe the open (third review of
-    // #658): the known-empty one says nothing about refusals at all, the unknown one says the record
-    // is gone — and neither claims the chat was opened with a single seat.
-    expect(k.message, 'a turn describes NOW, not the open').not.toMatch(/opened with a single seat/);
-    expect(k.message, 'nothing to say about a known-empty record on a turn').not.toMatch(/UNKNOWN/);
-    expect(u.message, 'an unknown record says so').toMatch(/UNKNOWN/);
-    expect(u.message).not.toMatch(/opened with a single seat/);
-    expect(k.message).not.toBe(u.message);
-    // …and so must the wire, for a consumer that reads fields rather than sentences.
-    expect(k.refusalsKnown).toBe(true);
-    expect(u.refusalsKnown).toBe(false);
-  });
-
-  // Boundary control for the WIDENED condition, and it has to earn that: the broadcast half passes on
-  // head and would pass against a `seats.length === 1` (reach) derivation too, because a broadcast
-  // reaches both seats — so it never touched the boundary it claimed to guard (third review of #658,
-  // defect 2). The TARGETED send is the half that discriminates: the turn reaches exactly one seat
-  // while the ROSTER still has two, so a reach-derived condition discloses and a roster-derived one
-  // stays quiet. The equivalent case for a chat WITH a refusal already exists above (#641); this is
-  // the one the no-refusal widening opened up.
-  it('a two-warm-seat chat with no refusals discloses NOTHING — on a broadcast AND on a send that reaches one seat', async () => {
-    const res = await open({ chatId: 'duo-norefuse', clis: ['claude', 'opencode'], repoRefs: ['alpha'] });
-    expect(res.statusCode).toBe(201);
-    expect((res.json() as { singleSeat?: unknown }).singleSeat).toBeUndefined();
-    const msg = await app.inject({
-      method: 'POST',
-      url: '/api/v1/chats/duo-norefuse/messages',
-      payload: { text: 'hello both' },
-    });
-    expect(msg.statusCode).toBe(202);
-    expect((msg.json() as { seats: string[]; singleSeat?: unknown }).seats).toEqual(['claude', 'opencode']);
-    expect((msg.json() as { singleSeat?: unknown }).singleSeat).toBeUndefined();
-
-    // A SECOND chat: the broadcast above is still in flight on this fixture, and a send that targets
-    // a busy seat is refused 409 `turn_in_flight` (F-RECON-017) — the same reason the #641 cases
-    // above use one chat per turn.
-    const second = await open({ chatId: 'duo-norefuse-targeted', clis: ['claude', 'opencode'], repoRefs: ['alpha'] });
-    expect(second.statusCode).toBe(201);
-    const targeted = await app.inject({
-      method: 'POST',
-      url: '/api/v1/chats/duo-norefuse-targeted/messages',
-      payload: { text: 'just you, claude', targets: ['claude'] },
-    });
-    expect(targeted.statusCode).toBe(202);
-    const tb = targeted.json() as { seats: string[]; singleSeat?: unknown };
-    expect(tb.seats, 'the turn REACHED one seat…').toEqual(['claude']);
-    expect(tb.singleSeat, '…but the chat still has two warm seats and can still disagree').toBeUndefined();
+  it('POST /chats/:id/seats re-admits a seat into the eligible roster with no engine call; an unknown chat is 404', async () => {
+    expect((await open({ chatId: 'reseat', clis: ['claude'], repoRefs: ['alpha'] })).statusCode).toBe(201);
+    const retry = await app.inject({ method: 'POST', url: '/api/v1/chats/reseat/seats', payload: { clis: ['pi'] } });
+    expect(retry.statusCode).toBe(200);
+    expect(retry.json()).toEqual({ chatId: 'reseat', seats: [{ cliKey: 'pi', ok: true }], refused: [] });
+    expect((await app.inject({ method: 'GET', url: '/api/v1/chats/reseat' })).json()).toMatchObject({ seats: ['claude', 'pi'] });
+    expect(chatOpen).not.toHaveBeenCalled();
+    expect((await app.inject({ method: 'POST', url: '/api/v1/chats/nope/seats', payload: { clis: ['claude'] } })).statusCode).toBe(404);
   });
 });
 
@@ -724,7 +317,9 @@ describe('POST /chats — named scope kinds (studio#323 R4)', () => {
       expect(body.scope.repos).toEqual([]);
       expect(body.scope.graph.bound).toBe(false);
       // pi (no permission asks) is admitted: a system chat holds no repository read-only.
-      expect(chatOpen.mock.calls.at(-1)).toEqual(['sys', ['claude', 'pi'], body.scope.cwd, { codeGraphDb: null, readRoots: [] }]);
+      expect((res.json() as { seats: { cliKey: string }[] }).seats.map((x) => x.cliKey)).toEqual(['claude', 'pi']);
+      expect(chatScopes.engineOf('sys')).toEqual({ cwd: body.scope.cwd, codeGraphDb: null, readRoots: [] });
+      expect(chatOpen).not.toHaveBeenCalled();
       expect(readFileSync(join(body.scope.cwd, 'AGENTS.md'), 'utf8')).toMatch(/## Scope: system/);
     } finally {
       spy.mockRestore();
@@ -750,7 +345,9 @@ describe('POST /chats — named scope kinds (studio#323 R4)', () => {
       expect(body.scope.kind).toBe('everything');
       expect(body.scope.repos.map((r) => r.rootPath)).toEqual(['/srv/repos/alpha']);
       expect(body.refused.map((r) => r.cliKey)).toEqual(['pi']);
-      expect(chatOpen.mock.calls.at(-1)).toEqual(['all', ['claude'], body.scope.cwd, { codeGraphDb: null, readRoots: ['/srv/repos/alpha'] }]);
+      expect((res.json() as { seats: { cliKey: string }[] }).seats.map((x) => x.cliKey)).toEqual(['claude']);
+      expect(chatScopes.engineOf('all')).toEqual({ cwd: body.scope.cwd, codeGraphDb: null, readRoots: ['/srv/repos/alpha'] });
+      expect(chatOpen).not.toHaveBeenCalled();
     } finally {
       spy.mockRestore();
     }
@@ -794,27 +391,3 @@ describe('POST /chats — named scope kinds (studio#323 R4)', () => {
   });
 });
 
-describe('DC-S7 — the rules a chat\'s seats were told about (codex r1)', () => {
-  it('an open the engine REFUSED leaves no "told" state behind: the id is not preface-eligible (a later send only seeds)', async () => {
-    chatOpen.mockImplementationOnce(async () => {
-      throw new Error('engine refused the open');
-    });
-    const res = await open({ chatId: 'c-fail', clis: ['claude'], repoRefs: ['alpha'] });
-    expect(res.statusCode).toBe(400);
-    const rule = {
-      id: 'proposal:r1',
-      rule_type: 'policy' as const,
-      statement: 'Never force-push to main.',
-      severity: 'warn' as const,
-      confidence: 1,
-      targets: {},
-      provenance: { source: 'proposal', source_kinds: [] },
-    };
-    // Not opened here ⇒ seeded on the first send, never prefaced on it.
-    expect(await registered.considerations.prefaceForSend('c-fail', { inForce: [rule] })).toBeNull();
-    // And a chat that DID open is preface-eligible from its open onwards.
-    const ok = await open({ chatId: 'c-ok', clis: ['claude'], repoRefs: ['alpha'] });
-    expect(ok.statusCode).toBe(201);
-    expect(await registered.considerations.prefaceForSend('c-ok', { inForce: [rule] })).toContain('[rule:proposal:r1]');
-  });
-});

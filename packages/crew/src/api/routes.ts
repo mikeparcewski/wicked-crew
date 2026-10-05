@@ -50,12 +50,14 @@ import type { ChatRepoRoot, ChatTranscriptStore } from './chat-transcripts.js';
 import {
   ChatScopeIndex,
   chatScopeDeps,
+  chatScopeStatement,
   prepareChatScratch,
   removeChatScratch,
   namedKindRefusal,
   resolveChatScope,
   type ChatSeatRefusal,
 } from './chat-scope.js';
+import { AskPathIndex, answerStep } from './ask-paths.js';
 import { allowedRootsFor, isInsideRoot, openWithSystemDefault } from './open-path.js';
 import {
   InvalidDiffBaseError,
@@ -791,6 +793,8 @@ export interface RuntimeDeps {
    *  `POST /chats/:id/messages` refuses a send to a seat still mid-turn; a directly-driven route
    *  set gets a fresh one (tests fold frames into it themselves). */
   chatTurns?: ChatTurnIndex;
+  /** (ASK-C1) The daemon's record of each chat's ask path; tests inject one to read it back. */
+  askPaths?: AskPathIndex;
   /** DES-L5 (D-13): the chat transcript at rest — `GET /chats/:id.messages`. Absent ⇒ nothing is
    *  persisted and the field is omitted (a directly-driven route in tests). */
   chatTranscripts?: ChatTranscriptStore;
@@ -949,6 +953,8 @@ export const ChatOpenSchema = z.object({
   /** The scope the caller NAMES (studio#323 R4) — omitted ⇒ the legacy inference. Shape rules
    *  (which kinds need / refuse `projectId` / `repoRefs`) are the resolver's (`chat-scope.ts`). */
   scopeKind: z.enum(['system', 'everything', 'project', 'repo', 'repos', 'none']).optional(),
+  /** (ASK-C1) The seat the operator chose as the primary agent; omitted ⇒ the engine picks at random. */
+  primary: z.string().min(1).optional(),
 }).strict();
 
 /**
@@ -1071,6 +1077,7 @@ export function registerRoutes(
   const guidanceIndex = runtime.guidanceIndex ?? new GuidanceIndex();
   const chatScopes = runtime.chatScopes ?? new ChatScopeIndex();
   const chatTurns = runtime.chatTurns ?? new ChatTurnIndex();
+  const askPaths = runtime.askPaths ?? new AskPathIndex();
   const chatTranscripts = runtime.chatTranscripts;
   const deliveryIndex = runtime.deliveryIndex ?? new DeliveryIndex();
   // Wave 6: the doc↔run binding and the registered test sets — `createServer` injects the real
@@ -1374,6 +1381,10 @@ export function registerRoutes(
         : { deliverGate: false, revisesPr: false, chatIdOnLaunch: false, seatChipOnCreate: false }),
       // C1: `AgentSession.chat_id` is served from the daemon's own launch index, whatever the engine.
       runChatId: true,
+      // ASK-C1 (DES-ASK-TEAM-CHAT-001 §5.1): an ask starts a path — the whole contract is the
+      // pinned core-ts floor the adapter reports; an older studio reads ABSENT as "every helper
+      // answers", a newer one renders the one PA voice.
+      askPath: typeof adapter.engineCapabilities === 'function' ? adapter.engineCapabilities().askPath : false,
       // WT-W1: repo-bound launches mint an evidence root only on an addon that takes the field.
       walkthroughRoots: typeof adapter.evidenceRootsSupported === 'function' ? adapter.evidenceRootsSupported() : false,
     };
@@ -2199,7 +2210,8 @@ export function registerRoutes(
       // always has at least one warm seat (`crew-api-types` ChatOpenResponse), so 0 is not a value
       // `chat_seat_count` can honestly hold.
       if (b.chatId !== undefined) {
-        const promotedFrom = await adapter.chatSeats(b.chatId).catch(() => null);
+        // ASK-C1: a chat's seats are its eligible roster (no warm pool to ask the engine about).
+        const promotedFrom: string[] | null = askPaths.get(b.chatId)?.eligible ?? null;
         const scope = chatScopes.engineOf(b.chatId);
         if (promotedFrom !== null && promotedFrom.length > 0 && scope !== undefined) {
           chatSeatCount = promotedFrom.length;
@@ -2912,93 +2924,24 @@ export function registerRoutes(
         });
       }
       try {
-        const seats = await adapter.chatOpen(chatId, clis, engine.cwd, {
-          codeGraphDb: engine.codeGraphDb,
-          readRoots: engine.readRoots,
-        });
-        // A REQUESTED seat the engine refused joins the same list, with the engine's reason.
-        for (const s of seats) {
-          if (!s.ok) refused.push({ cliKey: s.cliKey, reason: s.error ?? 'the engine refused the seat', source: 'engine' });
-        }
-        // F-A45-011 (F-2R2-007 still open): a seat the engine DROPPED — absent from `seats`
-        // altogether, neither ok nor refused — used to vanish without a trace (the fresh rig's pi:
-        // default chips claude·pi·opencode, 201 `seats:[claude, opencode]`, `refused: []`). It was
-        // taken out by the council-bench / dispatch-timeout path, not by admission, so admission's
-        // list never named it. Every requested-or-defaulted seat that is not in `seats` is named
-        // here with the most specific cause the daemon knows: its own "no credential" report
-        // (`auth`), else the dispatch budget (`budget`). (R5b: crew keeps no council bench of its
-        // own any more — the engine benches per run and says so in `unitDistributed.degradedReason`.)
-        for (const key of clis) {
-          if (seats.some((s) => s.cliKey === key) || refused.some((r) => r.cliKey === key)) continue;
-          const st = standingOf(key);
-          const authFailure = seatHealth.authFailureFor(key);
-          if (authFailure !== null || st?.auth === 'signed_out') {
-            refused.push({
-              cliKey: key,
-              reason:
-                authFailure !== null
-                  ? `not seated — the seat itself reported no credential (${noCredentialCause(authFailure)}); sign it in from the System page`
-                  : 'not seated — signed out; sign it in from the System page',
-              source: 'auth',
-            });
-          } else {
-            refused.push({
-              cliKey: key,
-              reason:
-                'not seated — the engine did not warm it within its dispatch budget (the seat timed out or ' +
-                'was dropped at dispatch); check GET /roster and try again, or name seats with `clis`',
-              source: 'budget',
-            });
-          }
-        }
-        // Nothing warmed (independent review, W1): the engine holds no pool row and has dropped the
-        // scope itself (no `chatClosed` will come) — report the PER-SEAT reasons, never an
-        // engine-version guess; the root goes, the id is free again.
-        if (seats.every((s) => !s.ok)) {
+        // DES-ASK-TEAM-CHAT-001 §5.1 (ASK-C1): an open resolves the scope and ELIGIBILITY and warms
+        // nothing — the chat is a path its first message launches, and the engine picks the PA
+        // then (`path.started.selection`). Crew owns eligibility; the engine owns the pick.
+        if (b.primary !== undefined && !clis.includes(b.primary)) {
           chatScopes.release(chatId, token);
           removeChatScratch(scope.cwd, chatScopes.base);
-          return reply.code(409).send({
-            error: `chat ${chatId}: no seat warmed (${seats.length} failed) — see seats`,
-            seats,
+          return reply.code(400).send({
+            error:
+              `primary names a seat that is not eligible for this chat: ${b.primary}` +
+              ` (eligible: ${clis.join(', ')})`,
             refused,
           });
         }
-        // Honest scope (Copilot, #518): a SCOPED chat is a promise — the roots are read-only, the
-        // graph is attached, the seats see nothing else — and only an engine that CONFIRMS it
-        // recorded the scope (its `chatList` row carries the scope fields) can keep it. An engine
-        // predating chat scope (wicked-core#410) dropped `scopeJson` and runs the seats unbounded in
-        // the scratch root; an engine that cannot be asked has confirmed nothing. Neither may hold a
-        // scoped chat: it is closed again, its root removed, and the caller gets a 501 naming the
-        // remedy — never a chat whose statement promises what its seats do not enforce. An UNSCOPED
-        // chat (`kind: 'none'`) promises nothing beyond its scratch root and proceeds.
-        const applied = await adapter.chatScopeApplied(chatId);
-        if (applied !== true && scoped) {
-          await adapter.chatClose(chatId).catch(() => undefined);
-          // The engine's `chatClosed` for this id is still on its way: park, do not release
-          // (Copilot, #518), so a reuse cannot have its root removed by the late event.
-          chatScopes.abortToClosing(chatId, token);
-          removeChatScratch(scope.cwd, chatScopes.base);
-          if (applied === false) {
-            // A row WITHOUT the scope fields: the engine predates chat scope (wicked-core#410).
-            return reply.code(501).send({
-              error:
-                'the installed wicked-core-ts predates chat scope (wicked-core#410): it cannot ground ' +
-                'a scoped chat or hold its read roots read-only — upgrade the engine, or open the ' +
-                'chat without projectId/repoRefs.',
-              seats,
-            });
-          }
-          // NO row although a seat reported warm: nothing is actually held for this chat.
-          return reply.code(409).send({
-            error:
-              `chat ${chatId}: a seat reported warm but the engine holds no row for the chat — ` +
-              'nothing warmed; open it again (see seats)',
-            seats,
-          });
-        }
-        // File the chat into its project WHILE the id is still reserved (Copilot, #518): publishing
-        // first would let a concurrent DELETE / engine `chatClosed` land during this await and leave
-        // a 201 with a stale scope and a membership attached to a closed chat.
+        const seats: Array<{ cliKey: string; ok: boolean; error?: string }> = clis.map((cliKey) => ({
+          cliKey,
+          ok: true,
+        }));
+        askPaths.open(chatId, clis, b.primary);
         let projectAttachError: string | undefined;
         let attachedMemberId: string | undefined;
         if (b.projectId !== undefined) {
@@ -3027,7 +2970,7 @@ export function registerRoutes(
           // The reservation was cancelled while the open was in flight — an engine `chatClosed` or a
           // `DELETE` for this id (Copilot, #518). Nothing was recorded; tear the chat down (engine
           // session, scratch root, and the filing just made) instead of returning a stale 201.
-          await adapter.chatClose(chatId).catch(() => undefined);
+          askPaths.close(chatId);
           removeChatScratch(scope.cwd, chatScopes.base);
           if (b.projectId !== undefined && attachedMemberId !== undefined) {
             await adapter.projectMemberDetach(b.projectId, attachedMemberId).catch(() => false);
@@ -3122,76 +3065,101 @@ export function registerRoutes(
     if (!parsed.success) {
       return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
     }
-    // DES-L5 §5-c (F-E2E-041): the audience is decided HERE — the named targets, else the engine's
-    // warm seats — so the turn can be opened BEFORE the engine call, in the same tick as the
-    // predicate below: two racing sends can no longer both pass `inFlight` during the await, and a
-    // `chatDelta` that lands before `chatSend` resolves is already stamped with its `turn_id`.
-    // crew#641 (review): the ROSTER and the AUDIENCE are different things and only one of them can
-    // answer "can this chat disagree with itself". Resolved ONCE here: `audience` is who this turn
-    // goes to (the named targets, else everyone warm), `warmRoster` is who is warm at all. A
-    // targeted send to one seat of a two-seat chat is not a degraded chat.
-    const warmRoster = await adapter.chatSeats(id);
-    const audience = parsed.data.targets ?? warmRoster;
-    if (audience.length === 0) {
-      return reply.code(409).send({ error: `chat '${id}' has no warm seats — open it first` });
+    // DES-ASK-TEAM-CHAT-001 §3, §5.1 (ASK-C1): the first message of a chat LAUNCHES one team path
+    // — a user-composed plan of one `understand` step with its gate raised to the turn gate, one
+    // reviewer asked for, the eligible roster as `clis`, the operator's choice as `primary`; every
+    // later message CONTINUES the same path: `propose_plan(answer-N)` then `confirm_gate(Approve)`
+    // at the turn gate the previous answer paused on. Nothing is fanned out: the PA is the one
+    // voice, helpers talk to the PA, the reviewer raises quiet findings — all on the bus.
+    const path = askPaths.get(id);
+    if (path === undefined) {
+      return reply.code(409).send({ error: `chat '${id}' is not open on this daemon — open it first (POST /chats)` });
     }
-    const inFlight = chatTurns.inFlight(id, audience);
-    if (inFlight !== null) {
-      return reply.code(409).send(turnInFlightBody(id, inFlight, 'Nothing was sent.'));
+    if (path.eligible.length === 0) {
+      return reply.code(409).send({ error: `chat '${id}' has no eligible seat — sign a seat in and re-seat it (POST /chats/:id/seats)` });
     }
-    // Sync, same tick as `inFlight`: the window is closed before anything yields.
-    const turn = chatTurns.begin(id, audience, parsed.data.text);
-    try {
-      // DC-S7: a rule remembered since the seats last heard from crew rides this send as a
-      // crew-authored preface — disclosed below as a `system` transcript record; the `user` record
-      // keeps the operator's own words.
-      const preface = await considerations.prefaceForSend(id);
-      const seats = await adapter.chatSend(
-        id,
-        preface !== null ? `${preface}\n\n${parsed.data.text}` : parsed.data.text,
-        parsed.data.targets,
-      );
-      if (turn !== null) {
-        // The engine's answer is the truth: the reserved audience is squared with the seats it
-        // reached, and the operator's message joins the transcript with exactly those seats.
-        chatTurns.reconcile(id, turn.turnId, seats);
-        chatTranscripts?.appendUser(id, turn.turnId, parsed.data.text, seats);
-        // DC-S4b: who said it, to whom — the recorder matches the seats' quotes against THIS message.
-        chatRecorder?.noteSend(id, turn.turnId, actorOf(req), parsed.data.text, seats);
-        if (preface !== null) chatTranscripts?.appendSystem(id, turn.turnId, preface);
-      }
-      // crew#641: re-state single-seat degradation on every turn so it is visible in the transcript.
-      // Decided from `warmRoster` — the seats that are WARM — never from `seats`, which is only the
-      // seats this turn reached: a targeted send to one seat of a two-seat chat would otherwise
-      // announce a degradation that does not exist, and a false "you are degraded" sends an operator
-      // after a problem they do not have.
-      // crew#650: `refusedOf` is `undefined` for a chat THIS daemon did not open (a restart drops
-      // the index) — that is "the refusals are unknown", not "the chat gained a seat". The
-      // disclosure is decided by the warm roster alone, and the `undefined` is handed STRAIGHT to
-      // the builder (never `?? []`, review of #658): only it may decide what an unknown record is
-      // allowed to claim.
-      const singleSeat202 =
-        warmRoster.length === 1 ? singleSeatDisclosure(warmRoster[0]!, chatScopes.refusedOf(id), 'turn') : undefined;
-      return reply.code(202).send({
-        seats,
-        ...(turn !== null ? { turnId: turn.turnId } : {}),
-        ...(singleSeat202 !== undefined ? { singleSeat: singleSeat202 } : {}),
+    const text = parsed.data.text;
+    const scope = chatScopes.get(id);
+    // A repo-bound path: exactly one repo in scope grounds the run (`repoRef`) and makes it
+    // deliverable; a project or a multi-repo scope binds the project graph only (§5.1 Grounding).
+    const repoRef = scope !== undefined && scope.kind === 'repos' && scope.repos.length === 1 ? scope.repos[0]!.id : undefined;
+    const projectId = scope?.projectId;
+    const voice = path.pa !== null ? [path.pa] : [];
+    // crew#641/#650 re-stated for a path: ONE eligible seat means no distinct reviewer and no
+    // helper — said on every turn (the engine's `member.joined{seat:null}` says it on the bus).
+    const singleSeat202 =
+      path.eligible.length === 1
+        ? { singleSeat: singleSeatDisclosure(path.eligible[0]!, chatScopes.refusedOf(id), 'turn') }
+        : {};
+    if (path.runId === undefined && path.launching === true) {
+      return reply.code(409).send({
+        code: 'turn_in_flight' as const,
+        error: `${path.pa ?? 'the primary agent'} is still being seated for the previous message in this chat — wait for the reply. Nothing was sent.`,
+        chatId: id,
       });
+    }
+    const turn = chatTurns.begin(id, voice, text);
+    const turnId = turn?.turnId ?? randomUUID();
+    try {
+      if (path.runId === undefined) {
+        askPaths.launching(id);
+        const stepId = 'answer-1';
+        const roster = rosterWithStanding().filter((seat) => path.eligible.includes(String(seat.key)));
+        const input: LaunchRunInput = {
+          problem: scope !== undefined ? chatScopeStatement(id, scope) : text,
+          sessionId: randomUUID(),
+          clisJson: JSON.stringify(roster),
+          plan: { steps: [answerStep(stepId, text)], monitors: { asked: 1 } },
+          ...(path.primary !== undefined ? { primary: path.primary } : {}),
+          ...(repoRef !== undefined ? { repoRef, deliver: 'pr' as const } : {}),
+          ...(projectId !== undefined ? { projectId } : {}),
+        };
+        const runId = await adapter.launchRun(input);
+        askPaths.started(id, runId, stepId);
+        runtime.linkChatRun?.(id, runId);
+        recordRunLaunched(audit, runTimingIndex, actorOf(req), runId, {
+          chatId: id,
+          askPath: true,
+          ...(repoRef !== undefined ? { repoRef } : {}),
+          ...(projectId !== undefined ? { projectId } : {}),
+          deliver: repoRef !== undefined ? 'pr' : 'none',
+        });
+        chatTranscripts?.appendUser(id, turnId, text, voice);
+        chatRecorder?.noteSend(id, turnId, actorOf(req), text, voice);
+        return reply.code(202).send({ seats: voice, turnId, runId, stepId, ...singleSeat202 });
+      }
+      const view = (await adapter.sessionsDetail()).find((v) => v.session.id === path.runId);
+      if (view === undefined) {
+        if (turn !== null) chatTurns.abort(id, turn.turnId);
+        return reply.code(409).send({ error: `chat '${id}': its path ${path.runId} is gone — open a new chat` });
+      }
+      const status = String(view.session.status);
+      if (status !== 'awaiting_human') {
+        if (turn !== null) chatTurns.abort(id, turn.turnId);
+        const who = path.pa ?? 'the primary agent';
+        return reply.code(409).send({
+          code: 'turn_in_flight' as const,
+          error:
+            status === 'executing' || status === 'running'
+              ? `${who} is still answering the previous message in this chat — wait for the reply. Nothing was sent.`
+              : `chat '${id}': its path ${path.runId} is ${status}, not waiting for your turn — nothing was sent`,
+          chatId: id,
+          runId: path.runId,
+          status,
+        });
+      }
+      const stepId = askPaths.nextStep(id);
+      await adapter.proposePlan(path.runId, { steps: [answerStep(stepId, text)] }, turnId);
+      await adapter.confirmGate(path.runId, true);
+      chatTranscripts?.appendUser(id, turnId, text, voice);
+      chatRecorder?.noteSend(id, turnId, actorOf(req), text, voice);
+      return reply.code(202).send({ seats: voice, turnId, runId: path.runId, stepId, ...singleSeat202 });
     } catch (err) {
-      // Nothing went out: the reservation is retracted so the next send is not refused for it.
+      askPaths.launchFailed(id);
       if (turn !== null) chatTurns.abort(id, turn.turnId);
-      const msg = message(err);
-      return reply.code(/no warm seats/.test(msg) ? 409 : 400).send({ error: msg });
+      return reply.code(400).send({ error: message(err) });
     }
   });
-
-  // F-W1-005 (wave-1 P6): re-seat NAMED seats on a LIVE chat — the retry lever for a seat the open
-  // refused (or whose session died). Re-runs the engine's per-seat `chat_ensure` through `chatOpen`
-  // with the IDENTICAL scope recorded at open (a different scope would evict every warm seat —
-  // Copilot, #426; the index retains what the engine was handed). Explicit seats bypass the daemon's
-  // default pre-filter exactly as `clis` on `POST /chats` does: the engine refuses per seat and its
-  // reason rides the outcome, then `refused[]` and a `chatSeatRefused` frame — the same shapes the
-  // 201 carries, so the thread and the picker read one story. Never a new chat, never a new pool key.
   const ChatSeatsSchema = z.object({
     clis: z.array(z.string().min(1)).min(1).max(8),
   }).strict();
@@ -3228,23 +3196,11 @@ export function registerRoutes(
         return reply.code(409).send(turnInFlightBody(id, inFlight, 'No seat was re-warmed.'));
       }
       try {
-        const seats = await adapter.chatOpen(id, clis, engine.cwd, {
-          codeGraphDb: engine.codeGraphDb,
-          readRoots: engine.readRoots,
-        });
+        // ASK-C1: a re-seat re-admits the named seats into the path's eligible roster (a sign-in
+        // fixed); nothing is warmed and the engine is not called.
+        const eligible = askPaths.admit(id, clis);
+        const seats = clis.map((cliKey) => ({ cliKey, ok: eligible.includes(cliKey) }));
         const refused = chatScopes.foldSeats(id, seats);
-        const projectId = projects.index.projectOf(id) ?? undefined;
-        for (const s of seats) {
-          if (s.ok) continue;
-          runtime.broadcast?.({
-            type: 'chatSeatRefused',
-            chat: id,
-            cliKey: s.cliKey,
-            reason: s.error ?? 'the engine refused the seat',
-            source: 'engine',
-            ...(projectId !== undefined ? { project_id: projectId } : {}),
-          } as CoreEvent);
-        }
         return { chatId: id, seats, refused };
       } catch (err) {
         return reply.code(400).send({ error: message(err) });
@@ -3307,9 +3263,12 @@ export function registerRoutes(
         // the seats refused at open (F-A45-011), so the studio's admission copy survives a reload.
         return {
           chatId: id,
-          seats: await adapter.chatSeats(id),
+          // ASK-C1: the eligible roster is the chat's seats (no warm pool); a chat this daemon
+          // did not open answers `[]`.
+          seats: askPaths.get(id)?.eligible ?? [],
           scope: chatScopes.get(id) ?? null,
           refused: chatScopes.refusedOf(id) ?? null,
+          ...(askPaths.view(id) !== undefined ? { path: askPaths.view(id) } : {}),
           // DES-L5 (D-13): the transcript so far, append order — `[]` before the first persisted
           // turn; the file goes with the chat on `chatClosed`, so a reclaimed id answers `[]` too.
           ...(chatTranscripts !== undefined ? { messages: chatTranscripts.read(id) } : {}),
@@ -3327,8 +3286,19 @@ export function registerRoutes(
     // close can never land on a chat that reused it (Copilot, #518).
     chatScopes.beginClose(id);
     chatTurns.closed(id);
+    // ASK-C1: End cancels the path (`path.ended{status:"cancelled"}`); the engine holds no chat
+    // row for an ask, so the daemon closes the id itself and the transcript follows the chat
+    // through the same `chatClosed` fold a pool chat used (dropped unless a promoted run retains it).
+    const path = askPaths.close(id);
     try {
-      await adapter.chatClose(id);
+      if (path?.runId !== undefined) await adapter.cancelRun(path.runId).catch(() => undefined);
+      const projectId = projects.index.projectOf(id) ?? undefined;
+      runtime.broadcast?.({
+        type: 'chatClosed',
+        chat: id,
+        reason: 'closed',
+        ...(projectId !== undefined ? { project_id: projectId } : {}),
+      } as CoreEvent);
       return { ok: true };
     } catch (err) {
       return reply.code(400).send({ error: message(err) });

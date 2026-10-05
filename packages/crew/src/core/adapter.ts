@@ -1780,9 +1780,20 @@ export class CoreAdapter {
    * silently ignores fields an older addon does not declare, so the version is the only honest
    * signal until the field lands.
    */
-  engineCapabilities(): { deliverGate: boolean; revisesPr: boolean; chatIdOnLaunch: boolean; seatChipOnCreate: boolean } {
+  engineCapabilities(): {
+    deliverGate: boolean;
+    revisesPr: boolean;
+    chatIdOnLaunch: boolean;
+    seatChipOnCreate: boolean;
+    askPath: boolean;
+  } {
     return {
       deliverGate: addonAtLeast(0, 7, 24),
+      // DES-ASK-TEAM-CHAT-001 §5.1: the WHOLE ask-path contract (primary pick, per-step budget,
+      // Approve applying held revisions, first-creator row, output review, the renderer) is the
+      // core-ts release that carries ASK-K1a–K3c; launch fields alone cannot prove the second
+      // message or the review will work, so the floor is the release, not a field.
+      askPath: addonAtLeast(0, 7, 38),
       // DES-L9 / crew#550: `LaunchRunBody.revisesPr` needs the engine's `LaunchSpec.base_ref`
       // (wicked-core-ts ≥ 0.7.27) — an older addon would base on the default branch and push a
       // duplicate PR, so the route fails closed and the composer hides the affordance.
@@ -1889,6 +1900,8 @@ export class CoreAdapter {
     };
     if (input.entityMode !== undefined) opts.entityMode = input.entityMode;
     if (input.humanConfirm !== undefined) opts.humanConfirm = input.humanConfirm;
+    // ASK-K1a: `LaunchSpec.primary`. napi ignores an undeclared object field on an older addon.
+    if (input.primary !== undefined) (opts as LaunchOptions & { primary?: string }).primary = input.primary;
     if (input.autoDeliver === true) {
       // F-E2E-030: the explicit deliver-gate opt-out (`LaunchOptions.autoDeliver`, wicked-core-ts
       // ≥ 0.7.24). Sent ONLY when true — the engine's default is the gate, and an addon that

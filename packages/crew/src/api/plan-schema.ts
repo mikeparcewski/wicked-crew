@@ -16,6 +16,8 @@ export const PlanSchema = z.object({
     .min(1),
   touch: z.array(z.string().min(1)).max(64).optional(),
   override: z.object({ remove: z.array(z.string().min(1)).min(1), reason: z.string().min(1) }).strict().optional(),
+  /** (core ASK-K1b) How many members the plan asks for; the supervisor caps at 3. */
+  monitors: z.object({ asked: z.number().int().min(0).max(3) }).strict().optional(),
 }).strict();
 
 /** The parsed plan as the engine command's `LaunchPlan` (an absent optional stays absent). */
@@ -23,5 +25,6 @@ export function toLaunchPlan(p: z.infer<typeof PlanSchema>): LaunchPlan {
   const plan: LaunchPlan = { steps: p.steps };
   if (p.touch !== undefined) plan.touch = p.touch;
   if (p.override !== undefined) plan.override = p.override;
+  if (p.monitors !== undefined) plan.monitors = p.monitors;
   return plan;
 }
