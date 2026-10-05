@@ -314,6 +314,41 @@ describe('AskRelay — the reply', () => {
     expect(reads, 'the stale read was not cached: attempt 2 read the run view afresh').toBe(2);
   });
 
+  it('codex on #810 r4 (1): attempts are 0-BASED — the engine\'s first attempt streams, its row (unit:<run>:<ord>:0) joins the fold, no grace is needed', async () => {
+    const h = harness({ pa: 'codex' });
+    await h.relay.onCoreEvent({ type: 'unitDispatched', session: 'run-1', ord: 1, attempt: 0 } as CoreEvent);
+    await h.relay.onCoreEvent({ type: 'unitOutputDelta', session: 'run-1', ord: 1, attempt: 0, text: 'first attempt\n' } as CoreEvent);
+    expect(h.emitted).toEqual([expect.objectContaining({ type: 'chatDelta', text: 'first attempt\n' })]);
+    await h.relay.onCoreEvent({ type: 'unitOutputCaptured', session: 'run-1', ord: 1, attempt: 0, outputBytes: 10, stepStatus: 'ok', governed: true } as CoreEvent);
+    h.relay.onTeamRow(row('wicked.team.step.completed', { run_id: 'run-1', step_id: 'answer-1', status: 'ok', tree: null, output_bytes: 10, output_ref: 'unit:run-1:1:0' }));
+    await h.relay.onCoreEvent({ type: 'unitDone', session: 'run-1', ord: 1 } as CoreEvent);
+    expect(h.emitted.filter((f) => f.type === 'chatReply'), 'answered at the fold, not after a grace').toHaveLength(1);
+    expect(h.emitted.find((f) => f.type === 'chatReply')).toMatchObject({ ok: true, ord: 1 });
+  });
+
+  it('codex on #810 r4 (2): the unit\'s persisted last_attempt is the durable half of the boundary — a row for attempt 1 cannot decide a fold whose stored output is attempt 2\'s (no attempt-2 frame seen)', async () => {
+    const h = harness({ pa: 'codex', units: [{ id: 'run-1:answer-1', ord: 1, status: 'done', assigned_cli: 'codex', last_attempt: 2 }] });
+    h.relay.onTeamRow(row('wicked.team.step.completed', { run_id: 'run-1', step_id: 'answer-1', status: 'timed_out', tree: null, output_bytes: 0, output_ref: 'unit:run-1:1:1' }));
+    await h.relay.onCoreEvent({ type: 'unitDone', session: 'run-1', ord: 1 } as CoreEvent); // no attempt-2 frame was ever seen
+    expect(h.emitted.filter((f) => f.type === 'chatReply'), 'the attempt-1 row does not answer').toEqual([]);
+    h.relay.onTeamRow(row('wicked.team.step.completed', { run_id: 'run-1', step_id: 'answer-1', status: 'ok', tree: null, output_bytes: 10, output_ref: 'unit:run-1:1:2' }));
+    await new Promise((r) => setTimeout(r, 5));
+    expect(h.emitted.find((f) => f.type === 'chatReply')).toMatchObject({ ok: true, text: 'The answer.\nSecond line.' });
+  });
+
+  it('codex on #810 r4 (3): a re-pick whose bus row is DELAYED — the freshly read unit\'s seat is this attempt\'s voice; the reply is attributed to it and the path learns it before the row', async () => {
+    const h = harness({ pa: 'claude', units: [{ id: 'run-1:answer-1', ord: 1, status: 'done', assigned_cli: 'codex', last_attempt: 1 }] });
+    h.relay.onTeamRow(row('wicked.team.step.completed', { run_id: 'run-1', step_id: 'answer-1', status: 'ok', tree: null, output_bytes: 10, output_ref: 'unit:run-1:1:1' }));
+    await h.relay.onCoreEvent({ type: 'unitDone', session: 'run-1', ord: 1 } as CoreEvent);
+    const reply = h.emitted.find((f) => f.type === 'chatReply');
+    expect(reply).toMatchObject({ ok: true, cliKey: 'codex' });
+    expect(h.paths.view('c1')).toMatchObject({ pa: 'codex', selection: 'random' });
+    expect(h.reconciled.at(-1)).toEqual(['c1', h.turn.turnId, ['codex']]);
+    // The late row changes nothing.
+    h.relay.onTeamRow(row('wicked.team.path.repicked', { run_id: 'run-1', from: 'claude', to: 'codex', reason: 'timed_out', selection: 'random', pick_seq: 1 }));
+    expect(h.paths.view('c1')).toMatchObject({ pa: 'codex' });
+  });
+
   it('codex on #810 r1 (8): two unitDone deliveries folded WITHOUT awaiting each other emit one reply', async () => {
     const h = harness({ pa: 'codex' });
     h.relay.onTeamRow(completed());

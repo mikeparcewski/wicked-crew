@@ -299,7 +299,7 @@ export class ChatDecisionRecorder {
     const early = this.early.get(key);
     if (early !== undefined) {
       this.early.delete(key);
-      for (const r of early.replies) this.track(this.onReply(r));
+      for (const r of early.replies) this.track(this.fold(r, false)); // counted when it first arrived
     }
   }
 
@@ -313,15 +313,21 @@ export class ChatDecisionRecorder {
   }
 
   /** A seat ended its part of a turn. Resolves once any recording it triggered has settled. */
-  async onReply(input: ChatReplyInput): Promise<void> {
+  onReply(input: ChatReplyInput): Promise<void> {
+    return this.fold(input, true);
+  }
+
+  private async fold(input: ChatReplyInput, count: boolean): Promise<void> {
     let parsed: ParsedDecisionsBlock | null = null;
     if (input.kind !== 'failed') {
       const c = this.counter(input.cliKey);
-      c.replies += 1;
+      if (count) c.replies += 1;
       if (input.block !== null) {
         parsed = parseDecisionsBlock(input.block);
-        if (parsed === null) c.malformed += 1;
-        else c.blocks += 1;
+        if (count) {
+          if (parsed === null) c.malformed += 1;
+          else c.blocks += 1;
+        }
       }
     }
     await this.sweep();

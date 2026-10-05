@@ -516,6 +516,7 @@ describe('ASK-C2 (codex on #810 r3, 3): a reply that beats the send record is he
     await h.recorder.idle();
     expect(h.recorder.diagnostics().recorded_turns).toBe(1);
     expect(h.recorder.diagnostics().unclassified_turns).toBe(0);
+    expect(h.recorder.diagnostics().recorder['codex'], 'the replay does not recount the reply (codex on #810 r4, 4)').toEqual({ replies: 1, blocks: 1, malformed: 0 });
     // A buffered reply nobody claims is swept once stale.
     await h.recorder.onReply({ chat: 'c2', cliKey: 'codex', turnId: 't9', ok: true, block: null });
     h.tick(2_000);

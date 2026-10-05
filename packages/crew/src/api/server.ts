@@ -1405,7 +1405,16 @@ export async function createServer(
     workOutput: (unitId) => adapter.workOutput(unitId),
     units: async (runId) => {
       const view = (await adapter.sessionsDetail()).find((v) => v.session.id === runId);
-      return (view?.units ?? []).map((u) => ({ id: u.id, ord: u.ord, status: String(u.status), assigned_cli: u.assigned_cli ?? null }));
+      return (view?.units ?? []).map((u) => {
+        const la = (u as { last_attempt?: unknown }).last_attempt;
+        return {
+          id: u.id,
+          ord: u.ord,
+          status: String(u.status),
+          assigned_cli: u.assigned_cli ?? null,
+          ...(typeof la === 'number' ? { last_attempt: la } : {}),
+        };
+      });
     },
     fold: (frame) => onEngineEvent(frame),
     recorderReconcile: (chat, turnId, seats) => chatDecisionRecorder?.reconcile(chat, turnId, seats),

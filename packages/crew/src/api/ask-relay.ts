@@ -49,6 +49,9 @@ export interface RelayUnit {
   ord: number;
   status: string;
   assigned_cli: string | null;
+  /** The engine's persisted attempt counter for the unit (0-based), when the run view carries it:
+   *  the durable half of the attempt boundary (codex on #810 r4, 2). */
+  last_attempt?: number;
 }
 
 export interface AskRelayDeps {
@@ -197,7 +200,7 @@ export class AskRelay {
         this.noteAttempt(runId, ref.ord, ref.attempt); // one monotonic boundary across rows and frames (r3, 1)
         // A fold is waiting for this very row (the row came late on the poll): the reply is due.
         const key = `${runId}:${ref.ord}`;
-        if (this.waiting.has(key) && ref.attempt >= this.attemptOf(runId, ref.ord)) {
+        if (this.waiting.has(key) && ref.attempt >= (this.attemptOf(runId, ref.ord) ?? ref.attempt)) {
           this.stopWaiting(key);
           void this.reply(runId, chatId, ref.ord, 'row');
         }
@@ -227,10 +230,10 @@ export class AskRelay {
     if (event.type === 'unitDispatched') return; // the attempt is noted; the seat is re-read on use
     // A straggler of a superseded attempt (the engine drains a replaced worker's buffered output
     // with its original label): not the voice any more (r2, 2).
-    if (attempt !== undefined && attempt < this.attemptOf(runId, ord)) return;
+    if (this.superseded(runId, ord, attempt)) return;
     if (event.type === 'unitOutputCaptured') {
       const stepStatus = typeof f['stepStatus'] === 'string' ? f['stepStatus'] : 'ok';
-      this.nestedOne(this.captured, runId).set(ord, { attempt: attempt ?? this.attemptOf(runId, ord), stepStatus });
+      this.nestedOne(this.captured, runId).set(ord, { attempt: attempt ?? this.attemptOf(runId, ord) ?? 0, stepStatus });
       return;
     }
     if (event.type === 'stepFailed' || event.type === 'unitDenied') {
@@ -248,7 +251,7 @@ export class AskRelay {
     if (this.deps.paths.chatOf(runId) !== chatId) return; // ended meanwhile (r1, 4)
     if (unit === null || answerStepOf(runId, unit.id) === null) return; // not the PA's answer: no chat frame
     // Superseded during the await: neither streamed nor allowed to name the PA (r3, 2).
-    if (attempt !== undefined && attempt < this.attemptOf(runId, ord)) return;
+    if (this.superseded(runId, ord, attempt)) return;
     const pa = this.paOf(runId, chatId, unit);
     if (event.type === 'unitOutputDelta') {
       const text = typeof f['text'] === 'string' ? f['text'] : '';
@@ -327,17 +330,27 @@ export class AskRelay {
     }
   }
 
-  /** The attempt the fold settles for (run, ord): the latest the engine's frames OR the team rows
-   *  named — one monotonic boundary (r3, 1) — else 1. */
-  private attemptOf(runId: string, ord: number): number {
-    const seen = this.attempts.get(runId)?.get(ord) ?? 0;
+  /** The attempt the fold settles for (run, ord): the latest the engine's frames, the team rows or
+   *  the unit's persisted counter named — one monotonic boundary (r3, 1); attempts are 0-based
+   *  (r4, 1), so `undefined` = nothing has named one yet. */
+  private attemptOf(runId: string, ord: number): number | undefined {
+    const seen = this.attempts.get(runId)?.get(ord);
     const rows = this.rows.get(runId)?.get(ord);
-    const fromRows = rows !== undefined && rows.size > 0 ? Math.max(...rows.keys()) : 0;
-    return Math.max(seen, fromRows, 1);
+    const fromRows = rows !== undefined && rows.size > 0 ? Math.max(...rows.keys()) : undefined;
+    if (seen === undefined) return fromRows;
+    return fromRows === undefined ? seen : Math.max(seen, fromRows);
+  }
+
+  /** Whether a frame labelled `attempt` belongs to an attempt the boundary has moved past. */
+  private superseded(runId: string, ord: number, attempt: number | undefined): boolean {
+    if (attempt === undefined) return false;
+    const boundary = this.attemptOf(runId, ord);
+    return boundary !== undefined && attempt < boundary;
   }
 
   private rowFor(runId: string, ord: number): CompletedRow | undefined {
-    return this.rows.get(runId)?.get(ord)?.get(this.attemptOf(runId, ord));
+    const boundary = this.attemptOf(runId, ord);
+    return boundary === undefined ? undefined : this.rows.get(runId)?.get(ord)?.get(boundary);
   }
 
   private stopWaiting(key: string): void {
@@ -359,15 +372,18 @@ export class AskRelay {
     }
   }
 
-  /** The PA: the team rows are authoritative; the unit's seat stands in until one has named it. */
+  /** The PA: the unit's seat for the CURRENT attempt (the cache is dropped per attempt, so a read
+   *  unit is this attempt's — a re-pick shows here before its bus row does; r4, 3); the team rows
+   *  (`path.started` / `path.repicked`) when the unit names no seat yet. */
   private paOf(runId: string, chatId: string, unit: RelayUnit): string {
     const path = this.deps.paths.get(chatId);
-    if (path !== undefined && path.pa !== null) return path.pa;
     if (unit.assigned_cli !== null) {
-      this.learnPa(runId, chatId, unit.assigned_cli, path?.selection ?? 'random');
+      if (path !== undefined && path.pa !== unit.assigned_cli) {
+        this.learnPa(runId, chatId, unit.assigned_cli, path.pa === null ? path.selection : 'random');
+      }
       return unit.assigned_cli;
     }
-    return 'pa';
+    return path?.pa ?? 'pa';
   }
 
   private async unit(runId: string, ord: number): Promise<RelayUnit | null> {
@@ -389,6 +405,9 @@ export class AskRelay {
     if (found !== null && this.units.has(runId) && this.attemptOf(runId, ord) === startedUnder) {
       this.nestedOne(this.units, runId).set(ord, found);
     }
+    // The unit's persisted attempt is the durable half of the boundary (r4, 2): a row for an older
+    // attempt cannot decide a fold whose stored output is this attempt's.
+    if (found?.last_attempt !== undefined) this.noteAttempt(runId, ord, found.last_attempt);
     return found;
   }
 
