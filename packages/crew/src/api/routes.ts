@@ -801,7 +801,7 @@ export interface RuntimeDeps {
    *  the transcript (crew#619) is released first, so a chat that reuses the id does not inherit
    *  the ended conversation (codex on #808 r3, 1). Absent (tests): the route closes the scope
    *  slot and broadcasts. */
-  closeChat?: (frame: CoreEvent, runId?: string) => void;
+  closeChat?: (frame: CoreEvent, runId?: string) => void | Promise<void>;
   /** DES-L5 (D-13): the chat transcript at rest — `GET /chats/:id.messages`. Absent ⇒ nothing is
    *  persisted and the field is omitted (a directly-driven route in tests). */
   chatTranscripts?: ChatTranscriptStore;
@@ -2883,7 +2883,9 @@ export function registerRoutes(
         }
         prepareChatScratch(chatId, scope, inForceAtOpen);
       } catch (err) {
-        if (chatScopes.release(chatId, token)) removeChatScratch(scope.cwd, chatScopes.base);
+        // The helper removes only what it created itself (a pre-existing root is preserved) —
+        // nothing more is removed here (codex on #808 r4, 3).
+        chatScopes.release(chatId, token);
         return reply
           .code(500)
           .send({ error: `cannot prepare the chat's scratch root ${scope.cwd}: ${message(err)}` });
@@ -2962,6 +2964,9 @@ export function registerRoutes(
         }));
         let projectAttachError: string | undefined;
         let attachedMemberId: string | undefined;
+        // Whether THIS open wrote the chat → project index entry (so its cleanup removes only its
+        // own — a newer open of the id may hold one; codex on #808 r4, 2).
+        let indexedHere = false;
         if (b.projectId !== undefined) {
           try {
             const { member, created } = await adapter.projectMemberAttach(
@@ -2970,8 +2975,12 @@ export function registerRoutes(
               chatId,
             );
             if (created) attachedMemberId = member.id;
-            if (created) {
+            // The attach awaited: publish the membership only while this open still holds the id —
+            // a cancelled open's filing would overwrite the replacement's (the failed `set` below
+            // detaches what was created).
+            if (created && chatScopes.owns(chatId, token)) {
               projects.index.set(chatId, b.projectId);
+              indexedHere = true;
               projects.bus?.emit(
                 MEMBERSHIP_ATTACHED,
                 { project_id: b.projectId, member: { kind: 'crew.chat', ref: chatId }, actor: actorOf(req).id },
@@ -2994,7 +3003,7 @@ export function registerRoutes(
           if (!chatScopes.has(chatId)) removeChatScratch(scope.cwd, chatScopes.base);
           if (b.projectId !== undefined && attachedMemberId !== undefined) {
             await adapter.projectMemberDetach(b.projectId, attachedMemberId).catch(() => false);
-            projects.index.delete(chatId);
+            if (indexedHere) projects.index.delete(chatId);
           }
           return reply.code(409).send({
             error: `chat ${chatId} was closed while it was being opened; open it again`,
@@ -3415,8 +3424,11 @@ export function registerRoutes(
       // The server's fold (scope slot, decisions, considerations, retention-aware transcript
       // drop) and the /ws fan-out — the same path an engine `chatClosed` took. Folded BEFORE the
       // awaited cancel: a close that lands after an await can land on a chat that reused the id
-      // meanwhile (codex on #808 r2, 2); after this line nothing of the closed chat is pending.
-      if (runtime.closeChat !== undefined) runtime.closeChat(frame, path?.runId);
+      // meanwhile (codex on #808 r2, 2). AWAITED: the decision recorder settles the chat's open
+      // turns under the chat's own project before the id is free (the slot is parked `closing`
+      // meanwhile, so a reopen waits), and only then is nothing of the closed chat pending
+      // (codex on #808 r4, 1).
+      if (runtime.closeChat !== undefined) await runtime.closeChat(frame, path?.runId);
       else {
         chatScopes.closed(id);
         runtime.broadcast?.(frame);

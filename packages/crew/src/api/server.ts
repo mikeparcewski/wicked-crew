@@ -1879,7 +1879,7 @@ export async function createServer(
       broadcast: (frame) => broadcast(frame),
       // ASK-C1: DELETE /chats/:id on an ask path closes through the same fold an engine
       // `chatClosed` takes (scope slot, decisions, considerations, retention-aware transcript).
-      closeChat: (frame, runId) => {
+      closeChat: async (frame, runId) => {
         // End cancels the path's run: its retention hold goes first, so the fold drops the
         // transcript with the chat (a reused id starts empty — codex on #808 r3, 1).
         if (runId !== undefined && typeof frame.chat === 'string') {
@@ -1888,6 +1888,12 @@ export async function createServer(
           if (retaining !== undefined && retaining.size === 0) chatRetained.delete(frame.chat);
           runToChat.delete(runId);
         }
+        // The recorder settles the chat's open turns NOW — resolving the project while the index
+        // still names this chat's (the id is parked `closing` until the fold below frees it), and
+        // writing the transcript's decisions record before the file is dropped. A deferred close
+        // could otherwise file the ended chat's words under a replacement's project and append
+        // them to its transcript (codex on #808 r4, 1). The fold's own call then finds nothing.
+        if (typeof frame.chat === 'string') await chatDecisionRecorder?.closed(frame.chat);
         onEngineEvent(frame);
       },
       // crew#619: retain a chat's transcript for the lifetime of its promoted run.

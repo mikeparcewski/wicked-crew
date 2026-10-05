@@ -4,7 +4,7 @@
 // `<tmp>/wicked-crew-chats`).
 
 import Fastify, { type FastifyInstance } from 'fastify';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -34,6 +34,7 @@ let warmByChat: Map<string, string[]>;
 let sendReaches: ((chatId: string, targets?: string[]) => string[]) | null = null;
 /** When set, `projectMemberAttach` parks until released — the open-in-flight window (codex on #808 r2, 3+4). */
 let holdAttach: { promise: Promise<void>; release: () => void } | null = null;
+let attachCount = 0;
 /** When set, the NEXT `listRepos` (scope resolution, before the scratch root is written) parks until
  *  released — the stale-open window (codex on #808 r3, 3). */
 let holdReposOnce: { promise: Promise<void>; release: () => void } | null = null;
@@ -67,8 +68,12 @@ function fakeAdapter(): CoreAdapter {
     chatList: async () => [],
     projectGet: async (id: string) => (id === 'p-live' ? { id, status: 'active' } : null),
     projectMemberAttach: async () => {
-      if (holdAttach !== null) await holdAttach.promise;
-      return { member: { id: 'm-1', attached_at: 1 }, created: true };
+      // Parks the FIRST attach only (a reopen's own attach goes straight through).
+      const held = holdAttach;
+      holdAttach = null;
+      if (held !== null) await held.promise;
+      attachCount += 1;
+      return { member: { id: `m-${attachCount}`, attached_at: attachCount }, created: true };
     },
     projectMemberDetach: async () => true,
   } as unknown as CoreAdapter;
@@ -313,7 +318,8 @@ describe('ASK-C1 — an ask starts a path: the open records eligibility and a ch
 
   it('codex on #808 r2 (3+4): the path record is published only once the scope is COMMITTED; an open cancelled mid-flight never touches the replacement that reused the id', async () => {
     let releaseAttach: () => void = () => undefined;
-    holdAttach = { promise: new Promise<void>((r) => { releaseAttach = r; }), release: () => releaseAttach() };
+    const held = { promise: new Promise<void>((r) => { releaseAttach = r; }), release: () => releaseAttach() };
+    holdAttach = held;
     const first = open({ chatId: 'live', clis: ['claude'], repoRefs: ['alpha'], projectId: 'p-live' });
     await new Promise((r) => setTimeout(r, 20));
     // Mid-open: no path yet — a message finds nothing to launch against, and the list is empty.
@@ -326,7 +332,7 @@ describe('ASK-C1 — an ask starts a path: the open records eligibility and a ch
     const cwd = (second.json() as { scope: { cwd: string } }).scope.cwd;
     expect(existsSync(cwd)).toBe(true);
     // The first open resumes: its reservation is gone — 409, and the replacement is untouched.
-    holdAttach.release();
+    held.release();
     const res = await first;
     expect(res.statusCode).toBe(409);
     expect((res.json() as { error: string }).error).toMatch(/closed while it was being opened/);
@@ -336,6 +342,35 @@ describe('ASK-C1 — an ask starts a path: the open records eligibility and a ch
       chats: [{ chatId: 'live', seats: ['claude'], idleSecs: null, cwd, codeGraphDb: graphFile, readRoots: ['/srv/repos/alpha'] }],
     });
     holdAttach = null;
+  });
+
+  it('codex on #808 r4 (2): a stale open\'s project attach neither publishes nor erases the reopened chat\'s project mapping', async () => {
+    let releaseAttach: () => void = () => undefined;
+    const held = { promise: new Promise<void>((r) => { releaseAttach = r; }), release: () => releaseAttach() };
+    holdAttach = held;
+    const stale = open({ chatId: 'live', clis: ['claude'], repoRefs: ['alpha'], projectId: 'p-live' });
+    await new Promise((r) => setTimeout(r, 20));
+    expect((await app.inject({ method: 'DELETE', url: '/api/v1/chats/live' })).statusCode).toBe(200);
+    const fresh = await open({ chatId: 'live', clis: ['claude'], repoRefs: ['alpha'], projectId: 'p-live' });
+    expect(fresh.statusCode).toBe(201);
+    held.release();
+    expect((await stale).statusCode).toBe(409);
+    // The newcomer's filing stands: its close frame names the project.
+    broadcast.length = 0;
+    expect((await app.inject({ method: 'DELETE', url: '/api/v1/chats/live' })).statusCode).toBe(200);
+    const closed = broadcast.find((f) => (f as { type: string }).type === 'chatClosed') as { project_id?: string } | undefined;
+    expect(closed?.project_id, 'the stale open\'s cleanup did not erase the replacement\'s project').toBe('p-live');
+  });
+
+  it('codex on #808 r4 (3): a scratch root that pre-exists and cannot be prepared is preserved by the 500 — the route removes nothing the helper did not create', async () => {
+    const root = join(base, 'chats', 'pre');
+    mkdirSync(join(root, 'AGENTS.md'), { recursive: true }); // a DIRECTORY where the file goes: EEXIST
+    const res = await open({ chatId: 'pre', clis: ['claude'], repoRefs: ['alpha'] });
+    expect(res.statusCode).toBe(500);
+    expect(existsSync(join(root, 'AGENTS.md')), 'the pre-existing root and its contents stand').toBe(true);
+    // The id is free again.
+    rmSync(root, { recursive: true, force: true });
+    expect((await open({ chatId: 'pre', clis: ['claude'], repoRefs: ['alpha'] })).statusCode).toBe(201);
   });
 
   it('codex on #808 r3 (3): an open parked in scope resolution, closed, and overtaken by a reopen of its id neither rewrites nor removes the newcomer\'s scratch root', async () => {

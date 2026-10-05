@@ -390,7 +390,7 @@ describe('POST /chats/:id/messages — an ask starts a PATH; refuse mid-turn; co
     expect((res.json() as { error: string }).error).toMatch(/closed while the message was in flight/);
     expect(proposed, 'no proposal reached the engine for the cancelled run').toHaveLength(0);
     expect(askPaths.get('e057')!.steps, 'the newcomer\'s record is untouched').toEqual([]);
-    expect(transcripts.read('e057').filter((r) => r.text === 'Q2')).toEqual([]);
+    expect(transcripts.read('e057').filter((r) => r.kind === 'user' && r.text === 'Q2')).toEqual([]);
     // The newcomer launches as usual.
     expect((await send({ text: 'Q1 again' })).statusCode).toBe(202);
     expect(askPaths.view('e057')).toMatchObject({ runId: 'run-2', stepId: 'answer-1' });
@@ -407,6 +407,21 @@ describe('POST /chats/:id/messages — an ask starts a PATH; refuse mid-turn; co
     expect(askPaths.get('e057')!.eligible).toEqual(['claude']);
     holdLaunch.release();
     expect((await first).statusCode).toBe(202);
+  });
+
+  it('codex on #808 r4 (1): DELETE AWAITS the server\'s close fold (the decision recorder settles under the chat\'s own project) before it answers', async () => {
+    opened('e057', ['claude'], 'claude');
+    await send({ text: 'Q1' });
+    const fold = gate();
+    closeChat.mockImplementationOnce(() => fold.promise);
+    let answered = false;
+    const del = app.inject({ method: 'DELETE', url: '/api/v1/chats/e057' }).then((r) => { answered = true; return r; });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(closeChat).toHaveBeenCalledTimes(1);
+    expect(answered, 'not before the fold settled').toBe(false);
+    fold.release();
+    expect((await del).statusCode).toBe(200);
+    expect(cancelled).toEqual(['run-1']);
   });
 
   it('codex on #808 r2 (2): DELETE folds the close BEFORE it awaits the cancel — nothing of the closed chat lands after an await', async () => {
