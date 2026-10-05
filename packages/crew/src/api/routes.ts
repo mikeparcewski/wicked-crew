@@ -43,7 +43,7 @@ import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
 import { callEstateTool, EstateMcpError } from '../core/estate-mcp-client.js';
 import { SeatHealthTracker } from './seat-health.js';
 import { applyWorkerConfigRoot, signedInHeuristic } from './seat-signin.js';
-import { chatSeatAdmission, noCredentialCause } from './seat-standing.js';
+import { chatSeatAdmission } from './seat-standing.js';
 import { rosterWithStandingFactory, type RosterWithStanding } from './roster-standing.js';
 import { ChatTurnIndex } from './chat-turns.js';
 import type { ChatRepoRoot, ChatTranscriptStore } from './chat-transcripts.js';
@@ -795,6 +795,10 @@ export interface RuntimeDeps {
   chatTurns?: ChatTurnIndex;
   /** (ASK-C1) The daemon's record of each chat's ask path; tests inject one to read it back. */
   askPaths?: AskPathIndex;
+  /** (ASK-C1) Close a chat the engine holds no row for: the server feeds the synthetic
+   *  `chatClosed` frame through its own event fold (and /ws), so DELETE closes exactly the way an
+   *  engine close did. Absent (tests): the route closes the scope slot and broadcasts. */
+  closeChat?: (frame: CoreEvent) => void;
   /** DES-L5 (D-13): the chat transcript at rest — `GET /chats/:id.messages`. Absent ⇒ nothing is
    *  persisted and the field is omitted (a directly-driven route in tests). */
   chatTranscripts?: ChatTranscriptStore;
@@ -2892,22 +2896,31 @@ export function registerRoutes(
       // The standing roster, read ONCE: the default admission below and the engine-drop
       // attribution after `chatOpen` both consult it (F-A45-011).
       const standing = rosterWithStanding();
-      const standingOf = (key: string) => standing.find((s) => String(s.key) === key);
-      let clis: string[];
-      if (b.clis !== undefined) {
-        clis = b.clis;
-      } else {
-        clis = [];
-        for (const seat of standing) {
-          const key = String(seat.key);
-          const admission = chatSeatAdmission(
-            seat as { key: string; enabled_for_council?: boolean; acp?: { acp_input_governance?: boolean; os_sandbox?: boolean } | null },
-            seat.auth ?? 'unknown',
-            scoped,
-          );
-          if (admission.ok) clis.push(key);
-          else refused.push({ cliKey: key, reason: admission.reason, source: admission.source });
+      // ASK-C1: admission applies to the DEFAULT roster and to seats NAMED in `clis` alike — the
+      // engine no longer refuses a seat at open (nothing is warmed), so this is the only gate
+      // between a request and the eligible roster the path launches with. A named seat passes
+      // the STRUCTURAL rule (an ACP adapter that can be held read-only) but not the sign-in
+      // heuristic: naming it is the operator's word that it is signed in (the heuristic reads a
+      // credential file, and a real auth failure surfaces on the path's run as a seat failure).
+      // An unknown key is refused by name.
+      const named = b.clis !== undefined;
+      const candidates: Array<(typeof standing)[number] | { key: string }> = named
+        ? b.clis!.map((key) => standing.find((s) => String(s.key) === key) ?? { key })
+        : standing;
+      const clis: string[] = [];
+      for (const seat of candidates) {
+        const key = String(seat.key);
+        if (!('auth' in seat)) {
+          refused.push({ cliKey: key, reason: `seat '${key}' is not in the roster`, source: 'scope' });
+          continue;
         }
+        const admission = chatSeatAdmission(
+          seat as { key: string; enabled_for_council?: boolean; acp?: { acp_input_governance?: boolean; os_sandbox?: boolean } | null },
+          named ? 'unknown' : (seat.auth ?? 'unknown'),
+          scoped,
+        );
+        if (admission.ok) clis.push(key);
+        else refused.push({ cliKey: key, reason: admission.reason, source: admission.source });
       }
       if (clis.length === 0) {
         chatScopes.release(chatId, token);
@@ -3091,31 +3104,45 @@ export function registerRoutes(
       path.eligible.length === 1
         ? { singleSeat: singleSeatDisclosure(path.eligible[0]!, chatScopes.refusedOf(id), 'turn') }
         : {};
-    if (path.runId === undefined && path.launching === true) {
+    // One message at a time per chat, on this daemon: the reservation covers the launch, and a
+    // continuation's status read → proposal → approval (two continuations racing would both
+    // read `awaiting_human` and both hold an edit; the second's approval then fails).
+    if (!askPaths.reserve(id)) {
       return reply.code(409).send({
         code: 'turn_in_flight' as const,
-        error: `${path.pa ?? 'the primary agent'} is still being seated for the previous message in this chat — wait for the reply. Nothing was sent.`,
+        error: `${path.pa ?? 'the primary agent'} is still answering the previous message in this chat — wait for the reply. Nothing was sent.`,
         chatId: id,
+        ...(path.runId !== undefined ? { runId: path.runId } : {}),
       });
     }
     const turn = chatTurns.begin(id, voice, text);
     const turnId = turn?.turnId ?? randomUUID();
+    // DC-S7: the rules the chat's seats were told about ride the step's instructions, as the
+    // preface rode a pool send; the scope statement carries the rules in force for the project.
+    const preface = await considerations.prefaceForSend(id);
+    const instructions = preface !== null ? `${preface}\n\n${text}` : text;
     try {
       if (path.runId === undefined) {
-        askPaths.launching(id);
         const stepId = 'answer-1';
+        const generation = path.generation;
         const roster = rosterWithStanding().filter((seat) => path.eligible.includes(String(seat.key)));
+        const rules = (await considerations.inForceFor(scope?.projectId ?? null)).rules;
         const input: LaunchRunInput = {
-          problem: scope !== undefined ? chatScopeStatement(id, scope) : text,
+          problem: scope !== undefined ? chatScopeStatement(id, scope, rules) : text,
           sessionId: randomUUID(),
           clisJson: JSON.stringify(roster),
-          plan: { steps: [answerStep(stepId, text)], monitors: { asked: 1 } },
+          plan: { steps: [answerStep(stepId, instructions)], monitors: { asked: 1 } },
           ...(path.primary !== undefined ? { primary: path.primary } : {}),
           ...(repoRef !== undefined ? { repoRef, deliver: 'pr' as const } : {}),
           ...(projectId !== undefined ? { projectId } : {}),
         };
         const runId = await adapter.launchRun(input);
-        askPaths.started(id, runId, stepId);
+        if (!askPaths.started(id, generation, runId, stepId)) {
+          // The chat was closed (End) while the launch was in flight: the run must not outlive it.
+          await adapter.cancelRun(runId).catch(() => undefined);
+          if (turn !== null) chatTurns.abort(id, turn.turnId);
+          return reply.code(409).send({ error: `chat '${id}' was closed while its path was launching; the run was cancelled` });
+        }
         runtime.linkChatRun?.(id, runId);
         recordRunLaunched(audit, runTimingIndex, actorOf(req), runId, {
           chatId: id,
@@ -3130,11 +3157,13 @@ export function registerRoutes(
       }
       const view = (await adapter.sessionsDetail()).find((v) => v.session.id === path.runId);
       if (view === undefined) {
+        askPaths.release(id);
         if (turn !== null) chatTurns.abort(id, turn.turnId);
         return reply.code(409).send({ error: `chat '${id}': its path ${path.runId} is gone — open a new chat` });
       }
       const status = String(view.session.status);
       if (status !== 'awaiting_human') {
+        askPaths.release(id);
         if (turn !== null) chatTurns.abort(id, turn.turnId);
         const who = path.pa ?? 'the primary agent';
         return reply.code(409).send({
@@ -3149,13 +3178,14 @@ export function registerRoutes(
         });
       }
       const stepId = askPaths.nextStep(id);
-      await adapter.proposePlan(path.runId, { steps: [answerStep(stepId, text)] }, turnId);
+      await adapter.proposePlan(path.runId, { steps: [answerStep(stepId, instructions)] }, turnId);
       await adapter.confirmGate(path.runId, true);
+      askPaths.release(id);
       chatTranscripts?.appendUser(id, turnId, text, voice);
       chatRecorder?.noteSend(id, turnId, actorOf(req), text, voice);
       return reply.code(202).send({ seats: voice, turnId, runId: path.runId, stepId, ...singleSeat202 });
     } catch (err) {
-      askPaths.launchFailed(id);
+      askPaths.release(id);
       if (turn !== null) chatTurns.abort(id, turn.turnId);
       return reply.code(400).send({ error: message(err) });
     }
@@ -3196,10 +3226,22 @@ export function registerRoutes(
         return reply.code(409).send(turnInFlightBody(id, inFlight, 'No seat was re-warmed.'));
       }
       try {
-        // ASK-C1: a re-seat re-admits the named seats into the path's eligible roster (a sign-in
-        // fixed); nothing is warmed and the engine is not called.
-        const eligible = askPaths.admit(id, clis);
-        const seats = clis.map((cliKey) => ({ cliKey, ok: eligible.includes(cliKey) }));
+        // ASK-C1: a re-seat re-admits the named seats that pass admission NOW (a sign-in fixed)
+        // into the path's eligible roster; nothing is warmed and the engine is not called.
+        const scopedChat = (chatScopes.get(id)?.kind ?? 'none') !== 'none' && chatScopes.get(id)?.kind !== 'system';
+        const standingNow = rosterWithStanding();
+        const seats = clis.map((cliKey) => {
+          const seat = standingNow.find((s) => String(s.key) === cliKey);
+          if (seat === undefined) return { cliKey, ok: false, error: `seat '${cliKey}' is not in the roster` };
+          // Named by the operator: the structural rule only (as at open).
+          const admission = chatSeatAdmission(
+            seat as { key: string; enabled_for_council?: boolean; acp?: { acp_input_governance?: boolean; os_sandbox?: boolean } | null },
+            'unknown',
+            scopedChat,
+          );
+          return admission.ok ? { cliKey, ok: true } : { cliKey, ok: false, error: admission.reason };
+        });
+        askPaths.admit(id, seats.filter((s) => s.ok).map((s) => s.cliKey));
         const refused = chatScopes.foldSeats(id, seats);
         return { chatId: id, seats, refused };
       } catch (err) {
@@ -3218,7 +3260,23 @@ export function registerRoutes(
     { config: { manifest: { responseType: 'ChatListResponse', statusCodes: [200, 400, 501] } } },
     async (_req, reply) => {
     try {
-      return { chats: await adapter.chatList() };
+      const pool = await adapter.chatList().catch((err: unknown) => {
+        if (err instanceof ChatUnsupportedError) return [];
+        throw err;
+      });
+      // ASK-C1: an ask path is a chat of this daemon with no engine pool row — listed from the
+      // ask-path index (the pool entries stay until ASK-K4 deletes the pool).
+      const paths = askPaths.list().map((p) => {
+        const engine = chatScopes.engineOf(p.chatId);
+        return {
+          chatId: p.chatId,
+          seats: [...p.eligible],
+          idleSecs: null,
+          ...(engine !== undefined ? { cwd: engine.cwd, codeGraphDb: engine.codeGraphDb ?? null, readRoots: [...engine.readRoots] } : {}),
+        };
+      });
+      const seen = new Set(paths.map((p) => p.chatId));
+      return { chats: [...paths, ...pool.filter((c) => !seen.has(c.chatId))] };
     } catch (err) {
       // A build that cannot do chat is a capability gap, not a bad request: 501 tells an operator to
       // upgrade rather than to fix a call that was already correct. Branching on the type, not on
@@ -3293,12 +3351,19 @@ export function registerRoutes(
     try {
       if (path?.runId !== undefined) await adapter.cancelRun(path.runId).catch(() => undefined);
       const projectId = projects.index.projectOf(id) ?? undefined;
-      runtime.broadcast?.({
+      const frame = {
         type: 'chatClosed',
         chat: id,
         reason: 'closed',
         ...(projectId !== undefined ? { project_id: projectId } : {}),
-      } as CoreEvent);
+      } as CoreEvent;
+      // The server's fold (scope slot, decisions, considerations, retention-aware transcript
+      // drop) and the /ws fan-out — the same path an engine `chatClosed` took.
+      if (runtime.closeChat !== undefined) runtime.closeChat(frame);
+      else {
+        chatScopes.closed(id);
+        runtime.broadcast?.(frame);
+      }
       return { ok: true };
     } catch (err) {
       return reply.code(400).send({ error: message(err) });

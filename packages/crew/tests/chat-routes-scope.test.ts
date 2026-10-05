@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ChatScopeIndex } from '../src/api/chat-scope.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { GateCache } from '../src/api/gate-cache.js';
-import { registerRoutes, type RegisteredRoutes } from '../src/api/routes.js';
+import { registerRoutes } from '../src/api/routes.js';
 import { CoreAdapter } from '../src/core/adapter.js';
 
 let base: string;
@@ -29,7 +29,6 @@ let broadcast: unknown[];
 /** chatId → the seats that actually warmed, filled by the adapter's `chatOpen` wrapper. */
 let warmByChat: Map<string, string[]>;
 /** What `registerRoutes` handed back (DC-S7: the consideration service's per-chat state). */
-let registered: RegisteredRoutes;
 /** When set, decides what a send REACHES — used to model a turn that reaches fewer seats than are
  *  warm (a transient engine drop), which is the only broadcast that can tell "roster" from "reach". */
 let sendReaches: ((chatId: string, targets?: string[]) => string[]) | null = null;
@@ -89,7 +88,7 @@ beforeEach(async () => {
   sendReaches = null;
   chatScopes = new ChatScopeIndex(join(base, 'chats'));
   app = Fastify({ logger: false });
-  registered = registerRoutes(app, fakeAdapter(), new GateCache(), new ElicitationCache(), undefined, undefined, {
+  registerRoutes(app, fakeAdapter(), new GateCache(), new ElicitationCache(), undefined, undefined, {
     chatScopes,
     // Never the real dotfile probe: the suite must not read the developer's worker home.
     signedIn: (seatKey) => signedIn(seatKey),
@@ -146,7 +145,7 @@ describe('POST /chats — scope lifecycle over a fake engine', () => {
     expect(readFileSync(join(base, 'chats', 'live', 'AGENTS.md'), 'utf8')).toBe(stamp);
   });
 
-  it('GET /chats/:id carries the recorded scope; DELETE removes the scratch root at once and parks the id until the engine closes it', async () => {
+  it('GET /chats/:id carries the recorded scope; DELETE removes the scratch root and frees the id at once (ASK-C1: no engine close is coming for a path)', async () => {
     await open({ chatId: 'live', clis: ['claude'], repoRefs: ['alpha'] });
     const detail = await app.inject({ method: 'GET', url: '/api/v1/chats/live' });
     expect(detail.statusCode).toBe(200);
@@ -156,12 +155,8 @@ describe('POST /chats — scope lifecycle over a fake engine', () => {
     expect(existsSync(join(base, 'chats', 'live'))).toBe(false);
     expect(chatScopes.get('live')).toBeUndefined();
     expect((await app.inject({ method: 'GET', url: '/api/v1/chats/live' })).json()).toMatchObject({ scope: null });
-    // Until the engine's own `chatClosed` is observed the id is CLOSING: a reuse is refused, so a
-    // close delivered late can never land on a newer chat's root.
-    const tooSoon = await open({ chatId: 'live', clis: ['claude'] });
-    expect(tooSoon.statusCode).toBe(409);
-    expect((tooSoon.json() as { error: string }).error).toMatch(/closing/);
-    chatScopes.closed('live'); // the relay delivers the engine's chatClosed
+    // ASK-C1: the daemon owns the close (the engine holds no row for a path), so the id is free
+    // the moment DELETE answers — the route's own fold ran `chatScopes.closed` (codex on #808, 5).
     expect((await open({ chatId: 'live', clis: ['claude'] })).statusCode).toBe(201);
   });
 
@@ -246,25 +241,18 @@ describe('POST /chats — scope lifecycle over a fake engine', () => {
 // refused — opened silently: `ok: true`, `refused: []`, no disclosure at all. The chat is just as
 // unable to disagree with itself, which is the property the field exists to state.
 /** The disclosure as a consumer sees it (crew#650 + the #658 review's `refusalsKnown`). */
-type SingleSeat = {
-  degraded: boolean;
-  warmed: string;
-  refused: { cliKey: string }[];
-  refusalsKnown?: boolean;
-  message: string;
-};
 
 describe('ASK-C1 — an ask starts a path: the open records eligibility and a chosen primary, warms nothing', () => {
   it('`primary` must be one of the eligible seats (400 names the eligible list); a valid one is recorded as the chosen PA', async () => {
-    const bad = await open({ chatId: 'pick-bad', clis: ['claude', 'pi'], repoRefs: ['alpha'], primary: 'codex' });
+    const bad = await open({ chatId: 'pick-bad', clis: ['claude', 'opencode'], repoRefs: ['alpha'], primary: 'codex' });
     expect(bad.statusCode).toBe(400);
-    expect((bad.json() as { error: string }).error).toMatch(/primary names a seat that is not eligible.*claude, pi/);
+    expect((bad.json() as { error: string }).error).toMatch(/primary names a seat that is not eligible.*claude, opencode/);
     expect(existsSync(join(base, 'chats', 'pick-bad')), 'a refused open frees its root').toBe(false);
-    const good = await open({ chatId: 'pick', clis: ['claude', 'pi'], repoRefs: ['alpha'], primary: 'pi' });
+    const good = await open({ chatId: 'pick', clis: ['claude', 'opencode'], repoRefs: ['alpha'], primary: 'opencode' });
     expect(good.statusCode).toBe(201);
     expect((good.json() as { seats: { cliKey: string; ok: boolean }[] }).seats).toEqual([
       { cliKey: 'claude', ok: true },
-      { cliKey: 'pi', ok: true },
+      { cliKey: 'opencode', ok: true },
     ]);
     expect(chatOpen, 'the engine warms nothing at open').not.toHaveBeenCalled();
     // No path yet: the first message launches it.
@@ -273,12 +261,40 @@ describe('ASK-C1 — an ask starts a path: the open records eligibility and a ch
 
   it('POST /chats/:id/seats re-admits a seat into the eligible roster with no engine call; an unknown chat is 404', async () => {
     expect((await open({ chatId: 'reseat', clis: ['claude'], repoRefs: ['alpha'] })).statusCode).toBe(201);
-    const retry = await app.inject({ method: 'POST', url: '/api/v1/chats/reseat/seats', payload: { clis: ['pi'] } });
+    const retry = await app.inject({ method: 'POST', url: '/api/v1/chats/reseat/seats', payload: { clis: ['opencode'] } });
     expect(retry.statusCode).toBe(200);
-    expect(retry.json()).toEqual({ chatId: 'reseat', seats: [{ cliKey: 'pi', ok: true }], refused: [] });
-    expect((await app.inject({ method: 'GET', url: '/api/v1/chats/reseat' })).json()).toMatchObject({ seats: ['claude', 'pi'] });
+    expect(retry.json()).toEqual({ chatId: 'reseat', seats: [{ cliKey: 'opencode', ok: true }], refused: [] });
+    expect((await app.inject({ method: 'GET', url: '/api/v1/chats/reseat' })).json()).toMatchObject({ seats: ['claude', 'opencode'] });
     expect(chatOpen).not.toHaveBeenCalled();
     expect((await app.inject({ method: 'POST', url: '/api/v1/chats/nope/seats', payload: { clis: ['claude'] } })).statusCode).toBe(404);
+    // codex on #808 (4): a re-seat ADMITS, it does not blindly admit — pi cannot be held read-only
+    // in a scoped chat, and an unknown key is refused by name; the eligible roster is unchanged.
+    const bad = await app.inject({ method: 'POST', url: '/api/v1/chats/reseat/seats', payload: { clis: ['pi', 'nobody'] } });
+    expect(bad.statusCode).toBe(200);
+    expect((bad.json() as { seats: { cliKey: string; ok: boolean }[] }).seats.map((s) => s.ok)).toEqual([false, false]);
+    expect((bad.json() as { refused: { cliKey: string; reason: string }[] }).refused.map((r) => r.cliKey)).toEqual(['pi', 'nobody']);
+    expect((await app.inject({ method: 'GET', url: '/api/v1/chats/reseat' })).json()).toMatchObject({ seats: ['claude', 'opencode'] });
+  });
+
+  it('codex on #808 (4): seats NAMED in `clis` pass the structural admission rule (no engine refuses them any more) but not the sign-in heuristic', async () => {
+    // pi has no input governance and no sandbox: refused in a scoped chat even when named.
+    const scopedPi = await open({ chatId: 'named-pi', clis: ['claude', 'pi'], repoRefs: ['alpha'] });
+    expect(scopedPi.statusCode).toBe(201);
+    const body = scopedPi.json() as { seats: { cliKey: string; ok: boolean }[]; refused: { cliKey: string; reason: string }[] };
+    expect(body.seats, 'the 201 seats are the ELIGIBLE roster; a refusal is on `refused`').toEqual([{ cliKey: 'claude', ok: true }]);
+    expect(body.refused.map((r) => r.cliKey)).toEqual(['pi']);
+    expect(body.refused[0]!.reason).toMatch(/asks no permissions/);
+    expect((await app.inject({ method: 'GET', url: '/api/v1/chats/named-pi' })).json()).toMatchObject({ seats: ['claude'] });
+    // A key the roster does not know is refused by name; naming a signed-out seat is the operator's
+    // word (the heuristic reads a credential file) — the path launches with it.
+    signedIn = () => false;
+    const named = await open({ chatId: 'named-out', clis: ['claude', 'nobody'], repoRefs: ['alpha'] });
+    expect(named.statusCode).toBe(201);
+    expect((named.json() as { seats: { cliKey: string; ok: boolean }[] }).seats).toEqual([{ cliKey: 'claude', ok: true }]);
+    expect((named.json() as { refused: { cliKey: string; reason: string }[] }).refused[0]).toMatchObject({ cliKey: 'nobody', reason: expect.stringMatching(/not in the roster/) });
+    // ...while the DEFAULT roster still refuses a signed-out seat up front (F-2R2-009 above).
+    const dflt = await open({ chatId: 'dflt-out', repoRefs: ['alpha'] });
+    expect((dflt.json() as { refused: { cliKey: string; reason: string }[] }).refused.find((r) => r.cliKey === 'claude')?.reason).toMatch(/signed out/);
   });
 });
 

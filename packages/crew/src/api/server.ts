@@ -1460,7 +1460,7 @@ export async function createServer(
     // prefill remains reproducible across a daemon restart (crew#619).
     chatTranscripts.clearOrphaned(new Set(chatRetained.keys()));
   }
-  const offEvent = adapter.onEvent((event) => {
+  const onEngineEvent = (event: CoreEvent): void => {
     gateCache.ingest(event);
     elicitationCache.ingest(event);
     seatHealth.ingest(event);
@@ -1674,7 +1674,8 @@ export async function createServer(
         }
       })();
     }
-  });
+  };
+  const offEvent = adapter.onEvent(onEngineEvent);
   // Skills keystone (codex round 4): every launch the daemon hands the engine — run, resume, gate
   // answer, campaign — opens a generation pin BEFORE the engine call, released only by the engine's
   // `skillsSnapshotHanded` report or the terminal frame (live-generations.ts). Unregistered on
@@ -1868,6 +1869,9 @@ export async function createServer(
       // Routes that say something to the thread (a refused chat seat, F-2R2-007) emit through the
       // SAME /ws fan-out the engine's frames take.
       broadcast: (frame) => broadcast(frame),
+      // ASK-C1: DELETE /chats/:id on an ask path closes through the same fold an engine
+      // `chatClosed` takes (scope slot, decisions, considerations, retention-aware transcript).
+      closeChat: (frame) => onEngineEvent(frame),
       // crew#619: retain a chat's transcript for the lifetime of its promoted run.
       linkChatRun,
       // TR-W5a: the `watch.*` settings guard validates against the registry's entries.

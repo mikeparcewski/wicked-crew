@@ -393,7 +393,7 @@ describe('the server wiring: one chatCitations frame per reply, after the rewrit
       url: '/api/v1/chats',
       payload: { chatId: 'cite-1', clis: ['claude'], repoRefs: ['alpha'] },
     });
-    expect(opened.statusCode).toBe(201);
+    expect(opened.statusCode, opened.body).toBe(201);
     chatCwdParent = dirname((opened.json() as { scope: { cwd: string } }).scope.cwd);
 
     // A REAL send, so the turn index opens a turn and the reply below is stamped the way the
@@ -456,7 +456,7 @@ describe('the server wiring: one chatCitations frame per reply, after the rewrit
       url: '/api/v1/chats',
       payload: { chatId: 'cite-2', clis: ['claude'], repoRefs: ['alpha'] },
     });
-    expect(opened.statusCode).toBe(201);
+    expect(opened.statusCode, opened.body).toBe(201);
 
     emit({ type: 'chatReply', chat: 'cite-2', cliKey: 'claude', ok: true, text: 'Nothing to cite here.' } as unknown as CoreEvent);
     emit({

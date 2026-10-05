@@ -16,8 +16,12 @@ export interface AskPath {
   primary?: string;
   /** The run the conversation is, once the first message launched it. */
   runId?: string;
-  /** The first message is launching the run right now (a second one meanwhile is `turn_in_flight`). */
-  launching?: boolean;
+  /** A message of this chat is in flight on this daemon — launching the run or continuing it
+   *  (status read → proposal → approval) — so a second one meanwhile is `turn_in_flight`. */
+  busy?: boolean;
+  /** Bumped on open; a launch that resolves after the chat was closed and reopened must not
+   *  attach its run to the newcomer. */
+  generation: number;
   /** The answer steps added so far (`answer-1`, `answer-2`, …). */
   steps: string[];
   /** The engine's pick as this daemon has seen it. */
@@ -29,6 +33,8 @@ export interface AskPath {
 
 export class AskPathIndex {
   private readonly paths = new Map<string, AskPath>();
+  /** Per chat id, across closes — a close-and-reopen must read as a NEW generation. */
+  private readonly generations = new Map<string, number>();
 
   /** Record an opened chat's eligibility and the operator's choice. */
   open(chatId: string, eligible: readonly string[], primary?: string): AskPath {
@@ -37,6 +43,7 @@ export class AskPathIndex {
       eligible: [...eligible],
       ...(primary !== undefined ? { primary } : {}),
       steps: [],
+      generation: this.nextGeneration(chatId),
       // One eligible seat is a certain voice (the engine's random pick over a roster of one):
       // the turn index and the transcript can name it before `path.started` lands.
       pa: primary ?? (eligible.length === 1 ? eligible[0]! : null),
@@ -58,26 +65,34 @@ export class AskPathIndex {
     return undefined;
   }
 
-  /** The first message is launching the run: reserve the path until `started` / `launchFailed`. */
-  launching(chatId: string): boolean {
+  private nextGeneration(chatId: string): number {
+    const g = (this.generations.get(chatId) ?? 0) + 1;
+    this.generations.set(chatId, g);
+    return g;
+  }
+
+  /** Reserve the chat for one message (a launch or a continuation): false when one is in flight. */
+  reserve(chatId: string): boolean {
     const p = this.paths.get(chatId);
-    if (p === undefined || p.runId !== undefined || p.launching === true) return false;
-    p.launching = true;
+    if (p === undefined || p.busy === true) return false;
+    p.busy = true;
     return true;
   }
 
-  launchFailed(chatId: string): void {
+  release(chatId: string): void {
     const p = this.paths.get(chatId);
-    if (p !== undefined) p.launching = false;
+    if (p !== undefined) p.busy = false;
   }
 
-  /** The first message launched the run; `stepId` is its answer step. */
-  started(chatId: string, runId: string, stepId: string): void {
+  /** The first message launched the run; `stepId` is its answer step. False when the chat was
+   *  closed (or closed and reopened) while the launch was in flight: the caller cancels the run. */
+  started(chatId: string, generation: number, runId: string, stepId: string): boolean {
     const p = this.paths.get(chatId);
-    if (p === undefined) return;
-    p.launching = false;
+    if (p === undefined || p.generation !== generation) return false;
+    p.busy = false;
     p.runId = runId;
     p.steps.push(stepId);
+    return true;
   }
 
   /** A later message added an answer step. Returns the new step id. */
@@ -106,6 +121,11 @@ export class AskPathIndex {
     if (fact.selection !== undefined) p.selection = fact.selection;
     if (fact.reviewer !== undefined) p.reviewer = fact.reviewer;
     if (fact.helper !== undefined && !p.helpers.includes(fact.helper)) p.helpers.push(fact.helper);
+  }
+
+  /** Every chat this daemon holds a path record for (`GET /chats`). */
+  list(): AskPath[] {
+    return [...this.paths.values()];
   }
 
   close(chatId: string): AskPath | undefined {

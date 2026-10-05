@@ -3,7 +3,7 @@
 // `turnId`; the seat's reply frames leave the daemon stamped with `turn_id`. Index unit + the route.
 
 import Fastify, { type FastifyInstance } from 'fastify';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -138,6 +138,10 @@ describe('POST /chats/:id/messages — an ask starts a PATH; refuse mid-turn; co
   let runStatus: string;
   /** When set, `launchRun` parks until released — the F-E2E-041 window under test. */
   let holdLaunch: { promise: Promise<void>; release: () => void } | null;
+  /** When set, `proposePlan` parks until released — the continuation window (codex on #808, 1). */
+  let holdPropose: { promise: Promise<void>; release: () => void } | null;
+  /** The server's event fold, as `registerRoutes` is handed it (codex on #808, 5). */
+  let closeChat: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
     launched = [];
@@ -146,6 +150,8 @@ describe('POST /chats/:id/messages — an ask starts a PATH; refuse mid-turn; co
     cancelled = [];
     runStatus = 'awaiting_human';
     holdLaunch = null;
+    holdPropose = null;
+    closeChat = vi.fn();
     turns = new ChatTurnIndex();
     askPaths = new AskPathIndex();
     transcriptDir = mkdtempSync(join(tmpdir(), 'chat-transcripts-'));
@@ -164,9 +170,11 @@ describe('POST /chats/:id/messages — an ask starts a PATH; refuse mid-turn; co
         },
         sessionsDetail: async () => [{ session: { id: 'run-1', status: runStatus }, units: [] }],
         proposePlan: async (runId: string, plan: unknown, requestId: string) => {
+          if (holdPropose !== null) await holdPropose.promise;
           proposed.push({ runId, plan, requestId });
           return { ok: true };
         },
+        chatList: async () => [{ chatId: 'pool-only', seats: ['claude'], idleSecs: 3 }],
         confirmGate: async (runId: string) => {
           approved.push(runId);
           return 'awaiting_human';
@@ -180,7 +188,7 @@ describe('POST /chats/:id/messages — an ask starts a PATH; refuse mid-turn; co
       new ElicitationCache(),
       undefined,
       undefined,
-      { chatTurns: turns, chatTranscripts: transcripts, askPaths, signedIn: () => null },
+      { chatTurns: turns, chatTranscripts: transcripts, askPaths, signedIn: () => null, closeChat: closeChat as unknown as (frame: CoreEvent) => void },
     );
     await app.ready();
   });
@@ -279,6 +287,61 @@ describe('POST /chats/:id/messages — an ask starts a PATH; refuse mid-turn; co
     expect(after.statusCode).toBe(409);
     expect((after.json() as { error: string }).error).toMatch(/not open on this daemon/);
     expect(launched, 'nothing launched for a closed chat').toHaveLength(1);
+  });
+
+  it('codex on #808 (1): two CONCURRENT continuations → exactly one proposal + approval; the loser is 409 turn_in_flight (the reservation spans status read → proposal → approval)', async () => {
+    opened('e057', ['claude'], 'claude');
+    await send({ text: 'Q1' });
+    let release: () => void = () => undefined;
+    holdPropose = { promise: new Promise<void>((r) => { release = r; }), release: () => release() };
+    const a = send({ text: 'Q2-a' });
+    const b = send({ text: 'Q2-b' });
+    await new Promise((r) => setTimeout(r, 20));
+    holdPropose.release();
+    const [ra, rb] = await Promise.all([a, b]);
+    expect([ra.statusCode, rb.statusCode].sort()).toEqual([202, 409]);
+    expect(proposed, 'ONE continuation reached the engine').toHaveLength(1);
+    expect(approved, 'and ONE approval (a launch is not approved — it has no gate yet)').toEqual(['run-1']);
+    const loser = ra.statusCode === 409 ? ra : rb;
+    expect(loser.json()).toMatchObject({ code: 'turn_in_flight', runId: 'run-1' });
+    // The reservation is released with the reply: a third message continues.
+    expect((await send({ text: 'Q3' })).statusCode).toBe(202);
+    expect(proposed).toHaveLength(2);
+  });
+
+  it('codex on #808 (2): DELETE while the first message is still LAUNCHING — the launch resolves to a run nobody owns: cancelled, the message is 409, no path survives', async () => {
+    opened('e057', ['claude'], 'claude');
+    let release: () => void = () => undefined;
+    holdLaunch = { promise: new Promise<void>((r) => { release = r; }), release: () => release() };
+    const first = send({ text: 'Q1' });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(launched).toHaveLength(1);
+    expect((await app.inject({ method: 'DELETE', url: '/api/v1/chats/e057' })).statusCode).toBe(200);
+    expect(cancelled, 'nothing to cancel yet — the run id is not known').toEqual([]);
+    // The id is reopened meanwhile (a newer chat must not inherit the orphan run).
+    opened('e057', ['claude'], 'claude');
+    holdLaunch.release();
+    const res = await first;
+    expect(res.statusCode).toBe(409);
+    expect((res.json() as { error: string }).error).toMatch(/closed while its path was launching/);
+    expect(cancelled, 'the orphan run was cancelled').toEqual(['run-1']);
+    expect(askPaths.view('e057'), 'the newcomer has no path').toBeUndefined();
+    expect(turns.inFlight('e057')).toBeNull();
+  });
+
+  it('codex on #808 (5+7): DELETE closes through the server\'s fold (the synthetic chatClosed frame); GET /chats lists this daemon\'s paths beside the engine pool', async () => {
+    opened('e057', ['claude'], 'claude');
+    await send({ text: 'Q1' });
+    const list = await app.inject({ method: 'GET', url: '/api/v1/chats' });
+    expect(list.statusCode).toBe(200);
+    expect((list.json() as { chats: { chatId: string; seats: string[] }[] }).chats).toEqual([
+      { chatId: 'e057', seats: ['claude'], idleSecs: null },
+      { chatId: 'pool-only', seats: ['claude'], idleSecs: 3 },
+    ]);
+    expect((await app.inject({ method: 'DELETE', url: '/api/v1/chats/e057' })).statusCode).toBe(200);
+    expect(closeChat).toHaveBeenCalledTimes(1);
+    expect(closeChat.mock.calls[0]![0]).toMatchObject({ type: 'chatClosed', chat: 'e057', reason: 'closed' });
+    expect((await app.inject({ method: 'GET', url: '/api/v1/chats' })).json()).toEqual({ chats: [{ chatId: 'pool-only', seats: ['claude'], idleSecs: 3 }] });
   });
 
   it('F-E2E-041: two CONCURRENT first messages → exactly one launch; the loser is 409 turn_in_flight; a delta during the launch is already stamped with the winner\'s turn', async () => {
