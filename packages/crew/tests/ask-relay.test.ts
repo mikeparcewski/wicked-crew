@@ -376,6 +376,52 @@ describe('AskRelay — the reply', () => {
     expect(replies[0]).toMatchObject({ ok: true, text: 'The answer.\nSecond line.' });
   });
 
+  it('codex on #810 r6 (1): a fresh read that FAILS at the fold never answers from the stale cache — the reply waits and the retry\'s row answers it', async () => {
+    const units: RelayUnit[] = [{ id: 'run-1:answer-1', ord: 1, status: 'distributed', assigned_cli: 'claude', last_attempt: 1 }];
+    let reads = 0;
+    let failNext = false;
+    const paths = new AskPathIndex();
+    const turns = new ChatTurnIndex();
+    paths.open('c1', ['claude', 'codex'], 'claude');
+    turns.begin('c1', ['claude'], 'Q1');
+    paths.started('c1', 1, 'run-1', 'answer-1');
+    const emitted: Array<CoreEvent & Record<string, unknown>> = [];
+    const relay = new AskRelay({
+      paths,
+      turns,
+      units: async () => { reads += 1; if (failNext) { failNext = false; throw new Error('run view unavailable'); } return units.map((u) => ({ ...u })); },
+      workOutput: async () => 'Retry text.',
+      fold: (f) => emitted.push(f as CoreEvent & Record<string, unknown>),
+      rowGraceMs: 60,
+    });
+    await relay.onCoreEvent({ type: 'unitOutputDelta', session: 'run-1', ord: 1, attempt: 1, text: 'first\n' } as CoreEvent); // caches attempt 1
+    relay.onTeamRow(row('wicked.team.step.completed', { run_id: 'run-1', step_id: 'answer-1', status: 'timed_out', tree: null, output_bytes: 0, output_ref: 'unit:run-1:1:1' }));
+    units[0] = { id: 'run-1:answer-1', ord: 1, status: 'done', assigned_cli: 'codex', last_attempt: 2 }; // the retry; its frames missed
+    failNext = true; // the fresh read at the fold fails once
+    await relay.onCoreEvent({ type: 'unitDone', session: 'run-1', ord: 1 } as CoreEvent);
+    expect(emitted.filter((f) => f.type === 'chatReply'), 'no answer from an uncertified cache').toEqual([]);
+    relay.onTeamRow(row('wicked.team.step.completed', { run_id: 'run-1', step_id: 'answer-1', status: 'ok', tree: null, output_bytes: 10, output_ref: 'unit:run-1:1:2' }));
+    await new Promise((r) => setTimeout(r, 10));
+    const replies = emitted.filter((f) => f.type === 'chatReply');
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toMatchObject({ ok: true, cliKey: 'codex', text: 'Retry text.' });
+    expect(reads).toBeGreaterThanOrEqual(3);
+  });
+
+  it('codex on #810 r6 (2): a late OLD row after the fold does not bypass the wait — the fresh read moves the boundary and the reply waits for the current row (or the grace)', async () => {
+    const units: RelayUnit[] = [{ id: 'run-1:answer-1', ord: 1, status: 'distributed', assigned_cli: 'claude', last_attempt: 1 }];
+    const h = harness({ pa: 'claude', units });
+    await h.relay.onCoreEvent({ type: 'unitOutputDelta', session: 'run-1', ord: 1, attempt: 1, text: 'first\n' } as CoreEvent);
+    h.units[0] = { id: 'run-1:answer-1', ord: 1, status: 'done', assigned_cli: 'codex', last_attempt: 2 };
+    await h.relay.onCoreEvent({ type: 'unitDone', session: 'run-1', ord: 1 } as CoreEvent); // no row yet → waits (the fresh read moved the boundary to 2)
+    h.relay.onTeamRow(row('wicked.team.step.completed', { run_id: 'run-1', step_id: 'answer-1', status: 'timed_out', tree: null, output_bytes: 0, output_ref: 'unit:run-1:1:1' })); // the late OLD row
+    await new Promise((r) => setTimeout(r, 10));
+    expect(h.emitted.filter((f) => f.type === 'chatReply'), 'the old row answers nothing').toEqual([]);
+    h.relay.onTeamRow(row('wicked.team.step.completed', { run_id: 'run-1', step_id: 'answer-1', status: 'ok', tree: null, output_bytes: 10, output_ref: 'unit:run-1:1:2' }));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(h.emitted.filter((f) => f.type === 'chatReply')).toEqual([expect.objectContaining({ ok: true, cliKey: 'codex' })]);
+  });
+
   it('codex on #810 r1 (8): two unitDone deliveries folded WITHOUT awaiting each other emit one reply', async () => {
     const h = harness({ pa: 'codex' });
     h.relay.onTeamRow(completed());

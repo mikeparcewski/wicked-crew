@@ -249,7 +249,7 @@ export class AskRelay {
     }
     const unit = await this.unit(runId, ord);
     if (this.deps.paths.chatOf(runId) !== chatId) return; // ended meanwhile (r1, 4)
-    if (unit === null || answerStepOf(runId, unit.id) === null) return; // not the PA's answer: no chat frame
+    if (unit === null || unit === undefined || answerStepOf(runId, unit.id) === null) return; // not the PA's answer: no chat frame
     // Superseded during the await: neither streamed nor allowed to name the PA (r3, 2).
     if (this.superseded(runId, ord, attempt)) return;
     const pa = this.paOf(runId, chatId, unit);
@@ -389,7 +389,9 @@ export class AskRelay {
     return path?.pa ?? 'pa';
   }
 
-  private async unit(runId: string, ord: number, fresh = false): Promise<RelayUnit | null> {
+  /** `undefined`: a FRESH read failed — the durable record could not be certified (the caller
+   *  must not answer from the cache; r6, 1). `null`: no such unit. */
+  private async unit(runId: string, ord: number, fresh = false): Promise<RelayUnit | null | undefined> {
     const byOrd = this.nestedOne(this.units, runId);
     const cached = byOrd.get(ord);
     // A unit with no seat yet is re-read (the seat is assigned at dispatch). A FRESH read (the
@@ -402,7 +404,7 @@ export class AskRelay {
       found = (await this.deps.units(runId)).find((u) => u.ord === ord) ?? null;
     } catch (err) {
       this.log(`[ask-relay] cannot read the units of ${runId}: ${err instanceof Error ? err.message : String(err)}`);
-      return cached ?? null;
+      return fresh ? undefined : (cached ?? null);
     }
     // Not found: not cached (the unit may be planned later — a continuation adds answer-N). A run
     // forgotten during the read (End) stays forgotten (r2, 4); a read that started under an attempt
@@ -441,9 +443,11 @@ export class AskRelay {
       return;
     }
     // The fresh read may have moved the boundary (a retry whose frames were missed): the row of
-    // THAT attempt decides, or none yet — then this fold waits for it like any other (r5, 1).
-    const row = this.rowFor(runId, ord);
-    if (row === undefined && via === 'fold') {
+    // THAT attempt decides, or none yet — then the reply waits for it like any other (r5, 1; the
+    // guard holds for every path but the grace, r6, 2). A read that could not certify the record
+    // (`undefined`) waits too: never an answer from an uncertified cache (r6, 1).
+    const row = unit === undefined ? undefined : this.rowFor(runId, ord);
+    if ((row === undefined || unit === undefined) && via !== 'grace') {
       this.replied.delete(key);
       if (!this.waiting.has(key)) {
         const timer = setTimeout(() => {
@@ -455,6 +459,20 @@ export class AskRelay {
         timer.unref?.();
         this.waiting.set(key, { timer });
       }
+      return;
+    }
+    if (unit === undefined) {
+      // The grace expired and the record still cannot be read: say so once rather than answer
+      // from a cache the fresh read could not certify.
+      this.deps.fold({
+        type: 'chatReply',
+        chat: chatId,
+        cliKey: this.deps.paths.get(chatId)?.pa ?? 'pa',
+        text: `the answer's record could not be read (the run view did not answer); see run ${runId}, unit ${ord}`,
+        ok: false,
+        run_id: runId,
+        ord,
+      } as CoreEvent);
       return;
     }
     const pa = this.paOf(runId, chatId, unit);
@@ -505,7 +523,7 @@ export class AskRelay {
       if (this.replied.has(key)) continue;
       const unit = await this.unit(runId, o);
       if (this.deps.paths.chatOf(runId) !== chatId) return;
-      if (unit === null || answerStepOf(runId, unit.id) === null) continue;
+      if (unit === null || unit === undefined || answerStepOf(runId, unit.id) === null) continue;
       if (this.replied.has(key)) continue;
       this.replied.add(key);
       this.stopWaiting(key);
