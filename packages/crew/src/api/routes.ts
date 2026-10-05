@@ -1040,7 +1040,7 @@ function singleSeatDisclosure(
     refusalsKnown: known,
     message:
       // "warm" on a turn: the claim is about the roster as it stands, not about how it got there.
-      `This chat has one ${at === 'open' ? 'seat' : 'warm seat'} (${warmed}); it cannot disagree with itself. ` +
+      `This chat has one eligible seat (${warmed}); it cannot disagree with itself. ` +
       refusalClause +
       'The single-seat root cause is tracked as wicked-core#563; this chat makes it visible.',
   };
@@ -2905,6 +2905,9 @@ export function registerRoutes(
       // and `system` (studio#323 R4: the platform itself, no repository) read none, so they take the
       // unscoped admission and open on an engine that predates chat scope.
       const scoped = scope.kind !== 'none' && scope.kind !== 'system';
+      // ASK-C2: a single-repo ask launches BOUND (the run holds the repository read-only), so every
+      // seat in standing is eligible; a wider repository scope keeps the structural rule.
+      const admissionKind = scope.kind === 'repos' && scope.repos.length === 1 ? 'path-bound' : 'path';
       const refused: ChatSeatRefusal[] = [];
       // The standing roster, read ONCE: the default admission below and the engine-drop
       // attribution after `chatOpen` both consult it (F-A45-011).
@@ -2930,7 +2933,7 @@ export function registerRoutes(
           seat as { key: string; enabled_for_council?: boolean; acp?: { acp_input_governance?: boolean; os_sandbox?: boolean } | null },
           seat.auth ?? 'unknown',
           scoped,
-          'path',
+          admissionKind,
         );
         if (admission.ok) clis.push(key);
         else refused.push({ cliKey: key, reason: admission.reason, source: admission.source });
@@ -2939,12 +2942,11 @@ export function registerRoutes(
         if (chatScopes.release(chatId, token)) removeChatScratch(scope.cwd, chatScopes.base);
         return reply.code(409).send({
           error:
-            (scoped
-              ? 'no seat in the roster can be held to a scoped chat (an ACP adapter admitted to input ' +
-                'governance, or `os_sandbox = true` on its [cli.acp] record) and take a turn; open the ' +
-                'chat unscoped, sign a seat in, or name seats with `clis`'
-              : 'no seat in the roster can take a turn (every seat is signed out); sign a seat in from ' +
-                'the System page, or name seats with `clis`') + ' — see refused',
+            (scoped && admissionKind === 'path'
+              ? 'no seat in standing can be held to an ask that reads several repositories (or a project) ' +
+                'the run cannot bind; scope the ask to one repository, sign a seat in, or open it unscoped'
+              : 'no seat in the roster can take a turn (every seat is signed out or disabled); sign a seat ' +
+                'in from the System page, or name seats with `clis`') + ' — see refused',
           refused,
         });
       }
@@ -3322,7 +3324,9 @@ export function registerRoutes(
       try {
         // ASK-C1: a re-seat re-admits the named seats that pass admission NOW (a sign-in fixed)
         // into the path's eligible roster; nothing is warmed and the engine is not called.
-        const scopedChat = (chatScopes.get(id)?.kind ?? 'none') !== 'none' && chatScopes.get(id)?.kind !== 'system';
+        const scopeNow = chatScopes.get(id);
+        const scopedChat = (scopeNow?.kind ?? 'none') !== 'none' && scopeNow?.kind !== 'system';
+        const reseatKind = scopeNow?.kind === 'repos' && scopeNow.repos.length === 1 ? 'path-bound' : 'path';
         const standingNow = rosterWithStanding();
         const seats = clis.map((cliKey) => {
           const seat = standingNow.find((s) => String(s.key) === cliKey);
@@ -3331,7 +3335,7 @@ export function registerRoutes(
             seat as { key: string; enabled_for_council?: boolean; acp?: { acp_input_governance?: boolean; os_sandbox?: boolean } | null },
             seat.auth ?? 'unknown',
             scopedChat,
-            'path',
+            reseatKind,
           );
           return admission.ok ? { cliKey, ok: true } : { cliKey, ok: false, error: admission.reason };
         });

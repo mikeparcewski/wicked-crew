@@ -472,16 +472,19 @@ export class AskRelay {
     }
     if (unit === undefined) {
       // The grace expired and the record still cannot be read: say so once rather than answer
-      // from a cache the fresh read could not certify.
-      this.deps.fold({
-        type: 'chatReply',
-        chat: chatId,
-        cliKey: this.deps.paths.get(chatId)?.pa ?? 'pa',
-        text: `the answer's record could not be read (the run view did not answer); see run ${runId}, unit ${ord}`,
-        ok: false,
-        run_id: runId,
-        ord,
-      } as CoreEvent);
+      // from a cache the fresh read could not certify — for every seat the turn waits on, so the
+      // turn ends (a reply ends a turn only for a seat it names).
+      for (const seat of this.voicesFor(chatId)) {
+        this.deps.fold({
+          type: 'chatReply',
+          chat: chatId,
+          cliKey: seat,
+          text: `the answer's record could not be read (the run view did not answer); see run ${runId}, unit ${ord}`,
+          ok: false,
+          run_id: runId,
+          ord,
+        } as CoreEvent);
+      }
       return;
     }
     const pa = this.paOf(runId, chatId, unit);
@@ -512,6 +515,15 @@ export class AskRelay {
     } as CoreEvent);
   }
 
+  /** The seats a failure must be said for: the PA when the path knows it, else every seat the
+   *  chat's live turns still wait on (the reserved audience of a random pick), else `pa`. */
+  private voicesFor(chatId: string): string[] {
+    const pa = this.deps.paths.get(chatId)?.pa ?? null;
+    if (pa !== null) return [pa];
+    const pending = [...new Set(this.deps.turns.turnsOf(chatId).flatMap((t) => t.pending))];
+    return pending.length > 0 ? pending : ['pa'];
+  }
+
   /** The run view, retried a few times — a terminal fact must not be lost to one failed read. */
   private async unitsRetrying(runId: string): Promise<RelayUnit[] | undefined> {
     for (let i = 0; i < 3; i += 1) {
@@ -529,29 +541,36 @@ export class AskRelay {
    *  The run view is read with a bounded retry; if it still cannot be read, the turn is ended
    *  without the unit's facts rather than left pending (r8, 2). */
   private async terminal(runId: string, chatId: string, ord: number | undefined, why: string): Promise<void> {
+    // The run is over: no armed waiter may answer from the record meanwhile (its grace could fire
+    // during the retry below).
+    const runPrefix = `${runId}:`;
+    for (const key of [...this.waiting.keys()]) if (key.startsWith(runPrefix)) this.stopWaiting(key);
     const all = await this.unitsRetrying(runId);
     if (this.deps.paths.chatOf(runId) !== chatId) return;
     if (all === undefined) {
-      // Nothing certified about the units: the chat's pending turn still ends — one failed reply
-      // from the PA as the path knows it, for the ord named (or none).
-      const key = ord !== undefined ? `${runId}:${ord}` : undefined;
-      if (key !== undefined) {
-        if (this.replied.has(key)) return;
-        this.replied.add(key);
-        this.stopWaiting(key);
+      // Nothing certified about the units: the chat's pending turn still ends — once per run
+      // (`<run>:terminal`), every armed waiter of the run stopped and its key reserved so no later
+      // row or grace answers twice, and one failed reply per seat the turn is still waiting on
+      // (the PA when known; else the reserved audience — a reply only ends a turn for a seat it
+      // names) (codex on #810 r9, 2+3).
+      const terminalKey = `${runId}:terminal`;
+      if (this.replied.has(terminalKey)) return;
+      this.replied.add(terminalKey);
+      if (ord !== undefined) this.replied.add(`${runId}:${ord}`);
+      for (const seat of this.voicesFor(chatId)) {
+        this.deps.fold({
+          type: 'chatReply',
+          chat: chatId,
+          cliKey: seat,
+          text: `${seat} did not answer: ${why} (the run view could not be read)`,
+          ok: false,
+          run_id: runId,
+          ...(ord !== undefined ? { ord } : {}),
+        } as CoreEvent);
       }
-      const pa = this.deps.paths.get(chatId)?.pa ?? 'pa';
-      this.deps.fold({
-        type: 'chatReply',
-        chat: chatId,
-        cliKey: pa,
-        text: `${pa} did not answer: ${why} (the run view could not be read)`,
-        ok: false,
-        run_id: runId,
-        ...(ord !== undefined ? { ord } : {}),
-      } as CoreEvent);
       return;
     }
+    // The run view answered: every pending answer unit ends.
     const targets = all
       .filter((u) => answerStepOf(runId, u.id) !== null && (ord === undefined || u.ord === ord) && !this.replied.has(`${runId}:${u.ord}`))
       .map((u) => u.ord);

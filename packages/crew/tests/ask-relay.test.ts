@@ -497,12 +497,24 @@ describe('AskRelay — the reply', () => {
     });
     await relay.onCoreEvent({ type: 'sessionFailed', session: 'run-1', ord: 1 } as CoreEvent); // one failed read, then the retry succeeds
     expect(emitted.filter((f) => f.type === 'chatReply')).toEqual([expect.objectContaining({ ok: false, cliKey: 'codex', ord: 1, text: expect.stringMatching(/the run failed at this step/) })]);
-    // The read never recovers: the turn still ends.
+    // The read never recovers: the turn still ends — once per run, for the seats the turn waits on
+    // (the PA unknown: the reserved audience), and later terminals / rows answer nothing more.
     fails = 99;
-    const relay2 = new AskRelay({ paths, turns, units: async () => { throw new Error('down'); }, workOutput: async () => null, fold: (f) => emitted.push(f as CoreEvent & Record<string, unknown>) });
-    await relay2.onCoreEvent({ type: 'runCancelled', session: 'run-1', tool_children_killed: 0 } as CoreEvent);
-    const last = emitted.filter((f) => f.type === 'chatReply').at(-1)!;
-    expect(last).toMatchObject({ ok: false, cliKey: 'codex', run_id: 'run-1', text: expect.stringMatching(/the run was cancelled \(the run view could not be read\)/) });
+    const paths2 = new AskPathIndex();
+    const turns2 = new ChatTurnIndex();
+    paths2.open('c2', ['claude', 'codex']); // random: pa null
+    const t = turns2.begin('c2', ['claude', 'codex'], 'Q1')!;
+    paths2.started('c2', 1, 'run-2', 'answer-1');
+    const out: Array<CoreEvent & Record<string, unknown>> = [];
+    const relay2 = new AskRelay({ paths: paths2, turns: turns2, units: async () => { throw new Error('down'); }, workOutput: async () => null, fold: (f) => { const st = turns2.decorate(f); turns2.observe(f); out.push(st as CoreEvent & Record<string, unknown>); }, rowGraceMs: 60 });
+    await relay2.onCoreEvent({ type: 'unitDone', session: 'run-2', ord: 1 } as CoreEvent); // arms a waiter (the read failed)
+    await relay2.onCoreEvent({ type: 'runCancelled', session: 'run-2', tool_children_killed: 0 } as CoreEvent);
+    const fails2 = out.filter((f) => f.type === 'chatReply');
+    expect(fails2.map((f) => [f['cliKey'], f['ok'], f['turn_id']])).toEqual([['claude', false, t.turnId], ['codex', false, t.turnId]]);
+    expect(turns2.turnsOf('c2'), 'the turn ended for every seat it waited on').toEqual([]);
+    await relay2.onCoreEvent({ type: 'sessionFailed', session: 'run-2', ord: 1 } as CoreEvent);
+    await new Promise((r) => setTimeout(r, 120)); // the armed waiter's grace would have fired
+    expect(out.filter((f) => f.type === 'chatReply'), 'said once').toHaveLength(2);
   });
 
   it('codex on #810 r1 (8): two unitDone deliveries folded WITHOUT awaiting each other emit one reply', async () => {

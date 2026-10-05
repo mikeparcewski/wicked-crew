@@ -122,9 +122,13 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
         signed_in: signed,
         ...(versionPin !== undefined ? { version_pin: versionPin } : {}),
         ...standing,
+        // ASK-C2: the admission an ASK applies (every chat is a path after ASK-C1): `unscoped` =
+        // standing only; `scoped` = the wider-scope rule (several repos / a project); `scoped_bound` =
+        // a single-repo ask (bound run — standing only). The picker offers from these.
         chat_admission: {
-          unscoped: chatSeatAdmission(standingSeat, standing.auth, false),
-          scoped: chatSeatAdmission(standingSeat, standing.auth, true),
+          unscoped: chatSeatAdmission(standingSeat, standing.auth, false, 'path'),
+          scoped: chatSeatAdmission(standingSeat, standing.auth, true, 'path'),
+          scoped_bound: chatSeatAdmission(standingSeat, standing.auth, true, 'path-bound'),
         },
       };
     });

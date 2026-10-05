@@ -191,7 +191,7 @@ describe('POST /chats — scope lifecycle over a fake engine', () => {
     expect((await open({ chatId: 'live', clis: ['claude'] })).statusCode).toBe(201);
   });
 
-  it('the DEFAULT seats of an ask are every seat in STANDING — an ask is a team run, so the pool\'s ACP pre-filter does not apply (W5 re-cut for ASK-C2); a disabled seat is named', async () => {
+  it('the DEFAULT seats of a SINGLE-REPO ask are every seat in STANDING — the run is bound, so the pool\'s ACP pre-filter does not apply (W5 re-cut for ASK-C2); a disabled seat is named', async () => {
     const spy = vi.spyOn(CoreAdapter, 'roster').mockReturnValue([
       { key: 'claude', acp: { acp_input_governance: true, os_sandbox: false } },
       { key: 'pi', acp: { acp_input_governance: false, os_sandbox: false } },
@@ -451,7 +451,7 @@ describe('POST /chats — named scope kinds (studio#323 R4)', () => {
     expect((res.json() as { scope: { kind: string } }).scope.kind).toBe('system');
   });
 
-  it("scopeKind 'everything' reads every registered repo; every seat in standing is eligible (ASK-C2)", async () => {
+  it("scopeKind 'everything' reads every registered repo; the run cannot BIND several repositories, so a seat that cannot hold itself read-only is refused (ASK-C2; codex on #810 r9)", async () => {
     const spy = vi.spyOn(CoreAdapter, 'roster').mockReturnValue([
       { key: 'claude', acp: { acp_input_governance: true, os_sandbox: false } },
       { key: 'pi', acp: { acp_input_governance: false, os_sandbox: false } },
@@ -462,8 +462,8 @@ describe('POST /chats — named scope kinds (studio#323 R4)', () => {
       const body = res.json() as { scope: { kind: string; repos: { rootPath: string }[]; cwd: string }; refused: { cliKey: string }[] };
       expect(body.scope.kind).toBe('everything');
       expect(body.scope.repos.map((r) => r.rootPath)).toEqual(['/srv/repos/alpha']);
-      expect(body.refused, 'an ask admits every seat in standing (ASK-C2)').toEqual([]);
-      expect((res.json() as { seats: { cliKey: string }[] }).seats.map((x) => x.cliKey)).toEqual(['claude', 'pi']);
+      expect(body.refused.map((r) => r.cliKey), 'pi: no permissions, no sandbox — unbound scope').toEqual(['pi']);
+      expect((res.json() as { seats: { cliKey: string }[] }).seats.map((x) => x.cliKey)).toEqual(['claude']);
       expect(chatScopes.engineOf('all')).toEqual({ cwd: body.scope.cwd, codeGraphDb: null, readRoots: ['/srv/repos/alpha'] });
       expect(chatOpen).not.toHaveBeenCalled();
     } finally {
