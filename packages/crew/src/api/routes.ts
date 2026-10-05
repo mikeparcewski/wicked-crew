@@ -801,7 +801,7 @@ export interface RuntimeDeps {
    *  the transcript (crew#619) is released first, so a chat that reuses the id does not inherit
    *  the ended conversation (codex on #808 r3, 1). Absent (tests): the route closes the scope
    *  slot and broadcasts. */
-  closeChat?: (frame: CoreEvent, runId?: string) => void | Promise<void>;
+  closeChat?: (frame: CoreEvent, runId: string | undefined, ticket: number) => void | Promise<void>;
   /** DES-L5 (D-13): the chat transcript at rest — `GET /chats/:id.messages`. Absent ⇒ nothing is
    *  persisted and the field is omitted (a directly-driven route in tests). */
   chatTranscripts?: ChatTranscriptStore;
@@ -2836,9 +2836,11 @@ export function registerRoutes(
         const state = chatScopes.stateOf(chatId);
         return reply.code(409).send({
           error:
-            state === 'closing'
-              ? `chat ${chatId} is closing; wait for its chatClosed (a few seconds at most) before reusing the id, or omit chatId to mint a fresh one`
-              : `chat ${chatId} is already open on this daemon; DELETE /chats/${chatId} first, or omit chatId to mint a fresh one`,
+            state === 'held'
+              ? `chat ${chatId} is closing (its DELETE is still settling); retry in a moment, or omit chatId to mint a fresh one`
+              : state === 'closing'
+                ? `chat ${chatId} is closing; wait for its chatClosed (a few seconds at most) before reusing the id, or omit chatId to mint a fresh one`
+                : `chat ${chatId} is already open on this daemon; DELETE /chats/${chatId} first, or omit chatId to mint a fresh one`,
         });
       }
       // DC-S7: the in-force rules the statement lists; recorded as "told" only once the open succeeds.
@@ -3405,9 +3407,11 @@ export function registerRoutes(
   app.delete(`${V}/chats/:id`, async (req, reply) => {
     const { id } = req.params as { id: string };
     // The scratch root goes with the chat at once, whether or not the engine still knew it
-    // (crew#502); the id stays parked until the engine's `chatClosed` is observed, so a delayed
-    // close can never land on a chat that reused it (Copilot, #518).
-    chatScopes.beginClose(id);
+    // (crew#502). ASK-C1: the daemon owns the close, so the id is HELD — no grace timer — until
+    // this close settles below; a reopen meanwhile is refused and a second DELETE joins this one
+    // (nothing of the closed chat can land on a reuse — codex on #808 r5).
+    const ticket = chatScopes.holdClose(id);
+    if (ticket === null) return { ok: true };
     chatTurns.closed(id);
     // ASK-C1: End cancels the path (`path.ended{status:"cancelled"}`); the engine holds no chat
     // row for an ask, so the daemon closes the id itself and the transcript follows the chat
@@ -3428,15 +3432,18 @@ export function registerRoutes(
       // turns under the chat's own project before the id is free (the slot is parked `closing`
       // meanwhile, so a reopen waits), and only then is nothing of the closed chat pending
       // (codex on #808 r4, 1).
-      if (runtime.closeChat !== undefined) await runtime.closeChat(frame, path?.runId);
+      if (runtime.closeChat !== undefined) await runtime.closeChat(frame, path?.runId, ticket);
       else {
-        chatScopes.closed(id);
+        chatScopes.closeHeld(id, ticket);
         runtime.broadcast?.(frame);
       }
       if (path?.runId !== undefined) await adapter.cancelRun(path.runId).catch(() => undefined);
       return { ok: true };
     } catch (err) {
       return reply.code(400).send({ error: message(err) });
+    } finally {
+      // Never left held: a fold that threw frees the id here (its own close settles it otherwise).
+      chatScopes.closeHeld(id, ticket);
     }
   });
 

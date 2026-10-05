@@ -378,3 +378,35 @@ describe('ChatDecisionRecorder', () => {
     expect(h.ledger.list()).toHaveLength(0);
   });
 });
+
+describe('codex on #808 r5 (3): closed() drains every recording of the chat, including one a sweep started', () => {
+  it('a stale turn finalized by another chat\'s sweep is still in flight when the chat closes — closed() resolves only after it settled', async () => {
+    const h = harness({ staleAfterMs: 1_000 });
+    let releaseRecord: () => void = () => undefined;
+    const parked = new Promise<void>((r) => { releaseRecord = r; });
+    const recorder = new ChatDecisionRecorder({
+      service: h.service,
+      transcripts: h.transcripts,
+      broadcast: () => undefined,
+      projectOf: () => 'P1',
+      now: () => h.service.deps.now?.() ?? Date.now(),
+      staleAfterMs: 1_000,
+      onTurnRecorded: async (chat) => {
+        if (chat === 'x') await parked;
+      },
+    });
+    const human = { kind: 'human', id: 'op' } as never;
+    recorder.noteSend('x', 't1', human, 'decide this', ['claude']);
+    h.tick(2_000); // x's turn is stale
+    recorder.noteSend('other', 't9', human, 'hello', ['claude']); // the sweep finalizes x:t1 — its recording parks
+    await new Promise((r) => setTimeout(r, 10));
+    let closedResolved = false;
+    const closing = recorder.closed('x').then(() => { closedResolved = true; });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(closedResolved, 'the close waits for the recording the sweep started').toBe(false);
+    releaseRecord();
+    await closing;
+    expect(closedResolved).toBe(true);
+    await recorder.idle();
+  });
+});

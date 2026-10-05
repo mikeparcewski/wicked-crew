@@ -26,6 +26,8 @@ let signedIn: (seatKey: string) => boolean | null = () => null;
 let entityCount: (dbPath: string) => Promise<number> = async () => 1;
 /** Every frame the route broadcast to /ws (the thread's copy of a refusal). */
 let broadcast: unknown[];
+/** When set, the close fold parks until released — a DELETE that is still settling (codex on #808 r5). */
+let holdFold: { promise: Promise<void>; release: () => void } | null = null;
 /** chatId → the seats that actually warmed, filled by the adapter's `chatOpen` wrapper. */
 let warmByChat: Map<string, string[]>;
 /** What `registerRoutes` handed back (DC-S7: the consideration service's per-chat state). */
@@ -94,6 +96,9 @@ function repos() {
 
 
 beforeEach(async () => {
+  holdFold = null;
+  holdAttach = null;
+  holdReposOnce = null;
   base = mkdtempSync(join(tmpdir(), 'chat-routes-scope-'));
   graphFile = join(base, 'alpha-graph.db');
   writeFileSync(graphFile, '');
@@ -113,6 +118,14 @@ beforeEach(async () => {
     broadcast: (frame) => broadcast.push(frame),
     // crew#642: never shell wicked-estate against mkdtemp fixtures.
     entityCount: (dbPath) => entityCount(dbPath),
+    // The server's fold, as a test double: settles the held close only when the fixture lets it.
+    closeChat: async (frame, _runId, ticket) => {
+      if (holdFold !== null) await holdFold.promise;
+      const chat = String(frame.chat);
+      if (!chatScopes.isHeld(chat, ticket)) return;
+      chatScopes.closeHeld(chat, ticket);
+      broadcast.push(frame);
+    },
   });
   await app.ready();
 });
@@ -342,6 +355,24 @@ describe('ASK-C1 — an ask starts a path: the open records eligibility and a ch
       chats: [{ chatId: 'live', seats: ['claude'], idleSecs: null, cwd, codeGraphDb: graphFile, readRoots: ['/srv/repos/alpha'] }],
     });
     holdAttach = null;
+  });
+
+  it('codex on #808 r5 (2): while a DELETE is still settling, the id is HELD — a reopen is refused (409 closing), no grace timer frees it; once the fold settles the id is free', async () => {
+    expect((await open({ chatId: 'live', clis: ['claude'], repoRefs: ['alpha'] })).statusCode).toBe(201);
+    let releaseFold: () => void = () => undefined;
+    holdFold = { promise: new Promise<void>((r) => { releaseFold = r; }), release: () => releaseFold() };
+    const del = app.inject({ method: 'DELETE', url: '/api/v1/chats/live' });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(existsSync(join(base, 'chats', 'live')), 'the root goes at once').toBe(false);
+    const tooSoon = await open({ chatId: 'live', clis: ['claude'], repoRefs: ['alpha'] });
+    expect(tooSoon.statusCode).toBe(409);
+    expect((tooSoon.json() as { error: string }).error).toMatch(/closing/);
+    expect(chatScopes.stateOf('live')).toBe('held');
+    holdFold.release();
+    holdFold = null;
+    expect((await del).statusCode).toBe(200);
+    expect(chatScopes.has('live')).toBe(false);
+    expect((await open({ chatId: 'live', clis: ['claude'], repoRefs: ['alpha'] })).statusCode).toBe(201);
   });
 
   it('codex on #808 r4 (2): a stale open\'s project attach neither publishes nor erases the reopened chat\'s project mapping', async () => {

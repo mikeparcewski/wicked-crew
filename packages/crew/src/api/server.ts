@@ -1879,7 +1879,7 @@ export async function createServer(
       broadcast: (frame) => broadcast(frame),
       // ASK-C1: DELETE /chats/:id on an ask path closes through the same fold an engine
       // `chatClosed` takes (scope slot, decisions, considerations, retention-aware transcript).
-      closeChat: async (frame, runId) => {
+      closeChat: async (frame, runId, ticket) => {
         // End cancels the path's run: its retention hold goes first, so the fold drops the
         // transcript with the chat (a reused id starts empty — codex on #808 r3, 1).
         if (runId !== undefined && typeof frame.chat === 'string') {
@@ -1894,6 +1894,10 @@ export async function createServer(
         // could otherwise file the ended chat's words under a replacement's project and append
         // them to its transcript (codex on #808 r4, 1). The fold's own call then finds nothing.
         if (typeof frame.chat === 'string') await chatDecisionRecorder?.closed(frame.chat);
+        // The id is held for this close alone (no timer, a second DELETE joined); the fold frees
+        // it. Not held any more = settled elsewhere: nothing to fold (codex on #808 r5, 1+2).
+        if (typeof frame.chat !== 'string' || !chatScopes.isHeld(frame.chat, ticket)) return;
+        chatScopes.closeHeld(frame.chat, ticket);
         onEngineEvent(frame);
       },
       // crew#619: retain a chat's transcript for the lifetime of its promoted run.

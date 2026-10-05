@@ -240,6 +240,8 @@ export class ChatDecisionRecorder {
   private readonly now: () => number;
   private readonly staleAfterMs: number;
   private readonly inFlight = new Set<Promise<unknown>>();
+  /** Per chat: the recordings in flight (a sweep's or a reply's), so a close can drain them. */
+  private readonly inFlightByChat = new Map<string, Set<Promise<unknown>>>();
 
   constructor(private readonly deps: ChatRecorderDeps) {
     this.now = deps.now ?? Date.now;
@@ -307,6 +309,14 @@ export class ChatDecisionRecorder {
     for (const turn of [...this.turns.values()]) {
       if (turn.chat === chat) await this.finalize(turn);
     }
+    // A recording a sweep (or a reply) started earlier is still this chat's: it resolves the
+    // project and appends to the transcript when it settles, so the close waits for it — a reuse
+    // of the id after this returns cannot receive it (codex on #808 r5, 3).
+    for (;;) {
+      const pending = this.inFlightByChat.get(chat);
+      if (pending === undefined || pending.size === 0) break;
+      await Promise.all([...pending]);
+    }
     this.lastTurn.delete(chat);
   }
 
@@ -341,7 +351,17 @@ export class ChatDecisionRecorder {
       this.log(`[decisions] chat ${turn.chat} turn ${turn.turnId}: ${err instanceof Error ? err.message : String(err)}`),
     );
     this.track(work);
-    await work;
+    let byChat = this.inFlightByChat.get(turn.chat);
+    if (byChat === undefined) {
+      byChat = new Set();
+      this.inFlightByChat.set(turn.chat, byChat);
+    }
+    const mine: Promise<unknown> = work.finally(() => {
+      byChat.delete(mine);
+      if (byChat.size === 0) this.inFlightByChat.delete(turn.chat);
+    });
+    byChat.add(mine);
+    await mine;
   }
 
   private async record(turn: TurnState): Promise<void> {

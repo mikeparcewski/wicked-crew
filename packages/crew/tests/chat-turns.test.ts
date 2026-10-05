@@ -409,6 +409,22 @@ describe('POST /chats/:id/messages — an ask starts a PATH; refuse mid-turn; co
     expect((await first).statusCode).toBe(202);
   });
 
+  it('codex on #808 r5 (1): a second DELETE while the first is still settling JOINS it — one fold, both 200, the id stays held until the fold frees it', async () => {
+    opened('e057', ['claude'], 'claude');
+    await send({ text: 'Q1' });
+    const fold = gate();
+    closeChat.mockImplementationOnce(() => fold.promise);
+    const d1 = app.inject({ method: 'DELETE', url: '/api/v1/chats/e057' });
+    await new Promise((r) => setTimeout(r, 20));
+    const d2 = await app.inject({ method: 'DELETE', url: '/api/v1/chats/e057' });
+    expect(d2.statusCode, 'the second DELETE answers at once').toBe(200);
+    expect(closeChat, 'and runs no second fold').toHaveBeenCalledTimes(1);
+    expect(typeof closeChat.mock.calls[0]![2], 'the fold is handed the hold ticket').toBe('number');
+    fold.release();
+    expect((await d1).statusCode).toBe(200);
+    expect(cancelled).toEqual(['run-1']);
+  });
+
   it('codex on #808 r4 (1): DELETE AWAITS the server\'s close fold (the decision recorder settles under the chat\'s own project) before it answers', async () => {
     opened('e057', ['claude'], 'claude');
     await send({ text: 'Q1' });
