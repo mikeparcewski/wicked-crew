@@ -215,6 +215,10 @@ export interface ChatRecorderDeps {
   now?: () => number;
   /** A turn whose seats never all answer is closed after this (default: the turn index's stale budget). */
   staleAfterMs?: number;
+  /** How long `closed()` waits for the chat's recordings in flight before the close proceeds
+   *  (default 15 s). A recording that outlives it is FENCED: it writes nothing to the chat's
+   *  transcript or /ws (the chat's epoch moved), only the ledger under the project it captured. */
+  closeDrainMs?: number;
   /** DC-S7: every finalized turn is handed on (the Consideration + its fact), before the words are judged. */
   onTurnRecorded?: (chat: string, turnId: string) => Promise<void>;
   log?: (msg: string) => void;
@@ -242,10 +246,15 @@ export class ChatDecisionRecorder {
   private readonly inFlight = new Set<Promise<unknown>>();
   /** Per chat: the recordings in flight (a sweep's or a reply's), so a close can drain them. */
   private readonly inFlightByChat = new Map<string, Set<Promise<unknown>>>();
+  /** Per chat: bumped by `closed()` — a recording started under an older epoch writes nothing
+   *  to the transcript or /ws (the id may belong to a newer conversation by then). */
+  private readonly epochs = new Map<string, number>();
+  private readonly closeDrainMs: number;
 
   constructor(private readonly deps: ChatRecorderDeps) {
     this.now = deps.now ?? Date.now;
     this.staleAfterMs = deps.staleAfterMs ?? chatTurnStaleAfterMs();
+    this.closeDrainMs = deps.closeDrainMs ?? 15_000;
   }
 
   private static key(chat: string, turnId: string): string {
@@ -306,16 +315,26 @@ export class ChatDecisionRecorder {
 
   /** The chat is gone: whatever its open turns gathered is recorded now. */
   async closed(chat: string): Promise<void> {
+    // The chat's epoch moves first: a recording that started before (or a sweep that still holds
+    // one of its turns) can no longer write to this id's transcript or /ws (codex on #808 r6, 1).
+    this.epochs.set(chat, (this.epochs.get(chat) ?? 0) + 1);
     for (const turn of [...this.turns.values()]) {
       if (turn.chat === chat) await this.finalize(turn);
     }
-    // A recording a sweep (or a reply) started earlier is still this chat's: it resolves the
-    // project and appends to the transcript when it settles, so the close waits for it — a reuse
-    // of the id after this returns cannot receive it (codex on #808 r5, 3).
+    // A recording a sweep (or a reply) started earlier is still this chat's: the close waits for
+    // it — bounded, since the chain can await an engine read that never answers (codex on #808
+    // r6, 2); past the bound the epoch fence above keeps its late writes off a reused id.
+    // Wall clock on purpose: the injected `now` is the turn-staleness clock (tests freeze it).
+    const deadline = Date.now() + this.closeDrainMs;
     for (;;) {
       const pending = this.inFlightByChat.get(chat);
       if (pending === undefined || pending.size === 0) break;
-      await Promise.all([...pending]);
+      const left = deadline - Date.now();
+      if (left <= 0) {
+        this.log(`[decisions] chat ${chat}: ${pending.size} recording(s) still in flight after ${this.closeDrainMs} ms — closing without them (fenced)`);
+        break;
+      }
+      await Promise.race([Promise.all([...pending]), new Promise<void>((r) => setTimeout(r, Math.min(left, 250)))]);
     }
     this.lastTurn.delete(chat);
   }
@@ -346,7 +365,12 @@ export class ChatDecisionRecorder {
   }
 
   private async finalize(turn: TurnState): Promise<void> {
-    this.turns.delete(ChatDecisionRecorder.key(turn.chat, turn.turnId));
+    // Claim atomically: a sweep's snapshot may hold a turn another path (a close, a reply) has
+    // finalized meanwhile — recording it twice would land the old words on whatever the id is
+    // now (codex on #808 r6, 1).
+    const key = ChatDecisionRecorder.key(turn.chat, turn.turnId);
+    if (this.turns.get(key) !== turn) return;
+    this.turns.delete(key);
     const work = this.record(turn).catch((err: unknown) =>
       this.log(`[decisions] chat ${turn.chat} turn ${turn.turnId}: ${err instanceof Error ? err.message : String(err)}`),
     );
@@ -365,6 +389,11 @@ export class ChatDecisionRecorder {
   }
 
   private async record(turn: TurnState): Promise<void> {
+    // Captured BEFORE any await: the project this conversation was filed under and its epoch —
+    // a close (and a reuse of the id) meanwhile must not re-point either.
+    const epoch = this.epochs.get(turn.chat) ?? 0;
+    const projectId = this.deps.projectOf(turn.chat) ?? null;
+    const sameEpoch = (): boolean => (this.epochs.get(turn.chat) ?? 0) === epoch;
     // DC-S7: what the seats considered and cited this turn — whoever sent the message.
     if (this.deps.onTurnRecorded !== undefined) {
       await this.deps.onTurnRecorded(turn.chat, turn.turnId).catch((err: unknown) =>
@@ -376,7 +405,6 @@ export class ChatDecisionRecorder {
     const recorder = pickRecorder(turn.seats);
     const own = recorder !== undefined ? (turn.replies.get(recorder) ?? null) : null;
     if (own === null) this.unclassified += 1;
-    const projectId = this.deps.projectOf(turn.chat) ?? null;
     const haystack = norm(turn.text);
     const records: DecisionRecord[] = [];
     if (own !== null && recorder !== undefined) {
@@ -448,6 +476,10 @@ export class ChatDecisionRecorder {
       items,
       ...(projectId !== null ? { project_id: projectId } : {}),
     };
+    if (!sameEpoch()) {
+      this.log(`[decisions] chat ${turn.chat} turn ${turn.turnId}: recorded in the ledger after the chat closed — not written to the (possibly reused) chat`);
+      return;
+    }
     this.deps.broadcast(frame as unknown as CoreEvent);
     this.deps.transcripts.recordDecisions({ chat: turn.chat, turnId: turn.turnId, items });
   }
