@@ -36,7 +36,12 @@ function harness(opts: { pa?: string; output?: string | null; units?: RelayUnit[
       if (holdOutput !== null) await holdOutput;
       return opts.output === undefined ? 'The answer.\nHELP: who owns billing?\nSecond line.' : opts.output;
     },
-    fold: (f) => emitted.push(f as CoreEvent & Record<string, unknown>),
+    // As the server's fold does: the turn index stamps the frame and folds it (a reply ends the
+    // seat's part), so terminal dedupe is judged the way production sees the turn.
+    fold: (f) => {
+      emitted.push(turns.decorate(f) as CoreEvent & Record<string, unknown>);
+      turns.observe(f);
+    },
     recorderReconcile: (chat, turnId, seats) => reconciled.push([chat, turnId, seats]),
     rowGraceMs: 60,
   });
@@ -568,6 +573,64 @@ describe('AskRelay — the reply', () => {
     // Sequential: a chat whose turn was already settled gets no second failure from a later terminal.
     await relay.onCoreEvent({ type: 'sessionFailed', session: 'run-1', ord: 1 } as CoreEvent);
     expect(out.filter((f) => f.type === 'chatReply')).toHaveLength(1);
+  });
+
+  it('codex on #810 r11 (1): a reply whose record read is still in flight when the run is cancelled — the terminal speaks for it (a reservation is not an answer) and the late read is fenced: exactly one reply, the turn ends', async () => {
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((r) => { release = r; });
+    const paths = new AskPathIndex();
+    const turns = new ChatTurnIndex();
+    paths.open('c1', ['codex'], 'codex');
+    turns.begin('c1', ['codex'], 'Q1');
+    paths.started('c1', 1, 'run-1', 'answer-1');
+    const out: Array<CoreEvent & Record<string, unknown>> = [];
+    const relay = new AskRelay({
+      paths,
+      turns,
+      units: async () => [{ id: 'run-1:answer-1', ord: 1, status: 'done', assigned_cli: 'codex', last_attempt: 0 }],
+      workOutput: async () => { await held; return 'late text'; },
+      fold: (f) => { const st = turns.decorate(f); turns.observe(f); out.push(st as CoreEvent & Record<string, unknown>); },
+    });
+    relay.onTeamRow(row('wicked.team.step.completed', { run_id: 'run-1', step_id: 'answer-1', status: 'ok', tree: null, output_bytes: 10, output_ref: 'unit:run-1:1:0' }));
+    const fold = relay.onCoreEvent({ type: 'unitDone', session: 'run-1', ord: 1 } as CoreEvent); // reserved; its record read is parked
+    await new Promise((r) => setTimeout(r, 5));
+    await relay.onCoreEvent({ type: 'runCancelled', session: 'run-1', tool_children_killed: 0 } as CoreEvent);
+    expect(out.filter((f) => f.type === 'chatReply').map((f) => [f['cliKey'], f['ok'], f['ord']])).toEqual([['codex', false, 1]]);
+    expect(turns.turnsOf('c1'), 'the turn ended').toEqual([]);
+    release();
+    await fold;
+    expect(out.filter((f) => f.type === 'chatReply'), 'the late read is fenced').toHaveLength(1);
+  });
+
+  it('codex on #810 r11 (2+3): an earlier turn\'s answer does not suppress the fallback for a LATER turn of the same run; a recovered read on a second terminal re-ends nothing', async () => {
+    let failReads = false;
+    const paths = new AskPathIndex();
+    const turns = new ChatTurnIndex();
+    paths.open('c1', ['codex'], 'codex');
+    turns.begin('c1', ['codex'], 'Q1');
+    paths.started('c1', 1, 'run-1', 'answer-1');
+    const out: Array<CoreEvent & Record<string, unknown>> = [];
+    const relay = new AskRelay({
+      paths,
+      turns,
+      units: async () => { if (failReads) throw new Error('down'); return [{ id: 'run-1:answer-1', ord: 1, status: 'done', assigned_cli: 'codex', last_attempt: 0 }, { id: 'run-1:answer-2', ord: 2, status: 'distributed', assigned_cli: 'codex', last_attempt: 0 }]; },
+      workOutput: async () => 'A1',
+      fold: (f) => { const st = turns.decorate(f); turns.observe(f); out.push(st as CoreEvent & Record<string, unknown>); },
+    });
+    relay.onTeamRow(row('wicked.team.step.completed', { run_id: 'run-1', step_id: 'answer-1', status: 'ok', tree: null, output_bytes: 2, output_ref: 'unit:run-1:1:0' }));
+    await relay.onCoreEvent({ type: 'unitDone', session: 'run-1', ord: 1 } as CoreEvent); // Q1 answered, its turn ended
+    expect(out.filter((f) => f.type === 'chatReply')).toHaveLength(1);
+    const q2 = turns.begin('c1', ['codex'], 'Q2')!; // the continuation's turn on the same run
+    paths.continued('c1', 1, 'answer-2');
+    failReads = true;
+    await relay.onCoreEvent({ type: 'sessionFailed', session: 'run-1', ord: 2 } as CoreEvent); // every read fails
+    const fails = out.filter((f) => f.type === 'chatReply' && f['ok'] === false);
+    expect(fails.map((f) => [f['cliKey'], f['turn_id']]), 'Q2 is settled although Q1 already spoke').toEqual([['codex', q2.turnId]]);
+    expect(turns.turnsOf('c1')).toEqual([]);
+    // (3) a later terminal whose read recovers names answer-1 — its turn ended long ago: nothing more.
+    failReads = false;
+    await relay.onCoreEvent({ type: 'sessionFailed', session: 'run-1', ord: 1 } as CoreEvent);
+    expect(out.filter((f) => f.type === 'chatReply')).toHaveLength(2);
   });
 
   it('codex on #810 r1 (8): two unitDone deliveries folded WITHOUT awaiting each other emit one reply', async () => {
