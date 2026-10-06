@@ -79,6 +79,7 @@ import type {
 import type { CoreAdapter } from '../core/adapter.js';
 import type { Actor, PutStorylineResponse, SessionView, WalkthroughStorylineView, WorkUnit } from '../core/types.js';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
+import { crewStateHome, isDefaultStateHome } from '../projects/state-home.js';
 import { API_PREFIX } from './api-prefix.js';
 import { coreUnitId } from './evidence.js';
 import { stepIdOf, WALKTHROUGH_AUTHOR_SUBDIR, walkthroughProofRoot } from '../core/walkthrough-root.js';
@@ -108,11 +109,55 @@ const DEMO_FILE_TYPES: Readonly<Record<string, string>> = {
   '.json': 'application/json; charset=utf-8',
 };
 
-/** Where a demo run's files live: one directory per run, outside every sandbox and state home. */
+/**
+ * Where a NEW demo run's files live: one directory per run that FOLLOWS the daemon's state home
+ * (`--db`) but sits OUTSIDE it — the worker must read the brief and write the video there, and
+ * every registered state-home entry is denied to workers by core's Read fence
+ * (`wicked-core src/state_home.rs` pushes `Read(<state home>/<entry>/**)` per entry, `Edit(<state
+ * home>/**)` is blanket, and `extraWriteRoots` widen a separate boundary — they never lift those
+ * denies), so the root cannot be a state-home entry.
+ *
+ *   - `WICKED_DEMO_DIR` set: `<dir>/<runId>` — the more specific instruction; the boot preflight
+ *     keeps it outside the state home (`assertWickedRootsOutsideStateHome`).
+ *   - the DEFAULT state home (`~/.wicked-crew`): the historical `~/.wicked/demos/<runId>` — that
+ *     daemon's home IS the operator's (the crew#756 settings rule).
+ *   - any OTHER state home (a lane, a rig, a second install): `<state home>-demos/<runId>`, a
+ *     sibling of the state home — so a `--db` daemon never writes into the operator's home
+ *     (crew#813: every demo it launched landed in `~/.wicked/demos/` while all its other stores
+ *     followed `--db`, and that absolute home path was baked into the run's problem text).
+ */
 export function demoRootDir(runId: string): string {
   if (process.env.WICKED_DEMO_DIR) return join(process.env.WICKED_DEMO_DIR, runId);
+  if (isDefaultStateHome()) return legacyDemoRootDir(runId);
+  return join(demoRootsBesideStateHome(), runId);
+}
+
+/** The demo roots of a NON-default state home: its sibling `<state home>-demos` (never inside it — see
+ *  {@link demoRootDir}). */
+export function demoRootsBesideStateHome(): string {
+  return `${crewStateHome()}-demos`;
+}
+
+/** The historical location, `~/.wicked/demos/<runId>` — still the DEFAULT state home's; for any other
+ *  state home it is READ for demos recorded before crew#813 (dual-read), never written again. */
+export function legacyDemoRootDir(runId: string): string {
   const home = process.env.HOME ?? process.env.USERPROFILE ?? '/tmp';
   return join(home, '.wicked', 'demos', runId);
+}
+
+/**
+ * The root an EXISTING demo run's files are read from (and, for its script edit and export, written
+ * in place): this daemon's root when it exists, else the legacy home root when THAT exists (a demo a
+ * non-default daemon recorded before crew#813), else this daemon's root (and a 404 for whatever is
+ * asked of it). `WICKED_DEMO_DIR` set, or the default state home = that root alone.
+ */
+export async function existingDemoRootDir(runId: string): Promise<string> {
+  const current = demoRootDir(runId);
+  const legacy = legacyDemoRootDir(runId);
+  if (process.env.WICKED_DEMO_DIR || current === legacy) return current;
+  if (await fsp.stat(current).then((st) => st.isDirectory(), () => false)) return current;
+  if (await fsp.stat(legacy).then((st) => st.isDirectory(), () => false)) return legacy;
+  return current;
 }
 
 /**
@@ -222,7 +267,7 @@ async function encodeDemoExport(
   atSec: number | undefined,
   stillExportable: () => Promise<boolean>,
 ): Promise<DemoExportAnswer> {
-  const root = demoRootDir(runId);
+  const root = await existingDemoRootDir(runId);
   const input = await containedPath(root, 'demo-video/demo.mp4');
   const inputSize = input === null ? null : await fsp.stat(input).then((st) => (st.isFile() ? st.size : null), () => null);
   if (input === null || inputSize === null || inputSize === 0) {
@@ -480,7 +525,7 @@ function briefFields(brief: string | null): { url: string | null; audience: stri
 /** Everything studio renders for a demo run, read from its root and its units. */
 export async function demoView(adapter: CoreAdapter, view: SessionView): Promise<DemoView> {
   const runId = view.session.id;
-  const root = demoRootDir(runId);
+  const root = await existingDemoRootDir(runId);
   // Every read is resolved inside the root: the run can write here, so a symlink it made is never followed out.
   const [brief, script, chaptersRaw, markersRaw, recordingRaw] = await Promise.all([
     readText(root, 'BRIEF.md'),
@@ -621,7 +666,9 @@ export function registerDemoRoutes(app: FastifyInstance, adapter: CoreAdapter): 
           url: `${V}/runs`,
           headers: { 'content-type': 'application/json', ...(auth !== undefined ? { authorization: auth } : {}) },
           payload: {
-            problem: `Make a demo of ${parsed.data.url} with the wicked-garden-demo skill: follow the demo brief at ${briefPath}. Demo root: ${root}`,
+            // ONE path (the worker's only way to the brief; the brief names the root). crew#813 made it
+            // follow the state home — studio masks the path where it prints the problem (studio#520).
+            problem: `Make a demo of ${parsed.data.url} with the wicked-garden-demo skill: follow the demo brief at ${briefPath} — its directory is the demo root, where every file this demo makes goes.`,
             sessionId: runId,
             // Unfiled (studio's `default` mount) is no project to file into: the run launches unfiled.
             ...(projectId !== UNFILED_PROJECT ? { projectId } : {}),
@@ -661,7 +708,7 @@ export function registerDemoRoutes(app: FastifyInstance, adapter: CoreAdapter): 
         return reply.code(400).send({ error: `\`path\` must be one of ${Object.keys(DEMO_FILE_TYPES).join(', ')}` });
       }
       if (!(await isKnownDemoRun(id))) return reply.code(404).send({ error: 'no demo run with that id' });
-      const target = await containedPath(demoRootDir(id), rel);
+      const target = await containedPath(await existingDemoRootDir(id), rel);
       if (target === null) return reply.code(404).send({ error: `no such demo file: ${rel}` });
       const st = await fsp.stat(target);
       if (!st.isFile()) return reply.code(404).send({ error: `no such demo file: ${rel}` });
@@ -746,7 +793,7 @@ export function registerDemoRoutes(app: FastifyInstance, adapter: CoreAdapter): 
         return reply.code(409).send({ error: 'the script can be edited only while the plan gate is open' });
       }
       // The resolved file, never the joined name: a worker-made symlink is followed only inside the root.
-      const target = await containedPath(demoRootDir(id), 'script.md');
+      const target = await containedPath(await existingDemoRootDir(id), 'script.md');
       if (target === null) return reply.code(409).send({ error: 'the plan has not written script.md' });
       await fsp.writeFile(target, parsed.data.content, 'utf8');
       return { bytes };

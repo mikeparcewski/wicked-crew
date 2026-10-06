@@ -10,8 +10,8 @@
 // Fastify inject() with a mock adapter — no engine.
 
 import Fastify, { type FastifyInstance } from 'fastify';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { registerRoutes } from '../src/api/routes.js';
@@ -19,7 +19,8 @@ import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
 import { AuditLog } from '../src/api/audit.js';
-import { parseRange, parseReview } from '../src/api/recording.js';
+import { demoRootDir, demoRootsBesideStateHome, existingDemoRootDir, legacyDemoRootDir, parseRange, parseReview } from '../src/api/recording.js';
+import { crewStateHome, setCrewStateHome } from '../src/projects/state-home.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { LaunchRunInput } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
@@ -436,5 +437,102 @@ describe('demo parsers', () => {
     expect(parseRange('bytes=10-12', 10)).toBe('bad');
     expect(parseRange('bytes=1-2,4-5', 10)).toBe('bad');
     expect(parseRange('items=0-1', 10)).toBe('bad');
+  });
+});
+
+describe('the demo root follows the daemon state home, never the operator HOME (crew#813)', () => {
+  // The hermetic setup arms `crewStateHome()` to a temp dir — a NON-default state home, as the CLI
+  // arms it from `--db`; with no WICKED_DEMO_DIR the root must follow it (as a SIBLING: a worker must
+  // read the brief, and core's fence denies every state-home entry to workers). Red before crew#813:
+  // `demoRootDir` resolved `$HOME/.wicked/demos/<runId>` for every daemon — a lane daemon left every
+  // demo in the operator's home and baked that absolute home path into the run's problem text.
+  const savedDemoDir = process.env.WICKED_DEMO_DIR;
+  const savedHome = process.env.HOME;
+  let fakeHome: string;
+  let app: FastifyInstance;
+  let launchRun: Mock;
+  let sessionsDetail: Mock;
+
+  beforeEach(async () => {
+    delete process.env.WICKED_DEMO_DIR;
+    fakeHome = mkdtempSync(join(tmpdir(), 'demo-fake-home-'));
+    process.env.HOME = fakeHome;
+    launchRun = vi.fn(async (input: LaunchRunInput) => input.sessionId);
+    sessionsDetail = vi.fn().mockResolvedValue([]);
+    app = buildApp({
+      launchRun,
+      sessionsDetail,
+      workOutput: vi.fn().mockResolvedValue(null),
+      listRepos: vi.fn().mockResolvedValue([]),
+      projectMembers: vi.fn().mockResolvedValue([]),
+    });
+    await app.ready();
+  });
+
+  afterEach(async () => {
+    await app.close();
+    if (savedDemoDir === undefined) delete process.env.WICKED_DEMO_DIR;
+    else process.env.WICKED_DEMO_DIR = savedDemoDir;
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    removeScratch(fakeHome);
+    rmSync(demoRootsBesideStateHome(), { recursive: true, force: true });
+  });
+
+  it('demoRootDir: a non-default state home → its sibling <state home>-demos/<runId>, outside the fenced tree and outside HOME; the default state home keeps ~/.wicked/demos; WICKED_DEMO_DIR still wins', () => {
+    const stateHome = crewStateHome();
+    expect(demoRootDir('r1')).toBe(join(`${stateHome}-demos`, 'r1'));
+    expect(demoRootDir('r1').startsWith(stateHome + '/')).toBe(false); // not INSIDE the state home: workers are fenced out of it
+    expect(demoRootDir('r1').startsWith(join(homedir(), '.wicked'))).toBe(false);
+    expect(demoRootDir('r1').startsWith(join(fakeHome, '.wicked'))).toBe(false);
+    // The default state home (none configured) is the operator's own daemon: the historical place.
+    setCrewStateHome(undefined);
+    try {
+      expect(demoRootDir('r1')).toBe(join(fakeHome, '.wicked', 'demos', 'r1'));
+    } finally {
+      setCrewStateHome(stateHome);
+    }
+    process.env.WICKED_DEMO_DIR = join(fakeHome, 'elsewhere');
+    expect(demoRootDir('r1')).toBe(join(fakeHome, 'elsewhere', 'r1'));
+  });
+
+  it('POST /projects/:id/demo writes the brief beside the state home and the problem names that path, not one under HOME', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/projects/proj-1/demo',
+      payload: { url: 'http://127.0.0.1:5173/', audience: 'New team leads', show: 'Launch a run' },
+    });
+    expect(res.statusCode, res.body).toBe(201);
+    const { runId } = res.json() as { runId: string };
+    const root = join(demoRootsBesideStateHome(), runId);
+    expect(existsSync(join(root, 'BRIEF.md'))).toBe(true);
+    expect(existsSync(join(fakeHome, '.wicked', 'demos', runId))).toBe(false);
+    const input = launchRun.mock.calls[0]![0] as LaunchRunInput;
+    expect(input.extraWriteRoots).toEqual([root]);
+    expect(input.problem).toContain(join(root, 'BRIEF.md'));
+    expect(input.problem).not.toContain(join(fakeHome, '.wicked'));
+    expect(input.problem).not.toContain('\n');
+    expect(Buffer.byteLength(input.problem)).toBeLessThan(600);
+  });
+
+  it('dual-read: a demo recorded under the legacy ~/.wicked/demos root is still served; a new-root demo wins when both exist', async () => {
+    const legacy = legacyDemoRootDir('old-1');
+    expect(legacy).toBe(join(fakeHome, '.wicked', 'demos', 'old-1'));
+    mkdirSync(legacy, { recursive: true });
+    writeFileSync(join(legacy, 'BRIEF.md'), '# Demo brief\n\n- **App:** http://legacy.test/\n- **Demo root:** x\n\n## Who it is for\n\nOld hands\n\n## Show\n\nx\n', 'utf8');
+    writeFileSync(join(legacy, 'script.md'), '# legacy script', 'utf8');
+    expect(await existingDemoRootDir('old-1')).toBe(legacy);
+    expect(await existingDemoRootDir('never-recorded')).toBe(join(demoRootsBesideStateHome(), 'never-recorded'));
+    sessionsDetail.mockResolvedValue([demoRun('old-1', 'plan', 'awaiting_human')]);
+    const view = await app.inject({ method: 'GET', url: '/api/v1/runs/old-1/demo' });
+    expect(view.statusCode, view.body).toBe(200);
+    expect((view.json() as { url: string | null }).url).toBe('http://legacy.test/');
+    const file = await app.inject({ method: 'GET', url: '/api/v1/runs/old-1/demo/file?path=script.md' });
+    expect(file.statusCode, file.body).toBe(200);
+    expect(file.body).toBe('# legacy script');
+    // The state-home root takes precedence once it exists.
+    const current = join(demoRootsBesideStateHome(), 'old-1');
+    mkdirSync(current, { recursive: true });
+    expect(await existingDemoRootDir('old-1')).toBe(current);
   });
 });
