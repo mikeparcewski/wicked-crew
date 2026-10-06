@@ -62,8 +62,8 @@
  * every candidate is read with ONE batched `lsof` (`/proc` on Linux) under a hard timeout that
  * SIGKILLs the probe, a tick whose predecessor is still in flight is skipped, a probe that fails or
  * times out reads as "cwd unknown → do not reap", the boot sweep no longer blocks the boot, and the
- * candidate match is narrowed to the PROGRAM tokens of a command line (the executable, or the
- * script a `node`/shell launcher runs) and is case-sensitive on POSIX — a path segment deep in a
+ * candidate match is narrowed to the PROGRAM region of a command line (before its first `-flag`
+ * token) and is case-sensitive on POSIX — a path segment deep in a
  * `--database=…/Claude/…` flag, or `/Applications/Claude.app/Contents/MacOS/Claude`, is not a
  * worker CLI.
  *
@@ -80,7 +80,7 @@
 
 import { execFile, spawnSync } from 'node:child_process';
 import { readlink } from 'node:fs/promises';
-import { basename, isAbsolute } from 'node:path';
+import { isAbsolute } from 'node:path';
 import {
   ownerAlive,
   readCrewSidecar,
@@ -152,38 +152,19 @@ function bridgeTokenRe(bin: string): RegExp {
 /** Regex flags of every token matcher: `i` on Windows (case-insensitive launchers), none elsewhere. */
 const TOKEN_FLAGS = process.platform === 'win32' ? 'i' : '';
 
-/** Launchers whose FIRST argument is the program that really runs: a node binary running a script
- *  (the npm shims), or a POSIX shell running a wrapper script. */
-const LAUNCHER_RE = /^(?:node|nodejs|node\d+|bun|sh|bash|zsh|dash)(?:\.exe)?$/i;
-
 /**
- * The PROGRAM tokens of a command line — the executable (`argv[0]`, a leading quoted token kept
- * whole) and, when that executable is a launcher ({@link LAUNCHER_RE}), the script it runs
- * (`argv[1]`). The orphan matchers test these alone (crew#806): an engine-spawned bridge or worker
- * CLI names its binary THERE (`/x/.bin/claude-agent-acp`, `node …/wicked-pi.mjs`, `claude -p …`),
- * while `chrome_crashpad_handler --database=/…/Claude/Crashpad` names ours only inside a flag of a
- * process that is nobody's worker. A path with unquoted spaces splits at the space — the match then
- * sees its prefix, so a bin under such a path is only found when its token sits before the space.
+ * The PROGRAM region of a command line — everything before its first `-flag` token (the whole
+ * line when there is none). The orphan matchers test this region alone (crew#806): an
+ * engine-spawned bridge or worker CLI names its binary THERE (`/x/.bin/claude-agent-acp`,
+ * `node …/wicked-pi.mjs --mode rpc`, `claude -p …`, `sh /x/.bin/pi-acp`, a quoted Windows `.cmd`,
+ * and a path with spaces — POSIX `ps` prints argv unquoted, so no split on whitespace), while
+ * `chrome_crashpad_handler --database=/…/Claude/Crashpad` names ours only inside a flag of a process
+ * that is nobody's worker. A node option before the script (`node --inspect …/claude`) ends the
+ * region early; the engine spawns its bridges and workers with none.
  */
-export function programTokensOf(command: string): string {
-  const trimmed = command.trimStart();
-  const tokens: string[] = [];
-  let rest = trimmed;
-  for (let i = 0; i < 2 && rest !== ''; i++) {
-    let token: string;
-    const quote = rest[0];
-    if (quote === '"' || quote === "'") {
-      const close = rest.indexOf(quote, 1);
-      token = close === -1 ? rest : rest.slice(0, close + 1);
-    } else {
-      token = /^\S+/.exec(rest)?.[0] ?? rest;
-    }
-    tokens.push(token);
-    rest = rest.slice(token.length).trimStart();
-    const bare = basename(token.replace(/^["']|["']$/g, '').replace(/\\/g, '/'));
-    if (!LAUNCHER_RE.test(bare)) break;
-  }
-  return tokens.join(' ');
+export function programRegionOf(command: string): string {
+  const m = /\s-/.exec(command);
+  return (m === null ? command : command.slice(0, m.index)).trimEnd();
 }
 
 /** Precompiled per-bin matchers — the scan loops run one test per line, no per-line RegExp churn. */
@@ -287,7 +268,15 @@ function listProcesses(): string | null {
               '-Command',
               "Get-CimInstance Win32_Process | ForEach-Object { '{0} {1} {2}' -f $_.ProcessId, $_.ParentProcessId, $_.CommandLine }",
             ],
-            { encoding: 'utf8', windowsHide: true, maxBuffer: 16 * 1024 * 1024, env: childEnvWithBootEstateDb() },
+            {
+              encoding: 'utf8',
+              windowsHide: true,
+              maxBuffer: 16 * 1024 * 1024,
+              // Bounded like the POSIX listing (crew#806); CIM is slower than `ps`, so four caps.
+              timeout: PROBE_TIMEOUT_MS * 4,
+              killSignal: 'SIGKILL',
+              env: childEnvWithBootEstateDb(),
+            },
           )
         : // POSIX keywords (`args`, not the BSD/procps-specific `command`): same spelling
           // works on macOS and Linux. Bounded (crew#806): this sync listing serves the `exit`
@@ -310,9 +299,11 @@ function listProcesses(): string | null {
  *  is SIGKILLed and reads as "unknown" — the sweeps fail open on it (nothing is reaped on a guess). */
 export const PROBE_TIMEOUT_MS = 5_000;
 
-/** Run a probe off the event loop: its stdout (possibly partial) on success, `null` when it failed
- *  or hit {@link PROBE_TIMEOUT_MS}. `lsof` exits 1 when one of the pids has already gone and still
- *  prints the rest, so a non-zero exit with output is output. */
+/** Run a probe off the event loop: its stdout on success, `null` when it failed, was signalled
+ *  (our SIGKILL at {@link PROBE_TIMEOUT_MS}, or anyone else's) or could not start. `lsof` exits 1
+ *  when one of the pids has already gone and still prints the rest, so with `okOnNonZero` a plain
+ *  non-zero EXIT STATUS with output is output — a signal never is (codex on crew#806: a probe cut
+ *  short by a signal has partial output, and partial output must not license a kill). */
 function probe(file: string, args: string[], okOnNonZero: boolean): Promise<string | null> {
   return new Promise((resolve) => {
     try {
@@ -328,8 +319,11 @@ function probe(file: string, args: string[], okOnNonZero: boolean): Promise<stri
           env: childEnvWithBootEstateDb(),
         },
         (err, stdout) => {
-          if (err !== null && (err.killed === true || (err as NodeJS.ErrnoException).code === 'ENOENT')) return resolve(null);
-          if (err !== null && !okOnNonZero) return resolve(null);
+          if (err !== null) {
+            const e = err as NodeJS.ErrnoException & { killed?: boolean; signal?: string | null; code?: string | number | null };
+            const exitedNonZero = e.killed !== true && (e.signal === null || e.signal === undefined) && typeof e.code === 'number';
+            if (!(okOnNonZero && exitedNonZero)) return resolve(null);
+          }
           resolve(typeof stdout === 'string' ? stdout : null);
         },
       );
@@ -368,9 +362,9 @@ export function parseOrphanedRunProcesses(listing: string): number[] {
   const pids: number[] = [];
   for (const { pid, ppid, command } of parseListing(listing)) {
     if (ppid !== 1 || pid === process.pid) continue;
-    // The PROGRAM tokens only (crew#806): a desktop app whose crash handler names `Claude` inside
+    // The PROGRAM region only (crew#806): a desktop app whose crash handler names `Claude` inside
     // a `--database=` flag is not a candidate, so it is never probed.
-    const program = programTokensOf(command);
+    const program = programRegionOf(command);
     if (ORPHAN_TOKEN_RES.some((re) => re.test(program))) pids.push(pid);
   }
   return pids;
@@ -483,15 +477,35 @@ export async function probeCwds(pids: readonly number[]): Promise<Map<number, st
   return out;
 }
 
+/** `value` settled within `ms`, else a rejection — the timer never holds the process open. */
+function withDeadline<T>(value: T | Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`process probe did not settle within ${ms} ms`)), ms);
+    timer.unref?.();
+    Promise.resolve(value).then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (err: unknown) => {
+        clearTimeout(timer);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      },
+    );
+  });
+}
+
 /** The run-process orphans whose cwd the (one) probe places inside a run worktree. */
 async function worktreeOrphans(listing: string, io: BridgeReaperIo): Promise<number[]> {
   const candidates = parseOrphanedRunProcesses(listing);
   if (candidates.length === 0) return [];
   let cwds: Map<number, string>;
   try {
-    cwds = await (io.cwds ?? probeCwds)(candidates);
+    // The default reader is bounded by its own probe timeout; the race bounds an injected one too,
+    // so the sweep's in-flight guard can never be held open by a read that does not settle.
+    cwds = await withDeadline((io.cwds ?? probeCwds)(candidates), PROBE_TIMEOUT_MS + 1_000);
   } catch {
-    return []; // a probe that failed answers nothing — never kill on uncertainty
+    return []; // a probe that failed or timed out answers nothing — never kill on uncertainty
   }
   return candidates.filter((pid) => inRunWorktree(cwds.get(pid)));
 }

@@ -39,7 +39,7 @@ import {
   parseOrphanedInteractiveBridges,
   parseOrphanedRunProcesses,
   probeCwds,
-  programTokensOf,
+  programRegionOf,
   reapOrphansAtBoot,
   rootArgOf,
   startOrphanSweep,
@@ -491,7 +491,7 @@ describe('the orphan sweep never starves the daemon (crew#806)', () => {
   const CODEX_FRAMEWORK_CRASHPAD =
     '  84018     1 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/154.0.8037.98/Helpers/browser_crashpad_handler --monitor-self --database=/home/op/Library/Application Support/com.openai.chat/Crashpad';
   // The ChatGPT app's embedded codex really IS a `codex` binary: it stays a candidate (its cwd, read
-  // once with everyone else's, clears it) — the matcher narrows to PROGRAM tokens, it does not guess.
+  // once with everyone else's, clears it) — the matcher narrows to the PROGRAM region, it does not guess.
   const CODEX_APP_SERVER = '  35959     1 /home/op/.codex/packages/app-server-daemon/releases/0.160.1/bin/codex app-server daemon pid-update-loop';
   const ENGINE_SHAPES = [
     '  901     1 node /opt/homebrew/bin/claude --output-format stream-json',
@@ -500,15 +500,19 @@ describe('the orphan sweep never starves the daemon (crew#806)', () => {
     '  904     1 node /repo/node_modules/agent-acp-bridges/wicked-pi.mjs --mode rpc',
     '  905     1 sh /repo/node_modules/.bin/pi-acp',
     String.raw`  906     1 "C:\repo\node_modules\.bin\wicked-pi.cmd" --mode rpc`,
+    // POSIX `ps` prints argv unquoted: a path with a space must still be found (codex r1 on crew#806).
+    '  907     1 node /home/op/My Project/node_modules/.bin/pi-acp --mode rpc',
   ];
 
-  it('programTokensOf: the executable, plus the script a node/shell launcher runs; a quoted executable stays whole', () => {
-    expect(programTokensOf('node /opt/homebrew/bin/claude --output-format stream-json')).toBe('node /opt/homebrew/bin/claude');
-    expect(programTokensOf('/home/op/.local/bin/codex exec --cd /x')).toBe('/home/op/.local/bin/codex');
-    expect(programTokensOf('sh /repo/node_modules/.bin/pi-acp --x')).toBe('sh /repo/node_modules/.bin/pi-acp');
-    expect(programTokensOf(String.raw`"C:\Program Files\x\pi-acp.cmd" --mode rpc`)).toBe(String.raw`"C:\Program Files\x\pi-acp.cmd"`);
-    expect(programTokensOf(CLAUDE_CRASHPAD.replace(/^\s*\d+\s+\d+\s+/, ''))).toBe(
-      '/Applications/Claude.app/Contents/Frameworks/Electron',
+  it('programRegionOf: everything before the first -flag token — a path with spaces survives, a flag value is out', () => {
+    expect(programRegionOf('node /opt/homebrew/bin/claude --output-format stream-json')).toBe('node /opt/homebrew/bin/claude');
+    expect(programRegionOf('/home/op/.local/bin/codex exec --cd /x')).toBe('/home/op/.local/bin/codex exec');
+    expect(programRegionOf('sh /repo/node_modules/.bin/pi-acp --x')).toBe('sh /repo/node_modules/.bin/pi-acp');
+    expect(programRegionOf('node /home/op/My Project/node_modules/.bin/pi-acp --mode rpc')).toBe('node /home/op/My Project/node_modules/.bin/pi-acp');
+    expect(programRegionOf(String.raw`"C:\Program Files\x\pi-acp.cmd" --mode rpc`)).toBe(String.raw`"C:\Program Files\x\pi-acp.cmd"`);
+    expect(programRegionOf('claude')).toBe('claude');
+    expect(programRegionOf(CLAUDE_CRASHPAD.replace(/^\s*\d+\s+\d+\s+/, ''))).toBe(
+      '/Applications/Claude.app/Contents/Frameworks/Electron Framework.framework/Helpers/chrome_crashpad_handler',
     );
   });
 
@@ -516,7 +520,7 @@ describe('the orphan sweep never starves the daemon (crew#806)', () => {
     'a desktop app, its crash handlers and a CLI named only inside a --flag are never candidates; every engine shape still is',
     () => {
       const listing = [CLAUDE_APP, CLAUDE_CRASHPAD, CODEX_FRAMEWORK_CRASHPAD, CODEX_APP_SERVER, ...ENGINE_SHAPES].join('\n');
-      expect(parseOrphanedRunProcesses(listing).sort(byNumber)).toEqual([901, 902, 903, 904, 905, 906, 35959]);
+      expect(parseOrphanedRunProcesses(listing).sort(byNumber)).toEqual([901, 902, 903, 904, 905, 906, 907, 35959]);
     },
   );
 
@@ -531,9 +535,9 @@ describe('the orphan sweep never starves the daemon (crew#806)', () => {
       },
       kill: (pid) => signals.push(pid),
     });
-    expect(batches).toEqual([[901, 902, 903, 904, 905, 906, 35959]]);
-    expect(result.terminated.sort(byNumber)).toEqual([901, 902, 903, 904, 906]);
-    expect(signals.sort(byNumber)).toEqual([901, 902, 903, 904, 906]);
+    expect(batches).toEqual([[901, 902, 903, 904, 905, 906, 907, 35959]]);
+    expect(result.terminated.sort(byNumber)).toEqual([901, 902, 903, 904, 906, 907]);
+    expect(signals.sort(byNumber)).toEqual([901, 902, 903, 904, 906, 907]);
   });
 
   it('a cwd probe that fails, times out or answers for nobody reaps nothing — never kill on uncertainty', async () => {
