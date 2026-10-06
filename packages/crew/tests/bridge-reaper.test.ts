@@ -511,6 +511,9 @@ describe('the orphan sweep never starves the daemon (crew#806)', () => {
     expect(programRegionOf('node /home/op/My Project/node_modules/.bin/pi-acp --mode rpc')).toBe('node /home/op/My Project/node_modules/.bin/pi-acp');
     expect(programRegionOf(String.raw`"C:\Program Files\x\pi-acp.cmd" --mode rpc`)).toBe(String.raw`"C:\Program Files\x\pi-acp.cmd"`);
     expect(programRegionOf('claude')).toBe('claude');
+    // (codex r2) a ` -` INSIDE a quoted executable is the path, not a flag.
+    expect(programRegionOf('"/x/My - Project/claude" --print')).toBe('"/x/My - Project/claude"');
+    expect(programRegionOf("'/x/a - b/codex' exec --cd /y")).toBe("'/x/a - b/codex' exec");
     expect(programRegionOf(CLAUDE_CRASHPAD.replace(/^\s*\d+\s+\d+\s+/, ''))).toBe(
       '/Applications/Claude.app/Contents/Frameworks/Electron Framework.framework/Helpers/chrome_crashpad_handler',
     );
@@ -578,14 +581,36 @@ describe('the orphan sweep never starves the daemon (crew#806)', () => {
         kill: () => {},
       });
       await new Promise((r) => setTimeout(r, 80));
+      expect(lists, 'one sweep in flight means one listing, however many intervals elapsed').toBe(1);
       stop();
       release?.();
       await held;
     } finally {
       console.warn = warn;
     }
-    expect(lists, 'one sweep in flight means one listing, however many intervals elapsed').toBe(1);
     expect(warned.some((m) => m.includes('orphan sweep SKIPPED'))).toBe(true);
+  });
+
+  it('a daemon running as pid 1 never takes its OWN children for orphans (codex r2)', () => {
+    const own = `  777     ${process.pid} node /opt/homebrew/bin/claude --output-format stream-json`;
+    // Only meaningful when this process IS pid 1; elsewhere the row is simply parented and excluded
+    // by the ppid rule — either way it must never be a candidate.
+    expect(parseOrphanedRunProcesses([own, ENGINE_SHAPES[0]!].join('\n'))).toEqual([901]);
+  });
+
+  it('a pid that is no longer the same orphan after the cwd probe is not signalled (recycled pid, codex r2)', async () => {
+    const signals: number[] = [];
+    let lists = 0;
+    const result = await sweepOrphanedRunProcesses(new Set(), {
+      // First listing: 901 (claude) and 903 (codex) are orphans; by the second listing 901 has exited and
+      // its pid now belongs to an operator's vim, 903 is unchanged.
+      list: () => (++lists === 1 ? [ENGINE_SHAPES[0]!, ENGINE_SHAPES[2]!].join('\n') : ['  901     1 vim notes.md', ENGINE_SHAPES[2]!].join('\n')),
+      cwds: worktreeCwds(),
+      kill: (pid) => signals.push(pid),
+    });
+    expect(lists).toBe(2);
+    expect(result.terminated).toEqual([903]);
+    expect(signals).toEqual([903]);
   });
 
   it.skipIf(process.platform === 'win32')('probeCwds reads this process\'s own cwd in one call and answers nothing for a pid that is gone', async () => {

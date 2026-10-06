@@ -63,7 +63,8 @@
  * SIGKILLs the probe, a tick whose predecessor is still in flight is skipped, a probe that fails or
  * times out reads as "cwd unknown → do not reap", the boot sweep no longer blocks the boot, and the
  * candidate match is narrowed to the PROGRAM region of a command line (before its first `-flag`
- * token) and is case-sensitive on POSIX — a path segment deep in a
+ * token, quote-aware), is case-sensitive on POSIX, and a pid is re-checked against a fresh
+ * listing after the probe's await (a recycled pid is nobody's orphan) — a path segment deep in a
  * `--database=…/Claude/…` flag, or `/Applications/Claude.app/Contents/MacOS/Claude`, is not a
  * worker CLI.
  *
@@ -163,8 +164,22 @@ const TOKEN_FLAGS = process.platform === 'win32' ? 'i' : '';
  * region early; the engine spawns its bridges and workers with none.
  */
 export function programRegionOf(command: string): string {
-  const m = /\s-/.exec(command);
-  return (m === null ? command : command.slice(0, m.index)).trimEnd();
+  // Quote-aware (codex r2 on crew#806): a ` -` inside a quoted executable (`"/x/My - Project/claude"`)
+  // is part of the path, not the first flag.
+  let quote: string | null = null;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i] as string;
+    if (quote !== null) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (/\s/.test(ch) && command[i + 1] === '-') return command.slice(0, i).trimEnd();
+  }
+  return command.trimEnd();
 }
 
 /** Precompiled per-bin matchers — the scan loops run one test per line, no per-line RegExp churn. */
@@ -361,7 +376,10 @@ export function discoverBridgeChildren(parentPid: number = process.pid): number[
 export function parseOrphanedRunProcesses(listing: string): number[] {
   const pids: number[] = [];
   for (const { pid, ppid, command } of parseListing(listing)) {
-    if (ppid !== 1 || pid === process.pid) continue;
+    // Never this daemon's OWN children (codex r2 on crew#806): a daemon running as pid 1 (a
+    // container's init) sees every child of its own with ppid 1 — those are the shutdown reaper's
+    // business, never an orphan's.
+    if (ppid !== 1 || pid === process.pid || ppid === process.pid) continue;
     // The PROGRAM region only (crew#806): a desktop app whose crash handler names `Claude` inside
     // a `--database=` flag is not a candidate, so it is never probed.
     const program = programRegionOf(command);
@@ -495,7 +513,9 @@ function withDeadline<T>(value: T | Promise<T>, ms: number): Promise<T> {
   });
 }
 
-/** The run-process orphans whose cwd the (one) probe places inside a run worktree. */
+/** The run-process orphans whose cwd the (one) probe places inside a run worktree — and that are
+ *  STILL listed as the same orphan after the probe (codex r2 on crew#806): the await is a window in
+ *  which an orphan can exit and its pid be reused, and a recycled pid is nobody's orphan. */
 async function worktreeOrphans(listing: string, io: BridgeReaperIo): Promise<number[]> {
   const candidates = parseOrphanedRunProcesses(listing);
   if (candidates.length === 0) return [];
@@ -507,7 +527,15 @@ async function worktreeOrphans(listing: string, io: BridgeReaperIo): Promise<num
   } catch {
     return []; // a probe that failed or timed out answers nothing — never kill on uncertainty
   }
-  return candidates.filter((pid) => inRunWorktree(cwds.get(pid)));
+  const inWorktree = candidates.filter((pid) => inRunWorktree(cwds.get(pid)));
+  if (inWorktree.length === 0) return [];
+  // Identity re-check: the same pid, still parented to init, still a run-process command line.
+  const again = await (io.list ?? listProcessesAsync)();
+  if (again === null) return []; // cannot confirm → do not reap
+  const before = new Map(parseListing(listing).map((r) => [r.pid, r.command]));
+  const now = new Map(parseListing(again).map((r) => [r.pid, r.command]));
+  const stillOrphans = new Set(parseOrphanedRunProcesses(again));
+  return inWorktree.filter((pid) => stillOrphans.has(pid) && now.get(pid) === before.get(pid));
 }
 
 /**
