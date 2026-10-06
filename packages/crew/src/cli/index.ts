@@ -551,8 +551,17 @@ async function main(): Promise<void> {
     // can never see them. Conservative: only ppid==1 matches, so another live
     // daemon's bridges are untouched. Interactive bridge trees join under the sidecar
     // gate (F-W1-103): crew's own sidecar names the pid and its owner daemon is gone.
-    const orphans = reapOrphansAtBoot();
-    if (orphans.length > 0) console.warn(`[bridge-reaper] reaped ${orphans.length} orphaned bridge/worker/interactive process(es) from a previous daemon (crew#285 / F-W1-103): ${orphans.join(', ')}`);
+    // Not awaited (crew#806): the sweep is async and bounded (one batched cwd probe under a hard
+    // timeout), and the boot must never wait on a process probe — a loaded host once kept a fresh
+    // daemon from reaching `listen` for 12 minutes while a synchronous `lsof` hung in this sweep.
+    void reapOrphansAtBoot().then(
+      (orphans) => {
+        if (orphans.length > 0) console.warn(`[bridge-reaper] reaped ${orphans.length} orphaned bridge/worker/interactive process(es) from a previous daemon (crew#285 / F-W1-103): ${orphans.join(', ')}`);
+      },
+      () => {
+        /* the sweep fails open by contract */
+      },
+    );
     // Live sweep (crew#340): kill -9 on a bridge mid-run orphans its worker CLI NOW, and
     // that orphan holds the shared worker config home hostage until reaped — the boot
     // sweep only helps the NEXT daemon. Unref'd timer; SIGTERM, then SIGKILL a tick later.
