@@ -493,9 +493,10 @@ export function processStartedAt(pid: number): string | null {
               '-Command',
               `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CreationDate.ToUniversalTime().ToString('o')`,
             ],
-            { encoding: 'utf8', timeout: 5000, windowsHide: true, env: childEnvWithBootEstateDb() },
+            { encoding: 'utf8', timeout: 5000, killSignal: 'SIGKILL', windowsHide: true, env: childEnvWithBootEstateDb() },
           )
-        : spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', timeout: 5000, env: childEnvWithBootEstateDb() });
+        : // One pid, one row — cheap; the SIGKILL makes the 5 s cap a guarantee (crew#806).
+          spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', timeout: 5000, killSignal: 'SIGKILL', env: childEnvWithBootEstateDb() });
     if (res.error || res.status !== 0) return null;
     const out = String(res.stdout).trim();
     return out === '' ? null : out;

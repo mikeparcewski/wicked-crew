@@ -52,6 +52,22 @@
  * operator's own `serve`) is never matched either. Crew-spawned bridges therefore live exactly as
  * long as a crew daemon owns them: adopt-or-kill, never leak.
  *
+ * A fifth (crew#806): the orphan sweeps probed each candidate's cwd with a SYNCHRONOUS per-pid
+ * `lsof` inside a timer callback, with no timeout. On a loaded macOS host one `lsof -p <pid>` of a
+ * crashpad handler took over 80 s, and the candidate set included processes that are not ours at
+ * all (`Claude.app`, its crashpad handlers, ChatGPT's "Codex Framework", the `codex app-server
+ * daemon`) — five such probes per 30 s tick, so the tick never finished before the next was due and
+ * the event loop starved: `/health` never answered, a fresh daemon never reached `listen`, SIGTERM
+ * was not honoured (the handler cannot run inside `spawnSync`). Now the sweeps are ASYNC, the cwd of
+ * every candidate is read with ONE batched `lsof` (`/proc` on Linux) under a hard timeout that
+ * SIGKILLs the probe, a tick whose predecessor is still in flight is skipped, a probe that fails or
+ * times out reads as "cwd unknown → do not reap", the boot sweep no longer blocks the boot, and the
+ * candidate match is narrowed to the PROGRAM region of a command line (before its first `-flag`
+ * token, quote-aware), is case-sensitive on POSIX, and a pid is re-checked against a fresh
+ * listing after the probe's await (a recycled pid is nobody's orphan) — a path segment deep in a
+ * `--database=…/Claude/…` flag, or `/Applications/Claude.app/Contents/MacOS/Claude`, is not a
+ * worker CLI.
+ *
  * # Why a process-table sweep rather than tracked pids alone
  *
  * The spawn happens inside the engine (the native actor thread), which reports no pid
@@ -63,7 +79,8 @@
  * that cannot enumerate children must still shut down.
  */
 
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
+import { readlink } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
 import {
   ownerAlive,
@@ -128,7 +145,43 @@ const POLL_INTERVAL_MS = 100;
  */
 function bridgeTokenRe(bin: string): RegExp {
   const esc = bin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`(?:^|[\\s/\\\\"'])${esc}(?:\\.(?:cmd|exe|bat|mjs))?(?:[\\s/\\\\"']|$)`, 'i');
+  // Case-insensitive only where the filesystem is (Windows launchers): on POSIX the CLIs are
+  // installed in lower case, and `…/Claude.app/Contents/MacOS/Claude` is a desktop app (crew#806).
+  return new RegExp(`(?:^|[\\s/\\\\"'])${esc}(?:\\.(?:cmd|exe|bat|mjs))?(?:[\\s/\\\\"']|$)`, TOKEN_FLAGS);
+}
+
+/** Regex flags of every token matcher: `i` on Windows (case-insensitive launchers), none elsewhere. */
+const TOKEN_FLAGS = process.platform === 'win32' ? 'i' : '';
+
+/**
+ * The PROGRAM region of a command line — everything before its first `-flag` token (the whole
+ * line when there is none). The orphan matchers test this region alone (crew#806): an
+ * engine-spawned bridge or worker CLI names its binary THERE (`/x/.bin/claude-agent-acp`,
+ * `node …/wicked-pi.mjs --mode rpc`, `claude -p …`, `sh /x/.bin/pi-acp`, a quoted Windows `.cmd`,
+ * and a path with spaces — POSIX `ps` prints argv unquoted, so no split on whitespace), while
+ * `chrome_crashpad_handler --database=/…/Claude/Crashpad` names ours only inside a flag of a process
+ * that is nobody's worker. A node option before the script (`node --inspect …/claude`) ends the
+ * region early; the engine spawns its bridges and workers with none.
+ */
+export function programRegionOf(command: string): string {
+  // Quote-aware (codex r2 on crew#806): a ` -` inside a quoted executable (`"/x/My - Project/claude"`)
+  // is part of the path, not the first flag.
+  let quote: string | null = null;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i] as string;
+    if (quote !== null) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    // A quote opens only at a token start (codex r3): POSIX `ps` prints argv unquoted, so the
+    // apostrophe in `/home/op/John's/bin/helper` is a character, not a quote.
+    if ((ch === '"' || ch === "'") && (i === 0 || /\s/.test(command[i - 1] as string))) {
+      quote = ch;
+      continue;
+    }
+    if (/\s/.test(ch) && command[i + 1] === '-') return command.slice(0, i).trimEnd();
+  }
+  return command.trimEnd();
 }
 
 /** Precompiled per-bin matchers — the scan loops run one test per line, no per-line RegExp churn. */
@@ -232,13 +285,24 @@ function listProcesses(): string | null {
               '-Command',
               "Get-CimInstance Win32_Process | ForEach-Object { '{0} {1} {2}' -f $_.ProcessId, $_.ParentProcessId, $_.CommandLine }",
             ],
-            { encoding: 'utf8', windowsHide: true, maxBuffer: 16 * 1024 * 1024, env: childEnvWithBootEstateDb() },
+            {
+              encoding: 'utf8',
+              windowsHide: true,
+              maxBuffer: 16 * 1024 * 1024,
+              // Bounded like the POSIX listing (crew#806); CIM is slower than `ps`, so four caps.
+              timeout: PROBE_TIMEOUT_MS * 4,
+              killSignal: 'SIGKILL',
+              env: childEnvWithBootEstateDb(),
+            },
           )
         : // POSIX keywords (`args`, not the BSD/procps-specific `command`): same spelling
-          // works on macOS and Linux.
+          // works on macOS and Linux. Bounded (crew#806): this sync listing serves the `exit`
+          // sweep, which has no async option — a `ps` that hangs must not hang the exit.
           spawnSync('ps', ['-A', '-o', 'pid=,ppid=,args='], {
             encoding: 'utf8',
             maxBuffer: 16 * 1024 * 1024,
+            timeout: PROBE_TIMEOUT_MS,
+            killSignal: 'SIGKILL',
             env: childEnvWithBootEstateDb(),
           });
     if (out.error !== undefined || out.status !== 0 || typeof out.stdout !== 'string') return null;
@@ -246,6 +310,62 @@ function listProcesses(): string | null {
   } catch {
     return null;
   }
+}
+
+/** Hard ceiling on any one process probe (`ps`, `lsof`) the sweeps run (crew#806). A probe past it
+ *  is SIGKILLed and reads as "unknown" — the sweeps fail open on it (nothing is reaped on a guess). */
+export const PROBE_TIMEOUT_MS = 5_000;
+
+/** Run a probe off the event loop: its stdout on success, `null` when it failed, was signalled
+ *  (our SIGKILL at {@link PROBE_TIMEOUT_MS}, or anyone else's) or could not start. `lsof` exits 1
+ *  when one of the pids has already gone and still prints the rest, so with `okOnNonZero` a plain
+ *  non-zero EXIT STATUS with output is output — a signal never is (codex on crew#806: a probe cut
+ *  short by a signal has partial output, and partial output must not license a kill). */
+function probe(file: string, args: string[], okOnNonZero: boolean, timeoutMs: number = PROBE_TIMEOUT_MS): Promise<string | null> {
+  return new Promise((resolve) => {
+    try {
+      execFile(
+        file,
+        args,
+        {
+          encoding: 'utf8',
+          timeout: timeoutMs,
+          killSignal: 'SIGKILL',
+          maxBuffer: 16 * 1024 * 1024,
+          windowsHide: true,
+          env: childEnvWithBootEstateDb(),
+        },
+        (err, stdout) => {
+          if (err !== null) {
+            const e = err as NodeJS.ErrnoException & { killed?: boolean; signal?: string | null; code?: string | number | null };
+            const exitedNonZero = e.killed !== true && (e.signal === null || e.signal === undefined) && typeof e.code === 'number';
+            if (!(okOnNonZero && exitedNonZero)) return resolve(null);
+          }
+          resolve(typeof stdout === 'string' ? stdout : null);
+        },
+      );
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+/** The async `pid ppid command` listing the orphan sweeps use — never on the event loop (crew#806),
+ *  on Windows too (codex r4: the sync CIM listing kept for the `exit` path must not serve a sweep). */
+async function listProcessesAsync(): Promise<string | null> {
+  if (process.platform === 'win32') {
+    return probe(
+      'powershell',
+      [
+        '-NoProfile',
+        '-Command',
+        "Get-CimInstance Win32_Process | ForEach-Object { '{0} {1} {2}' -f $_.ProcessId, $_.ParentProcessId, $_.CommandLine }",
+      ],
+      false,
+      PROBE_TIMEOUT_MS * 4, // CIM is slower than `ps`; still bounded, still off the loop
+    );
+  }
+  return probe('ps', ['-A', '-o', 'pid=,ppid=,args='], false);
 }
 
 /**
@@ -270,8 +390,14 @@ export function discoverBridgeChildren(parentPid: number = process.pid): number[
 export function parseOrphanedRunProcesses(listing: string): number[] {
   const pids: number[] = [];
   for (const { pid, ppid, command } of parseListing(listing)) {
-    if (ppid !== 1 || pid === process.pid) continue;
-    if (ORPHAN_TOKEN_RES.some((re) => re.test(command))) pids.push(pid);
+    // Never this daemon's OWN children (codex r2 on crew#806): a daemon running as pid 1 (a
+    // container's init) sees every child of its own with ppid 1 — those are the shutdown reaper's
+    // business, never an orphan's.
+    if (ppid !== 1 || pid === process.pid || ppid === process.pid) continue;
+    // The PROGRAM region only (crew#806): a desktop app whose crash handler names `Claude` inside
+    // a `--database=` flag is not a candidate, so it is never probed.
+    const program = programRegionOf(command);
+    if (ORPHAN_TOKEN_RES.some((re) => re.test(program))) pids.push(pid);
   }
   return pids;
 }
@@ -344,27 +470,100 @@ function orphanedInteractiveTargets(listing: string, io: BridgeReaperIo): number
   return targets;
 }
 
+/** The cwd contract of every engine-spawned bridge and worker CLI: a run worktree. */
+export function inRunWorktree(cwd: string | undefined): boolean {
+  return cwd !== undefined && cwd.includes('wicked-worktrees');
+}
+
 /**
- * True when `pid`'s working directory sits inside an engine run worktree — the cwd
- * contract of every engine-spawned bridge. A user's own nohup'd `*-acp` process also
- * reparents to init but runs from an arbitrary cwd, so this is the discriminator that
- * keeps the boot sweep from shooting it (Copilot review on #300). POSIX only (lsof);
- * anywhere the cwd cannot be read the answer is false — never kill on uncertainty.
+ * The working directory of each of `pids` that has a readable one — ONE batched read for the whole
+ * candidate set (crew#806): `/proc/<pid>/cwd` on Linux, a single `lsof -a -d cwd -p <p1,p2,…> -Fpn -w`
+ * elsewhere on POSIX (the same shape `api/run-liveness.ts` reads), bounded by {@link PROBE_TIMEOUT_MS}
+ * and SIGKILLed past it. A pid the probe could not answer for is simply absent — the sweeps treat
+ * absence as "cwd unknown → do not reap". Windows has no reading (an empty map): never kill on
+ * uncertainty. A user's own nohup'd `*-acp` also reparents to init but runs from an arbitrary cwd,
+ * so the cwd is the discriminator that keeps the sweeps from shooting it (Copilot review on #300).
  */
-function pidRunsInRunWorktree(pid: number): boolean {
-  if (process.platform === 'win32') return false;
-  try {
-    const out = spawnSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], {
-      encoding: 'utf8',
-      maxBuffer: 1024 * 1024,
-      env: childEnvWithBootEstateDb(),
-    });
-    if (out.error !== undefined || out.status !== 0 || typeof out.stdout !== 'string') return false;
-    const cwd = out.stdout.split('\n').find((l) => l.startsWith('n'))?.slice(1) ?? '';
-    return cwd.includes('wicked-worktrees');
-  } catch {
-    return false;
+export async function probeCwds(pids: readonly number[]): Promise<Map<number, string>> {
+  const out = new Map<number, string>();
+  if (pids.length === 0 || process.platform === 'win32') return out;
+  if (process.platform === 'linux') {
+    await Promise.all(
+      pids.map(async (pid) => {
+        try {
+          out.set(pid, await readlink(`/proc/${pid}/cwd`));
+        } catch {
+          // gone, or not ours to read
+        }
+      }),
+    );
+    return out;
   }
+  const text = await probe('lsof', ['-a', '-d', 'cwd', '-p', pids.join(','), '-Fpn', '-w'], true);
+  if (text === null) return out;
+  let pid: number | undefined;
+  for (const line of text.split('\n')) {
+    if (line.startsWith('p')) pid = Number(line.slice(1));
+    else if (line.startsWith('n') && pid !== undefined) out.set(pid, line.slice(1));
+  }
+  return out;
+}
+
+/** `value` settled within `ms`, else a rejection — the timer never holds the process open. */
+function withDeadline<T>(value: T | Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`process probe did not settle within ${ms} ms`)), ms);
+    timer.unref?.();
+    Promise.resolve(value).then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (err: unknown) => {
+        clearTimeout(timer);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      },
+    );
+  });
+}
+
+/**
+ * Every orphan this sweep may signal — run processes (ppid 1, program-region token, cwd inside a run
+ * worktree) and crew-recorded interactive trees (ppid 1, sidecar names the pid, owner gone) — judged
+ * on ONE listing, then CONFIRMED against a fresh listing after the cwd probe's await (codex r2/r3 on
+ * crew#806): the await is a window in which an orphan can exit and its pid be reused, and a
+ * recycled pid is nobody's orphan. A target is confirmed when the fresh listing shows the same pid
+ * with the same command line and the same parent. Both arms go through the re-check, so an
+ * interactive wrapper that died during the probe is never signalled by its pid's new owner.
+ */
+async function orphanTargets(listing: string, io: BridgeReaperIo): Promise<number[]> {
+  const runCandidates = parseOrphanedRunProcesses(listing);
+  const interactive = orphanedInteractiveTargets(listing, io);
+  if (runCandidates.length === 0 && interactive.length === 0) return [];
+  let inWorktree: number[] = [];
+  if (runCandidates.length > 0) {
+    try {
+      // The default reader is bounded by its own probe timeout; the race bounds an injected one
+      // too, so the sweep's in-flight guard can never be held open by a read that does not settle.
+      const cwds = await withDeadline((io.cwds ?? probeCwds)(runCandidates), PROBE_TIMEOUT_MS + 1_000);
+      inWorktree = runCandidates.filter((pid) => inRunWorktree(cwds.get(pid)));
+    } catch {
+      inWorktree = []; // a probe that failed or timed out answers nothing — never kill on uncertainty
+    }
+  }
+  const targets = [...new Set([...inWorktree, ...interactive])];
+  if (targets.length === 0) return [];
+  const again = await (io.list ?? listProcessesAsync)();
+  if (again === null) return []; // cannot confirm → do not reap
+  // Same pid, same command line, same parent as when it was judged: a run orphan keeps ppid 1, an
+  // interactive server keeps its (orphaned) wrapper as parent — a recycled pid matches neither.
+  const before = new Map(parseListing(listing).map((r) => [r.pid, r]));
+  const now = new Map(parseListing(again).map((r) => [r.pid, r]));
+  return targets.filter((pid) => {
+    const was = before.get(pid);
+    const row = now.get(pid);
+    return was !== undefined && row !== undefined && row.ppid === was.ppid && row.command === was.command;
+  });
 }
 
 /**
@@ -373,13 +572,10 @@ function pidRunsInRunWorktree(pid: number): boolean {
  * run worktree, so user-started processes are never matched — AND crew-spawned interactive
  * bridge trees whose owning daemon is gone (ppid 1 AND crew's sidecar names them, F-W1-103).
  */
-export function reapOrphansAtBoot(io: BridgeReaperIo = {}): number[] {
-  const listing = (io.list ?? listProcesses)();
+export async function reapOrphansAtBoot(io: BridgeReaperIo = {}): Promise<number[]> {
+  const listing = await (io.list ?? listProcessesAsync)();
   if (listing === null) return [];
-  const orphans = [
-    ...parseOrphanedRunProcesses(listing).filter((pid) => (io.cwdInWorktree ?? pidRunsInRunWorktree)(pid)),
-    ...orphanedInteractiveTargets(listing, io),
-  ];
+  const orphans = await orphanTargets(listing, io);
   const reaped: number[] = [];
   for (const pid of orphans) {
     try {
@@ -420,16 +616,13 @@ export function orphanSweepMs(raw: string | undefined = process.env['WICKED_CREW
  * STILL in the table now ignored its SIGTERM for a whole interval and gets SIGKILL — the
  * same escalation `shutdown()` runs, at sweep-interval granularity. Exported for tests.
  */
-export function sweepOrphanedRunProcesses(
+export async function sweepOrphanedRunProcesses(
   pendingKill: Set<number>,
   io: BridgeReaperIo = {},
-): { terminated: number[]; killed: number[] } {
-  const listing = (io.list ?? listProcesses)();
+): Promise<{ terminated: number[]; killed: number[] }> {
+  const listing = await (io.list ?? listProcessesAsync)();
   if (listing === null) return { terminated: [], killed: [] };
-  const alive = new Set([
-    ...parseOrphanedRunProcesses(listing).filter((pid) => (io.cwdInWorktree ?? pidRunsInRunWorktree)(pid)),
-    ...orphanedInteractiveTargets(listing, io),
-  ]);
+  const alive = new Set(await orphanTargets(listing, io));
   const kill = io.kill ?? process.kill;
   const terminated: number[] = [];
   const killed: number[] = [];
@@ -465,18 +658,37 @@ export function sweepOrphanedRunProcesses(
 export function startOrphanSweep(intervalMs: number = orphanSweepMs(), io: BridgeReaperIo = {}): () => void {
   if (intervalMs <= 0) return () => {};
   const pendingKill = new Set<number>();
+  let inFlight = false;
+  let stopped = false;
   const timer = setInterval(() => {
-    const { terminated, killed } = sweepOrphanedRunProcesses(pendingKill, io);
-    if (terminated.length > 0 || killed.length > 0) {
-      const killNote = killed.length > 0 ? `; SIGKILLed unresponsive: ${killed.join(', ')}` : '';
-      console.warn(
-        `[bridge-reaper] reaped orphaned worker/bridge process(es) (crew#340): ` +
-          `SIGTERMed ${terminated.join(', ') || '(none)'}${killNote}`,
-      );
+    // One sweep at a time (crew#806): a tick whose predecessor is still probing is skipped, so a
+    // slow host can never stack sweeps — the stall-watchdog's own rule.
+    if (inFlight) {
+      console.warn('[bridge-reaper] orphan sweep SKIPPED — the previous sweep is still in flight (a slow process probe?)');
+      return;
     }
+    inFlight = true;
+    sweepOrphanedRunProcesses(pendingKill, io)
+      .then(({ terminated, killed }) => {
+        if (stopped || (terminated.length === 0 && killed.length === 0)) return;
+        const killNote = killed.length > 0 ? `; SIGKILLed unresponsive: ${killed.join(', ')}` : '';
+        console.warn(
+          `[bridge-reaper] reaped orphaned worker/bridge process(es) (crew#340): ` +
+            `SIGTERMed ${terminated.join(', ') || '(none)'}${killNote}`,
+        );
+      })
+      .catch(() => {
+        /* a sweep never throws by contract; a surprise is not worth a crashed daemon */
+      })
+      .finally(() => {
+        inFlight = false;
+      });
   }, intervalMs);
   timer.unref?.();
-  return () => clearInterval(timer);
+  return () => {
+    stopped = true;
+    clearInterval(timer);
+  };
 }
 
 /** Injectable seams so the reaper is testable without signalling real bridges. */
@@ -485,10 +697,11 @@ export interface BridgeReaperIo {
   kill?: (pid: number, signal: NodeJS.Signals | 0) => void;
   /** Bridge-child discovery; defaults to the process-table sweep above. */
   discover?: (parentPid: number) => number[];
-  /** Orphan-sweep worktree-cwd discriminator; injectable so tests avoid real lsof. */
-  cwdInWorktree?: (pid: number) => boolean;
-  /** Orphan-sweep process listing (`pid ppid command` lines); defaults to the real table. */
-  list?: () => string | null;
+  /** Orphan-sweep cwd reader — ONE call per sweep with every candidate pid (crew#806); injectable so
+   *  tests avoid a real lsof. Defaults to {@link probeCwds}. */
+  cwds?: (pids: number[]) => Promise<Map<number, string>> | Map<number, string>;
+  /** Orphan-sweep process listing (`pid ppid command` lines); defaults to the real table (async). */
+  list?: () => string | null | Promise<string | null>;
   /** Interactive-orphan gate: crew's sidecar for a docs root (F-W1-103); injectable so tests avoid real files. */
   sidecar?: (root: string) => CrewSidecar | null;
   /** Interactive-orphan gate: the live `.wi-serve.json` for a docs root, so a sidecar is checked

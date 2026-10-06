@@ -38,6 +38,8 @@ import {
   parseBridgeChildren,
   parseOrphanedInteractiveBridges,
   parseOrphanedRunProcesses,
+  probeCwds,
+  programRegionOf,
   reapOrphansAtBoot,
   rootArgOf,
   startOrphanSweep,
@@ -52,6 +54,16 @@ const PKG_ROOT = join(HERE, '..');
 const esrch = (): Error => Object.assign(new Error('kill ESRCH'), { code: 'ESRCH' });
 
 const byNumber = (a: number, b: number): number => a - b;
+
+/** A cwd inside an engine run worktree — what every engine-spawned bridge/worker runs from. */
+const WORKTREE_CWD = '/home/op/.wicked-crew/wicked-worktrees/run-7f/repo';
+/** A batched cwd reader (crew#806): every pid `keep` admits runs in a worktree, the rest elsewhere. */
+const worktreeCwds =
+  (keep: (pid: number) => boolean = () => true) =>
+  (pids: number[]): Map<number, string> =>
+    new Map(pids.map((pid) => [pid, keep(pid) ? WORKTREE_CWD : '/home/op']));
+/** No candidate runs in a worktree. */
+const noWorktreeCwds = worktreeCwds(() => false);
 
 /**
  * Spawn a disposable `node -e` child and resolve once it has produced its first
@@ -359,32 +371,32 @@ describe('orphaned run-process sweep (crew#340)', () => {
     expect(parseOrphanedRunProcesses(listing).sort(byNumber)).toEqual([920, 921, 922]);
   });
 
-  it('reapOrphansAtBoot SIGTERMs only worktree-cwd orphans (worker CLIs included)', () => {
+  it('reapOrphansAtBoot SIGTERMs only worktree-cwd orphans (worker CLIs included)', async () => {
     const signals: Array<[number, NodeJS.Signals | 0]> = [];
-    const reaped = reapOrphansAtBoot({
+    const reaped = await reapOrphansAtBoot({
       list: () => [ORPHANED_CLAUDE, ORPHANED_BRIDGE, OPERATOR_CLAUDE, ORPHANED_VIM].join('\n'),
-      cwdInWorktree: (pid) => pid !== 905, // the operator's own claude runs elsewhere
+      cwds: worktreeCwds((pid) => pid !== 905), // the operator's own claude runs elsewhere
       kill: (pid, sig) => signals.push([pid, sig]),
     });
     expect(reaped.sort(byNumber)).toEqual([901, 902]);
     expect(signals.every(([, s]) => s === 'SIGTERM')).toBe(true);
   });
 
-  it('sweepOrphanedRunProcesses escalates: SIGTERM on sight, SIGKILL one tick later', () => {
+  it('sweepOrphanedRunProcesses escalates: SIGTERM on sight, SIGKILL one tick later', async () => {
     const signals: Array<[number, NodeJS.Signals | 0]> = [];
     const io = {
       list: () => [ORPHANED_CLAUDE].join('\n'),
-      cwdInWorktree: () => true,
+      cwds: worktreeCwds(),
       kill: (pid: number, sig: NodeJS.Signals | 0) => signals.push([pid, sig]),
     };
     const pending = new Set<number>();
 
-    const tick1 = sweepOrphanedRunProcesses(pending, io);
+    const tick1 = await sweepOrphanedRunProcesses(pending, io);
     expect(tick1).toEqual({ terminated: [901], killed: [] });
     expect([...pending]).toEqual([901]);
 
     // Still in the table a whole interval later — it ignored SIGTERM; escalate.
-    const tick2 = sweepOrphanedRunProcesses(pending, io);
+    const tick2 = await sweepOrphanedRunProcesses(pending, io);
     expect(tick2).toEqual({ terminated: [], killed: [901] });
     // One escalation per pid, then the slot clears: a stale table that keeps listing a
     // SIGKILLed zombie re-enters at SIGTERM, never a SIGKILL loop.
@@ -395,35 +407,35 @@ describe('orphaned run-process sweep (crew#340)', () => {
     ]);
   });
 
-  it('an orphan that exits during the grace interval is never SIGKILLed', () => {
+  it('an orphan that exits during the grace interval is never SIGKILLed', async () => {
     const signals: Array<[number, NodeJS.Signals | 0]> = [];
     let alive = true;
     const io = {
       list: () => (alive ? ORPHANED_CLAUDE : '   1     0 launchd'),
-      cwdInWorktree: () => true,
+      cwds: worktreeCwds(),
       kill: (pid: number, sig: NodeJS.Signals | 0) => signals.push([pid, sig]),
     };
     const pending = new Set<number>();
-    expect(sweepOrphanedRunProcesses(pending, io).terminated).toEqual([901]);
+    expect((await sweepOrphanedRunProcesses(pending, io)).terminated).toEqual([901]);
     alive = false; // the SIGTERM worked
-    expect(sweepOrphanedRunProcesses(pending, io)).toEqual({ terminated: [], killed: [] });
+    expect(await sweepOrphanedRunProcesses(pending, io)).toEqual({ terminated: [], killed: [] });
     expect(pending.size).toBe(0);
     expect(signals).toEqual([[901, 'SIGTERM']]);
   });
 
-  it('a non-worktree cwd is the hard gate: token-matching orphans elsewhere are untouched', () => {
+  it('a non-worktree cwd is the hard gate: token-matching orphans elsewhere are untouched', async () => {
     const signals: Array<[number, NodeJS.Signals | 0]> = [];
-    const result = sweepOrphanedRunProcesses(new Set(), {
+    const result = await sweepOrphanedRunProcesses(new Set(), {
       list: () => [ORPHANED_CLAUDE, OPERATOR_CLAUDE].join('\n'),
-      cwdInWorktree: (pid) => pid === 901,
+      cwds: worktreeCwds((pid) => pid === 901),
       kill: (pid: number, sig: NodeJS.Signals | 0) => signals.push([pid, sig]),
     });
     expect(result.terminated).toEqual([901]);
     expect(signals.map(([p]) => p)).toEqual([901]);
   });
 
-  it('an unreadable process table is a no-op, never a throw', () => {
-    expect(sweepOrphanedRunProcesses(new Set(), { list: () => null })).toEqual({
+  it('an unreadable process table is a no-op, never a throw', async () => {
+    expect(await sweepOrphanedRunProcesses(new Set(), { list: () => null })).toEqual({
       terminated: [],
       killed: [],
     });
@@ -445,7 +457,7 @@ describe('orphaned run-process sweep (crew#340)', () => {
         lists++;
         return '';
       },
-      cwdInWorktree: () => true,
+      cwds: worktreeCwds(),
       kill: () => {},
     });
     await new Promise((r) => setTimeout(r, 80));
@@ -467,6 +479,178 @@ describe('orphaned run-process sweep (crew#340)', () => {
     await new Promise((r) => setTimeout(r, 30));
     stop();
     expect(lists).toBe(0);
+  });
+});
+
+describe('the orphan sweep never starves the daemon (crew#806)', () => {
+  // The W12 proof host's ppid-1 processes the OLD matcher took for worker CLIs — five `lsof` probes
+  // per 30 s tick, one of which took over 80 s (a crashpad handler in state U). None is ours.
+  const CLAUDE_APP = '  46048     1 /Applications/Claude.app/Contents/MacOS/Claude';
+  const CLAUDE_CRASHPAD =
+    '  46158     1 /Applications/Claude.app/Contents/Frameworks/Electron Framework.framework/Helpers/chrome_crashpad_handler --no-rate-limit --monitor-self-annotation=ptype=crashpad-handler --database=/home/op/Library/Application Support/Claude/Crashpad';
+  const CODEX_FRAMEWORK_CRASHPAD =
+    '  84018     1 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/154.0.8037.98/Helpers/browser_crashpad_handler --monitor-self --database=/home/op/Library/Application Support/com.openai.chat/Crashpad';
+  // The ChatGPT app's embedded codex really IS a `codex` binary: it stays a candidate (its cwd, read
+  // once with everyone else's, clears it) — the matcher narrows to the PROGRAM region, it does not guess.
+  const CODEX_APP_SERVER = '  35959     1 /home/op/.codex/packages/app-server-daemon/releases/0.160.1/bin/codex app-server daemon pid-update-loop';
+  const ENGINE_SHAPES = [
+    '  901     1 node /opt/homebrew/bin/claude --output-format stream-json',
+    `  902     1 node /repo/node_modules/.bin/${BRIDGE_BINS[1]}`,
+    '  903     1 /home/op/.local/bin/codex exec --cd /x',
+    '  904     1 node /repo/node_modules/agent-acp-bridges/wicked-pi.mjs --mode rpc',
+    '  905     1 sh /repo/node_modules/.bin/pi-acp',
+    String.raw`  906     1 "C:\repo\node_modules\.bin\wicked-pi.cmd" --mode rpc`,
+    // POSIX `ps` prints argv unquoted: a path with a space must still be found (codex r1 on crew#806).
+    '  907     1 node /home/op/My Project/node_modules/.bin/pi-acp --mode rpc',
+  ];
+
+  it('programRegionOf: everything before the first -flag token — a path with spaces survives, a flag value is out', () => {
+    expect(programRegionOf('node /opt/homebrew/bin/claude --output-format stream-json')).toBe('node /opt/homebrew/bin/claude');
+    expect(programRegionOf('/home/op/.local/bin/codex exec --cd /x')).toBe('/home/op/.local/bin/codex exec');
+    expect(programRegionOf('sh /repo/node_modules/.bin/pi-acp --x')).toBe('sh /repo/node_modules/.bin/pi-acp');
+    expect(programRegionOf('node /home/op/My Project/node_modules/.bin/pi-acp --mode rpc')).toBe('node /home/op/My Project/node_modules/.bin/pi-acp');
+    expect(programRegionOf(String.raw`"C:\Program Files\x\pi-acp.cmd" --mode rpc`)).toBe(String.raw`"C:\Program Files\x\pi-acp.cmd"`);
+    expect(programRegionOf('claude')).toBe('claude');
+    // (codex r2) a ` -` INSIDE a quoted executable is the path, not a flag.
+    expect(programRegionOf('"/x/My - Project/claude" --print')).toBe('"/x/My - Project/claude"');
+    expect(programRegionOf("'/x/a - b/codex' exec --cd /y")).toBe("'/x/a - b/codex' exec");
+    expect(programRegionOf(CLAUDE_CRASHPAD.replace(/^\s*\d+\s+\d+\s+/, ''))).toBe(
+      '/Applications/Claude.app/Contents/Frameworks/Electron Framework.framework/Helpers/chrome_crashpad_handler',
+    );
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'a desktop app, its crash handlers and a CLI named only inside a --flag are never candidates; every engine shape still is',
+    () => {
+      const listing = [CLAUDE_APP, CLAUDE_CRASHPAD, CODEX_FRAMEWORK_CRASHPAD, CODEX_APP_SERVER, ...ENGINE_SHAPES].join('\n');
+      expect(parseOrphanedRunProcesses(listing).sort(byNumber)).toEqual([901, 902, 903, 904, 905, 906, 907, 35959]);
+    },
+  );
+
+  it('the cwd of every candidate is read with ONE batched call per sweep, and that reading gates the kill', async () => {
+    const batches: number[][] = [];
+    const signals: number[] = [];
+    const result = await sweepOrphanedRunProcesses(new Set(), {
+      list: () => [...ENGINE_SHAPES, CODEX_APP_SERVER].join('\n'),
+      cwds: (pids) => {
+        batches.push([...pids].sort(byNumber));
+        return worktreeCwds((pid) => pid !== 35959 && pid !== 905)(pids);
+      },
+      kill: (pid) => signals.push(pid),
+    });
+    expect(batches).toEqual([[901, 902, 903, 904, 905, 906, 907, 35959]]);
+    expect(result.terminated.sort(byNumber)).toEqual([901, 902, 903, 904, 906, 907]);
+    expect(signals.sort(byNumber)).toEqual([901, 902, 903, 904, 906, 907]);
+  });
+
+  it('a cwd probe that fails, times out or answers for nobody reaps nothing — never kill on uncertainty', async () => {
+    const signals: number[] = [];
+    const rejecting = await sweepOrphanedRunProcesses(new Set(), {
+      list: () => ENGINE_SHAPES.join('\n'),
+      cwds: () => Promise.reject(new Error('lsof: killed after 5000 ms')),
+      kill: (pid) => signals.push(pid),
+    });
+    expect(rejecting).toEqual({ terminated: [], killed: [] });
+    const silent = await reapOrphansAtBoot({
+      list: () => ENGINE_SHAPES.join('\n'),
+      cwds: () => new Map(), // the probe printed nothing for these pids
+      kill: (pid) => signals.push(pid),
+    });
+    expect(silent).toEqual([]);
+    expect(signals).toEqual([]);
+  });
+
+  it('startOrphanSweep never stacks ticks: while one sweep is still probing, the next ticks are skipped', async () => {
+    let lists = 0;
+    let release: (() => void) | undefined;
+    const held = new Promise<Map<number, string>>((resolve) => {
+      release = () => resolve(new Map());
+    });
+    const warned: string[] = [];
+    const warn = console.warn;
+    console.warn = (msg: string) => {
+      warned.push(String(msg));
+    };
+    try {
+      const stop = startOrphanSweep(10, {
+        list: () => {
+          lists++;
+          return ENGINE_SHAPES.join('\n');
+        },
+        cwds: () => held, // a probe that takes longer than the interval
+        kill: () => {},
+      });
+      await new Promise((r) => setTimeout(r, 80));
+      expect(lists, 'one sweep in flight means one listing, however many intervals elapsed').toBe(1);
+      stop();
+      release?.();
+      await held;
+    } finally {
+      console.warn = warn;
+    }
+    expect(warned.some((m) => m.includes('orphan sweep SKIPPED'))).toBe(true);
+  });
+
+  it('a daemon running as pid 1 never takes its OWN children for orphans (codex r2/r3)', () => {
+    // Run the matcher AS pid 1: every ppid-1 row is then this daemon's own child, and none is an orphan.
+    const desc = Object.getOwnPropertyDescriptor(process, 'pid');
+    if (desc === undefined || desc.configurable !== true) {
+      // Cannot impersonate pid 1 on this runtime: at least the parented row must be excluded.
+      expect(parseOrphanedRunProcesses([`  777     ${process.pid} node /opt/homebrew/bin/claude`, ENGINE_SHAPES[0]!].join('\n'))).toEqual([901]);
+      return;
+    }
+    Object.defineProperty(process, 'pid', { ...desc, value: 1 });
+    try {
+      expect(process.pid).toBe(1);
+      expect(parseOrphanedRunProcesses(ENGINE_SHAPES.join('\n'))).toEqual([]);
+    } finally {
+      Object.defineProperty(process, 'pid', desc);
+    }
+    expect(parseOrphanedRunProcesses(ENGINE_SHAPES.join('\n')).length).toBe(ENGINE_SHAPES.length);
+  });
+
+  it('an apostrophe inside a path is a character, not a quote (codex r3): the flag region is still cut off', () => {
+    expect(programRegionOf("/home/op/John's/bin/helper --database=/tmp/claude/cache")).toBe("/home/op/John's/bin/helper");
+    expect(parseOrphanedRunProcesses("  960     1 /home/op/John's/bin/helper --database=/tmp/claude/cache")).toEqual([]);
+  });
+
+  it('an interactive tree whose pid was recycled during the probe is not signalled either (codex r3)', async () => {
+    const signals: number[] = [];
+    let lists = 0;
+    const wrapper = ' 96633     1 npm exec wicked-interactive@^0.9.2 serve --root /home/op/docs/projects/p1';
+    const server = ' 98034 96633 node /opt/npm/bin/wicked-interactive serve --root /home/op/docs/projects/p1';
+    const result = await sweepOrphanedRunProcesses(new Set(), {
+      list: () => (++lists === 1 ? [wrapper, server].join('\n') : [' 96633     1 vim notes.md', server].join('\n')),
+      cwds: () => new Map(),
+      sidecar: (root) =>
+        root === '/home/op/docs/projects/p1' ? { env: {}, startedBy: 'wicked-crew', startedAt: '', pid: 98034, ownerPid: 424242 } : null,
+      ownerAlive: () => false,
+      kill: (pid) => signals.push(pid),
+    });
+    expect(lists).toBe(2);
+    expect(result.terminated).toEqual([98034]); // the server is still the same process; the wrapper's pid is now vim's
+    expect(signals).toEqual([98034]);
+  });
+
+  it('a pid that is no longer the same orphan after the cwd probe is not signalled (recycled pid, codex r2)', async () => {
+    const signals: number[] = [];
+    let lists = 0;
+    const result = await sweepOrphanedRunProcesses(new Set(), {
+      // First listing: 901 (claude) and 903 (codex) are orphans; by the second listing 901 has exited and
+      // its pid now belongs to an operator's vim, 903 is unchanged.
+      list: () => (++lists === 1 ? [ENGINE_SHAPES[0]!, ENGINE_SHAPES[2]!].join('\n') : ['  901     1 vim notes.md', ENGINE_SHAPES[2]!].join('\n')),
+      cwds: worktreeCwds(),
+      kill: (pid) => signals.push(pid),
+    });
+    expect(lists).toBe(2);
+    expect(result.terminated).toEqual([903]);
+    expect(signals).toEqual([903]);
+  });
+
+  it.skipIf(process.platform === 'win32')('probeCwds reads this process\'s own cwd in one call and answers nothing for a pid that is gone', async () => {
+    const cwds = await probeCwds([process.pid, 2 ** 22 - 1]);
+    expect(cwds.get(process.pid)).toBe(process.cwd());
+    expect(cwds.has(2 ** 22 - 1)).toBe(false);
   });
 });
 
@@ -579,11 +763,11 @@ describe('interactive bridge trees (F-W1-103)', () => {
   /** A fake owner check: every recorded owner is alive except the listed pids. */
   const ownerGone = (...dead: number[]) => (s: CrewSidecar): boolean => !dead.includes(s.ownerPid ?? -1);
 
-  it('reapOrphansAtBoot reaps a crew-recorded tree whose owner daemon is gone — the wrapper AND the server; run-process orphans still need their worktree cwd', () => {
+  it('reapOrphansAtBoot reaps a crew-recorded tree whose owner daemon is gone — the wrapper AND the server; run-process orphans still need their worktree cwd', async () => {
     const signals: Array<[number, NodeJS.Signals | 0]> = [];
-    const reaped = reapOrphansAtBoot({
+    const reaped = await reapOrphansAtBoot({
       list: () => ALL,
-      cwdInWorktree: () => false,
+      cwds: noWorktreeCwds,
       sidecar: sidecars({
         [PROJ]: { pid: 98034, ownerPid: DEAD_OWNER },
         [DOCS]: { pid: 9488, ownerPid: DEAD_OWNER },
@@ -597,11 +781,11 @@ describe('interactive bridge trees (F-W1-103)', () => {
     expect(signals.map(([p]) => p).sort(byNumber)).toEqual([8687, 9488, 96633, 98034]);
   });
 
-  it('the sidecar gate: no sidecar (operator / nohup), a sidecar naming ANOTHER pid, no proven owner, or a LIVE owner all leave the tree alone', () => {
+  it('the sidecar gate: no sidecar (operator / nohup), a sidecar naming ANOTHER pid, no proven owner, or a LIVE owner all leave the tree alone', async () => {
     const signals: number[] = [];
-    const reaped = reapOrphansAtBoot({
+    const reaped = await reapOrphansAtBoot({
       list: () => ALL,
-      cwdInWorktree: () => false,
+      cwds: noWorktreeCwds,
       sidecar: sidecars({
         // PROJ: no sidecar at all — nobody recorded it (an operator's own serve).
         [DOCS]: { pid: 4242, ownerPid: DEAD_OWNER }, // names a pid that is not in this tree — a stale record
@@ -615,15 +799,15 @@ describe('interactive bridge trees (F-W1-103)', () => {
     expect(signals).toEqual([]);
   });
 
-  it('a STALE record is no licence for the sweep either: the live lockfile names a DIFFERENT bridge instance on that pid (crew#510)', () => {
+  it('a STALE record is no licence for the sweep either: the live lockfile names a DIFFERENT bridge instance on that pid (crew#510)', async () => {
     // Red before the instance check reached the reaper: crew's own bridge on pid 98034 died, an
     // operator's `wicked-interactive serve --root <same root>` inherited the pid, and the boot
     // sweep SIGTERMed it on the strength of the dead bridge's record — the one rule this gate
     // exists to hold ("never kill a process crew did not start").
     const signals: number[] = [];
-    const reaped = reapOrphansAtBoot({
+    const reaped = await reapOrphansAtBoot({
       list: () => [WRAPPER_4400, SERVER_4400].join('\n'),
-      cwdInWorktree: () => false,
+      cwds: noWorktreeCwds,
       sidecar: sidecars({
         [PROJ]: { pid: 98034, ownerPid: DEAD_OWNER, bridgeStartedAt: '2026-09-01T00:00:00.000Z' },
       }),
@@ -636,11 +820,11 @@ describe('interactive bridge trees (F-W1-103)', () => {
     expect(signals).toEqual([]);
   });
 
-  it('a record that IS about the live bridge instance is still reaped when its owner is gone', () => {
+  it('a record that IS about the live bridge instance is still reaped when its owner is gone', async () => {
     const signals: number[] = [];
-    const reaped = reapOrphansAtBoot({
+    const reaped = await reapOrphansAtBoot({
       list: () => [WRAPPER_4400, SERVER_4400].join('\n'),
-      cwdInWorktree: () => false,
+      cwds: noWorktreeCwds,
       sidecar: sidecars({
         [PROJ]: { pid: 98034, ownerPid: DEAD_OWNER, bridgeStartedAt: '2026-09-29T09:00:00.000Z' },
       }),
@@ -652,18 +836,18 @@ describe('interactive bridge trees (F-W1-103)', () => {
     expect(signals.sort(byNumber)).toEqual([96633, 98034]);
   });
 
-  it('the live sweep escalates an interactive tree like any orphan: SIGTERM on sight, SIGKILL for whatever is still listed one tick later', () => {
+  it('the live sweep escalates an interactive tree like any orphan: SIGTERM on sight, SIGKILL for whatever is still listed one tick later', async () => {
     const signals: Array<[number, NodeJS.Signals | 0]> = [];
     const io = {
       list: () => [WRAPPER_4400, SERVER_4400].join('\n'),
-      cwdInWorktree: () => false,
+      cwds: noWorktreeCwds,
       sidecar: sidecars({ [PROJ]: { pid: 98034, ownerPid: DEAD_OWNER } }),
       ownerAlive: ownerGone(DEAD_OWNER),
       kill: (pid: number, sig: NodeJS.Signals | 0) => signals.push([pid, sig]),
     };
     const pending = new Set<number>();
-    expect(sweepOrphanedRunProcesses(pending, io)).toEqual({ terminated: [96633, 98034], killed: [] });
-    expect(sweepOrphanedRunProcesses(pending, io)).toEqual({ terminated: [], killed: [96633, 98034] });
+    expect(await sweepOrphanedRunProcesses(pending, io)).toEqual({ terminated: [96633, 98034], killed: [] });
+    expect(await sweepOrphanedRunProcesses(pending, io)).toEqual({ terminated: [], killed: [96633, 98034] });
     expect(signals).toEqual([[96633, 'SIGTERM'], [98034, 'SIGTERM'], [96633, 'SIGKILL'], [98034, 'SIGKILL']]);
     expect(pending.size).toBe(0);
   });
@@ -709,8 +893,8 @@ describe('interactive bridge trees (F-W1-103)', () => {
         // Default `list`, `ownerAlive` and `kill`. The sidecar READER is fenced to the fixture root
         // and the run-process arm is switched off: a test must never reap a process outside its own
         // fixture — the host it runs on may carry real orphans the production sweep exists for.
-        const reaped = reapOrphansAtBoot({
-          cwdInWorktree: () => false,
+        const reaped = await reapOrphansAtBoot({
+          cwds: noWorktreeCwds,
           sidecar: (r) => (r === root ? readCrewSidecar(r) : null),
         });
         expect(reaped).toEqual([serverPid]);
