@@ -591,11 +591,45 @@ describe('the orphan sweep never starves the daemon (crew#806)', () => {
     expect(warned.some((m) => m.includes('orphan sweep SKIPPED'))).toBe(true);
   });
 
-  it('a daemon running as pid 1 never takes its OWN children for orphans (codex r2)', () => {
-    const own = `  777     ${process.pid} node /opt/homebrew/bin/claude --output-format stream-json`;
-    // Only meaningful when this process IS pid 1; elsewhere the row is simply parented and excluded
-    // by the ppid rule — either way it must never be a candidate.
-    expect(parseOrphanedRunProcesses([own, ENGINE_SHAPES[0]!].join('\n'))).toEqual([901]);
+  it('a daemon running as pid 1 never takes its OWN children for orphans (codex r2/r3)', () => {
+    // Run the matcher AS pid 1: every ppid-1 row is then this daemon's own child, and none is an orphan.
+    const desc = Object.getOwnPropertyDescriptor(process, 'pid');
+    if (desc === undefined || desc.configurable !== true) {
+      // Cannot impersonate pid 1 on this runtime: at least the parented row must be excluded.
+      expect(parseOrphanedRunProcesses([`  777     ${process.pid} node /opt/homebrew/bin/claude`, ENGINE_SHAPES[0]!].join('\n'))).toEqual([901]);
+      return;
+    }
+    Object.defineProperty(process, 'pid', { ...desc, value: 1 });
+    try {
+      expect(process.pid).toBe(1);
+      expect(parseOrphanedRunProcesses(ENGINE_SHAPES.join('\n'))).toEqual([]);
+    } finally {
+      Object.defineProperty(process, 'pid', desc);
+    }
+    expect(parseOrphanedRunProcesses(ENGINE_SHAPES.join('\n')).length).toBe(ENGINE_SHAPES.length);
+  });
+
+  it('an apostrophe inside a path is a character, not a quote (codex r3): the flag region is still cut off', () => {
+    expect(programRegionOf("/home/op/John's/bin/helper --database=/tmp/claude/cache")).toBe("/home/op/John's/bin/helper");
+    expect(parseOrphanedRunProcesses("  960     1 /home/op/John's/bin/helper --database=/tmp/claude/cache")).toEqual([]);
+  });
+
+  it('an interactive tree whose pid was recycled during the probe is not signalled either (codex r3)', async () => {
+    const signals: number[] = [];
+    let lists = 0;
+    const wrapper = ' 96633     1 npm exec wicked-interactive@^0.9.2 serve --root /home/op/docs/projects/p1';
+    const server = ' 98034 96633 node /opt/npm/bin/wicked-interactive serve --root /home/op/docs/projects/p1';
+    const result = await sweepOrphanedRunProcesses(new Set(), {
+      list: () => (++lists === 1 ? [wrapper, server].join('\n') : [' 96633     1 vim notes.md', server].join('\n')),
+      cwds: () => new Map(),
+      sidecar: (root) =>
+        root === '/home/op/docs/projects/p1' ? { env: {}, startedBy: 'wicked-crew', startedAt: '', pid: 98034, ownerPid: 424242 } : null,
+      ownerAlive: () => false,
+      kill: (pid) => signals.push(pid),
+    });
+    expect(lists).toBe(2);
+    expect(result.terminated).toEqual([98034]); // the server is still the same process; the wrapper's pid is now vim's
+    expect(signals).toEqual([98034]);
   });
 
   it('a pid that is no longer the same orphan after the cwd probe is not signalled (recycled pid, codex r2)', async () => {

@@ -173,7 +173,9 @@ export function programRegionOf(command: string): string {
       if (ch === quote) quote = null;
       continue;
     }
-    if (ch === '"' || ch === "'") {
+    // A quote opens only at a token start (codex r3): POSIX `ps` prints argv unquoted, so the
+    // apostrophe in `/home/op/John's/bin/helper` is a character, not a quote.
+    if ((ch === '"' || ch === "'") && (i === 0 || /\s/.test(command[i - 1] as string))) {
       quote = ch;
       continue;
     }
@@ -513,29 +515,43 @@ function withDeadline<T>(value: T | Promise<T>, ms: number): Promise<T> {
   });
 }
 
-/** The run-process orphans whose cwd the (one) probe places inside a run worktree — and that are
- *  STILL listed as the same orphan after the probe (codex r2 on crew#806): the await is a window in
- *  which an orphan can exit and its pid be reused, and a recycled pid is nobody's orphan. */
-async function worktreeOrphans(listing: string, io: BridgeReaperIo): Promise<number[]> {
-  const candidates = parseOrphanedRunProcesses(listing);
-  if (candidates.length === 0) return [];
-  let cwds: Map<number, string>;
-  try {
-    // The default reader is bounded by its own probe timeout; the race bounds an injected one too,
-    // so the sweep's in-flight guard can never be held open by a read that does not settle.
-    cwds = await withDeadline((io.cwds ?? probeCwds)(candidates), PROBE_TIMEOUT_MS + 1_000);
-  } catch {
-    return []; // a probe that failed or timed out answers nothing — never kill on uncertainty
+/**
+ * Every orphan this sweep may signal — run processes (ppid 1, program-region token, cwd inside a run
+ * worktree) and crew-recorded interactive trees (ppid 1, sidecar names the pid, owner gone) — judged
+ * on ONE listing, then CONFIRMED against a fresh listing after the cwd probe's await (codex r2/r3 on
+ * crew#806): the await is a window in which an orphan can exit and its pid be reused, and a
+ * recycled pid is nobody's orphan. A target is confirmed when the fresh listing shows the same pid
+ * with the same command line and the same parent. Both arms go through the re-check, so an
+ * interactive wrapper that died during the probe is never signalled by its pid's new owner.
+ */
+async function orphanTargets(listing: string, io: BridgeReaperIo): Promise<number[]> {
+  const runCandidates = parseOrphanedRunProcesses(listing);
+  const interactive = orphanedInteractiveTargets(listing, io);
+  if (runCandidates.length === 0 && interactive.length === 0) return [];
+  let inWorktree: number[] = [];
+  if (runCandidates.length > 0) {
+    try {
+      // The default reader is bounded by its own probe timeout; the race bounds an injected one
+      // too, so the sweep's in-flight guard can never be held open by a read that does not settle.
+      const cwds = await withDeadline((io.cwds ?? probeCwds)(runCandidates), PROBE_TIMEOUT_MS + 1_000);
+      inWorktree = runCandidates.filter((pid) => inRunWorktree(cwds.get(pid)));
+    } catch {
+      inWorktree = []; // a probe that failed or timed out answers nothing — never kill on uncertainty
+    }
   }
-  const inWorktree = candidates.filter((pid) => inRunWorktree(cwds.get(pid)));
-  if (inWorktree.length === 0) return [];
-  // Identity re-check: the same pid, still parented to init, still a run-process command line.
+  const targets = [...new Set([...inWorktree, ...interactive])];
+  if (targets.length === 0) return [];
   const again = await (io.list ?? listProcessesAsync)();
   if (again === null) return []; // cannot confirm → do not reap
-  const before = new Map(parseListing(listing).map((r) => [r.pid, r.command]));
-  const now = new Map(parseListing(again).map((r) => [r.pid, r.command]));
-  const stillOrphans = new Set(parseOrphanedRunProcesses(again));
-  return inWorktree.filter((pid) => stillOrphans.has(pid) && now.get(pid) === before.get(pid));
+  // Same pid, same command line, same parent as when it was judged: a run orphan keeps ppid 1, an
+  // interactive server keeps its (orphaned) wrapper as parent — a recycled pid matches neither.
+  const before = new Map(parseListing(listing).map((r) => [r.pid, r]));
+  const now = new Map(parseListing(again).map((r) => [r.pid, r]));
+  return targets.filter((pid) => {
+    const was = before.get(pid);
+    const row = now.get(pid);
+    return was !== undefined && row !== undefined && row.ppid === was.ppid && row.command === was.command;
+  });
 }
 
 /**
@@ -547,7 +563,7 @@ async function worktreeOrphans(listing: string, io: BridgeReaperIo): Promise<num
 export async function reapOrphansAtBoot(io: BridgeReaperIo = {}): Promise<number[]> {
   const listing = await (io.list ?? listProcessesAsync)();
   if (listing === null) return [];
-  const orphans = [...(await worktreeOrphans(listing, io)), ...orphanedInteractiveTargets(listing, io)];
+  const orphans = await orphanTargets(listing, io);
   const reaped: number[] = [];
   for (const pid of orphans) {
     try {
@@ -594,7 +610,7 @@ export async function sweepOrphanedRunProcesses(
 ): Promise<{ terminated: number[]; killed: number[] }> {
   const listing = await (io.list ?? listProcessesAsync)();
   if (listing === null) return { terminated: [], killed: [] };
-  const alive = new Set([...(await worktreeOrphans(listing, io)), ...orphanedInteractiveTargets(listing, io)]);
+  const alive = new Set(await orphanTargets(listing, io));
   const kill = io.kill ?? process.kill;
   const terminated: number[] = [];
   const killed: number[] = [];
