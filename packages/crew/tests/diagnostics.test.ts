@@ -237,6 +237,26 @@ describe('component version readers', () => {
     }
   });
 
+  it('engineBinaryVersions probes the SAME wicked-estate the indexer resolves — WICKED_ESTATE_EXE, not a bare PATH lookup (crew#804)', async () => {
+    // Red before crew#804: the daemon indexed and grounded with the override's 0.20.0 while
+    // /diagnostics reported whatever older `wicked-estate` sat first on PATH (0.16.7 on the W12 proof
+    // stack) — the one place an operator can read the installed stack lied about estate.
+    const calls: string[] = [];
+    const exec = async (file: string): Promise<{ stdout: string; stderr: string }> => {
+      calls.push(file);
+      return { stdout: file === '/opt/estate-0.20.0/wicked-estate' ? 'wicked-estate 0.20.0 — usage:\n' : 'wicked-estate 0.16.7 — usage:\n', stderr: '' };
+    };
+    const saved = process.env['WICKED_ESTATE_EXE'];
+    process.env['WICKED_ESTATE_EXE'] = '/opt/estate-0.20.0/wicked-estate';
+    try {
+      expect(await engineBinaryVersions(exec)).toEqual({ [CORE_BIN]: null, [ESTATE_BIN]: '0.20.0' });
+      expect(calls).toEqual(['/opt/estate-0.20.0/wicked-estate']);
+    } finally {
+      if (saved === undefined) delete process.env['WICKED_ESTATE_EXE'];
+      else process.env['WICKED_ESTATE_EXE'] = saved;
+    }
+  });
+
   it('a failing probe answers null, never a throw', async () => {
     const exec = async (): Promise<{ stdout: string; stderr: string }> => {
       throw new Error('ENOENT');

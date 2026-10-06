@@ -26,6 +26,7 @@ import { createInterface } from 'node:readline';
 
 import { CoreAdapter } from '../core/adapter.js';
 import { execCapped } from '../core/exec.js';
+import { estateExe } from '../projects/graph.js';
 import { stateHomeOfDb } from '../projects/state-home.js';
 
 // ── ACP fold ─────────────────────────────────────────────────────────────────
@@ -490,8 +491,11 @@ type ExecLike = (
  *   - `wicked-core`: the standalone engine binary the adapter resolves at construction for the
  *     gate-hook command and publishes as `WICKED_CORE_EXE`. Env unset = crew never resolved
  *     one = `null`.
- *   - `wicked-estate`: invoked by bare name on PATH, exactly as the graph-view/blast-radius
- *     routes do. Not on PATH = `null`.
+ *   - `wicked-estate`: the executable the repo/project indexer resolves — `WICKED_ESTATE_EXE`, else
+ *     the bare name on PATH (`projects/graph.ts` `estateExe()`), exactly as the graph-view /
+ *     blast-radius routes spawn it. crew#804: a bare `probe('wicked-estate')` reported whatever
+ *     older build sat first on PATH while the daemon indexed and grounded with the override, so the
+ *     one place an operator reads the installed stack lied about estate. Unresolvable = `null`.
  *
  * Under a test runner the probes are SKIPPED (both `null`) unless an exec is injected — the
  * seat-health-probe posture: a test-built server never spawns CLI children by default.
@@ -514,7 +518,7 @@ export async function engineBinaryVersions(exec?: ExecLike): Promise<Record<stri
   const coreExe = process.env['WICKED_CORE_EXE'];
   const [core, estate] = await Promise.all([
     coreExe !== undefined && coreExe !== '' ? probe(coreExe) : Promise.resolve(null),
-    probe('wicked-estate'),
+    probe(estateExe()),
   ]);
   return { 'wicked-core': core, 'wicked-estate': estate };
 }
