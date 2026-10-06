@@ -39,6 +39,7 @@ import { mkdirSync, existsSync, rmSync, statSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { InteractiveHandoffLedger } from './ledger.js';
+import { reviewPartitionOf as projectPartitionOf } from './review-ledger.js';
 import {
   DRAFT_SKILL,
   draftQualityClause,
@@ -509,8 +510,61 @@ export interface DraftGrounding {
 }
 
 /** Deterministic bus idempotency key for the one draft this seam may land per document. */
-export function draftIdempotencyKey(documentId: string): string {
-  return `crew:interactive.draft:${documentId}:v1`;
+export function draftIdempotencyKey(documentId: string, projectId?: string): string {
+  const partition = projectPartitionOf(projectId);
+  // crew#809: the bus resolves a repeated key to the existing row, so a same-slug document in
+  // ANOTHER project must announce under its own key or its draft.completed is silently dropped.
+  return partition === '_unfiled'
+    ? `crew:interactive.draft:${documentId}:v1`
+    : `crew:interactive.draft:${documentId}:${partition}:v1`;
+}
+
+// ── Per-project identity of a draft (crew#809) ────────────────────────────────────────────────
+//
+// A document slug is unique within ONE project (the bridge, its docs root and the slug grammar are
+// all per project — review-events.ts partitions its rows the same way), so the draft leg's dedupe
+// key, its idempotency key and its per-run directory carry the project too. An UNFILED document
+// (no project, or the `default` mount alias) keeps the historical bare `<doc>` key and `<doc>/`
+// directory — every ledger row written before this release is an unfiled-or-filed `<doc>` row,
+// and only the unfiled ones are still consulted by that spelling: the subscription is live-only
+// (no backlog replay), and a dead-lettered pre-upgrade frame never had a row to begin with.
+
+/** The dedupe unit of the draft leg: one first draft per document PER PROJECT. `<doc>` when
+ *  unfiled (legacy spelling), `<doc>:draft:<partition>` when filed — it starts `<doc>:` like every
+ *  handoff key, so the doc↔run index and the delete sweep see it. */
+export function draftHandoffKey(documentId: string, projectId?: string): string {
+  const partition = projectPartitionOf(projectId);
+  return partition === '_unfiled' ? documentId : `${documentId}:draft:${partition}`;
+}
+
+/** Is `key` a draft row of the name `documentId` that is NOT this document's — another project's
+ *  (`<doc>:draft:<other partition>`), or, when THIS document is filed, the UNFILED document's bare
+ *  `<doc>` row? The delete sweep keeps those: deleting one project's document must not make a
+ *  same-named document elsewhere forget that it was drafted (the review seam's
+ *  `isAnotherProjectsReviewKey`, for drafts; codex on crew#809 for the unfiled row). */
+export function isAnotherProjectsDraftKey(key: string, documentId: string, projectId: string | undefined): boolean {
+  const own = draftHandoffKey(documentId, projectId);
+  if (key === own) return false;
+  if (key.startsWith(`${documentId}:draft:`)) return true;
+  return key === documentId && own !== documentId; // the unfiled document's row, when this one is filed
+}
+
+/** The per-run directory under the draft root is `<doc>` for every project — studio's run↔thread
+ *  binding reads `interactive-drafts/<doc>` back off the run's write root and narrows by `project_id`
+ *  (`wicked-studio src/interactive/runBinding.ts`), so the directory grammar cannot carry the
+ *  partition. Residual, documented: two projects drafting the SAME slug at the SAME time share that
+ *  per-doc directory (deliverable name and snapshot subdir); their keys, announces and ledger rows
+ *  do not. */
+
+/** wicked-studio's brand-learn scratch document (`src/theming/scratchDoc.ts`): a FIXED name, kind
+ *  `source`, a FIXED brief, one per project, created so a theme learn has a workspace to land tokens
+ *  in. It is never a document a person asked to have drafted — answering its creation with a
+ *  governed run spent a council and a worker on a scratch pad (crew#811). Matched on the name AND
+ *  the brief's fixed opening (codex: a person may legitimately name a document `brand-learn`). */
+export const STUDIO_SCRATCH_DOC_NAME = 'brand-learn';
+export const STUDIO_SCRATCH_DOC_BRIEF_PREFIX = 'Scratch document wicked-studio uses to learn brand themes';
+export function isStudioScratchDoc(doc: { documentId: string; brief: string }): boolean {
+  return doc.documentId === STUDIO_SCRATCH_DOC_NAME && doc.brief.trimStart().startsWith(STUDIO_SCRATCH_DOC_BRIEF_PREFIX);
 }
 
 // ── Durable per-doc ledger (replay-dedup across redelivery AND daemon restarts) ──────────────
@@ -712,7 +766,9 @@ export async function startInteractiveDraftSubscriber(
   // `inFlightDocs()` is what serializes the chat seam's asks (CREW-UX-5 contract (c)), and a floor
   // that takes seconds — up to its 120 s bound — would otherwise let an iteration ask launch
   // against the placeholder while the first draft was still being judged.
-  const finalizing = new Set<string>();
+  // Keyed by the per-project handoff key (crew#809: two projects finalizing the same slug must not
+  // clear each other's marker); the VALUE is the document id `inFlightDocs()` reports.
+  const finalizing = new Map<string, string>();
   let closed = false; // set by stop(): a handler mid-snapshot must never launch after shutdown
 
   /** Emit onto interactive's vocabulary as the `wi-crew` producer. Never throws into the
@@ -911,13 +967,13 @@ export async function startInteractiveDraftSubscriber(
     if (event.type === 'sessionCompleted') {
       endFlight(runId);
       // The doc stays busy until the floor and the announce are done (codex on crew#725).
-      finalizing.add(flight.documentId);
+      finalizing.set(draftHandoffKey(flight.documentId, flight.projectId), flight.documentId);
       // The announce awaits the bus writer; a throw is logged, as a synchronous one was.
       finalize(flight, runId)
         .catch((err: unknown) =>
           log(`[interactive-draft] finalizing run ${runId} failed: ${err instanceof Error ? err.message : String(err)}`),
         )
-        .finally(() => finalizing.delete(flight.documentId));
+        .finally(() => finalizing.delete(draftHandoffKey(flight.documentId, flight.projectId)));
       return;
     }
 
@@ -932,7 +988,7 @@ export async function startInteractiveDraftSubscriber(
     if (event.type === 'sessionFailed' || event.type === 'runCancelled') {
       endFlight(runId);
       removeSnapshots(flight); // the failure path cleans its snapshots too (CREW-UX-8 v4)
-      ledger.recordFailure(flight.documentId);
+      ledger.recordFailure(draftHandoffKey(flight.documentId, flight.projectId));
       const why =
         flight.failureDetail !== undefined ? ` Reason: ${oneLine(flight.failureDetail, 600)}` : '';
       emitStatus({
@@ -957,7 +1013,7 @@ export async function startInteractiveDraftSubscriber(
     if (!ok) {
       // The run is terminal — its grounding snapshots are done serving reads.
       removeSnapshots(flight);
-      ledger.recordFailure(documentId);
+      ledger.recordFailure(draftHandoffKey(documentId, projectId));
       emitStatus({
         ...docScope(documentId, projectId),
         state: 'error',
@@ -986,7 +1042,7 @@ export async function startInteractiveDraftSubscriber(
       log(`[interactive-draft] run ${runId} draft floor: ${floorVerdict.verdict} — ${floorVerdict.summary}`);
     }
     if (floorVerdict?.verdict === 'fail') {
-      ledger.recordFailure(documentId);
+      ledger.recordFailure(draftHandoffKey(documentId, projectId));
       emitStatus({
         ...docScope(documentId, projectId),
         state: 'error',
@@ -1010,13 +1066,13 @@ export async function startInteractiveDraftSubscriber(
     const emitted = await emitInteractive(
       DRAFT_COMPLETED,
       { ...docScope(documentId, projectId), html_path: outPath },
-      draftIdempotencyKey(documentId),
+      draftIdempotencyKey(documentId, projectId),
     );
     if (!emitted) {
       // The bus refused the announce: the draft exists on disk but never reached
       // the service. Fail HONEST — leaving the ledger row launched-but-never-closed would
       // silently eat every replay of this doc (the launch gate is `ledger.has`).
-      ledger.recordFailure(documentId);
+      ledger.recordFailure(draftHandoffKey(documentId, projectId));
       emitStatus({
         ...docScope(documentId, projectId),
         state: 'error',
@@ -1027,7 +1083,7 @@ export async function startInteractiveDraftSubscriber(
       log(`[interactive-draft] draft.completed emit FAILED for doc ${documentId} (run ${runId}) — recorded as failure`);
       return;
     }
-    ledger.recordEmitted(documentId);
+    ledger.recordEmitted(draftHandoffKey(documentId, projectId));
     emitStatus({
       ...docScope(documentId, projectId),
       state: 'complete',
@@ -1039,17 +1095,27 @@ export async function startInteractiveDraftSubscriber(
   async function handleDocCreated(event: BusEvent): Promise<void> {
     const doc = parseSourceDocCreated(event.event_type, event.payload);
     if (doc === null) return;
+    const where = doc.projectId !== undefined ? ` (project ${doc.projectId})` : ' (unfiled)';
 
-    // Replay-dedup: the ledger is the durable gate (redelivery after crash/restart), the
-    // in-flight scan the live one (redelivery inside a single process lifetime).
-    if (ledger.has(doc.documentId)) {
+    // crew#811: studio's theme-learning scratch pad is not a drafting request.
+    if (isStudioScratchDoc(doc)) {
       log(
-        `[interactive-draft] doc ${doc.documentId} already answered (run ${ledger.get(doc.documentId)?.runId}) — replay ignored`,
+        `[interactive-draft] doc ${doc.documentId}${where} is wicked-studio's brand-learn scratch document — ` +
+          `no draft run is launched for it (crew#811)`,
       );
       return;
     }
+
+    // Replay-dedup: the ledger is the durable gate (redelivery after crash/restart), the
+    // in-flight scan the live one (redelivery inside a single process lifetime). Keyed per
+    // PROJECT (crew#809): the same slug in another project is another document.
+    const key = draftHandoffKey(doc.documentId, doc.projectId);
+    if (ledger.has(key)) {
+      log(`[interactive-draft] doc ${doc.documentId}${where} already answered (run ${ledger.get(key)?.runId}) — replay ignored`);
+      return;
+    }
     for (const f of inFlight.values()) {
-      if (f.documentId === doc.documentId) return;
+      if (f.documentId === doc.documentId && f.projectId === doc.projectId) return;
     }
 
     // Per-run ISOLATION (Copilot, crew#313): every launch gets its OWN subdirectory holding
@@ -1354,7 +1420,7 @@ export async function startInteractiveDraftSubscriber(
     // Record AFTER the launch resolved: a failed launch leaves no ledger row, so a replayed
     // delivery retries. The crash window between launch and this write is the reason the
     // draft emit ALSO carries a deterministic idempotency key.
-    ledger.recordLaunch(doc.documentId, runId);
+    ledger.recordLaunch(key, runId);
     if (closed) {
       // stop() ran while the engine was accepting the launch: its sweep already dropped the
       // placeholder and the snapshot, and the engine's workers die with the daemon — the
@@ -1405,7 +1471,7 @@ export async function startInteractiveDraftSubscriber(
   return {
     ledger,
     inFlightDocs: () => [
-      ...new Set([...[...inFlight.values()].map((f) => f.documentId), ...finalizing]),
+      ...new Set([...[...inFlight.values()].map((f) => f.documentId), ...finalizing.values()]),
     ],
     stop: async () => {
       closed = true; // a handler mid-snapshot sees this and never launches (Copilot round 2)

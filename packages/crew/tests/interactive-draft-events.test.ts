@@ -39,11 +39,42 @@ import {
   SNAPSHOT_PATH_MAX,
   resolveProjectRepo,
   startInteractiveDraftSubscriber,
+  draftHandoffKey,
+  isAnotherProjectsDraftKey,
+  STUDIO_SCRATCH_DOC_BRIEF_PREFIX,
+  STUDIO_SCRATCH_DOC_NAME,
 } from '../src/interactive/draft-events.js';
 import { DocGroundingStore } from '../src/interactive/doc-grounding.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent, LaunchRunInput, WorkflowDef } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
+
+
+/** The project each bound fixture document is created in (crew#809: keys and run dirs carry it). */
+const PROJECT_OF: Record<string, string> = {
+  'spike-doc': 'proj-7',
+  'bound-doc': 'proj-7',
+  'dying-doc': 'proj-7',
+  'repo-doc': 'proj-repo',
+  'big-doc': 'proj-repo',
+  'trapped-doc': 'proj-repo',
+  'slow-doc': 'proj-repo',
+  'wedged-doc': 'proj-repo',
+  'ok-doc': 'proj-repo',
+  'dead-doc': 'proj-repo',
+  'live-doc': 'proj-repo',
+  'stale-doc': 'proj-repo',
+  'bare-doc': 'proj-bare',
+  'bare-inside': 'proj-bare',
+  'unverifiable': 'proj-bare',
+  'brochure': 'proj-multi',
+  'anon-doc': 'proj-multi',
+  'brief-doc': 'proj-multi',
+  'ghost-doc': 'proj-multi',
+  'late-doc': 'proj-multi',
+};
+/** The draft leg's ledger key for a fixture document (bare when unfiled). */
+const keyOf = (doc: string): string => draftHandoffKey(doc, PROJECT_OF[doc]);
 
 describe('parseSourceDocCreated', () => {
   const payload = {
@@ -695,7 +726,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     expect((draft.payload as { html_path?: string }).html_path).toBe(outPath);
     expect((draft.payload as { document_id?: string }).document_id).toBe('spike-doc');
     expect(draft.producer_id).toBe(INTERACTIVE_PRODUCER);
-    expect(draft.idempotency_key).toBe(draftIdempotencyKey('spike-doc'));
+    expect(draft.idempotency_key).toBe(draftIdempotencyKey('spike-doc', 'proj-7'));
 
     // …and closes out with a complete status.
     await waitFor(() =>
@@ -705,7 +736,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
           (e.payload as { state?: string }).state === 'complete',
       ),
     );
-    expect(sub!.ledger.get('spike-doc')?.emittedAt).toBeTruthy();
+    expect(sub!.ledger.get(keyOf('spike-doc'))?.emittedAt).toBeTruthy();
   });
 
   it('a REPLAYED doc.created launches no second run (ledger dedupe), and a second completion emits no second draft', async () => {
@@ -737,7 +768,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     mkdirSync(join(draftDir, 'spike-doc'), { recursive: true });
     writeFileSync(outPath, '<html><body>ok</body></html>', 'utf8');
     engine.fire({ type: 'sessionCompleted', session: runId });
-    await waitFor(() => sub!.ledger.get('spike-doc')?.emittedAt !== undefined);
+    await waitFor(() => sub!.ledger.get(keyOf('spike-doc'))?.emittedAt !== undefined);
     engine.fire({ type: 'sessionCompleted', session: runId }); // in-flight entry is gone — a no-op
     armProbe(bus);
     await waitFor(() => probeEvents.some((e) => e.event_type === DRAFT_COMPLETED));
@@ -764,6 +795,121 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     expect(engine2.launches.length, 'the durable ledger survives a restart').toBe(0);
   });
 
+
+  it('a same-slug document in ANOTHER project is another document: its own run, its own ledger row, its own announce (crew#809)', async () => {
+    // Red before crew#809: W12 chapter 30 — the same brief asked in two projects 9 minutes apart; the
+    // second doc.created was logged "already answered — replay ignored" and project B's document stayed
+    // at head 0 forever (the ledger, the in-flight scan and the idempotency key were all keyed by the
+    // slug alone, though a slug is only unique within one project).
+    const bus = await import('wicked-bus');
+    const engine = fakeAdapter();
+    const draftDir = join(dir, 'drafts');
+    const logs: string[] = [];
+    const sub = await startInteractiveDraftSubscriber(engine.asAdapter(), {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'ledger.json'),
+      draftDir,
+      clisJson: SEATS,
+      log: (m) => logs.push(m),
+    });
+    subs.push(sub!);
+    armProbe(bus);
+
+    await emitDocCreated(bus, 'welcome-page', { project_id: 'proj-a' });
+    await waitFor(() => engine.launches.length === 1);
+    await emitDocCreated(bus, 'welcome-page', { project_id: 'proj-b' });
+    await waitFor(() => engine.launches.length === 2, 3000);
+    expect(logs.some((m) => m.includes('already answered')), logs.join('\n')).toBe(false);
+    const [a, b] = engine.launches as [LaunchRunInput, LaunchRunInput];
+    expect(a.projectId).toBe('proj-a');
+    expect(b.projectId).toBe('proj-b');
+    // The per-doc directory is the SAME (studio's run binding reads `interactive-drafts/<doc>` back and
+    // narrows by project); the keys are not.
+    expect(a.extraWriteRoots).toEqual([join(draftDir, 'welcome-page')]);
+    expect(b.extraWriteRoots).toEqual([join(draftDir, 'welcome-page')]);
+    expect(sub!.ledger.get(draftHandoffKey('welcome-page', 'proj-a'))?.runId).toBe(a.sessionId);
+    expect(sub!.ledger.get(draftHandoffKey('welcome-page', 'proj-b'))?.runId).toBe(b.sessionId);
+    expect(sub!.ledger.has('welcome-page')).toBe(false); // no bare (unfiled) row was written for either
+
+    // The replay rule still holds WITHIN a project.
+    await emitDocCreated(bus, 'welcome-page', { project_id: 'proj-a' });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(engine.launches.length).toBe(2);
+    expect(logs.some((m) => m.includes('already answered'))).toBe(true);
+
+    // Both drafts complete: two announces, each under its own idempotency key and project.
+    mkdirSync(join(draftDir, 'welcome-page'), { recursive: true });
+    writeFileSync(join(draftDir, 'welcome-page', 'welcome-page-v1.html'), '<html><body>ok</body></html>', 'utf8');
+    engine.fire({ type: 'sessionCompleted', session: a.sessionId });
+    engine.fire({ type: 'sessionCompleted', session: b.sessionId });
+    await waitFor(() => probeEvents.filter((e) => e.event_type === DRAFT_COMPLETED).length === 2, 8000);
+    const announces = probeEvents.filter((e) => e.event_type === DRAFT_COMPLETED);
+    expect(announces.map((e) => e.idempotency_key).sort()).toEqual(
+      [draftIdempotencyKey('welcome-page', 'proj-a'), draftIdempotencyKey('welcome-page', 'proj-b')].sort(),
+    );
+    expect(announces.map((e) => (e.payload as { project_id?: string }).project_id).sort()).toEqual(['proj-a', 'proj-b']);
+    await waitFor(() => sub!.ledger.get(draftHandoffKey('welcome-page', 'proj-b'))?.emittedAt !== undefined);
+    expect(sub!.ledger.get(draftHandoffKey('welcome-page', 'proj-a'))?.emittedAt).toBeTruthy();
+
+    // Deleting project A's document keeps project B's row AND the unfiled document's (the delete sweep's `keep`).
+    expect(isAnotherProjectsDraftKey(draftHandoffKey('welcome-page', 'proj-b'), 'welcome-page', 'proj-a')).toBe(true);
+    expect(isAnotherProjectsDraftKey(draftHandoffKey('welcome-page', 'proj-a'), 'welcome-page', 'proj-a')).toBe(false);
+    expect(isAnotherProjectsDraftKey('welcome-page', 'welcome-page', 'proj-a')).toBe(true); // the UNFILED document's row
+    expect(isAnotherProjectsDraftKey('welcome-page', 'welcome-page', undefined)).toBe(false); // deleting the unfiled one drops it
+    expect(isAnotherProjectsDraftKey(draftHandoffKey('welcome-page', 'proj-a'), 'welcome-page', undefined)).toBe(true);
+    const ledgerKeep = sub!.ledger;
+    ledgerKeep.recordLaunch('welcome-page', 'run-unfiled');
+    const removed = ledgerKeep.removeDoc('welcome-page', (key) => isAnotherProjectsDraftKey(key, 'welcome-page', 'proj-a'));
+    expect(removed).toEqual([draftHandoffKey('welcome-page', 'proj-a')]);
+    expect(ledgerKeep.has(draftHandoffKey('welcome-page', 'proj-b'))).toBe(true);
+    expect(ledgerKeep.has('welcome-page')).toBe(true);
+  });
+
+  it('keys: unfiled keeps the bare legacy spelling; filed carries the project partition', () => {
+    expect(draftHandoffKey('my-doc')).toBe('my-doc');
+    expect(draftHandoffKey('my-doc', 'default')).toBe('my-doc'); // the mount alias is not a project
+    expect(draftHandoffKey('my-doc', 'proj-7')).toBe('my-doc:draft:p-proj-7');
+    expect(draftIdempotencyKey('my-doc')).toBe('crew:interactive.draft:my-doc:v1');
+    expect(draftIdempotencyKey('my-doc', 'proj-7')).toBe('crew:interactive.draft:my-doc:p-proj-7:v1');
+  });
+
+  it("studio's brand-learn scratch document launches NO draft run — it is a theme-learning pad, not a request (crew#811)", async () => {
+    // Red before crew#811: W12 chapter 23 — Learn from a brand created `brand-learn` (kind source, a fixed
+    // brief) and this seam answered it with governed run 1c04074a, a council + worker spend on a scratch pad.
+    const bus = await import('wicked-bus');
+    const engine = fakeAdapter();
+    const logs: string[] = [];
+    const sub = await startInteractiveDraftSubscriber(engine.asAdapter(), {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'ledger.json'),
+      draftDir: join(dir, 'drafts'),
+      clisJson: SEATS,
+      log: (m) => logs.push(m),
+    });
+    subs.push(sub!);
+    expect(STUDIO_SCRATCH_DOC_NAME).toBe('brand-learn');
+    await emitDocCreated(bus, STUDIO_SCRATCH_DOC_NAME, {
+      project_id: 'proj-7',
+      brief: `${STUDIO_SCRATCH_DOC_BRIEF_PREFIX}. Each "learn from a brand" run on the /theme page points the bridge at a source and reads the learned tokens back from this document\u2019s workspace.`,
+    });
+    await emitDocCreated(bus, 'real-doc', { project_id: 'proj-7' });
+    await waitFor(() => engine.launches.length === 1);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(engine.launches.map((l) => l.problem).join('\n')).not.toContain('brand-learn');
+    expect(engine.launches.length).toBe(1);
+    expect(sub!.ledger.has(draftHandoffKey(STUDIO_SCRATCH_DOC_NAME, 'proj-7'))).toBe(false);
+    expect(logs.some((m) => m.includes('brand-learn') && m.includes('crew#811'))).toBe(true);
+    expect(sub!.inFlightDocs()).not.toContain(STUDIO_SCRATCH_DOC_NAME);
+    // A person's OWN document that happens to be named brand-learn (an ordinary brief) is drafted: the
+    // name alone does not establish scratch provenance (codex r1) — the fixed brief does.
+    await emitDocCreated(bus, STUDIO_SCRATCH_DOC_NAME, { project_id: 'proj-8', brief: 'A one-page guide to learning our brand voice.' });
+    await waitFor(() => engine.launches.length === 2, 3000);
+    expect(engine.launches[1]!.problem).toContain('"brand-learn"');
+  });
   it('a failed run posts an error status, records the failure, and emits no draft', async () => {
     const bus = await import('wicked-bus');
     const engine = fakeAdapter();
@@ -789,7 +935,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
       ),
     );
     expect(probeEvents.some((e) => e.event_type === DRAFT_COMPLETED)).toBe(false);
-    expect(sub!.ledger.get('spike-doc')?.failedAt).toBeTruthy();
+    expect(sub!.ledger.get(keyOf('spike-doc'))?.failedAt).toBeTruthy();
   });
 
   // ── crew#621 / crew#504: the document floor, re-derived by crew ────────────────────────────
@@ -864,7 +1010,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     // Nothing was landed on the canvas, and the doc is not marked emitted.
     await new Promise((r) => setTimeout(r, 200));
     expect(probeEvents.filter((e) => e.event_type === DRAFT_COMPLETED)).toEqual([]);
-    expect(sub!.ledger.get('spike-doc')?.emittedAt).toBeUndefined();
+    expect(sub!.ledger.get(keyOf('spike-doc'))?.emittedAt).toBeUndefined();
   });
 
   it('keeps the document BUSY while the floor is still judging it — an iteration ask must not race the first draft (codex on crew#725)', async () => {
@@ -909,7 +1055,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     await new Promise((r) => setTimeout(r, 100));
     expect(sub!.inFlightDocs()).toContain('spike-doc');
     release!();
-    await waitFor(() => sub!.ledger.get('spike-doc')?.emittedAt !== undefined);
+    await waitFor(() => sub!.ledger.get(keyOf('spike-doc'))?.emittedAt !== undefined);
     await waitFor(() => !sub!.inFlightDocs().includes('spike-doc'));
   });
 
@@ -950,7 +1096,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
       ),
       'the reader is told the floor did not run',
     ).toBe(true);
-    expect(sub!.ledger.get('spike-doc')?.emittedAt).toBeTruthy();
+    expect(sub!.ledger.get(keyOf('spike-doc'))?.emittedAt).toBeTruthy();
   });
 
   // ── crew#311: the deliverable floor ────────────────────────────────────────────────────────
@@ -1050,7 +1196,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
       ),
     );
     // …and no ledger row exists, so a later replay (e.g. DLQ redrive) gets a real retry.
-    expect(sub!.ledger.has('spike-doc')).toBe(false);
+    expect(sub!.ledger.has(keyOf('spike-doc'))).toBe(false);
     expect(engine.launches.length).toBe(0);
   });
 
@@ -1314,7 +1460,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     // gets a real retry), no directory materialized inside the live repository, no lingering
     // busy state.
     expect(engine.launches.length).toBe(0);
-    expect(sub!.ledger.has('trapped-doc')).toBe(false);
+    expect(sub!.ledger.has(keyOf('trapped-doc'))).toBe(false);
     expect(existsSync(join(draftDir, 'trapped-doc'))).toBe(false);
     expect(sub!.inFlightDocs()).toEqual([]);
     expect(logged.some((m) => m.includes('REFUSING launch'))).toBe(true);
@@ -1362,10 +1508,10 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     await waitFor(() => engine.launches.length === 1);
     expect(sub!.inFlightDocs()).toContain('slow-doc');
     // …with no ledger row yet (that still waits for the launch to resolve).
-    expect(sub!.ledger.has('slow-doc')).toBe(false);
+    expect(sub!.ledger.has(keyOf('slow-doc'))).toBe(false);
 
     release();
-    await waitFor(() => sub!.ledger.get('slow-doc')?.runId !== undefined);
+    await waitFor(() => sub!.ledger.get(keyOf('slow-doc'))?.runId !== undefined);
     expect(sub!.inFlightDocs()).toEqual(['slow-doc']); // now a live flight with a heartbeat
   });
 
@@ -1415,7 +1561,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     // quiet: no heartbeat, no filing, no revived flight.
     release();
     await stopping;
-    await waitFor(() => sub!.ledger.get('wedged-doc')?.runId !== undefined);
+    await waitFor(() => sub!.ledger.get(keyOf('wedged-doc'))?.runId !== undefined);
     expect(sub!.inFlightDocs()).toEqual([]);
   });
 
@@ -1445,7 +1591,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     expect(existsSync(join(okSnap, 'README.md'))).toBe(true);
     writeFileSync(join(draftDir, 'ok-doc', 'ok-doc-v1.html'), '<html><body>grounded</body></html>', 'utf8');
     engine.fire({ type: 'sessionCompleted', session: engine.launches[0]!.sessionId });
-    await waitFor(() => sub!.ledger.get('ok-doc')?.emittedAt !== undefined);
+    await waitFor(() => sub!.ledger.get(keyOf('ok-doc'))?.emittedAt !== undefined);
     expect(existsSync(okSnap), 'success finalize must remove the snapshot').toBe(false);
 
     // Failure path: the run dies → the failure fold removes the snapshot too.
@@ -1454,7 +1600,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     const deadSnap = join(draftDir, 'dead-doc', 'repos', 'repo-studio');
     expect(existsSync(join(deadSnap, 'README.md'))).toBe(true);
     engine.fire({ type: 'sessionFailed', session: engine.launches[1]!.sessionId, ord: 1 });
-    await waitFor(() => sub!.ledger.get('dead-doc')?.failedAt !== undefined);
+    await waitFor(() => sub!.ledger.get(keyOf('dead-doc'))?.failedAt !== undefined);
     expect(existsSync(deadSnap), 'the failure path must remove the snapshot too').toBe(false);
 
     // Shutdown path (Copilot, crew#313): stop() with a run STILL IN FLIGHT sweeps its snapshot
@@ -1502,8 +1648,8 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     const draft = probeEvents.find((e) => e.event_type === DRAFT_COMPLETED)!;
     expect((draft.payload as { html_path?: string }).html_path).toBe(inboxPath);
     expect(readFileSync(inboxPath, 'utf8')).toContain('grounded draft');
-    expect(draft.idempotency_key).toBe(draftIdempotencyKey('repo-doc'));
-    expect(sub!.ledger.get('repo-doc')?.emittedAt).toBeTruthy();
+    expect(draft.idempotency_key).toBe(draftIdempotencyKey('repo-doc', 'proj-repo'));
+    expect(sub!.ledger.get(keyOf('repo-doc'))?.emittedAt).toBeTruthy();
     // The launch-scoped snapshot did not outlive its run.
     expect(existsSync(join(draftDir, 'repo-doc', 'repos'))).toBe(false);
   });
@@ -1777,7 +1923,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     );
     await new Promise((r) => setTimeout(r, 150));
     expect(engine.launches.length).toBe(0);
-    expect(sub!.ledger.has('bare-inside')).toBe(false);
+    expect(sub!.ledger.has(keyOf('bare-inside'))).toBe(false);
     expect(sub!.inFlightDocs()).toEqual([]);
     expect(existsSync(draftDir)).toBe(false);
     // The live checkout is byte-for-byte what it was.
@@ -1817,7 +1963,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     );
     await new Promise((r) => setTimeout(r, 150));
     expect(engine.launches.length).toBe(0);
-    expect(sub!.ledger.has('unverifiable')).toBe(false);
+    expect(sub!.ledger.has(keyOf('unverifiable'))).toBe(false);
     expect(sub!.inFlightDocs()).toEqual([]);
     expect(existsSync(draftDir)).toBe(false);
     expect(JSON.stringify(readdirDeep(checkout))).toBe(before);

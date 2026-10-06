@@ -207,7 +207,11 @@ describe('who wrote it', () => {
     const edit = new InteractiveHandoffLedger(join(dir, 'edit.json'));
     const chat = new InteractiveHandoffLedger(join(dir, 'chat.json'));
     draft.recordLaunch('brochure', 'draft-run');
+    // crew#809: a FILED document's draft row carries its project partition — still this name's draft
+    // run, so its creator is excluded from reviewing it (red before: only the bare key counted).
+    draft.recordLaunch('brochure:draft:p-proj-7', 'filed-draft-run');
     draft.recordLaunch('brochure-two', 'other-draft');
+    draft.recordLaunch('brochure-two:draft:p-proj-7', 'other-filed-draft');
     edit.recordLaunch('brochure:v1', 'edit-v1');
     edit.recordLaunch('brochure:v4', 'edit-v4');
     edit.recordLaunch('brochure:v5', 'edit-v5');
@@ -217,7 +221,7 @@ describe('who wrote it', () => {
     chat.recordLaunch('brochure:m:abc', 'chat-run');
     expect(editRunsBefore(edit, 'brochure', 5).sort()).toEqual(['edit-v1', 'edit-v4']);
     const sources = [{ name: 'draft', ledger: draft, path: '' }, { name: 'edit', ledger: edit, path: '' }, { name: 'chat', path: join(dir, 'chat.json') }];
-    expect(authoringRunsFromLedgers(sources, 'brochure', 5).sort()).toEqual(['chat-run', 'draft-run', 'edit-v1', 'edit-v4']);
+    expect(authoringRunsFromLedgers(sources, 'brochure', 5).sort()).toEqual(['chat-run', 'draft-run', 'edit-v1', 'edit-v4', 'filed-draft-run']);
     expect(authoringRunsFromLedgers(sources, 'never-drafted', 1)).toEqual([]);
     removeScratch(dir);
   });
