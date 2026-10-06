@@ -253,6 +253,45 @@ describe('draftFloorVerdict — the rule named, and only what a count without a 
     expect(v.summary).toMatch(/page count is UNVERIFIED/);
   });
 
+  it('the check\'s own FAIL on an UNMEASURED page count below an exact budget is not a refusal — the floor says "unmeasured", never "no" (crew#812)', () => {
+    // The exact answer `self_check.py --pages 2 --exact --json` gives WITHOUT --render for run 40ade5a9's
+    // deliverable (W12 chapter 32): verdict FAIL, failed ["pages"], pages 1 (html-estimate), verified false —
+    // the same file with --render answers PASS, pages 2. Red before crew#812: the pages rule correctly pushed
+    // nothing (1 ≤ 2) and the `verdict === 'FAIL'` fallback then refused the document on the one check the
+    // module note says this floor cannot judge, so every exact-N-page document whose structural estimate is
+    // below N was unpublishable.
+    const refusedWithoutRender = {
+      ...(report({ pages: 1, pagesVerified: false }) as object),
+      verdict: 'FAIL',
+      failed: ['pages'],
+      checks: {
+        ...((report({ pages: 1, pagesVerified: false }) as { checks: object }).checks),
+        pages: { pages: 1, budget: 2, exact: true, verified: false, within_budget: false, summary: 'pages: 1 (html-estimate) vs budget = 2 — EXCEEDED — UNVERIFIED (no render)' },
+      },
+    };
+    const v = draftFloorVerdict(refusedWithoutRender, EXACT_2);
+    expect(v.verdict).toBe('unverified');
+    expect(v.breaches).toEqual([]);
+    expect(v.summary).toMatch(/unmeasured/i);
+    expect(v.summary).toContain('1');
+    // A FAIL the floor still cannot attribute keeps refusing: `pages` unmeasured AND another failed check it
+    // has no rule for; or a measured (rendered) count below an exact budget, which IS a verdict.
+    expect(draftFloorVerdict({ ...refusedWithoutRender, failed: ['pages', 'fonts'] }, EXACT_2).verdict).toBe('fail');
+    // (codex r1) a malformed failed entry is as unattributable as an unknown one; a report with no
+    // count, or a floor with no budget, establishes nothing and keeps the check's FAIL.
+    expect(draftFloorVerdict({ ...refusedWithoutRender, failed: ['pages', {}] }, EXACT_2).verdict).toBe('fail');
+    expect(draftFloorVerdict({ ...refusedWithoutRender, failed: ['pages', null] }, EXACT_2).verdict).toBe('fail');
+    const noCount = { ...refusedWithoutRender, checks: { ...refusedWithoutRender.checks, pages: { verified: false } } };
+    expect(draftFloorVerdict(noCount, EXACT_2).verdict).toBe('fail');
+    expect(draftFloorVerdict(refusedWithoutRender, NO_BUDGET).verdict).toBe('fail');
+    const renderedShort = draftFloorVerdict(
+      { ...(report({ pages: 1, pagesVerified: true }) as object), verdict: 'FAIL', failed: ['pages'] },
+      EXACT_2,
+    );
+    expect(renderedShort.verdict).toBe('fail');
+    expect(renderedShort.breaches[0]).toContain('reports FAIL on pages');
+  });
+
   it('every breach is reported together, not just the first', () => {
     const v = draftFloorVerdict(
       report({ claims: false, byKind: { 'cite-off': 9 }, contrast: false, pages: 4 }),

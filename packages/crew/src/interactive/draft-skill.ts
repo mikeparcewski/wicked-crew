@@ -186,7 +186,10 @@ export function draftSkillArmLine(seam: string, held: boolean): string {
 // estimate — a LOWER bound, which cannot see a wrapper that overflows its sheet. A breach is
 // therefore only reported when the count already EXCEEDS the budget (`> budget`): that direction is
 // proven without a render, while "fewer pages than an exact budget" is exactly what only a render
-// can judge and is left to the worker's own `--render` run and the page-count disclosure.
+// can judge and is left to the worker's own `--render` run and the page-count disclosure. The
+// script's OWN verdict says FAIL on `pages` in that case (crew#812) — the floor sets that entry
+// aside as UNMEASURED rather than refusing what it cannot measure; the `verdict === 'FAIL'`
+// fallback still refuses on any check the floor has no rule for.
 //
 // A floor that cannot run (no garden plugin root, no Python, a timeout, an answer that is not the
 // report's shape) is reported as UNAVAILABLE and the draft is published with that said out loud —
@@ -331,14 +334,27 @@ export function draftFloorVerdict(report: unknown, budget: PageBudget): DraftFlo
         `wrapper that overflows its sheet)`,
     );
   }
+  // crew#812: without `--render` the script's own verdict is FAIL on `pages` for a count BELOW an exact
+  // budget it could not verify — the one measurement the module note says this floor cannot make. A
+  // refusal on an unmeasured count is not a verdict, so that entry is set aside before the fallback
+  // judges what remains; a MEASURED (rendered) count below an exact budget stays a refusal.
+  // (codex on crew#812: a count or a budget the report does not carry establishes nothing — only a
+  // real estimate at or below a real budget is "unmeasured"; anything else stays the check's FAIL.)
+  const pagesUnmeasured = pagesUnverified && count !== null && budget.pages !== null && count <= budget.pages;
   // The check refused the document for a reason this floor does not know how to name: report the
   // refusal as the check stated it, never a pass (codex review).
   if (breaches.length === 0 && rep.verdict === 'FAIL') {
-    const failed = Array.isArray(rep.failed) ? rep.failed.filter((f): f is string => typeof f === 'string') : [];
-    breaches.push(
-      `the self-check reports FAIL on ${failed.length > 0 ? failed.join(', ') : 'a floor this check names'} — ` +
-        `a verdict this floor cannot attribute to one rule, so the document is not published on it`,
-    );
+    // Every entry counts, not only the well-formed ones: a malformed entry is a failure this floor
+    // cannot name either, and must refuse like an unknown one (codex on crew#812).
+    const failed: unknown[] = Array.isArray(rep.failed) ? rep.failed : [];
+    const unattributed = failed.filter((f) => !(f === 'pages' && pagesUnmeasured));
+    if (unattributed.length > 0 || failed.length === 0) {
+      const names = unattributed.filter((f): f is string => typeof f === 'string' && f !== '');
+      breaches.push(
+        `the self-check reports FAIL on ${names.length > 0 ? names.join(', ') : 'a floor this check names'} — ` +
+          `a verdict this floor cannot attribute to one rule, so the document is not published on it`,
+      );
+    }
   }
   if (breaches.length > 0) {
     return {
@@ -348,12 +364,15 @@ export function draftFloorVerdict(report: unknown, budget: PageBudget): DraftFlo
     };
   }
   if (pagesUnverified) {
+    const estimate = count !== null ? `the structural estimate is ${count}` : 'no structural estimate';
+    const against =
+      budget.pages !== null ? ` against a budget of ${budget.pages}${budget.exact ? ' exactly' : ' at most'}` : '';
     return {
       verdict: 'unverified',
       breaches: [],
       summary:
-        `the draft floor met every rule it could judge; the page count is UNVERIFIED without a render ` +
-        `(${typeof pages?.summary === 'string' ? pages.summary : 'structural estimate only'})`,
+        `the draft floor met every rule it could judge; the page count is UNVERIFIED — unmeasured without a render ` +
+        `(${estimate}${against}; a lower bound only a render can confirm — the worker's own --render run is the measurement)`,
     };
   }
   return { verdict: 'pass', breaches: [], summary: 'the draft floor met every rule on the saved document' };
