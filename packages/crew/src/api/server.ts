@@ -42,7 +42,7 @@ import { DeliveryDerivationCache } from './delivery-cache.js';
 import { coreUnitId } from './evidence.js';
 import { registerClient, broadcast } from '../events/bus.js';
 import { TerminalHub, registerTerminalWs } from '../events/terminals.js';
-import { INTERACTIVE_DRAFT_WORKFLOW_DEF, startInteractiveDraftSubscriber } from '../interactive/draft-events.js';
+import { INTERACTIVE_DRAFT_WORKFLOW_DEF, startInteractiveDraftSubscriber, isAnotherProjectsDraftKey } from '../interactive/draft-events.js';
 import { INTERACTIVE_EDIT_WORKFLOW_DEF, startInteractiveEditSubscriber } from '../interactive/edit-events.js';
 import { putLearnedThemeViaBridge, startInteractiveThemeSubscriber } from '../interactive/theme-events.js';
 import { authoringRunsFromLedgers, isAnotherProjectsReviewKey, readDocVersionViaBridge, startInteractiveReviewSubscriber } from '../interactive/review-events.js';
@@ -855,7 +855,12 @@ export async function createServer(
     reviewSub?.reviewsDir ?? join(options?.interactiveEditEvents?.editDir ?? join(crewStateDir, 'interactive-edits'), REVIEWS_DIRNAME);
   const dropDocLedgerRows = (documentId: string, projectId?: string): DocLedgerSweep => {
     // EP-C2: a review row names its project, so the same-named document of ANOTHER project keeps its rows.
-    const sweep = sweepDocLedgers(documentId, docLedgerSources(), (key) => isAnotherProjectsReviewKey(key, documentId, projectId));
+    const sweep = sweepDocLedgers(
+      documentId,
+      docLedgerSources(),
+      // crew#809: a draft row names its project too.
+      (key) => isAnotherProjectsReviewKey(key, documentId, projectId) || isAnotherProjectsDraftKey(key, documentId, projectId),
+    );
     // EP-C2: the document's recorded reviews go with it — a later document of the same name must
     // not inherit them (the same ghost the ledger rows would be). Its own project's only: the
     // review store is partitioned per project, like the docs roots.

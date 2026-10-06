@@ -439,7 +439,7 @@ export interface AuthoringLedgerSource {
 
 /**
  * Every run on record that can have written what is under review: the document's draft run
- * (`<doc>`), its edit runs whose parent version is below `version` (`<doc>:v<n>`), and its chat
+ * (`<doc>`, or `<doc>:draft:<partition>` for a filed document), its edit runs whose parent version is below `version` (`<doc>:v<n>`), and its chat
  * revisions (`<doc>:m:…` / `<doc>:e:…` — a chat ask carries no version, so all of them count: the
  * list is a SUPERSET on purpose, because it can only narrow who reviews). Throws when a ledger
  * cannot be read — the caller then refuses to pick a reviewer blindly.
@@ -453,7 +453,9 @@ export function authoringRunsFromLedgers(sources: readonly AuthoringLedgerSource
       continue;
     }
     for (const [key, entry] of ledger.rows()) {
-      if (source.name === 'draft' ? key === documentId : key.startsWith(`${documentId}:`)) out.add(entry.runId);
+      // The draft row is `<doc>` (unfiled) or `<doc>:draft:<partition>` (filed, crew#809) — both are
+      // this name's draft runs (a superset across projects, which can only narrow who reviews).
+      if (source.name === 'draft' ? key === documentId || key.startsWith(`${documentId}:draft:`) : key.startsWith(`${documentId}:`)) out.add(entry.runId);
     }
   }
   return [...out];
