@@ -321,7 +321,7 @@ export const PROBE_TIMEOUT_MS = 5_000;
  *  when one of the pids has already gone and still prints the rest, so with `okOnNonZero` a plain
  *  non-zero EXIT STATUS with output is output — a signal never is (codex on crew#806: a probe cut
  *  short by a signal has partial output, and partial output must not license a kill). */
-function probe(file: string, args: string[], okOnNonZero: boolean): Promise<string | null> {
+function probe(file: string, args: string[], okOnNonZero: boolean, timeoutMs: number = PROBE_TIMEOUT_MS): Promise<string | null> {
   return new Promise((resolve) => {
     try {
       execFile(
@@ -329,7 +329,7 @@ function probe(file: string, args: string[], okOnNonZero: boolean): Promise<stri
         args,
         {
           encoding: 'utf8',
-          timeout: PROBE_TIMEOUT_MS,
+          timeout: timeoutMs,
           killSignal: 'SIGKILL',
           maxBuffer: 16 * 1024 * 1024,
           windowsHide: true,
@@ -350,9 +350,21 @@ function probe(file: string, args: string[], okOnNonZero: boolean): Promise<stri
   });
 }
 
-/** The async `pid ppid command` listing the orphan sweeps use — never on the event loop (crew#806). */
+/** The async `pid ppid command` listing the orphan sweeps use — never on the event loop (crew#806),
+ *  on Windows too (codex r4: the sync CIM listing kept for the `exit` path must not serve a sweep). */
 async function listProcessesAsync(): Promise<string | null> {
-  if (process.platform === 'win32') return listProcesses();
+  if (process.platform === 'win32') {
+    return probe(
+      'powershell',
+      [
+        '-NoProfile',
+        '-Command',
+        "Get-CimInstance Win32_Process | ForEach-Object { '{0} {1} {2}' -f $_.ProcessId, $_.ParentProcessId, $_.CommandLine }",
+      ],
+      false,
+      PROBE_TIMEOUT_MS * 4, // CIM is slower than `ps`; still bounded, still off the loop
+    );
+  }
   return probe('ps', ['-A', '-o', 'pid=,ppid=,args='], false);
 }
 
