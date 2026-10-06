@@ -10,6 +10,8 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+- **The release smoke runs wicked-ci at `0f8ad22` (wicked-ci#38; was `bbb3a03`, wicked-ci#37).** crew 0.8.2's release smoke (run 37426596418) failed S08 on both legs at the open — `POST /chats {clis: [acp-smoke]}` → 409 `seat 'acp-smoke' is not in the roster` — because from 0.8.2 an ask is a team path: a chat admits only council-enabled seats (`chatSeatAdmission`) and the first message launches the run, while the harness still asserted the pool wire with a council-disabled ACP seat. Harness lag, not a regression: the package was sound, and the publish/version legs were green. wicked-ci#38 makes S08 assert the chat wire of the crew it installed (path wire on ≥ 0.8.2: nothing warmed at open, 202 `{turnId, runId, stepId}`, one stamped `chatReply{run_id, ord, turn_id}`, 409 `turn_in_flight` during a step, End → `chatClosed{reason: "closed"}` + the run cancelled; the pool wire's cases kept for < 0.8.2). Two things the harness surfaced on the path wire are open here: a path turn's `chatReply` carries no `usage` (crew#824, labelled F-A6-USAGE expected-fail in the smoke), and a path turn longer than 3×`WICKED_CHAT_TURN_SECS` loses its turn stamp and its transcript record because the turn index's staleness is keyed to the pool knob (crew#826). Both pins (`uses:` and `wicked_ci_ref`) move together.
+
 ## [0.8.2] — 2026-10-06
 
 An ask typed in studio starts a team path (DES-STUDIO-REBUILD-001 Amendment 6; DES-ASK-TEAM-CHAT-001
