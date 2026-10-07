@@ -117,6 +117,18 @@ describe('POST /api/v1/governance/deadletters/replay', () => {
     expect(readdirSync(sidecar).filter((f) => f.includes('.replayed-'))).toEqual([]);
   });
 
+  it('a dry run over UNSTAMPED entries states in `note` that a replay cannot order them (crew#829)', async () => {
+    seed([
+      JSON.stringify({ type: 'wicked.crew.governance.conformance_recorded', domain: 'wicked-governance', subdomain: 'governance.evaluation', payload: {}, deadletter_reason: 'no shared store (WICKED_ESTATE_DB unset)' }),
+      REC('wicked.crew.governance.conformance_recorded', 'no shared store (WICKED_ESTATE_DB unset)', 2_000),
+    ]);
+    const r = await post({ dryRun: true });
+    expect(r.status).toBe(200);
+    expect(r.body['read']).toBe(2);
+    expect((r.body['fold'] as { untimestamped: number }).untimestamped).toBe(1);
+    expect(String(r.body['note'])).toContain('1 untimestamped (pre-stamp) entry carries no ts: a replay cannot order them');
+  });
+
   it('a real replay drains the outbox; what fails goes back onto it and stays a dead letter', async () => {
     const failedLine = REC('wicked.estate.rule.retired', 'store write failed: locked', 3_000);
     seed([
