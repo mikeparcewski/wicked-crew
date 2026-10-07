@@ -3,7 +3,7 @@
 // Now the daemon times its boot per EXCLUSIVE stage — `preflight` and `engine` (cli), then the
 // server's `setup`, `skills`, `venv` (the provisioner's time, carved out of `skills`), `routes`,
 // `studio`, `listen` — and hands the breakdown back from `startServer` (the `serve` ready line
-// carries it as `stages`, summing to `startupMs`).
+// carries it as `stages`; the stages sum to `startupMs` within per-stage rounding and the print).
 // And the acceptance that matters under load: a SECOND boot over an unchanged skills baseline —
 // a new process, a new `SkillsStore` — re-runs no `uv sync`: the provisioner is not called and
 // `venv` reads 0 ms, because the baseline env already carries its verified ready marker.
@@ -114,10 +114,10 @@ describe('daemon boot stages (crew#741): startServer hands back per-stage ms; a 
     expect(Object.keys(second.stages)).toEqual(SERVER_STAGES);
     expect(provisions).toHaveLength(1); // unchanged: the provisioner was never reached
     expect(second.stages['venv']).toBe(0);
-    expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]).toMatch(/snapshots\/000001$/); // the same generation is handed to the engine
+    expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]?.endsWith(join('snapshots', '000001'))).toBe(true); // the same generation is handed to the engine
   });
 
-  it('a boot with the skills seam disabled still reports the stages (skills and venv at 0 ms)', async () => {
+  it('a boot with the skills seam disabled still reports every stage: venv 0 ms, no provisioner, skills a non-negative lap', async () => {
     const s = await boot({ disabled: true });
     expect(Object.keys(s.stages)).toEqual(SERVER_STAGES);
     expect(s.stages['venv']).toBe(0);

@@ -455,8 +455,9 @@ async function bootstrap(opts: BootstrapOpts, bootStartedAt: number = performanc
   installShutdownHandlers();
   const stages: BootStages = { preflight: preflightMs, engine: engineMs, ...serverStages };
   // One stderr line beside the other `[crew]` boot lines: where the seconds went (crew#741) — the
-  // stages are exclusive and sum to `startupMs` (less the print itself). On a boot whose baseline
-  // env already verified, `venv` reads 0ms — no `uv sync` re-ran.
+  // stages are exclusive and sum to `startupMs` within rounding (each stage is rounded on its own)
+  // and the two prints that follow (a few ms; a diagnosis tool, not an invariant — codex on #846).
+  // On a boot whose baseline env already verified, `venv` reads 0ms — no `uv sync` re-ran.
   console.error(`[crew] boot stages: ${Object.entries(stages).map(([name, ms]) => `${name} ${ms}ms`).join(' · ')}`);
   return { adapter, port, stages };
 }
@@ -609,8 +610,8 @@ async function main(): Promise<void> {
       interactiveChatEvents: (opts.interactiveChatEvents && !adapter.stub) || undefined,
       startupMs: Math.round(performance.now() - t0),
       // crew#741: the EXCLUSIVE per-stage breakdown of `startupMs` (preflight · engine · setup ·
-      // skills · venv · routes · studio · listen, ms; they sum to it less this print) — a harness
-      // reads the stages it knows; `venv` 0 on an unchanged baseline.
+      // skills · venv · routes · studio · listen, ms; they sum to it within rounding and the prints)
+      // — a harness reads the stages it knows; `venv` 0 on an unchanged baseline.
       stages,
     });
   } else if (command === 'start') {
