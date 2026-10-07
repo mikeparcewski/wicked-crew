@@ -10,6 +10,8 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+- **Deliver read-race: a run that pushed its branch and opened its PR is never served `completed` + `delivery: 'stranded'` (#851).** The `run.delivered` record was resolved asynchronously on the terminal frame (`sessionsDetail` → `workOutput` → audit → index), so a `GET /runs(/:id)` landing between the engine's `completed` flip and that record derived `delivery` from the worktree stat and asserted "work not lifted" about a run whose deliver unit already carried the PR URL (0.8.3 release smoke F-SMOKE-003, macOS leg; the ubuntu leg polled ~1 s later and read `delivered`). `DeliveryResolver` (`api/delivery-index.ts`) now owns that read — one engine read per run shared between the terminal frame and any concurrent poll, settled once read — and the run routes await it for a served view inside the window (terminal, deliver unit `done`, nothing on record yet), so `status` and `delivery` come from one consistent read; the stat fallback is unreachable for a delivered run. Tests: `tests/deliver-read-race.test.ts`.
+
 ## [0.8.4] — 2026-10-07
 
 One publish of the skills catalogue no longer holds the daemon's event loop (crew#852): the

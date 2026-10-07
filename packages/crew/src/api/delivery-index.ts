@@ -33,6 +33,7 @@ import {
   type PushedOnlyDelivery,
 } from '../core/deliver.js';
 import { runIdentityOf, runWorkflowDef } from '../core/run-identity.js';
+import { coreUnitId } from './evidence.js';
 
 /** What `AgentSession.delivery` + `deliverUrl` spell on the wire (api-types 0.18.0, crew#393). */
 export interface DeliveryState {
@@ -475,6 +476,131 @@ export function deliverUnitOf(view: SessionView): WorkUnit | null {
   const byId = view.units.find((u) => u.id.endsWith(':deliver'));
   if (byId !== undefined) return byId;
   return view.units.find((u) => (u.tool_cmd ?? []).join(' ').includes('gh pr create')) ?? null;
+}
+
+/** What {@link DeliveryResolver} needs from the daemon — injected so the race is pinnable in a test. */
+export interface DeliveryResolverDeps {
+  /** The engine's run views (`adapter.sessionsDetail()`). */
+  listViews: () => Promise<SessionView[]>;
+  /** The deliver unit's stored transcript (`adapter.workOutput(coreUnitId(runId, unit))`). */
+  workOutput: (unitId: string) => Promise<string | null>;
+  /** Already on record — the durable `run.delivered` trail / {@link DeliveryIndex}. */
+  isDelivered: (runId: string) => boolean;
+  /** Write the record: the audit entry FIRST, then the index — the caller owns that order. */
+  record: (runId: string, record: DeliveryRecord) => void;
+  log?: (msg: string) => void;
+}
+
+/**
+ * The ONE post-terminal `workOutput` read that turns a run's deliver transcript into its
+ * `run.delivered` record (crew#321), with the two properties the read path needs (crew#851):
+ *
+ *  - **one read per run, shared.** Concurrent callers — the terminal-frame handler and a
+ *    `GET /runs(/:id)` that lands in the window — await the SAME promise, so the trail is never
+ *    written twice and the engine is never asked twice. A run whose read finished (a record, or
+ *    an approved deliver unit whose transcript carries none) is `settled` and never re-read;
+ *    a read that threw is not settled, so the next caller retries.
+ *  - **the window is detectable from the served view.** {@link DeliveryResolver.pending} is true
+ *    exactly while a terminal run with a `done` deliver unit has nothing on record and has not
+ *    been read: the record the DTO is built from already holds the delivery (the unit's stored
+ *    output), only the index lags. The routes await {@link DeliveryResolver.resolve} for such a
+ *    view before deriving `delivery`, so `status: completed` and `delivery` come from one
+ *    consistent read and the worktree-stat fallback (`'stranded'`) is unreachable for a run that
+ *    pushed and opened its PR (0.8.3 release smoke F-SMOKE-003, the macOS leg).
+ *
+ * Best-effort by construction: `resolve` never throws — a failed read is logged and the field
+ * stays absent until the next caller (or a restart's trail replay) heals it.
+ */
+/** The most a run route waits for an in-window delivery read (see {@link DeliveryResolver.settle}). */
+export const READ_PATH_SETTLE_MS = 2_000;
+
+export class DeliveryResolver {
+  private readonly inflight = new Map<string, Promise<void>>();
+  private readonly settled = new Set<string>();
+
+  constructor(private readonly deps: DeliveryResolverDeps) {}
+
+  /** Is this served view inside the completion window (see the class doc)? */
+  pending(view: SessionView): boolean {
+    const runId = view.session.id;
+    if (this.settled.has(runId) || this.deps.isDelivered(runId)) return false;
+    if (view.session.status !== 'completed' && view.session.status !== 'failed') return false;
+    const unit = deliverUnitOf(view);
+    return unit !== null && unit.status === 'done';
+  }
+
+  /** Resolve `runId`'s delivery onto the record — memoized while in flight, once when settled. */
+  resolve(runId: string): Promise<void> {
+    if (this.settled.has(runId)) return Promise.resolve();
+    const running = this.inflight.get(runId);
+    if (running !== undefined) return running;
+    const job = this.read(runId).finally(() => {
+      this.inflight.delete(runId);
+    });
+    this.inflight.set(runId, job);
+    return job;
+  }
+
+  /**
+   * Resolve every served view still inside the window, waiting at most `waitMs` (crew#851, codex
+   * r1 on #859): the request path must stay bounded — the old terminal-frame resolution never
+   * touched it — so a slow or hung engine read for one run costs the list at most `waitMs` and
+   * that run falls through to its stat-derived label for this poll; the read keeps running and
+   * heals the next one. Resolves `true` when every pending read landed within the bound.
+   */
+  async settle(views: SessionView[], waitMs: number = READ_PATH_SETTLE_MS): Promise<boolean> {
+    const pending = views.filter((v) => this.pending(v));
+    if (pending.length === 0) return true;
+    const all = Promise.all(pending.map((v) => this.resolve(v.session.id))).then(() => true);
+    let timer: NodeJS.Timeout | undefined;
+    const bound = new Promise<boolean>((resolveBound) => {
+      timer = setTimeout(() => resolveBound(false), waitMs);
+      timer.unref();
+    });
+    try {
+      return await Promise.race([all, bound]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  private async read(runId: string): Promise<void> {
+    try {
+      // Resume/retry re-terminals: already resolved once, and a terminal run's PR URL never
+      // changes — never re-read, never double-write the trail.
+      if (this.deps.isDelivered(runId)) {
+        this.settled.add(runId);
+        return;
+      }
+      const views = await this.deps.listViews();
+      const view = views.find((v) => v.session.id === runId);
+      if (view === undefined) return;
+      const unit = deliverUnitOf(view);
+      // Only an APPROVED deliver unit carries a delivery claim: a rejected one's output (were
+      // any stored) can contain a PR URL from a step that gh completed before a later
+      // re-derivation refused to report the delivery (core/deliver.ts step f).
+      if (unit === null || unit.status !== 'done') return;
+      const output = await this.deps.workOutput(coreUnitId(runId, unit));
+      // A `done` unit always has a stored work_output (`unit-output.ts`); `null` here is a store
+      // that has not shown it yet, not an empty transcript — leave the run unsettled so the next
+      // poll re-reads (one bounded engine read per poll, for an abnormal run only; codex r2 on #859).
+      if (output === null) return;
+      // A PR URL, or (N1) a push-only delivery to an origin gh cannot resolve to GitHub — a
+      // delivery too, so the run reads `delivery: 'pushed'` and never `'stranded'`.
+      const record = deliveryRecordFrom(output);
+      if (record !== null) this.deps.record(runId, record);
+      // Settled only once the whole read — transcript AND record — landed: a `done` deliver
+      // unit's transcript is final, but a record write that threw (codex r1 on #859) must leave
+      // the run unsettled so the next caller retries instead of serving a stat label forever.
+      this.settled.add(runId);
+    } catch (err) {
+      this.deps.log?.(
+        `[runs] delivery resolution for ${runId} failed (field absent until restart replays the trail): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
 }
 
 /**
