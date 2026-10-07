@@ -1,8 +1,9 @@
 // crew#741: boot time swung 25 s → 194 s with host load and `startupMs` was one number, so nobody
 // could say WHICH stage ate the seconds (35.8 s of one boot was the skills baseline `uv sync`).
-// Now the daemon times its boot per stage — `engine` (cli), then the server's `setup`, `skills`,
-// `venv` (the provisioner's share of `skills`, read from the store), `routes`, `studio`, `listen` —
-// and hands the breakdown back from `startServer` (the `serve` ready line carries it as `stages`).
+// Now the daemon times its boot per EXCLUSIVE stage — `preflight` and `engine` (cli), then the
+// server's `setup`, `skills`, `venv` (the provisioner's time, carved out of `skills`), `routes`,
+// `studio`, `listen` — and hands the breakdown back from `startServer` (the `serve` ready line
+// carries it as `stages`, summing to `startupMs`).
 // And the acceptance that matters under load: a SECOND boot over an unchanged skills baseline —
 // a new process, a new `SkillsStore` — re-runs no `uv sync`: the provisioner is not called and
 // `venv` reads 0 ms, because the baseline env already carries its verified ready marker.
@@ -120,7 +121,9 @@ describe('daemon boot stages (crew#741): startServer hands back per-stage ms; a 
     const s = await boot({ disabled: true });
     expect(Object.keys(s.stages)).toEqual(SERVER_STAGES);
     expect(s.stages['venv']).toBe(0);
-    expect(s.stages['skills']).toBeLessThanOrEqual(1); // no store, no publish: the lap is the cost of the branch itself
+    // No store, no publish: `skills` is the cost of the disabled branch itself — a wall-clock lap,
+    // so no ceiling is asserted (a loaded host can deschedule between two laps; codex on #846).
+    expect(Number.isInteger(s.stages['skills']) && (s.stages['skills'] ?? -1) >= 0).toBe(true);
     expect(provisions).toHaveLength(0);
   });
 });

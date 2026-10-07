@@ -418,15 +418,16 @@ export interface CreateServerOptions {
 
 /**
  * Per-stage boot timings, ms (crew#741): where a slow boot's seconds went, instead of one
- * `startupMs`. Keys are the stage names below (`setup`, `skills`, `venv`, `routes`, `studio`,
- * `listen`; `wicked-crew serve` adds `engine`) — additive, a harness reads what it knows.
+ * `startupMs`. EXCLUSIVE stages that sum to the boot: `setup`, `skills`, `venv`, `routes`,
+ * `studio`, `listen` here; `wicked-crew serve` prepends `preflight` and `engine`. The key set is
+ * open — a harness reads the stages it knows.
  */
 export type BootStages = Readonly<Record<string, number>>;
 
 /**
  * A lap clock for the boot: `lap(name)` closes the stage that ran since the previous lap (or since
- * construction) and rounds it to whole ms; `set` records a stage measured elsewhere (the venv share
- * of `skills`, read from the store). Stages are reported in the order they were recorded.
+ * construction) and rounds it to whole ms; `set` records (or corrects) a stage measured elsewhere —
+ * a re-`set` key keeps its position. Stages are reported in the order they were first recorded.
  */
 export class BootStageClock {
   private readonly stages: Record<string, number> = {};
@@ -571,9 +572,9 @@ export async function createServer(
   // anything under those roots (`serve` asserts the same rule before the engine spawns).
   assertWickedRootsOutsideStateHome(process.env, crewStateHome());
   // crew#741: everything above (logger, settings, roots) is `setup`; the skills seam is its own
-  // stage, with the provisioner's share (`venv`) read from the store — `0` when the baseline env
-  // already carried its verified ready marker (`SkillsStore.ensureVenv`'s fast path), which is
-  // the acceptance that a boot on an unchanged baseline re-runs no `uv sync`.
+  // stage, with the provisioner's time (`venv`) read from the store and carved OUT of it — `0`
+  // when the baseline env already carried its verified ready marker (`SkillsStore.ensureVenv`'s
+  // fast path), which is the acceptance that a boot on an unchanged baseline re-runs no `uv sync`.
   bootClock.lap('setup');
   let skillsRuntime: SkillsRuntime | undefined;
   let skillsStore: SkillsStore | undefined;
@@ -601,8 +602,12 @@ export async function createServer(
     skillsRuntime.configureBaseSkill(bootSettings);
     await skillsRuntime.apply();
   }
-  bootClock.lap('skills');
-  bootClock.set('venv', skillsStore?.venvStage().ms ?? 0);
+  // Exclusive peers (codex on #846): `venv` is the provisioner path's time, `skills` the rest of
+  // the seam (seed, validate, hash, stage, flip) — the stages sum, never double-count.
+  const skillsMs = bootClock.lap('skills');
+  const venvMs = skillsStore?.venvStage().ms ?? 0;
+  bootClock.set('skills', skillsMs - venvMs);
+  bootClock.set('venv', venvMs);
 
   // The state-home PREFLIGHT (wicked-core#411 / crew#497; F-RC1-011, F-RC2-020): an entry under the
   // state home that core's fence registry cannot classify refuses EVERY worker launch — and until
@@ -2165,7 +2170,7 @@ export interface StartedServer {
   app: ReturnType<typeof Fastify>;
   port: number;
   host: string;
-  /** crew#741: the boot's per-stage ms (`setup`, `skills`, `venv`, `routes`, `studio`, `listen`). */
+  /** crew#741: the boot's exclusive per-stage ms (`setup`, `skills`, `venv`, `routes`, `studio`, `listen`). */
   stages: BootStages;
 }
 
