@@ -39,6 +39,7 @@ import {
   type GovernanceStoreLocation,
   type GovernanceStoreSource,
   type LegacyOutboxScope,
+  governanceStoreFix,
 } from '../core/governance-store.js';
 
 // ── Wire-facing shapes (mirrored by wicked-crew-api-types `DiagnosticsGovernance*`) ──────────
@@ -355,14 +356,15 @@ export function governanceHealth(input: GovernanceHealthInputs): GovernanceHealt
   const store: GovernanceStoreInfo | null =
     input.location !== null ? { path: input.location.displayPath, source: input.location.source } : null;
   if (store === null) {
+    // crew#829: a store-less daemon names its FIX, not a replay — there is nothing to replay into,
+    // and a bare recipe (`replayCommand(…, null)`) would target the default state home's store.
     findings.push({
       kind: 'governance.store',
       severity: 'error',
       message:
-        'this daemon resolved no governance store — WICKED_ESTATE_DB is not exported to the engine, so every ' +
-        'governance event (conformance claims, phase transitions, rule lifecycle) dead-letters instead of landing; ' +
-        'boot through `wicked-crew serve` (which resolves <core db>.governance/governance.db) or pass --governance-db; ' +
-        `inspect any outbox meanwhile with ${replayCommand('<outbox.ndjson>', null)} --dry-run`,
+        'this daemon resolved no governance store — every governance event (conformance claims, phase transitions, ' +
+        `rule lifecycle) dead-letters instead of landing, and keeps doing so until the store exists; ${governanceStoreFix()}. ` +
+        'A replay is offered once the store exists',
     });
   }
   if (input.fold.count > 0) {
@@ -375,7 +377,9 @@ export function governanceHealth(input: GovernanceHealthInputs): GovernanceHealt
       message:
         `${input.fold.count} governance event(s) dead-lettered to ${path}${floor}${newest} — the store refused or was ` +
         `unset when they were emitted (${Object.keys(input.fold.byReason).join('; ') || 'reason unknown'}); ` +
-        `replay them with ${replayCommand(path, input.location)}`,
+        (input.location !== null
+          ? `replay them with ${replayCommand(path, input.location)}`
+          : `${governanceStoreFix()}; the replay is offered once this daemon has a store (a bare replay would land them in the default state home's store, not this daemon's)`),
     });
   }
   if (input.legacyOutbox !== null && input.legacyOutbox.scope === 'host') {

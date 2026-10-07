@@ -188,6 +188,21 @@ export function conflationNote(alreadyPresent: number, fold: Pick<DeadletterFold
   );
 }
 
+/**
+ * What a dry run must say about UNTIMESTAMPED (pre-stamp) entries (crew#829): a replay cannot order
+ * them — they carry no `ts`, so they land in file order among themselves and nothing says when they
+ * happened — and byte-identical unstamped lines share one replay id (see {@link conflationNote}).
+ * `null` when every entry is stamped.
+ */
+export function untimestampedNote(fold: Pick<DeadletterFold, 'untimestamped'>): string | null {
+  if (fold.untimestamped <= 0) return null;
+  return (
+    `${fold.untimestamped} untimestamped (pre-stamp) entr${fold.untimestamped === 1 ? 'y carries' : 'ies carry'} no ts: a replay ` +
+    'cannot order them — they land in file order with no time of their own — and byte-identical unstamped lines share ' +
+    'one replay id, so two dead letters of the same event land once.'
+  );
+}
+
 const NL = 0x0a;
 
 /**
@@ -327,7 +342,7 @@ export async function replayOutboxInto(
         alreadyPresent: null,
         failed: 0,
         dryRun: true,
-        note: null,
+        note: untimestampedNote(fold),
         fold,
       },
       exitCode: 0,

@@ -151,7 +151,7 @@ import {
   type ErrorRing,
 } from './diagnostics.js';
 import { GovernanceDiagnostics } from './governance-health.js';
-import { legacyHomeOutboxPath } from '../core/governance-store.js';
+import { governanceStoreFix, legacyHomeOutboxPath } from '../core/governance-store.js';
 import { UsageError, replayOutboxInto } from '../cli/governance.js';
 import { foldDeadletters } from './governance-health.js';
 import { RetryIndex } from './retry-index.js';
@@ -4398,7 +4398,8 @@ export function registerRoutes(
       const dryRun = parsed.data.dryRun === true;
       const store = adapter.governanceStore ?? null;
       if (store === null) {
-        return reply.code(409).send({ error: 'this daemon resolved no governance store — there is nothing to replay into' });
+        // crew#829: the refusal names the one-line fix; a replay is offered once the store exists.
+        return reply.code(409).send({ error: `this daemon resolved no governance store — there is nothing to replay into; ${governanceStoreFix()}` });
       }
       const blocker = store.dbPath === ':memory:'
         ? 'the governance store is in-memory — name a durable store before replaying'

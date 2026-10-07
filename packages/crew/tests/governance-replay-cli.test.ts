@@ -28,6 +28,7 @@ import {
   replayOutbox,
   replayTarget,
   restoreOutbox,
+  untimestampedNote,
   UsageError,
 } from '../src/cli/governance.js';
 import { GovernanceStoreError, governanceSidecarDb, resolveGovernanceStore } from '../src/core/governance-store.js';
@@ -110,7 +111,13 @@ describe('replayOutbox (the command body)', () => {
     expect(outcome.fold?.untimestamped).toBe(2);
     expect(existsSync(outbox)).toBe(true);
     expect(readdirSync(scratch as string)).toEqual(['emit-outbox.ndjson']); // no archive, no store
-    expect(outcome.note).toBeNull();
+    // crew#829: the dry run STATES that unstamped entries cannot be ordered (the fixture's RECORD_A and
+    // the torn line carry no ts) — the legacy HOME outbox on the rig was 3,715 such lines.
+    expect(outcome.note).toBe(untimestampedNote({ untimestamped: 2 }));
+    expect(outcome.note).toContain('2 untimestamped (pre-stamp) entries carry no ts: a replay cannot order them');
+    expect(outcome.note).toContain('byte-identical unstamped lines share one replay id');
+    expect(untimestampedNote({ untimestamped: 0 })).toBeNull();
+    expect(untimestampedNote({ untimestamped: 1 })).toContain('1 untimestamped (pre-stamp) entry carries no ts');
   });
 
   it('refuses a missing outbox, and a :memory: target for a REAL replay only — a dry run folds the file and touches no store', async () => {

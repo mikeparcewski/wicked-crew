@@ -33,6 +33,7 @@ import {
   legacyOutboxScope,
   redactStoreSpec,
   resolveGovernanceStore,
+  governanceStoreFix,
 } from '../src/core/governance-store.js';
 import { removeScratch } from './setup/scratch.js';
 
@@ -194,6 +195,18 @@ describe('resolveGovernanceStore (crew#495)', () => {
     const top = sidecarDir.slice(resolve('/state').length + 1);
     expect(top).toBe('core.db.governance');
     expect(classify(top)).toMatchObject({ prefix: 'core.db', kind: 'file-with-sidecars', owner: 'engine' });
+  });
+});
+
+describe('governanceStoreFix (crew#829)', () => {
+  it('is ONE line naming the serve flag, the env alternative, the engine variable it feeds and serve\'s sidecar default — never a replay command', () => {
+    const fix = governanceStoreFix();
+    expect(fix).not.toMatch(/[\n\r]/);
+    expect(fix).toContain('wicked-crew serve --governance-db <durable path>');
+    expect(fix).toContain('WICKED_CREW_GOVERNANCE_DB=<path>');
+    expect(fix).toContain('WICKED_ESTATE_DB');
+    expect(fix).toContain('<core db>.governance/governance.db');
+    expect(fix).not.toContain('governance replay');
   });
 });
 

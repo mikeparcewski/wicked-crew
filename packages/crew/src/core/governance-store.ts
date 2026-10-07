@@ -144,6 +144,22 @@ export class GovernanceStoreError extends Error {
   }
 }
 
+/**
+ * The ONE-LINE FIX for a daemon that resolved no governance store (crew#829): what to restart it
+ * with. Said wherever the missing store is reported — the `/diagnostics` finding, the replay route's
+ * refusal — instead of a replay recipe: with no store there is nothing to replay into, and a bare
+ * `wicked-crew governance replay <outbox>` would target the DEFAULT state home's sidecar
+ * (`replayTarget`'s `--db` default), not this daemon's. `wicked-crew serve` resolves the sidecar by
+ * itself, so a store-less daemon is an embedded/library boot that passed no location.
+ */
+export function governanceStoreFix(): string {
+  return (
+    `fix (one line): restart with \`wicked-crew serve ${GOVERNANCE_DB_FLAG} <durable path>\` — or export ` +
+    `${GOVERNANCE_DB_ENV}=<path> — so the engine receives ${ESTATE_DB_ENGINE_ENV}; \`wicked-crew serve --db <core db>\` ` +
+    `resolves <core db>${GOVERNANCE_SIDECAR_SUFFIX}/${GOVERNANCE_DB_FILENAME} on its own`
+  );
+}
+
 /** The sidecar directory the daemon's governance store and outbox live in: `<core db>.governance`. */
 export function governanceSidecarDir(coreDbPath: string): string {
   return `${resolve(coreDbPath)}${GOVERNANCE_SIDECAR_SUFFIX}`;
