@@ -1087,6 +1087,49 @@ describe('venv provisioning (design v3 §4)', () => {
     }
   });
 
+  it('a FRESH store over a published root (the next daemon boot, crew#741) never calls the provisioner: ensureReady publishes nothing and venvStage() reads 0/0; a CHANGED publish from it reuses the marked env', async () => {
+    const calls: string[] = [];
+    const provisioner: VenvProvisioner = async (baselineDir) => {
+      calls.push(baselineDir);
+      mkdirSync(join(baselineDir, '.venv', 'bin'), { recursive: true });
+      writeFileSync(join(baselineDir, '.venv', 'bin', 'python'), '#!/bin/sh\n');
+      return 'synced';
+    };
+    const v = scaffold({ provisionVenv: provisioner });
+    try {
+      // Boot 1: seed + first publish provisions the baseline env once; the store's venv stage says so.
+      expect((await v.store.ensureReady()).published?.verdict).toBe('clear');
+      expect(calls).toHaveLength(1);
+      expect(v.store.venvStage().provisions).toBe(1);
+      expect(v.store.venvStage().ms).toBeGreaterThanOrEqual(0);
+      // Boot 2: a NEW store instance over the same root — the shape of the next daemon process. The
+      // current generation is published and the env carries its verified marker: no publish, no
+      // provisioning, 0 ms in the venv stage (the acceptance: an unchanged baseline re-runs no uv sync).
+      const fresh = new SkillsStore({
+        root: v.root,
+        registeredSkillRefs: () => REGISTERED_REFS,
+        provisionVenv: provisioner,
+        source: () => pluginSourceAt(v.upstream),
+        now: () => CLOCK,
+        warn: () => undefined,
+      });
+      const ready = await fresh.ensureReady();
+      expect(ready.seeded).toBe(false);
+      expect(ready.published).toBeNull();
+      expect(calls).toHaveLength(1);
+      expect(fresh.venvStage()).toEqual({ ms: 0, provisions: 0 });
+      // Even a CHANGED publish from the fresh store (the slow path) reuses the env: the marker on
+      // disk is the authority across processes, not the instance that wrote it.
+      const r = await fresh.publish(bump(v));
+      expect(r.verdict).toBe('clear');
+      expect(r.snapshot?.gen).toBe(2);
+      expect(calls).toHaveLength(1);
+      expect(fresh.venvStage()).toEqual({ ms: 0, provisions: 0 });
+    } finally {
+      removeTreeForce(v.base);
+    }
+  });
+
   it('a SKIPPED provisioner (nothing to provision) yields no link, a `venv: skipped` note, and a clear publish', async () => {
     s.store.seed();
     const r = await s.store.publish(1);

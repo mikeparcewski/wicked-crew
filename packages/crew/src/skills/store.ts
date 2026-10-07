@@ -748,6 +748,14 @@ export class SkillsStore {
   private publishInFlight: Promise<SkillPublishResult> | null = null;
   /** One provisioning per baseline hash: a concurrent caller awaits the in-flight one. */
   private readonly venvInFlight = new Map<string, Promise<SkillVenvState>>();
+  /**
+   * Where the environment seconds went since this store was built (crew#741): the ms the
+   * provisioner path ran (torn-env removal, `uv sync`, marker, lock, verify) and how many times it
+   * reached the provisioner. A boot over a baseline whose env already carries the verified ready
+   * marker reads `0 / 0` — `ensureVenv`'s fast path never gets here. Read by the daemon's boot
+   * stage line (`api/server.ts`), never persisted.
+   */
+  private readonly venvStageTotals = { ms: 0, provisions: 0 };
   /** The canonical (realpath) identity of the root the store BOUND — recorded the first time the
    *  root is seen as a real directory (boot / seed), compared on every operation for the store's
    *  whole lifetime (the root is never re-aimed: a new root is a new store). */
@@ -791,6 +799,14 @@ export class SkillsStore {
   /** Whether a publish is running right now (diagnostics + tests). */
   isPublishing(): boolean {
     return this.publishInFlight !== null;
+  }
+
+  /**
+   * The `venv` boot stage (crew#741): provisioner time and count since construction. `{ ms: 0,
+   * provisions: 0 }` is the proof that a boot on an unchanged baseline re-ran no `uv sync`.
+   */
+  venvStage(): { ms: number; provisions: number } {
+    return { ms: Math.round(this.venvStageTotals.ms), provisions: this.venvStageTotals.provisions };
   }
 
   effectiveDir(): string {
@@ -1794,11 +1810,13 @@ export class SkillsStore {
     if (this.venvReady(venvDir)) return Promise.resolve('synced');
     const inFlight = this.venvInFlight.get(hash);
     if (inFlight !== undefined) return inFlight;
+    const tStage = performance.now();
     const run = (async (): Promise<SkillVenvState> => {
       if (this.entryExists(venvDir)) {
         this.warn(`[skills] ${venvDir} exists without a verified ready marker (a torn earlier sync or an unlockable env) — removed and re-provisioned`);
         removeTreeForce(venvDir);
       }
+      this.venvStageTotals.provisions += 1;
       const state = await this.provisionVenv(baselineDir, { log: this.warn, cacheDir });
       if (state !== 'synced') return state;
       if (!existsSync(venvDir)) {
@@ -1829,6 +1847,7 @@ export class SkillsStore {
     })();
     const tracked = run.finally(() => {
       this.venvInFlight.delete(hash);
+      this.venvStageTotals.ms += performance.now() - tStage;
     });
     this.venvInFlight.set(hash, tracked);
     return tracked;

@@ -416,10 +416,58 @@ export interface CreateServerOptions {
   };
 }
 
+/**
+ * Per-stage boot timings, ms (crew#741): where a slow boot's seconds went, instead of one
+ * `startupMs`. Keys are the stage names below (`setup`, `skills`, `venv`, `routes`, `studio`,
+ * `listen`; `wicked-crew serve` adds `engine`) — additive, a harness reads what it knows.
+ */
+export type BootStages = Readonly<Record<string, number>>;
+
+/**
+ * A lap clock for the boot: `lap(name)` closes the stage that ran since the previous lap (or since
+ * construction) and rounds it to whole ms; `set` records a stage measured elsewhere (the venv share
+ * of `skills`, read from the store). Stages are reported in the order they were recorded.
+ */
+export class BootStageClock {
+  private readonly stages: Record<string, number> = {};
+  private mark = performance.now();
+
+  lap(name: string): number {
+    const now = performance.now();
+    const ms = Math.max(0, Math.round(now - this.mark));
+    this.stages[name] = ms;
+    this.mark = now;
+    return ms;
+  }
+
+  set(name: string, ms: number): void {
+    this.stages[name] = Math.max(0, Math.round(ms));
+  }
+
+  snapshot(): BootStages {
+    return { ...this.stages };
+  }
+
+  /** One human line: `setup 12ms · skills 1203ms · venv 0ms · …` */
+  describe(): string {
+    return Object.entries(this.stages)
+      .map(([name, ms]) => `${name} ${ms}ms`)
+      .join(' · ');
+  }
+}
+
+declare module 'fastify' {
+  interface FastifyInstance {
+    /** crew#741 — the boot's stage clock; `startServer` adds `listen` and hands the snapshot back. */
+    bootStages?: BootStageClock;
+  }
+}
+
 export async function createServer(
   adapter: CoreAdapter,
   options?: CreateServerOptions,
 ): Promise<ReturnType<typeof Fastify>> {
+  const bootClock = new BootStageClock();
   // The diagnostics error ring: a tee on the pino stream that keeps the last ~20 error-level
   // lines in memory (crew has no log file of its own — stdout belongs to whoever launched the
   // daemon), surfaced read-only on GET /diagnostics. Built before Fastify so the logger's
@@ -522,19 +570,26 @@ export async function createServer(
   // was refused — discovered at each run's first worker. Judged here, before any seam creates
   // anything under those roots (`serve` asserts the same rule before the engine spawns).
   assertWickedRootsOutsideStateHome(process.env, crewStateHome());
+  // crew#741: everything above (logger, settings, roots) is `setup`; the skills seam is its own
+  // stage, with the provisioner's share (`venv`) read from the store — `0` when the baseline env
+  // already carried its verified ready marker (`SkillsStore.ensureVenv`'s fast path), which is
+  // the acceptance that a boot on an unchanged baseline re-runs no `uv sync`.
+  bootClock.lap('setup');
   let skillsRuntime: SkillsRuntime | undefined;
+  let skillsStore: SkillsStore | undefined;
   if (options?.skills?.disabled !== true) {
     const source = options?.skills?.source;
     const skillsRoot = resolveSkillsRoot();
     assertSkillsRootFenced(skillsRoot, { stateHome: crewStateHome() });
+    skillsStore = new SkillsStore({
+      root: skillsRoot,
+      registeredSkillRefs: () => registeredSkillRefs(adapter.listWorkflows()),
+      provisionVenv: options?.skills?.provisionVenv ?? uvSyncBaseline,
+      ...(source !== undefined ? { source } : {}),
+      warn: (m) => app.log.warn(m),
+    });
     skillsRuntime = new SkillsRuntime({
-      store: new SkillsStore({
-        root: skillsRoot,
-        registeredSkillRefs: () => registeredSkillRefs(adapter.listWorkflows()),
-        provisionVenv: options?.skills?.provisionVenv ?? uvSyncBaseline,
-        ...(source !== undefined ? { source } : {}),
-        warn: (m) => app.log.warn(m),
-      }),
+      store: skillsStore,
       log: (m) => app.log.warn(m),
     });
     // The base skill setting (crew#554 / wicked-core#468) is applied BEFORE the ladder runs, so
@@ -546,6 +601,8 @@ export async function createServer(
     skillsRuntime.configureBaseSkill(bootSettings);
     await skillsRuntime.apply();
   }
+  bootClock.lap('skills');
+  bootClock.set('venv', skillsStore?.venvStage().ms ?? 0);
 
   // The state-home PREFLIGHT (wicked-core#411 / crew#497; F-RC1-011, F-RC2-020): an entry under the
   // state home that core's fence registry cannot classify refuses EVERY worker launch — and until
@@ -2038,6 +2095,8 @@ export async function createServer(
   // answers 503, not 404) and BEFORE the static/SPA fallback below, like every other API route.
   registerInteractiveEventRoutes(app, interactiveRelay);
 
+  // crew#741: route registration + index hydration, from the skills seam to here, is `routes`.
+  bootClock.lap('routes');
   // Serve the bundled studio SPA same-origin (DES-STUDIO-SERVING-001 §3). The
   // API routes, `/ws`, and terminal WS are registered ABOVE and keep winning:
   // static uses `wildcard: false` (only serves files that physically exist),
@@ -2096,6 +2155,8 @@ export async function createServer(
       `studio bundle not found at ${studioRoot} — serving API + WS only (headless)`,
     );
   }
+  bootClock.lap('studio');
+  app.decorate('bootStages', bootClock);
 
   return app;
 }
@@ -2104,6 +2165,8 @@ export interface StartedServer {
   app: ReturnType<typeof Fastify>;
   port: number;
   host: string;
+  /** crew#741: the boot's per-stage ms (`setup`, `skills`, `venv`, `routes`, `studio`, `listen`). */
+  stages: BootStages;
 }
 
 /** The URL a worker on this host reaches the daemon at: a wildcard bind is reached on loopback. */
@@ -2120,13 +2183,15 @@ export async function startServer(
 ): Promise<StartedServer> {
   const app = await createServer(adapter, options);
   await app.listen({ port, host });
+  const clock = app.bootStages ?? new BootStageClock();
+  clock.lap('listen');
   const addr = app.server.address();
   const boundPort = typeof addr === 'object' && addr ? addr.port : port;
   const boundHost = typeof addr === 'object' && addr ? addr.address : host;
-  app.log.info(`wicked-crew daemon listening on ${boundHost}:${boundPort}`);
+  app.log.info(`wicked-crew daemon listening on ${boundHost}:${boundPort} (boot: ${clock.describe()})`);
   // DES-MCP-TOOLS-001 S1/S3: the in-process engine hands each governed worker this URL (with its
   // `WICKED_MCP_TOKEN`) as `WICKED_CREW_URL`, so the garden shim reaches THIS daemon's broker. The
   // engine reads the daemon's own env at every spawn; a daemon that never listened hands none.
   process.env['WICKED_CREW_URL'] = brokerUrlFor(boundHost, boundPort);
-  return { app, port: boundPort, host: boundHost };
+  return { app, port: boundPort, host: boundHost, stages: clock.snapshot() };
 }
