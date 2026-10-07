@@ -10,6 +10,17 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.8.4] — 2026-10-07
+
+One publish of the skills catalogue no longer holds the daemon's event loop (crew#852): the
+publish path runs paced, `GET /skills` says `publishing` meanwhile, and `wicked-crew-api-types`
+0.94.0 is the matching wire contract (also the first registry publish since 0.92.0 — 0.93.0's
+`InteractiveDocGrounding` from 0.8.3 was never tagged, so it reaches npm with this release). The
+engine pin stays `wicked-core-ts` `^0.7.39`. The bundled UI is **wicked-studio 0.6.4**: projects are
+visible and manageable again under the Desk (S17a), the S15e gate row is styled and asks each gate
+kind's question, and an engine cancel is never attributed to the operator's send-back note.
+
+- **Bundle wicked-studio `^0.6.4` (was `^0.6.3`).** `build:with-studio` copies the installed studio's `dist/`, so the studio pin is what ships as the default local skin. Studio 0.6.4: a Projects tab on `/everything` with active and archived registers, project actions (Rename, Archive / Unarchive) and a New project door on the tab and on the Desk, and `/p/:id` landing on the project's scoped Sessions view under a project header (studio#576, slice S17a — delivered by a governed run on the rig); the session-thread gate row is styled, the send-back note keeps its caret and each gate kind asks its own question (studio#568, #569, #570; studio#572); a cancelled run's banner never attributes an engine cancel to the operator's send-back note — a send-back (`approve: false` + `action: 'request_changes'`) is not a rejection, and the engine sentence appears only on the daemon's `run.turn.timedout` audit mark (studio#537 part (a); studio#564). Also the Health rail's probes settle visibly (studio#280 item 2; studio#563, in 0.6.3).
 - **`POST /skills/publish` no longer starves the daemon (crew#852).** One publish of a ~15k-file catalogue held the event loop for 408 s on a loaded host: its validate (walk + per-file hash), content hash, copy, staged re-hash, read-only lock, generation reap and the post-publish verification of the new generation were all synchronous, so for seven minutes `GET /health` did not answer, `listExecuting()` timed out in the stall watchdog three times, and the few reads that completed took 12–25 s. Every tree operation in `src/skills/tree.ts` is now written once as a step generator (`Steps<T>`, one `yield` per entry) with two drivers — `drain` (synchronous; every existing signature unchanged) and `paced` (`budgetPacer`: the loop turns through `setImmediate` whenever a 15 ms slice is spent) — and the store's publish path (`unchanged` check, validate, hash, copy, staged hash, lock, reap), `SkillsRuntime.afterPublishPaced`, `GET /skills`'s `current` verification and `POST /skills/analyze` run paced. Semantics are unchanged: one publish at a time, `gen` increments once, manifest before `current`, a reader sees the old generation or the new one; because the loop now turns mid-publish, a mutation that arrives while a publish runs is refused before it touches anything with the same 2xx `publish-in-flight` envelope a second publish gets, and the commit re-checks the root identity and the revision on disk (a moved revision removes the staged generation and fails the publish's CAS). `GET /skills` carries `publishing: boolean` (`wicked-crew-api-types` 0.94.0, additive). Measured over a 150-skill / 15k-file fixture with a trivial route polled every 50 ms in the same process: see the PR.
 
 ## [0.8.3] — 2026-10-07
@@ -3589,7 +3600,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.3...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.4...HEAD
+[0.8.4]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.0...v0.8.1
