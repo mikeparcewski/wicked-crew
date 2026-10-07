@@ -6324,7 +6324,10 @@ export interface GovernanceReplayOutcome {
   alreadyPresent: number | null;
   failed: number;
   dryRun: boolean;
-  /** The same-event conflation caveat the CLI prints, or `null`. */
+  /** The caveat the CLI prints, or `null`: on a dry run, that the outbox's untimestamped (pre-stamp) entries
+   *  cannot be ordered by a replay — they land in file order, and byte-identical unstamped lines share one
+   *  replay id (crew#829; `null` when every entry is stamped); on a real replay, the same-event conflation
+   *  caveat when entries were `alreadyPresent` and the outbox held unstamped lines. */
   note: string | null;
   /** Dry run only: the outbox fold (the `/diagnostics` dead-letter block minus the legacy pointer). */
   fold?: Omit<DiagnosticsGovernanceDeadletters, 'legacyOutbox'>;

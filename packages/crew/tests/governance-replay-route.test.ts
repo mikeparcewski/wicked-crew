@@ -110,9 +110,23 @@ describe('POST /api/v1/governance/deadletters/replay', () => {
     expect(Object.values(fold.byReason).reduce((a, b) => a + b, 0)).toBe(3);
     // `blocker` is null exactly when this engine can replay.
     expect(r.body['blocker'] === null).toBe(CoreAdapter.replayEmitOutboxSupported());
+    // Every entry is stamped: nothing to say about ordering (crew#829 — the unstamped caveat is the CLI test's).
+    expect(r.body['note']).toBeNull();
     // Nothing moved.
     expect(readFileSync(location.outboxPath, 'utf8')).toBe(before);
     expect(readdirSync(sidecar).filter((f) => f.includes('.replayed-'))).toEqual([]);
+  });
+
+  it('a dry run over UNSTAMPED entries states in `note` that a replay cannot order them (crew#829)', async () => {
+    seed([
+      JSON.stringify({ type: 'wicked.crew.governance.conformance_recorded', domain: 'wicked-governance', subdomain: 'governance.evaluation', payload: {}, deadletter_reason: 'no shared store (WICKED_ESTATE_DB unset)' }),
+      REC('wicked.crew.governance.conformance_recorded', 'no shared store (WICKED_ESTATE_DB unset)', 2_000),
+    ]);
+    const r = await post({ dryRun: true });
+    expect(r.status).toBe(200);
+    expect(r.body['read']).toBe(2);
+    expect((r.body['fold'] as { untimestamped: number }).untimestamped).toBe(1);
+    expect(String(r.body['note'])).toContain('1 untimestamped (pre-stamp) entry carries no ts: a replay cannot order them');
   });
 
   it('a real replay drains the outbox; what fails goes back onto it and stays a dead letter', async () => {
@@ -160,6 +174,49 @@ describe('POST /api/v1/governance/deadletters/replay', () => {
     expect((await post({ dryRun: true })).status).toBe(409);
     release();
     expect((await first).statusCode).toBe(200);
+  });
+
+  it('a daemon with NO governance store refuses both modes with 409 naming the one-line fix — nothing to replay into, no replay offered (crew#829)', async () => {
+    const bareScratch = mkdtempSync(join(tmpdir(), 'crew-governance-replay-route-bare-'));
+    const bareAdapter = {
+      stub: true,
+      governanceStore: null,
+      projectsSupported: () => false,
+      getSettings: async () => ({}),
+      onLaunch: (): (() => void) => () => undefined,
+      onEvent: () => () => {},
+    } as unknown as CoreAdapter;
+    const bare = await createServer(bareAdapter, {
+      auth: { mode: 'off' },
+      auditPath: join(bareScratch, 'audit.log'),
+      projectEvents: { disabled: true },
+      interactiveWsRelay: { disabled: true },
+      stallWatchdog: { enabled: false },
+      studioRoot: join(bareScratch, 'no-studio'),
+    });
+    try {
+      await bare.ready();
+      for (const payload of [{}, { dryRun: true }]) {
+        const res = await bare.inject({ method: 'POST', url: '/api/v1/governance/deadletters/replay', payload });
+        expect(res.statusCode).toBe(409);
+        const error = String((res.json() as { error?: unknown }).error);
+        expect(error).toContain('this daemon resolved no governance store');
+        expect(error).toContain('fix (one line): restart with `wicked-crew serve --governance-db <durable path>`');
+        expect(error).toContain('WICKED_CREW_GOVERNANCE_DB=<path>');
+        expect(error).not.toContain('wicked-crew governance replay');
+      }
+      // The same posture on /diagnostics: the store finding names the fix, no replay recipe.
+      const diag = await bare.inject({ method: 'GET', url: '/api/v1/diagnostics' });
+      expect(diag.statusCode).toBe(200);
+      const governance = (diag.json() as { governance: { store: unknown; findings: Array<{ kind: string; message: string }> } }).governance;
+      expect(governance.store).toBeNull();
+      const storeFinding = governance.findings.find((f) => f.kind === 'governance.store');
+      expect(storeFinding?.message).toContain('fix (one line)');
+      expect(storeFinding?.message).not.toContain('wicked-crew governance replay');
+    } finally {
+      await bare.close();
+      removeScratch(bareScratch);
+    }
   });
 
   it('a real replay on an engine without the binding is refused (501) with the outbox untouched', async () => {

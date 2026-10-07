@@ -222,7 +222,7 @@ describe('governanceHealth (the findings)', () => {
     if (process.platform !== 'win32') expect(shellQuote("it's.ndjson")).toBe("'it'\\''s.ndjson'");
   });
 
-  it('no store resolved (a library boot) is governance.store (error): every emit dead-letters', () => {
+  it('no store resolved (a library boot) is governance.store (error) naming the ONE-LINE FIX — and no replay command (crew#829)', () => {
     const health = governanceHealth({
       location: null,
       records: { total: null, sinceBoot: null },
@@ -233,9 +233,54 @@ describe('governanceHealth (the findings)', () => {
     expect(health.deadletters.path).toBeNull();
     expect(health.findings.map((f) => f.kind)).toEqual(['governance.store']);
     expect(health.findings[0]!.severity).toBe('error');
-    expect(health.findings[0]!.message).toContain('WICKED_ESTATE_DB');
-    // Every governance finding carries a copyable recipe — with no store known, the bare dry-run one.
-    expect(health.findings[0]!.message).toContain(`wicked-crew governance replay ${shellQuote('<outbox.ndjson>')} --dry-run`);
+    const msg = health.findings[0]!.message;
+    // The fix is named in one line: the serve flag, the env alternative, the engine variable it feeds, serve's default.
+    expect(msg).toContain('fix (one line): restart with `wicked-crew serve --governance-db <durable path>`');
+    expect(msg).toContain('WICKED_CREW_GOVERNANCE_DB=<path>');
+    expect(msg).toContain('WICKED_ESTATE_DB');
+    expect(msg).toContain('<core db>.governance/governance.db');
+    // No replay command of any kind: there is nothing to replay into, and a bare `governance replay`
+    // would target the DEFAULT state home's store (replayTarget's --db default), not this daemon's.
+    expect(msg).not.toContain('wicked-crew governance replay');
+    expect(msg).toContain('A replay is offered once the store exists');
+  });
+
+  it('dead letters with NO store: the deadletter finding names the fix and withholds the replay command (crew#829)', async () => {
+    const path = outboxWith([UNSTAMPED, STAMPED]);
+    const health = governanceHealth({
+      location: null,
+      records: { total: null, sinceBoot: null },
+      fold: await foldDeadletters(path),
+      legacyOutbox: null,
+    });
+    expect(health.findings.map((f) => [f.kind, f.severity])).toEqual([
+      ['governance.store', 'error'],
+      ['governance.deadletter', 'error'],
+    ]);
+    const msg = health.findings[1]!.message;
+    expect(msg).toContain('2 governance event(s) dead-lettered to');
+    expect(msg).toContain('no shared store (WICKED_ESTATE_DB unset)');
+    expect(msg).toContain('fix (one line): restart with `wicked-crew serve --governance-db <durable path>`');
+    expect(msg).toContain('the replay is offered once this daemon has a store');
+    expect(msg).not.toContain('wicked-crew governance replay');
+    // …while a daemon WITH a store keeps the replay recipe (the sibling test above).
+  });
+
+  it('a host-scope legacy outbox with NO store stays INFO with only the read-only inspect — no target store is named (crew#829)', () => {
+    const health = governanceHealth({
+      location: null,
+      records: { total: null, sinceBoot: null },
+      fold: emptyDeadletterFold(null),
+      legacyOutbox: { path: '/homes/op/.something-wicked/wicked-apps/emit-outbox.ndjson', bytes: 1_477_998, scope: 'host' },
+    });
+    expect(health.findings.map((f) => [f.kind, f.severity])).toEqual([
+      ['governance.store', 'error'],
+      ['governance.legacy-outbox', 'info'],
+    ]);
+    const msg = health.findings[1]!.message;
+    expect(msg).toContain('--dry-run');
+    expect(msg).not.toContain('--governance-db');
+    expect(msg).toContain('withheld');
   });
 
   it('a pre-fix outbox under HOME that is THIS daemon\'s own (scope own) is governance.legacy-outbox (warning) with the dry-run recipe', () => {
