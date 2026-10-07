@@ -21,13 +21,17 @@
  *                  them, `campaignNodeStarted`, under the campaign's umbrella pin), crew opens a pin
  *                  for that launch holding the generation the env exports RIGHT NOW, and every
  *                  generation published after that is added to it (the spawn may read any of them).
- *                  A launch pin is released ONLY when the engine reports the handed generation for
- *                  that session (`skillsSnapshotHanded` — the session pin takes over), when the
- *                  run/campaign reaches a terminal state, or when the engine REJECTED the launch
- *                  (nothing will ever read it). It never expires by publish count or age (codex
- *                  round 4: a bounded window let a run's generation be reaped while its handoff
- *                  report was still outstanding — publish count bounds nothing about handoff delay).
- *                  Reaping skips any generation with an unreleased launch pin.
+ *                  A launch pin is ACCOUNTED FOR when the engine reports a handoff for that session
+ *                  (`skillsSnapshotHanded`): every generation it holds FOLDS INTO the session pin,
+ *                  which the terminal frame releases — nothing the launch could have read is let go
+ *                  early, because the report speaks for ONE spawn, not the run: a launcher-only seat
+ *                  (wicked-core #499: codex/agy work units, chat seats) never reports at all, and a
+ *                  unit of the same run may still be reading the launch-time generation (crew#577).
+ *                  A launch pin is RELEASED only when the run/campaign reaches a terminal state, or
+ *                  when the engine REJECTED the launch (nothing will ever read it). It never expires
+ *                  by publish count or age (codex round 4: a bounded window let a run's generation be
+ *                  reaped while its handoff report was still outstanding — publish count bounds
+ *                  nothing about handoff delay). Reaping skips any generation with an open launch pin.
  *
  * The ledger is in-memory: the engine is in-process, so a daemon restart ends every worker it
  * spawned, and a resumed run's launch (`resumeRun`) opens a fresh launch pin.
@@ -79,8 +83,9 @@ export class LiveGenerations {
 
   /**
    * Fold one CoreEvent: track a live session, pin the EXACT generation the engine reports on a
-   * `skillsSnapshotHanded` (releasing that session's launch pin — the engine has accounted for the
-   * launch), release on a terminal frame; pin a campaign's node run as the engine announces it and
+   * `skillsSnapshotHanded` (folding that session's launch pin into the session pin — the engine has
+   * accounted for the launch; nothing it held is released before the terminal frame, crew#577),
+   * release on a terminal frame; pin a campaign's node run as the engine announces it and
    * release the campaign's pin on its terminal frame. A non-`skillsSnapshotHanded` session event
    * only tracks the session — it never pins "current at event time" (the bug codex round 3
    * replaced): the generation a spawn actually used comes from the engine's own report, and the
@@ -115,9 +120,17 @@ export class LiveGenerations {
     if (event.type === SKILLS_SNAPSHOT_HANDED) {
       const gen = handedGeneration(event);
       if (gen !== null) gens.add(gen);
-      // The engine has accounted for this launch — which generation it used (or that it used
-      // none: a live-cache fallback). The durable session pin lives until the terminal frame.
-      this.launchPins.delete(LiveGenerations.key('run', session));
+      // The engine has accounted for THIS spawn — which generation it used (or none: a live-cache
+      // fallback) — not for the run: a launcher-only seat (wicked-core #499) never reports, and a
+      // unit of this same run may still be reading any generation the launch pin holds. So the
+      // launch pin FOLDS INTO the durable session pin (released by the terminal frame) rather than
+      // being dropped; only the "outstanding launch" accounting is consumed (crew#577).
+      const key = LiveGenerations.key('run', session);
+      const launch = this.launchPins.get(key);
+      if (launch !== undefined) {
+        for (const held of launch) gens.add(held);
+        this.launchPins.delete(key);
+      }
     }
     return 'pinned';
   }
@@ -133,8 +146,8 @@ export class LiveGenerations {
   /**
    * The daemon is handing a launch to the engine (before the engine call, so no spawn can read the
    * env ahead of the pin): open its launch pin at the generation the env exports right now. The pin
-   * accumulates every later publish (`published`) and is released only by the engine's report for
-   * that session, the run's / campaign's terminal frame, or `launchRejected`.
+   * accumulates every later publish (`published`); the engine's report for that session folds it into
+   * the session pin, and only the run's / campaign's terminal frame or `launchRejected` releases it.
    */
   launched(kind: LaunchKind, id: string): void {
     const key = LiveGenerations.key(kind, id);
