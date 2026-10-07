@@ -61,6 +61,7 @@ import {
   writeSync,
   type Stats,
 } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { dirname, join, relative, sep } from 'node:path';
 
 import { ATOMIC_TMP_INFIX } from './root-names.js';
@@ -83,6 +84,72 @@ export interface FileRecord {
 export const SKIP_DIR_NAMES: ReadonlySet<string> = new Set(['__pycache__', 'node_modules', '.venv']);
 /** File names never copied into the root (Finder noise). */
 export const SKIP_FILE_NAMES: ReadonlySet<string> = new Set(['.DS_Store']);
+
+// ── Cooperative pacing (crew#852) ───────────────────────────────────────────────────────────
+//
+// Every walk, hash, copy and lock below is synchronous per ENTRY (the no-follow discipline needs
+// the lstat → open → fstat identity check on one descriptor, which the async fs API cannot spell),
+// but none of them has to be synchronous per TREE: a 15k-file catalogue under a slow scanner took
+// `POST /skills/publish` 408 s on the main thread, and for those seven minutes `/health`, the run
+// listing and the stall watchdog got nothing (crew#852). Each heavy function is therefore written
+// ONCE as a step generator (`Steps<T>`: a `yield` after every entry, the answer as the return
+// value) with two drivers: `drain` runs it synchronously — the sync signatures every caller uses
+// are unchanged — and `paced` runs it on the event loop, letting the loop turn (`setImmediate`)
+// whenever a slice's time budget is spent, so a request that arrives mid-publish is answered
+// within one slice plus one entry's I/O rather than after the whole tree.
+
+/** A step-wise computation: each `yield` is a point where a driver may let the event loop turn; the return value is the answer. */
+export type Steps<T> = Generator<void, T, undefined>;
+
+/** Decides, at each step, whether the running slice has spent its budget and the loop must turn. */
+export interface Pacer {
+  /** `null` while the slice still has budget (no yield); otherwise a promise that settles once the event loop has turned. */
+  tick(): Promise<void> | null;
+}
+
+/** The time one synchronous slice may hold the event loop before `paced` lets it turn. */
+export const PACE_SLICE_MS = 15;
+
+/**
+ * A pacer that yields through `setImmediate` once `sliceMs` of wall time passed since the loop
+ * last turned — a FULL loop iteration (timers, I/O poll, check), so pending sockets are served; a
+ * bare `await` would only drain microtasks and let nothing else through.
+ */
+export function budgetPacer(sliceMs: number = PACE_SLICE_MS): Pacer {
+  let sliceStart = performance.now();
+  return {
+    tick(): Promise<void> | null {
+      if (performance.now() - sliceStart < sliceMs) return null;
+      return new Promise<void>((resolve) => {
+        setImmediate(() => {
+          sliceStart = performance.now();
+          resolve();
+        });
+      });
+    },
+  };
+}
+
+/** A pacer that never yields — `paced` under it behaves exactly like `drain` (tests, and callers that hold no loop). */
+export const NO_PACE: Pacer = { tick: () => null };
+
+/** Run the steps to completion synchronously. */
+export function drain<T>(steps: Steps<T>): T {
+  for (;;) {
+    const r = steps.next();
+    if (r.done) return r.value;
+  }
+}
+
+/** Run the steps on the event loop, letting it turn whenever `pacer` says the slice is spent. */
+export async function paced<T>(steps: Steps<T>, pacer: Pacer): Promise<T> {
+  for (;;) {
+    const r = steps.next();
+    if (r.done) return r.value;
+    const wait = pacer.tick();
+    if (wait !== null) await wait;
+  }
+}
 
 export function toPosix(p: string): string {
   return sep === '/' ? p : p.split(sep).join('/');
@@ -214,6 +281,11 @@ export interface TreeEntry {
  * "list this skill's own files" must never enumerate a tree outside the store).
  */
 export function walkEntries(root: string, skipDir?: (rel: string) => boolean): TreeEntry[] {
+  return drain(walkEntriesSteps(root, skipDir));
+}
+
+/** `walkEntries` as steps — one `yield` per entry classified (crew#852). */
+export function* walkEntriesSteps(root: string, skipDir?: (rel: string) => boolean): Steps<TreeEntry[]> {
   const out: TreeEntry[] = [];
   try {
     if (lstatSync(root).isSymbolicLink()) throw new SymlinkComponentError(root, root);
@@ -221,7 +293,7 @@ export function walkEntries(root: string, skipDir?: (rel: string) => boolean): T
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return out;
     throw err;
   }
-  const visit = (dir: string, relDir: string, pruned: string | null): void => {
+  function* visit(dir: string, relDir: string, pruned: string | null): Steps<void> {
     let entries;
     try {
       entries = readdirSync(dir, { withFileTypes: true });
@@ -239,15 +311,16 @@ export function walkEntries(root: string, skipDir?: (rel: string) => boolean): T
         if (skipDir !== undefined && skipDir(rel)) continue;
         // A pruned-name directory is descended for CLASSIFICATION: its entries carry the outermost
         // pruned directory's rel (a `node_modules` inside a `.venv` is still pruned by the `.venv`).
-        visit(abs, rel, pruned ?? (SKIP_DIR_NAMES.has(entry.name) ? rel : null));
+        yield* visit(abs, rel, pruned ?? (SKIP_DIR_NAMES.has(entry.name) ? rel : null));
       } else if (entry.isFile()) {
         out.push({ rel, abs, kind: 'file', pruned });
       } else {
         out.push({ rel, abs, kind: 'other', pruned });
       }
+      yield;
     }
-  };
-  visit(root, '', null);
+  }
+  yield* visit(root, '', null);
   out.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
   return out;
 }
@@ -312,7 +385,12 @@ export interface TreeListing {
  * and never copied either).
  */
 export function walkTree(root: string, skipDir?: (rel: string) => boolean): TreeListing {
-  const entries = walkEntries(root, skipDir);
+  return drain(walkTreeSteps(root, skipDir));
+}
+
+/** `walkTree` as steps (crew#852) — the walk's yields. */
+export function* walkTreeSteps(root: string, skipDir?: (rel: string) => boolean): Steps<TreeListing> {
+  const entries = yield* walkEntriesSteps(root, skipDir);
   const carried = entries.filter((e) => e.pruned === null);
   return {
     files: carried.filter(isCarriedFile).map(({ rel, abs }) => ({ rel, abs })),
@@ -335,11 +413,17 @@ export function walkTree(root: string, skipDir?: (rel: string) => boolean): Tree
  * as "moved" and takes the full path.
  */
 export function fingerprintTree(root: string, skipDir?: (rel: string) => boolean): string | null {
+  return drain(fingerprintTreeSteps(root, skipDir));
+}
+
+/** `fingerprintTree` as steps (crew#852) — the walk's yields, then one per entry lstat'ed. */
+export function* fingerprintTreeSteps(root: string, skipDir?: (rel: string) => boolean): Steps<string | null> {
   const h = createHash('sha256');
   try {
-    for (const e of walkEntries(root, skipDir)) {
+    for (const e of yield* walkEntriesSteps(root, skipDir)) {
       const st = lstatSync(e.abs);
       h.update(`${e.rel}\0${e.kind}\0${st.size}\0${st.mtimeMs}\0${st.ctimeMs}\0${st.mode}\0${e.target ?? ''}\n`);
+      yield;
     }
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
@@ -467,12 +551,22 @@ export function hashTree(
   links: ReadonlyArray<Pick<LinkRecord, 'rel' | 'target'>>,
   dirs: ReadonlyArray<string> = [],
 ): string {
+  return drain(hashTreeSteps(files, links, dirs));
+}
+
+/** `hashTree` as steps (crew#852) — one `yield` per file read and digested. */
+export function* hashTreeSteps(
+  files: ReadonlyArray<FileRecord>,
+  links: ReadonlyArray<Pick<LinkRecord, 'rel' | 'target'>>,
+  dirs: ReadonlyArray<string> = [],
+): Steps<string> {
   const h = createHash('sha256');
   for (const f of [...files].sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0))) {
     h.update(f.rel);
     h.update('\0');
     h.update(sha256Hex(readFileNoFollow(f.abs)));
     h.update('\n');
+    yield;
   }
   for (const l of [...links].sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0))) {
     h.update(l.rel);
@@ -500,14 +594,21 @@ export function hashTree(
  * source's mode bits, so an executable baseline script lands executable.
  */
 export function copyFiles(files: ReadonlyArray<FileRecord>, destRoot: string): void {
+  drain(copyFilesSteps(files, destRoot));
+}
+
+/** `copyFiles` as steps (crew#852) — the whole preflight first (nothing written before every record passed), then one `yield` per file copied. */
+export function* copyFilesSteps(files: ReadonlyArray<FileRecord>, destRoot: string): Steps<void> {
   const plan: Array<{ src: string; dest: string }> = [];
   for (const f of files) {
     const dest = assertNoSymlinkComponents(destRoot, assertSafeRelSegments(f.rel));
     plan.push({ src: f.abs, dest });
+    yield;
   }
   for (const { src, dest } of plan) {
     mkdirSync(dirname(dest), { recursive: true });
     copyFileNoFollow(src, dest);
+    yield;
   }
 }
 
@@ -594,9 +695,9 @@ function isEnoent(err: unknown): boolean {
  * propagates every error but ENOENT (an entry that vanished mid-walk); the lenient mode (the
  * force-remove's) skips what it cannot list — `rmSync` reports what matters there.
  */
-function directoriesUnder(root: string, strict: boolean): string[] {
+function* directoriesUnderSteps(root: string, strict: boolean): Steps<string[]> {
   const out: string[] = [];
-  const visit = (dir: string): void => {
+  function* visit(dir: string): Steps<void> {
     let entries;
     try {
       entries = readdirSync(dir, { withFileTypes: true });
@@ -604,19 +705,20 @@ function directoriesUnder(root: string, strict: boolean): string[] {
       if (strict && !isEnoent(err)) throw err;
       return;
     }
+    yield;
     for (const entry of entries) {
       if (entry.isSymbolicLink() || !entry.isDirectory()) continue;
-      visit(join(dir, entry.name));
+      yield* visit(join(dir, entry.name));
     }
     out.push(dir);
-  };
+  }
   try {
     if (!lstatSync(root).isDirectory()) return out;
   } catch (err) {
     if (strict && !isEnoent(err)) throw err;
     return out;
   }
-  visit(root);
+  yield* visit(root);
   return out;
 }
 
@@ -634,8 +736,13 @@ const WRITE_BITS = 0o222;
  * that vanished mid-walk (ENOENT) is tolerated. A no-op on platforms without POSIX modes.
  */
 export function makeTreeReadOnly(root: string): void {
+  drain(makeTreeReadOnlySteps(root));
+}
+
+/** `makeTreeReadOnly` as steps (crew#852) — one `yield` per entry chmod'ed. */
+export function* makeTreeReadOnlySteps(root: string): Steps<void> {
   if (process.platform === 'win32') return;
-  for (const dir of directoriesUnder(root, true)) {
+  for (const dir of yield* directoriesUnderSteps(root, true)) {
     let entries;
     try {
       entries = readdirSync(dir, { withFileTypes: true });
@@ -651,12 +758,14 @@ export function makeTreeReadOnly(root: string): void {
       } catch (err) {
         if (!isEnoent(err)) throw err;
       }
+      yield;
     }
     try {
       chmodSync(dir, lstatSync(dir).mode & 0o777 & ~WRITE_BITS);
     } catch (err) {
       if (!isEnoent(err)) throw err;
     }
+    yield;
   }
 }
 
@@ -673,9 +782,23 @@ export function removeTreeForce(root: string): void {
   rmSync(root, { recursive: true, force: true });
 }
 
+/**
+ * `removeTreeForce` off the event loop (crew#852): the top-down permission restore runs as paced
+ * steps (one per directory), and the removal itself goes through `fs.promises.rm`, whose
+ * recursive walk is asynchronous entry by entry. Same outcome, same tolerance for a missing root.
+ */
+export async function removeTreeForcePaced(root: string, pacer: Pacer): Promise<void> {
+  await paced(restoreDirPermsTopDownSteps(root), pacer);
+  await rm(root, { recursive: true, force: true });
+}
+
 /** Give every directory under `dir` (`dir` included, symlinks never followed) owner `rwx` — restored
  *  before the dir is read, so even a `0o000` directory can be enumerated and removed. Best-effort. */
 function restoreDirPermsTopDown(dir: string): void {
+  drain(restoreDirPermsTopDownSteps(dir));
+}
+
+function* restoreDirPermsTopDownSteps(dir: string): Steps<void> {
   let st;
   try {
     st = lstatSync(dir);
@@ -694,9 +817,10 @@ function restoreDirPermsTopDown(dir: string): void {
   } catch {
     return; // still unreadable (not ours) — rmSync reports it
   }
+  yield;
   for (const entry of entries) {
     if (entry.isSymbolicLink() || !entry.isDirectory()) continue;
-    restoreDirPermsTopDown(join(dir, entry.name));
+    yield* restoreDirPermsTopDownSteps(join(dir, entry.name));
   }
 }
 

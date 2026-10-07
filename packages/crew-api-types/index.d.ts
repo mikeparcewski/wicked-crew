@@ -3105,6 +3105,14 @@ export interface SkillsManifestResponse {
    * `manifest.baseline`: different = Refresh baseline, then Publish.
    */
   installed?: InstalledPlugin | null;
+  /**
+   * Whether a `POST /skills/publish` is running on the daemon right now (crew#852; api-types
+   * 0.94.0) — its validate / hash / stage / lock run paced on the event loop, so this read answers
+   * while it runs, and `current` names the PREVIOUS generation until the publish commits and flips
+   * it (a reader sees the old generation or the new one, never half). A second publish in that
+   * window is the 2xx `publish-in-flight` envelope. Absent on a daemon older than 0.8.4.
+   */
+  publishing?: boolean;
 }
 
 /** `SkillsManifestResponse.installed` — the live plugin's identity (wicked-studio#388). */

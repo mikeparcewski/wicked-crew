@@ -3492,7 +3492,7 @@ describe('publish latency (DES-L6 PR-L6-1; crew#547 items 1-3, F-E2E-042): the `
   it('verifyCurrent memo: the second read skips the row re-derivation; an edited manifest.json is refused ON A HIT (the cross-check still runs); chmod + a one-byte edit of a generation file is a MISS the byte hash refuses', async () => {
     s.store.seed();
     const r1 = await s.store.publish(1);
-    const rows = vi.spyOn(s.store as unknown as { snapshotRowsProblem: (...args: unknown[]) => unknown }, 'snapshotRowsProblem');
+    const rows = vi.spyOn(s.store as unknown as { snapshotRowsProblemSteps: (...args: unknown[]) => unknown }, 'snapshotRowsProblemSteps'); // the row re-derivation runs as steps (crew#852)
     const first = s.store.currentSnapshot();
     expect(rows).toHaveBeenCalledTimes(1);
     const second = s.store.currentSnapshot();
