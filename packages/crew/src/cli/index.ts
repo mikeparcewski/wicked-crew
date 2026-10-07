@@ -9,7 +9,7 @@ import { ensureBridgesOnPath, ensurePiLauncherCommand, PI_ACP_COMMAND_ENV } from
 import { bridgeReaper, reapOrphansAtBoot, startOrphanSweep } from '../core/bridge-reaper.js';
 import { daemonSignalLog } from '../core/daemon-signal-log.js';
 import { shutdownWithDeadline } from '../core/shutdown.js';
-import { startServer } from '../api/server.js';
+import { startServer, type BootStages } from '../api/server.js';
 import { resolveAuthMode } from '../api/auth.js';
 import { crewStateHome, setCrewStateHome, stateHomeOfDb } from '../projects/state-home.js';
 import { assertWickedRootsOutsideStateHome, StateHomePlacementError } from '../projects/state-home-preflight.js';
@@ -234,7 +234,13 @@ function probeBusFile(dbPath: string): BusUnavailable | undefined {
 
 let adapterRef: CoreAdapter | undefined;
 
-async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; port: number }> {
+/**
+ * Boot the daemon. `bootStartedAt` is `main()`'s clock (the same instant `startupMs` counts from), so
+ * the stages handed back are an EXCLUSIVE breakdown of `startupMs`: `preflight` (everything here
+ * before the engine — bridges on PATH, state home, root preflight, bus/governance probes, the
+ * legacy-outbox probe), `engine`, then the server's own stages (`api/server.ts` BootStageClock).
+ */
+async function bootstrap(opts: BootstrapOpts, bootStartedAt: number = performance.now()): Promise<{ adapter: CoreAdapter; port: number; stages: BootStages }> {
   // Put the packaged ACP bridge shims on PATH BEFORE the engine exists — the core
   // spawns bridge binaries by bare name, and every engine subprocess inherits this
   // environment. Makes a plain `npm install` deployment fully self-contained (no
@@ -366,6 +372,12 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
     preRuleExecBusDbPath: opts.preRuleExecBusDbPath,
     preRuleExecUnavailable,
   });
+  // crew#741: the engine stage — the Core construction (engine spawn, core/governance store open) —
+  // timed apart from the server's own stages so a slow boot names its stage. The native addon itself
+  // is loaded when `core/adapter.ts` is imported, before `main()` starts its clock: not in any stage
+  // and not in `startupMs`.
+  const tEngine = performance.now();
+  const preflightMs = Math.round(tEngine - bootStartedAt);
   const adapter = new CoreAdapter({
     dbPath: opts.dbPath,
     stub: opts.stub,
@@ -373,6 +385,7 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
     ...engineBus,
     governanceStore,
   });
+  const engineMs = Math.round(performance.now() - tEngine);
   adapterRef = adapter;
   const serverOptions = {
     ...(opts.interactiveDraftEvents
@@ -431,7 +444,7 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
     // daemon's own origin (resolved by the pool from the bound address).
     interactiveBridge: { busDataDir: crewBus.dataDir },
   };
-  const { port } = await startServer(
+  const { port, stages: serverStages } = await startServer(
     adapter,
     opts.port,
     undefined,
@@ -440,7 +453,13 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
   // Now that the port is known, complete the origin stamp (the engine reads it at emit time).
   applyEmitOrigin(emitOrigin({ version: crewVersion, pid: process.pid, coreDbPath: opts.dbPath, port }));
   installShutdownHandlers();
-  return { adapter, port };
+  const stages: BootStages = { preflight: preflightMs, engine: engineMs, ...serverStages };
+  // One stderr line beside the other `[crew]` boot lines: where the seconds went (crew#741) — the
+  // stages are exclusive and sum to `startupMs` within rounding (each stage is rounded on its own)
+  // and the two prints that follow (a few ms; a diagnosis tool, not an invariant — codex on #846).
+  // On a boot whose baseline env already verified, `venv` reads 0ms — no `uv sync` re-ran.
+  console.error(`[crew] boot stages: ${Object.entries(stages).map(([name, ms]) => `${name} ${ms}ms`).join(' · ')}`);
+  return { adapter, port, stages };
 }
 
 function installShutdownHandlers(): void {
@@ -566,7 +585,7 @@ async function main(): Promise<void> {
     // that orphan holds the shared worker config home hostage until reaped — the boot
     // sweep only helps the NEXT daemon. Unref'd timer; SIGTERM, then SIGKILL a tick later.
     startOrphanSweep();
-    const { adapter, port } = await bootstrap(opts);
+    const { adapter, port, stages } = await bootstrap(opts, t0);
     printReady({
       mode: 'serve',
       port,
@@ -590,6 +609,10 @@ async function main(): Promise<void> {
       interactiveReviewEvents: (opts.interactiveReviewEvents && !adapter.stub) || undefined,
       interactiveChatEvents: (opts.interactiveChatEvents && !adapter.stub) || undefined,
       startupMs: Math.round(performance.now() - t0),
+      // crew#741: the EXCLUSIVE per-stage breakdown of `startupMs` (preflight · engine · setup ·
+      // skills · venv · routes · studio · listen, ms; they sum to it within rounding and the prints)
+      // — a harness reads the stages it knows; `venv` 0 on an unchanged baseline.
+      stages,
     });
   } else if (command === 'start') {
     const opts = parseBootstrap(argv);
