@@ -387,6 +387,10 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
 
   // The broker (§6). The body carries a worker's arguments: a malformed one is refused without
   // echoing any of it, and nothing of the body is logged or audited (the call record is the record).
+  // WORKER-FACING (crew#714): this route and `POST /mcp/tools` below are the two the bearer
+  // boundary exempts (`isUnitTokenRoute`, src/api/auth.ts) — a worker holds no operator bearer,
+  // and the body's capability token is judged by the engine on every call (401 `invalid_token`).
+  // Nothing here reads `req.actor`; keep it that way.
   app.post(
     `${V}/mcp/call`,
     { config: { manifest: { requestType: 'McpCallBody', responseType: 'McpCallResponse', statusCodes: [200, 400, 401, 403, 409, 429, 500, 502, 503, 504] } } },
@@ -406,7 +410,8 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
   );
 
   // The unit's tool list (S4). Like the call, the token travels in the body so it never reaches a
-  // request log, and nothing of the body is logged or audited.
+  // request log, and nothing of the body is logged or audited. WORKER-FACING, bearer-exempt like
+  // the call above (crew#714): the engine's `listMcpTools` judges the token, not an actor.
   app.post(
     `${V}/mcp/tools`,
     { config: { manifest: { requestType: 'McpToolsBody', responseType: 'McpToolsResponse', statusCodes: [200, 400, 401, 500, 503] } } },

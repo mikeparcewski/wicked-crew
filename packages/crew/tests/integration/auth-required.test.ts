@@ -279,6 +279,70 @@ describe('admin — governs', () => {
   });
 });
 
+describe('worker-facing MCP routes — authenticated by the unit token, not the bearer (crew#714)', () => {
+  // A governed worker holds only its per-unit capability token (WICKED_MCP_TOKEN) and sends it in
+  // the body. The ENGINE judges it: an unbound token is the broker's own 401 `invalid_token` — not
+  // the boundary's "Authentication required" (which would never let a worker reach any tool).
+  const UNBOUND = 'wmt_not_a_bound_unit_token';
+
+  function brokerJudged(res: Response, json: { code?: string; error?: string }, label: string): void {
+    expect(res.status, label).toBe(401);
+    expect(json.code, label).toBe('invalid_token');
+    expect(json.error, label).not.toMatch(/Authentication required/);
+    expect(res.headers.get('www-authenticate'), `${label}: the boundary's challenge header`).toBeNull();
+  }
+
+  it('a bearer-less POST /mcp/call with a unit token reaches the broker (the engine judges the token)', async () => {
+    const res = await call('POST', '/api/v1/mcp/call', undefined, { token: UNBOUND, subject: 'mcp:fx/read' });
+    brokerJudged(res, (await res.json()) as { code?: string; error?: string }, 'POST /mcp/call');
+  });
+
+  it('a bearer-less POST /mcp/tools with a unit token reaches the engine tool list', async () => {
+    const res = await call('POST', '/api/v1/mcp/tools', undefined, { token: UNBOUND });
+    brokerJudged(res, (await res.json()) as { code?: string; error?: string }, 'POST /mcp/tools');
+  });
+
+  it('an operator bearer never substitutes for the unit token on those two routes', async () => {
+    const res = await call('POST', '/api/v1/mcp/call', TOKENS.admin, { token: UNBOUND, subject: 'mcp:fx/read' });
+    brokerJudged(res, (await res.json()) as { code?: string; error?: string }, 'bearer + unbound unit token');
+  });
+
+  it('a malformed body on the exempt route is the route\'s own 400, not a 401', async () => {
+    const res = await call('POST', '/api/v1/mcp/call', undefined, { subject: 'mcp:fx/read' });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { code?: string }).code).toBe('bad_request');
+  });
+
+  it('every OTHER /mcp route still needs the bearer — exactly two method+path pairs, never a prefix', async () => {
+    for (const [method, path, body] of [
+      ['GET', '/api/v1/mcp/servers', undefined],
+      ['POST', '/api/v1/mcp/servers/preview', { name: 'fx', kind: 'mcp-stdio', command: 'x', args: [], auth: null }],
+      ['POST', '/api/v1/mcp/servers', { previewHash: 'x' }],
+      ['POST', '/api/v1/mcp/approvals', { subject: 'mcp:fx' }],
+      ['GET', '/api/v1/mcp/usage', undefined],
+      ['GET', '/api/v1/mcp/call', undefined],
+      ['GET', '/api/v1/mcp/tools', undefined],
+      ['POST', '/api/v1/mcp/call/', { token: UNBOUND, subject: 'mcp:fx/read' }],
+      ['POST', '/api/v1/mcp/calls', { token: UNBOUND, subject: 'mcp:fx/read' }],
+      ['PATCH', '/api/v1/mcp/tools/mcp:fx%2Fread', { enabled: false }],
+    ] as const) {
+      const res = await call(method, path, undefined, body);
+      expect(res.status, `${method} ${path}`).toBe(401);
+      expect(res.headers.get('www-authenticate'), `${method} ${path}`).toMatch(/Bearer/);
+      expect(((await res.json()) as { error: string }).error, `${method} ${path}`).toMatch(/Authentication required/);
+    }
+  });
+
+  it('local mode is unchanged: the same unbound token is the broker\'s 401 there too', async () => {
+    const res = await fetch(`${localBase}/api/v1/mcp/call`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: UNBOUND, subject: 'mcp:fx/read' }),
+    });
+    brokerJudged(res, (await res.json()) as { code?: string; error?: string }, 'local POST /mcp/call');
+  });
+});
+
 describe('CORS pairing (the R2 gap)', () => {
   it('required mode reflects a non-loopback origin, with Authorization allowed', async () => {
     const res = await call('GET', '/api/v1/health', TOKENS.observer);
