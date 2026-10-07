@@ -33,7 +33,7 @@
     "@agentclientprotocol/codex-acp": "^1.1.7",
     "@fastify/static": "^10.1.2",
     "@fastify/websocket": "^11.2.0",
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/sdk": "^1.31.0",
     "agent-acp-bridges": "^1.1.1",
     "fastify": "^5.12.5",
     "pi-acp": "^0.0.32",
