@@ -32,6 +32,19 @@
 // guards to skips. Automation must never set it; `tests/core-checkout-policy.test.ts` fails if an
 // automated environment ever loses the checkout, which is the regression test for the above.
 
+//
+// # Which REF (crew#508)
+//
+// WHERE the checkout is and WHICH REVISION of core it holds are two questions; this module owns the
+// policy for both. The revision default is `main` everywhere — CI's `WICKED_CORE_REF`, the release
+// pipeline's `scripts/fetch-core-checkout.mjs` — because the drift guards exist to catch the day
+// core main moves. The ONE override: a pull request may name a paired core branch with a PR-body
+// line `wicked-core-ref: <branch>` ({@link CORE_REF_MARKER}); CI's `core_ref` step honours it only
+// on `pull_request` events and only when the branch is the head of an OPEN core PR (a merged one
+// resolves back to the default — the post-merge re-run). A guard green against a branch is green
+// against THAT branch; main's own run re-judges against core main after the pair merges.
+// `tests/core-checkout-policy.test.ts` pins every clause of this against the workflow and the script.
+
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -41,6 +54,16 @@ const HERE = dirname(fileURLToPath(import.meta.url));
  *  this file moves; every path below is expressed relative to a named anchor, not counted out. */
 const PKG_ROOT = resolve(HERE, '..', '..');
 const REPO_ROOT = resolve(PKG_ROOT, '..', '..');
+
+/** The repository root — exported for the policy test, which audits the workflow and the fetch script. */
+export const CREW_REPO_ROOT: string = REPO_ROOT;
+
+/** The revision of core every automated environment defaults to (CI, release, local fetch). */
+export const CORE_DEFAULT_REF = 'main';
+
+/** The PR-body marker a lockstep PR uses to name the core branch it is built against (crew#508):
+ *  one line, `wicked-core-ref: <branch>`. Honoured on pull_request events only. */
+export const CORE_REF_MARKER = 'wicked-core-ref:';
 
 /**
  * The artifacts the guards actually read. A directory qualifies as core's checkout only if it has

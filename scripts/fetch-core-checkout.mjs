@@ -39,8 +39,12 @@ import { fileURLToPath } from 'node:url';
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const DEST = process.env['WICKED_CORE_DIR'] ?? resolve(REPO_ROOT, '..', 'wicked-core');
-/** `main` matches crew's CI (`WICKED_CORE_REF`), deliberately: the release must gate on the same
- *  revision of core that every PR was checked against, or the two disagree about what "green" is. */
+/** `main` matches crew's CI default (`WICKED_CORE_REF`), deliberately: the release must gate on the
+ *  same revision of core that every merged PR was checked against, or the two disagree about what
+ *  "green" is. Crew's CI may judge a PULL REQUEST against a paired core branch (the `wicked-core-ref:`
+ *  PR-body marker, .github/workflows/ci.yml `core_ref` step, crew#508) — but a push to main and this
+ *  script, which the release pipeline runs, never read that marker. `tests/core-checkout-policy.test.ts`
+ *  pins this default; change it there too or not at all. */
 const REF = process.env['WICKED_CORE_REF'] ?? 'main';
 const URL = process.env['WICKED_CORE_URL'] ?? 'https://github.com/mikeparcewski/wicked-core.git';
 

@@ -54,7 +54,9 @@ concurrency:
 env:
   # The wicked-core revision crew is tested against. `main` is deliberate: these two repos move
   # together, and the point of building from source is to catch drift the day it lands rather than at
-  # the next publish. Pin to a tag if crew ever needs to trail core.
+  # the next publish. Pin to a tag if crew ever needs to trail core. A pull_request may name a paired
+  # core branch instead (the `wicked-core-ref:` PR-body marker, resolved by the `core_ref` step below,
+  # crew#508); push to main and the release pipeline never do.
   WICKED_CORE_REF: main
   # Offline embedder — the memory engine must not download a model in CI (matches the tests' default).
   WICKED_MEMORY_EMBEDDER: hash
@@ -69,11 +71,78 @@ jobs:
         with:
           path: wicked-crew
 
+      # crew#508: a LOCKSTEP PR — a wire event and its mirror, a workflow def and its served copy — may
+      # name the wicked-core ref it is built against, so the three drift guards
+      # (builtin-overlay-shadow, armed-workflow-served, deliver-phase) judge it against the paired core
+      # branch instead of staying red until core main moves. The marker is one line of the PR body:
+      #
+      #     wicked-core-ref: <branch>
+      #
+      # Honoured ONLY on pull_request events, and ONLY when <branch> is the head of an OPEN PR on
+      # mikeparcewski/wicked-core itself (not a fork): a typo, a stranger's ref or a branch with no PR
+      # fails THIS step, loudly. A marker whose core PR has MERGED resolves to the default instead —
+      # that is the post-merge re-run against main the pairing needs, with no body edit. The effective
+      # ref is a check annotation and the job summary, so a reviewer sees what the PR was judged
+      # against. push to main, tags and the release pipeline never read the marker
+      # (scripts/fetch-core-checkout.mjs keeps main; tests/core-checkout-policy.test.ts pins all of it).
+      - name: Resolve the wicked-core ref (`wicked-core-ref:` PR-body marker, crew#508)
+        id: core_ref
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          # Through env, never interpolated into the script: a PR body is attacker-controlled text.
+          PR_BODY: ${{ github.event.pull_request.body }}
+          DEFAULT_REF: ${{ env.WICKED_CORE_REF }}
+          CORE_REPO: mikeparcewski/wicked-core
+        run: |
+          set -euo pipefail
+          ref="$DEFAULT_REF"
+          source="the workflow default"
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            # First marker line wins; CRLF bodies are fine ([[:space:]] eats the \r). Fenced code blocks
+            # (``` / ~~~) are dropped first so a body that QUOTES the marker — this workflow's own
+            # documentation, a PR template example — is not a body that USES it (codex on #839).
+            marker="$(printf '%s\n' "$PR_BODY" \
+              | sed -E "/^[[:space:]]*(\`\`\`|~~~)/,/^[[:space:]]*(\`\`\`|~~~)/d" \
+              | sed -nE 's/^[[:space:]]*wicked-core-ref:[[:space:]]*([^[:space:]]+)[[:space:]]*$/\1/p' | head -n 1)"
+            if [ -n "$marker" ]; then
+              case "$marker" in
+                *..*|-*|/*|*/|*.lock) echo "::error::wicked-core-ref marker '$marker' is not a plausible branch name"; exit 1 ;;
+              esac
+              if ! printf '%s' "$marker" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/-]*$'; then
+                echo "::error::wicked-core-ref marker '$marker' is not a plausible branch name"; exit 1
+              fi
+              # One query: every PR whose head is this branch of the core repo itself (forks excluded).
+              owner="${CORE_REPO%%/*}"
+              prs="$(gh api "repos/${CORE_REPO}/pulls?state=all&head=${owner}:${marker}&per_page=30" \
+                --jq "[.[] | select(.head.repo.full_name == \"${CORE_REPO}\") | {number, state, merged: (.merged_at != null)}]")"
+              open_pr="$(jq -r '[.[] | select(.state == "open")][0].number // empty' <<<"$prs")"
+              merged_pr="$(jq -r '[.[] | select(.merged)][0].number // empty' <<<"$prs")"
+              if [ -n "$open_pr" ]; then
+                ref="$marker"
+                source="the PR-body marker (open ${CORE_REPO}#${open_pr})"
+              elif [ -n "$merged_pr" ]; then
+                source="the workflow default — the marker's branch '$marker' is ${CORE_REPO}#${merged_pr}, already MERGED (post-merge re-run)"
+              else
+                echo "::error::wicked-core-ref marker '$marker' is not the head branch of an open ${CORE_REPO} pull request"
+                exit 1
+              fi
+            fi
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "::notice title=wicked-core ref::$ref — from $source"
+          {
+            echo "### wicked-core ref"
+            echo
+            echo "\`$ref\` — from $source"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Checkout wicked-core (source of the engine addon)
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           repository: mikeparcewski/wicked-core
-          ref: ${{ env.WICKED_CORE_REF }}
+          ref: ${{ steps.core_ref.outputs.ref }}
           path: wicked-core
 
       # No estate sibling checkout: wicked-core resolves wicked-estate from crates.io (published
