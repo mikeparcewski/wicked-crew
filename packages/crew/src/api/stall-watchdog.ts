@@ -110,6 +110,12 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): P
   }
 }
 
+/** ` (reason)` for a benched seat's log mention, when the run listing carried the reason. */
+function benchReason(run: ExecutingRun, cli: string): string {
+  const reason = run.benched?.find((b) => b.cli === cli)?.reason;
+  return reason !== undefined && reason !== '' ? ` (${reason})` : '';
+}
+
 /** The slice of a run the sweep needs; the server maps it from `sessionsDetail()`. */
 export interface ExecutingRun {
   id: string;
@@ -127,6 +133,11 @@ export interface ExecutingRun {
    *  routed `evaluator_distinct` avoids the seat it was routed away from. Absent/empty = no
    *  constraint (a free-text unit carries no role). */
   avoid?: string[];
+  /** Seats THIS RUN benched (`session.benched_seats`, crew#833): a seat the engine already failed
+   *  over away from — quota exhausted, signed out, dead — is never a failover target in the same
+   *  run, whatever the evaluator ≠ creator read says. With the reason, so the needs-you frame's log
+   *  can say why. Absent/empty = nothing benched (or an older engine). */
+  benched?: Array<{ cli: string; reason: string }>;
   /** What runs the cursor unit (crew #580 / #581): a `tool` unit is the engine's own command —
    *  there is no seat to fail over to, so the escalation stage NOTIFIES instead of reassigning.
    *  Absent = unknown (older engine views): today's ladder. */
@@ -549,16 +560,19 @@ export class WorkerStallWatchdog {
           escalations: used,
           error: 'cursor unit unknown: the run listing carried no ord for this run',
         };
-      } else if (pick.target === undefined && pick.avoided.length > 0) {
-        // crew#638 / crew#583: every other seat is one evaluator ≠ creator forbids. Moving the
-        // unit there would let one seat create and evaluate the same work, so a human decides.
+      } else if (pick.target === undefined && (pick.avoided.length > 0 || pick.benched.length > 0)) {
+        // crew#638 / crew#583: every other seat is one evaluator ≠ creator forbids — moving the unit
+        // there would let one seat create and evaluate the same work. crew#833: or one this run
+        // already BENCHED (quota exhausted, signed out) — dispatching there is a 13-second death on
+        // the same error that benched it. Either way a human decides; the frame names both lists.
         frame = {
           ...base,
           action: 'notify',
           outcome: 'ok',
           needsYou: true,
-          reason: 'evaluator_distinct',
-          avoided: pick.avoided,
+          reason: pick.benched.length > 0 ? 'no_eligible_seat' : 'evaluator_distinct',
+          ...(pick.avoided.length > 0 ? { avoided: pick.avoided } : {}),
+          ...(pick.benched.length > 0 ? { benched: pick.benched } : {}),
           ...(run.cli !== undefined ? { previousCli: run.cli } : {}),
         };
       } else {
@@ -597,6 +611,7 @@ export class WorkerStallWatchdog {
             ...(seat !== undefined ? { cli: seat } : {}),
             ...(run.cli !== undefined ? { previousCli: run.cli } : {}),
             ...(pick.avoided.length > 0 ? { avoided: pick.avoided } : {}),
+            ...(pick.benched.length > 0 ? { benched: pick.benched } : {}),
           };
         } catch (err) {
           frame = {
@@ -620,6 +635,11 @@ export class WorkerStallWatchdog {
       const why =
         frame.reason === 'evaluator_distinct'
           ? ` (every other seat is one evaluator ≠ creator forbids: ${(frame.avoided ?? []).join(', ')})`
+          : frame.reason === 'no_eligible_seat'
+            ? ` (no eligible seat: ${[
+                ...(frame.benched ?? []).map((s) => `${s} benched by this run${benchReason(run, s)}`),
+                ...(frame.avoided ?? []).map((s) => `${s} forbidden by evaluator ≠ creator`),
+              ].join('; ')})`
           : frame.reason === 'evaluating'
             ? ' (the worker returned; its gate evaluation is in flight)'
             : '';
@@ -671,8 +691,8 @@ export class WorkerStallWatchdog {
 
   /**
    * The failover TARGET for a stall reassign (perf#4): the first seat of the run's own pool
-   * that is neither the currently-stalled seat nor one this run already stall-reassigned away
-   * from. `undefined` = no distinct candidate (no pool known, a single-seat pool, or every
+   * that is neither the currently-stalled seat, nor one this run already stall-reassigned away
+   * from, nor one this run BENCHED (crew#833 — `benched` lists the pool seats the bench excluded). `undefined` = no distinct candidate (no pool known, a single-seat pool, or every
    * other seat already stalled here) — the caller then recycles in place, which is today's
    * (still safe) behaviour. Pool order is `session.clis` order: deterministic, no health
    * heuristics — the per-run budget bounds how far the rotation can walk.
@@ -681,14 +701,19 @@ export class WorkerStallWatchdog {
    * non-empty and no target is left, the caller escalates to a human instead of recycling in
    * place (crew#638).
    */
-  private pickFailoverSeat(run: ExecutingRun): { target: string | undefined; avoided: string[] } {
-    if (run.cli === undefined) return { target: undefined, avoided: [] }; // council re-pick
+  private pickFailoverSeat(run: ExecutingRun): { target: string | undefined; avoided: string[]; benched: string[] } {
+    if (run.cli === undefined) return { target: undefined, avoided: [], benched: [] }; // council re-pick
     const stalled = this.stalledSeats.get(run.id);
     const avoid = run.avoid ?? [];
+    const bench = new Set((run.benched ?? []).map((b) => b.cli));
     const candidates = (run.seats ?? []).filter((s) => s !== run.cli && !(stalled?.has(s) ?? false));
+    // A benched seat is out before the evaluator ≠ creator read: it is not a candidate for anything
+    // in this run, so it is named under `benched` even when the avoid list would also exclude it.
+    const eligible = candidates.filter((s) => !bench.has(s));
     return {
-      target: candidates.find((s) => !avoid.includes(s)),
-      avoided: candidates.filter((s) => avoid.includes(s)),
+      target: eligible.find((s) => !avoid.includes(s)),
+      avoided: eligible.filter((s) => avoid.includes(s)),
+      benched: candidates.filter((s) => bench.has(s)),
     };
   }
 

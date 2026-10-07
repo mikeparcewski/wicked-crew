@@ -7,6 +7,8 @@
 //   frame says `no_output`.
 // - crew#629: a unit whose own processes are working (a test runner) is not silent.
 // - crew#581: nothing is reassigned once the worker returned and its gate evaluation is in flight.
+// - crew#833: a failover never lands on a seat THIS RUN benched (`session.benched_seats`); with no
+//   eligible seat left the watchdog asks a human, naming the benched and the avoided seats apart.
 
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -87,6 +89,57 @@ describe('evaluator ≠ creator across a stall failover (crew#638, crew#583)', (
     await quietFor(wd, tick, 31);
     expect(reassigns).toEqual([{ runId: 'r-638b', ord: 3, cli: 'codex' }]);
     expect(escalated(frames)[0]).toMatchObject({ action: 'reassign', outcome: 'ok', cli: 'codex', avoided: ['pi'] });
+  });
+
+  it('crew#833: a seat this run benched is skipped on failover, and the frame names it under benched', async () => {
+    const { wd, frames, reassigns, tick } = build([
+      {
+        id: 'r-833a',
+        ord: 6,
+        cli: 'claude',
+        seats: ['claude', 'copilot', 'pi'],
+        benched: [{ cli: 'copilot', reason: 'quota_exhausted (no success in the run)' }],
+        executor: 'agent',
+      },
+    ]);
+    await quietFor(wd, tick, 31);
+    expect(reassigns).toEqual([{ runId: 'r-833a', ord: 6, cli: 'pi' }]);
+    expect(escalated(frames)[0]).toMatchObject({ action: 'reassign', outcome: 'ok', cli: 'pi', previousCli: 'claude', benched: ['copilot'] });
+    expect(escalated(frames)[0]).not.toHaveProperty('avoided');
+  });
+
+  it('crew#833: creator claude, codex avoided, copilot benched ⇒ no eligible seat ⇒ needs-you notify naming both', async () => {
+    const { wd, frames, reassigns, tick } = build([
+      {
+        id: 'r-833b',
+        ord: 6,
+        cli: 'claude',
+        seats: ['claude', 'codex', 'copilot'],
+        avoid: ['codex'],
+        benched: [{ cli: 'copilot', reason: 'quota_exhausted (no success in the run)' }],
+        executor: 'agent',
+      },
+    ]);
+    await quietFor(wd, tick, 31);
+    expect(reassigns).toEqual([]);
+    expect(escalated(frames)).toHaveLength(1);
+    expect(escalated(frames)[0]).toMatchObject({
+      action: 'notify',
+      outcome: 'ok',
+      needsYou: true,
+      reason: 'no_eligible_seat',
+      avoided: ['codex'],
+      benched: ['copilot'],
+      previousCli: 'claude',
+    });
+    // A seat both avoided and benched is named ONCE, under benched (the bench is checked first).
+    const both = build([
+      { id: 'r-833c', ord: 6, cli: 'claude', seats: ['claude', 'copilot'], avoid: ['copilot'], benched: [{ cli: 'copilot', reason: 'signed out' }], executor: 'agent' },
+    ]);
+    await quietFor(both.wd, both.tick, 31);
+    expect(both.reassigns).toEqual([]);
+    expect(escalated(both.frames)[0]).toMatchObject({ action: 'notify', reason: 'no_eligible_seat', benched: ['copilot'] });
+    expect(escalated(both.frames)[0]).not.toHaveProperty('avoided');
   });
 
   it('a single-seat pool still recycles in place (no seat was avoided)', async () => {
@@ -218,9 +271,9 @@ describe('the listExecuting mapper derives avoid for creator and evaluator_disti
     removeScratch(dir);
   });
 
-  const view = (unitIx: number, units: Record<string, unknown>[], clis: string[]): SessionView =>
+  const view = (unitIx: number, units: Record<string, unknown>[], clis: string[], session: Record<string, unknown> = {}): SessionView =>
     ({
-      session: { id: 'r-map', status: 'executing', unit_ix: unitIx, clis },
+      session: { id: 'r-map', status: 'executing', unit_ix: unitIx, clis, ...session },
       units: units.map((u) => ({ assigned_cli: null, routing: null, tool_cmd: null, ...u })),
     }) as unknown as SessionView;
 
@@ -295,5 +348,32 @@ describe('the listExecuting mapper derives avoid for creator and evaluator_disti
     );
     expect(reassigns).toEqual([]);
     expect(detail).toMatchObject({ reason: 'evaluator_distinct', avoided: ['claude'], needsYou: true });
+  }, 20_000);
+
+  // crew#833, run ad5a4ca7: creator claude stalled; codex is the run's evaluator (avoided); copilot
+  // was benched at unit 1 for quota. The old mapper handed only `avoid` over, so the pick landed on
+  // copilot and died in 13 s on the quota error. Now the bench reaches the watchdog: no eligible
+  // seat ⇒ a needs-you notify that names the benched and the avoided seats apart, and NO reassign.
+  it('a creator cursor never fails over onto the seat this run benched; with codex avoided too, a human is asked naming both (run ad5a4ca7)', async () => {
+    const { detail, reassigns } = await escalationOf(
+      view(
+        0,
+        [
+          { ord: 1, assigned_cli: 'claude', role: 'creator' },
+          { ord: 2, assigned_cli: 'codex', role: 'evaluator' },
+        ],
+        ['claude', 'codex', 'copilot'],
+        { benched_seats: [{ cli: 'copilot', reason: 'quota_exhausted (no success in the run)', source: 'worker' }] },
+      ),
+    );
+    expect(reassigns).toEqual([]);
+    expect(detail).toMatchObject({
+      action: 'notify',
+      needsYou: true,
+      reason: 'no_eligible_seat',
+      avoided: ['codex'],
+      benched: ['copilot'],
+      previousCli: 'claude',
+    });
   }, 20_000);
 });

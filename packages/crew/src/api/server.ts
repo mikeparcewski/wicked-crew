@@ -1309,6 +1309,11 @@ export async function createServer(
             ...(cursor?.cli !== undefined ? { cli: cursor.cli } : {}),
             ...(Array.isArray(v.session.clis) ? { seats: v.session.clis } : {}),
             ...(avoid.length > 0 ? { avoid } : {}),
+            // crew#833: the seats THIS RUN benched (`benched_seats`, engine ≥ wave 6) are never a
+            // failover target — the run already failed over away from them on the same error.
+            ...(Array.isArray(v.session.benched_seats) && v.session.benched_seats.length > 0
+              ? { benched: v.session.benched_seats.map((b) => ({ cli: b.cli, reason: b.reason })) }
+              : {}),
             // crew #580 / #581: a tool cursor is notified about, never reassigned.
             ...(cursor !== undefined ? { executor: cursor.executor } : {}),
           };
