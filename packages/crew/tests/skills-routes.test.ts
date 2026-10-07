@@ -359,7 +359,7 @@ describe('publish / analyze — the engine handoff and the copilot view', () => 
 
   it('a second publish with nothing changed is 200 {unchanged: true} naming the CURRENT generation; afterPublish is NOT re-run (the export already names it) — DES-L6 PR-L6-1', async () => {
     const runtime = new SkillsRuntime({ store: s.store, log: (m) => logs.push(m) });
-    const after = vi.spyOn(runtime, 'afterPublish');
+    const after = vi.spyOn(runtime, 'afterPublishPaced'); // the route drives the PACED export (crew#852)
     const own = buildApp(runtime);
     await own.ready();
     try {
@@ -554,7 +554,7 @@ describe('portability per reason on the wire (F-079; api-types 0.34.0)', () => {
     expect(after.manifest.skills['wicked-garden-gamma']?.portability?.reasons).toEqual(['cwd-script', 'skill-dir-var']);
     // The GET shape: {manifest, revision, root, current} plus `installed` — the live plugin's
     // identity, so a surface can say when the root is behind the install (wicked-studio#388).
-    expect(Object.keys(after).sort()).toEqual(['current', 'installed', 'manifest', 'revision', 'root']);
+    expect(Object.keys(after).sort()).toEqual(['current', 'installed', 'manifest', 'publishing', 'revision', 'root']); // `publishing`: crew#852
     // Published: the snapshot row carries the same claim and the view excludes gamma now.
     const pub = await app.inject({ method: 'POST', url: '/api/v1/skills/publish', payload: { expectedRevision: body.revision } });
     expect(pub.statusCode).toBe(200);

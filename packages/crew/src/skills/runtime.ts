@@ -81,6 +81,7 @@ import { applyBaseSkillEnv, BASE_SKILL_REF_ENGINE_ENV, baseSkillPosture, normali
 import { GARDEN_INSTALL_COMMAND, REQUIRED_GARDEN_VERSION, SKILLS_SOURCE_ENV, type PluginSource } from './plugin-source.js';
 import { REFUSED_DIRNAME } from './root-names.js';
 import { SkillsSourceUnavailableError, type CurrentSnapshot, type SkillsStore } from './store.js';
+import type { Pacer } from './tree.js';
 
 /**
  * The seed source named for the boot log by what it IS (Copilot on #480: the line used to hard-code
@@ -278,13 +279,15 @@ export class SkillsRuntime {
    * re-read counts as "nothing known to be handed" — under `warn` that unsets the variable and
    * warns; under `require` the engine refuses at intake, which is the policy's whole point.
    */
-  refreshBaseSkill(): BaseSkillPosture | null {
+  refreshBaseSkill(verified?: CurrentSnapshot): BaseSkillPosture | null {
     const config = this.baseSkillConfig;
     if (config === null) return null;
     let published: { gen: number; skills: string[] } | null = null;
     if (this.lastHealth.state === 'published') {
       try {
-        published = this.store.currentSnapshotSkills();
+        // The ladder hands the generation it JUST verified (crew#852): re-verifying it here would
+        // walk the whole generation again, synchronously, right after the paced export.
+        published = verified === undefined ? this.store.currentSnapshotSkills() : this.store.snapshotSkillsOf(verified);
       } catch {
         published = null;
       }
@@ -530,6 +533,29 @@ export class SkillsRuntime {
     try {
       current = this.store.currentSnapshot();
     } catch (err) {
+      return this.recordConfigError(err);
+    }
+    return this.exportCurrent(current);
+  }
+
+  /**
+   * `afterPublish` on the event loop (crew#852): the generation's verification — a full walk and
+   * hash of what was just published — runs as paced steps, so the publish route's response and
+   * every other request keep moving while it verifies. Same ladder, same record.
+   */
+  async afterPublishPaced(pacer: Pacer): Promise<SkillsHealth | null> {
+    let current: CurrentSnapshot | null;
+    try {
+      current = await this.store.currentSnapshotPaced(pacer);
+    } catch (err) {
+      return this.recordConfigError(err);
+    }
+    return this.exportCurrent(current);
+  }
+
+  /** The ladder's `config-error` rung: `current` would not verify — the engine input is pointed at the refusal path. */
+  private recordConfigError(err: unknown): SkillsHealth {
+    {
       const message = err instanceof Error ? err.message : String(err);
       const refusal = refusalPath(this.store.root, 'skills.config');
       applySkillsSnapshotEnv(refusal);
@@ -545,6 +571,10 @@ export class SkillsRuntime {
           baseSkill: null,
       });
     }
+  }
+
+  /** The ladder's upper rungs for a verified (or absent) `current`: export it, pin it, judge the rules identity, record. */
+  private exportCurrent(current: CurrentSnapshot | null): SkillsHealth | null {
     if (current === null) {
       this.store.live.exported(null);
       this.refreshBaseSkill();
@@ -576,23 +606,26 @@ export class SkillsRuntime {
     }
     const stale = staleRulesFinding(current, rederived);
     if (stale !== null) this.log(`[skills] skills.stale-rules: ${stale.message}`);
-    return this.record({
-      state: 'published',
-      root: this.store.root,
-      current: { gen: current.gen, path: current.path },
-      engineInput: current.path,
-      stateHome: canonicalCrewStateHome(),
-      findings: stale === null ? [] : [stale],
-          baseSkill: null,
-    });
+    return this.record(
+      {
+        state: 'published',
+        root: this.store.root,
+        current: { gen: current.gen, path: current.path },
+        engineInput: current.path,
+        stateHome: canonicalCrewStateHome(),
+        findings: stale === null ? [] : [stale],
+        baseSkill: null,
+      },
+      current,
+    );
   }
 
   /** Store the ladder's outcome; answer it as `health()` reports it (the live `skills.source` warning included). */
-  private record(health: SkillsHealth): SkillsHealth {
+  private record(health: SkillsHealth, verified?: CurrentSnapshot): SkillsHealth {
     this.lastHealth = health;
     // The base skill is judged against THIS outcome (crew#554): a generation just published (or
     // refused) changes what the engine is handed, so the variable follows the ladder every time.
-    this.refreshBaseSkill();
+    this.refreshBaseSkill(verified);
     return this.health();
   }
 }

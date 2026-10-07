@@ -42,6 +42,7 @@ import { SkillPathError } from '../skills/contain.js';
 import { finding } from '../skills/guards.js';
 import { installedPluginState } from '../skills/installed.js';
 import type { SkillsRuntime } from '../skills/runtime.js';
+import { budgetPacer } from '../skills/tree.js';
 import {
   RevisionMismatchError,
   SkillsCurrentInvalidError,
@@ -174,12 +175,15 @@ export function registerSkillsRoutes(app: FastifyInstance, deps: SkillsRouteDeps
     `${V}/skills`,
     { config: { manifest: { responseType: 'SkillsManifestResponse', statusCodes: [200, 503] } } },
     async (_req, reply) =>
-      guarded(reply, () => {
+      guarded(reply, async () => {
         const s = store();
         const manifest = s.manifest();
-        // (wicked-studio#388) The plugin ON DISK, so the page can say when the root — and therefore
-        // every published snapshot — is behind the operator's install.
-        return { manifest, revision: manifest.revision, root: s.root, current: s.currentSnapshot(), installed: installedPluginState() };
+        // `current` is VERIFIED on every read (a walk of the generation); paced (crew#852) so a
+        // 15k-file generation does not hold the loop. (wicked-studio#388) The plugin ON DISK, so the
+        // page can say when the root — and therefore every published snapshot — is behind the
+        // operator's install. `publishing` says a publish is running right now (crew#852).
+        const current = await s.currentSnapshotPaced(budgetPacer());
+        return { manifest, revision: manifest.revision, root: s.root, current, installed: installedPluginState(), publishing: s.isPublishing() };
       }),
   );
 
@@ -323,11 +327,15 @@ export function registerSkillsRoutes(app: FastifyInstance, deps: SkillsRouteDeps
       if (!parsed.success) return invalidBody(reply, parsed.error);
       return guarded(reply, async () => {
         const runtime = runtimeOf();
-        const published = await runtime.store.publish(parsed.data.expectedRevision);
+        // The export runs INSIDE the store's in-flight window (codex r1 on #853): paced, the
+        // verification of the new generation lets the loop turn, and a second publish admitted
+        // meanwhile could commit a generation this request would then export over.
+        const published = await runtime.store.publish(parsed.data.expectedRevision, async (result, pacer) => {
+          if (result.snapshot !== null && result.unchanged !== true) await runtime.afterPublishPaced(pacer);
+        });
         // The published snapshot is what the engine consumes — export its real path now. An
         // `unchanged` publish (DES-L6 PR-L6-1) minted nothing and moved nothing: the export the
         // engine reads is already this generation, so the ladder is not re-run.
-        if (published.snapshot !== null && published.unchanged !== true) runtime.afterPublish();
         // …and say whether the generation the engine is now handed holds the BASE skill (crew#554):
         // a publish that lacks it is the moment the operator learns runs go without the discipline
         // directive (`warn`) or will be refused at intake (`require`).
@@ -349,7 +357,7 @@ export function registerSkillsRoutes(app: FastifyInstance, deps: SkillsRouteDeps
   app.post(
     `${V}/skills/analyze`,
     { config: { manifest: { responseType: 'SkillAnalyzeResult', statusCodes: [200, 503] } } },
-    async (_req, reply) => guarded(reply, () => store().analyze()),
+    async (_req, reply) => guarded(reply, () => store().analyzePaced(budgetPacer())), // paced (crew#852): the same whole-tree validation publish runs
   );
 }
 

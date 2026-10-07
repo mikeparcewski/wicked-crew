@@ -227,27 +227,36 @@ import {
 import { CURRENT_TMP_PREFIX, STAGING_PREFIX } from './root-names.js';
 import {
   assertNoSymlinkComponents,
+  budgetPacer,
   copyFiles,
+  copyFilesSteps,
+  drain,
   EntrySwappedError,
-  fingerprintTree,
+  fingerprintTreeSteps,
   hashFileSet,
-  hashTree,
+  hashTreeSteps,
   impliedDirs,
   isCarriedFile,
   makeTreeReadOnly,
+  makeTreeReadOnlySteps,
+  paced,
   pruneEmptyDirs,
   readFileNoFollow,
   removeTreeForce,
+  removeTreeForcePaced,
   sha256Hex,
   SKIP_DIR_NAMES,
   SymlinkComponentError,
   type FileRecord,
   type LinkRecord,
+  type Pacer,
+  type Steps,
   type TreeEntry,
   type TreeListing,
-  walkEntries,
+  walkEntriesSteps,
   walkFiles,
   walkTree,
+  walkTreeSteps,
   writeFileAtomic,
 } from './tree.js';
 
@@ -627,6 +636,12 @@ export interface SkillsStoreOptions {
   /** Clock, ISO-8601 (tests pin it). */
   now?: () => string;
   warn?: (message: string) => void;
+  /**
+   * The pacer a publish runs its tree steps under (crew#852): default `budgetPacer` — the loop
+   * turns whenever a slice's budget is spent. Tests inject one that observes or interleaves at a
+   * yield (a write landing mid-publish) deterministically.
+   */
+  pacer?: () => Pacer;
 }
 
 /** One scanned file: plugin-relative path, on-disk path, content digest. */
@@ -746,6 +761,7 @@ export class SkillsStore {
   readonly live = new LiveGenerations();
   /** The one publish that may run at a time (module header) — `null` when none is in flight. */
   private publishInFlight: Promise<SkillPublishResult> | null = null;
+  private readonly makePacer: () => Pacer;
   /** One provisioning per baseline hash: a concurrent caller awaits the in-flight one. */
   private readonly venvInFlight = new Map<string, Promise<SkillVenvState>>();
   /**
@@ -788,6 +804,7 @@ export class SkillsStore {
       });
     this.now = opts.now ?? (() => new Date().toISOString());
     this.warn = opts.warn ?? ((m) => console.warn(m));
+    this.makePacer = opts.pacer ?? (() => budgetPacer());
   }
 
   // ── Paths ─────────────────────────────────────────────────────────────────────────────────
@@ -1094,6 +1111,18 @@ export class SkillsStore {
     if (expected !== m.revision) throw new RevisionMismatchError(expected, m.revision);
   }
 
+  /**
+   * A MUTATION while a publish runs is refused before it touches anything (crew#852): the publish
+   * now yields to the event loop between tree steps, so an API write could otherwise commit between
+   * its validation and its commit — the publish would then either fail its own CAS or stage content
+   * its manifest no longer describes. Same envelope as a second publish (`publish-in-flight`, 2xx,
+   * nothing written — re-read and retry); before the pacing a write in that window queued behind
+   * the blocked loop and failed its CAS after the publish landed. Reads are never refused.
+   */
+  private refuseDuringPublish(): void {
+    if (this.publishInFlight !== null) throw new SkillsPublishInFlightError(this.revision());
+  }
+
   // ── `current` ─────────────────────────────────────────────────────────────────────────────
 
   /**
@@ -1105,6 +1134,20 @@ export class SkillsStore {
    * re-derived each time it is handed out.
    */
   currentSnapshot(): CurrentSnapshot | null {
+    return drain(this.currentSnapshotSteps());
+  }
+
+  /**
+   * `currentSnapshot()` on the event loop (crew#852): the same verification, step for step, with
+   * its walk, fingerprint and hash paced so a request landing mid-verification is answered within
+   * one slice instead of after the whole generation. The route layer's publish and `GET /skills`
+   * drive this one; boot and the synchronous readers keep `currentSnapshot()`.
+   */
+  async currentSnapshotPaced(pacer: Pacer): Promise<CurrentSnapshot | null> {
+    return paced(this.currentSnapshotSteps(), pacer);
+  }
+
+  private *currentSnapshotSteps(): Steps<CurrentSnapshot | null> {
     this.assertRootIdentity(); // never answered through a root that changed identity (codex round 4)
     const link = this.currentLink();
     let target: string;
@@ -1115,7 +1158,7 @@ export class SkillsStore {
       if (errnoCode(err) === 'EINVAL') throw new SkillsCurrentInvalidError(link, 'it is not a symbolic link');
       throw err;
     }
-    return this.verifyCurrent(link, target);
+    return yield* this.verifyCurrentSteps(link, target);
   }
 
   /**
@@ -1128,12 +1171,17 @@ export class SkillsStore {
   currentSnapshotSkills(): { gen: number; skills: string[] } | null {
     const current = this.currentSnapshot();
     if (current === null) return null;
+    return this.snapshotSkillsOf(current);
+  }
+
+  /** `currentSnapshotSkills()` for a generation the caller holds VERIFIED already (the ladder's own, just exported) — the metadata read alone, no re-walk (crew#852). */
+  snapshotSkillsOf(current: CurrentSnapshot): { gen: number; skills: string[] } | null {
     const meta = this.readSnapshotMetadata(current.path);
     if (typeof meta === 'string') return null;
     return { gen: current.gen, skills: meta.parsed.skills.map((row) => row.name) };
   }
 
-  private verifyCurrent(link: string, target: string): CurrentSnapshot {
+  private *verifyCurrentSteps(link: string, target: string): Steps<CurrentSnapshot> {
     const invalid = (detail: string): never => {
       throw new SkillsCurrentInvalidError(link, detail);
     };
@@ -1203,7 +1251,7 @@ export class SkillsStore {
     // moves during verification pairs the verified result with a fingerprint that no longer
     // matches, so the next read re-verifies) and once more AFTER it; the result is memoised only
     // when both agree.
-    const fingerprint = fingerprintTree(real);
+    const fingerprint = yield* fingerprintTreeSteps(real);
     const memo = this.verifiedCurrent;
     if (
       memo !== null &&
@@ -1220,7 +1268,7 @@ export class SkillsStore {
       if (linkProblem !== null) return invalid(linkProblem);
       return memo.result;
     }
-    const tree = walkTree(real);
+    const tree = yield* walkTreeSteps(real);
     const special = tree.others[0];
     if (special !== undefined) return invalid(`${special.rel} is neither a file, a directory nor a symlink — a published generation carries no special nodes`);
     // A pruned-name directory (`SKIP_DIR_NAMES`) never enters a generation: publish copies a file set
@@ -1231,7 +1279,7 @@ export class SkillsStore {
     if (prunedDir !== undefined) {
       return invalid(`unexpected directory ${prunedDir} — a published generation never carries a ${posix.basename(prunedDir)} directory (publish copies no pruned directory; the environment is the .venv link at the generation root): the immutable snapshot was modified`);
     }
-    const hash = this.snapshotHash(tree);
+    const hash = yield* this.snapshotHashSteps(tree);
     if (hash !== parsed.contentHash) {
       return invalid(`content hash mismatch — snapshot.json records ${parsed.contentHash}, the tree hashes ${hash}: the immutable snapshot was modified`);
     }
@@ -1245,12 +1293,12 @@ export class SkillsStore {
     const recorded: PortabilityRulesIdentity | null =
       parsed.rulesVersion === undefined || parsed.rulesSha256 === undefined ? null : { version: parsed.rulesVersion, sha256: parsed.rulesSha256 };
     const stale = recorded === null || recorded.version !== running.version || recorded.sha256 !== running.sha256;
-    const rows = this.snapshotRowsProblem(parsed, tree, stale);
+    const rows = yield* this.snapshotRowsProblemSteps(parsed, tree, stale);
     if ('problem' in rows) return invalid(rows.problem);
     const linkProblem = this.snapshotLinkProblem(real, tree.links, parsed);
     if (linkProblem !== null) return invalid(linkProblem);
     const result: CurrentSnapshot = { gen: parsed.gen, path: real, rules: { recorded, running, stale }, drift: rows.drift };
-    const after = fingerprintTree(real);
+    const after = yield* fingerprintTreeSteps(real);
     this.verifiedCurrent =
       fingerprint !== null && after === fingerprint
         ? { gen: parsed.gen, contentHash: parsed.contentHash, snapshotHash: meta.rawSha, fingerprint, links: [...tree.links], result }
@@ -1275,7 +1323,7 @@ export class SkillsStore {
    * else (a missing SKILL.md, a kind claim, the view shape against the RECORDED rows) is judged the
    * same under any rules: none of it depends on the rule table.
    */
-  private snapshotRowsProblem(parsed: SnapshotManifest, tree: TreeListing, staleRules: boolean): { problem: string } | { drift: SnapshotRowDrift[] } {
+  private *snapshotRowsProblemSteps(parsed: SnapshotManifest, tree: TreeListing, staleRules: boolean): Steps<{ problem: string } | { drift: SnapshotRowDrift[] }> {
     const problem = (detail: string): { problem: string } => ({ problem: detail });
     const drift: SnapshotRowDrift[] = [];
     const files = tree.files;
@@ -1290,6 +1338,7 @@ export class SkillsStore {
       const skillMd = byRel.get(`${row.dir}/SKILL.md`);
       if (skillMd === undefined) return problem(`skill row ${row.name} names ${row.dir}, but the generation carries no ${row.dir}/SKILL.md`);
       const fm = parseFrontmatter(readFileNoFollow(skillMd.abs).toString('utf8'));
+      yield;
       if (!fm.ok) return problem(`${row.dir}/SKILL.md frontmatter does not parse (${fm.reason}) — its row cannot be re-derived`);
       const kind = skillKindOf(fm.fields);
       if (kind !== row.kind) return problem(`skill row ${row.name} claims kind ${row.kind}, but its SKILL.md derives ${kind}`);
@@ -1298,6 +1347,7 @@ export class SkillsStore {
       for (const f of files) {
         if (!f.rel.startsWith(prefix) || owningSkillDir(f.rel, dirs) !== row.dir) continue;
         const buf = readFileNoFollow(f.abs);
+        yield;
         if (looksBinary(buf)) continue;
         for (const hit of portabilityIssuesOf(buf.toString('utf8'), { fileRel: f.rel, skillDir: row.dir, skillDirs: dirs, exists })) hits.push({ ...hit, fileRel: f.rel });
       }
@@ -1345,7 +1395,11 @@ export class SkillsStore {
 
   /** Hash over a snapshot tree — files (`snapshot.json` excluded), link entries (path + link text) AND directory entries (codex round 9: an extra empty directory changes it). */
   private snapshotHash(tree: TreeListing): string {
-    return hashTree(
+    return drain(this.snapshotHashSteps(tree));
+  }
+
+  private *snapshotHashSteps(tree: TreeListing): Steps<string> {
+    return yield* hashTreeSteps(
       tree.files.filter((f) => f.rel !== SNAPSHOT_MANIFEST_FILENAME),
       tree.links,
       tree.dirs,
@@ -1648,6 +1702,11 @@ export class SkillsStore {
    * covers it, and no other pruned name is linked from anywhere.
    */
   private baselineProblem(hash: string): string | null {
+    return drain(this.baselineProblemSteps(hash));
+  }
+
+  /** `baselineProblem` as steps (crew#852): it walks AND re-hashes the whole bundle — the walk's yields, then one per file hashed. */
+  private *baselineProblemSteps(hash: string): Steps<string | null> {
     const dir = this.baselineDir(hash);
     const st = lstatOrNull(dir);
     if (st === null) return `${dir} does not exist`;
@@ -1655,7 +1714,7 @@ export class SkillsStore {
     if (!st.isDirectory()) return `${dir} is not a directory`;
     let tree: TreeListing;
     try {
-      tree = walkTree(dir);
+      tree = yield* walkTreeSteps(dir);
     } catch (err) {
       return `${dir} cannot be walked (${err instanceof Error ? err.message : String(err)})`;
     }
@@ -1663,7 +1722,7 @@ export class SkillsStore {
     if (link !== undefined) return `${dir} carries a symlink at ${link.rel} -> ${link.target}`;
     const special = tree.others[0];
     if (special !== undefined) return `${dir} carries ${special.rel}, which is neither a file nor a directory`;
-    const actual = hashFileSet(tree.files);
+    const actual = yield* hashTreeSteps(tree.files, []);
     if (actual !== hash) return `${dir} hashes to ${actual}, not to its name — a bundle file was modified, added or removed`;
     return null;
   }
@@ -1967,6 +2026,11 @@ export class SkillsStore {
 
   /** Every managed file under `effective/`, hashed. */
   private scanEffective(): EffectiveScan {
+    return drain(this.scanEffectiveSteps());
+  }
+
+  /** `scanEffective` as steps (crew#852): the walk's yields, then one per file hashed. */
+  private *scanEffectiveSteps(): Steps<EffectiveScan> {
     this.assertRootIdentity();
     // ONE walker classifies every entry (tree.ts `walkEntries`; codex round 9): the files are hashed,
     // the links and special nodes are handed to the validation to refuse by name, the directories are
@@ -1975,9 +2039,15 @@ export class SkillsStore {
     // `node_modules/`, `.venv/` or `__pycache__/` is in `links` / `others` (marked `pruned`) for the
     // validation to refuse; the files and directories beneath one stay out of the scan — never
     // carried, never hashed, exactly as before.
-    const entries = walkEntries(this.effectiveDir());
+    const entries = yield* walkEntriesSteps(this.effectiveDir());
+    const files: ScannedFile[] = [];
+    for (const e of entries) {
+      if (!isCarriedFile(e)) continue;
+      files.push({ rel: e.rel, abs: e.abs, sha: sha256Hex(readFileNoFollow(e.abs)) });
+      yield;
+    }
     return {
-      files: entries.filter(isCarriedFile).map((e) => ({ rel: e.rel, abs: e.abs, sha: sha256Hex(readFileNoFollow(e.abs)) })),
+      files,
       links: entries.filter((e) => e.kind === 'symlink'),
       others: entries.filter((e) => e.kind === 'other'),
       dirs: entries.filter((e) => e.kind === 'dir' && e.pruned === null).map((e) => e.rel),
@@ -2132,6 +2202,11 @@ export class SkillsStore {
    * blocking; a mutation on ANOTHER skill carries it as a warning (that mutation did land).
    */
   private recomputeDerived(m: SkillManifest): SkillConflictFinding[] {
+    return drain(this.recomputeDerivedSteps(m));
+  }
+
+  /** `recomputeDerived` as steps (crew#852): it reads every file of every skill for the portability scan — one `yield` per file read, one per skill. */
+  private *recomputeDerivedSteps(m: SkillManifest): Steps<SkillConflictFinding[]> {
     const refused: SkillConflictFinding[] = [];
     const catalogMd = new Map<string, string>();
     const byOwner = this.recordsByOwner(m);
@@ -2185,12 +2260,14 @@ export class SkillsStore {
           refused.push(this.pathFinding(err, name, rel));
           continue;
         }
+        yield;
         if (buf === null || looksBinary(buf)) continue;
         for (const hit of portabilityIssuesOf(buf.toString('utf8'), ctx(rel))) hits.push({ ...hit, fileRel: rel });
       }
       const reasons = portabilityReasonsOf(hits);
       entry.portable = reasons.length === 0;
       entry.portability = { portable: entry.portable, reasons, evidence: portabilityEvidenceOf(hits) };
+      yield;
     }
     // A DIRECTLY registered reference is core regardless of its readability (design v3.5 §5; codex
     // round 8): a skill a workflow names by `skill_ref` keeps `core: true` when its `SKILL.md` is
@@ -2497,6 +2574,7 @@ export class SkillsStore {
   private requireEntry(m: SkillManifest, name: string, expectedRevision: number): SkillEntry {
     const entry = m.skills[name];
     if (entry === undefined) throw new UnknownSkillError(name);
+    this.refuseDuringPublish();
     this.assertRevision(m, expectedRevision);
     return entry;
   }
@@ -2703,6 +2781,7 @@ export class SkillsStore {
   /** Write one root support file (`scripts/`, `schemas/`, `.claude-plugin/`, …) — always a warning. */
   writeSupport(rawRel: string, content: string, expectedRevision: number): SkillMutationResult {
     const m = this.manifest();
+    this.refuseDuringPublish();
     this.assertRevision(m, expectedRevision);
     let target: { abs: string; rel: string };
     try {
@@ -2961,6 +3040,7 @@ export class SkillsStore {
   /** Add a user skill at `skills/<name minus the prefix>` — staged, then swapped in (`swapOwnFiles`). */
   add(name: string, files: Readonly<Record<string, string>>, expectedRevision: number): SkillMutationResult {
     const m = this.manifest();
+    this.refuseDuringPublish();
     this.assertRevision(m, expectedRevision);
     const findings = this.addGuards(m, name, files);
     if (verdictOf(findings) === 'blocked') return this.blocked(m, findings);
@@ -3140,6 +3220,7 @@ export class SkillsStore {
    */
   refreshBaseline(expectedRevision: number): SkillRefreshResult {
     const m = this.manifest();
+    this.refuseDuringPublish();
     this.assertRevision(m, expectedRevision);
     const source = this.requireSource('no installed wicked-garden plugin found to refresh from (neither the marketplace cache nor the installer-managed copy)');
     const previous = m.baseline;
@@ -3463,17 +3544,34 @@ export class SkillsStore {
     return { verdict: verdictOf(v.findings), findings: v.findings, revision: m.revision };
   }
 
+  /** `analyze()` on the event loop (crew#852): the same whole-tree validation, its scan paced. Nothing is written either way. */
+  async analyzePaced(pacer: Pacer): Promise<SkillAnalyzeResult> {
+    const m = this.manifest();
+    const v = await paced(this.validateSteps(m), pacer);
+    return { verdict: verdictOf(v.findings), findings: v.findings, revision: m.revision };
+  }
+
   /**
    * ONE publish at a time (module header): a concurrent call is refused with
    * `SkillsPublishInFlightError` (the route's 409) rather than queued — the caller's revision would
    * be stale by the time a queued publish ran.
    */
-  async publish(expectedRevision: number): Promise<SkillPublishResult> {
+  async publish(expectedRevision: number, afterCommit?: (result: SkillPublishResult, pacer: Pacer) => Promise<void>): Promise<SkillPublishResult> {
     if (this.publishInFlight !== null) throw new SkillsPublishInFlightError(this.revision());
-    const run = this.publishSerialized(expectedRevision);
-    this.publishInFlight = run;
+    const pacer = this.makePacer();
+    const run = this.publishSerialized(expectedRevision, pacer);
+    // `afterCommit` (the route's export: verifying the new generation and handing it to the engine)
+    // runs INSIDE the in-flight window (codex r1 on #853): it is paced, so the loop turns while it
+    // verifies, and a second publish admitted in that window could commit a newer generation that
+    // the first request would then export over. Held here, that publish is `publish-in-flight`
+    // and `isPublishing()` is true for the whole request.
+    const whole = afterCommit === undefined ? run : run.then(async (result) => {
+      await afterCommit(result, pacer);
+      return result;
+    });
+    this.publishInFlight = whole;
     try {
-      return await run;
+      return await whole;
     } finally {
       this.publishInFlight = null;
     }
@@ -3502,9 +3600,20 @@ export class SkillsStore {
    * `snapshots/<gen>/` (staging + rename, never over an existing generation) with the generated
    * views, LOCK it read-only, COMMIT the manifest (venv state included), flip `current`, and reap
    * generations / baselines nothing references. A `blocked` verdict persists nothing — the caller's
-   * revision stays valid. Everything after the one await is synchronous: no interleaving.
+   * revision stays valid.
+   *
+   * Nothing here holds the event loop for longer than one slice (crew#852): every walk, hash, copy
+   * and lock over the tree runs as PACED steps (tree.ts `paced` / `budgetPacer`), so `/health`, the
+   * run listing and the stall watchdog keep answering while a 15k-file catalogue publishes. The
+   * loop therefore turns many times between the CAS and the commit — a read in that window sees the
+   * previous generation and the manifest as it was (nothing is written before the commit); a WRITE
+   * that commits in that window moves the revision, and the commit below re-checks the root identity
+   * and the revision first: a moved revision removes the staged generation (no manifest, no
+   * generation) and fails the caller's CAS exactly as a stale `expectedRevision` does. The
+   * published-generation semantics are unchanged: `gen` increments once, the manifest lands before
+   * `current` flips, a reader sees the old generation or the new one, never half of either.
    */
-  private async publishSerialized(expectedRevision: number): Promise<SkillPublishResult> {
+  private async publishSerialized(expectedRevision: number, pacer: Pacer): Promise<SkillPublishResult> {
     // Refuse a root that changed identity (codex round 4) or a symlinked storage ancestor (codex
     // round 3) BEFORE anything is provisioned, staged or copied: a `snapshots -> /outside` would
     // take the first copy out of the store.
@@ -3521,7 +3630,7 @@ export class SkillsStore {
     // The baseline must be the bundle its name claims BEFORE anything is provisioned in it (codex
     // round 7): a corrupt baseline is `baseline-corrupt`, blocking — nothing provisioned, nothing
     // written. `validate` re-derives the same hash AFTER the provisioner ran.
-    const preProblem = this.baselineProblem(pre.baseline);
+    const preProblem = await paced(this.baselineProblemSteps(pre.baseline), pacer);
     if (preProblem !== null) {
       return { verdict: 'blocked', findings: [this.baselineCorruptFinding(null, `${BASELINE_DIRNAME}/${pre.baseline}`, preProblem)], revision: pre.revision, snapshot: null };
     }
@@ -3536,13 +3645,17 @@ export class SkillsStore {
     // The `unchanged` fast path (crew#547 items 1-2 / DES-L6 PR-L6-1 (b)): BEFORE the slow step, the
     // SAME content hash the slow path would compute is derived from the effective tree; equal to the
     // current generation's — and that generation still verifies under the running rules — means
-    // there is nothing to publish: nothing awaited, nothing written, no generation minted.
+    // there is nothing to publish: nothing written, no generation minted. The steps are paced
+    // (crew#852), so the `unchanged` answer is re-checked against the revision on disk: a write that
+    // landed while the tree was hashed makes the caller's revision stale, exactly as before the check.
     const venvDir0 = baselineVenvDir(this.baselineDir(pre.baseline));
     const ready0 = this.venvReady(venvDir0);
-    const fast = this.unchangedPublish(pre, ready0);
+    const fast = await paced(this.unchangedPublishSteps(pre, ready0), pacer);
     t.validate += fast.validateMs;
     t.hash += fast.hashMs;
     if (fast.result !== null) {
+      this.assertRootUnchanged(bound, expectedRevision);
+      this.assertRevision(this.manifest(), expectedRevision);
       timing(ready0 ? 'ready' : 'skipped', ` · unchanged (gen ${fast.result.snapshot?.gen ?? '?'})`);
       return fast.result;
     }
@@ -3556,7 +3669,7 @@ export class SkillsStore {
     const m = this.manifest();
     this.assertRevision(m, expectedRevision);
     const tValidate = performance.now();
-    const v = this.validate(m);
+    const v = await paced(this.validateSteps(m), pacer);
     t.validate += performance.now() - tValidate; // validated twice on a CHANGED publish (accepted; the line shows the cost)
     if (venv === 'failed') {
       v.findings.push(
@@ -3587,14 +3700,14 @@ export class SkillsStore {
     // later verification hash the directories they WALK, so an extra directory — empty or not — is a
     // mismatch, never an invisible passenger.
     const tHash = performance.now();
-    const contentHash = hashTree(allFiles, venvLink === null ? [] : [{ rel: VENV_LINKNAME, target: venvLink.text }], impliedDirs(allFiles.map((f) => f.rel)));
+    const contentHash = await paced(hashTreeSteps(allFiles, venvLink === null ? [] : [{ rel: VENV_LINKNAME, target: venvLink.text }], impliedDirs(allFiles.map((f) => f.rel))), pacer);
     t.hash += performance.now() - tHash;
     const tStage = performance.now();
     const snapshots = this.snapshotsDir();
     mkdirSync(snapshots, { recursive: true });
     this.sweepStaging(snapshots);
     const staging = join(snapshots, `${STAGING_PREFIX}${randomBytes(6).toString('hex')}`);
-    copyFiles(allFiles, staging);
+    await paced(copyFilesSteps(allFiles, staging), pacer);
     const record = m.baselines[m.baseline];
     const snapshot: SnapshotManifest = {
       gen,
@@ -3634,7 +3747,7 @@ export class SkillsStore {
     if (venvLink !== null) this.symlink(venvLink.text, join(staging, VENV_LINKNAME), venvLink.absTarget);
     // Re-walk (lstat) and re-hash the staged generation AFTER the copy and BEFORE the rename (design
     // v3.5 §3): files and the one permitted link must hash to the content it was copied from.
-    const stagedHash = this.snapshotHash(walkTree(staging));
+    const stagedHash = await paced(this.snapshotHashSteps(await paced(walkTreeSteps(staging), pacer)), pacer);
     if (stagedHash !== contentHash) {
       removeTreeForce(staging);
       throw new SkillsPublishError(`the staged generation hashes to ${stagedHash}, not to the content it was copied from (${contentHash}) — modified between copy and rename; nothing published`);
@@ -3648,10 +3761,21 @@ export class SkillsStore {
     // Immutable by contract, and now by mode bits: a published generation is locked read-only
     // (verification by hash stays the authority — the lock is what makes an accidental edit fail).
     try {
-      makeTreeReadOnly(dest);
+      await paced(makeTreeReadOnlySteps(dest), pacer);
     } catch (err) {
       removeTreeForce(dest);
       throw new SkillsPublishError(`could not lock ${dest} read-only: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    // The paced steps let the loop turn (crew#852): the manifest about to be committed is the one
+    // bound at the start, so it lands only through the same root and over the same revision — a
+    // write that committed meanwhile fails this publish's CAS (the caller re-reads and retries) and
+    // the generation it never came to own is removed, exactly like a commit that fails below.
+    try {
+      this.assertRootUnchanged(bound, expectedRevision);
+      this.assertRevision(this.manifest(), expectedRevision);
+    } catch (err) {
+      removeTreeForce(dest);
+      throw err;
     }
 
     // Manifest FIRST, then `current`: a crash in between leaves a committed generation `ensureReady`
@@ -3678,8 +3802,8 @@ export class SkillsStore {
     }
     this.flipCurrent(gen);
     this.live.published(gen);
-    for (const g of retiredGens) removeTreeForce(this.snapshotDir(g)); // locked read-only at publish
-    for (const dir of prune.dirs) removeTreeForce(dir);
+    for (const g of retiredGens) await removeTreeForcePaced(this.snapshotDir(g), pacer); // locked read-only at publish
+    for (const dir of prune.dirs) await removeTreeForcePaced(dir, pacer);
     t.stage = performance.now() - tStage;
     timing(venvLabel, ` · gen ${gen}`);
     return {
@@ -3707,7 +3831,7 @@ export class SkillsStore {
    * touch: a rollback reads the same manifest. A blocked validation is left to the slow path so the
    * findings (a `venv-failed` included) are reported exactly as before.
    */
-  private unchangedPublish(pre: SkillManifest, venvReady: boolean): { result: SkillPublishResult | null; validateMs: number; hashMs: number } {
+  private *unchangedPublishSteps(pre: SkillManifest, venvReady: boolean): Steps<{ result: SkillPublishResult | null; validateMs: number; hashMs: number }> {
     const none = (validateMs = 0, hashMs = 0): { result: null; validateMs: number; hashMs: number } => ({ result: null, validateMs, hashMs });
     const published = pre.published;
     if (published === null) return none();
@@ -3719,18 +3843,18 @@ export class SkillsStore {
     else if (record.venv === 'skipped' && !this.entryExists(venvDir)) venvLink = null;
     else return none();
     const tValidate = performance.now();
-    const v = this.validate(pre);
+    const v = yield* this.validateSteps(pre);
     const validateMs = performance.now() - tValidate;
     if (verdictOf(v.findings) === 'blocked') return none(validateMs);
     const tHash = performance.now();
     const allFiles = sortedRels([...v.snapshotFiles, ...this.viewFiles(v).files]);
-    const candidate = hashTree(allFiles, venvLink === null ? [] : [{ rel: VENV_LINKNAME, target: venvLink.text }], impliedDirs(allFiles.map((f) => f.rel)));
+    const candidate = yield* hashTreeSteps(allFiles, venvLink === null ? [] : [{ rel: VENV_LINKNAME, target: venvLink.text }], impliedDirs(allFiles.map((f) => f.rel)));
     const hashMs = performance.now() - tHash;
     if (candidate !== published.contentHash) return none(validateMs, hashMs);
     if (this.currentLinkGen() !== published.gen) return none(validateMs, hashMs);
     let current: CurrentSnapshot | null;
     try {
-      current = this.currentSnapshot();
+      current = yield* this.currentSnapshotSteps();
     } catch {
       return none(validateMs, hashMs); // an unverifiable current generation is re-minted by the slow path
     }
@@ -3761,8 +3885,18 @@ export class SkillsStore {
   private viewFiles(v: Validation): { files: FileRecord[]; copilotSkills: string[] } {
     const files: FileRecord[] = [];
     const copilotSkills: string[] = [];
-    const byRel = new Map(v.snapshotFiles.map((f) => [f.rel, f]));
     const dirs = new Set(v.enabledSkills.map(({ entry }) => entry.dir));
+    // ONE pass groups the file set by its owning skill dir (crew#852): the former per-skill scan of
+    // every file was skills × files `owningSkillDir` calls — millions on the real catalogue, all on
+    // the event loop. A file whose owner is `entry.dir` sits under `entry.dir/` by construction.
+    const byOwner = new Map<string, FileRecord[]>();
+    for (const f of v.snapshotFiles) {
+      const owner = owningSkillDir(f.rel, dirs);
+      if (owner === null) continue;
+      const group = byOwner.get(owner);
+      if (group === undefined) byOwner.set(owner, [f]);
+      else group.push(f);
+    }
     for (const { name, entry } of v.enabledSkills) {
       if (!entry.portable) continue;
       // The persisted key becomes ONE path segment of the view. Validated here again, independently
@@ -3772,9 +3906,8 @@ export class SkillsStore {
       }
       copilotSkills.push(name);
       const prefix = `${entry.dir}/`;
-      for (const [rel, f] of byRel) {
-        if (!rel.startsWith(prefix) || owningSkillDir(rel, dirs) !== entry.dir) continue;
-        files.push({ rel: `${COPILOT_VIEW_SKILLS_REL}/${name}/${rel.slice(prefix.length)}`, abs: f.abs });
+      for (const f of byOwner.get(entry.dir) ?? []) {
+        files.push({ rel: `${COPILOT_VIEW_SKILLS_REL}/${name}/${f.rel.slice(prefix.length)}`, abs: f.abs });
       }
     }
     return { files: sortedRels(files), copilotSkills: copilotSkills.sort() };
@@ -3943,13 +4076,18 @@ export class SkillsStore {
    * commits it; analyze and a blocked publish drop it). Never touches `effective/`.
    */
   private validate(m: SkillManifest): Validation {
+    return drain(this.validateSteps(m));
+  }
+
+  /** `validate` as steps (crew#852): the effective scan's yields (walk + per-file hash); the rules themselves are cheap. */
+  private *validateSteps(m: SkillManifest): Steps<Validation> {
     const findings: SkillConflictFinding[] = [];
     // The baseline the records point at must be the bundle its name claims (codex round 7): reset
     // restores from it, `?side=baseline` reads it, the env is provisioned in it — and publish calls
     // this AFTER the provisioner ran, so a provisioner that wrote outside `.venv` is caught here.
-    const baselineProblem = this.baselineProblem(m.baseline);
+    const baselineProblem = yield* this.baselineProblemSteps(m.baseline);
     if (baselineProblem !== null) findings.push(this.baselineCorruptFinding(null, `${BASELINE_DIRNAME}/${m.baseline}`, baselineProblem));
-    const scan = this.scanEffective();
+    const scan = yield* this.scanEffectiveSteps();
     const scanned = scan.files;
     const onDisk = new Map(scanned.map((f) => [f.rel, f]));
 
@@ -4006,7 +4144,7 @@ export class SkillsStore {
     }
     // Derived fields are recomputed CONTAINED: a skill whose dir (or a file in it) crosses a symlink
     // is skipped, never read through, and BLOCKS here by name (codex round 5).
-    findings.push(...this.recomputeDerived(m));
+    findings.push(...(yield* this.recomputeDerivedSteps(m)));
     // EVERY entry of effective/ is classified (codex round 9): a symlink ANYWHERE under it is refused
     // by name — there is no permitted link there (the store never follows one, and a snapshot would
     // otherwise copy whatever it reaches) — and so is a node that is neither a file nor a directory.
@@ -4068,6 +4206,7 @@ export class SkillsStore {
       const rel = `${entry.dir}/SKILL.md`;
       const f = onDisk.get(rel);
       if (f !== undefined) catalogMd.set(name, readFileNoFollow(f.abs).toString('utf8'));
+      yield;
     }
 
     // The core closure must be COMPLETE: a registered ref or a mandate naming no catalog skill is
