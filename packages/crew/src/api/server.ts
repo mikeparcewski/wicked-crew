@@ -92,6 +92,7 @@ import { installEndpointManifestHook } from './endpoint-manifest.js';
 import { WorkerStallWatchdog } from './stall-watchdog.js';
 import { RunLivenessSampler } from './run-liveness.js';
 import { resumeRunningCampaigns } from '../campaign/boot-resume.js';
+import { resumeOrphanedRuns } from '../core/run-boot-resume.js';
 import { StandingOrderStore } from '../standing-orders/store.js';
 import { StandingOrderEvaluator, type GateFact } from '../standing-orders/evaluator.js';
 import { registerStandingOrderRoutes } from '../standing-orders/routes.js';
@@ -2023,6 +2024,10 @@ export async function createServer(
   // crew#471: a campaign the previous daemon left `running` is crash-resumed by the engine (its
   // node runs froze with that process) — asked once, at boot, never for a paused one.
   void resumeRunningCampaigns(adapter, (m) => app.log.warn(m));
+  // crew#830: a run the previous daemon left `executing` with no worker is marked `runOrphaned` by
+  // the engine at bootstrap (core#124) but never moved — resume every run whose trail ends on that
+  // frame, once, and audit it as `run.resumed {via: 'boot'}`; a live run (trail continues) is untouched.
+  void resumeOrphanedRuns(adapter, audit, DAEMON_ACTOR, (m) => app.log.warn(m));
 
   // The UI-emittable direction of the interactive seam. Registered unconditionally (a null relay
   // answers 503, not 404) and BEFORE the static/SPA fallback below, like every other API route.
