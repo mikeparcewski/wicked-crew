@@ -30,9 +30,13 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parse as parseYaml } from 'yaml';
 import {
   CORE_CHECKS_OPTIONAL,
+  CORE_DEFAULT_REF,
   CORE_DIR,
+  CORE_REF_MARKER,
+  CREW_REPO_ROOT,
   SKIP_CORE_CHECKS,
   coreDirMissingMessage,
   resolveCoreDir,
@@ -119,5 +123,68 @@ describe('one resolver, one policy', () => {
       'the absence policy is one decision and belongs in one module; a second reader of these ' +
         'env vars is a second policy.',
     ).toEqual([join('core-checkout-policy.test.ts')]);
+  });
+});
+
+// crew#508: a lockstep PR may name the core ref it is built against — and ONLY a PR may. These audit
+// the workflow and the fetch script structurally (parsed YAML, not grep), so the override can never
+// quietly widen to main pushes or the release, and the default can never silently stop being main.
+describe('a lockstep PR may name the wicked-core ref it is built against (crew#508) — pull_request only', () => {
+  interface Step {
+    name?: string;
+    id?: string;
+    uses?: string;
+    run?: string;
+    env?: Record<string, string>;
+    with?: Record<string, string>;
+  }
+  interface Workflow {
+    env?: Record<string, string>;
+    jobs: Record<string, { steps: Step[] }>;
+  }
+
+  const WORKFLOW_PATH = join(CREW_REPO_ROOT, '.github', 'workflows', 'ci.yml');
+  const workflow = parseYaml(readFileSync(WORKFLOW_PATH, 'utf8')) as Workflow;
+  const steps = workflow.jobs['check']?.steps ?? [];
+  const resolver = steps.find((s) => s.id === 'core_ref');
+  const coreCheckout = steps.find((s) => s.uses?.startsWith('actions/checkout') && s.with?.['repository'] === 'mikeparcewski/wicked-core');
+
+  it('the workflow default is the same main every other environment uses', () => {
+    expect(workflow.env?.['WICKED_CORE_REF']).toBe(CORE_DEFAULT_REF);
+  });
+
+  it('the core checkout takes its ref from the resolver step, which runs first', () => {
+    expect(resolver, 'no step with id core_ref in the check job').toBeDefined();
+    expect(coreCheckout, 'no actions/checkout step for the core repo').toBeDefined();
+    expect(coreCheckout!.with?.['ref']).toBe('${{ steps.core_ref.outputs.ref }}');
+    expect(steps.indexOf(resolver!)).toBeLessThan(steps.indexOf(coreCheckout!));
+  });
+
+  it('the resolver reads the marker from the PR body through env (never interpolated) and only on pull_request', () => {
+    const env = resolver!.env ?? {};
+    expect(env['PR_BODY']).toBe('${{ github.event.pull_request.body }}');
+    expect(env['EVENT_NAME']).toBe('${{ github.event_name }}');
+    expect(env['DEFAULT_REF']).toBe('${{ env.WICKED_CORE_REF }}');
+    const run = resolver!.run ?? '';
+    expect(run).not.toContain('${{'); // nothing from the event is spliced into the script text
+    expect(run).toContain(CORE_REF_MARKER);
+    expect(run).toMatch(/\[ "\$EVENT_NAME" = "pull_request" \]/);
+  });
+
+  it('a marker is accepted only as the head of an OPEN core PR on the core repo itself; a merged one falls back; anything else fails the step', () => {
+    const run = resolver!.run ?? '';
+    expect(run).toContain('select(.state == "open")');
+    expect(run).toContain('.merged_at != null');
+    expect(run).toContain('select(.head.repo.full_name ==');
+    expect(run).toMatch(/is not the head branch of an open .*pull request"\s*\n\s*exit 1/);
+    expect(run).toMatch(/is not a plausible branch name.*exit 1/);
+  });
+
+  it('the release path keeps main: the fetch script defaults to it and the release workflow passes no override', () => {
+    const script = readFileSync(join(CREW_REPO_ROOT, 'scripts', 'fetch-core-checkout.mjs'), 'utf8');
+    expect(script).toMatch(new RegExp(`process\\.env\\['WICKED_CORE_REF'\\] \\?\\? '${CORE_DEFAULT_REF}'`));
+    const release = readFileSync(join(CREW_REPO_ROOT, '.github', 'workflows', 'release.yml'), 'utf8');
+    expect(release).not.toContain('WICKED_CORE_REF');
+    expect(release).not.toContain(CORE_REF_MARKER);
   });
 });
