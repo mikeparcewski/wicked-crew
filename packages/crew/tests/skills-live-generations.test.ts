@@ -3,10 +3,11 @@
 // `skillsSnapshotHanded` CoreEvent ({session, gen}); crew pins that EXACT generation — never
 // "current at event time" (codex round 3) — plus every generation published while the session
 // stays live. The spawn→report gap is covered by a LAUNCH PIN the daemon opens when it hands a
-// launch to the engine (`CoreAdapter.onLaunch` → `SkillsRuntime.launched`), released ONLY by the
-// engine's report for that session, the run's / campaign's terminal frame, or the engine rejecting
-// the launch — never by publish count (codex round 4). The terminal frame releases the session's
-// pins and reaps what nobody else holds.
+// launch to the engine (`CoreAdapter.onLaunch` → `SkillsRuntime.launched`), FOLDED into the session
+// pin by the engine's report for that session (a launcher-only seat never reports, so the report
+// speaks for one spawn, not the run — crew#577), released ONLY by the run's / campaign's terminal
+// frame or the engine rejecting the launch — never by publish count (codex round 4). The terminal
+// frame releases the session's pins and reaps what nobody else holds.
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { mkdtempSync } from 'node:fs';
@@ -60,16 +61,36 @@ describe('LiveGenerations (the ledger)', () => {
     expect(live.pinned().has(1)).toBe(true);
     expect(sorted(live.pinned())).toEqual([1, 2, 3, 4, 5, 6]);
     expect(live.openLaunches()).toEqual(['run:run-a']);
-    // The engine reports run-a used gen 1 → the launch pin is consumed; the session pin (1) takes
-    // over and lives until run-a's terminal frame.
+    // The engine reports run-a used gen 1 → the launch is accounted for (no longer outstanding), and
+    // everything it held folds into the session pin — a launcher-only unit of run-a may still be
+    // reading any of 1..6 (crew#577) — which lives until run-a's terminal frame.
     expect(live.observe(handed('run-a', 1))).toBe('pinned');
     expect(live.openLaunches()).toEqual([]);
-    expect([...live.pinned()]).toEqual([1]);
+    expect(sorted(live.pinned())).toEqual([1, 2, 3, 4, 5, 6]);
     expect(live.observe(ev('sessionCompleted', 'run-a'))).toBe('released');
     expect([...live.pinned()]).toEqual([]);
   });
 
-  it('a launch pin is released by the terminal frame without a report, by the engine REJECTING the launch, and by a live-cache report (gen: null)', () => {
+  it('launch at gen 1 → publish gen 2 → the handoff reports gen 2 ⇒ gen 1 stays pinned until the terminal frame (crew#577: a launcher-only seat never reports)', () => {
+    const live = new LiveGenerations();
+    live.exported(1);
+    live.launched('run', 'run-a'); // a launcher-only unit of run-a may have read gen 1 right here — and will never say so
+    live.published(2);
+    live.exported(2);
+    expect(sorted(live.pinned())).toEqual([1, 2]);
+    // A LATER unit of the same run (a snapshot-delivered seat) reports gen 2. Before the fix this
+    // report dropped the launch pin and gen 1 with it — under a worker still reading it.
+    expect(live.observe(handed('run-a', 2))).toBe('pinned');
+    expect(live.openLaunches()).toEqual([]); // the launch is accounted for…
+    expect(sorted(live.pinned())).toEqual([1, 2]); // …but nothing it held is released
+    live.published(3);
+    expect(sorted(live.pinned())).toEqual([1, 2, 3]);
+    // Only the run's terminal frame lets gen 1 go.
+    expect(live.observe(ev('sessionCompleted', 'run-a'))).toBe('released');
+    expect([...live.pinned()]).toEqual([]);
+  });
+
+  it('a launch pin is released by the terminal frame without a report and by the engine REJECTING the launch; a live-cache report (gen: null) accounts for it but keeps what it held until the terminal frame', () => {
     const live = new LiveGenerations();
     live.exported(3);
     live.launched('run', 'run-a');
@@ -79,12 +100,13 @@ describe('LiveGenerations (the ledger)', () => {
     expect(live.openLaunches()).toEqual(['run:run-a', 'run:run-b', 'run:run-c']);
     expect(live.observe(ev('sessionFailed', 'run-a'))).toBe('released'); // ended before any spawn reported
     live.launchRejected('run', 'run-b'); // the engine refused the launch — nothing will read it
-    live.observe({ type: 'skillsSnapshotHanded', session: 'run-c', gen: null } as unknown as CoreEvent); // fallback: read no generation
+    live.observe({ type: 'skillsSnapshotHanded', session: 'run-c', gen: null } as unknown as CoreEvent); // fallback: THIS spawn read no generation
     expect(live.openLaunches()).toEqual([]);
-    expect([...live.pinned()]).toEqual([]);
-    // run-c is still a LIVE session (its report created the session pin, empty so far): a publish
-    // would be pinned to it until its terminal frame — end it so the next probe stands alone.
+    // run-c is a LIVE session whose launch pin (3) folded into its session pin: another unit of
+    // run-c may have read gen 3 without reporting (crew#577) — only its terminal frame lets it go.
+    expect([...live.pinned()]).toEqual([3]);
     expect(live.observe(ev('sessionCompleted', 'run-c'))).toBe('released');
+    expect([...live.pinned()]).toEqual([]);
     // A launch opened while NOTHING is exported (fallback / unpublished) pins nothing yet — but a
     // publish before its report is pinned for it (its spawn may read the new current).
     live.exported(null);
@@ -182,7 +204,20 @@ describe('SkillsStore reaping honours live pins', () => {
     expect(s.store.generationsOnDisk()).not.toContain(1);
   });
 
-  it('launch at gen 1 → FIVE publishes before the handoff report ⇒ gen 1 is retained on disk; released only by the report + terminal (codex round 4)', async () => {
+  it('launch at gen 1 → publish gen 2 → the handoff reports gen 2 ⇒ the store keeps gen 1 on disk until the terminal frame (crew#577)', async () => {
+    await publishTimes(1); // gen 1, current=1
+    s.store.live.exported(1);
+    s.store.live.launched('run', 'run-a'); // a launcher-only unit may read gen 1 here and never report it
+    await publishTimes(1); // gen 2, current=2
+    s.store.observeEvent(handed('run-a', 2)); // a later unit of the same run reports gen 2
+    await publishTimes(KEEP_GENERATIONS); // gens 3,4,5 — gen 1 is out of newest-three
+    expect(s.store.generationsOnDisk()).toContain(1); // not reaped under the unreporting worker
+    expect(s.store.live.openLaunches()).toEqual([]);
+    s.store.observeEvent(ev('sessionCompleted', 'run-a'));
+    expect(s.store.generationsOnDisk()).toEqual([3, 4, 5]);
+  });
+
+  it('launch at gen 1 → FIVE publishes before the handoff report ⇒ gen 1 is retained on disk; accounted for by the report, released by the terminal frame (codex round 4)', async () => {
     await publishTimes(1); // gen 1
     s.store.live.exported(1);
     s.store.live.launched('run', 'run-a');
