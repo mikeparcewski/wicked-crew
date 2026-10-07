@@ -19,6 +19,7 @@ import {
   GroundingPathRefusedError,
   REPO_REFS_MAX,
   groundingNarration,
+  groundingRecord,
   inferDocStyle,
   isDocStyle,
   matchRepoRef,
@@ -237,6 +238,56 @@ describe('groundingNarration (the thread line — F-046 follow-up) + snapshotDir
     expect(groundingNarration({ repos: [STUDIO], source: 'named', missing: [], ambiguous: [], memberCount: 2 }, [], 'draft')).toBeNull();
   });
 
+  it('groundingRecord (crew#512) says as DATA exactly what the narration says as text — same inputs, both directions', () => {
+    // Grounded on a named repo: the line names it; the record carries its id and why.
+    const named = { repos: [STUDIO], source: 'named' as const, missing: [], ambiguous: [], memberCount: 2 };
+    expect(groundingRecord(named, [STUDIO])).toEqual({ repo_refs: ['repo-studio'], source: 'named', skipped: [], member_count: 2 });
+    expect(groundingNarration(named, [STUDIO], 'draft')).toMatch(/^Grounded on wicked-studio \(named in your request\)/);
+    // The brief and the sole member: `source` is the only thing that differs, exactly like the "why" clause.
+    expect(groundingRecord({ ...named, source: 'brief' }, [STUDIO]).source).toBe('brief');
+    expect(groundingRecord({ repos: [CORE], source: 'sole-member', missing: [], ambiguous: [], memberCount: 1 }, [CORE])).toEqual({
+      repo_refs: ['repo-core'],
+      source: 'sole-member',
+      skipped: [],
+      member_count: 1,
+    });
+    // A named repo that is not a member: the line says "skipped", the record says which and why.
+    const ghost = { repos: [], source: 'named' as const, missing: ['repo-gone'], ambiguous: [], memberCount: 2 };
+    expect(groundingRecord(ghost, [])).toEqual({ repo_refs: [], source: 'named', skipped: [{ ref: 'repo-gone', reason: 'not-a-member' }], member_count: 2 });
+    expect(groundingNarration(ghost, [], 'draft')).toContain('"repo-gone" is not a member');
+    // Ambiguous, as spelled on the request.
+    expect(groundingRecord({ repos: [], source: 'named', missing: [], ambiguous: ['wicked-studio'], memberCount: 3 }, []).skipped).toEqual([
+      { ref: 'wicked-studio', reason: 'ambiguous' },
+    ]);
+    // None of N: the line explains; the record is empty refs + the count the chip needs.
+    expect(groundingRecord({ repos: [], source: 'none', missing: [], ambiguous: [], memberCount: 3 }, [])).toEqual({ repo_refs: [], source: 'none', skipped: [], member_count: 3 });
+    // A resolved repo whose snapshot FAILED: the narration claims nothing ("Grounded on" is null);
+    // the record claims nothing either — the ref moves to `skipped` as unsnapshotable, `source` stays
+    // true to WHY the launch looked there.
+    const unsnap = { repos: [STUDIO, CORE], source: 'named' as const, missing: [], ambiguous: [], memberCount: 2 };
+    expect(groundingNarration(unsnap, [], 'draft')).toBeNull();
+    expect(groundingRecord(unsnap, [])).toEqual({
+      repo_refs: [],
+      source: 'named',
+      skipped: [
+        { ref: 'repo-studio', reason: 'unsnapshotable' },
+        { ref: 'repo-core', reason: 'unsnapshotable' },
+      ],
+      member_count: 2,
+    });
+    // One of two landed: grounded on the one, the other skipped.
+    expect(groundingRecord(unsnap, [CORE])).toEqual({
+      repo_refs: ['repo-core'],
+      source: 'named',
+      skipped: [{ ref: 'repo-studio', reason: 'unsnapshotable' }],
+      member_count: 2,
+    });
+    // A repo-less project: nothing to say, and the record says so (0 members).
+    const bare = { repos: [], source: 'none' as const, missing: [], ambiguous: [], memberCount: 0 };
+    expect(groundingNarration(bare, [], 'draft')).toBeNull();
+    expect(groundingRecord(bare, [])).toEqual({ repo_refs: [], source: 'none', skipped: [], member_count: 0 });
+  });
+
   it('derives the snapshot directory from the CANONICAL repo id (names and basenames collide), path-safe, unique case-insensitively per launch (codex on #506)', () => {
     expect(snapshotDirName(STUDIO)).toBe('repo-studio');
     expect(snapshotDirName(STUDIO_TWIN)).toBe('repo-studio-twin');
@@ -289,6 +340,39 @@ describe('DocGroundingStore (the sidecar beside the doc; the bus-beats-create wi
     expect(fresh.get(root, 'other')).toBeDefined();
     // Nothing else appeared in the doc dir: the bridge's own files are untouched.
     expect(readFileSync(join(root, 'brochure', 'versions.json'), 'utf8')).toBe('{"head":0}');
+  });
+
+  it('recordGrounding (crew#512): the launch-time record joins the create-time binding — every proxy field kept — or starts a "nothing named" binding; a malformed record reads as not yet resolved', () => {
+    const store = new DocGroundingStore();
+    const record = { repo_refs: ['repo-studio'], source: 'named' as const, skipped: [{ ref: 'repo-gone', reason: 'not-a-member' as const }], member_count: 2 };
+    // Beside a proxy-recorded binding: refs as spelled, style, seat override and provenance survive.
+    mkdirSync(join(root, 'bound'), { recursive: true });
+    store.record(root, 'bound', { project_id: 'p1', repo_refs: ['repo-studio', 'repo-gone'], style: 'brochure', clis_json: '[]', channel: 'studio', actor: 'me' });
+    store.recordGrounding(root, 'bound', 'p1', record);
+    expect(store.get(root, 'bound')).toMatchObject({
+      project_id: 'p1',
+      repo_refs: ['repo-studio', 'repo-gone'],
+      style: 'brochure',
+      clis_json: '[]',
+      channel: 'studio',
+      actor: 'me',
+      grounding: record,
+    });
+    expect(new DocGroundingStore().get(root, 'bound')?.grounding).toEqual(record);
+    // No binding yet (nothing named on the create): a fresh one carries the record and `repo_refs: []`.
+    mkdirSync(join(root, 'fresh'));
+    store.recordGrounding(root, 'fresh', 'p1', { repo_refs: ['repo-core'], source: 'sole-member', skipped: [], member_count: 1 });
+    expect(store.get(root, 'fresh')).toMatchObject({ project_id: 'p1', repo_refs: [], grounding: { repo_refs: ['repo-core'], source: 'sole-member', skipped: [], member_count: 1 } });
+    expect(existsSync(join(root, 'fresh', CREW_GROUNDING_FILE))).toBe(true);
+    // A hand-edited or future-shaped record is read as "not resolved" — the binding's other fields still read.
+    mkdirSync(join(root, 'odd'));
+    writeFileSync(
+      join(root, 'odd', CREW_GROUNDING_FILE),
+      JSON.stringify({ project_id: 'p1', repo_refs: ['repo-x'], grounding: { repo_refs: ['repo-x'], source: 'elsewhere', skipped: [], member_count: 1 } }),
+    );
+    const odd = store.get(root, 'odd');
+    expect(odd?.repo_refs).toEqual(['repo-x']);
+    expect(odd?.grounding).toBeUndefined();
   });
 
   it('CONTAINMENT (codex on #506): a symlinked doc dir or sidecar is refused for read, write and remove — nothing outside the real docs root is ever touched', () => {

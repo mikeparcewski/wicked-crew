@@ -82,6 +82,7 @@ import type {
 import type { GovernanceStoreSource } from '../src/core/governance-store.js';
 import type { CREATE_UNDETERMINED, DocCreateBody, DocCreateRefusal, PreparedCreate } from '../src/interactive/proxy-routes.js';
 import type { SeamStatusPayload } from '../src/interactive/draft-events.js';
+import type { GroundingRecord } from '../src/interactive/doc-grounding.js';
 import type { LOCAL_ACTOR } from '../src/api/auth.js';
 import type { AuditLog } from '../src/api/audit.js';
 import type {
@@ -600,6 +601,12 @@ respondsWith<Wire.InteractiveDocCreateRequest, NonNullable<PreparedCreate['norma
 respondsWith<Wire.InteractiveStatusPosted, SeamStatusPayload & { ts: string }>();
 respondsWith<Wire.InteractiveStatusPosted['state'], SeamStatusPayload['state']>();
 respondsWith<SeamStatusPayload['state'], Wire.InteractiveStatusPosted['state']>();
+// crew#512: the grounding record the draft seam builds from `groundingNarration`'s inputs IS the
+// published `InteractiveDocGrounding` (both directions), on the status frame and on the docs list row.
+respondsWith<Wire.InteractiveDocGrounding, GroundingRecord>();
+respondsWith<GroundingRecord, Wire.InteractiveDocGrounding>();
+respondsWith<Wire.InteractiveStatusPosted['grounding'], SeamStatusPayload['grounding']>();
+respondsWith<Wire.InteractiveDocSummary['grounding'], GroundingRecord | undefined>();
 
 // GET /runs and GET /runs/:id — the run list / run detail payloads.
 respondsWith<Wire.SessionView[], Awaited<ReturnType<CoreAdapter['sessionsDetail']>>>();

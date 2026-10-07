@@ -22,7 +22,9 @@ import { createServer, type Server, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { InteractiveBridgePool, LiveBridge } from '../src/interactive/bridge-pool.js';
+import { DocGroundingStore } from '../src/interactive/doc-grounding.js';
 import { registerInteractiveDocList } from '../src/interactive/doc-list-routes.js';
+import { projectDocsRoot } from '../src/interactive/project-root.js';
 import { ProjectSettingsStore } from '../src/projects/settings.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { Project } from '../src/core/types.js';
@@ -41,6 +43,8 @@ let app: FastifyInstance;
 let base: string;
 const ensure = vi.fn<(root: string) => Promise<LiveBridge>>();
 const invalidate = vi.fn<(root: string) => void>();
+const groundingStore = new DocGroundingStore();
+let docsRoot: string;
 
 function json(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(body));
@@ -98,12 +102,16 @@ beforeAll(async () => {
         : null,
   } as unknown as CoreAdapter;
   app = Fastify({ logger: false });
+  const settings = new ProjectSettingsStore(settingsPath);
+  const rootOpts = { env: {}, stateHome: join(dir, 'state'), home: join(dir, 'home') };
+  // The route's own resolution of the mount's docs root — where the seam records the sidecar.
+  docsRoot = (await projectDocsRoot(adapter, settings, 'p-x', rootOpts))!;
   registerInteractiveDocList(app, adapter, {
-    settings: new ProjectSettingsStore(settingsPath),
+    settings,
     pool,
-    env: {},
-    home: join(dir, 'home'),
+    ...rootOpts,
     upstreamTimeoutMs: 5_000,
+    groundingStore,
   });
   await app.listen({ port: 0, host: '127.0.0.1' });
   const bound = app.server.address();
@@ -134,6 +142,21 @@ describe("GET /projects/:projectId/interactive/api/docs — the bridge's answer,
     expect(status).toBe(200);
     expect(body).toEqual([{ ...GOOD_ROW, projectId: 'p-x' }]);
     expect(hits).toBe(1);
+    expect(invalidate).not.toHaveBeenCalled();
+  });
+
+  it('crew#512: a row whose draft launch resolved its grounding carries the recorded object; a create-time-only binding, or none, adds nothing', async () => {
+    mode = 'ok';
+    const resolved = { repo_refs: ['repo-studio'], source: 'named' as const, skipped: [], member_count: 2 };
+    // The proxy's create-time binding alone (the launch has not resolved yet): no `grounding` on the row.
+    groundingStore.record(docsRoot, 'brief', { project_id: 'p-x', repo_refs: ['repo-studio'] });
+    expect((await list()).body).toEqual([{ ...GOOD_ROW, projectId: 'p-x' }]);
+    // The seam recorded what it resolved: the row serves exactly that object.
+    groundingStore.recordGrounding(docsRoot, 'brief', 'p-x', resolved);
+    expect((await list()).body).toEqual([{ ...GOOD_ROW, projectId: 'p-x', grounding: resolved }]);
+    // Sidecar gone (the doc was deleted and recreated): back to the bridge's row.
+    expect(groundingStore.remove(docsRoot, 'brief')).toBe(true);
+    expect((await list()).body).toEqual([{ ...GOOD_ROW, projectId: 'p-x' }]);
     expect(invalidate).not.toHaveBeenCalled();
   });
 

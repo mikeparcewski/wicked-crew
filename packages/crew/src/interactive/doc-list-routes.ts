@@ -30,6 +30,7 @@ import { API_PREFIX } from '../api/api-prefix.js';
 import type { CoreAdapter } from '../core/adapter.js';
 import { BridgeUnavailableError, type InteractiveBridgePool, type LiveBridge } from './bridge-pool.js';
 import type { ProjectSettingsStore } from '../projects/settings.js';
+import type { DocGroundingStore } from './doc-grounding.js';
 import { projectDocsRoot } from './project-root.js';
 
 const V = API_PREFIX;
@@ -75,6 +76,10 @@ export interface DocListDeps {
   log?: (msg: string) => void;
   /** Budget for the bridge's list call (tests shorten it). The list is a directory scan. */
   upstreamTimeoutMs?: number;
+  /** crew#512: the `crew-grounding.json` sidecars beside the docs under this mount's root — a row
+   *  whose draft launch resolved its grounding carries it as `grounding`. Absent = rows as the
+   *  bridge lists them. */
+  groundingStore?: DocGroundingStore;
 }
 
 export function registerInteractiveDocList(app: FastifyInstance, adapter: CoreAdapter, deps: DocListDeps): void {
@@ -196,7 +201,15 @@ export function registerInteractiveDocList(app: FastifyInstance, adapter: CoreAd
         }
         summaries.push(row);
       }
-      return reply.send(summaries.map((row) => ({ ...row, projectId })));
+      // crew#512: the grounding the draft seam RESOLVED for a row (and recorded beside the doc under
+      // this same root) rides the row — the one status frame that said it is long gone from a
+      // reopened document's view. A doc never launched, or bound before the record existed, has none.
+      return reply.send(
+        summaries.map((row) => {
+          const grounding = deps.groundingStore?.get(root, row.name)?.grounding;
+          return { ...row, projectId, ...(grounding !== undefined ? { grounding } : {}) };
+        }),
+      );
     },
   );
 }

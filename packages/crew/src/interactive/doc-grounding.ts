@@ -367,6 +367,66 @@ export function groundingNarration(
   return parts.length > 0 ? parts.join(' ') : null;
 }
 
+/** Why a requested repository grounded nothing — the record's spelling of the narration's "skipped" clauses. */
+export type GroundingSkipReason = 'not-a-member' | 'ambiguous' | 'unsnapshotable';
+
+/**
+ * The structured twin of {@link groundingNarration} (crew#512) — the published
+ * `InteractiveDocGrounding`: what the thread line SAYS, as data. Built from the same inputs, once per
+ * launch; rides the narration's status frame and is recorded in the sidecar so the docs list can
+ * serve it to a reopened document without the thread.
+ */
+export interface GroundingRecord {
+  /** Registry ids of the repos the launch grounded on (snapshotted), in decision order. */
+  repo_refs: string[];
+  source: GroundingSource;
+  skipped: Array<{ ref: string; reason: GroundingSkipReason }>;
+  member_count: number;
+}
+
+const SKIP_REASONS: ReadonlySet<string> = new Set<GroundingSkipReason>(['not-a-member', 'ambiguous', 'unsnapshotable']);
+const GROUNDING_SOURCES: ReadonlySet<string> = new Set<GroundingSource>(['named', 'brief', 'sole-member', 'none']);
+
+/**
+ * The record for a decision and the repos whose snapshot actually landed: `repo_refs` are the
+ * snapshotted ids (the "Grounded on …" clause); `skipped` is every repository the launch did NOT
+ * ground on — the named refs that are not members, the ambiguous ones, and the resolved members
+ * whose snapshot failed (the narration claims nothing for those either). `source` is the decision's,
+ * even when nothing landed — WHY the launch looked where it looked is still true.
+ */
+export function groundingRecord(decision: GroundingDecision, snapshotted: readonly GroundingRepo[]): GroundingRecord {
+  const landed = new Set(snapshotted.map((r) => r.repoRef));
+  return {
+    repo_refs: decision.repos.filter((r) => landed.has(r.repoRef)).map((r) => r.repoRef),
+    source: decision.source,
+    skipped: [
+      ...decision.missing.map((ref) => ({ ref, reason: 'not-a-member' as const })),
+      ...decision.ambiguous.map((ref) => ({ ref, reason: 'ambiguous' as const })),
+      ...decision.repos.filter((r) => !landed.has(r.repoRef)).map((r) => ({ ref: r.repoRef, reason: 'unsnapshotable' as const })),
+    ],
+    member_count: decision.memberCount,
+  };
+}
+
+/** A sidecar's `grounding` row, or undefined when absent or malformed (read as "not yet resolved"). */
+function parseGroundingRecord(value: unknown): GroundingRecord | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const row = value as Record<string, unknown>;
+  if (!Array.isArray(row['repo_refs']) || !row['repo_refs'].every((r) => typeof r === 'string' && r.length > 0)) return undefined;
+  if (typeof row['source'] !== 'string' || !GROUNDING_SOURCES.has(row['source'])) return undefined;
+  if (!Array.isArray(row['skipped'])) return undefined;
+  const skipped: GroundingRecord['skipped'] = [];
+  for (const entry of row['skipped']) {
+    if (typeof entry !== 'object' || entry === null) return undefined;
+    const e = entry as Record<string, unknown>;
+    if (typeof e['ref'] !== 'string' || e['ref'].length === 0) return undefined;
+    if (typeof e['reason'] !== 'string' || !SKIP_REASONS.has(e['reason'])) return undefined;
+    skipped.push({ ref: e['ref'], reason: e['reason'] as GroundingSkipReason });
+  }
+  if (typeof row['member_count'] !== 'number' || !Number.isInteger(row['member_count']) || row['member_count'] < 0) return undefined;
+  return { repo_refs: row['repo_refs'] as string[], source: row['source'] as GroundingSource, skipped, member_count: row['member_count'] };
+}
+
 // ── The durable binding, beside the doc ──────────────────────────────────────────────────────
 //
 // WHERE IT LIVES — and why NOT under the state home. wicked-core embeds crew's state-home registry
@@ -399,6 +459,9 @@ export interface DocGroundingBinding {
   channel?: 'studio' | 'cli' | 'api' | undefined;
   /** Opaque launch actor string from the create request (#632). */
   actor?: string | undefined;
+  /** crew#512: what the draft launch RESOLVED — written by the seam at launch (`recordGrounding`),
+   *  after the create-time fields above; absent until then. The docs list serves it per row. */
+  grounding?: GroundingRecord | undefined;
   recorded_at: string;
 }
 
@@ -592,6 +655,10 @@ export class DocGroundingStore {
         ...(typeof row['clis_json'] === 'string' ? { clis_json: row['clis_json'] } : {}),
         ...(typeof row['channel'] === 'string' && validChannels.has(row['channel']) ? { channel: row['channel'] as 'studio' | 'cli' | 'api' } : {}),
         ...(typeof row['actor'] === 'string' ? { actor: row['actor'] } : {}),
+        ...(() => {
+          const grounding = parseGroundingRecord(row['grounding']);
+          return grounding !== undefined ? { grounding } : {};
+        })(),
         recorded_at: typeof row['recorded_at'] === 'string' ? row['recorded_at'] : new Date(0).toISOString(),
       };
     } catch {
@@ -646,6 +713,18 @@ export class DocGroundingStore {
     } finally {
       dir.close();
     }
+  }
+
+  /**
+   * crew#512: persist what a draft launch RESOLVED for `documentId`, keeping every create-time field
+   * the proxy recorded (refs as spelled, style, seat override, provenance). A document the proxy
+   * never bound (nothing named on its create, or created past the proxy) gets a binding with
+   * `repo_refs: []` — "nothing was named" — carrying the record. Same containment and atomicity as
+   * {@link DocGroundingStore.record}; throws the same way, the caller logs and the frame still rides.
+   */
+  recordGrounding(docsRoot: string, documentId: string, projectId: string, grounding: GroundingRecord): void {
+    const existing = this.get(docsRoot, documentId);
+    this.record(docsRoot, documentId, existing !== undefined ? { ...existing, grounding } : { project_id: projectId, repo_refs: [], grounding });
   }
 
   /** Drop a document's sidecar. `true` when one was removed; a refused path removes nothing. */

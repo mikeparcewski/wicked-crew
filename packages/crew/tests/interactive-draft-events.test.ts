@@ -1793,6 +1793,19 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     await waitFor(() =>
       statusFor('brochure').some((e) => messageOf(e).startsWith('Grounded on wicked-studio (named in your request)')),
     );
+    // crew#512: the SAME frame carries the grounding as data — once per launch — and the sidecar
+    // beside the doc now holds that same object (the docs list serves it), the proxy's fields kept.
+    const expected = { repo_refs: ['repo-studio'], source: 'named', skipped: [], member_count: 2 };
+    const groundingOf = (e: { payload: unknown }): unknown => (e.payload as { grounding?: unknown }).grounding;
+    const narrated = statusFor('brochure').find((e) => messageOf(e).startsWith('Grounded on wicked-studio'))!;
+    expect(groundingOf(narrated)).toEqual(expected);
+    expect(statusFor('brochure').filter((e) => groundingOf(e) !== undefined)).toHaveLength(1);
+    expect(grounding.get(docsRoot, 'brochure')).toMatchObject({
+      project_id: 'proj-multi',
+      repo_refs: ['repo-studio'],
+      style: 'brochure',
+      grounding: expected,
+    });
   });
 
   it('F-046: a multi-repo project whose document names NO repository is NOT grounded on an arbitrary member — the task and the thread say so, honestly', async () => {
@@ -1889,6 +1902,12 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
         messageOf(e).includes('Requested repository "repo-gone" is not a member of this project — skipped.'),
       ),
     );
+    // crew#512: the skip is data on the same frame and in the sidecar — nothing grounded, the
+    // request's spelling and the reason named.
+    const expected = { repo_refs: [], source: 'named', skipped: [{ ref: 'repo-gone', reason: 'not-a-member' }], member_count: 2 };
+    const skipped = statusFor('ghost-doc').find((e) => messageOf(e).includes('"repo-gone" is not a member'))!;
+    expect((skipped.payload as { grounding?: unknown }).grounding).toEqual(expected);
+    expect(grounding.get(docsRoot, 'ghost-doc')).toMatchObject({ repo_refs: ['repo-gone'], grounding: expected });
   });
 
   it('REFUSES a draft dir inside ANY registered repository — even one that is not the subject, even for a repo-less project — before anything is created (codex on #506)', async () => {
