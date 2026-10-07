@@ -57,11 +57,13 @@ import { runDirInsideRepo, snapshotRepo, type SnapshotFailureReason } from './re
 import { resolveInteractiveRoot } from './bridge-root.js';
 import {
   groundingNarration,
+  groundingRecord,
   resolveGroundingRepos,
   snapshotDirName,
   styleContract,
   type DocGroundingStore,
   type GroundingDecision,
+  type GroundingRecord,
   type GroundingRepo,
 } from './doc-grounding.js';
 import type { CoreAdapter } from '../core/adapter.js';
@@ -127,6 +129,9 @@ export interface SeamStatusPayload {
   /** The unit (ord) the line narrates — the most recent engine frame's `ord`; absent before the
    *  first unit-scoped frame. */
   unit_ord?: number;
+  /** crew#512: the document's repository grounding as data — on the ONE frame per draft launch that
+   *  carries the "Grounded on …" narration (the published `InteractiveDocGrounding`). */
+  grounding?: GroundingRecord;
 }
 
 /**
@@ -1288,10 +1293,23 @@ export async function startInteractiveDraftSubscriber(
     }
     // The thread hears WHERE this draft is grounded and WHY (F-046 follow-up) — or, for a
     // multi-repo project whose document named nothing, how to name one next time.
-    if (decision !== undefined) {
+    // crew#512: the same facts as DATA — recorded beside the doc first (a skin that refetches the
+    // docs list on this frame finds it there), then on the narration frame itself. The record is
+    // written even when there is no line to say (a repo-less project): the list still answers.
+    if (decision !== undefined && doc.projectId !== undefined) {
+      const record = groundingRecord(decision, snapshotted);
+      if (groundingStore !== undefined) {
+        try {
+          groundingStore.recordGrounding(resolveDocsRoot(doc.projectId), doc.documentId, doc.projectId, record);
+        } catch (err) {
+          log(
+            `[interactive-draft] doc ${doc.documentId}: grounding record not written beside the doc (${err instanceof Error ? err.message : String(err)}) — the thread still hears it`,
+          );
+        }
+      }
       const line = groundingNarration(decision, snapshotted, 'draft');
       if (line !== null) {
-        emitStatus({ ...docScope(doc.documentId, doc.projectId), state: 'working', message: line });
+        emitStatus({ ...docScope(doc.documentId, doc.projectId), state: 'working', message: line, grounding: record });
       }
     }
 

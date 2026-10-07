@@ -4964,6 +4964,43 @@ export interface InteractiveStatusPosted {
   /** Wave 6: the unit (ord) the line narrates — the latest unit-scoped engine frame's `ord`, so a
    *  skin renders one council at a time. Absent before the first unit-scoped frame. */
   unit_ord?: number;
+  /**
+   * crew#512 (api-types 0.93.0): the document's repository grounding as data — present on exactly
+   * ONE frame per draft launch, the same `working` frame whose `message` is the "Grounded on …" /
+   * "Requested repository … skipped." narration (the text stays, for a skin that renders the
+   * transcript only). A skin keys a persistent header chip off this and never parses the sentence.
+   * Absent on every other frame, on a pre-0.93 daemon, and when the project has no repositories.
+   */
+  grounding?: InteractiveDocGrounding;
+}
+
+/**
+ * Where a document is grounded and why (crew#512; api-types 0.93.0) — the structured twin of the
+ * draft seam's "Grounded on …" narration (`groundingNarration`, doc-grounding.ts). Rides the one
+ * `InteractiveStatusPosted` frame that carries the narration and, once recorded, the document's
+ * `InteractiveDocSummary` row — the same object in both places, from the `crew-grounding.json`
+ * sidecar beside the document.
+ */
+export interface InteractiveDocGrounding {
+  /** Registry ids of the repositories the launch grounded on — the worker reads an offline snapshot
+   *  of each. `[]` = not repository-grounded (brief + code graph only). Names resolve through `GET /repos`. */
+  repo_refs: string[];
+  /** Why those: `named` — `repo_ref(s)` on the create request; `brief` — the brief names member repos;
+   *  `sole-member` — the project's only repository; `none` — nothing named, nothing inferred. */
+  source: 'named' | 'brief' | 'sole-member' | 'none';
+  /** Requested repositories that grounded nothing, with why (the narration's "skipped" clauses). */
+  skipped: InteractiveDocGroundingSkip[];
+  /** How many repositories the project has — the "1 of N" in a chip; `0` for a repo-less project. */
+  member_count: number;
+}
+
+/** One repository a launch did not ground on, as spelled on the request (or its registry id). */
+export interface InteractiveDocGroundingSkip {
+  ref: string;
+  /** `not-a-member` — not (or no longer) a project member; `ambiguous` — several members share that
+   *  name, the registry id disambiguates; `unsnapshotable` — a member whose offline snapshot failed
+   *  (too large, unreadable, …), so the task names it but the worker has no copy. */
+  reason: 'not-a-member' | 'ambiguous' | 'unsnapshotable';
 }
 
 // ── EP-C2: a document's checks — the four reviewers (api-types 0.88.0) ─────────────────────────
@@ -5047,6 +5084,14 @@ export interface InteractiveDocSummary {
   retired_at?: string;
   /** The crew project this row was listed under — the mount's `:projectId`. */
   projectId: string;
+  /**
+   * crew#512 (api-types 0.93.0): the repository grounding the draft seam resolved for this document,
+   * read from the `crew-grounding.json` sidecar beside it — the same object the launch's status
+   * frame carried, so a reopened document shows its chip without replaying the thread. Absent
+   * until a draft launch resolved it (a document still generating, one created before this release, an
+   * unfiled document) and on a pre-0.93 daemon.
+   */
+  grounding?: InteractiveDocGrounding;
 }
 
 /**

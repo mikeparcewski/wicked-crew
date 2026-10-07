@@ -6043,6 +6043,8 @@ export function registerRoutes(
   registerInteractiveDocList(app, adapter, {
     settings: projectSettings,
     pool: interactiveBridges,
+    // crew#512: the rows carry the grounding the draft seam recorded beside each doc.
+    ...(runtime.docGrounding !== undefined ? { groundingStore: runtime.docGrounding } : {}),
     log: (m) => app.log.warn(m),
   });
 
