@@ -1506,9 +1506,12 @@ export type WorkerStallEscalatedFrame = {
    * `evaluating` — the worker returned and its gate evaluation is in flight, a reassign would start
    * a second creator; `evaluator_distinct` — every other seat is one evaluator ≠ creator forbids
    * (see `avoided`), so the unit was left for a human; `no_output` (outcome `exhausted`) — the
-   * reassigned seat produced nothing past a startup banner.
+   * reassigned seat produced nothing past a startup banner; `no_eligible_seat` (crew#833; additive)
+   * — every other seat is one this run BENCHED (see `benched`: quota exhausted, signed out — a seat
+   * the engine already failed over away from) or one evaluator ≠ creator forbids (see `avoided`),
+   * so the unit was left for a human rather than dispatched to a seat known to fail.
    */
-  reason?: 'tool_unit' | 'evaluating' | 'evaluator_distinct' | 'no_output';
+  reason?: 'tool_unit' | 'evaluating' | 'evaluator_distinct' | 'no_output' | 'no_eligible_seat';
   /**
    * The seats the failover pick excluded under evaluator ≠ creator (crew#638; additive): a
    * creator cursor avoids the run's evaluator seats, an evaluator cursor the seats that built its
@@ -1516,6 +1519,13 @@ export type WorkerStallEscalatedFrame = {
    * reassign that skipped one and on a `reason: 'evaluator_distinct'` notify; absent otherwise.
    */
   avoided?: string[];
+  /**
+   * The pool seats the failover pick excluded because THIS RUN benched them (crew#833; additive):
+   * `AgentSession.benched_seats` keys — a seat the engine failed over away from (quota exhausted,
+   * signed out, dead) is never a failover target in the same run. Present on an `ok` reassign that
+   * skipped one and on a `reason: 'no_eligible_seat'` notify; absent otherwise.
+   */
+  benched?: string[];
 };
 
 export interface RecordedEvent extends CoreEvent {
