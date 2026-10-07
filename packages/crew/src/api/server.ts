@@ -30,16 +30,14 @@ import {
 } from './chat-citations.js';
 import {
   DeliveryIndex,
-  deliverUnitOf,
+  DeliveryResolver,
   gitRunBranchIsEmpty,
   gitWorktreeIsClean,
-  deliveryRecordFrom,
   canDeliverResolver,
   type VacuityProbes,
 } from './delivery-index.js';
 import { DeliveryFreeze } from './delivery-freeze.js';
 import { DeliveryDerivationCache } from './delivery-cache.js';
-import { coreUnitId } from './evidence.js';
 import { registerClient, broadcast } from '../events/bus.js';
 import { TerminalHub, registerTerminalWs } from '../events/terminals.js';
 import { INTERACTIVE_DRAFT_WORKFLOW_DEF, startInteractiveDraftSubscriber, isAnotherProjectsDraftKey } from '../interactive/draft-events.js';
@@ -802,41 +800,26 @@ export async function createServer(
   // a failure here must never fail the run. Triggered on `sessionCompleted` OR
   // `sessionFailed` — a def-carried deliver phase need not be the last phase, so a successful
   // deliver can precede a later failure; the failed-deliver case is a cheap no-op (a rejected
-  // unit has no stored work_output — deny-dominates writes none past a deny — and the status
-  // guard below skips the read entirely).
-  const resolveRunDelivery = async (runId: string): Promise<void> => {
-    try {
-      // Resume/retry re-terminals: already resolved once, and a terminal run's PR URL never
-      // changes — never re-read, never double-write the trail.
-      if (deliveryIndex.isDelivered(runId)) return;
-      const views = await adapter.sessionsDetail();
-      const view = views.find((v) => v.session.id === runId);
-      if (view === undefined) return;
-      const unit = deliverUnitOf(view);
-      // Only an APPROVED deliver unit carries a delivery claim: a rejected one's output (were
-      // any stored) can contain a PR URL from a step that gh completed before a later
-      // re-derivation refused to report the delivery (core/deliver.ts step f).
-      if (unit === null || unit.status !== 'done') return;
-      const output = await adapter.workOutput(coreUnitId(runId, unit));
-      if (output === null) return;
-      // A PR URL, or (N1) a push-only delivery to an origin gh cannot resolve to GitHub — a
-      // delivery too, so the run reads `delivery: 'pushed'` and never `'stranded'`.
-      const record = deliveryRecordFrom(output);
-      if (record === null) return;
-      // The durable record first, then the read-side index — the same write order as
-      // `guidance.set`, so the index can only LAG a crash (rehydrated at next boot), never
-      // hold a record the trail does not.
+  // unit has no stored work_output — deny-dominates writes none past a deny — and the resolver's
+  // status guard skips the read entirely). The resolver (crew#851) shares ONE read per run between
+  // this frame and a `GET /runs(/:id)` that lands between the engine's `completed` flip and the
+  // record — the routes await it for such a view, so the wire never serves `completed` +
+  // `delivery: 'stranded'` for a run whose deliver unit already carries the PR URL.
+  const deliveryResolver = new DeliveryResolver({
+    listViews: () => adapter.sessionsDetail(),
+    workOutput: (unitId) => adapter.workOutput(unitId),
+    isDelivered: (runId) => deliveryIndex.isDelivered(runId),
+    // The durable record first, then the read-side index — the same write order as
+    // `guidance.set`, so the index can only LAG a crash (rehydrated at next boot), never
+    // hold a record the trail does not.
+    record: (runId, record) => {
       audit.record('run.delivered', DAEMON_ACTOR, { runId, detail: record });
       if ('url' in record) deliveryIndex.set(runId, record.url);
       else deliveryIndex.setPushed(runId, record.pushed);
-    } catch (err) {
-      app.log.warn(
-        `[runs] delivery resolution for ${runId} failed (field absent until restart replays the trail): ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-    }
-  };
+    },
+    log: (m) => app.log.warn(m),
+  });
+  const resolveRunDelivery = (runId: string): Promise<void> => deliveryResolver.resolve(runId);
   // Crew reaches a bus only through the engine that holds it (wicked-core#631, core/bus.ts): a seam
   // with no bus db of its own reads and writes the one this adapter handed its engine.
   const engineBusDb = typeof adapter.busDbPath === 'string' ? adapter.busDbPath : undefined;
@@ -1957,6 +1940,8 @@ export async function createServer(
       // probe functions it derives through — so the routes' campaign rollup shares one TTL memo
       // with the sweeper instead of re-probing on its own clock.
       deliveryCache,
+      // crew#851: the routes await a pending resolution for a view in the completion window.
+      deliveryResolver,
       worktreeExists: vacuityProbes.worktreeExists,
       worktreeIsClean: vacuityProbes.worktreeIsClean,
       runBranchIsEmpty: vacuityProbes.runBranchIsEmpty,

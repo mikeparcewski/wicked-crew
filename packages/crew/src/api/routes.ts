@@ -173,6 +173,7 @@ import {
   freeTextOutcome,
   type DeliveryState,
   type VacuityProbes,
+  type DeliveryResolver,
 } from './delivery-index.js';
 import { DeliveryDerivationCache } from './delivery-cache.js';
 import {
@@ -828,6 +829,14 @@ export interface RuntimeDeps {
    *  directly-driven route set gets a COLD, unstarted one over the same injectable probes:
    *  reads then answer the stat-only tri-state until a test sweeps or warms it explicitly. */
   deliveryCache?: DeliveryDerivationCache;
+  /** The shared one-read-per-run delivery resolution (crew#851). For a served view inside the
+   *  completion window — terminal, deliver unit `done`, nothing on record yet — the run routes
+   *  AWAIT it before deriving `delivery`, so `status` and `delivery` come from one consistent
+   *  read and a run that pushed and opened its PR is never served `'stranded'`. Optional: a
+   *  directly-driven route set without one derives as before. */
+  deliveryResolver?: DeliveryResolver;
+  /** The read-path bound for that await (default `READ_PATH_SETTLE_MS`); tests shorten it. */
+  deliverySettleMs?: number;
   /** Def-awareness for the delivery derivation (crew#481 / D-14) — `createServer` injects the
    *  `runCanDeliver(view, runWorkflowDef(view, adapter.listWorkflows()))` closure it also hands
    *  its cache, so the campaigns rollup and the run DTOs classify from ONE predicate. A
@@ -1115,6 +1124,14 @@ export function registerRoutes(
       () => (typeof (adapter as Partial<CoreAdapter>).listWorkflows === 'function' ? adapter.listWorkflows() : []),
       (m) => app.log.warn(m),
     );
+  const deliveryResolver = runtime.deliveryResolver;
+  /** crew#851: await the shared resolution for every served view still inside the completion
+   *  window — BOUNDED (`READ_PATH_SETTLE_MS`): a hung engine read costs this poll the bound, not
+   *  the request; the run falls through to its stat-derived label until the read lands. */
+  const settleDeliveries = async (views: SessionView[]): Promise<void> => {
+    if (deliveryResolver === undefined) return;
+    await deliveryResolver.settle(views, runtime.deliverySettleMs);
+  };
   const deliveryCache =
     runtime.deliveryCache ??
     new DeliveryDerivationCache({
@@ -2413,7 +2430,9 @@ export function registerRoutes(
     const visible =
       doc === undefined ? unarchived : unarchived.filter((v) => docRuns.documentOf(v.session.id) === doc.trim());
     const ordered = sortActionableFirst(visible);
-    return { runs: (cap !== undefined ? ordered.slice(0, cap) : ordered).map(decorateRun) };
+    const served = cap !== undefined ? ordered.slice(0, cap) : ordered;
+    await settleDeliveries(served);
+    return { runs: served.map(decorateRun) };
   });
 
   // ── Run archival (crew#265) — write-off, not delete ────────────────────────
@@ -2473,6 +2492,7 @@ export function registerRoutes(
     const views = await adapter.sessionsDetail();
     const run = views.find((v) => v.session.id === id);
     if (!run) return reply.code(404).send({ error: 'Run not found' });
+    await settleDeliveries([run]);
     return { run: decorateRun(run) };
   });
 
