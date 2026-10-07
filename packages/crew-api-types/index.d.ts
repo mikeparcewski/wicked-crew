@@ -1414,6 +1414,30 @@ export interface CoreEvent {
  * words than the operator watched it happen in. (FINDING-014)
  */
 /**
+ * The engine's ORPHAN frame (wicked-core `RunOrphaned`, core#124; named here additively for
+ * crew#830). Written to a run's durable event log at actor bootstrap for every session the store
+ * still calls `executing` that the new process restored no worker for — the daemon died mid-run.
+ * It is a REPORT, not a terminal: the run stays `executing` and resumable (`qe/acceptance.ts` keeps
+ * it out of the terminal set on purpose). A trail that ENDS on this frame is a run nobody is
+ * running; a live run's trail continues past it.
+ *
+ * The daemon acts on it at boot: every `executing` run whose trail ends on `runOrphaned` is resumed
+ * once through the engine's `resumeRun` (the same path as `POST /runs/:id/resume`) and the resume is
+ * recorded in the audit trail as `run.resumed` by the `daemon` actor with
+ * `detail: { via: 'boot', status, ord? }` — `via: 'boot'` is what tells it apart from an operator's
+ * manual resume (`detail: { status }`, actor = the caller).
+ */
+export type RunOrphanedFrame = {
+  type: 'runOrphaned';
+  /** The orphaned run's id. */
+  session: string;
+  /** The cursor unit's 1-based ord (the cursor position when the units could not be read). */
+  ord: number;
+  /** The remedy, spelled out: `POST /api/v1/runs/<id>/resume`. */
+  detail: string;
+};
+
+/**
  * The stall watchdog's DETECTION frame (crew#287; api-types 0.18.0 — previously daemon-local).
  * DAEMON-SYNTHETIC: broadcast straight to `/ws` when a run in `executing` has been silent on the
  * daemon's CoreEvent relay past `SystemSettings.workerStallMinutes` — never re-relayed through
