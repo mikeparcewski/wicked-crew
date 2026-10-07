@@ -12,6 +12,8 @@ import {
   createOidcVerifier,
   createStaticVerifier,
   extractToken,
+  isProtectedPath,
+  isUnitTokenRoute,
   loadTokenFile,
   parseTokenFile,
   requiredTrust,
@@ -165,6 +167,40 @@ describe('the OIDC verifier', () => {
       defaultTrust: 'operator',
     });
     expect(v.name).toBe('oidc');
+  });
+});
+
+describe('unit-token routes (crew#714)', () => {
+  it('exempts exactly POST /api/v1/mcp/call and POST /api/v1/mcp/tools — method and path both exact', () => {
+    expect(isUnitTokenRoute('POST', '/api/v1/mcp/call')).toBe(true);
+    expect(isUnitTokenRoute('POST', '/api/v1/mcp/tools')).toBe(true);
+    expect(isUnitTokenRoute('post', '/api/v1/mcp/call')).toBe(true); // method case-insensitive
+    // Both are still inside the protected scope — the exemption is the hooks' decision, not the path's.
+    expect(isProtectedPath('/api/v1/mcp/call')).toBe(true);
+    expect(isProtectedPath('/api/v1/mcp/tools')).toBe(true);
+  });
+
+  it('never widens to a prefix, another method, or a neighbouring MCP route', () => {
+    for (const [method, path] of [
+      ['GET', '/api/v1/mcp/call'],
+      ['GET', '/api/v1/mcp/tools'],
+      ['PUT', '/api/v1/mcp/call'],
+      ['POST', '/api/v1/mcp/call/'],
+      ['POST', '/api/v1/mcp/call/x'],
+      ['POST', '/api/v1/mcp/calls'],
+      ['POST', '/api/v1/mcp/tools/x'],
+      ['PATCH', '/api/v1/mcp/tools/mcp:fx/read'],
+      ['POST', '/api/v1/mcp/servers'],
+      ['POST', '/api/v1/mcp/servers/preview'],
+      ['POST', '/api/v1/mcp/approvals'],
+      ['GET', '/api/v1/mcp/servers'],
+      ['GET', '/api/v1/mcp/usage'],
+      ['POST', '/api/v1/runs'],
+      ['POST', '/mcp/call'],
+      ['POST', '/api/v2/mcp/call'],
+    ] as const) {
+      expect(isUnitTokenRoute(method, path), `${method} ${path}`).toBe(false);
+    }
   });
 });
 

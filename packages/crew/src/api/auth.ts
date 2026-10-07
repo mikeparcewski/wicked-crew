@@ -35,7 +35,9 @@ declare module 'fastify' {
     /**
      * The authenticated actor — or {@link LOCAL_ACTOR} when auth is off. Set by
      * the identity hook for every request under `/api/v1` and `/ws`; routes
-     * outside that scope (SPA assets) never read it.
+     * outside that scope (SPA assets) never read it. The two unit-token routes
+     * ({@link isUnitTokenRoute}) are the one exception inside the scope: they
+     * carry no actor, the body's capability token is their credential.
      */
     actor: Actor;
   }
@@ -586,6 +588,25 @@ export function isProtectedPath(path: string): boolean {
 }
 
 /**
+ * The two WORKER-facing MCP routes (crew#714). A governed worker holds no operator bearer —
+ * only its per-unit capability token (`WICKED_MCP_TOKEN`, minted by core's carriers), which it
+ * sends in the request BODY (never a header, so it never reaches a request log). The ENGINE
+ * verifies that token on every request (`Core.evaluateMcpCall` / `Core.listMcpTools` → 401
+ * `invalid_token` for an unbound one), so the bearer boundary is not the credential here: the
+ * token is. Exactly two method+path pairs — never a prefix. Every other `/api/v1/mcp/*` route
+ * (servers, approvals, usage, …) is operator work and stays behind the bearer.
+ */
+const UNIT_TOKEN_ROUTES: ReadonlySet<string> = new Set([
+  `POST ${API_PREFIX}/mcp/call`,
+  `POST ${API_PREFIX}/mcp/tools`,
+]);
+
+/** True for exactly the two unit-token routes above (method and path both exact). */
+export function isUnitTokenRoute(method: string, path: string): boolean {
+  return UNIT_TOKEN_ROUTES.has(`${method.toUpperCase()} ${path}`);
+}
+
+/**
  * Extract the presented bearer token. `Authorization: Bearer <t>` everywhere;
  * the `/ws` upgrade paths ALSO accept `?access_token=` (RFC 6750 §2.3),
  * because the browser `WebSocket` constructor cannot set headers. Header wins
@@ -629,6 +650,9 @@ export function registerAuthHooks(app: FastifyInstance, auth: ResolvedAuth): voi
   app.addHook('onRequest', async (req, reply) => {
     const path = pathOf(req);
     if (!isProtectedPath(path)) return;
+    // The unit-token routes carry their own credential (the body's capability token, judged by
+    // the engine); no bearer, no actor — the call record is the record (crew#714).
+    if (isUnitTokenRoute(req.method, path)) return;
     if (auth.mode === 'off') {
       req.actor = LOCAL_ACTOR;
       return;
@@ -650,6 +674,7 @@ export function registerAuthHooks(app: FastifyInstance, auth: ResolvedAuth): voi
   app.addHook('preHandler', async (req, reply) => {
     const path = pathOf(req);
     if (!isProtectedPath(path)) return;
+    if (isUnitTokenRoute(req.method, path)) return; // no actor to rank: the engine judged the token
     // `actor` is always set here: the onRequest hook either assigned it or
     // already answered 401 (which skips the rest of the lifecycle).
     const need = requiredTrust(req.method, path, req.body);
