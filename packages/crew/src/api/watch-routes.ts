@@ -16,7 +16,7 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { WatchHealth, WatchKind } from 'wicked-crew-api-types';
 import type { Actor } from '../core/types.js';
-import type { WatchRegistry } from '../watch/registry.js';
+import type { WatchRegistry, WatchRunFacts } from '../watch/registry.js';
 import { API_PREFIX } from './api-prefix.js';
 import { LOCAL_ACTOR, trustAtLeast } from './auth.js';
 import type { AuditLog } from './audit.js';
@@ -56,7 +56,12 @@ function bad(reply: FastifyReply, error: string): FastifyReply {
 
 export function registerWatchRoutes(
   app: FastifyInstance,
-  deps: { registry: () => WatchRegistry | null; audit: AuditLog },
+  deps: {
+    registry: () => WatchRegistry | null;
+    audit: AuditLog;
+    /** crew#828: whether a run has ended and how many events it recorded; `null` = unknown run. */
+    runFacts?: (runId: string) => Promise<WatchRunFacts | null>;
+  },
 ): void {
   const actorOf = (req: { actor?: Actor }): Actor => req.actor ?? LOCAL_ACTOR;
 
@@ -83,7 +88,10 @@ export function registerWatchRoutes(
       if (registry === null) {
         return { findings: [], cleared: [], ...(run !== undefined ? { coverage: [] } : {}) };
       }
+      // crew#828: an ended run's coverage says so — read only when a run is asked about.
+      const runFacts = run !== undefined && deps.runFacts !== undefined ? await deps.runFacts(run).catch(() => null) : null;
       return registry.feed({
+        ...(runFacts !== null ? { runFacts } : {}),
         ...(project !== undefined ? { project } : {}),
         ...(kind !== undefined ? { kind: kind as WatchKind } : {}),
         ...(run !== undefined ? { run } : {}),

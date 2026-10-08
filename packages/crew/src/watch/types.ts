@@ -173,8 +173,12 @@ export interface WatchCheck<P = Record<string, unknown>, T = Record<string, unkn
   thresholdSchema: ZodType<T>;
   /** Pure over (input, the run's folded state); 0..n outputs. A throw is counted by the lane, never escapes. */
   evaluate(input: KeyPointInput, state: RunWatchState, params: P, threshold: T, ctx: CheckCtx): Promise<CheckOutput[]> | CheckOutput[];
-  /** What this check can see on this run (G7). `null`: the check is run-less and has no run coverage. */
-  coverage(state: RunWatchState): Omit<WatchCoverage, 'entry_id'> | null;
+  /**
+   * What this check can see on this run (G7). `null`: the check is run-less and has no run coverage.
+   * `run.ended` (crew#828): the run has ENDED, so a "not yet" is false — a check that saw nothing to
+   * judge says "nothing to check: …" instead. Absent = unknown (the in-progress wording stands).
+   */
+  coverage(state: RunWatchState, run?: { ended: boolean }): Omit<WatchCoverage, 'entry_id'> | null;
   /** The threshold in plain words, for "When Studio speaks up". */
   describe(threshold: T): string;
 }

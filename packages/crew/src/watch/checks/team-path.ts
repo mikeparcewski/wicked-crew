@@ -74,9 +74,9 @@ function endPath(bag: Bag): CheckOutput[] {
   return out;
 }
 
-function coverageOf(bag: Bag | undefined, what: string): { state: 'checked' } | { state: 'not_checked'; reason: string } {
+function coverageOf(bag: Bag | undefined, what: string, run?: { ended: boolean }): { state: 'checked' } | { state: 'not_checked'; reason: string } {
   if (bag !== undefined && bag.seen > 0) return { state: 'checked' };
-  return { state: 'not_checked', reason: `no ${what} on this run yet` };
+  return { state: 'not_checked', reason: run?.ended === true ? `nothing to check: no ${what} on this run` : `no ${what} on this run yet` };
 }
 
 export const pathRepickedCheck: WatchCheck<Empty, Empty> = {
@@ -110,7 +110,7 @@ export const pathRepickedCheck: WatchCheck<Empty, Empty> = {
       },
     ];
   },
-  coverage: (state) => coverageOf(state.bag.get('repicked') as Bag | undefined, 'team path row'),
+  coverage: (state, run) => coverageOf(state.bag.get('repicked') as Bag | undefined, 'team path row', run),
   describe: () => 'When the answering seat stops and another seat takes over the path',
 };
 
@@ -162,7 +162,7 @@ export const reviewerAbsentCheck: WatchCheck<Empty, Empty> = {
       },
     ];
   },
-  coverage: (state) => coverageOf(state.bag.get('reviewer') as Bag | undefined, 'team member row'),
+  coverage: (state, run) => coverageOf(state.bag.get('reviewer') as Bag | undefined, 'team member row', run),
   describe: () => 'When a team path has no reviewer: no distinct signed-in seat, or the reviewer could not join',
 };
 
@@ -222,6 +222,6 @@ export const helpUnansweredCheck: WatchCheck<Empty, Empty> = {
       },
     ];
   },
-  coverage: (state) => coverageOf(state.bag.get('help') as Bag | undefined, 'team help row'),
+  coverage: (state, run) => coverageOf(state.bag.get('help') as Bag | undefined, 'team help row', run),
   describe: () => 'When a help request on a team path ends without an answer (timed out, failed, or no helper)',
 };

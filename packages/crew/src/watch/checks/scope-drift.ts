@@ -218,9 +218,10 @@ export const scopeDriftCheck: WatchCheck<Record<string, never>, ScopeDriftThresh
     }
     return judge(bag, floor, threshold, false);
   },
-  coverage(state) {
+  coverage(state, run) {
+    const none = run?.ended === true ? 'nothing to check: no creator floor ran on this run' : 'no creator floor has run yet';
     const bag = state.bag.get(BAG_KEY) as Bag | undefined;
-    if (bag === undefined || (bag.floors === 0 && bag.touch === null)) return { state: 'not_checked', reason: 'no creator floor has run yet' };
+    if (bag === undefined || (bag.floors === 0 && bag.touch === null)) return { state: 'not_checked', reason: none };
     if (bag.touch === null) {
       const n = bag.waiting.length + bag.lost;
       return { state: 'not_checked', reason: `no accepted plan has reached the registry yet (${n} creator floor${n === 1 ? '' : 's'} wait for it)` };
@@ -236,7 +237,7 @@ export const scopeDriftCheck: WatchCheck<Record<string, never>, ScopeDriftThresh
     if (bag.touch.truncated) {
       return { state: 'not_checked', reason: `the declared scope was cut at ${TOUCH_CAP} paths, so what lies outside the listed ones cannot be judged` };
     }
-    if (bag.floors === 0) return { state: 'not_checked', reason: 'no creator floor has run yet' };
+    if (bag.floors === 0) return { state: 'not_checked', reason: none };
     if (bag.lost > 0) {
       return { state: 'not_checked', reason: `${bag.lost} creator floor${bag.lost === 1 ? '' : 's'} arrived before the plan and could not be kept` };
     }

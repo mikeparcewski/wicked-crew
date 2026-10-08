@@ -129,10 +129,10 @@ export const deliverAuditCheck: WatchCheck<Record<string, never>, Record<string,
         return [];
     }
   },
-  coverage(state) {
+  coverage(state, run) {
     const bag = state.bag.get('deliver') as Bag | undefined;
     if (bag !== undefined && bag.outcomes > 0) return { state: 'checked' };
-    return { state: 'not_checked', reason: 'nothing was delivered on this run yet' };
+    return { state: 'not_checked', reason: run?.ended === true ? 'nothing to check: no delivery on this run' : 'nothing was delivered on this run yet' };
   },
   describe: () =>
     'When delivery moves the work onto the newest main and the moved tree is not re-checked, or the move is skipped, conflicts or fails',

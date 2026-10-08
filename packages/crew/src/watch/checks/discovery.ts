@@ -178,15 +178,17 @@ async function discover(
   }));
 }
 
-function coverageOf(state: RunWatchState): { state: 'checked' } | { state: 'not_checked'; reason: string } {
+function coverageOf(state: RunWatchState, run?: { ended: boolean }): { state: 'checked' } | { state: 'not_checked'; reason: string } {
   const bag = state.bag.get(BAG_KEY) as Bag | undefined;
-  if (bag === undefined || bag.frames === 0) return { state: 'not_checked', reason: 'the run has not ended yet' };
+  // crew#828: an ENDED run whose terminal frame the registry never saw ended while it was not watching.
+  const notSeen = run?.ended === true ? 'the run ended while this daemon was not watching it' : 'the run has not ended yet';
+  if (bag === undefined || bag.frames === 0) return { state: 'not_checked', reason: notSeen };
   if (bag.noSource) return { state: 'not_checked', reason: 'no discovery source (the daemon gave the registry no project view to count over)' };
   if (bag.noProject) return { state: 'not_checked', reason: 'the run belongs to no project, so there is nothing to count over' };
   if (bag.unreadable !== null) {
     return { state: 'not_checked', reason: `the project's run records could not be read in time (${bag.unreadable}); counted again when the next run ends` };
   }
-  return bag.judged ? { state: 'checked' } : { state: 'not_checked', reason: 'the run has not ended yet' };
+  return bag.judged ? { state: 'checked' } : { state: 'not_checked', reason: notSeen };
 }
 
 export const addedByHandCheck: WatchCheck<AddedByHandParams, AddedByHandThreshold> = {

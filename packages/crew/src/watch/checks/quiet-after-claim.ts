@@ -90,10 +90,10 @@ export const quietAfterClaimCheck: WatchCheck<Record<string, never>, Record<stri
         return [];
     }
   },
-  coverage(state) {
+  coverage(state, run) {
     const bag = state.bag.get('quiet') as Bag | undefined;
     if (bag !== undefined && bag.seen > 0) return { state: 'checked' };
-    return { state: 'not_checked', reason: 'no step has handed back yet' };
+    return { state: 'not_checked', reason: run?.ended === true ? 'nothing to check: no step handed back on this run' : 'no step has handed back yet' };
   },
   describe: () => "When a step says it's finished but the run then goes quiet past the stall watchdog's threshold",
 };
