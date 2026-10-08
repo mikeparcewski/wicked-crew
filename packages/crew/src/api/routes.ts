@@ -430,6 +430,8 @@ const RegisterRepoSchema = z
     /** crew#496 / crew#632: the launch surface and caller, recorded on the run's launch entry. */
     channel: z.enum(['studio', 'cli', 'api']).optional(),
     actor: z.string().min(1).max(256).optional(),
+    /** crew#552: `false` = this onboarding chains no capture-learnings run (a one-off). */
+    autoCapture: z.boolean().optional(),
   })
   .strict()
   .refine(
@@ -449,6 +451,8 @@ const OnboardBodySchema = z
     projectId: z.string().min(1).max(128).optional(),
     channel: z.enum(['studio', 'cli', 'api']).optional(),
     actor: z.string().min(1).max(256).optional(),
+    /** crew#552: `false` = this onboarding chains no capture-learnings run (a one-off). */
+    autoCapture: z.boolean().optional(),
   })
   .strict();
 
@@ -1359,6 +1363,9 @@ export function registerRoutes(
     // C1: the chat the run was launched from, on every run (terminal ones too) — ABSENT otherwise.
     const chatId = runTimingIndex.chatIdFor(view.session.id);
     if (chatId !== undefined) view.session.chat_id = chatId;
+    // crew#552: the onboarding run a chained capture was launched from — ABSENT otherwise.
+    const chainedFrom = runTimingIndex.chainedFromOf(view.session.id);
+    if (chainedFrom !== undefined) view.session.chained_from = chainedFrom;
     // crew#854: an ask's run, and whether it waits at its TURN gate (answered by the next message,
     // never a gate for the Needs-you count).
     if (runTimingIndex.isAskPath(view.session.id)) {
@@ -1919,11 +1926,12 @@ export function registerRoutes(
     req: FastifyRequest,
     runId: string,
     repoId: string,
-    opts: { projectId?: string | undefined; channel?: string | undefined; actor?: string | undefined },
+    opts: { projectId?: string | undefined; channel?: string | undefined; actor?: string | undefined; autoCapture?: boolean | undefined },
   ): Promise<string | undefined> => {
     recordRunLaunched(audit, runTimingIndex, actorOf(req), runId, {
       workflow: 'onboarding',
       repoRef: repoId,
+      ...(opts.autoCapture === false ? { autoCapture: false } : {}),
       ...(opts.projectId !== undefined ? { projectId: opts.projectId } : {}),
       ...(opts.channel !== undefined ? { channel: opts.channel } : {}),
       ...(opts.actor !== undefined ? { actor: opts.actor } : {}),
@@ -1975,7 +1983,7 @@ export function registerRoutes(
     }
     const refused = await onboardRefusal();
     if (refused !== null) return reply.code(refused.status).send(refused.body);
-    const { name, rootPath, gitUrl, projectId, channel, actor } = parsed.data;
+    const { name, rootPath, gitUrl, projectId, channel, actor, autoCapture } = parsed.data;
     let repo: RepoEntry | undefined;
     let runId: string;
     try {
@@ -1995,7 +2003,7 @@ export function registerRoutes(
     } catch (err) {
       return reply.code(400).send({ error: message(err) });
     }
-    const projectAttachError = await recordOnboardingLaunch(req, runId, repo.id, { projectId, channel, actor });
+    const projectAttachError = await recordOnboardingLaunch(req, runId, repo.id, { projectId, channel, actor, autoCapture });
     return reply.code(201).send({ repo, onboardRunId: runId, ...(projectAttachError !== undefined ? { projectAttachError } : {}) });
   });
 
@@ -5307,6 +5315,10 @@ export function registerRoutes(
           .send({ error: "deliverDefault must be 'pr' or 'none'" });
       }
     }
+    // onboardingAutoCapture (crew#552): whether a completed onboarding chains capture-learnings.
+    if (Object.hasOwn(patch, 'onboardingAutoCapture') && typeof patch.onboardingAutoCapture !== 'boolean') {
+      return reply.code(400).send({ error: 'onboardingAutoCapture must be true or false' });
+    }
     // baseSkillRef / baseSkillPolicy (crew#554 / wicked-core#468): the discipline skill EVERY
     // governed unit is told to follow, and what a snapshot without it means. Both decide whether
     // launches carry the directive or are refused at intake, so a typo is a 400, never a silently
@@ -5390,6 +5402,7 @@ export function registerRoutes(
       'workerStallEscalateAction',
       'workerStallMaxEscalations',
       'deliverDefault',
+      'onboardingAutoCapture',
       'deliverIdentityLogin',
       'baseSkillRef',
       'baseSkillPolicy',

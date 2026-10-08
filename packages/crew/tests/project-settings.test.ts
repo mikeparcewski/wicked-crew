@@ -48,6 +48,18 @@ describe('ProjectSettingsStore', () => {
     expect(new ProjectSettingsStore(path).get('p-1')).toEqual({});
   });
 
+  it('crew#552: the autoCapture override persists across a restart, keeps the binding, and null clears it', () => {
+    const store = new ProjectSettingsStore(path);
+    store.set('p-1', { interactiveRoot: '/srv/decks' });
+    store.set('p-1', { autoCapture: false });
+    expect(new ProjectSettingsStore(path).get('p-1')).toEqual({ interactiveRoot: '/srv/decks', autoCapture: false });
+    store.set('p-1', { autoCapture: null });
+    expect(new ProjectSettingsStore(path).get('p-1')).toEqual({ interactiveRoot: '/srv/decks' });
+    // A hand-edited non-boolean is dropped on read, never honoured.
+    writeFileSync(path, JSON.stringify({ projects: { 'p-2': { autoCapture: 'no' } } }));
+    expect(new ProjectSettingsStore(path).get('p-2')).toEqual({});
+  });
+
   it('keeps projects independent', () => {
     const store = new ProjectSettingsStore(path);
     store.set('p-1', { interactiveRoot: '/a' });

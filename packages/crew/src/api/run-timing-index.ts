@@ -48,6 +48,12 @@ export class RunTimingIndex {
   private readonly runToChatId = new Map<string, string>();
   /** crew#854: runs an ask launched (the `run.launched` entry's `askPath`). */
   private readonly askPathRuns = new Set<string>();
+  /** crew#552: chained run → the onboarding run it was launched from (`detail.chainedFrom`). */
+  private readonly runToChainedFrom = new Map<string, string>();
+  /** crew#552: onboarding run → the capture run chained from it (the idempotence key). */
+  private readonly chainedRun = new Map<string, string>();
+  /** crew#552: onboarding runs launched with `autoCapture: false`. */
+  private readonly autoCaptureOffRuns = new Set<string>();
   /** crew#762: the RESOLVED delivery decision the launch recorded (`detail.deliver`). */
   private readonly runToLaunchDeliver = new Map<string, 'pr' | 'none'>();
 
@@ -79,6 +85,7 @@ export class RunTimingIndex {
       if (detail?.['askPath'] === true) this.askPathRuns.add(runId);
       const deliver = detail?.['deliver'];
       if (deliver === 'pr' || deliver === 'none') this.runToLaunchDeliver.set(runId, deliver);
+      this.noteChain(runId, detail);
     }
   }
 
@@ -154,6 +161,31 @@ export class RunTimingIndex {
   /** Did an ask launch the run (crew#854)? */
   isAskPath(runId: string): boolean {
     return this.askPathRuns.has(runId);
+  }
+
+  /** crew#552: a launch entry's chain facts (`chainedFrom`, `autoCapture: false`). */
+  noteChain(runId: string, detail: Record<string, unknown> | undefined): void {
+    const from = detail?.['chainedFrom'];
+    if (typeof from === 'string' && from.length > 0) {
+      this.runToChainedFrom.set(runId, from);
+      this.chainedRun.set(from, runId);
+    }
+    if (detail?.['autoCapture'] === false) this.autoCaptureOffRuns.add(runId);
+  }
+
+  /** crew#552: the onboarding run a chained run was launched from (`AgentSession.chained_from`). */
+  chainedFromOf(runId: string): string | undefined {
+    return this.runToChainedFrom.get(runId);
+  }
+
+  /** crew#552: the capture run chained from an onboarding run, if one was launched. */
+  chainedRunOf(onboardRunId: string): string | undefined {
+    return this.chainedRun.get(onboardRunId);
+  }
+
+  /** crew#552: was the onboarding run launched with `autoCapture: false`? */
+  autoCaptureOff(onboardRunId: string): boolean {
+    return this.autoCaptureOffRuns.has(onboardRunId);
   }
 
   /** Record the launch's resolved delivery decision (crew#762). */
@@ -249,6 +281,8 @@ export function recordRunLaunched(
   }
   // crew#854: an ask's run, live — the same field a restart rehydrates.
   if (detail['askPath'] === true && runTimingIndex !== undefined) runTimingIndex.setAskPath(runId);
+  // crew#552: the chain facts, live — the same fields a restart rehydrates.
+  runTimingIndex?.noteChain(runId, detail);
   // crew#762: the launch's delivery decision, live — the same field a restart rehydrates.
   const deliver = detail['deliver'];
   if ((deliver === 'pr' || deliver === 'none') && runTimingIndex !== undefined) {

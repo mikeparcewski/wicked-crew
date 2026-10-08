@@ -19,6 +19,7 @@ import { EvalRunStore } from './eval-store.js';
 import { RetryIndex } from './retry-index.js';
 import { GroupIndex } from './group-index.js';
 import { RunTimingIndex, recordRunLaunched } from './run-timing-index.js';
+import { OnboardingCaptureChain } from './onboarding-capture.js';
 import { GuidanceIndex } from './guidance-index.js';
 import { ChatScopeIndex, reapStaleChatNamespaces } from './chat-scope.js';
 import {
@@ -1075,6 +1076,25 @@ export async function createServer(
     );
   };
 
+  // crew#552: a completed onboarding run chains capture-learnings for its repo (one at a time).
+  const onboardingCapture = new OnboardingCaptureChain({
+    adapter,
+    runTimingIndex,
+    audit,
+    projectOf: (runId) => membershipIndex.projectOf(runId),
+    projectAutoCapture: (projectId) => projectSettings.get(projectId).autoCapture ?? undefined,
+    fileRun: (runId, projectId) => {
+      membershipIndex.set(runId, projectId);
+      projectBus?.emit(
+        MEMBERSHIP_ATTACHED,
+        { project_id: projectId, member: { kind: 'crew.run', ref: runId }, actor: 'onboarding' },
+        membershipAttachedKey(projectId, 'crew.run', runId, Date.now()),
+      );
+    },
+    broadcast: (frame) => broadcast(frame),
+    log: (m) => app.log.info(m),
+  });
+
   /** The docs root a project's interactive docs live under — the SAME per-project resolution
    *  the project routes and the interactive proxy use (DES-MERGE-001 §7.1/§7.2; partitioned
    *  per project since crew#472, with an event that carries no `project_id` belonging to
@@ -1728,6 +1748,8 @@ export async function createServer(
     // A completed ONBOARDING run refreshes the project graph(s) its repo belongs to (F-2R2-008):
     // bounded (plain refresh — unchanged members skip; one project at a time; at most two rounds),
     // off the hot path, logged. Only runs THIS daemon launched are known here, by design.
+    // crew#552: an onboarding completion queues its capture; a chained capture's end frees the slot.
+    onboardingCapture.onEvent(event);
     if (event.type === 'sessionCompleted' && session !== undefined) {
       const onboardedRepo = adapter.onboardedRepoOf(session);
       if (onboardedRepo !== undefined) {

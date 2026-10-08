@@ -40,6 +40,8 @@ import { crewStateHome } from './state-home.js';
 export interface ProjectSettings {
   /** DES-MERGE-001 §7.1 — the wicked-interactive docs root this project speaks to. */
   interactiveRoot?: string | null;
+  /** crew#552 — this project's override of `onboardingAutoCapture`; absent/null ⇒ the setting. */
+  autoCapture?: boolean | null;
 }
 
 /**
@@ -91,6 +93,7 @@ export class ProjectSettingsStore {
         const root = row.interactiveRoot;
         if (root === undefined || root === null || typeof root === 'string') {
           this.rows[id] = root === undefined ? {} : { interactiveRoot: root };
+          if (typeof row.autoCapture === 'boolean') this.rows[id]!.autoCapture = row.autoCapture;
         }
       }
     } catch {
@@ -108,6 +111,7 @@ export class ProjectSettingsStore {
   set(projectId: string, patch: ProjectSettings): ProjectSettings {
     const next: ProjectSettings = { ...this.get(projectId), ...patch };
     if (next.interactiveRoot === null || next.interactiveRoot === undefined) delete next.interactiveRoot;
+    if (next.autoCapture === null || next.autoCapture === undefined) delete next.autoCapture;
     this.rows[projectId] = next;
     this.persist();
     return next;
