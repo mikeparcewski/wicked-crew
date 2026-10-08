@@ -312,6 +312,15 @@ export function extractPluginRootRefs(text: string): TextRef[] {
   return out;
 }
 
+/**
+ * Whether plugin-relative `fileRel` lies under the `assets/` directory of the skill at `skillDir`
+ * (`skills/<name>`). Assets are templates a skill copies into a project; the references they spell
+ * are relative to that project, so the publish ref-check skips them (they still ship).
+ */
+export function isSkillAsset(skillDir: string, fileRel: string): boolean {
+  return fileRel.startsWith(`${skillDir}/assets/`);
+}
+
 /** Every `../<p>` reference in `text`, in order (as written; the caller resolves it). */
 export function extractRelativeRefs(text: string): TextRef[] {
   const out: TextRef[] = [];

@@ -945,6 +945,8 @@ respondsWith<Wire.DiagnosticsSkillsFinding['kind'], 'skills.source'>();
 respondsWith<Wire.DiagnosticsSkillsFinding['kind'], 'skills.manifest'>();
 // crew#753 (api-types 0.78.0): an installed garden older than the minimum.
 respondsWith<Wire.DiagnosticsSkillsFinding['kind'], 'skills.garden'>();
+// F-E2E-002 (api-types 0.96.0): a publish's warnings ride the findings of the generation it minted.
+respondsWith<Wire.DiagnosticsSkillsFinding['kind'], 'skills.publish-warning'>();
 respondsWith<Wire.AcpCliDiagnostics, AcpCliFold>();
 respondsWith<AcpCliFold, Wire.AcpCliDiagnostics>();
 respondsWith<Wire.DiagnosticsRecentError, RecentError>();

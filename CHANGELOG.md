@@ -10,6 +10,10 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+- **Skills: a skill's `assets/` are not ref-checked at publish (F-E2E-002).** Files under `skills/<name>/assets/` are templates the skill copies into a project — garden 12.44.0's `mcp-scaffold/assets/typescript/src/tools/*.ts` import `../registry.js` — so their `../` and `${CLAUDE_PLUGIN_ROOT}` spellings are relative to that project, not the plugin root. The first publish of 12.44.0 logged 13 false `unresolved-ref` warnings (crew 0.8.5 release smoke, run 37762305091). Assets still ship in the snapshot; skill text outside `assets/` is judged as before.
+- **Skills: a publish's warnings ride `/diagnostics.skills.findings` (F-E2E-002).** A publish that lands with warnings (verdict `warnings`) reported `findings: []` — the warnings were only in the daemon log. Now each warning of the publish that minted the CURRENT generation is a `skills.publish-warning` finding (`warning`; message names the publish finding's kind, `file:line` and evidence), from the boot publish and from `POST /skills/publish`; a later publish answers its own generation's, an `unchanged` publish keeps them. Held in memory: a restart re-verifies `current` without re-scanning it. `wicked-crew-api-types` declares the kind.
+- **The release smoke runs wicked-ci v1.4.0 (`2596ff1`, wicked-ci#41; was `0f8ad22`, wicked-ci#38).** crew 0.8.5's release smoke (run 37762305091) was red on both legs for harness reasons — the package was sound. core-ts 0.7.40 (wicked-core#774/#780) fails closed with a `judge_unavailable` gate when the only identity-distinct judge seats are benched, and the smoke's two live seats left the `verify` unit (evaluator opencode, creator claude) none; S04 now carries a third live seat and asserts the fail-closed gate on a separate launch without it. F-A6-USAGE is retired at 0.8.5 (#863 fixed the ask path's `chatReply.usage`) and F-E2E-002 is bound to this release. Both pins (`uses:` and `wicked_ci_ref`) move together.
+
 ## [0.8.5] — 2026-10-08
 
 The engine pin moves to **`wicked-core-ts` `^0.7.40`**, which ships the `mcp-server` workflow this

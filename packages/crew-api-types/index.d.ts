@@ -6420,7 +6420,12 @@ export interface DiagnosticsSkillsFinding {
    *  than the daemon requires (`GardenRequiredBody.required`), so it is not used: found at seed,
    *  the runtime is `config-error` and the engine is handed a refusal path. Rides
    *  `/health.warnings` too; launches and onboarding answer 422
-   *  `garden_required` until a newer garden is installed and published. */
+   *  `garden_required` until a newer garden is installed and published; `skills.publish-warning`
+   *  (`warning`, api-types 0.96.0, F-E2E-002) = one per WARNING the publish of the CURRENT
+   *  generation landed with (a reference the skill's author owns that names nothing in the
+   *  snapshot — published as found); `message` names the publish finding's kind, `file:line` and
+   *  evidence. Reported while that generation is current, from the publish that found them until the
+   *  daemon restarts (a restart re-verifies `current` without re-scanning it). */
   kind:
     | 'skills.fallback'
     | 'skills.blocked'
@@ -6430,7 +6435,8 @@ export interface DiagnosticsSkillsFinding {
     | 'skills.stale-rules'
     | 'skills.base-skill'
     | 'skills.phase-skill'
-    | 'skills.garden';
+    | 'skills.garden'
+    | 'skills.publish-warning';
   severity: 'warning' | 'error';
   message: string;
 }
