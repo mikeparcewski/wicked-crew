@@ -100,7 +100,7 @@ describe('the watch registry on the daemon', () => {
     const h = (await (await call('GET', '/api/v1/watch/health', TOKENS.operator)).json()) as WatchHealth;
     expect(h.armed).toBe(true);
     expect(h.reason).toBeNull();
-    expect(h.entries).toMatchObject({ loaded: 10, refused: [], off: [] });
+    expect(h.entries).toMatchObject({ loaded: 13, refused: [], off: [] });
     // TR-W7: scope-drift listens on the bus, so the pull is armed on the engine's bus.
     expect(h.sources.bus).toBe('ok');
     expect(h.llm.enabled).toBe(false);
@@ -109,9 +109,12 @@ describe('the watch registry on the daemon', () => {
       ['added-by-hand', true],
       ['claim-vs-evidence', true],
       ['deliver-audit', true],
+      ['help-unanswered', true],
+      ['path-repicked', true],
       ['quiet-after-claim', true],
       ['registry-check-failed', true],
       ['registry-lagging', true],
+      ['reviewer-absent', true],
       ['risky-call', true],
       ['scope-drift', true],
       ['ungated', true],
@@ -171,7 +174,10 @@ describe('the watch registry on the daemon', () => {
         { entry_id: 'added-by-hand', state: 'not_checked', reason: 'the run has not ended yet' },
         { entry_id: 'claim-vs-evidence', state: 'not_checked', reason: 'no step has run its checks yet' },
         { entry_id: 'deliver-audit', state: 'not_checked', reason: 'nothing was delivered on this run yet' },
+        { entry_id: 'help-unanswered', state: 'not_checked', reason: 'no team help row on this run yet' },
+        { entry_id: 'path-repicked', state: 'not_checked', reason: 'no team path row on this run yet' },
         { entry_id: 'quiet-after-claim', state: 'not_checked', reason: 'no step has handed back yet' },
+        { entry_id: 'reviewer-absent', state: 'not_checked', reason: 'no team member row on this run yet' },
         { entry_id: 'risky-call', state: 'not_checked', reason: 'no governed tool call has reached a gate yet' },
         { entry_id: 'scope-drift', state: 'not_checked', reason: 'no creator floor has run yet' },
         { entry_id: 'ungated', state: 'not_checked', reason: 'no step has reached its gate yet' },

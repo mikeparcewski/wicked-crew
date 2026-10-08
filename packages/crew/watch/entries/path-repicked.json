@@ -1,0 +1,13 @@
+{
+  "id": "path-repicked",
+  "version": 1,
+  "on": { "source": "bus", "type": "wicked.team.path.repicked" },
+  "join": [{ "source": "bus", "type": "wicked.team.path.ended" }],
+  "filter": {},
+  "check": "deterministic:path_repicked",
+  "params": {},
+  "threshold": {},
+  "emit": { "as": "flag", "severity": "medium", "watch_kind": "problem", "attach": null, "rate": { "per_run": 5 } },
+  "priority": "p1",
+  "enabled": true
+}

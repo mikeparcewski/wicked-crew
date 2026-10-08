@@ -23,7 +23,9 @@ const SRC = fileURLToPath(new URL('../src', import.meta.url));
 // WT-W4: the discovery view READS `wicked.team.plan.*` rows (who put which step in the plan). It emits
 // nothing either.
 // ASK-C2: the ask relay reads path.started / member.joined / step.completed rows (never emits).
-const READERS = new Set(['team/ws-relay.ts', 'team/routes.ts', 'standing-orders/evaluator.ts', 'watch/checks/scope-drift.ts', 'api/discovery-source.ts', 'api/ask-relay.ts']);
+// ASK-C3: the team-path watch checks READ path.repicked / member.joined / help.* / path.ended rows
+// (pulled by the registry); they emit nothing.
+const READERS = new Set(['team/ws-relay.ts', 'team/routes.ts', 'standing-orders/evaluator.ts', 'watch/checks/scope-drift.ts', 'watch/checks/team-path.ts', 'api/discovery-source.ts', 'api/ask-relay.ts']);
 
 function sources(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {

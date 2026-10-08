@@ -1,0 +1,13 @@
+{
+  "id": "reviewer-absent",
+  "version": 1,
+  "on": { "source": "bus", "type": "wicked.team.member.joined" },
+  "join": [{ "source": "bus", "type": "wicked.team.path.ended" }],
+  "filter": {},
+  "check": "deterministic:reviewer_absent",
+  "params": {},
+  "threshold": {},
+  "emit": { "as": "flag", "severity": "info", "watch_kind": "quiet", "attach": null, "rate": { "per_run": 5 } },
+  "priority": "p2",
+  "enabled": true
+}

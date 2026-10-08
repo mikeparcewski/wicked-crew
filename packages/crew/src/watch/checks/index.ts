@@ -12,6 +12,7 @@ import { addedByHandCheck, whatCatchesCheck } from './discovery.js';
 import { lagCheck } from './lag.js';
 import { quietAfterClaimCheck } from './quiet-after-claim.js';
 import { scopeDriftCheck } from './scope-drift.js';
+import { helpUnansweredCheck, pathRepickedCheck, reviewerAbsentCheck } from './team-path.js';
 import { ungatedCheck } from './ungated.js';
 import { warnedRuleCheck } from './warned-rule.js';
 
@@ -30,4 +31,8 @@ export const SHIPPED_CHECKS: ReadonlyMap<string, WatchCheck> = new Map<string, W
   // WT-W4 (DES-walkthrough-proof §4.13: discovery, propose-only)
   [addedByHandCheck.name, addedByHandCheck as unknown as WatchCheck],
   [whatCatchesCheck.name, whatCatchesCheck as unknown as WatchCheck],
+  // ASK-C3 (DES-ASK-TEAM-CHAT-001 §4.1, §4.5, §4.6: the ask path's team facts)
+  [pathRepickedCheck.name, pathRepickedCheck as unknown as WatchCheck],
+  [reviewerAbsentCheck.name, reviewerAbsentCheck as unknown as WatchCheck],
+  [helpUnansweredCheck.name, helpUnansweredCheck as unknown as WatchCheck],
 ]);

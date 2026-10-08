@@ -1,0 +1,16 @@
+{
+  "id": "help-unanswered",
+  "version": 1,
+  "on": { "source": "bus", "type": "wicked.team.help.answered" },
+  "join": [
+    { "source": "bus", "type": "wicked.team.help.requested" },
+    { "source": "bus", "type": "wicked.team.path.ended" }
+  ],
+  "filter": {},
+  "check": "deterministic:help_unanswered",
+  "params": {},
+  "threshold": {},
+  "emit": { "as": "flag", "severity": "info", "watch_kind": "quiet", "attach": null, "rate": { "per_run": 5 } },
+  "priority": "p2",
+  "enabled": true
+}
