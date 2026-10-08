@@ -75,7 +75,7 @@
 import { join } from 'node:path';
 
 import type { LaunchNotice } from '../core/adapter.js';
-import type { CoreEvent, SkillManifest } from '../core/types.js';
+import type { CoreEvent, SkillManifest, SkillPublishResult } from '../core/types.js';
 import { applySkillsSnapshotEnv, BOOT_SKILLS_SNAPSHOT, canonicalCrewStateHome, SKILLS_SNAPSHOT_ENGINE_ENV } from './engine-env.js';
 import { applyBaseSkillEnv, BASE_SKILL_REF_ENGINE_ENV, baseSkillPosture, normalizeBaseSkillRef, type BaseSkillConfig, type BaseSkillPolicy, type BaseSkillPosture } from './base-skill.js';
 import { GARDEN_INSTALL_COMMAND, REQUIRED_GARDEN_VERSION, SKILLS_SOURCE_ENV, type PluginSource } from './plugin-source.js';
@@ -188,7 +188,8 @@ export type SkillsHealthState = 'published' | 'fallback' | 'blocked' | 'config-e
 /** `skills.stale-rules` (F-083) is emitted ahead of its `wicked-crew-api-types` declaration — the next api-types cut adds it to `DiagnosticsSkillsFinding.kind`. */
 /** `skills.base-skill` (crew#554 / DES-L4 PR-⑧): the configured base skill is not in the published generation — an ERROR (the engine refuses launches at intake; `'require'` is the only policy). */
 /** `skills.garden` (crew#753): the installed wicked-garden found at seed is older than {@link REQUIRED_GARDEN_VERSION} — an ERROR; launches and onboarding are refused until a newer garden is installed. */
-export type SkillsHealthFindingKind = 'skills.fallback' | 'skills.blocked' | 'skills.config' | 'skills.source' | 'skills.manifest' | 'skills.stale-rules' | 'skills.base-skill' | 'skills.phase-skill' | 'skills.garden';
+/** `skills.publish-warning` (F-E2E-002): one per warning the publish of the CURRENT generation landed with (a broken reference the skill's author owns) — published as found, reported here so the warnings are not only in the daemon log. */
+export type SkillsHealthFindingKind = 'skills.fallback' | 'skills.blocked' | 'skills.config' | 'skills.source' | 'skills.manifest' | 'skills.stale-rules' | 'skills.base-skill' | 'skills.phase-skill' | 'skills.garden' | 'skills.publish-warning';
 
 export interface SkillsHealthFinding {
   kind: SkillsHealthFindingKind;
@@ -248,6 +249,13 @@ export class SkillsRuntime {
   private lastBaseSkill: BaseSkillPosture | null = null;
   /** The last `skills.base-skill` message logged — the seam says a finding once per change, not per re-export. */
   private lastBaseSkillLogged: string | null = null;
+  /**
+   * F-E2E-002: the warnings the publish that minted generation `gen` landed with, as diagnostics
+   * findings. Reported while `current` IS that generation (a later publish mints another gen and
+   * answers its own). Held in memory: a restart re-verifies `current` but does not re-scan it, so
+   * after a restart the warnings are back to the log line of the publish that found them.
+   */
+  private publishWarnings: { gen: number; findings: SkillsHealthFinding[] } | null = null;
 
   constructor(opts: SkillsRuntimeOptions) {
     this.store = opts.store;
@@ -489,6 +497,7 @@ export class SkillsRuntime {
       const named = ready.published.findings.map((f) => `${f.kind}${f.file === null ? '' : ` ${f.file}${f.line === null ? '' : `:${f.line}`}`}`).join('; ');
       this.log(`[skills] first publish landed with ${ready.published.findings.length} warning(s) (published as found; fix in the editor or upstream): ${named}`);
     }
+    if (ready.published !== null) this.notePublished(ready.published);
     this.afterPublish();
     const health = this.health();
     this.logSourceWarning(health);
@@ -521,6 +530,27 @@ export class SkillsRuntime {
     if (notice.status === 'handed') this.store.live.launched(notice.kind, notice.id);
     else if (notice.status === 'rejected') this.store.live.launchRejected(notice.kind, notice.id);
     // `accepted` changes nothing here: the pin opened at `handed` is released by the engine's report.
+  }
+
+  /**
+   * Remember what a publish that minted a generation landed with (F-E2E-002), so `health()` reports
+   * its warnings beside the generation instead of only logging them. Called by the boot ladder and
+   * by `POST /skills/publish` before the export; an `unchanged` publish minted nothing and keeps
+   * what the generation already reports.
+   */
+  notePublished(result: Pick<SkillPublishResult, 'verdict' | 'findings' | 'snapshot' | 'unchanged'>): void {
+    if (result.snapshot === null || result.unchanged === true) return;
+    const findings: SkillsHealthFinding[] =
+      result.verdict === 'warnings'
+        ? result.findings
+            .filter((f) => f.severity === 'warning')
+            .map((f) => ({
+              kind: 'skills.publish-warning' as const,
+              severity: 'warning' as const,
+              message: `${f.kind}${f.file === null ? '' : ` ${f.file}${f.line === null ? '' : `:${f.line}`}`}: ${f.evidence} — generation ${result.snapshot?.gen} was published with it as found; fix it in the editor or upstream`,
+            }))
+        : [];
+    this.publishWarnings = { gen: result.snapshot.gen, findings };
   }
 
   /**
@@ -613,7 +643,7 @@ export class SkillsRuntime {
         current: { gen: current.gen, path: current.path },
         engineInput: current.path,
         stateHome: canonicalCrewStateHome(),
-        findings: stale === null ? [] : [stale],
+        findings: [...(stale === null ? [] : [stale]), ...(this.publishWarnings?.gen === current.gen ? this.publishWarnings.findings : [])],
         baseSkill: null,
       },
       current,

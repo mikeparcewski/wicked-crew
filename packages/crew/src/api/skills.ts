@@ -331,7 +331,10 @@ export function registerSkillsRoutes(app: FastifyInstance, deps: SkillsRouteDeps
         // verification of the new generation lets the loop turn, and a second publish admitted
         // meanwhile could commit a generation this request would then export over.
         const published = await runtime.store.publish(parsed.data.expectedRevision, async (result, pacer) => {
-          if (result.snapshot !== null && result.unchanged !== true) await runtime.afterPublishPaced(pacer);
+          if (result.snapshot !== null && result.unchanged !== true) {
+            runtime.notePublished(result); // F-E2E-002: its warnings ride /diagnostics.skills.findings
+            await runtime.afterPublishPaced(pacer);
+          }
         });
         // The published snapshot is what the engine consumes — export its real path now. An
         // `unchanged` publish (DES-L6 PR-L6-1) minted nothing and moved nothing: the export the

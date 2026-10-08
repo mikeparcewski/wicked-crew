@@ -211,6 +211,7 @@ import {
   existsIn,
   extractPluginRootRefs,
   extractRelativeRefs,
+  isSkillAsset,
   looksBinary,
   PORTABILITY_EVIDENCE_CAP,
   PORTABILITY_REASONS,
@@ -4347,6 +4348,13 @@ export class SkillsStore {
     };
     for (const { name, entry } of enabledSkills) {
       for (const f of filesByOwner.get(entry.dir) ?? []) {
+        // A skill's `assets/` are TEMPLATES the skill copies out (garden 12.44.0's
+        // `mcp-scaffold/assets/typescript/src/tools/*.ts` import `../registry.js`), not skill text a
+        // worker follows: their `../` and `${CLAUDE_PLUGIN_ROOT}` spellings are relative to the
+        // project the template is copied into, never to the plugin root. They still ship in the
+        // snapshot; they are just not ref-checked (13 false `unresolved-ref` warnings on the first
+        // publish of 12.44.0 — the crew 0.8.5 release smoke, F-E2E-002).
+        if (isSkillAsset(entry.dir, f.rel)) continue;
         const buf = readFileNoFollow(f.abs);
         if (looksBinary(buf)) continue;
         const text = buf.toString('utf8');

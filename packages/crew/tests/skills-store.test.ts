@@ -2158,6 +2158,97 @@ describe('design v3.4 §1 — the live 12.32.0 shapes publish with WARNINGS; an 
   });
 });
 
+describe("a skill's assets/ are templates, not skill text: never ref-checked, still shipped (crew 0.8.5 release smoke, F-E2E-002)", () => {
+  // garden 12.44.0's mcp-scaffold ships `assets/typescript/src/tools/*.ts` whose `../registry.js`
+  // imports are relative to the project the template is copied into — 13 false unresolved-ref
+  // warnings on the first publish. The same lines in a refs/ file stay findings (the control).
+  const TEMPLATE = [
+    "import { registry } from '../registry.js';",
+    "import type { Tool } from '../../types.js';",
+    'const root = "${CLAUDE_PLUGIN_ROOT}/nothing/here";',
+    "import { far } from '../../../../../../../outside.js';",
+    '',
+  ].join('\n');
+
+  it('a file under skills/<name>/assets/ publishes with no unresolved-ref (not even the escape), ships in the snapshot; the same text under refs/ is still reported', async () => {
+    mkdirSync(join(s.upstream, 'skills', 'beta', 'assets', 'typescript', 'src', 'tools'), { recursive: true });
+    writeFileSync(join(s.upstream, 'skills', 'beta', 'assets', 'typescript', 'src', 'tools', 'example.ts'), TEMPLATE);
+    s.store.seed();
+    const r = await s.store.publish(1);
+    expect(r.snapshot?.gen).toBe(1);
+    expect(r.findings.filter((f) => f.kind === 'unresolved-ref')).toEqual([]);
+    expect(existsSync(join(r.snapshot?.path ?? '', 'skills', 'beta', 'assets', 'typescript', 'src', 'tools', 'example.ts'))).toBe(true);
+    // Control: the same lines in skill TEXT are still judged — three warnings and the escape blocks.
+    const w = s.store.writeFile('wicked-garden-beta', 'refs/not-an-asset.md', TEMPLATE, r.revision);
+    const blocked = await s.store.publish(w.revision);
+    expect(blocked.verdict).toBe('blocked');
+    const refs = blocked.findings.filter((f) => f.kind === 'unresolved-ref');
+    expect(refs.every((f) => f.file === 'skills/beta/refs/not-an-asset.md')).toBe(true);
+    expect(refs.map((f) => f.severity).sort()).toEqual(['blocking', 'warning', 'warning', 'warning']);
+  });
+});
+
+describe('a publish that lands with warnings reports them in /diagnostics.skills.findings (F-E2E-002)', () => {
+  const withEnvRestored = async (fn: () => Promise<void>): Promise<void> => {
+    const saved = process.env['WICKED_SKILLS_SNAPSHOT'];
+    try {
+      await fn();
+    } finally {
+      if (saved === undefined) delete process.env['WICKED_SKILLS_SNAPSHOT'];
+      else process.env['WICKED_SKILLS_SNAPSHOT'] = saved;
+    }
+  };
+
+  it('the boot publish: one skills.publish-warning per warning, naming file:line; a clean publish of a new generation clears them', async () =>
+    withEnvRestored(async () => {
+      mkdirSync(join(s.upstream, 'skills', 'beta', 'refs'), { recursive: true });
+      writeFileSync(
+        join(s.upstream, 'skills', 'beta', 'refs', 'broken.md'),
+        ['see [the schema](../schemas/evidence.json)', 'run "${CLAUDE_PLUGIN_ROOT}/scripts/some/script.py"', ''].join('\n'),
+      );
+      const logged: string[] = [];
+      const runtime = new SkillsRuntime({ store: storeOver(s), log: (m) => logged.push(m), bootSnapshot: undefined });
+      const health = await runtime.apply();
+      expect(health.state).toBe('published');
+      expect(logged.some((l) => l.includes('first publish landed with 2 warning(s)'))).toBe(true);
+      const warnings = health.findings.filter((f) => f.kind === 'skills.publish-warning');
+      expect(warnings).toHaveLength(2);
+      expect(warnings.every((f) => f.severity === 'warning')).toBe(true);
+      expect(warnings.map((f) => f.message.split(':').slice(0, 2).join(':')).sort()).toEqual(['unresolved-ref skills/beta/refs/broken.md:1', 'unresolved-ref skills/beta/refs/broken.md:2']);
+      expect(warnings.every((f) => f.message.includes('generation 1 was published with it as found'))).toBe(true);
+      // The diagnostics read keeps them while generation 1 is current.
+      expect(runtime.health().findings.filter((f) => f.kind === 'skills.publish-warning')).toHaveLength(2);
+      // The operator fixes the file and publishes: the new generation lands clear, the warnings go.
+      const w = runtime.store.writeFile('wicked-garden-beta', 'refs/broken.md', 'fixed\n', runtime.store.manifest().revision);
+      const again = await runtime.store.publish(w.revision);
+      expect(again.verdict).toBe('clear');
+      runtime.notePublished(again);
+      const after = runtime.afterPublish();
+      expect(after?.current?.gen).toBe(2);
+      expect(after?.findings).toEqual([]);
+      expect(runtime.health().findings).toEqual([]);
+    }));
+
+  it('a publish through the store that lands WITH warnings is reported for the generation it minted; an unchanged publish keeps them', async () =>
+    withEnvRestored(async () => {
+      const runtime = new SkillsRuntime({ store: storeOver(s), log: () => undefined, bootSnapshot: undefined });
+      const boot = await runtime.apply();
+      expect(boot.findings.filter((f) => f.kind === 'skills.publish-warning')).toEqual([]);
+      const w = runtime.store.writeFile('wicked-garden-beta', 'refs/broken.md', 'see ../nowhere/at-all.md\n', runtime.store.manifest().revision);
+      const r = await runtime.store.publish(w.revision);
+      expect(r.verdict).toBe('warnings');
+      runtime.notePublished(r);
+      const after = runtime.afterPublish();
+      const gen = r.snapshot?.gen;
+      expect(after?.current?.gen).toBe(gen);
+      expect(after?.findings.map((f) => f.kind)).toEqual(['skills.publish-warning']);
+      const same = await runtime.store.publish(runtime.store.manifest().revision);
+      expect(same.unchanged).toBe(true);
+      runtime.notePublished(same);
+      expect(runtime.health().findings.map((f) => f.kind)).toEqual(['skills.publish-warning']);
+    }));
+});
+
 describe('metadata is read NO-FOLLOW (codex round 6)', () => {
   it('a `manifest.json` replaced by a symlink to a copy is refused by name — nothing is read or committed through it, and the seed does not wipe around it', () => {
     s.store.seed();

@@ -72,7 +72,11 @@ jobs:
   # stays FIXED-UNVERIFIED until a green smoke. A true pre-`latest` gate (publish under dist-tag
   # `next`, promote on PASS) is decision D-L10-1, owed; this is the post-publish default. The
   # harness is pinned by SHA, in BOTH the `uses:` line and `wicked_ci_ref` (move them together). It
-  # is pinned to wicked-ci main after wicked-ci#38 (S08 follows the ask-path wire: crew 0.8.2's
+  # is pinned to wicked-ci v1.4.0 (= main after wicked-ci#41: crew 0.8.5's release smoke, run
+  # 37762305091, was red on harness reasons — core-ts 0.7.40 fails closed with a judge_unavailable
+  # gate when no identity-distinct judge is left, and the smoke's two live seats left the verify unit
+  # none, so S04 gets a third live seat and asserts that gate on its own; F-A6-USAGE retired at
+  # 0.8.5; F-E2E-002 bound to 0.8.6), on top of wicked-ci#38 (S08 follows the ask-path wire: crew 0.8.2's
   # release smoke, run 37426596418, failed the pool-wire S08 at the open — `POST /chats {clis:
   # [acp-smoke]}` → 409 "not in the roster", because a chat now admits only council-enabled seats and
   # the first message launches the path; the package was sound — on top of wicked-ci#37 (S08 counts a
@@ -105,7 +109,7 @@ jobs:
     needs: [release, version]
     permissions:
       contents: read
-    uses: mikeparcewski/wicked-ci/.github/workflows/smoke.yml@0f8ad223220f21de281b0ef85d6d4e297ff0dbe3 # main after wicked-ci#38 (S08 follows the ask-path wire: crew >= 0.8.2 admits only council-enabled seats and the first message launches the path)
+    uses: mikeparcewski/wicked-ci/.github/workflows/smoke.yml@2596ff1c048156ab8dd19d547c8539054d9f8e44 # wicked-ci v1.4.0 (#41: S04 third live seat + the fail-closed judge_unavailable assertion for core-ts 0.7.40; F-A6-USAGE retired; F-E2E-002 bound to 0.8.6)
     with:
       crew_version: ${{ needs.version.outputs.version }}
       # wicked-ci #30 (release verdict crew 0.7.35 §Smoke gate): on a CROSS-REPO workflow_call GitHub
@@ -113,4 +117,4 @@ jobs:
       # default fell back to `github.sha` — crew's own tag commit — and the harness checkout failed
       # ("not our ref"); the smoke gate never ran inside the release run. Pin the harness ref
       # EXPLICITLY to the same SHA as the `uses:` line above (move both together on every re-pin).
-      wicked_ci_ref: 0f8ad223220f21de281b0ef85d6d4e297ff0dbe3
+      wicked_ci_ref: 2596ff1c048156ab8dd19d547c8539054d9f8e44
