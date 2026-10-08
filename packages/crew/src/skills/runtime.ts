@@ -78,7 +78,8 @@ import type { LaunchNotice } from '../core/adapter.js';
 import type { CoreEvent, SkillManifest, SkillPublishResult } from '../core/types.js';
 import { applySkillsSnapshotEnv, BOOT_SKILLS_SNAPSHOT, canonicalCrewStateHome, SKILLS_SNAPSHOT_ENGINE_ENV } from './engine-env.js';
 import { applyBaseSkillEnv, BASE_SKILL_REF_ENGINE_ENV, baseSkillPosture, normalizeBaseSkillRef, type BaseSkillConfig, type BaseSkillPolicy, type BaseSkillPosture } from './base-skill.js';
-import { GARDEN_INSTALL_COMMAND, REQUIRED_GARDEN_VERSION, SKILLS_SOURCE_ENV, type PluginSource } from './plugin-source.js';
+import { compareSemver, GARDEN_INSTALL_COMMAND, parseSemver, REQUIRED_GARDEN_VERSION, SKILLS_SOURCE_ENV, type PluginSource } from './plugin-source.js';
+import type { InstalledPluginState } from './installed.js';
 import { REFUSED_DIRNAME } from './root-names.js';
 import { SkillsSourceUnavailableError, type CurrentSnapshot, type SkillsStore } from './store.js';
 import type { Pacer } from './tree.js';
@@ -189,7 +190,7 @@ export type SkillsHealthState = 'published' | 'fallback' | 'blocked' | 'config-e
 /** `skills.base-skill` (crew#554 / DES-L4 PR-⑧): the configured base skill is not in the published generation — an ERROR (the engine refuses launches at intake; `'require'` is the only policy). */
 /** `skills.garden` (crew#753): the installed wicked-garden found at seed is older than {@link REQUIRED_GARDEN_VERSION} — an ERROR; launches and onboarding are refused until a newer garden is installed. */
 /** `skills.publish-warning` (F-E2E-002): one per warning the publish of the CURRENT generation landed with (a broken reference the skill's author owns) — published as found, reported here so the warnings are not only in the daemon log. */
-export type SkillsHealthFindingKind = 'skills.fallback' | 'skills.blocked' | 'skills.config' | 'skills.source' | 'skills.manifest' | 'skills.stale-rules' | 'skills.base-skill' | 'skills.phase-skill' | 'skills.garden' | 'skills.publish-warning';
+export type SkillsHealthFindingKind = 'skills.fallback' | 'skills.blocked' | 'skills.config' | 'skills.source' | 'skills.manifest' | 'skills.stale-rules' | 'skills.base-skill' | 'skills.phase-skill' | 'skills.garden' | 'skills.publish-warning' | 'skills.installed-ahead';
 
 export interface SkillsHealthFinding {
   kind: SkillsHealthFindingKind;
@@ -237,6 +238,27 @@ export interface SkillsRuntimeOptions {
   log: (message: string) => void;
   /** The `WICKED_SKILLS_SNAPSHOT` this process BOOTED with (default: the real one, `BOOT_SKILLS_SNAPSHOT`); tests inject `''` / `undefined`. */
   bootSnapshot?: string | undefined;
+  /** crew#874: how long one installed-plugin probe (a bundle read + hash) is reused by `health()` (default 60 s). */
+  installedTtlMs?: number;
+  /** Clock for that cache (tests). */
+  nowMs?: () => number;
+}
+
+/** crew#874: the env switch for the boot auto-refresh — ON unless set to `0` / `false` / `off`. */
+export const SKILLS_AUTO_REFRESH_ENV = 'WICKED_CREW_SKILLS_AUTO_REFRESH';
+
+/** What `autoRefreshOnBoot` did (crew#874), for the boot log and tests. */
+export type AutoRefreshOutcome =
+  | { action: 'none'; reason: string }
+  | { action: 'skipped'; reason: string }
+  | { action: 'published'; gen: number; from: string | null; to: string }
+  | { action: 'failed'; reason: string };
+
+/** `installed X is ahead of / behind / differs from` — a SemVer comparison when both parse. */
+function versionRelation(installed: string, published: string | null): 'ahead of' | 'behind' | 'different from' {
+  if (published === null || parseSemver(installed) === null || parseSemver(published) === null) return 'different from';
+  const c = compareSemver(installed, published);
+  return c > 0 ? 'ahead of' : c < 0 ? 'behind' : 'different from';
 }
 
 export class SkillsRuntime {
@@ -256,11 +278,113 @@ export class SkillsRuntime {
    * after a restart the warnings are back to the log line of the publish that found them.
    */
   private publishWarnings: { gen: number; findings: SkillsHealthFinding[] } | null = null;
+  /** crew#874: the last installed-plugin probe and when it ran (a bundle hash is not free; `health()` runs per diagnostics read). */
+  private installedProbe: { at: number; state: InstalledPluginState | null } | null = null;
+  private readonly installedTtlMs: number;
+  private readonly nowMs: () => number;
+  /** crew#874: why the boot auto-refresh did not run (said in the finding), or `null`. */
+  private autoRefreshNote: string | null = null;
 
   constructor(opts: SkillsRuntimeOptions) {
     this.store = opts.store;
     this.log = opts.log;
     this.bootSnapshot = 'bootSnapshot' in opts ? opts.bootSnapshot : BOOT_SKILLS_SNAPSHOT;
+    this.installedTtlMs = opts.installedTtlMs ?? 60_000;
+    this.nowMs = opts.nowMs ?? (() => Date.now());
+  }
+
+  /** The installed plugin, probed at most once per `installedTtlMs` (`fresh` forces a probe). Never throws. */
+  private installed(fresh = false): InstalledPluginState | null {
+    const now = this.nowMs();
+    if (!fresh && this.installedProbe !== null && now - this.installedProbe.at < this.installedTtlMs) return this.installedProbe.state;
+    let state: InstalledPluginState | null;
+    try {
+      state = this.store.installedState();
+    } catch {
+      state = null;
+    }
+    this.installedProbe = { at: now, state };
+    return state;
+  }
+
+  /**
+   * crew#874: the installed wicked-garden is not the one the published generation was built from.
+   * Every governed run then executes the OLDER garden's skills and scripts while the operator
+   * believes the upgrade landed — and nothing on diagnostics or the launch said so. Compared by
+   * CONTENT HASH (`installed.baseline` vs `manifest.baseline`, the identity `refresh-baseline`
+   * decides on), named by version. `null` when they agree, when nothing is published, or when the
+   * installed bundle cannot be read (that comparison is `GET /skills`' `installed.unreadable`).
+   */
+  installedAheadFinding(m?: SkillManifest): SkillsHealthFinding | null {
+    if (this.lastHealth.state !== 'published') return null;
+    let manifest: SkillManifest;
+    try {
+      manifest = m ?? this.store.manifest();
+    } catch {
+      return null;
+    }
+    const installed = this.installed();
+    if (installed === null || installed.baseline === null || installed.baseline === manifest.baseline) return null;
+    const publishedVersion = manifest.baselines[manifest.baseline]?.plugin_version ?? null;
+    const gen = this.lastHealth.current?.gen ?? null;
+    const relation = versionRelation(installed.source.plugin_version, publishedVersion);
+    const note = this.autoRefreshNote === null ? '' : ` (not refreshed automatically: ${this.autoRefreshNote})`;
+    return {
+      kind: 'skills.installed-ahead',
+      severity: 'warning',
+      message:
+        `installed wicked-garden ${installed.source.plugin_version} is ${relation} the published generation` +
+        `${gen === null ? '' : ` ${gen}`} (built from ${publishedVersion ?? 'an unrecorded version'}) — runs use the published generation's skills and scripts, not the installed ones; ` +
+        `POST /skills/refresh-baseline then /skills/publish (each with {expectedRevision})${note}`,
+    };
+  }
+
+  /**
+   * crew#874: at boot, when the installed garden differs from the baseline AND the catalog holds no
+   * operator change (`store.pristine()`), refresh the baseline and publish — what the operator would
+   * do by hand after every garden upgrade, and the step whose omission ran the rig on garden 12.39.
+   * Anything user-edited, a refresh that does not come back clean, or a blocked publish leaves the
+   * current generation in place and is said in the `skills.installed-ahead` finding. Off with
+   * `WICKED_CREW_SKILLS_AUTO_REFRESH=0`. Never throws.
+   */
+  async autoRefreshOnBoot(env: NodeJS.ProcessEnv = process.env): Promise<AutoRefreshOutcome> {
+    const outcome = await this.autoRefreshInner(env);
+    if (outcome.action === 'skipped' || outcome.action === 'failed') this.autoRefreshNote = outcome.reason;
+    if (outcome.action === 'published') this.log(`[skills] skills.auto-refresh: installed wicked-garden ${outcome.to} published as generation ${outcome.gen} (baseline was ${outcome.from ?? 'unrecorded'}; nothing was user-edited)`);
+    else if (outcome.action !== 'none') this.log(`[skills] skills.auto-refresh ${outcome.action}: ${outcome.reason}`);
+    return outcome;
+  }
+
+  private async autoRefreshInner(env: NodeJS.ProcessEnv): Promise<AutoRefreshOutcome> {
+    try {
+      if (this.lastHealth.state !== 'published') return { action: 'none', reason: `skills state is ${this.lastHealth.state}` };
+      const m = this.store.manifest();
+      const installed = this.installed(true);
+      if (installed === null || installed.baseline === null || installed.baseline === m.baseline) return { action: 'none', reason: 'the installed plugin matches the baseline' };
+      const flag = (env[SKILLS_AUTO_REFRESH_ENV] ?? '').trim().toLowerCase();
+      if (flag === '0' || flag === 'false' || flag === 'off') return { action: 'skipped', reason: `${SKILLS_AUTO_REFRESH_ENV}=${flag}` };
+      const pristine = this.store.pristine();
+      if (!pristine.pristine) return { action: 'skipped', reason: `the catalog holds operator changes (${pristine.reason}) — refresh and publish by hand to merge them` };
+      const from = m.baselines[m.baseline]?.plugin_version ?? null;
+      const refreshed = this.store.refreshBaseline(m.revision);
+      if (refreshed.verdict === 'blocked' || refreshed.conflicts.length > 0 || refreshed.kept.length > 0) {
+        return { action: 'failed', reason: `refresh-baseline came back ${refreshed.verdict} (${refreshed.conflicts.length} conflict(s), ${refreshed.kept.length} kept) — nothing published` };
+      }
+      this.refreshBaseSkill();
+      const published = await this.store.publish(refreshed.revision, async (result, pacer) => {
+        if (result.snapshot !== null && result.unchanged !== true) {
+          this.notePublished(result);
+          await this.afterPublishPaced(pacer);
+        }
+      });
+      if (published.verdict === 'blocked' || published.snapshot === null) {
+        return { action: 'failed', reason: `publish was blocked: ${published.findings.filter((f) => f.severity === 'blocking').map((f) => `${f.kind}: ${f.evidence}`).join('; ')} — the previous generation stays current` };
+      }
+      this.installed(true);
+      return { action: 'published', gen: published.snapshot.gen, from, to: refreshed.plugin_version };
+    } catch (err) {
+      return { action: 'failed', reason: err instanceof Error ? err.message : String(err) };
+    }
   }
 
   /**
@@ -383,7 +507,9 @@ export class SkillsRuntime {
       });
     }
     const source = sourceFinding(manifest);
-    return this.withBaseSkill(source === null ? base : { ...base, findings: [...base.findings, source] });
+    const ahead = this.installedAheadFinding(manifest);
+    const extra = [...(source === null ? [] : [source]), ...(ahead === null ? [] : [ahead])];
+    return this.withBaseSkill(extra.length === 0 ? base : { ...base, findings: [...base.findings, ...extra] });
   }
 
   /** The reported block carries the base skill posture and its finding (crew#554) — the seam's one answer to "is the discipline skill handed". */

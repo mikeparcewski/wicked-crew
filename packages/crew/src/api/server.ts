@@ -600,6 +600,10 @@ export async function createServer(
     // and by every publish / refresh (skills/runtime.ts).
     skillsRuntime.configureBaseSkill(bootSettings);
     await skillsRuntime.apply();
+    // crew#874: an installed garden that moved past the baseline, over a catalog with no operator
+    // change, is refreshed and published here — otherwise every run executes the older garden and
+    // `skills.installed-ahead` says so. `WICKED_CREW_SKILLS_AUTO_REFRESH=0` turns it off.
+    await skillsRuntime.autoRefreshOnBoot();
   }
   // Exclusive peers (codex on #846): `venv` is the provisioner path's time, `skills` the rest of
   // the seam (seed, validate, hash, stage, flip) — the stages sum, never double-count.

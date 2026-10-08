@@ -207,6 +207,7 @@ import {
   type DiscoveryFinding,
   type PluginSource,
 } from './plugin-source.js';
+import { installedPluginState, type InstalledPluginState } from './installed.js';
 import {
   existsIn,
   extractPluginRootRefs,
@@ -754,6 +755,8 @@ export class SkillsStore {
   private readonly registeredRefs: () => ReadonlySet<string>;
   private readonly provisionVenv: VenvProvisioner;
   private readonly sourceFn: () => PluginSource | null;
+  /** The injected source (tests, `WICKED_CREW_SKILLS_SOURCE` harnesses), or `null` for live discovery — `installedState` reads it quietly. */
+  private readonly injectedSource: (() => PluginSource | null) | null;
   /** What the last automatic discovery passed over (crew#753: names a too-old garden in the refusal). */
   private lastDiscoveryFindings: DiscoveryFinding[] = [];
   readonly now: () => string;
@@ -795,6 +798,7 @@ export class SkillsStore {
     this.rootDir = opts.root;
     this.registeredRefs = opts.registeredSkillRefs;
     this.provisionVenv = opts.provisionVenv;
+    this.injectedSource = opts.source ?? null;
     this.sourceFn =
       opts.source ??
       (() => {
@@ -3197,6 +3201,51 @@ export class SkillsStore {
     }
     out.push(...frontmatterGuard(files['SKILL.md'], name, { isCore: entry.core, file: `${entry.dir}/SKILL.md` }));
     return out;
+  }
+
+  // ── Installed vs baseline (crew#874) ─────────────────────────────────────────────────────
+
+  /**
+   * The installed plugin as `GET /skills` reports it (`installed.ts`), from the SAME source this
+   * store seeds and refreshes from — discovered quietly (no discovery warnings: this is a probe the
+   * diagnostics read on a timer, not a seed).
+   */
+  installedState(): InstalledPluginState | null {
+    const injected = this.injectedSource;
+    return installedPluginState(injected === null ? {} : { discover: injected });
+  }
+
+  /**
+   * Whether the catalog holds ANY operator change a refresh would have to merge (crew#874): an
+   * edited/replaced/added skill, a refresh conflict, a file whose effective bytes differ from the
+   * baseline it was captured from, or a file on disk under `effective/` the manifest does not
+   * record (or records with other bytes). `pristine: true` ⇔ a refresh would take upstream for every
+   * file — the only case the daemon may refresh and publish on its own.
+   */
+  pristine(): { pristine: true } | { pristine: false; reason: string } {
+    const m = this.manifest();
+    for (const [name, entry] of Object.entries(m.skills)) {
+      if (entry.provenance !== 'shipped') return { pristine: false, reason: `skill ${name} is ${entry.provenance}` };
+      if (entry.editedAt !== null) return { pristine: false, reason: `skill ${name} was edited at ${entry.editedAt}` };
+      if (entry.conflict) return { pristine: false, reason: `skill ${name} carries a refresh conflict` };
+    }
+    for (const [rel, record] of Object.entries(m.files)) {
+      if (record.baselineHash === null) return { pristine: false, reason: `${rel} was added by the operator` };
+      if (record.effectiveHash !== record.baselineHash) return { pristine: false, reason: `${rel} differs from its baseline` };
+      if (record.conflict) return { pristine: false, reason: `${rel} carries a refresh conflict` };
+    }
+    const scan = this.scanEffective();
+    if (scan.links.length > 0 || scan.others.length > 0) return { pristine: false, reason: 'effective/ holds a link or special file' };
+    for (const f of scan.files) {
+      const record = m.files[f.rel];
+      if (record === undefined) return { pristine: false, reason: `${f.rel} is on disk but not in the manifest` };
+      if (record.baselineHash !== f.sha) return { pristine: false, reason: `${f.rel} on disk differs from its baseline` };
+    }
+    const onDisk = new Set(scan.files.map((f) => f.rel));
+    for (const rel of Object.keys(m.files)) {
+      if (!onDisk.has(rel)) return { pristine: false, reason: `${rel} was deleted from effective/` };
+    }
+    return { pristine: true };
   }
 
   // ── Refresh (three-way per FILE) ──────────────────────────────────────────────────────────
