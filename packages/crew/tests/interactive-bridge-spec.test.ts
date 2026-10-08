@@ -17,11 +17,14 @@ import {
   INTERACTIVE_SPEC,
   INTERACTIVE_SPEC_ENV,
   interactiveSpec,
+  resolveInteractiveBinary,
   resolveInteractiveSpec,
   validInteractiveRange,
 } from '../src/interactive/bridge-pool.js';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { bridgeNpmCachePath } from '../src/interactive/bridge-root.js';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { delimiter, join } from 'node:path';
 
 const SOURCE = readFileSync(
   join(import.meta.dirname, '..', 'src', 'interactive', 'bridge-pool.ts'),
@@ -103,5 +106,47 @@ describe('the wicked-interactive spec crew resolves', () => {
   it('keeps --yes: a daemon has no tty to answer npx’s install prompt with', () => {
     // Without it npx PROMPTS when the package is absent and the request hangs instead of 503ing.
     expect(SOURCE).toMatch(/'--yes'/);
+  });
+});
+
+// crew#499 (F-044, F-W4-110): the installed binary on PATH is preferred when its package is inside
+// the range; otherwise the spawn falls back to npx with the daemon's own npm cache.
+describe.skipIf(process.platform === 'win32')('the installed wicked-interactive on PATH (crew#499)', () => {
+  /** A fake npm global prefix: `<prefix>/bin/wicked-interactive` → `<prefix>/lib/node_modules/wicked-interactive/dist/cli.js`. */
+  function prefix(version: string | null): { bin: string; dir: string } {
+    const dir = mkdtempSync(join(tmpdir(), 'wi-path-'));
+    const pkg = join(dir, 'lib', 'node_modules', 'wicked-interactive');
+    mkdirSync(join(pkg, 'dist'), { recursive: true });
+    if (version !== null) writeFileSync(join(pkg, 'package.json'), JSON.stringify({ name: 'wicked-interactive', version }));
+    writeFileSync(join(pkg, 'dist', 'cli.js'), '#!/usr/bin/env node\n');
+    chmodSync(join(pkg, 'dist', 'cli.js'), 0o755);
+    mkdirSync(join(dir, 'bin'));
+    symlinkSync(join(pkg, 'dist', 'cli.js'), join(dir, 'bin', 'wicked-interactive'));
+    return { bin: join(dir, 'bin'), dir };
+  }
+
+  it('a PATH binary within the range is preferred; out of range, unreadable or absent falls back to npx', () => {
+    const inRange = prefix('0.10.3');
+    const old = prefix('0.9.4');
+    const nameless = prefix(null);
+    const empty = mkdtempSync(join(tmpdir(), 'wi-empty-'));
+    try {
+      expect(resolveInteractiveBinary({ PATH: [empty, inRange.bin].join(delimiter) })).toEqual({ path: join(inRange.bin, 'wicked-interactive'), version: '0.10.3' });
+      // The FIRST on PATH decides (what a shell would run): an out-of-range one ahead means npx.
+      expect(resolveInteractiveBinary({ PATH: [old.bin, inRange.bin].join(delimiter) })).toBeNull();
+      expect(resolveInteractiveBinary({ PATH: nameless.bin })).toBeNull();
+      expect(resolveInteractiveBinary({ PATH: empty })).toBeNull();
+      expect(resolveInteractiveBinary({})).toBeNull();
+      // The operator's range override is the one checked.
+      expect(resolveInteractiveBinary({ PATH: old.bin, [INTERACTIVE_SPEC_ENV]: '^0.9.4' })).toEqual({ path: join(old.bin, 'wicked-interactive'), version: '0.9.4' });
+    } finally {
+      for (const d of [inRange.dir, old.dir, nameless.dir, empty]) rmSync(d, { recursive: true, force: true });
+    }
+  });
+
+  it('the spawn tries the PATH binary first and hands the npx fallback the daemon\'s own npm cache', () => {
+    expect(SOURCE).toMatch(/const bin = resolveInteractiveBinary\(env\);\s*if \(bin !== null\) \{\s*return nodeSpawn\(bin\.path, \['serve', '--root', root\]/);
+    expect(SOURCE).toMatch(/npm_config_cache: bridgeNpmCachePath\(\)/);
+    expect(bridgeNpmCachePath('/state')).toBe(join('/state', 'interactive', 'npm-cache'));
   });
 });

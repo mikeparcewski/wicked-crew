@@ -92,6 +92,18 @@ export function recorderBrowsersPath(stateHome?: string): string {
     : join(stateHome, 'interactive', 'recorder-browsers');
 }
 
+/**
+ * crew#499: the npm cache the npx FALLBACK spawn of a bridge uses (`npm_config_cache`), under the
+ * same registered `interactive` entry — so a daemon's bridge binary lives under its own state home
+ * and a fresh rig never reads or writes the operator's `~/.npm/_npx`. Only the spawn env carries
+ * it (not the sidecar's {@link BridgeEnv}): it does not change what a running bridge is.
+ */
+export function bridgeNpmCachePath(stateHome?: string): string {
+  return stateHome === undefined
+    ? join(crewStateHome(), 'interactive', 'npm-cache')
+    : join(stateHome, 'interactive', 'npm-cache');
+}
+
 /** The pre-0.7.35 default docs root — interactive's own standalone default under HOME. */
 export function legacyHomeDocsRoot(home: string = homedir()): string {
   return resolve(home, 'wicked-interactive', 'docs');

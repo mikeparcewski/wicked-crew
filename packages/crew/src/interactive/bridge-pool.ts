@@ -62,11 +62,12 @@
  */
 
 import { spawn as nodeSpawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { accessSync, constants as fsConstants, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
-import { join, resolve } from 'node:path';
+import { delimiter, dirname, join, resolve } from 'node:path';
+import semver from 'semver';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
-import { recorderBrowsersPath } from './bridge-root.js';
+import { bridgeNpmCachePath, recorderBrowsersPath } from './bridge-root.js';
 
 export const LOCK_NAME = '.wi-serve.json';
 /** Crew's sidecar beside the bridge's lockfile: which pid crew started, and with which env (F-042/F-043). */
@@ -219,6 +220,63 @@ export function resolveInteractiveSpec(env: NodeJS.ProcessEnv = process.env): In
 export function interactiveSpec(env: NodeJS.ProcessEnv = process.env): string {
   return resolveInteractiveSpec(env).spec;
 }
+
+/** The installed bridge binary crew prefers over npx (crew#499). */
+export interface InteractiveBinary {
+  /** The PATH entry (what a shell would run), not its symlink target. */
+  path: string;
+  /** The installed package's `version`. */
+  version: string;
+}
+
+/** How far up from the binary's real path the package's own `package.json` may sit. */
+const PACKAGE_WALK_MAX = 6;
+
+/**
+ * crew#499 (F-044, F-W4-110): the FIRST `wicked-interactive` on `PATH` — what a shell would run —
+ * when its installed package version satisfies the spec's range (the default or the operator's
+ * `WICKED_INTERACTIVE_SPEC`), else `null` and the spawn falls back to npx. The version is read from
+ * the package's own `package.json` beside the binary's real path (an npm global install links
+ * `<prefix>/bin/<name>` into `<prefix>/lib/node_modules/<name>/…`); nothing is executed. A binary
+ * whose package cannot be found, or a platform whose shims are not links (Windows `.cmd`), falls
+ * back to npx too.
+ */
+export function resolveInteractiveBinary(env: NodeJS.ProcessEnv = process.env): InteractiveBinary | null {
+  if (process.platform === 'win32') return null;
+  const range = resolveInteractiveSpec(env).range;
+  const dirs = (env['PATH'] ?? '').split(delimiter).filter((d) => d !== '');
+  for (const dir of dirs) {
+    const candidate = join(dir, INTERACTIVE_PACKAGE);
+    try {
+      if (!statSync(candidate).isFile()) continue;
+      accessSync(candidate, fsConstants.X_OK);
+    } catch {
+      continue;
+    }
+    // The first executable on PATH decides: in range → it; out of range or unreadable → npx.
+    let d: string;
+    try {
+      d = dirname(realpathSync(candidate));
+    } catch {
+      return null;
+    }
+    for (let i = 0; i < PACKAGE_WALK_MAX; i += 1) {
+      try {
+        const pkg = JSON.parse(readFileSync(join(d, 'package.json'), 'utf8')) as { name?: unknown; version?: unknown };
+        if (pkg.name === INTERACTIVE_PACKAGE && typeof pkg.version === 'string') {
+          return semver.satisfies(pkg.version, range, { includePrerelease: true }) ? { path: candidate, version: pkg.version } : null;
+        }
+      } catch {
+        /* no package.json here: keep walking */
+      }
+      const up = dirname(d);
+      if (up === d) break;
+      d = up;
+    }
+    return null;
+  }
+  return null;
+}
 /** ADR-0025: 1.5 s × 3 while the pid lives. */
 export const HEALTH_TIMEOUT_MS = 1500;
 export const HEALTH_ATTEMPTS = 3;
@@ -249,6 +307,8 @@ export class BridgeUnavailableError extends Error {
 
 /** The one command that reproduces a failed start in a terminal, where its output is visible. */
 function serveCommand(root: string): string {
+  const bin = resolveInteractiveBinary();
+  if (bin !== null) return `${bin.path} serve --root ${root}`;
   return `npx ${interactiveSpec()} serve --root ${root}`;
 }
 
@@ -1024,6 +1084,15 @@ export class InteractiveBridgePool {
  *  stderr — its `bus identity` and refusal lines — are discarded here; `GET /api/health` is the
  *  observable), with the env the pool computed (the daemon's own plus {@link BridgeEnv}). */
 function defaultSpawn(root: string, env: NodeJS.ProcessEnv): ChildProcess {
+  // crew#499: the installed binary on PATH, when it is inside the range, is the bridge — the
+  // version the installer put on the machine is the one that runs.
+  const bin = resolveInteractiveBinary(env);
+  if (bin !== null) {
+    return nodeSpawn(bin.path, ['serve', '--root', root], { cwd: root, detached: true, stdio: 'ignore', env: childEnvWithBootEstateDb(env) });
+  }
+  // The npx fallback resolves into the daemon's own cache under its state home, never the
+  // operator's `~/.npm/_npx` (F-W4-110).
+  env = { ...env, npm_config_cache: bridgeNpmCachePath() };
   // `--yes` is load-bearing: without it npx PROMPTS when the package is not installed, and a
   // daemon has no tty to answer with — the request would hang instead of failing to a 503.
   return nodeSpawn('npx', ['--yes', interactiveSpec(), 'serve', '--root', root], {
