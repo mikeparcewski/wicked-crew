@@ -4504,6 +4504,16 @@ export interface SystemSettings {
    */
   deliverIdentityLogin?: string;
   /**
+   * (crew#737) A PUSH IDENTITY PER REGISTERED REPOSITORY: repo id → the GitHub login its deliveries
+   * push as, winning over {@link deliverIdentityLogin}. The deliver phase reads that account's OWN
+   * gh token for the phase (`gh auth token --user`), so another tool switching gh's machine-wide
+   * active account mid-run does not change who pushes; an account gh is not signed in as is named
+   * on the deliver gate card before approval and refused by the phase. A repo absent (or `''`)
+   * falls back to the daemon-wide identity, else the CLI's active account. Logins only — never a
+   * token. `PUT /settings` replaces the whole map; `{}` clears it.
+   */
+  deliverIdentityByRepo?: Record<string, string>;
+  /**
    * The stall watchdog's DETECTION threshold (crew#287; api-types 0.18.0 — previously a
    * daemon-local extension): minutes a run in `executing` may go without ANY engine event on the
    * daemon's relay before one synthetic `workerStalled` frame per quiet period is broadcast on

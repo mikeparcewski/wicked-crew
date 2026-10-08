@@ -218,6 +218,58 @@ export interface DeliverScriptOptions {
    *  the credential stays in gh's keyring or in `GH_TOKEN`. `null`/absent ⇒ `GH_ACCOUNT` decides.
    *  Refused at compose time when it is not a GitHub login, so nothing unsafe is spliced. */
   deliverIdentity?: string | null;
+  /** (crew#737) Where the configured identity came from, for the gate card: the repository's own
+   *  pin (`deliverIdentityByRepo`) or the daemon-wide setting. Absent ⇒ the daemon-wide setting. */
+  deliverIdentitySource?: 'repo' | 'setting';
+  /** (crew#737) Whether the configured identity is signed in to gh on this machine, read at compose
+   *  time (`gh auth status`, bounded): `false` ⇒ the gate card says so BEFORE approval and the
+   *  phase will refuse; `null`/absent ⇒ unknown (no probe, gh absent, timed out). */
+  deliverIdentitySignedIn?: boolean | null;
+}
+
+/**
+ * (crew#737) The configured push identity for a launch on `repoRef`: the repository's own pin
+ * (`deliverIdentityByRepo[repoRef]`) wins over the daemon-wide `deliverIdentityLogin`; `''` when
+ * neither is set (then `GH_ACCOUNT`, else the CLI's active account). Pure.
+ */
+export function deliverIdentityFor(
+  settings: { deliverIdentityLogin?: string | undefined; deliverIdentityByRepo?: Record<string, string> | undefined },
+  repoRef: string | null | undefined,
+): { login: string; source: 'repo' | 'setting' } {
+  const pinned = repoRef !== null && repoRef !== undefined ? settings.deliverIdentityByRepo?.[repoRef] : undefined;
+  if (typeof pinned === 'string' && pinned.trim() !== '') return { login: pinned.trim(), source: 'repo' };
+  return { login: (settings.deliverIdentityLogin ?? '').trim(), source: 'setting' };
+}
+
+/**
+ * (crew#737) The logins gh holds for github.com on this machine (`gh auth status`), bounded to 4 s.
+ * `null` when gh is absent, times out or answers nothing parseable — unknown, never "none". Reads
+ * the account NAMES only; no token is read here.
+ */
+export async function ghSignedInLogins(host = 'github.com'): Promise<string[] | null> {
+  const res = await new Promise<{ out: string; ok: boolean }>((resolve) => {
+    execFile(
+      'gh',
+      ['auth', 'status', '--hostname', host],
+      { timeout: 4_000, encoding: 'utf8', env: childEnvWithBootEstateDb(process.env) },
+      (err, stdout, stderr) => {
+        const spawnFailed = err !== null && typeof (err as { code?: unknown }).code !== 'number';
+        resolve({ out: `${String(stdout ?? '')}\n${String(stderr ?? '')}`, ok: !spawnFailed });
+      },
+    );
+  });
+  if (!res.ok) return null;
+  return parseGhAuthStatusLogins(res.out);
+}
+
+/** The logins in `gh auth status` text: "Logged in to <host> account <login>" (gh ≥ 2.40) or
+ *  "Logged in to <host> as <login>" (older). Pure, for the tests. */
+export function parseGhAuthStatusLogins(text: string): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(/Logged in to \S+ (?:account|as) ([A-Za-z0-9-]+)/gu)) {
+    if (!out.includes(m[1]!)) out.push(m[1]!);
+  }
+  return out;
 }
 
 /** A GitHub login as GitHub itself allows it — alphanumerics and single hyphens, ≤ 39 chars. The
@@ -533,7 +585,6 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // daemon's push identity is what its gh (or an exported GH_TOKEN — then `gh api user` IS the
     // token's login) holds, disclosed on the gate card, never switched at push time. Unset ⇒
     // today's behaviour, now said aloud. No account name is baked into crew code (env-driven).
-    'L=$(gh api user -q .login 2>/dev/null || true)',
     // (crew#549) The CONFIGURED identity is the system setting `deliverIdentityLogin` — baked
     // here at compose time, validated against the GitHub login charset before it is spliced —
     // and the `GH_ACCOUNT` env var when the setting is empty (still supported; the setting wins
@@ -541,6 +592,19 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // ONE name the refusals use, whichever source set it.
     `CFG='${identity}'`,
     'if [ -n "$CFG" ]; then GH_ACCOUNT="$CFG"; fi',
+    // (crew#737) PIN THE PUSH TO THAT ACCOUNT, whatever gh's machine-wide ACTIVE account is now: with
+    // no GH_TOKEN exported, read the configured account's own token from gh's keyring
+    // (`gh auth token --user`) and export it for this phase only — gh (`gh api`, `gh pr create`) and
+    // gh's git credential helper then act as that account even if another tool runs
+    // `gh auth switch` mid-run. Never echoed. An account gh holds no token for is REFUSED before
+    // anything is staged; a gh too old for `--user` (the flag is refused) keeps the active-login
+    // check below.
+    'if [ -n "${GH_ACCOUNT:-}" ] && [ -z "${GH_TOKEN:-}" ]; then',
+    '  if T=$(gh auth token --hostname github.com --user "$GH_ACCOUNT" 2>/dev/null) && [ -n "$T" ]; then export GH_TOKEN="$T"; unset T; echo "deliver: pinned to $GH_ACCOUNT\'s own gh token for this phase"',
+    '  elif gh auth token --help 2>/dev/null | grep -q -- "--user"; then echo "deliver: $GH_ACCOUNT is not signed in to gh on this machine; nothing was staged, committed or pushed. Sign in (gh auth login) as $GH_ACCOUNT, or pick another push identity for this repository, then approve to retry the deliver phase"; exit 1',
+    '  fi',
+    'fi',
+    'L=$(gh api user -q .login 2>/dev/null || true)',
     'if [ -n "${GH_ACCOUNT:-}" ]; then',
     '  [ "$L" = "$GH_ACCOUNT" ] || { echo "deliver: identity mismatch — GH_ACCOUNT is $GH_ACCOUNT but gh\'s active login is ${L:-unreadable}; nothing was staged, committed or pushed. Fix the daemon\'s gh login (switch gh\'s active account, or export GH_TOKEN in the daemon environment) and approve to retry the deliver phase"; exit 1; }',
     '  if [ -n "${GH_TOKEN:-}" ]; then echo "deliver: pushing as $L (GH_ACCOUNT pinned by GH_TOKEN)"; else echo "deliver: pushing as $L (GH_ACCOUNT from the gh keyring — export GH_TOKEN to pin it)"; fi',
@@ -1325,13 +1389,16 @@ export function deliverGateInstructions(opts: DeliverScriptOptions): string {
   // where the pin lives.
   const configured = (opts.deliverIdentity ?? '').trim();
   const account = configured !== '' ? configured : (opts.ghAccount ?? null);
-  const source = configured !== '' ? 'the deliver identity setting' : 'GH_ACCOUNT';
+  const source =
+    configured !== '' ? (opts.deliverIdentitySource === 'repo' ? "this repository's push identity" : 'the deliver identity setting') : 'GH_ACCOUNT';
   const who =
     account !== null && account !== ''
-      ? opts.ghTokenPinned === true
-        ? `Push identity: ${account} (${source}), pinned by GH_TOKEN — the phase refuses if gh's login differs at push time.`
-        : `Push identity: ${account} (${source}) against the gh keyring — the login can change between the check and the push; export GH_TOKEN to pin it. The phase refuses if gh's login differs.`
-      : 'Push identity: none configured — pushes as whatever login gh holds (set the deliver identity in system settings to pin it).';
+      ? opts.deliverIdentitySignedIn === false && opts.ghTokenPinned !== true
+        ? `Pushes as ${account} (${source}) — NOT signed in to gh on this machine: sign in (gh auth login) as ${account} or pick another push identity first; the phase will refuse and push nothing.`
+        : opts.ghTokenPinned === true
+          ? `Push identity: ${account} (${source}), pinned by GH_TOKEN — the phase refuses if gh's login differs at push time.`
+          : `Push identity: ${account} (${source}) — the phase pushes with that account's own gh token, so another tool switching gh's active account does not change it (a gh without \`auth token --user\` falls back to checking the active login). The phase refuses if gh's login differs.`
+      : 'Push identity: none configured — pushes as whatever login gh holds (set the deliver identity in system settings, or this repository\'s push identity, to pin it).';
   // Whatever is configured, the phase also asks git which credential IT would use for the
   // remote's host and refuses when the two logins disagree — the flip that pushed under an
   // unintended account (F-RC1-010).
@@ -1368,6 +1435,10 @@ export interface DeliverLaunchContext {
   originUrl?: string | null;
   /** (crew#549) The `deliverIdentityLogin` system setting — the login the push must run as. */
   deliverIdentity?: string | null;
+  /** (crew#737) Where that identity came from (the repository's pin or the daemon setting). */
+  deliverIdentitySource?: 'repo' | 'setting';
+  /** (crew#737) Whether it is signed in to gh here (`null`/absent = unknown). */
+  deliverIdentitySignedIn?: boolean | null;
 }
 
 /**
@@ -1408,6 +1479,8 @@ export function deliverPresetStep(
     ghTokenPinned: launch.ghTokenPinned === true,
     originUrl: launch.originUrl ?? null,
     deliverIdentity: launch.deliverIdentity ?? null,
+    ...(launch.deliverIdentitySource !== undefined ? { deliverIdentitySource: launch.deliverIdentitySource } : {}),
+    ...(launch.deliverIdentitySignedIn !== undefined ? { deliverIdentitySignedIn: launch.deliverIdentitySignedIn } : {}),
   });
   return {
     catalog: 'deliver',
@@ -1459,6 +1532,8 @@ export function composeDeliverWorkflow(
     // request on a remote that can never carry one.
     originUrl: launch.originUrl ?? null,
     deliverIdentity: launch.deliverIdentity ?? null,
+    ...(launch.deliverIdentitySource !== undefined ? { deliverIdentitySource: launch.deliverIdentitySource } : {}),
+    ...(launch.deliverIdentitySignedIn !== undefined ? { deliverIdentitySignedIn: launch.deliverIdentitySignedIn } : {}),
   });
   return {
     // No `is_system` on purpose: core's overlay/register schema rejects unknown fields, and the
