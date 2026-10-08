@@ -49,7 +49,7 @@ import type {
 import { DEFAULT_SETTINGS } from './types.js';
 import { BASE_SKILL_REF_SHAPE } from '../skills/base-skill.js';
 import { execCapped } from './exec.js';
-import { BUG_FIX_SWEEP_INSTRUCTIONS, composeDeliverWorkflow, DELIVER_PHASE_ID, deliverPresetStep, deliverRepoFor, EVIDENCE_FLOOR_PIN, isGitHubLogin, readDeliverOriginUrl } from './deliver.js';
+import { BUG_FIX_SWEEP_INSTRUCTIONS, composeDeliverWorkflow, DELIVER_PHASE_ID, deliverPresetStep, deliverIdentityFor, deliverRepoFor, EVIDENCE_FLOOR_PIN, ghSignedInLogins, isGitHubLogin, readDeliverOriginUrl } from './deliver.js';
 import { engineCampaignDef, engineRosterJson } from './engine-roster.js';
 import { QE_AUTHOR_TESTS_WORKFLOW_DEF } from '../qe/author-workflow.js';
 import { CAMPAIGN_WORKFLOW_PREFIX } from '../campaigns/plan.js';
@@ -1822,21 +1822,33 @@ export class CoreAdapter {
     return engineSupportsPlanLaunch();
   }
 
-  /** (crew#549) The CONFIGURED deliver identity — the `deliverIdentityLogin` setting, read at
-   *  launch. Cached on the instance for the synchronous compose paths (`deliverStep`), refreshed
-   *  by every `launchRun`, so a `PUT /settings` takes effect on the next launch and a settings
-   *  read never sits on the launch path twice. `''` ⇒ nothing configured (`GH_ACCOUNT` decides).
-   *  A LOGIN only: no token is ever read here. */
-  private deliverIdentityLogin = '';
-
-  private async refreshDeliverIdentity(): Promise<void> {
+  /**
+   * (crew#549, crew#737) The CONFIGURED deliver identity for a launch: the repository's own pin
+   * (`deliverIdentityByRepo[repoRef]`) else the daemon-wide `deliverIdentityLogin`, and — for a
+   * delivering launch — whether that login is signed in to gh on this machine (a bounded
+   * `gh auth status`). RETURNED, never stashed on the adapter: two concurrent delivering launches
+   * on different repositories must not read each other's identity (the F2 origin rule). A LOGIN
+   * only: no token is ever read here. `login: ''` ⇒ nothing configured (`GH_ACCOUNT` decides).
+   */
+  private async resolveDeliverIdentity(
+    repoRef: string | null | undefined,
+    probe: boolean,
+  ): Promise<{ login: string; source: 'repo' | 'setting'; signedIn: boolean | null }> {
+    let login = '';
+    let source: 'repo' | 'setting' = 'setting';
     try {
-      this.deliverIdentityLogin = (await this.getSettings()).deliverIdentityLogin ?? '';
+      ({ login, source } = deliverIdentityFor(await this.getSettings(), repoRef));
     } catch {
       // A settings file that cannot be read leaves the identity unconfigured rather than
       // failing the launch — the deliver script still cross-checks gh against git's credential.
-      this.deliverIdentityLogin = '';
+      login = '';
     }
+    let signedIn: boolean | null = null;
+    if (probe && login !== '') {
+      const logins = await ghSignedInLogins().catch(() => null);
+      signedIn = logins === null ? null : logins.includes(login);
+    }
+    return { login, source, signedIn };
   }
 
   /**
@@ -1879,6 +1891,8 @@ export class CoreAdapter {
     input: LaunchRunInput,
     /** (F2) The origin this launch resolved — launch-local, never adapter state. */
     originUrl: string | null,
+    /** (crew#737) The identity this launch resolved — launch-local, never adapter state. */
+    identity: { login: string; source: 'repo' | 'setting'; signedIn: boolean | null },
   ): ReturnType<typeof deliverPresetStep> {
     return deliverPresetStep(name, phases, input.sessionId, input.problem, {
       repoRef: input.repoRef ?? null,
@@ -1887,15 +1901,17 @@ export class CoreAdapter {
       ghAccount: process.env['GH_ACCOUNT'] ?? null,
       ghTokenPinned: typeof process.env['GH_TOKEN'] === 'string' && process.env['GH_TOKEN'] !== '',
       originUrl,
-      deliverIdentity: this.deliverIdentityLogin,
+      deliverIdentity: identity.login,
+      deliverIdentitySource: identity.source,
+      deliverIdentitySignedIn: identity.signedIn,
     });
   }
 
   /** Launch an interactive, resumable run → the run id. */
   async launchRun(input: LaunchRunInput): Promise<string> {
-    // (crew#549) Read the configured deliver identity BEFORE anything composes the deliver
-    // phase: the compose paths below are synchronous and bake it into the script.
-    await this.refreshDeliverIdentity();
+    // (crew#549, crew#737) Read the configured deliver identity BEFORE anything composes the deliver
+    // phase: the compose paths below are synchronous and bake it into the script. Launch-local.
+    const deliverIdentity = await this.resolveDeliverIdentity(input.repoRef, input.deliver === 'pr');
     // (F2) And the origin the push would go to — read once, for the gate card's target sentence.
     // Only a delivering launch composes a deliver phase, so only a delivering launch pays for it.
     const deliverOriginUrl = input.deliver === 'pr' ? await this.resolveDeliverOrigin(input.repoRef) : null;
@@ -2032,7 +2048,7 @@ export class CoreAdapter {
       // T8: a delivering plan hands the engine its deliver step, exactly as a preset launch does.
       if (input.deliver === 'pr') {
         (opts as LaunchOptions & { deliverStepJson?: string }).deliverStepJson = JSON.stringify(
-          this.deliverStep(null, [], input, deliverOriginUrl),
+          this.deliverStep(null, [], input, deliverOriginUrl, deliverIdentity),
         );
       }
     }
@@ -2053,7 +2069,7 @@ export class CoreAdapter {
         );
       }
       if (!this.supportsPlanLaunch()) throw new PlanLaunchUnsupportedError('Delivering a preset launch');
-      const step = this.deliverStep(input.workflow, this.getWorkflow(input.workflow)?.phases ?? [], input, deliverOriginUrl);
+      const step = this.deliverStep(input.workflow, this.getWorkflow(input.workflow)?.phases ?? [], input, deliverOriginUrl, deliverIdentity);
       (opts as LaunchOptions & { deliverStepJson?: string }).deliverStepJson = JSON.stringify(step);
       opts.workflow = input.workflow;
     } else if (input.workflow !== undefined) {
@@ -2128,8 +2144,11 @@ export class CoreAdapter {
             // pull request on a remote that can never carry one.
             originUrl: deliverOriginUrl,
             // crew#549 — the configured deliver identity, baked into the script so the refusal
-            // holds on a daemon started without GH_ACCOUNT exported.
-            deliverIdentity: this.deliverIdentityLogin,
+            // holds on a daemon started without GH_ACCOUNT exported; crew#737 — the repository's
+            // own pin wins, and the card says when it is not signed in here.
+            deliverIdentity: deliverIdentity.login,
+            deliverIdentitySource: deliverIdentity.source,
+            deliverIdentitySignedIn: deliverIdentity.signedIn,
           });
         }
       }
@@ -2629,6 +2648,7 @@ export class CoreAdapter {
     // (F2) The preview shows the deliver step's gate-card text, so it reads the same origin the
     // launch would. Local to this call, like the launch's.
     const previewOriginUrl = opts.deliver === true ? await this.resolveDeliverOrigin(opts.repoRef) : null;
+    const previewIdentity = await this.resolveDeliverIdentity(opts.repoRef, opts.deliver === true);
     const deliverStep =
       opts.deliver === true
         ? JSON.stringify(
@@ -2644,6 +2664,7 @@ export class CoreAdapter {
                 ...(opts.repoRef !== undefined ? { repoRef: opts.repoRef } : {}),
               },
               previewOriginUrl,
+              previewIdentity,
             ),
           )
         : null;
@@ -3720,6 +3741,20 @@ export class CoreAdapter {
           delete parsed.deliverIdentityLogin;
         } else {
           parsed.deliverIdentityLogin = v.trim();
+        }
+      }
+      // deliverIdentityByRepo (crew#737): repo id → a LOGIN, the same rule as deliverIdentityLogin
+      // per entry; a malformed entry is dropped, never spliced into the deliver script.
+      if ('deliverIdentityByRepo' in parsed) {
+        const m = parsed.deliverIdentityByRepo as unknown;
+        if (m === null || typeof m !== 'object' || Array.isArray(m)) {
+          delete parsed.deliverIdentityByRepo;
+        } else {
+          const kept: Record<string, string> = {};
+          for (const [repo, login] of Object.entries(m as Record<string, unknown>)) {
+            if (typeof login === 'string' && login.trim() !== '' && isGitHubLogin(login.trim())) kept[repo] = login.trim();
+          }
+          parsed.deliverIdentityByRepo = kept;
         }
       }
       // workerStallMinutes (crew#287): positive minutes; a hand-edited zero/negative/NaN would

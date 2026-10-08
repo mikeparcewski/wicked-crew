@@ -15,7 +15,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
-import { deliverGateInstructions, deliverPrScript, isGitHubLogin } from '../src/core/deliver.js';
+import { deliverGateInstructions, deliverIdentityFor, deliverPrScript, isGitHubLogin, parseGhAuthStatusLogins } from '../src/core/deliver.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { SystemSettings } from '../src/core/types.js';
 
@@ -81,6 +81,62 @@ describe('PUT/GET /settings deliverIdentityLogin', () => {
       // It says what it is, so nobody pastes a token into it.
       expect(res.json().error).toContain('never a token');
     }
+  });
+});
+
+describe('crew#737 — PUT/GET /settings deliverIdentityByRepo (a push identity per repository)', () => {
+  let app: FastifyInstance | undefined;
+  afterEach(async () => {
+    await app?.close();
+    app = undefined;
+  });
+  const build = (initial?: Partial<SystemSettings>) => {
+    app = Fastify({ logger: false });
+    registerRoutes(app, memoryAdapter(initial), new GateCache(), new ElicitationCache());
+    return app;
+  };
+
+  it('accepts repo id → login (trimmed; "" drops that repo), serves it back, and refuses a non-login naming the repo', async () => {
+    const a = build();
+    const put = await a.inject({ method: 'PUT', url: '/api/v1/settings', payload: { deliverIdentityByRepo: { 'repo-a': ' release-bot ', 'repo-b': '' } } });
+    expect(put.statusCode).toBe(200);
+    expect((await a.inject({ method: 'GET', url: '/api/v1/settings' })).json().settings.deliverIdentityByRepo).toEqual({ 'repo-a': 'release-bot' });
+    const bad = await a.inject({ method: 'PUT', url: '/api/v1/settings', payload: { deliverIdentityByRepo: { 'repo-a': 'ghp_not a login!' } } });
+    expect(bad.statusCode).toBe(400);
+    expect(bad.json().error).toMatch(/deliverIdentityByRepo\.repo-a must be a GitHub login/);
+    expect((await a.inject({ method: 'PUT', url: '/api/v1/settings', payload: { deliverIdentityByRepo: ['release-bot'] } })).statusCode).toBe(400);
+  });
+});
+
+describe('crew#737 — the gate card for a pinned repository', () => {
+  it('names the repository pin, says the push uses that account\'s own token, and says BEFORE approval when it is not signed in', () => {
+    const repo = deliverGateInstructions({ deliverIdentity: 'release-bot', deliverIdentitySource: 'repo', deliverIdentitySignedIn: true });
+    expect(repo).toContain("Push identity: release-bot (this repository's push identity) — the phase pushes with that account's own gh token");
+    const out = deliverGateInstructions({ deliverIdentity: 'release-bot', deliverIdentitySource: 'repo', deliverIdentitySignedIn: false });
+    expect(out).toContain("Pushes as release-bot (this repository's push identity) — NOT signed in to gh on this machine");
+    expect(out).toContain('the phase will refuse and push nothing');
+    // Unknown (no probe) is never "not signed in".
+    expect(deliverGateInstructions({ deliverIdentity: 'release-bot', deliverIdentitySignedIn: null })).not.toContain('NOT signed in');
+  });
+
+  it('the repository pin wins over the daemon-wide identity; an unpinned repo falls back', () => {
+    const settings = { deliverIdentityLogin: 'daemon-bot', deliverIdentityByRepo: { 'repo-a': 'release-bot' } };
+    expect(deliverIdentityFor(settings, 'repo-a')).toEqual({ login: 'release-bot', source: 'repo' });
+    expect(deliverIdentityFor(settings, 'repo-b')).toEqual({ login: 'daemon-bot', source: 'setting' });
+    expect(deliverIdentityFor(settings, undefined)).toEqual({ login: 'daemon-bot', source: 'setting' });
+    expect(deliverIdentityFor({}, 'repo-a')).toEqual({ login: '', source: 'setting' });
+  });
+
+  it('parses gh auth status (new and old wording) into the logins it holds', () => {
+    const text = [
+      'github.com',
+      '  ✓ Logged in to github.com account release-bot (keyring)',
+      '  - Active account: true',
+      '  ✓ Logged in to github.com account other-bot (keyring)',
+      '  ✓ Logged in to github.com as old-style (oauth_token)',
+    ].join('\n');
+    expect(parseGhAuthStatusLogins(text)).toEqual(['release-bot', 'other-bot', 'old-style']);
+    expect(parseGhAuthStatusLogins('You are not logged into any GitHub hosts.')).toEqual([]);
   });
 });
 

@@ -129,6 +129,12 @@ interface GhStub {
   prState?: string;
   /** stderr text + exit 1 from `gh pr comment`. */
   commentFailWith?: string;
+  /** (crew#737) `gh auth token --user <tokenFor>` prints a token; any other account fails. */
+  tokenFor?: string;
+  /** (crew#737) The login `gh api user` answers while that token is exported as GH_TOKEN. */
+  tokenLogin?: string;
+  /** (crew#737) `gh auth token --help` lists `--user` (a gh ≥ 2.40); default: an older gh. */
+  tokenUserFlag?: boolean;
 }
 
 /**
@@ -165,8 +171,17 @@ async function runDeliver(
       // Every call is logged — the identity tests assert the script never runs `gh auth switch`.
       'printf "%s\\n" "$*" >> "$GH_STUB_RECORD.calls"',
       'case "$1" in',
-      '  api) if [ -n "${GH_STUB_API_FAIL:-}" ]; then echo "gh: not logged in" >&2; exit 1; fi; echo "${GH_STUB_LOGIN:-tester}";;',
-      '  auth) echo "gh: switched account";;',
+      '  api) if [ -n "${GH_TOKEN:-}" ] && [ "$GH_TOKEN" = "tok-${GH_STUB_TOKEN_FOR:-}" ]; then echo "$GH_STUB_TOKEN_LOGIN"; exit 0; fi; if [ -n "${GH_STUB_API_FAIL:-}" ]; then echo "gh: not logged in" >&2; exit 1; fi; echo "${GH_STUB_LOGIN:-tester}";;',
+      // (crew#737) `gh auth token [--help] --user <a>`: a token only for the stubbed account; the
+      // help text lists --user only on a stubbed newer gh. Any other auth verb is still recorded.
+      '  auth)',
+      '    if [ "$2" = token ]; then',
+      '      case " $* " in *" --help "*) if [ -n "${GH_STUB_TOKEN_USER_FLAG:-}" ]; then echo "  -u, --user string   The account to output the token for"; fi; exit 0;; esac',
+      '      U=""; P=""; for a in "$@"; do [ "$P" = --user ] && U="$a"; P="$a"; done',
+      '      if [ -n "$U" ] && [ "$U" = "${GH_STUB_TOKEN_FOR:-}" ]; then echo "tok-$U"; exit 0; fi',
+      '      echo "no oauth token found for github.com account $U" >&2; exit 1',
+      '    fi',
+      '    echo "gh: switched account";;',
       '  pr)',
       '    case "$2" in',
       // DES-L9 revision mode: `gh pr view N --json state -q .state` and `gh pr comment N --body-file`.
@@ -226,6 +241,9 @@ async function runDeliver(
           GH_STUB_API_FAIL: opts.gh?.apiFails === true ? '1' : '',
           GH_STUB_PR_STATE: opts.gh?.prState ?? '',
           GH_STUB_COMMENT_FAIL: opts.gh?.commentFailWith ?? '',
+          GH_STUB_TOKEN_FOR: opts.gh?.tokenFor ?? '',
+          GH_STUB_TOKEN_LOGIN: opts.gh?.tokenLogin ?? '',
+          GH_STUB_TOKEN_USER_FLAG: opts.gh?.tokenUserFlag === true ? '1' : '',
           GIT_STUB_ORIGIN_PUSH_URL: opts.originPushUrl ?? '',
           // DES-L9: the identity block reads GH_TOKEN's PRESENCE for its disclosure line — keep the
           // fixture deterministic whatever the developer's shell exported.
@@ -572,9 +590,38 @@ describe('deliver script, driven for real (crew#317)', () => {
     // Refused BEFORE staging: the work is still untracked in a KEPT worktree, ready for the retry.
     expect(git(fx.workdir, 'status', '--porcelain')).toContain('?? work.ts');
     expect(existsSync(fx.workdir)).toBe(true);
-    // The account is never switched — the daemon's identity is disclosed, not flipped.
-    expect(r.ghCalls.some((c) => c.startsWith('auth'))).toBe(false);
-    expect(r.ghCalls).toEqual(['api user -q .login']);
+    // The account is never switched — the daemon's identity is disclosed, not flipped. (crew#737:
+    // the only auth calls are the token read for the configured account, which a gh too old for
+    // `--user` cannot answer, so the active-login check decides.)
+    expect(r.ghCalls.some((c) => c.startsWith('auth switch'))).toBe(false);
+    expect(r.ghCalls.filter((c) => !c.startsWith('auth token'))).toEqual(['api user -q .login']);
+  }, 60_000);
+
+  // ── crew#737 — the push is pinned to the configured account's OWN token ──────────────────────
+  it('crew#737: a configured account delivers as ITSELF even when gh\'s active account is another — its own token is exported for the phase, never echoed', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const z = 3;\n');
+    const r = await runDeliver(fx, {
+      gh: { login: 'someone-else', tokenFor: 'release-bot', tokenLogin: 'release-bot', tokenUserFlag: true },
+      script: { deliverIdentity: 'release-bot' },
+    });
+    expect(r.status).toBe(0);
+    expect(r.output).toContain("deliver: pinned to release-bot's own gh token for this phase");
+    expect(r.output).toContain('deliver: pushing as release-bot (GH_ACCOUNT pinned by GH_TOKEN)');
+    expect(r.output).not.toContain('tok-release-bot');
+    expect(r.ghCalls).toContain('auth token --hostname github.com --user release-bot');
+    expect(r.ghCalls.some((c) => c.startsWith('auth switch'))).toBe(false);
+    expect(originBranches(fx)).toContain(`wicked/${RUN_ID}`);
+  }, 60_000);
+
+  it('crew#737: a configured account gh is not signed in as is REFUSED before anything is staged', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const z = 3;\n');
+    const r = await runDeliver(fx, { gh: { login: 'someone-else', tokenUserFlag: true }, script: { deliverIdentity: 'release-bot' } });
+    expect(r.status).not.toBe(0);
+    expect(r.output).toContain('deliver: release-bot is not signed in to gh on this machine; nothing was staged, committed or pushed.');
+    expect(originBranches(fx)).toEqual(['main']);
+    expect(git(fx.workdir, 'status', '--porcelain')).toContain('?? work.ts');
   }, 60_000);
 
   it('REFUSES when GH_ACCOUNT is set and gh cannot say who it is (unauthenticated)', async () => {

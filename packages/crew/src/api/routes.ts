@@ -5304,6 +5304,22 @@ export function registerRoutes(
       }
       if (typeof login === 'string') patch.deliverIdentityLogin = login.trim();
     }
+    // deliverIdentityByRepo (crew#737): repo id → a GitHub login, each checked like
+    // deliverIdentityLogin; an entry of '' removes that repo's pin. A typo is a 400 naming the repo.
+    if (Object.hasOwn(patch, 'deliverIdentityByRepo')) {
+      const m = patch.deliverIdentityByRepo as unknown;
+      if (m === null || typeof m !== 'object' || Array.isArray(m)) {
+        return reply.code(400).send({ error: 'deliverIdentityByRepo must be an object of repo id → GitHub login' });
+      }
+      const kept: Record<string, string> = {};
+      for (const [repo, login] of Object.entries(m as Record<string, unknown>)) {
+        if (typeof login !== 'string' || (login.trim() !== '' && !isGitHubLogin(login.trim()))) {
+          return reply.code(400).send({ error: `deliverIdentityByRepo.${repo} must be a GitHub login (letters, digits and single hyphens, up to 39 characters), or "" to use the daemon-wide identity` });
+        }
+        if (login.trim() !== '') kept[repo] = login.trim();
+      }
+      patch.deliverIdentityByRepo = kept;
+    }
     // deliverDefault (crew#393): the repo-scoped launch delivery default. Two values only —
     // this knob decides whether completed code runs open PRs, so a typo must be a 400, never
     // a silently-dropped key that leaves the operator believing they flipped it.
@@ -5404,6 +5420,7 @@ export function registerRoutes(
       'deliverDefault',
       'onboardingAutoCapture',
       'deliverIdentityLogin',
+      'deliverIdentityByRepo',
       'baseSkillRef',
       'baseSkillPolicy',
     ];
