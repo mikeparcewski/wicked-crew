@@ -272,3 +272,86 @@ describe('evidence URL matches the registered route prefix (FINDING-006/#215)', 
     expect(bare, 'the evidence URL must not appear without the /api/v1 prefix').toEqual([]);
   });
 });
+
+// ── crew#848: which attempt the stored transcript is ─────────────────────────────────────────
+//
+// Core keeps ONE transcript per unit, written only when an attempt folds `ok`. After a rework whose
+// attempt 1 timed out, the stored bytes are attempt 0's; the route must say so instead of serving
+// them as the current output.
+
+describe('GET /runs/:id/units/:unitKey/output — attempts (crew#848)', () => {
+  const ATTEMPT0 = 'attempt zero transcript — the one the evaluator failed';
+  const captured = (attempt: number, outputBytes: number, stepStatus: string) => ({
+    type: 'unitOutputCaptured', session: RUN, ord: 2, attempt, outputBytes, stepStatus, governed: true, seq: attempt, ts: 0,
+  });
+  let app: FastifyInstance;
+  let runEvents: Mock;
+
+  beforeEach(async () => {
+    runEvents = vi.fn().mockResolvedValue([
+      captured(0, Buffer.byteLength(ATTEMPT0), 'ok'),
+      { type: 'unitDispatched', session: RUN, ord: 2, attempt: 1, seq: 9, ts: 0 },
+      captured(1, 5897, 'timed_out'),
+    ]);
+    app = buildApp({
+      sessionsDetail: vi.fn().mockResolvedValue([workflowRun()]),
+      workOutput: vi.fn().mockImplementation(async (unitId: string) => (unitId === `${RUN}:annotate` ? ATTEMPT0 : null)),
+      sessions: vi.fn().mockResolvedValue([RUN]),
+      runEvents,
+    } as unknown as MockAdapter);
+    await app.ready();
+  });
+  afterEach(async () => {
+    await app.close();
+  });
+
+  it('the default read names the attempt it serves and marks it superseded by a later attempt with no transcript', async () => {
+    const res = await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN}/units/annotate/output` });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['x-wicked-unit-attempt']).toBe('0');
+    const body = res.json<{ output: string; attempt: number; latestAttempt: number; superseded?: boolean; latestUnavailable?: string; attempts: { attempt: number }[] }>();
+    expect(body.output).toBe(ATTEMPT0);
+    expect(body.attempt).toBe(0);
+    expect(body.latestAttempt).toBe(1);
+    expect(body.superseded).toBe(true);
+    expect(body.latestUnavailable).toContain('Attempt 1 of unit 2 ended timed_out after 5897 bytes');
+    expect(body.attempts.map((a) => a.attempt)).toEqual([0, 1]);
+  });
+
+  it('?attempt=0 serves the stored bytes; ?attempt=1 answers null with the reason, never attempt 0 bytes', async () => {
+    const a0 = await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN}/units/annotate/output?attempt=0` });
+    expect(a0.statusCode).toBe(200);
+    expect(a0.json<{ output: string; attempt: number }>()).toMatchObject({ output: ATTEMPT0, attempt: 0 });
+    const a1 = await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN}/units/annotate/output?attempt=1` });
+    expect(a1.statusCode).toBe(200);
+    const b1 = a1.json<{ output: null; attempt: number; outputUnavailable: string }>();
+    expect(b1.output).toBeNull();
+    expect(b1.attempt).toBe(1);
+    expect(b1.outputUnavailable).toContain('not retained');
+    expect(b1.outputUnavailable).toContain('?attempt=0');
+  });
+
+  it('an out-of-range attempt is a 404 naming the attempts on record; a malformed one is a 400', async () => {
+    const res = await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN}/units/annotate/output?attempt=7` });
+    expect(res.statusCode).toBe(404);
+    expect(res.json<{ attempts: number[] }>().attempts).toEqual([0, 1]);
+    const bad = await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN}/units/annotate/output?attempt=-1` });
+    expect(bad.statusCode).toBe(400);
+  });
+
+  it('a later attempt that folded ok is the one served, not superseded', async () => {
+    const LATER = 'attempt one — the rework';
+    runEvents.mockResolvedValue([captured(0, Buffer.byteLength(ATTEMPT0), 'ok'), captured(1, Buffer.byteLength(LATER), 'ok')]);
+    const app2 = buildApp({
+      sessionsDetail: vi.fn().mockResolvedValue([workflowRun()]),
+      workOutput: vi.fn().mockResolvedValue(LATER),
+      sessions: vi.fn().mockResolvedValue([RUN]),
+      runEvents,
+    } as unknown as MockAdapter);
+    await app2.ready();
+    const body = (await app2.inject({ method: 'GET', url: `/api/v1/runs/${RUN}/units/annotate/output` })).json<{ attempt: number; superseded?: boolean }>();
+    expect(body.attempt).toBe(1);
+    expect(body.superseded).toBeUndefined();
+    await app2.close();
+  });
+});

@@ -25,7 +25,7 @@ import type { ElicitationCache } from './elicitation-cache.js';
 import { acceptanceRequirementOf, buildAcceptanceView } from '../qe/acceptance.js';
 import { runIdentityOf, wireIdentity } from '../core/run-identity.js';
 import { buildEvidenceBundle, coreUnitId, evidenceFilename } from './evidence.js';
-import { outputUnavailableReason, resolveUnit, unitKeysFor } from './unit-output.js';
+import { attemptUnavailableReason, capturedAttempts, outputUnavailableReason, resolveUnit, storedAttempt, unitKeysFor } from './unit-output.js';
 import type {
   ApproveProposalResponse,
   LaunchRunInput,
@@ -3602,11 +3602,46 @@ export function registerRoutes(
         units: unitKeysFor(run),
       });
     }
+    const rawAttempt = (req.query as { attempt?: string | string[] }).attempt;
+    const attemptArg = Array.isArray(rawAttempt) ? rawAttempt[0] : rawAttempt;
+    const wanted = attemptArg === undefined || attemptArg === '' ? undefined : Number(attemptArg);
+    if (wanted !== undefined && (!Number.isInteger(wanted) || wanted < 0)) {
+      return reply.code(400).send({ error: '`attempt` must be a non-negative integer' });
+    }
     // Keyed off the unit RECORD (the same derivation the evidence bundle uses), not off the
     // caller's path segment — the two disagreeing is what made a resolvable unit unreadable.
     const output = await adapter.workOutput(coreUnitId(id, unit));
-    if (output !== null) return reply.send({ output });
-    return reply.send({ output: null, outputUnavailable: outputUnavailableReason(unit) });
+    // crew#848: which attempt those bytes are. The engine keeps one transcript per unit (the last
+    // attempt that folded ok); the durable log has one `unitOutputCaptured` per attempt.
+    const events = typeof adapter.runEvents === 'function' ? await adapter.runEvents(id).catch(() => null) : null;
+    const attempts = capturedAttempts((events ?? []) as unknown as Record<string, unknown>[], unit.ord);
+    const served = output !== null ? storedAttempt(attempts, output) : null;
+    const latest = attempts[attempts.length - 1];
+    const meta = {
+      ...(served !== null ? { attempt: served } : {}),
+      ...(latest !== undefined ? { latestAttempt: latest.attempt } : {}),
+      ...(events !== null ? { attempts } : {}),
+    };
+    if (served !== null) void reply.header('x-wicked-unit-attempt', String(served));
+    if (wanted !== undefined) {
+      const rec = attempts.find((a) => a.attempt === wanted);
+      if (rec === undefined) {
+        return reply.code(404).send({
+          error: `Unit ${unit.ord} of run ${id} has no attempt ${wanted} on record`,
+          attempts: attempts.map((a) => a.attempt),
+        });
+      }
+      if (output !== null && served === wanted) return reply.send({ output, ...meta });
+      return reply.send({ output: null, ...meta, attempt: wanted, outputUnavailable: attemptUnavailableReason(unit, rec, served) });
+    }
+    if (output !== null) {
+      // A later attempt that left no transcript: the stored bytes are SUPERSEDED — say so, and why.
+      if (served !== null && latest !== undefined && latest.attempt > served) {
+        return reply.send({ output, ...meta, superseded: true, latestUnavailable: attemptUnavailableReason(unit, latest, served) });
+      }
+      return reply.send({ output, ...meta });
+    }
+    return reply.send({ output: null, ...meta, outputUnavailable: outputUnavailableReason(unit) });
   });
 
   // DC-S7 (§4.6): what the seats considered, set aside and cited for one chat turn or one unit
