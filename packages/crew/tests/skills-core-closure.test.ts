@@ -46,14 +46,19 @@ const pinnedCoreTs = (): string => {
 };
 
 describe('registeredSkillRefs', () => {
-  it('collects the non-null skill_refs of the workflows crew serves (capture-learnings, domain-extraction, qe-author-tests)', () => {
+  it('collects the non-null skill_refs of the workflows crew serves (capture-learnings, domain-extraction, qe-author-tests, mcp-server)', () => {
     const refs = registeredSkillRefs(BUILTIN_WORKFLOWS);
     expect([...refs].sort()).toEqual([
       'wicked-garden-domain',
       'wicked-garden-domain-coverage',
       'wicked-garden-domain-extractor',
+      // The mcp-server drop-in (DES-mcp-server-workflow): scaffold, then the three reviewers.
+      'wicked-garden-mcp-scaffold',
+      'wicked-garden-platform-security-engineer',
       // Wave 6: the governed test-authoring workflow routes recon/author/review through the QE skill.
       'wicked-garden-qe',
+      'wicked-garden-qe-contract-testing-engineer',
+      'wicked-garden-qe-observability-test-engineer',
       'wicked-garden-repo-learn',
     ]);
   });

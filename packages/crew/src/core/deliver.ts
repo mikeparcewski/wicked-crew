@@ -1447,24 +1447,40 @@ export function composeDeliverWorkflow(
     runUrl: runUrlFor(configuredPublicOrigin(), runId),
     revisesPr: revisesPr === null ? null : { number: revisesPr.number, url: revisesPr.url },
   });
+  const install = base.phases.find((p) => p.id === INSTALL_PHASE_ID);
+  const deliver = deliverPrPhase(install !== undefined ? [...install.depends_on] : last !== undefined ? [last.id] : [], intent, {
+    runId,
+    facts,
+    apiOrigin,
+    revisesPr,
+    ghAccount: launch.ghAccount ?? null,
+    ghTokenPinned: launch.ghTokenPinned === true,
+    // F2 — the origin the push will actually go to, so the gate card cannot promise a pull
+    // request on a remote that can never carry one.
+    originUrl: launch.originUrl ?? null,
+    deliverIdentity: launch.deliverIdentity ?? null,
+  });
   return {
     // No `is_system` on purpose: core's overlay/register schema rejects unknown fields, and the
     // composed def is engine-input, not catalog data.
     id: composedId,
-    phases: [
-      ...base.phases,
-      deliverPrPhase(last !== undefined ? [last.id] : [], intent, {
-        runId,
-        facts,
-        apiOrigin,
-        revisesPr,
-        ghAccount: launch.ghAccount ?? null,
-        ghTokenPinned: launch.ghTokenPinned === true,
-        // F2 — the origin the push will actually go to, so the gate card cannot promise a pull
-        // request on a remote that can never carry one.
-        originUrl: launch.originUrl ?? null,
-        deliverIdentity: launch.deliverIdentity ?? null,
-      }),
-    ],
+    phases: placeDeliverBeforeInstall(base.phases, deliver),
   };
+}
+
+/** The base phase a composed deliver goes BEFORE (the mcp-server drop-in's gated install). */
+export const INSTALL_PHASE_ID = 'install';
+
+/**
+ * The one id-keyed compose rule (DES-mcp-server-workflow): when the base def carries a phase with id
+ * `install`, `deliver` takes `install`'s `depends_on` as its own (the caller built it so), `install`
+ * then depends on `["deliver"]`, and `deliver` sits immediately before `install` in the array — so
+ * the pull request exists when the install gate asks. Without an `install` phase, deliver is
+ * appended after the last phase, as always. Pure: the base phases are not mutated.
+ */
+export function placeDeliverBeforeInstall<P extends { id: string; depends_on: string[] }>(phases: readonly P[], deliverPhase: P): P[] {
+  const at = phases.findIndex((p) => p.id === INSTALL_PHASE_ID);
+  if (at < 0) return [...phases, deliverPhase];
+  const install = { ...phases[at]!, depends_on: [deliverPhase.id] };
+  return [...phases.slice(0, at), deliverPhase, install, ...phases.slice(at + 1)];
 }
