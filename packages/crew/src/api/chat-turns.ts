@@ -2,7 +2,7 @@
  * Per-chat TURN tracking for `POST /chats/:id/messages` (F-RECON-017).
  *
  * The engine queues a message sent to a seat that is still answering the previous one — silently:
- * `chatSend` answers the seats it accepted, the worker receives the text the instant the previous
+ * the pool's `chat_send` answered the seats it accepted, the worker receives the text the instant the previous
  * turn's final block lands, and the reply frames (`chatDelta` / `chatReply`) carry chat + seat but
  * NO message correlation. The recon saw exactly that: Q3 sent 58 s into Q2's turn got a 202, and
  * Q2's reply then rendered under Q3's bubble. Neither the daemon nor the skin could tell.
@@ -38,7 +38,7 @@ import type { CoreEvent } from '../core/types.js';
 export interface ChatTurn {
   turnId: string;
   chatId: string;
-  /** Every seat the send reached (the engine's `chatSend` answer). */
+  /** Every seat the send reached (the engine's answer: the PA, or the eligible roster for a random pick). */
   seats: string[];
   /** The seats that have not ended their part yet. */
   pending: string[];
