@@ -655,3 +655,36 @@ describe('AskRelay — the reply', () => {
     expect(h.emitted.filter((f) => f.type === 'chatReply')).toHaveLength(2);
   });
 });
+
+describe('AskRelay — usage (crew#824)', () => {
+  const completed = (ref = 'unit:run-1:1:1') => row('wicked.team.step.completed', { run_id: 'run-1', step_id: 'answer-1', status: 'ok', tree: null, output_bytes: 10, output_ref: ref });
+  const usage = (attempt: number, inputTokens: number, outputTokens: number, costUsd: number | null) =>
+    ({ type: 'cliUsage', session: 'run-1', ord: 1, attempt, inputTokens, outputTokens, costUsd }) as unknown as CoreEvent;
+
+  it('the answer attempt\'s cliUsage frames are summed into chatReply.usage (cost null until priced)', async () => {
+    const h = harness({ pa: 'codex' });
+    await h.relay.onCoreEvent(usage(1, 100, 20, null));
+    await h.relay.onCoreEvent(usage(1, 50, 5, 0.25));
+    h.relay.onTeamRow(completed());
+    await h.relay.onCoreEvent({ type: 'unitDone', session: 'run-1', ord: 1, attempt: 1 } as CoreEvent);
+    expect(h.emitted.find((f) => f.type === 'chatReply')).toMatchObject({
+      ok: true,
+      usage: { inputTokens: 150, outputTokens: 25, cacheReadTokens: 0, cacheCreationTokens: 0, costUsd: 0.25 },
+    });
+  });
+
+  it('a re-picked attempt is metered on its own; a reply with no usage frame says null', async () => {
+    const h = harness({ pa: 'codex' });
+    await h.relay.onCoreEvent(usage(1, 100, 20, null));
+    await h.relay.onCoreEvent({ type: 'unitDispatched', session: 'run-1', ord: 1, attempt: 2 } as CoreEvent);
+    await h.relay.onCoreEvent(usage(2, 7, 3, null));
+    h.relay.onTeamRow(completed('unit:run-1:1:2'));
+    await h.relay.onCoreEvent({ type: 'unitDone', session: 'run-1', ord: 1, attempt: 2 } as CoreEvent);
+    expect(h.emitted.find((f) => f.type === 'chatReply')).toMatchObject({ usage: { inputTokens: 7, outputTokens: 3, costUsd: null } });
+
+    const bare = harness({ pa: 'codex' });
+    bare.relay.onTeamRow(completed());
+    await bare.relay.onCoreEvent({ type: 'unitDone', session: 'run-1', ord: 1 } as CoreEvent);
+    expect(bare.emitted.find((f) => f.type === 'chatReply')).toMatchObject({ usage: null });
+  });
+});

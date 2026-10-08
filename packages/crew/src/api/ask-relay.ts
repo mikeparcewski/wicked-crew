@@ -124,7 +124,21 @@ const UNIT_FRAMES: ReadonlySet<string> = new Set([
   'unitDenied',
   'sessionFailed',
   'runCancelled',
+  // crew#824: the answer attempt's prompt usage, folded into its `chatReply.usage`.
+  'cliUsage',
 ]);
+
+/** One answer attempt's summed usage (crew#824), the `ChatUsage` wire shape. */
+interface AttemptUsage {
+  attempt: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  costUsd: number | null;
+}
+
+const count = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 0);
 
 interface Pending {
   timer: ReturnType<typeof setTimeout>;
@@ -137,6 +151,8 @@ export class AskRelay {
   private readonly attempts = new Map<string, Map<number, number>>();
   /** run → ord → the engine's own status of the latest captured attempt (`unitOutputCaptured`). */
   private readonly captured = new Map<string, Map<number, { attempt: number; stepStatus: string }>>();
+  /** run → ord → the latest attempt's summed `cliUsage` (crew#824). */
+  private readonly usage = new Map<string, Map<number, AttemptUsage>>();
   /** run → ord → the unit (id + seat), resolved lazily from the run view; re-read per attempt. */
   private readonly units = new Map<string, Map<number, RelayUnit | null>>();
   /** `${run}:${ord}` → a fold waiting for its row (bounded by `rowGraceMs`). */
@@ -238,6 +254,28 @@ export class AskRelay {
     // A straggler of a superseded attempt (the engine drains a replaced worker's buffered output
     // with its original label): not the voice any more (r2, 2).
     if (this.superseded(runId, ord, attempt)) return;
+    if (event.type === 'cliUsage') {
+      // Summed over the attempt's prompts; a newer attempt starts its own sum (a re-pick's tokens
+      // are its own turn's). `costUsd` stays `null` until a frame carries a price (never `0`).
+      const at = attempt ?? this.attemptOf(runId, ord) ?? 0;
+      const byOrd = this.nestedOne(this.usage, runId);
+      const prev = byOrd.get(ord);
+      const base: AttemptUsage =
+        prev !== undefined && prev.attempt === at
+          ? prev
+          : { attempt: at, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, costUsd: null };
+      if (prev !== undefined && prev.attempt > at) return;
+      const cost = typeof f['costUsd'] === 'number' && Number.isFinite(f['costUsd']) ? f['costUsd'] : null;
+      byOrd.set(ord, {
+        attempt: at,
+        inputTokens: base.inputTokens + count(f['inputTokens']),
+        outputTokens: base.outputTokens + count(f['outputTokens']),
+        cacheReadTokens: base.cacheReadTokens + count(f['cacheReadTokens']),
+        cacheCreationTokens: base.cacheCreationTokens + count(f['cacheCreationTokens']),
+        costUsd: cost === null ? base.costUsd : (base.costUsd ?? 0) + cost,
+      });
+      return;
+    }
     if (event.type === 'unitOutputCaptured') {
       const stepStatus = typeof f['stepStatus'] === 'string' ? f['stepStatus'] : 'ok';
       this.nestedOne(this.captured, runId).set(ord, { attempt: attempt ?? this.attemptOf(runId, ord) ?? 0, stepStatus });
@@ -305,6 +343,7 @@ export class AskRelay {
     this.rows.delete(runId);
     this.attempts.delete(runId);
     this.captured.delete(runId);
+    this.usage.delete(runId);
     this.units.delete(runId);
     const prefix = `${runId}:`;
     for (const key of [...this.waiting.keys()]) if (key.startsWith(prefix)) this.stopWaiting(key);
@@ -517,6 +556,13 @@ export class AskRelay {
     const shown =
       text !== null ? stripControlLines(text) : `${pa} did not answer (${status}): the engine stored no output for ${stepId}`;
     if (via === 'grace') this.log(`[ask-relay] ${key}: replied from the record without a team row (status ${status})`);
+    // crew#824: the answer attempt's own prompt usage (summed `cliUsage`), `null` when the engine
+    // metered none for it — the pool wire's `chatReply.usage` shape, honest either way.
+    const u = this.usage.get(runId)?.get(ord);
+    const usage =
+      u !== undefined && (boundary === undefined || u.attempt === boundary)
+        ? { inputTokens: u.inputTokens, outputTokens: u.outputTokens, cacheReadTokens: u.cacheReadTokens, cacheCreationTokens: u.cacheCreationTokens, costUsd: u.costUsd }
+        : null;
     this.spoken.add(key);
     this.deps.fold({
       type: 'chatReply',
@@ -526,6 +572,7 @@ export class AskRelay {
       ok,
       run_id: runId,
       ord,
+      usage,
     } as CoreEvent);
   }
 
