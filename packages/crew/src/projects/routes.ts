@@ -97,6 +97,8 @@ export const UpdateProjectSchema = z
      *  null clears the binding back to the shared default root, which is a different act from
      *  omitting the key (leave it alone). Stored crew-side (see settings.ts), not in the engine. */
     interactiveRoot: z.string().min(1).nullable().optional(),
+    /** crew#552 — override `onboardingAutoCapture` for this project; null clears it. Crew-side. */
+    autoCapture: z.boolean().nullable().optional(),
   })
   .strict();
 
@@ -174,6 +176,7 @@ export function registerProjectRoutes(
   const withSettings = (project: Project): Project => ({
     ...project,
     interactiveRoot: settings.get(project.id).interactiveRoot ?? null,
+    autoCapture: settings.get(project.id).autoCapture ?? null,
   });
   // The AUTHENTICATED actor for event/audit stamping — locked decision #6
   // replaces the hardcoded 'api' strings these emits used to carry. Falls back
@@ -304,6 +307,9 @@ export function registerProjectRoutes(
       // PATCH never needs an engine round-trip at all (§7.1).
       if (parsed.data.interactiveRoot !== undefined) {
         settings.set(id, { interactiveRoot: parsed.data.interactiveRoot });
+      }
+      if (parsed.data.autoCapture !== undefined) {
+        settings.set(id, { autoCapture: parsed.data.autoCapture });
       }
       const touchesEngine =
         parsed.data.name !== undefined ||

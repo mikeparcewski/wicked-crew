@@ -3778,6 +3778,8 @@ export class CoreAdapter {
         const d = parsed.deliverDefault;
         if (d !== 'pr' && d !== 'none') delete parsed.deliverDefault;
       }
+      // onboardingAutoCapture (crew#552): a boolean only; anything else reads as the shipped default.
+      if ('onboardingAutoCapture' in parsed && typeof parsed.onboardingAutoCapture !== 'boolean') delete parsed.onboardingAutoCapture;
       // baseSkillRef / baseSkillPolicy (crew#554): the same shapes PUT /settings admits — a string
       // skill name (`""` = off) and `'require'`, the ONLY policy. A hand-edited baseSkillRef of any
       // other shape falls back to the shipped default rather than exporting garbage as the engine's

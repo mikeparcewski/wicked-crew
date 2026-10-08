@@ -240,6 +240,9 @@ export const DEFAULT_SETTINGS: CrewSystemSettings = {
   // default: a completed code run ends with a PR, or with the operator's explicit
   // `deliver: 'none'` (or this setting flipped) saying why not.
   deliverDefault: 'pr',
+  // crew#552 — a completed onboarding run chains capture-learnings (CAPTURE automatic, PROMOTION
+  // human-gated). The F-RC1-045/046 blockers are closed (wicked-core#462/#463, crew#553).
+  onboardingAutoCapture: true,
   // crew#554 (wicked-core#468) / DES-L4 PR-⑧ (D-8, D-8b) — every governed agent unit follows the
   // cross-CLI discipline skill, and `'require'` is the ONLY policy: a published generation that
   // lacks the skill REFUSES every launch at intake (the engine's `BaseSkillRefused`) — never a

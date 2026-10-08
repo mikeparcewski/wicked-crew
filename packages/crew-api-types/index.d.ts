@@ -540,6 +540,12 @@ export interface AgentSession {
    */
   chat_id?: string;
   /**
+   * (crew#552) The onboarding run this run was CHAINED from (a `capture-learnings` run the daemon
+   * launched when that onboarding completed) — read back from the `run.launched` entry after a
+   * restart. ABSENT on every other run. The live `/ws` frame is `runChained {session, from, workflow}`.
+   */
+  chained_from?: string;
+  /**
    * (crew#854) `true` on a run an ASK launched (DES-ASK-TEAM-CHAT-001 §3: the chat's path), read back
    * from the `run.launched` trail entry after a restart. ABSENT — never `false` — on any other run
    * and on a daemon before the field.
@@ -4459,6 +4465,13 @@ export interface SystemSettings {
    */
   deliverDefault?: 'pr' | 'none';
   /**
+   * (crew#552) Whether a completed onboarding run chains a `capture-learnings` run for the same
+   * repo (filed in the onboarding run's project; proposals stay human-gated). Absent reads as
+   * `true`; `false` switches the chain off. A one-off opt-out is `autoCapture: false` on
+   * `POST /repos` / `POST /repos/:id/onboard`.
+   */
+  onboardingAutoCapture?: boolean;
+  /**
    * The BASE skill every governed agent unit follows (crew#554 / wicked-core#468; additive): the
    * frontmatter name the daemon exports as the engine-config default `WICKED_BASE_SKILL_REF`, so
    * the engine leads EVERY unit prompt with `Invoke your skill "<base>" … and follow its §<role>
@@ -4737,6 +4750,12 @@ export interface Project {
    * route boundary, so the wire carries ONE project shape. Always present on a read.
    */
   interactiveRoot?: string | null;
+  /**
+   * (crew#552) This project's override of the `onboardingAutoCapture` setting — whether a completed
+   * onboarding of a repo filed here chains `capture-learnings`. `null` ⇒ the daemon setting applies.
+   * Held crew-side like {@link interactiveRoot}; always present on a read.
+   */
+  autoCapture?: boolean | null;
   [k: string]: unknown;
 }
 
@@ -4783,6 +4802,8 @@ export interface UpdateProjectBody {
   /** DES-MERGE-001 §7.1 — bind this project to a wicked-interactive docs root.
    *  `null` clears the binding back to the shared default root. */
   interactiveRoot?: string | null;
+  /** (crew#552) Override `onboardingAutoCapture` for this project; `null` clears it back to the setting. */
+  autoCapture?: boolean | null;
 }
 
 /** `POST /projects/:id/members` body. */
