@@ -1059,7 +1059,19 @@ export async function createServer(
       await registry.stop();
     });
   }
-  registerWatchRoutes(app, { registry: () => watchRegistry, audit });
+  registerWatchRoutes(app, {
+    registry: () => watchRegistry,
+    audit,
+    // crew#828: the run's own status (and, once it has ended, its recorded event count).
+    runFacts: async (runId) => {
+      const view = (await adapter.sessionsDetail()).find((v) => v.session.id === runId);
+      if (view === undefined) return null;
+      const ended = ['completed', 'failed', 'cancelled'].includes(String(view.session.status));
+      if (!ended) return { ended, events: null };
+      const events = await adapter.runEvents(runId).catch(() => null);
+      return { ended, events: events === null ? null : events.length };
+    },
+  });
 
   /** The post-commit half of a project-FILED launch, shared with the launch route (§2.2/§4):
    *  the engine already attached the crew.run membership atomically with the launch — here we

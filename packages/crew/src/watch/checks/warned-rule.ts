@@ -131,7 +131,7 @@ export const warnedRuleCheck: WatchCheck<Record<string, never>, Record<string, n
     }
     return out;
   },
-  coverage(state) {
+  coverage(state, run) {
     const bag = state.bag.get('warned') as Bag | undefined;
     if (bag !== undefined && bag.hooks > 0) {
       if (bag.waiting.length > 0 || bag.lost > 0) return { state: 'not_checked', reason: 'the rule store could not be read, so fired rules could not be classified' };
@@ -140,7 +140,7 @@ export const warnedRuleCheck: WatchCheck<Record<string, never>, Record<string, n
     if (bag !== undefined && bag.silent > 0) {
       return { state: 'not_checked', reason: 'the engine is too old to carry the fired rules (needs wicked-core-ts >= 0.7.35)' };
     }
-    return { state: 'not_checked', reason: 'no governed tool call has reached a gate yet' };
+    return { state: 'not_checked', reason: run?.ended === true ? 'nothing to check: no governed tool call reached a gate on this run' : 'no governed tool call has reached a gate yet' };
   },
   describe: () => 'When a governed tool call fires a steering rule the operator asked to be warned about (effect: warn)',
 };

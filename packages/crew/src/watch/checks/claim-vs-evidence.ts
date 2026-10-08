@@ -155,7 +155,7 @@ export const claimVsEvidenceCheck: WatchCheck<Record<string, never>, Record<stri
       re: `gateEvaluated#${ord}`,
     });
   },
-  coverage(state) {
+  coverage(state, run) {
     const bag = state.bag.get('claim') as Bag | undefined;
     if (bag !== undefined && bag.floors > 0) return { state: 'checked' };
     if (bag !== undefined && bag.notRun > 0) {
@@ -167,7 +167,7 @@ export const claimVsEvidenceCheck: WatchCheck<Record<string, never>, Record<stri
         reason: bag.floorNote !== null ? `no deterministic floor ran: ${bag.floorNote.slice(0, 160)}` : 'no step ran its checks — nothing to read the verdict against',
       };
     }
-    return { state: 'not_checked', reason: 'no step has run its checks yet' };
+    return { state: 'not_checked', reason: run?.ended === true ? 'nothing to check: no step ran its checks on this run' : 'no step has run its checks yet' };
   },
   describe: () => 'When a step is handed back as finished, or an evaluator says PASS, while the step\'s own checks failed',
 };

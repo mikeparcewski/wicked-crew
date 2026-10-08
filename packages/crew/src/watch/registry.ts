@@ -49,6 +49,17 @@ const FEED_LIMIT_DEFAULT = 100;
 const FEED_LIMIT_MAX = 500;
 const CHECK_FAILED_ENTRY = 'registry-check-failed';
 
+/** crew#828: the one coverage line for an ended run that recorded no events (pre-registry, or ungoverned). */
+export const NO_EVIDENCE_REASON = 'this run recorded no governance evidence (it ran before the checks existed, or ungoverned)';
+
+/** What the route read about a run for its coverage (crew#828). */
+export interface WatchRunFacts {
+  /** The run is completed, failed or cancelled. */
+  ended: boolean;
+  /** How many events the run recorded; `null` when the engine cannot say. */
+  events: number | null;
+}
+
 export interface WatchRegistryOptions {
   /**
    * TR-W6: the daemon's steering rules, read for `warned_rule` and cached for {@link RULES_SNAPSHOT_TTL_MS}.
@@ -580,8 +591,12 @@ export class WatchRegistry {
     }));
   }
 
-  /** `GET /watch`: the feed, newest first; with `run`, the run's coverage too. */
-  feed(q: { project?: string; kind?: WatchKind; run?: string; since?: number; limit?: number }): WatchFeedResponse {
+  /**
+   * `GET /watch`: the feed, newest first; with `run`, the run's coverage too. `runFacts` (crew#828):
+   * what the route read about the run — whether it has ENDED, and how many events it recorded
+   * (`null` = unknown) — so an ended run's coverage never reads "not yet".
+   */
+  feed(q: { project?: string; kind?: WatchKind; run?: string; since?: number; limit?: number; runFacts?: WatchRunFacts | null }): WatchFeedResponse {
     const limit = Math.min(Math.max(1, q.limit ?? FEED_LIMIT_DEFAULT), FEED_LIMIT_MAX);
     const rows = [...(this.emitter?.feed.rows.values() ?? [])]
       .filter(({ raised }) =>
@@ -593,16 +608,25 @@ export class WatchRegistry {
       .slice(0, limit);
     const findings: WatchFinding[] = rows.map((r) => r.raised);
     const cleared: WatchFindingCleared[] = rows.flatMap((r) => (r.cleared !== null ? [r.cleared] : []));
+    const noEvidence = q.run !== undefined && this.noEvidence(q.run, q.runFacts ?? null);
     return {
       findings,
       cleared,
-      ...(q.run !== undefined ? { coverage: this.coverage(q.run) } : {}),
+      ...(q.run !== undefined ? { coverage: this.coverage(q.run, q.runFacts ?? null) } : {}),
+      ...(noEvidence ? { coverage_summary: { state: 'no_evidence' as const, reason: NO_EVIDENCE_REASON } } : {}),
     };
   }
 
+  /** crew#828: the run ENDED having recorded no events at all, and the registry saw nothing of it. */
+  private noEvidence(runId: string, facts: WatchRunFacts | null): boolean {
+    return facts !== null && facts.ended && facts.events === 0 && this.runStates.get(runId) === undefined;
+  }
+
   /** G7: per run, which entries checked and which did not (and why). Run-less entries have none. */
-  coverage(runId: string): WatchCoverage[] {
+  coverage(runId: string, facts: WatchRunFacts | null = null): WatchCoverage[] {
     const out: WatchCoverage[] = [];
+    const noEvidence = this.noEvidence(runId, facts);
+    const run = facts !== null ? { ended: facts.ended } : undefined;
     for (const e of this.effective) {
       if (e.on.source === 'internal') continue;
       const check = this.checks.get(e.check);
@@ -615,12 +639,17 @@ export class WatchRegistry {
         out.push({ entry_id: e.id, state: 'not_checked', reason: 'turned off' });
         continue;
       }
+      if (noEvidence) {
+        // One honest reason for the whole block, never eight "not yet"s on a finished run.
+        out.push({ entry_id: e.id, state: 'not_checked', reason: NO_EVIDENCE_REASON });
+        continue;
+      }
       const state = this.runStates.get(runId)?.get(e.id);
       if (state === undefined && (this.listGap || this.gapRuns.has(runId))) {
         out.push({ entry_id: e.id, state: 'not_checked', reason: 'the daemon was down' });
         continue;
       }
-      const c = check.coverage(state ?? { runId, seen: new Set(), bag: new Map() });
+      const c = check.coverage(state ?? { runId, seen: new Set(), bag: new Map() }, run);
       if (c !== null) out.push({ entry_id: e.id, ...c } as WatchCoverage);
     }
     return out;

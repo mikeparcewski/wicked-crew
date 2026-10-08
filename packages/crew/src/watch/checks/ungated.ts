@@ -58,13 +58,13 @@ export const ungatedCheck: WatchCheck<Record<string, never>, Record<string, neve
       },
     ];
   },
-  coverage(state) {
+  coverage(state, run) {
     const bag = state.bag.get('ungated') as Bag | undefined;
     if (bag !== undefined && bag.gates > 0) return { state: 'checked' };
     if (bag !== undefined && bag.silent > 0) {
       return { state: 'not_checked', reason: 'the engine is too old to say whether a step was checked' };
     }
-    return { state: 'not_checked', reason: 'no step has reached its gate yet' };
+    return { state: 'not_checked', reason: run?.ended === true ? 'nothing to check: no step reached its gate on this run' : 'no step has reached its gate yet' };
   },
   describe: () => 'When a step finishes with nothing checking it: no checks, no judge, no policy',
 };

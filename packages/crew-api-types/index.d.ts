@@ -7915,8 +7915,17 @@ export interface WatchFeedResponse {
    * `watch_finding.cleared` frames would: Fixed, Dismissed, rolled up). api-types 0.73.0.
    */
   cleared?: WatchFindingCleared[];
-  /** Present with `run=` only. */
+  /**
+   * Present with `run=` only. On an ENDED run (crew#828) an entry that saw nothing to judge says
+   * "nothing to check: …", never the in-progress "… yet".
+   */
   coverage?: WatchCoverage[];
+  /**
+   * (crew#828) With `run=` only, and only when the run ENDED having recorded no events at all (it ran
+   * before the checks existed, or ungoverned): ONE line for the whole coverage block, which a skin
+   * renders instead of the per-entry rows (each of those carries the same reason). ABSENT otherwise.
+   */
+  coverage_summary?: { state: 'no_evidence'; reason: string };
 }
 
 /**
