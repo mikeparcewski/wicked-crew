@@ -177,3 +177,16 @@ export function answerStep(stepId: string, text: string): { catalog: string; id:
     instructions: text,
   };
 }
+
+/**
+ * crew#854: does an ask's run wait at its TURN gate — `awaiting_human` after an answer step, every
+ * unit on the run an answer step (`<run>:answer-N`), none still distributed? That gate (the engine's
+ * def / terminal HumanConfirm on the answer step, §4.7) is answered by the chat's next message, so it
+ * is never a Needs-you gate. Anything else — a research or creator step, Continue in Build — fails
+ * closed: the gate is a real one.
+ */
+export function isAskTurn(view: { session: { id: string; status: string }; units: ReadonlyArray<{ id: string; status: string }> }): boolean {
+  if (view.session.status !== 'awaiting_human' || view.units.length === 0) return false;
+  const answer = new RegExp(`^${view.session.id.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}:answer-\\d+$`, 'u');
+  return view.units.every((u) => answer.test(u.id) && u.status !== 'distributed');
+}

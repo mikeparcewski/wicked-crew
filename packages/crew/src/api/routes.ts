@@ -57,7 +57,7 @@ import {
   resolveChatScope,
   type ChatSeatRefusal,
 } from './chat-scope.js';
-import { ASK_TURN_BUDGET_SECS, AskPathIndex, answerStep } from './ask-paths.js';
+import { ASK_TURN_BUDGET_SECS, AskPathIndex, answerStep, isAskTurn } from './ask-paths.js';
 import { allowedRootsFor, isInsideRoot, openWithSystemDefault } from './open-path.js';
 import {
   InvalidDiffBaseError,
@@ -1359,6 +1359,12 @@ export function registerRoutes(
     // C1: the chat the run was launched from, on every run (terminal ones too) — ABSENT otherwise.
     const chatId = runTimingIndex.chatIdFor(view.session.id);
     if (chatId !== undefined) view.session.chat_id = chatId;
+    // crew#854: an ask's run, and whether it waits at its TURN gate (answered by the next message,
+    // never a gate for the Needs-you count).
+    if (runTimingIndex.isAskPath(view.session.id)) {
+      view.session.ask_path = true;
+      if (isAskTurn(view)) view.session.ask_turn = true;
+    }
     return view;
   };
   // Resolved ONCE and shared by the project routes (which read/write `interactiveRoot`) and the
