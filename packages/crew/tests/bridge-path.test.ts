@@ -5,11 +5,11 @@
 // plain `npm install` deployment work with no global installs or hand-made symlinks.
 
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ensureBridgesOnPath, ensurePiLauncherCommand, findBridgeBinDir, PI_ACP_COMMAND_ENV, piLauncherIn } from '../src/core/bridge-path.js';
+import { BRIDGE_ONLY_BINS, ensureBridgesOnPath, ensurePiLauncherCommand, findBridgeBinDir, PI_ACP_COMMAND_ENV, piLauncherIn } from '../src/core/bridge-path.js';
 
 const cleanups: Array<() => void> = [];
 afterEach(() => {
@@ -60,12 +60,56 @@ describe('ensureBridgesOnPath', () => {
       else process.env['PATH'] = before;
     });
 
-    expect(ensureBridgesOnPath(start)).toBe(binDir);
-    expect(process.env['PATH']?.split(delimiter)[0]).toBe(binDir);
+    const onPath = ensureBridgesOnPath(start);
+    expect(onPath).toBe(join(root, 'node_modules', '.wicked-crew-bridges'));
+    expect(onPath).not.toBe(binDir);
+    expect(process.env['PATH']?.split(delimiter)[0]).toBe(onPath);
 
     const afterFirst = process.env['PATH'];
-    expect(ensureBridgesOnPath(start)).toBe(binDir);
+    expect(ensureBridgesOnPath(start)).toBe(onPath);
     expect(process.env['PATH']).toBe(afterFirst);
+  });
+
+  // crew#858: the vendored `codex` launcher sits in the same `.bin` as `codex-acp`; the PATH entry
+  // the daemon adds must resolve the bridge and must NOT resolve the seat CLI.
+  it('the PATH entry resolves codex-acp but never the vendored codex beside it (crew#858)', () => {
+    const { root, start } = fixture('codex-acp');
+    const bin = join(root, 'node_modules', '.bin');
+    for (const extra of ['codex', 'claude', 'wicked-pi', 'pi-acp', 'some-other-tool']) {
+      writeFileSync(join(bin, extra), '#!/bin/sh\n', { mode: 0o755 });
+    }
+    const before = process.env['PATH'];
+    cleanups.push(() => {
+      if (before === undefined) delete process.env['PATH'];
+      else process.env['PATH'] = before;
+    });
+    const onPath = ensureBridgesOnPath(start) as string;
+    expect(onPath).not.toBeNull();
+    expect(existsSync(join(onPath, 'codex-acp'))).toBe(true);
+    expect(existsSync(join(onPath, 'pi-acp'))).toBe(true);
+    expect(existsSync(join(onPath, 'wicked-pi'))).toBe(true);
+    expect(existsSync(join(onPath, 'codex'))).toBe(false);
+    expect(existsSync(join(onPath, 'claude'))).toBe(false);
+    for (const entry of readdirSync(onPath)) {
+      expect(BRIDGE_ONLY_BINS, `${entry} must not be on the bridge PATH`).toContain(entry.replace(/\.cmd$/i, ''));
+    }
+    expect(process.env['PATH']?.split(delimiter)).not.toContain(bin);
+  });
+
+  it('re-running after the shim was reinstalled keeps the link resolvable and adds nothing else', () => {
+    const { root, start } = fixture('codex-acp');
+    const before = process.env['PATH'];
+    cleanups.push(() => {
+      if (before === undefined) delete process.env['PATH'];
+      else process.env['PATH'] = before;
+    });
+    const onPath = ensureBridgesOnPath(start) as string;
+    // Re-run after the shim was replaced: the link still resolves (same target path) and nothing else appears.
+    rmSync(join(root, 'node_modules', '.bin', 'codex-acp'));
+    writeFileSync(join(root, 'node_modules', '.bin', 'codex-acp'), '#!/bin/sh\n', { mode: 0o755 });
+    expect(ensureBridgesOnPath(start)).toBe(onPath);
+    expect(existsSync(join(onPath, 'codex-acp'))).toBe(true);
+    expect(readdirSync(onPath).sort()).toEqual(['codex-acp']);
   });
 
   it('leaves PATH untouched when nothing is found', () => {
