@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { CoreAdapter } from '../core/adapter.js';
 import { engineBusHandoff, type BusUnavailable } from '../core/engine-bus.js';
 import { ensureBridgesOnPath, ensurePiLauncherCommand, PI_ACP_COMMAND_ENV } from '../core/bridge-path.js';
+import { DISABLE_BACKGROUND_TASKS_ENV, ensureForegroundOnlyWorkers } from '../core/worker-env.js';
 import { bridgeReaper, reapOrphansAtBoot, startOrphanSweep } from '../core/bridge-reaper.js';
 import { daemonSignalLog } from '../core/daemon-signal-log.js';
 import { shutdownWithDeadline } from '../core/shutdown.js';
@@ -254,6 +255,12 @@ async function bootstrap(opts: BootstrapOpts, bootStartedAt: number = performanc
   const piCommand = ensurePiLauncherCommand();
   if (piCommand === null) {
     console.warn(`[crew] ${PI_ACP_COMMAND_ENV} not set — no wicked-pi launcher beside the ACP bridges (agent-acp-bridges < 1.1.0): a pi seat over ACP receives no skills; upgrade with \`npm i agent-acp-bridges@^1.1.0\` (bundled with wicked-crew once bridges-v1.1.0 is published)`);
+  }
+  // crew#844: a worker turn may not end with its commands still running in the background — the
+  // evidence would never reach the attempt record. Inherited by every seat; an operator value wins.
+  const foreground = ensureForegroundOnlyWorkers();
+  if (!foreground.defaulted && foreground.value !== '1') {
+    console.warn(`[crew] ${DISABLE_BACKGROUND_TASKS_ENV}=${foreground.value} — claude workers may end a turn with background tasks still running; their results will not reach the attempt record (crew#844)`);
   }
   // Every crew-side durable store follows the SAME state home as the core db (crew#330 for the
   // project graphs, crew#353 for the project settings): a daemon isolated with
