@@ -57,7 +57,7 @@ import {
   resolveChatScope,
   type ChatSeatRefusal,
 } from './chat-scope.js';
-import { AskPathIndex, answerStep } from './ask-paths.js';
+import { ASK_TURN_BUDGET_SECS, AskPathIndex, answerStep, isAskTurn } from './ask-paths.js';
 import { allowedRootsFor, isInsideRoot, openWithSystemDefault } from './open-path.js';
 import {
   InvalidDiffBaseError,
@@ -1359,6 +1359,12 @@ export function registerRoutes(
     // C1: the chat the run was launched from, on every run (terminal ones too) — ABSENT otherwise.
     const chatId = runTimingIndex.chatIdFor(view.session.id);
     if (chatId !== undefined) view.session.chat_id = chatId;
+    // crew#854: an ask's run, and whether it waits at its TURN gate (answered by the next message,
+    // never a gate for the Needs-you count).
+    if (runTimingIndex.isAskPath(view.session.id)) {
+      view.session.ask_path = true;
+      if (isAskTurn(view)) view.session.ask_turn = true;
+    }
     return view;
   };
   // Resolved ONCE and shared by the project routes (which read/write `interactiveRoot`) and the
@@ -3185,7 +3191,8 @@ export function registerRoutes(
         ...(path.runId !== undefined ? { runId: path.runId } : {}),
       });
     }
-    const turn = chatTurns.begin(id, audience, text);
+    // crew#826: the turn lives as long as its answer step may (`budget_secs`), not 3× the pool knob.
+    const turn = chatTurns.begin(id, audience, text, ASK_TURN_BUDGET_SECS);
     const turnId = turn?.turnId ?? randomUUID();
     // What an ACCEPTED message records — the engine has it, so a persistence failure here is
     // logged, never a retraction of a turn that is already being answered (codex on #808 r2, 9).
@@ -3223,9 +3230,13 @@ export function registerRoutes(
         const roster = rosterWithStanding().filter((seat) => path.eligible.includes(String(seat.key)));
         const rules = (await considerations.inForceFor(scope?.projectId ?? null)).rules;
         const pending = await considerations.pendingPreface(id, { inForce: rules });
-        const instructions = withPreface(pending.preface);
+        // crew#823: the run is titled by the operator's question (every reader titles a run from
+        // `problem`); the scope statement grounds the seats from the first answer step's
+        // instructions instead of standing in as the run's title.
+        const instructions =
+          scope !== undefined ? `${chatScopeStatement(id, scope, rules)}\n\n${withPreface(pending.preface)}` : withPreface(pending.preface);
         const input: LaunchRunInput = {
-          problem: scope !== undefined ? chatScopeStatement(id, scope, rules) : text,
+          problem: text,
           sessionId: randomUUID(),
           clisJson: JSON.stringify(roster),
           plan: { steps: [answerStep(stepId, instructions)], monitors: { asked: 1 } },
@@ -3243,6 +3254,17 @@ export function registerRoutes(
         pending.commit();
         persistAccepted(pending.preface, () => {
           runtime.linkChatRun?.(id, runId);
+          if (projectId !== undefined) {
+            // crew#823: the engine attached the crew.run membership with the launch record (as for
+            // POST /runs); this is the post-commit half — the run DTO's `project_id` and the /ws
+            // frames read the index, and the membership event says the run joined the chat's project.
+            projects.index.set(runId, projectId);
+            projects.bus?.emit(
+              MEMBERSHIP_ATTACHED,
+              { project_id: projectId, member: { kind: 'crew.run', ref: runId }, actor: actorOf(req).id },
+              membershipAttachedKey(projectId, 'crew.run', runId, Date.now()),
+            );
+          }
           recordRunLaunched(audit, runTimingIndex, actorOf(req), runId, {
             chatId: id,
             askPath: true,

@@ -540,6 +540,19 @@ export interface AgentSession {
    */
   chat_id?: string;
   /**
+   * (crew#854) `true` on a run an ASK launched (DES-ASK-TEAM-CHAT-001 §3: the chat's path), read back
+   * from the `run.launched` trail entry after a restart. ABSENT — never `false` — on any other run
+   * and on a daemon before the field.
+   */
+  ask_path?: true;
+  /**
+   * (crew#854) `true` while an ask path waits at its TURN gate: `awaiting_human` after an answer
+   * step, with no creator step on the run. The next message in the chat is the answer (it continues
+   * the path) — a skin draws no gate row and counts nothing as needing you. ABSENT otherwise: a
+   * gate at a creator or research step, or after Continue in Build, is a real gate.
+   */
+  ask_turn?: true;
+  /**
    * The engine's plan state (wicked-core `TeamPlanState`, DES-TEAMING-002 §8.4-§8.6; api-types
    * 0.46.0 types the engine field) — present on a run launched from a PLAN or a PRESET, ABSENT on
    * every other run (a registered def, the free-text planner) and on a team run before its launch

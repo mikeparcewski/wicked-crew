@@ -97,6 +97,25 @@ describe('ChatTurnIndex', () => {
     expect(idx.inFlight('c1')).toBeNull();
   });
 
+  it('crew#826: a turn begun with its own budget (a path step\'s budget_secs) is stale after 3× THAT budget, not 3× WICKED_CHAT_TURN_SECS', () => {
+    let now = 0;
+    // The pool knob at 5 s: the index's ceiling is 15 s.
+    const idx = new ChatTurnIndex({ now: () => now, staleAfterMs: chatTurnStaleAfterMs({ WICKED_CHAT_TURN_SECS: '5' }) });
+    const pathTurn = idx.begin('c1', ['claude'], 'slow step', 600)!;
+    idx.begin('c2', ['claude'], 'pool turn');
+    expect(pathTurn.staleAfterMs).toBe(3 * 600 * 1000);
+    now = 22_000; // the 22 s step of the smoke
+    expect(idx.inFlight('c1'), 'the path turn is still live').not.toBeNull();
+    expect(idx.inFlight('c2'), 'a pool turn keeps the knob').toBeNull();
+    // Its reply is stamped (the transcript persists only stamped frames).
+    const stamped = idx.decorate({ type: 'chatReply', chat: 'c1', cliKey: 'claude', text: 'A', ok: true } as CoreEvent) as unknown as Record<string, unknown>;
+    expect(stamped['turn_id']).toBe(pathTurn.turnId);
+    now = 3 * 600 * 1000;
+    expect(idx.inFlight('c1')).toBeNull();
+    // A nonsense budget falls back to the index's ceiling.
+    expect(idx.begin('c3', ['claude'], 'q', 0)!.staleAfterMs).toBe(15_000);
+  });
+
   it('DES-L5: reconcile squares the reserved audience with the engine\'s answer; abort retracts a refused send', () => {
     const idx = new ChatTurnIndex();
     // Reserved for claude + opencode; the engine reached claude + pi (opencode dropped, pi added).
@@ -264,6 +283,9 @@ describe('POST /chats/:id/messages — an ask starts a PATH; refuse mid-turn; co
     expect(input['workflow'], 'a user-composed plan, not a preset').toBeUndefined();
     expect(JSON.parse(input['clisJson'] as string).map((c: { key: string }) => c.key).sort()).toEqual(['claude', 'opencode']);
     expect(askPaths.view('e057')).toMatchObject({ runId: 'run-1', pa: 'claude', selection: 'chosen', stepId: 'answer-1' });
+    // crew#823: the run is titled by the question; crew#826: the turn lives as long as its step may.
+    expect(input['problem']).toBe('Q2: which repos consume api-types?');
+    expect(turns.turnsOf('e057')[0]?.staleAfterMs).toBe(3 * 600 * 1000);
   });
 
   it('a random pick sends NO primary and answers with no voice yet (the engine picks; the relay fills `pa` from path.started)', async () => {

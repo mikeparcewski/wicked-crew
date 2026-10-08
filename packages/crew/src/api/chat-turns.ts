@@ -46,6 +46,12 @@ export interface ChatTurn {
   startedAt: number;
   /** A bounded excerpt of the message, for the 409 body and diagnostics. */
   excerpt: string;
+  /**
+   * crew#826: how long this turn may go without a closing frame before it reads as lost —
+   * {@link CHAT_TURN_STALE_BUDGETS} of the turn's OWN budget when `begin` was told one (a path
+   * turn: the answer step's `budget_secs`), else of the pool knob ({@link chatTurnStaleAfterMs}).
+   */
+  staleAfterMs: number;
 }
 
 /** What a refused send is told (the 409 body's `turn`). */
@@ -117,7 +123,7 @@ export class ChatTurnIndex {
     const list = this.turns.get(chatId);
     if (list === undefined) return [];
     const now = this.now();
-    const kept = list.filter((t) => t.pending.length > 0 && now - t.startedAt < this.staleAfterMs);
+    const kept = list.filter((t) => t.pending.length > 0 && now - t.startedAt < t.staleAfterMs);
     if (kept.length === 0) this.turns.delete(chatId);
     else if (kept.length !== list.length) this.turns.set(chatId, kept);
     return kept;
@@ -148,9 +154,11 @@ export class ChatTurnIndex {
    * Open a turn for the seats a send is ABOUT to reach (the audience `inFlight` was asked about —
    * DES-L5: called before the engine call, so the window between the predicate and the record is
    * closed and early frames are stamped); `reconcile` squares it with the engine's answer. An empty
-   * seat list opens nothing (nothing to wait for).
+   * seat list opens nothing (nothing to wait for). `budgetSecs` is the turn's own budget when the
+   * engine was handed one (a path turn's answer step, crew#826): the turn is lost only after
+   * {@link CHAT_TURN_STALE_BUDGETS} of THAT budget, never of `WICKED_CHAT_TURN_SECS`.
    */
-  begin(chatId: string, seats: readonly string[], text: string): ChatTurn | null {
+  begin(chatId: string, seats: readonly string[], text: string, budgetSecs?: number): ChatTurn | null {
     const unique = [...new Set(seats)];
     if (unique.length === 0) return null;
     const turn: ChatTurn = {
@@ -160,6 +168,10 @@ export class ChatTurnIndex {
       pending: [...unique],
       startedAt: this.now(),
       excerpt: excerptOf(text),
+      staleAfterMs:
+        budgetSecs !== undefined && Number.isFinite(budgetSecs) && budgetSecs > 0
+          ? CHAT_TURN_STALE_BUDGETS * budgetSecs * 1000
+          : this.staleAfterMs,
     };
     const list = this.live(chatId);
     list.push(turn);

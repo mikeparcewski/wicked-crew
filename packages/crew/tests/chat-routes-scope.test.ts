@@ -14,8 +14,13 @@ import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { CoreAdapter } from '../src/core/adapter.js';
+import { MembershipIndex } from '../src/projects/membership-index.js';
 
 let base: string;
+/** crew#823: the membership index the routes file runs into (a run of the chat's project). */
+let membership: MembershipIndex;
+/** crew#823: what the ask's first message hands the engine. */
+let launched: Array<Record<string, unknown>>;
 let graphFile: string;
 let app: FastifyInstance;
 let chatScopes: ChatScopeIndex;
@@ -68,6 +73,10 @@ function fakeAdapter(): CoreAdapter {
     },
     chatClose: async () => undefined,
     chatList: async () => [],
+    launchRun: async (input: Record<string, unknown>) => {
+      launched.push(input);
+      return `run-p${launched.length}`;
+    },
     projectGet: async (id: string) => (id === 'p-live' ? { id, status: 'active' } : null),
     projectMemberAttach: async () => {
       // Parks the FIRST attach only (a reopen's own attach goes straight through).
@@ -110,8 +119,10 @@ beforeEach(async () => {
   warmByChat = new Map();
   sendReaches = null;
   chatScopes = new ChatScopeIndex(join(base, 'chats'));
+  membership = new MembershipIndex();
+  launched = [];
   app = Fastify({ logger: false });
-  registerRoutes(app, fakeAdapter(), new GateCache(), new ElicitationCache(), undefined, undefined, {
+  registerRoutes(app, fakeAdapter(), new GateCache(), new ElicitationCache(), { bus: null, index: membership, log: () => undefined }, undefined, {
     chatScopes,
     // Never the real dotfile probe: the suite must not read the developer's worker home.
     signedIn: (seatKey) => signedIn(seatKey),
@@ -329,6 +340,20 @@ describe('ASK-C1 — an ask starts a path: the open records eligibility and a ch
       chats: [{ chatId: 'live', seats: ['claude'], idleSecs: null, cwd, codeGraphDb: graphFile, readRoots: ['/srv/repos/alpha'] }],
     });
     holdAttach = null;
+  });
+
+  it('crew#823: an ask in a project scope files its run in the chat\'s project and is titled by the question; the scope statement rides the step instructions', async () => {
+    expect((await open({ chatId: 'proj-ask', clis: ['claude'], repoRefs: ['alpha'], projectId: 'p-live' })).statusCode).toBe(201);
+    const sent = await app.inject({ method: 'POST', url: '/api/v1/chats/proj-ask/messages', payload: { text: 'Which module owns loan due dates?' } });
+    expect(sent.statusCode).toBe(202);
+    expect(launched).toHaveLength(1);
+    const input = launched[0]!;
+    expect(input['problem'], 'never the "# Chat scope" preamble').toBe('Which module owns loan due dates?');
+    expect(input['projectId']).toBe('p-live');
+    const instructions = (input['plan'] as { steps: Array<{ instructions: string }> }).steps[0]!.instructions;
+    expect(instructions.startsWith('# Chat scope')).toBe(true);
+    expect(instructions.endsWith('Which module owns loan due dates?')).toBe(true);
+    expect(membership.projectOf('run-p1'), 'GET /runs/:id.session.project_id reads this index').toBe('p-live');
   });
 
   it('codex on #808 r5 (2): while a DELETE is still settling, the id is HELD — a reopen is refused (409 closing), no grace timer frees it; once the fold settles the id is free', async () => {
