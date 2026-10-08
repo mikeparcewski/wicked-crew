@@ -54,14 +54,31 @@ const DENYLISTED = [
 ];
 
 /** The scratch/cache directory names the push never carries, at any depth. */
-const SCRATCH_DIRS = ['tmp', '.tmp', 'scratch', '.cache', 'coverage'];
+export const SCRATCH_DIRS = ['tmp', '.tmp', 'scratch', '.cache', 'coverage'];
+
+/**
+ * The directories a TEST RUNNER or build tool writes its own output into (crew#861): a vitest
+ * JSON reporter's `.vitest/json/output.json` (2.3 MB, left untracked at a studio worktree root by a
+ * creator's read-only re-verify) would have ridden a governed PR had the lift not conflicted first.
+ * These names are never a run's product at any depth; like {@link SCRATCH_DIRS} they are excluded at
+ * enumeration by the script and reported once with a count.
+ */
+export const TOOL_ARTIFACT_DIRS = ['.vitest', 'playwright-report', 'test-results', 'node_modules', '.nyc_output', '__pycache__', '.pytest_cache'];
+
+/** Basename globs that are a tool's own log/report output, never a run's product (crew#861). */
+const TOOL_ARTIFACT_NAMES = [/\.log$/];
+
+/** The heading under which the deliver script lists what it left behind, in the PR body and the
+ *  commit message (crew#861) — the "says what it skipped" half of the guard. */
+export const DELIVER_NOT_SHIPPED_HEADING = '## Not shipped';
 
 /** Past this, an otherwise-unrecognised file is scratch by size alone (the generic net). */
 export const OVERSIZE_BYTES = 1048576;
 
 /**
  * Why the deliver push would exclude this path on its NAME alone — the arms that need no `stat`:
- * the denylist, the `socket` basename, `.DS_Store`, and a scratch directory at any depth. `null`
+ * the denylist, the `socket` basename, `.DS_Store`, a scratch or tool-artifact directory at any depth,
+ * and a tool's `*.log` (crew#434, crew#861). `null`
  * means "no name rule fires"; the caller still owes the size rule ({@link deliverExclusionReason}).
  *
  * Split out so a caller can classify 100 000 untracked paths without 100 000 synchronous `stat`
@@ -87,7 +104,13 @@ export function deliverExclusionByName(relPath: string): string | null {
   if (base === '.DS_Store') return 'ds-store';
   const segments = relPath.split('/');
   // Every segment BUT the last is a directory of the path (`/$F` against `*/tmp/*` in the shell).
-  if (segments.slice(0, -1).some((s) => SCRATCH_DIRS.includes(s))) return 'scratch-dir';
+  const dirs = segments.slice(0, -1);
+  if (dirs.some((s) => SCRATCH_DIRS.includes(s))) return 'scratch-dir';
+  // crew#861: under a test-runner / build-tool output directory (`.vitest/`, `playwright-report/`, …).
+  if (dirs.some((s) => TOOL_ARTIFACT_DIRS.includes(s))) return 'tool-artifact-dir';
+  // crew#861: a tool's own log output (`*.log`) — LAST of the name rules (a log under `tmp/` reads
+  // as the scratch dir it sits in), in the same order as the shell.
+  if (TOOL_ARTIFACT_NAMES.some((re) => re.test(lower))) return 'tool-artifact-name';
   return null;
 }
 

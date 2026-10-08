@@ -111,12 +111,14 @@ import { noEligibleSeatBody, parseNoEligibleSeat } from '../core/engine-roster.j
 import { ProjectSettingsStore } from '../projects/settings.js';
 import type { WatchRegistry } from '../watch/registry.js';
 import { isHumanOperator } from './watch-routes.js';
+import type { DeliverReportFact } from '../core/deliver-text.js';
 import { boundOrigin, InteractiveBridgePool } from '../interactive/bridge-pool.js';
 import {
   composeDeliverText,
   configuredPublicOrigin,
   extractFollowUps,
   factsFromRun,
+  reportsFromOutputs,
   FOLLOW_UPS_MAX,
   framedDeliverText,
   runUrlFor,
@@ -1234,6 +1236,14 @@ export function registerRoutes(
       for (const x of extractFollowUps(text)) if (!out.includes(x)) out.push(x);
     }
     return out.slice(0, FOLLOW_UPS_MAX);
+  };
+  /** crew#860: the creator and evaluator seats' final reports (and the recipe exit codes they
+   *  pasted), read from their captured output for the PR body's done-when evidence. Absent when
+   *  the adapter keeps no transcripts — the body then says the output could not be read. */
+  const seatReports = async (view: SessionView): Promise<DeliverReportFact[] | undefined> => {
+    if (typeof adapter.workOutput !== 'function') return undefined;
+    const read = adapter.workOutput.bind(adapter);
+    return reportsFromOutputs(view, (u) => read(coreUnitId(view.session.id, u)));
   };
   // The run-DTO joins (DES-UX-001 §8.2/§8.3, DES-UX-002 §7.2): `project_id` from the membership
   // record — `null` = genuinely unfiled, so the field is ALWAYS present on served runs —
@@ -2513,12 +2523,14 @@ export function registerRoutes(
       const run = views.find((v) => v.session.id === id);
       if (!run) return reply.code(404).send({ error: 'Run not found' });
       const followUps = await evaluatorFollowUps(run);
+      const reports = await seatReports(run);
       // The run's preset or workflow NAME, as the engine recorded it (seam X2).
       const text = composeDeliverText(
         factsFromRun(decorateRun(run), runUrlFor(configuredPublicOrigin(), id), {
           workflowId: runIdentityOf(run).name,
           revisesPr: retryIndex.revisesPrFor(id) ?? null,
           ...(followUps !== undefined ? { followUps } : {}),
+          ...(reports !== undefined ? { reports } : {}),
         }),
       );
       return reply.type('text/plain; charset=utf-8').send(framedDeliverText(text));
@@ -2676,6 +2688,7 @@ export function registerRoutes(
               revisesPr = { number: revising.number, headRef: again.pr.headRef, url: again.pr.url };
             }
             const followUps = await evaluatorFollowUps(run);
+            const reports = await seatReports(run);
             result = await deliverExec(workdir, s.problem ?? undefined, {
               runId: id,
               apiOrigin: origin,
@@ -2683,6 +2696,7 @@ export function registerRoutes(
                 workflowId: workflowName,
                 revisesPr: revisesPr === null ? null : { number: revisesPr.number, url: revisesPr.url },
                 ...(followUps !== undefined ? { followUps } : {}),
+                ...(reports !== undefined ? { reports } : {}),
               }),
               revisesPr,
               // R1 (Copilot on crew#736): the post-hoc delivery binds `gh pr create --repo` to the

@@ -32,11 +32,15 @@ import type { GateSpec, PhaseDef, SessionView, WorkUnit } from './types.js';
 import { stripLinkedIssues } from './linked-issues.js';
 
 /**
- * The PR title cap — GitHub's own limit (crew#550 P-1: a 72-character cap on the PR title still
- * severed the intent inside a quoted phrase). The COMMIT subject keeps git's conventional width,
+ * The PR title cap (crew#860, S17b F15 / S17a F20). GitHub ACCEPTS 256 characters, and under that
+ * cap wicked-studio#586 opened as the intent's first 244 — a whole paragraph, cut mid-sentence,
+ * wider than the PR list renders. A title is a headline: the intent's FIRST SENTENCE, cut at a word
+ * boundary inside 100 characters; the full intent is the body's first section and the run id is
+ * named there. (crew#550 P-1 — a 72-character cap severed a quoted phrase — is still honoured: the
+ * cut is depth-aware, see {@link boundedTitle}.) The COMMIT subject keeps git's conventional width,
  * {@link COMMIT_SUBJECT_MAX}; a longer title then opens the commit body in full.
  */
-export const DELIVER_TITLE_MAX = 256;
+export const DELIVER_TITLE_MAX = 100;
 /** The commit subject cap — git's conventional subject width (crew#550). */
 export const COMMIT_SUBJECT_MAX = 72;
 
@@ -76,6 +80,29 @@ export interface DeliverVerdictFact {
   reason: string | null;
 }
 
+/**
+ * What a unit's seat REPORTED in its final output (crew#860): the governed-worker output contract's
+ * "What you did / Commands run (with exit codes) / Counts / Findings" block — for a creator, what
+ * changed and the recipe it ran; for an evaluator, its findings by severity. Read from the unit's
+ * captured output by {@link extractUnitReport}; `report` is bounded markdown, never empty.
+ */
+export interface DeliverReportFact {
+  phase: string;
+  seat: string | null;
+  role: 'creator' | 'evaluator';
+  report: string;
+  /** The commands the seat says it ran, with the exit code it pasted beside each
+   *  ({@link extractRecipeExits}) — a creator's recipe, read for the done-when evidence table.
+   *  Absent/empty = the output named no command with an exit code. */
+  exits?: DeliverRecipeExit[];
+}
+
+/** One command a seat reported running, with the exit code it pasted (crew#860). */
+export interface DeliverRecipeExit {
+  command: string;
+  exit: number;
+}
+
 /** Everything the composer needs. Built by {@link factsFromRun} or {@link factsFromWorkflow}. */
 export interface DeliverTextFacts {
   runId: string;
@@ -106,6 +133,10 @@ export interface DeliverTextFacts {
    *  evaluator units' output by {@link extractFollowUps}). `[]` = read, none flagged; absent = not
    *  read (a definition-time composition), and the section is left out. */
   followUps?: string[];
+  /** crew#860: the creator and evaluator seats' final reports, read from the unit outputs
+   *  ({@link reportsFromOutputs}). `[]` = read, nothing reportable; absent = the outputs could not
+   *  be read (a definition-time composition, or an adapter without transcripts) — said in the body. */
+  reports?: DeliverReportFact[];
 }
 
 export interface DeliverText {
@@ -197,16 +228,60 @@ export function conventionalPrefix(workflowId: string | null | undefined): strin
   return CONVENTIONAL_TYPE_BY_WORKFLOW[workflowId ?? ''] ?? 'chore';
 }
 
+/** A `.` that ends one of these is an abbreviation, not a sentence (`e.g. the gate`, `vs. main`). */
+const ABBREVIATION_BEFORE_DOT = /(?:^|[\s(])(?:e\.g|i\.e|etc|vs|cf|approx|incl|resp|fig|no|vol|ca)$/i;
+
 /**
- * The PR title / commit subject: the intent's first line, whole when it fits, otherwise cut at the
- * last word boundary that leaves room for a single `…` — so the result is ≤ 256 characters and never
- * ends mid-word (the F-3R2-014 headline `…scenario CLN-2) aga`). Dangling punctuation before the
- * ellipsis is dropped. A blank intent names the run instead — through the SAME bounded cut, so a
- * long caller-supplied session id (the CLI passes `--session` through) is never cut mid-id either
- * (Copilot on #525): the body names the run id in full.
+ * The first SENTENCE of a headline line (crew#860): the text up to the first `.`, `!` or `?` that
+ * is followed by whitespace or the end, at quote/bracket depth 0 (a period inside `(…)` or `"…"`
+ * does not end the sentence), and not the dot of an abbreviation. A closing `.` is dropped (a
+ * headline carries no full stop); `!` and `?` stay. A dot glued to the next word (`0.8.4`,
+ * `deliver.ts`, `wicked-studio#586.`) never splits. No terminator ⇒ the whole line.
+ */
+export function firstSentence(line: string): string {
+  const stack: string[] = [];
+  for (let i = 0; i < line.length; i += 1) {
+    const c = line[i]!;
+    const top = stack[stack.length - 1];
+    if (top !== undefined && c === top) {
+      stack.pop();
+      continue;
+    }
+    if (c === "'") {
+      if (i === 0 || line[i - 1] === ' ') stack.push("'");
+      continue;
+    }
+    const closer = OPENERS[c];
+    if (closer !== undefined) {
+      stack.push(closer);
+      continue;
+    }
+    if (stack.length > 0 || (c !== '.' && c !== '!' && c !== '?')) continue;
+    // A run of terminators (`?!`, `...`) ends together; the sentence ends only when whitespace or
+    // the end follows the run.
+    let j = i;
+    while (j + 1 < line.length && /[.!?]/.test(line[j + 1]!)) j += 1;
+    if (j + 1 < line.length && !/\s/.test(line[j + 1]!)) continue;
+    const head = line.slice(0, i);
+    if (c === '.' && j === i && ABBREVIATION_BEFORE_DOT.test(head)) continue;
+    const sentence = (c === '.' && j === i ? head : line.slice(0, j + 1)).trim();
+    if (sentence === '') continue;
+    return sentence;
+  }
+  return line;
+}
+
+/**
+ * The PR title / commit subject: the FIRST SENTENCE of the intent's first prose line (crew#860),
+ * whole when it fits, otherwise cut at the last word boundary that leaves room for a single `…` —
+ * so the result is ≤ {@link DELIVER_TITLE_MAX} characters and never ends mid-word (the F-3R2-014
+ * headline `…scenario CLN-2) aga`). Dangling punctuation before the ellipsis is dropped. A blank
+ * intent names the run instead — through the SAME bounded cut, so a long caller-supplied session id
+ * (the CLI passes `--session` through) is never cut mid-id either (Copilot on #525): the body names
+ * the run id in full.
  */
 export function deliverTitle(intent: string, runId: string, workflowId?: string | null): string {
-  const line = firstLine(intent);
+  const line = firstSentence(firstLine(intent));
   // The run id is caller-supplied too (`LaunchSchema` only requires it non-empty): a newline in it
   // must not turn the title into two lines and break the framing (Copilot on #525).
   if (line === '') return boundedTitle(oneLine(`wicked-crew run ${oneLine(runId)}`));
@@ -506,6 +581,38 @@ export function composeDeliverText(f: DeliverTextFacts, links: IssueRefs = issue
   }
   out.push('');
 
+  // crew#860 (S17b F15): the DONE-WHEN EVIDENCE, one row per phase — the deterministic floor's
+  // results for that phase (`typecheck 0 · lint 0`), the evaluator verdict recorded for it, and the
+  // exit codes the creator PASTED for its own recipe — so a reviewer reads "what proved this" in one
+  // table instead of reconstructing it from three sections and the run record.
+  if (f.source === 'run') {
+    out.push('## Done-when evidence', '');
+    out.push(...doneWhenTable(f), '');
+  }
+
+  // crew#860 (S17b F15): the FACTS the intent's own done-when asks the PR to state — the creator's
+  // "what I did / commands run with exit codes / done-when table" and each evaluator's findings —
+  // already exist in the unit outputs; the PR used to carry only "passed its gate" and the operator
+  // appended the table by hand. They ride here, bounded, under the seat that wrote them.
+  out.push('## Creator report', '');
+  const creators = (f.reports ?? []).filter((r) => r.role === 'creator');
+  if (f.source === 'workflow') {
+    out.push('_Not available at composition time — the run record has it._');
+  } else if (f.reports === undefined) {
+    out.push("_The creator's output could not be read when this PR opened — the run record has it._");
+  } else if (creators.length === 0) {
+    out.push('_No creator report was recorded (no creator phase, or its output carried no report)._');
+  } else {
+    for (const r of creators) out.push(`### ${code(r.phase)} (${cell(r.seat ?? 'seat unknown')})`, '', r.report, '');
+  }
+  out.push('');
+
+  const evaluations = (f.reports ?? []).filter((r) => r.role === 'evaluator');
+  if (evaluations.length > 0) {
+    out.push('## Evaluator findings', '');
+    for (const r of evaluations) out.push(`### ${code(r.phase)} (${cell(r.seat ?? 'seat unknown')})`, '', r.report, '');
+  }
+
   // crew#550 P-7: what the evaluator said should happen NEXT lands on the PR, not only in its log.
   if (f.followUps !== undefined) {
     out.push('## Follow-ups', '');
@@ -525,6 +632,39 @@ export function composeDeliverText(f: DeliverTextFacts, links: IssueRefs = issue
     ...(f.trailers ?? []),
   );
   return { title, body: out.join('\n') };
+}
+
+/** At most this many pasted recipe commands per phase in the done-when table. */
+export const RECIPE_EXITS_MAX = 12;
+
+/**
+ * The done-when evidence table (crew#860): one row per phase that has ANY evidence — a floor
+ * result, a recorded verdict, or pasted recipe exit codes. Every cell says what was recorded, or
+ * `—` when nothing was; a phase with no evidence at all is left out (the Phases table lists it).
+ */
+function doneWhenTable(f: DeliverTextFacts): string[] {
+  const rows: string[] = [];
+  const order: string[] = [];
+  for (const p of f.phases) if (!order.includes(p.id)) order.push(p.id);
+  for (const x of [...(f.checks ?? []).map((c) => c.phase), ...f.verdicts.map((v) => v.phase), ...(f.reports ?? []).map((r) => r.phase)]) {
+    if (!order.includes(x)) order.push(x);
+  }
+  for (const id of order) {
+    const phase = f.phases.find((p) => p.id === id);
+    const checks = (f.checks ?? []).filter((c) => c.phase === id);
+    const floor = checks.map((c) => `${c.name} ${exitLabel(c)}${c.exitCode !== null && c.exitCode !== 0 && c.classification !== null ? ` (${c.classification})` : ''}`).join(' · ');
+    const verdict = f.verdicts.find((v) => v.phase === id);
+    const verdictCell = verdict === undefined ? '' : `${verdict.verdict}${verdict.reason !== null && verdict.reason.trim() !== '' ? ` — ${verdict.reason}` : ''}`;
+    const exits = (f.reports ?? []).filter((r) => r.phase === id).flatMap((r) => r.exits ?? []).slice(0, RECIPE_EXITS_MAX);
+    const recipe = exits.map((e) => `${code(e.command)} → ${e.exit}`).join('<br>');
+    if (floor === '' && verdictCell === '' && recipe === '') continue;
+    const seat = phase?.seat ?? f.reports?.find((r) => r.phase === id)?.seat ?? verdict?.seat ?? null;
+    rows.push(`| ${code(id)} | ${cell(seat)} | ${floor === '' ? '—' : cell(floor, 400)} | ${verdictCell === '' ? '—' : cell(verdictCell, 300)} | ${recipe === '' ? '—' : recipe} |`);
+  }
+  if (rows.length === 0) {
+    return ['_No floor results, evaluator verdicts or pasted recipe exit codes were recorded for this run._'];
+  }
+  return ['| phase | seat | floor (exit codes) | evaluator verdict | recipe the seat ran (pasted exit codes) |', '|---|---|---|---|---|', ...rows];
 }
 
 /** The classification cell: the engine's word for a non-zero exit, `—` for a pass or none. */
@@ -664,6 +804,8 @@ export function factsFromRun(
     revisesPr?: { number: number; url: string } | null;
     /** crew#550: the evaluator follow-ups, when the caller read the evaluator units' output. */
     followUps?: string[];
+    /** crew#860: the seats' final reports, when the caller read the unit outputs. */
+    reports?: DeliverReportFact[];
   } = {},
 ): DeliverTextFacts {
   const s = view.session;
@@ -705,6 +847,7 @@ export function factsFromRun(
     revisesPr: resolved.revisesPr ?? null,
     trailers: configuredTrailers(),
     ...(resolved.followUps !== undefined ? { followUps: resolved.followUps } : {}),
+    ...(resolved.reports !== undefined ? { reports: resolved.reports } : {}),
   };
 }
 
@@ -859,4 +1002,149 @@ export function extractFollowUps(text: string): string[] {
     i = j - 1;
   }
   return out;
+}
+
+// ── seat reports (crew#860) ────────────────────────────────────────────────────────────────────
+
+/** How much of one seat's report rides a PR body (characters); the run record has the rest. */
+export const REPORT_MAX_CHARS = 4_000;
+/** At most this many reports ride a PR body (one per creator / evaluator unit, by ord). */
+export const REPORTS_MAX = 6;
+
+/**
+ * The heading that OPENS a seat's final report — the governed-worker output contract's sections
+ * ("What you did", "Commands run", "Counts", "Findings", "Open questions") and the shapes seats
+ * actually write them in (`## What I did`, `**Commands run:**`, `Done-when`, `Evidence`, `Summary`).
+ */
+const REPORT_HEADING = /^\s*(?:#{1,6}\s*|\*\*|\d+[.)]\s*|[-*]\s*)*\s*(?:what (?:you|i|we) did|what (?:was|has been) done|what changed|commands? run|commands? executed|counts?|findings?|done[- ]when|evidence|open questions?|summary|report|verification|results?)\b/i;
+/** The evaluator's contract line — stated separately by the composer, never repeated in the report. */
+const VERDICT_LINE = /^\s*verdict:\s*(pass|fail)\s*$/i;
+
+/**
+ * A seat's final REPORT from its captured output (crew#860): the text from the first report heading
+ * ({@link REPORT_HEADING}) to the end — the output contract puts the report LAST, after the work —
+ * or, when no heading is found, the tail of the output (its last 40 lines), said so. `VERDICT:`
+ * lines are removed (the composer states the recorded verdict beside the phase). Headings are
+ * demoted below the body's own `##` / `###` so the report cannot restyle the PR; an unclosed code
+ * fence is closed so it cannot swallow the footer; control characters are dropped; the result is
+ * cut at a line boundary inside {@link REPORT_MAX_CHARS} and the cut is disclosed. `null` when the
+ * output carries nothing reportable (empty, or whitespace only).
+ */
+export function extractUnitReport(text: string | null | undefined): string | null {
+  if (text === null || text === undefined) return null;
+  const lines = text
+    .replace(/\r\n?/g, '\n')
+    .replace(CONTROL_CHARS, '')
+    .split('\n')
+    .filter((l) => !VERDICT_LINE.test(l));
+  let start = lines.findIndex((l) => REPORT_HEADING.test(l));
+  let note: string | null = null;
+  if (start < 0) {
+    start = Math.max(0, lines.length - 40);
+    note = '_(no report headings found in the output — its last lines follow)_';
+  }
+  let block = lines.slice(start).join('\n').trim();
+  if (block === '') return null;
+  // Below the body's `### <phase>` heading: `#`/`##`/`###` → `####`.
+  block = block.replace(/^#{1,3}(?=\s)/gm, '####');
+  let cut = false;
+  if (block.length > REPORT_MAX_CHARS) {
+    const head = block.slice(0, REPORT_MAX_CHARS);
+    const nl = head.lastIndexOf('\n');
+    block = (nl > REPORT_MAX_CHARS / 2 ? head.slice(0, nl) : head).trimEnd();
+    cut = true;
+  }
+  // An odd number of fences would leave the rest of the PR body inside a code block.
+  if ((block.match(/^\s*```/gm) ?? []).length % 2 === 1) block += '\n```';
+  const parts = [block];
+  if (cut) parts.push('', '_(cut here — the full report is on the run record)_');
+  if (note !== null) parts.unshift(note, '');
+  return parts.join('\n');
+}
+
+/**
+ * The seats' reports for a run (crew#860), one per creator / evaluator unit in ord order, read
+ * through `readOutput` (the adapter's `workOutput`, injected so the composer stays pure). A unit
+ * whose output cannot be read or carries nothing reportable contributes nothing; the result is
+ * `[]` when nothing was reportable, never `undefined` — the caller says "could not read" only when
+ * it has no reader at all.
+ */
+export async function reportsFromOutputs(
+  view: SessionView,
+  readOutput: (unit: WorkUnit) => Promise<string | null>,
+): Promise<DeliverReportFact[]> {
+  const units = [...view.units]
+    .filter((u) => u.role === 'creator' || u.role === 'evaluator')
+    .sort((a, b) => a.ord - b.ord);
+  const out: DeliverReportFact[] = [];
+  for (const u of units) {
+    if (out.length >= REPORTS_MAX) break;
+    let text: string | null = null;
+    try {
+      text = await readOutput(u);
+    } catch {
+      text = null;
+    }
+    const report = extractUnitReport(text);
+    if (report === null) continue;
+    const exits = extractRecipeExits(text);
+    out.push({
+      phase: phaseIdOf(u),
+      seat: seatOf(u),
+      role: u.role as 'creator' | 'evaluator',
+      report,
+      ...(exits.length > 0 ? { exits } : {}),
+    });
+  }
+  return out;
+}
+
+/** `exit 0`, `exit code: 1`, `exit=2`, `exited 0`, `(exit 0)` — the exit code a seat pasted. */
+const EXIT_WORD = /\bexit(?:ed)?(?:\s*code)?\s*[:=]?\s*(-?\d{1,3})\b/i;
+/** `` `cmd` → 0 `` / `` `cmd` -> 0 `` / `` `cmd`: 0 `` — the arrow shapes after a code span. */
+const ARROW_EXIT = /^\s*(?:→|->|=>|:|—|–)\s*(-?\d{1,3})\b/;
+/** `` | `cmd` | 0 | `` — a table row whose next cell is a bare exit code. */
+const TABLE_EXIT = /^\s*\|\s*(-?\d{1,3})\s*\|/;
+const CODE_SPAN = /`([^`\n]{2,200})`/;
+
+/**
+ * The commands a seat's output says it ran, with the exit code it pasted beside each (crew#860) —
+ * the "Commands run (with exit codes)" half of the governed-worker output contract, in the shapes
+ * seats write it: `` - `npm run lint` → exit 0 ``, `` | `npx vitest run` | 0 | ``, `typecheck: exit 0`.
+ * A line counts only when it names BOTH a command (a code span, else the list item's text before
+ * the exit word) and an exit code; deduplicated by command (the LAST report wins — a re-run
+ * supersedes), at most {@link RECIPE_EXITS_MAX}. Never throws; `[]` when nothing parses.
+ */
+export function extractRecipeExits(text: string | null | undefined): DeliverRecipeExit[] {
+  if (text === null || text === undefined) return [];
+  const found = new Map<string, number>();
+  for (const raw of text.replace(/\r\n?/g, '\n').replace(CONTROL_CHARS, '').split('\n')) {
+    const span = CODE_SPAN.exec(raw);
+    let command: string | null = null;
+    let exit: number | null = null;
+    if (span !== null) {
+      command = span[1]!.trim();
+      const after = raw.slice(span.index + span[0].length);
+      const m = EXIT_WORD.exec(after) ?? ARROW_EXIT.exec(after) ?? TABLE_EXIT.exec(after);
+      if (m !== null) exit = Number(m[1]);
+    } else {
+      const m = EXIT_WORD.exec(raw);
+      if (m !== null) {
+        const head = raw
+          .slice(0, m.index)
+          .replace(/^\s*(?:[-*•]|\d+[.)])\s+/, '')
+          .replace(/[\s(:—–,-]+$/, '')
+          .trim();
+        if (head !== '' && head.length <= 120 && !/^(?:all|every|each)\b/i.test(head)) {
+          command = head;
+          exit = Number(m[1]);
+        }
+      }
+    }
+    if (command === null || exit === null || command === '' || !Number.isFinite(exit)) continue;
+    const key = oneLine(command).slice(0, 120);
+    found.delete(key);
+    found.set(key, exit);
+  }
+  return [...found.entries()].slice(-RECIPE_EXITS_MAX).map(([command, exit]) => ({ command, exit }));
 }

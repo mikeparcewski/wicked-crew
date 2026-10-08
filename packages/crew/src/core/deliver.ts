@@ -87,7 +87,7 @@
 import { execFile } from 'node:child_process';
 import { childEnvWithBootEstateDb } from './governance-store.js';
 import type { PhaseDef, WorkflowDef } from './types.js';
-import { DELIVER_STRANDED_SENTINEL } from './deliver-exclusions.js';
+import { DELIVER_NOT_SHIPPED_HEADING, DELIVER_STRANDED_SENTINEL, SCRATCH_DIRS, TOOL_ARTIFACT_DIRS } from './deliver-exclusions.js';
 import {
   composeEmbeddedDeliverText,
   factsFromWorkflow,
@@ -840,8 +840,21 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // files on one benchmark run) and the other four — are excluded AT ENUMERATION with git
     // pathspecs and reported ONCE with a count, never walked file-by-file with a fork per file.
     // The per-file `*/tmp/*` arm below still catches a nested scratch dir.
-    'for SD in tmp .tmp scratch .cache coverage; do',
-    '  if [ -d "$SD" ]; then N=$(git ls-files --others --exclude-standard -- "$SD" | wc -l | tr -d " "); if [ "${N:-0}" -gt 0 ]; then echo "deliver: EXCLUDED (scratch-dir): $SD/ ($N files)"; fi; fi',
+    //
+    // crew#861 (S17b F14): a creator's read-only re-verify left `.vitest/json/output.json` (2.3 MB, a
+    // vitest JSON reporter's output) untracked at a studio worktree root. The size net would have
+    // caught THAT file, but a smaller reporter file, a `playwright-report/`, a `test-results/`, an
+    // un-ignored `node_modules/` or a stray `*.log` would have ridden — so the test-runner / build-
+    // tool output directories are a named class (`tool-artifact-dir`, excluded at enumeration like
+    // the scratch dirs, counted once) and `*.log` is `tool-artifact-name`. The repository's own
+    // ignore rules are honoured FIRST (`--exclude-standard`), and what they skipped is said too: the
+    // gitignored entries are counted (`--ignored --directory`, one entry per ignored directory) and
+    // named in the output. And "says what it skipped" reaches the READER, not only the phase log:
+    // every exclusion is collected and spliced into the PR body and the commit message as a
+    // `## Not shipped` section before the footer (below, after staging).
+    `for SD in ${[...SCRATCH_DIRS, ...TOOL_ARTIFACT_DIRS].join(' ')}; do`,
+    `  case "$SD" in ${SCRATCH_DIRS.join('|')}) DR="scratch-dir";; *) DR="tool-artifact-dir";; esac`,
+    '  if [ -d "$SD" ]; then N=$(git ls-files --others --exclude-standard -- "$SD" | wc -l | tr -d " "); if [ "${N:-0}" -gt 0 ]; then echo "deliver: EXCLUDED ($DR): $SD/ ($N files)"; printf "%s %s\\n" "$DR" "$SD/ ($N files)" >> "$TD/excluded"; fi; fi',
     'done',
     'while IFS= read -r -d "" F; do',
     '  [ -n "$F" ] || continue',
@@ -857,10 +870,36 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     '  esac',
     '  case "$LBN" in *socket*) [ -n "$RN" ] || RN="socket-name";; esac',
     '  [ "$BN" = ".DS_Store" ] && [ -z "$RN" ] && RN="ds-store"',
-    '  case "/$F" in */tmp/*|*/.tmp/*|*/scratch/*|*/.cache/*|*/coverage/*) [ -n "$RN" ] || RN="scratch-dir";; esac',
+    `  case "/$F" in ${SCRATCH_DIRS.map((d) => `*/${d}/*`).join('|')}) [ -n "$RN" ] || RN="scratch-dir";; esac`,
+    `  case "/$F" in ${TOOL_ARTIFACT_DIRS.map((d) => `*/${d}/*`).join('|')}) [ -n "$RN" ] || RN="tool-artifact-dir";; esac`,
+    '  case "$LBN" in *.log) [ -n "$RN" ] || RN="tool-artifact-name";; esac',
     '  if [ -z "$RN" ]; then SZ=$(wc -c < "$F" 2>/dev/null || echo 0); [ "${SZ:-0}" -gt 1048576 ] && RN="oversize-1mib"; fi',
-    '  if [ -n "$RN" ]; then echo "deliver: EXCLUDED ($RN): $F"; else git add -- "$F"; fi',
-    "done < <(git ls-files --others --exclude-standard -z -- . ':(exclude)tmp' ':(exclude).tmp' ':(exclude)scratch' ':(exclude).cache' ':(exclude)coverage')",
+    // The record line is ONE line whatever the name holds: a newline / CR / tab in a path is folded to
+    // `?` so a crafted file name cannot start a new bullet or heading in the PR body (codex r1).
+    '  if [ -n "$RN" ]; then echo "deliver: EXCLUDED ($RN): $F"; printf "%s %s\\n" "$RN" "$(printf "%s" "$F" | tr "\\n\\r\\t" "???")" >> "$TD/excluded"; else git add -- "$F"; fi',
+    `done < <(git ls-files --others --exclude-standard -z -- . ${[...SCRATCH_DIRS, ...TOOL_ARTIFACT_DIRS].map((d) => `':(exclude)${d}'`).join(' ')})`,
+    // (c1c) WHAT THE REPOSITORY'S OWN IGNORE RULES SKIPPED (crew#861) — never staged (the pass above
+    // honours them), but SAID: one entry per ignored directory (`--directory`), so an installed
+    // `node_modules/` is one line, not a walk. Named in the output (first 10) and counted in the body.
+    // Streamed to a file, never held in a shell variable (codex r1): a repo with many ignored files
+    // outside an ignored directory must not balloon the shell.
+    'git ls-files --others --ignored --exclude-standard --directory -z -- . | tr "\\n\\0" "?\\n" | sed "/^$/d" > "$TD/ignored" || true',
+    'NI=$(wc -l < "$TD/ignored" | tr -d " ")',
+    'if [ "${NI:-0}" -gt 0 ]; then echo "deliver: SKIPPED $NI gitignored (never staged): $(head -n 10 "$TD/ignored" | tr "\\n" " ")$([ "$NI" -gt 10 ] && echo "…")"; else NI=0; fi',
+    // (c1d) SAY WHAT WAS LEFT BEHIND WHERE THE REVIEWER READS (crew#861): a `## Not shipped` section
+    // — each excluded path with its reason (first 40; the output has them all) and the gitignored
+    // count — spliced into the PR body AND the commit message immediately before the footer's `---`
+    // (the LAST such line: the composer's footer; a `---` inside the intent is never the last). The
+    // `Delivered-By:` trailer stays the final paragraph. Backticks are dropped from a path so the
+    // code span cannot be broken. Nothing to report ⇒ no section (the common case reads as before).
+    'if [ -s "$TD/excluded" ] || [ "$NI" -gt 0 ]; then',
+    `  { echo '${DELIVER_NOT_SHIPPED_HEADING}'; echo; echo "_Untracked paths the deliver phase found in the worktree and did NOT commit — they match the repository's ignore rules or the scratch / tool-artifact / key-material classifier (crew#434, crew#861). They are still in the worktree; the phase output names every one._"; echo;`,
+    '    if [ -s "$TD/excluded" ]; then head -n 40 "$TD/excluded" | while read -r RN P; do echo "- \\\`$(printf "%s" "$P" | tr -d "\\\`")\\\` — $RN"; done; NE=$(wc -l < "$TD/excluded" | tr -d " "); [ "$NE" -gt 40 ] && echo "- … and $((NE - 40)) more excluded paths (see the deliver phase output)"; fi',
+    '    [ "$NI" -gt 0 ] && echo "- $NI gitignored entr$([ "$NI" -eq 1 ] && echo y || echo ies) (\\\`git ls-files --others --ignored --directory\\\`) — never staged"',
+    '    echo; } > "$TD/notshipped"',
+    "  _splice() { awk -v sec=\"$2\" 'BEGIN { while ((getline l < sec) > 0) s = s l \"\\n\" } { a[NR] = $0; if ($0 == \"---\") last = NR } END { for (i = 1; i <= NR; i++) { if (i == last) printf \"%s\", s; print a[i] } if (!last) printf \"%s\", s }' \"$1\" > \"$1.new\" && mv \"$1.new\" \"$1\"; }",
+    '  _splice "$TD/body" "$TD/notshipped"; _splice "$TD/commit" "$TD/notshipped"',
+    'fi',
     // Only commit when something is staged — a run that committed incrementally (core#280's
     // liveness contract) leaves a clean tree and must not gain an empty commit here.
     // `--cleanup=whitespace`, NOT git's default for `-F`: an operator/repo `commit.cleanup=strip`

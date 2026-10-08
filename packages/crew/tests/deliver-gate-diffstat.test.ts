@@ -154,5 +154,14 @@ describe('the deliver gate diffstat is computed over exactly the set that will b
     expect(deliverExclusionReason('rec.bin', 1048576)).toBeNull();
     expect(deliverExclusionReason('src/added-a.ts', 10)).toBeNull();
     expect(deliverExclusionReason('docs/note.md', 10)).toBeNull();
+    // crew#861: test-runner / build-tool output, at any depth, and a tool's `*.log`.
+    expect(deliverExclusionReason('.vitest/json/output.json', 10)).toBe('tool-artifact-dir');
+    expect(deliverExclusionReason('web/playwright-report/index.html', 10)).toBe('tool-artifact-dir');
+    expect(deliverExclusionReason('test-results/a/trace.zip', 10)).toBe('tool-artifact-dir');
+    expect(deliverExclusionReason('pkg/__pycache__/m.cpython-312.pyc', 10)).toBe('tool-artifact-dir');
+    expect(deliverExclusionReason('vitest-debug.LOG', 10)).toBe('tool-artifact-name');
+    // A product file merely NAMED like a tool is still product.
+    expect(deliverExclusionReason('src/vitest.config.ts', 10)).toBeNull();
+    expect(deliverExclusionReason('docs/test-results.md', 10)).toBeNull();
   });
 });
