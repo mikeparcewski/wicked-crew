@@ -11,7 +11,7 @@
  *
  * The scope is a first-class input now: a PROJECT (default: every registered `crew.repo` member)
  * or an explicit repo list. From it this module derives the three things the engine is handed
- * (`wicked-core-ts chatOpen(chatId, clis, cwd, scopeJson)`):
+ * (the engine pool's `chat_open(chat_id, clis, cwd, scope)` before ASK-C1; a path's launch now):
  *
  *   - `cwd`         — a PRIVATE SCRATCH ROOT of the chat's own, under THIS daemon's per-process
  *                     namespace (`<os tmp>/wicked-crew-chats/<pid>-<random>/<chatId>`, see
@@ -51,7 +51,7 @@ import type { ChatScope, ChatScopeRepo, ChatScopeRequestKind, RepoEntry } from '
 import { estateExe, parseEstateTotals, resolveProjectGraphBinding, type ProjectGraphBindingDecision } from '../projects/graph.js';
 import type { ChatRefusalSource } from './seat-standing.js';
 
-/** The engine's per-seat answer to `chatOpen` (`ChatSeatOutcome` on the wire). */
+/** The engine's per-seat answer to the pool's `chat_open` (`ChatSeatOutcome` on the wire). */
 export interface ChatSeatOutcomeLike {
   cliKey: string;
   ok: boolean;
@@ -76,7 +76,7 @@ export interface ChatScopeRequest {
   kind?: ChatScopeRequestKind;
 }
 
-/** What the engine is handed for the chat — the wire shape of `chatOpen`'s `scopeJson` plus `cwd`. */
+/** What the engine is handed for the chat — the wire shape of the pool's `chat_open` scope plus `cwd`. */
 export interface EngineChatScope {
   cwd: string;
   codeGraphDb: string | null;
@@ -963,7 +963,7 @@ type ChatSlot =
       state: 'live';
       scope: ChatScope;
       refused: ChatSeatRefusal[];
-      /** What the ENGINE was handed at open (F-W1-005): a per-seat retry must re-run `chatOpen` with
+      /** What the ENGINE was handed at open (F-W1-005): a per-seat retry must re-run the pool's `chat_open` with
        *  the IDENTICAL scope — a different one makes the engine evict every warm seat (Copilot, #426). */
       engine?: EngineChatScope;
     }

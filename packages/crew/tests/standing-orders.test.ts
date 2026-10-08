@@ -417,9 +417,16 @@ describe('the seat parse', () => {
     expect(ruleFromAnswer('{"action":"launch"}')).toBeUndefined();
   });
 
-  function fakeAdapter(reply: string | null, ok = true) {
+  /**
+   * The stub engine (ASK-C4): `launchRun` takes the one-step path and, unless the seat stays silent,
+   * plays the run's frames — the step's capture, then the terminal frame — with the step's stored
+   * output behind `workOutput(<run>:parse-1)`. `early` plays them BEFORE `launchRun` resolves.
+   */
+  function fakeAdapter(reply: string | null, ok = true, early = false) {
     let listener: ((e: CoreEvent) => void) | null = null;
     const calls: string[] = [];
+    const launches: Array<Record<string, unknown>> = [];
+    const outputs = new Map<string, string>();
     const adapter = {
       projectsSupported: () => true,
       projectList: async () => [{ id: 'p-a', name: 'Project A' }],
@@ -429,20 +436,32 @@ describe('the seat parse', () => {
           listener = null;
         };
       },
-      chatOpen: async (id: string, clis: string[]) => {
-        calls.push(`open ${clis.join(',')}`);
-        return [{ cliKey: clis[0]!, ok: true }];
+      launchRun: async (input: Record<string, unknown>) => {
+        launches.push(input);
+        const plan = input['plan'] as { steps: Array<{ instructions: string }> };
+        calls.push(`launch ${String(input['primary'])} ${plan.steps[0]!.instructions.includes('p-a: Project A') ? 'with-projects' : 'no-projects'}`);
+        // The run id IS the launch's session id (the engine's contract).
+        const runId = String(input['sessionId']);
+        if (reply !== null) {
+          outputs.set(`${runId}:parse-1`, reply);
+          const play = () => {
+            // Another run's end in between is not this parse's.
+            listener?.({ type: 'sessionCompleted', session: 'someone-else' } as unknown as CoreEvent);
+            listener?.({ type: 'unitOutputCaptured', session: runId, ord: 0, attempt: 0, stepStatus: ok ? 'ok' : 'failed' } as unknown as CoreEvent);
+            listener?.({ type: ok ? 'sessionCompleted' : 'sessionFailed', session: runId } as unknown as CoreEvent);
+          };
+          if (early) play();
+          else setTimeout(play, 5);
+        }
+        return runId;
       },
-      chatSend: async (id: string, text: string) => {
-        calls.push(`send ${text.includes('p-a: Project A') ? 'with-projects' : 'no-projects'}`);
-        if (reply !== null) setTimeout(() => listener?.({ type: 'chatReply', chat: id, cliKey: 'claude', text: reply, ok } as unknown as CoreEvent), 5);
-        return ['claude'];
-      },
-      chatClose: async () => {
-        calls.push('close');
+      workOutput: async (unitId: string) => outputs.get(unitId) ?? null,
+      cancelRun: async (runId: string) => {
+        calls.push(`cancel ${runId}`);
+        return '{}';
       },
     } as unknown as CoreAdapter;
-    return { adapter, calls };
+    return { adapter, calls, launches };
   }
   const roster = (): RosterSeat[] =>
     [
@@ -450,44 +469,91 @@ describe('the seat parse', () => {
       { key: 'claude', chat_admission: { unscoped: { ok: true } } },
     ] as unknown as RosterSeat[];
 
-  it('one seat, one turn, the chat closed after', async () => {
-    const { adapter, calls } = fakeAdapter(JSON.stringify(gateRule('intake', 'approve', 'p-a')));
+  it('one seat, one step: a one-step path with primary = the chosen seat and no reviewer, never the chat pool', async () => {
+    const { adapter, calls, launches } = fakeAdapter(JSON.stringify(gateRule('intake', 'approve', 'p-a')));
     const out = await seatParser({ adapter, roster })('auto-approve intake on project A');
     expect(out).toEqual({ ok: true, rule: gateRule('intake', 'approve', 'p-a'), seat: 'claude' });
-    expect(calls).toEqual(['open claude', 'send with-projects', 'close']);
+    expect(calls).toEqual(['launch claude with-projects']);
+    expect(launches[0]).toMatchObject({
+      primary: 'claude',
+      plan: { steps: [{ catalog: 'understand', id: 'parse-1' }], monitors: { asked: 0 } },
+    });
+    expect(JSON.parse(String(launches[0]!['clisJson']))).toEqual([{ key: 'claude', chat_admission: { unscoped: { ok: true } } }]);
+    expect(launches[0]).not.toHaveProperty('repoRef');
+    expect(launches[0]).not.toHaveProperty('deliver');
+    expect(adapter).not.toHaveProperty('chatOpen');
+    expect(adapter).not.toHaveProperty('chatSend');
   });
 
-  it('an answer with no rule is a 422 carrying the answer; silence is a 502; no seat is a 409', async () => {
+  it('a run that ends before launchRun resolves is still read (frames are kept from before the launch)', async () => {
+    const { adapter } = fakeAdapter(JSON.stringify(gateRule('intake', 'approve', 'p-a')), true, true);
+    expect(await seatParser({ adapter, roster })('x')).toMatchObject({ ok: true, seat: 'claude' });
+  });
+
+  it('an answer with no rule is a 422 carrying the answer; silence is a 502 and the path is cancelled; no seat is a 409', async () => {
     expect(await seatParser({ adapter: fakeAdapter('no idea').adapter, roster })('x')).toMatchObject({ ok: false, code: 422, answer: 'no idea' });
     const silent = fakeAdapter(null);
-    expect(await seatParser({ adapter: silent.adapter, roster, timeoutMs: 30 })('x')).toMatchObject({ ok: false, code: 502 });
-    expect(silent.calls).toContain('close');
+    expect(await seatParser({ adapter: silent.adapter, roster, timeoutMs: 30 })('x')).toMatchObject({ ok: false, code: 502, error: 'the claude seat did not answer in 0.03 s' });
+    expect(silent.calls).toEqual(['launch claude with-projects', `cancel ${String(silent.launches[0]!['sessionId'])}`]);
     expect(await seatParser({ adapter: silent.adapter, roster: () => [] })('x')).toMatchObject({ ok: false, code: 409 });
   });
 
-  it('a seat that will not open is a 502 that leaves no reply timer armed (codex on #686)', async () => {
+  it('a path that will not launch is a 502 that leaves no reply timer armed (codex on #686)', async () => {
     const { adapter } = fakeAdapter(null);
-    (adapter as unknown as { chatOpen: unknown }).chatOpen = async (_id: string, clis: string[]) => [{ cliKey: clis[0]!, ok: false, error: 'signed out' }];
+    (adapter as unknown as { launchRun: unknown }).launchRun = async () => {
+      throw new Error('signed out');
+    };
     vi.useFakeTimers();
     try {
-      expect(await seatParser({ adapter, roster })('x')).toMatchObject({ ok: false, code: 502 });
+      expect(await seatParser({ adapter, roster })('x')).toMatchObject({ ok: false, code: 502, error: 'the claude seat could not open: signed out' });
       expect(vi.getTimerCount()).toBe(0);
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it('a project list that fails is a 502 from the parse, not a thrown 500 (codex on #686)', async () => {
+  it('a launch that hangs is the same timeout 502, and the run it finally names is cancelled (codex on ASK-C4)', async () => {
+    const { adapter, calls } = fakeAdapter(null);
+    let release: (id: string) => void = () => undefined;
+    let sessionId = '';
+    (adapter as unknown as { launchRun: unknown }).launchRun = (input: Record<string, unknown>) => {
+      sessionId = String(input['sessionId']);
+      return new Promise<string>((r) => { release = r; });
+    };
+    expect(await seatParser({ adapter, roster, timeoutMs: 30 })('x')).toMatchObject({ ok: false, code: 502, error: 'the claude seat did not answer in 0.03 s' });
+    // The run the hung launch may already have started is cancelled under its session id …
+    expect(calls).toEqual([`cancel ${sessionId}`]);
+    release(sessionId);
+    await new Promise((r) => setTimeout(r, 5));
+    // … and again once the launch names it (a no-op on an engine that already cancelled it).
+    expect(calls).toEqual([`cancel ${sessionId}`, `cancel ${sessionId}`]);
+  });
+
+  it('another run\'s terminal frame is never this parse\'s', async () => {
     const { adapter } = fakeAdapter(null);
+    let listener: ((e: CoreEvent) => void) | null = null;
+    (adapter as unknown as { onEvent: unknown }).onEvent = (fn: (e: CoreEvent) => void) => { listener = fn; return () => { listener = null; }; };
+    (adapter as unknown as { launchRun: unknown }).launchRun = async (input: Record<string, unknown>) => {
+      listener?.({ type: 'sessionCompleted', session: 'someone-else' } as unknown as CoreEvent);
+      return String(input['sessionId']);
+    };
+    expect(await seatParser({ adapter, roster, timeoutMs: 30 })('x')).toMatchObject({ ok: false, code: 502, error: 'the claude seat did not answer in 0.03 s' });
+  });
+
+  it('a project list that fails is a 502 from the parse, not a thrown 500 (codex on #686)', async () => {
+    const { adapter, calls } = fakeAdapter(null);
     (adapter as unknown as { projectList: unknown }).projectList = async () => {
       throw new Error('engine gone');
     };
     expect(await seatParser({ adapter, roster })('x')).toMatchObject({ ok: false, code: 502, error: 'engine gone' });
+    expect(calls).toEqual([]);
   });
 
-  it('a FAILED turn is a failure even when its text holds a rule-shaped object (codex on #686)', async () => {
+  it('a FAILED step is a failure even when its text holds a rule-shaped object (codex on #686)', async () => {
     const failed = fakeAdapter(JSON.stringify(gateRule('intake', 'approve')), false);
-    expect(await seatParser({ adapter: failed.adapter, roster })('x')).toMatchObject({ ok: false, code: 502 });
+    expect(await seatParser({ adapter: failed.adapter, roster })('x')).toMatchObject({ ok: false, code: 502, error: "the claude seat's turn failed" });
+    // The run ended on its own: nothing to cancel.
+    expect(failed.calls).toEqual(['launch claude with-projects']);
   });
 });
 

@@ -2950,7 +2950,7 @@ export function registerRoutes(
       const admissionKind = scope.kind === 'repos' && scope.repos.length === 1 ? 'path-bound' : 'path';
       const refused: ChatSeatRefusal[] = [];
       // The standing roster, read ONCE: the default admission below and the engine-drop
-      // attribution after `chatOpen` both consult it (F-A45-011).
+      // attribution after the engine's open both consult it (F-A45-011).
       const standing = rosterWithStanding();
       // ASK-C1: admission applies to the DEFAULT roster and to seats NAMED in `clis` alike — the
       // engine no longer refuses a seat at open (nothing is warmed), so this is the only gate
