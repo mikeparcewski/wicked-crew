@@ -284,6 +284,8 @@ export class SkillsRuntime {
   private readonly nowMs: () => number;
   /** crew#874: why the boot auto-refresh did not run (said in the finding), or `null`. */
   private autoRefreshNote: string | null = null;
+  /** crew#874: the published generation's `gardenSource`, keyed by its path (immutable per generation). */
+  private publishedGardenCache: { path: string; garden: { plugin_version: string; baseline: string } | null } | null = null;
 
   constructor(opts: SkillsRuntimeOptions) {
     this.store = opts.store;
@@ -315,28 +317,37 @@ export class SkillsRuntime {
    * decides on), named by version. `null` when they agree, when nothing is published, or when the
    * installed bundle cannot be read (that comparison is `GET /skills`' `installed.unreadable`).
    */
-  installedAheadFinding(m?: SkillManifest): SkillsHealthFinding | null {
-    if (this.lastHealth.state !== 'published') return null;
-    let manifest: SkillManifest;
-    try {
-      manifest = m ?? this.store.manifest();
-    } catch {
-      return null;
-    }
-    const installed = this.installed();
-    if (installed === null || installed.baseline === null || installed.baseline === manifest.baseline) return null;
-    const publishedVersion = manifest.baselines[manifest.baseline]?.plugin_version ?? null;
-    const gen = this.lastHealth.current?.gen ?? null;
-    const relation = versionRelation(installed.source.plugin_version, publishedVersion);
+  installedAheadFinding(opts: { fresh?: boolean } = {}): SkillsHealthFinding | null {
+    if (this.lastHealth.state !== 'published' || this.lastHealth.current === null) return null;
+    // The generation the engine is HANDED (its own snapshot.json), never the editable catalog: a
+    // refresh that landed without a publish moves the catalog, not what runs execute (codex r1).
+    const published = this.publishedGarden(this.lastHealth.current.path);
+    if (published === null) return null;
+    const installed = this.installed(opts.fresh === true);
+    if (installed === null || installed.baseline === null || installed.baseline === published.baseline) return null;
+    const relation = versionRelation(installed.source.plugin_version, published.plugin_version);
     const note = this.autoRefreshNote === null ? '' : ` (not refreshed automatically: ${this.autoRefreshNote})`;
     return {
       kind: 'skills.installed-ahead',
       severity: 'warning',
       message:
-        `installed wicked-garden ${installed.source.plugin_version} is ${relation} the published generation` +
-        `${gen === null ? '' : ` ${gen}`} (built from ${publishedVersion ?? 'an unrecorded version'}) — runs use the published generation's skills and scripts, not the installed ones; ` +
+        `installed wicked-garden ${installed.source.plugin_version} is ${relation} the published generation ` +
+        `${this.lastHealth.current.gen} (built from ${published.plugin_version}) — runs use the published generation's skills and scripts, not the installed ones; ` +
         `POST /skills/refresh-baseline then /skills/publish (each with {expectedRevision})${note}`,
     };
+  }
+
+  /** `snapshot.json` `gardenSource` of the generation at `path`, read once per path. Never throws. */
+  private publishedGarden(path: string): { plugin_version: string; baseline: string } | null {
+    if (this.publishedGardenCache?.path === path) return this.publishedGardenCache.garden;
+    let garden: { plugin_version: string; baseline: string } | null;
+    try {
+      garden = this.store.snapshotGardenSourceOf(path);
+    } catch {
+      garden = null;
+    }
+    this.publishedGardenCache = { path, garden };
+    return garden;
   }
 
   /**
@@ -349,7 +360,7 @@ export class SkillsRuntime {
    */
   async autoRefreshOnBoot(env: NodeJS.ProcessEnv = process.env): Promise<AutoRefreshOutcome> {
     const outcome = await this.autoRefreshInner(env);
-    if (outcome.action === 'skipped' || outcome.action === 'failed') this.autoRefreshNote = outcome.reason;
+    this.autoRefreshNote = outcome.action === 'skipped' || outcome.action === 'failed' ? outcome.reason : null;
     if (outcome.action === 'published') this.log(`[skills] skills.auto-refresh: installed wicked-garden ${outcome.to} published as generation ${outcome.gen} (baseline was ${outcome.from ?? 'unrecorded'}; nothing was user-edited)`);
     else if (outcome.action !== 'none') this.log(`[skills] skills.auto-refresh ${outcome.action}: ${outcome.reason}`);
     return outcome;
@@ -357,31 +368,33 @@ export class SkillsRuntime {
 
   private async autoRefreshInner(env: NodeJS.ProcessEnv): Promise<AutoRefreshOutcome> {
     try {
-      if (this.lastHealth.state !== 'published') return { action: 'none', reason: `skills state is ${this.lastHealth.state}` };
-      const m = this.store.manifest();
+      if (this.lastHealth.state !== 'published' || this.lastHealth.current === null) return { action: 'none', reason: `skills state is ${this.lastHealth.state}` };
+      const published = this.publishedGarden(this.lastHealth.current.path);
       const installed = this.installed(true);
-      if (installed === null || installed.baseline === null || installed.baseline === m.baseline) return { action: 'none', reason: 'the installed plugin matches the baseline' };
+      if (installed === null || installed.baseline === null || published === null || installed.baseline === published.baseline) {
+        return { action: 'none', reason: 'the installed plugin is the one the published generation was built from' };
+      }
       const flag = (env[SKILLS_AUTO_REFRESH_ENV] ?? '').trim().toLowerCase();
       if (flag === '0' || flag === 'false' || flag === 'off') return { action: 'skipped', reason: `${SKILLS_AUTO_REFRESH_ENV}=${flag}` };
       const pristine = this.store.pristine();
       if (!pristine.pristine) return { action: 'skipped', reason: `the catalog holds operator changes (${pristine.reason}) — refresh and publish by hand to merge them` };
-      const from = m.baselines[m.baseline]?.plugin_version ?? null;
-      const refreshed = this.store.refreshBaseline(m.revision);
+      const from = published.plugin_version;
+      const refreshed = this.store.refreshBaseline(this.store.manifest().revision);
       if (refreshed.verdict === 'blocked' || refreshed.conflicts.length > 0 || refreshed.kept.length > 0) {
         return { action: 'failed', reason: `refresh-baseline came back ${refreshed.verdict} (${refreshed.conflicts.length} conflict(s), ${refreshed.kept.length} kept) — nothing published` };
       }
       this.refreshBaseSkill();
-      const published = await this.store.publish(refreshed.revision, async (result, pacer) => {
+      const outcomeOf = await this.store.publish(refreshed.revision, async (result, pacer) => {
         if (result.snapshot !== null && result.unchanged !== true) {
           this.notePublished(result);
           await this.afterPublishPaced(pacer);
         }
       });
-      if (published.verdict === 'blocked' || published.snapshot === null) {
-        return { action: 'failed', reason: `publish was blocked: ${published.findings.filter((f) => f.severity === 'blocking').map((f) => `${f.kind}: ${f.evidence}`).join('; ')} — the previous generation stays current` };
+      if (outcomeOf.verdict === 'blocked' || outcomeOf.snapshot === null) {
+        return { action: 'failed', reason: `the baseline was refreshed but the publish was blocked: ${outcomeOf.findings.filter((f) => f.severity === 'blocking').map((f) => `${f.kind}: ${f.evidence}`).join('; ')} — the previous generation stays current` };
       }
       this.installed(true);
-      return { action: 'published', gen: published.snapshot.gen, from, to: refreshed.plugin_version };
+      return { action: 'published', gen: outcomeOf.snapshot.gen, from, to: refreshed.plugin_version };
     } catch (err) {
       return { action: 'failed', reason: err instanceof Error ? err.message : String(err) };
     }
@@ -507,7 +520,7 @@ export class SkillsRuntime {
       });
     }
     const source = sourceFinding(manifest);
-    const ahead = this.installedAheadFinding(manifest);
+    const ahead = this.installedAheadFinding();
     const extra = [...(source === null ? [] : [source]), ...(ahead === null ? [] : [ahead])];
     return this.withBaseSkill(extra.length === 0 ? base : { ...base, findings: [...base.findings, ...extra] });
   }

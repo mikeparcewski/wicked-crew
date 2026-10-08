@@ -76,6 +76,18 @@ describe('skills.installed-ahead (crew#874)', () => {
     expect(aheadOf(runtime)?.message).toContain('not refreshed automatically: the catalog holds operator changes (skill wicked-garden-gamma is override)');
   });
 
+  it('a refresh with no publish moves the catalog, not the handed generation: the finding stays (codex r1)', async () => {
+    const { sc, runtime } = await booted();
+    upgrade(sc, '1.1.0');
+    const refreshed = sc.store.refreshBaseline(sc.store.revision());
+    expect(refreshed.verdict).not.toBe('blocked');
+    expect(sc.store.manifest().baseline).toBe(refreshed.baseline);
+    expect(aheadOf(runtime)?.message).toContain('installed wicked-garden 1.1.0 is ahead of the published generation 1 (built from 1.0.0)');
+    // …and the boot path still finishes the job: the refresh is a no-op, the publish lands.
+    expect(await runtime.autoRefreshOnBoot({})).toMatchObject({ action: 'published', gen: 2 });
+    expect(aheadOf(runtime)).toBeUndefined();
+  });
+
   it(`${SKILLS_AUTO_REFRESH_ENV}=0 turns the boot refresh off`, async () => {
     const { sc, runtime } = await booted();
     upgrade(sc, '1.1.0');

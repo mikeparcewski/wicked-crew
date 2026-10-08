@@ -1179,6 +1179,13 @@ export class SkillsStore {
     return this.snapshotSkillsOf(current);
   }
 
+  /** The garden a published generation was built from (`snapshot.json` `gardenSource`), or `null` when its metadata does not read (crew#874). */
+  snapshotGardenSourceOf(path: string): { plugin_version: string; baseline: string } | null {
+    const meta = this.readSnapshotMetadata(path);
+    if (typeof meta === 'string') return null;
+    return { plugin_version: meta.parsed.gardenSource.plugin_version, baseline: meta.parsed.gardenSource.baseline };
+  }
+
   /** `currentSnapshotSkills()` for a generation the caller holds VERIFIED already (the ladder's own, just exported) — the metadata read alone, no re-walk (crew#852). */
   snapshotSkillsOf(current: CurrentSnapshot): { gen: number; skills: string[] } | null {
     const meta = this.readSnapshotMetadata(current.path);
