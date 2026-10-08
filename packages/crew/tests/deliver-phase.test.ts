@@ -388,9 +388,10 @@ describe('deliverPrScript (the hardened field script)', () => {
   // F-BM-002 (crew#579): the scratch DIRECTORIES are excluded at enumeration — one git call, one
   // line per directory — never a fork per file for a path the classifier would exclude anyway.
   it('excludes the scratch directories at enumeration and reports each once with a count (F-BM-002)', () => {
-    expect(script).toContain("git ls-files --others --exclude-standard -z -- . ':(exclude)tmp' ':(exclude).tmp' ':(exclude)scratch' ':(exclude).cache' ':(exclude)coverage'");
-    expect(script).toContain('for SD in tmp .tmp scratch .cache coverage; do');
-    expect(script).toContain('deliver: EXCLUDED (scratch-dir): $SD/ ($N files)');
+    expect(script).toContain("git ls-files --others --exclude-standard -z -- . ':(exclude)tmp' ':(exclude).tmp' ':(exclude)scratch' ':(exclude).cache' ':(exclude)coverage' ':(exclude).vitest'");
+    // crew#861: the test-runner / build-tool output dirs ride the same enumeration-time exclusion.
+    expect(script).toContain('for SD in tmp .tmp scratch .cache coverage .vitest playwright-report test-results node_modules');
+    expect(script).toContain('deliver: EXCLUDED ($DR): $SD/ ($N files)');
     expect(script.indexOf('for SD in tmp')).toBeLessThan(script.indexOf('while IFS= read -r -d "" F; do'));
   });
 

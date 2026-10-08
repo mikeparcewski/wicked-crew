@@ -27,7 +27,7 @@ import {
 } from '../src/core/deliver.js';
 import { deliveryRecordFrom } from '../src/api/delivery-index.js';
 import { deliverExclusionReason } from '../src/core/deliver-exclusions.js';
-import { commitSubject, composeDeliverText, deliverTitle, factsFromWorkflow, framedDeliverText } from '../src/core/deliver-text.js';
+import { DELIVER_TITLE_MAX, commitSubject, composeDeliverText, deliverTitle, factsFromWorkflow, framedDeliverText } from '../src/core/deliver-text.js';
 
 const RUN_ID = '1bc72c20-0457-425f-b4cb-215a40e68e1e';
 
@@ -492,6 +492,67 @@ describe('deliver script, driven for real (crew#317)', () => {
     //   • of what the script left behind, TS keeps nothing.
     expect(keptByTs).toEqual(['feature.ts']);
     expect(untrackedOf(fx.workdir).filter((p) => tsExclusion(fx.workdir, p) === null)).toEqual([]);
+  }, 60_000);
+
+  // crew#861 (S17b F14): a creator's read-only re-verify left `.vitest/json/output.json` (a vitest
+  // JSON reporter's output) untracked at the worktree root; `git add -A` would have shipped it. The
+  // tool-artifact directories and `*.log` are excluded, the repository's ignore rules are honoured,
+  // and EVERY skip is named — in the phase output and in the PR body / commit message itself.
+  it('SKIPS gitignored paths and test-runner artifacts (.vitest/, playwright-report/, *.log) and names them in the PR (crew#861)', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'feature.ts'), 'export const feature = 1;\n');
+    writeFileSync(join(fx.workdir, '.gitignore'), 'dist/\n');
+    mkdirSync(join(fx.workdir, 'dist'));
+    writeFileSync(join(fx.workdir, 'dist', 'bundle.js'), 'built\n'); // gitignored
+    mkdirSync(join(fx.workdir, '.vitest', 'json'), { recursive: true });
+    // Small enough that the 1 MiB size net would NOT have caught it — only the class does.
+    writeFileSync(join(fx.workdir, '.vitest', 'json', 'output.json'), JSON.stringify({ numTotalTests: 483 }));
+    mkdirSync(join(fx.workdir, 'web', 'playwright-report'), { recursive: true });
+    writeFileSync(join(fx.workdir, 'web', 'playwright-report', 'index.html'), '<html></html>\n'); // nested tool dir
+    writeFileSync(join(fx.workdir, 'vitest-debug.log'), 'trace\n');
+    // A crafted name cannot open a heading in the PR body: its newline is folded on the record line.
+    writeFileSync(join(fx.workdir, 'evil\n## Injected.log'), 'x\n');
+    // `-z`: git's own unquoted spelling, so the newline name is classified as the script sees it.
+    const untrackedZ = (): string[] => git(fx.workdir, 'ls-files', '--others', '--exclude-standard', '-z').split('\0').filter((l) => l !== '');
+    const keptByTs = untrackedZ().filter((p) => tsExclusion(fx.workdir, p) === null).sort();
+
+    const r = await runDeliver(fx, { intent: 'ship the feature' });
+
+    expect(r.status).toBe(0);
+    const files = git(fx.origin, 'show', '--name-only', '--format=', `wicked/${RUN_ID}`).trim().split('\n').sort();
+    expect(files).toEqual(['.gitignore', 'feature.ts']);
+    // Named in the phase output, each with its reason.
+    expect(r.output).toContain('deliver: EXCLUDED (tool-artifact-dir): .vitest/ (1 files)');
+    expect(r.output).toContain('deliver: EXCLUDED (tool-artifact-dir): web/playwright-report/index.html');
+    expect(r.output).toContain('deliver: EXCLUDED (tool-artifact-name): vitest-debug.log');
+    expect(r.output).toMatch(/deliver: SKIPPED 1 gitignored \(never staged\): dist\//);
+    // …and where the reviewer reads: the PR body and the commit message, above the footer.
+    const body = r.pr?.body ?? '';
+    expect(body).toContain('## Not shipped');
+    expect(body).toContain('- `.vitest/ (1 files)` — tool-artifact-dir');
+    expect(body).toContain('- `web/playwright-report/index.html` — tool-artifact-dir');
+    expect(body).toContain('- `vitest-debug.log` — tool-artifact-name');
+    expect(body).toContain('- 1 gitignored entry');
+    expect(body).toContain('- `evil?## Injected.log` — tool-artifact-name');
+    expect(body).not.toMatch(/^## Injected/m);
+    expect(body.indexOf('## Not shipped')).toBeLessThan(body.lastIndexOf('\n---\n'));
+    const message = git(fx.origin, 'log', '-1', '--format=%B', `wicked/${RUN_ID}`);
+    expect(message).toContain('## Not shipped');
+    expect(message.trim().split('\n').pop()).toMatch(/^Delivered-By: wicked-crew run\b/);
+    // Skipped, never deleted.
+    const status = git(fx.workdir, 'status', '--porcelain');
+    for (const p of ['.vitest/', 'web/', 'vitest-debug.log', 'Injected.log']) expect(status).toContain(p);
+    // The TS classifier (the deliver gate's diffstat) agrees with the shell, both ways.
+    expect(keptByTs).toEqual(['.gitignore', 'feature.ts']);
+    expect(untrackedZ().filter((p) => tsExclusion(fx.workdir, p) === null)).toEqual([]);
+  }, 60_000);
+
+  it('adds no Not-shipped section when nothing was skipped', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'feature.ts'), 'export const feature = 1;\n');
+    const r = await runDeliver(fx, { intent: 'ship the feature' });
+    expect(r.status).toBe(0);
+    expect(r.pr?.body ?? '').not.toContain('## Not shipped');
   }, 60_000);
 
   // ── DES-L9 D-18 — IDENTITY (crew#549 / F-RC1-010) ─────────────────────────────────────────────
@@ -1064,9 +1125,9 @@ describe('deliver script — composed PR text (crew#524)', () => {
     // BC-72: the `bug` workflow's conventional prefix rides the fallback title too.
     expect(r.pr!.title).toBe(deliverTitle(INTENT, RUN_ID, 'bug'));
     expect(r.pr!.title.startsWith('fix: ')).toBe(true);
-    // crew#550 P-1: the PR title runs to GitHub's 256 — this one fits whole; only the commit subject is cut.
-    expect(r.pr!.title.length).toBeLessThanOrEqual(256);
-    expect(r.pr!.title.endsWith('…')).toBe(false);
+    // crew#860: the PR title is the intent's first sentence inside 100 columns (this one is cut at a
+    // word boundary); the commit subject is cut at 72.
+    expect(r.pr!.title.length).toBeLessThanOrEqual(DELIVER_TITLE_MAX);
     expect(r.pr!.body).toBe(`${expected.body}\n`);
     expect(r.pr!.body).toContain('Fixes #214');
     expect(r.pr!.body).toContain('Refs: #211'); // `wicked-studio#211` on a wicked-studio delivery (W3-K2)

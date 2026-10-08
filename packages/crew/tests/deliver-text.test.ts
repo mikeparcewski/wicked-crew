@@ -33,6 +33,11 @@ import {
   composeEmbeddedDeliverText,
   extractFollowUps,
   FOLLOW_UPS_MAX,
+  extractRecipeExits,
+  extractUnitReport,
+  firstSentence,
+  reportsFromOutputs,
+  REPORT_MAX_CHARS,
 } from '../src/core/deliver-text.js';
 import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
 import type { SessionView, WorkUnit } from '../src/core/types.js';
@@ -140,14 +145,17 @@ function runView(): SessionView {
   };
 }
 
-describe('deliverTitle / commitSubject — never cut mid-word (F-3R2-014); the PR title runs to 256, the commit subject to 72 (crew#550)', () => {
+describe('deliverTitle / commitSubject — never cut mid-word (F-3R2-014); the PR title runs to 100 (crew#860), the commit subject to 72 (crew#550)', () => {
   it('is the intent’s first line when it fits', () => {
     expect(deliverTitle('add the attention-reason helper', RUN_ID)).toBe('add the attention-reason helper');
   });
 
   it('cuts the F-3R2-014 intent at a word boundary with an ellipsis, inside 72 characters', () => {
-    // crew#550 P-1: the PR title is the whole first line — GitHub allows 256 characters.
-    expect(deliverTitle(INTENT, RUN_ID)).toBe(INTENT.split('\n')[0]!.trim());
+    // crew#860: the PR title is the first SENTENCE, cut at a word boundary inside 100 characters.
+    const prTitle = deliverTitle(INTENT, RUN_ID);
+    expect(prTitle.length).toBeLessThanOrEqual(DELIVER_TITLE_MAX);
+    expect(prTitle.endsWith('…')).toBe(true);
+    expect(INTENT.startsWith(prTitle.slice(0, -1))).toBe(true);
     const title = commitSubject(deliverTitle(INTENT, RUN_ID));
     expect(title.length).toBeLessThanOrEqual(COMMIT_SUBJECT_MAX);
     expect(title.endsWith('…')).toBe(true);
@@ -425,7 +433,7 @@ describe('deliverTitle — conventional prefix, no bare-URL titles, cuts outside
   it('never titles a PR with a bare issue URL — the issue it names becomes the headline and a Refs link', () => {
     const url = 'https://github.com/mikeparcewski/wicked-studio/issues/227';
     expect(deliverTitle(url, RUN_ID, 'bug')).toBe('fix: resolve mikeparcewski/wicked-studio#227');
-    expect(deliverTitle(`${url}\n\nBump astro past the advisory.`, RUN_ID, 'bug')).toBe('fix: Bump astro past the advisory.');
+    expect(deliverTitle(`${url}\n\nBump astro past the advisory.`, RUN_ID, 'bug')).toBe('fix: Bump astro past the advisory');
     expect(deliverTitle(`<${url}>`, RUN_ID)).toBe('resolve mikeparcewski/wicked-studio#227');
     expect(deliverTitle('https://example.com/not-github', RUN_ID)).toBe(`wicked-crew run ${RUN_ID}`);
     expect(issueRefs(`${url}\nfix it`).refs).toEqual(['mikeparcewski/wicked-studio#227']);
@@ -435,8 +443,9 @@ describe('deliverTitle — conventional prefix, no bare-URL titles, cuts outside
   it('cuts at the last word boundary OUTSIDE a quoted or bracketed phrase (crew#550 P-1)', () => {
     // The #273 headline: the old cut landed inside `'sign a seat in'`.
     const line = "Run failure card: headline truncated at '(Failed):' and 'sign a seat in' when the failed unit is a seat sign-in";
-    // The PR title keeps the whole line (GitHub's 256); the 72-column commit subject is where the cut lands.
-    expect(deliverTitle(line, RUN_ID)).toBe(line);
+    // crew#860: the PR title is cut inside 100 columns — at a boundary outside the quoted phrases.
+    expect(deliverTitle(line, RUN_ID)).toBe(boundedTitle(line, DELIVER_TITLE_MAX));
+    expect(deliverTitle(line, RUN_ID)).toBe("Run failure card: headline truncated at '(Failed):' and 'sign a seat in' when the failed unit is a…");
     expect(commitSubject(line)).toBe("Run failure card: headline truncated at '(Failed):' and…");
     const title = boundedTitle(line, 72);
     expect(title.length).toBeLessThanOrEqual(72);
@@ -727,5 +736,118 @@ describe('evaluator follow-ups (crew#550 P-7)', () => {
     expect(composeDeliverText({ ...base, followUps: [] }).body).toContain('## Follow-ups\n\n_None flagged by the evaluator._');
     expect(composeDeliverText(base).body).not.toContain('## Follow-ups');
     expect(factsFromRun(runView(), null, { followUps: ['x'] }).followUps).toEqual(['x']);
+  });
+});
+
+// crew#860 (S17b F15 / S17a F20): the PR title is a headline — the intent's first sentence inside
+// 100 characters — and the body carries the done-when evidence the run already recorded.
+describe('crew#860 — a ≤100-char first-sentence title and a done-when evidence body', () => {
+  /** The S17b intent's opening (wicked-studio#586 opened under its first 244 characters). */
+  const S17B =
+    'Build slice S17b in wicked-studio: Everything › Sessions can list every run on the daemon as a sortable, filterable, paged table. ' +
+    'One surface family: the runs table on the Sessions tab. Follows DES-STUDIO-REBUILD-001 Amendment 5 and §5.4 of the design, ' +
+    'with the done-when list below.\n\nDone when: the PR lists the columns.';
+
+  it('titles the S17b run with its first sentence, ≤ 100 characters, never mid-word; the run id rides the body', () => {
+    const title = deliverTitle(S17B, RUN_ID, 'feature');
+    expect(title.length).toBeLessThanOrEqual(DELIVER_TITLE_MAX);
+    expect(DELIVER_TITLE_MAX).toBe(100);
+    expect(title.startsWith('feat: Build slice S17b in wicked-studio')).toBe(true);
+    expect(title.endsWith('…')).toBe(true);
+    // Cut at a word boundary of the first sentence — nothing of the second sentence.
+    const kept = title.slice('feat: '.length, -1);
+    expect(S17B.startsWith(kept)).toBe(true);
+    expect(S17B[kept.length]).toMatch(/[\s,;:]/);
+    expect(title).not.toContain('One surface family');
+    expect(title).not.toContain(RUN_ID);
+    // A first sentence that fits is the whole title, without its full stop.
+    expect(deliverTitle('Fix the deliver title. Then the body.', RUN_ID, 'bug')).toBe('fix: Fix the deliver title');
+    const { body } = composeDeliverText(factsFromRun(runView(), null, { workflowId: 'feature' }));
+    expect(body).toContain(`- Run: \`${RUN_ID}\``);
+  });
+
+  it('firstSentence ignores abbreviations, dotted names and stops inside brackets or quotes', () => {
+    expect(firstSentence('Bump crew to 0.8.4 in deliver.ts. Then release.')).toBe('Bump crew to 0.8.4 in deliver.ts');
+    expect(firstSentence('Cover tool output, e.g. .vitest/ dirs. More.')).toBe('Cover tool output, e.g. .vitest/ dirs');
+    expect(firstSentence('Say it (as the S17b run did. twice) and stop. Tail')).toBe('Say it (as the S17b run did. twice) and stop');
+    expect(firstSentence('Is the PR body honest? Yes.')).toBe('Is the PR body honest?');
+    expect(firstSentence('no terminator here')).toBe('no terminator here');
+  });
+
+  it('reads the creator recipe exit codes in the shapes seats paste them', () => {
+    const out = [
+      '## What I did',
+      '- added the runs table',
+      '## Commands run',
+      '- `npm run typecheck` → exit 0',
+      '- `npm run lint` -> 0',
+      '| `npx vitest run src/desk` | 0 | 4.1s |',
+      '- python3 e2e/run_journeys.py --check-desk (exit code: 0)',
+      '- `npm run typecheck` → exit 2',
+      '- all checks green exit 0',
+      '- `vite build` ran fine',
+    ].join('\n');
+    expect(extractRecipeExits(out)).toEqual([
+      { command: 'npm run lint', exit: 0 },
+      { command: 'npx vitest run src/desk', exit: 0 },
+      { command: 'python3 e2e/run_journeys.py --check-desk', exit: 0 },
+      // A re-run supersedes: the LAST pasted code for a command wins.
+      { command: 'npm run typecheck', exit: 2 },
+    ]);
+    expect(extractRecipeExits(null)).toEqual([]);
+    expect(extractRecipeExits('nothing to see')).toEqual([]);
+  });
+
+  it('extracts the seat report from the first report heading, demoted, bounded, VERDICT lines dropped', () => {
+    const r = extractUnitReport('thinking…\nmore noise\n# What I did\nthe work\n## Findings\n- none\nVERDICT: PASS\n```\nunclosed');
+    expect(r).not.toBeNull();
+    expect(r!.startsWith('#### What I did')).toBe(true);
+    expect(r).toContain('#### Findings');
+    expect(r).not.toContain('VERDICT: PASS');
+    expect(r).not.toContain('thinking');
+    expect((r!.match(/```/g) ?? []).length % 2).toBe(0);
+    const long = extractUnitReport(`## Summary\n${'line of report\n'.repeat(1000)}`)!;
+    expect(long.length).toBeLessThanOrEqual(REPORT_MAX_CHARS + 100);
+    expect(long).toContain('full report is on the run record');
+    expect(extractUnitReport('   \n ')).toBeNull();
+  });
+
+  it('composes the done-when evidence table from a fixture record: floor per phase, verdicts, pasted recipe exit codes', async () => {
+    const view = runView();
+    const outputs: Record<string, string> = {
+      [`${RUN_ID}:fix`]: '## What I did\n- routed the project page\n## Commands run\n- `npm run typecheck` → exit 0\n- `npx vitest run` → exit 0\n',
+      [`${RUN_ID}:verify`]: '## Findings\n- Concern: the archive toggle lacks a test\nVERDICT: PASS\n',
+    };
+    const reports = await reportsFromOutputs(view, async (u) => outputs[u.id] ?? null);
+    expect(reports.map((r) => [r.phase, r.role, r.seat])).toEqual([
+      ['fix', 'creator', 'claude'],
+      ['verify', 'evaluator', 'pi'],
+    ]);
+    const { body } = composeDeliverText(factsFromRun(view, null, { workflowId: 'bug', reports }));
+    expect(body).toContain('## Done-when evidence');
+    expect(body).toContain('| phase | seat | floor (exit codes) | evaluator verdict | recipe the seat ran (pasted exit codes) |');
+    // The verify phase's floor, each check with its exit (a timeout says so) and its recorded verdict.
+    const table = body.slice(body.indexOf('## Done-when evidence'), body.indexOf('## Creator report')).split('\n');
+    const verifyRow = table.find((l) => l.startsWith('| `verify` |'))!;
+    expect(verifyRow).toContain('typecheck 0 · lint 0 · test 1 · e2e timed out');
+    expect(verifyRow).toContain('| pi |');
+    // The creator's pasted recipe.
+    const fixRow = table.find((l) => l.startsWith('| `fix` |'))!;
+    expect(fixRow).toContain('`npm run typecheck` → 0<br>`npx vitest run` → 0');
+    // The reports themselves ride under their own headings.
+    expect(body).toContain('## Creator report');
+    expect(body).toContain('- routed the project page');
+    expect(body).toContain('## Evaluator findings');
+    expect(body).toContain('Concern: the archive toggle lacks a test');
+    // The evidence precedes the footer.
+    expect(body.indexOf('## Done-when evidence')).toBeLessThan(body.indexOf('\n---\n'));
+  });
+
+  it('says the outputs could not be read when no reader was available, and composes no table at definition time', () => {
+    const { body } = composeDeliverText(factsFromRun(runView(), null, { workflowId: 'bug' }));
+    expect(body).toContain("_The creator's output could not be read when this PR opened — the run record has it._");
+    const def = BUILTIN_WORKFLOWS.find((w) => w.id === 'bug')!;
+    const fromDef = composeDeliverText(factsFromWorkflow({ runId: RUN_ID, intent: 'fix it', workflowId: 'bug', phases: def.phases, repoRef: null, runUrl: null }));
+    expect(fromDef.body).not.toContain('## Done-when evidence');
   });
 });
