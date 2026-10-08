@@ -131,6 +131,8 @@ const MIRRORED_IDS = [
   'bug',
   'migration',
   'domain-extraction',
+  // The MCP-server drop-in (DES-mcp-server-workflow): `instructions` and the install `executor` included.
+  'mcp-server',
   // `survey-repo` and `domain-graph-slice` were guarded here until DES-TEAMING-002 wave 1 deleted
   // both workflows (core and crew): nothing to mirror, nothing to guard.
 ];

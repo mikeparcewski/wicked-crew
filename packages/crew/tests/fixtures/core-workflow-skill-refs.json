@@ -3,6 +3,10 @@
   "refs": [
     "wicked-garden-domain",
     "wicked-garden-domain-coverage",
-    "wicked-garden-domain-extractor"
+    "wicked-garden-domain-extractor",
+    "wicked-garden-mcp-scaffold",
+    "wicked-garden-platform-security-engineer",
+    "wicked-garden-qe-contract-testing-engineer",
+    "wicked-garden-qe-observability-test-engineer"
   ]
 }
