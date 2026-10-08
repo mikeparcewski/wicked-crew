@@ -3604,8 +3604,8 @@ export function registerRoutes(
     }
     const rawAttempt = (req.query as { attempt?: string | string[] }).attempt;
     const attemptArg = Array.isArray(rawAttempt) ? rawAttempt[0] : rawAttempt;
-    const wanted = attemptArg === undefined || attemptArg === '' ? undefined : Number(attemptArg);
-    if (wanted !== undefined && (!Number.isInteger(wanted) || wanted < 0)) {
+    const wanted = attemptArg === undefined || attemptArg === '' ? undefined : /^\d{1,9}$/.test(attemptArg) ? Number(attemptArg) : NaN;
+    if (wanted !== undefined && !Number.isSafeInteger(wanted)) {
       return reply.code(400).send({ error: '`attempt` must be a non-negative integer' });
     }
     // Keyed off the unit RECORD (the same derivation the evidence bundle uses), not off the

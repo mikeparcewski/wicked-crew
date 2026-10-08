@@ -163,11 +163,15 @@ export function capturedAttempts(events: readonly Record<string, unknown>[], ord
 /**
  * The attempt the stored transcript belongs to: the LATEST captured attempt that folded (`ok`)
  * whose byte count matches the stored text, else the latest `ok` attempt (an engine that does not
- * report `outputBytes`), else `null` when the log cannot say.
+ * report `outputBytes`), else `null` when the log cannot say. Frames with no `stepStatus` count as
+ * folded only when no frame carries one.
  */
 export function storedAttempt(attempts: readonly CapturedAttempt[], output: string): number | null {
   const bytes = Buffer.byteLength(output, 'utf8');
-  const folded = attempts.filter((a) => a.stepStatus === 'ok' || a.stepStatus === null);
+  // A status-less frame counts as folded only on an engine that reports no statuses at all; once
+  // any frame carries one, only `ok` folds (a status-less failed attempt must not claim the bytes).
+  const statusless = attempts.every((a) => a.stepStatus === null);
+  const folded = attempts.filter((a) => a.stepStatus === 'ok' || (statusless && a.stepStatus === null));
   const exact = [...folded].reverse().find((a) => a.outputBytes === bytes);
   if (exact !== undefined) return exact.attempt;
   const last = folded[folded.length - 1];

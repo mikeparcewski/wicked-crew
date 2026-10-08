@@ -132,14 +132,17 @@ function linkTo(target: string, link: string): void {
   try {
     symlinkSync(target, link);
   } catch (err) {
-    // A concurrent daemon from the same install linked it first: fine if it agrees.
     if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    // A concurrent daemon from the same install linked it first: fine ONLY if it agrees —
+    // anything else (a file, a link elsewhere) throws so the caller falls back to a fresh dir.
+    if (!(lstatSync(link).isSymbolicLink() && readlinkSync(link) === target)) throw err;
   }
 }
 
 /** Write a Windows `.cmd` forwarder to `target` (a `.cmd` shim resolves `%~dp0` from its own dir). */
 function cmdForwarder(target: string, link: string): void {
-  const body = `@"${target}" %*\r\n`;
+  // `%` expands inside a quoted batch string, so a literal one in the path is doubled.
+  const body = `@"${target.replace(/%/g, '%%')}" %*\r\n`;
   try {
     if (readFileSync(link, 'utf8') === body) return;
   } catch {

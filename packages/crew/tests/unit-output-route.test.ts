@@ -336,6 +336,7 @@ describe('GET /runs/:id/units/:unitKey/output — attempts (crew#848)', () => {
     expect(res.statusCode).toBe(404);
     expect(res.json<{ attempts: number[] }>().attempts).toEqual([0, 1]);
     const bad = await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN}/units/annotate/output?attempt=-1` });
+    expect((await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN}/units/annotate/output?attempt=9007199254740993` })).statusCode).toBe(400);
     expect(bad.statusCode).toBe(400);
   });
 
@@ -353,5 +354,15 @@ describe('GET /runs/:id/units/:unitKey/output — attempts (crew#848)', () => {
     expect(body.attempt).toBe(1);
     expect(body.superseded).toBeUndefined();
     await app2.close();
+  });
+});
+
+describe('storedAttempt (crew#848, codex r1)', () => {
+  it('a status-less frame never claims the bytes once any frame carries a status', async () => {
+    const { storedAttempt } = await import('../src/api/unit-output.js');
+    const text = 'abc';
+    expect(storedAttempt([{ attempt: 0, outputBytes: 3, stepStatus: 'ok' }, { attempt: 1, outputBytes: 3, stepStatus: null }], text)).toBe(0);
+    expect(storedAttempt([{ attempt: 0, outputBytes: 3, stepStatus: null }, { attempt: 1, outputBytes: 3, stepStatus: null }], text)).toBe(1);
+    expect(storedAttempt([{ attempt: 0, outputBytes: 9, stepStatus: 'timed_out' }], text)).toBeNull();
   });
 });

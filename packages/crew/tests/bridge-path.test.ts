@@ -112,6 +112,21 @@ describe('ensureBridgesOnPath', () => {
     expect(readdirSync(onPath).sort()).toEqual(['codex-acp']);
   });
 
+  it('a non-link squatting on a bridge name in the shared dir sends the daemon to a fresh dir (codex r1)', () => {
+    const { root, start } = fixture('codex-acp');
+    const shared = join(root, 'node_modules', '.wicked-crew-bridges');
+    mkdirSync(join(shared, 'codex-acp'), { recursive: true }); // a directory: unlink fails, nothing agrees
+    const before = process.env['PATH'];
+    cleanups.push(() => {
+      if (before === undefined) delete process.env['PATH'];
+      else process.env['PATH'] = before;
+    });
+    const onPath = ensureBridgesOnPath(start) as string;
+    cleanups.push(() => rmSync(onPath, { recursive: true, force: true }));
+    expect(onPath).not.toBe(shared);
+    expect(existsSync(join(onPath, 'codex-acp'))).toBe(true);
+  });
+
   it('leaves PATH untouched when nothing is found', () => {
     const root = mkdtempSync(join(tmpdir(), 'bridge-path-none2-'));
     cleanups.push(() => rmSync(root, { recursive: true, force: true }));
