@@ -321,7 +321,7 @@ describe('the shipped scope-drift entry', () => {
       enabled: true,
     });
     // The first bus-listening entry: the router now names a bus type, so the registry arms the pull.
-    expect(new Router(entries).busTypes()).toEqual([PLAN_ACCEPTED]);
+    expect(new Router([e!]).busTypes()).toEqual([PLAN_ACCEPTED]);
   });
 
   it('replay at arm reads the run\'s plan.accepted row from the bus history; live floors then roll up past per_run (one live roll-up row per attempt)', async () => {
