@@ -13,14 +13,22 @@
  *      names — proven with a stub that records its argv to a file.
  */
 
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { PassThrough } from 'node:stream';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 
 import { isPiBinary, PI_SKILL_DIRS_ENV, piSkillFlags, runBridge, skillFlagsFor } from '../bridge.mjs';
-import { composePiArgv, piBinary, runPiLauncher } from '../wicked-pi.mjs';
+import {
+  bundledGovernanceExtension,
+  composePiArgv,
+  PI_GOVERNANCE_ENV,
+  PI_GOVERNANCE_EXTENSION_ENV,
+  piBinary,
+  piGovernanceFlags,
+  runPiLauncher,
+} from '../wicked-pi.mjs';
 
 const posix = process.platform !== 'win32';
 const cleanups = [];
@@ -213,5 +221,85 @@ describe('wicked-pi launcher', () => {
     const code = await runPiLauncher(['--mode', 'rpc'], env);
     expect(code).toBe(127);
     expect(errors.join('\n')).toContain('could not start');
+  });
+});
+
+// ── Input governance on the pi seat (wicked-core#563) ─────────────────────────────────────────
+
+describe('wicked-pi governance gate', () => {
+  // A real file: the launcher checks that the gate it names exists.
+  const gateDir = mkdtempSync(join(tmpdir(), 'wicked-pi-gate-'));
+  const gate = join(gateDir, 'pi-governance.js');
+  writeFileSync(gate, 'export default function () {}\n');
+  const other = join(gateDir, 'other-gate.js');
+  writeFileSync(other, 'export default function () {}\n');
+  afterAll(() => rmSync(gateDir, { recursive: true, force: true }));
+  const found = () => gate;
+  const missing = () => null;
+
+  it('off (unset, empty, 0): no flags, the argv is unchanged', () => {
+    for (const env of [{}, { [PI_GOVERNANCE_ENV]: '' }, { [PI_GOVERNANCE_ENV]: ' 0 ' }]) {
+      expect(piGovernanceFlags(env, found)).toEqual([]);
+      expect(composePiArgv(['--mode', 'rpc'], env, found)).toEqual(['--mode', 'rpc']);
+    }
+  });
+
+  it('on: the gate is the only extension, ahead of the skill flags and pi-acp\'s args', () => {
+    const env = { [PI_GOVERNANCE_ENV]: '1', [PI_SKILL_DIRS_ENV]: '/a' };
+    expect(composePiArgv(['--mode', 'rpc', '--no-themes'], env, found)).toEqual([
+      '--no-extensions',
+      '-e',
+      gate,
+      '--no-skills',
+      '--skill',
+      '/a',
+      '--mode',
+      'rpc',
+      '--no-themes',
+    ]);
+  });
+
+  it('any value other than empty or 0 turns the gate on (an unknown value fails closed)', () => {
+    for (const v of ['1', 'true', 'yes', 'on', 'garbage']) {
+      expect(piGovernanceFlags({ [PI_GOVERNANCE_ENV]: v }, found)).toEqual(['--no-extensions', '-e', gate]);
+    }
+  });
+
+  it('an explicit extension path wins over the bundled package', () => {
+    const env = { [PI_GOVERNANCE_ENV]: '1', [PI_GOVERNANCE_EXTENSION_ENV]: ` ${other} ` };
+    expect(piGovernanceFlags(env, found)).toEqual(['--no-extensions', '-e', other]);
+  });
+
+  it('a gate path that does not exist throws, explicit or bundled', () => {
+    const nowhere = join(gateDir, 'not-here.js');
+    expect(() => piGovernanceFlags({ [PI_GOVERNANCE_ENV]: '1', [PI_GOVERNANCE_EXTENSION_ENV]: nowhere }, found)).toThrow(/does not exist/);
+    expect(() => piGovernanceFlags({ [PI_GOVERNANCE_ENV]: '1' }, () => nowhere)).toThrow(/does not exist/);
+  });
+
+  it('on but no gate anywhere: composing throws, so pi is never started ungoverned', () => {
+    expect(() => piGovernanceFlags({ [PI_GOVERNANCE_ENV]: '1' }, missing)).toThrow(/pi-governance extension was not found/);
+  });
+
+  it('the bundled package resolves to the gate file', () => {
+    const p = bundledGovernanceExtension();
+    expect(p).not.toBeNull();
+    expect(p.replace(/\\/g, '/')).toMatch(/pi-governance\/extensions\/pi-governance\.js$/);
+  });
+
+  it.skipIf(!posix)('on with no gate: the launcher exits 126 with a named refusal and pi never starts', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wicked-pi-gov-'));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+    const record = join(dir, 'argv.json');
+    const { bin } = stubPi(`require('fs').writeFileSync(${JSON.stringify(record)}, 'started'); process.exit(0);`);
+    const env = { ...process.env, WICKED_PI_BINARY: bin, [PI_GOVERNANCE_ENV]: '1', [PI_GOVERNANCE_EXTENSION_ENV]: '' };
+    delete env[PI_GOVERNANCE_EXTENSION_ENV];
+    const errors = [];
+    const spy = vi.spyOn(console, 'error').mockImplementation((m) => errors.push(String(m)));
+    cleanups.push(() => spy.mockRestore());
+    // The explicit path is empty, so the launcher falls back to the bundled package; hide it.
+    const code = await runPiLauncher(['--mode', 'rpc'], env, missing);
+    expect(code).toBe(126);
+    expect(errors.join('\n')).toContain('refusing to start pi');
+    expect(existsSync(record)).toBe(false);
   });
 });
