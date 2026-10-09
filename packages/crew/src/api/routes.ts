@@ -3534,7 +3534,9 @@ export function registerRoutes(
           refused: chatScopes.refusedOf(id) ?? null,
           ...(askPaths.view(id) !== undefined ? { path: askPaths.view(id) } : {}),
           // DES-L5 (D-13): the transcript so far, append order — `[]` before the first persisted
-          // turn; the file goes with the chat on `chatClosed`, so a reclaimed id answers `[]` too.
+          // turn. The file goes with the chat on `chatClosed` UNLESS a run promoted from it is still
+          // live (crew#619 retention — dropped when that run terminals), so a reclaimed id answers
+          // `[]` only once no promoted run holds the old file.
           ...(chatTranscripts !== undefined ? { messages: chatTranscripts.read(id) } : {}),
         };
       } catch (err) {

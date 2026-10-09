@@ -3,13 +3,13 @@
 // boot (orphans only; retained transcripts survive). The store's own contract; the route + frame-hook
 // composition is pinned in chat-turns.test.ts.
 
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { CHAT_ID } from '../src/api/chat-scope.js';
-import { CHAT_TRANSCRIPTS_DIRNAME, ChatTranscriptStore, defaultChatTranscriptsDir, rewriteHostPaths } from '../src/api/chat-transcripts.js';
+import { CHAT_TRANSCRIPTS_DIRNAME, ChatTranscriptStore, defaultChatTranscriptsDir, rewriteHostPaths, withRootAliases } from '../src/api/chat-transcripts.js';
 import type { CoreEvent } from '../src/core/types.js';
 import { crewStateHome } from '../src/projects/state-home.js';
 
@@ -76,7 +76,7 @@ describe('ChatTranscriptStore', () => {
     expect(readdirSync(dir)).toEqual(['ok.id_1-2.jsonl']);
   });
 
-  it('drop removes ONE chat\'s file (idempotent); clearAll removes every file (boot — every one is an orphan)', () => {
+  it('drop removes ONE chat\'s file (idempotent); clearOrphaned(empty) removes every file (boot — every one is an orphan)', () => {
     const store = new ChatTranscriptStore({ dir });
     store.appendUser('c1', 't', 'a', ['claude']);
     store.appendUser('c2', 't', 'b', ['claude']);
@@ -85,9 +85,10 @@ describe('ChatTranscriptStore', () => {
     store.drop('never-existed');
     expect(readdirSync(dir)).toEqual(['c2.jsonl']);
     expect(store.read('c1')).toEqual([]);
-    store.clearAll();
-    expect(existsSync(dir)).toBe(false);
-    store.clearAll(); // idempotent on a missing dir
+    store.clearOrphaned(new Set());
+    expect(readdirSync(dir)).toEqual([]);
+    rmSync(dir, { recursive: true, force: true });
+    store.clearOrphaned(new Set()); // idempotent on a missing dir
     // Writable again after the clear.
     store.appendUser('c3', 't', 'c', []);
     expect(store.read('c3')).toHaveLength(1);
@@ -109,6 +110,68 @@ describe('rewriteHostPaths (crew#618)', () => {
     const repos = [{ absRoot: '/srv/repos/alpha', name: 'alpha' }];
     const text = 'See /srv/repos/alpha/a.ts and /srv/repos/alpha/b.ts. No match: /other/c.ts.';
     expect(rewriteHostPaths(text, repos)).toBe('See alpha/a.ts and alpha/b.ts. No match: /other/c.ts.');
+  });
+
+  it('crew#634 R2: a NESTED root wins over its parent — the sort is what keeps sub/ from becoming alpha/sub', () => {
+    // Listed parent-first on purpose: without the longest-first sort the parent would rewrite the
+    // nested root's paths to `alpha/sub/...`.
+    const repos = [
+      { absRoot: '/r/alpha', name: 'alpha' },
+      { absRoot: '/r/alpha/sub', name: 'sub' },
+    ];
+    expect(rewriteHostPaths('/r/alpha/sub/src/x.ts and /r/alpha/y.ts', repos)).toBe('sub/src/x.ts and alpha/y.ts');
+    expect(rewriteHostPaths('/r/alpha/sub/src/x.ts', [...repos].reverse())).toBe('sub/src/x.ts');
+  });
+
+  it('crew#634 R5: a bare root reference (no trailing separator) is rewritten at a boundary only', () => {
+    const repos = [
+      { absRoot: '/srv/repos/alpha', name: 'alpha' },
+      { absRoot: '/srv/repos/alpha-extra', name: 'alpha-extra' },
+    ];
+    expect(rewriteHostPaths('The repo is /srv/repos/alpha', repos)).toBe('The repo is alpha');
+    expect(rewriteHostPaths('Cloned at /srv/repos/alpha. Then (`/srv/repos/alpha`), /srv/repos/alpha: ok', repos)).toBe(
+      'Cloned at alpha. Then (`alpha`), alpha: ok',
+    );
+    // A longer sibling or an embedding path is not the root.
+    expect(rewriteHostPaths('/srv/repos/alpha-extra and /x/srv/repos/alpha and /srv/repos/alphabet', repos)).toBe(
+      'alpha-extra and /x/srv/repos/alpha and /srv/repos/alphabet',
+    );
+    expect(rewriteHostPaths('/srv/repos/alpha.git', repos)).toBe('/srv/repos/alpha.git');
+    // Punctuation is legal in a path: it ends the root only when the path ends right after it.
+    expect(rewriteHostPaths('/srv/repos/alpha:beta/src/x.ts and /srv/repos/alpha,backup', repos)).toBe(
+      '/srv/repos/alpha:beta/src/x.ts and /srv/repos/alpha,backup',
+    );
+  });
+
+  it('crew#634 R5: a symlinked root and the macOS /private alias are matched (withRootAliases)', () => {
+    const real = mkdtempSync(join(tmpdir(), 'chat-root-real-'));
+    const link = `${real}-link`;
+    try {
+      mkdirSync(join(real, 'src'));
+      symlinkSync(real, link);
+      const aliases = withRootAliases([{ absRoot: link, name: 'alpha' }]);
+      const spellings = aliases.map((a) => a.absRoot);
+      expect(spellings[0]).toBe(link);
+      expect(spellings).toContain(realpathSync(link));
+      expect(aliases.every((a) => a.name === 'alpha')).toBe(true);
+      const store = new ChatTranscriptStore({ dir });
+      store.registerRoots('c-alias', [{ absRoot: link, name: 'alpha' }]);
+      store.observe({ type: 'chatReply', chat: 'c-alias', cliKey: 'claude', text: `read ${realpathSync(link)}/src/a.ts`, ok: true, turn_id: 't1' } as unknown as CoreEvent);
+      expect(store.read('c-alias')[0]).toMatchObject({ text: 'read alpha/src/a.ts' });
+    } finally {
+      rmSync(link, { force: true });
+      rmSync(real, { recursive: true, force: true });
+    }
+    // A path that does not resolve keeps its one spelling — no guessed twin.
+    expect(withRootAliases([{ absRoot: '/var/nonexistent-crew-634/alpha', name: 'a' }]).map((a) => a.absRoot)).toEqual([
+      '/var/nonexistent-crew-634/alpha',
+    ]);
+    // A twin is added only when it resolves to the same directory (macOS: /var → /private/var).
+    const tmpReal = realpathSync(tmpdir());
+    const twin = tmpReal.startsWith('/private/') ? tmpReal.slice('/private'.length) : null;
+    if (twin !== null && existsSync(twin) && realpathSync(twin) === tmpReal) {
+      expect(withRootAliases([{ absRoot: tmpReal, name: 't' }]).map((a) => a.absRoot)).toEqual([tmpReal, twin]);
+    }
   });
 
   it('returns text unchanged when repos is empty', () => {
@@ -286,3 +349,4 @@ describe('crew#619 — chatClosed retention and terminal-release drop', () => {
     expect(store.read('orphan')).toEqual([]);
   });
 });
+
