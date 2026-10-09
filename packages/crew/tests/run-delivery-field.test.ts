@@ -42,7 +42,7 @@ import {
   prUrlFrom,
 } from '../src/api/delivery-index.js';
 import { DeliveryDerivationCache } from '../src/api/delivery-cache.js';
-import { DELIVER_SCRIPT_TAG, deliverPrScript } from '../src/core/deliver.js';
+import { DELIVER_PUSH_REJECTED_MARKER, deliverPrScript } from '../src/core/deliver.js';
 import { AuditLog } from '../src/api/audit.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { SessionView, WorkUnit } from '../src/core/types.js';
@@ -653,14 +653,14 @@ describe('deliverUnitOf — id suffix primary, tool_cmd fallback, never workflow
     expect(deliverUnitOf(v)?.id).toBe('wf-base:deliver');
   });
 
-  it('finds crew\'s deliver script under another phase name by its tag (overlay-carried deliver phase), whatever forge CLI it calls (crew#720 S3)', () => {
+  it('finds crew\'s deliver script under another phase name by its refusal marker (overlay-carried deliver phase), whatever forge CLI it calls (crew#720 S3)', () => {
     const v = view('run-a', {}, [
       unit('run-a:u0'),
       unit('run-a:ship', { tool_cmd: ['bash', '-lc', deliverPrScript()] }),
     ]);
     expect(deliverUnitOf(v)?.id).toBe('run-a:ship');
     // A provider whose script names no `gh` at all is still the deliver unit.
-    const other = view('run-b', {}, [unit('run-b:u0'), unit('run-b:ship', { tool_cmd: ['bash', '-lc', `${DELIVER_SCRIPT_TAG}\naz repos pr create`] })]);
+    const other = view('run-b', {}, [unit('run-b:u0'), unit('run-b:ship', { tool_cmd: ['bash', '-lc', `az repos pr create || { echo "${DELIVER_PUSH_REJECTED_MARKER}"; exit 1; }`] })]);
     expect(deliverUnitOf(other)?.id).toBe('run-b:ship');
     // The `deliver` catalog entry of a composed plan.
     expect(deliverUnitOf(view('run-c', {}, [unit('run-c:u0'), unit('run-c:ship', { catalog: 'deliver' })]))?.id).toBe('run-c:ship');

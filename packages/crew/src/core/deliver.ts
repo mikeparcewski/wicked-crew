@@ -120,14 +120,6 @@ export const EVIDENCE_FLOOR_PIN = 'e2e7af1db9e48454';
 export const DELIVER_PHASE_ID = 'deliver';
 
 /**
- * crew#720 S3: the first line of every deliver script crew composes — a provider-agnostic,
- * STRUCTURAL mark of the deliver phase. The delivery index finds the deliver unit by it (or by the
- * `:deliver` id / `deliver` catalog entry), never by the forge CLI the script happens to call, so a
- * future provider's script is found the same way and a renamed overlay carrying crew's phase too.
- */
-export const DELIVER_SCRIPT_TAG = '# wicked-crew:deliver-script';
-
-/**
  * The sentinel the deliver script prints when the RUN'S WORK has been committed but its LIFT did
  * not complete (crew#418): a rebase onto the remote default branch hit a conflict outside the
  * changelog. The work is safe on its `wicked/<id>` branch; an operator resolves the collision and
@@ -606,7 +598,6 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
   const nonce = opts.nonce ?? mintDeliverNonce();
   if (!/^[0-9a-fA-F]{16,64}$/.test(nonce)) throw new Error(`deliver nonce: not 16-64 hex digits: ${JSON.stringify(nonce)}`);
   return [
-    DELIVER_SCRIPT_TAG,
     'set -euo pipefail',
     // The engine concatenates the child's stdout and THEN its stderr, so anything git writes to
     // stderr would land after the PR URL and break "(f) the URL is the last line". Folding stderr
