@@ -48,6 +48,7 @@ import type { CoreAdapter } from '../core/adapter.js';
 import { execCapped } from '../core/exec.js';
 import { codeGraphDb } from '../core/repoPaths.js';
 import type { ChatScope, ChatScopeRepo, ChatScopeRequestKind, RepoEntry } from '../core/types.js';
+import { freshnessClause, type CheckoutFreshness, type FreshenCheckout } from './chat-freshness.js';
 import { estateExe, parseEstateTotals, resolveProjectGraphBinding, type ProjectGraphBindingDecision } from '../projects/graph.js';
 import type { ChatRefusalSource } from './seat-standing.js';
 
@@ -113,6 +114,10 @@ export interface ChatScopeDeps {
    * grounded, which is the very defect crew#642 fixed (review of #651).
    */
   entityCount?: (dbPath: string) => Promise<number>;
+  /** crew#899: bring each in-scope checkout to its upstream when safe, else report how stale it
+   *  is ({@link freshenCheckout}). Omitted = checkouts are read as they are and nothing is said
+   *  (tests; the daemon wires it in `server.ts`). */
+  freshen?: FreshenCheckout;
 }
 
 let processScratchBase: string | undefined;
@@ -278,6 +283,27 @@ function row(r: RepoEntry): ChatScopeRepo {
  * launch (`resolveProjectGraphBinding` never indexes; a refresh is an explicit act).
  */
 export async function resolveChatScope(
+  req: ChatScopeRequest,
+  deps: ChatScopeDeps,
+): Promise<ChatScopeResolution> {
+  const resolution = await resolveScopeOnly(req, deps);
+  const freshen = deps.freshen;
+  if (!resolution.ok || freshen === undefined || resolution.scope.repos.length === 0) return resolution;
+  // crew#899: every repository in scope, at once (one bounded fetch each), before the statement
+  // is written — the seats are told what they are reading against its upstream.
+  const repos = await Promise.all(
+    resolution.scope.repos.map(async (r) => {
+      const f = await freshen(r.rootPath).catch((): CheckoutFreshness => ({ state: 'unknown' }));
+      if (f.state === 'stale' || f.state === 'refreshed') {
+        deps.log?.(`chat ${req.chatId}: repo ${r.id}${freshnessClause(f)}`);
+      }
+      return f.state === 'unknown' ? r : { ...r, freshness: f };
+    }),
+  );
+  return { ...resolution, scope: { ...resolution.scope, repos } };
+}
+
+async function resolveScopeOnly(
   req: ChatScopeRequest,
   deps: ChatScopeDeps,
 ): Promise<ChatScopeResolution> {
@@ -664,6 +690,41 @@ const CHAT_DECISIONS_LINES: ReadonlyArray<string> = [
 ];
 export const CHAT_DECISIONS_DIRECTIVE = `${CHAT_DECISIONS_LINES.join('\n')}\n\n`;
 
+/**
+ * crew#855: what a seat does with a message that asks for work (build, fix, add, change). A
+ * repo-bound chat (exactly one repository: the path's `repoRef`, deliverable) PROPOSES it as one
+ * `PLAN+` line with a creator step and its `touch` — the engine's first-creator change, which opens
+ * the `plan_approval` gate studio renders as the Continue in Build card (§4.7, ASK-K2b; a block
+ * without `touch` is refused `no_scope`). Any other scope has no repository a creator step could
+ * run in, so the seat answers with the plan and points at Continue in Build (the launch-form
+ * prefill) instead. Either way it never attempts the change itself.
+ */
+export function chatWorkRequestLines(scope: Pick<ChatScope, 'kind' | 'repos'>): string[] {
+  const head = [
+    '## Requests for work',
+    '',
+    'This chat cannot change anything: writes outside this directory are refused. When the message',
+    'asks for work (build, fix, add, change, write code or docs), do NOT attempt it. Answer with a',
+    'short plan: what changes, in which files, and how it will be checked.',
+  ];
+  if (scope.kind === 'repos' && scope.repos.length === 1) {
+    return [
+      ...head,
+      'Then propose it on ONE line of its own. Replace each placeholder: `touch` lists the real',
+      'repository-relative paths the work will change, from your plan.',
+      '',
+      '    PLAN+ {"steps":[{"catalog":"build"}],"touch":["<path>"],"reason":"<one line>"}',
+      '',
+      'The operator approves it as Continue in Build; the line itself is not shown to them.',
+    ];
+  }
+  return [
+    ...head,
+    'Then tell the operator to start it with Continue in Build and to pick the repository there:',
+    'this chat has no single repository a build could run in.',
+  ];
+}
+
 export function chatScopeStatement(chatId: string, scope: ChatScope, rules?: ReadonlyArray<ConformanceRule>): string {
   const lines: string[] = [
     '# Chat scope',
@@ -724,7 +785,7 @@ export function chatScopeStatement(chatId: string, scope: ChatScope, rules?: Rea
     lines.push(
       '## Repositories in scope (READ-ONLY)',
       '',
-      ...scope.repos.map((r) => `- **${r.name}** (\`${r.id}\`): \`${r.rootPath}\``),
+      ...scope.repos.map((r) => `- **${r.name}** (\`${r.id}\`): \`${r.rootPath}\`${freshnessClause(r.freshness)}`),
       '',
       'Explore and answer questions about these repositories by reading them at the paths above.',
       'Cite files relative to their repository root, prefixed with the repository name',
@@ -790,6 +851,9 @@ export function chatScopeStatement(chatId: string, scope: ChatScope, rules?: Rea
     'be grounded, say so in one line rather than asserting it.',
     '',
   );
+  // crew#855 (DES-ASK-TEAM-CHAT-001 §4.7): a message that asks for WORK is never attempted here —
+  // every write outside the scratch root is refused, so an attempt only ends the turn at a denial.
+  lines.push(...chatWorkRequestLines(scope), '');
   // DC-S7 (§4.7): the project's in-force rules, as `[rule:<id>]` lines the seat can cite.
   if (rules !== undefined && rules.length > 0) lines.push(...rulesStatementLines(rules), '');
   // DC-S4b: every seat, every scope kind — the recorder is chosen from the turn's audience.

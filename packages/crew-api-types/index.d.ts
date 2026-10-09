@@ -5613,7 +5613,20 @@ export interface ChatScopeRepo {
   name: string;
   /** The registered root path — the read root the seats are pointed at. */
   rootPath: string;
+  /**
+   * (crew#899) What opening the chat found for this checkout against its upstream: `current`,
+   * `refreshed` (fast-forwarded `commits` to `upstream`, because the tree was clean and had no
+   * commits of its own), or `stale` (`behind` commits, NOT refreshed, `reason` says why; the seats
+   * are told). ABSENT when the root is not a checkout with an upstream, and on an older daemon.
+   */
+  freshness?: ChatCheckoutFreshness;
 }
+
+/** {@link ChatScopeRepo.freshness} (crew#899). */
+export type ChatCheckoutFreshness =
+  | { state: 'current'; upstream: string }
+  | { state: 'refreshed'; upstream: string; commits: number }
+  | { state: 'stale'; upstream: string; behind: number; reason: string };
 
 /**
  * What a chat's seats can see — decided at `POST /chats`, stated to the seats in their scratch
