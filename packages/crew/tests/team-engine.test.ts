@@ -238,8 +238,13 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
     // engine that carries it carries it on every entry, and it names exactly the entries whose step
     // is an acceptance requirement (crew#683 reads it for a plan run's acceptance).
     const flagged = entries.some((e) => 'verified_evidence' in e);
-    const want = flagged ? [...keys, 'verified_evidence'].sort() : keys;
+    // `pool` (wicked-core#816; api-types 0.100.1) is additive the same way: CI builds the engine
+    // from core main, which carries it on every entry, while the published core-ts may predate it.
+    const pooled = entries.some((e) => 'pool' in e);
+    const want = [...keys, ...(flagged ? ['verified_evidence'] : []), ...(pooled ? ['pool'] : [])].sort();
     for (const e of entries) expect(Object.keys(e).sort(), e.id).toEqual(want);
+    // Every shipped entry has a pool of 1 today (a plan step may only lower it).
+    if (pooled) for (const e of entries) expect(e.pool, e.id).toBe(1);
     if (flagged) {
       // wicked-core#691 (DES-walkthrough-proof §4.3, C1) adds `walkthrough_review`, a verified-evidence
       // Tool step inserted after `test` in catalog order. CI builds the engine from core main while the
