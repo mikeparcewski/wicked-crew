@@ -739,6 +739,32 @@ export interface WorkUnit {
   /** (crew#894) How that pool was seated, once distributed (see {@link UnitPoolSeating}). ABSENT
    *  for a pool of 1 and before distribution. */
   pool_seating?: UnitPoolSeating;
+  /**
+   * (wicked-core#761) The FAIL items an operator landed this Evaluator unit over at its
+   * `review_adjudication` gate, carried forward with the work. ABSENT when empty.
+   */
+  carried_items?: string[];
+  /**
+   * (wicked-core#686) The phase's AUTHORED instructions as a field: for the deliver phase, the gate
+   * card the workflow wrote. {@link WorkUnit.description} still carries them after ` ||| ` (it is
+   * the worker's prompt), but a reader takes them from here when
+   * {@link WorkUnit.structured_description} is true. ABSENT when the phase has none, and on a
+   * record that predates the field.
+   */
+  instructions?: string;
+  /**
+   * (wicked-core#686) Every approved intent amendment folded onto this unit, oldest first, as the
+   * operator's text (the description also carries each one after the amendment prefix).
+   * ABSENT when empty.
+   */
+  amendments?: string[];
+  /**
+   * (wicked-core#686) TRUE when the unit was planned with {@link WorkUnit.instructions} and
+   * {@link WorkUnit.amendments} as fields: read them there and never split the description.
+   * ABSENT (false) on a record that predates the fields; only then may a skin fall back to
+   * re-parsing the description, as a legacy path.
+   */
+  structured_description?: boolean;
 }
 
 /**
@@ -8495,6 +8521,13 @@ export interface CatalogEntry {
   skill_ref: string | null;
   /** The entry's one-line description; `null` when it has none. */
   description: string | null;
+  /**
+   * (wicked-core#816) The entry's worker pool (`PhaseDef::pool_size()`): the most a plan step of
+   * this entry may ask for, since the planner refuses a raise as `pool_raised`; a step may only
+   * lower it. The engine always sends it (1 when the entry declares none). ABSENT from an engine
+   * before core-ts carries #816: read absent as 1.
+   */
+  pool?: number;
 }
 
 /** `GET /catalog`. */
