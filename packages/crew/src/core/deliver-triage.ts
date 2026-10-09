@@ -45,9 +45,58 @@
 import {
   DELIVER_BASE_MOVED_MARKER,
   DELIVER_LIFT_CONFLICT_MARKER,
+  DELIVER_NONCE_VAR,
+  DELIVER_OUTCOME_MARKER,
   DELIVER_PREFLIGHT_CHANGED_MARKER,
   DELIVER_PUSH_REJECTED_MARKER,
 } from './deliver.js';
+
+/**
+ * (crew#739) The nonce a nonce-bearing deliver script declares (`DELIVER_NONCE=<hex>`, optionally
+ * quoted), read from the unit's `tool_cmd` — the engine's `deliver_nonce` (wicked-core#807), same
+ * rule: 16-64 hex digits, else not a nonce. `null` for a legacy script, which keeps the last-marker
+ * rule.
+ */
+export function deliverNonceOf(toolCmd: readonly string[] | null | undefined): string | null {
+  const needle = `${DELIVER_NONCE_VAR}=`;
+  for (const arg of toolCmd ?? []) {
+    let at = arg.indexOf(needle);
+    while (at !== -1) {
+      const hex = /^['"]*([0-9a-fA-F]*)/.exec(arg.slice(at + needle.length))?.[1] ?? '';
+      if (hex.length >= 16 && hex.length <= 64) return hex;
+      at = arg.indexOf(needle, at + needle.length);
+    }
+  }
+  return null;
+}
+
+/**
+ * (crew#739) The verdict of the LAST `deliver: OUTCOME <nonce> <verdict>` line carrying `nonce`
+ * exactly (the engine's `trusted_outcome`), or `null` when there is none. A sentinel with another
+ * nonce — a remote's echo — is not a sentinel.
+ */
+export function trustedOutcomeIn(text: string, nonce: string): string | null {
+  const lines = text.split('\n');
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const line = lines[i]!.trim();
+    if (!line.startsWith(DELIVER_OUTCOME_MARKER)) continue;
+    const words = line.slice(DELIVER_OUTCOME_MARKER.length).trim().split(/\s+/);
+    if (words.length === 2 && words[0] === nonce) return words[1]!;
+  }
+  return null;
+}
+
+/**
+ * (crew#739) How a deliver unit's output reads under the trusted sentinel: `undefined` for a legacy
+ * script (no nonce in `toolCmd` — the caller keeps the last-marker rule), else the sentinel's
+ * verdict, with NO sentinel reading `failed` (fail closed: a script killed before its trap, or an
+ * excerpt the remote filled, is never a strand).
+ */
+export function trustedDeliverOutcome(toolCmd: readonly string[] | null | undefined, text: string): string | undefined {
+  const nonce = deliverNonceOf(toolCmd);
+  if (nonce === null) return undefined;
+  return trustedOutcomeIn(text, nonce) ?? 'failed';
+}
 
 /** The engine's lift-conflict remedy (`LiftOutcome::Conflict`) — crew's marker plus the engine's words. */
 export const ENGINE_LIFT_CONFLICT_PHRASE = `${DELIVER_LIFT_CONFLICT_MARKER} — lifting the run's work onto`;
@@ -140,8 +189,28 @@ export function lastDeliverMarker(
  * command not found`), or a unit that is not the deliver phase — so callers fall back to their
  * default reading of `failureKind`.
  */
-export function triageDeliverFailure(detail: string | null | undefined): DeliverFailureTriage | null {
+export function triageDeliverFailure(
+  detail: string | null | undefined,
+  toolCmd?: readonly string[] | null,
+): DeliverFailureTriage | null {
   if (typeof detail !== 'string' || detail.length === 0) return null;
+  // (crew#739) A nonce-bearing script is judged on its trusted sentinel alone for the two
+  // post-commit classes: only `stranded` is a liftable strand and only `rejected` a refused push.
+  // Any other verdict (or none) falls through to the engine/script refusal phrases below with the
+  // two markers ignored, since text before the sentinel may be the remote's.
+  const trusted = trustedDeliverOutcome(toolCmd, detail);
+  if (trusted !== undefined) {
+    if (trusted === 'rejected') return { kind: 'push_rejected', author: 'script', disposition: 'escalate', recoverable: false };
+    if (trusted === 'stranded') {
+      return {
+        kind: 'lift_conflict',
+        author: detail.includes(ENGINE_LIFT_CONFLICT_PHRASE) ? 'engine' : 'script',
+        disposition: 'escalate',
+        recoverable: true,
+      };
+    }
+    return triageRefusalPhrases(detail);
+  }
   // The script prints its OWN marker last; text before it can be the remote's (a pre-receive hook
   // may print anything, `deliver: LIFT-CONFLICT` included). So the LAST marker decides (codex
   // review of N4) — a refused push is never read as a liftable strand.
@@ -156,6 +225,11 @@ export function triageDeliverFailure(detail: string | null | undefined): Deliver
       recoverable: true,
     };
   }
+  return triageRefusalPhrases(detail);
+}
+
+/** The engine's and the script's refusal phrases other than the two post-commit markers. */
+function triageRefusalPhrases(detail: string): DeliverFailureTriage | null {
   if (detail.includes(ENGINE_RUN_BRANCH_PHRASE)) return ENGINE('run_branch_refused');
   if (APPLY_FAILED.test(detail)) return ENGINE('lift_apply_failed');
   if (detail.includes(ENGINE_SNAPSHOT_FAILED_PHRASE)) return ENGINE('snapshot_failed');

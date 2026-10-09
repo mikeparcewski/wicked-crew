@@ -27,7 +27,7 @@ import { registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
-import { DeliveryIndex, gitWorktreeIsClean } from '../src/api/delivery-index.js';
+import { DeliveryIndex, gitWorktreeIsClean, isDeliverConflictStranded } from '../src/api/delivery-index.js';
 import { AuditLog } from '../src/api/audit.js';
 import { runDeliverScript } from '../src/api/post-hoc-deliver.js';
 import { DELIVER_LIFT_CONFLICT_MARKER, DELIVER_PUSH_REJECTED_MARKER } from '../src/core/deliver.js';
@@ -140,6 +140,35 @@ const roots: string[] = [];
 afterEach(async () => {
   for (const a of apps.splice(0)) await a.close();
   for (const r of roots.splice(0)) removeScratch(r);
+});
+
+// crew#739: a nonce-bearing deliver script is judged ONLY on its trusted sentinel.
+describe('crew#739 — the trusted sentinel decides the strand for a nonce-bearing script', () => {
+  const N = '0123456789abcdef0123456789abcdef';
+  const sentinelView = (denial: string) =>
+    view({
+      status: 'failed',
+      units: [
+        unit({ id: `${RUN_ID}:build`, ord: 3, status: 'done' }),
+        unit({
+          id: `${RUN_ID}:deliver`,
+          ord: 5,
+          status: 'rejected',
+          denial_reason: denial,
+          tool_cmd: ['bash', '-lc', `set -euo pipefail\nexec 2>&1\nDELIVER_NONCE='${N}'\nVERDICT=failed`],
+        }),
+      ],
+    });
+  it('stranded under the script\'s nonce strands', () => {
+    expect(isDeliverConflictStranded(sentinelView(`${DELIVER_LIFT_CONFLICT_MARKER} — x\ndeliver: OUTCOME ${N} stranded`))).toBe(true);
+  });
+  it('a hook-echoed marker followed by a failed sentinel does NOT strand', () => {
+    expect(isDeliverConflictStranded(sentinelView(`remote: ${DELIVER_LIFT_CONFLICT_MARKER}\ngh: HTTP 401\ndeliver: OUTCOME ${N} failed`))).toBe(false);
+  });
+  it('a forged sentinel under another nonce, or no sentinel at all, does NOT strand (fail closed)', () => {
+    expect(isDeliverConflictStranded(sentinelView(`${DELIVER_LIFT_CONFLICT_MARKER}\ndeliver: OUTCOME ${'f'.repeat(32)} stranded`))).toBe(false);
+    expect(isDeliverConflictStranded(sentinelView(`${DELIVER_LIFT_CONFLICT_MARKER} — x`))).toBe(false);
+  });
 });
 
 describe('crew#418 A — a deliver lift collision strands on the wire, it does not fail the run', () => {
@@ -430,7 +459,8 @@ describe('crew#418 A — strand then lift, end-to-end on real git', () => {
         id: `${RUN_ID}:deliver`,
         ord: 5,
         status: 'rejected',
-        denial_reason: `deliver refused on unit 5: ${first.output.slice(-400)}`,
+        // 460, not 400: the trusted sentinel line (crew#739, ~60 chars) now follows the marker.
+        denial_reason: `deliver refused on unit 5: ${first.output.slice(-460)}`,
         tool_cmd: ['bash', '-lc', 'gh pr create --head "$B" --fill'],
       }),
     ];

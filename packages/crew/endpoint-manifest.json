@@ -1577,6 +1577,28 @@
       "statusCodes": []
     },
     {
+      "method": "POST",
+      "path": "/api/v1/seats/:cli/login",
+      "requestType": "SeatSessionBody",
+      "responseType": "SeatSessionResponse",
+      "statusCodes": [
+        201,
+        400,
+        404
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/seats/:cli/logout",
+      "requestType": "SeatSessionBody",
+      "responseType": "SeatSessionResponse",
+      "statusCodes": [
+        201,
+        400,
+        404
+      ]
+    },
+    {
       "method": "GET",
       "path": "/api/v1/settings",
       "requestType": null,

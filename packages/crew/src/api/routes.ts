@@ -5,6 +5,7 @@ import type { RecordedStallFrame } from './stall-frame-index.js';
 import { z } from 'zod';
 import { listRequirements, getRequirement, patchRequirement } from './requirements.js';
 import { randomUUID } from 'node:crypto';
+import { homedir } from 'node:os';
 import { readFileSync, existsSync } from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
@@ -682,6 +683,12 @@ export const OpenTerminalSchema = z.object({
   // Optional so omission is the SAFE governed default (§7 — `false` is never a
   // default; the ungoverned operator shell must opt in explicitly).
   governed: z.boolean().optional(),
+}).strict();
+
+/** `POST /seats/:cli/login|logout` body (crew#615): the PTY size, both optional. */
+export const SeatSessionSchema = z.object({
+  cols: z.number().int().positive().optional(),
+  rows: z.number().int().positive().optional(),
 }).strict();
 
 const ResizeTerminalSchema = z.object({
@@ -5350,6 +5357,47 @@ export function registerRoutes(
       return reply.code(400).send({ error: message(err) });
     }
   });
+
+  // crew#615: sign a seat in or out without the client composing the command. The daemon runs the
+  // ENGINE's own `login_invocation` / `logout_invocation` for that seat (already prefixed with the
+  // seat's configuration root; the daemon never synthesizes one) in a governed PTY, and answers
+  // the terminal id — the device URL or the CLI's prompt streams over `/ws/terminals/:id`. The
+  // seat's credential probe is re-run when the terminal exits, so the roster's `signed_in` follows
+  // the outcome instead of waiting out the probe's TTL.
+  for (const action of ['login', 'logout'] as const) {
+    app.post(
+      `${V}/seats/:cli/${action}`,
+      { config: { manifest: { requestType: 'SeatSessionBody', responseType: 'SeatSessionResponse', statusCodes: [201, 400, 404] } } },
+      async (req, reply) => {
+        const { cli } = req.params as { cli: string };
+        const parsed = SeatSessionSchema.safeParse(req.body ?? {});
+        if (!parsed.success) {
+          return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
+        }
+        const seat = rosterWithStanding().find((s) => s.key === cli);
+        if (seat === undefined) return reply.code(404).send({ error: `unknown seat: ${cli}` });
+        const field = action === 'login' ? seat.login_invocation : seat.logout_invocation;
+        const invocation = typeof field === 'string' ? field.trim() : '';
+        if (invocation === '') {
+          return reply.code(404).send({
+            error: `seat ${cli} has no ${action} command: the engine roster carries no ${action}_invocation for it (its CLI documents none)`,
+          });
+        }
+        try {
+          const id = await adapter.openTerminal(homedir(), ['sh', '-lc', invocation], parsed.data.cols ?? 100, parsed.data.rows ?? 30, true);
+          const stop = adapter.onEvent((event) => {
+            if (event.type === 'terminalExited' && event.id === id) {
+              stop();
+              rosterWithStanding.reprobe?.(cli);
+            }
+          });
+          return reply.code(201).send({ terminalId: id, cli, action });
+        } catch (err) {
+          return reply.code(400).send({ error: message(err) });
+        }
+      },
+    );
+  }
 
   // Resize a live terminal's PTY.
   app.post(`${V}/terminals/:id/resize`, async (req, reply) => {

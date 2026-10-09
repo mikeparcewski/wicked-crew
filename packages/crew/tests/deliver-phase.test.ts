@@ -22,6 +22,7 @@ import {
   deliverPrScript,
 } from '../src/core/deliver.js';
 import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
+import { deliverNonceOf, trustedDeliverOutcome, trustedOutcomeIn } from '../src/core/deliver-triage.js';
 import type { WorkflowDef } from '../src/core/types.js';
 import { SKIP_CORE_CHECKS, requireCoreDir } from './support/core-checkout.js';
 
@@ -403,6 +404,52 @@ describe('deliverPrScript (the hardened field script)', () => {
   });
 });
 
+/** crew#739: each composition mints its own sentinel nonce; compare scripts with it masked. */
+const sansNonce = (cmd: { type: string; cmd?: string[] } | undefined) =>
+  JSON.parse(JSON.stringify(cmd ?? null).replace(/DELIVER_NONCE='[0-9a-f]+'/g, "DELIVER_NONCE='<nonce>'")) as unknown;
+
+describe('the trusted terminal sentinel (crew#739)', () => {
+  it('mints a fresh 32-hex nonce per composition into the script text, installs ONE EXIT trap, and defaults the verdict to failed', () => {
+    const a = deliverPrScript();
+    const b = deliverPrScript();
+    const na = /^DELIVER_NONCE='([0-9a-f]{32})'$/m.exec(a)?.[1];
+    const nb = /^DELIVER_NONCE='([0-9a-f]{32})'$/m.exec(b)?.[1];
+    expect(na).toBeDefined();
+    expect(nb).toBeDefined();
+    expect(na).not.toBe(nb);
+    expect(a.match(/^trap /gm)).toEqual(['trap ']);
+    expect(a).toContain('trap _outcome EXIT');
+    expect(a).toMatch(/^VERDICT=failed$/m);
+    expect(a).toContain('echo "deliver: OUTCOME $DELIVER_NONCE $VERDICT"');
+    // The engine reads the same nonce from the unit's tool_cmd (wicked-core#807 deliver_nonce).
+    expect(deliverNonceOf(['bash', '-lc', a])).toBe(na);
+    expect(deliverNonceOf(['bash', '-lc', 'git push'])).toBeNull();
+  });
+
+  it('every verdict site sets VERDICT before its exit: pr, pushed, rejected (both push refusals), stranded', () => {
+    const script = deliverPrScript(undefined, { nonce: 'a'.repeat(32) });
+    expect(script).toMatch(/VERDICT=pr\necho "\$URL"$/);
+    expect(script).toContain('VERDICT=pushed; echo "deliver: PUSHED-NO-PR');
+    expect(script.match(/VERDICT=rejected; /g)).toHaveLength(2);
+    expect(script).toContain('VERDICT=stranded; echo "deliver: LIFT-CONFLICT');
+  });
+
+  it('refuses a nonce that is not 16-64 hex digits at compose time', () => {
+    expect(() => deliverPrScript(undefined, { nonce: "x'; rm -rf /" })).toThrow(/deliver nonce/);
+    expect(() => deliverPrScript(undefined, { nonce: 'abc' })).toThrow(/deliver nonce/);
+  });
+
+  it('trustedDeliverOutcome: the last sentinel under the script\'s nonce wins; another nonce is ignored; none reads failed; legacy is undefined', () => {
+    const n = '0123456789abcdef0123456789abcdef';
+    const cmd = ['bash', '-lc', `DELIVER_NONCE='${n}'\n…`];
+    expect(trustedDeliverOutcome(cmd, `remote: x\ndeliver: OUTCOME ${n} stranded\ndeliver: OUTCOME ${n} pr`)).toBe('pr');
+    expect(trustedDeliverOutcome(cmd, `deliver: OUTCOME ${'f'.repeat(32)} stranded`)).toBe('failed');
+    expect(trustedDeliverOutcome(cmd, 'deliver: LIFT-CONFLICT — x')).toBe('failed');
+    expect(trustedDeliverOutcome(['bash', '-lc', 'legacy'], 'deliver: LIFT-CONFLICT — x')).toBeUndefined();
+    expect(trustedOutcomeIn(`deliver: OUTCOME ${n} pr extra`, n)).toBeNull();
+  });
+});
+
 describe('deliverPrPhase (the PhaseDef shape core accepts)', () => {
   it('is a neutral auto-gated build Tool phase running the hardened script', () => {
     const phase = deliverPrPhase(['review']);
@@ -414,7 +461,7 @@ describe('deliverPrPhase (the PhaseDef shape core accepts)', () => {
       role: 'neutral',
       depends_on: ['review'],
     });
-    expect(phase.executor).toEqual({ type: 'tool', cmd: ['bash', '-lc', deliverPrScript()] });
+    expect(sansNonce(phase.executor)).toEqual(sansNonce({ type: 'tool', cmd: ['bash', '-lc', deliverPrScript()] }));
     // The fields core's serde would default are spelled out so the def satisfies crew's own
     // WorkflowDef type without casts.
     expect(phase.gate_type).toBeNull();
@@ -438,10 +485,12 @@ describe('deliverPrPhase (the PhaseDef shape core accepts)', () => {
 
   it('threads the run intent into the script it carries', () => {
     const phase = deliverPrPhase(['review'], 'ship the deliver fix');
-    expect(phase.executor).toEqual({
-      type: 'tool',
-      cmd: ['bash', '-lc', deliverPrScript('ship the deliver fix')],
-    });
+    expect(sansNonce(phase.executor)).toEqual(
+      sansNonce({
+        type: 'tool',
+        cmd: ['bash', '-lc', deliverPrScript('ship the deliver fix')],
+      }),
+    );
     // The intent is the title (heredoc line 1) — the F-3R2-014 headline never comes back.
     const cmd = (phase.executor as { cmd: string[] }).cmd[2]!.split('\n');
     expect(cmd[cmd.indexOf(`  cat > "$TD/text" <<'${DELIVER_TEXT_HEREDOC}'`) + 1]).toBe('ship the deliver fix');

@@ -29,7 +29,11 @@ import { seatStanding, chatSeatAdmission, type StandingSeat } from './seat-stand
 /** The accessor: the registry roster WITH crew's standing, freshly read on every call. `ready`
  *  (crew#645), awaited by a launch before it reads the roster, waits — bounded — for every seat's
  *  missing or stale login check, so an expired login reads `signed_out` before work is routed. */
-export type RosterWithStanding = (() => RosterSeat[]) & { ready?: () => Promise<void> };
+export type RosterWithStanding = (() => RosterSeat[]) & {
+  ready?: () => Promise<void>;
+  /** crew#615: re-run one seat's credential probe now (after a sign-in / sign-out terminal). */
+  reprobe?: (seatKey: string) => void;
+};
 
 export interface RosterStandingDeps {
   /** The daemon's per-seat runtime health + council evidence (councilSeatFailed, auth refusals). */
@@ -152,6 +156,9 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
         return; // no roster: the launch reads (and reports) the same failure itself
       }
       await probe.ensureFresh(keys, liveRoot());
+    };
+    accessor.reprobe = (seatKey: string) => {
+      void probe.refresh(seatKey, liveRoot());
     };
   }
   // Warm the probe at boot, so the first launch after a restart already routes on the seat's own
