@@ -28,8 +28,11 @@
  * run either way; only the deliver phase's own commit is guaranteed to match it.
  */
 
+import { homedir } from 'node:os';
+
 import type { GateSpec, PhaseDef, SessionView, WorkUnit } from './types.js';
 import { stripLinkedIssues } from './linked-issues.js';
+import { rewriteHostPaths, withRootAliases } from './host-paths.js';
 
 /**
  * The PR title cap (crew#860, S17b F15 / S17a F20). GitHub ACCEPTS 256 characters, and under that
@@ -631,7 +634,30 @@ export function composeDeliverText(f: DeliverTextFacts, links: IssueRefs = issue
     `Delivered-By: wicked-crew run ${oneLine(f.runId)}`,
     ...(f.trailers ?? []),
   );
-  return { title, body: out.join('\n') };
+  return { title: redactHostPaths(title), body: redactHostPaths(out.join('\n')) };
+}
+
+/** The daemon's home directory, or `null` when it is unusable as a prefix (unset, or `/`). */
+function homePrefix(): string | null {
+  try {
+    const home = homedir().replace(/[\\/]+$/, '');
+    return home === '' ? null : home;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * crew#886: the PR title, body and commit message leave the machine, and they quote seat reports
+ * verbatim — a creator's "Worktree: `<home>/.wicked/repos/<repo>/wicked-worktrees/<run>`" put the
+ * operator's home directory on GitHub. Every spelling of the home directory (its realpath and the
+ * macOS `/private` twin too) becomes `~`, through the same rewrite crew#618 applies to chat replies
+ * (`rewriteHostPaths` + `withRootAliases`): `<home>/x` → `~/x`, a bare `<home>` → `~`, and a longer
+ * sibling (`<home>-old/…`) is never touched.
+ */
+export function redactHostPaths(text: string, home: string | null = homePrefix()): string {
+  if (home === null || home === '') return text;
+  return rewriteHostPaths(text, withRootAliases([{ absRoot: home, name: '~' }]));
 }
 
 /** At most this many pasted recipe commands per phase in the done-when table. */

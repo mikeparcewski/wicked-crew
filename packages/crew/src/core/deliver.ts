@@ -1102,10 +1102,18 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // N1: the machine line the daemon records the push-only delivery from — LAST, one line.
     `        echo "${DELIVER_PUSHED_NO_PR_MARKER} $B $R";`,
     '        exit 0;;',
+    // (e3) THIS RUN'S PR ALREADY EXISTS (crew#885). A rework re-runs the chain, so deliver runs
+    // again for the same `wicked/<run>` branch: the push above just updated the PR an earlier
+    // attempt opened, and gh refuses a second one ("a pull request for branch \"B\" into branch
+    // \"main\" already exists: <url>"). That is the delivery, not a failure: only gh's diagnostic
+    // naming THIS branch qualifies (a PR some other branch holds never does), the URL is gh's own,
+    // and done is re-derived below exactly as on the create path (URL + remote ahead of base). The
+    // new attempt's run record rides `gh pr comment`, as a revision's does.
+    `      *"for branch \\"$B\\""*"already exists"*) EXISTING=1;;`,
+    '      *) echo "deliver: gh pr create failed for $B — no PR was opened"; exit 1;;',
     '    esac',
-    '    echo "deliver: gh pr create failed for $B — no PR was opened"; exit 1',
     '  fi',
-    '  echo "$OUT"',
+    '  if [ -z "${EXISTING:-}" ]; then echo "$OUT"; fi',
     // (f) DONE IS RE-DERIVED, NOT ASSERTED — twice, from two independent facts, before the phase
     // is allowed to report a delivery:
     //   1. gh actually produced a PR URL (an exit code alone is a claim, not evidence);
@@ -1114,6 +1122,10 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     '  [ -n "$URL" ] || { echo "deliver: gh pr create exited 0 but produced no PR URL for $B — refusing to report a delivery nothing can be pointed at"; exit 1; }',
     '  P=$(git rev-list --count "$D..origin/$B")',
     '  [ "$P" -ge 1 ] || { echo "deliver: $B is not ahead of $D on the remote after the push — refusing to report a delivery with no commits"; exit 1; }',
+    '  if [ -n "${EXISTING:-}" ]; then',
+    '    echo "deliver: pull request $URL already exists for $B (an earlier attempt of this run opened it); the push updated it with $P commit(s) on top of $D — recorded as this run\'s delivery"',
+    '    if COUT=$(gh pr comment "$URL" --body-file "$TD/body" 2>&1); then echo "deliver: run record commented on $URL"; else echo "$COUT"; echo "deliver: could not comment on $URL — the commits landed; the record is in the commit message"; fi',
+    '  fi',
     'fi',
     'echo "$URL"',
   ].join('\n');
