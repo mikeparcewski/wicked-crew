@@ -4149,6 +4149,12 @@ export interface LaunchRunResponse {
    * delivery), and `notice` says so in words a composer can show. ABSENT on every other launch.
    */
   freeText?: { notice: string };
+  /**
+   * (crew#874) PRESENT when the installed wicked-garden is not the one the published skills
+   * generation was built from: the run executes the PUBLISHED generation, and this says so — the
+   * same `skills.installed-ahead` finding `GET /diagnostics.skills.findings` carries.
+   */
+  skillsWarning?: { kind: 'skills.installed-ahead'; severity: 'warning'; message: string };
 }
 
 /**
@@ -6504,7 +6510,12 @@ export interface DiagnosticsSkillsFinding {
    *  generation landed with (a reference the skill's author owns that names nothing in the
    *  snapshot — published as found); `message` names the publish finding's kind, `file:line` and
    *  evidence. Reported while that generation is current, from the publish that found them until the
-   *  daemon restarts (a restart re-verifies `current` without re-scanning it). */
+   *  daemon restarts (a restart re-verifies `current` without re-scanning it);
+   *  `skills.installed-ahead` (`warning`, crew#874) = the installed wicked-garden's content hash is
+   *  not the baseline the published generation was built from — runs use the published (older)
+   *  skills; `message` names both versions and the remedy (refresh-baseline, then publish). A
+   *  daemon boot refreshes and publishes on its own when nothing in the catalog is user-edited
+   *  (`WICKED_CREW_SKILLS_AUTO_REFRESH=0` turns that off); when it did not, the message says why. */
   kind:
     | 'skills.fallback'
     | 'skills.blocked'
@@ -6515,7 +6526,8 @@ export interface DiagnosticsSkillsFinding {
     | 'skills.base-skill'
     | 'skills.phase-skill'
     | 'skills.garden'
-    | 'skills.publish-warning';
+    | 'skills.publish-warning'
+    | 'skills.installed-ahead';
   severity: 'warning' | 'error';
   message: string;
 }

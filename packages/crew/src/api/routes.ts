@@ -2366,7 +2366,11 @@ export function registerRoutes(
       // planner (one unit, the brief verbatim). Say so in the answer, with how to get work done,
       // instead of letting it pass for a launch of real work.
       const freeText = input.workflow === undefined && input.plan === undefined ? { freeText: { notice: FREE_TEXT_NOTICE } } : {};
-      return reply.code(201).send({ runId, ...(linkedIssues !== undefined ? { linkedIssues } : {}), ...freeText });
+      // crew#874: the run uses the PUBLISHED generation; when the installed garden is not the one it
+      // was built from, the launch answer says so (a recorded proof can disclose which garden ran).
+      const skillsAhead = runtime.skills?.installedAheadFinding({ fresh: true }) ?? null; // fresh: an upgrade just before Send counts (codex r1)
+      const skillsWarning = skillsAhead === null ? {} : { skillsWarning: { kind: skillsAhead.kind, severity: skillsAhead.severity, message: skillsAhead.message } };
+      return reply.code(201).send({ runId, ...(linkedIssues !== undefined ? { linkedIssues } : {}), ...freeText, ...skillsWarning });
     } catch (err) {
       const msg = message(err);
       // DES-TEAMING-002 T3: a plan on an engine without the plan approval gate is an "upgrade the
