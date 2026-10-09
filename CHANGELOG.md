@@ -10,6 +10,20 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.8.7] — 2026-10-09
+
+The IG1-crew release: crew states the governance mode each seat runs under, reading the class the
+engine now derives (`governance_class`, wicked-core IG1-core-1..3), and folds that mode into ask
+eligibility and the run's acceptance record. The engine pin moves to `wicked-core-ts` `^0.7.42`
+(IG1-core-1..3, ASK-K4, batch 3). `wicked-crew-api-types` 0.97.0 is the matching wire contract. The
+bundled UI (wicked-studio 0.6.5) is unchanged.
+
+- **`wicked-crew-api-types` 0.97.0.** Additive: `SeatGovernanceMode`, `EngineGovernanceClass`, `GovernanceScopeKind`; `RosterSeat.governance_class` / `governance_mode`; `ChatPathView.governance_mode`; `DiagnosticsResponse.seatGovernance` and `memoryStore`; `ListMemoriesResponse.store`.
+- **Seat governance mode (IG1-crew-1, #881).** `seatGovernanceMode()` reads the engine's `governance_class` (`acp_input_governance | os_sandbox | none`) and adds only what crew knows (the ACP version pin, the scope kind, the fence crew applies): `admitted`, `os_sandbox` (source `seat_record`, `self` or `repo_boundary`) or `none`, with a `reason` and a `fence` (`write_roots`, `read_roots`, `network: 'open'`). It rides `GET /roster` per scope kind, `/diagnostics` and the ask path's `ChatPathView` for the PA (learned from `path.started.governance` / `member.joined.governance_class`); `CREW_ONLY_SEAT_FIELDS` strips it before a roster returns to the engine. codex stays on the floor: there is no per-call adapter to admit.
+- **Eligibility by mode, the per-unit record and `contained` (IG1-crew-2, #881).** A single-repo ask admits by standing (every seat has at least the repository boundary); a project or multi-repo ask admits `admitted` and `os_sandbox{seat_record | self}` and refuses `none` by name. `GET /runs/:id/acceptance` carries `conformance.enforcement.units[]` (mode, source, fence per unit attempt, from frames only) and the new status `contained` — a unit held by an OS-sandbox floor or, on a bound run, the repository boundary, rather than a per-call gate. Smoke on the real engine: a one-unit bound build run on a floor-class seat completes with no `input_governance` denial and is recorded `os_sandbox` / `contained`.
+- **`/diagnostics` per-seat governance (#742) and the memory store (#740), #881.** `seatGovernance {rosterFile, hostBoundary, seats[]}` — transport, record sandbox, engine class, input governance enforced / claimed / unenforced and the mode per scope kind — plus health warnings for ungoverned seats and floor seats on a host with no OS launcher; `memoryStore {path, source, notice}` on `/diagnostics` and `GET /memory`.
+- **Engine pin `wicked-core-ts` `^0.7.42` (#881).** Carries IG1-core-1..3 (the `os_sandbox` class, accepted by the fold), ASK-K4 and the batch-3 engine fixes; the core-workflow skill_refs fixture is re-stamped (refs unchanged).
+
 ## [0.8.6] — 2026-10-08
 
 A skills-seam fix release carrying the two crew halves of F-E2E-002, found by the crew 0.8.5 release
@@ -3641,7 +3655,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.6...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.7...HEAD
+[0.8.7]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.6...v0.8.7
 [0.8.6]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.5...v0.8.6
 [0.8.5]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.4...v0.8.5
 [0.8.4]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.3...v0.8.4
