@@ -536,7 +536,8 @@ export function readLock(root: string): LiveBridge | null {
       port: raw.port,
       pid: raw.pid,
       startedAt: typeof raw.startedAt === 'string' && raw.startedAt !== '' ? raw.startedAt : null,
-      spawnToken: typeof raw.spawnToken === 'string' && raw.spawnToken !== '' ? raw.spawnToken : null,
+      // crew#509: present only when the lockfile echoes one (the shape of a pre-token lockfile is unchanged).
+      ...(typeof raw.spawnToken === 'string' && raw.spawnToken !== '' ? { spawnToken: raw.spawnToken } : {}),
     };
   } catch {
     return null;
