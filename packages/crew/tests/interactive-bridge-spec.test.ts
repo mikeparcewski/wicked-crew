@@ -38,7 +38,7 @@ describe('the wicked-interactive spec crew resolves', () => {
     expect(INTERACTIVE_SPEC).not.toBe('wicked-interactive');
   });
 
-  it('floors at 0.10.0 — the learned-theme PUT + CREW review.completed (EP-I1/EP-I2, R-I) the theme and review seams need, on top of 0.9.4\'s read-only recorder + dry-run (crew#565/#500), 0.9.3\'s per-root bus identity (F-RC1-120) and 0.9.2\'s typed recorder contract (F-RECON-012/013/014)', () => {
+  it('floors at 0.11.1 — the spawn-token echo (crew#509, interactive#272) on top of 0.10.0\'s learned-theme PUT + CREW review.completed (EP-I1/EP-I2, R-I) the theme and review seams need, on top of 0.9.4\'s read-only recorder + dry-run (crew#565/#500), 0.9.3\'s per-root bus identity (F-RC1-120) and 0.9.2\'s typed recorder contract (F-RECON-012/013/014)', () => {
     const range = INTERACTIVE_SPEC.split('@')[1] ?? '';
     expect(range).toBe(INTERACTIVE_DEFAULT_RANGE);
     const m = /^\^?(\d+)\.(\d+)\.(\d+)/.exec(range);
@@ -49,7 +49,8 @@ describe('the wicked-interactive spec crew resolves', () => {
     // 0.9.2 bridge shares ONE bus cursor with every other bridge on the db (F-RC1-120, fixed 0.9.3).
     // 0.9.3 has no `dry-run` and records whatever a spec clicks (crew#565, fixed 0.9.4). 0.9.x has no
     // `PUT /d/:doc/api/theme/learned`, so a validated theme would fail at the bridge (EP-C4, fixed 0.10.0).
-    expect(maj * 1_000_000 + min * 1_000 + pat).toBeGreaterThanOrEqual(0 * 1_000_000 + 10 * 1_000 + 0);
+    // 0.11.0 does not echo WICKED_BRIDGE_SPAWN_TOKEN, so ownership falls back to the ps walk (crew#509, fixed 0.11.1).
+    expect(maj * 1_000_000 + min * 1_000 + pat).toBeGreaterThanOrEqual(0 * 1_000_000 + 11 * 1_000 + 1);
   });
 
   it('WICKED_INTERACTIVE_SPEC overrides the RANGE when it is a semver range; anything else is ignored and NAMED (F-081)', () => {
@@ -73,8 +74,11 @@ describe('the wicked-interactive spec crew resolves', () => {
     // itself now (no learned-theme route — EP-C4 writes through it; shipped 0.10.0).
     expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '^0.9.3' }).belowFloor).toBe(true);
     expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '^0.9.4' }).belowFloor).toBe(true);
-    expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '^0.10.0' }).belowFloor).toBeUndefined();
-    expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '0.10.0-rc.1' }).belowFloor).toBeUndefined();
+    // …and 0.10.x / 0.11.0 now (no spawn-token echo — crew#509; shipped 0.11.1).
+    expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '^0.10.0' }).belowFloor).toBe(true);
+    expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '^0.11.0' }).belowFloor).toBe(true);
+    expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '^0.11.1' }).belowFloor).toBeUndefined();
+    expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '0.11.1-rc.1' }).belowFloor).toBeUndefined();
     // An upper-bound-only range has no floor to compare — accepted, not flagged.
     expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '<1.0.0' })).toEqual({ spec: 'wicked-interactive@<1.0.0', range: '<1.0.0', source: 'env' });
     // A tag, an x-range, a union, a path, a different package, a whole spec: not a floor within the package.
@@ -126,12 +130,12 @@ describe.skipIf(process.platform === 'win32')('the installed wicked-interactive 
   }
 
   it('a PATH binary within the range is preferred; out of range, unreadable or absent falls back to npx', () => {
-    const inRange = prefix('0.10.3');
+    const inRange = prefix('0.11.1');
     const old = prefix('0.9.4');
     const nameless = prefix(null);
     const empty = mkdtempSync(join(tmpdir(), 'wi-empty-'));
     try {
-      expect(resolveInteractiveBinary({ PATH: [empty, inRange.bin].join(delimiter) })).toEqual({ path: join(inRange.bin, 'wicked-interactive'), version: '0.10.3' });
+      expect(resolveInteractiveBinary({ PATH: [empty, inRange.bin].join(delimiter) })).toEqual({ path: join(inRange.bin, 'wicked-interactive'), version: '0.11.1' });
       // The FIRST on PATH decides (what a shell would run): an out-of-range one ahead means npx.
       expect(resolveInteractiveBinary({ PATH: [old.bin, inRange.bin].join(delimiter) })).toBeNull();
       expect(resolveInteractiveBinary({ PATH: nameless.bin })).toBeNull();

@@ -43,6 +43,7 @@ import {
   readCrewSidecar,
   readLock,
   INTERACTIVE_SPEC,
+  resolveInteractiveBinary,
 } from '../src/interactive/bridge-pool.js';
 
 const NO_ENV: Record<string, string | undefined> = {};
@@ -487,8 +488,13 @@ describe('bridge pool keying + discovery (§7.2)', () => {
     });
     const err = await pool.ensure(dir).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(BridgeUnavailableError);
-    // The hint has to be runnable, not "try again".
-    expect((err as BridgeUnavailableError).hint).toContain(`npx ${INTERACTIVE_SPEC} serve --root ${dir}`);
+    // The hint has to be runnable, not "try again". It names the in-range PATH binary when the host
+    // has one (crew#499), so a developer machine with a global wicked-interactive in the range
+    // reads that binary, and a clean CI host reads the npx spec.
+    const bin = resolveInteractiveBinary();
+    expect((err as BridgeUnavailableError).hint).toContain(
+      bin !== null ? `${bin.path} serve --root ${dir}` : `npx ${INTERACTIVE_SPEC} serve --root ${dir}`,
+    );
   });
 
   it('creates a missing docs root rather than failing the spawn opaquely', async () => {

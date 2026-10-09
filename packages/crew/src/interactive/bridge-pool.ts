@@ -154,7 +154,12 @@ const INTERACTIVE_PACKAGE = 'wicked-interactive';
  * exists — the route crew's theme seam (EP-C4) writes through. A 0.9.x bridge has no such route, so
  * a validated theme would fail at the bridge (codex r1 on EP-C4): the floor follows.
  */
-export const INTERACTIVE_DEFAULT_RANGE = '^0.10.0';
+/**
+ * 0.11.1 (wicked-interactive#272, crew#509): `serve` echoes the crew-issued
+ * `WICKED_BRIDGE_SPAWN_TOKEN` into `.wi-serve.json` as `spawnToken`, so {@link tokenLineage} proves
+ * ownership without the process table; below it the pool takes the ps-walk fallback (#882).
+ */
+export const INTERACTIVE_DEFAULT_RANGE = '^0.11.1';
 /** The env override of the RANGE (not the package). */
 export const INTERACTIVE_SPEC_ENV = 'WICKED_INTERACTIVE_SPEC';
 /** The default spec — what the daemon spawns with no override. */

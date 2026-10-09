@@ -2569,7 +2569,8 @@ export interface UnitPlannedEvent {
   description: string;
   stage: StageKind;
   role: PhaseRole;
-  gate: 'auto' | 'human_confirm' | 'human_confirm_if';
+  /** `consent_before` from wicked-core-ts 0.7.43 (core#801, crew#888). */
+  gate: 'auto' | 'human_confirm' | 'human_confirm_if' | 'consent_before';
   skill_ref: string | null;
   has_validator_pin: boolean;
   executor_type: 'agent' | 'tool';
@@ -4301,9 +4302,17 @@ export interface GraphKind {
 /** Gate position in the value→strategy→execution ladder. */
 export type GateType = 'value' | 'strategy' | 'execution';
 
-/** Human-confirm spec for a phase gate (serde flattened from Rust enum). */
+/**
+ * Human-confirm spec for a phase gate (serde flattened from Rust enum).
+ *
+ * `'consent_before'` (wicked-core#805 / core#801, core-ts >= 0.7.43; crew#888): the engine pauses
+ * BEFORE the phase runs, with `awaitingHuman{gateKind: 'consent'}`, whatever the run-level
+ * `humanConfirm` policy, and nothing pauses after it. Approve runs the phase; reject cancels the run
+ * with nothing in the phase run. A standing order never answers a `consent` gate.
+ */
 export type GateSpec =
   | 'auto'
+  | 'consent_before'
   | { human_confirm: { unconditional: boolean } }
   | { human_confirm_if: 'verdict_not_pass' };
 

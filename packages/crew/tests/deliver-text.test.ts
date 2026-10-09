@@ -501,6 +501,7 @@ describe('composeDeliverText from the workflow definition (the script’s embedd
     expect(gateLabel({ human_confirm: { unconditional: true } })).toBe('human');
     expect(gateLabel({ human_confirm: { unconditional: false } })).toBe('human (conditional)');
     expect(gateLabel({ human_confirm_if: 'verdict_not_pass' })).toBe('human if verdict not pass');
+    expect(gateLabel('consent_before')).toBe('human, before it runs');
     expect(gateLabel(undefined)).toBe('—');
   });
 });
