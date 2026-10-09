@@ -688,3 +688,44 @@ describe('AskRelay — usage (crew#824)', () => {
     expect(bare.emitted.find((f) => f.type === 'chatReply')).toMatchObject({ usage: null });
   });
 });
+
+describe('IG1-crew-1 — the path learns the PA\'s governance mode from the run\'s rows', () => {
+  it('path.started.governance names each seat\'s class; the view carries the PA\'s mode for the ask\'s scope; a re-pick moves it', () => {
+    const paths = new AskPathIndex();
+    const turns = new ChatTurnIndex();
+    paths.open('c1', ['claude', 'pi'], undefined, {
+      seats: [
+        { key: 'claude', governance_class: 'acp_input_governance', acp: {} },
+        // The roster's class is stale here: the run's row is the engine's word and wins.
+        { key: 'pi', governance_class: 'none', acp: { os_sandbox: false } },
+      ],
+      scopeKind: 'scoped_bound',
+    });
+    turns.begin('c1', ['claude', 'pi'], 'Q1');
+    paths.started('c1', 1, 'run-1', 'answer-1');
+    const relay = new AskRelay({ paths, turns, units: async () => [], workOutput: async () => '', fold: () => undefined, rowGraceMs: 10 });
+    expect(paths.view('c1')!.governance_mode, 'no PA yet').toBeUndefined();
+    relay.onTeamRow(
+      row('wicked.team.path.started', {
+        run_id: 'run-1',
+        cli: 'pi',
+        selection: 'random',
+        roster: ['claude', 'pi'],
+        request: 'Q1',
+        workflow: null,
+        plan: false,
+        governance: [
+          { seat: 'claude', class: 'acp_input_governance' },
+          { seat: 'pi', class: 'os_sandbox' },
+        ],
+      }),
+    );
+    expect(paths.view('c1')!.governance_mode).toMatchObject({ mode: 'os_sandbox', source: 'repo_boundary', class: 'os_sandbox' });
+    relay.onTeamRow(row('wicked.team.path.repicked', { run_id: 'run-1', from: 'pi', to: 'claude', reason: 'timed_out', selection: 'random', pick_seq: 1 }));
+    expect(paths.view('c1')!.governance_mode).toMatchObject({ mode: 'admitted', source: 'acp_input_governance' });
+    // member.joined carries a joining seat's class.
+    relay.onTeamRow(row('wicked.team.member.joined', { run_id: 'run-1', member_id: 'm1', open_seq: 1, seat: 'pi', role: 'monitor', status: 'attached', reason: 'r', error: null, governance_class: 'none' }));
+    relay.onTeamRow(row('wicked.team.path.repicked', { run_id: 'run-1', from: 'claude', to: 'pi', reason: 'failed', selection: 'random', pick_seq: 2 }));
+    expect(paths.view('c1')!.governance_mode).toMatchObject({ mode: 'none', class: 'none' });
+  });
+});

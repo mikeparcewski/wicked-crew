@@ -189,6 +189,9 @@ export class AskRelay {
       case 'wicked.team.path.started': {
         const cli = typeof p['cli'] === 'string' ? p['cli'] : undefined;
         const selection = p['selection'] === 'chosen' ? 'chosen' : 'random';
+        // IG1-core-3: each roster seat's class, in roster order — the PA's mode reads it.
+        const classes = classesOf(p['governance']);
+        if (classes !== undefined) this.deps.paths.observe(runId, { classes });
         if (cli !== undefined) this.learnPa(runId, chatId, cli, selection);
         return;
       }
@@ -202,6 +205,9 @@ export class AskRelay {
       case 'wicked.team.member.joined': {
         const seat = typeof p['seat'] === 'string' ? p['seat'] : null;
         const role = typeof p['role'] === 'string' ? p['role'] : '';
+        if (seat !== null && typeof p['governance_class'] === 'string') {
+          this.deps.paths.observe(runId, { classes: { [seat]: p['governance_class'] } });
+        }
         if (role === 'monitor' || role === 'reviewer') this.deps.paths.observe(runId, { reviewer: seat });
         else if (role === 'helper' && seat !== null) this.deps.paths.observe(runId, { helper: seat });
         return;
@@ -660,4 +666,16 @@ export class AskRelay {
       }
     }
   }
+}
+
+/** `path.started.governance` (`[{seat, class}]`, IG1-core-3) as a seat → class map; `undefined`
+ *  when the row carries none (an engine before the field). */
+function classesOf(v: unknown): Record<string, string> | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const out: Record<string, string> = {};
+  for (const e of v) {
+    const r = e as { seat?: unknown; class?: unknown } | null;
+    if (r !== null && typeof r === 'object' && typeof r.seat === 'string' && typeof r.class === 'string') out[r.seat] = r.class;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }

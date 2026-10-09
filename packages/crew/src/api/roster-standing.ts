@@ -23,6 +23,7 @@ import { seatVersionPins, type SeatVersionPinCache } from './diagnostics.js';
 import type { SeatHealthTracker } from './seat-health.js';
 import { signedInHeuristic } from './seat-signin.js';
 import { SeatProbe } from './seat-probe.js';
+import { seatGovernanceModes } from './seat-governance.js';
 import { seatStanding, chatSeatAdmission, type StandingSeat } from './seat-standing.js';
 
 /** The accessor: the registry roster WITH crew's standing, freshly read on every call. `ready`
@@ -116,6 +117,14 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
       // proven against says so here (read from the cache; a stale cache refreshes in the
       // background). Absent for an unpinned seat and until the first probe answers.
       const versionPin = versionPins?.read(key);
+      // IG1-crew-1: the mode each scope kind runs this seat under, read from the engine's
+      // `governance_class` plus the pin reading above (seat-governance.ts).
+      const governanceMode = seatGovernanceModes({
+        ...(seat as { key: string }),
+        key,
+        ...(versionPin !== undefined ? { version_pin: versionPin } : {}),
+      });
+      const govSeat = { ...standingSeat, ...(versionPin !== undefined ? { version_pin: versionPin } : {}) };
       return {
         ...seat,
         health,
@@ -125,10 +134,11 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
         // ASK-C2: the admission an ASK applies (every chat is a path after ASK-C1): `unscoped` =
         // standing only; `scoped` = the wider-scope rule (several repos / a project); `scoped_bound` =
         // a single-repo ask (bound run — standing only). The picker offers from these.
+        governance_mode: governanceMode,
         chat_admission: {
-          unscoped: chatSeatAdmission(standingSeat, standing.auth, false, 'path'),
-          scoped: chatSeatAdmission(standingSeat, standing.auth, true, 'path'),
-          scoped_bound: chatSeatAdmission(standingSeat, standing.auth, true, 'path-bound'),
+          unscoped: chatSeatAdmission(govSeat, standing.auth, false, 'path'),
+          scoped: chatSeatAdmission(govSeat, standing.auth, true, 'path'),
+          scoped_bound: chatSeatAdmission(govSeat, standing.auth, true, 'path-bound'),
         },
       };
     });
