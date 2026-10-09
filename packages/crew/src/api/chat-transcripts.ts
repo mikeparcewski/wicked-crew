@@ -27,7 +27,7 @@
  * the worker Read fence — landed with core-ts 0.7.26), and named in `state-home-registry.ts`.
  */
 
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync } from 'node:fs';
 import { join, sep } from 'node:path';
 
 import type { ChatCitationItem, ChatTranscriptRecord, ChatUsage, CoreEvent, DecisionView } from '../core/types.js';
@@ -50,9 +50,11 @@ export interface ChatRepoRoot {
  * Rewrite absolute host paths in seat reply text to repo-relative form (crew#618).
  *
  * `/srv/repos/alpha/src/foo.ts` → `alpha/src/foo.ts` when `alpha`'s root is `/srv/repos/alpha`.
- * Longest roots are matched first so a path under a more-specific root is never truncated by a
- * parent root. Pure string substitution: no regex, no parsing — LLM-generated paths rarely use
- * special characters in the path components themselves.
+ * Longest roots are matched first so a path under a more-specific root (a NESTED root,
+ * `/r/alpha/sub` under `/r/alpha`) is never truncated by a parent root. crew#634 R5: a BARE root
+ * reference — the root itself, with no trailing separator, ending the text or followed by
+ * whitespace / closing punctuation — becomes the repo name too (`/srv/repos/alpha.` → `alpha.`);
+ * a longer sibling (`/srv/repos/alpha-extra`) is never touched. Pure string work.
  */
 export function rewriteHostPaths(text: string, roots: ReadonlyArray<ChatRepoRoot>): string {
   if (roots.length === 0) return text;
@@ -67,8 +69,50 @@ export function rewriteHostPaths(text: string, roots: ReadonlyArray<ChatRepoRoot
       const fwdPrefix = prefix.replace(/\\/g, '/');
       result = result.split(fwdPrefix).join(`${name}/`);
     }
+    result = rewriteBareRoot(result, prefix.slice(0, -1), name);
+    if (sep === '\\') result = rewriteBareRoot(result, prefix.slice(0, -1).replace(/\\/g, '/'), name);
   }
   return result;
+}
+
+/** crew#634 R5: `root` alone (no separator after it) at a boundary → `name`. */
+function rewriteBareRoot(text: string, root: string, name: string): string {
+  if (root === '' || !text.includes(root)) return text;
+  const escaped = root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // Not preceded by a path character (so `/x/srv/repos/alpha` is not a match for `/srv/repos/alpha`);
+  // followed by the end, whitespace, closing punctuation, or a sentence dot/comma/colon.
+  const bare = new RegExp(`(?<![\\w./\\\\-])${escaped}(?=$|[\\s)\\]}>'"\`,;:!?]|\\.(?:$|\\s))`, 'g');
+  return text.replace(bare, name);
+}
+
+/**
+ * crew#634 R5: every spelling a seat may cite a root by — the resolved path, its `realpath` (a
+ * symlinked checkout), and the macOS `/private` alias of `/var`, `/tmp`, `/etc` either way round.
+ * Each alias maps to the same repo name; unreadable paths keep the spelling they were given.
+ */
+export function withRootAliases(roots: ReadonlyArray<ChatRepoRoot>): ChatRepoRoot[] {
+  const out: ChatRepoRoot[] = [];
+  const seen = new Set<string>();
+  const add = (absRoot: string, name: string): void => {
+    if (absRoot === '' || seen.has(absRoot)) return;
+    seen.add(absRoot);
+    out.push({ absRoot, name });
+  };
+  for (const { absRoot, name } of roots) {
+    add(absRoot, name);
+    let real: string | null = null;
+    try {
+      real = realpathSync(absRoot);
+    } catch {
+      real = null;
+    }
+    if (real !== null) add(real, name);
+    for (const p of [absRoot, ...(real !== null ? [real] : [])]) {
+      if (/^\/private\/(?:var|tmp|etc)(?:\/|$)/.test(p)) add(p.slice('/private'.length), name);
+      else if (/^\/(?:var|tmp|etc)(?:\/|$)/.test(p)) add(`/private${p}`, name);
+    }
+  }
+  return out;
 }
 
 /** Where the transcripts live: under the daemon's state home, like every other crew store. */
@@ -112,7 +156,8 @@ export class ChatTranscriptStore {
    * `chatId` replaces the previous roots.
    */
   registerRoots(chatId: string, repos: ReadonlyArray<ChatRepoRoot>): void {
-    this.chatRoots.set(chatId, repos);
+    // crew#634 R5: a seat citing the realpath / `/private` spelling of a root is rewritten too.
+    this.chatRoots.set(chatId, withRootAliases(repos));
   }
 
   /** The directory this store writes under (diagnostics / tests). */
@@ -303,7 +348,7 @@ export class ChatTranscriptStore {
   /**
    * Daemon boot: remove every transcript NOT in `retainedChatIds` (crew#619 — promoted-run
    * transcripts must survive a restart so Continue-in-Build prefill is reproducible). Pass an
-   * empty set to clear everything (equivalent to the old `clearAll`).
+   * empty set to clear everything.
    */
   clearOrphaned(retainedChatIds: ReadonlySet<string>): void {
     if (!existsSync(this.dir)) return;
@@ -314,10 +359,5 @@ export class ChatTranscriptStore {
         rmSync(join(this.dir, file), { force: true });
       }
     }
-  }
-
-  /** Daemon boot: no chat survives a restart, so every file here is an orphan — remove them all. */
-  clearAll(): void {
-    rmSync(this.dir, { recursive: true, force: true });
   }
 }
