@@ -70,6 +70,8 @@ import type { foldMcpUsage } from '../src/mcp/usage.js';
 import type { SkillsHealth, SkillsHealthFindingKind } from '../src/skills/runtime.js';
 import type { PluginSource } from '../src/skills/plugin-source.js';
 import type { CappedFileRead, WorktreeDiff } from '../src/api/run-files.js';
+import type { SeatGovernanceMode } from '../src/api/seat-governance.js';
+import { resolveEnforcement } from '../src/qe/conformance.js';
 import type { DeliveryState } from '../src/api/delivery-index.js';
 import type { DeliverTargetView } from '../src/core/deliver.js';
 import type { AcpCliFold, RecentError, StoreFileEntry } from '../src/api/diagnostics.js';
@@ -95,7 +97,7 @@ import type { PutPresetSchema } from '../src/presets/routes.js';
 import type { EditPlanSchema, PlanPreviewSchema, joinTeam } from '../src/team/routes.js';
 import type { CreateStandingOrderSchema, ParseStandingOrderSchema, StandingAwaySchema } from '../src/standing-orders/routes.js';
 import type { StandingOrdersState as ServedStandingOrdersState } from '../src/standing-orders/store.js';
-import type { DEFAULT_SETTINGS } from '../src/core/types.js';
+import type { DEFAULT_SETTINGS, RecordedEvent } from '../src/core/types.js';
 
 /** Compile-time: what the daemon PRODUCES must satisfy what the contract PUBLISHES. */
 function respondsWith<Contract, Produced extends Contract>(): Produced | void {
@@ -1275,6 +1277,38 @@ describe('api-types 0.38.0 — recorded + DES-shaped engine frames (FIX-IT-ALL L
     expect(Object.keys(recorded['worktreeRetained'] as object).sort()).toEqual(['path', 'reason', 'session', 'type']);
   });
 });
+
+describe('IG1 (core-ts 0.7.41) — the governance class frames crew reads (IG1-crew-1/2)', () => {
+  const fixturePath = fileURLToPath(new URL('./fixtures/engine-frames-0.38.0.json', import.meta.url));
+  const recorded = JSON.parse(readFileSync(fixturePath, 'utf8')) as Record<string, unknown>;
+  const ctx = {
+    bound: true,
+    worktree: '/srv/wicked/runs/wicked-run-1',
+    extraWriteRoots: [],
+    seatOf: (cli: string) => (cli === 'pi' ? { key: 'pi', governance_class: 'os_sandbox', acp: { os_sandbox: false } } : undefined),
+  };
+  it('an armed floor unit (sandboxPosture os, governed: true, no governanceHookFired) is recorded os_sandbox and the run contained', () => {
+    const frames = recorded['ig1OsSandboxUnit'] as RecordedEvent[];
+    expect(frames.some((f) => f.type === 'governanceHookFired')).toBe(false);
+    const view = resolveEnforcement(frames, ctx);
+    expect(view.status).toBe('contained');
+    expect(view.units).toEqual([expect.objectContaining({ ord: 1, attempt: 0, cli: 'pi', mode: 'os_sandbox', source: 'repo_boundary', fence: expect.objectContaining({ write_roots: ['/srv/wicked/runs/wicked-run-1'] }) })]);
+  });
+  it('an unarmed floor unit (advisory + governanceUnenforced + sandboxUnenforced) on a bound run is os_sandbox/repo_boundary, undisclosed', () => {
+    const view = resolveEnforcement(recorded['ig1FloorUnarmed'] as RecordedEvent[], ctx);
+    expect(view.status).toBe('contained');
+    expect(view.units[0]).toMatchObject({ mode: 'os_sandbox', source: 'repo_boundary', enforced: 'undisclosed' });
+  });
+  it('path.started.governance and member.joined.governance_class are the engine spellings the relay reads', () => {
+    const started = recorded['teamPathStartedGovernance'] as { governance: { seat: string; class: string }[] };
+    expect(started.governance.every((g) => Object.keys(g).sort().join() === 'class,seat')).toBe(true);
+    expect(started.governance.map((g) => g.class).every((c) => ['acp_input_governance', 'os_sandbox', 'none'].includes(c))).toBe(true);
+    expect((recorded['teamMemberJoinedGovernanceClass'] as Record<string, unknown>)['governance_class']).toBe('acp_input_governance');
+  });
+});
+// The roster/path fields are the contract's (compile-time).
+respondsWith<Wire.SeatGovernanceMode, SeatGovernanceMode>();
+respondsWith<NonNullable<Wire.ChatPathView['governance_mode']>, SeatGovernanceMode>();
 
 describe('wire contract (wicked-crew-api-types) drift guard', () => {
   it('compiles: daemon responses satisfy the contract, contract bodies parse (see typecheck)', () => {

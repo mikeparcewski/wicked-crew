@@ -295,13 +295,11 @@ describe('(B) every seat dies at the UNIT — teamed routing seats a signed-out 
       seated: null,
       dissent: null,
     });
-    // (crew#477, core#648) The stub seats run no claude template and carry no admitted ACP adapter,
-    // so the build unit's degrade names the ungoverned seat; no bench is in it (nothing benched yet).
-    expect(String(distributed[0]!['degradedReason'])).toBe(
-      `unit 1 (build) runs on '${DEAD_SEATS[0]}', which does not enforce input governance ` +
-        '(acp_input_governance=false or no gate-hook adapter): no eligible seat that enforces it ' +
-        'admits this unit, so its tool calls run unchecked',
-    );
+    // (crew#477, core#648; IG1-core-2) The stub seats run no claude template and carry no ACP
+    // adapter, so the engine classes them `os_sandbox` (the OS-sandbox floor) — a governed class:
+    // the build unit is not degraded for governance, and with nothing benched yet there is no
+    // bench summary either.
+    expect(distributed[0]!['degradedReason']).toBeNull();
   });
 
   it('the worker exit benches the seat and fails over to the next one; with none left an autonomous run fails closed: one sessionFailed, no gate', () => {

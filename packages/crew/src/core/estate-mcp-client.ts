@@ -218,6 +218,14 @@ export function memoryStoreIsolationNotice(env: NodeJS.ProcessEnv = process.env)
     `memories. To use it anyway, start the daemon with WICKED_MEMORY_DB=${global}.`
   );
 }
+/** crew#740: the store this daemon's memory surface reads and writes, on the wire
+ *  (`/diagnostics.memoryStore`, `GET /memory`'s `store`) — the isolation notice was stderr-only.
+ *  Paths are for the local operator; nothing writes them to GitHub-visible text. */
+export function memoryStoreInfo(env: NodeJS.ProcessEnv = process.env): { path: string; source: MemoryDbSource; notice: string | null } {
+  const { path, source } = resolveMemoryDb(env);
+  return { path, source, notice: memoryStoreIsolationNotice(env) };
+}
+
 export function resolveMemoryDbPath(env: NodeJS.ProcessEnv = process.env): string {
   return resolveMemoryDb(env).path;
 }

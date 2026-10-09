@@ -8,6 +8,8 @@
  * `selection`) and every fact after it. `pa` here is what this daemon has seen of the engine's
  * pick (the relay fills it from `path.started`; a chosen seat is known at once).
  */
+
+import { seatGovernanceMode, type GovernanceScopeKind, type GovernanceSeatInput, type SeatGovernanceMode } from './seat-governance.js';
 export interface AskPath {
   chatId: string;
   /** Seats admitted to the chat at open (signed in, not benched, allowed for the scope). */
@@ -29,6 +31,12 @@ export interface AskPath {
   selection: 'chosen' | 'random';
   reviewer: string | null;
   helpers: string[];
+  /** IG1-crew-1: the eligible seats' records (as admitted) and the ask's scope kind — the PA's
+   *  governance mode is derived from them, with the engine's class as the run reports it. */
+  seats?: Record<string, GovernanceSeatInput>;
+  scopeKind?: GovernanceScopeKind;
+  /** The engine's class per seat, from `path.started.governance` / `member.joined.governance_class`. */
+  classes: Record<string, string>;
 }
 
 export class AskPathIndex {
@@ -37,8 +45,17 @@ export class AskPathIndex {
   private readonly generations = new Map<string, number>();
 
   /** Record an opened chat's eligibility and the operator's choice. */
-  open(chatId: string, eligible: readonly string[], primary?: string): AskPath {
+  open(
+    chatId: string,
+    eligible: readonly string[],
+    primary?: string,
+    governance?: { seats: readonly GovernanceSeatInput[]; scopeKind: GovernanceScopeKind },
+  ): AskPath {
+    const seats: Record<string, GovernanceSeatInput> = {};
+    for (const seat of governance?.seats ?? []) if (eligible.includes(seat.key)) seats[seat.key] = seat;
     const path: AskPath = {
+      ...(governance !== undefined ? { seats, scopeKind: governance.scopeKind } : {}),
+      classes: {},
       chatId,
       eligible: [...eligible],
       ...(primary !== undefined ? { primary } : {}),
@@ -130,10 +147,21 @@ export class AskPathIndex {
   }
 
   /** What the relay learned from the run's `path.started` / `member.joined` / `help.answered`. */
-  observe(runId: string, fact: { pa?: string; selection?: 'chosen' | 'random'; reviewer?: string | null; helper?: string }): void {
+  observe(
+    runId: string,
+    fact: {
+      pa?: string;
+      selection?: 'chosen' | 'random';
+      reviewer?: string | null;
+      helper?: string;
+      /** The engine's governance class per seat (`path.started.governance`, `member.joined`). */
+      classes?: Record<string, string>;
+    },
+  ): void {
     const chatId = this.chatOf(runId);
     const p = chatId !== undefined ? this.paths.get(chatId) : undefined;
     if (p === undefined) return;
+    if (fact.classes !== undefined) Object.assign(p.classes, fact.classes);
     if (fact.pa !== undefined) p.pa = fact.pa;
     if (fact.selection !== undefined) p.selection = fact.selection;
     if (fact.reviewer !== undefined) p.reviewer = fact.reviewer;
@@ -145,6 +173,19 @@ export class AskPathIndex {
     return [...this.paths.values()];
   }
 
+  /** The PA's governance mode for the ask's scope: its admitted record with the class the run's
+   *  frames report (the engine's, when it has spoken), else the roster's. Absent until the PA is
+   *  known, or on a path opened without seat records. */
+  private paMode(p: AskPath): SeatGovernanceMode | undefined {
+    if (p.pa === null || p.scopeKind === undefined) return undefined;
+    const engineClass = p.classes[p.pa];
+    const known = p.seats?.[p.pa];
+    // A PA with no admitted record and no class from the frames is unknown — never a fabricated `none`.
+    if (known === undefined && engineClass === undefined) return undefined;
+    const record = known ?? { key: p.pa };
+    return seatGovernanceMode(engineClass !== undefined ? { ...record, governance_class: engineClass } : record, p.scopeKind);
+  }
+
   close(chatId: string): AskPath | undefined {
     const p = this.paths.get(chatId);
     this.paths.delete(chatId);
@@ -152,10 +193,22 @@ export class AskPathIndex {
   }
 
   /** The wire view (`ChatDetailResponse.path`). */
-  view(chatId: string): { runId: string; pa: string | null; selection: 'chosen' | 'random'; reviewer: string | null; helpers: string[]; stepId: string } | undefined {
+  view(chatId: string):
+    | {
+        runId: string;
+        pa: string | null;
+        selection: 'chosen' | 'random';
+        reviewer: string | null;
+        helpers: string[];
+        stepId: string;
+        governance_mode?: SeatGovernanceMode;
+      }
+    | undefined {
     const p = this.paths.get(chatId);
     if (p?.runId === undefined) return undefined;
+    const mode = this.paMode(p);
     return {
+      ...(mode !== undefined ? { governance_mode: mode } : {}),
       runId: p.runId,
       pa: p.pa,
       selection: p.selection,

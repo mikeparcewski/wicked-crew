@@ -4,7 +4,7 @@
 // audit to a temp file — plus a scratch `core.db` + `core.db.events/` fixture the handler
 // actually reads, and a fixture studio root carrying the shipped version manifest.
 
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -13,6 +13,7 @@ import type { DiagnosticsResponse } from 'wicked-crew-api-types';
 
 import type { CoreAdapter } from '../src/core/adapter.js';
 import { createServer } from '../src/api/server.js';
+import { hostSandboxLauncher } from '../src/api/diagnostics.js';
 import { canonicalCrewStateHome } from '../src/skills/engine-env.js';
 import { removeScratch } from './setup/scratch.js';
 
@@ -182,6 +183,21 @@ describe('GET /api/v1/diagnostics (route smoke on a scratch daemon)', () => {
     expect(kinds.filter((k) => k !== 'governance.store' && k !== 'governance.legacy-outbox')).toEqual([]);
   });
 
+  it('crew#742 + crew#740: per-seat governance standing and the memory store ride the response', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/v1/diagnostics' });
+    const body = res.json() as DiagnosticsResponse;
+    const gov = body.seatGovernance!;
+    expect(Array.isArray(gov.seats)).toBe(true);
+    expect(gov.hostBoundary === null || ['sandbox-exec', 'bwrap'].includes(gov.hostBoundary)).toBe(true);
+    for (const seat of gov.seats) {
+      expect(['acp', 'wrapped']).toContain(seat.transport);
+      expect(['enforced', 'claimed', 'unenforced']).toContain(seat.input_governance);
+      expect(Object.keys(seat.governance_mode).sort()).toEqual(['scoped', 'scoped_bound', 'unscoped']);
+    }
+    expect(body.memoryStore).toMatchObject({ path: expect.stringMatching(/memory\.db$/), source: expect.stringMatching(/^(explicit|state-home|global)$/) });
+    expect(body.memoryStore!.notice === null || typeof body.memoryStore!.notice === 'string').toBe(true);
+  });
+
   it('folds the daemon\'s own error-level log lines into recentErrors, newest first', async () => {
     app.log.error('diagnostics smoke: first error');
     app.log.error('diagnostics smoke: second error');
@@ -204,5 +220,25 @@ describe('GET /api/v1/diagnostics (route smoke on a scratch daemon)', () => {
     expect(entry).toBeDefined();
     expect(entry?.responseType).toBe('DiagnosticsResponse');
     expect(entry?.statusCodes).toEqual([200]);
+  });
+});
+
+describe('hostSandboxLauncher (crew#742) — an executable file, not a name on PATH', () => {
+  it('a directory or a non-executable entry named bwrap arms nothing; an executable file does', () => {
+    const root = mkdtempSync(join(tmpdir(), 'crew-host-launcher-'));
+    try {
+      const asDir = join(root, 'a');
+      mkdirSync(join(asDir, 'bwrap'), { recursive: true });
+      const asFile = join(root, 'b');
+      mkdirSync(asFile);
+      writeFileSync(join(asFile, 'bwrap'), '#!/bin/sh\n');
+      chmodSync(join(asFile, 'bwrap'), 0o644);
+      expect(hostSandboxLauncher({ PATH: `${asDir}:${asFile}` }, 'linux')).toBeNull();
+      chmodSync(join(asFile, 'bwrap'), 0o755);
+      expect(hostSandboxLauncher({ PATH: `${asDir}:${asFile}` }, 'linux')).toBe('bwrap');
+      expect(hostSandboxLauncher({ PATH: asFile }, 'win32')).toBeNull();
+    } finally {
+      removeScratch(root);
+    }
   });
 });

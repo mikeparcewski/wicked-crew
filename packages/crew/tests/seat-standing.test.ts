@@ -156,21 +156,38 @@ describe('chatSeatAdmission — the default seats of a chat, and WHY a seat is n
   });
 });
 
-describe('ASK-C2 path admission (codex on #810 r9): standing is the gate where the run is bound; the structural rule stays where it is not', () => {
+describe('ASK-C2 path admission (codex on #810 r9) + IG1-crew-2: standing is the gate where the run is bound; the governance MODE decides where it is not', () => {
   const wrapped = { key: 'codex', enabled_for_council: true } as never;
-  const permissionless = { key: 'pi', enabled_for_council: true, acp: { acp_input_governance: false, os_sandbox: false } } as never;
-  const governed = { key: 'claude', enabled_for_council: true, acp: { acp_input_governance: true, os_sandbox: false } } as never;
-  it('path-bound (one repository): every seat in standing', () => {
+  // IG1-core-3 classes, as the engine's roster serialises them.
+  const codexSelf = { key: 'codex', enabled_for_council: true, governance_class: 'os_sandbox', trust_flags: ['--sandbox', 'workspace-write'] } as never;
+  const codexBypass = { key: 'codex', enabled_for_council: true, governance_class: 'none', trust_flags: ['--dangerously-bypass-approvals-and-sandbox'] } as never;
+  const pi = { key: 'pi', enabled_for_council: true, governance_class: 'os_sandbox', acp: { acp_input_governance: false, os_sandbox: false } } as never;
+  const piArmed = { key: 'pi', enabled_for_council: true, governance_class: 'os_sandbox', acp: { acp_input_governance: false, os_sandbox: true } } as never;
+  const governed = { key: 'claude', enabled_for_council: true, governance_class: 'acp_input_governance', acp: { acp_input_governance: true, os_sandbox: false } } as never;
+  it('path-bound (one repository): every seat in standing — every seat has at least the repository boundary there', () => {
     expect(chatSeatAdmission(wrapped, 'signed_in', true, 'path-bound')).toEqual({ ok: true });
-    expect(chatSeatAdmission(permissionless, 'signed_in', true, 'path-bound')).toEqual({ ok: true });
+    expect(chatSeatAdmission(pi, 'signed_in', true, 'path-bound')).toEqual({ ok: true });
+    expect(chatSeatAdmission(codexBypass, 'signed_in', true, 'path-bound')).toEqual({ ok: true });
     expect(chatSeatAdmission(wrapped, 'signed_out', true, 'path-bound')).toMatchObject({ ok: false, source: 'auth' });
     expect(chatSeatAdmission({ key: 'agy', enabled_for_council: false } as never, 'signed_in', true, 'path-bound')).toMatchObject({ ok: false, reason: expect.stringMatching(/disabled/) });
   });
-  it('path, unscoped: standing only; path, scoped but unbound (several repos / a project): the seat must hold itself read-only', () => {
+  it('path, unscoped: standing only; path, scoped but unbound: admitted and os_sandbox{seat_record | self} take a turn, none is refused by name with the mode', () => {
     expect(chatSeatAdmission(wrapped, 'signed_in', false, 'path')).toEqual({ ok: true });
-    expect(chatSeatAdmission(wrapped, 'signed_in', true, 'path')).toMatchObject({ ok: false, reason: expect.stringMatching(/cannot bind/) });
-    expect(chatSeatAdmission(permissionless, 'signed_in', true, 'path')).toMatchObject({ ok: false, reason: expect.stringMatching(/scope the ask to one repository/) });
     expect(chatSeatAdmission(governed, 'signed_in', true, 'path')).toEqual({ ok: true });
+    expect(chatSeatAdmission(codexSelf, 'signed_in', true, 'path')).toEqual({ ok: true });
+    expect(chatSeatAdmission(piArmed, 'signed_in', true, 'path')).toEqual({ ok: true });
+    // pi's only floor is the repository boundary, which needs a bound run.
+    expect(chatSeatAdmission(pi, 'signed_in', true, 'path')).toMatchObject({
+      ok: false,
+      source: 'scope',
+      reason: expect.stringMatching(/governance mode for this scope is none — its only floor is the engine's repository boundary.*scope the ask to one repository/),
+    });
+    expect(chatSeatAdmission(codexBypass, 'signed_in', true, 'path')).toMatchObject({
+      ok: false,
+      reason: expect.stringMatching(/governance mode for this scope is none — .*no per-call adapter to admit/),
+    });
+    // A seat the engine reported no class for is not claimed governed.
+    expect(chatSeatAdmission(wrapped, 'signed_in', true, 'path')).toMatchObject({ ok: false, reason: expect.stringMatching(/no governance class/) });
   });
   it('pool (default): unchanged — a wrapped seat is never a pool seat', () => {
     expect(chatSeatAdmission(wrapped, 'signed_in', false)).toMatchObject({ ok: false, reason: expect.stringMatching(/no ACP adapter/) });

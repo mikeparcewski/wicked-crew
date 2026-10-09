@@ -64,7 +64,7 @@ import type {
 } from './ledger.js';
 import { describeAttribution, readAcceptanceState, summarizeManifest } from './ledger.js';
 import type { RunConformance } from './conformance.js';
-import { resolveConformance } from './conformance.js';
+import { resolveConformance, type EnforcementContext } from './conformance.js';
 import type { RunAcceptanceSummary, RunAcceptanceWalkthrough, WalkthroughStepState } from 'wicked-crew-api-types';
 import type { WalkthroughGate } from './walkthrough-acceptance.js';
 
@@ -525,6 +525,8 @@ export async function buildAcceptanceView(opts: {
    * served with no roots so the `owned_by_you` steps reach the wire.
    */
   walkthroughs?: { gates: WalkthroughGate[]; steps: WalkthroughStepState[]; newest?: WalkthroughGate | null; ownedByYou?: boolean };
+  /** IG1-crew-2: the run's binding and seat records — `conformance.enforcement.units`. */
+  enforcementContext?: EnforcementContext;
 }): Promise<AcceptanceView> {
   const { phases, failClosed } = opts.requirement;
   const walkGates = opts.walkthroughs?.gates ?? [];
@@ -577,6 +579,7 @@ export async function buildAcceptanceView(opts: {
     claims: claimRows,
     ...(claimsError !== undefined ? { claimsError } : {}),
     events: eventRows,
+    ...(opts.enforcementContext !== undefined ? { enforcementContext: opts.enforcementContext } : {}),
   });
 
   return {

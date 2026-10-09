@@ -1,5 +1,5 @@
 {
-  "recordedFrom": "wicked-core 425de81 src/event.rs — CoreEvent::to_json arms GateEscalated (event.rs ~1763-1789), SandboxPosture (~1991-2004), WorktreeRetained (~2005-2013); key set, camelCase spellings and the null/empty conventions are the engine's exactly. RECORDED (mirrored from the engine's own to_json tests): gateEscalated, gateEscalatedHookVeto, sandboxPosture, worktreeRetained. DES-SHAPED (the engine emits them after L4 PR-② / L3 PR-3A; same key set and conventions, verdictSummary prose from DES-L4 R8 / DES-L3 §4 — not a recording): gateEscalatedCreatorMkdirOutside, gateEscalatedDeadSeat. api-types 0.38.0 types every key; a daemon whose engine predates wicked-core#464 emits only the first five gateEscalated keys. RECORDED from wicked-core b190f63 (PR #513, DES-L1 PR-1A — the evaluator-verdict layer): gateEscalatedEvaluatorVerdict and gateEvaluatedEvaluatorVerdict are the two frames the fold emits for an Evaluator unit whose own output ends `VERDICT: FAIL` (actor::substance_gate_tests::an_evaluator_fail_verdict_denies_into_the_escalation_gate, printed via CoreEvent::to_json); session/ord/phase renamed to run-1 / 4 / unit-4, every other byte the engine's. `evaluatorVerdict` is the 20th gateEvaluated key (api-types 0.38.0 types it); an engine before core-ts 0.7.27 emits the 19-key frame.",
+  "recordedFrom": "wicked-core 425de81 src/event.rs — CoreEvent::to_json arms GateEscalated (event.rs ~1763-1789), SandboxPosture (~1991-2004), WorktreeRetained (~2005-2013); key set, camelCase spellings and the null/empty conventions are the engine's exactly. RECORDED (mirrored from the engine's own to_json tests): gateEscalated, gateEscalatedHookVeto, sandboxPosture, worktreeRetained. DES-SHAPED (the engine emits them after L4 PR-② / L3 PR-3A; same key set and conventions, verdictSummary prose from DES-L4 R8 / DES-L3 §4 — not a recording): gateEscalatedCreatorMkdirOutside, gateEscalatedDeadSeat. api-types 0.38.0 types every key; a daemon whose engine predates wicked-core#464 emits only the first five gateEscalated keys. RECORDED from wicked-core b190f63 (PR #513, DES-L1 PR-1A — the evaluator-verdict layer): gateEscalatedEvaluatorVerdict and gateEvaluatedEvaluatorVerdict are the two frames the fold emits for an Evaluator unit whose own output ends `VERDICT: FAIL` (actor::substance_gate_tests::an_evaluator_fail_verdict_denies_into_the_escalation_gate, printed via CoreEvent::to_json); session/ord/phase renamed to run-1 / 4 / unit-4, every other byte the engine's. `evaluatorVerdict` is the 20th gateEvaluated key (api-types 0.38.0 types it); an engine before core-ts 0.7.27 emits the 19-key frame. IG1 (wicked-core-ts 0.7.41, core f6fc3d1): ig1OsSandboxUnit / ig1FloorUnarmed are the unit frames of a floor-class seat whose boundary armed / did not (reason strings from pipeline.rs SandboxPosture and execute_wrapped.rs GovernanceUnenforced; no governanceHookFired on the armed unit); teamPathStartedGovernance / teamMemberJoinedGovernanceClass are bus payloads (team/events.rs PathStarted.governance, MemberJoined.governance_class).",
   "gateEscalated": {
     "type": "gateEscalated",
     "session": "run-1",
@@ -117,5 +117,93 @@
     "session": "run-1",
     "path": "/srv/wicked/runs/wicked-run-1",
     "reason": "the worktree holds uncommitted work the run branch does not carry (2 modified, 1 untracked)"
+  },
+  "ig1OsSandboxUnit": [
+    {
+      "type": "sandboxPosture",
+      "session": "run-1",
+      "ord": 1,
+      "cli": "pi",
+      "posture": "os",
+      "reason": "the seat sits on the OS-sandbox floor and the run is bound to a worktree: the kernel write boundary arms (sandbox-exec), so writes outside the repository boundary are refused by the OS"
+    },
+    {
+      "type": "unitOutputCaptured",
+      "session": "run-1",
+      "ord": 1,
+      "attempt": 0,
+      "outputBytes": 512,
+      "stepStatus": "ok",
+      "governed": true
+    }
+  ],
+  "ig1FloorUnarmed": [
+    {
+      "type": "sandboxPosture",
+      "session": "run-1",
+      "ord": 1,
+      "cli": "pi",
+      "posture": "advisory",
+      "reason": "the OS write boundary will not arm — no_launcher: write containment is the worktree guard plus the command-text fences (remote-write, install) — best-effort, a shell can evade a text scan"
+    },
+    {
+      "type": "governanceUnenforced",
+      "session": "run-1",
+      "ord": 1,
+      "attempt": 0,
+      "cli": "pi",
+      "reason": "unit is governed but 'pi' has no input-governance adapter and its OS-sandbox governance floor did not arm (no_launcher); its tool calls are unchecked"
+    },
+    {
+      "type": "sandboxUnenforced",
+      "session": "run-1",
+      "ord": 1,
+      "attempt": 0,
+      "cli": "pi",
+      "level": "best-effort",
+      "reason": "no_launcher"
+    },
+    {
+      "type": "unitOutputCaptured",
+      "session": "run-1",
+      "ord": 1,
+      "attempt": 0,
+      "outputBytes": 512,
+      "stepStatus": "ok",
+      "governed": false
+    }
+  ],
+  "teamPathStartedGovernance": {
+    "run_id": "run-1",
+    "cli": "pi",
+    "selection": "random",
+    "roster": [
+      "claude",
+      "pi"
+    ],
+    "request": "Q1",
+    "workflow": null,
+    "plan": false,
+    "governance": [
+      {
+        "seat": "claude",
+        "class": "acp_input_governance"
+      },
+      {
+        "seat": "pi",
+        "class": "os_sandbox"
+      }
+    ]
+  },
+  "teamMemberJoinedGovernanceClass": {
+    "run_id": "run-1",
+    "member_id": "m1",
+    "open_seq": 1,
+    "seat": "claude",
+    "role": "monitor",
+    "status": "attached",
+    "reason": "monitor attached",
+    "error": null,
+    "governance_class": "acp_input_governance"
   }
 }

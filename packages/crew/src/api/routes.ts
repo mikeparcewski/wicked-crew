@@ -40,10 +40,17 @@ import type {
   SessionView,
 } from '../core/types.js';
 import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
-import { callEstateTool, EstateMcpError } from '../core/estate-mcp-client.js';
+import { callEstateTool, EstateMcpError, memoryStoreInfo } from '../core/estate-mcp-client.js';
 import { SeatHealthTracker } from './seat-health.js';
 import { applyWorkerConfigRoot, signedInHeuristic } from './seat-signin.js';
-import { chatSeatAdmission } from './seat-standing.js';
+import { chatSeatAdmission, type StandingSeat } from './seat-standing.js';
+import {
+  seatGovernanceDiagnostics,
+  seatGovernanceWarnings,
+  type DiagnosticSeatInput,
+  type GovernanceSeatInput,
+  type SeatGovernanceDiagnostic,
+} from './seat-governance.js';
 import { rosterWithStandingFactory, type RosterWithStanding } from './roster-standing.js';
 import { ChatTurnIndex } from './chat-turns.js';
 import type { ChatRepoRoot, ChatTranscriptStore } from './chat-transcripts.js';
@@ -148,6 +155,8 @@ import {
   EngineVersionCache,
   eventsDirOf,
   installedPackageVersion,
+  hostSandboxLauncher,
+  seatRosterFile,
   listStoreFiles,
   readStudioBundleVersion,
   type ErrorRing,
@@ -1464,6 +1473,9 @@ export function registerRoutes(
       ...(adapter.busUnavailable != null ? [busUnavailableWarning(adapter.busUnavailable)] : []),
       // wicked-core#631: the engine has the bus but not the calls crew reaches it through.
       ...(adapter.busSeamsOff != null ? [busSeamsOffWarning(adapter.busSeamsOff)] : []),
+      // crew#742: a seat that runs ungoverned, or floor seats on a host that cannot arm their
+      // boundary, are named before any run starts.
+      ...seatGovernanceWarnings(seatGovernanceNow(), hostSandboxLauncher()),
     ];
     return {
       status: 'ok',
@@ -1538,6 +1550,16 @@ export function registerRoutes(
         // who classified (the engine, or crew's registry copy on an older addon) and whether that
         // refuses launches — re-surveyed per read. `null` on a route set booted without the watch.
         stateHome: runtime.stateHome !== undefined ? await runtime.stateHome.refresh() : null,
+        // crew#742: per seat — transport, the record's OS sandbox, the engine's governance class,
+        // input governance enforced / claimed / unenforced, the mode per scope kind; plus the
+        // registry overlay file and this host's OS launcher.
+        seatGovernance: {
+          rosterFile: seatRosterFile(),
+          hostBoundary: hostSandboxLauncher(),
+          seats: seatGovernanceNow(),
+        },
+        // crew#740: which memory store this daemon reads and writes, and the isolation notice.
+        memoryStore: memoryStoreInfo(),
       };
     },
   );
@@ -1614,6 +1636,15 @@ export function registerRoutes(
   const rosterWithStanding: RosterWithStanding =
     runtime.rosterWithStanding ?? rosterWithStandingFactory({ seatHealth, signedIn });
   app.get(`${V}/roster`, async () => ({ roster: rosterWithStanding() }));
+  /** crew#742: the seats' governance standing, read from the standing roster (empty when the
+   *  roster cannot be read — the roster route reports that failure itself). */
+  const seatGovernanceNow = (): SeatGovernanceDiagnostic[] => {
+    try {
+      return seatGovernanceDiagnostics(rosterWithStanding() as unknown as DiagnosticSeatInput[]);
+    } catch {
+      return [];
+    }
+  };
 
   // Each seat's week (studio's weekly 1:1 per agent; api-types 0.52.0): units, first pass, rework,
   // stalls, bench and cost, folded from the runs' durable event logs by `seatRecord` — nothing new
@@ -2978,7 +3009,9 @@ export function registerRoutes(
           continue;
         }
         const admission = chatSeatAdmission(
-          seat as { key: string; enabled_for_council?: boolean; acp?: { acp_input_governance?: boolean; os_sandbox?: boolean } | null },
+          // IG1-crew-2: the standing seat carries the engine's `governance_class` and the pin
+          // reading, so a scoped ask admits by the seat's governance mode (reason names it).
+          seat as StandingSeat,
           seat.auth ?? 'unknown',
           scoped,
           admissionKind,
@@ -3064,7 +3097,12 @@ export function registerRoutes(
         }
         // ASK-C1: the path record — published only now, with the scope committed, so a message
         // cannot launch against a scope that is still being filed (codex on #808 r2, 4).
-        askPaths.open(chatId, clis, b.primary);
+        // IG1-crew-1: with the admitted seats' records and the scope kind, so the path's view
+        // names the PA's governance mode.
+        askPaths.open(chatId, clis, b.primary, {
+          seats: standing.filter((s) => clis.includes(String(s.key))) as unknown as GovernanceSeatInput[],
+          scopeKind: !scoped ? 'unscoped' : admissionKind === 'path-bound' ? 'scoped_bound' : 'scoped',
+        });
         // Register roots for path rewriting (crew#618): absolute host paths in seat replies are
         // rewritten to repo-relative form before being stored in the transcript.
         if (chatTranscripts !== undefined && scope.repos.length > 0) {
@@ -3396,7 +3434,9 @@ export function registerRoutes(
           const seat = standingNow.find((s) => String(s.key) === cliKey);
           if (seat === undefined) return { cliKey, ok: false, error: `seat '${cliKey}' is not in the roster` };
           const admission = chatSeatAdmission(
-            seat as { key: string; enabled_for_council?: boolean; acp?: { acp_input_governance?: boolean; os_sandbox?: boolean } | null },
+            // IG1-crew-2: the standing seat carries the engine's `governance_class` and the pin
+            // reading, so a scoped ask admits by the seat's governance mode (reason names it).
+            seat as StandingSeat,
             seat.auth ?? 'unknown',
             scopedChat,
             reseatKind,
@@ -3673,6 +3713,25 @@ export function registerRoutes(
       claims: () => adapter.listConformanceClaims(),
       events: (rid) => adapter.runEvents(rid),
       ...(walkthroughs.gates.length > 0 || walkthroughs.ownedByYou ? { walkthroughs } : {}),
+      // IG1-crew-2: what fenced each unit — the run's binding and the roster's seat records.
+      enforcementContext: {
+        bound: run.session.repo_ref !== null,
+        worktree: run.session.workdir,
+        extraWriteRoots: run.session.extra_write_roots ?? [],
+        seatOf: (() => {
+          let seats: GovernanceSeatInput[] | null = null;
+          return (cli: string) => {
+            if (seats === null) {
+              try {
+                seats = rosterWithStanding() as unknown as GovernanceSeatInput[];
+              } catch {
+                seats = [];
+              }
+            }
+            return seats.find((seat) => seat.key === cli);
+          };
+        })(),
+      },
     });
   });
 
@@ -5849,7 +5908,8 @@ export function registerRoutes(
           memories = memories.filter((m) => withinDateRange(m.created_at, since, until));
         }
         if (limit !== undefined) memories = memories.slice(0, limit);
-        const body: ListMemoriesResponse = { memories };
+        // crew#740: the store the list came from (path, source, the isolation notice when it applies).
+        const body: ListMemoriesResponse = { memories, store: memoryStoreInfo() };
         return body;
       } catch (err) {
         return estateUpstreamError(reply, err);

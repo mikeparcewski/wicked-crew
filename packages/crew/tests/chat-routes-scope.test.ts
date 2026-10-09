@@ -476,10 +476,11 @@ describe('POST /chats — named scope kinds (studio#323 R4)', () => {
     expect((res.json() as { scope: { kind: string } }).scope.kind).toBe('system');
   });
 
-  it("scopeKind 'everything' reads every registered repo; the run cannot BIND several repositories, so a seat that cannot hold itself read-only is refused (ASK-C2; codex on #810 r9)", async () => {
+  it("scopeKind 'everything' reads every registered repo; the run cannot BIND several repositories, so a seat whose governance mode is none for the scope is refused (ASK-C2; IG1-crew-2)", async () => {
     const spy = vi.spyOn(CoreAdapter, 'roster').mockReturnValue([
-      { key: 'claude', acp: { acp_input_governance: true, os_sandbox: false } },
-      { key: 'pi', acp: { acp_input_governance: false, os_sandbox: false } },
+      { key: 'claude', governance_class: 'acp_input_governance', acp: { acp_input_governance: true, os_sandbox: false } },
+      // pi is on the floor, but its floor is the repository boundary — which needs a bound run.
+      { key: 'pi', governance_class: 'os_sandbox', acp: { acp_input_governance: false, os_sandbox: false } },
     ]);
     try {
       const res = await open({ chatId: 'all', scopeKind: 'everything' });
@@ -487,7 +488,8 @@ describe('POST /chats — named scope kinds (studio#323 R4)', () => {
       const body = res.json() as { scope: { kind: string; repos: { rootPath: string }[]; cwd: string }; refused: { cliKey: string }[] };
       expect(body.scope.kind).toBe('everything');
       expect(body.scope.repos.map((r) => r.rootPath)).toEqual(['/srv/repos/alpha']);
-      expect(body.refused.map((r) => r.cliKey), 'pi: no permissions, no sandbox — unbound scope').toEqual(['pi']);
+      expect(body.refused.map((r) => r.cliKey), 'pi: repository boundary only — unbound scope').toEqual(['pi']);
+      expect((body.refused as unknown as { reason: string }[])[0]!.reason).toMatch(/governance mode for this scope is none/);
       expect((res.json() as { seats: { cliKey: string }[] }).seats.map((x) => x.cliKey)).toEqual(['claude']);
       expect(chatScopes.engineOf('all')).toEqual({ cwd: body.scope.cwd, codeGraphDb: null, readRoots: ['/srv/repos/alpha'] });
       expect(chatOpen).not.toHaveBeenCalled();

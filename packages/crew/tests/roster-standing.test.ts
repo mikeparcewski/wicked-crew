@@ -48,8 +48,8 @@ describe('rosterWithStandingFactory', () => {
       seatHealth: new SeatHealthTracker(),
       registry: () => [
         ...REGISTRY.map((s) => ({ ...s })),
-        { key: 'pi', display_name: 'Pi', binary: 'pi', enabled_for_council: true, headless_invocation: 'pi {PROMPT}', acp: { binary: 'pi-acp', acp_input_governance: false, os_sandbox: false } },
-        { key: 'governed', display_name: 'Governed', binary: 'claude', enabled_for_council: true, headless_invocation: 'claude -p {PROMPT}', acp: { binary: 'claude-acp', acp_input_governance: true } },
+        { key: 'pi', display_name: 'Pi', binary: 'pi', enabled_for_council: true, headless_invocation: 'pi {PROMPT}', governance_class: 'os_sandbox', acp: { binary: 'pi-acp', acp_input_governance: false, os_sandbox: false } },
+        { key: 'governed', display_name: 'Governed', binary: 'claude', enabled_for_council: true, headless_invocation: 'claude -p {PROMPT}', governance_class: 'acp_input_governance', acp: { binary: 'claude-acp', acp_input_governance: true } },
       ],
       signedIn: (key) => (key === 'codex' ? false : true),
       env: { WICKED_WORKER_HOME: '' },
@@ -59,17 +59,23 @@ describe('rosterWithStandingFactory', () => {
     // carries none): standing admits it unscoped and on a single-repo (bound) ask; a wider
     // repository scope the run cannot bind refuses it.
     expect(of('claude').unscoped).toEqual({ ok: true });
-    expect(of('claude').scoped).toEqual({ ok: false, reason: expect.stringMatching(/cannot bind/), source: 'scope' });
+    expect(of('claude').scoped).toEqual({ ok: false, reason: expect.stringMatching(/no governance class.*cannot bind/), source: 'scope' });
     expect(of('claude').scoped_bound).toEqual({ ok: true });
     // Signed out: refused in EVERY mode, source auth (the reason names the remedy).
     expect(of('codex').unscoped).toEqual({ ok: false, reason: expect.stringMatching(/signed out/), source: 'auth' });
     expect(of('codex').scoped.ok).toBe(false);
     expect(of('codex').scoped.source).toBe('auth');
     expect(of('codex').scoped_bound.ok).toBe(false);
-    // pi: an adapter that asks no permissions and arms no sandbox — unscoped yes, bound yes, wider scope no.
+    // pi: on the floor, but its floor is the repository boundary — unscoped yes, bound yes, wider scope no.
     expect(of('pi').unscoped).toEqual({ ok: true });
-    expect(of('pi').scoped).toEqual({ ok: false, reason: expect.stringMatching(/scope the ask to one repository/), source: 'scope' });
+    expect(of('pi').scoped).toEqual({ ok: false, reason: expect.stringMatching(/governance mode for this scope is none.*scope the ask to one repository/), source: 'scope' });
     expect(of('pi').scoped_bound).toEqual({ ok: true });
+    // IG1-crew-1: the roster states the mode per scope kind, read from the engine's class.
+    const mode = (key: string) => roster.find((s) => s.key === key)!['governance_mode'] as Record<string, { mode: string; source: string; class: string | null }>;
+    expect(mode('pi')['scoped_bound']).toMatchObject({ mode: 'os_sandbox', source: 'repo_boundary', class: 'os_sandbox' });
+    expect(mode('pi')['scoped']).toMatchObject({ mode: 'none', class: 'os_sandbox' });
+    expect(mode('governed')['scoped']).toMatchObject({ mode: 'admitted', source: 'acp_input_governance' });
+    expect(mode('claude')['scoped_bound']).toMatchObject({ mode: 'none', class: null });
     // A governed adapter sits in every mode.
     expect(of('governed')).toEqual({ unscoped: { ok: true }, scoped: { ok: true }, scoped_bound: { ok: true } });
     // The verdict IS the pre-filter's: the same function, the same inputs.

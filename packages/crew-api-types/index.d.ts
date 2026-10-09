@@ -902,7 +902,44 @@ export interface RosterSeat {
    * fails the seat's ACP governance closed at every spawn.
    */
   version_pin?: SeatVersionPin;
+  /**
+   * (IG1-core-3, wicked-core-ts 0.7.41) The engine's governance class for the seat, derived from
+   * its record — passed through verbatim. `null`/absent on an engine before the field.
+   */
+  governance_class?: EngineGovernanceClass | null;
+  /**
+   * (api-types 0.97.0, IG1-crew-1) The governance mode the seat runs under per scope kind (the
+   * keys of `chat_admission`): what fences its tool calls. A crew reading — never handed to the
+   * engine (`clisJson` strips it).
+   */
+  governance_mode?: Record<GovernanceScopeKind, SeatGovernanceMode>;
   [k: string]: unknown;
+}
+
+/** The engine's governance class names (IG1-core-3). */
+export type EngineGovernanceClass = 'acp_input_governance' | 'os_sandbox' | 'none';
+
+/** `unscoped` — no repository; `scoped` — several repositories or a project (the run binds none);
+ *  `scoped_bound` — one repository (the run is bound to its worktree; every build run). */
+export type GovernanceScopeKind = 'unscoped' | 'scoped' | 'scoped_bound';
+
+/**
+ * (api-types 0.97.0, IG1-crew-1) The governance MODE a seat runs under — what fences its tool
+ * calls. `admitted`: an ACP adapter sends every tool call through the engine's per-call gate (and
+ * a pinned build verified); `os_sandbox`: an OS write floor contains it — `source` names the floor
+ * (`seat_record` = `acp.os_sandbox`, `self` = codex's own `--sandbox`, `repo_boundary` = the
+ * engine's boundary around a run bound to one repository) — not a per-call gate, not a read or
+ * network jail; `none`: only the command-text fences. `reason` says why in the operator's words
+ * (codex: no per-call adapter exists to admit).
+ */
+export interface SeatGovernanceMode {
+  mode: 'admitted' | 'os_sandbox' | 'none';
+  class: EngineGovernanceClass | null;
+  source: 'acp_input_governance' | 'seat_record' | 'self' | 'repo_boundary' | 'none';
+  reason: string;
+  /** The roots the mode holds writes/reads to. On the roster these are labels (`<run worktree>`);
+   *  on a run's record, paths. */
+  fence: { write_roots: string[]; read_roots: string[]; network: 'open' };
 }
 
 /**
@@ -5653,6 +5690,12 @@ export interface ChatPathView {
   helpers: string[];
   /** The answer step the last message added (`answer-N`). */
   stepId: string;
+  /**
+   * (api-types 0.97.0, IG1-crew-1) The PA's governance mode for the ask's scope — what fences its
+   * tool calls — derived from the engine's class as the run reports it (`path.started.governance`,
+   * `member.joined.governance_class`). Absent until the PA is known, and on a daemon before it.
+   */
+  governance_mode?: SeatGovernanceMode;
 }
 
 // ── Project code graph (DES-PROJECT-001; the co-located multi-repo graph) ──────
@@ -6268,6 +6311,42 @@ export interface DiagnosticsResponse {
   stateHome?: DiagnosticsStateHome | null;
   /** The studio chat recorder's per-CLI format compliance (api-types 0.84.0, DC-S4b); `null` without the chat host. */
   decisions?: DiagnosticsDecisions | null;
+  /** (api-types 0.97.0, crew#742) Per-seat governance standing before any run. */
+  seatGovernance?: DiagnosticsSeatGovernance;
+  /** (api-types 0.97.0, crew#740) The memory store this daemon reads and writes. */
+  memoryStore?: MemoryStoreInfo;
+}
+
+/** `DiagnosticsResponse.seatGovernance` (crew#742). Paths are for the local operator. */
+export interface DiagnosticsSeatGovernance {
+  /** The engine's user registry overlay (`~/.config/wicked-council/clis.toml`) and whether it exists. */
+  rosterFile: { path: string; present: boolean } | null;
+  /** The OS launcher the repository boundary arms with on this host (`sandbox-exec` | `bwrap`),
+   *  found on PATH; `null` = none, so floor seats resting on it run advisory. */
+  hostBoundary: string | null;
+  seats: DiagnosticsSeatGovernanceEntry[];
+}
+
+export interface DiagnosticsSeatGovernanceEntry {
+  cli: string;
+  enabled_for_council: boolean;
+  transport: 'acp' | 'wrapped';
+  /** The seat record arms the OS sandbox itself (`acp.os_sandbox`). */
+  os_sandbox: boolean;
+  class: EngineGovernanceClass | null;
+  /** `enforced` — admitted and (if pinned) verified; `claimed` — admitted, pin not yet probed;
+   *  `unenforced` — no per-call gate holds the seat. */
+  input_governance: 'enforced' | 'claimed' | 'unenforced';
+  governance_mode: Record<GovernanceScopeKind, SeatGovernanceMode>;
+}
+
+/** (api-types 0.97.0, crew#740) The daemon's memory store: `explicit` (`WICKED_MEMORY_DB`),
+ *  `state-home` (a non-default state home's own store), `global` (the operator-global one).
+ *  `notice` is the isolation notice when this daemon's own store is empty and a global one exists. */
+export interface MemoryStoreInfo {
+  path: string;
+  source: 'explicit' | 'state-home' | 'global';
+  notice: string | null;
 }
 
 // ── Diagnostics — governance store + dead letters (api-types 0.31.0, crew#495 / F-022) ─────────
@@ -7220,6 +7299,8 @@ export interface ListMemoriesQuery {
 /** `GET /memory` → 200. */
 export interface ListMemoriesResponse {
   memories: MemoryItem[];
+  /** (api-types 0.97.0, crew#740) The store the list was read from. Absent on a daemon before it. */
+  store?: MemoryStoreInfo;
 }
 
 /** `GET /memory/coverage` query — an optional subtree filter (`""`/omitted = global totals). */

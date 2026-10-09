@@ -37,6 +37,7 @@
 import { homedir } from 'node:os';
 import type {SeatAuthFailure, SeatRecentBench} from './seat-health.js';
 import type {SeatProbeReading} from './seat-probe.js';
+import { seatGovernanceMode } from './seat-governance.js';
 
 /** The longest piece of a seat's own words that may ride in the plain sentence. */
 const PLAIN_EVIDENCE_MAX = 120;
@@ -121,7 +122,12 @@ export function seatAuth(seat: StandingSeat, signedIn: boolean | null): { auth: 
 export interface StandingSeat {
   key: string;
   enabled_for_council?: boolean;
-  acp?: { acp_input_governance?: boolean; os_sandbox?: boolean } | null;
+  acp?: { acp_input_governance?: boolean; os_sandbox?: boolean; verified_version?: unknown } | null;
+  /** IG1-core-3: the engine's derived class (`acp_input_governance | os_sandbox | none`). */
+  governance_class?: unknown;
+  trust_flags?: unknown;
+  /** core#581: the probed ACP version pin, when the seat pins one. */
+  version_pin?: { matched?: unknown; pinned?: unknown; observed?: unknown } | null;
   /** A registry-declared credential requirement, when the engine's record carries one (future core). */
   credential?: 'required' | 'optional' | string;
   /** A registry-declared free-tier label, when the record carries one (future core). */
@@ -295,7 +301,8 @@ export function chatSeatAdmission(
    *  hold the repositories read-only — a scoped ask that is not bound to one repository (several
    *  repos, a project, everything): no worktree, no guard, no default sandbox (codex on #810 r9).
    *  `path-bound`: a single-repo ask — the run is bound (worktree snapshot + guard + mutation
-   *  check), so every seat in standing is eligible, wrapped ones included. */
+   *  check), so every seat in standing is eligible, wrapped ones included: every seat has at
+   *  least the repository boundary there (IG1-crew-2; `governance_mode.scoped_bound` names it). */
   kind: 'pool' | 'path' | 'path-bound' = 'pool',
 ): ChatAdmission {
   const reasons: string[] = [];
@@ -312,16 +319,15 @@ export function chatSeatAdmission(
   }
   const acp = seat.acp ?? undefined;
   if (kind === 'path') {
-    // A scoped ask the run cannot bind: the seat must hold itself read-only.
-    if (acp === undefined) {
+    // IG1-crew-2: a scoped ask the run cannot bind admits a seat by its governance MODE for that
+    // scope (seat-governance.ts, the engine's class): `admitted` and `os_sandbox` (seat record or
+    // the seat's own sandbox — the repository boundary needs a bound run) take a turn; `none` is
+    // refused by name with the mode's reason.
+    const gov = seatGovernanceMode(seat, 'scoped');
+    if (gov.mode === 'none') {
       reasons.push(
-        'it has no ACP adapter and this ask reads several repositories (or a project) the run cannot bind, ' +
-          'so nothing would hold them read-only for it — scope the ask to one repository to include it',
-      );
-    } else if (acp.acp_input_governance !== true && acp.os_sandbox !== true) {
-      reasons.push(
-        'its ACP adapter asks no permissions and its record arms no OS sandbox, and this ask reads several ' +
-          'repositories (or a project) the run cannot bind — scope the ask to one repository to include it',
+        `its governance mode for this scope is none — ${gov.reason}; this ask reads several repositories ` +
+          '(or a project) the run cannot bind — scope the ask to one repository to include it',
       );
     }
     return reasons.length === 0 ? { ok: true } : { ok: false, reason: reasons.join('; '), source };
