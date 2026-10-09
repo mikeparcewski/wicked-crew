@@ -447,3 +447,83 @@ describe('resolveEnforcement — evaluatorMutatedWorktree (wicked-core F-036)', 
     expect(res.unenforced[0]!.reason).toMatch(/HEAD moved/);
   });
 });
+
+describe('IG1-crew-2 — per-unit governance records + contained', () => {
+  const seats: Record<string, Record<string, unknown>> = {
+    claude: { key: 'claude', governance_class: 'acp_input_governance', acp: { acp_input_governance: true } },
+    pi: { key: 'pi', governance_class: 'os_sandbox', acp: { acp_input_governance: false, os_sandbox: false } },
+    codex: { key: 'codex', governance_class: 'os_sandbox', trust_flags: ['--sandbox', 'workspace-write'] },
+  };
+  const ctx = (bound: boolean) => ({
+    bound,
+    worktree: bound ? '/w/run-1' : null,
+    extraWriteRoots: ['/w/evidence'],
+    seatOf: (cli: string) => seats[cli] as never,
+  });
+
+  it('a gate-armed unit is admitted; the run stays enforced and lists it', () => {
+    const view = resolveEnforcement(
+      [
+        ev({ type: 'unitDistributed', ord: 0, cli: 'claude' }),
+        ev({ type: 'governanceContextArmed', ord: 0, attempt: 0 }),
+        ev({ type: 'unitOutputCaptured', ord: 0, attempt: 0, governed: true }),
+      ],
+      ctx(true),
+    );
+    expect(view.status).toBe('enforced');
+    expect(view.units).toEqual([
+      expect.objectContaining({ ord: 0, attempt: 0, cli: 'claude', mode: 'admitted', source: 'acp_input_governance' }),
+    ]);
+  });
+
+  it("governed: true without a hook on a floor seat (the engine's os_sandbox marker) ⇒ os_sandbox, status contained, the fence naming the worktree", () => {
+    const view = resolveEnforcement(
+      [
+        ev({ type: 'unitDistributed', ord: 1, cli: 'pi' }),
+        ev({ type: 'sandboxPosture', ord: 1, cli: 'pi', posture: 'os', reason: '' }),
+        ev({ type: 'unitOutputCaptured', ord: 1, attempt: 0, governed: true }),
+      ],
+      ctx(true),
+    );
+    expect(view.status).toBe('contained');
+    expect(view.units[0]).toMatchObject({ cli: 'pi', mode: 'os_sandbox', source: 'repo_boundary', fence: { write_roots: ['/w/run-1', '/w/evidence'], network: 'open' } });
+    expect(view.reason).toMatch(/OS-sandbox floor, not a per-call gate — writes fenced to \/w\/run-1, \/w\/evidence/);
+    // codex is held by its own sandbox.
+    const codex = resolveEnforcement(
+      [ev({ type: 'unitDistributed', ord: 2, cli: 'codex' }), ev({ type: 'unitOutputCaptured', ord: 2, attempt: 0, governed: true })],
+      ctx(true),
+    );
+    expect(codex.units[0]).toMatchObject({ mode: 'os_sandbox', source: 'self' });
+  });
+
+  it('governanceUnenforced on a BOUND run ⇒ os_sandbox / repo_boundary, enforced: undisclosed, status contained (never guardrailed)', () => {
+    const events = [
+      ev({ type: 'unitDistributed', ord: 1, cli: 'pi' }),
+      ev({ type: 'sandboxPosture', ord: 1, cli: 'pi', posture: 'advisory', reason: 'no_launcher' }),
+      ev({ type: 'governanceUnenforced', ord: 1, attempt: 0, cli: 'pi', reason: 'the floor did not arm: no_launcher' }),
+      ev({ type: 'sandboxUnenforced', ord: 1, attempt: 0, cli: 'pi', level: 'best-effort', reason: 'no_launcher' }),
+      ev({ type: 'unitOutputCaptured', ord: 1, attempt: 0, governed: false }),
+    ];
+    const view = resolveEnforcement(events, ctx(true));
+    expect(view.status).toBe('contained');
+    expect(view.unenforced).toEqual([]);
+    expect(view.units).toEqual([
+      expect.objectContaining({ ord: 1, cli: 'pi', mode: 'os_sandbox', source: 'repo_boundary', enforced: 'undisclosed', fence: expect.objectContaining({ write_roots: ['/w/run-1', '/w/evidence'] }) }),
+    ]);
+    const conf = resolveConformance({ runId: 'run-1', claims: [], events, enforcementContext: ctx(true) });
+    expect(conf.guardrailed).toBe(false);
+    // The same unit on an UNBOUND run is none and still unenforced (deny-dominates).
+    const unbound = resolveEnforcement(events, ctx(false));
+    expect(unbound.status).toBe('unenforced');
+    expect(unbound.units[0]).toMatchObject({ mode: 'none', source: 'none' });
+  });
+
+  it('without a context the record still lists units, and the pre-IG1 reading holds (unenforced stays unenforced)', () => {
+    const view = resolveEnforcement([ev({ type: 'governanceUnenforced', ord: 3, attempt: 1, cli: 'agy', reason: 'no adapter' })]);
+    expect(view.status).toBe('unenforced');
+    expect(view.units).toEqual([expect.objectContaining({ ord: 3, attempt: 1, cli: 'agy', mode: 'none' })]);
+    const governed = resolveEnforcement([ev({ type: 'unitOutputCaptured', ord: 0, attempt: 0, governed: true })]);
+    expect(governed.status).toBe('enforced');
+    expect(governed.units[0]).toMatchObject({ mode: 'admitted' });
+  });
+});

@@ -47,6 +47,13 @@
  */
 
 import type { GovernanceClaim, RecordedEvent } from '../core/types.js';
+import {
+  seatGovernanceMode,
+  type GovernanceModeKind,
+  type GovernanceModeSource,
+  type GovernanceSeatInput,
+  type SeatGovernanceFence,
+} from '../api/seat-governance.js';
 
 /** Scope prefix the engine stamps on every run-scoped governance artifact (`scope.rs`). */
 const RUN_SCOPE_PREFIX = 'wicked-agent/';
@@ -109,18 +116,50 @@ export interface UnenforcedUnit {
 export interface GovernanceEnforcementView {
   /**
    * - `enforced`     — enforcement positively observed armed; nothing reported unenforced.
-   * - `unenforced`   — ≥1 governed unit ran with unchecked tool calls (`governanceUnenforced`).
+   * - `contained`    — (IG1-crew-2) no unit ran unchecked, but ≥1 unit was held by an OS-sandbox
+   *                    floor (or, on a bound run, the repository boundary) rather than a per-call
+   *                    gate: its writes were fenced to the roots `units[].fence` names. Between
+   *                    `enforced` and `unenforced`; never "guardrailed".
+   * - `unenforced`   — ≥1 governed unit ran with unchecked tool calls (`governanceUnenforced` on
+   *                    a run bound to no repository) or an evaluator mutated the worktree.
    * - `ungoverned`   — the log is readable and carries no governance signal at all: the run never
    *                    asked for governance. Not a failure — but never "guardrailed" either.
    * - `unverifiable` — the event log could not be read; unknown is never guardrailed.
    */
-  status: 'enforced' | 'unenforced' | 'ungoverned' | 'unverifiable';
+  status: 'enforced' | 'contained' | 'unenforced' | 'ungoverned' | 'unverifiable';
   /** The governed-but-unchecked units, verbatim from their events. Empty unless `unenforced`. */
   unenforced: UnenforcedUnit[];
   /** Ords of units whose governance context was confirmed armed (`governanceContextArmed`). */
   armedUnits: number[];
   /** Why the status is what it is — always populated. */
   reason: string;
+  /** (IG1-crew-2) What fenced each governed unit's tool calls, per attempt, oldest first. */
+  units: GovernedUnitRecord[];
+}
+
+/** (IG1-crew-2) One governed unit attempt's governance record, derived from frames only. */
+export interface GovernedUnitRecord {
+  ord: number;
+  attempt: number;
+  cli: string;
+  mode: GovernanceModeKind;
+  source: GovernanceModeSource;
+  fence: SeatGovernanceFence;
+  reason: string;
+  /** `undisclosed`: the unit reported `governanceUnenforced` on a bound run — the repository
+   *  boundary held its writes, but no armed floor was disclosed for it. */
+  enforced?: 'undisclosed';
+}
+
+/** What the per-unit record needs beyond the log: the run's binding and the seats' records. */
+export interface EnforcementContext {
+  /** The run is bound to one repository (a worktree). */
+  bound: boolean;
+  /** The bound run's worktree (`AgentSession.workdir`). */
+  worktree?: string | null;
+  extraWriteRoots?: readonly string[];
+  /** The roster's record for a seat key (its `governance_class`, `acp`, `trust_flags`). */
+  seatOf?: (cli: string) => GovernanceSeatInput | undefined;
 }
 
 /** The conformance half of the acceptance view — served beside the QE gate. */
@@ -222,12 +261,13 @@ function str(v: unknown): string {
  * which is `unverifiable`, never a quiet "enforced". An empty log is a real answer: no governance
  * signal ⇒ `ungoverned`.
  */
-export function resolveEnforcement(events: RecordedEvent[] | null): GovernanceEnforcementView {
+export function resolveEnforcement(events: RecordedEvent[] | null, ctx?: EnforcementContext): GovernanceEnforcementView {
   if (events === null) {
     return {
       status: 'unverifiable',
       unenforced: [],
       armedUnits: [],
+      units: [],
       reason:
         'run event log unavailable — enforcement cannot be verified (unknown is never guardrailed)',
     };
@@ -236,10 +276,37 @@ export function resolveEnforcement(events: RecordedEvent[] | null): GovernanceEn
   const unenforced: UnenforcedUnit[] = [];
   const armed = new Set<number>();
   let governedSignal = false;
+  // IG1-crew-2: per-attempt facts for the unit records.
+  const cliByOrd = new Map<number, string>();
+  const postureByOrd = new Map<number, string>();
+  const facts = new Map<string, UnitFacts>();
+  const factsOf = (ord: number, attempt: number): UnitFacts => {
+    const key = `${ord}:${attempt}`;
+    let f = facts.get(key);
+    if (f === undefined) {
+      f = { ord, attempt, cli: cliByOrd.get(ord) ?? '', posture: postureByOrd.get(ord), hook: false, governed: false };
+      facts.set(key, f);
+    }
+    return f;
+  };
 
   for (const ev of events) {
     switch (ev.type) {
-      case 'governanceUnenforced':
+      case 'unitDistributed':
+        if (str(ev['cli']) !== '') cliByOrd.set(num(ev['ord']), str(ev['cli']));
+        break;
+      case 'unitReassigned':
+        if (str(ev['newCli']) !== '') cliByOrd.set(num(ev['ord']), str(ev['newCli']));
+        break;
+      case 'sandboxPosture':
+        if (str(ev['cli']) !== '') cliByOrd.set(num(ev['ord']), str(ev['cli']));
+        postureByOrd.set(num(ev['ord']), str(ev['posture']));
+        break;
+      case 'governanceUnenforced': {
+        const f = factsOf(num(ev['ord']), num(ev['attempt']));
+        f.unenforced = str(ev['reason']);
+        if (str(ev['cli']) !== '') f.cli = str(ev['cli']);
+        if (ctx?.bound === true) break; // the repository boundary held it: a `contained` unit record
         unenforced.push({
           ord: num(ev['ord']),
           attempt: num(ev['attempt']),
@@ -248,6 +315,7 @@ export function resolveEnforcement(events: RecordedEvent[] | null): GovernanceEn
           kind: 'unchecked_tool_calls',
         });
         break;
+      }
       case 'evaluatorMutatedWorktree': {
         // wicked-core F-036: an `executes_code: false` phase (an evaluator, a recon rung) CHANGED
         // the worktree it was reviewing. The engine denied its gate; for the acceptance view it is
@@ -286,19 +354,30 @@ export function resolveEnforcement(events: RecordedEvent[] | null): GovernanceEn
       case 'governanceContextArmed':
         armed.add(num(ev['ord']));
         governedSignal = true;
+        factsOf(num(ev['ord']), num(ev['attempt'])).hook = true;
         break;
       case 'governanceHookFired':
+        governedSignal = true;
+        factsOf(num(ev['ord']), num(ev['attempt'])).hook = true;
+        break;
       case 'validationPinAttached':
         governedSignal = true;
         break;
       case 'unitOutputCaptured':
-        if (ev['governed'] === true) governedSignal = true;
+        if (ev['governed'] === true) {
+          governedSignal = true;
+          factsOf(num(ev['ord']), num(ev['attempt'])).governed = true;
+        }
         break;
       default:
         break;
     }
   }
   const armedUnits = [...armed].sort((a, b) => a - b);
+  const units = [...facts.values()]
+    .map((f) => unitRecord(f, ctx))
+    .filter((u): u is GovernedUnitRecord => u !== null)
+    .sort((a, b) => a.ord - b.ord || a.attempt - b.attempt);
 
   if (unenforced.length > 0) {
     // Deny-dominates: ONE unchecked governed unit breaks the whole run's guardrail claim, even
@@ -332,6 +411,21 @@ export function resolveEnforcement(events: RecordedEvent[] | null): GovernanceEn
       unenforced,
       armedUnits,
       reason: parts.join('; '),
+      units,
+    };
+  }
+  const contained = units.filter((u) => u.mode === 'os_sandbox');
+  if (contained.length > 0) {
+    const roots = [...new Set(contained.flatMap((u) => u.fence.write_roots))];
+    return {
+      status: 'contained',
+      unenforced: [],
+      armedUnits,
+      units,
+      reason:
+        `${contained.length} governed unit(s) on ${[...new Set(contained.map((u) => u.cli).filter((c) => c !== ''))].join(', ') || 'a floor seat'} ` +
+        `ran under an OS-sandbox floor, not a per-call gate — writes fenced to ${roots.length > 0 ? roots.join(', ') : 'the seat\'s own sandbox roots'}` +
+        (contained.some((u) => u.enforced === 'undisclosed') ? ' (the floor did not arm on a unit; the repository boundary held it)' : ''),
     };
   }
   if (governedSignal) {
@@ -339,6 +433,7 @@ export function resolveEnforcement(events: RecordedEvent[] | null): GovernanceEn
       status: 'enforced',
       unenforced: [],
       armedUnits,
+      units,
       reason:
         armedUnits.length > 0
           ? `input governance confirmed armed for unit(s) ${armedUnits.join(', ')}; none reported unenforced`
@@ -349,9 +444,68 @@ export function resolveEnforcement(events: RecordedEvent[] | null): GovernanceEn
     status: 'ungoverned',
     unenforced: [],
     armedUnits: [],
+    units,
     reason:
       'the run recorded no governance signal — nothing was enforced, so nothing is claimed guardrailed',
   };
+}
+
+interface UnitFacts {
+  ord: number;
+  attempt: number;
+  cli: string;
+  posture: string | undefined;
+  /** A per-call gate spoke for this attempt (`governanceContextArmed` / `governanceHookFired`). */
+  hook: boolean;
+  governed: boolean;
+  /** `governanceUnenforced.reason`, when the attempt reported one. */
+  unenforced?: string;
+}
+
+/**
+ * One attempt's record (IG1-crew-2). No frame names the ARMED marker's carrier, so the mode is
+ * read from what the frames do carry: a per-call gate ⇒ `admitted`; `governed: true` with no gate
+ * on a floor-class seat (or `sandboxPosture{posture: 'os'}`) ⇒ `os_sandbox` (`seat_record` /
+ * `self` per the seat record, else `repo_boundary`); `governanceUnenforced` on a bound run ⇒
+ * `os_sandbox / repo_boundary`, `enforced: 'undisclosed'`; on an unbound run ⇒ `none`.
+ */
+function unitRecord(f: UnitFacts, ctx: EnforcementContext | undefined): GovernedUnitRecord | null {
+  const bound = ctx?.bound === true;
+  const seat = f.cli !== '' ? ctx?.seatOf?.(f.cli) : undefined;
+  const scopeMode = seatGovernanceMode(seat ?? { key: f.cli }, bound ? 'scoped_bound' : 'scoped', {
+    ...(typeof ctx?.worktree === 'string' && ctx.worktree !== '' ? { worktree: ctx.worktree } : {}),
+    ...(ctx?.extraWriteRoots !== undefined ? { extraWriteRoots: ctx.extraWriteRoots } : {}),
+  });
+  const base = { ord: f.ord, attempt: f.attempt, cli: f.cli, fence: scopeMode.fence };
+  if (f.unenforced !== undefined) {
+    if (bound) {
+      return {
+        ...base,
+        mode: 'os_sandbox',
+        source: 'repo_boundary',
+        enforced: 'undisclosed',
+        reason: `no floor armed (${f.unenforced}); the run is bound, so the repository boundary held its writes to the worktree`,
+      };
+    }
+    return { ...base, mode: 'none', source: 'none', reason: f.unenforced };
+  }
+  const admitted = { ...base, mode: 'admitted' as const, source: 'acp_input_governance' as const, reason: "a per-call gate (the engine's governance hook) held its tool calls" };
+  if (f.hook) return admitted;
+  if (f.posture === 'os' || (f.governed && scopeMode.class === 'os_sandbox')) {
+    const source: GovernanceModeSource = scopeMode.mode === 'os_sandbox' ? scopeMode.source : 'repo_boundary';
+    return {
+      ...base,
+      mode: 'os_sandbox',
+      source,
+      reason:
+        (f.posture === 'os' ? 'the engine predicted the OS floor (`sandboxPosture: os`)' : 'the engine reported it governed with no per-call gate') +
+        ` — ${scopeMode.mode === 'os_sandbox' ? scopeMode.reason : "its writes were fenced to the run's worktree"}`,
+    };
+  }
+  // `governed: true` on a seat not on the floor: the engine armed input governance (the pre-IG1
+  // meaning of the flag).
+  if (f.governed) return admitted;
+  return null;
 }
 
 /**
@@ -365,8 +519,10 @@ export function resolveConformance(opts: {
   claims: GovernanceClaim[] | null;
   claimsError?: string;
   events: RecordedEvent[] | null;
+  /** IG1-crew-2: the run's binding and seat records for the per-unit record. */
+  enforcementContext?: EnforcementContext;
 }): RunConformance {
-  const enforcement = resolveEnforcement(opts.events);
+  const enforcement = resolveEnforcement(opts.events, opts.enforcementContext);
 
   const claimsAvailable = opts.claims !== null;
   const claims = (opts.claims ?? [])
