@@ -81,7 +81,14 @@ function creatorBefore(units: SessionView['units'], ord: number): SessionView['u
   );
 }
 
-function decisionOf(detail: Record<string, unknown>): DecidedGateRow['decision'] {
+/**
+ * The decision a `gate.decided` line records. A token outside the four named arms falls back on
+ * `approve`: an `action` the engine added later reads by its `approve` flag — `floor_fix`
+ * (crew#891, wicked-core#782: an approve with a note at a read-only phase's floor gate) IS an
+ * approve, and the escalation arms (`extend`, `targeted`, `accept_partial`, `accept_suggestion`,
+ * `amend_intent`) are all approve-shaped.
+ */
+export function decisionOf(detail: Record<string, unknown>): DecidedGateRow['decision'] {
   const action = detail['action'];
   if (action === 'request_changes' || action === 'reject' || action === 'edit_plan' || action === 'approve') return action;
   return detail['approve'] === true ? 'approve' : 'reject';
