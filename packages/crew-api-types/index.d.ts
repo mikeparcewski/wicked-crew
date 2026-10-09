@@ -767,8 +767,10 @@ export interface FloorRerun {
 
 /** {@link WorkUnit.repo_checks}: the parts of wicked-core's `RepoChecksReport` a skin reads. */
 export interface WorkUnitRepoChecks {
-  /** Whether the floor passed (vacuously true when nothing was detected). Always serialised. */
-  passed: boolean;
+  /** Whether the floor passed (vacuously true when nothing was detected). The engine always sends
+   *  it; optional here because this type is a partial reading, and consumers (fixtures included)
+   *  already hold units whose report they only partly know. */
+  passed?: boolean;
   /** The operator's re-run this report answers; absent for the ordinary floor. */
   rerun?: FloorRerunMode;
   /** Checks the operator waived for this unit. Absent when empty. */
