@@ -15,6 +15,7 @@ import {
   DELIVER_LIFT_CONFLICT_MARKER as LIFT_CONFLICT_MARKER,
   DELIVER_PREFLIGHT_CHANGED_MARKER as PREFLIGHT_CHANGED_MARKER,
   DELIVER_PHASE_ID,
+  DELIVER_SCRIPT_TAG,
   DELIVER_TEXT_HEREDOC,
   EVIDENCE_FLOOR_PIN,
   composeDeliverWorkflow,
@@ -399,8 +400,10 @@ describe('deliverPrScript (the hardened field script)', () => {
   // crew#317: the overlay def that shipped run d1bc72c2 began `set -e` with NO pipefail, which
   // is why its `gh … | tail -1` reported tail's status and the phase passed on a failed PR. This
   // script has always carried pipefail; it keeps it, and no longer depends on it for the verdict.
-  it('keeps `set -euo pipefail` as line 1 — the overlay that lost a gh failure had only `set -e`', () => {
-    expect(script.split('\n')[0]).toBe('set -euo pipefail');
+  it('keeps `set -euo pipefail` as the first command — the overlay that lost a gh failure had only `set -e`', () => {
+    // Line 1 is the structural deliver tag (crew#720 S3), a comment; the first COMMAND is pipefail.
+    expect(script.split('\n')[0]).toBe(DELIVER_SCRIPT_TAG);
+    expect(script.split('\n')[1]).toBe('set -euo pipefail');
   });
 });
 
