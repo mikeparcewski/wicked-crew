@@ -5392,6 +5392,9 @@ export interface InteractiveDocSummary {
   name: string;
   /** Manifest `kind`; a manifest without one lists as `doc`. */
   kind: 'doc' | 'html' | 'source' | 'demo';
+  /** Manifest `style` (the bridge's set: `web` | `ppt` | `brochure` | `doc`); ABSENT when the
+   *  manifest carries none (the bridge renders that as `web`). */
+  style?: 'web' | 'ppt' | 'brochure' | 'doc' | (string & {});
   /** Head version. */
   head: number;
   /** Lineage size. */
@@ -5462,6 +5465,16 @@ export interface InteractiveDocIndexRow {
   kinds: InteractiveSeamKind[];
   /** The governed runs those seams launched for it (ledger order) — the doc ↔ run binding. */
   runs: string[];
+  /** (crew#896) Manifest `style`, as the per-project list relays it; ABSENT when the manifest
+   *  carries none. */
+  style?: 'web' | 'ppt' | 'brochure' | 'doc' | (string & {});
+  /**
+   * (crew#896) The repository grounding the draft seam resolved for this document, read from the
+   * same `crew-grounding.json` sidecar the per-project list reads (see
+   * {@link InteractiveDocSummary.grounding}). ABSENT until a draft launch resolved it, and on a
+   * daemon before api-types 0.100.1.
+   */
+  grounding?: InteractiveDocGrounding;
 }
 
 /** A project docs root the listing could not read (api-types 0.36.0). */

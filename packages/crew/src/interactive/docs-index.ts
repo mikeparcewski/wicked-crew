@@ -28,6 +28,7 @@ import { ProjectsUnsupportedError } from '../core/adapter.js';
 import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
 import type { ProjectSettingsStore } from '../projects/settings.js';
 import { resolveProjectInteractiveRoot } from './bridge-root.js';
+import type { DocGroundingStore, GroundingRecord } from './doc-grounding.js';
 import type { DocRunIndex } from './doc-run-index.js';
 
 /** Interactive's doc-name grammar (the bridge's `DOC_NAME`): a safe single path segment. */
@@ -56,6 +57,11 @@ export interface InteractiveDocIndexRow {
   kinds: string[];
   /** The governed runs the seams launched for it (ledger order). */
   runs: string[];
+  /** Manifest `style`, the bridge's `listDocs` rule (absent when the manifest has none). */
+  style?: string;
+  /** crew#896: the grounding the draft seam recorded beside the doc, as the per-project list
+   *  serves it (doc-list-routes.ts). Absent when none was recorded. */
+  grounding?: GroundingRecord;
 }
 
 /** A project docs root the listing could not read. */
@@ -74,6 +80,8 @@ export interface ListInteractiveDocsDeps {
   adapter: Pick<CoreAdapter, 'projectList'>;
   settings: ProjectSettingsStore;
   docRuns: Pick<DocRunIndex, 'kindsOf' | 'runsOf'>;
+  /** crew#896: the sidecar store the per-project list reads grounding from. */
+  groundingStore?: Pick<DocGroundingStore, 'get'>;
   env?: Record<string, string | undefined>;
   /** The daemon state home the DEFAULT root hangs off (crew ≥ 0.7.35; tests point it at a scratch dir). */
   stateHome?: string;
@@ -101,6 +109,7 @@ function rowsOfRoot(
   projectId: string,
   docRuns: ListInteractiveDocsDeps['docRuns'],
   includeRetired: boolean,
+  groundingStore: ListInteractiveDocsDeps['groundingStore'],
 ): InteractiveDocIndexRow[] {
   if (!existsSync(root)) return [];
   const out: InteractiveDocIndexRow[] = [];
@@ -110,6 +119,7 @@ function rowsOfRoot(
     if (!existsSync(manifestPath)) continue;
     let m: {
       kind?: unknown;
+      style?: unknown;
       head?: unknown;
       versions?: unknown;
       retired_at?: unknown;
@@ -124,6 +134,7 @@ function rowsOfRoot(
     if (retiredAt !== undefined && !includeRetired) continue;
     const versions = Array.isArray(m.versions) ? (m.versions as Array<{ created_at?: unknown }>) : [];
     const last = versions[versions.length - 1];
+    const grounding = groundingStore?.get(root, entry.name)?.grounding;
     out.push({
       projectId,
       name: entry.name,
@@ -134,6 +145,8 @@ function rowsOfRoot(
       ...(retiredAt !== undefined ? { retired: true as const, retiredAt } : {}),
       kinds: docRuns.kindsOf(entry.name),
       runs: docRuns.runsOf(entry.name),
+      ...(typeof m.style === 'string' && m.style !== '' ? { style: m.style } : {}),
+      ...(grounding !== undefined ? { grounding } : {}),
     });
   }
   return out;
@@ -161,7 +174,7 @@ export async function listInteractiveDocs(deps: ListInteractiveDocsDeps): Promis
     if (seenRoots.has(root)) continue; // a shared root lists once, under the first project
     seenRoots.add(root);
     try {
-      docs.push(...rowsOfRoot(root, projectId, deps.docRuns, deps.includeRetired === true));
+      docs.push(...rowsOfRoot(root, projectId, deps.docRuns, deps.includeRetired === true, deps.groundingStore));
     } catch (err) {
       unreachable.push({ projectId, root, error: err instanceof Error ? err.message : String(err) });
     }

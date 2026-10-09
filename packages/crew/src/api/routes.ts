@@ -3582,6 +3582,8 @@ export function registerRoutes(
         adapter,
         settings: projectSettings,
         docRuns,
+        // crew#896: the index carries the grounding the per-project list carries.
+        ...(runtime.docGrounding !== undefined ? { groundingStore: runtime.docGrounding } : {}),
         includeRetired: flag === '1' || flag === 'true',
       });
     },

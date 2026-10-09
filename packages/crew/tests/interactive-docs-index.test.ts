@@ -15,6 +15,7 @@ import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
 import { ProjectSettingsStore } from '../src/projects/settings.js';
 import { DocRunIndex } from '../src/interactive/doc-run-index.js';
+import { DocGroundingStore, type GroundingRecord } from '../src/interactive/doc-grounding.js';
 import { listInteractiveDocs } from '../src/interactive/docs-index.js';
 import { InteractiveHandoffLedger } from '../src/interactive/ledger.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
@@ -158,6 +159,50 @@ describe('GET /interactive/docs — daemon-wide, non-spawning', () => {
       expect(listing.docs.some((d) => d.name === 'overview')).toBe(true);
     } finally {
       chmodSync(locked, 0o755);
+    }
+  });
+
+  it('crew#896: a row carries the grounding the draft seam recorded beside it and the manifest style, as the per-project list does', async () => {
+    const store = new DocGroundingStore();
+    const record: GroundingRecord = { repo_refs: ['offsite-plan'], source: 'named', skipped: [], member_count: 2 };
+    store.recordGrounding(p1Root, 'brief', 'p1', record);
+    try {
+      const listing = await listInteractiveDocs({
+        adapter: { projectList } as unknown as CoreAdapter,
+        settings,
+        docRuns,
+        groundingStore: store,
+        env: { WICKED_INTERACTIVE_ROOT: defaultRoot },
+      });
+      const brief = listing.docs.find((d) => d.name === 'brief');
+      expect(brief).toMatchObject({ projectId: 'p1', style: 'web', grounding: record });
+      // A doc with no sidecar and no manifest style carries neither key (absent, not null).
+      const overview = listing.docs.find((d) => d.name === 'overview')!;
+      expect('grounding' in overview).toBe(false);
+      expect('style' in overview).toBe(false);
+
+      // The route wires the daemon's store: the served index carries the same record.
+      const app2 = Fastify({ logger: false });
+      registerRoutes(
+        app2,
+        { sessionsDetail: vi.fn().mockResolvedValue([]), listRepos: vi.fn().mockResolvedValue([]), projectList } as unknown as CoreAdapter,
+        new GateCache(),
+        new ElicitationCache(),
+        { bus: null, index: new MembershipIndex(), log: () => undefined, settings },
+        undefined,
+        { docRuns, docGrounding: store },
+      );
+      await app2.ready();
+      try {
+        const res = await app2.inject({ method: 'GET', url: '/api/v1/interactive/docs' });
+        expect(res.statusCode).toBe(200);
+        const served = (res.json() as { docs: Array<Record<string, unknown>> }).docs.find((d) => d['name'] === 'brief');
+        expect(served).toMatchObject({ style: 'web', grounding: record });
+      } finally {
+        await app2.close();
+      }
+    } finally {
+      store.remove(p1Root, 'brief');
     }
   });
 
