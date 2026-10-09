@@ -221,7 +221,7 @@ describe('POST /runs {revisesPr} — resolved at the boundary, refused by name, 
     apps.push(app);
     await app.ready();
     const health = (await app.inject({ method: 'GET', url: '/api/v1/health' })).json() as { capabilities: Record<string, boolean> };
-    expect(health.capabilities).toEqual({ deliverGate: true, revisesPr: true, runChatId: true, walkthroughRoots: false });
+    expect(health.capabilities).toEqual({ deliverGate: true, revisesPr: true, runChatId: true, linkedIssuesExclude: true, walkthroughRoots: false });
   });
 });
 
