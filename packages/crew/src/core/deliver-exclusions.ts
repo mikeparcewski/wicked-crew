@@ -67,7 +67,10 @@ const ENV_TEMPLATE = /\.env\.(example|sample|template)$/;
 export const ENV_TEMPLATE_SAFE_LINE_ERE =
   "^[[:space:]]*(#.*)?$|^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[[:space:]]*(\"\"|''|<[^>]*>)?[[:space:]]*$";
 const ENV_TEMPLATE_SAFE_LINE = new RegExp(
-  ENV_TEMPLATE_SAFE_LINE_ERE.replaceAll('[[:space:]]', '[ \\t]'),
+  // POSIX `[[:space:]]` is space, tab, CR, LF, VT and FF: a CRLF template must read the same here
+  // as in the shell's grep.
+  ENV_TEMPLATE_SAFE_LINE_ERE.replaceAll('[[:space:]]', '[ \\t\\r\\n\\v\\f]'),
+  's', // and POSIX `.` matches CR too (JS `.` does not without dotAll)
 );
 
 /** Whether a basename names an env template (lowercased, as the ladder compares). */

@@ -152,6 +152,8 @@ describe('the deliver gate diffstat is computed over exactly the set that will b
     expect(deliverExclusionByName('giphy/.env.example')).toBeNull();
     expect(deliverExclusionReason('giphy/.env.example', 30, () => '# token\nGIPHY_TOKEN=\nA=""\nB=<placeholder>\n')).toBeNull();
     expect(deliverExclusionReason('giphy/.env.example', 0, () => '')).toBeNull();
+    expect(deliverExclusionReason('giphy/.env.example', 30, () => 'GIPHY_TOKEN=\r\n# c\r\n')).toBeNull(); // CRLF, as grep reads it
+    expect(deliverExclusionReason('giphy/.env.example', 30, () => 'GIPHY_TOKEN = abc\n')).toBe('env-template-with-values');
     expect(deliverExclusionReason('x.env.template', 20, () => 'GIPHY_TOKEN=abc123\n')).toBe('env-template-with-values');
     expect(deliverExclusionReason('.env.sample', 20)).toBe('env-template-with-values'); // no reader: not proven value-free
     expect(deliverExclusionReason('.env.local', 20, () => '')).toBe('denylisted-name');
