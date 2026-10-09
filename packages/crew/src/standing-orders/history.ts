@@ -82,8 +82,8 @@ function creatorBefore(units: SessionView['units'], ord: number): SessionView['u
 }
 
 /**
- * The decision a `gate.decided` line records. A token outside the four named arms falls back on
- * `approve`: an `action` the engine added later reads by its `approve` flag — `floor_fix`
+ * The decision a `gate.decided` line records. A token outside the four named arms reads by the
+ * line's `approve` flag (approve, else reject) — `floor_fix`
  * (crew#891, wicked-core#782: an approve with a note at a read-only phase's floor gate) IS an
  * approve, and the escalation arms (`extend`, `targeted`, `accept_partial`, `accept_suggestion`,
  * `amend_intent`) are all approve-shaped.

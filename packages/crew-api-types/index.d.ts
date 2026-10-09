@@ -758,16 +758,17 @@ export interface FloorRerun {
   mode: FloorRerunMode;
   /** `accept_partial`: the checks waived. Absent when empty. */
   waive?: string[];
-  /** The seat's output from the attempt the gate reviewed (the fold reads it; the seat does not re-run). */
-  output?: string;
+  /** The seat's output from the attempt the gate reviewed (the fold reads it; the seat does not re-run).
+   *  Always serialised (`""` when none). */
+  output: string;
   /** `floor_fix` only (crew#891): the note and the distinct seat that makes it. */
   fix?: FloorFix;
 }
 
 /** {@link WorkUnit.repo_checks}: the parts of wicked-core's `RepoChecksReport` a skin reads. */
 export interface WorkUnitRepoChecks {
-  /** Whether the floor passed (vacuously true when nothing was detected). */
-  passed?: boolean;
+  /** Whether the floor passed (vacuously true when nothing was detected). Always serialised. */
+  passed: boolean;
   /** The operator's re-run this report answers; absent for the ordinary floor. */
   rerun?: FloorRerunMode;
   /** Checks the operator waived for this unit. Absent when empty. */
