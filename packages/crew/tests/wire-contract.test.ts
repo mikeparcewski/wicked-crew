@@ -320,9 +320,24 @@ const RECORDED_UNIT_DISTRIBUTED = {
   degradedReason: '4 of 5 seats benched: codex (signed out — launcher), pi (unauthenticated — ballot), copilot (signed out — launcher), opencode (dispatch budget — ballot)',
   seatConstraint: null,
   distinctnessFallback: null,
+  // crew#894 (core-ts 0.7.44, wicked-core#810): REQUIRED on the engine's frame, `null` for a pool of 1.
+  pool: null,
 };
 respondsWith<Wire.UnitDistributedEvent, typeof RECORDED_UNIT_DISTRIBUTED>();
 respondsWith<UnitDistributedEventJson, typeof RECORDED_UNIT_DISTRIBUTED>();
+// crew#894: a pool seated SHORT — the engine's `UnitPoolSeatingJson` and the contract's
+// `UnitPoolSeating` accept each other (the pin is two-way), and the populated frame satisfies both.
+respondsWith<Wire.UnitPoolSeating, NonNullable<UnitDistributedEventJson['pool']>>();
+respondsWith<NonNullable<UnitDistributedEventJson['pool']>, Wire.UnitPoolSeating>();
+type RecordedUnitDistributedPool = Omit<typeof RECORDED_UNIT_DISTRIBUTED, 'pool'> & {
+  pool: { requested: number; seated: number; monitors: string[]; missing: string[]; shortfall: string | null };
+};
+const RECORDED_UNIT_DISTRIBUTED_POOL: RecordedUnitDistributedPool = {
+  ...RECORDED_UNIT_DISTRIBUTED,
+  pool: { requested: 3, seated: 2, monitors: ['claude#2'], missing: ['claude#3'], shortfall: 'claude#3 is not signed in' },
+};
+respondsWith<Wire.UnitDistributedEvent, RecordedUnitDistributedPool>();
+respondsWith<UnitDistributedEventJson, RecordedUnitDistributedPool>();
 
 // ── Hardening S5 (wicked-core#461 / crew#556): `unitDistributed.distinctnessFallback` ──────────────
 // The engine adds the evaluator ≠ creator fallback as a REQUIRED key of `UnitDistributedEventJson`
@@ -358,6 +373,7 @@ const RECORDED_UNIT_DISTRIBUTED_FALLBACK = {
   degradedReason: null,
   seatConstraint: null,
   distinctnessFallback: 'creator_seat' as const,
+  pool: null,
 };
 respondsWith<Wire.UnitDistributedEvent, typeof RECORDED_UNIT_DISTRIBUTED_FALLBACK>();
 respondsWith<UnitDistributedEventJsonWithFallback, typeof RECORDED_UNIT_DISTRIBUTED_FALLBACK>();
@@ -511,10 +527,13 @@ describe('wave 6 wire shapes (api-types 0.36.0)', () => {
     // The teeth are the compile-time assertions above; these keep the literal live and prove the
     // narrator reads the EMITTED spelling (a consumer of `degraded_reason` saw undefined pre-0.36).
     expect(Object.keys(RECORDED_UNIT_DISTRIBUTED).sort()).toEqual(
-      ['agreementPct', 'cli', 'degradedReason', 'dissent', 'distinctnessFallback', 'ord', 'returned', 'routingMethod', 'seatConstraint', 'seated', 'session', 'type'].sort(),
+      ['agreementPct', 'cli', 'degradedReason', 'dissent', 'distinctnessFallback', 'ord', 'pool', 'returned', 'routingMethod', 'seatConstraint', 'seated', 'session', 'type'].sort(),
     );
     // (core#461) The fallback key is spelled `null`, never absent, on the engine that emits it …
     expect(RECORDED_UNIT_DISTRIBUTED.distinctnessFallback).toBeNull();
+    // crew#894: `pool` is always on the frame — `null` for a pool of 1, the fill when seated short.
+    expect(RECORDED_UNIT_DISTRIBUTED.pool).toBeNull();
+    expect(RECORDED_UNIT_DISTRIBUTED_POOL.pool.seated).toBeLessThan(RECORDED_UNIT_DISTRIBUTED_POOL.pool.requested);
     expect('distinctnessFallback' in RECORDED_UNIT_DISTRIBUTED).toBe(true);
     // … and reads `'creator_seat'` when a review unit stays on its creator's seat.
     expect(RECORDED_UNIT_DISTRIBUTED_FALLBACK.distinctnessFallback).toBe('creator_seat');
@@ -1369,7 +1388,7 @@ describe('teamed routing wire shapes (wicked-core#590 S5)', () => {
     const frame = JSON.parse(
       '{"type":"unitDistributed","session":"b86c14c1-e295-4659-8a30-51b4ec1ac589","ord":2,' +
         '"cli":"claude","routingMethod":"teamed","agreementPct":null,"returned":null,"seated":null,' +
-        '"dissent":null,"degradedReason":null,"seatConstraint":null,"distinctnessFallback":null}',
+        '"dissent":null,"degradedReason":null,"seatConstraint":null,"distinctnessFallback":null,"pool":null}',
     ) as Wire.UnitDistributedEvent;
     expect(frame).toEqual(RECORDED_UNIT_DISTRIBUTED_TEAMED);
     const routing = JSON.parse('{"method":"teamed","winner":"codex"}') as Wire.RoutingInfo;

@@ -734,6 +734,11 @@ export interface WorkUnit {
    * `WorkUnit.operator_rulings`) — the record the evaluator reviewing it reads. ABSENT when empty.
    */
   operator_rulings?: OperatorRuling[];
+  /** (crew#894, wicked-core#810) The phase's worker pool (one creator plus monitors). ABSENT = 1. */
+  pool?: number;
+  /** (crew#894) How that pool was seated, once distributed (see {@link UnitPoolSeating}). ABSENT
+   *  for a pool of 1 and before distribution. */
+  pool_seating?: UnitPoolSeating;
 }
 
 /**
@@ -793,6 +798,23 @@ export interface OperatorRuling {
   attempt: number;
   /** Unix millis. */
   at: number;
+}
+
+/**
+ * (crew#894, wicked-core#810) A unit's worker-pool fill — `unitDistributed.pool` and
+ * `WorkUnit.pool_seating` (the same keys; core-ts `UnitPoolSeatingJson`).
+ */
+export interface UnitPoolSeating {
+  /** The phase's `pool` (after any plan step lowered it). */
+  requested: number;
+  /** Seats filled: the creator plus `monitors.length`. */
+  seated: number;
+  /** The monitor seat instances (`claude#2`), in the order the team supervisor summons them. */
+  monitors: string[];
+  /** Configured instances that could have filled the shortfall but are not signed in. */
+  missing: string[];
+  /** Why `seated < requested`; `null` when the pool was filled. */
+  shortfall: string | null;
 }
 
 /** The counts a capture phase reported (`WorkUnit.capture_report`; wicked-core#535). */
@@ -2732,6 +2754,13 @@ export interface UnitDistributedEvent {
    * unrecognised value as a disclosure too, never as "distinct".
    */
   distinctnessFallback?: 'creator_seat' | 'same_cli_instance' | null;
+  /**
+   * (crew#894, wicked-core#810 / #813; core-ts >= 0.7.44) How the unit's WORKER POOL was filled:
+   * one creator plus monitors. `null` for a pool of 1 (the default) and a tool unit; ABSENT on an
+   * older engine. A pool larger than the signed-in instances is seated SHORT and disclosed here
+   * (`seated < requested`, `missing`, `shortfall`), never refused. Guard with `== null`.
+   */
+  pool?: UnitPoolSeating | null;
   /** @deprecated api-types 0.36.0 — the engine emits `routingMethod`; removed in 0.37. */
   routing_method?: 'council' | 'degraded' | 'evaluator_distinct' | 'tool' | 'teamed';
   /** @deprecated api-types 0.36.0 — the engine emits `agreementPct`; removed in 0.37. */
@@ -4426,6 +4455,12 @@ export type PhaseExecutor =
 export interface PhaseDef {
   id: string;
   kind: StageKindPhase;
+  /**
+   * (crew#894, wicked-core#810) The phase's worker pool, `1..=4` (absent = 1): one creator plus
+   * `pool - 1` monitors, inside a TEAM run only. A user workflow declaring `pool > 1` is refused at
+   * registration (`pool outside a team run`), and so is a value outside `1..=4` (`pool out of range`).
+   */
+  pool?: number;
   /** How the phase executes. Omitted = Agent (engine default). Tool phases bypass the council and
    *  run `cmd` directly. */
   executor?: PhaseExecutor;
@@ -7592,6 +7627,10 @@ export interface TeamPlanStep {
   added_by?: 'plan' | 'floor' | (string & {});
   floor_reason?: string;
   late?: boolean;
+  /** (crew#894, wicked-core#810) The step's worker pool. A plan step may only LOWER the catalog
+   *  phase's pool; a raise is refused (`wicked.team.plan.refused`, reason `pool_raised`). Omitted
+   *  when unset. */
+  pool?: number;
 }
 
 export interface TeamPlanOverride {
@@ -7676,6 +7715,8 @@ export type TeamPlanAcceptedPayload = TeamEnvelope & {
 export type TeamPlanRefusedPayload = TeamEnvelope & {
   proposal_id: string;
   base_rev: number | null;
+  /** The engine's refusal reason, verbatim — e.g. `pool_raised` (crew#894, wicked-core#810: a plan
+   *  step raised a phase's `pool`; a step may only lower it). */
   reason: string;
 };
 
@@ -7712,6 +7753,9 @@ export type TeamStepClaimedPayload = TeamEnvelope & {
   baseline_tree: string | null;
   repo: { workdir: string; git_dir: string } | null;
   code_graph_db: string | null;
+  /** (crew#894, wicked-core#810) The monitor seat instances summoned beside the claiming creator
+   *  (a pool > 1). Omitted when empty. */
+  monitors?: string[];
 };
 
 export type TeamCheckpointReachedPayload = TeamEnvelope & {
