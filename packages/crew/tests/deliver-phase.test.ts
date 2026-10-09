@@ -420,7 +420,7 @@ describe('the trusted terminal sentinel (crew#739)', () => {
     expect(a.match(/^trap /gm)).toEqual(['trap ']);
     expect(a).toContain('trap _outcome EXIT');
     expect(a).toMatch(/^VERDICT=failed$/m);
-    expect(a).toContain('echo "deliver: OUTCOME $DELIVER_NONCE $VERDICT"');
+    expect(a).toContain('echo "deliver: OUTCOME $DELIVER_NONCE $VERDICT"; exit "$rc"; }');
     // The engine reads the same nonce from the unit's tool_cmd (wicked-core#807 deliver_nonce).
     expect(deliverNonceOf(['bash', '-lc', a])).toBe(na);
     expect(deliverNonceOf(['bash', '-lc', 'git push'])).toBeNull();

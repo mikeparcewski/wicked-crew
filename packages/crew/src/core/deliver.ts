@@ -612,7 +612,9 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     `${DELIVER_NONCE_VAR}='${nonce}'`,
     'VERDICT=failed',
     'TD=""',
-    `_outcome() { [ -z "$TD" ] || rm -rf "$TD"; echo "${DELIVER_OUTCOME_MARKER} $${DELIVER_NONCE_VAR} $VERDICT"; }`,
+    // `rc` keeps the script's exit status, and a failed cleanup can neither skip the sentinel nor
+    // replace that status under `set -e` (codex review).
+    `_outcome() { local rc=$?; [ -z "$TD" ] || rm -rf "$TD" || true; echo "${DELIVER_OUTCOME_MARKER} $${DELIVER_NONCE_VAR} $VERDICT"; exit "$rc"; }`,
     'trap _outcome EXIT',
     // IDENTITY (DES-L9 D-18, crew#549 / F-RC1-010) — read ONCE, up front, before anything is
     // fetched, staged or pushed, so the refusal is the phase's WHOLE output (the engine's head-150

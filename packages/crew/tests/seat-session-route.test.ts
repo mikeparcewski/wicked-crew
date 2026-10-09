@@ -101,11 +101,24 @@ describe('POST /seats/:cli/login|logout (crew#615)', () => {
     expect(listeners.size).toBe(0);
   });
 
+  it('a terminal that exits BEFORE openTerminal resolves still re-probes and releases the listener (codex review)', async () => {
+    const { app, openTerminal, reprobe, emit, listeners } = build();
+    openTerminal.mockImplementationOnce(async () => {
+      emit({ type: 'terminalExited', id: 'term-1' } as CoreEvent);
+      return 'term-1';
+    });
+    await app.ready();
+    expect((await app.inject({ method: 'POST', url: '/api/v1/seats/codex/logout', payload: {} })).statusCode).toBe(201);
+    expect(reprobe).toHaveBeenCalledWith('codex');
+    expect(listeners.size).toBe(0);
+  });
+
   it('a spawn failure is a 400 naming it', async () => {
-    const { app } = build({ openFails: true });
+    const { app, listeners } = build({ openFails: true });
     await app.ready();
     const res = await app.inject({ method: 'POST', url: '/api/v1/seats/codex/logout', payload: {} });
     expect(res.statusCode).toBe(400);
     expect(res.json().error).toContain('spawn failed');
+    expect(listeners.size).toBe(0);
   });
 });

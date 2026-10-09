@@ -5383,18 +5383,27 @@ export function registerRoutes(
             error: `seat ${cli} has no ${action} command: the engine roster carries no ${action}_invocation for it (its CLI documents none)`,
           });
         }
+        // Subscribe BEFORE the spawn: a short command can exit before `openTerminal` resolves, and
+        // its exit must still re-probe and release the listener (codex review).
+        let termId: string | null = null;
+        const exitedEarly = new Set<string>();
+        const done = (): void => {
+          stop();
+          rosterWithStanding.reprobe?.(cli);
+        };
+        const stop = adapter.onEvent((event) => {
+          if (event.type !== 'terminalExited' || typeof event.id !== 'string') return;
+          if (termId === null) exitedEarly.add(event.id);
+          else if (event.id === termId) done();
+        });
         try {
-          const id = await adapter.openTerminal(homedir(), ['sh', '-lc', invocation], parsed.data.cols ?? 100, parsed.data.rows ?? 30, true);
-          const stop = adapter.onEvent((event) => {
-            if (event.type === 'terminalExited' && event.id === id) {
-              stop();
-              rosterWithStanding.reprobe?.(cli);
-            }
-          });
-          return reply.code(201).send({ terminalId: id, cli, action });
+          termId = await adapter.openTerminal(homedir(), ['sh', '-lc', invocation], parsed.data.cols ?? 100, parsed.data.rows ?? 30, true);
         } catch (err) {
+          stop();
           return reply.code(400).send({ error: message(err) });
         }
+        if (exitedEarly.has(termId)) done();
+        return reply.code(201).send({ terminalId: termId, cli, action });
       },
     );
   }
