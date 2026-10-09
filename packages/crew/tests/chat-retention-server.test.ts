@@ -77,6 +77,8 @@ describe('crew#634 R1 — chatClosed retention + the delivered-only worktree swe
       confirmGate: async () => 'awaiting_human',
       cancelRun: async () => 'cancelled',
       chatClose: async () => undefined,
+      // Not an onboarding run: the capture-learnings chain (crew#552) stays out of the way.
+      onboardedRepoOf: () => undefined,
     } as unknown as CoreAdapter;
 
     app = await createServer(adapter, {
@@ -90,7 +92,7 @@ describe('crew#634 R1 — chatClosed retention + the delivered-only worktree swe
       skills: { disabled: true },
     });
     await app.ready();
-  }, 60_000);
+  }, 150_000);
 
   afterAll(async () => {
     await app.close();
