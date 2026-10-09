@@ -62,6 +62,7 @@
  */
 
 import { spawn as nodeSpawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { accessSync, constants as fsConstants, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { delimiter, dirname, join, resolve } from 'node:path';
@@ -292,7 +293,17 @@ export interface LiveBridge {
    *  sidecar is checked against, so a reused pid is never mistaken for the bridge crew recorded
    *  (crew#510). Null when the lockfile predates the field or does not carry it. */
   startedAt?: string | null;
+  /** crew#509: the `WICKED_BRIDGE_SPAWN_TOKEN` the bridge was started with, as its lockfile echoes it
+   *  (`spawnToken`). Null when the lockfile does not carry one (an interactive before the echo, or a
+   *  bridge started without a token — an operator's own `serve`). */
+  spawnToken?: string | null;
 }
+
+/** crew#509: the per-spawn token crew hands a bridge it starts; a token-aware bridge writes it back
+ *  into its lockfile as `spawnToken`, which proves the bridge is the one THIS spawn started — no
+ *  process-table walk. NOT part of {@link BridgeEnv}: it differs per spawn by design, and the env
+ *  match is about configuration. */
+export const SPAWN_TOKEN_ENV = 'WICKED_BRIDGE_SPAWN_TOKEN';
 
 /** The 503 the proxy renders as `{"code":"bridge_unavailable","hint":...}` (§5.6). */
 export class BridgeUnavailableError extends Error {
@@ -348,6 +359,10 @@ export interface CrewSidecar {
    *  Absent on a sidecar written before this field existed (checked the legacy way — see
    *  {@link sidecarNamesBridge} — and upgraded on the next adopt). */
   bridgeStartedAt?: string;
+  /** crew#509: the spawn token this bridge echoed when crew recorded it. With the lockfile's own
+   *  `spawnToken` it names ONE bridge instance regardless of pid reuse. Absent on a sidecar written
+   *  before the field, or for a bridge that does not echo the token. */
+  spawnToken?: string;
 }
 
 /** Injectable IO — the integration suite substitutes a fake bridge for the real `npx` spawn. */
@@ -430,6 +445,7 @@ export function readCrewSidecar(root: string): CrewSidecar | null {
       ...(typeof raw.bridgeStartedAt === 'string' && raw.bridgeStartedAt !== ''
         ? { bridgeStartedAt: raw.bridgeStartedAt }
         : {}),
+      ...(typeof raw.spawnToken === 'string' && raw.spawnToken !== '' ? { spawnToken: raw.spawnToken } : {}),
     };
   } catch {
     return null;
@@ -474,6 +490,10 @@ export type SidecarMatch =
  */
 export function sidecarNamesBridge(sidecar: CrewSidecar, live: LiveBridge): SidecarMatch {
   if (sidecar.pid !== live.pid) return 'other-pid';
+  // crew#509: both sides carry the spawn token — that alone decides (a reused pid has another).
+  if (sidecar.spawnToken !== undefined && typeof live.spawnToken === 'string') {
+    return sidecar.spawnToken === live.spawnToken ? 'names-it' : 'stale';
+  }
   const liveStart = live.startedAt ?? null;
   if (sidecar.bridgeStartedAt !== undefined) {
     return liveStart === sidecar.bridgeStartedAt ? 'names-it' : 'stale';
@@ -516,6 +536,8 @@ export function readLock(root: string): LiveBridge | null {
       port: raw.port,
       pid: raw.pid,
       startedAt: typeof raw.startedAt === 'string' && raw.startedAt !== '' ? raw.startedAt : null,
+      // crew#509: present only when the lockfile echoes one (the shape of a pre-token lockfile is unchanged).
+      ...(typeof raw.spawnToken === 'string' && raw.spawnToken !== '' ? { spawnToken: raw.spawnToken } : {}),
     };
   } catch {
     return null;
@@ -625,6 +647,18 @@ export function parentPidOf(pid: number): number | null {
 
 /** What the lineage proof concluded about a lockfile pid relative to the child this daemon spawned. */
 export type SpawnLineage = 'ours' | 'foreign' | 'unknown';
+
+/**
+ * crew#509: the ownership proof through the bridge itself. A lockfile that echoes the token THIS
+ * spawn issued is ours; one that echoes a DIFFERENT token is another daemon's spawn (foreign); one
+ * that carries none (an interactive before the echo, or an operator's own `serve`) is undecided
+ * here — `null`, and the caller falls back to {@link spawnLineage}'s process-table walk.
+ */
+export function tokenLineage(live: Pick<LiveBridge, 'spawnToken'>, issued: string): SpawnLineage | null {
+  const echoed = live.spawnToken ?? null;
+  if (echoed === null) return null;
+  return echoed === issued ? 'ours' : 'foreign';
+}
 
 /**
  * Is `pid` the child this daemon spawned (`childPid`) or one of its descendants (`npx` → shell →
@@ -940,7 +974,9 @@ export class InteractiveBridgePool {
     const bridgeEnv = bridgeEnvFor(this.io);
     // …with the engine-only store variables restored to their boot values: the daemon's governance
     // store is the in-process engine's business, never the bridge's.
-    const env: NodeJS.ProcessEnv = { ...childEnvWithBootEstateDb(), ...bridgeEnv };
+    // crew#509: a fresh token per spawn — the bridge's echo of it is the ownership proof.
+    const spawnToken = randomBytes(16).toString('hex');
+    const env: NodeJS.ProcessEnv = { ...childEnvWithBootEstateDb(), ...bridgeEnv, [SPAWN_TOKEN_ENV]: spawnToken };
     const child = (this.io.spawn ?? defaultSpawn)(root, env);
     const childPid = child.pid; // undefined when the spawn failed synchronously — its 'error' follows
     // Detached + unref: the bridge is keyed by root and adoptable through its lockfile, so the
@@ -979,7 +1015,11 @@ export class InteractiveBridgePool {
               `root (WICKED_INTERACTIVE_ROOT, or the project's interactiveRoot setting); the next request starts a bridge for this one`,
           );
         }
-        const lineage = childPid === undefined ? 'unknown' : spawnLineage(healthy.pid, childPid, this.io.parentOf ?? parentPidOf);
+        // crew#509: the bridge's own echo of the token decides first; the ps walk is the fallback
+        // for a bridge that does not echo it (interactive before the token-aware release).
+        const lineage =
+          tokenLineage(healthy, spawnToken) ??
+          (childPid === undefined ? 'unknown' : spawnLineage(healthy.pid, childPid, this.io.parentOf ?? parentPidOf));
         if (lineage === 'foreign') {
           abandon();
           this.io.log?.(
@@ -1036,6 +1076,7 @@ export class InteractiveBridgePool {
       startedBy: sidecar.startedBy,
       startedAt: sidecar.startedAt,
       ...(marker !== undefined ? { bridgeStartedAt: marker } : {}),
+      ...(sidecar.spawnToken !== undefined ? { spawnToken: sidecar.spawnToken } : {}),
     };
     try {
       writeFileSync(join(root, CREW_SIDECAR_NAME), JSON.stringify({ ...recorded, ...mine }, null, 2), 'utf8');
@@ -1070,6 +1111,7 @@ export class InteractiveBridgePool {
       // The instance this record is about (crew#510) — the bridge's own lockfile marker, so a
       // later pid reuse cannot read as this bridge.
       ...(typeof bridge.startedAt === 'string' ? { bridgeStartedAt: bridge.startedAt } : {}),
+      ...(typeof bridge.spawnToken === 'string' ? { spawnToken: bridge.spawnToken } : {}),
       ...ownerIdentity(),
     };
     try {
