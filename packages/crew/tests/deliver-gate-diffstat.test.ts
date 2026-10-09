@@ -148,6 +148,16 @@ describe('the deliver gate diffstat is computed over exactly the set that will b
     expect(deliverExclusionReason('SECRETS.PEM', 10)).toBe('denylisted-name');
     expect(deliverExclusionReason('.envrc', 10)).toBe('denylisted-name');
     expect(deliverExclusionReason('deploy.key', 10)).toBe('denylisted-name');
+    // crew#901: an env template is judged by its content, never by its name alone.
+    expect(deliverExclusionByName('giphy/.env.example')).toBeNull();
+    expect(deliverExclusionReason('giphy/.env.example', 30, () => '# token\nGIPHY_TOKEN=\nA=""\nB=<placeholder>\n')).toBeNull();
+    expect(deliverExclusionReason('giphy/.env.example', 0, () => '')).toBeNull();
+    expect(deliverExclusionReason('giphy/.env.example', 30, () => 'GIPHY_TOKEN=\r\n# c\r\n')).toBeNull(); // CRLF, as grep reads it
+    expect(deliverExclusionReason('giphy/.env.example', 30, () => 'GIPHY_TOKEN = abc\n')).toBe('env-template-with-values');
+    expect(deliverExclusionReason('x.env.template', 20, () => 'GIPHY_TOKEN=abc123\n')).toBe('env-template-with-values');
+    expect(deliverExclusionReason('.env.sample', 20)).toBe('env-template-with-values'); // no reader: not proven value-free
+    expect(deliverExclusionReason('.env.local', 20, () => '')).toBe('denylisted-name');
+    expect(deliverExclusionReason('.env', 20, () => '')).toBe('denylisted-name');
     expect(deliverExclusionReason('socket.path', 10)).toBe('socket-name');
     expect(deliverExclusionReason('a/.DS_Store', 10)).toBe('ds-store');
     expect(deliverExclusionReason('rec.bin', 1048577)).toBe('oversize-1mib');

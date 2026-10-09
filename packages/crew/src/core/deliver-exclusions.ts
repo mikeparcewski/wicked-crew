@@ -53,6 +53,38 @@ const DENYLISTED = [
   /^id_rsa/, /credentials/,
 ];
 
+/**
+ * crew#901: an env TEMPLATE (`.env.example`, `.env.sample`, `.env.template`, and `<x>.env.example`
+ * and the like) is a product a README points at ("see `.env.example`"; MCPS-1004 requires one), not
+ * key material — when it holds no value. It rides only when every line is blank, a comment, or a
+ * `NAME=` assignment whose value is empty (`""`, `''`) or an angle-bracket placeholder
+ * (`<your token>`); one real value and it is excluded as `env-template-with-values`. The shell runs
+ * the same test with {@link ENV_TEMPLATE_SAFE_LINE_ERE}.
+ */
+const ENV_TEMPLATE = /\.env\.(example|sample|template)$/;
+
+/** One line a value-free env template may hold (POSIX ERE, shared with the deliver script). */
+export const ENV_TEMPLATE_SAFE_LINE_ERE =
+  "^[[:space:]]*(#.*)?$|^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[[:space:]]*(\"\"|''|<[^>]*>)?[[:space:]]*$";
+const ENV_TEMPLATE_SAFE_LINE = new RegExp(
+  // POSIX `[[:space:]]` is space, tab, CR, LF, VT and FF: a CRLF template must read the same here
+  // as in the shell's grep.
+  ENV_TEMPLATE_SAFE_LINE_ERE.replaceAll('[[:space:]]', '[ \\t\\r\\n\\v\\f]'),
+  's', // and POSIX `.` matches CR too (JS `.` does not without dotAll)
+);
+
+/** Whether a basename names an env template (lowercased, as the ladder compares). */
+export function isEnvTemplateName(lowerBase: string): boolean {
+  return ENV_TEMPLATE.test(lowerBase);
+}
+
+/** Whether an env template's text holds no value (every line {@link ENV_TEMPLATE_SAFE_LINE}). */
+export function envTemplateIsValueFree(text: string): boolean {
+  const lines = text.split('\n');
+  if (lines[lines.length - 1] === '') lines.pop(); // a trailing newline is not a line
+  return lines.every((l) => ENV_TEMPLATE_SAFE_LINE.test(l));
+}
+
 /** The scratch/cache directory names the push never carries, at any depth. */
 export const SCRATCH_DIRS = ['tmp', '.tmp', 'scratch', '.cache', 'coverage'];
 
@@ -98,7 +130,9 @@ export function deliverExclusionByName(relPath: string): string | null {
   // The script classifies on a LOWERCASED basename so DEPLOY.KEY / .ENV / SOCKET.PATH cannot
   // bypass the denylist by case (crew#439).
   const lower = base.toLowerCase();
-  if (DENYLISTED.some((re) => re.test(lower))) return 'denylisted-name';
+  // crew#901: an env template is judged by its CONTENT ({@link deliverExclusionReason}); no NAME
+  // rule fires for it, so the name-only pre-filter never drops one.
+  if (!isEnvTemplateName(lower) && DENYLISTED.some((re) => re.test(lower))) return 'denylisted-name';
   if (lower.includes('socket')) return 'socket-name';
   // `.DS_Store` is matched on the ORIGINAL basename, as the shell does.
   if (base === '.DS_Store') return 'ds-store';
@@ -123,9 +157,18 @@ export function deliverExclusionByName(relPath: string): string | null {
  * A caller that wants to avoid the `stat` for a path a name rule already rejects calls
  * {@link deliverExclusionByName} first.
  */
-export function deliverExclusionReason(relPath: string, sizeBytes: number | null): string | null {
+export function deliverExclusionReason(
+  relPath: string,
+  sizeBytes: number | null,
+  /** crew#901: the file's text, for an env template; absent or `null` (unreadable) = excluded. */
+  readText?: () => string | null,
+): string | null {
   const byName = deliverExclusionByName(relPath);
   if (byName !== null) return byName;
+  if (isEnvTemplateName(relPath.slice(relPath.lastIndexOf('/') + 1).toLowerCase())) {
+    const text = readText?.() ?? null;
+    if (text === null || !envTemplateIsValueFree(text)) return 'env-template-with-values';
+  }
   if (sizeBytes !== null && sizeBytes > OVERSIZE_BYTES) return 'oversize-1mib';
   return null;
 }

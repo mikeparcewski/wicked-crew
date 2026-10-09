@@ -88,7 +88,7 @@ import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { childEnvWithBootEstateDb } from './governance-store.js';
 import type { PhaseDef, WorkflowDef } from './types.js';
-import { DELIVER_NOT_SHIPPED_HEADING, DELIVER_STRANDED_SENTINEL, SCRATCH_DIRS, TOOL_ARTIFACT_DIRS } from './deliver-exclusions.js';
+import { DELIVER_NOT_SHIPPED_HEADING, DELIVER_STRANDED_SENTINEL, ENV_TEMPLATE_SAFE_LINE_ERE, SCRATCH_DIRS, TOOL_ARTIFACT_DIRS } from './deliver-exclusions.js';
 import {
   composeEmbeddedDeliverText,
   factsFromWorkflow,
@@ -522,6 +522,11 @@ function apiOriginLiteral(origin: string | null | undefined): string {
   if (origin === null || origin === undefined) return '';
   const trimmed = origin.replace(/\/+$/, '');
   return /^https?:\/\/[A-Za-z0-9.\-[\]:]+$/.test(trimmed) ? trimmed : '';
+}
+
+/** A POSIX single-quoted shell word for `s` (an embedded `'` becomes `'\\''`). */
+function shellSingleQuote(s: string): string {
+  return `'${s.replaceAll("'", "'\\''")}'`;
 }
 
 /**
@@ -966,7 +971,13 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // Classify on a LOWERCASED basename so DEPLOY.KEY / .ENV / SOCKET.PATH cannot bypass the
     // denylist by case (review, #439).
     '  LBN=$(printf "%s" "$BN" | tr "[:upper:]" "[:lower:]")',
-    '  case "$LBN" in',
+    // crew#901: an env TEMPLATE is a product (a README points at it; MCPS-1004 requires one) when
+    // it holds no value — every line blank, a comment, or `NAME=` with an empty or `<placeholder>`
+    // value. One real value (or an unreadable file) and it is excluded; either way the denylist's
+    // `*.env.*` arm is not what decides it. Same rule as `deliverExclusionReason`. An EMPTY file is
+    // value-free by definition, and is tested apart: BSD grep's `-q -v` answers 0 on an empty file.
+    `  ENVT=""; case "$LBN" in *.env.example|*.env.sample|*.env.template) ENVT=1; if [ ! -r "$F" ] || { [ -s "$F" ] && grep -q -v -E ${shellSingleQuote(ENV_TEMPLATE_SAFE_LINE_ERE)} -- "$F"; }; then RN="env-template-with-values"; fi;; esac`,
+    '  [ -n "$ENVT" ] || case "$LBN" in',
     '    *.db|*.db-wal|*.db-shm|*.sqlite|*.sqlite2|*.sqlite3|*.sqlite-wal|*.sqlite-shm|*.sock|*.pid|*.env|*.env.*|.envrc|*.gif|*.webm|*.mp4|*.mov|*.pem|*.key|*.p12|*.pfx|id_rsa*|*credentials*) RN="denylisted-name";;',
     '  esac',
     '  case "$LBN" in *socket*) [ -n "$RN" ] || RN="socket-name";; esac',
@@ -1087,7 +1098,18 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     '  echo "$PUSHOUT"',
     '  case "$PUSHOUT" in',
     `    *non-fast-forward*|*"fetch first"*|*"[rejected]"*|*"Updates were rejected"*) : > "$S"; VERDICT=rejected; echo "deliver: the remote refused the push of $B because its branch moved (non-fast-forward); the work is committed on $B and nothing was pushed — approve to retry the deliver phase; ${DELIVER_PUSH_REJECTED_MARKER}"; exit 1;;`,
-    `    *) : > "$S"; VERDICT=rejected; PUSHERR="\${PUSHOUT:0:96} ... \${PUSHOUT: -128}"; PUSHERR=\${PUSHERR//$'\\n'/ }; echo "deliver: the remote refused the push of $B after commit: $PUSHERR; the work is committed on $B and nothing was pushed — fix the remote condition, then approve to retry the deliver phase; ${DELIVER_PUSH_REJECTED_MARKER}"; exit 1;;`,
+    // studio#403: the REASON is the remote's own lines (`remote:` hook / auth text, git's `error:` /
+    // `fatal:` / ` ! [remote rejected]`), the verdict-shaped ones first when there are any (a hook's
+    // progress chatter would otherwise fill the cap), joined and capped at 320 bytes, so a hook
+    // message is never cut out by a fixed window; the window is only the fallback for output that
+    // carries none of them. The REASON closes the line, just before the marker: the engine keeps
+    // only the TAIL of the output as the unit's denial (and the gate's text), so whatever leads
+    // the line is what gets cut. Git's generic `error: failed to push some refs` adds nothing. Every grep is `|| true`: the script runs `set -euo pipefail`, and a
+    // filter that matches nothing must not end it before the refusal line is printed. A
+    // credential in a URL is stripped from the WHOLE output first, before any cut (codex on #904: a
+    // cap landing inside `user:token@` would leave a fragment the redaction no longer matches). The push identity rides inside the action
+    // clause (what Approve does, and as whom).
+    `    *) : > "$S"; VERDICT=rejected; PUSHR=$(printf '%s' "$PUSHOUT" | sed -E 's#://[^/@ ]+@#://#g' || true); PUSHL=$(printf '%s\\n' "$PUSHR" | grep -E '^(remote: *[^ ]|error: |fatal: | ! )' | grep -v -E '^error: failed to push some refs' || true); PUSHV=$(printf '%s\\n' "$PUSHL" | grep -i -E 'error|denied|declined|reject|refus|violat|forbidden|required|not allowed|permission|authenticat|[0-9]{3}' || true); PUSHERR=$(printf '%s\\n' "\${PUSHV:-$PUSHL}" | head -c 320 | tr '\\n' ' ' | sed -E 's/ +$//' || true); [ -n "$PUSHERR" ] || { PUSHERR="\${PUSHR:0:96} ... \${PUSHR: -128}"; PUSHERR=\${PUSHERR//$'\\n'/ }; }; echo "deliver: the remote refused the push of $B after commit — nothing was pushed and the work is committed on $B; fix the remote condition, then approve to retry the deliver phase (it re-pushes $B to origin as \${L:-an unknown login}). The remote said: $PUSHERR; ${DELIVER_PUSH_REJECTED_MARKER}"; exit 1;;`,
     '  esac',
     'fi',
     // (e) Open the PR with gh's OUTPUT and EXIT STATUS captured separately (crew#317). The old
