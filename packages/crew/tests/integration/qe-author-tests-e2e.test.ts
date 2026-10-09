@@ -399,7 +399,10 @@ describe('wave 6 end to end — the governed test-authoring journey', () => {
     expect(await unitOutput(runId, author.ord)).not.toContain('pull/601');
     const deliver = run.units.find((u) => u.id.endsWith(':deliver'))!;
     expect((deliver.tool_cmd ?? []).join(' ')).toContain('gh pr create');
-    expect((await unitOutput(runId, deliver.ord)).trim().endsWith('https://github.com/o/r/pull/601')).toBe(true);
+    // The PR URL is the script's last verdict line; only the trusted sentinel follows it (crew#739).
+    const deliverLines = (await unitOutput(runId, deliver.ord)).trim().split('\n');
+    expect(deliverLines.at(-1)).toMatch(/^deliver: OUTCOME [0-9a-f]{32} pr$/);
+    expect(deliverLines.at(-2)).toBe('https://github.com/o/r/pull/601');
     // …and the delivery is REAL on the local origin: the run branch carries the produced files.
     expect(originBranches()).toContain(`wicked/${runId}`);
     const files = git(origin, 'show', '--name-only', '--format=', `wicked/${runId}`).trim().split('\n');

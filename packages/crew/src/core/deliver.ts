@@ -85,6 +85,7 @@
  */
 
 import { execFile } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { childEnvWithBootEstateDb } from './governance-store.js';
 import type { PhaseDef, WorkflowDef } from './types.js';
 import { DELIVER_NOT_SHIPPED_HEADING, DELIVER_STRANDED_SENTINEL, SCRATCH_DIRS, TOOL_ARTIFACT_DIRS } from './deliver-exclusions.js';
@@ -157,6 +158,25 @@ export const DELIVER_PUSH_REJECTED_MARKER = 'deliver: PUSH-REJECTED';
  */
 export const DELIVER_PUSHED_NO_PR_MARKER = 'deliver: PUSHED-NO-PR';
 
+/**
+ * (crew#739) The TRUSTED terminal sentinel: every exit of the deliver script prints exactly one
+ * `deliver: OUTCOME <nonce> <verdict>` line, from its EXIT trap. The nonce is minted per
+ * composition and written into the script text as `DELIVER_NONCE=<hex>` (so it rides the unit's
+ * `tool_cmd`, which the engine and crew already hold); a remote never sees the script, only the
+ * branch, so a pre-receive hook cannot echo a sentinel with the right nonce. The engine
+ * (wicked-core#807, `deliver_lift.rs`) and crew (`trustedDeliverOutcome`) classify a nonce-bearing
+ * deliver ONLY on that line; a missing sentinel reads `failed` (fail closed), never `stranded`.
+ */
+export const DELIVER_OUTCOME_MARKER = 'deliver: OUTCOME';
+/** The script variable carrying the nonce ({@link DELIVER_OUTCOME_MARKER}). */
+export const DELIVER_NONCE_VAR = 'DELIVER_NONCE';
+/** The verdicts the sentinel carries. `stranded` is the post-hoc-liftable LIFT-CONFLICT class. */
+export type DeliverOutcome = 'pr' | 'pushed' | 'rejected' | 'stranded' | 'failed';
+/** A fresh 16-byte hex nonce for one script composition. */
+export function mintDeliverNonce(): string {
+  return randomBytes(16).toString('hex');
+}
+
 /** What a push-only delivery left on the record: the branch, and the remote it is on. */
 export interface PushedOnlyDelivery {
   branch: string;
@@ -225,6 +245,9 @@ export interface DeliverScriptOptions {
    *  time (`gh auth status`, bounded): `false` ⇒ the gate card says so BEFORE approval and the
    *  phase will refuse; `null`/absent ⇒ unknown (no probe, gh absent, timed out). */
   deliverIdentitySignedIn?: boolean | null;
+  /** (crew#739) The sentinel nonce (16-64 hex digits). Absent ⇒ a fresh one per composition; a
+   *  test passes one to read the sentinel deterministically. Refused at compose time otherwise. */
+  nonce?: string;
 }
 
 /**
@@ -572,6 +595,8 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
   const prNum = revises === null ? '' : String(revises.number);
   const target = revises === null ? '' : revises.headRef;
   const prUrl = revises === null ? '' : revises.url;
+  const nonce = opts.nonce ?? mintDeliverNonce();
+  if (!/^[0-9a-fA-F]{16,64}$/.test(nonce)) throw new Error(`deliver nonce: not 16-64 hex digits: ${JSON.stringify(nonce)}`);
   return [
     'set -euo pipefail',
     // The engine concatenates the child's stdout and THEN its stderr, so anything git writes to
@@ -579,6 +604,18 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // into stdout for the whole phase keeps the output in true chronological order and makes the
     // final `echo "$URL"` genuinely last.
     'exec 2>&1',
+    // (crew#739) THE TRUSTED TERMINAL SENTINEL. Every exit — an explicit `exit`, a `set -e` failure,
+    // the success paths — runs this trap, which prints exactly one `deliver: OUTCOME <nonce>
+    // <verdict>` line LAST. VERDICT defaults to `failed`; only the script's own verdict sites set
+    // `pr` | `pushed` | `rejected` | `stranded`. The trap also owns the temp-dir cleanup (a second
+    // `trap … EXIT` would replace this one). The exit status is the script's, not the trap's.
+    `${DELIVER_NONCE_VAR}='${nonce}'`,
+    'VERDICT=failed',
+    'TD=""',
+    // `rc` keeps the script's exit status, and a failed cleanup can neither skip the sentinel nor
+    // replace that status under `set -e` (codex review).
+    `_outcome() { local rc=$?; [ -z "$TD" ] || rm -rf "$TD" || true; echo "${DELIVER_OUTCOME_MARKER} $${DELIVER_NONCE_VAR} $VERDICT"; exit "$rc"; }`,
+    'trap _outcome EXIT',
     // IDENTITY (DES-L9 D-18, crew#549 / F-RC1-010) — read ONCE, up front, before anything is
     // fetched, staged or pushed, so the refusal is the phase's WHOLE output (the engine's head-150
     // carries it). With GH_ACCOUNT set, a differing or unreadable active login REFUSES: the
@@ -770,8 +807,8 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // opened with `--title` + `--body-file` from it. WHICH text was used is always said in the
     // output — every branch below prints its reason (Copilot on #525): no origin known, no curl,
     // the daemon did not answer, or the run record was fetched.
+    // Cleaned up by the `_outcome` EXIT trap installed at the top (crew#739).
     'TD=$(mktemp -d)',
-    "trap 'rm -rf \"$TD\"' EXIT",
     // One URL path segment, RFC 3986: unreserved bytes verbatim, everything else `%XX` (byte-wise
     // under LC_ALL=C so multibyte characters encode per byte, as a URL requires). Used only when
     // the composer did not bake the launch id in (Copilot on #525: `/`, `#`, `?` in an id must
@@ -1027,7 +1064,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     '        done; then break; fi',
     '    GIT_EDITOR=true git -c core.editor=true rebase --continue >/dev/null 2>&1 || break;',
     '  done',
-    `  if _rebasing; then git rebase --abort >/dev/null 2>&1 || true; echo "${DELIVER_LIFT_CONFLICT_MARKER} — rebase of $B onto $D hit conflicts outside the changelog; resolve on the branch and re-run; nothing was pushed"; exit 1; fi`,
+    `  if _rebasing; then git rebase --abort >/dev/null 2>&1 || true; VERDICT=stranded; echo "${DELIVER_LIFT_CONFLICT_MARKER} — rebase of $B onto $D hit conflicts outside the changelog; resolve on the branch and re-run; nothing was pushed"; exit 1; fi`,
     'fi',
     // Re-derive after the rebase: it drops commits already upstream (patch-id equal), so a branch
     // that WAS ahead can come out of a rebase carrying nothing of its own.
@@ -1044,11 +1081,13 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // A revision pushes the run branch ONTO the PR's head branch (`$B:refs/heads/$TARGET`) — the
     // PR gains exactly the run's commits; a rejection there is the same recoverable strand.
     '_push() { if [ -n "$TARGET" ]; then git push origin "$B:refs/heads/$TARGET"; else git push -u origin "$B"; fi; }',
-    'if PUSHOUT=$(_push 2>&1); then echo "$PUSHOUT"; else',
+    // (crew#739) The branch-pushed fact is said in the script's own words, so a later failure (a gh
+    // error on `gh pr create`) still records that the branch reached the remote.
+    'if PUSHOUT=$(_push 2>&1); then echo "$PUSHOUT"; echo "deliver: pushed $B to origin"; else',
     '  echo "$PUSHOUT"',
     '  case "$PUSHOUT" in',
-    `    *non-fast-forward*|*"fetch first"*|*"[rejected]"*|*"Updates were rejected"*) : > "$S"; echo "deliver: the remote refused the push of $B because its branch moved (non-fast-forward); the work is committed on $B and nothing was pushed — approve to retry the deliver phase; ${DELIVER_PUSH_REJECTED_MARKER}"; exit 1;;`,
-    `    *) : > "$S"; PUSHERR="\${PUSHOUT:0:96} ... \${PUSHOUT: -128}"; PUSHERR=\${PUSHERR//$'\\n'/ }; echo "deliver: the remote refused the push of $B after commit: $PUSHERR; the work is committed on $B and nothing was pushed — fix the remote condition, then approve to retry the deliver phase; ${DELIVER_PUSH_REJECTED_MARKER}"; exit 1;;`,
+    `    *non-fast-forward*|*"fetch first"*|*"[rejected]"*|*"Updates were rejected"*) : > "$S"; VERDICT=rejected; echo "deliver: the remote refused the push of $B because its branch moved (non-fast-forward); the work is committed on $B and nothing was pushed — approve to retry the deliver phase; ${DELIVER_PUSH_REJECTED_MARKER}"; exit 1;;`,
+    `    *) : > "$S"; VERDICT=rejected; PUSHERR="\${PUSHOUT:0:96} ... \${PUSHOUT: -128}"; PUSHERR=\${PUSHERR//$'\\n'/ }; echo "deliver: the remote refused the push of $B after commit: $PUSHERR; the work is committed on $B and nothing was pushed — fix the remote condition, then approve to retry the deliver phase; ${DELIVER_PUSH_REJECTED_MARKER}"; exit 1;;`,
     '  esac',
     'fi',
     // (e) Open the PR with gh's OUTPUT and EXIT STATUS captured separately (crew#317). The old
@@ -1100,7 +1139,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     '        R=$(git remote get-url --push origin | sed -E "s#^([A-Za-z][A-Za-z0-9+.-]*://)[^@/]*@#\\1#")',
     '        echo "deliver: pushed $B to origin ($R) with $P commit(s) on top of $D, and no pull request was opened because that remote is not a GitHub host gh can resolve. The branch IS the delivery — open the pull/merge request for $B on your forge; merge stays human.";',
     // N1: the machine line the daemon records the push-only delivery from — LAST, one line.
-    `        echo "${DELIVER_PUSHED_NO_PR_MARKER} $B $R";`,
+    `        VERDICT=pushed; echo "${DELIVER_PUSHED_NO_PR_MARKER} $B $R";`,
     '        exit 0;;',
     // (e3) THIS RUN'S PR ALREADY EXISTS (crew#885). A rework re-runs the chain, so deliver runs
     // again for the same `wicked/<run>` branch: the push above just updated the PR an earlier
@@ -1127,6 +1166,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     '    if COUT=$(gh pr comment "$URL" --body-file "$TD/body" 2>&1); then echo "deliver: run record commented on $URL"; else echo "$COUT"; echo "deliver: could not comment on $URL — the commits landed; the record is in the commit message"; fi',
     '  fi',
     'fi',
+    'VERDICT=pr',
     'echo "$URL"',
   ].join('\n');
 }

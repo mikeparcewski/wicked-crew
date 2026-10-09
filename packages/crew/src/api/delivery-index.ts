@@ -24,7 +24,7 @@
 import type { AuditLog } from './audit.js';
 import type { AgentSession, SessionView, WorkUnit, WorkflowDef } from '../core/types.js';
 import { execCapped } from '../core/exec.js';
-import { lastDeliverMarker } from '../core/deliver-triage.js';
+import { lastDeliverMarker, trustedDeliverOutcome } from '../core/deliver-triage.js';
 import {
   DELIVER_LIFT_CONFLICT_MARKER,
   DELIVER_PHASE_ID,
@@ -632,8 +632,12 @@ export function isDeliverConflictStranded(view: SessionView): boolean {
   // A rejected unit that is NOT the deliver phase = a genuine work/build/test failure, not a
   // clean run whose only casualty was the lift.
   if (view.units.some((u) => u.id !== deliver.id && u.status === 'rejected')) return false;
-  // The LAST marker decides (codex review of N4): a refused push whose remote echoed the lift
-  // marker is still a refused push, never a liftable strand.
+  // (crew#739) A nonce-bearing script is judged ONLY on its trusted sentinel: `stranded` is a
+  // strand; any other verdict, or none at all, is not (fail closed — it stays `failed`).
+  const trusted = trustedDeliverOutcome(deliver.tool_cmd, deliver.denial_reason ?? '');
+  if (trusted !== undefined) return trusted === 'stranded';
+  // Legacy script (no nonce): the LAST marker decides (codex review of N4): a refused push whose
+  // remote echoed the lift marker is still a refused push, never a liftable strand.
   return lastDeliverMarker(deliver.denial_reason ?? '') === DELIVER_LIFT_CONFLICT_MARKER;
 }
 

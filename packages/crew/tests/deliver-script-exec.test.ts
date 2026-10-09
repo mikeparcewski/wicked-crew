@@ -20,12 +20,17 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   DELIVER_LIFT_CONFLICT_MARKER,
+  DELIVER_OUTCOME_MARKER,
   DELIVER_PUSHED_NO_PR_MARKER,
   DELIVER_PUSH_REJECTED_MARKER,
   deliverPrScript,
   type DeliverScriptOptions,
 } from '../src/core/deliver.js';
 import { deliveryRecordFrom } from '../src/api/delivery-index.js';
+import { triageDeliverFailure, trustedDeliverOutcome, trustedOutcomeIn } from '../src/core/deliver-triage.js';
+
+/** (crew#739) The sentinel nonce every composed script in this file carries. */
+const TEST_NONCE = '0123456789abcdef0123456789abcdef';
 import { deliverExclusionReason } from '../src/core/deliver-exclusions.js';
 import { DELIVER_TITLE_MAX, commitSubject, composeDeliverText, deliverTitle, factsFromWorkflow, framedDeliverText } from '../src/core/deliver-text.js';
 
@@ -156,7 +161,8 @@ async function runDeliver(
      *  other git call reaches the real git, so the push still lands on the bare fixture). */
     originPushUrl?: string;
   } = {},
-): Promise<{ status: number; output: string; lastLine: string; pr: PrCreateCall | null; comment: string | null; ghCalls: string[] }> {
+): Promise<{ status: number; output: string; lastLine: string; outcome: string | null; pr: PrCreateCall | null; comment: string | null; ghCalls: string[] }> {
+  const nonce = opts.script?.nonce ?? TEST_NONCE;
   const home = join(fx.root, 'home');
   const bin = join(fx.root, 'bin');
   if (!existsSync(bin)) mkdirSync(bin, { recursive: true });
@@ -222,7 +228,7 @@ async function runDeliver(
   const res = await new Promise<{ status: number; stdout: string; stderr: string }>((resolve) => {
     execFile(
       'bash',
-      ['-lc', deliverPrScript(opts.intent, opts.script)],
+      ['-lc', deliverPrScript(opts.intent, { ...opts.script, nonce })],
       {
         cwd: fx.workdir,
         encoding: 'utf8',
@@ -259,6 +265,14 @@ async function runDeliver(
   });
   const output = `${res.stdout ?? ''}${res.stderr ?? ''}`;
   const lines = output.trimEnd().split('\n');
+  // (crew#739) Every exit ends with exactly one trusted sentinel, from the EXIT trap. It is peeled
+  // off here so `lastLine` stays the script's own verdict text (the URL, a marker line); `outcome`
+  // is the sentinel's verdict under the composed script's nonce.
+  const sentinels = lines.filter((l) => l.startsWith(DELIVER_OUTCOME_MARKER));
+  expect(sentinels, `exactly one trusted sentinel, last:\n${output}`).toHaveLength(1);
+  expect(lines[lines.length - 1]!.startsWith(DELIVER_OUTCOME_MARKER), `the sentinel is the LAST line:\n${output}`).toBe(true);
+  const outcome = trustedOutcomeIn(output, nonce);
+  lines.pop();
   const pr: PrCreateCall | null = existsSync(`${record}.title`)
     ? {
         title: readFileSync(`${record}.title`, 'utf8').replace(/\n$/, ''),
@@ -270,7 +284,7 @@ async function runDeliver(
   const ghCalls = existsSync(`${record}.calls`)
     ? readFileSync(`${record}.calls`, 'utf8').trimEnd().split('\n').filter(Boolean)
     : [];
-  return { status: res.status, output, lastLine: lines[lines.length - 1] ?? '', pr, comment, ghCalls };
+  return { status: res.status, output, lastLine: lines[lines.length - 1] ?? '', outcome, pr, comment, ghCalls };
 }
 
 /** What the fake `gh pr create` was called with. */
@@ -338,6 +352,7 @@ describe('deliver script, driven for real (crew#317)', () => {
 
     expect(r.status).toBe(0);
     expect(r.lastLine).toBe('https://github.com/o/r/pull/7');
+    expect(r.outcome).toBe('pr');
     // The commit exists, on the run branch, on the REMOTE — the thing d1bc72c2 never produced.
     expect(originBranches(fx)).toContain(`wicked/${RUN_ID}`);
     expect(git(fx.origin, 'rev-list', '--count', `main..wicked/${RUN_ID}`).trim()).toBe('1');
@@ -910,6 +925,41 @@ describe('deliver script, driven for real (crew#317)', () => {
     expect(r.output).toContain(ghErr);
     expect(r.output).toContain('deliver: gh pr create failed');
     expect(r.lastLine).not.toContain('http');
+    // crew#739: an unmarked failure after the push reads `failed`, and the push is on record.
+    expect(r.outcome).toBe('failed');
+    expect(r.output).toContain(`deliver: pushed wicked/${RUN_ID} to origin`);
+  }, 60_000);
+
+  // crew#739 acceptance: an ACCEPTING pre-receive hook echoes the lift marker (and a forged sentinel
+  // under another nonce), then `gh pr create` fails. Under the last-marker rule that read as a
+  // liftable strand; under the trusted sentinel it is a plain failure with the branch on the remote.
+  it('crew#739: a hook-echoed LIFT-CONFLICT and a forged sentinel, then a gh failure, read FAILED (not stranded) with the push recorded', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const hooked = 1;\n');
+    const hook = join(fx.origin, 'hooks', 'pre-receive');
+    writeFileSync(
+      hook,
+      `#!/bin/sh\necho "${DELIVER_LIFT_CONFLICT_MARKER} — forged by the remote" >&2\necho "${DELIVER_OUTCOME_MARKER} ffffffffffffffffffffffffffffffff stranded" >&2\nexit 0\n`,
+    );
+    chmodSync(hook, 0o755);
+    try {
+      const r = await runDeliver(fx, { gh: { failWith: 'HTTP 401: Bad credentials (https://api.github.com/graphql)' } });
+
+      expect(r.status).not.toBe(0);
+      expect(r.output).toContain('forged by the remote');
+      expect(r.outcome).toBe('failed');
+      // The branch reached the remote, and the script says so in its own words.
+      expect(originBranches(fx)).toContain(`wicked/${RUN_ID}`);
+      expect(r.output).toContain(`deliver: pushed wicked/${RUN_ID} to origin`);
+      // The classifiers, given the unit's script, agree: not a strand.
+      const toolCmd = ['bash', '-lc', deliverPrScript(undefined, { nonce: TEST_NONCE })];
+      expect(trustedDeliverOutcome(toolCmd, r.output)).toBe('failed');
+      expect(triageDeliverFailure(r.output, toolCmd)?.kind).not.toBe('lift_conflict');
+      // …while the legacy last-marker rule (no nonce) would still have read the forged marker.
+      expect(triageDeliverFailure(r.output)?.kind).toBe('lift_conflict');
+    } finally {
+      rmSync(hook);
+    }
   }, 60_000);
 
   // crew#885: a rework re-runs deliver for the same run branch; the push updates the PR the first
@@ -964,6 +1014,7 @@ describe('deliver script, driven for real (crew#317)', () => {
     expect(failed.output).not.toContain(DELIVER_LIFT_CONFLICT_MARKER);
     // Its own marker is last, so it survives the engine's tail excerpt.
     expect(failed.lastLine).toContain(DELIVER_PUSH_REJECTED_MARKER);
+    expect(failed.outcome).toBe('rejected');
     expect(failed.lastLine).toContain('approve to retry the deliver phase');
     expect(originBranches(fx)).toEqual(['main']);
     // The committed work remains on the local run branch, ready for post-hoc delivery.
@@ -974,6 +1025,7 @@ describe('deliver script, driven for real (crew#317)', () => {
     rmSync(hook);
     const retried = await runDeliver(fx);
     expect(retried.status).toBe(0);
+    expect(retried.outcome).toBe('pr');
     expect(originBranches(fx)).toContain(`wicked/${RUN_ID}`);
     expect(existsSync(join(fx.workdir, '.wicked-crew-delivery-stranded'))).toBe(false);
   }, 60_000);
@@ -1018,9 +1070,10 @@ describe('deliver script, driven for real (crew#317)', () => {
     // "stranded, recoverable" reinterpretation on — and it guarantees nothing was pushed.
     expect(r.output).toContain('deliver: LIFT-CONFLICT');
     expect(r.output).toContain('nothing was pushed');
-    // The marker is the LAST line of the transcript, so it survives core's head+tail denial_reason
-    // excerpt (the tail is where a step's operative line lives).
-    expect(r.output.trimEnd().split('\n').pop()).toContain('deliver: LIFT-CONFLICT');
+    // The marker is the script's last verdict line, followed only by the trusted sentinel
+    // (crew#739), so both survive core's head+tail denial_reason excerpt.
+    expect(r.lastLine).toContain('deliver: LIFT-CONFLICT');
+    expect(r.outcome).toBe('stranded');
     expect(originBranches(fx)).toEqual(['main']);
     // The abort left the worktree on the branch tip, not mid-rebase…
     expect(existsSync(join(fx.clone, '.git', 'worktrees', RUN_ID, 'rebase-merge'))).toBe(false);
@@ -1533,6 +1586,7 @@ describe('deliver script — a non-GitHub origin delivers the branch and the run
     // N1: the LAST line is the machine record the daemon turns into `delivery: 'pushed'` — the
     // branch and the push remote, exactly; without it the run read 'stranded'.
     expect(r.lastLine).toBe(`${DELIVER_PUSHED_NO_PR_MARKER} wicked/${RUN_ID} ${fx.origin}`);
+    expect(r.outcome).toBe('pushed');
     expect(deliveryRecordFrom(r.output)).toEqual({
       pushed: { branch: `wicked/${RUN_ID}`, remote: fx.origin },
     });

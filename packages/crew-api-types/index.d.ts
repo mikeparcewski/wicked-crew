@@ -827,6 +827,15 @@ export interface RosterSeat {
    */
   login_invocation?: string;
   /**
+   * The shell invocation that signs this seat OUT of its own configuration root (crew#615;
+   * wicked-core#807 `AgenticCli.logout_invocation`, core-ts >= 0.7.43): the CLI's own documented
+   * logout (`claude auth logout`, `codex logout`, `opencode auth logout`), prefixed with the seat's
+   * root exactly like {@link login_invocation}. Passed through VERBATIM; absent for a seat whose CLI
+   * documents no logout (copilot, pi, agy) and on an engine predating the field. `POST
+   * /seats/:cli/logout` runs it.
+   */
+  logout_invocation?: string;
+  /**
    * Whether the seat LOOKS signed in — a cheap file/env-presence HEURISTIC computed by the
    * daemon (`seat-signin.ts`), never a spawned probe and never proof the credential still
    * works. Three-valued on purpose: `true`/`false` when the seat's auth state is observable
@@ -4429,6 +4438,28 @@ export interface DomainCoverage {
   total: number;
   behavior_bearing: number;
   resolved: number;
+}
+
+/**
+ * `POST /seats/:cli/login` and `POST /seats/:cli/logout` (crew#615): the PTY size for the terminal
+ * the daemon opens running the seat's own `login_invocation` / `logout_invocation`. Both optional
+ * (default 100 x 30).
+ */
+export interface SeatSessionBody {
+  cols?: number;
+  rows?: number;
+}
+
+/**
+ * The answer to {@link SeatSessionBody}: the terminal running the seat's sign-in / sign-out
+ * command. Drive and read it over `/ws/terminals/:id` (a device URL streams there). 404 when the
+ * seat is unknown or its CLI documents no such command.
+ */
+export interface SeatSessionResponse {
+  terminalId: string;
+  /** The seat key the command was run for. */
+  cli: string;
+  action: 'login' | 'logout';
 }
 
 /** The open-terminal request body (`POST /terminals`, DES-TERMINAL-001 §6). */
