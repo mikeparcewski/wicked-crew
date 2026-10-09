@@ -378,6 +378,12 @@ describe('crew#627 — a workflow launch reads the issues its intent links', () 
     const none = await app.inject({ method: 'POST', url: '/api/v1/linked-issues/preview', payload: { problem: 'fix #541', repoRef: 'wicked-studio', excludeLinkedIssues: ['541'] } });
     expect(none.json().appendedChars).toBe(0);
     expect(launched).toEqual([]);
+    const broken = routes(async () => {
+      throw new Error('repo list unreadable');
+    });
+    const fault = await broken.app.inject({ method: 'POST', url: '/api/v1/linked-issues/preview', payload: { problem: 'fix #541' } });
+    expect(fault.statusCode).toBe(200);
+    expect(fault.json()).toMatchObject({ issues: [], appendedChars: 0, error: expect.stringMatching(/repo list unreadable — a launch now runs on the intent alone/) });
     const health = await app.inject({ method: 'GET', url: '/api/v1/health' });
     expect(health.json().capabilities.linkedIssuesExclude).toBe(true);
   });

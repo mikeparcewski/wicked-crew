@@ -2116,9 +2116,16 @@ export function registerRoutes(
       const parsed = LinkedIssuesPreviewSchema.safeParse(req.body);
       if (!parsed.success) return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
       const b = parsed.data;
-      const root = b.repoRef !== undefined ? await repoRootOf(b.repoRef) : undefined;
-      const linked = await readLinkedIssues(b.problem, root, b.repoRef, b.excludeLinkedIssues ?? []);
-      return { issues: linked.issues, appendedChars: linked.block === null ? 0 : linked.block.length + 2 };
+      // The launch's own best-effort contract (codex on this PR): a resolver fault launches on the
+      // intent alone, so the preview answers "nothing appended" and says why — never a 500.
+      try {
+        const root = b.repoRef !== undefined ? await repoRootOf(b.repoRef) : undefined;
+        const linked = await readLinkedIssues(b.problem, root, b.repoRef, b.excludeLinkedIssues ?? []);
+        return { issues: linked.issues, appendedChars: linked.block === null ? 0 : linked.block.length + 2 };
+      } catch (err) {
+        req.log.warn(`linked-issue preview failed; a launch would run on the intent alone: ${message(err)}`);
+        return { issues: [], appendedChars: 0, error: `linked issues could not be read: ${message(err)} — a launch now runs on the intent alone` };
+      }
     },
   );
 

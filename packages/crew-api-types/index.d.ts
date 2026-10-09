@@ -4151,6 +4151,9 @@ export interface LinkedIssuesPreviewResponse {
   issues: LinkedIssue[];
   /** Characters the block would add to the problem; `0` when nothing would be appended. */
   appendedChars: number;
+  /** Present when the reading itself failed (the repo list or gh unreadable): a launch now runs on
+   *  the intent alone, exactly as `POST /runs` does on the same fault. */
+  error?: string;
 }
 
 /**
