@@ -227,6 +227,8 @@ export interface HealthCapabilities {
   /**
    * `LaunchRunBody.revisesPr` is accepted (crew#550; crew ≥ 0.7.36). ABSENT on a daemon before
    * the field — read as `false`: do not send `revisesPr` to such a daemon.
+   * NOTE (crew#662): this CAPABILITY flag is a boolean; the LAUNCH field of the same name,
+   * `LaunchRunBody.revisesPr`, is the pull request NUMBER (a positive integer) — never `true`.
    */
   revisesPr?: boolean;
   /**
@@ -4063,6 +4065,8 @@ export interface LaunchRunBody {
    * `deliver: 'none'` is a 400), and the PR must be OPEN and not from a fork (409 naming why).
    * Send it ONLY when `GET /health.capabilities.revisesPr === true` — an older daemon's strict
    * launch schema rejects the key with a 400.
+   * NOTE (crew#662): a positive integer PR number — not the boolean capability flag
+   * `HealthCapabilities.revisesPr` of the same name. A 400 names the field and what it expected.
    */
   revisesPr?: number;
   /**

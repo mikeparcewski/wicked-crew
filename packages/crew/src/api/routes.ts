@@ -297,7 +297,7 @@ function message(err: unknown): string {
  * the caller comparing their JSON against the source, so the unknown keys are named in `error`
  * itself, where a human and a `curl | jq .error` both see it without reading `details`.
  */
-function invalidBody(err: z.ZodError, what: string): { error: string; details: z.ZodIssue[] } {
+export function invalidBody(err: z.ZodError, what: string): { error: string; details: z.ZodIssue[] } {
   const unknown = err.issues.flatMap((i) => (i.code === 'unrecognized_keys' ? i.keys : []));
   const error =
     unknown.length > 0
@@ -306,8 +306,21 @@ function invalidBody(err: z.ZodError, what: string): { error: string; details: z
           .join(', ')} — this endpoint does not accept ${
           unknown.length > 1 ? 'them' : 'it'
         }, and ignoring ${unknown.length > 1 ? 'them' : 'it'} would run a different request than you sent`
-      : what;
+      : namedIssues(what, err.issues);
   return { error, details: err.issues };
+}
+
+/**
+ * crew#662: a schema rejection that is NOT an unknown key names the field and what was expected —
+ * `Invalid request body: \`revisesPr\` — Expected number, received boolean`. The bare
+ * "Invalid request body" sent a caller off to misdiagnose the contract. Up to three issues are
+ * spelled out; the rest are counted (all of them stay in `details`).
+ */
+function namedIssues(what: string, issues: readonly z.ZodIssue[]): string {
+  if (issues.length === 0) return what;
+  const shown = issues.slice(0, 3).map((i) => (i.path.length > 0 ? `\`${i.path.join('.')}\` — ${i.message}` : i.message));
+  const more = issues.length > 3 ? `; and ${issues.length - 3} more (see details)` : '';
+  return `${what}: ${shown.join('; ')}${more}`;
 }
 
 /** First value of a possibly-repeated query param, WITHOUT trimming — `''` is PRESERVED because a
