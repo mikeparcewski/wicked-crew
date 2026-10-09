@@ -28,9 +28,20 @@
  * A user-installed bridge earlier on PATH still wins for spawn resolution only if
  * it appears before ours — we prepend, so the packaged versions take precedence
  * and match the engine version they shipped with.
+ *
+ * What is prepended is NOT that `.bin` itself (crew#858): `.bin` is crew's whole
+ * dependency bin directory, and `@agentclientprotocol/codex-acp` depends on
+ * `@openai/codex`, whose launcher lands there as `codex` — prepending it made every
+ * bare-name `codex` seat spawn resolve to the vendored CLI instead of the one the
+ * operator installed and logs into. The daemon prepends a directory that holds ONLY
+ * links to the four bridges (`claude-agent-acp`, `codex-acp`, `pi-acp`, `agy-acp`)
+ * and the `wicked-pi` launcher. The precedence above is right for the bridges; a seat
+ * CLI that rides along as a transitive dependency never gets it. (`codex-acp` itself
+ * is unaffected: it resolves its bundled codex by module path, not PATH.)
  */
 
-import { existsSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -102,15 +113,89 @@ export function ensurePiLauncherCommand(
 }
 
 /**
- * Prepend the bridge `.bin` directory to PATH (idempotent). Returns the directory
- * when one was found, else `null`. Call once at daemon startup, before the engine
- * spawns anything.
+ * Every bin the bridges-only PATH directory may carry: the four bridges and the pi
+ * launcher. Nothing else from `.bin` — in particular never a seat CLI (crew#858).
+ */
+export const BRIDGE_ONLY_BINS: readonly string[] = ['claude-agent-acp', 'codex-acp', 'pi-acp', 'agy-acp', PI_LAUNCHER_BIN];
+
+/** Name of the bridges-only directory, a sibling of `.bin` inside `node_modules`. */
+const BRIDGES_DIR_NAME = '.wicked-crew-bridges';
+
+/** Point `link` at `target`, replacing a stale link; a link already right is left alone. */
+function linkTo(target: string, link: string): void {
+  try {
+    if (lstatSync(link).isSymbolicLink() && readlinkSync(link) === target) return;
+    unlinkSync(link);
+  } catch {
+    // absent — create below
+  }
+  try {
+    symlinkSync(target, link);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    // A concurrent daemon from the same install linked it first: fine ONLY if it agrees —
+    // anything else (a file, a link elsewhere) throws so the caller falls back to a fresh dir.
+    if (!(lstatSync(link).isSymbolicLink() && readlinkSync(link) === target)) throw err;
+  }
+}
+
+/** Write a Windows `.cmd` forwarder to `target` (a `.cmd` shim resolves `%~dp0` from its own dir). */
+function cmdForwarder(target: string, link: string): void {
+  // `%` expands inside a quoted batch string, so a literal one in the path is doubled.
+  const body = `@"${target.replace(/%/g, '%%')}" %*\r\n`;
+  try {
+    if (readFileSync(link, 'utf8') === body) return;
+  } catch {
+    // absent
+  }
+  writeFileSync(link, body);
+}
+
+/**
+ * Populate `dir` with links to the bridge shims found in `binDir` and nothing else.
+ * Throws when `dir` cannot be created or written (the caller falls back).
+ */
+function populateBridgesDir(binDir: string, dir: string): void {
+  mkdirSync(dir, { recursive: true });
+  for (const name of BRIDGE_ONLY_BINS) {
+    for (const file of [name, `${name}.cmd`]) {
+      const target = join(binDir, file);
+      if (!existsSync(target)) continue;
+      const link = join(dir, file);
+      if (file.endsWith('.cmd')) cmdForwarder(target, link);
+      else linkTo(target, link);
+    }
+  }
+}
+
+/**
+ * The directory holding ONLY the bridge shims from `binDir` (crew#858), created or
+ * refreshed: `<node_modules>/.wicked-crew-bridges` beside `.bin`, or — when the install
+ * is read-only — a fresh per-process directory under the OS temp dir.
+ */
+export function bridgesOnlyDir(binDir: string): string {
+  const preferred = join(dirname(binDir), BRIDGES_DIR_NAME);
+  try {
+    populateBridgesDir(binDir, preferred);
+    return preferred;
+  } catch {
+    const fallback = mkdtempSync(join(tmpdir(), 'wicked-crew-bridges-'));
+    populateBridgesDir(binDir, fallback);
+    return fallback;
+  }
+}
+
+/**
+ * Prepend a bridges-only directory (links to the bridge shims of the nearest bridge
+ * `.bin`) to PATH (idempotent). Returns the prepended directory when bridges were found,
+ * else `null`. Call once at daemon startup, before the engine spawns anything.
  */
 export function ensureBridgesOnPath(
   start: string = dirname(fileURLToPath(import.meta.url)),
 ): string | null {
-  const binDir = findBridgeBinDir(start);
-  if (binDir === null) return null;
+  const found = findBridgeBinDir(start);
+  if (found === null) return null;
+  const binDir = bridgesOnlyDir(found);
   const current = process.env['PATH'];
   if (current === undefined || current === '') {
     // No trailing delimiter: an empty PATH entry means the CWD on POSIX.
