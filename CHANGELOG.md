@@ -10,6 +10,31 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.8.9] — 2026-10-09
+
+The engine pin moves to **`wicked-core-ts` `^0.7.43`** (wicked-core#805, #807, #808). This release bundles **wicked-studio 0.6.7**: S16a moves the run page and the old shells into the session thread, and the session gate row answers the new `consent` gate. It carries the four crew PRs merged since 0.8.8 (#887, #889, #890, #877). The `mcp-server` install now asks for consent before it runs. The deliver script ends every exit with a trusted sentinel. Seats can be signed in and out through the daemon. `wicked-crew-api-types` 0.99.0 is the matching wire contract.
+
+- **`wicked-crew-api-types` 0.99.0.** Additive: `GateSpec` and `UnitPlannedEvent.gate` gain `'consent_before'` (#889); `RosterSeat.logout_invocation`, `SeatSessionBody`, `SeatSessionResponse` (#890).
+- **Engine pin `wicked-core-ts` `^0.7.43` (#889).** It carries:
+  - core#805: the `consent_before` gate, Tool-unit send-back, the operator-config fence, and MCPS/RVWL boot seeding;
+  - core#807: the trusted deliver sentinel, `logout_invocation` and the R7 sibling-worktree read fence;
+  - core#808: `findingIds` on `team_dispute` gates.
+
+  The core-workflow skill_refs fixture is re-stamped; the refs are unchanged.
+- **Bundled UI wicked-studio `^0.6.7`.** S16a (studio#602, #605, #607, #608, #609): the run page's controls and addresses move into the session thread, and the run page, the project shell, the old gate card and the chat page are deleted. The session gate row answers the `consent` gate with Approve / Decline, nothing preselected (studio#610). A NOT PASS gate's wording follows the reviewer's own verdict (studio#604).
+- **mcp-server consent gate (#888, #889).** The `mcp-server` mirror follows core's `workflows/mcp-server.json`:
+  - the install asks for consent before it runs (`consent_before`, gate kind `consent`), and a standing order never answers that gate;
+  - the install execs the admitted garden at `WICKED_GARDEN_ROOT`, never one found on PATH;
+  - the design phase may not state what a rule id means when it could not read the rule.
+
+  `GET /workflows/:id` counts the install as a phase that pauses.
+- **Interactive bridge floor `^0.11.1` (#509, #889).** This is the release that echoes the spawn token, so bridge ownership is proven without `ps`.
+- **Deliver: an existing PR is the delivery; no home paths leave the machine (#887).** A re-run whose run branch already has its pull request records that PR as the run's delivery and comments the new run record on it, instead of failing on gh's "already exists" (#885). The PR title, body and commit message rewrite the daemon's home directory to `~` (#886).
+- **Deliver: a trusted terminal sentinel (#739, #890).** Every exit of the deliver script ends with one `deliver: OUTCOME <nonce> <verdict>` line (a per-composition nonce, printed by an EXIT trap), and crew and the engine classify a nonce-bearing deliver only on that line. A hook-echoed `LIFT-CONFLICT` no longer reads as a strand, and a missing sentinel reads failed. A successful push is said in the script's own words.
+- **Seats: sign-in and sign-out routes (#615, #890).** `POST /seats/:cli/login` and `/logout` run the engine's `login_invocation` / `logout_invocation` in a terminal and re-probe the seat when it exits. They answer 404 for a seat whose CLI documents no such command.
+- **Site (#877).** No scroll snapping under `prefers-reduced-motion: reduce` (a site guard, and wicked-web re-pinned to the chrome fix) (#840). The site e2e Playwright webServer keeps `astro preview` in the foreground (#878).
+- **#634 closed.** R1 to R5 landed in earlier releases, and R7 is enforced by the engine (core#807).
+
 ## [0.8.8] — 2026-10-09
 
 Bundles wicked-studio 0.6.6 (the Desk is the only shell — S18a/b/c/d) and carries the five crew PRs
@@ -3671,7 +3696,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.8...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.9...HEAD
+[0.8.9]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.8...v0.8.9
 [0.8.8]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.7...v0.8.8
 [0.8.7]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.6...v0.8.7
 [0.8.6]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.5...v0.8.6
