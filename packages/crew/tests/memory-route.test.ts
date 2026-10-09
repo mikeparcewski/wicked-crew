@@ -75,6 +75,8 @@ describe('memory-management routes (DES-MEM-FACETED-001)', () => {
     expect(res.statusCode).toBe(200);
     // `created_at` (unix seconds) rides through from memory.list verbatim — the date-filter anchor.
     expect(res.json()).toEqual({
+      // crew#740: the store the list came from rides beside it.
+      store: expect.objectContaining({ path: expect.any(String), source: expect.stringMatching(/^(explicit|state-home|global)$/) }),
       memories: [
         { id: 'm1', content: 'a fact', tier: 'semantic', scope: 'org:acme', facets: { cli: 'codex' }, created_at: 100 },
         { id: 'm2', content: 'root note', tier: 'episodic', scope: '', facets: {}, created_at: 90 },
@@ -104,6 +106,8 @@ describe('memory-management routes (DES-MEM-FACETED-001)', () => {
     expect(estateTool).toHaveBeenCalledWith('memory.list', { scope_prefix: 'org:acme/agent:claude' });
     // m1 matches "deploy" AND cli=codex; m2 fails the facet; m3 fails the query substring.
     expect(res.json()).toEqual({
+      // crew#740: the store the list came from rides beside it.
+      store: expect.objectContaining({ path: expect.any(String), source: expect.stringMatching(/^(explicit|state-home|global)$/) }),
       memories: [{ id: 'm1', content: 'deploy runbook', tier: 'semantic', scope: 'org:acme/agent:claude', facets: { cli: 'codex' }, created_at: 100 }],
     });
   });
@@ -213,6 +217,8 @@ describe('memory-management routes (DES-MEM-FACETED-001)', () => {
 
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({
+      // crew#740: the store the list came from rides beside it.
+      store: expect.objectContaining({ path: expect.any(String), source: expect.stringMatching(/^(explicit|state-home|global)$/) }),
       memories: [{ id: 'm3', content: 'no score', tier: 'working', scope: 'p:x', facets: {} }],
     });
   });

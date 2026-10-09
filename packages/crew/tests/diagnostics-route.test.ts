@@ -182,6 +182,21 @@ describe('GET /api/v1/diagnostics (route smoke on a scratch daemon)', () => {
     expect(kinds.filter((k) => k !== 'governance.store' && k !== 'governance.legacy-outbox')).toEqual([]);
   });
 
+  it('crew#742 + crew#740: per-seat governance standing and the memory store ride the response', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/v1/diagnostics' });
+    const body = res.json() as DiagnosticsResponse;
+    const gov = body.seatGovernance!;
+    expect(Array.isArray(gov.seats)).toBe(true);
+    expect(gov.hostBoundary === null || ['sandbox-exec', 'bwrap'].includes(gov.hostBoundary)).toBe(true);
+    for (const seat of gov.seats) {
+      expect(['acp', 'wrapped']).toContain(seat.transport);
+      expect(['enforced', 'claimed', 'unenforced']).toContain(seat.input_governance);
+      expect(Object.keys(seat.governance_mode).sort()).toEqual(['scoped', 'scoped_bound', 'unscoped']);
+    }
+    expect(body.memoryStore).toMatchObject({ path: expect.stringMatching(/memory\.db$/), source: expect.stringMatching(/^(explicit|state-home|global)$/) });
+    expect(body.memoryStore!.notice === null || typeof body.memoryStore!.notice === 'string').toBe(true);
+  });
+
   it('folds the daemon\'s own error-level log lines into recentErrors, newest first', async () => {
     app.log.error('diagnostics smoke: first error');
     app.log.error('diagnostics smoke: second error');

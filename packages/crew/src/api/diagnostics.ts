@@ -21,7 +21,7 @@
 import { createReadStream, existsSync, readFileSync } from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import { createRequire } from 'node:module';
-import { basename, join } from 'node:path';
+import { basename, delimiter, join } from 'node:path';
 import { createInterface } from 'node:readline';
 
 import { CoreAdapter } from '../core/adapter.js';
@@ -688,4 +688,25 @@ async function listRepoGraphStores(root: string): Promise<StoreFileEntry[]> {
 /** Where a core db's durable run event logs live — the engine's `<db>.events/` convention. */
 export function eventsDirOf(dbPath: string): string {
   return `${dbPath}.events`;
+}
+
+/** The OS launcher the engine's repository boundary would arm with on this host (`sandbox-exec` on
+ *  macOS, `bwrap` on Linux), found on PATH; `null` when none is (crew#742). Presence only — the
+ *  engine's own probe decides whether it arms. */
+export function hostSandboxLauncher(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string | null {
+  const name = platform === 'darwin' ? 'sandbox-exec' : platform === 'linux' ? 'bwrap' : null;
+  if (name === null) return null;
+  for (const dir of (env['PATH'] ?? '').split(delimiter)) {
+    if (dir !== '' && existsSync(join(dir, name))) return name;
+  }
+  return null;
+}
+
+/** Where the engine's seat registry reads its user overlay (`wicked-council` `default_user_path`):
+ *  `$HOME/.config/wicked-council/clis.toml`. For the local operator only (never GitHub-visible). */
+export function seatRosterFile(env: NodeJS.ProcessEnv = process.env): { path: string; present: boolean } | null {
+  const home = env['HOME'] ?? env['USERPROFILE'];
+  if (home === undefined || home === '') return null;
+  const path = join(home, '.config', 'wicked-council', 'clis.toml');
+  return { path, present: existsSync(path) };
 }
