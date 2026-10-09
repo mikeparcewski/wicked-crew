@@ -752,6 +752,8 @@ export function parseFramedDeliverText(framed: string): DeliverText | null {
 /** A `GateSpec` (or the engine's loose string form) as a short label. */
 export function gateLabel(gate: GateSpec | string | undefined): string {
   if (gate === undefined || gate === null) return '—';
+  // crew#888: the engine pauses BEFORE a `consent_before` phase runs (core#801).
+  if (gate === 'consent_before') return 'human, before it runs';
   if (typeof gate === 'string') return gate;
   if ('human_confirm_if' in gate) return `human if ${gate.human_confirm_if.replace(/_/g, ' ')}`;
   if ('human_confirm' in gate) return gate.human_confirm.unconditional ? 'human' : 'human (conditional)';

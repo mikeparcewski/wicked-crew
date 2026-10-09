@@ -9,9 +9,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { BUILTIN_WORKFLOWS, CoreAdapter } from '../src/core/adapter.js';
+import { BUILTIN_WORKFLOWS, CoreAdapter, humanGatePhaseIds } from '../src/core/adapter.js';
 import { composeDeliverWorkflow, DELIVER_PHASE_ID, EVIDENCE_FLOOR_PIN, INSTALL_PHASE_ID, placeDeliverBeforeInstall } from '../src/core/deliver.js';
 import type { WorkflowDef } from '../src/core/types.js';
+import { orderMayApprove } from '../src/standing-orders/evaluator.js';
 import { removeScratch } from './setup/scratch.js';
 
 const SEATS = JSON.stringify([{ key: 'alpha', display_name: 'Alpha', binary: 'alpha', headless_invocation: 'alpha {PROMPT}' }]);
@@ -64,16 +65,29 @@ describe('the mcp-server mirror', () => {
     expect(by['test']!.verified_evidence).toBe(true);
     expect(by['security-review']!.depends_on).toEqual(['test']);
     expect(by['observability-review']!.depends_on).toEqual(['test']);
-    expect(by['install']!.gate).toEqual({ human_confirm: { unconditional: true } });
+    // crew#888 / core#801: the engine pauses BEFORE the install runs (`gateKind: 'consent'`).
+    expect(by['install']!.gate).toBe('consent_before');
     expect(by['install']!.executes_code).toBe(false);
     expect(by['install']!.depends_on).toEqual(['security-review', 'observability-review']);
-    expect(by['install']!.executor).toMatchObject({ type: 'tool', cmd: ['bash', '-lc', expect.stringContaining('scripts/mcp/install.py --from-run --json')] });
+    // core#802: `bash -c` (no login shell) execs the admitted garden at WICKED_GARDEN_ROOT, never PATH.
+    expect(by['install']!.executor).toMatchObject({ type: 'tool', cmd: ['bash', '-c', expect.stringContaining('scripts/mcp/install.py --from-run --json')] });
+    const installCmd = (by['install']!.executor as { cmd: string[] }).cmd[2]!;
+    expect(installCmd).toContain('${WICKED_GARDEN_ROOT:?');
+    expect(installCmd).not.toMatch(/command -v|npx/);
+    expect(by['install']!.instructions).toContain('Nothing has been installed yet: this asks before the install runs.');
+    expect(by['design']!.instructions).toContain('never state what a rule id means when you could not read it');
+    expect(humanGatePhaseIds(def)).toContain('install');
     for (const p of def.phases) {
       expect(typeof p.instructions, `${p.id} carries instructions`).toBe('string');
       expect(p.id).not.toBe(DELIVER_PHASE_ID);
       expect(p.required_deliverables).toEqual([]);
     }
     expect(def.is_system ?? false, 'an operator-selectable work mode, not a system workflow').toBe(false);
+  });
+
+  it('a standing order never answers the consent gate (crew#888: consent is the operator\'s decision every time)', () => {
+    expect(orderMayApprove('consent', { landsDoctrine: false })).toBe(false);
+    expect(orderMayApprove('def', { landsDoctrine: false })).toBe(true);
   });
 
   it('delivers by default: the build phase is a code-writing non-evaluator (the launch route\'s rule)', () => {
