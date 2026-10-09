@@ -80,15 +80,19 @@ function rewriteBareRoot(text: string, root: string, name: string): string {
   if (root === '' || !text.includes(root)) return text;
   const escaped = root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   // Not preceded by a path character (so `/x/srv/repos/alpha` is not a match for `/srv/repos/alpha`);
-  // followed by the end, whitespace, closing punctuation, or a sentence dot/comma/colon.
-  const bare = new RegExp(`(?<![\\w./\\\\-])${escaped}(?=$|[\\s)\\]}>'"\`,;:!?]|\\.(?:$|\\s))`, 'g');
+  // followed by the end or whitespace, optionally after a run of closing punctuation. Punctuation is
+  // legal in a path, so it only ends the root when the path ends right after it — `alpha:beta/x`
+  // and `alpha,backup` are other paths and stay untouched (codex on this PR).
+  const bare = new RegExp(`(?<![\\w./\\\\-])${escaped}(?=[)\\]}>'"\`,;:!?.]*(?:$|\\s))`, 'g');
   return text.replace(bare, name);
 }
 
 /**
  * crew#634 R5: every spelling a seat may cite a root by — the resolved path, its `realpath` (a
- * symlinked checkout), and the macOS `/private` alias of `/var`, `/tmp`, `/etc` either way round.
- * Each alias maps to the same repo name; unreadable paths keep the spelling they were given.
+ * symlinked checkout), and the macOS `/private` twin of `/var`, `/tmp`, `/etc` either way round.
+ * A twin is registered only when it RESOLVES to the same real directory (so a Linux `/private/tmp`
+ * that is some other path is never rewritten — codex on this PR). Each alias maps to the same repo
+ * name; an unreadable root keeps the one spelling it was given.
  */
 export function withRootAliases(roots: ReadonlyArray<ChatRepoRoot>): ChatRepoRoot[] {
   const out: ChatRepoRoot[] = [];
@@ -98,18 +102,25 @@ export function withRootAliases(roots: ReadonlyArray<ChatRepoRoot>): ChatRepoRoo
     seen.add(absRoot);
     out.push({ absRoot, name });
   };
+  const realOf = (p: string): string | null => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return null;
+    }
+  };
   for (const { absRoot, name } of roots) {
     add(absRoot, name);
-    let real: string | null = null;
-    try {
-      real = realpathSync(absRoot);
-    } catch {
-      real = null;
-    }
-    if (real !== null) add(real, name);
-    for (const p of [absRoot, ...(real !== null ? [real] : [])]) {
-      if (/^\/private\/(?:var|tmp|etc)(?:\/|$)/.test(p)) add(p.slice('/private'.length), name);
-      else if (/^\/(?:var|tmp|etc)(?:\/|$)/.test(p)) add(`/private${p}`, name);
+    const real = realOf(absRoot);
+    if (real === null) continue;
+    add(real, name);
+    for (const p of [absRoot, real]) {
+      const twin = /^\/private\/(?:var|tmp|etc)(?:\/|$)/.test(p)
+        ? p.slice('/private'.length)
+        : /^\/(?:var|tmp|etc)(?:\/|$)/.test(p)
+          ? `/private${p}`
+          : null;
+      if (twin !== null && realOf(twin) === real) add(twin, name);
     }
   }
   return out;

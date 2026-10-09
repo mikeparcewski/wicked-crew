@@ -137,6 +137,10 @@ describe('rewriteHostPaths (crew#618)', () => {
       'alpha-extra and /x/srv/repos/alpha and /srv/repos/alphabet',
     );
     expect(rewriteHostPaths('/srv/repos/alpha.git', repos)).toBe('/srv/repos/alpha.git');
+    // Punctuation is legal in a path: it ends the root only when the path ends right after it.
+    expect(rewriteHostPaths('/srv/repos/alpha:beta/src/x.ts and /srv/repos/alpha,backup', repos)).toBe(
+      '/srv/repos/alpha:beta/src/x.ts and /srv/repos/alpha,backup',
+    );
   });
 
   it('crew#634 R5: a symlinked root and the macOS /private alias are matched (withRootAliases)', () => {
@@ -158,12 +162,16 @@ describe('rewriteHostPaths (crew#618)', () => {
       rmSync(link, { force: true });
       rmSync(real, { recursive: true, force: true });
     }
-    // A path that does not exist keeps its spelling and still gets its /private twin.
+    // A path that does not resolve keeps its one spelling — no guessed twin.
     expect(withRootAliases([{ absRoot: '/var/nonexistent-crew-634/alpha', name: 'a' }]).map((a) => a.absRoot)).toEqual([
       '/var/nonexistent-crew-634/alpha',
-      '/private/var/nonexistent-crew-634/alpha',
     ]);
-    expect(withRootAliases([{ absRoot: '/private/tmp/nonexistent-crew-634', name: 'r' }]).map((a) => a.absRoot)).toContain('/tmp/nonexistent-crew-634');
+    // A twin is added only when it resolves to the same directory (macOS: /var → /private/var).
+    const tmpReal = realpathSync(tmpdir());
+    const twin = tmpReal.startsWith('/private/') ? tmpReal.slice('/private'.length) : null;
+    if (twin !== null && existsSync(twin) && realpathSync(twin) === tmpReal) {
+      expect(withRootAliases([{ absRoot: tmpReal, name: 't' }]).map((a) => a.absRoot)).toEqual([tmpReal, twin]);
+    }
   });
 
   it('returns text unchanged when repos is empty', () => {
