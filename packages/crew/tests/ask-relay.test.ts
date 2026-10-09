@@ -729,3 +729,19 @@ describe('IG1-crew-1 — the path learns the PA\'s governance mode from the run\
     expect(paths.view('c1')!.governance_mode).toMatchObject({ mode: 'none', class: 'none' });
   });
 });
+
+describe('IG1-crew-1 — a PA with no admitted record and no class is unknown, not none', () => {
+  it('a path.started naming a seat the path holds no record of, with no class row, omits governance_mode', () => {
+    const paths = new AskPathIndex();
+    const turns = new ChatTurnIndex();
+    paths.open('c2', ['claude', 'ghost'], undefined, { seats: [{ key: 'claude', governance_class: 'acp_input_governance', acp: {} }], scopeKind: 'scoped' });
+    turns.begin('c2', ['claude', 'ghost'], 'Q2');
+    paths.started('c2', 1, 'run-2', 'answer-2');
+    const relay = new AskRelay({ paths, turns, units: async () => [], workOutput: async () => '', fold: () => undefined, rowGraceMs: 10 });
+    relay.onTeamRow(
+      row('wicked.team.path.started', { run_id: 'run-2', cli: 'ghost', selection: 'random', roster: ['claude', 'ghost'], request: 'Q2', workflow: null, plan: false }),
+    );
+    expect(paths.view('c2')!.pa).toBe('ghost');
+    expect(paths.view('c2')!.governance_mode).toBeUndefined();
+  });
+});

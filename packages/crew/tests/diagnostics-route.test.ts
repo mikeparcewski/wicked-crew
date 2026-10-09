@@ -4,7 +4,7 @@
 // audit to a temp file — plus a scratch `core.db` + `core.db.events/` fixture the handler
 // actually reads, and a fixture studio root carrying the shipped version manifest.
 
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -13,6 +13,7 @@ import type { DiagnosticsResponse } from 'wicked-crew-api-types';
 
 import type { CoreAdapter } from '../src/core/adapter.js';
 import { createServer } from '../src/api/server.js';
+import { hostSandboxLauncher } from '../src/api/diagnostics.js';
 import { canonicalCrewStateHome } from '../src/skills/engine-env.js';
 import { removeScratch } from './setup/scratch.js';
 
@@ -219,5 +220,25 @@ describe('GET /api/v1/diagnostics (route smoke on a scratch daemon)', () => {
     expect(entry).toBeDefined();
     expect(entry?.responseType).toBe('DiagnosticsResponse');
     expect(entry?.statusCodes).toEqual([200]);
+  });
+});
+
+describe('hostSandboxLauncher (crew#742) — an executable file, not a name on PATH', () => {
+  it('a directory or a non-executable entry named bwrap arms nothing; an executable file does', () => {
+    const root = mkdtempSync(join(tmpdir(), 'crew-host-launcher-'));
+    try {
+      const asDir = join(root, 'a');
+      mkdirSync(join(asDir, 'bwrap'), { recursive: true });
+      const asFile = join(root, 'b');
+      mkdirSync(asFile);
+      writeFileSync(join(asFile, 'bwrap'), '#!/bin/sh\n');
+      chmodSync(join(asFile, 'bwrap'), 0o644);
+      expect(hostSandboxLauncher({ PATH: `${asDir}:${asFile}` }, 'linux')).toBeNull();
+      chmodSync(join(asFile, 'bwrap'), 0o755);
+      expect(hostSandboxLauncher({ PATH: `${asDir}:${asFile}` }, 'linux')).toBe('bwrap');
+      expect(hostSandboxLauncher({ PATH: asFile }, 'win32')).toBeNull();
+    } finally {
+      removeScratch(root);
+    }
   });
 });

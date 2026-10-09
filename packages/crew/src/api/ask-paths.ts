@@ -178,8 +178,11 @@ export class AskPathIndex {
    *  known, or on a path opened without seat records. */
   private paMode(p: AskPath): SeatGovernanceMode | undefined {
     if (p.pa === null || p.scopeKind === undefined) return undefined;
-    const record = p.seats?.[p.pa] ?? { key: p.pa };
     const engineClass = p.classes[p.pa];
+    const known = p.seats?.[p.pa];
+    // A PA with no admitted record and no class from the frames is unknown — never a fabricated `none`.
+    if (known === undefined && engineClass === undefined) return undefined;
+    const record = known ?? { key: p.pa };
     return seatGovernanceMode(engineClass !== undefined ? { ...record, governance_class: engineClass } : record, p.scopeKind);
   }
 
