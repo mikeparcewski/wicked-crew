@@ -496,6 +496,12 @@ const OnboardBodySchema = z
 // send is a body these schemas accept — the request-direction half of the drift guard (task #84).
 export { PlanSchema };
 
+/** crew#825: the issue refs a launch leaves out of the linked-issue expansion. */
+const ExcludeLinkedIssuesSchema = z
+  .array(z.string().regex(/^\s*(?:\d+|(?:(?:[\w.-]+\/)?[\w.-]+)?#\d+)\s*$/, 'an issue ref: 541, #541, repo#541 or owner/repo#541'))
+  .max(50)
+  .optional();
+
 export const LaunchSchema = z.object({
   problem: z.string().min(1),
   sessionId: z.string().min(1).optional(),
@@ -558,6 +564,11 @@ export const LaunchSchema = z.object({
    *  launch (e.g. a CI job name or a studio tab id). Persisted on the `run.launched` audit entry
    *  (`detail.actor`) and served on the run DTO; absent = caller omitted it. */
   actor: z.string().min(1).max(256).optional(),
+  /** crew#825 (api-types additive) — issue refs the intent names that the daemon must NOT read and
+   *  append (`541`, `#541`, `repo#541`, `owner/repo#541`): a reference in passing is not a request to inline
+   *  the issue. They are answered as `linkedIssues[].excluded`. Send only when
+   *  `GET /health.capabilities.linkedIssuesExclude === true`. */
+  excludeLinkedIssues: ExcludeLinkedIssuesSchema,
 }).strict().refine((b) => b.plan === undefined || b.workflow === undefined, {
   message: 'plan and workflow are mutually exclusive — a launch carries a plan or names a preset, not both',
   path: ['plan'],
@@ -794,7 +805,12 @@ export interface RuntimeDeps {
   resolvePullRequest?: (repoRoot: string, number: number) => Promise<PullRequestResolution>;
   /** crew#627: how the issues a launch's intent links are read (`gh issue view`, 5 s each).
    *  Injectable so route tests answer without gh; production uses `core/linked-issues.ts`. */
-  resolveLinkedIssues?: (problem: string, repoRoot: string | undefined, repoRef: string | undefined) => Promise<LinkedIssuesResult>;
+  resolveLinkedIssues?: (
+    problem: string,
+    repoRoot: string | undefined,
+    repoRef: string | undefined,
+    exclude?: readonly string[],
+  ) => Promise<LinkedIssuesResult>;
   seatHealth?: SeatHealthTracker;
   /** wicked-studio#284: the stall watchdog's remembered frames for a run — merged into
    *  `GET /runs/:id/events` at serve time so a reloaded page sees the `workerStalled` /
@@ -1243,7 +1259,10 @@ export function registerRoutes(
   /** DES-L9: PR number → head branch, through `gh pr view` unless the runtime injected an answerer. */
   const resolvePullRequest = runtime.resolvePullRequest ?? resolvePullRequestViaGh;
   /** crew#627: the intent's linked issues, read under the daemon's identity at launch. */
-  const readLinkedIssues = runtime.resolveLinkedIssues ?? ((p: string, root: string | undefined, ref: string | undefined) => resolveLinkedIssues(p, root, ref));
+  const readLinkedIssues =
+    runtime.resolveLinkedIssues ??
+    ((p: string, root: string | undefined, ref: string | undefined, exclude?: readonly string[]) =>
+      resolveLinkedIssues(p, root, ref, undefined, exclude));
   /** crew#550 P-7: the follow-ups the run's evaluator units flagged, read from their captured output.
    *  A unit whose output cannot be read contributes nothing (the section then says what WAS read);
    *  an adapter without transcripts (a directly-driven route set) reads as "not read" — absent. */
@@ -1450,6 +1469,8 @@ export function registerRoutes(
         : { deliverGate: false, revisesPr: false, chatIdOnLaunch: false, seatChipOnCreate: false }),
       // C1: `AgentSession.chat_id` is served from the daemon's own launch index, whatever the engine.
       runChatId: true,
+      // crew#825: `LaunchRunBody.excludeLinkedIssues` + `POST /linked-issues/preview` are served.
+      linkedIssuesExclude: true,
       // ASK-C1 (DES-ASK-TEAM-CHAT-001 §5.1): an ask starts a path — the whole contract is the
       // pinned core-ts floor the adapter reports; an older studio reads ABSENT as "every helper
       // answers", a newer one renders the one PA voice.
@@ -2078,6 +2099,29 @@ export function registerRoutes(
     return reply.code(201).send({ runId, ...(projectAttachError !== undefined ? { projectAttachError } : {}) });
   });
 
+  // crew#825: what a workflow launch WOULD append — the same reading `POST /runs` does, before Send,
+  // so the composer shows "N linked issues will be appended (≈K chars)" with a way to leave one out
+  // (`excludeLinkedIssues`). Read-only: nothing launches, nothing is stored.
+  const LinkedIssuesPreviewSchema = z
+    .object({
+      problem: z.string().min(1),
+      repoRef: z.string().min(1).optional(),
+      excludeLinkedIssues: ExcludeLinkedIssuesSchema,
+    })
+    .strict();
+  app.post(
+    `${V}/linked-issues/preview`,
+    { config: { manifest: { requestType: 'LinkedIssuesPreviewBody', responseType: 'LinkedIssuesPreviewResponse', statusCodes: [200, 400] } } },
+    async (req, reply) => {
+      const parsed = LinkedIssuesPreviewSchema.safeParse(req.body);
+      if (!parsed.success) return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
+      const b = parsed.data;
+      const root = b.repoRef !== undefined ? await repoRootOf(b.repoRef) : undefined;
+      const linked = await readLinkedIssues(b.problem, root, b.repoRef, b.excludeLinkedIssues ?? []);
+      return { issues: linked.issues, appendedChars: linked.block === null ? 0 : linked.block.length + 2 };
+    },
+  );
+
   // Launch a run (replaces POST /sessions). `clisJson` defaults to the roster;
   // `sessionId` is minted if the client omits it.
   app.post(
@@ -2281,11 +2325,10 @@ export function registerRoutes(
       // fault (the repo list unreadable, say) launches the run on its intent alone and is logged.
       try {
         const root = b.repoRef !== undefined ? await repoRootOf(b.repoRef) : undefined;
-        const linked = await readLinkedIssues(b.problem, root, b.repoRef);
-        if (linked.block !== null) {
-          input.problem = `${b.problem.trimEnd()}\n\n${linked.block}`;
-          linkedIssues = linked.issues;
-        }
+        const linked = await readLinkedIssues(b.problem, root, b.repoRef, b.excludeLinkedIssues ?? []);
+        if (linked.block !== null) input.problem = `${b.problem.trimEnd()}\n\n${linked.block}`;
+        // crew#825: an all-excluded intent appends nothing but still answers what it left out.
+        if (linked.issues.length > 0) linkedIssues = linked.issues;
       } catch (err) {
         req.log.warn(`linked-issue resolution failed; launching on the intent alone: ${message(err)}`);
       }

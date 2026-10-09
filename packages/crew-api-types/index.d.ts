@@ -249,6 +249,12 @@ export interface HealthCapabilities {
    */
   runChatId?: boolean;
   /**
+   * (crew#825; additive) `LaunchRunBody.excludeLinkedIssues` is accepted and
+   * `POST /linked-issues/preview` is served. ABSENT on an older daemon — read as `false`: do not
+   * send the field (its strict launch schema 400s on it) and do not call the preview.
+   */
+  linkedIssuesExclude?: boolean;
+  /**
    * Repo-bound runs get an EVIDENCE ROOT for walkthroughs (WT-W1, api-types 0.74.0): the engine
    * addon takes `LaunchOptions.evidenceRoot` (wicked-core-ts ≥ 0.7.35), so a walkthrough step on a
    * run launched now can record and pass. `GET /runs/:id/walkthrough` answers on every daemon that
@@ -4124,6 +4130,27 @@ export interface LaunchRunBody {
    * guard as `channel` above.
    */
   actor?: string;
+  /**
+   * (crew#825; additive) Issue refs the intent names that the daemon must NOT read and append to
+   * the problem (`"541"`, `"#541"`, `"owner/repo#541"`; at most 50) — a reference in passing is not
+   * a request to inline the issue. Answered as `LaunchRunResponse.linkedIssues[]` entries with
+   * `excluded: true`. Send only when `GET /health.capabilities.linkedIssuesExclude === true`.
+   */
+  excludeLinkedIssues?: string[];
+}
+
+/** `POST /linked-issues/preview` (crew#825): what a workflow launch of `problem` WOULD append. */
+export interface LinkedIssuesPreviewBody {
+  problem: string;
+  repoRef?: string;
+  excludeLinkedIssues?: string[];
+}
+
+/** The `POST /linked-issues/preview` 200 body: the same reading `POST /runs` does, nothing launched. */
+export interface LinkedIssuesPreviewResponse {
+  issues: LinkedIssue[];
+  /** Characters the block would add to the problem; `0` when nothing would be appended. */
+  appendedChars: number;
 }
 
 /**
@@ -4140,6 +4167,10 @@ export interface LinkedIssue {
   title?: string;
   /** Present when not `resolved`: why, in one line. */
   error?: string;
+  /** (crew#825; additive) Present when `resolved`: characters this issue adds to the problem. */
+  chars?: number;
+  /** (crew#825; additive) `true` when the launch left this ref out (`excludeLinkedIssues`). */
+  excluded?: true;
 }
 
 /** The `POST /runs` 201 body. `linkedIssues` (crew#627, additive) is present when the intent of a
