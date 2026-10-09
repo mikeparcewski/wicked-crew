@@ -912,6 +912,38 @@ describe('deliver script, driven for real (crew#317)', () => {
     expect(r.lastLine).not.toContain('http');
   }, 60_000);
 
+  // crew#885: a rework re-runs deliver for the same run branch; the push updates the PR the first
+  // attempt opened and gh refuses a second — that IS the delivery, recorded from gh's own URL.
+  it('DELIVERS when this run branch already has its PR (crew#885): records gh’s URL and comments the run record', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const again = 2;\n');
+    const ghErr = `a pull request for branch "wicked/${RUN_ID}" into branch "main" already exists:\nhttps://github.com/o/r/pull/1`;
+
+    const r = await runDeliver(fx, { gh: { failWith: ghErr } });
+
+    expect(r.status, r.output).toBe(0);
+    expect(r.lastLine).toBe('https://github.com/o/r/pull/1');
+    expect(r.output).not.toContain('deliver: gh pr create failed');
+    expect(r.output).toContain(`deliver: pull request https://github.com/o/r/pull/1 already exists for wicked/${RUN_ID}`);
+    // The new attempt's run record rides a comment on the existing PR.
+    expect(r.comment).not.toBeNull();
+    expect(r.ghCalls.some((c) => c.startsWith('pr comment https://github.com/o/r/pull/1'))).toBe(true);
+    // The daemon records it as delivered: the transcript's verdict is that URL.
+    expect(deliveryRecordFrom(r.output)).toEqual({ url: 'https://github.com/o/r/pull/1' });
+  }, 120_000);
+
+  it('still FAILS when the existing PR gh names is for ANOTHER branch (crew#885)', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const other = 3;\n');
+    const ghErr = 'a pull request for branch "someone-else" into branch "main" already exists:\nhttps://github.com/o/r/pull/9';
+
+    const r = await runDeliver(fx, { gh: { failWith: ghErr } });
+
+    expect(r.status).not.toBe(0);
+    expect(r.output).toContain('deliver: gh pr create failed');
+    expect(r.lastLine).not.toContain('http');
+  }, 60_000);
+
   it('KEEPS the work on a REFUSED push — PUSH-REJECTED, never a LIFT-CONFLICT (N4) — then succeeds after the remote is repaired (crew#432)', async () => {
     const fx = fixture();
     writeFileSync(join(fx.workdir, 'work.ts'), 'export const preserved = true;\n');

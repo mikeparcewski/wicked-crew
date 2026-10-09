@@ -28,8 +28,11 @@
  * run either way; only the deliver phase's own commit is guaranteed to match it.
  */
 
+import { homedir } from 'node:os';
+
 import type { GateSpec, PhaseDef, SessionView, WorkUnit } from './types.js';
 import { stripLinkedIssues } from './linked-issues.js';
+import { rewriteHostPaths, withRootAliases, type ChatRepoRoot } from './host-paths.js';
 
 /**
  * The PR title cap (crew#860, S17b F15 / S17a F20). GitHub ACCEPTS 256 characters, and under that
@@ -484,7 +487,11 @@ const FOOTER_LINK = '[wicked-crew](https://wc.wickedagile.com)';
  * `links` defaults to the issue references of `f.intent`; the embedded-fallback path passes the
  * references of the FULL intent while `f.intent` is the bounded copy ({@link composeEmbeddedDeliverText}).
  */
-export function composeDeliverText(f: DeliverTextFacts, links: IssueRefs = issueRefs(f.intent, f.repoRef)): DeliverText {
+export function composeDeliverText(raw: DeliverTextFacts, links: IssueRefs = issueRefs(raw.intent, raw.repoRef)): DeliverText {
+  // crew#886: redact the FACTS, not only the text — the title and table cells are cut to a width,
+  // and a cut through a home path would no longer match it (codex on crew#887). The output pass
+  // below stays as the backstop.
+  const f = redactFacts(raw);
   const title = deliverTitle(f.intent, f.runId, f.workflowId);
   const { fixes, refs } = links;
   const intent = stripLinkedIssues(f.intent).replace(/\r\n?/g, '\n').replace(CONTROL_CHARS, ' ').trim();
@@ -631,7 +638,56 @@ export function composeDeliverText(f: DeliverTextFacts, links: IssueRefs = issue
     `Delivered-By: wicked-crew run ${oneLine(f.runId)}`,
     ...(f.trailers ?? []),
   );
-  return { title, body: out.join('\n') };
+  return { title: redactHostPaths(title), body: redactHostPaths(out.join('\n')) };
+}
+
+/** Every string in the facts through {@link redactHostPaths} (plain data: strings, arrays, objects). */
+function redactFacts<T>(value: T, home: string | null = homePrefix()): T {
+  if (home === null) return value;
+  const aliases = withRootAliases([{ absRoot: home, name: '~' }]);
+  const walk = (v: unknown): unknown => {
+    if (typeof v === 'string') return redactWith(v, aliases);
+    if (Array.isArray(v)) return v.map(walk);
+    if (v !== null && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x)]));
+    return v;
+  };
+  return walk(value) as T;
+}
+
+/** The daemon's home directory, or `null` when it is unusable as a prefix (unset, or `/`). */
+function homePrefix(): string | null {
+  try {
+    const home = homedir().replace(/[\\/]+$/, '');
+    return home === '' ? null : home;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * crew#886: the PR title, body and commit message leave the machine, and they quote seat reports
+ * verbatim — a creator's "Worktree: `<home>/.wicked/repos/<repo>/wicked-worktrees/<run>`" put the
+ * operator's home directory on GitHub. Every spelling of the home directory (its realpath and the
+ * macOS `/private` twin too) becomes `~`, through the same rewrite crew#618 applies to chat replies
+ * (`rewriteHostPaths` + `withRootAliases`): `<home>/x` → `~/x`, a bare `<home>` → `~`, and a longer
+ * sibling (`<home>-old/…`) is never touched.
+ */
+export function redactHostPaths(text: string, home: string | null = homePrefix()): string {
+  if (home === null || home === '') return text;
+  return redactWith(text, withRootAliases([{ absRoot: home, name: '~' }]));
+}
+
+function redactWith(text: string, aliases: ReadonlyArray<ChatRepoRoot>): string {
+  let out = rewriteHostPaths(text, aliases);
+  // What leaves the machine is stricter than a chat citation: a bare home the chat rewrite keeps
+  // (followed by more than closing punctuation — compact JSON `"<home>","next"`, codex on crew#887)
+  // still goes, unless a path character continues it (a longer sibling such as `<home>-old`).
+  for (const { absRoot } of aliases) {
+    if (!out.includes(absRoot)) continue;
+    const escaped = absRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    out = out.replace(new RegExp(`(?<![\\w./\\\\-])${escaped}(?![\\w.-])`, 'g'), '~');
+  }
+  return out;
 }
 
 /** At most this many pasted recipe commands per phase in the done-when table. */
