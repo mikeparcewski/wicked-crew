@@ -192,7 +192,11 @@ describe('IG1-crew-2 smoke — a floor-class seat on the real engine is containe
     const { body } = await getJson('/api/v1/roster');
     const seat = (body['roster'] as Array<Record<string, unknown>>).find((s) => s['key'] === SEAT)!;
     expect(seat['governance_class']).toBe('os_sandbox');
-    expect((seat['governance_mode'] as { mode: string }).mode).toBe('os_sandbox');
+    // The roster states the mode per scope kind: a bound run is fenced by the repository
+    // boundary; with no record sandbox and no own sandbox, an unbound scope has no fence.
+    const modes = seat['governance_mode'] as Record<string, { mode: string; source: string }>;
+    expect(modes['scoped_bound']).toMatchObject({ mode: 'os_sandbox', source: 'repo_boundary' });
+    expect(modes['scoped']).toMatchObject({ mode: 'none' });
   });
 
   it('the one-unit bound build run completes with no input_governance denial', () => {
