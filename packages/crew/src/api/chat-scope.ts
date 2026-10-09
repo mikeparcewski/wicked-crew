@@ -48,6 +48,7 @@ import type { CoreAdapter } from '../core/adapter.js';
 import { execCapped } from '../core/exec.js';
 import { codeGraphDb } from '../core/repoPaths.js';
 import type { ChatScope, ChatScopeRepo, ChatScopeRequestKind, RepoEntry } from '../core/types.js';
+import { freshnessClause, type CheckoutFreshness, type FreshenCheckout } from './chat-freshness.js';
 import { estateExe, parseEstateTotals, resolveProjectGraphBinding, type ProjectGraphBindingDecision } from '../projects/graph.js';
 import type { ChatRefusalSource } from './seat-standing.js';
 
@@ -113,6 +114,10 @@ export interface ChatScopeDeps {
    * grounded, which is the very defect crew#642 fixed (review of #651).
    */
   entityCount?: (dbPath: string) => Promise<number>;
+  /** crew#899: bring each in-scope checkout to its upstream when safe, else report how stale it
+   *  is ({@link freshenCheckout}). Omitted = checkouts are read as they are and nothing is said
+   *  (tests; the daemon wires it in `server.ts`). */
+  freshen?: FreshenCheckout;
 }
 
 let processScratchBase: string | undefined;
@@ -278,6 +283,27 @@ function row(r: RepoEntry): ChatScopeRepo {
  * launch (`resolveProjectGraphBinding` never indexes; a refresh is an explicit act).
  */
 export async function resolveChatScope(
+  req: ChatScopeRequest,
+  deps: ChatScopeDeps,
+): Promise<ChatScopeResolution> {
+  const resolution = await resolveScopeOnly(req, deps);
+  const freshen = deps.freshen;
+  if (!resolution.ok || freshen === undefined || resolution.scope.repos.length === 0) return resolution;
+  // crew#899: every repository in scope, at once (one bounded fetch each), before the statement
+  // is written — the seats are told what they are reading against its upstream.
+  const repos = await Promise.all(
+    resolution.scope.repos.map(async (r) => {
+      const f = await freshen(r.rootPath).catch((): CheckoutFreshness => ({ state: 'unknown' }));
+      if (f.state === 'stale' || f.state === 'refreshed') {
+        deps.log?.(`chat ${req.chatId}: repo ${r.id}${freshnessClause(f)}`);
+      }
+      return f.state === 'unknown' ? r : { ...r, freshness: f };
+    }),
+  );
+  return { ...resolution, scope: { ...resolution.scope, repos } };
+}
+
+async function resolveScopeOnly(
   req: ChatScopeRequest,
   deps: ChatScopeDeps,
 ): Promise<ChatScopeResolution> {
@@ -759,7 +785,7 @@ export function chatScopeStatement(chatId: string, scope: ChatScope, rules?: Rea
     lines.push(
       '## Repositories in scope (READ-ONLY)',
       '',
-      ...scope.repos.map((r) => `- **${r.name}** (\`${r.id}\`): \`${r.rootPath}\``),
+      ...scope.repos.map((r) => `- **${r.name}** (\`${r.id}\`): \`${r.rootPath}\`${freshnessClause(r.freshness)}`),
       '',
       'Explore and answer questions about these repositories by reading them at the paths above.',
       'Cite files relative to their repository root, prefixed with the repository name',

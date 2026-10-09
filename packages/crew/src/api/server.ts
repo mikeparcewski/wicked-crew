@@ -10,6 +10,7 @@ import type { ChatDecisionRecorder } from '../decisions/chat-recorder.js';
 import type { ConsiderationService } from '../decisions/consider.js';
 import { requestOrigin, shellCsp } from '../editors/csp.js';
 import { registerRoutes } from './routes.js';
+import { freshenCheckout } from './chat-freshness.js';
 import { ErrorRing, teeStreamWithErrorRing } from './diagnostics.js';
 import { GateCache } from './gate-cache.js';
 import { ElicitationCache } from './elicitation-cache.js';
@@ -1995,6 +1996,8 @@ export async function createServer(
       // EP-C2: where the checks read finds a document's recorded reviews.
       docReviewsDir,
       docGrounding,
+      // crew#899: a chat's checkouts are brought to their upstream (when clean) before it reads them.
+      freshenCheckout: (root: string) => freshenCheckout(root),
       ...(skillsRuntime !== undefined ? { skills: skillsRuntime } : {}),
       // DES-MCP-TOOLS-001 S2: the registry over `<state home>/mcp` (created on the first save).
       // Route tests drive `registerMcpRoutes` over their own registry (tests/mcp-registry.test.ts).

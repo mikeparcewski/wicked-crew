@@ -80,6 +80,7 @@ import {
 } from './run-files.js';
 import { DocRunIndex } from '../interactive/doc-run-index.js';
 import { listInteractiveDocs } from '../interactive/docs-index.js';
+import type { FreshenCheckout } from './chat-freshness.js';
 import { TestSetIndex } from '../qe/test-sets.js';
 import { estateExe, parseEstateTotals, resolveProjectGraphBinding } from '../projects/graph.js';
 import { registerProjectRoutes, type ProjectRoutesDeps } from '../projects/routes.js';
@@ -931,6 +932,9 @@ export interface RuntimeDeps {
   /** F-046 — the create-time doc → subject-repo binding store the proxy records into and the
    *  draft/demo seams read. Absent = the create stays pure transport (a directly-driven route set). */
   docGrounding?: DocGroundingStore;
+  /** crew#899: refresh (or report the staleness of) each checkout a chat opens on. `createServer`
+   *  wires {@link freshenCheckout}; absent = checkouts are read as they are (route tests). */
+  freshenCheckout?: FreshenCheckout;
   /** The governed doc-delete's handoff-ledger sweep (crew#338) — `createServer` wires the real
    *  four-ledger sweep (live seam instances first, ledger files as fallback); a directly-driven
    *  route set gets an INERT one so unit tests never touch ~/.wicked-crew. */
@@ -3015,6 +3019,7 @@ export function registerRoutes(
           scratchBase: chatScopes.base,
           log: (m) => req.log.warn(m),
           ...(runtime.entityCount !== undefined ? { entityCount: runtime.entityCount } : {}),
+          ...(runtime.freshenCheckout !== undefined ? { freshen: runtime.freshenCheckout } : {}),
         },
       );
       if (!resolution.ok) {
