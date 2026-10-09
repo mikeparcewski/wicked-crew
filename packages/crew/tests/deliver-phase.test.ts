@@ -101,7 +101,9 @@ describe('deliverPrScript (the hardened field script)', () => {
     const plainArm = script.split('\n').find((l) => l.includes('the remote refused the push of $B after commit'))!;
     expect(plainArm).toContain('deliver: PUSH-REJECTED');
     expect(plainArm).not.toContain('LIFT-CONFLICT');
-    expect(plainArm).toContain('PUSHERR="${PUSHOUT:0:96}');
+    expect(plainArm).toContain('PUSHERR="${PUSHR:0:96}');
+    // codex on #904: the whole output is redacted BEFORE any cut.
+    expect(plainArm.indexOf('PUSHR=')).toBeLessThan(plainArm.indexOf('head -c'));
     expect(plainArm).toContain(': > "$S"');
     expect(plainArm).toContain('approve to retry the deliver phase');
     // The push-only lines never put a credential in the transcript: the push URL is read once,
