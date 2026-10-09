@@ -10,6 +10,22 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.8.8] — 2026-10-09
+
+Bundles wicked-studio 0.6.6 (the Desk is the only shell — S18a/b/c/d) and carries the five crew PRs
+merged since 0.8.7: worker/ACP fixes (#875), the skills installed-ahead finding and boot auto-refresh
+(#876), linked issues framed as background with a preview (#879), chat host-path rewriting (#880) and
+bridge ownership by a per-spawn token (#882). `wicked-crew-api-types` 0.98.0 is the matching wire
+contract. The engine pin (`wicked-core-ts` `^0.7.42`) is unchanged.
+
+- **`wicked-crew-api-types` 0.98.0.** Additive: the index.d.ts changes of #876 and #879 (`LinkedIssue.chars/excluded`, `LaunchRunBody.excludeLinkedIssues`, `LinkedIssuesPreviewBody/Response`, `HealthCapabilities.linkedIssuesExclude`, `LaunchRunResponse.skillsWarning`, and the `skills.installed-ahead` member of `DiagnosticsSkillsFinding.kind`).
+- **Bundled UI wicked-studio `^0.6.6`.** The Desk is the only shell: S18a gate ports (studio#595), S18b + S18c Desk ports (studio#591), S18d retires the classic and compact-rail skins (studio#599); plus studio#594, studio#597, studio#598.
+- **Worker/ACP (#875).** Fixed: the daemon's bridge PATH entry holds only the ACP bridges, so seats spawn the operator's `codex` rather than the vendored one (#858). `GET /runs/:id/units/:ord/output` names the attempt it serves, lists the attempts on record, marks a superseded transcript and takes `?attempt=` (#848). Workers run with `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` by default, so a turn cannot end with its suites still running (#844).
+- **Skills installed-ahead (#876).** Added: `skills.installed-ahead` diagnostics finding and `POST /runs` `skillsWarning` when the installed wicked-garden is not the garden the published skills generation was built from. At boot the daemon refreshes the baseline and publishes when nothing in the catalog is user-edited (`WICKED_CREW_SKILLS_AUTO_REFRESH=0` turns it off) (#874).
+- **Launch linked issues (#879).** The linked-issues block is framed as background (the intent wins), each issue's size is reported, `excludeLinkedIssues` leaves refs out, and `POST /linked-issues/preview` shows the expansion before Send (#825; api-types additive: `LinkedIssue.chars/excluded`, `LaunchRunBody.excludeLinkedIssues`, `LinkedIssuesPreviewBody/Response`, `HealthCapabilities.linkedIssuesExclude`). Schema 400s name the offending field and expectation (#662).
+- **Chat (#880).** Reply host-path rewriting also covers a bare root reference and a symlinked or `/private`-aliased root, and nested roots are pinned by a test (#634 R2/R5). Server-level tests now cover the chatClosed transcript retention and the delivered-only worktree sweep (R1). The unused `clearAll` is removed (R4).
+- **Interactive bridge ownership (#882).** Crew hands each spawned bridge a `WICKED_BRIDGE_SPAWN_TOKEN` and proves ownership by the lockfile's `spawnToken` echo. A token-aware interactive (wicked-interactive#271) no longer needs `ps`/PowerShell to be recorded as crew's, and the sidecar check is immune to pid reuse. Non-echoing bridges keep the ps-walk fallback (#509).
+
 ## [0.8.7] — 2026-10-09
 
 The IG1-crew release: crew states the governance mode each seat runs under, reading the class the
@@ -3655,7 +3671,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.7...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.8...HEAD
+[0.8.8]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.7...v0.8.8
 [0.8.7]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.6...v0.8.7
 [0.8.6]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.5...v0.8.6
 [0.8.5]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.4...v0.8.5
