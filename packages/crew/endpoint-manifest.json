@@ -522,6 +522,16 @@
       ]
     },
     {
+      "method": "POST",
+      "path": "/api/v1/linked-issues/preview",
+      "requestType": "LinkedIssuesPreviewBody",
+      "responseType": "LinkedIssuesPreviewResponse",
+      "statusCodes": [
+        200,
+        400
+      ]
+    },
+    {
       "method": "GET",
       "path": "/api/v1/mcp/approvals",
       "requestType": null,

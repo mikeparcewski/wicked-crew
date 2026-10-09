@@ -227,6 +227,8 @@ export interface HealthCapabilities {
   /**
    * `LaunchRunBody.revisesPr` is accepted (crew#550; crew ≥ 0.7.36). ABSENT on a daemon before
    * the field — read as `false`: do not send `revisesPr` to such a daemon.
+   * NOTE (crew#662): this CAPABILITY flag is a boolean; the LAUNCH field of the same name,
+   * `LaunchRunBody.revisesPr`, is the pull request NUMBER (a positive integer) — never `true`.
    */
   revisesPr?: boolean;
   /**
@@ -246,6 +248,12 @@ export interface HealthCapabilities {
    * as `false`: group such a daemon's runs one session per run.
    */
   runChatId?: boolean;
+  /**
+   * (crew#825; additive) `LaunchRunBody.excludeLinkedIssues` is accepted and
+   * `POST /linked-issues/preview` is served. ABSENT on an older daemon — read as `false`: do not
+   * send the field (its strict launch schema 400s on it) and do not call the preview.
+   */
+  linkedIssuesExclude?: boolean;
   /**
    * Repo-bound runs get an EVIDENCE ROOT for walkthroughs (WT-W1, api-types 0.74.0): the engine
    * addon takes `LaunchOptions.evidenceRoot` (wicked-core-ts ≥ 0.7.35), so a walkthrough step on a
@@ -4063,6 +4071,8 @@ export interface LaunchRunBody {
    * `deliver: 'none'` is a 400), and the PR must be OPEN and not from a fork (409 naming why).
    * Send it ONLY when `GET /health.capabilities.revisesPr === true` — an older daemon's strict
    * launch schema rejects the key with a 400.
+   * NOTE (crew#662): a positive integer PR number — not the boolean capability flag
+   * `HealthCapabilities.revisesPr` of the same name. A 400 names the field and what it expected.
    */
   revisesPr?: number;
   /**
@@ -4120,6 +4130,30 @@ export interface LaunchRunBody {
    * guard as `channel` above.
    */
   actor?: string;
+  /**
+   * (crew#825; additive) Issue refs the intent names that the daemon must NOT read and append to
+   * the problem (`"541"`, `"#541"`, `"owner/repo#541"`; at most 50) — a reference in passing is not
+   * a request to inline the issue. Answered as `LaunchRunResponse.linkedIssues[]` entries with
+   * `excluded: true`. Send only when `GET /health.capabilities.linkedIssuesExclude === true`.
+   */
+  excludeLinkedIssues?: string[];
+}
+
+/** `POST /linked-issues/preview` (crew#825): what a workflow launch of `problem` WOULD append. */
+export interface LinkedIssuesPreviewBody {
+  problem: string;
+  repoRef?: string;
+  excludeLinkedIssues?: string[];
+}
+
+/** The `POST /linked-issues/preview` 200 body: the same reading `POST /runs` does, nothing launched. */
+export interface LinkedIssuesPreviewResponse {
+  issues: LinkedIssue[];
+  /** Characters the block would add to the problem; `0` when nothing would be appended. */
+  appendedChars: number;
+  /** Present when the reading itself failed (the repo list or gh unreadable): a launch now runs on
+   *  the intent alone, exactly as `POST /runs` does on the same fault. */
+  error?: string;
 }
 
 /**
@@ -4136,6 +4170,10 @@ export interface LinkedIssue {
   title?: string;
   /** Present when not `resolved`: why, in one line. */
   error?: string;
+  /** (crew#825; additive) Present when `resolved`: characters this issue adds to the problem. */
+  chars?: number;
+  /** (crew#825; additive) `true` when the launch left this ref out (`excludeLinkedIssues`). */
+  excluded?: true;
 }
 
 /** The `POST /runs` 201 body. `linkedIssues` (crew#627, additive) is present when the intent of a

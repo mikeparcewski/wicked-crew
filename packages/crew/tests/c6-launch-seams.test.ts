@@ -348,4 +348,52 @@ describe('crew#627 — a workflow launch reads the issues its intent links', () 
     expect(launched[0]!.problem).toBe('fix #541');
     expect(res.json()).not.toHaveProperty('linkedIssues');
   });
+
+  it('crew#825: excludeLinkedIssues reaches the resolver; an all-excluded intent launches unchanged and answers what it left out', async () => {
+    const seen: Array<readonly string[] | undefined> = [];
+    const { app, launched } = routes(async (_p, _root, _ref, exclude) => {
+      seen.push(exclude);
+      return { issues: [{ ref: '#539', resolved: false, excluded: true, error: 'left out by the launch (excludeLinkedIssues)' }], block: null };
+    });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/runs',
+      payload: { problem: 'wicked-studio#539 records this', repoRef: 'wicked-studio', workflow: 'bug', excludeLinkedIssues: ['wicked-studio#539'] },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(seen).toEqual([['wicked-studio#539']]);
+    expect(launched[0]!.problem).toBe('wicked-studio#539 records this');
+    expect(res.json().linkedIssues).toEqual([{ ref: '#539', resolved: false, excluded: true, error: 'left out by the launch (excludeLinkedIssues)' }]);
+  });
+
+  it('crew#825: POST /linked-issues/preview answers the same reading before Send and launches nothing', async () => {
+    const block = `${LINKED_ISSUES_OPEN}\nx\n<!-- /wicked-crew:linked-issues -->`;
+    const { app, launched } = routes(async (_p, _root, _ref, exclude) => ({
+      issues: [{ ref: '#541', resolved: true, title: 'the bug', chars: 42 }],
+      block: exclude !== undefined && exclude.length > 0 ? null : block,
+    }));
+    const res = await app.inject({ method: 'POST', url: '/api/v1/linked-issues/preview', payload: { problem: 'fix #541', repoRef: 'wicked-studio' } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ issues: [{ ref: '#541', resolved: true, title: 'the bug', chars: 42 }], appendedChars: block.length + 2 });
+    const none = await app.inject({ method: 'POST', url: '/api/v1/linked-issues/preview', payload: { problem: 'fix #541', repoRef: 'wicked-studio', excludeLinkedIssues: ['541'] } });
+    expect(none.json().appendedChars).toBe(0);
+    expect(launched).toEqual([]);
+    const broken = routes(async () => {
+      throw new Error('repo list unreadable');
+    });
+    const fault = await broken.app.inject({ method: 'POST', url: '/api/v1/linked-issues/preview', payload: { problem: 'fix #541' } });
+    expect(fault.statusCode).toBe(200);
+    expect(fault.json()).toMatchObject({ issues: [], appendedChars: 0, error: expect.stringMatching(/repo list unreadable — a launch now runs on the intent alone/) });
+    const health = await app.inject({ method: 'GET', url: '/api/v1/health' });
+    expect(health.json().capabilities.linkedIssuesExclude).toBe(true);
+  });
+
+  it('crew#662: a schema 400 names the field and what it expected, not only "Invalid request body"', async () => {
+    const { app } = routes(undefined);
+    const res = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'x', repoRef: 'wicked-studio', workflow: 'bug', revisesPr: true } });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/^Invalid request body: `revisesPr` — Expected number, received boolean/);
+    const bad = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'x', excludeLinkedIssues: ['issue 7'] } });
+    expect(bad.json().error).toMatch(/`excludeLinkedIssues\.0` — an issue ref/);
+  });
 });

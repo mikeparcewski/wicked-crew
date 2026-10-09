@@ -260,6 +260,6 @@ describe('daemon bridge over core-ts (stub engine)', () => {
     });
     expect(badBody.status).toBe(400);
     const err = (await badBody.json()) as { error: string };
-    expect(err.error).toBe('Invalid request body');
+    expect(err.error).toMatch(/^Invalid request body: `message` — /); // crew#662: names the field
   });
 });

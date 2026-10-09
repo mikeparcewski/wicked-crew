@@ -6,7 +6,9 @@ import type { GhExec } from '../src/core/deliver.js';
 import {
   LINKED_ISSUES_CLOSE,
   LINKED_ISSUES_OPEN,
+  LINKED_ISSUES_PREFACE,
   MAX_LINKED_ISSUES,
+  normalizeIssueRef,
   resolveLinkedIssues,
   stripLinkedIssues,
 } from '../src/core/linked-issues.js';
@@ -36,7 +38,7 @@ describe('resolveLinkedIssues', () => {
     const { exec, calls } = stubGh({ '541': { stdout: ISSUE_541 } });
     const r = await resolveLinkedIssues('fix #541', '/srv/repo', 'repo', exec);
     expect(calls).toEqual([{ args: ['issue', 'view', '541', '--json', 'title,state,body,url,comments'], cwd: '/srv/repo' }]);
-    expect(r.issues).toEqual([{ ref: '#541', resolved: true, title: 'Gate hook records a path as the tool name' }]);
+    expect(r.issues).toEqual([{ ref: '#541', resolved: true, title: 'Gate hook records a path as the tool name', chars: expect.any(Number) }]);
     expect(r.block).not.toBeNull();
     expect(r.block!.startsWith(LINKED_ISSUES_OPEN)).toBe(true);
     expect(r.block!.endsWith(LINKED_ISSUES_CLOSE)).toBe(true);
@@ -57,7 +59,7 @@ describe('resolveLinkedIssues', () => {
     const r = await resolveLinkedIssues('see o/other#7 and elsewhere#3', undefined, 'repo', exec);
     expect(calls.map((c) => c.args.slice(0, 5))).toEqual([['issue', 'view', '7', '-R', 'o/other']]);
     expect(r.issues).toEqual([
-      { ref: 'o/other#7', resolved: true, title: 'Other' },
+      { ref: 'o/other#7', resolved: true, title: 'Other', chars: expect.any(Number) },
       { ref: 'elsewhere#3', resolved: false, error: 'no owner/repo to read it from' },
     ]);
     // A same-repo `#N` on a repo-less run has nowhere to read from.
@@ -87,5 +89,40 @@ describe('resolveLinkedIssues', () => {
     const { exec, calls } = stubGh({});
     await resolveLinkedIssues(problem, '/srv/repo', 'repo', exec);
     expect(calls.map((c) => c.args[2])).toEqual(['541']);
+  });
+
+  it('crew#825: the block is framed as background — the preface says the intent wins — and each read issue reports its size', async () => {
+    const { exec } = stubGh({ '541': { stdout: ISSUE_541 } });
+    const r = await resolveLinkedIssues('fix #541', '/srv/repo', 'repo', exec);
+    const lines = r.block!.split('\n');
+    expect(lines.slice(0, 4)).toEqual([LINKED_ISSUES_OPEN, '## Linked issues (read by the daemon at launch)', '', LINKED_ISSUES_PREFACE]);
+    expect(LINKED_ISSUES_PREFACE).toMatch(/the intent above is the instruction/);
+    expect(LINKED_ISSUES_PREFACE).toMatch(/the intent wins/);
+    const section = r.block!.slice(r.block!.indexOf('### #541'), r.block!.indexOf(LINKED_ISSUES_CLOSE) - 1);
+    expect(r.issues[0]!.chars).toBe(section.length);
+  });
+
+  it('crew#825: an excluded ref is neither read nor appended, is answered as excluded, and does not use a read slot', async () => {
+    const { exec, calls } = stubGh({ '541': { stdout: ISSUE_541 } });
+    const r = await resolveLinkedIssues('fix #541; wicked-studio#539 records this; see #12', '/srv/repo', 'repo', exec, ['12', 'wicked-studio#539']);
+    // `wicked-studio#539` on a `repo` delivery stays an owner-less other-repo ref; excluded verbatim.
+    expect(calls.map((c) => c.args[2])).toEqual(['541']);
+    expect(r.issues.find((i) => i.ref === 'wicked-studio#539')).toMatchObject({ excluded: true });
+    expect(r.issues.find((i) => i.ref === '#12')).toEqual({ ref: '#12', resolved: false, excluded: true, error: 'left out by the launch (excludeLinkedIssues)' });
+    expect(r.block).not.toContain('### #12');
+    // Everything excluded ⇒ no block at all, but the answer still lists what was left out.
+    const all = await resolveLinkedIssues('see #12', '/srv/repo', 'repo', exec, ['#12']);
+    expect(all.block).toBeNull();
+    expect(all.issues).toEqual([{ ref: '#12', resolved: false, excluded: true, error: 'left out by the launch (excludeLinkedIssues)' }]);
+  });
+
+  it('crew#825: exclusions normalize the spellings a caller sends', () => {
+    expect(normalizeIssueRef('541')).toBe('#541');
+    expect(normalizeIssueRef(' #541 ')).toBe('#541');
+    expect(normalizeIssueRef('o/r#7')).toBe('o/r#7');
+    expect(normalizeIssueRef('r#7')).toBe('r#7');
+    // The delivery repo's own owner-less spelling is `#N`, exactly as issueRefs emits it.
+    expect(normalizeIssueRef('wicked-studio#539', 'wicked-studio')).toBe('#539');
+    expect(normalizeIssueRef('issue 7')).toBeNull();
   });
 });
