@@ -7,7 +7,7 @@ CLI into an ACP server that wicked-core (or any ACP client) can drive as a worke
 | bin | wraps | headless invocation |
 |---|---|---|
 | `agy-acp` | Antigravity | `agy -p <prompt>` |
-| `wicked-pi` | pi (a launcher, not a bridge — see [Skills for a pi seat](#skills-for-a-pi-seat-wicked_pi_skill_dirs)) | `pi [--no-skills --skill <dir>…] <args>` |
+| `wicked-pi` | pi (a launcher, not a bridge — see [Skills for a pi seat](#skills-for-a-pi-seat-wicked_pi_skill_dirs) and [Input governance](#input-governance-for-a-pi-seat-wicked_pi_governance)) | `pi [--no-extensions -e <gate>] [--no-skills --skill <dir>…] <args>` |
 
 Every other roster CLI uses a native or upstream adapter instead of this package:
 
@@ -71,6 +71,21 @@ Two places implement it:
   `wicked-pi` runs `pi` from `PATH` (or the path in `WICKED_PI_BINARY`), passes stdio straight
   through, forwards `SIGTERM`/`SIGINT`/`SIGHUP`, and mirrors pi's exit status. A missing pi is a
   named failure (exit 127).
+
+## Input governance for a pi seat (`WICKED_PI_GOVERNANCE`)
+
+pi-acp turns pi's extension `confirm` dialogs into ACP `session/request_permission`, but nothing
+raises one for a tool call unless an extension does. The
+[`pi-governance`](https://github.com/mikeparcewski/pi-governance) extension does that for every
+tool call (wicked-core#563). `wicked-pi` loads it when wicked-core asks for it:
+
+| | |
+|---|---|
+| variable | `WICKED_PI_GOVERNANCE`, set by wicked-core on the adapter's environment for a seat it governs |
+| unset, empty or `0` | no gate, and the launch is unchanged |
+| any other value | pi starts with `--no-extensions -e <gate>` ahead of the skill flags, so the gate is the only extension loaded |
+| gate file | the bundled `pi-governance` package, or the path in `WICKED_PI_GOVERNANCE_EXTENSION` |
+| gate requested but not found | `wicked-pi` exits 126 with a named refusal and never starts pi ungoverned |
 
 ## Protocol
 

@@ -1,7 +1,7 @@
 {
   "name": "agent-acp-bridges",
   "version": "1.1.1",
-  "description": "ACP (Agent Client Protocol) stdio bridge for headless coding CLIs without a native or ecosystem ACP adapter — currently agy (Antigravity) — plus the `wicked-pi` launcher that hands a pi seat its skills through the community pi-acp adapter. Used by wicked-core to drive governed multi-turn sessions.",
+  "description": "ACP (Agent Client Protocol) stdio bridge for headless coding CLIs without a native or ecosystem ACP adapter — currently agy (Antigravity) — plus the `wicked-pi` launcher that hands a pi seat its skills and, when wicked-core asks, the pi-governance permission gate, through the community pi-acp adapter. Used by wicked-core to drive governed multi-turn sessions.",
   "type": "module",
   "bin": {
     "agy-acp": "agy-acp.mjs",
@@ -29,6 +29,9 @@
     "*.mjs",
     "README.md"
   ],
+  "dependencies": {
+    "pi-governance": "https://codeload.github.com/mikeparcewski/pi-governance/tar.gz/99e42ddeb483c020d3524dd4000bb17c2345cfa0"
+  },
   "devDependencies": {
     "vitest": "^5.0.2"
   }

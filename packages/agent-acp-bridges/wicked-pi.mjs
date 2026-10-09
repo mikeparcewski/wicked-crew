@@ -22,7 +22,7 @@
  */
 
 import { spawn } from 'child_process';
-import { realpathSync } from 'fs';
+import { existsSync, realpathSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { piSkillFlags } from './bridge.mjs';
 
@@ -33,15 +33,65 @@ export function piBinary(env = process.env) {
 }
 
 /**
- * The argv pi is started with: the skill flags derived from the environment FIRST, then every
- * argument this launcher was given (pi-acp's `--mode rpc --no-themes`, or an operator's own).
+ * The env contract for input governance on the pi seat (wicked-core#563). wicked-core sets it on
+ * the ACP adapter's environment for a seat it governs; pi-acp passes its environment to this
+ * launcher. Unset, empty or `0` means no gate. Any other value turns the gate on.
+ */
+export const PI_GOVERNANCE_ENV = 'WICKED_PI_GOVERNANCE';
+/** An explicit path to the gate extension file, instead of the bundled `pi-governance` package. */
+export const PI_GOVERNANCE_EXTENSION_ENV = 'WICKED_PI_GOVERNANCE_EXTENSION';
+
+/** The bundled gate's file path, or `null` when the `pi-governance` package cannot be resolved. */
+export function bundledGovernanceExtension() {
+  try {
+    return fileURLToPath(import.meta.resolve('pi-governance/extension'));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * pi's flags for the gate: `--no-extensions -e <gate>` when governance is on, so the gate is the
+ * only extension loaded. Another extension's `tool_call` handler could change a call's
+ * arguments after the gate approved it. Returns `[]` when governance is off.
+ *
+ * Throws when governance is on and no gate file can be found. The launcher then refuses to
+ * start pi rather than start it ungoverned.
+ *
+ * @param {NodeJS.ProcessEnv} [env]
+ * @param {() => string | null} [resolveBundled]
+ * @returns {string[]}
+ */
+export function piGovernanceFlags(env = process.env, resolveBundled = bundledGovernanceExtension) {
+  const on = env[PI_GOVERNANCE_ENV];
+  if (on === undefined || on.trim() === '' || on.trim() === '0') return [];
+  const explicit = env[PI_GOVERNANCE_EXTENSION_ENV];
+  const gate = typeof explicit === 'string' && explicit.trim() !== '' ? explicit.trim() : resolveBundled();
+  if (!gate) {
+    throw new Error(
+      `${PI_GOVERNANCE_ENV} is set but the pi-governance extension was not found (install the pi-governance package, or set ${PI_GOVERNANCE_EXTENSION_ENV})`,
+    );
+  }
+  // Checked here because pi's own handling of an `-e` path it cannot load is not this launcher's
+  // contract: a gate that is named but absent must stop the launch too.
+  if (!existsSync(gate)) {
+    throw new Error(`${PI_GOVERNANCE_ENV} is set but the pi-governance extension file does not exist: ${gate}`);
+  }
+  return ['--no-extensions', '-e', gate];
+}
+
+/**
+ * The argv pi is started with: the governance flags, then the skill flags derived from the
+ * environment, then every argument this launcher was given (pi-acp's `--mode rpc --no-themes`,
+ * or an operator's own).
  *
  * @param {string[]} passthrough
  * @param {NodeJS.ProcessEnv} [env]
+ * @param {() => string | null} [resolveBundled]
  * @returns {string[]}
  */
-export function composePiArgv(passthrough, env = process.env) {
-  return [...piSkillFlags(env), ...passthrough];
+export function composePiArgv(passthrough, env = process.env, resolveBundled = bundledGovernanceExtension) {
+  return [...piGovernanceFlags(env, resolveBundled), ...piSkillFlags(env), ...passthrough];
 }
 
 /**
@@ -56,10 +106,17 @@ function spawnPi(bin, argv, env) {
 }
 
 /** Run pi with the composed argv; resolve with the code this process should exit with. */
-export function runPiLauncher(passthrough = process.argv.slice(2), env = process.env) {
+export function runPiLauncher(passthrough = process.argv.slice(2), env = process.env, resolveBundled = bundledGovernanceExtension) {
   return new Promise((resolve) => {
     const bin = piBinary(env);
-    const argv = composePiArgv(passthrough, env);
+    let argv;
+    try {
+      argv = composePiArgv(passthrough, env, resolveBundled);
+    } catch (err) {
+      console.error(`[wicked-pi] refusing to start pi: ${err?.message ?? String(err)}`);
+      resolve(126);
+      return;
+    }
     let child;
     try {
       child = spawnPi(bin, argv, env);
