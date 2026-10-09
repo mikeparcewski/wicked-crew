@@ -1100,13 +1100,15 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     `    *non-fast-forward*|*"fetch first"*|*"[rejected]"*|*"Updates were rejected"*) : > "$S"; VERDICT=rejected; echo "deliver: the remote refused the push of $B because its branch moved (non-fast-forward); the work is committed on $B and nothing was pushed — approve to retry the deliver phase; ${DELIVER_PUSH_REJECTED_MARKER}"; exit 1;;`,
     // studio#403: the REASON is the remote's own lines (`remote:` hook / auth text, git's `error:` /
     // `fatal:` / ` ! [remote rejected]`), the verdict-shaped ones first when there are any (a hook's
-    // progress chatter would otherwise fill the cap), joined and capped at 600 bytes, so a hook
+    // progress chatter would otherwise fill the cap), joined and capped at 320 bytes, so a hook
     // message is never cut out by a fixed window; the window is only the fallback for output that
-    // carries none of them. Every grep is `|| true`: the script runs `set -euo pipefail`, and a
+    // carries none of them. The REASON closes the line, just before the marker: the engine keeps
+    // only the TAIL of the output as the unit's denial (and the gate's text), so whatever leads
+    // the line is what gets cut. Git's generic `error: failed to push some refs` adds nothing. Every grep is `|| true`: the script runs `set -euo pipefail`, and a
     // filter that matches nothing must not end it before the refusal line is printed. A
-    // credential in a URL is stripped either way. The push identity rides LAST, after the action,
-    // so the line leads with why nothing was pushed.
-    `    *) : > "$S"; VERDICT=rejected; PUSHL=$(printf '%s\\n' "$PUSHOUT" | grep -E '^(remote: *[^ ]|error: |fatal: | ! )' || true); PUSHV=$(printf '%s\\n' "$PUSHL" | grep -i -E 'error|denied|declined|reject|refus|violat|forbidden|required|not allowed|permission|authenticat|[0-9]{3}' || true); PUSHERR=$(printf '%s\\n' "\${PUSHV:-$PUSHL}" | head -c 600 | tr '\\n' ' ' | sed -E 's/ +$//' || true); [ -n "$PUSHERR" ] || { PUSHERR="\${PUSHOUT:0:96} ... \${PUSHOUT: -128}"; PUSHERR=\${PUSHERR//$'\\n'/ }; }; PUSHERR=$(printf '%s' "$PUSHERR" | sed -E 's#://[^/@ ]+@#://#g'); echo "deliver: the remote refused the push of $B after commit: $PUSHERR; the work is committed on $B and nothing was pushed — fix the remote condition, then approve to retry the deliver phase (the retry re-pushes $B to origin as \${L:-an unknown login}); ${DELIVER_PUSH_REJECTED_MARKER}"; exit 1;;`,
+    // credential in a URL is stripped either way. The push identity rides inside the action
+    // clause (what Approve does, and as whom).
+    `    *) : > "$S"; VERDICT=rejected; PUSHL=$(printf '%s\\n' "$PUSHOUT" | grep -E '^(remote: *[^ ]|error: |fatal: | ! )' | grep -v -E '^error: failed to push some refs' || true); PUSHV=$(printf '%s\\n' "$PUSHL" | grep -i -E 'error|denied|declined|reject|refus|violat|forbidden|required|not allowed|permission|authenticat|[0-9]{3}' || true); PUSHERR=$(printf '%s\\n' "\${PUSHV:-$PUSHL}" | head -c 320 | tr '\\n' ' ' | sed -E 's/ +$//' || true); [ -n "$PUSHERR" ] || { PUSHERR="\${PUSHOUT:0:96} ... \${PUSHOUT: -128}"; PUSHERR=\${PUSHERR//$'\\n'/ }; }; PUSHERR=$(printf '%s' "$PUSHERR" | sed -E 's#://[^/@ ]+@#://#g'); echo "deliver: the remote refused the push of $B after commit — nothing was pushed and the work is committed on $B; fix the remote condition, then approve to retry the deliver phase (it re-pushes $B to origin as \${L:-an unknown login}). The remote said: $PUSHERR; ${DELIVER_PUSH_REJECTED_MARKER}"; exit 1;;`,
     '  esac',
     'fi',
     // (e) Open the PR with gh's OUTPUT and EXIT STATUS captured separately (crew#317). The old

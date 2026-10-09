@@ -1056,8 +1056,10 @@ describe('deliver script, driven for real (crew#317)', () => {
     expect(failed.lastLine).toContain(DELIVER_PUSH_REJECTED_MARKER);
     expect(failed.lastLine).toContain('GH013: Repository rule violations found for refs/heads/x: signed commits required');
     expect(failed.lastLine).toContain('pre-receive hook declined');
-    // The action comes before the identity; the identity is the last clause before the marker.
-    expect(failed.lastLine).toMatch(/approve to retry the deliver phase \(the retry re-pushes \S+ to origin as [^)]+\); deliver: PUSH-REJECTED/u);
+    // What Approve does (and as whom) first; the remote's reason closes the line, just before the
+    // marker, because the engine keeps only the output's TAIL as the gate's text.
+    expect(failed.lastLine).toMatch(/approve to retry the deliver phase \(it re-pushes \S+ to origin as [^)]+\)\. The remote said: [^\n]*GH013[^\n]*; deliver: PUSH-REJECTED$/u);
+    expect(failed.lastLine).not.toContain('failed to push some refs');
   }, 60_000);
 
   it('FAILS when gh exits 0 but produces no PR URL — done is re-derived, not asserted', async () => {
