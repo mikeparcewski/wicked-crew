@@ -36,7 +36,9 @@ import {
   processStartedAt,
   readCrewSidecar,
   sidecarNamesBridge,
+  SPAWN_TOKEN_ENV,
   spawnLineage,
+  tokenLineage,
   type BridgePoolIo,
 } from '../../src/interactive/bridge-pool.js';
 import { removeScratch } from '../setup/scratch.js';
@@ -66,6 +68,8 @@ server.listen(0, '127.0.0.1', () => {
   writeFileSync(join(root, '.wi-serve.json'), JSON.stringify({
     port: server.address().port, host: '127.0.0.1', pid: process.pid,
     startedAt: new Date().toISOString(), version: 'fake',
+    // crew#509: a token-aware bridge echoes the spawn token; FAKE_LEGACY_BRIDGE plays an older one.
+    ...(process.env.WICKED_BRIDGE_SPAWN_TOKEN && !process.env.FAKE_LEGACY_BRIDGE ? { spawnToken: process.env.WICKED_BRIDGE_SPAWN_TOKEN } : {}),
   }));
 });
 `;
@@ -520,14 +524,14 @@ describe('recycling fails closed (codex r4 on #506)', () => {
     expect(pidAlive(foreignPid)).toBe(true);
   }, 30_000);
 
-  it('a lineage that cannot be read is USED but not recorded — no sidecar, a log line saying so', async () => {
+  it('a lineage that cannot be read is USED but not recorded — no sidecar, a log line saying so (a bridge that does not echo the spawn token)', async () => {
     const root = join(dir, 'root-unknown-lineage');
     const logged: string[] = [];
     const pool = poolWith({ origin: 'http://127.0.0.1:7701', bus: join(dir, 'other', 'bus') }, (m) => logged.push(m), {
       spawn: (r, e) => {
         // The lockfile ends up naming a pid that is NOT the child handle we got back (an `npx` wrapper
         // would look like this) and the platform cannot tell us who its parent is.
-        spawnFake(r, e);
+        spawnFake(r, { ...e, FAKE_LEGACY_BRIDGE: '1' });
         return spawnSleeper();
       },
       parentOf: () => null,
@@ -537,6 +541,42 @@ describe('recycling fails closed (codex r4 on #506)', () => {
     expect(sidecarBytes(root)).toBeNull();
     expect(logged.some((m) => m.includes('NOT recording'))).toBe(true);
   }, 30_000);
+
+  it('crew#509: a bridge that ECHOES the spawn token is proven ours with no process table — recorded, token in the sidecar', async () => {
+    const root = join(dir, 'root-token-ours');
+    const pool = poolWith({ origin: 'http://127.0.0.1:7701', bus: join(dir, 'other', 'bus') }, undefined, {
+      // The same shape as the unknown-lineage case (wrapper pid, unreadable ps) — the token decides.
+      spawn: (r, e) => {
+        spawnFake(r, e);
+        return spawnSleeper();
+      },
+      parentOf: () => {
+        throw new Error('the process table must not be consulted when the bridge echoes the token');
+      },
+    });
+    const bridge = await pool.ensure(root);
+    const issued = spawns[spawns.length - 1]!.env[SPAWN_TOKEN_ENV];
+    expect(typeof issued).toBe('string');
+    expect(issued).toMatch(/^[0-9a-f]{32}$/);
+    expect(bridge.spawnToken).toBe(issued);
+    const sidecar = readCrewSidecar(root);
+    expect(sidecar).toMatchObject({ pid: bridge.pid, spawnToken: issued });
+    // The token is per spawn, not configuration: it never rides the recorded env.
+    expect(Object.keys(sidecar!.env)).not.toContain(SPAWN_TOKEN_ENV);
+  }, 30_000);
+
+  it('crew#509: tokenLineage — same token ours, another token foreign, none undecided (fall back to ps); the sidecar check prefers the token', () => {
+    expect(tokenLineage({ spawnToken: 'a' }, 'a')).toBe('ours');
+    expect(tokenLineage({ spawnToken: 'b' }, 'a')).toBe('foreign');
+    expect(tokenLineage({ spawnToken: null }, 'a')).toBeNull();
+    expect(tokenLineage({}, 'a')).toBeNull();
+    const side = { pid: 7, env: {}, startedBy: 'wicked-crew' as const, startedAt: '2026-01-01T00:00:00.000Z', bridgeStartedAt: '2026-01-01T00:00:00.000Z', spawnToken: 't1' };
+    expect(sidecarNamesBridge(side, { host: 'h', port: 1, pid: 7, startedAt: '2026-01-01T00:00:00.000Z', spawnToken: 't1' })).toBe('names-it');
+    // Same pid AND same start marker, different token: a different bridge — the token wins.
+    expect(sidecarNamesBridge(side, { host: 'h', port: 1, pid: 7, startedAt: '2026-01-01T00:00:00.000Z', spawnToken: 't2' })).toBe('stale');
+    // A lockfile without the echo is judged the pre-token way.
+    expect(sidecarNamesBridge(side, { host: 'h', port: 1, pid: 7, startedAt: '2026-01-01T00:00:00.000Z', spawnToken: null })).toBe('names-it');
+  });
 
   it('spawnLineage: the child itself or a descendant is ours; the init process or a cycle is foreign; an unreadable hop or too many hops is unknown', () => {
     const tree = new Map<number, number>([
