@@ -152,6 +152,20 @@ test.describe('scroll-snap reachability', () => {
   });
 });
 
+test.describe('scroll-snap under reduced motion', () => {
+  // wicked-web#31: snapping moves the viewport for you, the motion the preference asks the page to
+  // suppress. crew.css re-declares `scroll-snap-type` on html after the chrome's guard, so it carries
+  // the guard too; assert at a desktop width, where snapping would otherwise be on (`y`).
+  test.use({ contextOptions: { reducedMotion: 'reduce' } });
+
+  test('no scroll snapping under prefers-reduced-motion @ 1440x700', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 700 });
+    await page.goto('/');
+    expect(await page.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches)).toBe(true);
+    expect(await page.evaluate(() => getComputedStyle(document.documentElement).scrollSnapType)).toBe('none');
+  });
+});
+
 test.describe('content is not truncated or orphaned', () => {
   test('install command blocks do not clip their trailing comment @ 1440x700', async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 700 });
