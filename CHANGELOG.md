@@ -10,6 +10,17 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.8.10] — 2026-10-09
+
+The engine pin moves to **`wicked-core-ts` `^0.7.44`** (wicked-core#810 / #813, the per-phase worker pool; wicked-core#782 / #811, the read-only phase's floor fix). This release bundles **wicked-studio 0.6.8**: S19 names a workflow by typing `/workflow-<key>` in the composer and the launch form, plus the gate-row, System and surface follow-ups.
+
+- **`wicked-crew-api-types` 0.100.0.** Additive:
+  - `floor_fix` (#893, crew#891): on `unitReworkAmended.scope`, `WorkUnit.repo_checks.rerun` / `requested_rerun.mode` (with `requested_rerun.fix {note, seat}`), `WorkUnit.operator_rulings[].action` and the durable prompt answer's `action`; `WorkUnit.worktree_guarded` / `repo_checks_floor` typed.
+  - The worker pool (#895, crew#894): `unitDistributed.pool` (`UnitPoolSeating`: requested / seated / monitors / missing / shortfall), `WorkUnit.pool` / `pool_seating`, `PhaseDef.pool` and plan-step `pool` (lower-only; `pool_raised`), `step.claimed.monitors`.
+- **Engine pin `wicked-core-ts` `^0.7.44` (#895).** The lockfile is regenerated (main + 5 platform packages) and the core-workflow skill_refs fixture is re-stamped; the refs are unchanged.
+- **The decided-gate history reads a `floor_fix` answer as an approve** (`standing-orders/history.ts` `decisionOf`, pinned) (#893).
+- **Bundled UI wicked-studio `^0.6.8`.** S19a/S19b (studio#614, #620): `/workflow-<key>` in the composer names a workflow and Enter launches it; the workflow buttons give way to the same grammar on the launch form. Gate-row follow-ups (studio#619): the restored-tree gate is a retry, no Send back preselected over a passing review, "Fix with a note" on a read-only phase's floor gate, Resume on a failed run. System › Log out through `POST /seats/:cli/logout`, linked issues on the launch form, a failed hand-over said and stoppable, surface fixes (studio#621). The composer and worker-pool follow-ups (studio#624) and the steering form's rule-type label (studio#625).
+
 ## [0.8.9] — 2026-10-09
 
 The engine pin moves to **`wicked-core-ts` `^0.7.43`** (wicked-core#805, #807, #808). This release bundles **wicked-studio 0.6.7**: S16a moves the run page and the old shells into the session thread, and the session gate row answers the new `consent` gate. It carries the four crew PRs merged since 0.8.8 (#887, #889, #890, #877). The `mcp-server` install now asks for consent before it runs. The deliver script ends every exit with a trusted sentinel. Seats can be signed in and out through the daemon. `wicked-crew-api-types` 0.99.0 is the matching wire contract.
@@ -3696,7 +3707,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.9...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.10...HEAD
+[0.8.10]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.9...v0.8.10
 [0.8.9]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.8...v0.8.9
 [0.8.8]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.7...v0.8.8
 [0.8.7]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.6...v0.8.7
