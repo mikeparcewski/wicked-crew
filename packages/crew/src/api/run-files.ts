@@ -8,7 +8,7 @@
 // read-only by construction: `fs` reads and `git diff`/`git status` — zero write capability, a
 // strictly smaller threat surface than `/open` handing the path to an OS opener.
 
-import { constants as fsConstants, promises as fsp, statSync } from 'node:fs';
+import { constants as fsConstants, promises as fsp, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
 import { deliverExclusionByName, deliverExclusionReason } from '../core/deliver-exclusions.js';
@@ -424,7 +424,17 @@ export async function worktreeDiff(
       // Unreadable/raced away: an unknown size is never treated as oversize (the shell's
       // `wc -c < "$F" 2>/dev/null || echo 0` degrades the same way).
     }
-    return deliverExclusionReason(file, size) === null;
+    // crew#901: an env template rides only when its text holds no value — read it (small: the
+    // name rules already passed, and the size rule drops anything over 1 MiB first).
+    return (
+      deliverExclusionReason(file, size, () => {
+        try {
+          return readFileSync(join(workdir, file), 'utf8');
+        } catch {
+          return null;
+        }
+      }) === null
+    );
   });
   for (const file of untracked) {
     // Cap is in BYTES; `out.length` counts UTF-16 code units. `>=`: exactly-at-cap is

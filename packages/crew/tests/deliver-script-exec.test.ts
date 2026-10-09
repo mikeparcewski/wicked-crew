@@ -50,7 +50,9 @@ function untrackedOf(cwd: string): string[] {
 function tsExclusion(cwd: string, rel: string): string | null {
   let size: number | null = null;
   try { size = statSync(join(cwd, rel)).size; } catch { /* raced away — unknown size */ }
-  return deliverExclusionReason(rel, size);
+  return deliverExclusionReason(rel, size, () => {
+    try { return readFileSync(join(cwd, rel), 'utf8'); } catch { return null; }
+  });
 }
 
 interface Fixture {
@@ -483,6 +485,12 @@ describe('deliver script, driven for real (crew#317)', () => {
     // N2: the empty recovery sentinel a PREVIOUS failed attempt left behind (the retry-gate shape).
     // The script removes it before staging, so it never ships — the TS predicate must agree.
     writeFileSync(join(fx.workdir, '.wicked-crew-delivery-stranded'), '');
+    // crew#901: an env TEMPLATE with no value is the run's product (a README points at it); one that
+    // holds a value is excluded by content, and a real `.env` stays denylisted by name.
+    mkdirSync(join(fx.workdir, 'giphy'));
+    writeFileSync(join(fx.workdir, 'giphy', '.env.example'), '# the one secret\nGIPHY_TOKEN=\nexport BASE_URL=<https://api.example>\n');
+    writeFileSync(join(fx.workdir, 'leaky.env.sample'), 'GIPHY_TOKEN=abc123\n');
+    writeFileSync(join(fx.workdir, '.env'), 'GIPHY_TOKEN=abc123\n');
 
     // F3 DRIFT GUARD, half 1 — what the TS classifier (the one the deliver-gate diff reads) keeps
     // over the tree the script is ABOUT to classify in shell.
@@ -497,7 +505,9 @@ describe('deliver script, driven for real (crew#317)', () => {
       .trim()
       .split('\n')
       .sort();
-    expect(files).toEqual(['README.md', 'feature.ts']);
+    expect(files).toEqual(['README.md', 'feature.ts', 'giphy/.env.example']);
+    expect(r.output).toContain('deliver: EXCLUDED (env-template-with-values): leaky.env.sample');
+    expect(r.output).toContain('deliver: EXCLUDED (denylisted-name): .env');
     // A GUARD, NOT A SILENT DROP — each exclusion is named with its reason in the phase output.
     expect(r.output).toContain('deliver: EXCLUDED (denylisted-name): bus.db');
     expect(r.output).toContain('deliver: EXCLUDED (denylisted-name): deploy.key');
@@ -523,7 +533,7 @@ describe('deliver script, driven for real (crew#317)', () => {
     // exactly this tree, both ways:
     //   • what TS kept beforehand == the untracked paths the script actually committed;
     //   • of what the script left behind, TS keeps nothing.
-    expect(keptByTs).toEqual(['feature.ts']);
+    expect(keptByTs).toEqual(['feature.ts', 'giphy/.env.example']);
     expect(untrackedOf(fx.workdir).filter((p) => tsExclusion(fx.workdir, p) === null)).toEqual([]);
   }, 60_000);
 
@@ -1028,6 +1038,26 @@ describe('deliver script, driven for real (crew#317)', () => {
     expect(retried.outcome).toBe('pr');
     expect(originBranches(fx)).toContain(`wicked/${RUN_ID}`);
     expect(existsSync(join(fx.workdir, '.wicked-crew-delivery-stranded'))).toBe(false);
+  }, 60_000);
+
+  it('studio#403: the refusal line carries the hook\'s own reason however long the push output is, and names the push identity LAST', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const reason = true;\n');
+    git(fx.workdir, 'add', '--', 'work.ts');
+    // A hook that talks a lot BEFORE its verdict: the old 96 … 128 window kept neither end's reason.
+    const hook = join(fx.origin, 'hooks', 'pre-receive');
+    const chatter = Array.from({ length: 12 }, (_, i) => `echo "checking policy step ${i} of 12 ........................................" >&2`).join('\n');
+    writeFileSync(hook, `#!/bin/sh\n${chatter}\necho "GH013: Repository rule violations found for refs/heads/x: signed commits required" >&2\n${chatter}\nexit 1\n`);
+    chmodSync(hook, 0o755);
+
+    const failed = await runDeliver(fx);
+
+    expect(failed.outcome).toBe('rejected');
+    expect(failed.lastLine).toContain(DELIVER_PUSH_REJECTED_MARKER);
+    expect(failed.lastLine).toContain('GH013: Repository rule violations found for refs/heads/x: signed commits required');
+    expect(failed.lastLine).toContain('pre-receive hook declined');
+    // The action comes before the identity; the identity is the last clause before the marker.
+    expect(failed.lastLine).toMatch(/approve to retry the deliver phase \(the retry re-pushes \S+ to origin as [^)]+\); deliver: PUSH-REJECTED/u);
   }, 60_000);
 
   it('FAILS when gh exits 0 but produces no PR URL — done is re-derived, not asserted', async () => {
