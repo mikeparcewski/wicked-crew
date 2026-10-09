@@ -711,6 +711,88 @@ export interface WorkUnit {
    * marker was MISSING (that denies; the denial is the record), and on an older engine.
    */
   capture_report?: CaptureReport;
+  /**
+   * TRUE when the worktree guard governs this unit (a def-driven, agent-executed
+   * `executes_code: false` phase — a READ-ONLY phase; wicked-core `WorkUnit.worktree_guarded`,
+   * derived at plan time). Skip-if-false on the wire: ABSENT on every other unit and on an older
+   * engine. Typed here for crew#891 (the floor-fix gate is a read-only phase's).
+   */
+  worktree_guarded?: boolean;
+  /**
+   * TRUE when this unit runs the repository's own checks as its floor (wicked-core
+   * `WorkUnit.repo_checks_floor`). Skip-if-false on the wire: ABSENT otherwise.
+   */
+  repo_checks_floor?: boolean;
+  /**
+   * The repo-checks evidence the fold attached to this unit (wicked-core `RepoChecksReport`),
+   * typed only as far as a skin reads it (crew#891); the rest of the report rides the index
+   * signature. ABSENT until the unit's gate folds, and when the floor does not apply.
+   */
+  repo_checks?: WorkUnitRepoChecks;
+  /**
+   * Every human gate note that amended this unit, oldest first (wicked-core#760
+   * `WorkUnit.operator_rulings`) — the record the evaluator reviewing it reads. ABSENT when empty.
+   */
+  operator_rulings?: OperatorRuling[];
+}
+
+/**
+ * How an operator's floor-only re-run ran (wicked-core `FloorRerunMode`, snake_case on the wire):
+ * `extend` | `targeted` | `accept_partial` (wicked-core#469, the escalation arms of a floor that did
+ * not finish) and `floor_fix` (crew#891, wicked-core#782 / #811 — a seat distinct from the
+ * read-only phase made the operator's fix first; reached only through an approve with a note at
+ * that phase's floor gate, never as its own `GateDecision.action`).
+ */
+export type FloorRerunMode = 'extend' | 'targeted' | 'accept_partial' | 'floor_fix';
+
+/** (crew#891, wicked-core#782) The fix a `floor_fix` re-run makes before its floor runs. */
+export interface FloorFix {
+  /** The operator's note, verbatim — the fixing seat's whole task. */
+  note: string;
+  /** The seat that makes the fix: distinct from the read-only phase's own (evaluator ≠ fixer). */
+  seat: string;
+}
+
+/** (wicked-core#469) A floor-only re-run the escalation gate armed on a unit, read by its next dispatch. */
+export interface FloorRerun {
+  mode: FloorRerunMode;
+  /** `accept_partial`: the checks waived. Absent when empty. */
+  waive?: string[];
+  /** The seat's output from the attempt the gate reviewed (the fold reads it; the seat does not re-run).
+   *  Always serialised (`""` when none). */
+  output: string;
+  /** `floor_fix` only (crew#891): the note and the distinct seat that makes it. */
+  fix?: FloorFix;
+}
+
+/** {@link WorkUnit.repo_checks}: the parts of wicked-core's `RepoChecksReport` a skin reads. */
+export interface WorkUnitRepoChecks {
+  /** Whether the floor passed (vacuously true when nothing was detected). The engine always sends
+   *  it; optional here because this type is a partial reading, and consumers (fixtures included)
+   *  already hold units whose report they only partly know. */
+  passed?: boolean;
+  /** The operator's re-run this report answers; absent for the ordinary floor. */
+  rerun?: FloorRerunMode;
+  /** Checks the operator waived for this unit. Absent when empty. */
+  waived?: string[];
+  /** The re-run armed at the gate and not yet consumed. Absent otherwise. */
+  requested_rerun?: FloorRerun;
+  [k: string]: unknown;
+}
+
+/**
+ * One human gate note on a unit (wicked-core#760 `OperatorRuling`): `request_changes` | `amend`,
+ * and `floor_fix` (crew#891, wicked-core#782) for an approve-with-note a distinct seat made as a
+ * floor fix. Read an unknown token as a note, never as an error.
+ */
+export interface OperatorRuling {
+  action: 'request_changes' | 'amend' | 'floor_fix' | (string & {});
+  /** The operator's own words. */
+  text: string;
+  /** The amended unit's attempt when the ruling was given. */
+  attempt: number;
+  /** Unix millis. */
+  at: number;
 }
 
 /** The counts a capture phase reported (`WorkUnit.capture_report`; wicked-core#535). */
@@ -2532,10 +2614,14 @@ export interface UnitReworkAmendedEvent {
    * (`amendScope: 'creator'`); `'request_changes'` — the creator phase the gate rewound to, and
    * `amendment` then carries the evaluator's full findings + the operator's note;
    * `'accept_suggestion'` (wicked-core#467) — the same rewind after the operator adopted the
-   * evaluator's pinned edit, and `amendment` names it. ABSENT on an engine before the field — read
-   * as `'cursor'`.
+   * evaluator's pinned edit, and `amendment` names it. `'floor_fix'` (crew#891, wicked-core#782 /
+   * #811) — an approve WITH A NOTE at the escalation gate of a READ-ONLY phase (worktree-guarded,
+   * `executes_code: false`) whose own repo-checks floor denied it: a seat DISTINCT from that phase
+   * makes the note's fix in the worktree, then only the floor re-runs (the phase does not run again;
+   * its verdict stands and the floor decides). ABSENT on an engine before the field — read as
+   * `'cursor'`.
    */
-  scope?: 'cursor' | 'creator' | 'request_changes' | 'accept_suggestion';
+  scope?: 'cursor' | 'creator' | 'request_changes' | 'accept_suggestion' | 'floor_fix';
 }
 
 /** P2 — a worker's ApplyStepResult arrived and output is ready to be gated. Fires before GateDecided.
@@ -5372,7 +5458,12 @@ export interface InteractionRequest {
   reviewing_ord: number | null;
   prompt: string;
   status: 'open' | 'answered' | 'expired' | 'cancelled';
-  /** The decision payload (JSON text, e.g. `{"approve":true,"amend":null}`) once resolved. */
+  /**
+   * The decision payload (JSON text, e.g. `{"approve":true,"amend":null}`) once resolved. Its
+   * `action` names the arm; `"floor_fix"` (crew#891, wicked-core#782) replaces `"approve"` when an
+   * approve with a note at a read-only phase's floor gate was taken as a floor fix — it IS an
+   * approve.
+   */
   answer: string | null;
   /** Unix millis. */
   created_at: number;
