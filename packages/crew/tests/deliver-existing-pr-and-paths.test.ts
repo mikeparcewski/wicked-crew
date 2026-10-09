@@ -55,6 +55,18 @@ describe('crew#886: deliver text carries no home-directory path', () => {
     );
   });
 
+  it('redacts a bare home followed by more punctuation (compact JSON), never a longer sibling', () => {
+    expect(redactHostPaths(`{"home":"${home}","next":1} ${home}.bak`, home)).toBe(`{"home":"~","next":1} ${home}.bak`);
+  });
+
+  it('a home path cut by the title width still leaves no part of it (facts redacted before the cut)', () => {
+    const intent = `${'x'.repeat(230)} ${home}/work/petstore and more words after it to force the cut`;
+    const text = composeDeliverText(factsFromWorkflow({ runId: 'run-a', intent, workflowId: null, repoRef: null, phases: [], runUrl: null }));
+    const user = home.split(/[\\/]/).filter(Boolean).pop()!;
+    expect(text.title).not.toContain(user);
+    expect(text.body).not.toContain(home);
+  });
+
   it('leaves the text alone when there is no usable home', () => {
     expect(redactHostPaths('/srv/x', null)).toBe('/srv/x');
   });

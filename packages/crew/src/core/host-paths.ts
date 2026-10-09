@@ -31,7 +31,9 @@ export function rewriteHostPaths(text: string, roots: ReadonlyArray<ChatRepoRoot
   const sorted = [...roots].sort((a, b) => b.absRoot.length - a.absRoot.length);
   let result = text;
   for (const { absRoot, name } of sorted) {
-    const prefix = absRoot.endsWith(sep) || absRoot.endsWith('/') ? absRoot : `${absRoot}/`;
+    // The NATIVE separator: on Windows `C:\\Users\\a` + `/` matched neither `C:\\Users\\a\\x` nor
+    // (after the swap below) anything new; `sep` keeps POSIX byte-identical (codex on crew#887).
+    const prefix = absRoot.endsWith(sep) || absRoot.endsWith('/') ? absRoot : `${absRoot}${sep}`;
     // Replace all occurrences of the absolute prefix with the repo-name prefix.
     result = result.split(prefix).join(`${name}/`);
     // Also handle the path spelling with the other separator (LLMs on Windows may use '/').
