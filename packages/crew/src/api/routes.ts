@@ -2994,12 +2994,16 @@ export function registerRoutes(
       const record = deliveryRecordFrom(result.output);
       const url = record !== null && 'url' in record ? record.url : null;
       const pushedOnly = record !== null && 'pushed' in record ? record.pushed : null;
+      // wicked-core#850 EX-04: no engine lift re-verified what this pushed — the run record says so,
+      // with the trees the script named (the PR body carries the same label). Built before the
+      // outcome branches, so a push-only delivery records it too (codex r1).
+      const assurance = postHocDeliveryAssurance(run, unverifiedTreesFrom(result.output), qeAcceptance);
       if (pushedOnly !== null) {
         // N1: the script pushed the branch and gh could resolve no GitHub repository for the
         // origin. That IS a delivery — record it, so the run reads `delivery: 'pushed'` — but there
         // is no PR URL to answer with, so the reply says what happened instead of a 200 `prUrl`.
-        audit.record('run.delivered', actorOf(req), { runId: id, detail: { pushed: pushedOnly, via: 'post-hoc' } });
-        deliveryIndex.setPushed(id, pushedOnly);
+        audit.record('run.delivered', actorOf(req), { runId: id, detail: { pushed: pushedOnly, via: 'post-hoc', assurance } });
+        deliveryIndex.setPushed(id, pushedOnly, assurance);
         return reply.code(409).send({ error: pushedOnlyRefusal(id, pushedOnly) });
       }
       if (url === null) {
@@ -3009,9 +3013,6 @@ export function registerRoutes(
           error: 'deliver script exited 0 but produced no PR URL — refusing to record a delivery nothing can be pointed at',
         });
       }
-      // wicked-core#850 EX-04: no engine lift re-verified what this pushed — the run record says so,
-      // with the trees the script named (the PR body carries the same label).
-      const assurance = postHocDeliveryAssurance(run, unverifiedTreesFrom(result.output), qeAcceptance);
       // The durable record first, then the read-side index — the same write order as the
       // deliver-phase resolution in server.ts, so the index can only LAG a crash, never lead it.
       audit.record('run.delivered', actorOf(req), { runId: id, detail: { url, via: 'post-hoc', assurance } });
@@ -4400,6 +4401,15 @@ export function registerRoutes(
         return reply.code(400).send({
           error: `cli "${requestedCli}" is not in this run's seat pool (${pool.join(', ') || 'none known'})`,
         });
+      }
+    }
+    // A gated reassign APPROVES the gate first, so it passes the same delivery checks (freeze,
+    // wicked-core#850 EX-03) when the gate holds the deliver unit (codex r1 on the EX-03 PR).
+    if (gated) {
+      const gatedUnit = await gatedUnitOf(run, undefined);
+      if (gatedUnit !== undefined && isDeliverUnit(gatedUnit)) {
+        const refused = await deliverApprovalRefusal(run, gatedUnit);
+        if ('refusal' in refused) return reply.code(refused.refusal.code).send(refused.refusal.body);
       }
     }
     const cursor = resolveCursorUnit(run);

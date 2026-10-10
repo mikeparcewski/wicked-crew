@@ -704,6 +704,8 @@ export class DeliveryIndex {
         ) {
           pushedOnly.add(entry.runId);
           this.runToPushed.set(entry.runId, { branch: pushed.branch, remote: pushed.remote });
+          const assurance = entry.detail?.['assurance'];
+          if (isDeliveryAssurance(assurance)) this.runToAssurance.set(entry.runId, assurance);
           continue;
         }
         // Newest entry decides, even when malformed — a corrupt newest write never resurrects an
@@ -738,9 +740,10 @@ export class DeliveryIndex {
   }
 
   /** Record a PUSH-ONLY delivery (N1). A recorded PR URL is never downgraded by it. */
-  setPushed(runId: string, pushed: PushedOnlyDelivery): void {
+  setPushed(runId: string, pushed: PushedOnlyDelivery, assurance?: DeliveryAssurance): void {
     if (this.runToUrl.has(runId)) return;
     this.runToPushed.set(runId, pushed);
+    if (assurance !== undefined) this.runToAssurance.set(runId, assurance);
   }
 
   /** The recorded push-only delivery for this run, or `undefined` (N1). */

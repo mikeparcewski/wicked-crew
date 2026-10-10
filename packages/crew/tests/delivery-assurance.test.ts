@@ -20,7 +20,9 @@ import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import type { AuditLog } from '../src/api/audit.js';
 import { BUILTIN_WORKFLOWS, type CoreAdapter } from '../src/core/adapter.js';
-import { DELIVER_UNVERIFIED_MARKER, composeDeliverWorkflow } from '../src/core/deliver.js';
+import { DELIVER_PUSHED_NO_PR_MARKER, DELIVER_UNVERIFIED_MARKER, composeDeliverWorkflow } from '../src/core/deliver.js';
+import { qeAcceptanceFromView } from '../src/api/delivery-assurance.js';
+import type { AcceptanceView } from '../src/qe/acceptance.js';
 import { composeDeliverableFloor } from '../src/core/deliverable-floor.js';
 import { CREW_RUN_ID_FIELD } from '../src/qe/ledger.js';
 import { removeScratch } from './setup/scratch.js';
@@ -90,7 +92,9 @@ const RUNS = {
   gatedNoReq: 'run-noqe-gated',
   done: 'run-qe-done',
   donePass: 'run-qe-done-pass',
+  donePushOnly: 'run-qe-done-push-only',
 };
+let pushOnlyNext = false;
 
 beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), 'crew-delivery-assurance-'));
@@ -105,6 +109,7 @@ beforeAll(async () => {
     view(RUNS.gatedNoReq, 'awaiting_human', ['distinct_evaluator', 'judge']),
     view(RUNS.done, 'completed', ['qe_acceptance'], workdir),
     view(RUNS.donePass, 'completed', ['qe_acceptance'], workdir),
+    view(RUNS.donePushOnly, 'completed', ['qe_acceptance'], workdir),
   ];
   const mockAdapter = {
     sessionsDetail: vi.fn(async () => structuredClone(views)),
@@ -132,6 +137,12 @@ beforeAll(async () => {
     worktreeExists: () => true,
     deliverExec: async (workdir: string) => {
       deliverCalls.push(workdir);
+      if (pushOnlyNext) {
+        return {
+          status: 0,
+          output: `${DELIVER_UNVERIFIED_MARKER} tree-before=3333333333 tree-after=4444444444\n${DELIVER_PUSHED_NO_PR_MARKER} wicked/x /srv/origin.git\n`,
+        };
+      }
       return {
         status: 0,
         output: `deliver: pushed wicked/x to origin\n${DELIVER_UNVERIFIED_MARKER} tree-before=1111111111 tree-after=2222222222\nhttps://github.com/o/r/pull/77\n`,
@@ -142,6 +153,7 @@ beforeAll(async () => {
   await stampVerdict(RUNS.gatedFail, 'FAIL');
   await stampVerdict(RUNS.gatedPass, 'PASS');
   await stampVerdict(RUNS.donePass, 'PASS');
+  await stampVerdict(RUNS.donePushOnly, 'PASS');
 });
 
 beforeEach(() => {
@@ -203,6 +215,19 @@ describe('EX-03 — a run that requires QE acceptance delivers only on an attrib
     expect(res.json().delivery).toEqual({ qeAcceptance: null });
   });
 
+  it('a gated REASSIGN approves the gate too — refused the same way before anything is confirmed', async () => {
+    const res = await app.inject({ method: 'POST', url: `/api/v1/runs/${RUNS.gated}/reassign`, payload: {} });
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json()).toMatchObject({ code: 'qe_acceptance_required' });
+    expect(confirmCalls).toEqual([]);
+  });
+
+  it('walkthrough evidence alone never satisfies qe_acceptance — the LEDGER must hold an attributed PASS', () => {
+    const check = qeAcceptanceFromView({ gate: { required: true, satisfied: true, verdict: null, runStatus: null, reason: 'every walkthrough sealed' }, acceptance: null } as unknown as AcceptanceView);
+    expect(check.satisfied).toBe(false);
+    expect(check.reason).toMatch(/no PASS attributed/);
+  });
+
   it('the post-hoc lift of a completed run with no PASS is refused BEFORE the script runs', async () => {
     const res = await app.inject({ method: 'POST', url: `/api/v1/runs/${RUNS.done}/deliver` });
     expect(res.statusCode, res.body).toBe(409);
@@ -233,6 +258,23 @@ describe('EX-04 — a post-hoc lift is recorded UNVERIFIED, with both trees', ()
     const again = await app.inject({ method: 'POST', url: `/api/v1/runs/${RUNS.donePass}/deliver` });
     expect(again.json()).toEqual(body);
     expect(deliverCalls).toHaveLength(1);
+  });
+});
+
+describe('EX-04 — a push-only post-hoc delivery (a non-GitHub origin) is recorded unverified too', () => {
+  it('the run record carries delivery_assurance for the pushed branch', async () => {
+    pushOnlyNext = true;
+    try {
+      const res = await app.inject({ method: 'POST', url: `/api/v1/runs/${RUNS.donePushOnly}/deliver` });
+      expect(res.statusCode, res.body).toBe(409); // push-only: no PR URL to answer with (N1)
+    } finally {
+      pushOnlyNext = false;
+    }
+    const delivered = recorded.find((r) => r.action === 'run.delivered');
+    expect(delivered?.detail).toMatchObject({ via: 'post-hoc', assurance: { verified: false, treeAfter: '4444444444' } });
+    const run = (await app.inject({ method: 'GET', url: `/api/v1/runs/${RUNS.donePushOnly}` })).json();
+    expect(run.run.session.delivery).toBe('pushed');
+    expect(run.run.session.delivery_assurance).toMatchObject({ verified: false, treeBefore: '3333333333', treeAfter: '4444444444' });
   });
 });
 

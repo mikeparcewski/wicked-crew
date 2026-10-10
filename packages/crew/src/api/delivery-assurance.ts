@@ -43,9 +43,16 @@ export function requiresQeAcceptance(view: SessionView): boolean {
  *  contract that requires QE acceptance owes a verdict even when no phase raises `verified_evidence`). */
 export function qeAcceptanceFromView(view: AcceptanceView): QeAcceptanceCheck {
   const verdict = view.acceptance?.verdict ?? null;
+  // The gate combines walkthrough seals with the repo ledger, and a walkthrough-only requirement
+  // leaves the ledger optional there. `qe_acceptance` is the LEDGER's attributed PASS: the gate must
+  // hold AND that verdict must be a PASS (codex r1 on the EX-03 PR).
+  const ledgerPass = verdict?.verdict === 'PASS';
   return {
-    satisfied: view.gate.satisfied,
-    reason: view.gate.reason,
+    satisfied: view.gate.satisfied && ledgerPass,
+    reason:
+      view.gate.satisfied && !ledgerPass
+        ? `the QE ledger holds no PASS attributed to this run (${view.gate.reason}); walkthrough evidence alone does not satisfy qe_acceptance`
+        : view.gate.reason,
     verdictId: verdict?.id ?? null,
     reviewer: verdict?.reviewer ?? null,
   };
