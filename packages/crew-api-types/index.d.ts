@@ -9731,3 +9731,83 @@ export interface ConsentWriteTarget {
   /** The path is the operator's OWN (outside every program-owned root). */
   operatorOwned: boolean;
 }
+
+// ── Project aggregates (crew#371; GET /projects/:id/{requirements,domain,coverage}) ──────────────
+/** Each `crew.repo` member is one row, never dropped: `ok`, `absent` (nothing generated or indexed
+ *  yet), `error`, or `dangling` (a member whose registry record is gone). `reason` says why for
+ *  every state but `ok`. */
+export type ProjectAggregateRowState = 'ok' | 'absent' | 'error' | 'dangling';
+
+export interface ProjectAggregateRowBase {
+  repo: { id: string; name: string | null };
+  state: ProjectAggregateRowState;
+  reason?: string;
+}
+
+export interface ProjectAggregateTotals {
+  repos: number;
+  ok: number;
+  absent: number;
+  errors: number;
+  dangling: number;
+}
+
+/** One repo's part of `GET /projects/:id/requirements`. */
+export interface ProjectRequirementsRow extends ProjectAggregateRowBase {
+  /** Requirements matching the query in this repo (`0` unless `ok`). */
+  total: number;
+  /** This repo's whole corpus (`0` unless `ok`). */
+  corpus: number;
+  orphanedOverrides: number;
+  /** This repo's part of the requested window; `[]` when the window lies in other repos. */
+  items: RequirementSummary[];
+}
+
+/**
+ * `GET /projects/:id/requirements?q&risk&category&domain&offset&limit` (crew#371): the same query as
+ * `GET /repos/:id/requirements`, over every repo of the project. `offset`/`limit` (max 200) page a
+ * GLOBAL window over the repos in membership order; each row's `total` says how many of its
+ * requirements match. The synthesized `default` project has no members (empty rows).
+ */
+export interface ProjectRequirementsResponse {
+  projectId: string;
+  totals: ProjectAggregateTotals & { total: number; corpus: number };
+  offset: number;
+  limit: number;
+  rows: ProjectRequirementsRow[];
+}
+
+/** One domain of a repo's `requirements_graph.json`, summarised. */
+export interface ProjectDomainSummary {
+  name: string;
+  description: string | null;
+  requirements: number;
+  entities: number;
+}
+
+export interface ProjectDomainRow extends ProjectAggregateRowBase {
+  domains: ProjectDomainSummary[];
+}
+
+/** `GET /projects/:id/domain` (crew#371): per-repo domain summaries and the merged domain list.
+ *  Full graphs stay on `GET /repos/:id/domain-graph`; coverage is `GET /projects/:id/coverage`. */
+export interface ProjectDomainResponse {
+  projectId: string;
+  totals: ProjectAggregateTotals & { domains: number; requirements: number; entities: number };
+  merged: Array<{ name: string; repoIds: string[]; requirements: number; entities: number }>;
+  rows: ProjectDomainRow[];
+}
+
+export interface ProjectCoverageRow extends ProjectAggregateRowBase {
+  /** The repo's report WITHOUT `unaccounted_nodes` (their count is `unaccounted`; the list is on
+   *  `GET /governance/coverage?repo=`). `null` unless `ok`. */
+  report: Omit<CoverageReport, 'unaccounted_nodes'> | null;
+}
+
+/** `GET /projects/:id/coverage` (crew#371): each repo's own coverage report; `totals.coverage` is
+ *  sum(resolved) / sum(behavior_bearing) over the `ok` rows, `null` when that is 0/0. */
+export interface ProjectCoverageResponse {
+  projectId: string;
+  totals: ProjectAggregateTotals & { behavior_bearing: number; resolved: number; coverage: number | null };
+  rows: ProjectCoverageRow[];
+}
