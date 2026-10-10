@@ -27,6 +27,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CoreAdapter } from '../../src/core/adapter.js';
+import { registerDef } from '../support/register-def.js';
 import { createServer } from '../../src/api/server.js';
 import type { McpCallRecord } from '../../src/core/types.js';
 import { mcpStateDir } from '../../src/mcp/registry-store.js';
@@ -88,7 +89,6 @@ process.stdout.write('WRAPPED-UNIT-DONE: listed and called the MCP tools through
 const ACP_AGENT = (client: string, out: string): string => `
 import { createInterface } from 'node:readline';
 import { useMcp } from ${JSON.stringify(client)};
-import { registerDef } from '../support/register-def.js';
 const rl = createInterface({ input: process.stdin });
 const w = (obj) => process.stdout.write(JSON.stringify(obj) + '\\n');
 rl.on('line', async (line) => {

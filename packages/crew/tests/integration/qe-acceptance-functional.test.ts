@@ -45,13 +45,13 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { CreateInput } from 'wicked-ledger';
 import { CoreAdapter } from '../../src/core/adapter.js';
+import { registerDef } from '../support/register-def.js';
 import { EVIDENCE_FLOOR_PIN } from '../../src/core/deliver.js';
 import { createServer } from '../../src/api/server.js';
 import { CREW_RUN_ID_FIELD } from '../../src/qe/ledger.js';
 import type { RecordedEvent } from '../../src/core/types.js';
 import { removeScratch } from '../setup/scratch.js';
 import { baseSkillOff } from '../setup/base-skill-off.js';
-import { registerDef } from '../support/register-def.js';
 
 const FIXTURE = fileURLToPath(new URL('../fixtures/qe-ledger-pass', import.meta.url));
 /** The 6b QE run the fixture records (its PASS verdict landed 2026-08-12T02:31:41Z). */

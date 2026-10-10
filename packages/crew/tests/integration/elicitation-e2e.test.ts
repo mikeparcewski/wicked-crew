@@ -27,6 +27,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
 import { CoreAdapter } from '../../src/core/adapter.js';
+import { registerDef } from '../support/register-def.js';
 import { createServer } from '../../src/api/server.js';
 import { removeScratch } from '../setup/scratch.js';
 import { baseSkillOff } from '../setup/base-skill-off.js';
@@ -88,7 +89,6 @@ function waitForFrame(pred: (f: Frame) => boolean, label: string, ms = 60000): P
  */
 const STUB_AGENT = `
 import { createInterface } from 'node:readline';
-import { registerDef } from '../support/register-def.js';
 const rl = createInterface({ input: process.stdin });
 const w = (obj) => process.stdout.write(JSON.stringify(obj) + '\\n');
 let promptId = null;

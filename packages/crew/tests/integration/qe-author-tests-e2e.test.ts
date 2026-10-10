@@ -29,6 +29,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter } from '../../src/core/adapter.js';
+import { registerDef } from '../support/register-def.js';
 import { createServer } from '../../src/api/server.js';
 import { EVIDENCE_FLOOR_PIN } from '../../src/core/deliver.js';
 import type { PhaseDef, WorkflowDef } from '../../src/core/types.js';
@@ -41,7 +42,6 @@ import type { TestSet } from '../../src/qe/test-sets.js';
 import { removeScratch } from '../setup/scratch.js';
 import { baseSkillOff } from '../setup/base-skill-off.js';
 import { createRequire } from 'node:module';
-import { registerDef } from '../support/register-def.js';
 
 /**
  * Is the installed `wicked-core-ts` at least `maj.min.pat`? A tests-only twin of the adapter's
