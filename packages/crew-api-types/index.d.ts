@@ -9798,7 +9798,9 @@ export interface ProjectDomainResponse {
 }
 
 export interface ProjectCoverageRow extends ProjectAggregateRowBase {
-  report: CoverageReport | null;
+  /** The repo's report WITHOUT `unaccounted_nodes` (their count is `unaccounted`; the list is on
+   *  `GET /governance/coverage?repo=`). `null` unless `ok`. */
+  report: Omit<CoverageReport, 'unaccounted_nodes'> | null;
 }
 
 /** `GET /projects/:id/coverage` (crew#371): each repo's own coverage report; `totals.coverage` is

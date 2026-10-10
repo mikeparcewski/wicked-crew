@@ -132,6 +132,25 @@ describe('project aggregates (crew#371)', () => {
     expect(res.rows[1]?.state).toBe('ok');
   });
 
+  it('codex on #907: a hung coverage read is JOINED by the next request, never started twice; rows carry no node list', async () => {
+    let calls = 0;
+    const hung = { ...adapter, getCoverageReportForRepo: vi.fn(async (ref: string) => { if (ref === 'alpha') { calls++; return new Promise(() => undefined); } return report(4, 2); }) };
+    await projectCoverage(hung as unknown as CoreAdapter, 'p1', 20);
+    await projectCoverage(hung as unknown as CoreAdapter, 'p1', 20);
+    expect(calls).toBe(1);
+    const res = await projectCoverage(adapter as unknown as CoreAdapter, 'p1', 50);
+    expect(res.rows[1]?.report).not.toHaveProperty('unaccounted_nodes');
+    expect(res.rows[1]?.report).toMatchObject({ behavior_bearing: 30, unaccounted: 0 });
+  });
+
+  it('codex on #907: a members read on an engine without projects is a 501 too', async () => {
+    const old = Fastify({ logger: false });
+    registerProjectAggregateRoutes(old, { ...adapter, projectMembers: vi.fn(async () => { throw new ProjectsUnsupportedError('Listing project members'); }) } as unknown as CoreAdapter);
+    await old.ready();
+    expect((await old.inject({ method: 'GET', url: '/api/v1/projects/p1/requirements' })).statusCode).toBe(501);
+    await old.close();
+  });
+
   it('an engine without projects is a 501', async () => {
     const old = Fastify({ logger: false });
     registerProjectAggregateRoutes(old, { ...adapter, projectGet: vi.fn(async () => { throw new ProjectsUnsupportedError('Reading a project'); }) } as unknown as CoreAdapter);

@@ -32,6 +32,7 @@ import type {
   ProjectDomainSummary,
   ProjectRequirementsResponse,
   ProjectRequirementsRow,
+  CoverageReport,
   RepoEntry,
 } from '../core/types.js';
 import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
@@ -67,9 +68,15 @@ async function membersOf(adapter: CoreAdapter, projectId: string): Promise<Membe
     throw err;
   }
   if (project === null) throw new AggregateHttpError(404, `Project ${projectId} not found`);
-  const refs = (await adapter.projectMembers(projectId)).filter((m) => m.member_kind === 'crew.repo').map((m) => m.member_ref);
-  const repos = await adapter.listRepos();
-  return [...new Set(refs)].map((ref) => ({ ref, repo: repos.find((r) => r.id === ref) ?? null }));
+  try {
+    const refs = (await adapter.projectMembers(projectId)).filter((m) => m.member_kind === 'crew.repo').map((m) => m.member_ref);
+    const repos = await adapter.listRepos();
+    return [...new Set(refs)].map((ref) => ({ ref, repo: repos.find((r) => r.id === ref) ?? null }));
+  } catch (err) {
+    // codex on #907: the member/registry reads fail the same ways the project read does.
+    if (err instanceof ProjectsUnsupportedError) throw new AggregateHttpError(501, err.message);
+    throw err;
+  }
 }
 
 /** Map with at most {@link AGGREGATE_CONCURRENCY} in flight, results in input order. */
@@ -117,6 +124,11 @@ export const ProjectRequirementsQuerySchema = z
   })
   .strict();
 
+/** A row the second read downgraded: no counts of a read that no longer stands (codex on #907). */
+function cleared(row: ProjectRequirementsRow): ProjectRequirementsRow {
+  return { ...row, total: 0, corpus: 0, orphanedOverrides: 0, items: [] };
+}
+
 export async function projectRequirements(
   adapter: CoreAdapter,
   projectId: string,
@@ -151,8 +163,8 @@ export async function projectRequirements(
       skip = 0;
       want -= limit;
       return listRequirements(members[i]!.repo!, { ...filters, offset, limit })
-        .then((page): ProjectRequirementsRow => (page === null ? { ...row, state: 'absent', reason: 'requirements_graph.json disappeared while reading' } : { ...row, items: page.items }))
-        .catch((err: unknown): ProjectRequirementsRow => ({ ...row, state: 'error', reason: message(err) }));
+        .then((page): ProjectRequirementsRow => (page === null ? { ...cleared(row), state: 'absent', reason: 'requirements_graph.json disappeared while reading' } : { ...row, items: page.items }))
+        .catch((err: unknown): ProjectRequirementsRow => ({ ...cleared(row), state: 'error', reason: message(err) }));
     }),
   );
   const ok = rows.filter((r) => r.state === 'ok');
@@ -229,6 +241,23 @@ function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
   return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
 }
 
+/**
+ * One coverage read per repo at a time, across requests (codex on #907): a timed-out read cannot be
+ * cancelled (it is an engine call), so a later request JOINS the read still in flight instead of
+ * starting another — a hung repo holds one engine call, not one per page load.
+ */
+const coverageInFlight = new WeakMap<CoreAdapter, Map<string, Promise<CoverageReport | null>>>();
+
+function coverageOnce(adapter: CoreAdapter, ref: string): Promise<CoverageReport | null> {
+  let reads = coverageInFlight.get(adapter);
+  if (reads === undefined) coverageInFlight.set(adapter, (reads = new Map()));
+  const running = reads.get(ref);
+  if (running !== undefined) return running;
+  const read = adapter.getCoverageReportForRepo(ref).finally(() => reads.delete(ref));
+  reads.set(ref, read);
+  return read;
+}
+
 export async function projectCoverage(
   adapter: CoreAdapter,
   projectId: string,
@@ -238,10 +267,13 @@ export async function projectCoverage(
   const rows = await mapBounded(members, async (m): Promise<ProjectCoverageRow> => {
     if (m.repo === null) return { repo: repoOf(m), state: 'dangling', reason: DANGLING, report: null };
     try {
-      const report = await withTimeout(adapter.getCoverageReportForRepo(m.ref), timeoutMs, 'the coverage read');
-      return report === null
-        ? { repo: repoOf(m), state: 'absent', reason: "the repo's code graph holds no nodes yet", report: null }
-        : { repo: repoOf(m), state: 'ok', report };
+      const report = await withTimeout(coverageOnce(adapter, m.ref), timeoutMs, 'the coverage read');
+      if (report === null) return { repo: repoOf(m), state: 'absent', reason: "the repo's code graph holds no nodes yet", report: null };
+      // The node list stays on the per-repo read (`GET /governance/coverage?repo=`): N repos' full
+      // `unaccounted_nodes` in one body is not a view (codex on #907). Its size is `unaccounted`.
+      const { unaccounted_nodes, ...summary } = report;
+      void unaccounted_nodes;
+      return { repo: repoOf(m), state: 'ok', report: summary };
     } catch (err) {
       return { repo: repoOf(m), state: 'error', reason: message(err), report: null };
     }
@@ -264,7 +296,7 @@ export function registerProjectAggregateRoutes(app: FastifyInstance, adapter: Co
   };
   app.get(
     `${V}/projects/:id/requirements`,
-    { config: { manifest: { responseType: 'ProjectRequirementsResponse', statusCodes: [200, 400, 404, 501] } } },
+    { config: { manifest: { responseType: 'ProjectRequirementsResponse', statusCodes: [200, 400, 404, 500, 501] } } },
     async (req, reply) => {
       const { id } = req.params as { id: string };
       const parsed = ProjectRequirementsQuerySchema.safeParse(req.query);
@@ -278,7 +310,7 @@ export function registerProjectAggregateRoutes(app: FastifyInstance, adapter: Co
   );
   app.get(
     `${V}/projects/:id/domain`,
-    { config: { manifest: { responseType: 'ProjectDomainResponse', statusCodes: [200, 404, 501] } } },
+    { config: { manifest: { responseType: 'ProjectDomainResponse', statusCodes: [200, 404, 500, 501] } } },
     async (req, reply) => {
       const { id } = req.params as { id: string };
       try {
@@ -290,7 +322,7 @@ export function registerProjectAggregateRoutes(app: FastifyInstance, adapter: Co
   );
   app.get(
     `${V}/projects/:id/coverage`,
-    { config: { manifest: { responseType: 'ProjectCoverageResponse', statusCodes: [200, 404, 501] } } },
+    { config: { manifest: { responseType: 'ProjectCoverageResponse', statusCodes: [200, 404, 500, 501] } } },
     async (req, reply) => {
       const { id } = req.params as { id: string };
       try {
