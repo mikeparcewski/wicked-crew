@@ -8076,9 +8076,12 @@ export interface TeamPlanStep {
 }
 
 /**
- * The stable token a plan refusal starts with (wicked-core `PlanRefusal::reason`). The wire's
- * `reason` strings are the engine's text, `<token>: <detail>`; a skin matches the token, never the
- * prose. Open-ended: the engine may add tokens.
+ * The stable token of a plan-rule refusal (wicked-core `PlanRefusal::reason`). A refusal formatted
+ * by the engine's `PlanRefusal` reads `<token>: <detail>`; a skin matches the token, never the
+ * prose. NOT every `plan.refused` reason is one: some are plain text (an auto-mode floor override,
+ * a held edit the run ended before applying), and a launch / preview / `propose_plan` error message
+ * CONTAINS the refusal text behind a context prefix (`the plan is refused: <token>: …`), so search
+ * for the token rather than splitting on the first `:`. Open-ended: the engine may add tokens.
  *
  *  - `pool_raised` (crew#894, wicked-core#810): a step raised its phase's pool.
  *  - `writes_nothing_on_code` (crew#928, wicked-core#854): `writes_nothing: true` on a step whose
@@ -8177,11 +8180,11 @@ export type TeamPlanAcceptedPayload = TeamEnvelope & {
 export type TeamPlanRefusedPayload = TeamEnvelope & {
   proposal_id: string;
   base_rev: number | null;
-  /** The engine's refusal reason, verbatim: `<token>: <detail>`, where the token is a
+  /** The engine's refusal reason, verbatim. A plan-rule refusal reads `<token>: <detail>` with a
    *  {@link PlanRefusalToken} — e.g. `pool_raised` (crew#894, wicked-core#810: a plan step raised a
    *  phase's `pool`; a step may only lower it), `security_review_on_non_code_plan` or
-   *  `writes_nothing_on_code` (crew#928). The same text is a launch / preview / `propose_plan`
-   *  error's message. */
+   *  `writes_nothing_on_code` (crew#928); other reasons are plain text. A launch / preview /
+   *  `propose_plan` error message contains the same text behind a context prefix. */
   reason: string;
 };
 

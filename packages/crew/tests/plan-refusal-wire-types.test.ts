@@ -25,8 +25,9 @@ const refused: TeamPlanRefusedPayload = {
     '(rule TST-1002 requires it)',
 };
 
-/** The token a skin keys on: the text before the first `:`. */
-const tokenOf = (reason: string): PlanRefusalToken => reason.split(':', 1)[0]!;
+/** The token a skin keys on, searched for (an error message prefixes context; some reasons are prose). */
+const tokenOf = (text: string): PlanRefusalToken | null =>
+  /\b(security_review_on_non_code_plan|writes_nothing_on_code|pool_raised)\b/.exec(text)?.[1] ?? null;
 
 describe('plan refusal wire (crew#928)', () => {
   it('types writes_nothing on plan and preset steps', () => {
@@ -35,6 +36,9 @@ describe('plan refusal wire (crew#928)', () => {
   });
   it('a refusal reason starts with its stable token', () => {
     expect(tokens).toContain(tokenOf(refused.reason));
+    // A preview error carries the same text behind a context prefix; a plain-text reason has no token.
+    expect(tokenOf(`the plan is refused: ${refused.reason}`)).toBe('security_review_on_non_code_plan');
+    expect(tokenOf('override in auto mode')).toBeNull();
     expect(refused.reason).toMatch(/rule TST-1002 requires it/);
   });
 });
