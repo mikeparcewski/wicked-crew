@@ -419,6 +419,22 @@ export function issueRefs(rawIntent: string, repoRef?: string | null): IssueRefs
 }
 
 /**
+ * (crew#933) The Azure Boards work items the intent names — `AB#<id>`, the syntax Azure Boards
+ * links on (case-insensitive, not glued to a word) — in order, deduplicated. On a GitHub delivery
+ * the mention rides the body as written (the Azure Boards app links it); on an Azure DevOps
+ * delivery the ids are linked on the pull request itself (`workItemRefs`). The daemon's
+ * linked-issues block is issue text, never the run's references.
+ */
+export function adoWorkItemIds(rawIntent: string): string[] {
+  const out: string[] = [];
+  for (const m of stripLinkedIssues(rawIntent).matchAll(/(?<![\w#])AB#(\d+)\b/gi)) {
+    const id = String(Number(m[1]));
+    if (id !== '0' && !out.includes(id)) out.push(id);
+  }
+  return out;
+}
+
+/**
  * How much of the intent the deliver SCRIPT carries in its embedded fallback text. The script is
  * one `bash -lc` argument, and `LaunchSchema.problem` has no length cap, so an unbounded intent
  * could exceed a platform's single-argument limit (Linux: 128 KiB) and fail the phase with E2BIG

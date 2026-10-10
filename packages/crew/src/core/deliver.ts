@@ -94,6 +94,7 @@ import { ADO_HELPER_JS } from './ado-deliver-helper.js';
 import { ADO_PAT_ENV, ADO_SP_ENV, DELIVER_CREDENTIALS_MISSING_MARKER, adoRepoOf, type AdoRepo, type DeliverCredentials } from './deliver-credentials.js';
 import { DELIVER_NOT_SHIPPED_HEADING, DELIVER_STRANDED_SENTINEL, ENV_TEMPLATE_SAFE_LINE_ERE, SCRATCH_DIRS, TOOL_ARTIFACT_DIRS } from './deliver-exclusions.js';
 import {
+  adoWorkItemIds,
   composeEmbeddedDeliverText,
   factsFromWorkflow,
   framedDeliverText,
@@ -312,7 +313,7 @@ export function isSafeRefName(name: string): boolean {
 
 /** The one shape a PR URL may take before it is baked into the script and printed as the phase's
  *  last line (crew re-derives "delivered" from that line — `prUrlFrom`). */
-const SAFE_PR_URL = /^https:\/\/[A-Za-z0-9.-]+\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/pull\/[0-9]+$/;
+const SAFE_PR_URL = /^https:\/\/[A-Za-z0-9.-]+\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/pull\/[0-9]+$|^https:\/\/dev\.azure\.com\/[A-Za-z0-9._~%()-]+\/[A-Za-z0-9._~%()-]+\/_git\/[A-Za-z0-9._~%()-]+\/pullrequest\/[0-9]+$/;
 
 /** The `bug` def's `fix` phase instructions — the SAME literal wicked-core's `bug_def()` carries
  *  (`BUG_FIX_SWEEP_INSTRUCTIONS`, DES-L9 BC-60 / core#432): both carriers are live (`deliver:pr`
@@ -321,6 +322,30 @@ const SAFE_PR_URL = /^https:\/\/[A-Za-z0-9.-]+\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+
  *  keeps ≥ 300 B of intent headroom. */
 export const BUG_FIX_SWEEP_INSTRUCTIONS =
   'Update every consumer of behaviour this fix retires or changes: tests, docs, comments.';
+
+/** (crew#933) The seam the Azure DevOps resolver runs the deliver helper through (`node ado.mjs …`). */
+export type AdoHelperExec = (args: string[], opts: { timeoutMs: number }) => Promise<{ stdout: string; stderr: string; code: number | null }>;
+
+/** The helper written to a private temp dir and run with the node that runs crew; the credential
+ *  stays in the daemon's environment and is read by the helper alone. */
+export const defaultAdoHelperExec: AdoHelperExec = async (args, opts) => {
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = await mkdtemp(join(tmpdir(), 'crew-ado-'));
+  try {
+    const file = join(dir, 'ado.mjs');
+    await writeFile(file, ADO_HELPER_JS, { mode: 0o600 });
+    return await new Promise((resolve) => {
+      execFile(process.execPath, [file, ...args], { timeout: opts.timeoutMs, encoding: 'utf8', env: childEnvWithBootEstateDb(process.env) }, (err, stdout, stderr) => {
+        const code = err === null ? 0 : typeof (err as { code?: unknown }).code === 'number' ? (err as { code: number }).code : null;
+        resolve({ stdout: String(stdout ?? ''), stderr: String(stderr ?? ''), code });
+      });
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+};
 
 /** What `gh pr view` answers for a revision target (DES-L9 `resolvePullRequest`). */
 export interface ResolvedPullRequest extends RevisedPullRequest {
@@ -399,37 +424,45 @@ export async function resolvePullRequest(
   repoRoot: string,
   number: number,
   exec: GhExec = defaultGhExec,
+  adoExec: AdoHelperExec = defaultAdoHelperExec,
 ): Promise<PullRequestResolution> {
   if (!Number.isInteger(number) || number <= 0) return { ok: false, error: `revisesPr must be a positive pull request number (got ${number})` };
+  // (crew#933) An Azure DevOps origin is asked through its REST API with the daemon's own
+  // credential (the deliver helper's `view`); the answer has gh's shape, so one parse serves both.
+  const ado = adoRepoOf(await readDeliverOriginUrl(repoRoot).catch(() => null));
+  const who = ado === null ? 'gh' : 'Azure DevOps';
   let out: { stdout: string; stderr: string; code: number | null };
   try {
-    out = await exec(['pr', 'view', String(number), '--json', 'headRefName,state,isCrossRepository,url'], { cwd: repoRoot, timeoutMs: 5000 });
+    out =
+      ado === null
+        ? await exec(['pr', 'view', String(number), '--json', 'headRefName,state,isCrossRepository,url'], { cwd: repoRoot, timeoutMs: 5000 })
+        : await adoExec(['view', ado.loginBase, ado.apiBase, ado.webUrl, String(number)], { timeoutMs: 30_000 });
   } catch (err) {
-    return { ok: false, error: `gh could not read PR #${number}: ${err instanceof Error ? err.message : String(err)}` };
+    return { ok: false, error: `${who} could not read PR #${number}: ${err instanceof Error ? err.message : String(err)}` };
   }
   if (out.code !== 0) {
     const why = (out.stderr || out.stdout).trim().split('\n').slice(-2).join(' ').slice(0, 300);
-    return { ok: false, error: `gh could not read PR #${number}: ${why || (out.code === null ? 'gh timed out or could not be spawned' : `exit ${out.code}`)}` };
+    return { ok: false, error: `${who} could not read PR #${number}: ${why || (out.code === null ? `${who} timed out or could not be spawned` : `exit ${out.code}`)}` };
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(out.stdout);
   } catch {
-    return { ok: false, error: `gh could not read PR #${number}: its answer was not the JSON asked for` };
+    return { ok: false, error: `${who} could not read PR #${number}: its answer was not the JSON asked for` };
   }
   const r = (parsed ?? {}) as Record<string, unknown>;
   const headRef = r['headRefName'];
   const state = r['state'];
   const url = r['url'];
   if (typeof headRef !== 'string' || typeof state !== 'string' || typeof url !== 'string') {
-    return { ok: false, error: `gh could not read PR #${number}: headRefName / state / url missing from its answer` };
+    return { ok: false, error: `${who} could not read PR #${number}: headRefName / state / url missing from its answer` };
   }
   if (state !== 'OPEN') return { ok: false, error: `revisesPr #${number} is ${state} — only an open pull request can be revised` };
   if (r['isCrossRepository'] === true) {
     return { ok: false, error: `revisesPr #${number} is a fork pull request (its head lives in another repository) — only a same-repository branch can be revised` };
   }
   if (!isSafeRefName(headRef)) return { ok: false, error: `revisesPr #${number}'s head branch name cannot be used as a push target: ${JSON.stringify(headRef)}` };
-  if (!SAFE_PR_URL.test(url)) return { ok: false, error: `revisesPr #${number}: gh answered a URL that is not a pull request URL (${url.slice(0, 120)})` };
+  if (!SAFE_PR_URL.test(url)) return { ok: false, error: `revisesPr #${number}: ${who} answered a URL that is not a pull request URL (${url.slice(0, 120)})` };
   return { ok: true, pr: { number, headRef, url, state } };
 }
 
@@ -619,11 +652,19 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
   const nonce = opts.nonce ?? mintDeliverNonce();
   if (!/^[0-9a-fA-F]{16,64}$/.test(nonce)) throw new Error(`deliver nonce: not 16-64 hex digits: ${JSON.stringify(nonce)}`);
   // (crew#720) AN AZURE DEVOPS ORIGIN: the push and the pull request go through the REST API with
-  // the daemon's own credential. Revising an existing ADO pull request is not supported yet —
-  // refused at compose time rather than silently opening a second PR.
+  // the daemon's own credential. (crew#933) A revision pushes onto the PR's head branch and comments
+  // the run record as a thread, as on GitHub; the intent's Azure Boards work items (`AB#<id>`) are
+  // linked on the PR it opens. Digits only, so the literal is safe.
   const ado = opts.adoTarget !== undefined ? opts.adoTarget : adoRepoOf(opts.originUrl);
-  if (ado !== null && revises !== null) {
-    throw new Error(`revisesPr #${revises.number}: revising an Azure DevOps pull request is not supported; launch a new delivery`);
+  const adoWorkItems = ado === null ? '' : adoWorkItemIds(intent ?? '').join(',');
+  // The revised PR must be THIS delivery's pull request: on Azure DevOps its URL names the target
+  // repository and the number (an origin re-pointed between resolution and composition must not
+  // push and comment on another organisation's PR); on GitHub it is never an Azure DevOps URL.
+  if (revises !== null) {
+    const isAdoUrl = revises.url.startsWith('https://dev.azure.com/');
+    if (ado !== null ? revises.url.toLowerCase() !== `${ado.webUrl}/pullrequest/${revises.number}`.toLowerCase() : isAdoUrl) {
+      throw new Error(`revisesPr #${revises.number}: ${revises.url} is not pull request #${revises.number} of the repository this delivery pushes to`);
+    }
   }
   return [
     'set -euo pipefail',
@@ -673,6 +714,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // can never hand the header to another program (codex r1 + r2).
     `ADOPROTO=${shellSingleQuote(ado === null ? '' : new URL(ado.gitUrl).protocol.replace(':', ''))}`,
     "ADOHDR=''",
+    `ADOWI='${adoWorkItems}'`,
     // (crew#940) THE PINNED GITHUB TOKEN lives in an UNEXPORTED shell variable and reaches each gh
     // and git network call one command at a time (`GH_TOKEN=… gh`, a one-command credential
     // helper for git) — never argv, disk or the log, and no child that does not talk to GitHub
@@ -1268,9 +1310,9 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     '  _gnet fetch -q "${NETGIT:-origin}" "+refs/heads/$TARGET:refs/remotes/origin/$TARGET"',
     '  RT=$(git rev-parse "origin/$TARGET"); LT=$(git rev-parse "$B")',
     '  [ "$RT" = "$LT" ] || { echo "deliver: origin/$TARGET is at ${RT:0:10} after the push, not at $B (${LT:0:10}) — refusing to report a delivery the remote does not show"; exit 1; }',
-    '  ST=$(_gh pr view "$PRNUM" ${GHREPO:+--repo "github.com/$GHREPO"} --json state -q .state 2>/dev/null || true)',
+    '  if [ -n "$ADOGIT" ]; then ST=$(WICKED_ADO_AUTH="$ADOHDR" "$ADONODE" "$TD/ado.mjs" state "$ADOAPI" "$PRNUM" 2>/dev/null || true); else ST=$(_gh pr view "$PRNUM" ${GHREPO:+--repo "github.com/$GHREPO"} --json state -q .state 2>/dev/null || true); fi',
     '  if [ "$ST" = "OPEN" ]; then echo "deliver: pull request #$PRNUM is OPEN and its branch $TARGET is at $B"; else echo "deliver: warning — pull request #$PRNUM reads ${ST:-unknown} (not OPEN) after the push; the commits landed on origin/$TARGET"; fi',
-    '  if COUT=$(_gh pr comment "$PRNUM" ${GHREPO:+--repo "github.com/$GHREPO"} --body-file "$TD/body" 2>&1); then echo "deliver: run record commented on pull request #$PRNUM"; else echo "$COUT"; echo "deliver: could not comment on pull request #$PRNUM — the commits landed; the record is in the commit message"; fi',
+    '  if COUT=$(if [ -n "$ADOGIT" ]; then WICKED_ADO_AUTH="$ADOHDR" "$ADONODE" "$TD/ado.mjs" comment "$ADOAPI" "$PRNUM" "$TD/body"; else _gh pr comment "$PRNUM" ${GHREPO:+--repo "github.com/$GHREPO"} --body-file "$TD/body"; fi 2>&1); then echo "deliver: run record commented on pull request #$PRNUM"; else echo "$COUT"; echo "deliver: could not comment on pull request #$PRNUM — the commits landed; the record is in the commit message"; fi',
     '  URL="$PRURL"',
     'else',
     // (e2) A NON-GITHUB ORIGIN DELIVERS THE BRANCH (F2). `gh pr create` failing used to be
@@ -1298,7 +1340,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // AND the remote branch (re-fetched from the canonical URL) ahead of the base.
     '  if [ -n "$ADOGIT" ]; then',
     `  printf '%s\\n' "$TITLE" > "$TD/title"`,
-    '  if ! OUT=$(WICKED_ADO_AUTH="$ADOHDR" "$ADONODE" "$TD/ado.mjs" pr "$ADOAPI" "$ADOWEB" "$B" "$DEF" "$TD/title" "$TD/body"); then echo "deliver: the Azure DevOps pull request for $B was not opened (above) — the branch is pushed; approve to retry the deliver phase (it re-pushes $B and opens or adopts the pull request)"; exit 1; fi',
+    '  if ! OUT=$(WICKED_ADO_AUTH="$ADOHDR" "$ADONODE" "$TD/ado.mjs" pr "$ADOAPI" "$ADOWEB" "$B" "$DEF" "$TD/title" "$TD/body" "$ADOWI"); then echo "deliver: the Azure DevOps pull request for $B was not opened (above) — the branch is pushed; approve to retry the deliver phase (it re-pushes $B and opens or adopts the pull request)"; exit 1; fi',
     '  echo "$OUT"',
     '  case "$OUT" in "deliver: ADO-PR-EXISTS "*) EXISTING=1;; esac',
     "  URL=$(printf '%s\\n' \"$OUT\" | grep -Eo 'https://[^[:space:]]+/pullrequest/[0-9]+' | tail -1 || true)",
