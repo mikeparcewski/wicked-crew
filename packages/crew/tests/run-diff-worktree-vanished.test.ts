@@ -2,6 +2,8 @@
 // on server" when the delivered-worktree sweep removed the worktree WHILE the request ran — git's
 // spawn into a vanished cwd fails ENOENT. That is a worktree that is gone, not a missing git: the
 // route serves the run branch, as it does for a worktree that was already gone (F-7R2-013).
+// crew 0.9.3's release smoke (S04, macOS) hit the same race one step later: git was already running
+// when the sweep removed its cwd and exited 128 "Unable to read current working directory".
 
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -10,14 +12,17 @@ import { join } from 'node:path';
 import Fastify from 'fastify';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 
+const race = vi.hoisted(() => ({ mode: 'spawn' as 'spawn' | 'running' }));
 vi.mock('../src/api/run-files.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../src/api/run-files.js')>();
   return {
     ...real,
-    // The sweep lands between the route's existence check and git's spawn.
+    // The sweep lands between the route's existence check and git's spawn (`spawn`), or while git
+    // is already running in the worktree (`running`).
     worktreeDiff: async (workdir: string) => {
       rmSync(workdir, { recursive: true, force: true });
-      throw Object.assign(new Error('spawn git ENOENT'), { code: 'ENOENT' });
+      if (race.mode === 'spawn') throw Object.assign(new Error('spawn git ENOENT'), { code: 'ENOENT' });
+      throw Object.assign(new Error('Command failed: git diff --no-color --no-ext-diff abc\nfatal: Unable to read current working directory: No such file or directory\n'), { code: 128 });
     },
   };
 });
@@ -34,8 +39,9 @@ const base = mkdtempSync(join(tmpdir(), 'diff-vanished-'));
 afterAll(() => rmSync(base, { recursive: true, force: true }));
 
 describe('GET /runs/:id/diff — the worktree vanished mid-request', () => {
-  it('serves the run branch (200, source: branch), never "git executable not found"', async () => {
-    const repo = join(base, 'repo');
+  it.each(['spawn', 'running'] as const)('serves the run branch (200, source: branch) when the sweep lands %s, never a 500', async (mode) => {
+    race.mode = mode;
+    const repo = join(base, `repo-${mode}`);
     // Engine worktrees live UNDER the registered repo (`wicked-worktrees/<id>`).
     const wt = join(repo, 'wicked-worktrees', 'run-v');
     mkdirSync(repo);

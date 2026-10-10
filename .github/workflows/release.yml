@@ -109,7 +109,7 @@ jobs:
     needs: [release, version]
     permissions:
       contents: read
-    uses: mikeparcewski/wicked-ci/.github/workflows/smoke.yml@397dc65f475ea3e297b880c1c074b37f1fe86182 # wicked-ci main after #44 (S04 counts only the bug run's own copilot turns; crew 0.9.1's smoke counted S03's chained capture), on v1.4.0 + #42
+    uses: mikeparcewski/wicked-ci/.github/workflows/smoke.yml@c9c4f7cd24776f5fa327709d8f0baba7778a43db # wicked-ci main after #45 (S04 takes the explicit QE skip on a crew that offers it: crew 0.9.3's smoke parked the bug runs at the QE-required deliver refusal), on #44 + v1.4.0 + #42
     with:
       crew_version: ${{ needs.version.outputs.version }}
       # wicked-ci #30 (release verdict crew 0.7.35 §Smoke gate): on a CROSS-REPO workflow_call GitHub
@@ -117,4 +117,4 @@ jobs:
       # default fell back to `github.sha` — crew's own tag commit — and the harness checkout failed
       # ("not our ref"); the smoke gate never ran inside the release run. Pin the harness ref
       # EXPLICITLY to the same SHA as the `uses:` line above (move both together on every re-pin).
-      wicked_ci_ref: 397dc65f475ea3e297b880c1c074b37f1fe86182
+      wicked_ci_ref: c9c4f7cd24776f5fa327709d8f0baba7778a43db

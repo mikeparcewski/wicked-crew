@@ -2056,9 +2056,11 @@ export function registerRoutes(
       return { ...(await worktreeDiff(workdir, rel, rawBase)), source: 'worktree' as const };
     } catch (err) {
       // The worktree was removed WHILE this request ran (the delivered-worktree sweep, an engine
-      // reap): git's spawn into a vanished cwd fails ENOENT, which is not "git is missing". Serve the
-      // run branch, as for a worktree that was already gone (seen in the 0.9.1 release smoke, S04).
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT' && !existsSync(workdir)) return fromBranchOr409();
+      // reap). Whatever git said — a spawn into the vanished cwd fails ENOENT (the 0.9.1 release
+      // smoke), a git already running exits 128 "Unable to read current working directory" (the
+      // 0.9.3 one) — a diff that failed over a worktree that is gone now serves the run branch, as
+      // for a worktree that was already gone. A named base error stays the caller's 400 (codex r1).
+      if (!(err instanceof UnresolvableDiffBaseError) && !existsSync(workdir)) return fromBranchOr409();
       return diffError(err);
     }
   });
