@@ -26,8 +26,8 @@ export const BUNDLE_CSP_BASE =
 
 /** Exactly the §8.2 header set for one editor's bundle. */
 export function bundleHeaders(record: Pick<EditorRecord, 'manifest' | 'firstParty'>): Record<string, string> {
-  // `network.media` widens only for a first-party editor: a third-party one would have to ASK
-  // (§6.1), and no third-party editor can be installed before EP-C8.
+  // `network.media` widens only for a first-party editor: a third-party pack editor never gets the
+  // network (§6.1 would have it ASK; garden's editor scaffold refuses to declare it at all).
   const media = record.firstParty && record.manifest.permissions.some((p) => p.id === 'network.media') ? ' https:' : '';
   return {
     'Content-Security-Policy': BUNDLE_CSP_BASE.replaceAll('{MEDIA}', media),

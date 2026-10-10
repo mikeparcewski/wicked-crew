@@ -235,7 +235,7 @@ import { ingestDecision } from '../decisions/ingest.js';
 import { registerDecisionRoutes } from '../decisions/routes.js';
 import { ChatDecisionRecorder } from '../decisions/chat-recorder.js';
 import { ConsiderationService } from '../decisions/consider.js';
-import { gardenPackCheck, type PackCheckRunner } from '../editors/pack-install.js';
+import { gardenConformance, gardenPackCheck, type ConformanceRunner, type PackCheckRunner } from '../editors/pack-install.js';
 import { EditorRegistry } from '../editors/registry.js';
 import { registerEditorRoutes } from '../editors/routes.js';
 import { discoverLivePlugin } from '../skills/plugin-source.js';
@@ -1007,6 +1007,8 @@ export interface RuntimeDeps {
   studioRoot?: string;
   /** EP-C1 (tests): the `pack check` runner `POST /editors` uses; default = garden's script as a child. */
   packCheck?: PackCheckRunner;
+  /** (tests) the install-time conformance run `POST /editors` uses; default = garden's runner as a child. */
+  editorConformance?: ConformanceRunner;
   /** EP-C1 (tests): where `daemon-editors.json` lives; default = the crew state home. */
   editorsStateHome?: string;
   /** The eval RUN history store behind `/testing/evals[/:id]` — `createServer` builds one over the
@@ -1289,8 +1291,9 @@ export function registerRoutes(
     log: (m) => app.log.warn(m),
   });
   // EP-C1 (DES-artifact-editor-plugins §9.1): the editor registry — first-party editors discovered
-  // in studio's bundle, flags in `daemon-editors.json` — and its routes. Pack installs are refused
-  // until EP-C8, after garden's gate has run and the approval list has been read.
+  // in studio's bundle, installed pack editors and the flags in `daemon-editors.json` — and its
+  // routes. A pack installs after garden's gate AND crew's own conformance run (garden's runner
+  // against this daemon's conformance host page, at the URL the daemon exported at boot).
   const editorRegistry = new EditorRegistry({
     ...(runtime.editorsStateHome !== undefined ? { stateHome: runtime.editorsStateHome } : {}),
     ...(runtime.studioRoot !== undefined ? { studioRoot: runtime.studioRoot } : {}),
@@ -1300,6 +1303,7 @@ export function registerRoutes(
     registry: editorRegistry,
     adapter,
     packCheck: runtime.packCheck ?? gardenPackCheck(discoverLivePlugin()?.path ?? null),
+    conformance: runtime.editorConformance ?? gardenConformance(discoverLivePlugin()?.path ?? null, () => process.env['WICKED_CREW_URL'] ?? null),
     log: (m) => app.log.warn(m),
   });
   const chatRecorder: ChatDecisionRecorder | null =

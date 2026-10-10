@@ -1,8 +1,9 @@
 // EP-C1 — editors: the registry (first-party editors discovered in studio's bundle, flags in
 // daemon-editors.json), the bundle route with EXACTLY the §8.2 headers (re-hashed per serve, refused
 // on a hash mismatch or a path that is not a registry record), the grants route (the engine's decided
-// set), human-only install/remove/enable under auth=required, and third-party installs refused after
-// garden's fail-closed gate has run and the approval list has been read (EP-C8 is later).
+// set), human-only install/remove/enable under auth=required, and third-party pack installs: garden's
+// fail-closed gate, then crew's own conformance run, then the registry (operator ruling X3); a pack
+// with skills or blocks is refused with its approval list.
 
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -11,9 +12,9 @@ import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { EditorGrantsResponse, EditorView, InstallEditorRefusal, ListEditorsResponse } from '../src/core/types.js';
+import type { EditorConformanceSummary, EditorGrantsResponse, EditorView, InstallEditorRefusal, InstallEditorResponse, ListEditorsResponse } from '../src/core/types.js';
 import { BUNDLE_CSP_BASE, bundleHeaders, requestOrigin, shellCsp } from '../src/editors/csp.js';
-import { gardenPackCheck, previewPackInstall, PackInstallError, type PackCheckRunner } from '../src/editors/pack-install.js';
+import { CONFORMANCE_CASES, gardenConformance, gardenPackCheck, installPack, PackInstallError, type ConformanceRunner, type PackCheckRunner } from '../src/editors/pack-install.js';
 import { EditorRegistry, EDITORS_STATE_FILENAME, discoverStudioEditors, externalReferences, sha256Of } from '../src/editors/registry.js';
 import { registerEditorRoutes, serveBundle } from '../src/editors/routes.js';
 
@@ -192,62 +193,144 @@ describe('the two policies (§8.2), pinned to the letter', () => {
   });
 });
 
-describe('pack install (refused until EP-C8)', () => {
-  function pack(extra: Record<string, unknown> = {}, opts: { skills?: string[] } = {}): string {
-    const root = mkdtempSync(join(tmpdir(), 'editors-pack-'));
-    scratches.push(root);
-    writeFileSync(
-      join(root, 'wicked-pack.json'),
-      JSON.stringify({
-        spec: 2,
-        name: 'acme-terms',
-        vendor: 'acme',
-        version: '0.1.0',
-        editors: [{ id: 'acme-terms', title: 'Terms checker', version: '0.1.0', protocol: [1], kinds: ['document'], entry: 'editors/acme-terms/index.html', sha256: 'a'.repeat(64), sizes: ['inline'], permissions: [{ id: 'artifact.read', why: 'to read the document' }] }],
-        blocks: [{ id: 'acme-terms-review', label: 'Check our terms', preset: 'presets/terms-review.json', produces_kind: 'document', skills: ['acme-terms-checker'] }],
-        skills_dir: 'skills',
-        ...extra,
-      }),
-    );
-    for (const s of opts.skills ?? ['acme-terms-checker']) mkdirSync(join(root, 'skills', s), { recursive: true });
-    return root;
+const EDITOR_HTML = '<!doctype html><html><body><p>terms</p><script>parent.postMessage(1, "*")</script></body></html>';
+
+/** A pack directory: editor-only by default, with its entry on disk and its true hash pinned. */
+function makePack(opts: { name?: string; id?: string; html?: string; blocks?: boolean; skills?: string[]; version?: string } = {}): string {
+  const root = mkdtempSync(join(tmpdir(), 'editors-pack-'));
+  scratches.push(root);
+  const id = opts.id ?? 'acme-terms';
+  const html = opts.html ?? EDITOR_HTML;
+  mkdirSync(join(root, 'editors', id), { recursive: true });
+  writeFileSync(join(root, 'editors', id, 'index.html'), html);
+  writeFileSync(
+    join(root, 'wicked-pack.json'),
+    JSON.stringify({
+      spec: 2,
+      name: opts.name ?? 'acme-terms',
+      vendor: 'acme',
+      version: opts.version ?? '0.1.0',
+      editors: [{ id, title: 'Terms checker', version: opts.version ?? '0.1.0', protocol: [1], kinds: ['document'], entry: `editors/${id}/index.html`, sha256: sha256Of(Buffer.from(html)), sizes: ['inline', 'pane'], permissions: [{ id: 'artifact.read', why: 'to read the document' }] }],
+      ...(opts.blocks === true ? { blocks: [{ id: 'acme-terms-review', label: 'Check our terms', preset: 'presets/terms-review.json', produces_kind: 'document', skills: ['acme-terms-checker'] }], skills_dir: 'skills' } : {}),
+    }),
+  );
+  for (const sk of opts.skills ?? []) mkdirSync(join(root, 'skills', sk), { recursive: true });
+  return root;
+}
+
+const passCheck: PackCheckRunner = async () => ({ ok: true, errors: [], warnings: [] });
+function conformant(ids: string[] = ['acme-terms']): ConformanceRunner {
+  return vi.fn(async (): Promise<EditorConformanceSummary> => ({
+    ok: true,
+    at: '2026-10-10T00:00:00.000Z',
+    editors: ids.map((id) => ({ id, ok: true, cases: Object.fromEntries(CONFORMANCE_CASES.map((c) => [c, { ok: true }])), gaps: ['case 7'] })),
+  }));
+}
+
+describe('pack install: the gate, crew\'s conformance run, then the registry', () => {
+  function registry(): { reg: EditorRegistry; home: string } {
+    const home = mkdtempSync(join(tmpdir(), 'editors-home-'));
+    scratches.push(home);
+    return { reg: new EditorRegistry({ stateHome: home, studioRoot: studioRoot() }), home };
   }
-  const pass: PackCheckRunner = async () => ({ ok: true, errors: [], warnings: [{ level: 'warn', code: 'w1', message: 'fine' }] });
   const fail: PackCheckRunner = async () => ({ ok: false, errors: [{ level: 'error', code: 'editor-entry-hash', message: 'sha256 mismatch', path: 'editors/acme-terms/index.html' }], warnings: [] });
 
-  it('garden\'s gate runs FIRST and fails closed: a refused pack is a 422 with the verdict, nothing read past it', async () => {
-    await expect(previewPackInstall(pack(), fail)).rejects.toMatchObject({ status: 422, check: { ok: false } });
-    await expect(previewPackInstall('relative/path', pass)).rejects.toMatchObject({ status: 400 });
-    await expect(previewPackInstall(join(tmpdir(), 'editors-does-not-exist-xyz'), pass)).rejects.toMatchObject({ status: 404 });
-    const noEditors = pack({ editors: undefined, spec: 1 });
-    await expect(previewPackInstall(noEditors, pass)).rejects.toMatchObject({ status: 400 });
-    const err = await previewPackInstall(noEditors, pass).catch((e: unknown) => e);
+  it('garden\'s gate runs FIRST and fails closed: a refused pack is a 422 with the verdict, and the conformance run never starts', async () => {
+    const { reg } = registry();
+    const conformance = conformant();
+    await expect(installPack(makePack(), undefined, { check: fail, conformance, registry: reg })).rejects.toMatchObject({ status: 422, check: { ok: false } });
+    await expect(installPack('relative/path', undefined, { check: passCheck, conformance, registry: reg })).rejects.toMatchObject({ status: 400 });
+    await expect(installPack(join(tmpdir(), 'editors-does-not-exist-xyz'), undefined, { check: passCheck, conformance, registry: reg })).rejects.toMatchObject({ status: 404 });
+    expect(conformance).not.toHaveBeenCalled();
+  });
+
+  it('an editor-only pack that passes both installs: recorded with its pinned hash, served from the pack, and read back after a restart', async () => {
+    const { reg, home } = registry();
+    const root = makePack();
+    const conformance = conformant();
+    const res: InstallEditorResponse = await installPack(root, undefined, { check: passCheck, conformance, registry: reg });
+    expect(conformance).toHaveBeenCalledWith(root);
+    expect(res.installed).toBe(true);
+    expect(res.updated).toBe(false);
+    expect(res.editors).toHaveLength(1);
+    expect(res.editors[0]).toMatchObject({ id: 'acme-terms', source: 'pack', first_party: false, enabled: true, sha256: sha256Of(Buffer.from(EDITOR_HTML)) });
+    expect(JSON.stringify(res.editors)).not.toContain(root);
+    const state = JSON.parse(readFileSync(join(home, EDITORS_STATE_FILENAME), 'utf8')) as { installed: Record<string, { root: string; entry: string; conformance: { ok: boolean; cases: string[] } }> };
+    expect(state.installed['acme-terms']).toMatchObject({ root, entry: 'editors/acme-terms/index.html', conformance: { ok: true } });
+    expect(state.installed['acme-terms']!.conformance.cases).toEqual([...CONFORMANCE_CASES]);
+    const again = new EditorRegistry({ stateHome: home });
+    expect(again.get('acme-terms')).toMatchObject({ source: 'pack', firstParty: false, enabled: true });
+    expect(again.get('acme-terms')!.entryPath).toBe(join(root, 'editors', 'acme-terms', 'index.html'));
+  });
+
+  it('a failed or impossible conformance run installs nothing (422), naming the cases that did not pass', async () => {
+    const { reg, home } = registry();
+    const failing: ConformanceRunner = async () => ({ ok: false, at: 'x', editors: [{ id: 'acme-terms', ok: false, cases: { '0-manifest': { ok: true }, '1-handshake': { ok: false } }, gaps: [] }] });
+    const err = await installPack(makePack(), undefined, { check: passCheck, conformance: failing, registry: reg }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(PackInstallError);
-    expect((err as PackInstallError).message).toMatch(/declares no editors/);
+    expect((err as PackInstallError).status).toBe(422);
+    expect((err as PackInstallError).body).toMatchObject({ code: 'editor_not_conformant' });
+    expect((err as PackInstallError).message).toMatch(/1-handshake/);
+    const noBrowser: ConformanceRunner = async () => ({ ok: false, at: 'x', editors: [], error: 'no headless browser' });
+    const err2 = await installPack(makePack(), undefined, { check: passCheck, conformance: noBrowser, registry: reg }).catch((e: unknown) => e);
+    expect((err2 as PackInstallError).body).toMatchObject({ code: 'conformance_unavailable' });
+    // A report that claims ok but leaves a case out is not a pass either.
+    const partial: ConformanceRunner = async () => ({ ok: true, at: 'x', editors: [{ id: 'acme-terms', ok: true, cases: { '0-manifest': { ok: true } }, gaps: [] }] });
+    await expect(installPack(makePack(), undefined, { check: passCheck, conformance: partial, registry: reg })).rejects.toMatchObject({ status: 422 });
+    expect(reg.get('acme-terms')).toBeNull();
+    expect(() => readFileSync(join(home, EDITORS_STATE_FILENAME), 'utf8')).toThrow();
   });
 
-  it('a pack that passes is still refused (501 shape) with the approval list: editors, blocks and the pack\'s skills', async () => {
-    const refusal = await previewPackInstall(pack(), pass);
-    expect(refusal.code).toBe('third_party_editors_not_available');
-    expect(refusal.error).toMatch(/EP-C8/);
-    expect(refusal.check.ok).toBe(true);
-    expect(refusal.pack).toEqual({
-      name: 'acme-terms',
-      vendor: 'acme',
-      version: '0.1.0',
-      editors: [{ id: 'acme-terms', title: 'Terms checker', version: '0.1.0', kinds: ['document'], permissions: [{ id: 'artifact.read', why: 'to read the document' }] }],
-      blocks: [{ id: 'acme-terms-review', label: 'Check our terms', produces_kind: 'document', skills: ['acme-terms-checker'] }],
-      skills: ['acme-terms-checker'],
-    });
+  it('a pack that also ships skills or blocks is refused (501) with its approval list; nothing runs or is written', async () => {
+    const { reg } = registry();
+    const conformance = conformant();
+    const err = await installPack(makePack({ blocks: true, skills: ['acme-terms-checker'] }), undefined, { check: passCheck, conformance, registry: reg }).catch((e: unknown) => e);
+    expect((err as PackInstallError).status).toBe(501);
+    const body = (err as PackInstallError).body as unknown as InstallEditorRefusal;
+    expect(body.code).toBe('pack_ships_skills_or_blocks');
+    expect(body.pack.blocks).toEqual([{ id: 'acme-terms-review', label: 'Check our terms', produces_kind: 'document', skills: ['acme-terms-checker'] }]);
+    expect(body.pack.skills).toEqual(['acme-terms-checker']);
+    expect(conformance).not.toHaveBeenCalled();
+    expect(reg.get('acme-terms')).toBeNull();
   });
 
-  it('gardenPackCheck without a garden is a FAILED check (never a pass), and spawns nothing', async () => {
+  it('the same pack again is an update in place (keeps the operator\'s switch); another pack with the id is a 409', async () => {
+    const { reg } = registry();
+    const root = makePack();
+    await installPack(root, false, { check: passCheck, conformance: conformant(), registry: reg });
+    expect(reg.get('acme-terms')!.enabled).toBe(false);
+    const v2 = makePack({ version: '0.2.0', html: EDITOR_HTML.replace('terms', 'terms v2') });
+    const res = await installPack(v2, undefined, { check: passCheck, conformance: conformant(), registry: reg });
+    expect(res.updated).toBe(true);
+    expect(res.editors[0]).toMatchObject({ version: '0.2.0', enabled: false });
+    await expect(installPack(makePack({ name: 'other-pack' }), undefined, { check: passCheck, conformance: conformant(), registry: reg })).rejects.toMatchObject({ status: 409 });
+  });
+
+  it('an installed entry changed on disk is skipped at boot (never served), and a first-party id is never taken', async () => {
+    const { reg, home } = registry();
+    const root = makePack();
+    await installPack(root, undefined, { check: passCheck, conformance: conformant(), registry: reg });
+    writeFileSync(join(root, 'editors', 'acme-terms', 'index.html'), '<script>fetch("https://evil")</script>');
+    const logs: string[] = [];
+    const again = new EditorRegistry({ stateHome: home, log: (m) => logs.push(m) });
+    expect(again.get('acme-terms')).toBeNull();
+    expect(logs.some((l) => /no longer matches the hash/.test(l))).toBe(true);
+    expect(again.isInstalled('acme-terms')).toBe(true);
+    await expect(installPack(makePack({ id: 'wicked-page', name: 'acme-page' }), undefined, { check: passCheck, conformance: conformant(['wicked-page']), registry: reg })).rejects.toMatchObject({ status: 409 });
+  });
+
+  it('gardenPackCheck and gardenConformance without a garden FAIL (never pass), and spawn nothing', async () => {
     const verdict = await gardenPackCheck(null)('/anywhere');
     expect(verdict.ok).toBe(false);
     expect(verdict.errors[0]!.code).toBe('garden-missing');
     const noScript = mkdtempSync(join(tmpdir(), 'editors-garden-'));
     scratches.push(noScript);
     expect((await gardenPackCheck(noScript)('/anywhere')).errors[0]!.code).toBe('garden-too-old');
+    expect(await gardenConformance(null, () => 'http://127.0.0.1:1')('/anywhere')).toMatchObject({ ok: false, editors: [] });
+    expect((await gardenConformance(noScript, () => 'http://127.0.0.1:1')('/anywhere')).error).toMatch(/no scripts\/editor\/conformance\.py/);
+    mkdirSync(join(noScript, 'scripts', 'editor'), { recursive: true });
+    writeFileSync(join(noScript, 'scripts', 'editor', 'conformance.py'), '');
+    expect((await gardenConformance(noScript, () => null)('/anywhere')).error).toMatch(/own URL/);
   });
 });
 
@@ -257,7 +340,7 @@ describe('the routes', () => {
     for (const a of apps.splice(0)) await a.close();
   });
 
-  async function harness(opts: { grants?: boolean; packCheck?: PackCheckRunner } = {}) {
+  async function harness(opts: { grants?: boolean; packCheck?: PackCheckRunner; conformance?: ConformanceRunner } = {}) {
     const root = studioRoot();
     const home = mkdtempSync(join(tmpdir(), 'editors-home-'));
     scratches.push(home);
@@ -281,7 +364,7 @@ describe('the routes', () => {
       }
     });
     const logs: string[] = [];
-    registerEditorRoutes(app, { registry, adapter, packCheck: opts.packCheck ?? (async () => ({ ok: true, errors: [], warnings: [] })), log: (m) => logs.push(m) });
+    registerEditorRoutes(app, { registry, adapter, packCheck: opts.packCheck ?? (async () => ({ ok: true, errors: [], warnings: [] })), conformance: opts.conformance ?? conformant(), log: (m) => logs.push(m) });
     await app.ready();
     apps.push(app);
     return { app, registry, root, home, evaluateEditorGrants, logs };
@@ -290,12 +373,12 @@ describe('the routes', () => {
   const AGENT = { 'x-actor': 'agent:operator' };
   const OBSERVER = { 'x-actor': 'human:observer' };
 
-  it('GET /editors lists the registry (operator+; observer 403) and says installs are refused', async () => {
+  it('GET /editors lists the registry (operator+; observer 403) and says installs need the conformance run', async () => {
     const h = await harness();
     const res = await h.app.inject({ method: 'GET', url: '/api/v1/editors', headers: HUMAN });
     expect(res.statusCode).toBe(200);
     const body = res.json() as ListEditorsResponse;
-    expect(body.installs).toBe('refused_until_conformance');
+    expect(body.installs).toBe('conformance_required');
     expect(body.editors.map((e) => e.id)).toEqual(['wicked-doc', 'wicked-page']);
     expect(JSON.stringify(body)).not.toContain(h.root);
     expect((await h.app.inject({ method: 'GET', url: '/api/v1/editors', headers: OBSERVER })).statusCode).toBe(403);
@@ -348,26 +431,46 @@ describe('the routes', () => {
     expect((await old.app.inject({ method: 'GET', url: '/api/v1/editors/wicked-page/grants', headers: HUMAN })).statusCode).toBe(501);
   });
 
-  it('install, remove, enable are HUMAN-only: an agent token is refused (403) and nothing changes; a human gets the gate + the refusal', async () => {
+  it('install, remove, enable are HUMAN-only: an agent token is refused (403) and nothing changes; a human installs, serves and removes', async () => {
     const h = await harness();
-    const packRoot = mkdtempSync(join(tmpdir(), 'editors-pack-'));
-    scratches.push(packRoot);
-    writeFileSync(join(packRoot, 'wicked-pack.json'), JSON.stringify({ spec: 2, name: 'acme-terms', vendor: 'acme', version: '0.1.0', editors: [{ id: 'acme-terms', title: 'T', version: '0.1.0', protocol: [1], kinds: ['document'], entry: 'e.html', sha256: 'a'.repeat(64), sizes: ['inline'], permissions: [] }] }));
+    const packRoot = makePack();
     expect((await h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: AGENT, payload: { packRoot } })).statusCode).toBe(403);
     expect((await h.app.inject({ method: 'DELETE', url: '/api/v1/editors/wicked-page', headers: AGENT })).statusCode).toBe(403);
     expect((await h.app.inject({ method: 'POST', url: '/api/v1/editors/wicked-page/enabled', headers: AGENT, payload: { enabled: false } })).statusCode).toBe(403);
     expect(h.registry.get('wicked-page')!.enabled).toBe(true);
-    const refused = await h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { packRoot } });
-    expect(refused.statusCode).toBe(501);
-    expect((refused.json() as InstallEditorRefusal).pack.editors[0]!.id).toBe('acme-terms');
+    expect(h.registry.get('acme-terms')).toBeNull();
     expect((await h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { nope: 1 } })).statusCode).toBe(400);
-    const removed = await h.app.inject({ method: 'DELETE', url: '/api/v1/editors/wicked-page', headers: HUMAN });
-    expect(removed.statusCode).toBe(409);
+    const installed = await h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { packRoot } });
+    expect(installed.statusCode, installed.body).toBe(200);
+    expect((installed.json() as InstallEditorResponse).editors[0]).toMatchObject({ id: 'acme-terms', source: 'pack' });
+    const listed = (await h.app.inject({ method: 'GET', url: '/api/v1/editors', headers: HUMAN })).json() as ListEditorsResponse;
+    expect(listed.editors.map((e) => e.id)).toEqual(['wicked-doc', 'wicked-page', 'acme-terms']);
+    const served = await h.app.inject({ method: 'GET', url: '/api/v1/editors/acme-terms/0.1.0/entry' });
+    expect(served.statusCode).toBe(200);
+    expect(served.body).toBe(EDITOR_HTML);
+    expect(served.headers['content-security-policy']).toBe(BUNDLE_CSP_BASE.replaceAll('{MEDIA}', ''));
+    expect((await h.app.inject({ method: 'DELETE', url: '/api/v1/editors/wicked-page', headers: HUMAN })).statusCode).toBe(409);
+    expect((await h.app.inject({ method: 'DELETE', url: '/api/v1/editors/acme-terms', headers: AGENT })).statusCode).toBe(403);
+    const removed = await h.app.inject({ method: 'DELETE', url: '/api/v1/editors/acme-terms', headers: HUMAN });
+    expect(removed.statusCode).toBe(200);
+    expect(h.registry.get('acme-terms')).toBeNull();
+    expect((await h.app.inject({ method: 'GET', url: '/api/v1/editors/acme-terms/0.1.0/entry' })).statusCode).toBe(404);
     expect((await h.app.inject({ method: 'DELETE', url: '/api/v1/editors/acme-terms', headers: HUMAN })).statusCode).toBe(404);
     const toggled = await h.app.inject({ method: 'POST', url: '/api/v1/editors/wicked-page/enabled', headers: HUMAN, payload: { enabled: false } });
     expect(toggled.statusCode).toBe(200);
     expect((toggled.json() as EditorView).enabled).toBe(false);
     expect(JSON.parse(readFileSync(join(h.home, EDITORS_STATE_FILENAME), 'utf8'))).toEqual({ v: 1, enabled: { 'wicked-page': false } });
+  });
+
+  it('a conformance failure through the route is a 422 carrying the report; a skills pack a 501 with the approval list', async () => {
+    const failing: ConformanceRunner = async () => ({ ok: false, at: 'x', editors: [{ id: 'acme-terms', ok: false, cases: { '3-no-network': { ok: false } }, gaps: [] }] });
+    const h = await harness({ conformance: failing });
+    const res = await h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { packRoot: makePack() } });
+    expect(res.statusCode).toBe(422);
+    expect(res.json()).toMatchObject({ code: 'editor_not_conformant', conformance: { ok: false }, check: { ok: true } });
+    const skills = await h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { packRoot: makePack({ blocks: true, skills: ['acme-terms-checker'] }) } });
+    expect(skills.statusCode).toBe(501);
+    expect((skills.json() as InstallEditorRefusal).code).toBe('pack_ships_skills_or_blocks');
   });
 
   it('a failing gate is a 422 carrying the verdict', async () => {

@@ -2,10 +2,13 @@
  * `/api/v1/editors` (DES-artifact-editor-plugins §6, §8.2, §9.1; EP-C1).
  *
  *  - `GET /editors` (operator+): the registry, as Settings → Editors renders it.
- *  - `POST /editors {packRoot}` (HUMAN-only): garden's fail-closed gate, the approval list, then 501
- *    `third_party_editors_not_available` — every pack editor is third-party and EP-C8 has not shipped.
- *  - `DELETE /editors/:id` (HUMAN-only): a first-party editor ships with studio and cannot be removed
- *    (409; disable it instead); no other editor can exist before EP-C8 (404).
+ *  - `POST /editors {packRoot, enabled?}` (HUMAN-only): install or update a pack's editors — garden's
+ *    fail-closed gate, then crew's own conformance run, then the registry (`pack-install.ts`). 200 with
+ *    the installed editors; 422 with the verdict or the conformance report; 501 with the approval list
+ *    for a pack that also ships skills or blocks; 409 for an id another pack or a first-party editor holds.
+ *  - `DELETE /editors/:id` (HUMAN-only): an installed pack editor is removed from the registry (the
+ *    installer deletes its files); a first-party editor ships with studio and cannot be removed (409;
+ *    disable it instead).
  *  - `POST /editors/:id/enabled {enabled}` (HUMAN-only): the operator's switch.
  *  - `GET /editors/:id/grants?project=` (operator+): the engine's decided set
  *    (`evaluate_editor_grants`: EDITOR-GRANTS ledger + EDITOR-BUILTIN posture, deny dominates), with
@@ -27,7 +30,7 @@ import { z } from 'zod';
 import { LOCAL_ACTOR, trustAtLeast } from '../api/auth.js';
 import type { Actor, EditorGrantsResponse, ListEditorsResponse } from '../core/types.js';
 import { bundleHeaders } from './csp.js';
-import { PackInstallError, previewPackInstall, type PackCheckRunner } from './pack-install.js';
+import { installPack, PackInstallError, type ConformanceRunner, type PackCheckRunner } from './pack-install.js';
 import { EDITOR_ID, EDITOR_VERSION, EditorRegistry, notRealEntry, type EditorRecord } from './registry.js';
 
 const V = '/api/v1';
@@ -49,6 +52,8 @@ export interface EditorRoutesDeps {
   registry: EditorRegistry;
   adapter: EditorGrantsAdapter;
   packCheck: PackCheckRunner;
+  /** The install-time conformance run (garden's runner against this daemon's conformance host page). */
+  conformance: ConformanceRunner;
   log?: (msg: string) => void;
 }
 
@@ -76,25 +81,26 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
     { config: { manifest: { responseType: 'ListEditorsResponse', statusCodes: [200, 403] } } },
     async (req, reply) => {
       if (!operatorOnly(req, reply)) return reply;
-      const body: ListEditorsResponse = { editors: registry.list().map((r) => EditorRegistry.view(r)), installs: 'refused_until_conformance' };
+      const body: ListEditorsResponse = { editors: registry.list().map((r) => EditorRegistry.view(r)), installs: 'conformance_required' };
       return body;
     },
   );
 
-  const InstallSchema = z.object({ packRoot: z.string().min(1) }).strict();
+  const InstallSchema = z.object({ packRoot: z.string().min(1), enabled: z.boolean().optional() }).strict();
   app.post(
     `${V}/editors`,
-    { config: { manifest: { responseType: 'InstallEditorRefusal', statusCodes: [400, 403, 404, 422, 501] } } },
+    { config: { manifest: { responseType: 'InstallEditorResponse', statusCodes: [200, 400, 403, 404, 409, 422, 501] } } },
     async (req, reply) => {
       if (!humanOnly(req, reply)) return reply;
       const parsed = InstallSchema.safeParse(req.body);
-      if (!parsed.success) return reply.code(400).send({ error: 'body must be { packRoot: <absolute path> }' });
+      if (!parsed.success) return reply.code(400).send({ error: 'body must be { packRoot: <absolute path>, enabled?: boolean }' });
       try {
-        const refusal = await previewPackInstall(parsed.data.packRoot, deps.packCheck);
-        return reply.code(501).send(refusal);
+        const installed = await installPack(parsed.data.packRoot, parsed.data.enabled, { check: deps.packCheck, conformance: deps.conformance, registry });
+        deps.log?.(`[editors] installed ${installed.editors.map((e) => `${e.id}@${e.version}`).join(', ')}${installed.updated ? ' (update)' : ''}`);
+        return installed;
       } catch (err) {
         if (err instanceof PackInstallError) {
-          return reply.code(err.status).send({ error: err.message, ...(err.check !== undefined ? { check: err.check } : {}) });
+          return reply.code(err.status).send({ error: err.message, ...(err.check !== undefined ? { check: err.check } : {}), ...(err.body ?? {}) });
         }
         throw err;
       }
@@ -103,14 +109,16 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
 
   app.delete(
     `${V}/editors/:id`,
-    { config: { manifest: { statusCodes: [403, 404, 409] } } },
+    { config: { manifest: { statusCodes: [200, 403, 404, 409] } } },
     async (req, reply) => {
       if (!humanOnly(req, reply)) return reply;
       const id = idOf(req);
-      const record = EDITOR_ID.test(id) ? registry.get(id) : null;
-      if (record === null) return reply.code(404).send({ error: `no editor '${id}' is installed` });
-      // The only editors that can exist before EP-C8 ship inside studio's bundle.
-      return reply.code(409).send({ error: `${id} ships with studio and cannot be removed — disable it instead (POST /editors/${id}/enabled)` });
+      if (!EDITOR_ID.test(id)) return reply.code(404).send({ error: `no editor '${id}' is installed` });
+      if (registry.get(id)?.firstParty === true) {
+        return reply.code(409).send({ error: `${id} ships with studio and cannot be removed — disable it instead (POST /editors/${id}/enabled)` });
+      }
+      if (!registry.removeInstalled(id)) return reply.code(404).send({ error: `no editor '${id}' is installed` });
+      return { removed: true, id };
     },
   );
 

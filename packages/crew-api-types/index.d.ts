@@ -10088,7 +10088,8 @@ export type EditorPermission =
  * fetched at `entry_url` (`GET /editors/:id/:version/entry`, the §8.2 headers, re-hashed per serve).
  * First-party editors ship inside studio's bundle (`<studio dist>/editors/<id>/editor.json` +
  * `index.html`, ids `wicked-*`) and are discovered at boot; third-party editors arrive as garden
- * packs and cannot be installed before the install-time conformance run (EP-C8).
+ * packs (`source: 'pack'`), installed by the operator once garden's `pack check` and the
+ * install-time conformance run have both passed.
  */
 export interface EditorView {
   id: string;
@@ -10107,20 +10108,51 @@ export interface EditorView {
   bytes: number;
   first_party: boolean;
   enabled: boolean;
-  source: 'studio-bundle';
+  /** `studio-bundle`: first-party, shipped with studio. `pack`: a third-party pack the operator installed. */
+  source: 'studio-bundle' | 'pack';
   entry_url: string;
 }
 
 /** `GET /editors` (operator+). */
 export interface ListEditorsResponse {
   editors: EditorView[];
-  /** Why `POST /editors` answers 501 today: third-party installs wait on EP-C8. */
-  installs: 'refused_until_conformance';
+  /** `conformance_required`: `POST /editors` installs a pack only after garden's `pack check` and the
+   *  install-time conformance run pass (`refused_until_conformance` before the install surface: every install was refused). */
+  installs: 'conformance_required' | 'refused_until_conformance';
 }
 
 /** `POST /editors` body (human-only): a pack directory holding `wicked-pack.json`. */
 export interface InstallEditorBody {
   packRoot: string;
+  /** Install it on (the default; an update keeps the editor's current switch) or off. */
+  enabled?: boolean;
+}
+
+/** `POST /editors` → 200: the pack's editors are installed (or updated in place) and listed. */
+export interface InstallEditorResponse {
+  installed: true;
+  /** The pack was installed before; its editors were replaced (a new hash asks for its grants again). */
+  updated: boolean;
+  editors: EditorView[];
+  check: PackCheckResult;
+  conformance: EditorConformanceSummary;
+}
+
+/** What the install-time conformance run found (garden `scripts/editor/conformance.py`). */
+export interface EditorConformanceSummary {
+  ok: boolean;
+  at: string;
+  editors: Array<{ id: string; ok: boolean; cases: Record<string, { ok: boolean }>; gaps: string[] }>;
+  /** Set when the run could not happen (no headless browser, no garden with the runner). */
+  error?: string;
+}
+
+/** `POST /editors` → 422 when the conformance run failed or could not run (fail closed). */
+export interface InstallEditorNotConformant {
+  code: 'editor_not_conformant' | 'conformance_unavailable';
+  error: string;
+  check: PackCheckResult;
+  conformance: EditorConformanceSummary;
 }
 
 /** One finding of garden's `pack check --json`. */
@@ -10139,11 +10171,12 @@ export interface PackCheckResult {
 }
 
 /**
- * `POST /editors` → 501: the pack passed garden's gate, and this is what the install WOULD ask the
- * operator to approve (§3.2 "Add these") once third-party installs open (EP-C8). Nothing was written.
+ * `POST /editors` → 501: the pack passed garden's gate but also ships skills or blocks, whose own
+ * approval (§3.2 "Add these") is not built yet; this is what it would ask the operator to approve.
+ * Nothing was written. (`third_party_editors_not_available` before the install surface: every pack was refused.)
  */
 export interface InstallEditorRefusal {
-  code: 'third_party_editors_not_available';
+  code: 'pack_ships_skills_or_blocks' | 'third_party_editors_not_available';
   error: string;
   check: PackCheckResult;
   pack: {
