@@ -29,6 +29,7 @@ import { buildEvidenceBundle, coreUnitId, evidenceFilename } from './evidence.js
 import { attemptUnavailableReason, capturedAttempts, outputUnavailableReason, resolveUnit, storedAttempt, unitKeysFor } from './unit-output.js';
 import type {
   ApproveProposalResponse,
+  AssuranceReceipt,
   LaunchRunInput,
   ListMemoriesResponse,
   ListProposalsResponse,
@@ -37,8 +38,10 @@ import type {
   PolicyLandingResult,
   RejectProposalResponse,
   RetireMemoryResponse,
+  QeAcceptanceCheck,
   SessionStatus,
   SessionView,
+  WorkUnit,
 } from '../core/types.js';
 import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
 import { callEstateTool, EstateMcpError, memoryStoreInfo } from '../core/estate-mcp-client.js';
@@ -121,6 +124,16 @@ import { REQUIRED_GARDEN_VERSION } from '../skills/plugin-source.js';
 import type { EvalRunStore } from './eval-store.js';
 import { engineRosterJson, noEligibleSeatBody, parseNoEligibleSeat } from '../core/engine-roster.js';
 import { launchAssuranceNotice } from '../core/assurance.js';
+import {
+  QE_ACCEPTANCE,
+  aggregateReceipt,
+  postHocDeliveryAssurance,
+  qeAcceptanceFromView,
+  qeAcceptanceRefusal,
+  receiptOf,
+  requiresQeAcceptance,
+  unreadableQeAcceptance,
+} from './delivery-assurance.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
 import type { WatchRegistry } from '../watch/registry.js';
 import { isHumanOperator } from './watch-routes.js';
@@ -142,6 +155,7 @@ import {
   isGitHubLogin,
   readDeliverOriginUrl,
   resolvePullRequest as resolvePullRequestViaGh,
+  unverifiedTreesFrom,
   type PullRequestResolution,
 } from '../core/deliver.js';
 import type { DocGroundingStore } from '../interactive/doc-grounding.js';
@@ -1409,6 +1423,9 @@ export function registerRoutes(
     if (launchActor !== undefined) view.session.launch_actor = launchActor;
     const state = resolveDelivery(view, conflictStrand);
     view.session.delivery = state.delivery;
+    // wicked-core#850 EX-04: a post-hoc delivery reads unverified, with its trees. ABSENT otherwise.
+    const deliveryAssurance = deliveryIndex.assuranceFor(view.session.id);
+    if (deliveryAssurance !== undefined) view.session.delivery_assurance = deliveryAssurance;
     // crew#762: was delivery asked for? The launch's decision (`deliver: 'pr'`), a post-hoc attempt
     // or a delivery on record says yes; a launch that said `deliver: 'none'` with neither says no.
     // ABSENT when the daemon holds no launch record and no attempt (never fabricated).
@@ -2232,7 +2249,19 @@ export function registerRoutes(
     // F-E2E-030: only the explicit `'auto'` opts out of the engine's deliver gate. `'human'` and
     // an omitted field both leave `autoDeliver` off the input — the gate is the engine's default,
     // so the wire never has to say "gate me" to be gated.
-    if (b.deliverGate === 'auto') input.autoDeliver = true;
+    if (b.deliverGate === 'auto') {
+      // wicked-core#850 EX-03: a workflow that requires QE acceptance delivers only through the deliver
+      // gate, where crew checks the verdict. Unattended delivery would push before anyone could.
+      const required = b.workflow !== undefined ? adapter.getWorkflow(b.workflow)?.required_instruments : undefined;
+      if (required?.includes(QE_ACCEPTANCE) === true) {
+        return reply.code(400).send({
+          error:
+            `workflow ${b.workflow} requires QE acceptance (required_instruments: qe_acceptance), so it delivers only ` +
+            'through the deliver gate, where the verdict is checked — deliverGate: "auto" cannot apply to it',
+        });
+      }
+      input.autoDeliver = true;
+    }
     if (b.repoRef !== undefined) input.repoRef = b.repoRef;
     if (b.workflow !== undefined) input.workflow = b.workflow;
     // DES-TEAMING-002 T3: the plan is the ENGINE's to propose, score, floor and gate — crew
@@ -2804,7 +2833,10 @@ export function registerRoutes(
       // re-run on a delivered run, so a double-click (or a retry after a slow response) cannot
       // double-open. The index only ever holds real runs, so this needs no store round-trip.
       const existing = deliveryIndex.urlFor(id);
-      if (existing !== undefined) return { prUrl: existing };
+      if (existing !== undefined) {
+        const recorded = deliveryIndex.assuranceFor(id);
+        return { prUrl: existing, ...(recorded !== undefined ? { assurance: recorded } : {}) };
+      }
       // N1: a run whose branch is already on a non-GitHub origin has nothing left to lift, and no
       // pull request can be opened from here — say so instead of pushing the branch again.
       const pushedAlready = deliveryIndex.pushedFor(id);
@@ -2836,6 +2868,12 @@ export function registerRoutes(
       // back to `| null`.
       const repoRef: string = s.repo_ref;
       const initialWorkdir: string = s.workdir;
+      // wicked-core#850 EX-03: a run whose contract requires QE acceptance is lifted only on a PASS
+      // attributed to it — checked BEFORE anything is spawned, so a refusal pushes nothing.
+      const qeAcceptance = await qeAcceptanceCheckFor(run);
+      if (qeAcceptance !== null && !qeAcceptance.satisfied) {
+        return reply.code(409).send(qeAcceptanceRefusal(id, qeAcceptance, aggregateReceipt(run, null), 'post_hoc'));
+      }
       // One delivery per run at a time: the script pushes and opens a PR, so two concurrent
       // spawns could race gh into two PRs — the exact double-open idempotency forbids. The guard
       // wraps the reprovision too, so a reaped run's `wicked/<id>` branch is only ever checked out
@@ -2956,12 +2994,16 @@ export function registerRoutes(
       const record = deliveryRecordFrom(result.output);
       const url = record !== null && 'url' in record ? record.url : null;
       const pushedOnly = record !== null && 'pushed' in record ? record.pushed : null;
+      // wicked-core#850 EX-04: no engine lift re-verified what this pushed — the run record says so,
+      // with the trees the script named (the PR body carries the same label). Built before the
+      // outcome branches, so a push-only delivery records it too (codex r1).
+      const assurance = postHocDeliveryAssurance(run, unverifiedTreesFrom(result.output), qeAcceptance);
       if (pushedOnly !== null) {
         // N1: the script pushed the branch and gh could resolve no GitHub repository for the
         // origin. That IS a delivery — record it, so the run reads `delivery: 'pushed'` — but there
         // is no PR URL to answer with, so the reply says what happened instead of a 200 `prUrl`.
-        audit.record('run.delivered', actorOf(req), { runId: id, detail: { pushed: pushedOnly, via: 'post-hoc' } });
-        deliveryIndex.setPushed(id, pushedOnly);
+        audit.record('run.delivered', actorOf(req), { runId: id, detail: { pushed: pushedOnly, via: 'post-hoc', assurance } });
+        deliveryIndex.setPushed(id, pushedOnly, assurance);
         return reply.code(409).send({ error: pushedOnlyRefusal(id, pushedOnly) });
       }
       if (url === null) {
@@ -2973,9 +3015,9 @@ export function registerRoutes(
       }
       // The durable record first, then the read-side index — the same write order as the
       // deliver-phase resolution in server.ts, so the index can only LAG a crash, never lead it.
-      audit.record('run.delivered', actorOf(req), { runId: id, detail: { url, via: 'post-hoc' } });
-      deliveryIndex.set(id, url);
-      return { prUrl: url };
+      audit.record('run.delivered', actorOf(req), { runId: id, detail: { url, via: 'post-hoc', assurance } });
+      deliveryIndex.set(id, url, assurance);
+      return { prUrl: url, assurance };
     },
   );
 
@@ -3890,14 +3932,24 @@ export function registerRoutes(
     const views = await adapter.sessionsDetail();
     const run = views.find((v) => v.session.id === id);
     if (!run) return reply.code(404).send({ error: 'Run not found' });
+    return acceptanceViewOf(run, { ...(qeRunId !== undefined && qeRunId !== '' ? { qeRunId } : {}) });
+  });
 
+  /**
+   * One run's acceptance answer — the body `GET /runs/:id/acceptance` serves, and what a delivery
+   * reads (wicked-core#850 EX-03). `forceDeclared`: the run's assurance CONTRACT requires QE
+   * acceptance, so a verdict is owed even when no phase raises `verified_evidence` — missing denies.
+   */
+  async function acceptanceViewOf(run: SessionView, opts: { qeRunId?: string; forceDeclared?: boolean }) {
+    const id = run.session.id;
     // What the run must prove, from what it CONTAINS (seam X2): a plan or preset run's steps whose
     // catalog entry re-verifies evidence, a registered workflow's def, nothing for free text — and
     // an unknown run (or one the daemon cannot read) is declared and denied with the reason.
     const verifiedCatalog =
       typeof adapter.verifiedEvidenceCatalog === 'function' ? await adapter.verifiedEvidenceCatalog() : null;
     const knownCatalog = typeof adapter.catalogIds === 'function' ? await adapter.catalogIds() : null;
-    const requirement = acceptanceRequirementOf(run, adapter.listWorkflows(), verifiedCatalog, knownCatalog);
+    const read = acceptanceRequirementOf(run, adapter.listWorkflows(), verifiedCatalog, knownCatalog);
+    const requirement = opts.forceDeclared === true ? { ...read, declared: true } : read;
     // WT-W2: every walkthrough step the requirement names is resolved from its proof root and seal.
     const walkthroughs = await walkthroughAcceptance(adapter, run, requirement.phases);
 
@@ -3911,7 +3963,7 @@ export function registerRoutes(
       runId: id,
       repo,
       requirement,
-      ...(qeRunId !== undefined && qeRunId !== '' ? { qeRunId } : {}),
+      ...(opts.qeRunId !== undefined ? { qeRunId: opts.qeRunId } : {}),
       // AW-14 (arch-R13a + R16): the conformance section reads the same wires the standalone
       // `/governance/claims` and `/runs/:id/events` routes serve, but run-scoped and resolved
       // deny-dominates BESIDE the QE gate — so a wiki-rule violation and an unenforced governed
@@ -3939,7 +3991,18 @@ export function registerRoutes(
         })(),
       },
     });
-  });
+  }
+
+  /** EX-03: the run's QE acceptance check when its contract requires `qe_acceptance`; `null` when it
+   *  does not. A read that fails is a refusal naming why, never a pass. */
+  async function qeAcceptanceCheckFor(run: SessionView): Promise<QeAcceptanceCheck | null> {
+    if (!requiresQeAcceptance(run)) return null;
+    try {
+      return qeAcceptanceFromView(await acceptanceViewOf(run, { forceDeclared: true }));
+    } catch (err) {
+      return unreadableQeAcceptance(err);
+    }
+  }
 
   /**
    * The run's OPEN gate, resolved the way `GET /runs/:id/gate` serves it: the cache, then the
@@ -3973,6 +4036,39 @@ export function registerRoutes(
     const events = await adapter.runEvents(id);
     if (events === null) return 'no-log';
     return gateCache.rebuild(id, events) ?? null;
+  }
+
+  /** The unit an open gate holds: the named `ord`, else the open gate's, else the cursor's. */
+  async function gatedUnitOf(run: SessionView, ord: number | undefined): Promise<WorkUnit | undefined> {
+    let gateOrd = ord;
+    if (gateOrd === undefined) {
+      // A route set whose adapter cannot read the gate (a partial stub without `runEvents`) falls
+      // back to the cursor unit, exactly as a log that records no open gate does.
+      const open = await resolveOpenGate(run.session.id).catch(() => null);
+      gateOrd = open !== null && open !== 'no-log' ? open.ord : undefined;
+    }
+    const units = run.units ?? [];
+    return gateOrd !== undefined
+      ? units.find((u) => u.ord === gateOrd)
+      : [...units].sort((a, b) => a.ord - b.ord)[run.session.unit_ix];
+  }
+
+  /**
+   * The checks an APPROVE that runs the deliver unit must pass — the ONE place for both gate paths
+   * (`POST /runs/:id/gate`, standing orders, and a gated `POST /runs/:id/resume`): the delivery
+   * freeze (idea 15), and wicked-core#850 EX-03 — a run whose contract requires QE acceptance
+   * delivers only on an attributed PASS. A refusal leaves the gate open.
+   */
+  async function deliverApprovalRefusal(
+    run: SessionView,
+    deliverUnit: WorkUnit,
+  ): Promise<{ refusal: { code: number; body: unknown } } | { qeAcceptance: QeAcceptanceCheck | null }> {
+    if (deliveryFreeze.state().frozen) return { refusal: { code: 409, body: frozenRefusal(deliveryFreeze.state()) } };
+    const qeAcceptance = await qeAcceptanceCheckFor(run);
+    if (qeAcceptance !== null && !qeAcceptance.satisfied) {
+      return { refusal: { code: 409, body: qeAcceptanceRefusal(run.session.id, qeAcceptance, receiptOf(deliverUnit), 'gate') } };
+    }
+    return { qeAcceptance };
   }
 
   /**
@@ -4021,22 +4117,16 @@ export function registerRoutes(
         } };
       }
     }
-    // Freeze deliveries (idea 15): an APPROVE that would run the run's deliver unit is held while
-    // the switch is on — the gate stays open, so unfreezing lets the same approve through. The gate
-    // is the named one, else the open one, else the unit the run's cursor points at.
-    if (parsed.data.approve && deliveryFreeze.state().frozen) {
-      let gateOrd: number | undefined = parsed.data.ord;
-      if (gateOrd === undefined) {
-        const open = await resolveOpenGate(id);
-        gateOrd = open !== null && open !== 'no-log' ? open.ord : undefined;
-      }
-      const units = run.units ?? [];
-      const gated = gateOrd !== undefined
-        ? units.find((u) => u.ord === gateOrd)
-        : [...units].sort((a, b) => a.ord - b.ord)[run.session.unit_ix];
-      if (gated !== undefined && isDeliverUnit(gated)) {
-        return { code: 409, body: frozenRefusal(deliveryFreeze.state()) };
-      }
+    // The gated unit — the named gate, else the open one, else the unit the run's cursor points at —
+    // and its receipt as it stands when the person decides (wicked-core#850: every gate answer
+    // carries it). An APPROVE that would run the deliver unit passes the delivery checks first.
+    const gated = await gatedUnitOf(run, parsed.data.ord);
+    const assurance = receiptOf(gated);
+    let deliveryCheck: { qeAcceptance: QeAcceptanceCheck | null } | undefined;
+    if (parsed.data.approve && gated !== undefined && isDeliverUnit(gated)) {
+      const refused = await deliverApprovalRefusal(run, gated);
+      if ('refusal' in refused) return refused.refusal;
+      deliveryCheck = { qeAcceptance: refused.qeAcceptance };
     }
     // The steering-author landing (crew#388): decided — and the gate prompt captured — BEFORE
     // the confirm, because a terminal-phase approve prunes the gate cache and moves the run out
@@ -4098,7 +4188,15 @@ export function registerRoutes(
       const landing = steeringPropose
         ? await landSteeringProposal({ adapter, audit, actor }, run, gatePrompt)
         : undefined;
-      return { code: 200, body: { status, ...(landing !== undefined ? { landing } : {}) } };
+      return {
+        code: 200,
+        body: {
+          status,
+          ...(landing !== undefined ? { landing } : {}),
+          assurance,
+          ...(deliveryCheck !== undefined ? { delivery: deliveryCheck } : {}),
+        },
+      };
     } catch (err) {
       if (err instanceof PlanLaunchUnsupportedError) {
         return { code: 501, body: { error: message(err) } };
@@ -4114,7 +4212,7 @@ export function registerRoutes(
       config: {
         manifest: {
           requestType: 'GateDecision',
-          responseType: '{ status: SessionStatus; landing?: SteeringLandingResult }',
+          responseType: 'GateDecisionResult',
           // 409 twice over: a run not awaiting a human gate, and an engine refusal at confirm.
           // 501: an edited plan on an addon without the plan approval gate (DES-TEAMING-002 T3).
           statusCodes: [200, 400, 404, 409, 501],
@@ -4187,6 +4285,15 @@ export function registerRoutes(
       const steeringPropose =
         gated && isSteeringAuthorRun(run);
       const gatePrompt = steeringPropose ? gateCache.get(id)?.prompt : undefined;
+      // A gated resume IS an approve, so it passes the same delivery checks (freeze, EX-03) — no side
+      // door around the deliver gate — and answers with the gated unit's receipt.
+      const gatedUnit = gated ? await gatedUnitOf(run, undefined) : undefined;
+      let deliveryCheck: { qeAcceptance: QeAcceptanceCheck | null } | undefined;
+      if (gatedUnit !== undefined && isDeliverUnit(gatedUnit)) {
+        const refused = await deliverApprovalRefusal(run, gatedUnit);
+        if ('refusal' in refused) return reply.code(refused.refusal.code).send(refused.refusal.body);
+        deliveryCheck = { qeAcceptance: refused.qeAcceptance };
+      }
       const status = gated ? await adapter.confirmGate(id, true) : await adapter.resumeRun(id);
       // A resume of a gated run IS a gate approval — audit it as one, so the
       // "who approved" trail has no side door (task #88).
@@ -4197,7 +4304,12 @@ export function registerRoutes(
       const landing = steeringPropose
         ? await landSteeringProposal({ adapter, audit, actor: actorOf(req) }, run, gatePrompt)
         : undefined;
-      return reply.send({ status, ...(landing !== undefined ? { landing } : {}) });
+      return reply.send({
+        status,
+        ...(landing !== undefined ? { landing } : {}),
+        ...(gated ? { assurance: receiptOf(gatedUnit) } : {}),
+        ...(deliveryCheck !== undefined ? { delivery: deliveryCheck } : {}),
+      });
     } catch (err) {
       return reply.code(409).send({ error: message(err) });
     }
@@ -4293,6 +4405,15 @@ export function registerRoutes(
         });
       }
     }
+    // A gated reassign APPROVES the gate first, so it passes the same delivery checks (freeze,
+    // wicked-core#850 EX-03) when the gate holds the deliver unit (codex r1 on the EX-03 PR).
+    if (gated) {
+      const gatedUnit = await gatedUnitOf(run, undefined);
+      if (gatedUnit !== undefined && isDeliverUnit(gatedUnit)) {
+        const refused = await deliverApprovalRefusal(run, gatedUnit);
+        if ('refusal' in refused) return reply.code(refused.refusal.code).send(refused.refusal.body);
+      }
+    }
     const cursor = resolveCursorUnit(run);
     const ord = cursor?.ord ?? run.session.unit_ix;
     try {
@@ -4327,8 +4448,13 @@ export function registerRoutes(
   // read it. A restart is routine: deploy, crash, laptop sleep.
   app.get(`${V}/runs/:id/gate`, async (req, reply) => {
     const { id } = req.params as { id: string };
+    // wicked-core#850: the gate answer carries the gated unit's receipt — what assured the work it asks about.
+    const receiptAt = async (ord: number): Promise<AssuranceReceipt | null> => {
+      const run = (await adapter.sessionsDetail()).find((v) => v.session.id === id);
+      return receiptOf(run?.units?.find((u) => u.ord === ord));
+    };
     const cached = gateCache.get(id);
-    if (cached) return { runId: id, ...cached };
+    if (cached) return { runId: id, ...cached, assurance: await receiptAt(cached.ord) };
 
     // A miss is not evidence of anything on its own, so ask the run what it is doing before paying
     // to replay it. Only `awaiting_human` can have an open gate, and that answer is definitive:
@@ -4365,7 +4491,7 @@ export function registerRoutes(
       // genuinely lost), as does a gate whose `awaitingHuman` predates the log's retention.
       return reply.code(404).send({ error: 'No open gate for this run' });
     }
-    return { runId: id, ...open };
+    return { runId: id, ...open, assurance: receiptOf(run.units?.find((u) => u.ord === open.ord)) };
   });
 
   // ── Elicitation (DES-002) ────────────────────────────────────────────────────

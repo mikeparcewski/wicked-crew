@@ -401,7 +401,7 @@ describe('POST /runs/:id/gate on a steering-author propose gate (crew#388)', () 
 
     const { status, body } = await send('POST', `/runs/${RUN}/gate`, { approve: true });
     expect(status).toBe(200);
-    expect(body).toEqual({ status: 'completed' });
+    expect(body).toEqual({ status: 'completed', assurance: null }); // wicked-core#850: the gated unit's receipt (none here)
     expect(upserted).toHaveLength(0);
   });
 });

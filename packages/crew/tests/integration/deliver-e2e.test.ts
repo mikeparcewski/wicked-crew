@@ -306,14 +306,22 @@ describe('crew#393 end to end — default-on delivery, stranded surfacing, post-
     // The post-hoc lift — the recovery the user had to do by hand for 83052f0b.
     const deliver = await postJson(`/api/v1/runs/${runId}/deliver`);
     expect(deliver.status).toBe(200);
-    expect(deliver.body).toEqual({ prUrl: 'https://github.com/o/r/pull/202' });
+    // wicked-core#850 EX-04: no engine lift re-verified this tree, and the answer says so, naming
+    // the run's tree before the lift and the tree that reached the remote.
+    expect(deliver.body).toEqual({
+      prUrl: 'https://github.com/o/r/pull/202',
+      assurance: expect.objectContaining({ verified: false, via: 'post_hoc' }),
+    });
     expect(originBranches()).toContain(`wicked/${runId}`);
+    const lifted = (deliver.body as { assurance: { treeBefore: string | null; treeAfter: string | null } }).assurance;
+    expect(lifted.treeBefore).toMatch(/^[0-9a-f]{40}$/);
+    expect(lifted.treeAfter).toBe(git(origin, 'rev-parse', `wicked/${runId}^{tree}`).trim());
     expect(Number(git(origin, 'rev-list', '--count', `main..wicked/${runId}`).trim())).toBeGreaterThanOrEqual(1);
 
     // Idempotent: the same URL again, and still exactly one PR-equivalent branch state.
     const again = await postJson(`/api/v1/runs/${runId}/deliver`);
     expect(again.status).toBe(200);
-    expect(again.body).toEqual({ prUrl: 'https://github.com/o/r/pull/202' });
+    expect(again.body).toEqual(deliver.body);
 
     // The wire flipped for good.
     const after = await waitForRun(

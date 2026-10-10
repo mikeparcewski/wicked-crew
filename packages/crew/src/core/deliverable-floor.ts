@@ -266,5 +266,10 @@ export function composeDeliverableFloor(
     ...base.phases,
     deliverableFloorPhase(paths, launchedAtMs, last !== undefined ? [last.id] : []),
   ];
-  return { id: composedId, phases };
+  // wicked-core#850: the per-run copy keeps the def's assurance contract (see composeDeliverWorkflow).
+  return {
+    id: composedId,
+    phases,
+    ...(base.required_instruments != null ? { required_instruments: [...base.required_instruments] } : {}),
+  };
 }

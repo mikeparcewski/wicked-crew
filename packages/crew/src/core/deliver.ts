@@ -468,6 +468,28 @@ export const DELIVER_BASE_MOVED_MARKER = 'deliver: BASE MOVED since verification
 export const DELIVER_POSTHOC_ENV = 'WICKED_DELIVER_POSTHOC';
 
 /**
+ * (wicked-core#850, codex audit EX-04) The line a POST-HOC lift prints once its tree is final, and
+ * the label it appends to the PR body: no engine lift re-verified what it pushes, so the delivery
+ * is UNVERIFIED, and both trees are named — the run's work as it stood (`tree-before`, after the
+ * commit) and what is delivered (`tree-after`, after the rebase). The daemon records the run's
+ * delivery as unverified from this line ({@link unverifiedTreesFrom}); an engine-driven deliver
+ * unit (no {@link DELIVER_POSTHOC_ENV}) never prints it — the engine's lift re-verified that tree.
+ */
+export const DELIVER_UNVERIFIED_MARKER = 'deliver: UNVERIFIED post-hoc';
+
+/** The trees a post-hoc lift's {@link DELIVER_UNVERIFIED_MARKER} line names; `null` when absent. */
+export function unverifiedTreesFrom(output: string): { treeBefore: string | null; treeAfter: string | null } | null {
+  let found: { treeBefore: string | null; treeAfter: string | null } | null = null;
+  for (const line of output.split('\n')) {
+    if (!line.startsWith(DELIVER_UNVERIFIED_MARKER)) continue;
+    const before = /tree-before=([0-9a-f]{7,64})/.exec(line)?.[1] ?? null;
+    const after = /tree-after=([0-9a-f]{7,64})/.exec(line)?.[1] ?? null;
+    found = { treeBefore: before, treeAfter: after }; // the LAST such line wins
+  }
+  return found;
+}
+
+/**
  * The sentinel the deliver script prints when the crew#426 preflight (`npm install` + the
  * `manifest:endpoints` / `generate:api-tests` codegen) CHANGED the worktree AFTER the engine had
  * verified it (wicked-core#433 review addendum): the tree that would ship is then not the tree the
@@ -1018,6 +1040,8 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // would otherwise treat every `## Intent` / `## Run` / `## Phases` heading as a `#` comment and
     // strip it from the commit body (review W3-K1).
     'git diff --cached --quiet || git commit -q --cleanup=whitespace -F "$TD/commit"',
+    // (EX-04) The run's work as it stands, before any lift moves it — the post-hoc label's old tree.
+    'TB=$(git rev-parse --verify -q "$B^{tree}" || true)',
     // (c2) NOTHING TO DELIVER — no staged work AND no commits of its own. Fail LOUDLY before the
     // remote is touched: an empty ref pushed under a run id is worse than a failed phase.
     'if [ -n "$TARGET" ]; then A=$(git rev-list --count "origin/$TARGET..$B"); [ "$A" -ge 1 ] || { echo "deliver: nothing to deliver — the run added no commit on top of PR #$PRNUM"; exit 1; }; else',
@@ -1081,6 +1105,16 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // that WAS ahead can come out of a rebase carrying nothing of its own.
     'A=$(git rev-list --count "$D..$B")',
     '[ "$A" -ge 1 ] || { echo "deliver: nothing to deliver — the run produced no committed change (after rebasing onto $D, $B carries no commit of its own); nothing was pushed"; exit 1; }',
+    'fi',
+    // (c4) EX-04 (wicked-core#850): a POST-HOC lift has no engine verification behind the tree it is
+    // about to push — label the PR body (and the comment a revision posts) UNVERIFIED with both trees,
+    // and print the machine line the daemon records the run's delivery from. The engine-driven deliver
+    // unit never takes this branch: the engine's own lift re-verified its tree.
+    'if [ -n "${WICKED_DELIVER_POSTHOC:-}" ]; then',
+    '  TA=$(git rev-parse --verify -q "$B^{tree}" || true)',
+    '  if [ "$TA" = "$TB" ]; then MOVED="the lift did not change it"; else MOVED="the lift changed it: the rebase onto $D moved the work onto newer code"; fi',
+    '  { echo; echo "---"; echo; echo "**Unverified delivery.** This pull request was delivered post-hoc (\\`POST /runs/$RUNID/deliver\\`), so no engine lift re-verified the tree it pushes. Run tree before the lift: \\`${TB:-unknown}\\`; delivered tree: \\`${TA:-unknown}\\` ($MOVED). Review it as unverified work."; } >> "$TD/body"',
+    `  echo "${DELIVER_UNVERIFIED_MARKER} tree-before=\${TB:-unknown} tree-after=\${TA:-unknown}"`,
     'fi',
     // (d) Push. Any push failure happens AFTER the work was committed and its branch was proven
     // ahead, whether the remote branch moved, auth returned 403, the transport is down, or a hook
@@ -1614,6 +1648,9 @@ export function composeDeliverWorkflow(
     // composed def is engine-input, not catalog data.
     id: composedId,
     phases: placeDeliverBeforeInstall(base.phases, deliver),
+    // wicked-core#850: the per-run copy keeps the def's assurance contract — dropping it would
+    // launch the run under the default contract and silently shed a declared `qe_acceptance`.
+    ...(base.required_instruments != null ? { required_instruments: [...base.required_instruments] } : {}),
   };
 }
 

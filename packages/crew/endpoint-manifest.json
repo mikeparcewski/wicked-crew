@@ -1472,7 +1472,7 @@
       "method": "POST",
       "path": "/api/v1/runs/:id/gate",
       "requestType": "GateDecision",
-      "responseType": "{ status: SessionStatus; landing?: SteeringLandingResult }",
+      "responseType": "GateDecisionResult",
       "statusCodes": [
         200,
         400,

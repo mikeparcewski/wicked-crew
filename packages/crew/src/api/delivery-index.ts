@@ -21,6 +21,7 @@
  * the per-run output endpoint.
  */
 
+import type { DeliveryAssurance } from 'wicked-crew-api-types';
 import type { AuditLog } from './audit.js';
 import type { AgentSession, SessionView, WorkUnit, WorkflowDef } from '../core/types.js';
 import { execCapped } from '../core/exec.js';
@@ -660,6 +661,8 @@ export class DeliveryIndex {
   private readonly requested = new Set<string>();
   /** N1: runs whose deliver phase pushed the branch and could open no PR (a non-GitHub origin). */
   private readonly runToPushed = new Map<string, PushedOnlyDelivery>();
+  /** (wicked-core#850 EX-04) How a post-hoc delivery was assured — `verified: false` and its trees. */
+  private readonly runToAssurance = new Map<string, DeliveryAssurance>();
 
   /**
    * Load deliveries from EVERY `run.delivered` entry in the trail — exhaustively, not capped
@@ -686,6 +689,8 @@ export class DeliveryIndex {
           decided.add(entry.runId);
           this.runToPushed.delete(entry.runId);
           this.runToUrl.set(entry.runId, url);
+          const assurance = entry.detail?.['assurance'];
+          if (isDeliveryAssurance(assurance)) this.runToAssurance.set(entry.runId, assurance);
           continue;
         }
         if (pushedOnly.has(entry.runId)) continue;
@@ -699,6 +704,8 @@ export class DeliveryIndex {
         ) {
           pushedOnly.add(entry.runId);
           this.runToPushed.set(entry.runId, { branch: pushed.branch, remote: pushed.remote });
+          const assurance = entry.detail?.['assurance'];
+          if (isDeliveryAssurance(assurance)) this.runToAssurance.set(entry.runId, assurance);
           continue;
         }
         // Newest entry decides, even when malformed — a corrupt newest write never resurrects an
@@ -718,16 +725,25 @@ export class DeliveryIndex {
     }
   }
 
-  /** Record the run's delivered PR URL (idempotent — the newest write wins). */
-  set(runId: string, url: string): void {
+  /** Record the run's delivered PR URL (idempotent — the newest write wins) and, for a post-hoc
+   *  delivery, how it was assured (EX-04). */
+  set(runId: string, url: string, assurance?: DeliveryAssurance): void {
     this.runToPushed.delete(runId);
     this.runToUrl.set(runId, url);
+    if (assurance !== undefined) this.runToAssurance.set(runId, assurance);
+    else this.runToAssurance.delete(runId);
+  }
+
+  /** How the run's recorded delivery was assured (EX-04) — set for a post-hoc delivery only. */
+  assuranceFor(runId: string): DeliveryAssurance | undefined {
+    return this.runToAssurance.get(runId);
   }
 
   /** Record a PUSH-ONLY delivery (N1). A recorded PR URL is never downgraded by it. */
-  setPushed(runId: string, pushed: PushedOnlyDelivery): void {
+  setPushed(runId: string, pushed: PushedOnlyDelivery, assurance?: DeliveryAssurance): void {
     if (this.runToUrl.has(runId)) return;
     this.runToPushed.set(runId, pushed);
+    if (assurance !== undefined) this.runToAssurance.set(runId, assurance);
   }
 
   /** The recorded push-only delivery for this run, or `undefined` (N1). */
@@ -758,6 +774,13 @@ export class DeliveryIndex {
   urlFor(runId: string): string | undefined {
     return this.runToUrl.get(runId);
   }
+}
+
+/** A trail-read `DeliveryAssurance` (the `run.delivered` entry's `detail.assurance`), shape-checked. */
+function isDeliveryAssurance(v: unknown): v is DeliveryAssurance {
+  if (typeof v !== 'object' || v === null) return false;
+  const a = v as Record<string, unknown>;
+  return typeof a['verified'] === 'boolean' && (a['via'] === 'post_hoc' || a['via'] === 'deliver_lift');
 }
 
 /**
