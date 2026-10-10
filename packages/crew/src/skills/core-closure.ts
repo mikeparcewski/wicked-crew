@@ -96,6 +96,18 @@ export async function builtinPresetSkillRefs(
 }
 
 /**
+ * (crew#935) The core reference set: the registered defs' refs plus the built-in presets' refs the
+ * catalog HOLDS. A held preset skill cannot be disabled out from under its preset; one the catalog
+ * lacks is not a publish blocker (an older garden still publishes for every other workflow, and a run
+ * of that preset fails at admission naming the skill).
+ */
+export function coreSkillRefs(defRefs: ReadonlySet<string>, presetRefs: ReadonlySet<string>, held: ReadonlySet<string>): Set<string> {
+  const out = new Set(defRefs);
+  for (const r of presetRefs) if (held.has(r)) out.add(r);
+  return out;
+}
+
+/**
  * Every well-formed qualified-name token in `text` with its line — catalog-agnostic, PROSE only.
  * Glob/prefix tokens (trailing `-`/`_`) and `:`-continued subagent types are not names and are not
  * returned. Callers hand this the body (`bodyWithFrontmatterBlanked`), never the frontmatter.

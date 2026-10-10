@@ -107,7 +107,7 @@ import { registerGateHistoryRoute, runBand, runPreset, runProject } from '../sta
 import { busRows, openPlanGateRisk } from '../team/routes.js';
 import { isSteeringAuthorRun } from './steering-landing.js';
 import { applyWorkerConfigRoot } from './seat-signin.js';
-import { builtinPresetSkillRefs, registeredSkillRefs } from '../skills/core-closure.js';
+import { builtinPresetSkillRefs, coreSkillRefs, registeredSkillRefs } from '../skills/core-closure.js';
 import type { PluginSource } from '../skills/plugin-source.js';
 import { assertSkillsRootFenced } from '../skills/root-fence.js';
 import { SkillsRuntime } from '../skills/runtime.js';
@@ -586,15 +586,29 @@ export async function createServer(
     const source = options?.skills?.source;
     const skillsRoot = resolveSkillsRoot();
     assertSkillsRootFenced(skillsRoot, { stateHome: crewStateHome() });
-    // crew#935: the built-in presets' skills are required too (a preset registers no def).
+    // crew#935: a built-in preset registers no def, so its skills join the core set here — but only
+    // the ones the catalog HOLDS (they cannot be disabled out from under the preset). One the catalog
+    // lacks is not made a publish blocker: an older garden still publishes for every other workflow,
+    // and a run of that preset fails at admission naming the skill (codex r5 on #938).
     const presetRefs = await builtinPresetSkillRefs(adapter, (m) => app.log.warn(m));
+    const store: { current?: SkillsStore } = {};
     skillsStore = new SkillsStore({
       root: skillsRoot,
-      registeredSkillRefs: () => new Set([...registeredSkillRefs(adapter.listWorkflows()), ...presetRefs]),
+      registeredSkillRefs: () => {
+        const refs = registeredSkillRefs(adapter.listWorkflows());
+        let held: ReadonlySet<string> = new Set();
+        try {
+          held = new Set(Object.keys(store.current?.manifest().skills ?? {}));
+        } catch {
+          // an unreadable manifest holds nothing: the presets' refs are then simply not core
+        }
+        return coreSkillRefs(refs, presetRefs, held);
+      },
       provisionVenv: options?.skills?.provisionVenv ?? uvSyncBaseline,
       ...(source !== undefined ? { source } : {}),
       warn: (m) => app.log.warn(m),
     });
+    store.current = skillsStore;
     skillsRuntime = new SkillsRuntime({
       store: skillsStore,
       log: (m) => app.log.warn(m),

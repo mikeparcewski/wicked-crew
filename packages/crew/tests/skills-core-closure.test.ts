@@ -24,7 +24,7 @@ import { describe, expect, it } from 'vitest';
 
 import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
 import type { WorkflowDef } from '../src/core/types.js';
-import { builtinPresetSkillRefs, coreClosure, mandateMentions, mentionedSkillNames, presetSkillRefs, registeredSkillRefs } from '../src/skills/core-closure.js';
+import { builtinPresetSkillRefs, coreClosure, coreSkillRefs, mandateMentions, mentionedSkillNames, presetSkillRefs, registeredSkillRefs } from '../src/skills/core-closure.js';
 import { parseFrontmatter } from '../src/skills/frontmatter.js';
 import { CORE_DIR, SKIP_CORE_CHECKS, coreDirMissingMessage } from './support/core-checkout.js';
 
@@ -63,6 +63,15 @@ describe('the built-in presets\' skill_refs are required too (crew#935, codex r5
     const failing = { presetsSupported: () => true, listPresets: async () => { throw new Error('engine down'); } };
     expect((await builtinPresetSkillRefs(failing, (m) => warn.push(m))).size).toBe(0);
     expect(warn.some((w) => w.includes('engine down'))).toBe(true);
+  });
+  it('coreSkillRefs: a preset skill the catalog holds is core; one it lacks blocks nothing', () => {
+    const defs = new Set(['wicked-garden-mcp-scaffold']);
+    const fromPresets = new Set(['wicked-garden-draft']);
+    expect([...coreSkillRefs(defs, fromPresets, new Set(['wicked-garden-draft', 'wicked-garden-mcp-scaffold']))].sort()).toEqual([
+      'wicked-garden-draft',
+      'wicked-garden-mcp-scaffold',
+    ]);
+    expect([...coreSkillRefs(defs, fromPresets, new Set(['wicked-garden-mcp-scaffold']))]).toEqual(['wicked-garden-mcp-scaffold']);
   });
   it('the published 0.8.0 engine\'s interactive presets name wicked-garden-draft, so it stays core (cannot be disabled)', async () => {
     const { CoreAdapter } = await import('../src/core/adapter.js');
