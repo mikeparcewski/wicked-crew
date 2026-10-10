@@ -171,6 +171,13 @@ export interface LaunchRunInput {
    * crew never sets it on a caller's behalf (`core/assurance.ts`).
    */
   reducedAssurance?: boolean;
+  /**
+   * (QE-IN-APP-WORKFLOWS, wicked-core-ts >= 0.7.49) The operator's EXPLICIT skip of a required QE
+   * acceptance, with this reason (core-ts `skipQeAcceptanceReason`), or its explicit force
+   * (`forceQeAcceptance`). Sent only when the caller sent them; crew never sets either.
+   */
+  skipQeAcceptanceReason?: string;
+  forceQeAcceptance?: boolean;
 }
 
 /** Default `workerStallMinutes` (crew#287): silent minutes before the stall watchdog fires. */

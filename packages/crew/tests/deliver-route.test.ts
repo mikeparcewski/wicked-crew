@@ -110,7 +110,9 @@ describe('POST /runs deliver option (crew#293)', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/v1/runs',
-      payload: { problem: 'ship it', clisJson: '[]', workflow: 'feature', deliver: 'pr', deliverGate: 'auto' },
+      // QE-IN-APP-WORKFLOWS: `feature` requires QE acceptance, which delivers only through the gate
+      // (or with an explicit skip) — a def that requires nothing is the opt-out's subject here.
+      payload: { problem: 'ship it', clisJson: '[]', workflow: 'code-chore', deliver: 'pr', deliverGate: 'auto' },
     });
     expect(res.statusCode).toBe(201);
     const input = mockAdapter.launchRun.mock.calls[0]![0] as LaunchRunInput;
@@ -383,7 +385,7 @@ describe('GET /health capabilities (F-E2E-030)', () => {
     // crew#619: `chatIdOnLaunch` is a crew-side constant so it is always false when engineCapabilities throws.
     // C1: `runChatId` is served by the daemon's own launch index, so it is true whatever the engine.
     // ASK-C1: `askPath` is the core-ts floor (0.7.38) — unknown engine, no capability.
-    expect(res.json().capabilities).toEqual({ deliverGate: false, revisesPr: false, chatIdOnLaunch: false, seatChipOnCreate: false, runChatId: true, linkedIssuesExclude: true, walkthroughRoots: false, askPath: false, reducedAssurance: false });
+    expect(res.json().capabilities).toEqual({ deliverGate: false, revisesPr: false, chatIdOnLaunch: false, seatChipOnCreate: false, runChatId: true, linkedIssuesExclude: true, walkthroughRoots: false, askPath: false, reducedAssurance: false, qeAcceptanceOverride: false });
     await app.close();
   });
 });

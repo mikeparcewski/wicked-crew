@@ -27,7 +27,7 @@ import {
   resolvePullRequest,
   type GhExec,
 } from '../src/core/deliver.js';
-import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
+import { BUILTIN_WORKFLOWS, addonSupportsQeOverride } from '../src/core/adapter.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { AuditEntry, LaunchRunInput } from '../src/core/types.js';
 
@@ -221,7 +221,7 @@ describe('POST /runs {revisesPr} — resolved at the boundary, refused by name, 
     apps.push(app);
     await app.ready();
     const health = (await app.inject({ method: 'GET', url: '/api/v1/health' })).json() as { capabilities: Record<string, boolean> };
-    expect(health.capabilities).toEqual({ deliverGate: true, revisesPr: true, runChatId: true, linkedIssuesExclude: true, walkthroughRoots: false, reducedAssurance: true });
+    expect(health.capabilities).toEqual({ deliverGate: true, revisesPr: true, runChatId: true, linkedIssuesExclude: true, walkthroughRoots: false, reducedAssurance: true, qeAcceptanceOverride: addonSupportsQeOverride() });
   });
 });
 

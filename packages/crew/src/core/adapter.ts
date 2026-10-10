@@ -716,6 +716,12 @@ export function addonSupportsReducedAssurance(): boolean {
   return addonAtLeast(0, 7, 46);
 }
 
+/** Does the installed addon carry the QE acceptance decision (`LaunchOptions.skipQeAcceptanceReason`
+ *  / `forceQeAcceptance`, `assurance.qe`; QE-IN-APP-WORKFLOWS, >= 0.7.49)? Same doctrine. */
+export function addonSupportsQeOverride(): boolean {
+  return addonAtLeast(0, 7, 49);
+}
+
 /**
  * Does the installed addon understand `LaunchOptions.projectGraph` (≥ 0.7.1)?
  *
@@ -826,6 +832,11 @@ const CORE_SEEDED_WORKFLOWS = new Set(['feature', 'bug', 'migration']);
 
 // `is_system` is NOT spelled on these defs: `withSystemFlag` stamps it from `SYSTEM_WORKFLOWS`
 // (core/run-identity.ts), the one list keyed by name that also classifies served runs (seam X2).
+/** QE-IN-APP-WORKFLOWS (operator ruling 2026-10-10): what a workflow that makes application changes
+ *  requires — the defaults plus `qe_acceptance` — exactly as core's `feature`/`bug`/`migration`/
+ *  `mcp-server` defs declare it (the mirror guards compare field for field). */
+const APP_CHANGE_INSTRUMENTS = ['distinct_evaluator', 'judge', 'qe_acceptance'];
+
 export const BUILTIN_WORKFLOWS: WorkflowDef[] = ([
   {
     id: 'feature',
@@ -837,6 +848,7 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = ([
       { id: 'test', kind: 'test', gate_type: 'execution', gate: { human_confirm_if: 'verdict_not_pass' }, executes_code: false, verified_evidence: true, required_deliverables: [], depends_on: ['build'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: EVIDENCE_FLOOR_PIN },
       { id: 'review', kind: 'review', gate_type: 'execution', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['test'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
     ],
+    required_instruments: APP_CHANGE_INSTRUMENTS,
   },
   {
     id: 'bug',
@@ -849,6 +861,7 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = ([
       { id: 'fix', kind: 'build', instructions: BUG_FIX_SWEEP_INSTRUCTIONS, gate_type: 'execution', gate: 'auto', executes_code: true, verified_evidence: false, required_deliverables: [], depends_on: ['reproduce'], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: EVIDENCE_FLOOR_PIN },
       { id: 'verify', kind: 'test', gate_type: 'execution', gate: { human_confirm_if: 'verdict_not_pass' }, executes_code: false, verified_evidence: true, required_deliverables: [], depends_on: ['fix'], role: 'evaluator', skill_ref: null, allowed_skills: [], validator_pin: EVIDENCE_FLOOR_PIN },
     ],
+    required_instruments: APP_CHANGE_INSTRUMENTS,
   },
   {
     id: 'migration',
@@ -859,6 +872,7 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = ([
       { id: 'verify', kind: 'test', gate_type: 'execution', gate: { human_confirm_if: 'verdict_not_pass' }, executes_code: false, verified_evidence: true, required_deliverables: [], depends_on: ['cutover'], role: 'evaluator', skill_ref: null, allowed_skills: [], validator_pin: EVIDENCE_FLOOR_PIN },
       { id: 'cleanup', kind: 'build', gate_type: null, gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['verify'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
     ],
+    required_instruments: APP_CHANGE_INSTRUMENTS,
   },
   {
     // capture-learnings (DES-MEM-FACETED-001 write side, onboarding): survey a just-indexed repo,
@@ -1015,6 +1029,7 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = ([
       { id: "install-plan", kind: "build", gate_type: "execution", gate: "auto", executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ["security-review", "observability-review"], role: "neutral", skill_ref: null, allowed_skills: [], validator_pin: null, executor: {"type": "tool", "cmd": ["bash", "-c", "exec \"${WICKED_GARDEN_ROOT:?the engine handed this Tool phase no garden root; refusing to resolve wicked-garden from PATH}/scripts/wicked-garden\" run scripts/mcp/install.py --from-run --dry-run --json"]}, instructions: "Plan the install without writing anything: resolve, on this host and as the daemon user, every file and directory each install choice would write — Install for workers (the default: the staged copy under ~/.wicked/mcp-servers/<key>/current, the wicked-crew MCP tools registry and the worker homes' CLI configurations under ~/.wicked-worker) and Also install into my CLIs (the worker set plus your own CLI configurations, such as ~/.claude.json, ~/.codex/config.toml and the opencode configuration) — and print them as one JSON plan line, so the install's consent gate can list them before you answer." },
       { id: "install", kind: "build", gate_type: "execution", gate: "consent_before", executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ["install-plan"], role: "neutral", skill_ref: null, allowed_skills: [], validator_pin: null, executor: {"type": "tool", "cmd": ["bash", "-c", "exec \"${WICKED_GARDEN_ROOT:?the engine handed this Tool phase no garden root; refusing to resolve wicked-garden from PATH}/scripts/wicked-garden\" run scripts/mcp/install.py --from-run --target \"${WICKED_CONSENT_CHOICE:?the consent gate recorded no install choice}\" --json"]}, instructions: "Install for running — or update the installed copy when this server key is already installed. Nothing has been installed yet: this asks before the install runs, and each answer lists exactly the files it would write (from the install-plan dry run). Install for workers (the default) builds the server from this run's tree into ~/.wicked/mcp-servers/<key>/current, registers it in wicked-crew's MCP tools under its key (an existing entry is re-registered in place; the first use of a changed tool still asks) and writes it into the worker homes' CLI MCP configurations — program-owned files only. Also install into my CLIs does the same and also writes it into your own CLI MCP configurations through wicked-installer (one entry per key, never a second copy; CLI entries carry no secret). Both probe tools/list. The one secret variable <SERVER>_TOKEN is named, never written: when the daemon cannot resolve it the registration is reported as pending with the remedy. Writes happen on the daemon host as the daemon user. Decline for not now — the pull request already delivered stays as it is." },
     ],
+    required_instruments: APP_CHANGE_INSTRUMENTS,
   },
 ] satisfies WorkflowDef[]).map(withSystemFlag);
 
@@ -2036,6 +2051,19 @@ export class CoreAdapter {
         );
       }
       opts.reducedAssurance = true;
+    }
+    if (input.skipQeAcceptanceReason !== undefined || input.forceQeAcceptance === true) {
+      // Fail CLOSED on an old addon (napi ignores undeclared fields): a dropped skip would leave a
+      // run the operator meant to skip refusing its delivery, and a dropped force would let a score
+      // waive what the operator required — either way the record and the run would disagree.
+      if (!addonSupportsQeOverride()) {
+        throw new Error(
+          'skipQeAcceptance / forceQeAcceptance need wicked-core-ts >= 0.7.49; the installed addon ' +
+            'has no QE acceptance decision to apply them to',
+        );
+      }
+      if (input.skipQeAcceptanceReason !== undefined) opts.skipQeAcceptanceReason = input.skipQeAcceptanceReason;
+      if (input.forceQeAcceptance === true) opts.forceQeAcceptance = true;
     }
     // SAFETY NET (grounding follow-on #1): ANY project-filed launch that did not already resolve a
     // project-graph binding gets one here, so no future project-filed caller can silently ship a run

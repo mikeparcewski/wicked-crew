@@ -49,13 +49,13 @@ function unit(run: string, ord: number, phase: string, status: string, assurance
   };
 }
 
-function view(id: string, status: string, required: string[] | null, workdir: string | null = null) {
+function view(id: string, status: string, required: string[] | null, workdir: string | null = null, qe?: Record<string, unknown>) {
   return {
     session: {
       id, workflow_id: 'bug', problem: 'p', entity_mode: 'shared', collection_scope: null,
       clis: ['claude', 'codex'], status, human_confirm: 'all', unit_ix: DELIVER_ORD - 1, attempt: 0, workdir,
       repo_ref: 'repo-1', extra_write_roots: [], archived_at: null, archive_note: null,
-      ...(required !== null ? { assurance: { mode: 'full', required } } : {}),
+      ...(required !== null ? { assurance: { mode: 'full', required, ...(qe !== undefined ? { qe } : {}) } } : {}),
     },
     units: [
       unit(id, 1, 'fix', 'done', RECEIPT),
@@ -93,6 +93,29 @@ const RUNS = {
   done: 'run-qe-done',
   donePass: 'run-qe-done-pass',
   donePushOnly: 'run-qe-done-push-only',
+  gatedWaived: 'run-qe-gated-waived',
+  gatedSkipped: 'run-qe-gated-skipped',
+  gatedDiffRequired: 'run-qe-gated-diff-required',
+  doneWaived: 'run-qe-done-waived',
+  gatedEmptyQe: 'run-qe-gated-empty',
+  gatedSkipNoOperator: 'run-qe-gated-skip-plan',
+  gatedUnknown: 'run-qe-gated-unknown',
+  doneMalformed: 'run-qe-done-malformed',
+};
+
+/** QE-IN-APP-WORKFLOWS: the engine's decisions as `assurance.qe` carries them. */
+const WAIVED = {
+  status: 'waived', basis: 'diff', score: 20, threshold: 20, ord: 2, tree: 'aaaaaaaa',
+  reason: 'waived: impact score 20 at or below the waiver line 20, every dimension in its lowest band (reach 20: 1 changed symbol(s))',
+  reasons: ['reach 20: 1 changed symbol(s), 0 dependent(s) within 3 hops'],
+};
+const SKIPPED = {
+  status: 'skipped', basis: 'operator', score: null, threshold: 20, ord: null, tree: null,
+  reason: 'QE acceptance skipped by operator: docs-only hotfix', reasons: [],
+};
+const DIFF_REQUIRED = {
+  status: 'required', basis: 'diff', score: 60, threshold: 20, ord: 2, tree: 'aaaaaaaa',
+  reason: 'required: impact score 60 above the waiver line 20 (novelty +20: 1 new dependency(ies))', reasons: [],
 };
 let pushOnlyNext = false;
 
@@ -110,6 +133,14 @@ beforeAll(async () => {
     view(RUNS.done, 'completed', ['qe_acceptance'], workdir),
     view(RUNS.donePass, 'completed', ['qe_acceptance'], workdir),
     view(RUNS.donePushOnly, 'completed', ['qe_acceptance'], workdir),
+    view(RUNS.gatedWaived, 'awaiting_human', ['qe_acceptance'], null, WAIVED),
+    view(RUNS.gatedSkipped, 'awaiting_human', ['qe_acceptance'], null, SKIPPED),
+    view(RUNS.gatedDiffRequired, 'awaiting_human', ['qe_acceptance'], null, DIFF_REQUIRED),
+    view(RUNS.doneWaived, 'completed', ['qe_acceptance'], workdir, WAIVED),
+    view(RUNS.gatedEmptyQe, 'awaiting_human', ['qe_acceptance'], null, {}),
+    view(RUNS.gatedSkipNoOperator, 'awaiting_human', ['qe_acceptance'], null, { ...SKIPPED, basis: 'plan' }),
+    view(RUNS.gatedUnknown, 'awaiting_human', ['qe_acceptance'], null, { ...WAIVED, status: 'exempt' }),
+    view(RUNS.doneMalformed, 'completed', ['qe_acceptance'], workdir, { ...WAIVED, basis: 'operator' }),
   ];
   const mockAdapter = {
     sessionsDetail: vi.fn(async () => structuredClone(views)),
@@ -160,7 +191,7 @@ beforeEach(() => {
   confirmCalls.length = 0;
   deliverCalls.length = 0;
   recorded.length = 0;
-  for (const id of [RUNS.gated, RUNS.gatedFail, RUNS.gatedPass, RUNS.gatedNoReq]) {
+  for (const id of [RUNS.gated, RUNS.gatedFail, RUNS.gatedPass, RUNS.gatedNoReq, RUNS.gatedWaived, RUNS.gatedSkipped, RUNS.gatedDiffRequired, RUNS.gatedEmptyQe, RUNS.gatedSkipNoOperator, RUNS.gatedUnknown]) {
     gateCache.adopt(id, { ord: DELIVER_ORD, prompt: 'Approve deliver?', lifecycle: 'open', receivedAt: '2026-10-10T10:00:00Z' });
   }
 });
@@ -317,6 +348,118 @@ describe('the per-run def copies keep the assurance contract', () => {
     const base = { ...feature, required_instruments: ['distinct_evaluator', 'judge', 'qe_acceptance'] };
     expect(composeDeliverWorkflow(base, 'run-1').required_instruments).toEqual(base.required_instruments);
     expect(composeDeliverableFloor(base, 'run-1', ['/tmp/out.html']).required_instruments).toEqual(base.required_instruments);
-    expect('required_instruments' in composeDeliverWorkflow(feature, 'run-1')).toBe(false);
+    const bare = { ...feature };
+    delete bare.required_instruments;
+    expect('required_instruments' in composeDeliverWorkflow(bare, 'run-1')).toBe(false);
+  });
+});
+
+describe('QE-IN-APP-WORKFLOWS — the delivery reads the run\'s QE decision', () => {
+  it('a score-WAIVED run delivers without a verdict, and the answer says waived and why', async () => {
+    const res = await gate(RUNS.gatedWaived, { approve: true, ord: DELIVER_ORD });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().delivery.qeAcceptance).toEqual({
+      status: 'waived', satisfied: true, reason: WAIVED.reason, verdictId: null, reviewer: null,
+    });
+    expect(confirmCalls).toHaveLength(1);
+  });
+
+  it('an operator-SKIPPED run delivers with the label naming the reason', async () => {
+    const res = await gate(RUNS.gatedSkipped, { approve: true, ord: DELIVER_ORD });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().delivery.qeAcceptance).toMatchObject({
+      status: 'skipped', satisfied: true, reason: 'QE acceptance skipped by operator: docs-only hotfix',
+    });
+  });
+
+  it('a diff decision of REQUIRED (high score) with no PASS is refused 409, the check saying required', async () => {
+    const res = await gate(RUNS.gatedDiffRequired, { approve: true, ord: DELIVER_ORD });
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json()).toMatchObject({ code: 'qe_acceptance_required', acceptance: { status: 'required', satisfied: false } });
+    expect(confirmCalls).toEqual([]);
+  });
+
+  it('codex r1: a malformed or mismatched decision never bypasses the ledger — empty, a skip not by the operator, an unknown status', async () => {
+    for (const id of [RUNS.gatedEmptyQe, RUNS.gatedSkipNoOperator, RUNS.gatedUnknown]) {
+      const res = await gate(id, { approve: true, ord: DELIVER_ORD });
+      expect(res.statusCode, `${id}: ${res.body}`).toBe(409);
+      expect(res.json()).toMatchObject({ code: 'qe_acceptance_required', acceptance: { status: 'required', satisfied: false } });
+    }
+    const resume = await app.inject({ method: 'POST', url: `/api/v1/runs/${RUNS.gatedUnknown}/resume` });
+    expect(resume.statusCode, resume.body).toBe(409);
+    const lift = await app.inject({ method: 'POST', url: `/api/v1/runs/${RUNS.doneMalformed}/deliver` });
+    expect(lift.statusCode, lift.body).toBe(409);
+    expect(confirmCalls).toEqual([]);
+  });
+
+  it('a waived post-hoc delivery runs the script; its receipt names the waiver and carries the decision', async () => {
+    const res = await app.inject({ method: 'POST', url: `/api/v1/runs/${RUNS.doneWaived}/deliver` });
+    expect(res.statusCode, res.body).toBe(200);
+    const a = res.json().assurance;
+    expect(a.qeAcceptance).toMatchObject({ status: 'waived', satisfied: true });
+    expect(a.receipt.qe).toEqual(WAIVED);
+    expect(a.receipt.skipped).toContainEqual({ instrument: 'qe_acceptance', reason: 'qe_waived_by_score', detail: WAIVED.reason });
+  });
+});
+
+describe('QE-IN-APP-WORKFLOWS at launch — the operator\'s explicit skip or force is forwarded, never inferred', () => {
+  async function launchWith(payload: Record<string, unknown>) {
+    const launched: Array<Record<string, unknown>> = [];
+    const a = Fastify({ logger: false });
+    registerRoutes(a, {
+      getWorkflow: (id: string) => (id === 'qe-gated' ? { id, phases: [], required_instruments: ['distinct_evaluator', 'judge', 'qe_acceptance'] } : null),
+      listWorkflows: () => BUILTIN_WORKFLOWS,
+      getSettings: async () => ({}),
+      launchRun: vi.fn(async (input: Record<string, unknown>) => { launched.push(input); return 'x'; }),
+    } as unknown as CoreAdapter, new GateCache(), new ElicitationCache());
+    await a.ready();
+    const res = await a.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'p', workflow: 'qe-gated', clisJson: '[]', ...payload } });
+    await a.close();
+    return { res, launched };
+  }
+
+  it('skipQeAcceptance forwards its reason; forceQeAcceptance forwards true; neither sent forwards nothing', async () => {
+    const skip = await launchWith({ skipQeAcceptance: { reason: 'docs-only hotfix' } });
+    expect(skip.res.statusCode, skip.res.body).toBe(201);
+    expect(skip.launched[0]!['skipQeAcceptanceReason']).toBe('docs-only hotfix');
+    expect('forceQeAcceptance' in skip.launched[0]!).toBe(false);
+    const force = await launchWith({ forceQeAcceptance: true });
+    expect(force.launched[0]!['forceQeAcceptance']).toBe(true);
+    expect('skipQeAcceptanceReason' in force.launched[0]!).toBe(false);
+    const none = await launchWith({ forceQeAcceptance: false });
+    expect('forceQeAcceptance' in none.launched[0]! || 'skipQeAcceptanceReason' in none.launched[0]!).toBe(false);
+  });
+
+  it('a skip with an empty reason, or a skip beside a force, is a 400; nothing launches', async () => {
+    for (const payload of [{ skipQeAcceptance: { reason: '  ' } }, { skipQeAcceptance: {} }, { skipQeAcceptance: { reason: 'x' }, forceQeAcceptance: true }]) {
+      const { res, launched } = await launchWith(payload);
+      expect(res.statusCode, JSON.stringify(payload)).toBe(400);
+      expect(launched).toEqual([]);
+    }
+  });
+
+  it('codex r1: a def that shadows a QE built-in preset\'s name never speaks for the preset the engine runs', async () => {
+    const launched: unknown[] = [];
+    const a = Fastify({ logger: false });
+    registerRoutes(a, {
+      getWorkflow: (id: string) => ({ id, phases: [] }),
+      listWorkflows: () => BUILTIN_WORKFLOWS,
+      getSettings: async () => ({}),
+      launchRun: vi.fn(async (input: unknown) => { launched.push(input); return 'x'; }),
+    } as unknown as CoreAdapter, new GateCache(), new ElicitationCache());
+    await a.ready();
+    for (const workflow of ['feature', 'migration']) {
+      const res = await a.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'p', workflow, deliverGate: 'auto', clisJson: '[]' } });
+      expect(res.statusCode, `${workflow}: ${res.body}`).toBe(400);
+      expect(res.json().error).toMatch(/requires QE acceptance/);
+    }
+    expect(launched).toEqual([]);
+    await a.close();
+  });
+
+  it('an explicit skip lets a QE-requiring workflow deliver unattended (no verdict is left to check)', async () => {
+    const { res, launched } = await launchWith({ deliverGate: 'auto', skipQeAcceptance: { reason: 'release train, QE ran upstream' } });
+    expect(res.statusCode, res.body).toBe(201);
+    expect(launched[0]!['autoDeliver']).toBe(true);
   });
 });

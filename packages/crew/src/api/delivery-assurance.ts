@@ -9,6 +9,12 @@
  * delivery — at the deliver gate's approve, at a gated resume, and at a post-hoc lift. Nothing is
  * pushed, and a deliver gate stays open for the approve to be retried once the PASS is recorded.
  *
+ * QE-IN-APP-WORKFLOWS (wicked-core-ts >= 0.7.49): the contract also carries the run's DECISION
+ * (`assurance.qe`): `required`, `waived` (the run's diff scored in the lowest band on every
+ * dimension) or `skipped` (the operator's explicit word at launch, with a reason). Only `required`
+ * reads the ledger; a waived or skipped delivery is not refused, and its check says which and why.
+ * A contract with no decision (an older engine) that requires `qe_acceptance` is `required`.
+ *
  * EX-04: a post-hoc lift (`POST /runs/:id/deliver`) has no engine verification behind the tree it
  * pushes, so it is labelled UNVERIFIED with the run's tree before and after the lift — in the PR
  * body (the deliver script, `DELIVER_UNVERIFIED_MARKER`) and in the run record
@@ -16,6 +22,7 @@
  */
 
 import type {
+  QeAcceptanceDecision,
   AssuranceInstrument,
   AssuranceReceipt,
   AssuranceSkip,
@@ -30,13 +37,59 @@ import type { AcceptanceView } from '../qe/acceptance.js';
 /** The contract token whose enforcement the engine leaves to the launcher. */
 export const QE_ACCEPTANCE = 'qe_acceptance';
 
+/** The engine's BUILT-IN presets that require `qe_acceptance` — the mirror of wicked-core's
+ *  `catalog::builtin_preset_instruments` (QE-IN-APP-WORKFLOWS). A launch naming one of these runs the
+ *  preset, whatever def of the same name crew holds. */
+export const QE_PRESETS: ReadonlySet<string> = new Set(['feature', 'migration']);
+
 /** `QeAcceptanceRefusal.code`. */
 export const QE_ACCEPTANCE_REQUIRED_CODE = 'qe_acceptance_required' as const;
 
 /** Whether the run's persisted contract requires a QE acceptance PASS before delivery. A run from an
  *  engine without the contract carries none and requires nothing here (its gate is the old one). */
 export function requiresQeAcceptance(view: SessionView): boolean {
-  return (view.session.assurance?.required ?? []).includes(QE_ACCEPTANCE);
+  return qeDecisionOf(view) !== null;
+}
+
+/** The run's QE decision when its contract requires `qe_acceptance` (else `null`): the engine's
+ *  `assurance.qe`, or — on an engine that records no decision — a plain `required`. */
+export function qeDecisionOf(view: SessionView): QeAcceptanceDecision | null {
+  const a = view.session.assurance;
+  if (a === undefined || a === null || !(a.required ?? []).includes(QE_ACCEPTANCE)) return null;
+  return (
+    a.qe ?? {
+      status: 'required',
+      basis: 'plan',
+      score: null,
+      threshold: 0,
+      reason: 'required: this engine records no QE decision',
+      reasons: [],
+      ord: null,
+      tree: null,
+    }
+  );
+}
+
+/** Whether a decision lets a delivery go WITHOUT a ledger PASS: only a waiver the engine made from
+ *  the run's diff (`waived` + `basis: 'diff'`) or the operator's explicit skip (`skipped` + `basis:
+ *  'operator'`, with a reason). Anything else — `required`, an unknown status, a mismatched basis, a
+ *  malformed record — reads the ledger (codex r1 on the crew PR: fail closed). */
+export function qeDecisionBypasses(decision: QeAcceptanceDecision): boolean {
+  if (typeof decision.reason !== 'string' || decision.reason.trim() === '') return false;
+  return (decision.status === 'waived' && decision.basis === 'diff')
+    || (decision.status === 'skipped' && decision.basis === 'operator');
+}
+
+/** A delivery's check when the decision is NOT `required`: satisfied, no verdict read, and it says
+ *  which (`waived` by the score, `skipped` by the operator) in the decision's own words. */
+export function qeAcceptanceNotRequired(decision: QeAcceptanceDecision): QeAcceptanceCheck {
+  return {
+    status: decision.status,
+    satisfied: true,
+    reason: decision.reason,
+    verdictId: null,
+    reviewer: null,
+  };
 }
 
 /** The check a delivery ran, from the acceptance view resolved with the requirement FORCED on (a
@@ -48,6 +101,7 @@ export function qeAcceptanceFromView(view: AcceptanceView): QeAcceptanceCheck {
   // hold AND that verdict must be a PASS (codex r1 on the EX-03 PR).
   const ledgerPass = verdict?.verdict === 'PASS';
   return {
+    status: 'required',
     satisfied: view.gate.satisfied && ledgerPass,
     reason:
       view.gate.satisfied && !ledgerPass
@@ -61,6 +115,7 @@ export function qeAcceptanceFromView(view: AcceptanceView): QeAcceptanceCheck {
 /** A check that could not be read at all is a refusal, naming why (deny-dominates). */
 export function unreadableQeAcceptance(err: unknown): QeAcceptanceCheck {
   return {
+    status: 'required',
     satisfied: false,
     reason: `the QE acceptance answer could not be read: ${err instanceof Error ? err.message : String(err)} (unreadable ⇒ deny)`,
     verdictId: null,
@@ -109,9 +164,22 @@ export function aggregateReceipt(view: SessionView, tree: string | null): Assura
   if (contract === null) return null;
   const ran: AssuranceInstrument[] = [];
   const skipped: AssuranceSkip[] = [];
+  // The run's CURRENT QE decision speaks for the delivery: a gate receipt cut while a since-revoked
+  // waiver stood must not carry its skip here (the engine's delivery receipt does the same).
+  const qe = view.session.assurance?.qe;
+  if (qe !== undefined && qe.status !== 'required') {
+    skipped.push({
+      instrument: QE_ACCEPTANCE,
+      reason: qe.status === 'waived' ? 'qe_waived_by_score' : 'qe_skipped_by_operator',
+      detail: qe.reason,
+    });
+  }
   for (const r of receipts) {
     for (const i of r.ran) if (!ran.includes(i)) ran.push(i);
-    for (const s of r.skipped) if (!skipped.some((k) => k.instrument === s.instrument)) skipped.push(s);
+    for (const s of r.skipped) {
+      if (s.instrument === QE_ACCEPTANCE) continue;
+      if (!skipped.some((k) => k.instrument === s.instrument)) skipped.push(s);
+    }
   }
   return {
     mode: contract.mode,
@@ -123,6 +191,7 @@ export function aggregateReceipt(view: SessionView, tree: string | null): Assura
     judge: null,
     tree,
     attempt: 0,
+    ...(qe !== undefined ? { qe } : {}),
   };
 }
 
