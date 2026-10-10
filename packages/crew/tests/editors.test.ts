@@ -394,6 +394,13 @@ describe('pack install: the gate, crew\'s conformance run, then the registry', (
     expect(res.editors[0]!.enabled).toBe(false);
   });
 
+  it('codex r5: an editor id that is an Object prototype key (constructor) still gets a boolean switch', async () => {
+    const { reg, home } = registry();
+    const res = await installPack(makePack({ id: 'constructor', name: 'acme-ctor' }), undefined, { check: passCheck, conformance: conformant(), registry: reg });
+    expect(res.editors[0]!.enabled).toBe(true);
+    expect(new EditorRegistry({ stateHome: home }).get('constructor')!.enabled).toBe(true);
+  });
+
   it('codex r1: readCapped never reads past the cap', () => {
     const dir = mkdtempSync(join(tmpdir(), 'editors-cap-'));
     scratches.push(dir);

@@ -326,6 +326,11 @@ const InstalledPackSchema = z.object({
   conformance: z.object({ ok: z.literal(true), at: z.string(), cases: z.array(z.string()) }),
 });
 
+/** An operator flag by editor id: own properties only (an id like `constructor` is not an inherited key, codex r5). */
+function flagOf(flags: Record<string, boolean>, id: string): boolean | undefined {
+  return Object.hasOwn(flags, id) && typeof flags[id] === 'boolean' ? flags[id] : undefined;
+}
+
 interface PersistedState {
   v: 1;
   enabled: Record<string, boolean>;
@@ -345,7 +350,7 @@ export class EditorRegistry {
     this.persistedFlags = state.enabled;
     if (opts.studioRoot !== undefined) {
       for (const r of discoverStudioEditors(opts.studioRoot, this.log)) {
-        this.records.set(r.manifest.id, { ...r, enabled: state.enabled[r.manifest.id] ?? true });
+        this.records.set(r.manifest.id, { ...r, enabled: flagOf(state.enabled, r.manifest.id) ?? true });
       }
     }
     for (const [id, pack] of Object.entries(state.installed ?? {})) {
@@ -355,7 +360,7 @@ export class EditorRegistry {
         continue;
       }
       const r = readPackEditor(pack, id, this.log);
-      if (r !== null) this.records.set(id, { ...r, enabled: state.enabled[id] ?? true });
+      if (r !== null) this.records.set(id, { ...r, enabled: flagOf(state.enabled, id) ?? true });
     }
   }
 
@@ -384,7 +389,7 @@ export class EditorRegistry {
   private writeState(): void {
     const enabled: Record<string, boolean> = {};
     for (const r of this.records.values()) if (!r.enabled) enabled[r.manifest.id] = false;
-    for (const id of this.installed.keys()) if (!this.records.has(id) && this.persistedFlags[id] === false) enabled[id] = false;
+    for (const id of this.installed.keys()) if (!this.records.has(id) && flagOf(this.persistedFlags, id) === false) enabled[id] = false;
     const state: PersistedState = { v: 1, enabled };
     if (this.installed.size > 0) state.installed = Object.fromEntries([...this.installed].sort(([a], [b]) => a.localeCompare(b)));
     mkdirSync(join(this.stateFile, '..'), { recursive: true });
@@ -460,7 +465,7 @@ export class EditorRegistry {
       const id = r.manifest.id;
       // An update keeps the operator's switch: the live record's, else the one persisted for a record
       // skipped at boot (codex r1), else on.
-      return { ...r, enabled: enabled ?? this.records.get(id)?.enabled ?? this.persistedFlags[id] ?? true };
+      return { ...r, enabled: enabled ?? this.records.get(id)?.enabled ?? flagOf(this.persistedFlags, id) ?? true };
     });
     this.commit(() => {
       for (const r of out) {
