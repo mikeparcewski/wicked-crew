@@ -26,7 +26,7 @@ async function seed(base: string): Promise<void> {
   const repo = join(base, 'repo');
   mkdirSync(home, { recursive: true });
   execFileSync('git', ['init', '-q', '-b', 'main', repo]);
-  for (const args of [['config', 'user.email', 'r@t'], ['config', 'user.name', 'r'], ['commit', '--allow-empty', '-qm', 'base']]) {
+  for (const args of [['config', 'user.email', 'r@t'], ['config', 'user.name', 'r'], ['config', 'core.fsmonitor', 'false'], ['commit', '--allow-empty', '-qm', 'base']]) {
     execFileSync('git', ['-c', 'commit.gpgsign=false', ...args], { cwd: repo });
   }
   writeFileSync(join(repo, 'README.md'), '# long-lived home\n');
