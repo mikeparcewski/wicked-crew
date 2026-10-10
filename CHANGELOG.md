@@ -10,6 +10,18 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.9.2] — 2026-10-10
+
+A patch for crew 0.9.1, whose post-publish smoke was red on macOS (S04). The engine pin moves to **`wicked-core-ts` `^0.7.48`**.
+
+- **launch (#930):** a plan or preset launch's `requireDeliverables` ride the launch to the engine (`LaunchOptions.deliverables`, wicked-core-ts >= 0.7.48) instead of being refused (X-MIG M9).
+- **deps (#934):** wicked-core-ts ^0.7.48 (`LaunchOptions.deliverables`, wicked-core#858).
+- **Fixed (#936):**
+  - A diff request (`GET /runs/:id/diff`) that raced the delivered-worktree sweep answered 500 "git executable not found on server". It now serves the run branch, as for a worktree that was already gone.
+  - A `?path=` inside an engine worktree diffs worktree-relative on the branch.
+  - The final-codebase archive is taken only on the deliver unit's own capture, so no other unit's capture costs an engine read.
+- **Release smoke:** pinned to wicked-ci after #44. S04 counts only the bug run's own copilot turns, because S03's chained onboarding capture no longer pauses under core-ts 0.7.47 (core#649 option A).
+
 ## [0.9.1] — 2026-10-10
 
 Azure DevOps delivery, one credential preflight for GitHub and Azure DevOps, and a final-codebase zip for every delivery (operator ruling on #720). The engine pin moves to **`wicked-core-ts` `^0.7.47`**, whose state-home registry classifies the new `artifacts/` directory (wicked-core#857). This release bundles **wicked-studio 0.7.1**.
@@ -3786,7 +3798,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.2...HEAD
+[0.9.2]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.10...v0.9.0
 [0.8.10]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.9...v0.8.10
