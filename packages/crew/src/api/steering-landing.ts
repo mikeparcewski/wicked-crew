@@ -40,6 +40,7 @@
  *    note would land words nobody reviewed as JSON nobody saw.
  */
 
+import { createHash } from 'node:crypto';
 import { promises as fsp } from 'node:fs';
 import { join } from 'node:path';
 
@@ -310,6 +311,13 @@ interface LandedMarker {
   ruleIds: string[];
   source: SteeringProposalSource;
   at: string;
+  /** sha256 of the landed proposal's rules (absent on markers written before core#649 M8). */
+  digest?: string;
+}
+
+/** The proposal's identity for the idempotency marker: the rules as parsed, hashed. */
+function proposalDigest(rules: RawRule[]): string {
+  return createHash('sha256').update(JSON.stringify(rules)).digest('hex');
 }
 
 /** Read a file, mapping ONLY a missing file to null — any other error (EACCES, EIO) throws. */
@@ -336,9 +344,17 @@ export async function landSteeringProposal(
   deps: SteeringLandingDeps,
   run: SessionView,
   gatePrompt?: string,
-): Promise<SteeringLandingResult> {
+): Promise<SteeringLandingResult | undefined> {
   const runId = run.session.id;
   const { adapter, audit, actor } = deps;
+
+  // ── Only an approve that follows the propose step lands (core#649 M8) ─────────
+  // Since `steering-author` is a preset, the run is PA-scoped and floor-filled: it can pause at
+  // a plan-approval gate BEFORE propose runs, and floor phases can gate AFTER it. Approving a
+  // gate while propose is still `pending` approves no proposal, so there is nothing to land and
+  // nothing to report. (`run` is the view taken before the confirm.)
+  const proposeUnit = run.units.find((u) => u.id === `${runId}:propose` || u.id.endsWith(':propose'));
+  if (proposeUnit === undefined || proposeUnit.status === 'pending') return undefined;
 
   const failed = (error: string, landedIds: string[] = [], source?: SteeringProposalSource): SteeringLandingResult => {
     audit.record('governance.steering.landing_failed', actor, {
@@ -352,30 +368,6 @@ export async function landSteeringProposal(
       error,
     };
   };
-
-  // ── Idempotency: a replayed approve re-lands nothing ─────────────────────────
-  let markerText: string | null = null;
-  try {
-    markerText = await readIfExists(steeringLandedMarkerPath(runId));
-  } catch {
-    /* an unreadable marker (not just missing) is treated as absent — the upsert is
-       idempotent by rule id, so the worst case is a same-content overwrite */
-  }
-  if (markerText !== null) {
-    try {
-      const marker = JSON.parse(markerText) as LandedMarker;
-      if (Array.isArray(marker.ruleIds)) {
-        return {
-          outcome: 'landed',
-          ruleIds: marker.ruleIds,
-          source: marker.source,
-          alreadyLanded: true,
-        };
-      }
-    } catch {
-      /* a corrupt marker is treated as absent — the upsert is idempotent anyway */
-    }
-  }
 
   // ── Read the proposal: deliverable file → stored transcript → cached gate prompt ──
   let rawRules: RawRule[] | null = null;
@@ -398,9 +390,8 @@ export async function landSteeringProposal(
 
   if (rawRules === null) {
     // The transcript is stored on approval (deny-dominates writes no output for a rejected
-    // unit), so post-confirm it is readable. Find the propose unit by its phase-suffixed id.
-    const proposeUnit = run.units.find((u) => u.id === `${runId}:propose` || u.id.endsWith(':propose'));
-    if (proposeUnit !== undefined) {
+    // unit), so post-confirm it is readable. The propose unit was found above.
+    {
       try {
         const transcript = await adapter.workOutput(coreUnitId(runId, proposeUnit));
         if (transcript !== null) {
@@ -427,6 +418,34 @@ export async function landSteeringProposal(
         `POST /governance/steering/author, or land the transcript's rules by hand through ` +
         `POST /governance/rules.`,
     );
+  }
+
+  // ── Idempotency: a replayed approve of the SAME proposal re-lands nothing ─────
+  // Keyed by the proposal's digest, not the run: a later gate (a floor phase after propose) can
+  // send the run back to propose, and the revised proposal it then approves must land. A marker
+  // from before M8 carries no digest and keeps the old run-wide behaviour.
+  const digest = proposalDigest(rawRules);
+  let markerText: string | null = null;
+  try {
+    markerText = await readIfExists(steeringLandedMarkerPath(runId));
+  } catch {
+    /* an unreadable marker (not just missing) is treated as absent — the upsert is
+       idempotent by rule id, so the worst case is a same-content overwrite */
+  }
+  if (markerText !== null) {
+    try {
+      const marker = JSON.parse(markerText) as LandedMarker;
+      if (Array.isArray(marker.ruleIds) && (marker.digest === undefined || marker.digest === digest)) {
+        return {
+          outcome: 'landed',
+          ruleIds: marker.ruleIds,
+          source: marker.source,
+          alreadyLanded: true,
+        };
+      }
+    } catch {
+      /* a corrupt marker is treated as absent — the upsert is idempotent anyway */
+    }
   }
 
   const defaultType = steeringTypeFromProblem(run.session.problem);
@@ -487,7 +506,7 @@ export async function landSteeringProposal(
   // ── Durable marker (best-effort — the upsert is idempotent even without it) ──
   try {
     await fsp.mkdir(steeringInboxDir(runId), { recursive: true });
-    const marker: LandedMarker = { ruleIds: landedIds, source, at: new Date().toISOString() };
+    const marker: LandedMarker = { ruleIds: landedIds, source, at: new Date().toISOString(), digest };
     await fsp.writeFile(steeringLandedMarkerPath(runId), JSON.stringify(marker, null, 2), 'utf8');
   } catch {
     /* a missing marker degrades to a re-upsert of identical content, never a duplicate */

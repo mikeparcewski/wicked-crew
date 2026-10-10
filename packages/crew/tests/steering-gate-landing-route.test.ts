@@ -11,7 +11,9 @@
 //    audit trail records `governance.rule.upserted` per rule.
 //  - The proposal is read MACHINE-READABLY first (the propose phase's proposed-rules.json in the
 //    run's steering inbox); the stored transcript is the fallback.
-//  - IDEMPOTENT: a replayed approve finds the durable marker and re-lands nothing.
+//  - IDEMPOTENT: a replayed approve of the SAME proposal finds the durable marker and re-lands
+//    nothing; a revised proposal (a send-back to propose) lands (core#649 M8).
+//  - A gate approved before propose ran (a preset's plan-approval pause) lands nothing.
 //  - FAIL-LOUD: an unparseable proposal still approves the RUN but answers an explicit
 //    `landing.outcome: "failed"` + `governance.steering.landing_failed` — never a silent no-op.
 //  - A REJECT lands nothing. An AMEND-approve lands the proposal UNCHANGED (the amend steers the
@@ -223,6 +225,50 @@ describe('POST /runs/:id/gate on a steering-author propose gate (crew#388)', () 
     // Landed ONCE: the store took exactly one write, and the audit shows exactly one upsert.
     expect(upserted).toHaveLength(1);
     expect(await auditEntries(RUN, 'governance.rule.upserted')).toHaveLength(1);
+  });
+
+  // core#649 M8: `steering-author` is a preset, so the run is PA-scoped and floor-filled.
+  it('a gate approved BEFORE propose ran (the plan-approval pause) lands nothing and reports no landing', async () => {
+    const RUN = 'land-preset-plan-gate-1';
+    const run = steeringRun(RUN);
+    run.session.unit_ix = 1;
+    run.units = [
+      { id: `${RUN}:pa-scope`, ord: 1, session_id: RUN, status: 'done' },
+      { id: `${RUN}:analyze`, ord: 2, session_id: RUN, status: 'pending' },
+      { id: `${RUN}:propose`, ord: 3, session_id: RUN, status: 'pending' },
+    ] as unknown as SessionView['units'];
+    views = [run];
+    writeProposalFile(RUN);
+
+    const { status, body } = await send('POST', `/runs/${RUN}/gate`, { approve: true });
+    expect(status).toBe(200);
+    expect(body['landing']).toBeUndefined();
+    expect(upserted).toHaveLength(0);
+    expect(await auditEntries(RUN, 'governance.steering.landing_failed')).toHaveLength(0);
+  });
+
+  it('a REVISED proposal approved after a send-back lands; the same proposal re-approved does not', async () => {
+    const RUN = 'land-revised-1';
+    views = [steeringRun(RUN)];
+    writeProposalFile(RUN);
+    const first = await send('POST', `/runs/${RUN}/gate`, { approve: true });
+    expect((first.body['landing'] as Record<string, unknown>)['outcome']).toBe('landed');
+    expect(upserted).toHaveLength(1);
+
+    // A floor phase after propose sent the run back; propose wrote a revised proposal and paused.
+    const revised = [{ ...PROPOSAL[0]!, statement: 'never deploy on friday or saturday' }];
+    writeProposalFile(RUN, JSON.stringify(revised));
+    views = [steeringRun(RUN)];
+    const second = await send('POST', `/runs/${RUN}/gate`, { approve: true });
+    expect(second.body['landing']).toMatchObject({ outcome: 'landed', ruleIds: ['POL-0001'] });
+    expect((second.body['landing'] as Record<string, unknown>)['alreadyLanded']).toBeUndefined();
+    expect(upserted).toHaveLength(2);
+    expect(upserted[1]!.statement).toBe('never deploy on friday or saturday');
+
+    views = [steeringRun(RUN)];
+    const third = await send('POST', `/runs/${RUN}/gate`, { approve: true });
+    expect(third.body['landing']).toMatchObject({ alreadyLanded: true });
+    expect(upserted).toHaveLength(2);
   });
 
   it('a re-post against a run that already moved on stays a 409 (the standing guard)', async () => {
