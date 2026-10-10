@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { COMPOSE_MAX_REQUIREMENTS, composeInstructions, registerProductRoutes } from '../src/api/product.js';
+import { COMPOSE_MAX_REQUIREMENTS, ComposeSelectionTooLargeError, composeInstructions, registerProductRoutes, reviewInstructions } from '../src/api/product.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 
 describe('POST /projects/:id/product/compose (crew#372)', () => {
@@ -81,6 +81,10 @@ describe('POST /projects/:id/product/compose (crew#372)', () => {
     expect(draft).toContain('alpha billing::r2: Refunds need approval');
     expect(draft).toContain("Operator's steer: one epic per domain");
     expect(draft).toContain('"requirementRefs"');
+    // codex on #911: the evaluator is handed the SAME list (the engine passes it the draft's output).
+    const review = String(steps[1]!['instructions']);
+    expect(review).toContain('alpha billing::r1: Invoices are numbered');
+    expect(review).toContain('alpha billing::r2: Refunds need approval');
   });
 
   it('an unknown key or a repo that is not the project\'s is a 400 naming each; nothing launches', async () => {
@@ -119,5 +123,13 @@ describe('POST /projects/:id/product/compose (crew#372)', () => {
     expect(text).toContain('"requirementRefs"');
     const wide = composeInstructions('p', rows.map((r) => ({ ...r, title: 'é'.repeat(400) })), undefined);
     expect(Buffer.byteLength(wide, 'utf8')).toBeLessThanOrEqual(7600);
+    expect(Buffer.byteLength(reviewInstructions('a-project-id', rows), 'utf8')).toBeLessThanOrEqual(7600);
+    // codex on #911: a long ref is never clipped — the description gives way, and refs that
+    // cannot fit whole are refused rather than handed to a seat cut.
+    const longKeys = rows.map((r, i) => ({ ...r, key: `d::${'k'.repeat(120)}-${i}` }));
+    const t = composeInstructions('p', longKeys, undefined);
+    for (const r of longKeys) expect(t).toContain(`- ${r.repoId} ${r.key}: `);
+    const huge = rows.map((r, i) => ({ ...r, key: `d::${'k'.repeat(190)}-${i}` }));
+    expect(() => composeInstructions('p', huge, undefined)).toThrow(ComposeSelectionTooLargeError);
   });
 });

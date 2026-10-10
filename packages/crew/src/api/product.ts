@@ -51,15 +51,34 @@ function clipBytes(s: string, max: number): string {
   return `${out}…`;
 }
 
+type ComposeRow = { repoId: string; key: string; title: string; statement: string };
+
+/** The selection does not fit the step cap even with every description cut: its refs alone are
+ *  too long. The route answers 400 (smaller selection) rather than hand a seat clipped refs. */
+export class ComposeSelectionTooLargeError extends Error {}
+
+/**
+ * The step's instructions: `head`, the requirement list, `tail`, under the byte budget. Every
+ * requirement keeps its line with its ref WHOLE (`- <repoId> <key>: `, codex on #911): only the
+ * descriptive text shares what is left, equally. Throws {@link ComposeSelectionTooLargeError} when
+ * the refs alone do not fit.
+ */
+function withRequirements(head: string, rows: ReadonlyArray<ComposeRow>, tail: readonly string[]): string {
+  const fixed = Buffer.byteLength([head, ...tail].join('\n'), 'utf8') + rows.length;
+  const prefixes = rows.map((r) => `- ${r.repoId} ${r.key}: `);
+  const refBytes = prefixes.reduce((n, p) => n + Buffer.byteLength(p, 'utf8'), 0);
+  const spare = COMPOSE_INSTRUCTIONS_MAX_BYTES - fixed - refBytes;
+  if (spare < rows.length * 8) throw new ComposeSelectionTooLargeError('the selected requirement refs alone exceed the step instructions budget');
+  const perText = Math.floor(spare / Math.max(1, rows.length));
+  const lines = rows.map((r, i) => prefixes[i]! + clipBytes(oneLine(`${r.title} — ${r.statement}`), perText));
+  return [head, ...lines, ...tail].join('\n');
+}
+
 /** The draft step's instructions: the requirements as the server read them, and the artifact. */
-export function composeInstructions(
-  projectId: string,
-  rows: ReadonlyArray<{ repoId: string; key: string; title: string; statement: string }>,
-  steer: string | undefined,
-): string {
+export function composeInstructions(projectId: string, rows: ReadonlyArray<ComposeRow>, steer: string | undefined): string {
   const head = `Compose a product plan for project ${projectId} from these ${rows.length} requirement(s):`;
-  const steerLines = steer !== undefined && steer.trim() !== '' ? ['', `Operator's steer: ${oneLine(steer)}`] : [];
-  const tail = [
+  return withRequirements(head, rows, [
+    ...(steer !== undefined && steer.trim() !== '' ? ['', `Operator's steer: ${oneLine(steer)}`] : []),
     '',
     'Group them into epics, each epic into features, each feature into user stories with acceptance',
     'criteria. Every feature names the requirement refs it covers ({"repoId","key"}, exactly as listed);',
@@ -67,17 +86,20 @@ export function composeInstructions(
     'Do not create issues or change any repository. End with ONE fenced ```json block, the plan:',
     '{"epics":[{"title":"","features":[{"title":"","requirementRefs":[{"repoId":"","key":""}],',
     '"stories":[{"title":"","acceptance":[""]}]}]}]}',
-  ];
-  // Whatever the selection, the whole text fits: the fixed parts first, then every requirement
-  // gets an equal share of what is left (a long title is cut, a requirement is never dropped).
-  const fixed = Buffer.byteLength([head, ...steerLines, ...tail].join('\n'), 'utf8') + rows.length;
-  const perLine = Math.max(48, Math.floor((COMPOSE_INSTRUCTIONS_MAX_BYTES - fixed) / Math.max(1, rows.length)));
-  const lines = rows.map((r) => clipBytes(`- ${r.repoId} ${r.key}: ${oneLine(`${r.title} — ${r.statement}`)}`, perLine));
-  return [head, ...lines, ...steerLines, ...tail].join('\n');
+  ]);
 }
 
-const REVIEW_INSTRUCTIONS =
-  "Review the drafted product plan against the requirements it was drafted from: every listed requirement is covered, every feature's requirementRefs exist in the list, nothing is invented, the stories are testable. The plan must be one well-formed fenced JSON block. A gap or an invented item is a FAIL naming it.";
+/** The review step's instructions: the SAME requirement list (codex on #911: the engine hands the
+ *  evaluator the draft's output, not the draft's instructions), so a gap or an invented ref is
+ *  checkable against what was selected. */
+export function reviewInstructions(projectId: string, rows: ReadonlyArray<ComposeRow>): string {
+  return withRequirements(`Review the drafted product plan for project ${projectId} against the ${rows.length} requirement(s) it was drafted from:`, rows, [
+    '',
+    "Every listed requirement is covered at least once; every feature's requirementRefs are refs from this list,",
+    'exactly; nothing is invented that no requirement asks for; the stories are testable; the plan is ONE',
+    'well-formed fenced JSON block. A gap, an unknown ref or an invented item is a FAIL naming it.',
+  ]);
+}
 
 export function registerProductRoutes(app: FastifyInstance, adapter: CoreAdapter): void {
   app.post(
@@ -112,6 +134,17 @@ export function registerProductRoutes(app: FastifyInstance, adapter: CoreAdapter
       if (unknown.length > 0) {
         return reply.code(400).send({ error: 'Unknown requirements: nothing was launched', unknown });
       }
+      let draft: string;
+      let review: string;
+      try {
+        draft = composeInstructions(id, rows, parsed.data.instructions);
+        review = reviewInstructions(id, rows);
+      } catch (err) {
+        if (err instanceof ComposeSelectionTooLargeError) {
+          return reply.code(400).send({ error: `${err.message}: select fewer requirements; nothing was launched` });
+        }
+        throw err;
+      }
       const launch = await app.inject({
         method: 'POST',
         url: `${V}/runs`,
@@ -127,8 +160,8 @@ export function registerProductRoutes(app: FastifyInstance, adapter: CoreAdapter
           deliver: 'none',
           plan: {
             steps: [
-              { catalog: 'produce', id: 'draft', instructions: composeInstructions(id, rows, parsed.data.instructions) },
-              { catalog: 'review', id: 'review', gate: { human_confirm: { unconditional: true } }, instructions: REVIEW_INSTRUCTIONS },
+              { catalog: 'produce', id: 'draft', instructions: draft },
+              { catalog: 'review', id: 'review', gate: { human_confirm: { unconditional: true } }, instructions: review },
             ],
           },
         },
