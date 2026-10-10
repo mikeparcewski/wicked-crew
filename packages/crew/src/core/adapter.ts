@@ -214,8 +214,8 @@ const STUDIO_SETTINGS_MAX_BYTES = 512 * 1024;
 
 /** Read user-registered workflow overlays from `dir` (the same dir `registerWorkflow` writes to).
  *
- * Skips: files whose id matches a built-in (those are `_writeBuiltinOverlay` artifacts written FOR
- * the Rust actor, not user workflows — including them would duplicate a built-in in `listWorkflows`),
+ * Skips: files whose id matches a built-in (artifacts older crews wrote FOR the Rust actor, not user
+ * workflows — including them would duplicate a built-in in `listWorkflows`),
  * non-`.json` files, and any file that does not parse into a `{id, phases[]}` shape (the Rust actor
  * skips an unreadable overlay too, so crew must not surface one it can't). A missing dir yields `[]`.
  *
@@ -1093,7 +1093,7 @@ export const RETIRED_OVERLAY_IDS = ['chat', 'survey-repo', 'memories', 'domain-g
 /**
  * Park the overlay files older crews wrote for {@link RETIRED_OVERLAY_IDS}.
  *
- * `_writeBuiltinOverlay` wrote each of these on first launch, and the overlay dir is PERSISTENT: on
+ * Older crews wrote each of these on first launch, and the overlay dir is PERSISTENT: on
  * an upgraded host the engine's startup `load_dir` would keep the deleted workflows launchable, and
  * `hydrateFromOverlay` would serve them on `GET /workflows` as user workflows, where they are no
  * longer on the system list (review of wicked-crew#688). Renamed, not deleted, like the onboarding
@@ -3394,11 +3394,10 @@ export class CoreAdapter {
   /**
    * Arm a PER-RUN composed workflow def (crew#293 deliver, crew#311 deliverable floor) with the
    * engine — hot registration
-   * ONLY. Deliberately neither of the other two paths:
+   * ONLY. Deliberately not the other path:
    *   - not `registerWorkflow()`: the composed def must not enter `userWorkflows` or the overlay
    *     dir — it is launch input for one run, and persisting it would grow the catalog and the
-   *     overlay dir by one entry per delivered run;
-   *   - not `_writeBuiltinOverlay()`: same reason, no file.
+   *     overlay dir by one entry per delivered run.
    * The engine's `registerWorkflow` binding validates the def server-side and makes it visible
    * to the next `launchRun` with no restart — exactly the lifetime a per-run def needs. (The
    * def is consumed at PLANNING time; a later daemon restart resumes the run from its persisted
