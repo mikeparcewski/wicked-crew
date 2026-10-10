@@ -321,14 +321,15 @@ describe.skipIf(!ENGINE_HAS_PLANS)('run identity through the real engine', () =>
   });
 
   it('delivery-index: a preset run classifies by what it CONTAINS, not the def under its name', async () => {
-    // `capture-learnings`' registered def does no code work, but this preset's steps do (`build`):
-    // the run is a delivery candidate because of the units the engine planned.
-    const v = await launchPreset('capture-learnings');
-    expect(runWorkflowDef(v, adapter.listWorkflows())?.id).toBe('capture-learnings');
+    // `steering-author`'s registered def does no code work, but this preset's steps do (`build`):
+    // the run is a delivery candidate because of the units the engine planned. (It was
+    // `capture-learnings` until wicked-core#829 made that one a BUILT-IN preset, read-only.)
+    const v = await launchPreset('steering-author');
+    expect(runWorkflowDef(v, adapter.listWorkflows())?.id).toBe('steering-author');
     expect(v.units.some((u) => u.executes_code === true && u.role !== 'evaluator')).toBe(true);
     expect(canDeliverResolver(() => adapter.listWorkflows())(v)).toBe(true);
     const served = (await (await fetch(`${baseUrl}/api/v1/runs/${v.session.id}`)).json()) as { run: SessionView };
-    expect(served.run.session.run_identity).toMatchObject({ name: 'capture-learnings', system: true });
+    expect(served.run.session.run_identity).toMatchObject({ name: 'steering-author', system: true });
   });
 
   it('a user plan resolves as a user plan', async () => {
