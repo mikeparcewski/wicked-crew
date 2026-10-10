@@ -359,7 +359,7 @@ function rosterOf(adapter: CoreAdapter, roster?: () => unknown[]): unknown[] {
 }
 
 /**
- * Arm the seam: register the `interactive-edit` workflow, open a durable
+ * Arm the seam (it registers nothing: the run is the engine's `interactive-edit` preset), open a durable
  * `wicked.interactive.feedback.processed` subscription, and answer each handoff carrying
  * structural items with a governed run that ends in `wicked.interactive.edit.completed`.
  *

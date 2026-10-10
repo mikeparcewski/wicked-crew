@@ -652,7 +652,7 @@ function rosterOf(adapter: CoreAdapter, roster?: () => unknown[]): unknown[] {
 }
 
 /**
- * Arm the seam: register the `interactive-draft` workflow, open a durable
+ * Arm the seam (it registers nothing: the run is the engine's `interactive-draft` preset), open a durable
  * `wicked.interactive.doc.created` subscription, and answer each `kind: "source"` creation
  * with a governed run that ends in `wicked.interactive.draft.completed`.
  *

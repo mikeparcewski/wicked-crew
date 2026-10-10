@@ -418,7 +418,7 @@ function rosterOf(adapter: CoreAdapter, roster?: () => unknown[]): unknown[] {
 }
 
 /**
- * Arm the seam: register the `interactive-chat` workflow, open a durable
+ * Arm the seam (it registers nothing: the run is the engine's `interactive-chat` preset), open a durable
  * `wicked.interactive.chat.posted` subscription, and answer each user ask on an existing
  * answerable doc (contract (b)) with a governed run that ends in `wicked.interactive.draft.completed`
  * (the service lands the revised full HTML as a generated version).

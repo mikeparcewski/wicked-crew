@@ -44,6 +44,13 @@ describe('RunUnits', () => {
     expect(u.position(3)).toBe('3/4');
     expect(u.observe({ type: 'unitDispatched', ord: 3 } as CoreEvent)).toBe(false);
   });
+  it('only the LAST creator is the writer: the launch\'s deliverables ride the last creator step (codex r3 on #938)', () => {
+    const u = new RunUnits();
+    u.observe(planned(1, 'outline', 'creator'));
+    u.observe(planned(2, 'draft', 'creator'));
+    u.observe(planned(3, 'critique', 'evaluator'));
+    expect([1, 2, 3].map((o) => u.isWriter(o))).toEqual([false, true, false]);
+  });
   it('a tool unit is never the writer, and an unplanned ord reads as its number', () => {
     const u = new RunUnits();
     u.observe(planned(1, 'verify', 'creator', 'tool'));

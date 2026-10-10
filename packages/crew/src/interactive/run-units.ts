@@ -89,10 +89,11 @@ export class RunUnits {
     return this.at(ord)?.tool === true;
   }
 
-  /** The agent creator unit: the one that writes the deliverable. */
+  /** The unit that writes the deliverable: the LAST agent creator (the engine joins the launch's
+   *  declared deliverables to the plan's last creator step, so only its gate verifies the file). */
   isWriter(ord: number): boolean {
-    const u = this.at(ord);
-    return u !== undefined && !u.tool && u.role === 'creator';
+    const isCreator = (u: PlannedUnit | undefined): boolean => u !== undefined && !u.tool && u.role === 'creator';
+    return isCreator(this.at(ord)) && !this.units.slice(ord).some(isCreator);
   }
 
   /** An evaluator unit (the engine's `critique`, a review). */
