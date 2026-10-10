@@ -2816,6 +2816,38 @@ export type AdviceDeliveredEvent = {
 };
 
 /**
+ * (wicked-core#762) The engine ended an ACP turn itself: the worker's final message was followed by
+ * `quietSecs` of silence (`WICKED_ACP_SETTLE_SECS`, default 600) with no tool call open, so the turn
+ * is settled `Ok` with its `outputBytes` of output as the attempt's result and the wedged process is
+ * dropped. Crew's stall watchdog reads it as a returned worker (never a reassign). Spelled as
+ * wicked-core's `CoreEvent::to_json` emits it.
+ */
+export type AcpTurnSettledEvent = {
+  type: 'acpTurnSettled';
+  session: string;
+  ord: number;
+  attempt: number;
+  cliKey: string;
+  quietSecs: number;
+  outputBytes: number;
+};
+
+/**
+ * (wicked-core#418) An ACP session opened to replace a process the engine closed itself, and what
+ * the cold start cost (`ms`, to the opened session): `reason` is `posture_switch`,
+ * `fenced_unit_quiesced` or `turn_settled` (read an unknown token as a reason, never an error).
+ */
+export type AcpProcessRestartedEvent = {
+  type: 'acpProcessRestarted';
+  session: string;
+  ord: number;
+  attempt: number;
+  cliKey: string;
+  reason: 'posture_switch' | 'fenced_unit_quiesced' | 'turn_settled' | (string & {});
+  ms: number;
+};
+
+/**
  * DES-TEAMING-001 §5.3 / §7 (wicked-core#602, S3; api-types 0.40.0) — the worker's answer to one
  * DELIVERED finding, read from its final output line `ADVICE <id>: ACCEPT|DECLINE — <reason>` (the
  * last line per id wins). The worker may decline and must say why: `reason` (≤2 KB) is its

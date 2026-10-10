@@ -269,7 +269,14 @@ export class WorkerStallWatchdog {
       this.outputSinceDispatch.set(session, 0);
     } else if (event.type === 'unitOutputDelta') {
       this.outputSinceDispatch.set(session, (this.outputSinceDispatch.get(session) ?? 0) + 1);
-    } else if (event.type === 'unitOutputCaptured' && typeof event.ord === 'number') {
+    } else if (
+      (event.type === 'unitOutputCaptured' || event.type === 'acpTurnSettled') &&
+      typeof event.ord === 'number'
+    ) {
+      // core#762: `acpTurnSettled` is the engine saying a complete final message existed and it
+      // ended the wedged turn itself, keeping the output as the attempt's result: the worker
+      // returned, exactly as for a captured output. A stall after it is the fold, never a dead
+      // worker, so the escalation notifies (`evaluating`) instead of reassigning finished work.
       this.evaluating.set(session, event.ord);
     }
     // The engine's own turn ceiling fired (perf#4: `stepStatus: "timed_out"` — a NEW value; the
