@@ -1,8 +1,8 @@
 // Wave 6 — the governed test-authoring workflow `qe-author-tests` (F-7R2-003/004/005/012/014/015,
-// acceptance R4-r2): the def as DATA, the engine's validation of it AS AUTHORED (wicked-core#414),
-// and the verify phase's script driven for REAL against temp git repos — the R4-r2 floor is "a
-// produced test that fails, or was never run, FAILS the unit", and that is asserted here by
-// running the very script the phase ships, not by reading its text.
+// acceptance R4-r2): the ENGINE's built-in preset (X-MIG M10) as crew serves it (X-MIG M11: derived
+// from the preset and the phase catalog, no mirror), and the verify step's script — the one the
+// engine's preset ships — driven for REAL against temp git repos. The R4-r2 floor is "a produced test
+// that fails, or was never run, FAILS the unit", asserted by running the very script the step runs.
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -11,26 +11,43 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { BUILTIN_WORKFLOWS, CoreAdapter } from '../src/core/adapter.js';
+import { CoreAdapter } from '../src/core/adapter.js';
 import { DELIVER_PHASE_ID, EVIDENCE_FLOOR_PIN } from '../src/core/deliver.js';
 import type { WorkflowDef } from '../src/core/types.js';
 import {
   QE_AUTHOR_TESTS_WORKFLOW,
-  QE_AUTHOR_TESTS_WORKFLOW_DEF,
-  QE_MAX_INLINE_INSTRUCTION_BYTES,
   QE_SKILL,
   QE_VERIFY_MARKER,
   QE_VERIFY_PHASE_ID,
   QE_VERIFY_SUMMARY_MARKER,
   parseQeVerifyOutput,
   qeAuthorPlan,
-  qeVerifyScript,
 } from '../src/qe/author-workflow.js';
 import { buildTestSet, qeTestsGroupLabel } from '../src/qe/test-sets.js';
 import type { SessionView } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
 
-const def = QE_AUTHOR_TESTS_WORKFLOW_DEF;
+/** The PTY line also carries the intent, so each step's inline orientation stays under this. */
+const QE_MAX_INLINE_INSTRUCTION_BYTES = 600;
+
+let engineDir: string;
+let engine: CoreAdapter;
+/** The def crew serves for the engine's preset, read once (the installed wicked-core-ts). */
+let def: WorkflowDef;
+beforeAll(async () => {
+  engineDir = mkdtempSync(join(tmpdir(), 'qe-author-preset-'));
+  engine = new CoreAdapter({ dbPath: join(engineDir, 'core.db'), stub: true });
+  await engine.loadBuiltinCatalog(() => {});
+  const served = engine.getWorkflow(QE_AUTHOR_TESTS_WORKFLOW);
+  if (served === null) throw new Error('the engine serves no qe-author-tests preset');
+  def = served;
+});
+afterAll(() => {
+  engine.close();
+  removeScratch(engineDir);
+});
+/** The verify step's script, as the engine's preset ships it (`bash -c <script>`). */
+const qeVerifyScript = (): string => (phase(QE_VERIFY_PHASE_ID).executor as { cmd: string[] }).cmd[2]!;
 const phase = (id: string) => {
   const p = def.phases.find((x) => x.id === id);
   if (!p) throw new Error(`phase ${id} missing`);
@@ -38,10 +55,9 @@ const phase = (id: string) => {
 };
 
 describe('qe-author-tests — the def as data', () => {
-  it('is served from BUILTIN_WORKFLOWS as an operator-selectable work mode (F-075: the catalog carries a test/QE workflow)', () => {
-    const served = BUILTIN_WORKFLOWS.find((w) => w.id === QE_AUTHOR_TESTS_WORKFLOW);
-    expect(served).toBe(def);
-    expect(served?.is_system).toBeUndefined();
+  it('is served from the engine\'s preset as an operator-selectable work mode (F-075: the catalog carries a test/QE workflow)', () => {
+    expect(engine.listWorkflows().some((w) => w.id === QE_AUTHOR_TESTS_WORKFLOW)).toBe(true);
+    expect(def.is_system ?? false).toBe(false);
   });
 
   it('runs recon → author → verify → review as a dependent chain, and NEVER carries a deliver phase of its own', () => {
@@ -72,7 +88,10 @@ describe('qe-author-tests — the def as data', () => {
 
   it('verify is a deterministic TOOL phase — verified_evidence, floor-pinned, executes_code:false (a Tool unit is never worktree-guarded)', () => {
     const verify = phase(QE_VERIFY_PHASE_ID);
-    expect(verify.executor).toEqual({ type: 'tool', cmd: ['bash', '-lc', qeVerifyScript()] });
+    const cmd = (verify.executor as { type: string; cmd: string[] }).cmd;
+    expect(verify.executor?.type).toBe('tool');
+    expect(cmd.slice(0, 2)).toEqual(['bash', cmd[1]]);
+    expect(cmd[2]).toContain(QE_VERIFY_SUMMARY_MARKER);
     expect(verify.kind).toBe('test');
     expect(verify.role).toBe('neutral');
     expect(verify.verified_evidence).toBe(true);
@@ -119,39 +138,6 @@ describe('qe-author-tests — the def as data', () => {
       }
       if (p.verified_evidence) expect(p.validator_pin, `${p.id}: verified_evidence needs a pin`).not.toBeNull();
     }
-  });
-});
-
-describe('qe-author-tests — the ENGINE validates the def as authored', () => {
-  let dir: string;
-  let adapter: CoreAdapter;
-  type Register = (json: string) => Promise<string>;
-  const register = (d: WorkflowDef): Promise<string> => {
-    const core = (adapter as unknown as { core: Record<string, unknown> }).core;
-    const fn = core['registerWorkflow'];
-    if (typeof fn !== 'function') throw new Error('the installed wicked-core-ts has no registerWorkflow binding');
-    return (fn as Register).call(core, JSON.stringify(d));
-  };
-
-  beforeAll(() => {
-    dir = mkdtempSync(join(tmpdir(), 'qe-author-def-'));
-    adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: true });
-  });
-  afterAll(() => {
-    adapter.close();
-    removeScratch(dir);
-  });
-
-  it('the shipped def registers — the core validator accepts the pins it carries', async () => {
-    await expect(register({ ...def, id: 'qe-author-tests-probe' })).resolves.toBeDefined();
-  });
-
-  it('the same def with the author pin removed is REFUSED (the validator has teeth — a def that dropped its floor could never ship)', async () => {
-    const unpinned: WorkflowDef = {
-      id: 'qe-author-tests-unpinned',
-      phases: def.phases.map((p) => (p.id === 'author' ? { ...p, validator_pin: null } : p)),
-    };
-    await expect(register(unpinned)).rejects.toThrow();
   });
 });
 

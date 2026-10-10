@@ -21,7 +21,7 @@ import {
   deliverPrPhase,
   deliverPrScript,
 } from '../src/core/deliver.js';
-import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
+import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
 import { deliverNonceOf, trustedDeliverOutcome, trustedOutcomeIn } from '../src/core/deliver-triage.js';
 import type { WorkflowDef } from '../src/core/types.js';
 import { SKIP_CORE_CHECKS, requireCoreDir } from './support/core-checkout.js';

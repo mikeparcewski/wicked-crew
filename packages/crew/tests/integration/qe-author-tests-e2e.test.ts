@@ -34,7 +34,6 @@ import { EVIDENCE_FLOOR_PIN } from '../../src/core/deliver.js';
 import type { PhaseDef, WorkflowDef } from '../../src/core/types.js';
 import {
   QE_AUTHOR_TESTS_WORKFLOW,
-  QE_AUTHOR_TESTS_WORKFLOW_DEF,
   QE_VERIFY_PHASE_ID,
   QE_VERIFY_SUMMARY_MARKER,
 } from '../../src/qe/author-workflow.js';
@@ -124,7 +123,7 @@ function standInDef(id: string, spec: string): WorkflowDef {
   // human, and an approve RE-RUNS the unit into the same escalation (the engine's designed semantics),
   // so a pinned review can never pass under the stub. The SHIPPED def keeps its pin (asserted in
   // tests/qe-author-workflow.test.ts); the verdict's content is an LLM matter no stub can produce.
-  const phases: PhaseDef[] = QE_AUTHOR_TESTS_WORKFLOW_DEF.phases.map((p) => {
+  const phases: PhaseDef[] = shippedQeDef().phases.map((p) => {
     if (p.id === 'author') {
       return {
         ...p,
@@ -145,6 +144,12 @@ function standInDef(id: string, spec: string): WorkflowDef {
 
 let app: Awaited<ReturnType<typeof createServer>>;
 let adapter: CoreAdapter;
+/** The def crew serves for the engine's `qe-author-tests` preset (X-MIG M11: derived at boot). */
+const shippedQeDef = (): WorkflowDef => {
+  const def = adapter.getWorkflow(QE_AUTHOR_TESTS_WORKFLOW);
+  if (def === null) throw new Error('the engine serves no qe-author-tests preset');
+  return def;
+};
 let dir: string;
 let origin: string;
 let clone: string;
@@ -492,7 +497,7 @@ describe('wave 6 end to end — the governed test-authoring journey', () => {
 
   it('SHIPPED DEF via POST /testing/author: a run whose author produced nothing is refused BEFORE deliver — whichever rung refuses (skill routing, the author floor, verify’s produced=0) — and never delivers', async () => {
     process.env['GH_STUB_OUT'] = 'https://github.com/o/r/pull/603';
-    await armQeAuthor(QE_AUTHOR_TESTS_WORKFLOW_DEF);
+    await armQeAuthor(shippedQeDef());
     const launch = await postJson('/api/v1/testing/author', {
       problem: 'e2e: functional tests for the launch flow',
       repoRefs: [repoId],

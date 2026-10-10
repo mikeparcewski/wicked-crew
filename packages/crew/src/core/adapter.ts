@@ -1,3 +1,4 @@
+import { builtinDefs as deriveBuiltinDefs } from './builtin-catalog.js';
 import { createRequire } from 'node:module';
 import type { BusUnavailable } from './engine-bus.js';
 import { attachEngineBus, detachEngineBus, type EngineBus } from './bus.js';
@@ -49,9 +50,8 @@ import type {
 import { DEFAULT_SETTINGS } from './types.js';
 import { BASE_SKILL_REF_SHAPE } from '../skills/base-skill.js';
 import { execCapped } from './exec.js';
-import { BUG_FIX_SWEEP_INSTRUCTIONS, composeDeliverWorkflow, DELIVER_PHASE_ID, deliverPresetStep, deliverIdentityFor, deliverRepoFor, EVIDENCE_FLOOR_PIN, isGitHubLogin, pushIdentityOf, readDeliverOriginUrl } from './deliver.js';
+import { composeDeliverWorkflow, DELIVER_PHASE_ID, deliverPresetStep, deliverIdentityFor, deliverRepoFor, isGitHubLogin, pushIdentityOf, readDeliverOriginUrl } from './deliver.js';
 import { engineCampaignDef, engineRosterJson } from './engine-roster.js';
-import { QE_AUTHOR_TESTS_WORKFLOW_DEF } from '../qe/author-workflow.js';
 import { CAMPAIGN_WORKFLOW_PREFIX } from '../campaigns/plan.js';
 import { composeDeliverableFloor } from './deliverable-floor.js';
 import { deliverCredentialsProbe, type DeliverCredentials } from './deliver-credentials.js';
@@ -214,8 +214,8 @@ const STUDIO_SETTINGS_MAX_BYTES = 512 * 1024;
 
 /** Read user-registered workflow overlays from `dir` (the same dir `registerWorkflow` writes to).
  *
- * Skips: files whose id matches a built-in (those are `_writeBuiltinOverlay` artifacts written FOR
- * the Rust actor, not user workflows — including them would duplicate a built-in in `listWorkflows`),
+ * Skips: files whose id matches a built-in (artifacts older crews wrote FOR the Rust actor, not user
+ * workflows — including them would duplicate a built-in in `listWorkflows`),
  * non-`.json` files, and any file that does not parse into a `{id, phases[]}` shape (the Rust actor
  * skips an unreadable overlay too, so crew must not surface one it can't). A missing dir yields `[]`.
  *
@@ -794,244 +794,9 @@ function addonAtLeast(maj: number, min: number, pat: number): boolean {
   }
 }
 
-// ── Built-in workflow definitions (crew#44) ──────────────────────────────────
-// Static mirrors of wicked-core workflow defs: feature, bug, migration and domain-extraction, plus
-// crew's own defs. `chat` and `onboarding` are engine built-in PRESETS (DES-TEAMING-002 M3/M4),
-// launched by the same name with no def here; `survey-repo`, `memories`, `domain-graph-slice` and
-// `collab` are deleted (nothing launched them).
-// Swap for `this.core.listWorkflowsJson()` / `this.core.getWorkflowJson(id)` once
-// the wicked-core-ts NAPI methods land.
-/**
- * The ids wicked-core seeds itself, in `WorkflowRegistry::with_defaults()`.
- *
- * `launchRun`'s generic drop-in overlay write SKIPS every id in this set.
- * A file in that dir shadows the compiled built-in
- * *wholesale* — `register` overwrites by id and `load_dir` runs after `with_defaults` — so writing
- * this hand-transcribed mirror over the real def silently replaces it with a copy missing whatever
- * the def has grown since the mirror was transcribed. That is not hypothetical: the mirror predated
- * the evidence floors, so the write took `validator_pin` back off `feature.adversarial-review`,
- * `bug.verify` and `migration.verify` — the entire content of core's gate-floor change, undone by a
- * file write, with no error and a workflow still reporting the right id and phases (FINDING-049).
- *
- * The write exists for the ids core does NOT seed (domain-extraction and crew's own defs): for
- * those the overlay is the only reason they resolve at all, so it stays.
- */
-const CORE_SEEDED_WORKFLOWS = new Set(['feature', 'bug', 'migration']);
-
-// `EVIDENCE_FLOOR_PIN` (imported from ./deliver.js, defined once) is carried on the Evaluator phase
-// of feature/bug/migration AND, since wicked-core F-039, on their code-writing Creator phases
-// (`build`/`fix`/`execute`) — so the gate that was supposed to make the change re-derives its diff
-// and a distinct seat judges it, instead of approving nothing. What `listWorkflows()` serves IS what
-// `GET /api/v1/workflows` and the work-mode selector show, and a `null` here reads as "this phase
-// is ungated" — the opposite of the truth. Since wicked-core#414 the engine also REFUSES a mirror
-// that lags (a code phase whose gate evaluates nothing is rejected as authored), so these values
-// are part of the contract with the engine, not display only: the drift guards in
-// `tests/armed-workflow-served.test.ts` and `tests/builtin-overlay-shadow.test.ts` fail loudly
-// the moment core's defs move. As of FINDING-049 these defs are never written to core's overlay dir
-// (see CORE_SEEDED_WORKFLOWS).
-
-// `is_system` is NOT spelled on these defs: `withSystemFlag` stamps it from `SYSTEM_WORKFLOWS`
-// (core/run-identity.ts), the one list keyed by name that also classifies served runs (seam X2).
-/** QE-IN-APP-WORKFLOWS (operator ruling 2026-10-10): what a workflow that makes application changes
- *  requires — the defaults plus `qe_acceptance` — exactly as core's `feature`/`bug`/`migration`/
- *  `mcp-server` defs declare it (the mirror guards compare field for field). */
-const APP_CHANGE_INSTRUMENTS = ['distinct_evaluator', 'judge', 'qe_acceptance'];
-
-export const BUILTIN_WORKFLOWS: WorkflowDef[] = ([
-  {
-    id: 'feature',
-    phases: [
-      { id: 'clarify', kind: 'recon', gate_type: 'value', gate: { human_confirm: { unconditional: false } }, executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-      { id: 'design', kind: 'recon', gate_type: 'strategy', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['clarify'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-      { id: 'build', kind: 'build', gate_type: 'execution', gate: 'auto', executes_code: true, verified_evidence: false, required_deliverables: [], depends_on: ['design'], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: EVIDENCE_FLOOR_PIN },
-      { id: 'adversarial-review', kind: 'review', gate_type: 'execution', gate: { human_confirm: { unconditional: false } }, executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['build'], role: 'evaluator', skill_ref: null, allowed_skills: [], validator_pin: EVIDENCE_FLOOR_PIN },
-      { id: 'test', kind: 'test', gate_type: 'execution', gate: { human_confirm_if: 'verdict_not_pass' }, executes_code: false, verified_evidence: true, required_deliverables: [], depends_on: ['build'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: EVIDENCE_FLOOR_PIN },
-      { id: 'review', kind: 'review', gate_type: 'execution', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['test'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-    ],
-    required_instruments: APP_CHANGE_INSTRUMENTS,
-  },
-  {
-    id: 'bug',
-    phases: [
-      { id: 'triage', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-      { id: 'reproduce', kind: 'test', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['triage'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-      // DES-L9 (BC-60, core#432): the retired-behaviour sweep — the SAME literal core's `bug_def()` carries (wicked-core #522); pinned by a test
-      // so the two carriers cannot drift. `builtin-overlay-shadow.test.ts` tolerates exactly this one field while core MAIN has not merged #522
-      // (crew CI compares this mirror with core main); row 6.9 (the `^0.7.27` pin) removes that tolerance.
-      { id: 'fix', kind: 'build', instructions: BUG_FIX_SWEEP_INSTRUCTIONS, gate_type: 'execution', gate: 'auto', executes_code: true, verified_evidence: false, required_deliverables: [], depends_on: ['reproduce'], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: EVIDENCE_FLOOR_PIN },
-      { id: 'verify', kind: 'test', gate_type: 'execution', gate: { human_confirm_if: 'verdict_not_pass' }, executes_code: false, verified_evidence: true, required_deliverables: [], depends_on: ['fix'], role: 'evaluator', skill_ref: null, allowed_skills: [], validator_pin: EVIDENCE_FLOOR_PIN },
-    ],
-    required_instruments: APP_CHANGE_INSTRUMENTS,
-  },
-  {
-    id: 'migration',
-    phases: [
-      { id: 'plan', kind: 'recon', gate_type: 'strategy', gate: { human_confirm: { unconditional: false } }, executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-      { id: 'execute', kind: 'build', gate_type: 'execution', gate: 'auto', executes_code: true, verified_evidence: false, required_deliverables: [], depends_on: ['plan'], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: EVIDENCE_FLOOR_PIN },
-      { id: 'cutover', kind: 'build', gate_type: 'execution', gate: { human_confirm: { unconditional: true } }, executes_code: true, verified_evidence: false, required_deliverables: [], depends_on: ['execute'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-      { id: 'verify', kind: 'test', gate_type: 'execution', gate: { human_confirm_if: 'verdict_not_pass' }, executes_code: false, verified_evidence: true, required_deliverables: [], depends_on: ['cutover'], role: 'evaluator', skill_ref: null, allowed_skills: [], validator_pin: EVIDENCE_FLOOR_PIN },
-      { id: 'cleanup', kind: 'build', gate_type: null, gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['verify'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-    ],
-    required_instruments: APP_CHANGE_INSTRUMENTS,
-  },
-  {
-    // capture-learnings (DES-MEM-FACETED-001 write side, onboarding): survey a just-indexed repo,
-    // then propose its durable learnings — BOTH faceted MEMORIES and repo POLICIES — as inert estate
-    // `proposal.submit` proposals (through garden's estate shim) a human later reviews.
-    //
-    // ONE workflow, not four. "Go multi-workflow" is realized as multi-PHASE composition inside a
-    // single governed run, NOT as separate churn-analysis / hotspot-read / derive-memories /
-    // derive-policies RUNS, because:
-    //   • Context threading: the learning method is a dependent chain (churn ranking → hotspot
-    //     cross-reference → capture). Crew threads each phase's output into the next phase's prompt
-    //     automatically (plan.rs folds prior context); separate runs share NOTHING, so a split would
-    //     sever that thread and each run would re-establish repo understanding from scratch.
-    //   • Council cost: every phase convenes a ~6-seat council (the ecosystem's spikiest operation,
-    //     serialized on purpose). Four runs multiply that; three phases in one run pay it once each.
-    //   • The Memories-vs-Policies review split is a proposal-KIND concern, not a workflow-identity
-    //     one: `kind_type` routes memory→studio Memories and policy:<type>→Steering downstream, so a
-    //     SINGLE `capture` phase emits both from the one shared understanding — splitting derive-
-    //     memories / derive-policies would re-run a council over the same context for no new evidence.
-    //   • Reuse already lives below the run: the reusable unit is the SKILL (and hotspot-read is
-    //     already a reusable capability via `wicked-garden-search`).
-    //
-    // The METHOD lives in the garden skill `wicked-garden-repo-learn`, referenced per-phase by
-    // `skill_ref` — the engine emits only a short `Invoke your skill "wicked-garden:repo-learn"…`
-    // directive and the worker loads SKILL.md from the installed plugin. The bounded git-churn
-    // sampling, the estate tool names (reached through the shim), and the proposal payload schemas that used to sit inline as
-    // ~600-column prose now live in that skill; the inline `instructions` here are a one-line phase
-    // ORIENTATION only. That matters because a governed worker's prompt rides a single PTY line capped
-    // at 1022 bytes (>=1023B is SILENTLY discarded — wicked-core execute_wrapped.rs), and the planner
-    // folds this text onto that line alongside the run intent, so long inline prose here would blow
-    // the line. Crew-only (NOT core-seeded), so the overlay write is the only def the engine resolves
-    // — no core mirror, and deliberately NOT in builtin-overlay-shadow's MIRRORED_IDS.
-    //
-    // The shim's `wicked-estate-mcp --readonly` opens the operator GLOBAL memory store and permits
-    // `proposal.submit` (a safe write, provenance server-stamped from the WICKED_RUN_* markers on the
-    // worker env — DES-L4 PR-③/⑦; there is no CLI-registered estate MCP on the worker any more),
-    // so proposals land in the same queue the studio Memories/Policies surfaces review. Onboarding IS
-    // about the repo, so the skill tags learnings `repo:`/`project:`.
-    id: 'capture-learnings',
-    phases: [
-      { id: 'churn', kind: 'recon', instructions: "Phase 1/3 CHURN: produce a ranked list of this repo's most actively-changed files and directories over the last ~12 months, plus the repo's real name (manifest or git remote) and parent project. Use the skill's bounded/sampled git-churn method — never stream the whole history. Do not read code deeply yet; the next phase targets these areas.", gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: 'wicked-garden-repo-learn', allowed_skills: [], validator_pin: null },
-      { id: 'hotspots', kind: 'recon', instructions: "Phase 2/3 HOTSPOTS: cross-reference the prior churn ranking with wicked-estate hotspot / blast-radius signals to find the load-bearing code, then READ it through the estate shim (`wicked-garden run scripts/_estate_client.py --readonly call …`, the skill's grounding path) to build a real technical understanding of how the system fits together — not a file listing. Reuse wicked-garden-search for the hotspot signals; follow the skill.", gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['churn'], role: 'neutral', skill_ref: 'wicked-garden-repo-learn', allowed_skills: [], validator_pin: null },
-      // (BC-80, wicked-core#535) `requires_capture_report`: the engine's capture-report floor reads
-      // the phase's output marker, so a capture run whose skill loaded and never ran can no longer
-      // report `completed` with 0 proposals — a missing marker, a failed submission and proposals
-      // derived but never submitted each deny into the human gate. An honest 0 passes. The
-      // instruction MANDATES the marker; garden's repo-learn skill carries the same contract, and
-      // the counts land on the unit (`capture_report`), which `GET /runs/:id` serves.
-      { id: 'capture', kind: 'build', instructions: "Phase 3/3 CAPTURE: from the prior churn + hotspot understanding, submit durable learnings as estate proposals through the shim's `propose` per the skill's capture contract — BOTH memories (facts / how-it-works) and policies (enforced conventions), one proposal per item, tagged repo/project. Each is inert until human review; never include secrets or personal data. END with `wicked-capture-report {\"derived\": N, \"submitted\": M, \"failed\": K}` — always, even on a degrade or a legitimate 0 (which is acceptable).", gate_type: 'value', gate: 'auto', executes_code: false, requires_capture_report: true, verified_evidence: false, required_deliverables: [], depends_on: ['hotspots'], role: 'creator', skill_ref: 'wicked-garden-repo-learn', allowed_skills: [], validator_pin: null },
-    ],
-  },
-  {
-    // "Add with chat" for the Steering surface (STEERING program) — the dedicated entry point
-    // behind POST /governance/steering/author. TH-12 propose-as-gate: the run analyzes the
-    // operator's intent + the named files/dirs, then the TERMINAL `propose` phase emits the
-    // PROPOSED steering rules and its unconditional human gate pauses the run `awaiting_human`
-    // (core evaluates a terminal phase's own gate before finalize — seam finding #4), so the
-    // operator approves/amends/rejects via the standard POST /runs/:id/gate. Approved rules land
-    // CREW-SIDE on that approve: the gate handler writes them through the governed rules seam
-    // with `provenance.source: "chat"` (api/steering-landing.ts, crew#388) — the run itself must
-    // never write the store, which is why both phases say so out loud. The propose phase hands
-    // the rules back in its REPLY — one ```json fenced array — and the landing reads them from the
-    // unit's stored output (#789). It used to be told to write the array to a file in the per-run
-    // inbox under the home config; a seat's sandbox refuses a write outside its workspace (codex's
-    // "approval request failed"), so every author run reported a failed write and the rules only
-    // landed through the transcript anyway. The reply is now the designed path, not a fallback.
-    //
-    // Crew-authored drop-in: NOT in CORE_SEEDED_WORKFLOWS, so launchRun's
-    // `_writeBuiltinOverlay` write is the only way core resolves the id — the same delivery
-    // mechanism every crew drop-in uses.
-    id: 'steering-author',
-    phases: [
-      { id: 'analyze', kind: 'recon', instructions: 'Read the operator intent and every file or directory listed in the problem statement. Identify candidate steering rules: durable, prescriptive statements a coding agent must follow, each classified into one steering type (architecture, development, security, testing, operations, compliance, design-ux). For each candidate note the statement, steering type, severity, and the evidence in the source material. Analysis only — do not write any rule to any store, and do not emit final rule JSON yet.', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-      { id: 'propose', kind: 'recon', instructions: 'From the prior analysis, emit the PROPOSED steering rules as one JSON array. Each entry is a conformance-rule object: id (PAT-<digits> for rule_type "pattern", POL-<digits> for "policy"), rule_type, statement, severity (info|warn|error|critical), confidence (a NUMBER 0..1), steering_type (default to the type named in the problem statement), provenance {"source":"chat"}, and — only where the source material supports them — the enforcement fields applies_to (array of phase tokens or globs), excludes, weight, obligations (array of strings), criteria (ONE string, never a list). Omit targets, effect and trigger unless you can express them in the store schema exactly: targets is a {language, layer, framework} facet OBJECT (never a file list — files belong in applies_to), and trigger is a structured condition object (never prose). Put that JSON array in your reply, ONCE, as a single ```json fenced block (the whole array, valid JSON): your reply IS the proposal — crew reads the array from it when the human approves. Do not write it to any file and do not create files for it. This output is a PROPOSAL for the human gate: rules land in the governance store only after approval, written crew-side — do not write any rule to any store yourself.', gate_type: 'value', gate: { human_confirm: { unconditional: true } }, executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['analyze'], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: null },
-    ],
-  },
-  // The governed test-authoring workflow (wave 6 — F-7R2-003/004/005/012/014/015, R4-r2): recon →
-  // author (creator, evidence-floor pinned) → verify (a TOOL phase that RUNS every produced test
-  // under the repository's own harness and fails the unit when one fails or never ran) → review
-  // (evaluator ≠ creator). Delivery is appended per run by the engine-side composition (`deliver:
-  // "pr"`), never performed by a worker. Def + verify script live in `qe/author-workflow.ts` so the
-  // e2e can assert the script's behaviour without reaching into this array. Crew-only drop-in (NOT
-  // core-seeded); the `wicked-garden-qe` skill carries the method (plan/author/review actions).
-  QE_AUTHOR_TESTS_WORKFLOW_DEF,
-  // The one workflow that ARMS the dual-validator gate: `coverage` carries an approved
-  // `validator_pin`, so layer 1 is live here and inert in every entry above. Transcribed
-  // field-for-field from the source of truth, `wicked-core/workflows/domain-extraction.json`
-  // (core ships it as a *drop-in*, not a seeded built-in, and exposes no dump command — hence a
-  // hand-transcribed mirror, like every other entry in this array).
-  //
-  // The pin is a content hash over the validator's criterion + script + approved flag. Core
-  // re-derives it in `domain_extraction.rs` and fails its own test if it drifts; if that test ever
-  // forces core's constant to change, THIS literal must change with it or crew will write an
-  // overlay that fails closed at plan time.
-  //
-  // Running it needs a one-time, idempotent `wicked-core seed-domain-validators` to vault + approve
-  // that validator. That step is deliberately manual — approval is an audited act a human/council
-  // owns, not something a daemon does unattended — and until it is run, a launch fails CLOSED at
-  // plan time rather than running the phase ungated. Not `is_system`: this is an operator-selectable
-  // work mode, unlike the dedicated-entry-point workflows above.
-  {
-    id: 'domain-extraction',
-    phases: [
-      // required_deliverables reconciled with core (wicked-core/workflows/domain-extraction.json):
-      // survey/analyze/extract annotate the estate STORE and domain-graph now PERSISTS the graph
-      // into the store (not a JSON file), so their evidence is DB state — verified by the coverage
-      // gate (reads the store) and domain-graph's fail-closed-on-coverage<1.0 — not a worktree file.
-      // Only coverage emits a genuine standalone report the deterministic floor reads. Declaring
-      // phantom files failed every phase under core's FINDING-101 deliverable gate.
-      //
-      // `coverage` is `executes_code: true` (wicked-core#414): it WRITES `coverage-report.json`
-      // into the worktree for its pinned validator to read, and an `executes_code: false` phase
-      // may write nothing there — the worktree guard has no exemptions, declared deliverables
-      // included. Its role stays `evaluator`; the deliver default keys off code-writing
-      // NON-EVALUATOR phases (`executes_code && role !== 'evaluator'`), so this def never delivers.
-      { id: 'survey', kind: 'recon', gate_type: null, gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: 'wicked-garden-domain', allowed_skills: [], validator_pin: null },
-      { id: 'analyze', kind: 'recon', gate_type: null, gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['survey'], role: 'neutral', skill_ref: 'wicked-garden-domain', allowed_skills: [], validator_pin: null },
-      { id: 'extract', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['analyze'], role: 'creator', skill_ref: 'wicked-garden-domain-extractor', allowed_skills: [], validator_pin: null },
-      { id: 'coverage', kind: 'test', gate_type: 'execution', gate: { human_confirm_if: 'verdict_not_pass' }, executes_code: true, verified_evidence: true, required_deliverables: ['coverage-report.json'], depends_on: ['extract'], role: 'evaluator', skill_ref: 'wicked-garden-domain-coverage', allowed_skills: [], validator_pin: 'bfe4020a365c598b' },
-      // domain-graph is a DETERMINISTIC Tool that runs `wicked-core domain-graph`, which PERSISTS the
-      // domain/requirement/rule graph into the repo store (core#237) — not an LLM skill that could hit
-      // a non-persisting hermetic fallback. Mirrors wicked-core/workflows/domain-extraction.json.
-      { id: 'domain-graph', executor: { type: 'tool', cmd: ['wicked-core', 'domain-graph', '--db', '{code_graph_db}', '--out', 'requirements_graph.json'] }, kind: 'build', gate_type: 'strategy', gate: { human_confirm: { unconditional: false } }, executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['coverage'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-    ],
-  },
-  // The MCP-server drop-in (DES-mcp-server-workflow): transcribed field for field — every
-  // `instructions` string verbatim, the gates, pins, roles, skill_refs, depends_on and the install
-  // phase's `executor` — from the source of truth, `wicked-core/workflows/mcp-server.json` (core ships
-  // it as a drop-in, not a seeded built-in, so it is NOT in CORE_SEEDED_WORKFLOWS: launchRun writes
-  // this mirror to the overlay and hot-registers it, as for domain-extraction). It carries only the
-  // evidence-floor pin, so no seed step is needed. Deliver is composed per run and placed BEFORE
-  // `install` (`composeDeliverWorkflow` / `placeDeliverBeforeInstall`), so the pull request exists
-  // when the install gate asks. The install gate is `consent_before` (core#801, crew#888): the engine
-  // pauses with `gateKind: 'consent'` BEFORE the install runs and nothing pauses after it; the
-  // command execs the admitted garden at `WICKED_GARDEN_ROOT` (core#802), never PATH. The install
-  // Tool phase runs on the daemon host as the daemon user (the garden install script builds into
-  // ~/.wicked/mcp-servers/<key>, registers the server in this daemon's MCP tools and writes the CLI
-  // configurations through wicked-installer). core#820: an `install-plan` Tool phase dry-runs the
-  // install first (`--dry-run --json`, one plan line), the gate offers its choices
-  // (`consent:worker` default, `consent:operator`, `reject`) with each one's write targets, and the
-  // install runs with the chosen `--target "$WICKED_CONSENT_CHOICE"`. Field-for-field equal to
-  // core's `workflows/mcp-server.json` (tests/builtin-overlay-shadow.test.ts).
-  // Not `is_system`: an operator-selectable work mode.
-  {
-    id: 'mcp-server',
-    phases: [
-      { id: "scope", kind: "recon", gate_type: "value", gate: {"human_confirm": {"unconditional": false}}, executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: "neutral", skill_ref: "wicked-garden-mcp-scaffold", allowed_skills: [], validator_pin: null, instructions: "Decide what this MCP server exposes (tools, resources, prompts), the upstream's authentication scheme (bearer, API key, basic, OAuth2 client credentials — the server reads ONE secret variable <SERVER>_TOKEN and every other auth parameter from its committed mcp-server.config.json), the transport (stdio by default; httpStream only when the intent asks for a hosted server), and the target: this run's repository, at its root when the repository is new and near-empty, or in a named subdirectory when it already holds code. Say whether an OpenAPI document was given (URL or file), and whether the operator wants the server installed for running when the run completes (the install phase asks again at its gate). If the intent names a repository that is not this run's, say that the operator must create it with an initial commit and register it before a run can deliver into it; do not try to create one." },
-      { id: "source-discovery", kind: "recon", gate_type: null, gate: "auto", executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ["scope"], role: "neutral", skill_ref: "wicked-garden-mcp-scaffold", allowed_skills: [], validator_pin: null, instructions: "With an OpenAPI document: run the skill's openapi action against the conversion service and report every tool it yields with its class (read, write, destructive), its input schema summary and its request mapping, plus the skipped operations and why. Without one: inventory the integration surface (SDK calls, CLI, database, events) into a candidate tool list with the same columns. Do not write code in this phase." },
-      { id: "design", kind: "recon", gate_type: "strategy", gate: {"human_confirm": {"unconditional": false}}, executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ["source-discovery"], role: "neutral", skill_ref: "wicked-garden-mcp-scaffold", allowed_skills: [], validator_pin: null, instructions: "Produce the design: the final tool table (name, description, input schema, annotations, class), the resources and prompts if any, the authentication plan (the one secret variable, the committed non-secret parameters, which header, what fails at startup), and the observability plan (span names and attributes, the three instruments, log fields, what leaves the process and only when). Check each against the MCP-server steering rules MCPS-1001 to MCPS-1007 (recall them with rules.recall, scope wiki:governance, when an estate store is present; otherwise use the checklist in the skill) and against MCP-D2 and MCP-D4. If a rule cannot be recalled, say so, cite the skill's checklist instead, and never state what a rule id means when you could not read it. Name every deviation and why." },
-      { id: "build", kind: "build", gate_type: "execution", gate: "auto", executes_code: true, verified_evidence: false, required_deliverables: [], depends_on: ["design"], role: "creator", skill_ref: "wicked-garden-mcp-scaffold", allowed_skills: [], validator_pin: EVIDENCE_FLOOR_PIN, instructions: "Scaffold the TypeScript server with the skill (--lang typescript) into the target directory. Branch A, with a tools.json from the conversion service: the generated tools ride the skeleton's REST runtime; adapt names, descriptions and annotations to the design. Branch B, without one: write each tool by hand with a zod schema on the same skeleton. Either way: the one secret variable and the committed mcp-server.config.json the design named, the conformance smoke and one contract test per tool under npm test, the typecheck, lint and test scripts present, an SPDX header on every source file, telemetry exporters armed only by OTEL_EXPORTER_OTLP_ENDPOINT. Build it and run the skill's probe; put the probe JSON in your output." },
-      { id: "test", kind: "test", gate_type: "execution", gate: {"human_confirm_if": "verdict_not_pass"}, executes_code: false, verified_evidence: true, required_deliverables: [], depends_on: ["build"], role: "neutral", skill_ref: "wicked-garden-qe-contract-testing-engineer", allowed_skills: [], validator_pin: EVIDENCE_FLOOR_PIN, instructions: "Judge the verify floor's report of the repository's own checks (typecheck, lint, test) and the tests themselves: every tool in the design has a contract test, the conformance smoke covers initialize, tools/list, tools/call, the missing-credential startup failure and the httpStream 401 path, and nothing in the tree holds a secret value. A tool without a test, or a smoke that does not exercise the failure paths, is a FAIL with the tool named." },
-      { id: "security-review", kind: "review", gate_type: "execution", gate: {"human_confirm": {"unconditional": false}}, executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ["test"], role: "evaluator", skill_ref: "wicked-garden-platform-security-engineer", allowed_skills: [], validator_pin: EVIDENCE_FLOOR_PIN, instructions: "Review the diff cold against MCPS-1004 and MCPS-1005 and MCP-D2: the one secret read from the environment only and never logged, returned or accepted as an argument; non-secret auth parameters in the committed config; authentication on every tool and resource (authenticate on httpStream, canAccess on every tool); input validated before the handler runs; upstream requests pinned to the configured base URL with allowlisted arguments and no redirects; a rate limit that answers a user error. Cite file and line for every finding." },
-      { id: "observability-review", kind: "review", gate_type: "execution", gate: {"human_confirm_if": "verdict_not_pass"}, executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ["test"], role: "evaluator", skill_ref: "wicked-garden-qe-observability-test-engineer", allowed_skills: [], validator_pin: EVIDENCE_FLOOR_PIN, instructions: "Review the diff cold against MCPS-1002 and MCPS-1003: one span per tool call with the server, tool, request id and outcome attributes and a child span per upstream request; the three instruments recorded; logs through loglayer with trace and span ids stamped, a request-scoped child logger per call, console output on stderr only; nothing exported unless the operator sets an OTLP endpoint. Cite file and line for every finding." },
-      { id: "install-plan", kind: "build", gate_type: "execution", gate: "auto", executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ["security-review", "observability-review"], role: "neutral", skill_ref: null, allowed_skills: [], validator_pin: null, executor: {"type": "tool", "cmd": ["bash", "-c", "exec \"${WICKED_GARDEN_ROOT:?the engine handed this Tool phase no garden root; refusing to resolve wicked-garden from PATH}/scripts/wicked-garden\" run scripts/mcp/install.py --from-run --dry-run --json"]}, instructions: "Plan the install without writing anything: resolve, on this host and as the daemon user, every file and directory each install choice would write — Install for workers (the default: the staged copy under ~/.wicked/mcp-servers/<key>/current, the wicked-crew MCP tools registry and the worker homes' CLI configurations under ~/.wicked-worker) and Also install into my CLIs (the worker set plus your own CLI configurations, such as ~/.claude.json, ~/.codex/config.toml and the opencode configuration) — and print them as one JSON plan line, so the install's consent gate can list them before you answer." },
-      { id: "install", kind: "build", gate_type: "execution", gate: "consent_before", executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ["install-plan"], role: "neutral", skill_ref: null, allowed_skills: [], validator_pin: null, executor: {"type": "tool", "cmd": ["bash", "-c", "exec \"${WICKED_GARDEN_ROOT:?the engine handed this Tool phase no garden root; refusing to resolve wicked-garden from PATH}/scripts/wicked-garden\" run scripts/mcp/install.py --from-run --target \"${WICKED_CONSENT_CHOICE:?the consent gate recorded no install choice}\" --json"]}, instructions: "Install for running — or update the installed copy when this server key is already installed. Nothing has been installed yet: this asks before the install runs, and each answer lists exactly the files it would write (from the install-plan dry run). Install for workers (the default) builds the server from this run's tree into ~/.wicked/mcp-servers/<key>/current, registers it in wicked-crew's MCP tools under its key (an existing entry is re-registered in place; the first use of a changed tool still asks) and writes it into the worker homes' CLI MCP configurations — program-owned files only. Also install into my CLIs does the same and also writes it into your own CLI MCP configurations through wicked-installer (one entry per key, never a second copy; CLI entries carry no secret). Both probe tools/list. The one secret variable <SERVER>_TOKEN is named, never written: when the daemon cannot resolve it the registration is reported as pending with the remedy. Writes happen on the daemon host as the daemon user. Decline for not now — the pull request already delivered stays as it is." },
-    ],
-    required_instruments: APP_CHANGE_INSTRUMENTS,
-  },
-] satisfies WorkflowDef[]).map(withSystemFlag);
+// ── Built-in workflows (X-MIG M11) ───────────────────────────────────────────
+// No mirrors: the built-ins are the engine's built-in presets, read once at boot and laid over the
+// phase catalog (`core/builtin-catalog.ts`, `loadBuiltinCatalog`). One source; nothing to drift.
 
 /**
  * Chat is not available in this deployment at all — a capability gap, never a bad request.
@@ -1328,7 +1093,7 @@ export const RETIRED_OVERLAY_IDS = ['chat', 'survey-repo', 'memories', 'domain-g
 /**
  * Park the overlay files older crews wrote for {@link RETIRED_OVERLAY_IDS}.
  *
- * `_writeBuiltinOverlay` wrote each of these on first launch, and the overlay dir is PERSISTENT: on
+ * Older crews wrote each of these on first launch, and the overlay dir is PERSISTENT: on
  * an upgraded host the engine's startup `load_dir` would keep the deleted workflows launchable, and
  * `hydrateFromOverlay` would serve them on `GET /workflows` as user workflows, where they are no
  * longer on the system list (review of wicked-crew#688). Renamed, not deleted, like the onboarding
@@ -1428,8 +1193,6 @@ export class CoreAdapter {
   private readonly listeners = new Set<CoreEventListener>();
   private readonly launchListeners = new Set<LaunchListener>();
   private closed = false;
-  /** Built-in workflow ids whose overlay JSON has been written this process lifetime. */
-  private readonly _builtinOverlayWritten = new Set<string>();
 
   /**
    * The estate db the Core actor was spawned over (`CoreAdapterOptions.dbPath` — the `--db`
@@ -2234,29 +1997,6 @@ export class CoreAdapter {
         workflowId = composed.id;
       }
       opts.workflow = workflowId;
-      if (workflowId === input.workflow) {
-        // Ensure DROP-IN workflow definitions are present in the Rust overlay dir on first use.
-        // Uses a dedicated helper (not registerWorkflow) to avoid adding built-ins to userWorkflows,
-        // which would duplicate them in listWorkflows(). The write is skipped after the first call
-        // per process lifetime.
-        //
-        // Ids core seeds itself are excluded: writing them shadows the real def with this stale
-        // mirror — see CORE_SEEDED_WORKFLOWS. Core resolves those from its own registry, so there is
-        // nothing to write and never was.
-        //
-        // Skipped entirely on the per-run deliver path above (workflowId !== input.workflow):
-        // the composed def carries the base's full phase list, so the run resolves its own
-        // registration and the base drop-in is not consulted.
-        const builtinDef = CORE_SEEDED_WORKFLOWS.has(input.workflow)
-          ? undefined
-          : BUILTIN_WORKFLOWS.find((w) => w.id === input.workflow);
-        if (builtinDef && !this._builtinOverlayWritten.has(input.workflow)) {
-          // Mark before await so concurrent launchRun() calls for the same builtin
-          // don't both pass the has() check and race to write the same file.
-          this._builtinOverlayWritten.add(input.workflow);
-          await this._writeBuiltinOverlay(builtinDef);
-        }
-      }
     } else if (input.deliver === 'pr' && input.plan === undefined) {
       // (A plan carries its deliver step above.) Fail loud, not silent: dropping the option would run to completion with the caller
       // believing a PR opens at the end — the exact operator gap crew#293 closes.
@@ -2406,11 +2146,9 @@ export class CoreAdapter {
    *  (snake_case) — `campaigns/plan.ts` is the one producer of it in this daemon.
    *
    *  `workflows` are the composed per-node Tool workflows the def's run_specs reference; they
-   *  are armed FIRST (hot-register + overlay persist) so the engine can resolve them both now
-   *  and after a restart — a campaign is durable, so its node workflows must be too. Unlike a
-   *  deliver-composed def they are NOT purely ephemeral (`_armPerRunWorkflow`), and unlike a
-   *  user workflow they never enter `userWorkflows` or the catalog (the hydration filter in
-   *  `readOverlayWorkflows` skips the `campaign-` prefix). */
+   *  are armed FIRST, as system presets (X-MIG M11), so the engine resolves them both now and
+   *  after a restart — a campaign is durable, so its node workflows must be too. They never enter
+   *  `userWorkflows` or the work-mode catalog. */
   async launchCampaign(def: CampaignDef, workflows: WorkflowDef[] = []): Promise<string> {
     const surface = this._campaigns('Launching a campaign');
     // (review-L1-598 M1) `denial_gate` is a 0.7.27 def field; an older addon's serde IGNORES it and
@@ -2437,22 +2175,23 @@ export class CoreAdapter {
     return this.handedToEngine('campaign', def.id, () => surface.launchCampaign(JSON.stringify(engineDef)));
   }
 
-  /** Arm one composed campaign-node workflow: validate-then-persist (the FINDING-002 ordering —
-   *  core's parser is the authority and runs BEFORE the overlay write), overlay file for
-   *  restart durability, no `userWorkflows` entry. */
+  /** Arm one composed campaign-node workflow as a PRESET (X-MIG M11): the preset store is the
+   *  engine's durable record, so a resumed campaign finds its node by name after a restart without
+   *  any file overlay. The node's one Tool phase becomes one `run` step carrying its command; the
+   *  engine composes it (its step rules apply), and the name keeps it a system preset, off every
+   *  picker (`isSystemWorkflow`). */
   private async _armCampaignWorkflow(def: WorkflowDef): Promise<void> {
-    const core = this.core as unknown as Record<string, unknown>;
-    const register = core['registerWorkflow'];
-    if (typeof register !== 'function') {
-      // Unreachable on any addon that carries launchCampaign (registerWorkflow predates it by
-      // several releases), but the guard keeps the failure loud if that ever un-holds.
-      throw new CampaignsUnsupportedError('Arming a campaign node workflow');
-    }
-    await (register as (j: string) => Promise<string>).call(this.core, JSON.stringify(def));
-    const dir = workflowOverlayDir();
-    await mkdir(dir, { recursive: true });
-    await writeFile(join(dir, `${def.id}.json`), JSON.stringify(def, null, 2), 'utf8');
+    if (!this.presetsSupported()) throw new CampaignsUnsupportedError('Arming a campaign node workflow');
+    const steps = def.phases.map((p) => ({
+      catalog: 'run',
+      id: p.id,
+      kind: p.kind,
+      gate_type: p.gate_type,
+      ...(p.executor !== undefined ? { executor: p.executor } : {}),
+    }));
+    await this.putPreset(def.id, steps as PresetStep[], undefined, 'crew-campaign');
   }
+
 
   /** Resume a campaign from its persisted state → the campaign status token. */
   resumeCampaign(id: string): Promise<string> {
@@ -3528,9 +3267,29 @@ export class CoreAdapter {
   }
 
   // ── Workflow viewer + builder (crew#44) ────────────────────────────────────
-  // Built-ins are static TypeScript mirrors of workflow.rs. User-registered
-  // workflows are added to `userWorkflows` and persisted to disk; the Rust actor
-  // picks them up via `register_workflow` NAPI (when available) for immediate use.
+  // Built-ins are the engine's built-in presets laid over its phase catalog (X-MIG M11:
+  // `loadBuiltinCatalog`, read once at boot). User-registered workflows are added to
+  // `userWorkflows` and hot-registered with the engine.
+
+  /** The built-in presets' defs as crew serves them (`core/builtin-catalog.ts`). Empty until
+   *  {@link loadBuiltinCatalog} ran — a directly-driven adapter (a test double, the CLI) serves none. */
+  private builtinDefs: WorkflowDef[] = [];
+
+  /**
+   * Read the engine's built-in presets and its phase catalog ONCE and derive the built-in workflows
+   * crew serves (`GET /workflows`, the deliver text, delivery candidacy, acceptance). The built-ins
+   * are compiled into the engine, so one read holds until restart. An engine without presets or the
+   * catalog binding serves none (logged), never a guess.
+   */
+  async loadBuiltinCatalog(warn: (m: string) => void = (m) => console.warn(m)): Promise<void> {
+    try {
+      if (!this.presetsSupported()) return;
+      const [presets, entries] = await Promise.all([this.listPresets(), this.catalog()]);
+      this.builtinDefs = deriveBuiltinDefs(presets, entries, warn).map(withSystemFlag);
+    } catch (err) {
+      warn(`wicked-crew: could not read the engine's built-in presets — no built-in workflow is served: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
 
   private readonly userWorkflows = new Map<string, WorkflowDef>();
 
@@ -3548,7 +3307,7 @@ export class CoreAdapter {
   private hydrateFromOverlay(): void {
     if (this.overlayHydrated) return;
     this.overlayHydrated = true;
-    const builtinIds = new Set(BUILTIN_WORKFLOWS.map((w) => w.id));
+    const builtinIds = new Set(this.builtinDefs.map((w) => w.id));
     for (const def of readOverlayWorkflows(workflowOverlayDir(), builtinIds)) {
       if (!this.userWorkflows.has(def.id)) this.userWorkflows.set(def.id, def);
     }
@@ -3610,7 +3369,7 @@ export class CoreAdapter {
     // ids conflict — consistent with getWorkflow() which prefers userWorkflows.get().
     const seen = new Set<string>();
     const result: WorkflowDef[] = [];
-    for (const w of BUILTIN_WORKFLOWS) {
+    for (const w of this.builtinDefs) {
       const override = this.userWorkflows.get(w.id);
       if (!seen.has(w.id)) { seen.add(w.id); result.push(withSystemFlag(override ?? w)); }
     }
@@ -3620,53 +3379,25 @@ export class CoreAdapter {
     return result;
   }
 
-  getWorkflow(id: string): WorkflowDef | null {
+  /** The runtime-registered defs only (the user's and crew's seams'), without the built-in presets. */
+  listRuntimeWorkflows(): WorkflowDef[] {
     this.hydrateFromOverlay();
-    const def = this.userWorkflows.get(id) ?? BUILTIN_WORKFLOWS.find((w) => w.id === id) ?? null;
-    return def === null ? null : withSystemFlag(def);
+    return [...this.userWorkflows.values()].map(withSystemFlag);
   }
 
-  /** Write a built-in workflow definition to the Rust overlay dir (and hot-register when possible).
-   *  Unlike registerWorkflow(), this does NOT touch userWorkflows, avoiding duplicates in listWorkflows(). */
-  private async _writeBuiltinOverlay(def: WorkflowDef): Promise<void> {
-    const dir = workflowOverlayDir();
-    await mkdir(dir, { recursive: true });
-    const overlayDef = { ...(def as WorkflowDef & { is_system?: boolean }) };
-    delete overlayDef.is_system;
-    const json = JSON.stringify(overlayDef);
-    const core = this.core as unknown as Record<string, unknown>;
-    const register = core['registerWorkflow'];
-
-    // Same validate-before-persist ordering as registerWorkflow (FINDING-002). This path had the
-    // identical defect — write first, validate last — which is the P3 shape this campaign keeps
-    // finding: N paths, one hardened. A mirror that drifted far enough for core to reject it would
-    // otherwise leave an unparseable *.json in the dispatch overlay dir, and core would skip it at
-    // the next load. Letting the rejection propagate instead fails the launch with core's own
-    // reason, which beats dispatching against a workflow core will silently drop.
-    if (typeof register === 'function') {
-      await (register as (j: string) => Promise<string>).call(this.core, json);
-    }
-    // Deliberately NOT the refusal registerWorkflow makes when the binding is absent, and the
-    // difference is the input, not the caller:
-    //   - a user def is arbitrary runtime input no test has ever seen, so unvalidatable means
-    //     unsafe to persist;
-    //   - a built-in mirror is asserted field-for-field against wicked-core's own
-    //     workflows/<id>.json by tests/builtin-overlay-shadow.test.ts, so its parseability is
-    //     established at build time rather than needing a runtime check.
-    // Refusing here would also break DELIVERY: this write is the only way core resolves a drop-in
-    // id, so a refusal turns a silent ungating into a hard "unknown workflow" — exactly the
-    // regression FINDING-084's first attempted fix caused.
-    await writeFile(join(dir, `${def.id}.json`), JSON.stringify(overlayDef, null, 2), 'utf8');
+  getWorkflow(id: string): WorkflowDef | null {
+    this.hydrateFromOverlay();
+    const def = this.userWorkflows.get(id) ?? this.builtinDefs.find((w) => w.id === id) ?? null;
+    return def === null ? null : withSystemFlag(def);
   }
 
   /**
    * Arm a PER-RUN composed workflow def (crew#293 deliver, crew#311 deliverable floor) with the
    * engine — hot registration
-   * ONLY. Deliberately neither of the other two paths:
+   * ONLY. Deliberately not the other path:
    *   - not `registerWorkflow()`: the composed def must not enter `userWorkflows` or the overlay
    *     dir — it is launch input for one run, and persisting it would grow the catalog and the
-   *     overlay dir by one entry per delivered run;
-   *   - not `_writeBuiltinOverlay()`: same reason, no file.
+   *     overlay dir by one entry per delivered run.
    * The engine's `registerWorkflow` binding validates the def server-side and makes it visible
    * to the next `launchRun` with no restart — exactly the lifetime a per-run def needs. (The
    * def is consumed at PLANNING time; a later daemon restart resumes the run from its persisted

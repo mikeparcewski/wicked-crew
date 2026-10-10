@@ -55,7 +55,7 @@ let adapter: CoreAdapter;
 let dir: string;
 let priorOverlayDir: string | undefined;
 
-beforeAll(() => {
+beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), 'wf-verdict-'));
   const overlayDir = join(dir, 'workflows');
   priorOverlayDir = process.env['WICKED_WORKFLOWS_DIR'];
@@ -65,6 +65,7 @@ beforeAll(() => {
   writeFileSync(join(overlayDir, 'dogfood-ungated.json'), JSON.stringify(UNGATED, null, 2), 'utf8');
   writeFileSync(join(overlayDir, 'dogfood-sound.json'), JSON.stringify(SOUND, null, 2), 'utf8');
   adapter = new CoreAdapter({ dbPath: join(dir, 'verdict.db'), stub: true });
+  await adapter.loadBuiltinCatalog(() => {});
 });
 
 afterAll(() => {

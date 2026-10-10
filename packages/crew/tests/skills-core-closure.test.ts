@@ -22,7 +22,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
-import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
+import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
 import type { WorkflowDef } from '../src/core/types.js';
 import { builtinPresetSkillRefs, coreClosure, coreSkillRefs, mandateMentions, mentionedSkillNames, presetSkillRefs, registeredSkillRefs } from '../src/skills/core-closure.js';
 import { parseFrontmatter } from '../src/skills/frontmatter.js';

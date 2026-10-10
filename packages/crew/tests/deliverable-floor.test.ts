@@ -17,7 +17,7 @@ import {
   deliverableFloorPhase,
   deliverableFloorScript,
 } from '../src/core/deliverable-floor.js';
-import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
+import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
 import type { PhaseDef, WorkflowDef } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
 

@@ -15,7 +15,8 @@ import { ESCALATION_ACTIONS, GateSchema, registerRoutes } from '../src/api/route
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import type { AuditLog } from '../src/api/audit.js';
-import { BUILTIN_WORKFLOWS, type CoreAdapter } from '../src/core/adapter.js';
+import { type CoreAdapter } from '../src/core/adapter.js';
+import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
 
 describe('GateSchema — the escalation arms', () => {
   it.each(ESCALATION_ACTIONS)('`%s` with approve: true and nothing else parses', (action) => {

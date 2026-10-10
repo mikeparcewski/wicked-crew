@@ -21,7 +21,7 @@ import type { Actor, CoreEvent } from '../core/types.js';
 import type { AuditLog } from './audit.js';
 import { recordRunLaunched, type RunTimingIndex } from './run-timing-index.js';
 
-/** The workflow a completed onboarding chains to (crew's BUILTIN_WORKFLOWS). */
+/** The workflow a completed onboarding chains to (the engine's built-in preset). */
 export const CAPTURE_LEARNINGS_WORKFLOW = 'capture-learnings';
 /** Who launched a chained capture (the launch entry's actor). */
 export const ONBOARDING_CHAIN_ACTOR: Actor = { id: 'onboarding', kind: 'system', trust: 'operator' };

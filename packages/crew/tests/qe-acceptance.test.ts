@@ -20,7 +20,7 @@ import {
   VERDICT_TO_STATUS,
 } from '../src/qe/acceptance.js';
 import type { QeAcceptanceState } from '../src/qe/ledger.js';
-import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
+import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
 import type { RecordedEvent, RunIdentity, SessionView, WorkflowDef } from '../src/core/types.js';
 import { runWorkflowDef } from '../src/core/run-identity.js';
 

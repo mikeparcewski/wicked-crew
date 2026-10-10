@@ -36,7 +36,7 @@ import type { TestSet } from '../src/qe/test-sets.js';
 import type { TestingAuthorSchema } from '../src/api/testing.js';
 import { councilOutcomeSuffix } from '../src/interactive/council-outcome.js';
 import { NO_ELIGIBLE_SEAT_CODE, noEligibleSeatBody } from '../src/core/engine-roster.js';
-import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
+import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
 import type { GateCacheEntry } from '../src/api/gate-cache.js';
 import type { ElicitationEntry } from '../src/api/elicitation-cache.js';
 import type { RequirementDetail, RequirementsPage } from '../src/api/requirements.js';

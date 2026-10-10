@@ -36,7 +36,8 @@ import { GateSchema, registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import type { AuditLog } from '../src/api/audit.js';
-import { BUILTIN_WORKFLOWS, ENGINE_TOO_OLD_RE, armsUnsupportedReason, type CoreAdapter } from '../src/core/adapter.js';
+import { ENGINE_TOO_OLD_RE, armsUnsupportedReason, type CoreAdapter } from '../src/core/adapter.js';
+import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
 
 describe('the wave-3 arms fail CLOSED on an addon < 0.7.27 (review-L1-598 M1 — one rule for action/amendScope and denialGate)', () => {
   it('names the feature, the version floor and the remedy; null when the addon carries the arms', () => {
