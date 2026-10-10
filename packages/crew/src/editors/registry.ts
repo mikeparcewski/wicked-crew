@@ -228,16 +228,16 @@ export function discoverStudioEditors(
       log?.(`[editors] ${manifest.id}: entry ${manifest.entry} is ${entryProblem}; skipped`);
       continue;
     }
-    let buf: Buffer;
+    const cap = manifest.limits?.bundleBytes ?? HOST_BUNDLE_CAP_BYTES;
+    let buf: Buffer | null;
     try {
-      buf = readFileSync(entryPath);
+      buf = readCapped(entryPath, cap);
     } catch (err) {
       log?.(`[editors] ${manifest.id}: entry unreadable (${err instanceof Error ? err.message : String(err)})`);
       continue;
     }
-    const cap = manifest.limits?.bundleBytes ?? HOST_BUNDLE_CAP_BYTES;
-    if (buf.byteLength > cap) {
-      log?.(`[editors] ${manifest.id}: entry is ${buf.byteLength} bytes, over its ${cap}-byte cap`);
+    if (buf === null) {
+      log?.(`[editors] ${manifest.id}: entry is over its ${cap}-byte cap`);
       continue;
     }
     const outside = externalReferences(buf.toString('utf8'));
@@ -469,6 +469,8 @@ export class EditorRegistry {
     if (!this.installed.has(id)) return false;
     this.commit(() => {
       this.installed.delete(id);
+      // A removed editor's boot-time "off" does not follow a later install of the id (codex r2).
+      delete this.persistedFlags[id];
       const r = this.records.get(id);
       if (r !== undefined && !r.firstParty) this.records.delete(id);
     });
