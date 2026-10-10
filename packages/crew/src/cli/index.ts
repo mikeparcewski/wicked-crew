@@ -57,6 +57,15 @@ function hasFlag(args: string[], name: string): boolean {
   return args.includes(name);
 }
 
+/** The `start` options that take a value — the token after one is that value, never a flag. */
+const START_VALUE_FLAGS: ReadonlySet<string> = new Set(['--problem', '--human-confirm', '--workflow', '--repo', '--session', '--db', '--port']);
+
+/** `name` present AS AN OPTION: never the value of a preceding value-taking option, so
+ *  `--problem --reduced-assurance` is a problem text, not an opt-in (codex r2 on crew#923). */
+function optionPresent(args: string[], name: string, valueFlags: ReadonlySet<string>): boolean {
+  return args.some((a, i) => a === name && (i === 0 || !valueFlags.has(args[i - 1]!)));
+}
+
 /** `true` when an env var is set to a falsy string: "", "0", "false", "no", "off" (case-insensitive, trimmed).
  *  An empty / whitespace-only value is treated as falsy so `VAR=` (common shell unset idiom) disables the feature. */
 function isFalsy(val: string | undefined): boolean {
@@ -650,7 +659,7 @@ async function main(): Promise<void> {
     if (repoRef !== undefined) launchBody['repoRef'] = repoRef;
     // wicked-core#850: the EXPLICIT reduced-assurance opt-in (the creator's seat may evaluate its own
     // work, disclosed on every receipt). Only the flag sends it; nothing defaults it on.
-    if (hasFlag(argv, '--reduced-assurance')) launchBody['reducedAssurance'] = true;
+    if (optionPresent(argv, '--reduced-assurance', START_VALUE_FLAGS)) launchBody['reducedAssurance'] = true;
     const launchRes = await daemonFetch(port, `http://127.0.0.1:${port}/api/v1/runs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

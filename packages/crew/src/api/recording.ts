@@ -173,6 +173,8 @@ export const DemoLaunchSchema = z
     audience: z.string().trim().min(1).max(2000),
     show: z.string().trim().min(1).max(4000),
     clisJson: z.string().optional(),
+    /** wicked-core#850 — the explicit reduced-assurance opt-in, forwarded to `POST /runs` only when `true`. */
+    reducedAssurance: z.boolean().optional(),
   })
   .strict();
 
@@ -675,6 +677,7 @@ export function registerDemoRoutes(app: FastifyInstance, adapter: CoreAdapter): 
             workflow: DEMO_PRESET,
             deliver: 'none',
             ...(parsed.data.clisJson !== undefined ? { clisJson: parsed.data.clisJson } : {}),
+            ...(parsed.data.reducedAssurance === true ? { reducedAssurance: true } : {}),
           },
         })
         .finally(() => demoLaunchRoots.delete(runId));
@@ -682,7 +685,9 @@ export function registerDemoRoutes(app: FastifyInstance, adapter: CoreAdapter): 
         await fsp.rm(root, { recursive: true, force: true });
         return reply.code(launched.statusCode).type('application/json').send(launched.body);
       }
-      return reply.code(201).send({ runId });
+      // wicked-core#850: the launch's one-CLI assurance notice reaches the caller (codex r2 on crew#923).
+      const { assuranceNotice } = launched.json() as { assuranceNotice?: unknown };
+      return reply.code(201).send({ runId, ...(assuranceNotice !== undefined ? { assuranceNotice } : {}) });
     },
   );
 

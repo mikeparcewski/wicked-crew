@@ -2037,9 +2037,10 @@ export interface QeAcceptanceRefusal {
 
 /**
  * (crew ≥ 0.9.0, EX-01/EX-02) `LaunchRunResponse.assuranceNotice`: the run launched under FULL
- * assurance on a roster whose usable seats are all ONE CLI, so no other seat can evaluate its work
- * and no other identity can judge it — the engine will refuse a review on its builder's seat
- * (`dead_seat` gate) or hold a judge-less gate (`judge_unavailable`), and the run waits for a seat.
+ * assurance on a roster whose WORK seats (not benched, not ballot-only) all invoke ONE CLI binary
+ * (the engine's judge identity), so no other seat can evaluate its work and no other identity can
+ * judge it. If the run reviews or changes code, the engine refuses the review on its builder's seat
+ * (`dead_seat` gate) or holds a gate that needs a judge (`judge_unavailable`), and the run waits.
  * The ways forward are explicit: sign a second CLI in, or relaunch with `retryWith` merged into the
  * launch body (the creator's seat then evaluates its own work, disclosed on every receipt). A client
  * shows `message` and asks its operator; crew never applies the opt-in by itself.
@@ -2047,7 +2048,7 @@ export interface QeAcceptanceRefusal {
 export interface LaunchAssuranceNotice {
   code: 'single_cli_roster';
   message: string;
-  /** The usable seats, all of one CLI. */
+  /** The work seats, all one CLI identity. */
   seats: string[];
   retryWith: { retryOf: string; reducedAssurance: true };
 }
@@ -7376,11 +7377,15 @@ export interface CaptureImageFile {
 export interface CaptureBody {
   notes?: string;
   files?: Array<CaptureTextFile | CaptureImageFile>;
+  /** (crew ≥ 0.9.0) The explicit reduced-assurance opt-in, as `LaunchRunBody.reducedAssurance`. */
+  reducedAssurance?: boolean;
 }
 
 /** `POST /projects/:id/capture` → 201. */
 export interface CaptureResponse {
   runId: string;
+  /** (crew ≥ 0.9.0) The launch's {@link LaunchAssuranceNotice}, when it answered one. */
+  assuranceNotice?: LaunchAssuranceNotice;
 }
 
 // ── The Demo experience (wicked-studio#373, api-types 0.61.0) ────────────────────────────────
@@ -7398,11 +7403,15 @@ export interface DemoLaunchBody {
   show: string;
   /** The roster to seat the team from, as `POST /runs` takes it. Omit for the daemon's roster. */
   clisJson?: string;
+  /** (crew ≥ 0.9.0) The explicit reduced-assurance opt-in, as `LaunchRunBody.reducedAssurance`. */
+  reducedAssurance?: boolean;
 }
 
 /** `POST /projects/:id/demo` → 201. */
 export interface DemoLaunchResponse {
   runId: string;
+  /** (crew ≥ 0.9.0) The launch's {@link LaunchAssuranceNotice}, when it answered one. */
+  assuranceNotice?: LaunchAssuranceNotice;
 }
 
 /** `PUT /runs/:id/demo/script` body: the presenter's edit of `script.md` (plan gate only; ≤ 256 KB). */

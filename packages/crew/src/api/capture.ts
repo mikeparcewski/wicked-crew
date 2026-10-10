@@ -59,6 +59,8 @@ export const CaptureSchema = z
   .object({
     notes: z.string().optional(),
     files: z.array(z.union([CaptureTextFileSchema, CaptureImageFileSchema])).max(CAPTURE_MAX_FILES).optional(),
+    /** wicked-core#850 — the explicit reduced-assurance opt-in, forwarded to `POST /runs` only when `true`. */
+    reducedAssurance: z.boolean().optional(),
   })
   .strict();
 
@@ -234,13 +236,16 @@ export function registerCaptureRoutes(app: FastifyInstance): void {
           projectId,
           plan: { steps: [{ catalog: 'understand', id: 'capture' }] },
           deliver: 'none',
+          ...(parsed.data.reducedAssurance === true ? { reducedAssurance: true } : {}),
         },
       }).finally(() => captureLaunchRoots.delete(runId));
       if (launched.statusCode !== 201) {
         await fsp.rm(dir, { recursive: true, force: true });
         return reply.code(launched.statusCode).type('application/json').send(launched.body);
       }
-      return reply.code(201).send({ runId });
+      // wicked-core#850: the launch's one-CLI assurance notice reaches the caller (codex r2 on crew#923).
+      const { assuranceNotice } = launched.json() as { assuranceNotice?: unknown };
+      return reply.code(201).send({ runId, ...(assuranceNotice !== undefined ? { assuranceNotice } : {}) });
     },
   );
 }

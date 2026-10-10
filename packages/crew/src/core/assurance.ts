@@ -15,22 +15,31 @@
  * {@link LaunchAssuranceNotice} naming the seat and the explicit opt-in to relaunch with.
  */
 
-/** `LaunchRunResponse.assuranceNotice.code`: every usable seat of the launch's roster is one CLI. */
+/** `LaunchRunResponse.assuranceNotice.code`: every work seat of the launch's roster is one CLI identity. */
 export const SINGLE_CLI_ROSTER_CODE = 'single_cli_roster' as const;
 
-/** The CLI behind a roster key: `claude#2` → `claude` (the engine's `model_of`). */
-export function cliOfSeatKey(key: string): string {
-  const at = key.indexOf('#');
-  return at >= 0 ? key.slice(0, at) : key;
+/**
+ * A seat's JUDGE identity, the engine's rule (wicked-core `validator::seat_identity`): the basename of
+ * its headless invocation's argv[0], case-folded — so `claude` and `claude-sonnet`, both invoking
+ * `claude`, are ONE identity. A seat with no invocation falls back to its key's CLI (`claude#2` →
+ * `claude`).
+ */
+export function seatIdentity(seat: { key: string; headless_invocation?: unknown }): string {
+  const inv = typeof seat.headless_invocation === 'string' ? seat.headless_invocation.trim() : '';
+  const argv0 = inv.split(/\s+/, 1)[0] ?? '';
+  const tok = argv0 !== '' ? argv0 : seat.key.split('#', 1)[0]!;
+  return (tok.split(/[\\/]/).pop() ?? tok).toLowerCase();
 }
 
 /**
- * The usable seats of the roster crew hands the engine (`engineRosterJson` output), by key. A seat
- * the launcher benched (`health.usable === false`) is not usable; a seat with no `health` is (the
- * engine treats it as eligible). `null` when the roster does not parse as an array of keyed seats:
- * the engine reports its own parse error, crew does not predict around it.
+ * The seats of the roster crew hands the engine (`engineRosterJson` output) that can do WORK — and
+ * so evaluate or judge — with their identities. Excluded: a seat the launcher benched
+ * (`health.usable === false`) and a ballot-only seat (`seat_eligible_for_work === false`, which the
+ * engine never routes work or a judge to). A seat with no `health` is usable (the engine treats it as
+ * eligible). `null` when the roster does not parse as an array of keyed seats: the engine reports its
+ * own parse error, crew does not predict around it.
  */
-export function usableSeatKeys(engineClisJson: string): string[] | null {
+export function workSeats(engineClisJson: string): Array<{ key: string; identity: string }> | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(engineClisJson);
@@ -38,22 +47,22 @@ export function usableSeatKeys(engineClisJson: string): string[] | null {
     return null;
   }
   if (!Array.isArray(parsed)) return null;
-  const keys: string[] = [];
+  const seats: Array<{ key: string; identity: string }> = [];
   for (const seat of parsed) {
     if (typeof seat !== 'object' || seat === null) return null;
-    const s = seat as { key?: unknown; health?: { usable?: unknown } };
+    const s = seat as { key?: unknown; headless_invocation?: unknown; health?: { usable?: unknown }; seat_eligible_for_work?: unknown };
     if (typeof s.key !== 'string' || s.key === '') return null;
-    if (s.health?.usable === false) continue;
-    keys.push(s.key);
+    if (s.health?.usable === false || s.seat_eligible_for_work === false) continue;
+    seats.push({ key: s.key, identity: seatIdentity({ key: s.key, headless_invocation: s.headless_invocation }) });
   }
-  return keys;
+  return seats;
 }
 
 /** `LaunchRunResponse.assuranceNotice` (api-types 0.102.0). */
 export interface LaunchAssuranceNotice {
   code: typeof SINGLE_CLI_ROSTER_CODE;
   message: string;
-  /** The usable seats — all one CLI. */
+  /** The seats that can work — all one CLI identity. */
   seats: string[];
   /** Relaunch with these fields to accept reduced assurance (`retryOf` names this run). */
   retryWith: { retryOf: string; reducedAssurance: true };
@@ -61,7 +70,7 @@ export interface LaunchAssuranceNotice {
 
 /**
  * The notice a full-assurance launch on a one-CLI roster answers with; `null` when the launch opted
- * in, or its roster has seats of two CLIs (or none the launcher could read).
+ * in, or its roster has work seats of two CLI identities (or none the launcher could read).
  */
 export function launchAssuranceNotice(opts: {
   runId: string;
@@ -69,18 +78,19 @@ export function launchAssuranceNotice(opts: {
   engineClisJson: string;
 }): LaunchAssuranceNotice | null {
   if (opts.reducedAssurance === true) return null;
-  const usable = usableSeatKeys(opts.engineClisJson);
-  if (usable === null || usable.length === 0) return null;
-  const clis = new Set(usable.map(cliOfSeatKey));
-  if (clis.size !== 1) return null;
-  const cli = [...clis][0]!;
+  const seats = workSeats(opts.engineClisJson);
+  if (seats === null || seats.length === 0) return null;
+  const identities = new Set(seats.map((s) => s.identity));
+  if (identities.size !== 1) return null;
+  const cli = [...identities][0]!;
+  const usable = seats.map((s) => s.key);
   return {
     code: SINGLE_CLI_ROSTER_CODE,
     message:
-      `Every usable seat is ${cli} (${usable.join(', ')}), so no other CLI can evaluate or judge this run's work. ` +
-      `Under full assurance the engine refuses a review on its builder's seat and holds a gate whose judge could ` +
-      `not run on a distinct seat, so this run will wait at a gate for one. Sign a second CLI in, or relaunch with ` +
-      `"reducedAssurance": true to let ${cli} evaluate its own work, disclosed on every receipt.`,
+      `Every seat that can work runs ${cli} (${usable.join(', ')}), so no other CLI can evaluate or judge this run's ` +
+      `work. Under full assurance the engine refuses a review on its builder's seat and holds a gate that needs a ` +
+      `judge, so if this run reviews or changes code it will wait at a gate for a distinct seat. Sign a second CLI ` +
+      `in, or relaunch with "reducedAssurance": true to let ${cli} evaluate its own work, disclosed on every receipt.`,
     seats: usable,
     retryWith: { retryOf: opts.runId, reducedAssurance: true },
   };
