@@ -9730,6 +9730,7 @@ export interface ConsentWriteTarget {
   cli?: string;
   /** The path is the operator's OWN (outside every program-owned root). */
   operatorOwned: boolean;
+}
 
 // ── Project aggregates (crew#371; GET /projects/:id/{requirements,domain,coverage}) ──────────────
 /** Each `crew.repo` member is one row, never dropped: `ok`, `absent` (nothing generated or indexed
