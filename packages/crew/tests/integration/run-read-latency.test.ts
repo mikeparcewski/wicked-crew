@@ -107,15 +107,19 @@ describe('crew#944 — run reads on a long-lived home', () => {
       expect(status).toBe(200);
       samples.push(ms);
     }
-    expect(p95(samples), `run-read samples (ms): ${samples.map((s) => s.toFixed(0)).join(' ')}`).toBeLessThan(RUN_READ_P95_MS);
+    const line = `run-read p95 ${p95(samples).toFixed(1)} ms; samples (ms): ${samples.map((s) => s.toFixed(0)).join(' ')}`;
+    console.info(`[crew#944] ${line}`);
+    expect(p95(samples), line).toBeLessThan(RUN_READ_P95_MS);
   }, 120_000);
 
   it(`/health answers within ${HEALTH_UNDER_LOAD_MS} ms while 20 run reads are in flight`, async () => {
     const reads = runIds.slice(0, 20).map((id) => timed(`/runs/${id}`));
     const health = await timed('/health');
     const done = await Promise.all(reads);
+    const line = `health ${health.ms.toFixed(1)} ms; reads (ms): ${done.map((r) => r.ms.toFixed(0)).join(' ')}`;
+    console.info(`[crew#944] ${line}`);
     expect(health.status).toBe(200);
     expect(done.every((r) => r.status === 200)).toBe(true);
-    expect(health.ms, `reads (ms): ${done.map((r) => r.ms.toFixed(0)).join(' ')}`).toBeLessThan(HEALTH_UNDER_LOAD_MS);
+    expect(health.ms, line).toBeLessThan(HEALTH_UNDER_LOAD_MS);
   }, 120_000);
 });
