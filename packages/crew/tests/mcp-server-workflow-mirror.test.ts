@@ -10,7 +10,7 @@ import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BUILTIN_WORKFLOWS, CoreAdapter, humanGatePhaseIds } from '../src/core/adapter.js';
-import { composeDeliverWorkflow, DELIVER_PHASE_ID, EVIDENCE_FLOOR_PIN, INSTALL_PHASE_ID, placeDeliverBeforeInstall } from '../src/core/deliver.js';
+import { composeDeliverWorkflow, DELIVER_PHASE_ID, EVIDENCE_FLOOR_PIN, INSTALL_PHASE_ID, INSTALL_PLAN_PHASE_ID, placeDeliverBeforeInstall } from '../src/core/deliver.js';
 import type { WorkflowDef } from '../src/core/types.js';
 import { orderMayApprove } from '../src/standing-orders/evaluator.js';
 import { removeScratch } from './setup/scratch.js';
@@ -44,7 +44,7 @@ const served = (): WorkflowDef => {
 };
 
 describe('the mcp-server mirror', () => {
-  it('serves the eight phases in order with their kinds, roles, gates, pins and skill_refs', () => {
+  it('serves the nine phases in order with their kinds, roles, gates, pins and skill_refs', () => {
     const def = served();
     expect(def.phases.map((p) => [p.id, p.kind, p.role, p.validator_pin, p.skill_ref])).toEqual([
       ['scope', 'recon', 'neutral', null, 'wicked-garden-mcp-scaffold'],
@@ -54,6 +54,7 @@ describe('the mcp-server mirror', () => {
       ['test', 'test', 'neutral', EVIDENCE_FLOOR_PIN, 'wicked-garden-qe-contract-testing-engineer'],
       ['security-review', 'review', 'evaluator', EVIDENCE_FLOOR_PIN, 'wicked-garden-platform-security-engineer'],
       ['observability-review', 'review', 'evaluator', EVIDENCE_FLOOR_PIN, 'wicked-garden-qe-observability-test-engineer'],
+      ['install-plan', 'build', 'neutral', null, null],
       ['install', 'build', 'neutral', null, null],
     ]);
     const by = Object.fromEntries(def.phases.map((p) => [p.id, p]));
@@ -68,13 +69,24 @@ describe('the mcp-server mirror', () => {
     // crew#888 / core#801: the engine pauses BEFORE the install runs (`gateKind: 'consent'`).
     expect(by['install']!.gate).toBe('consent_before');
     expect(by['install']!.executes_code).toBe(false);
-    expect(by['install']!.depends_on).toEqual(['security-review', 'observability-review']);
+    // core#820: the install depends on its dry run, which is where the consent gate reads the plan.
+    expect(by['install']!.depends_on).toEqual(['install-plan']);
+    expect(by['install-plan']!.depends_on).toEqual(['security-review', 'observability-review']);
+    expect(by['install-plan']!.gate).toBe('auto');
     // core#802: `bash -c` (no login shell) execs the admitted garden at WICKED_GARDEN_ROOT, never PATH.
-    expect(by['install']!.executor).toMatchObject({ type: 'tool', cmd: ['bash', '-c', expect.stringContaining('scripts/mcp/install.py --from-run --json')] });
+    const planCmd = (by['install-plan']!.executor as { cmd: string[] }).cmd;
+    expect(planCmd.slice(0, 2)).toEqual(['bash', '-c']);
+    expect(planCmd[2]).toContain('scripts/mcp/install.py --from-run --dry-run --json');
     const installCmd = (by['install']!.executor as { cmd: string[] }).cmd[2]!;
+    expect((by['install']!.executor as { cmd: string[] }).cmd.slice(0, 2)).toEqual(['bash', '-c']);
     expect(installCmd).toContain('${WICKED_GARDEN_ROOT:?');
-    expect(installCmd).not.toMatch(/command -v|npx/);
-    expect(by['install']!.instructions).toContain('Nothing has been installed yet: this asks before the install runs.');
+    // The install writes exactly the choice the operator approved at the gate (core#820).
+    expect(installCmd).toContain('--target "${WICKED_CONSENT_CHOICE:?');
+    expect(installCmd).not.toContain('--dry-run');
+    for (const cmd of [installCmd, planCmd[2]!]) expect(cmd).not.toMatch(/command -v|npx/);
+    expect(by['install']!.instructions).toContain('Nothing has been installed yet: this asks before the install runs');
+    expect(by['install']!.instructions).toContain('Install for workers (the default)');
+    expect(humanGatePhaseIds(def)).not.toContain('install-plan');
     expect(by['design']!.instructions).toContain('never state what a rule id means when you could not read it');
     expect(humanGatePhaseIds(def)).toContain('install');
     for (const p of def.phases) {
@@ -105,17 +117,19 @@ describe('the mcp-server mirror', () => {
 });
 
 describe('deliver goes before install', () => {
-  it('composeDeliverWorkflow on mcp-server: …, security-review, observability-review, deliver, install; deliver takes install\'s depends_on, install depends on deliver', () => {
+  it('composeDeliverWorkflow on mcp-server: …, observability-review, deliver, install-plan, install; the install still depends on its plan (core#820)', () => {
     const base = BUILTIN_WORKFLOWS.find((w) => w.id === 'mcp-server')!;
     const composed = composeDeliverWorkflow(base, 'run-1', 'build an MCP server');
     expect(composed.phases.map((p) => p.id)).toEqual([
-      'scope', 'source-discovery', 'design', 'build', 'test', 'security-review', 'observability-review', DELIVER_PHASE_ID, INSTALL_PHASE_ID,
+      'scope', 'source-discovery', 'design', 'build', 'test', 'security-review', 'observability-review', DELIVER_PHASE_ID, INSTALL_PLAN_PHASE_ID, INSTALL_PHASE_ID,
     ]);
     const by = Object.fromEntries(composed.phases.map((p) => [p.id, p]));
     expect(by[DELIVER_PHASE_ID]!.depends_on).toEqual(['security-review', 'observability-review']);
-    expect(by[INSTALL_PHASE_ID]!.depends_on).toEqual([DELIVER_PHASE_ID]);
+    expect(by[INSTALL_PLAN_PHASE_ID]!.depends_on).toEqual([DELIVER_PHASE_ID]);
+    // The consent gate reads the write plan from the phase the install DEPENDS ON: never deliver.
+    expect(by[INSTALL_PHASE_ID]!.depends_on).toEqual([INSTALL_PLAN_PHASE_ID]);
     // The base def is not mutated.
-    expect(base.phases.find((p) => p.id === INSTALL_PHASE_ID)!.depends_on).toEqual(['security-review', 'observability-review']);
+    expect(base.phases.find((p) => p.id === INSTALL_PLAN_PHASE_ID)!.depends_on).toEqual(['security-review', 'observability-review']);
   });
 
   it('a def without install still appends deliver after its last phase (feature)', () => {
@@ -140,5 +154,10 @@ describe('deliver goes before install', () => {
     const out = placeDeliverBeforeInstall(phases, { id: 'deliver', depends_on: ['a'] });
     expect(out).toEqual([{ id: 'a', depends_on: [] }, { id: 'deliver', depends_on: ['a'] }, { id: 'install', depends_on: ['deliver'] }, { id: 'z', depends_on: ['install'] }]);
     expect(phases[1]!.depends_on).toEqual(['a']);
+    // core#820: with a dry run before the install, deliver goes before the dry run.
+    const planned = [{ id: 'a', depends_on: [] }, { id: 'install-plan', depends_on: ['a'] }, { id: 'install', depends_on: ['install-plan'] }];
+    expect(placeDeliverBeforeInstall(planned, { id: 'deliver', depends_on: ['a'] })).toEqual([
+      { id: 'a', depends_on: [] }, { id: 'deliver', depends_on: ['a'] }, { id: 'install-plan', depends_on: ['deliver'] }, { id: 'install', depends_on: ['install-plan'] },
+    ]);
   });
 });

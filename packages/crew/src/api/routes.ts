@@ -602,8 +602,11 @@ export const LaunchSchema = z.object({
  *  evaluator's discarded, pinned edit as the creator's amendment. The ENGINE refuses each at any
  *  other gate (a 409 naming the gate it answers). */
 export const ESCALATION_ACTIONS = ['extend', 'targeted', 'accept_partial', 'accept_suggestion'] as const;
+/** (core#820) A consent gate's answer token: `consent:<choice id>` approves that row of the dry-run
+ *  plan (the engine refuses an id its plan does not offer); `reject` stays the decline. */
+export const CONSENT_CHOICE_ACTION = /^consent:[A-Za-z0-9_-]{1,32}$/u; // core `parse_plan` caps a choice id at 32
 const isEscalationAction = (a: string | undefined): boolean =>
-  a !== undefined && (ESCALATION_ACTIONS as readonly string[]).includes(a);
+  a !== undefined && ((ESCALATION_ACTIONS as readonly string[]).includes(a) || CONSENT_CHOICE_ACTION.test(a));
 
 /** `POST /runs/:id/gate` (api-types 0.38.0 `GateDecision`; DES-L1 PR-2). Additive arms: `action`
  *  names the arm (`approve` | `request_changes` | `reject`; absent = today's two-arm mapping of
@@ -621,7 +624,12 @@ const isEscalationAction = (a: string | undefined): boolean =>
 export const GateSchema = z.object({
   approve: z.boolean(),
   amend: z.string().optional(),
-  action: z.enum(['approve', 'request_changes', 'reject', 'edit_plan', 'amend_intent', ...ESCALATION_ACTIONS]).optional(),
+  action: z
+    .union([
+      z.enum(['approve', 'request_changes', 'reject', 'edit_plan', 'amend_intent', ...ESCALATION_ACTIONS]),
+      z.string().regex(CONSENT_CHOICE_ACTION, 'a consent choice is `consent:<choice id>`'),
+    ])
+    .optional(),
   amendScope: z.enum(['cursor', 'creator']).optional(),
   /** DES-TEAMING-002 T3 — approve a `plan_approval` gate WITH AN EDIT (`GateDecision.plan`). */
   plan: PlanSchema.optional(),
@@ -631,7 +639,7 @@ export const GateSchema = z.object({
 }).strict().refine(
   (b) => b.action === undefined
     || (b.action === 'approve' || b.action === 'edit_plan' || b.action === 'amend_intent' || isEscalationAction(b.action)) === b.approve,
-  { message: '`action` disagrees with `approve`: request_changes and reject require approve: false; approve, edit_plan, amend_intent, extend, targeted, accept_partial and accept_suggestion require approve: true', path: ['action'] },
+  { message: '`action` disagrees with `approve`: request_changes and reject require approve: false; approve, edit_plan, amend_intent, extend, targeted, accept_partial, accept_suggestion and consent:<id> require approve: true', path: ['action'] },
 ).refine(
   // (wicked-core#555) An intent amendment IS its text: an empty one amends nothing, and the arm's
   // scope is every unit at or after the cursor — which is what makes it reach the evaluator — so
@@ -643,7 +651,7 @@ export const GateSchema = z.object({
   { message: 'amend_intent takes no amendScope or plan — an intent amendment reaches every unit at or after the cursor, which is what makes it reach the evaluator', path: ['amendScope'] },
 ).refine(
   (b) => !isEscalationAction(b.action) || (b.amend === undefined && b.amendScope === undefined && b.plan === undefined),
-  { message: 'extend, targeted, accept_partial and accept_suggestion take no amend, amendScope or plan — the engine re-runs the floor or adopts the pinned edit as it stands', path: ['action'] },
+  { message: 'extend, targeted, accept_partial, accept_suggestion and consent:<id> take no amend, amendScope or plan — the engine re-runs the floor, adopts the pinned edit, or runs the chosen install as it stands', path: ['action'] },
 ).refine(
   (b) => (b.action === 'edit_plan') === (b.plan !== undefined) || (b.action === undefined && b.plan !== undefined),
   { message: 'an edited plan answers a plan_approval gate: `plan` needs approve: true with `action` omitted or edit_plan, and edit_plan needs `plan`', path: ['plan'] },

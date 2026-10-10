@@ -1311,7 +1311,10 @@ export interface GateDecision {
     | 'targeted'
     | 'accept_partial'
     | 'accept_suggestion'
-    | 'amend_intent';
+    | 'amend_intent'
+    /** (core#820) A `consent` gate's choice from its dry-run plan (`awaitingHuman.choices`), with
+     *  `approve: true`: `consent:worker` (the default), `consent:operator`, …; `reject` declines. */
+    | `consent:${string}`;
   /**
    * Where an approve's `amend` lands (api-types 0.38.0, additive; same release as `action`).
    * Absent = `'cursor'` (today: the gated unit's description). `'creator'` — the first creator
@@ -1403,6 +1406,24 @@ export interface CoreEvent {
    * ABSENT ⇒ nothing is preselected.
    */
   recommended?: number;
+  /**
+   * `awaitingHuman{gateKind: 'consent'}` (core#820): the answer tokens the gate offers, from the
+   * dry-run plan the gated unit depends on (`consent:<id>`…, `reject` last); `recommended` is then
+   * the index of the plan's default choice. ABSENT on every other gate, and on a consent gate with
+   * no plan (see `writeTargetsMissing`).
+   */
+  choices?: string[];
+  /** `awaitingHuman{gateKind: 'consent'}` (core#820): each token's label (`reject` → "Decline"). */
+  choiceLabels?: Record<string, string>;
+  /** `awaitingHuman{gateKind: 'consent'}` (core#820): what each token would write (`reject` → `[]`). */
+  writeTargets?: Record<string, ConsentWriteTarget[]>;
+  /** `awaitingHuman{gateKind: 'consent'}` (core#820): the ord of the dry-run unit the plan came from. */
+  writePlanOrd?: number;
+  /** `awaitingHuman{gateKind: 'consent'}` (core#820): CLIs the plan leaves out, and why. */
+  writeTargetsSkipped?: Array<{ cli: string; why: string }>;
+  /** `awaitingHuman{gateKind: 'consent'}` (core#820): why no write targets are listed (no dry run
+   *  ran before the gate, or it printed no plan); the gate is then a plain approve / reject. */
+  writeTargetsMissing?: string;
   /** PTY terminal frames (`terminalOpened`/`terminalOutput`/`terminalExited`): the terminal id. */
   id?: string;
   /**
@@ -9697,4 +9718,16 @@ export interface EditorGrantsResponse {
   project: string | null;
   firstParty: boolean;
   grants: EditorGrant[];
+}
+
+/** (core#820) One file or directory a consent choice would write, as the install's dry run
+ *  resolved it on the daemon host (`awaitingHuman.writeTargets`). */
+export interface ConsentWriteTarget {
+  path: string;
+  /** What the file is ("claude MCP config"). */
+  what: string;
+  /** The CLI it configures, when it is a CLI's file. */
+  cli?: string;
+  /** The path is the operator's OWN (outside every program-owned root). */
+  operatorOwned: boolean;
 }
