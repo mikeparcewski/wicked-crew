@@ -157,3 +157,38 @@ export function awaitingHumanLine(event: CoreEvent, runId: string, units: RunUni
     `(studio → Runs); the document lands after that.`
   );
 }
+
+/**
+ * Holds a run's engine frames while its fold is re-read ({@link resyncRunUnits}), then replays them
+ * in order: a dispatch that follows `resumed` must be narrated against the REFRESHED units, not the
+ * list a gate edit just changed (codex r2 on crew#938). Frames of other runs pass straight through.
+ */
+export class ResyncGate {
+  private readonly held = new Map<string, CoreEvent[]>();
+
+  constructor(private readonly fold: (event: CoreEvent) => void) {}
+
+  /** Deliver one engine frame: folded now, or queued behind its run's pending re-read. */
+  deliver(event: CoreEvent): void {
+    const runId = typeof event.session === 'string' ? event.session : undefined;
+    const queue = runId === undefined ? undefined : this.held.get(runId);
+    if (queue !== undefined) {
+      queue.push(event);
+      return;
+    }
+    this.fold(event);
+  }
+
+  /** Queue `runId`'s frames until `refresh` settles, then replay them through the fold. */
+  hold(runId: string, refresh: Promise<void>): void {
+    if (this.held.has(runId)) return; // already held: the pending re-read covers this one
+    this.held.set(runId, []);
+    void refresh
+      .catch(() => undefined)
+      .then(() => {
+        const queue = this.held.get(runId) ?? [];
+        this.held.delete(runId);
+        for (const e of queue) this.deliver(e);
+      });
+  }
+}

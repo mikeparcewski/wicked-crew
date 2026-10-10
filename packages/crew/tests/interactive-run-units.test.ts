@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent } from '../src/core/types.js';
-import { awaitingHumanLine, describeStep, plannedUnitOf, plannedUnitsOfRun, resyncRunUnits, RunUnits } from '../src/interactive/run-units.js';
+import { awaitingHumanLine, describeStep, plannedUnitOf, plannedUnitsOfRun, resyncRunUnits, ResyncGate, RunUnits } from '../src/interactive/run-units.js';
 
 const planned = (ord: number, id: string, role: string, executorType = 'agent'): CoreEvent =>
   ({ type: 'unitPlanned', session: 'r', ord, description: `${id} — the intent ||| do it`, role, executorType }) as unknown as CoreEvent;
@@ -108,5 +108,29 @@ describe('the fold re-read from the run, and the paused-run line', () => {
     const long = awaitingHumanLine({ type: 'awaitingHuman', ord: 2, prompt: 'x'.repeat(400), gateKind: 'escalation' } as CoreEvent, 'run-9', u);
     expect(long).toContain('revise needs a person');
     expect(long.length).toBeLessThan(300);
+  });
+});
+
+describe('ResyncGate (codex r2 on crew#938)', () => {
+  it('a run\'s frames after `resumed` wait for the re-read, then replay in order; other runs pass through', async () => {
+    const seen: string[] = [];
+    const u = new RunUnits();
+    u.observe(planned(1, 'pa-scope', 'neutral'));
+    u.observe(planned(2, 'design', 'neutral'));
+    u.observe(planned(3, 'draft', 'creator'));
+    let release!: () => void;
+    const refresh = new Promise<void>((r) => { release = r; });
+    const gate = new ResyncGate((e) => seen.push(`${String(e.session)}:${e.type}:${u.idAt(typeof e.ord === 'number' ? e.ord : 0)}`));
+    gate.hold('r', refresh.then(() => u.replace([{ id: 'pa-scope', role: 'neutral', tool: false }, { id: 'draft', role: 'creator', tool: false }])));
+    gate.deliver({ type: 'unitDispatched', session: 'r', ord: 2 } as CoreEvent);
+    gate.deliver({ type: 'unitDispatched', session: 'other', ord: 1 } as CoreEvent);
+    expect(seen).toEqual(['other:unitDispatched:pa-scope']);
+    release();
+    await refresh;
+    await new Promise((r) => setTimeout(r, 0));
+    // The held dispatch narrates the REFRESHED ord 2 (the gate edit dropped `design`).
+    expect(seen).toEqual(['other:unitDispatched:pa-scope', 'r:unitDispatched:draft']);
+    gate.deliver({ type: 'unitDone', session: 'r', ord: 2 } as CoreEvent);
+    expect(seen.at(-1)).toBe('r:unitDone:draft');
   });
 });

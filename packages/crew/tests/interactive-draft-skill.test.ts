@@ -74,7 +74,7 @@ describe('draftSkillArmLine', () => {
     const off = draftSkillArmLine('interactive-draft', false);
     expect(off).toMatch(/does not hold 'wicked-garden-draft'/);
     expect(off).toMatch(/12\.35\.0/);
-    expect(off).toMatch(/every run on this seam fails before its first unit/);
+    expect(off).toMatch(/every run on this seam fails before the document work starts/);
   });
 });
 

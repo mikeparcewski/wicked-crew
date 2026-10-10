@@ -12,9 +12,10 @@
  * the brief implies and the repository snapshot(s) claims must trace to — exactly as the skill's
  * "In a governed run" section expects.
  *
- * The presets ALWAYS require the skill (crew#935). The engine admits every `skill_ref` a run names
- * against the published skills snapshot before any unit starts, and FAILS the run when the snapshot
- * does not hold it (wicked-core `SkillsError::Missing`: "… enable and republish them"), so a run on a
+ * The presets ALWAYS require the skill (crew#935). The engine admits every `skill_ref` the run's
+ * planned units name against the published skills snapshot before a unit runs, and FAILS the run
+ * when the snapshot does not hold it (the PA's `pa-scope` names none, so it may run first; the
+ * drafting steps it plans are refused) (wicked-core `SkillsError::Missing`: "… enable and republish them"), so a run on a
  * garden older than 12.35.0, or a snapshot not republished since upgrading, fails rather than
  * run without the floor. The seams ask the skills runtime once when they arm, only to LOG which way
  * it is and name the fix.
@@ -134,7 +135,7 @@ export function draftSkillArmLine(seam: string, held: boolean): string {
         `snapshot holds it, so the contrast / page-budget / claims floor (and its self-check) governs every run on this seam`
     : `[${seam}] the published skills snapshot does not hold '${DRAFT_SKILL}' (wicked-garden < ${DRAFT_SKILL_GARDEN_VERSION}, ` +
         `or not republished since upgrading), and the '${seam}' preset requires it: every run on this seam fails before ` +
-        `its first unit until it is published — upgrade wicked-garden and republish the snapshot`;
+        `the document work starts (the PA's rating step may run first) until it is published — upgrade wicked-garden and republish the snapshot`;
 }
 
 

@@ -73,7 +73,7 @@ import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../project
 import { resolveInteractiveRoot } from './bridge-root.js';
 import type { CoreAdapter } from '../core/adapter.js';
 import type { CoreEvent } from '../core/types.js';
-import { awaitingHumanLine, describeStep, resyncRunUnits, RunUnits } from './run-units.js';
+import { awaitingHumanLine, describeStep, resyncRunUnits, ResyncGate, RunUnits } from './run-units.js';
 import {
   acpFallbackLine,
   ungatedGateNote,
@@ -320,7 +320,7 @@ export interface InteractiveChatOptions {
   roster?: () => unknown[];
   /** Does the daemon's PUBLISHED skills snapshot hold (and enable) a skill? Consulted ONCE at arm time
    *  for `wicked-garden-draft` (interactive/draft-skill.ts), only for the arm log line: the preset
-   *  always runs the skill, and a snapshot without it fails the run before its first unit (crew#935).
+   *  always runs the skill, and a snapshot without it fails the run before the document work starts (crew#935).
    *  Default: `() => false` (a caller without a skills runtime has no snapshot to hold anything). */
   skillHeld?: SkillHeld;
   /** The docs root an ask's doc is read from. Default: the shared-default resolution
@@ -536,7 +536,7 @@ export async function startInteractiveChatSubscriber(
 
   /** Terminal-event fold: turn the governed run's own events into interactive narration, and
    *  close the loop with `draft.completed` when the run lands. */
-  const offCoreEvents = adapter.onEvent((event: CoreEvent) => {
+  const foldEvent = (event: CoreEvent): void => {
     const runId = typeof event.session === 'string' ? event.session : undefined;
     if (runId === undefined) return;
     const planned = unitsByRun.get(runId);
@@ -599,7 +599,7 @@ export async function startInteractiveChatSubscriber(
       return;
     }
     if (event.type === 'resumed') {
-      if (planned !== undefined) void resyncRunUnits(adapter, runId, planned);
+      if (planned !== undefined) resync.hold(runId, resyncRunUnits(adapter, runId, planned));
       return;
     }
 
@@ -690,7 +690,9 @@ export async function startInteractiveChatSubscriber(
       // proceeds on the head that is there.
       drainDoc(flight.documentId);
     }
-  });
+  };
+  const resync = new ResyncGate(foldEvent);
+  const offCoreEvents = adapter.onEvent((event: CoreEvent) => resync.deliver(event));
 
   async function finalize(flight: InFlight, runId: string): Promise<void> {
     const { key, documentId, projectId, outPath } = flight;

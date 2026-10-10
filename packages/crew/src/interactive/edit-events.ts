@@ -56,7 +56,7 @@ import { DEMO_DOC_MOVED_MESSAGE, readDocHead } from './chat-events.js';
 import { resolveInteractiveRoot } from './bridge-root.js';
 import type { CoreAdapter } from '../core/adapter.js';
 import type { CoreEvent, LaunchRunInput } from '../core/types.js';
-import { awaitingHumanLine, resyncRunUnits, RunUnits } from './run-units.js';
+import { awaitingHumanLine, resyncRunUnits, ResyncGate, RunUnits } from './run-units.js';
 import {
   acpFallbackLine,
   ungatedGateNote,
@@ -283,7 +283,7 @@ export interface InteractiveEditOptions {
   roster?: () => unknown[];
   /** Does the daemon's PUBLISHED skills snapshot hold (and enable) a skill? Consulted ONCE at arm time
    *  for `wicked-garden-draft` (interactive/draft-skill.ts), only for the arm log line: the preset
-   *  always runs the skill, and a snapshot without it fails the run before its first unit (crew#935).
+   *  always runs the skill, and a snapshot without it fails the run before the document work starts (crew#935).
    *  Default: `() => false` (a caller without a skills runtime has no snapshot to hold anything). */
   skillHeld?: SkillHeld;
   /** The docs root a handoff's doc manifest is read from — the KIND GATE only (CREW-UX-9):
@@ -456,7 +456,7 @@ export async function startInteractiveEditSubscriber(
 
   /** Terminal-event fold: turn the governed run's own events into interactive narration, and
    *  close the loop with `edit.completed` when the run lands AND the self-check passes. */
-  const offCoreEvents = adapter.onEvent((event: CoreEvent) => {
+  const foldEvent = (event: CoreEvent): void => {
     const runId = typeof event.session === 'string' ? event.session : undefined;
     if (runId === undefined) return;
     const planned = unitsByRun.get(runId);
@@ -524,7 +524,7 @@ export async function startInteractiveEditSubscriber(
       return;
     }
     if (event.type === 'resumed') {
-      if (planned !== undefined) void resyncRunUnits(adapter, runId, planned);
+      if (planned !== undefined) resync.hold(runId, resyncRunUnits(adapter, runId, planned));
       return;
     }
 
@@ -606,7 +606,9 @@ export async function startInteractiveEditSubscriber(
       });
       log(`[interactive-edit] run ${runId} for handoff ${flight.key} ended: ${event.type}`);
     }
-  });
+  };
+  const resync = new ResyncGate(foldEvent);
+  const offCoreEvents = adapter.onEvent((event: CoreEvent) => resync.deliver(event));
 
   async function finalize(flight: InFlight, runId: string): Promise<void> {
     const { documentId, projectId, version, key, items } = flight;
