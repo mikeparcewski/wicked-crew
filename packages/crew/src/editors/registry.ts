@@ -36,6 +36,8 @@ import { crewStateHome } from '../projects/state-home.js';
 export const EDITORS_STATE_FILENAME = 'daemon-editors.json';
 /** Where first-party manifests live inside the studio bundle. */
 export const STUDIO_EDITORS_DIRNAME = 'editors';
+/** The most of an installed pack's `wicked-pack.json` the registry reads (a manifest is a few KB). */
+export const PACK_MANIFEST_CAP_BYTES = 1024 * 1024;
 /** The host's bundle cap (§8.5); a pack's `limits.bundleBytes` may only be lower. */
 export const HOST_BUNDLE_CAP_BYTES = 5 * 1024 * 1024;
 
@@ -272,7 +274,10 @@ export function readPackEditor(pack: InstalledPack, id: string, log?: (msg: stri
   if (manifestProblem !== null) return why(`wicked-pack.json is ${manifestProblem}`);
   let entries: unknown;
   try {
-    entries = (JSON.parse(readFileSync(manifestPath, 'utf8')) as { editors?: unknown }).editors;
+    // Bounded before it is parsed (codex r3): a manifest swapped for a huge one never reaches JSON.parse.
+    const raw = readCapped(manifestPath, PACK_MANIFEST_CAP_BYTES);
+    if (raw === null) return why(`wicked-pack.json is over ${PACK_MANIFEST_CAP_BYTES} bytes`);
+    entries = (JSON.parse(raw.toString('utf8')) as { editors?: unknown }).editors;
   } catch (err) {
     return why(`wicked-pack.json is unreadable (${err instanceof Error ? err.message : String(err)})`);
   }
