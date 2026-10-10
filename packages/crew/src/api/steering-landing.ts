@@ -311,13 +311,27 @@ interface LandedMarker {
   ruleIds: string[];
   source: SteeringProposalSource;
   at: string;
-  /** sha256 of the landed proposal's rules (absent on markers written before core#649 M8). */
+  /** sha256 of the landed proposal's canonical rules (absent on markers from before core#649 M8). */
   digest?: string;
 }
 
-/** The proposal's identity for the idempotency marker: the rules as parsed, hashed. */
+/** JSON with every object's keys sorted, so the same rules always hash the same. */
+function canonicalJson(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(',')}]`;
+  if (v !== null && typeof v === 'object') {
+    const o = v as Record<string, unknown>;
+    return `{${Object.keys(o)
+      .sort()
+      .filter((k) => o[k] !== undefined)
+      .map((k) => `${JSON.stringify(k)}:${canonicalJson(o[k])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(v) ?? 'null';
+}
+
+/** The proposal's identity for the idempotency marker: the parsed rules, canonicalized, hashed. */
 function proposalDigest(rules: RawRule[]): string {
-  return createHash('sha256').update(JSON.stringify(rules)).digest('hex');
+  return createHash('sha256').update(canonicalJson(rules)).digest('hex');
 }
 
 /** Read a file, mapping ONLY a missing file to null — any other error (EACCES, EIO) throws. */
@@ -350,11 +364,16 @@ export async function landSteeringProposal(
 
   // ── Only an approve that follows the propose step lands (core#649 M8) ─────────
   // Since `steering-author` is a preset, the run is PA-scoped and floor-filled: it can pause at
-  // a plan-approval gate BEFORE propose runs, and floor phases can gate AFTER it. Approving a
-  // gate while propose is still `pending` approves no proposal, so there is nothing to land and
-  // nothing to report. (`run` is the view taken before the confirm.)
-  const proposeUnit = run.units.find((u) => u.id === `${runId}:propose` || u.id.endsWith(':propose'));
-  if (proposeUnit === undefined || proposeUnit.status === 'pending') return undefined;
+  // a plan-approval gate BEFORE propose runs, and floor phases can gate AFTER it. A unit's status
+  // cannot tell: the engine marks every unit `distributed` when it assigns seats, before any runs.
+  // The run's cursor can: `unit_ix` is the index of the NEXT unit to execute (0-based over the
+  // units in ord order), so propose has run exactly when its index is below it. Approving a gate
+  // before that approves no proposal: nothing lands and the route sends no `landing`. (`run` is
+  // the view taken before the confirm.)
+  const ordered = [...run.units].sort((a, b) => a.ord - b.ord);
+  const proposeIx = ordered.findIndex((u) => u.id === `${runId}:propose` || u.id.endsWith(':propose'));
+  if (proposeIx < 0 || proposeIx >= run.session.unit_ix) return undefined;
+  const proposeUnit = ordered[proposeIx]!;
 
   const failed = (error: string, landedIds: string[] = [], source?: SteeringProposalSource): SteeringLandingResult => {
     audit.record('governance.steering.landing_failed', actor, {
@@ -423,7 +442,8 @@ export async function landSteeringProposal(
   // ── Idempotency: a replayed approve of the SAME proposal re-lands nothing ─────
   // Keyed by the proposal's digest, not the run: a later gate (a floor phase after propose) can
   // send the run back to propose, and the revised proposal it then approves must land. A marker
-  // from before M8 carries no digest and keeps the old run-wide behaviour.
+  // from before M8 carries no digest, so it cannot prove THIS proposal landed: it is ignored and
+  // the proposal is upserted (by rule id, so a same-content replay rewrites identical rules).
   const digest = proposalDigest(rawRules);
   let markerText: string | null = null;
   try {
@@ -435,7 +455,7 @@ export async function landSteeringProposal(
   if (markerText !== null) {
     try {
       const marker = JSON.parse(markerText) as LandedMarker;
-      if (Array.isArray(marker.ruleIds) && (marker.digest === undefined || marker.digest === digest)) {
+      if (Array.isArray(marker.ruleIds) && marker.digest === digest) {
         return {
           outcome: 'landed',
           ruleIds: marker.ruleIds,
