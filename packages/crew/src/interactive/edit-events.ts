@@ -535,7 +535,13 @@ export async function startInteractiveEditSubscriber(
     }
 
     if (event.type === 'unitOutputCaptured') {
-      narrate(flight, `Rework finished — the governance gate is reviewing it…`);
+      const ord = ordOf(event);
+      narrate(
+        flight,
+        units.isWriter(ord)
+          ? 'Rework finished — the governance gate is reviewing it…'
+          : `${units.idAt(ord)} finished — the governance gate is reviewing it…`,
+      );
       return;
     }
 

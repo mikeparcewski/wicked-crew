@@ -536,6 +536,9 @@ describe('startInteractiveEditSubscriber (real bus, fake engine)', () => {
     planned(3, 'critique', 'evaluator');
     engine.fire({ type: 'unitDispatched', session: launch.sessionId, ord: 1, attempt: 0 });
     await waitFor(narrated('Crew phase 1/3: pa-scope'));
+    // The PA's output is not the rework (codex r6 on #938).
+    engine.fire({ type: 'unitOutputCaptured', session: launch.sessionId, ord: 1 } as unknown as CoreEvent);
+    await waitFor(narrated('pa-scope finished'));
     engine.fire({ type: 'unitDispatched', session: launch.sessionId, ord: 2, attempt: 0 });
     await waitFor(narrated('Crew is reworking the targeted block'));
     engine.fire({ type: 'gateDecided', session: launch.sessionId, ord: 2, allow: true });
