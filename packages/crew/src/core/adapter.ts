@@ -703,6 +703,13 @@ function addonSupportsExcludeSeats(): boolean {
   return addonAtLeast(0, 7, 35);
 }
 
+/** Does the installed addon judge a plan or preset launch's declared deliverables
+ *  (`LaunchOptions.deliverables`, wicked-core#858, >= 0.7.47)? Same doctrine: an older addon
+ *  ignores the field, and the run would never be held to its deliverable. */
+export function addonSupportsLaunchDeliverables(): boolean {
+  return addonAtLeast(0, 7, 47);
+}
+
 /** Does the installed addon carry the assurance contract (`LaunchOptions.reducedAssurance`,
  *  wicked-core#850, >= 0.7.46)? Same doctrine. */
 export function addonSupportsReducedAssurance(): boolean {
@@ -1835,6 +1842,22 @@ export class CoreAdapter {
 
   /** Whether this engine carries the plan approval gate (DES-TEAMING-002 T3) — see
    *  [`engineSupportsPlanLaunch`]. An instance method so a partial-stub adapter can say either. */
+  /**
+   * (wicked-core#858, X-MIG M9) Hand a plan or preset launch's declared deliverables to the engine
+   * (`LaunchOptions.deliverables`). Fails CLOSED on an addon before the field (napi ignores it, so
+   * the run would never be held to them).
+   */
+  private passLaunchDeliverables(opts: LaunchOptions, deliverables: string[], what: string): void {
+    if (deliverables.length === 0) return;
+    if (!addonSupportsLaunchDeliverables()) {
+      throw new Error(
+        `requireDeliverables on ${what} needs wicked-core-ts >= 0.7.47 (LaunchOptions.deliverables, ` +
+          'wicked-core#858); the installed addon would drop them and the run would not be held to them',
+      );
+    }
+    (opts as LaunchOptions & { deliverables?: string[] }).deliverables = deliverables;
+  }
+
   supportsPlanLaunch(): boolean {
     return engineSupportsPlanLaunch();
   }
@@ -2071,14 +2094,10 @@ export class CoreAdapter {
       if (input.workflow !== undefined) {
         throw new Error('a launch carries a plan or names a workflow (a preset), not both');
       }
-      if ((input.requireDeliverables ?? []).length > 0) {
-        throw new Error(
-          'requireDeliverables with a plan is refused: the deliverable floor has no engine-side ' +
-            'step yet — launch the plan without it',
-        );
-      }
       if (!this.supportsPlanLaunch()) throw new PlanLaunchUnsupportedError('A plan launch');
       (opts as LaunchOptions & { planJson?: string }).planJson = JSON.stringify(input.plan);
+      // (wicked-core#858, X-MIG M9) The engine judges a plan's declared deliverables itself.
+      this.passLaunchDeliverables(opts, input.requireDeliverables ?? [], 'a plan');
       // T8: a delivering plan hands the engine its deliver step, exactly as a preset launch does.
       if (input.deliver === 'pr') {
         (opts as LaunchOptions & { deliverStepJson?: string }).deliverStepJson = JSON.stringify(
@@ -2096,13 +2115,11 @@ export class CoreAdapter {
       (input.deliver === 'pr' || requireDeliverablesAll.length > 0) &&
       (await this.presetNamed(input.workflow, input.projectId)) !== null;
     if (namesPreset && input.workflow !== undefined) {
-      if (requireDeliverablesAll.length > 0) {
-        throw new Error(
-          `requireDeliverables on a preset launch ('${input.workflow}') is refused: the deliverable ` +
-            'floor would have to be composed into a per-run def, which skips the plan_approval gate',
-        );
-      }
       if (!this.supportsPlanLaunch()) throw new PlanLaunchUnsupportedError('Delivering a preset launch');
+      // (wicked-core#858, X-MIG M9) A preset launch's deliverables ride the launch: the engine joins
+      // them to the plan's last creator step and its deliverable floor judges them — never a per-run
+      // def composed past the plan_approval gate.
+      this.passLaunchDeliverables(opts, requireDeliverablesAll, `a preset launch ('${input.workflow}')`);
       const step = this.deliverStep(input.workflow, this.getWorkflow(input.workflow)?.phases ?? [], input, deliverOriginUrl, deliverIdentity, deliverCredentials);
       (opts as LaunchOptions & { deliverStepJson?: string }).deliverStepJson = JSON.stringify(step);
       opts.workflow = input.workflow;

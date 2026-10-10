@@ -15,7 +15,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CoreAdapter, engineSupportsPlanLaunch } from '../src/core/adapter.js';
+import { CoreAdapter, addonSupportsLaunchDeliverables, engineSupportsPlanLaunch } from '../src/core/adapter.js';
 import { DELIVER_PHASE_ID, EVIDENCE_FLOOR_PIN } from '../src/core/deliver.js';
 import { createServer } from '../src/api/server.js';
 import type { LaunchOptions } from 'wicked-core-ts';
@@ -237,9 +237,15 @@ describe('POST /runs {plan} and the plan_approval gate — HTTP contract (shadow
       const res = await fetch(`${ctx.baseUrl}/api/v1/runs`, json({ problem: 'p', clisJson: SEATS, plan }));
       expect(res.status).toBe(201);
       expect((launched[0] as { deliverStepJson?: string }).deliverStepJson).toBeUndefined();
-      await expect(
-        ctx.adapter.launchRun({ problem: 'p', sessionId: 'r-plan-floor', clisJson: SEATS, plan, requireDeliverables: ['out/r.md'] }),
-      ).rejects.toThrow(/requireDeliverables with a plan/);
+      // (wicked-core#858) The engine judges a plan's declared deliverables; an addon before the
+      // field is refused rather than silently dropping them.
+      const planFloor = ctx.adapter.launchRun({ problem: 'p', sessionId: 'r-plan-floor', clisJson: SEATS, plan, requireDeliverables: ['out/r.md'] });
+      if (addonSupportsLaunchDeliverables()) {
+        await planFloor;
+        expect((launched.at(-1) as { deliverables?: string[] }).deliverables).toEqual(['out/r.md']);
+      } else {
+        await expect(planFloor).rejects.toThrow(/needs wicked-core-ts >= 0\.7\.47/);
+      }
     });
   });
 
@@ -255,18 +261,27 @@ describe('POST /runs {plan} and the plan_approval gate — HTTP contract (shadow
     });
   });
 
-  it('requireDeliverables on a preset launch is refused, never composed past the gate', async () => {
+  it('requireDeliverables on a preset launch rides the launch to the engine, never a per-run def past the gate', async () => {
     await withCapability(ctx.adapter, true, async () => {
-      await expect(
-        ctx.adapter.launchRun({
-          problem: 'p',
-          sessionId: 'r-floor',
-          clisJson: SEATS,
-          workflow: 'feature',
-          requireDeliverables: ['out/report.md'],
-        }),
-      ).rejects.toThrow(/requireDeliverables on a preset launch/);
-      expect(launched).toHaveLength(0);
+      const floor = ctx.adapter.launchRun({
+        problem: 'p',
+        sessionId: 'r-floor',
+        clisJson: SEATS,
+        workflow: 'feature',
+        requireDeliverables: ['out/report.md'],
+      });
+      if (addonSupportsLaunchDeliverables()) {
+        await floor;
+        const opts = launched[0] as LaunchOptions & { deliverables?: string[]; planJson?: string };
+        // The preset itself is launched with its deliverables (wicked-core#858): the engine joins
+        // them to the last creator step and its deliverable floor judges them.
+        expect(opts.workflow).toBe('feature');
+        expect(opts.deliverables).toEqual(['out/report.md']);
+      } else {
+        // An addon before LaunchOptions.deliverables would drop them: refused, not composed.
+        await expect(floor).rejects.toThrow(/needs wicked-core-ts >= 0\.7\.47/);
+        expect(launched).toHaveLength(0);
+      }
       expect(registered).toEqual([]);
     });
   });
