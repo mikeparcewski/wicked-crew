@@ -10,6 +10,39 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.9.3] — 2026-10-10
+
+QE acceptance on the workflows that change the application, built-in interactive presets, the GitHub push identity pinned per command, and the Azure DevOps follow-ups. The engine pin moves to **`wicked-core-ts` `^0.8.1`**. This release bundles **wicked-studio 0.7.3** and ships **`wicked-crew-api-types` 0.107.0**.
+
+**Behaviour change:** on `feature`, `bug`, `migration` and `mcp-server`, QE acceptance is now required.
+- `deliverGate: "auto"` delivers only on an attributed QE PASS, on the impact score's waiver (the reason is disclosed), or on an explicit operator skip with a reason (`skipQeAcceptance`).
+- An unattended launch that relied on `auto` alone now needs that explicit skip.
+
+- **QE acceptance (#941, wicked-core#861):**
+  - Delivery reads the engine's QE decision. Only a diff waiver or an operator skip delivers without an attributed PASS.
+  - `POST /runs` and `wicked-crew start` take an explicit skip (with a reason) or a force. `capabilities.qeAcceptanceOverride` reports support.
+  - The workflow mirrors declare `required_instruments`.
+- **Interactive presets (#938, crew#935, X-MIG M9):** the draft, edit and chat seams launch wicked-core's built-in `interactive-*` presets.
+  - No def is registered, and phases are counted from the run's planned units.
+  - A paused run says where to answer it.
+  - The draft skill is always required; a snapshot without it fails the run instead of running it unarmed.
+- **The GitHub push identity is pinned per command (#942, #940):**
+  - With a push identity configured (the setting, the repository's pin, or `GH_ACCOUNT`) on a github.com origin, the deliver phase reads that account's own gh token. It uses that token for its gh calls and for its git fetch and push, whatever account gh has active.
+  - An exported `GH_TOKEN` still wins, and is refused when it authenticates as another login.
+  - An identity gh holds no token for is "GitHub credentials not configured": on the gate card before approval, and a recoverable refusal in the phase.
+  - The pinned git call resets an ambient `http.extraHeader`, allows only https, refuses redirects, and refuses a `url.*.insteadOf` rewrite of the canonical URL.
+  - Off github.com the identity does not apply, and git's credential is still cross-checked.
+- **Azure DevOps (#946, part of #933):**
+  - `AB#<id>` work items in the intent are linked on the pull request.
+  - A re-deliver updates the adopted PR's title and description.
+  - Revising an existing Azure DevOps pull request (`revisesPr`) is supported: it is resolved through the REST API, the run's commits are pushed onto its branch, and the run record is posted as a thread.
+  - With core-ts 0.8.1 (wicked-core#867), the engine's pre-deliver lift authenticates an Azure DevOps origin instead of skipping.
+  - Still open on #933: a proof against a live Azure DevOps organisation.
+- **api-types 0.107.0 (#939):** `PlanRefusalToken` and `TeamPlanStep.writes_nothing` / `PresetStep.writes_nothing` (wicked-core#854).
+- **deps:** `wicked-core-ts` `^0.8.1`, `wicked-studio` `^0.7.3`:
+  - studio 0.7.2: the QE decision and the Skip / Force QE controls; the incomplete-inventory note;
+  - studio 0.7.3: the compact `/` and `@` menu.
+
 ## [0.9.2] — 2026-10-10
 
 A patch for crew 0.9.1, whose post-publish smoke was red on macOS (S04). The engine pin moves to **`wicked-core-ts` `^0.7.48`**.
@@ -3798,7 +3831,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.3...HEAD
+[0.9.3]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.10...v0.9.0
