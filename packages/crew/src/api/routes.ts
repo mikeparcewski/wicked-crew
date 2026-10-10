@@ -85,6 +85,7 @@ import { TestSetIndex } from '../qe/test-sets.js';
 import { estateExe, parseEstateTotals, resolveProjectGraphBinding } from '../projects/graph.js';
 import { registerProjectRoutes, type ProjectRoutesDeps } from '../projects/routes.js';
 import { registerProjectAggregateRoutes } from './project-aggregates.js';
+import { registerProductRoutes } from './product.js';
 import { registerPresetRoutes } from '../presets/routes.js';
 import { registerTeamRoutes } from '../team/routes.js';
 import { registerCampaignRoutes } from '../campaigns/routes.js';
@@ -6205,6 +6206,8 @@ export function registerRoutes(
   registerProjectRoutes(app, adapter, { ...projects, settings: projectSettings }, security);
   // crew#371: a project's requirements / domain / coverage, folded over its repos' own reads.
   registerProjectAggregateRoutes(app, adapter);
+  // crew#372: draft a product plan from selected requirements, as a governed run via POST /runs.
+  registerProductRoutes(app, adapter);
 
   // ── Capture (Studio OS behaviour 8) — notes and photos → a project-filed run whose output is
   // proposals in the queue above; the launch is POST /runs itself (api/capture.ts).
