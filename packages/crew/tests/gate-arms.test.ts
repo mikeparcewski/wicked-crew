@@ -150,7 +150,8 @@ describe('POST /runs/:id/gate — the arms reach the adapter (DES-L1 PR-2)', () 
   it("today's reject reaches confirmGate(id, false) and is audited — the regression control", async () => {
     const res = await gate('run-gated', { approve: false });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ status: 'executing' });
+    // wicked-core#850: every gate answer carries the gated unit's receipt (`null`: this unit has none).
+    expect(res.json()).toEqual({ status: 'executing', assurance: null });
     expect(confirmCalls).toHaveLength(1);
     expect(confirmCalls[0]!.slice(0, 2)).toEqual(['run-gated', false]);
     expect(recorded.map((r) => r.action)).toEqual(['gate.decided']);

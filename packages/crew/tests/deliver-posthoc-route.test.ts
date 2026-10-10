@@ -214,7 +214,11 @@ describe('POST /runs/:id/deliver — post-hoc delivery, driven for real (crew#39
 
     const res = await app.inject({ method: 'POST', url: `/api/v1/runs/${RUN_ID}/deliver` });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ prUrl: 'https://github.com/o/r/pull/42' });
+    // wicked-core#850 EX-04: a post-hoc lift answers how it was assured — never verified, both trees named.
+    expect(res.json()).toEqual({
+      prUrl: 'https://github.com/o/r/pull/42',
+      assurance: expect.objectContaining({ verified: false, via: 'post_hoc', treeBefore: expect.stringMatching(/^[0-9a-f]{40}$/), treeAfter: expect.stringMatching(/^[0-9a-f]{40}$/) }),
+    });
 
     // The commit exists on the LOCAL origin's run branch — the lift is real, not asserted.
     expect(originBranches(fx)).toContain(`wicked/${RUN_ID}`);
@@ -538,7 +542,7 @@ describe('POST /runs/:id/deliver — a stranded REVISION re-pushes onto the PR b
     const res = await app.inject({ method: 'POST', url: `/api/v1/runs/${RUN_ID}/deliver` });
 
     expect(res.statusCode, res.body).toBe(200);
-    expect(res.json()).toEqual({ prUrl: PR_URL });
+    expect(res.json()).toEqual({ prUrl: PR_URL, assurance: expect.objectContaining({ verified: false, via: 'post_hoc' }) }); // EX-04
     expect(git(fx.origin, 'rev-list', '--count', `${fx.prHead}..${PR_BRANCH}`).trim()).toBe('1');
     expect(git(fx.origin, 'log', '-1', '--format=%s', PR_BRANCH).trim()).toBe('fix: revised after review');
     expect(originBranches(fx).sort()).toEqual(['main', PR_BRANCH].sort());

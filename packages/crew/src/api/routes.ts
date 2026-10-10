@@ -4042,7 +4042,9 @@ export function registerRoutes(
   async function gatedUnitOf(run: SessionView, ord: number | undefined): Promise<WorkUnit | undefined> {
     let gateOrd = ord;
     if (gateOrd === undefined) {
-      const open = await resolveOpenGate(run.session.id);
+      // A route set whose adapter cannot read the gate (a partial stub without `runEvents`) falls
+      // back to the cursor unit, exactly as a log that records no open gate does.
+      const open = await resolveOpenGate(run.session.id).catch(() => null);
       gateOrd = open !== null && open !== 'no-log' ? open.ord : undefined;
     }
     const units = run.units ?? [];
