@@ -1959,7 +1959,8 @@ export function registerRoutes(
       return reply.code(500).send({ error: message(err) });
     };
     const worktreeLive = typeof workdir === 'string' && workdir.length > 0 && existsSync(workdir);
-    if (!worktreeLive) {
+    /** The run branch's diff, when the worktree is gone (or went while this request ran). */
+    const fromBranchOr409 = async () => {
       // Wave 6 (F-7R2-013): the engine reaps a completed run's worktree, and the run page went dark
       // (`409 workdir no longer exists`). The run's WORK is not gone — it lives on the `wicked/<id>`
       // branch of the registered repo, and the wave-6 engine records `run_branch` + `base_commit`
@@ -1989,9 +1990,12 @@ export function registerRoutes(
         // Narrowing: a path under the (gone) worktree or under the repo root, made repo-relative.
         let rel: string | undefined;
         if (resolved.target !== undefined) {
-          if (isInsideRoot(root, resolved.target)) rel = relative(root, resolved.target);
-          else if (typeof workdir === 'string' && workdir.length > 0 && isInsideRoot(workdir, resolved.target)) {
+          // The worktree first: engine worktrees live UNDER the repo root (`wicked-worktrees/<id>`),
+          // and a path inside one is worktree-relative on the branch (codex r1).
+          if (typeof workdir === 'string' && workdir.length > 0 && isInsideRoot(workdir, resolved.target)) {
             rel = relative(workdir, resolved.target);
+          } else if (isInsideRoot(root, resolved.target)) {
+            rel = relative(root, resolved.target);
           } else {
             return reply.code(400).send({
               error: `\`path\` must be inside the run's worktree or its repository to diff: ${root}`,
@@ -2011,7 +2015,8 @@ export function registerRoutes(
       return reply.code(409).send({
         error: `run ${id}'s workdir no longer exists (${workdir}) and its run branch holds no commits — nothing to diff`,
       });
-    }
+    };
+    if (!worktreeLive) return fromBranchOr409();
     // Narrowing is WORKTREE-scoped: a contained-but-outside-the-worktree path (extra write
     // root / repo root) is a valid FILE read but has no meaning as a diff pathspec — rejected
     // explicitly here rather than handing git a `../`-prefixed pathspec and surfacing its
@@ -2040,6 +2045,10 @@ export function registerRoutes(
       }
       return { ...(await worktreeDiff(workdir, rel, rawBase)), source: 'worktree' as const };
     } catch (err) {
+      // The worktree was removed WHILE this request ran (the delivered-worktree sweep, an engine
+      // reap): git's spawn into a vanished cwd fails ENOENT, which is not "git is missing". Serve the
+      // run branch, as for a worktree that was already gone (seen in the 0.9.1 release smoke, S04).
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT' && !existsSync(workdir)) return fromBranchOr409();
       return diffError(err);
     }
   });

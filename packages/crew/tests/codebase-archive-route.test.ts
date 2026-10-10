@@ -14,7 +14,8 @@ import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
 import { DeliveryIndex } from '../src/api/delivery-index.js';
 import { AuditLog } from '../src/api/audit.js';
-import { CodebaseArchiveStore } from '../src/api/codebase-archive.js';
+import { CodebaseArchiveStore, deliverDispatchKey } from '../src/api/codebase-archive.js';
+import { deliverPrScript } from '../src/core/deliver.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { SessionView } from '../src/core/types.js';
 
@@ -105,5 +106,14 @@ describe('crew#720 the run wire: codebase_archive, the zip route, deliver_creden
     const run = (await a.inject({ method: 'GET', url: `/api/v1/runs/${RUN}` })).json() as { run: { session: Record<string, unknown> } };
     expect(run.run.session['codebase_archive']).toBeUndefined();
     expect(run.run.session['deliver_credentials']).toBeUndefined();
+  });
+});
+
+describe('crew#720 the deliver-archive trigger', () => {
+  it('keys only a dispatched crew deliver script', () => {
+    const script = deliverPrScript('x', { runId: RUN });
+    expect(deliverDispatchKey({ type: 'toolExecutorDispatched', session: RUN, ord: 4, cmd: ['bash', '-lc', script] })).toBe(`${RUN}\0${4}`);
+    expect(deliverDispatchKey({ type: 'toolExecutorDispatched', session: RUN, ord: 2, cmd: ['node', 'persist-graph.js'] })).toBeNull();
+    expect(deliverDispatchKey({ type: 'unitOutputCaptured', session: RUN, ord: 4 })).toBeNull();
   });
 });
