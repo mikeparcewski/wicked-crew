@@ -56,7 +56,7 @@ import { DEMO_DOC_MOVED_MESSAGE, readDocHead } from './chat-events.js';
 import { resolveInteractiveRoot } from './bridge-root.js';
 import type { CoreAdapter } from '../core/adapter.js';
 import type { CoreEvent, LaunchRunInput } from '../core/types.js';
-import { RunUnits } from './run-units.js';
+import { awaitingHumanLine, resyncRunUnits, RunUnits } from './run-units.js';
 import {
   acpFallbackLine,
   ungatedGateNote,
@@ -330,8 +330,6 @@ interface InFlight {
   runId?: string | undefined;
   /** The ord of the latest unit-scoped engine frame, stamped on narration as `unit_ord`. */
   narrationOrd?: number | undefined;
-  /** The run's planned units, folded from its `unitPlanned` frames (crew#935). */
-  units?: RunUnits | undefined;
   heartbeat: ReturnType<typeof setInterval>;
   /** The engine's own reason for the most recent failed unit (`stepFailed.detail`). Carried so
    *  the terminal error status names WHY — in particular the crew#311 deliverable-floor report,
@@ -399,6 +397,9 @@ export async function startInteractiveEditSubscriber(
   const editDir = opts.editDir ?? join(defaultStateDir(), 'interactive-edits');
   const heartbeatMs = opts.heartbeatMs ?? 15_000;
   const inFlight = new Map<string, InFlight>(); // runId → live state
+  // runId → the run's planned units (crew#935). Opened BEFORE the launch: the engine announces the
+  // first plan (`unitPlanned`) while `launchRun` is still in flight, before the flight is recorded.
+  const unitsByRun = new Map<string, RunUnits>();
 
   /** Emit onto interactive's vocabulary as the `wi-crew` producer. Never throws into the
    *  caller: narration/announce failures are logged — a lost status line must not kill the
@@ -449,6 +450,7 @@ export async function startInteractiveEditSubscriber(
       clearInterval(flight.heartbeat);
       inFlight.delete(runId);
     }
+    unitsByRun.delete(runId);
     return flight;
   }
 
@@ -457,6 +459,8 @@ export async function startInteractiveEditSubscriber(
   const offCoreEvents = adapter.onEvent((event: CoreEvent) => {
     const runId = typeof event.session === 'string' ? event.session : undefined;
     if (runId === undefined) return;
+    const planned = unitsByRun.get(runId);
+    if (planned?.observe(event) === true) return;
     const flight = inFlight.get(runId);
     if (flight === undefined) return;
     // F-4R2-005: every narration line and heartbeat from here carries the run id and the ord of the
@@ -471,8 +475,7 @@ export async function startInteractiveEditSubscriber(
 
     // The steps are the engine's (crew#935), read from the run's `unitPlanned` frames. A tool unit
     // has no seat, so its council and routing frames are not narrated.
-    const units = (flight.units ??= new RunUnits());
-    if (units.observe(event)) return;
+    const units = planned ?? new RunUnits();
     const ordOf = (e: CoreEvent): number => (typeof e.ord === 'number' ? e.ord : 0);
 
     if (event.type === 'councilConvened') {
@@ -510,6 +513,18 @@ export async function startInteractiveEditSubscriber(
             ? `Crew is reviewing the rework (${units.idAt(ord)})…`
             : `Crew phase ${units.position(ord)}: ${units.idAt(ord)}…`,
       );
+      return;
+    }
+
+    // A preset run can pause for a person (the plan approval of a high-risk ask, crew#935): say so
+    // and where to answer, rather than repeat the last working line. A plan edited at that gate can
+    // drop or reorder pending units, so the fold is re-read from the run when it resumes.
+    if (event.type === 'awaitingHuman') {
+      narrate(flight, awaitingHumanLine(event, runId, units));
+      return;
+    }
+    if (event.type === 'resumed') {
+      if (planned !== undefined) void resyncRunUnits(adapter, runId, planned);
       return;
     }
 
@@ -787,8 +802,10 @@ export async function startInteractiveEditSubscriber(
         // whose Writes were denied as long as it narrated ~200 characters first.
         requireDeliverables: items.map((i) => i.output_path),
       };
+      unitsByRun.set(runId, new RunUnits()); // before the launch: its first plan is announced during it
       await adapter.launchRun(input);
     } catch (err) {
+      unitsByRun.delete(runId);
       // The 'processing' status is already on the thread — close it out honestly so the
       // canvas never sits in an in-between state on a launch that went nowhere.
       const reason = err instanceof Error ? err.message : String(err);

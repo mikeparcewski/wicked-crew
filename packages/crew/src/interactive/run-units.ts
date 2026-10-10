@@ -12,7 +12,12 @@
  * unit is inserted at its ord in the ordered list and the units after it shift by one, as the
  * engine shifts them. The step id is the description's leading token (the engine writes
  * `<step id> — <intent> ||| <instructions>`).
+ *
+ * A plan edited at a plan-approval gate can also DROP or reorder pending units, which no frame
+ * announces; so when the run resumes the fold is re-read from the run's own unit list
+ * ({@link resyncRunUnits}).
  */
+import type { CoreAdapter } from '../core/adapter.js';
 import type { CoreEvent } from '../core/types.js';
 
 /** One planned unit, as narration needs it. */
@@ -49,17 +54,24 @@ export function describeStep(id: string): string {
 
 /** The run's planned units in ord order (ord n = index n − 1). */
 export class RunUnits {
-  private readonly units: PlannedUnit[] = [];
+  /** A hole is a unit the fold has not seen announced (it keeps the later ords honest). */
+  private readonly units: Array<PlannedUnit | undefined> = [];
 
   /** Fold one engine frame; `true` when it was a `unitPlanned` frame. */
   observe(event: CoreEvent): boolean {
     const planned = plannedUnitOf(event);
     if (planned === null) return false;
     const { ord, unit } = planned;
-    const at = this.units.findIndex((u) => u.id === unit.id);
+    const at = this.units.findIndex((u) => u?.id === unit.id);
     if (at !== -1) this.units.splice(at, 1); // a re-announced unit moves, never duplicates
-    this.units.splice(Math.min(ord - 1, this.units.length), 0, unit);
+    while (this.units.length < ord - 1) this.units.push(undefined);
+    this.units.splice(ord - 1, 0, unit);
     return true;
+  }
+
+  /** Replace the whole list with the run's units as the engine holds them (ord order). */
+  replace(units: readonly PlannedUnit[]): void {
+    this.units.splice(0, this.units.length, ...units);
   }
 
   /** The unit at `ord`, or `undefined` before the engine planned it. */
@@ -92,4 +104,56 @@ export class RunUnits {
   position(ord: number): string {
     return this.units.length > 0 ? `${ord}/${Math.max(this.units.length, ord)}` : `${ord}`;
   }
+}
+
+/** One unit of the run as `SessionView.units[]` carries it (the fields the fold reads). */
+export interface RunUnitRow {
+  id: string;
+  ord: number;
+  role?: string | null | undefined;
+  tool_cmd?: string[] | null | undefined;
+}
+
+/** The run's units as {@link PlannedUnit}s in ord order; the step id is the unit id after `<run>:`. */
+export function plannedUnitsOfRun(runId: string, rows: readonly RunUnitRow[]): PlannedUnit[] {
+  const prefix = `${runId}:`;
+  return [...rows]
+    .sort((a, b) => a.ord - b.ord)
+    .map((r) => ({
+      id: r.id.startsWith(prefix) ? r.id.slice(prefix.length) : r.id,
+      role: typeof r.role === 'string' ? r.role : 'neutral',
+      tool: Array.isArray(r.tool_cmd) && r.tool_cmd.length > 0,
+    }));
+}
+
+/**
+ * Re-read `units` from the run's own unit list (after a gate the plan may have been edited at).
+ * Narration only: an engine that cannot answer leaves the fold as it was, and nothing throws.
+ */
+export async function resyncRunUnits(adapter: CoreAdapter, runId: string, units: RunUnits): Promise<void> {
+  if (typeof (adapter as Partial<CoreAdapter>).sessionsDetail !== 'function') return;
+  try {
+    const view = (await adapter.sessionsDetail()).find((v) => v.session.id === runId);
+    if (view !== undefined && view.units.length > 0) {
+      units.replace(plannedUnitsOfRun(runId, view.units as readonly RunUnitRow[]));
+    }
+  } catch {
+    // The fold keeps what the frames said.
+  }
+}
+
+/** The thread line for a run paused for a person (`awaitingHuman`): what it waits on and where to answer. */
+export function awaitingHumanLine(event: CoreEvent, runId: string, units: RunUnits): string {
+  const e = event as { gateKind?: unknown; prompt?: unknown };
+  const ord = typeof event.ord === 'number' ? event.ord : 0;
+  const prompt = typeof e.prompt === 'string' ? e.prompt.replace(/\s+/g, ' ').trim() : '';
+  const why =
+    e.gateKind === 'plan_approval'
+      ? 'the plan needs approval before the work starts'
+      : `${units.idAt(ord)} needs a person`;
+  const clipped = prompt.length > 160 ? `${prompt.slice(0, 157)}…` : prompt;
+  return (
+    `The run is paused: ${why}${clipped !== '' ? ` (${clipped})` : ''}. Answer it on run ${runId} ` +
+    `(studio → Runs); the document lands after that.`
+  );
 }

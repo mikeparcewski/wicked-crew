@@ -7,9 +7,9 @@
 //
 // crew#935 (X-MIG M9) retired that degraded arming: interactive-draft / -edit / -chat are wicked-core
 // built-in presets that ALWAYS run the skill, so a snapshot without it fails the run instead of
-// running it unarmed — no seam arms with a gap any more. The disclosure machinery stays generic
-// (any seam that arms degraded records through `PhaseSkillArming`); it is pinned here over a
-// recorded gap, and the daemon wiring is pinned to report none for the interactive seams.
+// running it unarmed — no seam arms with a gap any more, and the live arming machinery is deleted.
+// Pinned here: /diagnostics and /health report no gap, an accepted launch writes no degraded record,
+// and a run that DID run unarmed before keeps its trail record (`skill_gaps`).
 //
 // Real pieces throughout: a real skills store over the committed fixture plugin (which does NOT
 // carry the draft skill), a real SkillsRuntime, the real route set, a real audit trail on disk.
@@ -20,7 +20,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { AuditLog } from '../src/api/audit.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
@@ -35,7 +35,7 @@ import { pluginSourceAt } from '../src/skills/plugin-source.js';
 import { noVenv } from '../src/skills/venv.js';
 import { SKILLS_SNAPSHOT_ENGINE_ENV } from '../src/skills/engine-env.js';
 import { BASE_SKILL_REF_ENGINE_ENV } from '../src/skills/base-skill.js';
-import { PhaseSkillArming, RunSkillGapIndex } from '../src/skills/phase-skill-gaps.js';
+import { RunSkillGapIndex } from '../src/skills/phase-skill-gaps.js';
 import { SkillsRuntime } from '../src/skills/runtime.js';
 import { removeScratch } from './setup/scratch.js';
 import { FIXTURE_PLUGIN, scaffold, type Scaffold } from './support/skills-fixture.js';
@@ -75,12 +75,6 @@ afterEach(async () => {
   restoreEnv();
 });
 
-/** A seam's workflow as `PhaseSkillArming` reads it: two agent phases and one tool phase (no skill). */
-const SEAM_DEF = {
-  id: 'seam-flow',
-  phases: [{ id: 'plan' }, { id: 'write' }, { id: 'floor', executor: { type: 'tool', cmd: ['true'] } }],
-} as unknown as WorkflowDef;
-
 function routes(runtime: RuntimeDeps, adapter: Partial<Record<string, unknown>> = {}): FastifyInstance {
   const app = Fastify({ logger: false });
   registerRoutes(
@@ -96,71 +90,25 @@ function routes(runtime: RuntimeDeps, adapter: Partial<Record<string, unknown>> 
   return app;
 }
 
-describe('GET /diagnostics names every subsystem whose phases armed without their declared skill (crew#661)', () => {
-  it('a published snapshot WITHOUT wicked-garden-draft → one structured entry per drafting seam, a skills.phase-skill finding each, and /health warns', async () => {
+describe('GET /diagnostics names no phase-skill gap once the seams fail closed (crew#935)', () => {
+  it('a published snapshot WITHOUT wicked-garden-draft → phaseSkillGaps [] (the field stays on the wire), no finding, no /health warning', async () => {
     const runtime = new SkillsRuntime({ store: s.store, log: () => undefined });
     await runtime.apply();
     expect(runtime.health().state).toBe('published');
     expect(runtime.holdsSkill(DRAFT)).toBe(false); // the fixture catalog does not carry it — the precondition
 
-    const arming = new PhaseSkillArming(() => runtime.health().current?.gen ?? null, () => 1_700_000_000_000);
-    for (const seam of ['seam-b', 'seam-a']) {
-      const held = arming.probe(seam, { ...SEAM_DEF, id: seam }, (name) => runtime.holdsSkill(name));
-      expect(held(DRAFT)).toBe(false);
-    }
-
-    const app = routes({ skills: runtime, phaseSkills: arming });
-    await app.ready();
-    const diag = (await app.inject({ method: 'GET', url: '/api/v1/diagnostics' })).json() as DiagnosticsResponse;
-    const gaps = diag.skills.phaseSkillGaps;
-    expect(gaps?.map(withoutRemedy)).toEqual([
-      { subsystem: 'seam-a', workflow: 'seam-a', phases: ['plan', 'write'], skill: DRAFT, gen: 1, armedAt: 1_700_000_000_000 },
-      { subsystem: 'seam-b', workflow: 'seam-b', phases: ['plan', 'write'], skill: DRAFT, gen: 1, armedAt: 1_700_000_000_000 },
-    ]);
-    for (const g of gaps!) {
-      expect(g.remedy).toContain('republish the skills snapshot');
-      expect(g.remedy).toContain(DRAFT);
-      expect(g.remedy).toContain('restart crew');
-    }
-    const findings = diag.skills.findings.filter((f) => f.kind === 'skills.phase-skill');
-    expect(findings).toHaveLength(2);
-    for (const f of findings) {
-      expect(f.severity).toBe('warning');
-      expect(f.message).toContain(`'${DRAFT}'`);
-      expect(f.message).toContain('generation 1');
-    }
-    expect(findings.map((f) => f.message.split(':')[0])).toEqual(['seam-a', 'seam-b']);
-
-    const health = (await app.inject({ method: 'GET', url: '/api/v1/health' })).json() as HealthResponse;
-    expect(health.status).toBe('ok');
-    expect((health.warnings ?? []).filter((w) => w.kind === 'skills.phase-skill')).toHaveLength(2);
-  });
-
-  it('a published snapshot that HOLDS wicked-garden-draft → no entry, no finding, no warning', async () => {
-    const runtime = new SkillsRuntime({ store: s.store, log: () => undefined });
-    await runtime.apply(); // boot: seed + first publish (generation 1, no draft skill)
-    const rev = s.store.manifest().revision;
-    const added = s.store.add(DRAFT, { 'SKILL.md': `---\nname: ${DRAFT}\ndescription: the document quality floor\n---\n\n# Draft\n\nRun the self-check.\n` }, rev);
-    expect(added.verdict).not.toBe('blocked');
-    const published = await s.store.publish(added.revision);
-    expect(published.snapshot?.gen).toBe(2);
-    runtime.afterPublish();
-    expect(runtime.holdsSkill(DRAFT)).toBe(true); // the precondition
-
-    const arming = new PhaseSkillArming(() => runtime.health().current?.gen ?? null);
-    expect(arming.probe('seam-a', SEAM_DEF, (name) => runtime.holdsSkill(name))(DRAFT)).toBe(true);
-
-    const app = routes({ skills: runtime, phaseSkills: arming });
+    const app = routes({ skills: runtime });
     await app.ready();
     const diag = (await app.inject({ method: 'GET', url: '/api/v1/diagnostics' })).json() as DiagnosticsResponse;
     expect(diag.skills.phaseSkillGaps).toEqual([]);
     expect(diag.skills.findings.filter((f) => f.kind === 'skills.phase-skill')).toEqual([]);
     const health = (await app.inject({ method: 'GET', url: '/api/v1/health' })).json() as HealthResponse;
+    expect(health.status).toBe('ok');
     expect((health.warnings ?? []).filter((w) => w.kind === 'skills.phase-skill')).toEqual([]);
   });
 });
 
-describe('a run launched on an unarmed seam says so on the run record (degrade-and-disclose, crew#661)', () => {
+describe('a run that ran unarmed BEFORE crew#935 keeps saying so on the run record (crew#661)', () => {
   const RUN = 'run-661';
   const OTHER = 'run-armed';
   const view = (id: string, workflow: string): SessionView =>
@@ -169,21 +117,15 @@ describe('a run launched on an unarmed seam says so on the run record (degrade-a
       units: [],
     }) as unknown as SessionView;
 
-  it('the ACCEPTED launch on an unarmed workflow is recorded durably, survives a restart, and rides GET /runs/:id as skill_gaps; other runs carry no field', async () => {
-    const arming = new PhaseSkillArming(() => 4);
-    arming.record('interactive-chat', { ...SEAM_DEF, id: 'interactive-chat' }, DRAFT, false);
-    arming.record('interactive-draft', { ...SEAM_DEF, id: 'interactive-draft' }, DRAFT, true);
-
+  it('the trail\'s run.skill.unarmed entry survives a restart and rides GET /runs/:id as skill_gaps; other runs carry no field', async () => {
     const trail = join(dir, 'audit.log');
     const audit = new AuditLog(trail, () => undefined);
-    const live = new RunSkillGapIndex();
-    const warn = vi.fn();
-    live.onLaunch({ kind: 'run', id: RUN, status: 'accepted', workflow: 'interactive-chat' }, arming, audit, DAEMON, warn);
-    live.onLaunch({ kind: 'run', id: OTHER, status: 'accepted', workflow: 'interactive-draft' }, arming, audit, DAEMON, warn);
-    live.onLaunch({ kind: 'run', id: 'resumed', status: 'accepted' }, arming, audit, DAEMON, warn);
+    // The record a pre-crew#935 daemon wrote for a run its chat seam launched unarmed.
+    audit.record('run.skill.unarmed', DAEMON, {
+      runId: RUN,
+      detail: { gap: { subsystem: 'interactive-chat', workflow: 'interactive-chat', phases: ['understand', 'revise'], skill: DRAFT, gen: 4, remedy: 'republish the skills snapshot' } },
+    });
     await audit.flush();
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(String(warn.mock.calls[0]![0])).toContain(`run ${RUN}`);
 
     // A restarted daemon: a fresh index over the same trail.
     const rehydrated = new RunSkillGapIndex();
@@ -196,7 +138,7 @@ describe('a run launched on an unarmed seam says so on the run record (degrade-a
     await app.ready();
     const unarmed = (await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN}` })).json() as { run: SessionView };
     expect(unarmed.run.session.skill_gaps?.map(withoutRemedy)).toEqual([
-      { subsystem: 'interactive-chat', workflow: 'interactive-chat', phases: ['plan', 'write'], skill: DRAFT, gen: 4 },
+      { subsystem: 'interactive-chat', workflow: 'interactive-chat', phases: ['understand', 'revise'], skill: DRAFT, gen: 4 },
     ]);
     expect(unarmed.run.session.skill_gaps?.[0]?.remedy).toContain('republish the skills snapshot');
     const armed = (await app.inject({ method: 'GET', url: `/api/v1/runs/${OTHER}` })).json() as { run: SessionView };

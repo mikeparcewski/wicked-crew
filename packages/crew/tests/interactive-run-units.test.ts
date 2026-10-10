@@ -4,8 +4,9 @@
 
 import { describe, expect, it } from 'vitest';
 
+import type { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent } from '../src/core/types.js';
-import { describeStep, plannedUnitOf, RunUnits } from '../src/interactive/run-units.js';
+import { awaitingHumanLine, describeStep, plannedUnitOf, plannedUnitsOfRun, resyncRunUnits, RunUnits } from '../src/interactive/run-units.js';
 
 const planned = (ord: number, id: string, role: string, executorType = 'agent'): CoreEvent =>
   ({ type: 'unitPlanned', session: 'r', ord, description: `${id} — the intent ||| do it`, role, executorType }) as unknown as CoreEvent;
@@ -61,5 +62,51 @@ describe('RunUnits', () => {
   it('the PA step says what it does', () => {
     expect(describeStep('pa-scope')).toMatch(/rating the ask/);
     expect(describeStep('outline')).toBe('outline');
+  });
+});
+
+describe('the fold re-read from the run, and the paused-run line', () => {
+  it('plannedUnitsOfRun: ord order, step id after `<run>:`, a tool_cmd unit is a tool', () => {
+    expect(
+      plannedUnitsOfRun('r', [
+        { id: 'r:revise', ord: 2, role: 'creator' },
+        { id: 'r:pa-scope', ord: 1, role: null },
+        { id: 'r:verify', ord: 3, role: 'neutral', tool_cmd: ['node', 'v.js'] },
+      ]),
+    ).toEqual([
+      { id: 'pa-scope', role: 'neutral', tool: false },
+      { id: 'revise', role: 'creator', tool: false },
+      { id: 'verify', role: 'neutral', tool: true },
+    ]);
+  });
+  it('resyncRunUnits drops a unit a gate edit removed (no frame announces a removal)', async () => {
+    const u = new RunUnits();
+    for (const [ord, id, role] of [[1, 'pa-scope', 'neutral'], [2, 'understand', 'neutral'], [3, 'revise', 'creator']] as const) {
+      u.observe(planned(ord, id, role));
+    }
+    const adapter = {
+      sessionsDetail: async () => [
+        { session: { id: 'other' }, units: [{ id: 'other:x', ord: 1 }] },
+        { session: { id: 'r' }, units: [{ id: 'r:pa-scope', ord: 1, role: 'neutral' }, { id: 'r:revise', ord: 2, role: 'creator' }] },
+      ],
+    } as unknown as CoreAdapter;
+    await resyncRunUnits(adapter, 'r', u);
+    expect(u.idAt(2)).toBe('revise');
+    expect(u.isWriter(2)).toBe(true);
+    expect(u.position(2)).toBe('2/2');
+    // An engine that cannot answer leaves the fold as it was.
+    await resyncRunUnits({} as CoreAdapter, 'r', u);
+    await resyncRunUnits({ sessionsDetail: async () => { throw new Error('boom'); } } as unknown as CoreAdapter, 'r', u);
+    expect(u.position(2)).toBe('2/2');
+  });
+  it('awaitingHumanLine names the plan approval (or the step) and where to answer', () => {
+    const u = new RunUnits();
+    u.observe(planned(2, 'revise', 'creator'));
+    expect(awaitingHumanLine({ type: 'awaitingHuman', ord: 1, prompt: 'Approve?', gateKind: 'plan_approval' } as CoreEvent, 'run-9', u)).toBe(
+      'The run is paused: the plan needs approval before the work starts (Approve?). Answer it on run run-9 (studio → Runs); the document lands after that.',
+    );
+    const long = awaitingHumanLine({ type: 'awaitingHuman', ord: 2, prompt: 'x'.repeat(400), gateKind: 'escalation' } as CoreEvent, 'run-9', u);
+    expect(long).toContain('revise needs a person');
+    expect(long.length).toBeLessThan(300);
   });
 });

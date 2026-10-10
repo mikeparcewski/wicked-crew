@@ -51,7 +51,7 @@ import { authoringRunsFromLedgers, isAnotherProjectsReviewKey, readDocVersionVia
 import { REVIEWS_DIRNAME, removeDocReviews } from '../interactive/review-ledger.js';
 import { InteractiveBridgePool, boundOrigin } from '../interactive/bridge-pool.js';
 import { startInteractiveChatSubscriber } from '../interactive/chat-events.js';
-import { PhaseSkillArming, RunSkillGapIndex } from '../skills/phase-skill-gaps.js';
+import { RunSkillGapIndex } from '../skills/phase-skill-gaps.js';
 import { resolveProjectInteractiveRoot } from '../interactive/bridge-root.js';
 import { sweepDocLedgers, type DocLedgerSource, type DocLedgerSweep } from '../interactive/doc-ledger-sweep.js';
 import { DocRunIndex } from '../interactive/doc-run-index.js';
@@ -745,9 +745,8 @@ export async function createServer(
   // trail's `guidance.set` entries so notes survive a daemon restart.
   const guidanceIndex = new GuidanceIndex();
   await guidanceIndex.hydrate(audit, (m) => app.log.warn(m));
-  // crew#661: each drafting seam's ARM-TIME skill outcome (diagnostics / health), and the runs
-  // launched while a seam was unarmed (`session.skill_gaps`) — same durable trail pattern.
-  const phaseSkills = new PhaseSkillArming(() => skillsRuntime?.health().current?.gen ?? null);
+  // crew#661: the runs that launched while a seam was unarmed (`session.skill_gaps`), read back from
+  // the trail. No seam arms unarmed since crew#935, so nothing new is recorded.
   const runSkillGaps = new RunSkillGapIndex();
   await runSkillGaps.hydrate(audit, (m) => app.log.warn(m));
   const skillHeld = (name: string): boolean => skillsRuntime?.holdsSkill(name) ?? false;
@@ -1869,9 +1868,6 @@ export async function createServer(
   // close like the event listener.
   const offLaunch = adapter.onLaunch((notice) => {
     skillsRuntime?.launched(notice);
-    // crew#661: a run the engine ACCEPTED on a workflow that armed WITHOUT its declared skill proceeds
-    // degraded and says so on the run (`session.skill_gaps`, a `run.skill.unarmed` trail entry). Never throws.
-    runSkillGaps.onLaunch(notice, phaseSkills, audit, DAEMON_ACTOR, (m) => app.log.warn(m));
   });
   app.addHook('onClose', async () => {
     offEvent();
@@ -2015,7 +2011,6 @@ export async function createServer(
       groupIndex,
       runTimingIndex,
       guidanceIndex,
-      phaseSkills,
       runSkillGaps,
       chatScopes,
       chatTurns,

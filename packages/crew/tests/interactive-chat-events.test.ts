@@ -267,6 +267,8 @@ interface FakeAdapter {
   launches: LaunchRunInput[];
   registered: WorkflowDef[];
   fire: (event: CoreEvent) => void;
+  /** Runs INSIDE `launchRun`, before it resolves — where a real engine announces the first plan. */
+  duringLaunch?: (input: LaunchRunInput) => void;
   asAdapter(): CoreAdapter;
 }
 
@@ -294,6 +296,7 @@ function fakeAdapter(repoWorld?: RepoWorld): FakeAdapter {
         },
         launchRun: async (input: LaunchRunInput) => {
           state.launches.push(input);
+          state.duringLaunch?.(input);
           return input.sessionId;
         },
         onEvent: (listener: (e: CoreEvent) => void) => {
@@ -453,6 +456,15 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     // registers no def of its own.
     expect(engine.registered).toEqual([]);
 
+    // The engine announces the first plan WHILE the launch is in flight, before the seam records the
+    // flight (codex r1 on crew#938): the PA's `pa-scope`, the preset's understand and revise.
+    const plannedFrame = (session: string, ord: number, id: string, role: string): CoreEvent =>
+      ({ type: 'unitPlanned', session, ord, description: `${id} — revise iter-doc ||| instructions`, role, executorType: 'agent' }) as unknown as CoreEvent;
+    engine.duringLaunch = (input) => {
+      engine.fire(plannedFrame(input.sessionId, 1, 'pa-scope', 'neutral'));
+      engine.fire(plannedFrame(input.sessionId, 2, 'understand', 'neutral'));
+      engine.fire(plannedFrame(input.sessionId, 3, 'revise', 'creator'));
+    };
     const { event_id } = await emitChatPosted(bus, 'iter-doc', { project_id: 'proj-7', source_message_id: 'm-1' });
     await waitFor(() => engine.launches.length === 1);
     const launch = engine.launches[0]!;
@@ -503,21 +515,12 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
           e.event_type === STATUS_POSTED &&
           String((e.payload as { message?: string }).message).includes(needle),
       );
-    // crew#935: the phases are counted from the run's PLANNED units — the PA's `pa-scope`, the
-    // preset's understand and revise, and the floor's `critique` — announced as the engine plans
-    // them. The re-plan after the PA's rating inserts `critique` and shifts nothing before it.
-    const planned = (ord: number, id: string, role: string) =>
-      engine.fire({
-        type: 'unitPlanned',
-        session: launch.sessionId,
-        ord,
-        description: `${id} — revise iter-doc ||| instructions`,
-        role,
-        executorType: 'agent',
-      } as unknown as CoreEvent);
-    planned(1, 'pa-scope', 'neutral');
-    planned(2, 'understand', 'neutral');
-    planned(3, 'revise', 'creator');
+    // crew#935: the phases are counted from the run's PLANNED units — announced during the launch
+    // above, then the floor's `critique` from the re-plan after the PA's rating.
+    const planned = (ord: number, id: string, role: string) => engine.fire(plannedFrame(launch.sessionId, ord, id, role));
+    // A high-risk ask pauses at plan approval: the thread says so and where to answer it.
+    engine.fire({ type: 'awaitingHuman', session: launch.sessionId, ord: 1, prompt: 'Approve the plan?', gateKind: 'plan_approval' } as unknown as CoreEvent);
+    await waitFor(narrated(`The run is paused: the plan needs approval before the work starts (Approve the plan?). Answer it on run ${launch.sessionId}`));
     engine.fire({ type: 'unitDispatched', session: launch.sessionId, ord: 2, attempt: 0 });
     await waitFor(narrated('Crew phase 2/3: understand — reading the current version and your ask'));
     planned(4, 'critique', 'evaluator');

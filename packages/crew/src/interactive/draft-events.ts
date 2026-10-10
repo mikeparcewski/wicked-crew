@@ -67,7 +67,7 @@ import {
 } from './doc-grounding.js';
 import type { CoreAdapter } from '../core/adapter.js';
 import type { CoreEvent } from '../core/types.js';
-import { describeStep, RunUnits } from './run-units.js';
+import { awaitingHumanLine, describeStep, resyncRunUnits, RunUnits } from './run-units.js';
 import {
   acpFallbackLine,
   ungatedGateNote,
@@ -615,8 +615,6 @@ interface InFlight {
   runId?: string | undefined;
   /** The ord of the latest unit-scoped engine frame, stamped on narration as `unit_ord`. */
   narrationOrd?: number | undefined;
-  /** The run's planned units, folded from its `unitPlanned` frames (crew#935). */
-  units?: RunUnits | undefined;
   /** Undefined while the flight is a PRE-LAUNCH placeholder (registered before the snapshot
    *  await so `inFlightDocs()` reports the doc busy — Copilot round 2); set once the launch
    *  resolves. */
@@ -695,6 +693,9 @@ export async function startInteractiveDraftSubscriber(
   const groundingStore = opts.groundingStore;
   const resolveDocsRoot = opts.resolveDocsRoot ?? (() => resolveInteractiveRoot(null));
   const inFlight = new Map<string, InFlight>(); // runId → live state (pre-launch placeholders included)
+  // runId → the run's planned units (crew#935). Opened BEFORE the launch: the engine announces the
+  // first plan (`unitPlanned`) while `launchRun` is still in flight, before the flight is recorded.
+  const unitsByRun = new Map<string, RunUnits>();
   // Documents whose run is terminal but whose FINALIZE is still running — the draft floor's
   // re-derivation and the announce (codex on crew#725). The doc must stay BUSY across that window:
   // `inFlightDocs()` is what serializes the chat seam's asks (CREW-UX-5 contract (c)), and a floor
@@ -753,6 +754,7 @@ export async function startInteractiveDraftSubscriber(
       if (flight.heartbeat !== undefined) clearInterval(flight.heartbeat);
       inFlight.delete(runId);
     }
+    unitsByRun.delete(runId);
     return flight;
   }
 
@@ -793,6 +795,8 @@ export async function startInteractiveDraftSubscriber(
   const offCoreEvents = adapter.onEvent((event: CoreEvent) => {
     const runId = typeof event.session === 'string' ? event.session : undefined;
     if (runId === undefined) return;
+    const planned = unitsByRun.get(runId);
+    if (planned?.observe(event) === true) return;
     const flight = inFlight.get(runId);
     if (flight === undefined) return;
     // F-4R2-005: every narration line and heartbeat from here carries the run id and the ord of the
@@ -807,8 +811,7 @@ export async function startInteractiveDraftSubscriber(
     // The steps are the engine's (crew#935): the preset's creator, the PA's `pa-scope` first and
     // the floor's additions, as the run's `unitPlanned` frames announce them. A deterministic tool
     // unit has no seat, so its council and routing frames are not narrated.
-    const units = (flight.units ??= new RunUnits());
-    if (units.observe(event)) return;
+    const units = planned ?? new RunUnits();
     const ordOf = (e: CoreEvent): number => (typeof e.ord === 'number' ? e.ord : 0);
 
     if (event.type === 'councilConvened') {
@@ -847,6 +850,18 @@ export async function startInteractiveDraftSubscriber(
             ? `Crew phase ${units.position(ord)}: reviewing the draft (${id})…`
             : `Crew phase ${units.position(ord)}: ${describeStep(id)}…`,
       );
+      return;
+    }
+
+    // A preset run can pause for a person (the plan approval of a high-risk ask, crew#935): say so
+    // and where to answer, rather than repeat the last working line. A plan edited at that gate can
+    // drop or reorder pending units, so the fold is re-read from the run when it resumes.
+    if (event.type === 'awaitingHuman') {
+      narrate(flight, awaitingHumanLine(event, runId, units));
+      return;
+    }
+    if (event.type === 'resumed') {
+      if (planned !== undefined) void resyncRunUnits(adapter, runId, planned);
       return;
     }
 
@@ -1276,6 +1291,7 @@ export async function startInteractiveDraftSubscriber(
       log(`run ${runId}: ${decision.reason}`);
     }
     try {
+      unitsByRun.set(runId, new RunUnits()); // before the launch: its first plan is announced during it
       await adapter.launchRun({
         // DES-MEM-FACETED-001 Phase 3: thread the doc's project as the recall intent's `project`
         // axis (the reliably-available axis on this seam). An unfiled doc leaves it undefined, so
@@ -1338,6 +1354,7 @@ export async function startInteractiveDraftSubscriber(
         requireDeliverables: [outPath],
       });
     } catch (err) {
+      unitsByRun.delete(runId);
       // A launch that never happened keeps no flight and no snapshot (a replayed frame
       // re-registers and re-snapshots fresh).
       endFlight(runId);

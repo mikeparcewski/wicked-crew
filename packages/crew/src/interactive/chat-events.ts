@@ -73,7 +73,7 @@ import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../project
 import { resolveInteractiveRoot } from './bridge-root.js';
 import type { CoreAdapter } from '../core/adapter.js';
 import type { CoreEvent } from '../core/types.js';
-import { describeStep, RunUnits } from './run-units.js';
+import { awaitingHumanLine, describeStep, resyncRunUnits, RunUnits } from './run-units.js';
 import {
   acpFallbackLine,
   ungatedGateNote,
@@ -372,8 +372,6 @@ interface InFlight {
   runId?: string | undefined;
   /** The ord of the latest unit-scoped engine frame, stamped on narration as `unit_ord`. */
   narrationOrd?: number | undefined;
-  /** The run's planned units, folded from its `unitPlanned` frames (crew#935). */
-  units?: RunUnits | undefined;
   heartbeat: ReturnType<typeof setInterval>;
   /** The engine's own reason for the most recent failed unit (`stepFailed.detail`). Carried so
    *  the terminal error status names WHY — in particular the crew#311 deliverable-floor report,
@@ -461,6 +459,9 @@ export async function startInteractiveChatSubscriber(
   const landingGateMs = opts.landingGateMs ?? 60_000;
   const resolveDocsRoot = opts.resolveDocsRoot ?? (() => resolveInteractiveRoot(null));
   const inFlight = new Map<string, InFlight>(); // runId → live state
+  // runId → the run's planned units (crew#935). Opened BEFORE the launch: the engine announces the
+  // first plan (`unitPlanned`) while `launchRun` is still in flight, before the flight is recorded.
+  const unitsByRun = new Map<string, RunUnits>();
   const queues = new Map<string, QueuedAsk[]>(); // documentId → parked asks, FIFO
   const landingGates = new Map<string, LandingGate>(); // documentId → post-completion gate
 
@@ -512,6 +513,7 @@ export async function startInteractiveChatSubscriber(
       clearInterval(flight.heartbeat);
       inFlight.delete(runId);
     }
+    unitsByRun.delete(runId);
     return flight;
   }
 
@@ -537,6 +539,8 @@ export async function startInteractiveChatSubscriber(
   const offCoreEvents = adapter.onEvent((event: CoreEvent) => {
     const runId = typeof event.session === 'string' ? event.session : undefined;
     if (runId === undefined) return;
+    const planned = unitsByRun.get(runId);
+    if (planned?.observe(event) === true) return;
     const flight = inFlight.get(runId);
     if (flight === undefined) return;
     // F-4R2-005: every narration line and heartbeat from here carries the run id and the ord of the
@@ -547,8 +551,7 @@ export async function startInteractiveChatSubscriber(
     // Narration ladder — same rationale as the draft fold: the heartbeat repeats the LATEST
     // line and the transcript dedups repeats, so advancing the line = visible progress. The steps
     // are the engine's (crew#935), read from the run's `unitPlanned` frames.
-    const units = (flight.units ??= new RunUnits());
-    if (units.observe(event)) return;
+    const units = planned ?? new RunUnits();
     const ordOf = (e: CoreEvent): number => (typeof e.ord === 'number' ? e.ord : 0);
 
     if (event.type === 'councilConvened') {
@@ -585,6 +588,18 @@ export async function startInteractiveChatSubscriber(
               ? `Crew phase ${units.position(ord)}: ${describeStep(id)}…`
               : `Crew phase ${units.position(ord)}: ${id} — reading the current version and your ask…`,
       );
+      return;
+    }
+
+    // A preset run can pause for a person (the plan approval of a high-risk ask, crew#935): say so
+    // and where to answer, rather than repeat the last working line. A plan edited at that gate can
+    // drop or reorder pending units, so the fold is re-read from the run when it resumes.
+    if (event.type === 'awaitingHuman') {
+      narrate(flight, awaitingHumanLine(event, runId, units));
+      return;
+    }
+    if (event.type === 'resumed') {
+      if (planned !== undefined) void resyncRunUnits(adapter, runId, planned);
       return;
     }
 
@@ -819,6 +834,7 @@ export async function startInteractiveChatSubscriber(
     }
 
     try {
+      unitsByRun.set(runId, new RunUnits()); // before the launch: its first plan is announced during it
       await adapter.launchRun({
         // DES-MEM-FACETED-001 Phase 3: thread the ask's project as the recall intent's `project`
         // axis (the reliably-available axis on this seam). An unfiled ask leaves it undefined, so
@@ -868,6 +884,7 @@ export async function startInteractiveChatSubscriber(
         requireDeliverables: [outPath],
       });
     } catch (err) {
+      unitsByRun.delete(runId);
       // The 'processing' status is already on the thread — close it out honestly so the
       // canvas never sits in an in-between state on a launch that went nowhere.
       const reason = err instanceof Error ? err.message : String(err);

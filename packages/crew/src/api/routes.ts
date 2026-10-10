@@ -112,7 +112,7 @@ import type { McpCallRecordSource } from '../mcp/call-records.js';
 import { McpPolicies } from '../mcp/policies.js';
 import type { McpRegistry } from '../mcp/registry.js';
 import { disabledSkillsHealth, type SkillsRuntime } from '../skills/runtime.js';
-import { phaseSkillFindings, withPhaseSkillGaps, type PhaseSkillArming, type RunSkillGapIndex } from '../skills/phase-skill-gaps.js';
+import { withPhaseSkillGaps, type RunSkillGapIndex } from '../skills/phase-skill-gaps.js';
 import {
   STATE_HOME_BLOCKER_CODE,
   STATE_HOME_REMEDY,
@@ -1024,12 +1024,8 @@ export interface RuntimeDeps {
   mcpBroker?: McpBroker;
   /** The broker's call records (DES-MCP-TOOLS-001 S7), the ones `GET /mcp/usage` folds; absent → 503. */
   mcpCalls?: McpCallRecordSource;
-  /** crew#661 — each drafting seam's ARM-TIME skill outcome: the subsystems whose phases run without
-   *  a declared skill (`/diagnostics.skills.phaseSkillGaps` + `skills.phase-skill` findings, and
-   *  `/health.warnings`). Absent = nothing armed here (a directly-driven route set): no gaps. */
-  phaseSkills?: PhaseSkillArming;
-  /** crew#661 — the runs launched with such a gap (`AgentSession.skill_gaps`), hydrated from the
-   *  trail. Absent = no run carries the field. */
+  /** crew#661 — the runs that launched with a skill gap before crew#935 (`AgentSession.skill_gaps`),
+   *  hydrated from the trail. Absent = no run carries the field. */
   runSkillGaps?: RunSkillGapIndex;
   /** The live state-home classification (wicked-core#411 / crew#497) — `createServer` surveys the
    *  daemon state home at boot and hands the watch here; the routes re-survey on demand, report it
@@ -1572,14 +1568,11 @@ export function registerRoutes(
     // `baseSkill.finding` and `/diagnostics.skills.findings[]` (one surface, no new field;
     // `HealthWarning.kind` is open); status stays ok because the daemon serves and studio must load
     // and show it — exactly the state-home blocker's precedent above.
-    // crew#661: a drafting seam that armed WITHOUT its declared skill rides `warnings` as well — its
-    // runs proceed degraded, so "status ok, no warnings" would be the silent answer the issue names.
     const warnings = [
       ...(stateHome === null ? [] : stateHome.findings.map((f) => ({ kind: f.kind, severity: f.severity, message: f.message }))),
       ...(baseSkill?.finding ? [{ kind: baseSkill.finding.kind, severity: baseSkill.finding.severity, message: baseSkill.finding.message }] : []),
       // crew#753: a garden older than the minimum is a blocking finding on the first screen too.
       ...[gardenBlocker()].filter((f): f is NonNullable<typeof f> => f !== null),
-      ...phaseSkillFindings(runtime.phaseSkills?.gaps() ?? []),
       // DES-TEAMING-002 T0: the daemon's bus did not open at boot, so the engine was handed none
       // and runs un-teamed. A daemon-level notice (status stays ok: it serves); the per-run
       // `transport:"none"` record lands with P1.
@@ -1650,9 +1643,9 @@ export function registerRoutes(
         // The skills seam's last outcome (skills keystone): published / fallback / blocked /
         // config-error, with the `skills.*` findings the ladder produced — the operator's one
         // read-only answer to "why do launches refuse the snapshot".
-        // crew#661: plus every subsystem whose phases ARMED without a declared skill (`phaseSkillGaps`,
-        // one `skills.phase-skill` finding each) — the degraded runs' operator-facing record.
-        skills: withPhaseSkillGaps(runtime.skills?.health() ?? disabledSkillsHealth(), runtime.phaseSkills),
+        // crew#661's `phaseSkillGaps` stays on the wire, always `[]` since crew#935: no seam arms
+        // without its declared skill (the interactive presets fail such a run instead).
+        skills: withPhaseSkillGaps(runtime.skills?.health() ?? disabledSkillsHealth()),
         // Is the governance evidence LANDING (crew#495): the store, the records on it, the dead
         // letters — with a `governance.deadletter` finding the moment the outbox holds one.
         governance,
