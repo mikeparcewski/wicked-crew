@@ -97,6 +97,7 @@ import {
   registerGovernanceSteeringRoutes,
 } from './governance-steering.js';
 import { isSteeringAuthorRun, landSteeringProposal } from './steering-landing.js';
+import { inventoryComplete, parseInventoryClaims, type InventoryClaim } from '../core/inventory-claim.js';
 import { ApproveEditSchema, approveEdited, captureLaunchRoots, editInFlight, FileProposalSchema, registerCaptureRoutes } from './capture.js';
 import { registerTestingRoutes } from './testing.js';
 import { DEMO_PRESET, demoLaunchRoots, registerDemoRoutes, registerWalkthroughRoutes, walkthroughAcceptance } from './recording.js';
@@ -2638,6 +2639,48 @@ export function registerRoutes(
     await settleDeliveries([run]);
     return { run: decorateRun(run) };
   });
+
+  // ── Inventory claims (crew#721) — whether each enumerating step's list is complete ──
+  // A step that lists things a later step acts on ends its reply with a `wicked-inventory` block
+  // (wicked-garden core/refs/inventory-report.md). This reads them off every unit's captured
+  // output, so a reviewer sees "partial: 9 of 10, issue #936 unread" without opening transcripts
+  // (crew#648). `complete` is true only when at least one unit claimed an inventory and every
+  // claim is `full`; `readable: false` when the adapter keeps no transcripts.
+  app.get(
+    `${V}/runs/:id/inventory`,
+    {
+      config: {
+        manifest: {
+          responseType:
+            '{ runId: string; readable: boolean; complete: boolean; units: { ord: number; unitId: string; claims: InventoryClaim[] }[] }',
+          statusCodes: [200, 404],
+        },
+      },
+    },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const views = await adapter.sessionsDetail();
+      const run = views.find((v) => v.session.id === id);
+      if (!run) return reply.code(404).send({ error: 'Run not found' });
+      if (typeof adapter.workOutput !== 'function') {
+        return { runId: id, readable: false, complete: false, units: [] };
+      }
+      const units: { ord: number; unitId: string; claims: InventoryClaim[] }[] = [];
+      for (const u of [...run.units].sort((a, b) => a.ord - b.ord)) {
+        let text: string | null = null;
+        try {
+          text = await adapter.workOutput(coreUnitId(id, u));
+        } catch {
+          text = null;
+        }
+        if (text === null) continue;
+        const claims = parseInventoryClaims(text);
+        if (claims.length > 0) units.push({ ord: u.ord, unitId: u.id, claims });
+      }
+      const all = units.flatMap((u) => u.claims);
+      return { runId: id, readable: true, complete: inventoryComplete(all), units };
+    },
+  );
 
   // ── Deliver text (crew#524 / F-3R2-014) — the PR title + body a run's delivery carries ──
   // `gh pr create --fill` gave wicked-studio#249 a mid-word title and an EMPTY body. The deliver
