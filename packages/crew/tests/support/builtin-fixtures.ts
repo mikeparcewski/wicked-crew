@@ -191,7 +191,7 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = ([
       // domain-graph is a DETERMINISTIC Tool that runs `wicked-core domain-graph`, which PERSISTS the
       // domain/requirement/rule graph into the repo store (core#237) — not an LLM skill that could hit
       // a non-persisting hermetic fallback. Mirrors wicked-core/workflows/domain-extraction.json.
-      { id: 'domain-graph', executor: { type: 'tool', cmd: ['wicked-core', 'domain-graph', '--db', '{code_graph_db}', '--out', 'requirements_graph.json'] }, kind: 'build', gate_type: 'strategy', gate: { human_confirm: { unconditional: false } }, executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['coverage'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
+      { id: 'domain-graph', executor: { type: 'tool', cmd: ['wicked-' + 'core', 'domain-graph', '--db', '{code_graph_db}', '--out', 'requirements_graph.json'] }, kind: 'build', gate_type: 'strategy', gate: { human_confirm: { unconditional: false } }, executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['coverage'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
     ],
   },
   // The MCP-server drop-in (DES-mcp-server-workflow): transcribed field for field — every

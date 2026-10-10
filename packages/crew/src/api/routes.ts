@@ -4032,7 +4032,15 @@ export function registerRoutes(
     const verifiedCatalog =
       typeof adapter.verifiedEvidenceCatalog === 'function' ? await adapter.verifiedEvidenceCatalog() : null;
     const knownCatalog = typeof adapter.catalogIds === 'function' ? await adapter.catalogIds() : null;
-    const read = acceptanceRequirementOf(run, adapter.listWorkflows(), verifiedCatalog, knownCatalog);
+    // A def run is read against the defs actually registered (X-MIG M11): a run a retired built-in
+    // def produced is no longer describable, so it fails closed rather than borrowing the preset's
+    // shape; preset and plan runs are read from their own units.
+    const read = acceptanceRequirementOf(
+      run,
+      typeof adapter.listRuntimeWorkflows === 'function' ? adapter.listRuntimeWorkflows() : adapter.listWorkflows(),
+      verifiedCatalog,
+      knownCatalog,
+    );
     const requirement = opts.forceDeclared === true ? { ...read, declared: true } : read;
     // WT-W2: every walkthrough step the requirement names is resolved from its proof root and seal.
     const walkthroughs = await walkthroughAcceptance(adapter, run, requirement.phases);

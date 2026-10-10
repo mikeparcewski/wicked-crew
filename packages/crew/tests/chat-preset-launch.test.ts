@@ -94,12 +94,14 @@ describe.skipIf(!ENGINE_HAS_PLANS)('M3: POST /runs {workflow:"chat"} launches th
     expect(view!.units.some((u) => u.role === 'evaluator')).toBe(false);
   });
 
-  it('GET /presets serves chat as a system built-in; GET /workflows lists no chat def', async () => {
+  it('GET /presets serves chat as a system built-in; GET /workflows serves it derived from that preset, flagged system (X-MIG M11)', async () => {
     const presets = ((await (await fetch(`${baseUrl}/api/v1/presets`)).json()) as { presets: Preset[] }).presets;
     const chat = presets.find((p) => p.name === 'chat');
     expect(chat).toMatchObject({ scope: 'global', created_by: 'builtin', system: true });
     expect(chat?.steps.map((s) => `${s.catalog}:${s.id}`)).toEqual(['understand:explore']);
     const workflows = ((await (await fetch(`${baseUrl}/api/v1/workflows`)).json()) as { workflows: WorkflowDef[] }).workflows;
-    expect(workflows.map((w) => w.id)).not.toContain('chat');
+    const served = workflows.find((w) => w.id === 'chat');
+    expect(served?.is_system).toBe(true);
+    expect(served?.phases.map((p) => p.id)).toEqual(['explore']);
   });
 });
