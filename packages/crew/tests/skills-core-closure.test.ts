@@ -24,7 +24,7 @@ import { describe, expect, it } from 'vitest';
 
 import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
 import type { WorkflowDef } from '../src/core/types.js';
-import { coreClosure, mandateMentions, mentionedSkillNames, registeredSkillRefs } from '../src/skills/core-closure.js';
+import { builtinPresetSkillRefs, coreClosure, mandateMentions, mentionedSkillNames, presetSkillRefs, registeredSkillRefs } from '../src/skills/core-closure.js';
 import { parseFrontmatter } from '../src/skills/frontmatter.js';
 import { CORE_DIR, SKIP_CORE_CHECKS, coreDirMissingMessage } from './support/core-checkout.js';
 
@@ -44,6 +44,39 @@ const pinnedCoreTs = (): string => {
   const pkg = JSON.parse(readFileSync(join(HERE, '..', 'package.json'), 'utf8')) as { dependencies: Record<string, string> };
   return (pkg.dependencies['wicked-core-ts'] ?? '').replace(/^[\^~=]/, '');
 };
+
+describe('the built-in presets\' skill_refs are required too (crew#935, codex r5 on #938)', () => {
+  const presets = [
+    { name: 'interactive-draft', created_by: 'builtin', steps: [{ catalog: 'produce', id: 'draft', skill_ref: 'wicked-garden-draft' }] },
+    { name: 'feature', created_by: 'builtin', steps: [{ catalog: 'build', id: 'build' }] },
+    { name: 'mine', created_by: 'studio', steps: [{ catalog: 'produce', id: 'p', skill_ref: 'wicked-garden-user-only' }] },
+  ];
+  it('presetSkillRefs collects the non-empty skill_refs', () => {
+    expect([...presetSkillRefs(presets)].sort()).toEqual(['wicked-garden-draft', 'wicked-garden-user-only']);
+  });
+  it('builtinPresetSkillRefs reads only the built-ins, and degrades to the empty set (logged)', async () => {
+    const warn: string[] = [];
+    expect([...(await builtinPresetSkillRefs({ presetsSupported: () => true, listPresets: async () => presets }, (m) => warn.push(m)))]).toEqual(['wicked-garden-draft']);
+    expect((await builtinPresetSkillRefs({ presetsSupported: () => false, listPresets: async () => presets }, (m) => warn.push(m))).size).toBe(0);
+    // A partial adapter with no preset methods at all (test doubles of createServer).
+    expect((await builtinPresetSkillRefs({} as never, (m) => warn.push(m))).size).toBe(0);
+    const failing = { presetsSupported: () => true, listPresets: async () => { throw new Error('engine down'); } };
+    expect((await builtinPresetSkillRefs(failing, (m) => warn.push(m))).size).toBe(0);
+    expect(warn.some((w) => w.includes('engine down'))).toBe(true);
+  });
+  it('the published 0.8.0 engine\'s interactive presets name wicked-garden-draft, so it stays core (cannot be disabled)', async () => {
+    const { CoreAdapter } = await import('../src/core/adapter.js');
+    const { mkdtempSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const a = new CoreAdapter({ dbPath: join(mkdtempSync(join(tmpdir(), 'crew935-')), 'core.db'), stub: true });
+    try {
+      const refs = await builtinPresetSkillRefs(a, () => {});
+      expect(refs.has('wicked-garden-draft')).toBe(true);
+    } finally {
+      a.close();
+    }
+  });
+});
 
 describe('registeredSkillRefs', () => {
   it('collects the non-null skill_refs of the workflows crew serves (capture-learnings, domain-extraction, qe-author-tests, mcp-server)', () => {

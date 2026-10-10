@@ -61,6 +61,40 @@ export function registeredSkillRefs(workflows: ReadonlyArray<WorkflowDef>): Set<
   return out;
 }
 
+/** The non-empty `skill_ref`s across a set of presets' steps. */
+export function presetSkillRefs(presets: ReadonlyArray<{ steps: ReadonlyArray<object> }>): Set<string> {
+  const out = new Set<string>();
+  for (const p of presets) {
+    for (const s of p.steps) {
+      const ref = (s as { skill_ref?: unknown }).skill_ref;
+      if (typeof ref === 'string' && ref !== '') out.add(ref);
+    }
+  }
+  return out;
+}
+
+/**
+ * (crew#935, codex r5 on #938) The skill_refs of the engine's BUILT-IN presets, read once at boot:
+ * a workflow that became a preset registers no def, so `registeredSkillRefs(listWorkflows())` no
+ * longer sees its skills, and a skill a preset ALWAYS requires (`wicked-garden-draft` on the
+ * interactive-* presets) could be disabled and published, failing every run that needs it. The
+ * built-ins are compiled into the engine, so one read holds until restart. An addon without presets,
+ * or a read that fails, answers the empty set (logged): the registered defs still count.
+ */
+export async function builtinPresetSkillRefs(
+  adapter: { presetsSupported(): boolean; listPresets(): Promise<ReadonlyArray<{ created_by: string; steps: ReadonlyArray<object> }>> },
+  warn: (msg: string) => void,
+): Promise<Set<string>> {
+  try {
+    // A partial adapter (a directly-driven route set, a test double) may carry neither method.
+    if (typeof adapter.presetsSupported !== 'function' || !adapter.presetsSupported()) return new Set();
+    return presetSkillRefs((await adapter.listPresets()).filter((p) => p.created_by === 'builtin'));
+  } catch (err) {
+    warn(`[skills] could not read the built-in presets' skill_refs: ${err instanceof Error ? err.message : String(err)}`);
+    return new Set();
+  }
+}
+
 /**
  * Every well-formed qualified-name token in `text` with its line — catalog-agnostic, PROSE only.
  * Glob/prefix tokens (trailing `-`/`_`) and `:`-continued subagent types are not names and are not

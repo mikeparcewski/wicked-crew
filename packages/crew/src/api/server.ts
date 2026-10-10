@@ -107,7 +107,7 @@ import { registerGateHistoryRoute, runBand, runPreset, runProject } from '../sta
 import { busRows, openPlanGateRisk } from '../team/routes.js';
 import { isSteeringAuthorRun } from './steering-landing.js';
 import { applyWorkerConfigRoot } from './seat-signin.js';
-import { registeredSkillRefs } from '../skills/core-closure.js';
+import { builtinPresetSkillRefs, registeredSkillRefs } from '../skills/core-closure.js';
 import type { PluginSource } from '../skills/plugin-source.js';
 import { assertSkillsRootFenced } from '../skills/root-fence.js';
 import { SkillsRuntime } from '../skills/runtime.js';
@@ -586,9 +586,11 @@ export async function createServer(
     const source = options?.skills?.source;
     const skillsRoot = resolveSkillsRoot();
     assertSkillsRootFenced(skillsRoot, { stateHome: crewStateHome() });
+    // crew#935: the built-in presets' skills are required too (a preset registers no def).
+    const presetRefs = await builtinPresetSkillRefs(adapter, (m) => app.log.warn(m));
     skillsStore = new SkillsStore({
       root: skillsRoot,
-      registeredSkillRefs: () => registeredSkillRefs(adapter.listWorkflows()),
+      registeredSkillRefs: () => new Set([...registeredSkillRefs(adapter.listWorkflows()), ...presetRefs]),
       provisionVenv: options?.skills?.provisionVenv ?? uvSyncBaseline,
       ...(source !== undefined ? { source } : {}),
       warn: (m) => app.log.warn(m),
