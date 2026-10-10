@@ -88,6 +88,7 @@ process.stdout.write('WRAPPED-UNIT-DONE: listed and called the MCP tools through
 const ACP_AGENT = (client: string, out: string): string => `
 import { createInterface } from 'node:readline';
 import { useMcp } from ${JSON.stringify(client)};
+import { registerDef } from '../support/register-def.js';
 const rl = createInterface({ input: process.stdin });
 const w = (obj) => process.stdout.write(JSON.stringify(obj) + '\\n');
 rl.on('line', async (line) => {
@@ -232,7 +233,7 @@ beforeAll(async () => {
   const approved = await postJson('/api/v1/mcp/approvals', { subject: 'mcp:fx' });
   expect(approved.status, JSON.stringify(approved.body)).toBeLessThan(300);
 
-  const wf = await postJson('/api/v1/workflows', {
+  const wf = await registerDef(adapter, {
     id: WORKFLOW_ID,
     phases: [phase('build', 'build', 'creator', []), phase('review', 'review', 'evaluator', ['build'])],
   });

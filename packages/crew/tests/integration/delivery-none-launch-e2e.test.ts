@@ -24,6 +24,7 @@ import { join } from 'node:path';
 import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
 import { removeScratch } from '../setup/scratch.js';
+import { registerDef } from '../support/register-def.js';
 
 const SEATS = JSON.stringify([
   { key: 'alpha', display_name: 'Alpha', binary: 'alpha', headless_invocation: 'alpha {PROMPT}' },
@@ -146,7 +147,7 @@ beforeAll(async () => {
   baseUrl = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`;
 
   await adapter.registerRepo('l8-notes-ws', repo);
-  const wf = await postJson('/api/v1/workflows', NOTES_WORKFLOW);
+  const wf = await registerDef(adapter, NOTES_WORKFLOW);
   expect(wf.status).toBe(201);
 }, 60_000);
 

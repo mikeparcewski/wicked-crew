@@ -5229,14 +5229,6 @@ export function registerRoutes(
 
   app.get(`${V}/workflows/:id`, async (req, reply) => {
     const { id } = req.params as { id: string };
-    // (crew#718) JUDGE FIRST (review of PR #724, MEDIUM). `getWorkflow` only hydrates the overlay
-    // dir; `workflowRefusal` is what runs the engine's verdict pass and drops the defs it refused.
-    // Read the other way round, the FIRST request for a refused drop-in answered 200 with the def
-    // the engine had thrown away — and this route is where the launch looks it up.
-    const refusal = await adapter.workflowRefusal(id);
-    if (refusal !== null) {
-      return reply.code(404).send({ error: `workflow '${id}' was refused by the engine: ${refusal}`, reason: refusal });
-    }
     const workflow = adapter.getWorkflow(id);
     if (!workflow) {
       return reply.code(404).send({ error: `workflow '${id}' not found` });
@@ -5246,24 +5238,14 @@ export function registerRoutes(
     return { workflow, humanGates: humanGatePhaseIds(workflow) };
   });
 
-  // Register (or replace) a user-authored workflow definition.
-  // Validates, persists to ~/.wicked/workflows/<id>.json, hot-registers in the
-  // Rust actor when registerWorkflow NAPI is available.
-  app.post(`${V}/workflows`, async (req, reply) => {
-    const body = req.body as { id?: unknown };
-    if (!body || typeof body.id !== 'string' || !body.id) {
-      return reply.code(400).send({ error: 'workflow must have a string `id` field' });
-    }
-    if (!SAFE_REPO_NAME.test(body.id) || body.id.length > 128) {
-      return reply.code(400).send({ error: 'workflow id must start with a letter/digit and contain only letters, digits, dots, hyphens, and underscores' });
-    }
-    try {
-      const id = await adapter.registerWorkflow(body as import('../core/types.js').WorkflowDef);
-      audit.record('workflow.registered', actorOf(req), { detail: { id } });
-      return reply.code(201).send({ id, status: 'registered' });
-    } catch (err) {
-      return reply.code(400).send({ error: message(err) });
-    }
+  // (X-MIG M11) User-authored workflow defs are retired: a user saves a PRESET — catalog steps the
+  // engine composes and governs — with `PUT /presets/:name`. A def posted here would be a free-form
+  // def the engine no longer keeps, so the route answers 410 with the replacement.
+  app.post(`${V}/workflows`, async (_req, reply) => {
+    return reply.code(410).send({
+      error: 'POST /workflows is retired: save a preset instead (PUT /api/v1/presets/:name with {steps})',
+      replacement: 'PUT /api/v1/presets/:name',
+    });
   });
 
   // Save an inline script to ~/.wicked/scripts/ and return its path.

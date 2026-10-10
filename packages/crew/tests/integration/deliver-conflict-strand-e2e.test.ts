@@ -33,6 +33,7 @@ import { createServer } from '../../src/api/server.js';
 import { DELIVER_LIFT_CONFLICT_MARKER } from '../../src/core/deliver.js';
 import { removeScratch } from '../setup/scratch.js';
 import { baseSkillOff } from '../setup/base-skill-off.js';
+import { registerDef } from '../support/register-def.js';
 
 const SEATS = JSON.stringify([
   { key: 'alpha', display_name: 'Alpha', binary: 'alpha', headless_invocation: 'alpha {PROMPT}' },
@@ -223,7 +224,7 @@ beforeAll(async () => {
   baseUrl = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`;
 
   await adapter.registerRepo('deliver-418-ws', clone);
-  const wf = await postJson('/api/v1/workflows', WORK_WORKFLOW);
+  const wf = await registerDef(adapter, WORK_WORKFLOW);
   expect(wf.status).toBe(201);
 }, 60_000);
 

@@ -88,6 +88,7 @@ function waitForFrame(pred: (f: Frame) => boolean, label: string, ms = 60000): P
  */
 const STUB_AGENT = `
 import { createInterface } from 'node:readline';
+import { registerDef } from '../support/register-def.js';
 const rl = createInterface({ input: process.stdin });
 const w = (obj) => process.stdout.write(JSON.stringify(obj) + '\\n');
 let promptId = null;
@@ -212,10 +213,7 @@ afterAll(async () => {
 
 describe('ACP elicitation end-to-end (real engine + scripted agent)', () => {
   it('registers the single-phase workflow', async () => {
-    const res = await fetch(`${baseUrl}/api/v1/workflows`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    const res = await registerDef(adapter, {
         id: WORKFLOW_ID,
         phases: [
           {
@@ -233,8 +231,7 @@ describe('ACP elicitation end-to-end (real engine + scripted agent)', () => {
             validator_pin: null,
           },
         ],
-      }),
-    });
+      });
     expect(res.status).toBe(201);
   });
 

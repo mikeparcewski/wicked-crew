@@ -41,6 +41,7 @@ import type { TestSet } from '../../src/qe/test-sets.js';
 import { removeScratch } from '../setup/scratch.js';
 import { baseSkillOff } from '../setup/base-skill-off.js';
 import { createRequire } from 'node:module';
+import { registerDef } from '../support/register-def.js';
 
 /**
  * Is the installed `wicked-core-ts` at least `maj.min.pat`? A tests-only twin of the adapter's
@@ -317,7 +318,7 @@ beforeAll(async () => {
 // X-MIG M11: the shipped id is a built-in preset now, so a stand-in under it is refused at
 // registration; the two skipped cases that use this need a preset-shaped stand-in to come back.
 async function armQeAuthor(def: WorkflowDef): Promise<void> {
-  const res = await postJson('/api/v1/workflows', def);
+  const res = await registerDef(adapter, def);
   expect(res.status, JSON.stringify(res.body)).toBe(201);
   expect(adapter.getWorkflow(QE_AUTHOR_TESTS_WORKFLOW)?.phases).toEqual(def.phases);
 }

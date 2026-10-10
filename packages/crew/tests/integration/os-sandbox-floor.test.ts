@@ -24,6 +24,7 @@ import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
 import { removeScratch } from '../setup/scratch.js';
 import { baseSkillOff } from '../setup/base-skill-off.js';
+import { registerDef } from '../support/register-def.js';
 
 const SEAT = 'floor-seat';
 const WORKFLOW = 'os-sandbox-floor-build';
@@ -113,7 +114,7 @@ beforeAll(async () => {
   await adapter.registerRepo('os-sandbox-floor-ws', repo);
   const repoId = (await adapter.listRepos()).find((r) => r.name === 'os-sandbox-floor-ws')!.id;
 
-  const wf = await postJson('/api/v1/workflows', {
+  const wf = await registerDef(adapter, {
     id: WORKFLOW,
     phases: [
       {

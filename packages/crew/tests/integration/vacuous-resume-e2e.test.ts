@@ -30,6 +30,7 @@ import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
 import { removeScratch } from '../setup/scratch.js';
 import { baseSkillOff } from '../setup/base-skill-off.js';
+import { registerDef } from '../support/register-def.js';
 
 const SEATS = JSON.stringify([
   { key: 'alpha', display_name: 'Alpha', binary: 'alpha', headless_invocation: 'alpha {PROMPT}' },
@@ -206,7 +207,7 @@ beforeAll(async () => {
   const repos = await adapter.listRepos();
   repoId = repos.find((r) => r.name === 'vacuous-e2e-ws')!.id;
   for (const wf of [NOOP_WORKFLOW, WORK_WORKFLOW, SLOW_WORKFLOW]) {
-    const res = await postJson('/api/v1/workflows', wf);
+    const res = await registerDef(adapter, wf);
     expect(res.status).toBe(201);
   }
 }, 60_000);

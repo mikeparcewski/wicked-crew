@@ -51,6 +51,7 @@ import { CREW_RUN_ID_FIELD } from '../../src/qe/ledger.js';
 import type { RecordedEvent } from '../../src/core/types.js';
 import { removeScratch } from '../setup/scratch.js';
 import { baseSkillOff } from '../setup/base-skill-off.js';
+import { registerDef } from '../support/register-def.js';
 
 const FIXTURE = fileURLToPath(new URL('../fixtures/qe-ledger-pass', import.meta.url));
 /** The 6b QE run the fixture records (its PASS verdict landed 2026-08-12T02:31:41Z). */
@@ -145,11 +146,7 @@ beforeAll(async () => {
   // minus the onboarding launch this test does not need) and the workflow through the API.
   const repo = await adapter.registerRepo('qe-accept-ws', workspace);
 
-  const wfRes = await fetch(`${baseUrl}/api/v1/workflows`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(ACCEPT_WORKFLOW),
-  });
+  const wfRes = await registerDef(adapter, ACCEPT_WORKFLOW);
   expect(wfRes.status).toBe(201);
 
   // Launch the governed run over the daemon's own surface.

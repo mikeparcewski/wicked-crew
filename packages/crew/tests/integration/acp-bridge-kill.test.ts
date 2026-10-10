@@ -101,6 +101,7 @@ function waitForFrame(pred: (f: Frame) => boolean, label: string, ms = 90_000): 
 const STUB_AGENT = `
 import { createInterface } from 'node:readline';
 import { existsSync, writeFileSync } from 'node:fs';
+import { registerDef } from '../support/register-def.js';
 const [pidFile, completeFlag] = process.argv.slice(2);
 const rl = createInterface({ input: process.stdin });
 const w = (obj) => process.stdout.write(JSON.stringify(obj) + '\\n');
@@ -233,10 +234,7 @@ async function launchRun(sessionId: string): Promise<void> {
 
 describe('kill -9 of an ACP worker mid-turn (crew#340)', () => {
   it('registers the single-phase workflow', async () => {
-    const res = await fetch(`${baseUrl}/api/v1/workflows`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    const res = await registerDef(adapter, {
         id: WORKFLOW_ID,
         phases: [
           {
@@ -254,8 +252,7 @@ describe('kill -9 of an ACP worker mid-turn (crew#340)', () => {
             validator_pin: null,
           },
         ],
-      }),
-    });
+      });
     expect(res.status).toBe(201);
   });
 

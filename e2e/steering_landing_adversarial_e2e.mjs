@@ -195,15 +195,14 @@ try {
   // ════ D. ordinary non-steering human gate: byte-identical behavior ════════
   {
     const before = (await rules()).length;
-    const reg = await send('POST', '/workflows', {
-      id: 'plain-gated',
-      is_system: false,
-      phases: [
-        { id: 'think', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-        { id: 'decide', kind: 'review', gate_type: 'value', gate: { human_confirm: { unconditional: true } }, executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['think'], role: 'evaluator', skill_ref: null, allowed_skills: [], validator_pin: null },
+    // X-MIG M11: a user's own workflow is a PRESET (POST /workflows is retired, 410).
+    const reg = await send('PUT', '/presets/plain-gated', {
+      steps: [
+        { catalog: 'understand', id: 'think' },
+        { catalog: 'review', id: 'decide', depends_on: ['think'], gate: { human_confirm: { unconditional: true } } },
       ],
     });
-    check('D: custom non-steering workflow registered', reg.status === 201, JSON.stringify(reg.body));
+    check('D: custom non-steering preset saved', reg.status === 200 || reg.status === 201, JSON.stringify(reg.body));
     const launch = await send('POST', '/runs', { problem: 'Ordinary gated run: summarize the plan and pause for a decision.', workflow: 'plain-gated' });
     check('D: ordinary run launched', launch.status === 201, JSON.stringify(launch.body));
     const runId = launch.body.runId;
