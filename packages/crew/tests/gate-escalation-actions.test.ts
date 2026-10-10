@@ -40,6 +40,17 @@ describe('GateSchema — the escalation arms', () => {
     }
   });
 
+  it('core#820: a consent choice `consent:<id>` is an approve-shaped arm too; a bare or malformed one is refused', () => {
+    const ok: GateDecision = { approve: true, action: 'consent:worker' };
+    expect(GateSchema.safeParse(ok).success).toBe(true);
+    expect(GateSchema.safeParse({ approve: true, action: 'consent:operator', ord: 7 }).success).toBe(true);
+    expect(GateSchema.safeParse({ approve: false, action: 'consent:worker' }).success).toBe(false);
+    expect(GateSchema.safeParse({ approve: true, action: 'consent:worker', amend: 'x' }).success).toBe(false);
+    for (const bad of ['consent:', 'consent:a b', 'consent:../x', `consent:${'x'.repeat(65)}`]) {
+      expect(GateSchema.safeParse({ approve: true, action: bad }).success, bad).toBe(false);
+    }
+  });
+
   it('an unknown arm is still refused', () => {
     expect(GateSchema.safeParse({ approve: true, action: 'extend_forever' }).success).toBe(false);
   });
@@ -115,6 +126,12 @@ describe('POST /runs/:id/gate — the escalation arms reach the engine', () => {
     expect(res.statusCode).toBe(200);
     expect(confirmCalls).toEqual([['run-gated', true, undefined, action, undefined, undefined]]);
     expect(recorded[0]!.detail).toMatchObject({ approve: true, action });
+  });
+
+  it('core#820: `consent:operator` reaches the engine as the arm, like the escalation tokens', async () => {
+    const res = await gate({ approve: true, action: 'consent:operator' });
+    expect(res.statusCode).toBe(200);
+    expect(confirmCalls).toEqual([['run-gated', true, undefined, 'consent:operator', undefined, undefined]]);
   });
 
   it("the engine's refusal (a gate the arm does not answer) is a 409 carrying its words; nothing is audited", async () => {

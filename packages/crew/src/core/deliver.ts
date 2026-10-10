@@ -1594,8 +1594,8 @@ export function composeDeliverWorkflow(
     runUrl: runUrlFor(configuredPublicOrigin(), runId),
     revisesPr: revisesPr === null ? null : { number: revisesPr.number, url: revisesPr.url },
   });
-  const install = base.phases.find((p) => p.id === INSTALL_PHASE_ID);
-  const deliver = deliverPrPhase(install !== undefined ? [...install.depends_on] : last !== undefined ? [last.id] : [], intent, {
+  const anchor = base.phases[installAnchorIndex(base.phases)];
+  const deliver = deliverPrPhase(anchor !== undefined ? [...anchor.depends_on] : last !== undefined ? [last.id] : [], intent, {
     runId,
     facts,
     apiOrigin,
@@ -1619,17 +1619,29 @@ export function composeDeliverWorkflow(
 
 /** The base phase a composed deliver goes BEFORE (the mcp-server drop-in's gated install). */
 export const INSTALL_PHASE_ID = 'install';
+/** core#820: the install's dry run. The consent gate reads its plan from the phase the gated unit
+ *  DEPENDS ON, so deliver goes before the dry run, never between it and the install. */
+export const INSTALL_PLAN_PHASE_ID = 'install-plan';
+
+/** The phase deliver goes before: the install's dry run when there is one (core#820: the install
+ *  keeps depending on its plan, which is where the consent gate reads the write targets), else the
+ *  install itself; `-1` when the def has neither. */
+export function installAnchorIndex(phases: readonly { id: string }[]): number {
+  const plan = phases.findIndex((p) => p.id === INSTALL_PLAN_PHASE_ID);
+  return plan >= 0 ? plan : phases.findIndex((p) => p.id === INSTALL_PHASE_ID);
+}
 
 /**
  * The one id-keyed compose rule (DES-mcp-server-workflow): when the base def carries a phase with id
- * `install`, `deliver` takes `install`'s `depends_on` as its own (the caller built it so), `install`
+ * `install` (or its dry run `install-plan`, which then takes the place of `install` below — core#820),
+ * `deliver` takes `install`'s `depends_on` as its own (the caller built it so), `install`
  * then depends on `["deliver"]`, and `deliver` sits immediately before `install` in the array — so
  * the pull request exists when the install gate asks. Without an `install` phase, deliver is
  * appended after the last phase, as always. Pure: the base phases are not mutated.
  */
 export function placeDeliverBeforeInstall<P extends { id: string; depends_on: string[] }>(phases: readonly P[], deliverPhase: P): P[] {
-  const at = phases.findIndex((p) => p.id === INSTALL_PHASE_ID);
+  const at = installAnchorIndex(phases);
   if (at < 0) return [...phases, deliverPhase];
-  const install = { ...phases[at]!, depends_on: [deliverPhase.id] };
-  return [...phases.slice(0, at), deliverPhase, install, ...phases.slice(at + 1)];
+  const next = { ...phases[at]!, depends_on: [deliverPhase.id] };
+  return [...phases.slice(0, at), deliverPhase, next, ...phases.slice(at + 1)];
 }
