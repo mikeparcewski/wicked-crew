@@ -1,33 +1,33 @@
-// DES-mcp-server-workflow, crew half: the `mcp-server` drop-in core ships (wicked-core
-// workflows/mcp-server.json) is served from crew's BUILTIN_WORKFLOWS mirror, delivers by default
-// (its build phase writes code), and the per-run deliver composer places `deliver` BEFORE the gated
-// `install` Tool phase, so the pull request exists when the install gate asks. The field-for-field
-// equality with core's JSON lives in builtin-overlay-shadow.test.ts (MIRRORED_IDS), with the other
-// drop-ins.
+// DES-mcp-server-workflow, crew half: `mcp-server` is the engine's built-in preset (X-MIG M12), and
+// crew serves it DERIVED from that preset and the phase catalog (X-MIG M11, no mirror): it delivers
+// by default (its build step writes code), and the per-run deliver composer, for a runtime def that
+// carries an install, places `deliver` BEFORE the gated `install` Tool phase so the pull request
+// exists when the install gate asks. (A delivering preset launch: the engine places it, M12.)
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { existsSync, mkdtempSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { BUILTIN_WORKFLOWS, CoreAdapter, humanGatePhaseIds } from '../src/core/adapter.js';
+import { CoreAdapter, humanGatePhaseIds } from '../src/core/adapter.js';
+import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
 import { composeDeliverWorkflow, DELIVER_PHASE_ID, EVIDENCE_FLOOR_PIN, INSTALL_PHASE_ID, INSTALL_PLAN_PHASE_ID, placeDeliverBeforeInstall } from '../src/core/deliver.js';
 import type { WorkflowDef } from '../src/core/types.js';
 import { orderMayApprove } from '../src/standing-orders/evaluator.js';
 import { removeScratch } from './setup/scratch.js';
 
-const SEATS = JSON.stringify([{ key: 'alpha', display_name: 'Alpha', binary: 'alpha', headless_invocation: 'alpha {PROMPT}' }]);
 
 let adapter: CoreAdapter;
 let dir: string;
 let overlayDir: string;
 let priorOverlayDir: string | undefined;
 
-beforeAll(() => {
+beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), 'mcp-server-mirror-'));
   overlayDir = join(dir, 'workflows');
   priorOverlayDir = process.env['WICKED_WORKFLOWS_DIR'];
   process.env['WICKED_WORKFLOWS_DIR'] = overlayDir;
   adapter = new CoreAdapter({ dbPath: join(dir, 'mirror.db'), stub: true });
+  await adapter.loadBuiltinCatalog(() => {});
 });
 
 afterAll(() => {
@@ -43,7 +43,7 @@ const served = (): WorkflowDef => {
   return def!;
 };
 
-describe('the mcp-server mirror', () => {
+describe('the mcp-server built-in, served from the engine\'s preset (X-MIG M11)', () => {
   it('serves the nine phases in order with their kinds, roles, gates, pins and skill_refs', () => {
     const def = served();
     expect(def.phases.map((p) => [p.id, p.kind, p.role, p.validator_pin, p.skill_ref])).toEqual([
@@ -51,7 +51,8 @@ describe('the mcp-server mirror', () => {
       ['source-discovery', 'recon', 'neutral', null, 'wicked-garden-mcp-scaffold'],
       ['design', 'recon', 'neutral', null, 'wicked-garden-mcp-scaffold'],
       ['build', 'build', 'creator', EVIDENCE_FLOOR_PIN, 'wicked-garden-mcp-scaffold'],
-      ['test', 'test', 'neutral', EVIDENCE_FLOOR_PIN, 'wicked-garden-qe-contract-testing-engineer'],
+      // The preset's one bold cell (M12): test runs on the evaluator role.
+      ['test', 'test', 'evaluator', EVIDENCE_FLOOR_PIN, 'wicked-garden-qe-contract-testing-engineer'],
       ['security-review', 'review', 'evaluator', EVIDENCE_FLOOR_PIN, 'wicked-garden-platform-security-engineer'],
       ['observability-review', 'review', 'evaluator', EVIDENCE_FLOOR_PIN, 'wicked-garden-qe-observability-test-engineer'],
       ['install-plan', 'build', 'neutral', null, null],
@@ -104,15 +105,6 @@ describe('the mcp-server mirror', () => {
 
   it('delivers by default: the build phase is a code-writing non-evaluator (the launch route\'s rule)', () => {
     expect(served().phases.some((p) => p.executes_code === true && p.role !== 'evaluator')).toBe(true);
-  });
-
-  it('a launch writes the drop-in to the overlay (core does not seed it)', async () => {
-    try {
-      await adapter.launchRun({ problem: 'probe mcp-server', sessionId: 's-mcp-server', clisJson: SEATS, workflow: 'mcp-server' });
-    } catch {
-      /* the stub run's own outcome is not what this measures */
-    }
-    expect(existsSync(join(overlayDir, 'mcp-server.json'))).toBe(true);
   });
 });
 

@@ -4,7 +4,8 @@
 // out when it paused. `humanGatePhaseIds` is the launch-time signal (surfaced on GET /workflows/:id).
 
 import { describe, expect, it } from 'vitest';
-import { humanGatePhaseIds, BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
+import { humanGatePhaseIds } from '../src/core/adapter.js';
+import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
 import type { PhaseDef, WorkflowDef } from '../src/core/types.js';
 
 function phase(id: string, gate: PhaseDef['gate']): PhaseDef {

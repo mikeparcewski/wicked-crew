@@ -21,6 +21,7 @@ import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
 import type { RecordedEvent, RepoEntry, SessionView } from '../../src/core/types.js';
 import { removeScratch } from '../setup/scratch.js';
+import { BUILTIN_WORKFLOWS } from '../support/builtin-fixtures.js';
 
 const FIXTURE = fileURLToPath(new URL('../fixtures/qe-ledger-pass', import.meta.url));
 const QE_RUN_ID = '7ec47687-fb15-4592-bf69-5121359f8bab';
@@ -208,6 +209,11 @@ beforeAll(async () => {
     repoEntry('repo-cross', crossRun),
   ];
   adapter.runEvents = async (runId: string) => historyOf(runId);
+  // These runs launched the `feature` and `capture-learnings` DEFS (before X-MIG M11 made them
+  // presets), so the defs are read as runtime-registered ones: acceptance reads only the defs the
+  // engine actually holds.
+  adapter.listRuntimeWorkflows = () =>
+    BUILTIN_WORKFLOWS.filter((w) => w.id === 'feature' || w.id === 'capture-learnings');
 
   app = await createServer(adapter);
   await app.listen({ port: 0, host: '127.0.0.1' });

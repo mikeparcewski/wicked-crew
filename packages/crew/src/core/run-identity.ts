@@ -52,16 +52,21 @@ export const SYSTEM_WORKFLOWS: ReadonlySet<string> = new Set([
 
 /** Whether a preset/workflow name is a system one ({@link SYSTEM_WORKFLOWS}). */
 export function isSystemWorkflow(name: string | null | undefined): boolean {
-  return typeof name === 'string' && SYSTEM_WORKFLOWS.has(name);
+  // (X-MIG M11) A campaign's composed node preset (`campaign-<campaign>-<scenario>`) is machine-owned.
+  return typeof name === 'string' && (SYSTEM_WORKFLOWS.has(name) || name.startsWith(CAMPAIGN_NODE_PREFIX));
 }
 
+/** The campaign node prefix (`campaigns/plan.ts` CAMPAIGN_WORKFLOW_PREFIX, restated to keep this module dependency-free). */
+const CAMPAIGN_NODE_PREFIX = 'campaign-';
+
 /**
- * A def with its `is_system` flag set from {@link SYSTEM_WORKFLOWS} — the ONE source of the flag.
+ * A def with its `is_system` flag set from {@link isSystemWorkflow} — the ONE source of the flag.
  * Returns the same object when it already agrees (a registered def's own `is_system` is not a
  * second source: it is overwritten either way).
  */
 export function withSystemFlag<T extends WorkflowDef>(def: T): T {
-  const system = SYSTEM_WORKFLOWS.has(def.id);
+  // The one rule for defs, presets and runs alike ({@link isSystemWorkflow}, codex r1 on crew A).
+  const system = isSystemWorkflow(def.id);
   if (system) return def.is_system === true ? def : { ...def, is_system: true };
   if (!('is_system' in def)) return def;
   const rest = { ...def };

@@ -26,6 +26,7 @@ import { DELIVER_PHASE_ID } from '../src/core/deliver.js';
 import { DELIVERABLE_FLOOR_PHASE_ID } from '../src/core/deliverable-floor.js';
 import type { LaunchOptions } from 'wicked-core-ts';
 import type { PhaseDef, WorkflowDef } from '../src/core/types.js';
+import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
 import { removeScratch } from './setup/scratch.js';
 
 let dir: string;
@@ -74,6 +75,11 @@ beforeEach(() => {
   // These tests pin crew's per-run COMPOSITION over a registered def, so the engine here holds no
   // preset: `bug` resolves as the def crew serves.
   stubCore(adapter, 'listPresets', () => Promise.resolve('[]'));
+  // …and the def served under `bug` is the last shipped bug def (X-MIG M11: crew keeps no mirror;
+  // the test fixture stands in for a registered def).
+  const fixture = BUILTIN_WORKFLOWS.find((w) => w.id === 'bug')!;
+  const served = adapter.getWorkflow.bind(adapter);
+  adapter.getWorkflow = (id: string) => (id === 'bug' ? fixture : served(id));
 });
 
 afterEach(() => {

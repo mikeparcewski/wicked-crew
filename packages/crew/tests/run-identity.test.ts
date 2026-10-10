@@ -19,7 +19,7 @@ import { CoreAdapter, engineSupportsPlanLaunch } from '../src/core/adapter.js';
 import { createServer } from '../src/api/server.js';
 import { canDeliverResolver, runCanDeliver } from '../src/api/delivery-index.js';
 import { acceptanceRequirementOf, resolveAcceptanceGate } from '../src/qe/acceptance.js';
-import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
+import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
 import { isSteeringAuthorRun } from '../src/api/steering-landing.js';
 import { isQeAuthorRun } from '../src/qe/test-sets.js';
 import {
@@ -208,15 +208,16 @@ describe('the system list is ONE list', () => {
     const dir = mkdtempSync(join(tmpdir(), 'x2-system-'));
     const adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: true });
     try {
+      // X-MIG M11: the served built-ins are derived from the engine's presets at boot.
+      await adapter.loadBuiltinCatalog(() => {});
       for (const def of adapter.listWorkflows()) {
         expect(def.is_system === true, def.id).toBe(SYSTEM_WORKFLOWS.has(def.id));
       }
       expect(adapter.getWorkflow('capture-learnings')?.is_system).toBe(true);
       expect(adapter.getWorkflow('feature')?.is_system).toBeUndefined();
-      // M3/M4: `chat` and `onboarding` are the engine's built-in presets, not defs — the preset
-      // carries the same name-keyed flag, so a surface classifies them exactly as before.
-      expect(adapter.getWorkflow('chat')).toBeNull();
-      expect(adapter.getWorkflow('onboarding')).toBeNull();
+      // `chat` and `onboarding` are served derived from their presets, flagged system like the preset.
+      expect(adapter.getWorkflow('chat')?.is_system).toBe(true);
+      expect(adapter.getWorkflow('onboarding')?.is_system).toBe(true);
       if (adapter.presetsSupported()) {
         const presets = await adapter.listPresets();
         for (const p of presets) expect(p.system, p.name).toBe(SYSTEM_WORKFLOWS.has(p.name));

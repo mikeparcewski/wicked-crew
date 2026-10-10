@@ -15,7 +15,8 @@ import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { DeliveryFreeze, isDeliverUnit } from '../src/api/delivery-freeze.js';
 import type { AuditLog } from '../src/api/audit.js';
-import { BUILTIN_WORKFLOWS, type CoreAdapter } from '../src/core/adapter.js';
+import { type CoreAdapter } from '../src/core/adapter.js';
+import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
 import type { AuditEntry } from '../src/core/types.js';
 
 const RUN = 'run-deliver';

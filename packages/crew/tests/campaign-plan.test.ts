@@ -317,3 +317,17 @@ describe('buildReconCampaign — the fan as a first-class campaign', () => {
     ).toThrow(/at least 2 resolved repos/);
   });
 });
+
+describe('scenarioWorkflowId — bounded by the engine\'s preset-name cap (X-MIG M11, codex r1 on crew A)', () => {
+  it('a 64-char campaign id with a scenario still names a valid preset: at most 64 chars, deterministic, distinct per node', () => {
+    const camp = 'c'.repeat(64);
+    const a = scenarioWorkflowId(camp, 's');
+    expect(a.length).toBeLessThanOrEqual(64);
+    expect(a).toMatch(/^campaign-[0-9a-f]{16}$/);
+    expect(scenarioWorkflowId(camp, 's')).toBe(a);
+    expect(scenarioWorkflowId(camp, 't')).not.toBe(a);
+  });
+  it('a short pair keeps the readable composed name', () => {
+    expect(scenarioWorkflowId('camp-1', 'a')).toBe('campaign-camp-1-a');
+  });
+});

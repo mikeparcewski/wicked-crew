@@ -19,7 +19,8 @@ import { registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import type { AuditLog } from '../src/api/audit.js';
-import { BUILTIN_WORKFLOWS, type CoreAdapter } from '../src/core/adapter.js';
+import { type CoreAdapter } from '../src/core/adapter.js';
+import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
 import { DELIVER_PUSHED_NO_PR_MARKER, DELIVER_UNVERIFIED_MARKER, composeDeliverWorkflow } from '../src/core/deliver.js';
 import { qeAcceptanceFromView } from '../src/api/delivery-assurance.js';
 import type { AcceptanceView } from '../src/qe/acceptance.js';
@@ -448,7 +449,8 @@ describe('QE-IN-APP-WORKFLOWS at launch — the operator\'s explicit skip or for
       launchRun: vi.fn(async (input: unknown) => { launched.push(input); return 'x'; }),
     } as unknown as CoreAdapter, new GateCache(), new ElicitationCache());
     await a.ready();
-    for (const workflow of ['feature', 'migration']) {
+    // core-ts 0.8.2: `bug` and `mcp-server` are QE presets too (codex r3 on crew A).
+    for (const workflow of ['feature', 'migration', 'bug', 'mcp-server']) {
       const res = await a.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'p', workflow, deliverGate: 'auto', clisJson: '[]' } });
       expect(res.statusCode, `${workflow}: ${res.body}`).toBe(400);
       expect(res.json().error).toMatch(/requires QE acceptance/);

@@ -315,14 +315,6 @@ export function isSafeRefName(name: string): boolean {
  *  last line (crew re-derives "delivered" from that line — `prUrlFrom`). */
 const SAFE_PR_URL = /^https:\/\/[A-Za-z0-9.-]+\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/pull\/[0-9]+$|^https:\/\/dev\.azure\.com\/[A-Za-z0-9._~%()-]+\/[A-Za-z0-9._~%()-]+\/_git\/[A-Za-z0-9._~%()-]+\/pullrequest\/[0-9]+$/;
 
-/** The `bug` def's `fix` phase instructions — the SAME literal wicked-core's `bug_def()` carries
- *  (`BUG_FIX_SWEEP_INSTRUCTIONS`, DES-L9 BC-60 / core#432): both carriers are live (`deliver:pr`
- *  plans from this mirror, `deliver:none` from core's def), so one string, pinned by a test. Short
- *  (≤ 90 ASCII bytes) on purpose — the PTY carrier's whole prompt is 1000 B and core's budget test
- *  keeps ≥ 300 B of intent headroom. */
-export const BUG_FIX_SWEEP_INSTRUCTIONS =
-  'Update every consumer of behaviour this fix retires or changes: tests, docs, comments.';
-
 /** (crew#933) The seam the Azure DevOps resolver runs the deliver helper through (`node ado.mjs …`). */
 export type AdoHelperExec = (args: string[], opts: { timeoutMs: number }) => Promise<{ stdout: string; stderr: string; code: number | null }>;
 

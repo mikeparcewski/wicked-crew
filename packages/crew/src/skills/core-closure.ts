@@ -1,11 +1,9 @@
 /**
  * Core-by-reference = the REGISTERED-REFERENCE CLOSURE (design v3 §5), recomputed at every publish:
  *
- *   seeds     every `skill_ref` of every workflow the daemon knows — core's drop-ins as mirrored in
- *             `BUILTIN_WORKFLOWS` (asserted field-for-field against wicked-core's `workflows/*.json`
- *             by tests/builtin-overlay-shadow.test.ts), crew's TS-generated workflows
- *             (capture-learnings → repo-learn, domain-extraction → domain/extractor/coverage) and
- *             any user-registered def — `adapter.listWorkflows()` is that one list;
+ *   seeds     every `skill_ref` of every runtime-registered def (the user's and crew's seams',
+ *             `adapter.listRuntimeWorkflows()`), required; and the engine's built-in presets' refs
+ *             (`builtinPresetSkillRefs`), core when the catalog holds them (`coreSkillRefs`, X-MIG M11);
  *   closure   plus each referenced skill's mandates, transitively. A skill mandates another in two
  *             ways, and BOTH are read (a mandate that is missed is a phase the engine refuses):
  *

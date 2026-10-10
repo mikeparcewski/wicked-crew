@@ -25,6 +25,7 @@ import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CoreAdapter } from '../../src/core/adapter.js';
+import { BUILTIN_WORKFLOWS } from '../support/builtin-fixtures.js';
 import { createServer } from '../../src/api/server.js';
 import type { RecordedEvent, RepoEntry, SessionView } from '../../src/core/types.js';
 import { removeScratch } from '../setup/scratch.js';
@@ -178,6 +179,10 @@ beforeAll(async () => {
   adapter.runEvents = async (runId: string) => historyOf(runId);
   // The engine's catalog answer: the entries whose step re-verifies evidence.
   adapter.verifiedEvidenceCatalog = async () => new Set(['test', 'domain_coverage']);
+  // These `feature` runs are DEF runs (no team plan): their def is read from the registered defs
+  // (X-MIG M11 retired the built-in one), so the shipped feature def is registered here.
+  const featureDef = BUILTIN_WORKFLOWS.find((w) => w.id === 'feature')!;
+  adapter.listRuntimeWorkflows = () => [featureDef];
 
   app = await createServer(adapter);
   await app.listen({ port: 0, host: '127.0.0.1' });
