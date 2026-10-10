@@ -422,6 +422,7 @@ export class EditorRegistry {
   private commit(change: () => void): void {
     const records = new Map(this.records);
     const installed = new Map(this.installed);
+    const flags = { ...this.persistedFlags };
     change();
     try {
       this.writeState();
@@ -430,6 +431,7 @@ export class EditorRegistry {
       for (const [k, v] of records) this.records.set(k, v);
       this.installed.clear();
       for (const [k, v] of installed) this.installed.set(k, v);
+      this.persistedFlags = flags;
       throw err;
     }
   }

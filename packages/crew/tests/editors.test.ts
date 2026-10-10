@@ -368,11 +368,30 @@ describe('pack install: the gate, crew\'s conformance run, then the registry', (
     try {
       expect(() => reg.removeInstalled('acme-terms')).toThrow();
       expect(reg.get('acme-terms')).not.toBeNull();
+      expect(reg.isInstalled('acme-terms')).toBe(true);
       await expect(installPack(makePack({ version: '0.3.0' }), undefined, { check: passCheck, conformance: conformant(), registry: reg })).rejects.toThrow();
       expect(reg.get('acme-terms')!.manifest.version).toBe('0.1.0');
     } finally {
       chmodSync(home, 0o700);
     }
+  });
+
+  it('codex r4: a failed removal of a boot-skipped "off" editor keeps the "off" for its reinstall', async () => {
+    const { reg, home } = registry();
+    const root = makePack();
+    await installPack(root, false, { check: passCheck, conformance: conformant(), registry: reg });
+    const entry = join(root, 'editors', 'acme-terms', 'index.html');
+    writeFileSync(entry, 'tampered');
+    const booted = new EditorRegistry({ stateHome: home });
+    chmodSync(home, 0o500);
+    try {
+      expect(() => booted.removeInstalled('acme-terms')).toThrow();
+    } finally {
+      chmodSync(home, 0o700);
+    }
+    writeFileSync(entry, EDITOR_HTML);
+    const res = await installPack(root, undefined, { check: passCheck, conformance: conformant(), registry: booted });
+    expect(res.editors[0]!.enabled).toBe(false);
   });
 
   it('codex r1: readCapped never reads past the cap', () => {
