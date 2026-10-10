@@ -648,6 +648,9 @@ async function main(): Promise<void> {
     if (humanConfirm !== undefined) launchBody['humanConfirm'] = humanConfirm;
     if (workflow !== undefined) launchBody['workflow'] = workflow;
     if (repoRef !== undefined) launchBody['repoRef'] = repoRef;
+    // wicked-core#850: the EXPLICIT reduced-assurance opt-in (the creator's seat may evaluate its own
+    // work, disclosed on every receipt). Only the flag sends it; nothing defaults it on.
+    if (hasFlag(argv, '--reduced-assurance')) launchBody['reducedAssurance'] = true;
     const launchRes = await daemonFetch(port, `http://127.0.0.1:${port}/api/v1/runs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -658,9 +661,17 @@ async function main(): Promise<void> {
       console.error(`launch failed (${launchRes.status}): ${errBody.error ?? launchRes.statusText}`);
       process.exit(1);
     }
-    const { runId, freeText } = (await launchRes.json()) as { runId: string; freeText?: { notice: string } };
+    const { runId, freeText, assuranceNotice } = (await launchRes.json()) as {
+      runId: string;
+      freeText?: { notice: string };
+      assuranceNotice?: { message: string };
+    };
     // crew#755: say on stderr what a launch with no --workflow ran (stdout stays the ready line).
     if (freeText !== undefined) console.warn(`[crew] ${freeText.notice}`);
+    // wicked-core#850: a one-CLI roster under full assurance waits at a gate for a distinct seat.
+    if (assuranceNotice !== undefined) {
+      console.warn(`[crew] ${assuranceNotice.message} (wicked-crew start --reduced-assurance …)`);
+    }
     printReady({ mode: 'start', port, db: opts.dbPath, run: runId, startupMs: Math.round(performance.now() - t0) });
   } else if (command === 'resume') {
     const sessionId = flag(argv, '--session');

@@ -164,6 +164,13 @@ export interface LaunchRunInput {
    * interactive-review seam fills it with the seats that wrote the document under review (EP-C2).
    */
   excludeSeats?: string[];
+  /**
+   * (wicked-core#850 EX-01/EX-02, wicked-core-ts >= 0.7.46) The EXPLICIT opt-in to reduced
+   * assurance: the creator's seat may evaluate its own work and a gate may pass with its judge
+   * skipped for want of a distinct seat, both disclosed on every receipt. Sent only when `true`;
+   * crew never sets it on a caller's behalf (`core/assurance.ts`).
+   */
+  reducedAssurance?: boolean;
 }
 
 /** Default `workerStallMinutes` (crew#287): silent minutes before the stall watchdog fires. */

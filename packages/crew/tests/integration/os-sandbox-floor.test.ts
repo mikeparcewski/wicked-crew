@@ -149,6 +149,9 @@ beforeAll(async () => {
     humanConfirm: 'none',
     deliver: 'none',
     clisJson: JSON.stringify([seat]),
+    // wicked-core#850: one seat, so no distinct judge exists — under full assurance the pinned gate
+    // holds (EX-02). This smoke is about the containment floor, not assurance: opt in, disclosed.
+    reducedAssurance: true,
   });
   expect(launch.status, JSON.stringify(launch.body)).toBe(201);
 

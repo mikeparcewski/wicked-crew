@@ -10,7 +10,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, GovernanceReplayUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, humanGatePhaseIds, settingsFilePath } from '../core/adapter.js';
+import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, GovernanceReplayUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, addonSupportsReducedAssurance, humanGatePhaseIds, settingsFilePath } from '../core/adapter.js';
 import { codeGraphDb, codeGraphErrorStatus, requirementsGraph } from '../core/repoPaths.js';
 import type {
   ConformanceRule,
@@ -119,7 +119,8 @@ import {
 import { BASE_SKILL_POLICIES, BASE_SKILL_REF_SHAPE, baseSkillRemedy } from '../skills/base-skill.js';
 import { REQUIRED_GARDEN_VERSION } from '../skills/plugin-source.js';
 import type { EvalRunStore } from './eval-store.js';
-import { noEligibleSeatBody, parseNoEligibleSeat } from '../core/engine-roster.js';
+import { engineRosterJson, noEligibleSeatBody, parseNoEligibleSeat } from '../core/engine-roster.js';
+import { launchAssuranceNotice } from '../core/assurance.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
 import type { WatchRegistry } from '../watch/registry.js';
 import { isHumanOperator } from './watch-routes.js';
@@ -574,6 +575,11 @@ export const LaunchSchema = z.object({
    *  the issue. They are answered as `linkedIssues[].excluded`. Send only when
    *  `GET /health.capabilities.linkedIssuesExclude === true`. */
   excludeLinkedIssues: ExcludeLinkedIssuesSchema,
+  /** wicked-core#850 (api-types 0.102.0) — the EXPLICIT reduced-assurance opt-in: the creator's seat
+   *  may evaluate and a judge-less gate may pass, disclosed on every receipt. `false` is an explicit
+   *  "full assurance", the same as omitting it: the launcher never chooses for the caller, and a
+   *  full-assurance launch on a one-CLI roster is answered with `assuranceNotice` (`core/assurance.ts`). */
+  reducedAssurance: z.boolean().optional(),
 }).strict().refine((b) => b.plan === undefined || b.workflow === undefined, {
   message: 'plan and workflow are mutually exclusive — a launch carries a plan or names a preset, not both',
   path: ['plan'],
@@ -1499,6 +1505,10 @@ export function registerRoutes(
       askPath: typeof adapter.engineCapabilities === 'function' ? adapter.engineCapabilities().askPath : false,
       // WT-W1: repo-bound launches mint an evidence root only on an addon that takes the field.
       walkthroughRoots: typeof adapter.evidenceRootsSupported === 'function' ? adapter.evidenceRootsSupported() : false,
+      // wicked-core#850: `LaunchRunBody.reducedAssurance` is accepted (the installed addon carries the
+      // assurance contract); a one-CLI full-assurance launch answers `assuranceNotice`. A route set
+      // that cannot probe the addon reports no capability — never an invented one.
+      reducedAssurance: typeof adapter.engineCapabilities === 'function' && addonSupportsReducedAssurance(),
     };
     // wicked-core#411 / crew#497: the state-home blocker rides the health probe as a WARNING. The
     // daemon still SERVES (status stays ok — studio must load and show the blocker) but refuses to
@@ -2285,6 +2295,9 @@ export function registerRoutes(
       deliverDefaulted = true;
     }
     if (deliver === 'pr') input.deliver = 'pr';
+    // wicked-core#850 EX-01/EX-02: forwarded only when the caller sent it — crew never waives
+    // assurance on anyone's behalf (a one-CLI launch that did not is TOLD so in its answer, below).
+    if (b.reducedAssurance === true) input.reducedAssurance = true;
     // DES-L9 / crew#550 — REVISION: `revisesPr` names an OPEN same-repository pull request whose
     // head branch becomes the run's base (`baseRef`, crew-internal → the engine's
     // `LaunchSpec.base_ref`) and the push target of the composed deliver phase — the PR gains
@@ -2401,6 +2414,9 @@ export function registerRoutes(
         // trail says what the run will actually do, and whether the daemon decided it.
         deliver,
         ...(deliverDefaulted ? { deliverDefaulted: true } : {}),
+        // wicked-core#850: the caller's explicit assurance choice (the engine persists the contract
+        // on the session; this records WHO waived it).
+        ...(b.reducedAssurance !== undefined ? { reducedAssurance: b.reducedAssurance } : {}),
         // CREW-UX-3: the trail is the durable record of lineage — the retry index (and a
         // restarted daemon's hydrate) reads it back from exactly this entry.
         ...(b.retryOf !== undefined ? { retryOf: b.retryOf } : {}),
@@ -2455,7 +2471,11 @@ export function registerRoutes(
       // was built from, the launch answer says so (a recorded proof can disclose which garden ran).
       const skillsAhead = runtime.skills?.installedAheadFinding({ fresh: true }) ?? null; // fresh: an upgrade just before Send counts (codex r1)
       const skillsWarning = skillsAhead === null ? {} : { skillsWarning: { kind: skillsAhead.kind, severity: skillsAhead.severity, message: skillsAhead.message } };
-      return reply.code(201).send({ runId, ...(linkedIssues !== undefined ? { linkedIssues } : {}), ...freeText, ...skillsWarning });
+      // wicked-core#850: a full-assurance run on a one-CLI roster will wait at a gate for a seat that
+      // can evaluate or judge it; the answer names the explicit opt-in to relaunch with.
+      const notice = launchAssuranceNotice({ runId, reducedAssurance: b.reducedAssurance, engineClisJson: engineRosterJson(input.clisJson) });
+      const assuranceNotice = notice === null ? {} : { assuranceNotice: notice };
+      return reply.code(201).send({ runId, ...(linkedIssues !== undefined ? { linkedIssues } : {}), ...freeText, ...skillsWarning, ...assuranceNotice });
     } catch (err) {
       const msg = message(err);
       // DES-TEAMING-002 T3: a plan on an engine without the plan approval gate is an "upgrade the

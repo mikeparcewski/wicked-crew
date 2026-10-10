@@ -304,7 +304,8 @@ describe('wicked-studio#27 — ad-hoc grouping + campaigns rollup', () => {
     const ungrouped = await launch({ problem: 'plain', sessionId: 'run-p' });
     expect(ungrouped.status).toBe(201);
     // No grouping key on the 201; a launch with no workflow also carries its free-text notice (crew#755).
-    expect(Object.keys(ungrouped.body)).toEqual(['runId', 'freeText']);
+    // wicked-core#850: the test roster is one CLI, so a full-assurance launch also answers assuranceNotice.
+    expect(Object.keys(ungrouped.body)).toEqual(['runId', 'freeText', 'assuranceNotice']);
     // The engine input carries NO grouping key on any launch — grouped or not, the launch is
     // byte-identical to pre-0.19 behavior.
     expect(launchInputs).toHaveLength(3);

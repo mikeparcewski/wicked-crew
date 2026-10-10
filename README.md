@@ -83,6 +83,13 @@ curl -X POST http://127.0.0.1:7701/api/v1/runs \
 wicked-crew start --problem "Fix the flaky retry test" --workflow bug
 ```
 
+**With only one CLI signed in**, a governed run cannot be evaluated or judged by a seat other than the
+one that built it. Under the default (full) assurance the engine refuses a review on its builder's
+seat and holds a gate whose judge has no distinct seat, so the run waits for a second CLI; the launch
+answer says so (`assuranceNotice`). To proceed with one CLI, opt in explicitly:
+`"reducedAssurance": true` on `POST /runs`, or `wicked-crew start --reduced-assurance`. The creator's
+seat then evaluates its own work, and every receipt says `reduced`. crew never turns it on for you.
+
 ### Start on login
 
 A daemon started by hand dies with the machine. Register it as a per-user login service instead:

@@ -262,9 +262,8 @@ export interface HealthCapabilities {
    */
   walkthroughRoots?: boolean;
   /**
-   * (crew ≥ 0.9.0; wicked-core#850) `LaunchRunBody.reducedAssurance` is accepted, a launch that
-   * would hit the creator-seat refusal answers 409 {@link ReducedAssuranceRequiredBody}, delivery
-   * enforces `qe_acceptance` ({@link QeAcceptanceRefusal}) and gate / delivery responses carry
+   * (crew ≥ 0.9.0; wicked-core#850) `LaunchRunBody.reducedAssurance` is accepted, a one-CLI
+   * full-assurance launch answers `LaunchRunResponse.assuranceNotice`, delivery enforces `qe_acceptance` ({@link QeAcceptanceRefusal}) and gate / delivery responses carry
    * receipts. ABSENT on an older daemon — do not send the field (its strict schema 400s on it).
    */
   reducedAssurance?: boolean;
@@ -2037,24 +2036,20 @@ export interface QeAcceptanceRefusal {
 }
 
 /**
- * (crew ≥ 0.9.0, EX-01) The 409 body of `POST /runs` when the launch would hit the engine's
- * creator-seat refusal: the run has a build/recon phase and a review/test phase, its contract
- * requires a distinct evaluator, and the roster crew would hand the engine has exactly ONE usable
- * seat and nothing benched. Nothing was launched. The two ways forward are explicit: add a second
- * signed-in seat (or a second instance, `claude#2`), or resend the SAME body with
- * `reducedAssurance: true` — the creator's seat then evaluates its own work, disclosed on every
- * receipt. crew never applies the opt-in by itself.
+ * (crew ≥ 0.9.0, EX-01/EX-02) `LaunchRunResponse.assuranceNotice`: the run launched under FULL
+ * assurance on a roster whose usable seats are all ONE CLI, so no other seat can evaluate its work
+ * and no other identity can judge it — the engine will refuse a review on its builder's seat
+ * (`dead_seat` gate) or hold a judge-less gate (`judge_unavailable`), and the run waits for a seat.
+ * The ways forward are explicit: sign a second CLI in, or relaunch with `retryWith` merged into the
+ * launch body (the creator's seat then evaluates its own work, disclosed on every receipt). A client
+ * shows `message` and asks its operator; crew never applies the opt-in by itself.
  */
-export interface ReducedAssuranceRequiredBody {
-  code: 'reduced_assurance_required';
-  error: string;
-  remedy: string;
-  /** The one usable seat — the one that would both build and evaluate. */
-  seat: string;
-  /** The phase ids that would evaluate on it. */
-  phases: string[];
-  /** Resend the launch with these fields merged in to accept reduced assurance. */
-  retryWith: { reducedAssurance: true };
+export interface LaunchAssuranceNotice {
+  code: 'single_cli_roster';
+  message: string;
+  /** The usable seats, all of one CLI. */
+  seats: string[];
+  retryWith: { retryOf: string; reducedAssurance: true };
 }
 
 /** §3 B1 — the gate's decision depth, emitted alongside `gateDecided`. `denial` is the structured
@@ -4508,10 +4503,11 @@ export interface LaunchRunBody {
    * (crew ≥ 0.9.0; wicked-core#850 EX-01/EX-02) The EXPLICIT opt-in to reduced assurance: the
    * creator's seat may evaluate its own work and a pinned gate may pass with its judge skipped for
    * want of a distinct seat — both disclosed on every receipt (`AgentSession.assurance.mode:
-   * 'reduced'`). Omitted or `false`, a launch that would grade on its creator seat answers 409
-   * {@link ReducedAssuranceRequiredBody} (one usable seat), or parks at the engine's `dead_seat`
-   * gate. It never waives `qe_acceptance`. A client must ask its operator before sending `true`;
-   * send it only when `GET /health.capabilities.reducedAssurance === true`.
+   * 'reduced'`). Omitted or `false` (the same): full assurance — a run that would grade on its
+   * creator's seat parks at the engine's `dead_seat` gate, a gate whose judge had no distinct seat
+   * holds (`judge_unavailable`), and a one-CLI launch is answered with
+   * `LaunchRunResponse.assuranceNotice`. It never waives `qe_acceptance`. A client must ask its
+   * operator before sending `true`; send it only when `GET /health.capabilities.reducedAssurance === true`.
    */
   reducedAssurance?: boolean;
 }
@@ -4570,6 +4566,9 @@ export interface LaunchRunResponse {
    * same `skills.installed-ahead` finding `GET /diagnostics.skills.findings` carries.
    */
   skillsWarning?: { kind: 'skills.installed-ahead'; severity: 'warning'; message: string };
+  /** (crew ≥ 0.9.0; wicked-core#850) PRESENT when a full-assurance launch's usable seats are all one
+   *  CLI: the run will wait at a gate for a distinct seat. ABSENT otherwise. */
+  assuranceNotice?: LaunchAssuranceNotice;
 }
 
 /**
