@@ -7200,7 +7200,8 @@ export interface DiagnosticsSkillsFinding {
    *  an `error` under `'require'` (the engine refuses every launch at intake); cleared by a publish
    *  that hands it. Also carried as `DiagnosticsSkills.baseSkill.finding`; `skills.phase-skill`
    *  (`warning`, crew#661) = a subsystem's phases declare a skill the published snapshot did not hold
-   *  when it armed, so they run without it — one per `DiagnosticsSkills.phaseSkillGaps` entry;
+   *  when it armed, so they run without it — one per `DiagnosticsSkills.phaseSkillGaps` entry (none
+   *  since crew#935);
    *  `skills.garden` (`error`, api-types 0.78.0, crew#753) = the installed wicked-garden is older
    *  than the daemon requires (`GardenRequiredBody.required`), so it is not used: found at seed,
    *  the runtime is `config-error` and the engine is handed a refusal path. Rides
@@ -7277,7 +7278,9 @@ export interface DiagnosticsSkills {
   /** Subsystems whose phases run WITHOUT a skill their workflow declares (crew#661; additive) — one
    *  entry per subsystem, judged when that seam ARMED (the decision holds until the daemon restarts).
    *  Each entry also rides `findings` as a `skills.phase-skill` warning. `[]` when every armed seam
-   *  holds its skill; ABSENT on a daemon before this field (read it as unknown, not as `[]`). */
+   *  holds its skill; ABSENT on a daemon before this field (read it as unknown, not as `[]`). Always
+   *  `[]` from a daemon carrying crew#935: the interactive seams launch wicked-core's presets, which
+   *  always run their skill (a snapshot without it fails the run), so no seam arms without it. */
   phaseSkillGaps?: DiagnosticsPhaseSkillGap[];
 }
 

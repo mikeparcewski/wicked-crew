@@ -23,9 +23,10 @@
 //
 // The four ANSWERING seams — draft / edit / demo / chat, the ones that reply to interactive by
 // LAUNCHING A GOVERNED RUN — must not arm on a stub-engine daemon, and must still arm on a
-// production-engine one. Arming is observed through `registerWorkflow`: each seam registers its
-// own workflow def with the engine as the first thing it does, so a seam that never registers is a
-// seam that never opened a subscription.
+// production-engine one. Arming is observed through the engine-event subscription: each armed seam
+// subscribes to the engine's events exactly once (`adapter.onEvent`) to fold its runs, so the
+// production boot subscribes once per seam more than the stub boot. (The draft / edit / chat seams
+// registered a workflow def before crew#935; they launch wicked-core built-in presets now.)
 //
 // Both directions matter. "Refused under --stub" alone is satisfied by a guard that never arms
 // anything, which would silently retire the seams for every real daemon — so the production case
@@ -40,8 +41,10 @@ import type { CoreAdapter } from '../src/core/adapter.js';
 import type { SystemSettings, WorkflowDef } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
 
-/** Every workflow id an interactive seam armed with the engine this boot. */
+/** Every workflow id registered with the engine this boot (the seams register none since crew#935). */
 let registered: string[];
+/** How many engine-event subscriptions this boot opened. */
+let subscriptions: number;
 let tmp: string;
 
 /**
@@ -54,7 +57,10 @@ function fakeAdapter(stub: boolean): CoreAdapter {
     getSettings: async (): Promise<SystemSettings> => ({ graphNodeLimit: 150 }),
     projectsSupported: (): boolean => false,
     onLaunch: (): (() => void) => () => undefined, // the launch hook createServer registers (skills keystone, codex round 4)
-    onEvent: (): (() => void) => () => undefined,
+    onEvent: (): (() => void) => {
+      subscriptions += 1;
+      return () => undefined;
+    },
     registerWorkflow: async (def: WorkflowDef): Promise<string> => {
       registered.push(def.id);
       return 'registered';
@@ -77,30 +83,27 @@ async function bootWithSeams(stub: boolean): Promise<Awaited<ReturnType<typeof c
 describe('crew#309: the stub engine is never an answerer', () => {
   beforeEach(() => {
     registered = [];
+    subscriptions = 0;
     tmp = mkdtempSync(join(tmpdir(), 'crew309-'));
   });
   afterEach(() => {
     removeScratch(tmp);
   });
 
-  it('refuses to arm the interactive answering seams on a --stub daemon', async () => {
-    const app = await bootWithSeams(true);
-    try {
-      // A registered workflow here means a seam armed: it holds a durable cursor on the shared
-      // bus and will answer the next doc.created with a fabricated, gate-approved, empty run.
-      expect(registered).toEqual([]);
-    } finally {
-      await app.close();
-    }
-  });
-
-  it('still arms them on a production-engine daemon', async () => {
+  it('refuses to arm the interactive answering seams on a --stub daemon, and arms all three on a production one', async () => {
+    const stubApp = await bootWithSeams(true);
+    const stubSubscriptions = subscriptions;
+    await stubApp.close();
+    subscriptions = 0;
     const app = await bootWithSeams(false);
     try {
       // The guard must key on the ENGINE, not on "interactive seams are risky" — a real daemon
-      // answering interactive is the whole point of these seams.
-      expect(registered.length).toBeGreaterThan(0);
-      expect(registered).toContain('interactive-draft');
+      // answering interactive is the whole point of these seams. Each seam subscribes once, so
+      // three more subscriptions on the production boot means all three armed there and none
+      // armed on the stub (an armed stub seam holds a durable cursor on the shared bus and would
+      // answer the next doc.created with a fabricated, gate-approved, empty run).
+      expect(subscriptions - stubSubscriptions).toBe(3);
+      expect(registered.filter((id) => id.startsWith('interactive-'))).toEqual([]);
     } finally {
       await app.close();
     }

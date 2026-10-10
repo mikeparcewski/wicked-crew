@@ -27,7 +27,6 @@ import {
   EDIT_COMPLETED,
   INTERACTIVE_EDIT_BUS_FILTER,
   INTERACTIVE_EDIT_WORKFLOW,
-  INTERACTIVE_EDIT_WORKFLOW_DEF,
   parseStructuralFeedback,
   handoffKey,
   editIdempotencyKey,
@@ -215,41 +214,6 @@ describe('editProblem recall clause (DES-MEM-FACETED-001 Phase 3)', () => {
     expect(problem).not.toContain('undefined');
     // the propose clause (write side) rides every interactive prompt
     expect(problem).toContain('proposal.submit');
-  });
-});
-
-describe('the interactive-edit workflow def (workflows-as-data)', () => {
-  const def = INTERACTIVE_EDIT_WORKFLOW_DEF;
-
-  it('is a single creator-role build phase — the handoff already carries the plan', () => {
-    expect(def.id).toBe(INTERACTIVE_EDIT_WORKFLOW);
-    expect(def.phases.map((p) => p.id)).toEqual(['edit']);
-    expect(def.phases[0]?.role).toBe('creator');
-    expect(def.phases[0]?.depends_on).toEqual([]);
-  });
-
-  it('keeps the phase instruction single-line (the same PTY constraint as the problem)', () => {
-    for (const p of def.phases) {
-      expect(p.instructions ?? '').not.toMatch(/[\n\r]/);
-      expect((p.instructions ?? '').length).toBeGreaterThan(0);
-    }
-  });
-
-  it('arms no human gate and no validator floor — the seam’s own self-check + interactive’s INV-2 gate stand watch', () => {
-    for (const p of def.phases) {
-      expect(p.gate).toBe('auto');
-      expect(p.validator_pin).toBeNull();
-      expect(p.required_deliverables).toEqual([]);
-    }
-  });
-
-  it('carries the fragment-edit contract from the assist skill (Step 2/3), adapted', () => {
-    const edit = def.phases[0]?.instructions ?? '';
-    expect(edit).toContain('data-wid');
-    expect(edit).toContain('byte-for-byte'); // INV-2 at scale: preservation, not just non-minting
-    expect(edit).toContain('INV-2');
-    expect(edit).toContain('output_path');
-    expect(edit).toMatch(/never fabricate/i);
   });
 });
 
@@ -510,8 +474,9 @@ describe('startInteractiveEditSubscriber (real bus, fake engine)', () => {
     const sub = await arm(engine, { heartbeatMs: 60 });
     armProbe(bus);
 
-    // The workflow def rode the normal registration path before the cursor armed.
-    expect(engine.registered.map((w) => w.id)).toEqual([INTERACTIVE_EDIT_WORKFLOW]);
+    // crew#935: the workflow is the engine's built-in `interactive-edit` preset, so the seam
+    // registers no def of its own.
+    expect(engine.registered).toEqual([]);
 
     await emitFeedbackProcessed(bus);
     await waitFor(() => engine.launches.length === 1);
@@ -550,6 +515,36 @@ describe('startInteractiveEditSubscriber (real bus, fake engine)', () => {
       ).length;
     const before = beats();
     await waitFor(() => beats() >= before + 2);
+
+    // crew#935: narration reads the run's PLANNED units (the PA's `pa-scope`, the preset's `edit`
+    // creator, the floor's `critique`), not a def — and no crew floor unit follows the creator.
+    const narrated = (needle: string) => () =>
+      probeEvents.some(
+        (e) => e.event_type === STATUS_POSTED && String((e.payload as { message?: string }).message).includes(needle),
+      );
+    const planned = (ord: number, id: string, role: string) =>
+      engine.fire({
+        type: 'unitPlanned',
+        session: launch.sessionId,
+        ord,
+        description: `${id} — edit spike-doc ||| instructions`,
+        role,
+        executorType: 'agent',
+      } as unknown as CoreEvent);
+    planned(1, 'pa-scope', 'neutral');
+    planned(2, 'edit', 'creator');
+    planned(3, 'critique', 'evaluator');
+    engine.fire({ type: 'unitDispatched', session: launch.sessionId, ord: 1, attempt: 0 });
+    await waitFor(narrated('Crew phase 1/3: pa-scope'));
+    // The PA's output is not the rework (codex r6 on #938).
+    engine.fire({ type: 'unitOutputCaptured', session: launch.sessionId, ord: 1 } as unknown as CoreEvent);
+    await waitFor(narrated('pa-scope finished'));
+    engine.fire({ type: 'unitDispatched', session: launch.sessionId, ord: 2, attempt: 0 });
+    await waitFor(narrated('Crew is reworking the targeted block'));
+    engine.fire({ type: 'gateDecided', session: launch.sessionId, ord: 2, allow: true });
+    await waitFor(narrated('Gate approved the edit — crew checks the fragment files before they land'));
+    engine.fire({ type: 'unitDispatched', session: launch.sessionId, ord: 3, attempt: 0 });
+    await waitFor(narrated('Crew is reviewing the rework (critique)'));
 
     // The worker wrote a wid-preserving edit; completion emits edit.completed with the results.
     writeFileSync(outPath, '<h2 data-wid="slide-2-heading-1">Punchier!</h2>', 'utf8');

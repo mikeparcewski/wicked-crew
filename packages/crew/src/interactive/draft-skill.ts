@@ -7,24 +7,22 @@
  * `skill_ref: null`: no skill owned drafting, so no design floor and no self-check ran. The
  * garden fix is a skill whose `## Runtime` block names ONE command the author runs on the SAVED
  * file before "done" (`self_check.py <out.html> --pages N --exact --render --repo <snapshot>`);
- * crew's half is (1) to name that skill on the drafting phases and (2) to name in the TASK what
- * the command needs — the page budget the brief implies and the repository snapshot(s) claims
- * must trace to — exactly as the skill's "In a governed run" section expects.
+ * the skill rides the drafting steps of wicked-core's `interactive-*` presets (X-MIG M9,
+ * wicked-core#860), and crew's half is to name in the TASK what the command needs — the page budget
+ * the brief implies and the repository snapshot(s) claims must trace to — exactly as the skill's
+ * "In a governed run" section expects.
  *
- * GATED on the snapshot (design call, this module's one rule): the engine resolves `skill_ref`
- * against the published skills snapshot at PLAN time and REFUSES the run when the snapshot does
- * not hold it (wicked-core `SkillsError::Missing`: "the skills snapshot at … does not hold the
- * skills this run requires: …; enable and republish them (or fix the workflow's skill_ref)").
- * An unconditional stamp would therefore refuse EVERY interactive draft/edit/chat on a garden
- * older than 12.35.0 (or a snapshot never republished after upgrading). So the seams ask the
- * daemon's skills runtime whether the published snapshot holds the skill (enabled) when they ARM,
- * stamp the phases only then, and LOG which way it went — a run on an older garden proceeds as
- * before (no floor), and the log line says so and names the fix (upgrade garden, republish).
+ * The presets ALWAYS require the skill (crew#935). The engine admits every `skill_ref` the run's
+ * planned units name against the published skills snapshot before a unit runs, and FAILS the run
+ * when the snapshot does not hold it (the PA's `pa-scope` names none, so it may run first; the
+ * drafting steps it plans are refused) (wicked-core `SkillsError::Missing`: "… enable and republish them"), so a run on a
+ * garden older than 12.35.0, or a snapshot not republished since upgrading, fails rather than
+ * run without the floor. The seams ask the skills runtime once when they arm, only to LOG which way
+ * it is and name the fix.
  */
 
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
-import type { WorkflowDef } from '../core/types.js';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 import { discoverLivePlugin } from '../skills/plugin-source.js';
 
@@ -35,19 +33,6 @@ export const DRAFT_SKILL_GARDEN_VERSION = '12.35.0';
 
 /** Predicate the seams are wired with: does the PUBLISHED snapshot hold (and enable) `name`? */
 export type SkillHeld = (name: string) => boolean;
-
-/**
- * `def` with `skill_ref: DRAFT_SKILL` on every AGENT phase (a phase with a tool `executor` is
- * deterministic tooling and takes no skill) when `held`; the SAME def object otherwise — the
- * shared constant is never mutated either way.
- */
-export function withDraftSkill(def: WorkflowDef, held: boolean): WorkflowDef {
-  if (!held) return def;
-  return {
-    ...def,
-    phases: def.phases.map((p) => (p.executor !== undefined ? p : { ...p, skill_ref: DRAFT_SKILL })),
-  };
-}
 
 /** The page budget a brief + style imply, per the skill's § 2 defaults. */
 export type PageBudget =
@@ -146,12 +131,11 @@ export function draftQualityClause(
 /** The one log line a seam writes when it arms, saying which way the gate went and why. */
 export function draftSkillArmLine(seam: string, held: boolean): string {
   return held
-    ? `[${seam}] drafting phases carry skill_ref '${DRAFT_SKILL}' — the published skills snapshot holds it, so the ` +
-        `contrast / page-budget / claims floor (and its self-check) governs every run on this seam`
-    : `[${seam}] drafting phases carry NO skill_ref: the published skills snapshot does not hold '${DRAFT_SKILL}' ` +
-        `(wicked-garden < ${DRAFT_SKILL_GARDEN_VERSION}, or not republished since upgrading) — runs proceed WITHOUT ` +
-        `the quality floor, exactly as before; upgrade wicked-garden, republish the snapshot and restart crew to arm it ` +
-        `(stamping it anyway would make the engine refuse every run at plan time: "the skills snapshot … does not hold the skills this run requires")`;
+    ? `[${seam}] the '${seam}' preset runs skill '${DRAFT_SKILL}' on its drafting steps — the published skills ` +
+        `snapshot holds it, so the contrast / page-budget / claims floor (and its self-check) governs every run on this seam`
+    : `[${seam}] the published skills snapshot does not hold '${DRAFT_SKILL}' (wicked-garden < ${DRAFT_SKILL_GARDEN_VERSION}, ` +
+        `or not republished since upgrading), and the '${seam}' preset requires it: every run on this seam fails before ` +
+        `the document work starts (the PA's rating step may run first) until it is published — upgrade wicked-garden and republish the snapshot`;
 }
 
 

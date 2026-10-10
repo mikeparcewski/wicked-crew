@@ -44,14 +44,14 @@ import { DeliveryFreeze } from './delivery-freeze.js';
 import { DeliveryDerivationCache } from './delivery-cache.js';
 import { registerClient, broadcast } from '../events/bus.js';
 import { TerminalHub, registerTerminalWs } from '../events/terminals.js';
-import { INTERACTIVE_DRAFT_WORKFLOW_DEF, startInteractiveDraftSubscriber, isAnotherProjectsDraftKey } from '../interactive/draft-events.js';
-import { INTERACTIVE_EDIT_WORKFLOW_DEF, startInteractiveEditSubscriber } from '../interactive/edit-events.js';
+import { startInteractiveDraftSubscriber, isAnotherProjectsDraftKey } from '../interactive/draft-events.js';
+import { startInteractiveEditSubscriber } from '../interactive/edit-events.js';
 import { putLearnedThemeViaBridge, startInteractiveThemeSubscriber } from '../interactive/theme-events.js';
 import { authoringRunsFromLedgers, isAnotherProjectsReviewKey, readDocVersionViaBridge, startInteractiveReviewSubscriber } from '../interactive/review-events.js';
 import { REVIEWS_DIRNAME, removeDocReviews } from '../interactive/review-ledger.js';
 import { InteractiveBridgePool, boundOrigin } from '../interactive/bridge-pool.js';
-import { INTERACTIVE_CHAT_WORKFLOW_DEF, startInteractiveChatSubscriber } from '../interactive/chat-events.js';
-import { PhaseSkillArming, RunSkillGapIndex } from '../skills/phase-skill-gaps.js';
+import { startInteractiveChatSubscriber } from '../interactive/chat-events.js';
+import { RunSkillGapIndex } from '../skills/phase-skill-gaps.js';
 import { resolveProjectInteractiveRoot } from '../interactive/bridge-root.js';
 import { sweepDocLedgers, type DocLedgerSource, type DocLedgerSweep } from '../interactive/doc-ledger-sweep.js';
 import { DocRunIndex } from '../interactive/doc-run-index.js';
@@ -107,7 +107,7 @@ import { registerGateHistoryRoute, runBand, runPreset, runProject } from '../sta
 import { busRows, openPlanGateRisk } from '../team/routes.js';
 import { isSteeringAuthorRun } from './steering-landing.js';
 import { applyWorkerConfigRoot } from './seat-signin.js';
-import { registeredSkillRefs } from '../skills/core-closure.js';
+import { builtinPresetSkillRefs, coreSkillRefs, registeredSkillRefs } from '../skills/core-closure.js';
 import type { PluginSource } from '../skills/plugin-source.js';
 import { assertSkillsRootFenced } from '../skills/root-fence.js';
 import { SkillsRuntime } from '../skills/runtime.js';
@@ -586,13 +586,29 @@ export async function createServer(
     const source = options?.skills?.source;
     const skillsRoot = resolveSkillsRoot();
     assertSkillsRootFenced(skillsRoot, { stateHome: crewStateHome() });
+    // crew#935: a built-in preset registers no def, so its skills join the core set here — but only
+    // the ones the catalog HOLDS (they cannot be disabled out from under the preset). One the catalog
+    // lacks is not made a publish blocker: an older garden still publishes for every other workflow,
+    // and a run of that preset fails at admission naming the skill (codex r5 on #938).
+    const presetRefs = await builtinPresetSkillRefs(adapter, (m) => app.log.warn(m));
+    const store: { current?: SkillsStore } = {};
     skillsStore = new SkillsStore({
       root: skillsRoot,
-      registeredSkillRefs: () => registeredSkillRefs(adapter.listWorkflows()),
+      registeredSkillRefs: () => {
+        const refs = registeredSkillRefs(adapter.listWorkflows());
+        let held: ReadonlySet<string> = new Set();
+        try {
+          held = new Set(Object.keys(store.current?.manifest().skills ?? {}));
+        } catch {
+          // an unreadable manifest holds nothing: the presets' refs are then simply not core
+        }
+        return coreSkillRefs(refs, presetRefs, held);
+      },
       provisionVenv: options?.skills?.provisionVenv ?? uvSyncBaseline,
       ...(source !== undefined ? { source } : {}),
       warn: (m) => app.log.warn(m),
     });
+    store.current = skillsStore;
     skillsRuntime = new SkillsRuntime({
       store: skillsStore,
       log: (m) => app.log.warn(m),
@@ -745,9 +761,8 @@ export async function createServer(
   // trail's `guidance.set` entries so notes survive a daemon restart.
   const guidanceIndex = new GuidanceIndex();
   await guidanceIndex.hydrate(audit, (m) => app.log.warn(m));
-  // crew#661: each drafting seam's ARM-TIME skill outcome (diagnostics / health), and the runs
-  // launched while a seam was unarmed (`session.skill_gaps`) — same durable trail pattern.
-  const phaseSkills = new PhaseSkillArming(() => skillsRuntime?.health().current?.gen ?? null);
+  // crew#661: the runs that launched while a seam was unarmed (`session.skill_gaps`), read back from
+  // the trail. No seam arms unarmed since crew#935, so nothing new is recorded.
   const runSkillGaps = new RunSkillGapIndex();
   await runSkillGaps.hydrate(audit, (m) => app.log.warn(m));
   const skillHeld = (name: string): boolean => skillsRuntime?.holdsSkill(name) ?? false;
@@ -1209,9 +1224,8 @@ export async function createServer(
       ...(o.clisJson !== undefined ? { clisJson: o.clisJson } : {}),
       // The roster WITH standing when no override is set (F-RECON-002/003).
       roster: rosterWithStanding,
-      // The quality-floor skill gate (draft-skill.ts): stamped only when the published snapshot holds it;
-      // the arm-time answer is recorded for /diagnostics (crew#661).
-      skillHeld: phaseSkills.probe('interactive-draft', INTERACTIVE_DRAFT_WORKFLOW_DEF, skillHeld),
+      // The draft skill the preset runs (draft-skill.ts): asked once, for the arm log line (crew#935).
+      skillHeld,
       onRunFiled: fileRun,
       onRunLaunched: (runId, detail) => { recordRunLaunched(audit, runTimingIndex, DAEMON_ACTOR, runId, detail); },
       // F-046: the create-time grounding sidecar is read under the SAME per-project docs root the
@@ -1221,8 +1235,6 @@ export async function createServer(
       log: (m) => app.log.warn(m),
       logError: (m) => app.log.error(m),
     });
-    // crew#661: a seam that failed to arm runs nothing — its arm-time skill answer is not a gap.
-    if (draftSub === null) phaseSkills.forget('interactive-draft');
     if (draftSub !== null) {
       const sub = draftSub;
       app.log.info('interactive-draft subscription armed (filter wicked.interactive.doc.created)');
@@ -1246,9 +1258,8 @@ export async function createServer(
       ...(o.clisJson !== undefined ? { clisJson: o.clisJson } : {}),
       // The roster WITH standing when no override is set (F-RECON-002/003).
       roster: rosterWithStanding,
-      // The quality-floor skill gate (draft-skill.ts): stamped only when the published snapshot holds it;
-      // the arm-time answer is recorded for /diagnostics (crew#661).
-      skillHeld: phaseSkills.probe('interactive-edit', INTERACTIVE_EDIT_WORKFLOW_DEF, skillHeld),
+      // The draft skill the preset runs (draft-skill.ts): asked once, for the arm log line (crew#935).
+      skillHeld,
       // The demo-kind gate: a demo doc's step feedback is declined with an honest error status
       // (demos are made by the Demo experience's `demo` preset now, studio#373).
       resolveDocsRoot: o.resolveDocsRoot ?? interactiveDocsRoot,
@@ -1256,8 +1267,6 @@ export async function createServer(
       log: (m) => app.log.warn(m),
       logError: (m) => app.log.error(m),
     });
-    // crew#661: a seam that failed to arm runs nothing — its arm-time skill answer is not a gap.
-    if (editSub === null) phaseSkills.forget('interactive-edit');
     if (editSub !== null) {
       const sub = editSub;
       app.log.info('interactive-edit subscription armed (filter wicked.interactive.feedback.processed)');
@@ -1350,9 +1359,8 @@ export async function createServer(
       ...(o.clisJson !== undefined ? { clisJson: o.clisJson } : {}),
       // The roster WITH standing when no override is set (F-RECON-002/003).
       roster: rosterWithStanding,
-      // The quality-floor skill gate (draft-skill.ts): stamped only when the published snapshot holds it;
-      // the arm-time answer is recorded for /diagnostics (crew#661).
-      skillHeld: phaseSkills.probe('interactive-chat', INTERACTIVE_CHAT_WORKFLOW_DEF, skillHeld),
+      // The draft skill the preset runs (draft-skill.ts): asked once, for the arm log line (crew#935).
+      skillHeld,
       ...(o.queueSweepMs !== undefined ? { queueSweepMs: o.queueSweepMs } : {}),
       ...(o.landingGateMs !== undefined ? { landingGateMs: o.landingGateMs } : {}),
       resolveDocsRoot: o.resolveDocsRoot ?? interactiveDocsRoot,
@@ -1363,8 +1371,6 @@ export async function createServer(
       log: (m) => app.log.warn(m),
       logError: (m) => app.log.error(m),
     });
-    // crew#661: a seam that failed to arm runs nothing — its arm-time skill answer is not a gap.
-    if (chatSub === null) phaseSkills.forget('interactive-chat');
     if (chatSub !== null) {
       const sub = chatSub;
       app.log.info('interactive-chat subscription armed (filter wicked.interactive.chat.posted)');
@@ -1878,9 +1884,6 @@ export async function createServer(
   // close like the event listener.
   const offLaunch = adapter.onLaunch((notice) => {
     skillsRuntime?.launched(notice);
-    // crew#661: a run the engine ACCEPTED on a workflow that armed WITHOUT its declared skill proceeds
-    // degraded and says so on the run (`session.skill_gaps`, a `run.skill.unarmed` trail entry). Never throws.
-    runSkillGaps.onLaunch(notice, phaseSkills, audit, DAEMON_ACTOR, (m) => app.log.warn(m));
   });
   app.addHook('onClose', async () => {
     offEvent();
@@ -2024,7 +2027,6 @@ export async function createServer(
       groupIndex,
       runTimingIndex,
       guidanceIndex,
-      phaseSkills,
       runSkillGaps,
       chatScopes,
       chatTurns,

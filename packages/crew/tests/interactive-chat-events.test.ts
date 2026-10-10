@@ -31,7 +31,6 @@ import {
   CHAT_POSTED,
   INTERACTIVE_CHAT_BUS_FILTER,
   INTERACTIVE_CHAT_WORKFLOW,
-  INTERACTIVE_CHAT_WORKFLOW_DEF,
   parseChatPosted,
   isIterationAsk,
   chatKey,
@@ -255,41 +254,6 @@ describe('chatProblem recall clause (DES-MEM-FACETED-001 Phase 3)', () => {
   });
 });
 
-describe('the interactive-chat workflow def (workflows-as-data)', () => {
-  const def = INTERACTIVE_CHAT_WORKFLOW_DEF;
-
-  it('is understand → revise, creator-role build second, unique phase ids', () => {
-    expect(def.id).toBe(INTERACTIVE_CHAT_WORKFLOW);
-    expect(def.phases.map((p) => p.id)).toEqual(['understand', 'revise']);
-    expect(def.phases[1]?.role).toBe('creator');
-    expect(def.phases[1]?.depends_on).toEqual(['understand']);
-  });
-
-  it('keeps every phase instruction single-line (the same PTY constraint as the problem)', () => {
-    for (const p of def.phases) {
-      expect(p.instructions ?? '').not.toMatch(/[\n\r]/);
-      expect((p.instructions ?? '').length).toBeGreaterThan(0);
-    }
-  });
-
-  it('arms no human gate and no validator floor — the acceptance gate is the canvas', () => {
-    for (const p of def.phases) {
-      expect(p.gate).toBe('auto');
-      expect(p.validator_pin).toBeNull();
-      expect(p.required_deliverables).toEqual([]);
-    }
-  });
-
-  it('carries the ITERATION contract: start from the current doc, keep data-wids, mint none', () => {
-    const revise = def.phases[1]?.instructions ?? '';
-    expect(revise).toMatch(/KEEP every existing data-wid/i);
-    expect(revise).toMatch(/add NO data-wid/i);
-    expect(revise).toContain('self-contained HTML');
-    expect(revise).toMatch(/never fabricate/i);
-    expect(revise).toMatch(/change only what the ask touches/i);
-  });
-});
-
 describe('bus identity constants', () => {
   it('subscribes on an exact-type, domain-guarded filter ', () => {
     expect(INTERACTIVE_CHAT_BUS_FILTER).toBe('wicked.interactive.chat.posted@wicked-interactive');
@@ -303,6 +267,8 @@ interface FakeAdapter {
   launches: LaunchRunInput[];
   registered: WorkflowDef[];
   fire: (event: CoreEvent) => void;
+  /** Runs INSIDE `launchRun`, before it resolves — where a real engine announces the first plan. */
+  duringLaunch?: (input: LaunchRunInput) => void;
   asAdapter(): CoreAdapter;
 }
 
@@ -330,6 +296,7 @@ function fakeAdapter(repoWorld?: RepoWorld): FakeAdapter {
         },
         launchRun: async (input: LaunchRunInput) => {
           state.launches.push(input);
+          state.duringLaunch?.(input);
           return input.sessionId;
         },
         onEvent: (listener: (e: CoreEvent) => void) => {
@@ -485,9 +452,19 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     subs.push(sub!);
     armProbe(bus);
 
-    // The workflow def rode the normal registration path before the cursor armed.
-    expect(engine.registered.map((w) => w.id)).toEqual([INTERACTIVE_CHAT_WORKFLOW]);
+    // crew#935: the workflow is the engine's built-in `interactive-chat` preset, so the seam
+    // registers no def of its own.
+    expect(engine.registered).toEqual([]);
 
+    // The engine announces the first plan WHILE the launch is in flight, before the seam records the
+    // flight (codex r1 on crew#938): the PA's `pa-scope`, the preset's understand and revise.
+    const plannedFrame = (session: string, ord: number, id: string, role: string): CoreEvent =>
+      ({ type: 'unitPlanned', session, ord, description: `${id} — revise iter-doc ||| instructions`, role, executorType: 'agent' }) as unknown as CoreEvent;
+    engine.duringLaunch = (input) => {
+      engine.fire(plannedFrame(input.sessionId, 1, 'pa-scope', 'neutral'));
+      engine.fire(plannedFrame(input.sessionId, 2, 'understand', 'neutral'));
+      engine.fire(plannedFrame(input.sessionId, 3, 'revise', 'creator'));
+    };
     const { event_id } = await emitChatPosted(bus, 'iter-doc', { project_id: 'proj-7', source_message_id: 'm-1' });
     await waitFor(() => engine.launches.length === 1);
     const launch = engine.launches[0]!;
@@ -507,8 +484,8 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     const outPath = join(runDir, 'revised.html');
     expect(launch.problem).toContain(currentPath);
     expect(launch.problem).toContain(outPath);
-    // crew#311: the revised document is DECLARED as the run's deliverable, so the engine runs
-    // crew's floor phase over it. Naming the path in the prompt is an instruction; declaring it
+    // crew#311: the revised document is DECLARED as the run's deliverable, so the engine's
+    // deliverable floor judges it on the preset's creator step (wicked-core#858). Naming the path in the prompt is an instruction; declaring it
     // here is the check — without this the run passes on ~200 chars of narration and no file.
     expect(launch.requireDeliverables).toEqual([outPath]);
     expect(readFileSync(currentPath, 'utf8')).toContain('data-wid="w-h1"');
@@ -538,17 +515,23 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
           e.event_type === STATUS_POSTED &&
           String((e.payload as { message?: string }).message).includes(needle),
       );
-    // 2/3, not 2/2: the run carries the crew#311 deliverable floor as a third unit, and the
-    // "landing it now" line now fires on ITS gate — the revision is announced once the FILE is
-    // verified, never on the strength of the worker's reply alone.
+    // crew#935: the phases are counted from the run's PLANNED units — announced during the launch
+    // above, then the floor's `critique` from the re-plan after the PA's rating.
+    const planned = (ord: number, id: string, role: string) => engine.fire(plannedFrame(launch.sessionId, ord, id, role));
+    // A high-risk ask pauses at plan approval: the thread says so and where to answer it.
+    engine.fire({ type: 'awaitingHuman', session: launch.sessionId, ord: 1, prompt: 'Approve the plan?', gateKind: 'plan_approval' } as unknown as CoreEvent);
+    await waitFor(narrated(`The run is paused: the plan needs approval before the work starts (Approve the plan?). Answer it on run ${launch.sessionId}`));
     engine.fire({ type: 'unitDispatched', session: launch.sessionId, ord: 2, attempt: 0 });
-    await waitFor(narrated('2/3'));
-    engine.fire({ type: 'gateDecided', session: launch.sessionId, ord: 2, allow: true });
-    await waitFor(narrated('checking the file landed'));
+    await waitFor(narrated('Crew phase 2/3: understand — reading the current version and your ask'));
+    planned(4, 'critique', 'evaluator');
+    engine.fire({ type: 'councilConvened', session: launch.sessionId, ord: 3, clis: ['a', 'b'] });
+    await waitFor(narrated('2-seat council to pick who revises the document'));
     engine.fire({ type: 'unitDispatched', session: launch.sessionId, ord: 3, attempt: 0 });
-    await waitFor(narrated('3/3'));
+    await waitFor(narrated('Crew phase 3/4: revising the document (revise)'));
     engine.fire({ type: 'gateDecided', session: launch.sessionId, ord: 3, allow: true });
-    await waitFor(narrated('landing it now'));
+    await waitFor(narrated('Gate approved the revision — crew checks the file before it lands'));
+    engine.fire({ type: 'unitDispatched', session: launch.sessionId, ord: 4, attempt: 0 });
+    await waitFor(narrated('Crew phase 4/4: reviewing the revision (critique)'));
 
     // The worker "wrote" the revision; completion announces it by path on the DRAFT wire.
     writeFileSync(outPath, '<html><body><h1>revised</h1></body></html>', 'utf8');
@@ -999,7 +982,10 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
       // repo-LESS: no repoLabel (the worker spans every bound repo), and STILL no repoRef/snapshot.
       expect(launch.projectGraph?.repoLabel).toBeUndefined();
       expect('repoRef' in launch).toBe(false);
-      expect(launch.problem).not.toContain('repository snapshot');
+      // The quality clause says "no repository snapshot rides a revision" (crew#935: the preset
+      // always runs the draft skill); no snapshot is NAMED and none is handed to the self-check.
+      expect(launch.problem).not.toContain('offline repository snapshot');
+      expect(launch.problem).not.toContain('--repo ');
     });
 
     it('a FILED doc whose project graph was NEVER built launches with NO projectGraph key, and logs the degrade reason', async () => {
