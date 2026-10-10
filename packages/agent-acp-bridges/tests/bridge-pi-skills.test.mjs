@@ -280,7 +280,9 @@ describe('wicked-pi governance gate', () => {
     expect(() => piGovernanceFlags({ [PI_GOVERNANCE_ENV]: '1' }, missing)).toThrow(/pi-governance extension was not found/);
   });
 
-  it('the bundled package resolves to the gate file', () => {
+  // The package is not a dependency until pi-governance is on the npm registry (npm 12 refuses a
+  // tarball-URL dependency: EALLOWREMOTE). Checked wherever it is installed.
+  it.skipIf(bundledGovernanceExtension() === null)('the bundled package resolves to the gate file', () => {
     const p = bundledGovernanceExtension();
     expect(p).not.toBeNull();
     expect(p.replace(/\\/g, '/')).toMatch(/pi-governance\/extensions\/pi-governance\.js$/);
