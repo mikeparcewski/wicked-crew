@@ -348,7 +348,8 @@ describe('the per-run def copies keep the assurance contract', () => {
     const base = { ...feature, required_instruments: ['distinct_evaluator', 'judge', 'qe_acceptance'] };
     expect(composeDeliverWorkflow(base, 'run-1').required_instruments).toEqual(base.required_instruments);
     expect(composeDeliverableFloor(base, 'run-1', ['/tmp/out.html']).required_instruments).toEqual(base.required_instruments);
-    const { required_instruments: _drop, ...bare } = feature;
+    const bare = { ...feature };
+    delete bare.required_instruments;
     expect('required_instruments' in composeDeliverWorkflow(bare, 'run-1')).toBe(false);
   });
 });
