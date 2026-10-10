@@ -39,7 +39,7 @@ import {
   deliverUnitOf,
   type VacuityProbes,
 } from './delivery-index.js';
-import { CodebaseArchiveStore } from './codebase-archive.js';
+import { CodebaseArchiveStore, archiveKey, deliverDispatchKey } from './codebase-archive.js';
 import { DeliveryFreeze } from './delivery-freeze.js';
 import { DeliveryDerivationCache } from './delivery-cache.js';
 import { registerClient, broadcast } from '../events/bus.js';
@@ -836,6 +836,10 @@ export async function createServer(
   // run that failed after building, a cancel) — BEFORE the delivered-worktree sweep. An unchanged
   // tree rewrites nothing. Best-effort: never awaited by the frame, never a run failure.
   const codebaseArchives = new CodebaseArchiveStore(options?.codebaseArchiveRoot, (m) => app.log.info(m));
+  /** `<run>\0<ord>` of deliver-script units dispatched and not yet captured (crew#720). */
+  const deliverDispatches = new Set<string>();
+  /** Runs this daemon has seen a dispatch frame for (crew#720; the boot-redrive fallback). */
+  const observedRuns = new Set<string>();
   const archiveRunCodebase = async (runId: string, trigger: 'deliver' | 'run_end', view?: SessionView): Promise<void> => {
     try {
       const v = view ?? (await adapter.sessionsDetail()).find((x) => x.session.id === runId);
@@ -1693,17 +1697,35 @@ export async function createServer(
       const ord = typeof ev.ord === 'number' ? ev.ord : typeof ev.unitOrd === 'number' ? ev.unitOrd : undefined;
       if (ord !== undefined) void considerations?.onUnitCaptured(session, ord, typeof ev.attempt === 'number' ? ev.attempt : 0);
       // crew#720: the deliver unit's output landed — whatever its verdict, archive the tree now.
-      if (ord !== undefined) {
+      // Only a unit this daemon saw dispatched as crew's deliver script qualifies, so no other
+      // unit's capture costs an engine read (the release smoke's mixed-roster timing, S04).
+      const key = ord !== undefined ? archiveKey(session, ord) : undefined;
+      // A run whose dispatch this daemon never saw (redriven at boot before the subscription opened,
+      // codex r1) is checked against its view once: the capture may be its deliver unit's.
+      const unseen = !observedRuns.has(session);
+      if (key !== undefined && (deliverDispatches.delete(key) || unseen)) {
+        observedRuns.add(session);
         void adapter
           .sessionsDetail()
           .then((views) => {
             const view = views.find((v) => v.session.id === session);
-            const unit = view !== undefined ? deliverUnitOf(view) : null;
-            if (view !== undefined && unit !== null && unit.ord === ord) return archiveRunCodebase(session, 'deliver', view);
-            return undefined;
+            if (view === undefined) return undefined;
+            if (unseen && deliverUnitOf(view)?.ord !== ord) return undefined;
+            return archiveRunCodebase(session, 'deliver', view);
           })
           .catch(() => undefined);
       }
+    }
+    if ((event.type === 'unitDispatched' || event.type === 'toolExecutorDispatched') && session !== undefined) {
+      if (observedRuns.size > 5000) observedRuns.clear();
+      observedRuns.add(session);
+    }
+    // crew#720: crew's deliver script is recognised by its own refusal marker in the dispatched
+    // command (the structural mark `deliverUnitOf` reads, crew#720 S3).
+    const dispatched = deliverDispatchKey(event);
+    if (dispatched !== null) {
+      if (deliverDispatches.size > 1000) deliverDispatches.clear();
+      deliverDispatches.add(dispatched);
     }
     // The delivered-PR record (CREW-UX-8, crew#321): resolved once per run at its terminal
     // frame, best-effort, off the hot path — see `resolveRunDelivery` above for why BOTH

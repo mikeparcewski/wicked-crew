@@ -28,7 +28,7 @@ import { copyFileSync, createReadStream, existsSync, lstatSync, mkdirSync, mkdte
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { API_PREFIX } from './api-prefix.js';
-import { deliverRunBranch } from '../core/deliver.js';
+import { DELIVER_PUSH_REJECTED_MARKER, deliverRunBranch } from '../core/deliver.js';
 import { SCRATCH_DIRS, TOOL_ARTIFACT_DIRS, deliverExclusionByName, deliverExclusionReason } from '../core/deliver-exclusions.js';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 import { crewStateHome } from '../projects/state-home.js';
@@ -61,6 +61,23 @@ export interface ArchiveSources {
 const GIT_TIMEOUT_MS = 60_000;
 const ZIP_NAME = 'codebase.zip';
 const META_NAME = 'codebase.json';
+
+/** `<run>\0<ord>` — the key a deliver unit's dispatch and its output capture share. */
+export function archiveKey(runId: string, ord: number): string {
+  return `${runId}\0${ord}`;
+}
+
+/**
+ * The {@link archiveKey} of a `toolExecutorDispatched` frame that runs crew's deliver script —
+ * recognised by its own refusal marker in the command (the structural mark `deliverUnitOf` reads,
+ * crew#720 S3) — else `null`. The daemon archives on that unit's `unitOutputCaptured` only, so no
+ * other unit's capture costs an engine read.
+ */
+export function deliverDispatchKey(event: { type?: unknown; session?: unknown; ord?: unknown; cmd?: unknown }): string | null {
+  if (event.type !== 'toolExecutorDispatched' || typeof event.session !== 'string' || typeof event.ord !== 'number') return null;
+  if (!Array.isArray(event.cmd) || !event.cmd.some((a) => typeof a === 'string' && a.includes(DELIVER_PUSH_REJECTED_MARKER))) return null;
+  return archiveKey(event.session, event.ord);
+}
 
 /** The daemon-relative URL the zip is served at. */
 export function codebaseArchiveUrl(runId: string): string {
