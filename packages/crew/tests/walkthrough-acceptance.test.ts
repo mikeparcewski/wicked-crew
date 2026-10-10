@@ -286,6 +286,30 @@ describe('the requirement fails closed on a catalog id the engine does not defin
     expect(req.failClosed).toMatch(/step `s1` names catalog `walkthrough_v9`, which this engine does not define/);
   });
 
+  it('a step that raises verified_evidence in the accepted plan is a requirement (wicked-core M10: qe verify is a `run` step)', () => {
+    const v = plan(['understand', 'build', 'run']);
+    (v.session as unknown as { team_plan: Record<string, unknown> }).team_plan.accepted = {
+      steps: { steps: [{ catalog: 'understand', id: 's0' }, { catalog: 'build', id: 's1' }, { catalog: 'run', id: 's2', verified_evidence: true }] },
+    };
+    expect(acceptanceRequirementOf(v, [], VERIFIED, new Set([...KNOWN, 'run']))).toEqual({ declared: true, phases: ['s2'] });
+    // Without the raise, a `run` step declares nothing: the catalog entry is not verified.
+    expect(acceptanceRequirementOf(plan(['understand', 'build', 'run']), [], VERIFIED, new Set([...KNOWN, 'run']))).toEqual({ declared: false, phases: [] });
+  });
+
+  it('a plan held for approval (pending, nothing accepted) fails closed; an unreadable accepted plan too (codex r2)', () => {
+    const held = plan(['understand', 'build', 'run']);
+    (held.session as unknown as { team_plan: Record<string, unknown> }).team_plan.pending = { rev: 2 };
+    expect(acceptanceRequirementOf(held, [], VERIFIED, new Set([...KNOWN, 'run'])).failClosed).toMatch(/not accepted yet/);
+    const broken = plan(['understand']);
+    (broken.session as unknown as { team_plan: Record<string, unknown> }).team_plan.accepted = { steps: 'x' };
+    expect(acceptanceRequirementOf(broken, [], VERIFIED, KNOWN).failClosed).toMatch(/not accepted yet/);
+    const ghost = plan(['understand']);
+    (ghost.session as unknown as { team_plan: Record<string, unknown> }).team_plan.accepted = {
+      steps: { steps: [{ catalog: 'run', id: 'verify', verified_evidence: true }] },
+    };
+    expect(acceptanceRequirementOf(ghost, [], VERIFIED, KNOWN).failClosed).toMatch(/step `verify` re-verifies evidence but the run planned no such unit/);
+  });
+
   it('with no full catalog to compare against, nothing changes (the verified-set rule still applies)', () => {
     expect(acceptanceRequirementOf(plan(['build', 'walkthrough_v9']), [], VERIFIED, null)).toEqual({ declared: false, phases: [] });
   });
