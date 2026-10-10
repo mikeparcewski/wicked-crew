@@ -314,6 +314,8 @@ beforeAll(async () => {
  * for its launch (seam X2), never by its phase sequence, so a stand-in under another id is, rightly,
  * not a test-authoring run and registers no test set. The SHIPPED case re-arms the shipped def.
  */
+// X-MIG M11: the shipped id is a built-in preset now, so a stand-in under it is refused at
+// registration; the two skipped cases that use this need a preset-shaped stand-in to come back.
 async function armQeAuthor(def: WorkflowDef): Promise<void> {
   const res = await postJson('/api/v1/workflows', def);
   expect(res.status, JSON.stringify(res.body)).toBe(201);
@@ -497,7 +499,8 @@ describe('wave 6 end to end — the governed test-authoring journey', () => {
 
   it('SHIPPED DEF via POST /testing/author: a run whose author produced nothing is refused BEFORE deliver — whichever rung refuses (skill routing, the author floor, verify’s produced=0) — and never delivers', async () => {
     process.env['GH_STUB_OUT'] = 'https://github.com/o/r/pull/603';
-    await armQeAuthor(shippedQeDef());
+    // X-MIG M11: `qe-author-tests` is the engine's built-in preset, seeded at boot — nothing to arm
+    // (a def registered under a built-in name is refused: a launch resolves the preset first).
     const launch = await postJson('/api/v1/testing/author', {
       problem: 'e2e: functional tests for the launch flow',
       repoRefs: [repoId],
