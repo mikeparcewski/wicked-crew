@@ -704,10 +704,10 @@ function addonSupportsExcludeSeats(): boolean {
 }
 
 /** Does the installed addon judge a plan or preset launch's declared deliverables
- *  (`LaunchOptions.deliverables`, wicked-core#858, >= 0.7.47)? Same doctrine: an older addon
+ *  (`LaunchOptions.deliverables`, wicked-core#858, >= 0.7.48)? Same doctrine: an older addon
  *  ignores the field, and the run would never be held to its deliverable. */
 export function addonSupportsLaunchDeliverables(): boolean {
-  return addonAtLeast(0, 7, 47);
+  return addonAtLeast(0, 7, 48);
 }
 
 /** Does the installed addon carry the assurance contract (`LaunchOptions.reducedAssurance`,
@@ -1851,7 +1851,7 @@ export class CoreAdapter {
     if (deliverables.length === 0) return;
     if (!addonSupportsLaunchDeliverables()) {
       throw new Error(
-        `requireDeliverables on ${what} needs wicked-core-ts >= 0.7.47 (LaunchOptions.deliverables, ` +
+        `requireDeliverables on ${what} needs wicked-core-ts >= 0.7.48 (LaunchOptions.deliverables, ` +
           'wicked-core#858); the installed addon would drop them and the run would not be held to them',
       );
     }

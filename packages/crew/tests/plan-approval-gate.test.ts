@@ -244,7 +244,7 @@ describe('POST /runs {plan} and the plan_approval gate — HTTP contract (shadow
         await planFloor;
         expect((launched.at(-1) as { deliverables?: string[] }).deliverables).toEqual(['out/r.md']);
       } else {
-        await expect(planFloor).rejects.toThrow(/needs wicked-core-ts >= 0\.7\.47/);
+        await expect(planFloor).rejects.toThrow(/needs wicked-core-ts >= 0\.7\.48/);
       }
     });
   });
@@ -281,7 +281,7 @@ describe('POST /runs {plan} and the plan_approval gate — HTTP contract (shadow
         expect(opts.deliverStepJson).toBeUndefined();
       } else {
         // An addon before LaunchOptions.deliverables would drop them: refused, not composed.
-        await expect(floor).rejects.toThrow(/needs wicked-core-ts >= 0\.7\.47/);
+        await expect(floor).rejects.toThrow(/needs wicked-core-ts >= 0\.7\.48/);
         expect(launched).toHaveLength(0);
       }
       expect(registered).toEqual([]);
