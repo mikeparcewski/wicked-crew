@@ -46,7 +46,8 @@ describe('GateSchema — the escalation arms', () => {
     expect(GateSchema.safeParse({ approve: true, action: 'consent:operator', ord: 7 }).success).toBe(true);
     expect(GateSchema.safeParse({ approve: false, action: 'consent:worker' }).success).toBe(false);
     expect(GateSchema.safeParse({ approve: true, action: 'consent:worker', amend: 'x' }).success).toBe(false);
-    for (const bad of ['consent:', 'consent:a b', 'consent:../x', `consent:${'x'.repeat(65)}`]) {
+    expect(GateSchema.safeParse({ approve: true, action: `consent:${'x'.repeat(32)}` }).success).toBe(true);
+    for (const bad of ['consent:', 'consent:a b', 'consent:../x', `consent:${'x'.repeat(33)}`]) {
       expect(GateSchema.safeParse({ approve: true, action: bad }).success, bad).toBe(false);
     }
   });

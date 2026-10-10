@@ -604,7 +604,7 @@ export const LaunchSchema = z.object({
 export const ESCALATION_ACTIONS = ['extend', 'targeted', 'accept_partial', 'accept_suggestion'] as const;
 /** (core#820) A consent gate's answer token: `consent:<choice id>` approves that row of the dry-run
  *  plan (the engine refuses an id its plan does not offer); `reject` stays the decline. */
-export const CONSENT_CHOICE_ACTION = /^consent:[A-Za-z0-9_-]{1,64}$/u;
+export const CONSENT_CHOICE_ACTION = /^consent:[A-Za-z0-9_-]{1,32}$/u; // core `parse_plan` caps a choice id at 32
 const isEscalationAction = (a: string | undefined): boolean =>
   a !== undefined && ((ESCALATION_ACTIONS as readonly string[]).includes(a) || CONSENT_CHOICE_ACTION.test(a));
 
