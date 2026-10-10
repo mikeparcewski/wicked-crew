@@ -84,7 +84,7 @@ tool call (wicked-core#563). `wicked-pi` loads it when wicked-core asks for it:
 | variable | `WICKED_PI_GOVERNANCE`, set by wicked-core on the adapter's environment for a seat it governs |
 | unset, empty or `0` | no gate, and the launch is unchanged |
 | any other value | pi starts with `--no-extensions -e <gate>` ahead of the skill flags, so the gate is the only extension loaded |
-| gate file | the bundled `pi-governance` package, or the path in `WICKED_PI_GOVERNANCE_EXTENSION` |
+| gate file | the path in `WICKED_PI_GOVERNANCE_EXTENSION`, else the `pi-governance` package when it is installed. It is not a dependency yet: it joins as a registry dependency once published to npm, because npm 12 refuses a tarball-URL dependency |
 | gate requested but not found | `wicked-pi` exits 126 with a named refusal and never starts pi ungoverned |
 
 ## Protocol
