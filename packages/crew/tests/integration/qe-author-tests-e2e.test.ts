@@ -329,12 +329,18 @@ afterAll(async () => {
 });
 
 describe('wave 6 end to end — the governed test-authoring journey', () => {
-  it('GREEN: verify RUNS the produced e2e under the repo harness, the ENGINE deliver phase opens the PR, the test set is registered, the diff survives completion', async () => {
+  // crew#922: since wicked-core#843 the name `qe-author-tests` launches the built-in PRESET, so this
+  // stand-in def is shadowed and the case cannot run its subject. Re-author it against the preset.
+  it.skip('GREEN: verify RUNS the produced e2e under the repo harness, the ENGINE deliver phase opens the PR, the test set is registered, the diff survives completion', async () => {
     process.env['GH_STUB_OUT'] = 'https://github.com/o/r/pull/601';
     await armQeAuthor(standInDef(QE_AUTHOR_TESTS_WORKFLOW, 'console.log("launch spec ok");'));
     const launch = await postJson('/api/v1/runs', {
       problem: 'e2e: functional tests for the launch flow',
       clisJson: SEATS,
+      // wicked-core#850: SEATS is one seat, so the review cannot be distinct from its creator and
+      // the engine refuses it under full assurance (EX-01). This journey is about verify → review →
+      // deliver, not assurance: opt in explicitly, disclosed on every receipt.
+      reducedAssurance: true,
       workflow: QE_AUTHOR_TESTS_WORKFLOW,
       repoRef: repoId,
       humanConfirm: 'none',
@@ -442,12 +448,18 @@ describe('wave 6 end to end — the governed test-authoring journey', () => {
     expect(String(diff.body['diff'])).toContain('launch.spec.mjs');
   }, 540_000);
 
-  it('RED (R4-r2 floor): a produced e2e that FAILS under the harness fails the run — no PR, no branch, a red test set', async () => {
+  // crew#922: since wicked-core#843 the name `qe-author-tests` launches the built-in PRESET, so this
+  // stand-in def is shadowed and the case cannot run its subject. Re-author it against the preset.
+  it.skip('RED (R4-r2 floor): a produced e2e that FAILS under the harness fails the run — no PR, no branch, a red test set', async () => {
     process.env['GH_STUB_OUT'] = 'https://github.com/o/r/pull/602';
     await armQeAuthor(standInDef(QE_AUTHOR_TESTS_WORKFLOW, 'console.log("launch spec about to fail"); process.exit(1);'));
     const launch = await postJson('/api/v1/runs', {
       problem: 'e2e: tests that do not pass must not ship',
       clisJson: SEATS,
+      // wicked-core#850: SEATS is one seat, so the review cannot be distinct from its creator and
+      // the engine refuses it under full assurance (EX-01). This journey is about verify → review →
+      // deliver, not assurance: opt in explicitly, disclosed on every receipt.
+      reducedAssurance: true,
       workflow: QE_AUTHOR_TESTS_WORKFLOW,
       repoRef: repoId,
       humanConfirm: 'none',
@@ -512,6 +524,22 @@ describe('wave 6 end to end — the governed test-authoring journey', () => {
       'terminal status or the escalation gate',
       480_000,
     );
+    // wicked-core#843 (X-MIG M10): `qe-author-tests` is a built-in PRESET now — a team run the PA
+    // scopes first, whose rev-2 plan holds at a `plan_approval` gate (high risk). Approving the plan
+    // is the operator's ordinary step; it is not one of the refusing rungs this case pins.
+    for (let i = 0; i < 3 && run.session['status'] === 'awaiting_human'; i++) {
+      const gate = await getJson(`/api/v1/runs/${runId}/gate`);
+      if (!String(gate.body['prompt'] ?? '').startsWith('Approve plan rev')) break;
+      const ok = await postJson(`/api/v1/runs/${runId}/gate`, { approve: true });
+      expect(ok.status, JSON.stringify(ok.body)).toBe(200);
+      await new Promise((r) => setTimeout(r, 300));
+      run = await waitForRun(
+        runId,
+        (s) => TERMINAL.has(String(s['status'])) || s['status'] === 'awaiting_human',
+        'terminal status or the escalation gate after the plan approval',
+        480_000,
+      );
+    }
     if (run.session['status'] === 'awaiting_human') {
       const { body: evBody } = await getJson(`/api/v1/runs/${runId}/events`);
       // UNTYPED on purpose: the additive `gateEscalated` fields reach crew's wire types with #559;
@@ -555,7 +583,10 @@ describe('wave 6 end to end — the governed test-authoring journey', () => {
     }
     expect(run.session['delivery']).toBe('none');
     const planned = run.units.sort((a, b) => a.ord - b.ord).map((u) => u.id.slice(u.id.indexOf(':') + 1));
-    expect(planned.slice(0, 4)).toEqual(['recon', 'author', QE_VERIFY_PHASE_ID, 'review']);
+    // The preset's plan (wicked-core#843) leads with the PA's `pa-scope` and the floor may add steps;
+    // the def's own chain is still there, in order.
+    const chain = ['recon', 'author', QE_VERIFY_PHASE_ID, 'review'];
+    expect(planned.filter((p) => chain.includes(p))).toEqual(chain);
     expect(run.units.some((u) => u.status === 'rejected')).toBe(true);
     expect(run.units.find((u) => u.id.endsWith(':deliver'))?.status).not.toBe('done');
     expect(originBranches()).not.toContain(`wicked/${runId}`);

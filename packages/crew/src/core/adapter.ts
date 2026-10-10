@@ -702,6 +702,12 @@ function addonSupportsExcludeSeats(): boolean {
   return addonAtLeast(0, 7, 35);
 }
 
+/** Does the installed addon carry the assurance contract (`LaunchOptions.reducedAssurance`,
+ *  wicked-core#850, >= 0.7.46)? Same doctrine. */
+export function addonSupportsReducedAssurance(): boolean {
+  return addonAtLeast(0, 7, 46);
+}
+
 /**
  * Does the installed addon understand `LaunchOptions.projectGraph` (≥ 0.7.1)?
  *
@@ -1989,6 +1995,18 @@ export class CoreAdapter {
         );
       }
       opts.excludeSeats = input.excludeSeats;
+    }
+    if (input.reducedAssurance === true) {
+      // Fail CLOSED on an old addon (napi ignores undeclared fields): an addon before the assurance
+      // contract has no refusal to opt out of, so the caller's explicit waiver would be recorded
+      // against a run the engine never knew was reduced — the receipt and the run would disagree.
+      if (!addonSupportsReducedAssurance()) {
+        throw new Error(
+          'reducedAssurance needs wicked-core-ts >= 0.7.46; the installed addon has no assurance ' +
+            'contract to reduce, and would record nothing of the waiver the launch asked for',
+        );
+      }
+      opts.reducedAssurance = true;
     }
     // SAFETY NET (grounding follow-on #1): ANY project-filed launch that did not already resolve a
     // project-graph binding gets one here, so no future project-filed caller can silently ship a run

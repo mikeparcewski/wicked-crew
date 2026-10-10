@@ -261,6 +261,12 @@ export interface HealthCapabilities {
    * has the field. ABSENT or `false` — a walkthrough step on this daemon's runs fails closed.
    */
   walkthroughRoots?: boolean;
+  /**
+   * (crew ≥ 0.9.0; wicked-core#850) `LaunchRunBody.reducedAssurance` is accepted, a one-CLI
+   * full-assurance launch answers `LaunchRunResponse.assuranceNotice`, delivery enforces `qe_acceptance` ({@link QeAcceptanceRefusal}) and gate / delivery responses carry
+   * receipts. ABSENT on an older daemon — do not send the field (its strict schema 400s on it).
+   */
+  reducedAssurance?: boolean;
 }
 
 /** One `GET /health.warnings[]` entry (additive; wicked-core#411 / wicked-crew#497). */
@@ -303,6 +309,19 @@ export interface AgentSession {
   archived_at: number | null;
   /** Optional operator note recorded at archival. */
   archive_note: string | null;
+  /**
+   * (api-types 0.102.0; wicked-core#850, core-ts ≥ 0.7.46) The run's assurance contract, persisted
+   * by the engine: `mode: 'reduced'` only when the launch opted in (`reducedAssurance: true`).
+   * ABSENT on a run from an older engine (read it as unknown, never as `full`).
+   */
+  assurance?: RunAssurance;
+  /**
+   * (crew ≥ 0.9.0, EX-04) How the run's delivery was assured, when crew delivered it post-hoc
+   * (`POST /runs/:id/deliver`): `verified: false`, with the tree before and after the lift — the
+   * same label the PR body carries. Rehydrated from the `run.delivered` audit entry. ABSENT for an
+   * in-run delivery (its receipt is `deliverLiftEvaluated.assurance`) and for an undelivered run.
+   */
+  delivery_assurance?: DeliveryAssurance;
   /**
    * The project this run is filed into (DES-UX-001 §8.2, CREW-UX-2; api-types 0.8.0) —
    * populated by the crew server from the membership record at DTO assembly on BOTH
@@ -668,6 +687,9 @@ export interface WorkUnit {
   skill_ref?: string | null;
   /** The command this unit runs directly (Tool-executor phases). `null`/absent for Agent units. */
   tool_cmd?: string[] | null;
+  /** (api-types 0.102.0; wicked-core#850, core-ts ≥ 0.7.46) The receipt of this unit's LAST gate,
+   *  as `gateEvaluated.assurance` carried it. ABSENT until a gate ran, and on an older engine. */
+  assurance?: AssuranceReceipt;
   /** Evaluator≠creator role. Present on def-driven units; absent on legacy/free-text. */
   role?: PhaseRole;
   /** Gate policy for this phase. Present on def-driven units; absent on legacy/free-text. */
@@ -1260,6 +1282,22 @@ export interface GateInfo {
    * advisory: it never gates a decision, and is omitted entirely on a normal gate.
    */
   refusal?: { matched: boolean; reason: string };
+  /** (crew ≥ 0.9.0) The gated unit's persisted receipt (`WorkUnit.assurance`) — what assured the
+   *  work this gate asks about. `null` when the unit carries none (no gate evaluated it yet, or an
+   *  older engine); ABSENT on an older daemon. */
+  assurance?: AssuranceReceipt | null;
+}
+
+/**
+ * The 200 body of `POST /runs/:id/gate` (and of a gated `POST /runs/:id/resume`). `assurance`
+ * (crew ≥ 0.9.0) is the gated unit's receipt as it stood when the decision was taken; `null` when
+ * the unit carried none. A DELIVER gate's approve also carries `delivery` (its QE acceptance check).
+ */
+export interface GateDecisionResult {
+  status: SessionStatus;
+  landing?: SteeringLandingResult;
+  assurance?: AssuranceReceipt | null;
+  delivery?: { qeAcceptance: QeAcceptanceCheck | null };
 }
 
 /** Approve / reject payload for the steering gate (`POST /runs/:id/gate`). On a
@@ -1845,6 +1883,14 @@ export interface DataUsedEvent {
  *   which denies fail-closed WITHOUT that event; `reason` names the cause;
  * - `repo_checks` — the repository's own checks failed in the worktree (wicked-core F-039, see
  *   {@link RepoChecksEvaluatedEvent}).
+ * - `same_seat_evaluator` (api-types 0.102.0; wicked-core#850 EX-01, core-ts ≥ 0.7.46) — a
+ *   review/test unit ran on the seat that built its work, on a run whose contract requires a
+ *   distinct evaluator. It escalates as a `dead_seat` gate: reassign the unit to a distinct seat.
+ * - `evaluator_error` (api-types 0.102.0; EX-05) — the evaluator≠creator pass errored; `reason`
+ *   names the error. Before core-ts 0.7.46 the error was dropped and the gate could approve.
+ * - `judge_unavailable` — the gate's judge did not run (every eligible judge seat failed, or, since
+ *   core-ts 0.7.46 / EX-02, the run requires a judge and none distinct from the creator existed).
+ *   A HOLD: sign a judge seat in, then approve to re-run.
  * Open-ended (`string & {}`) so a newer engine's source parses in an older studio.
  */
 export type UnitDenialSource =
@@ -1859,6 +1905,9 @@ export type UnitDenialSource =
   | 'elicitation'
   | 'worktree_guard'
   | 'repo_checks'
+  | 'same_seat_evaluator'
+  | 'evaluator_error'
+  | 'judge_unavailable'
   | (string & {});
 
 /** The MACHINE-READABLE twin of `gateEvaluated.denialReason` (wicked-core `UnitDenial`, camelCase on
@@ -1872,6 +1921,136 @@ export interface UnitDenial {
   ruleIds: string[];
   deniedTool: string | null;
   phase: string | null;
+}
+
+// ── Assurance (api-types 0.102.0; wicked-core#850, codex audit EX-01..EX-05, core-ts ≥ 0.7.46) ──
+
+/** The run's assurance mode. `reduced` only when the launch EXPLICITLY opted in
+ *  (`LaunchRunBody.reducedAssurance: true`); it is disclosed on every receipt. */
+export type AssuranceMode = 'full' | 'reduced';
+
+/** What a run's contract can require: a workflow's `required_instruments`, else the first two. */
+export type AssuranceRequirement = 'distinct_evaluator' | 'judge' | 'qe_acceptance' | (string & {});
+
+/** A receipt's instrument token (`ran[]`, `skipped[].instrument`). */
+export type AssuranceInstrument =
+  | 'pinned_validator'
+  | 'repo_checks'
+  | 'judge'
+  | 'evaluator_pass'
+  | 'distinct_evaluator'
+  | (string & {});
+
+/** Why an instrument is absent from a receipt. */
+export type AssuranceSkipReason =
+  | 'reduced_assurance'
+  | 'no_distinct_seat'
+  | 'no_boundary'
+  | 'error'
+  | 'not_applicable'
+  | (string & {});
+
+/**
+ * The run's assurance CONTRACT, persisted by the engine on the session (`AgentSession.assurance`)
+ * and carried on `sessionStarted.assurance`. `required` is what the workflow requires BEFORE any
+ * waiver; `reduced` waives exactly `distinct_evaluator` and `judge`, never `qe_acceptance`. A
+ * session persisted before core-ts 0.7.46 reads back `full` with the default requirements.
+ */
+export interface RunAssurance {
+  mode: AssuranceMode;
+  required: AssuranceRequirement[];
+}
+
+/** One instrument a receipt did NOT run, and why. */
+export interface AssuranceSkip {
+  instrument: AssuranceInstrument;
+  reason: AssuranceSkipReason;
+  /** The engine's own words when it has them (the judge-skip reason, the floor note); else `null`. */
+  detail: string | null;
+}
+
+/**
+ * What assured ONE decision: the run's contract, the instruments that RAN and the ones that did
+ * not (and why), who made, evaluated and judged the work, the tree it was decided on, the attempt.
+ * On `gateEvaluated.assurance` (one unit's gate, persisted as `WorkUnit.assurance`) and
+ * `deliverLiftEvaluated.assurance` (every gate of the run aggregated, stamped with the delivered
+ * tree). A receipt claims only what ran: a pinned validator that timed out is a skip, checks count
+ * as ran only when some executed, a judge only when a seat answered. `null` fields are the
+ * engine's `None`, never absent.
+ */
+export interface AssuranceReceipt {
+  mode: AssuranceMode;
+  required: AssuranceRequirement[];
+  ran: AssuranceInstrument[];
+  skipped: AssuranceSkip[];
+  creator: string | null;
+  evaluator: string | null;
+  judge: string | null;
+  tree: string | null;
+  attempt: number;
+}
+
+/**
+ * (crew ≥ 0.9.0, EX-03) The QE acceptance check a delivery ran: present when the run's contract
+ * requires `qe_acceptance`. `satisfied` only on a PASS ATTRIBUTED to this run — a FAIL, any
+ * non-PASS verdict, no verdict, an unattributed verdict or an unreadable ledger refuses delivery.
+ */
+export interface QeAcceptanceCheck {
+  satisfied: boolean;
+  /** The gate's own words (`GET /runs/:id/acceptance` → `gate.reason`). */
+  reason: string;
+  /** The deciding verdict's id and reviewer, when one was attributed; `null` otherwise. */
+  verdictId: string | null;
+  reviewer: string | null;
+}
+
+/**
+ * (crew ≥ 0.9.0) What assured a DELIVERY. `receipt` is the run's aggregate: the engine's
+ * `deliverLiftEvaluated.assurance` for an in-run deliver, or — for a post-hoc delivery, which no
+ * engine lift preceded — crew's union of the units' persisted receipts with `tree` set to the
+ * delivered tree. `verified: false` (EX-04) is a post-hoc / recovery delivery: nothing re-verified
+ * the tree it pushed, and `treeBefore` (the run's work as it stood) and `treeAfter` (what was
+ * delivered, after the rebase) say whether the lift moved it. The PR body carries the same label.
+ */
+export interface DeliveryAssurance {
+  verified: boolean;
+  via: 'deliver_lift' | 'post_hoc';
+  receipt: AssuranceReceipt | null;
+  treeBefore: string | null;
+  treeAfter: string | null;
+  /** `null` when the run's contract does not require `qe_acceptance`. */
+  qeAcceptance: QeAcceptanceCheck | null;
+}
+
+/**
+ * (crew ≥ 0.9.0, EX-03) The 409 body of a delivery the QE acceptance requirement refused: an
+ * APPROVE of the deliver gate (`POST /runs/:id/gate`, or a gated `POST /runs/:id/resume`) or a
+ * post-hoc `POST /runs/:id/deliver`. Nothing was pushed; a deliver gate stays open. Record an
+ * attributed PASS (garden's qe `accept`), then approve again.
+ */
+export interface QeAcceptanceRefusal {
+  code: 'qe_acceptance_required';
+  error: string;
+  acceptance: QeAcceptanceCheck;
+  assurance: AssuranceReceipt | null;
+}
+
+/**
+ * (crew ≥ 0.9.0, EX-01/EX-02) `LaunchRunResponse.assuranceNotice`: the run launched under FULL
+ * assurance on a roster whose WORK seats (not benched, not ballot-only) all invoke ONE CLI binary
+ * (the engine's judge identity), so no other seat can evaluate its work and no other identity can
+ * judge it. If the run reviews or changes code, the engine refuses the review on its builder's seat
+ * (`dead_seat` gate) or holds a gate that needs a judge (`judge_unavailable`), and the run waits.
+ * The ways forward are explicit: sign a second CLI in, or relaunch with `retryWith` merged into the
+ * launch body (the creator's seat then evaluates its own work, disclosed on every receipt). A client
+ * shows `message` and asks its operator; crew never applies the opt-in by itself.
+ */
+export interface LaunchAssuranceNotice {
+  code: 'single_cli_roster';
+  message: string;
+  /** The work seats, all one CLI identity. */
+  seats: string[];
+  retryWith: { retryOf: string; reducedAssurance: true };
 }
 
 /** §3 B1 — the gate's decision depth, emitted alongside `gateDecided`. `denial` is the structured
@@ -1935,6 +2114,9 @@ export interface GateEvaluatedEvent {
    * parsed", never as PASS.
    */
   evaluatorVerdict?: string | null;
+  /** (api-types 0.102.0; wicked-core#850, core-ts ≥ 0.7.46) What assured this gate — persisted on
+   *  the unit as `WorkUnit.assurance`. ABSENT on an older engine. */
+  assurance?: AssuranceReceipt;
 }
 
 /** Foundation wave: session started with enriched context. */
@@ -1946,6 +2128,9 @@ export interface SessionStartedEvent {
   cli_count: number;
   governed: boolean;
   entity_mode: 'shared' | 'isolated';
+  /** (api-types 0.102.0; wicked-core#850, core-ts ≥ 0.7.46) The run's assurance contract. ABSENT
+   *  on an older engine. */
+  assurance?: RunAssurance;
 }
 
 // ── P1 observability events ─────────────────────────────────────────────────
@@ -2121,7 +2306,10 @@ export interface GateEscalatedEvent {
    * The raw denial LAYER token (`gateEvaluated.denial.source`): `worktree_guard` ·
    * `input_governance` · `dead_seat` · `repo_checks` · `repo_checks_timeout` · `pinned_validator`
    * · `substance` · `deliverables` · `agent_validator` · `worker_failure` · `evaluator_verdict`
-   * (0.7.27) · `governance`. `""` (EMPTY) = a hook veto whose source identity was folded away
+   * (0.7.27) · `governance` · `same_seat_evaluator` (a `dead_seat` condition: the review ran on its
+   * builder's seat — core-ts 0.7.46, EX-01) · `evaluator_error` · `judge_unavailable` (a
+   * `judge_unavailable` condition; since core-ts 0.7.46 also a required judge with no distinct
+   * seat — EX-02). `""` (EMPTY) = a hook veto whose source identity was folded away
    * (`actor.rs` `boundary_deny` arm with no structured denial) — a reader keys copy on
    * `(condition, denialSource)` and treats `""` beside `boundary_deny` as input governance.
    */
@@ -2498,6 +2686,9 @@ export type DeliverLiftEvaluatedEvent = {
   conflicts: string[];
   /** Why the lift was skipped / failed, or a disclosed degradation (a failed fetch); `null` otherwise. */
   note: string | null;
+  /** (api-types 0.102.0; wicked-core#850, core-ts ≥ 0.7.46) Every gate of the run aggregated,
+   *  stamped with the delivered tree and the attempt. ABSENT on an older engine. */
+  assurance?: AssuranceReceipt;
 };
 
 /** wicked-core#431 / F-3R2-009 — an `executes_code: false` phase (an evaluator, a recon rung, a
@@ -4309,6 +4500,17 @@ export interface LaunchRunBody {
    * `excluded: true`. Send only when `GET /health.capabilities.linkedIssuesExclude === true`.
    */
   excludeLinkedIssues?: string[];
+  /**
+   * (crew ≥ 0.9.0; wicked-core#850 EX-01/EX-02) The EXPLICIT opt-in to reduced assurance: the
+   * creator's seat may evaluate its own work and a pinned gate may pass with its judge skipped for
+   * want of a distinct seat — both disclosed on every receipt (`AgentSession.assurance.mode:
+   * 'reduced'`). Omitted or `false` (the same): full assurance — a run that would grade on its
+   * creator's seat parks at the engine's `dead_seat` gate, a gate whose judge had no distinct seat
+   * holds (`judge_unavailable`), and a one-CLI launch is answered with
+   * `LaunchRunResponse.assuranceNotice`. It never waives `qe_acceptance`. A client must ask its
+   * operator before sending `true`; send it only when `GET /health.capabilities.reducedAssurance === true`.
+   */
+  reducedAssurance?: boolean;
 }
 
 /** `POST /linked-issues/preview` (crew#825): what a workflow launch of `problem` WOULD append. */
@@ -4365,6 +4567,9 @@ export interface LaunchRunResponse {
    * same `skills.installed-ahead` finding `GET /diagnostics.skills.findings` carries.
    */
   skillsWarning?: { kind: 'skills.installed-ahead'; severity: 'warning'; message: string };
+  /** (crew ≥ 0.9.0; wicked-core#850) PRESENT when a full-assurance launch's usable seats are all one
+   *  CLI: the run will wait at a gate for a distinct seat. ABSENT otherwise. */
+  assuranceNotice?: LaunchAssuranceNotice;
 }
 
 /**
@@ -4399,6 +4604,9 @@ export interface SetGuidanceResult {
  */
 export interface DeliverRunResult {
   prUrl: string;
+  /** (crew ≥ 0.9.0, EX-04) Always `verified: false, via: 'post_hoc'` here: nothing re-verified the
+   *  delivered tree. ABSENT on an idempotent replay of a delivery recorded before crew 0.9.0. */
+  assurance?: DeliveryAssurance;
 }
 
 /**
@@ -7169,11 +7377,15 @@ export interface CaptureImageFile {
 export interface CaptureBody {
   notes?: string;
   files?: Array<CaptureTextFile | CaptureImageFile>;
+  /** (crew ≥ 0.9.0) The explicit reduced-assurance opt-in, as `LaunchRunBody.reducedAssurance`. */
+  reducedAssurance?: boolean;
 }
 
 /** `POST /projects/:id/capture` → 201. */
 export interface CaptureResponse {
   runId: string;
+  /** (crew ≥ 0.9.0) The launch's {@link LaunchAssuranceNotice}, when it answered one. */
+  assuranceNotice?: LaunchAssuranceNotice;
 }
 
 // ── The Demo experience (wicked-studio#373, api-types 0.61.0) ────────────────────────────────
@@ -7191,11 +7403,15 @@ export interface DemoLaunchBody {
   show: string;
   /** The roster to seat the team from, as `POST /runs` takes it. Omit for the daemon's roster. */
   clisJson?: string;
+  /** (crew ≥ 0.9.0) The explicit reduced-assurance opt-in, as `LaunchRunBody.reducedAssurance`. */
+  reducedAssurance?: boolean;
 }
 
 /** `POST /projects/:id/demo` → 201. */
 export interface DemoLaunchResponse {
   runId: string;
+  /** (crew ≥ 0.9.0) The launch's {@link LaunchAssuranceNotice}, when it answered one. */
+  assuranceNotice?: LaunchAssuranceNotice;
 }
 
 /** `PUT /runs/:id/demo/script` body: the presenter's edit of `script.md` (plan gate only; ≤ 256 KB). */

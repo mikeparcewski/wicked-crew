@@ -83,6 +83,13 @@ curl -X POST http://127.0.0.1:7701/api/v1/runs \
 wicked-crew start --problem "Fix the flaky retry test" --workflow bug
 ```
 
+**With only one CLI signed in**, a governed run cannot be evaluated or judged by a seat other than the
+one that built it. Under the default (full) assurance the engine refuses a review on its builder's
+seat and holds a gate whose judge has no distinct seat, so the run waits for a second CLI; the launch
+answer says so (`assuranceNotice`). To proceed with one CLI, opt in explicitly:
+`"reducedAssurance": true` on `POST /runs`, or `wicked-crew start --reduced-assurance`. The creator's
+seat then evaluates its own work, and every receipt says `reduced`. crew never turns it on for you.
+
 ### Start on login
 
 A daemon started by hand dies with the machine. Register it as a per-user login service instead:
@@ -128,9 +135,9 @@ state home, not your home directory (an explicit `WICKED_APPS_EMIT_DEADLETTER` i
 `governance.deadletter` finding, and `wicked-crew governance replay <outbox>` puts them back.
 
 The interactive document bridge (Vibe / Demo documents) is spawned on demand as
-`npx wicked-interactive@^0.9.2` (0.9.2 preflights and provisions the demo recorder's browser and reports
-recorder failures as typed `RecorderError` frames crew relays); `WICKED_INTERACTIVE_SPEC` overrides the
-**range** for an operator or a test rig (a semver range only — `^0.9.2`, `0.9.2`, `>=0.9.2 <1.0.0`; tags, paths and `pkg@range`
+`npx wicked-interactive@^0.12.0` (0.12.0 confines export asset reads to the document's own and approved
+roots; earlier floors added the recorder browser preflight and the typed `RecorderError` frames crew relays); `WICKED_INTERACTIVE_SPEC` overrides the
+**range** for an operator or a test rig (a semver range only — `^0.12.0`, `0.12.0`, `>=0.12.0 <1.0.0`; tags, paths and `pkg@range`
 spellings are refused and the default is used), reported on the boot line, with a warning when the
 override's floor is below the release crew needs.
 

@@ -159,7 +159,13 @@ const INTERACTIVE_PACKAGE = 'wicked-interactive';
  * `WICKED_BRIDGE_SPAWN_TOKEN` into `.wi-serve.json` as `spawnToken`, so {@link tokenLineage} proves
  * ownership without the process table; below it the pool takes the ps-walk fallback (#882).
  */
-export const INTERACTIVE_DEFAULT_RANGE = '^0.11.1';
+/**
+ * 0.12.0 (codex audit EXP-03, wicked-interactive#287): export asset reads are confined, by realpath,
+ * to the document's root and `WI_EXPORT_ASSET_ROOTS`, so a relative, absolute or symlinked reference
+ * can no longer inline a host file into an export. Below it a bridge reads whatever path a document
+ * names: the floor follows the security fix.
+ */
+export const INTERACTIVE_DEFAULT_RANGE = '^0.12.0';
 /** The env override of the RANGE (not the package). */
 export const INTERACTIVE_SPEC_ENV = 'WICKED_INTERACTIVE_SPEC';
 /** The default spec — what the daemon spawns with no override. */
