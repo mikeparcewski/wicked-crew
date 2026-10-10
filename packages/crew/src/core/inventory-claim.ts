@@ -13,15 +13,10 @@
  * the contradiction added to `unread`. Only the blocks that end the reply are the report.
  */
 
-export type InventoryAnswered = 'full' | 'partial' | 'none' | 'unknown';
+import type { InventoryAnswered, InventoryClaim } from 'wicked-crew-api-types';
 
-export interface InventoryClaim {
-  source: string | null;
-  answered: InventoryAnswered;
-  listed: number | null;
-  expected: number | null;
-  unread: string[];
-}
+// The wire shapes live in wicked-crew-api-types (crew#721), the one definition studio reads too.
+export type { InventoryAnswered, InventoryClaim };
 
 const ANSWERED = new Set<InventoryAnswered>(['full', 'partial', 'none']);
 const isCount = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v >= 0;

@@ -101,6 +101,7 @@ import {
 } from './governance-steering.js';
 import { isSteeringAuthorRun, landSteeringProposal } from './steering-landing.js';
 import { inventoryComplete, parseInventoryClaims, type InventoryClaim } from '../core/inventory-claim.js';
+import type { RunInventoryResponse } from 'wicked-crew-api-types';
 import { ApproveEditSchema, approveEdited, captureLaunchRoots, editInFlight, FileProposalSchema, registerCaptureRoutes } from './capture.js';
 import { registerTestingRoutes } from './testing.js';
 import { DEMO_PRESET, demoLaunchRoots, registerDemoRoutes, registerWalkthroughRoutes, walkthroughAcceptance } from './recording.js';
@@ -2714,8 +2715,7 @@ export function registerRoutes(
     {
       config: {
         manifest: {
-          responseType:
-            '{ runId: string; readable: boolean; complete: boolean; units: { ord: number; unitId: string; claims: InventoryClaim[] }[]; unreadUnits: string[] }',
+          responseType: 'RunInventoryResponse',
           statusCodes: [200, 404],
         },
       },
@@ -2726,7 +2726,7 @@ export function registerRoutes(
       const run = views.find((v) => v.session.id === id);
       if (!run) return reply.code(404).send({ error: 'Run not found' });
       if (typeof adapter.workOutput !== 'function') {
-        return { runId: id, readable: false, complete: false, units: [], unreadUnits: [] };
+        return { runId: id, readable: false, complete: false, units: [], unreadUnits: [] } satisfies RunInventoryResponse;
       }
       const units: { ord: number; unitId: string; claims: InventoryClaim[] }[] = [];
       // A unit whose output could not be READ is not a unit that claimed nothing: it may hold the
@@ -2756,7 +2756,7 @@ export function registerRoutes(
         complete: inventoryComplete(all) && unreadUnits.length === 0,
         units,
         unreadUnits,
-      };
+      } satisfies RunInventoryResponse;
     },
   );
 
