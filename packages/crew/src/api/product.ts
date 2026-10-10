@@ -59,7 +59,7 @@ export class ComposeSelectionTooLargeError extends Error {}
 
 /**
  * The step's instructions: `head`, the requirement list, `tail`, under the byte budget. Every
- * requirement keeps its line with its ref WHOLE (`- <repoId> <key>: `, codex on #911): only the
+ * requirement keeps its line with its ref WHOLE (`- <repoId> <key>: `, codex review of the compose PR): only the
  * descriptive text shares what is left, equally. Throws {@link ComposeSelectionTooLargeError} when
  * the refs alone do not fit.
  */
@@ -89,7 +89,7 @@ export function composeInstructions(projectId: string, rows: ReadonlyArray<Compo
   ]);
 }
 
-/** The review step's instructions: the SAME requirement list (codex on #911: the engine hands the
+/** The review step's instructions: the SAME requirement list (codex review of the compose PR: the engine hands the
  *  evaluator the draft's output, not the draft's instructions), so a gap or an invented ref is
  *  checkable against what was selected. */
 export function reviewInstructions(projectId: string, rows: ReadonlyArray<ComposeRow>): string {

@@ -81,7 +81,7 @@ describe('POST /projects/:id/product/compose (crew#372)', () => {
     expect(draft).toContain('alpha billing::r2: Refunds need approval');
     expect(draft).toContain("Operator's steer: one epic per domain");
     expect(draft).toContain('"requirementRefs"');
-    // codex on #911: the evaluator is handed the SAME list (the engine passes it the draft's output).
+    // codex review of the compose PR: the evaluator is handed the SAME list (the engine passes it the draft's output).
     const review = String(steps[1]!['instructions']);
     expect(review).toContain('alpha billing::r1: Invoices are numbered');
     expect(review).toContain('alpha billing::r2: Refunds need approval');
@@ -124,7 +124,7 @@ describe('POST /projects/:id/product/compose (crew#372)', () => {
     const wide = composeInstructions('p', rows.map((r) => ({ ...r, title: 'é'.repeat(400) })), undefined);
     expect(Buffer.byteLength(wide, 'utf8')).toBeLessThanOrEqual(7600);
     expect(Buffer.byteLength(reviewInstructions('a-project-id', rows), 'utf8')).toBeLessThanOrEqual(7600);
-    // codex on #911: a long ref is never clipped — the description gives way, and refs that
+    // codex review of the compose PR: a long ref is never clipped — the description gives way, and refs that
     // cannot fit whole are refused rather than handed to a seat cut.
     const longKeys = rows.map((r, i) => ({ ...r, key: `d::${'k'.repeat(120)}-${i}` }));
     const t = composeInstructions('p', longKeys, undefined);
