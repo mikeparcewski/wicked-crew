@@ -15,6 +15,11 @@
  *  - every message is redacted (each secret, its base64 Basic forms, JWTs, Authorization values,
  *    URL userinfo) before it is printed.
  *
+ * (crew#933) It also links Azure Boards work items (`AB#<id>` in the intent) on the pull request it
+ * opens (`workItemRefs`), updates the title and description of the one it adopts on a re-deliver,
+ * and serves the revision mode: `view` (launch: the PR's head branch and state, minting its own
+ * header), `state` and `comment` (the deliver phase: a thread carrying the run record).
+ *
  * Plain JavaScript in a string on purpose: the script must not depend on where crew's dist lives
  * (a run waits at its gate across a crew upgrade), and the same text is what the tests run.
  */
@@ -101,7 +106,7 @@ function fitDescription(body) {
   const tail = body.slice(-600);
   return body.slice(0, MAX - tail.length - note.length) + note + tail;
 }
-async function pr(apiBase, webUrl, source, target, titleFile, bodyFile) {
+async function pr(apiBase, webUrl, source, target, titleFile, bodyFile, workItems) {
   const fs = await import('node:fs');
   const auth = env.WICKED_ADO_AUTH || '';
   if (!auth) fail('no Azure DevOps auth header was handed to the pull-request step');
@@ -111,7 +116,7 @@ async function pr(apiBase, webUrl, source, target, titleFile, bodyFile) {
   const r = await call(apiBase + '/pullrequests?' + API, {
     method: 'POST',
     headers: { Authorization: auth, 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify({ sourceRefName: 'refs/heads/' + source, targetRefName: 'refs/heads/' + target, title, description }),
+    body: JSON.stringify({ sourceRefName: 'refs/heads/' + source, targetRefName: 'refs/heads/' + target, title, description, workItemRefs: ids(workItems).map((id) => ({ id })) }),
   });
   if (r.ok && r.json && typeof r.json.pullRequestId === 'number') {
     process.stdout.write(webUrl + '/pullrequest/' + r.json.pullRequestId + '\n');
@@ -122,13 +127,56 @@ async function pr(apiBase, webUrl, source, target, titleFile, bodyFile) {
   const existing = await findPr(apiBase, auth, source, target);
   if (existing) {
     process.stdout.write('deliver: ADO-PR-EXISTS ' + webUrl + '/pullrequest/' + existing.pullRequestId + '\n');
+    // A re-deliver: the adopted PR now describes THIS attempt (the GitHub path comments the record;
+    // Azure DevOps has one description, so it is replaced). A failed update is said, not fatal.
+    const u = await call(apiBase + '/pullrequests/' + existing.pullRequestId + '?' + API, {
+      method: 'PATCH',
+      headers: { Authorization: auth, 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ title, description }),
+    });
+    process.stdout.write(u.ok ? 'deliver: updated the title and description of pull request ' + existing.pullRequestId + ' for this attempt\n' : 'deliver: could not update pull request ' + existing.pullRequestId + ' (HTTP ' + u.status + ') — the push landed; the record is in the commit message\n');
     return;
   }
   const why = r.json && typeof r.json.message === 'string' ? r.json.message : r.text.slice(0, 300);
   fail('Azure DevOps refused the pull request (HTTP ' + r.status + '): ' + why);
 }
+// The work-item ids baked by the composer ('12,34'): digits only, deduplicated.
+function ids(list) { return [...new Set(String(list || '').split(',').filter((x) => /^[0-9]+$/.test(x)))]; }
+function prState(p) { return p && p.status === 'active' ? 'OPEN' : String((p && p.status) || 'unknown').toUpperCase(); }
+async function readPr(apiBase, auth, id) {
+  const r = await call(apiBase + '/pullrequests/' + encodeURIComponent(id) + '?' + API, { method: 'GET', headers: { Authorization: auth, Accept: 'application/json' } });
+  if (!r.ok || !r.json || typeof r.json.pullRequestId !== 'number') fail('Azure DevOps could not read pull request ' + id + ' (HTTP ' + r.status + ')');
+  return r.json;
+}
+// Launch time (the daemon, no deliver phase yet): mint the header, read the PR, print what the
+// revision needs as the JSON gh pr view would have answered.
+async function view(loginBase, apiBase, webUrl, id) {
+  const p = await readPr(apiBase, await header(loginBase), id);
+  const head = typeof p.sourceRefName === 'string' && p.sourceRefName.startsWith('refs/heads/') ? p.sourceRefName.slice('refs/heads/'.length) : null;
+  process.stdout.write(JSON.stringify({ headRefName: head, state: prState(p), isCrossRepository: Boolean(p.forkSource), url: webUrl + '/pullrequest/' + p.pullRequestId }) + '\n');
+}
+async function state(apiBase, id) {
+  const auth = env.WICKED_ADO_AUTH || '';
+  if (!auth) fail('no Azure DevOps auth header was handed to the state step');
+  process.stdout.write(prState(await readPr(apiBase, auth, id)) + '\n');
+}
+async function comment(apiBase, id, bodyFile) {
+  const fs = await import('node:fs');
+  const auth = env.WICKED_ADO_AUTH || '';
+  if (!auth) fail('no Azure DevOps auth header was handed to the comment step');
+  const content = fitDescription(fs.readFileSync(bodyFile, 'utf8'));
+  const r = await call(apiBase + '/pullRequests/' + encodeURIComponent(id) + '/threads?' + API, {
+    method: 'POST',
+    headers: { Authorization: auth, 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ comments: [{ parentCommentId: 0, content, commentType: 1 }], status: 1 }),
+  });
+  if (!r.ok) fail('Azure DevOps refused the comment on pull request ' + id + ' (HTTP ' + r.status + ')');
+}
 (async () => {
   if (cmd === 'header') process.stdout.write((await header(args[0])) + '\n');
+  else if (cmd === 'view') await view(...args);
+  else if (cmd === 'state') await state(...args);
+  else if (cmd === 'comment') await comment(...args);
   else if (cmd === 'same') {
     const want = canon(args[0]);
     const urls = args.slice(1).join('\n').split(/\s+/).filter(Boolean);

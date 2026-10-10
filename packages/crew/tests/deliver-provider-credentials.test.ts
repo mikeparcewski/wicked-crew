@@ -15,7 +15,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { DELIVER_PUSH_REJECTED_MARKER, deliverGateInstructions, deliverPrScript, type DeliverScriptOptions } from '../src/core/deliver.js';
+import { DELIVER_PUSH_REJECTED_MARKER, defaultAdoHelperExec, deliverGateInstructions, deliverPrScript, resolvePullRequest, type AdoHelperExec, type DeliverScriptOptions } from '../src/core/deliver.js';
+import { adoWorkItemIds } from '../src/core/deliver-text.js';
 import { ADO_HELPER_JS } from '../src/core/ado-deliver-helper.js';
 import {
   adoCredentials,
@@ -132,12 +133,12 @@ interface Run {
   ghCalls: string[];
 }
 
-async function runDeliver(fx: Fx, script: DeliverScriptOptions, env: Record<string, string>): Promise<Run> {
+async function runDeliver(fx: Fx, script: DeliverScriptOptions, env: Record<string, string>, intent = 'feat: crew#720 delivery'): Promise<Run> {
   const record = join(fx.root, `gh-calls-${Math.random().toString(16).slice(2)}`);
   const res = await new Promise<{ status: number; out: string }>((resolve) => {
     execFile(
       'bash',
-      ['-lc', deliverPrScript('feat: crew#720 delivery', { runId: RUN_ID, nonce: NONCE, ...script })],
+      ['-lc', deliverPrScript(intent, { runId: RUN_ID, nonce: NONCE, ...script })],
       {
         cwd: fx.workdir,
         encoding: 'utf8',
@@ -193,12 +194,15 @@ interface Ado {
   url: string;
   target: AdoRepo;
   prBodies: Array<{ auth: string; body: Record<string, unknown> }>;
+  /** (crew#933) PATCHes of an existing PR and thread comments, by PR id. */
+  patches: Array<{ id: string; body: Record<string, unknown> }>;
+  threads: Array<{ id: string; body: Record<string, unknown> }>;
   tokenForms: URLSearchParams[];
   authSeen: string[];
 }
 
-async function mockAdo(fx: Fx, o: { auth: string; existingPr?: number; refusePush?: boolean; mint?: string }): Promise<Ado> {
-  const state: Omit<Ado, 'url' | 'target'> = { prBodies: [], tokenForms: [], authSeen: [] };
+async function mockAdo(fx: Fx, o: { auth: string; existingPr?: number; refusePush?: boolean; mint?: string; prHead?: string; prStatus?: string }): Promise<Ado> {
+  const state: Omit<Ado, 'url' | 'target'> = { prBodies: [], patches: [], threads: [], tokenForms: [], authSeen: [] };
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const u = new URL(req.url ?? '/', 'http://x');
     const chunks: Buffer[] = [];
@@ -218,6 +222,25 @@ async function mockAdo(fx: Fx, o: { auth: string; existingPr?: number; refusePus
       if (auth !== o.auth) {
         res.writeHead(401, { 'www-authenticate': 'Basic realm="ado"' });
         res.end('unauthorized');
+        return;
+      }
+      const one = /^\/org\/proj\/_apis\/git\/repositories\/repo\/pullrequests\/(\d+)$/i.exec(u.pathname);
+      if (one !== null && req.method === 'PATCH') {
+        state.patches.push({ id: one[1]!, body: JSON.parse(body.toString('utf8')) as Record<string, unknown> });
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ pullRequestId: Number(one[1]) }));
+        return;
+      }
+      if (one !== null && req.method === 'GET') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ pullRequestId: Number(one[1]), status: o.prStatus ?? 'active', sourceRefName: `refs/heads/${o.prHead ?? 'feature/x'}`, targetRefName: 'refs/heads/main' }));
+        return;
+      }
+      const thread = /^\/org\/proj\/_apis\/git\/repositories\/repo\/pullRequests\/(\d+)\/threads$/.exec(u.pathname);
+      if (thread !== null && req.method === 'POST') {
+        state.threads.push({ id: thread[1]!, body: JSON.parse(body.toString('utf8')) as Record<string, unknown> });
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ id: 1 }));
         return;
       }
       if (u.pathname === '/org/proj/_apis/git/repositories/repo/pullrequests') {
@@ -403,10 +426,30 @@ describe('crew#720 provider + credentials (pure)', () => {
     expect(credentialsMissingIn('deliver: pushed')).toBeNull();
   });
 
-  it('a revision of an Azure DevOps pull request is refused at compose time', () => {
+  it('(crew#933) a revision of an Azure DevOps pull request composes; its URL must be an Azure DevOps PR URL', () => {
+    const script = deliverPrScript('x', { originUrl: 'https://dev.azure.com/org/proj/_git/repo', revisesPr: { number: 3, headRef: 'wicked/a', url: 'https://dev.azure.com/org/proj/_git/repo/pullrequest/3' } });
+    expect(script).toContain("TARGET='wicked/a'");
     expect(() =>
-      deliverPrScript('x', { originUrl: 'https://dev.azure.com/org/proj/_git/repo', revisesPr: { number: 3, headRef: 'wicked/a', url: 'https://github.com/o/r/pull/3' } }),
-    ).toThrow(/Azure DevOps pull request is not supported/);
+      deliverPrScript('x', { originUrl: 'https://dev.azure.com/org/proj/_git/repo', revisesPr: { number: 3, headRef: 'wicked/a', url: "https://dev.azure.com/o/p/_git/r/pullrequest/3'; echo x" } }),
+    ).toThrow(/not a pull request URL/);
+    // Bound to THIS repository and number: another organisation's PR, another number, a GitHub URL.
+    for (const url of ['https://dev.azure.com/other/proj/_git/repo/pullrequest/3', 'https://dev.azure.com/org/proj/_git/repo/pullrequest/4', 'https://github.com/o/r/pull/3']) {
+      expect(() => deliverPrScript('x', { originUrl: 'https://dev.azure.com/org/proj/_git/repo', revisesPr: { number: 3, headRef: 'wicked/a', url } }), url).toThrow(
+        /is not pull request #3 of the repository this delivery pushes to/,
+      );
+    }
+    // …and a GitHub delivery never revises an Azure DevOps URL.
+    expect(() => deliverPrScript('x', { originUrl: 'https://github.com/o/r.git', revisesPr: { number: 3, headRef: 'wicked/a', url: 'https://dev.azure.com/org/proj/_git/repo/pullrequest/3' } })).toThrow(
+      /is not pull request #3/,
+    );
+  });
+
+  it('(crew#933) AB#<id> mentions are the Azure Boards work items, in order, deduplicated, never glued to a word', () => {
+    expect(adoWorkItemIds('Fixes AB#123 and ab#45; see AB#123, xAB#9, AB#0')).toEqual(['123', '45']);
+    expect(adoWorkItemIds('fix #12')).toEqual([]);
+    // Baked as digits only on an Azure DevOps delivery; nothing on a GitHub one.
+    expect(deliverPrScript('Fixes AB#7', { originUrl: 'https://dev.azure.com/org/proj/_git/repo' })).toContain("ADOWI='7'");
+    expect(deliverPrScript('Fixes AB#7', { originUrl: 'https://github.com/o/r.git' })).toContain("ADOWI=''");
   });
 });
 
@@ -467,13 +510,81 @@ describe('crew#720 deliver, driven for real — Azure DevOps', () => {
     expectNoSecret(r.output);
   }, 60_000);
 
-  it('a PR already open for this branch pair is ADOPTED (a retry after the push landed)', async () => {
+  it('a PR already open for this branch pair is ADOPTED (a retry after the push landed) and its title + description are updated (crew#933)', async () => {
     const fx = fixture();
     const ado = await mockAdo(fx, { auth: `Basic ${Buffer.from(`:${PAT}`).toString('base64')}`, existingPr: 41 });
     const r = await runDeliver(fx, { adoTarget: ado.target }, { AZURE_DEVOPS_EXT_PAT: PAT });
     expect(r.status, r.output).toBe(0);
     expect(r.output).toContain('already exists');
     expect(prUrlFrom(r.output)).toBe('https://dev.azure.com/org/proj/_git/repo/pullrequest/41');
+    expect(r.output).toContain('deliver: updated the title and description of pull request 41 for this attempt');
+    expect(ado.patches).toHaveLength(1);
+    expect(ado.patches[0]).toMatchObject({ id: '41', body: { title: 'feat: crew#720 delivery' } });
+    expect(String(ado.patches[0]!.body['description'])).toContain('## Intent');
+    expectNoSecret(r.output);
+  }, 60_000);
+
+  it('(crew#933) AB# work items in the intent are linked on the pull request it opens', async () => {
+    const fx = fixture();
+    const ado = await mockAdo(fx, { auth: `Basic ${Buffer.from(`:${PAT}`).toString('base64')}` });
+    const r = await runDeliver(fx, { adoTarget: ado.target }, { AZURE_DEVOPS_EXT_PAT: PAT }, 'feat: board item delivery\n\nFixes AB#123, refs AB#45');
+    expect(r.status, r.output).toBe(0);
+    expect(ado.prBodies[0]!.body['workItemRefs']).toEqual([{ id: '123' }, { id: '45' }]);
+    // …and the mention rides the description as written.
+    expect(String(ado.prBodies[0]!.body['description'])).toContain('AB#123');
+  }, 120_000);
+
+  it('(crew#933) REVISION: pushes onto the Azure DevOps PR head branch, opens no PR, comments the run record as a thread', async () => {
+    const fx = fixture();
+    const auth = `Basic ${Buffer.from(`:${PAT}`).toString('base64')}`;
+    // The PR's head: one commit on top of main on the served repo; the run is based on it.
+    git(fx.clone, 'checkout', '-q', '-b', 'feature/x', 'main');
+    writeFileSync(join(fx.clone, 'pr.txt'), 'the prior run\n');
+    git(fx.clone, 'add', 'pr.txt');
+    git(fx.clone, 'commit', '-qm', 'the prior run');
+    git(fx.clone, 'push', '-q', fx.bare, 'feature/x');
+    git(fx.clone, 'checkout', '-q', 'main');
+    const prHead = git(fx.bare, 'rev-parse', 'feature/x').trim();
+    git(fx.workdir, 'stash', '-q', '-u');
+    git(fx.workdir, 'reset', '-q', '--hard', prHead);
+    git(fx.workdir, 'stash', 'pop', '-q');
+    const ado = await mockAdo(fx, { auth, prHead: 'feature/x' });
+    const url = 'https://dev.azure.com/org/proj/_git/repo/pullrequest/9';
+    const r = await runDeliver(fx, { adoTarget: ado.target, revisesPr: { number: 9, headRef: 'feature/x', url } }, { AZURE_DEVOPS_EXT_PAT: PAT });
+    expect(r.status, r.output).toBe(0);
+    expect(r.output.trimEnd().split('\n').filter((l) => !l.startsWith('deliver: OUTCOME')).pop()).toBe(url);
+    expect(ado.prBodies).toEqual([]);
+    expect(git(fx.bare, 'rev-list', '--count', `${prHead}..feature/x`).trim()).toBe('1');
+    expect(bareBranches(fx)).not.toContain(`wicked/${RUN_ID}`);
+    expect(r.output).toContain('deliver: pull request #9 is OPEN');
+    expect(ado.threads).toHaveLength(1);
+    expect(ado.threads[0]!.id).toBe('9');
+    expect(JSON.stringify(ado.threads[0]!.body)).toContain('## Intent');
+    expectNoSecret(r.output);
+  }, 120_000);
+
+  it('(crew#933) the launch resolves an Azure DevOps PR through its REST API (head branch, state, URL)', async () => {
+    const fx = fixture();
+    const ado = await mockAdo(fx, { auth: `Basic ${Buffer.from(`:${PAT}`).toString('base64')}`, prHead: 'feature/x' });
+    // The real helper, the mocked REST: `view` mints its own header from the environment.
+    // Every ADO credential the helper could read is pinned for the test (a configured machine's
+    // service principal must never reach the loopback token endpoint).
+    const names = ['AZURE_DEVOPS_EXT_PAT', 'CREW_ADO_TENANT_ID', 'CREW_ADO_CLIENT_ID', 'CREW_ADO_CLIENT_SECRET'];
+    const saved = Object.fromEntries(names.map((n) => [n, process.env[n]]));
+    for (const n of names) delete process.env[n];
+    process.env['AZURE_DEVOPS_EXT_PAT'] = PAT;
+    try {
+      const adoExec: AdoHelperExec = (args, opts) =>
+        defaultAdoHelperExec(args[0] === 'view' ? ['view', ado.target.loginBase, ado.target.apiBase, ado.target.webUrl, args[4]!] : args, opts);
+      git(fx.clone, 'remote', 'set-url', 'origin', 'https://dev.azure.com/org/proj/_git/repo');
+      const res = await resolvePullRequest(fx.clone, 9, undefined, adoExec);
+      expect(res).toEqual({ ok: true, pr: { number: 9, headRef: 'feature/x', url: 'https://dev.azure.com/org/proj/_git/repo/pullrequest/9', state: 'OPEN' } });
+    } finally {
+      for (const n of names) {
+        if (saved[n] === undefined) delete process.env[n];
+        else process.env[n] = saved[n];
+      }
+    }
   }, 60_000);
 
   it('REFUSED PUSH (403): committed, nothing on the remote, parks recoverably; the zip holds the committed tree', async () => {
