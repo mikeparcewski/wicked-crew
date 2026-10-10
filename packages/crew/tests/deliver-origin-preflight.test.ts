@@ -79,7 +79,6 @@ describe('the deliver gate names the real origin (F2)', () => {
   it('another HOST is told the condition, never "no pull request" — GHES is an arbitrary hostname', () => {
     for (const [url, host] of [
       ['git@gitlab.com:group/proj.git', 'gitlab.com'],
-      ['https://dev.azure.com/org/proj/_git/repo', 'dev.azure.com'],
       ['ssh://git@gitea.internal:2222/team/repo.git', 'gitea.internal'],
       ['https://github.acme.example/owner/repo.git', 'github.acme.example'],
     ] as const) {
@@ -88,6 +87,20 @@ describe('the deliver gate names the real origin (F2)', () => {
       const s = newPrTargetSentence(url);
       expect(s).toContain(`opens a pull request only if gh resolves ${host} as a GitHub host`);
       expect(s).toContain('otherwise no pull request is opened and the pushed branch IS the delivery');
+    }
+  });
+
+  it('(crew#720) an Azure DevOps origin names the repository the pull request opens on, through the REST API', () => {
+    for (const url of [
+      'https://dev.azure.com/org/proj/_git/repo',
+      'https://org@dev.azure.com/org/proj/_git/repo',
+      'git@ssh.dev.azure.com:v3/org/proj/repo',
+      'https://org.visualstudio.com/DefaultCollection/proj/_git/repo',
+    ]) {
+      expect(classifyDeliverOrigin(url)).toBe('other');
+      expect(newPrTargetSentence(url)).toBe(
+        "Pushes the run branch to org/proj/repo on Azure DevOps and opens a pull request there through its REST API, with the daemon's Azure DevOps credential; merge stays human.",
+      );
     }
   });
 

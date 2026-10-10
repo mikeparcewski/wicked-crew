@@ -54,6 +54,7 @@ import { engineCampaignDef, engineRosterJson } from './engine-roster.js';
 import { QE_AUTHOR_TESTS_WORKFLOW_DEF } from '../qe/author-workflow.js';
 import { CAMPAIGN_WORKFLOW_PREFIX } from '../campaigns/plan.js';
 import { composeDeliverableFloor } from './deliverable-floor.js';
+import { deliverCredentialsProbe, type DeliverCredentials } from './deliver-credentials.js';
 import {
   isSyntheticWorkflowId,
   resolveRunIdentity,
@@ -1909,6 +1910,8 @@ export class CoreAdapter {
     originUrl: string | null,
     /** (crew#737) The identity this launch resolved — launch-local, never adapter state. */
     identity: { login: string; source: 'repo' | 'setting'; signedIn: boolean | null },
+    /** (crew#720) The provider credential preflight this launch read. */
+    credentials: DeliverCredentials | null,
   ): ReturnType<typeof deliverPresetStep> {
     return deliverPresetStep(name, phases, input.sessionId, input.problem, {
       repoRef: input.repoRef ?? null,
@@ -1920,6 +1923,7 @@ export class CoreAdapter {
       deliverIdentity: identity.login,
       deliverIdentitySource: identity.source,
       deliverIdentitySignedIn: identity.signedIn,
+      credentials,
     });
   }
 
@@ -1931,6 +1935,8 @@ export class CoreAdapter {
     // (F2) And the origin the push would go to — read once, for the gate card's target sentence.
     // Only a delivering launch composes a deliver phase, so only a delivering launch pays for it.
     const deliverOriginUrl = input.deliver === 'pr' ? await this.resolveDeliverOrigin(input.repoRef) : null;
+    // (crew#720) And whether the provider credential is there — presence only, read once.
+    const deliverCredentials = input.deliver === 'pr' ? await deliverCredentialsProbe(deliverOriginUrl, process.env) : null;
     const opts: LaunchOptions = {
       problem: input.problem,
       sessionId: input.sessionId,
@@ -2076,7 +2082,7 @@ export class CoreAdapter {
       // T8: a delivering plan hands the engine its deliver step, exactly as a preset launch does.
       if (input.deliver === 'pr') {
         (opts as LaunchOptions & { deliverStepJson?: string }).deliverStepJson = JSON.stringify(
-          this.deliverStep(null, [], input, deliverOriginUrl, deliverIdentity),
+          this.deliverStep(null, [], input, deliverOriginUrl, deliverIdentity, deliverCredentials),
         );
       }
     }
@@ -2097,7 +2103,7 @@ export class CoreAdapter {
         );
       }
       if (!this.supportsPlanLaunch()) throw new PlanLaunchUnsupportedError('Delivering a preset launch');
-      const step = this.deliverStep(input.workflow, this.getWorkflow(input.workflow)?.phases ?? [], input, deliverOriginUrl, deliverIdentity);
+      const step = this.deliverStep(input.workflow, this.getWorkflow(input.workflow)?.phases ?? [], input, deliverOriginUrl, deliverIdentity, deliverCredentials);
       (opts as LaunchOptions & { deliverStepJson?: string }).deliverStepJson = JSON.stringify(step);
       opts.workflow = input.workflow;
     } else if (input.workflow !== undefined) {
@@ -2177,6 +2183,8 @@ export class CoreAdapter {
             deliverIdentity: deliverIdentity.login,
             deliverIdentitySource: deliverIdentity.source,
             deliverIdentitySignedIn: deliverIdentity.signedIn,
+            // crew#720 — the provider credential preflight, said on the card before approval.
+            credentials: deliverCredentials,
           });
         }
       }
@@ -2677,6 +2685,7 @@ export class CoreAdapter {
     // launch would. Local to this call, like the launch's.
     const previewOriginUrl = opts.deliver === true ? await this.resolveDeliverOrigin(opts.repoRef) : null;
     const previewIdentity = await this.resolveDeliverIdentity(opts.repoRef, opts.deliver === true);
+    const previewCredentials = opts.deliver === true ? await deliverCredentialsProbe(previewOriginUrl, process.env) : null;
     const deliverStep =
       opts.deliver === true
         ? JSON.stringify(
@@ -2693,6 +2702,7 @@ export class CoreAdapter {
               },
               previewOriginUrl,
               previewIdentity,
+              previewCredentials,
             ),
           )
         : null;

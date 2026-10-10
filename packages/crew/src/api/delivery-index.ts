@@ -436,10 +436,12 @@ export function gitRunBranchIsEmpty(
  * The PR URL in a deliver transcript — crew's own extraction, mirrored
  * (`core/deliver.ts`: `grep -Eo 'https://[^[:space:]]+/pull/[0-9]+' | tail -1`). Requiring
  * the digits keeps `…/pull/new/<branch>` — the create-PR form git prints on every push —
- * from ever matching; the LAST match wins, same as `tail -1`.
+ * from ever matching; the LAST match wins, same as `tail -1`. (crew#720) An Azure DevOps pull
+ * request reads `…/_git/<repo>/pullrequest/<id>` (the script's ADO branch greps exactly that);
+ * Azure Repos' own push hint, `…/pullrequestcreate?…`, carries no `/<digits>` and never matches.
  */
 export function prUrlFrom(text: string): string | null {
-  const matches = text.match(/https:\/\/\S+\/pull\/\d+/g);
+  const matches = text.match(/https:\/\/\S+\/pull(?:request)?\/\d+/g);
   return matches === null ? null : (matches[matches.length - 1] ?? null);
 }
 

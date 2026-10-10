@@ -22,6 +22,8 @@ export const STATE_HOME_ENTRY_NAMES: ReadonlyArray<string> = [
   'skills',
   'audit.log',
   'evals',
+  // crew#720: each run's final-codebase zip — `src/api/codebase-archive.ts`.
+  'artifacts',
   'project-graphs',
   'repo-graphs',
   'project-settings.json',

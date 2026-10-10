@@ -36,8 +36,10 @@ import {
   gitRunBranchIsEmpty,
   gitWorktreeIsClean,
   canDeliverResolver,
+  deliverUnitOf,
   type VacuityProbes,
 } from './delivery-index.js';
+import { CodebaseArchiveStore } from './codebase-archive.js';
 import { DeliveryFreeze } from './delivery-freeze.js';
 import { DeliveryDerivationCache } from './delivery-cache.js';
 import { registerClient, broadcast } from '../events/bus.js';
@@ -75,7 +77,7 @@ import { MembershipIndex } from '../projects/membership-index.js';
 import { writeRunEvidencePointer } from '../projects/charter.js';
 import {
   engineBenchesUnclassifiedSeats, CoreAdapter } from '../core/adapter.js';
-import type { Actor, CoreEvent } from '../core/types.js';
+import type { Actor, CoreEvent, SessionView } from '../core/types.js';
 import { resolveCursorUnit } from '../core/cursor.js';
 import {
   STALL_DETECTED_ACTION,
@@ -327,6 +329,8 @@ export interface CreateServerOptions {
    *  `WICKED_CREW_EVAL_STORE`. Symmetric with `auditPath` — a createServer-driven test isolates its
    *  eval history here instead of writing the operator's real `~/.wicked-crew/evals/`. */
   evalStoreRoot?: string;
+  /** (crew#720) The final-codebase zip root override (tests). Default `<state home>/artifacts/runs`. */
+  codebaseArchiveRoot?: string;
   // (The crew#274 §3 seat-health `--version` recovery probe is retired — perf recon fix #3.
   // Readiness lives engine-side as the wicked-core#355 dispatch bench; the tracker recovers a
   // seat on its next real `ok` output. The `seatHealthProbe` option is gone with it.)
@@ -826,6 +830,24 @@ export async function createServer(
     log: (m) => app.log.warn(m),
   });
   const resolveRunDelivery = (runId: string): Promise<void> => deliveryResolver.resolve(runId);
+  // crew#720 (operator ruling 2026-10-10): every delivery leaves a zip of the run's final codebase,
+  // whatever the outcome. Taken when the deliver unit's output lands (delivered, push refused,
+  // credentials missing, wrong account) and again at the run's terminal frame (a lift conflict, a
+  // run that failed after building, a cancel) — BEFORE the delivered-worktree sweep. An unchanged
+  // tree rewrites nothing. Best-effort: never awaited by the frame, never a run failure.
+  const codebaseArchives = new CodebaseArchiveStore(options?.codebaseArchiveRoot, (m) => app.log.info(m));
+  const archiveRunCodebase = async (runId: string, trigger: 'deliver' | 'run_end', view?: SessionView): Promise<void> => {
+    try {
+      const v = view ?? (await adapter.sessionsDetail()).find((x) => x.session.id === runId);
+      if (v === undefined || v.session.repo_ref == null) return;
+      const repoRoot = (await adapter.listRepos()).find((r) => r.id === v.session.repo_ref)?.root_path ?? null;
+      const before = codebaseArchives.get(runId);
+      const rec = await codebaseArchives.archive(runId, { workdir: v.session.workdir, repoRoot }, trigger);
+      if (rec !== null && rec !== before) audit.record('run.codebase_archived', DAEMON_ACTOR, { runId, detail: { ...rec } });
+    } catch (err) {
+      app.log.warn(`[runs] codebase archive for ${runId} failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
   // Crew reaches a bus only through the engine that holds it (wicked-core#631, core/bus.ts): a seam
   // with no bus db of its own reads and writes the one this adapter handed its engine.
   const engineBusDb = typeof adapter.busDbPath === 'string' ? adapter.busDbPath : undefined;
@@ -1670,6 +1692,18 @@ export async function createServer(
       const ev = event as CoreEvent & { ord?: unknown; unitOrd?: unknown; attempt?: unknown };
       const ord = typeof ev.ord === 'number' ? ev.ord : typeof ev.unitOrd === 'number' ? ev.unitOrd : undefined;
       if (ord !== undefined) void considerations?.onUnitCaptured(session, ord, typeof ev.attempt === 'number' ? ev.attempt : 0);
+      // crew#720: the deliver unit's output landed — whatever its verdict, archive the tree now.
+      if (ord !== undefined) {
+        void adapter
+          .sessionsDetail()
+          .then((views) => {
+            const view = views.find((v) => v.session.id === session);
+            const unit = view !== undefined ? deliverUnitOf(view) : null;
+            if (view !== undefined && unit !== null && unit.ord === ord) return archiveRunCodebase(session, 'deliver', view);
+            return undefined;
+          })
+          .catch(() => undefined);
+      }
     }
     // The delivered-PR record (CREW-UX-8, crew#321): resolved once per run at its terminal
     // frame, best-effort, off the hot path — see `resolveRunDelivery` above for why BOTH
@@ -1710,6 +1744,8 @@ export async function createServer(
         if (endedTs > 0) runTimingIndex.setEnded(session, endedTs);
       }
       void resolveRunDelivery(session)
+        // crew#720: the final-codebase zip, before the sweep below can remove the worktree.
+        .then(() => archiveRunCodebase(session, 'run_end'))
         // crew#620 Acceptance 3: sweep the delivered run's worktree once the PR is open.
         // Best-effort — a sweep error must never fail the terminal frame.
         .then(async () => {
@@ -1981,6 +2017,7 @@ export async function createServer(
       deliveryCache,
       // crew#851: the routes await a pending resolution for a view in the completion window.
       deliveryResolver,
+      codebaseArchives,
       worktreeExists: vacuityProbes.worktreeExists,
       worktreeIsClean: vacuityProbes.worktreeIsClean,
       runBranchIsEmpty: vacuityProbes.runBranchIsEmpty,
