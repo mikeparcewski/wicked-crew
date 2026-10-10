@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { freshenCheckout, freshnessClause } from '../src/api/chat-freshness.js';
+import { freshenCheckout, freshnessClause, nonInteractiveGitEnv } from '../src/api/chat-freshness.js';
 import { chatScopeStatement } from '../src/api/chat-scope.js';
 
 const git = (cwd: string, ...args: string[]): string =>
@@ -46,6 +46,12 @@ describe('freshenCheckout (crew#899)', () => {
   }, 120_000);
 
   afterEach(() => rmSync(base, { recursive: true, force: true }));
+
+  it('codex retro on #902: the git env never prompts — askpass answers nothing, GCM never interacts, ssh is batch mode on top of the operator\'s own command', () => {
+    const env = nonInteractiveGitEnv({ PATH: '/bin', GIT_ASKPASS: '/usr/local/bin/gui-askpass', GIT_SSH_COMMAND: 'ssh -i ~/.ssh/k' });
+    expect(env).toMatchObject({ PATH: '/bin', GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: 'true', SSH_ASKPASS: 'true', GCM_INTERACTIVE: 'never', GIT_SSH_COMMAND: 'ssh -i ~/.ssh/k -o BatchMode=yes' });
+    expect(nonInteractiveGitEnv({})['GIT_SSH_COMMAND']).toBe('ssh -o BatchMode=yes');
+  });
 
   it('a checkout already at its upstream is current', async () => {
     expect(await freshenCheckout(clone)).toEqual({ state: 'current', upstream: 'origin/main' });
