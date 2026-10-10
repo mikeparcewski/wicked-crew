@@ -2644,15 +2644,15 @@ export function registerRoutes(
   // A step that lists things a later step acts on ends its reply with a `wicked-inventory` block
   // (wicked-garden core/refs/inventory-report.md). This reads them off every unit's captured
   // output, so a reviewer sees "partial: 9 of 10, issue #936 unread" without opening transcripts
-  // (crew#648). `complete` is true only when at least one unit claimed an inventory and every
-  // claim is `full`; `readable: false` when the adapter keeps no transcripts.
+  // (crew#648). `complete` is true only when at least one unit claimed an inventory, every claim is
+  // `full` and every unit's output was readable; `readable: false` when the adapter keeps none.
   app.get(
     `${V}/runs/:id/inventory`,
     {
       config: {
         manifest: {
           responseType:
-            '{ runId: string; readable: boolean; complete: boolean; units: { ord: number; unitId: string; claims: InventoryClaim[] }[] }',
+            '{ runId: string; readable: boolean; complete: boolean; units: { ord: number; unitId: string; claims: InventoryClaim[] }[]; unreadUnits: string[] }',
           statusCodes: [200, 404],
         },
       },
@@ -2663,22 +2663,32 @@ export function registerRoutes(
       const run = views.find((v) => v.session.id === id);
       if (!run) return reply.code(404).send({ error: 'Run not found' });
       if (typeof adapter.workOutput !== 'function') {
-        return { runId: id, readable: false, complete: false, units: [] };
+        return { runId: id, readable: false, complete: false, units: [], unreadUnits: [] };
       }
       const units: { ord: number; unitId: string; claims: InventoryClaim[] }[] = [];
+      // A unit whose output could not be READ is not a unit that claimed nothing: it may hold the
+      // partial claim, so it is listed and the run is never `complete` while any remain (codex r1).
+      const unreadUnits: string[] = [];
       for (const u of [...run.units].sort((a, b) => a.ord - b.ord)) {
-        let text: string | null = null;
+        let text: string | null;
         try {
           text = await adapter.workOutput(coreUnitId(id, u));
         } catch {
-          text = null;
+          unreadUnits.push(u.id);
+          continue;
         }
         if (text === null) continue;
         const claims = parseInventoryClaims(text);
         if (claims.length > 0) units.push({ ord: u.ord, unitId: u.id, claims });
       }
       const all = units.flatMap((u) => u.claims);
-      return { runId: id, readable: true, complete: inventoryComplete(all), units };
+      return {
+        runId: id,
+        readable: true,
+        complete: inventoryComplete(all) && unreadUnits.length === 0,
+        units,
+        unreadUnits,
+      };
     },
   );
 

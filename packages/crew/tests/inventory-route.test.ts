@@ -16,6 +16,7 @@ let app: Awaited<ReturnType<typeof createServer>>;
 let baseUrl: string;
 let views: SessionView[] = [];
 let outputs: Record<string, string | null> = {};
+let throwing = new Set<string>();
 
 const block = (o: unknown) => '```wicked-inventory\n' + JSON.stringify(o) + '\n```';
 
@@ -31,7 +32,10 @@ beforeAll(async () => {
   adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: true });
   adapter.sessionsDetail = async () => views;
   adapter.sessions = async () => views.map((v) => v.session.id);
-  adapter.workOutput = async (unitId: string) => outputs[unitId] ?? null;
+  adapter.workOutput = async (unitId: string) => {
+    if (throwing.has(unitId)) throw new Error('transcript store unavailable');
+    return outputs[unitId] ?? null;
+  };
   adapter.interactionRequests = async () => [];
   adapter.runEvents = async () => [];
   app = await createServer(adapter, { auditPath: join(dir, 'audit.log') });
@@ -43,6 +47,7 @@ beforeAll(async () => {
 beforeEach(() => {
   views = [];
   outputs = {};
+  throwing = new Set();
 });
 
 afterAll(async () => {
@@ -78,10 +83,18 @@ describe('GET /runs/:id/inventory', () => {
     expect((body['units'] as unknown[]).length).toBe(2);
   });
 
+  it('a unit whose output cannot be read keeps the run from reading complete (codex r1)', async () => {
+    views = [run('r4', ['issues', 'prs'])];
+    outputs['r4:issues'] = block({ source: 'gh issue list', answered: 'full', listed: 5, expected: 5, unread: [] });
+    throwing.add('r4:prs');
+    const { body } = await get('r4');
+    expect(body).toMatchObject({ complete: false, unreadUnits: ['r4:prs'] });
+  });
+
   it('a run that claims nothing is not complete, and an unknown run is a 404', async () => {
     views = [run('r3', ['explore'])];
     outputs['r3:explore'] = 'no inventory';
-    expect((await get('r3')).body).toMatchObject({ readable: true, complete: false, units: [] });
+    expect((await get('r3')).body).toMatchObject({ readable: true, complete: false, units: [], unreadUnits: [] });
     expect((await get('nope')).status).toBe(404);
   });
 });

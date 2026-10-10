@@ -7,9 +7,10 @@
  * reported, and what it could not read. crew#648 is why: two triage runs reported success, one
  * inventory was six items short, and nothing on the wire told them apart.
  *
- * Pure: text in, claims out. Deny-dominates on the claim itself. A block that does not parse reads
- * `unknown`, never `full`. A `full` that its own numbers contradict (something unread, or fewer
- * listed than the source's total) reads `partial`, with the contradiction added to `unread`.
+ * Pure: text in, claims out. Deny-dominates on the claim itself: a block that does not parse, or
+ * has a required field missing or misshapen, reads `unknown`, never `full`; a `full` that its own
+ * numbers contradict (something unread, or a count unlike the source's total) reads `partial`, with
+ * the contradiction added to `unread`. Only the blocks that end the reply are the report.
  */
 
 export type InventoryAnswered = 'full' | 'partial' | 'none' | 'unknown';
@@ -22,11 +23,8 @@ export interface InventoryClaim {
   unread: string[];
 }
 
-const BLOCK = /```wicked-inventory[^\S\n]*\n([\s\S]*?)\n```/g;
 const ANSWERED = new Set<InventoryAnswered>(['full', 'partial', 'none']);
-
-const count = (v: unknown): number | null =>
-  typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : null;
+const isCount = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v >= 0;
 
 function claimOf(body: string): InventoryClaim {
   let raw: unknown;
@@ -39,20 +37,34 @@ function claimOf(body: string): InventoryClaim {
     return unknown('the wicked-inventory block is not a JSON object');
   }
   const o = raw as Record<string, unknown>;
-  const source = typeof o['source'] === 'string' && o['source'].trim() !== '' ? o['source'] : null;
-  const listed = count(o['listed']);
-  const expected = o['expected'] === null ? null : count(o['expected']);
-  const unread = Array.isArray(o['unread']) ? o['unread'].filter((u): u is string => typeof u === 'string') : [];
-  const claimed = o['answered'];
-  if (typeof claimed !== 'string' || !ANSWERED.has(claimed as InventoryAnswered)) {
-    return { source, answered: 'unknown', listed, expected, unread: [...unread, `answered is not full|partial|none: ${JSON.stringify(claimed)}`] };
+  // Every field is required, as the codebook states it. A claim with a field missing or misshapen
+  // cannot vouch for anything, so it reads `unknown` with the reason (never normalized to `full`).
+  const problems: string[] = [];
+  if (typeof o['source'] !== 'string' || o['source'].trim() === '') problems.push('source is not a non-empty string');
+  if (!isCount(o['listed'])) problems.push('listed is not a non-negative integer');
+  if (!('expected' in o) || !(o['expected'] === null || isCount(o['expected']))) {
+    problems.push('expected is not a non-negative integer or null');
   }
-  let answered = claimed as InventoryAnswered;
+  const unreadRaw = o['unread'];
+  if (!Array.isArray(unreadRaw) || !unreadRaw.every((u) => typeof u === 'string')) {
+    problems.push('unread is not an array of strings');
+  }
+  const answeredRaw = o['answered'];
+  if (typeof answeredRaw !== 'string' || !ANSWERED.has(answeredRaw as InventoryAnswered)) {
+    problems.push(`answered is not full|partial|none: ${JSON.stringify(answeredRaw)}`);
+  }
+  const source = typeof o['source'] === 'string' && o['source'].trim() !== '' ? o['source'] : null;
+  const listed = isCount(o['listed']) ? o['listed'] : null;
+  const expected = isCount(o['expected']) ? o['expected'] : null;
+  const unread = Array.isArray(unreadRaw) ? unreadRaw.map((u) => (typeof u === 'string' ? u : JSON.stringify(u))) : [];
+  if (problems.length > 0) {
+    return { source, answered: 'unknown', listed, expected, unread: [...unread, `malformed claim: ${problems.join('; ')}`] };
+  }
+  let answered = answeredRaw as InventoryAnswered;
   if (answered === 'full') {
     const why: string[] = [];
     if (unread.length > 0) why.push('it lists unread items');
-    if (listed === null) why.push('it gives no listed count');
-    else if (expected !== null && listed !== expected) why.push(`it lists ${listed} of the source's ${expected}`);
+    if (expected !== null && listed !== expected) why.push(`it lists ${listed} of the source's ${expected}`);
     if (why.length > 0) {
       answered = 'partial';
       unread.push(`claimed full, but ${why.join(' and ')}`);
@@ -65,10 +77,60 @@ function unknown(why: string): InventoryClaim {
   return { source: null, answered: 'unknown', listed: null, expected: null, unread: [why] };
 }
 
-/** Every `wicked-inventory` block in `text`, in order. Empty when the text claims nothing. */
+const FENCE = /^\s{0,3}(`{3,}|~{3,})\s*([^`\s]*)\s*$/;
+
+/**
+ * The report's claims: the `wicked-inventory` blocks that END the reply, as the codebook asks
+ * ("one block per source, nothing after them"). Parsed line by line with fence tracking, so:
+ * - a block quoted inside another fence (an example in a code sample) is not a claim;
+ * - a block followed by more prose is not the report (an example earlier in the reply);
+ * - an inventory opener that never closes (a truncated reply) is an `unknown` claim.
+ * Empty when the reply makes no report.
+ */
 export function parseInventoryClaims(text: string): InventoryClaim[] {
+  const lines = text.split(/\r?\n/);
+  // Each top-level fenced region: [startLine, endLine (exclusive of nothing; -1 = unclosed), info].
+  const regions: { start: number; end: number; info: string; body: string[] }[] = [];
+  let open: { start: number; ch: string; len: number; info: string; body: string[] } | null = null;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? '';
+    const m = FENCE.exec(line);
+    if (open === null) {
+      if (m) open = { start: i, ch: m[1]![0]!, len: m[1]!.length, info: m[2] ?? '', body: [] };
+      continue;
+    }
+    if (m && m[2] === '' && m[1]![0] === open.ch && m[1]!.length >= open.len) {
+      regions.push({ start: open.start, end: i, info: open.info, body: open.body });
+      open = null;
+    } else {
+      open.body.push(line);
+    }
+  }
+  if (open !== null && open.info === 'wicked-inventory' && open.ch === '`') {
+    // A truncated report: the opener is the last fence and nothing closed it.
+    const closed = trailingReport(lines, regions, open.start);
+    return [...closed, unknown('a wicked-inventory block was opened and never closed (the reply was cut off?)')];
+  }
+  if (open !== null) return [];
+  return trailingReport(lines, regions, lines.length);
+}
+
+/** The claims of the inventory blocks after which nothing but blank lines and more of them follow. */
+function trailingReport(
+  lines: string[],
+  regions: { start: number; end: number; info: string; body: string[] }[],
+  end: number,
+): InventoryClaim[] {
   const out: InventoryClaim[] = [];
-  for (const m of text.matchAll(BLOCK)) out.push(claimOf(m[1] ?? ''));
+  let cursor = end;
+  for (let r = regions.length - 1; r >= 0; r--) {
+    const region = regions[r]!;
+    const between = lines.slice(region.end + 1, cursor);
+    if (between.some((l) => l.trim() !== '')) break;
+    if (region.info !== 'wicked-inventory') break;
+    out.unshift(claimOf(region.body.join('\n')));
+    cursor = region.start;
+  }
   return out;
 }
 

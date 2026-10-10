@@ -26,7 +26,7 @@ describe('parseInventoryClaims', () => {
     const [hole] = parseInventoryClaims(block({ source: 's', answered: 'full', listed: 9, expected: 9, unread: ['PRs: 403'] }));
     expect(hole?.answered).toBe('partial');
     const [nocount] = parseInventoryClaims(block({ source: 's', answered: 'full', expected: 9, unread: [] }));
-    expect(nocount?.answered).toBe('partial');
+    expect(nocount?.answered).toBe('unknown');
   });
 
   it('a block that does not parse, or answers outside the vocabulary, reads unknown, never full', () => {
@@ -40,6 +40,40 @@ describe('parseInventoryClaims', () => {
     const two = `${block({ source: 'a', answered: 'full', listed: 1, expected: 1, unread: [] })}\n${block({ source: 'b', answered: 'none', listed: 0, expected: null, unread: ['gh: exit 4'] })}`;
     expect(parseInventoryClaims(two).map((c) => [c.source, c.answered])).toEqual([['a', 'full'], ['b', 'none']]);
     expect(parseInventoryClaims('no inventory here')).toEqual([]);
+  });
+
+  it('a claim with a required field missing or misshapen reads unknown (codex r1)', () => {
+    const full = { source: 's', answered: 'full', listed: 2, expected: 2, unread: [] as unknown[] };
+    for (const bad of [
+      { ...full, source: '' },
+      { ...full, source: 3 },
+      { source: 's', answered: 'full', listed: 2, unread: [] },
+      { ...full, expected: -1 },
+      { ...full, expected: '2' },
+      { source: 's', answered: 'full', listed: 2, expected: 2 },
+      { ...full, unread: [{ reason: '403' }] },
+    ]) {
+      const [c] = parseInventoryClaims(block(bad));
+      expect(c?.answered, JSON.stringify(bad)).toBe('unknown');
+      expect(c?.unread.at(-1)).toMatch(/malformed claim/);
+    }
+  });
+
+  it('only the blocks that end the reply are the report: an example in prose or in another fence is not (codex r1)', () => {
+    const fullBlock = block({ source: 's', answered: 'full', listed: 1, expected: 1, unread: [] });
+    expect(parseInventoryClaims(`Here is the format:\n${fullBlock}\nNow the real work follows.`)).toEqual([]);
+    const quoted = '````markdown\n' + fullBlock + '\n````\n';
+    expect(parseInventoryClaims(quoted)).toEqual([]);
+    const crlf = `done\r\n\`\`\`wicked-inventory \r\n${JSON.stringify({ source: 's', answered: 'full', listed: 1, expected: 1, unread: [] })}\r\n\`\`\`\r\n`;
+    expect(parseInventoryClaims(crlf)[0]?.answered).toBe('full');
+  });
+
+  it('an inventory block that never closes (a cut-off reply) is an unknown claim, after any closed ones (codex r1)', () => {
+    const fullBlock = block({ source: 'a', answered: 'full', listed: 1, expected: 1, unread: [] });
+    const cut = `${fullBlock}\n\`\`\`wicked-inventory\n{"source": "b", "answ`;
+    const claims = parseInventoryClaims(cut);
+    expect(claims.map((c) => c.answered)).toEqual(['full', 'unknown']);
+    expect(inventoryComplete(claims)).toBe(false);
   });
 
   it('inventoryComplete: at least one claim, all full', () => {
