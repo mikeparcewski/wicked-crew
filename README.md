@@ -16,15 +16,18 @@ wicked-crew is the **Govern** arc of the wicked loop (intent → steer → equip
 coding agents and their models change constantly — so crew is the durable system *around* it: it runs
 the coding-agent CLIs you already use (Claude Code, Codex, and others) as governed workers through
 **durable, multi-agent workflows**, and you drive the run, the gates decide, and every decision is
-audited. State your intent, get verified work out. The engine underneath is **wicked-core**.
+audited. State your intent, get gated work out — and every gate says what it actually checked. The engine underneath is **wicked-core**.
 
 Bring your own CLI and your own subscription — crew drives the agents *you* already pay for, on *your*
 auth and *your* plan. There's no billing, no accounts, no model reselling.
 
 Under the hood it's a daemon (`wicked-crew serve`) plus CLI and a same-origin browser console — but
-the daemon is the **mechanism, not the pitch.** What you actually get: an evaluator that is
-structurally not the creator (it can't self-grade), a deny-dominates dual gate, "done" **re-derived
-from evidence** instead of asserted, and **workflows-as-data** you can add without touching code. crew
+the daemon is the **mechanism, not the pitch.** What you actually get: review routed to a seat
+other than the creator's whenever the roster has an eligible one (a team run refuses to start without one; an
+ordinary run on a too-small roster keeps review on the creator seat and **says so** —
+"evaluator ≠ creator not held"), a deny-dominates gate on a deterministic floor, "done"
+**re-derived from evidence** instead of asserted (a phase with no distinct judge is labelled
+"floor only", an ungated one "approved by default, not verified"), and **workflows-as-data** you can add without touching code. crew
 owns the phase lifecycle, the gates, the evidence, and the crash-safe state; the agent does
 the coding inside a phase.
 
@@ -142,8 +145,11 @@ pay for instead of replacing them.
   gates; the agent does the coding inside a phase.
 - **Workflows are data.** feature / bug / migration ship built-in; new ones are drop-in JSON files, not
   code. (The engine — `wicked-core` — validates and drives them.)
-- **Gates are real, not self-graded.** Every phase transition is governed **deny-dominates**, on a
-  deterministic structural floor, with an independent evaluator seat that reads cold evidence only.
+- **Gates are real, and they say what they checked.** A gated transition resolves
+  **deny-dominates** on the layers that actually ran — a deterministic floor, repo checks,
+  policies, an evaluator seat that reads cold evidence only. A transition with none of them is
+  disclosed as "approved by default, not verified", never dressed as a pass. That seat is distinct from the creator's whenever the roster has an eligible one; team runs
+  require it, and an ordinary run that cannot meet it discloses the fallback on the run.
 - **Evidence, not assertion.** "Done" is re-derived from evidence at the gate, never claimed by the
   agent that did the work.
 - **Drive it your way.** Headless over CLI + REST/WS, or through the browser console.
@@ -157,9 +163,12 @@ clarify → design → build → adversarial-review → test → review
    │gate     │gate    │gate         │gate          │gate    │gate
 ```
 
-Each phase is executed by a **skill** (a fixed, versioned capability contract) invoked on the assigned
-CLI — consistent control instead of an ad-hoc prompt every run. Phases, gates, roles, and the skill a
-phase runs are all **data** on the workflow definition.
+By default every phase's worker follows garden's role-keyed base skill (`wicked-garden-governed-worker`;
+settings or the workflow definition can override or disable it), read from an immutable skills
+snapshot generation handed to each worker spawn — a cached ACP session keeps the generation it
+started with — so control is consistent instead of an ad-hoc prompt every run. A phase runs a task-specific skill only when its definition names one (`skill_ref`): the
+built-in `domain-extraction` and `mcp-server` workflows do; `feature`, `bug` and `migration` rely on
+the base skill. Phases, gates, roles, and any phase skill are all **data** on the workflow definition.
 
 ## Gates: generated, grounded, dual validators *(built — `wicked-core`, DES-EXEC-001 rev0.4)*
 
@@ -169,9 +178,10 @@ phase runs are all **data** on the workflow definition.
 > (deny-dominates, no LLM at gate time) alongside an independent agent judge that can reject but never
 > lone-approve. The security controls (approval gate, fail-closed parse, denylist) survived a 14-finding
 > adversarial review. **Caveat:** the shipped feature/bug/migration workflows pin only the built-in
-> **evidence floor** (`e2e7af1db9e48454` — "the run left a change in its worktree; done is re-derived
-> from the diff, never asserted") on their verification phases (feature `adversarial-review` + `test`,
-> bug `verify`, migration `verify`); every other phase ships `validator_pin: null` and engages the full
+> **evidence floor** (`e2e7af1db9e48454` — "the run left a change in its worktree"; it proves a change
+> exists, not that the change is correct) on their code and verification phases (feature `build` +
+> `adversarial-review` + `test`, bug `fix` + `verify`, migration `execute` + `verify`); every other
+> phase ships `validator_pin: null` and engages the full
 > gate only once an operator authors, approves, and pins a task-specific validator into the def.
 
 The deterministic gate check is not a generic precanned assertion. A **test-strategy agent authors a
@@ -183,13 +193,17 @@ validation always tracks the spec. The evaluator is a **complementary pair**:
   patterns — auditable, cheap), and
 - an **agent-based** validator (semantic judgment: does this meet the *intent*?).
 
-*(As built, the agent validator now runs under a **genuinely distinct council seat** — identity-distinct
-from both the deterministic-validator author and the work author, by resolved binary (no self-grading),
-with a single-runner fallback when the roster is too small. An adversarial review caught an early
+*(As built, the agent validator runs under a **distinct council seat** — identity-distinct from both
+the deterministic-validator author and the work author, by resolved binary. When the roster has no
+such seat the judge is **skipped**, never self-graded: the gate then decides on its deterministic floor
+alone and the verdict says so (`agentVerdict: skipped`, `judgeDistinct: false`; studio renders it as
+"no distinct judge reviewed this verdict (floor only)"). An adversarial review caught an early
 self-grade hole here — the judge excluded the wrong author — since fixed and dispatch-proven.)*
 
 Combined so that **Approve requires the deterministic piece to PASS; the agent piece can REJECT but is
-never the sole approver** — a model may fail a gate, never solely approve one.
+never the sole approver** — a model may fail a gate, never solely approve one. The converse also
+holds: with the judge skipped, a deterministic PASS approves on its own, so a floor-only approval is
+only as strong as that floor.
 
 **Trust model, named honestly:** diverse-seat agent consensus, on a deterministic structural floor, with
 human escalation above a threshold. A green run means "diverse seats + the escalation policy agreed,"
@@ -197,8 +211,9 @@ not "proven."
 
 ## Acceptance: the QE gate *(crew 0.6.0, Phase 6a)*
 
-Distinct from the per-phase gates above — which govern the RUN — the **acceptance gate** answers a
-different question: *does the QE evidence ledger accept the work this run did to its repo?* This is
+Distinct from the per-phase gates above — which govern the RUN — the **acceptance gate** is an
+assessment you read, not a step delivery waits on: it is computed on `GET`, and neither the engine's
+completion nor the deliver phase consults it today. It answers a different question: *does the QE evidence ledger accept the work this run did to its repo?* This is
 the machine gate absorbed from the retired wicked-testing product, and it lives on the daemon: <!-- historical -->
 
 ```
@@ -214,8 +229,9 @@ ledgers are still read; `WICKED_QE_LEDGER_DIR` overrides) — **deny-dominates**
 - `PASS` → satisfied. **Nothing else is.**
 - `FAIL`, `CONDITIONAL`, `PARTIAL`, `INCONCLUSIVE`, a missing ledger, a missing verdict, an
   unreadable ledger → each **denies with its own named reason**. No evidence is never a pass, and a
-  conditional approval's conditions are unmet work — the hold stands until a clean `PASS` is
-  recorded or a human approves at the crew gate with the conditions in view.
+  conditional approval's conditions are unmet work — the assessment stays a deny until a clean
+  `PASS` is recorded. A run can therefore read completed (even delivered) while its acceptance
+  answer is a deny; read both before you merge.
 
 The route always answers 200 for a known run: "no ledger", "no verdict", and "FAIL" are real answers
 about the gate, not errors in the request. It sits beside `GET /runs/:id/evidence` deliberately —
@@ -239,12 +255,14 @@ standalone `/governance/claims` wire:
   no non-advisory denial stands, AND enforcement was positively verified. An unenforced,
   ungoverned, or unverifiable run is **never** reported guardrailed.
 
-**Coverage boundary, stated plainly:** deterministic per-tool-call input governance (gate-hook
-injection) exists for **claude only**. A governed unit routed to any other CLI (Antigravity, Codex,
-local, …) runs with unchecked tool calls and is reported `unenforced` — it still gets
+**Coverage boundary, stated plainly:** deterministic per-tool-call input governance exists only on
+seats whose adapter is **admitted** for it (`acp_input_governance` in the engine's CLI registry):
+today the built-in **claude** and **opencode** entries. A `clis.toml` override that restates a seat
+without that flag drops the admission. A governed unit routed to any other CLI (Antigravity, Codex,
+pi, copilot, local, …) runs with unchecked tool calls and is reported `unenforced` — it still gets
 **phase-boundary coverage only**: the in-process output gate and the deliverable floor evaluate the
 unit's *output* after the fact, advisory relative to mid-flight tool-call blocking. "Guardrailed"
-is a verified claim about claude-seated governed units, not a blanket property of every run.
+is a verified claim about governed units on admitted seats, not a blanket property of every run.
 
 ## Event-driven, with sidecars *(built substrate — DES-EXEC-001 §2/§4.2)*
 

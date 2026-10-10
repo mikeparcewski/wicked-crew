@@ -42,36 +42,35 @@ test.describe('gate console [data-gc]', () => {
     await expect(gc).toHaveClass(/is-manual/);
   });
 
-  test('the ledger card shows the CONDITIONAL hold; hand-driving degrades it to a plain FAIL', async ({ page }) => {
+  test('the ledger card shows a CONDITIONAL acceptance read beside the circuit — it never moves the transition', async ({ page }) => {
     await page.goto('/');
     const gc = page.locator('[data-gc]');
     await bringIntoView(gc);
 
     const stamp = gc.locator('[data-stamp]');
     const chip = gc.locator('[data-gc-ledger-verdict]');
-    const sw = gc.locator('[data-sw][data-policy="verdict.json"]');
 
-    // Settle on the ledger scene: verdict.json open because the QE evidence
-    // ledger returned CONDITIONAL — a hold, not a FAIL.
+    // verdict.json is not a switch on the transition circuit: the acceptance read is a
+    // separate answer (GET /runs/:id/acceptance) that delivery does not wait on.
+    await expect(gc.locator('[data-sw][data-policy="verdict.json"]')).toHaveCount(0);
+
+    // Settle on the ledger scene: the QE ledger returned CONDITIONAL — a deny on that read,
+    // while every check on the circuit is closed, so the transition is still allowed.
     await page.locator('[data-gc-card][data-card="ledger"]').click();
-    await expect(stamp).toHaveText('DENY');
-    await expect(sw.locator('[data-state]')).toHaveText('COND');
-    await expect(gc.locator('[data-vline]')).toContainText('CONDITIONAL');
+    await expect(stamp).toHaveText('ALLOW');
     await expect(chip).toHaveText('CONDITIONAL');
     await expect(chip).toHaveAttribute('data-v', 'conditional');
+    await expect(gc.locator('[data-vline]')).toContainText('CONDITIONAL');
+    await expect(gc.locator('[data-vline]')).toContainText('delivery does not wait on it');
 
-    // Closing the switch by hand: a clean PASS — the chip mirrors it live.
-    await sw.click();
-    await expect(stamp).toHaveText('ALLOW');
-    await expect(sw.locator('[data-state]')).toHaveText('PASS');
-    await expect(chip).toHaveText('PASS');
-
-    // Re-opening by hand is a plain FAIL, not the ledger's CONDITIONAL reading.
-    await sw.click();
+    // Driving a real circuit switch changes the transition, never the acceptance read.
+    const drift = gc.locator('[data-sw][data-policy="schema-drift"]');
+    await drift.click();
     await expect(stamp).toHaveText('DENY');
-    await expect(sw.locator('[data-state]')).toHaveText('FAIL');
-    await expect(chip).toHaveText('FAIL');
-    await expect(chip).toHaveAttribute('data-v', 'fail');
+    await expect(chip).toHaveText('CONDITIONAL');
+    await drift.click();
+    await expect(stamp).toHaveText('ALLOW');
+    await expect(chip).toHaveText('CONDITIONAL');
   });
 
   test('the LLM judge seat can veto but never approve', async ({ page }) => {
