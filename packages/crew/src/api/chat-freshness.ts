@@ -30,6 +30,27 @@ export const CHAT_FETCH_TIMEOUT_MS = 20_000;
 
 type Git = (root: string, args: string[], timeoutMs?: number) => Promise<string>;
 
+/**
+ * The env a chat-open git call runs with: it must never ask anyone anything (codex retro on
+ * crew#902). `GIT_TERMINAL_PROMPT=0` stops only the terminal prompt; an inherited `GIT_ASKPASS`, a
+ * GUI credential manager or an ssh passphrase prompt could still pop up on the operator's desktop
+ * and hold the chat open until the fetch timeout. So askpass answers nothing (`true`), Git
+ * Credential Manager is told never to interact, and ssh runs in batch mode, keeping an operator's
+ * own `GIT_SSH_COMMAND` and adding the option to it. A fetch that needs a credential then fails at
+ * once, and the chat says the checkout could not be fetched.
+ */
+export function nonInteractiveGitEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const ssh = env['GIT_SSH_COMMAND'];
+  return {
+    ...env,
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_ASKPASS: 'true',
+    SSH_ASKPASS: 'true',
+    GCM_INTERACTIVE: 'never',
+    GIT_SSH_COMMAND: `${ssh !== undefined && ssh.trim() !== '' ? ssh : 'ssh'} -o BatchMode=yes`,
+  };
+}
+
 const realGit: Git = (root, args, timeoutMs = 30_000) =>
   new Promise((ok, fail) => {
     execFile(
@@ -37,8 +58,7 @@ const realGit: Git = (root, args, timeoutMs = 30_000) =>
       // No hooks (codex on crew#902): a fetch or fast-forward run on the operator's behalf must not
       // execute the checkout's post-merge / reference-transaction hooks.
       ['-C', root, '-c', `core.hooksPath=${devNull}`, ...args],
-      // Never prompt for credentials: a fetch that needs them fails, and the chat says so.
-      { windowsHide: true, timeout: timeoutMs, env: { ...childEnvWithBootEstateDb(process.env), GIT_TERMINAL_PROMPT: '0' } },
+      { windowsHide: true, timeout: timeoutMs, env: nonInteractiveGitEnv(childEnvWithBootEstateDb(process.env)) },
       (err, stdout) => (err ? fail(err) : ok(String(stdout).trim())),
     );
   });
