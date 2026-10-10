@@ -1,9 +1,9 @@
 /* wicked-crew content styles (wc.wickedagile.com) — THE CONTROL PLANE.
    Positioning: crew is the CONTROL PLANE of the wicked platform — the harness
-   for your agent harnesses. Intent in → governed, verified work out: YOUR
+   for your agent harnesses. Intent in → governed, gated work out: YOUR
    installed CLIs run as governed workers through durable, data-driven
-   workflows; evaluator ≠ creator; deny-dominates gates fed by the QE
-   evidence ledger; one public API (/api/v1) with two skins.
+   workflows; review on a distinct eligible seat when the roster has one; deny-dominates
+   gates; one public API (/api/v1), one console (studio).
 
    Aesthetic: an execution control surface. Signal colors — amber (--accent)
    = pass / current-flowing / verified energy, terracotta (--deny) = deny /
@@ -1180,7 +1180,7 @@ code {
 .op-k { font-weight: 700; font-size: 13px; letter-spacing: .02em; color: var(--accent); }
 .op-t { font-size: 13px; line-height: 1.5; opacity: .9; }
 
-/* ── One public API, two skins ─────────────────────────────────────────────
+/* ── One public API, one console + the document engine ─────────────────────────────────────────────
    The control plane's single contract (/api/v1) with two pure clients: the
    studio (coder skin, ships inside crew) and wicked-interactive (creator
    skin — governed generation answered its bus, proven). Violet marks the

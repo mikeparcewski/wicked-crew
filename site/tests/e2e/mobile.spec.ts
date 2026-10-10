@@ -39,7 +39,7 @@ test.describe('mobile (390×844)', () => {
     await expect(gcStatic).toBeVisible();
     await expect(gcStatic.locator('.gcs-stamp')).toHaveText('HELD');
     await expect(gcStatic.locator('.gcs-list li.is-fail')).toHaveCount(1);
-    // The ledger line rides the static panel too: CONDITIONAL is a hold.
+    // The ledger line rides the static panel too: CONDITIONAL reads as a deny on that read.
     await expect(gcStatic.locator('.gcs-ledger')).toContainText('CONDITIONAL');
   });
 

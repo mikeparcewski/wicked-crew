@@ -1,9 +1,10 @@
 # wicked-crew
 
 **The harness for your agent harnesses** — run the coding-agent CLIs you already use as governed
-workers through durable, multi-agent workflows. Intent in, verified work out: the evaluator is
-structurally not the creator, gates are deny-dominates, and "done" is re-derived from evidence
-instead of asserted.
+workers through durable, multi-agent workflows. Intent in, gated work out: gates are
+deny-dominates, "done" is re-derived from evidence instead of asserted, and review goes to a seat
+other than the creator's whenever the roster has an eligible one — team runs require it, and an ordinary run
+that cannot meet it says so on the run ("evaluator ≠ creator not held").
 
 Local-first: loopback only, no accounts, no billing, no model reselling. Crew drives the agents
 *you* already pay for, on *your* auth and *your* plan.
@@ -69,9 +70,11 @@ by a versioned skill on an assigned CLI worker; the gates decide, and every deci
   the gates; the agent does the coding inside a phase.
 - **Workflows are data.** `feature` / `bug` / `migration` ship built-in; new ones are drop-in JSON
   files, not code.
-- **Gates are real, not self-graded.** Phase transitions resolve **deny-dominates** on a
-  deterministic structural floor, with an independent evaluator seat that reads cold evidence
-  only — a model may fail a gate, never solely approve one.
+- **Gates are real, and they say what they checked.** A gated transition resolves
+  **deny-dominates** on the layers that ran — a deterministic floor, repo checks, policies, an
+  evaluator seat that reads cold evidence only — and a model may fail a gate, never solely approve
+  one. With no distinct judge seat the floor decides alone ("floor only"); a transition nothing
+  gated reads "approved by default, not verified".
 - **Evidence, not assertion.** "Done" is re-derived from evidence at the gate, never claimed by
   the agent that did the work.
 

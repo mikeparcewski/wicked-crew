@@ -12,9 +12,10 @@
  * arms a bearer-token check on `/api/v1/*` and the `/ws` upgrade paths.
  * Verification is pluggable behind {@link TokenVerifier}; v1 ships the static
  * workload-token verifier (hashed-at-rest file, {@link loadTokenFile}) and the
- * OIDC verifier SEAM ({@link OidcConfig} + {@link createOidcVerifier}), whose
- * implementation is a named follow-up — configuring OIDC today fails the boot
- * LOUDLY rather than pretending an IdP was consulted.
+ * OIDC verifier ({@link OidcConfig} + {@link createOidcVerifier}, crew#249):
+ * JWTs checked against the issuer's JWKS (discovery or an explicit `jwksUri`),
+ * `iss`/`aud`/expiry enforced. A malformed OIDC config fails the boot loudly
+ * rather than running with a verifier that was never configured.
  *
  * Deny semantics: missing/unknown token in required mode → 401 (with
  * `WWW-Authenticate: Bearer`); an authenticated actor below a route's rung on
@@ -89,8 +90,8 @@ export function resolveAuthMode(env: NodeJS.ProcessEnv = process.env): AuthMode 
 /**
  * The verifier seam. A verifier resolves a presented bearer token to an
  * {@link Actor}, or `null` when the token is not one of its. Verifiers are
- * tried in order; the first non-null answer wins. v1 ships the static
- * workload-token verifier; the OIDC verifier is the named follow-up
+ * tried in order; the first non-null answer wins: the static workload-token
+ * verifier, then the OIDC verifier when `auth.json` configures one
  * (docs/auth.md § "The OIDC seam").
  */
 export interface TokenVerifier {
@@ -499,7 +500,8 @@ export function resolveAuth(options: AuthOptions | undefined, warn: (msg: string
   const verifiers: TokenVerifier[] = [
     createStaticVerifier(loadTokenFile(options?.tokensPath ?? defaultTokensPath(), warn)),
   ];
-  // The OIDC seam: configuring it today is a LOUD boot failure, never a silent skip.
+  // The OIDC verifier is optional: an `auth.json` with an `oidc` block registers it, and a
+  // malformed one fails the boot loudly rather than being silently skipped.
   const configPath = options?.configPath ?? defaultAuthConfigPath();
   let configJson: string | null = null;
   try {
@@ -524,7 +526,7 @@ export function resolveAuth(options: AuthOptions | undefined, warn: (msg: string
       throw new Error(`[auth] ${configPath} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
     }
     if (parsed.oidc !== undefined) {
-      verifiers.push(createOidcVerifier(parsed.oidc)); // throws — the declared seam
+      verifiers.push(createOidcVerifier(parsed.oidc)); // throws only on a malformed config
     }
   }
   return { mode, verifiers, allowedOrigins };

@@ -7,7 +7,8 @@ description: |
 
 # wicked-crew
 
-`wicked-crew` is a governed execution platform: intent in, verified work out. It runs the
+`wicked-crew` is a governed execution platform: intent in, gated work out — each gate reports
+what it checked. It runs the
 coding-agent CLIs you already use as governed workers through durable, multi-agent
 workflows, with human gates and evidence-derived "done".
 

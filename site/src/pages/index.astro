@@ -4,7 +4,9 @@
  *
  * POSITIONING (four-plane era): crew IS the CONTROL PLANE of the wicked
  * platform — the harness for your agent harnesses. Intent in → governed,
- * verified work out. Evaluator ≠ creator, deny-dominates dual gates, durable
+ * gated work out. Review on a distinct seat whenever the roster has an eligible one (team
+ * runs require it; other runs disclose a same-seat fallback), deny-dominates
+ * gates that report what they checked, durable
  * runs that survive crashes, and the CLIs you already have running as governed
  * workers over persistent ACP sessions. The studio console is a pure CLIENT of
  * the same public /api/v1 every other consumer uses — nothing privileged.
@@ -18,17 +20,22 @@
  *  - Workers run over PERSISTENT ACP sessions via ecosystem adapters (official
  *    claude-agent-acp + codex-acp, community pi-acp, native copilot/opencode);
  *    wicked owns only the agy bridge. Never depict one-shot `-p` dispatch.
- *  - The acceptance gate READS the QE evidence ledger (wicked-ledger) at
+ *  - The acceptance read takes the QE evidence ledger (wicked-ledger) at
  *    GET /api/v1/runs/:id/acceptance and resolves it deny-dominates:
  *    anything that isn't a clean PASS (FAIL, CONDITIONAL, PARTIAL,
- *    INCONCLUSIVE, missing) holds the run. CONDITIONAL is "approve with
- *    listed fixes" — deliberately NOT a pass (qe/acceptance.ts).
+ *    INCONCLUSIVE, missing) reads as a deny. CONDITIONAL is "approve with
+ *    listed fixes" — deliberately NOT a pass (qe/acceptance.ts). It is an
+ *    assessment beside the run, NOT a step delivery waits on — never say it
+ *    holds or blocks the run.
+ *  - Assurance copy matches the engine's own labels: a review that could not
+ *    leave the creator seat is "evaluator ≠ creator not held", a gate with no
+ *    distinct judge is "floor only", an ungated phase is "approved by default".
  *  - Governed generation is PROVEN, not projected: a crew-governed run
  *    answered wicked-interactive's `wicked.interactive.doc.created` bus event
  *    with a real first draft (`wicked.interactive.draft.completed`), zero
  *    interactive-service changes (interactive/draft-events.ts).
  *  - The Project model SHIPPED in 0.7.0 (registerProjectRoutes, api/routes.ts):
- *    projects group runs + docs across both skins — members, merged activity
+ *    projects group runs + docs — members, merged activity
  *    feed, open-prompt rollups, and a project-scoped code graph (blast radius
  *    across member repos). Present tense now; keep claims to those routes.
  *  - Blast radius is shipped repo- AND project-scoped (GET …/graph/blast-radius),
@@ -54,9 +61,9 @@ import Footer from 'wicked-web/components/Footer.astro';
 import SameGarden from 'wicked-web/components/SameGarden.astro';
 import '../styles/crew.css';
 
-const title = 'wicked-crew — the control plane: intent in, verified work out';
+const title = 'wicked-crew — the control plane: intent in, gated work out';
 const description =
-  'wicked-crew is the control plane for governed agent delivery — the harness for your agent harnesses. Intent in; governed, verified work out: your own installed CLIs (Claude Code, Antigravity, Codex, opencode, Pi, GitHub Copilot) run as governed workers over persistent ACP sessions, in git worktrees, through durable multi-agent workflows where "done" is re-derived from evidence, never self-graded. The acceptance gate reads the QE evidence ledger and resolves it deny-dominates — a CONDITIONAL verdict holds the run. Governance is more than a gate: steering doctrine across seven types and governed knowledge — agents propose, humans promote — are authored through the same API, and the requirements graph in wicked-estate becomes the source of truth every phase reads. One public API, no privileged clients: the studio console ships inside crew as a pure client of /api/v1, and governed generation answers the document engine over the bus. Crash-resumable by construction. Runs on the agents and plans you already pay for. Local-first.';
+  'wicked-crew is the control plane for governed agent delivery — the harness for your agent harnesses. Intent in; governed, gated work out: your own installed CLIs (Claude Code, Antigravity, Codex, opencode, Pi, GitHub Copilot) run as governed workers over persistent ACP sessions, in git worktrees, through durable multi-agent workflows where "done" is re-derived from evidence, not asserted, and review goes to a distinct eligible seat — or the run says it could not. Beside the run, the acceptance read resolves the QE evidence ledger deny-dominates; a CONDITIONAL reads as a deny, and delivery does not wait on it. Governance is more than a gate: steering doctrine across seven types and governed knowledge — agents propose, humans promote — are authored through the same API, and each phase grounds on the code graph in wicked-estate. One public API, no privileged clients: the studio console ships inside crew as a pure client of /api/v1, and governed generation answers the document engine over the bus. Crash-resumable by construction. Runs on the agents and plans you already pay for. Local-first.';
 const repo = 'https://github.com/mikeparcewski/wicked-crew';
 
 // The deterministic floor: policies wired in series across a build → ship gate.
@@ -65,7 +72,6 @@ const POLICIES = [
   { id: 'security',      note: 'No secret, no disallowed dependency.' },
   { id: 'coverage',      note: 'Coverage at or above the approved floor.' },
   { id: 'schema-drift',  note: 'Migration matches the checked-in schema.' },
-  { id: 'verdict.json',  note: 'QE acceptance verdict from the evidence ledger = PASS. Anything else — FAIL, CONDITIONAL, missing — holds.' },
 ];
 
 // The bring-your-own roster. crew runs whatever CLI you've installed + authed.
@@ -133,7 +139,7 @@ const GATE_CARDS = [
   { k: 'series',  title: 'Every check is a switch',   line: 'Policies sit in series; close every switch and current reaches the next phase.' },
   { k: 'deny',    title: 'Deny dominates',            line: 'Open one switch and the track goes dark. One failing check is the whole answer — not a score you out-vote.' },
   { k: 'agent',   title: 'The judge can veto only',   line: 'An LLM seat can break the track (fail the gate) — never close it. No model approves.' },
-  { k: 'ledger',  title: 'Evidence feeds the gate',   line: 'verdict.json is read from the QE evidence ledger. CONDITIONAL is unmet work: the hold stands until a clean PASS lands.' },
+  { k: 'ledger',  title: 'The ledger, beside it',     line: 'verdict.json, from the QE ledger — beside the circuit, not on it. CONDITIONAL reads as a deny until a clean PASS.' },
   { k: 'opt-in',  title: 'Gating is opt-in per phase', line: 'A phase can run ungated: turn the gate off and the transition passes without evaluation — a per-phase choice.' },
 ];
 
@@ -150,12 +156,12 @@ const crewVersion = __WICKED_CREW_VERSION__;
     <div class="grid-floor" aria-hidden="true"></div>
     <div class="wrap hero-head">
       <div class="kicker kicker--plane">wicked-crew · the control plane of the wicked platform</div>
-      <h1>Intent in.<br><span class="y">Verified work out.</span></h1>
+      <h1>Intent in.<br><span class="y">Gated work out.</span></h1>
       <p class="lede">
         The control plane for governed agent delivery — <b>the harness for your agent
-        harnesses</b>. Your own CLIs do the work through durable, governed workflows; the
-        thing that grades it is <b>never</b> the thing that did it, and “done” is re-derived
-        from evidence, never asserted. This is the console, live — drive it.
+        harnesses</b>. Your own CLIs do the work through durable, governed workflows; review goes
+        to a <b>different seat</b> or the run says why not, and “done” is re-derived from evidence,
+        never asserted. This is the console, live — drive it.
       </p>
     </div>
 
@@ -227,7 +233,7 @@ const crewVersion = __WICKED_CREW_VERSION__;
     <div class="wrap hero-foot">
       <div class="hero-tags" role="list">
         <span role="listitem">bring your own CLI</span>
-        <span role="listitem">can’t self-grade</span>
+        <span role="listitem">honest gate labels</span>
         <span role="listitem">deny-dominates gates</span>
         <span role="listitem">crash-resumable</span>
         <span role="listitem">evidence export</span>
@@ -257,7 +263,7 @@ const crewVersion = __WICKED_CREW_VERSION__;
         <li class="prob-card">
           <span class="prob-n">2</span>
           <span class="prob-t"><b>Agents grade their own homework.</b> Nothing structurally prevents self-approval.</span>
-          <span class="prob-fix">→ evaluator ≠ creator, enforced in the engine</span>
+          <span class="prob-fix">→ review on a distinct seat: team runs refuse without one, other runs label the fallback</span>
         </li>
         <li class="prob-card">
           <span class="prob-n">3</span>
@@ -275,7 +281,7 @@ const crewVersion = __WICKED_CREW_VERSION__;
         <span class="idd-arrow">→</span>
         <span class="idd-chip idd-chip--mid">governed workflow</span>
         <span class="idd-arrow">→</span>
-        <span class="idd-chip idd-chip--out">verified result · with the evidence</span>
+        <span class="idd-chip idd-chip--out">gated result · with the evidence</span>
       </p>
     </div>
   </section>
@@ -385,7 +391,7 @@ const crewVersion = __WICKED_CREW_VERSION__;
 
       <p class="skins-landing">
         <span class="skins-landing-chip">shipped</span>
-        <b>The Project model</b> — projects group runs and docs across both skins: members, a merged
+        <b>The Project model</b> — projects group runs and docs: members, a merged
         feed, gate rollups, and a project-scoped <b>code graph in wicked-estate</b> — the source of
         truth each phase reads before it acts; blast radius across member repos is one read of it.
       </p>
@@ -455,9 +461,9 @@ const crewVersion = __WICKED_CREW_VERSION__;
           A real transition — <b>build → ship</b> — behind a dual gate that <b>deny-dominates</b>:
           deterministic checks, each a projection of <b>steering doctrine</b> (seven types, authored via
           crew’s <code>/api/v1</code>), plus an LLM judge that can <b>fail</b> a gate but <b>never
-          approve</b> one. The <code>verdict.json</code> switch is <b>read from the QE evidence
-          ledger</b> that <a href="https://wg.wickedagile.com">wicked-garden’s QE fleet</a> writes —
-          never asserted. Click a switch to take over.
+          approve</b> one. The <b>acceptance read</b> beside it comes from the QE ledger
+          <a href="https://wg.wickedagile.com">wicked-garden’s QE fleet</a> writes — not a switch
+          here. Click a switch to take over.
         </p>
       </div>
 
@@ -525,8 +531,8 @@ const crewVersion = __WICKED_CREW_VERSION__;
             </div>
           </div>
 
-          <!-- The acceptance feed: verdict.json's value is READ from the evidence
-               ledger, never asserted. The chip mirrors the switch live. -->
+          <!-- The acceptance read: verdict.json's value is READ from the evidence ledger, never
+               asserted. It sits BESIDE the circuit — it never changes the transition verdict. -->
           <div class="gc-ledger" data-gc-ledger>
             <span class="gc-ledger-k">acceptance · read from the ledger</span>
             <code class="gc-ledger-call">GET /api/v1/runs/r-4f2a/acceptance</code>
@@ -560,7 +566,7 @@ const crewVersion = __WICKED_CREW_VERSION__;
           <span class="gcs-stamp">HELD</span>
           <span class="gcs-vtext">1 check failed — the series breaks, held for a human. An LLM judge can <b>fail</b> a gate, never <b>approve</b> one.</span>
         </div>
-        <p class="gcs-ledger"><code>verdict.json</code> is read from the QE evidence ledger — deny-dominates, and a <b>CONDITIONAL</b> verdict holds until a clean PASS lands.</p>
+        <p class="gcs-ledger">Beside the gate, the acceptance read takes <code>verdict.json</code> from the QE evidence ledger — deny-dominates, so a <b>CONDITIONAL</b> verdict reads as a deny until a clean PASS lands. It is a separate answer; delivery does not wait on it.</p>
       </div>
 
       <!-- Explainer cards drive the console. Click one to play its point. -->
@@ -804,17 +810,12 @@ wicked-crew serve   <span class="c"># the studio console, served on your machine
       var timer = null;   // auto-cycle timer; null = not auto-playing
       var manual = false; // user has taken hands-on control of the switches
       var scene = 0;
-      // The ledger scene: verdict.json is open because the QE ledger returned
-      // CONDITIONAL (approve-with-listed-fixes) — not a FAIL, still a hold.
+      // The ledger scene: the acceptance read BESIDE the circuit returned CONDITIONAL
+      // (approve-with-listed-fixes) — a deny on that read, but it is not a switch on this
+      // circuit, so the transition verdict does not change.
       var condLedger = false;
       var reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-      function byId(id) {
-        for (var i = 0; i < switches.length; i++) {
-          if (switches[i].getAttribute('data-policy') === id) return switches[i];
-        }
-        return null;
-      }
       function isClosed(sw) { return !sw.classList.contains('is-open'); }
       function isAgent(sw) { return sw.getAttribute('data-kind') === 'agent'; }
 
@@ -822,14 +823,11 @@ wicked-crew serve   <span class="c"># the studio console, served on your machine
       // the first open switch kills all current downstream. The agent seat is
       // just another switch in series — it can BREAK the track (veto) but can
       // never be the reason current flows, so no model can approve.
-      // The ledger chip mirrors verdict.json live: its value is READ from the
-      // QE evidence ledger, never asserted — closed = PASS, open under the
-      // ledger scene = CONDITIONAL (still a hold), open by hand = FAIL.
+      // The acceptance chip: its value is READ from the QE evidence ledger, never asserted,
+      // and it is independent of the circuit — PASS, or CONDITIONAL under the ledger scene.
       function updateLedger() {
         if (!ledgerEl) return;
-        var sw = byId('verdict.json');
-        if (!sw) return;
-        var v = isClosed(sw) ? 'PASS' : (condLedger ? 'CONDITIONAL' : 'FAIL');
+        var v = condLedger ? 'CONDITIONAL' : 'PASS';
         ledgerEl.textContent = v;
         ledgerEl.setAttribute('data-v', v.toLowerCase());
       }
@@ -858,31 +856,29 @@ wicked-crew serve   <span class="c"># the studio console, served on your machine
 
         var live = true;
         segs[0].classList.toggle('is-live', live);
-        var openCount = 0, agentVeto = false, ledgerCond = false;
+        var openCount = 0, agentVeto = false;
         for (var i = 0; i < switches.length; i++) {
           var sw = switches[i];
           var reached = live;
           sw.classList.toggle('is-hot', reached);
           var closed = isClosed(sw);
-          var isLedgerCond = !closed && condLedger &&
-            sw.getAttribute('data-policy') === 'verdict.json';
-          if (!closed) { openCount++; if (isAgent(sw)) agentVeto = true; if (isLedgerCond) ledgerCond = true; }
+          if (!closed) { openCount++; if (isAgent(sw)) agentVeto = true; }
           live = reached && closed;
           var afterSeg = segs[i + 1];
           if (afterSeg) afterSeg.classList.toggle('is-live', live);
           var st = sw.querySelector('[data-state]');
           if (st) st.textContent = isAgent(sw) ? (closed ? 'ABSTAIN' : 'VETO')
-            : (closed ? 'PASS' : (isLedgerCond ? 'COND' : 'FAIL'));
+            : (closed ? 'PASS' : 'FAIL');
           sw.setAttribute('aria-pressed', closed ? 'true' : 'false');
         }
         var allow = live;
         dst.classList.toggle('is-live', allow);
         verdict.setAttribute('data-verdict', allow ? 'allow' : 'deny');
         stamp.textContent = allow ? 'ALLOW' : 'DENY';
-        if (allow) {
+        if (allow && condLedger) {
+          vline.textContent = 'Every check closed — transition allowed. The acceptance read beside it says CONDITIONAL: not a PASS, and delivery does not wait on it — read both before you merge.';
+        } else if (allow) {
           vline.textContent = 'Every check closed — current reaches ship. Transition allowed.';
-        } else if (ledgerCond && openCount === 1) {
-          vline.textContent = 'Ledger verdict CONDITIONAL — approve-with-listed-fixes is not a PASS. Held until a clean PASS lands or a human approves with the conditions in view.';
         } else if (agentVeto && openCount === 1) {
           vline.textContent = 'The LLM judge vetoed — gate failed. A model can fail, never approve.';
         } else if (openCount === 1) {
@@ -898,7 +894,7 @@ wicked-crew serve   <span class="c"># the studio console, served on your machine
         { gated: true,  open: [] },                 // series: all closed → ALLOW
         { gated: true,  open: ['schema-drift'] },   // deny-dominates
         { gated: true,  open: ['llm-judge'] },      // veto-only agent seat
-        { gated: true,  open: ['verdict.json'], cond: true }, // ledger CONDITIONAL → hold
+        { gated: true,  open: [], cond: true },     // acceptance read CONDITIONAL, beside the circuit
         { gated: false, open: [] },                 // opt-in per phase (ungated)
       ];
 
@@ -937,9 +933,6 @@ wicked-crew serve   <span class="c"># the studio console, served on your machine
           takeControl();
           root.removeAttribute('data-argued');
           if (!gated) gated = true;
-          // Hand-toggling verdict.json leaves the ledger scene: a hand-opened
-          // switch is a plain FAIL, not the ledger's CONDITIONAL reading.
-          if (sw.getAttribute('data-policy') === 'verdict.json') condLedger = false;
           sw.classList.toggle('is-open');
           recompute();
         });
@@ -1430,7 +1423,7 @@ wicked-crew serve   <span class="c"># the studio console, served on your machine
           { h: 'council · profile <b>#2</b> wins at <b>100%</b> (ballot 2) · unit → <b>' + worker + '</b>' },
           { h: 'acp session started · <b>' + worker + '</b> · tokens streaming · .worktrees/run-4f2a' },
           { h: 'unit <b>3/6</b> build · diff captured · usage 41k in / 6k out' },
-          { h: 'evaluator ≠ creator · review unit forced onto a <b>different CLI</b>' },
+          { h: 'evaluator ≠ creator · review unit routed to a <b>different CLI</b>' },
           { h: 'policy <b>schema-drift</b> · <b>FAIL</b> — migration ≠ checked-in schema', c: 'sf-row--gate' },
           { h: 'gate held · <b>steering decision required</b>', c: 'sf-row--gate' }
         ];
