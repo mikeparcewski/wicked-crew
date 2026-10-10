@@ -62,10 +62,13 @@ jobs:
         run: npm install -g npm@12
         working-directory: .
 
-      # Workspace install to pull in the typescript devDependency used by the typecheck step.
-      # `npm ci` — release must install what the lockfile pins, not whatever resolves today.
-      - name: Install workspace
-        run: npm ci
+      # Install THIS package's devDependency (typescript) for the typecheck step, as the lockfile
+      # pins it — scoped to the workspace, not the whole tree. npm 12 refuses remote (URL)
+      # dependencies by default (`allow-remote: none`), and another workspace's URL dependency
+      # (agent-acp-bridges' pi-governance tarball, crew#903) failed the api-types-v0.101.0 release
+      # at this step though the contract package needs none of it.
+      - name: Install the package's toolchain
+        run: npm ci --workspace packages/crew-api-types
         working-directory: .
 
       # The package is declaration-only (index.d.ts).  The typecheck step compiles the
