@@ -39,7 +39,7 @@ import {
   reportsFromOutputs,
   REPORT_MAX_CHARS,
 } from '../src/core/deliver-text.js';
-import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
+import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
 import type { SessionView, WorkUnit } from '../src/core/types.js';
 
 const RUN_ID = 'd74e4e8f-bbc9-4697-8c30-181bae005217';

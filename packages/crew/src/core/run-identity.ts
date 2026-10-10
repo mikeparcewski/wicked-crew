@@ -52,8 +52,12 @@ export const SYSTEM_WORKFLOWS: ReadonlySet<string> = new Set([
 
 /** Whether a preset/workflow name is a system one ({@link SYSTEM_WORKFLOWS}). */
 export function isSystemWorkflow(name: string | null | undefined): boolean {
-  return typeof name === 'string' && SYSTEM_WORKFLOWS.has(name);
+  // (X-MIG M11) A campaign's composed node preset (`campaign-<campaign>-<scenario>`) is machine-owned.
+  return typeof name === 'string' && (SYSTEM_WORKFLOWS.has(name) || name.startsWith(CAMPAIGN_NODE_PREFIX));
 }
+
+/** The campaign node prefix (`campaigns/plan.ts` CAMPAIGN_WORKFLOW_PREFIX, restated to keep this module dependency-free). */
+const CAMPAIGN_NODE_PREFIX = 'campaign-';
 
 /**
  * A def with its `is_system` flag set from {@link SYSTEM_WORKFLOWS} — the ONE source of the flag.

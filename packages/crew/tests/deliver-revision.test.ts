@@ -21,13 +21,13 @@ import { DeliveryIndex } from '../src/api/delivery-index.js';
 import { AuditLog } from '../src/api/audit.js';
 import { RetryIndex } from '../src/api/retry-index.js';
 import {
-  BUG_FIX_SWEEP_INSTRUCTIONS,
   deliverGateInstructions,
   isSafeRefName,
   resolvePullRequest,
   type GhExec,
 } from '../src/core/deliver.js';
-import { BUILTIN_WORKFLOWS, addonSupportsQeOverride } from '../src/core/adapter.js';
+import { addonSupportsQeOverride } from '../src/core/adapter.js';
+import { BUG_FIX_SWEEP_INSTRUCTIONS, BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { AuditEntry, LaunchRunInput } from '../src/core/types.js';
 

@@ -44,14 +44,13 @@ import { AuditLog } from '../src/api/audit.js';
 import { GroupIndex } from '../src/api/group-index.js';
 import { buildGroups, sessionsById } from '../src/campaigns/rollup.js';
 import { runWorkflowDef } from '../src/core/run-identity.js';
-import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
-import { QE_AUTHOR_TESTS_WORKFLOW_DEF } from '../src/qe/author-workflow.js';
+import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
 import { DELIVER_PHASE_ID } from '../src/core/deliver.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { SessionView, WorkUnit, WorkflowDef } from '../src/core/types.js';
 
 /** Every def crew ships: the built-ins plus the qe author def (`author-workflow.ts:291` executes_code). */
-const SHIPPED: WorkflowDef[] = [...BUILTIN_WORKFLOWS, QE_AUTHOR_TESTS_WORKFLOW_DEF];
+const SHIPPED: WorkflowDef[] = [...BUILTIN_WORKFLOWS];
 
 function unit(id: string, over: Partial<WorkUnit> = {}): WorkUnit {
   return { id, ord: 1, status: 'done', ...over } as unknown as WorkUnit;
