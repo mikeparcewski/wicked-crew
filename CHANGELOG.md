@@ -10,6 +10,65 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-10-10
+
+This is a **minor** release because default behaviour changes. The engine pin moves to **`wicked-core-ts` `^0.7.46`**, which carries the assurance engine (wicked-core#852, the design in wicked-core#850):
+- a review on its builder's seat is refused by default (EX-01);
+- a gate whose required judge had no distinct seat holds (EX-02);
+- an evaluator-pass error denies (EX-05);
+- every gate and delivery event carries an assurance receipt.
+
+On a one-CLI roster, a governed run now waits at a gate unless it is launched with the explicit `reducedAssurance` opt-in. crew never sets that opt-in by itself. crew adds the delivery half of the contract: QE acceptance gates delivery (EX-03), and post-hoc delivery is labelled unverified (EX-04). This release bundles **wicked-studio 0.7.0**, which adds the assurance receipt, the reduced-assurance opt-in and the delivery labels.
+
+- **Assurance (wicked-core#850), launch (#923):**
+  - `POST /runs` takes `reducedAssurance` (the explicit opt-in), forwarded to the engine only when it is `true`. The `wicked-crew start --reduced-assurance` flag and the demo and capture launches take it too.
+  - A full-assurance launch whose work seats are all one CLI identity answers 201 with `assuranceNotice`. The notice names the seats and the opt-in to relaunch with (`retryWith: {retryOf, reducedAssurance: true}`).
+  - `GET /health.capabilities.reducedAssurance` says whether the installed addon carries the contract. The README quickstart says how one CLI proceeds.
+- **Assurance, delivery (#924):**
+  - **EX-03.** When a run's contract requires `qe_acceptance`, delivery needs a QE ledger PASS attributed to the run. That applies to the deliver gate's approve (standing orders included), a gated resume or reassign, and post-hoc `POST /runs/:id/deliver`. Otherwise the answer is `409 qe_acceptance_required`, nothing is pushed, and the gate stays open. Walkthrough seals alone never satisfy it.
+  - `deliverGate: "auto"` is refused for a workflow that requires `qe_acceptance`. The per-run def copies (`deliver: "pr"`, `requireDeliverables`) keep `required_instruments`; before this change they dropped it.
+  - **EX-04.** A post-hoc lift labels its PR body **Unverified delivery**, with the run's tree before the lift and the delivered tree. It records `AgentSession.delivery_assurance {verified: false, via: 'post_hoc', receipt, treeBefore, treeAfter, qeAcceptance}`, rehydrated from the audit trail, and push-only deliveries are included.
+  - `GET /runs/:id/gate`, the gate decision answer (`GateDecisionResult`) and a gated resume carry the gated unit's receipt. A post-hoc delivery answers with its `DeliveryAssurance`.
+- **`wicked-crew-api-types` 0.102.0 (#923) and 0.103.0:**
+  - `RunAssurance`, `AssuranceReceipt` and `AssuranceSkip`;
+  - `assurance` on `sessionStarted`, `gateEvaluated`, `deliverLiftEvaluated`, `AgentSession` and `WorkUnit`;
+  - the denial sources `same_seat_evaluator`, `evaluator_error` and `judge_unavailable`;
+  - `LaunchRunBody.reducedAssurance`, `LaunchAssuranceNotice` and `HealthCapabilities.reducedAssurance`;
+  - `QeAcceptanceCheck`, `QeAcceptanceRefusal`, `DeliveryAssurance`, `GateDecisionResult` and `GateInfo.assurance`.
+
+  0.103.0 adds `WorkflowDef.required_instruments` and the `AcpTurnSettledEvent` and `AcpProcessRestartedEvent` frames (#909).
+- **Engine pin `wicked-core-ts` `^0.7.46` (#923).** The lockfile is regenerated (main + 5 platform packages), and the core-workflow skill_refs fixture is re-stamped (the refs are unchanged). It also carries estate 0.24.0 and the CO-1 slices: guarded verify floors run on a clean checkout of the guard's tree (core#417), and send-back routes to the creator (core#753).
+- **wicked-interactive `^0.12.0` (#923).** Export asset reads are confined to the document's own and approved roots (EXP-03, wicked-interactive#287).
+- **The stall watchdog** no longer reassigns a unit whose ACP turn the engine settled after a complete final message (`acpTurnSettled`, wicked-core#762); it notifies while the output is folded (#909).
+- **acceptance:** a plan step that raises `verified_evidence` is an acceptance requirement, and a held or unreadable plan fails the requirement closed (core#649 M10) (#921).
+- **steering:** an approve lands the steering proposal only after the propose step has run. A revised proposal approved after a send-back now lands, because the marker is keyed by the proposal's digest (core#649 M8) (#911).
+- **runs:** `GET /runs/:id/inventory` reports whether each enumerating step's inventory is complete. Malformed, contradicted, truncated or unreadable claims never read complete (crew#721) (#917).
+- **product:** `POST /projects/:id/product/compose` drafts epics, features and stories from up to 40 selected requirements as a governed run (crew#372). Nothing is published (#914).
+- **projects:** `GET /projects/:id/requirements`, `/domain` and `/coverage` aggregate a project's repos. Every member repo is a row, and none is dropped (crew#371). This comes with api-types 0.101.0 (#907).
+- **mcp-server workflow:** the install is dry-run and offers the three-choice consent gate, and the install then writes exactly the chosen set (wicked-core#820). `POST /runs/:id/gate` accepts `consent:<id>` (#908).
+- **deliver:**
+  - A refused push names the remote's own reason and ends with what the retry does and who pushes (studio#403).
+  - A value-free `.env.example` / `.sample` / `.template` is delivered, and one holding a value is excluded and named (crew#901) (#904).
+  - The delivery index finds the deliver phase by structure, never by the `gh pr create` string (crew#720 S3) (#905).
+- **chat:** a seat asked to do work answers with a plan and proposes it as a `PLAN+` build step (crew#855). Checkouts are fast-forwarded when clean, or disclosed as stale (crew#899). The chat-open fetch never prompts for credentials (#902, #906).
+- **interactive docs:** `GET /interactive/docs` rows carry `grounding` and `style` (crew#896). This comes with api-types 0.100.1 (#900).
+- **agent-acp-bridges 1.2.0:** `wicked-pi` loads the pi-governance permission gate when `WICKED_PI_GOVERNANCE` is set, and refuses to start pi when the gate is requested but missing. The tarball-URL dependency that npm 12 refuses is removed (#903, #915).
+- **Dependencies:**
+  - `wicked-ledger` `^0.5.0` (#919): JSON/index coherence, merged-record validation, a Node >= 22 floor;
+  - `wicked-bus` `^2.4.0` (#920): unacked events are never swept by default, and the dedup window is separate;
+  - a consolidated patch/minor bump (#898).
+- **docs:** the crew docs, skill and site qualify the evaluator≠creator, verified-work, acceptance and input-governance claims to what ships (#918).
+- **tests:** the `qe-author-tests` e2e GREEN and RED cases are skipped while their stand-in def is shadowed by core#843's built-in preset (crew#922).
+- **Bundled UI wicked-studio `^0.7.0`.** It includes:
+  - the assurance receipt on every gate row and on the delivery, with a judge-held gate reading "Waiting for a judge seat" (studio#657);
+  - **Run with reduced assurance** on the creator-seat refusal, and the same explicit opt-in on the launch form and the composer for a one-seat launch;
+  - the "Unverified delivery" label and the QE acceptance check on the hand-over (studio#658);
+  - the Product view (studio#655), and Coverage and Domain on the project page (studio#653);
+  - the consent gate's install choices (studio#648);
+  - a gate that says whether the diff changed since your last decision (studio#644);
+  - the composer's helpers row (studio#645, #649, #652);
+  - the waves 4–5 fixes since 0.6.8.
+
 ## [0.8.10] — 2026-10-09
 
 The engine pin moves to **`wicked-core-ts` `^0.7.44`** (wicked-core#810 / #813, the per-phase worker pool; wicked-core#782 / #811, the read-only phase's floor fix). This release bundles **wicked-studio 0.6.8**: S19 names a workflow by typing `/workflow-<key>` in the composer and the launch form, plus the gate-row, System and surface follow-ups.
@@ -3707,7 +3766,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.10...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.10...v0.9.0
 [0.8.10]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.9...v0.8.10
 [0.8.9]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.8...v0.8.9
 [0.8.8]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.7...v0.8.8
