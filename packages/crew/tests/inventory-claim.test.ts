@@ -76,6 +76,16 @@ describe('parseInventoryClaims', () => {
     expect(inventoryComplete(claims)).toBe(false);
   });
 
+  it('fence edge cases (codex r2): tilde truncation, multiword info strings, tab-indented examples', () => {
+    const full = JSON.stringify({ source: 's', answered: 'full', listed: 1, expected: 1, unread: [] });
+    const partial = JSON.stringify({ source: 'p', answered: 'partial', listed: 1, expected: 2, unread: ['x'] });
+    expect(parseInventoryClaims(`~~~wicked-inventory\n{"source": "b"`).map((c) => c.answered)).toEqual(['unknown']);
+    const titled = '```text title="example"\nsome output\n```\n```wicked-inventory\n' + partial + '\n```';
+    expect(parseInventoryClaims(titled).map((c) => c.answered)).toEqual(['partial']);
+    const tabbed = '\t```wicked-inventory\n\t' + full + '\n\t```';
+    expect(parseInventoryClaims(tabbed)).toEqual([]);
+  });
+
   it('inventoryComplete: at least one claim, all full', () => {
     expect(inventoryComplete([])).toBe(false);
     expect(inventoryComplete(parseInventoryClaims(block({ source: 's', answered: 'full', listed: 1, expected: 1, unread: [] })))).toBe(true);

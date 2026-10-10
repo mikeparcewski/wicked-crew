@@ -77,7 +77,9 @@ function unknown(why: string): InventoryClaim {
   return { source: null, answered: 'unknown', listed: null, expected: null, unread: [why] };
 }
 
-const FENCE = /^\s{0,3}(`{3,}|~{3,})\s*([^`\s]*)\s*$/;
+/** A fence line: up to three SPACES (a tab makes an indented code block, not a fence), the run of
+ *  backticks or tildes, then the info string (whose first word is the language). */
+const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 
 /**
  * The report's claims: the `wicked-inventory` blocks that END the reply, as the codebook asks
@@ -96,17 +98,23 @@ export function parseInventoryClaims(text: string): InventoryClaim[] {
     const line = lines[i] ?? '';
     const m = FENCE.exec(line);
     if (open === null) {
-      if (m) open = { start: i, ch: m[1]![0]!, len: m[1]!.length, info: m[2] ?? '', body: [] };
+      if (m) {
+        const ch = m[1]![0]!;
+        const info = (m[2] ?? '').trim();
+        // A backtick fence's info string cannot contain a backtick (that line is inline code).
+        if (ch === '`' && info.includes('`')) continue;
+        open = { start: i, ch, len: m[1]!.length, info: info.split(/\s+/)[0] ?? '', body: [] };
+      }
       continue;
     }
-    if (m && m[2] === '' && m[1]![0] === open.ch && m[1]!.length >= open.len) {
+    if (m && (m[2] ?? '').trim() === '' && m[1]![0] === open.ch && m[1]!.length >= open.len) {
       regions.push({ start: open.start, end: i, info: open.info, body: open.body });
       open = null;
     } else {
       open.body.push(line);
     }
   }
-  if (open !== null && open.info === 'wicked-inventory' && open.ch === '`') {
+  if (open !== null && open.info === 'wicked-inventory') {
     // A truncated report: the opener is the last fence and nothing closed it.
     const closed = trailingReport(lines, regions, open.start);
     return [...closed, unknown('a wicked-inventory block was opened and never closed (the reply was cut off?)')];
