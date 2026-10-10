@@ -63,7 +63,11 @@ const START_VALUE_FLAGS: ReadonlySet<string> = new Set(['--problem', '--human-co
 /** `name` present AS AN OPTION: never the value of a preceding value-taking option, so
  *  `--problem --reduced-assurance` is a problem text, not an opt-in (codex r2 on crew#923). */
 function optionPresent(args: string[], name: string, valueFlags: ReadonlySet<string>): boolean {
-  return args.some((a, i) => a === name && (i === 0 || !valueFlags.has(args[i - 1]!)));
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === name) return true;
+    if (valueFlags.has(args[i]!)) i++; // the next token is this option's value (codex r3)
+  }
+  return false;
 }
 
 /** `true` when an env var is set to a falsy string: "", "0", "false", "no", "off" (case-insensitive, trimmed).

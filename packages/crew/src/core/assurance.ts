@@ -21,14 +21,13 @@ export const SINGLE_CLI_ROSTER_CODE = 'single_cli_roster' as const;
 /**
  * A seat's JUDGE identity, the engine's rule (wicked-core `validator::seat_identity`): the basename of
  * its headless invocation's argv[0], case-folded — so `claude` and `claude-sonnet`, both invoking
- * `claude`, are ONE identity. A seat with no invocation falls back to its key's CLI (`claude#2` →
- * `claude`).
+ * `claude`, are ONE identity. `null` for a seat with no invocation: the engine never judges on it.
  */
-export function seatIdentity(seat: { key: string; headless_invocation?: unknown }): string {
+export function seatIdentity(seat: { headless_invocation?: unknown }): string | null {
   const inv = typeof seat.headless_invocation === 'string' ? seat.headless_invocation.trim() : '';
   const argv0 = inv.split(/\s+/, 1)[0] ?? '';
-  const tok = argv0 !== '' ? argv0 : seat.key.split('#', 1)[0]!;
-  return (tok.split(/[\\/]/).pop() ?? tok).toLowerCase();
+  if (argv0 === '') return null;
+  return (argv0.split(/[\\/]/).pop() ?? argv0).toLowerCase();
 }
 
 /**
@@ -39,7 +38,7 @@ export function seatIdentity(seat: { key: string; headless_invocation?: unknown 
  * eligible). `null` when the roster does not parse as an array of keyed seats: the engine reports its
  * own parse error, crew does not predict around it.
  */
-export function workSeats(engineClisJson: string): Array<{ key: string; identity: string }> | null {
+export function workSeats(engineClisJson: string): Array<{ key: string; identity: string | null }> | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(engineClisJson);
@@ -47,13 +46,13 @@ export function workSeats(engineClisJson: string): Array<{ key: string; identity
     return null;
   }
   if (!Array.isArray(parsed)) return null;
-  const seats: Array<{ key: string; identity: string }> = [];
+  const seats: Array<{ key: string; identity: string | null }> = [];
   for (const seat of parsed) {
     if (typeof seat !== 'object' || seat === null) return null;
     const s = seat as { key?: unknown; headless_invocation?: unknown; health?: { usable?: unknown }; seat_eligible_for_work?: unknown };
     if (typeof s.key !== 'string' || s.key === '') return null;
     if (s.health?.usable === false || s.seat_eligible_for_work === false) continue;
-    seats.push({ key: s.key, identity: seatIdentity({ key: s.key, headless_invocation: s.headless_invocation }) });
+    seats.push({ key: s.key, identity: seatIdentity({ headless_invocation: s.headless_invocation }) });
   }
   return seats;
 }
@@ -80,9 +79,10 @@ export function launchAssuranceNotice(opts: {
   if (opts.reducedAssurance === true) return null;
   const seats = workSeats(opts.engineClisJson);
   if (seats === null || seats.length === 0) return null;
-  const identities = new Set(seats.map((s) => s.identity));
-  if (identities.size !== 1) return null;
-  const cli = [...identities][0]!;
+  // Judge identities: a seat with no invocation can work but never judge (codex r3).
+  const identities = new Set(seats.flatMap((s) => (s.identity === null ? [] : [s.identity])));
+  if (identities.size > 1) return null;
+  const cli = [...identities][0] ?? seats[0]!.key;
   const usable = seats.map((s) => s.key);
   return {
     code: SINGLE_CLI_ROSTER_CODE,

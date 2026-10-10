@@ -13,10 +13,11 @@ const notice = (seats: unknown[], reducedAssurance?: boolean) =>
   launchAssuranceNotice({ runId: 'r1', reducedAssurance, engineClisJson: JSON.stringify(seats) });
 
 describe('seatIdentity — the engine judge identity (wicked-core validator::seat_identity)', () => {
-  it('is the basename of the invocation argv[0], case-folded; a seat with none falls back to its key CLI', () => {
-    expect(seatIdentity({ key: 'claude-sonnet', headless_invocation: '/usr/local/bin/Claude -p {PROMPT}' })).toBe('claude');
-    expect(seatIdentity({ key: 'codex', headless_invocation: 'codex exec {PROMPT}' })).toBe('codex');
-    expect(seatIdentity({ key: 'claude#2' })).toBe('claude');
+  it('is the basename of the invocation argv[0], case-folded; a seat with none has no judge identity', () => {
+    expect(seatIdentity({ headless_invocation: '/usr/local/bin/Claude -p {PROMPT}' })).toBe('claude');
+    expect(seatIdentity({ headless_invocation: 'codex exec {PROMPT}' })).toBe('codex');
+    expect(seatIdentity({ headless_invocation: '   ' })).toBeNull();
+    expect(seatIdentity({})).toBeNull();
   });
 });
 
@@ -47,6 +48,10 @@ describe('launchAssuranceNotice', () => {
 
   it('two keys invoking ONE binary are one identity (the judge cannot be distinct) — told', () => {
     expect(notice([seat('claude', 'claude -p {PROMPT}'), seat('claude-sonnet', 'claude --model sonnet -p {PROMPT}')])).not.toBeNull();
+  });
+
+  it('a second seat with no invocation cannot judge — told', () => {
+    expect(notice([seat('claude', 'claude -p {PROMPT}'), seat('codex', '')])).not.toBeNull();
   });
 
   it('a second CLI that can only vote, or is benched, does not count — told', () => {
