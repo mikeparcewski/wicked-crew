@@ -69,6 +69,11 @@ beforeEach(() => {
     launched.push(opts);
     return Promise.resolve(opts.sessionId);
   });
+  // X-MIG M1 (wicked-core#864): `bug` is a built-in PRESET on the engine, and a delivering preset
+  // launch rides the engine's deliver step (tests/plan-approval-gate.test.ts pins that path).
+  // These tests pin crew's per-run COMPOSITION over a registered def, so the engine here holds no
+  // preset: `bug` resolves as the def crew serves.
+  stubCore(adapter, 'listPresets', () => Promise.resolve('[]'));
 });
 
 afterEach(() => {
