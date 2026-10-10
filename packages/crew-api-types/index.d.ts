@@ -10142,7 +10142,8 @@ export interface InstallEditorResponse {
 export interface EditorConformanceSummary {
   ok: boolean;
   at: string;
-  editors: Array<{ id: string; ok: boolean; cases: Record<string, { ok: boolean }>; gaps: string[] }>;
+  /** Per editor: the version and entry sha256 the run tested (an install requires both to be the installed ones). */
+  editors: Array<{ id: string; version: string; sha256: string; ok: boolean; cases: Record<string, { ok: boolean }>; gaps: string[] }>;
   /** Set when the run could not happen (no headless browser, no garden with the runner). */
   error?: string;
 }

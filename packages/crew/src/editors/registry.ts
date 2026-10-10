@@ -25,7 +25,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 
@@ -99,6 +99,8 @@ export interface InstalledPack {
   entry: string;
   /** The entry's sha256 when it was installed (and passed the conformance run). */
   sha256: string;
+  /** {@link editorEntryDigest} of its manifest entry as admitted: permissions, kinds, version, … */
+  manifestSha256: string;
   installedAt: string;
   /** The conformance run that admitted it: when, and which cases ran. */
   conformance: { ok: true; at: string; cases: string[] };
@@ -114,6 +116,33 @@ export class EditorInstallConflict extends Error {
 
 export function sha256Of(buf: Buffer): string {
   return createHash('sha256').update(buf).digest('hex');
+}
+
+/**
+ * Read a file holding at most `cap` bytes, never allocating more than `cap + 1` (codex r1 on X3: a
+ * file swapped for a huge one is refused before it is read whole). `null` = over the cap.
+ */
+export function readCapped(path: string, cap: number): Buffer | null {
+  const fd = openSync(path, 'r');
+  try {
+    if (fstatSync(fd).size > cap) return null;
+    const buf = Buffer.alloc(cap + 1);
+    let n = 0;
+    for (;;) {
+      const got = readSync(fd, buf, n, buf.length - n, null);
+      if (got === 0) break;
+      n += got;
+      if (n > cap) return null;
+    }
+    return buf.subarray(0, n);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** The digest of a pack editor's admitted manifest entry: a manifest edited after install is a new install. */
+export function editorEntryDigest(entry: unknown): string {
+  return createHash('sha256').update(JSON.stringify(entry)).digest('hex');
 }
 
 /**
@@ -252,6 +281,7 @@ export function readPackEditor(pack: InstalledPack, id: string, log?: (msg: stri
   if (!parsed.success) return why(`its manifest entry is refused (${parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')})`);
   const m = parsed.data;
   if (FIRST_PARTY_ID.test(m.id) || m.id === 'wicked') return why('a pack may not declare a wicked-* editor');
+  if (editorEntryDigest(m) !== pack.manifestSha256) return why('its manifest entry changed since it was installed');
   if (m.entry !== pack.entry) return why(`its entry moved (${pack.entry} → ${m.entry})`);
   const entryPath = resolve(pack.root, m.entry);
   const rel = relative(resolve(pack.root), entryPath);
@@ -265,14 +295,14 @@ export function readPackEditor(pack: InstalledPack, id: string, log?: (msg: stri
   }
   const entryProblem = notRealEntry(entryPath, 'file');
   if (entryProblem !== null) return why(`entry ${m.entry} is ${entryProblem}`);
-  let buf: Buffer;
+  const cap = m.limits?.bundleBytes ?? HOST_BUNDLE_CAP_BYTES;
+  let buf: Buffer | null;
   try {
-    buf = readFileSync(entryPath);
+    buf = readCapped(entryPath, cap);
   } catch (err) {
     return why(`entry unreadable (${err instanceof Error ? err.message : String(err)})`);
   }
-  const cap = m.limits?.bundleBytes ?? HOST_BUNDLE_CAP_BYTES;
-  if (buf.byteLength > cap) return why(`entry is ${buf.byteLength} bytes, over its ${cap}-byte cap`);
+  if (buf === null) return why(`entry is over its ${cap}-byte cap`);
   const outside = externalReferences(buf.toString('utf8'));
   if (outside.length > 0) return why(`entry loads from outside itself (${outside.slice(0, 3).join(', ')})`);
   const sha = sha256Of(buf);
@@ -286,6 +316,7 @@ const InstalledPackSchema = z.object({
   name: z.string().regex(EDITOR_ID),
   entry: z.string().regex(/\.html$/u),
   sha256: z.string().regex(/^[0-9a-f]{64}$/u),
+  manifestSha256: z.string().regex(/^[0-9a-f]{64}$/u),
   installedAt: z.string(),
   conformance: z.object({ ok: z.literal(true), at: z.string(), cases: z.array(z.string()) }),
 });
@@ -375,9 +406,27 @@ export class EditorRegistry {
     const r = this.records.get(id);
     if (r === undefined) return null;
     const next = { ...r, enabled };
-    this.records.set(id, next);
-    this.writeState();
+    this.commit(() => this.records.set(id, next));
     return next;
+  }
+
+  /**
+   * Apply `change` to the in-memory maps and persist; a failed write restores the maps as they were
+   * and rethrows, so memory never holds what the file does not (codex r1 on X3).
+   */
+  private commit(change: () => void): void {
+    const records = new Map(this.records);
+    const installed = new Map(this.installed);
+    change();
+    try {
+      this.writeState();
+    } catch (err) {
+      this.records.clear();
+      for (const [k, v] of records) this.records.set(k, v);
+      this.installed.clear();
+      for (const [k, v] of installed) this.installed.set(k, v);
+      throw err;
+    }
   }
 
   /**
@@ -400,25 +449,29 @@ export class EditorRegistry {
       if (r === null) throw new EditorInstallConflict(`${id} did not read back from ${pack.root} (see the daemon log)`);
       read.push(r);
     }
-    const out: EditorRecord[] = [];
-    for (const r of read) {
+    const out: EditorRecord[] = read.map((r) => {
       const id = r.manifest.id;
-      const next: EditorRecord = { ...r, enabled: enabled ?? this.records.get(id)?.enabled ?? true };
-      this.records.set(id, next);
-      this.installed.set(id, r.pack!);
-      out.push(next);
-    }
-    this.writeState();
+      // An update keeps the operator's switch: the live record's, else the one persisted for a record
+      // skipped at boot (codex r1), else on.
+      return { ...r, enabled: enabled ?? this.records.get(id)?.enabled ?? this.persistedFlags[id] ?? true };
+    });
+    this.commit(() => {
+      for (const r of out) {
+        this.records.set(r.manifest.id, r);
+        this.installed.set(r.manifest.id, r.pack!);
+      }
+    });
     return { records: out, updated };
   }
 
   /** Remove an installed pack editor (the pack's files are the installer's to delete). `false` when it is not one. */
   removeInstalled(id: string): boolean {
     if (!this.installed.has(id)) return false;
-    this.installed.delete(id);
-    const r = this.records.get(id);
-    if (r !== undefined && !r.firstParty) this.records.delete(id);
-    this.writeState();
+    this.commit(() => {
+      this.installed.delete(id);
+      const r = this.records.get(id);
+      if (r !== undefined && !r.firstParty) this.records.delete(id);
+    });
     return true;
   }
 

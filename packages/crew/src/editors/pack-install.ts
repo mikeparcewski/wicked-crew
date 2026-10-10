@@ -21,7 +21,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 
 import type { EditorConformanceSummary, InstallEditorRefusal, InstallEditorResponse, PackCheckResult } from '../core/types.js';
 import { execCapped } from '../core/exec.js';
-import { EditorInstallConflict, EditorRegistry, type InstalledPack } from './registry.js';
+import { EditorInstallConflict, EditorRegistry, PackEditorSchema, editorEntryDigest, type InstalledPack } from './registry.js';
 
 export type PackCheckRunner = (packRoot: string) => Promise<PackCheckResult>;
 
@@ -134,13 +134,13 @@ export function gardenConformance(gardenRoot: string | null, hostUrl: () => stri
       const editors = Array.isArray(raw.editors)
         ? raw.editors.flatMap((e) => {
             if (typeof e !== 'object' || e === null) return [];
-            const r = e as { id?: unknown; ok?: unknown; cases?: unknown; gaps?: unknown };
+            const r = e as { id?: unknown; version?: unknown; sha256?: unknown; ok?: unknown; cases?: unknown; gaps?: unknown };
             const cases: Record<string, { ok: boolean }> = {};
             if (typeof r.cases === 'object' && r.cases !== null) {
               for (const [k, v] of Object.entries(r.cases)) cases[k] = { ok: typeof v === 'object' && v !== null && (v as { ok?: unknown }).ok === true };
             }
             const gaps = Array.isArray(r.gaps) ? r.gaps.filter((g): g is string => typeof g === 'string') : [];
-            return [{ id: String(r.id), ok: r.ok === true, cases, gaps }];
+            return [{ id: String(r.id), version: typeof r.version === 'string' ? r.version : '', sha256: typeof r.sha256 === 'string' ? r.sha256 : '', ok: r.ok === true, cases, gaps }];
           })
         : [];
       return {
@@ -236,6 +236,13 @@ function approvalList(pack: ParsedPack, verdict: PackCheckResult): InstallEditor
   };
 }
 
+/** The admitted manifest entry's digest, over the same parse the registry reads it back with. */
+function digestOf(entry: Record<string, unknown>): string {
+  const parsed = PackEditorSchema.safeParse(entry);
+  if (!parsed.success) throw new PackInstallError(400, `editor ${str(entry['id'])}: manifest entry refused (${parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')})`);
+  return editorEntryDigest(parsed.data);
+}
+
 /** `POST /editors {packRoot, enabled?}`: the gate, the conformance run, then the registry. */
 export async function installPack(
   packRootRaw: string,
@@ -252,9 +259,15 @@ export async function installPack(
     if (deps.registry.get(id)?.firstParty === true) throw new PackInstallError(409, `${id} is a first-party editor's id`, verdict);
   }
   const conformance = await deps.conformance(pack.root);
-  const missing = (r: EditorConformanceSummary['editors'][number] | undefined): string[] =>
-    CONFORMANCE_CASES.filter((c) => r?.cases[c]?.ok !== true);
-  const failures = ids.map((id) => ({ id, missing: missing(conformance.editors.find((e) => e.id === id)) })).filter((f) => f.missing.length > 0);
+  // The report counts only for the bytes being installed (codex r1): the run's own version and entry
+  // hash must be the manifest's, which the registry then re-reads at that same hash.
+  const missing = (e: Record<string, unknown>): string[] => {
+    const r = conformance.editors.find((x) => x.id === str(e['id']));
+    if (r === undefined) return ['not in the report'];
+    if (r.sha256 !== str(e['sha256']) || r.version !== str(e['version'])) return [`ran against ${r.version || '?'}#${(r.sha256 || '?').slice(0, 12)}, not this entry`];
+    return CONFORMANCE_CASES.filter((c) => r.cases[c]?.ok !== true);
+  };
+  const failures = pack.editors.map((e) => ({ id: str(e['id']), missing: missing(e) })).filter((f) => f.missing.length > 0);
   if (!conformance.ok || failures.length > 0) {
     const unavailable = conformance.editors.length === 0;
     throw new PackInstallError(
@@ -274,6 +287,7 @@ export async function installPack(
       name,
       entry,
       sha256: str(e['sha256']),
+      manifestSha256: digestOf(e),
       installedAt: now,
       conformance: { ok: true, at: conformance.at, cases: [...CONFORMANCE_CASES] },
     };

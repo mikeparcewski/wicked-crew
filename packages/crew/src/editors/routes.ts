@@ -23,7 +23,6 @@
  */
 
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 
@@ -31,7 +30,7 @@ import { LOCAL_ACTOR, trustAtLeast } from '../api/auth.js';
 import type { Actor, EditorGrantsResponse, ListEditorsResponse } from '../core/types.js';
 import { bundleHeaders } from './csp.js';
 import { installPack, PackInstallError, type ConformanceRunner, type PackCheckRunner } from './pack-install.js';
-import { EDITOR_ID, EDITOR_VERSION, EditorRegistry, notRealEntry, type EditorRecord } from './registry.js';
+import { EDITOR_ID, EDITOR_VERSION, EditorRegistry, HOST_BUNDLE_CAP_BYTES, notRealEntry, readCapped, type EditorRecord } from './registry.js';
 
 const V = '/api/v1';
 
@@ -194,12 +193,16 @@ export function serveBundle(record: EditorRecord, reply: FastifyReply, log?: (ms
     log?.(`[editors] ${record.manifest.id}: entry is ${problem} at serve time; refused`);
     return reply.code(404).send({ error: 'no such editor bundle' });
   }
-  let buf: Buffer;
+  let buf: Buffer | null;
   try {
-    buf = readFileSync(record.entryPath);
+    buf = readCapped(record.entryPath, record.manifest.limits?.bundleBytes ?? HOST_BUNDLE_CAP_BYTES);
   } catch (err) {
     log?.(`[editors] ${record.manifest.id}: entry unreadable at serve time (${err instanceof Error ? err.message : String(err)})`);
     return reply.code(404).send({ error: 'no such editor bundle' });
+  }
+  if (buf === null) {
+    log?.(`[editors] ${record.manifest.id}@${record.manifest.version}: entry grew over its cap on disk; refused`);
+    return reply.code(409).send({ code: 'bundle_hash_mismatch', error: `the ${record.manifest.id} bundle on disk no longer matches its pinned hash; restart the daemon to re-pin it` });
   }
   const actual = createHash('sha256').update(buf).digest('hex');
   if (actual !== record.sha256) {

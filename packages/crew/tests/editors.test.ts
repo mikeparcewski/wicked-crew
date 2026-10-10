@@ -5,7 +5,7 @@
 // fail-closed gate, then crew's own conformance run, then the registry (operator ruling X3); a pack
 // with skills or blocks is refused with its approval list.
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -15,7 +15,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { EditorConformanceSummary, EditorGrantsResponse, EditorView, InstallEditorRefusal, InstallEditorResponse, ListEditorsResponse } from '../src/core/types.js';
 import { BUNDLE_CSP_BASE, bundleHeaders, requestOrigin, shellCsp } from '../src/editors/csp.js';
 import { CONFORMANCE_CASES, gardenConformance, gardenPackCheck, installPack, PackInstallError, type ConformanceRunner, type PackCheckRunner } from '../src/editors/pack-install.js';
-import { EditorRegistry, EDITORS_STATE_FILENAME, discoverStudioEditors, externalReferences, sha256Of } from '../src/editors/registry.js';
+import { EditorRegistry, EDITORS_STATE_FILENAME, discoverStudioEditors, externalReferences, readCapped, sha256Of } from '../src/editors/registry.js';
 import { registerEditorRoutes, serveBundle } from '../src/editors/routes.js';
 
 const scratches: string[] = [];
@@ -219,12 +219,16 @@ function makePack(opts: { name?: string; id?: string; html?: string; blocks?: bo
 }
 
 const passCheck: PackCheckRunner = async () => ({ ok: true, errors: [], warnings: [] });
-function conformant(ids: string[] = ['acme-terms']): ConformanceRunner {
-  return vi.fn(async (): Promise<EditorConformanceSummary> => ({
-    ok: true,
-    at: '2026-10-10T00:00:00.000Z',
-    editors: ids.map((id) => ({ id, ok: true, cases: Object.fromEntries(CONFORMANCE_CASES.map((c) => [c, { ok: true }])), gaps: ['case 7'] })),
-  }));
+/** A passing run over whatever the pack holds right now (its ids, versions and entry hashes, as garden's runner reports them). */
+function conformant(): ConformanceRunner {
+  return vi.fn(async (packRoot: string): Promise<EditorConformanceSummary> => {
+    const m = JSON.parse(readFileSync(join(packRoot, 'wicked-pack.json'), 'utf8')) as { editors: Array<{ id: string; version: string; entry: string }> };
+    return {
+      ok: true,
+      at: '2026-10-10T00:00:00.000Z',
+      editors: m.editors.map((e) => ({ id: e.id, version: e.version, sha256: sha256Of(readFileSync(join(packRoot, e.entry))), ok: true, cases: Object.fromEntries(CONFORMANCE_CASES.map((c) => [c, { ok: true }])), gaps: ['case 7'] })),
+    };
+  });
 }
 
 describe('pack install: the gate, crew\'s conformance run, then the registry', () => {
@@ -265,7 +269,7 @@ describe('pack install: the gate, crew\'s conformance run, then the registry', (
 
   it('a failed or impossible conformance run installs nothing (422), naming the cases that did not pass', async () => {
     const { reg, home } = registry();
-    const failing: ConformanceRunner = async () => ({ ok: false, at: 'x', editors: [{ id: 'acme-terms', ok: false, cases: { '0-manifest': { ok: true }, '1-handshake': { ok: false } }, gaps: [] }] });
+    const failing: ConformanceRunner = async () => ({ ok: false, at: 'x', editors: [{ id: 'acme-terms', version: '0.1.0', sha256: sha256Of(Buffer.from(EDITOR_HTML)), ok: false, cases: { '0-manifest': { ok: true }, '1-handshake': { ok: false } }, gaps: [] }] });
     const err = await installPack(makePack(), undefined, { check: passCheck, conformance: failing, registry: reg }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(PackInstallError);
     expect((err as PackInstallError).status).toBe(422);
@@ -275,7 +279,7 @@ describe('pack install: the gate, crew\'s conformance run, then the registry', (
     const err2 = await installPack(makePack(), undefined, { check: passCheck, conformance: noBrowser, registry: reg }).catch((e: unknown) => e);
     expect((err2 as PackInstallError).body).toMatchObject({ code: 'conformance_unavailable' });
     // A report that claims ok but leaves a case out is not a pass either.
-    const partial: ConformanceRunner = async () => ({ ok: true, at: 'x', editors: [{ id: 'acme-terms', ok: true, cases: { '0-manifest': { ok: true } }, gaps: [] }] });
+    const partial: ConformanceRunner = async () => ({ ok: true, at: 'x', editors: [{ id: 'acme-terms', version: '0.1.0', sha256: sha256Of(Buffer.from(EDITOR_HTML)), ok: true, cases: { '0-manifest': { ok: true } }, gaps: [] }] });
     await expect(installPack(makePack(), undefined, { check: passCheck, conformance: partial, registry: reg })).rejects.toMatchObject({ status: 422 });
     expect(reg.get('acme-terms')).toBeNull();
     expect(() => readFileSync(join(home, EDITORS_STATE_FILENAME), 'utf8')).toThrow();
@@ -316,7 +320,67 @@ describe('pack install: the gate, crew\'s conformance run, then the registry', (
     expect(again.get('acme-terms')).toBeNull();
     expect(logs.some((l) => /no longer matches the hash/.test(l))).toBe(true);
     expect(again.isInstalled('acme-terms')).toBe(true);
-    await expect(installPack(makePack({ id: 'wicked-page', name: 'acme-page' }), undefined, { check: passCheck, conformance: conformant(['wicked-page']), registry: reg })).rejects.toMatchObject({ status: 409 });
+    await expect(installPack(makePack({ id: 'wicked-page', name: 'acme-page' }), undefined, { check: passCheck, conformance: conformant(), registry: reg })).rejects.toMatchObject({ status: 409 });
+  });
+
+  it('codex r1 (P1): a passing report counts only for the bytes being installed — another hash or version is a 422', async () => {
+    const { reg } = registry();
+    const root = makePack();
+    const passing = await conformant()(root);
+    const otherBytes: ConformanceRunner = async () => ({ ...passing, editors: passing.editors.map((e) => ({ ...e, sha256: 'b'.repeat(64) })) });
+    await expect(installPack(root, undefined, { check: passCheck, conformance: otherBytes, registry: reg })).rejects.toMatchObject({ status: 422, message: /not this entry/ });
+    const otherVersion: ConformanceRunner = async () => ({ ...passing, editors: passing.editors.map((e) => ({ ...e, version: '9.9.9' })) });
+    await expect(installPack(root, undefined, { check: passCheck, conformance: otherVersion, registry: reg })).rejects.toMatchObject({ status: 422 });
+    expect(reg.get('acme-terms')).toBeNull();
+  });
+
+  it('codex r1: a manifest edited after install (a permission added, same HTML) is skipped at boot until installed again', async () => {
+    const { reg, home } = registry();
+    const root = makePack();
+    await installPack(root, undefined, { check: passCheck, conformance: conformant(), registry: reg });
+    const mp = join(root, 'wicked-pack.json');
+    const m = JSON.parse(readFileSync(mp, 'utf8')) as { editors: Array<{ permissions: Array<{ id: string; why: string }> }> };
+    m.editors[0]!.permissions.push({ id: 'artifact.write', why: 'quietly' });
+    writeFileSync(mp, JSON.stringify(m));
+    const logs: string[] = [];
+    expect(new EditorRegistry({ stateHome: home, log: (l) => logs.push(l) }).get('acme-terms')).toBeNull();
+    expect(logs.some((l) => /manifest entry changed since it was installed/.test(l))).toBe(true);
+  });
+
+  it('codex r1: a reinstall of an editor skipped at boot keeps the operator\'s "off"', async () => {
+    const { reg, home } = registry();
+    const root = makePack();
+    await installPack(root, false, { check: passCheck, conformance: conformant(), registry: reg });
+    const entry = join(root, 'editors', 'acme-terms', 'index.html');
+    writeFileSync(entry, 'tampered');
+    const booted = new EditorRegistry({ stateHome: home });
+    expect(booted.get('acme-terms')).toBeNull();
+    writeFileSync(entry, EDITOR_HTML);
+    const res = await installPack(root, undefined, { check: passCheck, conformance: conformant(), registry: booted });
+    expect(res.editors[0]!.enabled).toBe(false);
+  });
+
+  it('codex r1: a state write that fails leaves memory as the file is (install and remove)', async () => {
+    const { reg, home } = registry();
+    const root = makePack();
+    await installPack(root, undefined, { check: passCheck, conformance: conformant(), registry: reg });
+    chmodSync(home, 0o500);
+    try {
+      expect(() => reg.removeInstalled('acme-terms')).toThrow();
+      expect(reg.get('acme-terms')).not.toBeNull();
+      await expect(installPack(makePack({ version: '0.3.0' }), undefined, { check: passCheck, conformance: conformant(), registry: reg })).rejects.toThrow();
+      expect(reg.get('acme-terms')!.manifest.version).toBe('0.1.0');
+    } finally {
+      chmodSync(home, 0o700);
+    }
+  });
+
+  it('codex r1: readCapped never reads past the cap', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'editors-cap-'));
+    scratches.push(dir);
+    writeFileSync(join(dir, 'big.html'), Buffer.alloc(2048, 0x61));
+    expect(readCapped(join(dir, 'big.html'), 1024)).toBeNull();
+    expect(readCapped(join(dir, 'big.html'), 4096)!.byteLength).toBe(2048);
   });
 
   it('gardenPackCheck and gardenConformance without a garden FAIL (never pass), and spawn nothing', async () => {
@@ -463,7 +527,7 @@ describe('the routes', () => {
   });
 
   it('a conformance failure through the route is a 422 carrying the report; a skills pack a 501 with the approval list', async () => {
-    const failing: ConformanceRunner = async () => ({ ok: false, at: 'x', editors: [{ id: 'acme-terms', ok: false, cases: { '3-no-network': { ok: false } }, gaps: [] }] });
+    const failing: ConformanceRunner = async () => ({ ok: false, at: 'x', editors: [{ id: 'acme-terms', version: '0.1.0', sha256: sha256Of(Buffer.from(EDITOR_HTML)), ok: false, cases: { '3-no-network': { ok: false } }, gaps: [] }] });
     const h = await harness({ conformance: failing });
     const res = await h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { packRoot: makePack() } });
     expect(res.statusCode).toBe(422);
