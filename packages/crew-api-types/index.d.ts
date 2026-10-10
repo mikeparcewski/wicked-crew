@@ -5395,6 +5395,9 @@ export interface RunInventoryResponse {
 export interface PresetStep {
   catalog: string;
   id: string;
+  /** (crew#928, wicked-core#854) The step changes no file in the run's tree; see
+   *  {@link TeamPlanStep.writes_nothing}. */
+  writes_nothing?: boolean;
   [k: string]: unknown;
 }
 
@@ -8132,7 +8135,35 @@ export interface TeamPlanStep {
    *  phase's pool; a raise is refused (`wicked.team.plan.refused`, reason `pool_raised`). Omitted
    *  when unset. */
   pool?: number;
+  /** (crew#928, wicked-core#854) The step changes no file in the run's tree (capture-learnings'
+   *  `capture`, steering-author's `propose`). A plan whose every creator step sets it, and that has
+   *  no `run` step, may be scoped `SCOPE {"touch":[]}`, which scores 0. Set on a code phase it is
+   *  refused (`writes_nothing_on_code`). Omitted when unset. */
+  writes_nothing?: boolean;
 }
+
+/**
+ * The stable token of a plan-rule refusal (wicked-core `PlanRefusal::reason`). A refusal formatted
+ * by the engine's `PlanRefusal` reads `<token>: <detail>`; a skin matches the token, never the
+ * prose. NOT every `plan.refused` reason is one: some are plain text (an auto-mode floor override,
+ * a held edit the run ended before applying), and a launch / preview / `propose_plan` error message
+ * CONTAINS the refusal text behind a context prefix (`the plan is refused: <token>: …`), so search
+ * for the token rather than splitting on the first `:`. Open-ended: the engine may add tokens.
+ *
+ *  - `pool_raised` (crew#894, wicked-core#810): a step raised its phase's pool.
+ *  - `writes_nothing_on_code` (crew#928, wicked-core#854): `writes_nothing: true` on a step whose
+ *    phase executes code.
+ *  - `security_review_on_non_code_plan` (crew#928, wicked-core#846/#854): a `security_review` in a
+ *    plan where no step does code work; its diff evidence floor could never pass. The detail names
+ *    the step and either the held testing rule that added it (`rule TST-1002 requires it`) or `the
+ *    plan authored it`. Raised mid-run (a rule fired by the diff re-score) it FAILS the run, and
+ *    the run's error text carries the rule.
+ */
+export type PlanRefusalToken =
+  | 'pool_raised'
+  | 'writes_nothing_on_code'
+  | 'security_review_on_non_code_plan'
+  | (string & {});
 
 export interface TeamPlanOverride {
   remove: string[];
@@ -8216,8 +8247,11 @@ export type TeamPlanAcceptedPayload = TeamEnvelope & {
 export type TeamPlanRefusedPayload = TeamEnvelope & {
   proposal_id: string;
   base_rev: number | null;
-  /** The engine's refusal reason, verbatim — e.g. `pool_raised` (crew#894, wicked-core#810: a plan
-   *  step raised a phase's `pool`; a step may only lower it). */
+  /** The engine's refusal reason, verbatim. A plan-rule refusal reads `<token>: <detail>` with a
+   *  {@link PlanRefusalToken} — e.g. `pool_raised` (crew#894, wicked-core#810: a plan step raised a
+   *  phase's `pool`; a step may only lower it), `security_review_on_non_code_plan` or
+   *  `writes_nothing_on_code` (crew#928); other reasons are plain text. A launch / preview /
+   *  `propose_plan` error message contains the same text behind a context prefix. */
   reason: string;
 };
 
