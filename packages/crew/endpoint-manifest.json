@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.100.1",
+  "apiTypesVersion": "0.101.0",
   "endpoints": [
     {
       "method": "GET",
@@ -865,6 +865,17 @@
       ]
     },
     {
+      "method": "GET",
+      "path": "/api/v1/projects/:id/coverage",
+      "requestType": null,
+      "responseType": "ProjectCoverageResponse",
+      "statusCodes": [
+        200,
+        404,
+        501
+      ]
+    },
+    {
       "method": "POST",
       "path": "/api/v1/projects/:id/demo",
       "requestType": "DemoLaunchBody",
@@ -875,6 +886,17 @@
         404,
         409,
         422,
+        501
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/projects/:id/domain",
+      "requestType": null,
+      "responseType": "ProjectDomainResponse",
+      "statusCodes": [
+        200,
+        404,
         501
       ]
     },
@@ -957,6 +979,18 @@
       "requestType": null,
       "responseType": null,
       "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/projects/:id/requirements",
+      "requestType": null,
+      "responseType": "ProjectRequirementsResponse",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        501
+      ]
     },
     {
       "method": "POST",
