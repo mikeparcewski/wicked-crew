@@ -50,15 +50,15 @@ type AggregateTotals = ProjectAggregateTotals;
 type DomainSummary = ProjectDomainSummary;
 
 /** The project's repos, in membership order: registered ones, and the refs whose record is gone. */
-type Member = { ref: string; repo: RepoEntry | null };
+export type Member = { ref: string; repo: RepoEntry | null };
 
-class AggregateHttpError extends Error {
+export class AggregateHttpError extends Error {
   constructor(readonly status: number, message: string) {
     super(message);
   }
 }
 
-async function membersOf(adapter: CoreAdapter, projectId: string): Promise<Member[]> {
+export async function membersOf(adapter: CoreAdapter, projectId: string): Promise<Member[]> {
   if (projectId === DEFAULT_PROJECT_ID) return []; // synthesized, never stored: it has no members
   let project;
   try {

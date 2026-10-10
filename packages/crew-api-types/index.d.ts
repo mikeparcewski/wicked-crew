@@ -9811,3 +9811,25 @@ export interface ProjectCoverageResponse {
   totals: ProjectAggregateTotals & { behavior_bearing: number; resolved: number; coverage: number | null };
   rows: ProjectCoverageRow[];
 }
+
+// ── Product compose (crew#372; POST /projects/:id/product/compose) ──────────────────────────────
+/**
+ * Draft epics → features → stories from selected requirements of the project (at most 40). The
+ * daemon re-reads each one from its repo's artifact (an unknown or foreign ref is a 400 naming it,
+ * nothing launched) and launches a governed run through `POST /runs`: a `produce` draft step, then
+ * a `review` evaluator with a human gate; `deliver: "none"`. The draft ends with one fenced JSON
+ * plan `{epics:[{title, features:[{title, requirementRefs:[{repoId,key}], stories:[{title,
+ * acceptance:[…]}]}]}]}`. `POST /runs`' own refusals are relayed with their status.
+ */
+export interface ProductComposeBody {
+  requirements: Array<{ repoId: string; key: string }>;
+  /** The operator's steer for the draft (≤ 500 chars). */
+  instructions?: string;
+}
+
+/** `POST /projects/:id/product/compose` 202. */
+export interface ProductComposeResponse {
+  runId: string;
+  /** How many requirements the draft was handed. */
+  requirements: number;
+}

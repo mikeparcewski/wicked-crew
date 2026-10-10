@@ -976,6 +976,20 @@
       "statusCodes": []
     },
     {
+      "method": "POST",
+      "path": "/api/v1/projects/:id/product/compose",
+      "requestType": "ProductComposeBody",
+      "responseType": "ProductComposeResponse",
+      "statusCodes": [
+        202,
+        400,
+        404,
+        409,
+        422,
+        501
+      ]
+    },
+    {
       "method": "GET",
       "path": "/api/v1/projects/:id/prompts",
       "requestType": null,
