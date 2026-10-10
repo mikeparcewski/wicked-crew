@@ -599,7 +599,7 @@ export const LaunchSchema = z.object({
    *  "full assurance", the same as omitting it: the launcher never chooses for the caller, and a
    *  full-assurance launch on a one-CLI roster is answered with `assuranceNotice` (`core/assurance.ts`). */
   reducedAssurance: z.boolean().optional(),
-  /** QE-IN-APP-WORKFLOWS (api-types 0.105.0) — the operator's EXPLICIT skip of a required QE
+  /** QE-IN-APP-WORKFLOWS (api-types 0.106.0) — the operator's EXPLICIT skip of a required QE
    *  acceptance, with a reason (labelled on the run, every gate and the delivery), or its explicit
    *  force (no score waiver). Forwarded only when sent; crew never decides either for the caller,
    *  and the engine refuses either on a run whose workflow does not require QE acceptance. */

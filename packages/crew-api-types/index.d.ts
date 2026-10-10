@@ -268,7 +268,7 @@ export interface HealthCapabilities {
    */
   reducedAssurance?: boolean;
   /**
-   * (api-types 0.105.0) `LaunchRunBody.skipQeAcceptance` / `forceQeAcceptance` are accepted (the
+   * (api-types 0.106.0) `LaunchRunBody.skipQeAcceptance` / `forceQeAcceptance` are accepted (the
    * installed addon carries the QE acceptance decision, wicked-core-ts >= 0.7.48), and receipts
    * carry `qe`. ABSENT on an older daemon — do not send the fields (its strict schema 400s on them).
    */
@@ -1978,17 +1978,17 @@ export type AssuranceSkipReason =
 export interface RunAssurance {
   mode: AssuranceMode;
   required: AssuranceRequirement[];
-  /** (api-types 0.105.0; wicked-core-ts >= 0.7.48) The run's QE acceptance decision, present
+  /** (api-types 0.106.0; wicked-core-ts >= 0.7.48) The run's QE acceptance decision, present
    *  exactly when `required` holds `qe_acceptance`. ABSENT on an older engine (then a required
    *  `qe_acceptance` is enforced). */
   qe?: QeAcceptanceDecision;
 }
 
-/** (api-types 0.105.0) `QeAcceptanceDecision.status`. */
+/** (api-types 0.106.0) `QeAcceptanceDecision.status`. */
 export type QeAcceptanceStatus = 'required' | 'waived' | 'skipped' | (string & {});
 
 /**
- * (api-types 0.105.0; wicked-core-ts >= 0.7.48; QE-IN-APP-WORKFLOWS) A run's QE acceptance
+ * (api-types 0.106.0; wicked-core-ts >= 0.7.48; QE-IN-APP-WORKFLOWS) A run's QE acceptance
  * decision, on `RunAssurance.qe` and every receipt. `basis: 'plan'` is the launch's provisional
  * `required` (a plan has no diff); `'operator'` is an explicit skip (with its reason) or force;
  * `'diff'` is the binding decision the run's QE unit made from the run's diff — `waived` only when
@@ -2034,7 +2034,7 @@ export interface AssuranceReceipt {
   judge: string | null;
   tree: string | null;
   attempt: number;
-  /** (api-types 0.105.0) The run's QE acceptance decision when the receipt was cut; ABSENT when the
+  /** (api-types 0.106.0) The run's QE acceptance decision when the receipt was cut; ABSENT when the
    *  run does not require QE acceptance (or on an older engine). A waived or skipped one is also a
    *  `skipped[]` entry (reason `qe_waived_by_score` | `qe_skipped_by_operator`). */
   qe?: QeAcceptanceDecision;
@@ -2046,7 +2046,7 @@ export interface AssuranceReceipt {
  * non-PASS verdict, no verdict, an unattributed verdict or an unreadable ledger refuses delivery.
  */
 export interface QeAcceptanceCheck {
-  /** (api-types 0.105.0) `required` — the ledger was read and `satisfied` is its PASS; `waived` —
+  /** (api-types 0.106.0) `required` — the ledger was read and `satisfied` is its PASS; `waived` —
    *  the run's score waived it (`reason` names the score); `skipped` — the operator skipped it at
    *  launch (`reason` names the reason). A waived or skipped check is `satisfied` with no verdict.
    *  ABSENT on an older daemon (read as `required`). */
@@ -2803,7 +2803,7 @@ export type RunBaseResolvedEvent = {
   runBranch?: string;
 };
 
-/** (api-types 0.105.0; wicked-core-ts >= 0.7.48) The run's QE acceptance decision changed at a
+/** (api-types 0.106.0; wicked-core-ts >= 0.7.48) The run's QE acceptance decision changed at a
  *  unit's dispatch: the run's QE unit scored the run's diff (`qe.basis: 'diff'`, `required` or
  *  `waived`), or a creator dispatched after a waiver revoked it. From this point the decision is on
  *  the session's contract (`AgentSession.assurance.qe`). `type` alias on purpose. */
@@ -4610,7 +4610,7 @@ export interface LaunchRunBody {
    */
   reducedAssurance?: boolean;
   /**
-   * (api-types 0.105.0; wicked-core QE-IN-APP-WORKFLOWS) SKIP a required QE acceptance, for this
+   * (api-types 0.106.0; wicked-core QE-IN-APP-WORKFLOWS) SKIP a required QE acceptance, for this
    * reason (non-empty, the operator's own words). Persisted on the contract
    * (`assurance.qe.status: 'skipped'`, `basis: 'operator'`) and labelled on the run, every gate and
    * the delivery ("QE acceptance skipped by operator: <reason>"). Omitted: a required QE acceptance
@@ -4619,7 +4619,7 @@ export interface LaunchRunBody {
    */
   skipQeAcceptance?: { reason: string };
   /**
-   * (api-types 0.105.0) REQUIRE QE acceptance whatever the run's impact score says (no waiver).
+   * (api-types 0.106.0) REQUIRE QE acceptance whatever the run's impact score says (no waiver).
    * `false` is the same as omitting it. 400 beside `skipQeAcceptance`.
    */
   forceQeAcceptance?: boolean;
