@@ -10,6 +10,26 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.9.1] — 2026-10-10
+
+Azure DevOps delivery, one credential preflight for GitHub and Azure DevOps, and a final-codebase zip for every delivery (operator ruling on #720). The engine pin moves to **`wicked-core-ts` `^0.7.47`**, whose state-home registry classifies the new `artifacts/` directory (wicked-core#857). This release bundles **wicked-studio 0.7.1**.
+
+- **Azure DevOps delivery (#927):** for a `dev.azure.com` / `*.visualstudio.com` / `ssh.dev.azure.com` origin, the deliver phase pushes the run branch and opens the pull request through the Azure DevOps REST API (`…/pullrequests?api-version=7.1`).
+  - Credentials come only from the daemon's environment: the service principal `CREW_ADO_TENANT_ID` / `CREW_ADO_CLIENT_ID` / `CREW_ADO_CLIENT_SECRET` (an Entra client-credentials token), else `AZURE_DEVOPS_EXT_PAT`.
+  - The header reaches git one-shot, scoped to the repository URL, with git's transport pinned to that URL's scheme. It is never written to disk, argv or the log, and error text is redacted.
+  - An existing active pull request for the branch pair is adopted. Revising an Azure DevOps pull request is not supported yet and is refused at launch.
+  - Tested against a mocked Azure DevOps REST API and a local git smart-HTTP server; there is no live Azure DevOps proof.
+- **One credential preflight for both providers (#927):** a missing credential is named on the deliver gate card before approval and on `GET /repos/:id/deliver-target`:
+  - Azure DevOps: the variables above.
+  - GitHub: gh absent or not signed in to github.com, with no `GH_TOKEN`.
+
+  The deliver phase refuses before anything is staged, and the run waits at the deliver gate with its work kept. The run record carries `deliver_credentials`.
+- **Final-codebase zip, every delivery (#927):** whatever the outcome, the run's final tree is archived with `git archive` (tracked and shippable files only: no `.git`, gitignored files or untracked `.env*`).
+  - Outcomes covered: delivered, push refused, credentials missing, wrong account, lift conflict, or a run that failed after building.
+  - Served at `GET /api/v1/runs/:id/artifacts/codebase.zip` with its sha256, and recorded as `AgentSession.codebase_archive` and in the post-hoc `DeliverRunResult.codebase`.
+- **api-types 0.105.0:** `RunInventoryResponse` + `InventoryClaim` for `GET /runs/:id/inventory` (#721, #926). Already published in 0.104.0: `DeliverCredentials`, `CodebaseArchive`, `AgentSession.codebase_archive` / `deliver_credentials`, `DeliverRunResult.codebase`, `DeliverTargetResponse.credentials` / `adoRepo`.
+- **deps:** wicked-bus ^2.5.0 (unacked backlog capped at 30 days and archived, bus#101; #929).
+
 ## [0.9.0] — 2026-10-10
 
 This is a **minor** release because default behaviour changes. The engine pin moves to **`wicked-core-ts` `^0.7.46`**, which carries the assurance engine (wicked-core#852, the design in wicked-core#850):
@@ -3766,7 +3786,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.10...v0.9.0
 [0.8.10]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.9...v0.8.10
 [0.8.9]: https://github.com/mikeparcewski/wicked-crew/compare/v0.8.8...v0.8.9
