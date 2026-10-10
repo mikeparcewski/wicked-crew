@@ -58,7 +58,7 @@ function hasFlag(args: string[], name: string): boolean {
 }
 
 /** The `start` options that take a value — the token after one is that value, never a flag. */
-const START_VALUE_FLAGS: ReadonlySet<string> = new Set(['--problem', '--human-confirm', '--workflow', '--repo', '--session', '--db', '--port']);
+const START_VALUE_FLAGS: ReadonlySet<string> = new Set(['--problem', '--human-confirm', '--workflow', '--repo', '--session', '--db', '--port', '--skip-qe-acceptance']);
 
 /** `name` present AS AN OPTION: never the value of a preceding value-taking option, so
  *  `--problem --reduced-assurance` is a problem text, not an opt-in (codex r2 on crew#923). */
@@ -68,6 +68,20 @@ function optionPresent(args: string[], name: string, valueFlags: ReadonlySet<str
     if (valueFlags.has(args[i]!)) i++; // the next token is this option's value (codex r3)
   }
   return false;
+}
+
+/** The value of option `name`, read AS AN OPTION (never the value of a preceding value-taking
+ *  option): `undefined` when absent, `null` when present without a value (end of argv, or a token
+ *  that is itself an option). */
+function optionValue(args: string[], name: string, valueFlags: ReadonlySet<string>): string | null | undefined {
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === name) {
+      const v = args[i + 1];
+      return v === undefined || v.startsWith('--') ? null : v;
+    }
+    if (valueFlags.has(args[i]!)) i++;
+  }
+  return undefined;
 }
 
 /** `true` when an env var is set to a falsy string: "", "0", "false", "no", "off" (case-insensitive, trimmed).
@@ -664,6 +678,21 @@ async function main(): Promise<void> {
     // wicked-core#850: the EXPLICIT reduced-assurance opt-in (the creator's seat may evaluate its own
     // work, disclosed on every receipt). Only the flag sends it; nothing defaults it on.
     if (optionPresent(argv, '--reduced-assurance', START_VALUE_FLAGS)) launchBody['reducedAssurance'] = true;
+    // QE-IN-APP-WORKFLOWS: the operator's EXPLICIT skip of a required QE acceptance (with a reason,
+    // labelled on the run, every gate and the delivery), or its explicit force. Only the flags send
+    // them; a skip without a reason is refused here, before anything launches.
+    const skipQe = optionValue(argv, '--skip-qe-acceptance', START_VALUE_FLAGS);
+    const forceQe = optionPresent(argv, '--force-qe-acceptance', START_VALUE_FLAGS);
+    if (skipQe === null || (typeof skipQe === 'string' && skipQe.trim() === '')) {
+      console.error('--skip-qe-acceptance requires a reason: wicked-crew start --skip-qe-acceptance "<reason>"');
+      process.exit(1);
+    }
+    if (skipQe !== undefined && forceQe) {
+      console.error('--skip-qe-acceptance and --force-qe-acceptance are mutually exclusive');
+      process.exit(1);
+    }
+    if (skipQe !== undefined) launchBody['skipQeAcceptance'] = { reason: skipQe };
+    if (forceQe) launchBody['forceQeAcceptance'] = true;
     const launchRes = await daemonFetch(port, `http://127.0.0.1:${port}/api/v1/runs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

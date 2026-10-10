@@ -10,7 +10,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, GovernanceReplayUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, addonSupportsReducedAssurance, humanGatePhaseIds, settingsFilePath } from '../core/adapter.js';
+import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, GovernanceReplayUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, addonSupportsQeOverride, addonSupportsReducedAssurance, humanGatePhaseIds, settingsFilePath } from '../core/adapter.js';
 import { codeGraphDb, codeGraphErrorStatus, requirementsGraph } from '../core/repoPaths.js';
 import type {
   ConformanceRule,
@@ -132,7 +132,8 @@ import {
   qeAcceptanceFromView,
   qeAcceptanceRefusal,
   receiptOf,
-  requiresQeAcceptance,
+  qeAcceptanceNotRequired,
+  qeDecisionOf,
   unreadableQeAcceptance,
 } from './delivery-assurance.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
@@ -598,7 +599,16 @@ export const LaunchSchema = z.object({
    *  "full assurance", the same as omitting it: the launcher never chooses for the caller, and a
    *  full-assurance launch on a one-CLI roster is answered with `assuranceNotice` (`core/assurance.ts`). */
   reducedAssurance: z.boolean().optional(),
-}).strict().refine((b) => b.plan === undefined || b.workflow === undefined, {
+  /** QE-IN-APP-WORKFLOWS (api-types 0.105.0) — the operator's EXPLICIT skip of a required QE
+   *  acceptance, with a reason (labelled on the run, every gate and the delivery), or its explicit
+   *  force (no score waiver). Forwarded only when sent; crew never decides either for the caller,
+   *  and the engine refuses either on a run whose workflow does not require QE acceptance. */
+  skipQeAcceptance: z.object({ reason: z.string().trim().min(1).max(2000) }).strict().optional(),
+  forceQeAcceptance: z.boolean().optional(),
+}).strict().refine((b) => b.skipQeAcceptance === undefined || b.forceQeAcceptance !== true, {
+  message: 'skipQeAcceptance and forceQeAcceptance are mutually exclusive — skip it with a reason, or force it',
+  path: ['forceQeAcceptance'],
+}).refine((b) => b.plan === undefined || b.workflow === undefined, {
   message: 'plan and workflow are mutually exclusive — a launch carries a plan or names a preset, not both',
   path: ['plan'],
 }).refine((b) => b.plan !== undefined || b.deliver !== 'pr' || b.workflow !== undefined, {
@@ -1541,6 +1551,9 @@ export function registerRoutes(
       // assurance contract); a one-CLI full-assurance launch answers `assuranceNotice`. A route set
       // that cannot probe the addon reports no capability — never an invented one.
       reducedAssurance: typeof adapter.engineCapabilities === 'function' && addonSupportsReducedAssurance(),
+      // QE-IN-APP-WORKFLOWS: `LaunchRunBody.skipQeAcceptance` / `forceQeAcceptance` reach an addon
+      // that carries the QE decision; never an invented capability.
+      qeAcceptanceOverride: typeof adapter.engineCapabilities === 'function' && addonSupportsQeOverride(),
     };
     // wicked-core#411 / crew#497: the state-home blocker rides the health probe as a WARNING. The
     // daemon still SERVES (status stays ok — studio must load and show the blocker) but refuses to
@@ -2276,12 +2289,14 @@ export function registerRoutes(
     if (b.deliverGate === 'auto') {
       // wicked-core#850 EX-03: a workflow that requires QE acceptance delivers only through the deliver
       // gate, where crew checks the verdict. Unattended delivery would push before anyone could.
+      // QE-IN-APP-WORKFLOWS: an explicit operator skip leaves no verdict to check, so it may.
       const required = b.workflow !== undefined ? adapter.getWorkflow(b.workflow)?.required_instruments : undefined;
-      if (required?.includes(QE_ACCEPTANCE) === true) {
+      if (required?.includes(QE_ACCEPTANCE) === true && b.skipQeAcceptance === undefined) {
         return reply.code(400).send({
           error:
             `workflow ${b.workflow} requires QE acceptance (required_instruments: qe_acceptance), so it delivers only ` +
-            'through the deliver gate, where the verdict is checked — deliverGate: "auto" cannot apply to it',
+            'through the deliver gate, where the verdict is checked — deliverGate: "auto" cannot apply to it ' +
+            '(unless the launch explicitly skips QE acceptance with a reason: skipQeAcceptance)',
         });
       }
       input.autoDeliver = true;
@@ -2351,6 +2366,10 @@ export function registerRoutes(
     // wicked-core#850 EX-01/EX-02: forwarded only when the caller sent it — crew never waives
     // assurance on anyone's behalf (a one-CLI launch that did not is TOLD so in its answer, below).
     if (b.reducedAssurance === true) input.reducedAssurance = true;
+    // QE-IN-APP-WORKFLOWS: the operator's explicit skip (with its reason) or force — forwarded only
+    // when sent, never inferred.
+    if (b.skipQeAcceptance !== undefined) input.skipQeAcceptanceReason = b.skipQeAcceptance.reason;
+    if (b.forceQeAcceptance === true) input.forceQeAcceptance = true;
     // DES-L9 / crew#550 — REVISION: `revisesPr` names an OPEN same-repository pull request whose
     // head branch becomes the run's base (`baseRef`, crew-internal → the engine's
     // `LaunchSpec.base_ref`) and the push target of the composed deliver phase — the PR gains
@@ -2470,6 +2489,9 @@ export function registerRoutes(
         // wicked-core#850: the caller's explicit assurance choice (the engine persists the contract
         // on the session; this records WHO waived it).
         ...(b.reducedAssurance !== undefined ? { reducedAssurance: b.reducedAssurance } : {}),
+        // QE-IN-APP-WORKFLOWS: WHO skipped or forced QE acceptance, and why.
+        ...(b.skipQeAcceptance !== undefined ? { skipQeAcceptance: b.skipQeAcceptance } : {}),
+        ...(b.forceQeAcceptance === true ? { forceQeAcceptance: true } : {}),
         // CREW-UX-3: the trail is the durable record of lineage — the retry index (and a
         // restarted daemon's hydrate) reads it back from exactly this entry.
         ...(b.retryOf !== undefined ? { retryOf: b.retryOf } : {}),
@@ -4056,9 +4078,13 @@ export function registerRoutes(
   }
 
   /** EX-03: the run's QE acceptance check when its contract requires `qe_acceptance`; `null` when it
-   *  does not. A read that fails is a refusal naming why, never a pass. */
+   *  does not. A read that fails is a refusal naming why, never a pass. QE-IN-APP-WORKFLOWS: a
+   *  decision the score WAIVED or the operator SKIPPED is satisfied without a ledger read and says
+   *  which, in the decision's words; only `required` reads the ledger. */
   async function qeAcceptanceCheckFor(run: SessionView): Promise<QeAcceptanceCheck | null> {
-    if (!requiresQeAcceptance(run)) return null;
+    const decision = qeDecisionOf(run);
+    if (decision === null) return null;
+    if (decision.status !== 'required') return qeAcceptanceNotRequired(decision);
     try {
       return qeAcceptanceFromView(await acceptanceViewOf(run, { forceDeclared: true }));
     } catch (err) {

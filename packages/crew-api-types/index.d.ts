@@ -267,6 +267,12 @@ export interface HealthCapabilities {
    * receipts. ABSENT on an older daemon — do not send the field (its strict schema 400s on it).
    */
   reducedAssurance?: boolean;
+  /**
+   * (api-types 0.105.0) `LaunchRunBody.skipQeAcceptance` / `forceQeAcceptance` are accepted (the
+   * installed addon carries the QE acceptance decision, wicked-core-ts >= 0.7.48), and receipts
+   * carry `qe`. ABSENT on an older daemon — do not send the fields (its strict schema 400s on them).
+   */
+  qeAcceptanceOverride?: boolean;
 }
 
 /** One `GET /health.warnings[]` entry (additive; wicked-core#411 / wicked-crew#497). */
@@ -1972,6 +1978,33 @@ export type AssuranceSkipReason =
 export interface RunAssurance {
   mode: AssuranceMode;
   required: AssuranceRequirement[];
+  /** (api-types 0.105.0; wicked-core-ts >= 0.7.48) The run's QE acceptance decision, present
+   *  exactly when `required` holds `qe_acceptance`. ABSENT on an older engine (then a required
+   *  `qe_acceptance` is enforced). */
+  qe?: QeAcceptanceDecision;
+}
+
+/** (api-types 0.105.0) `QeAcceptanceDecision.status`. */
+export type QeAcceptanceStatus = 'required' | 'waived' | 'skipped' | (string & {});
+
+/**
+ * (api-types 0.105.0; wicked-core-ts >= 0.7.48; QE-IN-APP-WORKFLOWS) A run's QE acceptance
+ * decision, on `RunAssurance.qe` and every receipt. `basis: 'plan'` is the launch's provisional
+ * `required` (a plan has no diff); `'operator'` is an explicit skip (with its reason) or force;
+ * `'diff'` is the binding decision the run's QE unit made from the run's diff — `waived` only when
+ * every scoring dimension is in its lowest band (`score <= threshold`, no complexity or novelty).
+ * A creator after a waiver revokes it. `reason` is what a plan, gate or delivery shows.
+ */
+export interface QeAcceptanceDecision {
+  status: QeAcceptanceStatus;
+  basis: 'plan' | 'operator' | 'diff' | (string & {});
+  score: number | null;
+  threshold: number;
+  reason: string;
+  /** The score's own lines, one per term, when it was scored. */
+  reasons: string[];
+  ord: number | null;
+  tree: string | null;
 }
 
 /** One instrument a receipt did NOT run, and why. */
@@ -2001,6 +2034,10 @@ export interface AssuranceReceipt {
   judge: string | null;
   tree: string | null;
   attempt: number;
+  /** (api-types 0.105.0) The run's QE acceptance decision when the receipt was cut; ABSENT when the
+   *  run does not require QE acceptance (or on an older engine). A waived or skipped one is also a
+   *  `skipped[]` entry (reason `qe_waived_by_score` | `qe_skipped_by_operator`). */
+  qe?: QeAcceptanceDecision;
 }
 
 /**
@@ -2009,6 +2046,11 @@ export interface AssuranceReceipt {
  * non-PASS verdict, no verdict, an unattributed verdict or an unreadable ledger refuses delivery.
  */
 export interface QeAcceptanceCheck {
+  /** (api-types 0.105.0) `required` — the ledger was read and `satisfied` is its PASS; `waived` —
+   *  the run's score waived it (`reason` names the score); `skipped` — the operator skipped it at
+   *  launch (`reason` names the reason). A waived or skipped check is `satisfied` with no verdict.
+   *  ABSENT on an older daemon (read as `required`). */
+  status?: QeAcceptanceStatus;
   satisfied: boolean;
   /** The gate's own words (`GET /runs/:id/acceptance` → `gate.reason`). */
   reason: string;
@@ -2759,6 +2801,17 @@ export type RunBaseResolvedEvent = {
    *  so the run's diff is servable from the branch once the worktree is reaped. Absent on an
    *  engine predating wave 6. */
   runBranch?: string;
+};
+
+/** (api-types 0.105.0; wicked-core-ts >= 0.7.48) The run's QE acceptance decision changed at a
+ *  unit's dispatch: the run's QE unit scored the run's diff (`qe.basis: 'diff'`, `required` or
+ *  `waived`), or a creator dispatched after a waiver revoked it. From this point the decision is on
+ *  the session's contract (`AgentSession.assurance.qe`). `type` alias on purpose. */
+export type QeAcceptanceDecidedEvent = {
+  type: 'qeAcceptanceDecided';
+  session: string;
+  ord: number;
+  qe: QeAcceptanceDecision;
 };
 
 /** The gate-evidence events (wicked-core F-036/F-039, extended by wicked-core#431 — api-types 0.33.0
@@ -4556,6 +4609,20 @@ export interface LaunchRunBody {
    * operator before sending `true`; send it only when `GET /health.capabilities.reducedAssurance === true`.
    */
   reducedAssurance?: boolean;
+  /**
+   * (api-types 0.105.0; wicked-core QE-IN-APP-WORKFLOWS) SKIP a required QE acceptance, for this
+   * reason (non-empty, the operator's own words). Persisted on the contract
+   * (`assurance.qe.status: 'skipped'`, `basis: 'operator'`) and labelled on the run, every gate and
+   * the delivery ("QE acceptance skipped by operator: <reason>"). Omitted: a required QE acceptance
+   * is never skipped. 400 beside `forceQeAcceptance`; the engine refuses it on a run whose workflow
+   * does not require QE acceptance. Send only when `GET /health.capabilities.qeAcceptanceOverride`.
+   */
+  skipQeAcceptance?: { reason: string };
+  /**
+   * (api-types 0.105.0) REQUIRE QE acceptance whatever the run's impact score says (no waiver).
+   * `false` is the same as omitting it. 400 beside `skipQeAcceptance`.
+   */
+  forceQeAcceptance?: boolean;
 }
 
 /** `POST /linked-issues/preview` (crew#825): what a workflow launch of `problem` WOULD append. */

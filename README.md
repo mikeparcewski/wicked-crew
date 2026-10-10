@@ -90,6 +90,18 @@ answer says so (`assuranceNotice`). To proceed with one CLI, opt in explicitly:
 `"reducedAssurance": true` on `POST /runs`, or `wicked-crew start --reduced-assurance`. The creator's
 seat then evaluates its own work, and every receipt says `reduced`. crew never turns it on for you.
 
+**QE acceptance.** A run that makes application changes (`feature`, `bug`, `migration`,
+`mcp-server`) requires real functional QE acceptance: garden's three-agent `wicked-garden-qe accept`
+pipeline, whose verdict lands in the QE ledger stamped with the run. Delivery is refused (`409
+qe_acceptance_required`) unless the ledger holds a PASS attributed to the run. The engine decides at
+the run's QE phase, from the run's actual diff, whether it is `required` or `waived`. A waiver needs
+the impact score in its lowest band on every dimension (reach, complexity, novelty). The decision,
+with its reason, is on the run, every gate receipt and the delivery. To skip it, say so with a
+reason: `"skipQeAcceptance": {"reason": "…"}` on `POST /runs`, or
+`wicked-crew start --skip-qe-acceptance "<reason>"`. It is labelled "QE acceptance skipped by
+operator: <reason>" everywhere. To require it even when the score would waive it, send
+`"forceQeAcceptance": true` (`--force-qe-acceptance`). crew never sends either for you.
+
 ### Start on login
 
 A daemon started by hand dies with the machine. Register it as a per-user login service instead:
