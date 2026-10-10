@@ -105,7 +105,7 @@ describe('registeredSkillRefs', () => {
     ]);
   });
 
-  it('ALWAYS: the vendored core-workflow skill_refs fixture is at the pinned wicked-core-ts version, sorted, and every ref it names is registered in BUILTIN_WORKFLOWS (codex round 6 — no sibling checkout needed)', () => {
+  it('ALWAYS: the vendored core-workflow skill_refs fixture is at the pinned wicked-core-ts version, sorted, and every ref it names is one the ENGINE\'s built-in presets hold — the set production reads (codex round 6; X-MIG M11, codex r1 on crew A)', async () => {
     const fixture = readFixture();
     const pinned = pinnedCoreTs();
     expect(pinned).toMatch(/^\d+\.\d+\.\d+/);
@@ -115,9 +115,19 @@ describe('registeredSkillRefs', () => {
     ).toBe(pinned);
     expect(fixture.refs.length).toBeGreaterThan(0);
     expect(fixture.refs).toEqual([...new Set(fixture.refs)].sort()); // sorted and unique, so a regeneration diff is reviewable
-    const crewRefs = registeredSkillRefs(BUILTIN_WORKFLOWS);
-    for (const ref of fixture.refs) {
-      expect(crewRefs.has(ref), `wicked-core ${pinned} names ${ref} as a skill_ref but crew's BUILTIN_WORKFLOWS do not — the core closure would miss it`).toBe(true);
+    // Production's built-in refs come from the engine (`builtinPresetSkillRefs` over the installed
+    // core-ts), not from a crew mirror — so that is what the fixture is checked against.
+    const { CoreAdapter } = await import('../src/core/adapter.js');
+    const { mkdtempSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const a = new CoreAdapter({ dbPath: join(mkdtempSync(join(tmpdir(), 'crew-m11-refs-')), 'core.db'), stub: true });
+    try {
+      const engineRefs = await builtinPresetSkillRefs(a, () => {});
+      for (const ref of fixture.refs) {
+        expect(engineRefs.has(ref), `wicked-core ${pinned} names ${ref} as a skill_ref but its built-in presets do not — the core closure would miss it`).toBe(true);
+      }
+    } finally {
+      a.close();
     }
   });
 

@@ -60,12 +60,13 @@ export function isSystemWorkflow(name: string | null | undefined): boolean {
 const CAMPAIGN_NODE_PREFIX = 'campaign-';
 
 /**
- * A def with its `is_system` flag set from {@link SYSTEM_WORKFLOWS} — the ONE source of the flag.
+ * A def with its `is_system` flag set from {@link isSystemWorkflow} — the ONE source of the flag.
  * Returns the same object when it already agrees (a registered def's own `is_system` is not a
  * second source: it is overwritten either way).
  */
 export function withSystemFlag<T extends WorkflowDef>(def: T): T {
-  const system = SYSTEM_WORKFLOWS.has(def.id);
+  // The one rule for defs, presets and runs alike ({@link isSystemWorkflow}, codex r1 on crew A).
+  const system = isSystemWorkflow(def.id);
   if (system) return def.is_system === true ? def : { ...def, is_system: true };
   if (!('is_system' in def)) return def;
   const rest = { ...def };

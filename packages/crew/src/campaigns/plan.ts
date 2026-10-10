@@ -27,6 +27,7 @@
  * error says it: persist the content as a file and pass its path.
  */
 
+import { createHash } from 'node:crypto';
 import type {
   CampaignDef,
   CampaignEdge,
@@ -48,7 +49,7 @@ export const MAX_INLINE_BYTES = 1022;
 
 /** id rule for campaigns and scenarios: overlay-file-safe, run-id-safe (no `:` — the engine
  *  keys node run ids `{campaign}:{node}:a{attempt}`), and short enough that the composed
- *  workflow id (`campaign-<campaign>-<scenario>`) stays under core's 128-char id cap. */
+ *  workflow id (`campaign-<campaign>-<scenario>`) is bounded ({@link scenarioWorkflowId}). */
 const SAFE_ID = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
 const MAX_CAMPAIGN_ID = 64;
 const MAX_SCENARIO_ID = 48;
@@ -58,9 +59,20 @@ const MAX_SCENARIO_ID = 48;
  *  `resumeCampaign` can re-dispatch pending nodes by workflow id. */
 export const CAMPAIGN_WORKFLOW_PREFIX = 'campaign-';
 
-/** The composed workflow id for one deterministic scenario node. */
+/** The engine's preset-name cap (wicked-core `preset::validate_name`): a node's preset is named by it. */
+export const MAX_PRESET_NAME = 64;
+
+/**
+ * The composed workflow id for one deterministic scenario node: `campaign-<campaign>-<scenario>`, or
+ * when that would pass the engine's 64-char preset-name cap (X-MIG M11 arms node workflows as
+ * presets; codex r1 on crew A), `campaign-<16 hex of sha256(campaign NUL scenario)>`. Deterministic,
+ * and never equal to a composed name (that one always holds a `-` after the prefix; hex has none).
+ */
 export function scenarioWorkflowId(campaignId: string, scenarioId: string): string {
-  return `${CAMPAIGN_WORKFLOW_PREFIX}${campaignId}-${scenarioId}`;
+  const composed = `${CAMPAIGN_WORKFLOW_PREFIX}${campaignId}-${scenarioId}`;
+  if (composed.length <= MAX_PRESET_NAME) return composed;
+  const digest = createHash('sha256').update(`${campaignId}\u0000${scenarioId}`).digest('hex').slice(0, 16);
+  return `${CAMPAIGN_WORKFLOW_PREFIX}${digest}`;
 }
 
 /** A built campaign: the engine def plus the per-node Tool workflows the adapter must arm
