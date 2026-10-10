@@ -10,6 +10,18 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.9.4] — 2026-10-10
+
+Run reads no longer stall the daemon on a long-lived home, and a diff over a worktree that vanished while git ran serves the run branch. The engine pin moves to **`wicked-core-ts` `^0.8.3`**. This release still bundles **wicked-studio 0.7.3** (no studio release since) and ships no new `wicked-crew-api-types` (0.107.0 stands).
+
+- **Run reads (#950, crew#944, with wicked-core#869 in core-ts 0.8.3):**
+  - Concurrent run reads share the engine's sessions-detail fold (at most one running, one queued), so `/health` keeps answering while run reads are in flight.
+  - The engine folds the work units once instead of once per session: on a 120-run home `GET /runs/:id` drops from ~0.8 s to ~22 ms, and `/health` with 20 reads in flight from ~15 s to ~15 ms.
+  - A run-read latency regression test runs against a generated long-lived home.
+- **Fixed (#949):** `GET /runs/:id/diff` serves the run branch when the worktree is removed while git is running in it, instead of answering 500 "Unable to read current working directory" (crew 0.9.3 release smoke, S04 macOS). A named `?base=` error stays the caller's 400.
+- **Release smoke (#949):** pinned to wicked-ci #45 (S04 sends an explicit, reasoned QE skip and asserts the labelled skip).
+- **deps:** `wicked-core-ts` `^0.8.3` (0.8.2 adds the built-in `bug` and `mcp-server` presets, wicked-core#864/#866; 0.8.3 carries wicked-core#869 and the wicked-estate 0.26.0 crates, wicked-core#873); `wicked-studio` stays `^0.7.3`.
+
 ## [0.9.3] — 2026-10-10
 
 QE acceptance on the workflows that change the application, built-in interactive presets, the GitHub push identity pinned per command, and the Azure DevOps follow-ups. The engine pin moves to **`wicked-core-ts` `^0.8.1`**. This release bundles **wicked-studio 0.7.3** and ships **`wicked-crew-api-types` 0.107.0**.
@@ -3831,7 +3843,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.3...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.4...HEAD
+[0.9.4]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.0...v0.9.1
