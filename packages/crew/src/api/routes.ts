@@ -2677,7 +2677,12 @@ export function registerRoutes(
           unreadUnits.push(u.id);
           continue;
         }
-        if (text === null) continue;
+        if (text === null) {
+          // No output from a unit that has not run is expected; from one that finished, the
+          // transcript is missing and may have held the claim (codex r3).
+          if (u.status === 'done' || u.status === 'rejected') unreadUnits.push(u.id);
+          continue;
+        }
         const claims = parseInventoryClaims(text);
         if (claims.length > 0) units.push({ ord: u.ord, unitId: u.id, claims });
       }

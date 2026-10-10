@@ -91,6 +91,17 @@ describe('GET /runs/:id/inventory', () => {
     expect(body).toMatchObject({ complete: false, unreadUnits: ['r4:prs'] });
   });
 
+  it('a finished unit with no stored transcript also blocks complete; a unit that has not run does not (codex r3)', async () => {
+    views = [run('r5', ['issues', 'prs'])];
+    outputs['r5:issues'] = block({ source: 'gh issue list', answered: 'full', listed: 5, expected: 5, unread: [] });
+    expect((await get('r5')).body).toMatchObject({ complete: false, unreadUnits: ['r5:prs'] });
+    const pending = run('r6', ['issues', 'prs']);
+    (pending.units[1] as { status: string }).status = 'pending';
+    views = [pending];
+    outputs['r6:issues'] = outputs['r5:issues']!;
+    expect((await get('r6')).body).toMatchObject({ complete: true, unreadUnits: [] });
+  });
+
   it('a run that claims nothing is not complete, and an unknown run is a 404', async () => {
     views = [run('r3', ['explore'])];
     outputs['r3:explore'] = 'no inventory';
