@@ -263,13 +263,18 @@ describe.skipIf(!ENGINE_HAS_PLANS)('run identity through the real engine', () =>
     return planned(runId);
   }
 
+  /** Launch the preset `name`. A name the engine seeds as a built-in (DES-TEAMING-002 M-seams:
+   *  `feature`, `migration`, and each consumer as its seam lands) launches the built-in: a global
+   *  save under a built-in's name is refused (`preset_builtin_readonly`). Any other name is saved
+   *  with `steps` first. */
   async function launchPreset(name: string, steps: PresetStep[] = TWO_STEPS): Promise<SessionView> {
-    if (name !== 'feature') await adapter.putPreset(name, steps);
+    const builtin = (await adapter.listPresets()).find((p) => p.name === name && p.created_by === 'builtin');
+    if (builtin === undefined) await adapter.putPreset(name, steps);
     const v = await launch({ workflow: name });
     // A preset declares no `touch`: its PA scoped it first, so `pa-scope` is unit 1 (X1).
     expect(v.units[0]?.id).toBe(`${v.session.id}:pa-scope`);
     // The floor added steps the preset never declared, so the unit sequence matches no def.
-    expect(v.units.length).toBeGreaterThan(1 + (name === 'feature' ? 6 : steps.length));
+    expect(v.units.length).toBeGreaterThan(1 + (builtin?.steps.length ?? steps.length));
     return v;
   }
 
