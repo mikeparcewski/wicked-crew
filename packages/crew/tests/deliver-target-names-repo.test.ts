@@ -148,12 +148,15 @@ describe('GET /repos/:id/deliver-target — the launch reads the gate\'s own pre
   it('a GITHUB origin: names owner/repo; the credential in the URL never reaches the wire', async () => {
     const res = await app.inject({ method: 'GET', url: '/api/v1/repos/r-gh/deliver-target' });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({
+    expect(res.json()).toMatchObject({
       repo: 'r-gh',
       origin: 'github',
       githubRepo: SLUG,
       sentence: `Pushes the run branch to ${SLUG} on GitHub and opens a pull request there; merge stays human.`,
+      adoRepo: null,
     });
+    // crew#720: the GitHub credential preflight rides along (its status is this host's gh state).
+    expect((res.json() as { credentials: { provider: string; status: string } }).credentials).toMatchObject({ provider: 'github' });
     expect(res.body).not.toMatch(/FAKE-TOKEN|x-access-token/);
   });
 

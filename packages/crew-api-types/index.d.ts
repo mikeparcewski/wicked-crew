@@ -323,6 +323,19 @@ export interface AgentSession {
    */
   delivery_assurance?: DeliveryAssurance;
   /**
+   * (crew#720) The zip of the run's FINAL codebase, taken for every delivery whatever its outcome
+   * (delivered, push refused, credentials missing, wrong account, lift conflict, a run that failed
+   * after building, a cancel): `GET codebase_archive.url` downloads it. ABSENT when the run had no
+   * repository, no archive has been taken yet, or the daemon predates the field.
+   */
+  codebase_archive?: CodebaseArchive;
+  /**
+   * (crew#720) Present when the run's deliver phase REFUSED for want of the provider credential
+   * (`status: 'missing'`): the run waits at the deliver gate with its work kept, and `message` /
+   * `missing` say what to set before approving the retry. ABSENT otherwise.
+   */
+  deliver_credentials?: DeliverCredentials;
+  /**
    * The project this run is filed into (DES-UX-001 §8.2, CREW-UX-2; api-types 0.8.0) —
    * populated by the crew server from the membership record at DTO assembly on BOTH
    * `GET /runs` and `GET /runs/:id`, so clients no longer re-derive the run→project join.
@@ -4634,8 +4647,51 @@ export interface SetGuidanceResult {
  * — the body's `error` carries the script's own words, e.g. the rebase-conflict message), 500
  * (the script produced no verifiable PR URL, or could not be spawned).
  */
+/**
+ * (crew#720) The deliver phase's provider credential preflight — ONE shape for GitHub and Azure
+ * DevOps. Presence only: no value is ever read into a crew record.
+ *  - GitHub: `GH_TOKEN` exported (`source: 'gh_token'`), else a gh login for github.com
+ *    (`'gh_login'`); gh absent or signed out is `missing` (`missing: ['gh auth login', 'GH_TOKEN']`).
+ *  - Azure DevOps: the service principal `CREW_ADO_TENANT_ID` + `CREW_ADO_CLIENT_ID` +
+ *    `CREW_ADO_CLIENT_SECRET` (`'service_principal'`), else `AZURE_DEVOPS_EXT_PAT` (`'pat'`).
+ * `unknown` = the probe could not answer (gh timed out) — never read it as missing.
+ */
+export interface DeliverCredentials {
+  provider: 'github' | 'azure_devops';
+  status: 'configured' | 'missing' | 'unknown';
+  source: 'gh_token' | 'gh_login' | 'service_principal' | 'pat' | null;
+  /** What to set when `missing` (env var names, commands), in the order the phase tries them. */
+  missing: string[];
+  /** One sentence, for the gate card and the run record. */
+  message: string;
+}
+
+/** (crew#720) A run's final-codebase zip (`AgentSession.codebase_archive`). */
+export interface CodebaseArchive {
+  /** Daemon-relative: `/api/v1/runs/<id>/artifacts/codebase.zip` (also answers `X-Content-SHA256`). */
+  url: string;
+  /** Hex sha256 of the zip's bytes. */
+  sha256: string;
+  bytes: number;
+  /** The git tree the zip was written from (`git archive --format=zip <tree>`): HEAD plus the
+   *  worktree's tracked changes plus the untracked files the deliver phase ships — never `.git`,
+   *  gitignored files, or untracked `.env*` / key material. */
+  tree: string;
+  /** The commit the tree was taken on; `null` on an unborn branch. */
+  commit: string | null;
+  /** Unix millis. */
+  created_at: number;
+  /** `deliver`: the deliver phase's output landed (or a post-hoc deliver ran); `run_end`: the run ended. */
+  trigger: 'deliver' | 'run_end';
+  /** `worktree`: read from the live run worktree; `branch`: from the retained `wicked/<run>` branch. */
+  source: 'worktree' | 'branch';
+}
+
 export interface DeliverRunResult {
   prUrl: string;
+  /** (crew#720) The final-codebase zip taken for this delivery (also on `AgentSession.codebase_archive`).
+   *  ABSENT when no archive could be taken, and on an idempotent replay. */
+  codebase?: CodebaseArchive;
   /** (crew ≥ 0.9.0, EX-04) Always `verified: false, via: 'post_hoc'` here: nothing re-verified the
    *  delivered tree. ABSENT on an idempotent replay of a delivery recorded before crew 0.9.0. */
   assurance?: DeliveryAssurance;
@@ -4933,6 +4989,12 @@ export interface DeliverTargetResponse {
   origin: 'github' | 'local' | 'other' | 'none' | 'unknown';
   githubRepo: string | null;
   sentence: string;
+  /** (crew#720) Where the pull request opens when the origin is Azure DevOps: `org/project/repo`;
+   *  `null` otherwise. ABSENT on an older daemon. */
+  adoRepo?: string | null;
+  /** (crew#720) The provider credential preflight for this origin — `missing` says what to set
+   *  BEFORE launching. `null` when no provider applies (a local or other origin); ABSENT on an older daemon. */
+  credentials?: DeliverCredentials | null;
 }
 
 /**

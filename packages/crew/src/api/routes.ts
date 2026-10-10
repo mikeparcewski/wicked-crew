@@ -158,6 +158,8 @@ import {
   unverifiedTreesFrom,
   type PullRequestResolution,
 } from '../core/deliver.js';
+import { credentialsMissingIn, deliverCredentialsProbe, missingCredentials } from '../core/deliver-credentials.js';
+import { codebaseArchiveUrl, type CodebaseArchive, type CodebaseArchiveStore } from './codebase-archive.js';
 import type { DocGroundingStore } from '../interactive/doc-grounding.js';
 import { registerInteractiveProxy } from '../interactive/proxy-routes.js';
 import { registerInteractiveDocDelete } from '../interactive/doc-delete-routes.js';
@@ -198,6 +200,7 @@ import {
   gitWorktreeIsClean,
   isDeliverConflictStranded,
   deliveryRecordFrom,
+  deliverUnitOf,
   pushedState,
   canDeliverResolver,
   FREE_TEXT_NOTICE,
@@ -918,6 +921,10 @@ export interface RuntimeDeps {
    *  read and a run that pushed and opened its PR is never served `'stranded'`. Optional: a
    *  directly-driven route set without one derives as before. */
   deliveryResolver?: DeliveryResolver;
+  /** (crew#720) The final-codebase zips (`AgentSession.codebase_archive`, `GET /runs/:id/artifacts/
+   *  codebase.zip`, taken again by a post-hoc deliver). Optional: a directly-driven route set without
+   *  one serves no archive. */
+  codebaseArchives?: CodebaseArchiveStore;
   /** The read-path bound for that await (default `READ_PATH_SETTLE_MS`); tests shorten it. */
   deliverySettleMs?: number;
   /** Def-awareness for the delivery derivation (crew#481 / D-14) — `createServer` injects the
@@ -1441,6 +1448,13 @@ export function registerRoutes(
     if (state.deliverUrl !== undefined) view.session.deliverUrl = state.deliverUrl;
     if (state.deliverBranch !== undefined) view.session.deliverBranch = state.deliverBranch;
     if (state.deliverRemote !== undefined) view.session.deliverRemote = state.deliverRemote;
+    // crew#720: the final-codebase zip (every outcome), and a deliver phase that refused for want of
+    // the provider credential — read from the deliver unit's own refusal line.
+    const archive = runtime.codebaseArchives?.get(view.session.id);
+    if (archive !== undefined) view.session.codebase_archive = archive;
+    const deliverUnit = deliverUnitOf(view);
+    const credMissing = deliverUnit !== null && deliverUnit.status !== 'done' ? credentialsMissingIn(deliverUnit.denial_reason ?? '') : null;
+    if (credMissing !== null) view.session.deliver_credentials = missingCredentials(credMissing);
     // crew#641/#642 (item 5): chat promotion provenance — ABSENT when not a chat-promoted run.
     const chatSeatCount = runTimingIndex.chatSeatCountFor(view.session.id);
     if (chatSeatCount !== undefined) view.session.chat_seat_count = chatSeatCount;
@@ -2835,7 +2849,9 @@ export function registerRoutes(
       const existing = deliveryIndex.urlFor(id);
       if (existing !== undefined) {
         const recorded = deliveryIndex.assuranceFor(id);
-        return { prUrl: existing, ...(recorded !== undefined ? { assurance: recorded } : {}) };
+        // crew#720: the run's final-codebase zip rides the replay too.
+        const zip = runtime.codebaseArchives?.get(id);
+        return { prUrl: existing, ...(recorded !== undefined ? { assurance: recorded } : {}), ...(zip !== undefined ? { codebase: zip } : {}) };
       }
       // N1: a run whose branch is already on a non-GitHub origin has nothing left to lift, and no
       // pull request can be opened from here — say so instead of pushing the branch again.
@@ -2894,6 +2910,7 @@ export function registerRoutes(
       // that branch and lift THAT; the branch (the record) is untouched. `cleanupWorktree` tears
       // the throwaway down after the lift.
       let result: DeliverScriptResult | undefined;
+      let codebase: CodebaseArchive | undefined;
       let worktreeGone = false;
       // DES-L9: a stranded REVISION re-pushes onto its PR's branch (re-checked OPEN via the same
       // resolver), never a new PR; a PR that closed meanwhile is a named 409.
@@ -2953,6 +2970,16 @@ export function registerRoutes(
               // remotes), so the PR opens where origin points rather than where gh's default does.
               originUrl: await readDeliverOriginUrl(workdir),
             });
+            // crew#720: the final-codebase zip, taken while this checkout (perhaps a throwaway)
+            // still exists — whatever the script's verdict.
+            const archives = runtime.codebaseArchives;
+            if (archives !== undefined) {
+              try {
+                codebase = (await archives.archive(id, { workdir, repoRoot: (await repoRootOf(repoRef)) ?? null }, 'deliver')) ?? undefined;
+              } catch {
+                // Best-effort: the archive store logs its own failures; a lookup that threw leaves none.
+              }
+            }
           } finally {
             if (cw !== null) await cw(); // tear the throwaway down whether the lift succeeded or threw
           }
@@ -2987,6 +3014,8 @@ export function registerRoutes(
         // guarantees nothing was pushed on the refusing paths.
         return reply.code(409).send({
           error: `deliver failed (exit ${result.status}): ${deliverErrorTail(result.output)}`,
+          // crew#720: the final-codebase zip is there whatever the verdict.
+          ...(codebase !== undefined ? { codebase } : {}),
         });
       }
       // The SAME parser the in-run record uses: the script's push-only verdict outranks a URL a
@@ -3015,9 +3044,9 @@ export function registerRoutes(
       }
       // The durable record first, then the read-side index — the same write order as the
       // deliver-phase resolution in server.ts, so the index can only LAG a crash, never lead it.
-      audit.record('run.delivered', actorOf(req), { runId: id, detail: { url, via: 'post-hoc', assurance } });
+      audit.record('run.delivered', actorOf(req), { runId: id, detail: { url, via: 'post-hoc', assurance, ...(codebase !== undefined ? { codebase } : {}) } });
       deliveryIndex.set(id, url, assurance);
-      return { prUrl: url, assurance };
+      return { prUrl: url, assurance, ...(codebase !== undefined ? { codebase } : {}) };
     },
   );
 
@@ -3803,6 +3832,30 @@ export function registerRoutes(
   // `outputUnavailable` saying WHICH cause applies — denied, not finished, or a store that
   // disagrees with itself. It previously answered `200 {"output": null}` to all four, so the
   // failed unit an operator opens during triage was the one that told them nothing (FINDING-006).
+  // crew#720: the run's final-codebase zip (every delivery, every outcome). 404 for an unknown run
+  // or one with no archive yet; the record (`AgentSession.codebase_archive`) names the same sha256,
+  // which the answer also carries as `X-Content-SHA256`.
+  app.get(
+    `${V}/runs/:id/artifacts/codebase.zip`,
+    { config: { manifest: { responseType: 'binary (application/zip)', statusCodes: [200, 404] } } },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const opened = runtime.codebaseArchives?.open(id) ?? null;
+      if (opened === null || opened.rec.url !== codebaseArchiveUrl(id)) {
+        opened?.stream.destroy();
+        return reply.code(404).send({ error: `run ${id} has no codebase archive` });
+      }
+      const rec = opened.rec;
+      const safe = id.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 80);
+      return reply
+        .header('content-type', 'application/zip')
+        .header('content-disposition', `attachment; filename="${safe}-codebase.zip"`)
+        .header('x-content-sha256', rec.sha256)
+        .header('content-length', String(rec.bytes))
+        .send(opened.stream);
+    },
+  );
+
   app.get(`${V}/runs/:id/units/:unitKey/output`, async (req, reply) => {
     const { id, unitKey } = req.params as { id: string; unitKey: string };
     const views = await adapter.sessionsDetail();
@@ -5482,7 +5535,9 @@ export function registerRoutes(
       const repo = deliverRepoFor(await adapter.listRepos(), id);
       if (repo === undefined) return reply.code(404).send({ error: `Repo ${id} not found` });
       const originUrl = repo.root_path === '' ? null : await readDeliverOriginUrl(repo.root_path);
-      return reply.send({ repo: repo.id, ...deliverTargetView(originUrl) });
+      // crew#720: the provider credential preflight, so a launch can say "not configured" up front.
+      const credentials = await deliverCredentialsProbe(originUrl, process.env);
+      return reply.send({ repo: repo.id, ...deliverTargetView(originUrl), credentials });
     },
   );
 

@@ -88,6 +88,8 @@ import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { childEnvWithBootEstateDb } from './governance-store.js';
 import type { PhaseDef, WorkflowDef } from './types.js';
+import { ADO_HELPER_JS } from './ado-deliver-helper.js';
+import { ADO_PAT_ENV, ADO_SP_ENV, DELIVER_CREDENTIALS_MISSING_MARKER, adoRepoOf, type AdoRepo, type DeliverCredentials } from './deliver-credentials.js';
 import { DELIVER_NOT_SHIPPED_HEADING, DELIVER_STRANDED_SENTINEL, ENV_TEMPLATE_SAFE_LINE_ERE, SCRATCH_DIRS, TOOL_ARTIFACT_DIRS } from './deliver-exclusions.js';
 import {
   composeEmbeddedDeliverText,
@@ -248,6 +250,12 @@ export interface DeliverScriptOptions {
   /** (crew#739) The sentinel nonce (16-64 hex digits). Absent ⇒ a fresh one per composition; a
    *  test passes one to read the sentinel deterministically. Refused at compose time otherwise. */
   nonce?: string;
+  /** (crew#720) The Azure DevOps repository this delivery goes to. Absent ⇒ derived from
+   *  `originUrl` ({@link adoRepoOf}); a test passes one to point the push and the REST calls at a
+   *  local git server and a mocked API. `null` ⇒ not an Azure DevOps delivery. */
+  adoTarget?: AdoRepo | null;
+  /** (crew#720) The provider credential preflight read at compose time, for the gate card. */
+  credentials?: DeliverCredentials | null;
 }
 
 /**
@@ -624,6 +632,13 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
   const prUrl = revises === null ? '' : revises.url;
   const nonce = opts.nonce ?? mintDeliverNonce();
   if (!/^[0-9a-fA-F]{16,64}$/.test(nonce)) throw new Error(`deliver nonce: not 16-64 hex digits: ${JSON.stringify(nonce)}`);
+  // (crew#720) AN AZURE DEVOPS ORIGIN: the push and the pull request go through the REST API with
+  // the daemon's own credential. Revising an existing ADO pull request is not supported yet —
+  // refused at compose time rather than silently opening a second PR.
+  const ado = opts.adoTarget !== undefined ? opts.adoTarget : adoRepoOf(opts.originUrl);
+  if (ado !== null && revises !== null) {
+    throw new Error(`revisesPr #${revises.number}: revising an Azure DevOps pull request is not supported; launch a new delivery`);
+  }
   return [
     'set -euo pipefail',
     // The engine concatenates the child's stdout and THEN its stderr, so anything git writes to
@@ -654,6 +669,49 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // and the `GH_ACCOUNT` env var when the setting is empty (still supported; the setting wins
     // so a daemon started without the export is not silently unpinned). `GH_ACCOUNT` is then the
     // ONE name the refusals use, whichever source set it.
+    // (crew#720) ONE CREDENTIAL PREFLIGHT SHAPE FOR EVERY PROVIDER. A missing provider credential
+    // is refused HERE, before anything is fetched, staged, committed or pushed: the line names the
+    // provider and what to set, the untracked recovery sentinel keeps the worktree, and the trusted
+    // verdict is `rejected` with the push-refused marker, so the engine parks the run at its
+    // deliver-refusal gate with the work kept — exactly like a push the remote refused.
+    // The SHORT machine line comes last: the engine keeps only the head and the tail of a refused
+    // unit's output as its denial, and crew reads the provider from that line.
+    `_credmissing() { VERDICT=rejected; : > ${DELIVER_STRANDED_SENTINEL} || true; echo "deliver: $2 Nothing was staged, committed or pushed and the work stays in the worktree; set the credential, then approve to retry the deliver phase."; echo "${DELIVER_CREDENTIALS_MISSING_MARKER} $1; ${DELIVER_PUSH_REJECTED_MARKER}"; exit 1; }`,
+    `ADOGIT=${shellSingleQuote(ado?.gitUrl ?? '')}`,
+    `ADOAPI=${shellSingleQuote(ado?.apiBase ?? '')}`,
+    `ADOWEB=${shellSingleQuote(ado?.webUrl ?? '')}`,
+    `ADOLOGIN=${shellSingleQuote(ado?.loginBase ?? '')}`,
+    // The one transport the header may travel on — the canonical URL's own scheme (https; a test's
+    // loopback server is http). `GIT_ALLOW_PROTOCOL` OVERRIDES any `protocol.<name>.allow` in the
+    // repository's config, so a `url.*.insteadOf` rewrite to `ext::`, a remote helper, `file` or ssh
+    // can never hand the header to another program (codex r1 + r2).
+    `ADOPROTO=${shellSingleQuote(ado === null ? '' : new URL(ado.gitUrl).protocol.replace(':', ''))}`,
+    "ADOHDR=''",
+    // Plain `git` outside Azure DevOps mode; in it, the network calls carry the auth header ONE-SHOT
+    // in the child's environment, scoped to the exact repository URL (`http.<url>.extraHeader`),
+    // after an empty entry resets any ambient extra header; redirects are refused, hooks and
+    // credential helpers are off. The header lives in an UNEXPORTED shell variable: no file, no
+    // argv, no log, and no other child of this script inherits it.
+    `_gnet() { if [ -n "$ADOHDR" ]; then GIT_CONFIG_COUNT=4 GIT_CONFIG_KEY_0=http.extraHeader GIT_CONFIG_VALUE_0= GIT_CONFIG_KEY_1="http.$ADOGIT.extraHeader" GIT_CONFIG_VALUE_1= GIT_CONFIG_KEY_2="http.$ADOGIT.extraHeader" GIT_CONFIG_VALUE_2="Authorization: $ADOHDR" GIT_CONFIG_KEY_3=http.followRedirects GIT_CONFIG_VALUE_3=false GIT_TERMINAL_PROMPT=0 GIT_ALLOW_PROTOCOL="$ADOPROTO" git -c core.hooksPath=/dev/null -c credential.helper= "$@"; else git "$@"; fi; }`,
+    'if [ -n "$ADOGIT" ]; then',
+    '  echo "deliver: Azure DevOps origin — $ADOWEB (the push and the pull request use the daemon\'s Azure DevOps credential; gh is not used)"',
+    `  if ! { [ -n "\${${ADO_PAT_ENV}:-}" ] || { ${ADO_SP_ENV.map((n) => `[ -n "\${${n}:-}" ]`).join(' && ')}; }; }; then _credmissing azure_devops "Azure DevOps credentials not configured: set ${ADO_SP_ENV.join(', ')} (a service principal) or ${ADO_PAT_ENV} in the daemon's environment and restart it."; fi`,
+    // The node that runs crew writes and runs the helper (plain JS, so a run that waited at its
+    // gate across a crew upgrade still finds it).
+    `  ADONODE=$(command -v node || true); [ -n "$ADONODE" ] || ADONODE=${shellSingleQuote(process.execPath)}`,
+    '  [ -x "$ADONODE" ] || { echo "deliver: no node binary to run the Azure DevOps step; nothing was staged, committed or pushed"; exit 1; }',
+    '  TD=$(mktemp -d)',
+    // The helper text rides only in a script composed for an Azure DevOps origin (the script is one
+    // argv entry; a GitHub delivery does not pay its bytes).
+    ...(ado === null ? [] : [`  cat > "$TD/ado.mjs" <<'WICKED_CREW_ADO_HELPER_EOF'`, ...ADO_HELPER_JS.split('\n'), 'WICKED_CREW_ADO_HELPER_EOF']),
+    // DRIFT: every push URL of origin must still name the consented repository (the GitHub rule,
+    // crew#736). The URLs are passed as data, never printed (one may carry a token).
+    '  "$ADONODE" "$TD/ado.mjs" same "$ADOGIT" "$(git remote get-url --push --all origin 2>/dev/null | sed -E "s#^(https?://)[^@/]*@#\\1#" || true)" || { echo "deliver: origin no longer points at $ADOWEB alone, the repository this delivery was approved for — nothing was staged, committed or pushed. Point origin back at it, or reject and relaunch against the new remote"; exit 1; }',
+    `  if ! ADOHDR=$("$ADONODE" "$TD/ado.mjs" header "$ADOLOGIN"); then VERDICT=rejected; : > ${DELIVER_STRANDED_SENTINEL} || true; echo "deliver: could not obtain the Azure DevOps credential (above) — nothing was staged, committed or pushed; fix the credential, then approve to retry the deliver phase; ${DELIVER_PUSH_REJECTED_MARKER}"; exit 1; fi`,
+    // The raw credential leaves the environment now: nothing this script runs later (the crew#426
+    // npm preflight, git's commit machinery) can read it.
+    `  unset ${[ADO_PAT_ENV, ...ADO_SP_ENV].join(' ')}`,
+    'else',
     `CFG='${identity}'`,
     'if [ -n "$CFG" ]; then GH_ACCOUNT="$CFG"; fi',
     // (crew#737) PIN THE PUSH TO THAT ACCOUNT, whatever gh's machine-wide ACTIVE account is now: with
@@ -667,6 +725,14 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     '  if T=$(gh auth token --hostname github.com --user "$GH_ACCOUNT" 2>/dev/null) && [ -n "$T" ]; then export GH_TOKEN="$T"; unset T; echo "deliver: pinned to $GH_ACCOUNT\'s own gh token for this phase"',
     '  elif gh auth token --help 2>/dev/null | grep -q -- "--user"; then echo "deliver: $GH_ACCOUNT is not signed in to gh on this machine; nothing was staged, committed or pushed. Sign in (gh auth login) as $GH_ACCOUNT, or pick another push identity for this repository, then approve to retry the deliver phase"; exit 1',
     '  fi',
+    'fi',
+    // (crew#720) GITHUB CREDENTIAL PREFLIGHT — parity with Azure DevOps. A github.com origin with no
+    // exported GH_TOKEN needs a gh signed in to github.com; gh absent or signed out is refused here,
+    // before anything is staged, with the shared credentials-missing refusal.
+    `GHREPO='${ghRepo}'`,
+    'if [ -n "$GHREPO" ] && [ -z "${GH_TOKEN:-}" ]; then',
+    `  if ! command -v gh >/dev/null 2>&1; then _credmissing github "GitHub credentials not configured: gh is not installed and no GH_TOKEN is exported. Install gh and run gh auth login, or export GH_TOKEN in the daemon's environment."; fi`,
+    `  gh auth status --hostname github.com >/dev/null 2>&1 || _credmissing github "GitHub credentials not configured: gh is not signed in to github.com and no GH_TOKEN is exported. Run gh auth login on this machine, or export GH_TOKEN in the daemon's environment."`,
     'fi',
     'L=$(gh api user -q .login 2>/dev/null || true)',
     'if [ -n "${GH_ACCOUNT:-}" ]; then',
@@ -716,6 +782,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     '  "") echo "deliver: this worktree has no origin remote — no git credential applies";;',
     '  *) echo "deliver: origin is not an https remote — no git credential applies (ssh keys or a local path authenticate the push)";;',
     'esac',
+    'fi',
     // REVISION MODE inputs (DES-L9 / crew#550) — baked at compose time from the resolved PR, each
     // validated against a strict charset before it is spliced into a single-quoted literal. Empty
     // TARGET ⇒ today's new-PR delivery.
@@ -758,7 +825,9 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     'git rev-parse --verify "$B" >/dev/null 2>&1 || B=$(git branch --show-current)',
     // Derive origin's default branch FIRST — the refusal below must cover a repo whose
     // default is trunk/develop/anything, not just main/master (Copilot on #303).
-    'git fetch origin',
+    // (crew#720) Azure DevOps: fetched from the validated canonical URL with the scoped header, into
+    // origin's own tracking refs — never through origin's configured URLs (an ssh origin included).
+    `if [ -n "$ADOGIT" ]; then _gnet fetch -q "$ADOGIT" '+refs/heads/*:refs/remotes/origin/*' || { VERDICT=rejected; : > ${DELIVER_STRANDED_SENTINEL} || true; echo "deliver: Azure DevOps refused the fetch of $ADOWEB (above) — check that the credential can read the repository; nothing was staged, committed or pushed; approve to retry the deliver phase; ${DELIVER_PUSH_REJECTED_MARKER}"; exit 1; }; else git fetch origin; fi`,
     // …the way the ENGINE derives it (wicked-core `deliver_lift.rs`, review F-527-003): origin/HEAD
     // when it resolves to a commit — a DANGLING origin/HEAD (the remote's default branch renamed or
     // deleted since the clone) is tolerated — else origin/main, else origin/master, else origin/main
@@ -835,7 +904,8 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // output — every branch below prints its reason (Copilot on #525): no origin known, no curl,
     // the daemon did not answer, or the run record was fetched.
     // Cleaned up by the `_outcome` EXIT trap installed at the top (crew#739).
-    'TD=$(mktemp -d)',
+    // The Azure DevOps preamble may already have made it (its helper lives there).
+    '[ -n "$TD" ] || TD=$(mktemp -d)',
     // One URL path segment, RFC 3986: unreserved bytes verbatim, everything else `%XX` (byte-wise
     // under LC_ALL=C so multibyte characters encode per byte, as a URL requires). Used only when
     // the composer did not bake the launch id in (Copilot on #525: `/`, `#`, `?` in an id must
@@ -1125,7 +1195,8 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // human approves the retry.
     // A revision pushes the run branch ONTO the PR's head branch (`$B:refs/heads/$TARGET`) — the
     // PR gains exactly the run's commits; a rejection there is the same recoverable strand.
-    '_push() { if [ -n "$TARGET" ]; then git push origin "$B:refs/heads/$TARGET"; else git push -u origin "$B"; fi; }',
+    // (crew#720) Azure DevOps pushes to the validated canonical URL with the scoped header.
+    '_push() { if [ -n "$ADOGIT" ]; then _gnet push "$ADOGIT" "$B:refs/heads/$B"; elif [ -n "$TARGET" ]; then git push origin "$B:refs/heads/$TARGET"; else git push -u origin "$B"; fi; }',
     // (crew#739) The branch-pushed fact is said in the script's own words, so a later failure (a gh
     // error on `gh pr create`) still records that the branch reached the remote.
     'if PUSHOUT=$(_push 2>&1); then echo "$PUSHOUT"; echo "deliver: pushed $B to origin"; else',
@@ -1184,6 +1255,22 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // Done is still RE-DERIVED before the claim: the remote ref must be ahead of the base. And
     // nothing may read a pull request out of this output — there is no URL in it, so `prUrlFrom`
     // answers null and the run's `delivery` never reads `delivered`.
+    // (crew#720) AZURE DEVOPS: the pull request through the REST API (`…/pullrequests`), the header
+    // handed one-shot to that one child. An existing ACTIVE PR for exactly this source and target
+    // branch is adopted (a retry after the push landed). Done is re-derived as on GitHub: a PR URL
+    // AND the remote branch (re-fetched from the canonical URL) ahead of the base.
+    '  if [ -n "$ADOGIT" ]; then',
+    '  _gnet fetch -q "$ADOGIT" "+refs/heads/$B:refs/remotes/origin/$B"',
+    `  printf '%s\\n' "$TITLE" > "$TD/title"`,
+    '  if ! OUT=$(WICKED_ADO_AUTH="$ADOHDR" "$ADONODE" "$TD/ado.mjs" pr "$ADOAPI" "$ADOWEB" "$B" "$DEF" "$TD/title" "$TD/body"); then echo "deliver: the Azure DevOps pull request for $B was not opened (above) — the branch is pushed; approve to retry the deliver phase (it re-pushes $B and opens or adopts the pull request)"; exit 1; fi',
+    '  echo "$OUT"',
+    '  case "$OUT" in "deliver: ADO-PR-EXISTS "*) EXISTING=1;; esac',
+    "  URL=$(printf '%s\\n' \"$OUT\" | grep -Eo 'https://[^[:space:]]+/pullrequest/[0-9]+' | tail -1 || true)",
+    '  [ -n "$URL" ] || { echo "deliver: Azure DevOps answered without a pull request URL for $B — refusing to report a delivery nothing can be pointed at"; exit 1; }',
+    '  P=$(git rev-list --count "$D..origin/$B")',
+    '  [ "$P" -ge 1 ] || { echo "deliver: $B is not ahead of $D on the remote after the push — refusing to report a delivery with no commits"; exit 1; }',
+    '  if [ -n "${EXISTING:-}" ]; then echo "deliver: pull request $URL already exists for $B (an earlier attempt of this run opened it); the push updated it with $P commit(s) on top of $D — recorded as this run\'s delivery"; fi',
+    '  else',
     '  if ! OUT=$(gh pr create ${GHREPO:+--repo "$GHREPO"} --head "$B" --title "$TITLE" --body-file "$TD/body" 2>&1); then',
     '    echo "$OUT"',
     '    case "$OUT" in',
@@ -1220,6 +1307,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     '  if [ -n "${EXISTING:-}" ]; then',
     '    echo "deliver: pull request $URL already exists for $B (an earlier attempt of this run opened it); the push updated it with $P commit(s) on top of $D — recorded as this run\'s delivery"',
     '    if COUT=$(gh pr comment "$URL" --body-file "$TD/body" 2>&1); then echo "deliver: run record commented on $URL"; else echo "$COUT"; echo "deliver: could not comment on $URL — the commits landed; the record is in the commit message"; fi',
+    '  fi',
     '  fi',
     'fi',
     'VERDICT=pr',
@@ -1431,6 +1519,13 @@ export function newPrTargetSentence(originUrl: string | null | undefined, runId?
       'resolves, the pushed branch IS the delivery.'
     );
   }
+  const ado = adoRepoOf(originUrl);
+  if (ado !== null) {
+    return (
+      `Pushes ${branch} to ${ado.org}/${ado.project}/${ado.repo} on Azure DevOps and opens a pull request there ` +
+      "through its REST API, with the daemon's Azure DevOps credential; merge stays human."
+    );
+  }
   if (kind === 'other') {
     const host = originRemoteHost((originUrl ?? '').trim()) ?? 'that host';
     return (
@@ -1459,6 +1554,8 @@ export interface DeliverTargetView {
   githubRepo: string | null;
   /** {@link newPrTargetSentence} for the launch (no run yet): the deliver gate's own sentence. */
   sentence: string;
+  /** (crew#720) `org/project/repo` for an Azure DevOps origin; `null` otherwise. */
+  adoRepo: string | null;
 }
 
 /** The launch-time reading of the same origin preflight the deliver gate uses (R3, crew#730). */
@@ -1468,6 +1565,7 @@ export function deliverTargetView(originUrl: string | null | undefined): Deliver
     origin: unread ? 'unknown' : classifyDeliverOrigin(originUrl),
     githubRepo: githubRepoOf(originUrl),
     sentence: newPrTargetSentence(originUrl),
+    adoRepo: ((a) => (a === null ? null : `${a.org}/${a.project}/${a.repo}`))(adoRepoOf(originUrl)),
   };
 }
 
@@ -1507,10 +1605,25 @@ export function deliverGateInstructions(opts: DeliverScriptOptions): string {
           ? `Push identity: ${account} (${source}), pinned by GH_TOKEN — the phase refuses if gh's login differs at push time.`
           : `Push identity: ${account} (${source}) — the phase pushes with that account's own gh token, so another tool switching gh's active account does not change it (a gh without \`auth token --user\` falls back to checking the active login). The phase refuses if gh's login differs.`
       : 'Push identity: none configured — pushes as whatever login gh holds (set the deliver identity in system settings, or this repository\'s push identity, to pin it).';
+  // (crew#720) The provider credential preflight read at compose time: a missing credential is said
+  // BEFORE approval, on the card, in the same words the phase refuses with.
+  const cred = opts.credentials ?? null;
+  const credSentence = cred !== null && cred.status === 'missing' ? `${cred.message} ` : '';
+  const ado = opts.adoTarget !== undefined ? opts.adoTarget : adoRepoOf(opts.originUrl);
+  if (ado !== null) {
+    // gh plays no part in an Azure DevOps delivery: the card names the credential instead.
+    const how =
+      cred !== null && cred.status === 'configured'
+        ? `${cred.message} `
+        : cred === null
+          ? `Credential: the service principal (${ADO_SP_ENV.join(' / ')}) or ${ADO_PAT_ENV} from the daemon environment; the phase refuses before staging anything without one. `
+          : '';
+    return `${target} ${credSentence}${how}It refuses if origin no longer points at that repository.`.replace(/\s+$/, '');
+  }
   // Whatever is configured, the phase also asks git which credential IT would use for the
   // remote's host and refuses when the two logins disagree — the flip that pushed under an
   // unintended account (F-RC1-010).
-  return `${target} ${who} It refuses if gh's login and git's credential for the remote disagree.`;
+  return `${target} ${credSentence}${who} It refuses if gh's login and git's credential for the remote disagree.`;
 }
 
 /**
@@ -1547,6 +1660,8 @@ export interface DeliverLaunchContext {
   deliverIdentitySource?: 'repo' | 'setting';
   /** (crew#737) Whether it is signed in to gh here (`null`/absent = unknown). */
   deliverIdentitySignedIn?: boolean | null;
+  /** (crew#720) The provider credential preflight for the gate card (`null`/absent = none read). */
+  credentials?: DeliverCredentials | null;
 }
 
 /**
@@ -1589,6 +1704,7 @@ export function deliverPresetStep(
     deliverIdentity: launch.deliverIdentity ?? null,
     ...(launch.deliverIdentitySource !== undefined ? { deliverIdentitySource: launch.deliverIdentitySource } : {}),
     ...(launch.deliverIdentitySignedIn !== undefined ? { deliverIdentitySignedIn: launch.deliverIdentitySignedIn } : {}),
+    credentials: launch.credentials ?? null,
   });
   return {
     catalog: 'deliver',
@@ -1642,6 +1758,7 @@ export function composeDeliverWorkflow(
     deliverIdentity: launch.deliverIdentity ?? null,
     ...(launch.deliverIdentitySource !== undefined ? { deliverIdentitySource: launch.deliverIdentitySource } : {}),
     ...(launch.deliverIdentitySignedIn !== undefined ? { deliverIdentitySignedIn: launch.deliverIdentitySignedIn } : {}),
+    credentials: launch.credentials ?? null,
   });
   return {
     // No `is_system` on purpose: core's overlay/register schema rejects unknown fields, and the

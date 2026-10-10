@@ -311,8 +311,12 @@ describe('crew#393 end to end — default-on delivery, stranded surfacing, post-
     expect(deliver.body).toEqual({
       prUrl: 'https://github.com/o/r/pull/202',
       assurance: expect.objectContaining({ verified: false, via: 'post_hoc' }),
+      // crew#720: the final-codebase zip of the tree that reached the remote (the run-end archive is
+      // kept when the lift left the tree unchanged — same content, nothing rewritten).
+      codebase: expect.objectContaining({ source: 'worktree', url: `/api/v1/runs/${encodeURIComponent(runId)}/artifacts/codebase.zip` }),
     });
     expect(originBranches()).toContain(`wicked/${runId}`);
+    expect((deliver.body as { codebase: { tree: string } }).codebase.tree).toBe(git(origin, 'rev-parse', `wicked/${runId}^{tree}`).trim());
     const lifted = (deliver.body as { assurance: { treeBefore: string | null; treeAfter: string | null } }).assurance;
     expect(lifted.treeBefore).toMatch(/^[0-9a-f]{40}$/);
     expect(lifted.treeAfter).toBe(git(origin, 'rev-parse', `wicked/${runId}^{tree}`).trim());

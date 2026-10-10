@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.103.0",
+  "apiTypesVersion": "0.104.0",
   "endpoints": [
     {
       "method": "GET",
@@ -1337,6 +1337,16 @@
       "requestType": null,
       "responseType": null,
       "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/runs/:id/artifacts/codebase.zip",
+      "requestType": null,
+      "responseType": "binary (application/zip)",
+      "statusCodes": [
+        200,
+        404
+      ]
     },
     {
       "method": "POST",

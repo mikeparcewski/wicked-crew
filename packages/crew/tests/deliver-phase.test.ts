@@ -91,7 +91,8 @@ describe('deliverPrScript (the hardened field script)', () => {
   it('marks every push failure PUSH-REJECTED — never a LIFT-CONFLICT (N4)', () => {
     // DES-L9: one push seam — the new-PR push (`-u origin "$B"`) or, for a revision, the refspec
     // onto the PR's head branch — captured the same way, so every failure takes the arms below.
-    expect(script).toContain('_push() { if [ -n "$TARGET" ]; then git push origin "$B:refs/heads/$TARGET"; else git push -u origin "$B"; fi; }');
+    // crew#720: an Azure DevOps origin pushes to its validated canonical URL through `_gnet` first.
+    expect(script).toContain('_push() { if [ -n "$ADOGIT" ]; then _gnet push "$ADOGIT" "$B:refs/heads/$B"; elif [ -n "$TARGET" ]; then git push origin "$B:refs/heads/$TARGET"; else git push -u origin "$B"; fi; }');
     expect(script).toContain('if PUSHOUT=$(_push 2>&1); then');
     const nffArm = script.split('\n').find((l) => l.includes('*non-fast-forward*'))!;
     expect(nffArm).toMatch(/non-fast-forward[^\n]*nothing was pushed[^\n]*deliver: PUSH-REJECTED"; exit 1;;/);
@@ -432,7 +433,9 @@ describe('the trusted terminal sentinel (crew#739)', () => {
     const script = deliverPrScript(undefined, { nonce: 'a'.repeat(32) });
     expect(script).toMatch(/VERDICT=pr\necho "\$URL"$/);
     expect(script).toContain('VERDICT=pushed; echo "deliver: PUSHED-NO-PR');
-    expect(script.match(/VERDICT=rejected; /g)).toHaveLength(2);
+    // Both push refusals, plus (crew#720) the credentials-missing refusal and the Azure DevOps
+    // credential-mint and fetch refusals — every one a recoverable park, never a strand.
+    expect(script.match(/VERDICT=rejected; /g)).toHaveLength(5);
     expect(script).toContain('VERDICT=stranded; echo "deliver: LIFT-CONFLICT');
   });
 
