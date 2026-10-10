@@ -722,7 +722,7 @@ export function registerTestingRoutes(
       }
       const def = adapter.getWorkflow(QE_AUTHOR_TESTS_WORKFLOW);
       if (def === null) {
-        // A daemon defect, never the caller's: the def ships in BUILTIN_WORKFLOWS.
+        // A daemon defect, never the caller's: the engine ships it as a built-in preset.
         return reply.code(500).send({
           error: `the daemon does not serve the '${QE_AUTHOR_TESTS_WORKFLOW}' workflow — GET /workflows lists what it serves`,
         });

@@ -230,8 +230,8 @@ export function registerGovernanceSteeringRoutes(
   );
 
   // ── "Add with chat" (the Steering page's conversational authoring action) ────
-  // REUSES crew's run machinery end to end: launches the `steering-author` drop-in workflow
-  // (BUILTIN_WORKFLOWS — analyze → propose, with an unconditional human gate on the terminal
+  // REUSES crew's run machinery end to end: launches the `steering-author` built-in preset
+  // (the engine's — analyze → propose, with an unconditional human gate on the terminal
   // propose phase: TH-12 propose-as-gate), inline documents land in the per-run steering inbox
   // (the run reads the daemon host's filesystem — the existing run file mechanism), and the
   // operator answers the proposal through the standard POST /runs/:id/gate. Approved rules land

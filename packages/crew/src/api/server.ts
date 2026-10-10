@@ -582,6 +582,11 @@ export async function createServer(
   bootClock.lap('setup');
   let skillsRuntime: SkillsRuntime | undefined;
   let skillsStore: SkillsStore | undefined;
+  // X-MIG M11: the built-in workflows crew serves are the engine's presets, read once at boot (a
+  // test double without the method serves none).
+  if (typeof (adapter as Partial<CoreAdapter>).loadBuiltinCatalog === 'function') {
+    await adapter.loadBuiltinCatalog((m) => app.log.warn(m));
+  }
   if (options?.skills?.disabled !== true) {
     const source = options?.skills?.source;
     const skillsRoot = resolveSkillsRoot();
@@ -595,7 +600,11 @@ export async function createServer(
     skillsStore = new SkillsStore({
       root: skillsRoot,
       registeredSkillRefs: () => {
-        const refs = registeredSkillRefs(adapter.listWorkflows());
+        // Runtime defs' refs are required; the built-in presets' (served in listWorkflows since
+        // X-MIG M11) are core only when the catalog holds them — `coreSkillRefs` below.
+        const refs = registeredSkillRefs(
+          typeof adapter.listRuntimeWorkflows === 'function' ? adapter.listRuntimeWorkflows() : adapter.listWorkflows(),
+        );
         let held: ReadonlySet<string> = new Set();
         try {
           held = new Set(Object.keys(store.current?.manifest().skills ?? {}));

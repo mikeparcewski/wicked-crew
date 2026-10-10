@@ -15,7 +15,8 @@ import { GateSchema, registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import type { AuditLog } from '../src/api/audit.js';
-import { BUILTIN_WORKFLOWS, type CoreAdapter } from '../src/core/adapter.js';
+import { type CoreAdapter } from '../src/core/adapter.js';
+import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
 
 function view(id: string, status: string, unitIx: number) {
   return {

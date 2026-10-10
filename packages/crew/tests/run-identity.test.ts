@@ -19,7 +19,7 @@ import { CoreAdapter, engineSupportsPlanLaunch } from '../src/core/adapter.js';
 import { createServer } from '../src/api/server.js';
 import { canDeliverResolver, runCanDeliver } from '../src/api/delivery-index.js';
 import { acceptanceRequirementOf, resolveAcceptanceGate } from '../src/qe/acceptance.js';
-import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
+import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
 import { isSteeringAuthorRun } from '../src/api/steering-landing.js';
 import { isQeAuthorRun } from '../src/qe/test-sets.js';
 import {
