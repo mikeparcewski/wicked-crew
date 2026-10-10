@@ -127,12 +127,14 @@ import { engineRosterJson, noEligibleSeatBody, parseNoEligibleSeat } from '../co
 import { launchAssuranceNotice } from '../core/assurance.js';
 import {
   QE_ACCEPTANCE,
+  QE_PRESETS,
   aggregateReceipt,
   postHocDeliveryAssurance,
   qeAcceptanceFromView,
   qeAcceptanceRefusal,
   receiptOf,
   qeAcceptanceNotRequired,
+  qeDecisionBypasses,
   qeDecisionOf,
   unreadableQeAcceptance,
 } from './delivery-assurance.js';
@@ -2289,9 +2291,12 @@ export function registerRoutes(
     if (b.deliverGate === 'auto') {
       // wicked-core#850 EX-03: a workflow that requires QE acceptance delivers only through the deliver
       // gate, where crew checks the verdict. Unattended delivery would push before anyone could.
-      // QE-IN-APP-WORKFLOWS: an explicit operator skip leaves no verdict to check, so it may.
+      // QE-IN-APP-WORKFLOWS: an explicit operator skip leaves no verdict to check, so it may. A name
+      // the engine resolves to a built-in preset that requires QE acceptance is judged by that preset
+      // (the engine resolves a preset before any def, so a def of the same name never speaks for it).
       const required = b.workflow !== undefined ? adapter.getWorkflow(b.workflow)?.required_instruments : undefined;
-      if (required?.includes(QE_ACCEPTANCE) === true && b.skipQeAcceptance === undefined) {
+      const qeRequired = required?.includes(QE_ACCEPTANCE) === true || (b.workflow !== undefined && QE_PRESETS.has(b.workflow));
+      if (qeRequired && b.skipQeAcceptance === undefined) {
         return reply.code(400).send({
           error:
             `workflow ${b.workflow} requires QE acceptance (required_instruments: qe_acceptance), so it delivers only ` +
@@ -4084,7 +4089,7 @@ export function registerRoutes(
   async function qeAcceptanceCheckFor(run: SessionView): Promise<QeAcceptanceCheck | null> {
     const decision = qeDecisionOf(run);
     if (decision === null) return null;
-    if (decision.status !== 'required') return qeAcceptanceNotRequired(decision);
+    if (qeDecisionBypasses(decision)) return qeAcceptanceNotRequired(decision);
     try {
       return qeAcceptanceFromView(await acceptanceViewOf(run, { forceDeclared: true }));
     } catch (err) {

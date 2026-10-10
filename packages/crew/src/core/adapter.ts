@@ -717,9 +717,9 @@ export function addonSupportsReducedAssurance(): boolean {
 }
 
 /** Does the installed addon carry the QE acceptance decision (`LaunchOptions.skipQeAcceptanceReason`
- *  / `forceQeAcceptance`, `assurance.qe`; QE-IN-APP-WORKFLOWS, >= 0.7.48)? Same doctrine. */
+ *  / `forceQeAcceptance`, `assurance.qe`; QE-IN-APP-WORKFLOWS, >= 0.7.49)? Same doctrine. */
 export function addonSupportsQeOverride(): boolean {
-  return addonAtLeast(0, 7, 48);
+  return addonAtLeast(0, 7, 49);
 }
 
 /**
@@ -2058,7 +2058,7 @@ export class CoreAdapter {
       // waive what the operator required — either way the record and the run would disagree.
       if (!addonSupportsQeOverride()) {
         throw new Error(
-          'skipQeAcceptance / forceQeAcceptance need wicked-core-ts >= 0.7.48; the installed addon ' +
+          'skipQeAcceptance / forceQeAcceptance need wicked-core-ts >= 0.7.49; the installed addon ' +
             'has no QE acceptance decision to apply them to',
         );
       }

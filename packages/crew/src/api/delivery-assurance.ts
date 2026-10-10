@@ -9,7 +9,7 @@
  * delivery — at the deliver gate's approve, at a gated resume, and at a post-hoc lift. Nothing is
  * pushed, and a deliver gate stays open for the approve to be retried once the PASS is recorded.
  *
- * QE-IN-APP-WORKFLOWS (wicked-core-ts >= 0.7.48): the contract also carries the run's DECISION
+ * QE-IN-APP-WORKFLOWS (wicked-core-ts >= 0.7.49): the contract also carries the run's DECISION
  * (`assurance.qe`): `required`, `waived` (the run's diff scored in the lowest band on every
  * dimension) or `skipped` (the operator's explicit word at launch, with a reason). Only `required`
  * reads the ledger; a waived or skipped delivery is not refused, and its check says which and why.
@@ -37,6 +37,11 @@ import type { AcceptanceView } from '../qe/acceptance.js';
 /** The contract token whose enforcement the engine leaves to the launcher. */
 export const QE_ACCEPTANCE = 'qe_acceptance';
 
+/** The engine's BUILT-IN presets that require `qe_acceptance` — the mirror of wicked-core's
+ *  `catalog::builtin_preset_instruments` (QE-IN-APP-WORKFLOWS). A launch naming one of these runs the
+ *  preset, whatever def of the same name crew holds. */
+export const QE_PRESETS: ReadonlySet<string> = new Set(['feature', 'migration']);
+
 /** `QeAcceptanceRefusal.code`. */
 export const QE_ACCEPTANCE_REQUIRED_CODE = 'qe_acceptance_required' as const;
 
@@ -63,6 +68,16 @@ export function qeDecisionOf(view: SessionView): QeAcceptanceDecision | null {
       tree: null,
     }
   );
+}
+
+/** Whether a decision lets a delivery go WITHOUT a ledger PASS: only a waiver the engine made from
+ *  the run's diff (`waived` + `basis: 'diff'`) or the operator's explicit skip (`skipped` + `basis:
+ *  'operator'`, with a reason). Anything else — `required`, an unknown status, a mismatched basis, a
+ *  malformed record — reads the ledger (codex r1 on the crew PR: fail closed). */
+export function qeDecisionBypasses(decision: QeAcceptanceDecision): boolean {
+  if (typeof decision.reason !== 'string' || decision.reason.trim() === '') return false;
+  return (decision.status === 'waived' && decision.basis === 'diff')
+    || (decision.status === 'skipped' && decision.basis === 'operator');
 }
 
 /** A delivery's check when the decision is NOT `required`: satisfied, no verdict read, and it says

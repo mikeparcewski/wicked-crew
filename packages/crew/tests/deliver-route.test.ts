@@ -110,7 +110,9 @@ describe('POST /runs deliver option (crew#293)', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/v1/runs',
-      payload: { problem: 'ship it', clisJson: '[]', workflow: 'feature', deliver: 'pr', deliverGate: 'auto' },
+      // QE-IN-APP-WORKFLOWS: `feature` requires QE acceptance, which delivers only through the gate
+      // (or with an explicit skip) — a def that requires nothing is the opt-out's subject here.
+      payload: { problem: 'ship it', clisJson: '[]', workflow: 'code-chore', deliver: 'pr', deliverGate: 'auto' },
     });
     expect(res.statusCode).toBe(201);
     const input = mockAdapter.launchRun.mock.calls[0]![0] as LaunchRunInput;

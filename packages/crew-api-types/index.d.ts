@@ -269,7 +269,7 @@ export interface HealthCapabilities {
   reducedAssurance?: boolean;
   /**
    * (api-types 0.106.0) `LaunchRunBody.skipQeAcceptance` / `forceQeAcceptance` are accepted (the
-   * installed addon carries the QE acceptance decision, wicked-core-ts >= 0.7.48), and receipts
+   * installed addon carries the QE acceptance decision, wicked-core-ts >= 0.7.49), and receipts
    * carry `qe`. ABSENT on an older daemon — do not send the fields (its strict schema 400s on them).
    */
   qeAcceptanceOverride?: boolean;
@@ -1978,7 +1978,7 @@ export type AssuranceSkipReason =
 export interface RunAssurance {
   mode: AssuranceMode;
   required: AssuranceRequirement[];
-  /** (api-types 0.106.0; wicked-core-ts >= 0.7.48) The run's QE acceptance decision, present
+  /** (api-types 0.106.0; wicked-core-ts >= 0.7.49) The run's QE acceptance decision, present
    *  exactly when `required` holds `qe_acceptance`. ABSENT on an older engine (then a required
    *  `qe_acceptance` is enforced). */
   qe?: QeAcceptanceDecision;
@@ -1988,7 +1988,7 @@ export interface RunAssurance {
 export type QeAcceptanceStatus = 'required' | 'waived' | 'skipped' | (string & {});
 
 /**
- * (api-types 0.106.0; wicked-core-ts >= 0.7.48; QE-IN-APP-WORKFLOWS) A run's QE acceptance
+ * (api-types 0.106.0; wicked-core-ts >= 0.7.49; QE-IN-APP-WORKFLOWS) A run's QE acceptance
  * decision, on `RunAssurance.qe` and every receipt. `basis: 'plan'` is the launch's provisional
  * `required` (a plan has no diff); `'operator'` is an explicit skip (with its reason) or force;
  * `'diff'` is the binding decision the run's QE unit made from the run's diff — `waived` only when
@@ -2803,7 +2803,7 @@ export type RunBaseResolvedEvent = {
   runBranch?: string;
 };
 
-/** (api-types 0.106.0; wicked-core-ts >= 0.7.48) The run's QE acceptance decision changed at a
+/** (api-types 0.106.0; wicked-core-ts >= 0.7.49) The run's QE acceptance decision changed at a
  *  unit's dispatch: the run's QE unit scored the run's diff (`qe.basis: 'diff'`, `required` or
  *  `waived`), or a creator dispatched after a waiver revoked it. From this point the decision is on
  *  the session's contract (`AgentSession.assurance.qe`). `type` alias on purpose. */

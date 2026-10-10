@@ -97,6 +97,10 @@ const RUNS = {
   gatedSkipped: 'run-qe-gated-skipped',
   gatedDiffRequired: 'run-qe-gated-diff-required',
   doneWaived: 'run-qe-done-waived',
+  gatedEmptyQe: 'run-qe-gated-empty',
+  gatedSkipNoOperator: 'run-qe-gated-skip-plan',
+  gatedUnknown: 'run-qe-gated-unknown',
+  doneMalformed: 'run-qe-done-malformed',
 };
 
 /** QE-IN-APP-WORKFLOWS: the engine's decisions as `assurance.qe` carries them. */
@@ -133,6 +137,10 @@ beforeAll(async () => {
     view(RUNS.gatedSkipped, 'awaiting_human', ['qe_acceptance'], null, SKIPPED),
     view(RUNS.gatedDiffRequired, 'awaiting_human', ['qe_acceptance'], null, DIFF_REQUIRED),
     view(RUNS.doneWaived, 'completed', ['qe_acceptance'], workdir, WAIVED),
+    view(RUNS.gatedEmptyQe, 'awaiting_human', ['qe_acceptance'], null, {}),
+    view(RUNS.gatedSkipNoOperator, 'awaiting_human', ['qe_acceptance'], null, { ...SKIPPED, basis: 'plan' }),
+    view(RUNS.gatedUnknown, 'awaiting_human', ['qe_acceptance'], null, { ...WAIVED, status: 'exempt' }),
+    view(RUNS.doneMalformed, 'completed', ['qe_acceptance'], workdir, { ...WAIVED, basis: 'operator' }),
   ];
   const mockAdapter = {
     sessionsDetail: vi.fn(async () => structuredClone(views)),
@@ -183,7 +191,7 @@ beforeEach(() => {
   confirmCalls.length = 0;
   deliverCalls.length = 0;
   recorded.length = 0;
-  for (const id of [RUNS.gated, RUNS.gatedFail, RUNS.gatedPass, RUNS.gatedNoReq, RUNS.gatedWaived, RUNS.gatedSkipped, RUNS.gatedDiffRequired]) {
+  for (const id of [RUNS.gated, RUNS.gatedFail, RUNS.gatedPass, RUNS.gatedNoReq, RUNS.gatedWaived, RUNS.gatedSkipped, RUNS.gatedDiffRequired, RUNS.gatedEmptyQe, RUNS.gatedSkipNoOperator, RUNS.gatedUnknown]) {
     gateCache.adopt(id, { ord: DELIVER_ORD, prompt: 'Approve deliver?', lifecycle: 'open', receivedAt: '2026-10-10T10:00:00Z' });
   }
 });
@@ -370,6 +378,19 @@ describe('QE-IN-APP-WORKFLOWS — the delivery reads the run\'s QE decision', ()
     expect(confirmCalls).toEqual([]);
   });
 
+  it('codex r1: a malformed or mismatched decision never bypasses the ledger — empty, a skip not by the operator, an unknown status', async () => {
+    for (const id of [RUNS.gatedEmptyQe, RUNS.gatedSkipNoOperator, RUNS.gatedUnknown]) {
+      const res = await gate(id, { approve: true, ord: DELIVER_ORD });
+      expect(res.statusCode, `${id}: ${res.body}`).toBe(409);
+      expect(res.json()).toMatchObject({ code: 'qe_acceptance_required', acceptance: { status: 'required', satisfied: false } });
+    }
+    const resume = await app.inject({ method: 'POST', url: `/api/v1/runs/${RUNS.gatedUnknown}/resume` });
+    expect(resume.statusCode, resume.body).toBe(409);
+    const lift = await app.inject({ method: 'POST', url: `/api/v1/runs/${RUNS.doneMalformed}/deliver` });
+    expect(lift.statusCode, lift.body).toBe(409);
+    expect(confirmCalls).toEqual([]);
+  });
+
   it('a waived post-hoc delivery runs the script; its receipt names the waiver and carries the decision', async () => {
     const res = await app.inject({ method: 'POST', url: `/api/v1/runs/${RUNS.doneWaived}/deliver` });
     expect(res.statusCode, res.body).toBe(200);
@@ -414,6 +435,25 @@ describe('QE-IN-APP-WORKFLOWS at launch — the operator\'s explicit skip or for
       expect(res.statusCode, JSON.stringify(payload)).toBe(400);
       expect(launched).toEqual([]);
     }
+  });
+
+  it('codex r1: a def that shadows a QE built-in preset\'s name never speaks for the preset the engine runs', async () => {
+    const launched: unknown[] = [];
+    const a = Fastify({ logger: false });
+    registerRoutes(a, {
+      getWorkflow: (id: string) => ({ id, phases: [] }),
+      listWorkflows: () => BUILTIN_WORKFLOWS,
+      getSettings: async () => ({}),
+      launchRun: vi.fn(async (input: unknown) => { launched.push(input); return 'x'; }),
+    } as unknown as CoreAdapter, new GateCache(), new ElicitationCache());
+    await a.ready();
+    for (const workflow of ['feature', 'migration']) {
+      const res = await a.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'p', workflow, deliverGate: 'auto', clisJson: '[]' } });
+      expect(res.statusCode, `${workflow}: ${res.body}`).toBe(400);
+      expect(res.json().error).toMatch(/requires QE acceptance/);
+    }
+    expect(launched).toEqual([]);
+    await a.close();
   });
 
   it('an explicit skip lets a QE-requiring workflow deliver unattended (no verdict is left to check)', async () => {

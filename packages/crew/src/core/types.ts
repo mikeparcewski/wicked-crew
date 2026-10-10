@@ -172,7 +172,7 @@ export interface LaunchRunInput {
    */
   reducedAssurance?: boolean;
   /**
-   * (QE-IN-APP-WORKFLOWS, wicked-core-ts >= 0.7.48) The operator's EXPLICIT skip of a required QE
+   * (QE-IN-APP-WORKFLOWS, wicked-core-ts >= 0.7.49) The operator's EXPLICIT skip of a required QE
    * acceptance, with this reason (core-ts `skipQeAcceptanceReason`), or its explicit force
    * (`forceQeAcceptance`). Sent only when the caller sent them; crew never sets either.
    */
