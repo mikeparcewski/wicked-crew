@@ -272,11 +272,13 @@ describe('POST /runs {plan} and the plan_approval gate — HTTP contract (shadow
       });
       if (addonSupportsLaunchDeliverables()) {
         await floor;
-        const opts = launched[0] as LaunchOptions & { deliverables?: string[]; planJson?: string };
+        const opts = launched[0] as LaunchOptions & { deliverables?: string[]; planJson?: string; deliverStepJson?: string };
         // The preset itself is launched with its deliverables (wicked-core#858): the engine joins
-        // them to the last creator step and its deliverable floor judges them.
+        // them to the last creator step and its deliverable floor judges them. Not delivering, so
+        // no deliver step rides it (codex r1).
         expect(opts.workflow).toBe('feature');
         expect(opts.deliverables).toEqual(['out/report.md']);
+        expect(opts.deliverStepJson).toBeUndefined();
       } else {
         // An addon before LaunchOptions.deliverables would drop them: refused, not composed.
         await expect(floor).rejects.toThrow(/needs wicked-core-ts >= 0\.7\.47/);

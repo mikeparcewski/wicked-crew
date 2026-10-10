@@ -2120,8 +2120,12 @@ export class CoreAdapter {
       // them to the plan's last creator step and its deliverable floor judges them — never a per-run
       // def composed past the plan_approval gate.
       this.passLaunchDeliverables(opts, requireDeliverablesAll, `a preset launch ('${input.workflow}')`);
-      const step = this.deliverStep(input.workflow, this.getWorkflow(input.workflow)?.phases ?? [], input, deliverOriginUrl, deliverIdentity, deliverCredentials);
-      (opts as LaunchOptions & { deliverStepJson?: string }).deliverStepJson = JSON.stringify(step);
+      // Only a DELIVERING preset gets the deliver step: a preset launched for its deliverables alone
+      // pushes nothing (codex r1 on #930).
+      if (input.deliver === 'pr') {
+        const step = this.deliverStep(input.workflow, this.getWorkflow(input.workflow)?.phases ?? [], input, deliverOriginUrl, deliverIdentity, deliverCredentials);
+        (opts as LaunchOptions & { deliverStepJson?: string }).deliverStepJson = JSON.stringify(step);
+      }
       opts.workflow = input.workflow;
     } else if (input.workflow !== undefined) {
       let workflowId = input.workflow;
@@ -2239,7 +2243,8 @@ export class CoreAdapter {
       throw new Error(
         'deliver: "pr" requires a workflow — a free-text run has no def to append the deliver phase to',
       );
-    } else if ((input.requireDeliverables ?? []).length > 0) {
+    } else if ((input.requireDeliverables ?? []).length > 0 && input.plan === undefined) {
+      // (A plan hands its deliverables to the engine above, wicked-core#858.)
       // Same rule for the floor (Copilot, #319): a caller that declares what a run MUST produce
       // and gets no enforcement is worse off than one that never declared it — it would watch a
       // free-text run complete and believe the artifacts were re-derived. There is no def to
