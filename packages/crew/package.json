@@ -51,7 +51,7 @@
     "typescript": "^5.5.0",
     "undici": "^6.28.1",
     "vitest": "^5.0.2",
-    "wicked-bus": "^2.3.5",
+    "wicked-bus": "^2.4.0",
     "wicked-crew-api-types": "*",
     "wicked-studio": "^0.6.8"
   },
