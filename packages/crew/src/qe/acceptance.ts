@@ -181,12 +181,38 @@ export function acceptanceRequirementOf(
           "the engine's phase catalog does not say which entries declare verified evidence (an engine before `CatalogEntry.verified_evidence`)",
         );
       }
-      const phases = units.filter((u) => verifiedCatalog.has(u.catalog as string)).map((u) => unitPhaseId(u.id));
+      // A step may also RAISE `verified_evidence` itself (wicked-core PlanStep, DES-TEAMING-002
+      // M10: qe-author-tests' `verify` is a `run` Tool step that keeps crew's acceptance
+      // declaration). The accepted plan carries the flag; the catalog alone would drop it.
+      const raised = stepsDeclaringVerified(view);
+      const phases = units
+        .filter((u) => verifiedCatalog.has(u.catalog as string) || raised.has(unitPhaseId(u.id)))
+        .map((u) => unitPhaseId(u.id));
       return { declared: phases.length > 0, phases };
     }
   }
 }
 
+
+/** The ids of the accepted plan's steps that raise `verified_evidence` themselves (wicked-core
+ *  persists the accepted plan as `team_plan.accepted.steps.steps`). Empty when the run's record
+ *  carries no accepted plan, or an engine predates the step field. */
+function stepsDeclaringVerified(view: SessionView): Set<string> {
+  const accepted = (view.session as { team_plan?: { accepted?: { steps?: { steps?: unknown } } } }).team_plan?.accepted;
+  const steps = accepted?.steps?.steps;
+  const out = new Set<string>();
+  if (!Array.isArray(steps)) return out;
+  for (const s of steps) {
+    if (s !== null && typeof s === 'object') {
+      const step = s as { id?: unknown; catalog?: unknown; verified_evidence?: unknown };
+      if (step.verified_evidence === true) {
+        const id = typeof step.id === 'string' && step.id !== '' ? step.id : step.catalog;
+        if (typeof id === 'string' && id !== '') out.add(id);
+      }
+    }
+  }
+  return out;
+}
 
 /** The gate's resolution of one run's acceptance requirement. */
 export interface AcceptanceGateResolution {
