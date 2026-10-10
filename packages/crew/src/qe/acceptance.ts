@@ -185,6 +185,14 @@ export function acceptanceRequirementOf(
       // M10: qe-author-tests' `verify` is a `run` Tool step that keeps crew's acceptance
       // declaration). The accepted plan carries the flag; the catalog alone would drop it.
       const raised = stepsDeclaringVerified(view);
+      if (raised === null) {
+        return closed("the run's plan is not accepted yet, so which of its steps re-verify evidence cannot be read");
+      }
+      const unitPhases = new Set(units.map((u) => unitPhaseId(u.id)));
+      const missing = [...raised].find((id) => !unitPhases.has(id));
+      if (missing !== undefined) {
+        return closed(`the accepted plan's step \`${missing}\` re-verifies evidence but the run planned no such unit`);
+      }
       const phases = units
         .filter((u) => verifiedCatalog.has(u.catalog as string) || raised.has(unitPhaseId(u.id)))
         .map((u) => unitPhaseId(u.id));
@@ -195,13 +203,25 @@ export function acceptanceRequirementOf(
 
 
 /** The ids of the accepted plan's steps that raise `verified_evidence` themselves (wicked-core
- *  persists the accepted plan as `team_plan.accepted.steps.steps`). Empty when the run's record
- *  carries no accepted plan, or an engine predates the step field. */
-function stepsDeclaringVerified(view: SessionView): Set<string> {
-  const accepted = (view.session as { team_plan?: { accepted?: { steps?: { steps?: unknown } } } }).team_plan?.accepted;
-  const steps = accepted?.steps?.steps;
+ *  persists the accepted plan as `team_plan.accepted.steps.steps`). `null` when the run's plan is
+ *  held for approval, or its accepted plan's steps cannot be read: the caller fails closed (codex
+ *  r2: an unreadable plan must never shrink the requirement). */
+function stepsDeclaringVerified(view: SessionView): Set<string> | null {
+  const plan = (view.session as { team_plan?: { accepted?: { steps?: { steps?: unknown } } | null; pending?: unknown } })
+    .team_plan;
   const out = new Set<string>();
-  if (!Array.isArray(steps)) return out;
+  const accepted = plan?.accepted;
+  if (accepted === undefined || accepted === null) {
+    // A plan held for approval has its composed units but no accepted steps yet: unreadable.
+    // A record with neither (an engine before the accepted plan was persisted) keeps the
+    // catalog-only rule.
+    return plan?.pending !== undefined && plan.pending !== null ? null : out;
+  }
+  // An accepted plan recorded without its steps (an older record) carries no raised flags; one
+  // whose steps are present but unreadable fails closed.
+  if (accepted.steps === undefined) return out;
+  const steps = accepted.steps?.steps;
+  if (!Array.isArray(steps)) return null;
   for (const s of steps) {
     if (s !== null && typeof s === 'object') {
       const step = s as { id?: unknown; catalog?: unknown; verified_evidence?: unknown };
