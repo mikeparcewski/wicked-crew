@@ -753,7 +753,8 @@ respondsWith<boolean, ReturnType<CoreAdapter['steeringSupported']>>();
 
 // The steering-author landing (crew#388): the `landing` field POST /runs/:id/gate (and a gated
 // /resume) produces on approve of a propose gate must satisfy the published shape.
-respondsWith<Wire.SteeringLandingResult, Awaited<ReturnType<typeof import('../src/api/steering-landing.js').landSteeringProposal>>>();
+// `undefined` = the approved gate was not after propose (core#649 M8): the route then sends no `landing`.
+respondsWith<Wire.SteeringLandingResult, NonNullable<Awaited<ReturnType<typeof import('../src/api/steering-landing.js').landSteeringProposal>>>>();
 
 // Testing (crew-testing): POST /testing/evals/run + /testing/corpora/import — the report and
 // the import receipt are the ENGINE's serde output passed through verbatim (snake_case), so
