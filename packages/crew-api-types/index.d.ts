@@ -5158,11 +5158,12 @@ export interface SystemSettings {
   baseSkillPolicy?: 'warn' | 'require';
   /**
    * The DELIVER IDENTITY (crew#549; additive): the GitHub login the deliver phase must push as.
-   * The deliver script reads `gh api user` AND asks git which credential it would use for the
-   * remote's host, and REFUSES — before anything is staged, committed or pushed — when either
-   * disagrees with this login (or, with nothing configured, when those two disagree with each
-   * other). `''`/absent ⇒ the `GH_ACCOUNT` env var decides, and unset there means the phase
-   * pushes as whatever login gh holds, said aloud on the gate card.
+   * (crew#940) On a github.com origin the deliver script reads THIS login's own token from gh's
+   * keyring and uses it for its gh calls and its git fetch/push alone, whatever account gh has
+   * active; a login gh holds no token for is "GitHub credentials not configured", refused before
+   * anything is staged. An exported `GH_TOKEN` wins, and is refused when it authenticates as
+   * another login. `''`/absent ⇒ the `GH_ACCOUNT` env var decides, and unset there means the phase
+   * pushes as whatever login gh holds (git's credential cross-checked), said aloud on the gate card.
    *
    * A LOGIN ONLY — never a token. The credential itself stays in gh's keyring or in the daemon's
    * `GH_TOKEN`; `GET /settings` returns this login and no secret ever.

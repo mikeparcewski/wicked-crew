@@ -16,6 +16,7 @@ import { registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { deliverGateInstructions, deliverIdentityFor, deliverPrScript, isGitHubLogin, parseGhAuthStatusLogins } from '../src/core/deliver.js';
+import { githubCredentials } from '../src/core/deliver-credentials.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { SystemSettings } from '../src/core/types.js';
 
@@ -109,14 +110,21 @@ describe('crew#737 — PUT/GET /settings deliverIdentityByRepo (a push identity 
 });
 
 describe('crew#737 — the gate card for a pinned repository', () => {
-  it('names the repository pin, says the push uses that account\'s own token, and says BEFORE approval when it is not signed in', () => {
-    const repo = deliverGateInstructions({ deliverIdentity: 'release-bot', deliverIdentitySource: 'repo', deliverIdentitySignedIn: true });
-    expect(repo).toContain("Push identity: release-bot (this repository's push identity) — the phase pushes with that account's own gh token");
-    const out = deliverGateInstructions({ deliverIdentity: 'release-bot', deliverIdentitySource: 'repo', deliverIdentitySignedIn: false });
-    expect(out).toContain("Pushes as release-bot (this repository's push identity) — NOT signed in to gh on this machine");
-    expect(out).toContain('the phase will refuse and push nothing');
-    // Unknown (no probe) is never "not signed in".
-    expect(deliverGateInstructions({ deliverIdentity: 'release-bot', deliverIdentitySignedIn: null })).not.toContain('NOT signed in');
+  it('names the repository pin, says the push uses that account\'s own token, and says BEFORE approval when it has none here (crew#940)', () => {
+    const originUrl = 'https://github.com/o/r.git';
+    const repo = deliverGateInstructions({ originUrl, deliverIdentity: 'release-bot', deliverIdentitySource: 'repo', credentials: githubCredentials({}, ['release-bot'], 'release-bot') });
+    expect(repo).toContain("Push identity: release-bot (this repository's push identity) — the phase pushes and opens the pull request with release-bot's own gh token, whatever account gh has active.");
+    expect(repo).toContain('git pushes with the same token, not its own configured credential.');
+    // Signed in to gh as SOMEONE ELSE is no credential for release-bot: the shared preflight says so.
+    const missing = githubCredentials({}, ['someone-else'], 'release-bot');
+    expect(missing.status).toBe('missing');
+    const out = deliverGateInstructions({ originUrl, deliverIdentity: 'release-bot', deliverIdentitySource: 'repo', credentials: missing });
+    expect(out).toContain('GitHub credentials not configured: gh holds no token for release-bot on this machine and no GH_TOKEN is exported.');
+    expect(out).toContain('The deliver phase refuses before anything is staged');
+    // Unknown (the probe did not answer) is never "missing".
+    expect(githubCredentials({}, null, 'release-bot').status).toBe('unknown');
+    // An exported GH_TOKEN is the credential whatever gh holds.
+    expect(githubCredentials({ GH_TOKEN: 'x' }, [], 'release-bot').status).toBe('configured');
   });
 
   it('the repository pin wins over the daemon-wide identity; an unpinned repo falls back', () => {
@@ -161,17 +169,21 @@ describe('the deliver identity in the script and on the gate card', () => {
     expect(script).toContain("git's credential for $RH is $GC");
   });
 
-  it('the gate card names the login, WHERE it is configured, and the cross-check', () => {
-    const fromSetting = deliverGateInstructions({ deliverIdentity: 'release-bot', ghAccount: 'stale-bot' });
+  it('the gate card names the login, WHERE it is configured, and whether git is pinned or cross-checked', () => {
+    const originUrl = 'https://github.com/o/r.git';
+    const fromSetting = deliverGateInstructions({ originUrl, deliverIdentity: 'release-bot', ghAccount: 'stale-bot' });
     expect(fromSetting).toContain('Push identity: release-bot (the deliver identity setting)');
-    const fromEnv = deliverGateInstructions({ ghAccount: 'env-bot' });
+    const fromEnv = deliverGateInstructions({ originUrl, ghAccount: 'env-bot' });
     expect(fromEnv).toContain('Push identity: env-bot (GH_ACCOUNT)');
-    const none = deliverGateInstructions({});
+    for (const text of [fromSetting, fromEnv]) expect(text).toContain('git pushes with the same token');
+    const none = deliverGateInstructions({ originUrl });
     expect(none).toContain('none configured');
     expect(none).toContain('set the deliver identity in system settings');
-    for (const text of [fromSetting, fromEnv, none]) {
-      expect(text).toContain("refuses if gh's login and git's credential for the remote disagree");
-    }
+    expect(none).toContain("refuses if gh's login and git's credential for the remote disagree");
+    // Off github.com the identity does not apply, and the card says so.
+    const local = deliverGateInstructions({ originUrl: '/srv/git/r.git', ghAccount: 'env-bot' });
+    expect(local).toContain('Push identity: env-bot (GH_ACCOUNT) applies to github.com origins only');
+    expect(local).toContain("refuses if gh's login and git's credential for the remote disagree");
   });
 
   it('isGitHubLogin is the one validator both boundaries use', () => {

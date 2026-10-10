@@ -154,9 +154,11 @@ import {
   runUrlFor,
 } from '../core/deliver-text.js';
 import {
+  deliverIdentityFor,
   deliverRepoFor,
   deliverTargetView,
   isGitHubLogin,
+  pushIdentityOf,
   readDeliverOriginUrl,
   resolvePullRequest as resolvePullRequestViaGh,
   unverifiedTreesFrom,
@@ -5569,7 +5571,16 @@ export function registerRoutes(
       if (repo === undefined) return reply.code(404).send({ error: `Repo ${id} not found` });
       const originUrl = repo.root_path === '' ? null : await readDeliverOriginUrl(repo.root_path);
       // crew#720: the provider credential preflight, so a launch can say "not configured" up front.
-      const credentials = await deliverCredentialsProbe(originUrl, process.env);
+      // crew#940: with a push identity configured, only that account's own gh login counts. Settings
+      // that cannot be read leave it unconfigured (GH_ACCOUNT decides), as at launch.
+      let configured = '';
+      try {
+        configured = deliverIdentityFor(await adapter.getSettings(), id).login;
+      } catch {
+        configured = '';
+      }
+      const identity = pushIdentityOf(configured);
+      const credentials = await deliverCredentialsProbe(originUrl, process.env, undefined, identity);
       return reply.send({ repo: repo.id, ...deliverTargetView(originUrl), credentials });
     },
   );

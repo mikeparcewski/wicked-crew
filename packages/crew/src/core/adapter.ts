@@ -49,7 +49,7 @@ import type {
 import { DEFAULT_SETTINGS } from './types.js';
 import { BASE_SKILL_REF_SHAPE } from '../skills/base-skill.js';
 import { execCapped } from './exec.js';
-import { BUG_FIX_SWEEP_INSTRUCTIONS, composeDeliverWorkflow, DELIVER_PHASE_ID, deliverPresetStep, deliverIdentityFor, deliverRepoFor, EVIDENCE_FLOOR_PIN, ghSignedInLogins, isGitHubLogin, readDeliverOriginUrl } from './deliver.js';
+import { BUG_FIX_SWEEP_INSTRUCTIONS, composeDeliverWorkflow, DELIVER_PHASE_ID, deliverPresetStep, deliverIdentityFor, deliverRepoFor, EVIDENCE_FLOOR_PIN, isGitHubLogin, pushIdentityOf, readDeliverOriginUrl } from './deliver.js';
 import { engineCampaignDef, engineRosterJson } from './engine-roster.js';
 import { QE_AUTHOR_TESTS_WORKFLOW_DEF } from '../qe/author-workflow.js';
 import { CAMPAIGN_WORKFLOW_PREFIX } from '../campaigns/plan.js';
@@ -1879,16 +1879,15 @@ export class CoreAdapter {
 
   /**
    * (crew#549, crew#737) The CONFIGURED deliver identity for a launch: the repository's own pin
-   * (`deliverIdentityByRepo[repoRef]`) else the daemon-wide `deliverIdentityLogin`, and — for a
-   * delivering launch — whether that login is signed in to gh on this machine (a bounded
-   * `gh auth status`). RETURNED, never stashed on the adapter: two concurrent delivering launches
+   * (`deliverIdentityByRepo[repoRef]`) else the daemon-wide `deliverIdentityLogin`. Whether that
+   * login has a gh token here is the credential preflight's question ({@link deliverCredentialsProbe},
+   * crew#940). RETURNED, never stashed on the adapter: two concurrent delivering launches
    * on different repositories must not read each other's identity (the F2 origin rule). A LOGIN
    * only: no token is ever read here. `login: ''` ⇒ nothing configured (`GH_ACCOUNT` decides).
    */
   private async resolveDeliverIdentity(
     repoRef: string | null | undefined,
-    probe: boolean,
-  ): Promise<{ login: string; source: 'repo' | 'setting'; signedIn: boolean | null }> {
+  ): Promise<{ login: string; source: 'repo' | 'setting' }> {
     let login = '';
     let source: 'repo' | 'setting' = 'setting';
     try {
@@ -1898,12 +1897,7 @@ export class CoreAdapter {
       // failing the launch — the deliver script still cross-checks gh against git's credential.
       login = '';
     }
-    let signedIn: boolean | null = null;
-    if (probe && login !== '') {
-      const logins = await ghSignedInLogins().catch(() => null);
-      signedIn = logins === null ? null : logins.includes(login);
-    }
-    return { login, source, signedIn };
+    return { login, source };
   }
 
   /**
@@ -1947,7 +1941,7 @@ export class CoreAdapter {
     /** (F2) The origin this launch resolved — launch-local, never adapter state. */
     originUrl: string | null,
     /** (crew#737) The identity this launch resolved — launch-local, never adapter state. */
-    identity: { login: string; source: 'repo' | 'setting'; signedIn: boolean | null },
+    identity: { login: string; source: 'repo' | 'setting' },
     /** (crew#720) The provider credential preflight this launch read. */
     credentials: DeliverCredentials | null,
   ): ReturnType<typeof deliverPresetStep> {
@@ -1960,7 +1954,6 @@ export class CoreAdapter {
       originUrl,
       deliverIdentity: identity.login,
       deliverIdentitySource: identity.source,
-      deliverIdentitySignedIn: identity.signedIn,
       credentials,
     });
   }
@@ -1969,12 +1962,12 @@ export class CoreAdapter {
   async launchRun(input: LaunchRunInput): Promise<string> {
     // (crew#549, crew#737) Read the configured deliver identity BEFORE anything composes the deliver
     // phase: the compose paths below are synchronous and bake it into the script. Launch-local.
-    const deliverIdentity = await this.resolveDeliverIdentity(input.repoRef, input.deliver === 'pr');
+    const deliverIdentity = await this.resolveDeliverIdentity(input.repoRef);
     // (F2) And the origin the push would go to — read once, for the gate card's target sentence.
     // Only a delivering launch composes a deliver phase, so only a delivering launch pays for it.
     const deliverOriginUrl = input.deliver === 'pr' ? await this.resolveDeliverOrigin(input.repoRef) : null;
     // (crew#720) And whether the provider credential is there — presence only, read once.
-    const deliverCredentials = input.deliver === 'pr' ? await deliverCredentialsProbe(deliverOriginUrl, process.env) : null;
+    const deliverCredentials = input.deliver === 'pr' ? await deliverCredentialsProbe(deliverOriginUrl, process.env, undefined, pushIdentityOf(deliverIdentity.login)) : null;
     const opts: LaunchOptions = {
       problem: input.problem,
       sessionId: input.sessionId,
@@ -2231,7 +2224,6 @@ export class CoreAdapter {
             // own pin wins, and the card says when it is not signed in here.
             deliverIdentity: deliverIdentity.login,
             deliverIdentitySource: deliverIdentity.source,
-            deliverIdentitySignedIn: deliverIdentity.signedIn,
             // crew#720 — the provider credential preflight, said on the card before approval.
             credentials: deliverCredentials,
           });
@@ -2734,8 +2726,8 @@ export class CoreAdapter {
     // (F2) The preview shows the deliver step's gate-card text, so it reads the same origin the
     // launch would. Local to this call, like the launch's.
     const previewOriginUrl = opts.deliver === true ? await this.resolveDeliverOrigin(opts.repoRef) : null;
-    const previewIdentity = await this.resolveDeliverIdentity(opts.repoRef, opts.deliver === true);
-    const previewCredentials = opts.deliver === true ? await deliverCredentialsProbe(previewOriginUrl, process.env) : null;
+    const previewIdentity = await this.resolveDeliverIdentity(opts.repoRef);
+    const previewCredentials = opts.deliver === true ? await deliverCredentialsProbe(previewOriginUrl, process.env, undefined, pushIdentityOf(previewIdentity.login)) : null;
     const deliverStep =
       opts.deliver === true
         ? JSON.stringify(

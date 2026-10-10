@@ -252,18 +252,20 @@ describe('the deliver gate card (DES-L9 §4) — push target + identity with its
    *  account on the RC1 rig. */
   const CROSS = " It refuses if gh's login and git's credential for the remote disagree.";
 
-  it('names the revised PR or the new-PR push, and the identity: pinned by GH_TOKEN / keyring / not set', () => {
-    expect(deliverGateInstructions({ revisesPr: { number: 273, headRef: HEAD, url: URL_273 }, ghAccount: 'release-bot', ghTokenPinned: true })).toBe(
-      `Pushes the run branch onto pull request #273 (branch ${HEAD}); no new PR. Push identity: release-bot (GH_ACCOUNT), pinned by GH_TOKEN — the phase refuses if gh's login differs at push time.${CROSS}`,
+  it('names the revised PR or the new-PR push, and the identity: pinned by GH_TOKEN / its own token / not set (crew#940)', () => {
+    const originUrl = 'https://github.com/o/r.git';
+    const SAME = ' git pushes with the same token, not its own configured credential.';
+    expect(deliverGateInstructions({ originUrl, revisesPr: { number: 273, headRef: HEAD, url: URL_273 }, ghAccount: 'release-bot', ghTokenPinned: true })).toBe(
+      `Pushes the run branch onto pull request #273 (branch ${HEAD}); no new PR. Push identity: release-bot (GH_ACCOUNT), pinned by GH_TOKEN — the phase refuses if that token authenticates as anyone else.${SAME}`,
     );
-    expect(deliverGateInstructions({ ghAccount: 'release-bot', ghTokenPinned: false })).toBe(
-      `Pushes the run branch to origin and opens a pull request; merge stays human. Push identity: release-bot (GH_ACCOUNT) — the phase pushes with that account's own gh token, so another tool switching gh's active account does not change it (a gh without \`auth token --user\` falls back to checking the active login). The phase refuses if gh's login differs.${CROSS}`,
+    expect(deliverGateInstructions({ originUrl, ghAccount: 'release-bot', ghTokenPinned: false })).toContain(
+      "Push identity: release-bot (GH_ACCOUNT) — the phase pushes and opens the pull request with release-bot's own gh token, whatever account gh has active." + SAME,
     );
     expect(deliverGateInstructions({})).toBe(
       `Pushes the run branch to origin and opens a pull request; merge stays human. Push identity: none configured — pushes as whatever login gh holds (set the deliver identity in system settings, or this repository's push identity, to pin it).${CROSS}`,
     );
     // Never the token itself.
-    expect(deliverGateInstructions({ ghAccount: 'a', ghTokenPinned: true })).not.toMatch(/ghp_|gho_/);
+    expect(deliverGateInstructions({ originUrl, ghAccount: 'a', ghTokenPinned: true })).not.toMatch(/ghp_|gho_/);
   });
 
   it('(crew#549) names WHERE the pin lives: the setting wins over the env var', () => {
@@ -274,6 +276,7 @@ describe('the deliver gate card (DES-L9 §4) — push target + identity with its
     ).toContain('Push identity: release-bot (the deliver identity setting)');
     expect(deliverGateInstructions({ ghAccount: 'env-bot' })).toContain('Push identity: env-bot (GH_ACCOUNT)');
     expect(deliverGateInstructions({})).toContain('set the deliver identity in system settings');
+    // Unpinned (no github.com origin, or nothing configured) the card states the cross-check.
     for (const card of [
       deliverGateInstructions({ deliverIdentity: 'release-bot' }),
       deliverGateInstructions({ ghAccount: 'env-bot' }),

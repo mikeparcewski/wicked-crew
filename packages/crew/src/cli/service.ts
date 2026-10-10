@@ -340,7 +340,7 @@ export async function installService(input: InstallInput, deps: ServiceDeps): Pr
     deps.log(
       `  not written to the unit (secret-shaped): ${omitted.join(', ')} — the service runs without them` +
         (omitted.includes('GH_TOKEN')
-          ? `; the deliver phase pushes with gh's keyring login${env['GH_ACCOUNT'] !== undefined ? ', checked against GH_ACCOUNT' : ''}`
+          ? `; the deliver phase pushes with ${env['GH_ACCOUNT'] !== undefined ? "GH_ACCOUNT's own gh token from the keyring" : "gh's keyring login"}`
           : ''),
     );
   }

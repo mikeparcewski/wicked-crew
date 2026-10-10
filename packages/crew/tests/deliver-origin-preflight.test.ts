@@ -119,7 +119,9 @@ describe('the deliver gate names the real origin (F2)', () => {
   it('the whole card carries it: origin sentence + identity + the credential cross-check', () => {
     const card = deliverGateInstructions({ originUrl: '/tmp/origin.git', ghAccount: 'release-bot', ghTokenPinned: true });
     expect(card).toContain('a local path, so no pull request can be opened against it');
-    expect(card).toContain('Push identity: release-bot (GH_ACCOUNT), pinned by GH_TOKEN');
+    // (crew#940) Off github.com the github.com identity does not apply, and git keeps its own
+    // credential, cross-checked.
+    expect(card).toContain('Push identity: release-bot (GH_ACCOUNT) applies to github.com origins only');
     expect(card).toContain("It refuses if gh's login and git's credential for the remote disagree.");
   });
 

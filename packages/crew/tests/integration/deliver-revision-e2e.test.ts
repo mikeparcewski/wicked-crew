@@ -9,11 +9,13 @@
 //      of the pull request the run revises. `POST /runs {revisesPr: N}` resolves it via the stub
 //      `gh pr view` and the engine bases the run worktree on `origin/wicked/prior-run`
 //      (`base_commit` on the wire == the PR head).
-//   2. `humanConfirm` is OMITTED and `GH_ACCOUNT` ≠ the stub gh login, so at the deliver gate the
-//      operator approves, the deliver script reads the identity FIRST and REFUSES (D-18), and the
-//      engine's deterministic arm PARKS the run at `awaitingHuman{gateKind:"escalation"}` — no
-//      `sessionFailed`, the worktree kept.
-//   3. Fix the daemon's gh login (set GH_ACCOUNT to the stub's login) and approve the escalation
+//   2. `humanConfirm` is OMITTED and origin carries a `pre-receive` hook that refuses every push, so
+//      at the deliver gate the operator approves, the deliver script commits, the remote REFUSES the
+//      push, and the engine's deterministic arm PARKS the run at
+//      `awaitingHuman{gateKind:"escalation"}` — no `sessionFailed`, the worktree kept. (Until
+//      crew#940 this leg was an identity refusal — GH_ACCOUNT ≠ gh's login — which a file-backed
+//      origin can no longer produce: the github.com identity applies to github.com origins only.)
+//   3. Fix the remote (drop the hook) and approve the escalation
 //      gate: the phase re-runs, pushes the run's one commit onto `refs/heads/wicked/prior-run`
 //      (no new PR), comments the run record, and the run completes. The PR branch gained exactly
 //      one commit; no `wicked/<run>` branch appears on origin.
@@ -25,7 +27,7 @@ process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { execFileSync } from 'node:child_process';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter } from '../../src/core/adapter.js';
@@ -183,8 +185,8 @@ beforeAll(async () => {
   for (const [k, v] of Object.entries({
     HOME: home,
     PATH: `${bin}:${process.env['PATH'] ?? ''}`,
-    // ≠ the stub login, so the first deliver refuses on identity (D-18). Fixed to STUB_LOGIN mid-test.
-    GH_ACCOUNT: 'someone-else',
+    // The operator's own identity must not leak in (the first deliver refuses on the origin's hook).
+    GH_ACCOUNT: '',
     GH_STUB_LOGIN: STUB_LOGIN,
     WICKED_CREW_AUDIT_LOG: join(dir, 'audit.log'),
   })) {
@@ -211,6 +213,9 @@ beforeAll(async () => {
   git(seed, 'commit', '-qm', 'fix: the prior run');
   git(seed, 'push', '-q', 'origin', PR_BRANCH);
   prHead = git(seed, 'rev-parse', PR_BRANCH).trim();
+  // The remote refuses the first deliver push (step 2); the test drops the hook for step 3.
+  writeFileSync(join(origin, 'hooks', 'pre-receive'), '#!/bin/sh\necho "protected: pushes need review" >&2\nexit 1\n');
+  chmodSync(join(origin, 'hooks', 'pre-receive'), 0o755);
 
   execFileSync('git', ['clone', '-q', origin, clone]);
   git(clone, 'config', 'user.email', 'runner@test');
@@ -242,7 +247,7 @@ afterAll(async () => {
   }
 });
 
-describe('DES-L9 §7 — revise an open PR: base on its head, refuse on identity → escalation gate, fix → deliver onto the PR branch', () => {
+describe('DES-L9 §7 — revise an open PR: base on its head, a refused push → escalation gate, fix → deliver onto the PR branch', () => {
   it('revisesPr bases the run on the PR head; a deliver refusal parks at escalation; the fix lands one commit on the PR branch', async () => {
     const repos = await adapter.listRepos();
     const repoId = repos.find((r) => r.name === 'deliver-l9-rev-ws')!.id;
@@ -277,7 +282,7 @@ describe('DES-L9 §7 — revise an open PR: base on its head, refuse on identity
     const approve1 = await postJson(`/api/v1/runs/${runId}/gate`, { approve: true });
     expect(approve1.status).toBe(200);
 
-    // (2a) The deliver script refuses on identity (GH_ACCOUNT ≠ the stub login) and the engine arm
+    // (2a) The remote refuses the deliver push (origin's pre-receive hook) and the engine arm
     // PARKS the run at an escalation gate — never `sessionFailed`, the worktree kept.
     const parked = await waitForRun(
       runId,
@@ -300,15 +305,15 @@ describe('DES-L9 §7 — revise an open PR: base on its head, refuse on identity
     if (reason.includes('no OS write boundary could be armed')) {
       console.error(
         'deliver-revision-e2e: no OS-sandbox tool on this host — the engine floor refusal parked the ' +
-          'run at escalation (proven above); the identity → fix → complete leg needs an armable floor and is skipped',
+          'run at escalation (proven above); the refused-push → fix → complete leg needs an armable floor and is skipped',
       );
       return;
     }
-    expect(reason).toContain('deliver: identity mismatch');
+    expect(reason).toContain('protected: pushes need review');
 
-    // (3) Fix the daemon's gh login (match the stub) and approve the escalation gate: the phase
-    // re-runs, pushes the run's commit onto the PR branch, comments, and the run completes.
-    process.env['GH_ACCOUNT'] = STUB_LOGIN;
+    // (3) Fix the remote (drop the hook) and approve the escalation gate: the phase re-runs,
+    // pushes the run's commit onto the PR branch, comments, and the run completes.
+    rmSync(join(origin, 'hooks', 'pre-receive'));
     const approve2 = await postJson(`/api/v1/runs/${runId}/gate`, { approve: true });
     expect(approve2.status).toBe(200);
     const done = await waitForRun(runId, (s) => s['status'] === 'completed' || s['status'] === 'failed', 'the run to complete');

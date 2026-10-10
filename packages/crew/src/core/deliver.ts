@@ -40,11 +40,13 @@
  *  (f) the PR URL is the last line of the phase output.
  *
  * One deliberate change from the field version: NO gh account is baked into crew code (the
- * overlay guarded a personal account). Instead, when the `GH_ACCOUNT` env var is set the script
- * compares it against `gh api user -q .login` and REFUSES when they differ (DES-L9 D-18, crew#549):
- * the daemon's push identity is what its gh — or an exported `GH_TOKEN` — holds, disclosed on the
- * deliver gate card, never switched at push time (the switch this replaced pushed under whatever
- * account it could flip to, and a 403 hard-failed the run). Unset ⇒ whatever gh holds, said aloud.
+ * overlay guarded a personal account). Instead the push identity is CONFIGURED (the deliver
+ * identity setting, the repository's pin, or the `GH_ACCOUNT` env var) and chosen PER COMMAND
+ * (crew#940): on a github.com origin the script reads that account's own token from gh's keyring
+ * and hands it to its gh calls and its git fetch/push alone, so gh's machine-wide active account
+ * never decides who pushes; an exported `GH_TOKEN` wins, and one that authenticates as another
+ * login is refused. It is disclosed on the deliver gate card and never switched at push time.
+ * Unset ⇒ whatever gh holds, said aloud.
  *
  * REVISION mode (DES-L9 / crew#550, `POST /runs {revisesPr}`): the run was based on an OPEN pull
  * request's head branch; the script pushes `wicked/<run>` onto `refs/heads/<that branch>` (the PR
@@ -243,10 +245,6 @@ export interface DeliverScriptOptions {
   /** (crew#737) Where the configured identity came from, for the gate card: the repository's own
    *  pin (`deliverIdentityByRepo`) or the daemon-wide setting. Absent ⇒ the daemon-wide setting. */
   deliverIdentitySource?: 'repo' | 'setting';
-  /** (crew#737) Whether the configured identity is signed in to gh on this machine, read at compose
-   *  time (`gh auth status`, bounded): `false` ⇒ the gate card says so BEFORE approval and the
-   *  phase will refuse; `null`/absent ⇒ unknown (no probe, gh absent, timed out). */
-  deliverIdentitySignedIn?: boolean | null;
   /** (crew#739) The sentinel nonce (16-64 hex digits). Absent ⇒ a fresh one per composition; a
    *  test passes one to read the sentinel deterministically. Refused at compose time otherwise. */
   nonce?: string;
@@ -272,25 +270,13 @@ export function deliverIdentityFor(
   return { login: (settings.deliverIdentityLogin ?? '').trim(), source: 'setting' };
 }
 
-/**
- * (crew#737) The logins gh holds for github.com on this machine (`gh auth status`), bounded to 4 s.
- * `null` when gh is absent, times out or answers nothing parseable — unknown, never "none". Reads
- * the account NAMES only; no token is read here.
- */
-export async function ghSignedInLogins(host = 'github.com'): Promise<string[] | null> {
-  const res = await new Promise<{ out: string; ok: boolean }>((resolve) => {
-    execFile(
-      'gh',
-      ['auth', 'status', '--hostname', host],
-      { timeout: 4_000, encoding: 'utf8', env: childEnvWithBootEstateDb(process.env) },
-      (err, stdout, stderr) => {
-        const spawnFailed = err !== null && typeof (err as { code?: unknown }).code !== 'number';
-        resolve({ out: `${String(stdout ?? '')}\n${String(stderr ?? '')}`, ok: !spawnFailed });
-      },
-    );
-  });
-  if (!res.ok) return null;
-  return parseGhAuthStatusLogins(res.out);
+/** (crew#940) The push identity a delivery pins: the configured login (the repository's pin or the
+ *  setting), else `GH_ACCOUNT`; `null` = none. Pure over `env`. */
+export function pushIdentityOf(configured: string | null | undefined, env: NodeJS.ProcessEnv = process.env): string | null {
+  const c = (configured ?? '').trim();
+  if (c !== '') return c;
+  const g = (env['GH_ACCOUNT'] ?? '').trim();
+  return g === '' ? null : g;
 }
 
 /** The logins in `gh auth status` text: "Logged in to <host> account <login>" (gh ≥ 2.40) or
@@ -687,12 +673,27 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // can never hand the header to another program (codex r1 + r2).
     `ADOPROTO=${shellSingleQuote(ado === null ? '' : new URL(ado.gitUrl).protocol.replace(':', ''))}`,
     "ADOHDR=''",
+    // (crew#940) THE PINNED GITHUB TOKEN lives in an UNEXPORTED shell variable and reaches each gh
+    // and git network call one command at a time (`GH_TOKEN=… gh`, a one-command credential
+    // helper for git) — never argv, disk or the log, and no child that does not talk to GitHub
+    // inherits it. GHGIT is the canonical https URL a pinned github.com delivery fetches from and
+    // pushes to; NETGIT is that URL or the Azure DevOps one, '' for a plain `origin` delivery.
+    // An ambient `http.extraHeader` (actions/checkout writes one per host) would authenticate
+    // before any helper is asked, and a `url.*.insteadOf` could rewrite the canonical URL to ssh
+    // (whose key is another identity), so the GitHub arm of `_gnet` resets the header, allows only
+    // https and refuses redirects, as the ADO arm does.
+    "GHT=''",
+    "GHPIN=''",
+    "GHGIT=''",
+    "NETGIT=''",
+    // Pinned, gh talks to github.com whatever GH_HOST / GH_REPO the daemon inherited (codex r2).
+    '_gh() { if [ -n "$GHT" ]; then GH_TOKEN="$GHT" GH_HOST=github.com GH_REPO="github.com/$GHREPO" gh "$@"; else gh "$@"; fi; }',
     // Plain `git` outside Azure DevOps mode; in it, the network calls carry the auth header ONE-SHOT
     // in the child's environment, scoped to the exact repository URL (`http.<url>.extraHeader`),
     // after an empty entry resets any ambient extra header; redirects are refused, hooks and
     // credential helpers are off. The header lives in an UNEXPORTED shell variable: no file, no
     // argv, no log, and no other child of this script inherits it.
-    `_gnet() { if [ -n "$ADOHDR" ]; then GIT_CONFIG_COUNT=4 GIT_CONFIG_KEY_0=http.extraHeader GIT_CONFIG_VALUE_0= GIT_CONFIG_KEY_1="http.$ADOGIT.extraHeader" GIT_CONFIG_VALUE_1= GIT_CONFIG_KEY_2="http.$ADOGIT.extraHeader" GIT_CONFIG_VALUE_2="Authorization: $ADOHDR" GIT_CONFIG_KEY_3=http.followRedirects GIT_CONFIG_VALUE_3=false GIT_TERMINAL_PROMPT=0 GIT_ALLOW_PROTOCOL="$ADOPROTO" git -c core.hooksPath=/dev/null -c credential.helper= "$@"; else git "$@"; fi; }`,
+    `_gnet() { if [ -n "$ADOHDR" ]; then GIT_CONFIG_COUNT=4 GIT_CONFIG_KEY_0=http.extraHeader GIT_CONFIG_VALUE_0= GIT_CONFIG_KEY_1="http.$ADOGIT.extraHeader" GIT_CONFIG_VALUE_1= GIT_CONFIG_KEY_2="http.$ADOGIT.extraHeader" GIT_CONFIG_VALUE_2="Authorization: $ADOHDR" GIT_CONFIG_KEY_3=http.followRedirects GIT_CONFIG_VALUE_3=false GIT_TERMINAL_PROMPT=0 GIT_ALLOW_PROTOCOL="$ADOPROTO" git -c core.hooksPath=/dev/null -c credential.helper= "$@"; elif [ -n "$GHGIT" ]; then GIT_CONFIG_COUNT=4 GIT_CONFIG_KEY_0=http.extraHeader GIT_CONFIG_VALUE_0= GIT_CONFIG_KEY_1="http.$GHGIT.extraHeader" GIT_CONFIG_VALUE_1= GIT_CONFIG_KEY_2=http.followRedirects GIT_CONFIG_VALUE_2=false GIT_CONFIG_KEY_3="http.$GHGIT.followRedirects" GIT_CONFIG_VALUE_3=false GIT_ALLOW_PROTOCOL=https GH_TOKEN="$GHT" GIT_TERMINAL_PROMPT=0 git -c credential.helper= -c 'credential.https://github.com.helper=!f() { test "$1" = get && echo username=x-access-token && echo "password=$GH_TOKEN"; }; f' "$@"; else git "$@"; fi; }`,
     'if [ -n "$ADOGIT" ]; then',
     '  echo "deliver: Azure DevOps origin — $ADOWEB (the push and the pull request use the daemon\'s Azure DevOps credential; gh is not used)"',
     `  if ! { [ -n "\${${ADO_PAT_ENV}:-}" ] || { ${ADO_SP_ENV.map((n) => `[ -n "\${${n}:-}" ]`).join(' && ')}; }; }; then _credmissing azure_devops "Azure DevOps credentials not configured: set ${ADO_SP_ENV.join(', ')} (a service principal) or ${ADO_PAT_ENV} in the daemon's environment and restart it."; fi`,
@@ -711,35 +712,67 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // The raw credential leaves the environment now: nothing this script runs later (the crew#426
     // npm preflight, git's commit machinery) can read it.
     `  unset ${[ADO_PAT_ENV, ...ADO_SP_ENV].join(' ')}`,
+    '  NETGIT="$ADOGIT"',
     'else',
     `CFG='${identity}'`,
     'if [ -n "$CFG" ]; then GH_ACCOUNT="$CFG"; fi',
-    // (crew#737) PIN THE PUSH TO THAT ACCOUNT, whatever gh's machine-wide ACTIVE account is now: with
-    // no GH_TOKEN exported, read the configured account's own token from gh's keyring
-    // (`gh auth token --user`) and export it for this phase only — gh (`gh api`, `gh pr create`) and
-    // gh's git credential helper then act as that account even if another tool runs
-    // `gh auth switch` mid-run. Never echoed. An account gh holds no token for is REFUSED before
-    // anything is staged; a gh too old for `--user` (the flag is refused) keeps the active-login
-    // check below.
-    'if [ -n "${GH_ACCOUNT:-}" ] && [ -z "${GH_TOKEN:-}" ]; then',
-    '  if T=$(gh auth token --hostname github.com --user "$GH_ACCOUNT" 2>/dev/null) && [ -n "$T" ]; then export GH_TOKEN="$T"; unset T; echo "deliver: pinned to $GH_ACCOUNT\'s own gh token for this phase"',
-    '  elif gh auth token --help 2>/dev/null | grep -q -- "--user"; then echo "deliver: $GH_ACCOUNT is not signed in to gh on this machine; nothing was staged, committed or pushed. Sign in (gh auth login) as $GH_ACCOUNT, or pick another push identity for this repository, then approve to retry the deliver phase"; exit 1',
-    '  fi',
-    'fi',
-    // (crew#720) GITHUB CREDENTIAL PREFLIGHT — parity with Azure DevOps. A github.com origin with no
-    // exported GH_TOKEN needs a gh signed in to github.com; gh absent or signed out is refused here,
-    // before anything is staged, with the shared credentials-missing refusal.
     `GHREPO='${ghRepo}'`,
-    'if [ -n "$GHREPO" ] && [ -z "${GH_TOKEN:-}" ]; then',
-    `  if ! command -v gh >/dev/null 2>&1; then _credmissing github "GitHub credentials not configured: gh is not installed and no GH_TOKEN is exported. Install gh and run gh auth login, or export GH_TOKEN in the daemon's environment."; fi`,
-    `  gh auth status --hostname github.com >/dev/null 2>&1 || _credmissing github "GitHub credentials not configured: gh is not signed in to github.com and no GH_TOKEN is exported. Run gh auth login on this machine, or export GH_TOKEN in the daemon's environment."`,
+    // (crew#940, operator ruling 2026-10-10) THE PUSH IDENTITY IS CHOSEN PER COMMAND. On a github.com
+    // origin an exported GH_TOKEN still wins; else, with an identity configured (the setting, the
+    // repository's pin, or GH_ACCOUNT), the script reads THAT account's token from gh's keyring
+    // itself (`gh auth token --user`) and hands it to its own gh calls and to its git fetch/push —
+    // so gh's machine-wide ACTIVE account (which other tools switch) never decides who pushes.
+    // An identity gh holds no token for is the shared "credentials not configured" refusal
+    // (crew#720's shape): before anything is staged, recoverable, said on the gate card too. Off
+    // github.com (GitHub Enterprise, GitLab, a local path) the github.com identity does not apply.
+    'if [ -n "$GHREPO" ]; then',
+    '  if [ -n "${GH_TOKEN:-}" ]; then GHT="$GH_TOKEN"; GHPIN=exported',
+    '  elif [ -n "${GH_ACCOUNT:-}" ]; then',
+    `    command -v gh >/dev/null 2>&1 || _credmissing github "GitHub credentials not configured: gh is not installed and no GH_TOKEN is exported, so $GH_ACCOUNT's token cannot be read. Install gh and run gh auth login as $GH_ACCOUNT, or export GH_TOKEN in the daemon's environment."`,
+    `    GHT=$(gh auth token --hostname github.com --user "$GH_ACCOUNT" 2>/dev/null || true); [ -n "$GHT" ] || _credmissing github "GitHub credentials not configured: gh holds no token for $GH_ACCOUNT on this machine and no GH_TOKEN is exported. Run gh auth login as $GH_ACCOUNT on this machine (gh 2.40 or newer), or export GH_TOKEN in the daemon's environment."`,
+    '    GHPIN=keyring',
+    '  else',
+    // (crew#720) Unpinned: gh's own login is the credential, so gh absent or signed out is the
+    // same credentials-missing refusal.
+    `    if ! command -v gh >/dev/null 2>&1; then _credmissing github "GitHub credentials not configured: gh is not installed and no GH_TOKEN is exported. Install gh and run gh auth login, or export GH_TOKEN in the daemon's environment."; fi`,
+    `    gh auth status --hostname github.com >/dev/null 2>&1 || _credmissing github "GitHub credentials not configured: gh is not signed in to github.com and no GH_TOKEN is exported. Run gh auth login on this machine, or export GH_TOKEN in the daemon's environment."`,
+    '  fi',
+    '  if [ -n "$GHT" ]; then GHGIT="https://github.com/$GHREPO.git"; NETGIT="$GHGIT"; fi',
+    // A `url.<base>.insteadOf` / `pushInsteadOf` that rewrites the canonical URL would send the
+    // fetch or push somewhere the pin does not reach (ssh, or https carrying its own credential):
+    // refuse before anything is staged rather than push under that identity (codex r1/r2).
+    '  if [ -n "$GHGIT" ]; then while IFS= read -r RW; do RWV=${RW#* }; [ -n "$RW" ] && [ -n "$RWV" ] || continue; case "$GHGIT" in "$RWV"*) echo "deliver: git config rewrites $RWV (a url.*.insteadOf), so the push would not go to $GHGIT with the pinned token; nothing was staged, committed or pushed. Remove the rewrite for this repository, then approve to retry the deliver phase"; exit 1;; esac; done <<GHRW_EOF',
+    '$(git config --get-regexp \'^url\\..*\\.(push)?insteadof$\' 2>/dev/null || true)',
+    'GHRW_EOF',
+    '  fi',
+    // The token now lives only in GHT; nothing this script runs that is not a gh or git network
+    // call (the npm preflight, git's commit machinery) inherits it.
+    '  if [ -n "$GHT" ]; then unset GH_TOKEN; fi',
+    'elif [ -n "${GH_ACCOUNT:-}" ]; then',
+    // An origin the composer could not read (GHREPO empty) that IS a github.com remote cannot be
+    // pinned: refuse rather than push under whatever credential git holds. The glob is loose on
+    // purpose — a look-alike host only refuses, it never pins.
+    '  case "$(git remote get-url --push --all origin 2>/dev/null | tr \'A-Z\' \'a-z\' || true)" in *github.com[:/]*) echo "deliver: origin is a github.com remote, but this delivery was composed without reading it, so the push identity $GH_ACCOUNT cannot be pinned; nothing was staged, committed or pushed. Approve to retry once the origin can be read, or reject and relaunch"; exit 1;; esac',
+    '  echo "deliver: the push identity $GH_ACCOUNT applies to github.com origins only; this origin is not one, so gh and git use their own credentials"',
     'fi',
-    'L=$(gh api user -q .login 2>/dev/null || true)',
-    'if [ -n "${GH_ACCOUNT:-}" ]; then',
-    '  [ "$L" = "$GH_ACCOUNT" ] || { echo "deliver: identity mismatch — GH_ACCOUNT is $GH_ACCOUNT but gh\'s active login is ${L:-unreadable}; nothing was staged, committed or pushed. Fix the daemon\'s gh login (switch gh\'s active account, or export GH_TOKEN in the daemon environment) and approve to retry the deliver phase"; exit 1; }',
-    '  if [ -n "${GH_TOKEN:-}" ]; then echo "deliver: pushing as $L (GH_ACCOUNT pinned by GH_TOKEN)"; else echo "deliver: pushing as $L (GH_ACCOUNT from the gh keyring — export GH_TOKEN to pin it)"; fi',
-    'elif [ -n "$L" ]; then echo "deliver: pushing as $L (GH_ACCOUNT not set — not pinned)"',
-    'else echo "deliver: pushing as an unknown login (gh not authenticated; GH_ACCOUNT not set — not pinned)"; fi',
+    // WHO PUSHES, said once. A keyring pin IS its account (the token was read for that login), so
+    // there is nothing to compare. An exported GH_TOKEN is the one credential that can belong to
+    // someone other than the configured identity: that mismatch is still refused.
+    'if [ "$GHPIN" = keyring ]; then L="$GH_ACCOUNT"; echo "deliver: pushing as $GH_ACCOUNT with its own gh token, pinned for this phase (gh\'s active account is not used)"',
+    'else',
+    '  L=$(_gh api user -q .login 2>/dev/null || true)',
+    '  if [ "$GHPIN" = exported ] && [ -n "${GH_ACCOUNT:-}" ]; then',
+    '    [ "$L" = "$GH_ACCOUNT" ] || { echo "deliver: identity mismatch — the push identity is $GH_ACCOUNT but the exported GH_TOKEN authenticates as ${L:-unreadable}; nothing was staged, committed or pushed. Export $GH_ACCOUNT\'s token as GH_TOKEN in the daemon environment (or unset GH_TOKEN so the phase reads $GH_ACCOUNT\'s own gh token), then approve to retry the deliver phase"; exit 1; }',
+    '    echo "deliver: pushing as $L (pinned by GH_TOKEN)"',
+    '  elif [ "$GHPIN" = exported ]; then echo "deliver: pushing as ${L:-an unknown login} (pinned by GH_TOKEN)"',
+    '  elif [ -n "$L" ]; then echo "deliver: pushing as $L (no push identity configured — not pinned)"',
+    '  else echo "deliver: pushing as an unknown login (gh not authenticated; no push identity configured — not pinned)"; fi',
+    'fi',
+    // A pinned github.com delivery fetches from and pushes to GHGIT with the pinned token as git's
+    // only credential, so git's configured helpers cannot hand it another account: the cross-check
+    // below applies to every OTHER delivery, where git still picks its own credential.
+    'if [ -n "$GHGIT" ]; then echo "deliver: git fetches and pushes https://github.com/$GHREPO with the same token (git\'s configured credential helpers are not used)"',
+    'else',
     // (crew#549 / F-RC1-010) THE CREDENTIAL CROSS-CHECK. `gh api user` says who gh is; it says
     // NOTHING about the credential `git push` will use. On the RC1 rig those two disagreed —
     // `git credential fill` handed git one account while `gh api user` reported another — and the
@@ -782,6 +815,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     '  "") echo "deliver: this worktree has no origin remote — no git credential applies";;',
     '  *) echo "deliver: origin is not an https remote — no git credential applies (ssh keys or a local path authenticate the push)";;',
     'esac',
+    'fi',
     'fi',
     // REVISION MODE inputs (DES-L9 / crew#550) — baked at compose time from the resolved PR, each
     // validated against a strict charset before it is spliced into a single-quoted literal. Empty
@@ -827,7 +861,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // default is trunk/develop/anything, not just main/master (Copilot on #303).
     // (crew#720) Azure DevOps: fetched from the validated canonical URL with the scoped header, into
     // origin's own tracking refs — never through origin's configured URLs (an ssh origin included).
-    `if [ -n "$ADOGIT" ]; then _gnet fetch -q "$ADOGIT" '+refs/heads/*:refs/remotes/origin/*' || { VERDICT=rejected; : > ${DELIVER_STRANDED_SENTINEL} || true; echo "deliver: Azure DevOps refused the fetch of $ADOWEB (above) — check that the credential can read the repository; nothing was staged, committed or pushed; approve to retry the deliver phase; ${DELIVER_PUSH_REJECTED_MARKER}"; exit 1; }; else git fetch origin; fi`,
+    `if [ -n "$ADOGIT" ]; then _gnet fetch -q "$ADOGIT" '+refs/heads/*:refs/remotes/origin/*' || { VERDICT=rejected; : > ${DELIVER_STRANDED_SENTINEL} || true; echo "deliver: Azure DevOps refused the fetch of $ADOWEB (above) — check that the credential can read the repository; nothing was staged, committed or pushed; approve to retry the deliver phase; ${DELIVER_PUSH_REJECTED_MARKER}"; exit 1; }; elif [ -n "$GHGIT" ]; then _gnet fetch -q "$GHGIT" '+refs/heads/*:refs/remotes/origin/*' || { VERDICT=rejected; : > ${DELIVER_STRANDED_SENTINEL} || true; echo "deliver: GitHub refused the fetch of https://github.com/$GHREPO as $L (above) — check that the credential can read the repository; nothing was staged, committed or pushed; approve to retry the deliver phase; ${DELIVER_PUSH_REJECTED_MARKER}"; exit 1; }; else git fetch origin; fi`,
     // …the way the ENGINE derives it (wicked-core `deliver_lift.rs`, review F-527-003): origin/HEAD
     // when it resolves to a commit — a DANGLING origin/HEAD (the remote's default branch renamed or
     // deleted since the clone) is tolerated — else origin/main, else origin/master, else origin/main
@@ -855,7 +889,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // Asked of the REMOTE (`ls-remote`), not of the clone's `origin/*` refs — a plain fetch never
     // prunes a branch deleted after the PR merged, so the local ref would still resolve and the
     // push would silently RE-CREATE the branch under a closed PR.
-    '  git ls-remote --exit-code --heads origin "$TARGET" >/dev/null 2>&1 && git rev-parse --verify -q "origin/$TARGET^{commit}" >/dev/null || { echo "deliver: pull request #$PRNUM\'s branch origin/$TARGET no longer exists on the remote; nothing was staged, committed or pushed"; exit 1; }',
+    '  _gnet ls-remote --exit-code --heads "${NETGIT:-origin}" "$TARGET" >/dev/null 2>&1 && git rev-parse --verify -q "origin/$TARGET^{commit}" >/dev/null || { echo "deliver: pull request #$PRNUM\'s branch origin/$TARGET no longer exists on the remote; nothing was staged, committed or pushed"; exit 1; }',
     '  git merge-base --is-ancestor "origin/$TARGET" "$B" || { echo "deliver: pull request #$PRNUM\'s branch moved since this run based on it (origin/$TARGET is no longer an ancestor of $B); nothing was staged, committed or pushed — launch a new revision on the current head, or rebase $B onto origin/$TARGET by hand and approve to retry"; echo "deliver: pull request #$PRNUM\'s branch moved — refused; nothing was pushed"; exit 1; }',
     'fi',
     // (a2) VERIFIED-BASE PIN (wicked-core#431 / #433). Before this script runs, the engine LIFTED the
@@ -1196,7 +1230,10 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // A revision pushes the run branch ONTO the PR's head branch (`$B:refs/heads/$TARGET`) — the
     // PR gains exactly the run's commits; a rejection there is the same recoverable strand.
     // (crew#720) Azure DevOps pushes to the validated canonical URL with the scoped header.
-    '_push() { if [ -n "$ADOGIT" ]; then _gnet push "$ADOGIT" "$B:refs/heads/$B"; elif [ -n "$TARGET" ]; then git push origin "$B:refs/heads/$TARGET"; else git push -u origin "$B"; fi; }',
+    // (crew#940) A pinned github.com delivery pushes to its canonical URL the same way, and both
+    // re-fetch the pushed ref into origin's tracking ref (a push to a URL updates none) so the
+    // done checks below read the remote.
+    '_push() { if [ -n "$NETGIT" ]; then _gnet push "$NETGIT" "$B:refs/heads/${TARGET:-$B}" && _gnet fetch -q "$NETGIT" "+refs/heads/${TARGET:-$B}:refs/remotes/origin/${TARGET:-$B}"; elif [ -n "$TARGET" ]; then git push origin "$B:refs/heads/$TARGET"; else git push -u origin "$B"; fi; }',
     // (crew#739) The branch-pushed fact is said in the script's own words, so a later failure (a gh
     // error on `gh pr create`) still records that the branch reached the remote.
     'if PUSHOUT=$(_push 2>&1); then echo "$PUSHOUT"; echo "deliver: pushed $B to origin"; else',
@@ -1228,12 +1265,12 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // rides `gh pr comment` (the body the PR-create path would have used); a comment failure is
     // printed, not fatal — the commit message carries the same record.
     'if [ -n "$TARGET" ]; then',
-    '  git fetch -q origin "$TARGET"',
+    '  _gnet fetch -q "${NETGIT:-origin}" "+refs/heads/$TARGET:refs/remotes/origin/$TARGET"',
     '  RT=$(git rev-parse "origin/$TARGET"); LT=$(git rev-parse "$B")',
     '  [ "$RT" = "$LT" ] || { echo "deliver: origin/$TARGET is at ${RT:0:10} after the push, not at $B (${LT:0:10}) — refusing to report a delivery the remote does not show"; exit 1; }',
-    '  ST=$(gh pr view "$PRNUM" --json state -q .state 2>/dev/null || true)',
+    '  ST=$(_gh pr view "$PRNUM" ${GHREPO:+--repo "github.com/$GHREPO"} --json state -q .state 2>/dev/null || true)',
     '  if [ "$ST" = "OPEN" ]; then echo "deliver: pull request #$PRNUM is OPEN and its branch $TARGET is at $B"; else echo "deliver: warning — pull request #$PRNUM reads ${ST:-unknown} (not OPEN) after the push; the commits landed on origin/$TARGET"; fi',
-    '  if COUT=$(gh pr comment "$PRNUM" --body-file "$TD/body" 2>&1); then echo "deliver: run record commented on pull request #$PRNUM"; else echo "$COUT"; echo "deliver: could not comment on pull request #$PRNUM — the commits landed; the record is in the commit message"; fi',
+    '  if COUT=$(_gh pr comment "$PRNUM" ${GHREPO:+--repo "github.com/$GHREPO"} --body-file "$TD/body" 2>&1); then echo "deliver: run record commented on pull request #$PRNUM"; else echo "$COUT"; echo "deliver: could not comment on pull request #$PRNUM — the commits landed; the record is in the commit message"; fi',
     '  URL="$PRURL"',
     'else',
     // (e2) A NON-GITHUB ORIGIN DELIVERS THE BRANCH (F2). `gh pr create` failing used to be
@@ -1260,7 +1297,6 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // branch is adopted (a retry after the push landed). Done is re-derived as on GitHub: a PR URL
     // AND the remote branch (re-fetched from the canonical URL) ahead of the base.
     '  if [ -n "$ADOGIT" ]; then',
-    '  _gnet fetch -q "$ADOGIT" "+refs/heads/$B:refs/remotes/origin/$B"',
     `  printf '%s\\n' "$TITLE" > "$TD/title"`,
     '  if ! OUT=$(WICKED_ADO_AUTH="$ADOHDR" "$ADONODE" "$TD/ado.mjs" pr "$ADOAPI" "$ADOWEB" "$B" "$DEF" "$TD/title" "$TD/body"); then echo "deliver: the Azure DevOps pull request for $B was not opened (above) — the branch is pushed; approve to retry the deliver phase (it re-pushes $B and opens or adopts the pull request)"; exit 1; fi',
     '  echo "$OUT"',
@@ -1271,7 +1307,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     '  [ "$P" -ge 1 ] || { echo "deliver: $B is not ahead of $D on the remote after the push — refusing to report a delivery with no commits"; exit 1; }',
     '  if [ -n "${EXISTING:-}" ]; then echo "deliver: pull request $URL already exists for $B (an earlier attempt of this run opened it); the push updated it with $P commit(s) on top of $D — recorded as this run\'s delivery"; fi',
     '  else',
-    '  if ! OUT=$(gh pr create ${GHREPO:+--repo "$GHREPO"} --head "$B" --title "$TITLE" --body-file "$TD/body" 2>&1); then',
+    '  if ! OUT=$(_gh pr create ${GHREPO:+--repo "$GHREPO"} --head "$B" --title "$TITLE" --body-file "$TD/body" 2>&1); then',
     '    echo "$OUT"',
     '    case "$OUT" in',
     '      *"git remotes configured for this repository"*"known GitHub host"*)',
@@ -1306,7 +1342,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     '  [ "$P" -ge 1 ] || { echo "deliver: $B is not ahead of $D on the remote after the push — refusing to report a delivery with no commits"; exit 1; }',
     '  if [ -n "${EXISTING:-}" ]; then',
     '    echo "deliver: pull request $URL already exists for $B (an earlier attempt of this run opened it); the push updated it with $P commit(s) on top of $D — recorded as this run\'s delivery"',
-    '    if COUT=$(gh pr comment "$URL" --body-file "$TD/body" 2>&1); then echo "deliver: run record commented on $URL"; else echo "$COUT"; echo "deliver: could not comment on $URL — the commits landed; the record is in the commit message"; fi',
+    '    if COUT=$(_gh pr comment "$URL" --body-file "$TD/body" 2>&1); then echo "deliver: run record commented on $URL"; else echo "$COUT"; echo "deliver: could not comment on $URL — the commits landed; the record is in the commit message"; fi',
     '  fi',
     '  fi',
     'fi',
@@ -1597,14 +1633,22 @@ export function deliverGateInstructions(opts: DeliverScriptOptions): string {
   const account = configured !== '' ? configured : (opts.ghAccount ?? null);
   const source =
     configured !== '' ? (opts.deliverIdentitySource === 'repo' ? "this repository's push identity" : 'the deliver identity setting') : 'GH_ACCOUNT';
-  const who =
-    account !== null && account !== ''
-      ? opts.deliverIdentitySignedIn === false && opts.ghTokenPinned !== true
-        ? `Pushes as ${account} (${source}) — NOT signed in to gh on this machine: sign in (gh auth login) as ${account} or pick another push identity first; the phase will refuse and push nothing.`
-        : opts.ghTokenPinned === true
-          ? `Push identity: ${account} (${source}), pinned by GH_TOKEN — the phase refuses if gh's login differs at push time.`
-          : `Push identity: ${account} (${source}) — the phase pushes with that account's own gh token, so another tool switching gh's active account does not change it (a gh without \`auth token --user\` falls back to checking the active login). The phase refuses if gh's login differs.`
-      : 'Push identity: none configured — pushes as whatever login gh holds (set the deliver identity in system settings, or this repository\'s push identity, to pin it).';
+  const configuredAccount = account !== null && account !== '';
+  // (crew#940) The identity is pinned per command on a github.com origin: the token is the
+  // account's own (or an exported GH_TOKEN), and git pushes with that same token.
+  const github = githubRepoOf(opts.originUrl) !== null;
+  const pinned = github && (configuredAccount || opts.ghTokenPinned === true);
+  const who = !github
+    ? configuredAccount
+      ? `Push identity: ${account} (${source}) applies to github.com origins only; this push uses whatever credential the remote's host takes.`
+      : 'Push identity: none configured — pushes as whatever login gh holds (set the deliver identity in system settings, or this repository\'s push identity, to pin it).'
+    : configuredAccount
+      ? opts.ghTokenPinned === true
+        ? `Push identity: ${account} (${source}), pinned by GH_TOKEN — the phase refuses if that token authenticates as anyone else.`
+        : `Push identity: ${account} (${source}) — the phase pushes and opens the pull request with ${account}'s own gh token, whatever account gh has active.`
+      : opts.ghTokenPinned === true
+        ? 'Push identity: the login of the exported GH_TOKEN (no push identity configured).'
+        : 'Push identity: none configured — pushes as whatever login gh holds (set the deliver identity in system settings, or this repository\'s push identity, to pin it).';
   // (crew#720) The provider credential preflight read at compose time: a missing credential is said
   // BEFORE approval, on the card, in the same words the phase refuses with.
   const cred = opts.credentials ?? null;
@@ -1620,10 +1664,10 @@ export function deliverGateInstructions(opts: DeliverScriptOptions): string {
           : '';
     return `${target} ${credSentence}${how}It refuses if origin no longer points at that repository.`.replace(/\s+$/, '');
   }
-  // Whatever is configured, the phase also asks git which credential IT would use for the
-  // remote's host and refuses when the two logins disagree — the flip that pushed under an
-  // unintended account (F-RC1-010).
-  return `${target} ${credSentence}${who} It refuses if gh's login and git's credential for the remote disagree.`;
+  // Pinned, git pushes with the same token; otherwise the phase asks git which credential IT would
+  // use for the remote's host and refuses when the two logins disagree (F-RC1-010).
+  const git = pinned ? 'git pushes with the same token, not its own configured credential.' : "It refuses if gh's login and git's credential for the remote disagree.";
+  return `${target} ${credSentence}${who} ${git}`;
 }
 
 /**
@@ -1658,8 +1702,6 @@ export interface DeliverLaunchContext {
   deliverIdentity?: string | null;
   /** (crew#737) Where that identity came from (the repository's pin or the daemon setting). */
   deliverIdentitySource?: 'repo' | 'setting';
-  /** (crew#737) Whether it is signed in to gh here (`null`/absent = unknown). */
-  deliverIdentitySignedIn?: boolean | null;
   /** (crew#720) The provider credential preflight for the gate card (`null`/absent = none read). */
   credentials?: DeliverCredentials | null;
 }
@@ -1703,7 +1745,6 @@ export function deliverPresetStep(
     originUrl: launch.originUrl ?? null,
     deliverIdentity: launch.deliverIdentity ?? null,
     ...(launch.deliverIdentitySource !== undefined ? { deliverIdentitySource: launch.deliverIdentitySource } : {}),
-    ...(launch.deliverIdentitySignedIn !== undefined ? { deliverIdentitySignedIn: launch.deliverIdentitySignedIn } : {}),
     credentials: launch.credentials ?? null,
   });
   return {
@@ -1757,7 +1798,6 @@ export function composeDeliverWorkflow(
     originUrl: launch.originUrl ?? null,
     deliverIdentity: launch.deliverIdentity ?? null,
     ...(launch.deliverIdentitySource !== undefined ? { deliverIdentitySource: launch.deliverIdentitySource } : {}),
-    ...(launch.deliverIdentitySignedIn !== undefined ? { deliverIdentitySignedIn: launch.deliverIdentitySignedIn } : {}),
     credentials: launch.credentials ?? null,
   });
   return {
