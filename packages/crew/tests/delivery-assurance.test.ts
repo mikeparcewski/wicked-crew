@@ -449,7 +449,8 @@ describe('QE-IN-APP-WORKFLOWS at launch — the operator\'s explicit skip or for
       launchRun: vi.fn(async (input: unknown) => { launched.push(input); return 'x'; }),
     } as unknown as CoreAdapter, new GateCache(), new ElicitationCache());
     await a.ready();
-    for (const workflow of ['feature', 'migration']) {
+    // core-ts 0.8.2: `bug` and `mcp-server` are QE presets too (codex r3 on crew A).
+    for (const workflow of ['feature', 'migration', 'bug', 'mcp-server']) {
       const res = await a.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'p', workflow, deliverGate: 'auto', clisJson: '[]' } });
       expect(res.statusCode, `${workflow}: ${res.body}`).toBe(400);
       expect(res.json().error).toMatch(/requires QE acceptance/);
