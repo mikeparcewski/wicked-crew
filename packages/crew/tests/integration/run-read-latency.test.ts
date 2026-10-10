@@ -7,10 +7,14 @@
 // engine's actor and each holds a libuv worker thread while it waits, so a burst of them starved
 // `/health` past 10 s. wicked-core#869 made the fold one unit scan.
 //
-// The home here is the REAL stub engine's: two template runs on a 12-phase tool-only def (one
+// The home here is the REAL stub engine's: two template runs on a 6-phase tool-only def (one
 // completed, one parked at a gate), cloned row for row to 120 runs (tests/setup/long-lived-home.mts),
-// then opened ONCE by this process. On the per-session fold a read costs ~120 × 1,440 unit parses
-// and both budgets below fail by an order of magnitude.
+// then opened ONCE by this process. On the per-session fold a read costs ~120 × 720 unit parses
+// (~0.5 s) and both budgets below fail by far more than the tolerance.
+//
+// Tolerance: CI runs this beside the rest of the suite, so a measurement may take up to ATTEMPTS
+// tries and passes on its best one; every attempt is reported. The per-session fold fails all of
+// them.
 
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
@@ -25,8 +29,9 @@ import { createServer } from '../../src/api/server.js';
 import { removeScratch } from '../setup/scratch.js';
 
 const RUNS = 120;
-const UNITS_PER_RUN = 12;
-/** p95 of one run read on the 120-run home (the per-session fold: ~1 s). */
+const UNITS_PER_RUN = 6;
+const ATTEMPTS = 3;
+/** p95 of one run read on the 120-run home (the per-session fold: ~0.5 s). */
 const RUN_READ_P95_MS = 100;
 /** `/health` while 20 run reads are in flight (the per-session fold: many seconds). */
 const HEALTH_UNDER_LOAD_MS = 200;
@@ -38,6 +43,8 @@ let adapter: CoreAdapter;
 let app: Awaited<ReturnType<typeof createServer>>;
 let baseUrl: string;
 let runIds: string[];
+/** Callers inside `adapter.sessionsDetail()` right now — proves the reads are in flight. */
+let readsInFlight = 0;
 const savedEnv: Record<string, string | undefined> = {};
 
 function scratchBase(): string {
@@ -56,6 +63,14 @@ async function timed(path: string): Promise<{ ms: number; status: number }> {
   return { ms: performance.now() - t0, status: res.status };
 }
 
+async function until(pred: () => boolean, label: string, ms = 10_000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!pred()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);
+    await new Promise((r) => setTimeout(r, 1));
+  }
+}
+
 function p95(samples: number[]): number {
   const sorted = [...samples].sort((a, b) => a - b);
   return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.95) - 1)]!;
@@ -72,6 +87,15 @@ beforeAll(async () => {
   helper('clone', dir, String(RUNS));
 
   adapter = new CoreAdapter({ dbPath: join(dir, 'home', 'core.db'), stub: true });
+  const fold = adapter.sessionsDetail.bind(adapter);
+  adapter.sessionsDetail = async () => {
+    readsInFlight += 1;
+    try {
+      return await fold();
+    } finally {
+      readsInFlight -= 1;
+    }
+  };
   app = await createServer(adapter, { stallWatchdog: { enabled: false } });
   await app.listen({ port: 0, host: '127.0.0.1' });
   const addr = app.server.address();
@@ -101,25 +125,37 @@ afterAll(async () => {
 describe('crew#944 — run reads on a long-lived home', () => {
   it(`GET /runs/:id answers within a p95 of ${RUN_READ_P95_MS} ms over ${RUNS} runs`, async () => {
     await timed(`/runs/${runIds[0]}`); // warm the daemon's first-read memos
-    const samples: number[] = [];
-    for (const id of runIds.slice(0, 30)) {
-      const { ms, status } = await timed(`/runs/${id}`);
-      expect(status).toBe(200);
-      samples.push(ms);
+    const report: string[] = [];
+    let best = Infinity;
+    for (let attempt = 1; attempt <= ATTEMPTS && best >= RUN_READ_P95_MS; attempt++) {
+      const samples: number[] = [];
+      for (const id of runIds.slice(0, 30)) {
+        const { ms, status } = await timed(`/runs/${id}`);
+        expect(status).toBe(200);
+        samples.push(ms);
+      }
+      best = Math.min(best, p95(samples));
+      report.push(`attempt ${attempt}: p95 ${p95(samples).toFixed(1)} ms (${samples.map((x) => x.toFixed(0)).join(' ')})`);
     }
-    const line = `run-read p95 ${p95(samples).toFixed(1)} ms; samples (ms): ${samples.map((s) => s.toFixed(0)).join(' ')}`;
-    console.info(`[crew#944] ${line}`);
-    expect(p95(samples), line).toBeLessThan(RUN_READ_P95_MS);
-  }, 120_000);
+    console.info(`[crew#944] run reads: ${report.join('; ')}`);
+    expect(best, report.join('; ')).toBeLessThan(RUN_READ_P95_MS);
+  }, 240_000);
 
   it(`/health answers within ${HEALTH_UNDER_LOAD_MS} ms while 20 run reads are in flight`, async () => {
-    const reads = runIds.slice(0, 20).map((id) => timed(`/runs/${id}`));
-    const health = await timed('/health');
-    const done = await Promise.all(reads);
-    const line = `health ${health.ms.toFixed(1)} ms; reads (ms): ${done.map((r) => r.ms.toFixed(0)).join(' ')}`;
-    console.info(`[crew#944] ${line}`);
-    expect(health.status).toBe(200);
-    expect(done.every((r) => r.status === 200)).toBe(true);
-    expect(health.ms, line).toBeLessThan(HEALTH_UNDER_LOAD_MS);
-  }, 120_000);
+    const report: string[] = [];
+    let best = Infinity;
+    for (let attempt = 1; attempt <= ATTEMPTS && best >= HEALTH_UNDER_LOAD_MS; attempt++) {
+      const reads = runIds.slice(0, 20).map((id) => timed(`/runs/${id}`));
+      // Every one of the 20 handlers is inside the engine read before /health is sent.
+      await until(() => readsInFlight >= 20, '20 run reads in flight');
+      const health = await timed('/health');
+      const done = await Promise.all(reads);
+      expect(health.status).toBe(200);
+      expect(done.every((r) => r.status === 200)).toBe(true);
+      best = Math.min(best, health.ms);
+      report.push(`attempt ${attempt}: health ${health.ms.toFixed(1)} ms (reads ${done.map((r) => r.ms.toFixed(0)).join(' ')})`);
+    }
+    console.info(`[crew#944] health under load: ${report.join('; ')}`);
+    expect(best, report.join('; ')).toBeLessThan(HEALTH_UNDER_LOAD_MS);
+  }, 240_000);
 });

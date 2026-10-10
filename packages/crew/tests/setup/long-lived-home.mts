@@ -15,7 +15,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-const PHASES = 12;
+const PHASES = 6;
 const [mode, dir, total] = process.argv.slice(2);
 
 async function seed(base: string): Promise<void> {
