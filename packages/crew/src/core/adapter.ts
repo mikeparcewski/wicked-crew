@@ -2578,7 +2578,7 @@ export class CoreAdapter {
    * with no name (a user plan, free text, unknown) keeps the engine's id.
    */
   async sessionsDetail(): Promise<SessionView[]> {
-    const views = JSON.parse(await this.core.sessionsDetail()) as SessionView[];
+    const views = JSON.parse(await this.engineSessionsDetail()) as SessionView[];
     const needsLaunch = (v: SessionView): boolean =>
       (v.session as { team_plan?: unknown }).team_plan == null &&
       typeof v.session.workflow_id === 'string' &&
@@ -2599,6 +2599,41 @@ export class CoreAdapter {
       }
     }
     return views;
+  }
+
+  /** The engine's sessions-detail fold running now, and the one every caller that arrived during it shares. */
+  private detailRunning: Promise<string> | null = null;
+  private detailNext: Promise<string> | null = null;
+
+  /**
+   * The engine's whole-store sessions-detail read, at most one running and one queued (crew#944).
+   * Each call is a fold on the engine's single actor, and the binding holds a libuv worker thread
+   * blocked on the actor's reply until it is served. So N concurrent run reads used to queue N
+   * folds and pin the whole pool, and `/health` (its ping, its state-home readdir) waited behind
+   * all of them. A caller that arrives while a fold runs shares the NEXT fold, which starts after
+   * the running one ends. It never takes the running one's answer, so every caller still reads
+   * a fold that started after it asked (a write it saw committed is in it). Each caller parses its
+   * own copy of the JSON, because callers decorate the views they get in place.
+   */
+  private engineSessionsDetail(): Promise<string> {
+    if (this.detailNext !== null) return this.detailNext;
+    if (this.detailRunning === null) return this.startSessionsDetail();
+    const next = this.detailRunning
+      .catch(() => undefined)
+      .then(() => {
+        this.detailNext = null;
+        return this.startSessionsDetail();
+      });
+    this.detailNext = next;
+    return next;
+  }
+
+  private startSessionsDetail(): Promise<string> {
+    const running: Promise<string> = this.core.sessionsDetail().finally(() => {
+      if (this.detailRunning === running) this.detailRunning = null;
+    });
+    this.detailRunning = running;
+    return running;
   }
 
   /** A unit's captured transcript (string, or `null`). */
