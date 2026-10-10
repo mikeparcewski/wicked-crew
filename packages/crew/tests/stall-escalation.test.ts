@@ -184,6 +184,28 @@ describe('perf#4: default-ON', () => {
   });
 });
 
+describe('core#762: a turn the engine SETTLED is a returned worker, never a reassign', () => {
+  it('acpTurnSettled for the cursor unit: the escalation notifies `evaluating` and touches nothing', async () => {
+    const { wd, frames, reassigns, tick } = build();
+    wd.ingest(ev({ type: 'unitOutputDelta', session: 'r-wedge', ord: 3, text: 'the evidence table' }));
+    wd.ingest(ev({ type: 'acpTurnSettled', session: 'r-wedge', ord: 3, attempt: 0, cliKey: 'claude', quietSecs: 600, outputBytes: 5051 }));
+    tick(31 * MIN);
+    await wd.sweep();
+    expect(reassigns).toEqual([]);
+    expect(escalatedOf(frames)[0]).toMatchObject({ action: 'notify', reason: 'evaluating', needsYou: true });
+  });
+
+  it('a settle for an EARLIER unit does not shield a later unit\'s wedge', async () => {
+    const { wd, frames, reassigns, tick } = build();
+    wd.ingest(ev({ type: 'acpTurnSettled', session: 'r-wedge', ord: 2, attempt: 0, cliKey: 'claude', quietSecs: 600, outputBytes: 10 }));
+    wd.ingest(ev({ type: 'unitDispatched', session: 'r-wedge', ord: 3 }));
+    tick(31 * MIN);
+    await wd.sweep();
+    expect(reassigns).toHaveLength(1);
+    expect(escalatedOf(frames)[0]).toMatchObject({ action: 'reassign', outcome: 'ok' });
+  });
+});
+
 describe('perf#4: reassign routes to a DIFFERENT seat from the run pool', () => {
   it('fails over to the first other pool seat, reporting target and stalled seat apart', async () => {
     const { wd, frames, reassigns, tick } = build({
