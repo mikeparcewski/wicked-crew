@@ -5274,6 +5274,50 @@ export interface ElicitationResponse {
   content?: { response: string };
 }
 
+// ── Inventory claims (wicked-crew#721) — whether each enumerating step's list is complete ──
+
+/**
+ * How fully an enumerating step's source answered (wicked-garden `core/refs/inventory-report.md`).
+ * `unknown` is crew's own reading of a block that does not parse, or has a required field missing
+ * or misshapen: it never reads as `full`.
+ */
+export type InventoryAnswered = 'full' | 'partial' | 'none' | 'unknown';
+
+/**
+ * One `wicked-inventory` block a step ended its reply with: where it listed from, how fully the
+ * source answered, how many it listed, the total the source reported (`null` when it reports
+ * none) and what it could not read. A `full` its own numbers contradict reads `partial`, with the
+ * contradiction added to `unread`.
+ */
+export interface InventoryClaim {
+  source: string | null;
+  answered: InventoryAnswered;
+  listed: number | null;
+  expected: number | null;
+  unread: string[];
+}
+
+/** One unit of a run that claimed an inventory. */
+export interface RunInventoryUnit {
+  ord: number;
+  unitId: string;
+  claims: InventoryClaim[];
+}
+
+/**
+ * `GET /runs/:id/inventory` (404 for an unknown run). `complete` is true only when at least one
+ * unit claimed an inventory, every claim is `full` and every finished unit's output was readable;
+ * a unit whose output could not be read is listed in `unreadUnits`. `readable: false` when the
+ * adapter keeps no transcripts (then `units` and `unreadUnits` are empty).
+ */
+export interface RunInventoryResponse {
+  runId: string;
+  readable: boolean;
+  complete: boolean;
+  units: RunInventoryUnit[];
+  unreadUnits: string[];
+}
+
 // ── Presets (DES-TEAMING-002 §8.4, seam C2) — saved phase selections ──────────
 
 /**

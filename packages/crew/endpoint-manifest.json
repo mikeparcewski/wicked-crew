@@ -1513,7 +1513,7 @@
       "method": "GET",
       "path": "/api/v1/runs/:id/inventory",
       "requestType": null,
-      "responseType": "{ runId: string; readable: boolean; complete: boolean; units: { ord: number; unitId: string; claims: InventoryClaim[] }[]; unreadUnits: string[] }",
+      "responseType": "RunInventoryResponse",
       "statusCodes": [
         200,
         404
