@@ -326,15 +326,22 @@ describe.skipIf(!ENGINE_HAS_PLANS)('run identity through the real engine', () =>
   });
 
   it('delivery-index: a preset run classifies by what it CONTAINS, not the def under its name', async () => {
-    // `steering-author`'s registered def does no code work, but this preset's steps do (`build`):
-    // the run is a delivery candidate because of the units the engine planned. (It was
-    // `capture-learnings` until wicked-core#829 made that one a BUILT-IN preset, read-only.)
-    const v = await launchPreset('steering-author');
-    expect(runWorkflowDef(v, adapter.listWorkflows())?.id).toBe('steering-author');
+    // A registered def that does no code work, and a user preset of the SAME name whose steps do
+    // (`build`): the run is a delivery candidate because of the units the engine planned. The name
+    // is the test's own, so no M-seam that seeds a built-in can take it (it was `capture-learnings`,
+    // then `steering-author`, each of which becomes a read-only built-in as its seam lands).
+    await adapter.registerWorkflow({
+      id: 'x2-prose-def',
+      phases: [
+        { id: 'look', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
+      ],
+    });
+    const v = await launchPreset('x2-prose-def');
+    expect(runWorkflowDef(v, adapter.listWorkflows())?.id).toBe('x2-prose-def');
     expect(v.units.some((u) => u.executes_code === true && u.role !== 'evaluator')).toBe(true);
     expect(canDeliverResolver(() => adapter.listWorkflows())(v)).toBe(true);
     const served = (await (await fetch(`${baseUrl}/api/v1/runs/${v.session.id}`)).json()) as { run: SessionView };
-    expect(served.run.session.run_identity).toMatchObject({ name: 'steering-author', system: true });
+    expect(served.run.session.run_identity).toMatchObject({ kind: 'preset', name: 'x2-prose-def', system: false });
   });
 
   it('a user plan resolves as a user plan', async () => {
