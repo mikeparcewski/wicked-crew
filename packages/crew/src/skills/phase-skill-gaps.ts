@@ -17,6 +17,11 @@
  * not governed the way it claims. Refusing here would stop every interactive ask on a snapshot that
  * was merely never republished — a capability outage for a quality gap.
  *
+ * Since crew#935 (X-MIG M9) the interactive seams no longer arm this way: draft / edit / chat are
+ * wicked-core built-in presets that ALWAYS run the skill, and a snapshot without it fails the run
+ * instead of running it unarmed (fail closed, the operator's call on wicked-core#860). The machinery
+ * below stays for any seam that arms degraded; none of the shipped seams does today.
+ *
  * Two halves, both keyed on what the seam DECIDED at arm time (the decision holds until restart —
  * a republish does not re-arm a running seam, so "the snapshot holds it now" is not the answer):
  *

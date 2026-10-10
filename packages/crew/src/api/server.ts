@@ -44,13 +44,13 @@ import { DeliveryFreeze } from './delivery-freeze.js';
 import { DeliveryDerivationCache } from './delivery-cache.js';
 import { registerClient, broadcast } from '../events/bus.js';
 import { TerminalHub, registerTerminalWs } from '../events/terminals.js';
-import { INTERACTIVE_DRAFT_WORKFLOW_DEF, startInteractiveDraftSubscriber, isAnotherProjectsDraftKey } from '../interactive/draft-events.js';
-import { INTERACTIVE_EDIT_WORKFLOW_DEF, startInteractiveEditSubscriber } from '../interactive/edit-events.js';
+import { startInteractiveDraftSubscriber, isAnotherProjectsDraftKey } from '../interactive/draft-events.js';
+import { startInteractiveEditSubscriber } from '../interactive/edit-events.js';
 import { putLearnedThemeViaBridge, startInteractiveThemeSubscriber } from '../interactive/theme-events.js';
 import { authoringRunsFromLedgers, isAnotherProjectsReviewKey, readDocVersionViaBridge, startInteractiveReviewSubscriber } from '../interactive/review-events.js';
 import { REVIEWS_DIRNAME, removeDocReviews } from '../interactive/review-ledger.js';
 import { InteractiveBridgePool, boundOrigin } from '../interactive/bridge-pool.js';
-import { INTERACTIVE_CHAT_WORKFLOW_DEF, startInteractiveChatSubscriber } from '../interactive/chat-events.js';
+import { startInteractiveChatSubscriber } from '../interactive/chat-events.js';
 import { PhaseSkillArming, RunSkillGapIndex } from '../skills/phase-skill-gaps.js';
 import { resolveProjectInteractiveRoot } from '../interactive/bridge-root.js';
 import { sweepDocLedgers, type DocLedgerSource, type DocLedgerSweep } from '../interactive/doc-ledger-sweep.js';
@@ -1209,9 +1209,8 @@ export async function createServer(
       ...(o.clisJson !== undefined ? { clisJson: o.clisJson } : {}),
       // The roster WITH standing when no override is set (F-RECON-002/003).
       roster: rosterWithStanding,
-      // The quality-floor skill gate (draft-skill.ts): stamped only when the published snapshot holds it;
-      // the arm-time answer is recorded for /diagnostics (crew#661).
-      skillHeld: phaseSkills.probe('interactive-draft', INTERACTIVE_DRAFT_WORKFLOW_DEF, skillHeld),
+      // The draft skill the preset runs (draft-skill.ts): asked once, for the arm log line (crew#935).
+      skillHeld,
       onRunFiled: fileRun,
       onRunLaunched: (runId, detail) => { recordRunLaunched(audit, runTimingIndex, DAEMON_ACTOR, runId, detail); },
       // F-046: the create-time grounding sidecar is read under the SAME per-project docs root the
@@ -1221,8 +1220,6 @@ export async function createServer(
       log: (m) => app.log.warn(m),
       logError: (m) => app.log.error(m),
     });
-    // crew#661: a seam that failed to arm runs nothing — its arm-time skill answer is not a gap.
-    if (draftSub === null) phaseSkills.forget('interactive-draft');
     if (draftSub !== null) {
       const sub = draftSub;
       app.log.info('interactive-draft subscription armed (filter wicked.interactive.doc.created)');
@@ -1246,9 +1243,8 @@ export async function createServer(
       ...(o.clisJson !== undefined ? { clisJson: o.clisJson } : {}),
       // The roster WITH standing when no override is set (F-RECON-002/003).
       roster: rosterWithStanding,
-      // The quality-floor skill gate (draft-skill.ts): stamped only when the published snapshot holds it;
-      // the arm-time answer is recorded for /diagnostics (crew#661).
-      skillHeld: phaseSkills.probe('interactive-edit', INTERACTIVE_EDIT_WORKFLOW_DEF, skillHeld),
+      // The draft skill the preset runs (draft-skill.ts): asked once, for the arm log line (crew#935).
+      skillHeld,
       // The demo-kind gate: a demo doc's step feedback is declined with an honest error status
       // (demos are made by the Demo experience's `demo` preset now, studio#373).
       resolveDocsRoot: o.resolveDocsRoot ?? interactiveDocsRoot,
@@ -1256,8 +1252,6 @@ export async function createServer(
       log: (m) => app.log.warn(m),
       logError: (m) => app.log.error(m),
     });
-    // crew#661: a seam that failed to arm runs nothing — its arm-time skill answer is not a gap.
-    if (editSub === null) phaseSkills.forget('interactive-edit');
     if (editSub !== null) {
       const sub = editSub;
       app.log.info('interactive-edit subscription armed (filter wicked.interactive.feedback.processed)');
@@ -1350,9 +1344,8 @@ export async function createServer(
       ...(o.clisJson !== undefined ? { clisJson: o.clisJson } : {}),
       // The roster WITH standing when no override is set (F-RECON-002/003).
       roster: rosterWithStanding,
-      // The quality-floor skill gate (draft-skill.ts): stamped only when the published snapshot holds it;
-      // the arm-time answer is recorded for /diagnostics (crew#661).
-      skillHeld: phaseSkills.probe('interactive-chat', INTERACTIVE_CHAT_WORKFLOW_DEF, skillHeld),
+      // The draft skill the preset runs (draft-skill.ts): asked once, for the arm log line (crew#935).
+      skillHeld,
       ...(o.queueSweepMs !== undefined ? { queueSweepMs: o.queueSweepMs } : {}),
       ...(o.landingGateMs !== undefined ? { landingGateMs: o.landingGateMs } : {}),
       resolveDocsRoot: o.resolveDocsRoot ?? interactiveDocsRoot,
@@ -1363,8 +1356,6 @@ export async function createServer(
       log: (m) => app.log.warn(m),
       logError: (m) => app.log.error(m),
     });
-    // crew#661: a seam that failed to arm runs nothing — its arm-time skill answer is not a gap.
-    if (chatSub === null) phaseSkills.forget('interactive-chat');
     if (chatSub !== null) {
       const sub = chatSub;
       app.log.info('interactive-chat subscription armed (filter wicked.interactive.chat.posted)');

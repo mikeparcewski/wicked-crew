@@ -5,15 +5,19 @@
 // interactive-draft / -edit / -chat armed with NO skill_ref and every run on them proceeded
 // unarmed — nothing in /diagnostics, /health, or on the run.
 //
+// crew#935 (X-MIG M9) retired that degraded arming: interactive-draft / -edit / -chat are wicked-core
+// built-in presets that ALWAYS run the skill, so a snapshot without it fails the run instead of
+// running it unarmed — no seam arms with a gap any more. The disclosure machinery stays generic
+// (any seam that arms degraded records through `PhaseSkillArming`); it is pinned here over a
+// recorded gap, and the daemon wiring is pinned to report none for the interactive seams.
+//
 // Real pieces throughout: a real skills store over the committed fixture plugin (which does NOT
-// carry the draft skill), a real SkillsRuntime, the three real seams armed over a real bus, the
-// real route set, a real audit trail on disk. Expected values are literals from the issue and the
-// workflow defs as written — never read back out of the code under test.
+// carry the draft skill), a real SkillsRuntime, the real route set, a real audit trail on disk.
 
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import Fastify, { type FastifyInstance } from 'fastify';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -25,9 +29,6 @@ import { registerRoutes, type RuntimeDeps } from '../src/api/routes.js';
 import { createServer } from '../src/api/server.js';
 import { CoreAdapter } from '../src/core/adapter.js';
 import { DEFAULT_SETTINGS, type DiagnosticsResponse, HealthResponse, SessionView, WorkflowDef } from '../src/core/types.js';
-import { INTERACTIVE_CHAT_WORKFLOW_DEF, startInteractiveChatSubscriber } from '../src/interactive/chat-events.js';
-import { INTERACTIVE_DRAFT_WORKFLOW_DEF, startInteractiveDraftSubscriber } from '../src/interactive/draft-events.js';
-import { INTERACTIVE_EDIT_WORKFLOW_DEF, startInteractiveEditSubscriber } from '../src/interactive/edit-events.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
 import { setCrewStateHome } from '../src/projects/state-home.js';
 import { pluginSourceAt } from '../src/skills/plugin-source.js';
@@ -74,52 +75,11 @@ afterEach(async () => {
   restoreEnv();
 });
 
-/** The minimal engine the seams arm against (the chat-seam precedent in interactive-draft-skill.test.ts). */
-function engine(): { registered: WorkflowDef[]; adapter: CoreAdapter } {
-  const registered: WorkflowDef[] = [];
-  const adapter = {
-    registerWorkflow: async (def: WorkflowDef) => {
-      registered.push(def);
-      return def.id;
-    },
-    launchRun: async () => 'r',
-    onEvent: () => () => undefined,
-  } as unknown as CoreAdapter;
-  return { registered, adapter };
-}
-
-/** Arm the three real drafting seams exactly as `createServer` wires them: the skill predicate goes through the arming probe. */
-async function armSeams(runtime: SkillsRuntime, arming: PhaseSkillArming): Promise<WorkflowDef[]> {
-  const eng = engine();
-  const held = (name: string): boolean => runtime.holdsSkill(name);
-  const common = { pollIntervalMs: 25, clisJson: '[]', log: () => undefined };
-  const draft = await startInteractiveDraftSubscriber(eng.adapter, {
-    ...common,
-    dbPath: join(dir, 'bus-d.db'),
-    ledgerPath: join(dir, 'ld.json'),
-    draftDir: join(dir, 'd'),
-    skillHeld: arming.probe('interactive-draft', INTERACTIVE_DRAFT_WORKFLOW_DEF, held),
-  });
-  const edit = await startInteractiveEditSubscriber(eng.adapter, {
-    ...common,
-    dbPath: join(dir, 'bus-e.db'),
-    ledgerPath: join(dir, 'le.json'),
-    editDir: join(dir, 'e'),
-    skillHeld: arming.probe('interactive-edit', INTERACTIVE_EDIT_WORKFLOW_DEF, held),
-  });
-  const chat = await startInteractiveChatSubscriber(eng.adapter, {
-    ...common,
-    dbPath: join(dir, 'bus-c.db'),
-    ledgerPath: join(dir, 'lc.json'),
-    chatDir: join(dir, 'c'),
-    skillHeld: arming.probe('interactive-chat', INTERACTIVE_CHAT_WORKFLOW_DEF, held),
-  });
-  for (const sub of [draft, edit, chat]) {
-    expect(sub).not.toBeNull();
-    subs.push(sub!);
-  }
-  return eng.registered;
-}
+/** A seam's workflow as `PhaseSkillArming` reads it: two agent phases and one tool phase (no skill). */
+const SEAM_DEF = {
+  id: 'seam-flow',
+  phases: [{ id: 'plan' }, { id: 'write' }, { id: 'floor', executor: { type: 'tool', cmd: ['true'] } }],
+} as unknown as WorkflowDef;
 
 function routes(runtime: RuntimeDeps, adapter: Partial<Record<string, unknown>> = {}): FastifyInstance {
   const app = Fastify({ logger: false });
@@ -144,18 +104,18 @@ describe('GET /diagnostics names every subsystem whose phases armed without thei
     expect(runtime.holdsSkill(DRAFT)).toBe(false); // the fixture catalog does not carry it — the precondition
 
     const arming = new PhaseSkillArming(() => runtime.health().current?.gen ?? null, () => 1_700_000_000_000);
-    const registered = await armSeams(runtime, arming);
-    // The seams really did arm UNARMED (the degraded state the entry must describe).
-    for (const def of registered) for (const p of def.phases) expect(p.skill_ref).toBeNull();
+    for (const seam of ['seam-b', 'seam-a']) {
+      const held = arming.probe(seam, { ...SEAM_DEF, id: seam }, (name) => runtime.holdsSkill(name));
+      expect(held(DRAFT)).toBe(false);
+    }
 
     const app = routes({ skills: runtime, phaseSkills: arming });
     await app.ready();
     const diag = (await app.inject({ method: 'GET', url: '/api/v1/diagnostics' })).json() as DiagnosticsResponse;
     const gaps = diag.skills.phaseSkillGaps;
     expect(gaps?.map(withoutRemedy)).toEqual([
-      { subsystem: 'interactive-chat', workflow: 'interactive-chat', phases: ['understand', 'revise'], skill: DRAFT, gen: 1, armedAt: 1_700_000_000_000 },
-      { subsystem: 'interactive-draft', workflow: 'interactive-draft', phases: ['draft'], skill: DRAFT, gen: 1, armedAt: 1_700_000_000_000 },
-      { subsystem: 'interactive-edit', workflow: 'interactive-edit', phases: ['edit'], skill: DRAFT, gen: 1, armedAt: 1_700_000_000_000 },
+      { subsystem: 'seam-a', workflow: 'seam-a', phases: ['plan', 'write'], skill: DRAFT, gen: 1, armedAt: 1_700_000_000_000 },
+      { subsystem: 'seam-b', workflow: 'seam-b', phases: ['plan', 'write'], skill: DRAFT, gen: 1, armedAt: 1_700_000_000_000 },
     ]);
     for (const g of gaps!) {
       expect(g.remedy).toContain('republish the skills snapshot');
@@ -163,17 +123,17 @@ describe('GET /diagnostics names every subsystem whose phases armed without thei
       expect(g.remedy).toContain('restart crew');
     }
     const findings = diag.skills.findings.filter((f) => f.kind === 'skills.phase-skill');
-    expect(findings).toHaveLength(3);
+    expect(findings).toHaveLength(2);
     for (const f of findings) {
       expect(f.severity).toBe('warning');
       expect(f.message).toContain(`'${DRAFT}'`);
       expect(f.message).toContain('generation 1');
     }
-    expect(findings.map((f) => f.message.split(':')[0])).toEqual(['interactive-chat', 'interactive-draft', 'interactive-edit']);
+    expect(findings.map((f) => f.message.split(':')[0])).toEqual(['seam-a', 'seam-b']);
 
     const health = (await app.inject({ method: 'GET', url: '/api/v1/health' })).json() as HealthResponse;
     expect(health.status).toBe('ok');
-    expect((health.warnings ?? []).filter((w) => w.kind === 'skills.phase-skill')).toHaveLength(3);
+    expect((health.warnings ?? []).filter((w) => w.kind === 'skills.phase-skill')).toHaveLength(2);
   });
 
   it('a published snapshot that HOLDS wicked-garden-draft → no entry, no finding, no warning', async () => {
@@ -188,8 +148,7 @@ describe('GET /diagnostics names every subsystem whose phases armed without thei
     expect(runtime.holdsSkill(DRAFT)).toBe(true); // the precondition
 
     const arming = new PhaseSkillArming(() => runtime.health().current?.gen ?? null);
-    const registered = await armSeams(runtime, arming);
-    for (const def of registered) for (const p of def.phases) expect(p.skill_ref).toBe(DRAFT);
+    expect(arming.probe('seam-a', SEAM_DEF, (name) => runtime.holdsSkill(name))(DRAFT)).toBe(true);
 
     const app = routes({ skills: runtime, phaseSkills: arming });
     await app.ready();
@@ -212,8 +171,8 @@ describe('a run launched on an unarmed seam says so on the run record (degrade-a
 
   it('the ACCEPTED launch on an unarmed workflow is recorded durably, survives a restart, and rides GET /runs/:id as skill_gaps; other runs carry no field', async () => {
     const arming = new PhaseSkillArming(() => 4);
-    arming.record('interactive-chat', INTERACTIVE_CHAT_WORKFLOW_DEF, DRAFT, false);
-    arming.record('interactive-draft', INTERACTIVE_DRAFT_WORKFLOW_DEF, DRAFT, true);
+    arming.record('interactive-chat', { ...SEAM_DEF, id: 'interactive-chat' }, DRAFT, false);
+    arming.record('interactive-draft', { ...SEAM_DEF, id: 'interactive-draft' }, DRAFT, true);
 
     const trail = join(dir, 'audit.log');
     const audit = new AuditLog(trail, () => undefined);
@@ -237,7 +196,7 @@ describe('a run launched on an unarmed seam says so on the run record (degrade-a
     await app.ready();
     const unarmed = (await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN}` })).json() as { run: SessionView };
     expect(unarmed.run.session.skill_gaps?.map(withoutRemedy)).toEqual([
-      { subsystem: 'interactive-chat', workflow: 'interactive-chat', phases: ['understand', 'revise'], skill: DRAFT, gen: 4 },
+      { subsystem: 'interactive-chat', workflow: 'interactive-chat', phases: ['plan', 'write'], skill: DRAFT, gen: 4 },
     ]);
     expect(unarmed.run.session.skill_gaps?.[0]?.remedy).toContain('republish the skills snapshot');
     const armed = (await app.inject({ method: 'GET', url: `/api/v1/runs/${OTHER}` })).json() as { run: SessionView };
@@ -245,16 +204,16 @@ describe('a run launched on an unarmed seam says so on the run record (degrade-a
   });
 });
 
-describe('the daemon wiring (createServer) records only what really armed and what the engine really accepted (codex on #665)', () => {
+describe('the daemon wiring (createServer): the interactive seams arm no skill gap, so nothing is disclosed as degraded (crew#935)', () => {
   let adapter: CoreAdapter | undefined;
   afterEach(() => {
     adapter?.close();
     adapter = undefined;
   });
 
-  /** A daemon over a real (stub-spawned) adapter posing as a real engine: the draft def FAILS to register
-   *  (that seam disables itself and returns null), the chat def registers; the engine refuses the launch
-   *  of `refused-run` AFTER the daemon handed it over and accepts every other. */
+  /** A daemon over a real (stub-spawned) adapter posing as a real engine, with a published snapshot
+   *  that does NOT hold the draft skill: the interactive-* presets fail such a run rather than run
+   *  it unarmed, so the seams arm without a gap and an accepted launch writes no degraded record. */
   async function bootDaemon(): Promise<{ app: FastifyInstance; adapter: CoreAdapter; auditPath: string }> {
     const home = join(dir, 'home');
     const a = new CoreAdapter({ dbPath: join(home, 'core.db'), stub: true });
@@ -263,15 +222,13 @@ describe('the daemon wiring (createServer) records only what really armed and wh
     a.listWorkflows = () => [];
     a.getSettings = async () => ({ ...DEFAULT_SETTINGS });
     Object.defineProperty(a, 'stub', { value: false }); // the stub engine refuses every interactive seam (crew#309)
+    const registered: string[] = [];
     a.registerWorkflow = async (def: WorkflowDef) => {
-      if (def.id === 'interactive-draft') throw new Error('drifted def');
+      registered.push(def.id);
       return def.id;
     };
     const core = (a as unknown as { core: { launchRun: (o: { sessionId?: string }) => Promise<string> } }).core;
-    core.launchRun = async (o) => {
-      if (o.sessionId === 'refused-run') throw new Error('engine refused the launch');
-      return o.sessionId ?? 'x';
-    };
+    core.launchRun = async (o) => o.sessionId ?? 'x';
     const auditPath = join(dir, 'audit.log');
     const app = await createServer(a, {
       auth: { mode: 'off' },
@@ -285,29 +242,29 @@ describe('the daemon wiring (createServer) records only what really armed and wh
       interactiveChatEvents: { enabled: true, dbPath: join(dir, 'bus-c.db'), ledgerPath: join(dir, 'lc.json'), chatDir: join(dir, 'c'), clisJson: '[]' },
     });
     apps.push(app);
+    expect(registered.filter((id) => id.startsWith('interactive-'))).toEqual([]); // presets: nothing registered
     return { app, adapter: a, auditPath };
   }
 
-  it('a seam that FAILS to register (disabled, returns null) is not reported as running unarmed — only the seam that is up', async () => {
+  it('/diagnostics and /health name no phase-skill gap for the interactive seams', async () => {
     const { app } = await bootDaemon();
     const diag = (await app.inject({ method: 'GET', url: '/api/v1/diagnostics' })).json() as DiagnosticsResponse;
-    expect(diag.skills.phaseSkillGaps?.map((g) => g.subsystem)).toEqual(['interactive-chat']);
+    expect(diag.skills.phaseSkillGaps).toEqual([]);
     const health = (await app.inject({ method: 'GET', url: '/api/v1/health' })).json() as HealthResponse;
-    expect((health.warnings ?? []).filter((w) => w.kind === 'skills.phase-skill').map((w) => w.message.split(':')[0])).toEqual(['interactive-chat']);
+    expect((health.warnings ?? []).filter((w) => w.kind === 'skills.phase-skill')).toEqual([]);
   });
 
-  it('a launch the engine REFUSES after it was handed leaves no run.skill.unarmed record (a retry under the same id must not inherit it); an accepted one does', async () => {
+  it('an accepted interactive launch writes no run.skill.unarmed record', async () => {
     const { app, adapter: a, auditPath } = await bootDaemon();
-    await expect(a.launchRun({ problem: 'p', sessionId: 'refused-run', workflow: 'interactive-chat', clisJson: '[]' })).rejects.toThrow('engine refused the launch');
     await a.launchRun({ problem: 'p', sessionId: 'accepted-run', workflow: 'interactive-chat', clisJson: '[]' });
     await app.close();
     apps.splice(apps.indexOf(app), 1);
-    const unarmed = readFileSync(auditPath, 'utf8')
+    const unarmed = (existsSync(auditPath) ? readFileSync(auditPath, 'utf8') : '')
       .split('\n')
       .filter((l) => l.trim() !== '')
       .map((l) => JSON.parse(l) as { action: string; runId?: string })
       .filter((e) => e.action === 'run.skill.unarmed')
       .map((e) => e.runId);
-    expect(unarmed).toEqual(['accepted-run']);
+    expect(unarmed).toEqual([]);
   });
 });

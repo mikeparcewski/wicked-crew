@@ -67,13 +67,13 @@ import {
   narrationStamps,
 } from './draft-events.js';
 import { InteractiveHandoffLedger } from './ledger.js';
-import { DRAFT_SKILL, draftQualityClause, draftSkillArmLine, withDraftSkill, type SkillHeld } from './draft-skill.js';
+import { DRAFT_SKILL, draftQualityClause, draftSkillArmLine, type SkillHeld } from './draft-skill.js';
 import { crewStateHome } from '../projects/state-home.js';
 import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
 import { resolveInteractiveRoot } from './bridge-root.js';
 import type { CoreAdapter } from '../core/adapter.js';
-import { DELIVERABLE_FLOOR_PHASE_ID } from '../core/deliverable-floor.js';
-import type { CoreEvent, WorkflowDef } from '../core/types.js';
+import type { CoreEvent } from '../core/types.js';
+import { describeStep, RunUnits } from './run-units.js';
 import {
   acpFallbackLine,
   ungatedGateNote,
@@ -92,60 +92,16 @@ export const INTERACTIVE_CHAT_BUS_FILTER = `${CHAT_POSTED}@${INTERACTIVE_DOMAIN}
 
 // ── The workflow (workflows-as-data) ─────────────────────────────────────────────────────────
 
-export const INTERACTIVE_CHAT_WORKFLOW = 'interactive-chat';
-
 /**
- * The governed workflow that fulfils an iteration ask. Two agent phases — understand (recon)
- * then revise (build, creator role) — the draft leg's sibling: the reviser builds on a stated
- * plan instead of one-shotting a rewrite, and the run narrates a real phase transition.
- *
- * The phase `instructions` carry the ITERATION contract: start from the CURRENT document (the
- * snapshot path named in the task), change only what the ask touches, KEEP every existing
- * `data-wid` on kept elements (interactive's instrument pass preserves pre-existing anchors —
- * INV-1 — so feedback deep-links survive the iteration) and mint none on added ones. They are
- * SINGLE-LINE by contract (PTY seat runner, wicked-core FINDING-011).
- *
- * All gates are `auto` with `validator_pin: null` — same rationale as the draft leg: the
- * acceptance gate for a revision is interactive's instrument+theme pipeline and the user's own
- * eyes on the canvas.
+ * The governed workflow that fulfils an iteration ask: the wicked-core built-in preset
+ * `interactive-chat` (X-MIG M9, wicked-core#860; crew#935). understand, then revise (the creator):
+ * the reviser builds on a stated plan instead of one-shotting a rewrite. The steps carry the
+ * ITERATION contract (start from the CURRENT document, change only what the ask touches, KEEP every
+ * existing `data-wid` and mint none) and run `wicked-garden-draft`. The engine owns the steps: the
+ * PA's RISK rating (`pa-scope`) first, its floor additions, and the deliverable floor on the
+ * creator step. Crew registers no def; its narration reads the run's planned units.
  */
-export const INTERACTIVE_CHAT_WORKFLOW_DEF: WorkflowDef = {
-  id: INTERACTIVE_CHAT_WORKFLOW,
-  phases: [
-    {
-      id: 'understand',
-      kind: 'recon',
-      instructions:
-        'Understand the revision ask, do not write anything yet: read the CURRENT document — the absolute HTML file path named in the task — and the user\'s ask, then produce a concise revision plan as plain text: which sections change, what gets added or removed, and what stays untouched (the default is untouched — this is an iteration on a document the user already accepted, not a rewrite). Never invent facts, numbers, or claims the current document and the ask do not support; where the ask needs material the document lacks, plan honest placeholder copy that says what belongs there. Do NOT write HTML and do NOT create any files in this phase.',
-      gate_type: 'value',
-      gate: 'auto',
-      executes_code: false,
-      verified_evidence: false,
-      required_deliverables: [],
-      depends_on: [],
-      role: 'neutral',
-      skill_ref: null,
-      allowed_skills: [],
-      validator_pin: null,
-    },
-    {
-      id: 'revise',
-      kind: 'build',
-      instructions:
-        'Using the plan from the prior phase, write the COMPLETE revised HTML document and SAVE it to the absolute output file named in the task (create parent directories if needed, overwrite if present) — the file on disk is the deliverable, so write it before you finish and end your reply with the absolute path you wrote. Contract: start from the CURRENT document (the absolute input path named in the task) and apply the user\'s ask — change only what the ask touches and keep everything else, including the document\'s style and structure; produce a full self-contained HTML document (inline CSS, no external network resources, no build step); KEEP every existing data-wid attribute byte-for-byte on elements you keep, and add NO data-wid to elements you create (the wicked-interactive service instruments its own anchors); never fabricate facts or figures; keep the markup semantic and well-formed (balanced tags) so the instrumentation pass lands cleanly.',
-      gate_type: 'execution',
-      gate: 'auto',
-      executes_code: false,
-      verified_evidence: false,
-      required_deliverables: [],
-      depends_on: ['understand'],
-      role: 'creator',
-      skill_ref: null,
-      allowed_skills: [],
-      validator_pin: null,
-    },
-  ],
-};
+export const INTERACTIVE_CHAT_WORKFLOW = 'interactive-chat';
 
 // ── Pure helpers (unit-tested without a bus or an engine) ─────────────────────────────────────
 
@@ -363,9 +319,8 @@ export interface InteractiveChatOptions {
    *  the engine benched (`health {usable: false, reason}`) instead of being convened or elected. */
   roster?: () => unknown[];
   /** Does the daemon's PUBLISHED skills snapshot hold (and enable) a skill? Consulted ONCE at arm time
-   *  for `wicked-garden-draft` (interactive/draft-skill.ts): held ⇒ the drafting phases carry the
-   *  skill_ref and the task names the self-check's inputs; not held ⇒ the run proceeds without the
-   *  quality floor and the arm log says so (the engine would refuse a skill_ref the snapshot lacks).
+   *  for `wicked-garden-draft` (interactive/draft-skill.ts), only for the arm log line: the preset
+   *  always runs the skill, and a snapshot without it fails the run before its first unit (crew#935).
    *  Default: `() => false` (a caller without a skills runtime has no snapshot to hold anything). */
   skillHeld?: SkillHeld;
   /** The docs root an ask's doc is read from. Default: the shared-default resolution
@@ -417,6 +372,8 @@ interface InFlight {
   runId?: string | undefined;
   /** The ord of the latest unit-scoped engine frame, stamped on narration as `unit_ord`. */
   narrationOrd?: number | undefined;
+  /** The run's planned units, folded from its `unitPlanned` frames (crew#935). */
+  units?: RunUnits | undefined;
   heartbeat: ReturnType<typeof setInterval>;
   /** The engine's own reason for the most recent failed unit (`stepFailed.detail`). Carried so
    *  the terminal error status names WHY — in particular the crew#311 deliverable-floor report,
@@ -477,7 +434,6 @@ export async function startInteractiveChatSubscriber(
   opts: InteractiveChatOptions = {},
 ): Promise<InteractiveChatSubscription | null> {
   const log = opts.log ?? ((m: string) => console.error(m));
-  let draftSkillHeld = false; // set at arm time (draft-skill.ts); read at launch for the task clause
 
   // This seam reads and writes the bus through the engine that holds it (wicked-core#631,
   // core/bus.ts). Checked here so a bus no engine holds disables the seam before anything is armed.
@@ -493,21 +449,9 @@ export async function startInteractiveChatSubscriber(
     return null;
   }
 
-  // The workflow rides the normal registration path — core validates the def BEFORE it is
-  // persisted/hot-registered (FINDING-002 ordering), so a drifted def fails the arm loudly
-  // instead of failing the first launch obscurely.
-  try {
-    // The quality-floor skill rides only when the published snapshot holds it (draft-skill.ts).
-    draftSkillHeld = (opts.skillHeld ?? (() => false))(DRAFT_SKILL);
-    log(draftSkillArmLine('interactive-chat', draftSkillHeld));
-    await adapter.registerWorkflow(withDraftSkill(INTERACTIVE_CHAT_WORKFLOW_DEF, draftSkillHeld));
-  } catch (err) {
-    log(
-      `[interactive-chat] could not register the '${INTERACTIVE_CHAT_WORKFLOW}' workflow — ` +
-        `governed iteration disabled: ${err instanceof Error ? err.message : String(err)}`,
-    );
-    return null;
-  }
+  // The workflow is the engine's built-in `interactive-chat` preset (crew#935): nothing to
+  // register. The arm line says whether the published snapshot holds the draft skill it runs.
+  log(draftSkillArmLine(INTERACTIVE_CHAT_WORKFLOW, (opts.skillHeld ?? (() => false))(DRAFT_SKILL)));
 
   const ledger = new InteractiveHandoffLedger(
     opts.ledgerPath ?? join(defaultStateDir(), 'interactive-chat-ledger.json'),
@@ -516,10 +460,6 @@ export async function startInteractiveChatSubscriber(
   const heartbeatMs = opts.heartbeatMs ?? 15_000;
   const landingGateMs = opts.landingGateMs ?? 60_000;
   const resolveDocsRoot = opts.resolveDocsRoot ?? (() => resolveInteractiveRoot(null));
-  // +1 for the crew#311 deliverable floor the adapter appends per-run (`requireDeliverables`):
-  // `agentPhaseCount` drives the council/worker branches, `phaseCount` is the run's real length.
-  const agentPhaseCount = INTERACTIVE_CHAT_WORKFLOW_DEF.phases.length;
-  const phaseCount = agentPhaseCount + 1;
   const inFlight = new Map<string, InFlight>(); // runId → live state
   const queues = new Map<string, QueuedAsk[]>(); // documentId → parked asks, FIFO
   const landingGates = new Map<string, LandingGate>(); // documentId → post-completion gate
@@ -605,50 +545,45 @@ export async function startInteractiveChatSubscriber(
     if (typeof event.ord === 'number') flight.narrationOrd = event.ord;
 
     // Narration ladder — same rationale as the draft fold: the heartbeat repeats the LATEST
-    // line and the transcript dedups repeats, so advancing the line = visible progress.
-    const phaseName = (ord: number): string =>
-      ord > agentPhaseCount
-        ? DELIVERABLE_FLOOR_PHASE_ID
-        : (INTERACTIVE_CHAT_WORKFLOW_DEF.phases[ord - 1]?.id ?? `phase ${ord}`);
-
-    // The crew#311 deliverable floor is a DETERMINISTIC tool phase — no seat, no council. Core
-    // still emits the seat-selection events for it (its `cli` is the node interpreter's absolute
-    // path), so narrating them verbatim put "Council picked /opt/homebrew/.../node…" in the
-    // reader's thread. Drop those two lines for the floor ord.
-    const isFloorOrd = (e: CoreEvent): boolean =>
-      typeof (e as { ord?: unknown }).ord === 'number' && (e as { ord: number }).ord > agentPhaseCount;
+    // line and the transcript dedups repeats, so advancing the line = visible progress. The steps
+    // are the engine's (crew#935), read from the run's `unitPlanned` frames.
+    const units = (flight.units ??= new RunUnits());
+    if (units.observe(event)) return;
+    const ordOf = (e: CoreEvent): number => (typeof e.ord === 'number' ? e.ord : 0);
 
     if (event.type === 'councilConvened') {
-      if (isFloorOrd(event)) return;
-      const ord = typeof event.ord === 'number' ? event.ord : 0;
+      const ord = ordOf(event);
+      if (units.isTool(ord)) return;
       const seats = Array.isArray(event.clis) ? event.clis.length : 0;
       const council = seats > 0 ? `a ${seats}-seat council` : 'a council';
       narrate(
         flight,
-        `Convening ${council} to pick who ${ord >= agentPhaseCount ? 'revises the document' : 'reads your ask'}…`,
+        `Convening ${council} to pick who ${units.isWriter(ord) ? 'revises the document' : `runs ${units.idAt(ord)}`}…`,
       );
       return;
     }
 
     if (event.type === 'unitDistributed') {
-      if (isFloorOrd(event)) return;
-      const ord = typeof event.ord === 'number' ? event.ord : 0;
+      const ord = ordOf(event);
+      if (units.isTool(ord)) return;
       // One helper narrates the frame by `routingMethod` (S5 `teamed` = "Routed …", a recorded
       // council = "Council picked …" honest about its benched seats, F-4R2-007).
-      narrate(flight, unitDistributedLine(event, `for ${phaseName(ord)}`));
+      narrate(flight, unitDistributedLine(event, `for ${units.idAt(ord)}`));
       return;
     }
 
     if (event.type === 'unitDispatched') {
-      const ord = typeof event.ord === 'number' ? event.ord : 0;
-      const phase = phaseName(ord);
+      const ord = ordOf(event);
+      const id = units.idAt(ord);
       narrate(
         flight,
-        ord > agentPhaseCount
-          ? `Crew phase ${ord}/${phaseCount}: checking the revised document was actually written (${phase})…`
-          : ord >= agentPhaseCount
-            ? `Crew phase ${ord}/${phaseCount}: revising the document (${phase})…`
-            : `Crew phase ${ord}/${phaseCount}: ${phase} — reading the current version and your ask…`,
+        units.isWriter(ord)
+          ? `Crew phase ${units.position(ord)}: revising the document (${id})…`
+          : units.isEvaluator(ord)
+            ? `Crew phase ${units.position(ord)}: reviewing the revision (${id})…`
+            : id === 'pa-scope'
+              ? `Crew phase ${units.position(ord)}: ${describeStep(id)}…`
+              : `Crew phase ${units.position(ord)}: ${id} — reading the current version and your ask…`,
       );
       return;
     }
@@ -660,20 +595,19 @@ export async function startInteractiveChatSubscriber(
     }
 
     if (event.type === 'unitOutputCaptured') {
-      const ord = typeof event.ord === 'number' ? event.ord : 0;
-      narrate(flight, `${phaseName(ord)} finished — the governance gate is reviewing it…`);
+      narrate(flight, `${units.idAt(ordOf(event))} finished — the governance gate is reviewing it…`);
       return;
     }
 
     if (event.type === 'gateDecided' && event.allow === true) {
-      const ord = typeof event.ord === 'number' ? event.ord : 0;
+      const ord = ordOf(event);
+      // The engine's deliverable floor judges the creator's unit before its gate decides, so an
+      // approved writer means the revised document is on disk and was written by this run.
       narrate(
         flight,
-        ord > agentPhaseCount
-          ? 'Revised document verified on disk — landing it now…'
-          : ord >= agentPhaseCount
-            ? 'Gate approved the revision — checking the file landed…'
-            : `Gate approved ${phaseName(ord)} — moving on…`,
+        units.isWriter(ord)
+          ? 'Gate approved the revision — the revised document is verified on disk…'
+          : `Gate approved ${units.idAt(ord)} — moving on…`,
       );
       return;
     }
@@ -684,7 +618,7 @@ export async function startInteractiveChatSubscriber(
       const note = ungatedGateNote(event);
       if (note !== null) {
         const ord = typeof event.ord === 'number' ? event.ord : 0;
-        narrate(flight, `Gate for ${phaseName(ord)}: ${note}`);
+        narrate(flight, `Gate for ${units.idAt(ord)}: ${note}`);
       }
       return;
     }
@@ -900,10 +834,8 @@ export async function startInteractiveChatSubscriber(
           // The quality floor on a revision (draft-skill.ts): the revised COMPLETE document lands at
           // outPath, so the self-check runs there; the page budget is the one the document already
           // has (count its pages — the manifest carries no style), no snapshot rides this leg.
-          (draftSkillHeld
-            ? ' ' +
-              draftQualityClause(outPath, { pages: null, exact: false, source: 'unknown' }, [], { revision: true })
-            : ''),
+          ' ' +
+          draftQualityClause(outPath, { pages: null, exact: false, source: 'unknown' }, [], { revision: true }),
         sessionId: runId,
         clisJson: opts.clisJson ?? JSON.stringify(rosterOf(adapter, opts.roster)),
         workflow: INTERACTIVE_CHAT_WORKFLOW,

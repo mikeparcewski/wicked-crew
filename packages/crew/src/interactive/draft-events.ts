@@ -46,7 +46,6 @@ import {
   draftSkillArmLine,
   pageBudgetFor,
   runDraftFloor,
-  withDraftSkill,
   type DraftFloorIo,
   type PageBudget,
   type SkillHeld,
@@ -67,8 +66,8 @@ import {
   type GroundingRepo,
 } from './doc-grounding.js';
 import type { CoreAdapter } from '../core/adapter.js';
-import { DELIVERABLE_FLOOR_PHASE_ID } from '../core/deliverable-floor.js';
-import type { CoreEvent, WorkflowDef } from '../core/types.js';
+import type { CoreEvent } from '../core/types.js';
+import { describeStep, RunUnits } from './run-units.js';
 import {
   acpFallbackLine,
   ungatedGateNote,
@@ -156,70 +155,18 @@ export const GROUNDING_BINDING_WAIT_MS = 3000;
 
 // ── The workflow (workflows-as-data) ─────────────────────────────────────────────────────────
 
-export const INTERACTIVE_DRAFT_WORKFLOW = 'interactive-draft';
-
 /**
- * The governed workflow that produces a first draft: ONE creator phase that plans, then writes.
- *
- * ## Why one phase (crew#621)
- *
- * It used to be two — a neutral `outline` recon phase, then the `draft` creator — and the split
- * was prose. On the brochure run the neutral phase, whose instruction ended "Do NOT write HTML and
- * do NOT create any files in this phase", authored the ENTIRE 26.6 KB deliverable in its output
- * and signed off with "the HTML above is the complete deliverable; save it"; the creator phase then
- * only wrote that HTML to disk. $1.23 of the run's $1.81 was spent inside the read-only phase, and
- * both phases gated `ungated: true`, so nothing noticed. evaluator≠creator / neutral-recon
- * separation on this seam was a label: a defect in the "planning" phase's grounding was inherited
- * verbatim by a creator whose self-check could not see it.
- *
- * The engine already fences the neutral phase's WRITE (its `mkdir` and its `Write` were denied);
- * what nothing could fence is a recon phase PRODUCING the artifact in its output. Crew cannot pin a
- * validator on a phase's output (see `interactive/draft-skill.ts`), and killing a run whose worker
- * planned-then-drafted in one unit would take the user's document with it. So the phase model is
- * made honest instead of gated: one creator unit whose instruction is "plan the document first,
- * then write it" — one honest phase beats two nominal ones. The plan is still narrated (the worker
- * states its outline before it writes) and the document is still floored, by the two deterministic
- * checks that judge the ARTIFACT: the draft floor (`runDraftFloor`, the skill's own self-check
- * re-derived by crew before the draft is published) and the crew#311 deliverable floor.
- *
- * The phase `instructions` adapt the draft-production contract from interactive's assist skill
- * (Step 5): honor the brief/sources/style, ground content in what the brief supports, produce a
- * complete self-contained HTML document, and NEVER mint `data-wid` attributes (the service
- * instruments fresh anchors itself). They are SINGLE-LINE by contract: the engine folds
- * instructions onto the unit description with a single-line separator, and the PTY seat runner
- * refuses any prompt carrying an embedded newline (wicked-core FINDING-011).
- *
- * The gate is `auto` with `validator_pin: null` — crew cannot provision an engine validator
- * (`interactive/draft-skill.ts`) — so the run's deterministic floors sit on the ARTIFACT: the
- * crew#311 deliverable floor (the file exists, carries bytes, and was written by this run) and
- * crew's re-derivation of the skill's self-check before the draft is published (crew#621/#504).
- * Beyond those the acceptance gate for a draft is the INTERACTIVE side (the service's INV-2
- * instrument+theme pipeline and the user's own eyes on the canvas). Registered via
- * `adapter.registerWorkflow()` at arm time (validate-before-persist, hot-registered into the
- * engine), not added to BUILTIN_WORKFLOWS: this def is crew-only data owned by this seam, not a
- * mirror of a wicked-core drop-in.
+ * The governed workflow that produces a first draft: the wicked-core built-in preset
+ * `interactive-draft` (X-MIG M9, wicked-core#860; crew#935). Its one creator step plans, then
+ * writes (crew#621: a separate neutral `outline` phase authored the whole deliverable in its
+ * output, so the split was deleted rather than gated), and runs `wicked-garden-draft`, the document
+ * quality floor. The engine owns the steps: it puts the PA's RISK rating (`pa-scope`) first, adds
+ * its floor (`critique`, and more at higher bands), and judges the launch's declared deliverable on
+ * the creator step (`LaunchOptions.deliverables`, written by THIS run). Crew registers no def for
+ * it; its narration reads the run's planned units (`run-units.ts`). The preset always requires the
+ * draft skill: a snapshot without it fails the run before its first unit.
  */
-export const INTERACTIVE_DRAFT_WORKFLOW_DEF: WorkflowDef = {
-  id: INTERACTIVE_DRAFT_WORKFLOW,
-  phases: [
-    {
-      id: 'draft',
-      kind: 'build',
-      instructions:
-        'PLAN, then WRITE — in this one phase. First read the brief (and any source files/folders named in the task, expanding ~) and state a short outline in your reply: the sections in order, the key points each carries, and the format the requested style implies (web = rich scrollable page; ppt = fixed landscape slides; brochure = landscape print pages; doc = minimal content-first prose). Then write the COMPLETE first-draft HTML document to the absolute output file named in the task (create parent directories if needed, overwrite if present) — the file on disk is the deliverable, so write it before you finish and end your reply with the absolute path you wrote. Contract: a full self-contained HTML document (inline CSS, no external network resources, no build step); honor the requested style/format and the page budget in the task; keep every fact grounded in the brief/sources and cite it — never fabricate a figure, a URL or an audit row, and label every mock visibly; leave NO placeholder copy in the document (say what is missing in your reply instead); do NOT add data-wid attributes anywhere (the wicked-interactive service instruments its own anchors); keep the markup semantic and well-formed (balanced tags) so the instrumentation pass lands cleanly.',
-      gate_type: 'execution',
-      gate: 'auto',
-      executes_code: false,
-      verified_evidence: false,
-      required_deliverables: [],
-      depends_on: [],
-      role: 'creator',
-      skill_ref: null,
-      allowed_skills: [],
-      validator_pin: null,
-    },
-  ],
-};
+export const INTERACTIVE_DRAFT_WORKFLOW = 'interactive-draft';
 
 // ── Pure helpers (unit-tested without a bus or an engine) ─────────────────────────────────────
 
@@ -606,9 +553,8 @@ export interface InteractiveDraftOptions {
    *  the engine benched (`health {usable: false, reason}`) instead of being convened or elected. */
   roster?: () => unknown[];
   /** Does the daemon's PUBLISHED skills snapshot hold (and enable) a skill? Consulted ONCE at arm time
-   *  for `wicked-garden-draft` (interactive/draft-skill.ts): held ⇒ the drafting phases carry the
-   *  skill_ref and the task names the self-check's inputs; not held ⇒ the run proceeds without the
-   *  quality floor and the arm log says so (the engine would refuse a skill_ref the snapshot lacks).
+   *  for `wicked-garden-draft` (interactive/draft-skill.ts), only for the arm log line: the preset
+   *  always runs the skill, and a snapshot without it fails the run before its first unit (crew#935).
    *  Default: `() => false` (a caller without a skills runtime has no snapshot to hold anything). */
   skillHeld?: SkillHeld;
   /** Repo-snapshot size budget in bytes (CREW-UX-8 v4; default ~200MB — see
@@ -669,6 +615,8 @@ interface InFlight {
   runId?: string | undefined;
   /** The ord of the latest unit-scoped engine frame, stamped on narration as `unit_ord`. */
   narrationOrd?: number | undefined;
+  /** The run's planned units, folded from its `unitPlanned` frames (crew#935). */
+  units?: RunUnits | undefined;
   /** Undefined while the flight is a PRE-LAUNCH placeholder (registered before the snapshot
    *  await so `inFlightDocs()` reports the doc busy — Copilot round 2); set once the launch
    *  resolves. */
@@ -719,7 +667,6 @@ export async function startInteractiveDraftSubscriber(
   opts: InteractiveDraftOptions = {},
 ): Promise<InteractiveDraftSubscription | null> {
   const log = opts.log ?? ((m: string) => console.error(m));
-  let draftSkillHeld = false; // set at arm time (draft-skill.ts); read at launch for the task clause
 
   // This seam reads and writes the bus through the engine that holds it (wicked-core#631,
   // core/bus.ts). Checked here so a bus no engine holds disables the seam before anything is armed.
@@ -735,22 +682,10 @@ export async function startInteractiveDraftSubscriber(
     return null;
   }
 
-  // The workflow rides the normal registration path — core validates the def BEFORE it is
-  // persisted/hot-registered (FINDING-002 ordering), so a drifted def fails the arm loudly
-  // instead of failing the first launch obscurely.
-  try {
-    // The quality-floor skill rides only when the published snapshot holds it (draft-skill.ts).
-    draftSkillHeld = (opts.skillHeld ?? (() => false))(DRAFT_SKILL);
-    log(draftSkillArmLine('interactive-draft', draftSkillHeld));
-
-    await adapter.registerWorkflow(withDraftSkill(INTERACTIVE_DRAFT_WORKFLOW_DEF, draftSkillHeld));
-  } catch (err) {
-    log(
-      `[interactive-draft] could not register the '${INTERACTIVE_DRAFT_WORKFLOW}' workflow — ` +
-        `governed drafting disabled: ${err instanceof Error ? err.message : String(err)}`,
-    );
-    return null;
-  }
+  // The workflow is the engine's built-in `interactive-draft` preset (crew#935): nothing to
+  // register. It always runs the draft skill, so the arm line says whether the published snapshot
+  // holds it — without it the engine fails each run before its first unit, naming the fix.
+  log(draftSkillArmLine(INTERACTIVE_DRAFT_WORKFLOW, (opts.skillHeld ?? (() => false))(DRAFT_SKILL)));
 
   const ledger = new InteractiveHandoffLedger(
     opts.ledgerPath ?? join(defaultStateDir(), 'interactive-draft-ledger.json'),
@@ -759,12 +694,6 @@ export async function startInteractiveDraftSubscriber(
   const heartbeatMs = opts.heartbeatMs ?? 15_000;
   const groundingStore = opts.groundingStore;
   const resolveDocsRoot = opts.resolveDocsRoot ?? (() => resolveInteractiveRoot(null));
-  // The run executes ONE MORE unit than the def declares: the crew#311 deliverable floor,
-  // appended per-run by `launchRun` from `requireDeliverables`. `agentPhaseCount` is what the
-  // council-and-worker narration branches key on (unchanged); `phaseCount` is the run's real
-  // length, so the thread never reports "phase 3/2" or calls the verification "the draft".
-  const agentPhaseCount = INTERACTIVE_DRAFT_WORKFLOW_DEF.phases.length;
-  const phaseCount = agentPhaseCount + 1;
   const inFlight = new Map<string, InFlight>(); // runId → live state (pre-launch placeholders included)
   // Documents whose run is terminal but whose FINALIZE is still running — the draft floor's
   // re-derivation and the announce (codex on crew#725). The doc must stay BUSY across that window:
@@ -874,51 +803,49 @@ export async function startInteractiveDraftSubscriber(
     // Narration ladder (#user-feedback 2026-08-14): the heartbeat repeats the LATEST line, and
     // the interactive transcript dedups consecutive repeats — so the more the line ADVANCES with
     // the run's real events, the more the thread reads as progress instead of a stuck echo.
-    const phaseName = (ord: number): string =>
-      ord > agentPhaseCount
-        ? DELIVERABLE_FLOOR_PHASE_ID
-        : (INTERACTIVE_DRAFT_WORKFLOW_DEF.phases[ord - 1]?.id ?? `phase ${ord}`);
-
-    // The crew#311 deliverable floor is a DETERMINISTIC tool phase — no seat, no council. Core
-    // still emits the seat-selection events for it (its `cli` is the node interpreter's absolute
-    // path), so narrating them verbatim put "Council picked /opt/homebrew/.../node for
-    // verify-deliverables…" in the reader's thread. Drop those two lines for the floor ord; the
-    // `unitDispatched` line that follows immediately says what the phase actually is.
-    const isFloorOrd = (e: CoreEvent): boolean =>
-      typeof (e as { ord?: unknown }).ord === 'number' && (e as { ord: number }).ord > agentPhaseCount;
+    //
+    // The steps are the engine's (crew#935): the preset's creator, the PA's `pa-scope` first and
+    // the floor's additions, as the run's `unitPlanned` frames announce them. A deterministic tool
+    // unit has no seat, so its council and routing frames are not narrated.
+    const units = (flight.units ??= new RunUnits());
+    if (units.observe(event)) return;
+    const ordOf = (e: CoreEvent): number => (typeof e.ord === 'number' ? e.ord : 0);
 
     if (event.type === 'councilConvened') {
-      if (isFloorOrd(event)) return;
-      const ord = typeof event.ord === 'number' ? event.ord : 0;
+      const ord = ordOf(event);
+      if (units.isTool(ord)) return;
       const seats = Array.isArray(event.clis) ? event.clis.length : 0;
       // "0-seat council" reads like a bug — generic phrasing whenever clis is missing or empty
       // (Copilot, #269).
       const council = seats > 0 ? `a ${seats}-seat council` : 'a council';
       narrate(
         flight,
-        `Convening ${council} to pick who plans and writes the draft…`,
+        units.isWriter(ord)
+          ? `Convening ${council} to pick who plans and writes the draft…`
+          : `Convening ${council} to pick who runs ${units.idAt(ord)}…`,
       );
-      void ord;
       return;
     }
 
     if (event.type === 'unitDistributed') {
-      if (isFloorOrd(event)) return;
-      const ord = typeof event.ord === 'number' ? event.ord : 0;
+      const ord = ordOf(event);
+      if (units.isTool(ord)) return;
       // One helper narrates the frame by `routingMethod` (S5 `teamed` = "Routed …", a recorded
       // council = "Council picked …" honest about its benched seats, F-4R2-007).
-      narrate(flight, unitDistributedLine(event, `for ${phaseName(ord)}`));
+      narrate(flight, unitDistributedLine(event, `for ${units.idAt(ord)}`));
       return;
     }
 
     if (event.type === 'unitDispatched') {
-      const ord = typeof event.ord === 'number' ? event.ord : 0;
-      const phase = phaseName(ord);
+      const ord = ordOf(event);
+      const id = units.idAt(ord);
       narrate(
         flight,
-        ord > agentPhaseCount
-          ? `Crew phase ${ord}/${phaseCount}: checking the draft file was actually written (${phase})…`
-          : `Crew phase ${ord}/${phaseCount}: planning and writing the draft (${phase})…`,
+        units.isWriter(ord)
+          ? `Crew phase ${units.position(ord)}: planning and writing the draft (${id})…`
+          : units.isEvaluator(ord)
+            ? `Crew phase ${units.position(ord)}: reviewing the draft (${id})…`
+            : `Crew phase ${units.position(ord)}: ${describeStep(id)}…`,
       );
       return;
     }
@@ -930,18 +857,19 @@ export async function startInteractiveDraftSubscriber(
     }
 
     if (event.type === 'unitOutputCaptured') {
-      const ord = typeof event.ord === 'number' ? event.ord : 0;
-      narrate(flight, `${phaseName(ord)} finished — the governance gate is reviewing it…`);
+      narrate(flight, `${units.idAt(ordOf(event))} finished — the governance gate is reviewing it…`);
       return;
     }
 
     if (event.type === 'gateDecided' && event.allow === true) {
-      const ord = typeof event.ord === 'number' ? event.ord : 0;
+      const ord = ordOf(event);
+      // The engine's deliverable floor judges the creator's unit before its gate decides, so an
+      // approved writer means the draft file is on disk and was written by this run.
       narrate(
         flight,
-        ord > agentPhaseCount
-          ? 'Draft file verified on disk — re-deriving the draft floor…'
-          : 'Gate approved the draft — checking the file landed…',
+        units.isWriter(ord)
+          ? 'Gate approved the draft — the draft file is verified on disk…'
+          : `Gate approved ${units.idAt(ord)} — moving on…`,
       );
       return;
     }
@@ -952,7 +880,7 @@ export async function startInteractiveDraftSubscriber(
       const note = ungatedGateNote(event);
       if (note !== null) {
         const ord = typeof event.ord === 'number' ? event.ord : 0;
-        narrate(flight, `Gate for ${phaseName(ord)}: ${note}`);
+        narrate(flight, `Gate for ${units.idAt(ord)}: ${note}`);
       }
       return;
     }
@@ -1031,22 +959,18 @@ export async function startInteractiveDraftSubscriber(
     // the artifact before it is published — the same `wicked-garden-draft` self-check the worker
     // was told to run, on the same inputs (hence BEFORE the snapshots go: the claims scan traces
     // every number and URL to them). A breach fails the draft naming the rule; a floor that could
-    // not run is published with that said, never rounded to a pass. Armed only when the skill is
-    // actually published — a run that got no quality clause was never held to this contract.
-    const floorVerdict = draftSkillHeld
-      ? await runDraftFloor(
-          outPath,
-          flight.floor?.budget ?? { pages: null, exact: false, source: 'unknown' },
-          flight.snapshotDirs,
-          { ...(flight.floor !== undefined ? { style: flight.floor.style } : {}) },
-          opts.draftFloorIo ?? {},
-        )
-      : null;
+    // not run is published with that said, never rounded to a pass. Every run is held to it: the
+    // preset always runs the skill, and a snapshot without it fails the run (crew#935).
+    const floorVerdict = await runDraftFloor(
+      outPath,
+      flight.floor?.budget ?? { pages: null, exact: false, source: 'unknown' },
+      flight.snapshotDirs,
+      { ...(flight.floor !== undefined ? { style: flight.floor.style } : {}) },
+      opts.draftFloorIo ?? {},
+    );
     removeSnapshots(flight);
-    if (floorVerdict !== null) {
-      log(`[interactive-draft] run ${runId} draft floor: ${floorVerdict.verdict} — ${floorVerdict.summary}`);
-    }
-    if (floorVerdict?.verdict === 'fail') {
+    log(`[interactive-draft] run ${runId} draft floor: ${floorVerdict.verdict} — ${floorVerdict.summary}`);
+    if (floorVerdict.verdict === 'fail') {
       ledger.recordFailure(draftHandoffKey(documentId, projectId));
       emitStatus({
         ...docScope(documentId, projectId),
@@ -1058,7 +982,7 @@ export async function startInteractiveDraftSubscriber(
       });
       return;
     }
-    if (floorVerdict?.verdict === 'unverified' || floorVerdict?.verdict === 'unavailable') {
+    if (floorVerdict.verdict === 'unverified' || floorVerdict.verdict === 'unavailable') {
       // Disclosed, not silently passed: the reader is told which floor could not be re-derived.
       emitStatus({
         ...docScope(documentId, projectId),
@@ -1370,17 +1294,14 @@ export async function startInteractiveDraftSubscriber(
                 }
               : undefined,
           ) +
-          // The quality floor's inputs (draft-skill.ts) — only when the skill rides the phases,
-          // since the clause names a launcher only that skill's snapshot provides.
-          (draftSkillHeld
-            ? ' ' +
-              draftQualityClause(
-                outPath,
-                pageBudgetFor(doc.brief, doc.style),
-                subjects.flatMap((s) => (s.snapshotDir !== undefined ? [s.snapshotDir] : [])),
-                { style: doc.style },
-              )
-            : ''),
+          // The quality floor's inputs (draft-skill.ts): the preset's steps always run the skill.
+          ' ' +
+          draftQualityClause(
+            outPath,
+            pageBudgetFor(doc.brief, doc.style),
+            subjects.flatMap((s) => (s.snapshotDir !== undefined ? [s.snapshotDir] : [])),
+            { style: doc.style },
+          ),
         sessionId: runId,
         clisJson: docClisJson ?? opts.clisJson ?? JSON.stringify(rosterOf(adapter, opts.roster)),
         workflow: INTERACTIVE_DRAFT_WORKFLOW,

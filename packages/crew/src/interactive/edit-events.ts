@@ -49,13 +49,14 @@ import {
   narrationStamps,
 } from './draft-events.js';
 import { InteractiveHandoffLedger } from './ledger.js';
-import { DRAFT_SKILL, draftQualityClause, draftSkillArmLine, withDraftSkill, type SkillHeld } from './draft-skill.js';
+import { DRAFT_SKILL, draftQualityClause, draftSkillArmLine, type SkillHeld } from './draft-skill.js';
 import { crewStateHome } from '../projects/state-home.js';
 import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
 import { DEMO_DOC_MOVED_MESSAGE, readDocHead } from './chat-events.js';
 import { resolveInteractiveRoot } from './bridge-root.js';
 import type { CoreAdapter } from '../core/adapter.js';
-import type { CoreEvent, LaunchRunInput, WorkflowDef } from '../core/types.js';
+import type { CoreEvent, LaunchRunInput } from '../core/types.js';
+import { RunUnits } from './run-units.js';
 import {
   acpFallbackLine,
   ungatedGateNote,
@@ -76,45 +77,16 @@ export const INTERACTIVE_EDIT_BUS_FILTER = `${FEEDBACK_PROCESSED}@${INTERACTIVE_
 
 // ── The workflow (workflows-as-data) ─────────────────────────────────────────────────────────
 
-export const INTERACTIVE_EDIT_WORKFLOW = 'interactive-edit';
-
 /**
- * The governed workflow that fulfils a structural handoff. ONE agent phase — `edit` (build,
- * creator role): the target fragments are already extracted and the instructions already
- * written, so unlike the draft leg there is nothing left to plan; a recon phase would only
- * burn a council turn re-reading a handoff the edit phase reads anyway.
- *
- * The phase `instructions` adapt the fragment-edit contract from interactive's assist skill
- * (Step 2 + Step 3): rewrite each handed-off fragment per its instruction, preserve every
- * pre-existing `data-wid` byte-for-byte, never mint new anchors, keep the markup well-formed,
- * and never fabricate facts. SINGLE-LINE by contract (PTY seat runner, wicked-core FINDING-011).
- *
- * The gate is `auto` with `validator_pin: null` — no human gate, no deterministic floor —
- * because this seam runs its own deterministic pre-emit self-check (INV-2) and interactive's
- * apply path re-checks the same invariant; a wrong-but-anchor-safe edit is the user's to judge
- * on the canvas, exactly as with the assist session it replaces.
+ * The governed workflow that fulfils a structural handoff: the wicked-core built-in preset
+ * `interactive-edit` (X-MIG M9, wicked-core#860; crew#935). ONE creator step, `edit`: the target
+ * fragments are already extracted and the instructions already written, so there is nothing left
+ * to plan. The step carries the fragment-edit contract (preserve every pre-existing `data-wid`
+ * byte-for-byte, mint none, keep the markup well-formed) and runs `wicked-garden-draft`. The engine
+ * owns the steps (the PA's `pa-scope` first, its floor additions, the deliverable floor on the
+ * creator step); this seam still runs its own pre-emit INV-2 self-check. Crew registers no def.
  */
-export const INTERACTIVE_EDIT_WORKFLOW_DEF: WorkflowDef = {
-  id: INTERACTIVE_EDIT_WORKFLOW,
-  phases: [
-    {
-      id: 'edit',
-      kind: 'build',
-      instructions:
-        'Read the handoff JSON file named in the task; for EACH entry of its items array: rewrite that item\'s "fragment" (the current outerHTML of one document element) to fulfil the item\'s "instruction", and SAVE the complete edited fragment — the element\'s full outerHTML only, no document wrapper, no markdown fences — to the item\'s exact absolute "output_path" (create parent directories if needed, overwrite if present). NON-NEGOTIABLE (INV-2): every data-wid attribute in the input fragment MUST survive in your edited fragment byte-for-byte — never remove, rename, or re-value a data-wid, and keep the root element\'s own data-wid on the root; elements you ADD must carry no data-wid at all (the wicked-interactive service instruments its own anchors). Keep the markup well-formed (balanced tags), change only what the instruction asks, and never fabricate facts or figures. Write every output file before you finish and end your reply with the absolute paths you wrote.',
-      gate_type: 'execution',
-      gate: 'auto',
-      executes_code: false,
-      verified_evidence: false,
-      required_deliverables: [],
-      depends_on: [],
-      role: 'creator',
-      skill_ref: null,
-      allowed_skills: [],
-      validator_pin: null,
-    },
-  ],
-};
+export const INTERACTIVE_EDIT_WORKFLOW = 'interactive-edit';
 
 // ── Pure helpers (unit-tested without a bus or an engine) ─────────────────────────────────────
 
@@ -310,9 +282,8 @@ export interface InteractiveEditOptions {
    *  the engine benched (`health {usable: false, reason}`) instead of being convened or elected. */
   roster?: () => unknown[];
   /** Does the daemon's PUBLISHED skills snapshot hold (and enable) a skill? Consulted ONCE at arm time
-   *  for `wicked-garden-draft` (interactive/draft-skill.ts): held ⇒ the drafting phases carry the
-   *  skill_ref and the task names the self-check's inputs; not held ⇒ the run proceeds without the
-   *  quality floor and the arm log says so (the engine would refuse a skill_ref the snapshot lacks).
+   *  for `wicked-garden-draft` (interactive/draft-skill.ts), only for the arm log line: the preset
+   *  always runs the skill, and a snapshot without it fails the run before its first unit (crew#935).
    *  Default: `() => false` (a caller without a skills runtime has no snapshot to hold anything). */
   skillHeld?: SkillHeld;
   /** The docs root a handoff's doc manifest is read from — the KIND GATE only (CREW-UX-9):
@@ -359,6 +330,8 @@ interface InFlight {
   runId?: string | undefined;
   /** The ord of the latest unit-scoped engine frame, stamped on narration as `unit_ord`. */
   narrationOrd?: number | undefined;
+  /** The run's planned units, folded from its `unitPlanned` frames (crew#935). */
+  units?: RunUnits | undefined;
   heartbeat: ReturnType<typeof setInterval>;
   /** The engine's own reason for the most recent failed unit (`stepFailed.detail`). Carried so
    *  the terminal error status names WHY — in particular the crew#311 deliverable-floor report,
@@ -401,7 +374,6 @@ export async function startInteractiveEditSubscriber(
   opts: InteractiveEditOptions = {},
 ): Promise<InteractiveEditSubscription | null> {
   const log = opts.log ?? ((m: string) => console.error(m));
-  let draftSkillHeld = false; // set at arm time (draft-skill.ts); read at launch for the task clause
 
   // This seam reads and writes the bus through the engine that holds it (wicked-core#631,
   // core/bus.ts). Checked here so a bus no engine holds disables the seam before anything is armed.
@@ -417,32 +389,15 @@ export async function startInteractiveEditSubscriber(
     return null;
   }
 
-  // The workflow rides the normal registration path — core validates the def BEFORE it is
-  // persisted/hot-registered (FINDING-002 ordering), so a drifted def fails the arm loudly
-  // instead of failing the first launch obscurely.
-  try {
-    // The quality-floor skill rides only when the published snapshot holds it (draft-skill.ts).
-    draftSkillHeld = (opts.skillHeld ?? (() => false))(DRAFT_SKILL);
-    log(draftSkillArmLine('interactive-edit', draftSkillHeld));
-    await adapter.registerWorkflow(withDraftSkill(INTERACTIVE_EDIT_WORKFLOW_DEF, draftSkillHeld));
-  } catch (err) {
-    log(
-      `[interactive-edit] could not register the '${INTERACTIVE_EDIT_WORKFLOW}' workflow — ` +
-        `governed structural edits disabled: ${err instanceof Error ? err.message : String(err)}`,
-    );
-    return null;
-  }
+  // The workflow is the engine's built-in `interactive-edit` preset (crew#935): nothing to
+  // register. The arm line says whether the published snapshot holds the draft skill it runs.
+  log(draftSkillArmLine(INTERACTIVE_EDIT_WORKFLOW, (opts.skillHeld ?? (() => false))(DRAFT_SKILL)));
 
   const ledger = new InteractiveHandoffLedger(
     opts.ledgerPath ?? join(defaultStateDir(), 'interactive-edit-ledger.json'),
   );
   const editDir = opts.editDir ?? join(defaultStateDir(), 'interactive-edits');
   const heartbeatMs = opts.heartbeatMs ?? 15_000;
-  // The run executes ONE MORE unit than the def declares: the crew#311 deliverable floor,
-  // appended per-run by `launchRun` from `requireDeliverables`. Narration keys off this so the
-  // "landing the new version" line fires when the FILES are verified, not when the worker
-  // merely stopped talking.
-  const agentPhaseCount = INTERACTIVE_EDIT_WORKFLOW_DEF.phases.length;
   const inFlight = new Map<string, InFlight>(); // runId → live state
 
   /** Emit onto interactive's vocabulary as the `wi-crew` producer. Never throws into the
@@ -514,37 +469,47 @@ export async function startInteractiveEditSubscriber(
     const blocks =
       flight.items.length === 1 ? 'the targeted block' : `${flight.items.length} targeted blocks`;
 
-    // The crew#311 deliverable floor is a DETERMINISTIC tool phase — no seat, no council. Core
-    // still emits the seat-selection events for it (its `cli` is the node interpreter's absolute
-    // path), so narrating them verbatim put "Council picked /opt/homebrew/.../node to rework…"
-    // in the reader's thread. Drop those two lines for the floor ord.
-    const isFloorOrd = (e: CoreEvent): boolean =>
-      typeof (e as { ord?: unknown }).ord === 'number' && (e as { ord: number }).ord > agentPhaseCount;
+    // The steps are the engine's (crew#935), read from the run's `unitPlanned` frames. A tool unit
+    // has no seat, so its council and routing frames are not narrated.
+    const units = (flight.units ??= new RunUnits());
+    if (units.observe(event)) return;
+    const ordOf = (e: CoreEvent): number => (typeof e.ord === 'number' ? e.ord : 0);
 
     if (event.type === 'councilConvened') {
-      if (isFloorOrd(event)) return;
+      const ord = ordOf(event);
+      if (units.isTool(ord)) return;
       const seats = Array.isArray(event.clis) ? event.clis.length : 0;
       // "0-seat council" reads like a bug — generic phrasing whenever clis is missing or empty
       // (Copilot, #269).
       const council = seats > 0 ? `a ${seats}-seat council` : 'a council';
-      narrate(flight, `Convening ${council} to pick who reworks ${blocks}…`);
+      narrate(
+        flight,
+        units.isWriter(ord)
+          ? `Convening ${council} to pick who reworks ${blocks}…`
+          : `Convening ${council} to pick who runs ${units.idAt(ord)}…`,
+      );
       return;
     }
 
     if (event.type === 'unitDistributed') {
-      if (isFloorOrd(event)) return;
+      const ord = ordOf(event);
+      if (units.isTool(ord)) return;
       // One helper narrates the frame by `routingMethod` (S5 `teamed` = "Routed …", a recorded
       // council = "Council picked …" honest about its benched seats, F-4R2-007).
-      narrate(flight, unitDistributedLine(event, `to rework ${blocks}`));
+      narrate(flight, unitDistributedLine(event, units.isWriter(ord) ? `to rework ${blocks}` : `for ${units.idAt(ord)}`));
       return;
     }
 
     if (event.type === 'unitDispatched') {
-      if (isFloorOrd(event)) {
-        narrate(flight, 'Checking the edited fragment files were actually written…');
-        return;
-      }
-      narrate(flight, `Crew is reworking ${blocks}…`);
+      const ord = ordOf(event);
+      narrate(
+        flight,
+        units.isWriter(ord)
+          ? `Crew is reworking ${blocks}…`
+          : units.isEvaluator(ord)
+            ? `Crew is reviewing the rework (${units.idAt(ord)})…`
+            : `Crew phase ${units.position(ord)}: ${units.idAt(ord)}…`,
+      );
       return;
     }
 
@@ -560,13 +525,14 @@ export async function startInteractiveEditSubscriber(
     }
 
     if (event.type === 'gateDecided' && event.allow === true) {
-      const ord = typeof event.ord === 'number' ? event.ord : 0;
-      // ord > the def's own phase count = the crew#311 deliverable floor, appended per-run.
+      const ord = ordOf(event);
+      // The engine's deliverable floor judges the creator's unit before its gate decides, so an
+      // approved writer means the fragment files are on disk and were written by this run.
       narrate(
         flight,
-        ord > agentPhaseCount
-          ? 'Edited fragments verified on disk — landing the new version now…'
-          : 'Gate approved the edit — checking the fragment files landed…',
+        units.isWriter(ord)
+          ? 'Gate approved the edit — the edited fragment files are verified on disk…'
+          : `Gate approved ${units.idAt(ord)} — moving on…`,
       );
       return;
     }
@@ -789,15 +755,13 @@ export async function startInteractiveEditSubscriber(
           // The quality floor on a revision (draft-skill.ts): the edited fragments are what land,
           // so the self-check runs on each item's output_path — no page budget applies to a fragment
           // (the document's count is the service's to keep), no snapshot rides this leg.
-          (draftSkillHeld
-            ? ' ' +
-              draftQualityClause(
-                'each item\'s output_path from the handoff file',
-                { pages: null, exact: false, source: 'unknown' },
-                [],
-                { revision: true, style: 'doc' },
-              )
-            : ''),
+          ' ' +
+          draftQualityClause(
+            'each item\'s output_path from the handoff file',
+            { pages: null, exact: false, source: 'unknown' },
+            [],
+            { revision: true, style: 'doc' },
+          ),
         sessionId: runId,
         clisJson: opts.clisJson ?? JSON.stringify(rosterOf(adapter, opts.roster)),
         workflow: INTERACTIVE_EDIT_WORKFLOW,

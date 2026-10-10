@@ -28,7 +28,6 @@ import {
   INTERACTIVE_BUS_FILTER,
   INTERACTIVE_PRODUCER,
   INTERACTIVE_DRAFT_WORKFLOW,
-  INTERACTIVE_DRAFT_WORKFLOW_DEF,
   InteractiveHandoffLedger,
   parseSourceDocCreated,
   draftProblem,
@@ -352,55 +351,6 @@ describe('resolveProjectRepo (CREW-UX-8: the project → repo binding)', () => {
   });
 });
 
-describe('the interactive-draft workflow def (workflows-as-data)', () => {
-  const def = INTERACTIVE_DRAFT_WORKFLOW_DEF;
-
-  it('is ONE creator phase that plans then writes — no neutral recon phase can author the deliverable (crew#621)', () => {
-    // Red before the collapse: the def was ['outline', 'draft'], and the neutral `outline` phase —
-    // instructed "Do NOT write HTML and do NOT create any files in this phase" — authored the whole
-    // 26.6 KB document in its output for the creator to paste. A phase whose instruction the run
-    // ignores is not a phase; the split is deleted rather than gated.
-    expect(def.id).toBe(INTERACTIVE_DRAFT_WORKFLOW);
-    expect(def.phases.map((p) => p.id)).toEqual(['draft']);
-    expect(def.phases[0]?.role).toBe('creator');
-    expect(def.phases[0]?.kind).toBe('build');
-    expect(def.phases[0]?.depends_on).toEqual([]);
-    expect(def.phases.some((p) => p.kind === 'recon')).toBe(false);
-    expect(def.phases.some((p) => p.role === 'neutral')).toBe(false);
-  });
-
-  it('the one phase is told to PLAN first and then WRITE, and to leave no placeholder copy (crew#621/#504)', () => {
-    const draft = def.phases[0]?.instructions ?? '';
-    expect(draft).toMatch(/PLAN, then WRITE/);
-    expect(draft).toMatch(/state a short outline/i);
-    expect(draft).toMatch(/NO placeholder copy/i);
-    expect(draft).toMatch(/label every mock visibly/i);
-  });
-
-  it('keeps every phase instruction single-line (the same PTY constraint as the problem)', () => {
-    for (const p of def.phases) {
-      expect(p.instructions ?? '').not.toMatch(/[\n\r]/);
-      expect((p.instructions ?? '').length).toBeGreaterThan(0);
-    }
-  });
-
-  it('arms no human gate and no validator floor — the acceptance gate is interactive’s INV-2 pipeline', () => {
-    for (const p of def.phases) {
-      expect(p.gate).toBe('auto');
-      expect(p.validator_pin).toBeNull();
-      expect(p.required_deliverables).toEqual([]);
-    }
-  });
-
-  it('carries the draft-production contract from the assist skill (Step 5), adapted', () => {
-    const draft = def.phases[0]?.instructions ?? '';
-    expect(draft).toContain('data-wid'); // the INV-2 discipline: never mint anchors
-    expect(draft).toMatch(/do NOT add data-wid/i);
-    expect(draft).toContain('self-contained HTML');
-    expect(draft).toMatch(/never fabricate/i);
-  });
-});
-
 describe('bus identity constants', () => {
   it('subscribes on an exact-type, domain-guarded filter ', () => {
     expect(INTERACTIVE_BUS_FILTER).toBe('wicked.interactive.doc.created@wicked-interactive');
@@ -603,8 +553,9 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     subs.push(sub!);
     armProbe(bus);
 
-    // The workflow def rode the normal registration path before the cursor armed.
-    expect(engine.registered.map((w) => w.id)).toEqual([INTERACTIVE_DRAFT_WORKFLOW]);
+    // crew#935: the workflow is the engine's built-in `interactive-draft` preset, so the seam
+    // registers no def of its own.
+    expect(engine.registered).toEqual([]);
 
     await emitDocCreated(bus, 'spike-doc', { project_id: 'proj-7' });
     await waitFor(() => engine.launches.length === 1);
@@ -631,14 +582,35 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     const before = beats();
     await waitFor(() => beats() >= before + 2);
 
-    // Phase transition narration folds the run's own events into the thread. 1/2, not 1/1: the
-    // run carries the crew#311 deliverable floor as a third unit.
+    // Phase transition narration folds the run's own events into the thread, counted from the
+    // run's PLANNED units (crew#935): the preset's creator sits behind the PA's `pa-scope`, and the
+    // engine's floor added a `critique` — three units, none of them a crew floor unit.
+    const planned = (ord: number, id: string, role: string) =>
+      engine.fire({
+        type: 'unitPlanned',
+        session: launch.sessionId,
+        ord,
+        description: `${id} — draft spike-doc ||| instructions`,
+        role,
+        executorType: 'agent',
+      } as unknown as CoreEvent);
+    planned(1, 'pa-scope', 'neutral');
+    planned(2, 'draft', 'creator');
+    planned(3, 'critique', 'evaluator');
     engine.fire({ type: 'unitDispatched', session: launch.sessionId, ord: 1, attempt: 0 });
     await waitFor(() =>
       probeEvents.some(
         (e) =>
           e.event_type === STATUS_POSTED &&
-          String((e.payload as { message?: string }).message).includes('1/2'),
+          String((e.payload as { message?: string }).message).includes('Crew phase 1/3: rating the ask'),
+      ),
+    );
+    engine.fire({ type: 'unitDispatched', session: launch.sessionId, ord: 2, attempt: 0 });
+    await waitFor(() =>
+      probeEvents.some(
+        (e) =>
+          e.event_type === STATUS_POSTED &&
+          String((e.payload as { message?: string }).message).includes('Crew phase 2/3: planning and writing the draft (draft)'),
       ),
     );
 
@@ -650,16 +622,16 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
           e.event_type === STATUS_POSTED &&
           String((e.payload as { message?: string }).message).includes(needle),
       );
-    engine.fire({ type: 'councilConvened', session: launch.sessionId, ord: 1, clis: ['a', 'b', 'c'] });
-    await waitFor(narrated('3-seat council'));
-    engine.fire({ type: 'unitDistributed', session: launch.sessionId, ord: 1, cli: 'stub', agreement_pct: 100 });
+    engine.fire({ type: 'councilConvened', session: launch.sessionId, ord: 2, clis: ['a', 'b', 'c'] });
+    await waitFor(narrated('3-seat council to pick who plans and writes the draft'));
+    engine.fire({ type: 'unitDistributed', session: launch.sessionId, ord: 2, cli: 'stub', agreement_pct: 100 });
     await waitFor(narrated('picked stub'));
     // wicked-core#590 S5: a `teamed` frame (no council convened; the council-only fields are null)
     // is narrated as a routing, never as a council pick.
     engine.fire({
       type: 'unitDistributed',
       session: launch.sessionId,
-      ord: 1,
+      ord: 2,
       cli: 'stub',
       routingMethod: 'teamed',
       agreementPct: null,
@@ -677,16 +649,16 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
           /council|agreement|picked/i.test(String((e.payload as { message?: string }).message)),
       ),
     ).toEqual([]);
-    engine.fire({ type: 'toolInvoked', session: launch.sessionId, ord: 1, attempt: 0, tools: ['Write', 'Write', 'Read'] });
+    engine.fire({ type: 'toolInvoked', session: launch.sessionId, ord: 2, attempt: 0, tools: ['Write', 'Write', 'Read'] });
     await waitFor(narrated('using Write, Read'));
-    engine.fire({ type: 'gateDecided', session: launch.sessionId, ord: 1, allow: true });
-    await waitFor(narrated('checking the file landed'));
+    engine.fire({ type: 'gateDecided', session: launch.sessionId, ord: 2, allow: true });
+    await waitFor(narrated('the draft file is verified on disk'));
     // Wave 6: the honest gate (F-7R2-005) and the fenced worker (F-7R2-012) reach the thread, and
     // every line is stamped per run + unit (F-4R2-005) so a skin keys narration per unit.
     engine.fire({
       type: 'gateEvaluated',
       session: launch.sessionId,
-      ord: 1,
+      ord: 2,
       ungated: true,
       ungatedReason: 'no judge: no eligible judge seat distinct from creator `stub`',
     } as unknown as CoreEvent);
@@ -694,7 +666,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     engine.fire({
       type: 'workerToolCallDenied',
       session: launch.sessionId,
-      ord: 1,
+      ord: 2,
       attempt: 0,
       cli: 'stub',
       carrier: 'acp',
@@ -709,13 +681,12 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
       (e) => e.event_type === STATUS_POSTED && String((e.payload as { message?: string }).message).includes('UNGATED'),
     );
     expect((stamped!.payload as { run_id?: string }).run_id).toBe(launch.sessionId);
-    expect((stamped!.payload as { unit_ord?: number }).unit_ord).toBe(1);
-    // The floor's own gate is what says "landing it now" — the draft is announced once the
-    // FILE is verified, never on the strength of the worker's reply alone (crew#311).
-    engine.fire({ type: 'unitDispatched', session: launch.sessionId, ord: 2, attempt: 0 });
-    await waitFor(narrated('2/2'));
-    engine.fire({ type: 'gateDecided', session: launch.sessionId, ord: 2, allow: true });
-    await waitFor(narrated('re-deriving the draft floor'));
+    expect((stamped!.payload as { unit_ord?: number }).unit_ord).toBe(2);
+    // The engine's floor addition reviews the draft; no crew floor unit follows it (crew#935).
+    engine.fire({ type: 'unitDispatched', session: launch.sessionId, ord: 3, attempt: 0 });
+    await waitFor(narrated('Crew phase 3/3: reviewing the draft (critique)'));
+    engine.fire({ type: 'gateDecided', session: launch.sessionId, ord: 3, allow: true });
+    await waitFor(narrated('Gate approved critique'));
 
     // The worker "wrote" the draft; completion announces it by path with the deterministic key.
     mkdirSync(join(draftDir, 'spike-doc'), { recursive: true });
