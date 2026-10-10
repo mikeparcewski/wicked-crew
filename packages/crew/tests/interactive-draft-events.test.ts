@@ -652,7 +652,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     engine.fire({ type: 'toolInvoked', session: launch.sessionId, ord: 2, attempt: 0, tools: ['Write', 'Write', 'Read'] });
     await waitFor(narrated('using Write, Read'));
     engine.fire({ type: 'gateDecided', session: launch.sessionId, ord: 2, allow: true });
-    await waitFor(narrated('the draft file is verified on disk'));
+    await waitFor(narrated('Gate approved the draft — crew checks the file before it lands'));
     // Wave 6: the honest gate (F-7R2-005) and the fenced worker (F-7R2-012) reach the thread, and
     // every line is stamped per run + unit (F-4R2-005) so a skin keys narration per unit.
     engine.fire({

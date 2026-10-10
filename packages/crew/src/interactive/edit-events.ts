@@ -547,12 +547,13 @@ export async function startInteractiveEditSubscriber(
 
     if (event.type === 'gateDecided' && event.allow === true) {
       const ord = ordOf(event);
-      // The engine's deliverable floor judges the creator's unit before its gate decides, so an
-      // approved writer means the fragment files are on disk and were written by this run.
+      // The gate's approval is not the file check: a plan revised mid-run can move which creator
+      // carries the deliverable (codex r7 on #938), so the line claims no verification — crew's
+      // finalize re-derives the file before anything lands.
       narrate(
         flight,
         units.isWriter(ord)
-          ? 'Gate approved the edit — the edited fragment files are verified on disk…'
+          ? 'Gate approved the edit — crew checks the fragment files before they land…'
           : `Gate approved ${units.idAt(ord)} — moving on…`,
       );
       return;

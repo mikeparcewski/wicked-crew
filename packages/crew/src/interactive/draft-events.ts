@@ -878,12 +878,13 @@ export async function startInteractiveDraftSubscriber(
 
     if (event.type === 'gateDecided' && event.allow === true) {
       const ord = ordOf(event);
-      // The engine's deliverable floor judges the creator's unit before its gate decides, so an
-      // approved writer means the draft file is on disk and was written by this run.
+      // The gate's approval is not the file check: a plan revised mid-run can move which creator
+      // carries the deliverable (codex r7 on #938), so the line claims no verification — crew's
+      // finalize re-derives the file before anything lands.
       narrate(
         flight,
         units.isWriter(ord)
-          ? 'Gate approved the draft — the draft file is verified on disk…'
+          ? 'Gate approved the draft — crew checks the file before it lands…'
           : `Gate approved ${units.idAt(ord)} — moving on…`,
       );
       return;

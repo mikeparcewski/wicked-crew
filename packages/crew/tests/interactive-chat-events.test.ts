@@ -529,7 +529,7 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     engine.fire({ type: 'unitDispatched', session: launch.sessionId, ord: 3, attempt: 0 });
     await waitFor(narrated('Crew phase 3/4: revising the document (revise)'));
     engine.fire({ type: 'gateDecided', session: launch.sessionId, ord: 3, allow: true });
-    await waitFor(narrated('the revised document is verified on disk'));
+    await waitFor(narrated('Gate approved the revision — crew checks the file before it lands'));
     engine.fire({ type: 'unitDispatched', session: launch.sessionId, ord: 4, attempt: 0 });
     await waitFor(narrated('Crew phase 4/4: reviewing the revision (critique)'));
 

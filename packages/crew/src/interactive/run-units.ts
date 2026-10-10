@@ -89,8 +89,9 @@ export class RunUnits {
     return this.at(ord)?.tool === true;
   }
 
-  /** The unit that writes the deliverable: the LAST agent creator (the engine joins the launch's
-   *  declared deliverables to the plan's last creator step, so only its gate verifies the file). */
+  /** The unit narrated as writing the document: the LAST agent creator (the engine joins the
+   *  launch's declared deliverables to the plan's last creator step at launch). A label only — a plan
+   *  revised mid-run can add a later creator, so no line claims a file check from it (codex r7). */
   isWriter(ord: number): boolean {
     const isCreator = (u: PlannedUnit | undefined): boolean => u !== undefined && !u.tool && u.role === 'creator';
     return isCreator(this.at(ord)) && !this.units.slice(ord).some(isCreator);

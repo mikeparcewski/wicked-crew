@@ -542,7 +542,7 @@ describe('startInteractiveEditSubscriber (real bus, fake engine)', () => {
     engine.fire({ type: 'unitDispatched', session: launch.sessionId, ord: 2, attempt: 0 });
     await waitFor(narrated('Crew is reworking the targeted block'));
     engine.fire({ type: 'gateDecided', session: launch.sessionId, ord: 2, allow: true });
-    await waitFor(narrated('the edited fragment files are verified on disk'));
+    await waitFor(narrated('Gate approved the edit — crew checks the fragment files before they land'));
     engine.fire({ type: 'unitDispatched', session: launch.sessionId, ord: 3, attempt: 0 });
     await waitFor(narrated('Crew is reviewing the rework (critique)'));
 
