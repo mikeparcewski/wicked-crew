@@ -23,7 +23,9 @@ import {
   DELIVER_OUTCOME_MARKER,
   DELIVER_PUSHED_NO_PR_MARKER,
   DELIVER_PUSH_REJECTED_MARKER,
+  DELIVER_UNVERIFIED_MARKER,
   deliverPrScript,
+  unverifiedTreesFrom,
   type DeliverScriptOptions,
 } from '../src/core/deliver.js';
 import { deliveryRecordFrom } from '../src/api/delivery-index.js';
@@ -1636,4 +1638,32 @@ describe('deliver script — a non-GitHub origin delivers the branch and the run
     expect(r.output).toContain('deliver: gh pr create failed');
     expect(r.output).not.toContain('no pull request was opened');
   }, 60_000);
+});
+
+// ── wicked-core#850 EX-04 — a POST-HOC lift labels its PR UNVERIFIED, with both trees ────────────
+describe('deliver script — a post-hoc lift is labelled unverified (EX-04)', () => {
+  it('post-hoc: the PR body ends with the label, and the marker line names the tree before and the tree delivered', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const lifted = true;\n');
+    const r = await runDeliver(fx, { intent: 'post-hoc lift', env: { WICKED_DELIVER_POSTHOC: '1' } });
+    expect(r.status, r.output).toBe(0);
+    const trees = unverifiedTreesFrom(r.output);
+    expect(trees?.treeBefore).toMatch(/^[0-9a-f]{40}$/);
+    // The delivered tree IS what reached the remote.
+    expect(trees?.treeAfter).toBe(git(fx.origin, 'rev-parse', `wicked/${RUN_ID}^{tree}`).trim());
+    expect(r.pr?.body).toContain('**Unverified delivery.**');
+    expect(r.pr?.body).toContain(trees!.treeBefore!);
+    expect(r.pr?.body).toContain(trees!.treeAfter!);
+    expect(r.lastLine).toMatch(/\/pull\/\d+$/); // the URL stays the verdict line
+  }, 90_000);
+
+  it('the engine-driven deliver unit (no post-hoc env) carries no label and prints no marker', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const verified = true;\n');
+    const r = await runDeliver(fx, { intent: 'in-run deliver' });
+    expect(r.status, r.output).toBe(0);
+    expect(r.output).not.toContain(DELIVER_UNVERIFIED_MARKER);
+    expect(unverifiedTreesFrom(r.output)).toBeNull();
+    expect(r.pr?.body ?? '').not.toContain('Unverified delivery');
+  }, 90_000);
 });

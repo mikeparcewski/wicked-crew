@@ -4,7 +4,7 @@ Control plane of the wicked platform: a daemon + CLI that runs coding-agent CLIs
 workers through durable workflows — intent in, gated work out (deny-dominates gates; "done"
 re-derived from the engine's own evidence — floors, repo checks, judges; review on a seat distinct
 from the creator's whenever the roster has an eligible one, disclosed when it is not). The QE ledger
-acceptance answer is a separate read (`GET /runs/:id/acceptance`), not a delivery prerequisite. The execution engine is
+acceptance answer is a separate read (`GET /runs/:id/acceptance`), a delivery prerequisite only for a run whose assurance contract requires `qe_acceptance` (then an attributed PASS, or no push — wicked-core#850). The execution engine is
 wicked-core (its own Rust repo); this repo is the JS/TS surface on top of it.
 
 This file is a pointer stub — no doctrine lives here. Ecosystem-wide rules (PR merge

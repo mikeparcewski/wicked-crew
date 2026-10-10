@@ -4790,6 +4790,13 @@ export interface WorkflowDef {
    * Gated at intake: a launch whose snapshot lacks the skill is refused before any unit is planned.
    */
   base_skill_ref?: string | null;
+  /**
+   * (api-types 0.102.0; wicked-core#850, core-ts ≥ 0.7.46) The instruments a run of this workflow
+   * REQUIRES: `distinct_evaluator`, `judge`, `qe_acceptance`. ABSENT ⇒ the first two. An unknown or
+   * repeated token refuses the def at load. `qe_acceptance` is enforced by crew at delivery (an
+   * attributed QE PASS, or no push) and is never waived by `reducedAssurance`.
+   */
+  required_instruments?: string[] | null;
 }
 
 /** A drop-in workflow definition the ENGINE refused, with the engine's own reason (wicked-crew#718). */
