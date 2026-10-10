@@ -93,7 +93,10 @@ async function trail(pred: (entries: AuditEntry[]) => boolean, ms = 5_000): Prom
 
 describe('§4.8 — isCodeWorkDef equals the LIVE POST /runs deliver-default rule for every shipped def', () => {
   it('drives POST /runs per shipped def (no `deliver`) and reads the closure\'s decision off the run.launched trail', async () => {
-    const shipped: WorkflowDef[] = adapter.listWorkflows();
+    // The defs a plain `POST /runs` launches (X-MIG M11: the catalog now carries every built-in
+    // preset; `demo` and the interactive documents launch through their own surfaces, not here).
+    const launchable = new Set(['feature', 'bug', 'migration', 'capture-learnings', 'steering-author', 'domain-extraction', 'mcp-server', 'qe-author-tests']);
+    const shipped: WorkflowDef[] = adapter.listWorkflows().filter((w) => launchable.has(w.id));
     expect(shipped.map((w) => w.id)).toEqual(expect.arrayContaining(['feature', 'bug', 'capture-learnings', 'qe-author-tests']));
     const decided: Array<{ id: string; deliver: unknown; defaulted: unknown }> = [];
     for (const def of shipped) {
