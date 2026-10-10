@@ -29,6 +29,7 @@ import {
   type DeliverScriptOptions,
 } from '../src/core/deliver.js';
 import { deliveryRecordFrom } from '../src/api/delivery-index.js';
+import { DELIVER_CREDENTIALS_MISSING_MARKER } from '../src/core/deliver-credentials.js';
 import { triageDeliverFailure, trustedDeliverOutcome, trustedOutcomeIn } from '../src/core/deliver-triage.js';
 
 /** (crew#739) The sentinel nonce every composed script in this file carries. */
@@ -110,6 +111,11 @@ function fixture(opts: { worktree?: boolean; defaultBranch?: string; fromRef?: s
 /** DES-L9 — the PR this run revises: a `wicked/prior-run` branch on origin, one commit on top of main,
  *  fetched into the clone so `origin/wicked/prior-run` resolves. Returns its head sha. */
 const PR_BRANCH = 'wicked/prior-run';
+/** (crew#940) The github.com origin the identity tests deliver to (the git shim maps it to the bare fixture). */
+const GITHUB_URL = 'https://github.com/o/r.git';
+/** A credential helper answering for gh's ACTIVE account — what osxkeychain or a stale helper holds. */
+// Assembled at runtime: no credential-shaped literal in the source (secret scanners read it).
+const ACTIVE_ACCOUNT_HELPER = ['!f() { test "$1" = get && printf \'user', "name=someone-else\\npass", "word=tok-someone-else\\n'; }; f"].join('');
 const PR = { number: 273, headRef: PR_BRANCH, url: 'https://github.com/o/r/pull/273' };
 function prBranchOnOrigin(root: string, origin: string): string {
   const other = join(root, 'other');
@@ -164,8 +170,13 @@ async function runDeliver(
     /** R1: what `git remote get-url --push origin` answers inside the script (a `git` shim; every
      *  other git call reaches the real git, so the push still lands on the bare fixture). */
     originPushUrl?: string;
+    /** (crew#940) A github.com origin: origin's URL (and the script's) is GITHUB_URL, and a `git`
+     *  shim hands any fetch/push/ls-remote naming that URL to the bare fixture — first asking git,
+     *  with the SAME `-c` options the script passed, which password its credential helpers would
+     *  present for github.com (recorded as `gitCreds`, "<subcommand> <password> allow=<GIT_ALLOW_PROTOCOL>"). */
+    githubOrigin?: boolean;
   } = {},
-): Promise<{ status: number; output: string; lastLine: string; outcome: string | null; pr: PrCreateCall | null; comment: string | null; ghCalls: string[] }> {
+): Promise<{ status: number; output: string; lastLine: string; outcome: string | null; pr: PrCreateCall | null; comment: string | null; ghCalls: string[]; gitCreds: string[]; prToken: string | null }> {
   const nonce = opts.script?.nonce ?? TEST_NONCE;
   const home = join(fx.root, 'home');
   const bin = join(fx.root, 'bin');
@@ -200,7 +211,7 @@ async function runDeliver(
       '      *)',
       // Record what the PR was opened WITH (crew#524): the title and the body file's content.
       '        T=""; BF=""; while [ $# -gt 0 ]; do case "$1" in --title) T="$2"; shift;; --body-file) BF="$2"; shift;; esac; shift; done',
-      '        printf "%s\\n" "$T" > "$GH_STUB_RECORD.title"; if [ -n "$BF" ]; then cp "$BF" "$GH_STUB_RECORD.body"; fi; printf "%s\\n" "$*" > "$GH_STUB_RECORD.argv"',
+      '        printf "%s\\n" "$T" > "$GH_STUB_RECORD.title"; if [ -n "$BF" ]; then cp "$BF" "$GH_STUB_RECORD.body"; fi; printf "%s\\n" "$*" > "$GH_STUB_RECORD.argv"; printf "%s\\n" "${GH_TOKEN:-}" > "$GH_STUB_RECORD.prtoken"',
       '        if [ -n "${GH_STUB_FAIL:-}" ]; then echo "$GH_STUB_FAIL" >&2; exit 1; fi',
       '        echo "${GH_STUB_OUT:-https://github.com/o/r/pull/7}";;',
       '    esac;;',
@@ -210,7 +221,37 @@ async function runDeliver(
     ].join('\n'),
   );
   chmodSync(join(bin, 'gh'), 0o755);
-  if (opts.originPushUrl !== undefined) {
+  const record = join(fx.root, `gh-record-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  let script = opts.script;
+  if (opts.githubOrigin === true) {
+    git(fx.workdir, 'remote', 'set-url', 'origin', GITHUB_URL);
+    script = { originUrl: GITHUB_URL, ...opts.script };
+    const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+    writeFileSync(
+      join(bin, 'git'),
+      [
+        '#!/bin/bash',
+        `REAL='${realGit}'`,
+        'args=("$@"); out=(); cfg=(); sub=""; i=0',
+        'while [ $i -lt ${#args[@]} ]; do a="${args[$i]}"',
+        '  if [ -z "$sub" ]; then',
+        '    if [ "$a" = -c ]; then cfg+=(-c "${args[$((i+1))]}"); out+=(-c "${args[$((i+1))]}"); i=$((i+2)); continue; fi',
+        '    case "$a" in -*) ;; *) sub="$a";; esac; out+=("$a")',
+        '  else',
+        `    if [ "$a" = '${GITHUB_URL}' ]; then case "$sub" in push|fetch|ls-remote)`,
+        '      P=$(printf "protocol=https\nhost=github.com\npath=o/r.git\n\n" | GIT_TERMINAL_PROMPT=0 "$REAL" "${cfg[@]}" credential fill 2>/dev/null | sed -n "s/^password=//p" | head -1)',
+        // The canonical https URL becomes the bare fixture (a local path), which the script's
+        // https-only GIT_ALLOW_PROTOCOL would refuse; it is recorded, then lifted for this call.
+        '      printf "%s %s %s\n" "$sub" "${P:-none}" "allow=${GIT_ALLOW_PROTOCOL:-}" >> "$GH_STUB_RECORD.gitcred"; a="$GIT_STUB_GITHUB_DIR"; unset GIT_ALLOW_PROTOCOL;; esac; fi',
+        '    out+=("$a")',
+        '  fi',
+        '  i=$((i+1))',
+        'done',
+        'exec "$REAL" "${out[@]}"',
+      ].join('\n'),
+    );
+    chmodSync(join(bin, 'git'), 0o755);
+  } else if (opts.originPushUrl !== undefined) {
     const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
     writeFileSync(
       join(bin, 'git'),
@@ -228,11 +269,10 @@ async function runDeliver(
     rmSync(join(bin, 'git'));
   }
 
-  const record = join(fx.root, `gh-record-${Date.now()}-${Math.random().toString(16).slice(2)}`);
   const res = await new Promise<{ status: number; stdout: string; stderr: string }>((resolve) => {
     execFile(
       'bash',
-      ['-lc', deliverPrScript(opts.intent, { ...opts.script, nonce })],
+      ['-lc', deliverPrScript(opts.intent, { ...script, nonce })],
       {
         cwd: fx.workdir,
         encoding: 'utf8',
@@ -255,6 +295,7 @@ async function runDeliver(
           GH_STUB_TOKEN_LOGIN: opts.gh?.tokenLogin ?? '',
           GH_STUB_TOKEN_USER_FLAG: opts.gh?.tokenUserFlag === true ? '1' : '',
           GIT_STUB_ORIGIN_PUSH_URL: opts.originPushUrl ?? '',
+          GIT_STUB_GITHUB_DIR: fx.origin,
           // DES-L9: the identity block reads GH_TOKEN's PRESENCE for its disclosure line — keep the
           // fixture deterministic whatever the developer's shell exported.
           GH_TOKEN: '',
@@ -288,7 +329,9 @@ async function runDeliver(
   const ghCalls = existsSync(`${record}.calls`)
     ? readFileSync(`${record}.calls`, 'utf8').trimEnd().split('\n').filter(Boolean)
     : [];
-  return { status: res.status, output, lastLine: lines[lines.length - 1] ?? '', outcome, pr, comment, ghCalls };
+  const gitCreds = existsSync(`${record}.gitcred`) ? readFileSync(`${record}.gitcred`, 'utf8').trimEnd().split('\n').filter(Boolean) : [];
+  const prToken = existsSync(`${record}.prtoken`) ? readFileSync(`${record}.prtoken`, 'utf8').trim() : null;
+  return { status: res.status, output, lastLine: lines[lines.length - 1] ?? '', outcome, pr, comment, ghCalls, gitCreds, prToken };
 }
 
 /** What the fake `gh pr create` was called with. */
@@ -600,90 +643,117 @@ describe('deliver script, driven for real (crew#317)', () => {
     expect(r.pr?.body ?? '').not.toContain('## Not shipped');
   }, 60_000);
 
-  // ── DES-L9 D-18 — IDENTITY (crew#549 / F-RC1-010) ─────────────────────────────────────────────
-  it('REFUSES up front when GH_ACCOUNT differs from gh’s active login — nothing staged, nothing pushed, no `gh auth switch`', async () => {
+  // ── crew#940 (operator ruling 2026-10-10) — the push identity is chosen PER COMMAND ────────────
+  // gh's machine-wide ACTIVE account is someone-else, and git's own credential helper answers for
+  // that account too (osxkeychain, a stale helper). With release-bot configured, the phase reads
+  // release-bot's own token and hands it to its gh calls and to its git fetch/push alone — so the
+  // push, the fetch and the pull request all go out as release-bot. On main the configured account
+  // was only checked against git's helper, so this delivery was refused (or pushed as the helper's
+  // account): it fails there.
+  it('crew#940: with gh active as ANOTHER user, delivery still fetches, pushes and opens the PR as the configured identity', async () => {
     const fx = fixture();
     writeFileSync(join(fx.workdir, 'work.ts'), 'export const z = 3;\n');
-
-    const r = await runDeliver(fx, { gh: { login: 'someone-else' }, env: { GH_ACCOUNT: 'release-bot' } });
-
-    expect(r.status).not.toBe(0);
-    expect(r.output).toContain(
-      "deliver: identity mismatch — GH_ACCOUNT is release-bot but gh's active login is someone-else; nothing was staged, committed or pushed. Fix the daemon's gh login (switch gh's active account, or export GH_TOKEN in the daemon environment) and approve to retry the deliver phase",
-    );
-    // The refusal IS the whole output — it runs before the fetch, so the engine's head excerpt carries it.
-    expect(r.output.trim().startsWith('deliver: identity mismatch')).toBe(true);
-    expect(originBranches(fx)).toEqual(['main']);
-    // Refused BEFORE staging: the work is still untracked in a KEPT worktree, ready for the retry.
-    expect(git(fx.workdir, 'status', '--porcelain')).toContain('?? work.ts');
-    expect(existsSync(fx.workdir)).toBe(true);
-    // The account is never switched — the daemon's identity is disclosed, not flipped. (crew#737:
-    // the only auth calls are the token read for the configured account, which a gh too old for
-    // `--user` cannot answer, so the active-login check decides.)
-    expect(r.ghCalls.some((c) => c.startsWith('auth switch'))).toBe(false);
-    expect(r.ghCalls.filter((c) => !c.startsWith('auth token'))).toEqual(['api user -q .login']);
-  }, 60_000);
-
-  // ── crew#737 — the push is pinned to the configured account's OWN token ──────────────────────
-  it('crew#737: a configured account delivers as ITSELF even when gh\'s active account is another — its own token is exported for the phase, never echoed', async () => {
-    const fx = fixture();
-    writeFileSync(join(fx.workdir, 'work.ts'), 'export const z = 3;\n');
+    git(fx.workdir, 'config', 'credential.helper', ACTIVE_ACCOUNT_HELPER);
     const r = await runDeliver(fx, {
-      gh: { login: 'someone-else', tokenFor: 'release-bot', tokenLogin: 'release-bot', tokenUserFlag: true },
-      script: { deliverIdentity: 'release-bot' },
+      githubOrigin: true,
+      gh: { login: 'someone-else', tokenFor: 'release-bot', tokenLogin: 'release-bot' },
+      env: { GH_ACCOUNT: 'release-bot' },
+      script: { runId: RUN_ID },
     });
-    expect(r.status).toBe(0);
-    expect(r.output).toContain("deliver: pinned to release-bot's own gh token for this phase");
-    expect(r.output).toContain('deliver: pushing as release-bot (GH_ACCOUNT pinned by GH_TOKEN)');
+    expect(r.status, r.output).toBe(0);
+    expect(r.outcome).toBe('pr');
+    // git presented release-bot's token on every network call, never the active account's.
+    expect(r.gitCreds.length).toBeGreaterThanOrEqual(2);
+    expect(r.gitCreds.every((c) => c.endsWith(' tok-release-bot allow=https')), r.gitCreds.join('\n')).toBe(true);
+    expect(r.gitCreds.some((c) => c.startsWith('push '))).toBe(true);
+    // …and so did gh for the pull request.
+    expect(r.prToken).toBe('tok-release-bot');
+    expect(r.output).toContain("deliver: pushing as release-bot with its own gh token, pinned for this phase (gh's active account is not used)");
+    // The token never reaches the log, and the account is never switched.
     expect(r.output).not.toContain('tok-release-bot');
     expect(r.ghCalls).toContain('auth token --hostname github.com --user release-bot');
     expect(r.ghCalls.some((c) => c.startsWith('auth switch'))).toBe(false);
+    expect(r.output).not.toContain('identity mismatch');
     expect(originBranches(fx)).toContain(`wicked/${RUN_ID}`);
   }, 60_000);
 
-  it('crew#737: a configured account gh is not signed in as is REFUSED before anything is staged', async () => {
+  it('crew#940: a configured identity gh holds no token for is "GitHub credentials not configured" — refused before anything is staged, recoverably', async () => {
     const fx = fixture();
     writeFileSync(join(fx.workdir, 'work.ts'), 'export const z = 3;\n');
-    const r = await runDeliver(fx, { gh: { login: 'someone-else', tokenUserFlag: true }, script: { deliverIdentity: 'release-bot' } });
+    const r = await runDeliver(fx, { githubOrigin: true, gh: { login: 'someone-else' }, script: { deliverIdentity: 'release-bot' } });
     expect(r.status).not.toBe(0);
-    expect(r.output).toContain('deliver: release-bot is not signed in to gh on this machine; nothing was staged, committed or pushed.');
+    expect(r.outcome).toBe('rejected');
+    expect(r.output).toContain('deliver: GitHub credentials not configured: gh holds no token for release-bot on this machine and no GH_TOKEN is exported.');
+    expect(r.output).toContain(`${DELIVER_CREDENTIALS_MISSING_MARKER} github; ${DELIVER_PUSH_REJECTED_MARKER}`);
     expect(originBranches(fx)).toEqual(['main']);
     expect(git(fx.workdir, 'status', '--porcelain')).toContain('?? work.ts');
+    expect(r.gitCreds).toEqual([]);
+    expect(r.ghCalls.filter((c) => !c.startsWith('auth token'))).toEqual([]);
   }, 60_000);
 
-  it('REFUSES when GH_ACCOUNT is set and gh cannot say who it is (unauthenticated)', async () => {
+  it('crew#940: an exported GH_TOKEN wins — and one that authenticates as another login than the identity is REFUSED', async () => {
     const fx = fixture();
     writeFileSync(join(fx.workdir, 'work.ts'), 'export const z = 3;\n');
-
-    const r = await runDeliver(fx, { gh: { apiFails: true }, env: { GH_ACCOUNT: 'release-bot' } });
-
-    expect(r.status).not.toBe(0);
-    expect(r.output).toContain("GH_ACCOUNT is release-bot but gh's active login is unreadable; nothing was staged");
-    expect(originBranches(fx)).toEqual(['main']);
-  }, 60_000);
-
-  it('pushes when GH_ACCOUNT matches, saying which identity and whether GH_TOKEN pins it', async () => {
-    const fx = fixture();
-    writeFileSync(join(fx.workdir, 'work.ts'), 'export const z = 3;\n');
-    const pinned = await runDeliver(fx, { gh: { login: 'release-bot' }, env: { GH_ACCOUNT: 'release-bot', GH_TOKEN: 'ghp_stub' } });
-    expect(pinned.status).toBe(0);
-    expect(pinned.output).toContain('deliver: pushing as release-bot (GH_ACCOUNT pinned by GH_TOKEN)');
-    expect(originBranches(fx)).toContain(`wicked/${RUN_ID}`);
+    const ok = await runDeliver(fx, { githubOrigin: true, gh: { login: 'release-bot' }, env: { GH_ACCOUNT: 'release-bot', GH_TOKEN: 'ghp_stub' } });
+    expect(ok.status, ok.output).toBe(0);
+    expect(ok.output).toContain('deliver: pushing as release-bot (pinned by GH_TOKEN)');
+    expect(ok.gitCreds.every((c) => c.endsWith(' ghp_stub allow=https'))).toBe(true);
+    expect(ok.ghCalls.some((c) => c.startsWith('auth token'))).toBe(false);
+    expect(ok.output).not.toContain('ghp_stub');
 
     const fx2 = fixture();
     writeFileSync(join(fx2.workdir, 'work.ts'), 'export const z = 3;\n');
-    const keyring = await runDeliver(fx2, { gh: { login: 'release-bot' }, env: { GH_ACCOUNT: 'release-bot' } });
-    expect(keyring.status).toBe(0);
-    expect(keyring.output).toContain('deliver: pushing as release-bot (GH_ACCOUNT from the gh keyring — export GH_TOKEN to pin it)');
-    expect(keyring.output).not.toContain('by GH_TOKEN');
-  }, 60_000);
+    const bad = await runDeliver(fx2, { githubOrigin: true, gh: { login: 'someone-else' }, env: { GH_ACCOUNT: 'release-bot', GH_TOKEN: 'ghp_stub' } });
+    expect(bad.status).not.toBe(0);
+    expect(bad.output.trim().startsWith('deliver: identity mismatch')).toBe(true);
+    expect(bad.output).toContain('deliver: identity mismatch — the push identity is release-bot but the exported GH_TOKEN authenticates as someone-else; nothing was staged, committed or pushed.');
+    expect(originBranches(fx2)).toEqual(['main']);
+    expect(git(fx2.workdir, 'status', '--porcelain')).toContain('?? work.ts');
 
-  it('with GH_ACCOUNT unset it pushes as whatever gh holds — and SAYS so (not pinned)', async () => {
+    const fx3 = fixture();
+    writeFileSync(join(fx3.workdir, 'work.ts'), 'export const z = 3;\n');
+    const unread = await runDeliver(fx3, { githubOrigin: true, gh: { apiFails: true }, env: { GH_ACCOUNT: 'release-bot', GH_TOKEN: 'ghp_stub' } });
+    expect(unread.status).not.toBe(0);
+    expect(unread.output).toContain('but the exported GH_TOKEN authenticates as unreadable; nothing was staged');
+  }, 90_000);
+
+  it('with no identity configured it pushes as whatever gh holds — and SAYS so (not pinned)', async () => {
     const fx = fixture();
     writeFileSync(join(fx.workdir, 'work.ts'), 'export const z = 3;\n');
     const r = await runDeliver(fx, { gh: { login: 'whoever' } });
     expect(r.status).toBe(0);
-    expect(r.output).toContain('deliver: pushing as whoever (GH_ACCOUNT not set — not pinned)');
+    expect(r.output).toContain('deliver: pushing as whoever (no push identity configured — not pinned)');
+  }, 60_000);
+
+  it('crew#940: a url.*.insteadOf rewriting the canonical URL (to ssh, or https carrying its own credential) is refused before staging', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const z = 3;\n');
+    git(fx.workdir, 'config', 'url.git@github.com:.insteadOf', 'https://github.com/');
+    const r = await runDeliver(fx, { githubOrigin: true, gh: { login: 'someone-else', tokenFor: 'release-bot', tokenLogin: 'release-bot' }, env: { GH_ACCOUNT: 'release-bot' } });
+    expect(r.status).not.toBe(0);
+    expect(r.output).toContain('deliver: git config rewrites https://github.com/ (a url.*.insteadOf), so the push would not go to https://github.com/o/r.git with the pinned token; nothing was staged');
+    expect(r.gitCreds).toEqual([]);
+    expect(originBranches(fx)).toEqual(['main']);
+  }, 60_000);
+
+  it('crew#940: a github.com origin the composer could not read is refused, not pushed unpinned', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const z = 3;\n');
+    git(fx.workdir, 'remote', 'set-url', 'origin', GITHUB_URL);
+    const r = await runDeliver(fx, { gh: { login: 'someone-else', tokenFor: 'release-bot' }, env: { GH_ACCOUNT: 'release-bot' } });
+    expect(r.status).not.toBe(0);
+    expect(r.output).toContain('deliver: origin is a github.com remote, but this delivery was composed without reading it, so the push identity release-bot cannot be pinned; nothing was staged');
+    expect(git(fx.workdir, 'status', '--porcelain')).toContain('?? work.ts');
+  }, 60_000);
+
+  it('off github.com the github.com identity does not apply: no token is read and the push goes to origin as before', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const z = 3;\n');
+    const r = await runDeliver(fx, { gh: { login: 'someone-else' }, env: { GH_ACCOUNT: 'release-bot' } });
+    expect(r.status, r.output).toBe(0);
+    expect(r.output).toContain('deliver: the push identity release-bot applies to github.com origins only');
+    expect(r.ghCalls.some((c) => c.startsWith('auth '))).toBe(false);
+    expect(originBranches(fx)).toContain(`wicked/${RUN_ID}`);
   }, 60_000);
 
   // (crew#549 / F-RC1-010) THE CREDENTIAL CROSS-CHECK. `gh api user` says who GH is; it says
@@ -772,29 +842,19 @@ describe('deliver script, driven for real (crew#317)', () => {
     expect(originBranches(fx)).toContain(`wicked/${RUN_ID}`);
   }, 60_000);
 
-  it('the CONFIGURED deliver identity (the setting) refuses a differing gh login with GH_ACCOUNT unset', async () => {
+  it('the CONFIGURED deliver identity (the setting) wins over a differing GH_ACCOUNT', async () => {
     const fx = fixture();
     writeFileSync(join(fx.workdir, 'work.ts'), 'export const z = 3;\n');
-
     const r = await runDeliver(fx, {
-      gh: { login: 'someone-else' },
-      script: { deliverIdentity: 'release-bot' },
-    });
-
-    expect(r.status).not.toBe(0);
-    expect(r.output).toContain("GH_ACCOUNT is release-bot but gh's active login is someone-else");
-    expect(originBranches(fx)).toEqual(['main']);
-
-    // …and the setting WINS over a differing env var (a daemon started with a stale export).
-    const fx2 = fixture();
-    writeFileSync(join(fx2.workdir, 'work.ts'), 'export const z = 3;\n');
-    const r2 = await runDeliver(fx2, {
-      gh: { login: 'release-bot' },
+      githubOrigin: true,
+      gh: { login: 'someone-else', tokenFor: 'release-bot', tokenLogin: 'release-bot' },
       env: { GH_ACCOUNT: 'stale-bot' },
       script: { deliverIdentity: 'release-bot' },
     });
-    expect(r2.status).toBe(0);
-    expect(r2.output).toContain('deliver: pushing as release-bot');
+    expect(r.status, r.output).toBe(0);
+    expect(r.output).toContain('deliver: pushing as release-bot');
+    expect(r.ghCalls).toContain('auth token --hostname github.com --user release-bot');
+    expect(r.ghCalls.some((c) => c.includes('stale-bot'))).toBe(false);
   }, 60_000);
 
   // ── DES-L9 / crew#550 — REVISION mode ───────────────────────────────────────────────────────
@@ -1182,24 +1242,13 @@ describe('deliver script, driven for real (crew#317)', () => {
     expect(originBranches(fx)).not.toContain(`wicked/${RUN_ID}`);
   }, 60_000);
 
-  it('honours the GH_ACCOUNT guard without baking a name in — a match pushes, a mismatch REFUSES (DES-L9 D-18)', async () => {
+  it('bakes no account name in: the identity comes from GH_ACCOUNT at run time, and the account is never switched (DES-L9 D-18)', async () => {
     const fx = fixture();
     writeFileSync(join(fx.workdir, 'work.ts'), 'export const q = 5;\n');
-
-    // Same account ⇒ pushes, disclosing the identity; never a switch.
-    const same = await runDeliver(fx, { gh: { login: 'someone' }, env: { GH_ACCOUNT: 'someone' } });
-    expect(same.status).toBe(0);
-    expect(same.output).toContain('deliver: pushing as someone (GH_ACCOUNT from the gh keyring — export GH_TOKEN to pin it)');
-    expect(same.output).not.toContain('switched account');
-
-    // Different account ⇒ REFUSED up front (the `gh auth switch` this replaced is gone).
-    const fx2 = fixture();
-    writeFileSync(join(fx2.workdir, 'work.ts'), 'export const q = 6;\n');
-    const other = await runDeliver(fx2, { gh: { login: 'someone' }, env: { GH_ACCOUNT: 'other' } });
-    expect(other.status).not.toBe(0);
-    expect(other.output).not.toContain('switched account');
-    expect(other.output).toContain("deliver: identity mismatch — GH_ACCOUNT is other but gh's active login is someone");
-    expect(originBranches(fx2)).toEqual(['main']);
+    const r = await runDeliver(fx, { githubOrigin: true, gh: { login: 'other', tokenFor: 'someone', tokenLogin: 'someone' }, env: { GH_ACCOUNT: 'someone' } });
+    expect(r.status, r.output).toBe(0);
+    expect(r.output).toContain('deliver: pushing as someone with its own gh token');
+    expect(r.ghCalls.some((c) => c.startsWith('auth switch'))).toBe(false);
   }, 90_000);
 });
 

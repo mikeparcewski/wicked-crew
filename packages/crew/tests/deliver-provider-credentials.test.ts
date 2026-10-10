@@ -517,10 +517,12 @@ describe('crew#720 deliver, driven for real — GitHub parity', () => {
     expectShippedZip(entries, path);
   }, 60_000);
 
-  it('WRONG ACCOUNT (GH_ACCOUNT pinned, gh answers another login): refused, nothing pushed, zip present', async () => {
+  it('WRONG ACCOUNT (identity alice, the exported GH_TOKEN authenticates as bob): refused, nothing pushed, zip present', async () => {
     const fx = fixture();
     stubGh(fx);
-    const r = await runDeliver(fx, {}, { GH_ACCOUNT: 'alice', GH_STUB_TOKEN_FOR: 'alice', GH_STUB_TOKEN_LOGIN: 'bob' });
+    // (crew#940) A keyring pin reads alice's OWN token, so the only credential that can belong to
+    // another login is an exported GH_TOKEN — that is the wrong account the phase still refuses.
+    const r = await runDeliver(fx, { originUrl: 'https://github.com/o/r' }, { GH_ACCOUNT: 'alice', GH_TOKEN: 'ghp_bobs', GH_STUB_LOGIN: 'bob' });
     expect(r.status).toBe(1);
     expect(r.output).toContain('identity mismatch');
     expect(bareBranches(fx)).toEqual(['main']);

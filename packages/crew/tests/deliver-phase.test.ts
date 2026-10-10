@@ -92,7 +92,7 @@ describe('deliverPrScript (the hardened field script)', () => {
     // DES-L9: one push seam — the new-PR push (`-u origin "$B"`) or, for a revision, the refspec
     // onto the PR's head branch — captured the same way, so every failure takes the arms below.
     // crew#720: an Azure DevOps origin pushes to its validated canonical URL through `_gnet` first.
-    expect(script).toContain('_push() { if [ -n "$ADOGIT" ]; then _gnet push "$ADOGIT" "$B:refs/heads/$B"; elif [ -n "$TARGET" ]; then git push origin "$B:refs/heads/$TARGET"; else git push -u origin "$B"; fi; }');
+    expect(script).toContain('_push() { if [ -n "$NETGIT" ]; then _gnet push "$NETGIT" "$B:refs/heads/${TARGET:-$B}" && _gnet fetch -q "$NETGIT" "+refs/heads/${TARGET:-$B}:refs/remotes/origin/${TARGET:-$B}"; elif [ -n "$TARGET" ]; then git push origin "$B:refs/heads/$TARGET"; else git push -u origin "$B"; fi; }');
     expect(script).toContain('if PUSHOUT=$(_push 2>&1); then');
     const nffArm = script.split('\n').find((l) => l.includes('*non-fast-forward*'))!;
     expect(nffArm).toMatch(/non-fast-forward[^\n]*nothing was pushed[^\n]*deliver: PUSH-REJECTED"; exit 1;;/);
@@ -314,7 +314,7 @@ describe('deliverPrScript (the hardened field script)', () => {
 
   it('captures gh’s output and status separately — no `| tail -1` verdict laundering', () => {
     expect(script).toContain(
-      'if ! OUT=$(gh pr create ${GHREPO:+--repo "$GHREPO"} --head "$B" --title "$TITLE" --body-file "$TD/body" 2>&1); then',
+      'if ! OUT=$(_gh pr create ${GHREPO:+--repo "$GHREPO"} --head "$B" --title "$TITLE" --body-file "$TD/body" 2>&1); then',
     );
     expect(script).not.toContain('--fill');
     expect(script).toContain('deliver: gh pr create failed for $B — no PR was opened');
@@ -337,9 +337,13 @@ describe('deliverPrScript (the hardened field script)', () => {
     // The field overlay guarded a personal account by name; that must never ship in crew.
     expect(script).not.toContain('mikeparcewski');
     expect(script).toContain('GH_ACCOUNT');
-    // The identity check reads gh's ACTIVE login and only acts when GH_ACCOUNT is set.
-    expect(script).toContain('gh api user -q .login');
-    expect(script).toMatch(/if \[ -n "\$\{GH_ACCOUNT:-\}" \]/);
+    // (crew#940) The configured identity's OWN token is read by name, per command — never the
+    // active account.
+    expect(script).toContain('gh auth token --hostname github.com --user "$GH_ACCOUNT"');
+    // …and git's pinned arm resets any ambient extra header (an Authorization header authenticates
+    // before a credential helper is ever asked — actions/checkout writes one per host).
+    expect(script).toContain('elif [ -n "$GHGIT" ]; then GIT_CONFIG_COUNT=4 GIT_CONFIG_KEY_0=http.extraHeader GIT_CONFIG_VALUE_0= GIT_CONFIG_KEY_1="http.$GHGIT.extraHeader" GIT_CONFIG_VALUE_1= GIT_CONFIG_KEY_2=http.followRedirects GIT_CONFIG_VALUE_2=false GIT_CONFIG_KEY_3="http.$GHGIT.followRedirects" GIT_CONFIG_VALUE_3=false GIT_ALLOW_PROTOCOL=https GH_TOKEN="$GHT"');
+    expect(script).toMatch(/elif \[ -n "\$\{GH_ACCOUNT:-\}" \]; then/);
   });
 
   // DES-L9 D-18 (FIX-IT-ALL row 0.11, PR-L9-crew-0 — tests first): with GH_ACCOUNT set and a
@@ -352,11 +356,12 @@ describe('deliverPrScript (the hardened field script)', () => {
     expect(script).toContain('deliver: identity mismatch');
     expect(script).toContain('nothing was staged, committed or pushed');
     // The identity is read ONCE, before the fetch, so the refusal is the phase's whole output.
-    expect(script.indexOf('L=$(gh api user -q .login')).toBeLessThan(script.indexOf('git fetch origin'));
-    // Unset ⇒ disclosed, never silent.
-    expect(script).toContain('GH_ACCOUNT not set — not pinned');
-    expect(script).toContain('GH_ACCOUNT pinned by GH_TOKEN');
-    expect(script).toContain('GH_ACCOUNT from the gh keyring — export GH_TOKEN to pin it');
+    expect(script.indexOf('L=$(_gh api user -q .login')).toBeLessThan(script.indexOf('git fetch origin'));
+    expect(script.indexOf('gh auth token --hostname github.com --user')).toBeLessThan(script.indexOf('git fetch origin'));
+    // Unset ⇒ disclosed, never silent; pinned ⇒ said which way (crew#940).
+    expect(script).toContain('no push identity configured — not pinned');
+    expect(script).toContain('(pinned by GH_TOKEN)');
+    expect(script).toContain('with its own gh token, pinned for this phase');
   });
 
   // DES-L9 / crew#550 — REVISION mode: the script pushes onto the PR's head branch and never
@@ -375,8 +380,8 @@ describe('deliverPrScript (the hardened field script)', () => {
     expect(moved).toContain("deliver: pull request #$PRNUM's branch moved — refused; nothing was pushed");
     expect(rev).toContain('no longer exists on the remote; nothing was staged, committed or pushed');
     expect(rev).toContain('the run added no commit on top of PR #$PRNUM');
-    expect(rev).toContain('gh pr comment "$PRNUM" --body-file "$TD/body"');
-    expect(rev).toContain('gh pr view "$PRNUM" --json state -q .state');
+    expect(rev).toContain('_gh pr comment "$PRNUM" ${GHREPO:+--repo "github.com/$GHREPO"} --body-file "$TD/body"');
+    expect(rev).toContain('_gh pr view "$PRNUM" ${GHREPO:+--repo "github.com/$GHREPO"} --json state -q .state');
     // The rebase onto the default branch and the verified-base check are new-PR-mode only.
     expect(rev).toContain('if [ -z "$TARGET" ]; then\nif ! git rebase "$D" "$B"; then');
     expect(rev).toContain('if [ -n "${WICKED_DELIVER_VERIFIED_BASE:-}" ] && [ -z "$TARGET" ]; then');
@@ -433,9 +438,10 @@ describe('the trusted terminal sentinel (crew#739)', () => {
     const script = deliverPrScript(undefined, { nonce: 'a'.repeat(32) });
     expect(script).toMatch(/VERDICT=pr\necho "\$URL"$/);
     expect(script).toContain('VERDICT=pushed; echo "deliver: PUSHED-NO-PR');
-    // Both push refusals, plus (crew#720) the credentials-missing refusal and the Azure DevOps
-    // credential-mint and fetch refusals — every one a recoverable park, never a strand.
-    expect(script.match(/VERDICT=rejected; /g)).toHaveLength(5);
+    // Both push refusals, plus (crew#720) the credentials-missing refusal, the Azure DevOps
+    // credential-mint and fetch refusals and (crew#940) the pinned GitHub fetch refusal — every
+    // one a recoverable park, never a strand.
+    expect(script.match(/VERDICT=rejected; /g)).toHaveLength(6);
     expect(script).toContain('VERDICT=stranded; echo "deliver: LIFT-CONFLICT');
   });
 

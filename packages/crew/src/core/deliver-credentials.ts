@@ -73,14 +73,31 @@ export function adoCredentials(env: NodeJS.ProcessEnv = process.env): DeliverCre
 /**
  * The GitHub credential: an exported `GH_TOKEN`, else a gh login for github.com. `logins` is
  * `gh auth status`'s answer — `[]` = gh answered with no login, `'absent'` = gh is not installed,
- * `null` = the probe could not answer (unknown, never missing).
+ * `null` = the probe could not answer (unknown, never missing). (crew#940) With a push identity
+ * configured (`account`), only THAT account's own gh login counts: the phase reads its token by
+ * name, so another account signed in to gh is no credential for this delivery.
  */
-export function githubCredentials(env: NodeJS.ProcessEnv, logins: readonly string[] | 'absent' | null): DeliverCredentials {
+export function githubCredentials(env: NodeJS.ProcessEnv, logins: readonly string[] | 'absent' | null, account: string | null = null): DeliverCredentials {
   if (present(env, 'GH_TOKEN')) {
     return { provider: 'github', status: 'configured', source: 'gh_token', missing: [], message: 'GitHub credentials: GH_TOKEN in the daemon environment.' };
   }
   if (logins === null) {
     return { provider: 'github', status: 'unknown', source: null, missing: [], message: 'GitHub credentials: gh did not answer in time; the deliver phase checks again before it stages anything.' };
+  }
+  const who = (account ?? '').trim();
+  if (who !== '') {
+    if (logins !== 'absent' && logins.includes(who)) {
+      return { provider: 'github', status: 'configured', source: 'gh_login', missing: [], message: `GitHub credentials: ${who}'s own gh token (signed in to gh on this machine).` };
+    }
+    return {
+      provider: 'github',
+      status: 'missing',
+      source: null,
+      missing: [`gh auth login (as ${who})`, 'GH_TOKEN'],
+      message:
+        `GitHub credentials not configured: ${logins === 'absent' ? 'gh is not installed' : `gh holds no token for ${who} on this machine`} and no GH_TOKEN is exported. ` +
+        `Run \`gh auth login\` as ${who} on this machine or export GH_TOKEN in the daemon's environment. The deliver phase refuses before anything is staged and the run waits at the deliver gate with its work kept.`,
+    };
   }
   if (logins !== 'absent' && logins.length > 0) {
     return { provider: 'github', status: 'configured', source: 'gh_login', missing: [], message: `GitHub credentials: gh is signed in to github.com (${logins.join(', ')}).` };
@@ -198,10 +215,11 @@ export function deliverCredentialsFor(
   originUrl: string | null | undefined,
   env: NodeJS.ProcessEnv,
   ghLogins: readonly string[] | 'absent' | null,
+  account: string | null = null,
 ): DeliverCredentials | null {
   const provider = deliverProviderOf(originUrl);
   if (provider === 'azure_devops') return adoCredentials(env);
-  if (provider === 'github') return githubCredentials(env, ghLogins);
+  if (provider === 'github') return githubCredentials(env, ghLogins, account);
   return null;
 }
 
@@ -225,12 +243,14 @@ export async function deliverCredentialsProbe(
   originUrl: string | null | undefined,
   env: NodeJS.ProcessEnv,
   probe: () => Promise<string[] | 'absent' | null> = ghLoginsOrAbsent,
+  /** (crew#940) The configured push identity (setting / repo pin / `GH_ACCOUNT`), `null` = none. */
+  account: string | null = null,
 ): Promise<DeliverCredentials | null> {
   const provider = deliverProviderOf(originUrl);
   if (provider === null) return null;
-  if (provider === 'azure_devops' || present(env, 'GH_TOKEN')) return deliverCredentialsFor(originUrl, env, null);
+  if (provider === 'azure_devops' || present(env, 'GH_TOKEN')) return deliverCredentialsFor(originUrl, env, null, account);
   const logins = await probe().catch(() => null);
-  return deliverCredentialsFor(originUrl, env, logins);
+  return deliverCredentialsFor(originUrl, env, logins, account);
 }
 
 /** `gh auth status --hostname github.com` → the logins, `'absent'` when gh is not installed (spawn
