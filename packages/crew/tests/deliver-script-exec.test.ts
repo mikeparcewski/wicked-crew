@@ -1327,7 +1327,7 @@ describe('deliver script — composed PR text (crew#524)', () => {
       workflowId: 'bug',
       repoRef: 'wicked-studio',
       phases: [],
-      runUrl: `${daemon.origin}/runs/${RUN_ID}`,
+      runUrl: `${daemon.origin}/s/run%3A${RUN_ID}`,
     });
 
     const r = await runDeliver(fx, { intent: INTENT, script: { runId: RUN_ID, apiOrigin: daemon.origin, facts } });
@@ -1346,7 +1346,7 @@ describe('deliver script — composed PR text (crew#524)', () => {
     expect(r.pr!.body).toBe(`${expected.body}\n`);
     expect(r.pr!.body).toContain('Fixes #214');
     expect(r.pr!.body).toContain('Refs: #211'); // `wicked-studio#211` on a wicked-studio delivery (W3-K2)
-    expect(r.pr!.body).toContain(`- Run: [\`${RUN_ID}\`](${daemon.origin}/runs/${RUN_ID})`);
+    expect(r.pr!.body).toContain(`- Run: [\`${RUN_ID}\`](${daemon.origin}/s/run%3A${RUN_ID})`);
     expect(r.pr!.body).toContain('workflow `bug` · repo `wicked-studio`');
     expect(r.pr!.body).toContain('Not available at composition time');
     // The commit subject is the composed 72-column cut (word boundary, never `…aga`), the body the full title.

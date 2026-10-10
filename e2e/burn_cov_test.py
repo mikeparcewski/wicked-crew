@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Re-verify: Burn panel populates from the usage fix; Cov modal opens via its X-close path."""
 import json
+import urllib.parse
 import os
 import sys
 import time
@@ -44,7 +45,7 @@ with sync_playwright() as p:
         },
     )["runId"]
     report["run_id"] = run_id
-    page.goto(f"{BASE}/runs/{run_id}", wait_until="networkidle")
+    page.goto(f"{BASE}/s/{urllib.parse.quote('run:' + run_id, safe='')}", wait_until="networkidle")
 
     deadline = time.time() + 420
     while time.time() < deadline:

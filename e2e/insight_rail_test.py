@@ -5,6 +5,7 @@
 3. after completion, open every accordion + Term + Cov, screenshot, dump text
 """
 import json
+import urllib.parse
 import os
 import sys
 import time
@@ -61,7 +62,7 @@ with sync_playwright() as p:
     )["runId"]
     report["run_id"] = run_id
 
-    page.goto(f"{BASE}/runs/{run_id}", wait_until="networkidle")
+    page.goto(f"{BASE}/s/{urllib.parse.quote('run:' + run_id, safe='')}", wait_until="networkidle")
 
     # Hold the page open until the run completes (WS events populate the model).
     deadline = time.time() + 420

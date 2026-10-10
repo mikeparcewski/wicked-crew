@@ -1009,7 +1009,7 @@ function isLoopbackHost(host: string): boolean {
 
 /**
  * The run link for a PR body under the configured PUBLIC origin ({@link configuredPublicOrigin}),
- * or null (crew#550 P-2). Never a loopback URL: `http://127.0.0.1:<port>/runs/<id>` opens only on
+ * or null (crew#550 P-2). Never a loopback URL: `http://127.0.0.1:<port>/s/run%3A<id>` opens only on
  * the daemon's own host, so a PR carrying it gave every other reader a dead link. A loopback,
  * unparseable or non-http(s) origin yields no link; the run id itself is always named in the text.
  */
@@ -1023,7 +1023,8 @@ export function runUrlFor(origin: string | null | undefined, runId: string): str
   }
   if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
   if (isLoopbackHost(url.hostname)) return null;
-  return `${origin.replace(/\/+$/, '')}/runs/${urlPathSegment(runId)}`;
+  // The run's session in studio (`/s/run%3A<id>`): studio removed the `/runs/:id` move (coverage exception X1).
+  return `${origin.replace(/\/+$/, '')}/s/${urlPathSegment(`run:${runId}`)}`;
 }
 
 // ── evaluator follow-ups (crew#550 P-7) ────────────────────────────────────────────────────────

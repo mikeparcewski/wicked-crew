@@ -293,7 +293,7 @@ describe('composeDeliverText from the persisted run (GET /runs/:id/deliver-text)
     expect(factsFromRun(v, null).workflowId).toBe(`wf-${RUN_ID}`);
     expect(factsFromRun(v, null, { workflowId: 'custom-bug' }).workflowId).toBe('custom-bug');
     expect(facts.repoRef).toBe('wicked-studio');
-    expect(facts.runUrl).toBe(`https://studio.example.test/runs/${RUN_ID}`);
+    expect(facts.runUrl).toBe(`https://studio.example.test/s/run%3A${RUN_ID}`);
     // Units are ordered by ord, whatever order the view listed them in.
     expect(facts.phases.map((p) => p.id)).toEqual(['triage', 'reproduce', 'fix', 'verify', 'deliver']);
     expect(facts.phases.map((p) => p.seat)).toEqual(['codex', 'pi', 'claude', 'pi', 'tool']);
@@ -310,7 +310,7 @@ describe('composeDeliverText from the persisted run (GET /runs/:id/deliver-text)
     expect(body).toContain('Found by the seed-surfaces suite (wicked-studio#211, scenario CLN-2)'); // the intent verbatim
     expect(body).toContain('\nFixes #214\n');
     expect(body).toContain('Refs: #211'); // `wicked-studio#211` on a wicked-studio delivery (W3-K2)
-    expect(body).toContain(`- Run: [\`${RUN_ID}\`](https://studio.example.test/runs/${RUN_ID})`);
+    expect(body).toContain(`- Run: [\`${RUN_ID}\`](https://studio.example.test/s/run%3A${RUN_ID})`);
     expect(body).toContain('workflow `bug` · repo `wicked-studio`');
     // Phases with seats and gate outcomes.
     expect(body).toContain('| `triage` | recon | neutral | codex | auto | approved |');
@@ -486,7 +486,7 @@ describe('composeDeliverText from the workflow definition (the script’s embedd
     expect(title).toBe(deliverTitle(INTENT, RUN_ID, 'bug'));
     expect(title.startsWith('fix: ')).toBe(true);
     expect(body).toContain('\nFixes #214\n');
-    expect(body).toContain(`- Run: [\`${RUN_ID}\`](https://studio.example.test/runs/${RUN_ID})`);
+    expect(body).toContain(`- Run: [\`${RUN_ID}\`](https://studio.example.test/s/run%3A${RUN_ID})`);
     expect(body).toContain('workflow `bug` · repo `wicked-studio`');
     for (const p of bug.phases) expect(body).toContain(`| \`${p.id}\` | ${p.kind} | ${p.role} |`);
     expect(body).toContain('From the workflow definition at launch');
@@ -527,10 +527,10 @@ describe('framing — one shape for the daemon answer, the embedded fallback and
   });
 
   it('builds the run link from the configured PUBLIC origin, tolerating a trailing slash (crew#550 P-2)', () => {
-    expect(runUrlFor('https://studio.example.test', 'r1')).toBe('https://studio.example.test/runs/r1');
-    expect(runUrlFor('https://studio.example.test/', 'a b')).toBe('https://studio.example.test/runs/a%20b');
+    expect(runUrlFor('https://studio.example.test', 'r1')).toBe('https://studio.example.test/s/run%3Ar1');
+    expect(runUrlFor('https://studio.example.test/', 'a b')).toBe('https://studio.example.test/s/run%3Aa%20b');
     // An operator may name a LAN studio on purpose: the origin is configured, never the bound address.
-    expect(runUrlFor('http://192.168.1.5:7701', 'r1')).toBe('http://192.168.1.5:7701/runs/r1');
+    expect(runUrlFor('http://192.168.1.5:7701', 'r1')).toBe('http://192.168.1.5:7701/s/run%3Ar1');
     expect(runUrlFor(null, 'r1')).toBeNull();
     expect(runUrlFor('', 'r1')).toBeNull();
     expect(configuredPublicOrigin({})).toBeNull();
@@ -551,7 +551,7 @@ describe('framing — one shape for the daemon answer, the embedded fallback and
     const odd = runView();
     odd.session.id = 'r`1\nx';
     const linked = composeDeliverText(factsFromRun(odd, runUrlFor('https://studio.example.test', odd.session.id))).body;
-    expect(linked).toContain('- Run: [`r1 x`](https://studio.example.test/runs/r%601%0Ax)');
+    expect(linked).toContain('- Run: [`r1 x`](https://studio.example.test/s/run%3Ar%601%0Ax)');
   });
 
   it('bounds the intent the SCRIPT embeds and says so; the run-derived text is never bounded (E2BIG)', () => {
