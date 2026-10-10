@@ -29,6 +29,7 @@ import {
   DELIVER_LIFT_CONFLICT_MARKER,
   DELIVER_PHASE_ID,
   DELIVER_PUSHED_NO_PR_MARKER,
+  DELIVER_PUSH_REJECTED_MARKER,
   pushedOnlyFrom,
   type PushedOnlyDelivery,
 } from '../core/deliver.js';
@@ -468,14 +469,23 @@ export function deliveryRecordFrom(output: string): DeliveryRecord | null {
 
 /**
  * This run's deliver unit, or `null`. The composed id suffix (`<base>:deliver`) is the
- * primary key; the `tool_cmd` probe is the fallback for an operator OVERLAY that carried the
- * deliver phase under its own name — do NOT key on `workflow_id`, which is plain for
+ * primary key; the `deliver` catalog entry and crew's deliver-script refusal marker (crew#720 S3) find an
+ * operator OVERLAY that carried the deliver phase under its own name — do NOT key on `workflow_id`, which is plain for
  * overlay-carried deliver phases (crew#321).
  */
 export function deliverUnitOf(view: SessionView): WorkUnit | null {
   const byId = view.units.find((u) => u.id.endsWith(':deliver'));
   if (byId !== undefined) return byId;
-  return view.units.find((u) => (u.tool_cmd ?? []).join(' ').includes('gh pr create')) ?? null;
+  // crew#720 S3: by STRUCTURE, never by a forge CLI string: the `deliver` catalog entry of a
+  // composed plan, or crew's own deliver script under another phase name, recognised by the
+  // refusal marker its contract prints (every crew deliver script has carried it since crew#432,
+  // so a unit planned before this change, still in flight across the upgrade, is found too —
+  // codex on #905). The old `gh pr create` substring tied delivery detection to GitHub's CLI.
+  return (
+    view.units.find(
+      (u) => u.catalog === DELIVER_PHASE_ID || (u.tool_cmd ?? []).some((arg) => arg.includes(DELIVER_PUSH_REJECTED_MARKER)),
+    ) ?? null
+  );
 }
 
 /** What {@link DeliveryResolver} needs from the daemon — injected so the race is pinnable in a test. */
