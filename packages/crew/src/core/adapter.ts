@@ -3400,13 +3400,13 @@ export class CoreAdapter {
 
   listWorkflows(): WorkflowDef[] {
     this.hydrateFromOverlay();
-    // Builtins first (stable ordering), but user-registered workflows take precedence when
-    // ids conflict — consistent with getWorkflow() which prefers userWorkflows.get().
+    // Built-ins first, and a built-in WINS a name conflict (X-MIG M11, codex r2 on crew A): a launch
+    // naming it resolves the engine's preset before any registered def, so the reader must serve
+    // what runs. Consistent with getWorkflow().
     const seen = new Set<string>();
     const result: WorkflowDef[] = [];
     for (const w of this.builtinDefs) {
-      const override = this.userWorkflows.get(w.id);
-      if (!seen.has(w.id)) { seen.add(w.id); result.push(withSystemFlag(override ?? w)); }
+      if (!seen.has(w.id)) { seen.add(w.id); result.push(withSystemFlag(w)); }
     }
     for (const w of this.userWorkflows.values()) {
       if (!seen.has(w.id)) { seen.add(w.id); result.push(withSystemFlag(w)); }
@@ -3422,7 +3422,8 @@ export class CoreAdapter {
 
   getWorkflow(id: string): WorkflowDef | null {
     this.hydrateFromOverlay();
-    const def = this.userWorkflows.get(id) ?? this.builtinDefs.find((w) => w.id === id) ?? null;
+    // Preset first, as the engine resolves a launch (see listWorkflows).
+    const def = this.builtinDefs.find((w) => w.id === id) ?? this.userWorkflows.get(id) ?? null;
     return def === null ? null : withSystemFlag(def);
   }
 
@@ -3464,6 +3465,12 @@ export class CoreAdapter {
     const SAFE_ID = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
     if (!SAFE_ID.test(def.id) || def.id.length > 128) {
       throw new Error('workflow id must start with a letter/digit and contain only letters, digits, dots, hyphens, and underscores');
+    }
+    if (this.builtinDefs.some((w) => w.id === def.id)) {
+      // A def of a built-in preset's name would never run: a launch resolves the preset first.
+      throw new Error(
+        `workflow id '${def.id}' is a built-in preset: a registered def of that name never runs (a launch resolves the preset first) — save your own preset under another name (PUT /presets/:name)`,
+      );
     }
     const dir = workflowOverlayDir();
     await mkdir(dir, { recursive: true });

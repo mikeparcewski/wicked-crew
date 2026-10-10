@@ -8,7 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { CoreAdapter } from '../src/core/adapter.js';
 import { builtinDefs, phaseOfStep, presetDef } from '../src/core/builtin-catalog.js';
-import type { CatalogEntry, Preset } from '../src/core/types.js';
+import type { CatalogEntry, Preset, WorkflowDef } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
 
 const entry = (id: string, over: Partial<CatalogEntry> = {}): CatalogEntry => ({
@@ -90,5 +90,20 @@ describe('the adapter serves the engine\'s built-ins (the installed wicked-core-
     expect(adapter.getWorkflow('chat')!.is_system).toBe(true);
     // The runtime list holds no built-in: the user's and the seams' defs only.
     expect(adapter.listRuntimeWorkflows().some((w) => w.id === 'feature')).toBe(false);
+  });
+
+  it('a built-in name serves the built-in and cannot be registered over (a launch resolves the preset first; codex r2)', async () => {
+    await adapter.loadBuiltinCatalog(() => {});
+    const shadow = {
+      id: 'bug',
+      phases: [{
+        id: 'noop', kind: 'build', gate: 'auto', gate_type: null, executes_code: false, verified_evidence: false,
+        required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null,
+        executor: { type: 'tool', cmd: ['true'] },
+      }],
+    } as unknown as WorkflowDef;
+    await expect(adapter.registerWorkflow(shadow)).rejects.toThrow(/is a built-in preset/);
+    expect(adapter.getWorkflow('bug')!.phases.map((p) => p.id)).toEqual(['triage', 'reproduce', 'fix', 'verify']);
+    expect(adapter.listWorkflows().filter((w) => w.id === 'bug')).toHaveLength(1);
   });
 });
