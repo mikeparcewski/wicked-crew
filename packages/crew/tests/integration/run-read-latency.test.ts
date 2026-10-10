@@ -43,8 +43,8 @@ let adapter: CoreAdapter;
 let app: Awaited<ReturnType<typeof createServer>>;
 let baseUrl: string;
 let runIds: string[];
-/** Callers inside `adapter.sessionsDetail()` right now — proves the reads are in flight. */
-let readsInFlight = 0;
+/** Callers that have entered `adapter.sessionsDetail()` — proves the reads reached the engine. */
+let readsEntered = 0;
 const savedEnv: Record<string, string | undefined> = {};
 
 function scratchBase(): string {
@@ -88,13 +88,9 @@ beforeAll(async () => {
 
   adapter = new CoreAdapter({ dbPath: join(dir, 'home', 'core.db'), stub: true });
   const fold = adapter.sessionsDetail.bind(adapter);
-  adapter.sessionsDetail = async () => {
-    readsInFlight += 1;
-    try {
-      return await fold();
-    } finally {
-      readsInFlight -= 1;
-    }
+  adapter.sessionsDetail = () => {
+    readsEntered += 1;
+    return fold();
   };
   app = await createServer(adapter, { stallWatchdog: { enabled: false } });
   await app.listen({ port: 0, host: '127.0.0.1' });
@@ -145,9 +141,11 @@ describe('crew#944 — run reads on a long-lived home', () => {
     const report: string[] = [];
     let best = Infinity;
     for (let attempt = 1; attempt <= ATTEMPTS && best >= HEALTH_UNDER_LOAD_MS; attempt++) {
+      const entered = readsEntered;
       const reads = runIds.slice(0, 20).map((id) => timed(`/runs/${id}`));
-      // Every one of the 20 handlers is inside the engine read before /health is sent.
-      await until(() => readsInFlight >= 20, '20 run reads in flight');
+      // All 20 handlers have reached the engine read before /health is sent (a counter of entries,
+      // not of reads still open: on the one-scan fold the first reads may already have answered).
+      await until(() => readsEntered - entered >= 20, '20 run reads to reach the engine');
       const health = await timed('/health');
       const done = await Promise.all(reads);
       expect(health.status).toBe(200);
