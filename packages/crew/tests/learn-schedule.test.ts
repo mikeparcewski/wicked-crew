@@ -65,7 +65,8 @@ function rig(opts: { runs?: Record<string, Status>; launch?: () => Promise<strin
     log: () => undefined,
     now: () => clock,
     exec,
-    env: { WICKED_GARDEN_ROOT: '/garden', WICKED_RUN_ID: 'leak', WICKED_ESTATE_READONLY: '1', PATH: '/bin' },
+    env: { WICKED_GARDEN_ROOT: '/garden', WICKED_RUN_ID: 'leak', WICKED_ESTATE_READONLY: '1', CLAUDE_PLUGIN_ROOT: '/old-checkout', PATH: '/bin' },
+    gardenRoot: () => '/live-plugin',
   });
   return { dir, store, runs, launches, frames, execs, scheduler, advance: (ms: number) => (clock = new Date(clock.getTime() + ms)) };
 }
@@ -199,6 +200,8 @@ describe('LearnScheduler.sweep', () => {
     const revParse = r.execs.find((e) => e.cmd === 'git' && e.args.includes('rev-parse'))!;
     expect(revParse.args.at(-1)).toBe('origin/main:.wicked/knowledge/sqlite-wal');
     for (const k of RUN_MARKER_ENV) expect(spawns[0]!.env?.[k]).toBeUndefined();
+    expect(spawns[0]!.env?.['CLAUDE_PLUGIN_ROOT']).toBeUndefined();
+    expect(spawns[0]!.env?.['WICKED_GARDEN_ROOT']).toBe('/garden');
     expect(r.store.get('r1:sqlite-wal')!.indexedTree).toBe('abc123');
     await r.scheduler.sweep();
     expect(r.execs.filter((e) => e.cmd !== 'git')).toHaveLength(1); // unchanged tree: no spawn
@@ -282,5 +285,18 @@ describe('/learn/topics', () => {
     expect(t.problem).toMatch(/does not parse/);
     expect((await a.inject({ method: 'GET', url: '/api/v1/learn/topics?repoRef=r9' })).statusCode).toBe(404);
     expect((await a.inject({ method: 'GET', url: '/api/v1/learn/topics' })).statusCode).toBe(400);
+  });
+});
+
+describe('the indexer garden root (E2E F-LEARN-5)', () => {
+  it('without WICKED_GARDEN_ROOT it uses the live plugin, never an inherited CLAUDE_PLUGIN_ROOT', async () => {
+    const { gardenRootFor, gardenLauncher, unmarkedEnv } = await import('../src/learn/scheduler.js');
+    const env = { CLAUDE_PLUGIN_ROOT: '/old', PATH: '/bin' };
+    const root = gardenRootFor(env, () => '/live');
+    expect(gardenLauncher(root)).toBe('/live/scripts/wicked-garden');
+    const child = unmarkedEnv(env, root);
+    expect(child['CLAUDE_PLUGIN_ROOT']).toBeUndefined();
+    expect(child['WICKED_GARDEN_ROOT']).toBe('/live');
+    expect(gardenLauncher(gardenRootFor({}, () => null))).toBe('wicked-garden');
   });
 });
