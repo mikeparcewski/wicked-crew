@@ -10,6 +10,13 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.9.11] — 2026-10-11
+
+The studio patch: plain words, and a deliver card that never offers a refused delivery. This release bundles **wicked-studio 0.7.10**; the engine pin stays **`wicked-core-ts` `^0.9.7`**. Pair it with **wicked-garden 12.53.3** and **wicked-estate 0.29.2**.
+
+- **deps:** `wicked-studio` `^0.7.10` (#731: no Deliver offer on a run whose required QE acceptance has not passed; plain words on Health, the session sheet and System; #730 Desk fixes; #729 Settings names).
+- **Release smoke:** pinned to wicked-ci 181e987 (#49: S04 opts opencode in for the delivery run, which is now opt-in, and a default-roster arm asserts `judge_unavailable`).
+
 ## [0.9.10] — 2026-10-11
 
 The operator can be the judge, and opencode is opt-in (operator rulings 19:00Z). The engine pin moves to **`wicked-core-ts` `^0.9.7`**; this release bundles **wicked-studio 0.7.9** and ships **`wicked-crew-api-types` 0.110.0**. Pair it with **wicked-garden 12.53.3** and **wicked-estate 0.29.2**.
@@ -3937,7 +3944,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.10...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.11...HEAD
+[0.9.11]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.10...v0.9.11
 [0.9.10]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.9...v0.9.10
 [0.9.9]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.8...v0.9.9
 [0.9.8]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.7...v0.9.8
