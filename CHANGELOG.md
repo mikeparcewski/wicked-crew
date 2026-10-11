@@ -10,6 +10,18 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.9.7] — 2026-10-11
+
+QE acceptance works on fenced seats and in repositories that do not declare wicked-ledger, and a verdict counts only for the tree it judged. The engine pin moves to **`wicked-core-ts` `^0.9.4`**. This release bundles **wicked-studio 0.7.6**. Pair it with **wicked-garden 12.53.1** (the one wicked-ledger resolver, garden#1284) and **wicked-estate 0.29.2** on the seats.
+
+- **Fixed (#973, crew#971):** a QE verdict counts only for the tree it judged. After a send-back, a PASS on the fixed tree delivers, and a FAIL on a superseded tree no longer blocks the run forever.
+- **Fixed (#967, crew#951):** the daemon exports its own wicked-ledger as `WICKED_LEDGER_PKG_DIR`, so a governed run's QE unit records its verdict without an install in the worktree (with garden 12.53.1's single resolver).
+- **Fixed (#970, E2E F-LEARN-5):** learn indexing runs the live garden plugin, never an inherited `CLAUDE_PLUGIN_ROOT`.
+- **Release smoke:** pinned to wicked-ci #47 (the verdict keeps each OS's newest attempt; `~/Library/Logs/SiriTTSService` is runner noise).
+- **deps:**
+  - `wicked-core-ts` `^0.9.4`: wicked-core#893, #894, #895 (judge pool: when the run's own seats are all parties it reaches every other enabled seat; the default judge's pool stays the run's own seats), #896 (the `learn` preset's author computes claim ids), wicked-estate 0.29.2.
+  - `wicked-studio` `^0.7.6`: every section on the UI contract (S1–S6), Stop on a running session, and a failed runs read says so with Retry.
+
 ## [0.9.6] — 2026-10-11
 
 Learn schedules, council size and spawn stagger, and the project and repo blast radius read every page of estate's answer. The engine pin moves to **`wicked-core-ts` `^0.9.3`**. This release bundles **wicked-studio 0.7.5** and ships **`wicked-crew-api-types` 0.109.0**. **Pair it with wicked-garden ≥ 12.52.0** (12.52.1 recommended): the learn tick passes `index.py --ref`, which older gardens refuse.
@@ -3894,7 +3906,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.6...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.7...HEAD
+[0.9.7]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.6...v0.9.7
 [0.9.6]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.5...v0.9.6
 [0.9.5]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.3...v0.9.4
