@@ -182,6 +182,8 @@ export function aggregateReceipt(view: SessionView, tree: string | null): Assura
       detail: qe.reason,
     });
   }
+  // Who decided the run's disputes (wicked-core#888): every council any gate recorded, in order.
+  const councils = receipts.flatMap((r) => r.councils ?? []);
   for (const r of receipts) {
     for (const i of r.ran) if (!ran.includes(i)) ran.push(i);
     for (const s of r.skipped) {
@@ -200,6 +202,7 @@ export function aggregateReceipt(view: SessionView, tree: string | null): Assura
     tree,
     attempt: 0,
     ...(qe !== undefined ? { qe } : {}),
+    ...(councils.length > 0 ? { councils } : {}),
   };
 }
 
