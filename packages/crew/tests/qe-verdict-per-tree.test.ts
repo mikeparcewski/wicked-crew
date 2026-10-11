@@ -35,7 +35,7 @@ const REQUIRED = {
   reason: 'required: impact score 50 above the waiver line 20', reasons: [],
 };
 
-const RUNS = { passAfterSendBack: 'run-971-pass-b', failOnCurrent: 'run-971-fail-b', passOnSuperseded: 'run-971-pass-a' };
+const RUNS = { passAfterSendBack: 'run-971-pass-b', failOnCurrent: 'run-971-fail-b', passOnSuperseded: 'run-971-pass-a', failOutsideWindows: 'run-971-fail-late' };
 
 let dir: string;
 let app: FastifyInstance;
@@ -66,7 +66,7 @@ function view(id: string) {
       verified_tree: TREE_B, archived_at: null, archive_note: null,
       assurance: { mode: 'full', required: ['distinct_evaluator', 'judge', 'qe_acceptance'], qe: REQUIRED },
     },
-    units: [unit(1, 'fix', 'done'), unit(QE_ORD, 'verify', 'done'), unit(DELIVER_ORD, 'deliver', 'pending')],
+    units: [unit(1, 'fix', 'done'), { ...unit(QE_ORD, 'verify', 'done'), qe_acceptance: REQUIRED }, unit(DELIVER_ORD, 'deliver', 'pending')],
   };
 }
 
@@ -112,6 +112,9 @@ beforeAll(async () => {
   verdictAt(RUNS.failOnCurrent, 1, 'FAIL', T0 + 150);
   verdictAt(RUNS.failOnCurrent, 2, 'FAIL', T0 + 350);
   verdictAt(RUNS.passOnSuperseded, 1, 'PASS', T0 + 150);
+  // PASS on B, then a FAIL recorded after every gate (a late re-review): not shown to be about another tree.
+  verdictAt(RUNS.failOutsideWindows, 1, 'PASS', T0 + 350);
+  verdictAt(RUNS.failOutsideWindows, 2, 'FAIL', T0 + 500);
 });
 
 beforeEach(() => {
@@ -146,6 +149,13 @@ describe('crew#971 — a QE verdict counts only for the tree it judged', () => {
 
   it('a FAIL on the current tree still refuses (deny-dominates within the tree)', async () => {
     const res = await approve(RUNS.failOnCurrent);
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().acceptance.reason).toMatch(/^FAIL/);
+    expect(confirmCalls).toEqual([]);
+  });
+
+  it('a FAIL recorded outside every QE attempt still counts — only a provably superseded verdict drops (codex r1)', async () => {
+    const res = await approve(RUNS.failOutsideWindows);
     expect(res.statusCode, res.body).toBe(409);
     expect(res.json().acceptance.reason).toMatch(/^FAIL/);
     expect(confirmCalls).toEqual([]);

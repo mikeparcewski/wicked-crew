@@ -517,6 +517,7 @@ export function runWindowFromEvents(
   runId: string,
   unreadable?: string,
   currentTree?: string | null,
+  qeUnitOrds?: number[],
 ): RunLinkage {
   if (unreadable !== undefined) return { runId, startedAt: null, finishedAt: null, logUnreadable: unreadable };
   if (events === null || events.length === 0) return { runId, startedAt: null, finishedAt: null };
@@ -539,7 +540,7 @@ export function runWindowFromEvents(
       finishedAt = null; // a failed run rescued and executing again: live until its next terminal frame
     }
   }
-  const qeAttempts = qeAttemptsFromEvents(events);
+  const qeAttempts = qeAttemptsFromEvents(events, qeUnitOrds);
   // The deliverable tree: the engine's verified tree when the caller has it, else the newest gate's.
   let tree: string | null = typeof currentTree === 'string' && currentTree !== '' ? currentTree : null;
   if (tree === null) {
@@ -556,11 +557,16 @@ export function runWindowFromEvents(
  * names) up to that attempt's `gateEvaluated`, with the tree the gate judged. A dispatch whose
  * gate never ran stays open (`end: null`, `tree: null`) — it judged no tree yet.
  */
-export function qeAttemptsFromEvents(events: RecordedEvent[]): QeAttemptWindow[] {
-  const ords = new Set<number>();
-  for (const e of events) {
-    const ord = (e as { ord?: unknown }).ord;
-    if (e.type === 'qeAcceptanceDecided' && typeof ord === 'number') ords.add(ord);
+export function qeAttemptsFromEvents(events: RecordedEvent[], qeUnitOrds?: number[]): QeAttemptWindow[] {
+  // The QE unit(s): the run's units that carry a QE decision when the caller has them — a
+  // `qeAcceptanceDecided` also names a CREATOR that revoked a waiver (codex r1 on #973), whose
+  // interval is no QE attempt. Without the units, the event's ords are the best the log says.
+  const ords = new Set<number>(qeUnitOrds ?? []);
+  if (qeUnitOrds === undefined) {
+    for (const e of events) {
+      const ord = (e as { ord?: unknown }).ord;
+      if (e.type === 'qeAcceptanceDecided' && typeof ord === 'number') ords.add(ord);
+    }
   }
   const out: QeAttemptWindow[] = [];
   let open: QeAttemptWindow | null = null;
@@ -597,6 +603,8 @@ export async function buildAcceptanceView(opts: {
    * this tree count. Absent ⇒ the newest gate's tree from the event log.
    */
   deliverableTree?: string | null;
+  /** (crew#971) The ords of the run's QE unit(s) — the units carrying a QE decision. */
+  qeUnitOrds?: number[];
   /** What the run must prove ({@link acceptanceRequirementOf}). */
   requirement: AcceptanceRequirement;
   qeRunId?: string;
@@ -647,7 +655,7 @@ export async function buildAcceptanceView(opts: {
   const subject: ReadSubject =
     opts.qeRunId !== undefined
       ? { qeRunId: opts.qeRunId }
-      : { run: runWindowFromEvents(eventRows, opts.runId, eventsError, opts.deliverableTree ?? null) };
+      : { run: runWindowFromEvents(eventRows, opts.runId, eventsError, opts.deliverableTree ?? null, opts.qeUnitOrds) };
 
   // The run's ONE ledger (crew#951): its evidence root's when it has one, else its repo's.
   const ledgerRoot = runQeLedgerRoot({ evidence_root: opts.evidenceRoot ?? null }, opts.repo?.root_path ?? null);

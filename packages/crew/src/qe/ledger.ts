@@ -191,18 +191,24 @@ export interface QeAttemptWindow {
 }
 
 /**
- * (crew#971) Keep only the verdicts that judged the run's current tree: recorded inside a QE
- * attempt whose gate judged `currentTree`. `null` = no scoping applies (no attempts known, or no
- * current tree) — every verdict stays, as before.
+ * (crew#971) Drop ONLY the verdicts that provably judged a superseded tree: recorded inside a QE
+ * attempt whose gate judged a known tree other than `currentTree`, and inside no attempt that judged
+ * `currentTree`. Every other verdict keeps counting — one recorded outside every window, or in an
+ * attempt whose gate recorded no tree, is not shown to be about another tree, so its denial stands
+ * (codex r1 on #973: uncertain attribution must refuse, never expose an earlier PASS). `null` = no
+ * scoping applies (no attempts known, or no current tree) — every verdict stays, as before.
  */
 function verdictsForCurrentTree(verdicts: VerdictRecord[], run: RunLinkage): { kept: VerdictRecord[]; superseded: number } | null {
   const attempts = run.qeAttempts;
   const tree = run.currentTree;
   if (attempts === undefined || attempts.length === 0 || tree === undefined || tree === null || tree === '') return null;
-  const windows = attempts.filter((a) => a.tree === tree);
+  const inside = (w: QeAttemptWindow, at: number) => at >= w.start && (w.end === null || at <= w.end);
   const kept = verdicts.filter((v) => {
     const at = epoch(v.created_at);
-    return at !== null && windows.some((w) => at >= w.start && (w.end === null || at <= w.end));
+    if (at === null) return true;
+    const judgedCurrent = attempts.some((w) => w.tree === tree && inside(w, at));
+    const judgedOther = attempts.some((w) => w.tree !== null && w.tree !== tree && inside(w, at));
+    return judgedCurrent || !judgedOther;
   });
   return { kept, superseded: verdicts.length - kept.length };
 }

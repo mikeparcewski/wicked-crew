@@ -2924,7 +2924,7 @@ export function registerRoutes(
       const initialWorkdir: string = s.workdir;
       // wicked-core#850 EX-03: a run whose contract requires QE acceptance is lifted only on a PASS
       // attributed to it — checked BEFORE anything is spawned, so a refusal pushes nothing.
-      const qeAcceptance = await qeAcceptanceCheckFor(run);
+      const qeAcceptance = await qeAcceptanceCheckFor(run, 'post_hoc');
       if (qeAcceptance !== null && !qeAcceptance.satisfied) {
         return reply.code(409).send(qeAcceptanceRefusal(id, qeAcceptance, aggregateReceipt(run, null), 'post_hoc'));
       }
@@ -4031,7 +4031,7 @@ export function registerRoutes(
    * reads (wicked-core#850 EX-03). `forceDeclared`: the run's assurance CONTRACT requires QE
    * acceptance, so a verdict is owed even when no phase raises `verified_evidence` — missing denies.
    */
-  async function acceptanceViewOf(run: SessionView, opts: { qeRunId?: string; forceDeclared?: boolean }) {
+  async function acceptanceViewOf(run: SessionView, opts: { qeRunId?: string; forceDeclared?: boolean; treeScoped?: boolean }) {
     const id = run.session.id;
     // What the run must prove, from what it CONTAINS (seam X2): a plan or preset run's steps whose
     // catalog entry re-verifies evidence, a registered workflow's def, nothing for free text — and
@@ -4065,10 +4065,16 @@ export function registerRoutes(
       // crew#951: a run with an evidence root keeps its QE ledger there (where its QE unit records).
       evidenceRoot: typeof evidenceRoot === 'string' ? evidenceRoot : null,
       // crew#971: QE verdicts count only for the tree they judged — this run's deliverable tree.
+      // A post-hoc lift's checkout is not the engine-verified tree (codex r1 on #973): it is not
+      // scoped, so every verdict of the run counts there, as before.
       deliverableTree: (() => {
+        if (opts.treeScoped === false) return null;
         const t = (run.session as { verified_tree?: unknown }).verified_tree;
         return typeof t === 'string' && t !== '' ? t : null;
       })(),
+      qeUnitOrds: (run.units ?? [])
+        .filter((u) => (u as { qe_acceptance?: unknown }).qe_acceptance != null)
+        .map((u) => u.ord),
       requirement,
       ...(opts.qeRunId !== undefined ? { qeRunId: opts.qeRunId } : {}),
       // AW-14 (arch-R13a + R16): the conformance section reads the same wires the standalone
@@ -4104,12 +4110,12 @@ export function registerRoutes(
    *  does not. A read that fails is a refusal naming why, never a pass. QE-IN-APP-WORKFLOWS: a
    *  decision the score WAIVED or the operator SKIPPED is satisfied without a ledger read and says
    *  which, in the decision's words; only `required` reads the ledger. */
-  async function qeAcceptanceCheckFor(run: SessionView): Promise<QeAcceptanceCheck | null> {
+  async function qeAcceptanceCheckFor(run: SessionView, where: 'gate' | 'post_hoc' = 'gate'): Promise<QeAcceptanceCheck | null> {
     const decision = qeDecisionOf(run);
     if (decision === null) return null;
     if (qeDecisionBypasses(decision)) return qeAcceptanceNotRequired(decision);
     try {
-      return qeAcceptanceFromView(await acceptanceViewOf(run, { forceDeclared: true }));
+      return qeAcceptanceFromView(await acceptanceViewOf(run, { forceDeclared: true, treeScoped: where === 'gate' }));
     } catch (err) {
       return unreadableQeAcceptance(err);
     }
