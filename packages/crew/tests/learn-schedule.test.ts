@@ -300,3 +300,28 @@ describe('the indexer garden root (E2E F-LEARN-5)', () => {
     expect(gardenLauncher(gardenRootFor({}, () => null))).toBe('wicked-garden');
   });
 });
+
+describe('/learn/topics reads what MERGED (F-LEARN-4)', () => {
+  it('reads origin/<default>, not the checkout working tree', async () => {
+    const { execFileSync } = await import('node:child_process');
+    const r = rig();
+    const root = join(r.dir, 'repo');
+    const d = join(root, '.wicked', 'knowledge', 'merged-topic');
+    mkdirSync(d, { recursive: true });
+    const git = (...a: string[]) => execFileSync('git', ['-C', root, ...a], { stdio: 'pipe' });
+    git('init', '-q', '-b', 'main');
+    writeFileSync(join(d, 'topic.json'), JSON.stringify({ schema: 1, slug: 'merged-topic', title: 'Merged title', kind: 'topic' }));
+    writeFileSync(join(d, 'claims.jsonl'), JSON.stringify({ id: 'c-1', status: 'active', last_verified: '2026-10-10T00:00:00Z', sources: [] }) + '\n');
+    git('add', '-A');
+    git('-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-qm', 'merged');
+    git('update-ref', 'refs/remotes/origin/main', 'HEAD');
+    // an unmerged working-tree edit: a second topic and a renamed title
+    writeFileSync(join(d, 'topic.json'), JSON.stringify({ schema: 1, slug: 'merged-topic', title: 'UNMERGED title', kind: 'topic' }));
+    mkdirSync(join(root, '.wicked', 'knowledge', 'unmerged-topic'), { recursive: true });
+    const a = Fastify();
+    registerLearnRoutes(a, { store: r.store, adapter: { listRepos: async () => [{ ...REPO, root_path: root }] } as never, audit: new AuditLog(join(r.dir, 'a.log'), () => undefined), now: () => T0 });
+    await a.ready();
+    const topics = (await a.inject({ method: 'GET', url: '/api/v1/learn/topics?repoRef=r1' })).json().topics;
+    expect(topics.map((t: { slug: string; title: string }) => [t.slug, t.title])).toEqual([['merged-topic', 'Merged title']]);
+  });
+});

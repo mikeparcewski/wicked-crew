@@ -7,6 +7,7 @@
  */
 
 import { readdir, readFile, stat } from 'node:fs/promises';
+import { execCapped } from '../core/exec.js';
 import { join } from 'node:path';
 import type { LearnTopic } from 'wicked-crew-api-types';
 import { LEARN_SLUG } from './schedule-store.js';
@@ -22,7 +23,55 @@ function iso(v: unknown): string | null {
 }
 
 /** One topic's summary. `staleAfterDays`: an active claim not re-verified for longer counts as stale. */
-export async function readTopic(dir: string, slug: string, staleAfterDays: number, now: Date): Promise<LearnTopic> {
+/** Where a topic's files are read from: the checkout's working tree, or a git ref (what MERGED). */
+export interface TopicSource {
+  /** The topic directories under `.wicked/knowledge/`. */
+  slugs(): Promise<string[]>;
+  /** One file's text, or `null` when absent. */
+  read(slug: string, file: 'topic.json' | 'claims.jsonl'): Promise<string | null>;
+}
+
+export function treeSource(root: string): TopicSource {
+  const base = join(root, '.wicked', 'knowledge');
+  return {
+    slugs: async () => {
+      try {
+        return (await readdir(base, { withFileTypes: true })).filter((d) => d.isDirectory()).map((d) => d.name);
+      } catch {
+        return [];
+      }
+    },
+    read: async (slug, file) => {
+      const path = join(base, slug, file);
+      try {
+        if ((await stat(path)).size > MAX_CLAIMS_BYTES) return null;
+        return await readFile(path, 'utf8');
+      } catch {
+        return null;
+      }
+    },
+  };
+}
+
+/** The topics as they are at a git `ref` of the checkout (e.g. `origin/main`, what the learn tick indexes). */
+export function refSource(root: string, ref: string): TopicSource {
+  const git = async (args: string[]): Promise<string | null> => {
+    try {
+      return (await execCapped('git', ['-C', root, ...args], { timeout: 10_000, maxBuffer: MAX_CLAIMS_BYTES })).stdout;
+    } catch {
+      return null;
+    }
+  };
+  return {
+    slugs: async () => {
+      const out = await git(['ls-tree', '--name-only', `${ref}:.wicked/knowledge`]);
+      return out === null ? [] : out.split('\n').map((x) => x.trim()).filter(Boolean);
+    },
+    read: (slug, file) => git(['show', `${ref}:.wicked/knowledge/${slug}/${file}`]),
+  };
+}
+
+export async function readTopic(src: TopicSource, slug: string, staleAfterDays: number, now: Date): Promise<LearnTopic> {
   const topic: LearnTopic = {
     slug,
     title: slug,
@@ -35,7 +84,9 @@ export async function readTopic(dir: string, slug: string, staleAfterDays: numbe
     problem: null,
   };
   try {
-    const meta = JSON.parse(await readFile(join(dir, 'topic.json'), 'utf8')) as Record<string, unknown>;
+    const raw = await src.read(slug, 'topic.json');
+    if (raw === null) throw new Error('absent');
+    const meta = JSON.parse(raw) as Record<string, unknown>;
     if (typeof meta['title'] === 'string' && meta['title'].trim() !== '') topic.title = meta['title'];
     if (meta['kind'] === 'event') topic.kind = 'event';
     topic.refreshedAt = iso(meta['refreshed_at']) ?? iso(meta['created_at']);
@@ -43,11 +94,11 @@ export async function readTopic(dir: string, slug: string, staleAfterDays: numbe
     topic.problem = 'topic.json is missing or does not parse';
   }
   try {
-    const path = join(dir, 'claims.jsonl');
-    if ((await stat(path)).size > MAX_CLAIMS_BYTES) throw new Error('too large');
+    const text = await src.read(slug, 'claims.jsonl');
+    if (text === null) throw new Error('absent or too large');
     const urls = new Set<string>();
     let oldest: number | null = null;
-    for (const line of (await readFile(path, 'utf8')).split('\n')) {
+    for (const line of text.split('\n')) {
       if (line.trim() === '') continue;
       let c: Record<string, unknown>;
       try {
@@ -73,15 +124,20 @@ export async function readTopic(dir: string, slug: string, staleAfterDays: numbe
   return topic;
 }
 
-/** Every topic under `<root>/.wicked/knowledge/`, sorted by slug. An absent dir is an empty list. */
-export async function readTopics(root: string, staleAfterDays: (slug: string) => number, now: Date): Promise<LearnTopic[]> {
-  const base = join(root, '.wicked', 'knowledge');
-  let names: string[];
+/** Every topic in `src`, sorted by slug. No knowledge dir is an empty list. */
+export async function readTopics(src: TopicSource, staleAfterDays: (slug: string) => number, now: Date): Promise<LearnTopic[]> {
+  const names = (await src.slugs()).filter((n) => LEARN_SLUG.test(n)).sort();
+  return Promise.all(names.slice(0, MAX_TOPICS).map((slug) => readTopic(src, slug, staleAfterDays(slug), now)));
+}
+
+/** What MERGED (F-LEARN-4): `origin/<default>` when the checkout has that ref (the learn tick fetches
+ *  it each minute and indexes the same tree), else the working tree (a repository with no remote). */
+export async function mergedSource(root: string, defaultBranch: string): Promise<TopicSource> {
+  const ref = `origin/${defaultBranch || 'main'}`;
   try {
-    names = (await readdir(base, { withFileTypes: true })).filter((d) => d.isDirectory() && LEARN_SLUG.test(d.name)).map((d) => d.name);
+    await execCapped('git', ['-C', root, 'rev-parse', '--verify', '--quiet', `${ref}^{commit}`], { timeout: 5_000 });
+    return refSource(root, ref);
   } catch {
-    return [];
+    return treeSource(root);
   }
-  names.sort();
-  return Promise.all(names.slice(0, MAX_TOPICS).map((slug) => readTopic(join(base, slug), slug, staleAfterDays(slug), now)));
 }

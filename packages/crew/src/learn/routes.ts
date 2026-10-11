@@ -12,7 +12,7 @@ import { API_PREFIX } from '../api/api-prefix.js';
 import { LOCAL_ACTOR } from '../api/auth.js';
 import type { AuditLog } from '../api/audit.js';
 import { isHumanOperator } from '../api/watch-routes.js';
-import { readTopics } from './topics.js';
+import { mergedSource, readTopics } from './topics.js';
 import { LEARN_SLUG, MAX_EVERY_HOURS, MIN_EVERY_HOURS, scheduleId, type LearnScheduleStore } from './schedule-store.js';
 
 const V = API_PREFIX;
@@ -68,7 +68,7 @@ export function registerLearnRoutes(app: FastifyInstance, deps: LearnRouteDeps):
         const s = schedules.find((x) => x.slug === slug);
         return s !== undefined ? (2 * s.everyHours) / 24 : (deps.defaultStaleDays ?? 60);
       };
-      return { repoRef, topics: await readTopics(repo.root_path, staleDays, now()) };
+      return { repoRef, topics: await readTopics(await mergedSource(repo.root_path, repo.default_branch), staleDays, now()) };
     },
   );
 
