@@ -45,9 +45,9 @@
  *  - Governed PTY is shipped (DES-TERMINAL-001): POST /api/v1/terminals defaults
  *    governed:true (tool-calls route through the gate-hook); an ungoverned shell
  *    is an explicit opt-in. Never imply the terminal bypasses governance.
- *  - Workflow authoring is shipped: POST /api/v1/workflows validates, persists
- *    to the overlay dir, and hot-registers in the running engine (core-ts
- *    registerWorkflow NAPI) — the studio ships a builder for it (crew#44).
+ *  - Workflow authoring is presets (X-MIG M11): PUT /api/v1/presets/:name saves
+ *    catalog steps the engine composes and governs; the studio's builder saves one.
+ *    Drop-in JSON files and POST /api/v1/workflows are retired.
  *  - BYO-CLI: crew runs whatever CLI you've authed, under your plan. It has no
  *    billing and manages no subscriptions. Programmatic use of some CLIs may
  *    conflict with their ToS (noted on-page).
@@ -589,14 +589,14 @@ const crewVersion = __WICKED_CREW_VERSION__;
     <div class="wrap">
       <div class="sec-head sec-head--wide">
         <div class="kicker">Workflows are data, not code</div>
-        <h2 id="wf-h">Drop a <code>*.json</code>. It’s a workflow.</h2>
+        <h2 id="wf-h">Pick catalog steps. It’s a workflow.</h2>
         <p class="sec-sub">
           <b>10 built-ins ship</b> — feature, bug, migration, <b>collab</b> (two CLIs: propose →
           critique → revise → verdict), and <b>capture-learnings</b>, where agents <b>propose</b>
           lessons a human <b>promotes</b> to steering — each as <b>acyclic-validated JSON</b>. Author
-          your own: drop a file in <code>~/.config/wicked-core/workflows/</code>, or
-          <code>POST /api/v1/workflows</code> — validated, persisted, <b>hot-registered in the
-          engine</b>, and the studio ships a builder for it.
+          your own as a <b>preset</b>: steps over the engine's phase catalog, saved with
+          <code>PUT /api/v1/presets/:name</code> — composed and governed by the engine, and the
+          studio's builder saves one.
         </p>
       </div>
 

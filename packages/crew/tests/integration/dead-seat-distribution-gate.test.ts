@@ -41,6 +41,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter } from '../../src/core/adapter.js';
+import { registerDef } from '../support/register-def.js';
 import { createServer } from '../../src/api/server.js';
 import { removeScratch } from '../setup/scratch.js';
 import { baseSkillOff } from '../setup/base-skill-off.js';
@@ -182,13 +183,13 @@ beforeAll(async () => {
   baseUrl = `http://127.0.0.1:${port}`;
 
   // (A) build→review: the review must run on a seat that did not build.
-  const wfA = await postJson('/api/v1/workflows', {
+  const wfA = await registerDef(adapter, {
     id: WORKFLOW_A,
     phases: [phase('build', 'build', 'neutral', []), phase('review', 'review', 'evaluator', ['build'])],
   });
   expect(wfA.status, JSON.stringify(wfA.body)).toBeLessThan(300);
   // (B) one neutral agent phase — routed teamed to the first seat, which is where the worker dies.
-  const wfB = await postJson('/api/v1/workflows', { id: WORKFLOW_B, phases: [phase('work', 'build', 'neutral', [])] });
+  const wfB = await registerDef(adapter, { id: WORKFLOW_B, phases: [phase('work', 'build', 'neutral', [])] });
   expect(wfB.status, JSON.stringify(wfB.body)).toBeLessThan(300);
 
   // (A) `BUILDER` is usable; `BENCHED` — the only seat distinct from the builder — was found signed

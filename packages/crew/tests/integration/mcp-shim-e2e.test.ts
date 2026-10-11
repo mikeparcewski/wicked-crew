@@ -27,6 +27,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CoreAdapter } from '../../src/core/adapter.js';
+import { registerDef } from '../support/register-def.js';
 import { createServer } from '../../src/api/server.js';
 import type { McpCallRecord } from '../../src/core/types.js';
 import { mcpStateDir } from '../../src/mcp/registry-store.js';
@@ -232,7 +233,7 @@ beforeAll(async () => {
   const approved = await postJson('/api/v1/mcp/approvals', { subject: 'mcp:fx' });
   expect(approved.status, JSON.stringify(approved.body)).toBeLessThan(300);
 
-  const wf = await postJson('/api/v1/workflows', {
+  const wf = await registerDef(adapter, {
     id: WORKFLOW_ID,
     phases: [phase('build', 'build', 'creator', []), phase('review', 'review', 'evaluator', ['build'])],
   });

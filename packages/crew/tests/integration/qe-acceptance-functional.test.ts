@@ -45,6 +45,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { CreateInput } from 'wicked-ledger';
 import { CoreAdapter } from '../../src/core/adapter.js';
+import { registerDef } from '../support/register-def.js';
 import { EVIDENCE_FLOOR_PIN } from '../../src/core/deliver.js';
 import { createServer } from '../../src/api/server.js';
 import { CREW_RUN_ID_FIELD } from '../../src/qe/ledger.js';
@@ -145,11 +146,7 @@ beforeAll(async () => {
   // minus the onboarding launch this test does not need) and the workflow through the API.
   const repo = await adapter.registerRepo('qe-accept-ws', workspace);
 
-  const wfRes = await fetch(`${baseUrl}/api/v1/workflows`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(ACCEPT_WORKFLOW),
-  });
+  const wfRes = await registerDef(adapter, ACCEPT_WORKFLOW);
   expect(wfRes.status).toBe(201);
 
   // Launch the governed run over the daemon's own surface.

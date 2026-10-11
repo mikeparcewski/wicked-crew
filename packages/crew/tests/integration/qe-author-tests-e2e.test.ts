@@ -29,6 +29,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter } from '../../src/core/adapter.js';
+import { registerDef } from '../support/register-def.js';
 import { createServer } from '../../src/api/server.js';
 import { EVIDENCE_FLOOR_PIN } from '../../src/core/deliver.js';
 import type { PhaseDef, WorkflowDef } from '../../src/core/types.js';
@@ -317,7 +318,7 @@ beforeAll(async () => {
 // X-MIG M11: the shipped id is a built-in preset now, so a stand-in under it is refused at
 // registration; the two skipped cases that use this need a preset-shaped stand-in to come back.
 async function armQeAuthor(def: WorkflowDef): Promise<void> {
-  const res = await postJson('/api/v1/workflows', def);
+  const res = await registerDef(adapter, def);
   expect(res.status, JSON.stringify(res.body)).toBe(201);
   expect(adapter.getWorkflow(QE_AUTHOR_TESTS_WORKFLOW)?.phases).toEqual(def.phases);
 }

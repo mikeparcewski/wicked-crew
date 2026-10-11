@@ -21,6 +21,7 @@ import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter } from '../../src/core/adapter.js';
+import { registerDef } from '../support/register-def.js';
 import { createServer } from '../../src/api/server.js';
 import { removeScratch } from '../setup/scratch.js';
 import { baseSkillOff } from '../setup/base-skill-off.js';
@@ -113,7 +114,7 @@ beforeAll(async () => {
   await adapter.registerRepo('os-sandbox-floor-ws', repo);
   const repoId = (await adapter.listRepos()).find((r) => r.name === 'os-sandbox-floor-ws')!.id;
 
-  const wf = await postJson('/api/v1/workflows', {
+  const wf = await registerDef(adapter, {
     id: WORKFLOW,
     phases: [
       {

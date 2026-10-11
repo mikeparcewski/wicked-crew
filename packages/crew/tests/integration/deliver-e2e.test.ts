@@ -26,6 +26,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter } from '../../src/core/adapter.js';
+import { registerDef } from '../support/register-def.js';
 import { createServer } from '../../src/api/server.js';
 import { removeScratch } from '../setup/scratch.js';
 import { baseSkillOff } from '../setup/base-skill-off.js';
@@ -218,7 +219,7 @@ beforeAll(async () => {
   // Register the repo (same registration POST /repos performs, minus the onboarding launch this
   // test does not need) and the workflow through the API.
   await adapter.registerRepo('deliver-e2e-ws', clone);
-  const wf = await postJson('/api/v1/workflows', WORK_WORKFLOW);
+  const wf = await registerDef(adapter, WORK_WORKFLOW);
   expect(wf.status).toBe(201);
 }, 60_000);
 

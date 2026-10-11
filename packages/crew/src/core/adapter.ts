@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import type { BusUnavailable } from './engine-bus.js';
 import { attachEngineBus, detachEngineBus, type EngineBus } from './bus.js';
 import { mkdir, access, readFile, writeFile, chmod, rm, link, rename, realpath, stat } from 'node:fs/promises';
-import { existsSync, readdirSync, readFileSync, renameSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join, dirname, resolve, isAbsolute, relative, sep } from 'node:path';
 import { isPlainRunId, WALKTHROUGH_AUTHOR_SUBDIR, walkthroughRootDir } from './walkthrough-root.js';
 import { crewStateHome, isDefaultStateHome } from '../projects/state-home.js';
@@ -52,7 +52,6 @@ import { BASE_SKILL_REF_SHAPE } from '../skills/base-skill.js';
 import { execCapped } from './exec.js';
 import { composeDeliverWorkflow, DELIVER_PHASE_ID, deliverPresetStep, deliverIdentityFor, deliverRepoFor, isGitHubLogin, pushIdentityOf, readDeliverOriginUrl } from './deliver.js';
 import { engineCampaignDef, engineRosterJson } from './engine-roster.js';
-import { CAMPAIGN_WORKFLOW_PREFIX } from '../campaigns/plan.js';
 import { composeDeliverableFloor } from './deliverable-floor.js';
 import { deliverCredentialsProbe, type DeliverCredentials } from './deliver-credentials.js';
 import {
@@ -94,20 +93,6 @@ function parseEngineJson<T>(raw: unknown, method: string): T {
       `${method}: engine returned invalid JSON (${e instanceof Error ? e.message : String(e)})`,
     );
   }
-}
-
-/**
- * Workflow overlay directory — mirrors the Rust `workflow_overlay_dir()` logic in
- * `pipeline.rs`. The Rust actor reads drop-in workflow JSONs from this path at startup
- * and (with registerWorkflow NAPI) at runtime. TS must write to the same location so
- * the files are picked up on the next daemon start.
- *   • `$WICKED_WORKFLOWS_DIR`  — explicit override (matches Rust env check)
- *   • `~/.config/wicked-core/workflows`  — default (matches Rust default)
- */
-function workflowOverlayDir(): string {
-  if (process.env.WICKED_WORKFLOWS_DIR) return process.env.WICKED_WORKFLOWS_DIR;
-  const home = process.env.HOME ?? process.env.USERPROFILE ?? '/tmp';
-  return join(home, '.config', 'wicked-core', 'workflows');
 }
 
 /** Where the daemon persists system settings. Exported so tests write fixtures to the ONE
@@ -212,43 +197,6 @@ async function publishSettingsFile(linkPath: string, body: string, replace: bool
  */
 const STUDIO_SETTINGS_MAX_BYTES = 512 * 1024;
 
-/** Read user-registered workflow overlays from `dir` (the same dir `registerWorkflow` writes to).
- *
- * Skips: files whose id matches a built-in (artifacts older crews wrote FOR the Rust actor, not user
- * workflows — including them would duplicate a built-in in `listWorkflows`),
- * non-`.json` files, and any file that does not parse into a `{id, phases[]}` shape (the Rust actor
- * skips an unreadable overlay too, so crew must not surface one it can't). A missing dir yields `[]`.
- *
- * Exported so the FINDING-002 restart-hydration path is unit-testable without spawning a Core. */
-export function readOverlayWorkflows(
-  dir: string,
-  builtinIds: ReadonlySet<string>,
-): WorkflowDef[] {
-  let files: string[];
-  try {
-    files = readdirSync(dir);
-  } catch {
-    return []; // no overlay dir yet → nothing registered
-  }
-  const out: WorkflowDef[] = [];
-  for (const file of files) {
-    if (!file.endsWith('.json')) continue;
-    const id = file.slice(0, -'.json'.length);
-    if (builtinIds.has(id)) continue; // a built-in overlay, not a user workflow
-    // A composed campaign-node workflow (TH-9): persisted here so the Rust actor reloads it at
-    // startup (a fresh-process resumeCampaign re-dispatches pending nodes by workflow id), but
-    // it is one node's private plumbing, not a user workflow — keep it out of the catalog.
-    if (id.startsWith(CAMPAIGN_WORKFLOW_PREFIX)) continue;
-    try {
-      const def = JSON.parse(readFileSync(join(dir, file), 'utf8')) as WorkflowDef;
-      if (def && typeof def.id === 'string' && Array.isArray(def.phases)) out.push(def);
-    } catch {
-      // Unparseable overlay — core would skip it at load, so crew skips it too.
-    }
-  }
-  return out;
-}
-
 /** A drop-in workflow definition the ENGINE refused, with the engine's own reason (crew#718). */
 export interface RefusedWorkflow {
   /** The def's id, as the file named it. */
@@ -256,47 +204,6 @@ export interface RefusedWorkflow {
   /** Core's refusal, verbatim — e.g. `gate evaluates nothing: write-a-note — the phase declares
    *  executes_code but pins no validator and has no human gate …`. */
   reason: string;
-}
-
-/** Ask CORE's parser which drop-in defs it will actually honour (crew#718).
- *
- * {@link readOverlayWorkflows} checks a `{id, phases[]}` shape, which is not the engine's contract:
- * `WorkflowRegistry::load_dir` runs `refuse_reserved_id` + `WorkflowDef::validate()` and SKIPS the
- * file it rejects, loudly, on the daemon's stderr. So the catalog listed defs the engine had thrown
- * away at boot and the launch then 400'd `unknown workflow` — the MCP S8 dogfood's F-3, on a
- * hand-authored drop-in whose `executes_code` phase pinned no validator ("gate evaluates nothing").
- *
- * The same doctrine {@link CoreAdapter.registerWorkflow} states for the WRITE path applies here:
- * core's parser is the authority, so it is what we ask. Enumerating `validate()`'s rules in
- * TypeScript would be a second copy of core's schema — the drift that produced this defect.
- * `register` is the engine's `registerWorkflow` binding, which validates before it registers and
- * is idempotent on id, so re-offering a def the engine already loaded at boot is a same-content
- * overwrite; a def added to the dir after boot becomes launchable rather than being listed and
- * refused.
- *
- * `is_system` is stripped first, exactly as the two write paths do: it is crew's own display flag
- * and core's strict def parser rejects the key.
- *
- * Pure (no adapter state) so it is unit-testable without spawning a Core, like
- * {@link readOverlayWorkflows}.
- */
-export async function judgeOverlayWorkflows(
-  defs: readonly WorkflowDef[],
-  register: (json: string) => Promise<string>,
-): Promise<{ accepted: WorkflowDef[]; refused: RefusedWorkflow[] }> {
-  const accepted: WorkflowDef[] = [];
-  const refused: RefusedWorkflow[] = [];
-  for (const def of defs) {
-    const overlayDef = { ...(def as WorkflowDef & { is_system?: boolean }) };
-    delete overlayDef.is_system;
-    try {
-      await register(JSON.stringify(overlayDef));
-      accepted.push(def);
-    } catch (err) {
-      refused.push({ id: def.id, reason: err instanceof Error ? err.message : String(err) });
-    }
-  }
-  return { accepted, refused };
 }
 
 // The native addon is a CommonJS cdylib (`index.node`); load it with a CJS
@@ -1019,108 +926,6 @@ export interface CoreAdapterOptions {
 }
 
 
-/**
- * Quarantine a pre-#197 `onboarding.json` left in the overlay dir.
- *
- * This package used to write that file on every launch, baked with ONE repo's absolute paths. It no
- * longer does — core declares `{repo_root}` / `{code_graph_db}` and binds them per run
- * (wicked-core#179). But the overlay dir is PERSISTENT STATE, and the engine's `load_dir` registers
- * whatever it finds there, replacing a compiled def by id, wholesale.
- *
- * So an upgraded deployment keeps running the last file the old code wrote. Not intermittently:
- * EVERY onboarding run indexes whichever repo happened to be registered last before the upgrade.
- * Observed exactly that on this host after #197 merged — three fresh registrations in three
- * different orgs all indexed `agentic-products/eliza`, the last repo seeded before the fix.
- *
- * Renamed rather than deleted. The file is almost certainly machine-written, but the overlay dir is
- * an operator-facing extension point and silently destroying something out of it is not this
- * process's call. The rename is enough to stop the shadow, and leaves the evidence in place.
- */
-function quarantineStaleOnboardingOverlay(): void {
-  const stale = join(workflowOverlayDir(), 'onboarding.json');
-  if (!existsSync(stale)) return; // the ordinary case on a clean install
-
-  // Only a PRE-#197 artifact, never an operator's override. `registerWorkflow()` writes user
-  // definitions into this same directory, and parking one on every boot would delete a deliberate
-  // customization each time it was re-registered.
-  //
-  // The signature is specific: old crew baked one repo's ABSOLUTE paths into the tool commands. A
-  // def carrying `{repo_root}` / `{code_graph_db}`, or agent phases, or relative commands, is not
-  // what this is looking for and is left alone. An operator who hand-writes absolute paths into a
-  // shared def has written the same bug, and gets the same treatment for the same reason.
-  let bakedPaths: string[];
-  try {
-    const def = JSON.parse(readFileSync(stale, 'utf8')) as {
-      phases?: { executor?: { type?: string; cmd?: string[] } }[];
-    };
-    bakedPaths = (def.phases ?? [])
-      .flatMap((p) => (p.executor?.type === 'tool' ? (p.executor.cmd ?? []) : []))
-      .filter((arg) => arg.startsWith('/'));
-  } catch {
-    // Unparseable: not ours to judge. The engine reports its own load failure.
-    return;
-  }
-  if (bakedPaths.length === 0) return;
-
-  const parked = `${stale}.superseded-by-crew197`;
-  try {
-    renameSync(stale, parked);
-    console.warn(
-      `[onboarding] removed a stale overlay that would have hijacked every onboarding run: ` +
-        `${stale} → ${parked}. It baked ${bakedPaths[0]} into a def shared by every repo, which is ` +
-        `what a pre-#197 crew wrote; the engine resolves it in preference to the built-in ` +
-        `(FINDING-075).`,
-    );
-  } catch (err) {
-    // Loud, and non-fatal: the daemon still starts, but every onboarding on this host is wrong
-    // until the file goes, so the operator has to be told rather than left to discover it.
-    console.error(
-      `[onboarding] FAILED to remove the stale overlay at ${stale}: ${
-        err instanceof Error ? err.message : String(err)
-      }. Until it is removed by hand, every onboarding run will index the repo baked into it, ` +
-        `whatever repo the run names (FINDING-075).`,
-    );
-  }
-}
-
-/**
- * The drop-in ids crew wrote into the overlay dir before DES-TEAMING-002 wave 1 retired them:
- * `chat` is the engine's built-in preset now, and `survey-repo`, `memories` and
- * `domain-graph-slice` are deleted. Exported for the quarantine test.
- */
-export const RETIRED_OVERLAY_IDS = ['chat', 'survey-repo', 'memories', 'domain-graph-slice'] as const;
-
-/**
- * Park the overlay files older crews wrote for {@link RETIRED_OVERLAY_IDS}.
- *
- * Older crews wrote each of these on first launch, and the overlay dir is PERSISTENT: on
- * an upgraded host the engine's startup `load_dir` would keep the deleted workflows launchable, and
- * `hydrateFromOverlay` would serve them on `GET /workflows` as user workflows, where they are no
- * longer on the system list (review of wicked-crew#688). Renamed, not deleted, like the onboarding
- * quarantine above: the evidence stays, and a name retired by operator decision (2026-09-26) is
- * not a workflow any more — save a preset instead.
- */
-function quarantineRetiredOverlays(): void {
-  for (const id of RETIRED_OVERLAY_IDS) {
-    const stale = join(workflowOverlayDir(), `${id}.json`);
-    if (!existsSync(stale)) continue;
-    const parked = `${stale}.retired-des-teaming-002`;
-    try {
-      renameSync(stale, parked);
-      console.warn(
-        `[workflows] parked ${stale} → ${parked}: \`${id}\` is retired (DES-TEAMING-002 wave 1` +
-          `${id === 'chat' ? '; chat is the engine\'s built-in preset' : '; the workflow is deleted'}).`,
-      );
-    } catch (err) {
-      console.error(
-        `[workflows] FAILED to park the retired overlay ${stale}: ${
-          err instanceof Error ? err.message : String(err)
-        }. The engine will keep resolving \`${id}\` from it until it is removed by hand.`,
-      );
-    }
-  }
-}
-
 /** The ids of a workflow's phases that carry a HUMAN gate (`human_confirm` unconditional, the
  * conditional `human_confirm_if`, or `consent_before` — crew#888, which pauses BEFORE the phase
  * runs) — i.e. the phases that will PAUSE for a person.
@@ -1294,11 +1099,6 @@ export class CoreAdapter {
     // it publishes `task.dispatched` / consumes `task.completed` around WHATEVER step runner the engine
     // wires (the production wrapped-CLI runner OR the deterministic stub), so a stub engine can arm it
     // for a fast, offline, deterministic proof of the event path.
-    // BEFORE the Core spawns: the actor reads the overlay dir at startup, so a stale
-    // `onboarding.json` has to be out of the way by then or it shadows the built-in def.
-    quarantineStaleOnboardingOverlay();
-    quarantineRetiredOverlays();
-
     // DES-TEAMING-002 T0: the engine gets the daemon's bus on EVERY boot (`WICKED_BUS_DB`); exec
     // mediation stays a separate switch (`WICKED_BUS_EXEC`), set only under `engineExec`, and the
     // engine's bus gate-judge path follows that switch — never the mere presence of a bus.
@@ -3328,78 +3128,14 @@ export class CoreAdapter {
 
   private readonly userWorkflows = new Map<string, WorkflowDef>();
 
-  /** Whether {@link hydrateFromOverlay} has run this process lifetime. */
-  private overlayHydrated = false;
-
-  /** Load user-registered workflows persisted to the overlay dir into `userWorkflows`, ONCE.
-   *
-   * FINDING-002 residual: `registerWorkflow` writes each def to the overlay dir AND to the in-memory
-   * `userWorkflows` Map, but the Map is process-local and empty on every daemon restart, and nothing
-   * read the dir back. So after a restart the Rust actor (which DOES load the overlay dir at startup)
-   * would launch a user workflow that `listWorkflows()`/`GET /workflows` no longer showed — it
-   * vanished from the registry while remaining runnable. Hydrating from the same dir the writer uses
-   * makes the two views agree again. */
-  private hydrateFromOverlay(): void {
-    if (this.overlayHydrated) return;
-    this.overlayHydrated = true;
-    const builtinIds = new Set(this.builtinDefs.map((w) => w.id));
-    for (const def of readOverlayWorkflows(workflowOverlayDir(), builtinIds)) {
-      if (!this.userWorkflows.has(def.id)) this.userWorkflows.set(def.id, def);
-    }
-  }
-
-  /** Core's verdict on each hydrated drop-in, run ONCE per process (the same lifetime as
-   *  {@link hydrateFromOverlay} and as core's own boot-time `load_dir`). */
-  private overlayVerdicts: Promise<void> | null = null;
-
-  /** id → core's refusal reason, for the drop-ins `judgeOverlayOnce` dropped. */
-  private readonly overlayRefusals = new Map<string, string>();
-
-  /** Drop the refused defs from `userWorkflows` and remember why, asking core's parser (crew#718).
-   *
-   * A build with no `registerWorkflow` binding has no validator to ask, so nothing is judged and
-   * the catalog reads exactly as it did before — the same floor {@link registerWorkflow} draws,
-   * on the read side where there is no state to corrupt. `registerWorkflow` has been declared
-   * (non-optional) in wicked-core-ts since 0.4.0. */
-  private judgeOverlayOnce(): Promise<void> {
-    this.overlayVerdicts ??= (async (): Promise<void> => {
-      this.hydrateFromOverlay();
-      const core = this.core as unknown as Record<string, unknown>;
-      const register = core['registerWorkflow'];
-      if (typeof register !== 'function') return;
-      const { refused } = await judgeOverlayWorkflows(
-        [...this.userWorkflows.values()],
-        (json) => (register as (j: string) => Promise<string>).call(this.core, json),
-      );
-      for (const r of refused) {
-        this.userWorkflows.delete(r.id);
-        this.overlayRefusals.set(r.id, r.reason);
-        console.warn(
-          `wicked-crew: drop-in workflow '${r.id}' is NOT in the catalog — the engine refused it: ${r.reason}`,
-        );
-      }
-    })();
-    return this.overlayVerdicts;
-  }
-
-  /** The workflow catalog `GET /workflows` serves: the defs the ENGINE accepted, plus the drop-ins
-   *  it refused with its own reason, so an unlaunchable def is named instead of offered (crew#718). */
+  /** The workflow catalog `GET /workflows` serves. `unavailable` stays on the wire, always empty:
+   *  it named the operator drop-ins the engine refused (crew#718), and drop-ins are retired
+   *  (X-MIG M11 — a file in the old overlay dir never runs; the engine names it once at boot). */
   async workflowCatalog(): Promise<{ workflows: WorkflowDef[]; unavailable: RefusedWorkflow[] }> {
-    await this.judgeOverlayOnce();
-    return {
-      workflows: this.listWorkflows(),
-      unavailable: [...this.overlayRefusals].map(([id, reason]) => ({ id, reason })),
-    };
-  }
-
-  /** Core's refusal reason for `id`, or `null` when the engine never refused it (crew#718). */
-  async workflowRefusal(id: string): Promise<string | null> {
-    await this.judgeOverlayOnce();
-    return this.overlayRefusals.get(id) ?? null;
+    return { workflows: this.listWorkflows(), unavailable: [] };
   }
 
   listWorkflows(): WorkflowDef[] {
-    this.hydrateFromOverlay();
     // Built-ins first, and a built-in WINS a name conflict (X-MIG M11, codex r2 on crew A): a launch
     // naming it resolves the engine's preset before any registered def, so the reader must serve
     // what runs. Consistent with getWorkflow().
@@ -3416,12 +3152,10 @@ export class CoreAdapter {
 
   /** The runtime-registered defs only (the user's and crew's seams'), without the built-in presets. */
   listRuntimeWorkflows(): WorkflowDef[] {
-    this.hydrateFromOverlay();
     return [...this.userWorkflows.values()].map(withSystemFlag);
   }
 
   getWorkflow(id: string): WorkflowDef | null {
-    this.hydrateFromOverlay();
     // Preset first, as the engine resolves a launch (see listWorkflows).
     const def = this.builtinDefs.find((w) => w.id === id) ?? this.userWorkflows.get(id) ?? null;
     return def === null ? null : withSystemFlag(def);
@@ -3456,10 +3190,10 @@ export class CoreAdapter {
   }
 
   /**
-   * Register a user-authored workflow: persist to the Rust workflow overlay dir
-   * (`~/.config/wicked-core/workflows/<id>.json` or `$WICKED_WORKFLOWS_DIR`),
-   * update the in-memory registry, and (when core supports it) register in the
-   * Rust actor so runs using this workflow work immediately without a restart.
+   * Register a RUNTIME workflow def with the engine (X-MIG M11): crew's interactive seams that still
+   * hold a def (review, theme) register it at boot. The engine validates it and holds it in memory
+   * for this process; nothing is written to disk (operator drop-ins are retired, and a user saves a
+   * preset instead). Refused for a built-in preset's name, which a launch would never resolve to it.
    */
   async registerWorkflow(def: WorkflowDef): Promise<string> {
     const SAFE_ID = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
@@ -3472,50 +3206,18 @@ export class CoreAdapter {
         `workflow id '${def.id}' is a built-in preset: a registered def of that name never runs (a launch resolves the preset first) — save your own preset under another name (PUT /presets/:name)`,
       );
     }
-    const dir = workflowOverlayDir();
-    await mkdir(dir, { recursive: true });
-    const path = join(dir, `${def.id}.json`);
-    // Strip `is_system` before writing — the Rust core's overlay format does not recognise that
-    // field and silently drops any workflow whose JSON it cannot fully deserialise.
-    const overlayDef = { ...(def as WorkflowDef & { is_system?: boolean }) };
-    delete overlayDef.is_system;
-    const json = JSON.stringify(overlayDef);
-
-    // VALIDATE BEFORE PERSISTING (FINDING-002). This ordering is the whole fix.
-    //
-    // The write used to come first and `registerWorkflow` last, so core's parser — the only thing
-    // that actually knows the overlay schema — ran AFTER the state was already mutated. Observed
-    // end to end: POST /api/v1/workflows answered
-    //   400 invalid workflow JSON: unknown field `name`, expected `id` or `phases`
-    // and the file was on disk anyway, `name` included, and served from `userWorkflows` as though
-    // registered. On the next daemon start core could not deserialise its own overlay file:
-    //   wicked-core: skipping workflow file .../probe-002-persist.json
-    // and the workflow VANISHED while its file remained. That is FINDING-002's root cause: not
-    // "registration is not durable" but "a rejected request persisted a def core cannot read".
-    //
-    // Core's parser is the authority, so it is what we ask. Enumerating the accepted fields in TS
-    // instead would be a second copy of core's schema — the exact drift this codebase keeps paying
-    // for, and `is_system` above is already one hand-maintained instance of it.
+    // `is_system` is crew's display flag; core's strict def parser rejects the key.
+    const engineDef = { ...(def as WorkflowDef & { is_system?: boolean }) };
+    delete engineDef.is_system;
     const core = this.core as unknown as Record<string, unknown>;
     const register = core['registerWorkflow'];
     if (typeof register !== 'function') {
-      // No validator, so no safe way to persist: an unvalidated def written here is a file core
-      // may silently skip at load. Refusing is the honest outcome — and it is loud, unlike the
-      // vanishing act it replaces. `registerWorkflow` has been declared (non-optional) in
-      // wicked-core-ts since 0.4.0, so this is a real floor, not a routine path.
-      throw new Error(
-        'this wicked-core build exposes no registerWorkflow binding, so a workflow cannot be ' +
-          'validated before it is written; refusing to persist an unvalidated definition',
-      );
+      // No validator: refusing is the honest outcome (declared non-optional since core-ts 0.4.0).
+      throw new Error('this wicked-core build exposes no registerWorkflow binding, so a workflow cannot be validated and registered');
     }
-    // Throws on a def core rejects — before anything is written or registered.
-    await (register as (j: string) => Promise<string>).call(this.core, json);
-
-    await writeFile(path, JSON.stringify(overlayDef, null, 2), 'utf8');
+    // Throws on a def core rejects — before crew's registry holds it.
+    await (register as (j: string) => Promise<string>).call(this.core, JSON.stringify(engineDef));
     this.userWorkflows.set(def.id, def);
-    // (crew#718) This def just passed core's own validator, so any earlier refusal under the same
-    // id is stale — the catalog must offer the replacement, not keep naming the version it refused.
-    this.overlayRefusals.delete(def.id);
     return def.id;
   }
 

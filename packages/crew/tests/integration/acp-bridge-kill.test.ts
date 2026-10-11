@@ -29,6 +29,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
 import { CoreAdapter } from '../../src/core/adapter.js';
+import { registerDef } from '../support/register-def.js';
 import { createServer } from '../../src/api/server.js';
 import { removeScratch } from '../setup/scratch.js';
 import { baseSkillOff } from '../setup/base-skill-off.js';
@@ -233,10 +234,7 @@ async function launchRun(sessionId: string): Promise<void> {
 
 describe('kill -9 of an ACP worker mid-turn (crew#340)', () => {
   it('registers the single-phase workflow', async () => {
-    const res = await fetch(`${baseUrl}/api/v1/workflows`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    const res = await registerDef(adapter, {
         id: WORKFLOW_ID,
         phases: [
           {
@@ -254,8 +252,7 @@ describe('kill -9 of an ACP worker mid-turn (crew#340)', () => {
             validator_pin: null,
           },
         ],
-      }),
-    });
+      });
     expect(res.status).toBe(201);
   });
 
