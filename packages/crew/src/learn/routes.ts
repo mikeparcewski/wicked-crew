@@ -12,6 +12,7 @@ import { API_PREFIX } from '../api/api-prefix.js';
 import { LOCAL_ACTOR } from '../api/auth.js';
 import type { AuditLog } from '../api/audit.js';
 import { isHumanOperator } from '../api/watch-routes.js';
+import { readTopics } from './topics.js';
 import { LEARN_SLUG, MAX_EVERY_HOURS, MIN_EVERY_HOURS, scheduleId, type LearnScheduleStore } from './schedule-store.js';
 
 const V = API_PREFIX;
@@ -30,6 +31,8 @@ export const LearnSchedulePutSchema = z
 export interface LearnRouteDeps {
   store: LearnScheduleStore;
   adapter: Pick<CoreAdapter, 'listRepos'>;
+  /** Days without re-verification after which an UNSCHEDULED topic's active claim counts as stale. */
+  defaultStaleDays?: number;
   audit: AuditLog;
   now?: () => Date;
 }
@@ -48,6 +51,25 @@ export function registerLearnRoutes(app: FastifyInstance, deps: LearnRouteDeps):
     `${V}/learn/schedules`,
     { config: { manifest: { responseType: 'LearnSchedulesResponse', statusCodes: [200] } } },
     async () => ({ schedules: deps.store.list() }),
+  );
+
+  // The learned topics of one registered repository, read from its checkout. A topic on a schedule
+  // goes stale after two of its intervals without re-verification; an unscheduled one after 60 days.
+  app.get(
+    `${V}/learn/topics`,
+    { config: { manifest: { responseType: 'LearnTopicsResponse', statusCodes: [200, 400, 404] } } },
+    async (req, reply) => {
+      const { repoRef } = req.query as { repoRef?: string };
+      if (typeof repoRef !== 'string' || repoRef === '') return bad(reply, 'repoRef is required');
+      const repo = (await deps.adapter.listRepos()).find((r) => r.id === repoRef);
+      if (repo === undefined) return reply.code(404).send({ error: `no registered repository ${repoRef}` });
+      const schedules = deps.store.list().filter((s) => s.repoRef === repoRef);
+      const staleDays = (slug: string): number => {
+        const s = schedules.find((x) => x.slug === slug);
+        return s !== undefined ? (2 * s.everyHours) / 24 : (deps.defaultStaleDays ?? 60);
+      };
+      return { repoRef, topics: await readTopics(repo.root_path, staleDays, now()) };
+    },
   );
 
   app.put(

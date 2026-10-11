@@ -568,6 +568,17 @@
       ]
     },
     {
+      "method": "GET",
+      "path": "/api/v1/learn/topics",
+      "requestType": null,
+      "responseType": "LearnTopicsResponse",
+      "statusCodes": [
+        200,
+        400,
+        404
+      ]
+    },
+    {
       "method": "POST",
       "path": "/api/v1/linked-issues/preview",
       "requestType": "LinkedIssuesPreviewBody",

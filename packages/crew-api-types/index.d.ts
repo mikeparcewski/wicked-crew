@@ -10378,3 +10378,26 @@ export interface LearnSchedulePutBody {
   enabled?: boolean;
   projectId?: string;
 }
+
+/** One learned topic of a repository (`GET /learn/topics?repoRef=`), read from `.wicked/knowledge/<slug>/`. */
+export interface LearnTopic {
+  slug: string;
+  title: string;
+  kind: 'topic' | 'event';
+  /** topic.json `refreshed_at` (else `created_at`), ISO-8601; null when absent. */
+  refreshedAt: string | null;
+  claims: { active: number; superseded: number; contradicted: number; retired: number };
+  /** The oldest `last_verified` among active claims (ISO-8601), null when none. */
+  oldestVerifiedAt: string | null;
+  /** Active claims not re-verified within the staleness window (2 intervals when scheduled, else 60 days). */
+  staleActive: number;
+  /** Distinct source URLs across the ledger. */
+  sources: number;
+  /** A plain-words reason a file could not be read, else null. */
+  problem: string | null;
+}
+
+export interface LearnTopicsResponse {
+  repoRef: string;
+  topics: LearnTopic[];
+}

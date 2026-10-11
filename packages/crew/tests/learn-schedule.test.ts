@@ -4,7 +4,7 @@
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import Fastify from 'fastify';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AuditLog } from '../src/api/audit.js';
@@ -242,5 +242,33 @@ describe('LearnScheduler launch race + bookkeeping (codex r1)', () => {
     await r.scheduler.sweep();
     const row = r.store.get('r1:sqlite-wal')!;
     expect([row.lastRunId, row.lastOutcome, row.failures]).toEqual(['run-1', 'launched', 0]);
+  });
+});
+
+describe('/learn/topics', () => {
+  it('summarises each topic: counts by status, oldest verification, stale active claims', async () => {
+    const r = rig();
+    const root = join(r.dir, 'repo');
+    const d = join(root, '.wicked', 'knowledge', 'sqlite-wal');
+    mkdirSync(d, { recursive: true });
+    writeFileSync(join(d, 'topic.json'), JSON.stringify({ schema: 1, slug: 'sqlite-wal', title: 'SQLite WAL mode', kind: 'topic', refreshed_at: '2026-10-01T00:00:00Z' }));
+    const src = [{ url: 'https://sqlite.org/wal.html', observed_at: '2026-10-01T00:00:00Z' }];
+    writeFileSync(join(d, 'claims.jsonl'), [
+      { id: 'c-1', status: 'active', last_verified: '2026-10-10T00:00:00Z', sources: src },
+      { id: 'c-2', status: 'active', last_verified: '2026-07-01T00:00:00Z', sources: src },
+      { id: 'c-3', status: 'retired', sources: [{ url: 'https://x.org/a' }] },
+    ].map((c) => JSON.stringify(c)).join('\n') + '\nnot json\n');
+    mkdirSync(join(root, '.wicked', 'knowledge', 'Not_A_Slug'), { recursive: true });
+    const a = Fastify();
+    registerLearnRoutes(a, { store: r.store, adapter: { listRepos: async () => [{ ...REPO, root_path: root }] } as never, audit: new AuditLog(join(r.dir, 'a.log'), () => undefined), now: () => T0 });
+    await a.ready();
+    const res = await a.inject({ method: 'GET', url: '/api/v1/learn/topics?repoRef=r1' });
+    expect(res.statusCode).toBe(200);
+    const [t, ...rest] = res.json().topics;
+    expect(rest).toHaveLength(0);
+    expect(t).toMatchObject({ slug: 'sqlite-wal', title: 'SQLite WAL mode', claims: { active: 2, retired: 1, superseded: 0, contradicted: 0 }, staleActive: 1, sources: 2, oldestVerifiedAt: '2026-07-01T00:00:00.000Z', refreshedAt: '2026-10-01T00:00:00Z' });
+    expect(t.problem).toMatch(/does not parse/);
+    expect((await a.inject({ method: 'GET', url: '/api/v1/learn/topics?repoRef=r9' })).statusCode).toBe(404);
+    expect((await a.inject({ method: 'GET', url: '/api/v1/learn/topics' })).statusCode).toBe(400);
   });
 });
