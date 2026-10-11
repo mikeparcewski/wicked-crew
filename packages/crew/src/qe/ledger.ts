@@ -35,7 +35,8 @@
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { isAbsolute, join } from 'node:path';
+import { createRequire } from 'node:module';
+import { dirname, isAbsolute, join } from 'node:path';
 import type { EvidenceManifest, RunRecord, VerdictRecord } from 'wicked-ledger';
 
 /**
@@ -83,6 +84,42 @@ export function qeLedgerRoot(repoRoot: string): string {
   const legacy = join(repoRoot, LEGACY_QE_LEDGER_DIRNAME);
   if (existsSync(legacy)) return legacy;
   return current;
+}
+
+/** The variable garden's QE pipeline resolves wicked-ledger through first (`scripts/qe/lib/ledger-pkg.mjs`). */
+export const LEDGER_PKG_ENV = 'WICKED_LEDGER_PKG_DIR';
+
+/**
+ * (crew#951) Export crew's OWN wicked-ledger package dir as `WICKED_LEDGER_PKG_DIR` for every
+ * worker the engine spawns (the daemon's env reaches them; `hardened()` strips only engine-internal
+ * variables). A governed run's QE unit then records its verdict with the very package this daemon's
+ * acceptance check reads it with — no `npm i` in the worktree, which a fenced seat is refused and
+ * which would change the tree under review. Live on the rig the seat reached a PASS and wrote no
+ * run/verdict rows because the package did not resolve. An operator's own value is kept. Returns
+ * the dir in effect, or `null` when crew's own package cannot be located (nothing is set).
+ */
+export function exportLedgerPackageDir(env: NodeJS.ProcessEnv = process.env): string | null {
+  const own = env[LEDGER_PKG_ENV]?.trim();
+  if (own !== undefined && own !== '') return own;
+  try {
+    // Resolved, never loaded: the daemon itself opens no SQLite library (wicked-core#631 guard,
+    // which admits only the `wicked-ledger/manifest` subpath by name).
+    let dir = dirname(createRequire(import.meta.url).resolve('wicked-ledger/manifest'));
+    for (let i = 0; i < 6; i++) {
+      const pj = join(dir, 'package.json');
+      // The nearest package.json above the resolved subpath is the package's root.
+      if (existsSync(pj)) {
+        env[LEDGER_PKG_ENV] = dir;
+        return dir;
+      }
+      const parent = dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 /**
