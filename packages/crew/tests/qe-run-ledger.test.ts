@@ -208,3 +208,18 @@ describe('crew#951 — a run with an evidence root keeps its QE verdict in the r
     expect(JSON.stringify(none.json())).toContain(join(evidenceOf(RUNS.none), '.wicked-qe').replace(/\\/g, '\\\\'));
   });
 });
+
+describe('crew#951 — the QE unit records with crew\'s own wicked-ledger', () => {
+  it('exports crew\'s bundled wicked-ledger as WICKED_LEDGER_PKG_DIR (an operator value is kept)', async () => {
+    const { exportLedgerPackageDir, LEDGER_PKG_ENV } = await import('../src/qe/ledger.js');
+    const env: NodeJS.ProcessEnv = {};
+    const dir = exportLedgerPackageDir(env);
+    expect(dir).not.toBeNull();
+    expect(env[LEDGER_PKG_ENV]).toBe(dir);
+    const { readFileSync } = await import('node:fs');
+    expect(JSON.parse(readFileSync(join(dir!, 'package.json'), 'utf8')).name).toBe('wicked-ledger');
+    const pinned: NodeJS.ProcessEnv = { [LEDGER_PKG_ENV]: '/operator/ledger' };
+    expect(exportLedgerPackageDir(pinned)).toBe('/operator/ledger');
+    expect(pinned[LEDGER_PKG_ENV]).toBe('/operator/ledger');
+  });
+});

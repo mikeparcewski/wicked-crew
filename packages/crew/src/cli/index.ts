@@ -4,6 +4,7 @@ import { join, dirname } from 'node:path';
 import { closeSync, mkdirSync, openSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { CoreAdapter } from '../core/adapter.js';
+import { exportLedgerPackageDir } from '../qe/ledger.js';
 import { engineBusHandoff, type BusUnavailable } from '../core/engine-bus.js';
 import { ensureBridgesOnPath, ensurePiLauncherCommand, PI_ACP_COMMAND_ENV } from '../core/bridge-path.js';
 import { DISABLE_BACKGROUND_TASKS_ENV, ensureForegroundOnlyWorkers } from '../core/worker-env.js';
@@ -410,6 +411,9 @@ async function bootstrap(opts: BootstrapOpts, bootStartedAt: number = performanc
   // timed apart from the server's own stages so a slow boot names its stage. The native addon itself
   // is loaded when `core/adapter.ts` is imported, before `main()` starts its clock: not in any stage
   // and not in `startupMs`.
+  // crew#951: the QE unit records with crew's own wicked-ledger (WICKED_LEDGER_PKG_DIR), set
+  // before the engine spawns any worker.
+  exportLedgerPackageDir();
   const tEngine = performance.now();
   const preflightMs = Math.round(tEngine - bootStartedAt);
   const adapter = new CoreAdapter({
