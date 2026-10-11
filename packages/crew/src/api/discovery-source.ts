@@ -165,9 +165,14 @@ export function makeDiscoverySource(deps: DiscoverySourceDeps): (projectId: stri
       }
       let test: string | null = null;
       if (v.session.repo_ref !== null && units.some((u) => u.catalog === TEST_CATALOG)) {
-        repos ??= await deps.repos().catch(() => []);
-        const repo = repos.find((r) => r.id === v.session.repo_ref);
-        const ledgerRoot = repo !== undefined ? runQeLedgerRoot(v.session as { evidence_root?: unknown }, repo.root_path) : null;
+        // The run's QE ledger (crew#951): its evidence root's, needing no repo lookup; else its repo's.
+        const evidence = (v.session as { evidence_root?: unknown }).evidence_root;
+        let repoRoot: string | null = null;
+        if (typeof evidence !== 'string' || evidence.trim() === '') {
+          repos ??= await deps.repos().catch(() => []);
+          repoRoot = repos.find((r) => r.id === v.session.repo_ref)?.root_path ?? null;
+        }
+        const ledgerRoot = runQeLedgerRoot({ evidence_root: evidence }, repoRoot);
         if (ledgerRoot !== null) test = await testVerdict(ledgerRoot, id, events).catch(() => null);
       }
       let firstTs = Number.POSITIVE_INFINITY;

@@ -462,7 +462,7 @@ describe('GET /runs/:id/acceptance and the walkthrough view read the proof roots
     expect(v.steps.map((s) => [s.stepId, s.checkState])).toEqual([['build', 'checked']]);
   });
 
-  it('deny-dominates: an unsealed walkthrough denies the gate, and a missing repo ledger still denies a plan with a test step', async () => {
+  it('deny-dominates: an unsealed walkthrough denies the gate, and a missing run QE ledger still denies a plan with a test step', async () => {
     sessionsDetail.mockResolvedValue([planRun(false)]);
     recordProofRoot(join(ev, STEP), PASSING);
     workOutput.mockResolvedValue('no seal');
@@ -474,13 +474,17 @@ describe('GET /runs/:id/acceptance and the walkthrough view read the proof roots
     workOutput.mockResolvedValue(sealLine(join(ev, STEP), PASSING));
     const both = (await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN}/acceptance` })).json() as { gate: { satisfied: boolean; reason: string } };
     expect(both.gate.satisfied).toBe(false);
-    expect(both.gate.reason).toMatch(/no repo context/);
+    // crew#951: the run's QE ledger is its evidence root's — absent here, so the test step's share denies.
+    expect(both.gate.reason).toMatch(/no QE ledger at/);
+    expect(both.gate.reason).toContain(join(ev, '.wicked-qe'));
   });
 
-  it('a walkthrough-only plan still denies when the repo ledger exists but cannot be read (Copilot)', async () => {
+  it('a walkthrough-only plan still denies when the run QE ledger exists but cannot be read (Copilot)', async () => {
     const repoRoot = join(dir, 'repo');
-    mkdirSync(join(repoRoot, '.wicked-qe', 'verdicts'), { recursive: true });
-    writeFileSync(join(repoRoot, '.wicked-qe', 'verdicts', 'broken.json'), '{not json');
+    mkdirSync(repoRoot, { recursive: true });
+    // crew#951: the run's QE ledger is `<evidence root>/.wicked-qe` (the repo's no longer speaks for it).
+    mkdirSync(join(ev, '.wicked-qe', 'verdicts'), { recursive: true });
+    writeFileSync(join(ev, '.wicked-qe', 'verdicts', 'broken.json'), '{not json');
     const r = planRun(false);
     (r.session as unknown as { repo_ref: string }).repo_ref = 'shop';
     sessionsDetail.mockResolvedValue([r]);

@@ -567,7 +567,9 @@ export function readStampedVerdicts(
   runId: string,
   stepId: string,
 ): { found: boolean; rows: StampedLedgerVerdict[]; error?: string } {
-  const root = qeLedgerRoot(proofRoot);
+  // Exactly `<proofRoot>/.wicked-qe`, where the recorder writes it: crew's own WICKED_QE_LEDGER_DIR
+  // pins the repo ledger, never a proof root's (codex r1 on crew#951).
+  const root = join(proofRoot, DEFAULT_QE_LEDGER_DIRNAME);
   if (!existsSync(root)) return { found: false, rows: [] };
   try {
     const rows: StampedLedgerVerdict[] = [];

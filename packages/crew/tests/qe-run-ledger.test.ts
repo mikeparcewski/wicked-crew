@@ -24,7 +24,7 @@ import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import type { AuditLog } from '../src/api/audit.js';
 import { type CoreAdapter } from '../src/core/adapter.js';
 import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
-import { CREW_RUN_ID_FIELD, runQeLedgerRoot } from '../src/qe/ledger.js';
+import { CREW_RUN_ID_FIELD, readStampedVerdicts, runQeLedgerRoot } from '../src/qe/ledger.js';
 import { removeScratch } from './setup/scratch.js';
 
 const DELIVER_ORD = 3;
@@ -184,6 +184,20 @@ describe('crew#951 — a run with an evidence root keeps its QE verdict in the r
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+
+  it("a walkthrough proof root's ledger is read where the recorder writes it, whatever crew's WICKED_QE_LEDGER_DIR says", async () => {
+    const proofRoot = join(dir, 'proof');
+    await stampVerdict(join(proofRoot, '.wicked-qe'), 'run-951-proof', 'PASS');
+    vi.stubEnv('WICKED_QE_LEDGER_DIR', join(repoRoot, '.wicked-qe'));
+    try {
+      const read = readStampedVerdicts(proofRoot, 'run-951-proof', 'no-such-step');
+      expect(read.found).toBe(true);
+      expect(read.error).toBeUndefined();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(readStampedVerdicts(join(dir, 'no-proof'), 'run-951-proof', 'x').found).toBe(false);
   });
 
   it('GET /runs/:id/acceptance answers from the run ledger', async () => {
