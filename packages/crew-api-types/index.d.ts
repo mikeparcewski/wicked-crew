@@ -978,6 +978,11 @@ export interface SeatHealth {
  * the seat intact so it round-trips verbatim into `clisJson` on launch.
  */
 export interface RosterSeat {
+  /** (api-types 0.110.0, operator ruling 2026-10-11) An OPT-IN seat (opencode): never in a default
+   *  launch roster — a launch surface shows it unticked with `optInNote` ("opt-in: known to stall")
+   *  and includes it only when the operator ticks it. ABSENT for every other seat. */
+  optIn?: true;
+  optInNote?: string;
   key: string;
   display_name: string;
   binary: string;
@@ -1958,7 +1963,23 @@ export type AssuranceInstrument =
   | 'judge'
   | 'evaluator_pass'
   | 'distinct_evaluator'
+  /** (api-types 0.110.0) The operator judged a gate whose judge could not rule. */
+  | 'operator_judge'
   | (string & {});
+
+/**
+ * (api-types 0.110.0, operator ruling 2026-10-11) "Judged by operator": the operator's explicit
+ * approve at a `judge_unavailable` gate (no eligible judge, or a judge that gave no verdict). `by` is
+ * the actor the gate API recorded (the operator, or the agent acting for them); never automatic.
+ */
+export interface OperatorJudgment {
+  by: string;
+  /** Unix millis. */
+  at: number;
+  note: string | null;
+  /** Why the judge could not rule (the gate's denial reason). */
+  reason: string | null;
+}
 
 /** Why an instrument is absent from a receipt. */
 export type AssuranceSkipReason =
@@ -2042,6 +2063,9 @@ export interface AssuranceReceipt {
    *  decided (`seats`) and the draw's `seed`. ABSENT when none was convened (the routine case) or on
    *  an older engine. A delivery receipt lists every council of the run. */
   councils?: TeamDispute[];
+  /** (api-types 0.110.0) Every gate the operator judged ("judged by operator"); ABSENT when none or on
+   *  an older engine. A unit receipt carries its own; a delivery receipt lists the run's. */
+  operatorJudges?: OperatorJudgment[];
 }
 
 /**

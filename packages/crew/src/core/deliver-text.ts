@@ -766,6 +766,17 @@ export function parseFramedDeliverText(framed: string): DeliverText | null {
 // ── facts ──────────────────────────────────────────────────────────────────────────────────────
 
 /** A `GateSpec` (or the engine's loose string form) as a short label. */
+/** (operator ruling 2026-10-11) "judged by operator (<who>)" when the operator judged this phase's
+ *  gate because no judge could rule (`assurance.operatorJudges`, core-ts ≥ 0.9.7); else `null`. */
+export function operatorJudgedLabel(u: { assurance?: unknown }): string | null {
+  const judges = (u.assurance as { operatorJudges?: Array<{ by?: unknown }> } | null | undefined)?.operatorJudges;
+  if (!Array.isArray(judges) || judges.length === 0) return null;
+  const who = judges
+    .map((j) => (typeof j.by === 'string' && j.by.trim() !== '' ? j.by.trim() : 'operator'))
+    .join(', ');
+  return `judged by operator (${who})`;
+}
+
 export function gateLabel(gate: GateSpec | string | undefined): string {
   if (gate === undefined || gate === null) return '—';
   // crew#888: the engine pauses BEFORE a `consent_before` phase runs (core#801).
@@ -902,7 +913,7 @@ export function factsFromRun(
         id,
         stage: u.stage,
         role: u.role ?? 'neutral',
-        gate: gateLabel(u.gate),
+        gate: operatorJudgedLabel(u) ?? gateLabel(u.gate),
         seat: seatOf(u),
         outcome: id === 'deliver' && running ? 'this PR' : (u.phase_status ?? u.status),
       };

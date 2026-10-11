@@ -1866,6 +1866,15 @@ export class CoreAdapter {
     return this.handedToEngine('run', runId, () => this.core.resumeRun(runId));
   }
 
+  /** (operator ruling 2026-10-11) The actor answering each run's gate, set by the gate route for its
+   *  next {@link confirmGate} call only. */
+  private readonly gateActors = new Map<string, string>();
+
+  /** Record who answers `runId`'s gate on the next {@link confirmGate} (the gate API's actor). */
+  recordGateActor(runId: string, actorLabel: string): void {
+    this.gateActors.set(runId, actorLabel);
+  }
+
   /** Resolve a human gate: approve (optional amend) / request changes / reject → the status token.
    *  (DES-L1 PR-2) `action` and `amendScope` are the 0.7.27 arms: on an older addon a napi call
    *  would silently DROP them — a `request_changes` would run as a plain reject — so they fail
@@ -1879,7 +1888,31 @@ export class CoreAdapter {
     amendScope?: string,
     plan?: LaunchPlan,
   ): Promise<string> {
+    // (operator ruling 2026-10-11) WHO answered — recorded by the gate route just before this call
+    // (`recordGateActor`), consumed once. The engine records it when the answer is an operator
+    // judgment ("judged by operator", core-ts ≥ 0.9.7); an older addon ignores the trailing argument.
+    const actorLabel = this.gateActors.get(runId);
+    this.gateActors.delete(runId);
     return this.handedToEngine('run', runId, () => {
+      if (actorLabel !== undefined && plan === undefined) {
+        const why =
+          action !== undefined || amendScope !== undefined
+            ? armsUnsupportedReason('the gate arms `action` / `amendScope`', 'approve or reject without them')
+            : null;
+        if (why !== null) throw new Error(why);
+        const core = this.core as unknown as {
+          confirmGate(
+            runId: string,
+            approve: boolean,
+            amend?: string,
+            action?: string,
+            amendScope?: string,
+            planJson?: string,
+            actor?: string,
+          ): Promise<string>;
+        };
+        return core.confirmGate(runId, approve, amend, action, amendScope, undefined, actorLabel);
+      }
       if (plan !== undefined) {
         // DES-TEAMING-002 T3: approve a `plan_approval` gate WITH AN EDIT — the engine proposes,
         // floor-fills and accepts it (or refuses it and re-opens the gate). Fail CLOSED on an

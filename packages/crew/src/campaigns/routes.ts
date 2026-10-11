@@ -19,6 +19,7 @@
  * 400 ("fix your request").
  */
 
+import { defaultLaunchRoster } from '../core/opt-in-seats.js';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 
@@ -132,7 +133,10 @@ export function registerCampaignRoutes(
       const body = parsed.data as LaunchCampaignBody;
       try {
         const clis: unknown[] =
-          body.clisJson !== undefined ? (JSON.parse(body.clisJson) as unknown[]) : deps.roster();
+          body.clisJson !== undefined
+            ? (JSON.parse(body.clisJson) as unknown[])
+            : // (operator ruling 2026-10-11) the default roster leaves opt-in seats (opencode) out.
+              defaultLaunchRoster(deps.roster() as Array<{ key?: unknown }>);
         if (!Array.isArray(clis)) {
           return reply
             .code(400)

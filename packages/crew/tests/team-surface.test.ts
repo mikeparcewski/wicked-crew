@@ -398,17 +398,18 @@ describe('commands (T8 (c), (d), P1)', () => {
       const res = await fetch(`${ctx.baseUrl}/api/v1/runs/r1/gate`, json(a));
       expect(res.status, JSON.stringify(a)).toBe(200);
     }
+    // (operator ruling 2026-10-11) An attributed answer carries the gate API's actor last.
     expect(gated).toEqual([
-      ['r1', true, undefined],
-      ['r1', true, 'continue without team'],
-      ['r1', false, undefined],
+      ['r1', true, undefined, undefined, undefined, undefined, expect.any(String)],
+      ['r1', true, 'continue without team', undefined, undefined, undefined, expect.any(String)],
+      ['r1', false, undefined, undefined, undefined, undefined, expect.any(String)],
     ]);
   });
 
   it('approving a team_dispute gate is a plain approve through confirmGate (never a re-dispatch here)', async () => {
     const res = await fetch(`${ctx.baseUrl}/api/v1/runs/r1/gate`, json({ approve: true, action: 'approve' }));
     expect(res.status).toBe(200);
-    expect(gated).toEqual([['r1', true, undefined, 'approve', undefined]]);
+    expect(gated).toEqual([['r1', true, undefined, 'approve', undefined, undefined, expect.any(String)]]);
   });
 
   it('POST /team/outbox/replay answers the engine report; 409 when the engine refuses; 501 without the binding', async () => {

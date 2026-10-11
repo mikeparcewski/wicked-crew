@@ -48,6 +48,7 @@ import { callEstateTool, EstateMcpError, memoryStoreInfo } from '../core/estate-
 import { SeatHealthTracker } from './seat-health.js';
 import { applyWorkerConfigRoot, signedInHeuristic } from './seat-signin.js';
 import { applyCouncilSettings, isCouncilSize, isCouncilStaggerMs } from '../core/council-settings.js';
+import { defaultLaunchRoster, markOptIn } from '../core/opt-in-seats.js';
 import { chatSeatAdmission, type StandingSeat } from './seat-standing.js';
 import {
   seatGovernanceDiagnostics,
@@ -1748,7 +1749,7 @@ export function registerRoutes(
   // disagree about a seat.
   const rosterWithStanding: RosterWithStanding =
     runtime.rosterWithStanding ?? rosterWithStandingFactory({ seatHealth, signedIn });
-  app.get(`${V}/roster`, async () => ({ roster: rosterWithStanding() }));
+  app.get(`${V}/roster`, async () => ({ roster: markOptIn(rosterWithStanding()) }));
   /** crew#742: the seats' governance standing, read from the standing roster (empty when the
    *  roster cannot be read — the roster route reports that failure itself). */
   const seatGovernanceNow = (): SeatGovernanceDiagnostic[] => {
@@ -2276,7 +2277,9 @@ export function registerRoutes(
       // The default roster carries crew's STANDING (wave 6, the crew half of F-7R2-006): the adapter
       // translates `council_eligible: false` into the engine's per-seat bench verdict at launch
       // (`core/engine-roster.ts`), so a signed-out seat is never convened, never a judge.
-      clisJson: b.clisJson ?? JSON.stringify(rosterWithStanding()),
+      // (operator ruling 2026-10-11) …minus the opt-in seats (opencode): a launch gets one only
+      // when it names it.
+      clisJson: b.clisJson ?? JSON.stringify(defaultLaunchRoster(rosterWithStanding())),
     };
     // A capture launch (api/capture.ts) reads its materials from a per-run inbox outside every
     // sandbox: the capture route registered it under the run id it minted.
@@ -4257,6 +4260,10 @@ export function registerRoutes(
       // All five positionals, explicit `undefined` for the absent ones (DES-L1 PR-2; the
       // gate-arms tripwire pins the arity). An engine refusal (no creator to send back to,
       // an engine older than the arm) surfaces as the existing 409 below.
+      // (operator ruling 2026-10-11) WHO answered: the adapter hands it to the engine with this
+      // confirm, which records it as the judge when this approve answers a `judge_unavailable`
+      // gate ("judged by operator").
+      adapter.recordGateActor?.(id, `${actor.id} (${actor.kind})`);
       const status = await adapter.confirmGate(
         id,
         parsed.data.approve,
@@ -4411,6 +4418,10 @@ export function registerRoutes(
         if ('refusal' in refused) return reply.code(refused.refusal.code).send(refused.refusal.body);
         deliveryCheck = { qeAcceptance: refused.qeAcceptance };
       }
+      if (gated) {
+        const who = actorOf(req);
+        adapter.recordGateActor?.(id, `${who.id} (${who.kind})`);
+      }
       const status = gated ? await adapter.confirmGate(id, true) : await adapter.resumeRun(id);
       // A resume of a gated run IS a gate approval — audit it as one, so the
       // "who approved" trail has no side door (task #88).
@@ -4535,6 +4546,8 @@ export function registerRoutes(
     const ord = cursor?.ord ?? run.session.unit_ix;
     try {
       if (gated) {
+        const who = actorOf(req);
+        adapter.recordGateActor?.(id, `${who.id} (${who.kind})`);
         const status = await adapter.confirmGate(id, true);
         audit.record('gate.decided', actorOf(req), {
           runId: id,
