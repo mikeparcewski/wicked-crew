@@ -312,6 +312,7 @@ describe('/learn/topics reads what MERGED (F-LEARN-4)', () => {
     git('init', '-q', '-b', 'main');
     writeFileSync(join(d, 'topic.json'), JSON.stringify({ schema: 1, slug: 'merged-topic', title: 'Merged title', kind: 'topic' }));
     writeFileSync(join(d, 'claims.jsonl'), JSON.stringify({ id: 'c-1', status: 'active', last_verified: '2026-10-10T00:00:00Z', sources: [] }) + '\n');
+    writeFileSync(join(root, '.wicked', 'knowledge', 'notes'), 'a tracked file is not a topic');
     git('add', '-A');
     git('-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-qm', 'merged');
     git('update-ref', 'refs/remotes/origin/main', 'HEAD');

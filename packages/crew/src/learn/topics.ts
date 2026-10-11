@@ -64,8 +64,13 @@ export function refSource(root: string, ref: string): TopicSource {
   };
   return {
     slugs: async () => {
-      const out = await git(['ls-tree', '--name-only', `${ref}:.wicked/knowledge`]);
-      return out === null ? [] : out.split('\n').map((x) => x.trim()).filter(Boolean);
+      // `<mode> <type> <oid>\t<name>` — only tree entries are topics (codex r1: a tracked file is not).
+      const out = await git(['ls-tree', `${ref}:.wicked/knowledge`]);
+      if (out === null) return [];
+      return out.split('\n').flatMap((line) => {
+        const m = /^\d+ tree [0-9a-f]+\t(.+)$/.exec(line.trim());
+        return m !== null ? [m[1]!] : [];
+      });
     },
     read: (slug, file) => git(['show', `${ref}:.wicked/knowledge/${slug}/${file}`]),
   };
