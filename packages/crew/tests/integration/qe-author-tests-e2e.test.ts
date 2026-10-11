@@ -38,7 +38,9 @@ import {
   QE_VERIFY_PHASE_ID,
   QE_VERIFY_SUMMARY_MARKER,
 } from '../../src/qe/author-workflow.js';
-import type { TestSet } from '../../src/qe/test-sets.js';
+import { TestSetIndex, registerTestSetForRun, type TestSet } from '../../src/qe/test-sets.js';
+import { AuditLog } from '../../src/api/audit.js';
+import type { SessionView } from '../../src/core/types.js';
 import { removeScratch } from '../setup/scratch.js';
 import { baseSkillOff } from '../setup/base-skill-off.js';
 import { createRequire } from 'node:module';
@@ -310,17 +312,60 @@ beforeAll(async () => {
 }, 120_000);
 
 /**
- * Arm a stand-in UNDER THE SHIPPED ID, through the API (the engine validates it as authored). The
- * run must BE a `qe-author-tests` run — the daemon classifies a run by the name the engine recorded
- * for its launch (seam X2), never by its phase sequence, so a stand-in under another id is, rightly,
- * not a test-authoring run and registers no test set. The SHIPPED case re-arms the shipped def.
+ * The id the GREEN and RED stand-ins are armed under (crew#922). Since wicked-core#843 (X-MIG M10/M11)
+ * `qe-author-tests` is a built-in PRESET: a def registered under that name is refused, and a launch
+ * naming it runs the preset. So the stand-in takes its own id; the run is the shipped chain with the
+ * author's hands replaced, launched and delivered for real.
  */
-// X-MIG M11: the shipped id is a built-in preset now, so a stand-in under it is refused at
-// registration; the two skipped cases that use this need a preset-shaped stand-in to come back.
+const STAND_IN_ID = 'qe-author-tests-standin';
+
+/** Arm a stand-in through the API (the engine validates it as authored). */
 async function armQeAuthor(def: WorkflowDef): Promise<void> {
   const res = await registerDef(adapter, def);
   expect(res.status, JSON.stringify(res.body)).toBe(201);
-  expect(adapter.getWorkflow(QE_AUTHOR_TESTS_WORKFLOW)?.phases).toEqual(def.phases);
+  expect(adapter.getWorkflow(def.id)?.phases).toEqual(def.phases);
+}
+
+/**
+ * The test set the daemon registers for a `qe-author-tests` run, built by the REAL
+ * `registerTestSetForRun` over the stand-in run's REAL view (its verify transcript, its repo, its
+ * delivery), presented with the identity a built-in preset run carries
+ * (`run_identity: {kind: 'preset', name: 'qe-author-tests'}`, seam X2).
+ *
+ * The daemon classifies a run by the name the engine recorded (never by its phase sequence), so it
+ * rightly registers nothing for the stand-in itself — asserted by the callers. What this stands in
+ * for is only the NAME; everything the record is built from is the run that just happened.
+ */
+async function testSetAsPresetRun(runId: string, deliverUrl: string | undefined): Promise<TestSet | null> {
+  const views = await adapter.sessionsDetail();
+  const real = views.find((v) => v.session.id === runId);
+  expect(real, `the run view for ${runId}`).toBeDefined();
+  const asPreset: SessionView = {
+    ...real!,
+    session: {
+      ...real!.session,
+      run_identity: { kind: 'preset', name: QE_AUTHOR_TESTS_WORKFLOW, user_plan: false, system: false },
+    } as SessionView['session'],
+  };
+  return registerTestSetForRun(
+    {
+      adapter: {
+        sessionsDetail: async () => [asPreset],
+        workOutput: (unitId: string) => adapter.workOutput(unitId),
+        listRepos: () => adapter.listRepos(),
+      },
+      audit: AuditLog.noop(),
+      index: new TestSetIndex(),
+      ...(deliverUrl !== undefined ? { deliveryUrlFor: () => deliverUrl } : {}),
+    },
+    runId,
+  );
+}
+
+/** The daemon's own registry: the stand-in, being no `qe-author-tests` run by name, is not in it. */
+async function campaignsTestSet(runId: string): Promise<TestSet | undefined> {
+  const { body } = await getJson('/api/v1/campaigns');
+  return ((body['test_sets'] as TestSet[] | undefined) ?? []).find((s) => s.run_id === runId);
 }
 
 afterAll(async () => {
@@ -337,11 +382,9 @@ afterAll(async () => {
 });
 
 describe('wave 6 end to end — the governed test-authoring journey', () => {
-  // crew#922: since wicked-core#843 the name `qe-author-tests` launches the built-in PRESET, so this
-  // stand-in def is shadowed and the case cannot run its subject. Re-author it against the preset.
-  it.skip('GREEN: verify RUNS the produced e2e under the repo harness, the ENGINE deliver phase opens the PR, the test set is registered, the diff survives completion', async () => {
+  it('GREEN: verify RUNS the produced e2e under the repo harness, the ENGINE deliver phase opens the PR, the test set is registered, the diff survives completion', async () => {
     process.env['GH_STUB_OUT'] = 'https://github.com/o/r/pull/601';
-    await armQeAuthor(standInDef(QE_AUTHOR_TESTS_WORKFLOW, 'console.log("launch spec ok");'));
+    await armQeAuthor(standInDef(STAND_IN_ID, 'console.log("launch spec ok");'));
     const launch = await postJson('/api/v1/runs', {
       problem: 'e2e: functional tests for the launch flow',
       clisJson: SEATS,
@@ -349,7 +392,7 @@ describe('wave 6 end to end — the governed test-authoring journey', () => {
       // the engine refuses it under full assurance (EX-01). This journey is about verify → review →
       // deliver, not assurance: opt in explicitly, disclosed on every receipt.
       reducedAssurance: true,
-      workflow: QE_AUTHOR_TESTS_WORKFLOW,
+      workflow: STAND_IN_ID,
       repoRef: repoId,
       humanConfirm: 'none',
       // core ≥ 11d3b66 (core-ts 0.7.24) gates the deliver phase by default (F-E2E-030); this rig's intent is a
@@ -423,12 +466,12 @@ describe('wave 6 end to end — the governed test-authoring journey', () => {
     expect(files).toContain('e2e/launch.spec.mjs');
     expect(files).toContain('tests/PLAN-launch.md');
 
-    // (3) The TEST SET is registered on the campaigns surface (F-7R2-014) — the Test landing's data.
-    const set = await waitFor(async () => {
-      const { body } = await getJson('/api/v1/campaigns');
-      const sets = (body['test_sets'] as TestSet[] | undefined) ?? [];
-      return sets.find((s) => s.run_id === runId) ?? null;
-    }, 'the registered test set on GET /campaigns', 120_000);
+    // (3) The TEST SET a `qe-author-tests` run registers (F-7R2-014) — the Test landing's data — built
+    //     from this run by the real registration (crew#922: the stand-in carries its own name, so the
+    //     daemon itself rightly files none for it).
+    expect(await campaignsTestSet(runId)).toBeUndefined();
+    const set = (await testSetAsPresetRun(runId, String(run.session['deliverUrl'])))!;
+    expect(set).not.toBeNull();
     expect(set).toMatchObject({
       id: `testset-${runId}`,
       workflow_id: QE_AUTHOR_TESTS_WORKFLOW,
@@ -456,11 +499,9 @@ describe('wave 6 end to end — the governed test-authoring journey', () => {
     expect(String(diff.body['diff'])).toContain('launch.spec.mjs');
   }, 540_000);
 
-  // crew#922: since wicked-core#843 the name `qe-author-tests` launches the built-in PRESET, so this
-  // stand-in def is shadowed and the case cannot run its subject. Re-author it against the preset.
-  it.skip('RED (R4-r2 floor): a produced e2e that FAILS under the harness fails the run — no PR, no branch, a red test set', async () => {
+  it('RED (R4-r2 floor): a produced e2e that FAILS under the harness fails the run — no PR, no branch, a red test set', async () => {
     process.env['GH_STUB_OUT'] = 'https://github.com/o/r/pull/602';
-    await armQeAuthor(standInDef(QE_AUTHOR_TESTS_WORKFLOW, 'console.log("launch spec about to fail"); process.exit(1);'));
+    await armQeAuthor(standInDef(STAND_IN_ID, 'console.log("launch spec about to fail"); process.exit(1);'));
     const launch = await postJson('/api/v1/runs', {
       problem: 'e2e: tests that do not pass must not ship',
       clisJson: SEATS,
@@ -468,7 +509,7 @@ describe('wave 6 end to end — the governed test-authoring journey', () => {
       // the engine refuses it under full assurance (EX-01). This journey is about verify → review →
       // deliver, not assurance: opt in explicitly, disclosed on every receipt.
       reducedAssurance: true,
-      workflow: QE_AUTHOR_TESTS_WORKFLOW,
+      workflow: STAND_IN_ID,
       repoRef: repoId,
       humanConfirm: 'none',
       // core ≥ 11d3b66 (core-ts 0.7.24) gates the deliver phase by default (F-E2E-030); this rig's intent is a
@@ -490,10 +531,10 @@ describe('wave 6 end to end — the governed test-authoring journey', () => {
     expect(run.units.find((u) => u.id.endsWith(':deliver'))?.status).not.toBe('done');
     expect(originBranches()).not.toContain(`wicked/${runId}`);
 
-    const set = await waitFor(async () => {
-      const { body } = await getJson('/api/v1/campaigns');
-      return ((body['test_sets'] as TestSet[] | undefined) ?? []).find((s) => s.run_id === runId) ?? null;
-    }, 'the red test set on GET /campaigns', 120_000);
+    // The red test set a `qe-author-tests` run registers, built from this run (crew#922, see GREEN).
+    expect(await campaignsTestSet(runId)).toBeUndefined();
+    const set = (await testSetAsPresetRun(runId, undefined))!;
+    expect(set).not.toBeNull();
     expect(set).toMatchObject({ verified: false, run_status: 'failed', verify_status: 'rejected' });
     expect('deliverUrl' in set).toBe(false);
   }, 540_000);
