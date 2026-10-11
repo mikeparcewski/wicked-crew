@@ -10333,3 +10333,48 @@ export interface ProductComposeResponse {
   /** How many requirements the draft was handed. */
   requirements: number;
 }
+
+// ── learn schedules (DES-learn-workflow §5) ────────────────────────────────────────────────────
+
+/** A learn schedule's last outcome: `launched` while its run is open; `refused` = the launch failed. */
+export type LearnScheduleOutcome = 'launched' | 'refused' | 'completed' | 'failed' | 'cancelled';
+
+/** One learned topic's refresh schedule (`GET /learn/schedules`). `id` = `<repoRef>:<slug>`. */
+export interface LearnSchedule {
+  id: string;
+  repoRef: string;
+  /** The topic's directory under `.wicked/knowledge/`. */
+  slug: string;
+  /** The topic in plain words (the refresh run's intent names it). */
+  topic: string;
+  projectId?: string;
+  /** Interval, 24..2160 hours. */
+  everyHours: number;
+  enabled: boolean;
+  /** ISO-8601. Missed intervals coalesce into one launch. */
+  nextDueAt: string;
+  lastRunId: string | null;
+  lastRunAt: string | null;
+  lastOutcome: LearnScheduleOutcome | null;
+  /** Consecutive refused launches (backoff = min(2^failures, 24) h). */
+  failures: number;
+  lastError: string | null;
+  /** The git tree id of `.wicked/knowledge/<slug>` last indexed into estate (null = never). */
+  indexedTree: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface LearnSchedulesResponse {
+  schedules: LearnSchedule[];
+}
+
+/** `PUT /learn/schedules/:id` (`:id` must equal `<repoRef>:<slug>`). */
+export interface LearnSchedulePutBody {
+  repoRef: string;
+  slug: string;
+  topic: string;
+  everyHours: number;
+  enabled?: boolean;
+  projectId?: string;
+}

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.108.0",
+  "apiTypesVersion": "0.109.0",
   "endpoints": [
     {
       "method": "GET",
@@ -522,6 +522,49 @@
       "responseType": "InteractiveDocsListing",
       "statusCodes": [
         200
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/learn/schedules",
+      "requestType": null,
+      "responseType": "LearnSchedulesResponse",
+      "statusCodes": [
+        200
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/learn/schedules/:id",
+      "requestType": null,
+      "responseType": "void",
+      "statusCodes": [
+        204,
+        403,
+        404
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/learn/schedules/:id",
+      "requestType": "LearnSchedulePutBody",
+      "responseType": "LearnSchedule",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/learn/schedules/:id/run-now",
+      "requestType": null,
+      "responseType": "LearnSchedule",
+      "statusCodes": [
+        200,
+        403,
+        404
       ]
     },
     {
