@@ -4260,6 +4260,10 @@ export function registerRoutes(
       // All five positionals, explicit `undefined` for the absent ones (DES-L1 PR-2; the
       // gate-arms tripwire pins the arity). An engine refusal (no creator to send back to,
       // an engine older than the arm) surfaces as the existing 409 below.
+      // (operator ruling 2026-10-11) WHO answered: the adapter hands it to the engine with this
+      // confirm, which records it as the judge when this approve answers a `judge_unavailable`
+      // gate ("judged by operator").
+      adapter.recordGateActor?.(id, `${actor.id} (${actor.kind})`);
       const status = await adapter.confirmGate(
         id,
         parsed.data.approve,
@@ -4267,9 +4271,6 @@ export function registerRoutes(
         parsed.data.action,
         parsed.data.amendScope,
         parsed.data.plan !== undefined ? toLaunchPlan(parsed.data.plan) : undefined,
-        // (operator ruling 2026-10-11) WHO answered: recorded by the engine as the judge when this
-        // approve answers a `judge_unavailable` gate ("judged by operator").
-        `${actor.id} (${actor.kind})`,
       );
       // WHO approved/rejected — the gate-decision audit (task #88). The engine
       // records THAT the gate resolved (interaction_requests / gateDecided);

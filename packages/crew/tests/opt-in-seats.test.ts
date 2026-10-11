@@ -9,6 +9,13 @@ describe('opt-in seats', () => {
   it('the default launch roster leaves every opencode instance out', () => {
     expect(defaultLaunchRoster(roster).map((s) => s.key)).toEqual(['claude', 'pi']);
   });
+  it('…unless it is the only seat the engine could convene (never a default launch with no seat)', () => {
+    const onlyOpencodeUsable = [
+      { key: 'claude', council_eligible: false, council_ineligible_reason: 'signed out' },
+      { key: 'opencode' },
+    ];
+    expect(defaultLaunchRoster(onlyOpencodeUsable).map((s) => s.key)).toEqual(['claude', 'opencode']);
+  });
   it('GET /roster marks it opt-in with the one-line note; other seats unchanged', () => {
     const marked = markOptIn(roster);
     expect(marked[1]).toEqual({ key: 'opencode', optIn: true, optInNote: OPT_IN_NOTE });
