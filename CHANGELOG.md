@@ -10,6 +10,15 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.9.10] — 2026-10-11
+
+The operator can be the judge, and opencode is opt-in (operator rulings 19:00Z). The engine pin moves to **`wicked-core-ts` `^0.9.7`**; this release bundles **wicked-studio 0.7.9** and ships **`wicked-crew-api-types` 0.110.0**. Pair it with **wicked-garden 12.53.3** and **wicked-estate 0.29.2**.
+
+- **Added (#980, with wicked-core#907):** an operator approve at a `judge_unavailable` gate is the judgment and is recorded with who answered (`operator:<actor>` on the receipt); the PR body says "judged by operator".
+- **Changed (#980):** opencode is opt-in: not in the default launch roster unless it is the only seat the engine could convene; `GET /roster` marks it `optIn`.
+- **Release smoke (#979):** pinned to wicked-ci 027da7e.
+- **deps:** `wicked-core-ts` `^0.9.7` (#907); `wicked-studio` `^0.7.9` (opencode opt-in in the launch wizard, #721); api-types 0.110.0.
+
 ## [0.9.9] — 2026-10-11
 
 A patch on 0.9.8: the learn walkthrough's "Ask a follow-up" works on the released stack, and the studio patch (launch wizard, Settings page, plain words). The engine pin moves to **`wicked-core-ts` `^0.9.6`**; this release bundles **wicked-studio 0.7.8**. Pair it with **wicked-garden 12.53.3** and **wicked-estate 0.29.2** on the seats.
@@ -3928,7 +3937,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.9...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.10...HEAD
+[0.9.10]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.9...v0.9.10
 [0.9.9]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.8...v0.9.9
 [0.9.8]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.7...v0.9.8
 [0.9.7]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.6...v0.9.7
