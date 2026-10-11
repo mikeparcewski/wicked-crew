@@ -62,7 +62,7 @@ import type {
   ReadSubject,
   RunLinkage,
 } from './ledger.js';
-import { describeAttribution, readAcceptanceState, summarizeManifest } from './ledger.js';
+import { describeAttribution, readLedgerAcceptanceState, runQeLedgerRoot, summarizeManifest } from './ledger.js';
 import type { RunConformance } from './conformance.js';
 import { resolveConformance, type EnforcementContext } from './conformance.js';
 import type { RunAcceptanceSummary, RunAcceptanceWalkthrough, WalkthroughStepState } from 'wicked-crew-api-types';
@@ -548,6 +548,11 @@ export function runWindowFromEvents(
 export async function buildAcceptanceView(opts: {
   runId: string;
   repo: RepoEntry | null;
+  /**
+   * The run's evidence root (`session.evidence_root`), when it has one: its QE ledger is then
+   * `<evidence root>/.wicked-qe` and nothing else ({@link runQeLedgerRoot}, crew#951).
+   */
+  evidenceRoot?: string | null;
   /** What the run must prove ({@link acceptanceRequirementOf}). */
   requirement: AcceptanceRequirement;
   qeRunId?: string;
@@ -600,7 +605,9 @@ export async function buildAcceptanceView(opts: {
       ? { qeRunId: opts.qeRunId }
       : { run: runWindowFromEvents(eventRows, opts.runId, eventsError) };
 
-  const state = opts.repo !== null ? await readAcceptanceState(opts.repo.root_path, subject) : null;
+  // The run's ONE ledger (crew#951): its evidence root's when it has one, else its repo's.
+  const ledgerRoot = runQeLedgerRoot({ evidence_root: opts.evidenceRoot ?? null }, opts.repo?.root_path ?? null);
+  const state = ledgerRoot !== null ? await readLedgerAcceptanceState(ledgerRoot, subject) : null;
   // Deny-dominates across the repo ledger too: on a run whose requirement is walkthroughs only, a
   // verdict the repo ledger DOES attribute to this run still counts — a FAIL there denies.
   // An unreadable repo ledger counts too: it cannot say whether it attributes a denial (Copilot on #759).

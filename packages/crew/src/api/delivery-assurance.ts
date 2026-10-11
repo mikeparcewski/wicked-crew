@@ -143,8 +143,8 @@ export function qeAcceptanceRefusal(
     error:
       `run ${runId} requires QE acceptance (qe_acceptance) and its delivery is refused: ${check.reason}. ` +
       (where === 'gate'
-        ? 'Nothing was pushed and the deliver gate stays open — record a PASS attributed to this run (garden qe accept), then approve again.'
-        : 'Nothing was pushed — record a PASS attributed to this run (garden qe accept), then deliver again.'),
+        ? 'Nothing was pushed and the deliver gate stays open — record a PASS attributed to this run in its QE ledger (garden qe accept), then approve again.'
+        : 'Nothing was pushed — record a PASS attributed to this run in its QE ledger (garden qe accept), then deliver again.'),
     acceptance: check,
     assurance,
   };

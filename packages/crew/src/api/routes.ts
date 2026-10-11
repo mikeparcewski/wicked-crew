@@ -4057,9 +4057,12 @@ export function registerRoutes(
       repo = repos.find((r) => r.id === run.session.repo_ref) ?? null;
     }
 
+    const evidenceRoot = (run.session as { evidence_root?: unknown }).evidence_root;
     return buildAcceptanceView({
       runId: id,
       repo,
+      // crew#951: a run with an evidence root keeps its QE ledger there (where its QE unit records).
+      evidenceRoot: typeof evidenceRoot === 'string' ? evidenceRoot : null,
       requirement,
       ...(opts.qeRunId !== undefined ? { qeRunId: opts.qeRunId } : {}),
       // AW-14 (arch-R13a + R16): the conformance section reads the same wires the standalone

@@ -275,8 +275,8 @@ describe('makeDiscoverySource — the project view the registry hands to the che
       },
       workOutput: async (unitId) => (unitId === 'r1:u3' ? SEAL('FAIL') : null),
       repos: async () => [{ id: 'repo-1', name: 'repo', root_path: '/nowhere', default_branch: 'main', registered_at: 0 } as RepoEntry],
-      testVerdict: async (repoRoot, runId) => {
-        verdicts.push(`${repoRoot}:${runId}`);
+      testVerdict: async (ledgerRoot, runId) => {
+        verdicts.push(`${ledgerRoot}:${runId}`);
         return runId === 'r1' ? 'PASS' : null;
       },
       now: () => NOW,
@@ -290,7 +290,8 @@ describe('makeDiscoverySource — the project view the registry hands to the che
     expect(first.runs[0]).toEqual({ run_id: 'r1', kind: 'feature', launched_at: NOW - 5 * DAY, human_added: ['walkthrough_plan', 'walkthrough_review'], walkthrough: 'FAIL', test: 'PASS' });
     expect(first.runs[1]).toEqual({ run_id: 'r3', kind: 'feature', launched_at: NOW - 5 * DAY, human_added: [], walkthrough: null, test: null, unknown: true });
     expect(first.runs[2]).toEqual({ run_id: 'r2', kind: 'feature', launched_at: NOW - 1 * DAY, human_added: [], walkthrough: null, test: null });
-    expect(verdicts).toEqual(['/nowhere:r1', '/nowhere:r2']); // only runs with a test step and a repo are read
+    // only runs with a test step and a repo are read — from the run's QE ledger (crew#951: the repo's, as these runs carry no evidence root)
+    expect(verdicts).toEqual([`${join('/nowhere', '.wicked-qe')}:r1`, `${join('/nowhere', '.wicked-qe')}:r2`]);
     // Terminal runs are cached; the live one is re-read; the unreadable one is retried.
     reads.length = 0;
     const second = await source('proj-1');

@@ -86,6 +86,24 @@ export function qeLedgerRoot(repoRoot: string): string {
 }
 
 /**
+ * The QE ledger ONE crew run's verdicts live in (crew#951) — the ONE rule every per-run read uses.
+ *
+ * A run with an EVIDENCE ROOT (every repo-bound launch mints one, `CoreAdapter.launchRun`, outside
+ * every worktree and state home) keeps its QE ledger there: `<evidence root>/.wicked-qe`. The engine
+ * hands that path to the run's QE unit as `WICKED_QE_LEDGER_DIR` and admits it in that unit's
+ * read-only write boundary, so garden's `qe accept` records the verdict where this reads it — never
+ * in the worktree, whose guard discarded the verdict (with its PASS) when it landed there. Exactly
+ * that path: neither crew's own `WICKED_QE_LEDGER_DIR` nor the repo's ledger speaks for such a run.
+ * A run without an evidence root (a caller-chosen id, an older addon) reads its repo's ledger
+ * ({@link qeLedgerRoot}); no repo and no evidence root ⇒ no ledger (`null`).
+ */
+export function runQeLedgerRoot(session: { evidence_root?: unknown }, repoRoot: string | null): string | null {
+  const evidence = session.evidence_root;
+  if (typeof evidence === 'string' && evidence.trim() !== '') return join(evidence, DEFAULT_QE_LEDGER_DIRNAME);
+  return repoRoot !== null ? qeLedgerRoot(repoRoot) : null;
+}
+
+/**
  * The crew run a ledger read is FOR — what a verdict has to be tied to before
  * it is served as that run's acceptance evidence.
  */
@@ -434,7 +452,17 @@ export async function readAcceptanceState(
   repoRoot: string,
   subject: ReadSubject,
 ): Promise<QeAcceptanceState> {
-  const root = qeLedgerRoot(repoRoot);
+  return readLedgerAcceptanceState(qeLedgerRoot(repoRoot), subject);
+}
+
+/**
+ * {@link readAcceptanceState} over an already-resolved LEDGER ROOT — what a per-run read passes
+ * ({@link runQeLedgerRoot}). Read-only, canonical JSON only.
+ */
+export async function readLedgerAcceptanceState(
+  root: string,
+  subject: ReadSubject,
+): Promise<QeAcceptanceState> {
   const state: QeAcceptanceState = {
     root,
     found: false,
@@ -539,7 +567,9 @@ export function readStampedVerdicts(
   runId: string,
   stepId: string,
 ): { found: boolean; rows: StampedLedgerVerdict[]; error?: string } {
-  const root = qeLedgerRoot(proofRoot);
+  // Exactly `<proofRoot>/.wicked-qe`, where the recorder writes it: crew's own WICKED_QE_LEDGER_DIR
+  // pins the repo ledger, never a proof root's (codex r1 on crew#951).
+  const root = join(proofRoot, DEFAULT_QE_LEDGER_DIRNAME);
   if (!existsSync(root)) return { found: false, rows: [] };
   try {
     const rows: StampedLedgerVerdict[] = [];

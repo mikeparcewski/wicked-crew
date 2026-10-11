@@ -23,7 +23,7 @@
 import type { RecordedEvent, RepoEntry, SessionView } from 'wicked-crew-api-types';
 import { readBus, type BusEvent } from '../core/bus.js';
 import { runWindowFromEvents } from '../qe/acceptance.js';
-import { readAcceptanceState } from '../qe/ledger.js';
+import { readLedgerAcceptanceState, runQeLedgerRoot } from '../qe/ledger.js';
 import { parseSeal } from '../qe/walkthrough-acceptance.js';
 import type { DiscoveryRun, DiscoverySnapshot } from '../watch/types.js';
 import { coreUnitId } from './evidence.js';
@@ -96,14 +96,14 @@ export interface DiscoverySourceDeps {
   runEvents(runId: string): Promise<RecordedEvent[] | null>;
   workOutput(unitId: string): Promise<string | null>;
   repos(): Promise<RepoEntry[]>;
-  /** The run's attributed QE verdict (the acceptance gate's ledger read); injectable for tests. */
-  testVerdict?(repoRoot: string, runId: string, events: RecordedEvent[]): Promise<string | null>;
+  /** The run's attributed QE verdict (the acceptance gate's ledger read) from the run's QE LEDGER root; injectable for tests. */
+  testVerdict?(ledgerRoot: string, runId: string, events: RecordedEvent[]): Promise<string | null>;
   now?(): number;
 }
 
-/** The verdict `GET /runs/:id/acceptance` would attribute to the run from the repo's QE ledger. */
-export async function attributedTestVerdict(repoRoot: string, runId: string, events: RecordedEvent[]): Promise<string | null> {
-  const state = await readAcceptanceState(repoRoot, { run: runWindowFromEvents(events, runId) });
+/** The verdict `GET /runs/:id/acceptance` would attribute to the run from its QE ledger ({@link runQeLedgerRoot}). */
+export async function attributedTestVerdict(ledgerRoot: string, runId: string, events: RecordedEvent[]): Promise<string | null> {
+  const state = await readLedgerAcceptanceState(ledgerRoot, { run: runWindowFromEvents(events, runId) });
   return state.verdict?.verdict ?? null;
 }
 
@@ -165,9 +165,15 @@ export function makeDiscoverySource(deps: DiscoverySourceDeps): (projectId: stri
       }
       let test: string | null = null;
       if (v.session.repo_ref !== null && units.some((u) => u.catalog === TEST_CATALOG)) {
-        repos ??= await deps.repos().catch(() => []);
-        const repo = repos.find((r) => r.id === v.session.repo_ref);
-        if (repo !== undefined) test = await testVerdict(repo.root_path, id, events).catch(() => null);
+        // The run's QE ledger (crew#951): its evidence root's, needing no repo lookup; else its repo's.
+        const evidence = (v.session as { evidence_root?: unknown }).evidence_root;
+        let repoRoot: string | null = null;
+        if (typeof evidence !== 'string' || evidence.trim() === '') {
+          repos ??= await deps.repos().catch(() => []);
+          repoRoot = repos.find((r) => r.id === v.session.repo_ref)?.root_path ?? null;
+        }
+        const ledgerRoot = runQeLedgerRoot({ evidence_root: evidence }, repoRoot);
+        if (ledgerRoot !== null) test = await testVerdict(ledgerRoot, id, events).catch(() => null);
       }
       let firstTs = Number.POSITIVE_INFINITY;
       for (const e of events) if (typeof e.ts === 'number' && Number.isFinite(e.ts) && e.ts < firstTs) firstTs = e.ts;
