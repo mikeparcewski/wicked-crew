@@ -10,6 +10,33 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.9.5] — 2026-10-11
+
+QE acceptance no longer strands governed app-change runs at deliver, and editor packs install with a conformance check. The engine pin moves to **`wicked-core-ts` `^0.8.5`**. This release bundles **wicked-studio 0.7.4** and ships **`wicked-crew-api-types` 0.108.0**.
+
+- **Fixed (#958, crew#951, with wicked-core#878 in core-ts 0.8.5):** a governed run's QE acceptance verdict now lives in the run's own QE ledger, `<evidence root>/.wicked-qe`, and delivery reads exactly that ledger.
+  - The engine hands the run's QE unit `WICKED_QE_LEDGER_DIR`, admitted in its read-only boundary. garden's `qe accept` (wicked-garden 12.49.0, wicked-ledger 0.6.0) records there.
+  - Before, the verdict went into the worktree, the worktree guard discarded it, and deliver refused with "no QE ledger". The 0.9.4 workaround (an explicit QE skip with a reason) is no longer needed.
+  - For such a run, neither the repo's ledger nor crew's own `WICKED_QE_LEDGER_DIR` speaks; a run without an evidence root reads its repo ledger as before.
+  - A walkthrough proof root's ledger is read exactly at `<proof root>/.wicked-qe`.
+- **Editor plugin installs (#952, X3):** `POST /api/v1/editors {packRoot, enabled?}` installs an editor-only pack's editors after garden's `pack check` and crew's own install-time conformance run (headless Chromium against this daemon's conformance host page).
+  - A failure, or a run that cannot happen, installs nothing.
+  - Installed editors are recorded in `daemon-editors.json`, re-checked at their pinned hash at boot and on every serve, and listed in `GET /editors` with `source: "pack"`.
+  - `DELETE /editors/:id` removes one.
+  - api-types 0.108.0: `EditorView.source` `'pack'`, `InstallEditorResponse`, `EditorConformanceSummary`.
+- **Built-in workflows come from the engine's presets (#948, X-MIG M11 crew A):** no hand-written mirrors.
+  - A built-in preset wins its name, and a def can no longer be registered over one.
+  - Campaign tool nodes are saved as system presets.
+  - `bug` and `mcp-server` launches require QE acceptance before an unattended delivery.
+- **Fixed (#954, studio X1):** a delivered PR's run link opens the run's session in studio (`/s/run%3A<id>`), not the retired `/runs/<id>` address.
+- **Release smoke (#959):** pinned to wicked-ci #46 (S04 knows the preset-era `bug` plan and the argv-less ACP shim rows).
+- **Tests (#957):** crew's suite no longer reads wicked-core's retired `workflows/` directory; the core-skill guard pins the engine's built-in preset refs.
+- **deps:**
+  - `wicked-core-ts` `^0.8.5`: 0.8.4 carries wicked-core#872 (the `editor-plugin` preset) and #876 (a benched judge seat stays benched, the 0.9.4 known issue); 0.8.5 carries #878.
+  - `wicked-studio` `^0.7.4`: #677, the builder saves presets; #678, an archived run opens its record.
+  - `wicked-ledger` `^0.6.0`.
+
+
 ## [0.9.4] — 2026-10-10
 
 Run reads no longer stall the daemon on a long-lived home, and a diff over a worktree that vanished while git ran serves the run branch. The engine pin moves to **`wicked-core-ts` `^0.8.3`**. This release still bundles **wicked-studio 0.7.3** (no studio release since) and ships no new `wicked-crew-api-types` (0.107.0 stands).
@@ -3846,7 +3873,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.4...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.5...HEAD
+[0.9.5]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.1...v0.9.2
