@@ -116,7 +116,7 @@ describe('/learn/schedules', () => {
     expect(list.json().schedules).toHaveLength(1);
     const now = await a.inject({ method: 'POST', url: '/api/v1/learn/schedules/r1:sqlite-wal/run-now' });
     expect(now.json().nextDueAt).toBe(T0.toISOString());
-    expect((await a.inject({ method: 'DELETE', url: '/api/v1/learn/schedules/r1:sqlite-wal' })).statusCode).toBe(204);
+    expect((await a.inject({ method: 'DELETE', url: '/api/v1/learn/schedules/r1:sqlite-wal' })).json()).toEqual({ deleted: true, id: 'r1:sqlite-wal' });
     expect((await a.inject({ method: 'DELETE', url: '/api/v1/learn/schedules/r1:sqlite-wal' })).statusCode).toBe(404);
   });
 

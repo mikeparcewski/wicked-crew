@@ -94,14 +94,14 @@ export function registerLearnRoutes(app: FastifyInstance, deps: LearnRouteDeps):
 
   app.delete(
     `${V}/learn/schedules/:id`,
-    { config: { manifest: { responseType: 'void', statusCodes: [204, 403, 404] } } },
+    { config: { manifest: { responseType: '{ deleted: true; id: string }', statusCodes: [200, 403, 404] } } },
     async (req, reply) => {
       const actor = actorOf(req);
       if (!isHumanOperator(actor)) return refuse(reply);
       const { id } = req.params as { id: string };
       if (!deps.store.delete(id)) return reply.code(404).send({ error: `no learn schedule ${id}` });
       deps.audit.record('learn.schedule.deleted', actor, { detail: { id } });
-      return reply.code(204).send();
+      return { deleted: true as const, id };
     },
   );
 

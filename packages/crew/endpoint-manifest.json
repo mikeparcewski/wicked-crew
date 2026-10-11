@@ -537,9 +537,9 @@
       "method": "DELETE",
       "path": "/api/v1/learn/schedules/:id",
       "requestType": null,
-      "responseType": "void",
+      "responseType": "{ deleted: true; id: string }",
       "statusCodes": [
-        204,
+        200,
         403,
         404
       ]
