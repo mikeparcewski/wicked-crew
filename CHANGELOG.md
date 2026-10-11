@@ -10,6 +10,22 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.9.6] — 2026-10-11
+
+Learn schedules, council size and spawn stagger, and the project and repo blast radius read every page of estate's answer. The engine pin moves to **`wicked-core-ts` `^0.9.3`**. This release bundles **wicked-studio 0.7.5** and ships **`wicked-crew-api-types` 0.109.0**. **Pair it with wicked-garden ≥ 12.52.0** (12.52.1 recommended): the learn tick passes `index.py --ref`, which older gardens refuse.
+
+- **Added (#963):** learn schedules: `/api/v1/learn/schedules` plus a minute tick that indexes merged learned knowledge and launches one due `learn` refresh at a time (with wicked-core#886's `learn` preset in core-ts 0.9.3).
+- **Fixed (#966):** learn indexing reads the merged default branch, not the checkout.
+- **Added (#964):** `SystemSettings.councilSize` (1..9, default 3) and `councilSpawnStaggerMs` (0..30000, default 3000), exported to the engine as `WICKED_COUNCIL_SIZE` / `WICKED_COUNCIL_SPAWN_STAGGER_MS` (wicked-core#888). The delivery receipt keeps `councils`.
+- **Fixed (#965):** the project and repo blast radius read every page of estate's answer (`next_cursor`), not only the first, so wide symbols list all their dependents; `truncated_dependents` stays surfaced.
+- **Tests (#962, crew#922):** the GREEN and RED test-authoring e2e cases run again, under a named stand-in.
+- **api-types 0.109.0:** `LearnSchedule`, `LearnTopic` and the `/learn/*` routes; `TeamDispute.seed`, `council.ruled` `seats`/`seed`/`eligible`, `AssuranceReceipt.councils`.
+- **deps:**
+  - `wicked-core-ts` `^0.9.3`:
+    - 0.9.2 carries wicked-core#889 (the QE unit runs garden's pipeline into its own roots, crew#951 on fenced seats), #888 (council size, seeded draw, stagger) and #884 (wicked-estate 0.28.0, paging);
+    - 0.9.3 carries #886 (the `learn` preset) and wicked-estate 0.29.1 (#890: `--readonly` creates no store, crew#931).
+  - `wicked-studio` `^0.7.5`: the phone shell and UI primitives, the left nav and Health page, the Learn page, editor plugins in Settings, Council size, X1.
+
 ## [0.9.5] — 2026-10-11
 
 QE acceptance no longer strands governed app-change runs at deliver, editor packs install with a conformance check, and the workflow overlay is retired. The engine pin moves to **`wicked-core-ts` `^0.9.1`**. This release bundles **wicked-studio 0.7.4** and ships **`wicked-crew-api-types` 0.108.0**.
@@ -3878,7 +3894,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.5...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.6...HEAD
+[0.9.6]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.5...v0.9.6
 [0.9.5]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.2...v0.9.3
