@@ -10,6 +10,15 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.9.9] — 2026-10-11
+
+A patch on 0.9.8: the learn walkthrough's "Ask a follow-up" works on the released stack, and the studio patch (launch wizard, Settings page, plain words). The engine pin moves to **`wicked-core-ts` `^0.9.6`**; this release bundles **wicked-studio 0.7.8**. Pair it with **wicked-garden 12.53.3** and **wicked-estate 0.29.2** on the seats.
+
+- **Fixed (wicked-core#904, in core-ts 0.9.6):** the gate pre-check accepts "Ask a follow-up" on a conversational step of a floor-filled plan, so the learn walkthrough loop works (live: run b9ada134).
+- **deps:**
+  - `wicked-core-ts` `^0.9.6`: #904.
+  - `wicked-studio` `^0.7.8`: the launch wizard from every start point (#719), a Settings page and smaller Workspace links with Health last (#717), and plain words for checks that didn't run with paths behind "Where it is" (#718).
+
 ## [0.9.8] — 2026-10-11
 
 The train's final crew. Evaluators never run on a seat that built the work, a build that changed nothing cannot pass, and a judge that cannot render a verdict no longer cancels a run. The engine pin moves to **`wicked-core-ts` `^0.9.5`**. This release bundles **wicked-studio 0.7.7**. Pair it with **wicked-garden 12.53.1** and **wicked-estate 0.29.2** on the seats.
@@ -3919,7 +3928,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.8...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.9...HEAD
+[0.9.9]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.8...v0.9.9
 [0.9.8]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.7...v0.9.8
 [0.9.7]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.6...v0.9.7
 [0.9.6]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.5...v0.9.6
