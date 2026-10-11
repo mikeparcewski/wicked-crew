@@ -27,6 +27,8 @@ export const STATE_HOME_ENTRY_NAMES: ReadonlyArray<string> = [
   'project-graphs',
   'repo-graphs',
   'project-settings.json',
+  // DES-learn-workflow §5: the learn schedules — `src/learn/schedule-store.ts`.
+  'learn-schedules.json',
   'interactive-chat-ledger.json',
   'interactive-chats',
   'interactive-demo-ledger.json',

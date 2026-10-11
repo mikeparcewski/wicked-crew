@@ -21,6 +21,9 @@ import { RetryIndex } from './retry-index.js';
 import { GroupIndex } from './group-index.js';
 import { RunTimingIndex, recordRunLaunched } from './run-timing-index.js';
 import { OnboardingCaptureChain } from './onboarding-capture.js';
+import { registerLearnRoutes } from '../learn/routes.js';
+import { LearnScheduler } from '../learn/scheduler.js';
+import { LearnScheduleStore } from '../learn/schedule-store.js';
 import { GuidanceIndex } from './guidance-index.js';
 import { ChatScopeIndex, reapStaleChatNamespaces } from './chat-scope.js';
 import {
@@ -383,6 +386,12 @@ export interface CreateServerOptions {
    * under a test runner (VITEST / NODE_ENV=test), the seat-health-probe posture — the
    * terminal-frame warm is always on (event-driven, not a timer).
    */
+  /** DES-learn-workflow §5.3: the learn schedule's tick. ON in the daemon, OFF under a test runner
+   *  (the deliveryCache posture); tests drive `LearnScheduler.sweep()` directly. */
+  learnSchedule?: {
+    enabled?: boolean;
+    sweepIntervalMs?: number;
+  };
   deliveryCache?: {
     enabled?: boolean;
     /** Sweep cadence, ms (tests shorten it). */
@@ -1163,6 +1172,33 @@ export async function createServer(
     },
     broadcast: (frame) => broadcast(frame),
     log: (m) => app.log.info(m),
+  });
+
+  // DES-learn-workflow §5: the learn schedule — a durable record per learned topic plus a minute
+  // tick that indexes merged knowledge and launches at most one due `learn` refresh at a time.
+  const learnSchedules = new LearnScheduleStore();
+  registerLearnRoutes(app, { store: learnSchedules, adapter, audit });
+  const learnScheduler = new LearnScheduler({
+    store: learnSchedules,
+    adapter,
+    audit,
+    runTimingIndex,
+    fileRun: (runId, projectId) => {
+      membershipIndex.set(runId, projectId);
+      projectBus?.emit(
+        MEMBERSHIP_ATTACHED,
+        { project_id: projectId, member: { kind: 'crew.run', ref: runId }, actor: 'learn-schedule' },
+        membershipAttachedKey(projectId, 'crew.run', runId, Date.now()),
+      );
+    },
+    broadcast: (frame) => broadcast(frame),
+    log: (m) => app.log.info(m),
+  });
+  if (options?.learnSchedule?.enabled ?? !(process.env['VITEST'] !== undefined || process.env['NODE_ENV'] === 'test')) {
+    learnScheduler.start(options?.learnSchedule?.sweepIntervalMs);
+  }
+  app.addHook('onClose', async () => {
+    learnScheduler.stop();
   });
 
   /** The docs root a project's interactive docs live under — the SAME per-project resolution
