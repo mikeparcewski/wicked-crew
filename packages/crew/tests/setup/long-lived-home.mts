@@ -50,7 +50,7 @@ async function seed(base: string): Promise<void> {
   const repos = (await inject('GET', '/repos')).body['repos'] as Array<{ id: string; name: string }>;
   const repoRef = repos.find((r) => r.name === 'long-lived-ws')!.id;
   // X-MIG M11: POST /workflows is retired (410); the scenario def is a runtime def, as the seams register.
-  await adapter.registerWorkflow(def as unknown as Parameters<CoreAdapter['registerWorkflow']>[0]);
+  await adapter.registerWorkflow(def as unknown as Parameters<typeof adapter.registerWorkflow>[0]);
   const seats = JSON.stringify([{ key: 'alpha', display_name: 'Alpha', binary: 'alpha', headless_invocation: 'alpha {PROMPT}' }]);
   for (const humanConfirm of ['none', 'all']) {
     const launch = await inject('POST', '/runs', { problem: `template (${humanConfirm})`, clisJson: seats, workflow: def.id, repoRef, humanConfirm });
