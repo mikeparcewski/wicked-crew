@@ -67,6 +67,7 @@ import {
 const TERMINAL_RUN_STATUSES: ReadonlySet<string> = new Set(['completed', 'cancelled', 'failed']);
 import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
 import { applyGovernanceStoreEnv, isStoreSpec, type GovernanceStoreLocation } from './governance-store.js';
+import { isCouncilSize, isCouncilStaggerMs } from './council-settings.js';
 
 
 
@@ -3351,6 +3352,12 @@ export class CoreAdapter {
       // worker_config_root (seat sign-in): absolute path or "" (= engine default). A hand-edited
       // relative path is dropped rather than exported as WICKED_WORKER_HOME, where the engine
       // would resolve it against an arbitrary spawn cwd.
+      // councilSize / councilSpawnStaggerMs (wicked-core#888): the same bounds PUT /settings
+      // enforces; a hand-edited invalid value falls back to the engine default.
+      if ('councilSize' in parsed && !isCouncilSize(parsed.councilSize)) delete parsed.councilSize;
+      if ('councilSpawnStaggerMs' in parsed && !isCouncilStaggerMs(parsed.councilSpawnStaggerMs)) {
+        delete parsed.councilSpawnStaggerMs;
+      }
       if ('worker_config_root' in parsed) {
         const r = parsed.worker_config_root;
         if (typeof r !== 'string' || (r !== '' && !isAbsolute(r))) delete parsed.worker_config_root;

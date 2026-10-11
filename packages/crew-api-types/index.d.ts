@@ -2038,6 +2038,10 @@ export interface AssuranceReceipt {
    *  run does not require QE acceptance (or on an older engine). A waived or skipped one is also a
    *  `skipped[]` entry (reason `qe_waived_by_score` | `qe_skipped_by_operator`). */
   qe?: QeAcceptanceDecision;
+  /** (api-types 0.109.0, core#888) The councils this decision's disputes convened, each with WHO
+   *  decided (`seats`) and the draw's `seed`. ABSENT when none was convened (the routine case) or on
+   *  an older engine. A delivery receipt lists every council of the run. */
+  councils?: TeamDispute[];
 }
 
 /**
@@ -5110,6 +5114,21 @@ export interface SystemSettings {
    * the engine default `~/.wicked-worker`.
    */
   worker_config_root?: string;
+  /**
+   * (api-types 0.109.0, operator ruling 2026-10-11) How many seats a council convenes — councils
+   * sit only on concrete decisions (a team dispute). Integer 1..9, default 3; the seats are drawn
+   * AT RANDOM from the run's eligible seats (not benched, not a party to the dispute), distinct
+   * model families first, and the draw's seats + seed ride the gate's receipt
+   * (`AssuranceReceipt.councils`). The daemon exports it as `WICKED_COUNCIL_SIZE` at boot and on
+   * every change; the engine reads it per council. Absent = the default.
+   */
+  councilSize?: number;
+  /**
+   * (api-types 0.109.0) Milliseconds between two council seat spawns of one ballot, so a council
+   * never forks every heavy CLI at once. Integer 0..30000, default 3000 (`0` = all at once).
+   * Exported as `WICKED_COUNCIL_SPAWN_STAGGER_MS`, read per council. Absent = the default.
+   */
+  councilSpawnStaggerMs?: number;
   /*
    * There is NO skills setting (skills keystone, api-types 0.28.0). The daemon-owned skills root is
    * `<state home>/skills` — the directory holding `manifest.json`, `baseline/<hash>/`, `effective/`,
@@ -8433,7 +8452,27 @@ export type TeamCouncilRuledPayload = TeamEnvelope & {
   dissent: string[];
   returned: number;
   seated: number;
+  /** (api-types 0.109.0, core#888) The seats drawn onto the council, the draw's seed, and the
+   *  eligible seats it was drawn from. ABSENT when nothing was convened or on an older engine. */
+  seats?: string[];
+  seed?: number;
+  eligible?: string[];
 };
+
+/**
+ * A one-off council's verdict on a dispute (DES-001 §6.3). (api-types 0.109.0, core#888) `seats`
+ * names WHO decided — the seats drawn onto the council (empty when none was convened, or on an
+ * older engine) — and `seed` is the random draw's seed: re-drawing with it seats the same council.
+ * `seed` is ABSENT when no council was drawn or on an older engine.
+ */
+export interface TeamDispute {
+  verdict: 'yes' | 'no' | 'no_verdict' | (string & {});
+  agreementPct: number | null;
+  dissent: number | null;
+  seats: string[];
+  seed?: number;
+  reason: string | null;
+}
 
 /** DES-001 §7 `teamLedger.findings[]` (camelCase). */
 export interface TeamLedgerFinding {
@@ -8454,13 +8493,7 @@ export interface TeamLedgerFinding {
   status: 'accepted' | 'declined' | 'withdrawn' | 'unanswered' | 'superseded' | (string & {});
   workerReason: string | null;
   monitorReply: { kind: 'hold' | 'withdraw' | (string & {}); reason: string } | null;
-  dispute: {
-    verdict: 'yes' | 'no' | 'no_verdict' | (string & {});
-    agreementPct: number | null;
-    dissent: number | null;
-    seats: string[];
-    reason: string | null;
-  } | null;
+  dispute: TeamDispute | null;
   /**
    * (T6, api-types 0.42.0) The enclosing location the finding id is minted over (git's funcname
    * heuristic). Omitted when file-level.
