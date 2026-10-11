@@ -74,10 +74,9 @@ export const CORE_REF_MARKER = 'wicked-core-ref:';
  * half-deleted checkout satisfies the first and fails the second at the point of use, with a
  * `readFileSync` stack trace instead of a diagnosis.
  */
-const REQUIRED_ARTIFACTS: readonly string[] = [
-  join('workflows', 'domain-extraction.json'),
-  join('crates', 'wicked-core-ts', 'package.json'),
-];
+// X-MIG M11: core's `workflows/` drop-ins are retired (wicked-core deletes the directory), and no
+// guard reads them any more — the core-ts manifest is what the remaining guards read.
+const REQUIRED_ARTIFACTS: readonly string[] = [join('crates', 'wicked-core-ts', 'package.json')];
 
 /**
  * Where core may be.

@@ -50,10 +50,7 @@ const URL = process.env['WICKED_CORE_URL'] ?? 'https://github.com/mikeparcewski/
 
 /** The same list `tests/support/core-checkout.ts` requires — a clone that exits 0 without these is
  *  not a success, it is a layout change wearing a success's clothes. */
-const REQUIRED_ARTIFACTS = [
-  join('workflows', 'domain-extraction.json'),
-  join('crates', 'wicked-core-ts', 'package.json'),
-];
+const REQUIRED_ARTIFACTS = [join('crates', 'wicked-core-ts', 'package.json')];
 
 const missing = (dir) => REQUIRED_ARTIFACTS.filter((rel) => !existsSync(join(dir, rel)));
 
