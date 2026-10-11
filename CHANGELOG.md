@@ -12,9 +12,11 @@ mentioned only where a daemon release depends on them.
 
 ## [0.9.5] — 2026-10-11
 
-QE acceptance no longer strands governed app-change runs at deliver, and editor packs install with a conformance check. The engine pin moves to **`wicked-core-ts` `^0.8.5`**. This release bundles **wicked-studio 0.7.4** and ships **`wicked-crew-api-types` 0.108.0**.
+QE acceptance no longer strands governed app-change runs at deliver, editor packs install with a conformance check, and the workflow overlay is retired. The engine pin moves to **`wicked-core-ts` `^0.9.1`**. This release bundles **wicked-studio 0.7.4** and ships **`wicked-crew-api-types` 0.108.0**.
 
-- **Fixed (#958, crew#951, with wicked-core#878 in core-ts 0.8.5):** a governed run's QE acceptance verdict now lives in the run's own QE ledger, `<evidence root>/.wicked-qe`, and delivery reads exactly that ledger.
+**Behaviour change (#955, X-MIG M11 crew C, with wicked-core#871 in core-ts 0.9.0):** crew neither reads nor writes the workflow drop-in overlay. `POST /workflows` answers 410 and names the preset route; `GET /workflows` serves `unavailable: []`. A runtime def (the interactive review/theme seams) is engine-validated and held in memory.
+
+- **Fixed (#958, crew#951, with wicked-core#878 in core-ts 0.9.1):** a governed run's QE acceptance verdict now lives in the run's own QE ledger, `<evidence root>/.wicked-qe`, and delivery reads exactly that ledger.
   - The engine hands the run's QE unit `WICKED_QE_LEDGER_DIR`, admitted in its read-only boundary. garden's `qe accept` (wicked-garden 12.49.0, wicked-ledger 0.6.0) records there.
   - Before, the verdict went into the worktree, the worktree guard discarded it, and deliver refused with "no QE ledger". The 0.9.4 workaround (an explicit QE skip with a reason) is no longer needed.
   - For such a run, neither the repo's ledger nor crew's own `WICKED_QE_LEDGER_DIR` speaks; a run without an evidence root reads its repo ledger as before.
@@ -32,7 +34,10 @@ QE acceptance no longer strands governed app-change runs at deliver, and editor 
 - **Release smoke (#959):** pinned to wicked-ci #46 (S04 knows the preset-era `bug` plan and the argv-less ACP shim rows).
 - **Tests (#957):** crew's suite no longer reads wicked-core's retired `workflows/` directory; the core-skill guard pins the engine's built-in preset refs.
 - **deps:**
-  - `wicked-core-ts` `^0.8.5`: 0.8.4 carries wicked-core#872 (the `editor-plugin` preset) and #876 (a benched judge seat stays benched, the 0.9.4 known issue); 0.8.5 carries #878.
+  - `wicked-core-ts` `^0.9.1`:
+    - 0.8.4 carries wicked-core#872 (the `editor-plugin` preset) and #876 (a benched judge seat stays benched, the 0.9.4 known issue);
+    - 0.9.0 carries #871 (drop-ins retired);
+    - 0.9.1 carries #878 and #880 (wicked-estate 0.27.0).
   - `wicked-studio` `^0.7.4`: #677, the builder saves presets; #678, an archived run opens its record.
   - `wicked-ledger` `^0.6.0`.
 
