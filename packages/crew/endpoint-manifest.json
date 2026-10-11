@@ -288,11 +288,13 @@
       "method": "POST",
       "path": "/api/v1/editors",
       "requestType": null,
-      "responseType": "InstallEditorRefusal",
+      "responseType": "InstallEditorResponse",
       "statusCodes": [
+        200,
         400,
         403,
         404,
+        409,
         422,
         501
       ]
@@ -303,6 +305,7 @@
       "requestType": null,
       "responseType": null,
       "statusCodes": [
+        200,
         403,
         404,
         409

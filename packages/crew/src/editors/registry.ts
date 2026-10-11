@@ -1,28 +1,32 @@
 /**
  * The artifact-editor registry (DES-artifact-editor-plugins §5.2, §8.6, §9.1; EP-C1).
  *
- * Two kinds of editor exist in the design; one exists today:
+ * Two kinds of editor exist:
  *
  *  - **First-party** editors ship INSIDE studio's bundle (§8.6): `<studio dist>/editors/<id>/editor.json`
  *    beside the ONE self-contained `index.html` entry. Crew discovers them at boot, pins each entry's
  *    sha256 and byte size, and serves the entry through the hashed bundle route (`routes.ts`) with
  *    the §8.2 headers. Their ids are `wicked-*` — the reserved first-party namespace every pack is
  *    refused (garden `wicked-pack.schema.json`).
- *  - **Third-party** editors arrive as garden packs (spec 2 `editors[]`). Their install is REFUSED
- *    until the install-time conformance run ships (EP-C8, LATER): `pack-install.ts` still runs
- *    garden's fail-closed `pack check` and lists what the operator would be asked to approve, then
- *    answers 501. Nothing of a pack is ever written by this registry.
+ *  - **Third-party** editors arrive as garden packs (spec 2 `editors[]`), installed by the operator
+ *    (`POST /editors {packRoot}`, human-only) once garden's fail-closed `pack check` AND the
+ *    install-time conformance run (garden `scripts/editor/conformance.py`, run by crew against its
+ *    own conformance host page, §12.1 / EP-C8) both pass (`pack-install.ts`). The registry records
+ *    the pack directory and each editor's pinned entry hash; it never writes into the pack. A pack
+ *    that also ships skills or blocks is refused: their own "Add these" approval (§3.2) is not built.
  *
- * Persisted state is ONE file, `<state home>/daemon-editors.json` — the enable/disable flags the
- * operator sets in Settings → Editors (§6.4, human-only). It sits under the `daemon-` prefix both
- * crew's state-home registry and the engine's worker fence already classify (crew#756), so no new
- * top-level entry is introduced; a pack install (EP-C8) will need a registered `editors/` subtree in
- * both repos first.
+ * Persisted state is ONE file, `<state home>/daemon-editors.json`: the enable/disable flags the
+ * operator sets in Settings (§6.4, human-only) and the installed packs. It sits under the `daemon-`
+ * prefix both crew's state-home registry and the engine's worker fence already classify (crew#756),
+ * so no new top-level entry is introduced. The packs themselves live where the installer staged
+ * them (garden's default `~/.wicked/editors/<name>/current`, program-owned, outside the state home);
+ * a bundle is re-hashed against the recorded pin on every serve, so a copy changed after install is
+ * refused, never served.
  */
 
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, writeFileSync } from 'node:fs';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 
 import type { EditorPermission, EditorView } from '../core/types.js';
@@ -32,6 +36,8 @@ import { crewStateHome } from '../projects/state-home.js';
 export const EDITORS_STATE_FILENAME = 'daemon-editors.json';
 /** Where first-party manifests live inside the studio bundle. */
 export const STUDIO_EDITORS_DIRNAME = 'editors';
+/** The most of an installed pack's `wicked-pack.json` the registry reads (a manifest is a few KB). */
+export const PACK_MANIFEST_CAP_BYTES = 1024 * 1024;
 /** The host's bundle cap (§8.5); a pack's `limits.bundleBytes` may only be lower. */
 export const HOST_BUNDLE_CAP_BYTES = 5 * 1024 * 1024;
 
@@ -78,12 +84,67 @@ export interface EditorRecord {
   /** Absolute path of the entry file. Never on the wire. */
   entryPath: string;
   firstParty: boolean;
-  source: 'studio-bundle';
+  /** `studio-bundle`: first-party, shipped in studio's dist. `pack`: a third-party pack the operator installed. */
+  source: 'studio-bundle' | 'pack';
   enabled: boolean;
+  /** For a pack editor: the pack it came from. Never on the wire. */
+  pack?: InstalledPack;
+}
+
+/** One installed pack editor, as `daemon-editors.json` records it. */
+export interface InstalledPack {
+  /** Absolute path of the pack directory (holding `wicked-pack.json`). */
+  root: string;
+  /** The pack's `name` (the installer's key). */
+  name: string;
+  /** The editor's entry path, relative to the pack root. */
+  entry: string;
+  /** The entry's sha256 when it was installed (and passed the conformance run). */
+  sha256: string;
+  /** {@link editorEntryDigest} of its manifest entry as admitted: permissions, kinds, version, … */
+  manifestSha256: string;
+  installedAt: string;
+  /** The conformance run that admitted it: when, and which cases ran. */
+  conformance: { ok: true; at: string; cases: string[] };
+}
+
+/** An install the registry refuses: the id is taken, or the pack did not read back. */
+export class EditorInstallConflict extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'EditorInstallConflict';
+  }
 }
 
 export function sha256Of(buf: Buffer): string {
   return createHash('sha256').update(buf).digest('hex');
+}
+
+/**
+ * Read a file holding at most `cap` bytes, never allocating more than `cap + 1` (codex r1 on X3: a
+ * file swapped for a huge one is refused before it is read whole). `null` = over the cap.
+ */
+export function readCapped(path: string, cap: number): Buffer | null {
+  const fd = openSync(path, 'r');
+  try {
+    if (fstatSync(fd).size > cap) return null;
+    const buf = Buffer.alloc(cap + 1);
+    let n = 0;
+    for (;;) {
+      const got = readSync(fd, buf, n, buf.length - n, null);
+      if (got === 0) break;
+      n += got;
+      if (n > cap) return null;
+    }
+    return buf.subarray(0, n);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** The digest of a pack editor's admitted manifest entry: a manifest edited after install is a new install. */
+export function editorEntryDigest(entry: unknown): string {
+  return createHash('sha256').update(JSON.stringify(entry)).digest('hex');
 }
 
 /**
@@ -169,16 +230,16 @@ export function discoverStudioEditors(
       log?.(`[editors] ${manifest.id}: entry ${manifest.entry} is ${entryProblem}; skipped`);
       continue;
     }
-    let buf: Buffer;
+    const cap = manifest.limits?.bundleBytes ?? HOST_BUNDLE_CAP_BYTES;
+    let buf: Buffer | null;
     try {
-      buf = readFileSync(entryPath);
+      buf = readCapped(entryPath, cap);
     } catch (err) {
       log?.(`[editors] ${manifest.id}: entry unreadable (${err instanceof Error ? err.message : String(err)})`);
       continue;
     }
-    const cap = manifest.limits?.bundleBytes ?? HOST_BUNDLE_CAP_BYTES;
-    if (buf.byteLength > cap) {
-      log?.(`[editors] ${manifest.id}: entry is ${buf.byteLength} bytes, over its ${cap}-byte cap`);
+    if (buf === null) {
+      log?.(`[editors] ${manifest.id}: entry is over its ${cap}-byte cap`);
       continue;
     }
     const outside = externalReferences(buf.toString('utf8'));
@@ -191,9 +252,90 @@ export function discoverStudioEditors(
   return out;
 }
 
+/** A pack editor's manifest entry: the shared shape plus its pinned hash and a pack-relative entry. */
+export const PackEditorSchema = EditorManifestSchema.extend({
+  entry: z.string().regex(/\.html$/u),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/u),
+});
+
+/**
+ * Read one pack editor at serve-time quality: the manifest entry for `id` in `<root>/wicked-pack.json`,
+ * its entry a real file inside the pack, within its caps, loading nothing from outside, and hashing to
+ * `pin`. `null` + a logged reason when any of it fails — an installed editor whose pack changed is
+ * skipped until it is installed again, never served half-right.
+ */
+export function readPackEditor(pack: InstalledPack, id: string, log?: (msg: string) => void): Omit<EditorRecord, 'enabled'> | null {
+  const why = (m: string): null => {
+    log?.(`[editors] ${id} (pack ${pack.name}): ${m}; skipped — install it again`);
+    return null;
+  };
+  const manifestPath = join(pack.root, 'wicked-pack.json');
+  const manifestProblem = notRealEntry(manifestPath, 'file');
+  if (manifestProblem !== null) return why(`wicked-pack.json is ${manifestProblem}`);
+  let entries: unknown;
+  try {
+    // Bounded before it is parsed (codex r3): a manifest swapped for a huge one never reaches JSON.parse.
+    const raw = readCapped(manifestPath, PACK_MANIFEST_CAP_BYTES);
+    if (raw === null) return why(`wicked-pack.json is over ${PACK_MANIFEST_CAP_BYTES} bytes`);
+    entries = (JSON.parse(raw.toString('utf8')) as { editors?: unknown }).editors;
+  } catch (err) {
+    return why(`wicked-pack.json is unreadable (${err instanceof Error ? err.message : String(err)})`);
+  }
+  const raw = Array.isArray(entries) ? entries.find((e) => typeof e === 'object' && e !== null && (e as { id?: unknown }).id === id) : undefined;
+  const parsed = PackEditorSchema.safeParse(raw);
+  if (!parsed.success) return why(`its manifest entry is refused (${parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')})`);
+  const m = parsed.data;
+  if (FIRST_PARTY_ID.test(m.id) || m.id === 'wicked') return why('a pack may not declare a wicked-* editor');
+  if (editorEntryDigest(m) !== pack.manifestSha256) return why('its manifest entry changed since it was installed');
+  if (m.entry !== pack.entry) return why(`its entry moved (${pack.entry} → ${m.entry})`);
+  const entryPath = resolve(pack.root, m.entry);
+  const rel = relative(resolve(pack.root), entryPath);
+  if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) return why(`entry ${m.entry} is outside the pack`);
+  // Every directory on the way and the file itself are real, never links.
+  let at = resolve(pack.root);
+  for (const part of rel.split(sep).slice(0, -1)) {
+    at = join(at, part);
+    const p = notRealEntry(at, 'dir');
+    if (p !== null) return why(`entry directory ${part} is ${p}`);
+  }
+  const entryProblem = notRealEntry(entryPath, 'file');
+  if (entryProblem !== null) return why(`entry ${m.entry} is ${entryProblem}`);
+  const cap = m.limits?.bundleBytes ?? HOST_BUNDLE_CAP_BYTES;
+  let buf: Buffer | null;
+  try {
+    buf = readCapped(entryPath, cap);
+  } catch (err) {
+    return why(`entry unreadable (${err instanceof Error ? err.message : String(err)})`);
+  }
+  if (buf === null) return why(`entry is over its ${cap}-byte cap`);
+  const outside = externalReferences(buf.toString('utf8'));
+  if (outside.length > 0) return why(`entry loads from outside itself (${outside.slice(0, 3).join(', ')})`);
+  const sha = sha256Of(buf);
+  if (sha !== m.sha256 || sha !== pack.sha256) return why('its entry no longer matches the hash it was installed with');
+  const manifest: EditorManifest = { id: m.id, title: m.title, version: m.version, protocol: m.protocol, kinds: m.kinds, entry: m.entry, sizes: m.sizes, permissions: m.permissions, ...(m.panels !== undefined ? { panels: m.panels } : {}), ...(m.limits !== undefined ? { limits: m.limits } : {}) };
+  return { manifest, sha256: sha, bytes: buf.byteLength, entryPath, firstParty: false, source: 'pack', pack };
+}
+
+const InstalledPackSchema = z.object({
+  root: z.string().min(1),
+  name: z.string().regex(EDITOR_ID),
+  entry: z.string().regex(/\.html$/u),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/u),
+  manifestSha256: z.string().regex(/^[0-9a-f]{64}$/u),
+  installedAt: z.string(),
+  conformance: z.object({ ok: z.literal(true), at: z.string(), cases: z.array(z.string()) }),
+});
+
+/** An operator flag by editor id: own properties only (an id like `constructor` is not an inherited key, codex r5). */
+function flagOf(flags: Record<string, boolean>, id: string): boolean | undefined {
+  return Object.hasOwn(flags, id) && typeof flags[id] === 'boolean' ? flags[id] : undefined;
+}
+
 interface PersistedState {
   v: 1;
   enabled: Record<string, boolean>;
+  /** Installed pack editors, by editor id. Absent in a file written before installs existed. */
+  installed?: Record<string, InstalledPack>;
 }
 
 export class EditorRegistry {
@@ -205,19 +347,40 @@ export class EditorRegistry {
     this.stateFile = join(opts.stateHome ?? crewStateHome(), EDITORS_STATE_FILENAME);
     this.log = opts.log ?? (() => undefined);
     const state = this.readState();
+    this.persistedFlags = state.enabled;
     if (opts.studioRoot !== undefined) {
       for (const r of discoverStudioEditors(opts.studioRoot, this.log)) {
-        this.records.set(r.manifest.id, { ...r, enabled: state.enabled[r.manifest.id] ?? true });
+        this.records.set(r.manifest.id, { ...r, enabled: flagOf(state.enabled, r.manifest.id) ?? true });
       }
     }
+    for (const [id, pack] of Object.entries(state.installed ?? {})) {
+      this.installed.set(id, pack);
+      if (this.records.has(id)) {
+        this.log(`[editors] ${id} (pack ${pack.name}): a first-party editor holds the id; skipped`);
+        continue;
+      }
+      const r = readPackEditor(pack, id, this.log);
+      if (r !== null) this.records.set(id, { ...r, enabled: flagOf(state.enabled, id) ?? true });
+    }
   }
+
+  /** Every installed pack editor as recorded, including one skipped at boot (so an install can replace it). */
+  private readonly installed = new Map<string, InstalledPack>();
+  /** The flags as read at boot: kept for an installed editor skipped at boot, so a write never drops its "off". */
+  private persistedFlags: Record<string, boolean> = {};
 
   private readState(): PersistedState {
     try {
       const raw = JSON.parse(readFileSync(this.stateFile, 'utf8')) as Partial<PersistedState>;
       const enabled: Record<string, boolean> = {};
       for (const [k, v] of Object.entries(raw.enabled ?? {})) if (typeof v === 'boolean' && EDITOR_ID.test(k)) enabled[k] = v;
-      return { v: 1, enabled };
+      const installed: Record<string, InstalledPack> = {};
+      for (const [k, v] of Object.entries(raw.installed ?? {})) {
+        const parsed = InstalledPackSchema.safeParse(v);
+        if (EDITOR_ID.test(k) && parsed.success) installed[k] = parsed.data;
+        else this.log(`[editors] ${k}: its install record in ${EDITORS_STATE_FILENAME} is malformed; ignored`);
+      }
+      return { v: 1, enabled, installed };
     } catch {
       return { v: 1, enabled: {} };
     }
@@ -226,7 +389,9 @@ export class EditorRegistry {
   private writeState(): void {
     const enabled: Record<string, boolean> = {};
     for (const r of this.records.values()) if (!r.enabled) enabled[r.manifest.id] = false;
+    for (const id of this.installed.keys()) if (!this.records.has(id) && flagOf(this.persistedFlags, id) === false) enabled[id] = false;
     const state: PersistedState = { v: 1, enabled };
+    if (this.installed.size > 0) state.installed = Object.fromEntries([...this.installed].sort(([a], [b]) => a.localeCompare(b)));
     mkdirSync(join(this.stateFile, '..'), { recursive: true });
     const tmp = `${this.stateFile}.${process.pid}.tmp`;
     writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
@@ -251,9 +416,82 @@ export class EditorRegistry {
     const r = this.records.get(id);
     if (r === undefined) return null;
     const next = { ...r, enabled };
-    this.records.set(id, next);
-    this.writeState();
+    this.commit(() => this.records.set(id, next));
     return next;
+  }
+
+  /**
+   * Apply `change` to the in-memory maps and persist; a failed write restores the maps as they were
+   * and rethrows, so memory never holds what the file does not (codex r1 on X3).
+   */
+  private commit(change: () => void): void {
+    const records = new Map(this.records);
+    const installed = new Map(this.installed);
+    const flags = { ...this.persistedFlags };
+    change();
+    try {
+      this.writeState();
+    } catch (err) {
+      this.records.clear();
+      for (const [k, v] of records) this.records.set(k, v);
+      this.installed.clear();
+      for (const [k, v] of installed) this.installed.set(k, v);
+      this.persistedFlags = flags;
+      throw err;
+    }
+  }
+
+  /**
+   * Record a pack's editors, already checked and conformance-run by the caller (`pack-install.ts`):
+   * each is read back from disk exactly as boot reads it, and only then recorded. All or nothing — a
+   * pack editor that does not read back leaves the registry as it was. An editor id another pack
+   * holds is refused; the same pack re-installed (an update) replaces its own editors, keeping the
+   * operator's on/off choice unless `enabled` says otherwise.
+   */
+  installPack(packs: Array<{ id: string; pack: InstalledPack }>, enabled: boolean | undefined): { records: EditorRecord[]; updated: boolean } {
+    const read: Array<Omit<EditorRecord, 'enabled'>> = [];
+    let updated = false;
+    for (const { id, pack } of packs) {
+      const existing = this.records.get(id);
+      if (existing?.firstParty === true) throw new EditorInstallConflict(`${id} is a first-party editor's id`);
+      const held = this.installed.get(id);
+      if (held !== undefined && held.name !== pack.name) throw new EditorInstallConflict(`${id} is already installed from the pack ${held.name}; remove it first`);
+      if (held !== undefined) updated = true;
+      const r = readPackEditor(pack, id, this.log);
+      if (r === null) throw new EditorInstallConflict(`${id} did not read back from ${pack.root} (see the daemon log)`);
+      read.push(r);
+    }
+    const out: EditorRecord[] = read.map((r) => {
+      const id = r.manifest.id;
+      // An update keeps the operator's switch: the live record's, else the one persisted for a record
+      // skipped at boot (codex r1), else on.
+      return { ...r, enabled: enabled ?? this.records.get(id)?.enabled ?? flagOf(this.persistedFlags, id) ?? true };
+    });
+    this.commit(() => {
+      for (const r of out) {
+        this.records.set(r.manifest.id, r);
+        this.installed.set(r.manifest.id, r.pack!);
+      }
+    });
+    return { records: out, updated };
+  }
+
+  /** Remove an installed pack editor (the pack's files are the installer's to delete). `false` when it is not one. */
+  removeInstalled(id: string): boolean {
+    if (!this.installed.has(id)) return false;
+    this.commit(() => {
+      this.installed.delete(id);
+      // A removed editor's boot-time "off" does not follow a later install of the id (codex r2).
+      delete this.persistedFlags[id];
+      const r = this.records.get(id);
+      if (r !== undefined && !r.firstParty) this.records.delete(id);
+    });
+    return true;
+  }
+
+  /** Whether `id` is an installed pack editor (served or skipped at boot). */
+  isInstalled(id: string): boolean {
+    return this.installed.has(id);
   }
 
   /** The wire view: no paths, the hashed entry URL instead. */
