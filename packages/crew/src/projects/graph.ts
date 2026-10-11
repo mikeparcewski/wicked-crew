@@ -1052,18 +1052,57 @@ function toHit(raw: RawHit, labels: Map<string, string>): ProjectGraphHit | null
   };
 }
 
+/** Safety stop for following estate's blast-radius cursor: a server that kept issuing cursors would
+ *  loop forever. 200 pages of ~235 rows is far past any real answer. */
+const MAX_BLAST_PAGES = 200;
+
+/**
+ * `wicked-estate blast-radius --json`, EVERY page of it (operator ruling "full graph"; estate#279,
+ * wicked-estate 0.28.0+). estate pages a wide answer: a page names the rest with `next_cursor`
+ * (null on the last page), and `--cursor` returns the next rows of the SAME answer. The pages'
+ * `dependents` are joined; every other field is the LAST page's, so once every page is in,
+ * `truncated_dependents` says only what the walk itself cut (and `next_cursor` is null). A cursor
+ * still unread at the page cap is left on the answer with that page's `truncated_dependents`, so
+ * the unread rows read as cut, never as absent. An estate that does not page sends no
+ * `next_cursor`: one call, its JSON unchanged. Shared by the repo route and the project route.
+ */
+export async function readBlastRadiusPages(
+  exe: string,
+  name: string,
+  dbPath: string,
+  opts: { timeout: number; cwd?: string },
+): Promise<Record<string, unknown>> {
+  const dependents: unknown[] = [];
+  let first: Record<string, unknown> | null = null;
+  let last: Record<string, unknown> = {};
+  let cursor: string | null = null;
+  for (let pages = 0; pages < MAX_BLAST_PAGES; pages += 1) {
+    const args = ['blast-radius', name, '--db', dbPath, '--json', ...(cursor === null ? [] : ['--cursor', cursor])];
+    const { stdout } = await execCapped(exe, args, opts);
+    last = JSON.parse(stdout) as Record<string, unknown>;
+    first ??= last;
+    if (Array.isArray(last['dependents'])) dependents.push(...(last['dependents'] as unknown[]));
+    cursor = typeof last['next_cursor'] === 'string' && last['next_cursor'] !== '' ? last['next_cursor'] : null;
+    if (cursor === null) break;
+  }
+  if (first === last) return last;
+  const merged: Record<string, unknown> = { ...last, dependents };
+  // The joined rows' window: from the first page's start, over the last page's total.
+  const p0 = first?.['page'] as { from?: unknown } | undefined;
+  const pn = last['page'] as { total?: unknown } | undefined;
+  if (pn !== undefined && pn !== null && typeof pn === 'object') {
+    merged['page'] = { count: dependents.length, from: typeof p0?.from === 'number' ? p0.from : 0, total: pn.total };
+  }
+  return merged;
+}
+
 /** Dependents of a symbol across every member repo, each hit attributed to the repo it is in. */
 export async function projectBlastRadius(
   q: Extract<Queryable, { ok: true }>,
   name: string,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<ProjectBlastRadius> {
-  const { stdout } = await execCapped(
-    estateExe(env),
-    ['blast-radius', name, '--db', q.dbPath, '--json'],
-    { timeout: QUERY_TIMEOUT_MS },
-  );
-  const raw = JSON.parse(stdout) as {
+  const raw = (await readBlastRadiusPages(estateExe(env), name, q.dbPath, { timeout: QUERY_TIMEOUT_MS })) as {
     dependents?: RawHit[];
     unresolved?: number;
     target?: string;

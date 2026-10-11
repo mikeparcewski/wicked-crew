@@ -86,7 +86,7 @@ import { DocRunIndex } from '../interactive/doc-run-index.js';
 import { listInteractiveDocs } from '../interactive/docs-index.js';
 import type { FreshenCheckout } from './chat-freshness.js';
 import { TestSetIndex } from '../qe/test-sets.js';
-import { estateExe, parseEstateTotals, resolveProjectGraphBinding } from '../projects/graph.js';
+import { estateExe, parseEstateTotals, readBlastRadiusPages, resolveProjectGraphBinding } from '../projects/graph.js';
 import { registerProjectRoutes, type ProjectRoutesDeps } from '../projects/routes.js';
 import { registerProjectAggregateRoutes } from './project-aggregates.js';
 import { registerProductRoutes } from './product.js';
@@ -5547,12 +5547,10 @@ export function registerRoutes(
       return reply.code(404).send({ error: 'Code graph not built for this repo yet' });
     }
     try {
-      const { stdout } = await execCapped(
-        'wicked-estate',
-        ['blast-radius', q.name.trim(), '--db', dbPath, '--json'],
-        { timeout: 30_000, cwd: repo.root_path },
+      // Every page of the answer (estate#279): the dependents are joined, the rest is the last page's.
+      return reply.send(
+        await readBlastRadiusPages('wicked-estate', q.name.trim(), dbPath, { timeout: 30_000, cwd: repo.root_path }),
       );
-      return reply.send(JSON.parse(stdout) as unknown);
     } catch (err) {
       return reply.code(500).send({ error: message(err) });
     }
