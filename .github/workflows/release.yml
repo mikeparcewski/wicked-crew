@@ -109,7 +109,7 @@ jobs:
     needs: [release, version]
     permissions:
       contents: read
-    uses: mikeparcewski/wicked-ci/.github/workflows/smoke.yml@027da7e02b8a261b6761a83730797a408c8ab6c9 # wicked-ci main after #48 (S04 accepts the wicked-core#902 judge_unavailable gate that names the judge that gave no verdict), on #47 (the verdict keeps each OS's newest attempt; SiriTTSService runner noise), on #46 (S04 follows the preset-era bug plan and the argv-less ACP shim rows: crew 0.9.4's smoke), on #45 (S04 takes the explicit QE skip on a crew that offers it: crew 0.9.3's smoke parked the bug runs at the QE-required deliver refusal), on #44 + v1.4.0 + #42
+    uses: mikeparcewski/wicked-ci/.github/workflows/smoke.yml@181e98747fcb0dfc47744d6fae60ec504b4d97cb # wicked-ci main after #49 (S04 opts opencode in for the delivery run; a default-roster arm asserts judge_unavailable), on #48 (S04 accepts the wicked-core#902 judge_unavailable gate that names the judge that gave no verdict), on #47 (the verdict keeps each OS's newest attempt; SiriTTSService runner noise), on #46 (S04 follows the preset-era bug plan and the argv-less ACP shim rows: crew 0.9.4's smoke), on #45 (S04 takes the explicit QE skip on a crew that offers it: crew 0.9.3's smoke parked the bug runs at the QE-required deliver refusal), on #44 + v1.4.0 + #42
     with:
       crew_version: ${{ needs.version.outputs.version }}
       # wicked-ci #30 (release verdict crew 0.7.35 §Smoke gate): on a CROSS-REPO workflow_call GitHub
@@ -117,4 +117,4 @@ jobs:
       # default fell back to `github.sha` — crew's own tag commit — and the harness checkout failed
       # ("not our ref"); the smoke gate never ran inside the release run. Pin the harness ref
       # EXPLICITLY to the same SHA as the `uses:` line above (move both together on every re-pin).
-      wicked_ci_ref: 027da7e02b8a261b6761a83730797a408c8ab6c9
+      wicked_ci_ref: 181e98747fcb0dfc47744d6fae60ec504b4d97cb
