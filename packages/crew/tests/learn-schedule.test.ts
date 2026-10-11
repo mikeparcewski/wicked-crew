@@ -218,3 +218,29 @@ describe('LearnScheduler.sweep', () => {
     expect(r.execs).toHaveLength(0);
   });
 });
+
+describe('LearnScheduler launch race + bookkeeping (codex r1)', () => {
+  it('re-reads the run list right before launching', async () => {
+    const r = rig();
+    put(r.store);
+    r.advance(25 * H);
+    let reads = 0;
+    const adapter = (r.scheduler as unknown as { deps: { adapter: { sessionsDetail: () => Promise<unknown[]> } } }).deps.adapter;
+    adapter.sessionsDetail = async () => (++reads === 1 ? [] : [{ session: { id: 'late', status: 'executing' }, units: [] }]);
+    await r.scheduler.sweep();
+    expect(r.launches).toHaveLength(0);
+    expect(r.store.get('r1:sqlite-wal')!.lastOutcome).toBeNull();
+  });
+
+  it('keeps a successful launch recorded when the bookkeeping after it throws', async () => {
+    const r = rig();
+    put(r.store);
+    r.advance(25 * H);
+    (r.scheduler as unknown as { deps: { broadcast: () => void } }).deps.broadcast = () => {
+      throw new Error('ws down');
+    };
+    await r.scheduler.sweep();
+    const row = r.store.get('r1:sqlite-wal')!;
+    expect([row.lastRunId, row.lastOutcome, row.failures]).toEqual(['run-1', 'launched', 0]);
+  });
+});

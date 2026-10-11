@@ -28,6 +28,8 @@ export const LEARN_SCHEDULE_ACTOR: Actor = { id: 'learn-schedule', kind: 'system
 export const DEFAULT_LEARN_SWEEP_MS = 60_000;
 /** How long a launched run the daemon no longer lists keeps the schedule's slot (48 h). */
 export const STALE_LAUNCH_MS = 48 * HOURS;
+/** A run that holds the host: one governed run at a time (a run parked on a human is not busy). */
+const BUSY: ReadonlySet<SessionStatus> = new Set<SessionStatus>(['planning', 'distributing', 'executing']);
 const TERMINAL: ReadonlySet<SessionStatus> = new Set<SessionStatus>(['completed', 'failed', 'cancelled']);
 /** The env a governed unit carries; the index spawn drops every one so estate opens writable. */
 export const RUN_MARKER_ENV = ['WICKED_RUN_ID', 'WICKED_GATE_SCOPE', 'WICKED_WRITE_ROOTS', 'WICKED_GOVERNED', 'WICKED_ESTATE_READONLY'];
@@ -168,43 +170,27 @@ export class LearnScheduler {
       return r.lastRunAt !== null && now.getTime() - Date.parse(r.lastRunAt) < STALE_LAUNCH_MS;
     });
     if (open) return;
-    if ([...status.values()].some((s) => s === 'executing')) return;
+    if ([...status.values()].some((s) => BUSY.has(s))) return;
     const due = rows
       .filter((r) => r.enabled && Date.parse(r.nextDueAt) <= now.getTime())
       .sort((a, b) => a.nextDueAt.localeCompare(b.nextDueAt))[0];
     if (due === undefined) return;
+    let runId: string;
     try {
-      const runId = await this.deps.adapter.launchRun({
+      const clisJson = JSON.stringify(await this.deps.adapter.seatsForWorkflow(LEARN_WORKFLOW));
+      // Re-read right before the launch (codex r1): the index spawn and the seat read above can take
+      // minutes, and another surface may have started a run meanwhile.
+      const fresh = await this.deps.adapter.sessionsDetail();
+      if (fresh.some((v) => BUSY.has(v.session.status))) return;
+      runId = await this.deps.adapter.launchRun({
         problem: refreshProblem(due),
         sessionId: randomUUID(),
-        clisJson: JSON.stringify(await this.deps.adapter.seatsForWorkflow(LEARN_WORKFLOW)),
+        clisJson,
         workflow: LEARN_WORKFLOW,
         repoRef: due.repoRef,
         deliver: 'pr',
         ...(due.projectId !== undefined ? { projectId: due.projectId } : {}),
       });
-      recordRunLaunched(this.deps.audit, this.deps.runTimingIndex, LEARN_SCHEDULE_ACTOR, runId, {
-        workflow: LEARN_WORKFLOW,
-        repoRef: due.repoRef,
-        deliver: 'pr',
-        learnSchedule: due.id,
-        ...(due.projectId !== undefined ? { projectId: due.projectId } : {}),
-      });
-      if (due.projectId !== undefined) this.deps.fileRun(runId, due.projectId);
-      this.deps.store.update(
-        due.id,
-        {
-          lastRunId: runId,
-          lastRunAt: now.toISOString(),
-          lastOutcome: 'launched',
-          failures: 0,
-          lastError: null,
-          nextDueAt: new Date(now.getTime() + due.everyHours * HOURS).toISOString(),
-        },
-        now,
-      );
-      this.deps.broadcast({ type: 'learnRefreshLaunched', session: runId, schedule: due.id } as unknown as CoreEvent);
-      this.deps.log(`[learn-schedule] ${due.id} due → learn ${runId}`);
     } catch (err) {
       const failures = due.failures + 1;
       const message = err instanceof Error ? err.message : String(err);
@@ -219,6 +205,35 @@ export class LearnScheduler {
         now,
       );
       this.deps.log(`[learn-schedule] ${due.id} launch refused (${failures}): ${message}`);
+      return;
     }
+    // The launch happened: record it FIRST, so a failure in the bookkeeping below can never
+    // misreport it as refused or free the slot for a second refresh (codex r1).
+    this.deps.store.update(
+      due.id,
+      {
+        lastRunId: runId,
+        lastRunAt: now.toISOString(),
+        lastOutcome: 'launched',
+        failures: 0,
+        lastError: null,
+        nextDueAt: new Date(now.getTime() + due.everyHours * HOURS).toISOString(),
+      },
+      now,
+    );
+    try {
+      recordRunLaunched(this.deps.audit, this.deps.runTimingIndex, LEARN_SCHEDULE_ACTOR, runId, {
+        workflow: LEARN_WORKFLOW,
+        repoRef: due.repoRef,
+        deliver: 'pr',
+        learnSchedule: due.id,
+        ...(due.projectId !== undefined ? { projectId: due.projectId } : {}),
+      });
+      if (due.projectId !== undefined) this.deps.fileRun(runId, due.projectId);
+      this.deps.broadcast({ type: 'learnRefreshLaunched', session: runId, schedule: due.id } as unknown as CoreEvent);
+    } catch (err) {
+      this.deps.log(`[learn-schedule] ${due.id} launched ${runId}, but its bookkeeping failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    this.deps.log(`[learn-schedule] ${due.id} due → learn ${runId}`);
   }
 }
