@@ -301,7 +301,10 @@ beforeAll(async () => {
     'the built-in council registry must offer two seats, or evaluator\u2260creator cannot be satisfied',
   ).toBeGreaterThanOrEqual(2);
   authorSeats = JSON.stringify(
-    registryKeys.slice(0, 2).map((key) => ({
+    // wicked-core#898 (F-EDIT-5 / F-LEARN-3): a codex seat is benched on a worktree-bound run (its
+    // commands are refused on hosts whose codex account has no approver), so it is not one of the
+    // two ELIGIBLE seats this bound run needs.
+    registryKeys.filter((key) => key !== 'codex' && !key.startsWith('codex#')).slice(0, 2).map((key) => ({
       key,
       display_name: key,
       binary: key,
