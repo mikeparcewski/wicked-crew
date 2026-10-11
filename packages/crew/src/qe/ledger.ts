@@ -102,9 +102,21 @@ export function exportLedgerPackageDir(env: NodeJS.ProcessEnv = process.env): st
   const own = env[LEDGER_PKG_ENV]?.trim();
   if (own !== undefined && own !== '') return own;
   try {
-    const dir = dirname(createRequire(import.meta.url).resolve('wicked-ledger/package.json'));
-    env[LEDGER_PKG_ENV] = dir;
-    return dir;
+    // Resolved, never loaded: the daemon itself opens no SQLite library (wicked-core#631 guard,
+    // which admits only the `wicked-ledger/manifest` subpath by name).
+    let dir = dirname(createRequire(import.meta.url).resolve('wicked-ledger/manifest'));
+    for (let i = 0; i < 6; i++) {
+      const pj = join(dir, 'package.json');
+      // The nearest package.json above the resolved subpath is the package's root.
+      if (existsSync(pj)) {
+        env[LEDGER_PKG_ENV] = dir;
+        return dir;
+      }
+      const parent = dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+    return null;
   } catch {
     return null;
   }
