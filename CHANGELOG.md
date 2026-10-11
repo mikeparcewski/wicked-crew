@@ -20,6 +20,9 @@ Run reads no longer stall the daemon on a long-lived home, and a diff over a wor
   - A run-read latency regression test runs against a generated long-lived home.
 - **Fixed (#949):** `GET /runs/:id/diff` serves the run branch when the worktree is removed while git is running in it, instead of answering 500 "Unable to read current working directory" (crew 0.9.3 release smoke, S04 macOS). A named `?base=` error stays the caller's 400.
 - **Release smoke (#949):** pinned to wicked-ci #45 (S04 sends an explicit, reasoned QE skip and asserts the labelled skip).
+- **Known issues:**
+  - **#951:** QE acceptance strands governed app-change runs at deliver. The verify seat writes its QE verdict into the run's worktree, the worktree guard discards it, and deliver refuses with "no QE ledger". Workaround: launch with an explicit QE skip and a reason (`skipQeAcceptance`). Fixed in the next release.
+  - **wicked-core#876:** a judge seat benched for a refusal can be retried as the judge on later units of the same run (the 0.9.4 post-publish smoke, F-SMOKE-004). The run completes, at one dead turn per judged unit. Fixed with the next core-ts.
 - **deps:** `wicked-core-ts` `^0.8.3` (0.8.2 adds the built-in `bug` and `mcp-server` presets, wicked-core#864/#866; 0.8.3 carries wicked-core#869 and the wicked-estate 0.26.0 crates, wicked-core#873); `wicked-studio` stays `^0.7.3`.
 
 ## [0.9.3] — 2026-10-10
