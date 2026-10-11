@@ -10,6 +10,19 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.9.8] — 2026-10-11
+
+The train's final crew. Evaluators never run on a seat that built the work, a build that changed nothing cannot pass, and a judge that cannot render a verdict no longer cancels a run. The engine pin moves to **`wicked-core-ts` `^0.9.5`**. This release bundles **wicked-studio 0.7.7**. Pair it with **wicked-garden 12.53.1** and **wicked-estate 0.29.2** on the seats.
+
+- **Fixed (wicked-core#898, crew#972, operator-approved, in core-ts 0.9.5):** an evaluator, a review re-seat and every judge exclude every seat that built any part of the work, so a reassigned creator never reviews (with none left, the gate escalates). A build step whose own tree is unchanged cannot pass the code-evidence floor unless it says `NO CHANGE NEEDED`. codex seats are benched on worktree-bound runs (wicked-core#769), with opt-out `WICKED_CODEX_WORKTREE_OK=1`.
+- **Fixed (wicked-core#898 + #902, the crew 0.9.7 known issue):** a judge answer with no PASS/REJECT verdict escalates to you as `judge_unavailable` ("judge gave no verdict"). It never rotates to another judge (no verdict shopping) and never records a REJECT that cancels the run.
+- **Added (wicked-core#899, in core-ts 0.9.5; studio#714):** the learn walkthrough is a multi-turn loop: "Ask a follow-up" re-runs the conversational step with its history.
+- **Fixed (#975, F-LEARN-4):** the Learn page shows what merged, not the checkout's working copy.
+- **Tests (#976):** the qe-author e2e's bound run uses non-codex seats.
+- **deps:**
+  - `wicked-core-ts` `^0.9.5`: #898, #899 and #902.
+  - `wicked-studio` `^0.7.7`: the learn follow-up (#714), and the rail's project icon opens the project (#715).
+
 ## [0.9.7] — 2026-10-11
 
 QE acceptance works on fenced seats and in repositories that do not declare wicked-ledger, and a verdict counts only for the tree it judged. The engine pin moves to **`wicked-core-ts` `^0.9.4`**. This release bundles **wicked-studio 0.7.6**. Pair it with **wicked-garden 12.53.1** (the one wicked-ledger resolver, garden#1284) and **wicked-estate 0.29.2** on the seats.
@@ -3906,7 +3919,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.7...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.8...HEAD
+[0.9.8]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.7...v0.9.8
 [0.9.7]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.6...v0.9.7
 [0.9.6]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.5...v0.9.6
 [0.9.5]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.4...v0.9.5
