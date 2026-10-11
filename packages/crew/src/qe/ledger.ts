@@ -166,6 +166,50 @@ export interface RunLinkage {
    * different remedy, so the denial names it (review of #539, F5).
    */
   logUnreadable?: string;
+  /**
+   * (crew#971) The run's QE attempts, from its event log: each dispatch of the QE unit (the ord
+   * `qeAcceptanceDecided` names) to that attempt's `gateEvaluated`, with the tree the gate judged
+   * (`assurance.tree`). A verdict recorded inside an attempt's window judged that attempt's tree.
+   * Absent when the log names no QE unit (an older engine) — no tree scoping then.
+   */
+  qeAttempts?: QeAttemptWindow[];
+  /**
+   * (crew#971) The run's CURRENT deliverable tree (`session.verified_tree`; null ⇒ no scoping). With {@link qeAttempts}, only verdicts recorded in an attempt that judged THIS tree are
+   * the run's evidence: a FAIL on a tree a send-back superseded no longer blocks the delivery.
+   */
+  currentTree?: string | null;
+}
+
+/** One dispatch of the run's QE unit: when it ran and which tree its gate judged. */
+export interface QeAttemptWindow {
+  start: number;
+  /** The attempt's `gateEvaluated` time; `null` while it is still running. */
+  end: number | null;
+  /** The tree the attempt's gate judged; `null` when the gate records none (or has not run yet). */
+  tree: string | null;
+}
+
+/**
+ * (crew#971) Drop ONLY the verdicts that provably judged a superseded tree: recorded inside a QE
+ * attempt whose gate judged a known tree other than `currentTree`, and inside no attempt that judged
+ * `currentTree`. Every other verdict keeps counting — one recorded outside every window, or in an
+ * attempt whose gate recorded no tree, is not shown to be about another tree, so its denial stands
+ * (codex r1 on #973: uncertain attribution must refuse, never expose an earlier PASS). `null` = no
+ * scoping applies (no attempts known, or no current tree) — every verdict stays, as before.
+ */
+function verdictsForCurrentTree(verdicts: VerdictRecord[], run: RunLinkage): { kept: VerdictRecord[]; superseded: number } | null {
+  const attempts = run.qeAttempts;
+  const tree = run.currentTree;
+  if (attempts === undefined || attempts.length === 0 || tree === undefined || tree === null || tree === '') return null;
+  const inside = (w: QeAttemptWindow, at: number) => at >= w.start && (w.end === null || at <= w.end);
+  const kept = verdicts.filter((v) => {
+    const at = epoch(v.created_at);
+    if (at === null) return true;
+    const judgedCurrent = attempts.some((w) => w.tree === tree && inside(w, at));
+    const judgedOther = attempts.some((w) => w.tree !== null && w.tree !== tree && inside(w, at));
+    return judgedCurrent || !judgedOther;
+  });
+  return { kept, superseded: verdicts.length - kept.length };
 }
 
 /**
@@ -376,6 +420,27 @@ function attribute(root: string, verdicts: VerdictRecord[], subject: ReadSubject
   }
 
   const { runId, startedAt, finishedAt, logUnreadable } = subject.run;
+  // (crew#971) A verdict counts only for the tree it judged: scope to the run's current tree first,
+  // so deny-dominates holds WITHIN that tree's verdicts and a FAIL on a superseded tree is history.
+  const scoped = verdictsForCurrentTree(verdicts, subject.run);
+  if (scoped !== null) {
+    verdicts = scoped.kept;
+    if (verdicts.length === 0) {
+      return {
+        verdict: null,
+        run: null,
+        attribution: {
+          kind: 'none',
+          reason:
+            `no QE verdict judged the run's current tree ${subject.run.currentTree}` +
+            (scoped.superseded > 0
+              ? ` (${scoped.superseded} verdict${scoped.superseded === 1 ? '' : 's'} judged a superseded tree and no longer count${scoped.superseded === 1 ? 's' : ''})`
+              : ''),
+        },
+        attributedVerdicts: 0,
+      };
+    }
+  }
   if (verdicts.length === 0) {
     return {
       verdict: null,

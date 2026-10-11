@@ -57,6 +57,7 @@ import { runIdentityOf, runWorkflowDef } from '../core/run-identity.js';
 import { basename } from 'node:path';
 import type {
   QeAcceptanceState,
+  QeAttemptWindow,
   QeAttribution,
   QeManifestSummary,
   ReadSubject,
@@ -515,6 +516,8 @@ export function runWindowFromEvents(
   events: RecordedEvent[] | null,
   runId: string,
   unreadable?: string,
+  currentTree?: string | null,
+  qeUnitOrds?: number[],
 ): RunLinkage {
   if (unreadable !== undefined) return { runId, startedAt: null, finishedAt: null, logUnreadable: unreadable };
   if (events === null || events.length === 0) return { runId, startedAt: null, finishedAt: null };
@@ -537,7 +540,45 @@ export function runWindowFromEvents(
       finishedAt = null; // a failed run rescued and executing again: live until its next terminal frame
     }
   }
-  return { runId, startedAt, finishedAt };
+  const qeAttempts = qeAttemptsFromEvents(events, qeUnitOrds);
+  // The deliverable tree: ONLY the engine's verified tree the caller hands in. None ⇒ no scoping
+  // (every verdict counts, the conservative reading — codex r2 on #973: a log-derived fallback
+  // re-enabled scoping on exactly the paths that must stay unscoped).
+  const tree: string | null = typeof currentTree === 'string' && currentTree !== '' ? currentTree : null;
+  return { runId, startedAt, finishedAt, ...(qeAttempts.length > 0 ? { qeAttempts, currentTree: tree } : {}) };
+}
+
+/**
+ * (crew#971) The run's QE attempts: every dispatch of the QE unit (the ords `qeAcceptanceDecided`
+ * names) up to that attempt's `gateEvaluated`, with the tree the gate judged. A dispatch whose
+ * gate never ran stays open (`end: null`, `tree: null`) — it judged no tree yet.
+ */
+export function qeAttemptsFromEvents(events: RecordedEvent[], qeUnitOrds?: number[]): QeAttemptWindow[] {
+  // The QE unit(s): the run's units that carry a QE decision when the caller has them — a
+  // `qeAcceptanceDecided` also names a CREATOR that revoked a waiver (codex r1 on #973), whose
+  // interval is no QE attempt. Without the units, the event's ords are the best the log says.
+  const ords = new Set<number>(qeUnitOrds ?? []);
+  if (qeUnitOrds === undefined) {
+    for (const e of events) {
+      const ord = (e as { ord?: unknown }).ord;
+      if (e.type === 'qeAcceptanceDecided' && typeof ord === 'number') ords.add(ord);
+    }
+  }
+  const out: QeAttemptWindow[] = [];
+  let open: QeAttemptWindow | null = null;
+  for (const e of events) {
+    const ord = (e as { ord?: unknown }).ord;
+    if (typeof ord !== 'number' || !ords.has(ord) || typeof e.ts !== 'number') continue;
+    if (e.type === 'unitDispatched') {
+      open = { start: e.ts, end: null, tree: null };
+      out.push(open);
+    } else if (e.type === 'gateEvaluated' && open !== null && open.end === null) {
+      const t = (e as { assurance?: { tree?: unknown } }).assurance?.tree;
+      open.end = e.ts;
+      open.tree = typeof t === 'string' && t !== '' ? t : null;
+    }
+  }
+  return out;
 }
 
 /**
@@ -553,6 +594,13 @@ export async function buildAcceptanceView(opts: {
    * `<evidence root>/.wicked-qe` and nothing else ({@link runQeLedgerRoot}, crew#951).
    */
   evidenceRoot?: string | null;
+  /**
+   * (crew#971) The run's deliverable tree (`session.verified_tree`): only QE verdicts that judged
+   * this tree count. Absent/null ⇒ no tree scoping (every verdict counts).
+   */
+  deliverableTree?: string | null;
+  /** (crew#971) The ords of the run's QE unit(s) — the units carrying a QE decision. */
+  qeUnitOrds?: number[];
   /** What the run must prove ({@link acceptanceRequirementOf}). */
   requirement: AcceptanceRequirement;
   qeRunId?: string;
@@ -603,7 +651,7 @@ export async function buildAcceptanceView(opts: {
   const subject: ReadSubject =
     opts.qeRunId !== undefined
       ? { qeRunId: opts.qeRunId }
-      : { run: runWindowFromEvents(eventRows, opts.runId, eventsError) };
+      : { run: runWindowFromEvents(eventRows, opts.runId, eventsError, opts.deliverableTree ?? null, opts.qeUnitOrds) };
 
   // The run's ONE ledger (crew#951): its evidence root's when it has one, else its repo's.
   const ledgerRoot = runQeLedgerRoot({ evidence_root: opts.evidenceRoot ?? null }, opts.repo?.root_path ?? null);
