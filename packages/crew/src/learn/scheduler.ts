@@ -20,6 +20,7 @@ import { randomUUID } from 'node:crypto';
 import type { SessionStatus } from 'wicked-crew-api-types';
 import type { CoreAdapter } from '../core/adapter.js';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
+import { gardenPluginRoot } from '../interactive/draft-skill.js';
 import type { Actor, CoreEvent } from '../core/types.js';
 import type { AuditLog } from '../api/audit.js';
 import { recordRunLaunched, type RunTimingIndex } from '../api/run-timing-index.js';
@@ -63,18 +64,31 @@ export interface LearnSchedulerDeps {
   now?: () => Date;
   exec?: Exec;
   env?: NodeJS.ProcessEnv;
+  /** The live garden plugin root (tests inject it); default: the skills runtime's discovery. */
+  gardenRoot?: () => string | null;
 }
 
-/** The garden launcher: `$WICKED_GARDEN_ROOT/scripts/wicked-garden` when set, else `wicked-garden` on PATH. */
-export function gardenLauncher(env: NodeJS.ProcessEnv): string {
+/** The garden root the indexer runs from: `$WICKED_GARDEN_ROOT`, else the live plugin the daemon's
+ *  skills runtime publishes from (E2E F-LEARN-5: an inherited `CLAUDE_PLUGIN_ROOT` pointing at an
+ *  older checkout must never pick the script), else null (`wicked-garden` on PATH). */
+export function gardenRootFor(env: NodeJS.ProcessEnv, live: () => string | null = gardenPluginRoot): string | null {
   const root = env['WICKED_GARDEN_ROOT'];
-  return root !== undefined && root !== '' ? `${root.replace(/\/+$/, '')}/scripts/wicked-garden` : 'wicked-garden';
+  if (root !== undefined && root !== '') return root.replace(/\/+$/, '');
+  return live();
 }
 
-/** `env` without the governed-run markers. */
-export function unmarkedEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+/** The garden launcher under a root (`<root>/scripts/wicked-garden`), else `wicked-garden` on PATH. */
+export function gardenLauncher(root: string | null): string {
+  return root !== null ? `${root}/scripts/wicked-garden` : 'wicked-garden';
+}
+
+/** `env` without the governed-run markers, pinned to the garden root it resolved (and no inherited
+ *  `CLAUDE_PLUGIN_ROOT`, which the launcher would otherwise prefer). */
+export function unmarkedEnv(env: NodeJS.ProcessEnv, root: string | null = null): NodeJS.ProcessEnv {
   const out: NodeJS.ProcessEnv = { ...env };
   for (const k of RUN_MARKER_ENV) delete out[k];
+  delete out['CLAUDE_PLUGIN_ROOT'];
+  if (root !== null) out['WICKED_GARDEN_ROOT'] = root;
   return out;
 }
 
@@ -155,10 +169,11 @@ export class LearnScheduler {
       const tree = await exec('git', ['-C', repo.root_path, 'rev-parse', `${ref}:.wicked/knowledge/${row.slug}`], { timeoutMs: 5_000 });
       const sha = tree.code === 0 ? tree.stdout.trim() : '';
       if (sha === '' || sha === row.indexedTree) continue;
+      const root = gardenRootFor(env, this.deps.gardenRoot);
       const res = await exec(
-        gardenLauncher(env),
+        gardenLauncher(root),
         ['run', 'scripts/learn/index.py', '--repo', repo.root_path, '--ref', ref, '--name', repo.name, '--slug', row.slug],
-        { cwd: repo.root_path, env: unmarkedEnv(env), timeoutMs: 120_000 },
+        { cwd: repo.root_path, env: unmarkedEnv(env, root), timeoutMs: 120_000 },
       );
       if (res.code === 0) {
         this.deps.store.update(row.id, { indexedTree: sha }, this.now());
