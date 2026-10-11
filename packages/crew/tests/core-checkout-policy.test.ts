@@ -66,10 +66,7 @@ describe('the cross-repo guards are live in this environment', () => {
   it.skipIf(CORE_CHECKS_OPTIONAL)('resolved a checkout that carries the artifacts', () => {
     const dir = resolveCoreDir();
     expect(dir).not.toBeNull();
-    for (const rel of [
-      join('workflows', 'domain-extraction.json'),
-      join('crates', 'wicked-core-ts', 'package.json'),
-    ]) {
+    for (const rel of [join('crates', 'wicked-core-ts', 'package.json')]) {
       expect(statSync(join(dir!, rel)).isFile(), `${rel} missing from ${dir}`).toBe(true);
     }
   });

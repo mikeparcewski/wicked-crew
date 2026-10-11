@@ -1,49 +1,17 @@
 // Core-by-reference = the registered-reference closure (design v3 §5): the skill_refs of every
-// workflow the daemon knows, plus each referenced skill's SKILL.md mandates, transitively. Pinned
-// against the workflows crew ships AND against wicked-core's own drop-ins TWICE (codex round 6 on
-// #480): ALWAYS against the vendored contract `tests/fixtures/core-workflow-skill-refs.json` — the
-// skill_refs of wicked-core's `workflows/*.json` at the core-ts version crew pins — and, as the
-// local extra, against a sibling checkout when one is available (the same sibling-checkout policy
-// as builtin-overlay-shadow.test.ts). The runtime source of the closure stays
-// `adapter.listWorkflows()`: the engine has NO separate catalog at runtime (core's JSON files are
-// drop-ins; core-ts exposes only `registerWorkflow`; crew registers the built-ins and reads the
-// overlay dir), so the daemon's registry IS the canonical set of workflows it can launch — what
-// this suite guards is that the registry never drifts from core's shipped set.
+// workflow the daemon knows, plus each referenced skill's SKILL.md mandates, transitively.
 //
-// Regenerate the fixture with every core-ts bump (from a wicked-core checkout at that version):
-//   node -e 'const fs=require("node:fs");const [d,v]=process.argv.slice(1);const refs=new Set();
-//     for(const f of fs.readdirSync(d).filter(f=>f.endsWith(".json")))for(const p of JSON.parse(fs.readFileSync(`${d}/${f}`,"utf8")).phases??[])
-//       if(typeof p.skill_ref==="string"&&p.skill_ref)refs.add(p.skill_ref);
-//     console.log(JSON.stringify({"wicked-core-ts":v,refs:[...refs].sort()},null,2))' <wicked-core>/workflows <version> \
-//     > tests/fixtures/core-workflow-skill-refs.json
+// X-MIG M11: crew keeps no mirror of wicked-core's built-in workflows any more — every built-in is
+// an engine preset, and production reads the built-in refs from the engine
+// (`builtinPresetSkillRefs`). So the guard is pinned against the INSTALLED engine (below), and the
+// vendored fixture of core's retired `workflows/*.json` and the sibling-checkout comparison are gone.
 
-import { readdirSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
-import type { WorkflowDef } from '../src/core/types.js';
 import { builtinPresetSkillRefs, coreClosure, coreSkillRefs, mandateMentions, mentionedSkillNames, presetSkillRefs, registeredSkillRefs } from '../src/skills/core-closure.js';
 import { parseFrontmatter } from '../src/skills/frontmatter.js';
-import { CORE_DIR, SKIP_CORE_CHECKS, coreDirMissingMessage } from './support/core-checkout.js';
-
-const HERE = dirname(fileURLToPath(import.meta.url));
-/** The vendored contract: wicked-core's `workflows/*.json` skill_refs at the pinned core-ts version. */
-const FIXTURE = join(HERE, 'fixtures', 'core-workflow-skill-refs.json');
-
-interface CoreSkillRefsFixture {
-  'wicked-core-ts': string;
-  refs: string[];
-}
-
-const readFixture = (): CoreSkillRefsFixture => JSON.parse(readFileSync(FIXTURE, 'utf8')) as CoreSkillRefsFixture;
-
-/** The `wicked-core-ts` version `packages/crew/package.json` pins, range prefix stripped (`^0.7.16` → `0.7.16`). */
-const pinnedCoreTs = (): string => {
-  const pkg = JSON.parse(readFileSync(join(HERE, '..', 'package.json'), 'utf8')) as { dependencies: Record<string, string> };
-  return (pkg.dependencies['wicked-core-ts'] ?? '').replace(/^[\^~=]/, '');
-};
 
 describe('the built-in presets\' skill_refs are required too (crew#935, codex r5 on #938)', () => {
   const presets = [
@@ -105,48 +73,30 @@ describe('registeredSkillRefs', () => {
     ]);
   });
 
-  it('ALWAYS: the vendored core-workflow skill_refs fixture is at the pinned wicked-core-ts version, sorted, and every ref it names is one the ENGINE\'s built-in presets hold — the set production reads (codex round 6; X-MIG M11, codex r1 on crew A)', async () => {
-    const fixture = readFixture();
-    const pinned = pinnedCoreTs();
-    expect(pinned).toMatch(/^\d+\.\d+\.\d+/);
-    expect(
-      fixture['wicked-core-ts'],
-      `tests/fixtures/core-workflow-skill-refs.json was generated against wicked-core-ts ${fixture['wicked-core-ts']} but packages/crew/package.json pins ${pinned} — refresh the fixture with the core-ts bump (regeneration recipe at the top of this file)`,
-    ).toBe(pinned);
-    expect(fixture.refs.length).toBeGreaterThan(0);
-    expect(fixture.refs).toEqual([...new Set(fixture.refs)].sort()); // sorted and unique, so a regeneration diff is reviewable
-    // Production's built-in refs come from the engine (`builtinPresetSkillRefs` over the installed
-    // core-ts), not from a crew mirror — so that is what the fixture is checked against.
+  it('the ENGINE\'s built-in presets name every skill crew must keep core — the set production reads (X-MIG M11: no crew mirror, no vendored copy of core\'s retired workflows/)', async () => {
     const { CoreAdapter } = await import('../src/core/adapter.js');
     const { mkdtempSync } = await import('node:fs');
     const { tmpdir } = await import('node:os');
     const a = new CoreAdapter({ dbPath: join(mkdtempSync(join(tmpdir(), 'crew-m11-refs-')), 'core.db'), stub: true });
     try {
       const engineRefs = await builtinPresetSkillRefs(a, () => {});
-      for (const ref of fixture.refs) {
-        expect(engineRefs.has(ref), `wicked-core ${pinned} names ${ref} as a skill_ref but its built-in presets do not — the core closure would miss it`).toBe(true);
+      // Pinned against the installed core-ts: a release that drops one of these is a loud diff.
+      for (const ref of [
+        'wicked-garden-domain',
+        'wicked-garden-domain-coverage',
+        'wicked-garden-domain-extractor',
+        'wicked-garden-draft',
+        'wicked-garden-mcp-scaffold',
+        'wicked-garden-platform-security-engineer',
+        'wicked-garden-qe',
+        'wicked-garden-qe-contract-testing-engineer',
+        'wicked-garden-qe-observability-test-engineer',
+        'wicked-garden-repo-learn',
+      ]) {
+        expect(engineRefs.has(ref), `the installed engine's built-in presets do not name ${ref}`).toBe(true);
       }
     } finally {
       a.close();
-    }
-  });
-
-  it.skipIf(SKIP_CORE_CHECKS)('local extra: covers every skill_ref in a sibling wicked-core checkout\'s workflows/*.json, and agrees with the vendored fixture when the checkout is at the pinned version', () => {
-    if (CORE_DIR === null) throw new Error(coreDirMissingMessage());
-    const dir = join(CORE_DIR, 'workflows');
-    const coreDefs = readdirSync(dir)
-      .filter((f) => f.endsWith('.json'))
-      .map((f) => JSON.parse(readFileSync(join(dir, f), 'utf8')) as WorkflowDef);
-    const coreRefs = registeredSkillRefs(coreDefs);
-    const crewRefs = registeredSkillRefs(BUILTIN_WORKFLOWS);
-    for (const ref of coreRefs) {
-      expect(crewRefs.has(ref), `wicked-core names ${ref} as a skill_ref but crew's BUILTIN_WORKFLOWS do not — the core closure would miss it`).toBe(true);
-    }
-    // The vendored fixture IS this catalog at the pinned version: a checkout at that version must agree exactly.
-    const siblingVersion = (JSON.parse(readFileSync(join(CORE_DIR, 'crates', 'wicked-core-ts', 'package.json'), 'utf8')) as { version: string }).version;
-    const fixture = readFixture();
-    if (siblingVersion === fixture['wicked-core-ts']) {
-      expect([...coreRefs].sort(), `the sibling checkout is at core-ts ${siblingVersion} (the pinned version) but its workflows name different skill_refs than the vendored fixture — regenerate the fixture`).toEqual(fixture.refs);
     }
   });
 });
