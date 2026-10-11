@@ -167,9 +167,10 @@ describe('POST /runs {plan} and the plan_approval gate — HTTP contract (shadow
     await withCapability(ctx.adapter, true, async () => {
       expect((await fetch(`${ctx.baseUrl}/api/v1/runs/r1/gate`, json({ approve: true }))).status).toBe(200);
       expect((await fetch(`${ctx.baseUrl}/api/v1/runs/r1/gate`, json({ approve: false }))).status).toBe(200);
+      // (operator ruling 2026-10-11) An attributed answer carries the gate API's actor last.
       expect(gated).toEqual([
-        ['r1', true, undefined],
-        ['r1', false, undefined],
+        ['r1', true, undefined, undefined, undefined, undefined, expect.any(String)],
+        ['r1', false, undefined, undefined, undefined, undefined, expect.any(String)],
       ]);
     });
   });

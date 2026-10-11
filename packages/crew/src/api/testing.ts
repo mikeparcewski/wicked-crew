@@ -20,6 +20,7 @@
  * daemon must serve both routes honestly against the released 0.7.4 addon.
  */
 
+import { defaultLaunchRoster } from '../core/opt-in-seats.js';
 import { randomUUID } from 'node:crypto';
 
 import type { FastifyInstance, FastifyRequest } from 'fastify';
@@ -577,7 +578,7 @@ export function registerTestingRoutes(
         const input: LaunchRunInput = {
           problem: b.problem,
           sessionId: runId,
-          clisJson: b.clisJson ?? JSON.stringify(deps.roster()),
+          clisJson: b.clisJson ?? JSON.stringify(defaultLaunchRoster(deps.roster() as Array<{ key?: unknown }>)),
           // crew#391: the intake gate rides EVERY spelling of the recon launch — the fallback
           // fan and the single run hold the same posture the banner promises.
           humanConfirm: gate,

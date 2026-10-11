@@ -4418,6 +4418,10 @@ export function registerRoutes(
         if ('refusal' in refused) return reply.code(refused.refusal.code).send(refused.refusal.body);
         deliveryCheck = { qeAcceptance: refused.qeAcceptance };
       }
+      if (gated) {
+        const who = actorOf(req);
+        adapter.recordGateActor?.(id, `${who.id} (${who.kind})`);
+      }
       const status = gated ? await adapter.confirmGate(id, true) : await adapter.resumeRun(id);
       // A resume of a gated run IS a gate approval — audit it as one, so the
       // "who approved" trail has no side door (task #88).
@@ -4542,6 +4546,8 @@ export function registerRoutes(
     const ord = cursor?.ord ?? run.session.unit_ix;
     try {
       if (gated) {
+        const who = actorOf(req);
+        adapter.recordGateActor?.(id, `${who.id} (${who.kind})`);
         const status = await adapter.confirmGate(id, true);
         audit.record('gate.decided', actorOf(req), {
           runId: id,
