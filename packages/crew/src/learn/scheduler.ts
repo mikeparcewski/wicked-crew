@@ -2,7 +2,8 @@
  * The learn schedule's tick (DES-learn-workflow §5.3). Once a minute:
  *
  *  1. RECONCILE — a schedule's last run that reached a terminal status records its outcome.
- *  2. INDEX — a topic whose MERGED knowledge changed (`git rev-parse HEAD:.wicked/knowledge/<slug>`
+ *  2. INDEX — a topic whose MERGED knowledge changed (`git fetch origin <default>`, then
+ *     `git rev-parse origin/<default>:.wicked/knowledge/<slug>`; the checkout's working copy is never read)
  *     moved) is re-indexed into the estate knowledge store by garden's `scripts/learn/index.py`,
  *     spawned OUTSIDE any run (its env carries no run markers, so the estate opens writable), one
  *     spawn per sweep. Indexing reads the registered checkout, never an open pull request.
@@ -143,12 +144,17 @@ export class LearnScheduler {
       if (!row.enabled) continue;
       const repo = repos.find((r) => r.id === row.repoRef);
       if (repo === undefined || !repo.root_path) continue;
-      const tree = await exec('git', ['-C', repo.root_path, 'rev-parse', `HEAD:.wicked/knowledge/${row.slug}`], { timeoutMs: 5_000 });
+      // What MERGED: the remote default branch, fetched (a run's pull request merges there; the
+      // registered checkout itself is never pulled or modified, only its remote-tracking ref moves).
+      const branch = repo.default_branch || 'main';
+      const ref = `origin/${branch}`;
+      const fetched = await exec('git', ['-C', repo.root_path, 'fetch', '--quiet', 'origin', `${branch}:refs/remotes/origin/${branch}`], { timeoutMs: 30_000 });
+      const tree = await exec('git', ['-C', repo.root_path, 'rev-parse', `${fetched.code === 0 ? ref : 'HEAD'}:.wicked/knowledge/${row.slug}`], { timeoutMs: 5_000 });
       const sha = tree.code === 0 ? tree.stdout.trim() : '';
       if (sha === '' || sha === row.indexedTree) continue;
       const res = await exec(
         gardenLauncher(env),
-        ['run', 'scripts/learn/index.py', '--repo', repo.root_path, '--name', repo.name, '--slug', row.slug],
+        ['run', 'scripts/learn/index.py', '--repo', repo.root_path, '--ref', fetched.code === 0 ? ref : 'HEAD', '--name', repo.name, '--slug', row.slug],
         { cwd: repo.root_path, env: unmarkedEnv(env), timeoutMs: 120_000 },
       );
       if (res.code === 0) {

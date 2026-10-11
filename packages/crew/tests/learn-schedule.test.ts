@@ -32,7 +32,7 @@ const REPO = { id: 'r1', name: 'demo', root_path: '/repos/demo', default_branch:
 
 type Status = 'executing' | 'awaiting_human' | 'completed' | 'failed' | 'cancelled';
 
-function rig(opts: { runs?: Record<string, Status>; launch?: () => Promise<string>; tree?: string; indexCode?: number } = {}) {
+function rig(opts: { runs?: Record<string, Status>; launch?: () => Promise<string>; tree?: string; indexCode?: number; fetchCode?: number } = {}) {
   const dir = scratch();
   const store = new LearnScheduleStore(join(dir, 'learn-schedules.json'));
   const runs = opts.runs ?? {};
@@ -51,6 +51,7 @@ function rig(opts: { runs?: Record<string, Status>; launch?: () => Promise<strin
   } as unknown as Pick<CoreAdapter, 'listRepos' | 'sessionsDetail' | 'seatsForWorkflow' | 'launchRun'>;
   const exec: Exec = async (cmd, args, o) => {
     execs.push({ cmd, args, env: o.env });
+    if (cmd === 'git' && args.includes('fetch')) return { code: opts.fetchCode ?? 0, stdout: '', stderr: '' };
     if (cmd === 'git') return opts.tree === undefined ? { code: 128, stdout: '', stderr: 'no path' } : { code: 0, stdout: `${opts.tree}\n`, stderr: '' };
     return { code: opts.indexCode ?? 0, stdout: '{"ok":true}', stderr: '' };
   };
@@ -194,11 +195,21 @@ describe('LearnScheduler.sweep', () => {
     const spawns = r.execs.filter((e) => e.cmd !== 'git');
     expect(spawns).toHaveLength(1);
     expect(spawns[0]!.cmd).toBe('/garden/scripts/wicked-garden');
-    expect(spawns[0]!.args).toEqual(['run', 'scripts/learn/index.py', '--repo', '/repos/demo', '--name', 'demo', '--slug', 'sqlite-wal']);
+    expect(spawns[0]!.args).toEqual(['run', 'scripts/learn/index.py', '--repo', '/repos/demo', '--ref', 'origin/main', '--name', 'demo', '--slug', 'sqlite-wal']);
+    const revParse = r.execs.find((e) => e.cmd === 'git' && e.args.includes('rev-parse'))!;
+    expect(revParse.args.at(-1)).toBe('origin/main:.wicked/knowledge/sqlite-wal');
     for (const k of RUN_MARKER_ENV) expect(spawns[0]!.env?.[k]).toBeUndefined();
     expect(r.store.get('r1:sqlite-wal')!.indexedTree).toBe('abc123');
     await r.scheduler.sweep();
     expect(r.execs.filter((e) => e.cmd !== 'git')).toHaveLength(1); // unchanged tree: no spawn
+  });
+
+  it('falls back to the checkout HEAD when the fetch fails', async () => {
+    const r = rig({ tree: 'abc123', fetchCode: 1 });
+    put(r.store);
+    await r.scheduler.sweep();
+    const spawn = r.execs.find((e) => e.cmd !== 'git')!;
+    expect(spawn.args).toContain('HEAD');
   });
 
   it('keeps the old tree when the index fails, so the next sweep retries', async () => {
