@@ -149,12 +149,15 @@ export class LearnScheduler {
       const branch = repo.default_branch || 'main';
       const ref = `origin/${branch}`;
       const fetched = await exec('git', ['-C', repo.root_path, 'fetch', '--quiet', 'origin', `${branch}:refs/remotes/origin/${branch}`], { timeoutMs: 30_000 });
-      const tree = await exec('git', ['-C', repo.root_path, 'rev-parse', `${fetched.code === 0 ? ref : 'HEAD'}:.wicked/knowledge/${row.slug}`], { timeoutMs: 5_000 });
+      // A failed fetch keeps the last fetched origin/<default> (codex r1): never the checkout's HEAD,
+      // which may be an unmerged branch. No remote-tracking ref at all: nothing merged to index.
+      if (fetched.code !== 0) this.deps.log(`[learn-schedule] fetch of ${ref} for ${row.id} failed; using the last fetched ${ref}`);
+      const tree = await exec('git', ['-C', repo.root_path, 'rev-parse', `${ref}:.wicked/knowledge/${row.slug}`], { timeoutMs: 5_000 });
       const sha = tree.code === 0 ? tree.stdout.trim() : '';
       if (sha === '' || sha === row.indexedTree) continue;
       const res = await exec(
         gardenLauncher(env),
-        ['run', 'scripts/learn/index.py', '--repo', repo.root_path, '--ref', fetched.code === 0 ? ref : 'HEAD', '--name', repo.name, '--slug', row.slug],
+        ['run', 'scripts/learn/index.py', '--repo', repo.root_path, '--ref', ref, '--name', repo.name, '--slug', row.slug],
         { cwd: repo.root_path, env: unmarkedEnv(env), timeoutMs: 120_000 },
       );
       if (res.code === 0) {

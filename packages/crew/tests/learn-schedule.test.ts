@@ -204,12 +204,13 @@ describe('LearnScheduler.sweep', () => {
     expect(r.execs.filter((e) => e.cmd !== 'git')).toHaveLength(1); // unchanged tree: no spawn
   });
 
-  it('falls back to the checkout HEAD when the fetch fails', async () => {
+  it('a failed fetch keeps the last fetched origin ref, never the checkout HEAD (codex r1)', async () => {
     const r = rig({ tree: 'abc123', fetchCode: 1 });
     put(r.store);
     await r.scheduler.sweep();
     const spawn = r.execs.find((e) => e.cmd !== 'git')!;
-    expect(spawn.args).toContain('HEAD');
+    expect(spawn.args).toContain('origin/main');
+    expect(spawn.args).not.toContain('HEAD');
   });
 
   it('keeps the old tree when the index fails, so the next sweep retries', async () => {
