@@ -48,6 +48,7 @@ import { callEstateTool, EstateMcpError, memoryStoreInfo } from '../core/estate-
 import { SeatHealthTracker } from './seat-health.js';
 import { applyWorkerConfigRoot, signedInHeuristic } from './seat-signin.js';
 import { applyCouncilSettings, isCouncilSize, isCouncilStaggerMs } from '../core/council-settings.js';
+import { defaultLaunchRoster, markOptIn } from '../core/opt-in-seats.js';
 import { chatSeatAdmission, type StandingSeat } from './seat-standing.js';
 import {
   seatGovernanceDiagnostics,
@@ -1748,7 +1749,7 @@ export function registerRoutes(
   // disagree about a seat.
   const rosterWithStanding: RosterWithStanding =
     runtime.rosterWithStanding ?? rosterWithStandingFactory({ seatHealth, signedIn });
-  app.get(`${V}/roster`, async () => ({ roster: rosterWithStanding() }));
+  app.get(`${V}/roster`, async () => ({ roster: markOptIn(rosterWithStanding()) }));
   /** crew#742: the seats' governance standing, read from the standing roster (empty when the
    *  roster cannot be read — the roster route reports that failure itself). */
   const seatGovernanceNow = (): SeatGovernanceDiagnostic[] => {
@@ -2276,7 +2277,9 @@ export function registerRoutes(
       // The default roster carries crew's STANDING (wave 6, the crew half of F-7R2-006): the adapter
       // translates `council_eligible: false` into the engine's per-seat bench verdict at launch
       // (`core/engine-roster.ts`), so a signed-out seat is never convened, never a judge.
-      clisJson: b.clisJson ?? JSON.stringify(rosterWithStanding()),
+      // (operator ruling 2026-10-11) …minus the opt-in seats (opencode): a launch gets one only
+      // when it names it.
+      clisJson: b.clisJson ?? JSON.stringify(defaultLaunchRoster(rosterWithStanding())),
     };
     // A capture launch (api/capture.ts) reads its materials from a per-run inbox outside every
     // sandbox: the capture route registered it under the run id it minted.
@@ -4264,6 +4267,9 @@ export function registerRoutes(
         parsed.data.action,
         parsed.data.amendScope,
         parsed.data.plan !== undefined ? toLaunchPlan(parsed.data.plan) : undefined,
+        // (operator ruling 2026-10-11) WHO answered: recorded by the engine as the judge when this
+        // approve answers a `judge_unavailable` gate ("judged by operator").
+        `${actor.id} (${actor.kind})`,
       );
       // WHO approved/rejected — the gate-decision audit (task #88). The engine
       // records THAT the gate resolved (interaction_requests / gateDecided);

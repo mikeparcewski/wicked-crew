@@ -163,7 +163,7 @@ describe('POST /runs/:id/gate — the arms reach the adapter (DES-L1 PR-2)', () 
     const res = await gate('run-gated', { approve: false, action: 'request_changes', amend: 'add the missing null check' });
     expect(res.statusCode).toBe(200);
     expect(confirmCalls).toHaveLength(1);
-    expect(confirmCalls[0]).toEqual(['run-gated', false, 'add the missing null check', 'request_changes', undefined, undefined]);
+    expect(confirmCalls[0]).toEqual(['run-gated', false, 'add the missing null check', 'request_changes', undefined, undefined, expect.any(String)]);
     expect(recorded[0]!.detail).toMatchObject({ approve: false, action: 'request_changes' });
   });
 
@@ -171,7 +171,7 @@ describe('POST /runs/:id/gate — the arms reach the adapter (DES-L1 PR-2)', () 
     const res = await gate('run-gated', { approve: true, amend: 'prefer the existing helper', amendScope: 'creator' });
     expect(res.statusCode).toBe(200);
     expect(confirmCalls).toHaveLength(1);
-    expect(confirmCalls[0]).toEqual(['run-gated', true, 'prefer the existing helper', undefined, 'creator', undefined]);
+    expect(confirmCalls[0]).toEqual(['run-gated', true, 'prefer the existing helper', undefined, 'creator', undefined, expect.any(String)]);
     expect(recorded[0]!.detail).toMatchObject({ approve: true, amendScope: 'creator' });
   });
 

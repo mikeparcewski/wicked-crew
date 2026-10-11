@@ -1878,8 +1878,31 @@ export class CoreAdapter {
     action?: string,
     amendScope?: string,
     plan?: LaunchPlan,
+    // (operator ruling 2026-10-11) WHO answered — the gate API's authenticated actor. The engine
+    // records it when the answer is an operator judgment ("judged by operator", core-ts ≥ 0.9.7);
+    // an older addon ignores the trailing argument.
+    actorLabel?: string,
   ): Promise<string> {
     return this.handedToEngine('run', runId, () => {
+      if (actorLabel !== undefined && plan === undefined) {
+        const why =
+          action !== undefined || amendScope !== undefined
+            ? armsUnsupportedReason('the gate arms `action` / `amendScope`', 'approve or reject without them')
+            : null;
+        if (why !== null) throw new Error(why);
+        const core = this.core as unknown as {
+          confirmGate(
+            runId: string,
+            approve: boolean,
+            amend?: string,
+            action?: string,
+            amendScope?: string,
+            planJson?: string,
+            actor?: string,
+          ): Promise<string>;
+        };
+        return core.confirmGate(runId, approve, amend, action, amendScope, undefined, actorLabel);
+      }
       if (plan !== undefined) {
         // DES-TEAMING-002 T3: approve a `plan_approval` gate WITH AN EDIT — the engine proposes,
         // floor-fills and accepts it (or refuses it and re-opens the gate). Fail CLOSED on an
