@@ -4064,6 +4064,11 @@ export function registerRoutes(
       repo,
       // crew#951: a run with an evidence root keeps its QE ledger there (where its QE unit records).
       evidenceRoot: typeof evidenceRoot === 'string' ? evidenceRoot : null,
+      // crew#971: QE verdicts count only for the tree they judged — this run's deliverable tree.
+      deliverableTree: (() => {
+        const t = (run.session as { verified_tree?: unknown }).verified_tree;
+        return typeof t === 'string' && t !== '' ? t : null;
+      })(),
       requirement,
       ...(opts.qeRunId !== undefined ? { qeRunId: opts.qeRunId } : {}),
       // AW-14 (arch-R13a + R16): the conformance section reads the same wires the standalone
