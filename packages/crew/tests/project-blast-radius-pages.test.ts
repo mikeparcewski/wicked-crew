@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 
-import { projectBlastRadius, type Queryable } from '../src/projects/graph.js';
+import { projectBlastRadius, readBlastRadiusPages, type Queryable } from '../src/projects/graph.js';
 import { removeScratch } from './setup/scratch.js';
 
 const dir = mkdtempSync(join(tmpdir(), 'project-blast-pages-'));
@@ -83,5 +83,15 @@ describe.skipIf(process.platform === 'win32')('projectBlastRadius follows estate
     expect(out.dependents).toHaveLength(1);
     expect(out.truncated_dependents).toBe(2);
     expect(calls()).toHaveLength(1);
+  });
+
+  it('the repo route\'s reader joins the pages too: every row, the last page\'s fields, the joined window', async () => {
+    const { env } = pagedEstate([
+      { target: 'charge', unresolved: 1, dependents: [hit('api', 1)], truncated_dependents: 1, next_cursor: 'c1', page: { count: 1, from: 0, total: 2 } },
+      { target: 'charge', unresolved: 1, dependents: [hit('api', 2)], truncated_dependents: 0, next_cursor: null, page: { count: 1, from: 1, total: 2 } },
+    ]);
+    const out = await readBlastRadiusPages(env['WICKED_ESTATE_EXE']!, 'charge', q.dbPath, { timeout: 10_000 });
+    expect((out['dependents'] as Array<{ name: string }>).map((d) => d.name)).toEqual(['f1', 'f2']);
+    expect(out).toMatchObject({ unresolved: 1, truncated_dependents: 0, next_cursor: null, page: { count: 2, from: 0, total: 2 } });
   });
 });
