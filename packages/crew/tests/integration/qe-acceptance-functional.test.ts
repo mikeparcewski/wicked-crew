@@ -14,7 +14,12 @@
 //
 // The FAIL and PASS are created through the wicked-ledger API itself — the same store the QE
 // pipeline writes — not by hand-editing files, so the flips exercise the real data contract, and
-// the read side never writes: the run's `.wicked-testing/` gains no `wicked-qe.db` from a GET.
+// the read side never writes: the run ledger gains no `wicked-qe.db` from a GET.
+//
+// crew#951: the ledger read is the RUN's — `<evidence root>/.wicked-qe`, the root the engine hands
+// the run's QE unit as `WICKED_QE_LEDGER_DIR` (every repo-bound launch mints an evidence root). The
+// fixture ledger is placed there; the repo keeps its own legacy copy as a DECOY the gate must not
+// read (a repo's ledger does not speak for a run that has its own).
 //
 // Two engine behaviors this test deliberately RIDES rather than works around:
 //  - wicked-core auto-pins its built-in evidence floor onto any `verified_evidence` phase with no
@@ -85,6 +90,8 @@ let dir: string;
 let workspace: string;
 let baseUrl: string;
 let runId: string;
+/** The run's QE ledger (crew#951): `<session.evidence_root>/.wicked-qe`. */
+let runLedger: string;
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 
@@ -210,6 +217,12 @@ beforeAll(async () => {
   // The denied unit stays denied after the cancel — a reject decides the run, not the denial.
   const cancelled = await getJson(`/api/v1/runs/${runId}`);
   expect((cancelled.body['run'] as { units: Array<{ id: string; status: string }> }).units.find((u) => u.id.endsWith(':accept'))?.status).toBe('rejected');
+
+  // crew#951: the run's QE ledger lives under its evidence root; the fixture ledger goes there.
+  const evidenceRoot = (cancelled.body['run'] as { session: { evidence_root?: unknown } }).session.evidence_root;
+  expect(typeof evidenceRoot, 'a repo-bound launch mints an evidence root').toBe('string');
+  runLedger = join(evidenceRoot as string, '.wicked-qe');
+  cpSync(join(FIXTURE, '.wicked-testing'), runLedger, { recursive: true });
 }, 60000);
 
 afterAll(async () => {
@@ -245,9 +258,10 @@ describe('functional: the 6a acceptance gate over a real daemon + real ledger', 
     // A repo is registered by its real path (#778): on macOS the tmpdir is under /var, a symlink
     // to /private/var, so the stored root is the resolved one.
     expect(body['repo']).toMatchObject({ name: 'qe-accept-ws', rootPath: realpathSync(workspace) });
-    // The ledger IS found and reported — as what the repo holds, not as this run's evidence.
+    // The RUN's ledger IS found and reported — what it holds is not this run's evidence (the
+    // fixture's PASS predates the run). The repo's own decoy ledger is never read (crew#951).
     expect(body['acceptance']).toMatchObject({
-      ledgerDir: '.wicked-testing',
+      ledgerDir: '.wicked-qe',
       found: true,
       verdict: null,
       qeRun: null,
@@ -263,7 +277,8 @@ describe('functional: the 6a acceptance gate over a real daemon + real ledger', 
 
     // And the GET wrote nothing into the checkout: no derived index materialised on a read.
     for (const stray of ['wicked-qe.db', 'wicked-qe.db-wal', 'wicked-qe.db-shm']) {
-      expect(existsSync(join(workspace, '.wicked-testing', stray)), `${stray} created by a GET`).toBe(false);
+      expect(existsSync(join(runLedger, stray)), `${stray} created by a GET`).toBe(false);
+      expect(existsSync(join(workspace, '.wicked-testing', stray)), `${stray} created in the repo by a GET`).toBe(false);
     }
   });
 
@@ -272,7 +287,7 @@ describe('functional: the 6a acceptance gate over a real daemon + real ledger', 
     // placed inside the crew run's lifetime, as a pipeline running in one of its units would be.
     const { startedAt } = await runWindow();
     const { createDomainStore } = await import('wicked-ledger');
-    const store = createDomainStore({ root: join(workspace, '.wicked-testing') });
+    const store = createDomainStore({ root: runLedger });
     // The WRITER owns the derived index: the fixture ships JSON-only, so the pipeline side builds
     // it before writing — the read side never does this on its behalf any more (F-E2E-013).
     store.rebuildIndex();
@@ -319,7 +334,7 @@ describe('functional: the 6a acceptance gate over a real daemon + real ledger', 
     // runs are this crew run's, and one of them still says FAIL.
     const { finishedAt } = await runWindow();
     const { createDomainStore } = await import('wicked-ledger');
-    const store = createDomainStore({ root: join(workspace, '.wicked-testing') });
+    const store = createDomainStore({ root: runLedger });
     const passRun = store.get('runs', QE_RUN_ID)!;
     const stampedRun = store.create('runs', {
       project_id: passRun.project_id,
@@ -355,7 +370,7 @@ describe('functional: the 6a acceptance gate over a real daemon + real ledger', 
     // Supersession stays PER QE RUN: the re-review is the failing run's newest verdict, so the
     // deny-dominates set is now {PASS, PASS} and the newest PASS governs.
     const { createDomainStore } = await import('wicked-ledger');
-    const store = createDomainStore({ root: join(workspace, '.wicked-testing') });
+    const store = createDomainStore({ root: runLedger });
     store.create('verdicts', {
       run_id: failRunId,
       verdict: 'PASS',
