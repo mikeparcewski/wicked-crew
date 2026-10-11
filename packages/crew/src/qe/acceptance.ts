@@ -541,14 +541,10 @@ export function runWindowFromEvents(
     }
   }
   const qeAttempts = qeAttemptsFromEvents(events, qeUnitOrds);
-  // The deliverable tree: the engine's verified tree when the caller has it, else the newest gate's.
-  let tree: string | null = typeof currentTree === 'string' && currentTree !== '' ? currentTree : null;
-  if (tree === null) {
-    for (const e of events) {
-      const t = (e as { assurance?: { tree?: unknown } }).assurance?.tree;
-      if (e.type === 'gateEvaluated' && typeof t === 'string' && t !== '') tree = t;
-    }
-  }
+  // The deliverable tree: ONLY the engine's verified tree the caller hands in. None ⇒ no scoping
+  // (every verdict counts, the conservative reading — codex r2 on #973: a log-derived fallback
+  // re-enabled scoping on exactly the paths that must stay unscoped).
+  const tree: string | null = typeof currentTree === 'string' && currentTree !== '' ? currentTree : null;
   return { runId, startedAt, finishedAt, ...(qeAttempts.length > 0 ? { qeAttempts, currentTree: tree } : {}) };
 }
 
@@ -600,7 +596,7 @@ export async function buildAcceptanceView(opts: {
   evidenceRoot?: string | null;
   /**
    * (crew#971) The run's deliverable tree (`session.verified_tree`): only QE verdicts that judged
-   * this tree count. Absent ⇒ the newest gate's tree from the event log.
+   * this tree count. Absent/null ⇒ no tree scoping (every verdict counts).
    */
   deliverableTree?: string | null;
   /** (crew#971) The ords of the run's QE unit(s) — the units carrying a QE decision. */

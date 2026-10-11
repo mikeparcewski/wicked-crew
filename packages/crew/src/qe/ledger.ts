@@ -174,8 +174,7 @@ export interface RunLinkage {
    */
   qeAttempts?: QeAttemptWindow[];
   /**
-   * (crew#971) The run's CURRENT deliverable tree (`session.verified_tree`, else the newest gate's
-   * tree). With {@link qeAttempts}, only verdicts recorded in an attempt that judged THIS tree are
+   * (crew#971) The run's CURRENT deliverable tree (`session.verified_tree`; null ⇒ no scoping). With {@link qeAttempts}, only verdicts recorded in an attempt that judged THIS tree are
    * the run's evidence: a FAIL on a tree a send-back superseded no longer blocks the delivery.
    */
   currentTree?: string | null;
