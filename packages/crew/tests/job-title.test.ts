@@ -37,6 +37,15 @@ describe('jobTitle', () => {
     expect(jobTitle(problem)).toBe(title);
   });
 
+  it('keeps literal pipes in the operator\'s words', () => {
+    expect(jobTitle('Fix the foo|||bar parser')).toBe('Fix the foo|||bar parser');
+  });
+
+  it('cuts at a later aside when the first one comes too early', () => {
+    expect(jobTitle('Ok so yes, fix the release notes generator, and then publish the docs site for every package'))
+      .toBe('Ok so yes, fix the release notes generator');
+  });
+
   it('cuts the engine step scaffold', () => {
     expect(jobTitle('review the diff ||| PHASE SCOPE: build only')).toBe('Review the diff');
   });

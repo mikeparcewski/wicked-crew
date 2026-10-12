@@ -34,7 +34,7 @@ const ASIDES = [' — ', ' – ', ' - ', ', meaning ', ', so that ', ', so ', ',
 
 export function jobTitle(problem: string | null | undefined): string {
   const raw = (problem ?? '').replace(CONTEXT_PACK, '');
-  const bar = raw.indexOf('|||');
+  const bar = raw.indexOf(' ||| ');
   const text = (bar === -1 ? raw : raw.slice(0, bar)).trim();
   if (text === '') return 'Untitled job';
 
@@ -73,7 +73,7 @@ function firstClause(text: string): string {
 function beforeAside(clause: string): string {
   let best = -1;
   for (const a of ASIDES) {
-    const at = clause.indexOf(a);
+    const at = clause.indexOf(a, MIN_HEAD);
     if (at >= MIN_HEAD && (best === -1 || at < best)) best = at;
   }
   return best === -1 ? clause : clause.slice(0, best);
