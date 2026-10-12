@@ -8,7 +8,7 @@
  *   `destructiveHint !== false` (the MCP spec default); else `write`. A tool with NO annotations
  *   is `write` (D-4).
  * - The SCHEMA HASH covers everything a policy or an operator approved: description, input and
- *   output schema, annotations, and a `rest` tool's request mapping. Any change sends the tool back to unregistered (D-5) until it
+ *   output schema, annotations, and a `rest` tool's request mapping and target (G2). Any change sends the tool back to unregistered (D-5) until it
  *   is previewed and saved again.
  */
 
@@ -84,7 +84,18 @@ export interface HashedToolShape {
   rest?: McpRestMapping | null;
 }
 
-export function toolSchemaHash(tool: HashedToolShape): string {
+/**
+ * (G2, DES-data-connectors §3) What a `rest` tool's calls go to: the base URL's origin and path and
+ * the header its secret rides in. Part of a REST tool's hash, so a changed target re-registers the
+ * tool (D-5) and withdraws its approvals until it is previewed and saved again.
+ */
+export interface HashedRestTarget {
+  origin: string;
+  basePath: string;
+  authHeader: string | null;
+}
+
+export function toolSchemaHash(tool: HashedToolShape, target: HashedRestTarget | null = null): string {
   return sha256Hex(
     canonicalJson({
       name: tool.name,
@@ -94,6 +105,9 @@ export function toolSchemaHash(tool: HashedToolShape): string {
       annotations: tool.annotations,
       // Only when present, so an MCP tool's hash is what it was before REST upstreams existed.
       ...(tool.rest != null ? { rest: tool.rest } : {}),
+      // Only for a REST tool (G2). A REST tool saved before G2 has a hash without it, so it reads
+      // `unregistered` until it is saved again (no silent re-hash).
+      ...(target !== null ? { target } : {}),
     }),
   );
 }

@@ -190,6 +190,10 @@ export class McpBroker {
       return this.refuse(span, 'guard_error', 'guard_error', 'engine', [], `the call could not be judged or recorded: ${msg}`, 'nothing ran; try again, and report it if it persists');
     }
     span.verdict = verdict;
+    if (verdict.decision === 'deny' && target?.resaveRequired === true) {
+      // (G2) The engine denied an unregistered tool (D-5); say the one thing that fixes it.
+      return this.refuse(span, 'denied', 'deny', verdict.ruleIds[0] ?? 'policy', verdict.ruleIds, resaveReason(body.subject), RESAVE_REMEDY);
+    }
     if (verdict.decision === 'deny') {
       return this.refuse(span, 'denied', 'deny', verdict.ruleIds[0] ?? 'policy', verdict.ruleIds, verdict.reason, verdict.remedy);
     }
@@ -199,6 +203,7 @@ export class McpBroker {
     if (target === null || !target.registered) {
       // The engine allowed a subject the registry does not hold as registered (unknown, disabled,
       // `gone` or changed since its preview): never invoke it (D-5 holds even if the engine errs).
+      if (target?.resaveRequired === true) return this.refuse(span, 'guard_error', 'guard_error', 'broker', verdict.ruleIds, resaveReason(body.subject), RESAVE_REMEDY);
       return this.refuse(span, 'guard_error', 'guard_error', 'broker', verdict.ruleIds, `${body.subject} is not a registered, enabled tool`, 'register it in studio → MCP tools');
     }
 
@@ -391,6 +396,19 @@ export class McpBroker {
     }
   }
 }
+
+/**
+ * (G2) Why a `rest` tool whose saved hash does not cover its target is refused: it was saved
+ * before the target was part of the hash, or its url or auth header changed outside a save. Its hash is
+ * not re-computed silently (DES-data-connectors §3): the operator re-saves it, which also withdraws
+ * its earlier approvals and leaves its write tools off until they are granted again.
+ */
+function resaveReason(subject: string): string {
+  return `${subject} is refused: its saved approval does not cover where the API's calls go (the base URL's origin and path, and the auth header), because it was saved before crew bound REST approvals to that target or the target changed without a save. The operator must re-save the server`;
+}
+const RESAVE_REMEDY =
+  'the operator re-saves the server in studio → MCP tools (preview it, then save), re-granting any write tools; the first call then asks again. ' +
+  "If the save answers egress_unconfirmed (a private address, or a base URL the spec's servers don't name), a human operator saves it through POST /api/v1/mcp/servers with allowOrigin set to the preview's egress.origin";
 
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);

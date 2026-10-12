@@ -26,6 +26,7 @@
 import type {
   ConformanceRule,
   McpApproval,
+  McpAuthConfig,
   McpApprovalsResponse,
   McpApprovalState,
   McpDecision,
@@ -42,8 +43,9 @@ import type {
   McpToolClass,
   McpUpstreamKind,
 } from '../core/types.js';
-import { MCP_SERVER_NAME_RE, parseMcpSubject } from './classify.js';
+import { canonicalJson, type HashedRestTarget, MCP_SERVER_NAME_RE, parseMcpSubject } from './classify.js';
 import { McpRegistryError, type McpRegistry } from './registry.js';
+import { restTarget } from './rest.js';
 
 /**
  * A ledger edit that failed part-way. `changed` names the rules still changed after the rollback
@@ -195,10 +197,10 @@ export class McpPolicies {
    * The matrix for a server that is being added (`POST /mcp/servers/preview`): every tool judged
    * as if the preview were saved now, so the operator sees what would run, ask or be denied.
    */
-  async previewUnsaved(server: { name: string; kind: McpUpstreamKind }, tools: McpPreviewTool[]): Promise<McpPolicyPreviewResponse> {
+  async previewUnsaved(server: { name: string; kind: McpUpstreamKind; url: string | null; auth: McpAuthConfig | null }, tools: McpPreviewTool[]): Promise<McpPolicyPreviewResponse> {
     const cells = this.cells({});
     const ledgers = await this.ledgers();
-    const withdrawOnSave = await this.withdrawnBySave({ name: server.name, tools });
+    const withdrawOnSave = await this.withdrawnBySave({ name: server.name, tools, target: server.kind === 'rest' ? restTarget(server) : null });
     const calls: EngineCall[] = tools.map((t) => ({
       server: server.name,
       tool: t.name,
@@ -295,8 +297,13 @@ export class McpPolicies {
    * The approval tokens saving `next` over the registered server of the same name withdraws: each
    * tool whose saved schema changed, and the server's own token when any did (a server-wide
    * approval cannot leave one tool out). Empty for a new server or an unchanged one.
+   *
+   * (G2) A `rest` server whose target (`next.target`: origin, base path, auth header) differs from
+   * the registered one's withdraws EVERY approval naming the server, even when no tool name is in
+   * both saves: an approval covered the API it was given for, not the server's name. So does
+   * re-saving a registration whose saved hashes never covered its target (saved before G2).
    */
-  async withdrawnBySave(next: { name: string; tools: ReadonlyArray<{ name: string; schemaHash: string }> }): Promise<string[]> {
+  async withdrawnBySave(next: { name: string; tools: ReadonlyArray<{ name: string; schemaHash: string }>; target: HashedRestTarget | null }): Promise<string[]> {
     let prior: McpServer;
     try {
       prior = await this.registry.get(next.name);
@@ -307,6 +314,8 @@ export class McpPolicies {
     // A `gone` tool keeps its last saved schema hash (the registry never deletes one), so a tool
     // that is dropped and later returns with a different schema counts as changed here too; one
     // that returns unchanged keeps its approval, and while gone it is unregistered (D-5) anyway.
+    const priorTarget = prior.kind === 'rest' ? restTarget(prior) : null;
+    if (canonicalJson(priorTarget) !== canonicalJson(next.target) || !(await this.registry.targetBound(next.name))) return this.tokensOf(next.name);
     const changed = prior.tools.filter((t) => {
       if (t.schemaHash === null) return false;
       const now = next.tools.find((x) => x.name === t.name);

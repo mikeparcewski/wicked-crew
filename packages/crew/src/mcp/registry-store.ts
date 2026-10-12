@@ -56,6 +56,12 @@ export interface McpServerRecord {
   openapiUrl?: string | null;
   openapi?: Record<string, unknown> | null;
   operations?: string[] | null;
+  /**
+   * `rest` only (G2): the origin the operator confirmed with `allowOrigin` (a base URL that
+   * matches none of the spec's `servers`, or a private address). Kept while the server still goes
+   * there, so a re-save over it does not ask again.
+   */
+  allowedOrigin?: string;
   enabled: boolean;
   health: McpHealth;
   registeredAt: string;
