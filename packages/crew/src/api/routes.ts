@@ -1240,6 +1240,12 @@ export function registerRoutes(
     if (deliveryResolver === undefined) return;
     await deliveryResolver.settle(views, runtime.deliverySettleMs);
   };
+  // crew#985: terminal runs with no `run.ended` entry are dated from the engine's event log before
+  // the DTO is assembled (read-only, once per run per process; see `backfillEndedFromEvents`).
+  const backfillEndedAt = async (views: readonly SessionView[]): Promise<void> => {
+    if (typeof adapter.runEvents !== 'function') return;
+    await runTimingIndex.backfillEndedFromEvents(views, (id) => adapter.runEvents(id));
+  };
   const deliveryCache =
     runtime.deliveryCache ??
     new DeliveryDerivationCache({
@@ -1777,7 +1783,9 @@ export function registerRoutes(
         }
         days = n;
       }
-      const views = (await adapter.sessionsDetail()).map(decorateRun);
+      const detail = await adapter.sessionsDetail();
+      await backfillEndedAt(detail);
+      const views = detail.map(decorateRun);
       const out = await seatRecord(
         views,
         async (id) => {
@@ -2681,6 +2689,7 @@ export function registerRoutes(
     const ordered = sortActionableFirst(visible);
     const served = cap !== undefined ? ordered.slice(0, cap) : ordered;
     await settleDeliveries(served);
+    await backfillEndedAt(served);
     return { runs: served.map(decorateRun) };
   });
 
@@ -2742,6 +2751,7 @@ export function registerRoutes(
     const run = views.find((v) => v.session.id === id);
     if (!run) return reply.code(404).send({ error: 'Run not found' });
     await settleDeliveries([run]);
+    await backfillEndedAt([run]);
     return { run: decorateRun(run) };
   });
 

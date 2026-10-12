@@ -27,7 +27,7 @@ import { MembershipIndex } from '../src/projects/membership-index.js';
 import { AuditLog } from '../src/api/audit.js';
 import { RunTimingIndex, recordRunLaunched } from '../src/api/run-timing-index.js';
 import { CoreAdapter } from '../src/core/adapter.js';
-import type { AuditEntry, SessionView } from '../src/core/types.js';
+import type { AuditEntry, RecordedEvent, SessionView } from '../src/core/types.js';
 import type { LaunchOptions } from 'wicked-core-ts';
 import { removeScratch } from './setup/scratch.js';
 
@@ -192,5 +192,113 @@ describe('onboarding created_at — the adapter reports its off-POST-/runs launc
 
   it('with no recorder wired (a CLI-driven adapter) the launch is byte-for-byte today', async () => {
     await expect(adapter.launchOnboardingRun('repo-3', 'gamma')).resolves.toMatch(/[0-9a-f-]{36}/);
+  });
+});
+
+// crew#985: a terminal run with no `run.ended` entry (it ended before crew#496, or while no daemon
+// watched) is dated from the FIRST terminal frame in the engine's event log — read-only, in memory.
+describe('RunTimingIndex.backfillEndedFromEvents (crew#985)', () => {
+  function ev(type: string, ts: number): RecordedEvent {
+    return { type, ts, seq: ts } as unknown as RecordedEvent;
+  }
+
+  it('dates an undated terminal run from its FIRST terminal frame; live and already-recorded runs are not read', async () => {
+    const idx = new RunTimingIndex();
+    idx.setEnded('recorded', 9_000_000);
+    const logs: Record<string, RecordedEvent[]> = {
+      old: [ev('sessionStarted', 1_000_000), ev('sessionFailed', 2_000_999), ev('sessionCompleted', 3_000_000)],
+    };
+    const read = vi.fn(async (id: string) => logs[id] ?? []);
+    await idx.backfillEndedFromEvents([view('old', 'failed'), view('live', 'executing'), view('recorded', 'completed')], read);
+    expect(idx.endedAtFor('old')).toBe(2_000);
+    expect(idx.endedAtFor('live')).toBeUndefined();
+    expect(idx.endedAtFor('recorded')).toBe(9_000);
+    expect(read.mock.calls.map((c) => c[0])).toEqual(['old']);
+  });
+
+  it('a derived instant never counts as RECORDED: the daemon still writes run.ended, and the recorded one wins', async () => {
+    const idx = new RunTimingIndex();
+    await idx.backfillEndedFromEvents([view('r', 'completed')], async () => [ev('sessionCompleted', 5_000_000)]);
+    expect(idx.endedAtFor('r')).toBe(5_000);
+    expect(idx.hasRecordedEnd('r')).toBe(false);
+    idx.setEnded('r', 5_001_000);
+    expect(idx.hasRecordedEnd('r')).toBe(true);
+    expect(idx.endedAtFor('r')).toBe(5_001);
+  });
+
+  it('a log with no terminal frame stays ABSENT and is read once; a failed read is retried; a null binding dates nothing', async () => {
+    const idx = new RunTimingIndex();
+    const empty = vi.fn(async () => [] as RecordedEvent[]);
+    await idx.backfillEndedFromEvents([view('pre-log', 'completed')], empty);
+    await idx.backfillEndedFromEvents([view('pre-log', 'completed')], empty);
+    expect(idx.endedAtFor('pre-log')).toBeUndefined();
+    expect(empty).toHaveBeenCalledTimes(1);
+
+    let calls = 0;
+    const flaky = async (): Promise<RecordedEvent[]> => {
+      calls += 1;
+      if (calls === 1) throw new Error('store busy');
+      return [ev('runCancelled', 7_000_000)];
+    };
+    await idx.backfillEndedFromEvents([view('flaky', 'cancelled')], flaky);
+    expect(idx.endedAtFor('flaky')).toBeUndefined();
+    await idx.backfillEndedFromEvents([view('flaky', 'cancelled')], flaky);
+    expect(idx.endedAtFor('flaky')).toBe(7_000);
+
+    await idx.backfillEndedFromEvents([view('no-binding', 'completed')], async () => null);
+    expect(idx.endedAtFor('no-binding')).toBeUndefined();
+  });
+
+  it('an overlapping request waits for the read already in flight instead of serving the run undated', async () => {
+    const idx = new RunTimingIndex();
+    let release!: (events: RecordedEvent[]) => void;
+    const read = vi.fn(() => new Promise<RecordedEvent[]>((resolve) => (release = resolve)));
+    const first = idx.backfillEndedFromEvents([view('slow', 'completed')], read);
+    let secondDone = false;
+    const second = idx.backfillEndedFromEvents([view('slow', 'completed')], read).then(() => {
+      secondDone = true;
+    });
+    await Promise.resolve();
+    expect(secondDone).toBe(false);
+    release([ev('sessionCompleted', 4_000_000)]);
+    await Promise.all([first, second]);
+    expect(idx.endedAtFor('slow')).toBe(4_000);
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+
+  it('GET /runs and GET /runs/:id serve the derived ended_at; the live run stays ABSENT', async () => {
+    const views = [view('pre-field', 'completed'), view('run-live', 'executing')];
+    const adapter = {
+      sessionsDetail: vi.fn().mockResolvedValue(views),
+      sessions: vi.fn().mockResolvedValue(views.map((v) => v.session.id)),
+      runEvents: vi.fn(async (id: string) =>
+        id === 'pre-field' ? [ev('sessionStarted', 1_700_000_000_000), ev('sessionCompleted', 1_700_000_120_500)] : [],
+      ),
+    };
+    const app = Fastify({ logger: false });
+    registerRoutes(
+      app,
+      adapter as unknown as CoreAdapter,
+      new GateCache(),
+      new ElicitationCache(),
+      { bus: null, index: new MembershipIndex(), log: () => undefined },
+      { audit: AuditLog.noop(), authMode: 'off' },
+      { runTimingIndex: new RunTimingIndex() },
+    );
+    await app.ready();
+    try {
+      const list = (await app.inject({ method: 'GET', url: '/api/v1/runs' })).json() as {
+        runs: { session: Record<string, unknown> }[];
+      };
+      expect(list.runs.find((r) => r.session['id'] === 'pre-field')!.session['ended_at']).toBe(1_700_000_120);
+      expect('ended_at' in list.runs.find((r) => r.session['id'] === 'run-live')!.session).toBe(false);
+      const detail = (await app.inject({ method: 'GET', url: '/api/v1/runs/pre-field' })).json() as {
+        run: { session: Record<string, unknown> };
+      };
+      expect(detail.run.session['ended_at']).toBe(1_700_000_120);
+      expect(adapter.runEvents).toHaveBeenCalledTimes(1); // once per run per process
+    } finally {
+      await app.close();
+    }
   });
 });
