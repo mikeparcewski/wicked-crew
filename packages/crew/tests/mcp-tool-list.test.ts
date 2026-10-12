@@ -108,7 +108,8 @@ beforeEach(async () => {
     url: null,
     auth: null,
   })) as McpPreviewResponse;
-  await registry.save(preview.previewHash);
+  // G1: writes register disabled; these tests exercise the broker over every tool, so all are granted.
+  await registry.save(preview.previewHash, preview.tools.filter((t) => t.class !== 'read').map((t) => t.name));
 });
 
 afterEach(async () => {

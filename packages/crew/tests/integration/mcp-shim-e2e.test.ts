@@ -228,7 +228,8 @@ beforeAll(async () => {
     auth: null,
   });
   expect(preview.status, JSON.stringify(preview.body)).toBe(200);
-  const saved = await postJson('/api/v1/mcp/servers', { previewHash: preview.body['previewHash'] });
+  // G1: a write registers disabled; the operator grants wt_note (destructive) at save.
+  const saved = await postJson('/api/v1/mcp/servers', { previewHash: preview.body['previewHash'], enabledWrites: ['wt_note'] });
   expect(saved.status, JSON.stringify(saved.body)).toBeLessThan(300);
   const approved = await postJson('/api/v1/mcp/approvals', { subject: 'mcp:fx' });
   expect(approved.status, JSON.stringify(approved.body)).toBeLessThan(300);

@@ -6,11 +6,17 @@
  *   POST   /mcp/servers/preview         probe (10 s, hardened env): tools, classes and a previewHash
  *                                       (`kind: "rest"`, slice S5a: the tools of an OpenAPI 3 document,
  *                                       each pinned to the base `url`; see `mcp/rest.ts`)
- *   POST   /mcp/servers                 save: `{previewHash}` only; missing, unknown or expired → 409
+ *   POST   /mcp/servers                 save: `{previewHash, enabledWrites?}`; missing, unknown or expired → 409.
+ *                                       (G1) a write/destructive tool that is new or whose schema changed
+ *                                       is registered DISABLED; `enabledWrites` names the ones the operator
+ *                                       grants (human operator only → else 403), each audited
+ *                                       `mcp.tool.write_granted`
  *   PATCH  /mcp/servers/:name           `{enabled}`
  *   DELETE /mcp/servers/:name           remove the server and the keychain secret it owns
  *   POST   /mcp/servers/:name/test      probe again: health plus the tool diff
- *   PATCH  /mcp/tools/:subject          `{enabled?, classOverride?}`; `:subject` is `mcp:<server>/<tool>`, URL-encoded
+ *   PATCH  /mcp/tools/:subject          `{enabled?, classOverride?}`; `:subject` is `mcp:<server>/<tool>`, URL-encoded.
+ *                                       (G1) turning a write tool on is a grant: human operator only (403),
+ *                                       audited `mcp.tool.write_granted`
  *   PUT    /mcp/servers/:name/secret    `{value}` → the OS keychain; answers `{ref, set: true}`, never the value.
  *                                       RE-KEY only (crew#719): the server must already reference
  *                                       `keychain:wicked-mcp/<name>`. A new server's secret rides
@@ -50,7 +56,7 @@ import { MCP_SERVER_NAME_RE } from '../mcp/classify.js';
 import type { McpBroker } from '../mcp/broker.js';
 import type { McpPolicies } from '../mcp/policies.js';
 import { MCP_PREVIEW_ROLES, MCP_RUN_MODES, McpLedgerEditError } from '../mcp/policies.js';
-import { McpRegistryError, type McpRegistry } from '../mcp/registry.js';
+import { isWriteGrant, McpRegistryError, type McpRegistry } from '../mcp/registry.js';
 import { listUnitTools } from '../mcp/tool-list.js';
 import { McpRegistryCorruptError } from '../mcp/registry-store.js';
 import { parseSecretRef, SecretStoreError } from '../mcp/secrets.js';
@@ -60,6 +66,7 @@ import type { McpUpstreamConfig } from '../mcp/probe.js';
 import { parseBaseUrl, REST_SPEC_MAX_BYTES } from '../mcp/rest.js';
 import { API_PREFIX } from './api-prefix.js';
 import type { AuditLog } from './audit.js';
+import { trustAtLeast } from './auth.js';
 
 const V = API_PREFIX;
 const serverName = z.string().regex(MCP_SERVER_NAME_RE, 'a server name is 1-63 of a-z 0-9 _ -, starting with a letter or digit');
@@ -144,7 +151,13 @@ export const McpServerConfigSchema = z
       if (c.auth != null && (c.auth.header === undefined || c.auth.env !== undefined)) issue('auth', 'an mcp-http server injects its secret into one header: auth.header, no auth.env');
     }
   });
-export const SaveMcpServerSchema = z.object({ previewHash: z.string().min(1).max(128).optional() }).strict();
+export const SaveMcpServerSchema = z
+  .object({
+    previewHash: z.string().min(1).max(128).optional(),
+    /** (G1) The write/destructive tools of the preview the operator grants: registered enabled. */
+    enabledWrites: z.array(z.string().min(1).max(256)).max(512).optional(),
+  })
+  .strict();
 export const PatchMcpServerSchema = z.object({ enabled: z.boolean() }).strict();
 export const PatchMcpToolSchema = z
   .object({ enabled: z.boolean().optional(), classOverride: toolClass.nullable().optional() })
@@ -216,6 +229,22 @@ function fail(reply: FastifyReply, err: unknown): FastifyReply {
   throw err;
 }
 
+/**
+ * (G1, DES-data-connectors §3) Enabling a write tool is the operator's grant: a human operator
+ * only, like an editor install (`editors/routes.ts`). Under `auth=off` every same-uid caller is the
+ * local human actor, so this refuses a worker token; it is not a boundary against the local user.
+ */
+function mayGrantWrite(actor: Actor): boolean {
+  return actor.kind === 'human' && trustAtLeast(actor, 'operator');
+}
+
+function writeGrantRefused(reply: FastifyReply, actor: Actor): FastifyReply {
+  return reply.code(403).send({
+    error: `only a human operator can enable a write tool (a write grant); you are ${actor.kind}/${actor.trust}`,
+    code: 'write_grant_human_only',
+  });
+}
+
 function toConfig(body: z.infer<typeof McpServerConfigSchema>): McpUpstreamConfig {
   return {
     name: body.name,
@@ -281,12 +310,15 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
 
   app.post(
     `${V}/mcp/servers`,
-    { config: { manifest: { requestType: 'SaveMcpServerBody', responseType: 'McpServer', statusCodes: [201, 400, 409, 500, 502, 503] } } },
+    { config: { manifest: { requestType: 'SaveMcpServerBody', responseType: 'McpServer', statusCodes: [201, 400, 403, 409, 500, 502, 503] } } },
     async (req, reply) => {
       const r = registry(reply);
       if (r === null) return reply;
       const parsed = SaveMcpServerSchema.safeParse(req.body ?? {});
       if (!parsed.success) return invalidBody(reply, parsed.error);
+      const enabledWrites = [...new Set(parsed.data.enabledWrites ?? [])];
+      // A grant is refused before anything is withdrawn or saved.
+      if (enabledWrites.length > 0 && !mayGrantWrite(deps.actorOf(req))) return writeGrantRefused(reply, deps.actorOf(req));
       try {
         // A saved tool whose schema changed loses its approvals BEFORE the save lands, so a failed
         // withdrawal refuses the save rather than leaving an approval over a schema nobody approved.
@@ -299,10 +331,22 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
             for (const id of rules) deps.audit.record('governance.rule.upserted', deps.actorOf(req), { detail: { id, source: 'mcp-approval' } });
           }
         }
-        const server = await r.save(parsed.data.previewHash);
+        const server = await r.save(parsed.data.previewHash, enabledWrites);
         deps.audit.record('mcp.server.saved', deps.actorOf(req), {
-          detail: { name: server.name, kind: server.kind, tools: server.tools.length, authRef: server.auth?.ref ?? null },
+          detail: {
+            name: server.name,
+            kind: server.kind,
+            tools: server.tools.length,
+            authRef: server.auth?.ref ?? null,
+            // G1: the write tools this save left off, so the record says what was not granted.
+            disabledWrites: server.tools.filter((t) => t.status !== 'gone' && !t.enabled && isWriteGrant(t.annotations, t.classOverride)).map((t) => t.subject),
+          },
         });
+        for (const name of enabledWrites) {
+          const tool = server.tools.find((t) => t.name === name);
+          if (tool === undefined) continue;
+          deps.audit.record('mcp.tool.write_granted', deps.actorOf(req), { detail: { subject: tool.subject, class: tool.class, via: 'save' } });
+        }
         return reply.code(201).send(server);
       } catch (err) {
         return fail(reply, err);
@@ -369,15 +413,19 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
 
   app.patch<{ Params: { subject: string } }>(
     `${V}/mcp/tools/:subject`,
-    { config: { manifest: { requestType: 'PatchMcpToolBody', responseType: 'McpTool', statusCodes: [200, 400, 404, 503] } } },
+    { config: { manifest: { requestType: 'PatchMcpToolBody', responseType: 'McpTool', statusCodes: [200, 400, 403, 404, 503] } } },
     async (req, reply) => {
       const r = registry(reply);
       if (r === null) return reply;
       const parsed = PatchMcpToolSchema.safeParse(req.body);
       if (!parsed.success) return invalidBody(reply, parsed.error);
       try {
-        const tool = await r.patchTool(req.params.subject, parsed.data);
-        deps.audit.record('mcp.tool.updated', deps.actorOf(req), { detail: { subject: tool.subject, ...parsed.data } });
+        const actor = deps.actorOf(req);
+        const tool = await r.patchTool(req.params.subject, parsed.data, { mayGrantWrite: mayGrantWrite(actor) });
+        deps.audit.record('mcp.tool.updated', actor, { detail: { subject: tool.subject, ...parsed.data } });
+        if (parsed.data.enabled === true && isWriteGrant(tool.annotations, tool.classOverride)) {
+          deps.audit.record('mcp.tool.write_granted', actor, { detail: { subject: tool.subject, class: tool.class, via: 'toggle' } });
+        }
         return tool;
       } catch (err) {
         return fail(reply, err);

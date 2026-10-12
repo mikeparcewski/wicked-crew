@@ -70,11 +70,14 @@ async function call(method: 'GET' | 'POST' | 'DELETE', url: string, payload?: un
   return app.inject({ method, url: `/api/v1${url}`, ...(payload !== undefined ? { payload: payload as object } : {}) });
 }
 
+/** G1: writes register disabled; these tests judge every tool, so each save grants all of them. */
+const grantAll = (p: McpPreviewResponse): string[] => p.tools.filter((t) => t.class !== 'read').map((t) => t.name);
+
 async function register(): Promise<McpPreviewResponse> {
   const preview = await call('POST', '/mcp/servers/preview', { name: 'fx', kind: 'mcp-stdio', command: process.execPath, args: [FIXTURE_SERVER, specPath] });
   expect(preview.statusCode, preview.body).toBe(200);
   const body = preview.json() as McpPreviewResponse;
-  const saved = await call('POST', '/mcp/servers', { previewHash: body.previewHash });
+  const saved = await call('POST', '/mcp/servers', { previewHash: body.previewHash, enabledWrites: grantAll(body) });
   expect(saved.statusCode, saved.body).toBe(201);
   return body;
 }
@@ -368,7 +371,7 @@ describe('approvals are audited edits of the ledger rules', () => {
     await call('POST', '/mcp/approvals', { subject: 'mcp:fx/wt_plain' });
     const save = async () => {
       const p = (await call('POST', '/mcp/servers/preview', { name: 'fx', kind: 'mcp-stdio', command: process.execPath, args: [FIXTURE_SERVER, specPath] })).json() as McpPreviewResponse;
-      expect((await call('POST', '/mcp/servers', { previewHash: p.previewHash })).statusCode).toBe(201);
+      expect((await call('POST', '/mcp/servers', { previewHash: p.previewHash, enabledWrites: grantAll(p) })).statusCode).toBe(201);
     };
     writeSpec(TOOLS.filter((t) => t.name !== 'wt_plain'));
     await save(); // wt_plain is gone: its approval is inert (D-5) but kept with its last schema
@@ -390,7 +393,7 @@ describe('approvals are audited edits of the ledger rules', () => {
     const again = (await call('POST', '/mcp/servers/preview', { name: 'fx', kind: 'mcp-stdio', command: process.execPath, args: [FIXTURE_SERVER, specPath] })).json() as McpPreviewResponse;
     expect(again.diff?.changed).toEqual(['wt_plain']);
     expect(again.policies?.withdrawOnSave).toEqual(['mcp:fx', 'mcp:fx/wt_plain']);
-    expect((await call('POST', '/mcp/servers', { previewHash: again.previewHash })).statusCode).toBe(201);
+    expect((await call('POST', '/mcp/servers', { previewHash: again.previewHash, enabledWrites: grantAll(again) })).statusCode).toBe(201);
     expect(await ledger(FIRST_USE_LEDGER)).toEqual(['mcp:fx/wt_echo']);
     expect(await ledger(WRITE_LEDGER)).toEqual(['mcp:fx/wt_echo']);
     const m = await matrix();
