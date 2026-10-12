@@ -11,6 +11,7 @@ import { join, sep } from 'node:path';
 import { ProjectSettingsStore, defaultSettingsPath } from '../src/projects/settings.js';
 import { setCrewStateHome, stateHomeOfDb } from '../src/projects/state-home.js';
 import { resolveInteractiveRoot, defaultInteractiveRoot } from '../src/interactive/bridge-root.js';
+import { useUnconfiguredTempHome } from './setup/temp-home.js';
 
 let dir: string;
 let path: string;
@@ -19,8 +20,9 @@ beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'crew-proj-settings-'));
   path = join(dir, 'nested', 'project-settings.json');
 });
+// crew#986: a temp HOME per test; the armed state home is restored after, never left unset.
+useUnconfiguredTempHome();
 afterEach(() => {
-  setCrewStateHome(undefined); // module state must never leak into another test
   rmSync(dir, { recursive: true, force: true });
 });
 

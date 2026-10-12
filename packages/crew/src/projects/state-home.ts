@@ -24,7 +24,7 @@
  * the tests and proof scripts already use.
  */
 
-import { homedir } from 'node:os';
+import { homedir, userInfo } from 'node:os';
 import { existsSync, realpathSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 
@@ -54,9 +54,40 @@ export function setCrewStateHome(stateHome: string | undefined): void {
 }
 
 /** The state home every durable store resolves under: the bootstrap-configured `--db` parent when
- *  a daemon is running, the historical `~/.wicked-crew` default otherwise. */
+ *  a daemon is running, the historical `~/.wicked-crew` default otherwise. Under a test runner it
+ *  refuses the real user's `~/.wicked-crew` (crew#986, {@link refuseLiveHomeUnderTest}). */
 export function crewStateHome(): string {
-  return configuredStateHome ?? defaultStateHome(homedir());
+  return refuseLiveHomeUnderTest(configuredStateHome ?? defaultStateHome(homedir()));
+}
+
+/**
+ * crew#986: a test must never resolve the operator's LIVE state home. The suite's
+ * `tests/setup/hermetic-home.ts` arms a temp one, but only when vitest loads crew's
+ * `vitest.config.ts`. A run from another directory (the repo root has no vitest config), or a test
+ * that unconfigures the home and leaves it unset, fell back to the real `~/.wicked-crew`: a live
+ * daemon's decision ledger held 21 gate decisions written by crew tests that way.
+ *
+ * So under a test runner (`VITEST` / `NODE_ENV=test`, the posture `server.ts` already keys on),
+ * resolving the real user's default state home throws instead. "Real" is the account's home from
+ * `os.userInfo()`, which ignores `HOME`, so a test that points `HOME` at a temp dir may still
+ * exercise the unconfigured default. Compared by identity, like {@link isDefaultStateHome}.
+ */
+function refuseLiveHomeUnderTest(stateHome: string): string {
+  if (process.env['VITEST'] === undefined && process.env['NODE_ENV'] !== 'test') return stateHome;
+  let realHome: string;
+  try {
+    realHome = userInfo().homedir;
+  } catch {
+    realHome = homedir();
+  }
+  if (realSpelling(stateHome) === realSpelling(defaultStateHome(realHome))) {
+    throw new Error(
+      `crew#986: refusing the live state home (${stateHome}) under a test runner. Run vitest from ` +
+        `packages/crew (its vitest.config.ts arms a temp state home), or give the test its own ` +
+        `state home (setCrewStateHome) or a temp HOME.`,
+    );
+  }
+  return stateHome;
 }
 
 /**
@@ -65,7 +96,7 @@ export function crewStateHome(): string {
  * default (codex on #760). Each side is the realpath of its deepest existing ancestor plus the rest.
  */
 export function isDefaultStateHome(): boolean {
-  return configuredStateHome === undefined || realSpelling(configuredStateHome) === realSpelling(defaultStateHome(homedir()));
+  return realSpelling(crewStateHome()) === realSpelling(defaultStateHome(homedir()));
 }
 
 function realSpelling(p: string): string {

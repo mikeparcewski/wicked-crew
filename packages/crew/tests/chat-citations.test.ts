@@ -35,7 +35,7 @@ import {
   type CitationRoot,
 } from '../src/api/chat-citations.js';
 import { createServer } from '../src/api/server.js';
-import { setCrewStateHome } from '../src/projects/state-home.js';
+import { crewStateHome, setCrewStateHome } from '../src/projects/state-home.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
@@ -303,6 +303,7 @@ describe('the server wiring: one chatCitations frame per reply, after the rewrit
   let repoRoot: string;
   let sha: string;
   let chatCwdParent: string | undefined;
+  let armedStateHome: string;
 
   beforeAll(async () => {
     scratch = mkdtempSync(join(tmpdir(), 'chat-citations-server-'));
@@ -310,6 +311,7 @@ describe('the server wiring: one chatCitations frame per reply, after the rewrit
     sha = initRepo(repoRoot, 'src/foo.ts', ['// a', 'const x = 1;', ''].join('\n'));
     const home = join(scratch, 'state-home');
     mkdirSync(home);
+    armedStateHome = crewStateHome();
     setCrewStateHome(home);
 
     const listeners = new Set<(e: CoreEvent) => void>();
@@ -374,7 +376,7 @@ describe('the server wiring: one chatCitations frame per reply, after the rewrit
   afterAll(async () => {
     ws.close();
     await app.close();
-    setCrewStateHome(undefined);
+    setCrewStateHome(armedStateHome); // crew#986: restore the armed home, never leave it unset
     // The chat scratch namespace this daemon minted for itself (under the OS temp dir).
     if (chatCwdParent !== undefined) removeScratch(chatCwdParent);
     removeScratch(scratch);
