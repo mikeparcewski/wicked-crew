@@ -172,7 +172,31 @@ describe('GET /api/v1/roster/record', () => {
     expect((res.json() as { days: number }).days).toBe(7);
   });
 
-  it.each(['0', '31', 'abc', '1.5'])('refuses days=%s', async (days) => {
+  it('reads up to 90 days (api-types 0.112.0; was 30)', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/v1/roster/record?days=90' });
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as { days: number }).days).toBe(90);
+  });
+
+  it('scopes to one project and echoes it, so a skin can trust a project spend', async () => {
+    // Neither stub run is filed in a project: a scoped read folds nothing, and says which project.
+    const res = await app.inject({ method: 'GET', url: '/api/v1/roster/record?days=7&project=proj_1' });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { project?: string; runsRead: number; seats: SeatRecord[] };
+    expect(body.project).toBe('proj_1');
+    expect(body.runsRead).toBe(0);
+    expect(body.seats).toEqual([]);
+    // Unscoped: no echo.
+    const all = await app.inject({ method: 'GET', url: '/api/v1/roster/record?days=7' });
+    expect((all.json() as { project?: string }).project).toBeUndefined();
+  });
+
+  it.each(['project=', 'project=a&project=b'])('refuses %s', async (q) => {
+    const res = await app.inject({ method: 'GET', url: `/api/v1/roster/record?${q}` });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it.each(['0', '91', 'abc', '1.5'])('refuses days=%s', async (days) => {
     const res = await app.inject({ method: 'GET', url: `/api/v1/roster/record?days=${days}` });
     expect(res.statusCode).toBe(400);
   });

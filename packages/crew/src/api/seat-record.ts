@@ -31,7 +31,7 @@ import type {
 } from '../core/types.js';
 
 export const SEAT_RECORD_DEFAULT_DAYS = 7;
-export const SEAT_RECORD_MAX_DAYS = 30;
+export const SEAT_RECORD_MAX_DAYS = 90;
 export const SEAT_RECORD_RUN_CAP = 200;
 
 type Frame = RecordedEvent & Record<string, unknown>;
