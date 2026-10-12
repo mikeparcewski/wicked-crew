@@ -1423,7 +1423,7 @@ export function registerRoutes(
     // Wave 6 (F-4R2-006): the interactive document this run answered, from the seams' handoff
     // ledgers — `null` = genuinely not a document run, so the field is ALWAYS present on served runs.
     view.session.document_id = docRuns.documentOf(view.session.id) ?? null;
-    // api-types 0.112.0 (operator ruling 2026-10-12): the run's short job title, derived here from its
+    // api-types 0.113.0 (operator ruling 2026-10-12): the run's short job title, derived here from its
     // own problem (pure, `job-title.ts`) so every skin shows the same one; the full text stays `problem`.
     view.session.title = jobTitle(view.session.problem);
     const retryOf = retryIndex.retryOfFor(view.session.id);
@@ -1787,7 +1787,7 @@ export function registerRoutes(
         }
         days = n;
       }
-      // api-types 0.112.0: `?project=<id>` folds only that project's runs (the dashboards' spend);
+      // api-types 0.113.0: `?project=<id>` folds only that project's runs (the dashboards' spend);
       // the answer echoes it, so a skin can tell a scoped answer from an older daemon's global one.
       const rawProject = (req.query as { project?: string | string[] }).project;
       if (rawProject !== undefined && (Array.isArray(rawProject) || rawProject.trim() === '')) {

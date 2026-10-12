@@ -1,4 +1,4 @@
-// AgentSession.title (api-types 0.112.0): the daemon's short job title, derived from the run's problem.
+// AgentSession.title (api-types 0.113.0): the daemon's short job title, derived from the run's problem.
 // Cases are the real problems on the operator's daemon (DES-frontdoor §4 requirement 1).
 
 import { mkdtempSync } from 'node:fs';

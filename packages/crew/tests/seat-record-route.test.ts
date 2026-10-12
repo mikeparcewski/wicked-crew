@@ -178,7 +178,7 @@ describe('GET /api/v1/roster/record', () => {
     expect((res.json() as { days: number }).days).toBe(7);
   });
 
-  it('reads up to 90 days (api-types 0.112.0; was 30)', async () => {
+  it('reads up to 90 days (api-types 0.113.0; was 30)', async () => {
     const res = await app.inject({ method: 'GET', url: '/api/v1/roster/record?days=90' });
     expect(res.statusCode).toBe(200);
     expect((res.json() as { days: number }).days).toBe(90);

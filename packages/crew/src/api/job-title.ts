@@ -1,5 +1,5 @@
 /**
- * A run's SHORT JOB TITLE (`AgentSession.title`; api-types 0.112.0, operator ruling 2026-10-12: crew
+ * A run's SHORT JOB TITLE (`AgentSession.title`; api-types 0.113.0, operator ruling 2026-10-12: crew
  * derives the title, every skin shows the same one). Pure and deterministic, derived at DTO assembly
  * from what the run already records (`problem`), so it costs nothing on `GET /runs`, survives a
  * restart and never needs a model call.
