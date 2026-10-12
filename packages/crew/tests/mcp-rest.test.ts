@@ -24,7 +24,7 @@ import { AuditLog } from '../src/api/audit.js';
 import { LOCAL_ACTOR } from '../src/api/auth.js';
 import { registerMcpRoutes } from '../src/api/mcp.js';
 import type { McpEngineGate } from '../src/core/adapter.js';
-import type { McpCallRecord, McpCallResponse, McpPreviewResponse, McpServer } from '../src/core/types.js';
+import type { Actor, McpCallRecord, McpCallResponse, McpPreviewResponse, McpServer, McpTool } from '../src/core/types.js';
 import { McpBroker } from '../src/mcp/broker.js';
 import { McpCallRecordFile } from '../src/mcp/call-records.js';
 import { deriveToolClass } from '../src/mcp/classify.js';
@@ -163,6 +163,9 @@ let other: Awaited<ReturnType<typeof httpServer>>;
 let apiRespond: (req: Seen) => { status: number; headers?: Record<string, string>; body?: string };
 let answered: string[];
 let logs: string[];
+let audit: AuditLog;
+/** Who the routes see (G1): the local human operator unless a test says otherwise. */
+let actor: Actor;
 
 function recorded(): McpCallRecord[] {
   try {
@@ -172,11 +175,12 @@ function recorded(): McpCallRecord[] {
   }
 }
 
-async function register(body: Record<string, unknown>): Promise<McpServer> {
+/** `enabledWrites`: the write tools the test grants at save (G1: a write registers disabled otherwise). */
+async function register(body: Record<string, unknown>, enabledWrites: string[] = []): Promise<McpServer> {
   const preview = await app.inject({ method: 'POST', url: '/api/v1/mcp/servers/preview', payload: body });
   answered.push(preview.body);
   expect(preview.statusCode, preview.body).toBe(200);
-  const saved = await app.inject({ method: 'POST', url: '/api/v1/mcp/servers', payload: { previewHash: (preview.json() as McpPreviewResponse).previewHash } });
+  const saved = await app.inject({ method: 'POST', url: '/api/v1/mcp/servers', payload: { previewHash: (preview.json() as McpPreviewResponse).previewHash, enabledWrites } });
   answered.push(saved.body);
   expect(saved.statusCode, saved.body).toBe(201);
   return saved.json() as McpServer;
@@ -203,7 +207,9 @@ beforeEach(async () => {
   registry = new McpRegistry({ store: new McpRegistryStore(join(base, 'state', 'mcp')), secrets, probe: probeMcpServer, discover: () => [] });
   const broker = new McpBroker({ registry, engine: () => gate, records, sleep: async () => undefined, log: (m) => logs.push(m) });
   app = Fastify({ logger: false });
-  registerMcpRoutes(app, { registry, broker, audit: new AuditLog(join(base, 'audit.log'), (m) => logs.push(m)), actorOf: () => LOCAL_ACTOR });
+  actor = LOCAL_ACTOR;
+  audit = new AuditLog(join(base, 'audit.log'), (m) => logs.push(m));
+  registerMcpRoutes(app, { registry, broker, audit, actorOf: () => actor });
   await app.ready();
 });
 
@@ -251,7 +257,7 @@ describe('PROVING (S5a): an unmapped argument is dropped', () => {
   });
 
   it('a JSON body is built from its mapped keys only', async () => {
-    await register(tracker());
+    await register(tracker(), ['createIssue']);
     const r = await mcpCall('mcp:tracker/createIssue', { title: 'Broken', parent: { title: 'Epic' }, owner: 'mallory' });
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     const req = api.seen[0]!;
@@ -309,7 +315,7 @@ describe('PROVING (S5a): an unmapped argument is dropped', () => {
 
 describe('PROVING (S5a): an off-host request is refused (I6)', () => {
   it('a path value that climbs out of the base path is refused unsent and recorded as guard_error', async () => {
-    await register(tracker());
+    await register(tracker(), ['deleteIssue']);
     const r = await mcpCall('mcp:tracker/deleteIssue', { id: '..' });
     expect(r.status).toBe(500);
     expect(r.body.outcome).toBe('guard_error');
@@ -429,7 +435,7 @@ describe('the OpenAPI import', () => {
 
 describe('the broker over a REST tool', () => {
   it('a read tool is retried on 503; a write tool never is; a 4xx is the tool\'s own error result', async () => {
-    await register(tracker());
+    await register(tracker(), ['createIssue']);
     let n = 0;
     apiRespond = () => (++n <= 2 ? { status: 503 } : { status: 200, body: '{"ok":true}' });
     const read = await mcpCall('mcp:tracker/getIssue', { id: '1' });
@@ -476,5 +482,145 @@ describe('the broker over a REST tool', () => {
     const r = await mcpCall('mcp:tracker/getIssue', { id: '1', fields: 'x' });
     expect(r.body.outcome).toBe('denied');
     expect(api.seen.filter((s) => s.url.startsWith('/v1/'))).toHaveLength(0);
+  });
+});
+
+// G1 (DES-data-connectors §3): a connector's writes are registered DISABLED until the operator
+// grants them, per tool, at save (`enabledWrites`) or with the tool toggle. Only a human operator
+// can grant, and every grant is audited.
+describe('G1: writes are registered disabled until a human operator grants them', () => {
+  const AGENT: Actor = { id: 'worker-1', kind: 'agent', trust: 'operator' };
+  const toolOf = (server: McpServer, name: string): McpTool => server.tools.find((t) => t.name === name)!;
+  const switches = (server: McpServer): Record<string, boolean> => Object.fromEntries(server.tools.map((t) => [t.name, t.enabled]));
+  async function preview(body: Record<string, unknown> = tracker()): Promise<McpPreviewResponse> {
+    const res = await app.inject({ method: 'POST', url: '/api/v1/mcp/servers/preview', payload: body });
+    expect(res.statusCode, res.body).toBe(200);
+    return res.json() as McpPreviewResponse;
+  }
+  async function save(previewHash: string, enabledWrites?: string[]) {
+    return app.inject({ method: 'POST', url: '/api/v1/mcp/servers', payload: { previewHash, ...(enabledWrites !== undefined ? { enabledWrites } : {}) } });
+  }
+  async function patch(subject: string, body: Record<string, unknown>) {
+    return app.inject({ method: 'PATCH', url: `/api/v1/mcp/tools/${encodeURIComponent(subject)}`, payload: body });
+  }
+  async function audited(action: string) {
+    await audit.flush();
+    return (await audit.read()).filter((e) => e.action === action);
+  }
+
+  it('a save with no grant registers read tools enabled and every write or destructive tool disabled, and the preview says so', async () => {
+    const p = await preview();
+    expect(Object.fromEntries(p.tools.map((t) => [t.name, [t.class, t.enabledOnSave]]))).toEqual({
+      getIssue: ['read', true],
+      deleteIssue: ['destructive', false],
+      createIssue: ['write', false],
+    });
+    const res = await save(p.previewHash);
+    expect(res.statusCode, res.body).toBe(201);
+    const server = res.json() as McpServer;
+    expect(switches(server)).toEqual({ getIssue: true, deleteIssue: false, createIssue: false });
+    expect(server.counts.enabled).toBe(1);
+    // A disabled write is not callable: never listed, and the broker hands the engine registered:false.
+    expect((await registry.callableTools()).map((t) => t.tool)).toEqual(['getIssue']);
+    const r = await mcpCall('mcp:tracker/createIssue', { title: 'x' });
+    expect(r.status).toBe(403);
+    expect(gate.calls.at(-1)?.registered).toBe(false);
+    expect(api.seen).toHaveLength(0);
+    const [saved] = await audited('mcp.server.saved');
+    expect(saved?.detail?.['disabledWrites']).toEqual(['mcp:tracker/deleteIssue', 'mcp:tracker/createIssue']);
+    expect(await audited('mcp.tool.write_granted')).toEqual([]);
+  });
+
+  it('enabledWrites grants exactly the named writes, audited; a read or unknown name is a 400 that leaves the preview usable', async () => {
+    const p = await preview();
+    const unknown = await save(p.previewHash, ['nope']);
+    expect(unknown.statusCode).toBe(400);
+    expect(unknown.json()).toMatchObject({ code: 'unknown_tool' });
+    const read = await save(p.previewHash, ['getIssue']);
+    expect(read.statusCode).toBe(400);
+    expect(read.json()).toMatchObject({ code: 'not_a_write_tool' });
+    expect((await registry.list()).servers).toEqual([]);
+    const res = await save(p.previewHash, ['createIssue']);
+    expect(res.statusCode, res.body).toBe(201);
+    expect(switches(res.json() as McpServer)).toEqual({ getIssue: true, deleteIssue: false, createIssue: true });
+    const grants = await audited('mcp.tool.write_granted');
+    expect(grants.map((g) => [g.actor.id, g.detail])).toEqual([[LOCAL_ACTOR.id, { subject: 'mcp:tracker/createIssue', class: 'write', via: 'save' }]]);
+    const r = await mcpCall('mcp:tracker/createIssue', { title: 'x' });
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+  });
+
+  it('an agent cannot grant a write: not at save, not with the toggle, not by lowering its class first', async () => {
+    actor = AGENT;
+    const p = await preview();
+    const refused = await save(p.previewHash, ['createIssue']);
+    expect(refused.statusCode).toBe(403);
+    expect(refused.json()).toMatchObject({ code: 'write_grant_human_only' });
+    // With no grant, an agent may still save: the writes land disabled.
+    const ok = await save(p.previewHash);
+    expect(ok.statusCode, ok.body).toBe(201);
+    for (const body of [{ enabled: true }, { enabled: true, classOverride: 'read' }]) {
+      const res = await patch('mcp:tracker/createIssue', body);
+      expect(res.statusCode, res.body).toBe(403);
+      expect(res.json()).toMatchObject({ code: 'write_grant_human_only' });
+    }
+    expect(toolOf(await registry.get('tracker'), 'createIssue')).toMatchObject({ enabled: false, classOverride: null });
+    // Turning a tool off, and a read tool on, need no grant.
+    expect((await patch('mcp:tracker/getIssue', { enabled: false })).statusCode).toBe(200);
+    expect((await patch('mcp:tracker/getIssue', { enabled: true })).statusCode).toBe(200);
+    expect(await audited('mcp.tool.write_granted')).toEqual([]);
+    // The human operator's toggle is the grant.
+    actor = LOCAL_ACTOR;
+    const granted = await patch('mcp:tracker/createIssue', { enabled: true });
+    expect(granted.statusCode, granted.body).toBe(200);
+    expect((granted.json() as McpTool).enabled).toBe(true);
+    const grants = await audited('mcp.tool.write_granted');
+    expect(grants.map((g) => g.detail)).toEqual([{ subject: 'mcp:tracker/createIssue', class: 'write', via: 'toggle' }]);
+  });
+
+  it('re-classing an enabled read as a write is a grant; a no-op enable of a granted write is not', async () => {
+    expect((await save((await preview()).previewHash, ['createIssue'])).statusCode).toBe(201);
+    actor = AGENT;
+    const reclass = await patch('mcp:tracker/getIssue', { classOverride: 'write' });
+    expect(reclass.statusCode, reclass.body).toBe(403);
+    expect(reclass.json()).toMatchObject({ code: 'write_grant_human_only' });
+    expect(toolOf(await registry.get('tracker'), 'getIssue')).toMatchObject({ enabled: true, classOverride: null });
+    // Re-classing a disabled tool, or one already an enabled write, grants nothing new.
+    expect((await patch('mcp:tracker/deleteIssue', { classOverride: 'write' })).statusCode).toBe(200);
+    expect((await patch('mcp:tracker/createIssue', { enabled: true })).statusCode).toBe(200);
+    expect(await audited('mcp.tool.write_granted')).toHaveLength(1); // the save's grant only
+    actor = LOCAL_ACTOR;
+    expect((await patch('mcp:tracker/getIssue', { classOverride: 'write' })).statusCode).toBe(200);
+    const grants = await audited('mcp.tool.write_granted');
+    expect(grants.map((g) => g.detail)).toEqual([ // newest first
+      { subject: 'mcp:tracker/getIssue', class: 'write', via: 'toggle' },
+      { subject: 'mcp:tracker/createIssue', class: 'write', via: 'save' },
+    ]);
+  });
+
+  it('a class override that survives the save makes a derived read grantable at save', async () => {
+    expect((await save((await preview()).previewHash)).statusCode).toBe(201);
+    expect((await patch('mcp:tracker/getIssue', { enabled: false, classOverride: 'write' })).statusCode).toBe(200);
+    const p = await preview();
+    // The preview shows the class the save will keep, so a client offering grants offers this one.
+    expect(p.tools.find((t) => t.name === 'getIssue')).toMatchObject({ class: 'write', classOverride: 'write', enabledOnSave: false });
+    expect(p.tools.find((t) => t.name === 'createIssue')).toMatchObject({ class: 'write', classOverride: null });
+    const res = await save(p.previewHash, ['getIssue']);
+    expect(res.statusCode, res.body).toBe(201);
+    expect(toolOf(res.json() as McpServer, 'getIssue')).toMatchObject({ enabled: true, classOverride: 'write', class: 'write' });
+  });
+
+  it('a re-save keeps a grant while the schema is unchanged; a changed write is disabled again', async () => {
+    expect((await save((await preview()).previewHash, ['createIssue', 'deleteIssue'])).statusCode).toBe(201);
+    expect((await patch('mcp:tracker/getIssue', { enabled: false })).statusCode).toBe(200);
+    // Same spec: every switch is as the operator left it.
+    const same = await preview();
+    expect(Object.fromEntries(same.tools.map((t) => [t.name, t.enabledOnSave]))).toEqual({ getIssue: false, deleteIssue: true, createIssue: true });
+    expect(switches((await save(same.previewHash)).json() as McpServer)).toEqual({ getIssue: false, deleteIssue: true, createIssue: true });
+    // createIssue's schema changes: its grant covered the old one, so it is off until granted again.
+    const changed = structuredClone(SPEC) as { paths: Record<string, Record<string, { summary?: string }>> };
+    changed.paths['/issues']!['post']!.summary = 'Create an issue (v2)';
+    const p = await preview(tracker({ openapi: changed }));
+    expect(p.tools.find((t) => t.name === 'createIssue')?.enabledOnSave).toBe(false);
+    expect(switches((await save(p.previewHash)).json() as McpServer)).toEqual({ getIssue: false, deleteIssue: true, createIssue: false });
   });
 });

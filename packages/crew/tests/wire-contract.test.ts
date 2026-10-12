@@ -1078,7 +1078,7 @@ respondsWith<Wire.McpServersResponse, Awaited<ReturnType<McpRegistry['list']>>>(
 respondsWith<Wire.McpPreviewResponse, Awaited<ReturnType<McpRegistry['preview']>>>();
 respondsWith<Wire.McpServer, Awaited<ReturnType<McpRegistry['save']>>>();
 respondsWith<Wire.McpServerTestResponse, Awaited<ReturnType<McpRegistry['test']>>>();
-respondsWith<Wire.McpTool, Awaited<ReturnType<McpRegistry['patchTool']>>>();
+respondsWith<Wire.McpTool, Awaited<ReturnType<McpRegistry['patchTool']>>['tool']>(); // the route answers `.tool` (G1: `grantedWrite` is audited, not sent)
 
 // ── api-types 0.63.0 — MCP policies: the preview matrix and the approvals (DES-MCP-TOOLS-001 S6) ──
 accepts<z.input<typeof McpPolicyPreviewSchema>, Wire.McpPolicyPreviewBody>();

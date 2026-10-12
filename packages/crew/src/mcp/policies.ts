@@ -203,7 +203,8 @@ export class McpPolicies {
       server: server.name,
       tool: t.name,
       annotations: hints(t.annotations),
-      classOverride: null,
+      // The override the save would keep (G1 codex r2): the matrix judges the class that will apply.
+      classOverride: t.classOverride,
       registered: true,
       kind: server.kind,
     }));
@@ -217,7 +218,9 @@ export class McpPolicies {
         tool: t.name,
         class: results[i]?.[0]?.class ?? t.class,
         status: 'registered',
-        enabled: true,
+        // G1: the switch the save would give it (a new write tool is off until granted). The cells
+        // still judge it as registered, so the operator sees what it would do once enabled.
+        enabled: t.enabledOnSave,
         registered: true,
         approval: this.approvalOf(ledgers, server.name, t.subject),
         cells: results[i] ?? [],

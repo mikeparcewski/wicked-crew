@@ -49,7 +49,7 @@ export class McpRegistryError extends Error {
   constructor(
     // 500: the registry and the OS secret store disagree and crew could not reconcile them
     // (crew#719, `secret_orphaned`) — the message names what was left behind.
-    readonly status: 400 | 404 | 409 | 500 | 501 | 502 | 503,
+    readonly status: 400 | 403 | 404 | 409 | 500 | 501 | 502 | 503,
     readonly code: string,
     message: string,
   ) {
@@ -157,6 +157,12 @@ export class McpRegistry {
     const expiresAt = this.now() + PREVIEW_TTL_MS;
     this.hold(previewHash, { config, tools, expiresAt, secret: stagedSecret });
     const existing = (await this.deps.store.read()).servers.find((s) => s.name === config.name);
+    const was = (name: string): McpToolRecord | undefined => existing?.tools.find((p) => p.name === name);
+    // The override a save keeps: only while the tool's schema is unchanged (as `save` decides).
+    const survivingOverride = (t: { name: string; schemaHash: string }): McpToolClass | null => {
+      const w = was(t.name);
+      return w !== undefined && w.schemaHash === t.schemaHash ? w.classOverride : null;
+    };
     return {
       previewHash,
       expiresAt: new Date(expiresAt).toISOString(),
@@ -168,8 +174,10 @@ export class McpRegistry {
         description: t.description,
         annotations: t.annotations,
         inputSchema: t.inputSchema,
-        class: deriveToolClass(t.annotations),
+        class: effectiveToolClass(deriveToolClass(t.annotations), survivingOverride(t)),
+        classOverride: survivingOverride(t),
         schemaHash: t.schemaHash,
+        enabledOnSave: enabledOnSave(was(t.name), t),
         ...(config.kind === 'rest' ? { rest: t.rest ?? null } : {}),
       })),
       diff: existing === undefined ? null : diffTools(existing.tools, tools),
@@ -179,10 +187,17 @@ export class McpRegistry {
 
   /**
    * Register exactly what a preview showed. Saving over an existing name re-registers it: every
-   * tool of the preview becomes `registered`, a tool it no longer lists becomes `gone`, a tool's
-   * `enabled` switch survives, and a class override survives only while the schema is unchanged.
+   * tool of the preview becomes `registered`, a tool it no longer lists becomes `gone`, and a class
+   * override survives only while the schema is unchanged.
+   *
+   * (G1, DES-data-connectors §3) A tool's `enabled` switch is {@link enabledOnSave}: a `write` or
+   * `destructive` tool that is new, or whose schema changed, is registered DISABLED. `enabledWrites`
+   * is the operator's per-tool grant (the preview's write checkbox): each name must be a write or
+   * destructive tool of this preview, and is registered enabled. The route allows a grant from a
+   * human operator only and audits it. A grant enables a tool; `MCP-FIRST-USE` still asks on its
+   * first call.
    */
-  async save(previewHash: string | undefined): Promise<McpServer> {
+  async save(previewHash: string | undefined, enabledWrites: readonly string[] = []): Promise<McpServer> {
     if (previewHash === undefined) {
       throw new McpRegistryError(409, 'preview_required', 'saving a server needs the previewHash of a preview of it: POST /mcp/servers/preview first');
     }
@@ -191,6 +206,9 @@ export class McpRegistry {
       this.previews.delete(previewHash);
       throw new McpRegistryError(409, 'preview_stale', 'that previewHash is unknown or expired: preview the server again, then save');
     }
+    // A wrong grant is refused before the preview is spent, so the operator can correct it and save again.
+    await this.checkWriteGrants(previewHash, enabledWrites);
+    const granted = new Set(enabledWrites);
     this.previews.delete(previewHash);
     const stamp = new Date(this.now()).toISOString();
     // (crew#719) The staged secret and the registry row commit TOGETHER. Studio used to write the
@@ -217,7 +235,7 @@ export class McpRegistry {
           outputSchema: t.outputSchema,
           annotations: t.annotations,
           classOverride: was !== undefined && was.schemaHash === t.schemaHash ? was.classOverride : null,
-          enabled: was?.enabled ?? true,
+          enabled: granted.has(t.name) || enabledOnSave(was, t),
           schemaHash: t.schemaHash,
           observedSchemaHash: t.schemaHash,
           present: true,
@@ -274,6 +292,29 @@ export class McpRegistry {
     }
   }
 
+  /**
+   * (G1) Refuse an `enabledWrites` list that does not fit the held preview: a name it does not list
+   * (400 `unknown_tool`), or a tool that would not be a write once saved (400 `not_a_write_tool`) —
+   * by its annotations, or by a class override that survives the save (schema unchanged). The route
+   * calls this before it withdraws any approval, so a refused grant changes nothing. An unknown or
+   * expired preview is left for `save` to refuse.
+   */
+  async checkWriteGrants(previewHash: string, enabledWrites: readonly string[]): Promise<void> {
+    if (enabledWrites.length === 0) return;
+    const held = this.previews.get(previewHash);
+    if (held === undefined || held.expiresAt <= this.now()) return;
+    const prior = (await this.deps.store.read()).servers.find((s) => s.name === held.config.name);
+    for (const name of enabledWrites) {
+      const t = held.tools.find((x) => x.name === name);
+      if (t === undefined) throw new McpRegistryError(400, 'unknown_tool', `enabledWrites names ${name}, which this preview does not list`);
+      const was = prior?.tools.find((p) => p.name === name);
+      const override = was !== undefined && was.schemaHash === t.schemaHash ? was.classOverride : null;
+      if (!isWriteGrant(t.annotations, override)) {
+        throw new McpRegistryError(400, 'not_a_write_tool', `enabledWrites names ${name}, a read tool; read tools are enabled on save without a grant`);
+      }
+    }
+  }
+
   /** What a held preview would register: its server name and each tool's schema hash (S6). */
   peekPreview(previewHash: string): { name: string; tools: Array<{ name: string; schemaHash: string }> } | null {
     const held = this.previews.get(previewHash);
@@ -310,20 +351,39 @@ export class McpRegistry {
     }
   }
 
-  async patchTool(subject: string, patch: { enabled?: boolean | undefined; classOverride?: McpToolClass | null | undefined }): Promise<McpTool> {
+  /**
+   * Set a tool's switch and/or class override. (G1) A patch that leaves a tool ENABLED and a WRITE
+   * (by its own annotations or by its class after the patch) when it was not both before is a write
+   * grant: turning a write on, or re-classing an enabled read as a write. It is refused (403
+   * `write_grant_human_only`) unless `opts.mayGrantWrite`, which the route sets for a human operator
+   * only. Turning a tool off, and enabling a read, need no grant. `grantedWrite` says whether this
+   * patch was one, so the route audits exactly the grants.
+   */
+  async patchTool(
+    subject: string,
+    patch: { enabled?: boolean | undefined; classOverride?: McpToolClass | null | undefined },
+    opts: { mayGrantWrite?: boolean } = {},
+  ): Promise<{ tool: McpTool; grantedWrite: boolean }> {
     const parts = parseMcpSubject(subject);
     if (parts === null) throw new McpRegistryError(404, 'unknown_tool', `no tool ${subject}`);
     const stamp = new Date(this.now()).toISOString();
-    const { server, tool } = await this.deps.store.mutate((file) => {
+    const { server, tool, grant } = await this.deps.store.mutate((file) => {
       const s = this.find(file.servers, parts.server);
       const t = s.tools.find((x) => x.name === parts.tool);
       if (t === undefined) throw new McpRegistryError(404, 'unknown_tool', `no tool ${subject}`);
-      if (patch.enabled !== undefined) t.enabled = patch.enabled;
-      if (patch.classOverride !== undefined) t.classOverride = patch.classOverride;
+      const before = t.enabled && isWriteGrant(t.annotations, t.classOverride);
+      const enabled = patch.enabled ?? t.enabled;
+      const override = patch.classOverride !== undefined ? patch.classOverride : t.classOverride;
+      const grant = !before && enabled && isWriteGrant(t.annotations, override);
+      if (grant && opts.mayGrantWrite !== true) {
+        throw new McpRegistryError(403, 'write_grant_human_only', `${subject} would be an enabled write tool: only a human operator can grant that`);
+      }
+      t.enabled = enabled;
+      t.classOverride = override;
       s.updatedAt = stamp;
-      return { server: s, tool: t };
+      return { server: s, tool: t, grant };
     });
-    return toolView(server.name, tool);
+    return { tool: toolView(server.name, tool), grantedWrite: grant };
   }
 
   /** Probe a registered server again: record its health and its tool diff. */
@@ -364,7 +424,8 @@ export class McpRegistry {
           outputSchema: p.outputSchema,
           annotations: p.annotations,
           classOverride: null,
-          enabled: true,
+          // G1: a tool the server added is shown with the switch a save would give it.
+          enabled: enabledOnSave(undefined, p),
           schemaHash: null,
           observedSchemaHash: p.schemaHash,
           present: true,
@@ -537,6 +598,28 @@ function configView(c: McpUpstreamConfig): ConfigView {
     view.operations = c.operations ?? null;
   }
   return view;
+}
+
+/**
+ * (G1, DES-data-connectors §3) The switch a save gives a tool when the operator grants nothing:
+ * - the schema the operator last saved, unchanged: its switch as they left it;
+ * - otherwise a `write` or `destructive` tool (by its own annotations; an override does not survive
+ *   a schema change) is DISABLED until the operator grants it, so a grant covers one schema;
+ * - otherwise a `read` tool keeps its switch, and a new one is enabled.
+ */
+export function enabledOnSave(
+  was: Pick<McpToolRecord, 'enabled' | 'schemaHash'> | undefined,
+  next: { annotations: McpToolAnnotations | null; schemaHash: string },
+): boolean {
+  if (was !== undefined && was.schemaHash !== null && was.schemaHash === next.schemaHash) return was.enabled;
+  if (deriveToolClass(next.annotations) !== 'read') return false;
+  return was?.enabled ?? true;
+}
+
+/** (G1) Whether enabling a tool with these annotations and class override grants a write. */
+export function isWriteGrant(annotations: McpToolAnnotations | null, classOverride: McpToolClass | null): boolean {
+  const derived = deriveToolClass(annotations);
+  return derived !== 'read' || effectiveToolClass(derived, classOverride) !== 'read';
 }
 
 export function toolStatus(t: Pick<McpToolRecord, 'present' | 'schemaHash' | 'observedSchemaHash'>): McpToolStatus {
