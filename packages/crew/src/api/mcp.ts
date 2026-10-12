@@ -6,11 +6,16 @@
  *   POST   /mcp/servers/preview         probe (10 s, hardened env): tools, classes and a previewHash
  *                                       (`kind: "rest"`, slice S5a: the tools of an OpenAPI 3 document,
  *                                       each pinned to the base `url`; see `mcp/rest.ts`)
- *   POST   /mcp/servers                 save: `{previewHash, enabledWrites?}`; missing, unknown or expired → 409.
+ *   POST   /mcp/servers                 save: `{previewHash, enabledWrites?, allowOrigin?}`; missing, unknown or expired → 409.
  *                                       (G1) a write/destructive tool that is new or whose schema changed
  *                                       is registered DISABLED; `enabledWrites` names the ones the operator
  *                                       grants (human operator only → else 403), each audited
- *                                       `mcp.tool.write_granted`
+ *                                       `mcp.tool.write_granted`.
+ *                                       (G2) a `rest` base URL that matches none of the spec's `servers`, or a
+ *                                       loopback/private host, needs `allowOrigin` = exactly that origin (409
+ *                                       `egress_unconfirmed`; human operator only → else 403), audited
+ *                                       `mcp.server.egress_confirmed`. A REST tool's hash covers the target, so
+ *                                       a changed target re-registers its tools and withdraws their approvals
  *   PATCH  /mcp/servers/:name           `{enabled}`
  *   DELETE /mcp/servers/:name           remove the server and the keychain secret it owns
  *   POST   /mcp/servers/:name/test      probe again: health plus the tool diff
@@ -157,6 +162,8 @@ export const SaveMcpServerSchema = z
     previewHash: z.string().min(1).max(128).optional(),
     /** (G1) The write/destructive tools of the preview the operator grants: registered enabled. */
     enabledWrites: z.array(z.string().min(1).max(256)).max(512).optional(),
+    /** (G2) The exact origin a `rest` server's calls go to, confirmed by a human operator. */
+    allowOrigin: z.string().min(1).max(4096).optional(),
   })
   .strict();
 export const PatchMcpServerSchema = z.object({ enabled: z.boolean() }).strict();
@@ -246,6 +253,13 @@ function writeGrantRefused(reply: FastifyReply, actor: Actor): FastifyReply {
   });
 }
 
+function egressConfirmRefused(reply: FastifyReply, actor: Actor): FastifyReply {
+  return reply.code(403).send({
+    error: `only a human operator can confirm where a rest server's calls go (allowOrigin); you are ${actor.kind}/${actor.trust}`,
+    code: 'egress_confirm_human_only',
+  });
+}
+
 function toConfig(body: z.infer<typeof McpServerConfigSchema>): McpUpstreamConfig {
   return {
     name: body.name,
@@ -320,11 +334,18 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
       const enabledWrites = [...new Set(parsed.data.enabledWrites ?? [])];
       // A grant is refused before anything is withdrawn or saved.
       if (enabledWrites.length > 0 && !mayGrantWrite(deps.actorOf(req))) return writeGrantRefused(reply, deps.actorOf(req));
+      // (G2) So is an egress confirmation from anyone but a human operator.
+      const allowOrigin = parsed.data.allowOrigin ?? null;
+      if (allowOrigin !== null && !mayGrantWrite(deps.actorOf(req))) return egressConfirmRefused(reply, deps.actorOf(req));
       try {
         // A saved tool whose schema changed loses its approvals BEFORE the save lands, so a failed
         // withdrawal refuses the save rather than leaving an approval over a schema nobody approved.
         // A grant that does not fit the preview is refused BEFORE any approval is withdrawn.
-        if (parsed.data.previewHash !== undefined) await r.checkWriteGrants(parsed.data.previewHash, enabledWrites);
+        if (parsed.data.previewHash !== undefined) {
+          await r.checkWriteGrants(parsed.data.previewHash, enabledWrites);
+          // (G2) An unconfirmed egress is refused before any approval is withdrawn, too.
+          await r.checkEgress(parsed.data.previewHash, allowOrigin);
+        }
         const held = parsed.data.previewHash === undefined ? null : r.peekPreview(parsed.data.previewHash);
         if (held !== null && deps.policies !== undefined) {
           const tokens = await deps.policies.withdrawnBySave(held);
@@ -334,7 +355,7 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
             for (const id of rules) deps.audit.record('governance.rule.upserted', deps.actorOf(req), { detail: { id, source: 'mcp-approval' } });
           }
         }
-        const server = await r.save(parsed.data.previewHash, enabledWrites);
+        const server = await r.save(parsed.data.previewHash, enabledWrites, allowOrigin);
         deps.audit.record('mcp.server.saved', deps.actorOf(req), {
           detail: {
             name: server.name,
@@ -345,6 +366,11 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
             disabledWrites: server.tools.filter((t) => t.status !== 'gone' && !t.enabled && isWriteGrant(t.annotations, t.classOverride)).map((t) => t.subject),
           },
         });
+        // Audited whenever the operator named the origin: the save accepted it, so it is the origin.
+        if (allowOrigin !== null && held?.egress != null) {
+          const e = held.egress;
+          deps.audit.record('mcp.server.egress_confirmed', deps.actorOf(req), { detail: { name: server.name, origin: e.origin, basePath: e.basePath, matches: e.matches, privateAddress: e.privateAddress, resolved: e.resolved, servers: e.servers } });
+        }
         for (const name of enabledWrites) {
           const tool = server.tools.find((t) => t.name === name);
           if (tool === undefined) continue;

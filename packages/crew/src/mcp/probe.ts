@@ -18,7 +18,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 
 import type { McpAuthConfig, McpRestMapping, McpToolAnnotations, McpUpstreamKind } from '../core/types.js';
-import { probeRestServer } from './rest.js';
+import { probeRestServer, type RestEgress } from './rest.js';
 import { scrubSecrets } from './secrets.js';
 
 export const MCP_PROBE_TIMEOUT_MS = 10_000;
@@ -53,7 +53,7 @@ export interface ProbedTool {
 }
 
 export type ProbeResult =
-  | { ok: true; serverInfo: { name: string; version: string } | null; tools: ProbedTool[]; skipped?: string[] }
+  | { ok: true; serverInfo: { name: string; version: string } | null; tools: ProbedTool[]; skipped?: string[]; egress?: RestEgress }
   | { ok: false; error: string };
 
 export type Prober = (config: McpUpstreamConfig, secret: string | null) => Promise<ProbeResult>;

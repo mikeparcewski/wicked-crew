@@ -10,6 +10,10 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Security
+- **REST connectors check where their calls go (data connectors G2, `wicked-crew-api-types` 0.112.0).** A `rest` server's preview answers `egress`: its base URL checked against the OpenAPI document's `servers`, and whether its host is loopback or private (literal, `localhost`, or what DNS returns at preview time). A base URL that matches no server, a private host, or a host that doesn't resolve can't be saved until a human operator names that exact origin (`POST /mcp/servers {allowOrigin}`). Without it the save gets 409 `egress_unconfirmed`; from an agent it gets 403 `egress_confirm_human_only`. The confirmation is audited `mcp.server.egress_confirmed` and remembered for later saves over the same origin. A REST tool's approval hash now covers the base URL's origin and path and the auth header. Changing any of them re-registers the tools, withdraws every approval that names the server and turns its write tools off again.
+- **Action needed: re-save every REST server registered before this release.** Its tools' saved hashes don't include the target, so they read `unregistered` and every call is denied until the server is saved again. The denial tells the operator to re-save it. Studio → MCP tools → preview the server, then save. Crew doesn't re-hash old registrations silently. The re-save withdraws the tools' earlier approvals, leaves their write tools off until they are granted again, and asks for `allowOrigin` once if the base URL is private or isn't one of the document's `servers`. Studio doesn't send `allowOrigin` until its connector sheet (G4) ships, so until then a server that needs confirming can only be re-saved through the API. MCP servers (`mcp-stdio`, `mcp-http`) are unaffected.
+
 ## [0.9.13] — 2026-10-12
 
 Bundles **wicked-studio 0.7.12**: Watchtower's Finished and Delivered read the real wire and every empty filter says why (studio#738), and new Approved and Rejected filters list your gate answers (studio#739). Engine pin unchanged (`wicked-core-ts` `^0.9.7`); pair with wicked-garden 12.53.3 and wicked-estate 0.29.2.

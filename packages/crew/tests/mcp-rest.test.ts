@@ -27,11 +27,11 @@ import type { McpEngineGate } from '../src/core/adapter.js';
 import type { Actor, McpCallRecord, McpCallResponse, McpPreviewResponse, McpServer, McpTool } from '../src/core/types.js';
 import { McpBroker } from '../src/mcp/broker.js';
 import { McpCallRecordFile } from '../src/mcp/call-records.js';
-import { deriveToolClass } from '../src/mcp/classify.js';
+import { deriveToolClass, toolSchemaHash } from '../src/mcp/classify.js';
 import { probeMcpServer } from '../src/mcp/probe.js';
 import { McpRegistry } from '../src/mcp/registry.js';
 import { McpRegistryStore } from '../src/mcp/registry-store.js';
-import { buildRestRequest, importOpenApi, pinnedUrl, RestBoundaryError } from '../src/mcp/rest.js';
+import { buildRestRequest, importOpenApi, isPrivateAddress, pinnedUrl, RestBoundaryError, restEgress, type RestLookup, restTarget, specServers } from '../src/mcp/rest.js';
 import { SECRET_REDACTION, type SecretStore } from '../src/mcp/secrets.js';
 import { removeScratch } from './setup/scratch.js';
 
@@ -175,15 +175,25 @@ function recorded(): McpCallRecord[] {
   }
 }
 
-/** `enabledWrites`: the write tools the test grants at save (G1: a write registers disabled otherwise). */
+/**
+ * `enabledWrites`: the write tools the test grants at save (G1: a write registers disabled otherwise).
+ * The fixture API listens on 127.0.0.1, a loopback address, so the save confirms its origin (G2's
+ * `allowOrigin`) whenever the preview asks for it; the G2 block tests the refusal itself.
+ */
 async function register(body: Record<string, unknown>, enabledWrites: string[] = []): Promise<McpServer> {
   const preview = await app.inject({ method: 'POST', url: '/api/v1/mcp/servers/preview', payload: body });
   answered.push(preview.body);
   expect(preview.statusCode, preview.body).toBe(200);
-  const saved = await app.inject({ method: 'POST', url: '/api/v1/mcp/servers', payload: { previewHash: (preview.json() as McpPreviewResponse).previewHash, enabledWrites } });
+  const p = preview.json() as McpPreviewResponse;
+  const saved = await app.inject({ method: 'POST', url: '/api/v1/mcp/servers', payload: { previewHash: p.previewHash, enabledWrites, ...confirmOrigin(p) } });
   answered.push(saved.body);
   expect(saved.statusCode, saved.body).toBe(201);
   return saved.json() as McpServer;
+}
+
+/** (G2) The `allowOrigin` a human operator's save sends when the preview asks for one. */
+function confirmOrigin(p: McpPreviewResponse): { allowOrigin?: string } {
+  return p.egress?.confirmRequired === true && actor.kind === 'human' ? { allowOrigin: p.egress.origin } : {};
 }
 
 async function mcpCall(subject: string, args: Record<string, unknown> = {}) {
@@ -495,10 +505,14 @@ describe('G1: writes are registered disabled until a human operator grants them'
   async function preview(body: Record<string, unknown> = tracker()): Promise<McpPreviewResponse> {
     const res = await app.inject({ method: 'POST', url: '/api/v1/mcp/servers/preview', payload: body });
     expect(res.statusCode, res.body).toBe(200);
-    return res.json() as McpPreviewResponse;
+    lastPreview = res.json() as McpPreviewResponse;
+    return lastPreview;
   }
+  // The fixture origin is loopback (G2): a human operator's save confirms it, as `register` does.
+  let lastPreview: McpPreviewResponse | null = null;
   async function save(previewHash: string, enabledWrites?: string[]) {
-    return app.inject({ method: 'POST', url: '/api/v1/mcp/servers', payload: { previewHash, ...(enabledWrites !== undefined ? { enabledWrites } : {}) } });
+    const confirm = lastPreview !== null && lastPreview.previewHash === previewHash ? confirmOrigin(lastPreview) : {};
+    return app.inject({ method: 'POST', url: '/api/v1/mcp/servers', payload: { previewHash, ...(enabledWrites !== undefined ? { enabledWrites } : {}), ...confirm } });
   }
   async function patch(subject: string, body: Record<string, unknown>) {
     return app.inject({ method: 'PATCH', url: `/api/v1/mcp/tools/${encodeURIComponent(subject)}`, payload: body });
@@ -550,8 +564,11 @@ describe('G1: writes are registered disabled until a human operator grants them'
   });
 
   it('an agent cannot grant a write: not at save, not with the toggle, not by lowering its class first', async () => {
+    // G2: only a human operator confirms the loopback fixture origin; once confirmed it is remembered.
+    expect((await save((await preview()).previewHash)).statusCode).toBe(201);
     actor = AGENT;
     const p = await preview();
+    expect(p.egress?.confirmRequired).toBe(false);
     const refused = await save(p.previewHash, ['createIssue']);
     expect(refused.statusCode).toBe(403);
     expect(refused.json()).toMatchObject({ code: 'write_grant_human_only' });
@@ -622,5 +639,202 @@ describe('G1: writes are registered disabled until a human operator grants them'
     const p = await preview(tracker({ openapi: changed }));
     expect(p.tools.find((t) => t.name === 'createIssue')?.enabledOnSave).toBe(false);
     expect(switches((await save(p.previewHash)).json() as McpServer)).toEqual({ getIssue: false, deleteIssue: true, createIssue: false });
+  });
+});
+
+// G2 (DES-data-connectors §3): a REST server's egress. The base URL is checked against the spec's
+// `servers`; a mismatch, and a loopback or private host, are refused at save unless a human
+// operator names that exact origin (`allowOrigin`). A REST tool's hash covers its target, so a
+// changed target re-registers it, and a tool saved before G2 is refused until it is re-saved.
+describe('G2: egress is checked against the spec and the target is in the approval hash', () => {
+  const PUBLIC = async (): Promise<string[]> => ['93.184.216.34'];
+  const egressOf = (base: string, doc: Record<string, unknown>, specUrl: string | null = null, lookup: RestLookup = PUBLIC) => restEgress(new URL(base), doc, specUrl, lookup);
+  async function preview(body: Record<string, unknown>): Promise<McpPreviewResponse> {
+    const res = await app.inject({ method: 'POST', url: '/api/v1/mcp/servers/preview', payload: body });
+    expect(res.statusCode, res.body).toBe(200);
+    return res.json() as McpPreviewResponse;
+  }
+  const save = (payload: Record<string, unknown>) => app.inject({ method: 'POST', url: '/api/v1/mcp/servers', payload });
+  async function audited(action: string) {
+    await audit.flush();
+    return (await audit.read()).filter((e) => e.action === action);
+  }
+
+  it('the base URL must be one of the spec servers: same origin, and that path or under it', async () => {
+    const doc = { servers: [{ url: 'https://api.example.com/v1' }, { url: 'https://{region}.example.com/v2', variables: { region: { default: 'eu' } } }] };
+    expect((await egressOf('https://api.example.com/v1', doc)).matches).toBe(true);
+    expect((await egressOf('https://API.example.com:443/v1/', doc)).matches).toBe(true); // the URL parser normalizes
+    expect((await egressOf('https://api.example.com/v1/beta', doc)).matches).toBe(true);
+    expect((await egressOf('https://eu.example.com/v2', doc)).matches).toBe(true); // a variable takes its default
+    expect((await egressOf('https://api.example.com', doc)).matches).toBe(false); // off the server's path
+    expect((await egressOf('https://api.example.com/v10', doc)).matches).toBe(false); // a prefix, not a segment
+    expect((await egressOf('http://api.example.com/v1', doc)).matches).toBe(false); // another scheme is another origin
+    expect((await egressOf('https://evil.example/v1', doc)).matches).toBe(false);
+    const e = await egressOf('https://api.example.com/v1', doc);
+    expect(e).toEqual({ origin: 'https://api.example.com', basePath: '/v1', servers: ['https://api.example.com/v1', 'https://eu.example.com/v2'], matches: true, privateAddress: false, resolved: true });
+  });
+
+  it('servers resolve as OpenAPI says: relative to the document, none means "/", an unresolvable one is left out', () => {
+    const spec = 'https://petstore3.swagger.io/api/v3/openapi.json';
+    expect(specServers({ servers: [{ url: '/api/v3' }] }, spec).map((u) => u.href)).toEqual(['https://petstore3.swagger.io/api/v3']);
+    expect(specServers({}, spec).map((u) => u.href)).toEqual(['https://petstore3.swagger.io/']);
+    expect(specServers({ servers: [{ url: '/api/v3' }] }, null)).toEqual([]); // a pasted document: not checkable
+    expect(specServers({ servers: [{ url: 'https://{tenant}.example.com' }, { url: 'ftp://files.example.com' }, { nope: 1 }] }, null)).toEqual([]);
+  });
+
+  it('a loopback, private or link-local host is a private address, by literal or by what it resolves to', async () => {
+    for (const ip of ['127.0.0.1', '10.1.2.3', '172.16.0.1', '192.168.1.1', '169.254.169.254', '100.64.0.1', '0.0.0.0', '::1', '::', 'fd00::1', 'fe80::1', '::ffff:127.0.0.1', '::ffff:7f00:1']) {
+      expect(isPrivateAddress(ip), ip).toBe(true);
+    }
+    for (const ip of ['93.184.216.34', '8.8.8.8', '2606:4700::1111', 'example.com']) expect(isPrivateAddress(ip), ip).toBe(false);
+    for (const base of ['http://127.0.0.1:8080', 'http://[::1]/', 'http://localhost/', 'http://LOCALHOST./', 'http://api.localhost/', 'http://0x7f.1/', 'http://2130706433/', 'http://[::ffff:127.0.0.1]/']) {
+      expect((await egressOf(base, {})).privateAddress, base).toBe(true);
+    }
+    expect((await egressOf('https://internal.example.com', {}, null, async () => ['93.184.216.34', '10.0.0.5'])).privateAddress).toBe(true);
+    // codex r1: the local-use IPv4/IPv6 translation prefix can reach private IPv4 (RFC 8215).
+    expect(isPrivateAddress('64:ff9b:1::a00:1')).toBe(true);
+    expect(isPrivateAddress('fec0::1')).toBe(true); // codex r2: deprecated site-local, still routed in places (RFC 3879)
+    // codex r1: the host is resolved as the request will name it (a trailing dot is a different name).
+    const asked: string[] = [];
+    await egressOf('https://api.example./v1', {}, null, async (h) => (asked.push(h), ['93.184.216.34']));
+    expect(asked).toEqual(['api.example.']);
+  });
+
+  it('a host that does not resolve at preview is not assumed public: the save needs the origin named (codex r1)', async () => {
+    const doc = { servers: [{ url: 'https://api.example.com/v1' }] };
+    const e = await egressOf('https://api.example.com/v1', doc, null, async () => []);
+    expect(e).toMatchObject({ matches: true, privateAddress: false, resolved: false });
+    const reg = new McpRegistry({
+      store: new McpRegistryStore(join(base, 'state', 'mcp-unresolved')),
+      secrets,
+      probe: async (config) => ({ ok: true, serverInfo: null, tools: [], egress: await restEgress(new URL(config.url!), doc, null, async () => []) }),
+      discover: () => [],
+    });
+    const p = await reg.preview({ name: 'nx', kind: 'rest', command: null, args: [], url: 'https://api.example.com/v1', auth: null, openapi: SPEC });
+    expect(p.egress?.confirmRequired).toBe(true);
+    await expect(reg.save(p.previewHash)).rejects.toMatchObject({ code: 'egress_unconfirmed', message: expect.stringContaining('did not resolve') });
+    expect((await reg.save(p.previewHash, [], 'https://api.example.com')).name).toBe('nx');
+  });
+
+  it('a held preview does not inherit a confirmation the registry no longer holds (codex r1)', async () => {
+    await register(tracker());
+    const held = await preview(tracker());
+    expect(held.egress?.confirmRequired).toBe(false); // confirmed by the save above
+    expect((await app.inject({ method: 'DELETE', url: '/api/v1/mcp/servers/tracker' })).statusCode).toBe(200);
+    const res = await save({ previewHash: held.previewHash });
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json()).toMatchObject({ code: 'egress_unconfirmed' });
+    expect((await registry.list()).servers).toEqual([]);
+  });
+
+  it('a private or unmatched origin is refused at save until a human operator names it exactly; the confirmation is remembered', async () => {
+    const p = await preview(tracker());
+    expect(p.egress).toEqual({ origin: api.origin, basePath: '/v1', servers: [], matches: false, privateAddress: true, resolved: true, confirmRequired: true });
+    const bare = await save({ previewHash: p.previewHash });
+    expect(bare.statusCode).toBe(409);
+    expect(bare.json()).toMatchObject({ code: 'egress_unconfirmed' });
+    expect((bare.json() as { error: string }).error).toContain(`allowOrigin set to exactly ${api.origin}`);
+    const wrong = await save({ previewHash: p.previewHash, allowOrigin: `${api.origin}/v1` });
+    expect(wrong.statusCode).toBe(409);
+    expect(wrong.json()).toMatchObject({ code: 'egress_unconfirmed' });
+    actor = { id: 'worker-1', kind: 'agent', trust: 'operator' };
+    const agent = await save({ previewHash: p.previewHash, allowOrigin: api.origin });
+    expect(agent.statusCode).toBe(403);
+    expect(agent.json()).toMatchObject({ code: 'egress_confirm_human_only' });
+    actor = LOCAL_ACTOR;
+    expect((await registry.list()).servers).toEqual([]); // every refusal left nothing saved, and the preview usable
+    const ok = await save({ previewHash: p.previewHash, allowOrigin: api.origin });
+    expect(ok.statusCode, ok.body).toBe(201);
+    const confirmed = await audited('mcp.server.egress_confirmed');
+    expect(confirmed.map((e) => e.detail)).toEqual([{ name: 'tracker', origin: api.origin, basePath: '/v1', matches: false, privateAddress: true, resolved: true, servers: [] }]);
+    // A re-save over the same origin does not ask again; another origin (port) does.
+    const again = await preview(tracker());
+    expect(again.egress?.confirmRequired).toBe(false);
+    expect((await save({ previewHash: again.previewHash })).statusCode).toBe(201);
+    const moved = await preview(tracker({ url: `${other.origin}/v1` }));
+    expect(moved.egress?.confirmRequired).toBe(true);
+    expect((await save({ previewHash: moved.previewHash })).statusCode).toBe(409);
+  });
+
+  it('a spec whose servers name the base URL needs no confirmation for a public host', async () => {
+    const reg = new McpRegistry({
+      store: new McpRegistryStore(join(base, 'state', 'mcp-public')),
+      secrets,
+      probe: async (config) => ({ ok: true, serverInfo: null, tools: [], egress: await restEgress(new URL(config.url!), { servers: [{ url: 'https://api.example.com/v1' }] }, null, PUBLIC) }),
+      discover: () => [],
+    });
+    const p = await reg.preview({ name: 'pub', kind: 'rest', command: null, args: [], url: 'https://api.example.com/v1', auth: null, openapi: SPEC });
+    expect(p.egress).toMatchObject({ matches: true, privateAddress: false, confirmRequired: false });
+    expect((await reg.save(p.previewHash)).name).toBe('pub');
+    const off = await reg.preview({ name: 'pub', kind: 'rest', command: null, args: [], url: 'https://api.example.com/v2', auth: null, openapi: SPEC });
+    expect(off.egress).toMatchObject({ matches: false, confirmRequired: true });
+    await expect(reg.save(off.previewHash)).rejects.toMatchObject({ code: 'egress_unconfirmed' });
+  });
+
+  it("a REST tool's hash covers its origin, base path and auth header; an MCP tool's hash is unchanged", async () => {
+    const [tool] = importOpenApi(SPEC, { operations: ['getIssue'] }).tools;
+    const at = (url: string, header = 'Authorization') => toolSchemaHash(tool!, restTarget({ url, auth: { ref: 'env:K', header } }));
+    const h = at(`${api.origin}/v1`);
+    expect(at(`${api.origin}/v1/`)).toBe(h); // the same target
+    expect(at(`${api.origin}/v1`, 'authorization')).toBe(h); // header names are case-insensitive
+    expect(at(`${api.origin}/v2`)).not.toBe(h);
+    expect(at(`${other.origin}/v1`)).not.toBe(h);
+    expect(at(`${api.origin}/v1`, 'X-Api-Key')).not.toBe(h);
+    expect(toolSchemaHash(tool!)).not.toBe(h);
+    const mcpTool = { name: 't', description: null, inputSchema: null, outputSchema: null, annotations: null };
+    expect(toolSchemaHash(mcpTool)).toBe(toolSchemaHash(mcpTool, null));
+  });
+
+  it('a changed target re-registers the tools: the preview shows them changed and the writes go off again', async () => {
+    await register(tracker(), ['createIssue']);
+    const p = await preview(tracker({ url: `${api.origin}/v2` }));
+    expect(p.diff).toMatchObject({ changed: ['getIssue', 'deleteIssue', 'createIssue'], unchanged: [] });
+    expect(p.tools.find((t) => t.name === 'createIssue')?.enabledOnSave).toBe(false);
+    const header = await preview(tracker({ auth: { ref: 'keychain:wicked-mcp/tracker', header: 'X-Api-Key' } }));
+    expect(header.diff?.changed).toHaveLength(3);
+    // A record whose url changed outside a save is refused, unsent, with the re-save remedy.
+    await registry['deps'].store.mutate((file) => {
+      file.servers[0]!.url = `${api.origin}/v2`;
+    });
+    expect((await registry.get('tracker')).tools.map((t) => t.status)).toEqual(['unregistered', 'unregistered', 'unregistered']);
+    const r = await mcpCall('mcp:tracker/getIssue', { id: '1' });
+    expect(r.body.outcome).toBe('denied');
+    expect(JSON.stringify(r.body)).toContain('re-save');
+    expect(api.seen).toHaveLength(0);
+  });
+
+  it('a REST tool saved before G2 (its hash has no target) is refused with the re-save remedy until it is saved again', async () => {
+    await register(tracker());
+    expect((await mcpCall('mcp:tracker/getIssue', { id: '1' })).body.outcome).toBe('ok');
+    // What a pre-G2 crew wrote: each hash without the target, and no confirmed origin.
+    await registry['deps'].store.mutate((file) => {
+      const s = file.servers[0]!;
+      delete s.allowedOrigin;
+      for (const t of s.tools) t.schemaHash = t.observedSchemaHash = toolSchemaHash(t);
+    });
+    api.seen.length = 0;
+    const view = await registry.get('tracker');
+    expect(view.tools.map((t) => [t.name, t.status])).toEqual([['getIssue', 'unregistered'], ['deleteIssue', 'unregistered'], ['createIssue', 'unregistered']]);
+    expect(await registry.callableTools()).toEqual([]);
+    const r = await mcpCall('mcp:tracker/getIssue', { id: '1' });
+    expect(r.status).toBe(403);
+    expect(r.body).toMatchObject({ outcome: 'denied' });
+    expect(JSON.stringify(r.body)).toContain('The operator must re-save the server');
+    expect(JSON.stringify(r.body)).toContain('re-saves the server in studio');
+    expect(gate.calls.at(-1)?.registered).toBe(false);
+    expect(api.seen).toHaveLength(0);
+    // The re-save is the fix: it shows every tool changed, asks for the origin again, and calls work.
+    const p = await preview(tracker());
+    expect(p.diff?.changed).toEqual(['getIssue', 'deleteIssue', 'createIssue']);
+    expect(p.egress?.confirmRequired).toBe(true);
+    expect((await save({ previewHash: p.previewHash, allowOrigin: api.origin })).statusCode).toBe(201);
+    expect((await mcpCall('mcp:tracker/getIssue', { id: '1' })).body.outcome).toBe('ok');
+  });
+
+  it('allowOrigin is for a rest server only', async () => {
+    const reg = new McpRegistry({ store: new McpRegistryStore(join(base, 'state', 'mcp-http')), secrets, probe: async () => ({ ok: true, serverInfo: null, tools: [] }), discover: () => [] });
+    const p = await reg.preview({ name: 'h', kind: 'mcp-http', command: null, args: [], url: 'http://127.0.0.1:9/mcp', auth: null });
+    expect(p.egress).toBeUndefined();
+    await expect(reg.save(p.previewHash, [], 'http://127.0.0.1:9')).rejects.toMatchObject({ status: 400, code: 'egress_not_rest' });
   });
 });

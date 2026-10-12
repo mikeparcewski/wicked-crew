@@ -20,10 +20,14 @@
  * Ideas only from ContextForge (`openapi_service.py`, `tool_service.py`); no code is copied.
  */
 
+import { lookup } from 'node:dns/promises';
+import { BlockList, isIP } from 'node:net';
+
 import { parse as parseYaml } from 'yaml';
 
-import type { McpRestMapping, McpToolAnnotations } from '../core/types.js';
+import type { McpRestEgress, McpRestMapping, McpToolAnnotations } from '../core/types.js';
 import type { UpstreamToolResult } from './invoke.js';
+import type { HashedRestTarget } from './classify.js';
 import type { McpUpstreamConfig, ProbedTool, ProbeResult } from './probe.js';
 import { scrubSecrets } from './secrets.js';
 import { UpstreamCallError } from './upstream-error.js';
@@ -93,6 +97,124 @@ export function parseBaseUrl(raw: string | null): URL | null {
 
 function basePath(base: URL): string {
   return base.pathname.replace(/\/+$/, '');
+}
+
+/**
+ * (G2, DES-data-connectors §3) What a `rest` server's calls go to, and so what its tools' hash
+ * covers (`toolSchemaHash`): the base URL's origin and path, and the header its secret rides in
+ * (lowercased; header names are case-insensitive). `null` = no valid base URL (never callable).
+ */
+export function restTarget(config: Pick<McpUpstreamConfig, 'url' | 'auth'>): HashedRestTarget | null {
+  const base = parseBaseUrl(config.url);
+  if (base === null) return null;
+  return { origin: base.origin, basePath: basePath(base), authHeader: config.auth?.header?.toLowerCase() ?? null };
+}
+
+// ── Egress: the base URL against the spec's `servers`, and private addresses (G2) ───────────
+
+/**
+ * Loopback, private, link-local, CGNAT, "this network", unique-local and (deprecated, RFC 3879)
+ * site-local ranges, plus the local-use
+ * IPv4/IPv6 translation prefix (RFC 8215), which may reach private IPv4. `BlockList` also matches
+ * an IPv4-mapped IPv6 address (`::ffff:127.0.0.1`) against the IPv4 rules.
+ */
+const PRIVATE_RANGES = (() => {
+  const list = new BlockList();
+  for (const [net, prefix] of [['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.168.0.0', 16]] as const) {
+    list.addSubnet(net, prefix, 'ipv4');
+  }
+  for (const [net, prefix] of [['::', 128], ['::1', 128], ['fc00::', 7], ['fe80::', 10], ['fec0::', 10], ['64:ff9b:1::', 48]] as const) list.addSubnet(net, prefix, 'ipv6');
+  return list;
+})();
+
+/** Whether an IP literal is a loopback/private/link-local/unique-local address. Not an IP → `false`. */
+export function isPrivateAddress(ip: string): boolean {
+  const family = isIP(ip);
+  if (family === 0) return false;
+  return PRIVATE_RANGES.check(ip, family === 4 ? 'ipv4' : 'ipv6');
+}
+
+/** Resolves a hostname to its addresses; `[]` when it does not resolve. Injectable for tests. */
+export type RestLookup = (hostname: string) => Promise<string[]>;
+
+const LOOKUP_TIMEOUT_MS = 3_000;
+
+export const dnsLookup: RestLookup = async (hostname) => {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const found = await Promise.race([
+      lookup(hostname, { all: true, verbatim: true }),
+      new Promise<never>((_r, reject) => {
+        timer = setTimeout(() => reject(new Error('timeout')), LOOKUP_TIMEOUT_MS);
+      }),
+    ]);
+    return found.map((a) => a.address);
+  } catch {
+    return [];
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+/**
+ * The spec's `servers`, each resolved to an absolute URL: `{variable}`s take their `default`, and a
+ * relative URL resolves against the document's own URL (OpenAPI 3 §4.8.5). A server that can't be
+ * resolved (a variable with no default, a relative URL in a pasted document) is not checkable and
+ * is left out. No `servers` means `[{url: "/"}]`, as the spec defines.
+ */
+export function specServers(doc: Record<string, unknown>, specUrl: string | null): URL[] {
+  const raw = Array.isArray(doc['servers']) && doc['servers'].length > 0 ? (doc['servers'] as unknown[]) : [{ url: '/' }];
+  const out: URL[] = [];
+  for (const s of raw) {
+    if (s === null || typeof s !== 'object' || Array.isArray(s)) continue;
+    const entry = s as Record<string, unknown>;
+    if (typeof entry['url'] !== 'string') continue;
+    const vars = entry['variables'] !== null && typeof entry['variables'] === 'object' ? (entry['variables'] as Record<string, unknown>) : {};
+    let unresolved = false;
+    const filled = entry['url'].replace(/\{([^{}]+)\}/g, (_m, name: string) => {
+      const v = vars[name];
+      const dflt = v !== null && typeof v === 'object' ? (v as Record<string, unknown>)['default'] : undefined;
+      if (typeof dflt !== 'string') {
+        unresolved = true;
+        return '';
+      }
+      return dflt;
+    });
+    if (unresolved) continue;
+    let u: URL;
+    try {
+      u = specUrl === null ? new URL(filled) : new URL(filled, specUrl);
+    } catch {
+      continue;
+    }
+    if (u.protocol === 'https:' || u.protocol === 'http:') out.push(u);
+  }
+  return out;
+}
+
+/** What the probe finds of a `rest` server's egress (G2); the registry adds `confirmRequired`. */
+export type RestEgress = Omit<McpRestEgress, 'confirmRequired'>;
+
+/** Check `base` against the spec's `servers`, and whether its host is a private address. */
+export async function restEgress(base: URL, doc: Record<string, unknown>, specUrl: string | null, lookupImpl: RestLookup = dnsLookup): Promise<RestEgress> {
+  const servers = specServers(doc, specUrl);
+  const path = basePath(base);
+  const matches = servers.some((s) => {
+    const prefix = basePath(s);
+    return s.origin === base.origin && (prefix === '' || path === prefix || path.startsWith(`${prefix}/`));
+  });
+  // The URL parser has already normalized an IP literal (`0x7f.1` → `127.0.0.1`); an IPv6 one keeps
+  // its brackets. A name is resolved exactly as the request will name it (a trailing dot included).
+  const host = base.hostname.replace(/^\[|\]$/g, '');
+  const name = host.toLowerCase().replace(/\.$/, '');
+  let privateAddress = name === 'localhost' || name.endsWith('.localhost') || isPrivateAddress(host);
+  let resolved = true;
+  if (!privateAddress && isIP(host) === 0) {
+    const addresses = await lookupImpl(host);
+    resolved = addresses.length > 0;
+    privateAddress = addresses.some(isPrivateAddress);
+  }
+  return { origin: base.origin, basePath: path, servers: servers.map((s) => s.href), matches, privateAddress, resolved };
 }
 
 /**
@@ -444,8 +566,12 @@ export type RestFetch = typeof fetch;
  * The document's URL is NOT pinned to the base URL, by design: it is the operator's own input at
  * preview time (an API's spec often lives elsewhere, e.g. a docs host), not a worker's call, and it
  * carries no secret off the API's origin. The host pin (I6) is on the tools' calls.
+ *
+ * (G2) It also answers `egress`: the base URL checked against the document's `servers`, and
+ * whether its host is a private address. The registry refuses to save a mismatch or a private
+ * address unless the operator names that exact origin.
  */
-export async function probeRestServer(config: McpUpstreamConfig, secret: string | null, fetchImpl: RestFetch = fetch): Promise<ProbeResult> {
+export async function probeRestServer(config: McpUpstreamConfig, secret: string | null, fetchImpl: RestFetch = fetch, lookupImpl: RestLookup = dnsLookup): Promise<ProbeResult> {
   const secrets = secret === null ? [] : [secret];
   try {
     const base = parseBaseUrl(config.url);
@@ -470,7 +596,8 @@ export async function probeRestServer(config: McpUpstreamConfig, secret: string 
       const sample = Object.fromEntries(Object.values(t.rest.pathMap).map((v) => [v, 'x']));
       pinnedUrl(base, t.rest.pathTemplate, sample);
     }
-    return scrubSecrets({ ok: true as const, serverInfo: imported.serverInfo, tools: imported.tools, skipped: imported.skipped }, secrets);
+    const egress = await restEgress(base, doc, config.openapi !== null && config.openapi !== undefined ? null : (config.openapiUrl ?? null), lookupImpl);
+    return scrubSecrets({ ok: true as const, serverInfo: imported.serverInfo, tools: imported.tools, skipped: imported.skipped, egress }, secrets);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return scrubSecrets({ ok: false as const, error: message }, secrets);
