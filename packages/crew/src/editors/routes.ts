@@ -27,7 +27,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 
 import { LOCAL_ACTOR, trustAtLeast } from '../api/auth.js';
-import type { Actor, EditorGrantsResponse, ListEditorsResponse } from '../core/types.js';
+import type { Actor, ConformanceRule, EditorGrantsResponse, ListEditorsResponse } from '../core/types.js';
 import { bundleHeaders } from './csp.js';
 import { installPack, PackInstallError, type ConformanceRunner, type PackCheckRunner } from './pack-install.js';
 import { EDITOR_ID, EDITOR_VERSION, EditorRegistry, HOST_BUNDLE_CAP_BYTES, notRealEntry, readCapped, type EditorRecord } from './registry.js';
@@ -45,6 +45,40 @@ export interface EditorGrantsAdapter {
     project?: string;
     firstParty: boolean;
   }): Promise<EditorGrantsResponse>;
+  /** The rule store, for the install consent's `mcp.session` grant (DES-MCP-INSPECTOR-001 §6). */
+  listConformanceRules?(): Promise<ConformanceRule[]>;
+  upsertConformanceRule?(rule: ConformanceRule): Promise<void>;
+}
+
+/** The approvals ledger the engine reads (core `editor_gate.rs` GRANTS_LEDGER). */
+export const EDITOR_GRANTS_LEDGER = 'EDITOR-GRANTS';
+/** The permission only an install consent grants: no posture or allow rule can (core LEDGER_ONLY_PERMISSIONS). */
+export const INSTALL_GRANTED = 'mcp.session';
+
+export function grantToken(id: string, version: string, sha256: string, permission: string): string {
+  return `editor:${id}@${version}#${sha256}/${permission}`;
+}
+
+/**
+ * Rewrite the ledger's `mcp.session` tokens for `ids`: every earlier build's token of those editors
+ * is dropped, and `add` (this install's tokens) is written. One read-modify-write; nothing is written when the list is unchanged.
+ */
+export async function editInstallGrants(
+  adapter: EditorGrantsAdapter,
+  ids: readonly string[],
+  add: readonly string[],
+): Promise<void> {
+  if (typeof adapter.listConformanceRules !== 'function' || typeof adapter.upsertConformanceRule !== 'function') {
+    throw new Error('this engine cannot write editor grants');
+  }
+  const rules = await adapter.listConformanceRules();
+  const ledger = rules.find((r) => r.id === EDITOR_GRANTS_LEDGER);
+  if (ledger === undefined) throw new Error(`the ${EDITOR_GRANTS_LEDGER} ledger is not in the policy store; restart the daemon to seed it`);
+  const owned = (t: string): boolean => ids.some((id) => t.startsWith(`editor:${id}@`) && t.endsWith(`/${INSTALL_GRANTED}`));
+  const before = ledger.excludes ?? [];
+  const dedup = [...new Set([...before.filter((t) => !owned(t)), ...add])];
+  if (dedup.length === before.length && dedup.every((t, i) => t === before[i])) return;
+  await adapter.upsertConformanceRule({ ...ledger, excludes: dedup });
 }
 
 export interface EditorRoutesDeps {
@@ -58,6 +92,13 @@ export interface EditorRoutesDeps {
 
 export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDeps): void {
   const { registry } = deps;
+  // Ledger edits are read-modify-write: serialize them so two installs never drop each other's token.
+  let chain: Promise<unknown> = Promise.resolve();
+  const grantChain = <T>(f: () => Promise<T>): Promise<T> => {
+    const r = chain.then(f, f);
+    chain = r.catch(() => undefined);
+    return r;
+  };
   const actorOf = (req: { actor?: Actor }): Actor => req.actor ?? LOCAL_ACTOR;
   const operatorOnly = (req: FastifyRequest, reply: FastifyReply): boolean => {
     const actor = actorOf(req);
@@ -96,7 +137,21 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
       try {
         const installed = await installPack(parsed.data.packRoot, parsed.data.enabled, { check: deps.packCheck, conformance: deps.conformance, registry });
         deps.log?.(`[editors] installed ${installed.editors.map((e) => `${e.id}@${e.version}`).join(', ')}${installed.updated ? ' (update)' : ''}`);
-        return installed;
+        // The install consent IS the mcp.session grant (DES-MCP-INSPECTOR-001 §6): this human-only
+        // call, after the operator approved the install, writes each declaring editor's per-build
+        // token. An editor that does not declare it gets none; an earlier build's token is dropped.
+        const declaring = installed.editors.filter((e) => e.permissions.some((p) => p.id === INSTALL_GRANTED));
+        if (declaring.length === 0) return installed;
+        const tokens = declaring.map((e) => grantToken(e.id, e.version, e.sha256, INSTALL_GRANTED));
+        try {
+          await grantChain(() => editInstallGrants(deps.adapter, declaring.map((e) => e.id), tokens));
+          deps.log?.(`[editors] install consent granted ${INSTALL_GRANTED} to ${declaring.map((e) => `${e.id}@${e.version}`).join(', ')}`);
+          return { ...installed, granted: tokens };
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          deps.log?.(`[editors] installed, but the ${INSTALL_GRANTED} grant was not written: ${msg}`);
+          return { ...installed, grantError: `installed, but ${INSTALL_GRANTED} was not granted (it asks): ${msg}` };
+        }
       } catch (err) {
         if (err instanceof PackInstallError) {
           return reply.code(err.status).send({ error: err.message, ...(err.check !== undefined ? { check: err.check } : {}), ...(err.body ?? {}) });
@@ -117,6 +172,10 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
         return reply.code(409).send({ error: `${id} ships with studio and cannot be removed — disable it instead (POST /editors/${id}/enabled)` });
       }
       if (!registry.removeInstalled(id)) return reply.code(404).send({ error: `no editor '${id}' is installed` });
+      // A removed editor keeps no install grant: a later install asks its consent again.
+      await grantChain(() => editInstallGrants(deps.adapter, [id], [])).catch((err: unknown) => {
+        deps.log?.(`[editors] removed ${id}, but its ${INSTALL_GRANTED} grant could not be withdrawn: ${err instanceof Error ? err.message : String(err)}`);
+      });
       return { removed: true, id };
     },
   );

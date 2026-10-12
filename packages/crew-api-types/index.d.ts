@@ -10171,7 +10171,10 @@ export type EditorPermission =
   | 'media.read'
   | 'artifact.export'
   | 'ui.fullscreen'
-  | 'network.media';
+  | 'network.media'
+  /** Talk, through studio's host, to an MCP server the operator connected (DES-MCP-INSPECTOR-001).
+   *  No posture rule allows it: the editor's install consent writes its per-build grant. */
+  | 'mcp.session';
 
 /**
  * One registered editor, as Settings → Editors renders it. No path is on the wire: the bundle is
@@ -10226,6 +10229,13 @@ export interface InstallEditorResponse {
   editors: EditorView[];
   check: PackCheckResult;
   conformance: EditorConformanceSummary;
+  /**
+   * The `mcp.session` grant tokens this install consent wrote into `EDITOR-GRANTS` (one per installed
+   * editor that declares it). Absent when no installed editor declares it. `grantError` = the editor is
+   * installed but its grant could not be written, so `mcp.session` still asks.
+   */
+  granted?: string[];
+  grantError?: string;
 }
 
 /** What the install-time conformance run found (garden `scripts/editor/conformance.py`). */
@@ -10490,4 +10500,97 @@ export interface LearnTopic {
 export interface LearnTopicsResponse {
   repoRef: string;
   topics: LearnTopic[];
+}
+
+// ── MCP inspector bridge (DES-MCP-INSPECTOR-001 §3) ───────────────────────────────────────────
+// `/api/v1/mcp-inspect/sessions`: one live connection to an MCP server per session, driven by
+// studio's host for an `mcp-server` editor. Start, send and delete are human-only; the log is
+// operator-only. No session id, command, URL, env or header value is ever given to the plugin.
+
+/** What to connect to: a server in crew's MCP registry, a stdio command, or an HTTP endpoint. */
+export type McpInspectTarget =
+  | { server: string }
+  | { command: string; args?: string[]; env?: Record<string, string>; cwd?: string }
+  | { url: string; transport?: 'streamable-http' | 'sse'; headers?: Record<string, string> };
+
+/** `POST /mcp-inspect/sessions` */
+export interface McpInspectStartBody {
+  target: McpInspectTarget;
+}
+
+export type McpInspectState = 'connecting' | 'ready' | 'closed' | 'failed';
+
+/** The server's `initialize` result, secrets scrubbed. */
+export interface McpInspectInitialize {
+  protocolVersion: string | null;
+  serverInfo: { name: string; version: string; [k: string]: unknown } | null;
+  capabilities: Record<string, unknown>;
+  instructions: string | null;
+}
+
+export interface McpInspectSessionView {
+  id: string;
+  target: {
+    kind: 'server' | 'stdio' | 'streamable-http' | 'sse';
+    /** A short name: the registry name, the command's basename, or the URL's host. */
+    name: string;
+    /** The full command line or URL, for the HOST's header only. */
+    label: string;
+    /** Names only, never values. */
+    envNames: string[];
+    headerNames: string[];
+  };
+  state: McpInspectState;
+  initialize: McpInspectInitialize | null;
+  error: string | null;
+  startedAt: string;
+  /** The last log sequence number written. */
+  lastSeq: number;
+}
+
+/** `201` of `POST /mcp-inspect/sessions` */
+export interface McpInspectStartResponse {
+  session: McpInspectSessionView;
+}
+
+/** `POST /mcp-inspect/sessions/:id/rpc` */
+export interface McpInspectRpcBody {
+  method: string;
+  params?: Record<string, unknown>;
+}
+
+export interface McpInspectRpcResponse {
+  /** The server's JSON-RPC answer (`{ result }` or `{ error: { code, message, data? } }`), secrets scrubbed. */
+  response: { result?: unknown; error?: { code: number; message: string; data?: unknown } };
+  ms: number;
+  /** The answer was over the cap and is cut (the log entry carries the cut text). */
+  truncated: boolean;
+}
+
+export interface McpInspectLogEntry {
+  seq: number;
+  /** ISO time. */
+  at: string;
+  /** `out` = to the server, `in` = from it, `host` = the bridge's own line (state, exit). */
+  dir: 'out' | 'in' | 'host';
+  kind: 'request' | 'response' | 'notification' | 'stderr' | 'state';
+  method?: string;
+  rpcId?: string | number;
+  /** Round trip, on a response. */
+  ms?: number;
+  error?: boolean;
+  /** The message as JSON (or the stderr text), secrets scrubbed, at most 64 KB. */
+  text: string;
+  truncated?: boolean;
+}
+
+/** `GET /mcp-inspect/sessions/:id/log?after=&wait=` (a long poll) */
+export interface McpInspectLogResponse {
+  entries: McpInspectLogEntry[];
+  /** Pass as `after` next time. */
+  next: number;
+  /** The oldest sequence still held; entries before it were evicted (a gap). */
+  first: number;
+  state: McpInspectState;
+  error: string | null;
 }

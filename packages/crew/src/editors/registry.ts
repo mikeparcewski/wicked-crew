@@ -53,6 +53,7 @@ export const EDITOR_PERMISSIONS = [
   'artifact.export',
   'ui.fullscreen',
   'network.media',
+  'mcp.session',
 ] as const satisfies ReadonlyArray<EditorPermission>;
 
 /** Editor ids: lowercase dash-words, ≤ 64 (garden's shape); first-party ones start with `wicked-`. */
