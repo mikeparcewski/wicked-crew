@@ -28,6 +28,7 @@ import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { LOCAL_ACTOR, trustAtLeast } from '../api/auth.js';
 import type { Actor, McpInspectLogResponse, McpInspectRpcResponse, McpInspectStartResponse } from '../core/types.js';
 import type { McpUpstreamConfig } from '../mcp/probe.js';
+import { canonicalJson } from '../mcp/classify.js';
 import { isWriteGrant, type McpCallTarget } from '../mcp/registry.js';
 import { commandName, InspectError, InspectSession, InspectSessions, INSPECT_METHODS, type OpenedTransport, type TargetDescription } from './session.js';
 
@@ -38,7 +39,7 @@ export interface InspectRegistry {
   inspectTarget(name: string): Promise<McpUpstreamConfig | null>;
   callSecret(config: McpUpstreamConfig): Promise<{ secret: string | null; missing: boolean }>;
   /** The broker's resolution of one tool (data connectors G1: a write tool is callable only once a human granted it). */
-  resolveCall(server: string, tool: string): Promise<Pick<McpCallTarget, 'annotations' | 'classOverride' | 'registered'> | null>;
+  resolveCall(server: string, tool: string): Promise<Pick<McpCallTarget, 'config' | 'annotations' | 'classOverride' | 'registered'> | null>;
 }
 
 /**
@@ -48,11 +49,19 @@ export interface InspectRegistry {
  * A read tool is callable, enabled or not (an operator debugs what it switched off). A typed command
  * or URL has no registry grant to check: the host's confirm named exactly what runs.
  * The plugin's `mcp.session` grant (install consent) never stands in for a write grant.
+ *
+ * The grant is judged for the server this session CONNECTED to (codex r2): a registry entry
+ * re-saved since with another command or URL is a 409 `server_changed` (reconnect), never a grant
+ * read off the new entry for the old connection.
  */
-async function refuseUngrantedWrite(registry: InspectRegistry | undefined, server: string, params: Record<string, unknown> | undefined): Promise<InspectError | null> {
+async function refuseUngrantedWrite(registry: InspectRegistry | undefined, connected: McpUpstreamConfig, params: Record<string, unknown> | undefined): Promise<InspectError | null> {
   const tool = params?.['name'];
   if (typeof tool !== 'string') return null; // the server answers a malformed call itself
+  const server = connected.name;
   const t = registry === undefined ? null : await registry.resolveCall(server, tool);
+  if (t !== null && canonicalJson(t.config) !== canonicalJson(connected)) {
+    return new InspectError(409, 'server_changed', `${server} was re-registered with another command or URL since this session connected: reconnect to call its tools`);
+  }
   if (t !== null && (t.registered || !isWriteGrant(t.annotations, t.classOverride))) return null;
   return new InspectError(403, 'write_not_granted', `${server}/${tool} is a write tool no human has granted (or its schema changed since): enable it on the MCP tools page first`);
 }
@@ -126,7 +135,7 @@ export interface InspectRoutesDeps {
 }
 
 /** Resolve a target to what to open, what the host may show, and the values to scrub. */
-async function resolve(target: z.infer<typeof Target>, registry: InspectRegistry | undefined): Promise<{ spec: ConnectSpec; describe: TargetDescription; secrets: string[] }> {
+async function resolve(target: z.infer<typeof Target>, registry: InspectRegistry | undefined): Promise<{ spec: ConnectSpec; describe: TargetDescription; secrets: string[]; registered?: McpUpstreamConfig }> {
   if ('server' in target) {
     const config = registry === undefined ? null : await registry.inspectTarget(target.server);
     if (config === null || registry === undefined) throw new InspectError(404, 'unknown_server', `no MCP server named ${target.server} is registered`);
@@ -141,6 +150,7 @@ async function resolve(target: z.infer<typeof Target>, registry: InspectRegistry
         spec: { kind: 'stdio', command: config.command ?? '', args: config.args, env },
         describe: { kind: 'server', name: config.name, label: [config.command ?? '', ...config.args].join(' '), envNames: Object.keys(env), headerNames: [] },
         secrets,
+        registered: config,
       };
     }
     const headers: Record<string, string> = {};
@@ -149,6 +159,7 @@ async function resolve(target: z.infer<typeof Target>, registry: InspectRegistry
       spec: { kind: 'streamable-http', url: config.url ?? '', headers },
       describe: { kind: 'server', name: config.name, label: config.url ?? '', envNames: [], headerNames: Object.keys(headers) },
       secrets,
+      registered: config,
     };
   }
   if ('command' in target) {
@@ -171,6 +182,8 @@ async function resolve(target: z.infer<typeof Target>, registry: InspectRegistry
 
 export function registerMcpInspectRoutes(app: FastifyInstance, deps: InspectRoutesDeps): InspectSessions {
   const sessions = deps.sessions ?? new InspectSessions();
+  /** The registry config each registry-server session connected with (G1's grant check binds to it). */
+  const connectedTo = new WeakMap<InspectSession, McpUpstreamConfig>();
   const open = deps.open ?? openTransport;
   const actorOf = (req: { actor?: Actor }): Actor => req.actor ?? LOCAL_ACTOR;
   const humanOnly = (req: FastifyRequest, reply: FastifyReply): boolean => {
@@ -215,7 +228,7 @@ export function registerMcpInspectRoutes(app: FastifyInstance, deps: InspectRout
       if (!parsed.success) return reply.code(400).send({ code: 'bad_request', error: `body must be { target: {server} | {command, args?, env?, cwd?} | {url, transport?, headers?} }: ${parsed.error.issues[0]?.message ?? ''}` });
       try {
         if (!sessions.hasRoom()) throw new InspectError(429, 'too_many_sessions', 'at most 4 inspector sessions at once; disconnect one first');
-        const { spec, describe, secrets } = await resolve(parsed.data.target, deps.registry);
+        const { spec, describe, secrets, registered } = await resolve(parsed.data.target, deps.registry);
         let opened: OpenedTransport;
         try {
           opened = open(spec);
@@ -224,6 +237,7 @@ export function registerMcpInspectRoutes(app: FastifyInstance, deps: InspectRout
         }
         const session = new InspectSession(describe, opened, secrets, Date.now, deps.callTimeoutMs);
         sessions.add(session);
+        if (registered !== undefined) connectedTo.set(session, registered);
         await session.start();
         deps.log?.(session.scrubText(`[mcp-inspect] ${session.id.slice(0, 8)} ${describe.kind} ${describe.name}: ${session.state}`));
         const body: McpInspectStartResponse = { session: session.view() };
@@ -246,9 +260,11 @@ export function registerMcpInspectRoutes(app: FastifyInstance, deps: InspectRout
       if (!INSPECT_METHODS.has(parsed.data.method)) {
         return reply.code(400).send({ code: 'method_not_allowed', error: `${parsed.data.method} is not a method the inspector sends (allowed: ${[...INSPECT_METHODS].join(', ')})` });
       }
-      const target = s.target;
-      if (parsed.data.method === 'tools/call' && target.kind === 'server') {
-        const refused = await refuseUngrantedWrite(deps.registry, target.name, parsed.data.params);
+      // Keyed by the session itself, never by its scrubbed view (codex r2: a secret equal to a field
+      // value would rewrite it).
+      const connected = connectedTo.get(s);
+      if (parsed.data.method === 'tools/call' && connected !== undefined) {
+        const refused = await refuseUngrantedWrite(deps.registry, connected, parsed.data.params);
         if (refused !== null) return fail(reply, refused);
       }
       try {

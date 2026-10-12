@@ -299,7 +299,7 @@ describe('the MCP inspector bridge', () => {
     const registry: InspectRegistry = {
       inspectTarget: async (name) => (name === 'fixture' ? config({}) : name === 'api' ? config({ name: 'api', kind: 'rest' }) : null),
       callSecret: async () => ({ secret, missing: secret === null }),
-      resolveCall: async () => ({ annotations: { readOnlyHint: true }, classOverride: null, registered: false }),
+      resolveCall: async () => ({ config: config({}), annotations: { readOnlyHint: true }, classOverride: null, registered: false }),
     };
     const h = await harness({ registry });
     const res = await h.start({ server: 'fixture' });
@@ -324,10 +324,13 @@ describe('the MCP inspector bridge', () => {
       whoami: { annotations: { readOnlyHint: false, destructiveHint: true }, classOverride: null, registered: true }, // granted
       slow: { annotations: { readOnlyHint: true }, classOverride: 'destructive', registered: false }, // re-classed a write
     };
+    let live: McpUpstreamConfig = { name: 'fixture', kind: 'mcp-stdio', command: process.execPath, args: [SERVER], url: null, auth: { ref: 'env:X', env: 'INSPECT_TOKEN' } as McpUpstreamConfig['auth'] };
+    const connected = live;
     const registry: InspectRegistry = {
-      inspectTarget: async () => ({ name: 'fixture', kind: 'mcp-stdio', command: process.execPath, args: [SERVER], url: null, auth: null }),
-      callSecret: async () => ({ secret: null, missing: false }),
-      resolveCall: async (_server, tool) => tools[tool] ?? null,
+      inspectTarget: async () => live,
+      // The secret is the word "server": the session's scrubbed view rewrites its kind, and the check must not care (codex r2).
+      callSecret: async () => ({ secret: 'server', missing: false }),
+      resolveCall: async (_server, tool) => (tools[tool] === undefined ? null : { config: live, ...tools[tool]! }),
     };
     const h = await harness({ registry });
     const { session } = (await h.start({ server: 'fixture' })).json() as McpInspectStartResponse;
@@ -342,6 +345,12 @@ describe('the MCP inspector bridge', () => {
     expect((await h.rpc(session.id, 'tools/list')).statusCode).toBe(200);
     const typed = (await h.start(stdio())).json() as McpInspectStartResponse;
     expect((await h.rpc(typed.session.id, 'tools/call', { name: 'echo', arguments: { text: 'hi' } })).statusCode).toBe(200);
+    // Re-registered with another command since: the grant is never read off the new entry (codex r2).
+    live = { ...connected, args: [SERVER, '--other'] };
+    tools['echo']!.registered = true;
+    const changed = await h.rpc(session.id, 'tools/call', { name: 'echo', arguments: { text: 'hi' } });
+    expect(changed.statusCode).toBe(409);
+    expect(changed.json()).toMatchObject({ code: 'server_changed' });
   });
 
   it('names a stdio command by its script, never its path', () => {
