@@ -10,6 +10,12 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.9.13] — 2026-10-12
+
+Bundles **wicked-studio 0.7.12**: Watchtower's Finished and Delivered read the real wire and every empty filter says why (studio#738), and new Approved and Rejected filters list your gate answers (studio#739). Engine pin unchanged (`wicked-core-ts` `^0.9.7`); pair with wicked-garden 12.53.3 and wicked-estate 0.29.2.
+
+- **deps:** `wicked-studio` `^0.7.12`.
+
 ## [0.9.12] — 2026-10-12
 
 Bundles **wicked-studio 0.7.11**: the rail's Workspace links are visibly smaller and muted, under a small WORKSPACE header (studio#736). Engine pin unchanged (`wicked-core-ts` `^0.9.7`); pair with wicked-garden 12.53.3 and wicked-estate 0.29.2.
@@ -3950,7 +3956,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.12...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.13...HEAD
+[0.9.13]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.12...v0.9.13
 [0.9.12]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.11...v0.9.12
 [0.9.11]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.10...v0.9.11
 [0.9.10]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.9...v0.9.10
