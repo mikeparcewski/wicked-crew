@@ -89,6 +89,15 @@ export async function editInstallGrants(
   await adapter.upsertConformanceRule({ ...ledger, excludes: dedup });
 }
 
+export interface EditorRoutesDeps {
+  registry: EditorRegistry;
+  adapter: EditorGrantsAdapter;
+  packCheck: PackCheckRunner;
+  /** The install-time conformance run (garden's runner against this daemon's conformance host page). */
+  conformance: ConformanceRunner;
+  log?: (msg: string) => void;
+}
+
 export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDeps): void {
   const { registry } = deps;
   // Ledger edits are read-modify-write: serialize them so two installs never drop each other's token.
