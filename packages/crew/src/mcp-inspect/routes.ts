@@ -28,6 +28,7 @@ import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { LOCAL_ACTOR, trustAtLeast } from '../api/auth.js';
 import type { Actor, McpInspectLogResponse, McpInspectRpcResponse, McpInspectStartResponse } from '../core/types.js';
 import type { McpUpstreamConfig } from '../mcp/probe.js';
+import { isWriteGrant, type McpCallTarget } from '../mcp/registry.js';
 import { commandName, InspectError, InspectSession, InspectSessions, INSPECT_METHODS, type OpenedTransport, type TargetDescription } from './session.js';
 
 const V = '/api/v1';
@@ -36,6 +37,24 @@ const V = '/api/v1';
 export interface InspectRegistry {
   inspectTarget(name: string): Promise<McpUpstreamConfig | null>;
   callSecret(config: McpUpstreamConfig): Promise<{ secret: string | null; missing: boolean }>;
+  /** The broker's resolution of one tool (data connectors G1: a write tool is callable only once a human granted it). */
+  resolveCall(server: string, tool: string): Promise<Pick<McpCallTarget, 'annotations' | 'classOverride' | 'registered'> | null>;
+}
+
+/**
+ * Data connectors G1 composed with the inspector: on a REGISTERED server, a `tools/call` of a write
+ * or destructive tool (by its annotations or class override, as the broker classes it) needs the
+ * human write grant the registry holds (`registered`: server and tool enabled, schema as saved).
+ * A read tool is callable, enabled or not (an operator debugs what it switched off). A typed command
+ * or URL has no registry grant to check: the host's confirm named exactly what runs.
+ * The plugin's `mcp.session` grant (install consent) never stands in for a write grant.
+ */
+async function refuseUngrantedWrite(registry: InspectRegistry | undefined, server: string, params: Record<string, unknown> | undefined): Promise<InspectError | null> {
+  const tool = params?.['name'];
+  if (typeof tool !== 'string') return null; // the server answers a malformed call itself
+  const t = registry === undefined ? null : await registry.resolveCall(server, tool);
+  if (t !== null && (t.registered || !isWriteGrant(t.annotations, t.classOverride))) return null;
+  return new InspectError(403, 'write_not_granted', `${server}/${tool} is a write tool no human has granted (or its schema changed since): enable it on the MCP tools page first`);
 }
 
 /** A resolved connection: what to open, and what to scrub. */
@@ -226,6 +245,11 @@ export function registerMcpInspectRoutes(app: FastifyInstance, deps: InspectRout
       if (!parsed.success) return reply.code(400).send({ code: 'bad_request', error: 'body must be { method, params?: object }' });
       if (!INSPECT_METHODS.has(parsed.data.method)) {
         return reply.code(400).send({ code: 'method_not_allowed', error: `${parsed.data.method} is not a method the inspector sends (allowed: ${[...INSPECT_METHODS].join(', ')})` });
+      }
+      const target = s.target;
+      if (parsed.data.method === 'tools/call' && target.kind === 'server') {
+        const refused = await refuseUngrantedWrite(deps.registry, target.name, parsed.data.params);
+        if (refused !== null) return fail(reply, refused);
       }
       try {
         const body: McpInspectRpcResponse = await s.rpc(parsed.data.method, parsed.data.params);

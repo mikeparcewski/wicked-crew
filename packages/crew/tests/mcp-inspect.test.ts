@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { McpInspectLogResponse, McpInspectRpcResponse, McpInspectStartResponse } from '../src/core/types.js';
 import { registerMcpInspectRoutes, type InspectRegistry } from '../src/mcp-inspect/routes.js';
 import { commandName, heldTail, InspectSessions, MAX_SESSIONS } from '../src/mcp-inspect/session.js';
+import type { McpToolAnnotations, McpToolClass } from '../src/core/types.js';
 import type { McpUpstreamConfig } from '../src/mcp/probe.js';
 
 const SERVER = join(import.meta.dirname, 'fixtures', 'mcp', 'inspect-server.mjs');
@@ -298,6 +299,7 @@ describe('the MCP inspector bridge', () => {
     const registry: InspectRegistry = {
       inspectTarget: async (name) => (name === 'fixture' ? config({}) : name === 'api' ? config({ name: 'api', kind: 'rest' }) : null),
       callSecret: async () => ({ secret, missing: secret === null }),
+      resolveCall: async () => ({ annotations: { readOnlyHint: true }, classOverride: null, registered: false }),
     };
     const h = await harness({ registry });
     const res = await h.start({ server: 'fixture' });
@@ -313,6 +315,33 @@ describe('the MCP inspector bridge', () => {
     const missing = await h.start({ server: 'fixture' });
     expect(missing.statusCode).toBe(409);
     expect(missing.json()).toMatchObject({ code: 'secret_missing' });
+  });
+
+  it('data connectors G1: on a registered server, a write tool no human granted is refused; a read or a granted write is called', async () => {
+    const tools: Record<string, { annotations: McpToolAnnotations | null; classOverride: McpToolClass | null; registered: boolean }> = {
+      echo: { annotations: { readOnlyHint: false, destructiveHint: false }, classOverride: null, registered: false }, // a write, not granted
+      boom: { annotations: { readOnlyHint: true }, classOverride: null, registered: false }, // a read, switched off
+      whoami: { annotations: { readOnlyHint: false, destructiveHint: true }, classOverride: null, registered: true }, // granted
+      slow: { annotations: { readOnlyHint: true }, classOverride: 'destructive', registered: false }, // re-classed a write
+    };
+    const registry: InspectRegistry = {
+      inspectTarget: async () => ({ name: 'fixture', kind: 'mcp-stdio', command: process.execPath, args: [SERVER], url: null, auth: null }),
+      callSecret: async () => ({ secret: null, missing: false }),
+      resolveCall: async (_server, tool) => tools[tool] ?? null,
+    };
+    const h = await harness({ registry });
+    const { session } = (await h.start({ server: 'fixture' })).json() as McpInspectStartResponse;
+    const echo = await h.rpc(session.id, 'tools/call', { name: 'echo', arguments: { text: 'hi' } });
+    expect(echo.statusCode).toBe(403);
+    expect(echo.json()).toMatchObject({ code: 'write_not_granted' });
+    expect((await h.rpc(session.id, 'tools/call', { name: 'slow', arguments: {} })).statusCode).toBe(403);
+    expect((await h.rpc(session.id, 'tools/call', { name: 'unregistered', arguments: {} })).statusCode).toBe(403);
+    expect((await h.rpc(session.id, 'tools/call', { name: 'boom', arguments: {} })).statusCode).toBe(200);
+    expect((await h.rpc(session.id, 'tools/call', { name: 'whoami', arguments: {} })).statusCode).toBe(200);
+    // Listing is never gated; a typed command has no registry grant to check.
+    expect((await h.rpc(session.id, 'tools/list')).statusCode).toBe(200);
+    const typed = (await h.start(stdio())).json() as McpInspectStartResponse;
+    expect((await h.rpc(typed.session.id, 'tools/call', { name: 'echo', arguments: { text: 'hi' } })).statusCode).toBe(200);
   });
 
   it('names a stdio command by its script, never its path', () => {
