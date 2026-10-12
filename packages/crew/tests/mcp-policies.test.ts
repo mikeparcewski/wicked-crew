@@ -30,7 +30,7 @@ import type {
   McpPreviewResponse,
   McpToolAnnotations,
 } from '../src/core/types.js';
-import { deriveToolClass } from '../src/mcp/classify.js';
+import { deriveToolClass, toolSchemaHash } from '../src/mcp/classify.js';
 import { FIRST_USE_LEDGER, McpPolicies, MCP_PREVIEW_SEATS, WRITE_LEDGER } from '../src/mcp/policies.js';
 import { probeMcpServer } from '../src/mcp/probe.js';
 import { McpRegistry } from '../src/mcp/registry.js';
@@ -418,6 +418,85 @@ describe('approvals are audited edits of the ledger rules', () => {
     expect(await ledger(WRITE_LEDGER)).toEqual([]);
     await audit.flush();
     expect(readFileSync(auditPath, 'utf8')).toContain('mcp.approval.withdrawn');
+  });
+});
+
+describe('G2: a REST tool approval covers where its calls go (real engine)', () => {
+  // An inline document: the preview reads no network. The base URL is loopback, so the first save
+  // confirms its origin (allowOrigin); that confirmation is remembered for later saves.
+  const DOC = {
+    openapi: '3.0.3',
+    info: { title: 'Notes', version: '1' },
+    paths: { '/notes': { get: { operationId: 'listNotes' }, post: { operationId: 'addNote', requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { text: { type: 'string' } } } } } } } } },
+  };
+  const restBody = (url: string) => ({ name: 'notes', kind: 'rest', url, openapi: DOC });
+  const preview = async (url: string) => (await call('POST', '/mcp/servers/preview', restBody(url))).json() as McpPreviewResponse;
+  // An inline document previews in a few ms, so these tests reach the engine much sooner after it
+  // opens than the stdio-server tests above (whose spawn takes 300 ms+). That early, a read can fail
+  // with "open estate store read-only … no such table: meta", and an approval can go missing from
+  // the next read (reproduced locally, 1-2 of 3 runs, and on CI): the engine's store is not yet
+  // initialized. Wait until it answers with its seeded ledgers. The race is reported for
+  // wicked-core/crew's adapter, not fixed here.
+  beforeEach(async () => {
+    for (let i = 0; ; i++) {
+      try {
+        if ((await adapter.listConformanceRules()).some((r) => r.id === FIRST_USE_LEDGER)) break;
+      } catch (err) {
+        if (i >= 60) throw err;
+      }
+      if (i >= 60) throw new Error('the engine never answered with its seeded MCP ledgers');
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  });
+
+  it('a changed base path withdraws the approvals, and an unconfirmed origin change withdraws none', async () => {
+    const first = await preview('http://127.0.0.1:9/v1');
+    expect((await call('POST', '/mcp/servers', { previewHash: first.previewHash, enabledWrites: ['addNote'], allowOrigin: 'http://127.0.0.1:9' })).statusCode).toBe(201);
+    await call('POST', '/mcp/approvals', { subject: 'mcp:notes' });
+    await call('POST', '/mcp/approvals', { subject: 'mcp:notes/addNote' });
+    expect(cell(tool(await matrix({ server: 'notes' }), 'addNote'), 'creator', 'claude', 'balanced').decision).toBe('allow');
+
+    // Another origin needs confirming: the refused save withdraws nothing.
+    const moved = await preview('http://127.0.0.1:10/v1');
+    expect(moved.policies?.withdrawOnSave).toEqual(['mcp:notes', 'mcp:notes/addNote']);
+    const refused = await call('POST', '/mcp/servers', { previewHash: moved.previewHash });
+    expect(refused.statusCode, refused.body).toBe(409);
+    expect(await ledger(FIRST_USE_LEDGER)).toEqual(['mcp:notes', 'mcp:notes/addNote']);
+    expect(await ledger(WRITE_LEDGER)).toEqual(['mcp:notes/addNote']);
+
+    // Same origin, another base path: no confirmation, but the target changed, so the save withdraws.
+    const repath = await preview('http://127.0.0.1:9/v2');
+    expect(repath.egress?.confirmRequired).toBe(false);
+    expect(repath.diff?.changed).toEqual(['listNotes', 'addNote']);
+    expect((await call('POST', '/mcp/servers', { previewHash: repath.previewHash, enabledWrites: ['addNote'] })).statusCode).toBe(201);
+    expect(await ledger(FIRST_USE_LEDGER)).toEqual([]);
+    expect(await ledger(WRITE_LEDGER)).toEqual([]);
+    expect(cell(tool(await matrix({ server: 'notes' }), 'addNote'), 'creator', 'claude', 'autonomous')).toMatchObject({ decision: 'ask', ruleIds: ['engine:mcp-first-use'] });
+  });
+  it('a changed target withdraws the server approval even when no tool name carries over (codex r1)', async () => {
+    const first = await preview('http://127.0.0.1:9/v1');
+    expect((await call('POST', '/mcp/servers', { previewHash: first.previewHash, allowOrigin: 'http://127.0.0.1:9' })).statusCode).toBe(201);
+    await call('POST', '/mcp/approvals', { subject: 'mcp:notes' });
+    await call('POST', '/mcp/approvals', { subject: 'mcp:notes/listNotes' });
+    // Another base path, and only the other operation: no tool is in both saves.
+    const body = { ...restBody('http://127.0.0.1:9/v2'), operations: ['addNote'] };
+    const swapped = (await call('POST', '/mcp/servers/preview', body)).json() as McpPreviewResponse;
+    expect(swapped.policies?.withdrawOnSave).toEqual(['mcp:notes', 'mcp:notes/listNotes']);
+    expect((await call('POST', '/mcp/servers', { previewHash: swapped.previewHash })).statusCode).toBe(201);
+    expect(await ledger(FIRST_USE_LEDGER)).toEqual([]);
+  });
+  it('re-saving a registration from before G2 withdraws its approvals, even when no tool name carries over (codex r2)', async () => {
+    const first = (await call('POST', '/mcp/servers/preview', { ...restBody('http://127.0.0.1:9/v1'), operations: ['listNotes'] })).json() as McpPreviewResponse;
+    expect((await call('POST', '/mcp/servers', { previewHash: first.previewHash, allowOrigin: 'http://127.0.0.1:9' })).statusCode).toBe(201);
+    await call('POST', '/mcp/approvals', { subject: 'mcp:notes' });
+    // What a pre-G2 crew wrote: hashes without the target.
+    await registry['deps'].store.mutate((file) => {
+      for (const t of file.servers[0]!.tools) t.schemaHash = t.observedSchemaHash = toolSchemaHash(t);
+    });
+    const resave = (await call('POST', '/mcp/servers/preview', { ...restBody('http://127.0.0.1:9/v1'), operations: ['addNote'] })).json() as McpPreviewResponse;
+    expect(resave.policies?.withdrawOnSave).toEqual(['mcp:notes']);
+    expect((await call('POST', '/mcp/servers', { previewHash: resave.previewHash })).statusCode).toBe(201);
+    expect(await ledger(FIRST_USE_LEDGER)).toEqual([]);
   });
 });
 

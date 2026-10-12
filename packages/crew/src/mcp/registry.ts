@@ -21,6 +21,7 @@ import type {
   McpAuthState,
   McpDiscoveredServer,
   McpPreviewResponse,
+  McpRestEgress,
   McpRestMapping,
   McpServer,
   McpServersResponse,
@@ -32,9 +33,10 @@ import type {
   McpToolStatus,
   McpUpstreamKind,
 } from '../core/types.js';
-import { canonicalJson, deriveToolClass, effectiveToolClass, mcpSubject, parseMcpSubject, sha256Hex, toolSchemaHash } from './classify.js';
+import { canonicalJson, deriveToolClass, effectiveToolClass, type HashedRestTarget, type HashedToolShape, mcpSubject, parseMcpSubject, sha256Hex, toolSchemaHash } from './classify.js';
 import type { McpUpstreamConfig, ProbedTool, ProbeResult, Prober } from './probe.js';
 import type { McpRegistryStore, McpServerRecord, McpToolRecord } from './registry-store.js';
+import { restTarget } from './rest.js';
 import { KEYCHAIN_SERVICE, keychainRef, parseSecretRef, resolveSecret, secretIsSet, type SecretStore } from './secrets.js';
 
 /** How long a preview can be saved. */
@@ -65,6 +67,11 @@ export interface McpCallTarget {
   annotations: McpToolAnnotations | null;
   classOverride: McpToolClass | null;
   registered: boolean;
+  /**
+   * (G2) The tool is a `rest` tool saved before its hash covered the server's target (or whose
+   * target was changed outside a save): refused until the operator previews and saves it again.
+   */
+  resaveRequired: boolean;
 }
 
 /** A registered, enabled tool, as the tool list judges it (`callableTools`). */
@@ -91,6 +98,8 @@ interface HeldPreview {
    * rule as every other secret value in this module. A preview that expires takes it with it.
    */
   secret: string | null;
+  /** (G2) A `rest` preview's egress; `null` for an MCP server. */
+  egress: McpRestEgress | null;
 }
 
 export interface McpRegistryDeps {
@@ -152,11 +161,16 @@ export class McpRegistry {
       const what = config.kind === 'rest' ? 'the OpenAPI document could not be imported' : 'the server did not answer tools/list';
       throw new McpRegistryError(502, 'probe_failed', `${what}: ${result.error}`);
     }
-    const tools = result.tools.map((t) => ({ ...t, schemaHash: toolSchemaHash(t) }));
+    const tools = result.tools.map((t) => ({ ...t, schemaHash: hashOf(config, t) }));
     const previewHash = sha256Hex(canonicalJson({ config, tools: tools.map((t) => [t.name, t.schemaHash]) }));
     const expiresAt = this.now() + PREVIEW_TTL_MS;
-    this.hold(previewHash, { config, tools, expiresAt, secret: stagedSecret });
     const existing = (await this.deps.store.read()).servers.find((s) => s.name === config.name);
+    // (G2) A mismatch with the spec's `servers`, or a private address, needs the operator to name
+    // the origin at save, unless an earlier save of this server already confirmed that origin.
+    const egress: McpRestEgress | null =
+      config.kind !== 'rest' || result.egress === undefined ? null : { ...result.egress, confirmRequired: egressRefusal(result.egress, null, existing) !== null };
+    if (config.kind === 'rest' && egress === null) throw new McpRegistryError(502, 'probe_failed', 'the rest probe did not report where its calls go');
+    this.hold(previewHash, { config, tools, expiresAt, secret: stagedSecret, egress });
     const was = (name: string): McpToolRecord | undefined => existing?.tools.find((p) => p.name === name);
     // The override a save keeps: only while the tool's schema is unchanged (as `save` decides).
     const survivingOverride = (t: { name: string; schemaHash: string }): McpToolClass | null => {
@@ -182,6 +196,7 @@ export class McpRegistry {
       })),
       diff: existing === undefined ? null : diffTools(existing.tools, tools),
       ...(result.skipped !== undefined && result.skipped.length > 0 ? { skipped: result.skipped } : {}),
+      ...(egress !== null ? { egress } : {}),
     };
   }
 
@@ -196,8 +211,12 @@ export class McpRegistry {
    * destructive tool of this preview, and is registered enabled. The route allows a grant from a
    * human operator only and audits it. A grant enables a tool; `MCP-FIRST-USE` still asks on its
    * first call.
+   *
+   * (G2) `allowOrigin` is the operator naming the exact origin a `rest` server's calls go to. It is
+   * required when the preview's `egress.confirmRequired` (see {@link checkEgress}) and remembered
+   * on the record, so a re-save over the same origin does not ask again.
    */
-  async save(previewHash: string | undefined, enabledWrites: readonly string[] = []): Promise<McpServer> {
+  async save(previewHash: string | undefined, enabledWrites: readonly string[] = [], allowOrigin: string | null = null): Promise<McpServer> {
     if (previewHash === undefined) {
       throw new McpRegistryError(409, 'preview_required', 'saving a server needs the previewHash of a preview of it: POST /mcp/servers/preview first');
     }
@@ -208,6 +227,7 @@ export class McpRegistry {
     }
     // A wrong grant is refused before the preview is spent, so the operator can correct it and save again.
     await this.checkWriteGrants(previewHash, enabledWrites);
+    await this.checkEgress(previewHash, allowOrigin);
     const granted = new Set(enabledWrites);
     this.previews.delete(previewHash);
     const stamp = new Date(this.now()).toISOString();
@@ -226,6 +246,12 @@ export class McpRegistry {
     if (held.secret !== null) await this.deps.secrets.set(held.config.name, held.secret);
     const saved = await this.restoreSecretOnFailure(held.config.name, held.secret !== null, prior, () => this.deps.store.mutate((file) => {
       const prior = file.servers.find((s) => s.name === held.config.name);
+      // (G2) Re-judged against the record as it is NOW, inside the write: a confirmation the
+      // preview inherited from a server since removed or re-pointed does not carry over.
+      if (held.egress !== null) {
+        const refusal = egressRefusal(held.egress, allowOrigin, prior);
+        if (refusal !== null) throw refusal;
+      }
       const tools: McpToolRecord[] = held.tools.map((t) => {
         const was = prior?.tools.find((p) => p.name === t.name);
         return {
@@ -245,8 +271,12 @@ export class McpRegistry {
       for (const old of prior?.tools ?? []) {
         if (!tools.some((t) => t.name === old.name)) tools.push({ ...old, present: false });
       }
+      const origin = held.egress?.origin ?? null;
+      // The confirmed origin is kept while the server still goes there: named now, or by an earlier save.
+      const allowedOrigin = origin !== null && (allowOrigin === origin || prior?.allowedOrigin === origin) ? origin : null;
       const record: McpServerRecord = {
         ...held.config,
+        ...(allowedOrigin !== null ? { allowedOrigin } : {}),
         enabled: prior?.enabled ?? true,
         health: { state: 'ok', consecutiveFailures: 0, checkedAt: stamp, lastError: null },
         registeredAt: prior?.registeredAt ?? stamp,
@@ -315,11 +345,49 @@ export class McpRegistry {
     }
   }
 
+  /**
+   * (G2, DES-data-connectors §3) Refuse a save whose egress the operator has not confirmed: when
+   * the held preview's `egress.confirmRequired` (the base URL matches none of the spec's `servers`,
+   * or its host is a loopback/private address), `allowOrigin` must be exactly `egress.origin`
+   * (409 `egress_unconfirmed`). An `allowOrigin` that names another origin is refused the same way
+   * even when no confirmation is needed, and one for a server that is not `rest` is a 400
+   * `egress_not_rest`. Like {@link checkWriteGrants} it changes nothing, so the route calls it
+   * before any approval is withdrawn; `save` judges it again inside its write. An unknown or
+   * expired preview is left for `save` to refuse.
+   */
+  async checkEgress(previewHash: string, allowOrigin: string | null): Promise<void> {
+    const held = this.previews.get(previewHash);
+    if (held === undefined || held.expiresAt <= this.now()) return;
+    if (held.egress === null) {
+      if (allowOrigin !== null) throw new McpRegistryError(400, 'egress_not_rest', 'allowOrigin is for a rest server');
+      return;
+    }
+    const prior = (await this.deps.store.read()).servers.find((s) => s.name === held.config.name);
+    const refusal = egressRefusal(held.egress, allowOrigin, prior);
+    if (refusal !== null) throw refusal;
+  }
+
+  /**
+   * (G2) Whether every saved tool of the `rest` server `name` has a hash that covers the server's
+   * target. `false` for a registration saved before G2 (or whose url or auth header changed outside
+   * a save): its approvals never covered the target, so a re-save withdraws them all. `true` for an
+   * unknown server and for an MCP server.
+   */
+  async targetBound(name: string): Promise<boolean> {
+    const s = (await this.deps.store.read()).servers.find((x) => x.name === name);
+    return s === undefined || s.tools.every((t) => targetBound(s, t));
+  }
+
   /** What a held preview would register: its server name and each tool's schema hash (S6). */
-  peekPreview(previewHash: string): { name: string; tools: Array<{ name: string; schemaHash: string }> } | null {
+  peekPreview(previewHash: string): { name: string; tools: Array<{ name: string; schemaHash: string }>; egress: McpRestEgress | null; target: HashedRestTarget | null } | null {
     const held = this.previews.get(previewHash);
     if (held === undefined || held.expiresAt <= this.now()) return null;
-    return { name: held.config.name, tools: held.tools.map((t) => ({ name: t.name, schemaHash: t.schemaHash })) };
+    return {
+      name: held.config.name,
+      tools: held.tools.map((t) => ({ name: t.name, schemaHash: t.schemaHash })),
+      egress: held.egress,
+      target: held.config.kind === 'rest' ? restTarget(held.config) : null,
+    };
   }
 
   async setServerEnabled(name: string, enabled: boolean): Promise<McpServer> {
@@ -383,7 +451,7 @@ export class McpRegistry {
       s.updatedAt = stamp;
       return { server: s, tool: t, grant };
     });
-    return { tool: toolView(server.name, tool), grantedWrite: grant };
+    return { tool: toolView(server, tool), grantedWrite: grant };
   }
 
   /** Probe a registered server again: record its health and its tool diff. */
@@ -406,7 +474,7 @@ export class McpRegistry {
         s.health = { state, consecutiveFailures: failures, checkedAt: stamp, lastError: result.error };
         return s;
       }
-      const probed = result.tools.map((t) => ({ ...t, schemaHash: toolSchemaHash(t) }));
+      const probed = result.tools.map((t) => ({ ...t, schemaHash: hashOf(config, t) }));
       diff = diffTools(s.tools, probed);
       for (const t of s.tools) {
         const now = probed.find((p) => p.name === t.name);
@@ -472,7 +540,8 @@ export class McpRegistry {
       rest: t?.rest ?? null,
       annotations: t?.annotations ?? null,
       classOverride: t?.classOverride ?? null,
-      registered: s.enabled && t !== undefined && t.enabled && toolStatus(t) === 'registered',
+      registered: s.enabled && t !== undefined && t.enabled && statusOf(s, t) === 'registered',
+      resaveRequired: t !== undefined && !targetBound(s, t),
     };
   }
 
@@ -486,7 +555,7 @@ export class McpRegistry {
     for (const s of (await this.deps.store.read()).servers) {
       if (!s.enabled) continue;
       for (const t of s.tools) {
-        if (!t.enabled || toolStatus(t) !== 'registered') continue;
+        if (!t.enabled || statusOf(s, t) !== 'registered') continue;
         out.push({
           server: s.name,
           tool: t.name,
@@ -560,7 +629,7 @@ export class McpRegistry {
   }
 
   private async view(s: McpServerRecord): Promise<McpServer> {
-    const tools = s.tools.map((t) => toolView(s.name, t));
+    const tools = s.tools.map((t) => toolView(s, t));
     const live = tools.filter((t) => t.status !== 'gone');
     return {
       ...configView(configOf(s)),
@@ -636,12 +705,55 @@ export function toolStatus(t: Pick<McpToolRecord, 'present' | 'schemaHash' | 'ob
   return t.schemaHash !== null && t.schemaHash === t.observedSchemaHash ? 'registered' : 'unregistered';
 }
 
-function toolView(server: string, t: McpToolRecord): McpTool {
+/**
+ * (G2) Why saving a `rest` preview with this egress is refused, or `null` when it may be saved: an
+ * `allowOrigin` naming another origin; or a base URL that matches none of the spec's `servers`, a
+ * private host, or one that did not resolve, with neither `allowOrigin` naming the origin nor
+ * `prior` (the record as it is now) holding it as confirmed.
+ */
+function egressRefusal(egress: Omit<McpRestEgress, 'confirmRequired'>, allowOrigin: string | null, prior: Pick<McpServerRecord, 'allowedOrigin'> | undefined): McpRegistryError | null {
+  if (allowOrigin !== null && allowOrigin !== egress.origin) {
+    return new McpRegistryError(409, 'egress_unconfirmed', `allowOrigin ${JSON.stringify(allowOrigin)} is not this server's origin; to confirm it, name exactly ${egress.origin}`);
+  }
+  if (allowOrigin !== null || prior?.allowedOrigin === egress.origin) return null;
+  const why = [
+    ...(egress.matches ? [] : [egress.servers.length === 0 ? 'the OpenAPI document names no server crew can check it against' : `it matches none of the OpenAPI document's servers (${egress.servers.join(', ')})`]),
+    ...(egress.privateAddress ? ['it is a loopback or private address'] : []),
+    ...(egress.resolved ? [] : ['its host did not resolve, so crew could not check that it is not a private address']),
+  ];
+  if (why.length === 0) return null;
+  return new McpRegistryError(409, 'egress_unconfirmed', `the calls would go to ${egress.origin}${egress.basePath}, but ${why.join(', and ')}: to use it anyway, save with allowOrigin set to exactly ${egress.origin}`);
+}
+
+/** A tool's schema hash: a `rest` tool's also covers its server's target (G2). */
+function hashOf(config: Pick<McpUpstreamConfig, 'kind' | 'url' | 'auth'>, t: HashedToolShape): string {
+  return toolSchemaHash(t, config.kind === 'rest' ? restTarget(config) : null);
+}
+
+/**
+ * (G2) Whether a saved `rest` tool's hash covers the target its server's calls go to now. The
+ * hash is recomputed from the saved tool and the saved config, so a tool saved before G2 (whose
+ * hash has no target), and a record whose url or auth header changed outside a save, read
+ * `unregistered` and are denied (D-5) until the operator saves the server again. Nothing re-hashes
+ * an existing registration silently.
+ */
+function targetBound(s: McpServerRecord, t: McpToolRecord): boolean {
+  if (s.kind !== 'rest' || t.schemaHash === null) return true;
+  return hashOf(s, t) === t.schemaHash;
+}
+
+/** {@link toolStatus}, plus (G2) a `rest` tool whose saved hash does not cover its target is `unregistered`. */
+function statusOf(s: McpServerRecord, t: McpToolRecord): McpToolStatus {
+  const status = toolStatus(t);
+  return status === 'registered' && !targetBound(s, t) ? 'unregistered' : status;
+}
+
+function toolView(s: McpServerRecord, t: McpToolRecord): McpTool {
   const derivedClass = deriveToolClass(t.annotations);
   return {
     name: t.name,
     ...(t.rest != null ? { rest: t.rest } : {}),
-    subject: mcpSubject(server, t.name),
+    subject: mcpSubject(s.name, t.name),
     description: t.description,
     annotations: t.annotations,
     inputSchema: t.inputSchema,
@@ -649,7 +761,7 @@ function toolView(server: string, t: McpToolRecord): McpTool {
     classOverride: t.classOverride,
     class: effectiveToolClass(derivedClass, t.classOverride),
     enabled: t.enabled,
-    status: toolStatus(t),
+    status: statusOf(s, t),
     schemaHash: t.schemaHash,
     observedSchemaHash: t.observedSchemaHash,
   };

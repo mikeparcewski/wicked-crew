@@ -197,6 +197,7 @@ import { UsageError, replayOutboxInto } from '../cli/governance.js';
 import { foldDeadletters } from './governance-health.js';
 import { RetryIndex } from './retry-index.js';
 import { SEAT_RECORD_DEFAULT_DAYS, SEAT_RECORD_MAX_DAYS, seatRecord } from './seat-record.js';
+import { jobTitle } from './job-title.js';
 import { DeliveryFreeze, frozenRefusal, isDeliverUnit, registerDeliveryFreezeRoutes } from './delivery-freeze.js';
 import { GroupIndex } from './group-index.js';
 import { RunTimingIndex, recordRunLaunched } from './run-timing-index.js';
@@ -1423,6 +1424,9 @@ export function registerRoutes(
     // Wave 6 (F-4R2-006): the interactive document this run answered, from the seams' handoff
     // ledgers — `null` = genuinely not a document run, so the field is ALWAYS present on served runs.
     view.session.document_id = docRuns.documentOf(view.session.id) ?? null;
+    // api-types 0.113.0 (operator ruling 2026-10-12): the run's short job title, derived here from its
+    // own problem (pure, `job-title.ts`) so every skin shows the same one; the full text stays `problem`.
+    view.session.title = jobTitle(view.session.problem);
     const retryOf = retryIndex.retryOfFor(view.session.id);
     if (retryOf !== undefined) view.session.retry_of = retryOf;
     // wicked-studio#27 (api-types 0.19.0): the launch-time group attach, from the same durable
@@ -1784,9 +1788,17 @@ export function registerRoutes(
         }
         days = n;
       }
+      // api-types 0.113.0: `?project=<id>` folds only that project's runs (the dashboards' spend);
+      // the answer echoes it, so a skin can tell a scoped answer from an older daemon's global one.
+      const rawProject = (req.query as { project?: string | string[] }).project;
+      if (rawProject !== undefined && (Array.isArray(rawProject) || rawProject.trim() === '')) {
+        return reply.code(400).send({ error: 'Invalid ?project — expected one project id' });
+      }
+      const project = rawProject?.trim();
       const detail = await adapter.sessionsDetail();
       await backfillEndedAt(detail);
-      const views = detail.map(decorateRun);
+      const all = detail.map(decorateRun);
+      const views = project === undefined ? all : all.filter((v) => v.session.project_id === project);
       const out = await seatRecord(
         views,
         async (id) => {
@@ -1800,7 +1812,7 @@ export function registerRoutes(
       if (out === null) {
         return reply.code(503).send({ error: 'Seat records are unavailable: this wicked-core build has no event-log read binding' });
       }
-      return out;
+      return project === undefined ? out : { ...out, project };
     },
   );
 

@@ -288,6 +288,18 @@ export interface AgentSession {
   id: string;
   workflow_id: string;
   problem: string;
+  /**
+   * (api-types 0.113.0; operator ruling 2026-10-12) The run's SHORT JOB TITLE, derived by the daemon
+   * at DTO assembly on `GET /runs` and `GET /runs/:id` from {@link problem} — deterministic, at most
+   * 60 characters (an ellipsis included), so every skin shows the same headline: the operator's words
+   * without an attached studio context pack or step scaffold, cut at the first clause and then at an
+   * aside ("— …", ", meaning …", " when …"), which reads as a clause end; only a cut at a word boundary
+   * (no aside left) ends in "…". Onboarding runs read
+   * "Set up <repo>"; a chat's ask run reads "A conversation about <repos>". The full text stays in
+   * `problem` (show it on hover). ABSENT on a daemon before this field: a skin then falls back to its
+   * own first-clause cut of `problem`, never an invented title.
+   */
+  title?: string;
   entity_mode: EntityMode;
   collection_scope: string | null;
   clis: string[];
@@ -1173,14 +1185,21 @@ export interface RosterSeatCouncilBench {
 }
 
 /**
- * `GET /roster/record?days=N` (api-types 0.52.0): each seat's record over the last N days (default 7,
- * max 30), folded from the runs' durable event logs (studio's weekly 1:1 per agent). Nothing new is
+ * `GET /roster/record?days=N[&project=<id>]` (api-types 0.52.0): each seat's record over the last N days
+ * (default 7, max 90 from api-types 0.113.0; was 30), folded from the runs' durable event logs (studio's
+ * weekly 1:1 per agent; the dashboards sum `costUsd` across seats for a window's spend). Nothing new is
  * stored; the window is by event time. A unit's seat is `unitDistributed.cli` (moved by
  * `unitReassigned.newCli`), else the unit row's `assigned_cli`. 503 when the engine has no event-log
  * read binding (a missing binding is not an empty week).
  */
 export interface SeatRecordResponse {
   days: number;
+  /**
+   * (api-types 0.113.0) The project the read was scoped to (`?project=<id>`: only that project's runs
+   * were folded). ABSENT on an unscoped read AND on a daemon before the parameter, which ignores it and
+   * answers for every run: trust a project-scoped spend only when this echoes the id you asked for.
+   */
+  project?: string;
   /** Window start, unix MILLIS. */
   since: number;
   /** Window end (the read time), unix MILLIS. */
@@ -9535,6 +9554,12 @@ export interface McpPreviewResponse {
   /** `rest` only (api-types 0.64.0): operations that could not be wrapped, each with why. */
   skipped?: string[];
   /**
+   * `rest` only (api-types 0.112.0, G2): where the tools' calls would go, checked against the
+   * document's `servers`. When `confirmRequired`, `POST /mcp/servers` needs `allowOrigin` set to
+   * exactly `egress.origin`.
+   */
+  egress?: McpRestEgress;
+  /**
    * Each tool's decision per phase role × seat × mode under the current policies and approvals,
    * judged as if this preview were saved now (api-types 0.63.0); see `withdrawOnSave`. `null` when
    * the engine cannot preview.
@@ -9555,6 +9580,47 @@ export interface SaveMcpServerBody {
    * operator a 403 `write_grant_human_only`. Each grant is audited `mcp.tool.write_granted`.
    */
   enabledWrites?: string[];
+  /**
+   * (api-types 0.112.0, G2) The operator naming the exact origin a `rest` server's calls go to
+   * (`McpPreviewResponse.egress.origin`). Required when the preview's `egress.confirmRequired`
+   * (the base URL matches none of the document's `servers`, or its host is a loopback or private
+   * address, or did not resolve); without it, or with any other value, the save is a 409 `egress_unconfirmed`. It is
+   * remembered with the server, so re-saving over the same origin does not ask again. Human
+   * operator only (403 `egress_confirm_human_only`); audited `mcp.server.egress_confirmed`. A 400
+   * `egress_not_rest` for a server that is not `rest`.
+   */
+  allowOrigin?: string;
+}
+
+/**
+ * (api-types 0.112.0, G2, DES-data-connectors §3) A `rest` server's egress as its preview found it.
+ * A REST tool's schema hash also covers `{origin, basePath, auth header}`, so a changed target
+ * re-registers its tools and withdraws their approvals.
+ */
+export interface McpRestEgress {
+  /** The base URL's origin (`https://api.example.com`): the exact string `allowOrigin` names. */
+  origin: string;
+  /** The base URL's path, no trailing slash (`""` at the root). */
+  basePath: string;
+  /**
+   * The document's `servers` crew could resolve, as absolute URLs (`{variable}` = its default; a
+   * relative URL resolves against `openapiUrl`). No `servers` means `/`, per OpenAPI 3.
+   */
+  servers: string[];
+  /** The origin is one server's and the base path is that server's path or under it. */
+  matches: boolean;
+  /** The host is `localhost`, or is or resolves to a loopback/private/link-local/unique-local address. */
+  privateAddress: boolean;
+  /**
+   * `false` = the host is a name that did not resolve at preview, so crew could not check that it
+   * is not private. An IP literal is always `true`.
+   */
+  resolved: boolean;
+  /**
+   * `!matches || privateAddress || !resolved`, unless this origin was already confirmed for this
+   * server by an earlier save: the save needs `allowOrigin`.
+   */
+  confirmRequired: boolean;
 }
 
 /** `PATCH /mcp/servers/:name`. */
