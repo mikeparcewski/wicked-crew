@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import type { McpInspectLogResponse, McpInspectRpcResponse, McpInspectStartResponse } from '../src/core/types.js';
 import { registerMcpInspectRoutes, type InspectRegistry } from '../src/mcp-inspect/routes.js';
-import { commandName, InspectSessions, MAX_SESSIONS, safeCut } from '../src/mcp-inspect/session.js';
+import { commandName, heldTail, InspectSessions, MAX_SESSIONS } from '../src/mcp-inspect/session.js';
 import type { McpUpstreamConfig } from '../src/mcp/probe.js';
 
 const SERVER = join(import.meta.dirname, 'fixtures', 'mcp', 'inspect-server.mjs');
@@ -147,12 +147,14 @@ describe('the MCP inspector bridge', () => {
     expect(body).not.toContain(TOKEN);
     expect(body).not.toContain(TOKEN.slice(6));
     expect(body).not.toContain('c-secret-value');
-    expect(body).toContain('opaque-[redacted:secret]');
+    // The stderr text, joined across its entries, reads with the secret replaced whole.
+    const stderrText = ((JSON.parse(body) as McpInspectLogResponse).entries).filter((e) => e.kind === 'stderr').map((e) => e.text).join('');
+    expect(stderrText).toContain('opaque-[redacted:secret]');
   });
 
-  it('codex r2: a secret split by a pause longer than the idle flush is still whole when it is scrubbed', async () => {
+  it('codex r2: a secret split across chunks by a long pause is still whole when it is scrubbed', async () => {
     const h = await harness();
-    // The pause (400 ms) outlasts the 250 ms idle flush that used to log the first half on its own.
+    // The pause (400 ms) outlasted r1's 250 ms idle flush, which logged the first half on its own.
     const script = `process.stderr.write('opaque-${TOKEN.slice(0, 6)}'); setTimeout(() => process.stderr.write('${TOKEN.slice(6)}\\n'), 400);` +
       `require('readline').createInterface({input: process.stdin}).on('line', (l) => { const m = JSON.parse(l);` +
       ` if (m.method === 'initialize') process.stdout.write(JSON.stringify({jsonrpc: '2.0', id: m.id, result: {protocolVersion: '2025-06-18', capabilities: {}, serverInfo: {name: 'x', version: '1'}}}) + '\\n'); });`;
@@ -198,19 +200,39 @@ describe('the MCP inspector bridge', () => {
     }
   }, 15_000);
 
-  it('safeCut pulls a cut back before any tail that begins a secret form, and nowhere else', () => {
-    expect(safeCut('log: opaque-sec', 15, ['opaque-secret'])).toBe(5);
-    expect(safeCut('log: done', 9, ['opaque-secret'])).toBe(9);
-    expect(safeCut('log: o', 6, ['opaque-secret', 'other'])).toBe(5);
-    expect(safeCut('x opaque-secret', 15, ['opaque-secret'])).toBe(15); // a whole secret is scrubbed, not held
-    expect(safeCut('abc', 0, ['abc'])).toBe(0);
-    // codex r2 verify: a secret whose suffix repeats its prefix is never cut at its own suffix.
-    expect(safeCut('abcab', 5, ['abcab'])).toBe(0);
-    expect(safeCut('xy abcab', 8, ['abcab'])).toBe(3);
-    expect(safeCut('abcab\n', 6, ['abcab'])).toBe(6);
-    // A whole occurrence across a cut moves the cut before it; text after a line end is not held.
-    expect(safeCut('a secret!', 5, ['secret'])).toBe(2);
-    expect(safeCut('line\nopa', 5, ['opaque'])).toBe(5);
+  it('codex r2 verify: a secret start left on stderr when the pipe ends is redacted, never logged', async () => {
+    const h = await harness();
+    const script = `process.stderr.write('bye ${TOKEN.slice(0, 6)}', () => process.exit(3));`;
+    const res = await h.start({ command: process.execPath, args: ['-e', script], env: { INSPECT_TOKEN: TOKEN } });
+    const { session } = res.json() as McpInspectStartResponse;
+    await new Promise((r) => setTimeout(r, 300));
+    const body = (await h.log(session.id)).body;
+    expect(body).not.toContain(TOKEN.slice(0, 6));
+    const stderrText = ((JSON.parse(body) as McpInspectLogResponse).entries).filter((e) => e.kind === 'stderr').map((e) => e.text).join('');
+    expect(stderrText).toBe('bye [redacted:secret]');
+  });
+
+  it('heldTail holds back only a tail that could begin a secret, never more than the secret', () => {
+    expect(heldTail('log: opaque-sec', ['opaque-secret'])).toBe(10);
+    expect(heldTail('log: done', ['opaque-secret'])).toBe(0);
+    expect(heldTail('log: o', ['opaque-secret', 'other'])).toBe(1);
+    expect(heldTail('a'.repeat(10_000), ['aaaa', 'zzzz'])).toBe(3); // codex r2 verify: bounded by the form
+    expect(heldTail('', ['abc'])).toBe(0);
+  });
+
+  it('codex r2 verify: a self-overlapping secret in a long unbroken stderr run is scrubbed, and nothing piles up', async () => {
+    const h = await harness();
+    const script = `process.stderr.write('a'.repeat(100000));` +
+      `require('readline').createInterface({input: process.stdin}).on('line', (l) => { const m = JSON.parse(l);` +
+      ` if (m.method === 'initialize') process.stdout.write(JSON.stringify({jsonrpc: '2.0', id: m.id, result: {protocolVersion: '2025-06-18', capabilities: {}, serverInfo: {name: 'x', version: '1'}}}) + '\\n'); });`;
+    const { session } = (await h.start({ command: process.execPath, args: ['-e', script], env: { INSPECT_TOKEN: 'aaaa' } })).json() as McpInspectStartResponse;
+    expect(session.state).toBe('ready');
+    await new Promise((r) => setTimeout(r, 300));
+    const l = (await h.log(session.id)).json() as McpInspectLogResponse;
+    const err = l.entries.filter((e) => e.kind === 'stderr');
+    expect(err.length).toBeGreaterThan(0);
+    expect(err.every((e) => !e.text.includes('aaaa'))).toBe(true);
+    expect(err.some((e) => e.text.includes('[redacted:secret]'))).toBe(true);
   });
 
   it('the log long-polls: it waits for the next entry, and answers at once when there is one', async () => {

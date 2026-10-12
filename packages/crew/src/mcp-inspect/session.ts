@@ -33,7 +33,7 @@ import type {
   McpInspectState,
 } from '../core/types.js';
 import { redactString } from '../mcp/redact.js';
-import { scrubSecrets } from '../mcp/secrets.js';
+import { scrubSecrets, SECRET_REDACTION } from '../mcp/secrets.js';
 
 /** The methods a plugin may send. The bridge itself owns `initialize`. */
 export const INSPECT_METHODS: ReadonlySet<string> = new Set([
@@ -125,46 +125,27 @@ interface Pending {
 
 /** At most this many timed-out requests keep their send time (for a late answer's round trip). */
 const SENT_AT_MAX = 256;
-/** Stderr is logged by line; a partial line is flushed after this long without more output. */
-const STDERR_FLUSH_MS = 250;
-const STDERR_LINE_MAX = 8 * 1024;
 /** An upstream DELETE of a streamable-HTTP session gets this long. */
 const TERMINATE_MS = 2_000;
 /** Longer than SDK 1.31's stdio close (2 s for EOF, then 2 s after SIGTERM, then SIGKILL; codex r2). */
 const CLOSE_MS = 5_000;
 
 /**
- * Where text may be cut so no secret form is split by the cut (codex r2): `end`, pulled back until
- * (a) no whole occurrence of a form straddles the cut, and (b) no tail before the cut could begin a
- * form that the rest of the buffer has not finished yet. Each rule only moves the cut earlier, so
- * repeating both until neither moves it terminates (codex r2 verify: a secret whose suffix repeats
- * its prefix, `abcab`, must not be cut at its own `ab`).
+ * How many trailing characters of `text` could be the start of a secret form: the longest tail
+ * that is a proper prefix of one (codex r2). Bounded by the longest form, so a buffer holding it
+ * back never grows past that.
  */
-export function safeCut(text: string, end: number, forms: readonly string[]): number {
-  let cut = end;
-  for (let moved = true; moved; ) {
-    moved = false;
-    for (const f of forms) {
-      // (a) a whole occurrence across the cut: cut before it.
-      for (let i = text.indexOf(f, Math.max(0, cut - f.length + 1)); i !== -1 && i < cut; i = text.indexOf(f, i + 1)) {
-        if (i + f.length > cut) {
-          cut = i;
-          moved = true;
-          break;
-        }
-      }
-      // (b) a possible start: everything from the tail to the buffer's end is still a prefix of the form.
-      for (let k = Math.min(f.length - 1, cut); k > 0; k--) {
-        const rest = text.slice(cut - k);
-        if (rest.length < f.length && f.startsWith(rest)) {
-          cut -= k;
-          moved = true;
-          break;
-        }
+export function heldTail(text: string, forms: readonly string[]): number {
+  let held = 0;
+  for (const f of forms) {
+    for (let k = Math.min(f.length - 1, text.length); k > held; k--) {
+      if (text.charCodeAt(text.length - k) === f.charCodeAt(0) && text.endsWith(f.slice(0, k))) {
+        held = k;
+        break;
       }
     }
   }
-  return cut;
+  return held;
 }
 
 export class InspectSession {
@@ -183,8 +164,8 @@ export class InspectSession {
   private sentAt = new Map<string | number, number>();
   private waiters = new Set<() => void>();
   private readonly forms: string[];
+  /** Stderr not yet logged: at most a tail that could begin a secret (whole secrets are scrubbed in it first). */
   private stderrBuf = '';
-  private stderrTimer: NodeJS.Timeout | null = null;
   private closing: Promise<void> | null = null;
   /**
    * The stdio child's pid, held from start until the child is known gone: the SDK forgets its
@@ -230,12 +211,13 @@ export class InspectSession {
   async start(initTimeoutMs = INIT_TIMEOUT_MS): Promise<void> {
     const { transport, stderr } = this.opened;
     stderr?.on('data', (chunk: Buffer | string) => this.stderrData(typeof chunk === 'string' ? chunk : chunk.toString('utf8')));
+    // The pipe's end is the only point where a held tail is final (codex r2 verify: a SIGKILL does
+    // not drain the pipe, so a flush after the kill could still split a secret).
+    stderr?.once('end', () => this.flushStderr());
     transport.onmessage = (m) => this.received(m as unknown as Msg);
     transport.onerror = (e) => this.append({ dir: 'host', kind: 'state', error: true, text: `transport error: ${e.message}` });
     transport.onclose = () => {
       this.closed('the connection closed');
-      // The child is gone: what it left unfinished on stderr is all it wrote.
-      this.flushStderr();
       this.childPid = null;
     };
     let timer: NodeJS.Timeout | undefined;
@@ -342,37 +324,21 @@ export class InspectSession {
   }
 
   /**
-   * Stderr by line, so a secret split across two chunks is whole when it is scrubbed (codex r1).
-   * Every cut (a line end, the 8 KiB cap, the idle flush) is pulled back before any tail that
-   * begins a secret form (codex r2), so the rest of a secret always joins its start.
+   * Stderr as it arrives (codex r1/r2): whole secrets are scrubbed in the buffer first, so none can
+   * straddle what is logged; then everything but a tail that could begin a secret is logged at once.
    */
   private stderrData(text: string): void {
-    this.stderrBuf += text;
-    const nl = this.stderrBuf.lastIndexOf('\n');
-    this.emitStderr(nl !== -1 ? nl + 1 : this.stderrBuf.length > STDERR_LINE_MAX ? this.stderrBuf.length : 0);
+    const buf = scrubSecrets(this.stderrBuf + text, this.forms);
+    const keep = heldTail(buf, this.forms);
+    this.stderrBuf = buf.slice(buf.length - keep);
+    if (keep < buf.length) this.append({ dir: 'in', kind: 'stderr', text: buf.slice(0, buf.length - keep) });
   }
 
-  /** Log `stderrBuf` up to a safe cut at or before `end`; arm the idle flush for what is left. */
-  private emitStderr(end: number): void {
-    const cut = safeCut(this.stderrBuf, end, this.forms);
-    if (cut > 0) {
-      const text = this.stderrBuf.slice(0, cut);
-      this.stderrBuf = this.stderrBuf.slice(cut);
-      this.append({ dir: 'in', kind: 'stderr', text });
-    }
-    if (this.stderrTimer !== null) clearTimeout(this.stderrTimer);
-    // A held-back secret start is not re-flushed by the timer: it waits for more output or the close.
-    this.stderrTimer = this.stderrBuf === '' || cut < end ? null : setTimeout(() => this.emitStderr(this.stderrBuf.length), STDERR_FLUSH_MS);
-  }
-
-  /** The child is gone or going: what is left is all it wrote, so it is logged as is (scrubbed). */
+  /** The pipe ended: a held tail never became a whole secret, but it is a secret's start, so it is redacted, never logged. */
   private flushStderr(): void {
-    if (this.stderrTimer !== null) clearTimeout(this.stderrTimer);
-    this.stderrTimer = null;
     if (this.stderrBuf === '') return;
-    const rest = this.stderrBuf;
     this.stderrBuf = '';
-    this.append({ dir: 'in', kind: 'stderr', text: rest });
+    this.append({ dir: 'in', kind: 'stderr', text: SECRET_REDACTION });
   }
 
   /**
@@ -457,8 +423,6 @@ export class InspectSession {
       // held since start (codex r2).
       this.killSync();
       this.childPid = null;
-      // Only now, with the child stopped, is a held-back stderr tail final (codex r2 verify).
-      this.flushStderr();
     })();
     return this.closing;
   }
