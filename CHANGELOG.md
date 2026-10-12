@@ -10,6 +10,12 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.10.1] — 2026-10-12
+
+Bundles **wicked-studio 0.7.13**, the front door: the Desk as mission control (studio#741), the project dashboard (studio#742), and the Workspace rail (Steering, Skills, MCP, Plugins, Evals, Repositories, General settings, with Health at the foot), with the Product page retired into the dashboard and the launch wizard, and a new Plugins page (studio#744). It also carries the Agents page's readings on `GET /roster` (#996) and ships **`wicked-crew-api-types` 0.115.0**. Engine pin unchanged (`wicked-core-ts` `^0.9.9`): that engine has neither `Core.worktreeBenched` (wicked-core#920) nor `Core.qeReviewerAdmitted` (wicked-core#923), so on this release `work_admission` (A5) and `qe_reviewer` (A4) are absent from `GET /roster`; they light up with a later core-ts. Pair it with wicked-garden 12.54.0 and wicked-estate 0.29.2.
+
+- **deps:** `wicked-studio` `^0.7.13`.
+
 ### Added
 - **The Agents page's readings on `GET /roster` (DES-seats-page C1 + C2, `wicked-crew-api-types` 0.115.0).** Crew sends facts and codes; studio owns the words.
   - `version` for every seat (A1): the installed version from its `version_probe`, whether its pin is proven, when it was checked, and how it was installed (`npm` / `brew` / `other`, read from the binary's resolved path).
@@ -4005,7 +4011,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.13...v0.10.0
 [0.9.13]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.12...v0.9.13
 [0.9.12]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.11...v0.9.12
