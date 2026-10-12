@@ -134,16 +134,33 @@ const TERMINATE_MS = 2_000;
 const CLOSE_MS = 5_000;
 
 /**
- * Where text may be cut so no secret form straddles the cut (codex r2: a timed flush split a
- * secret): `end`, pulled back past any tail of `text.slice(0, end)` that begins a secret form.
+ * Where text may be cut so no secret form is split by the cut (codex r2): `end`, pulled back until
+ * (a) no whole occurrence of a form straddles the cut, and (b) no tail before the cut could begin a
+ * form that the rest of the buffer has not finished yet. Each rule only moves the cut earlier, so
+ * repeating both until neither moves it terminates (codex r2 verify: a secret whose suffix repeats
+ * its prefix, `abcab`, must not be cut at its own `ab`).
  */
 export function safeCut(text: string, end: number, forms: readonly string[]): number {
   let cut = end;
-  for (const f of forms) {
-    for (let k = Math.min(f.length - 1, end); k > 0; k--) {
-      if (end - k < cut && text.startsWith(f.slice(0, k), end - k)) {
-        cut = end - k;
-        break;
+  for (let moved = true; moved; ) {
+    moved = false;
+    for (const f of forms) {
+      // (a) a whole occurrence across the cut: cut before it.
+      for (let i = text.indexOf(f, Math.max(0, cut - f.length + 1)); i !== -1 && i < cut; i = text.indexOf(f, i + 1)) {
+        if (i + f.length > cut) {
+          cut = i;
+          moved = true;
+          break;
+        }
+      }
+      // (b) a possible start: everything from the tail to the buffer's end is still a prefix of the form.
+      for (let k = Math.min(f.length - 1, cut); k > 0; k--) {
+        const rest = text.slice(cut - k);
+        if (rest.length < f.length && f.startsWith(rest)) {
+          cut -= k;
+          moved = true;
+          break;
+        }
       }
     }
   }
@@ -217,6 +234,8 @@ export class InspectSession {
     transport.onerror = (e) => this.append({ dir: 'host', kind: 'state', error: true, text: `transport error: ${e.message}` });
     transport.onclose = () => {
       this.closed('the connection closed');
+      // The child is gone: what it left unfinished on stderr is all it wrote.
+      this.flushStderr();
       this.childPid = null;
     };
     let timer: NodeJS.Timeout | undefined;
@@ -405,7 +424,6 @@ export class InspectSession {
 
   private closed(reason: string): void {
     if (this.state === 'closed' || this.state === 'failed') return;
-    this.flushStderr();
     const pid = this.childPid;
     this.state = this.state === 'connecting' ? 'failed' : 'closed';
     if (this.state === 'failed') this.error = reason;
@@ -430,7 +448,6 @@ export class InspectSession {
   close(reason = 'closed by the operator'): Promise<void> {
     if (this.state !== 'failed') this.closed(reason);
     else this.rejectPending(reason);
-    this.flushStderr();
     this.closing ??= (async () => {
       const t = this.opened.transport as Transport & { terminateSession?: () => Promise<void>; sessionId?: string };
       const bounded = (p: Promise<unknown>, ms: number): Promise<unknown> => Promise.race([p.catch(() => undefined), new Promise((r) => setTimeout(r, ms).unref())]);
@@ -440,6 +457,8 @@ export class InspectSession {
       // held since start (codex r2).
       this.killSync();
       this.childPid = null;
+      // Only now, with the child stopped, is a held-back stderr tail final (codex r2 verify).
+      this.flushStderr();
     })();
     return this.closing;
   }
@@ -464,7 +483,8 @@ export function commandName(command: string, args: readonly string[]): string {
 
 export class InspectSessions {
   private sessions = new Map<string, InspectSession>();
-  private closingSessions = new Set<InspectSession>();
+  /** Sessions removed but still closing, with their close: killable at exit, awaited by closeAll (codex r2). */
+  private closingSessions = new Map<InspectSession, Promise<void>>();
   private sweeper: NodeJS.Timeout | null = null;
 
   constructor(private readonly now: () => number = Date.now) {}
@@ -496,9 +516,10 @@ export class InspectSessions {
     if (s === undefined) return false;
     this.sessions.delete(id);
     // Still killable at process exit while its close runs (codex r2).
-    this.closingSessions.add(s);
+    const closing = s.close(reason);
+    this.closingSessions.set(s, closing);
     try {
-      await s.close(reason);
+      await closing;
     } finally {
       this.closingSessions.delete(s);
     }
@@ -515,10 +536,10 @@ export class InspectSessions {
   async closeAll(): Promise<void> {
     if (this.sweeper !== null) clearInterval(this.sweeper);
     this.sweeper = null;
-    await Promise.all([...this.sessions.keys()].map((id) => this.remove(id, 'the daemon is stopping')));
+    await Promise.all([...[...this.sessions.keys()].map((id) => this.remove(id, 'the daemon is stopping')), ...this.closingSessions.values()]);
   }
 
   killAllSync(): void {
-    for (const s of [...this.sessions.values(), ...this.closingSessions]) s.killSync();
+    for (const s of [...this.sessions.values(), ...this.closingSessions.keys()]) s.killSync();
   }
 }

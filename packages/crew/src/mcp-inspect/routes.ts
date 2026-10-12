@@ -176,13 +176,15 @@ export function registerMcpInspectRoutes(app: FastifyInstance, deps: InspectRout
     return s;
   };
 
-  app.addHook('onClose', async () => {
-    await sessions.closeAll();
-  });
   const onExit = (): void => sessions.killAllSync();
   process.once('exit', onExit);
+  // The exit kill stays armed until every session, including one already closing, is closed (codex r2).
   app.addHook('onClose', async () => {
-    process.removeListener('exit', onExit);
+    try {
+      await sessions.closeAll();
+    } finally {
+      process.removeListener('exit', onExit);
+    }
   });
 
   app.post(

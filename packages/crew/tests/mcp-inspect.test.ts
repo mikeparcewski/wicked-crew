@@ -204,6 +204,13 @@ describe('the MCP inspector bridge', () => {
     expect(safeCut('log: o', 6, ['opaque-secret', 'other'])).toBe(5);
     expect(safeCut('x opaque-secret', 15, ['opaque-secret'])).toBe(15); // a whole secret is scrubbed, not held
     expect(safeCut('abc', 0, ['abc'])).toBe(0);
+    // codex r2 verify: a secret whose suffix repeats its prefix is never cut at its own suffix.
+    expect(safeCut('abcab', 5, ['abcab'])).toBe(0);
+    expect(safeCut('xy abcab', 8, ['abcab'])).toBe(3);
+    expect(safeCut('abcab\n', 6, ['abcab'])).toBe(6);
+    // A whole occurrence across a cut moves the cut before it; text after a line end is not held.
+    expect(safeCut('a secret!', 5, ['secret'])).toBe(2);
+    expect(safeCut('line\nopa', 5, ['opaque'])).toBe(5);
   });
 
   it('the log long-polls: it waits for the next entry, and answers at once when there is one', async () => {
