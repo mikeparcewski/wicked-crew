@@ -27,7 +27,9 @@ describe('jobTitle', () => {
     ['Recon: survey the target and propose a test plan — the scenarios, their dependencies, and which are deterministic', 'Recon: survey the target and propose a test plan'],
     ['Governance: allowlist the estate stdio shim (--readonly) and read-only wicked-estate subcommands in governed units', 'Governance: allowlist the estate stdio shim'],
     // No aside to cut at: a word boundary and an ellipsis.
-    ['Add a policy around going with managed cloud native services as the first option for designing new application', 'Add a policy around going with managed cloud native services…'],
+    ['Add a policy around going with managed cloud native services as the first option for designing new application', 'Add a policy around going with managed cloud native…'],
+    // A word that ends exactly at the head's room is kept, and the ellipsis stays inside the budget.
+    [`A${'a'.repeat(29)} ${'b'.repeat(28)} ccc`, `A${'a'.repeat(29)} ${'b'.repeat(28)}…`],
     ['Fix the login bug. Then add a test.', 'Fix the login bug'],
     ['# Plan the release\n\nDetails follow', 'Plan the release'],
     ['   ', 'Untitled job'],
@@ -47,7 +49,7 @@ describe('jobTitle', () => {
   it('never exceeds the budget', () => {
     const long = 'word '.repeat(80);
     const t = jobTitle(long);
-    expect(t.length).toBeLessThanOrEqual(JOB_TITLE_MAX + 1);
+    expect(t.length).toBeLessThanOrEqual(JOB_TITLE_MAX);
     expect(t.endsWith('…')).toBe(true);
     expect(jobTitle('x'.repeat(200)).length).toBeLessThanOrEqual(JOB_TITLE_MAX);
   });

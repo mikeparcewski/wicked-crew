@@ -291,9 +291,10 @@ export interface AgentSession {
   /**
    * (api-types 0.112.0; operator ruling 2026-10-12) The run's SHORT JOB TITLE, derived by the daemon
    * at DTO assembly on `GET /runs` and `GET /runs/:id` from {@link problem} — deterministic, at most
-   * 60 characters, so every skin shows the same headline: the operator's words without an attached
-   * studio context pack or step scaffold, cut at the first clause and then at an aside ("— …",
-   * ", meaning …", " when …"), with an ellipsis when cut mid-sentence. Onboarding runs read
+   * 60 characters (an ellipsis included), so every skin shows the same headline: the operator's words
+   * without an attached studio context pack or step scaffold, cut at the first clause and then at an
+   * aside ("— …", ", meaning …", " when …"), which reads as a clause end; only a cut at a word boundary
+   * (no aside left) ends in "…". Onboarding runs read
    * "Set up <repo>"; a chat's ask run reads "A conversation about <repos>". The full text stays in
    * `problem` (show it on hover). ABSENT on a daemon before this field: a skin then falls back to its
    * own first-clause cut of `problem`, never an invented title.

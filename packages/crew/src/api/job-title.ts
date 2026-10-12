@@ -12,7 +12,8 @@
  *  3. The first sentence or clause (a stop is `.`/`!`/`?`/`;` followed by a space, a line break, or a
  *     `:` after more than one word: "Recon: survey …" keeps its label).
  *  4. Still longer than {@link JOB_TITLE_MAX}: cut at the first aside (" — ", ", meaning", " when ",
- *     " because ", " (" …) that leaves a real headline; then at a word boundary, with an ellipsis.
+ *     " because ", " (" …) that leaves a real headline (a clause end: no ellipsis); then, if still too
+ *     long, at a word boundary with an ellipsis, the ellipsis inside the budget.
  *  5. A lowercase first word is capitalised unless it looks like an identifier (`repo-learn`).
  *
  * The full problem stays on the run (`problem`); a skin shows it on hover.
@@ -80,10 +81,12 @@ function beforeAside(clause: string): string {
 
 function clip(s: string): string {
   if (s.length <= JOB_TITLE_MAX) return s;
-  const cut = s.slice(0, JOB_TITLE_MAX);
+  // The ellipsis counts against the budget: the head is at most MAX - 1 characters.
+  const room = JOB_TITLE_MAX - 1;
+  const cut = s.slice(0, room);
   // A cut that lands exactly on a word's end keeps that word.
-  const atWord = s.charAt(JOB_TITLE_MAX) === ' ' ? JOB_TITLE_MAX : cut.lastIndexOf(' ');
-  const head = (atWord >= MIN_HEAD ? cut.slice(0, atWord) : cut.slice(0, JOB_TITLE_MAX - 1)).replace(/[\s,;:·—–-]+$/, '');
+  const atWord = s.charAt(room) === ' ' ? room : cut.lastIndexOf(' ');
+  const head = (atWord >= MIN_HEAD ? cut.slice(0, atWord) : cut).replace(/[\s,;:·—–-]+$/, '');
   return `${head}…`;
 }
 
