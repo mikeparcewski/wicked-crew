@@ -241,6 +241,7 @@ import { ConsiderationService } from '../decisions/consider.js';
 import { gardenConformance, gardenPackCheck, type ConformanceRunner, type PackCheckRunner } from '../editors/pack-install.js';
 import { EditorRegistry } from '../editors/registry.js';
 import { registerEditorRoutes } from '../editors/routes.js';
+import { registerMcpInspectRoutes } from '../mcp-inspect/routes.js';
 import { discoverLivePlugin } from '../skills/plugin-source.js';
 import type { DecisionBusEmit } from '../decisions/events.js';
 import { resolveDecisionsMode, type DecisionsMode } from '../decisions/types.js';
@@ -6672,6 +6673,12 @@ export function registerRoutes(
           previewCalls: (json) => adapter.previewMcpCalls(json),
         })
       : undefined;
+  // The MCP inspector bridge (DES-MCP-INSPECTOR-001): live sessions to MCP servers for studio's
+  // `mcp-server` editor host; registry servers resolve through the same registry and secrets.
+  registerMcpInspectRoutes(app, {
+    ...(runtime.mcp !== undefined ? { registry: runtime.mcp } : {}),
+    log: (m) => app.log.info(m),
+  });
   registerMcpRoutes(app, {
     ...(runtime.mcp !== undefined ? { registry: runtime.mcp, toolLister: () => CoreAdapter.mcpToolLister() } : {}),
     ...(runtime.mcpBroker !== undefined ? { broker: runtime.mcpBroker } : {}),

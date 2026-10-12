@@ -571,6 +571,15 @@ export class McpRegistry {
   }
 
   /**
+   * The MCP inspector's resolution of a registered server (DES-MCP-INSPECTOR-001 §3): its config,
+   * enabled or not (an operator debugs a server it switched off), or `null` for no such name.
+   */
+  async inspectTarget(name: string): Promise<McpUpstreamConfig | null> {
+    const s = (await this.deps.store.read()).servers.find((x) => x.name === name);
+    return s === undefined ? null : configOf(s);
+  }
+
+  /**
    * The secret a call to `config` is made with, resolved at the moment of the call and nowhere
    * else. `missing` = the server names a secret that resolves to nothing: the call is not made
    * unauthenticated.

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.113.0",
+  "apiTypesVersion": "0.114.0",
   "endpoints": [
     {
       "method": "GET",
@@ -308,7 +308,8 @@
         200,
         403,
         404,
-        409
+        409,
+        503
       ]
     },
     {
@@ -586,6 +587,57 @@
       "statusCodes": [
         200,
         400
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/mcp-inspect/sessions",
+      "requestType": "McpInspectStartBody",
+      "responseType": "McpInspectStartResponse",
+      "statusCodes": [
+        201,
+        400,
+        403,
+        404,
+        409,
+        429
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/mcp-inspect/sessions/:id",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": [
+        204,
+        403,
+        404
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/mcp-inspect/sessions/:id/log",
+      "requestType": null,
+      "responseType": "McpInspectLogResponse",
+      "statusCodes": [
+        200,
+        403,
+        404
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/mcp-inspect/sessions/:id/rpc",
+      "requestType": "McpInspectRpcBody",
+      "responseType": "McpInspectRpcResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        409,
+        502,
+        504
       ]
     },
     {

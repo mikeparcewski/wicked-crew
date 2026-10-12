@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { EditorConformanceSummary, EditorGrantsResponse, EditorView, InstallEditorRefusal, InstallEditorResponse, ListEditorsResponse } from '../src/core/types.js';
+import type { ConformanceRule, EditorConformanceSummary, EditorGrantsResponse, EditorView, InstallEditorRefusal, InstallEditorResponse, ListEditorsResponse } from '../src/core/types.js';
 import { BUNDLE_CSP_BASE, bundleHeaders, requestOrigin, shellCsp } from '../src/editors/csp.js';
 import { CONFORMANCE_CASES, gardenConformance, gardenPackCheck, installPack, PackInstallError, type ConformanceRunner, type PackCheckRunner } from '../src/editors/pack-install.js';
 import { EditorRegistry, EDITORS_STATE_FILENAME, discoverStudioEditors, externalReferences, readCapped, sha256Of } from '../src/editors/registry.js';
@@ -196,7 +196,7 @@ describe('the two policies (§8.2), pinned to the letter', () => {
 const EDITOR_HTML = '<!doctype html><html><body><p>terms</p><script>parent.postMessage(1, "*")</script></body></html>';
 
 /** A pack directory: editor-only by default, with its entry on disk and its true hash pinned. */
-function makePack(opts: { name?: string; id?: string; html?: string; blocks?: boolean; skills?: string[]; version?: string } = {}): string {
+function makePack(opts: { name?: string; id?: string; html?: string; blocks?: boolean; skills?: string[]; version?: string; permissions?: Array<{ id: string; why: string }> } = {}): string {
   const root = mkdtempSync(join(tmpdir(), 'editors-pack-'));
   scratches.push(root);
   const id = opts.id ?? 'acme-terms';
@@ -210,7 +210,7 @@ function makePack(opts: { name?: string; id?: string; html?: string; blocks?: bo
       name: opts.name ?? 'acme-terms',
       vendor: 'acme',
       version: opts.version ?? '0.1.0',
-      editors: [{ id, title: 'Terms checker', version: opts.version ?? '0.1.0', protocol: [1], kinds: ['document'], entry: `editors/${id}/index.html`, sha256: sha256Of(Buffer.from(html)), sizes: ['inline', 'pane'], permissions: [{ id: 'artifact.read', why: 'to read the document' }] }],
+      editors: [{ id, title: 'Terms checker', version: opts.version ?? '0.1.0', protocol: [1], kinds: ['document'], entry: `editors/${id}/index.html`, sha256: sha256Of(Buffer.from(html)), sizes: ['inline', 'pane'], permissions: opts.permissions ?? [{ id: 'artifact.read', why: 'to read the document' }] }],
       ...(opts.blocks === true ? { blocks: [{ id: 'acme-terms-review', label: 'Check our terms', preset: 'presets/terms-review.json', produces_kind: 'document', skills: ['acme-terms-checker'] }], skills_dir: 'skills' } : {}),
     }),
   );
@@ -430,10 +430,10 @@ describe('the routes', () => {
     for (const a of apps.splice(0)) await a.close();
   });
 
-  async function harness(opts: { grants?: boolean; packCheck?: PackCheckRunner; conformance?: ConformanceRunner } = {}) {
+  async function harness(opts: { grants?: boolean; packCheck?: PackCheckRunner; conformance?: ConformanceRunner; ledger?: { excludes: string[] } | null; home?: string } = {}) {
     const root = studioRoot();
-    const home = mkdtempSync(join(tmpdir(), 'editors-home-'));
-    scratches.push(home);
+    const home = opts.home ?? mkdtempSync(join(tmpdir(), 'editors-home-'));
+    if (opts.home === undefined) scratches.push(home);
     const registry = new EditorRegistry({ stateHome: home, studioRoot: root });
     const evaluateEditorGrants = vi.fn(async (req: { editorId: string; version: string; sha256: string; permissions: string[]; project?: string; firstParty: boolean }): Promise<EditorGrantsResponse> => ({
       editorId: req.editorId,
@@ -443,7 +443,15 @@ describe('the routes', () => {
       firstParty: req.firstParty,
       grants: req.permissions.map((p) => ({ permission: p, decision: p === 'network.media' && req.project === 'kestrel' ? 'deny' : 'allow', ruleIds: ['EDITOR-BUILTIN'], token: `editor:${req.editorId}@${req.version}#${req.sha256}/${p}` })),
     }));
-    const adapter = opts.grants === false ? {} : { editorGrantsSupported: () => true, evaluateEditorGrants };
+    const ledger = opts.ledger ?? null;
+    const upsertConformanceRule = vi.fn(async (rule: ConformanceRule) => {
+      if (ledger !== null) ledger.excludes = [...(rule.excludes ?? [])];
+    });
+    const rules = {
+      listConformanceRules: async (): Promise<ConformanceRule[]> => (ledger === null ? [] : [{ id: 'EDITOR-GRANTS', excludes: [...ledger.excludes] } as unknown as ConformanceRule]),
+      upsertConformanceRule,
+    };
+    const adapter = opts.grants === false ? {} : { editorGrantsSupported: () => true, evaluateEditorGrants, ...rules };
     const app = Fastify({ logger: false });
     app.decorateRequest('actor', null as unknown as never);
     app.addHook('onRequest', async (req) => {
@@ -457,7 +465,7 @@ describe('the routes', () => {
     registerEditorRoutes(app, { registry, adapter, packCheck: opts.packCheck ?? (async () => ({ ok: true, errors: [], warnings: [] })), conformance: opts.conformance ?? conformant(), log: (m) => logs.push(m) });
     await app.ready();
     apps.push(app);
-    return { app, registry, root, home, evaluateEditorGrants, logs };
+    return { app, registry, root, home, evaluateEditorGrants, logs, upsertConformanceRule };
   }
   const HUMAN = { 'x-actor': 'human:operator' };
   const AGENT = { 'x-actor': 'agent:operator' };
@@ -550,6 +558,114 @@ describe('the routes', () => {
     expect(toggled.statusCode).toBe(200);
     expect((toggled.json() as EditorView).enabled).toBe(false);
     expect(JSON.parse(readFileSync(join(h.home, EDITORS_STATE_FILENAME), 'utf8'))).toEqual({ v: 1, enabled: { 'wicked-page': false } });
+  });
+
+  it('mcp.session is granted by the install consent only: per build, only to a declaring editor, withdrawn on remove (DES-MCP-INSPECTOR-001 §6)', async () => {
+    const ledger = { excludes: ['editor:other@1.0.0#' + 'a'.repeat(64) + '/mcp.session', 'mcp:unrelated'] };
+    const h = await harness({ ledger });
+    const inspector = [{ id: 'artifact.read', why: 'r' }, { id: 'mcp.session', why: 'to talk to the MCP server you connect' }];
+    // An agent's install is refused, and writes nothing.
+    const packRoot = makePack({ id: 'acme-inspect', name: 'acme-inspect', permissions: inspector });
+    expect((await h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: AGENT, payload: { packRoot } })).statusCode).toBe(403);
+    expect(h.upsertConformanceRule).not.toHaveBeenCalled();
+    // An editor that does not declare it is granted nothing.
+    const plain = await h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { packRoot: makePack() } });
+    expect(plain.statusCode, plain.body).toBe(200);
+    expect((plain.json() as InstallEditorResponse).granted).toBeUndefined();
+    expect(h.upsertConformanceRule).not.toHaveBeenCalled();
+    // The human install of a declaring editor writes exactly its build's token.
+    const res = await h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { packRoot } });
+    expect(res.statusCode, res.body).toBe(200);
+    const sha = h.registry.get('acme-inspect')!.sha256;
+    const token = `editor:acme-inspect@0.1.0#${sha}/mcp.session`;
+    expect((res.json() as InstallEditorResponse).granted).toEqual([token]);
+    expect(ledger.excludes).toEqual(['editor:other@1.0.0#' + 'a'.repeat(64) + '/mcp.session', 'mcp:unrelated', token]);
+    // An update replaces the earlier build's token (the new hash is a new grant).
+    const v2 = makePack({ id: 'acme-inspect', name: 'acme-inspect', version: '0.2.0', permissions: inspector, html: EDITOR_HTML.replace('</body>', '<!-- v2 --></body>') });
+    const updated = await h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { packRoot: v2 } });
+    expect(updated.statusCode, updated.body).toBe(200);
+    const token2 = `editor:acme-inspect@0.2.0#${h.registry.get('acme-inspect')!.sha256}/mcp.session`;
+    expect(ledger.excludes.filter((t) => t.startsWith('editor:acme-inspect@'))).toEqual([token2]);
+    // An update that no longer declares it keeps no grant (codex r1).
+    const v3 = makePack({ id: 'acme-inspect', name: 'acme-inspect', version: '0.3.0', html: EDITOR_HTML.replace('</body>', '<!-- v3 --></body>') });
+    const dropped = await h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { packRoot: v3 } });
+    expect(dropped.statusCode, dropped.body).toBe(200);
+    expect((dropped.json() as InstallEditorResponse).granted).toBeUndefined();
+    expect(ledger.excludes.some((t) => t.startsWith('editor:acme-inspect@'))).toBe(false);
+    const v4 = makePack({ id: 'acme-inspect', name: 'acme-inspect', version: '0.4.0', permissions: inspector, html: EDITOR_HTML.replace('</body>', '<!-- v4 --></body>') });
+    expect((await h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { packRoot: v4 } })).statusCode).toBe(200);
+    // A withdrawal that cannot be written keeps the editor installed (a retry can reach it), 503.
+    h.upsertConformanceRule.mockRejectedValueOnce(new Error('store busy'));
+    const busy = await h.app.inject({ method: 'DELETE', url: '/api/v1/editors/acme-inspect', headers: HUMAN });
+    expect(busy.statusCode).toBe(503);
+    expect(h.registry.get('acme-inspect')).not.toBeNull();
+    // Removing it withdraws the grant; another editor's token is untouched.
+    expect((await h.app.inject({ method: 'DELETE', url: '/api/v1/editors/acme-inspect', headers: HUMAN })).statusCode).toBe(200);
+    expect(ledger.excludes).toEqual(['editor:other@1.0.0#' + 'a'.repeat(64) + '/mcp.session', 'mcp:unrelated']);
+  });
+
+  it('codex r2: a boot-skipped editor is removable, and its grant is withdrawn', async () => {
+    const ledger = { excludes: ['mcp:unrelated'] };
+    const first = await harness({ ledger });
+    const packRoot = makePack({ id: 'acme-inspect', name: 'acme-inspect', permissions: [{ id: 'mcp.session', why: 'x' }] });
+    expect((await first.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { packRoot } })).statusCode).toBe(200);
+    expect(ledger.excludes.some((t) => t.startsWith('editor:acme-inspect@'))).toBe(true);
+    writeFileSync(join(packRoot, 'editors', 'acme-inspect', 'index.html'), 'tampered');
+    const booted = await harness({ ledger, home: first.home });
+    expect(booted.registry.get('acme-inspect')).toBeNull();
+    expect(booted.registry.isInstalled('acme-inspect')).toBe(true);
+    const res = await booted.app.inject({ method: 'DELETE', url: '/api/v1/editors/acme-inspect', headers: HUMAN });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(booted.registry.isInstalled('acme-inspect')).toBe(false);
+    expect(ledger.excludes).toEqual(['mcp:unrelated']);
+  });
+
+  it('codex r2: an update that drops mcp.session says so when the earlier grant cannot be withdrawn', async () => {
+    const ledger = { excludes: [] as string[] };
+    const h = await harness({ ledger });
+    const v1 = makePack({ id: 'acme-inspect', name: 'acme-inspect', permissions: [{ id: 'mcp.session', why: 'x' }] });
+    expect((await h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { packRoot: v1 } })).statusCode).toBe(200);
+    h.upsertConformanceRule.mockRejectedValueOnce(new Error('store busy'));
+    const v2 = makePack({ id: 'acme-inspect', name: 'acme-inspect', version: '0.2.0', html: EDITOR_HTML.replace('</body>', '<!-- v2 --></body>') });
+    const res = await h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { packRoot: v2 } });
+    expect(res.statusCode, res.body).toBe(200);
+    expect((res.json() as InstallEditorResponse).grantError).toMatch(/earlier build's mcp\.session grant was not withdrawn: store busy/);
+  });
+
+  it('codex r2: a removal and an install never interleave: the editor and its grant agree afterwards', async () => {
+    const ledger = { excludes: [] as string[] };
+    const h = await harness({ ledger });
+    const perms = [{ id: 'mcp.session', why: 'x' }];
+    const v1 = makePack({ id: 'acme-inspect', name: 'acme-inspect', permissions: perms });
+    expect((await h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { packRoot: v1 } })).statusCode).toBe(200);
+    // The removal's withdrawal is slow; the install of v2 arrives while it is in flight.
+    const real = h.upsertConformanceRule.getMockImplementation()!;
+    h.upsertConformanceRule.mockImplementationOnce(async (rule) => {
+      await new Promise((r) => setTimeout(r, 150));
+      return real(rule);
+    });
+    const v2 = makePack({ id: 'acme-inspect', name: 'acme-inspect', version: '0.2.0', permissions: perms, html: EDITOR_HTML.replace('</body>', '<!-- v2 --></body>') });
+    const [del, inst] = await Promise.all([
+      h.app.inject({ method: 'DELETE', url: '/api/v1/editors/acme-inspect', headers: HUMAN }),
+      h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { packRoot: v2 } }),
+    ]);
+    expect(del.statusCode, del.body).toBe(200);
+    expect(inst.statusCode, inst.body).toBe(200);
+    // Whichever ran first, the other ran after it: never a grant for a removed editor.
+    const live = h.registry.get('acme-inspect');
+    if (live === null) expect(ledger.excludes).toEqual([]);
+    else expect(ledger.excludes).toEqual([`editor:acme-inspect@${live.manifest.version}#${live.sha256}/mcp.session`]);
+    expect(live === null || live.manifest.version === '0.2.0').toBe(true);
+  });
+
+  it('an install whose mcp.session grant cannot be written still installs, and says it asks', async () => {
+    const h = await harness({ ledger: null });
+    const res = await h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { packRoot: makePack({ id: 'acme-inspect', name: 'acme-inspect', permissions: [{ id: 'mcp.session', why: 'x' }] }) } });
+    expect(res.statusCode, res.body).toBe(200);
+    const body = res.json() as InstallEditorResponse;
+    expect(body.granted).toBeUndefined();
+    expect(body.grantError).toMatch(/EDITOR-GRANTS ledger is not in the policy store/);
+    expect(h.registry.get('acme-inspect')).not.toBeNull();
   });
 
   it('a conformance failure through the route is a 422 carrying the report; a skills pack a 501 with the approval list', async () => {
