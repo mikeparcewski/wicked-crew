@@ -13,7 +13,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 
 import { createServer } from '../src/api/server.js';
-import { setCrewStateHome } from '../src/projects/state-home.js';
+import { crewStateHome, setCrewStateHome } from '../src/projects/state-home.js';
+
+const armedStateHome = crewStateHome();
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
@@ -96,7 +98,7 @@ describe('crew#634 R1 — chatClosed retention + the delivered-only worktree swe
 
   afterAll(async () => {
     await app.close();
-    setCrewStateHome(undefined);
+    setCrewStateHome(armedStateHome); // crew#986: re-arm, never leave it unset
     if (chatCwdParent !== undefined) removeScratch(chatCwdParent);
     removeScratch(scratch);
   });

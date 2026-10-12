@@ -22,6 +22,7 @@ async function seed(base: string): Promise<void> {
   process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
   const { CoreAdapter } = await import('../../src/core/adapter.js');
   const { createServer } = await import('../../src/api/server.js');
+  const { setCrewStateHome } = await import('../../src/projects/state-home.js');
   const home = join(base, 'home');
   const repo = join(base, 'repo');
   mkdirSync(home, { recursive: true });
@@ -40,6 +41,9 @@ async function seed(base: string): Promise<void> {
       depends_on: i === 0 ? [] : [ids[i - 1]], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null,
     })),
   };
+  // crew#986: this child never runs tests/setup/hermetic-home.ts, so its stores would resolve the real
+  // ~/.wicked-crew. Its state home is the seeded one, as the CLI derives it from --db.
+  setCrewStateHome(home);
   const adapter = new CoreAdapter({ dbPath: join(home, 'core.db'), stub: true });
   const app = await createServer(adapter, { stallWatchdog: { enabled: false } });
   const inject = async (method: 'GET' | 'POST', url: string, payload?: unknown) => {

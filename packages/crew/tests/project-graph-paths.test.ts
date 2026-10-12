@@ -16,7 +16,8 @@ import { describe, it, expect } from 'vitest';
 import { homedir } from 'node:os';
 import { join, sep } from 'node:path';
 
-import { crewStateHome, setCrewStateHome } from '../src/projects/state-home.js';
+import { setCrewStateHome } from '../src/projects/state-home.js';
+import { useUnconfiguredTempHome } from './setup/temp-home.js';
 import {
   assertProjectIdIsPathSafe,
   isValidRepoLabel,
@@ -104,20 +105,16 @@ describe('repoLabel', () => {
 describe('project graph paths', () => {
   const env = { WICKED_CREW_PROJECT_GRAPH_ROOT: join(sep, 'tmp', 'pg') } as NodeJS.ProcessEnv;
 
-  it('defaults under the daemon state directory, NOT under any repo checkout', () => {
-    // The harness arms the state home away from the real ~/.wicked-crew (tests/setup/hermetic-home.ts);
-    // this assertion is about the UNCONFIGURED default, so unconfigure for it and restore after.
-    const armed = crewStateHome();
-    setCrewStateHome(undefined);
-    try {
+  describe('with no state home configured (crew#986: under a temp HOME, never the live one)', () => {
+    useUnconfiguredTempHome();
+    it('defaults under the daemon state directory, NOT under any repo checkout', () => {
+      setCrewStateHome(undefined);
       const root = projectGraphRoot({} as NodeJS.ProcessEnv);
       expect(root).toBe(join(homedir(), '.wicked-crew', 'project-graphs'));
       // The failure this pins: a project graph written into a member repo's working tree, which is
       // what `.codegraph/estate.db` does per-repo and what was just cleaned out of six checkouts.
       expect(root).not.toContain('.codegraph');
-    } finally {
-      setCrewStateHome(armed);
-    }
+    });
   });
 
   it('honours WICKED_CREW_PROJECT_GRAPH_ROOT', () => {

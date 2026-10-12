@@ -40,7 +40,8 @@ import { registerProjectRoutes } from '../src/projects/routes.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
 import { ProjectSettingsStore } from '../src/projects/settings.js';
 import { projectGraphDb, projectGraphManifest, projectGraphRoot } from '../src/projects/graph-paths.js';
-import { setCrewStateHome, stateHomeOfDb } from '../src/projects/state-home.js';
+import { crewStateHome, setCrewStateHome, stateHomeOfDb } from '../src/projects/state-home.js';
+import { useUnconfiguredTempHome } from './setup/temp-home.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { Project, ProjectMember, RepoEntry } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
@@ -53,13 +54,15 @@ const PROJECT_ID = 'proj_330_isolation_regress';
 
 const NO_ENV = {} as NodeJS.ProcessEnv;
 
+const armedStateHome = crewStateHome();
 afterEach(() => {
-  // Module state must never leak into another test (or another file's expectations of the
-  // homedir default).
-  setCrewStateHome(undefined);
+  // Module state must never leak into another test: restore the harness-armed state home, never
+  // leave it unset (crew#986: unset, the next test resolved the operator's live ~/.wicked-crew).
+  setCrewStateHome(armedStateHome);
 });
 
 describe('projectGraphRoot precedence (crew#330)', () => {
+  useUnconfiguredTempHome(); // crew#986: the unconfigured default is asserted under a temp HOME
   it('a configured state home moves the root — the --db parent owns the graphs', () => {
     setCrewStateHome(join(sep, 'scratch', 'daemon-a'));
     expect(projectGraphRoot(NO_ENV)).toBe(join(sep, 'scratch', 'daemon-a', 'project-graphs'));
@@ -210,7 +213,7 @@ describe.skipIf(!POSIX)('POST /graph/refresh under an isolated state home (crew#
     delete process.env['WICKED_ESTATE_EXE'];
     if (savedEnvRoot === undefined) delete process.env['WICKED_CREW_PROJECT_GRAPH_ROOT'];
     else process.env['WICKED_CREW_PROJECT_GRAPH_ROOT'] = savedEnvRoot;
-    setCrewStateHome(undefined);
+    setCrewStateHome(armedStateHome);
     removeScratch(work);
   });
 
