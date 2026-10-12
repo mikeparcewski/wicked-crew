@@ -9493,7 +9493,13 @@ export interface McpPreviewTool {
   description: string | null;
   annotations: McpToolAnnotations | null;
   inputSchema: Record<string, unknown> | null;
+  /** The class the tool will have once saved: `classOverride ?? ` the class its annotations imply. */
   class: McpToolClass;
+  /**
+   * (api-types 0.111.0) The operator's class override this save keeps: the registered tool's, while
+   * its schema is unchanged; `null` for a new or changed tool, or one with no override.
+   */
+  classOverride: McpToolClass | null;
   schemaHash: string;
   /**
    * (api-types 0.111.0, G1) The switch `POST /mcp/servers` gives this tool when `enabledWrites`

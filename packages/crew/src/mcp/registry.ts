@@ -158,6 +158,11 @@ export class McpRegistry {
     this.hold(previewHash, { config, tools, expiresAt, secret: stagedSecret });
     const existing = (await this.deps.store.read()).servers.find((s) => s.name === config.name);
     const was = (name: string): McpToolRecord | undefined => existing?.tools.find((p) => p.name === name);
+    // The override a save keeps: only while the tool's schema is unchanged (as `save` decides).
+    const survivingOverride = (t: { name: string; schemaHash: string }): McpToolClass | null => {
+      const w = was(t.name);
+      return w !== undefined && w.schemaHash === t.schemaHash ? w.classOverride : null;
+    };
     return {
       previewHash,
       expiresAt: new Date(expiresAt).toISOString(),
@@ -169,7 +174,8 @@ export class McpRegistry {
         description: t.description,
         annotations: t.annotations,
         inputSchema: t.inputSchema,
-        class: deriveToolClass(t.annotations),
+        class: effectiveToolClass(deriveToolClass(t.annotations), survivingOverride(t)),
+        classOverride: survivingOverride(t),
         schemaHash: t.schemaHash,
         enabledOnSave: enabledOnSave(was(t.name), t),
         ...(config.kind === 'rest' ? { rest: t.rest ?? null } : {}),

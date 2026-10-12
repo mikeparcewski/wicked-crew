@@ -601,7 +601,9 @@ describe('G1: writes are registered disabled until a human operator grants them'
     expect((await save((await preview()).previewHash)).statusCode).toBe(201);
     expect((await patch('mcp:tracker/getIssue', { enabled: false, classOverride: 'write' })).statusCode).toBe(200);
     const p = await preview();
-    expect(p.tools.find((t) => t.name === 'getIssue')?.enabledOnSave).toBe(false);
+    // The preview shows the class the save will keep, so a client offering grants offers this one.
+    expect(p.tools.find((t) => t.name === 'getIssue')).toMatchObject({ class: 'write', classOverride: 'write', enabledOnSave: false });
+    expect(p.tools.find((t) => t.name === 'createIssue')).toMatchObject({ class: 'write', classOverride: null });
     const res = await save(p.previewHash, ['getIssue']);
     expect(res.statusCode, res.body).toBe(201);
     expect(toolOf(res.json() as McpServer, 'getIssue')).toMatchObject({ enabled: true, classOverride: 'write', class: 'write' });

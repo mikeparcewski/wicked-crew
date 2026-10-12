@@ -203,7 +203,8 @@ export class McpPolicies {
       server: server.name,
       tool: t.name,
       annotations: hints(t.annotations),
-      classOverride: null,
+      // The override the save would keep (G1 codex r2): the matrix judges the class that will apply.
+      classOverride: t.classOverride,
       registered: true,
       kind: server.kind,
     }));
