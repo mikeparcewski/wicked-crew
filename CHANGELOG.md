@@ -10,9 +10,30 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-10-12
+
+A minor release, because data connectors G1 and G2 change behaviour: tools that write are registered disabled until a human operator grants them, and a REST server's calls are checked against its spec's servers. **Action needed: re-save every REST server registered before this release** (see Security). The engine pin moves to **`wicked-core-ts` `^0.9.9`**, which makes QE acceptance work on every seat. This release ships **`wicked-crew-api-types` 0.114.0**, a superset of the unpublished 0.111.0–0.113.0, and still bundles **wicked-studio 0.7.12**. Pair it with **wicked-garden 12.54.0** and wicked-estate 0.29.2.
+
 ### Security
 - **REST connectors check where their calls go (data connectors G2, `wicked-crew-api-types` 0.112.0).** A `rest` server's preview answers `egress`: its base URL checked against the OpenAPI document's `servers`, and whether its host is loopback or private (literal, `localhost`, or what DNS returns at preview time). A base URL that matches no server, a private host, or a host that doesn't resolve can't be saved until a human operator names that exact origin (`POST /mcp/servers {allowOrigin}`). Without it the save gets 409 `egress_unconfirmed`; from an agent it gets 403 `egress_confirm_human_only`. The confirmation is audited `mcp.server.egress_confirmed` and remembered for later saves over the same origin. A REST tool's approval hash now covers the base URL's origin and path and the auth header. Changing any of them re-registers the tools, withdraws every approval that names the server and turns its write tools off again.
 - **Action needed: re-save every REST server registered before this release.** Its tools' saved hashes don't include the target, so they read `unregistered` and every call is denied until the server is saved again. The denial tells the operator to re-save it. Studio → MCP tools → preview the server, then save. Crew doesn't re-hash old registrations silently. The re-save withdraws the tools' earlier approvals, leaves their write tools off until they are granted again, and asks for `allowOrigin` once if the base URL is private or isn't one of the document's `servers`. Studio doesn't send `allowOrigin` until its connector sheet (G4) ships, so until then a server that needs confirming can only be re-saved through the API. MCP servers (`mcp-stdio`, `mcp-http`) are unaffected.
+- **Write tools are registered disabled (#991, data connectors G1, api-types 0.111.0).** MCP and REST tools that write are now registered disabled until a human operator grants them (`enabledWrites` on save, or the tool toggle). Each grant is audited `mcp.tool.write_granted`.
+
+### Added
+- **MCP inspector bridge (#983, api-types 0.114.0):** `/api/v1/mcp-inspect/sessions` (start / rpc / log long-poll / delete). The `mcp.session` editor permission is granted by an editor build's install consent, with no global allow. An ungranted write tool is refused (`403 write_not_granted`); a server changed since connect answers `409 server_changed`.
+- **Short job titles (#989, api-types 0.113.0):** `AgentSession.title`, a derived short job title on every served run, plus `SeatRecordResponse.project`. `GET /roster/record` takes `?project=` and up to 90 days.
+
+### Changed
+- **deps:** `wicked-core-ts` `^0.9.9`. It brings:
+  - QE acceptance on every seat (wicked-core#917): the engine runs an isolated reviewer turn, and when no reviewer is possible the operator's approve is the judgment, labelled "judged by operator". Needs wicked-garden 12.54.0+.
+  - The `mcp.session` permission (wicked-core#909).
+  - POL-2101, boot-seeded: check the chosen stack's built-ins first (wicked-core#910, #915).
+  - The opencode admission pin moves to `opencode v2.0.25` (wicked-core#913), which clears the `seats.ungoverned` opencode warning.
+  - Governed seats no longer load a repository's own agent configuration (wicked-core#916). Disclosed: a repo's CLAUDE.md and AGENTS.md no longer auto-load on governed seats.
+
+### Fixed
+- **Runs report when they ended (#988, crew#985):** runs that ended before `ended_at` existed now report it, derived from the run's event log.
+- **Hermetic tests (#990, crew#986):** crew's tests can no longer write into the live state home. Under a test runner the real `~/.wicked-crew` is refused.
 
 ## [0.9.13] — 2026-10-12
 
@@ -3960,7 +3981,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.13...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.13...v0.10.0
 [0.9.13]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.12...v0.9.13
 [0.9.12]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.11...v0.9.12
 [0.9.11]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.10...v0.9.11
