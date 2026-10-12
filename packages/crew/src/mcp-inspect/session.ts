@@ -125,6 +125,8 @@ interface Pending {
 
 /** At most this many timed-out requests keep their send time (for a late answer's round trip). */
 const SENT_AT_MAX = 256;
+/** A stderr line longer than this is logged without waiting for its newline. */
+const STDERR_LINE_MAX = 8 * 1024;
 /** An upstream DELETE of a streamable-HTTP session gets this long. */
 const TERMINATE_MS = 2_000;
 /** Longer than SDK 1.31's stdio close (2 s for EOF, then 2 s after SIGTERM, then SIGKILL; codex r2). */
@@ -324,21 +326,31 @@ export class InspectSession {
   }
 
   /**
-   * Stderr as it arrives (codex r1/r2): whole secrets are scrubbed in the buffer first, so none can
-   * straddle what is logged; then everything but a tail that could begin a secret is logged at once.
+   * Stderr as it arrives (codex r1/r2), by whole line: whole secrets are scrubbed in the buffer
+   * first, so none can straddle what is logged; a tail that could begin a secret is never logged;
+   * and only complete lines go out (a partial one waits for its newline, up to 8 KiB), so the
+   * credential-shape patterns see a line whole however the server's writes were chunked.
    */
   private stderrData(text: string): void {
     const buf = scrubSecrets(this.stderrBuf + text, this.forms);
-    const keep = heldTail(buf, this.forms);
-    this.stderrBuf = buf.slice(buf.length - keep);
-    if (keep < buf.length) this.append({ dir: 'in', kind: 'stderr', text: buf.slice(0, buf.length - keep) });
+    let end = buf.length - heldTail(buf, this.forms);
+    const nl = end > 0 ? buf.lastIndexOf('\n', end - 1) : -1;
+    if (nl !== -1) end = nl + 1;
+    else if (end <= STDERR_LINE_MAX) end = 0;
+    this.stderrBuf = buf.slice(end);
+    if (end > 0) this.append({ dir: 'in', kind: 'stderr', text: buf.slice(0, end) });
   }
 
-  /** The pipe ended: a held tail never became a whole secret, but it is a secret's start, so it is redacted, never logged. */
+  /**
+   * The pipe ended: a partial last line is logged, and a held tail (a secret's start that never
+   * became a whole secret) is redacted, never logged.
+   */
   private flushStderr(): void {
     if (this.stderrBuf === '') return;
+    const buf = this.stderrBuf;
+    const keep = heldTail(buf, this.forms);
     this.stderrBuf = '';
-    this.append({ dir: 'in', kind: 'stderr', text: SECRET_REDACTION });
+    this.append({ dir: 'in', kind: 'stderr', text: buf.slice(0, buf.length - keep) + (keep > 0 ? SECRET_REDACTION : '') });
   }
 
   /**

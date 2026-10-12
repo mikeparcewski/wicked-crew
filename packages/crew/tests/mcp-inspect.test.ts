@@ -162,8 +162,7 @@ describe('the MCP inspector bridge', () => {
     expect(session.state).toBe('ready');
     await new Promise((r) => setTimeout(r, 300));
     const mid = (await h.log(session.id)).body;
-    expect(mid).toContain('opaque-'); // the text before the secret's start is not held
-    expect(mid).not.toContain(TOKEN.slice(0, 6));
+    expect(mid).not.toContain(TOKEN.slice(0, 6)); // the unfinished line waits for its end
     await new Promise((r) => setTimeout(r, 400));
     const body = (await h.log(session.id)).body;
     expect(body).not.toContain(TOKEN.slice(0, 6));
@@ -210,6 +209,21 @@ describe('the MCP inspector bridge', () => {
     expect(body).not.toContain(TOKEN.slice(0, 6));
     const stderrText = ((JSON.parse(body) as McpInspectLogResponse).entries).filter((e) => e.kind === 'stderr').map((e) => e.text).join('');
     expect(stderrText).toBe('bye [redacted:secret]');
+  });
+
+  it('codex r2 verify: a credential shape split across stderr writes is redacted (lines go out whole)', async () => {
+    const h = await harness();
+    const shape = 'ghp_' + 'A1b2C3d4E5f6G7h8I9j0K1l2';
+    const script = `process.stderr.write('key ${shape.slice(0, 4)}'); setTimeout(() => process.stderr.write('${shape.slice(4)} ok\\n'), 300);` +
+      `require('readline').createInterface({input: process.stdin}).on('line', (l) => { const m = JSON.parse(l);` +
+      ` if (m.method === 'initialize') process.stdout.write(JSON.stringify({jsonrpc: '2.0', id: m.id, result: {protocolVersion: '2025-06-18', capabilities: {}, serverInfo: {name: 'x', version: '1'}}}) + '\\n'); });`;
+    const { session } = (await h.start({ command: process.execPath, args: ['-e', script] })).json() as McpInspectStartResponse;
+    expect(session.state).toBe('ready');
+    await new Promise((r) => setTimeout(r, 600));
+    const l = (await h.log(session.id)).json() as McpInspectLogResponse;
+    const err = l.entries.filter((e) => e.kind === 'stderr').map((e) => e.text);
+    expect(err).toHaveLength(1);
+    expect(err[0]).toBe('key [REDACTED:github-token] ok\n');
   });
 
   it('heldTail holds back only a tail that could begin a secret, never more than the secret', () => {
