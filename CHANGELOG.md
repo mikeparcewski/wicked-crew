@@ -10,6 +10,12 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.9.12] — 2026-10-12
+
+Bundles **wicked-studio 0.7.11**: the rail's Workspace links are visibly smaller and muted, under a small WORKSPACE header (studio#736). Engine pin unchanged (`wicked-core-ts` `^0.9.7`); pair with wicked-garden 12.53.3 and wicked-estate 0.29.2.
+
+- **deps:** `wicked-studio` `^0.7.11`.
+
 ## [0.9.11] — 2026-10-11
 
 The studio patch: plain words, and a deliver card that never offers a refused delivery. This release bundles **wicked-studio 0.7.10**; the engine pin stays **`wicked-core-ts` `^0.9.7`**. Pair it with **wicked-garden 12.53.3** and **wicked-estate 0.29.2**.
@@ -3944,7 +3950,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.11...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.12...HEAD
+[0.9.12]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.11...v0.9.12
 [0.9.11]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.10...v0.9.11
 [0.9.10]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.9...v0.9.10
 [0.9.9]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.8...v0.9.9
