@@ -21,6 +21,7 @@ import {
   resolveMemoryDbPath,
 } from '../src/core/estate-mcp-client.js';
 import { defaultStateHome, setCrewStateHome } from '../src/projects/state-home.js';
+import { useUnconfiguredTempHome } from './setup/temp-home.js';
 import { removeScratch } from './setup/scratch.js';
 
 // A fake estate-mcp server. argv: [logPath, mode]. Modes: 'ok' (mcp result), 'rpcerror' (JSON-RPC
@@ -159,8 +160,9 @@ describe('callEstateTool', () => {
 
 describe('resolveMemoryDbPath', () => {
   const scratch: string[] = [];
+  // crew#986: a temp HOME per test and no configured state home; the armed one is restored after.
+  useUnconfiguredTempHome();
   afterEach(() => {
-    setCrewStateHome(undefined);
     for (const d of scratch.splice(0)) rmSync(d, { recursive: true, force: true });
   });
 

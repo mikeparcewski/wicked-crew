@@ -9,13 +9,15 @@
 //
 // Pure path-resolution tests: no daemon, no filesystem writes.
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { defaultAuditPath } from '../src/api/audit.js';
 import { setCrewStateHome } from '../src/projects/state-home.js';
+import { useUnconfiguredTempHome } from './setup/temp-home.js';
 
-afterEach(() => setCrewStateHome(undefined));
+// crew#986: a temp HOME per test, and the armed state home restored after (never left unset).
+useUnconfiguredTempHome();
 
 describe('defaultAuditPath follows the daemon state home (crew#353)', () => {
   it('resolves under the configured state home (the --db parent)', () => {

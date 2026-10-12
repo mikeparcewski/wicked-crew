@@ -29,7 +29,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
-import { setCrewStateHome, stateHomeOfDb } from '../../src/projects/state-home.js';
+import { crewStateHome, setCrewStateHome, stateHomeOfDb } from '../../src/projects/state-home.js';
 import type { Project } from '../../src/core/types.js';
 import { removeScratch } from '../setup/scratch.js';
 
@@ -39,6 +39,7 @@ const MARKER = `/srv/decks-crew353-${process.pid}-${Date.now()}`;
 const PROJECT_NAME = `isolation-353-${process.pid}-${Date.now()}`;
 const REAL_DEFAULT = join(homedir(), '.wicked-crew', 'project-settings.json');
 const REAL_AUDIT = join(homedir(), '.wicked-crew', 'audit.log');
+const armedStateHome = crewStateHome();
 
 let work: string;
 let stateHome: string;
@@ -96,7 +97,7 @@ afterAll(async () => {
   else process.env['WICKED_CREW_PROJECT_SETTINGS'] = savedEnvOverride;
   if (savedAuditOverride === undefined) delete process.env['WICKED_CREW_AUDIT_LOG'];
   else process.env['WICKED_CREW_AUDIT_LOG'] = savedAuditOverride;
-  setCrewStateHome(undefined);
+  setCrewStateHome(armedStateHome); // crew#986: re-arm, never leave it unset
   removeScratch(work);
 });
 
