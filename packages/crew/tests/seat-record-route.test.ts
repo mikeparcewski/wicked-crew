@@ -8,8 +8,14 @@ import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 
+import Fastify from 'fastify';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import { createServer } from '../src/api/server.js';
+import { registerRoutes } from '../src/api/routes.js';
+import { GateCache } from '../src/api/gate-cache.js';
+import { ElicitationCache } from '../src/api/elicitation-cache.js';
+import { AuditLog } from '../src/api/audit.js';
+import { MembershipIndex } from '../src/projects/membership-index.js';
 import { foldRunIntoSeats, seatRecord, SEAT_RECORD_RUN_CAP } from '../src/api/seat-record.js';
 import type { RecordedEvent, SeatRecord, SessionView } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
@@ -172,7 +178,31 @@ describe('GET /api/v1/roster/record', () => {
     expect((res.json() as { days: number }).days).toBe(7);
   });
 
-  it.each(['0', '31', 'abc', '1.5'])('refuses days=%s', async (days) => {
+  it('reads up to 90 days (api-types 0.113.0; was 30)', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/v1/roster/record?days=90' });
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as { days: number }).days).toBe(90);
+  });
+
+  it('scopes to one project and echoes it, so a skin can trust a project spend', async () => {
+    // Neither stub run is filed in a project: a scoped read folds nothing, and says which project.
+    const res = await app.inject({ method: 'GET', url: '/api/v1/roster/record?days=7&project=proj_1' });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { project?: string; runsRead: number; seats: SeatRecord[] };
+    expect(body.project).toBe('proj_1');
+    expect(body.runsRead).toBe(0);
+    expect(body.seats).toEqual([]);
+    // Unscoped: no echo.
+    const all = await app.inject({ method: 'GET', url: '/api/v1/roster/record?days=7' });
+    expect((all.json() as { project?: string }).project).toBeUndefined();
+  });
+
+  it.each(['project=', 'project=a&project=b'])('refuses %s', async (q) => {
+    const res = await app.inject({ method: 'GET', url: `/api/v1/roster/record?${q}` });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it.each(['0', '91', 'abc', '1.5'])('refuses days=%s', async (days) => {
     const res = await app.inject({ method: 'GET', url: `/api/v1/roster/record?days=${days}` });
     expect(res.statusCode).toBe(400);
   });
@@ -182,5 +212,37 @@ describe('GET /api/v1/roster/record', () => {
     const res = await app.inject({ method: 'GET', url: '/api/v1/roster/record' });
     binding = true;
     expect(res.statusCode).toBe(503);
+  });
+});
+
+describe('GET /api/v1/roster/record?project= folds only that project\'s runs', () => {
+  it('counts the filed run\'s spend and leaves the other project\'s out', async () => {
+    const RUN_P = view('run-p', [unit(0, 'claude', 'build')], { created_at: Math.floor((NOW - HOUR) / 1000) });
+    const EVENTS_P: RecordedEvent[] = [
+      ev('unitDistributed', NOW - HOUR, { ord: 0, cli: 'claude' }),
+      ev('cliUsage', NOW - HOUR, { ord: 0, attempt: 1, inputTokens: 1, outputTokens: 1, costUsd: 1.25 }),
+    ];
+    const index = new MembershipIndex();
+    index.set('run-a', 'proj_a');
+    index.set('run-p', 'proj_p');
+    const adapter = {
+      sessions: async () => ['run-a', 'run-p'],
+      sessionsDetail: async () => [structuredClone(RUN_A), structuredClone(RUN_P)],
+      runEvents: async (id: string) => (id === 'run-a' ? EVENTS_A : EVENTS_P),
+    } as unknown as CoreAdapter;
+    const app = Fastify({ logger: false });
+    registerRoutes(app, adapter, new GateCache(), new ElicitationCache(), { bus: null, index, log: () => undefined }, { audit: AuditLog.noop(), authMode: 'off' });
+    await app.ready();
+    const res = await app.inject({ method: 'GET', url: '/api/v1/roster/record?days=7&project=proj_p' });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { project?: string; runsRead: number; seats: SeatRecord[] };
+    expect(body.project).toBe('proj_p');
+    expect(body.runsRead).toBe(1);
+    const s = bySeat(body.seats);
+    expect(s['claude']?.costUsd).toBe(1.25);
+    expect(s['codex']).toBeUndefined();
+    const all = await app.inject({ method: 'GET', url: '/api/v1/roster/record?days=7' });
+    expect((all.json() as { runsRead: number }).runsRead).toBe(2);
+    await app.close();
   });
 });
