@@ -201,13 +201,7 @@ export class McpRegistry {
       throw new McpRegistryError(409, 'preview_stale', 'that previewHash is unknown or expired: preview the server again, then save');
     }
     // A wrong grant is refused before the preview is spent, so the operator can correct it and save again.
-    for (const name of enabledWrites) {
-      const t = held.tools.find((x) => x.name === name);
-      if (t === undefined) throw new McpRegistryError(400, 'unknown_tool', `enabledWrites names ${name}, which this preview does not list`);
-      if (deriveToolClass(t.annotations) === 'read') {
-        throw new McpRegistryError(400, 'not_a_write_tool', `enabledWrites names ${name}, a read tool; read tools are enabled on save without a grant`);
-      }
-    }
+    await this.checkWriteGrants(previewHash, enabledWrites);
     const granted = new Set(enabledWrites);
     this.previews.delete(previewHash);
     const stamp = new Date(this.now()).toISOString();
@@ -292,6 +286,29 @@ export class McpRegistry {
     }
   }
 
+  /**
+   * (G1) Refuse an `enabledWrites` list that does not fit the held preview: a name it does not list
+   * (400 `unknown_tool`), or a tool that would not be a write once saved (400 `not_a_write_tool`) —
+   * by its annotations, or by a class override that survives the save (schema unchanged). The route
+   * calls this before it withdraws any approval, so a refused grant changes nothing. An unknown or
+   * expired preview is left for `save` to refuse.
+   */
+  async checkWriteGrants(previewHash: string, enabledWrites: readonly string[]): Promise<void> {
+    if (enabledWrites.length === 0) return;
+    const held = this.previews.get(previewHash);
+    if (held === undefined || held.expiresAt <= this.now()) return;
+    const prior = (await this.deps.store.read()).servers.find((s) => s.name === held.config.name);
+    for (const name of enabledWrites) {
+      const t = held.tools.find((x) => x.name === name);
+      if (t === undefined) throw new McpRegistryError(400, 'unknown_tool', `enabledWrites names ${name}, which this preview does not list`);
+      const was = prior?.tools.find((p) => p.name === name);
+      const override = was !== undefined && was.schemaHash === t.schemaHash ? was.classOverride : null;
+      if (!isWriteGrant(t.annotations, override)) {
+        throw new McpRegistryError(400, 'not_a_write_tool', `enabledWrites names ${name}, a read tool; read tools are enabled on save without a grant`);
+      }
+    }
+  }
+
   /** What a held preview would register: its server name and each tool's schema hash (S6). */
   peekPreview(previewHash: string): { name: string; tools: Array<{ name: string; schemaHash: string }> } | null {
     const held = this.previews.get(previewHash);
@@ -329,33 +346,38 @@ export class McpRegistry {
   }
 
   /**
-   * Set a tool's switch and/or class override. (G1) Turning ON a tool that is a write — by its own
-   * annotations or by its class after this patch — is a write grant: refused (403
+   * Set a tool's switch and/or class override. (G1) A patch that leaves a tool ENABLED and a WRITE
+   * (by its own annotations or by its class after the patch) when it was not both before is a write
+   * grant: turning a write on, or re-classing an enabled read as a write. It is refused (403
    * `write_grant_human_only`) unless `opts.mayGrantWrite`, which the route sets for a human operator
-   * only. Turning a tool off, and enabling a read tool, need no grant.
+   * only. Turning a tool off, and enabling a read, need no grant. `grantedWrite` says whether this
+   * patch was one, so the route audits exactly the grants.
    */
   async patchTool(
     subject: string,
     patch: { enabled?: boolean | undefined; classOverride?: McpToolClass | null | undefined },
     opts: { mayGrantWrite?: boolean } = {},
-  ): Promise<McpTool> {
+  ): Promise<{ tool: McpTool; grantedWrite: boolean }> {
     const parts = parseMcpSubject(subject);
     if (parts === null) throw new McpRegistryError(404, 'unknown_tool', `no tool ${subject}`);
     const stamp = new Date(this.now()).toISOString();
-    const { server, tool } = await this.deps.store.mutate((file) => {
+    const { server, tool, grant } = await this.deps.store.mutate((file) => {
       const s = this.find(file.servers, parts.server);
       const t = s.tools.find((x) => x.name === parts.tool);
       if (t === undefined) throw new McpRegistryError(404, 'unknown_tool', `no tool ${subject}`);
+      const before = t.enabled && isWriteGrant(t.annotations, t.classOverride);
+      const enabled = patch.enabled ?? t.enabled;
       const override = patch.classOverride !== undefined ? patch.classOverride : t.classOverride;
-      if (patch.enabled === true && !t.enabled && isWriteGrant(t.annotations, override) && opts.mayGrantWrite !== true) {
-        throw new McpRegistryError(403, 'write_grant_human_only', `${subject} is a write tool: only a human operator can enable it (a write grant)`);
+      const grant = !before && enabled && isWriteGrant(t.annotations, override);
+      if (grant && opts.mayGrantWrite !== true) {
+        throw new McpRegistryError(403, 'write_grant_human_only', `${subject} would be an enabled write tool: only a human operator can grant that`);
       }
-      if (patch.enabled !== undefined) t.enabled = patch.enabled;
-      if (patch.classOverride !== undefined) t.classOverride = patch.classOverride;
+      t.enabled = enabled;
+      t.classOverride = override;
       s.updatedAt = stamp;
-      return { server: s, tool: t };
+      return { server: s, tool: t, grant };
     });
-    return toolView(server.name, tool);
+    return { tool: toolView(server.name, tool), grantedWrite: grant };
   }
 
   /** Probe a registered server again: record its health and its tool diff. */

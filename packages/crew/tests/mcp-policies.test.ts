@@ -382,6 +382,19 @@ describe('approvals are audited edits of the ledger rules', () => {
     expect(cell(tool(await matrix(), 'wt_plain'), 'creator', 'claude', 'autonomous')).toMatchObject({ decision: 'ask', ruleIds: ['engine:mcp-first-use'] });
   });
 
+  it('a save refused for a bad write grant withdraws no approval (G1)', async () => {
+    await register();
+    await call('POST', '/mcp/approvals', { subject: 'mcp:fx' });
+    await call('POST', '/mcp/approvals', { subject: 'mcp:fx/wt_plain' });
+    writeSpec(TOOLS.map((t) => (t.name === 'wt_plain' ? { ...t, description: 'changed' } : t)));
+    const again = (await call('POST', '/mcp/servers/preview', { name: 'fx', kind: 'mcp-stdio', command: process.execPath, args: [FIXTURE_SERVER, specPath] })).json() as McpPreviewResponse;
+    expect(again.policies?.withdrawOnSave).toEqual(['mcp:fx', 'mcp:fx/wt_plain']);
+    const refused = await call('POST', '/mcp/servers', { previewHash: again.previewHash, enabledWrites: ['no_such_tool'] });
+    expect(refused.statusCode, refused.body).toBe(400);
+    expect(await ledger(FIRST_USE_LEDGER)).toEqual(['mcp:fx', 'mcp:fx/wt_plain']);
+    expect(await ledger(WRITE_LEDGER)).toEqual(['mcp:fx/wt_plain']);
+  });
+
   it('a changed schema withdraws the approvals that named it, and so does removing the server', async () => {
     await register();
     await call('POST', '/mcp/approvals', { subject: 'mcp:fx' });

@@ -577,6 +577,36 @@ describe('G1: writes are registered disabled until a human operator grants them'
     expect(grants.map((g) => g.detail)).toEqual([{ subject: 'mcp:tracker/createIssue', class: 'write', via: 'toggle' }]);
   });
 
+  it('re-classing an enabled read as a write is a grant; a no-op enable of a granted write is not', async () => {
+    expect((await save((await preview()).previewHash, ['createIssue'])).statusCode).toBe(201);
+    actor = AGENT;
+    const reclass = await patch('mcp:tracker/getIssue', { classOverride: 'write' });
+    expect(reclass.statusCode, reclass.body).toBe(403);
+    expect(reclass.json()).toMatchObject({ code: 'write_grant_human_only' });
+    expect(toolOf(await registry.get('tracker'), 'getIssue')).toMatchObject({ enabled: true, classOverride: null });
+    // Re-classing a disabled tool, or one already an enabled write, grants nothing new.
+    expect((await patch('mcp:tracker/deleteIssue', { classOverride: 'write' })).statusCode).toBe(200);
+    expect((await patch('mcp:tracker/createIssue', { enabled: true })).statusCode).toBe(200);
+    expect(await audited('mcp.tool.write_granted')).toHaveLength(1); // the save's grant only
+    actor = LOCAL_ACTOR;
+    expect((await patch('mcp:tracker/getIssue', { classOverride: 'write' })).statusCode).toBe(200);
+    const grants = await audited('mcp.tool.write_granted');
+    expect(grants.map((g) => g.detail)).toEqual([ // newest first
+      { subject: 'mcp:tracker/getIssue', class: 'write', via: 'toggle' },
+      { subject: 'mcp:tracker/createIssue', class: 'write', via: 'save' },
+    ]);
+  });
+
+  it('a class override that survives the save makes a derived read grantable at save', async () => {
+    expect((await save((await preview()).previewHash)).statusCode).toBe(201);
+    expect((await patch('mcp:tracker/getIssue', { enabled: false, classOverride: 'write' })).statusCode).toBe(200);
+    const p = await preview();
+    expect(p.tools.find((t) => t.name === 'getIssue')?.enabledOnSave).toBe(false);
+    const res = await save(p.previewHash, ['getIssue']);
+    expect(res.statusCode, res.body).toBe(201);
+    expect(toolOf(res.json() as McpServer, 'getIssue')).toMatchObject({ enabled: true, classOverride: 'write', class: 'write' });
+  });
+
   it('a re-save keeps a grant while the schema is unchanged; a changed write is disabled again', async () => {
     expect((await save((await preview()).previewHash, ['createIssue', 'deleteIssue'])).statusCode).toBe(201);
     expect((await patch('mcp:tracker/getIssue', { enabled: false })).statusCode).toBe(200);

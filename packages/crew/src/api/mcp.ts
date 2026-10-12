@@ -15,8 +15,9 @@
  *   DELETE /mcp/servers/:name           remove the server and the keychain secret it owns
  *   POST   /mcp/servers/:name/test      probe again: health plus the tool diff
  *   PATCH  /mcp/tools/:subject          `{enabled?, classOverride?}`; `:subject` is `mcp:<server>/<tool>`, URL-encoded.
- *                                       (G1) turning a write tool on is a grant: human operator only (403),
- *                                       audited `mcp.tool.write_granted`
+ *                                       (G1) leaving a tool enabled AND a write when it was not both (turning
+ *                                       a write on, or re-classing an enabled read) is a grant: human
+ *                                       operator only (403), audited `mcp.tool.write_granted`
  *   PUT    /mcp/servers/:name/secret    `{value}` → the OS keychain; answers `{ref, set: true}`, never the value.
  *                                       RE-KEY only (crew#719): the server must already reference
  *                                       `keychain:wicked-mcp/<name>`. A new server's secret rides
@@ -322,6 +323,8 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
       try {
         // A saved tool whose schema changed loses its approvals BEFORE the save lands, so a failed
         // withdrawal refuses the save rather than leaving an approval over a schema nobody approved.
+        // A grant that does not fit the preview is refused BEFORE any approval is withdrawn.
+        if (parsed.data.previewHash !== undefined) await r.checkWriteGrants(parsed.data.previewHash, enabledWrites);
         const held = parsed.data.previewHash === undefined ? null : r.peekPreview(parsed.data.previewHash);
         if (held !== null && deps.policies !== undefined) {
           const tokens = await deps.policies.withdrawnBySave(held);
@@ -421,9 +424,9 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
       if (!parsed.success) return invalidBody(reply, parsed.error);
       try {
         const actor = deps.actorOf(req);
-        const tool = await r.patchTool(req.params.subject, parsed.data, { mayGrantWrite: mayGrantWrite(actor) });
+        const { tool, grantedWrite } = await r.patchTool(req.params.subject, parsed.data, { mayGrantWrite: mayGrantWrite(actor) });
         deps.audit.record('mcp.tool.updated', actor, { detail: { subject: tool.subject, ...parsed.data } });
-        if (parsed.data.enabled === true && isWriteGrant(tool.annotations, tool.classOverride)) {
+        if (grantedWrite) {
           deps.audit.record('mcp.tool.write_granted', actor, { detail: { subject: tool.subject, class: tool.class, via: 'toggle' } });
         }
         return tool;

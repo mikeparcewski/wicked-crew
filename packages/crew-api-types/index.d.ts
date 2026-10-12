@@ -9543,7 +9543,9 @@ export interface SaveMcpServerBody {
    * (api-types 0.111.0, G1) The operator's write grant: names of this preview's `write` or
    * `destructive` tools to register ENABLED. Every other write tool that is new or changed is
    * registered disabled (`McpPreviewTool.enabledOnSave`). A name the preview does not list is a 400
-   * `unknown_tool`, a read tool a 400 `not_a_write_tool`, and a grant from anyone but a human
+   * `unknown_tool`; a tool that would not be a write once saved (its annotations, or a class override
+   * that survives an unchanged schema) a 400 `not_a_write_tool`. Both are refused before any approval
+   * is withdrawn and leave the preview usable. A grant from anyone but a human
    * operator a 403 `write_grant_human_only`. Each grant is audited `mcp.tool.write_granted`.
    */
   enabledWrites?: string[];
@@ -9555,9 +9557,11 @@ export interface PatchMcpServerBody {
 }
 
 /**
- * `PATCH /mcp/tools/:subject` (subject URL-encoded). At least one field. (G1) Turning on a tool
- * that is a write, by its annotations or its class after the patch, is a write grant: a human
- * operator only (else 403 `write_grant_human_only`), audited `mcp.tool.write_granted`.
+ * `PATCH /mcp/tools/:subject` (subject URL-encoded). At least one field. (G1) A patch that leaves
+ * the tool enabled AND a write (by its annotations, or its class after the patch) when it was not
+ * both before is a write grant: turning a write on, or re-classing an enabled read as a write. A
+ * grant is a human operator's only (else 403 `write_grant_human_only`) and is audited
+ * `mcp.tool.write_granted`. Turning a tool off, and enabling a read, need no grant.
  */
 export interface PatchMcpToolBody {
   enabled?: boolean;
