@@ -129,6 +129,25 @@ describe('the MCP inspector bridge', () => {
     }
   });
 
+  it('codex r1: a secret is scrubbed in its JSON-escaped form, across split stderr chunks, and out of the target label', async () => {
+    const h = await harness();
+    const quoted = 'a"b\\c-secret-value';
+    const script = `process.stderr.write('opaque-${TOKEN.slice(0, 6)}'); setTimeout(() => process.stderr.write('${TOKEN.slice(6)}\\n'), 30);` +
+      `require('readline').createInterface({input: process.stdin}).on('line', (l) => { const m = JSON.parse(l);` +
+      ` if (m.method === 'initialize') process.stdout.write(JSON.stringify({jsonrpc: '2.0', id: m.id, result: {protocolVersion: '2025-06-18', capabilities: {}, serverInfo: {name: process.env.Q, version: '1'}}}) + '\\n'); });`;
+    const res = await h.start({ command: process.execPath, args: ['-e', script, TOKEN], env: { INSPECT_TOKEN: TOKEN, Q: quoted } });
+    const { session } = res.json() as McpInspectStartResponse;
+    expect(session.state).toBe('ready');
+    expect(JSON.stringify(session)).not.toContain(TOKEN);
+    expect(session.target.label).toContain('[redacted:secret]');
+    await new Promise((r) => setTimeout(r, 400));
+    const body = (await h.log(session.id)).body;
+    expect(body).not.toContain(TOKEN);
+    expect(body).not.toContain(TOKEN.slice(6));
+    expect(body).not.toContain('c-secret-value');
+    expect(body).toContain('opaque-[redacted:secret]');
+  });
+
   it('the log long-polls: it waits for the next entry, and answers at once when there is one', async () => {
     const h = await harness();
     const { session } = (await h.start(stdio())).json() as McpInspectStartResponse;

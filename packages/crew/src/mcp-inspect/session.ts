@@ -80,9 +80,23 @@ export interface OpenedTransport {
 
 export type TargetDescription = McpInspectSessionView['target'];
 
-/** Scrub exact secrets, then credential shapes, from any JSON value or string. */
-function scrub<T>(value: T, secrets: readonly string[]): T {
-  const exact = scrubSecrets(value, secrets);
+/**
+ * Every form a secret can take in what the bridge emits: the value itself and its JSON-escaped body
+ * (a quote, backslash or newline in a secret changes its serialized form; codex r1).
+ */
+export function secretForms(secrets: readonly string[]): string[] {
+  const out = new Set<string>();
+  for (const v of secrets) {
+    if (v.length === 0) continue;
+    out.add(v);
+    out.add(JSON.stringify(v).slice(1, -1));
+  }
+  return [...out].sort((a, b) => b.length - a.length);
+}
+
+/** Scrub exact secrets (every form), then credential shapes, from any JSON value or string. */
+export function scrub<T>(value: T, forms: readonly string[]): T {
+  const exact = scrubSecrets(value, forms);
   const walk = (v: unknown): unknown => {
     if (typeof v === 'string') return redactString(v);
     if (Array.isArray(v)) return v.map(walk);
@@ -104,11 +118,17 @@ type Msg = Record<string, unknown>;
 
 interface Pending {
   method: string;
-  sentAt: number;
   resolve: (r: McpInspectRpcResponse) => void;
   reject: (e: Error) => void;
   timer: NodeJS.Timeout;
 }
+
+/** At most this many timed-out requests keep their send time (for a late answer's round trip). */
+const SENT_AT_MAX = 256;
+/** Stderr is logged by line; a partial line is flushed after this long without more output. */
+const STDERR_FLUSH_MS = 250;
+const STDERR_LINE_MAX = 8 * 1024;
+const CLOSE_MS = 2_000;
 
 export class InspectSession {
   readonly id = randomBytes(12).toString('hex');
@@ -125,16 +145,31 @@ export class InspectSession {
   /** When each request went out, so a response that lands after its timeout still shows its time. */
   private sentAt = new Map<string | number, number>();
   private waiters = new Set<() => void>();
+  private readonly forms: string[];
+  private stderrBuf = '';
+  private stderrTimer: NodeJS.Timeout | null = null;
+  private closing: Promise<void> | null = null;
 
   constructor(
-    readonly target: TargetDescription,
+    private readonly rawTarget: TargetDescription,
     private readonly opened: OpenedTransport,
-    private readonly secrets: readonly string[],
+    secrets: readonly string[],
     private readonly now: () => number = Date.now,
     private readonly callTimeoutMs: number = CALL_TIMEOUT_MS,
   ) {
+    this.forms = secretForms(secrets);
     this.startedAt = new Date(now()).toISOString();
     this.lastSeen = now();
+  }
+
+  /** The target as anyone outside may see it: a secret the operator also typed into an argument is scrubbed (codex r1). */
+  get target(): TargetDescription {
+    return scrub(this.rawTarget, this.forms);
+  }
+
+  /** Scrub a message meant for a reply, an error or a daemon log line. */
+  scrubText(text: string): string {
+    return scrub(text, this.forms);
   }
 
   view(): McpInspectSessionView {
@@ -145,20 +180,25 @@ export class InspectSession {
     this.lastSeen = this.now();
   }
 
-  /** Connect and run the handshake. Never throws: a failure is the session's `failed` state. */
+  /**
+   * Connect and run the handshake, all of it (transport start, `initialize`, `initialized`) under
+   * ONE deadline (codex r1: a legacy SSE endpoint that never sends its `endpoint` event hung the
+   * start). Never throws: a failure is the session's `failed` state.
+   */
   async start(initTimeoutMs = INIT_TIMEOUT_MS): Promise<void> {
     const { transport, stderr } = this.opened;
-    stderr?.on('data', (chunk: Buffer | string) => {
-      const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
-      this.append({ dir: 'in', kind: 'stderr', text });
-    });
+    stderr?.on('data', (chunk: Buffer | string) => this.stderrData(typeof chunk === 'string' ? chunk : chunk.toString('utf8')));
     transport.onmessage = (m) => this.received(m as unknown as Msg);
     transport.onerror = (e) => this.append({ dir: 'host', kind: 'state', error: true, text: `transport error: ${e.message}` });
     transport.onclose = () => this.closed('the connection closed');
-    try {
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`no answer to the handshake in ${Math.round(initTimeoutMs / 1000)} s`)), initTimeoutMs);
+    });
+    const handshake = (async (): Promise<void> => {
       await transport.start();
       this.append({ dir: 'host', kind: 'state', text: 'connected' });
-      const init = await this.request('initialize', { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: CLIENT_INFO }, initTimeoutMs, true);
+      const init = await this.request('initialize', { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: CLIENT_INFO }, initTimeoutMs);
       if (init.response.error !== undefined) throw new Error(`initialize failed: ${init.response.error.message}`);
       const r = (init.response.result ?? {}) as Msg;
       const info = r['serverInfo'];
@@ -171,12 +211,18 @@ export class InspectSession {
       const setter = (transport as { setProtocolVersion?: (v: string) => void }).setProtocolVersion;
       if (typeof setter === 'function' && this.initialize.protocolVersion !== null) setter.call(transport, this.initialize.protocolVersion);
       await this.send({ jsonrpc: '2.0', method: 'notifications/initialized' });
+    })();
+    try {
+      await Promise.race([handshake, deadline]);
       if (this.state === 'connecting') {
         this.state = 'ready';
         this.append({ dir: 'host', kind: 'state', text: 'ready' });
       }
     } catch (err) {
+      handshake.catch(() => undefined);
       this.fail(err instanceof Error ? err.message : String(err));
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -185,24 +231,27 @@ export class InspectSession {
     this.touch();
     if (!INSPECT_METHODS.has(method)) throw new InspectError(400, 'method_not_allowed', `${method} is not a method the inspector sends`);
     if (this.state !== 'ready') throw new InspectError(409, 'not_connected', `the session is ${this.state}`);
-    return this.request(method, params, this.callTimeoutMs, false);
+    return this.request(method, params, this.callTimeoutMs);
   }
 
-  private request(method: string, params: Record<string, unknown> | undefined, timeoutMs: number, handshake: boolean): Promise<McpInspectRpcResponse> {
+  private request(method: string, params: Record<string, unknown> | undefined, timeoutMs: number): Promise<McpInspectRpcResponse> {
     const id = this.nextId++;
     const msg: Msg = { jsonrpc: '2.0', id, method, ...(params !== undefined ? { params } : {}) };
     return new Promise<McpInspectRpcResponse>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
+        // Kept (bounded) so a late answer still shows its round trip in the log.
+        while (this.sentAt.size > SENT_AT_MAX) this.sentAt.delete(this.sentAt.keys().next().value as string | number);
         reject(new InspectError(504, 'timeout', `${method}: no answer in ${Math.round(timeoutMs / 1000)} s (it may still answer; watch the log)`));
       }, timeoutMs);
-      const sentAt = this.now();
-      this.pending.set(id, { method, sentAt, resolve, reject, timer });
-      this.sentAt.set(id, sentAt);
+      this.pending.set(id, { method, resolve, reject, timer });
+      this.sentAt.set(id, this.now());
       this.send(msg).catch((err: unknown) => {
         clearTimeout(timer);
         this.pending.delete(id);
-        reject(handshake ? (err as Error) : new InspectError(502, 'send_failed', `could not send ${method}: ${err instanceof Error ? err.message : String(err)}`));
+        this.sentAt.delete(id);
+        // An SDK error can carry the upstream's response body, which can echo a secret (codex r1).
+        reject(new InspectError(502, 'send_failed', this.scrubText(`could not send ${method}: ${err instanceof Error ? err.message : String(err)}`)));
       });
     });
   }
@@ -211,25 +260,24 @@ export class InspectSession {
     const id = msg['id'] as string | number | undefined;
     const method = msg['method'] as string | undefined;
     const kind = method === undefined ? 'response' : id === undefined ? 'notification' : 'request';
-    this.append({ dir: 'out', kind, ...(method !== undefined ? { method } : {}), ...(id !== undefined ? { rpcId: id } : {}), text: JSON.stringify(msg) });
+    this.append({ dir: 'out', kind, ...(method !== undefined ? { method } : {}), ...(id !== undefined ? { rpcId: id } : {}) }, msg);
     await this.opened.transport.send(msg as unknown as JSONRPCMessage);
   }
 
   private received(msg: Msg): void {
     const id = msg['id'] as string | number | undefined;
     const method = typeof msg['method'] === 'string' ? (msg['method'] as string) : undefined;
-    const text = JSON.stringify(msg);
     if (method === undefined && id !== undefined) {
       const sentAt = this.sentAt.get(id);
       this.sentAt.delete(id);
       const ms = sentAt === undefined ? undefined : this.now() - sentAt;
       const isError = msg['error'] !== undefined;
-      const entry = this.append({ dir: 'in', kind: 'response', rpcId: id, ...(ms !== undefined ? { ms } : {}), ...(isError ? { error: true } : {}), text });
+      const entry = this.append({ dir: 'in', kind: 'response', rpcId: id, ...(ms !== undefined ? { ms } : {}), ...(isError ? { error: true } : {}) }, msg);
       const p = this.pending.get(id);
       if (p !== undefined) {
         this.pending.delete(id);
         clearTimeout(p.timer);
-        const scrubbed = scrub(isError ? { error: msg['error'] } : { result: msg['result'] }, this.secrets) as McpInspectRpcResponse['response'];
+        const scrubbed = scrub(isError ? { error: msg['error'] } : { result: msg['result'] }, this.forms) as McpInspectRpcResponse['response'];
         const raw = JSON.stringify(scrubbed);
         const truncated = raw.length > REPLY_MAX_CHARS;
         p.resolve({ response: truncated ? { result: { truncated: true, text: raw.slice(0, REPLY_MAX_CHARS) } } : scrubbed, ms: ms ?? 0, truncated: truncated || entry.truncated === true });
@@ -238,17 +286,45 @@ export class InspectSession {
     }
     if (method !== undefined && id !== undefined) {
       // A server request: the inspector declares no client capabilities, so it serves none.
-      this.append({ dir: 'in', kind: 'request', method, rpcId: id, text });
+      this.append({ dir: 'in', kind: 'request', method, rpcId: id }, msg);
       void this.send({ jsonrpc: '2.0', id, error: { code: -32601, message: `the MCP inspector does not serve ${method}` } }).catch(() => undefined);
       return;
     }
-    this.append({ dir: 'in', kind: 'notification', ...(method !== undefined ? { method } : {}), text });
+    this.append({ dir: 'in', kind: 'notification', ...(method !== undefined ? { method } : {}) }, msg);
   }
 
-  private append(e: Omit<McpInspectLogEntry, 'seq' | 'at'>): McpInspectLogEntry {
-    const { text, truncated } = cap(scrub(e.text, this.secrets), ENTRY_MAX_CHARS);
+  /** Stderr by line, so a secret split across two chunks is whole when it is scrubbed (codex r1). */
+  private stderrData(text: string): void {
+    this.stderrBuf += text;
+    let nl = this.stderrBuf.lastIndexOf('\n');
+    if (nl === -1 && this.stderrBuf.length > STDERR_LINE_MAX) nl = this.stderrBuf.length - 1;
+    if (nl !== -1) {
+      const lines = this.stderrBuf.slice(0, nl + 1);
+      this.stderrBuf = this.stderrBuf.slice(nl + 1);
+      this.append({ dir: 'in', kind: 'stderr', text: lines });
+    }
+    if (this.stderrTimer !== null) clearTimeout(this.stderrTimer);
+    this.stderrTimer = this.stderrBuf === '' ? null : setTimeout(() => this.flushStderr(), STDERR_FLUSH_MS);
+  }
+
+  private flushStderr(): void {
+    if (this.stderrTimer !== null) clearTimeout(this.stderrTimer);
+    this.stderrTimer = null;
+    if (this.stderrBuf === '') return;
+    const rest = this.stderrBuf;
+    this.stderrBuf = '';
+    this.append({ dir: 'in', kind: 'stderr', text: rest });
+  }
+
+  /**
+   * One log entry. A JSON-RPC message is scrubbed as a VALUE, then serialized (codex r1: scrubbing
+   * the serialized text missed escaped secrets), and so are `method` and `rpcId`.
+   */
+  private append(e: Omit<McpInspectLogEntry, 'seq' | 'at' | 'text'> & { text?: string }, message?: Msg): McpInspectLogEntry {
+    const clean = scrub({ ...e, ...(message !== undefined ? { text: JSON.stringify(scrub(message, this.forms)) } : {}) }, this.forms);
+    const { text, truncated } = cap(clean.text ?? '', ENTRY_MAX_CHARS);
     this.seq += 1;
-    const entry: McpInspectLogEntry = { ...e, seq: this.seq, at: new Date(this.now()).toISOString(), text, ...(truncated ? { truncated: true } : {}) };
+    const entry: McpInspectLogEntry = { ...clean, seq: this.seq, at: new Date(this.now()).toISOString(), text, ...(truncated ? { truncated: true } : {}) };
     this.log.push(entry);
     this.bytes += text.length;
     while (this.log.length > LOG_MAX_ENTRIES || (this.bytes > LOG_MAX_BYTES && this.log.length > 1)) {
@@ -279,8 +355,8 @@ export class InspectSession {
   }
 
   private fail(message: string): void {
-    const msg = scrub(message, this.secrets);
     if (this.state === 'closed' || this.state === 'failed') return;
+    const msg = this.scrubText(message);
     this.state = 'failed';
     this.error = msg;
     this.append({ dir: 'host', kind: 'state', error: true, text: `failed: ${msg}` });
@@ -289,6 +365,7 @@ export class InspectSession {
 
   private closed(reason: string): void {
     if (this.state === 'closed' || this.state === 'failed') return;
+    this.flushStderr();
     const pid = this.opened.pid();
     this.state = this.state === 'connecting' ? 'failed' : 'closed';
     if (this.state === 'failed') this.error = reason;
@@ -302,14 +379,25 @@ export class InspectSession {
       p.reject(new InspectError(409, 'not_connected', `${p.method}: ${reason}`));
       this.pending.delete(id);
     }
+    this.sentAt.clear();
     for (const w of [...this.waiters]) w();
   }
 
-  /** Close the transport (a stdio child is terminated by the SDK). Idempotent. */
-  async close(reason = 'closed by the operator'): Promise<void> {
+  /**
+   * Close it. A streamable-HTTP session is terminated upstream first (its DELETE, codex r1), then the
+   * transport is closed (a stdio child is terminated by the SDK). Bounded and idempotent.
+   */
+  close(reason = 'closed by the operator'): Promise<void> {
     if (this.state !== 'failed') this.closed(reason);
     else this.rejectPending(reason);
-    await this.opened.transport.close().catch(() => undefined);
+    this.flushStderr();
+    this.closing ??= (async () => {
+      const t = this.opened.transport as Transport & { terminateSession?: () => Promise<void>; sessionId?: string };
+      const bounded = (p: Promise<unknown>): Promise<unknown> => Promise.race([p.catch(() => undefined), new Promise((r) => setTimeout(r, CLOSE_MS).unref())]);
+      if (typeof t.terminateSession === 'function' && t.sessionId !== undefined) await bounded(t.terminateSession());
+      await bounded(t.close());
+    })();
+    return this.closing;
   }
 
   /** Process exit: no awaiting, so a stdio child is killed outright. */
@@ -327,7 +415,7 @@ export class InspectSession {
 /** A short, path-free name for a stdio command (`node build/index.js` → `index.js`). */
 export function commandName(command: string, args: readonly string[]): string {
   const script = args.find((a) => !a.startsWith('-'));
-  return basename(script ?? command) || command;
+  return (basename(script ?? command) || command).slice(0, 60);
 }
 
 export class InspectSessions {

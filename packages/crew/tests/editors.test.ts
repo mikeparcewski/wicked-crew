@@ -586,6 +586,19 @@ describe('the routes', () => {
     expect(updated.statusCode, updated.body).toBe(200);
     const token2 = `editor:acme-inspect@0.2.0#${h.registry.get('acme-inspect')!.sha256}/mcp.session`;
     expect(ledger.excludes.filter((t) => t.startsWith('editor:acme-inspect@'))).toEqual([token2]);
+    // An update that no longer declares it keeps no grant (codex r1).
+    const v3 = makePack({ id: 'acme-inspect', name: 'acme-inspect', version: '0.3.0', html: EDITOR_HTML.replace('</body>', '<!-- v3 --></body>') });
+    const dropped = await h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { packRoot: v3 } });
+    expect(dropped.statusCode, dropped.body).toBe(200);
+    expect((dropped.json() as InstallEditorResponse).granted).toBeUndefined();
+    expect(ledger.excludes.some((t) => t.startsWith('editor:acme-inspect@'))).toBe(false);
+    const v4 = makePack({ id: 'acme-inspect', name: 'acme-inspect', version: '0.4.0', permissions: inspector, html: EDITOR_HTML.replace('</body>', '<!-- v4 --></body>') });
+    expect((await h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { packRoot: v4 } })).statusCode).toBe(200);
+    // A withdrawal that cannot be written keeps the editor installed (a retry can reach it), 503.
+    h.upsertConformanceRule.mockRejectedValueOnce(new Error('store busy'));
+    const busy = await h.app.inject({ method: 'DELETE', url: '/api/v1/editors/acme-inspect', headers: HUMAN });
+    expect(busy.statusCode).toBe(503);
+    expect(h.registry.get('acme-inspect')).not.toBeNull();
     // Removing it withdraws the grant; another editor's token is untouched.
     expect((await h.app.inject({ method: 'DELETE', url: '/api/v1/editors/acme-inspect', headers: HUMAN })).statusCode).toBe(200);
     expect(ledger.excludes).toEqual(['editor:other@1.0.0#' + 'a'.repeat(64) + '/mcp.session', 'mcp:unrelated']);

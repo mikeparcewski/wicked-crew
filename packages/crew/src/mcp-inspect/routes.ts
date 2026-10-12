@@ -204,7 +204,7 @@ export function registerMcpInspectRoutes(app: FastifyInstance, deps: InspectRout
         const session = new InspectSession(describe, opened, secrets, Date.now, deps.callTimeoutMs);
         sessions.add(session);
         await session.start();
-        deps.log?.(`[mcp-inspect] ${session.id.slice(0, 8)} ${describe.kind} ${describe.name}: ${session.state}`);
+        deps.log?.(session.scrubText(`[mcp-inspect] ${session.id.slice(0, 8)} ${describe.kind} ${describe.name}: ${session.state}`));
         const body: McpInspectStartResponse = { session: session.view() };
         return reply.code(201).send(body);
       } catch (err) {
