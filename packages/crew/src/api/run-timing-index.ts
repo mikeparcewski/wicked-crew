@@ -16,7 +16,14 @@
  */
 
 import type { AuditLog } from './audit.js';
-import type { Actor, AuditEntry } from '../core/types.js';
+import type { Actor, AuditEntry, RecordedEvent, SessionView } from '../core/types.js';
+
+/** The run statuses that are terminal (`SessionStatus`): the only runs `ended_at` may date. */
+const TERMINAL_STATUSES: ReadonlySet<string> = new Set(['completed', 'cancelled', 'failed']);
+/** The engine frames that end a run: the same three the daemon records `run.ended` on. */
+const TERMINAL_EVENTS: ReadonlySet<string> = new Set(['sessionCompleted', 'sessionFailed', 'runCancelled']);
+/** How many run event logs one backfill reads at once. */
+const BACKFILL_CONCURRENCY = 4;
 
 /**
  * Millis → whole unix SECONDS. The DTO field (`AgentSession.created_at`) and every other
@@ -31,6 +38,13 @@ export class RunTimingIndex {
   private readonly runToCreatedAt = new Map<string, number>();
   /** runId → terminal instant, unix SECONDS (`AgentSession.ended_at`; api-types 0.38.0, crew#496). */
   private readonly runToEndedAt = new Map<string, number>();
+  /** crew#985: runId → terminal instant DERIVED from the engine event log (unix SECONDS), for runs
+   *  with no `run.ended` entry. Kept apart from {@link runToEndedAt} so it never stands in for the
+   *  durable record: the daemon still writes `run.ended` when it sees the frame. */
+  private readonly runToDerivedEndedAt = new Map<string, number>();
+  /** crew#985: runId → the read of its engine event log (settled = read; in flight = awaited by an
+   *  overlapping request, so no request serves a run undated while another is still reading it). */
+  private readonly endedBackfill = new Map<string, Promise<void>>();
   /** runId → launch channel (`AgentSession.channel`; crew#632). */
   private readonly runToChannel = new Map<string, 'studio' | 'cli' | 'api'>();
   /** runId → launch actor string (`AgentSession.launch_actor`; crew#632). */
@@ -243,7 +257,60 @@ export class RunTimingIndex {
    *  never fabricated: a live run, a pre-field run, a run that terminalled before THIS daemon
    *  booted, a lost trail). */
   endedAtFor(runId: string): number | undefined {
-    return this.runToEndedAt.get(runId);
+    return this.runToEndedAt.get(runId) ?? this.runToDerivedEndedAt.get(runId);
+  }
+
+  /** Whether the run has a RECORDED terminal instant (a `run.ended` entry, live or hydrated). The
+   *  daemon writes the entry only when this is false, so an event-log derivation never skips it. */
+  hasRecordedEnd(runId: string): boolean {
+    return this.runToEndedAt.has(runId);
+  }
+
+  /**
+   * crew#985: date the terminal runs that have no `run.ended` entry (runs that ended before
+   * crew#496 shipped the entry, or while no daemon was watching) from the engine's own event log:
+   * the FIRST terminal frame's capture `ts`, the same first-wins rule as {@link setEnded}. Read-only
+   * and in memory: nothing is written to the trail, so the next boot derives it again, and a
+   * recorded `run.ended` (live or hydrated) always wins over the derivation.
+   *
+   * Each run's log is read at most once per process (a terminal run's log does not grow). A run
+   * whose log has no terminal frame (it predates the log) stays ABSENT. A failed read is not
+   * remembered, so a later request tries again.
+   */
+  async backfillEndedFromEvents(
+    views: readonly SessionView[],
+    runEvents: (runId: string) => Promise<RecordedEvent[] | null>,
+  ): Promise<void> {
+    const inFlight: Promise<void>[] = [];
+    const pending: Array<{ id: string; settle: () => void }> = [];
+    for (const { session: s } of views) {
+      if (!TERMINAL_STATUSES.has(s.status) || this.runToEndedAt.has(s.id)) continue;
+      const read = this.endedBackfill.get(s.id);
+      if (read !== undefined) {
+        inFlight.push(read);
+        continue;
+      }
+      let settle!: () => void;
+      this.endedBackfill.set(s.id, new Promise<void>((resolve) => (settle = resolve)));
+      pending.push({ id: s.id, settle });
+    }
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      while (next < pending.length) {
+        const { id, settle } = pending[next++]!;
+        try {
+          const events = await runEvents(id);
+          const terminal = events?.find((e) => TERMINAL_EVENTS.has(e.type) && typeof e.ts === 'number' && e.ts > 0);
+          if (terminal !== undefined) this.runToDerivedEndedAt.set(id, toSeconds(terminal.ts));
+        } catch {
+          this.endedBackfill.delete(id);
+        } finally {
+          settle();
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(BACKFILL_CONCURRENCY, pending.length) }, worker));
+    await Promise.all(inFlight);
   }
 }
 

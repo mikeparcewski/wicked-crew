@@ -502,10 +502,13 @@ export interface AgentSession {
    * {@link created_at} ("started" ≡ "created" — the ONE launch instant) it gives a run its own clock;
    * a skin prefers these over the moment it happened to attach.
    *
-   * ABSENT — never `null`, never fabricated — when the daemon has no `run.ended` entry: a run
-   * still live, a run that terminalled before this field existed or before THIS daemon booted
-   * (no re-emission at boot), a lost trail, or the one crash window between the engine's status
-   * write and the daemon's synchronous audit record. Read with `typeof === 'number'`; a duration
+   * A terminal run with no `run.ended` entry (it ended before this field existed, or while no
+   * daemon was watching) is dated from the FIRST terminal frame in the engine's event log
+   * (`GET /runs/:id/events`), derived at read time and never written back (crew#985).
+   *
+   * ABSENT — never `null`, never fabricated — when neither source has it: a run still live, or a
+   * terminal run with no `run.ended` entry whose event log holds no terminal frame (it predates
+   * the log). Read with `typeof === 'number'`; a duration
    * or a "finished N minutes ago" MUST be omitted for an undated run, never derived from now.
    * Distinct from {@link finished_at} (engine-side unix MILLIS, retention bookkeeping).
    */

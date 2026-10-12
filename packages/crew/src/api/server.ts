@@ -1812,7 +1812,7 @@ export async function createServer(
       // second terminal frame) finds the run already dated and writes nothing; a restart re-reads the
       // trail (newest entry wins) instead of re-emitting. The one hole — a crash between the engine's
       // status write and this record — leaves that run ABSENT, never null (the wire contract).
-      if (runTimingIndex.endedAtFor(session) === undefined) {
+      if (!runTimingIndex.hasRecordedEnd(session)) {
         const endedTs = audit.record('run.ended', DAEMON_ACTOR, {
           runId: session,
           detail: { status: event.type },
