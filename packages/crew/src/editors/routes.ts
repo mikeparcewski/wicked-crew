@@ -100,9 +100,11 @@ export interface EditorRoutesDeps {
 
 export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDeps): void {
   const { registry } = deps;
-  // Ledger edits are read-modify-write: serialize them so two installs never drop each other's token.
+  // An install or a removal is ONE serialized step with its ledger edit (codex r2): the ledger edit is
+  // read-modify-write, and a removal interleaved with an install could otherwise remove the new
+  // build while the install still writes its grant.
   let chain: Promise<unknown> = Promise.resolve();
-  const grantChain = <T>(f: () => Promise<T>): Promise<T> => {
+  const serial = <T>(f: () => Promise<T>): Promise<T> => {
     const r = chain.then(f, f);
     chain = r.catch(() => undefined);
     return r;
@@ -143,25 +145,28 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
       const parsed = InstallSchema.safeParse(req.body);
       if (!parsed.success) return reply.code(400).send({ error: 'body must be { packRoot: <absolute path>, enabled?: boolean }' });
       try {
-        const installed = await installPack(parsed.data.packRoot, parsed.data.enabled, { check: deps.packCheck, conformance: deps.conformance, registry });
-        deps.log?.(`[editors] installed ${installed.editors.map((e) => `${e.id}@${e.version}`).join(', ')}${installed.updated ? ' (update)' : ''}`);
-        // The install consent IS the mcp.session grant (DES-MCP-INSPECTOR-001 §6): this human-only
-        // call, after the operator approved the install, writes each declaring editor's per-build
-        // token. Every installed editor's earlier tokens are dropped first (codex r1: an update that
-        // no longer declares it keeps none), and an editor that does not declare it gets none.
-        const declaring = installed.editors.filter((e) => e.permissions.some((p) => p.id === INSTALL_GRANTED));
-        const tokens = declaring.map((e) => grantToken(e.id, e.version, e.sha256, INSTALL_GRANTED));
-        try {
-          await grantChain(() => editInstallGrants(deps.adapter, installed.editors.map((e) => e.id), tokens));
-          if (declaring.length === 0) return installed;
-          deps.log?.(`[editors] install consent granted ${INSTALL_GRANTED} to ${declaring.map((e) => `${e.id}@${e.version}`).join(', ')}`);
-          return { ...installed, granted: tokens };
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          deps.log?.(`[editors] installed, but the ${INSTALL_GRANTED} grants were not written: ${msg}`);
-          if (declaring.length === 0) return installed;
-          return { ...installed, grantError: `installed, but ${INSTALL_GRANTED} was not granted (it asks): ${msg}` };
-        }
+        return await serial(async () => {
+          const installed = await installPack(parsed.data.packRoot, parsed.data.enabled, { check: deps.packCheck, conformance: deps.conformance, registry });
+          deps.log?.(`[editors] installed ${installed.editors.map((e) => `${e.id}@${e.version}`).join(', ')}${installed.updated ? ' (update)' : ''}`);
+          // The install consent IS the mcp.session grant (DES-MCP-INSPECTOR-001 §6): this human-only
+          // call, after the operator approved the install, writes each declaring editor's per-build
+          // token. Every installed editor's earlier tokens are dropped first (codex r1: an update that
+          // no longer declares it keeps none), and an editor that does not declare it gets none.
+          const declaring = installed.editors.filter((e) => e.permissions.some((p) => p.id === INSTALL_GRANTED));
+          const tokens = declaring.map((e) => grantToken(e.id, e.version, e.sha256, INSTALL_GRANTED));
+          try {
+            await editInstallGrants(deps.adapter, installed.editors.map((e) => e.id), tokens);
+            if (declaring.length === 0) return installed;
+            deps.log?.(`[editors] install consent granted ${INSTALL_GRANTED} to ${declaring.map((e) => `${e.id}@${e.version}`).join(', ')}`);
+            return { ...installed, granted: tokens };
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            deps.log?.(`[editors] installed, but the ${INSTALL_GRANTED} grants were not written: ${msg}`);
+            // Said either way (codex r2): with nothing to grant, an earlier build's token was not withdrawn.
+            const what = declaring.length > 0 ? `${INSTALL_GRANTED} was not granted (it asks)` : `an earlier build's ${INSTALL_GRANTED} grant was not withdrawn`;
+            return { ...installed, grantError: `installed, but ${what}: ${msg}` };
+          }
+        });
       } catch (err) {
         if (err instanceof PackInstallError) {
           return reply.code(err.status).send({ error: err.message, ...(err.check !== undefined ? { check: err.check } : {}), ...(err.body ?? {}) });
@@ -181,16 +186,19 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
       if (registry.get(id)?.firstParty === true) {
         return reply.code(409).send({ error: `${id} ships with studio and cannot be removed — disable it instead (POST /editors/${id}/enabled)` });
       }
-      if (registry.get(id) === null) return reply.code(404).send({ error: `no editor '${id}' is installed` });
-      // Its install grant goes first (codex r1): a failed withdrawal keeps the editor installed, so a
-      // retry of this DELETE can still reach it, and never leaves a grant behind a removed editor.
-      try {
-        await grantChain(() => editInstallGrants(deps.adapter, [id], []));
-      } catch (err) {
-        return reply.code(503).send({ error: `${id} was not removed: its ${INSTALL_GRANTED} grant could not be withdrawn (${err instanceof Error ? err.message : String(err)}); try again` });
-      }
-      if (!registry.removeInstalled(id)) return reply.code(404).send({ error: `no editor '${id}' is installed` });
-      return { removed: true, id };
+      return serial(async () => {
+        // Installed = served or skipped at boot (codex r2: a skipped one has no live record but is removable).
+        if (!registry.isInstalled(id)) return reply.code(404).send({ error: `no editor '${id}' is installed` });
+        // Its install grant goes first (codex r1): a failed withdrawal keeps the editor installed, so a
+        // retry of this DELETE can still reach it, and never leaves a grant behind a removed editor.
+        try {
+          await editInstallGrants(deps.adapter, [id], []);
+        } catch (err) {
+          return reply.code(503).send({ error: `${id} was not removed: its ${INSTALL_GRANTED} grant could not be withdrawn (${err instanceof Error ? err.message : String(err)}); try again` });
+        }
+        if (!registry.removeInstalled(id)) return reply.code(404).send({ error: `no editor '${id}' is installed` });
+        return { removed: true, id };
+      });
     },
   );
 

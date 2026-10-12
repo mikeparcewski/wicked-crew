@@ -2,13 +2,15 @@
 // server, through the routes, with the human-only rule, the method allowlist, the log long-poll,
 // secret scrubbing, server-request refusal, timeouts, the session cap and close.
 
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { McpInspectLogResponse, McpInspectRpcResponse, McpInspectStartResponse } from '../src/core/types.js';
 import { registerMcpInspectRoutes, type InspectRegistry } from '../src/mcp-inspect/routes.js';
-import { commandName, InspectSessions, MAX_SESSIONS } from '../src/mcp-inspect/session.js';
+import { commandName, InspectSessions, MAX_SESSIONS, safeCut } from '../src/mcp-inspect/session.js';
 import type { McpUpstreamConfig } from '../src/mcp/probe.js';
 
 const SERVER = join(import.meta.dirname, 'fixtures', 'mcp', 'inspect-server.mjs');
@@ -146,6 +148,62 @@ describe('the MCP inspector bridge', () => {
     expect(body).not.toContain(TOKEN.slice(6));
     expect(body).not.toContain('c-secret-value');
     expect(body).toContain('opaque-[redacted:secret]');
+  });
+
+  it('codex r2: a secret split by a pause longer than the idle flush is still whole when it is scrubbed', async () => {
+    const h = await harness();
+    // The pause (400 ms) outlasts the 250 ms idle flush that used to log the first half on its own.
+    const script = `process.stderr.write('opaque-${TOKEN.slice(0, 6)}'); setTimeout(() => process.stderr.write('${TOKEN.slice(6)}\\n'), 400);` +
+      `require('readline').createInterface({input: process.stdin}).on('line', (l) => { const m = JSON.parse(l);` +
+      ` if (m.method === 'initialize') process.stdout.write(JSON.stringify({jsonrpc: '2.0', id: m.id, result: {protocolVersion: '2025-06-18', capabilities: {}, serverInfo: {name: 'x', version: '1'}}}) + '\\n'); });`;
+    const { session } = (await h.start({ command: process.execPath, args: ['-e', script], env: { INSPECT_TOKEN: TOKEN } })).json() as McpInspectStartResponse;
+    expect(session.state).toBe('ready');
+    await new Promise((r) => setTimeout(r, 300));
+    const mid = (await h.log(session.id)).body;
+    expect(mid).toContain('opaque-'); // the text before the secret's start is not held
+    expect(mid).not.toContain(TOKEN.slice(0, 6));
+    await new Promise((r) => setTimeout(r, 400));
+    const body = (await h.log(session.id)).body;
+    expect(body).not.toContain(TOKEN.slice(0, 6));
+    expect(body).not.toContain(TOKEN.slice(6));
+    expect(body).toContain('[redacted:secret]');
+  });
+
+  it('codex r2: a child that ignores stdin EOF and SIGTERM is dead when the disconnect returns', async () => {
+    const h = await harness();
+    const dir = mkdtempSync(join(tmpdir(), 'mcp-inspect-pid-'));
+    const pidFile = join(dir, 'pid');
+    try {
+      const script = `process.on('SIGTERM', () => {}); setInterval(() => {}, 1000); require('fs').writeFileSync(process.argv[1], String(process.pid));` +
+        `require('readline').createInterface({input: process.stdin}).on('line', (l) => { const m = JSON.parse(l);` +
+        ` if (m.method === 'initialize') process.stdout.write(JSON.stringify({jsonrpc: '2.0', id: m.id, result: {protocolVersion: '2025-06-18', capabilities: {}, serverInfo: {name: 'stubborn', version: '1'}}}) + '\\n'); });`;
+      const { session } = (await h.start({ command: process.execPath, args: ['-e', script, pidFile] })).json() as McpInspectStartResponse;
+      expect(session.state).toBe('ready');
+      const pid = Number(readFileSync(pidFile, 'utf8'));
+      expect((await h.app.inject({ method: 'DELETE', url: `/api/v1/mcp-inspect/sessions/${session.id}`, headers: HUMAN })).statusCode).toBe(204);
+      // Gone (once reaped: a SIGKILLed child is a zombie until the event loop collects it), not left
+      // alive to a close still running in the background.
+      const alive = (): boolean => {
+        try {
+          process.kill(pid, 0);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      for (let i = 0; i < 20 && alive(); i++) await new Promise((r) => setTimeout(r, 50));
+      expect(alive()).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  it('safeCut pulls a cut back before any tail that begins a secret form, and nowhere else', () => {
+    expect(safeCut('log: opaque-sec', 15, ['opaque-secret'])).toBe(5);
+    expect(safeCut('log: done', 9, ['opaque-secret'])).toBe(9);
+    expect(safeCut('log: o', 6, ['opaque-secret', 'other'])).toBe(5);
+    expect(safeCut('x opaque-secret', 15, ['opaque-secret'])).toBe(15); // a whole secret is scrubbed, not held
+    expect(safeCut('abc', 0, ['abc'])).toBe(0);
   });
 
   it('the log long-polls: it waits for the next entry, and answers at once when there is one', async () => {

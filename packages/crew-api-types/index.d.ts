@@ -10232,7 +10232,8 @@ export interface InstallEditorResponse {
   /**
    * The `mcp.session` grant tokens this install consent wrote into `EDITOR-GRANTS` (one per installed
    * editor that declares it). Absent when no installed editor declares it. `grantError` = the editor is
-   * installed but its grant could not be written, so `mcp.session` still asks.
+   * installed but the ledger could not be edited: a declaring build's `mcp.session` still asks, or (for
+   * a build that no longer declares it) an earlier build's grant was not withdrawn.
    */
   granted?: string[];
   grantError?: string;

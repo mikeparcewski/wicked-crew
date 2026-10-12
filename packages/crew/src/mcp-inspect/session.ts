@@ -128,7 +128,27 @@ const SENT_AT_MAX = 256;
 /** Stderr is logged by line; a partial line is flushed after this long without more output. */
 const STDERR_FLUSH_MS = 250;
 const STDERR_LINE_MAX = 8 * 1024;
-const CLOSE_MS = 2_000;
+/** An upstream DELETE of a streamable-HTTP session gets this long. */
+const TERMINATE_MS = 2_000;
+/** Longer than SDK 1.31's stdio close (2 s for EOF, then 2 s after SIGTERM, then SIGKILL; codex r2). */
+const CLOSE_MS = 5_000;
+
+/**
+ * Where text may be cut so no secret form straddles the cut (codex r2: a timed flush split a
+ * secret): `end`, pulled back past any tail of `text.slice(0, end)` that begins a secret form.
+ */
+export function safeCut(text: string, end: number, forms: readonly string[]): number {
+  let cut = end;
+  for (const f of forms) {
+    for (let k = Math.min(f.length - 1, end); k > 0; k--) {
+      if (end - k < cut && text.startsWith(f.slice(0, k), end - k)) {
+        cut = end - k;
+        break;
+      }
+    }
+  }
+  return cut;
+}
 
 export class InspectSession {
   readonly id = randomBytes(12).toString('hex');
@@ -149,6 +169,11 @@ export class InspectSession {
   private stderrBuf = '';
   private stderrTimer: NodeJS.Timeout | null = null;
   private closing: Promise<void> | null = null;
+  /**
+   * The stdio child's pid, held from start until the child is known gone: the SDK forgets its
+   * process the moment close() begins, so `opened.pid()` cannot be asked then (codex r2).
+   */
+  private childPid: number | null = null;
 
   constructor(
     private readonly rawTarget: TargetDescription,
@@ -190,13 +215,17 @@ export class InspectSession {
     stderr?.on('data', (chunk: Buffer | string) => this.stderrData(typeof chunk === 'string' ? chunk : chunk.toString('utf8')));
     transport.onmessage = (m) => this.received(m as unknown as Msg);
     transport.onerror = (e) => this.append({ dir: 'host', kind: 'state', error: true, text: `transport error: ${e.message}` });
-    transport.onclose = () => this.closed('the connection closed');
+    transport.onclose = () => {
+      this.closed('the connection closed');
+      this.childPid = null;
+    };
     let timer: NodeJS.Timeout | undefined;
     const deadline = new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new Error(`no answer to the handshake in ${Math.round(initTimeoutMs / 1000)} s`)), initTimeoutMs);
     });
     const handshake = (async (): Promise<void> => {
       await transport.start();
+      this.childPid = this.opened.pid();
       this.append({ dir: 'host', kind: 'state', text: 'connected' });
       const init = await this.request('initialize', { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: CLIENT_INFO }, initTimeoutMs);
       if (init.response.error !== undefined) throw new Error(`initialize failed: ${init.response.error.message}`);
@@ -293,20 +322,31 @@ export class InspectSession {
     this.append({ dir: 'in', kind: 'notification', ...(method !== undefined ? { method } : {}) }, msg);
   }
 
-  /** Stderr by line, so a secret split across two chunks is whole when it is scrubbed (codex r1). */
+  /**
+   * Stderr by line, so a secret split across two chunks is whole when it is scrubbed (codex r1).
+   * Every cut (a line end, the 8 KiB cap, the idle flush) is pulled back before any tail that
+   * begins a secret form (codex r2), so the rest of a secret always joins its start.
+   */
   private stderrData(text: string): void {
     this.stderrBuf += text;
-    let nl = this.stderrBuf.lastIndexOf('\n');
-    if (nl === -1 && this.stderrBuf.length > STDERR_LINE_MAX) nl = this.stderrBuf.length - 1;
-    if (nl !== -1) {
-      const lines = this.stderrBuf.slice(0, nl + 1);
-      this.stderrBuf = this.stderrBuf.slice(nl + 1);
-      this.append({ dir: 'in', kind: 'stderr', text: lines });
-    }
-    if (this.stderrTimer !== null) clearTimeout(this.stderrTimer);
-    this.stderrTimer = this.stderrBuf === '' ? null : setTimeout(() => this.flushStderr(), STDERR_FLUSH_MS);
+    const nl = this.stderrBuf.lastIndexOf('\n');
+    this.emitStderr(nl !== -1 ? nl + 1 : this.stderrBuf.length > STDERR_LINE_MAX ? this.stderrBuf.length : 0);
   }
 
+  /** Log `stderrBuf` up to a safe cut at or before `end`; arm the idle flush for what is left. */
+  private emitStderr(end: number): void {
+    const cut = safeCut(this.stderrBuf, end, this.forms);
+    if (cut > 0) {
+      const text = this.stderrBuf.slice(0, cut);
+      this.stderrBuf = this.stderrBuf.slice(cut);
+      this.append({ dir: 'in', kind: 'stderr', text });
+    }
+    if (this.stderrTimer !== null) clearTimeout(this.stderrTimer);
+    // A held-back secret start is not re-flushed by the timer: it waits for more output or the close.
+    this.stderrTimer = this.stderrBuf === '' || cut < end ? null : setTimeout(() => this.emitStderr(this.stderrBuf.length), STDERR_FLUSH_MS);
+  }
+
+  /** The child is gone or going: what is left is all it wrote, so it is logged as is (scrubbed). */
   private flushStderr(): void {
     if (this.stderrTimer !== null) clearTimeout(this.stderrTimer);
     this.stderrTimer = null;
@@ -366,7 +406,7 @@ export class InspectSession {
   private closed(reason: string): void {
     if (this.state === 'closed' || this.state === 'failed') return;
     this.flushStderr();
-    const pid = this.opened.pid();
+    const pid = this.childPid;
     this.state = this.state === 'connecting' ? 'failed' : 'closed';
     if (this.state === 'failed') this.error = reason;
     this.append({ dir: 'host', kind: 'state', text: `${reason}${pid !== null ? ` (pid ${pid})` : ''}` });
@@ -393,16 +433,20 @@ export class InspectSession {
     this.flushStderr();
     this.closing ??= (async () => {
       const t = this.opened.transport as Transport & { terminateSession?: () => Promise<void>; sessionId?: string };
-      const bounded = (p: Promise<unknown>): Promise<unknown> => Promise.race([p.catch(() => undefined), new Promise((r) => setTimeout(r, CLOSE_MS).unref())]);
-      if (typeof t.terminateSession === 'function' && t.sessionId !== undefined) await bounded(t.terminateSession());
-      await bounded(t.close());
+      const bounded = (p: Promise<unknown>, ms: number): Promise<unknown> => Promise.race([p.catch(() => undefined), new Promise((r) => setTimeout(r, ms).unref())]);
+      if (typeof t.terminateSession === 'function' && t.sessionId !== undefined) await bounded(t.terminateSession(), TERMINATE_MS);
+      await bounded(t.close(), CLOSE_MS);
+      // The SDK's close ends in SIGKILL; a child that outlived even that is killed here, by the pid
+      // held since start (codex r2).
+      this.killSync();
+      this.childPid = null;
     })();
     return this.closing;
   }
 
   /** Process exit: no awaiting, so a stdio child is killed outright. */
   killSync(): void {
-    const pid = this.opened.pid();
+    const pid = this.childPid;
     if (pid === null) return;
     try {
       process.kill(pid, 'SIGKILL');
@@ -420,6 +464,7 @@ export function commandName(command: string, args: readonly string[]): string {
 
 export class InspectSessions {
   private sessions = new Map<string, InspectSession>();
+  private closingSessions = new Set<InspectSession>();
   private sweeper: NodeJS.Timeout | null = null;
 
   constructor(private readonly now: () => number = Date.now) {}
@@ -450,7 +495,13 @@ export class InspectSessions {
     const s = this.sessions.get(id);
     if (s === undefined) return false;
     this.sessions.delete(id);
-    await s.close(reason);
+    // Still killable at process exit while its close runs (codex r2).
+    this.closingSessions.add(s);
+    try {
+      await s.close(reason);
+    } finally {
+      this.closingSessions.delete(s);
+    }
     return true;
   }
 
@@ -468,6 +519,6 @@ export class InspectSessions {
   }
 
   killAllSync(): void {
-    for (const s of this.sessions.values()) s.killSync();
+    for (const s of [...this.sessions.values(), ...this.closingSessions]) s.killSync();
   }
 }

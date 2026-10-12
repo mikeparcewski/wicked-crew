@@ -430,10 +430,10 @@ describe('the routes', () => {
     for (const a of apps.splice(0)) await a.close();
   });
 
-  async function harness(opts: { grants?: boolean; packCheck?: PackCheckRunner; conformance?: ConformanceRunner; ledger?: { excludes: string[] } | null } = {}) {
+  async function harness(opts: { grants?: boolean; packCheck?: PackCheckRunner; conformance?: ConformanceRunner; ledger?: { excludes: string[] } | null; home?: string } = {}) {
     const root = studioRoot();
-    const home = mkdtempSync(join(tmpdir(), 'editors-home-'));
-    scratches.push(home);
+    const home = opts.home ?? mkdtempSync(join(tmpdir(), 'editors-home-'));
+    if (opts.home === undefined) scratches.push(home);
     const registry = new EditorRegistry({ stateHome: home, studioRoot: root });
     const evaluateEditorGrants = vi.fn(async (req: { editorId: string; version: string; sha256: string; permissions: string[]; project?: string; firstParty: boolean }): Promise<EditorGrantsResponse> => ({
       editorId: req.editorId,
@@ -602,6 +602,60 @@ describe('the routes', () => {
     // Removing it withdraws the grant; another editor's token is untouched.
     expect((await h.app.inject({ method: 'DELETE', url: '/api/v1/editors/acme-inspect', headers: HUMAN })).statusCode).toBe(200);
     expect(ledger.excludes).toEqual(['editor:other@1.0.0#' + 'a'.repeat(64) + '/mcp.session', 'mcp:unrelated']);
+  });
+
+  it('codex r2: a boot-skipped editor is removable, and its grant is withdrawn', async () => {
+    const ledger = { excludes: ['mcp:unrelated'] };
+    const first = await harness({ ledger });
+    const packRoot = makePack({ id: 'acme-inspect', name: 'acme-inspect', permissions: [{ id: 'mcp.session', why: 'x' }] });
+    expect((await first.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { packRoot } })).statusCode).toBe(200);
+    expect(ledger.excludes.some((t) => t.startsWith('editor:acme-inspect@'))).toBe(true);
+    writeFileSync(join(packRoot, 'editors', 'acme-inspect', 'index.html'), 'tampered');
+    const booted = await harness({ ledger, home: first.home });
+    expect(booted.registry.get('acme-inspect')).toBeNull();
+    expect(booted.registry.isInstalled('acme-inspect')).toBe(true);
+    const res = await booted.app.inject({ method: 'DELETE', url: '/api/v1/editors/acme-inspect', headers: HUMAN });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(booted.registry.isInstalled('acme-inspect')).toBe(false);
+    expect(ledger.excludes).toEqual(['mcp:unrelated']);
+  });
+
+  it('codex r2: an update that drops mcp.session says so when the earlier grant cannot be withdrawn', async () => {
+    const ledger = { excludes: [] as string[] };
+    const h = await harness({ ledger });
+    const v1 = makePack({ id: 'acme-inspect', name: 'acme-inspect', permissions: [{ id: 'mcp.session', why: 'x' }] });
+    expect((await h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { packRoot: v1 } })).statusCode).toBe(200);
+    h.upsertConformanceRule.mockRejectedValueOnce(new Error('store busy'));
+    const v2 = makePack({ id: 'acme-inspect', name: 'acme-inspect', version: '0.2.0', html: EDITOR_HTML.replace('</body>', '<!-- v2 --></body>') });
+    const res = await h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { packRoot: v2 } });
+    expect(res.statusCode, res.body).toBe(200);
+    expect((res.json() as InstallEditorResponse).grantError).toMatch(/earlier build's mcp\.session grant was not withdrawn: store busy/);
+  });
+
+  it('codex r2: a removal and an install never interleave: the editor and its grant agree afterwards', async () => {
+    const ledger = { excludes: [] as string[] };
+    const h = await harness({ ledger });
+    const perms = [{ id: 'mcp.session', why: 'x' }];
+    const v1 = makePack({ id: 'acme-inspect', name: 'acme-inspect', permissions: perms });
+    expect((await h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { packRoot: v1 } })).statusCode).toBe(200);
+    // The removal's withdrawal is slow; the install of v2 arrives while it is in flight.
+    const real = h.upsertConformanceRule.getMockImplementation()!;
+    h.upsertConformanceRule.mockImplementationOnce(async (rule) => {
+      await new Promise((r) => setTimeout(r, 150));
+      return real(rule);
+    });
+    const v2 = makePack({ id: 'acme-inspect', name: 'acme-inspect', version: '0.2.0', permissions: perms, html: EDITOR_HTML.replace('</body>', '<!-- v2 --></body>') });
+    const [del, inst] = await Promise.all([
+      h.app.inject({ method: 'DELETE', url: '/api/v1/editors/acme-inspect', headers: HUMAN }),
+      h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { packRoot: v2 } }),
+    ]);
+    expect(del.statusCode, del.body).toBe(200);
+    expect(inst.statusCode, inst.body).toBe(200);
+    // Whichever ran first, the other ran after it: never a grant for a removed editor.
+    const live = h.registry.get('acme-inspect');
+    if (live === null) expect(ledger.excludes).toEqual([]);
+    else expect(ledger.excludes).toEqual([`editor:acme-inspect@${live.manifest.version}#${live.sha256}/mcp.session`]);
+    expect(live === null || live.manifest.version === '0.2.0').toBe(true);
   });
 
   it('an install whose mcp.session grant cannot be written still installs, and says it asks', async () => {
