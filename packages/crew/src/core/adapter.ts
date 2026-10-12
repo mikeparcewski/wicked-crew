@@ -542,6 +542,15 @@ interface CoreConstructor {
    *  Its PRESENCE is the capability: napi ignores an undeclared object field, so an older addon
    *  would drop a plan and run the launch unplanned and UNGATED. */
   supportsPlanLaunch?(): boolean;
+  /** core#920 (wicked-core-ts ≥ the release carrying it): the engine's worktree bench as a pure
+   *  predicate — the `BenchedSeat` JSON array a run BOUND to one repository benches before routing
+   *  (every codex seat unless the host sets `WICKED_CODEX_WORKTREE_OK`). Optional: the pinned addon
+   *  may predate it, and then the roster says nothing about that bench rather than restate it. */
+  worktreeBenched?(clisJson: string, bound: boolean): string;
+  /** (wicked-core-ts ≥ the release carrying it) Whether this host's skill routing admits the seat
+   *  (with its roster invocation template) to the engine's isolated QE reviewer turn. Optional for
+   *  the same reason as `worktreeBenched`. */
+  qeReviewerAdmitted?(key: string, invocation?: string | null): boolean;
   /** DES-MCP-TOOLS-001 S1 (wicked-core-ts ≥ the release carrying it): judge and record ONE brokered
    *  MCP call for the unit a worker's `WICKED_MCP_TOKEN` is bound to. Rejects with `invalid_token:`,
    *  `bad_request:` or `guard_error:`. */
@@ -1353,6 +1362,16 @@ export class CoreAdapter {
     return out;
   }
 
+  /**
+   * Whether this host's skill routing admits `key` to the engine's isolated QE reviewer turn (the
+   * reviewer runs the QE skill; a Claude-only skills root admits claude seats only) — or `null`
+   * when the linked addon predates the predicate. Read at call time.
+   */
+  static qeReviewerAdmitted(key: string, invocation: string | undefined): boolean | null {
+    if (typeof Core.qeReviewerAdmitted !== 'function') return null;
+    return Core.qeReviewerAdmitted(key, invocation ?? null);
+  }
+
   /** Deliver `accepted` once the engine TOOK the launch. Never propagates: the launch already happened,
    *  so a listener failure is logged and must not turn an accepted run into a rejected call. */
   private announceAccepted(notice: LaunchNotice): void {
@@ -1379,6 +1398,19 @@ export class CoreAdapter {
   /** The production council roster (static), parsed to seats. */
   static roster(): unknown[] {
     return JSON.parse(Core.registryRoster()) as unknown[];
+  }
+
+  /**
+   * core#920: the seats the engine benches on a run bound to one repository, keyed by seat with the
+   * engine's reason — or `null` when the linked addon predates the predicate. `seats` must be
+   * engine-shaped (the registry roster, or `toEngineRoster` of a served one). Read at call time.
+   */
+  static worktreeBenched(seats: readonly unknown[]): Map<string, string> | null {
+    if (typeof Core.worktreeBenched !== 'function') return null;
+    const benched = JSON.parse(Core.worktreeBenched(JSON.stringify(seats), true)) as Array<{ cli?: unknown; reason?: unknown }>;
+    const out = new Map<string, string>();
+    for (const b of benched) if (typeof b.cli === 'string' && typeof b.reason === 'string') out.set(b.cli, b.reason);
+    return out;
   }
 
   /** Liveness probe → `"ok"` (also proves the event pump). */

@@ -57,7 +57,7 @@ import {
   type GovernanceSeatInput,
   type SeatGovernanceDiagnostic,
 } from './seat-governance.js';
-import { rosterWithStandingFactory, type RosterWithStanding } from './roster-standing.js';
+import { ROSTER_REFRESH_WAIT_MS, rosterWithStandingFactory, type RosterWithStanding } from './roster-standing.js';
 import { ChatTurnIndex } from './chat-turns.js';
 import type { ChatRepoRoot, ChatTranscriptStore } from './chat-transcripts.js';
 import {
@@ -1760,7 +1760,23 @@ export function registerRoutes(
   // disagree about a seat.
   const rosterWithStanding: RosterWithStanding =
     runtime.rosterWithStanding ?? rosterWithStandingFactory({ seatHealth, signedIn });
-  app.get(`${V}/roster`, async () => ({ roster: markOptIn(rosterWithStanding()) }));
+  // A3b (DES-seats-page): `?refresh=<key>` re-runs that seat's sign-in check now and waits for it,
+  // bounded, so the Agents page's "I've signed in: check again" reads the seat's fresh answer, not
+  // the probe cache's 30-second-old one. A read with no parameter never waits.
+  app.get(
+    `${V}/roster`,
+    { config: { manifest: { responseType: 'RosterResponse', statusCodes: [200, 400] } } },
+    async (req, reply) => {
+      const raw = (req.query as { refresh?: string | string[] }).refresh;
+      if (raw === undefined) return { roster: markOptIn(rosterWithStanding()) };
+      const key = Array.isArray(raw) ? undefined : raw.trim();
+      if (key === undefined || key === '' || !rosterWithStanding().some((s) => s.key === key)) {
+        return reply.code(400).send({ error: `Invalid ?refresh — expected one roster seat key, got ${JSON.stringify(raw)}` });
+      }
+      const outcome = rosterWithStanding.recheck !== undefined ? await rosterWithStanding.recheck(key, ROSTER_REFRESH_WAIT_MS) : 'not_probed';
+      return { roster: markOptIn(rosterWithStanding()), refresh: { key, outcome } };
+    },
+  );
   /** crew#742: the seats' governance standing, read from the standing roster (empty when the
    *  roster cannot be read — the roster route reports that failure itself). */
   const seatGovernanceNow = (): SeatGovernanceDiagnostic[] => {
@@ -3329,7 +3345,7 @@ export function registerRoutes(
               ? 'no seat in standing can be held to an ask that reads several repositories (or a project) ' +
                 'the run cannot bind; scope the ask to one repository, sign a seat in, or open it unscoped'
               : 'no seat in the roster can take a turn (every seat is signed out or disabled); sign a seat ' +
-                'in from the System page, or name seats with `clis`') + ' — see refused',
+                'in from the Agents page, or name seats with `clis`') + ' — see refused',
           refused,
         });
       }
@@ -5723,13 +5739,17 @@ export function registerRoutes(
     }
   });
 
-  // crew#615: sign a seat in or out without the client composing the command. The daemon runs the
-  // ENGINE's own `login_invocation` / `logout_invocation` for that seat (already prefixed with the
-  // seat's configuration root; the daemon never synthesizes one) in a governed PTY, and answers
-  // the terminal id — the device URL or the CLI's prompt streams over `/ws/terminals/:id`. The
-  // seat's credential probe is re-run when the terminal exits, so the roster's `signed_in` follows
-  // the outcome instead of waiting out the probe's TTL.
-  for (const action of ['login', 'logout'] as const) {
+  // crew#615: sign a seat out without the client composing the command. The daemon runs the
+  // ENGINE's own `logout_invocation` for that seat (already prefixed with the seat's configuration
+  // root; the daemon never synthesizes one) in a governed PTY, and answers the terminal id — the
+  // CLI's output streams over `/ws/terminals/:id`. The seat's credential probe is re-run when the
+  // terminal exits, so the roster's `signed_in` follows the outcome instead of waiting out the
+  // probe's TTL.
+  // DES-seats-page Q3 (operator, 2026-10-12): studio never handles credentials — a sign-in is a
+  // command the operator runs in their own terminal (`RosterSeat.login_invocation`), so the
+  // `POST /seats/:cli/login` PTY route is deleted. This logout route stays only while studio's
+  // Configuration page still calls it; it goes with that page's Log out terminal (studio S2).
+  for (const action of ['logout'] as const) {
     app.post(
       `${V}/seats/:cli/${action}`,
       { config: { manifest: { requestType: 'SeatSessionBody', responseType: 'SeatSessionResponse', statusCodes: [201, 400, 404] } } },
@@ -5741,7 +5761,7 @@ export function registerRoutes(
         }
         const seat = rosterWithStanding().find((s) => s.key === cli);
         if (seat === undefined) return reply.code(404).send({ error: `unknown seat: ${cli}` });
-        const field = action === 'login' ? seat.login_invocation : seat.logout_invocation;
+        const field = seat.logout_invocation;
         const invocation = typeof field === 'string' ? field.trim() : '';
         if (invocation === '') {
           return reply.code(404).send({

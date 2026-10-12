@@ -37,7 +37,7 @@ describe('toEngineSeat', () => {
   it('council_eligible:false becomes the engine bench verdict WITH a SHORT reason (the engine renders it inline); true becomes usable', () => {
     // The engine renders `"codex (<reason> — launcher)"` in degradedReason, so the reason is the cause
     // in a few words, derived from the standing readings, not the operator-facing sentence.
-    const signedOut = toEngineSeat({ ...registrySeat, auth: 'signed_out', council_eligible: false, council_ineligible_reason: 'signed out — a council would bench this seat on its first ballot; sign it in from the System page' }) as Record<string, unknown>;
+    const signedOut = toEngineSeat({ ...registrySeat, auth: 'signed_out', council_eligible: false, council_ineligible_reason: 'signed out — a council would bench this seat on its first ballot; sign it in from the Agents page' }) as Record<string, unknown>;
     expect(signedOut['health']).toEqual({ usable: false, reason: 'signed out' });
     const inactive = toEngineSeat({ ...registrySeat, health: { status: 'inactive', since: 't' }, council_eligible: false, council_ineligible_reason: 'inactive after a seat-level error: boom' }) as Record<string, unknown>;
     // (R5) No `inactive` arm any more — a stale client's sentence falls back to its first clause.

@@ -38,7 +38,7 @@ describe('rosterWithStandingFactory', () => {
     // opencode answers on its free tier with an unknown probe.
     expect(first.find((s) => s.key === 'opencode')!.council_eligible).toBe(true);
 
-    // The seat signs in from the System page: the very next call sees it — nothing was captured.
+    // The seat signs in from the Agents page: the very next call sees it — nothing was captured.
     codexSignedIn = true;
     expect(roster().find((s) => s.key === 'codex')!.council_eligible).toBe(true);
   });

@@ -54,7 +54,8 @@ describe('the seat-health fold records the seat’s OWN "no credential" report (
     for (const kind of ['auth_failed', 'unauthenticated', 'auth_required']) {
       const tt = new SeatHealthTracker();
       tt.ingest(ev({ type: 'acpFallback', session: 'r-5', cliKey: 'pi', fallbackKind: kind, reason: 'pi-acp answered 401' }));
-      expect(tt.authFailureFor('pi')).toMatchObject({ source: 'acp', detail: 'pi-acp answered 401' });
+      // A8: the adapter's prose is not kept; no refusal phrase matched, so the fallback kind is.
+      expect(tt.authFailureFor('pi')).toMatchObject({ source: 'acp', detail: kind });
     }
     // A transport fallback is not an auth failure.
     const t6 = new SeatHealthTracker();

@@ -523,7 +523,7 @@ export async function createServer(
   // tracker's standing, built ONCE and handed to every launch path — the routes (below, through
   // `runtime.rosterWithStanding`), the four interactive seams (`roster`), and the adapter's own
   // launches (`setRosterProvider` → `seatsForWorkflow` / `wicked-crew start`). Read at call time,
-  // so a seat signed in from the System page is eligible on the very next launch.
+  // so a seat signed in from the Agents page is eligible on the very next launch.
   const rosterWithStanding = rosterWithStandingFactory({
     seatHealth,
     ...(options?.seats?.signedIn !== undefined ? { signedIn: options.seats.signedIn } : {}),

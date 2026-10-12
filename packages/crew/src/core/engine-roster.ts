@@ -43,6 +43,14 @@ export const CREW_ONLY_SEAT_FIELDS: ReadonlySet<string> = new Set([
   'council_eligible',
   'council_ineligible_reason',
   'council_bench',
+  // DES-seats-page A1–A6 (api-types 0.115.0): the Agents page's readings — crew's, never the
+  // engine's (`version` and `account` would otherwise look like record fields a future engine owns).
+  'version',
+  'account',
+  'recent_bench',
+  'work_admission',
+  'qe_reviewer',
+  'issues',
 ]);
 
 /** The engine's `AgenticCli.health` (wicked-core `SeatHealth`, wave 6). */

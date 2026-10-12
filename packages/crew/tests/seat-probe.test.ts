@@ -110,7 +110,7 @@ describe('SeatProbe cache', () => {
     now += PROBE_TTL_OTHER_MS - 1;
     probe.read('claude', '/w');
     expect(calls).toHaveLength(1);
-    answer = LOGGED_IN_CLAUDE; // the operator signed in from the System page
+    answer = LOGGED_IN_CLAUDE; // the operator signed in from the Agents page
     now += 1;
     expect(probe.read('claude', '/w')).toMatchObject({ signedIn: false }); // stale answer served…
     await probe.refresh('claude', '/w'); // …while the background refresh lands
@@ -184,7 +184,7 @@ describe("the engine's real refusal frames flip the roster within the run (crew#
         latencyMs: 2700,
       }),
     );
-    expect(roster(t)()[0]).toMatchObject({ auth: 'signed_out', auth_source: 'seat-stderr', council_eligible: false, auth_evidence: 'Not logged in · Please run /login' });
+    expect(roster(t)()[0]).toMatchObject({ auth: 'signed_out', auth_source: 'seat-stderr', council_eligible: false, auth_evidence: 'Not logged in' });
   });
 
   it('reason: not_logged_in alone is enough, and claude\'s expired-login words count', () => {

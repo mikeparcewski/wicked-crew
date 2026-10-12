@@ -10,6 +10,30 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Added
+- **The Agents page's readings on `GET /roster` (DES-seats-page C1 + C2, `wicked-crew-api-types` 0.115.0).** Crew sends facts and codes; studio owns the words.
+  - `version` for every seat (A1): the installed version from its `version_probe`, whether its pin is proven, when it was checked, and how it was installed (`npm` / `brew` / `other`, read from the binary's resolved path).
+  - `account.kind` (A2): `subscription`, `api_key`, `free` or `unknown`, with a provider-public plan name when the status states one. Never an email or id.
+  - `recent_bench` (A3): the bench that is active now, with the runs it spans and when crew lifts it. A live sign-in check that answers after a sign-in or quota bench lifts that bench.
+  - `GET /roster?refresh=<key>` (A3b): re-runs that seat's sign-in check now, past the 30-second cache, waits up to 20 s, and reports `refresh.outcome`.
+  - `qe_reviewer` (A4): QE runs on every seat since wicked-core#917, so a seat qualifies when it is signed in, kept by a run bound to one repository, and admitted to the QE skill by the host's skill routing (`Core.qeReviewerAdmitted`, wicked-core#923). Without both engine predicates it is absent.
+  - `work_admission` per scope (A5): includes the engine's launcher benches, so codex reads benched on repository jobs. It needs `Core.worktreeBenched` (wicked-core#920). On an older engine `work_admission` and `qe_reviewer` are absent; crew does not restate the rule.
+  - `issues[]` (A6): coded problems, warnings and notes, most important first, with `$HOME`-form commands.
+
+### Changed
+- **Sign-in copy points at the Agents page, not the System page (A7).**
+- **A live sign-in check that answers after a seat's own "not logged in" refusal now clears that refusal.** Before this, the refusal outranked the fresh check for up to 30 minutes, so a seat the operator had just signed in still read signed out.
+
+### Security
+- **`auth_evidence` and `login_note` carry crew's own words, never a CLI's prose (A8).**
+  - A seat's refusal keeps only the phrases crew's refusal patterns name (`No API key found`, `Not logged in`, `HTTP/1.1 401`, …).
+  - A claude JSON status (stdout alone) keeps only `loggedIn`, `authMethod` and `apiProvider`; malformed JSON is withheld.
+  - A codex status keeps only its known phrase. A live check reports the refusal phrase, a known blocker (`usage limit`, `quota`, `network`, …) or its exit code.
+  - Masking email-, id-, key- and account-pair-shaped strings is the second guard.
+
+### Removed
+- **`POST /seats/:cli/login` (DES-seats-page Q3).** Sign-in is a command the operator runs in their own terminal; studio never hosts it, and no client called this route. `POST /seats/:cli/logout` stays until studio's Configuration page drops its Log out terminal.
+
 ## [0.10.0] — 2026-10-12
 
 A minor release, because data connectors G1 and G2 change behaviour: tools that write are registered disabled until a human operator grants them, and a REST server's calls are checked against its spec's servers. **Action needed: re-save every REST server registered before this release** (see Security). The engine pin moves to **`wicked-core-ts` `^0.9.9`**, which makes QE acceptance work on every seat. This release ships **`wicked-crew-api-types` 0.114.0**, a superset of the unpublished 0.111.0–0.113.0, and still bundles **wicked-studio 0.7.12**. Pair it with **wicked-garden 12.54.0** and wicked-estate 0.29.2.

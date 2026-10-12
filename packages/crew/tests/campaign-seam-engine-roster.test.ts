@@ -46,7 +46,7 @@ const signedOutCodex = {
   signed_in: false,
   auth: 'signed_out',
   council_eligible: false,
-  council_ineligible_reason: 'signed out — a council would bench this seat on its first ballot; sign it in from the System page',
+  council_ineligible_reason: 'signed out — a council would bench this seat on its first ballot; sign it in from the Agents page',
 };
 const signedInClaude = {
   ...registrySeat,

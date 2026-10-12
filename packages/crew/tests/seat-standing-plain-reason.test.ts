@@ -21,7 +21,7 @@ describe('a signed-out seat reads as one plain sentence (crew#771)', () => {
   it("the probe's raw auth JSON never reaches the reason; the evidence keeps it, home written ~", () => {
     const s = seatStanding({ key: 'claude' }, true, null, { signedIn: false, check: 'status', probedAt: '2026-10-04T00:00:00.000Z', detail: RAW });
     expect(s.council_eligible).toBe(false);
-    expect(s.council_ineligible_reason).toBe("signed out — the seat's own auth check says it is not logged in; sign it in from the System page");
+    expect(s.council_ineligible_reason).toBe("signed out — the seat's own auth check says it is not logged in; sign it in from the Agents page");
     expect(s.auth_evidence).toContain('"loggedIn":false');
     expect(s.auth_evidence).not.toContain(HOME);
     expect(s.auth_evidence).toContain('~/.wicked-worker/claude');
@@ -33,7 +33,7 @@ describe('a signed-out seat reads as one plain sentence (crew#771)', () => {
     const leaky = { ...failure, detail: `Error: could not read ${join(HOME, '.pi', 'auth.json')}` };
     const r = seatStanding({ key: 'pi' }, true, leaky).council_ineligible_reason!;
     expect(r).not.toContain(HOME);
-    expect(r).toBe('signed out — the seat itself reported no credential (ballot); sign it in from the System page');
+    expect(r).toBe('signed out — the seat itself reported no credential (ballot); sign it in from the Agents page');
   });
 
   it('plainEvidence keeps one short plain line and refuses JSON, paths, multi-line and long text', () => {

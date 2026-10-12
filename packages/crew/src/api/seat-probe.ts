@@ -45,7 +45,7 @@
  * one refresh in the background (deduplicated per seat, one probe process at a time host-wide
  * for this daemon). A signed-in answer is kept for 5 minutes (so a live check costs at most one
  * one-word request per seat per 5 minutes); a signed-out or unknown one for 30 s, so a seat signed
- * in from the System page turns green on the next poll or two. The cache is keyed by (seat, worker
+ * in from the Agents page turns green on the next poll or two. The cache is keyed by (seat, worker
  * home): changing `worker_config_root` discards every answer at once. A launch awaits a missing or
  * stale answer, bounded, before it routes ({@link SeatProbe.ensureFresh}).
  */
@@ -56,6 +56,7 @@ import { join } from 'node:path';
 
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 import { isAuthRefusal } from './seat-health.js';
+import { accountFromStatus, liveSummary, statusSummary, type SeatAccount } from './seat-scrub.js';
 
 /** A probe process's outcome, as the runner reports it. `error` is set when it never ran to exit
  *  (not installed, timed out, killed). */
@@ -86,8 +87,11 @@ export interface SeatProbeReading {
   check: ProbeCheck;
   /** ISO-8601 of the probe. */
   probedAt: string;
-  /** A bounded excerpt of what the CLI said (its own words for a `false`). */
+  /** A bounded excerpt of what the CLI said (its own words for a `false`), with every account
+   *  identifier dropped (A8, `seat-scrub.ts`): it rides the roster's `auth_evidence` / `login_note`. */
   detail: string;
+  /** (A2) The account KIND the status command stated, when it stated one — never an identifier. */
+  account?: SeatAccount;
 }
 
 /** How long an answer is trusted before a background refresh (the stale answer is served meanwhile). */
@@ -237,7 +241,13 @@ export class SeatProbe {
     const hit = this.cache.get(cacheKey(seatKey, workerRoot));
     if (hit === undefined || this.stale(hit)) void this.refresh(seatKey, workerRoot);
     if (hit === undefined) return undefined;
-    return { signedIn: hit.signedIn, check: hit.check, probedAt: hit.probedAt, detail: hit.detail };
+    return {
+      signedIn: hit.signedIn,
+      check: hit.check,
+      probedAt: hit.probedAt,
+      detail: hit.detail,
+      ...(hit.account !== undefined ? { account: hit.account } : {}),
+    };
   }
 
   /**
@@ -285,22 +295,34 @@ export class SeatProbe {
     return job;
   }
 
+  /**
+   * A3b: probe AGAIN, after any probe already running for this seat has finished. A running probe
+   * may have started before the operator signed in, so its answer cannot be the fresh one.
+   */
+  async refreshFresh(seatKey: string, workerRoot: string | undefined): Promise<SeatProbeReading | undefined> {
+    const running = this.inflight.get(cacheKey(seatKey, workerRoot));
+    if (running !== undefined) await running.catch(() => undefined);
+    return this.refresh(seatKey, workerRoot);
+  }
+
   /** The status command, then — when it says signed in — the live check. */
   private async probeOnce(seatKey: string, status: Command, verify: Command | null): Promise<SeatProbeReading> {
     const out = await this.run(status.cmd, status.args, status.env, PROBE_TIMEOUT_MS);
     const said = classifyProbe(seatKey, out);
-    const statusWords = excerpt(out.error ?? `${out.stdout}\n${out.stderr}`);
-    if (said !== true || verify === null) return this.reading(said, 'status', statusWords);
+    // A8: only crew's own words for what the CLI said (`seat-scrub.ts`), never its prose.
+    const statusWords = excerpt(statusSummary(seatKey, out));
+    const account = said === true ? accountFromStatus(seatKey, out.stdout, out.stderr) : undefined;
+    if (said !== true || verify === null) return this.reading(said, 'status', statusWords, account);
     const live = await this.run(verify.cmd, verify.args, verify.env, VERIFY_TIMEOUT_MS);
     const verdict = classifyVerify(live);
-    const liveWords = excerpt(live.error ?? `${live.stdout}\n${live.stderr}`);
+    const liveWords = excerpt(liveSummary(live));
     if (verdict === false) return this.reading(false, 'live', liveWords);
-    if (verdict === true) return this.reading(true, 'live', statusWords);
-    return this.reading(true, 'status', `the live check could not tell (${liveWords}); status: ${statusWords}`);
+    if (verdict === true) return this.reading(true, 'live', statusWords, account);
+    return this.reading(true, 'status', `the live check could not tell (${liveWords}); status: ${statusWords}`, account);
   }
 
-  private reading(signedIn: boolean | null, check: ProbeCheck, detail: string): SeatProbeReading {
-    return { signedIn, check, probedAt: new Date(this.now()).toISOString(), detail };
+  private reading(signedIn: boolean | null, check: ProbeCheck, detail: string, account?: SeatAccount): SeatProbeReading {
+    return { signedIn, check, probedAt: new Date(this.now()).toISOString(), detail, ...(account !== undefined ? { account } : {}) };
   }
 
   private stale(hit: SeatProbeReading & { atMs: number }): boolean {
