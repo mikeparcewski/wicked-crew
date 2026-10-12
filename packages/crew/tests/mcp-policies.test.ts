@@ -431,6 +431,23 @@ describe('G2: a REST tool approval covers where its calls go (real engine)', () 
   };
   const restBody = (url: string) => ({ name: 'notes', kind: 'rest', url, openapi: DOC });
   const preview = async (url: string) => (await call('POST', '/mcp/servers/preview', restBody(url))).json() as McpPreviewResponse;
+  // An inline document previews in a few ms, so these tests reach the engine much sooner after it
+  // opens than the stdio-server tests above (whose spawn takes 300 ms+). That early, a read can fail
+  // with "open estate store read-only … no such table: meta", and an approval can go missing from
+  // the next read (reproduced locally, 1-2 of 3 runs, and on CI): the engine's store is not yet
+  // initialized. Wait until it answers with its seeded ledgers. The race is reported for
+  // wicked-core/crew's adapter, not fixed here.
+  beforeEach(async () => {
+    for (let i = 0; ; i++) {
+      try {
+        if ((await adapter.listConformanceRules()).some((r) => r.id === FIRST_USE_LEDGER)) break;
+      } catch (err) {
+        if (i >= 60) throw err;
+      }
+      if (i >= 60) throw new Error('the engine never answered with its seeded MCP ledgers');
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  });
 
   it('a changed base path withdraws the approvals, and an unconfirmed origin change withdraws none', async () => {
     const first = await preview('http://127.0.0.1:9/v1');
