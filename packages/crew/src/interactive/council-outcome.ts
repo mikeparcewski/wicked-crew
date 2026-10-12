@@ -139,7 +139,7 @@ export function acpFallbackLine(event: CoreEvent): string {
   const who = str(event, 'cliKey', 'cli') ?? 'the worker';
   const kind = str(event, 'fallbackKind', 'fallback_kind');
   if (kind !== null && AUTH_FALLBACK_KINDS.has(kind)) {
-    return `${who} is not signed in (${kind.replace(/_/g, ' ')}) — benched for this run; sign it in from the System page…`;
+    return `${who} is not signed in (${kind.replace(/_/g, ' ')}) — benched for this run; sign it in from the Agents page…`;
   }
   if (kind !== null && kind.endsWith('_requires_wrapped')) {
     return `${who} routed to single-shot mode (${kind.replace(/_/g, ' ')})…`;

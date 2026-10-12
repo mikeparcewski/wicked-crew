@@ -64,17 +64,18 @@ function escapeRegExp(s: string): string {
 
 /**
  * `auth_evidence` with the operator's home directory written `~` (crew#771: screen shares and
- * recordings). Only the home as a whole path segment — `/home/al` never eats the start of
+ * recordings). A command's display passes `$HOME` instead (`seat-agents.ts`): it expands inside the
+ * double quotes the engine puts around a seat's root, where `~` does not. Only the home as a whole path segment — `/home/al` never eats the start of
  * `/home/alice` — and in every separator spelling: `/`, `\`, and the JSON-escaped `\\` a Windows
  * home takes inside a CLI's JSON status (codex on #797). A root home (`/`) is left alone.
  */
-export function homeless(detail: string, home: string = homedir()): string {
+export function homeless(detail: string, home: string = homedir(), replacement = '~'): string {
   const trimmed = home.replace(/[\\/]+$/, '');
   if (trimmed === '') return detail;
   const back = trimmed.replace(/\//g, '\\');
   const spellings = new Set([trimmed, trimmed.replace(/\\/g, '/'), back, back.replace(/\\/g, '\\\\')]);
   let out = detail;
-  for (const h of [...spellings].sort((a, b) => b.length - a.length)) out = out.replace(new RegExp(`${escapeRegExp(h)}(?=$|[\\\\/\\s"'),;:])`, 'g'), '~');
+  for (const h of [...spellings].sort((a, b) => b.length - a.length)) out = out.replace(new RegExp(`${escapeRegExp(h)}(?=$|[\\\\/\\s"'),;:])`, 'g'), () => replacement);
   return out;
 }
 
@@ -229,10 +230,10 @@ export function seatStanding(
       council_eligible: false,
       council_ineligible_reason:
         authFailure !== null
-          ? `signed out — the seat itself reported no credential (${noCredentialCause(authFailure)}); sign it in from the System page`
+          ? `signed out — the seat itself reported no credential (${noCredentialCause(authFailure)}); sign it in from the Agents page`
           : read.auth_source === 'probe'
-            ? `signed out — the seat's own auth check says ${probeWords(read.auth_evidence)}; sign it in from the System page`
-            : 'signed out — a council would bench this seat on its first ballot; sign it in from the System page',
+            ? `signed out — the seat's own auth check says ${probeWords(read.auth_evidence)}; sign it in from the Agents page`
+            : 'signed out — a council would bench this seat on its first ballot; sign it in from the Agents page',
     };
   }
   // A seat the ENGINE benched in a recent run on its own refusal (`seatBenched`: out of quota, not
@@ -308,7 +309,7 @@ export function chatSeatAdmission(
   const reasons: string[] = [];
   let source: ChatRefusalSource = 'scope';
   if (!authUsable(auth)) {
-    reasons.push('signed out — it cannot take a turn until it is signed in from the System page');
+    reasons.push('signed out — it cannot take a turn until it is signed in from the Agents page');
     source = 'auth';
   }
   if (seat.enabled_for_council === false) {

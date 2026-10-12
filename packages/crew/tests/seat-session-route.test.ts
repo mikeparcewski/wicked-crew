@@ -1,7 +1,8 @@
-// crew#615: `POST /seats/:cli/login` and `/logout` run the ENGINE's own `login_invocation` /
-// `logout_invocation` for the seat (wicked-core#807 ships the logout field) in a governed PTY and
-// answer the terminal id. The daemon never composes a command: a seat with no invocation is a 404.
-// The seat's credential probe is re-run when that terminal exits.
+// crew#615: `POST /seats/:cli/logout` runs the ENGINE's own `logout_invocation` for the seat
+// (wicked-core#807 ships the field) in a governed PTY and answers the terminal id. The daemon never
+// composes a command: a seat with no invocation is a 404. The seat's credential probe is re-run when
+// that terminal exits. DES-seats-page Q3: the `login` route is GONE — sign-in is a command the
+// operator runs in their own terminal; studio never hosts it.
 
 import Fastify from 'fastify';
 import { homedir } from 'node:os';
@@ -53,7 +54,7 @@ function build(opts: { openFails?: boolean } = {}) {
   return { app, openTerminal, reprobe, emit, listeners };
 }
 
-describe('POST /seats/:cli/login|logout (crew#615)', () => {
+describe('POST /seats/:cli/logout (crew#615)', () => {
   it('logout runs the engine\'s logout_invocation verbatim in a governed PTY and answers the terminal id', async () => {
     const { app, openTerminal } = build();
     await app.ready();
@@ -63,12 +64,20 @@ describe('POST /seats/:cli/login|logout (crew#615)', () => {
     expect(openTerminal).toHaveBeenCalledWith(homedir(), ['sh', '-lc', 'CODEX_HOME="/w/codex" codex logout'], 80, 24, true);
   });
 
-  it('login runs the login_invocation; the size defaults to 100 x 30 with no body', async () => {
+  it('the size defaults to 100 x 30 with no body', async () => {
     const { app, openTerminal } = build();
     await app.ready();
-    const res = await app.inject({ method: 'POST', url: '/api/v1/seats/codex/login' });
+    const res = await app.inject({ method: 'POST', url: '/api/v1/seats/codex/logout' });
     expect(res.statusCode).toBe(201);
-    expect(openTerminal).toHaveBeenCalledWith(homedir(), ['sh', '-lc', 'CODEX_HOME="/w/codex" codex login'], 100, 30, true);
+    expect(openTerminal).toHaveBeenCalledWith(homedir(), ['sh', '-lc', 'CODEX_HOME="/w/codex" codex logout'], 100, 30, true);
+  });
+
+  it('Q3: there is no login route — the daemon never opens a sign-in terminal', async () => {
+    const { app, openTerminal } = build();
+    await app.ready();
+    const res = await app.inject({ method: 'POST', url: '/api/v1/seats/codex/login', payload: {} });
+    expect(res.statusCode).toBe(404);
+    expect(openTerminal).not.toHaveBeenCalled();
   });
 
   it('404s a seat whose CLI documents no logout, and an unknown seat — never a made-up command', async () => {
@@ -77,7 +86,7 @@ describe('POST /seats/:cli/login|logout (crew#615)', () => {
     const none = await app.inject({ method: 'POST', url: '/api/v1/seats/pi/logout', payload: {} });
     expect(none.statusCode).toBe(404);
     expect(none.json().error).toMatch(/no logout command/);
-    const unknown = await app.inject({ method: 'POST', url: '/api/v1/seats/nope/login', payload: {} });
+    const unknown = await app.inject({ method: 'POST', url: '/api/v1/seats/nope/logout', payload: {} });
     expect(unknown.statusCode).toBe(404);
     expect(openTerminal).not.toHaveBeenCalled();
   });

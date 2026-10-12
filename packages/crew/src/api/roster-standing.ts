@@ -14,17 +14,29 @@
  * builds exactly one over its `SeatHealthTracker` and hands the same function everywhere.
  *
  * Standing is read at CALL time (the tracker's live state, the LIVE `WICKED_WORKER_HOME`), never
- * captured — a seat signed in from the System page is eligible on the very next launch.
+ * captured — a seat signed in from the Agents page is eligible on the very next launch.
  */
 
 import { CoreAdapter } from '../core/adapter.js';
+import { defaultLaunchRoster, isOptInSeat } from '../core/opt-in-seats.js';
 import type { RosterSeat } from '../core/types.js';
-import { seatVersionPins, type SeatVersionPinCache } from './diagnostics.js';
+import { hostSandboxLauncher, seatVersionPins, type SeatVersionPinCache } from './diagnostics.js';
+import {
+  liveCheckLiftsBench,
+  qeReviewer,
+  recentBenchWire,
+  seatAccount,
+  seatIssues,
+  workAdmission,
+  type QeReviewer,
+  type WorkAdmission,
+} from './seat-agents.js';
 import type { SeatHealthTracker } from './seat-health.js';
 import { signedInHeuristic } from './seat-signin.js';
 import { SeatProbe } from './seat-probe.js';
-import { seatGovernanceModes } from './seat-governance.js';
-import { seatStanding, chatSeatAdmission, type StandingSeat } from './seat-standing.js';
+import { seatGovernanceModes, type GovernanceScopeKind, type SeatGovernanceMode } from './seat-governance.js';
+import { seatStanding, chatSeatAdmission, type StandingSeat, type SeatStanding } from './seat-standing.js';
+import { seatVersion, seatVersions, type SeatVersionCache } from './seat-version.js';
 
 /** The accessor: the registry roster WITH crew's standing, freshly read on every call. `ready`
  *  (crew#645), awaited by a launch before it reads the roster, waits — bounded — for every seat's
@@ -33,7 +45,18 @@ export type RosterWithStanding = (() => RosterSeat[]) & {
   ready?: () => Promise<void>;
   /** crew#615: re-run one seat's credential probe now (after a sign-in / sign-out terminal). */
   reprobe?: (seatKey: string) => void;
+  /** A3b (`GET /roster?refresh=<key>`): re-run one seat's sign-in check now and wait for it, at most
+   *  `waitMs`. `probed` — the fresh answer is in; `timed_out` — still running (the read serves the
+   *  last answer); `not_probed` — the seat has no sign-in check (pi, copilot, opencode). */
+  recheck?: (seatKey: string, waitMs: number) => Promise<RecheckOutcome>;
 };
+
+export type RecheckOutcome = 'probed' | 'timed_out' | 'not_probed';
+
+/** A3b: how long `GET /roster?refresh=<key>` waits for the seat's sign-in check — the status
+ *  command (about a second) plus its one live request (a CLI start and a one-word reply). Past it
+ *  the read answers with the last reading and `timed_out`; the check keeps running. */
+export const ROSTER_REFRESH_WAIT_MS = 20 * 1000;
 
 export interface RosterStandingDeps {
   /** The daemon's per-seat runtime health + council evidence (councilSeatFailed, auth refusals). */
@@ -53,6 +76,22 @@ export interface RosterStandingDeps {
   /** The seats' ACP version-pin readings (core#581, `diagnostics.ts`). Default: the daemon's
    *  shared cache under the same rule as `probe`; `null` turns it off. */
   versionPins?: SeatVersionPinCache | null;
+  /** (A1) Every seat's `--version` reading (`seat-version.ts`). Default: the daemon's cache under
+   *  the same rule as `probe`; `null` turns it off. */
+  versions?: SeatVersionCache | null;
+  /** (A5, core#920) The engine's worktree bench for a bound run: seat key → reason, or `null` when
+   *  the engine cannot answer (an addon before the predicate). Default: `CoreAdapter.worktreeBenched`
+   *  under the same rule as `probe`; `null` (or a test that injects a registry) turns it off, and
+   *  then `work_admission` and `qe_reviewer` are absent. */
+  worktreeBench?: ((engineSeats: readonly unknown[]) => Map<string, string> | null) | null;
+  /** (A4) The engine's QE reviewer admission for one seat (`Core.qeReviewerAdmitted`), `null` when
+   *  the engine cannot answer. Default under the same rule as `worktreeBench`; without it (or with
+   *  `worktreeBench` absent) `qe_reviewer` is absent. */
+  qeAdmitted?: ((key: string, invocation: string | undefined) => boolean | null) | null;
+  /** (A6) The OS launcher the repository boundary arms with (`hostSandboxLauncher`). */
+  hostBoundary?: () => string | null;
+  /** (A6) The home directory a command's display writes as `$HOME` (default `os.homedir()`). */
+  home?: string;
 }
 
 /**
@@ -74,13 +113,29 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
       : deps.signedIn === undefined && deps.registry === undefined
         ? seatVersionPins
         : null;
+  const daemon = deps.signedIn === undefined && deps.registry === undefined;
+  const versions = deps.versions !== undefined ? deps.versions : daemon ? seatVersions : null;
+  const worktreeBench =
+    deps.worktreeBench !== undefined ? deps.worktreeBench : daemon ? (seats: readonly unknown[]) => CoreAdapter.worktreeBenched(seats) : null;
+  const qeAdmitted =
+    deps.qeAdmitted !== undefined ? deps.qeAdmitted : daemon ? (key: string, inv: string | undefined) => CoreAdapter.qeReviewerAdmitted(key, inv) : null;
+  const hostBoundary = deps.hostBoundary ?? (() => hostSandboxLauncher());
   const liveRoot = (): string | undefined => {
     const workerRoot = env['WICKED_WORKER_HOME'];
     return workerRoot === '' ? undefined : workerRoot;
   };
   const accessor: RosterWithStanding = (): RosterSeat[] => {
     const root = liveRoot();
-    return (registry() as RosterSeat[]).map((seat) => {
+    const seats = registry() as RosterSeat[];
+    // A5: one engine call per read — the predicate takes the whole (engine-shaped) registry roster.
+    let benchedOnBound: Map<string, string> | null = null;
+    try {
+      benchedOnBound = worktreeBench === null ? null : worktreeBench(seats);
+    } catch {
+      benchedOnBound = null; // an engine that cannot answer says nothing, never a guessed bench
+    }
+    const boundary = hostBoundary();
+    const decorated = seats.map((seat) => {
       const key = String(seat.key);
       const health = seatHealth.healthFor(key);
       // crew#630: the seat's own auth-status answer (cached; never awaited here). A probed seat
@@ -88,6 +143,19 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
       // file is not a working login (a moved worker home keeps `.claude.json` and loses the
       // keychain token) — it reads `unknown` until the probe answers.
       const probed = probe?.read(key, root);
+      // A seat's own "no credential" report that its LIVE sign-in check answered AFTER is stale: the
+      // operator signed in since (codex r1 on #996 — it otherwise outranked the fresh probe for 30 min).
+      if (probed !== undefined && probed.signedIn === true && probed.check === 'live') {
+        seatHealth.clearAuthFailureBefore(key, Date.parse(probed.probedAt));
+      }
+      const authFailure = seatHealth.authFailureFor(key);
+      // A3: an account bench (signed out, out of quota) the seat's own LIVE sign-in check disproved
+      // after it landed is lifted here, as an ok turn would lift it.
+      let recentBench = seatHealth.recentBenchFor(key);
+      if (recentBench !== null && liveCheckLiftsBench(recentBench, probed)) {
+        seatHealth.clearRecentBench(key);
+        recentBench = null;
+      }
       const heuristic = signedIn(key, root);
       const signed =
         probed !== undefined && probed.signedIn !== null
@@ -104,12 +172,12 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
         // F-A45-006: the seat's OWN "no credential" report (a ballot's "No API key found", a
         // worker's 401, an auth ACP fallback) overrides the file probe — `auth` flips, not only
         // `council_eligible`, and the evidence rides on the wire.
-        seatHealth.authFailureFor(key),
+        authFailure,
         probed ?? (probe?.probes(key) === true ? 'pending' : undefined),
         // The engine's own in-run bench of the seat, carried to this launch for a bounded window
         // (`seatBenched`, SEAT_BENCH_WINDOW_MS): a seat that reads signed in but refused its work
         // in a recent run is benched up front instead of being handed a unit again.
-        seatHealth.recentBenchFor(key),
+        recentBench,
       );
       // F-W1-005 (wave-1 P6): the chat admission verdict the daemon itself applies when `POST /chats`
       // picks its default seats — the SAME `chatSeatAdmission` call, for both scope modes — so the
@@ -129,6 +197,35 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
         ...(versionPin !== undefined ? { version_pin: versionPin } : {}),
       });
       const govSeat = { ...standingSeat, ...(versionPin !== undefined ? { version_pin: versionPin } : {}) };
+      const chatAdmission = {
+        unscoped: chatSeatAdmission(govSeat, standing.auth, false, 'path'),
+        scoped: chatSeatAdmission(govSeat, standing.auth, true, 'path'),
+        scoped_bound: chatSeatAdmission(govSeat, standing.auth, true, 'path-bound'),
+      };
+      // A1: every seat's installed version, beside the pin reading.
+      const version = seatVersion(seat as { acp?: { verified_version?: unknown } | null }, versions?.read(key), versionPin);
+      const account = seatAccount(standing.auth, probed?.account);
+      // A4: the engine's QE skill admission for this seat (`null` when it cannot answer).
+      let skillAdmitted: boolean | null = null;
+      try {
+        const inv = (seat as { headless_invocation?: unknown }).headless_invocation;
+        skillAdmitted = qeAdmitted === null ? null : qeAdmitted(key, typeof inv === 'string' ? inv : undefined);
+      } catch {
+        skillAdmitted = null;
+      }
+      // A4 / A5: only when the engine can say whether it benches the seat on a bound run.
+      const inputs =
+        benchedOnBound === null
+          ? null
+          : {
+              enabled_for_council: (seat as { enabled_for_council?: boolean }).enabled_for_council,
+              seat_eligible_for_work: (seat as { seat_eligible_for_work?: boolean }).seat_eligible_for_work,
+              standing,
+              recentBench,
+              loginPending: probed === undefined && probe?.probes(key) === true && authFailure === null,
+              chatAdmission,
+              worktreeBench: benchedOnBound.get(key) ?? null,
+            };
       return {
         ...seat,
         health,
@@ -139,13 +236,39 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
         // standing only; `scoped` = the wider-scope rule (several repos / a project); `scoped_bound` =
         // a single-repo ask (bound run — standing only). The picker offers from these.
         governance_mode: governanceMode,
-        chat_admission: {
-          unscoped: chatSeatAdmission(govSeat, standing.auth, false, 'path'),
-          scoped: chatSeatAdmission(govSeat, standing.auth, true, 'path'),
-          scoped_bound: chatSeatAdmission(govSeat, standing.auth, true, 'path-bound'),
-        },
+        chat_admission: chatAdmission,
+        ...(version !== undefined ? { version } : {}),
+        ...(account !== undefined ? { account } : {}),
+        ...(recentBench !== null ? { recent_bench: recentBenchWire(recentBench) } : {}),
+        ...(inputs !== null ? { work_admission: workAdmission(inputs) } : {}),
+        ...(inputs !== null && skillAdmitted !== null ? { qe_reviewer: qeReviewer(inputs, skillAdmitted) } : {}),
       };
     });
+    // A6: the issues read the whole roster once — can any seat a DEFAULT launch holds run QE now?
+    // The default launch roster leaves opt-in seats out unless they are all it could convene
+    // (`defaultLaunchRoster`), so this follows the same rule (codex r1 on #996).
+    const qeKnown = decorated.some((s) => s.qe_reviewer !== undefined);
+    const rosterQe = !qeKnown ? undefined : defaultLaunchRoster(decorated).some((s) => (s.qe_reviewer as QeReviewer | undefined)?.ok === true);
+    return decorated.map((s) => ({
+      ...s,
+      issues: seatIssues({
+        key: String(s.key),
+        display_name: typeof s.display_name === 'string' ? s.display_name : String(s.key),
+        binary: typeof s.binary === 'string' ? s.binary : String(s.key),
+        ...(typeof s.login_invocation === 'string' ? { login_invocation: s.login_invocation } : {}),
+        ...(typeof s.logout_invocation === 'string' ? { logout_invocation: s.logout_invocation } : {}),
+        optIn: isOptInSeat(s.key),
+        standing: s as unknown as SeatStanding,
+        ...(s.version !== undefined ? { version: s.version } : {}),
+        governance: s.governance_mode as Record<GovernanceScopeKind, SeatGovernanceMode>,
+        hostBoundary: boundary,
+        recentBench: s.recent_bench,
+        ...(s.work_admission !== undefined ? { workAdmission: s.work_admission as Record<GovernanceScopeKind, WorkAdmission> } : {}),
+        ...(s.qe_reviewer !== undefined ? { qeReviewer: s.qe_reviewer as QeReviewer } : {}),
+        rosterQe,
+        ...(deps.home !== undefined ? { home: deps.home } : {}),
+      }),
+    }));
   };
   if (probe !== null) {
     accessor.ready = async () => {
@@ -159,6 +282,28 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
     };
     accessor.reprobe = (seatKey: string) => {
       void probe.refresh(seatKey, liveRoot());
+    };
+    accessor.recheck = async (seatKey: string, waitMs: number): Promise<RecheckOutcome> => {
+      if (!probe.probes(seatKey)) return 'not_probed';
+      const deadlineAt = Date.now() + waitMs;
+      // `probed` must describe the worker home the answer is READ under: if `worker_config_root`
+      // changed while the check ran, check the new home too, inside the same bound (codex r1 #996).
+      for (let root = liveRoot(); ; ) {
+        const remaining = deadlineAt - Date.now();
+        if (remaining <= 0) return 'timed_out';
+        let timer: NodeJS.Timeout | undefined;
+        const deadline = new Promise<'timed_out'>((resolve) => {
+          timer = setTimeout(() => resolve('timed_out'), remaining);
+          timer.unref();
+        });
+        const done = probe.refreshFresh(seatKey, root).then(() => 'probed' as const);
+        const outcome = await Promise.race([done, deadline]);
+        clearTimeout(timer);
+        if (outcome === 'timed_out') return outcome;
+        const now = liveRoot();
+        if (now === root) return 'probed';
+        root = now;
+      }
     };
   }
   // Warm the probe at boot, so the first launch after a restart already routes on the seat's own

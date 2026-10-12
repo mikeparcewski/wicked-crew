@@ -84,7 +84,7 @@ function str(v: unknown): string | undefined {
  * `auth` must flip to `signed_out` (not only `council_eligible`), and the evidence rides with it.
  */
 export const AUTH_REFUSAL_PATTERNS: RegExp[] = [
-  /no api key/i,
+  /no api key(?: found)?/i,
   /not logged in/i,
   /\bunauthenticated\b/i,
   /\bunauthori[sz]ed\b/i,
@@ -111,6 +111,24 @@ export const AUTH_REFUSAL_PATTERNS: RegExp[] = [
 /** Whether a failure detail / stderr says the seat has no usable credential. */
 export function isAuthRefusal(text: string): boolean {
   return AUTH_REFUSAL_PATTERNS.some((re) => re.test(text));
+}
+
+/**
+ * A8 (DES-seats-page §4.3): what a seat's refusal SAID, in crew's own vocabulary — the words each
+ * {@link AUTH_REFUSAL_PATTERNS} entry matched (`No API key`, `Not logged in`, `HTTP/1.1 401`,
+ * `OAuth session expired`), deduplicated, joined `; ` — or `null` when none matched. Never the
+ * CLI's surrounding prose: a refusal can carry a key, an account or an organisation in any shape,
+ * and no mask can know them all, so the roster carries only what crew's patterns name.
+ */
+export function refusalSummary(text: string): string | null {
+  const hits: string[] = [];
+  for (const re of AUTH_REFUSAL_PATTERNS) {
+    const m = re.exec(text);
+    if (m === null) continue;
+    const phrase = m[0].replace(/\s+/g, ' ').trim();
+    if (!hits.some((h) => h.toLowerCase() === phrase.toLowerCase())) hits.push(phrase);
+  }
+  return hits.length > 0 ? hits.join('; ') : null;
 }
 
 /** `acpFallback.fallbackKind` values that mean the seat's ACCOUNT refused (wave 6 adds two). */
@@ -145,6 +163,8 @@ export interface SeatRecentBench {
   source: string;
   /** The run that benched it, when the frame named one. */
   run?: string;
+  /** (A3) How many runs benched the seat while this bench was active (at least 1). */
+  runs: number;
 }
 
 /** A seat's own report that it has no credential (`RosterSeat.auth_evidence`). */
@@ -173,7 +193,7 @@ export class SeatHealthTracker {
   private readonly authFailures = new Map<string, { at: number; detail: string; source: SeatAuthFailure['source']; session?: string }>();
   /** cli key → the engine's latest in-run bench of the seat (`seatBenched`), cleared by an ok
    *  output or by {@link SEAT_BENCH_WINDOW_MS}. */
-  private readonly recentBenches = new Map<string, { at: number; reason: string; source: string; session?: string }>();
+  private readonly recentBenches = new Map<string, { at: number; reason: string; source: string; session?: string; runs: number }>();
   /** Default `since` for seats that have never changed state. */
   private readonly startedAt = new Date().toISOString();
 
@@ -264,7 +284,7 @@ export class SeatHealthTracker {
         // F-A45-006: a ballot the seat lost to its own missing credential (`not_logged_in`, or
         // its own words saying "No API key found") flips `auth`, whatever the file probe read.
         if (cli !== undefined && (kind === 'not_logged_in' || reason === 'not_logged_in' || said !== undefined)) {
-          this.recordAuthFailure(cli, said ?? texts[0] ?? 'not logged in', 'ballot', at, session);
+          this.recordAuthFailure(cli, said ?? texts[0] ?? '', 'ballot', at, session, 'not logged in');
         }
         // (R5b) An observed error — stamped, never counted: the engine benches the seat for the
         // run at its own ballot threshold and says so in `unitDistributed.degradedReason`; crew
@@ -293,7 +313,12 @@ export class SeatHealthTracker {
         // bench is crew's own reading, and a frame with no (or an unknown) source is malformed —
         // neither may bench a seat for the window.
         if (cli === undefined || reason === undefined || (source !== 'worker' && source !== 'judge')) return;
-        this.recentBenches.set(cli, { at, reason, source, ...(session !== undefined ? { session } : {}) });
+        // A3: a bench that lands while the last one is still active counts one more run (the same
+        // run benching twice — its worker, then its judge — counts once).
+        const prev = this.recentBenches.get(cli);
+        const active = prev !== undefined && at - prev.at < SEAT_BENCH_WINDOW_MS;
+        const runs = !active ? 1 : session !== undefined && session === prev.session ? prev.runs : prev.runs + 1;
+        this.recentBenches.set(cli, { at, reason, source, runs, ...(session !== undefined ? { session } : {}) });
         this.stampError(cli, at);
         // The run moves its units OFF the benched seat: the refusing unit fails over (a
         // `stepFailed` naming the new seat, no `unitReassigned`) and a later one is re-seated
@@ -317,7 +342,7 @@ export class SeatHealthTracker {
         // `unauthenticated`) is the seat's account refusing — `auth` flips, with the engine's reason.
         if (fallbackKind !== undefined && AUTH_FALLBACK_KINDS.has(fallbackKind)) {
           const why = str((event as { reason?: unknown }).reason) ?? fallbackKind;
-          this.recordAuthFailure(cliKey, why, 'acp', at, session);
+          this.recordAuthFailure(cliKey, why, 'acp', at, session, fallbackKind);
         }
         // (R5) A fallback — one or many — is an observed error, never a status flip: the unit
         // still runs on the wrapped carrier, and the seat's next turn is the engine's call.
@@ -372,6 +397,25 @@ export class SeatHealthTracker {
     this.recentBenches.delete(key); // …and a run's bench of it: the seat just did work
   }
 
+  /**
+   * (A3) Lift the seat's recent bench because something else proved it can work again — the roster
+   * calls this when the seat's own LIVE sign-in check answered after an account bench (signed out,
+   * out of quota). An ok output does the same through {@link markActive}.
+   */
+  clearRecentBench(key: string): void {
+    this.recentBenches.delete(key);
+  }
+
+  /**
+   * Drop the seat's own "no credential" report when it is OLDER than `beforeMs` — the roster calls
+   * this when the seat's LIVE sign-in check answered after it (the operator signed in since). A
+   * report that landed after the check is kept: the seat refused again.
+   */
+  clearAuthFailureBefore(key: string, beforeMs: number): void {
+    const rec = this.authFailures.get(key);
+    if (rec !== undefined && rec.at < beforeMs) this.authFailures.delete(key);
+  }
+
   /** Record a seat's own "no credential" report (F-A45-006) — the newest report wins. */
   private recordAuthFailure(
     key: string,
@@ -379,10 +423,15 @@ export class SeatHealthTracker {
     source: SeatAuthFailure['source'],
     atMs: number,
     session: string | undefined,
+    fallback = 'no credential',
   ): void {
     this.authFailures.set(key, {
       at: atMs,
-      detail: excerpt(detail),
+      // A8: a seat's own words can carry a key or name its account, so only crew's own vocabulary
+      // for them is kept (`refusalSummary`); every reader — the roster, a chat refusal, a bench
+      // reason — gets that, never the CLI's prose. A refusal no pattern names keeps its source's
+      // controlled word (the caller's `fallback`).
+      detail: excerpt(refusalSummary(detail) ?? fallback),
       source,
       ...(session !== undefined ? { session } : {}),
     });
@@ -439,6 +488,7 @@ export class SeatHealthTracker {
       reason: rec.reason,
       source: rec.source,
       ...(rec.session !== undefined ? { run: rec.session } : {}),
+      runs: rec.runs,
     };
   }
 

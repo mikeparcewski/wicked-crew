@@ -353,7 +353,8 @@ describe('SeatHealthTracker — councilSeatFailed is observed, never a bench', (
     // stderr is the detail when the frame carries no `detail` (a non_zero_exit).
     t.ingest(failed('codex', 'non_zero_exit', T0 + 2000, { stderr: 'Not logged in. Run `codex login`.' }));
     expect(t.healthFor('codex').status).toBe('active');
-    expect(t.authFailureFor('codex', T0 + 3000)).toMatchObject({ source: 'ballot', detail: 'Not logged in. Run `codex login`.' });
+    // A8: crew's words for the refusal, never the CLI's sentence.
+    expect(t.authFailureFor('codex', T0 + 3000)).toMatchObject({ source: 'ballot', detail: 'Not logged in' });
   });
 
   it('a frame without a cli or a kind is ignored', () => {

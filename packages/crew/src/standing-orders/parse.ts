@@ -37,7 +37,7 @@ export function seatParser(deps: SeatParserDeps): (text: string) => Promise<Pars
   return async (text) => {
     const entry = chatSeat(deps.roster());
     if (entry === undefined) {
-      return { ok: false, code: 409, error: 'no seat can take a turn to read the order — sign a seat in from the System page' };
+      return { ok: false, code: 409, error: 'no seat can take a turn to read the order — sign a seat in from the Agents page' };
     }
     const seat = String(entry.key);
     // The run id IS the session id the launch names, so the frames are filtered on it from before

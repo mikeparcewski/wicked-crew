@@ -1012,9 +1012,9 @@ export interface RosterSeat {
   /**
    * The shell invocation that runs this seat's own interactive login flow (seat sign-in;
    * wicked-core PR#278 `AgenticCli.login_invocation`). Passed through from the engine roster
-   * VERBATIM — the daemon never synthesizes one. The studio hosts it in a PTY terminal
-   * (`POST /terminals`) so every CLI's native sign-in gets one uniform surface. Absent on an
-   * engine predating the field (serde omits `None`) and on seats with no known login flow.
+   * VERBATIM — the daemon never synthesizes one. The operator runs it in their own terminal (the
+   * Agents page copies it; `RosterSeat.issues[].commands` carries a `$HOME` display form). Absent on
+   * an engine predating the field (serde omits `None`) and on seats with no known login flow.
    */
   login_invocation?: string;
   /**
@@ -1052,7 +1052,9 @@ export interface RosterSeat {
    */
   auth_source?: 'seat-stderr' | 'probe';
   /** Present with `auth_source: 'seat-stderr'`, and with `probe` when it read signed out: the
-   *  seat's own words, bounded. */
+   *  seat's own words, bounded. From api-types 0.115.0 (A8) account identifiers are dropped before
+   *  they reach the wire: a JSON status keeps only `loggedIn` / `authMethod` / `apiProvider`, and
+   *  email-, id- and key-shaped strings are masked. */
   auth_evidence?: string;
   /**
    * Present with `auth_source: 'probe'` (crew#630): ISO-8601 of the seat's own auth-status check
@@ -1071,7 +1073,8 @@ export interface RosterSeat {
    * or could not tell). Optional on the wire: a daemon before it sends none.
    */
   login_check?: 'live' | 'status' | 'unverified';
-  /** Present unless `login_check` is `live`: why, in the operator's words ("login unverified — …"). */
+  /** Present unless `login_check` is `live`: why, in the operator's words ("login unverified — …").
+   *  Scrubbed like `auth_evidence` (A8). */
   login_note?: string;
   /** Present when `auth` is `not_required`: the free tier the seat answers on. */
   free_tier?: string;
@@ -1121,7 +1124,154 @@ export interface RosterSeat {
    * engine (`clisJson` strips it).
    */
   governance_mode?: Record<GovernanceScopeKind, SeatGovernanceMode>;
+  /**
+   * (api-types 0.115.0, DES-seats-page A1) The seat's installed version, for EVERY seat (not only
+   * the pinned ones `version_pin` covers), read from its registry `version_probe` in the background.
+   * ABSENT until the first reading, and for a pinned seat until its pin has been probed too.
+   */
+  version?: SeatVersion;
+  /**
+   * (api-types 0.115.0, A2) The account KIND the seat is signed in with — never an email, an account
+   * or an organisation id. Present when `auth` is `signed_in` (`unknown` when the seat's status
+   * command states no kind) or `not_required` (`free`).
+   */
+  account?: SeatAccount;
+  /**
+   * (api-types 0.115.0, A3) The engine's bench of the seat that is ACTIVE now: a run benched it on
+   * its worker's or judge's own refusal, and crew keeps it out of new launches until `lifts_at`,
+   * its next good turn, or — for an account bench (`not_logged_in`, `quota_exhausted`,
+   * `usage_limit`) — a live sign-in check that answered after it. The week's history stays in
+   * `GET /roster/record`. ABSENT when there is no active bench.
+   */
+  recent_bench?: SeatRecentBench;
+  /**
+   * (api-types 0.115.0, A5) Whether a job of each scope kind would give the seat work, including
+   * the engine's launcher benches (core#769's codex worktree bench, via `Core.worktreeBenched`).
+   * ABSENT on a daemon whose engine addon cannot answer the worktree bench (wicked-core-ts without
+   * `worktreeBenched`): crew does not restate the engine's rule.
+   */
+  work_admission?: Record<GovernanceScopeKind, SeatWorkAdmission>;
+  /**
+   * (api-types 0.115.0, A4) Whether the seat can run the isolated QE review. Since wicked-core#917
+   * (core-ts 0.9.9) the engine starts the reviewer as a fresh session on any run seat it admits, so
+   * a seat is eligible when it is signed in, a run bound to one repository keeps it (QE runs only
+   * there), and the host's skill routing admits it to the QE skill (`Core.qeReviewerAdmitted`, wicked-core#923: a
+   * Claude-only skills root admits claude seats only). A reviewer-only seat counts. ABSENT unless
+   * the engine answers both `Core.worktreeBenched` (wicked-core#920) and `Core.qeReviewerAdmitted` (wicked-core#923).
+   */
+  qe_reviewer?: SeatQeReviewer;
+  /**
+   * (api-types 0.115.0, A6) What the Agents page shows for the seat, most important first (problem
+   * before warning before note; within one, safety before availability). Crew sends codes and
+   * facts; the client owns the words per code and shows `message` only for a code it does not know.
+   */
+  issues?: SeatIssue[];
   [k: string]: unknown;
+}
+
+/** `RosterSeat.version` (api-types 0.115.0). */
+export interface SeatVersion {
+  /** The first non-empty line of the seat's `--version`, home written `~`; `null` when it did not answer. */
+  installed: string | null;
+  /** The build the seat's governance was proven on (`acp.verified_version`); `null` when it pins none. */
+  proven: string | null;
+  /** `proven` — the installed build is the pinned one; `unproven` — it is not (governance fails
+   *  closed); `no_pin` — the seat pins no build. */
+  status: 'proven' | 'unproven' | 'no_pin';
+  /** ISO-8601 of the reading. */
+  checked_at: string;
+  /** How the binary on PATH was installed, from its resolved path: under `node_modules` = `npm`, a
+   *  Homebrew prefix = `brew`, else `other`; `null` when it is not on PATH. */
+  install_source: 'npm' | 'brew' | 'other' | null;
+}
+
+/** `RosterSeat.account` (api-types 0.115.0). */
+export interface SeatAccount {
+  kind: 'subscription' | 'api_key' | 'free' | 'unknown';
+  /** A provider-public plan name (`Max`, `Pro`, `Team`, `Enterprise`), only from a fixed table. */
+  plan?: string;
+}
+
+/** `RosterSeat.recent_bench` (api-types 0.115.0). */
+export interface SeatRecentBench {
+  /** The engine's cause token: `quota_exhausted`, `not_logged_in`, `not_installed`,
+   *  `approval_unavailable`, `timed_out`, … */
+  kind: string;
+  /** Runs that benched the seat while this bench was active (at least 1). */
+  runs: number;
+  /** ISO-8601 of the latest bench. */
+  last_at: string;
+  /** ISO-8601 of when crew stops carrying it to new launches. Crew's window, NOT a provider reset
+   *  time (no provider states one on the wire today). */
+  lifts_at: string;
+  /** Who benched it in the run: `worker` or `judge`. */
+  source: string;
+  /** The engine's own reason, verbatim (technical details). */
+  reason: string;
+}
+
+/** Why a seat would get no work, one code per refusal (api-types 0.115.0). */
+export type SeatWorkReasonCode =
+  | 'signed_out'
+  | 'not_enabled'
+  | 'reviewer_only'
+  | 'recent_bench'
+  | 'login_pending'
+  | 'worktree_bench'
+  | 'scope_ungoverned';
+
+/** `RosterSeat.work_admission[scope]` (api-types 0.115.0). `source`: `auth` — signed out;
+ *  `launcher` — a launch benches it (disabled, reviewer-only, a recent bench, a pending login
+ *  check, the engine's worktree bench); `scope` — the scope's governance rule refuses it. */
+export type SeatWorkAdmission =
+  | { ok: true }
+  | { ok: false; reason_code: SeatWorkReasonCode; source: 'auth' | 'launcher' | 'scope'; reason: string };
+
+/** `RosterSeat.qe_reviewer` (api-types 0.115.0). */
+export type SeatQeReviewer =
+  | { ok: true }
+  | {
+      ok: false;
+      /** `skill_not_admitted`: this host's skills root admits only a claude seat to the QE skill. */
+      reason_code: Exclude<SeatWorkReasonCode, 'reviewer_only' | 'scope_ungoverned'> | 'skill_not_admitted';
+      reason: string;
+    };
+
+/**
+ * One `RosterSeat.issues` entry (api-types 0.115.0). Today's codes: `signed_out`, `qe_blocked`
+ * (problems); `quota`, `usage_limit`, `benched`, `codex_worktree`, `version_unproven`,
+ * `unchecked` (`params.why`: `no_governance` | `no_host_boundary`), `fence_scoped`,
+ * `live_check_failed` (warnings); `opt_in`, `no_qe`, `unverified` (notes). A client must tolerate
+ * an unknown code.
+ */
+export interface SeatIssue {
+  code: string;
+  severity: 'problem' | 'warning' | 'note';
+  /** Names, versions, counts and ISO times only — never a CLI's free text. */
+  params: Record<string, string | number>;
+  /** Crew's one line, for a client that does not know the code. */
+  message: string;
+  commands?: SeatIssueCommand[];
+}
+
+/** A command an issue offers. Run the roster's `login_invocation` / `logout_invocation` (or
+ *  `<binary> --version`); `display` is the safe rendering, the home directory written `$HOME`. */
+export interface SeatIssueCommand {
+  purpose: 'sign_in' | 'sign_out' | 'version';
+  display: string;
+}
+
+/**
+ * `GET /roster[?refresh=<key>]` (api-types 0.115.0 names it). With `?refresh=<key>` the daemon
+ * re-runs that seat's sign-in check and waits for it, at most 20 s, before answering (A3b); 400
+ * when the key is not a roster seat.
+ */
+export interface RosterResponse {
+  roster: RosterSeat[];
+  /** Present on a `?refresh=` read: `probed` — the answer is fresh; `timed_out` — still running
+   *  (the roster shows the last reading; the check keeps going); `not_probed` — the seat has no
+   *  sign-in check (it reads its credential file). */
+  refresh?: { key: string; outcome: 'probed' | 'timed_out' | 'not_probed' };
 }
 
 /** The engine's governance class names (IG1-core-3). */
@@ -5029,9 +5179,10 @@ export interface DomainCoverage {
 }
 
 /**
- * `POST /seats/:cli/login` and `POST /seats/:cli/logout` (crew#615): the PTY size for the terminal
- * the daemon opens running the seat's own `login_invocation` / `logout_invocation`. Both optional
- * (default 100 x 30).
+ * `POST /seats/:cli/logout` (crew#615): the PTY size for the terminal the daemon opens running the
+ * seat's own `logout_invocation`. Both optional (default 100 x 30). `POST /seats/:cli/login` is
+ * GONE from api-types 0.115.0 (DES-seats-page Q3): sign-in is a command the operator runs in their
+ * own terminal (`RosterSeat.login_invocation`).
  */
 export interface SeatSessionBody {
   cols?: number;
@@ -5047,6 +5198,7 @@ export interface SeatSessionResponse {
   terminalId: string;
   /** The seat key the command was run for. */
   cli: string;
+  /** `login` is no longer produced (api-types 0.115.0: the login route is gone). */
   action: 'login' | 'logout';
 }
 
