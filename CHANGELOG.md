@@ -10,6 +10,9 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+- **agent-acp-bridges 1.3.0: the pi seat's governance gate ships with the bridges again (#998).** `pi-governance` 0.1.0 is now a registry dependency of `agent-acp-bridges`. Since wicked-core#563 asks for the gate on every governed pi session (`WICKED_PI_GOVERNANCE=1`), and #915 had dropped the dependency, `wicked-pi` exited 126 on every run, pi-acp failed `session/new` ("Cannot call write after a stream was destroyed"), and every pi turn fell back to an ungoverned carrier. Measured on pi 1.1.0 with pi-acp 0.0.32 through `wicked-pi`: the session starts, and read, bash, edit and write each ask before they run. Reaches an install once `bridges-v1.3.0` is published (crew's `^1.2.0` range takes it); the engine half, refusing rather than running such a unit unchecked, is wicked-core#925. The narration line for its new `acpFallback` kind, `governed_requires_acp`, says the unit was refused and moves to another agent, never that it continued single-shot.
+
 ## [0.10.1] — 2026-10-12
 
 Bundles **wicked-studio 0.7.13**, the front door: the Desk as mission control (studio#741), the project dashboard (studio#742), and the Workspace rail (Steering, Skills, MCP, Plugins, Evals, Repositories, General settings, with Health at the foot), with the Product page retired into the dashboard and the launch wizard, and a new Plugins page (studio#744). It also carries the Agents page's readings on `GET /roster` (#996) and ships **`wicked-crew-api-types` 0.115.0**. Engine pin unchanged (`wicked-core-ts` `^0.9.9`): that engine has neither `Core.worktreeBenched` (wicked-core#920) nor `Core.qeReviewerAdmitted` (wicked-core#923), so on this release `work_admission` (A5) and `qe_reviewer` (A4) are absent from `GET /roster`; they light up with a later core-ts. Pair it with wicked-garden 12.54.0 and wicked-estate 0.29.2.

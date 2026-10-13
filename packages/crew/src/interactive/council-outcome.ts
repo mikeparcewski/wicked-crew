@@ -129,10 +129,15 @@ export function workerToolCallDeniedLine(event: CoreEvent): string {
  *  adds `auth_failed` / `unauthenticated` beside the older `auth_required`). */
 export const AUTH_FALLBACK_KINDS: ReadonlySet<string> = new Set(['auth_required', 'auth_failed', 'unauthenticated']);
 
+/** The `acpFallback` kind for a REFUSAL (wicked-core#925): the unit is governed, its seat is admitted
+ *  to ACP input governance, and its ACP carrier could not carry it, so no fallback ran. */
+export const GOVERNED_REQUIRES_ACP = 'governed_requires_acp';
+
 /**
  * The `acpFallback` line, by `fallbackKind`: an authentication failure benches the seat for the run
  * (the wave-6 engine never retries the single-shot carrier for it — it fails the same way); a
- * deliberate `*_requires_wrapped` reroute is routing, not a drop; anything else is the classic
+ * deliberate `*_requires_wrapped` reroute is routing, not a drop; `governed_requires_acp` is a refusal
+ * (nothing ran single-shot); anything else is the classic
  * "live session dropped — continuing in single-shot mode".
  */
 export function acpFallbackLine(event: CoreEvent): string {
@@ -140,6 +145,11 @@ export function acpFallbackLine(event: CoreEvent): string {
   const kind = str(event, 'fallbackKind', 'fallback_kind');
   if (kind !== null && AUTH_FALLBACK_KINDS.has(kind)) {
     return `${who} is not signed in (${kind.replace(/_/g, ' ')}) — benched for this run; sign it in from the Agents page…`;
+  }
+  // wicked-crew#998 / wicked-core#925: a governed unit whose admitted seat could not carry it on
+  // ACP is REFUSED — nothing continues single-shot, and the run moves the work to another seat.
+  if (kind === GOVERNED_REQUIRES_ACP) {
+    return `${who} could not run the unit governed — refused rather than run unchecked; the run moves it to another agent if one can take it…`;
   }
   if (kind !== null && kind.endsWith('_requires_wrapped')) {
     return `${who} routed to single-shot mode (${kind.replace(/_/g, ' ')})…`;
