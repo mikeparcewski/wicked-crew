@@ -10,8 +10,22 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.10.2] — 2026-10-13
+
+A patch on the wicked-core-ts 0.9.10 engine, which closes an outside-worktree write bypass (wicked-core#924), and on agent-acp-bridges 1.3.0, which governs pi again (#998). Studio is unchanged (`wicked-studio` `^0.7.13`). Pair it with wicked-garden 12.54.0 and wicked-estate 0.29.2.
+
+### Security
+- **The engine judges Bash write targets as the shell resolves them (wicked-core#924, fixes wicked-core#922).** On earlier engines, a quoted, escaped or `$HOME`/`${HOME}` write target outside the worktree (`echo x > "/outside/f"`, `tee "…"`, `cp a "…"`, `sh -c '… > "…"'`, `"../outside/f"`) was read as a path inside the worktree and admitted by the boundary. Those writes are now denied. **Behaviour change:** a write target the gate cannot resolve without running the shell (`$VAR`, `$(…)`, backticks, globs, `sh -c` with outer expansion) is now refused (an advisory deny: the call is blocked and audited, and the seat is asked to spell the path literally) on every posture, where it was admitted before.
+
+### Added
+- **`qe_reviewer` (A4) and `work_admission` (A5) now appear on `GET /roster`.** wicked-core-ts 0.9.10 exports `Core.qeReviewerAdmitted` (wicked-core#923) and `Core.worktreeBenched` (wicked-core#920), the two engine predicates #996 feature-detects, so the Agents page can say which seats can host the QE reviewer and that codex is benched on repository jobs.
+
+### Changed
+- **deps:** `wicked-core-ts` `^0.9.10`. Besides wicked-core#920, #923 and #924, it brings wicked-core#921 (governed claude seats load the worktree's `CLAUDE.md` again; repository hooks, settings and MCP servers stay off) and wicked-core#925 (a governed unit on an ACP-governed seat other than claude whose ACP session cannot start, or dies mid-turn, is refused and moves to another agent, instead of running unchecked; crew's tests cover both that branch and the ungoverned single-shot fallback, #1003).
+- **deps:** `agent-acp-bridges` `^1.3.0` (published 2026-10-13), so a fresh install carries the `pi-governance` gate that wicked-core#925 requires.
+
 ### Fixed
-- **agent-acp-bridges 1.3.0: the pi seat's governance gate ships with the bridges again (#998).** `pi-governance` 0.1.0 is now a registry dependency of `agent-acp-bridges`. Since wicked-core#563 asks for the gate on every governed pi session (`WICKED_PI_GOVERNANCE=1`), and #915 had dropped the dependency, `wicked-pi` exited 126 on every run, pi-acp failed `session/new` ("Cannot call write after a stream was destroyed"), and every pi turn fell back to an ungoverned carrier. Measured on pi 1.1.0 with pi-acp 0.0.32 through `wicked-pi`: the session starts, and read, bash, edit and write each ask before they run. Reaches an install once `bridges-v1.3.0` is published (crew's `^1.2.0` range takes it); the engine half, refusing rather than running such a unit unchecked, is wicked-core#925. The narration line for its new `acpFallback` kind, `governed_requires_acp`, says the unit was refused and moves to another agent, never that it continued single-shot.
+- **agent-acp-bridges 1.3.0: the pi seat's governance gate ships with the bridges again (#998).** `pi-governance` 0.1.0 is now a registry dependency of `agent-acp-bridges`. Since wicked-core#563 asks for the gate on every governed pi session (`WICKED_PI_GOVERNANCE=1`), and #915 had dropped the dependency, `wicked-pi` exited 126 on every run, pi-acp failed `session/new` ("Cannot call write after a stream was destroyed"), and every pi turn fell back to an ungoverned carrier. Measured on pi 1.1.0 with pi-acp 0.0.32 through `wicked-pi`: the session starts, and read, bash, edit and write each ask before they run. agent-acp-bridges 1.3.0 is published and this release pins `^1.3.0`; the engine half, refusing rather than running such a unit unchecked, is wicked-core#925. The narration line for its new `acpFallback` kind, `governed_requires_acp`, says the unit was refused and moves to another agent, never that it continued single-shot.
 
 ## [0.10.1] — 2026-10-12
 
@@ -4014,7 +4028,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.10.2...HEAD
+[0.10.2]: https://github.com/mikeparcewski/wicked-crew/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.13...v0.10.0
 [0.9.13]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.12...v0.9.13
