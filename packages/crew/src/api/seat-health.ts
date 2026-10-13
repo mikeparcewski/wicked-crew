@@ -73,6 +73,20 @@ const CLI_IN_DETAIL = /\(cli `([^`]+)` exited /;
  *  wrapped carrier before any ACP turn, where the read-only lever is an argv fact). */
 const BENIGN_FALLBACK_KINDS = new Set(['governance_requires_wrapped', 'read_only_requires_wrapped']);
 
+/**
+ * A worker's ACP session died mid-turn (crew#411's correlation subject). Since wicked-core#925 a
+ * GOVERNED unit's death on an ACP-admitted non-claude seat is emitted as `governed_requires_acp`
+ * (nothing fell back, so the cause's `session_died` slug is not used); its reason still opens with
+ * the engine's session-death cause, which is what tells it apart from the other refusal causes
+ * (startup failure, workdir, transport, version pin).
+ */
+const SESSION_DEATH_CAUSES = ['[wicked-core] ACP session exited for ', '[wicked-core] ACP error for '];
+export function isSessionDeath(fallbackKind: string | undefined, reason: string | undefined): boolean {
+  if (fallbackKind === 'session_died') return true;
+  if (fallbackKind !== 'governed_requires_acp' || reason === undefined) return false;
+  return SESSION_DEATH_CAUSES.some((c) => reason.startsWith(c));
+}
+
 function str(v: unknown): string | undefined {
   return typeof v === 'string' && v.length > 0 ? v : undefined;
 }
@@ -351,9 +365,9 @@ export class SeatHealthTracker {
         // A session_died fallback is a silent bridge exit-0; whether the daemon was
         // also signalled at the same time determines the likely cause. Both branches
         // always log when the signal log is wired so post-mortems have the evidence.
-        if (fallbackKind === 'session_died' && this.opts.signalLog !== undefined) {
+        if (isSessionDeath(fallbackKind, str((event as { reason?: unknown }).reason)) && this.opts.signalLog !== undefined) {
           const match = this.opts.signalLog.findInWindow(at);
-          const who = `acpFallback(session_died) for ${cliKey} on run ${session ?? 'unknown'}`;
+          const who = `acpFallback(${fallbackKind ?? 'session_died'}) for ${cliKey} on run ${session ?? 'unknown'}`;
           // The correlation is the whole point of crew#411 — never silently dropped when a
           // caller wired a signalLog but no log sink; fall back to console.warn.
           const emit = this.opts.log ?? ((m: string) => console.warn(m));

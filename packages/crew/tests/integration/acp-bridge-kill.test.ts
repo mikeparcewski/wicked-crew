@@ -41,6 +41,7 @@ import { CoreAdapter } from '../../src/core/adapter.js';
 import { registerDef } from '../support/register-def.js';
 import { createServer } from '../../src/api/server.js';
 import { removeScratch } from '../setup/scratch.js';
+import { quiesceRun } from '../setup/quiesce.js';
 import { baseSkillOff } from '../setup/base-skill-off.js';
 
 interface Frame {
@@ -158,34 +159,58 @@ async function startHarness(dbPath: string): Promise<Harness> {
   // spawn exercises the session cache, the reader-thread death detection, and the
   // fallback/refusal under test.
   const adapter = new CoreAdapter({ dbPath, stub: false });
-  baseSkillOff(); // run mechanics, not grounding — no published generation here (see tests/setup/base-skill-off.ts)
-  const app = await createServer(adapter);
-  await app.listen({ port: 0, host: '127.0.0.1' });
-  const addr = app.server.address();
-  const port = typeof addr === 'object' && addr ? addr.port : 0;
-  const baseUrl = `http://127.0.0.1:${port}`;
+  let app: Awaited<ReturnType<typeof createServer>> | undefined;
+  let ws: WebSocket | undefined;
+  let baseUrl: string;
+  try {
+    baseSkillOff(); // run mechanics, not grounding — no published generation here (see tests/setup/base-skill-off.ts)
+    app = await createServer(adapter);
+    await app.listen({ port: 0, host: '127.0.0.1' });
+    const addr = app.server.address();
+    const port = typeof addr === 'object' && addr ? addr.port : 0;
+    baseUrl = `http://127.0.0.1:${port}`;
 
-  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
-  ws.on('message', (data: Buffer | string) => {
-    try {
-      onFrame(JSON.parse(data.toString()) as Frame);
-    } catch {
-      /* ignore non-JSON */
-    }
-  });
-  await new Promise<void>((resolve, reject) => {
-    ws.on('open', () => resolve());
-    ws.on('error', reject);
-  });
+    const sock = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+    ws = sock;
+    sock.on('message', (data: Buffer | string) => {
+      try {
+        onFrame(JSON.parse(data.toString()) as Frame);
+      } catch {
+        /* ignore non-JSON */
+      }
+    });
+    // Bounded inside the 60 s setup hook, so a socket that never opens fails here and is cleaned up.
+    await new Promise<void>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('timed out (15000ms) opening /ws')), 15_000);
+      sock.on('open', () => {
+        clearTimeout(t);
+        resolve();
+      });
+      sock.on('error', (err) => {
+        clearTimeout(t);
+        reject(err);
+      });
+    });
+  } catch (err) {
+    // Partial startup: release what was acquired before propagating (codex r1 on crew#1003).
+    ws?.terminate();
+    await app?.close().catch(() => undefined);
+    adapter.close();
+    throw err;
+  }
+  const server = app;
+  const socket = ws;
+  const launched: string[] = [];
 
   return {
     adapter,
-    app,
+    app: server,
     baseUrl,
-    ws,
+    ws: socket,
     frames,
     waitForFrame,
     async launchRun(sessionId, seats) {
+      launched.push(sessionId);
       const res = await fetch(`${baseUrl}/api/v1/runs`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -223,12 +248,16 @@ async function startHarness(dbPath: string): Promise<Harness> {
     },
     async close() {
       try {
-        ws.close();
-      } catch {
-        /* ignore */
+        // A run a failed assertion left mid-turn (the stub hangs until killed) is cancelled and
+        // settled before the engine goes away, so the next block never shares the worker files
+        // with it and scratch removal never races it (codex r1 on crew#1003).
+        for (const run of launched) await quiesceRun(adapter, run).catch(() => undefined);
+        for (const w of waiters.splice(0)) clearTimeout(w.timer);
+        socket.close();
+        await server.close();
+      } finally {
+        adapter.close();
       }
-      await app.close();
-      adapter.close();
     },
   };
 }
@@ -342,7 +371,7 @@ describe('kill -9 of an ACP worker mid-turn, GOVERNED unit (crew#340, wicked-cor
   }, 60_000);
   afterAll(async () => {
     await h?.close();
-  });
+  }, 60_000);
 
   it('refuses the single-shot fallback (governed_requires_acp) and fails the unit over to another seat', async () => {
     await h.launchRun(RUN, [stubSeat(), failoverSeat()]);
@@ -388,9 +417,12 @@ describe('kill -9 of an ACP worker mid-turn, UNGOVERNED unit (crew#340)', () => 
     await h.registerWorkflow();
   }, 60_000);
   afterAll(async () => {
-    await h?.close();
-    process.chdir(priorCwd);
-  });
+    try {
+      await h?.close();
+    } finally {
+      process.chdir(priorCwd);
+    }
+  }, 60_000);
 
   it('a REAL kill -9 mid-turn resolves the unit loudly and the run still terminates', async () => {
     await h.launchRun(RUN_1, [stubSeat()]);
