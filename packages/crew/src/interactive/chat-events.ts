@@ -233,19 +233,20 @@ export function chatSeamAnswers(kind: string): boolean {
 
 /**
  * `true` when SOME seam answers a thread ask on a doc of this kind — the proxy refuses the rest
- * with a typed 422 (`askRefusalFor`). A `demo` document has no answerer: demos are made in
- * studio's Demo mode (the `demo` preset, studio#373).
+ * with a typed 422 (`askRefusalFor`). A `demo` document has no answerer: demos are made by a
+ * governed run of the `demo` preset, started from studio's New job › Demo video (studio#664).
  */
 export function isAnswerableDocKind(kind: string): boolean {
   return chatSeamAnswers(kind);
 }
 
 /** Why a demo DOCUMENT's feedback or ask has no answerer (studio#373, M9b): demos are made by a
- *  governed run of the `demo` preset in studio's Demo mode, which re-records at its review gate. */
+ *  governed run of the `demo` preset, which re-records at its review gate. Studio's Demo mode is
+ *  gone (studio#609); the way in is New job › Demo video, or ⌘K "New Demo" (studio#664). */
 export const DEMO_DOC_MOVED_MESSAGE =
-  'This is a demo document. Demos are made in studio\'s Demo mode now (a governed demo run: plan, ' +
-  'record, review), which re-records a chapter from its review gate. Nothing was changed; start a new ' +
-  'demo there.';
+  'This is a demo document. Demos are made by a governed demo run now (plan, record, review), which ' +
+  're-records a chapter from its review gate. Nothing was changed. To make a new demo, open New job in ' +
+  'studio and choose Demo video.';
 
 /** The thread's answer to an ask on a doc no seam answers (F-RECON-013). Mirrors the proxy's 422
  *  (`askRefusalFor`). */

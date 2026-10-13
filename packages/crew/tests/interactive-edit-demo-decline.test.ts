@@ -1,6 +1,6 @@
 // studio#373 (M9b): demos are made by the Demo experience's `demo` preset, so a demo DOCUMENT has no
 // answerer. Its step feedback (`feedback.processed` on a doc whose manifest says `kind: "demo"`) is
-// declined by the edit seam with an honest error status naming Demo mode — never a storyboard-text
+// declined by the edit seam with an honest error status naming the way in (New job › Demo video) — never a storyboard-text
 // edit the next recording would overwrite, and never a silent drop. Real bus, fake engine.
 
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
@@ -44,7 +44,7 @@ describe('the edit seam declines a demo document honestly (M9b)', () => {
     removeScratch(dir);
   });
 
-  it('posts an error status naming Demo mode and launches nothing', async () => {
+  it('posts an error status naming the way in to a new demo and launches nothing', async () => {
     const bus = await import('wicked-bus');
     const docDir = join(docsRoot, 'checkout-demo');
     mkdirSync(docDir, { recursive: true });
@@ -115,7 +115,10 @@ describe('the edit seam declines a demo document honestly (M9b)', () => {
       (e.payload as { document_id?: string }).document_id === 'checkout-demo';
     await waitFor(() => events.some(isError));
     expect((events.find(isError)!.payload as { message: string }).message).toBe(DEMO_DOC_MOVED_MESSAGE);
-    expect(DEMO_DOC_MOVED_MESSAGE).toMatch(/Demo mode/);
+    // studio#664: Demo mode is gone; the message names the door that exists (New job › Demo video).
+    expect(DEMO_DOC_MOVED_MESSAGE).not.toMatch(/Demo mode/);
+    expect(DEMO_DOC_MOVED_MESSAGE).toMatch(/New job/);
+    expect(DEMO_DOC_MOVED_MESSAGE).toMatch(/Demo video/);
     expect(DEMO_DOC_MOVED_MESSAGE).toMatch(/Nothing was changed/);
     await new Promise((r) => setTimeout(r, 300));
     expect(launches.length, 'a demo handoff must not become a storyboard edit').toBe(0);

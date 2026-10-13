@@ -160,7 +160,7 @@ describe('readDocHead (contract b — the versions.json read)', () => {
     expect(readDocHead(root, 'real-source-doc')?.kind).toBe('doc');
     expect(isAnswerableDocKind('doc')).toBe(true);
     expect(isAnswerableDocKind('source')).toBe(true);
-    // studio#373 (M9b): a demo DOCUMENT has no answerer — demos are made in studio's Demo mode.
+    // studio#373 (M9b): a demo DOCUMENT has no answerer — demos are made by a governed demo run.
     expect(isAnswerableDocKind('demo')).toBe(false);
     expect(chatSeamAnswers('demo')).toBe(false);
     expect(chatSeamAnswers('doc')).toBe(true);
@@ -625,7 +625,7 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     expect(sub!.ledger.size()).toBe(0);
     // F-RECON-013: a foreign-kind ask is DECLINED ON THE THREAD — not dropped into a log line while
     // the canvas shows "generating". studio#373 (M9b): a DEMO doc's ask is declined the same way,
-    // naming Demo mode. The unknown doc stays silent (nothing to post to).
+    // naming the way in (New job › Demo video, studio#664). The unknown doc stays silent (nothing to post to).
     const errors = () =>
       probeEvents.filter((e) => e.event_type === STATUS_POSTED && e.producer_id === INTERACTIVE_PRODUCER && (e.payload as { state?: string }).state === 'error');
     await waitFor(() => errors().length === 2);
@@ -637,7 +637,7 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     expect([...declined.keys()].sort()).toEqual(['demo-doc', 'odd-doc']);
     expect(declined.get('odd-doc')!.project_id).toBe('proj-7');
     expect(declined.get('odd-doc')!.message).toMatch(/kind 'storyboard' have no answering seam/);
-    expect(declined.get('demo-doc')!.message).toMatch(/Demo mode/);
+    expect(declined.get('demo-doc')!.message).toMatch(/New job/);
 
     // …while the kindless manifest — what interactive ACTUALLY writes for a source doc — is answered.
     await emitChatPosted(bus, 'kindless-doc', { source_message_id: 'm-kindless' });
