@@ -73,6 +73,12 @@ describe('acpFallbackLine', () => {
       'codex routed to single-shot mode (read only requires wrapped)…',
     );
   });
+  it('a governed_requires_acp refusal never reads as a single-shot continuation (#998)', () => {
+    const line = acpFallbackLine(ev({ type: 'acpFallback', cliKey: 'pi', fallbackKind: 'governed_requires_acp' }));
+    expect(line).toContain('pi could not run the unit governed');
+    expect(line).toContain('refused rather than run unchecked');
+    expect(line).not.toContain('single-shot');
+  });
   it('anything else is the classic dropped-session line', () => {
     expect(acpFallbackLine(ev({ type: 'acpFallback', cliKey: 'codex', fallbackKind: 'session_died' }))).toBe(
       "codex's live session dropped — continuing in single-shot mode…",
