@@ -545,13 +545,14 @@ describe('F-RECON-013 — a chat ask on a doc NO seam answers is refused with a 
     expect(body.doc_kind).toBe('storyboard');
     expect(body.error).toMatch(/have no answering seam/);
 
-    // studio#373 (M9b): demos are made in studio's Demo mode — a demo DOCUMENT's ask has no answerer,
-    // and the refusal says where demos are made now.
+    // studio#373 (M9b): demos are made by a governed demo run — a demo DOCUMENT's ask has no answerer,
+    // and the refusal says where demos are made now: New job › Demo video (studio#664).
     const demo = await post('p-bound', ask('a-demo'));
     expect(demo.status).toBe(422);
     const demoBody = (await demo.json()) as { doc_kind: string; error: string };
     expect(demoBody.doc_kind).toBe('demo');
-    expect(demoBody.error).toMatch(/Demo mode/);
+    expect(demoBody.error).toMatch(/New job/);
+    expect(demoBody.error).not.toMatch(/Demo mode/);
 
     for (const doc of ['a-source', 'kindless', 'never-created']) {
       const ok = await post('p-bound', ask(doc));
