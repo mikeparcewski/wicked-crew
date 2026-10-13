@@ -15,8 +15,12 @@ import type { CoreEvent } from '../src/core/types.js';
 
 const ev = (frame: Record<string, unknown>): CoreEvent => frame as unknown as CoreEvent;
 
-const acpFallbackEvent = (cliKey: string, fallbackKind: string, ts: number): CoreEvent =>
-  ev({ type: 'acpFallback', session: 'r-411', cliKey, reason: 'bridge exited 0', fallbackKind, ts });
+const acpFallbackEvent = (cliKey: string, fallbackKind: string, ts: number, reason = 'bridge exited 0'): CoreEvent =>
+  ev({ type: 'acpFallback', session: 'r-411', cliKey, reason, fallbackKind, ts });
+
+/** wicked-core#925: the reason a governed unit's refusal carries, opened by the engine's cause. */
+const refusalReason = (cause: string): string =>
+  `${cause}; NOT falling back to the single-shot wrapped carrier: the unit is governed, and 'pi' is governed only on its ACP carrier (crew#998)`;
 
 // ── 1. Signal-log write path ──────────────────────────────────────────────────
 
@@ -84,6 +88,31 @@ describe('SeatHealthTracker acpFallback(session_died) correlation (crew#411)', (
 
     tracker.ingest(acpFallbackEvent('claude', 'binary_unavailable', Date.now()));
 
+    expect(logs).toHaveLength(0);
+  });
+
+  it('correlates a GOVERNED worker death (wicked-core#925: governed_requires_acp after a session death)', () => {
+    const T = Date.now();
+    for (const cause of ["[wicked-core] ACP session exited for 'pi'", "[wicked-core] ACP error for 'pi' (broken pipe)"]) {
+      const signalLog = new DaemonSignalLog();
+      const logs: string[] = [];
+      const tracker = new SeatHealthTracker({ signalLog, log: (m) => logs.push(m) });
+      signalLog.record('SIGTERM', T - 1_000);
+      tracker.ingest(acpFallbackEvent('pi', 'governed_requires_acp', T, refusalReason(cause)));
+      expect(logs).toHaveLength(1);
+      expect(logs[0]).toContain('acpFallback(governed_requires_acp) for pi');
+      expect(logs[0]).toContain('daemon also received SIGTERM');
+    }
+  });
+
+  it('does not correlate a governed refusal whose cause is not a session death (e.g. a startup failure)', () => {
+    const signalLog = new DaemonSignalLog();
+    const logs: string[] = [];
+    const tracker = new SeatHealthTracker({ signalLog, log: (m) => logs.push(m) });
+    signalLog.record('SIGTERM', Date.now());
+    tracker.ingest(
+      acpFallbackEvent('pi', 'governed_requires_acp', Date.now(), refusalReason("[wicked-core] ACP unavailable for 'pi' (spawn failed)")),
+    );
     expect(logs).toHaveLength(0);
   });
 });
