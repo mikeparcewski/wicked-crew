@@ -26,6 +26,9 @@ Bundles **wicked-studio 0.7.13**, the front door: the Desk as mission control (s
   - `work_admission` per scope (A5): includes the engine's launcher benches, so codex reads benched on repository jobs. It needs `Core.worktreeBenched` (wicked-core#920). On an older engine `work_admission` and `qe_reviewer` are absent; crew does not restate the rule.
   - `issues[]` (A6): coded problems, warnings and notes, most important first, with `$HOME`-form commands.
 
+### Fixed
+- **agent-acp-bridges 1.3.0: the pi seat's governance gate ships with the bridges again (#998).** `pi-governance` 0.1.0 is now a registry dependency of `agent-acp-bridges`. Since wicked-core#563 asks for the gate on every governed pi session (`WICKED_PI_GOVERNANCE=1`), and #915 had dropped the dependency, `wicked-pi` exited 126 on every run, pi-acp failed `session/new` ("Cannot call write after a stream was destroyed"), and every pi turn fell back to an ungoverned carrier. Measured on pi 1.1.0 with pi-acp 0.0.32 through `wicked-pi`: the session starts, and read, bash, edit and write each ask before they run. Reaches an install once `bridges-v1.3.0` is published (crew's `^1.2.0` range takes it); the engine half, refusing rather than running such a unit unchecked, is wicked-core's.
+
 ### Changed
 - **Sign-in copy points at the Agents page, not the System page (A7).**
 - **A live sign-in check that answers after a seat's own "not logged in" refusal now clears that refusal.** Before this, the refusal outranked the fresh check for up to 30 minutes, so a seat the operator had just signed in still read signed out.

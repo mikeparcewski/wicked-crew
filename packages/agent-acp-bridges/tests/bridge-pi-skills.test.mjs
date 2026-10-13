@@ -280,12 +280,33 @@ describe('wicked-pi governance gate', () => {
     expect(() => piGovernanceFlags({ [PI_GOVERNANCE_ENV]: '1' }, missing)).toThrow(/pi-governance extension was not found/);
   });
 
-  // The package is not a dependency until pi-governance is on the npm registry (npm 12 refuses a
-  // tarball-URL dependency: EALLOWREMOTE). Checked wherever it is installed.
-  it.skipIf(bundledGovernanceExtension() === null)('the bundled package resolves to the gate file', () => {
+  // wicked-crew#998: wicked-core asks for the gate on every governed pi session (core#563), so the
+  // gate must ship with this package. Without the dependency `wicked-pi` exited 126 on every rig
+  // run, pi-acp failed `session/new`, and every pi turn fell back to an ungoverned carrier.
+  it('declares pi-governance as a registry dependency', () => {
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+    expect(pkg.dependencies?.['pi-governance']).toMatch(/^\^?\d+\.\d+\.\d+$/);
+  });
+
+  it('the bundled package resolves to a gate file that exists', () => {
     const p = bundledGovernanceExtension();
     expect(p).not.toBeNull();
     expect(p.replace(/\\/g, '/')).toMatch(/pi-governance\/extensions\/pi-governance\.js$/);
+    expect(existsSync(p)).toBe(true);
+  });
+
+  it.skipIf(!posix)('on with only the bundled gate: pi starts with that gate as its only extension', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wicked-pi-gov-'));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+    const record = join(dir, 'argv.json');
+    const { bin } = stubPi(`require('fs').writeFileSync(${JSON.stringify(record)}, JSON.stringify(process.argv.slice(2))); process.exit(0);`);
+    const env = { ...process.env, WICKED_PI_BINARY: bin, [PI_GOVERNANCE_ENV]: '1' };
+    delete env[PI_GOVERNANCE_EXTENSION_ENV];
+    delete env.WICKED_PI_SKILL_DIRS;
+    const code = await runPiLauncher(['--mode', 'rpc', '--no-themes'], env);
+    expect(code).toBe(0);
+    const argv = JSON.parse(readFileSync(record, 'utf8'));
+    expect(argv).toEqual(['--no-extensions', '-e', bundledGovernanceExtension(), '--mode', 'rpc', '--no-themes']);
   });
 
   it.skipIf(!posix)('on with no gate: the launcher exits 126 with a named refusal and pi never starts', async () => {
