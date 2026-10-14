@@ -7984,6 +7984,19 @@ export interface DemoView {
   seats: { recorder: string | null; reviewer: string | null };
   /** The script says which data is synthetic. */
   syntheticLabelled: boolean;
+  /** The wicked-interactive document made from this run's demo (`POST /runs/:id/demo/document`), which the video
+   *  editor re-cuts through `/projects/:projectId/interactive/d/:docId/api/demo/*`; null until made. ABSENT from a
+   *  daemon before api-types 0.119.0. */
+  document?: { projectId: string; docId: string } | null;
+}
+
+/** `POST /runs/:id/demo/document` → 200 (idempotent: `created:false` when it was made before). 404 not a demo run
+ *  or no such project; 409 the run has not completed (or been cancelled) yet, or a chapter without a recorded segment; 502 the interactive
+ *  bridge refused it; 503 the bridge is unavailable. */
+export interface DemoDocumentResponse {
+  projectId: string;
+  docId: string;
+  created: boolean;
 }
 
 /** What `POST /runs/:id/demo/export` makes (EP-C3; api-types 0.72.0). The MP4 itself needs no export: download `video.path`. */

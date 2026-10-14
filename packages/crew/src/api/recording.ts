@@ -62,6 +62,7 @@ import { extname, join, relative, resolve, sep } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type {
+  DemoDocumentResponse,
   DemoChapter,
   DemoExportFormat,
   DemoExportResponse,
@@ -201,6 +202,8 @@ export const DEMO_GIF_FILTER =
 
 /** The stages an export may run in: no worker of the run is running, so none can write the root. */
 const DEMO_EXPORT_STAGES: ReadonlySet<DemoStage> = new Set<DemoStage>(['review_gate', 'done', 'failed']);
+/** Session statuses that never resume (POST /runs/:id/resume refuses exactly these): the root is no longer written. */
+const DEMO_DOCUMENT_STATUSES: ReadonlySet<string> = new Set(['completed', 'cancelled']);
 
 /** What each export writes, inside the run's `demo-video/`. */
 const DEMO_EXPORT_FILE: Readonly<Record<DemoExportFormat, string>> = { gif: 'demo.gif', poster: 'poster.jpg' };
@@ -575,7 +578,196 @@ export async function demoView(adapter: CoreAdapter, view: SessionView): Promise
     review: { verdict, findings, text: reviewOutput, rejected: review?.status === 'rejected' },
     seats: { recorder: record?.assigned_cli ?? null, reviewer: review?.assigned_cli ?? null },
     syntheticLabelled: script !== null && /synthetic/i.test(script),
+    document: await demoDocumentLink(runId),
   };
+}
+
+// ── The run's demo as an editable document ──────────────────────────────────────────────────────────────────
+// `POST /runs/:id/demo/document` imports the run's recorded segments into a wicked-interactive document (one
+// take per chapter, its title and blurb, the brief's URL), so the video editor can re-cut it with E1's API.
+// The link lives in crew's state home, never in the run root: the run's own worker can write there.
+
+/** Under the state home's registered `daemon-` prefix (state-home-registry.ts): a top-level name the worker
+ *  Read fence classifies, so the file never refuses a launch. Its temp sidecars share the prefix. */
+export const DEMO_DOCS_FILE = 'daemon-demo-documents.json';
+const DOC_ID = /^[a-z0-9][a-z0-9-]{0,63}$/u;
+const IMPORT_KEY = /^[a-z0-9][a-z0-9-]{0,47}$/u;
+/** A segment is read and uploaded whole; one larger than this is refused rather than buffered. */
+const SEGMENT_MAX_BYTES = 256 * 1024 * 1024;
+
+type DemoDocLink = NonNullable<DemoView['document']>;
+
+async function readDemoDocs(): Promise<Record<string, DemoDocLink>> {
+  try {
+    const raw = JSON.parse(await fsp.readFile(join(crewStateHome(), DEMO_DOCS_FILE), 'utf8')) as unknown;
+    return raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, DemoDocLink>) : {};
+  } catch {
+    return {};
+  }
+}
+
+/** The run's linked document, when one was made (and still reads as one). */
+export async function demoDocumentLink(runId: string): Promise<DemoDocLink | null> {
+  const link = (await readDemoDocs())[runId];
+  return link !== undefined && typeof link.projectId === 'string' && typeof link.docId === 'string' && DOC_ID.test(link.docId)
+    ? { projectId: link.projectId, docId: link.docId }
+    : null;
+}
+
+/** One writer for the links file across every run: each write reads, adds and renames inside this chain, so two
+ *  runs' links never overwrite each other. */
+let demoDocsWrites: Promise<unknown> = Promise.resolve();
+
+function writeDemoDocLink(runId: string, link: DemoDocLink): Promise<void> {
+  const write = demoDocsWrites.then(async () => {
+    const all = await readDemoDocs();
+    all[runId] = link;
+    const path = join(crewStateHome(), DEMO_DOCS_FILE);
+    const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+    await fsp.mkdir(crewStateHome(), { recursive: true });
+    try {
+      await fsp.writeFile(tmp, JSON.stringify(all, null, 2), 'utf8');
+      await fsp.rename(tmp, path);
+    } finally {
+      await fsp.rm(tmp, { force: true });
+    }
+  });
+  demoDocsWrites = write.catch(() => undefined);
+  return write;
+}
+
+/** Thrown for a segment that is not a plain file inside the run root (or changed while it was read). */
+class SegmentReadError extends Error {}
+
+/**
+ * A chapter's segment bytes, read like `readStoryline`: no link on the way (`demo-video`, `segments`, the
+ * chapter directory, the file), the directory's real path pinned under the root's, the file opened O_NOFOLLOW and
+ * at most {@link SEGMENT_MAX_BYTES}, and the inode that was read re-checked at the pinned path afterwards — the
+ * run's worker can write the root, so a swap between the check and the open is refused, never followed out.
+ */
+async function readSegment(root: string, key: string, maxBytes = SEGMENT_MAX_BYTES): Promise<Buffer> {
+  const parts = ['demo-video', 'segments', key];
+  let p = root;
+  for (const part of parts) {
+    p = join(p, part);
+    const st = await fsp.lstat(p).catch(() => null);
+    if (st === null || st.isSymbolicLink() || !st.isDirectory()) throw new SegmentReadError(`chapter ${key} has no recorded segment yet`);
+  }
+  const dir = p;
+  const file = join(dir, 'segment.mp4');
+  const expected = join(await fsp.realpath(root), ...parts);
+  if ((await fsp.realpath(dir)) !== expected) throw new SegmentReadError(`chapter ${key}'s segment resolves outside the demo root`);
+  const fh = await fsp.open(file, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0)).catch(() => null);
+  if (fh === null) throw new SegmentReadError(`chapter ${key} has no recorded segment yet`);
+  try {
+    const st = await fh.stat();
+    if (!st.isFile() || st.size === 0) throw new SegmentReadError(`chapter ${key} has no recorded segment yet`);
+    if (st.size > maxBytes) throw new SegmentReadError(`chapter ${key}'s segment is over ${maxBytes} bytes`);
+    // A bounded read: never more than the size fstat reported (+1 to see growth), whatever the file does meanwhile.
+    const buf = Buffer.alloc(st.size + 1);
+    let n = 0;
+    for (;;) {
+      const { bytesRead } = await fh.read(buf, n, buf.length - n, n);
+      if (bytesRead === 0) break;
+      n += bytesRead;
+      if (n > st.size) break;
+    }
+    const bytes = buf.subarray(0, n);
+    const after = await fsp.lstat(file).catch(() => null);
+    if (n !== st.size || after === null || after.ino !== st.ino || after.dev !== st.dev || (await fsp.realpath(dir)) !== expected) {
+      throw new SegmentReadError(`chapter ${key}'s segment changed while it was read`);
+    }
+    return bytes;
+  } finally {
+    await fh.close();
+  }
+}
+
+/** One call to the project's bridge: JSON or raw bytes in, the status and parsed JSON body out. */
+export type BridgeCall = (method: 'POST' | 'PUT', path: string, body: Buffer | Record<string, unknown>) => Promise<{ status: number; body: Record<string, unknown> }>;
+
+export interface DemoDocumentDeps {
+  /** The project's bridge (reuse-or-start), as a caller of its HTTP surface; null = no such project. */
+  bridgeFor: (projectId: string) => Promise<BridgeCall | null>;
+  /** The per-segment read cap (default {@link SEGMENT_MAX_BYTES}). */
+  segmentMaxBytes?: number;
+}
+
+/** Make (once) and link the run's demo document. */
+export async function makeDemoDocument(view: SessionView, deps: DemoDocumentDeps): Promise<{ status: number; body: DemoDocumentResponse | { error: string } }> {
+  const runId = view.session.id;
+  const existing = await demoDocumentLink(runId);
+  if (existing !== null) return { status: 200, body: { ...existing, created: false } };
+  // Only from a run that can never run again: completed or cancelled. No worker of it is alive, or can be resumed,
+  // to write the root while it is read — a review gate's send-back or a failed run's resume restarts the recorder,
+  // which could swap a segment's directory mid-read (codex on #1013).
+  if (!DEMO_DOCUMENT_STATUSES.has(view.session.status)) return { status: 409, body: { error: 'a demo becomes a document once its run has completed (or was cancelled)' } };
+  const root = await existingDemoRootDir(runId);
+  const chapters = parseChapters(await readText(root, 'chapters.json'));
+  if (chapters.length === 0) return { status: 409, body: { error: 'the demo has no chapters to import' } };
+  for (const c of chapters) {
+    if (!IMPORT_KEY.test(c.key)) return { status: 409, body: { error: `chapter key ${JSON.stringify(c.key)} cannot name a take` } };
+    const size = await fileSize(root, `demo-video/segments/${c.key}/segment.mp4`);
+    if (size === null || size === 0) return { status: 409, body: { error: `chapter ${c.key} has no recorded segment yet` } };
+  }
+  const projectId = view.session.project_id ?? UNFILED_PROJECT;
+  const call = await deps.bridgeFor(projectId);
+  if (call === null) return { status: 404, body: { error: `Project ${projectId} not found` } };
+  const docId = `demo-${runId.replace(/[^a-z0-9]/giu, '').toLowerCase().slice(0, 12)}`;
+  const { url } = briefFields(await readText(root, 'BRIEF.md'));
+  const title = `Demo of ${url ?? 'the app'}`.replace(/[\r\n]+/gu, ' ').slice(0, 80);
+  const placeholder = `<main><h1>${title.replace(/[&<>"]/gu, '')}</h1><p>The run's demo, imported for editing.</p></main>`;
+  const created = await call('POST', '/api/docs', { name: docId, html: placeholder, ...(projectId !== UNFILED_PROJECT ? { project: projectId } : {}) });
+  if (created.status !== 200 && created.status !== 409) return { status: 502, body: { error: `interactive refused the document (${created.status}): ${String(created.body['error'] ?? '')}` } };
+  for (const c of chapters) {
+    let bytes: Buffer;
+    try {
+      bytes = await readSegment(root, c.key, deps.segmentMaxBytes);
+    } catch (e) {
+      if (e instanceof SegmentReadError) return { status: 409, body: { error: e.message } };
+      throw e;
+    }
+    const staged = await call('PUT', `/d/${encodeURIComponent(docId)}/api/demo/import/${encodeURIComponent(c.key)}`, bytes);
+    // 409 cut_exists: an earlier attempt imported it already; the link below is all that is missing.
+    if (staged.status === 409 && staged.body['error'] === 'cut_exists') break;
+    if (staged.status !== 200) return { status: 502, body: { error: `interactive refused chapter ${c.key} (${staged.status}): ${String(staged.body['error'] ?? '')}` } };
+  }
+  const imported = await call('POST', `/d/${encodeURIComponent(docId)}/api/demo/import`, {
+    title,
+    ...(url !== null ? { url } : {}),
+    chapters: chapters.map((c) => ({ id: c.key, title: c.title.replace(/[\r\n]+/gu, ' ').slice(0, 80) || c.key, ...(c.blurb ? { say: c.blurb.slice(0, 2000) } : {}) })),
+  });
+  if (imported.status !== 200 && !(imported.status === 409 && imported.body['error'] === 'cut_exists')) {
+    return { status: 502, body: { error: `interactive refused the import (${imported.status}): ${String(imported.body['error'] ?? '')}` } };
+  }
+  const link = { projectId, docId };
+  await writeDemoDocLink(runId, link);
+  return { status: 200, body: { ...link, created: true } };
+}
+
+/** `POST /runs/:id/demo/document`, registered where the bridge pool exists. One make per run at a time. */
+export function registerDemoDocumentRoute(app: FastifyInstance, adapter: CoreAdapter, deps: DemoDocumentDeps): void {
+  const inFlight = new Map<string, Promise<{ status: number; body: DemoDocumentResponse | { error: string } }>>();
+  app.post(
+    `${V}/runs/:id/demo/document`,
+    { config: { manifest: { responseType: 'DemoDocumentResponse', statusCodes: [200, 404, 409, 502, 503] } } },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const views = await adapter.sessionsDetail();
+      const run = views.find((v) => v.session.id === id);
+      if (run === undefined || !isDemoRun(run)) return reply.code(404).send({ error: 'no demo run with that id' });
+      let pending = inFlight.get(id);
+      if (pending === undefined) {
+        // A bridge that will not start (or a transport failure mid-import) is a 503 with its reason, never a 500.
+        pending = makeDemoDocument(run, deps)
+          .catch((e: unknown) => ({ status: 503, body: { error: `the interactive bridge is unavailable: ${e instanceof Error ? e.message : String(e)}` } }))
+          .finally(() => inFlight.delete(id));
+        inFlight.set(id, pending);
+      }
+      const answer = await pending;
+      return reply.code(answer.status).send(answer.body);
+    },
+  );
 }
 
 /** `path` resolved inside `root` (symlinks included), or `null` when it would leave it. */

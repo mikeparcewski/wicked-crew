@@ -18,6 +18,7 @@
 
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
+import { DEMO_DOCS_FILE } from '../src/api/recording.js';
 import { lstatSync, mkdtempSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative } from 'node:path';
@@ -101,7 +102,7 @@ const STATE_HOME_JOIN_RE =
   /join\(\s*(?:crewStateHome\(\)|defaultStateDir\(\)|crewStateDir|stateHome\(\)|stateHomeOfDb\([^)]*\))\s*,\s*(?:'([^']+)'|"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))/g;
 
 /** Identifiers a state-home join may name instead of a literal — resolved here so the audit stays exact. */
-const KNOWN_CONSTANTS: Record<string, string> = { SKILLS_DIRNAME, REPO_GRAPHS_DIRNAME };
+const KNOWN_CONSTANTS: Record<string, string> = { SKILLS_DIRNAME, REPO_GRAPHS_DIRNAME, DEMO_DOCS_FILE };
 
 /**
  * Crew-owned entries whose writer crew deleted, kept in the registry so a host that already has them

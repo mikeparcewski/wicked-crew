@@ -111,7 +111,8 @@ import { inventoryComplete, parseInventoryClaims, type InventoryClaim } from '..
 import type { RunInventoryResponse } from 'wicked-crew-api-types';
 import { ApproveEditSchema, approveEdited, captureLaunchRoots, editInFlight, FileProposalSchema, registerCaptureRoutes } from './capture.js';
 import { registerTestingRoutes } from './testing.js';
-import { DEMO_PRESET, demoLaunchRoots, registerDemoRoutes, registerWalkthroughRoutes, walkthroughAcceptance } from './recording.js';
+import { DEMO_PRESET, demoLaunchRoots, registerDemoDocumentRoute, registerDemoRoutes, registerWalkthroughRoutes, walkthroughAcceptance, type BridgeCall } from './recording.js';
+import { projectDocsRoot } from '../interactive/project-root.js';
 import { registerSkillsRoutes } from './skills.js';
 import { registerMcpRoutes } from './mcp.js';
 import type { McpBroker } from '../mcp/broker.js';
@@ -6917,6 +6918,33 @@ export function registerRoutes(
     // `createServer`.
     dropDocLedgerRows: runtime.dropDocLedgerRows ?? (() => ({ ok: true, removed_keys: [] })),
     log: (m) => app.log.warn(m),
+  });
+
+  // ── A demo run's video as an editable document (the video editor re-cuts it through E1's per-doc API) ──
+  registerDemoDocumentRoute(app, adapter, {
+    bridgeFor: async (projectId): Promise<BridgeCall | null> => {
+      const root = await projectDocsRoot(adapter, projectSettings, projectId);
+      if (root === null) return null;
+      const bridge = await interactiveBridges.ensure(root);
+      return async (method, path, body) => {
+        const raw = Buffer.isBuffer(body);
+        const res = await fetch(`http://${bridge.host}:${bridge.port}${path}`, {
+          method,
+          headers: { 'content-type': raw ? 'application/octet-stream' : 'application/json' },
+          body: raw ? new Uint8Array(body) : JSON.stringify(body),
+          // A segment upload or the import's render (ffmpeg) can take minutes on a loaded host.
+          signal: AbortSignal.timeout(600_000),
+        });
+        let parsed: Record<string, unknown> = {};
+        try {
+          const j: unknown = await res.json();
+          if (j !== null && typeof j === 'object' && !Array.isArray(j)) parsed = j as Record<string, unknown>;
+        } catch {
+          parsed = {};
+        }
+        return { status: res.status, body: parsed };
+      };
+    },
   });
 
   // ── Project-attributed docs list (crew#472) ──
