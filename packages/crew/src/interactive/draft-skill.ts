@@ -53,28 +53,61 @@ const WORD_NUMBERS: Record<string, number> = {
   twelve: 12,
 };
 
+/** The nouns a "N-page …" adjective must qualify for the count to be the DELIVERABLE's budget. */
+const DELIVERABLE_NOUNS =
+  /^(?:brochures?|leaflets?|flyers?|handouts?|docs?|documents?|summar(?:y|ies)|briefs?|briefings?|reports?|overviews?|memos?|letters?|pdfs?|one-pagers?|print(?:out)?s?|spreads?|booklets?|pamphlets?|datasheets?|data sheets?|fact ?sheets?|one-sheets?|sheets?|white ?papers?|papers?|explainers?|writeups?|write-ups?|guides?|proposals?|essays?|articles?|websites?|web ?pages?|landing pages?|pages?|sites?|posters?|newsletters?|handbooks?|manuals?|playbooks?|primers?|case stud(?:y|ies)|plans?|resumes?|cvs?|decks?)(?![\w-])/;
+
 /**
- * "two pages" / "2-page" / "a one-pager" in the brief wins (`--exact`, the skill's default reading
- * of a named count). Otherwise the style decides: a brochure/leaflet is 2 pages, a `doc` (memo/
- * prose) and a `web` page have NO page budget, a `ppt` deck's budget is its slide count — which the
- * outline fixes, so the clause tells the worker to pass the count it planned.
+ * "two pages" / "2-page brochure" / "a one-pager" in the brief wins (`--exact`, the skill's default
+ * reading of a named count). Otherwise the style decides: a brochure/leaflet is 2 pages, a `doc`
+ * (memo/prose) and a `web` page have NO page budget, a `ppt` deck's budget is its slide count — which
+ * the outline fixes, so the clause tells the worker to pass the count it planned.
+ *
+ * (crew#1005) A count in the brief is the budget only when it names the DELIVERABLE: the plural
+ * ("two pages", "4 printed pages"), a spaced singular ("fit it on one page"), or a "N-page" adjective
+ * on a document noun ("a 2-page printed brochure"). A "N-page" adjective on anything else describes
+ * something else — "the one-page tip calculator" is the app the deck is about — and is skipped. And
+ * a `ppt` deck never takes a PAGE count at all: its budget is the slide count (a Slides draft that
+ * read "one-page" came out as six thumbnails on one landscape page).
  */
 export function pageBudgetFor(brief: string, style: string): PageBudget {
+  if (style === 'ppt') return { pages: null, exact: false, source: 'style-default' };
   const text = brief.toLowerCase();
   const onePager = /\bone[- ]pager\b/.test(text);
   if (onePager) return { pages: 1, exact: true, source: 'brief' };
-  const m = /\b(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|twelve)[- ](?:printed |a4 |letter )?pages?\b/.exec(text);
-  if (m !== null) {
+  const count = /\b(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|twelve)([- ])(?:printed |a4 |letter )?(pages?)\b/g;
+  for (let m = count.exec(text); m !== null; m = count.exec(text)) {
     const raw = m[1]!;
     const n = /^\d+$/.test(raw) ? Number(raw) : WORD_NUMBERS[raw];
-    if (n !== undefined && n >= 1 && n <= 60) return { pages: n, exact: true, source: 'brief' };
+    if (n === undefined || n < 1 || n > 60) continue;
+    if (m[2] === '-' && m[3] === 'page') {
+      // The attributive form: a budget when nothing follows it ("a one-page.") or it qualifies a
+      // document noun within two words ("a 2-page printed brochure"); on any other noun it
+      // describes that thing ("the one-page tip calculator").
+      const after = text.slice(m.index + m[0].length).trimStart();
+      // The noun may START in either of the next two words and run on (a compound such as
+      // "printed fact sheet"); a hyphen continues the compound adjective ("one-page-only"), so it
+      // is never the end of the phrase.
+      // codex r2: only a closing mark ends the phrase (an opening quote or parenthesis does not),
+      // and the noun is looked for only within the same clause, opening marks stripped.
+      const clause = after.split(/[.,;:!?]/)[0] ?? '';
+      const next = clause
+        .split(/\s+/)
+        .map((w) => w.replace(/^[("'\u201c\u2018[]+|[)"'\u201d\u2019\],]+$/g, ''))
+        .filter((w) => w !== '')
+        .slice(0, 4);
+      // A straight quote may open as well as close, so only unambiguous closing marks end it.
+      const endsHere = after === '' || /^[.,;:!?)\]\u201d\u2019]/.test(after);
+      const namesDeliverable = [0, 1].some((i) => i < next.length && DELIVERABLE_NOUNS.test(next.slice(i).join(' ')));
+      if (!endsHere && !namesDeliverable) continue;
+    }
+    return { pages: n, exact: true, source: 'brief' };
   }
   switch (style) {
     case 'brochure':
       return { pages: 2, exact: true, source: 'style-default' };
     case 'web':
     case 'doc':
-    case 'ppt':
       return { pages: null, exact: false, source: 'style-default' };
     default:
       return { pages: null, exact: false, source: 'unknown' };
