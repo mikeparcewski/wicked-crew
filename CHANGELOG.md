@@ -11,6 +11,15 @@ mentioned only where a daemon release depends on them.
 ## [Unreleased]
 
 - **The Agents roster no longer flips a signed-in agent to "unknown", or its version to "not reported", when a check is slow.** On a loaded host, a seat's auth-status command (15 s bound) or its `--version` (10 s bound) can time out. Before, a check that could not tell replaced the last real answer, so `GET /roster` alternated between `signed_in` and `unknown`, and a version read `null` for a whole 10-minute TTL. Studio showed "Unknown" and "Not reported" while other reads said signed in. Now a check that could not tell keeps the seat's last definite answer and its time (`probed_at`, `checked_at`), and the check is retried on the short TTL: 30 s for sign-in, 2 min for versions. The answer is kept for at most 30 min (sign-in) or 60 min (version), counted from when it was given. Past that window a kept answer is not served, even before the next check lands, and the roster says it could not tell. (An answer that is merely stale, with no failed check since, keeps the existing rule: it is served while its background refresh runs.) A definite answer, signed out included, replaces a kept one at once. A binary that is no longer on PATH is never covered by a kept version. `GET /roster?refresh=<key>` answers `timed_out`, not `probed`, when the check it ran could not tell.
+- **A terminal's first output reaches the browser that opens it (wicked-core C6).** The per-terminal
+  socket hub dropped every frame for a terminal whose browser socket had not attached yet. A login
+  container prints its sign-in link and code the moment it starts, while studio opens
+  `/ws/terminals/:id` only after the `POST /seats/:cli/container-login` that created it returns —
+  seconds later on a loaded host — so the user saw an empty terminal and never got the link. The hub
+  now holds a terminal's output until its socket attaches (bounded: 64 KiB per terminal, 64
+  terminals) and replays it in order. A socket that attaches to a terminal that already exited is
+  closed at once (exits are remembered apart from the output holds), and one the engine holds no
+  terminal for is closed after a short grace, instead of leaving the sign-in dialog open.
 
 ## [0.11.0] — 2026-10-14
 
