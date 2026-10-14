@@ -10,7 +10,17 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-10-14
+
+A minor release: QE acceptance can be turned off per daemon (#1015, `wicked-crew-api-types` 0.120.0), on the wicked-core-ts 0.11.0 engine, where container seats run on the agent's own sign-in (C6), with the C6 sign-in link fix, a steadier Agents roster and an editor-pack conformance cap that fits a slow host.
+
+### Added
 - **QE acceptance can be turned off for a daemon (`SystemSettings.qeAcceptance: 'required' | 'off'`, `GET /health.capabilities.qeAcceptance`, `wicked-crew-api-types` 0.120.0).** `'required'` is the default (an absent or unknown value reads the same). With `'off'`, a launch of a workflow that requires QE acceptance, and that neither skips nor forces it itself, is skipped through the engine's own skip, with a reason that names the setting. `POST /runs` reads the setting once and hands the skip to the engine with the launch. Every other path that launches through `CoreAdapter.launchRun` (chats, drafts, standing orders, testing) gets the same skip there. The run, every gate and the delivery stay labelled "QE acceptance skipped by operator: …", and the deliver gate and a post-hoc lift read a skip, not a refusal. Whether a workflow requires QE acceptance is resolved the way the engine resolves it: a preset of that name first (a built-in by the engine's table, a saved one by its own `required_instruments`, in the launch's project), then the def. A workflow that does not require QE acceptance gets no skip, because the engine refuses a skip on such a run. A launch's `forceQeAcceptance: true` still requires it. `deliverGate: 'auto'` on a QE workflow is accepted while the setting is off. `PUT /settings` accepts only `'required'` or `'off'` (400 otherwise) and only from a person (403 for an agent or system actor). `GET /workflows` now gives the built-in QE presets (`feature`, `bug`, `migration`, `mcp-server`, `editor-plugin`) their `required_instruments`, as the engine's own table sets them. Before, they were served without it, so studio never offered its QE choice for them. Crew's mirror of that table gains `editor-plugin`, which the engine has required QE acceptance for since core-ts 0.10.0. Not covered: launches the engine takes without crew. These are campaign nodes (the engine's own `RunSpec` carries no QE word) and `wicked.crew.run.requested` bus requests.
+
+### Changed
+- **deps:** `wicked-core-ts` `^0.11.0` (a minor): under `WICKED_SEAT_FLOOR=container` a seat runs on the credential the user signed in with in the agent's login container, the `WICKED_SEAT_CREDENTIAL_<CLI>` override is removed, and an agent with no usable sign-in is refused before its seat starts (`agent_signed_out`, read as a "not signed in" seat refusal); a closed sign-in tab no longer blocks later sign-ins, and `seat-login argv copilot` refuses up front (wicked-core#948). The engine knows the `artifact.theme` editor permission, so protocol-2 first-party editor cards start (wicked-core#946), and the built-in `editor-plugin` workflow builds protocol 2 (wicked-core#947).
+
+### Fixed
 - **The Agents roster no longer flips a signed-in agent to "unknown", or its version to "not reported", when a check is slow.** On a loaded host, a seat's auth-status command (15 s bound) or its `--version` (10 s bound) can time out. Before, a check that could not tell replaced the last real answer, so `GET /roster` alternated between `signed_in` and `unknown`, and a version read `null` for a whole 10-minute TTL. Studio showed "Unknown" and "Not reported" while other reads said signed in. Now a check that could not tell keeps the seat's last definite answer and its time (`probed_at`, `checked_at`), and the check is retried on the short TTL: 30 s for sign-in, 2 min for versions. The answer is kept for at most 30 min (sign-in) or 60 min (version), counted from when it was given. Past that window a kept answer is not served, even before the next check lands, and the roster says it could not tell. (An answer that is merely stale, with no failed check since, keeps the existing rule: it is served while its background refresh runs.) A definite answer, signed out included, replaces a kept one at once. A binary that is no longer on PATH is never covered by a kept version. `GET /roster?refresh=<key>` answers `timed_out`, not `probed`, when the check it ran could not tell.
 - **A terminal's first output reaches the browser that opens it (wicked-core C6).** The per-terminal
   socket hub dropped every frame for a terminal whose browser socket had not attached yet. A login
@@ -4061,7 +4071,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.10.2...v0.11.0
 [0.10.2]: https://github.com/mikeparcewski/wicked-crew/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.10.0...v0.10.1
