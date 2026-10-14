@@ -11,19 +11,23 @@ import {
 } from '../src/events/terminals.js';
 import type { CoreEvent } from '../src/core/types.js';
 
-function fakeSocket(): { socket: WebSocket; sent: string[]; closed: () => boolean } {
+function fakeSocket(): { socket: WebSocket; sent: string[]; raw: Buffer[]; closed: () => boolean } {
   const sent: string[] = [];
+  const raw: Buffer[] = [];
   const state = { readyState: WebSocket.OPEN as number };
   const socket = {
     get readyState() {
       return state.readyState;
     },
-    send: (b: Buffer) => sent.push(b.toString('utf8')),
+    send: (b: Buffer) => {
+      raw.push(b);
+      sent.push(b.toString('utf8'));
+    },
     close: () => {
       state.readyState = WebSocket.CLOSING;
     },
   } as unknown as WebSocket;
-  return { socket, sent, closed: () => state.readyState !== WebSocket.OPEN };
+  return { socket, sent, raw, closed: () => state.readyState !== WebSocket.OPEN };
 }
 
 const out = (id: string, text: string): CoreEvent =>
@@ -143,6 +147,12 @@ describe('TerminalHub early output', () => {
     one.register('huge', h.socket);
     expect(h.sent.join('').length).toBe(EARLY_OUTPUT_MAX_BYTES);
     expect(h.sent.join('').endsWith('tail')).toBe(true);
+    // ...and holds a copy, not a view that keeps the whole decoded frame alive (codex c6-r6).
+    const big = new TerminalHub();
+    big.route(out('eight', 'z'.repeat(8 * EARLY_OUTPUT_MAX_BYTES)));
+    const e = fakeSocket();
+    big.register('eight', e.socket);
+    expect(e.raw[0]?.buffer.byteLength).toBeLessThan(2 * EARLY_OUTPUT_MAX_BYTES);
   });
 
   it('evicts a held exited terminal before a live one', () => {

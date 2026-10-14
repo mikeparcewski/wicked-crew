@@ -172,9 +172,12 @@ export class TerminalHub {
       this.early.set(id, held);
     }
     const whole = Buffer.from(event.bytesB64, 'base64');
-    // One frame past the bound keeps only its tail (agy c6-r1): the bound holds per terminal.
+    // One frame past the bound keeps only a COPY of its tail (agy c6-r1, codex c6-r6): a subarray
+    // would keep the whole decoded frame alive behind 64 KiB of accounting.
     const chunk =
-      whole.length > EARLY_OUTPUT_MAX_BYTES ? whole.subarray(whole.length - EARLY_OUTPUT_MAX_BYTES) : whole;
+      whole.length > EARLY_OUTPUT_MAX_BYTES
+        ? Buffer.from(whole.subarray(whole.length - EARLY_OUTPUT_MAX_BYTES))
+        : whole;
     held.chunks.push(chunk);
     held.bytes += chunk.length;
     while (held.bytes > EARLY_OUTPUT_MAX_BYTES && held.chunks.length > 1) {
