@@ -92,8 +92,62 @@ export class PackInstallError extends Error {
   }
 }
 
-/** The install-time conformance run: the pack root in, garden's report out. */
-export type ConformanceRunner = (packRoot: string) => Promise<EditorConformanceSummary>;
+/** The install-time conformance run: the pack root in, garden's report out; `editors` (the manifest's
+ *  entries) sizes the run's overall cap. */
+export type ConformanceRunner = (packRoot: string, editors?: readonly Record<string, unknown>[]) => Promise<EditorConformanceSummary>;
+
+/** garden's bound on each load of the conformance host page (scripts/editor/conformance.py `--timeout`):
+ *  this env var, read by garden's runner itself in the daemon's environment, else 120 s. */
+export const CONFORMANCE_TIMEOUT_ENV = 'WG_EDITOR_CONFORMANCE_TIMEOUT';
+export const DEFAULT_CONFORMANCE_LOAD_S = 120;
+
+/**
+ * The per-load bound the runner will use, read the way garden's `load_timeout` reads it: Python's
+ * `float()` of the env value (surrounding spaces and digit-group underscores allowed, `1_000` = 1000),
+ * valid only within 5-1800 s. A value garden refuses fails its run at once, so the default stands.
+ */
+export function conformanceLoadSeconds(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = (env[CONFORMANCE_TIMEOUT_ENV] ?? '').trim();
+  if (raw === '' || !/^[+-]?(\d(_?\d)*(\.(\d(_?\d)*)?)?|\.\d(_?\d)*)([eE][+-]?\d(_?\d)*)?$/.test(raw)) return DEFAULT_CONFORMANCE_LOAD_S;
+  const v = Number(raw.replace(/_/g, ''));
+  return Number.isFinite(v) && v >= 5 && v <= 1800 ? v : DEFAULT_CONFORMANCE_LOAD_S;
+}
+
+/** One editor's manifest surfaces, as far as the run's length depends on them. */
+function surfaceCounts(entry: Record<string, unknown>): { actions: number; tabs: number; pluginTabs: number } {
+  const surfaces = entry['surfaces'];
+  const o = typeof surfaces === 'object' && surfaces !== null ? (surfaces as Record<string, unknown>) : {};
+  const card = typeof o['card'] === 'object' && o['card'] !== null ? (o['card'] as Record<string, unknown>) : {};
+  const options = typeof o['options'] === 'object' && o['options'] !== null ? (o['options'] as Record<string, unknown>) : {};
+  const actions = Array.isArray(card['actions']) ? card['actions'].length : 0;
+  const tabs = Array.isArray(options['tabs']) ? options['tabs'] : [];
+  const pluginTabs = tabs.filter((t) => typeof t === 'object' && t !== null && (t as Record<string, unknown>)['render'] === 'plugin').length;
+  return { actions, tabs: tabs.length, pluginTabs };
+}
+
+/**
+ * The overall cap on one conformance run, derived from garden's per-load bound so the two never
+ * disagree. Per editor (garden scripts/editor/conformance.py):
+ *  - host-page loads, each allowed the whole bound: 2 (the cases, then the hash-pinned reload); for an
+ *    editor that speaks protocol 2, 1 more for the card (full screen reuses it) and 1 per plugin-rendered
+ *    options tab (at least 1 when it declares options);
+ *  - the cases' fixed waits (~30 s) plus each sequential answer the host allows up to 2 s: every card
+ *    action, every options tab, and the two full-screen mode changes;
+ * plus 60 s for the browser start. One protocol-2 editor with no surfaces, at the default 120 s:
+ * 60 + (30 + 2 x 2) + 3 x 120 = 454 s. A fixed 240 s cap killed a correct install at 249 s.
+ */
+export function conformanceCapMs(editors: readonly Record<string, unknown>[], loadS: number): number {
+  const list = editors.length > 0 ? editors : [{}];
+  let seconds = 60;
+  for (const e of list) {
+    const speaks2 = requiredCases(e).length > CONFORMANCE_CASES.length;
+    const c = surfaceCounts(e);
+    const loads = 2 + (speaks2 ? 1 + (c.tabs > 0 ? Math.max(1, c.pluginTabs) : 0) : 0);
+    const answers = speaks2 ? c.actions + c.tabs + 2 : 0;
+    seconds += 30 + 2 * answers + loads * loadS;
+  }
+  return Math.round(seconds * 1000);
+}
 
 /** The cases a conformance run must report passing for every editor (garden's runner: 0-6 and 8-12). */
 export const CONFORMANCE_CASES = ['0-manifest', '1-handshake', '2-sizes', '3-no-network', '4-permissions', '5-typing', '6-forwarding', '8-strict-input', '9-liveness', '10-keyboard', '11-theme', '12-hash-pinned'] as const;
@@ -114,19 +168,28 @@ export function requiredCases(entry: Record<string, unknown>): string[] {
  * --host-url <this daemon> --json`. A missing garden or runner, no daemon URL, no browser, or an
  * unreadable report is a FAILED run with the reason — never a pass.
  */
-export function gardenConformance(gardenRoot: string | null, hostUrl: () => string | null): ConformanceRunner {
+export function gardenConformance(
+  gardenRoot: string | null,
+  hostUrl: () => string | null,
+  deps: { env?: NodeJS.ProcessEnv; exec?: typeof execCapped } = {},
+): ConformanceRunner {
   const failed = (error: string): EditorConformanceSummary => ({ ok: false, at: new Date().toISOString(), editors: [], error });
-  return async (packRoot) => {
+  const exec = deps.exec ?? execCapped;
+  return async (packRoot, editors = []) => {
     if (gardenRoot === null) return failed('no wicked-garden plugin found to run the editor conformance cases');
     const script = join(gardenRoot, 'scripts', 'editor', 'conformance.py');
     if (!existsSync(script)) return failed('this wicked-garden has no scripts/editor/conformance.py (needs the release with the editor-scaffold skill)');
     const host = hostUrl();
     if (host === null) return failed('this daemon does not know its own URL to serve the conformance host page');
     const args = [script, '--pack', packRoot, '--host-url', host, '--json'];
+    // garden's runner gets the very bound the cap was sized from (any spelling of the env var it would
+    // read differently, e.g. non-ASCII digits, cannot make the two disagree — codex r2).
+    const loadS = conformanceLoadSeconds(deps.env);
+    const childEnv: NodeJS.ProcessEnv = { ...(deps.env ?? process.env), [CONFORMANCE_TIMEOUT_ENV]: String(loadS) };
     let stdout = '';
     for (const bin of ['python3', 'python']) {
       try {
-        stdout = (await execCapped(bin, args, { timeout: 240_000, windowsHide: true })).stdout;
+        stdout = (await exec(bin, args, { timeout: conformanceCapMs(editors, loadS), windowsHide: true, env: childEnv })).stdout;
         break;
       } catch (err) {
         const e = err as NodeJS.ErrnoException & { stdout?: string };
@@ -269,7 +332,7 @@ export async function installPack(
   for (const id of ids) {
     if (deps.registry.get(id)?.firstParty === true) throw new PackInstallError(409, `${id} is a first-party editor's id`, verdict);
   }
-  const conformance = await deps.conformance(pack.root);
+  const conformance = await deps.conformance(pack.root, pack.editors);
   // The report counts only for the bytes being installed (codex r1): the run's own version and entry
   // hash must be the manifest's, which the registry then re-reads at that same hash.
   const missing = (e: Record<string, unknown>): string[] => {
