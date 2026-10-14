@@ -1017,6 +1017,8 @@ export interface RosterSeat {
    * an engine predating the field (serde omits `None`) and on seats with no known login flow.
    */
   login_invocation?: string;
+  /** Container seats sign in through the daemon's disposable login terminal. */
+  sign_in?: 'container';
   /**
    * The shell invocation that signs this seat OUT of its own configuration root (crew#615;
    * wicked-core#807 `AgenticCli.logout_invocation`, core-ts >= 0.7.43): the CLI's own documented
@@ -5180,7 +5182,8 @@ export interface DomainCoverage {
 
 /**
  * `POST /seats/:cli/logout` (crew#615): the PTY size for the terminal the daemon opens running the
- * seat's own `logout_invocation`. Both optional (default 100 x 30). `POST /seats/:cli/login` is
+ * seat's own `logout_invocation`, also used by `POST /seats/:cli/container-login` for the disposable
+ * login container. Both optional (default 100 x 30). `POST /seats/:cli/login` is
  * GONE from api-types 0.115.0 (DES-seats-page Q3): sign-in is a command the operator runs in their
  * own terminal (`RosterSeat.login_invocation`).
  */
@@ -5200,6 +5203,27 @@ export interface SeatSessionResponse {
   cli: string;
   /** `login` is no longer produced (api-types 0.115.0: the login route is gone). */
   action: 'login' | 'logout';
+}
+
+export interface SeatContainerLoginResponse {
+  terminalId: string;
+  cli: string;
+  action: 'sign_in';
+}
+
+export interface SeatContainerLoginOutcome {
+  cli: string;
+  ok: boolean;
+  files?: string[];
+  expires_at?: number | null;
+  error?: string;
+  /** ISO-8601 time of ingestion. */
+  at: string;
+}
+
+export interface SeatContainerLogoutResponse {
+  cli: string;
+  action: 'sign_out';
 }
 
 /** The open-terminal request body (`POST /terminals`, DES-TERMINAL-001 §6). */

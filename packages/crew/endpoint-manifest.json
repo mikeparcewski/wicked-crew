@@ -1762,6 +1762,39 @@
       "statusCodes": []
     },
     {
+      "method": "GET",
+      "path": "/api/v1/seats/:cli/container-login",
+      "requestType": null,
+      "responseType": "SeatContainerLoginOutcome",
+      "statusCodes": [
+        200,
+        404
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/seats/:cli/container-login",
+      "requestType": "SeatSessionBody",
+      "responseType": "SeatContainerLoginResponse",
+      "statusCodes": [
+        201,
+        400,
+        404,
+        502
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/seats/:cli/container-logout",
+      "requestType": null,
+      "responseType": "SeatContainerLogoutResponse",
+      "statusCodes": [
+        200,
+        404,
+        502
+      ]
+    },
+    {
       "method": "POST",
       "path": "/api/v1/seats/:cli/logout",
       "requestType": "SeatSessionBody",

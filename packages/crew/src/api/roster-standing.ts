@@ -34,6 +34,7 @@ import {
 import type { SeatHealthTracker } from './seat-health.js';
 import { signedInHeuristic } from './seat-signin.js';
 import { SeatProbe } from './seat-probe.js';
+import { SeatContainerStatus, isContainerLoginCli, isContainerSeatFloor } from './seat-container-login.js';
 import { seatGovernanceModes, type GovernanceScopeKind, type SeatGovernanceMode } from './seat-governance.js';
 import { seatStanding, chatSeatAdmission, type StandingSeat, type SeatStanding } from './seat-standing.js';
 import { seatVersion, seatVersions, type SeatVersionCache } from './seat-version.js';
@@ -42,6 +43,7 @@ import { seatVersion, seatVersions, type SeatVersionCache } from './seat-version
  *  (crew#645), awaited by a launch before it reads the roster, waits — bounded — for every seat's
  *  missing or stale login check, so an expired login reads `signed_out` before work is routed. */
 export type RosterWithStanding = (() => RosterSeat[]) & {
+  containerStatus?: SeatContainerStatus;
   ready?: () => Promise<void>;
   /** crew#615: re-run one seat's credential probe now (after a sign-in / sign-out terminal). */
   reprobe?: (seatKey: string) => void;
@@ -59,6 +61,7 @@ export type RecheckOutcome = 'probed' | 'timed_out' | 'not_probed';
 export const ROSTER_REFRESH_WAIT_MS = 20 * 1000;
 
 export interface RosterStandingDeps {
+  containerStatus?: SeatContainerStatus;
   /** The daemon's per-seat runtime health + council evidence (councilSeatFailed, auth refusals). */
   seatHealth: SeatHealthTracker;
   /** Seat sign-in presence probe — injectable so tests never read the developer's dotfiles.
@@ -105,6 +108,8 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
   const signedIn = deps.signedIn ?? signedInHeuristic;
   const registry = deps.registry ?? (() => CoreAdapter.roster());
   const env = deps.env ?? process.env;
+  const containerMode = (): boolean => isContainerSeatFloor(env);
+  const containerStatus = deps.containerStatus ?? new SeatContainerStatus();
   const probe =
     deps.probe !== undefined ? deps.probe : deps.signedIn === undefined && deps.registry === undefined ? new SeatProbe() : null;
   const versionPins =
@@ -126,6 +131,7 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
   };
   const accessor: RosterWithStanding = (): RosterSeat[] => {
     const root = liveRoot();
+    const container = containerMode();
     const seats = registry() as RosterSeat[];
     // A5: one engine call per read — the predicate takes the whole (engine-shaped) registry roster.
     let benchedOnBound: Map<string, string> | null = null;
@@ -142,7 +148,20 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
       // whose probe has not answered yet does not read `signed_in` off its file — a credential
       // file is not a working login (a moved worker home keeps `.claude.json` and loses the
       // keychain token) — it reads `unknown` until the probe answers.
-      const probed = probe?.read(key, root);
+      // Only a seat with a container login reads the broker (agy crew-r1: any other seat keeps its
+      // own check rather than waiting forever on a broker reading it can never get).
+      const containerSeat = container && isContainerLoginCli(key);
+      const broker = containerSeat ? containerStatus.read(key) : undefined;
+      const probed = containerSeat
+        ? broker === undefined
+          ? undefined
+          : {
+              signedIn: broker.signed_in,
+              check: 'status' as const,
+              probedAt: broker.probedAt,
+              detail: broker.reason ?? `broker credential ${broker.state}`,
+            }
+        : probe?.read(key, root);
       // A seat's own "no credential" report that its LIVE sign-in check answered AFTER is stale: the
       // operator signed in since (codex r1 on #996 — it otherwise outranked the fresh probe for 30 min).
       if (probed !== undefined && probed.signedIn === true && probed.check === 'live') {
@@ -156,13 +175,15 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
         seatHealth.clearRecentBench(key);
         recentBench = null;
       }
-      const heuristic = signedIn(key, root);
+      const heuristic = containerSeat ? null : signedIn(key, root);
       const signed =
-        probed !== undefined && probed.signedIn !== null
-          ? probed.signedIn
-          : probe?.probes(key) === true && heuristic === true
-            ? null
-            : heuristic;
+        containerSeat
+          ? broker?.signed_in ?? null
+          : probed !== undefined && probed.signedIn !== null
+            ? probed.signedIn
+            : probe?.probes(key) === true && heuristic === true
+              ? null
+              : heuristic;
       // (R5b, DES-L3 PR-3D) No crew-side council bench any more: the engine's per-run ballot ledger
       // (`session.benched_seats`) is the one bench, so there is no bench reading to pass and no
       // health reading to weigh — the roster's standing is the auth picture alone.
@@ -173,7 +194,7 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
         // worker's 401, an auth ACP fallback) overrides the file probe — `auth` flips, not only
         // `council_eligible`, and the evidence rides on the wire.
         authFailure,
-        probed ?? (probe?.probes(key) === true ? 'pending' : undefined),
+        probed ?? (containerSeat || probe?.probes(key) === true ? 'pending' : undefined),
         // The engine's own in-run bench of the seat, carried to this launch for a bounded window
         // (`seatBenched`, SEAT_BENCH_WINDOW_MS): a seat that reads signed in but refused its work
         // in a recent run is benched up front instead of being handed a unit again.
@@ -222,7 +243,7 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
               seat_eligible_for_work: (seat as { seat_eligible_for_work?: boolean }).seat_eligible_for_work,
               standing,
               recentBench,
-              loginPending: probed === undefined && probe?.probes(key) === true && authFailure === null,
+              loginPending: probed === undefined && (containerSeat || probe?.probes(key) === true) && authFailure === null,
               chatAdmission,
               worktreeBench: benchedOnBound.get(key) ?? null,
             };
@@ -230,6 +251,7 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
         ...seat,
         health,
         signed_in: signed,
+        ...(containerSeat ? { sign_in: 'container' as const } : {}),
         ...(versionPin !== undefined ? { version_pin: versionPin } : {}),
         ...standing,
         // ASK-C2: the admission an ASK applies (every chat is a path after ASK-C1): `unscoped` =
@@ -270,7 +292,8 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
       }),
     }));
   };
-  if (probe !== null) {
+  accessor.containerStatus = containerStatus;
+  if (probe !== null || containerMode()) {
     accessor.ready = async () => {
       let keys: string[];
       try {
@@ -278,12 +301,34 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
       } catch {
         return; // no roster: the launch reads (and reports) the same failure itself
       }
-      await probe.ensureFresh(keys, liveRoot());
+      if (containerMode()) {
+        await Promise.all(keys.filter(isContainerLoginCli).map((key) => containerStatus.refresh(key)));
+      } else {
+        await probe?.ensureFresh(keys, liveRoot());
+      }
     };
     accessor.reprobe = (seatKey: string) => {
-      void probe.refresh(seatKey, liveRoot());
+      if (containerMode()) {
+        containerStatus.invalidate(seatKey);
+        void containerStatus.refresh(seatKey);
+      } else {
+        void probe?.refresh(seatKey, liveRoot());
+      }
     };
     accessor.recheck = async (seatKey: string, waitMs: number): Promise<RecheckOutcome> => {
+      if (containerMode()) {
+        if (!isContainerLoginCli(seatKey)) return 'not_probed';
+        containerStatus.invalidate(seatKey);
+        let timer: NodeJS.Timeout | undefined;
+        const deadline = new Promise<'timed_out'>((resolve) => {
+          timer = setTimeout(() => resolve('timed_out'), waitMs);
+          timer.unref();
+        });
+        const outcome = await Promise.race([containerStatus.refreshFresh(seatKey).then(() => 'probed' as const), deadline]);
+        clearTimeout(timer);
+        return outcome;
+      }
+      if (probe === null) return 'not_probed';
       if (!probe.probes(seatKey)) return 'not_probed';
       const deadlineAt = Date.now() + waitMs;
       // `probed` must describe the worker home the answer is READ under: if `worker_config_root`

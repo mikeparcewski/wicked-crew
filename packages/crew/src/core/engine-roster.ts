@@ -37,6 +37,7 @@ export const CREW_ONLY_SEAT_FIELDS: ReadonlySet<string> = new Set([
   'governance_mode',
   'health',
   'signed_in',
+  'sign_in',
   'auth',
   'free_tier',
   'free_tier_source',
