@@ -133,9 +133,8 @@ import { REQUIRED_GARDEN_VERSION } from '../skills/plugin-source.js';
 import type { EvalRunStore } from './eval-store.js';
 import { engineRosterJson, noEligibleSeatBody, parseNoEligibleSeat } from '../core/engine-roster.js';
 import { launchAssuranceNotice } from '../core/assurance.js';
+import { launchRequiresQe, mayRequireQe, qeAcceptanceMode, qeSettingSkipReason } from '../core/qe-acceptance-setting.js';
 import {
-  QE_ACCEPTANCE,
-  QE_PRESETS,
   aggregateReceipt,
   postHocDeliveryAssurance,
   qeAcceptanceFromView,
@@ -1553,6 +1552,10 @@ export function registerRoutes(
   // spellings where the contract has no name, statusCodes list every code the route answers on
   // purpose. Declared on the highest-traffic run-lifecycle routes first; the manifest records
   // null / [] for the rest ("where declared", never invented). See src/api/endpoint-manifest.ts.
+  // The daemon's QE acceptance setting as read now ('required' when the settings cannot be read:
+  // fail closed, never off by accident).
+  const qeAcceptanceNow = async (): Promise<'required' | 'off'> =>
+    qeAcceptanceMode(await Promise.resolve().then(() => adapter.getSettings()).catch(() => null));
   app.get(`${V}/health`, { config: { manifest: { statusCodes: [200] } } }, async () => {
     const ping = await enginePing();
     // F-E2E-030: what this deployment can keep. A composer reads `capabilities.deliverGate`
@@ -1579,6 +1582,9 @@ export function registerRoutes(
       // QE-IN-APP-WORKFLOWS: `LaunchRunBody.skipQeAcceptance` / `forceQeAcceptance` reach an addon
       // that carries the QE decision; never an invented capability.
       qeAcceptanceOverride: typeof adapter.engineCapabilities === 'function' && addonSupportsQeOverride(),
+      // api-types 0.120.0: the daemon's QE acceptance setting, read per probe ('off' = every launch
+      // that requires QE acceptance skips it, labelled with the setting).
+      qeAcceptance: await qeAcceptanceNow(),
     };
     // wicked-core#411 / crew#497: the state-home blocker rides the health probe as a WARNING. The
     // daemon still SERVES (status stays ok — studio must load and show the blocker) but refuses to
@@ -2340,15 +2346,23 @@ export function registerRoutes(
     // F-E2E-030: only the explicit `'auto'` opts out of the engine's deliver gate. `'human'` and
     // an omitted field both leave `autoDeliver` off the input — the gate is the engine's default,
     // so the wire never has to say "gate me" to be gated.
+    // The daemon's QE acceptance setting, read ONCE for this launch: the deliverGate check below and
+    // the skip handed to the engine come from the same reading (core/qe-acceptance-setting.ts).
+    // An addon without the QE decision enforces none, so the setting has nothing to skip on it.
+    const qeMode = addonSupportsQeOverride() ? await qeAcceptanceNow() : 'required';
+    const qeRequired = b.deliverGate === 'auto' || qeMode === 'off' ? await launchRequiresQe(adapter, b.workflow, b.projectId) : false;
+    const settingSkip = qeSettingSkipReason(qeMode, { skipQeAcceptanceReason: b.skipQeAcceptance?.reason, forceQeAcceptance: b.forceQeAcceptance }, qeRequired);
     if (b.deliverGate === 'auto') {
       // wicked-core#850 EX-03: a workflow that requires QE acceptance delivers only through the deliver
       // gate, where crew checks the verdict. Unattended delivery would push before anyone could.
       // QE-IN-APP-WORKFLOWS: an explicit operator skip leaves no verdict to check, so it may. A name
       // the engine resolves to a built-in preset that requires QE acceptance is judged by that preset
       // (the engine resolves a preset before any def, so a def of the same name never speaks for it).
-      const required = b.workflow !== undefined ? adapter.getWorkflow(b.workflow)?.required_instruments : undefined;
-      const qeRequired = required?.includes(QE_ACCEPTANCE) === true || (b.workflow !== undefined && QE_PRESETS.has(b.workflow));
-      if (qeRequired && b.skipQeAcceptance === undefined) {
+      // The daemon's `qeAcceptance: 'off'` setting skips it the same way (resolved once, above, and
+      // handed to the engine with this launch), unless this launch forces QE acceptance.
+      // Refused on the CONSERVATIVE reading (a built-in QE name or a QE def counts even when a project
+      // preset shadows it now): only an explicit or setting skip lets QE work deliver unattended.
+      if (mayRequireQe(adapter, b.workflow, qeRequired) && b.skipQeAcceptance === undefined && settingSkip === undefined) {
         return reply.code(400).send({
           error:
             `workflow ${b.workflow} requires QE acceptance (required_instruments: qe_acceptance), so it delivers only ` +
@@ -2426,6 +2440,7 @@ export function registerRoutes(
     // QE-IN-APP-WORKFLOWS: the operator's explicit skip (with its reason) or force — forwarded only
     // when sent, never inferred.
     if (b.skipQeAcceptance !== undefined) input.skipQeAcceptanceReason = b.skipQeAcceptance.reason;
+    else if (settingSkip !== undefined) input.skipQeAcceptanceReason = settingSkip;
     if (b.forceQeAcceptance === true) input.forceQeAcceptance = true;
     // DES-L9 / crew#550 — REVISION: `revisesPr` names an OPEN same-repository pull request whose
     // head branch becomes the run's base (`baseRef`, crew-internal → the engine's
@@ -6113,6 +6128,19 @@ export function registerRoutes(
           .send({ error: "deliverDefault must be 'pr' or 'none'" });
       }
     }
+    // qeAcceptance (api-types 0.120.0): 'required' | 'off' only. 'off' skips QE acceptance on every
+    // launch that requires it (labelled with the setting), so a typo must be a 400, never a dropped key.
+    // Turning it off waives an assurance instrument on every launch after it, so only a PERSON may
+    // change it (the predicate the watch switches use); a worker's bearer gets 403.
+    if (Object.hasOwn(patch, 'qeAcceptance')) {
+      const q = patch.qeAcceptance;
+      if (q !== 'required' && q !== 'off') {
+        return reply.code(400).send({ error: "qeAcceptance must be 'required' or 'off'" });
+      }
+      if (!isHumanOperator(actorOf(req))) {
+        return reply.code(403).send({ error: 'Only a person can change QE acceptance (qeAcceptance); a worker or system actor cannot' });
+      }
+    }
     // onboardingAutoCapture (crew#552): whether a completed onboarding chains capture-learnings.
     if (Object.hasOwn(patch, 'onboardingAutoCapture') && typeof patch.onboardingAutoCapture !== 'boolean') {
       return reply.code(400).send({ error: 'onboardingAutoCapture must be true or false' });
@@ -6200,6 +6228,7 @@ export function registerRoutes(
       'workerStallEscalateAction',
       'workerStallMaxEscalations',
       'deliverDefault',
+      'qeAcceptance',
       'onboardingAutoCapture',
       'deliverIdentityLogin',
       'deliverIdentityByRepo',

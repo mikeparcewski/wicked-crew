@@ -68,6 +68,7 @@ const TERMINAL_RUN_STATUSES: ReadonlySet<string> = new Set(['completed', 'cancel
 import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
 import { applyGovernanceStoreEnv, isStoreSpec, type GovernanceStoreLocation } from './governance-store.js';
 import { isCouncilSize, isCouncilStaggerMs } from './council-settings.js';
+import { launchRequiresQe, qeAcceptanceMode, qeSettingSkipReason } from './qe-acceptance-setting.js';
 
 
 
@@ -1640,6 +1641,20 @@ export class CoreAdapter {
         );
       }
       opts.reducedAssurance = true;
+    }
+    // The daemon's QE acceptance setting (`qeAcceptance: 'off'`, core/qe-acceptance-setting.ts): a
+    // launch of a workflow that requires QE acceptance, and that neither skips nor forces it, is
+    // skipped through the engine's own skip with a reason naming the setting — so every path that
+    // launches (POST /runs, chats, standing orders, campaigns) is labelled the same way. An addon
+    // with no QE decision enforces none, so there is nothing to skip on one.
+    // POST /runs resolves it itself (one settings read for its deliverGate check and the skip) and
+    // hands the skip in explicitly, so it is not read twice there.
+    if (addonSupportsQeOverride() && input.skipQeAcceptanceReason === undefined && input.forceQeAcceptance !== true) {
+      const mode = qeAcceptanceMode(await this.getSettings().catch(() => null));
+      const settingSkip = mode === 'off'
+        ? qeSettingSkipReason(mode, input, await launchRequiresQe(this, input.workflow, input.projectId))
+        : undefined;
+      if (settingSkip !== undefined) input = { ...input, skipQeAcceptanceReason: settingSkip };
     }
     if (input.skipQeAcceptanceReason !== undefined || input.forceQeAcceptance === true) {
       // Fail CLOSED on an old addon (napi ignores undeclared fields): a dropped skip would leave a
@@ -3440,6 +3455,9 @@ export class CoreAdapter {
         const d = parsed.deliverDefault;
         if (d !== 'pr' && d !== 'none') delete parsed.deliverDefault;
       }
+      // qeAcceptance (api-types 0.120.0): 'required' | 'off' only — a hand-edited anything-else reads
+      // as the shipped default ('required'), never as off.
+      if ('qeAcceptance' in parsed && parsed.qeAcceptance !== 'required' && parsed.qeAcceptance !== 'off') delete parsed.qeAcceptance;
       // onboardingAutoCapture (crew#552): a boolean only; anything else reads as the shipped default.
       if ('onboardingAutoCapture' in parsed && typeof parsed.onboardingAutoCapture !== 'boolean') delete parsed.onboardingAutoCapture;
       // baseSkillRef / baseSkillPolicy (crew#554): the same shapes PUT /settings admits — a string

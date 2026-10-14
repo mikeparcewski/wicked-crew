@@ -254,6 +254,9 @@ export const DEFAULT_SETTINGS: CrewSystemSettings = {
   // default: a completed code run ends with a PR, or with the operator's explicit
   // `deliver: 'none'` (or this setting flipped) saying why not.
   deliverDefault: 'pr',
+  // api-types 0.120.0 — QE acceptance is required wherever a workflow requires it; 'off' skips it
+  // on every such launch, labelled with the setting (core/qe-acceptance-setting.ts).
+  qeAcceptance: 'required',
   // crew#552 — a completed onboarding run chains capture-learnings (CAPTURE automatic, PROMOTION
   // human-gated). The F-RC1-045/046 blockers are closed (wicked-core#462/#463, crew#553).
   onboardingAutoCapture: true,

@@ -23,6 +23,7 @@ import { type CoreAdapter } from '../src/core/adapter.js';
 import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
 import { DELIVER_PUSHED_NO_PR_MARKER, DELIVER_UNVERIFIED_MARKER, composeDeliverWorkflow } from '../src/core/deliver.js';
 import { qeAcceptanceFromView } from '../src/api/delivery-assurance.js';
+import { QE_OFF_REASON } from '../src/core/qe-acceptance-setting.js';
 import type { AcceptanceView } from '../src/qe/acceptance.js';
 import { composeDeliverableFloor } from '../src/core/deliverable-floor.js';
 import { CREW_RUN_ID_FIELD } from '../src/qe/ledger.js';
@@ -98,6 +99,7 @@ const RUNS = {
   gatedSkipped: 'run-qe-gated-skipped',
   gatedDiffRequired: 'run-qe-gated-diff-required',
   doneWaived: 'run-qe-done-waived',
+  doneSettingSkipped: 'run-qe-done-setting-skipped',
   gatedEmptyQe: 'run-qe-gated-empty',
   gatedSkipNoOperator: 'run-qe-gated-skip-plan',
   gatedUnknown: 'run-qe-gated-unknown',
@@ -114,6 +116,8 @@ const SKIPPED = {
   status: 'skipped', basis: 'operator', score: null, threshold: 20, ord: null, tree: null,
   reason: 'QE acceptance skipped by operator: docs-only hotfix', reasons: [],
 };
+/** The skip the daemon's `qeAcceptance: 'off'` setting hands the engine (core/qe-acceptance-setting.ts). */
+const SETTING_SKIPPED = { ...SKIPPED, reason: `QE acceptance skipped by operator: ${QE_OFF_REASON}` };
 const DIFF_REQUIRED = {
   status: 'required', basis: 'diff', score: 60, threshold: 20, ord: 2, tree: 'aaaaaaaa',
   reason: 'required: impact score 60 above the waiver line 20 (novelty +20: 1 new dependency(ies))', reasons: [],
@@ -138,6 +142,7 @@ beforeAll(async () => {
     view(RUNS.gatedSkipped, 'awaiting_human', ['qe_acceptance'], null, SKIPPED),
     view(RUNS.gatedDiffRequired, 'awaiting_human', ['qe_acceptance'], null, DIFF_REQUIRED),
     view(RUNS.doneWaived, 'completed', ['qe_acceptance'], workdir, WAIVED),
+    view(RUNS.doneSettingSkipped, 'completed', ['qe_acceptance'], workdir, SETTING_SKIPPED),
     view(RUNS.gatedEmptyQe, 'awaiting_human', ['qe_acceptance'], null, {}),
     view(RUNS.gatedSkipNoOperator, 'awaiting_human', ['qe_acceptance'], null, { ...SKIPPED, basis: 'plan' }),
     view(RUNS.gatedUnknown, 'awaiting_human', ['qe_acceptance'], null, { ...WAIVED, status: 'exempt' }),
@@ -400,6 +405,15 @@ describe('QE-IN-APP-WORKFLOWS — the delivery reads the run\'s QE decision', ()
     expect(a.qeAcceptance).toMatchObject({ status: 'waived', satisfied: true });
     expect(a.receipt.qe).toEqual(WAIVED);
     expect(a.receipt.skipped).toContainEqual({ instrument: 'qe_acceptance', reason: 'qe_waived_by_score', detail: WAIVED.reason });
+  });
+
+  it("a post-hoc delivery of a run the daemon's qeAcceptance 'off' setting skipped runs the script; the receipt names the setting", async () => {
+    const res = await app.inject({ method: 'POST', url: `/api/v1/runs/${RUNS.doneSettingSkipped}/deliver` });
+    expect(res.statusCode, res.body).toBe(200);
+    const a = res.json().assurance;
+    expect(a.qeAcceptance).toMatchObject({ status: 'skipped', satisfied: true, reason: SETTING_SKIPPED.reason });
+    expect(a.receipt.qe).toEqual(SETTING_SKIPPED);
+    expect(a.receipt.skipped).toContainEqual({ instrument: 'qe_acceptance', reason: 'qe_skipped_by_operator', detail: SETTING_SKIPPED.reason });
   });
 });
 

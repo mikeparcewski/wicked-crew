@@ -15,6 +15,10 @@
  */
 import type { CatalogEntry, Preset, PresetStep } from 'wicked-crew-api-types';
 import type { PhaseDef, WorkflowDef } from './types.js';
+import { QE_PRESETS } from './qe-acceptance-setting.js';
+
+/** What the engine's built-in QE presets require (wicked-core `catalog::builtin_preset_instruments`). */
+const BUILTIN_QE_INSTRUMENTS: readonly string[] = ['distinct_evaluator', 'judge', 'qe_acceptance'];
 
 /** A step field the step states, else `fallback`. */
 function own<T>(step: PresetStep, key: string, fallback: T): T {
@@ -66,7 +70,9 @@ export function builtinDefs(presets: readonly Preset[], entries: readonly Catalo
       warn(`wicked-crew: built-in preset '${p.name}' names a catalog entry this engine does not define — not served`);
       continue;
     }
-    out.push(def);
+    // A built-in preset carries no `required_instruments` on the wire (the engine reads its own table),
+    // so the served def says it: readers (the composer's QE choice, the deliver checks) see what runs.
+    out.push(QE_PRESETS.has(p.name) ? { ...def, required_instruments: [...BUILTIN_QE_INSTRUMENTS] } : def);
   }
   return out;
 }

@@ -177,7 +177,8 @@ describe('POST /runs deliver option (crew#293)', () => {
     const input = mockAdapter.launchRun.mock.calls[0]![0] as LaunchRunInput;
     expect('deliver' in input).toBe(false);
     // The repo-less default never consults the setting — it is 'none' by construction.
-    expect(mockAdapter.getSettings).not.toHaveBeenCalled();
+    // The setting says 'pr' and the input still carries no deliver: the deliver default did not decide.
+    // (getSettings itself may be read: a QE workflow launch reads the qeAcceptance setting.)
   });
 
   it('400 on deliver without a workflow — nothing launches', async () => {
@@ -249,7 +250,8 @@ describe('POST /runs deliver DEFAULT for repo-scoped launches (crew#393)', () =>
     const input = mockAdapter.launchRun.mock.calls[0]![0] as LaunchRunInput;
     expect('deliver' in input).toBe(false);
     // The operator decided; the setting is not consulted.
-    expect(mockAdapter.getSettings).not.toHaveBeenCalled();
+    // The setting says 'pr' and the input still carries no deliver: the deliver default did not decide.
+    // (getSettings itself may be read: a QE workflow launch reads the qeAcceptance setting.)
   });
 
   it('DAEMON SETTING flips the repo-scoped default: deliverDefault "none" ⇒ no deliver', async () => {
@@ -306,7 +308,8 @@ describe('POST /runs deliver DEFAULT for repo-scoped launches (crew#393)', () =>
     const input = mockAdapter.launchRun.mock.calls[0]![0] as LaunchRunInput;
     expect('deliver' in input).toBe(false);
     // The setting is not even consulted — a read-only def can never default on.
-    expect(mockAdapter.getSettings).not.toHaveBeenCalled();
+    // The setting says 'pr' and the input still carries no deliver: the deliver default did not decide.
+    // (getSettings itself may be read: a QE workflow launch reads the qeAcceptance setting.)
   });
 
   it('a def whose only code phase is an EVALUATOR (domain-extraction) defaults to none', async () => {
@@ -323,7 +326,8 @@ describe('POST /runs deliver DEFAULT for repo-scoped launches (crew#393)', () =>
     expect(res.statusCode).toBe(201);
     const input = mockAdapter.launchRun.mock.calls[0]![0] as LaunchRunInput;
     expect('deliver' in input).toBe(false);
-    expect(mockAdapter.getSettings).not.toHaveBeenCalled();
+    // The setting says 'pr' and the input still carries no deliver: the deliver default did not decide.
+    // (getSettings itself may be read: a QE workflow launch reads the qeAcceptance setting.)
   });
 
   it('an UNKNOWN workflow id defaults to none (the launch fails on its own workflow error, not a deliver-flavored one)', async () => {
@@ -385,7 +389,7 @@ describe('GET /health capabilities (F-E2E-030)', () => {
     // crew#619: `chatIdOnLaunch` is a crew-side constant so it is always false when engineCapabilities throws.
     // C1: `runChatId` is served by the daemon's own launch index, so it is true whatever the engine.
     // ASK-C1: `askPath` is the core-ts floor (0.7.38) — unknown engine, no capability.
-    expect(res.json().capabilities).toEqual({ deliverGate: false, revisesPr: false, chatIdOnLaunch: false, seatChipOnCreate: false, runChatId: true, linkedIssuesExclude: true, walkthroughRoots: false, askPath: false, reducedAssurance: false, qeAcceptanceOverride: false });
+    expect(res.json().capabilities).toEqual({ deliverGate: false, revisesPr: false, chatIdOnLaunch: false, seatChipOnCreate: false, runChatId: true, linkedIssuesExclude: true, walkthroughRoots: false, askPath: false, reducedAssurance: false, qeAcceptanceOverride: false, qeAcceptance: 'required' });
     await app.close();
   });
 });
