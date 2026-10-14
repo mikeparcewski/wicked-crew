@@ -1270,8 +1270,9 @@ export interface SeatIssueCommand {
  */
 export interface RosterResponse {
   roster: RosterSeat[];
-  /** Present on a `?refresh=` read: `probed` — the answer is fresh; `timed_out` — still running
-   *  (the roster shows the last reading; the check keeps going); `not_probed` — the seat has no
+  /** Present on a `?refresh=` read: `probed` — the answer is fresh; `timed_out` — no fresh answer:
+   *  the check is still running (it keeps going), or it finished and could not tell (a status command
+   *  that timed out); either way the roster shows the last reading; `not_probed` — the seat has no
    *  sign-in check (it reads its credential file). */
   refresh?: { key: string; outcome: 'probed' | 'timed_out' | 'not_probed' };
 }

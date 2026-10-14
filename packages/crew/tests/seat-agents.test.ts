@@ -8,7 +8,7 @@ import { rosterWithStandingFactory } from '../src/api/roster-standing.js';
 import { liveCheckLiftsBench, seatIssues, displayCommand } from '../src/api/seat-agents.js';
 import { SEAT_BENCH_WINDOW_MS, SeatHealthTracker } from '../src/api/seat-health.js';
 import { SeatProbe } from '../src/api/seat-probe.js';
-import { SeatVersionCache, firstVersionLine, installSourceOf, probeSeatVersions, seatVersion } from '../src/api/seat-version.js';
+import { SEAT_VERSION_KEEP_MS, SEAT_VERSION_RETRY_MS, SEAT_VERSION_TTL_MS, SeatVersionCache, firstVersionLine, installSourceOf, probeSeatVersions, seatVersion } from '../src/api/seat-version.js';
 import { toEngineSeat } from '../src/core/engine-roster.js';
 import type { CoreEvent } from '../src/core/types.js';
 
@@ -351,5 +351,81 @@ describe('A1 version for every seat', () => {
     expect(seat(roster, 'claude')['version']).toMatchObject({ installed: 'claude 1.0', status: 'no_pin' });
     // pinned, pin not yet probed: no guessed status
     expect(seat(roster, 'opencode')['version']).toBeUndefined();
+  });
+});
+
+describe('SeatVersionCache — a version probe that did not answer (a slow start under load)', () => {
+  const T0 = Date.parse('2026-10-14T16:00:00.000Z');
+  function cache(answers: () => Array<{ cli: string; installed: string | null; install_source: 'brew' | null }>, clock: { now: number }) {
+    let probes = 0;
+    const versions = new SeatVersionCache(
+      async () => {
+        probes += 1;
+        return answers().map((a) => ({ ...a, checked_at: new Date(clock.now).toISOString() }));
+      },
+      SEAT_VERSION_TTL_MS,
+      () => clock.now,
+    );
+    return { versions, probes: () => probes };
+  }
+
+  it("keeps an installed seat's last answered version, retries in 2 minutes, and never serves it past the keep window", async () => {
+    const clock = { now: T0 };
+    let installed: string | null = '2.1.287 (Claude Code)';
+    const { versions, probes } = cache(() => [{ cli: 'claude', installed, install_source: 'brew' }], clock);
+    await versions.refresh();
+    expect(versions.read('claude')?.installed).toBe('2.1.287 (Claude Code)');
+    installed = null; // the next `claude --version` times out; the binary is still on PATH
+    clock.now += SEAT_VERSION_TTL_MS;
+    await versions.refresh();
+    expect(versions.read('claude')?.installed).toBe('2.1.287 (Claude Code)');
+    // Retried sooner than the full TTL while an installed seat did not answer.
+    const n = probes();
+    clock.now += SEAT_VERSION_RETRY_MS - 1;
+    versions.read('claude');
+    expect(probes()).toBe(n);
+    clock.now += 1;
+    versions.read('claude');
+    await versions.refresh();
+    expect(probes()).toBeGreaterThan(n);
+    // Past the keep window the kept answer is not served, even before a refresh lands.
+    clock.now = T0 + SEAT_VERSION_KEEP_MS;
+    expect(versions.read('claude')?.installed).toBeNull();
+  });
+
+  it('a real answer replaces a kept one at once, and the normal TTL is back', async () => {
+    const clock = { now: T0 };
+    let installed: string | null = '2.1.287 (Claude Code)';
+    const { versions, probes } = cache(() => [{ cli: 'claude', installed, install_source: 'brew' }], clock);
+    await versions.refresh();
+    installed = null;
+    clock.now += SEAT_VERSION_TTL_MS;
+    await versions.refresh();
+    installed = '2.1.300 (Claude Code)';
+    clock.now += SEAT_VERSION_RETRY_MS;
+    await versions.refresh();
+    expect(versions.read('claude')?.installed).toBe('2.1.300 (Claude Code)');
+    const n = probes();
+    clock.now += SEAT_VERSION_TTL_MS - 1;
+    versions.read('claude');
+    expect(probes()).toBe(n);
+  });
+
+  it('a binary no longer on PATH is news: no kept version, and no fast retry of the whole roster', async () => {
+    const clock = { now: T0 };
+    let gone = false;
+    const { versions, probes } = cache(() => [
+      { cli: 'claude', installed: '2.1.287 (Claude Code)', install_source: 'brew' },
+      gone ? { cli: 'agy', installed: null, install_source: null } : { cli: 'agy', installed: 'agy 1.0', install_source: 'brew' },
+    ], clock);
+    await versions.refresh();
+    gone = true;
+    clock.now += SEAT_VERSION_TTL_MS;
+    await versions.refresh();
+    expect(versions.read('agy')).toMatchObject({ installed: null, install_source: null });
+    const n = probes();
+    clock.now += SEAT_VERSION_RETRY_MS;
+    versions.read('claude');
+    expect(probes()).toBe(n);
   });
 });

@@ -16,6 +16,7 @@ import { describe, expect, it } from 'vitest';
 import { rosterWithStandingFactory } from '../src/api/roster-standing.js';
 import { SeatHealthTracker } from '../src/api/seat-health.js';
 import {
+  PROBE_KEEP_ANSWER_MS,
   PROBE_TTL_OTHER_MS,
   PROBE_TTL_SIGNED_IN_MS,
   SeatProbe,
@@ -120,6 +121,73 @@ describe('SeatProbe cache', () => {
     probe.read('claude', '/w');
     expect(calls).toHaveLength(n);
     expect(probe.read('claude', '/moved')).toBeUndefined(); // a moved home is a different login
+  });
+
+  it('a probe that could not tell (a status timeout under load) keeps the last answer, re-checked on the short TTL, for a bounded time', async () => {
+    let now = 1_000_000;
+    const TIMED_OUT: ProbeOutput = { code: null, stdout: '', stderr: '', error: 'timed out' };
+    let answer: ProbeOutput = LOGGED_IN_CLAUDE;
+    // claude's live check is a second command; it answers the same way as the status command.
+    const { run, calls } = fakeRunner(() => answer);
+    const probe = new SeatProbe({ run, env: {}, home: '/h', now: () => now });
+    await probe.refresh('claude', '/w');
+    const first = probe.read('claude', '/w');
+    expect(first).toMatchObject({ signedIn: true, check: 'live' });
+    answer = TIMED_OUT;
+    now += PROBE_TTL_SIGNED_IN_MS;
+    // The refresh itself answers what the probe said (a caller that asked for a fresh check learns
+    // it could not tell); the cache keeps serving the last answer.
+    expect(await probe.refresh('claude', '/w')).toMatchObject({ signedIn: null });
+    expect(probe.read('claude', '/w')).toMatchObject({ signedIn: true, check: 'live', probedAt: first!.probedAt });
+    // …re-checked on the short TTL, not after another 5 minutes.
+    const n = calls.length;
+    now += PROBE_TTL_OTHER_MS - 1;
+    probe.read('claude', '/w');
+    expect(calls).toHaveLength(n);
+    now += 1;
+    probe.read('claude', '/w');
+    await probe.refresh('claude', '/w');
+    expect(calls.length).toBeGreaterThan(n);
+    expect(probe.read('claude', '/w')).toMatchObject({ signedIn: true });
+    // Past the keep window the read says it could not tell — even before any refresh lands.
+    now = Date.parse(first!.probedAt) + PROBE_KEEP_ANSWER_MS;
+    expect(probe.read('claude', '/w')).toMatchObject({ signedIn: null });
+  });
+
+  it('during the keep window a definite answer replaces the kept one at once, and the normal TTL is back', async () => {
+    let now = 1_000_000;
+    const TIMED_OUT: ProbeOutput = { code: null, stdout: '', stderr: '', error: 'timed out' };
+    let answer: ProbeOutput = NOT_LOGGED_IN_CLAUDE;
+    const { run, calls } = fakeRunner(() => answer);
+    const probe = new SeatProbe({ run, env: {}, home: '/h', now: () => now });
+    await probe.refresh('claude', '/w');
+    // A signed-OUT answer is kept through an inconclusive check too.
+    answer = TIMED_OUT;
+    now += PROBE_TTL_OTHER_MS;
+    await probe.refresh('claude', '/w');
+    expect(probe.read('claude', '/w')).toMatchObject({ signedIn: false });
+    // The operator signs in; the next check answers: it replaces the kept answer immediately.
+    answer = LOGGED_IN_CLAUDE;
+    now += PROBE_TTL_OTHER_MS;
+    await probe.refresh('claude', '/w');
+    expect(probe.read('claude', '/w')).toMatchObject({ signedIn: true, check: 'live' });
+    // A definite signed-in answer is trusted for the full 5 minutes again.
+    const n = calls.length;
+    now += PROBE_TTL_SIGNED_IN_MS - 1;
+    probe.read('claude', '/w');
+    expect(calls).toHaveLength(n);
+  });
+
+  it('GET /roster?refresh= on a check that could not tell says timed_out, not probed (the roster shows the last answer)', async () => {
+    const TIMED_OUT: ProbeOutput = { code: null, stdout: '', stderr: '', error: 'timed out' };
+    let answer: ProbeOutput = LOGGED_IN_CLAUDE;
+    const { run } = fakeRunner(() => answer);
+    const probe = new SeatProbe({ run, env: {}, home: '/h' });
+    const roster = rosterWithStandingFactory({ seatHealth: new SeatHealthTracker(), registry: () => [{ ...CLAUDE }], signedIn: () => true, env: { WICKED_WORKER_HOME: '' }, probe });
+    expect(await roster.recheck!('claude', 20_000)).toBe('probed');
+    answer = TIMED_OUT;
+    expect(await roster.recheck!('claude', 20_000)).toBe('timed_out');
+    expect(roster().find((s) => s.key === 'claude')).toMatchObject({ auth: 'signed_in' });
   });
 });
 

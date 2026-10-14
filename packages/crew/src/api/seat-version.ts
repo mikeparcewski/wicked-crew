@@ -33,6 +33,11 @@ import { homeless } from './seat-standing.js';
 
 /** How long a version reading is trusted before a background refresh. */
 export const SEAT_VERSION_TTL_MS = 10 * 60 * 1000;
+/** A read where some seat's `--version` did not answer (a slow start on a loaded host) is retried
+ *  this soon, not after the full TTL. */
+export const SEAT_VERSION_RETRY_MS = 2 * 60 * 1000;
+/** How long a seat's last answered version outlives later probes that did not answer. */
+export const SEAT_VERSION_KEEP_MS = 60 * 60 * 1000;
 const VERSION_TIMEOUT_MS = 10 * 1000;
 const VERSION_MAX = 80;
 
@@ -149,7 +154,10 @@ export async function probeSeatVersions(
 
 /** A TTL cache of {@link probeSeatVersions}: read synchronously, refreshed in the background. */
 export class SeatVersionCache {
-  private value: { at: number; readings: SeatVersionReading[] } | null = null;
+  /** `missing` — some installed seat's probe did not answer: the read is retried after
+   *  {@link SEAT_VERSION_RETRY_MS}. `silent` — per seat whose last answer was kept, what this probe
+   *  said, served once the kept answer is older than {@link SEAT_VERSION_KEEP_MS}. */
+  private value: { at: number; readings: SeatVersionReading[]; missing: boolean; silent: Map<string, SeatVersionReading> } | null = null;
   private inFlight: Promise<void> | null = null;
   private failedAt: number | null = null;
 
@@ -162,7 +170,8 @@ export class SeatVersionCache {
   private stale(): boolean {
     const t = this.now();
     if (this.failedAt !== null && t - this.failedAt < this.ttlMs) return false;
-    return this.value === null || t - this.value.at >= this.ttlMs;
+    if (this.value === null) return true;
+    return t - this.value.at >= (this.value.missing ? Math.min(this.ttlMs, SEAT_VERSION_RETRY_MS) : this.ttlMs);
   }
 
   /** Probe now unless a probe is running; resolves when the answer is in. */
@@ -170,8 +179,23 @@ export class SeatVersionCache {
     if (this.source === null) return Promise.resolve();
     if (this.inFlight !== null) return this.inFlight;
     this.inFlight = this.source()
-      .then((readings) => {
-        this.value = { at: this.now(), readings };
+      .then((fresh) => {
+        // A seat whose binary is on PATH but whose `--version` did not answer this time keeps its last
+        // answered reading (bounded by SEAT_VERSION_KEEP_MS): a timed-out probe is not news that the
+        // CLI changed, and the Agents page would otherwise read "Not reported" for a whole TTL. A
+        // binary that is no longer on PATH (`install_source: null`) is news: it is never papered over.
+        const at = this.now();
+        const prev = this.value?.readings ?? [];
+        const silent = new Map<string, SeatVersionReading>();
+        const didNotAnswer = (r: SeatVersionReading): boolean => r.installed === null && r.install_source !== null;
+        const readings = fresh.map((r) => {
+          if (!didNotAnswer(r)) return r;
+          const kept = prev.find((p) => p.cli === r.cli && p.installed !== null && at - Date.parse(p.checked_at) < SEAT_VERSION_KEEP_MS);
+          if (kept === undefined) return r;
+          silent.set(r.cli, r);
+          return kept;
+        });
+        this.value = { at, readings, missing: fresh.some(didNotAnswer), silent };
         this.failedAt = null;
       })
       .catch(() => {
@@ -186,7 +210,11 @@ export class SeatVersionCache {
   /** The last reading for `cli`, without waiting; a stale or empty cache starts a refresh. */
   read(cli: string): SeatVersionReading | undefined {
     if (this.source !== null && this.stale()) void this.refresh();
-    return this.value?.readings.find((r) => r.cli === cli);
+    const r = this.value?.readings.find((x) => x.cli === cli);
+    const silent = this.value?.silent.get(cli);
+    // A kept answer past its window is not served, whether or not a refresh has landed since.
+    if (r !== undefined && silent !== undefined && this.now() - Date.parse(r.checked_at) >= SEAT_VERSION_KEEP_MS) return silent;
+    return r;
   }
 }
 
