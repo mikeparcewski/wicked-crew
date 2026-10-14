@@ -84,7 +84,15 @@ export function styleContract(style: string): string {
     case 'web':
       return 'a rich, scrollable single web page (responsive; no fixed page or slide size)';
     case 'ppt':
-      return 'fixed 16:9 landscape slides — one section per slide, nothing scrolls inside a slide';
+      // (crew#1005) The deck contract wicked-deck and the exporter read: each slide is its own
+      // top-level <section> (a shared masthead or grid outside them shows on every slide), and the
+      // speaker notes ride `aside.notes` inside their slide — the service stamps `data-notes-for`
+      // on it. Visible notes text rendered on the slide while the Speaker notes field stayed empty.
+      return (
+        'fixed 16:9 landscape slides — each slide its own top-level <section> (no masthead, header or ' +
+        'grid wrapper outside the sections), nothing scrolls inside a slide; speaker notes go inside ' +
+        'their slide as <aside class="notes" hidden>…</aside>, never as visible text on the slide'
+      );
     case 'brochure':
       return (
         'PRINT pages — honour the page size and page count the brief asks for (default A4 portrait), ' +

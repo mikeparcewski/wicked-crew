@@ -42,6 +42,39 @@ describe('pageBudgetFor', () => {
     expect(pageBudgetFor('a deck', 'ppt')).toEqual({ pages: null, exact: false, source: 'style-default' });
     expect(pageBudgetFor('something', 'poster')).toEqual({ pages: null, exact: false, source: 'unknown' });
   });
+  it('crew#1005: a Slides deck never takes a page count — its budget is the slide count', () => {
+    const brief = 'A 5-slide deck introducing Tip Splitter, the one-page tip calculator in the tip-splitter repo';
+    expect(pageBudgetFor(brief, 'ppt')).toEqual({ pages: null, exact: false, source: 'style-default' });
+    expect(pageBudgetFor('a two-page deck', 'ppt')).toEqual({ pages: null, exact: false, source: 'style-default' });
+    const clause = draftQualityClause('/inbox/deck/draft.html', pageBudgetFor(brief, 'ppt'), [], { style: 'ppt' });
+    expect(clause).toContain('page budget = the slide count your outline fixed, exactly');
+    expect(clause).not.toContain('printed page');
+  });
+  it('crew#1005: a "N-page" adjective on something other than the deliverable is not its budget', () => {
+    expect(pageBudgetFor('A brochure about Tip Splitter, the one-page tip calculator', 'brochure')).toEqual({ pages: 2, exact: true, source: 'style-default' });
+    expect(pageBudgetFor('an explainer for the one-page tip calculator', 'web').pages).toBeNull();
+    expect(pageBudgetFor('a 2-page printed brochure', 'brochure')).toEqual({ pages: 2, exact: true, source: 'brief' });
+    expect(pageBudgetFor('a 1-page summary of the release', 'doc')).toEqual({ pages: 1, exact: true, source: 'brief' });
+    expect(pageBudgetFor('keep it to one page', 'doc')).toEqual({ pages: 1, exact: true, source: 'brief' });
+    expect(pageBudgetFor('the one-page app, then a three-page leaflet', 'brochure')).toEqual({ pages: 3, exact: true, source: 'brief' });
+    // codex r1: real deliverables keep their budget; a hyphen continues the adjective.
+    expect(pageBudgetFor('Create a four-page proposal', 'doc')).toEqual({ pages: 4, exact: true, source: 'brief' });
+    expect(pageBudgetFor('Create a one-page website', 'web')).toEqual({ pages: 1, exact: true, source: 'brief' });
+    expect(pageBudgetFor('Create a 3-page printed fact sheet', 'brochure')).toEqual({ pages: 3, exact: true, source: 'brief' });
+    expect(pageBudgetFor('Create a brochure about the one-page-only tip calculator', 'brochure')).toEqual({ pages: 2, exact: true, source: 'style-default' });
+    // codex r2: an opening quote is no phrase end, and the noun stays in its clause.
+    expect(pageBudgetFor('Create a brochure about the one-page \u201cTip Splitter\u201d calculator', 'brochure')).toEqual({ pages: 2, exact: true, source: 'style-default' });
+    expect(pageBudgetFor('Create a brochure about the one-page (tip) calculator', 'brochure')).toEqual({ pages: 2, exact: true, source: 'style-default' });
+    expect(pageBudgetFor('Create a brochure about the one-page app. Report on its features.', 'brochure')).toEqual({ pages: 2, exact: true, source: 'style-default' });
+    expect(pageBudgetFor('Make it a one-page.', 'doc')).toEqual({ pages: 1, exact: true, source: 'brief' });
+    // codex r3: straight quotes may open; a noun followed by a hyphen is part of another compound.
+    expect(pageBudgetFor('Create a brochure about the one-page "Tip Splitter" calculator', 'brochure')).toEqual({ pages: 2, exact: true, source: 'style-default' });
+    expect(pageBudgetFor("Create a brochure about the one-page 'Tip Splitter' calculator", 'brochure')).toEqual({ pages: 2, exact: true, source: 'style-default' });
+    expect(pageBudgetFor('Create a brochure about the one-page document-management app', 'brochure')).toEqual({ pages: 2, exact: true, source: 'style-default' });
+    expect(pageBudgetFor('three one-page write-ups', 'doc')).toEqual({ pages: 1, exact: true, source: 'brief' });
+    expect(pageBudgetFor('Create a brochure about the one-page app, report on its features.', 'brochure')).toEqual({ pages: 2, exact: true, source: 'style-default' });
+    expect(pageBudgetFor('a two-page "launch" brochure', 'brochure')).toEqual({ pages: 2, exact: true, source: 'brief' });
+  });
   it('never reads a count out of unrelated numbers ("page 3 of the README", "10 pages of logs" is a count though)', () => {
     expect(pageBudgetFor('summarise page 3 of the README', 'doc').pages).toBeNull();
     expect(pageBudgetFor('600 pages', 'doc').pages).toBeNull(); // over the 60 ceiling → not a budget

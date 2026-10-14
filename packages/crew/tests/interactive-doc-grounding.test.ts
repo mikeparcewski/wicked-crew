@@ -92,6 +92,10 @@ describe('style: inference + the format contract (F-046, F-050/F-053)', () => {
     expect(c).toContain('page breaks');
     expect(c).toContain('never a fixed slide-size viewport');
     expect(styleContract('ppt')).toContain('landscape slides');
+    // crew#1005: the deck contract wicked-deck reads — one top-level section per slide, and the
+    // speaker notes in an `aside.notes` inside the slide, never visible on it.
+    expect(styleContract('ppt')).toContain('<aside class="notes" hidden>');
+    expect(styleContract('ppt')).toContain('top-level <section>');
     expect(styleContract('web')).toContain('scrollable');
     expect(styleContract('doc')).toContain('prose');
     expect(styleContract('odd')).toContain('"odd"');
