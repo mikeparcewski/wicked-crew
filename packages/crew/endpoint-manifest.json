@@ -1,7 +1,16 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.117.0",
+  "apiTypesVersion": "0.118.0",
   "endpoints": [
+    {
+      "method": "GET",
+      "path": "/api/v1/appearance/video-palette",
+      "requestType": null,
+      "responseType": "VideoPaletteResponse",
+      "statusCodes": [
+        200
+      ]
+    },
     {
       "method": "GET",
       "path": "/api/v1/audit",
