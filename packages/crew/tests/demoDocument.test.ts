@@ -140,6 +140,8 @@ describe('a demo run becomes an editable document', () => {
   it('refuses before the review gate, without recorded segments, for an unknown project, or when interactive refuses', async () => {
     expect((await makeDemoDocument(view('running'), { bridgeFor: async () => bridge().call })).status).toBe(409);
     // At the review gate a send-back can resume the recorder: not yet.
+    // A failed run can be resumed, so not from it either.
+    expect((await makeDemoDocument(view('failed'), { bridgeFor: async () => bridge().call })).status).toBe(409);
     expect((await makeDemoDocument(view('awaiting_human'), { bridgeFor: async () => bridge().call })).status).toBe(409);
     writeFileSync(join(demoRootDir(RUN), 'demo-video', 'segments', '02-close', 'segment.mp4'), '');
     expect(await makeDemoDocument(view('completed'), { bridgeFor: async () => bridge().call })).toMatchObject({ status: 409, body: { error: expect.stringContaining('02-close') } });

@@ -202,8 +202,8 @@ export const DEMO_GIF_FILTER =
 
 /** The stages an export may run in: no worker of the run is running, so none can write the root. */
 const DEMO_EXPORT_STAGES: ReadonlySet<DemoStage> = new Set<DemoStage>(['review_gate', 'done', 'failed']);
-/** A run whose workers have all ended: its root is no longer written. */
-const DEMO_DOCUMENT_STAGES: ReadonlySet<DemoStage> = new Set<DemoStage>(['done', 'failed']);
+/** Session statuses that never resume (POST /runs/:id/resume refuses exactly these): the root is no longer written. */
+const DEMO_DOCUMENT_STATUSES: ReadonlySet<string> = new Set(['completed', 'cancelled']);
 
 /** What each export writes, inside the run's `demo-video/`. */
 const DEMO_EXPORT_FILE: Readonly<Record<DemoExportFormat, string>> = { gif: 'demo.gif', poster: 'poster.jpg' };
@@ -698,9 +698,10 @@ export async function makeDemoDocument(view: SessionView, deps: DemoDocumentDeps
   const runId = view.session.id;
   const existing = await demoDocumentLink(runId);
   if (existing !== null) return { status: 200, body: { ...existing, created: false } };
-  // Only once the run has ENDED: no worker of it is alive to write the root while it is read. At the review gate a
-  // send-back resumes the recorder, which could swap a segment's directory mid-read (codex on #1013).
-  if (!DEMO_DOCUMENT_STAGES.has(demoStage(view))) return { status: 409, body: { error: 'a demo becomes a document once its run has ended' } };
+  // Only from a run that can never run again: completed or cancelled. No worker of it is alive, or can be resumed,
+  // to write the root while it is read — a review gate's send-back or a failed run's resume restarts the recorder,
+  // which could swap a segment's directory mid-read (codex on #1013).
+  if (!DEMO_DOCUMENT_STATUSES.has(view.session.status)) return { status: 409, body: { error: 'a demo becomes a document once its run has completed (or was cancelled)' } };
   const root = await existingDemoRootDir(runId);
   const chapters = parseChapters(await readText(root, 'chapters.json'));
   if (chapters.length === 0) return { status: 409, body: { error: 'the demo has no chapters to import' } };
