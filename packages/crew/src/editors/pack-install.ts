@@ -97,6 +97,17 @@ export type ConformanceRunner = (packRoot: string) => Promise<EditorConformanceS
 
 /** The cases a conformance run must report passing for every editor (garden's runner: 0-6 and 8-12). */
 export const CONFORMANCE_CASES = ['0-manifest', '1-handshake', '2-sizes', '3-no-network', '4-permissions', '5-typing', '6-forwarding', '8-strict-input', '9-liveness', '10-keyboard', '11-theme', '12-hash-pinned'] as const;
+/** The protocol-2 cases an editor whose `protocol` lists 2 must also pass (DES-EDITOR-PLUGIN-CONTRACT-001 §8.3):
+ *  its surfaces, card, options and full screen. A garden runner before them reports none, so such an editor is
+ *  refused (fail closed). Case 17 (protocol-1 compatibility) restates cases 1-12, so it is not required. */
+export const CONFORMANCE_CASES_V2 = ['13-surfaces', '14-card', '15-options', '16-full'] as const;
+
+/** The cases one editor's install requires, by the protocols its manifest entry lists. */
+export function requiredCases(entry: Record<string, unknown>): string[] {
+  const protocol = entry['protocol'];
+  const speaks2 = Array.isArray(protocol) && protocol.includes(2);
+  return [...CONFORMANCE_CASES, ...(speaks2 ? CONFORMANCE_CASES_V2 : [])];
+}
 
 /**
  * Garden's conformance runner as a child: `python3 <garden>/scripts/editor/conformance.py --pack <root>
@@ -265,7 +276,7 @@ export async function installPack(
     const r = conformance.editors.find((x) => x.id === str(e['id']));
     if (r === undefined) return ['not in the report'];
     if (r.sha256 !== str(e['sha256']) || r.version !== str(e['version'])) return [`ran against ${r.version || '?'}#${(r.sha256 || '?').slice(0, 12)}, not this entry`];
-    return CONFORMANCE_CASES.filter((c) => r.cases[c]?.ok !== true);
+    return requiredCases(e).filter((c) => r.cases[c]?.ok !== true);
   };
   const failures = pack.editors.map((e) => ({ id: str(e['id']), missing: missing(e) })).filter((f) => f.missing.length > 0);
   if (!conformance.ok || failures.length > 0) {
@@ -289,7 +300,7 @@ export async function installPack(
       sha256: str(e['sha256']),
       manifestSha256: digestOf(e),
       installedAt: now,
-      conformance: { ok: true, at: conformance.at, cases: [...CONFORMANCE_CASES] },
+      conformance: { ok: true, at: conformance.at, cases: requiredCases(e) },
     };
     return { id: str(e['id']), pack: record };
   });

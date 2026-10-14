@@ -10416,7 +10416,51 @@ export type EditorPermission =
   | 'network.media'
   /** Talk, through studio's host, to an MCP server the operator connected (DES-MCP-INSPECTOR-001).
    *  No posture rule allows it: the editor's install consent writes its per-build grant. */
-  | 'mcp.session';
+  | 'mcp.session'
+  /** Protocol 2 `theme.set` (DES-EDITOR-PLUGIN-CONTRACT-001 §7.2): change this artifact's theme, as a new version. */
+  | 'artifact.theme';
+
+/**
+ * A protocol-2 editor's surfaces (DES-EDITOR-PLUGIN-CONTRACT-001 §5.2), as the registry parsed them from its
+ * manifest: defaults filled (`interactive:false`, `aspect:'16:9'`, `actions:[]`, `primary:false`, `maxChars:200`,
+ * `full.default:'simple'`), `options`/`full` null when not declared. The host renders the card, the options tabs
+ * and full screen from this copy (and requires the bundle's `plugin.ready` copy to be the same).
+ */
+export interface EditorSurfaces {
+  card: {
+    /** The frame takes pointer and keys inside the card (a protocol-1 inline card never did). */
+    interactive: boolean;
+    /** `auto`: the plugin reports its height (`ui.height`, clamped to 120-560 px). */
+    aspect: '16:9' | '4:3' | 'auto';
+    /** At most 4, drawn by the HOST in the card footer. `plugin` → `host.action {id}`; the others are host verbs. */
+    actions: Array<{ id: string; label: string; primary: boolean; verb: 'plugin' | 'host:export' | 'host:ask' }>;
+  };
+  /** At most 5 tabs, added to the host panel on Options; null = no Options button. */
+  options: { tabs: EditorOptionsTab[] } | null;
+  /** Null = no Full screen button. `modes` null = one mode (no Simple/Advanced toggle). */
+  full: { modes: Array<'simple' | 'advanced'> | null; default: 'simple' | 'advanced' } | null;
+}
+
+/** One options tab: a frame of the plugin's (`plugin`) or host-drawn controls (`controls`, at most 12). */
+export interface EditorOptionsTab {
+  id: string;
+  label: string;
+  render: 'plugin' | 'controls';
+  controls?: EditorControl[];
+}
+
+/** A host-drawn control (§5.3, a closed vocabulary). `options` for select/segmented (2-8); `min`/`max`/`step`
+ *  for range; `maxChars` for text. */
+export interface EditorControl {
+  id: string;
+  label: string;
+  type: 'toggle' | 'segmented' | 'select' | 'color' | 'text' | 'range';
+  options?: Array<{ id: string; label: string }>;
+  min?: number;
+  max?: number;
+  step?: number;
+  maxChars?: number;
+}
 
 /**
  * One registered editor, as Settings → Editors renders it. No path is on the wire: the bundle is
@@ -10436,6 +10480,10 @@ export interface EditorView {
   kinds: string[];
   sizes: Array<'inline' | 'pane' | 'full'>;
   panels?: Array<'checks'>;
+  /** Protocol 2 (an editor whose `protocol` lists 2): its declared surfaces, parsed. Absent for a protocol-1
+   *  editor, and from a daemon that predates the field (added with api-types 0.117.0; the host then reads
+   *  the bundle's `plugin.ready` copy). */
+  surfaces?: EditorSurfaces;
   /** Each with the reason shown at install. The GRANTED set is `GET /editors/:id/grants`. */
   permissions: Array<{ id: EditorPermission; why: string }>;
   /** The full sha256 of the entry file, pinned when the registry read it. */
