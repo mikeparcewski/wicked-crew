@@ -253,7 +253,8 @@ describe('pack install: the gate, crew\'s conformance run, then the registry', (
     const root = makePack();
     const conformance = conformant();
     const res: InstallEditorResponse = await installPack(root, undefined, { check: passCheck, conformance, registry: reg });
-    expect(conformance).toHaveBeenCalledWith(root);
+    // The pack's editors ride along: they size the run's overall cap (tests/editor-conformance-cap.test.ts).
+    expect(conformance).toHaveBeenCalledWith(root, [expect.objectContaining({ id: expect.any(String) })]);
     expect(res.installed).toBe(true);
     expect(res.updated).toBe(false);
     expect(res.editors).toHaveLength(1);

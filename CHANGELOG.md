@@ -21,6 +21,7 @@ mentioned only where a daemon release depends on them.
   terminals) and replays it in order. A socket that attaches to a terminal that already exited is
   closed at once (exits are remembered apart from the output holds), and one the engine holds no
   terminal for is closed after a short grace, instead of leaving the sign-in dialog open.
+- **An editor-pack install no longer kills a correct conformance run on a slow host.** The run's overall cap was a fixed 240 s. garden's runner gives each host-page load up to `$WG_EDITOR_CONFORMANCE_TIMEOUT` (default 120 s), so a protocol-2 editor's loads alone could need more than that, and an install was killed at 249 s. The cap is now derived per editor from the same bound, read from the same env var the way garden reads it (Python `float()`, 5 to 1800 s). Each editor gets every host-page load at the full bound (2 per editor; for protocol 2 add 1 for the card and 1 per plugin-rendered options tab), 30 s of fixed case waits, and 2 s for each sequential answer (card actions, options tabs, the two full-screen modes). The run adds 60 s for the browser start. One protocol-2 editor with no surfaces, at the default, is 454 s. Crew hands garden's runner the very bound it sized the cap from, so the two cannot disagree. To change both, set `WG_EDITOR_CONFORMANCE_TIMEOUT` where the daemon runs.
 
 ## [0.11.0] — 2026-10-14
 
