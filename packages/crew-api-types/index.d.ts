@@ -5473,6 +5473,37 @@ export interface SystemSettings {
 }
 
 /**
+ * The demo video's palette from the operator's studio skin (`studio.appearance`): each colour `#rrggbb`. Renderers
+ * use it by default; a storyline's own brand colour or a custom video style overrides it.
+ */
+export interface VideoPalette {
+  /** The page ground (title and end cards, the stage behind the app). */
+  canvas: string;
+  /** A raised surface (chips, caption band). */
+  surface: string;
+  /** Primary text. */
+  ink: string;
+  /** Secondary text. */
+  ink2: string;
+  /** Quiet text (kickers, counters). */
+  muted: string;
+  /** Hairlines and inactive progress. */
+  line: string;
+  /** The skin's accent, adjusted per theme and until it reads on `canvas` (≥ 3:1): chapter numbers, highlights, the cursor ring. */
+  accent: string;
+  /** The skin's typeface family name. */
+  font: string;
+  scheme: 'light' | 'dark';
+}
+
+/** `GET /appearance/video-palette` → 200. `studio-default` = no skin stored: studio's new-install look. */
+export interface VideoPaletteResponse {
+  source: 'studio-skin' | 'studio-default';
+  theme: 'dark' | 'light' | 'wicked-light' | 'wicked-dark';
+  palette: VideoPalette;
+}
+
+/**
  * `GET /settings` → 200 (api-types 0.38.0 — the body's first named type; the shape `{ settings }`
  * is unchanged since 0.1). `path` (additive; DES-L10 PR-L10-6, crew ≥ 0.7.35) is the ABSOLUTE
  * path of the settings file the daemon reads and writes (`WICKED_CREW_SYSTEM_SETTINGS` honoured),

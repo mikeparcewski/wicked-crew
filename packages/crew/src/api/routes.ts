@@ -10,6 +10,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { videoPalette } from '../appearance/video-palette.js';
 import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, GovernanceReplayUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, addonSupportsQeOverride, addonSupportsReducedAssurance, humanGatePhaseIds, settingsFilePath } from '../core/adapter.js';
 import { codeGraphDb, codeGraphErrorStatus, requirementsGraph } from '../core/repoPaths.js';
 import type {
@@ -5991,6 +5992,11 @@ export function registerRoutes(
   // additive `path` (api-types 0.38.0 `SettingsResponse.path?`; adjudicated §4.6 — `path`, not
   // `settings_path`).
   app.get(`${V}/settings`, async () => ({ settings: await adapter.getSettings(), path: settingsFilePath() }));
+
+  // The demo video's palette from the studio skin (operator 2026-10-14): read-only, derived from `studio.appearance`;
+  // garden's demo stage and interactive's re-cuts read it as their default colours.
+  app.get(`${V}/appearance/video-palette`, { config: { manifest: { responseType: 'VideoPaletteResponse', statusCodes: [200] } } },
+    async () => videoPalette((await adapter.getSettings())['studio.appearance']));
 
   app.put(`${V}/settings`, async (req, reply) => {
     const patch = req.body as Partial<import('../core/types.js').CrewSystemSettings>;
