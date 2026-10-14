@@ -32,24 +32,12 @@ import type {
   SessionView,
   WorkUnit,
 } from '../core/types.js';
+import { QE_ACCEPTANCE } from '../core/qe-acceptance-setting.js';
 import type { AcceptanceView } from '../qe/acceptance.js';
 
-/** The contract token whose enforcement the engine leaves to the launcher. */
-export const QE_ACCEPTANCE = 'qe_acceptance';
-
-/** The engine's BUILT-IN presets that require `qe_acceptance` — the mirror of wicked-core's
- *  `catalog::builtin_preset_instruments` (QE-IN-APP-WORKFLOWS). A launch naming one of these runs the
- *  preset, whatever def of the same name crew holds. */
-export const QE_PRESETS: ReadonlySet<string> = new Set([
-  'feature',
-  'migration',
-  // core-ts 0.8.2: X-MIG M1 (`bug`, wicked-core#864) and M12 (`mcp-server`, #866) made these
-  // built-in presets with qe_acceptance (codex r3 on crew A: without them an unattended delivery
-  // of a bug fix pushed past the verdict check).
-  'bug',
-  'mcp-server',
-]);
-
+// The contract token and the built-in QE presets live with the daemon's QE acceptance setting (the
+// adapter applies it at launch); re-exported here for the deliver paths.
+export { QE_ACCEPTANCE, QE_PRESETS } from '../core/qe-acceptance-setting.js';
 /** `QeAcceptanceRefusal.code`. */
 export const QE_ACCEPTANCE_REQUIRED_CODE = 'qe_acceptance_required' as const;
 

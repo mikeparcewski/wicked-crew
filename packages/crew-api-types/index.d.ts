@@ -273,6 +273,15 @@ export interface HealthCapabilities {
    * carry `qe`. ABSENT on an older daemon — do not send the fields (its strict schema 400s on them).
    */
   qeAcceptanceOverride?: boolean;
+  /**
+   * (api-types 0.120.0) The daemon's QE acceptance setting ({@link SystemSettings.qeAcceptance}):
+   * `'required'` (the default) or `'off'` — every launch of a workflow that requires QE acceptance,
+   * and that neither skips nor forces it, is skipped with a reason naming the setting (labelled on
+   * the run, every gate and the delivery); launches the engine takes without crew excepted (see the
+   * setting). ABSENT on an
+   * older daemon — read as `'required'`.
+   */
+  qeAcceptance?: 'required' | 'off';
 }
 
 /** One `GET /health.warnings[]` entry (additive; wicked-core#411 / wicked-crew#497). */
@@ -4817,7 +4826,9 @@ export interface LaunchRunBody {
    * reason (non-empty, the operator's own words). Persisted on the contract
    * (`assurance.qe.status: 'skipped'`, `basis: 'operator'`) and labelled on the run, every gate and
    * the delivery ("QE acceptance skipped by operator: <reason>"). Omitted: a required QE acceptance
-   * is never skipped. 400 beside `forceQeAcceptance`; the engine refuses it on a run whose workflow
+   * is not skipped — unless the daemon's {@link SystemSettings.qeAcceptance} is `'off'`, which skips it
+   * the same way with a reason naming the setting (a `forceQeAcceptance: true` launch still requires
+   * it). 400 beside `forceQeAcceptance`; the engine refuses it on a run whose workflow
    * does not require QE acceptance. Send only when `GET /health.capabilities.qeAcceptanceOverride`.
    */
   skipQeAcceptance?: { reason: string };
@@ -5371,6 +5382,18 @@ export interface SystemSettings {
    * launches (those are always `'none'`).
    */
   deliverDefault?: 'pr' | 'none';
+  /**
+   * (api-types 0.120.0) QE ACCEPTANCE for this daemon. `'required'` (the shipped default; absent
+   * reads the same): a run whose workflow requires `qe_acceptance` delivers only on an attributed
+   * PASS unless its own launch sends `skipQeAcceptance`. `'off'`: every launch of such a workflow that
+   * neither skips nor forces QE acceptance itself is SKIPPED, through the same skip, with a reason
+   * naming this setting — `assurance.qe.status: 'skipped'`, `basis: 'operator'`, labelled on the run,
+   * every gate and the delivery, and the deliver gate reads a skip, never a refusal. A launch's
+   * `forceQeAcceptance: true` still requires it. `GET /health.capabilities.qeAcceptance` reports it.
+   * NOT covered: launches the engine takes without crew — campaign nodes (the engine's own run spec
+   * carries no QE word) and `wicked.crew.run.requested` bus requests — so those still require it.
+   */
+  qeAcceptance?: 'required' | 'off';
   /**
    * (crew#552) Whether a completed onboarding run chains a `capture-learnings` run for the same
    * repo (filed in the onboarding run's project; proposals stay human-gated). Absent reads as
