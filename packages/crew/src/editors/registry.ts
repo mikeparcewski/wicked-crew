@@ -30,6 +30,7 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 
 import type { EditorPermission, EditorView } from '../core/types.js';
+import { parseSurfaces } from './surfaces.js';
 import { crewStateHome } from '../projects/state-home.js';
 
 /** The persisted flags file, under the registered `daemon-` prefix. */
@@ -54,6 +55,7 @@ export const EDITOR_PERMISSIONS = [
   'ui.fullscreen',
   'network.media',
   'mcp.session',
+  'artifact.theme',
 ] as const satisfies ReadonlyArray<EditorPermission>;
 
 /** Editor ids: lowercase dash-words, ≤ 64 (garden's shape); first-party ones start with `wicked-`. */
@@ -63,7 +65,26 @@ export const FIRST_PARTY_ID = /^wicked-[a-z0-9]+(?:-[a-z0-9]+)*$/u;
 export const EDITOR_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u;
 const KIND = /^[a-z][a-z0-9-]{1,40}$/u;
 
-export const EditorManifestSchema = z.object({
+/** Protocol 2's `surfaces` (DES-EDITOR-PLUGIN-CONTRACT-001 §5.2), parsed strictly to the wire shape: any
+ *  violation refuses the editor, with the host's own reason. */
+const SurfacesField = z.unknown().optional().transform((raw, ctx) => {
+  if (raw === undefined) return undefined;
+  const parsed = parseSurfaces(raw);
+  if (!parsed.ok) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: parsed.reason });
+    return z.NEVER;
+  }
+  return parsed.value;
+});
+
+/** §8.2: `surfaces` is required when `protocol` lists 2, and refused when it doesn't. */
+function surfacesMatchProtocol(m: { protocol: number[]; surfaces?: unknown }, ctx: z.RefinementCtx): void {
+  const speaks2 = m.protocol.includes(2);
+  if (speaks2 && m.surfaces === undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['surfaces'], message: 'a protocol-2 editor declares its surfaces' });
+  if (!speaks2 && m.surfaces !== undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['surfaces'], message: 'surfaces are a protocol-2 field' });
+}
+
+const EditorManifestFields = z.object({
   id: z.string().max(64).regex(EDITOR_ID),
   title: z.string().min(1).regex(/\S/u),
   version: z.string().regex(EDITOR_VERSION),
@@ -74,8 +95,10 @@ export const EditorManifestSchema = z.object({
   panels: z.array(z.enum(['checks'])).optional(),
   permissions: z.array(z.object({ id: z.enum(EDITOR_PERMISSIONS), why: z.string().min(1) })),
   limits: z.object({ bundleBytes: z.number().int().min(1).max(HOST_BUNDLE_CAP_BYTES) }).optional(),
+  surfaces: SurfacesField,
 });
-export type EditorManifest = z.infer<typeof EditorManifestSchema>;
+export const EditorManifestSchema = EditorManifestFields.superRefine(surfacesMatchProtocol);
+export type EditorManifest = z.infer<typeof EditorManifestFields>;
 
 export interface EditorRecord {
   manifest: EditorManifest;
@@ -254,10 +277,10 @@ export function discoverStudioEditors(
 }
 
 /** A pack editor's manifest entry: the shared shape plus its pinned hash and a pack-relative entry. */
-export const PackEditorSchema = EditorManifestSchema.extend({
+export const PackEditorSchema = EditorManifestFields.extend({
   entry: z.string().regex(/\.html$/u),
   sha256: z.string().regex(/^[0-9a-f]{64}$/u),
-});
+}).superRefine(surfacesMatchProtocol);
 
 /**
  * Read one pack editor at serve-time quality: the manifest entry for `id` in `<root>/wicked-pack.json`,
@@ -313,7 +336,7 @@ export function readPackEditor(pack: InstalledPack, id: string, log?: (msg: stri
   if (outside.length > 0) return why(`entry loads from outside itself (${outside.slice(0, 3).join(', ')})`);
   const sha = sha256Of(buf);
   if (sha !== m.sha256 || sha !== pack.sha256) return why('its entry no longer matches the hash it was installed with');
-  const manifest: EditorManifest = { id: m.id, title: m.title, version: m.version, protocol: m.protocol, kinds: m.kinds, entry: m.entry, sizes: m.sizes, permissions: m.permissions, ...(m.panels !== undefined ? { panels: m.panels } : {}), ...(m.limits !== undefined ? { limits: m.limits } : {}) };
+  const manifest: EditorManifest = { id: m.id, title: m.title, version: m.version, protocol: m.protocol, kinds: m.kinds, entry: m.entry, sizes: m.sizes, permissions: m.permissions, ...(m.panels !== undefined ? { panels: m.panels } : {}), ...(m.limits !== undefined ? { limits: m.limits } : {}), ...(m.surfaces !== undefined ? { surfaces: m.surfaces } : {}) };
   return { manifest, sha256: sha, bytes: buf.byteLength, entryPath, firstParty: false, source: 'pack', pack };
 }
 
@@ -506,6 +529,7 @@ export class EditorRegistry {
       kinds: [...m.kinds],
       sizes: [...m.sizes],
       ...(m.panels !== undefined ? { panels: [...m.panels] } : {}),
+      ...(m.surfaces !== undefined ? { surfaces: structuredClone(m.surfaces) } : {}),
       permissions: m.permissions.map((p) => ({ id: p.id, why: p.why })),
       sha256: r.sha256,
       bytes: r.bytes,
