@@ -8,7 +8,7 @@
  * runs require it; other runs disclose a same-seat fallback), deny-dominates
  * gates that report what they checked, durable
  * runs that survive crashes, and the CLIs you already have running as governed
- * workers over persistent ACP sessions. The studio console is a pure CLIENT of
+ * workers in hardened seat containers. The studio console is a pure CLIENT of
  * the same public /api/v1 every other consumer uses — nothing privileged.
  *
  * The daemon (`wicked-crew serve`) is the SUBSTRATE, never the pitch.
@@ -62,7 +62,7 @@ import '../styles/crew.css';
 
 const title = 'wicked-crew — the control plane: intent in, gated work out';
 const description =
-  'wicked-crew is the control plane for governed agent delivery — the harness for your agent harnesses. Intent in; governed, gated work out: your own installed CLIs (Claude Code, Antigravity, Codex, opencode, Pi, GitHub Copilot) run as governed workers over persistent ACP sessions, in git worktrees, through durable multi-agent workflows where "done" is re-derived from evidence, not asserted, and review goes to a distinct eligible seat — or the run says it could not. Beside the run, the acceptance read resolves the QE evidence ledger deny-dominates; a CONDITIONAL reads as a deny, and delivery does not wait on it. Governance is more than a gate: steering doctrine across seven types and governed knowledge — agents propose, humans promote — are authored through the same API, and each phase grounds on the code graph in wicked-estate. One public API, no privileged clients: the studio console ships inside crew as a pure client of /api/v1, and governed generation answers the document engine over the bus. Crash-resumable by construction. Runs on the agents and plans you already pay for. Local-first.';
+  'wicked-crew is the control plane for governed agent delivery — the harness for your agent harnesses. Intent in; governed, gated work out: your own installed CLIs (Claude Code, Antigravity, Codex, opencode, Pi, GitHub Copilot) run as governed workers in hardened seat containers, in git worktrees, through durable multi-agent workflows where "done" is re-derived from evidence, not asserted, and review goes to a distinct eligible seat — or the run says it could not. Beside the run, the acceptance read resolves the QE evidence ledger deny-dominates; a CONDITIONAL reads as a deny, and delivery does not wait on it. Governance is more than a gate: steering doctrine across seven types and governed knowledge — agents propose, humans promote — are authored through the same API, and each phase grounds on the code graph in wicked-estate. One public API, no privileged clients: the studio console ships inside crew as a pure client of /api/v1, and governed generation answers the document engine over the bus. Crash-resumable by construction. Runs on the agents and plans you already pay for. Local-first.';
 const repo = 'https://github.com/mikeparcewski/wicked-crew';
 
 // The deterministic floor: policies wired in series across a build → ship gate.
@@ -426,11 +426,11 @@ const crewVersion = __WICKED_CREW_VERSION__;
 
       <div class="byo-stage" data-byo-stage>
         <div class="byo-stage-head">
-          <span class="byo-stage-k">resident ACP session · governed worker</span>
+          <span class="byo-stage-k">seat container · governed worker</span>
           <span class="byo-stage-badge" data-byo-badge>Claude Code</span>
         </div>
         <div class="byo-stage-row">
-          <code data-byo-cmd>claude-agent-acp</code>
+          <code data-byo-cmd>claude -p</code>
           <span class="byo-stage-arr">→ session in →</span>
           <span class="byo-stage-wt">.worktrees/run-4f2a · no shell · read-scoped</span>
         </div>
@@ -1420,7 +1420,7 @@ wicked-crew serve   <span class="c"># the studio console, served on your machine
         return [
           { h: 'run <b>r-4f2a</b> launched · workflow <b>feature</b> · council convening' },
           { h: 'council · profile <b>#2</b> wins at <b>100%</b> (ballot 2) · unit → <b>' + worker + '</b>' },
-          { h: 'acp session started · <b>' + worker + '</b> · tokens streaming · .worktrees/run-4f2a' },
+          { h: 'seat container started · <b>' + worker + '</b> · output streaming · .worktrees/run-4f2a' },
           { h: 'unit <b>3/6</b> build · diff captured · usage 41k in / 6k out' },
           { h: 'evaluator ≠ creator · review unit routed to a <b>different CLI</b>' },
           { h: 'policy <b>schema-drift</b> · <b>FAIL</b> — migration ≠ checked-in schema', c: 'sf-row--gate' },

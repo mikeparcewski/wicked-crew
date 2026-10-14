@@ -9,6 +9,7 @@ import {
   seatGovernanceMode,
   seatGovernanceModes,
   seatGovernanceWarnings,
+  runRoot,
   type GovernanceScopeKind,
 } from '../src/api/seat-governance.js';
 import { CREW_ONLY_SEAT_FIELDS, toEngineSeat } from '../src/core/engine-roster.js';
@@ -149,5 +150,18 @@ describe('under the container floor (C5)', () => {
     expect(claude.reason).toMatch(/gate hook/);
     const diag = seatGovernanceDiagnostics([{ ...BUILTIN.pi, enabled_for_council: true }]);
     expect(seatGovernanceWarnings(diag, null).map((w) => w.kind)).not.toContain('seats.os-floor-unarmable');
+  });
+});
+
+describe('runRoot: the executable decides, not the seat name (C5, codex c5-crew-r3)', () => {
+  it('reads the headless invocation, then the binary, then the key', () => {
+    expect(runRoot({ key: 'claude', headless_invocation: 'pi -p {PROMPT}' })).toBe('pi');
+    expect(runRoot({ key: 'my-claude', headless_invocation: '"/opt/tools/claude" -p {PROMPT}' })).toBe('claude');
+    expect(runRoot({ key: 'x', binary: 'C:\\tools\\codex.cmd' })).toBe('codex');
+    expect(runRoot({ key: 'claude#2' })).toBe('claude');
+  });
+  it('a claude-named seat running pi reads none on the host floor; a claude binary under another name is admitted', () => {
+    expect(seatGovernanceMode({ key: 'claude', governance_class: 'acp_input_governance', headless_invocation: 'pi -p {PROMPT}' }, 'scoped')).toMatchObject({ mode: 'none' });
+    expect(seatGovernanceMode({ key: 'my-claude', governance_class: 'acp_input_governance', headless_invocation: 'claude -p {PROMPT}' }, 'scoped')).toMatchObject({ mode: 'admitted' });
   });
 });

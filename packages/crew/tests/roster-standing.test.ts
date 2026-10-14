@@ -75,12 +75,11 @@ describe('rosterWithStandingFactory', () => {
     // C5: on the interim host floor the engine refuses pi's governed work.
     expect(mode('pi')['scoped_bound']).toMatchObject({ mode: 'none', source: 'none', class: 'os_sandbox' });
     expect(mode('pi')['scoped']).toMatchObject({ mode: 'none', class: 'os_sandbox' });
-    // C5: a non-claude seat governed only over ACP reads none on the interim host floor.
-    expect(mode('governed')['scoped']).toMatchObject({ mode: 'none', source: 'none' });
+    // C5: the executable decides — this seat runs `claude -p`, so its gate hook holds it.
+    expect(mode('governed')['scoped']).toMatchObject({ mode: 'admitted', source: 'acp_input_governance' });
     expect(mode('claude')['scoped_bound']).toMatchObject({ mode: 'none', class: null });
-    // C5: with ACP gone nothing holds it read-only in a scoped chat on the host floor.
-    expect(of('governed').unscoped).toEqual({ ok: true });
-    expect(of('governed').scoped).toMatchObject({ ok: false });
+    // A governed adapter sits in every mode.
+    expect(of('governed')).toEqual({ unscoped: { ok: true }, scoped: { ok: true }, scoped_bound: { ok: true } });
     // The verdict IS the pre-filter's: the same function, the same inputs.
     for (const key of ['claude', 'codex', 'pi', 'governed']) {
       const seat = roster.find((s) => s.key === key)!;

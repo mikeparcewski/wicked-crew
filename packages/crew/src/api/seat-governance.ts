@@ -52,6 +52,9 @@ export interface SeatGovernanceMode {
 /** The registry fields the mode reads (a `RosterSeat` satisfies it). */
 export interface GovernanceSeatInput {
   key: string;
+  /** The headless invocation the engine launches (its first token is the executable). */
+  headless_invocation?: unknown;
+  binary?: unknown;
   governance_class?: unknown;
   trust_flags?: unknown;
   acp?: { os_sandbox?: unknown; verified_version?: unknown } | null;
@@ -86,6 +89,22 @@ function ownSandboxMode(trustFlags: unknown): string | null {
     if (mode === 'workspace-write' || mode === 'read-only') return mode;
   }
   return null;
+}
+
+/** The CLI that actually runs for `seat` (C5, codex c5-crew-r3): the executable of its headless
+ *  invocation (quote-aware first token), else its binary, else its key — basename, lower-case, no
+ *  extension — as the engine resolves it, so a `claude` seat running `pi` is judged as pi. */
+export function runRoot(seat: GovernanceSeatInput): string {
+  const inv = typeof seat.headless_invocation === 'string' ? seat.headless_invocation.trim() : '';
+  let exe = '';
+  if (inv !== '') {
+    const m = /^"([^"]*)"|^'([^']*)'|^(\S+)/.exec(inv);
+    exe = (m?.[1] ?? m?.[2] ?? m?.[3] ?? '').trim();
+  }
+  if (exe === '' && typeof seat.binary === 'string') exe = seat.binary;
+  if (exe === '') exe = seat.key.split('#')[0] ?? seat.key;
+  const base = exe.split(/[\\/]/).pop() ?? exe;
+  return base.replace(/\.(exe|cmd|bat|mjs|js)$/i, '').toLowerCase();
 }
 
 function isCodex(seat: GovernanceSeatInput): boolean {
@@ -124,8 +143,7 @@ export function seatGovernanceMode(
   // C5: under the container floor (the default) no seat runs over ACP; what holds a governed unit
   // is its seat container, plus claude's gate hook — never an ACP adapter's permission channel.
   if (isContainerSeatFloor()) {
-    const root = seat.key.split('#')[0]?.toLowerCase();
-    if (root === 'claude') {
+    if (runRoot(seat) === 'claude') {
       return {
         mode: 'admitted',
         class: cls,
@@ -157,8 +175,8 @@ export function seatGovernanceMode(
   // C5: ACP is gone from the seats. On the interim host floor only claude (its gate hook) and codex
   // (its own bounded sandbox) keep a per-call check; the engine refuses every other seat's governed
   // work (needs_container_floor, wicked-core#950), so it reads none here too.
-  const rootKey = seat.key.split('#')[0]?.toLowerCase();
-  if (rootKey !== 'claude' && !isCodex(seat)) {
+  const rootKey = runRoot(seat);
+  if (rootKey !== 'claude' && rootKey !== 'codex') {
     return none(
       'its tool calls were checked over ACP, which is removed from the seats; on the interim host floor the engine refuses its governed work (needs_container_floor) — run the container floor',
     );

@@ -6,6 +6,13 @@ whether the seat can authenticate, and whether it enforces governance on its too
 
 ## Where a seat's login lives
 
+**Default (container floor, `WICKED_SEAT_FLOOR=container`):** sign each agent in once from studio →
+Agents → **Sign in**, which opens that CLI's own login in a disposable login container; the
+credential goes to the gateway's broker and every governed seat gets a placeholder. Nothing below
+applies to it: a host login (`claude /login` on the host) does not sign a container seat in.
+
+**Interim host floor (`WICKED_SEAT_FLOOR=host`)** — the rest of this section:
+
 The engine runs every seat under its own configuration home inside the worker home
 (`WICKED_WORKER_HOME`, default `~/.wicked-worker`, or `worker_config_root` in the system settings):
 
