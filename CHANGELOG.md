@@ -10,6 +10,18 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Changed
+- **BREAKING (C5): governed seats run in containers by default; ACP is removed from the seats (with wicked-core's
+  matching change).** The daemon sets `WICKED_SEAT_FLOOR=container` at boot unless the operator chose a
+  floor, so every governed unit runs its CLI's headless mode in a hardened seat container, signed in
+  from the Agents tab; `WICKED_SEAT_FLOOR=host` keeps the labelled interim host floor and boots with a
+  warning. A governed run on a host with no container runtime is refused with the install remedy.
+  Removed: the `agent-acp-bridges` workspace package (`agy-acp`, `wicked-pi`), the bridge PATH wiring
+  (`src/core/bridge-path.ts`, `PI_ACP_PI_COMMAND`), and the ACP adapter dependencies
+  (`@agentclientprotocol/claude-agent-acp`, `@agentclientprotocol/codex-acp`, `pi-acp`). The orphan
+  reaper still recognizes the old bridge names, so a daemon upgraded from an ACP release reaps what the
+  old one left running.
+
 ## [0.12.0] — 2026-10-14
 
 A minor release: a demo run's video becomes an editable document (#1013, `wicked-crew-api-types` 0.119.0) and QE acceptance can be turned off per daemon (#1015, `wicked-crew-api-types` 0.120.0), on the wicked-core-ts 0.11.0 engine, where container seats run on the agent's own sign-in (C6), and studio 0.9.0 (the editor stack on protocol 2) as the bundled UI, with the C6 sign-in link fix, a steadier Agents roster and an editor-pack conformance cap that fits a slow host.

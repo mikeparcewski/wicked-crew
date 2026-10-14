@@ -27,6 +27,17 @@ export function isContainerSeatFloor(env: NodeJS.ProcessEnv = process.env): bool
   return (env['WICKED_SEAT_FLOOR'] ?? '').trim().toLowerCase() === 'container';
 }
 
+/** The default seat floor of a crew daemon (C5): governed seats run in containers. Sets
+ *  `WICKED_SEAT_FLOOR=container` in `env` unless the operator chose a floor — the engine (in this
+ *  process) and crew's sign-in routes and roster then read the same value. `WICKED_SEAT_FLOOR=host`
+ *  keeps the interim host floor (macOS Seatbelt / Linux bwrap), labelled as such. Returns the floor. */
+export function defaultSeatFloor(env: NodeJS.ProcessEnv = process.env): string {
+  const chosen = (env['WICKED_SEAT_FLOOR'] ?? '').trim();
+  if (chosen !== '') return chosen;
+  env['WICKED_SEAT_FLOOR'] = 'container';
+  return 'container';
+}
+
 export function isContainerLoginCli(cli: string): boolean {
   return ['claude', 'codex', 'pi', 'opencode', 'copilot'].includes(cli);
 }

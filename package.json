@@ -4,8 +4,7 @@
   "private": true,
   "workspaces": [
     "packages/crew-api-types",
-    "packages/crew",
-    "packages/agent-acp-bridges"
+    "packages/crew"
   ],
   "scripts": {
     "use-local-core-ts": "node scripts/use-local-core-ts.mjs",

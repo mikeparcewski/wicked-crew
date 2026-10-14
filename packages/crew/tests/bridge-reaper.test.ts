@@ -13,8 +13,8 @@
  *   - FAKE IO proves the policy: discovery ∪ registry targeting, escalation order,
  *     report contents — without racing real process lifecycles.
  *
- * Plus the drift guard: `BRIDGE_BINS` must equal the `*-acp` bins the declared
- * dependencies provide (the same ground truth `bridge-names.test.ts` audits), so a
+ * Plus the legacy guard: no declared dependency provides an ACP bridge any more (C5), and
+ * `BRIDGE_BINS` stays the list a pre-C5 daemon may have left running (the earlier drift guard: a
  * bridge added or removed there cannot silently escape the reaper here.
  */
 
@@ -143,8 +143,11 @@ describe('BRIDGE_BINS drift guard', () => {
     return names;
   }
 
-  it('BRIDGE_BINS equals the *-acp bins the declared dependencies provide', () => {
-    expect([...BRIDGE_BINS].sort()).toEqual([...bridgeNamesFromDeclaredDeps()].sort());
+  it('no declared dependency provides an ACP bridge any more; BRIDGE_BINS is the legacy list (C5)', () => {
+    // ACP is gone from the seats: nothing installs a bridge, and BRIDGE_BINS names only what a
+    // pre-C5 daemon may have left running, so the boot sweep still reaps it after an upgrade.
+    expect([...bridgeNamesFromDeclaredDeps()]).toEqual([]);
+    expect([...BRIDGE_BINS].sort()).toEqual(['agy-acp', 'claude-agent-acp', 'codex-acp', 'pi-acp']);
   });
 
   it('the grace window is the ~2s the shutdown contract promises', () => {

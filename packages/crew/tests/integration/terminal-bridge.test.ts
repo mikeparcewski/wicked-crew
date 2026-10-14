@@ -189,7 +189,8 @@ describe('terminal web bridge over core-ts (real PTY)', () => {
     });
     expect(res.status).toBe(201);
     const { id } = (await res.json()) as { id: string };
-    await waitForFrame((f) => f.type === 'terminalOutput' && f.id === id, 'early terminalOutput');
+    // A loaded host (the full suite) delays the first frame well past the 15 s default.
+    await waitForFrame((f) => f.type === 'terminalOutput' && f.id === id, 'early terminalOutput', 60000);
     const late = new WebSocket(`ws://127.0.0.1:${port}/ws/terminals/${encodeURIComponent(id)}`);
     late.binaryType = 'nodebuffer';
     const got: Buffer[] = [];
@@ -206,7 +207,7 @@ describe('terminal web bridge over core-ts (real PTY)', () => {
     const closed = new Promise<void>((resolve) => late.on('close', () => resolve()));
     await fetch(`${baseUrl}/api/v1/terminals/${encodeURIComponent(id)}/close`, { method: 'POST' });
     await closed;
-  });
+  }, 90000);
 
   it('a socket for a terminal the engine does not hold is closed after the grace, never left open (wicked-core C6)', async () => {
     const stray = new WebSocket(`ws://127.0.0.1:${port}/ws/terminals/term-never-opened`);

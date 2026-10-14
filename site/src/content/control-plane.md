@@ -65,17 +65,15 @@ Under the hood there are three pieces:
   planning, routing, gates, and an event stream. Runs are durable (embedded SQLite);
   every decision is an event.
 - **the daemon** (`wicked-crew serve`) — a thin TypeScript surface: REST + WebSocket
-  over the engine, and the process that puts your agent adapters on PATH.
+  over the engine, and the process that signs your agents in and runs their seat containers.
 - **studio** — the browser console: launch runs, watch every agent live, answer gates,
   inspect the decision trail, export the evidence.
 
-Agents run as workers over the
-[Agent Client Protocol](https://agentclientprotocol.com): persistent sessions, streamed
-token-level output, structured usage reporting. The adapters come from the ecosystem
-where they exist (the official `@agentclientprotocol/claude-agent-acp` and `codex-acp`,
-community `pi-acp`, native `copilot --acp` and `opencode acp`). The adapter packages
-are npm dependencies — installing the repo installs them; the CLIs themselves (and the
-natively-speaking `copilot`/`opencode`) you install and authenticate separately.
+Agents run as workers in their CLI's own headless mode, inside a hardened seat container
+(the container floor: only the worktree is mounted, and the seat's only egress is the model
+gateway). Each agent is signed in once, from the Agents tab, in a login container: the
+gateway holds the credential and the seat gets a placeholder. The CLIs come from their
+publishers; crew builds the seat images on first use.
 Cross-agent context is injected automatically: when unit 4 runs on a
 different CLI than unit 3, it receives unit 3's output as labeled context.
 

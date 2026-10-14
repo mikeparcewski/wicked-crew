@@ -18,13 +18,10 @@ protocol, where things live) are in the parent `../CLAUDE.md`.
   `build:with-studio` bundles wicked-studio's dist as the default local UI.
 - `packages/crew-api-types` — the published wire contract of `/api/v1` + `/ws` (types only,
   zero runtime); wicked-studio builds against this, never against crew internals.
-- `packages/agent-acp-bridges` — two bins, not one. `agy-acp` is an ACP stdio bridge for
-  agy/Antigravity, spawned by wicked-core for governed ACP sessions. `wicked-pi` is a
-  *launcher* shim, not a bridge: it turns wicked-core's `WICKED_PI_SKILL_DIRS` into pi's
-  `--no-skills --skill <dir>…` and is wired in by **crew**, not core, via
-  `PI_ACP_PI_COMMAND` (`src/core/bridge-path.ts`) so the community `pi-acp` adapter spawns
-  it instead of bare `pi`. Note `agy-acp` is resolved by name off PATH and an unrelated
-  community `agy-acp` is now published on npm — which one a spawn gets is PATH order.
+- No ACP bridges any more (C5): governed seats run each CLI's headless mode, in a hardened seat
+  container by default (`WICKED_SEAT_FLOOR=container`, set at boot unless the operator chose
+  `host`, the labelled interim host floor). `src/core/bridge-reaper.ts` still knows the old bridge
+  names so a daemon upgraded from an ACP release reaps what the old one left running.
 
 ## Where the real docs live
 
