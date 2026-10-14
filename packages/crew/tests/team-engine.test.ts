@@ -297,10 +297,14 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
     expect(p.high_risk).toBe(false);
     expect(p.pauses).toBe(false);
     expect(p.reasons[0]).toMatch(/^pending the PA's scope/);
-    expect(p.steps.map((s) => [s.catalog, s.id])).toEqual([
+    const steps = p.steps.map((s) => [s.catalog, s.id]);
+    expect(steps.slice(0, 2)).toEqual([
       ['understand', 'pa-scope'],
       ['build', 'build'],
     ]);
+    // wicked-core#934: an engine whose run contract requires a distinct evaluator plans its review even at the
+    // lowest band. CI builds core-ts from core main (which has it); the released core-ts may not yet.
+    expect(steps.slice(2)).toEqual(steps.length > 2 ? [['review', 'review']] : []);
     expect(p.def.phases[0]?.id).toBe('pa-scope');
   });
 
