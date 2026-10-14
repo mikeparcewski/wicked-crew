@@ -348,7 +348,8 @@ describe('the routes — PUT /settings, GET /health, GET /diagnostics, publish /
     expect(h.status).toBe('ok'); // the daemon serves — studio must load and show it (the state-home precedent)
     const finding = h.baseSkill?.finding ?? null;
     expect(finding).not.toBeNull();
-    expect(h.warnings).toEqual([{ kind: 'skills.base-skill', severity: 'error', message: finding!.message }]);
+    // The roster's own seat warnings (C5: interim host floor) ride /health too; this file's subject is the base skill.
+    expect((h.warnings ?? []).filter((w) => w.kind.startsWith('skills.'))).toEqual([{ kind: 'skills.base-skill', severity: 'error', message: finding!.message }]);
     expect(finding!.message).toContain(BASE_SKILL_INSTALL_HINT);
     expect(finding!.message.endsWith(baseSkillRemedy(false))).toBe(true);
     const res = await app!.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'triage the flake', clisJson: '[]' } });

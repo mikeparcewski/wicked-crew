@@ -159,8 +159,11 @@ describe('a state home the fence cannot classify — said at boot, on /diagnosti
     const body = res.json() as HealthResponse;
     expect(body.status).toBe('ok');
     expect(body.warnings).toBeDefined();
-    expect(body.warnings).toHaveLength(3);
-    for (const w of body.warnings ?? []) {
+    // Only this file's subject: the roster's own seat warnings (C5: on the interim host floor every
+    // seat but claude and codex is named ungoverned) ride /health beside them.
+    const stateHome = (body.warnings ?? []).filter((w) => w.kind.startsWith('state-home'));
+    expect(stateHome).toHaveLength(3);
+    for (const w of stateHome) {
       expect(w.kind).toBe('state-home.unregistered');
       expect(w.severity).toBe('error');
       expect(w.message).toContain('is not in the state-home registry');
@@ -190,7 +193,7 @@ describe('a state home the fence cannot classify — said at boot, on /diagnosti
 
     const health = (await app.inject({ method: 'GET', url: '/api/v1/health' })).json() as HealthResponse;
     expect(health.status).toBe('ok');
-    expect(health.warnings).toBeUndefined();
+    expect((health.warnings ?? []).filter((w) => w.kind.startsWith('state-home'))).toEqual([]);
 
     const diag = (await app.inject({ method: 'GET', url: '/api/v1/diagnostics' })).json() as DiagnosticsResponse;
     expect(diag.stateHome?.refusesLaunches).toBe(false);
