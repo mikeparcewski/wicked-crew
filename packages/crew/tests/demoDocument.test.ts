@@ -1,7 +1,7 @@
 // A demo run's video as an editable document (POST /runs/:id/demo/document): the run's recorded segments become a
 // wicked-interactive document (one take per chapter), linked from crew's state home and shown on DemoView.document.
 
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -11,6 +11,7 @@ import { demoDocumentLink, demoRootDir, makeDemoDocument, type BridgeCall } from
 import type { SessionView } from '../src/core/types.js';
 import { crewStateHome, setCrewStateHome } from '../src/projects/state-home.js';
 import { removeScratch } from './setup/scratch.js';
+import { isRegisteredStateHomeEntry } from '../src/projects/state-home-registry.js';
 
 const RUN = 'run-0f3a9c2e-77aa-4c1b-9d2e-000000000001';
 
@@ -90,6 +91,43 @@ describe('a demo run becomes an editable document', () => {
     const b = bridge({ cutExists: true });
     expect((await makeDemoDocument(view('completed'), { bridgeFor: async () => b.call })).status).toBe(200);
     expect(await demoDocumentLink(RUN)).not.toBeNull();
+  });
+
+  it('the link file is a registered state-home entry, so it never refuses a governed launch', async () => {
+    await makeDemoDocument(view('completed'), { bridgeFor: async () => bridge().call });
+    const entries = readdirSync(crewStateHome());
+    expect(entries).toContain('daemon-demo-documents.json');
+    expect(entries.every((e) => isRegisteredStateHomeEntry(e)), entries.join(',')).toBe(true);
+    expect(isRegisteredStateHomeEntry('daemon-demo-documents.json.123.abc.tmp')).toBe(true);
+  });
+
+  it('two runs made at once both keep their links', async () => {
+    const other = { ...view('completed'), session: { ...view('completed').session, id: 'run-2' } } as unknown as SessionView;
+    const root2 = demoRootDir('run-2');
+    mkdirSync(join(root2, 'demo-video', 'segments', '01-open'), { recursive: true });
+    writeFileSync(join(root2, 'chapters.json'), JSON.stringify([{ key: '01-open', title: 'Open it' }]));
+    writeFileSync(join(root2, 'demo-video', 'segments', '01-open', 'segment.mp4'), Buffer.alloc(4));
+    const [a, b] = await Promise.all([
+      makeDemoDocument(view('completed'), { bridgeFor: async () => bridge().call }),
+      makeDemoDocument(other, { bridgeFor: async () => bridge().call }),
+    ]);
+    expect([a.status, b.status]).toEqual([200, 200]);
+    expect(await demoDocumentLink(RUN)).not.toBeNull();
+    expect(await demoDocumentLink('run-2')).not.toBeNull();
+  });
+
+  it('a segment directory the worker swapped for a link out of the root is refused, never read', async () => {
+    const outside = join(scratch, 'outside');
+    mkdirSync(outside);
+    writeFileSync(join(outside, 'segment.mp4'), Buffer.alloc(8, 9));
+    const seg = join(demoRootDir(RUN), 'demo-video', 'segments', '02-close');
+    rmSync(seg, { recursive: true });
+    symlinkSync(outside, seg);
+    const b = bridge();
+    const r = await makeDemoDocument(view('completed'), { bridgeFor: async () => b.call });
+    expect(r.status).toBe(409);
+    expect(b.calls.filter((c) => c.method === 'PUT').map((c) => c.path)).not.toContain('/d/demo-run0f3a9c2e7/api/demo/import/02-close');
+    expect(await demoDocumentLink(RUN)).toBeNull();
   });
 
   it('refuses before the review gate, without recorded segments, for an unknown project, or when interactive refuses', async () => {

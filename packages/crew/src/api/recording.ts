@@ -585,11 +585,13 @@ export async function demoView(adapter: CoreAdapter, view: SessionView): Promise
 // take per chapter, its title and blurb, the brief's URL), so the video editor can re-cut it with E1's API.
 // The link lives in crew's state home, never in the run root: the run's own worker can write there.
 
-const DEMO_DOCS_FILE = 'demo-documents.json';
+/** Under the state home's registered `daemon-` prefix (state-home-registry.ts): a top-level name the worker
+ *  Read fence classifies, so the file never refuses a launch. Its temp sidecars share the prefix. */
+const DEMO_DOCS_FILE = 'daemon-demo-documents.json';
 const DOC_ID = /^[a-z0-9][a-z0-9-]{0,63}$/u;
 const IMPORT_KEY = /^[a-z0-9][a-z0-9-]{0,47}$/u;
-/** A segment is uploaded to the bridge whole; one this large is refused rather than buffered. */
-const SEGMENT_MAX_BYTES = 1024 * 1024 * 1024;
+/** A segment is read and uploaded whole; one larger than this is refused rather than buffered. */
+const SEGMENT_MAX_BYTES = 256 * 1024 * 1024;
 
 type DemoDocLink = NonNullable<DemoView['document']>;
 
@@ -610,14 +612,64 @@ export async function demoDocumentLink(runId: string): Promise<DemoDocLink | nul
     : null;
 }
 
-async function writeDemoDocLink(runId: string, link: DemoDocLink): Promise<void> {
-  const all = await readDemoDocs();
-  all[runId] = link;
-  const path = join(crewStateHome(), DEMO_DOCS_FILE);
-  const tmp = `${path}.${process.pid}.tmp`;
-  await fsp.mkdir(crewStateHome(), { recursive: true });
-  await fsp.writeFile(tmp, JSON.stringify(all, null, 2), 'utf8');
-  await fsp.rename(tmp, path);
+/** One writer for the links file across every run: each write reads, adds and renames inside this chain, so two
+ *  runs' links never overwrite each other. */
+let demoDocsWrites: Promise<unknown> = Promise.resolve();
+
+function writeDemoDocLink(runId: string, link: DemoDocLink): Promise<void> {
+  const write = demoDocsWrites.then(async () => {
+    const all = await readDemoDocs();
+    all[runId] = link;
+    const path = join(crewStateHome(), DEMO_DOCS_FILE);
+    const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+    await fsp.mkdir(crewStateHome(), { recursive: true });
+    try {
+      await fsp.writeFile(tmp, JSON.stringify(all, null, 2), 'utf8');
+      await fsp.rename(tmp, path);
+    } finally {
+      await fsp.rm(tmp, { force: true });
+    }
+  });
+  demoDocsWrites = write.catch(() => undefined);
+  return write;
+}
+
+/** Thrown for a segment that is not a plain file inside the run root (or changed while it was read). */
+class SegmentReadError extends Error {}
+
+/**
+ * A chapter's segment bytes, read like `readStoryline`: no link on the way (`demo-video`, `segments`, the
+ * chapter directory, the file), the directory's real path pinned under the root's, the file opened O_NOFOLLOW and
+ * at most {@link SEGMENT_MAX_BYTES}, and the inode that was read re-checked at the pinned path afterwards — the
+ * run's worker can write the root, so a swap between the check and the open is refused, never followed out.
+ */
+async function readSegment(root: string, key: string): Promise<Buffer> {
+  const parts = ['demo-video', 'segments', key];
+  let p = root;
+  for (const part of parts) {
+    p = join(p, part);
+    const st = await fsp.lstat(p).catch(() => null);
+    if (st === null || st.isSymbolicLink() || !st.isDirectory()) throw new SegmentReadError(`chapter ${key} has no recorded segment yet`);
+  }
+  const dir = p;
+  const file = join(dir, 'segment.mp4');
+  const expected = join(await fsp.realpath(root), ...parts);
+  if ((await fsp.realpath(dir)) !== expected) throw new SegmentReadError(`chapter ${key}'s segment resolves outside the demo root`);
+  const fh = await fsp.open(file, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0)).catch(() => null);
+  if (fh === null) throw new SegmentReadError(`chapter ${key} has no recorded segment yet`);
+  try {
+    const st = await fh.stat();
+    if (!st.isFile() || st.size === 0) throw new SegmentReadError(`chapter ${key} has no recorded segment yet`);
+    if (st.size > SEGMENT_MAX_BYTES) throw new SegmentReadError(`chapter ${key}'s segment is over ${SEGMENT_MAX_BYTES} bytes`);
+    const bytes = await fh.readFile();
+    const after = await fsp.lstat(file).catch(() => null);
+    if (bytes.length > SEGMENT_MAX_BYTES || after === null || after.ino !== st.ino || after.dev !== st.dev || (await fsp.realpath(dir)) !== expected) {
+      throw new SegmentReadError(`chapter ${key}'s segment changed while it was read`);
+    }
+    return bytes;
+  } finally {
+    await fh.close();
+  }
 }
 
 /** One call to the project's bridge: JSON or raw bytes in, the status and parsed JSON body out. */
@@ -641,7 +693,6 @@ export async function makeDemoDocument(view: SessionView, deps: DemoDocumentDeps
     if (!IMPORT_KEY.test(c.key)) return { status: 409, body: { error: `chapter key ${JSON.stringify(c.key)} cannot name a take` } };
     const size = await fileSize(root, `demo-video/segments/${c.key}/segment.mp4`);
     if (size === null || size === 0) return { status: 409, body: { error: `chapter ${c.key} has no recorded segment yet` } };
-    if (size > SEGMENT_MAX_BYTES) return { status: 409, body: { error: `chapter ${c.key}'s segment is over ${SEGMENT_MAX_BYTES} bytes` } };
   }
   const projectId = view.session.project_id ?? UNFILED_PROJECT;
   const call = await deps.bridgeFor(projectId);
@@ -653,9 +704,14 @@ export async function makeDemoDocument(view: SessionView, deps: DemoDocumentDeps
   const created = await call('POST', '/api/docs', { name: docId, html: placeholder, ...(projectId !== UNFILED_PROJECT ? { project: projectId } : {}) });
   if (created.status !== 200 && created.status !== 409) return { status: 502, body: { error: `interactive refused the document (${created.status}): ${String(created.body['error'] ?? '')}` } };
   for (const c of chapters) {
-    const path = await containedPath(root, `demo-video/segments/${c.key}/segment.mp4`);
-    if (path === null) return { status: 409, body: { error: `chapter ${c.key} has no recorded segment yet` } };
-    const staged = await call('PUT', `/d/${encodeURIComponent(docId)}/api/demo/import/${encodeURIComponent(c.key)}`, await fsp.readFile(path));
+    let bytes: Buffer;
+    try {
+      bytes = await readSegment(root, c.key);
+    } catch (e) {
+      if (e instanceof SegmentReadError) return { status: 409, body: { error: e.message } };
+      throw e;
+    }
+    const staged = await call('PUT', `/d/${encodeURIComponent(docId)}/api/demo/import/${encodeURIComponent(c.key)}`, bytes);
     // 409 cut_exists: an earlier attempt imported it already; the link below is all that is missing.
     if (staged.status === 409 && staged.body['error'] === 'cut_exists') break;
     if (staged.status !== 200) return { status: 502, body: { error: `interactive refused chapter ${c.key} (${staged.status}): ${String(staged.body['error'] ?? '')}` } };
