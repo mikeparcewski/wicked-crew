@@ -589,7 +589,7 @@ export async function demoView(adapter: CoreAdapter, view: SessionView): Promise
 
 /** Under the state home's registered `daemon-` prefix (state-home-registry.ts): a top-level name the worker
  *  Read fence classifies, so the file never refuses a launch. Its temp sidecars share the prefix. */
-const DEMO_DOCS_FILE = 'daemon-demo-documents.json';
+export const DEMO_DOCS_FILE = 'daemon-demo-documents.json';
 const DOC_ID = /^[a-z0-9][a-z0-9-]{0,63}$/u;
 const IMPORT_KEY = /^[a-z0-9][a-z0-9-]{0,47}$/u;
 /** A segment is read and uploaded whole; one larger than this is refused rather than buffered. */
