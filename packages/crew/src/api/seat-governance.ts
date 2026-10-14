@@ -13,6 +13,8 @@
  * (`core/engine-roster.ts`), so a studio round-trip of the roster never hands it to the engine.
  */
 
+import { isContainerSeatFloor } from './seat-container-login.js';
+
 /** The engine's governance class names (IG1-core-3 `GovernanceClass::as_wire`). */
 export type EngineGovernanceClass = 'acp_input_governance' | 'os_sandbox' | 'none';
 
@@ -119,6 +121,29 @@ export function seatGovernanceMode(
   const cls = asClass(seat.governance_class);
   const fence = fenceFor(scope, roots);
   const none = (reason: string): SeatGovernanceMode => ({ mode: 'none', class: cls, source: 'none', reason, fence });
+  // C5: under the container floor (the default) no seat runs over ACP; what holds a governed unit
+  // is its seat container, plus claude's gate hook — never an ACP adapter's permission channel.
+  if (isContainerSeatFloor()) {
+    const root = seat.key.split('#')[0]?.toLowerCase();
+    if (root === 'claude') {
+      return {
+        mode: 'admitted',
+        class: cls,
+        source: 'acp_input_governance',
+        reason:
+          "its gate hook judges every tool call (a blocking HTTP hook through the model gateway), inside a hardened seat container that mounts only the run's worktree",
+        fence,
+      };
+    }
+    return {
+      mode: 'os_sandbox',
+      class: cls,
+      source: 'repo_boundary',
+      reason:
+        "the container floor holds it: a hardened seat container that mounts only the run's worktree, with the model gateway as its only egress — not a per-call gate",
+      fence,
+    };
+  }
   if (cls === null) {
     return none('the engine reported no governance class for this seat, so nothing is claimed to fence its tool calls');
   }
@@ -254,7 +279,9 @@ export function seatGovernanceWarnings(seats: readonly SeatGovernanceDiagnostic[
     }
   }
   const boundaryOnly = enabled.filter((s) => s.governance_mode.scoped_bound.source === 'repo_boundary').map((s) => s.cli);
-  if (hostBoundary === null && boundaryOnly.length > 0) {
+  // Under the container floor the seat container is the boundary, not the host's sandbox-exec /
+  // bwrap (codex c5-crew-r1).
+  if (hostBoundary === null && boundaryOnly.length > 0 && !isContainerSeatFloor()) {
     out.push({
       kind: 'seats.os-floor-unarmable',
       severity: 'warning',

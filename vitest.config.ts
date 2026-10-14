@@ -5,6 +5,6 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
-    projects: ['packages/crew', 'packages/agent-acp-bridges'],
+    projects: ['packages/crew'],
   },
 });

@@ -2,7 +2,7 @@
  * IG1-crew-1: the governance mode table (seat-governance.ts) — five built-in seats × three scope
  * kinds, the pin rule, codex's trust flags — and the crew#742 diagnostics/warnings built on it.
  */
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   seatGovernanceDiagnostics,
@@ -124,5 +124,25 @@ describe('crew#742 — /diagnostics seat governance + /health warnings', () => {
     expect(noLauncher.map((w) => w.kind)).toEqual(['seats.ungoverned', 'seats.os-floor-unarmable']);
     expect(noLauncher[1]!.message).toMatch(/no OS write boundary can arm on this host.*so pi /);
     expect(noLauncher[1]!.message).not.toMatch(/copilot/);
+  });
+});
+
+describe('under the container floor (C5)', () => {
+  const prev = process.env['WICKED_SEAT_FLOOR'];
+  afterEach(() => {
+    if (prev === undefined) delete process.env['WICKED_SEAT_FLOOR'];
+    else process.env['WICKED_SEAT_FLOOR'] = prev;
+  });
+  it('reads the seat container, never an ACP permission channel; no host-launcher warning', () => {
+    process.env['WICKED_SEAT_FLOOR'] = 'container';
+    const pi = seatGovernanceMode({ key: 'pi', governance_class: 'acp_input_governance' }, 'unscoped');
+    expect(pi).toMatchObject({ mode: 'os_sandbox', source: 'repo_boundary' });
+    expect(pi.reason).toMatch(/container floor/);
+    expect(pi.reason).not.toMatch(/request_permission/);
+    const claude = seatGovernanceMode({ key: 'claude#2', governance_class: 'acp_input_governance' }, 'scoped');
+    expect(claude).toMatchObject({ mode: 'admitted' });
+    expect(claude.reason).toMatch(/gate hook/);
+    const diag = seatGovernanceDiagnostics([{ ...BUILTIN.pi, enabled_for_council: true }]);
+    expect(seatGovernanceWarnings(diag, null).map((w) => w.kind)).not.toContain('seats.os-floor-unarmable');
   });
 });

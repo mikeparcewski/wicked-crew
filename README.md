@@ -38,8 +38,10 @@ the coding inside a phase.
 
 ## Install & quickstart
 
-Requires Node.js ≥ 22 and at least one coding-agent CLI on your machine (e.g. Claude Code, Codex —
-crew drives them through packaged ACP bridges, self-contained, no global installs).
+Requires Node.js ≥ 22 and a container runtime (Rancher Desktop, Docker, Podman, Colima or OrbStack):
+governed agents run each CLI's headless mode in a hardened seat container (crew builds the seat images
+on first use), and you sign each agent in once from studio's Agents tab, in a login container.
+`WICKED_SEAT_FLOOR=host` keeps the labelled interim host floor instead.
 
 ```bash
 npm install -g wicked-crew     # or run it directly: npx wicked-crew serve
@@ -274,9 +276,12 @@ standalone `/governance/claims` wire:
   no non-advisory denial stands, AND enforcement was positively verified. An unenforced,
   ungoverned, or unverifiable run is **never** reported guardrailed.
 
-**Coverage boundary, stated plainly:** deterministic per-tool-call input governance exists only on
-seats whose adapter is **admitted** for it (`acp_input_governance` in the engine's CLI registry):
-today the built-in **claude** and **opencode** entries. A `clis.toml` override that restates a seat
+**Coverage boundary, stated plainly:** in a seat container the floor bounds every seat's effects
+(only the worktree is mounted; the model gateway is its only egress). Deterministic per-tool-call
+input governance is claude's gate hook; the per-tool-call checks other seats had over ACP are gone
+with ACP (the container floor's pause-and-ask replaces them; not built yet), and on the interim host
+floor a governed unit on such a seat is refused. Historically: seats whose adapter was **admitted**
+(`acp_input_governance` in the engine's CLI registry), the built-in **claude** and **opencode** entries. A `clis.toml` override that restates a seat
 without that flag drops the admission. A governed unit routed to any other CLI (Antigravity, Codex,
 pi, copilot, local, …) runs with unchecked tool calls and is reported `unenforced` — it still gets
 **phase-boundary coverage only**: the in-process output gate and the deliverable floor evaluate the

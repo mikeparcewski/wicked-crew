@@ -17,9 +17,8 @@
  *  - Local-first today (loopback, in-process engine, local workers/bus). The
  *    execution seam is built for a remote runner — gestured, never claimed as
  *    shipped.
- *  - Workers run over PERSISTENT ACP sessions via ecosystem adapters (official
- *    claude-agent-acp + codex-acp, community pi-acp, native copilot/opencode);
- *    wicked owns only the agy bridge. Never depict one-shot `-p` dispatch.
+ *  - Workers run each CLI's own headless mode inside a hardened seat container
+ *    (resumed per seat across turns); ACP is gone from the seats (C5).
  *  - The acceptance read takes the QE evidence ledger (wicked-ledger) at
  *    GET /api/v1/runs/:id/acceptance and resolves it deny-dominates:
  *    anything that isn't a clean PASS (FAIL, CONDITIONAL, PARTIAL,
@@ -81,12 +80,12 @@ const POLICIES = [
 // the prompt is substituted into argv ({PROMPT}) and the result is read from
 // stdout (wicked-council/src/dispatch.rs).
 const WORKERS = [
-  { name: 'Claude Code',    cli: 'claude-agent-acp', tag: 'your auth' },
-  { name: 'Codex',          cli: 'codex-acp',        tag: 'your plan' },
-  { name: 'GitHub Copilot', cli: 'copilot --acp',    tag: 'your seat' },
-  { name: 'opencode',       cli: 'opencode acp',     tag: 'your keys' },
-  { name: 'Pi',             cli: 'pi-acp',           tag: 'your host' },
-  { name: 'Antigravity',    cli: 'agy bridge',       tag: 'see ToS note' },
+  { name: 'Claude Code',    cli: 'claude -p',        tag: 'your auth' },
+  { name: 'Codex',          cli: 'codex exec',       tag: 'your plan' },
+  { name: 'GitHub Copilot', cli: 'copilot -p',       tag: 'your seat' },
+  { name: 'opencode',       cli: 'opencode run',     tag: 'your keys' },
+  { name: 'Pi',             cli: 'pi -p',            tag: 'your host' },
+  { name: 'Antigravity',    cli: 'agy -p',           tag: 'see ToS note' },
   { name: 'local model',    cli: 'ollama run …',     tag: 'offline' },
   { name: 'any binary',     cli: './my-agent',       tag: 'your TOML' },
 ];
