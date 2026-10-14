@@ -10,6 +10,9 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Added
+- **Container sign-in for agents (#1006, `wicked-crew-api-types` 0.116.0; engine side wicked-core#938).** Under `WICKED_SEAT_FLOOR=container`, `POST /api/v1/seats/:cli/container-login` opens the engine's hardened login container (`wicked-core seat-login argv`) in crew's PTY and moves the credential into the gateway's broker once, when that terminal exits; `POST /api/v1/seats/:cli/container-logout` signs out through the broker. One sign-in or sign-out runs at a time per seat, and a generation fence keeps an abandoned login terminal from ingesting over a newer sign-in. `GET /roster` reads the broker's status for container seats (`sign_in: 'container'`) instead of host credential probes. Crew reads `WICKED_SEAT_FLOOR` as the engine does (trimmed, case-insensitive). api-types gains `sign_in` and the `SeatContainerLogin*` shapes.
+
 ## [0.10.2] — 2026-10-13
 
 A patch on the wicked-core-ts 0.9.10 engine, which closes an outside-worktree write bypass (wicked-core#924), and on agent-acp-bridges 1.3.0, which governs pi again (#998). Studio is unchanged (`wicked-studio` `^0.7.13`). Pair it with wicked-garden 12.54.0 and wicked-estate 0.29.2.
