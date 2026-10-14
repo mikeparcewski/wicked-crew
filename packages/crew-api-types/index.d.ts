@@ -7991,8 +7991,8 @@ export interface DemoView {
 }
 
 /** `POST /runs/:id/demo/document` → 200 (idempotent: `created:false` when it was made before). 404 not a demo run
- *  or no such project; 409 not yet at the review gate / ended, or a chapter without a recorded segment; 502 the
- *  interactive bridge refused it. */
+ *  or no such project; 409 the run has not ended yet, or a chapter without a recorded segment; 502 the interactive
+ *  bridge refused it; 503 the bridge is unavailable. */
 export interface DemoDocumentResponse {
   projectId: string;
   docId: string;

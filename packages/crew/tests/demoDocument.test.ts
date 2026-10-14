@@ -101,6 +101,13 @@ describe('a demo run becomes an editable document', () => {
     expect(isRegisteredStateHomeEntry('daemon-demo-documents.json.123.abc.tmp')).toBe(true);
   });
 
+  it('a segment over the read cap is refused before anything is uploaded for it', async () => {
+    const b = bridge();
+    const r = await makeDemoDocument(view('completed'), { bridgeFor: async () => b.call, segmentMaxBytes: 15 });
+    expect(r).toMatchObject({ status: 409, body: { error: expect.stringContaining('02-close') } });
+    expect(b.calls.some((c) => c.path.endsWith('/import/02-close'))).toBe(false);
+  });
+
   it('two runs made at once both keep their links', async () => {
     const other = { ...view('completed'), session: { ...view('completed').session, id: 'run-2' } } as unknown as SessionView;
     const root2 = demoRootDir('run-2');
@@ -132,6 +139,8 @@ describe('a demo run becomes an editable document', () => {
 
   it('refuses before the review gate, without recorded segments, for an unknown project, or when interactive refuses', async () => {
     expect((await makeDemoDocument(view('running'), { bridgeFor: async () => bridge().call })).status).toBe(409);
+    // At the review gate a send-back can resume the recorder: not yet.
+    expect((await makeDemoDocument(view('awaiting_human'), { bridgeFor: async () => bridge().call })).status).toBe(409);
     writeFileSync(join(demoRootDir(RUN), 'demo-video', 'segments', '02-close', 'segment.mp4'), '');
     expect(await makeDemoDocument(view('completed'), { bridgeFor: async () => bridge().call })).toMatchObject({ status: 409, body: { error: expect.stringContaining('02-close') } });
     writeFileSync(join(demoRootDir(RUN), 'demo-video', 'segments', '02-close', 'segment.mp4'), Buffer.alloc(5));

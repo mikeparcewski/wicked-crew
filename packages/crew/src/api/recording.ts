@@ -202,6 +202,8 @@ export const DEMO_GIF_FILTER =
 
 /** The stages an export may run in: no worker of the run is running, so none can write the root. */
 const DEMO_EXPORT_STAGES: ReadonlySet<DemoStage> = new Set<DemoStage>(['review_gate', 'done', 'failed']);
+/** A run whose workers have all ended: its root is no longer written. */
+const DEMO_DOCUMENT_STAGES: ReadonlySet<DemoStage> = new Set<DemoStage>(['done', 'failed']);
 
 /** What each export writes, inside the run's `demo-video/`. */
 const DEMO_EXPORT_FILE: Readonly<Record<DemoExportFormat, string>> = { gif: 'demo.gif', poster: 'poster.jpg' };
@@ -643,7 +645,7 @@ class SegmentReadError extends Error {}
  * at most {@link SEGMENT_MAX_BYTES}, and the inode that was read re-checked at the pinned path afterwards — the
  * run's worker can write the root, so a swap between the check and the open is refused, never followed out.
  */
-async function readSegment(root: string, key: string): Promise<Buffer> {
+async function readSegment(root: string, key: string, maxBytes = SEGMENT_MAX_BYTES): Promise<Buffer> {
   const parts = ['demo-video', 'segments', key];
   let p = root;
   for (const part of parts) {
@@ -660,10 +662,19 @@ async function readSegment(root: string, key: string): Promise<Buffer> {
   try {
     const st = await fh.stat();
     if (!st.isFile() || st.size === 0) throw new SegmentReadError(`chapter ${key} has no recorded segment yet`);
-    if (st.size > SEGMENT_MAX_BYTES) throw new SegmentReadError(`chapter ${key}'s segment is over ${SEGMENT_MAX_BYTES} bytes`);
-    const bytes = await fh.readFile();
+    if (st.size > maxBytes) throw new SegmentReadError(`chapter ${key}'s segment is over ${maxBytes} bytes`);
+    // A bounded read: never more than the size fstat reported (+1 to see growth), whatever the file does meanwhile.
+    const buf = Buffer.alloc(st.size + 1);
+    let n = 0;
+    for (;;) {
+      const { bytesRead } = await fh.read(buf, n, buf.length - n, n);
+      if (bytesRead === 0) break;
+      n += bytesRead;
+      if (n > st.size) break;
+    }
+    const bytes = buf.subarray(0, n);
     const after = await fsp.lstat(file).catch(() => null);
-    if (bytes.length > SEGMENT_MAX_BYTES || after === null || after.ino !== st.ino || after.dev !== st.dev || (await fsp.realpath(dir)) !== expected) {
+    if (n !== st.size || after === null || after.ino !== st.ino || after.dev !== st.dev || (await fsp.realpath(dir)) !== expected) {
       throw new SegmentReadError(`chapter ${key}'s segment changed while it was read`);
     }
     return bytes;
@@ -678,6 +689,8 @@ export type BridgeCall = (method: 'POST' | 'PUT', path: string, body: Buffer | R
 export interface DemoDocumentDeps {
   /** The project's bridge (reuse-or-start), as a caller of its HTTP surface; null = no such project. */
   bridgeFor: (projectId: string) => Promise<BridgeCall | null>;
+  /** The per-segment read cap (default {@link SEGMENT_MAX_BYTES}). */
+  segmentMaxBytes?: number;
 }
 
 /** Make (once) and link the run's demo document. */
@@ -685,7 +698,9 @@ export async function makeDemoDocument(view: SessionView, deps: DemoDocumentDeps
   const runId = view.session.id;
   const existing = await demoDocumentLink(runId);
   if (existing !== null) return { status: 200, body: { ...existing, created: false } };
-  if (!DEMO_EXPORT_STAGES.has(demoStage(view))) return { status: 409, body: { error: 'a demo becomes a document at the review gate or once the run has ended' } };
+  // Only once the run has ENDED: no worker of it is alive to write the root while it is read. At the review gate a
+  // send-back resumes the recorder, which could swap a segment's directory mid-read (codex on #1013).
+  if (!DEMO_DOCUMENT_STAGES.has(demoStage(view))) return { status: 409, body: { error: 'a demo becomes a document once its run has ended' } };
   const root = await existingDemoRootDir(runId);
   const chapters = parseChapters(await readText(root, 'chapters.json'));
   if (chapters.length === 0) return { status: 409, body: { error: 'the demo has no chapters to import' } };
@@ -706,7 +721,7 @@ export async function makeDemoDocument(view: SessionView, deps: DemoDocumentDeps
   for (const c of chapters) {
     let bytes: Buffer;
     try {
-      bytes = await readSegment(root, c.key);
+      bytes = await readSegment(root, c.key, deps.segmentMaxBytes);
     } catch (e) {
       if (e instanceof SegmentReadError) return { status: 409, body: { error: e.message } };
       throw e;
