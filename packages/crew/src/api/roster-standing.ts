@@ -48,8 +48,9 @@ export type RosterWithStanding = (() => RosterSeat[]) & {
   /** crew#615: re-run one seat's credential probe now (after a sign-in / sign-out terminal). */
   reprobe?: (seatKey: string) => void;
   /** A3b (`GET /roster?refresh=<key>`): re-run one seat's sign-in check now and wait for it, at most
-   *  `waitMs`. `probed` — the fresh answer is in; `timed_out` — still running (the read serves the
-   *  last answer); `not_probed` — the seat has no sign-in check (pi, copilot, opencode). */
+   *  `waitMs`. `probed` — the fresh answer is in; `timed_out` — no fresh answer: still running, or
+   *  finished without being able to tell (the read serves the last answer); `not_probed` — the seat
+   *  has no sign-in check (pi, copilot, opencode). */
   recheck?: (seatKey: string, waitMs: number) => Promise<RecheckOutcome>;
 };
 
@@ -341,7 +342,9 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
           timer = setTimeout(() => resolve('timed_out'), remaining);
           timer.unref();
         });
-        const done = probe.refreshFresh(seatKey, root).then(() => 'probed' as const);
+        // A check that could not tell (its status command timed out) is not a fresh answer: the roster
+        // keeps showing the last one, which is what `timed_out` says.
+        const done = probe.refreshFresh(seatKey, root).then((r) => (r === undefined || r.signedIn === null ? ('timed_out' as const) : ('probed' as const)));
         const outcome = await Promise.race([done, deadline]);
         clearTimeout(timer);
         if (outcome === 'timed_out') return outcome;

@@ -101,6 +101,10 @@ export const PROBE_TTL_OTHER_MS = 30 * 1000;
 export const PROBE_TIMEOUT_MS = 15 * 1000;
 /** The live check is one model request (a CLI start plus one short reply). */
 export const VERIFY_TIMEOUT_MS = 60 * 1000;
+/** How long a definite answer (signed in or out) outlives later probes that could not tell. A status
+ *  command that times out on a loaded host is not news about the login: the last answer stands, and
+ *  is re-checked on the short TTL, until this long after it was given. */
+export const PROBE_KEEP_ANSWER_MS = 30 * 60 * 1000;
 /** How long a launch waits for missing or stale answers before it routes on what it has. */
 export const LAUNCH_PROBE_WAIT_MS = 20 * 1000;
 
@@ -208,9 +212,14 @@ export interface SeatProbeOptions {
   home?: string;
 }
 
+type CacheEntry = SeatProbeReading & { atMs: number; retryMs?: number; inconclusive?: SeatProbeReading };
+
 /** The per-daemon probe cache (see the module doc). */
 export class SeatProbe {
-  private readonly cache = new Map<string, SeatProbeReading & { atMs: number }>();
+  /** `atMs` — when the answer was given. When a later probe could not tell and the answer was kept
+   *  ({@link PROBE_KEEP_ANSWER_MS}): `retryMs` — when that probe ran, and `inconclusive` — what it
+   *  said, served once the kept answer is too old. */
+  private readonly cache = new Map<string, CacheEntry>();
   private readonly inflight = new Map<string, Promise<SeatProbeReading | undefined>>();
   /** One probe process at a time: each refresh chains onto this. */
   private queue: Promise<unknown> = Promise.resolve();
@@ -241,12 +250,14 @@ export class SeatProbe {
     const hit = this.cache.get(cacheKey(seatKey, workerRoot));
     if (hit === undefined || this.stale(hit)) void this.refresh(seatKey, workerRoot);
     if (hit === undefined) return undefined;
+    // A kept answer past its window is not served, whether or not a refresh has landed since.
+    const served = hit.inconclusive !== undefined && this.now() - hit.atMs >= PROBE_KEEP_ANSWER_MS ? hit.inconclusive : hit;
     return {
-      signedIn: hit.signedIn,
-      check: hit.check,
-      probedAt: hit.probedAt,
-      detail: hit.detail,
-      ...(hit.account !== undefined ? { account: hit.account } : {}),
+      signedIn: served.signedIn,
+      check: served.check,
+      probedAt: served.probedAt,
+      detail: served.detail,
+      ...(served.account !== undefined ? { account: served.account } : {}),
     };
   }
 
@@ -285,6 +296,17 @@ export class SeatProbe {
       .catch(() => undefined)
       .then(() => this.probeOnce(seatKey, command, verifyCommand(seatKey, workerRoot, env, this.home)))
       .then((reading) => {
+        // A probe that could not tell (a status command that timed out under load) never erases a
+        // recent definite answer: the roster would flip signed in → unknown → signed in between
+        // reads. The answer is kept (until PROBE_KEEP_ANSWER_MS after it was given) and re-checked on
+        // the short TTL. The probe's own answer is still what this returns: a caller that asked for a
+        // fresh check (`GET /roster?refresh=`) learns it could not tell.
+        const prev = this.cache.get(key);
+        const at = this.now();
+        if (reading.signedIn === null && prev !== undefined && prev.signedIn !== null && at - prev.atMs < PROBE_KEEP_ANSWER_MS) {
+          this.cache.set(key, { ...prev, retryMs: at, inconclusive: reading });
+          return reading;
+        }
         this.cache.set(key, { ...reading, atMs: Date.parse(reading.probedAt) });
         return reading;
       })
@@ -325,7 +347,8 @@ export class SeatProbe {
     return { signedIn, check, probedAt: new Date(this.now()).toISOString(), detail, ...(account !== undefined ? { account } : {}) };
   }
 
-  private stale(hit: SeatProbeReading & { atMs: number }): boolean {
+  private stale(hit: CacheEntry): boolean {
+    if (hit.retryMs !== undefined) return this.now() - hit.retryMs >= PROBE_TTL_OTHER_MS || this.now() - hit.atMs >= PROBE_KEEP_ANSWER_MS;
     const ttl = hit.signedIn === true ? PROBE_TTL_SIGNED_IN_MS : PROBE_TTL_OTHER_MS;
     return this.now() - hit.atMs >= ttl;
   }

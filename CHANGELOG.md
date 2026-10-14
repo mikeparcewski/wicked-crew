@@ -10,6 +10,8 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+- **The Agents roster no longer flips a signed-in agent to "unknown", or its version to "not reported", when a check is slow.** On a loaded host, a seat's auth-status command (15 s bound) or its `--version` (10 s bound) can time out. Before, a check that could not tell replaced the last real answer, so `GET /roster` alternated between `signed_in` and `unknown`, and a version read `null` for a whole 10-minute TTL. Studio showed "Unknown" and "Not reported" while other reads said signed in. Now a check that could not tell keeps the seat's last definite answer and its time (`probed_at`, `checked_at`), and the check is retried on the short TTL: 30 s for sign-in, 2 min for versions. The answer is kept for at most 30 min (sign-in) or 60 min (version), counted from when it was given. Past that window a kept answer is not served, even before the next check lands, and the roster says it could not tell. (An answer that is merely stale, with no failed check since, keeps the existing rule: it is served while its background refresh runs.) A definite answer, signed out included, replaces a kept one at once. A binary that is no longer on PATH is never covered by a kept version. `GET /roster?refresh=<key>` answers `timed_out`, not `probed`, when the check it ran could not tell.
+
 ## [0.11.0] — 2026-10-14
 
 A minor release: container sign-in for agents (#1006), protocol-2 editor surfaces (#1008) and the demo video palette (#1011), on the wicked-core-ts 0.10.0 engine, which carries the container seat floor (opt-in `WICKED_SEAT_FLOOR=container`) and the run-blocker fixes, and studio 0.8.0 (Desk v2) as the bundled UI.
