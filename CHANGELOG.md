@@ -10,6 +10,10 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-10-14
+
+A minor release: container sign-in for agents (#1006), protocol-2 editor surfaces (#1008) and the demo video palette (#1011), on the wicked-core-ts 0.10.0 engine, which carries the container seat floor (opt-in `WICKED_SEAT_FLOOR=container`) and the run-blocker fixes, and studio 0.8.0 (Desk v2) as the bundled UI.
+
 ### Added
 - **The demo video's palette follows the studio skin (`GET /api/v1/appearance/video-palette`, `wicked-crew-api-types` 0.118.0).** The operator's Theme (`studio.appearance`: the theme and its accent) becomes the video's canvas, surface, inks, accent and typeface. The values are studio's own theme tokens, and the accent gets the theme's adjustment and is kept readable on the canvas (≥ 3:1). With no skin stored, the route gives studio's new-install look. garden's demo stage and interactive's re-cuts use it as their default colours instead of a fixed grey-and-red palette. A storyline's own brand colour or a custom video style still overrides it.
 - **Container sign-in for agents (#1006, `wicked-crew-api-types` 0.116.0; engine side wicked-core#938).** Under `WICKED_SEAT_FLOOR=container`, `POST /api/v1/seats/:cli/container-login` opens the engine's hardened login container (`wicked-core seat-login argv`) in crew's PTY and moves the credential into the gateway's broker once, when that terminal exits; `POST /api/v1/seats/:cli/container-logout` signs out through the broker. One sign-in or sign-out runs at a time per seat, and a generation fence keeps an abandoned login terminal from ingesting over a newer sign-in. `GET /roster` reads the broker's status for container seats (`sign_in: 'container'`) instead of host credential probes. Crew reads `WICKED_SEAT_FLOOR` as the engine does (trimmed, case-insensitive). api-types gains `sign_in` and the `SeatContainerLogin*` shapes.
@@ -17,6 +21,12 @@ mentioned only where a daemon release depends on them.
 
 ### Changed
 - **A protocol-2 pack editor installs only when its conformance run passes cases 13-16 (§8.3).** Besides cases 0-6 and 8-12, crew now requires the surfaces, card, options and full-screen cases of an editor whose `protocol` lists 2, and records them on the install. A wicked-garden whose runner does not report them yet refuses such an install with the missing cases named (fail closed); protocol-1 packs install as before.
+- **deps:** `wicked-core-ts` `^0.10.0` (a minor): the container seat floor, opt-in with `WICKED_SEAT_FLOOR=container` (wicked-core#927, #930, #931, #932, #938), and the run-blocker fixes: evaluator failover never re-picks a failed or author seat (#939), a run whose contract requires a distinct evaluator always plans one (#940), an ACP bridge the engine keeps alive is never a unit's background work (#941, #943), codex's own sandbox admits the unit's declared write roots (#942), seat-login test isolation (#945).
+- **The bundled studio is 0.8.0** (`wicked-studio` `^0.8.0`): Desk v2 with Work, Runs, Repositories, Report, Understand, Steer, Agents and Evaluate tabs; the Agents tab with container Sign in / Sign out; a clearer run page; Slides; editor plugin protocol 2 on the host side.
+
+### Fixed
+- **A Slides draft's budget is its slide count (#1005, #1007).** A descriptive "one-page" in a deck brief is no longer read as a page budget, and the deck notes contract is named in the draft skill.
+- The team-engine plan preview accepts the review step wicked-core#934 always plans (#1010).
 
 ## [0.10.2] — 2026-10-13
 
@@ -4037,7 +4047,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.10.2...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.10.2...v0.11.0
 [0.10.2]: https://github.com/mikeparcewski/wicked-crew/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.9.13...v0.10.0
