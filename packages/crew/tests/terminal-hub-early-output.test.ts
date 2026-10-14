@@ -136,6 +136,13 @@ describe('TerminalHub early output', () => {
     expect(s.sent.at(-1)?.startsWith('7')).toBe(true);
     for (let i = 0; i < EARLY_OUTPUT_MAX_TERMINALS + 5; i++) hub.route(out(`t${i}`, 'hi'));
     expect(hub.heldCount()).toBe(EARLY_OUTPUT_MAX_TERMINALS);
+    // A single frame past the bound keeps only its tail (agy c6-r1).
+    const one = new TerminalHub();
+    one.route(out('huge', `head${'y'.repeat(EARLY_OUTPUT_MAX_BYTES)}tail`));
+    const h = fakeSocket();
+    one.register('huge', h.socket);
+    expect(h.sent.join('').length).toBe(EARLY_OUTPUT_MAX_BYTES);
+    expect(h.sent.join('').endsWith('tail')).toBe(true);
   });
 
   it('evicts a held exited terminal before a live one', () => {

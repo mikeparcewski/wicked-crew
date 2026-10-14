@@ -171,7 +171,10 @@ export class TerminalHub {
       held = { chunks: [], bytes: 0 };
       this.early.set(id, held);
     }
-    const chunk = Buffer.from(event.bytesB64, 'base64');
+    const whole = Buffer.from(event.bytesB64, 'base64');
+    // One frame past the bound keeps only its tail (agy c6-r1): the bound holds per terminal.
+    const chunk =
+      whole.length > EARLY_OUTPUT_MAX_BYTES ? whole.subarray(whole.length - EARLY_OUTPUT_MAX_BYTES) : whole;
     held.chunks.push(chunk);
     held.bytes += chunk.length;
     while (held.bytes > EARLY_OUTPUT_MAX_BYTES && held.chunks.length > 1) {
