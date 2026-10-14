@@ -90,6 +90,7 @@ import {
 } from './stall-frame-index.js';
 import { SeatHealthTracker } from './seat-health.js';
 import { rosterWithStandingFactory } from './roster-standing.js';
+import { SeatContainerStatus, seatLoginDepsFor } from './seat-container-login.js';
 import { ChatTurnIndex } from './chat-turns.js';
 import { ChatTranscriptStore } from './chat-transcripts.js';
 import { sweepDeliveredWorktree } from './worktree-sweep.js';
@@ -527,6 +528,9 @@ export async function createServer(
   const rosterWithStanding = rosterWithStandingFactory({
     seatHealth,
     ...(options?.seats?.signedIn !== undefined ? { signedIn: options.seats.signedIn } : {}),
+    // The broker status cache reads the gateway the ENGINE arms (beside this adapter's store),
+    // the same dir the sign-in routes pass (agy crew-r1).
+    containerStatus: new SeatContainerStatus(seatLoginDepsFor((adapter as { dbPath?: unknown }).dbPath)),
   });
   // Runtime-guarded, not typed away: the integration suites drive `createServer` over PARTIAL fake
   // adapters (cast to `CoreAdapter`) that never grew this method — the real adapter always has it.

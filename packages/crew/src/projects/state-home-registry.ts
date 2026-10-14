@@ -26,6 +26,8 @@ export const STATE_HOME_ENTRY_NAMES: ReadonlyArray<string> = [
   'artifacts',
   'project-graphs',
   'repo-graphs',
+  // Container seats' agentgateway state (WICKED_SEAT_FLOOR=container) — wicked-core `src/seat_gateway.rs`.
+  'gateway',
   'project-settings.json',
   // DES-learn-workflow §5: the learn schedules — `src/learn/schedule-store.ts`.
   'learn-schedules.json',
