@@ -66,6 +66,15 @@ describe('container seat login routes', () => {
     expect(openTerminal).not.toHaveBeenCalled();
   });
 
+  // codex train r4: crew reads WICKED_SEAT_FLOOR as the engine does (trimmed, case-insensitive).
+  it('serves the container endpoints for a spelling the engine accepts', async () => {
+    vi.stubEnv('WICKED_SEAT_FLOOR', ' Container ');
+    const { app, openTerminal } = build();
+    const res = await app.inject({ method: 'POST', url: URL, payload: { cols: 80, rows: 24 } });
+    expect(res.statusCode).toBe(201);
+    expect(openTerminal).toHaveBeenCalledWith(homedir(), ARGV, 80, 24, true);
+  });
+
   it('opens the engine argv exactly and ingests once only when its terminal exits', async () => {
     const { app, exec, openTerminal, emit, listeners, reprobe, invalidate } = build();
     expect((await app.inject({ method: 'GET', url: URL })).statusCode).toBe(404);

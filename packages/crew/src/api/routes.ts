@@ -59,7 +59,7 @@ import {
 } from './seat-governance.js';
 import { ROSTER_REFRESH_WAIT_MS, rosterWithStandingFactory, type RosterWithStanding } from './roster-standing.js';
 import {
-  SeatContainerStatus, isContainerLoginCli, loginDetail, runSeatLogin, seatLoginDepsFor, type ExecLike, type SeatLoginDeps,
+  SeatContainerStatus, isContainerLoginCli, isContainerSeatFloor, loginDetail, runSeatLogin, seatLoginDepsFor, type ExecLike, type SeatLoginDeps,
 } from './seat-container-login.js';
 import type { SeatContainerLoginOutcome } from '../core/types.js';
 import { ChatTurnIndex } from './chat-turns.js';
@@ -5803,7 +5803,7 @@ export function registerRoutes(
 
   const containerLoginOutcomes = new Map<string, SeatContainerLoginOutcome>();
   const containerSeat = (cli: string): boolean =>
-    process.env['WICKED_SEAT_FLOOR'] === 'container' && isContainerLoginCli(cli) && rosterWithStanding().some((seat) => seat.key === cli);
+    isContainerSeatFloor() && isContainerLoginCli(cli) && rosterWithStanding().some((seat) => seat.key === cli);
   const loginError = (stderr: string): string => loginDetail(stderr) || 'seat-login failed';
   // One sign-in/sign-out at a time per seat, and a generation every new sign-in and every sign-out
   // bumps (agy crew-r1): an abandoned login terminal that exits later never ingests over a newer

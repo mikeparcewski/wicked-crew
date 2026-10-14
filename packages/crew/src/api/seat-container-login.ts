@@ -20,6 +20,13 @@ export interface SeatLoginDeps {
 /** First-use `seat-login argv` builds the seat image (codex crew-r2). */
 export const ARGV_TIMEOUT_MS = 15 * 60_000;
 
+/** The container seat floor is on, read exactly as the engine reads `WICKED_SEAT_FLOOR`
+ *  (wicked-core `container_floor.rs`: trimmed, ASCII case-insensitive `container`), so crew's
+ *  sign-in routes and roster never disagree with the engine about which floor is running. */
+export function isContainerSeatFloor(env: NodeJS.ProcessEnv = process.env): boolean {
+  return (env['WICKED_SEAT_FLOOR'] ?? '').trim().toLowerCase() === 'container';
+}
+
 export function isContainerLoginCli(cli: string): boolean {
   return ['claude', 'codex', 'pi', 'opencode', 'copilot'].includes(cli);
 }

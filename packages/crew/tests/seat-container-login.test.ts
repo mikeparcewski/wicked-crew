@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { rosterWithStandingFactory } from '../src/api/roster-standing.js';
-import { ARGV_TIMEOUT_MS, SeatContainerStatus, parseBrokerStatus, runSeatLogin, type ExecLike } from '../src/api/seat-container-login.js';
+import {
+  ARGV_TIMEOUT_MS, SeatContainerStatus, isContainerSeatFloor, parseBrokerStatus, runSeatLogin, type ExecLike,
+} from '../src/api/seat-container-login.js';
 import { SeatHealthTracker } from '../src/api/seat-health.js';
 import { SeatProbe } from '../src/api/seat-probe.js';
 import { toEngineSeat } from '../src/core/engine-roster.js';
@@ -112,6 +114,25 @@ describe('broker status cache', () => {
     }));
     const cache = new SeatContainerStatus({ exec, gatewayDir: '/fixture/gateway' });
     expect(await cache.refresh('codex')).toMatchObject({ signed_in: null, state: 'unknown', reason: 'broker unavailable' });
+  });
+});
+
+describe('isContainerSeatFloor', () => {
+  // codex train r4: the engine trims and compares case-insensitively (container_floor.rs).
+  it.each([
+    ['container', true], [' Container ', true], ['CONTAINER', true], ['host', false], ['', false], [undefined, false], ['containers', false],
+  ] as const)('reads %j as %s', (value, on) => {
+    expect(isContainerSeatFloor(value === undefined ? {} : { WICKED_SEAT_FLOOR: value })).toBe(on);
+  });
+
+  it('marks a seat for container sign-in under a spelling the engine accepts', () => {
+    const exec = vi.fn<ExecLike>(async () => ({ stdout: '{"status":"signed_in","detail":{"expires_at":null}}', stderr: '' }));
+    const roster = rosterWithStandingFactory({
+      seatHealth: new SeatHealthTracker(), registry: () => [{ key: 'codex', display_name: 'Codex', enabled_for_council: true }],
+      env: { WICKED_SEAT_FLOOR: ' Container ' }, signedIn: () => true, probe: null,
+      containerStatus: new SeatContainerStatus({ exec, gatewayDir: '/fixture/gateway' }),
+    });
+    expect(roster()[0]).toMatchObject({ sign_in: 'container' });
   });
 });
 

@@ -34,7 +34,7 @@ import {
 import type { SeatHealthTracker } from './seat-health.js';
 import { signedInHeuristic } from './seat-signin.js';
 import { SeatProbe } from './seat-probe.js';
-import { SeatContainerStatus, isContainerLoginCli } from './seat-container-login.js';
+import { SeatContainerStatus, isContainerLoginCli, isContainerSeatFloor } from './seat-container-login.js';
 import { seatGovernanceModes, type GovernanceScopeKind, type SeatGovernanceMode } from './seat-governance.js';
 import { seatStanding, chatSeatAdmission, type StandingSeat, type SeatStanding } from './seat-standing.js';
 import { seatVersion, seatVersions, type SeatVersionCache } from './seat-version.js';
@@ -108,7 +108,7 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
   const signedIn = deps.signedIn ?? signedInHeuristic;
   const registry = deps.registry ?? (() => CoreAdapter.roster());
   const env = deps.env ?? process.env;
-  const containerMode = (): boolean => env['WICKED_SEAT_FLOOR'] === 'container';
+  const containerMode = (): boolean => isContainerSeatFloor(env);
   const containerStatus = deps.containerStatus ?? new SeatContainerStatus();
   const probe =
     deps.probe !== undefined ? deps.probe : deps.signedIn === undefined && deps.registry === undefined ? new SeatProbe() : null;
