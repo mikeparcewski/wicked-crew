@@ -99,12 +99,12 @@ const WORKFLOWS = [
 
 // Durable lifecycle: the governed track + the stateless worker each phase dispatches.
 const LIFECYCLE = [
-  { id: 'clarify',            worker: 'claude · acp',  evidence: 'clarify.md' },
-  { id: 'design',             worker: 'claude · acp',  evidence: 'design.md' },
-  { id: 'build',              worker: 'claude · acp',  evidence: 'diff · build.log' },
-  { id: 'adversarial-review', worker: 'codex · acp',   evidence: 'findings.md' },
-  { id: 'test',               worker: 'codex · acp',   evidence: 'verdict.json' },
-  { id: 'review',             worker: 'codex · acp',   evidence: 'review.md' },
+  { id: 'clarify',            worker: 'claude · headless',  evidence: 'clarify.md' },
+  { id: 'design',             worker: 'claude · headless',  evidence: 'design.md' },
+  { id: 'build',              worker: 'claude · headless',  evidence: 'diff · build.log' },
+  { id: 'adversarial-review', worker: 'codex · headless',   evidence: 'findings.md' },
+  { id: 'test',               worker: 'codex · headless',   evidence: 'verdict.json' },
+  { id: 'review',             worker: 'codex · headless',   evidence: 'review.md' },
 ];
 
 // A council: heterogeneous CLIs, each answering in its own isolated sandbox,
@@ -403,13 +403,13 @@ const crewVersion = __WICKED_CREW_VERSION__;
     <div class="wrap">
       <div class="sec-head sec-head--wide">
         <div class="kicker">Bring your own agent · one protocol</div>
-        <h2 id="byo-h">crew runs the CLIs you already have — over ACP.</h2>
+        <h2 id="byo-h">crew runs the CLIs you already have — in a seat container.</h2>
         <p class="sec-sub">
           Not a new model, not a subscription. Your <b>installed</b> CLIs run
-          as <b>persistent <a href="https://agentclientprotocol.com">Agent Client Protocol</a> sessions</b> in
-          isolated git worktrees, under <b>your own auth and plan</b> — streamed tokens, structured
-          usage, cross-agent context between units. The adapters come from the ecosystem where they
-          exist; crew owns only the Antigravity bridge. The roster is data you own.
+          in their own <b>headless mode inside a hardened seat container</b> on an isolated git
+          worktree, under <b>your own auth and plan</b>, signed in once from the Agents tab —
+          streamed output, structured usage, cross-agent context between units. The roster is data
+          you own.
         </p>
       </div>
 

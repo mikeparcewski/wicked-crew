@@ -72,12 +72,15 @@ describe('rosterWithStandingFactory', () => {
     expect(of('pi').scoped_bound).toEqual({ ok: true });
     // IG1-crew-1: the roster states the mode per scope kind, read from the engine's class.
     const mode = (key: string) => roster.find((s) => s.key === key)!['governance_mode'] as Record<string, { mode: string; source: string; class: string | null }>;
-    expect(mode('pi')['scoped_bound']).toMatchObject({ mode: 'os_sandbox', source: 'repo_boundary', class: 'os_sandbox' });
+    // C5: on the interim host floor the engine refuses pi's governed work.
+    expect(mode('pi')['scoped_bound']).toMatchObject({ mode: 'none', source: 'none', class: 'os_sandbox' });
     expect(mode('pi')['scoped']).toMatchObject({ mode: 'none', class: 'os_sandbox' });
-    expect(mode('governed')['scoped']).toMatchObject({ mode: 'admitted', source: 'acp_input_governance' });
+    // C5: a non-claude seat governed only over ACP reads none on the interim host floor.
+    expect(mode('governed')['scoped']).toMatchObject({ mode: 'none', source: 'none' });
     expect(mode('claude')['scoped_bound']).toMatchObject({ mode: 'none', class: null });
-    // A governed adapter sits in every mode.
-    expect(of('governed')).toEqual({ unscoped: { ok: true }, scoped: { ok: true }, scoped_bound: { ok: true } });
+    // C5: with ACP gone nothing holds it read-only in a scoped chat on the host floor.
+    expect(of('governed').unscoped).toEqual({ ok: true });
+    expect(of('governed').scoped).toMatchObject({ ok: false });
     // The verdict IS the pre-filter's: the same function, the same inputs.
     for (const key of ['claude', 'codex', 'pi', 'governed']) {
       const seat = roster.find((s) => s.key === key)!;

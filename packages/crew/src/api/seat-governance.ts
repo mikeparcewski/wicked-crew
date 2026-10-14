@@ -154,23 +154,28 @@ export function seatGovernanceMode(
         : 'the engine names its governance class none (its record sets `governance_floor = false`) — only the command-text fences apply',
     );
   }
+  // C5: ACP is gone from the seats. On the interim host floor only claude (its gate hook) and codex
+  // (its own bounded sandbox) keep a per-call check; the engine refuses every other seat's governed
+  // work (needs_container_floor, wicked-core#950), so it reads none here too.
+  const rootKey = seat.key.split('#')[0]?.toLowerCase();
+  if (rootKey !== 'claude' && !isCodex(seat)) {
+    return none(
+      'its tool calls were checked over ACP, which is removed from the seats; on the interim host floor the engine refuses its governed work (needs_container_floor) — run the container floor',
+    );
+  }
   if (cls === 'acp_input_governance') {
-    const pinned = typeof seat.acp?.verified_version === 'string' ? seat.acp.verified_version : null;
-    if (pinned !== null && seat.version_pin?.matched === false) {
-      const observed = typeof seat.version_pin.observed === 'string' ? `reports \`${seat.version_pin.observed}\`` : 'did not answer `--version`';
-      return none(
-        `its ACP admission is proven against the build \`${pinned}\`, but its binary ${observed} — the engine fails its governance closed, so its tool calls run unchecked`,
-      );
+    if (rootKey === 'claude') {
+      return {
+        mode: 'admitted',
+        class: cls,
+        source: 'acp_input_governance',
+        reason: 'its gate hook judges every tool call on the headless carrier (interim host floor)',
+        fence,
+      };
     }
-    return {
-      mode: 'admitted',
-      class: cls,
-      source: 'acp_input_governance',
-      reason:
-        'its admitted ACP adapter sends every tool call through `session/request_permission` to the engine\'s gate' +
-        (pinned === null ? '' : seat.version_pin?.matched === true ? ` (pinned build \`${pinned}\` verified)` : ` (pinned build \`${pinned}\`; not yet probed)`),
-      fence,
-    };
+    return none(
+      'its tool calls were checked over ACP, which is removed from the seats; on the interim host floor the engine refuses its governed work (needs_container_floor) — run the container floor',
+    );
   }
   // cls === 'os_sandbox'
   if (seat.acp?.os_sandbox === true) {
@@ -249,7 +254,8 @@ export function seatGovernanceDiagnostics(seats: readonly DiagnosticSeatInput[])
     return {
       cli: seat.key,
       enabled_for_council: seat.enabled_for_council !== false,
-      transport: seat.acp !== undefined && seat.acp !== null ? 'acp' : 'wrapped',
+      // C5: every seat runs its CLI's headless mode (the wrapped carrier); `acp` is legacy metadata.
+      transport: 'wrapped',
       os_sandbox: seat.acp?.os_sandbox === true,
       class: bound.class,
       input_governance,
