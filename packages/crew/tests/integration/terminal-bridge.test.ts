@@ -180,6 +180,56 @@ describe('terminal web bridge over core-ts (real PTY)', () => {
     expect(res.status).toBe(404);
   });
 
+  it('output a terminal writes before its socket attaches is replayed on attach (wicked-core C6)', async () => {
+    // A login container prints its sign-in link the moment it starts; the browser attaches later.
+    const res = await fetch(`${baseUrl}/api/v1/terminals`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cwd: dir, cmd: ['sh', '-c', 'echo early-link-FAKE; exec cat'], cols: 80, rows: 24, governed: false }),
+    });
+    expect(res.status).toBe(201);
+    const { id } = (await res.json()) as { id: string };
+    await waitForFrame((f) => f.type === 'terminalOutput' && f.id === id, 'early terminalOutput');
+    const late = new WebSocket(`ws://127.0.0.1:${port}/ws/terminals/${encodeURIComponent(id)}`);
+    late.binaryType = 'nodebuffer';
+    const got: Buffer[] = [];
+    late.on('message', (d: Buffer) => got.push(Buffer.isBuffer(d) ? d : Buffer.from(d as ArrayBuffer)));
+    await new Promise<void>((resolve, reject) => {
+      late.on('open', () => resolve());
+      late.on('error', reject);
+    });
+    const deadline = Date.now() + 10000;
+    while (!Buffer.concat(got).toString('utf8').includes('early-link-FAKE')) {
+      if (Date.now() > deadline) throw new Error(`no replay; got ${JSON.stringify(Buffer.concat(got).toString('utf8'))}`);
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    const closed = new Promise<void>((resolve) => late.on('close', () => resolve()));
+    await fetch(`${baseUrl}/api/v1/terminals/${encodeURIComponent(id)}/close`, { method: 'POST' });
+    await closed;
+  });
+
+  it('a socket for a terminal the engine does not hold is closed after the grace, never left open (wicked-core C6)', async () => {
+    const stray = new WebSocket(`ws://127.0.0.1:${port}/ws/terminals/term-never-opened`);
+    const closed = new Promise<void>((resolve) => stray.on('close', () => resolve()));
+    await closed;
+    expect(stray.readyState).toBe(WebSocket.CLOSED);
+  }, 30000);
+
+  it('two sockets attached together to an exited terminal both close (codex c6-r2)', async () => {
+    const res = await fetch(`${baseUrl}/api/v1/terminals`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cwd: dir, cmd: ['sh', '-c', 'echo bye'], cols: 80, rows: 24, governed: false }),
+    });
+    expect(res.status).toBe(201);
+    const { id } = (await res.json()) as { id: string };
+    await waitForFrame((f) => f.type === 'terminalExited' && f.id === id, 'terminalExited');
+    const url = `ws://127.0.0.1:${port}/ws/terminals/${encodeURIComponent(id)}`;
+    const pair = [new WebSocket(url), new WebSocket(url)];
+    await Promise.all(pair.map((s) => new Promise<void>((resolve) => s.on('close', () => resolve()))));
+    for (const s of pair) expect(s.readyState).toBe(WebSocket.CLOSED);
+  });
+
   it('resize validates its body (cols/rows required, positive)', async () => {
     const res = await fetch(`${baseUrl}/api/v1/terminals/whatever/resize`, {
       method: 'POST',
