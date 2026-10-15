@@ -43,6 +43,13 @@ export interface AskPath {
 
 export class AskPathIndex {
   private readonly paths = new Map<string, AskPath>();
+  private readonly scopeResetListeners = new Set<(runId: string) => void>();
+
+  /** The relay shares this index with routes; discard a detached run before cancellation can
+   * emit terminal frames, without routing a scope refresh through the chat-close fold. */
+  onScopeReset(listener: (runId: string) => void): void {
+    this.scopeResetListeners.add(listener);
+  }
   /** Per chat id, across closes — a close-and-reopen must read as a NEW generation. */
   private readonly generations = new Map<string, number>();
 
@@ -118,9 +125,9 @@ export class AskPathIndex {
     return true;
   }
 
-  /** crew#1020: after cancelling a path whose graph changed, return to first-message launch.
-   * Keep admission and the PA choice; clear the old run's facts. Transfer the message's lease
-   * to a fresh generation so an awaited cancel cannot reset a closed-and-reopened chat, and
+  /** crew#1020: detach a path whose graph changed BEFORE cancelling it.
+   * Keep admission and the operator's primary; clear the old run's facts and engine pick.
+   * Transfer the message's lease to a fresh generation so an awaited cancel cannot reset a closed-and-reopened chat, and
    * work holding the old generation cannot release or attach to this replacement path. */
   resetForScope(chatId: string, lease: number): AskPath | undefined {
     const p = this.paths.get(chatId);
@@ -128,6 +135,7 @@ export class AskPathIndex {
     const next: AskPath = {
       ...p,
       generation: this.nextGeneration(chatId),
+      pa: p.primary ?? (p.eligible.length === 1 ? p.eligible[0]! : null),
       steps: [],
       classes: {},
       reviewer: null,
@@ -136,7 +144,16 @@ export class AskPathIndex {
     delete next.runId;
     delete next.launchedCodeGraphDb;
     this.paths.set(chatId, next);
+    if (p.runId !== undefined) for (const listener of this.scopeResetListeners) listener(p.runId);
     return next;
+  }
+
+  /** A refused cancellation must keep the old path, never start a second run. Restore only
+   * under the reset's lease so a close/reopen during cancellation keeps its own path. */
+  restoreForScope(chatId: string, lease: number, previous: AskPath): void {
+    const current = this.paths.get(chatId);
+    if (current?.generation !== lease || current.busy !== true) return;
+    this.paths.set(chatId, { ...previous, generation: lease, busy: false });
   }
 
   /** A later message added an answer step. Returns the new step id. */

@@ -171,6 +171,8 @@ export class AskRelay {
 
   constructor(private readonly deps: AskRelayDeps) {
     this.rowGraceMs = deps.rowGraceMs ?? 5_000;
+    // As on DELETE, forget the old run before its cancellation can settle a new chat turn.
+    deps.paths.onScopeReset((runId) => this.forget(runId));
   }
 
   private log(msg: string): void {

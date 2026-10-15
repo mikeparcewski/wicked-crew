@@ -2202,36 +2202,42 @@ export function registerRoutes(
     const { name, rootPath, gitUrl, projectId, channel, actor, autoCapture } = parsed.data;
     let repo: RepoEntry | undefined;
     let runId: string;
-    let clonedSuccessfully = false;
+    let clonedRepoId: string | undefined;
+    let previousRepoIds: Set<string> | undefined;
     try {
       if (gitUrl) {
         // Remote: clone to rootPath (if provided) or default ~/.wicked/repos/<name>,
         // register, and launch onboarding run.
+        // Snapshot ids before clone: only a registration absent here can have landed now.
+        previousRepoIds = new Set((await adapter.listRepos()).map((r) => r.id));
         const cloned = await adapter.cloneAndRegisterRepo(name, gitUrl, rootPath);
         runId = cloned.runId;
-        clonedSuccessfully = true;
+        clonedRepoId = cloned.repoId;
         const repos = await adapter.listRepos();
         repo = repos.find((r) => r.id === cloned.repoId);
-        if (!repo) return reply.code(500).send({ error: 'Repo registered but could not be retrieved' });
+        if (!repo) return reply.code(500).send({ error: 'Repo registered but could not be retrieved', repoId: clonedRepoId });
       } else {
         // Local: register then launch onboarding run.
         repo = await adapter.registerRepo(name, rootPath!);
         runId = await adapter.launchOnboardingRun(repo.id, name);
       }
     } catch (err) {
-      if (repo === undefined && gitUrl && !clonedSuccessfully) {
+      if (clonedRepoId !== undefined) {
+        return reply.code(500).send({ error: 'Repo registered but could not be retrieved', repoId: clonedRepoId });
+      }
+      if (repo === undefined && gitUrl && previousRepoIds !== undefined) {
         // crew#1019: cloneAndRegisterRepo launches internally. Mirror its destination resolution
         // including adapter.ts wickedDir('repos') (not exported; adapter.ts is fenced), and
         // require BOTH name and root; a clone failure must not recover a namesake.
         const expanded = rootPath?.startsWith('~/') ? join(homedir(), rootPath.slice(2)) : rootPath;
         const cloneRoot = expanded
           ? (isAbsolute(expanded) ? resolve(expanded) : undefined)
-          : join(process.env.HOME ?? process.env.USERPROFILE ?? '/tmp', '.wicked', 'repos', name);
+          : resolve(process.env.HOME ?? process.env.USERPROFILE ?? '/tmp', '.wicked', 'repos', name);
         if (cloneRoot !== undefined) {
           try {
             // registerRepo canonicalizes symlinked destinations before persisting the root.
             const registeredRoot = await fsp.realpath(cloneRoot).catch(() => cloneRoot);
-            repo = (await adapter.listRepos()).find((r) => r.name === name && resolve(r.root_path) === registeredRoot);
+            repo = (await adapter.listRepos()).find((r) => !previousRepoIds!.has(r.id) && r.name === name && resolve(r.root_path) === registeredRoot);
           } catch (lookupErr) {
             req.log.warn(`cannot check whether repo ${name} registered: ${message(lookupErr)}`);
           }
@@ -3581,11 +3587,8 @@ export function registerRoutes(
     }
     const text = parsed.data.text;
     let scope = chatScopes.get(id);
-    const voice = path.pa !== null ? [path.pa] : [];
-    // The turn is reserved for the voice — or, for a random pick (no PA yet), for the whole
-    // eligible roster: the relay narrows it to the PA when `path.started` names one (ASK-C2), so
-    // the PA's frames are stamped with this turn and a second message is refused meanwhile.
-    const audience = voice.length > 0 ? voice : path.eligible;
+    let voice: string[] = [];
+    let audience: string[] = [];
     // crew#641/#650 re-stated for a path: ONE eligible seat means no distinct reviewer and no
     // helper — said on every turn (the engine's `member.joined{seat:null}` says it on the bus).
     const singleSeat202 =
@@ -3612,8 +3615,8 @@ export function registerRoutes(
       });
     }
     // crew#826: the turn lives as long as its answer step may (`budget_secs`), not 3× the pool knob.
-    const turn = chatTurns.begin(id, audience, text, ASK_TURN_BUDGET_SECS);
-    const turnId = turn?.turnId ?? randomUUID();
+    let turn: ReturnType<ChatTurnIndex['begin']> = null;
+    let turnId: string = randomUUID();
     // What an ACCEPTED message records — the engine has it, so a persistence failure here is
     // logged, never a retraction of a turn that is already being answered (codex on #808 r2, 9).
     const persistAccepted = (preface: string | null, after: () => void): void => {
@@ -3644,6 +3647,7 @@ export function registerRoutes(
     // preface rode a pool send; told only once the send is accepted (`commit`).
     const withPreface = (preface: string | null): string => (preface !== null ? `${preface}\n\n${text}` : text);
     try {
+      const rules = (await considerations.inForceFor(scope?.projectId ?? null)).rules;
       let scopeChanged = false;
       // crew#1020: a project/everything chat must see repos attached since open. Admission was
       // under this scope KIND and the kind stays the same, so do not re-run seat admission.
@@ -3659,7 +3663,6 @@ export function registerRoutes(
           const refreshed = { ...resolution.scope, cwd: scope.cwd };
           const engine = { ...resolution.engine, cwd: scope.cwd };
           if (JSON.stringify(refreshed) !== JSON.stringify(scope) || JSON.stringify(engine) !== JSON.stringify(chatScopes.engineOf(id))) {
-            const rules = (await considerations.inForceFor(scope.projectId ?? null)).rules;
             // No await between the ownership check, statement rewrite and publish: a close/reopen
             // during resolution must never write into the newcomer's scratch root (crew#1020).
             if (chatScopes.get(id) === scope && askPaths.get(id)?.generation === lease) {
@@ -3667,6 +3670,7 @@ export function registerRoutes(
               if (chatScopes.refresh(id, scope, refreshed, engine)) {
                 scope = refreshed;
                 scopeChanged = true;
+                chatTranscripts?.registerRoots(id, refreshed.repos.map((r) => ({ absRoot: resolve(r.rootPath), name: r.name })));
               }
             }
           }
@@ -3675,31 +3679,65 @@ export function registerRoutes(
         }
       }
       if (askPaths.get(id)?.generation !== lease) {
-        if (turn !== null) chatTurns.abort(id, turn.turnId);
         return reply.code(409).send({ error: `chat '${id}' was closed while the message was in flight; nothing was sent` });
       }
-      let newPath = false;
+      if (path.runId !== undefined) {
+        const view = (await adapter.sessionsDetail()).find((v) => v.session.id === path.runId);
+        if (view === undefined) {
+          askPaths.release(id, lease);
+          return reply.code(409).send({ error: `chat '${id}': its path ${path.runId} is gone — open a new chat` });
+        }
+        const status = String(view.session.status);
+        if (status !== 'awaiting_human') {
+          askPaths.release(id, lease);
+          const who = path.pa ?? 'the primary agent';
+          return reply.code(409).send({
+            code: 'turn_in_flight' as const,
+            error:
+              status === 'executing' || status === 'running'
+                ? `${who} is still answering the previous message in this chat — wait for the reply. Nothing was sent.`
+                : `chat '${id}': its path ${path.runId} is ${status}, not waiting for your turn — nothing was sent`,
+            chatId: id,
+            runId: path.runId,
+            status,
+          });
+        }
+        // The status read awaited: the chat may have been closed (and its id reopened) meanwhile —
+        // nothing of this message may land on the newcomer (codex on #808 r3, 2).
+        if (askPaths.get(id)?.generation !== lease) {
+          return reply.code(409).send({ error: `chat '${id}' was closed while the message was in flight; nothing was sent` });
+        }
+      }
       const codeGraphDb = chatScopes.engineOf(id)?.codeGraphDb ?? null;
       if (path.runId !== undefined && codeGraphDb !== path.launchedCodeGraphDb) {
-        // crew#1020: a project's run binds its graph only at launch (via projectId), and its
-        // grounding is graph-only. A statement cannot rebind a parked run: cancel it and take
-        // the first-message branch, linking the replacement to this chat. Tell the caller in 202.
+        // crew#1020: only a parked path may be replaced. Detach and forget its relay state
+        // before cancelling, so the old run's terminal frames cannot answer this message.
+        const previous = path;
         const oldRunId = path.runId;
-        try {
-          await adapter.cancelRun(oldRunId);
-          req.log.info({ chatId: id, runId: oldRunId }, 'cancelled ask path because its scope graph changed');
-        } catch (err) {
-          req.log.warn({ chatId: id, runId: oldRunId }, `cannot cancel ask path after scope change: ${message(err)}`);
-        }
         const reset = askPaths.resetForScope(id, lease);
         if (reset === undefined) {
-          if (turn !== null) chatTurns.abort(id, turn.turnId);
           return reply.code(409).send({ error: `chat '${id}' was closed while the message was in flight; nothing was sent` });
         }
         path = reset;
         lease = reset.generation;
-        newPath = true;
+        try {
+          await adapter.cancelRun(oldRunId);
+          req.log.info({ chatId: id, runId: oldRunId }, 'cancelled ask path because its scope graph changed');
+        } catch (err) {
+          askPaths.restoreForScope(id, lease, previous);
+          askPaths.release(id, lease);
+          return reply.code(502).send({ error: `cannot cancel ask path after scope change: ${message(err)}`, runId: oldRunId });
+        }
+        if (askPaths.get(id)?.generation !== lease) {
+          return reply.code(409).send({ error: `chat '${id}' was closed while the message was in flight; nothing was sent` });
+        }
+        // The thread shows the new run through linkChatRun; no extra 202 wire field is needed.
       }
+      voice = path.pa !== null ? [path.pa] : [];
+      // A random replacement pick reserves every eligible seat until the relay names the PA.
+      audience = voice.length > 0 ? voice : path.eligible;
+      turn = chatTurns.begin(id, audience, text, ASK_TURN_BUDGET_SECS);
+      turnId = turn?.turnId ?? turnId;
       // A repo-bound path can deliver; project and multi-repo scopes remain read-only asks.
       const repoRef = scope?.kind === 'repos' && scope.repos.length === 1 ? scope.repos[0]!.id : undefined;
       const projectId = scope?.projectId;
@@ -3707,7 +3745,6 @@ export function registerRoutes(
         const stepId = 'answer-1';
         const generation = path.generation;
         const roster = rosterWithStanding().filter((seat) => path.eligible.includes(String(seat.key)));
-        const rules = (await considerations.inForceFor(scope?.projectId ?? null)).rules;
         const pending = await considerations.pendingPreface(id, { inForce: rules });
         // crew#823: the run is titled by the operator's question (every reader titles a run from
         // `problem`); the scope statement grounds the seats from the first answer step's
@@ -3754,43 +3791,13 @@ export function registerRoutes(
         });
         return reply.code(202).send({
           seats: voice, turnId, runId, stepId, ...singleSeat202,
-          ...(newPath ? { scopeRefreshed: { repos: scope?.repos.length ?? 0, newPath: true } } : {}),
         });
-      }
-      const view = (await adapter.sessionsDetail()).find((v) => v.session.id === path.runId);
-      if (view === undefined) {
-        askPaths.release(id, lease);
-        if (turn !== null) chatTurns.abort(id, turn.turnId);
-        return reply.code(409).send({ error: `chat '${id}': its path ${path.runId} is gone — open a new chat` });
-      }
-      const status = String(view.session.status);
-      if (status !== 'awaiting_human') {
-        askPaths.release(id, lease);
-        if (turn !== null) chatTurns.abort(id, turn.turnId);
-        const who = path.pa ?? 'the primary agent';
-        return reply.code(409).send({
-          code: 'turn_in_flight' as const,
-          error:
-            status === 'executing' || status === 'running'
-              ? `${who} is still answering the previous message in this chat — wait for the reply. Nothing was sent.`
-              : `chat '${id}': its path ${path.runId} is ${status}, not waiting for your turn — nothing was sent`,
-          chatId: id,
-          runId: path.runId,
-          status,
-        });
-      }
-      // The status read awaited: the chat may have been closed (and its id reopened) meanwhile —
-      // nothing of this message may land on the newcomer (codex on #808 r3, 2).
-      if (askPaths.get(id)?.generation !== lease) {
-        if (turn !== null) chatTurns.abort(id, turn.turnId);
-        return reply.code(409).send({ error: `chat '${id}' was closed while the message was in flight; nothing was sent` });
       }
       const stepId = askPaths.nextStep(id);
-      const pending = await considerations.pendingPreface(id);
+      const pending = await considerations.pendingPreface(id, { inForce: rules });
       // crew#1020: a later turn must tell its already-running path when the scope changed.
       let instructions = withPreface(pending.preface);
       if (scopeChanged && scope !== undefined) {
-        const rules = (await considerations.inForceFor(scope.projectId ?? null)).rules;
         instructions = `${chatScopeStatement(id, scope, rules)}\n\n${instructions}`;
       }
       await adapter.proposePlan(path.runId, { steps: [answerStep(stepId, instructions)] }, turnId);

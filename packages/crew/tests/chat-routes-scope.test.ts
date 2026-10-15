@@ -9,6 +9,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { AskRelay } from '../src/api/ask-relay.js';
+import { ChatTranscriptStore } from '../src/api/chat-transcripts.js';
+import { ConsiderationService } from '../src/decisions/consider.js';
+import type { CoreEvent } from '../src/core/types.js';
+import type { BusEvent } from '../src/core/bus.js';
 import { AskPathIndex } from '../src/api/ask-paths.js';
 import { ChatScopeIndex } from '../src/api/chat-scope.js';
 import { ChatTurnIndex } from '../src/api/chat-turns.js';
@@ -31,6 +36,8 @@ let registryFails: boolean;
 let app: FastifyInstance;
 let chatScopes: ChatScopeIndex;
 let askPaths: AskPathIndex;
+let relay: AskRelay;
+let transcripts: ChatTranscriptStore;
 const linkChatRun = vi.fn();
 let chatTurns: ChatTurnIndex;
 let applied: boolean | null;
@@ -135,6 +142,19 @@ beforeEach(async () => {
   chatScopes = new ChatScopeIndex(join(base, 'chats'));
   chatTurns = new ChatTurnIndex();
   askPaths = new AskPathIndex();
+  transcripts = new ChatTranscriptStore({ dir: join(base, 'transcripts') });
+  relay = new AskRelay({
+    paths: askPaths,
+    turns: chatTurns,
+    units: async (runId) => [{ id: `${runId}:answer-1`, ord: 1, status: 'done', assigned_cli: askPaths.get(askPaths.chatOf(runId) ?? '')?.pa ?? 'claude' }],
+    workOutput: async () => 'See /srv/repos/alpha/src/index.ts:10',
+    fold: (frame) => {
+      const stamped = transcripts.rewriteEvent(chatTurns.decorate(frame));
+      transcripts.observe(stamped);
+      broadcast.push(stamped);
+      chatTurns.observe(frame);
+    },
+  });
   linkChatRun.mockClear();
   membership = new MembershipIndex();
   launched = [];
@@ -144,6 +164,7 @@ beforeEach(async () => {
     chatScopes,
     chatTurns,
     askPaths,
+    chatTranscripts: transcripts,
     linkChatRun,
     // Never the real dotfile probe: the suite must not read the developer's worker home.
     signedIn: (seatKey) => signedIn(seatKey),
@@ -584,7 +605,7 @@ describe('POST /chats/:id/messages — refresh dynamic scopes', () => {
   });
 
   function park(id: string) {
-    chatTurns.observe({ type: 'chatReply', chat: id, cliKey: 'claude', text: 'Attach the repository and re-ask.', ok: true });
+    chatTurns.observe({ type: 'chatReply', chat: id, cliKey: askPaths.get(id)?.pa ?? 'claude', text: 'Attach the repository and re-ask.', ok: true });
     adapter.sessionsDetail = async () => [{ session: { id: 'run-p1', status: 'awaiting_human' } }] as Awaited<ReturnType<CoreAdapter['sessionsDetail']>>;
     const propose = vi.fn<CoreAdapter['proposePlan']>(async () => ({} as Awaited<ReturnType<CoreAdapter['proposePlan']>>));
     adapter.proposePlan = propose;
@@ -593,7 +614,7 @@ describe('POST /chats/:id/messages — refresh dynamic scopes', () => {
     return propose;
   }
 
-  it.each([false, true])('replaces a launched path when attaching a repo gives the project a graph (cancel fails: %s)', async (cancelFails) => {
+  it('replaces a parked path when attaching a repo gives the project a graph', async () => {
     const binding = vi.spyOn(projectGraph, 'resolveProjectGraphBinding').mockResolvedValue({ binding: null, reason: 'no members' });
     try {
       expect((await open({ chatId: 'continuing', clis: ['claude'], primary: 'claude', projectId: 'p-live' })).statusCode).toBe(201);
@@ -601,13 +622,14 @@ describe('POST /chats/:id/messages — refresh dynamic scopes', () => {
       const original = askPaths.get('continuing')!;
       expect(original).toMatchObject({ launchedCodeGraphDb: null });
       const propose = park('continuing');
-      if (cancelFails) vi.mocked(adapter.cancelRun).mockRejectedValue(new Error('cancel unavailable'));
+
       const attached = await app.inject({ method: 'POST', url: '/api/v1/projects/p-live/members', payload: { kind: 'crew.repo', ref: 'r1' } });
       expect(attached.statusCode).toBe(201);
       binding.mockResolvedValue({ binding: { dbPath: graphFile }, reason: 'project graph ready' });
       const sent = await send('continuing');
       expect(sent.statusCode).toBe(202);
-      expect(sent.json()).toMatchObject({ runId: 'run-p2', stepId: 'answer-1', scopeRefreshed: { repos: 1, newPath: true } });
+      expect(sent.json()).toMatchObject({ runId: 'run-p2', stepId: 'answer-1' });
+      expect(sent.json()).not.toHaveProperty('scopeRefreshed');
       expect(adapter.cancelRun).toHaveBeenCalledExactlyOnceWith('run-p1');
       expect(propose).not.toHaveBeenCalled();
       expect(launched).toHaveLength(2);
@@ -629,6 +651,150 @@ describe('POST /chats/:id/messages — refresh dynamic scopes', () => {
     }
   });
 
+  function completed(runId: string) {
+    relay.onTeamRow({ event_type: 'wicked.team.step.completed', payload: { run_id: runId, step_id: 'answer-1', status: 'ok', output_ref: `unit:${runId}:1:1` } } as BusEvent);
+    return relay.onCoreEvent({ type: 'unitDone', session: runId, ord: 1 } as CoreEvent);
+  }
+
+  async function graphUpgrade(id: string, clis = ['claude'], primary?: string) {
+    const binding = vi.spyOn(projectGraph, 'resolveProjectGraphBinding').mockResolvedValue({ binding: null, reason: 'no members' });
+    const opened = await open({ chatId: id, clis, projectId: 'p-live', ...(primary ? { primary } : {}) });
+    expect(opened.statusCode, opened.body).toBe(201);
+    expect((await send(id)).statusCode).toBe(202);
+    relay.onTeamRow({ event_type: 'wicked.team.path.started', payload: { run_id: 'run-p1', cli: primary ?? clis.at(-1), selection: primary ? 'chosen' : 'random' } } as BusEvent);
+    park(id);
+    projectRepoRefs.push('r1');
+    binding.mockResolvedValue({ binding: { dbPath: graphFile }, reason: 'project graph ready' });
+    return binding;
+  }
+
+  it('detaches and forgets the old run before cancellation; only the replacement answers the new turn', async () => {
+    const binding = await graphUpgrade('relay');
+    const forget = vi.spyOn(relay, 'forget');
+    try {
+      // The old answer has already spoken, matching the terminal fallback in the review.
+      chatTurns.begin('relay', ['claude'], 'first answer');
+      await completed('run-p1');
+      broadcast.length = 0;
+      adapter.cancelRun = vi.fn(async (runId) => {
+        await relay.onCoreEvent({ type: 'runCancelled', session: runId } as CoreEvent);
+        return 'cancelled';
+      });
+      const sent = await send('relay');
+      expect(sent.statusCode).toBe(202);
+      expect(broadcast).toEqual([]);
+      expect(chatTurns.inFlight('relay')?.turnId).toBe(sent.json().turnId);
+      expect(forget).toHaveBeenCalledExactlyOnceWith('run-p1');
+      expect(forget.mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(adapter.cancelRun).mock.invocationCallOrder[0]!);
+      expect((await send('relay')).statusCode).toBe(409);
+      await completed('run-p2');
+      expect(broadcast).toEqual([expect.objectContaining({ type: 'chatReply', run_id: 'run-p2', turn_id: sent.json().turnId, ok: true })]);
+      expect(transcripts.read('relay')).toContainEqual(expect.objectContaining({ kind: 'seat', turnId: sent.json().turnId, text: 'See alpha/src/index.ts:10' }));
+    } finally {
+      binding.mockRestore();
+    }
+  });
+
+  it('refuses graph replacement while the old path is executing, even after its turn cleared', async () => {
+    const binding = await graphUpgrade('executing');
+    try {
+      adapter.sessionsDetail = vi.fn(async () => [{ session: { id: 'run-p1', status: 'executing' } }] as Awaited<ReturnType<CoreAdapter['sessionsDetail']>>);
+      const sent = await send('executing');
+      expect(sent.statusCode).toBe(409);
+      expect(sent.json()).toMatchObject({ code: 'turn_in_flight', status: 'executing' });
+      expect(adapter.cancelRun).not.toHaveBeenCalled();
+      expect(launched).toHaveLength(1);
+      expect(askPaths.get('executing')).toMatchObject({ runId: 'run-p1', busy: false });
+      expect(chatTurns.inFlight('executing')).toBeNull();
+    } finally {
+      binding.mockRestore();
+    }
+  });
+
+  it('keeps the old path and releases the turn if cancellation fails, then retries safely', async () => {
+    const binding = await graphUpgrade('cancel-fails');
+    const old = askPaths.get('cancel-fails')!;
+    try {
+      vi.mocked(adapter.cancelRun).mockRejectedValueOnce(new Error('cancel unavailable'));
+      const sent = await send('cancel-fails');
+      expect(sent.statusCode).toBe(502);
+      expect(sent.json().error).toContain('cancel unavailable');
+      expect(launched).toHaveLength(1);
+      expect(askPaths.chatOf('run-p1')).toBe('cancel-fails');
+      expect(askPaths.get('cancel-fails')).toMatchObject({ runId: 'run-p1', steps: old.steps, pa: old.pa, launchedCodeGraphDb: null, busy: false });
+      expect(chatTurns.inFlight('cancel-fails')).toBeNull();
+      expect((await send('cancel-fails')).statusCode).toBe(202);
+      expect(launched).toHaveLength(2);
+    } finally {
+      binding.mockRestore();
+    }
+  });
+
+  it.each([false, true])('a close/reopen during cancellation keeps the new chat (cancel fails: %s)', async (cancelFails) => {
+    const binding = await graphUpgrade('cancel-reuse');
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((done) => { release = done; });
+    adapter.cancelRun = vi.fn(async () => {
+      await held;
+      if (cancelFails) throw new Error('cancel unavailable');
+      return 'cancelled';
+    });
+    try {
+      const sending = send('cancel-reuse').then((result) => result);
+      await vi.waitFor(() => expect(adapter.cancelRun).toHaveBeenCalledOnce());
+      expect(askPaths.chatOf('run-p1')).toBeUndefined();
+      expect((await app.inject({ method: 'DELETE', url: '/api/v1/chats/cancel-reuse' })).statusCode).toBe(200);
+      expect((await open({ chatId: 'cancel-reuse', clis: ['claude'], repoRefs: ['alpha'] })).statusCode).toBe(201);
+      const fresh = askPaths.get('cancel-reuse');
+      release();
+      expect((await sending).statusCode).toBe(cancelFails ? 502 : 409);
+      expect(askPaths.get('cancel-reuse')).toBe(fresh);
+      expect(askPaths.get('cancel-reuse')?.busy).not.toBe(true);
+      expect(askPaths.chatOf('run-p1')).toBeUndefined();
+      expect(launched).toHaveLength(1);
+      expect(chatTurns.inFlight('cancel-reuse')).toBeNull();
+    } finally {
+      release();
+      binding.mockRestore();
+    }
+  });
+
+  it.each([undefined, 'claude'])('resets the engine pick and records the replacement audience (operator primary: %s)', async (primary) => {
+    const roster = vi.spyOn(CoreAdapter, 'roster').mockReturnValue([
+      { key: 'claude', governance_class: 'acp_input_governance', acp: { acp_input_governance: true, os_sandbox: false } },
+      { key: 'opencode', governance_class: 'acp_input_governance', acp: { acp_input_governance: true, os_sandbox: false } },
+    ]);
+    let binding: Awaited<ReturnType<typeof graphUpgrade>> | undefined;
+    try {
+      binding = await graphUpgrade('audience', ['claude', 'opencode'], primary);
+      askPaths.observe('run-p1', { pa: primary ?? 'opencode' });
+      const sent = await send('audience');
+      expect(sent.statusCode).toBe(202);
+      expect(askPaths.get('audience')?.pa).toBe(primary ?? null);
+      expect(sent.json().seats).toEqual(primary ? [primary] : []);
+      expect(transcripts.read('audience').filter((r) => r.kind === 'user').at(-1)).toMatchObject({ seats: primary ? [primary] : [] });
+      expect(chatTurns.turnsOf('audience')[0]?.pending).toEqual(primary ? [primary] : ['claude', 'opencode']);
+      expect(launched[1]?.['primary']).toBe(primary);
+      // The replacement may select a different PA; its reply must still correlate.
+      relay.onTeamRow({ event_type: 'wicked.team.path.started', payload: { run_id: 'run-p2', cli: 'claude', selection: primary ? 'chosen' : 'random' } } as BusEvent);
+      await completed('run-p2');
+      expect(broadcast).toContainEqual(expect.objectContaining({ type: 'chatReply', cliKey: 'claude', turn_id: sent.json().turnId }));
+    } finally {
+      binding?.mockRestore();
+      roster.mockRestore();
+    }
+  });
+
+  it('refreshes transcript roots before the first answer from a newly attached repo', async () => {
+    expect((await open({ chatId: 'roots', clis: ['claude'], projectId: 'p-live' })).statusCode).toBe(201);
+    projectRepoRefs.push('r1');
+    const sent = await send('roots');
+    expect(sent.statusCode).toBe(202);
+    await completed('run-p1');
+    expect(broadcast).toContainEqual(expect.objectContaining({ type: 'chatReply', text: 'See alpha/src/index.ts:10' }));
+    expect(transcripts.read('roots')).toContainEqual(expect.objectContaining({ kind: 'seat', text: 'See alpha/src/index.ts:10' }));
+  });
+
   it('continues the same run with a refreshed statement when the graph binding is unchanged', async () => {
     const binding = vi.spyOn(projectGraph, 'resolveProjectGraphBinding').mockResolvedValue({ binding: { dbPath: graphFile }, reason: 'project graph ready' });
     try {
@@ -636,7 +802,11 @@ describe('POST /chats/:id/messages — refresh dynamic scopes', () => {
       expect((await send('same-graph')).statusCode).toBe(202);
       const propose = park('same-graph');
       projectRepoRefs.push('r1');
+      const reads = vi.spyOn(ConsiderationService.prototype, 'inForceFor');
       const sent = await send('same-graph');
+      const count = reads.mock.calls.length;
+      reads.mockRestore();
+      expect(count).toBe(1);
       expect(sent.statusCode).toBe(202);
       expect(sent.json()).toMatchObject({ runId: 'run-p1', stepId: 'answer-2' });
       expect(sent.json()).not.toHaveProperty('scopeRefreshed');

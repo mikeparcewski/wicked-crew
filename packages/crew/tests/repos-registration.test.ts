@@ -2,7 +2,7 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import { homedir, tmpdir } from 'node:os';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { GateCache } from '../src/api/gate-cache.js';
@@ -72,6 +72,39 @@ describe('POST /api/v1/repos — registration and onboarding outcomes', () => {
     expect(adapter.projectMemberAttach).not.toHaveBeenCalled();
   });
 
+  it.each(['throws', 'missing'])('returns 500 with the registered id when the post-clone lookup %s', async (lookup) => {
+    const { app, adapter } = routes();
+    adapter.cloneAndRegisterRepo.mockImplementation(async () => {
+      if (lookup === 'throws') adapter.listRepos.mockRejectedValueOnce(new Error('registry unreadable'));
+      else adapter.listRepos.mockResolvedValueOnce([]);
+      return { repoId: 'r-landed', runId: 'onboard-1' };
+    });
+    const res = await app.inject({ method: 'POST', url: '/api/v1/repos', payload: { name: 'alpha', gitUrl: 'https://example.invalid/alpha.git' } });
+    expect(res.statusCode).toBe(500);
+    expect(res.json()).toEqual({ error: 'Repo registered but could not be retrieved', repoId: 'r-landed' });
+    expect(adapter.projectMemberAttach).not.toHaveBeenCalled();
+  });
+
+  it('normalizes the default clone destination before a failed realpath lookup', async () => {
+    const { app, adapter, repos } = routes();
+    const previousHome = process.env.HOME;
+    const temporaryHome = mkdtempSync(join(tmpdir(), 'repo-home-'));
+    process.env.HOME = relative(process.cwd(), temporaryHome);
+    try {
+      adapter.cloneAndRegisterRepo.mockImplementation(async () => {
+        await adapter.registerRepo('alpha', join(temporaryHome, '.wicked', 'repos', 'alpha'));
+        throw new Error(launchError);
+      });
+      const res = await app.inject({ method: 'POST', url: '/api/v1/repos', payload: { name: 'alpha', gitUrl: 'https://example.invalid/alpha.git' } });
+      expect(res.statusCode).toBe(201);
+      expect(res.json()).toEqual({ repo: repos[0], onboardRunId: null, onboardError: launchError });
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      rmSync(temporaryHome, { recursive: true, force: true });
+    }
+  });
+
   it('matches the registered canonical root when a remote destination is a symlink', async () => {
     const base = mkdtempSync(join(tmpdir(), 'repo-register-'));
     try {
@@ -92,9 +125,9 @@ describe('POST /api/v1/repos — registration and onboarding outcomes', () => {
     }
   });
 
-  it.each(['no registration', 'same name elsewhere', 'different name at root'])('keeps a remote clone failure a 400 with %s', async (existing) => {
+  it.each(['no registration', 'same name elsewhere', 'different name at root', 'same name at same root'])('keeps a remote clone failure a 400 with %s', async (existing) => {
     const { app, repos } = routes();
-    if (existing !== 'no registration') repos.push({ id: 'other', name: existing === 'same name elsewhere' ? 'alpha' : 'beta', root_path: existing === 'same name elsewhere' ? '/srv/other' : '/srv/alpha', default_branch: 'main', registered_at: 1 });
+    if (existing !== 'no registration') repos.push({ id: 'other', name: existing.startsWith('same name') ? 'alpha' : 'beta', root_path: existing === 'same name elsewhere' ? '/srv/other' : '/srv/alpha', default_branch: 'main', registered_at: 1 });
     const res = await app.inject({ method: 'POST', url: '/api/v1/repos', payload: { name: 'alpha', gitUrl: 'https://example.invalid/alpha.git', rootPath: '/srv/alpha' } });
     expect(res.statusCode).toBe(400);
     expect(res.json()).toEqual({ error: 'clone failed' });
