@@ -10,6 +10,10 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.12.4] — 2026-10-15
+
+A patch release: the daemon's first boot on a fresh state home no longer exits 0 before it listens (#1044, crew#1041). wicked-core-ts stays ^0.11.3 and the bundled UI stays wicked-studio 0.9.4.
+
 ### Fixed
 - **The daemon's first boot no longer exits 0 mid-boot (crew#1041).** On a fresh state home, `serve` seeded the skills root and then quit silently before it listened, and the release smoke's S01 failed on 0.12.1, 0.12.2 and 0.12.3. A restart worked because the root was already seeded. Since #1027, `refreshInstalled` (called by boot's auto-refresh) deferred its probe behind an `unref()`'d `setImmediate`. Nothing else held the event loop that early, so the immediate never fired, and the bounded wait's timer was unref'd too, so Node drained the loop with the `await` pending. The deferral's immediate is now ref'd; the deadline timer stays unref'd, since the probe's own I/O holds the loop once it starts.
 
@@ -4117,7 +4121,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.12.3...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.12.4...HEAD
+[0.12.4]: https://github.com/mikeparcewski/wicked-crew/compare/v0.12.3...v0.12.4
 [0.12.3]: https://github.com/mikeparcewski/wicked-crew/compare/v0.12.2...v0.12.3
 [0.12.2]: https://github.com/mikeparcewski/wicked-crew/compare/v0.12.1...v0.12.2
 [0.12.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.12.0...v0.12.1
