@@ -49,13 +49,15 @@ const { Core } = require('wicked-core-ts') as {
 };
 /** `identity` (the registry record's binary / ACP adapter / invocation) keys the memo only: the engine's predicate reads the
  *  live registry record, so a changed binary under the same key is a different seat (codex on #1027). */
+/** The addon surface the async QE batch is read from (injectable: the real napi static is not configurable). */
+type QeAddon = { qeReviewersAdmitted?: (seatsJson: string) => Promise<string> };
 type QeAdmissionSeat = { key: string; invocation?: string; identity?: string };
 
-function nativeQeAdmissionBatch(): RosterStandingDeps['qeAdmittedBatch'] {
-  const batch = Core.qeReviewersAdmitted;
+function nativeQeAdmissionBatch(core: QeAddon = Core): RosterStandingDeps['qeAdmittedBatch'] {
+  const batch = core.qeReviewersAdmitted;
   if (typeof batch !== 'function') return null;
   return async (seats) => {
-    const rows = JSON.parse(await batch.call(Core, JSON.stringify(seats.map(({ key, invocation }) => ({ key, invocation: invocation ?? null }))))) as Array<{ key: string; admitted: boolean }>;
+    const rows = JSON.parse(await batch.call(core, JSON.stringify(seats.map(({ key, invocation }) => ({ key, invocation: invocation ?? null }))))) as Array<{ key: string; admitted: boolean }>;
     return new Map(rows.map(({ key, admitted }) => [key, admitted]));
   };
 }
@@ -117,6 +119,8 @@ export interface RosterStandingDeps {
    *  addon's async static on each read. A null entry/result uses the memoized sync fallback
    *  (older addons block only on a miss); a batch miss serves the seat's last answer or null. */
   qeAdmittedBatch?: ((seats: Array<{ key: string; invocation?: string }>) => Promise<Map<string, boolean>> | null) | null;
+  /** crew#1021: the addon the daemon default reads `Core.qeReviewersAdmitted` from at each read (default: wicked-core-ts's `Core`). */
+  qeAddon?: QeAddon;
   /** crew#1021: clock for the mutable skills fallback admission memo (30 s). */
   nowMs?: () => number;
   /** (A6) The OS launcher the repository boundary arms with (`hostSandboxLauncher`). */
@@ -187,7 +191,7 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
   // Served while a refresh is in flight (the token, which carries each seat's identity, triggers it).
   const lastAdmission = new Map<string, boolean>();
   const qeAdmissions = (seats: QeAdmissionSeat[]): Map<string, boolean | null> => {
-    const batch = deps.qeAdmittedBatch !== undefined ? deps.qeAdmittedBatch : daemon ? nativeQeAdmissionBatch() : null;
+    const batch = deps.qeAdmittedBatch !== undefined ? deps.qeAdmittedBatch : daemon ? nativeQeAdmissionBatch(deps.qeAddon) : null;
     if (batch != null) {
       const generation = generationToken();
       const token = JSON.stringify([generation, seats]);

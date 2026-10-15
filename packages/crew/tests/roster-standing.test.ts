@@ -3,7 +3,6 @@
 // applies) turns a signed-out seat into the engine's bench verdict. Over an injected registry and
 // sign-in probe — never the native addon, never the developer's dotfiles.
 
-import { createRequire } from 'node:module';
 import { describe, expect, it, vi } from 'vitest';
 
 import { rosterWithStandingFactory } from '../src/api/roster-standing.js';
@@ -252,23 +251,20 @@ describe('background QE reviewer batches (crew#1021)', () => {
   }
 
   it('feature-detects the addon static at read time and sends absent invocations as null', async () => {
-    const { Core } = createRequire(import.meta.url)('wicked-core-ts') as {
-      Core: { qeReviewersAdmitted?: (json: string) => Promise<string> };
-    };
-    const original = Object.getOwnPropertyDescriptor(Core, 'qeReviewersAdmitted');
+    // A fake addon object: the real napi static is not configurable (and exists once core-ts carries it).
+    const addon: { qeReviewersAdmitted?: (json: string) => Promise<string> } = {};
     const registry = vi.spyOn(CoreAdapter, 'roster').mockReturnValue([
       REGISTRY[0]!, { key: 'codex', enabled_for_council: true },
     ]);
     const sync = vi.fn(() => true);
-    Object.defineProperty(Core, 'qeReviewersAdmitted', { configurable: true, writable: true, value: undefined });
     try {
       const roster = rosterWithStandingFactory({
         seatHealth: new SeatHealthTracker(), env: { WICKED_SKILLS_SNAPSHOT: '/published/1' },
         probe: null, versions: null, versionPins: null, worktreeBench: () => new Map(),
-        hostBoundary: () => null, qeAdmitted: sync,
+        hostBoundary: () => null, qeAdmitted: sync, qeAddon: addon,
       });
       const batch = vi.fn(async () => JSON.stringify([{ key: 'claude', admitted: true }, { key: 'codex', admitted: false }]));
-      Core.qeReviewersAdmitted = batch; // available after factory construction
+      addon.qeReviewersAdmitted = batch; // available after factory construction
       expect(roster().every((s) => s.qe_reviewer === undefined)).toBe(true);
       expect(batch).toHaveBeenCalledExactlyOnceWith(JSON.stringify([
         { key: 'claude', invocation: REGISTRY[0]!.headless_invocation },
@@ -278,13 +274,11 @@ describe('background QE reviewer batches (crew#1021)', () => {
       expect(roster().every((s) => s.qe_reviewer !== undefined)).toBe(true);
       expect(sync).not.toHaveBeenCalled();
       expect(batch).toHaveBeenCalledTimes(1);
-      delete Core.qeReviewersAdmitted;
+      delete addon.qeReviewersAdmitted;
       roster();
       roster();
       expect(sync).toHaveBeenCalledTimes(2); // missing batch: memoized synchronous fallback
     } finally {
-      if (original === undefined) delete Core.qeReviewersAdmitted;
-      else Object.defineProperty(Core, 'qeReviewersAdmitted', original);
       registry.mockRestore();
     }
   });
