@@ -27,8 +27,10 @@ mentioned only where a daemon release depends on them.
   `POST /api/v1/runs/:id/elicitation`. The tool call holds until the operator answers, declines or dismisses it, the run
   ends, or `WICKED_ASK_TIMEOUT_SECS` passes (default 600, 10 to 3600); a timeout returns a clear no-answer result. A run
   shows one question at a time, so parallel units' asks queue per run in arrival order. The run's event log records the
-  question and the answer (`elicitationResolved.answer`, `heldMs`). claude, codex and pi; not opencode or copilot.
-  Requires the wicked-core-ts release carrying the engine half (wicked-core, stacked on wicked-core#950).
+  question and the answer (`elicitationResolved.answer`, `heldMs`). claude, codex and pi; opencode too with the
+  wicked-core change that registers the ask server through opencode's own serve API (wicked-core#965); not copilot,
+  which has no sign-in broker route. Requires the wicked-core-ts release carrying the engine half (wicked-core,
+  stacked on wicked-core#950).
 
 ### Changed
 - **BREAKING (C5): governed seats run in containers by default; ACP is removed from the seats (with wicked-core's
