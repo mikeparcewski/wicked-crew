@@ -20,8 +20,9 @@ export interface AskPath {
   runId?: string;
   /** crew#1020: the graph binding actually used at launch; a run cannot acquire a new one. */
   launchGraphBinding?: string | null;
-  /** Stable repository + graph key last delivered to the run by an accepted message. */
-  lastToldScopeKey?: string;
+  /** crew#1034: the read roots the run was launched with (sorted). The engine fixes a run's read
+   *  boundary at launch, so a run cannot acquire a repository attached after it started either. */
+  launchReadRoots?: string[];
   /** A message of this chat is in flight on this daemon — launching the run or continuing it
    *  (status read → proposal → approval) — so a second one meanwhile is `turn_in_flight`. */
   busy?: boolean;
@@ -110,12 +111,20 @@ export class AskPathIndex {
 
   /** The first message launched the run; `stepId` is its answer step. False when the chat was
    *  closed (or closed and reopened) while the launch was in flight: the caller cancels the run. */
-  started(chatId: string, generation: number, runId: string, stepId: string, codeGraphDb: string | null = null): boolean {
+  started(
+    chatId: string,
+    generation: number,
+    runId: string,
+    stepId: string,
+    codeGraphDb: string | null = null,
+    readRoots: readonly string[] = [],
+  ): boolean {
     const p = this.paths.get(chatId);
     if (p === undefined || p.generation !== generation) return false;
     p.busy = false;
     p.runId = runId;
     p.launchGraphBinding = codeGraphDb;
+    p.launchReadRoots = [...readRoots].sort();
     p.steps.push(stepId);
     return true;
   }

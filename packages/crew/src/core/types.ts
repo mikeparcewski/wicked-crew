@@ -104,6 +104,14 @@ export interface LaunchRunInput {
    */
   extraWriteRoots?: string[];
   /**
+   * ADDITIONAL absolute READ-ONLY roots for the run (wicked-core#294): reads inside them pass the
+   * governed units' boundary, writes stay denied. A chat's ask run declares its scope's
+   * repositories here (crew#1034), so a project chat reads its repositories whether or not the
+   * project's code graph is built. The engine validates each root at launch; an invalid root
+   * fails the launch with no session persisted.
+   */
+  extraReadRoots?: string[];
+  /**
    * The PROJECT's co-located code graph this run's governed workers should query instead of the
    * run repo's own — resolved by `projects/graph.ts::resolveProjectGraphBinding`, which is the ONE
    * thing that knows where a project graph lives and what each repo is labelled inside it.

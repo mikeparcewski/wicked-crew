@@ -1665,6 +1665,10 @@ export class CoreAdapter {
       }
       opts.extraWriteRoots = input.extraWriteRoots;
     }
+    // crew#1034: core-ts has carried `extraReadRoots` since wicked-core#294 (well below crew's pin).
+    if (input.extraReadRoots !== undefined && input.extraReadRoots.length > 0) {
+      opts.extraReadRoots = input.extraReadRoots;
+    }
     if (input.excludeSeats !== undefined && input.excludeSeats.length > 0) {
       // Fail CLOSED on an old addon (napi ignores undeclared fields): a silently-dropped exclusion
       // would let the seat that wrote the work judge it — the one thing the caller asked to rule out.
