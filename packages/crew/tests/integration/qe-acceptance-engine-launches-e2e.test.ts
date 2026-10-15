@@ -208,19 +208,27 @@ describe.skipIf(!supported)('qeAcceptance on the launches the engine makes on it
     expect(qeDecisionBypasses(decision!)).toBe(true);
     // The engine left the plain node alone: no skip it would refuse, so the node launched.
     expect(qeOf(await contractOf(ids.plain))).toBeUndefined();
+    // The decision is made at launch; the work itself is not under test here. Stop it, so the one
+    // run this suite drives to completion (the gate test below) runs alone.
+    await quiesceCampaign(adapter, 'qe-engine-camp-off');
   }, 90_000);
 
   it("'off': a bus request of a QE workflow carries the skip; a plain one gets none; a request's own force still requires it", async () => {
-    await requestRun('qe-engine-bus-off', QE_WF);
-    await requestRun('qe-engine-bus-plain', PLAIN_WF);
-    await requestRun('qe-engine-bus-forced', QE_WF, { force_qe_acceptance: true });
+    // Each parks before its first unit (`human_confirm: all`): the contract is written at launch,
+    // and none of them competes with the run the gate test drives to completion.
+    await requestRun('qe-engine-bus-off', QE_WF, { human_confirm: 'all' });
+    await requestRun('qe-engine-bus-plain', PLAIN_WF, { human_confirm: 'all' });
+    await requestRun('qe-engine-bus-forced', QE_WF, { force_qe_acceptance: true, human_confirm: 'all' });
     expect(qeOf(await contractOf('qe-engine-bus-off'))).toMatchObject(SKIPPED);
     expect(qeOf(await contractOf('qe-engine-bus-plain'))).toBeUndefined();
     expect(qeOf(await contractOf('qe-engine-bus-forced'))).toMatchObject({ status: 'required', basis: 'operator' });
   }, 90_000);
 
   it("'off': every gate of a bus-launched QE run carries the skip on its receipt", async () => {
-    const id = 'qe-engine-bus-off';
+    // The only run this suite lets execute: launched over the bus, unattended, under the setting.
+    const id = 'qe-engine-bus-gates';
+    await requestRun(id, QE_WF);
+    expect(qeOf(await contractOf(id))).toMatchObject(SKIPPED);
     const deadline = Date.now() + 60_000;
     let status = '';
     for (;;) {
@@ -243,7 +251,8 @@ describe.skipIf(!supported)('qeAcceptance on the launches the engine makes on it
     expect(core.qeAcceptanceOff()).toBeNull();
     const ids = await launchCampaign('qe-engine-camp-on');
     expect(qeOf(await contractOf(ids.qe))).toMatchObject({ status: 'required', basis: 'plan' });
-    await requestRun('qe-engine-bus-on', QE_WF);
+    await quiesceCampaign(adapter, 'qe-engine-camp-on');
+    await requestRun('qe-engine-bus-on', QE_WF, { human_confirm: 'all' });
     expect(qeOf(await contractOf('qe-engine-bus-on'))).toMatchObject({ status: 'required', basis: 'plan' });
   }, 90_000);
 
@@ -285,6 +294,7 @@ describe.skipIf(!supported)('qeAcceptance on the launches the engine makes on it
     expect(((await call('GET', `/api/v1/runs/${encodeURIComponent(`${id}:later:a0`)}`)).body['run'] as unknown) ?? null).toBeNull();
     writeFileSync(marker, 'go');
     expect(qeOf(await contractOf(`${id}:later:a0`, 90_000))).toMatchObject(SKIPPED);
+    await quiesceCampaign(adapter, id);
   }, 150_000);
 
   it('a daemon that boots with the setting off starts its engine with it (before the bus bridge is armed), and the variable is not left behind', async () => {
