@@ -529,8 +529,8 @@ export function registerProjectRoutes(
       projectId: DEFAULT_PROJECT_ID,
       state: 'no-repo-members',
       detail:
-        "the synthesized 'default' project holds unfiled runs and chats only — it has no repo " +
-        'members and cannot have a code graph. Create a project and attach repos to it.',
+        'This holds unfiled runs and chats only — it has no repositories and cannot have a ' +
+        'code graph. Create a project and attach repositories to it.',
       dbPath: null,
       repos: [],
       missingRepos: [],
