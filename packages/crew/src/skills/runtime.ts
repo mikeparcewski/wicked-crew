@@ -240,6 +240,8 @@ export interface SkillsRuntimeOptions {
   bootSnapshot?: string | undefined;
   /** crew#874: how long one installed-plugin probe (a bundle read + hash) is reused by `health()` (default 60 s). */
   installedTtlMs?: number;
+  /** crew#1021: maximum wait for a fresh probe; a timeout serves the last value (default 5 s). */
+  installedTimeoutMs?: number;
   /** Clock for that cache (tests). */
   nowMs?: () => number;
 }
@@ -281,6 +283,8 @@ export class SkillsRuntime {
   /** crew#874: the last installed-plugin probe and when it ran (a bundle hash is not free; `health()` runs per diagnostics read). */
   private installedProbe: { at: number; state: InstalledPluginState | null } | null = null;
   private readonly installedTtlMs: number;
+  private readonly installedTimeoutMs: number;
+  private installedInFlight: Promise<InstalledPluginState | null> | null = null;
   private readonly nowMs: () => number;
   /** crew#874: why the boot auto-refresh did not run (said in the finding), or `null`. */
   private autoRefreshNote: string | null = null;
@@ -293,20 +297,58 @@ export class SkillsRuntime {
     this.bootSnapshot = 'bootSnapshot' in opts ? opts.bootSnapshot : BOOT_SKILLS_SNAPSHOT;
     this.installedTtlMs = opts.installedTtlMs ?? 60_000;
     this.nowMs = opts.nowMs ?? (() => Date.now());
+    this.installedTimeoutMs = opts.installedTimeoutMs ?? 5_000;
+    void this.probeInstalled(); // crew#1021: first probe starts in the background, never in a GET
   }
 
-  /** The installed plugin, probed at most once per `installedTtlMs` (`fresh` forces a probe). Never throws. */
-  private installed(fresh = false): InstalledPluginState | null {
-    const now = this.nowMs();
-    if (!fresh && this.installedProbe !== null && now - this.installedProbe.at < this.installedTtlMs) return this.installedProbe.state;
-    let state: InstalledPluginState | null;
+  /** crew#1021: request reads serve the last probe and schedule stale work off the request path. */
+  installed(): InstalledPluginState | null {
+    if (this.installedInFlight === null && (this.installedProbe === null || this.nowMs() - this.installedProbe.at >= this.installedTtlMs)) void this.probeInstalled();
+    return this.installedProbe?.state ?? null;
+  }
+
+  /**
+   * crew#1021: a fresh caller waits for any pre-call probe, then starts (or joins) a newer one.
+   * One deadline covers both waits; after it expires no follow-up probe is started for that caller.
+   * A timed-out probe may still land later; reads serve the last completed reading until then.
+   */
+  async refreshInstalled(opts: { fresh?: boolean } = {}): Promise<InstalledPluginState | null> {
+    const prior = this.installedInFlight;
+    let expired = false;
+    const reading = async (): Promise<InstalledPluginState | null> => {
+      if (opts.fresh === true && prior !== null) await prior;
+      return expired ? this.installedProbe?.state ?? null : this.probeInstalled();
+    };
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      state = this.store.installedState();
-    } catch {
-      state = null;
+      return await Promise.race([
+        reading(),
+        new Promise<InstalledPluginState | null>((resolve) => {
+          timer = setTimeout(() => {
+            expired = true;
+            resolve(this.installedProbe?.state ?? null);
+          }, this.installedTimeoutMs);
+          timer.unref(); // crew#1021: a bounded wait must not keep a CLI/test process alive.
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
     }
-    this.installedProbe = { at: now, state };
-    return state;
+  }
+
+  /** Background callers share one probe and need no deadline timer. */
+  private probeInstalled(): Promise<InstalledPluginState | null> {
+    if (this.installedInFlight === null) {
+      this.installedInFlight = new Promise<void>((resolve) => { setImmediate(resolve).unref(); })
+        .then(() => this.store.installedStateAsync())
+        .catch(() => null)
+        .then((state) => {
+          this.installedProbe = { at: this.nowMs(), state };
+          this.installedInFlight = null;
+          return state;
+        });
+    }
+    return this.installedInFlight;
   }
 
   /**
@@ -317,22 +359,33 @@ export class SkillsRuntime {
    * decides on), named by version. `null` when they agree, when nothing is published, or when the
    * installed bundle cannot be read (that comparison is `GET /skills`' `installed.unreadable`).
    */
-  installedAheadFinding(opts: { fresh?: boolean } = {}): SkillsHealthFinding | null {
-    if (this.lastHealth.state !== 'published' || this.lastHealth.current === null) return null;
+  installedAheadFinding(opts: { fresh: true }): Promise<SkillsHealthFinding | null>;
+  installedAheadFinding(opts?: { fresh?: false }): SkillsHealthFinding | null;
+  installedAheadFinding(opts: { fresh?: boolean } = {}): SkillsHealthFinding | null | Promise<SkillsHealthFinding | null> {
+    // The launch already uses this generation. A publish during the fresh probe must not
+    // replace its comparison baseline (or remove its warning by catching up to the install).
+    const current = this.lastHealth.state === 'published' ? this.lastHealth.current : null;
+    const published = current === null ? null : { gen: current.gen, garden: this.publishedGarden(current.path) };
+    if (opts.fresh === true) return this.refreshInstalled({ fresh: true }).then((state) => this.findingForInstalled(state, published));
+    return this.findingForInstalled(this.installed(), published);
+  }
+
+  private findingForInstalled(
+    installed: InstalledPluginState | null,
+    published: { gen: number; garden: { plugin_version: string; baseline: string } | null } | null,
+  ): SkillsHealthFinding | null {
     // The generation the engine is HANDED (its own snapshot.json), never the editable catalog: a
     // refresh that landed without a publish moves the catalog, not what runs execute (codex r1).
-    const published = this.publishedGarden(this.lastHealth.current.path);
-    if (published === null) return null;
-    const installed = this.installed(opts.fresh === true);
-    if (installed === null || installed.baseline === null || installed.baseline === published.baseline) return null;
-    const relation = versionRelation(installed.source.plugin_version, published.plugin_version);
+    if (published === null || published.garden === null) return null;
+    if (installed === null || installed.baseline === null || installed.baseline === published.garden.baseline) return null;
+    const relation = versionRelation(installed.source.plugin_version, published.garden.plugin_version);
     const note = this.autoRefreshNote === null ? '' : ` (not refreshed automatically: ${this.autoRefreshNote})`;
     return {
       kind: 'skills.installed-ahead',
       severity: 'warning',
       message:
         `installed wicked-garden ${installed.source.plugin_version} is ${relation} the published generation ` +
-        `${this.lastHealth.current.gen} (built from ${published.plugin_version}) — runs use the published generation's skills and scripts, not the installed ones; ` +
+        `${published.gen} (built from ${published.garden.plugin_version}) — runs use the published generation's skills and scripts, not the installed ones; ` +
         `POST /skills/refresh-baseline then /skills/publish (each with {expectedRevision})${note}`,
     };
   }
@@ -356,7 +409,8 @@ export class SkillsRuntime {
    * do by hand after every garden upgrade, and the step whose omission ran the rig on garden 12.39.
    * Anything user-edited, a refresh that does not come back clean, or a blocked publish leaves the
    * current generation in place and is said in the `skills.installed-ahead` finding. Off with
-   * `WICKED_CREW_SKILLS_AUTO_REFRESH=0`. Never throws.
+   * `WICKED_CREW_SKILLS_AUTO_REFRESH=0`. With auto-refresh off, the installed-ahead finding
+   * appears once the background constructor probe lands (crew#1021). Never throws.
    */
   async autoRefreshOnBoot(env: NodeJS.ProcessEnv = process.env): Promise<AutoRefreshOutcome> {
     const outcome = await this.autoRefreshInner(env);
@@ -370,7 +424,7 @@ export class SkillsRuntime {
     try {
       if (this.lastHealth.state !== 'published' || this.lastHealth.current === null) return { action: 'none', reason: `skills state is ${this.lastHealth.state}` };
       const published = this.publishedGarden(this.lastHealth.current.path);
-      const installed = this.installed(true);
+      const installed = await this.refreshInstalled({ fresh: true });
       if (installed === null || installed.baseline === null || published === null || installed.baseline === published.baseline) {
         return { action: 'none', reason: 'the installed plugin is the one the published generation was built from' };
       }
@@ -393,7 +447,7 @@ export class SkillsRuntime {
       if (outcomeOf.verdict === 'blocked' || outcomeOf.snapshot === null) {
         return { action: 'failed', reason: `the baseline was refreshed but the publish was blocked: ${outcomeOf.findings.filter((f) => f.severity === 'blocking').map((f) => `${f.kind}: ${f.evidence}`).join('; ')} — the previous generation stays current` };
       }
-      this.installed(true);
+      await this.refreshInstalled({ fresh: true });
       return { action: 'published', gen: outcomeOf.snapshot.gen, from, to: refreshed.plugin_version };
     } catch (err) {
       return { action: 'failed', reason: err instanceof Error ? err.message : String(err) };

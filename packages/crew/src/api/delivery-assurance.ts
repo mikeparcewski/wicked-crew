@@ -172,6 +172,8 @@ export function aggregateReceipt(view: SessionView, tree: string | null): Assura
   }
   // Who decided the run's disputes (wicked-core#888): every council any gate recorded, in order.
   const councils = receipts.flatMap((r) => r.councils ?? []);
+  // …and every gate a FALLBACK judge ruled on (wicked-core judge fallback, api-types 0.121.0), in order.
+  const judgeFallbacks = receipts.flatMap((r) => r.judgeFallbacks ?? []);
   for (const r of receipts) {
     for (const i of r.ran) if (!ran.includes(i)) ran.push(i);
     for (const s of r.skipped) {
@@ -191,6 +193,7 @@ export function aggregateReceipt(view: SessionView, tree: string | null): Assura
     attempt: 0,
     ...(qe !== undefined ? { qe } : {}),
     ...(councils.length > 0 ? { councils } : {}),
+    ...(judgeFallbacks.length > 0 ? { judgeFallbacks } : {}),
   };
 }
 

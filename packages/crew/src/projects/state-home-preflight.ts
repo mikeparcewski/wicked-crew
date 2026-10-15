@@ -42,6 +42,7 @@
  */
 
 import { existsSync, lstatSync, readdirSync, realpathSync } from 'node:fs';
+import { lstat, readdir } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
 import { SKILLS_ROOT_NAMES } from '../skills/root-names.js';
@@ -265,6 +266,22 @@ export function surveyStateHome(stateHome: string): UnregisteredStateHomeEntry[]
   return out;
 }
 
+/** crew#1021: health/diagnostics keep the fallback survey's directory reads off the main thread. */
+export async function surveyStateHomeAsync(stateHome: string): Promise<UnregisteredStateHomeEntry[]> {
+  const out: UnregisteredStateHomeEntry[] = [];
+  for (const name of (await readdir(stateHome)).sort()) {
+    if (!isRegisteredStateHomeEntry(name)) out.push({ name, path: join(stateHome, name), level: 'state-home' });
+  }
+  const skillsDir = join(stateHome, SKILLS_DIRNAME);
+  const skillsIsDir = await lstat(skillsDir).then((stat) => stat.isDirectory(), () => false);
+  if (skillsIsDir) {
+    for (const name of (await readdir(skillsDir)).sort()) {
+      if (!skillsChildRegistered(name)) out.push({ name, path: join(skillsDir, name), level: 'skills-root' });
+    }
+  }
+  return out;
+}
+
 /**
  * The state home a handed snapshot derives (core's `state_home::of_snapshot`, by SHAPE alone):
  * `<state home>/skills/snapshots/<gen>` — three components up when the parent is the read slot,
@@ -316,6 +333,7 @@ export interface StateHomeWatchOptions {
 export class StateHomeWatch {
   private readonly opts: StateHomeWatchOptions;
   private lastHealth: StateHomeHealth;
+  private inFlight: { key: string; promise: Promise<StateHomeHealth> } | null = null;
 
   constructor(opts: StateHomeWatchOptions) {
     this.opts = opts;
@@ -337,23 +355,33 @@ export class StateHomeWatch {
     return this.lastHealth;
   }
 
-  /** Re-survey now and return the answer. */
+  private cacheKey(snapshotPath: string | null = this.opts.snapshotPath()): string {
+    return JSON.stringify([snapshotPath, this.opts.dbPath]);
+  }
+
+  /** crew#1021: coalesce only the current generation; an older survey cannot replace its answer. */
   async refresh(): Promise<StateHomeHealth> {
     const now = (this.opts.now ?? Date.now)();
     const snapshotPath = this.opts.snapshotPath();
     const dbPath = this.opts.dbPath;
+    const key = this.cacheKey(snapshotPath);
+    if (this.inFlight?.key === key) return this.inFlight.promise;
     if (snapshotPath === null && dbPath === null) {
+      this.inFlight = null;
       this.lastHealth = { ...this.lastHealth, source: 'unavailable', checkedAt: now };
       return this.lastHealth;
     }
-    let health: StateHomeHealth;
-    if (this.opts.engine !== null) {
-      health = await this.fromEngine(this.opts.engine, snapshotPath, dbPath ?? ':memory:', now);
-    } else {
-      health = this.fromCrew(snapshotPath, dbPath, now);
-    }
-    this.lastHealth = health;
-    return health;
+    const survey = this.opts.engine !== null
+      ? this.fromEngine(this.opts.engine, snapshotPath, dbPath ?? ':memory:', now)
+      : this.fromCrew(snapshotPath, dbPath, now);
+    const pending = { key, promise: survey.then((health) => {
+      if (this.inFlight === pending && this.cacheKey() === key) this.lastHealth = health;
+      return health;
+    }).finally(() => {
+      if (this.inFlight === pending) this.inFlight = null;
+    }) };
+    this.inFlight = pending;
+    return pending.promise;
   }
 
   private async fromEngine(engine: EnginePreflight, snapshotPath: string | null, dbPath: string, now: number): Promise<StateHomeHealth> {
@@ -376,12 +404,12 @@ export class StateHomeWatch {
     } catch (err) {
       // The engine could not answer (a rejected task, malformed JSON): say so and fall back to
       // crew's own classification rather than report a clean state home nobody checked.
-      const crew = this.fromCrew(snapshotPath, this.opts.dbPath, now);
+      const crew = await this.fromCrew(snapshotPath, this.opts.dbPath, now);
       return { ...crew, error: `engine preflight failed (${err instanceof Error ? err.message : String(err)})${crew.error === null ? '' : `; ${crew.error}`}` };
     }
   }
 
-  private fromCrew(snapshotPath: string | null, dbPath: string | null, now: number): StateHomeHealth {
+  private async fromCrew(snapshotPath: string | null, dbPath: string | null, now: number): Promise<StateHomeHealth> {
     let stateHome: string | null = null;
     let derivedFrom: 'snapshot' | 'db' | null = null;
     let error: string | null = null;
@@ -399,7 +427,7 @@ export class StateHomeWatch {
     let unregistered: UnregisteredStateHomeEntry[] = [];
     if (stateHome !== null) {
       try {
-        unregistered = (this.opts.survey ?? surveyStateHome)(stateHome);
+        unregistered = await (this.opts.survey ?? surveyStateHomeAsync)(stateHome);
       } catch (err) {
         error = `cannot list ${stateHome} to classify it (${err instanceof Error ? err.message : String(err)})`;
       }

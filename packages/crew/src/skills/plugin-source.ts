@@ -62,9 +62,10 @@
  * them to every worker.
  */
 
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, readdirSync, readlinkSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
+import { promisify } from 'node:util';
 import { delimiter, join, resolve, sep } from 'node:path';
 
 import type { SkillSourceKind } from '../core/types.js';
@@ -554,5 +555,19 @@ export function gitStateOf(source: PluginSource): GitState {
       git_dirty: false,
       error: err instanceof Error ? err.message : String(err),
     };
+  }
+}
+
+/** crew#1021: checkout probes must never hold the request loop while git runs. */
+export async function gitStateOfAsync(source: PluginSource): Promise<GitState> {
+  if (source.kind !== 'checkout') return { git_sha: null, git_dirty: false };
+  const git = promisify(execFile);
+  const options = { cwd: source.path, timeout: GIT_TIMEOUT_MS, env: childEnvWithBootEstateDb() };
+  try {
+    const sha = await git('git', ['rev-parse', 'HEAD'], options);
+    const status = await git('git', ['status', '--porcelain'], options);
+    return { git_sha: sha.stdout.trim(), git_dirty: status.stdout.trim() !== '' };
+  } catch (err) {
+    return { git_sha: null, git_dirty: false, error: err instanceof Error ? err.message : String(err) };
   }
 }

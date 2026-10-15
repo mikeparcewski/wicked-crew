@@ -2175,6 +2175,24 @@ export interface OperatorJudgment {
   reason: string | null;
 }
 
+/**
+ * (api-types 0.121.0, wicked-core judge fallback, operator ruling 2026-10-14) A judge seated IN PLACE
+ * of the run's preferred judge: every preferred judge seat was benched for the run (codex's worktree
+ * bench, a sign-in refusal) or failed as a seat while judging, so a fallback seat (Claude Code, then
+ * Antigravity) distinct from every party to the work (creator, authors, evaluator, validator author,
+ * team) judged instead. With no such seat the gate still holds (`judge_unavailable`).
+ */
+export interface JudgeFallback {
+  /** The seat that judged. */
+  seat: string;
+  /** The preferred judge seats it stood in for, in rotation order. */
+  preferred: string[];
+  /** Why they could not judge, in the engine's words (`codex benched: …` / `copilot unavailable: …`). */
+  reason: string;
+  /** The disclosure line to show as-is: `judge: agy (fallback; codex benched: …)`. */
+  label: string;
+}
+
 /** Why an instrument is absent from a receipt. */
 export type AssuranceSkipReason =
   | 'reduced_assurance'
@@ -2260,6 +2278,10 @@ export interface AssuranceReceipt {
   /** (api-types 0.110.0) Every gate the operator judged ("judged by operator"); ABSENT when none or on
    *  an older engine. A unit receipt carries its own; a delivery receipt lists the run's. */
   operatorJudges?: OperatorJudgment[];
+  /** (api-types 0.121.0) Every judge seated as a FALLBACK for a benched or unavailable preferred judge;
+   *  ABSENT when every judge was the run's own (the routine case) or on an older engine. A unit
+   *  receipt carries at most one; a delivery receipt lists the run's. */
+  judgeFallbacks?: JudgeFallback[];
 }
 
 /**
@@ -4742,6 +4764,10 @@ export interface LaunchRunBody {
    * default and typo fallback). Requires wicked-core-ts ≥ 0.7.24 / crew ≥ 0.7.33 for the gate to
    * exist at all — read `AgentSession.auto_deliver` to learn whether the engine knows it. An
    * older daemon's launch schema rejects the field with a 400 — omit it against such servers.
+   * `'auto'` on a workflow that requires QE acceptance (with no `skipQeAcceptance` and the daemon's
+   * {@link SystemSettings.qeAcceptance} not `'off'`) is refused 400 `{ code: 'qe_acceptance_required',
+   * error }` (crew ≥ 0.12.1; before that, `error` alone). The token is the one a refused delivery's
+   * {@link QeAcceptanceRefusal} carries, but this 400 has no `acceptance` or `assurance`.
    */
   deliverGate?: 'human' | 'auto';
   /**
@@ -5400,8 +5426,13 @@ export interface SystemSettings {
    * naming this setting — `assurance.qe.status: 'skipped'`, `basis: 'operator'`, labelled on the run,
    * every gate and the delivery, and the deliver gate reads a skip, never a refusal. A launch's
    * `forceQeAcceptance: true` still requires it. `GET /health.capabilities.qeAcceptance` reports it.
-   * NOT covered: launches the engine takes without crew — campaign nodes (the engine's own run spec
-   * carries no QE word) and `wicked.crew.run.requested` bus requests — so those still require it.
+   * (api-types 0.122.0) The launches the engine takes on its own — campaign nodes (as each dispatches) and
+   * `wicked.crew.run.requested` bus requests — follow it too, when the engine addon carries
+   * `setQeAcceptanceOff` (crew hands the setting to the engine with every settings read): such a
+   * launch that gives no QE word of its own (`CampaignRunSpec.skip_qe_acceptance_reason` /
+   * `force_qe_acceptance`, or the same keys on the bus request's `args`) is skipped with the same
+   * reason, only when its contract requires QE acceptance. On an older addon those launches still
+   * require it.
    */
   qeAcceptance?: 'required' | 'off';
   /**
@@ -6999,6 +7030,14 @@ export interface CampaignRunSpec {
   /** The registered `WorkflowDef` id this node's Run follows — for a deterministic scenario node,
    *  the per-node composed Tool workflow (`campaign-<campaign>-<node>`). */
   workflow_id?: string | null;
+  /** (api-types 0.122.0; engine wire, QE acceptance) The node's own skip of a required QE acceptance, with its reason
+   *  — labelled on the node's run, gates and delivery. Absent unless the def set it (crew's
+   *  scenarios do not); refused beside `force_qe_acceptance` and on a workflow that does not
+   *  require QE acceptance. With neither set, the daemon's `qeAcceptance: 'off'` applies. */
+  skip_qe_acceptance_reason?: string;
+  /** (api-types 0.122.0; engine wire, QE acceptance) The node's own force: QE acceptance is required whatever the
+   *  run's score says. Absent = `false`. */
+  force_qe_acceptance?: boolean;
 }
 
 /** A schedulable unit of the DAG — one node = one governed core Run. */

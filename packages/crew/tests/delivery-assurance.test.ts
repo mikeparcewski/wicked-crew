@@ -343,6 +343,8 @@ describe('EX-03 at launch — a workflow that requires QE acceptance never deliv
     });
     expect(res.statusCode, res.body).toBe(400);
     expect(res.json().error).toMatch(/requires QE acceptance/);
+    // The stable token a client matches on (the same one a refused delivery carries).
+    expect(res.json().code).toBe('qe_acceptance_required');
     expect(launched).toEqual([]);
     await a.close();
   });
@@ -468,6 +470,7 @@ describe('QE-IN-APP-WORKFLOWS at launch — the operator\'s explicit skip or for
       const res = await a.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'p', workflow, deliverGate: 'auto', clisJson: '[]' } });
       expect(res.statusCode, `${workflow}: ${res.body}`).toBe(400);
       expect(res.json().error).toMatch(/requires QE acceptance/);
+      expect(res.json().code).toBe('qe_acceptance_required');
     }
     expect(launched).toEqual([]);
     await a.close();

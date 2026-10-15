@@ -61,7 +61,7 @@ import {
   writeSync,
   type Stats,
 } from 'node:fs';
-import { rm } from 'node:fs/promises';
+import { lstat, open, rm } from 'node:fs/promises';
 import { dirname, join, relative, sep } from 'node:path';
 
 import { ATOMIC_TMP_INFIX } from './root-names.js';
@@ -87,8 +87,8 @@ export const SKIP_FILE_NAMES: ReadonlySet<string> = new Set(['.DS_Store']);
 
 // ── Cooperative pacing (crew#852) ───────────────────────────────────────────────────────────
 //
-// Every walk, hash, copy and lock below is synchronous per ENTRY (the no-follow discipline needs
-// the lstat → open → fstat identity check on one descriptor, which the async fs API cannot spell),
+// The original walk, hash, copy and lock primitives are synchronous per ENTRY, with the
+// lstat → open → fstat identity check on one descriptor,
 // but none of them has to be synchronous per TREE: a 15k-file catalogue under a slow scanner took
 // `POST /skills/publish` 408 s on the main thread, and for those seven minutes `/health`, the run
 // listing and the stall watchdog got nothing (crew#852). Each heavy function is therefore written
@@ -495,6 +495,40 @@ export function readFileNoFollow(path: string): Buffer {
   } finally {
     closeSync(fd);
   }
+}
+
+/** crew#1021: background probes read bytes asynchronously, with the same no-follow identity check. */
+export async function readFileNoFollowAsync(path: string): Promise<Buffer> {
+  const before = await lstat(path);
+  if (before.isSymbolicLink()) throw new SymlinkComponentError(path, path);
+  if (!before.isFile()) throw new EntrySwappedError(path);
+  const file = await open(path, fsConstants.O_RDONLY | O_NOFOLLOW).catch((err: NodeJS.ErrnoException) => {
+    if (err.code === 'ELOOP') throw new EntrySwappedError(path);
+    throw err;
+  });
+  try {
+    const stat = await file.stat();
+    if (!stat.isFile() || stat.dev !== before.dev || stat.ino !== before.ino) throw new EntrySwappedError(path);
+    return await file.readFile();
+  } finally {
+    await file.close();
+  }
+}
+
+/** crew#1021: bounded parallel reads, folded in sync hash order, keep large probes responsive. */
+export async function hashFileSetAsync(files: ReadonlyArray<FileRecord>): Promise<string> {
+  const h = createHash('sha256');
+  const ordered = [...files].sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
+  for (let offset = 0; offset < ordered.length; offset += 16) {
+    const batch = ordered.slice(offset, offset + 16);
+    // Settle the whole batch even on failure: no read may outlive the probe's answer.
+    const hashes = await Promise.allSettled(batch.map(async (f) => `${f.rel}\0${sha256Hex(await readFileNoFollowAsync(f.abs))}\n`));
+    for (const hash of hashes) {
+      if (hash.status === 'rejected') throw hash.reason;
+      h.update(hash.value);
+    }
+  }
+  return h.digest('hex');
 }
 
 /**

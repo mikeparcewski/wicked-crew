@@ -17,6 +17,8 @@
  * captured — a seat signed in from the Agents page is eligible on the very next launch.
  */
 
+import { createRequire } from 'node:module';
+
 import { CoreAdapter } from '../core/adapter.js';
 import { defaultLaunchRoster, isOptInSeat } from '../core/opt-in-seats.js';
 import type { RosterSeat } from '../core/types.js';
@@ -38,6 +40,27 @@ import { SeatContainerStatus, isContainerLoginCli, isContainerSeatFloor } from '
 import { seatGovernanceModes, type GovernanceScopeKind, type SeatGovernanceMode } from './seat-governance.js';
 import { seatStanding, chatSeatAdmission, type StandingSeat, type SeatStanding } from './seat-standing.js';
 import { seatVersion, seatVersions, type SeatVersionCache } from './seat-version.js';
+
+// The adapter loads this same addon module. Keep the optional 0.11.1 static local until the
+// adapter's surface catches up; detect it at read time, not when the daemon factory is built.
+const require = createRequire(import.meta.url);
+const { Core } = require('wicked-core-ts') as {
+  Core: { qeReviewersAdmitted?: (seatsJson: string) => Promise<string> };
+};
+/** `identity` (the registry record's binary / ACP adapter / invocation) keys the memo only: the engine's predicate reads the
+ *  live registry record, so a changed binary under the same key is a different seat (codex on #1027). */
+/** The addon surface the async QE batch is read from (injectable: the real napi static is not configurable). */
+type QeAddon = { qeReviewersAdmitted?: (seatsJson: string) => Promise<string> };
+type QeAdmissionSeat = { key: string; invocation?: string; identity?: string };
+
+function nativeQeAdmissionBatch(core: QeAddon = Core): RosterStandingDeps['qeAdmittedBatch'] {
+  const batch = core.qeReviewersAdmitted;
+  if (typeof batch !== 'function') return null;
+  return async (seats) => {
+    const rows = JSON.parse(await batch.call(core, JSON.stringify(seats.map(({ key, invocation }) => ({ key, invocation: invocation ?? null }))))) as Array<{ key: string; admitted: boolean }>;
+    return new Map(rows.map(({ key, admitted }) => [key, admitted]));
+  };
+}
 
 /** The accessor: the registry roster WITH crew's standing, freshly read on every call. `ready`
  *  (crew#645), awaited by a launch before it reads the roster, waits — bounded — for every seat's
@@ -92,6 +115,14 @@ export interface RosterStandingDeps {
    *  the engine cannot answer. Default under the same rule as `worktreeBench`; without it (or with
    *  `worktreeBench` absent) `qe_reviewer` is absent. */
   qeAdmitted?: ((key: string, invocation: string | undefined) => boolean | null) | null;
+  /** crew#1021: whole-roster admission off the daemon thread. The daemon feature-detects the
+   *  addon's async static on each read. A null entry/result uses the memoized sync fallback
+   *  (older addons block only on a miss); a batch miss serves the seat's last answer or null. */
+  qeAdmittedBatch?: ((seats: Array<{ key: string; invocation?: string }>) => Promise<Map<string, boolean>> | null) | null;
+  /** crew#1021: the addon the daemon default reads `Core.qeReviewersAdmitted` from at each read (default: wicked-core-ts's `Core`). */
+  qeAddon?: QeAddon;
+  /** crew#1021: clock for the mutable skills fallback admission memo (30 s). */
+  nowMs?: () => number;
   /** (A6) The OS launcher the repository boundary arms with (`hostSandboxLauncher`). */
   hostBoundary?: () => string | null;
   /** (A6) The home directory a command's display writes as `$HOME` (default `os.homedir()`). */
@@ -125,6 +156,85 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
     deps.worktreeBench !== undefined ? deps.worktreeBench : daemon ? (seats: readonly unknown[]) => CoreAdapter.worktreeBenched(seats) : null;
   const qeAdmitted =
     deps.qeAdmitted !== undefined ? deps.qeAdmitted : daemon ? (key: string, inv: string | undefined) => CoreAdapter.qeReviewerAdmitted(key, inv) : null;
+  // Published generations are immutable; the mutable HOME-derived fallback expires after 30 s.
+  const nowMs = deps.nowMs ?? Date.now;
+  const generationToken = (): string => JSON.stringify([
+    env['WICKED_SKILLS_SNAPSHOT'] || undefined, env['CLAUDE_CONFIG_DIR'], env['HOME'], env['USERPROFILE'],
+  ]);
+  let generation = '';
+  const qeMemo = new Map<string, { admitted: boolean | null; at: number }>();
+  const qeAdmission = (key: string, invocation: string | undefined, identity = ''): boolean | null => {
+    // crew#1021: core filters empty snapshot values and home_dir falls back to USERPROFILE.
+    const snapshot = env['WICKED_SKILLS_SNAPSHOT'] || undefined;
+    const token = generationToken();
+    if (token !== generation) {
+      generation = token;
+      qeMemo.clear();
+    }
+    const memoKey = JSON.stringify([key, invocation, identity]);
+    const now = nowMs();
+    const cached = qeMemo.get(memoKey);
+    if (cached !== undefined && (snapshot !== undefined || now - cached.at < 30_000)) return cached.admitted;
+    let admitted: boolean | null = null;
+    try {
+      admitted = qeAdmitted === null ? null : qeAdmitted(key, invocation);
+    } catch {
+      admitted = null;
+    }
+    qeMemo.set(memoKey, { admitted, at: now });
+    return admitted;
+  };
+  let batchToken = '';
+  let batchEpoch = 0;
+  const batchesInFlight = new Set<string>();
+  const batchMemo = new Map<string, { admitted: boolean; at: number }>();
+  // Served while a refresh is in flight (the token, which carries each seat's identity, triggers it).
+  const lastAdmission = new Map<string, boolean>();
+  const qeAdmissions = (seats: QeAdmissionSeat[]): Map<string, boolean | null> => {
+    const batch = deps.qeAdmittedBatch !== undefined ? deps.qeAdmittedBatch : daemon ? nativeQeAdmissionBatch(deps.qeAddon) : null;
+    if (batch != null) {
+      const generation = generationToken();
+      const token = JSON.stringify([generation, seats]);
+      if (token !== batchToken) {
+        batchToken = token;
+        batchEpoch++;
+        batchMemo.clear();
+      }
+      const now = nowMs();
+      const fresh = (key: string): boolean => {
+        const cached = batchMemo.get(key);
+        return cached !== undefined && (!!env['WICKED_SKILLS_SNAPSHOT'] || now - cached.at < 30_000);
+      };
+      if (seats.some(({ key }) => !fresh(key)) && !batchesInFlight.has(token)) {
+        const epoch = batchEpoch;
+        let pending: Promise<Map<string, boolean>> | null;
+        try {
+          pending = batch(seats.map(({ key, invocation }) => (invocation !== undefined ? { key, invocation } : { key })));
+        } catch {
+          // A batch failure says nothing; it must never fall back to blocking native work.
+          pending = Promise.resolve(new Map());
+        }
+        if (pending === null) return new Map(seats.map(({ key, invocation, identity }) => [key, qeAdmission(key, invocation, identity)]));
+        batchesInFlight.add(token);
+        void pending.then((admissions) => {
+          // A publish can move the env even without another roster read. Also reject A→B→A
+          // completions from an earlier epoch, and results for an obsolete invocation roster.
+          if (epoch !== batchEpoch || generation !== generationToken()) return;
+          const at = nowMs();
+          for (const { key } of seats) {
+            const admitted = admissions.get(key);
+            if (admitted === undefined) continue;
+            batchMemo.set(key, { admitted, at });
+            lastAdmission.set(key, admitted);
+          }
+        }, () => { /* retain the last admission; a later read can retry */ }).finally(() => {
+          batchesInFlight.delete(token);
+        });
+      }
+      return new Map(seats.map(({ key }) => [key, batchMemo.get(key)?.admitted ?? lastAdmission.get(key) ?? null]));
+    }
+    return new Map(seats.map(({ key, invocation, identity }) => [key, qeAdmission(key, invocation, identity)]));
+  };
   const hostBoundary = deps.hostBoundary ?? (() => hostSandboxLauncher());
   const liveRoot = (): string | undefined => {
     const workerRoot = env['WICKED_WORKER_HOME'];
@@ -134,6 +244,11 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
     const root = liveRoot();
     const container = containerMode();
     const seats = registry() as RosterSeat[];
+    const admissions = qeAdmissions(seats.map((seat) => ({
+      key: String(seat.key),
+      ...(typeof seat.headless_invocation === 'string' ? { invocation: seat.headless_invocation } : {}),
+      identity: JSON.stringify([(seat as { binary?: unknown }).binary ?? null, (seat as { acp?: unknown }).acp ?? null, seat.headless_invocation ?? null]),
+    })));
     // A5: one engine call per read — the predicate takes the whole (engine-shaped) registry roster.
     let benchedOnBound: Map<string, string> | null = null;
     try {
@@ -228,13 +343,7 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
       const version = seatVersion(seat as { acp?: { verified_version?: unknown } | null }, versions?.read(key), versionPin);
       const account = seatAccount(standing.auth, probed?.account);
       // A4: the engine's QE skill admission for this seat (`null` when it cannot answer).
-      let skillAdmitted: boolean | null = null;
-      try {
-        const inv = (seat as { headless_invocation?: unknown }).headless_invocation;
-        skillAdmitted = qeAdmitted === null ? null : qeAdmitted(key, typeof inv === 'string' ? inv : undefined);
-      } catch {
-        skillAdmitted = null;
-      }
+      const skillAdmitted = admissions.get(key) ?? null;
       // A4 / A5: only when the engine can say whether it benches the seat on a bound run.
       const inputs =
         benchedOnBound === null

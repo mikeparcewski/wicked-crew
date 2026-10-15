@@ -282,7 +282,7 @@ describe('adapter getSettings read-validation', () => {
     writeFileSync(file, JSON.stringify(content));
   }
 
-  const read = (): Promise<SystemSettings> => CoreAdapter.prototype.getSettings.call({} as CoreAdapter);
+  const read = (): Promise<SystemSettings> => CoreAdapter.prototype.getSettings.call(Object.create(CoreAdapter.prototype) as CoreAdapter);
 
   it('drops a hand-edited skills_root (ANY value — a pre-release settings.json) and the withdrawn skills_mirror knob; keeps the settings that exist', async () => {
     writeSettings({ graphNodeLimit: 150, skills_root: '/srv/skills', skills_mirror: 'on', worker_config_root: '/srv/worker' });

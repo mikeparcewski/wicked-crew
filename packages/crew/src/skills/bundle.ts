@@ -48,7 +48,7 @@
 import { lstatSync } from 'node:fs';
 
 import { noFollowEntry, PLUGIN_MANIFEST_REL, PluginSourceSymlinkError, realPluginRoot } from './plugin-source.js';
-import { toPosix, walkTree, type FileRecord } from './tree.js';
+import { budgetPacer, drain, paced, toPosix, walkTreeSteps, type FileRecord, type Steps } from './tree.js';
 
 /** The plugin subdirectory skills live in (and the prefix of every manifest `dir`). */
 export const SKILLS_SUBDIR = 'skills';
@@ -127,6 +127,15 @@ export class NotAPluginRootError extends Error {
  * entries — nothing is copied by the caller either).
  */
 export function pluginBundleFiles(pluginRoot: string): FileRecord[] {
+  return drain(pluginBundleFilesSteps(pluginRoot));
+}
+
+/** crew#1021: discovery probes yield between tree entries so a large install cannot stall requests. */
+export function pluginBundleFilesPaced(pluginRoot: string): Promise<FileRecord[]> {
+  return paced(pluginBundleFilesSteps(pluginRoot), budgetPacer());
+}
+
+function* pluginBundleFilesSteps(pluginRoot: string): Steps<FileRecord[]> {
   const root = realPluginRoot(pluginRoot);
   if (root === null) throw new NotAPluginRootError(pluginRoot);
   const manifestAbs = noFollowEntry(root, [PLUGIN_MANIFEST_DIRNAME, 'plugin.json'], pluginRoot);
@@ -147,7 +156,7 @@ export function pluginBundleFiles(pluginRoot: string): FileRecord[] {
     if (abs === null || !lstatSync(abs).isDirectory()) continue;
     // Links are ENUMERATED, never skipped (`walkTree`): a linked `skills/<x>` dir or a linked file
     // inside a skill is refused by name rather than silently left out of the bundle.
-    const tree = walkTree(abs, dir === 'scripts' ? isScriptsDevDir : undefined);
+    const tree = yield* walkTreeSteps(abs, dir === 'scripts' ? isScriptsDevDir : undefined);
     const link = tree.links[0];
     if (link !== undefined) throw new PluginSourceSymlinkError(pluginRoot, `${dir}/${link.rel}`, link.target);
     for (const f of tree.files) {

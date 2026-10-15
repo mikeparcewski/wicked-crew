@@ -13,12 +13,12 @@
  * The comparison is the CONTENT HASH, the same identity `refresh-baseline` decides on
  * (`hashFileSet` over the dependency closure). Not the version string: two installs of one version
  * with different bytes are two baselines, and a checkout that moved without a version bump is the
- * dogfood's exact case. The cost is one bundle read, on a route studio calls when the page loads.
+ * dogfood's exact case. The runtime shares a background probe across catalog and diagnostics reads (crew#1021).
  */
 
-import { hashFileSet, type FileRecord } from './tree.js';
-import { pluginBundleFiles } from './bundle.js';
-import { discoverLivePlugin, gitStateOf, type PluginSource } from './plugin-source.js';
+import { hashFileSet, hashFileSetAsync, type FileRecord } from './tree.js';
+import { pluginBundleFiles, pluginBundleFilesPaced } from './bundle.js';
+import { discoverLivePlugin, gitStateOf, gitStateOfAsync, type PluginSource } from './plugin-source.js';
 import type { SkillSourceKind } from '../core/types.js';
 
 /** What `GET /skills` reports about the installed plugin (`SkillsManifestResponse.installed`). */
@@ -60,6 +60,28 @@ export function installedPluginState(opts: {
   } catch (err) {
     // A symlink among the bundle's designated entries, a file that vanished mid-walk, a permission
     // refusal. The catalog still answers — this one comparison is simply unavailable, and says so.
+    return { ...state, baseline: null, unreadable: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * crew#1021: the background probe yields before discovery, paces bundle enumeration, and uses
+ * asynchronous file and git reads. The synchronous entry point remains for boot/CLI callers.
+ */
+export async function installedPluginStateAsync(opts: {
+  discover?: () => PluginSource | null;
+} = {}): Promise<InstalledPluginState | null> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const source = (opts.discover ?? (() => discoverLivePlugin()))();
+  if (source === null) return null;
+  const state = {
+    source: { kind: source.kind, path: source.path, plugin_version: source.plugin_version },
+    git_sha: (await gitStateOfAsync(source)).git_sha,
+  };
+  try {
+    const files = await pluginBundleFilesPaced(source.path);
+    return { ...state, baseline: await hashFileSetAsync(files), unreadable: null };
+  } catch (err) {
     return { ...state, baseline: null, unreadable: err instanceof Error ? err.message : String(err) };
   }
 }
