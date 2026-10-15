@@ -10,8 +10,7 @@
  * can no longer drift (task #84; `tests/wire-contract.test.ts` is the guard).
  *
  * What remains in THIS file is engine-internal: inputs the adapter maps onto
- * the native addon (`LaunchRunInput`), shapes that never leave the daemon
- * (`RepoOnboardRef`), and runtime constants (`DEFAULT_SETTINGS`) — a types-only
+ * the native addon (`LaunchRunInput`) and runtime constants (`DEFAULT_SETTINGS`) — a types-only
  * contract package cannot carry values.
  *
  * ONLY `core/adapter.ts` imports from the native addon itself; the rest of the
@@ -31,12 +30,6 @@ export type RunTeamView = Omit<RunTeamResponse, 'units' | 'rows' | 'teamed' | 't
 };
 
 import { DEFAULT_BASE_SKILL_REF, type BaseSkillPolicy } from '../skills/base-skill.js';
-
-/** The run id of the onboarding run started when a repo was registered. */
-export interface RepoOnboardRef {
-  repoId: string;
-  runId: string;
-}
 
 /** The daemon's launch-run input (mapped by the adapter onto the addon's `LaunchOptions`). */
 export interface LaunchRunInput {

@@ -1,4 +1,4 @@
-// Regression tests for cloneAndRegisterRepo cleanup behaviour (crew#63, crew#81).
+// Regression tests for cloneAndRegister cleanup behaviour (crew#63, crew#81).
 //
 // Scenario A — pre-existing directory: clone fails → only .git is removed, caller's
 //              directory and any existing contents are preserved.
@@ -32,7 +32,7 @@ afterAll(() => {
   removeScratch(dbDir);
 });
 
-describe('cloneAndRegisterRepo cleanup', () => {
+describe('cloneAndRegister cleanup', () => {
   it('preserves a pre-existing directory and removes only .git on clone failure', async () => {
     const preexistingDir = mkdtempSync(join(tmpdir(), 'crew-preexist-'));
     // Put a sentinel file in the directory to prove we didn't delete it.
@@ -41,7 +41,7 @@ describe('cloneAndRegisterRepo cleanup', () => {
 
     try {
       await expect(
-        adapter.cloneAndRegisterRepo('pre-existing', INVALID_URL, preexistingDir),
+        adapter.cloneAndRegister('pre-existing', INVALID_URL, preexistingDir),
       ).rejects.toThrow();
 
       // The directory and its contents must survive.
@@ -59,7 +59,7 @@ describe('cloneAndRegisterRepo cleanup', () => {
     expect(existsSync(newDir)).toBe(false);
 
     await expect(
-      adapter.cloneAndRegisterRepo('new-dir', INVALID_URL, newDir),
+      adapter.cloneAndRegister('new-dir', INVALID_URL, newDir),
     ).rejects.toThrow();
 
     // The directory was created by us → must be cleaned up so a retry starts fresh.

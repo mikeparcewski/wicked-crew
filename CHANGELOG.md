@@ -10,6 +10,9 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+- **Remote repository registration survives an onboarding launch failure (crew#1030, follow-up of #1019).** `POST /api/v1/repos` with `gitUrl` now keeps the registered repo and returns 201 with `{ repo, onboardRunId: null, onboardError }` when onboarding cannot start, as local registration does. Clone or registration failures still return 400.
+
 ## [0.12.1] — 2026-10-15
 
 A patch release: a launch refused for QE acceptance carries a stable code (#1023), the QE acceptance setting covers the launches the engine makes on its own (#1025), a gate judged by a fallback seat says so (#1024), a registered repository whose onboarding couldn't start keeps its project (#1026), a project chat sees a repository attached after it started or asks for a new chat (#1026), and roster, `/health` and websocket reads no longer block the daemon on skills-root walks (#1027). It pins **wicked-core-ts ^0.11.2**, the engine that carries #1025's and #1024's halves (core #952, #953), the shell-read boundary on every carrier's shell tool (core #955, core#951), the async whole-roster QE admission #1027 uses (core #956), and the fix for concurrent engine-made runs that hung or stopped the engine (core #966, core#957). The bundled UI is **wicked-studio 0.9.2**.

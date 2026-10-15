@@ -22,7 +22,7 @@ function routes() {
       return repo;
     }),
     launchOnboardingRun: vi.fn(async (): Promise<string> => { throw new Error(launchError); }),
-    cloneAndRegisterRepo: vi.fn<CoreAdapter['cloneAndRegisterRepo']>(async () => { throw new Error('clone failed'); }),
+    cloneAndRegister: vi.fn<CoreAdapter['cloneAndRegister']>(async () => { throw new Error('clone failed'); }),
     projectMemberAttach: vi.fn(),
   };
   const app = Fastify({ logger: false });
@@ -50,17 +50,41 @@ describe('POST /api/v1/repos — registration and onboarding outcomes', () => {
     expect(adapter.launchOnboardingRun).not.toHaveBeenCalled();
   });
 
-  it("keeps main's remote behaviour: an adapter failure returns 400 even after registration landed", async () => {
-    const { app, adapter } = routes();
-    adapter.cloneAndRegisterRepo.mockImplementation(async () => {
-      await adapter.registerRepo('alpha', '/srv/alpha');
-      throw new Error(launchError);
-    });
+  it('returns the registered remote repo with a null run and launch error, without filing a run', async () => {
+    const { app, adapter, repos } = routes();
+    adapter.cloneAndRegister.mockImplementation(async (name, _gitUrl, rootPath) => adapter.registerRepo(name, rootPath!));
+    const res = await app.inject({ method: 'POST', url: '/api/v1/repos', payload: { name: 'alpha', gitUrl: 'https://example.invalid/alpha.git', rootPath: '/srv/alpha', projectId: 'p1' } });
+    expect(res.statusCode).toBe(201);
+    expect(repos).toHaveLength(1);
+    expect(res.json()).toEqual({ repo: repos[0], onboardRunId: null, onboardError: launchError });
+    expect(adapter.cloneAndRegister).toHaveBeenCalledExactlyOnceWith('alpha', 'https://example.invalid/alpha.git', '/srv/alpha');
+    expect(adapter.launchOnboardingRun).toHaveBeenCalledExactlyOnceWith('r-new', 'alpha');
+    expect(adapter.listRepos).not.toHaveBeenCalled();
+    expect((await app.inject({ method: 'GET', url: '/api/v1/repos' })).json().repos).toEqual(repos);
+    expect(adapter.projectMemberAttach).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 when cloning fails, without launching onboarding', async () => {
+    const { app, adapter, repos } = routes();
+    adapter.cloneAndRegister.mockRejectedValue(new Error('clone failed'));
     const res = await app.inject({ method: 'POST', url: '/api/v1/repos', payload: { name: 'alpha', gitUrl: 'https://example.invalid/alpha.git', rootPath: '/srv/alpha' } });
     expect(res.statusCode).toBe(400);
-    expect(res.json()).toEqual({ error: launchError });
-    expect(adapter.cloneAndRegisterRepo).toHaveBeenCalledExactlyOnceWith('alpha', 'https://example.invalid/alpha.git', '/srv/alpha');
-    expect(adapter.listRepos).not.toHaveBeenCalled();
+    expect(res.json()).toEqual({ error: 'clone failed' });
+    expect(repos).toHaveLength(0);
+    expect(adapter.launchOnboardingRun).not.toHaveBeenCalled();
     expect(adapter.projectMemberAttach).not.toHaveBeenCalled();
+  });
+
+  it('returns the registered remote repo and the launched onboarding run id on success', async () => {
+    const { app, adapter, repos } = routes();
+    adapter.cloneAndRegister.mockImplementation(async (name, _gitUrl, rootPath) => adapter.registerRepo(name, rootPath!));
+    adapter.launchOnboardingRun.mockResolvedValue('run-onboard');
+    const res = await app.inject({ method: 'POST', url: '/api/v1/repos', payload: { name: 'alpha', gitUrl: 'https://example.invalid/alpha.git', rootPath: '/srv/alpha' } });
+    expect(res.statusCode).toBe(201);
+    expect(repos).toHaveLength(1);
+    expect(res.json()).toEqual({ repo: repos[0], onboardRunId: 'run-onboard' });
+    expect(adapter.cloneAndRegister).toHaveBeenCalledExactlyOnceWith('alpha', 'https://example.invalid/alpha.git', '/srv/alpha');
+    expect(adapter.launchOnboardingRun).toHaveBeenCalledExactlyOnceWith('r-new', 'alpha');
+    expect(adapter.listRepos).not.toHaveBeenCalled();
   });
 });
