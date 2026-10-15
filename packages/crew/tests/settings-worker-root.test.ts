@@ -178,7 +178,7 @@ describe('adapter getSettings read-validation', () => {
 
   // getSettings touches no engine state — calling it off the prototype avoids spawning a Core.
   const read = (): Promise<SystemSettings> =>
-    CoreAdapter.prototype.getSettings.call({} as CoreAdapter);
+    CoreAdapter.prototype.getSettings.call(Object.create(CoreAdapter.prototype) as CoreAdapter);
 
   it('drops a hand-edited RELATIVE root rather than exporting it as WICKED_WORKER_HOME', async () => {
     writeSettings({ graphNodeLimit: 150, worker_config_root: 'relative/nope' });

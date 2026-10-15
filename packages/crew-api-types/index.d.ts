@@ -5416,8 +5416,13 @@ export interface SystemSettings {
    * naming this setting — `assurance.qe.status: 'skipped'`, `basis: 'operator'`, labelled on the run,
    * every gate and the delivery, and the deliver gate reads a skip, never a refusal. A launch's
    * `forceQeAcceptance: true` still requires it. `GET /health.capabilities.qeAcceptance` reports it.
-   * NOT covered: launches the engine takes without crew — campaign nodes (the engine's own run spec
-   * carries no QE word) and `wicked.crew.run.requested` bus requests — so those still require it.
+   * (api-types 0.122.0) The launches the engine takes on its own — campaign nodes (as each dispatches) and
+   * `wicked.crew.run.requested` bus requests — follow it too, when the engine addon carries
+   * `setQeAcceptanceOff` (crew hands the setting to the engine with every settings read): such a
+   * launch that gives no QE word of its own (`CampaignRunSpec.skip_qe_acceptance_reason` /
+   * `force_qe_acceptance`, or the same keys on the bus request's `args`) is skipped with the same
+   * reason, only when its contract requires QE acceptance. On an older addon those launches still
+   * require it.
    */
   qeAcceptance?: 'required' | 'off';
   /**
@@ -7004,6 +7009,14 @@ export interface CampaignRunSpec {
   /** The registered `WorkflowDef` id this node's Run follows — for a deterministic scenario node,
    *  the per-node composed Tool workflow (`campaign-<campaign>-<node>`). */
   workflow_id?: string | null;
+  /** (api-types 0.122.0; engine wire, QE acceptance) The node's own skip of a required QE acceptance, with its reason
+   *  — labelled on the node's run, gates and delivery. Absent unless the def set it (crew's
+   *  scenarios do not); refused beside `force_qe_acceptance` and on a workflow that does not
+   *  require QE acceptance. With neither set, the daemon's `qeAcceptance: 'off'` applies. */
+  skip_qe_acceptance_reason?: string;
+  /** (api-types 0.122.0; engine wire, QE acceptance) The node's own force: QE acceptance is required whatever the
+   *  run's score says. Absent = `false`. */
+  force_qe_acceptance?: boolean;
 }
 
 /** A schedulable unit of the DAG — one node = one governed core Run. */

@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import type { BusUnavailable } from './engine-bus.js';
 import { attachEngineBus, detachEngineBus, type EngineBus } from './bus.js';
 import { mkdir, access, readFile, writeFile, chmod, rm, link, rename, realpath, stat } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join, dirname, resolve, isAbsolute, relative, sep } from 'node:path';
 import { isPlainRunId, WALKTHROUGH_AUTHOR_SUBDIR, walkthroughRootDir } from './walkthrough-root.js';
 import { crewStateHome, isDefaultStateHome } from '../projects/state-home.js';
@@ -68,7 +68,7 @@ const TERMINAL_RUN_STATUSES: ReadonlySet<string> = new Set(['completed', 'cancel
 import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
 import { applyGovernanceStoreEnv, isStoreSpec, type GovernanceStoreLocation } from './governance-store.js';
 import { isCouncilSize, isCouncilStaggerMs } from './council-settings.js';
-import { launchRequiresQe, qeAcceptanceMode, qeSettingSkipReason } from './qe-acceptance-setting.js';
+import { QE_OFF_REASON, launchRequiresQe, qeAcceptanceMode, qeSettingSkipReason } from './qe-acceptance-setting.js';
 
 
 
@@ -117,6 +117,25 @@ export function settingsFilePath(): string {
   // home keeps the historical location.
   if (!isDefaultStateHome()) return join(crewStateHome(), 'daemon-settings.json');
   return sharedSettingsFilePath();
+}
+
+/**
+ * The daemon's QE acceptance setting as it stands on disk NOW, read SYNCHRONOUSLY — what the
+ * engine's mirror is set from (`syncEngineQeSetting`), and its boot value (`WICKED_QE_ACCEPTANCE_OFF`,
+ * which must be in place before `Core.spawn` arms the bus bridge). Read synchronously, so the mirror
+ * is never set from a read that a later edit or write overtook. The file `getSettings` reads, or —
+ * before a non-default state home is seeded from it — the shared file it will be seeded from.
+ * Anything unreadable reads as `'required'` (fail closed).
+ */
+function diskQeAcceptanceMode(): 'required' | 'off' {
+  const path = settingsFilePath();
+  const override = process.env['WICKED_CREW_SYSTEM_SETTINGS'];
+  const seeded = existsSync(path) || (override !== undefined && override !== '') || isDefaultStateHome();
+  try {
+    return qeAcceptanceMode(JSON.parse(readFileSync(seeded ? path : sharedSettingsFilePath(), 'utf8')) as { qeAcceptance?: unknown });
+  } catch {
+    return 'required';
+  }
 }
 
 /** The historical machine-wide settings file — the default state home's, and the one-time seed of any other (crew#756). */
@@ -500,8 +519,19 @@ interface BusBridgeMethods {
   busRead?(afterId: number, limit: number, typePrefix?: string | null, includeExpired?: boolean | null): Promise<string>;
 }
 
+/** (wicked-core-ts ≥ the release carrying it) The engine's standing "QE acceptance off" for the
+ *  launches it makes on its own — campaign nodes as they dispatch and `wicked.crew.run.requested`
+ *  bus requests: a reason (skip a node or request that gives no QE word of its own, only when its
+ *  contract requires QE acceptance) or `null` (skip nothing). Throws on a blank reason. Optional: an
+ *  older addon has no such method, and its engine-originated launches still require QE acceptance. */
+interface QeHostMethods {
+  setQeAcceptanceOff?(reason: string | null): void;
+  qeAcceptanceOff?(): string | null;
+}
+
 type CoreHandleFull = CoreHandle &
   BusBridgeMethods &
+  QeHostMethods &
   GovernanceMethods &
   ChatMethods &
   EventLogMethods &
@@ -1031,6 +1061,8 @@ export class CoreAdapter {
   readonly busSeamsOff: string | null = null;
   /** The engine's bus calls, attached for `busDbPath` (core/bus.ts); `null` without a bus. */
   private engineBus: EngineBus | null = null;
+  /** What crew last handed the engine's `setQeAcceptanceOff` (the engine starts with the boot value). */
+  private engineQeOff: string | null = null;
   /**
    * `true` when this adapter drives the DETERMINISTIC OFFLINE engine (`Core.spawnStub`) rather
    * than the production one — i.e. the `StubDispatcher` (every seat votes for the first roster
@@ -1147,7 +1179,21 @@ export class CoreAdapter {
 
     this.stub = opts.stub === true;
     this.dbPath = opts.dbPath;
-    this.core = this.stub ? Core.spawnStub(opts.dbPath) : Core.spawn(opts.dbPath);
+    // The QE acceptance setting's engine mirror (`syncEngineQeSetting`) must hold BEFORE the engine
+    // arms its bus bridge inside `spawn`, or a bus request in between would launch under the
+    // default: hand the boot value over in the engine's own variable, read at spawn.
+    if (diskQeAcceptanceMode() === 'off') process.env['WICKED_QE_ACCEPTANCE_OFF'] = QE_OFF_REASON;
+    else delete process.env['WICKED_QE_ACCEPTANCE_OFF'];
+    try {
+      this.core = this.stub ? Core.spawnStub(opts.dbPath) : Core.spawn(opts.dbPath);
+    } finally {
+      // Read once, at spawn: never inherited by the workers this daemon starts.
+      delete process.env['WICKED_QE_ACCEPTANCE_OFF'];
+    }
+    // An addon without the mirror ignores the variable; one with it started with the boot value.
+    this.engineQeOff = typeof (this.core as { qeAcceptanceOff?: unknown }).qeAcceptanceOff === 'function'
+      ? (this.core as { qeAcceptanceOff: () => string | null }).qeAcceptanceOff()
+      : null;
     // DES-TEAMING-002 T0: `spawn` returns only once the engine's bus bridge is armed, or has given up
     // within its bound. Not armed = the engine launches nothing from the bus: say so on the same
     // `bus.unavailable` path as a bus crew could not open.
@@ -1645,7 +1691,9 @@ export class CoreAdapter {
     // The daemon's QE acceptance setting (`qeAcceptance: 'off'`, core/qe-acceptance-setting.ts): a
     // launch of a workflow that requires QE acceptance, and that neither skips nor forces it, is
     // skipped through the engine's own skip with a reason naming the setting — so every path that
-    // launches (POST /runs, chats, standing orders, campaigns) is labelled the same way. An addon
+    // launches through here (POST /runs, chats, standing orders) is labelled the same way. The launches
+    // the engine makes on its own (campaign nodes, bus requests) read the engine's mirror of the
+    // setting instead (`syncEngineQeSetting`). An addon
     // with no QE decision enforces none, so there is nothing to skip on one.
     // POST /runs resolves it itself (one settings read for its deliverGate check and the skip) and
     // hands the skip in explicitly, so it is not read twice there.
@@ -2045,6 +2093,11 @@ export class CoreAdapter {
     for (const wf of workflows) {
       await this._armCampaignWorkflow(wf);
     }
+    // The engine reads its mirror of the QE acceptance setting as each node dispatches: refresh it
+    // from the settings file now (synchronously, no added wait), so a hand edit since the last read
+    // is what the campaign starts under (`syncEngineQeSetting`; an unreadable file reads as
+    // 'required': fail closed).
+    this.syncEngineQeSetting(true);
     // The roster crew hands the ENGINE (F-086, the campaign half of wave 6's `core/engine-roster.ts`):
     // a def built from `rosterWithStanding()` carries crew's `health {status}` / `auth` /
     // `council_eligible` readings on every node's `run_spec.clis`; core-ts ≥ 0.7.22 parses `health`
@@ -3357,7 +3410,52 @@ export class CoreAdapter {
 
   // ── System settings ───────────────────────────────────────────────────────
 
+  /**
+   * Hand the daemon's QE acceptance setting to the ENGINE, for the launches it makes on its own:
+   * campaign nodes (as each dispatches) and `wicked.crew.run.requested` bus requests never pass
+   * through `launchRun`, so crew cannot add the skip to them. With `qeAcceptance: 'off'` the engine
+   * skips such a launch that gives no QE word of its own, with {@link QE_OFF_REASON}, and only when
+   * the run's contract requires QE acceptance (the engine resolves that itself, so a run with nothing
+   * to skip is left alone, never refused).
+   *
+   * Runs after every settings read and write, and reads the file itself, synchronously
+   * (`diskQeAcceptanceMode`): the mirror is the file as it stands at that moment, never the result of
+   * an async read that a later edit or write overtook. `readOk: false` (the settings read failed —
+   * rejected, or could not read, parse or validate the file and served the defaults, which `/health`
+   * and `launchRun` read as `'required'`) clears it: fail closed. An addon without
+   * the method has no such mirror (`engineQeSettingSupported`): there, engine-originated launches
+   * still require QE acceptance.
+   */
+  private syncEngineQeSetting(readOk: boolean): void {
+    // `core` is absent on a bare prototype-backed adapter (the settings read-validation suites).
+    const core = this.core as { setQeAcceptanceOff?: (reason: string | null) => void } | undefined;
+    if (typeof core?.setQeAcceptanceOff !== 'function') return;
+    const want = readOk && diskQeAcceptanceMode() === 'off' ? QE_OFF_REASON : null;
+    if (this.engineQeOff === want) return;
+    core.setQeAcceptanceOff.call(this.core, want);
+    this.engineQeOff = want;
+  }
+
+  /** Whether the installed engine follows the QE acceptance setting on the launches it makes on its
+   *  own (campaign nodes, bus requests) — `setQeAcceptanceOff` is present. */
+  engineQeSettingSupported(): boolean {
+    return typeof (this.core as { setQeAcceptanceOff?: unknown }).setQeAcceptanceOff === 'function';
+  }
+
   async getSettings(): Promise<CrewSystemSettings> {
+    let readOk = false;
+    try {
+      const { settings, ok } = await this.readSettings();
+      readOk = ok;
+      return settings;
+    } finally {
+      this.syncEngineQeSetting(readOk);
+    }
+  }
+
+  /** The settings as read, and whether the read succeeded: a file that could not be read, parsed or
+   *  validated serves the defaults (`ok: false`), which the engine's QE mirror reads as a failure. */
+  private async readSettings(): Promise<{ settings: CrewSystemSettings; ok: boolean }> {
     await seedStateHomeSettings(settingsFilePath());
     try {
       const raw = await readFile(settingsFilePath(), 'utf8');
@@ -3509,16 +3607,21 @@ export class CoreAdapter {
           );
         }
       }
-      return { ...DEFAULT_SETTINGS, ...parsed };
+      return { settings: { ...DEFAULT_SETTINGS, ...parsed }, ok: true };
     } catch {
-      return { ...DEFAULT_SETTINGS };
+      return { settings: { ...DEFAULT_SETTINGS }, ok: false };
     }
   }
 
   async updateSettings(patch: Partial<CrewSystemSettings>): Promise<CrewSystemSettings> {
     const current = await this.getSettings();
     const next = { ...current, ...patch };
-    await publishSettingsFile(settingsFilePath(), JSON.stringify(next, null, 2), true);
+    try {
+      await publishSettingsFile(settingsFilePath(), JSON.stringify(next, null, 2), true);
+    } finally {
+      // The file as it now stands (this write, or a later one that already landed).
+      this.syncEngineQeSetting(true);
+    }
     return next;
   }
 
