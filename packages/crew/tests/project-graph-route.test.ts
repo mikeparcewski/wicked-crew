@@ -258,6 +258,7 @@ describe('GET /projects/:id/graph — the graph reports its own standing', () =>
     const { status } = res.json() as { status: Record<string, unknown> };
     expect(status['state']).toBe('no-repo-members');
     expect(status['detail']).toMatch(/unfiled runs and chats only/);
+    expect(status['detail']).not.toMatch(/synthesized|'default' project/);
   });
 
   it('an unknown project is a 404, not an empty graph', async () => {
