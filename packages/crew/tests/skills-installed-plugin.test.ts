@@ -11,11 +11,15 @@
 // The comparison is the CONTENT HASH, the identity `refresh-baseline` itself decides on: a checkout
 // that moved without a version bump is the dogfood's exact case, so a version-string comparison
 // would have reported agreement.
-import { expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 
-import { installedPluginState } from '../src/skills/installed.js';
+import { installedPluginState, installedPluginStateAsync } from '../src/skills/installed.js';
 import type { FileRecord } from '../src/skills/tree.js';
-import type { PluginSource } from '../src/skills/plugin-source.js';
+import { gitStateOf, gitStateOfAsync, type PluginSource } from '../src/skills/plugin-source.js';
+import { mkdirSync, symlinkSync } from 'node:fs';
+import { join } from 'node:path';
+import { scaffold, type Scaffold } from './support/skills-fixture.js';
+import { removeScratch } from './setup/scratch.js';
 
 const SOURCE: PluginSource = { path: '/garden', kind: 'checkout', plugin_version: '12.38.1' };
 const BUNDLE: FileRecord[] = [{ rel: 'scripts/mcp/shim.py', abs: '/garden/scripts/mcp/shim.py' }];
@@ -61,4 +65,35 @@ it('a bundle it cannot read is STATED, never reported as agreement', () => {
 
 it('no installed plugin is null, not an invented identity', () => {
   expect(installedPluginState({ discover: () => null })).toBeNull();
+});
+
+const scratch: Scaffold[] = [];
+afterEach(() => {
+  vi.unstubAllEnvs();
+  for (const sc of scratch.splice(0)) removeScratch(sc.base);
+});
+
+it('crew#1021: async installed probe has the same bundle identity as the synchronous probe', async () => {
+  const sc = scaffold();
+  scratch.push(sc);
+  expect(await sc.store.installedStateAsync()).toEqual(sc.store.installedState());
+  expect(await installedPluginStateAsync({ discover: () => null })).toBeNull();
+});
+
+it('crew#1021: async bundle probing still refuses links among designated entries', async () => {
+  const sc = scaffold();
+  scratch.push(sc);
+  symlinkSync(sc.base, join(sc.upstream, 'skills', 'outside'));
+  const state = await sc.store.installedStateAsync();
+  expect(state?.baseline).toBeNull();
+  expect(state?.unreadable).toContain('skills/outside is a symlink');
+});
+
+it('crew#1021: async git preserves the non-checkout and unreadable-checkout answers', async () => {
+  expect(await gitStateOfAsync({ ...SOURCE, kind: 'directory' })).toEqual(gitStateOf({ ...SOURCE, kind: 'directory' }));
+  const sc = scaffold();
+  scratch.push(sc);
+  vi.stubEnv('GIT_CONFIG_GLOBAL', join(sc.base, 'no-global-git-config'));
+  mkdirSync(join(sc.upstream, '.git'));
+  expect(await gitStateOfAsync({ ...SOURCE, path: sc.upstream })).toMatchObject({ git_sha: null, git_dirty: false, error: expect.any(String) });
 });

@@ -11,6 +11,12 @@ import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { SeatHealthTracker } from '../src/api/seat-health.js';
 import { CoreAdapter } from '../src/core/adapter.js';
+import { SkillsRuntime } from '../src/skills/runtime.js';
+import * as installedPlugin from '../src/skills/installed.js';
+import * as pluginSource from '../src/skills/plugin-source.js';
+import * as skillTree from '../src/skills/tree.js';
+import { scaffold } from './support/skills-fixture.js';
+import { removeScratch } from './setup/scratch.js';
 import type { CoreEvent, RosterSeat } from '../src/core/types.js';
 import type { FastifyInstance } from 'fastify';
 
@@ -33,19 +39,19 @@ const SEATS: RosterSeat[] = [
   },
 ];
 
-function buildApp(tracker: SeatHealthTracker): FastifyInstance {
+function buildApp(tracker: SeatHealthTracker, skills?: SkillsRuntime): FastifyInstance {
   const app = Fastify({ logger: false });
   registerRoutes(
     app,
-    // The roster route reads no adapter method — the static roster is spied below.
-    {} as unknown as CoreAdapter,
+    // The static roster is spied below; health's engine/settings reads stay hermetic too.
+    { ping: async () => 'ok', getSettings: async () => ({}) } as unknown as CoreAdapter,
     new GateCache(),
     new ElicitationCache(),
     undefined,
     undefined,
     // signedIn stubbed to "unknown" so this suite stays about HEALTH and never reads the
     // developer's real dotfiles (the sign-in surface has its own suites).
-    { seatHealth: tracker, signedIn: () => null },
+    { seatHealth: tracker, signedIn: () => null, ...(skills !== undefined ? { skills } : {}) },
   );
   return app;
 }
@@ -130,4 +136,40 @@ describe('GET /roster with seat health (crew#274)', () => {
     expect(codex?.health?.status).toBe('active');
     expect(codex?.health?.message).toBeUndefined();
   });
+});
+
+// crew#1021: exercise actual GET handlers with a synchronous probe that must remain unreachable.
+it('health, skills and diagnostics serve the cached install without synchronously probing it', async () => {
+  const sc = scaffold();
+  let now = 0;
+  // crew#1021: even scheduled probes stay hermetic and cannot outlive this temp root.
+  vi.spyOn(sc.store, 'installedStateAsync').mockResolvedValue(null);
+  const runtime = new SkillsRuntime({ store: sc.store, log: () => {}, bootSnapshot: undefined, nowMs: () => now, installedTtlMs: 1 });
+  vi.spyOn(CoreAdapter, 'roster').mockReturnValue(SEATS);
+  await runtime.apply();
+  await runtime.refreshInstalled();
+  const sync = vi.spyOn(sc.store, 'installedState').mockImplementation(() => { throw new Error('synchronous probe on request path'); });
+  // The old GET /skills called the module directly, bypassing the store method. Guard both
+  // entries and their expensive sync helpers, even if a handler swallows a probe failure.
+  const direct = vi.spyOn(installedPlugin, 'installedPluginState').mockImplementation(() => { throw new Error('direct synchronous probe on request path'); });
+  const git = vi.spyOn(pluginSource, 'gitStateOf').mockImplementation(() => { throw new Error('synchronous git on request path'); });
+  const hash = vi.spyOn(skillTree, 'hashFileSet').mockImplementation(() => { throw new Error('synchronous bundle hash on request path'); });
+  const app = buildApp(new SeatHealthTracker(), runtime);
+  try {
+    await app.ready();
+    now += 2; // stale: the handlers may schedule a refresh, but cannot execute the sync probe
+    for (const url of ['/api/v1/health', '/api/v1/skills', '/api/v1/diagnostics']) {
+      const result = await app.inject({ method: 'GET', url });
+      expect(result.statusCode, url).toBe(200);
+    }
+    expect(sync).not.toHaveBeenCalled();
+    expect(direct).not.toHaveBeenCalled();
+    expect(git).not.toHaveBeenCalled();
+    expect(hash).not.toHaveBeenCalled();
+  } finally {
+    await app.close();
+    await runtime.refreshInstalled();
+    vi.restoreAllMocks();
+    removeScratch(sc.base);
+  }
 });
