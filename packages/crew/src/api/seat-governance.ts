@@ -79,10 +79,14 @@ function asClass(v: unknown): EngineGovernanceClass | null {
   return v === 'acp_input_governance' || v === 'os_sandbox' || v === 'none' ? v : null;
 }
 
-/** The seat's own bounded `--sandbox <mode>` among its trust flags (codex). */
+/**
+ * The seat's own bounded `--sandbox <mode>` among its trust flags (codex), exactly the engine's
+ * `codex_sandbox_is_bounded`: a bypass flag anywhere cancels it (codex c5-crew-r5).
+ */
 function ownSandboxMode(trustFlags: unknown): string | null {
   if (!Array.isArray(trustFlags)) return null;
   const flags = trustFlags.filter((f): f is string => typeof f === 'string');
+  if (flags.some((f) => f === '--dangerously-bypass-approvals-and-sandbox' || f === '--yolo')) return null;
   for (let i = 0; i < flags.length; i++) {
     const f = flags[i]!;
     const mode = f === '--sandbox' || f === '-s' ? flags[i + 1] : f.startsWith('--sandbox=') ? f.slice('--sandbox='.length) : undefined;

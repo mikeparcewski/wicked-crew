@@ -164,4 +164,10 @@ describe('runRoot: the executable decides, not the seat name (C5, codex c5-crew-
     expect(seatGovernanceMode({ key: 'claude', governance_class: 'acp_input_governance', headless_invocation: 'pi -p {PROMPT}' }, 'scoped')).toMatchObject({ mode: 'none' });
     expect(seatGovernanceMode({ key: 'my-claude', governance_class: 'acp_input_governance', headless_invocation: 'claude -p {PROMPT}' }, 'scoped')).toMatchObject({ mode: 'admitted' });
   });
+  it('a seat running codex with a bounded --sandbox AND a bypass flag reads none, as the engine refuses it (codex c5-crew-r5)', () => {
+    const seat = (trust_flags: string[]) => ({ key: 'runner', governance_class: 'os_sandbox', headless_invocation: 'codex exec {PROMPT}', trust_flags });
+    expect(seatGovernanceMode(seat(['--sandbox', 'workspace-write']), 'scoped')).toMatchObject({ mode: 'os_sandbox', source: 'self' });
+    expect(seatGovernanceMode(seat(['--sandbox', 'workspace-write', '--yolo']), 'scoped')).toMatchObject({ mode: 'none' });
+    expect(seatGovernanceMode(seat(['--sandbox=read-only', '--dangerously-bypass-approvals-and-sandbox']), 'scoped')).toMatchObject({ mode: 'none' });
+  });
 });
