@@ -10,6 +10,9 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+- **The daemon's first boot no longer exits 0 mid-boot (crew#1041).** On a fresh state home, `serve` seeded the skills root and then quit silently before it listened, and the release smoke's S01 failed on 0.12.1, 0.12.2 and 0.12.3. A restart worked because the root was already seeded. Since #1027, `refreshInstalled` (called by boot's auto-refresh) deferred its probe behind an `unref()`'d `setImmediate`. Nothing else held the event loop that early, so the immediate never fired, and the bounded wait's timer was unref'd too, so Node drained the loop with the `await` pending. The deferral's immediate is now ref'd; the deadline timer stays unref'd, since the probe's own I/O holds the loop once it starts.
+
 ## [0.12.3] — 2026-10-15
 
 A patch release of the bundled UI: **wicked-studio 0.9.4**, where a run Needs you holds (a stall, an orphan, an open question) reads as waiting on you across the Desk instead of "working" (wicked-studio#807). No daemon change; wicked-core-ts stays ^0.11.3.
