@@ -68,7 +68,7 @@ const TERMINAL_RUN_STATUSES: ReadonlySet<string> = new Set(['completed', 'cancel
 import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
 import { applyGovernanceStoreEnv, isStoreSpec, type GovernanceStoreLocation } from './governance-store.js';
 import { isCouncilSize, isCouncilStaggerMs } from './council-settings.js';
-import { launchRequiresQe, qeAcceptanceMode, qeSettingSkipReason } from './qe-acceptance-setting.js';
+import { QE_OFF_REASON, launchRequiresQe, qeAcceptanceMode, qeSettingSkipReason } from './qe-acceptance-setting.js';
 
 
 
@@ -500,8 +500,19 @@ interface BusBridgeMethods {
   busRead?(afterId: number, limit: number, typePrefix?: string | null, includeExpired?: boolean | null): Promise<string>;
 }
 
+/** (wicked-core-ts ≥ the release carrying it) The engine's standing "QE acceptance off" for the
+ *  launches it makes on its own — campaign nodes as they dispatch and `wicked.crew.run.requested`
+ *  bus requests: a reason (skip a node or request that gives no QE word of its own, only when its
+ *  contract requires QE acceptance) or `null` (skip nothing). Throws on a blank reason. Optional: an
+ *  older addon has no such method, and its engine-originated launches still require QE acceptance. */
+interface QeHostMethods {
+  setQeAcceptanceOff?(reason: string | null): void;
+  qeAcceptanceOff?(): string | null;
+}
+
 type CoreHandleFull = CoreHandle &
   BusBridgeMethods &
+  QeHostMethods &
   GovernanceMethods &
   ChatMethods &
   EventLogMethods &
@@ -1031,6 +1042,8 @@ export class CoreAdapter {
   readonly busSeamsOff: string | null = null;
   /** The engine's bus calls, attached for `busDbPath` (core/bus.ts); `null` without a bus. */
   private engineBus: EngineBus | null = null;
+  /** What crew last handed the engine's `setQeAcceptanceOff` (the engine starts with `null`). */
+  private engineQeOff: string | null = null;
   /**
    * `true` when this adapter drives the DETERMINISTIC OFFLINE engine (`Core.spawnStub`) rather
    * than the production one — i.e. the `StubDispatcher` (every seat votes for the first roster
@@ -1645,7 +1658,9 @@ export class CoreAdapter {
     // The daemon's QE acceptance setting (`qeAcceptance: 'off'`, core/qe-acceptance-setting.ts): a
     // launch of a workflow that requires QE acceptance, and that neither skips nor forces it, is
     // skipped through the engine's own skip with a reason naming the setting — so every path that
-    // launches (POST /runs, chats, standing orders, campaigns) is labelled the same way. An addon
+    // launches through here (POST /runs, chats, standing orders) is labelled the same way. The launches
+    // the engine makes on its own (campaign nodes, bus requests) read the engine's mirror of the
+    // setting instead (`syncEngineQeSetting`). An addon
     // with no QE decision enforces none, so there is nothing to skip on one.
     // POST /runs resolves it itself (one settings read for its deliverGate check and the skip) and
     // hands the skip in explicitly, so it is not read twice there.
@@ -3357,7 +3372,38 @@ export class CoreAdapter {
 
   // ── System settings ───────────────────────────────────────────────────────
 
+  /**
+   * Hand the daemon's QE acceptance setting to the ENGINE, for the launches it makes on its own:
+   * campaign nodes (as each dispatches) and `wicked.crew.run.requested` bus requests never pass
+   * through `launchRun`, so crew cannot add the skip to them. With `qeAcceptance: 'off'` the engine
+   * skips such a launch that gives no QE word of its own, with {@link QE_OFF_REASON}, and only when
+   * the run's contract requires QE acceptance (the engine resolves that itself, so a run with nothing
+   * to skip is left alone, never refused). Called with every settings read, so the engine follows
+   * a `PUT /settings` and a hand-edited settings file alike. An addon without the method has no such
+   * mirror: there, engine-originated launches still require QE acceptance (`engineQeSettingSupported`).
+   */
+  private syncEngineQeSetting(settings: { qeAcceptance?: unknown } | null): void {
+    const core = this.core as { setQeAcceptanceOff?: (reason: string | null) => void };
+    if (typeof core.setQeAcceptanceOff !== 'function') return;
+    const want = qeAcceptanceMode(settings) === 'off' ? QE_OFF_REASON : null;
+    if (this.engineQeOff === want) return;
+    core.setQeAcceptanceOff.call(this.core, want);
+    this.engineQeOff = want;
+  }
+
+  /** Whether the installed engine follows the QE acceptance setting on the launches it makes on its
+   *  own (campaign nodes, bus requests) — `setQeAcceptanceOff` is present. */
+  engineQeSettingSupported(): boolean {
+    return typeof (this.core as { setQeAcceptanceOff?: unknown }).setQeAcceptanceOff === 'function';
+  }
+
   async getSettings(): Promise<CrewSystemSettings> {
+    const settings = await this.readSettings();
+    this.syncEngineQeSetting(settings);
+    return settings;
+  }
+
+  private async readSettings(): Promise<CrewSystemSettings> {
     await seedStateHomeSettings(settingsFilePath());
     try {
       const raw = await readFile(settingsFilePath(), 'utf8');
@@ -3519,6 +3565,7 @@ export class CoreAdapter {
     const current = await this.getSettings();
     const next = { ...current, ...patch };
     await publishSettingsFile(settingsFilePath(), JSON.stringify(next, null, 2), true);
+    this.syncEngineQeSetting(next);
     return next;
   }
 
