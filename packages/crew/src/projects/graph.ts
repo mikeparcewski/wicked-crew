@@ -317,7 +317,8 @@ function buildStatus({ projectId, members, manifest, dbExists, env }: StatusInpu
             : 'the project graph has never been built',
           // Both causes are exactly what a refresh is for: the member is registered and its root
           // is where the registry says, there are simply no rows for it yet.
-          remedy: `POST /api/v1/projects/${projectId}/graph/refresh fixes it.`,
+          // Customer copy (crew#1036): it reaches a chat's scope card through the bind reason.
+          remedy: `Refreshing the code graph (the project's Repositories tab) fixes it.`,
         };
       }
       // The rows under this label were written from a DIFFERENT root than the registry now names.

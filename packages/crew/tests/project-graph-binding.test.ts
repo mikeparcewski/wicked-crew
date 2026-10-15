@@ -133,7 +133,8 @@ describe('resolveProjectGraphBinding — what a run launched into a project gets
     expect(binding).toBeNull();
     expect(reason).toMatch(/does not hold 'engine-repo'/);
     expect(reason).toMatch(/answer "not found" about its own worktree/);
-    expect(reason).toMatch(/graph\/refresh/);
+    expect(reason).toMatch(/Refreshing the code graph \(the project's Repositories tab\) fixes it\./);
+    expect(reason).not.toContain(PROJECT_ID);
   });
 
   /**
@@ -154,7 +155,7 @@ describe('resolveProjectGraphBinding — what a run launched into a project gets
 
     expect(binding).toBeNull();
     expect(reason).toMatch(/registry no longer knows this ref/);
-    expect(reason).not.toMatch(/graph\/refresh/);
+    expect(reason).not.toMatch(/graph\/refresh|Refreshing the code graph/);
     expect(reason).toMatch(/Re-register the repo|DELETE .*\/members\//);
   });
 
@@ -175,7 +176,7 @@ describe('resolveProjectGraphBinding — what a run launched into a project gets
     expect(reason).toMatch(/describe a different checkout/);
     // Its own text names the refresh AND the rebuild fallback; what must not appear is the flat
     // "POST …/graph/refresh fixes it." claim tacked on the end.
-    expect(reason).not.toMatch(/graph\/refresh fixes it\./);
+    expect(reason).not.toMatch(/graph\/refresh fixes it\.|Refreshing the code graph/);
   });
 
   /**
