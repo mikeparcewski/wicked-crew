@@ -607,6 +607,9 @@ describe('POST /chats/:id/messages — refresh dynamic scopes', () => {
     expect(chatScopes.engineOf('dynamic')?.readRoots).toEqual(['/srv/repos/alpha']);
     expect(launched[0]).toMatchObject({ projectId: 'p-live' });
     for (const field of ['cwd', 'readRoots', 'codeGraphDb']) expect(launched[0]).not.toHaveProperty(field);
+    // crew#1034: the repository is the run's read root whether or not the project graph is built.
+    expect(launched[0]?.extraReadRoots).toEqual(['/srv/repos/alpha']);
+    expect(askPaths.get('dynamic')?.launchReadRoots).toEqual(['/srv/repos/alpha']);
     for (const file of ['AGENTS.md', 'CLAUDE.md']) expect(readFileSync(join(cwd, file), 'utf8')).toContain('/srv/repos/alpha');
     expect(readFileSync(join(cwd, 'notes.txt'), 'utf8')).toBe('keep me');
     const instructions = launched[0]!.plan!.steps[0]!['instructions'] as string;
@@ -786,80 +789,104 @@ describe('POST /chats/:id/messages — refresh dynamic scopes', () => {
     expect(transcripts.read('roots')).toContainEqual(expect.objectContaining({ kind: 'seat', text: 'See alpha/src/index.ts:10' }));
   });
 
-  it('continues the same run with a refreshed statement when the graph binding is unchanged', async () => {
+  it('refuses a repository attached after launch at once, even when the graph binding is unchanged (crew#1034)', async () => {
     const binding = vi.spyOn(projectGraph, 'resolveProjectGraphBinding').mockResolvedValue({ binding: { dbPath: graphFile }, reason: 'project graph ready' });
     try {
       expect((await open({ chatId: 'same-graph', clis: ['claude'], projectId: 'p-live' })).statusCode).toBe(201);
       expect((await send('same-graph')).statusCode).toBe(202);
+      expect(askPaths.get('same-graph')?.launchReadRoots).toEqual([]);
       const propose = park('same-graph');
+      const storedScope = chatScopes.get('same-graph');
       projectRepoRefs.push('r1');
-      const reads = vi.spyOn(ConsiderationService.prototype, 'inForceFor');
       const sent = await send('same-graph');
-      const count = reads.mock.calls.length;
-      reads.mockRestore();
-      expect(count).toBe(1);
-      expect(sent.statusCode).toBe(202);
-      expect(sent.json()).toMatchObject({ runId: 'run-p1', stepId: 'answer-2' });
-      expect(sent.json()).not.toHaveProperty('scopeRefreshed');
-      expect(propose.mock.calls[0]?.[0]).toBe('run-p1');
-      expect(propose.mock.calls[0]?.[1].steps[0]?.instructions).toContain('/srv/repos/alpha');
-      expect(adapter.confirmGate).toHaveBeenCalledExactlyOnceWith('run-p1', true);
-      expect(adapter.cancelRun).not.toHaveBeenCalled();
+      // The run's read boundary was fixed at launch: accepting the message would hand the seats a
+      // statement naming a repository that every read of is refused (verify-e2e r4, crew#1034).
+      expect(sent.statusCode).toBe(409);
+      expect(sent.json()).toEqual({
+        code: 'chat_scope_changed',
+        error: "This chat's repositories or their code graph changed since it started (1 now in scope). Start a new chat to read them — this one keeps its original scope.",
+      });
+      expect(propose).not.toHaveBeenCalled();
+      expect(adapter.confirmGate).not.toHaveBeenCalled();
+      expect(chatScopes.get('same-graph')).toBe(storedScope);
+      expect(askPaths.busy('same-graph')).toBe(false);
       expect(launched).toHaveLength(1);
     } finally {
       binding.mockRestore();
     }
   });
 
-  it.each(['executing', 'proposal fails'])('still prefixes a refreshed statement after a refused send (%s)', async (refusal) => {
-    // Everything scopes keep a null binding when membership changes.
+  it('a project chat with an unbuilt graph reads its repository: the launch declares it as a read root (crew#1034)', async () => {
+    projectRepoRefs.push('r1');
+    const binding = vi.spyOn(projectGraph, 'resolveProjectGraphBinding').mockResolvedValue({ binding: null, reason: 'not built yet' });
+    try {
+      expect((await open({ chatId: 'no-graph', clis: ['claude'], projectId: 'p-live' })).statusCode).toBe(201);
+      expect((await send('no-graph')).statusCode).toBe(202);
+      expect(launched[0]).not.toHaveProperty('projectGraph');
+      expect(launched[0]?.extraReadRoots).toEqual(['/srv/repos/alpha']);
+      // Unchanged roots and graph: the follow-up continues the same run.
+      const propose = park('no-graph');
+      expect((await send('no-graph')).statusCode).toBe(202);
+      expect(propose).toHaveBeenCalledOnce();
+      expect(launched).toHaveLength(1);
+    } finally {
+      binding.mockRestore();
+    }
+  });
+
+  it('a second registration of the same checkout is not a scope change: the read-root set is compared (crew#1034, codex r1)', async () => {
+    vi.mocked(adapter.listRepos).mockResolvedValueOnce(repos());
+    expect((await open({ chatId: 'alias', clis: ['claude'], scopeKind: 'everything' })).statusCode).toBe(201);
+    vi.mocked(adapter.listRepos).mockResolvedValueOnce(repos());
+    expect((await send('alias')).statusCode).toBe(202);
+    expect(askPaths.get('alias')?.launchReadRoots).toEqual(['/srv/repos/alpha']);
+    const propose = park('alias');
+    vi.mocked(adapter.listRepos).mockResolvedValueOnce([...repos(), { ...repos()[0]!, id: 'r2', name: 'alpha-again' }]);
+    expect((await send('alias')).statusCode).toBe(202);
+    expect(propose).toHaveBeenCalledOnce();
+    expect(launched).toHaveLength(1);
+  });
+
+  it('every follow-up carries the scope statement, not only the first answer step (crew#1033)', async () => {
+    projectRepoRefs.push('r1');
+    expect((await open({ chatId: 'every-turn', clis: ['codex'], projectId: 'p-live' })).statusCode).toBe(201);
+    expect((await send('every-turn')).statusCode).toBe(202);
+    const first = launched[0]!.plan!.steps[0]!['instructions'] as string;
+    expect(first).toContain('## Repositories in scope (READ-ONLY)');
+    for (const step of ['answer-2', 'answer-3']) {
+      const propose = park('every-turn');
+      const sent = await send('every-turn');
+      expect(sent.statusCode).toBe(202);
+      expect(sent.json()).toMatchObject({ runId: 'run-p1', stepId: step });
+      const instructions = propose.mock.calls[0]?.[1].steps[0]?.instructions as string;
+      expect(instructions).toContain('## Repositories in scope (READ-ONLY)');
+      expect(instructions).toContain('/srv/repos/alpha');
+      expect(instructions.endsWith('Where is the entry point?')).toBe(true);
+    }
+    expect(launched).toHaveLength(1);
+  });
+
+  it('an everything chat refuses a repository registered after launch, and its empty statement says to start a new chat (crew#1034)', async () => {
     vi.mocked(adapter.listRepos).mockResolvedValueOnce([]);
     expect((await open({ chatId: 'retry-scope', clis: ['claude'], scopeKind: 'everything' })).statusCode).toBe(201);
     vi.mocked(adapter.listRepos).mockResolvedValueOnce([]);
     expect((await send('retry-scope')).statusCode).toBe(202);
+    expect(launched[0]).not.toHaveProperty('extraReadRoots');
     const propose = park('retry-scope');
-    const originalKey = askPaths.get('retry-scope')?.lastToldScopeKey;
     const storedScope = chatScopes.get('retry-scope');
-    const storedEngine = chatScopes.engineOf('retry-scope');
-    const statements = ['AGENTS.md', 'CLAUDE.md'].map((file) => readFileSync(join(storedScope!.cwd, file), 'utf8'));
-    const roots = vi.spyOn(transcripts, 'registerRoots');
-    if (refusal === 'executing') {
-      adapter.sessionsDetail = async () => [{ session: { id: 'run-p1', status: 'executing' } }] as Awaited<ReturnType<CoreAdapter['sessionsDetail']>>;
-    } else {
-      propose.mockRejectedValueOnce(new Error('proposal unavailable'));
-    }
-    const refused = await send('retry-scope');
-    expect(refused.statusCode).toBe(refusal === 'executing' ? 409 : 400);
-    if (refusal === 'executing') expect(refused.json().code).toBe('turn_in_flight');
-    expect(askPaths.get('retry-scope')?.lastToldScopeKey).toBe(originalKey);
+    const sent = await send('retry-scope');
+    expect(sent.statusCode).toBe(409);
+    expect(sent.json().code).toBe('chat_scope_changed');
+    expect(propose).not.toHaveBeenCalled();
+    expect(chatScopes.get('retry-scope')).toBe(storedScope);
     expect(askPaths.get('retry-scope')).toMatchObject({ steps: ['answer-1'], busy: false });
     expect(chatTurns.inFlight('retry-scope')).toBeNull();
-    if (refusal === 'executing') {
-      expect(chatScopes.get('retry-scope')).toBe(storedScope);
-      expect(chatScopes.engineOf('retry-scope')).toEqual(storedEngine);
-      expect(['AGENTS.md', 'CLAUDE.md'].map((file) => readFileSync(join(storedScope!.cwd, file), 'utf8'))).toEqual(statements);
-      expect(roots).not.toHaveBeenCalled();
-      expect((await app.inject({ method: 'GET', url: '/api/v1/chats/retry-scope' })).json().scope.repos).toEqual([]);
-    }
-    const accepted = park('retry-scope');
-    expect((await send('retry-scope')).statusCode).toBe(202);
-    expect(roots).toHaveBeenCalledWith('retry-scope', [{ absRoot: '/srv/repos/alpha', name: 'alpha' }]);
-    expect(accepted.mock.calls[0]?.[1].steps[0]?.instructions).toContain('/srv/repos/alpha');
-    expect(askPaths.get('retry-scope')?.lastToldScopeKey).not.toBe(originalKey);
-    expect(askPaths.get('retry-scope')?.steps).toEqual(['answer-1', 'answer-2']);
-
-    const unchanged = park('retry-scope');
-    expect((await send('retry-scope')).statusCode).toBe(202);
-    expect(unchanged.mock.calls[0]?.[1].steps[0]?.instructions).toBe('Where is the entry point?');
-    expect(launched).toHaveLength(1);
-    expect(adapter.cancelRun).not.toHaveBeenCalled();
-
-    // Removing the last repo refreshes the statement and clears transcript rewrite roots too.
-    park('retry-scope');
+    // Nothing changed since launch: the follow-up continues the same run.
+    const same = park('retry-scope');
     vi.mocked(adapter.listRepos).mockResolvedValueOnce([]);
     expect((await send('retry-scope')).statusCode).toBe(202);
-    expect(roots).toHaveBeenLastCalledWith('retry-scope', []);
-    roots.mockRestore();
+    expect(same).toHaveBeenCalledOnce();
+    expect(launched).toHaveLength(1);
   });
 
   it('refreshes everything when another repository is registered', async () => {
@@ -870,13 +897,15 @@ describe('POST /chats/:id/messages — refresh dynamic scopes', () => {
     for (const file of ['AGENTS.md', 'CLAUDE.md']) {
       const statement = readFileSync(join(opened.json().scope.cwd as string, file), 'utf8');
       expect(statement).toContain('register it with this daemon');
-      expect(statement).toContain('next message');
-      expect(statement).not.toContain('NEW chat');
+      // crew#1034: a run cannot acquire a read root after launch, so the advice is a new chat.
+      expect(statement).toContain('start a NEW chat');
+      expect(statement).not.toContain('next message');
     }
     expect((await send('dynamic-all')).statusCode).toBe(202);
     expect(chatScopes.get('dynamic-all')?.repos.map((repo) => repo.id)).toEqual(['r1']);
     expect(chatScopes.engineOf('dynamic-all')?.readRoots).toEqual(['/srv/repos/alpha']);
     expect(launched).toHaveLength(1);
+    expect(launched[0]?.extraReadRoots).toEqual(['/srv/repos/alpha']);
   });
 
   it('refreshes a changed graph binding even with the same repository list', async () => {
@@ -902,7 +931,9 @@ describe('POST /chats/:id/messages — refresh dynamic scopes', () => {
     const statements = ['AGENTS.md', 'CLAUDE.md'].map((file) => readFileSync(join(storedScope!.cwd, file), 'utf8'));
     const roots = vi.spyOn(transcripts, 'registerRoots');
     const refresh = vi.spyOn(chatScopes, 'refresh');
-    projectRepoRefs.push('r1');
+    // A changed repository set is refused (409 chat_scope_changed, crew#1034) BEFORE the preface
+    // read, so the preface stage holds a message whose scope is unchanged.
+    if (stage !== 'preface') projectRepoRefs.push('r1');
     let release: () => void = () => undefined;
     const held = new Promise<void>((done) => { release = done; });
     let entered = false;

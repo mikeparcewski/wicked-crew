@@ -3671,20 +3671,23 @@ export function registerRoutes(
         }
       }
       const codeGraphDb = engine?.codeGraphDb ?? null;
+      // A set: two registrations of one checkout are one root (codex r1).
+      const readRoots = [...new Set(engine?.readRoots ?? [])].sort();
       // Only project scopes refresh a project graph; fixed repo scopes may use the engine's
       // own repo graph instead of input.projectGraph, and everything scopes have no graph.
-      if (scope?.kind === 'project' && path.runId !== undefined && codeGraphDb !== path.launchGraphBinding) {
+      // crew#1034: nor can a run acquire a READ ROOT after launch (the engine fixes its read
+      // boundary then), so a repository attached or registered since is refused here, at once, with
+      // the sentence — never accepted into a run whose boundary refuses every read of it.
+      const graphChanged = scope?.kind === 'project' && codeGraphDb !== path.launchGraphBinding;
+      const rootsChanged = (scope?.kind === 'project' || scope?.kind === 'everything') &&
+        path.launchReadRoots !== undefined && JSON.stringify(readRoots) !== JSON.stringify(path.launchReadRoots);
+      if (path.runId !== undefined && (graphChanged || rootsChanged)) {
         askPaths.release(id, lease);
         return reply.code(409).send({
           code: 'chat_scope_changed',
           error: `This chat's repositories or their code graph changed since it started (${scope?.repos.length ?? 0} now in scope). Start a new chat to read them — this one keeps its original scope.`,
         });
       }
-      // Sort repository identities so membership order alone does not trigger another statement.
-      const scopeKey = JSON.stringify([
-        scope?.repos.map((repo) => [repo.id, repo.name, repo.rootPath]).sort((a, b) => a[0]!.localeCompare(b[0]!)) ?? [],
-        codeGraphDb,
-      ]);
       const pending = await considerations.pendingPreface(id, { inForce: rules });
       // The last await before delivery may also have closed/reopened the chat. From this check
       // through publication and the send there is no await, so no executing turn's files change.
@@ -3724,15 +3727,17 @@ export function registerRoutes(
           ...(repoRef !== undefined ? { repoRef, deliver: 'pr' as const } : {}),
           ...(projectId !== undefined ? { projectId } : {}),
           ...(scope?.kind === 'project' && codeGraphDb !== null ? { projectGraph: { dbPath: codeGraphDb } } : {}),
+          // crew#1034: the scope's repositories are the run's read roots, graph or no graph — the
+          // statement tells the seats to read them at their paths, so the boundary must let them.
+          ...(readRoots.length > 0 ? { extraReadRoots: readRoots } : {}),
         };
         const runId = await adapter.launchRun(input);
-        if (!askPaths.started(id, generation, runId, stepId, input.projectGraph?.dbPath ?? null)) {
+        if (!askPaths.started(id, generation, runId, stepId, input.projectGraph?.dbPath ?? null, input.extraReadRoots ?? [])) {
           // The chat was closed (End) while the launch was in flight: the run must not outlive it.
           await adapter.cancelRun(runId).catch(() => undefined);
           if (turn !== null) chatTurns.abort(id, turn.turnId);
           return reply.code(409).send({ error: `chat '${id}' was closed while its path was launching; the run was cancelled` });
         }
-        path.lastToldScopeKey = scopeKey;
         pending.commit();
         persistAccepted(pending.preface, () => {
           runtime.linkChatRun?.(id, runId);
@@ -3760,11 +3765,11 @@ export function registerRoutes(
         });
       }
       const stepId = askPaths.nextStep(id);
-      // crew#1020: tell the run about a refreshed scope until a continuation accepts it.
-      let instructions = withPreface(pending.preface);
-      if (scope !== undefined && scopeKey !== path.lastToldScopeKey) {
-        instructions = `${chatScopeStatement(id, scope, rules)}\n\n${instructions}`;
-      }
+      // crew#1033: EVERY answer step carries the scope statement, as the first one does. A seat on a
+      // single-shot carrier (codex on the wrapped carrier) remembers nothing of the first turn, so a
+      // follow-up told only the question answered "the supplied repository contains only tmp".
+      const instructions =
+        scope !== undefined ? `${chatScopeStatement(id, scope, rules)}\n\n${withPreface(pending.preface)}` : withPreface(pending.preface);
       await adapter.proposePlan(path.runId, { steps: [answerStep(stepId, instructions)] }, turnId);
       await adapter.confirmGate(path.runId, true);
       askPaths.release(id, lease);
@@ -3772,7 +3777,6 @@ export function registerRoutes(
         // Closed between the proposal and here: the DELETE cancelled the run this was accepted on.
         return reply.code(409).send({ error: `chat '${id}' was closed while the message was in flight; its path was cancelled` });
       }
-      path.lastToldScopeKey = scopeKey;
       pending.commit();
       persistAccepted(pending.preface, () => undefined);
       return reply.code(202).send({ seats: voice, turnId, runId: path.runId, stepId, ...singleSeat202 });

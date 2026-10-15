@@ -13,6 +13,18 @@ mentioned only where a daemon release depends on them.
 ### Fixed
 - **Remote repository registration survives an onboarding launch failure (crew#1030, follow-up of #1019).** `POST /api/v1/repos` with `gitUrl` now keeps the registered repo and returns 201 with `{ repo, onboardRunId: null, onboardError }` when onboarding cannot start, as local registration does. Clone or registration failures still return 400.
 - **A project's code graph status no longer shows its raw id (crew#1036).** `GET /projects/:id/graph`'s `detail` (shown as is on the project page, on a chat's scope card, and as the `error` of a query route's 404) now says "This project …" instead of "Project proj_…'s …". The no-repositories case points to the project's Repositories tab instead of the `POST …/members` route. A run or chat whose repo is not a member of the project now reads "repo 'x' is not a member of this project … Attach it on the project's Repositories tab …" (the reason a chat's scope card shows), a member not yet in the graph reads "Refreshing the code graph (the project's Repositories tab) fixes it." instead of the `POST …/graph/refresh` route, and the unfiled-runs project's detail no longer calls itself "the synthesized 'default' project". The `state` values and every other field are unchanged.
+- **Every answer step of a chat carries its scope statement (#1033).** A follow-up was told the scope
+  only when it changed since the last turn, so a seat with no memory of the first turn (codex on the
+  single-shot carrier) answered "the supplied repository contains only `tmp`". Every turn's step now
+  carries the "Repositories in scope" section, as the first one does.
+- **A project chat reads its repositories whether or not the project's code graph is built, and a
+  repository attached after the chat started is refused at once (#1034).** The ask run now declares
+  its scope's repositories as read roots at launch (`extraReadRoots`); before, a project chat with no
+  built graph had no read root for them, and every read was refused. A run's read roots are fixed at
+  launch, so a message whose project (or "everything") scope now resolves to other repositories is
+  refused with 409 `chat_scope_changed` ("Start a new chat to read them"), as a changed graph already
+  was, instead of being accepted into a run that refuses every read of the new repository. The empty
+  "everything" statement now says to register a repository and start a new chat.
 
 ## [0.12.1] — 2026-10-15
 
