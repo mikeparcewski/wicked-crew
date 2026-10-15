@@ -12,6 +12,7 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 - **Remote repository registration survives an onboarding launch failure (crew#1030, follow-up of #1019).** `POST /api/v1/repos` with `gitUrl` now keeps the registered repo and returns 201 with `{ repo, onboardRunId: null, onboardError }` when onboarding cannot start, as local registration does. Clone or registration failures still return 400.
+- **A project's code graph status no longer shows its raw id (crew#1036).** `GET /projects/:id/graph`'s `detail` (shown as is on the project page, on a chat's scope card, and as the `error` of a query route's 404) now says "This project …" instead of "Project proj_…'s …". The no-repositories case points to the project's Repositories tab instead of the `POST …/members` route. The `state` values and every other field are unchanged.
 
 ## [0.12.1] — 2026-10-15
 

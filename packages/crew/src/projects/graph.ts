@@ -388,13 +388,15 @@ function buildStatus({ projectId, members, manifest, dbExists, env }: StatusInpu
         : manifest.repos.reduce((max, r) => Math.max(max, r.indexedAt), 0) || null,
   };
 
+  // Customer copy (F-2R2-008, crew#1036): every `detail` below is shown to a person on the project
+  // page and a chat's scope card, so it says "this project" — never the raw project id or a route.
   if (members.repos.length === 0 && members.dangling.length === 0) {
     return {
       ...base,
       state: 'no-repo-members',
       detail:
-        `Project ${projectId} has no crew.repo members, so there is nothing to build a code graph ` +
-        `from. Attach one with POST /api/v1/projects/${projectId}/members {"kind":"crew.repo","ref":"<repoId>"}.`,
+        `This project has no repositories yet, so there is nothing to build a code graph from. ` +
+        `Attach one on the project's Repositories tab.`,
     };
   }
   const dangling = members.dangling.map((d) => d.repoId).join(', ');
@@ -407,7 +409,7 @@ function buildStatus({ projectId, members, manifest, dbExists, env }: StatusInpu
       ...base,
       state: 'not-indexed',
       detail:
-        `Project ${projectId}'s only repo member(s) — ${dangling} — are not in the repo registry, ` +
+        `This project's only repo member(s) — ${dangling} — are not in the repo registry, ` +
         `so there is nothing to index. Re-attach a registered repo, or re-register the missing one; ` +
         `a refresh cannot help while every member is dangling.`,
     };
@@ -432,7 +434,7 @@ function buildStatus({ projectId, members, manifest, dbExists, env }: StatusInpu
       ...base,
       state: 'ready-single-repo',
       detail:
-        `Project ${projectId}'s graph holds exactly one repo (${
+        `This project's code graph holds exactly one repo (${
           repos.find((r) => r.indexed)?.label ?? '?'
         })` +
         `${missingRepos.length > 0 ? `, with ${missingRepos.length} member repo(s) missing from it` : ''}` +
@@ -443,7 +445,7 @@ function buildStatus({ projectId, members, manifest, dbExists, env }: StatusInpu
     ...base,
     state: 'ready',
     detail:
-      `Project ${projectId}'s graph holds ${indexedCount} co-located repos` +
+      `This project's code graph holds ${indexedCount} co-located repos` +
       `${missingRepos.length > 0 ? `; ${missingRepos.length} member repo(s) are NOT in it and every answer is partial` : ''}.`,
   };
 }
