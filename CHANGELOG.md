@@ -10,6 +10,10 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.12.3] — 2026-10-15
+
+A patch release of the bundled UI: **wicked-studio 0.9.4**, where a run Needs you holds (a stall, an orphan, an open question) reads as waiting on you across the Desk instead of "working" (wicked-studio#807). No daemon change; wicked-core-ts stays ^0.11.3.
+
 ## [0.12.2] — 2026-10-15
 
 A patch release: a chat's follow-ups always carry its scope and a chat whose repositories changed is refused at once (#1038), a project's code graph status says "this project" instead of its raw id (#1037), and a remote repository registration survives an onboarding launch failure (#1035). It pins **wicked-core-ts ^0.11.3**, which carries the planner's QE step for QE-required runs (core #967, core#960) and Approve judging a team run's PA step at `judge_unavailable`, `NO CHANGE NEEDED` opening its line, and no engine text in a seat's answer (core #972; core#969, #929, #970). The bundled UI is **wicked-studio 0.9.3**.
@@ -4110,7 +4114,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.12.2...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.12.3...HEAD
+[0.12.3]: https://github.com/mikeparcewski/wicked-crew/compare/v0.12.2...v0.12.3
 [0.12.2]: https://github.com/mikeparcewski/wicked-crew/compare/v0.12.1...v0.12.2
 [0.12.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.11.0...v0.12.0
