@@ -166,7 +166,10 @@ describe('QE reviewer generation memo (crew#1021)', () => {
     expect(f.calls()).toBe(20);
     f.seats[0]!.headless_invocation = 'claude --changed {PROMPT}';
     f.roster();
-    expect(f.calls()).toBe(21);
+    expect(f.calls()).toBe(21);    // The predicate reads the live registry record: a changed binary under the same key is re-judged (codex on #1027).
+    (f.seats[0] as { binary?: string }).binary = 'codex';
+    f.roster();
+    expect(f.calls()).toBe(22);
   });
 
   it('expires the mutable fallback after 30 seconds using the injected clock', () => {

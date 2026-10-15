@@ -47,7 +47,9 @@ const require = createRequire(import.meta.url);
 const { Core } = require('wicked-core-ts') as {
   Core: { qeReviewersAdmitted?: (seatsJson: string) => Promise<string> };
 };
-type QeAdmissionSeat = { key: string; invocation?: string };
+/** `identity` (the registry record's binary / ACP adapter / invocation) keys the memo only: the engine's predicate reads the
+ *  live registry record, so a changed binary under the same key is a different seat (codex on #1027). */
+type QeAdmissionSeat = { key: string; invocation?: string; identity?: string };
 
 function nativeQeAdmissionBatch(): RosterStandingDeps['qeAdmittedBatch'] {
   const batch = Core.qeReviewersAdmitted;
@@ -157,7 +159,7 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
   ]);
   let generation = '';
   const qeMemo = new Map<string, { admitted: boolean | null; at: number }>();
-  const qeAdmission = (key: string, invocation: string | undefined): boolean | null => {
+  const qeAdmission = (key: string, invocation: string | undefined, identity = ''): boolean | null => {
     // crew#1021: core filters empty snapshot values and home_dir falls back to USERPROFILE.
     const snapshot = env['WICKED_SKILLS_SNAPSHOT'] || undefined;
     const token = generationToken();
@@ -165,7 +167,7 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
       generation = token;
       qeMemo.clear();
     }
-    const memoKey = JSON.stringify([key, invocation]);
+    const memoKey = JSON.stringify([key, invocation, identity]);
     const now = nowMs();
     const cached = qeMemo.get(memoKey);
     if (cached !== undefined && (snapshot !== undefined || now - cached.at < 30_000)) return cached.admitted;
@@ -182,6 +184,7 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
   let batchEpoch = 0;
   const batchesInFlight = new Set<string>();
   const batchMemo = new Map<string, { admitted: boolean; at: number }>();
+  // Served while a refresh is in flight (the token, which carries each seat's identity, triggers it).
   const lastAdmission = new Map<string, boolean>();
   const qeAdmissions = (seats: QeAdmissionSeat[]): Map<string, boolean | null> => {
     const batch = deps.qeAdmittedBatch !== undefined ? deps.qeAdmittedBatch : daemon ? nativeQeAdmissionBatch() : null;
@@ -202,12 +205,12 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
         const epoch = batchEpoch;
         let pending: Promise<Map<string, boolean>> | null;
         try {
-          pending = batch(seats);
+          pending = batch(seats.map(({ key, invocation }) => (invocation !== undefined ? { key, invocation } : { key })));
         } catch {
           // A batch failure says nothing; it must never fall back to blocking native work.
           pending = Promise.resolve(new Map());
         }
-        if (pending === null) return new Map(seats.map(({ key, invocation }) => [key, qeAdmission(key, invocation)]));
+        if (pending === null) return new Map(seats.map(({ key, invocation, identity }) => [key, qeAdmission(key, invocation, identity)]));
         batchesInFlight.add(token);
         void pending.then((admissions) => {
           // A publish can move the env even without another roster read. Also reject A→B→A
@@ -226,7 +229,7 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
       }
       return new Map(seats.map(({ key }) => [key, batchMemo.get(key)?.admitted ?? lastAdmission.get(key) ?? null]));
     }
-    return new Map(seats.map(({ key, invocation }) => [key, qeAdmission(key, invocation)]));
+    return new Map(seats.map(({ key, invocation, identity }) => [key, qeAdmission(key, invocation, identity)]));
   };
   const hostBoundary = deps.hostBoundary ?? (() => hostSandboxLauncher());
   const liveRoot = (): string | undefined => {
@@ -240,6 +243,7 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
     const admissions = qeAdmissions(seats.map((seat) => ({
       key: String(seat.key),
       ...(typeof seat.headless_invocation === 'string' ? { invocation: seat.headless_invocation } : {}),
+      identity: JSON.stringify([(seat as { binary?: unknown }).binary ?? null, (seat as { acp?: unknown }).acp ?? null, seat.headless_invocation ?? null]),
     })));
     // A5: one engine call per read — the predicate takes the whole (engine-shaped) registry roster.
     let benchedOnBound: Map<string, string> | null = null;
