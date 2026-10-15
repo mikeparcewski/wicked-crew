@@ -3676,7 +3676,8 @@ export function registerRoutes(
         }
       }
       const codeGraphDb = engine?.codeGraphDb ?? null;
-      const readRoots = [...(engine?.readRoots ?? [])].sort();
+      // A set: two registrations of one checkout are one root (codex r1).
+      const readRoots = [...new Set(engine?.readRoots ?? [])].sort();
       // Only project scopes refresh a project graph; fixed repo scopes may use the engine's
       // own repo graph instead of input.projectGraph, and everything scopes have no graph.
       // crew#1034: nor can a run acquire a READ ROOT after launch (the engine fixes its read

@@ -124,7 +124,7 @@ export class AskPathIndex {
     p.busy = false;
     p.runId = runId;
     p.launchGraphBinding = codeGraphDb;
-    p.launchReadRoots = [...readRoots].sort();
+    p.launchReadRoots = [...new Set(readRoots)].sort();
     p.steps.push(stepId);
     return true;
   }

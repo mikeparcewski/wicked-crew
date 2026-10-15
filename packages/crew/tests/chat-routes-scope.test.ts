@@ -834,6 +834,19 @@ describe('POST /chats/:id/messages — refresh dynamic scopes', () => {
     }
   });
 
+  it('a second registration of the same checkout is not a scope change: the read-root set is compared (crew#1034, codex r1)', async () => {
+    vi.mocked(adapter.listRepos).mockResolvedValueOnce(repos());
+    expect((await open({ chatId: 'alias', clis: ['claude'], scopeKind: 'everything' })).statusCode).toBe(201);
+    vi.mocked(adapter.listRepos).mockResolvedValueOnce(repos());
+    expect((await send('alias')).statusCode).toBe(202);
+    expect(askPaths.get('alias')?.launchReadRoots).toEqual(['/srv/repos/alpha']);
+    const propose = park('alias');
+    vi.mocked(adapter.listRepos).mockResolvedValueOnce([...repos(), { ...repos()[0]!, id: 'r2', name: 'alpha-again' }]);
+    expect((await send('alias')).statusCode).toBe(202);
+    expect(propose).toHaveBeenCalledOnce();
+    expect(launched).toHaveLength(1);
+  });
+
   it('every follow-up carries the scope statement, not only the first answer step (crew#1033)', async () => {
     projectRepoRefs.push('r1');
     expect((await open({ chatId: 'every-turn', clis: ['codex'], projectId: 'p-live' })).statusCode).toBe(201);
