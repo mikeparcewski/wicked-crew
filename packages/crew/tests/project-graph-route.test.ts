@@ -149,8 +149,11 @@ describe('GET /projects/:id/graph — the graph reports its own standing', () =>
     expect(res.statusCode).toBe(200);
     const { status } = res.json() as { status: Record<string, unknown> };
     expect(status['state']).toBe('no-repo-members');
-    expect(status['detail']).toMatch(/no crew\.repo members/);
-    expect(status['detail']).toMatch(/POST \/api\/v1\/projects/);
+    // Customer copy (crew#1036): the page action, never the raw project id or the route.
+    expect(status['detail']).toMatch(/This project has no repositories yet/);
+    expect(status['detail']).toMatch(/Repositories tab/);
+    expect(status['detail']).not.toMatch(/POST/);
+    expect(status['detail']).not.toContain(PROJECT_ID);
     expect(status['dbPath']).toBeNull();
     // The limit travels with every payload, including the ones that carry no results.
     expect(status['linkage']).toBe('co-located');
@@ -212,6 +215,7 @@ describe('GET /projects/:id/graph — the graph reports its own standing', () =>
     expect(status['detail']).toMatch(/only repo member\(s\) — deleted-repo — are not in the repo registry/);
     expect(status['detail']).toMatch(/a refresh cannot help/);
     expect(status['detail']).not.toMatch(/has 0 repo member/);
+    expect(status['detail']).not.toContain(PROJECT_ID);
   });
 
   it('an addon too old to publish code_graph_db answers engine-too-old, not an empty graph', async () => {
@@ -254,6 +258,7 @@ describe('GET /projects/:id/graph — the graph reports its own standing', () =>
     const { status } = res.json() as { status: Record<string, unknown> };
     expect(status['state']).toBe('no-repo-members');
     expect(status['detail']).toMatch(/unfiled runs and chats only/);
+    expect(status['detail']).not.toMatch(/synthesized|'default' project/);
   });
 
   it('an unknown project is a 404, not an empty graph', async () => {
@@ -289,7 +294,7 @@ describe('the query routes refuse rather than answer emptily', () => {
       expect(res.statusCode).toBe(404);
       const body = res.json() as { error: string; status: Record<string, unknown> };
       expect(body.status['state']).toBe('no-repo-members');
-      expect(body.error).toMatch(/no crew\.repo members/);
+      expect(body.error).toMatch(/This project has no repositories yet/);
       // The thing that must NOT be here: a well-formed empty answer.
       expect(body).not.toHaveProperty('dependents');
       expect(body).not.toHaveProperty('matches');
