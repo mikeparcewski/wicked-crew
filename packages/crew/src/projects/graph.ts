@@ -926,9 +926,10 @@ export async function resolveProjectGraphBinding(
     return {
       binding: null,
       reason:
-        `repo '${repoRef}' is not a crew.repo member of project ${projectId}, so the project ` +
-        `graph does not describe it; this run uses the repo's own code graph. Attach it with ` +
-        `POST /api/v1/projects/${projectId}/members and refresh the graph to widen future runs.`,
+        // Customer copy (crew#1036): a chat's scope card shows this, so no raw id or route.
+        `repo '${repoRef}' is not a member of this project, so the project graph does not ` +
+        `describe it; this run uses the repo's own code graph. Attach it on the project's ` +
+        `Repositories tab and refresh the graph to widen future runs.`,
     };
   }
   if (!own.indexed) {

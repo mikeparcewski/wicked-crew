@@ -310,8 +310,12 @@ describe('resolveProjectGraphBinding — what a run launched into a project gets
     const { binding, reason } = await resolveProjectGraphBinding(adapter, PROJECT_ID, 'other');
 
     expect(binding).toBeNull();
-    expect(reason).toMatch(/is not a crew\.repo member/);
-    expect(reason).toMatch(/members/);
+    // Customer copy (crew#1036): the reason reaches a chat's scope card, so it names the page
+    // action, never the raw project id or the route.
+    expect(reason).toMatch(/^repo 'other' is not a member of this project/);
+    expect(reason).toMatch(/Repositories tab/);
+    expect(reason).not.toContain(PROJECT_ID);
+    expect(reason).not.toMatch(/POST/);
   });
 
   /**
