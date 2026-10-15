@@ -175,12 +175,12 @@ describe('ASK-C2 path admission (codex on #810 r9) + IG1-crew-2: standing is the
     expect(chatSeatAdmission(wrapped, 'signed_in', false, 'path')).toEqual({ ok: true });
     expect(chatSeatAdmission(governed, 'signed_in', true, 'path')).toEqual({ ok: true });
     expect(chatSeatAdmission(codexSelf, 'signed_in', true, 'path')).toEqual({ ok: true });
-    expect(chatSeatAdmission(piArmed, 'signed_in', true, 'path')).toEqual({ ok: true });
-    // pi's only floor is the repository boundary, which needs a bound run.
+    // C5: a record sandbox no longer holds a host-floor pi seat; the engine refuses its governed work.
+    expect(chatSeatAdmission(piArmed, 'signed_in', true, 'path')).toMatchObject({ ok: false });
+    // C5: pi keeps no per-call check on the interim host floor, bound or not.
     expect(chatSeatAdmission(pi, 'signed_in', true, 'path')).toMatchObject({
       ok: false,
-      source: 'scope',
-      reason: expect.stringMatching(/governance mode for this scope is none — its only floor is the engine's repository boundary.*scope the ask to one repository/),
+      reason: expect.stringMatching(/needs_container_floor/),
     });
     expect(chatSeatAdmission(codexBypass, 'signed_in', true, 'path')).toMatchObject({
       ok: false,
