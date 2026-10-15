@@ -663,6 +663,15 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
       ungatedReason: 'no judge: no eligible judge seat distinct from creator `stub`',
     } as unknown as CoreEvent);
     await waitFor(narrated('UNGATED — no judge'));
+    // (wicked-core judge fallback) A gate judged by a fallback seat reaches the thread in the engine's words.
+    engine.fire({
+      type: 'gateEvaluated',
+      session: launch.sessionId,
+      ord: 2,
+      ungated: false,
+      assurance: { judgeFallbacks: [{ seat: 'agy', preferred: ['codex'], reason: 'codex benched: x', label: 'judge: agy (fallback; codex benched: x)' }] },
+    } as unknown as CoreEvent);
+    await waitFor(narrated('judge: agy (fallback; codex benched: x)'));
     engine.fire({
       type: 'workerToolCallDenied',
       session: launch.sessionId,
