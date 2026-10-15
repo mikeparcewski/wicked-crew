@@ -339,7 +339,12 @@ export class SkillsRuntime {
   /** Background callers share one probe and need no deadline timer. */
   private probeInstalled(): Promise<InstalledPluginState | null> {
     if (this.installedInFlight === null) {
-      this.installedInFlight = new Promise<void>((resolve) => { setImmediate(resolve).unref(); })
+      // NOT unref'd (crew#1041): this deferral is the probe's first step, and an unref'd immediate never
+      // fires when nothing else holds the loop — at first boot, before the server listens, the daemon's
+      // `await refreshInstalled()` then drained the loop and the process exited 0 mid-boot. An immediate
+      // runs on the next turn, so it keeps nothing alive for long; the deadline timer above may stay
+      // unref'd because, once started, the probe's own I/O holds the loop.
+      this.installedInFlight = new Promise<void>((resolve) => { setImmediate(resolve); })
         .then(() => this.store.installedStateAsync())
         .catch(() => null)
         .then((state) => {
