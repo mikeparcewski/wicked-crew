@@ -139,6 +139,7 @@ import {
   postHocDeliveryAssurance,
   qeAcceptanceFromView,
   qeAcceptanceRefusal,
+  QE_ACCEPTANCE_REQUIRED_CODE,
   receiptOf,
   qeAcceptanceNotRequired,
   qeDecisionBypasses,
@@ -2363,7 +2364,10 @@ export function registerRoutes(
       // Refused on the CONSERVATIVE reading (a built-in QE name or a QE def counts even when a project
       // preset shadows it now): only an explicit or setting skip lets QE work deliver unattended.
       if (mayRequireQe(adapter, b.workflow, qeRequired) && b.skipQeAcceptance === undefined && settingSkip === undefined) {
+        // `code` is the same stable token a refused delivery carries (QeAcceptanceRefusal.code), so a
+        // client can say "this failed because QE acceptance is required" without parsing the sentence.
         return reply.code(400).send({
+          code: QE_ACCEPTANCE_REQUIRED_CODE,
           error:
             `workflow ${b.workflow} requires QE acceptance (required_instruments: qe_acceptance), so it delivers only ` +
             'through the deliver gate, where the verdict is checked — deliverGate: "auto" cannot apply to it ' +
