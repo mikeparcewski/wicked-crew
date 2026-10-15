@@ -17,7 +17,6 @@ import type {
   LaunchRunInput,
   LaunchPlan,
   RepoEntry,
-  RepoOnboardRef,
   SessionView,
   RecordedEvent,
   GovernancePolicy,
@@ -2700,10 +2699,10 @@ export class CoreAdapter {
   }
 
   /**
-   * Clone a remote git URL, register it, then launch an `onboarding` workflow run.
+   * Clone a remote git URL and return the persisted `RepoEntry` from registration.
    * `checkoutPath` overrides the default clone destination (`~/.wicked/repos/<name>`).
    */
-  async cloneAndRegisterRepo(name: string, gitUrl: string, checkoutPath?: string): Promise<RepoOnboardRef> {
+  async cloneAndRegister(name: string, gitUrl: string, checkoutPath?: string): Promise<RepoEntry> {
     const reposRoot = wickedDir('repos');
     let cloneDir: string;
     if (checkoutPath) {
@@ -2769,9 +2768,7 @@ export class CoreAdapter {
       }
     }
 
-    const entry = await this.registerRepo(name, cloneDir);
-    const runId = await this.launchOnboardingRun(entry.id, name);
-    return { repoId: entry.id, runId };
+    return this.registerRepo(name, cloneDir);
   }
 
   /**

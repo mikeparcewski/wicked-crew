@@ -11,6 +11,7 @@ mentioned only where a daemon release depends on them.
 ## [Unreleased]
 
 ### Fixed
+- **Remote repository registration survives an onboarding launch failure (crew#1030, follow-up of #1019).** `POST /api/v1/repos` with `gitUrl` now keeps the registered repo and returns 201 with `{ repo, onboardRunId: null, onboardError }` when onboarding cannot start, as local registration does. Clone or registration failures still return 400.
 - **Every answer step of a chat carries its scope statement (#1033).** A follow-up was told the scope
   only when it changed since the last turn, so a seat with no memory of the first turn (codex on the
   single-shot carrier) answered "the supplied repository contains only `tmp`". Every turn's step now

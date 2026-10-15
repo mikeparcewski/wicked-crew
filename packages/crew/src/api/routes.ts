@@ -2188,9 +2188,9 @@ export function registerRoutes(
   };
 
   /**
-   * crew#1019: registration is durable even when onboarding cannot launch (core has no unregister).
-   * A landed local repo returns 201 with `onboardRunId: null` and `onboardError` on launch failure, so
-   * callers can still attach it to their project and retry onboarding separately.
+   * crew#1019/#1030: local and remote registration is durable even when onboarding cannot launch
+   * (core has no unregister). A registered repo returns 201 with `onboardRunId: null` and
+   * `onboardError` on launch failure, so callers can attach it to their project and retry onboarding.
    */
   app.post(`${V}/repos`, async (req, reply) => {
     const parsed = RegisterRepoSchema.safeParse(req.body);
@@ -2206,13 +2206,8 @@ export function registerRoutes(
       if (gitUrl) {
         // Remote: clone to rootPath (if provided) or default ~/.wicked/repos/<name>,
         // register, and launch onboarding run.
-        // cloneAndRegisterRepo registers and launches in one call. Distinguishing a landed
-        // registration from a failed clone requires splitting that adapter call (follow-up).
-        const cloned = await adapter.cloneAndRegisterRepo(name, gitUrl, rootPath);
-        runId = cloned.runId;
-        const repos = await adapter.listRepos();
-        repo = repos.find((r) => r.id === cloned.repoId);
-        if (!repo) return reply.code(500).send({ error: 'Repo registered but could not be retrieved' });
+        repo = await adapter.cloneAndRegister(name, gitUrl, rootPath);
+        runId = await adapter.launchOnboardingRun(repo.id, name);
       } else {
         // Local: register then launch onboarding run.
         repo = await adapter.registerRepo(name, rootPath!);
