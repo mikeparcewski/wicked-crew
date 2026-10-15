@@ -11,7 +11,7 @@ mentioned only where a daemon release depends on them.
 ## [Unreleased]
 
 ### Added
-- **A launch refused because its workflow requires QE acceptance names it with a stable code.** `POST /runs` with `deliverGate: 'auto'` on a workflow that requires QE acceptance (and no skip from the launch or the daemon's setting) still answers 400 with the same sentence, and now also `code: 'qe_acceptance_required'`, the token a refused delivery's 409 (`QeAcceptanceRefusal.code`) already carries. Studio matches on it to say why the launch failed and that QE acceptance can be turned off in Settings, instead of parsing the sentence.
+- **A launch refused because its workflow requires QE acceptance names it with a stable code.** `POST /runs` with `deliverGate: 'auto'` on a workflow that requires QE acceptance (and no skip from the launch or the daemon's setting) still answers 400 with the same sentence, and now also `code: 'qe_acceptance_required'`, the token a refused delivery's 409 (`QeAcceptanceRefusal.code`) already carries. This lets studio say why the launch failed, and that QE acceptance can be turned off in Settings, without parsing the sentence. `LaunchRunBody.deliverGate`'s doc in `wicked-crew-api-types` names the refusal (doc only; no type changed).
 
 ## [0.12.0] — 2026-10-14
 

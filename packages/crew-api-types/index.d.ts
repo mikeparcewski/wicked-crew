@@ -4732,6 +4732,10 @@ export interface LaunchRunBody {
    * default and typo fallback). Requires wicked-core-ts ≥ 0.7.24 / crew ≥ 0.7.33 for the gate to
    * exist at all — read `AgentSession.auto_deliver` to learn whether the engine knows it. An
    * older daemon's launch schema rejects the field with a 400 — omit it against such servers.
+   * `'auto'` on a workflow that requires QE acceptance (with no `skipQeAcceptance` and the daemon's
+   * {@link SystemSettings.qeAcceptance} not `'off'`) is refused 400 `{ code: 'qe_acceptance_required',
+   * error }` (crew ≥ 0.12.1; before that, `error` alone). The token is the one a refused delivery's
+   * {@link QeAcceptanceRefusal} carries, but this 400 has no `acceptance` or `assurance`.
    */
   deliverGate?: 'human' | 'auto';
   /**
