@@ -362,25 +362,30 @@ export class SkillsRuntime {
   installedAheadFinding(opts: { fresh: true }): Promise<SkillsHealthFinding | null>;
   installedAheadFinding(opts?: { fresh?: false }): SkillsHealthFinding | null;
   installedAheadFinding(opts: { fresh?: boolean } = {}): SkillsHealthFinding | null | Promise<SkillsHealthFinding | null> {
-    if (opts.fresh === true) return this.refreshInstalled({ fresh: true }).then((state) => this.findingForInstalled(state));
-    return this.findingForInstalled(this.installed());
+    // The launch already uses this generation. A publish during the fresh probe must not
+    // replace its comparison baseline (or remove its warning by catching up to the install).
+    const current = this.lastHealth.state === 'published' ? this.lastHealth.current : null;
+    const published = current === null ? null : { gen: current.gen, garden: this.publishedGarden(current.path) };
+    if (opts.fresh === true) return this.refreshInstalled({ fresh: true }).then((state) => this.findingForInstalled(state, published));
+    return this.findingForInstalled(this.installed(), published);
   }
 
-  private findingForInstalled(installed: InstalledPluginState | null): SkillsHealthFinding | null {
-    if (this.lastHealth.state !== 'published' || this.lastHealth.current === null) return null;
+  private findingForInstalled(
+    installed: InstalledPluginState | null,
+    published: { gen: number; garden: { plugin_version: string; baseline: string } | null } | null,
+  ): SkillsHealthFinding | null {
     // The generation the engine is HANDED (its own snapshot.json), never the editable catalog: a
     // refresh that landed without a publish moves the catalog, not what runs execute (codex r1).
-    const published = this.publishedGarden(this.lastHealth.current.path);
-    if (published === null) return null;
-    if (installed === null || installed.baseline === null || installed.baseline === published.baseline) return null;
-    const relation = versionRelation(installed.source.plugin_version, published.plugin_version);
+    if (published === null || published.garden === null) return null;
+    if (installed === null || installed.baseline === null || installed.baseline === published.garden.baseline) return null;
+    const relation = versionRelation(installed.source.plugin_version, published.garden.plugin_version);
     const note = this.autoRefreshNote === null ? '' : ` (not refreshed automatically: ${this.autoRefreshNote})`;
     return {
       kind: 'skills.installed-ahead',
       severity: 'warning',
       message:
         `installed wicked-garden ${installed.source.plugin_version} is ${relation} the published generation ` +
-        `${this.lastHealth.current.gen} (built from ${published.plugin_version}) — runs use the published generation's skills and scripts, not the installed ones; ` +
+        `${published.gen} (built from ${published.garden.plugin_version}) — runs use the published generation's skills and scripts, not the installed ones; ` +
         `POST /skills/refresh-baseline then /skills/publish (each with {expectedRevision})${note}`,
     };
   }

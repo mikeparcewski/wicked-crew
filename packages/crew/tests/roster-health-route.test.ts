@@ -12,6 +12,9 @@ import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { SeatHealthTracker } from '../src/api/seat-health.js';
 import { CoreAdapter } from '../src/core/adapter.js';
 import { SkillsRuntime } from '../src/skills/runtime.js';
+import * as installedPlugin from '../src/skills/installed.js';
+import * as pluginSource from '../src/skills/plugin-source.js';
+import * as skillTree from '../src/skills/tree.js';
 import { scaffold } from './support/skills-fixture.js';
 import { removeScratch } from './setup/scratch.js';
 import type { CoreEvent, RosterSeat } from '../src/core/types.js';
@@ -146,6 +149,11 @@ it('health, skills and diagnostics serve the cached install without synchronousl
   await runtime.apply();
   await runtime.refreshInstalled();
   const sync = vi.spyOn(sc.store, 'installedState').mockImplementation(() => { throw new Error('synchronous probe on request path'); });
+  // The old GET /skills called the module directly, bypassing the store method. Guard both
+  // entries and their expensive sync helpers, even if a handler swallows a probe failure.
+  const direct = vi.spyOn(installedPlugin, 'installedPluginState').mockImplementation(() => { throw new Error('direct synchronous probe on request path'); });
+  const git = vi.spyOn(pluginSource, 'gitStateOf').mockImplementation(() => { throw new Error('synchronous git on request path'); });
+  const hash = vi.spyOn(skillTree, 'hashFileSet').mockImplementation(() => { throw new Error('synchronous bundle hash on request path'); });
   const app = buildApp(new SeatHealthTracker(), runtime);
   try {
     await app.ready();
@@ -155,6 +163,9 @@ it('health, skills and diagnostics serve the cached install without synchronousl
       expect(result.statusCode, url).toBe(200);
     }
     expect(sync).not.toHaveBeenCalled();
+    expect(direct).not.toHaveBeenCalled();
+    expect(git).not.toHaveBeenCalled();
+    expect(hash).not.toHaveBeenCalled();
   } finally {
     await app.close();
     await runtime.refreshInstalled();

@@ -3,12 +3,14 @@
 // applies) turns a signed-out seat into the engine's bench verdict. Over an injected registry and
 // sign-in probe — never the native addon, never the developer's dotfiles.
 
-import { describe, expect, it } from 'vitest';
+import { createRequire } from 'node:module';
+import { describe, expect, it, vi } from 'vitest';
 
 import { rosterWithStandingFactory } from '../src/api/roster-standing.js';
 import { chatSeatAdmission } from '../src/api/seat-standing.js';
 import { SeatHealthTracker } from '../src/api/seat-health.js';
 import { engineRosterJson } from '../src/core/engine-roster.js';
+import { CoreAdapter } from '../src/core/adapter.js';
 
 const REGISTRY = [
   { key: 'claude', display_name: 'Claude Code', binary: 'claude', enabled_for_council: true, headless_invocation: 'claude -p {PROMPT}', login_invocation: 'claude login' },
@@ -135,7 +137,7 @@ describe('QE reviewer generation memo (crew#1021)', () => {
     const roster = rosterWithStandingFactory({
       seatHealth: new SeatHealthTracker(), registry: () => seats, signedIn: () => true,
       env, worktreeBench: () => new Map(), hostBoundary: () => null,
-      qeAdmitted: () => { calls++; return admitted; }, nowMs: () => now,
+      qeAdmitted: () => { calls++; return admitted; }, qeAdmittedBatch: null, nowMs: () => now,
     });
     return { roster, env, seats, calls: () => calls, advance: (ms: number) => { now += ms; } };
   }
@@ -218,5 +220,149 @@ describe('QE reviewer generation memo (crew#1021)', () => {
     f.advance(30_000);
     f.roster();
     expect(f.calls()).toBe(10);
+  });
+});
+
+describe('background QE reviewer batches (crew#1021)', () => {
+  function fixture() {
+    let now = 0;
+    const env: NodeJS.ProcessEnv = { WICKED_SKILLS_SNAPSHOT: '/published/1', HOME: '/home' };
+    const seats = REGISTRY.map((seat) => ({ ...seat }));
+    const pending: Array<{
+      resolve: (admissions: Map<string, boolean>) => void;
+      reject: (error: Error) => void;
+    }> = [];
+    const batch = vi.fn<(seats: Array<{ key: string; invocation?: string }>) => Promise<Map<string, boolean>>>(() => new Promise((resolve, reject) => {
+      pending.push({ resolve, reject });
+    }));
+    const sync = vi.fn(() => { throw new Error('sync QE predicate must never run with a batch'); });
+    const roster = rosterWithStandingFactory({
+      seatHealth: new SeatHealthTracker(), registry: () => seats, signedIn: () => true,
+      env, worktreeBench: () => new Map(), hostBoundary: () => null,
+      qeAdmitted: sync, qeAdmittedBatch: batch, nowMs: () => now,
+    });
+    const settle = async (index: number, admitted: boolean) => {
+      pending[index]!.resolve(new Map(seats.map(({ key }) => [key, admitted])));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    };
+    return { roster, env, seats, batch, sync, pending, settle, advance: (ms: number) => { now += ms; } };
+  }
+
+  it('feature-detects the addon static at read time and sends absent invocations as null', async () => {
+    const { Core } = createRequire(import.meta.url)('wicked-core-ts') as {
+      Core: { qeReviewersAdmitted?: (json: string) => Promise<string> };
+    };
+    const original = Object.getOwnPropertyDescriptor(Core, 'qeReviewersAdmitted');
+    const registry = vi.spyOn(CoreAdapter, 'roster').mockReturnValue([
+      REGISTRY[0]!, { key: 'codex', enabled_for_council: true },
+    ]);
+    const sync = vi.fn(() => true);
+    Object.defineProperty(Core, 'qeReviewersAdmitted', { configurable: true, writable: true, value: undefined });
+    try {
+      const roster = rosterWithStandingFactory({
+        seatHealth: new SeatHealthTracker(), env: { WICKED_SKILLS_SNAPSHOT: '/published/1' },
+        probe: null, versions: null, versionPins: null, worktreeBench: () => new Map(),
+        hostBoundary: () => null, qeAdmitted: sync,
+      });
+      const batch = vi.fn(async () => JSON.stringify([{ key: 'claude', admitted: true }, { key: 'codex', admitted: false }]));
+      Core.qeReviewersAdmitted = batch; // available after factory construction
+      expect(roster().every((s) => s.qe_reviewer === undefined)).toBe(true);
+      expect(batch).toHaveBeenCalledExactlyOnceWith(JSON.stringify([
+        { key: 'claude', invocation: REGISTRY[0]!.headless_invocation },
+        { key: 'codex', invocation: null },
+      ]));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(roster().every((s) => s.qe_reviewer !== undefined)).toBe(true);
+      expect(sync).not.toHaveBeenCalled();
+      expect(batch).toHaveBeenCalledTimes(1);
+      delete Core.qeReviewersAdmitted;
+      roster();
+      roster();
+      expect(sync).toHaveBeenCalledTimes(2); // missing batch: memoized synchronous fallback
+    } finally {
+      if (original === undefined) delete Core.qeReviewersAdmitted;
+      else Object.defineProperty(Core, 'qeReviewersAdmitted', original);
+      registry.mockRestore();
+    }
+  });
+
+  it('serves unknown on a cold miss, coalesces the whole roster, then serves both true and false admissions', async () => {
+    const f = fixture();
+    for (let i = 0; i < 10; i++) expect(f.roster().every((s) => s.qe_reviewer === undefined)).toBe(true);
+    expect(f.batch).toHaveBeenCalledExactlyOnceWith(REGISTRY.map((seat) => ({ key: seat.key, invocation: seat.headless_invocation })));
+    f.pending[0]!.resolve(new Map([['claude', true], ['codex', false], ['opencode', true]]));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const roster = f.roster();
+    expect(roster[0]!.qe_reviewer).toMatchObject({ ok: true });
+    expect(roster[1]!.qe_reviewer).toMatchObject({ ok: false });
+    for (let i = 0; i < 10; i++) expect(f.roster()).toEqual(roster);
+    f.advance(120_000);
+    f.roster();
+    expect(f.batch).toHaveBeenCalledTimes(1); // immutable generation
+    expect(f.sync).not.toHaveBeenCalled();
+  });
+
+  it('serves the last admission during generation, invocation and fallback TTL misses, with one batch in flight', async () => {
+    const f = fixture();
+    f.roster();
+    await f.settle(0, true);
+    f.env.WICKED_SKILLS_SNAPSHOT = '/published/2';
+    for (let i = 0; i < 10; i++) expect(f.roster().every((s) => (s.qe_reviewer as { ok: boolean }).ok)).toBe(true);
+    expect(f.batch).toHaveBeenCalledTimes(2);
+    await f.settle(1, false);
+    f.seats[0]!.headless_invocation = 'claude --changed {PROMPT}';
+    for (let i = 0; i < 10; i++) expect(f.roster()[0]!.qe_reviewer).toMatchObject({ ok: false });
+    expect(f.batch).toHaveBeenCalledTimes(3);
+    expect(f.batch.mock.calls[2]![0]).toHaveLength(REGISTRY.length); // refresh all seats on one miss
+    await f.settle(2, true);
+    f.env.WICKED_SKILLS_SNAPSHOT = '';
+    f.roster();
+    await f.settle(3, true);
+    f.advance(29_999);
+    f.roster();
+    expect(f.batch).toHaveBeenCalledTimes(4);
+    f.advance(1);
+    for (let i = 0; i < 10; i++) expect(f.roster()[0]!.qe_reviewer).toMatchObject({ ok: true });
+    expect(f.batch).toHaveBeenCalledTimes(5);
+    await f.settle(4, false);
+    expect(f.roster()[0]!.qe_reviewer).toMatchObject({ ok: false });
+    expect(f.sync).not.toHaveBeenCalled();
+  });
+
+  it('drops stale completions, including when the env changes without a read and when a token is revisited', async () => {
+    const f = fixture();
+    f.roster();
+    f.env.WICKED_SKILLS_SNAPSHOT = '/published/2';
+    await f.settle(0, true); // no intervening read: must not even fill lastAdmission
+    expect(f.roster()[0]!.qe_reviewer).toBeUndefined();
+    f.env.WICKED_SKILLS_SNAPSHOT = '/published/1';
+    f.roster();
+    f.env.WICKED_SKILLS_SNAPSHOT = '/published/2';
+    f.roster();
+    expect(f.batch).toHaveBeenCalledTimes(3); // revisiting /published/2 cannot duplicate its pending batch
+    await f.settle(1, true); // earlier epoch of /published/2 must not fill the memo
+    expect(f.roster()[0]!.qe_reviewer).toBeUndefined(); // starts the new epoch's batch now
+    expect(f.batch).toHaveBeenCalledTimes(4);
+    await f.settle(3, false); // newest /published/2 wins
+    await f.settle(2, true); // older /published/1 must not overwrite it
+    expect(f.roster().every((s) => (s.qe_reviewer as { ok: boolean }).ok === false)).toBe(true);
+    expect(f.batch).toHaveBeenCalledTimes(4);
+    expect(f.sync).not.toHaveBeenCalled();
+  });
+
+  it('drops a batch for an obsolete invocation and retries a rejected batch without a sync fallback', async () => {
+    const f = fixture();
+    f.roster();
+    f.seats[0]!.headless_invocation = 'claude --changed {PROMPT}';
+    f.roster();
+    await f.settle(0, true);
+    expect(f.roster()[0]!.qe_reviewer).toBeUndefined();
+    f.pending[1]!.reject(new Error('native batch failed'));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(f.roster()[0]!.qe_reviewer).toBeUndefined();
+    expect(f.batch).toHaveBeenCalledTimes(3);
+    await f.settle(2, true);
+    expect(f.roster()[0]!.qe_reviewer).toMatchObject({ ok: true });
+    expect(f.sync).not.toHaveBeenCalled();
   });
 });

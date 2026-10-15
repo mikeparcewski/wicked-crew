@@ -200,6 +200,30 @@ describe('installed probe request isolation (crew#1021)', () => {
     expect(finding?.message).toContain('1.1.0 is ahead of');
   });
 
+  it('fresh:true retains the launch generation warning when a publish catches up during the probe', async () => {
+    const { sc, runtime } = await booted();
+    upgrade(sc, '1.1.0');
+    const installed = sc.store.installedState();
+    let finish!: (state: typeof installed) => void;
+    vi.spyOn(sc.store, 'installedStateAsync').mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const finding = runtime.installedAheadFinding({ fresh: true });
+    try {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const refreshed = sc.store.refreshBaseline(sc.store.revision());
+      expect(refreshed.verdict).not.toBe('blocked');
+      const published = await sc.store.publish(refreshed.revision);
+      expect(published.snapshot?.gen).toBe(2);
+      runtime.afterPublish();
+      expect(runtime.health().current?.gen).toBe(2);
+      finish(installed);
+      expect((await finding)?.message).toContain('1.1.0 is ahead of the published generation 1 (built from 1.0.0)');
+      expect(runtime.installedAheadFinding()).toBeNull(); // later callers use generation 2
+    } finally {
+      finish?.(installed);
+      await finding;
+    }
+  });
+
   it('fresh:true awaits a bounded, coalesced refresh and falls back to the last value', async () => {
     const { sc, runtime } = await booted();
     upgrade(sc, '1.1.0');
