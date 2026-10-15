@@ -169,5 +169,11 @@ describe('runRoot: the executable decides, not the seat name (C5, codex c5-crew-
     expect(seatGovernanceMode(seat(['--sandbox', 'workspace-write']), 'scoped')).toMatchObject({ mode: 'os_sandbox', source: 'self' });
     expect(seatGovernanceMode(seat(['--sandbox', 'workspace-write', '--yolo']), 'scoped')).toMatchObject({ mode: 'none' });
     expect(seatGovernanceMode(seat(['--sandbox=read-only', '--dangerously-bypass-approvals-and-sandbox']), 'scoped')).toMatchObject({ mode: 'none' });
+    // codex c5-crew-r6: the engine checks the final argv, so a bypass in the invocation counts too.
+    for (const bypass of ['--yolo', '--dangerously-bypass-approvals-and-sandbox']) {
+      expect(seatGovernanceMode({ ...seat(['--sandbox', 'workspace-write']), headless_invocation: `codex exec ${bypass} {PROMPT}` }, 'scoped')).toMatchObject({ mode: 'none' });
+    }
+    expect(seatGovernanceMode({ ...seat([]), headless_invocation: 'codex exec --sandbox read-only "{PROMPT}"' }, 'scoped')).toMatchObject({ mode: 'os_sandbox', source: 'self' });
+    expect(seatGovernanceMode({ ...seat(['--sandbox', 'workspace-write']), headless_invocation: 'codex exec "{PROMPT} --yolo"' }, 'scoped')).toMatchObject({ mode: 'os_sandbox' });
   });
 });

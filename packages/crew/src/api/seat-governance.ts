@@ -95,6 +95,17 @@ function ownSandboxMode(trustFlags: unknown): string | null {
   return null;
 }
 
+/**
+ * The fixed tokens of the seat's headless invocation after the executable, quote-aware; a token
+ * carrying a `{PLACEHOLDER}` (the prompt and other substituted content) is dropped.
+ */
+function invocationFlags(seat: GovernanceSeatInput): string[] {
+  const inv = typeof seat.headless_invocation === 'string' ? seat.headless_invocation : '';
+  const tokens: string[] = [];
+  for (const m of inv.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)) tokens.push(m[1] ?? m[2] ?? m[3] ?? '');
+  return tokens.slice(1).filter((t) => !/\{[A-Za-z_]+\}/.test(t));
+}
+
 /** The CLI that actually runs for `seat` (C5, codex c5-crew-r3): the executable of its headless
  *  invocation (quote-aware first token), else its binary, else its key — basename, lower-case, no
  *  extension — as the engine resolves it, so a `claude` seat running `pi` is judged as pi. */
@@ -182,7 +193,9 @@ export function seatGovernanceMode(
     };
   }
   if (rootKey === 'codex') {
-    const own = ownSandboxMode(seat.trust_flags);
+    // The engine checks the FINAL argv (invocation + posture flags), so a bypass in the invocation
+    // template cancels a bounded mode in the trust flags too (codex c5-crew-r6).
+    const own = ownSandboxMode([...invocationFlags(seat), ...(Array.isArray(seat.trust_flags) ? seat.trust_flags : [])]);
     if (own !== null) {
       return {
         mode: 'os_sandbox',
