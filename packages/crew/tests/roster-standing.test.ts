@@ -186,4 +186,37 @@ describe('QE reviewer generation memo (crew#1021)', () => {
     expect(f.roster()).toEqual(first);
     expect(f.calls()).toBe(5);
   });
+
+  it('treats an empty snapshot as unset for the token and the mutable TTL', () => {
+    const f = fixture('');
+    f.roster();
+    delete f.env.WICKED_SKILLS_SNAPSHOT;
+    f.roster();
+    expect(f.calls()).toBe(5);
+    f.env.WICKED_SKILLS_SNAPSHOT = '';
+    f.advance(30_000);
+    f.roster();
+    expect(f.calls()).toBe(10);
+    f.advance(30_000);
+    f.roster();
+    expect(f.calls()).toBe(15);
+  });
+
+  it('re-judges when USERPROFILE changes with HOME unset', () => {
+    const f = fixture();
+    delete f.env.HOME;
+    f.env.USERPROFILE = '/profile/1';
+    f.roster();
+    f.env.USERPROFILE = '/profile/2';
+    f.roster();
+    expect(f.calls()).toBe(10);
+  });
+
+  it('expires the mutable fallback when the snapshot stays empty', () => {
+    const f = fixture('');
+    f.roster();
+    f.advance(30_000);
+    f.roster();
+    expect(f.calls()).toBe(10);
+  });
 });

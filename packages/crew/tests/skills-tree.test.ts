@@ -24,6 +24,7 @@ import {
   assertSafeRelSegments,
   copyFiles,
   hashFileSet,
+  hashFileSetAsync,
   hashTree,
   impliedDirs,
   makeTreeReadOnly,
@@ -44,6 +45,17 @@ beforeEach(() => {
 
 afterEach(() => {
   removeTreeForce(base);
+});
+
+it('async file-set hashing matches the sync identity across ordered batches (crew#1021)', async () => {
+  for (let i = 0; i < 35; i++) {
+    const dir = join(base, `dir-${i % 3}`);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${i}.bin`), Buffer.from([i, 0, 255, i % 2]));
+  }
+  const files = walkFiles(base).reverse();
+  expect(await hashFileSetAsync(files)).toBe(hashFileSet(files));
+  expect(await hashFileSetAsync([])).toBe(hashFileSet([]));
 });
 
 describe('walkFiles', () => {

@@ -139,6 +139,8 @@ describe('GET /roster with seat health (crew#274)', () => {
 it('health, skills and diagnostics serve the cached install without synchronously probing it', async () => {
   const sc = scaffold();
   let now = 0;
+  // crew#1021: even scheduled probes stay hermetic and cannot outlive this temp root.
+  vi.spyOn(sc.store, 'installedStateAsync').mockResolvedValue(null);
   const runtime = new SkillsRuntime({ store: sc.store, log: () => {}, bootSnapshot: undefined, nowMs: () => now, installedTtlMs: 1 });
   vi.spyOn(CoreAdapter, 'roster').mockReturnValue(SEATS);
   await runtime.apply();

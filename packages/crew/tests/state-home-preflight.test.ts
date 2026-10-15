@@ -295,6 +295,32 @@ const DEBRIS: UnregisteredStateHomeEntry = {
 };
 
 describe('StateHomeWatch — the live classification the routes report and gate on', () => {
+  it('coalesces only the current key and never lets an older survey replace a newer answer (crew#1021)', async () => {
+    let snapshot = '/srv/state/skills/snapshots/000001';
+    const completions: Array<(json: string) => void> = [];
+    const calls: Array<string | null> = [];
+    const watch = new StateHomeWatch({
+      dbPath: '/srv/state/core.db', snapshotPath: () => snapshot,
+      engine: (path) => {
+        calls.push(path);
+        return new Promise((resolve) => { completions.push(resolve); });
+      },
+    });
+    const old = watch.refresh();
+    const same = watch.refresh();
+    snapshot = '/srv/state/skills/snapshots/000002';
+    const current = watch.refresh();
+    // Resolve every invocation even on the old implementation, so no survey outlives the test.
+    const latest = completions.pop()!;
+    latest(engineJson({ unregistered: [DEBRIS], refusesLaunches: true }));
+    const newest = await current;
+    for (const finish of completions) finish(engineJson({ unregistered: [], refusesLaunches: false }));
+    await Promise.all([old, same]);
+    expect(calls).toEqual(['/srv/state/skills/snapshots/000001', snapshot]);
+    expect(newest.refusesLaunches).toBe(true);
+    expect(watch.last).toBe(newest);
+  });
+
   it('asks the ENGINE when the addon carries the preflight: source engine, the entries, one error finding per entry, refusesLaunches as the engine says', async () => {
     const calls: Array<[string | null, string]> = [];
     const watch = new StateHomeWatch({

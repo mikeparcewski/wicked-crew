@@ -133,7 +133,9 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
   let generation = '';
   const qeMemo = new Map<string, { admitted: boolean | null; at: number }>();
   const qeAdmission = (key: string, invocation: string | undefined): boolean | null => {
-    const token = JSON.stringify([env['WICKED_SKILLS_SNAPSHOT'], env['CLAUDE_CONFIG_DIR'], env['HOME']]);
+    // crew#1021: core filters empty snapshot values and home_dir falls back to USERPROFILE.
+    const snapshot = env['WICKED_SKILLS_SNAPSHOT'] || undefined;
+    const token = JSON.stringify([snapshot, env['CLAUDE_CONFIG_DIR'], env['HOME'], env['USERPROFILE']]);
     if (token !== generation) {
       generation = token;
       qeMemo.clear();
@@ -141,7 +143,7 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
     const memoKey = JSON.stringify([key, invocation]);
     const now = nowMs();
     const cached = qeMemo.get(memoKey);
-    if (cached !== undefined && (env['WICKED_SKILLS_SNAPSHOT'] !== undefined || now - cached.at < 30_000)) return cached.admitted;
+    if (cached !== undefined && (snapshot !== undefined || now - cached.at < 30_000)) return cached.admitted;
     let admitted: boolean | null = null;
     try {
       admitted = qeAdmitted === null ? null : qeAdmitted(key, invocation);

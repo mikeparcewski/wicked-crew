@@ -333,6 +333,7 @@ export interface StateHomeWatchOptions {
 export class StateHomeWatch {
   private readonly opts: StateHomeWatchOptions;
   private lastHealth: StateHomeHealth;
+  private inFlight: { key: string; promise: Promise<StateHomeHealth> } | null = null;
 
   constructor(opts: StateHomeWatchOptions) {
     this.opts = opts;
@@ -354,23 +355,33 @@ export class StateHomeWatch {
     return this.lastHealth;
   }
 
-  /** Re-survey now and return the answer. */
+  private cacheKey(snapshotPath: string | null = this.opts.snapshotPath()): string {
+    return JSON.stringify([snapshotPath, this.opts.dbPath]);
+  }
+
+  /** crew#1021: coalesce only the current generation; an older survey cannot replace its answer. */
   async refresh(): Promise<StateHomeHealth> {
     const now = (this.opts.now ?? Date.now)();
     const snapshotPath = this.opts.snapshotPath();
     const dbPath = this.opts.dbPath;
+    const key = this.cacheKey(snapshotPath);
+    if (this.inFlight?.key === key) return this.inFlight.promise;
     if (snapshotPath === null && dbPath === null) {
+      this.inFlight = null;
       this.lastHealth = { ...this.lastHealth, source: 'unavailable', checkedAt: now };
       return this.lastHealth;
     }
-    let health: StateHomeHealth;
-    if (this.opts.engine !== null) {
-      health = await this.fromEngine(this.opts.engine, snapshotPath, dbPath ?? ':memory:', now);
-    } else {
-      health = await this.fromCrew(snapshotPath, dbPath, now);
-    }
-    this.lastHealth = health;
-    return health;
+    const survey = this.opts.engine !== null
+      ? this.fromEngine(this.opts.engine, snapshotPath, dbPath ?? ':memory:', now)
+      : this.fromCrew(snapshotPath, dbPath, now);
+    const pending = { key, promise: survey.then((health) => {
+      if (this.inFlight === pending && this.cacheKey() === key) this.lastHealth = health;
+      return health;
+    }).finally(() => {
+      if (this.inFlight === pending) this.inFlight = null;
+    }) };
+    this.inFlight = pending;
+    return pending.promise;
   }
 
   private async fromEngine(engine: EnginePreflight, snapshotPath: string | null, dbPath: string, now: number): Promise<StateHomeHealth> {

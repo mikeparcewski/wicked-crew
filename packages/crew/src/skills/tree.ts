@@ -515,11 +515,18 @@ export async function readFileNoFollowAsync(path: string): Promise<Buffer> {
   }
 }
 
-/** crew#1021: identical bundle identity without synchronous file reads on the daemon loop. */
+/** crew#1021: bounded parallel reads, folded in sync hash order, keep large probes responsive. */
 export async function hashFileSetAsync(files: ReadonlyArray<FileRecord>): Promise<string> {
   const h = createHash('sha256');
-  for (const f of [...files].sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0))) {
-    h.update(`${f.rel}\0${sha256Hex(await readFileNoFollowAsync(f.abs))}\n`);
+  const ordered = [...files].sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
+  for (let offset = 0; offset < ordered.length; offset += 16) {
+    const batch = ordered.slice(offset, offset + 16);
+    // Settle the whole batch even on failure: no read may outlive the probe's answer.
+    const hashes = await Promise.allSettled(batch.map(async (f) => `${f.rel}\0${sha256Hex(await readFileNoFollowAsync(f.abs))}\n`));
+    for (const hash of hashes) {
+      if (hash.status === 'rejected') throw hash.reason;
+      h.update(hash.value);
+    }
   }
   return h.digest('hex');
 }

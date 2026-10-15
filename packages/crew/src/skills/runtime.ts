@@ -298,22 +298,48 @@ export class SkillsRuntime {
     this.installedTtlMs = opts.installedTtlMs ?? 60_000;
     this.nowMs = opts.nowMs ?? (() => Date.now());
     this.installedTimeoutMs = opts.installedTimeoutMs ?? 5_000;
-    void this.refreshInstalled(); // crew#1021: first probe starts in the background, never in a GET
+    void this.probeInstalled(); // crew#1021: first probe starts in the background, never in a GET
   }
 
   /** crew#1021: request reads serve the last probe and schedule stale work off the request path. */
   installed(): InstalledPluginState | null {
-    if (this.installedInFlight === null && (this.installedProbe === null || this.nowMs() - this.installedProbe.at >= this.installedTtlMs)) void this.refreshInstalled();
+    if (this.installedInFlight === null && (this.installedProbe === null || this.nowMs() - this.installedProbe.at >= this.installedTtlMs)) void this.probeInstalled();
     return this.installedProbe?.state ?? null;
   }
 
   /**
-   * crew#1021: coalesce asynchronous probes and bound the caller's wait. A timed-out probe may
-   * still land later; until then health/diagnostics say nothing beyond the last completed reading.
+   * crew#1021: a fresh caller waits for any pre-call probe, then starts (or joins) a newer one.
+   * One deadline covers both waits; after it expires no follow-up probe is started for that caller.
+   * A timed-out probe may still land later; reads serve the last completed reading until then.
    */
-  async refreshInstalled(): Promise<InstalledPluginState | null> {
+  async refreshInstalled(opts: { fresh?: boolean } = {}): Promise<InstalledPluginState | null> {
+    const prior = this.installedInFlight;
+    let expired = false;
+    const reading = async (): Promise<InstalledPluginState | null> => {
+      if (opts.fresh === true && prior !== null) await prior;
+      return expired ? this.installedProbe?.state ?? null : this.probeInstalled();
+    };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        reading(),
+        new Promise<InstalledPluginState | null>((resolve) => {
+          timer = setTimeout(() => {
+            expired = true;
+            resolve(this.installedProbe?.state ?? null);
+          }, this.installedTimeoutMs);
+          timer.unref(); // crew#1021: a bounded wait must not keep a CLI/test process alive.
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Background callers share one probe and need no deadline timer. */
+  private probeInstalled(): Promise<InstalledPluginState | null> {
     if (this.installedInFlight === null) {
-      this.installedInFlight = new Promise<void>((resolve) => setImmediate(resolve))
+      this.installedInFlight = new Promise<void>((resolve) => { setImmediate(resolve).unref(); })
         .then(() => this.store.installedStateAsync())
         .catch(() => null)
         .then((state) => {
@@ -322,17 +348,7 @@ export class SkillsRuntime {
           return state;
         });
     }
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      return await Promise.race([
-        this.installedInFlight,
-        new Promise<InstalledPluginState | null>((resolve) => {
-          timer = setTimeout(() => resolve(this.installedProbe?.state ?? null), this.installedTimeoutMs);
-        }),
-      ]);
-    } finally {
-      clearTimeout(timer);
-    }
+    return this.installedInFlight;
   }
 
   /**
@@ -346,7 +362,7 @@ export class SkillsRuntime {
   installedAheadFinding(opts: { fresh: true }): Promise<SkillsHealthFinding | null>;
   installedAheadFinding(opts?: { fresh?: false }): SkillsHealthFinding | null;
   installedAheadFinding(opts: { fresh?: boolean } = {}): SkillsHealthFinding | null | Promise<SkillsHealthFinding | null> {
-    if (opts.fresh === true) return this.refreshInstalled().then((state) => this.findingForInstalled(state));
+    if (opts.fresh === true) return this.refreshInstalled({ fresh: true }).then((state) => this.findingForInstalled(state));
     return this.findingForInstalled(this.installed());
   }
 
@@ -388,7 +404,8 @@ export class SkillsRuntime {
    * do by hand after every garden upgrade, and the step whose omission ran the rig on garden 12.39.
    * Anything user-edited, a refresh that does not come back clean, or a blocked publish leaves the
    * current generation in place and is said in the `skills.installed-ahead` finding. Off with
-   * `WICKED_CREW_SKILLS_AUTO_REFRESH=0`. Never throws.
+   * `WICKED_CREW_SKILLS_AUTO_REFRESH=0`. With auto-refresh off, the installed-ahead finding
+   * appears once the background constructor probe lands (crew#1021). Never throws.
    */
   async autoRefreshOnBoot(env: NodeJS.ProcessEnv = process.env): Promise<AutoRefreshOutcome> {
     const outcome = await this.autoRefreshInner(env);
@@ -402,7 +419,7 @@ export class SkillsRuntime {
     try {
       if (this.lastHealth.state !== 'published' || this.lastHealth.current === null) return { action: 'none', reason: `skills state is ${this.lastHealth.state}` };
       const published = this.publishedGarden(this.lastHealth.current.path);
-      const installed = await this.refreshInstalled();
+      const installed = await this.refreshInstalled({ fresh: true });
       if (installed === null || installed.baseline === null || published === null || installed.baseline === published.baseline) {
         return { action: 'none', reason: 'the installed plugin is the one the published generation was built from' };
       }
@@ -425,7 +442,7 @@ export class SkillsRuntime {
       if (outcomeOf.verdict === 'blocked' || outcomeOf.snapshot === null) {
         return { action: 'failed', reason: `the baseline was refreshed but the publish was blocked: ${outcomeOf.findings.filter((f) => f.severity === 'blocking').map((f) => `${f.kind}: ${f.evidence}`).join('; ')} — the previous generation stays current` };
       }
-      await this.refreshInstalled();
+      await this.refreshInstalled({ fresh: true });
       return { action: 'published', gen: outcomeOf.snapshot.gen, from, to: refreshed.plugin_version };
     } catch (err) {
       return { action: 'failed', reason: err instanceof Error ? err.message : String(err) };

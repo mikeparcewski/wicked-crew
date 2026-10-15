@@ -13,10 +13,14 @@ import { removeScratch } from './setup/scratch.js';
 import { scaffold, type Scaffold } from './support/skills-fixture.js';
 
 const scratch: Scaffold[] = [];
-const runtimes: SkillsRuntime[] = [];
 afterEach(async () => {
+  // Let already scheduled constructor/health probes enter their async store seam.
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  // crew#1021: a bounded wait can time out while a real fixture read is still running.
+  // Settle the underlying reads before restoring spies or removing their temp trees.
+  await Promise.all(scratch.flatMap((sc) => vi.mocked(sc.store.installedStateAsync).mock.results
+    .filter((result) => result.type === 'return').map((result) => result.value)));
   vi.restoreAllMocks();
-  await Promise.all(runtimes.splice(0).map((runtime) => runtime.refreshInstalled()));
   for (const sc of scratch.splice(0)) removeScratch(sc.base);
 });
 
@@ -33,10 +37,12 @@ async function booted(): Promise<{ sc: Scaffold; runtime: SkillsRuntime; logs: s
   const sc = scaffold();
   scratch.push(sc);
   const logs: string[] = [];
+  const probe = vi.spyOn(sc.store, 'installedStateAsync');
   const runtime = new SkillsRuntime({ store: sc.store, log: (m) => logs.push(m), bootSnapshot: undefined, installedTtlMs: 0 });
-  runtimes.push(runtime);
   const health = await runtime.apply();
-  await runtime.refreshInstalled();
+  // Await the constructor's background probe itself, without starting another boot probe.
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await Promise.all(probe.mock.results.filter((result) => result.type === 'return').map((result) => result.value));
   expect(health.state).toBe('published');
   return { sc, runtime, logs };
 }
@@ -113,6 +119,54 @@ describe('skills.installed-ahead (crew#874)', () => {
 
 // crew#1021: health and diagnostics read the last probe, never a synchronous bundle hash/git.
 describe('installed probe request isolation (crew#1021)', () => {
+  it('uses one unref deadline for the old probe and the fresh probe', async () => {
+    const sc = scaffold();
+    scratch.push(sc);
+    const old = sc.store.installedState();
+    const completions: Array<(state: typeof old) => void> = [];
+    const probe = vi.spyOn(sc.store, 'installedStateAsync').mockImplementation(() => new Promise((resolve) => { completions.push(resolve); }));
+    vi.useFakeTimers();
+    const timers = vi.spyOn(globalThis, 'setTimeout');
+    const runtime = new SkillsRuntime({ store: sc.store, log: () => {}, bootSnapshot: undefined });
+    try {
+      await vi.advanceTimersByTimeAsync(1);
+      let answered = false;
+      const fresh = runtime.refreshInstalled({ fresh: true }).then((value) => { answered = true; return value; });
+      expect((timers.mock.results[0]?.value as NodeJS.Timeout).hasRef()).toBe(false);
+      await vi.advanceTimersByTimeAsync(4_000);
+      completions[0]!(old);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(probe).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(998);
+      expect(answered).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await fresh).toEqual(old);
+    } finally {
+      for (const finish of completions) finish(old);
+      probe.mockResolvedValue(old);
+      await Promise.all(probe.mock.results.filter((result) => result.type === 'return').map((result) => result.value));
+      timers.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('fresh:true waits for the pre-call background probe, then reads the upgraded install', async () => {
+    const { sc, runtime } = await booted();
+    const old = sc.store.installedState();
+    let finish!: (state: typeof old) => void;
+    const probe = vi.spyOn(sc.store, 'installedStateAsync')
+      .mockClear()
+      .mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    runtime.installed(); // TTL 0: begin a background probe before the upgrade/fresh call.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    upgrade(sc, '1.1.0');
+    probe.mockResolvedValue(sc.store.installedState());
+    const fresh = runtime.installedAheadFinding({ fresh: true });
+    finish(old);
+    expect((await fresh)?.message).toContain('1.1.0 is ahead of');
+    expect(probe).toHaveBeenCalledTimes(2);
+  });
+
   it('never invokes synchronous installedState from installedAheadFinding or health', async () => {
     const { sc, runtime } = await booted();
     const sync = vi.spyOn(sc.store, 'installedState').mockImplementation(() => { throw new Error('request blocked'); });
@@ -129,7 +183,6 @@ describe('installed probe request isolation (crew#1021)', () => {
     vi.spyOn(sc.store, 'installedStateAsync').mockReturnValue(pending);
     const sync = vi.spyOn(sc.store, 'installedState');
     const runtime = new SkillsRuntime({ store: sc.store, log: () => {}, bootSnapshot: undefined });
-    runtimes.push(runtime);
     expect((await runtime.apply()).state).toBe('published');
     expect(runtime.installedAheadFinding()).toBeNull();
     expect(runtime.installed()).toBeNull();
@@ -152,7 +205,7 @@ describe('installed probe request isolation (crew#1021)', () => {
     upgrade(sc, '1.1.0');
     await runtime.refreshInstalled();
     let finish!: (value: null) => void;
-    const asyncProbe = vi.spyOn(sc.store, 'installedStateAsync').mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const asyncProbe = vi.spyOn(sc.store, 'installedStateAsync').mockClear().mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
     vi.useFakeTimers();
     try {
       let answered = false;
@@ -166,8 +219,11 @@ describe('installed probe request isolation (crew#1021)', () => {
       expect((await second)?.message).toContain('1.1.0 is ahead of');
       expect(asyncProbe).toHaveBeenCalledTimes(1);
       finish(null);
-      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(asyncProbe).toHaveBeenCalledTimes(1); // expired callers must not start a follow-up probe
     } finally {
+      finish?.(null);
+      asyncProbe.mockResolvedValue(null);
       vi.useRealTimers();
     }
   });
