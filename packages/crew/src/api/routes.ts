@@ -74,6 +74,7 @@ import {
   namedKindRefusal,
   resolveChatScope,
   type ChatSeatRefusal,
+  type ChatScopeRequest,
 } from './chat-scope.js';
 import { ASK_TURN_BUDGET_SECS, AskPathIndex, answerStep, isAskTurn } from './ask-paths.js';
 import { allowedRootsFor, isInsideRoot, openWithSystemDefault } from './open-path.js';
@@ -2186,6 +2187,11 @@ export function registerRoutes(
     return null;
   };
 
+  /**
+   * crew#1019: registration is durable even when onboarding cannot launch (core has no unregister).
+   * A landed local repo returns 201 with `onboardRunId: null` and `onboardError` on launch failure, so
+   * callers can still attach it to their project and retry onboarding separately.
+   */
   app.post(`${V}/repos`, async (req, reply) => {
     const parsed = RegisterRepoSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -2200,6 +2206,8 @@ export function registerRoutes(
       if (gitUrl) {
         // Remote: clone to rootPath (if provided) or default ~/.wicked/repos/<name>,
         // register, and launch onboarding run.
+        // cloneAndRegisterRepo registers and launches in one call. Distinguishing a landed
+        // registration from a failed clone requires splitting that adapter call (follow-up).
         const cloned = await adapter.cloneAndRegisterRepo(name, gitUrl, rootPath);
         runId = cloned.runId;
         const repos = await adapter.listRepos();
@@ -2211,7 +2219,10 @@ export function registerRoutes(
         runId = await adapter.launchOnboardingRun(repo.id, name);
       }
     } catch (err) {
-      return reply.code(400).send({ error: message(err) });
+      if (repo === undefined) return reply.code(400).send({ error: message(err) });
+      req.log.warn({ repoId: repo.id }, `repo registered but onboarding launch failed: ${message(err)}`);
+      // No run exists to record or file, even when projectId was supplied (crew#1019).
+      return reply.code(201).send({ repo, onboardRunId: null, onboardError: message(err) });
     }
     const projectAttachError = await recordOnboardingLaunch(req, runId, repo.id, { projectId, channel, actor, autoCapture });
     return reply.code(201).send({ repo, onboardRunId: runId, ...(projectAttachError !== undefined ? { projectAttachError } : {}) });
@@ -3211,6 +3222,15 @@ export function registerRoutes(
   // READ-ONLY estate MCP over it (the grounding governed runs get). The scope is resolved and
   // validated BEFORE any seat warms, stated to the seats in the scratch root's AGENTS.md /
   // CLAUDE.md, and returned as `scope` (see `chat-scope.ts`).
+  // crew#1020: open and refresh use the same registry, graph, liveness and checkout dependencies.
+  const resolveScope = (request: ChatScopeRequest, req: FastifyRequest) => resolveChatScope(request, {
+    ...chatScopeDeps(adapter),
+    scratchBase: chatScopes.base,
+    log: (m) => req.log.warn(m),
+    ...(runtime.entityCount !== undefined ? { entityCount: runtime.entityCount } : {}),
+    ...(runtime.freshenCheckout !== undefined ? { freshen: runtime.freshenCheckout } : {}),
+  });
+
   app.post(
     `${V}/chats`,
     {
@@ -3275,21 +3295,13 @@ export function registerRoutes(
       // The scope (crew#502): explicit repos (`repoRefs`, the legacy `repoRef` merged in) or the
       // project's members — each ref checked against the registry, EVERY missing one named — else
       // none. Resolved before any seat warms: a 404 here warmed nothing.
-      const resolution = await resolveChatScope(
-        {
-          chatId,
-          ...(b.projectId !== undefined ? { projectId: b.projectId } : {}),
-          repoRefs: requestedRefs,
-          ...(b.scopeKind !== undefined ? { kind: b.scopeKind } : {}),
-        },
-        {
-          ...chatScopeDeps(adapter),
-          scratchBase: chatScopes.base,
-          log: (m) => req.log.warn(m),
-          ...(runtime.entityCount !== undefined ? { entityCount: runtime.entityCount } : {}),
-          ...(runtime.freshenCheckout !== undefined ? { freshen: runtime.freshenCheckout } : {}),
-        },
-      );
+      const scopeRequest: ChatScopeRequest = {
+        chatId,
+        ...(b.projectId !== undefined ? { projectId: b.projectId } : {}),
+        repoRefs: requestedRefs,
+        ...(b.scopeKind !== undefined ? { kind: b.scopeKind } : {}),
+      };
+      const resolution = await resolveScope(scopeRequest, req);
       if (!resolution.ok) {
         chatScopes.release(chatId, token);
         return reply.code(resolution.status).send({
@@ -3426,7 +3438,7 @@ export function registerRoutes(
             projectAttachError = message(err);
           }
         }
-        if (!chatScopes.set(chatId, scope, token, refused, engine)) {
+        if (!chatScopes.set(chatId, scope, token, refused, engine, scopeRequest)) {
           // The reservation was cancelled while the open was in flight — an engine `chatClosed` or a
           // `DELETE` for this id (Copilot, #518). Nothing was recorded; tear the chat down (scratch
           // root and the filing just made) instead of returning a stale 201. No path record exists
@@ -3541,24 +3553,20 @@ export function registerRoutes(
     // later message CONTINUES the same path: `propose_plan(answer-N)` then `confirm_gate(Approve)`
     // at the turn gate the previous answer paused on. Nothing is fanned out: the PA is the one
     // voice, helpers talk to the PA, the reviewer raises quiet findings — all on the bus.
-    const path = askPaths.get(id);
-    if (path === undefined) {
+    const openedPath = askPaths.get(id);
+    if (openedPath === undefined) {
       return reply.code(409).send({ error: `chat '${id}' is not open on this daemon — open it first (POST /chats)` });
     }
+    const path = openedPath;
     if (path.eligible.length === 0) {
       return reply.code(409).send({ error: `chat '${id}' has no eligible seat — sign a seat in and re-seat it (POST /chats/:id/seats)` });
     }
     const text = parsed.data.text;
-    const scope = chatScopes.get(id);
-    // A repo-bound path: exactly one repo in scope grounds the run (`repoRef`) and makes it
-    // deliverable; a project or a multi-repo scope binds the project graph only (§5.1 Grounding).
-    const repoRef = scope !== undefined && scope.kind === 'repos' && scope.repos.length === 1 ? scope.repos[0]!.id : undefined;
-    const projectId = scope?.projectId;
-    const voice = path.pa !== null ? [path.pa] : [];
-    // The turn is reserved for the voice — or, for a random pick (no PA yet), for the whole
-    // eligible roster: the relay narrows it to the PA when `path.started` names one (ASK-C2), so
-    // the PA's frames are stamped with this turn and a second message is refused meanwhile.
-    const audience = voice.length > 0 ? voice : path.eligible;
+    let scope = chatScopes.get(id);
+    const storedScope = scope;
+    let engine = chatScopes.engineOf(id);
+    let voice: string[] = [];
+    let audience: string[] = [];
     // crew#641/#650 re-stated for a path: ONE eligible seat means no distinct reviewer and no
     // helper — said on every turn (the engine's `member.joined{seat:null}` says it on the bus).
     const singleSeat202 =
@@ -3585,8 +3593,8 @@ export function registerRoutes(
       });
     }
     // crew#826: the turn lives as long as its answer step may (`budget_secs`), not 3× the pool knob.
-    const turn = chatTurns.begin(id, audience, text, ASK_TURN_BUDGET_SECS);
-    const turnId = turn?.turnId ?? randomUUID();
+    let turn: ReturnType<ChatTurnIndex['begin']> = null;
+    let turnId: string = randomUUID();
     // What an ACCEPTED message records — the engine has it, so a persistence failure here is
     // logged, never a retraction of a turn that is already being answered (codex on #808 r2, 9).
     const persistAccepted = (preface: string | null, after: () => void): void => {
@@ -3617,12 +3625,96 @@ export function registerRoutes(
     // preface rode a pool send; told only once the send is accepted (`commit`).
     const withPreface = (preface: string | null): string => (preface !== null ? `${preface}\n\n${text}` : text);
     try {
+      const rules = (await considerations.inForceFor(scope?.projectId ?? null)).rules;
+      // crew#1020: a project/everything chat must see repos attached since open. Admission was
+      // under this scope KIND and the kind stays the same, so do not re-run seat admission.
+      const scopeRequest = chatScopes.requestOf(id);
+      if (scope !== undefined && (scope.kind === 'project' || scope.kind === 'everything') && scopeRequest !== undefined) {
+        try {
+          if (scopeRequest.projectId !== undefined && await adapter.projectGet(scopeRequest.projectId) === null) {
+            throw new Error(`Project ${scopeRequest.projectId} not found`);
+          }
+          const resolution = await resolveScope(scopeRequest, req);
+          if (!resolution.ok) throw new Error(resolution.error);
+          // Retain this chat's scratch root even if the resolver's defaults change (crew#1020).
+          // Resolve only: a refused message must leave the stored scope, executing seats' files
+          // and transcript roots untouched. Publish after every refusal check, just before send.
+          engine = { ...resolution.engine, cwd: scope.cwd };
+          scope = { ...resolution.scope, cwd: scope.cwd };
+        } catch (err) {
+          req.log.warn({ chatId: id }, `chat scope refresh failed; keeping stored scope: ${message(err)}`);
+        }
+      }
+      if (askPaths.get(id)?.generation !== lease) {
+        return reply.code(409).send({ error: `chat '${id}' was closed while the message was in flight; nothing was sent` });
+      }
+      if (path.runId !== undefined) {
+        const view = (await adapter.sessionsDetail()).find((v) => v.session.id === path.runId);
+        if (view === undefined) {
+          askPaths.release(id, lease);
+          return reply.code(409).send({ error: `chat '${id}': its path ${path.runId} is gone — open a new chat` });
+        }
+        const status = String(view.session.status);
+        if (status !== 'awaiting_human') {
+          askPaths.release(id, lease);
+          const who = path.pa ?? 'the primary agent';
+          return reply.code(409).send({
+            code: 'turn_in_flight' as const,
+            error:
+              status === 'executing' || status === 'running'
+                ? `${who} is still answering the previous message in this chat — wait for the reply. Nothing was sent.`
+                : `chat '${id}': its path ${path.runId} is ${status}, not waiting for your turn — nothing was sent`,
+            chatId: id,
+            runId: path.runId,
+            status,
+          });
+        }
+        // The status read awaited: the chat may have been closed (and its id reopened) meanwhile —
+        // nothing of this message may land on the newcomer (codex on #808 r3, 2).
+        if (askPaths.get(id)?.generation !== lease) {
+          return reply.code(409).send({ error: `chat '${id}' was closed while the message was in flight; nothing was sent` });
+        }
+      }
+      const codeGraphDb = engine?.codeGraphDb ?? null;
+      // Only project scopes refresh a project graph; fixed repo scopes may use the engine's
+      // own repo graph instead of input.projectGraph, and everything scopes have no graph.
+      if (scope?.kind === 'project' && path.runId !== undefined && codeGraphDb !== path.launchGraphBinding) {
+        askPaths.release(id, lease);
+        return reply.code(409).send({
+          code: 'chat_scope_changed',
+          error: `This chat's repositories or their code graph changed since it started (${scope?.repos.length ?? 0} now in scope). Start a new chat to read them — this one keeps its original scope.`,
+        });
+      }
+      // Sort repository identities so membership order alone does not trigger another statement.
+      const scopeKey = JSON.stringify([
+        scope?.repos.map((repo) => [repo.id, repo.name, repo.rootPath]).sort((a, b) => a[0]!.localeCompare(b[0]!)) ?? [],
+        codeGraphDb,
+      ]);
+      const pending = await considerations.pendingPreface(id, { inForce: rules });
+      // The last await before delivery may also have closed/reopened the chat. From this check
+      // through publication and the send there is no await, so no executing turn's files change.
+      if (askPaths.get(id)?.generation !== lease || chatScopes.get(id) !== storedScope) {
+        return reply.code(409).send({ error: `chat '${id}' was closed while the message was in flight; nothing was sent` });
+      }
+      if (storedScope !== undefined && scope !== undefined && engine !== undefined &&
+        (JSON.stringify(scope) !== JSON.stringify(storedScope) || JSON.stringify(engine) !== JSON.stringify(chatScopes.engineOf(id)))) {
+        prepareChatScratch(id, scope, rules);
+        if (chatScopes.refresh(id, storedScope, scope, engine)) {
+          chatTranscripts?.registerRoots(id, scope.repos.map((r) => ({ absRoot: resolve(r.rootPath), name: r.name })));
+        }
+      }
+      voice = path.pa !== null ? [path.pa] : [];
+      // A random pick reserves every eligible seat until the relay names the PA.
+      audience = voice.length > 0 ? voice : path.eligible;
+      turn = chatTurns.begin(id, audience, text, ASK_TURN_BUDGET_SECS);
+      turnId = turn?.turnId ?? turnId;
+      // A repo-bound path can deliver; project and multi-repo scopes remain read-only asks.
+      const repoRef = scope?.kind === 'repos' && scope.repos.length === 1 ? scope.repos[0]!.id : undefined;
+      const projectId = scope?.projectId;
       if (path.runId === undefined) {
         const stepId = 'answer-1';
         const generation = path.generation;
         const roster = rosterWithStanding().filter((seat) => path.eligible.includes(String(seat.key)));
-        const rules = (await considerations.inForceFor(scope?.projectId ?? null)).rules;
-        const pending = await considerations.pendingPreface(id, { inForce: rules });
         // crew#823: the run is titled by the operator's question (every reader titles a run from
         // `problem`); the scope statement grounds the seats from the first answer step's
         // instructions instead of standing in as the run's title.
@@ -3636,14 +3728,16 @@ export function registerRoutes(
           ...(path.primary !== undefined ? { primary: path.primary } : {}),
           ...(repoRef !== undefined ? { repoRef, deliver: 'pr' as const } : {}),
           ...(projectId !== undefined ? { projectId } : {}),
+          ...(scope?.kind === 'project' && codeGraphDb !== null ? { projectGraph: { dbPath: codeGraphDb } } : {}),
         };
         const runId = await adapter.launchRun(input);
-        if (!askPaths.started(id, generation, runId, stepId)) {
+        if (!askPaths.started(id, generation, runId, stepId, input.projectGraph?.dbPath ?? null)) {
           // The chat was closed (End) while the launch was in flight: the run must not outlive it.
           await adapter.cancelRun(runId).catch(() => undefined);
           if (turn !== null) chatTurns.abort(id, turn.turnId);
           return reply.code(409).send({ error: `chat '${id}' was closed while its path was launching; the run was cancelled` });
         }
+        path.lastToldScopeKey = scopeKey;
         pending.commit();
         persistAccepted(pending.preface, () => {
           runtime.linkChatRun?.(id, runId);
@@ -3666,45 +3760,24 @@ export function registerRoutes(
             deliver: repoRef !== undefined ? 'pr' : 'none',
           });
         });
-        return reply.code(202).send({ seats: voice, turnId, runId, stepId, ...singleSeat202 });
-      }
-      const view = (await adapter.sessionsDetail()).find((v) => v.session.id === path.runId);
-      if (view === undefined) {
-        askPaths.release(id, lease);
-        if (turn !== null) chatTurns.abort(id, turn.turnId);
-        return reply.code(409).send({ error: `chat '${id}': its path ${path.runId} is gone — open a new chat` });
-      }
-      const status = String(view.session.status);
-      if (status !== 'awaiting_human') {
-        askPaths.release(id, lease);
-        if (turn !== null) chatTurns.abort(id, turn.turnId);
-        const who = path.pa ?? 'the primary agent';
-        return reply.code(409).send({
-          code: 'turn_in_flight' as const,
-          error:
-            status === 'executing' || status === 'running'
-              ? `${who} is still answering the previous message in this chat — wait for the reply. Nothing was sent.`
-              : `chat '${id}': its path ${path.runId} is ${status}, not waiting for your turn — nothing was sent`,
-          chatId: id,
-          runId: path.runId,
-          status,
+        return reply.code(202).send({
+          seats: voice, turnId, runId, stepId, ...singleSeat202,
         });
       }
-      // The status read awaited: the chat may have been closed (and its id reopened) meanwhile —
-      // nothing of this message may land on the newcomer (codex on #808 r3, 2).
-      if (askPaths.get(id)?.generation !== lease) {
-        if (turn !== null) chatTurns.abort(id, turn.turnId);
-        return reply.code(409).send({ error: `chat '${id}' was closed while the message was in flight; nothing was sent` });
-      }
       const stepId = askPaths.nextStep(id);
-      const pending = await considerations.pendingPreface(id);
-      await adapter.proposePlan(path.runId, { steps: [answerStep(stepId, withPreface(pending.preface))] }, turnId);
+      // crew#1020: tell the run about a refreshed scope until a continuation accepts it.
+      let instructions = withPreface(pending.preface);
+      if (scope !== undefined && scopeKey !== path.lastToldScopeKey) {
+        instructions = `${chatScopeStatement(id, scope, rules)}\n\n${instructions}`;
+      }
+      await adapter.proposePlan(path.runId, { steps: [answerStep(stepId, instructions)] }, turnId);
       await adapter.confirmGate(path.runId, true);
       askPaths.release(id, lease);
       if (!askPaths.continued(id, lease, stepId)) {
         // Closed between the proposal and here: the DELETE cancelled the run this was accepted on.
         return reply.code(409).send({ error: `chat '${id}' was closed while the message was in flight; its path was cancelled` });
       }
+      path.lastToldScopeKey = scopeKey;
       pending.commit();
       persistAccepted(pending.preface, () => undefined);
       return reply.code(202).send({ seats: voice, turnId, runId: path.runId, stepId, ...singleSeat202 });
