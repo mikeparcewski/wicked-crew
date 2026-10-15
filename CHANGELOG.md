@@ -10,6 +10,9 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Added
+- **A launch refused because its workflow requires QE acceptance names it with a stable code.** `POST /runs` with `deliverGate: 'auto'` on a workflow that requires QE acceptance (and no skip from the launch or the daemon's setting) still answers 400 with the same sentence, and now also `code: 'qe_acceptance_required'`, the token a refused delivery's 409 (`QeAcceptanceRefusal.code`) already carries. Studio matches on it to say why the launch failed and that QE acceptance can be turned off in Settings, instead of parsing the sentence.
+
 ## [0.12.0] — 2026-10-14
 
 A minor release: a demo run's video becomes an editable document (#1013, `wicked-crew-api-types` 0.119.0) and QE acceptance can be turned off per daemon (#1015, `wicked-crew-api-types` 0.120.0), on the wicked-core-ts 0.11.0 engine, where container seats run on the agent's own sign-in (C6), and studio 0.9.0 (the editor stack on protocol 2) as the bundled UI, with the C6 sign-in link fix, a steadier Agents roster and an editor-pack conformance cap that fits a slow host.
