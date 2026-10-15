@@ -107,10 +107,6 @@ export function runRoot(seat: GovernanceSeatInput): string {
   return base.replace(/\.(exe|cmd|bat|mjs|js)$/i, '').toLowerCase();
 }
 
-function isCodex(seat: GovernanceSeatInput): boolean {
-  return seat.key === 'codex' || seat.key.startsWith('codex-');
-}
-
 function fenceFor(scope: GovernanceScopeKind, roots: GovernanceFenceRoots): SeatGovernanceFence {
   if (scope === 'scoped_bound') {
     const worktree = roots.worktree ?? WORKTREE_LABEL;
@@ -120,17 +116,13 @@ function fenceFor(scope: GovernanceScopeKind, roots: GovernanceFenceRoots): Seat
 }
 
 /**
- * The mode a seat runs under for a scope kind.
+ * The mode a seat runs under for a scope kind (C5, matching wicked-core#950).
  *
- *  - `admitted`: class `acp_input_governance` and — when the seat pins `acp.verified_version` —
- *    the probed `version_pin.matched` is not `false` (a drifted pin fails the engine's governance
- *    closed: `none`).
- *  - `os_sandbox`: class `os_sandbox` with a floor that holds for this scope — `seat_record`
- *    (`acp.os_sandbox`), `self` (codex's own bounded `--sandbox`), or `repo_boundary` (the
- *    engine's boundary around a run BOUND to one repository: worktree + `extraWriteRoots`).
- *    A floor seat whose only floor is the repository boundary, on a scope that binds no
- *    repository, is `none` for that scope.
- *  - `none`: class `none`, no class at all, or the cases above.
+ *  - Container floor (the default): claude reads `admitted` (its gate hook inside the seat
+ *    container); every other seat reads `os_sandbox` / `repo_boundary` (the seat container).
+ *  - Interim host floor: claude reads `admitted` (its gate hook); codex reads `os_sandbox` /
+ *    `self` only with its own bounded `--sandbox`; every other seat reads `none` (the engine
+ *    refuses its governed work: `needs_container_floor`). Class `none` or no class reads `none`.
  */
 export function seatGovernanceMode(
   seat: GovernanceSeatInput,
@@ -165,69 +157,43 @@ export function seatGovernanceMode(
   if (cls === null) {
     return none('the engine reported no governance class for this seat, so nothing is claimed to fence its tool calls');
   }
+  const rootKey = runRoot(seat);
   if (cls === 'none') {
     return none(
-      isCodex(seat)
+      rootKey === 'codex'
         ? `the engine names its governance class none: codex runs with its own sandbox off (no bounded \`--sandbox\` in its trust flags, or the bypass flag), and ${CODEX_NO_ADAPTER} — only the command-text fences apply`
         : 'the engine names its governance class none (its record sets `governance_floor = false`) — only the command-text fences apply',
     );
   }
-  // C5: ACP is gone from the seats. On the interim host floor only claude (its gate hook) and codex
-  // (its own bounded sandbox) keep a per-call check; the engine refuses every other seat's governed
-  // work (needs_container_floor, wicked-core#950), so it reads none here too.
-  const rootKey = runRoot(seat);
-  if (rootKey !== 'claude' && rootKey !== 'codex') {
-    return none(
-      'its tool calls were checked over ACP, which is removed from the seats; on the interim host floor the engine refuses its governed work (needs_container_floor) — run the container floor',
-    );
+  // C5, the interim host floor — exactly wicked-core#950's rule (agy c5-crew-r1): ACP is gone from
+  // the seats, so a governed unit runs only on claude (its gate hook) or on codex in its own bounded
+  // sandbox; the engine refuses every other seat's governed work (needs_container_floor).
+  if (rootKey === 'claude') {
+    return {
+      mode: 'admitted',
+      class: cls,
+      source: 'acp_input_governance',
+      reason: 'its gate hook judges every tool call on the headless carrier (interim host floor)',
+      fence,
+    };
   }
-  if (cls === 'acp_input_governance') {
-    if (rootKey === 'claude') {
+  if (rootKey === 'codex') {
+    const own = ownSandboxMode(seat.trust_flags);
+    if (own !== null) {
       return {
-        mode: 'admitted',
+        mode: 'os_sandbox',
         class: cls,
-        source: 'acp_input_governance',
-        reason: 'its gate hook judges every tool call on the headless carrier (interim host floor)',
+        source: 'self',
+        reason: `codex runs under its own \`--sandbox ${own}\`, and ${CODEX_NO_ADAPTER}, so it stays on the OS-sandbox floor — not a per-call gate`,
         fence,
       };
     }
     return none(
-      'its tool calls were checked over ACP, which is removed from the seats; on the interim host floor the engine refuses its governed work (needs_container_floor) — run the container floor',
+      `codex runs without its own bounded \`--sandbox\`, and ${CODEX_NO_ADAPTER}; on the interim host floor the engine refuses its governed work (needs_container_floor)`,
     );
   }
-  // cls === 'os_sandbox'
-  if (seat.acp?.os_sandbox === true) {
-    return {
-      mode: 'os_sandbox',
-      class: cls,
-      source: 'seat_record',
-      reason: 'its record arms the OS sandbox (`acp.os_sandbox`): the kernel write floor holds its writes to the fenced roots — not a per-call gate, not a read or network jail',
-      fence,
-    };
-  }
-  const own = isCodex(seat) ? ownSandboxMode(seat.trust_flags) : null;
-  if (own !== null) {
-    return {
-      mode: 'os_sandbox',
-      class: cls,
-      source: 'self',
-      reason: `codex runs under its own \`--sandbox ${own}\`, and ${CODEX_NO_ADAPTER}, so it stays on the OS-sandbox floor — not a per-call gate`,
-      fence,
-    };
-  }
-  if (scope === 'scoped_bound') {
-    return {
-      mode: 'os_sandbox',
-      class: cls,
-      source: 'repo_boundary',
-      reason:
-        "the engine's repository boundary (sandbox-exec / bwrap) holds its writes to the run's worktree and the granted write roots — not a per-call gate, not a read or network jail",
-      fence,
-    };
-  }
   return none(
-    "its only floor is the engine's repository boundary, which arms on a run bound to one repository — " +
-      (scope === 'scoped' ? 'this scope (several repositories or a project) binds none' : 'an unscoped ask binds none'),
+    'its tool calls were checked over ACP, which is removed from the seats; on the interim host floor the engine refuses its governed work (needs_container_floor) — run the container floor',
   );
 }
 

@@ -109,3 +109,8 @@ setCrewStateHome(join(base, 'state-home'));
 // fixture. (The seam never writes into the user's CLI directories — design v3.2 §1 — so there is
 // no mirror home to arm; tests/skills-no-user-cli-writes.test.ts proves it against a fake HOME.)
 process.env['WICKED_CREW_SKILLS_SOURCE'] = join(base, 'no-plugin-source');
+
+// C5: the seat floor is read from the environment (`isContainerSeatFloor()`, the engine's
+// `default_seat_floor()`). Clear an operator's ambient value so the seat readings under test are
+// the unset (embedder) default; a test that wants a floor sets it and restores it itself.
+delete process.env['WICKED_SEAT_FLOOR'];
