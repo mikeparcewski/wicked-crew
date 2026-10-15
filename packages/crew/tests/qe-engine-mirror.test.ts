@@ -6,7 +6,7 @@
 // the boot value before `spawn` arms its bus bridge. Skips on an addon without the mirror.
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRequire } from 'node:module';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -14,6 +14,24 @@ import { join } from 'node:path';
 import { CoreAdapter, settingsFilePath } from '../src/core/adapter.js';
 import { QE_OFF_REASON } from '../src/core/qe-acceptance-setting.js';
 import { removeScratch } from './setup/scratch.js';
+
+// The production read's own catch path: one async `readFile` of the settings file can be made to
+// fail while the file itself stays readable (a transient fault the mirror's sync read would not see).
+const failNextSettingsRead = vi.hoisted(() => ({ on: false }));
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    readFile: (async (...args: Parameters<typeof actual.readFile>) => {
+      // The hermetic settings file (`WICKED_CREW_SYSTEM_SETTINGS`, tests/setup/hermetic-home.ts).
+      if (failNextSettingsRead.on && String(args[0]) === process.env['WICKED_CREW_SYSTEM_SETTINGS']) {
+        failNextSettingsRead.on = false;
+        throw Object.assign(new Error('EIO: transient read failure'), { code: 'EIO' });
+      }
+      return actual.readFile(...args);
+    }) as typeof actual.readFile,
+  };
+});
 
 const require = createRequire(import.meta.url);
 const { Core } = require('wicked-core-ts') as { Core: { prototype: Record<string, unknown> } };
@@ -97,7 +115,7 @@ describe.skipIf(!supported)("the engine's mirror of qeAcceptance", () => {
     writeQe('off');
     await a.getSettings(); // a newer read sees 'off'
     expect(mirror(a)).toBe(QE_OFF_REASON);
-    release({ qeAcceptance: 'required' });
+    release({ settings: { qeAcceptance: 'required' }, ok: true });
     await stale;
     expect(mirror(a)).toBe(QE_OFF_REASON);
   });
@@ -108,6 +126,19 @@ describe.skipIf(!supported)("the engine's mirror of qeAcceptance", () => {
     expect(mirror(a)).toBe(QE_OFF_REASON);
     nextRead(a, () => Promise.reject(new Error('EACCES: settings unreadable')));
     await expect(a.getSettings()).rejects.toThrow(/EACCES/);
+    expect(mirror(a)).toBeNull();
+    await a.getSettings();
+    expect(mirror(a)).toBe(QE_OFF_REASON);
+  });
+
+  it("a read that FELL BACK to the defaults (the production read's own catch) clears it too, though the file is readable again", async () => {
+    writeQe('off');
+    const a = spawn('fallback');
+    expect(mirror(a)).toBe(QE_OFF_REASON);
+    failNextSettingsRead.on = true;
+    const served = await a.getSettings();
+    expect(failNextSettingsRead.on).toBe(false); // the fault was hit
+    expect(served.qeAcceptance).toBe('required'); // what /health and launchRun read
     expect(mirror(a)).toBeNull();
     await a.getSettings();
     expect(mirror(a)).toBe(QE_OFF_REASON);

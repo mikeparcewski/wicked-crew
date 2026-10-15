@@ -3420,8 +3420,9 @@ export class CoreAdapter {
    *
    * Runs after every settings read and write, and reads the file itself, synchronously
    * (`diskQeAcceptanceMode`): the mirror is the file as it stands at that moment, never the result of
-   * an async read that a later edit or write overtook. `readOk: false` (the settings read failed,
-   * which `/health` and `launchRun` read as `'required'`) clears it: fail closed. An addon without
+   * an async read that a later edit or write overtook. `readOk: false` (the settings read failed —
+   * rejected, or could not read, parse or validate the file and served the defaults, which `/health`
+   * and `launchRun` read as `'required'`) clears it: fail closed. An addon without
    * the method has no such mirror (`engineQeSettingSupported`): there, engine-originated launches
    * still require QE acceptance.
    */
@@ -3444,15 +3445,17 @@ export class CoreAdapter {
   async getSettings(): Promise<CrewSystemSettings> {
     let readOk = false;
     try {
-      const settings = await this.readSettings();
-      readOk = true;
+      const { settings, ok } = await this.readSettings();
+      readOk = ok;
       return settings;
     } finally {
       this.syncEngineQeSetting(readOk);
     }
   }
 
-  private async readSettings(): Promise<CrewSystemSettings> {
+  /** The settings as read, and whether the read succeeded: a file that could not be read, parsed or
+   *  validated serves the defaults (`ok: false`), which the engine's QE mirror reads as a failure. */
+  private async readSettings(): Promise<{ settings: CrewSystemSettings; ok: boolean }> {
     await seedStateHomeSettings(settingsFilePath());
     try {
       const raw = await readFile(settingsFilePath(), 'utf8');
@@ -3604,9 +3607,9 @@ export class CoreAdapter {
           );
         }
       }
-      return { ...DEFAULT_SETTINGS, ...parsed };
+      return { settings: { ...DEFAULT_SETTINGS, ...parsed }, ok: true };
     } catch {
-      return { ...DEFAULT_SETTINGS };
+      return { settings: { ...DEFAULT_SETTINGS }, ok: false };
     }
   }
 
