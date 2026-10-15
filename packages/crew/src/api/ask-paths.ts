@@ -18,7 +18,7 @@ export interface AskPath {
   primary?: string;
   /** The run the conversation is, once the first message launched it. */
   runId?: string;
-  /** crew#1020: the resolved scope's graph binding at launch; a run cannot acquire a new one. */
+  /** crew#1020: the graph binding actually used at launch; a run cannot acquire a new one. */
   launchGraphBinding?: string | null;
   /** Stable repository + graph key last delivered to the run by an accepted message. */
   lastToldScopeKey?: string;
