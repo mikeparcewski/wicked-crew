@@ -590,20 +590,22 @@ export function isProtectedPath(path: string): boolean {
 }
 
 /**
- * The two WORKER-facing MCP routes (crew#714). A governed worker holds no operator bearer —
- * only its per-unit capability token (`WICKED_MCP_TOKEN`, minted by core's carriers), which it
- * sends in the request BODY (never a header, so it never reaches a request log). The ENGINE
- * verifies that token on every request (`Core.evaluateMcpCall` / `Core.listMcpTools` → 401
- * `invalid_token` for an unbound one), so the bearer boundary is not the credential here: the
- * token is. Exactly two method+path pairs — never a prefix. Every other `/api/v1/mcp/*` route
+ * WORKER-facing MCP routes. A governed worker holds its per-unit capability token
+ * (`WICKED_MCP_TOKEN`), verified by the ENGINE. `/mcp/call` and `/mcp/tools` carry it in
+ * the body; `/mcp/ask` carries it in the Authorization header. That header must never be
+ * treated as an operator bearer. Only these exact method+path pairs bypass operator auth.
+ * Every other `/api/v1/mcp/*` route
  * (servers, approvals, usage, …) is operator work and stays behind the bearer.
  */
 const UNIT_TOKEN_ROUTES: ReadonlySet<string> = new Set([
   `POST ${API_PREFIX}/mcp/call`,
   `POST ${API_PREFIX}/mcp/tools`,
+  `POST ${API_PREFIX}/mcp/ask`,
+  `GET ${API_PREFIX}/mcp/ask`,
+  `DELETE ${API_PREFIX}/mcp/ask`,
 ]);
 
-/** True for exactly the two unit-token routes above (method and path both exact). */
+/** True for exactly the unit-token routes above (method and path both exact). */
 export function isUnitTokenRoute(method: string, path: string): boolean {
   return UNIT_TOKEN_ROUTES.has(`${method.toUpperCase()} ${path}`);
 }
@@ -652,8 +654,7 @@ export function registerAuthHooks(app: FastifyInstance, auth: ResolvedAuth): voi
   app.addHook('onRequest', async (req, reply) => {
     const path = pathOf(req);
     if (!isProtectedPath(path)) return;
-    // The unit-token routes carry their own credential (the body's capability token, judged by
-    // the engine); no bearer, no actor — the call record is the record (crew#714).
+    // The engine verifies the capability token, including /mcp/ask's Authorization header.
     if (isUnitTokenRoute(req.method, path)) return;
     if (auth.mode === 'off') {
       req.actor = LOCAL_ACTOR;

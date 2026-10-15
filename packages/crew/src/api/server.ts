@@ -14,6 +14,7 @@ import { freshenCheckout } from './chat-freshness.js';
 import { ErrorRing, teeStreamWithErrorRing } from './diagnostics.js';
 import { GateCache } from './gate-cache.js';
 import { ElicitationCache } from './elicitation-cache.js';
+import { AskServer } from '../mcp/ask-server.js';
 import { registerAuthHooks, resolveAuth, type AuthOptions } from './auth.js';
 import { AuditLog } from './audit.js';
 import { EvalRunStore } from './eval-store.js';
@@ -513,6 +514,7 @@ export async function createServer(
   // and the chat open/send paths (built by `registerRoutes`).
   let considerations: ConsiderationService | null = null;
   const elicitationCache = new ElicitationCache();
+  const askServer = new AskServer({ adapter });
   const terminals = new TerminalHub();
   // Per-seat runtime health (crew#274): folded from the single CoreEvent subscription below,
   // surfaced on GET /roster, recovered by the low-frequency probe armed further down.
@@ -1680,6 +1682,7 @@ export async function createServer(
   const onEngineEvent = (event: CoreEvent): void => {
     gateCache.ingest(event);
     elicitationCache.ingest(event);
+    askServer.ingest(event);
     seatHealth.ingest(event);
     // ASK-C2: a path run's unit + terminal frames become the chat's frames (re-entering this fold
     // as chatDelta / chatReply, which the relay ignores — no recursion).
@@ -2117,6 +2120,7 @@ export async function createServer(
       mcp: mcpRegistry,
       // DES-MCP-TOOLS-001 S3: the broker's call path over that registry.
       mcpBroker,
+      ...(typeof adapter.askSupported === 'function' && adapter.askSupported() ? { askServer } : {}),
       // DES-MCP-TOOLS-001 S7: the call records the usage fold reads.
       mcpCalls: mcpCallRecords,
       // wicked-core#411 / crew#497: the live state-home classification the routes report and gate on.

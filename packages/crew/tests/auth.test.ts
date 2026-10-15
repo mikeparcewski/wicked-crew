@@ -171,9 +171,10 @@ describe('the OIDC verifier', () => {
 });
 
 describe('unit-token routes (crew#714)', () => {
-  it('exempts exactly POST /api/v1/mcp/call and POST /api/v1/mcp/tools — method and path both exact', () => {
+  it('exempts the broker and ask unit-token routes — method and path both exact', () => {
     expect(isUnitTokenRoute('POST', '/api/v1/mcp/call')).toBe(true);
     expect(isUnitTokenRoute('POST', '/api/v1/mcp/tools')).toBe(true);
+    for (const method of ['POST', 'GET', 'DELETE']) expect(isUnitTokenRoute(method, '/api/v1/mcp/ask')).toBe(true);
     expect(isUnitTokenRoute('post', '/api/v1/mcp/call')).toBe(true); // method case-insensitive
     // Both are still inside the protected scope — the exemption is the hooks' decision, not the path's.
     expect(isProtectedPath('/api/v1/mcp/call')).toBe(true);
@@ -184,6 +185,10 @@ describe('unit-token routes (crew#714)', () => {
     for (const [method, path] of [
       ['GET', '/api/v1/mcp/call'],
       ['GET', '/api/v1/mcp/tools'],
+      ['PUT', '/api/v1/mcp/ask'],
+      ['POST', '/api/v1/mcp/ask/x'],
+      ['GET', '/api/v1/mcp/ask/'],
+      ['DELETE', '/api/v1/mcp/ask/x'],
       ['PUT', '/api/v1/mcp/call'],
       ['POST', '/api/v1/mcp/call/'],
       ['POST', '/api/v1/mcp/call/x'],

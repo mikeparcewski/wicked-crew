@@ -10,6 +10,28 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Added
+- **An ask question says who asked, on the wire and after a reload.** The elicitation cache keeps the engine's additive
+  `elicitationCreated` fields for a seat's `ask` question (`source: "ask"`, `ord`, `attempt`, and the new `seat`, the
+  asking unit's roster seat key), and `GET /api/v1/runs/:id/elicitation` returns them; each is kept only when
+  well-formed and absent for every other producer. `wicked-crew-api-types`: `ElicitationInfo.{source, ord, attempt,
+  seat}` and `CoreEvent.seat`. Studio names the asking seat on the question card from these, instead of the seat the
+  run is running now. Needs the wicked-core change that adds `seat` to the frame (stacked on wicked-core#958); with
+  an engine without it, `ord` still identifies the asking step.
+- **Governed seats can ask the operator mid-turn with the MCP `ask` tool (DES-CONTAINER-FLOOR step 5).** crew serves
+  a one-tool MCP server (`src/mcp/ask-server.ts`, on the MCP SDK's stateless streamable-HTTP transport) at
+  `POST /api/v1/mcp/ask`. Seat containers reach it only through agentgateway's MCP route (`http://agw:8700`), and each call
+  carries the unit's capability token (`WICKED_MCP_TOKEN`) in `Authorization`, verified by the engine (`askUnit`,
+  `openAsk`, `closeAsk`). The question shows in studio's existing question card: the engine emits the same
+  `elicitationCreated` frame (now with `source: "ask"`, `ord`, `attempt`), and the operator answers through the same
+  `POST /api/v1/runs/:id/elicitation`. The tool call holds until the operator answers, declines or dismisses it, the run
+  ends, or `WICKED_ASK_TIMEOUT_SECS` passes (default 600, 10 to 3600); a timeout returns a clear no-answer result. A run
+  shows one question at a time, so parallel units' asks queue per run in arrival order. The run's event log records the
+  question and the answer (`elicitationResolved.answer`, `heldMs`). claude, codex and pi; opencode too with the
+  wicked-core change that registers the ask server through opencode's own serve API (wicked-core#965); not copilot,
+  which has no sign-in broker route. Requires the wicked-core-ts release carrying the engine half (wicked-core,
+  stacked on wicked-core#950).
+
 ### Changed
 - **BREAKING (C5): governed seats run in containers by default; ACP is removed from the seats (with wicked-core's
   matching change).** The daemon sets `WICKED_SEAT_FLOOR=container` at boot unless the operator chose a
