@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import type { BusUnavailable } from './engine-bus.js';
 import { attachEngineBus, detachEngineBus, type EngineBus } from './bus.js';
 import { mkdir, access, readFile, writeFile, chmod, rm, link, rename, realpath, stat } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join, dirname, resolve, isAbsolute, relative, sep } from 'node:path';
 import { isPlainRunId, WALKTHROUGH_AUTHOR_SUBDIR, walkthroughRootDir } from './walkthrough-root.js';
 import { crewStateHome, isDefaultStateHome } from '../projects/state-home.js';
@@ -117,6 +117,23 @@ export function settingsFilePath(): string {
   // home keeps the historical location.
   if (!isDefaultStateHome()) return join(crewStateHome(), 'daemon-settings.json');
   return sharedSettingsFilePath();
+}
+
+/**
+ * The daemon's QE acceptance setting as it stands on disk, read SYNCHRONOUSLY — for the engine's
+ * boot value (`WICKED_QE_ACCEPTANCE_OFF`), which must be in place before `Core.spawn` arms the bus
+ * bridge. The file `getSettings` reads, or — before a non-default state home is seeded from it —
+ * the shared file it will be seeded from. Anything unreadable reads as `'required'` (fail closed).
+ */
+function bootQeAcceptanceMode(): 'required' | 'off' {
+  const path = settingsFilePath();
+  const override = process.env['WICKED_CREW_SYSTEM_SETTINGS'];
+  const seeded = existsSync(path) || (override !== undefined && override !== '') || isDefaultStateHome();
+  try {
+    return qeAcceptanceMode(JSON.parse(readFileSync(seeded ? path : sharedSettingsFilePath(), 'utf8')) as { qeAcceptance?: unknown });
+  } catch {
+    return 'required';
+  }
 }
 
 /** The historical machine-wide settings file — the default state home's, and the one-time seed of any other (crew#756). */
@@ -1042,8 +1059,13 @@ export class CoreAdapter {
   readonly busSeamsOff: string | null = null;
   /** The engine's bus calls, attached for `busDbPath` (core/bus.ts); `null` without a bus. */
   private engineBus: EngineBus | null = null;
-  /** What crew last handed the engine's `setQeAcceptanceOff` (the engine starts with `null`). */
+  /** What crew last handed the engine's `setQeAcceptanceOff` (the engine starts with the boot value). */
   private engineQeOff: string | null = null;
+  /** Bumped around every settings write: a read that began before a write finished never moves
+   *  the engine's QE mirror (the write's own value is the one that stands). */
+  private settingsWriteGen = 0;
+  /** Settings writes run one at a time, so the last write to land is the last to set the mirror. */
+  private settingsWrites: Promise<unknown> = Promise.resolve();
   /**
    * `true` when this adapter drives the DETERMINISTIC OFFLINE engine (`Core.spawnStub`) rather
    * than the production one — i.e. the `StubDispatcher` (every seat votes for the first roster
@@ -1160,7 +1182,21 @@ export class CoreAdapter {
 
     this.stub = opts.stub === true;
     this.dbPath = opts.dbPath;
-    this.core = this.stub ? Core.spawnStub(opts.dbPath) : Core.spawn(opts.dbPath);
+    // The QE acceptance setting's engine mirror (`syncEngineQeSetting`) must hold BEFORE the engine
+    // arms its bus bridge inside `spawn`, or a bus request in between would launch under the
+    // default: hand the boot value over in the engine's own variable, read at spawn.
+    if (bootQeAcceptanceMode() === 'off') process.env['WICKED_QE_ACCEPTANCE_OFF'] = QE_OFF_REASON;
+    else delete process.env['WICKED_QE_ACCEPTANCE_OFF'];
+    try {
+      this.core = this.stub ? Core.spawnStub(opts.dbPath) : Core.spawn(opts.dbPath);
+    } finally {
+      // Read once, at spawn: never inherited by the workers this daemon starts.
+      delete process.env['WICKED_QE_ACCEPTANCE_OFF'];
+    }
+    // An addon without the mirror ignores the variable; one with it started with the boot value.
+    this.engineQeOff = typeof (this.core as { qeAcceptanceOff?: unknown }).qeAcceptanceOff === 'function'
+      ? (this.core as { qeAcceptanceOff: () => string | null }).qeAcceptanceOff()
+      : null;
     // DES-TEAMING-002 T0: `spawn` returns only once the engine's bus bridge is armed, or has given up
     // within its bound. Not armed = the engine launches nothing from the bus: say so on the same
     // `bus.unavailable` path as a bus crew could not open.
@@ -2060,6 +2096,10 @@ export class CoreAdapter {
     for (const wf of workflows) {
       await this._armCampaignWorkflow(wf);
     }
+    // The engine reads its mirror of the QE acceptance setting as each node dispatches: refresh it
+    // from the settings file now, so a hand edit since the last read is what the campaign starts
+    // under (`syncEngineQeSetting`; a failed read leaves the mirror as it was).
+    await this.getSettings().catch(() => null);
     // The roster crew hands the ENGINE (F-086, the campaign half of wave 6's `core/engine-roster.ts`):
     // a def built from `rosterWithStanding()` carries crew's `health {status}` / `auth` /
     // `council_eligible` readings on every node's `run_spec.clis`; core-ts ≥ 0.7.22 parses `health`
@@ -3398,8 +3438,10 @@ export class CoreAdapter {
   }
 
   async getSettings(): Promise<CrewSystemSettings> {
+    const gen = this.settingsWriteGen;
     const settings = await this.readSettings();
-    this.syncEngineQeSetting(settings);
+    // A read that raced a write may have seen the file from before it: leave the mirror to the write.
+    if (gen === this.settingsWriteGen) this.syncEngineQeSetting(settings);
     return settings;
   }
 
@@ -3561,12 +3603,21 @@ export class CoreAdapter {
     }
   }
 
-  async updateSettings(patch: Partial<CrewSystemSettings>): Promise<CrewSystemSettings> {
-    const current = await this.getSettings();
-    const next = { ...current, ...patch };
-    await publishSettingsFile(settingsFilePath(), JSON.stringify(next, null, 2), true);
-    this.syncEngineQeSetting(next);
-    return next;
+  updateSettings(patch: Partial<CrewSystemSettings>): Promise<CrewSystemSettings> {
+    const write = this.settingsWrites.then(async () => {
+      this.settingsWriteGen += 1;
+      try {
+        const current = await this.readSettings();
+        const next = { ...current, ...patch };
+        await publishSettingsFile(settingsFilePath(), JSON.stringify(next, null, 2), true);
+        this.syncEngineQeSetting(next);
+        return next;
+      } finally {
+        this.settingsWriteGen += 1;
+      }
+    });
+    this.settingsWrites = write.catch(() => undefined);
+    return write;
   }
 
   /**

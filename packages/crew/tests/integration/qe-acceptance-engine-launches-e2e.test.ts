@@ -14,10 +14,10 @@ process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createRequire } from 'node:module';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CoreAdapter } from '../../src/core/adapter.js';
+import { CoreAdapter, settingsFilePath } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
 import { emitOnBus } from '../../src/core/bus.js';
 import { qeDecisionBypasses, qeDecisionOf } from '../../src/api/delivery-assurance.js';
@@ -155,15 +155,27 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (!supported) return;
-  for (const id of campaigns) await quiesceCampaign(adapter, id).catch(() => undefined);
-  for (const id of runs) await call('POST', `/api/v1/runs/${encodeURIComponent(id)}/cancel`, {}).catch(() => undefined);
-  await app.close();
-  adapter.close();
-  for (const [k, v] of Object.entries(savedEnv)) {
-    if (v === undefined) delete process.env[k];
-    else process.env[k] = v;
+  // Whatever setup got to (or failed at), the environment and the scratch dir are restored.
+  try {
+    if (adapter !== undefined) {
+      for (const id of campaigns) await quiesceCampaign(adapter, id).catch(() => undefined);
+    }
+    if (app !== undefined) {
+      for (const id of runs) await call('POST', `/api/v1/runs/${encodeURIComponent(id)}/cancel`, {}).catch(() => undefined);
+      await app.close().catch(() => undefined);
+    }
+    try {
+      adapter?.close();
+    } catch {
+      /* restored below regardless */
+    }
+  } finally {
+    for (const [k, v] of Object.entries(savedEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    if (dir !== undefined) removeScratch(dir);
   }
-  removeScratch(dir);
 }, 60_000);
 
 describe.skipIf(!supported)('qeAcceptance on the launches the engine makes on its own', () => {
@@ -225,8 +237,6 @@ describe.skipIf(!supported)('qeAcceptance on the launches the engine makes on it
 
   it('a hand-edited settings file is followed on the next settings read', async () => {
     const core = (adapter as unknown as { core: { qeAcceptanceOff(): string | null } }).core;
-    const { settingsFilePath } = await import('../../src/core/adapter.js');
-    const { readFileSync } = await import('node:fs');
     const file = settingsFilePath();
     const current = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
     writeFileSync(file, JSON.stringify({ ...current, qeAcceptance: 'off' }, null, 2));
@@ -236,4 +246,48 @@ describe.skipIf(!supported)('qeAcceptance on the launches the engine makes on it
     await call('GET', '/api/v1/settings');
     expect(core.qeAcceptanceOff()).toBeNull();
   });
+
+  it("a node reads the setting when it DISPATCHES: a dependent QE node held behind another is skipped once the setting goes off", async () => {
+    expect((await call('PUT', '/api/v1/settings', { qeAcceptance: 'required' })).status).toBe(200);
+    // Node `hold` is a tool that waits for a marker file; `later` (the QE node) depends on it.
+    const marker = join(dir, 'release-hold');
+    const holdScript = join(dir, 'hold.mjs');
+    writeFileSync(
+      holdScript,
+      `import { existsSync } from 'node:fs';\nconst t = Date.now();\nwhile (!existsSync(${JSON.stringify(marker)})) {\n  if (Date.now() - t > 60000) process.exit(1);\n  await new Promise((r) => setTimeout(r, 100));\n}\n`,
+    );
+    const id = 'qe-engine-camp-later';
+    const res = await call('POST', '/api/v1/campaigns', {
+      id,
+      scenarios: [
+        { id: 'hold', tool: { cmd: [process.execPath, holdScript] } },
+        { id: 'later', deps: ['hold'], agent: { problem: 'Build the thing, then review it.', workflow: QE_WF } },
+      ],
+      clisJson: clisJson(),
+    });
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    campaigns.push(id);
+    await contractOf(`${id}:hold:a0`);
+    // The setting goes off while `later` waits; it has not launched yet.
+    expect((await call('PUT', '/api/v1/settings', { qeAcceptance: 'off' })).status).toBe(200);
+    expect(((await call('GET', `/api/v1/runs/${encodeURIComponent(`${id}:later:a0`)}`)).body['run'] as unknown) ?? null).toBeNull();
+    writeFileSync(marker, 'go');
+    expect(qeOf(await contractOf(`${id}:later:a0`, 90_000))).toMatchObject(SKIPPED);
+  }, 150_000);
+
+  it('a daemon that boots with the setting off starts its engine with it (before the bus bridge is armed), and the variable is not left behind', async () => {
+    const file = settingsFilePath();
+    const current = existsSync(file) ? (JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>) : {};
+    writeFileSync(file, JSON.stringify({ ...current, qeAcceptance: 'off' }, null, 2));
+    const second = new CoreAdapter({ dbPath: join(dir, 'core-boot.db'), stub: false });
+    try {
+      // No settings read yet: the engine has the boot value from spawn.
+      const core = (second as unknown as { core: { qeAcceptanceOff(): string | null } }).core;
+      expect(core.qeAcceptanceOff()).toBe(QE_OFF_REASON);
+      expect(process.env['WICKED_QE_ACCEPTANCE_OFF']).toBeUndefined();
+    } finally {
+      second.close();
+      writeFileSync(file, JSON.stringify({ ...current, qeAcceptance: 'required' }, null, 2));
+    }
+  }, 60_000);
 });
