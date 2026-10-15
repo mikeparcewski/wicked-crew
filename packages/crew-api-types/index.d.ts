@@ -10,8 +10,8 @@
  * carry, which could drift from the daemon silently (task #84).
  *
  * Rules of this package:
- * - WIRE SHAPES ONLY. Engine-internal types (`LaunchRunInput`,
- *   `RepoOnboardRef`, runtime constants) stay in `packages/crew/src/core/types.ts`.
+ * - WIRE SHAPES ONLY. Engine-internal types (`LaunchRunInput`) and runtime
+ *   constants stay in `packages/crew/src/core/types.ts`.
  * - ZERO RUNTIME. This is a `.d.ts`-only package with no JavaScript; import it
  *   with `import type` exclusively. The `exports` map deliberately offers only
  *   a `types` condition, so a value import fails loudly at resolution time.
