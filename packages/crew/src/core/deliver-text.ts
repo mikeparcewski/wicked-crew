@@ -766,6 +766,11 @@ export function parseFramedDeliverText(framed: string): DeliverText | null {
 // ── facts ──────────────────────────────────────────────────────────────────────────────────────
 
 /** A `GateSpec` (or the engine's loose string form) as a short label. */
+/** The gate cell with the fallback judge's disclosure beside it, when there is one. */
+function withJudgeFallback(gate: string, fallback: string | null): string {
+  return fallback === null ? gate : `${gate} · ${fallback}`;
+}
+
 /** (operator ruling 2026-10-11) "judged by operator (<who>)" when the operator judged this phase's
  *  gate because no judge could rule (`assurance.operatorJudges`, core-ts ≥ 0.9.7); else `null`. */
 export function operatorJudgedLabel(u: { assurance?: unknown }): string | null {
@@ -775,6 +780,15 @@ export function operatorJudgedLabel(u: { assurance?: unknown }): string | null {
     .map((j) => (typeof j.by === 'string' && j.by.trim() !== '' ? j.by.trim() : 'operator'))
     .join(', ');
   return `judged by operator (${who})`;
+}
+
+/** (operator ruling 2026-10-14) The engine's disclosure line — `judge: agy (fallback; codex benched: …)` — when
+ *  this phase's gate was judged by a fallback seat (`assurance.judgeFallbacks`, api-types 0.121.0); else `null`. */
+export function judgeFallbackLabel(u: { assurance?: unknown }): string | null {
+  const fbs = (u.assurance as { judgeFallbacks?: Array<{ label?: unknown }> } | null | undefined)?.judgeFallbacks;
+  if (!Array.isArray(fbs)) return null;
+  const labels = fbs.flatMap((f) => (typeof f?.label === 'string' && f.label.trim() !== '' ? [f.label.trim()] : []));
+  return labels.length > 0 ? labels.join('; ') : null;
 }
 
 export function gateLabel(gate: GateSpec | string | undefined): string {
@@ -913,7 +927,7 @@ export function factsFromRun(
         id,
         stage: u.stage,
         role: u.role ?? 'neutral',
-        gate: operatorJudgedLabel(u) ?? gateLabel(u.gate),
+        gate: withJudgeFallback(operatorJudgedLabel(u) ?? gateLabel(u.gate), judgeFallbackLabel(u)),
         seat: seatOf(u),
         outcome: id === 'deliver' && running ? 'this PR' : (u.phase_status ?? u.status),
       };

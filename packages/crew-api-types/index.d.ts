@@ -2165,6 +2165,24 @@ export interface OperatorJudgment {
   reason: string | null;
 }
 
+/**
+ * (api-types 0.121.0, wicked-core judge fallback, operator ruling 2026-10-14) A judge seated IN PLACE
+ * of the run's preferred judge: every preferred judge seat was benched for the run (codex's worktree
+ * bench, a sign-in refusal) or failed as a seat while judging, so a fallback seat (Claude Code, then
+ * Antigravity) distinct from every party to the work (creator, authors, evaluator, validator author,
+ * team) judged instead. With no such seat the gate still holds (`judge_unavailable`).
+ */
+export interface JudgeFallback {
+  /** The seat that judged. */
+  seat: string;
+  /** The preferred judge seats it stood in for, in rotation order. */
+  preferred: string[];
+  /** Why they could not judge, in the engine's words (`codex benched: …` / `copilot unavailable: …`). */
+  reason: string;
+  /** The disclosure line to show as-is: `judge: agy (fallback; codex benched: …)`. */
+  label: string;
+}
+
 /** Why an instrument is absent from a receipt. */
 export type AssuranceSkipReason =
   | 'reduced_assurance'
@@ -2250,6 +2268,10 @@ export interface AssuranceReceipt {
   /** (api-types 0.110.0) Every gate the operator judged ("judged by operator"); ABSENT when none or on
    *  an older engine. A unit receipt carries its own; a delivery receipt lists the run's. */
   operatorJudges?: OperatorJudgment[];
+  /** (api-types 0.121.0) Every judge seated as a FALLBACK for a benched or unavailable preferred judge;
+   *  ABSENT when every judge was the run's own (the routine case) or on an older engine. A unit
+   *  receipt carries at most one; a delivery receipt lists the run's. */
+  judgeFallbacks?: JudgeFallback[];
 }
 
 /**
