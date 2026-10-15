@@ -32,6 +32,7 @@
  *    `LaunchOptions.projectId` so the edit shows up in the project's activity feed.
  */
 
+import { judgeFallbackLabel } from '../core/deliver-text.js';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -562,11 +563,14 @@ export async function startInteractiveEditSubscriber(
     // Wave 6 — the honest gate (F-7R2-005): a unit NOTHING gated must read as UNGATED in the thread,
     // never as approved; the engine says so on `gateEvaluated.ungated` and names the missing layers.
     if (event.type === 'gateEvaluated') {
+      const ord = typeof event.ord === 'number' ? event.ord : 0;
       const note = ungatedGateNote(event);
       if (note !== null) {
-        const ord = typeof event.ord === 'number' ? event.ord : 0;
         narrate(flight, `Gate for unit ${ord}: ${note}`);
       }
+      // (wicked-core judge fallback) A gate judged by a fallback seat says so in the thread, in the engine's words.
+      const fallback = judgeFallbackLabel(event as { assurance?: unknown });
+      if (fallback !== null) narrate(flight, `Gate for unit ${ord}: ${fallback}`);
       return;
     }
 

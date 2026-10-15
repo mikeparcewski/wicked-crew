@@ -34,6 +34,7 @@
  *    forever), so the launch simply omits `projectId` — an unfiled governed run (CREW-UX-2).
  */
 
+import { judgeFallbackLabel } from '../core/deliver-text.js';
 import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
 import { mkdirSync, existsSync, rmSync, statSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
@@ -893,11 +894,14 @@ export async function startInteractiveDraftSubscriber(
     // Wave 6 — the honest gate (F-7R2-005): a unit NOTHING gated must read as UNGATED in the thread,
     // never as approved; the engine says so on `gateEvaluated.ungated` and names the missing layers.
     if (event.type === 'gateEvaluated') {
+      const ord = typeof event.ord === 'number' ? event.ord : 0;
       const note = ungatedGateNote(event);
       if (note !== null) {
-        const ord = typeof event.ord === 'number' ? event.ord : 0;
         narrate(flight, `Gate for ${units.idAt(ord)}: ${note}`);
       }
+      // (wicked-core judge fallback) A gate judged by a fallback seat says so in the thread, in the engine's words.
+      const fallback = judgeFallbackLabel(event as { assurance?: unknown });
+      if (fallback !== null) narrate(flight, `Gate for ${units.idAt(ord)}: ${fallback}`);
       return;
     }
 
