@@ -533,8 +533,7 @@ function installShutdownHandlers(): void {
   });
   // Normal exit (`process.exit` anywhere, main() falling off): an 'exit' handler cannot
   // await, so this is the synchronous SIGTERM sweep. After the graceful path above it is
-  // a no-op re-scan; on a plain exit it is the only reaping that happens, and the
-  // bridges' own stdin-EOF watchdog (packages/agent-acp-bridges) is the final backstop.
+  // a no-op re-scan; on a plain exit it is the only reaping that happens.
   process.on('exit', () => {
     bridgeReaper.sweepSync();
   });
