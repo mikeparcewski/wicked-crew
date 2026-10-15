@@ -120,12 +120,14 @@ export function settingsFilePath(): string {
 }
 
 /**
- * The daemon's QE acceptance setting as it stands on disk, read SYNCHRONOUSLY — for the engine's
- * boot value (`WICKED_QE_ACCEPTANCE_OFF`), which must be in place before `Core.spawn` arms the bus
- * bridge. The file `getSettings` reads, or — before a non-default state home is seeded from it —
- * the shared file it will be seeded from. Anything unreadable reads as `'required'` (fail closed).
+ * The daemon's QE acceptance setting as it stands on disk NOW, read SYNCHRONOUSLY — what the
+ * engine's mirror is set from (`syncEngineQeSetting`), and its boot value (`WICKED_QE_ACCEPTANCE_OFF`,
+ * which must be in place before `Core.spawn` arms the bus bridge). Read synchronously, so the mirror
+ * is never set from a read that a later edit or write overtook. The file `getSettings` reads, or —
+ * before a non-default state home is seeded from it — the shared file it will be seeded from.
+ * Anything unreadable reads as `'required'` (fail closed).
  */
-function bootQeAcceptanceMode(): 'required' | 'off' {
+function diskQeAcceptanceMode(): 'required' | 'off' {
   const path = settingsFilePath();
   const override = process.env['WICKED_CREW_SYSTEM_SETTINGS'];
   const seeded = existsSync(path) || (override !== undefined && override !== '') || isDefaultStateHome();
@@ -1061,11 +1063,6 @@ export class CoreAdapter {
   private engineBus: EngineBus | null = null;
   /** What crew last handed the engine's `setQeAcceptanceOff` (the engine starts with the boot value). */
   private engineQeOff: string | null = null;
-  /** Bumped around every settings write: a read that began before a write finished never moves
-   *  the engine's QE mirror (the write's own value is the one that stands). */
-  private settingsWriteGen = 0;
-  /** Settings writes run one at a time, so the last write to land is the last to set the mirror. */
-  private settingsWrites: Promise<unknown> = Promise.resolve();
   /**
    * `true` when this adapter drives the DETERMINISTIC OFFLINE engine (`Core.spawnStub`) rather
    * than the production one — i.e. the `StubDispatcher` (every seat votes for the first roster
@@ -1185,7 +1182,7 @@ export class CoreAdapter {
     // The QE acceptance setting's engine mirror (`syncEngineQeSetting`) must hold BEFORE the engine
     // arms its bus bridge inside `spawn`, or a bus request in between would launch under the
     // default: hand the boot value over in the engine's own variable, read at spawn.
-    if (bootQeAcceptanceMode() === 'off') process.env['WICKED_QE_ACCEPTANCE_OFF'] = QE_OFF_REASON;
+    if (diskQeAcceptanceMode() === 'off') process.env['WICKED_QE_ACCEPTANCE_OFF'] = QE_OFF_REASON;
     else delete process.env['WICKED_QE_ACCEPTANCE_OFF'];
     try {
       this.core = this.stub ? Core.spawnStub(opts.dbPath) : Core.spawn(opts.dbPath);
@@ -2097,9 +2094,10 @@ export class CoreAdapter {
       await this._armCampaignWorkflow(wf);
     }
     // The engine reads its mirror of the QE acceptance setting as each node dispatches: refresh it
-    // from the settings file now, so a hand edit since the last read is what the campaign starts
-    // under (`syncEngineQeSetting`; a failed read leaves the mirror as it was).
-    await this.getSettings().catch(() => null);
+    // from the settings file now (synchronously, no added wait), so a hand edit since the last read
+    // is what the campaign starts under (`syncEngineQeSetting`; an unreadable file reads as
+    // 'required': fail closed).
+    this.syncEngineQeSetting(true);
     // The roster crew hands the ENGINE (F-086, the campaign half of wave 6's `core/engine-roster.ts`):
     // a def built from `rosterWithStanding()` carries crew's `health {status}` / `auth` /
     // `council_eligible` readings on every node's `run_spec.clis`; core-ts ≥ 0.7.22 parses `health`
@@ -3418,14 +3416,20 @@ export class CoreAdapter {
    * through `launchRun`, so crew cannot add the skip to them. With `qeAcceptance: 'off'` the engine
    * skips such a launch that gives no QE word of its own, with {@link QE_OFF_REASON}, and only when
    * the run's contract requires QE acceptance (the engine resolves that itself, so a run with nothing
-   * to skip is left alone, never refused). Called with every settings read, so the engine follows
-   * a `PUT /settings` and a hand-edited settings file alike. An addon without the method has no such
-   * mirror: there, engine-originated launches still require QE acceptance (`engineQeSettingSupported`).
+   * to skip is left alone, never refused).
+   *
+   * Runs after every settings read and write, and reads the file itself, synchronously
+   * (`diskQeAcceptanceMode`): the mirror is the file as it stands at that moment, never the result of
+   * an async read that a later edit or write overtook. `readOk: false` (the settings read failed,
+   * which `/health` and `launchRun` read as `'required'`) clears it: fail closed. An addon without
+   * the method has no such mirror (`engineQeSettingSupported`): there, engine-originated launches
+   * still require QE acceptance.
    */
-  private syncEngineQeSetting(settings: { qeAcceptance?: unknown } | null): void {
-    const core = this.core as { setQeAcceptanceOff?: (reason: string | null) => void };
-    if (typeof core.setQeAcceptanceOff !== 'function') return;
-    const want = qeAcceptanceMode(settings) === 'off' ? QE_OFF_REASON : null;
+  private syncEngineQeSetting(readOk: boolean): void {
+    // `core` is absent on a bare prototype-backed adapter (the settings read-validation suites).
+    const core = this.core as { setQeAcceptanceOff?: (reason: string | null) => void } | undefined;
+    if (typeof core?.setQeAcceptanceOff !== 'function') return;
+    const want = readOk && diskQeAcceptanceMode() === 'off' ? QE_OFF_REASON : null;
     if (this.engineQeOff === want) return;
     core.setQeAcceptanceOff.call(this.core, want);
     this.engineQeOff = want;
@@ -3438,11 +3442,14 @@ export class CoreAdapter {
   }
 
   async getSettings(): Promise<CrewSystemSettings> {
-    const gen = this.settingsWriteGen;
-    const settings = await this.readSettings();
-    // A read that raced a write may have seen the file from before it: leave the mirror to the write.
-    if (gen === this.settingsWriteGen) this.syncEngineQeSetting(settings);
-    return settings;
+    let readOk = false;
+    try {
+      const settings = await this.readSettings();
+      readOk = true;
+      return settings;
+    } finally {
+      this.syncEngineQeSetting(readOk);
+    }
   }
 
   private async readSettings(): Promise<CrewSystemSettings> {
@@ -3603,21 +3610,16 @@ export class CoreAdapter {
     }
   }
 
-  updateSettings(patch: Partial<CrewSystemSettings>): Promise<CrewSystemSettings> {
-    const write = this.settingsWrites.then(async () => {
-      this.settingsWriteGen += 1;
-      try {
-        const current = await this.readSettings();
-        const next = { ...current, ...patch };
-        await publishSettingsFile(settingsFilePath(), JSON.stringify(next, null, 2), true);
-        this.syncEngineQeSetting(next);
-        return next;
-      } finally {
-        this.settingsWriteGen += 1;
-      }
-    });
-    this.settingsWrites = write.catch(() => undefined);
-    return write;
+  async updateSettings(patch: Partial<CrewSystemSettings>): Promise<CrewSystemSettings> {
+    const current = await this.getSettings();
+    const next = { ...current, ...patch };
+    try {
+      await publishSettingsFile(settingsFilePath(), JSON.stringify(next, null, 2), true);
+    } finally {
+      // The file as it now stands (this write, or a later one that already landed).
+      this.syncEngineQeSetting(true);
+    }
+    return next;
   }
 
   /**

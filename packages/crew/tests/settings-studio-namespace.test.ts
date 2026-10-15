@@ -407,12 +407,12 @@ describe('adapter getSettings enforces the studio.* cap on READ (crew#325)', () 
     JSON.parse(readFileSync(settingsFilePath(), 'utf8')) as Record<string, unknown>;
 
   const read = (): Promise<CrewSystemSettings> =>
-    CoreAdapter.prototype.getSettings.call({} as CoreAdapter);
+    CoreAdapter.prototype.getSettings.call(Object.create(CoreAdapter.prototype) as CoreAdapter);
 
-  // `updateSettings` calls `this.getSettings()`, so the fake `this` carries that one method.
+  // `updateSettings` calls `this.getSettings()`: a prototype-backed `this` carries it (and no engine).
   const update = (patch: Partial<CrewSystemSettings>): Promise<CrewSystemSettings> =>
     CoreAdapter.prototype.updateSettings.call(
-      { getSettings: CoreAdapter.prototype.getSettings } as unknown as CoreAdapter,
+      Object.create(CoreAdapter.prototype) as CoreAdapter,
       patch,
     );
 
