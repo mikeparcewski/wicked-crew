@@ -81,6 +81,18 @@ async function contractOf(runId: string, timeoutMs = 45_000): Promise<Record<str
   }
 }
 
+/** What a run that did not settle was doing: its units and its last events (a failure message). */
+async function runDump(runId: string): Promise<string> {
+  const run = (await call('GET', `/api/v1/runs/${encodeURIComponent(runId)}`)).body['run'] as
+    | { session?: Record<string, unknown>; units?: Array<Record<string, unknown>> }
+    | undefined;
+  const units = (run?.units ?? []).map((u) => ({ ord: u['ord'], status: u['status'], cli: u['cli'] ?? u['assigned_cli'], attempt: u['attempt'] }));
+  const events = (((await call('GET', `/api/v1/runs/${encodeURIComponent(runId)}/events`)).body['events'] ?? []) as Array<Record<string, unknown>>)
+    .slice(-40)
+    .map((e) => [e['type'], e['ord'], e['cli'], e['status'], e['message'], e['reason']].filter((v) => v !== undefined && v !== null).join(':'));
+  return JSON.stringify({ status: run?.session?.['status'], units, events }).slice(0, 6000);
+}
+
 const qeOf = (session: Record<string, unknown>): Record<string, unknown> | undefined =>
   (session['assurance'] as Record<string, unknown>)['qe'] as Record<string, unknown> | undefined;
 
@@ -214,7 +226,7 @@ describe.skipIf(!supported)('qeAcceptance on the launches the engine makes on it
     for (;;) {
       status = String((await contractOf(id))['status']);
       if (['completed', 'failed', 'cancelled', 'awaiting_human'].includes(status)) break;
-      if (Date.now() > deadline) throw new Error(`${id} never settled (last ${status})`);
+      if (Date.now() > deadline) throw new Error(`${id} never settled (last ${status}): ${await runDump(id)}`);
       await new Promise((r) => setTimeout(r, 250));
     }
     const events = ((await call('GET', `/api/v1/runs/${id}/events`)).body['events'] ?? []) as Array<Record<string, unknown>>;
