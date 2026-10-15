@@ -10,6 +10,19 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Added
+- **Governed seats can ask the operator mid-turn with the MCP `ask` tool (DES-CONTAINER-FLOOR step 5).** crew serves
+  a one-tool MCP server (`src/mcp/ask-server.ts`, on the MCP SDK's stateless streamable-HTTP transport) at
+  `POST /api/v1/mcp/ask`. Seat containers reach it only through agentgateway's MCP route (`http://agw:8700`), and each call
+  carries the unit's capability token (`WICKED_MCP_TOKEN`) in `Authorization`, verified by the engine (`askUnit`,
+  `openAsk`, `closeAsk`). The question shows in studio's existing question card: the engine emits the same
+  `elicitationCreated` frame (now with `source: "ask"`, `ord`, `attempt`), and the operator answers through the same
+  `POST /api/v1/runs/:id/elicitation`. The tool call holds until the operator answers, declines or dismisses it, the run
+  ends, or `WICKED_ASK_TIMEOUT_SECS` passes (default 600, 10 to 3600); a timeout returns a clear no-answer result. A run
+  shows one question at a time, so parallel units' asks queue per run in arrival order. The run's event log records the
+  question and the answer (`elicitationResolved.answer`, `heldMs`). claude, codex and pi; not opencode or copilot.
+  Requires the wicked-core-ts release carrying the engine half (wicked-core, stacked on wicked-core#950).
+
 ### Changed
 - **BREAKING (C5): governed seats run in containers by default; ACP is removed from the seats (with wicked-core's
   matching change).** The daemon sets `WICKED_SEAT_FLOOR=container` at boot unless the operator chose a

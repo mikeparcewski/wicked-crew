@@ -115,6 +115,7 @@ import { DEMO_PRESET, demoLaunchRoots, registerDemoDocumentRoute, registerDemoRo
 import { projectDocsRoot } from '../interactive/project-root.js';
 import { registerSkillsRoutes } from './skills.js';
 import { registerMcpRoutes } from './mcp.js';
+import type { AskServer } from '../mcp/ask-server.js';
 import type { McpBroker } from '../mcp/broker.js';
 import type { McpCallRecordSource } from '../mcp/call-records.js';
 import { McpPolicies } from '../mcp/policies.js';
@@ -1037,6 +1038,7 @@ export interface RuntimeDeps {
   mcp?: McpRegistry;
   /** The MCP broker's call path (DES-MCP-TOOLS-001 S3) over that registry; absent → `POST /mcp/call` 503. */
   mcpBroker?: McpBroker;
+  askServer?: AskServer;
   /** The broker's call records (DES-MCP-TOOLS-001 S7), the ones `GET /mcp/usage` folds; absent → 503. */
   mcpCalls?: McpCallRecordSource;
   /** crew#661 — the runs that launched with a skill gap before crew#935 (`AgentSession.skill_gaps`),
@@ -6897,6 +6899,7 @@ export function registerRoutes(
     log: (m) => app.log.info(m),
   });
   registerMcpRoutes(app, {
+    ...(runtime.askServer !== undefined ? { askServer: runtime.askServer } : {}),
     ...(runtime.mcp !== undefined ? { registry: runtime.mcp, toolLister: () => CoreAdapter.mcpToolLister() } : {}),
     ...(runtime.mcpBroker !== undefined ? { broker: runtime.mcpBroker } : {}),
     ...(mcpPolicies !== undefined ? { policies: mcpPolicies } : {}),

@@ -21,6 +21,46 @@
 
 export type * from 'wicked-crew-api-types';
 
+/** Bound identity is read before opening, so queued asks produce no events. */
+export interface AskUnit {
+  runId: string;
+  ord: number;
+  attempt: number;
+  seat: string;
+  timeoutSecs: number;
+}
+
+export interface AskTicket extends AskUnit {
+  elicitationId: string;
+}
+
+export interface AskRequest {
+  token: string;
+  question: string;
+  choices?: string[];
+  recommended?: number;
+}
+
+export interface AskAdapter {
+  askUnit(token: string): Promise<AskUnit>;
+  openAsk(request: AskRequest): Promise<AskTicket>;
+  closeAsk(id: string, reason: 'timeout' | 'teardown'): Promise<boolean>;
+}
+
+export class AskError extends Error {
+  constructor(readonly code: 'invalid_token' | 'bad_request' | 'run_ended', message: string) {
+    super(message);
+    this.name = 'AskError';
+  }
+}
+
+export class AskUnsupportedError extends Error {
+  constructor() {
+    super('ask_unsupported');
+    this.name = 'AskUnsupportedError';
+  }
+}
+
 import type { RunTeamResponse, RunTeamUnit, SystemSettings } from 'wicked-crew-api-types';
 
 /** `Core.runTeam`'s JSON (DES-TEAMING-002 P1): the persisted half of `GET /runs/:id/team`, before

@@ -1644,6 +1644,11 @@ export interface CoreEvent {
   message?: string;
   /** `elicitationCreated` (DES-002): the id minted by the actor for this elicitation round. */
   elicitationId?: string;
+  /** `elicitationCreated`: 'ask' for worker questions; chat refusal frames retain their source. */
+  source?: 'ask' | ChatRefusalSource;
+  /** The operator's accepted free-text or single-select answer. */
+  answer?: string;
+  heldMs?: number;
   /** `elicitationCreated`: an ordered set of valid responses; `null` / absent = free-text. */
   options?: string[] | null;
   /**
@@ -1698,7 +1703,7 @@ export interface CoreEvent {
   /** `terminalOpened`: the working directory the PTY was opened in. */
   cwd?: string;
   // ── DES-STUDIO-COCKPIT-001 §3 B-events (Phase B insight wires) ──
-  /** `unitDispatched`/`cliUsage`: 0-based dispatch attempt (`>0` = a re-dispatch / rework). */
+  /** `unitDispatched`/`cliUsage`/ask `elicitationCreated`: 0-based dispatch attempt (`>0` = a re-dispatch / rework). */
   attempt?: number;
   /** `cliUsage`: prompt/input tokens for the unit run. */
   inputTokens?: number;
