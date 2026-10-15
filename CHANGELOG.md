@@ -10,6 +10,20 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+- **Every answer step of a chat carries its scope statement (#1033).** A follow-up was told the scope
+  only when it changed since the last turn, so a seat with no memory of the first turn (codex on the
+  single-shot carrier) answered "the supplied repository contains only `tmp`". Every turn's step now
+  carries the "Repositories in scope" section, as the first one does.
+- **A project chat reads its repositories whether or not the project's code graph is built, and a
+  repository attached after the chat started is refused at once (#1034).** The ask run now declares
+  its scope's repositories as read roots at launch (`extraReadRoots`); before, a project chat with no
+  built graph had no read root for them, and every read was refused. A run's read roots are fixed at
+  launch, so a message whose project (or "everything") scope now resolves to other repositories is
+  refused with 409 `chat_scope_changed` ("Start a new chat to read them"), as a changed graph already
+  was, instead of being accepted into a run that refuses every read of the new repository. The empty
+  "everything" statement now says to register a repository and start a new chat.
+
 ## [0.12.1] — 2026-10-15
 
 A patch release: a launch refused for QE acceptance carries a stable code (#1023), the QE acceptance setting covers the launches the engine makes on its own (#1025), a gate judged by a fallback seat says so (#1024), a registered repository whose onboarding couldn't start keeps its project (#1026), a project chat sees a repository attached after it started or asks for a new chat (#1026), and roster, `/health` and websocket reads no longer block the daemon on skills-root walks (#1027). It pins **wicked-core-ts ^0.11.2**, the engine that carries #1025's and #1024's halves (core #952, #953), the shell-read boundary on every carrier's shell tool (core #955, core#951), the async whole-roster QE admission #1027 uses (core #956), and the fix for concurrent engine-made runs that hung or stopped the engine (core #966, core#957). The bundled UI is **wicked-studio 0.9.2**.
