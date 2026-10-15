@@ -11,6 +11,13 @@ mentioned only where a daemon release depends on them.
 ## [Unreleased]
 
 ### Added
+- **An ask question says who asked, on the wire and after a reload.** The elicitation cache keeps the engine's additive
+  `elicitationCreated` fields for a seat's `ask` question (`source: "ask"`, `ord`, `attempt`, and the new `seat`, the
+  asking unit's roster seat key), and `GET /api/v1/runs/:id/elicitation` returns them; each is kept only when
+  well-formed and absent for every other producer. `wicked-crew-api-types`: `ElicitationInfo.{source, ord, attempt,
+  seat}` and `CoreEvent.seat`. Studio names the asking seat on the question card from these, instead of the seat the
+  run is running now. Needs the wicked-core change that adds `seat` to the frame (stacked on wicked-core#958); with
+  an engine without it, `ord` still identifies the asking step.
 - **Governed seats can ask the operator mid-turn with the MCP `ask` tool (DES-CONTAINER-FLOOR step 5).** crew serves
   a one-tool MCP server (`src/mcp/ask-server.ts`, on the MCP SDK's stateless streamable-HTTP transport) at
   `POST /api/v1/mcp/ask`. Seat containers reach it only through agentgateway's MCP route (`http://agw:8700`), and each call

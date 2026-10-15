@@ -1649,6 +1649,11 @@ export interface CoreEvent {
   /** The operator's accepted free-text or single-select answer. */
   answer?: string;
   heldMs?: number;
+  /**
+   * ask `elicitationCreated` (wicked-core, additive): the seat key that asked — the asking unit's
+   * roster seat for that `attempt` (e.g. `pi`, `codex#2`). Absent for every other producer.
+   */
+  seat?: string;
   /** `elicitationCreated`: an ordered set of valid responses; `null` / absent = free-text. */
   options?: string[] | null;
   /**
@@ -5633,6 +5638,17 @@ export interface ElicitationInfo {
    * focus, DESIGN-interaction rule 6).
    */
   recommended?: number;
+  /**
+   * (ask) Who asked, relayed from the engine's additive `elicitationCreated` fields for a seat's
+   * MCP `ask` question: `source: "ask"`, the asking unit's `ord` and dispatch `attempt`, and the
+   * `seat` key that asked (the roster instance, e.g. `pi`, `codex#2`). ABSENT for every other
+   * producer and on an engine that predates them; a skin then names the seat running the run's
+   * current step.
+   */
+  source?: 'ask';
+  ord?: number;
+  attempt?: number;
+  seat?: string;
   receivedAt: string;
 }
 
