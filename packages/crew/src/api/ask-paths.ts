@@ -19,11 +19,13 @@ export interface AskPath {
   /** The run the conversation is, once the first message launched it. */
   runId?: string;
   /** crew#1020: the resolved scope's graph binding at launch; a run cannot acquire a new one. */
-  launchedCodeGraphDb?: string | null;
+  launchGraphBinding?: string | null;
+  /** Stable repository + graph key last delivered to the run by an accepted message. */
+  lastToldScopeKey?: string;
   /** A message of this chat is in flight on this daemon — launching the run or continuing it
    *  (status read → proposal → approval) — so a second one meanwhile is `turn_in_flight`. */
   busy?: boolean;
-  /** Bumped on open or scope reset; a launch that resolves after the chat was closed and
+  /** Bumped on open; a launch that resolves after the chat was closed and
    *  reopened must not attach its run to the newcomer. */
   generation: number;
   /** The answer steps added so far (`answer-1`, `answer-2`, …). */
@@ -43,13 +45,6 @@ export interface AskPath {
 
 export class AskPathIndex {
   private readonly paths = new Map<string, AskPath>();
-  private readonly scopeResetListeners = new Set<(runId: string) => void>();
-
-  /** The relay shares this index with routes; discard a detached run before cancellation can
-   * emit terminal frames, without routing a scope refresh through the chat-close fold. */
-  onScopeReset(listener: (runId: string) => void): void {
-    this.scopeResetListeners.add(listener);
-  }
   /** Per chat id, across closes — a close-and-reopen must read as a NEW generation. */
   private readonly generations = new Map<string, number>();
 
@@ -120,40 +115,9 @@ export class AskPathIndex {
     if (p === undefined || p.generation !== generation) return false;
     p.busy = false;
     p.runId = runId;
-    p.launchedCodeGraphDb = codeGraphDb;
+    p.launchGraphBinding = codeGraphDb;
     p.steps.push(stepId);
     return true;
-  }
-
-  /** crew#1020: detach a path whose graph changed BEFORE cancelling it.
-   * Keep admission and the operator's primary; clear the old run's facts and engine pick.
-   * Transfer the message's lease to a fresh generation so an awaited cancel cannot reset a closed-and-reopened chat, and
-   * work holding the old generation cannot release or attach to this replacement path. */
-  resetForScope(chatId: string, lease: number): AskPath | undefined {
-    const p = this.paths.get(chatId);
-    if (p === undefined || p.generation !== lease || p.busy !== true) return undefined;
-    const next: AskPath = {
-      ...p,
-      generation: this.nextGeneration(chatId),
-      pa: p.primary ?? (p.eligible.length === 1 ? p.eligible[0]! : null),
-      steps: [],
-      classes: {},
-      reviewer: null,
-      helpers: [],
-    };
-    delete next.runId;
-    delete next.launchedCodeGraphDb;
-    this.paths.set(chatId, next);
-    if (p.runId !== undefined) for (const listener of this.scopeResetListeners) listener(p.runId);
-    return next;
-  }
-
-  /** A refused cancellation must keep the old path, never start a second run. Restore only
-   * under the reset's lease so a close/reopen during cancellation keeps its own path. */
-  restoreForScope(chatId: string, lease: number, previous: AskPath): void {
-    const current = this.paths.get(chatId);
-    if (current?.generation !== lease || current.busy !== true) return;
-    this.paths.set(chatId, { ...previous, generation: lease, busy: false });
   }
 
   /** A later message added an answer step. Returns the new step id. */

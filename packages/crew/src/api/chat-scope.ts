@@ -750,6 +750,7 @@ export function chatScopeStatement(chatId: string, scope: ChatScope, rules?: Rea
       '',
       'This chat covers every repository registered with this daemon, but none is registered yet:',
       'no repository is readable. Say so plainly if asked about code.',
+      'To read a repository, register it with this daemon and start a NEW chat to read it.',
       '',
     );
   } else if (scope.repos.length === 0 && scope.kind === 'project') {
@@ -764,6 +765,7 @@ export function chatScopeStatement(chatId: string, scope: ChatScope, rules?: Rea
           ? ` (members whose repository is no longer registered: ${scope.dangling.map((d) => `\`${d}\``).join(', ')}).`
           : ' (it has no `crew.repo` member).'),
       'Answer from general knowledge, and say plainly that no repository is readable if asked about code.',
+      'To read a repository, attach it to this project and start a NEW chat to read it.',
       '',
     );
   } else if (scope.repos.length === 0) {

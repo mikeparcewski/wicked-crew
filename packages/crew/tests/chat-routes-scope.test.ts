@@ -587,6 +587,7 @@ describe('POST /chats/:id/messages — refresh dynamic scopes', () => {
     const opened = await open({ chatId: 'dynamic', clis: ['claude'], projectId: 'p-live' });
     expect(opened.statusCode).toBe(201);
     expect(opened.json().scope.repos).toEqual([]);
+    expect(readFileSync(join(opened.json().scope.cwd as string, 'AGENTS.md'), 'utf8')).toContain('attach it to this project and start a NEW chat to read it');
     const cwd = opened.json().scope.cwd as string;
     writeFileSync(join(cwd, 'notes.txt'), 'keep me');
     const attached = await app.inject({ method: 'POST', url: '/api/v1/projects/p-live/members', payload: { kind: 'crew.repo', ref: 'r1' } });
@@ -605,8 +606,8 @@ describe('POST /chats/:id/messages — refresh dynamic scopes', () => {
   });
 
   function park(id: string) {
-    chatTurns.observe({ type: 'chatReply', chat: id, cliKey: askPaths.get(id)?.pa ?? 'claude', text: 'Attach the repository and re-ask.', ok: true });
-    adapter.sessionsDetail = async () => [{ session: { id: 'run-p1', status: 'awaiting_human' } }] as Awaited<ReturnType<CoreAdapter['sessionsDetail']>>;
+    chatTurns.observe({ type: 'chatReply', chat: id, cliKey: askPaths.get(id)?.pa ?? 'claude', text: 'Attach the repository and start a new chat to read it.', ok: true });
+    adapter.sessionsDetail = async () => [{ session: { id: askPaths.get(id)?.runId, status: 'awaiting_human' } }] as Awaited<ReturnType<CoreAdapter['sessionsDetail']>>;
     const propose = vi.fn<CoreAdapter['proposePlan']>(async () => ({} as Awaited<ReturnType<CoreAdapter['proposePlan']>>));
     adapter.proposePlan = propose;
     adapter.confirmGate = vi.fn(async () => 'approved');
@@ -614,38 +615,50 @@ describe('POST /chats/:id/messages — refresh dynamic scopes', () => {
     return propose;
   }
 
-  it('replaces a parked path when attaching a repo gives the project a graph', async () => {
-    const binding = vi.spyOn(projectGraph, 'resolveProjectGraphBinding').mockResolvedValue({ binding: null, reason: 'no members' });
+  it.each([null, 'bound'])('refuses a changed graph binding without consuming a turn; a new chat can launch (initial: %s)', async (initial) => {
+    const binding = vi.spyOn(projectGraph, 'resolveProjectGraphBinding').mockResolvedValue(
+      initial === null ? { binding: null, reason: 'no members' } : { binding: { dbPath: graphFile }, reason: 'ready' },
+    );
     try {
       expect((await open({ chatId: 'continuing', clis: ['claude'], primary: 'claude', projectId: 'p-live' })).statusCode).toBe(201);
       expect((await send('continuing')).statusCode).toBe(202);
       const original = askPaths.get('continuing')!;
-      expect(original).toMatchObject({ launchedCodeGraphDb: null });
+      expect(original.launchGraphBinding).toBe(initial === null ? null : graphFile);
       const propose = park('continuing');
+      const before = { ...original, steps: [...original.steps] };
+      const transcript = transcripts.read('continuing');
+      const turns = chatTurns.turnsOf('continuing');
+      projectRepoRefs.push('r1');
+      binding.mockResolvedValue(initial === null ? { binding: { dbPath: graphFile }, reason: 'ready' } : { binding: null, reason: 'unavailable' });
 
-      const attached = await app.inject({ method: 'POST', url: '/api/v1/projects/p-live/members', payload: { kind: 'crew.repo', ref: 'r1' } });
-      expect(attached.statusCode).toBe(201);
-      binding.mockResolvedValue({ binding: { dbPath: graphFile }, reason: 'project graph ready' });
-      const sent = await send('continuing');
-      expect(sent.statusCode).toBe(202);
-      expect(sent.json()).toMatchObject({ runId: 'run-p2', stepId: 'answer-1' });
-      expect(sent.json()).not.toHaveProperty('scopeRefreshed');
-      expect(adapter.cancelRun).toHaveBeenCalledExactlyOnceWith('run-p1');
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const sent = await send('continuing');
+        expect(sent.statusCode).toBe(409);
+        expect(sent.json()).toEqual({
+          code: 'chat_scope_changed',
+          error: "This chat's repositories changed since it started (1 now in scope). Start a new chat to read them — this one keeps its original scope.",
+        });
+        expect(askPaths.get('continuing')).toBe(original);
+        expect(askPaths.get('continuing')).toEqual(before);
+        expect(askPaths.busy('continuing')).toBe(false);
+        expect(chatTurns.turnsOf('continuing')).toEqual(turns);
+        expect(transcripts.read('continuing')).toEqual(transcript);
+      }
+      expect(adapter.cancelRun).not.toHaveBeenCalled();
       expect(propose).not.toHaveBeenCalled();
-      expect(launched).toHaveLength(2);
-      expect(adapter.launchRun).toHaveBeenCalledTimes(2);
-      expect(launched[1]).toMatchObject({ projectId: 'p-live', primary: 'claude' });
-      const instructions = (launched[1]!['plan'] as { steps: Array<{ instructions: string }> }).steps[0]!.instructions;
-      expect(instructions).toContain('/srv/repos/alpha');
-      expect(instructions).toContain('Where is the entry point?');
+      expect(adapter.confirmGate).not.toHaveBeenCalled();
+      expect(launched).toHaveLength(1);
+      expect(linkChatRun.mock.calls).toEqual([['continuing', 'run-p1']]);
       const detail = await app.inject({ method: 'GET', url: '/api/v1/chats/continuing' });
       expect(detail.json().scope.repos).toEqual([expect.objectContaining({ id: 'r1' })]);
-      expect(askPaths.get('continuing')).toMatchObject({
-        eligible: original.eligible, primary: original.primary, pa: original.pa,
-        launchedCodeGraphDb: graphFile, steps: ['answer-1'], busy: false,
-      });
-      expect(askPaths.get('continuing')!.generation).toBeGreaterThan(original.generation);
-      expect(linkChatRun.mock.calls).toEqual([['continuing', 'run-p1'], ['continuing', 'run-p2']]);
+      for (const file of ['AGENTS.md', 'CLAUDE.md']) expect(readFileSync(join(detail.json().scope.cwd as string, file), 'utf8')).toContain('/srv/repos/alpha');
+
+      expect((await open({ chatId: 'fresh', clis: ['claude'], projectId: 'p-live' })).statusCode).toBe(201);
+      const fresh = await send('fresh');
+      expect(fresh.statusCode).toBe(202);
+      expect(fresh.json()).toMatchObject({ runId: 'run-p2', stepId: 'answer-1' });
+      expect(launched).toHaveLength(2);
+      expect((launched[1]?.['plan'] as { steps: Array<{ instructions: string }> }).steps[0]?.instructions).toContain('/srv/repos/alpha');
     } finally {
       binding.mockRestore();
     }
@@ -655,135 +668,6 @@ describe('POST /chats/:id/messages — refresh dynamic scopes', () => {
     relay.onTeamRow({ event_type: 'wicked.team.step.completed', payload: { run_id: runId, step_id: 'answer-1', status: 'ok', output_ref: `unit:${runId}:1:1` } } as BusEvent);
     return relay.onCoreEvent({ type: 'unitDone', session: runId, ord: 1 } as CoreEvent);
   }
-
-  async function graphUpgrade(id: string, clis = ['claude'], primary?: string) {
-    const binding = vi.spyOn(projectGraph, 'resolveProjectGraphBinding').mockResolvedValue({ binding: null, reason: 'no members' });
-    const opened = await open({ chatId: id, clis, projectId: 'p-live', ...(primary ? { primary } : {}) });
-    expect(opened.statusCode, opened.body).toBe(201);
-    expect((await send(id)).statusCode).toBe(202);
-    relay.onTeamRow({ event_type: 'wicked.team.path.started', payload: { run_id: 'run-p1', cli: primary ?? clis.at(-1), selection: primary ? 'chosen' : 'random' } } as BusEvent);
-    park(id);
-    projectRepoRefs.push('r1');
-    binding.mockResolvedValue({ binding: { dbPath: graphFile }, reason: 'project graph ready' });
-    return binding;
-  }
-
-  it('detaches and forgets the old run before cancellation; only the replacement answers the new turn', async () => {
-    const binding = await graphUpgrade('relay');
-    const forget = vi.spyOn(relay, 'forget');
-    try {
-      // The old answer has already spoken, matching the terminal fallback in the review.
-      chatTurns.begin('relay', ['claude'], 'first answer');
-      await completed('run-p1');
-      broadcast.length = 0;
-      adapter.cancelRun = vi.fn(async (runId) => {
-        await relay.onCoreEvent({ type: 'runCancelled', session: runId } as CoreEvent);
-        return 'cancelled';
-      });
-      const sent = await send('relay');
-      expect(sent.statusCode).toBe(202);
-      expect(broadcast).toEqual([]);
-      expect(chatTurns.inFlight('relay')?.turnId).toBe(sent.json().turnId);
-      expect(forget).toHaveBeenCalledExactlyOnceWith('run-p1');
-      expect(forget.mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(adapter.cancelRun).mock.invocationCallOrder[0]!);
-      expect((await send('relay')).statusCode).toBe(409);
-      await completed('run-p2');
-      expect(broadcast).toEqual([expect.objectContaining({ type: 'chatReply', run_id: 'run-p2', turn_id: sent.json().turnId, ok: true })]);
-      expect(transcripts.read('relay')).toContainEqual(expect.objectContaining({ kind: 'seat', turnId: sent.json().turnId, text: 'See alpha/src/index.ts:10' }));
-    } finally {
-      binding.mockRestore();
-    }
-  });
-
-  it('refuses graph replacement while the old path is executing, even after its turn cleared', async () => {
-    const binding = await graphUpgrade('executing');
-    try {
-      adapter.sessionsDetail = vi.fn(async () => [{ session: { id: 'run-p1', status: 'executing' } }] as Awaited<ReturnType<CoreAdapter['sessionsDetail']>>);
-      const sent = await send('executing');
-      expect(sent.statusCode).toBe(409);
-      expect(sent.json()).toMatchObject({ code: 'turn_in_flight', status: 'executing' });
-      expect(adapter.cancelRun).not.toHaveBeenCalled();
-      expect(launched).toHaveLength(1);
-      expect(askPaths.get('executing')).toMatchObject({ runId: 'run-p1', busy: false });
-      expect(chatTurns.inFlight('executing')).toBeNull();
-    } finally {
-      binding.mockRestore();
-    }
-  });
-
-  it('keeps the old path and releases the turn if cancellation fails, then retries safely', async () => {
-    const binding = await graphUpgrade('cancel-fails');
-    const old = askPaths.get('cancel-fails')!;
-    try {
-      vi.mocked(adapter.cancelRun).mockRejectedValueOnce(new Error('cancel unavailable'));
-      const sent = await send('cancel-fails');
-      expect(sent.statusCode).toBe(502);
-      expect(sent.json().error).toContain('cancel unavailable');
-      expect(launched).toHaveLength(1);
-      expect(askPaths.chatOf('run-p1')).toBe('cancel-fails');
-      expect(askPaths.get('cancel-fails')).toMatchObject({ runId: 'run-p1', steps: old.steps, pa: old.pa, launchedCodeGraphDb: null, busy: false });
-      expect(chatTurns.inFlight('cancel-fails')).toBeNull();
-      expect((await send('cancel-fails')).statusCode).toBe(202);
-      expect(launched).toHaveLength(2);
-    } finally {
-      binding.mockRestore();
-    }
-  });
-
-  it.each([false, true])('a close/reopen during cancellation keeps the new chat (cancel fails: %s)', async (cancelFails) => {
-    const binding = await graphUpgrade('cancel-reuse');
-    let release: () => void = () => undefined;
-    const held = new Promise<void>((done) => { release = done; });
-    adapter.cancelRun = vi.fn(async () => {
-      await held;
-      if (cancelFails) throw new Error('cancel unavailable');
-      return 'cancelled';
-    });
-    try {
-      const sending = send('cancel-reuse').then((result) => result);
-      await vi.waitFor(() => expect(adapter.cancelRun).toHaveBeenCalledOnce());
-      expect(askPaths.chatOf('run-p1')).toBeUndefined();
-      expect((await app.inject({ method: 'DELETE', url: '/api/v1/chats/cancel-reuse' })).statusCode).toBe(200);
-      expect((await open({ chatId: 'cancel-reuse', clis: ['claude'], repoRefs: ['alpha'] })).statusCode).toBe(201);
-      const fresh = askPaths.get('cancel-reuse');
-      release();
-      expect((await sending).statusCode).toBe(cancelFails ? 502 : 409);
-      expect(askPaths.get('cancel-reuse')).toBe(fresh);
-      expect(askPaths.get('cancel-reuse')?.busy).not.toBe(true);
-      expect(askPaths.chatOf('run-p1')).toBeUndefined();
-      expect(launched).toHaveLength(1);
-      expect(chatTurns.inFlight('cancel-reuse')).toBeNull();
-    } finally {
-      release();
-      binding.mockRestore();
-    }
-  });
-
-  it.each([undefined, 'claude'])('resets the engine pick and records the replacement audience (operator primary: %s)', async (primary) => {
-    const roster = vi.spyOn(CoreAdapter, 'roster').mockReturnValue([
-      { key: 'claude', governance_class: 'acp_input_governance', acp: { acp_input_governance: true, os_sandbox: false } },
-      { key: 'opencode', governance_class: 'acp_input_governance', acp: { acp_input_governance: true, os_sandbox: false } },
-    ]);
-    let binding: Awaited<ReturnType<typeof graphUpgrade>> | undefined;
-    try {
-      binding = await graphUpgrade('audience', ['claude', 'opencode'], primary);
-      askPaths.observe('run-p1', { pa: primary ?? 'opencode' });
-      const sent = await send('audience');
-      expect(sent.statusCode).toBe(202);
-      expect(askPaths.get('audience')?.pa).toBe(primary ?? null);
-      expect(sent.json().seats).toEqual(primary ? [primary] : []);
-      expect(transcripts.read('audience').filter((r) => r.kind === 'user').at(-1)).toMatchObject({ seats: primary ? [primary] : [] });
-      expect(chatTurns.turnsOf('audience')[0]?.pending).toEqual(primary ? [primary] : ['claude', 'opencode']);
-      expect(launched[1]?.['primary']).toBe(primary);
-      // The replacement may select a different PA; its reply must still correlate.
-      relay.onTeamRow({ event_type: 'wicked.team.path.started', payload: { run_id: 'run-p2', cli: 'claude', selection: primary ? 'chosen' : 'random' } } as BusEvent);
-      await completed('run-p2');
-      expect(broadcast).toContainEqual(expect.objectContaining({ type: 'chatReply', cliKey: 'claude', turn_id: sent.json().turnId }));
-    } finally {
-      binding?.mockRestore();
-      roster.mockRestore();
-    }
-  });
 
   it('refreshes transcript roots before the first answer from a newly attached repo', async () => {
     expect((await open({ chatId: 'roots', clis: ['claude'], projectId: 'p-live' })).statusCode).toBe(201);
@@ -818,6 +702,48 @@ describe('POST /chats/:id/messages — refresh dynamic scopes', () => {
     } finally {
       binding.mockRestore();
     }
+  });
+
+  it.each(['executing', 'proposal fails'])('still prefixes a refreshed statement after a refused send (%s)', async (refusal) => {
+    // Everything scopes keep a null binding when membership changes.
+    vi.mocked(adapter.listRepos).mockResolvedValueOnce([]);
+    expect((await open({ chatId: 'retry-scope', clis: ['claude'], scopeKind: 'everything' })).statusCode).toBe(201);
+    vi.mocked(adapter.listRepos).mockResolvedValueOnce([]);
+    expect((await send('retry-scope')).statusCode).toBe(202);
+    const propose = park('retry-scope');
+    const originalKey = askPaths.get('retry-scope')?.lastToldScopeKey;
+    const roots = vi.spyOn(transcripts, 'registerRoots');
+    if (refusal === 'executing') {
+      adapter.sessionsDetail = async () => [{ session: { id: 'run-p1', status: 'executing' } }] as Awaited<ReturnType<CoreAdapter['sessionsDetail']>>;
+    } else {
+      propose.mockRejectedValueOnce(new Error('proposal unavailable'));
+    }
+    const refused = await send('retry-scope');
+    expect(refused.statusCode).toBe(refusal === 'executing' ? 409 : 400);
+    if (refusal === 'executing') expect(refused.json().code).toBe('turn_in_flight');
+    expect(askPaths.get('retry-scope')?.lastToldScopeKey).toBe(originalKey);
+    expect(askPaths.get('retry-scope')).toMatchObject({ steps: ['answer-1'], busy: false });
+    expect(chatTurns.inFlight('retry-scope')).toBeNull();
+    expect((await app.inject({ method: 'GET', url: '/api/v1/chats/retry-scope' })).json().scope.repos).toHaveLength(1);
+    expect(roots).toHaveBeenCalledWith('retry-scope', [{ absRoot: '/srv/repos/alpha', name: 'alpha' }]);
+    const accepted = park('retry-scope');
+    expect((await send('retry-scope')).statusCode).toBe(202);
+    expect(accepted.mock.calls[0]?.[1].steps[0]?.instructions).toContain('/srv/repos/alpha');
+    expect(askPaths.get('retry-scope')?.lastToldScopeKey).not.toBe(originalKey);
+    expect(askPaths.get('retry-scope')?.steps).toEqual(['answer-1', 'answer-2']);
+
+    const unchanged = park('retry-scope');
+    expect((await send('retry-scope')).statusCode).toBe(202);
+    expect(unchanged.mock.calls[0]?.[1].steps[0]?.instructions).toBe('Where is the entry point?');
+    expect(launched).toHaveLength(1);
+    expect(adapter.cancelRun).not.toHaveBeenCalled();
+
+    // Removing the last repo refreshes the statement and clears transcript rewrite roots too.
+    park('retry-scope');
+    vi.mocked(adapter.listRepos).mockResolvedValueOnce([]);
+    expect((await send('retry-scope')).statusCode).toBe(202);
+    expect(roots).toHaveBeenLastCalledWith('retry-scope', []);
+    roots.mockRestore();
   });
 
   it('refreshes everything when another repository is registered', async () => {

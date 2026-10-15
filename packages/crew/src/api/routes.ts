@@ -2189,7 +2189,7 @@ export function registerRoutes(
 
   /**
    * crew#1019: registration is durable even when onboarding cannot launch (core has no unregister).
-   * A landed repo returns 201 with `onboardRunId: null` and `onboardError` on launch failure, so
+   * A landed local repo returns 201 with `onboardRunId: null` and `onboardError` on launch failure, so
    * callers can still attach it to their project and retry onboarding separately.
    */
   app.post(`${V}/repos`, async (req, reply) => {
@@ -2202,47 +2202,23 @@ export function registerRoutes(
     const { name, rootPath, gitUrl, projectId, channel, actor, autoCapture } = parsed.data;
     let repo: RepoEntry | undefined;
     let runId: string;
-    let clonedRepoId: string | undefined;
-    let previousRepoIds: Set<string> | undefined;
     try {
       if (gitUrl) {
         // Remote: clone to rootPath (if provided) or default ~/.wicked/repos/<name>,
         // register, and launch onboarding run.
-        // Snapshot ids before clone: only a registration absent here can have landed now.
-        previousRepoIds = new Set((await adapter.listRepos()).map((r) => r.id));
+        // cloneAndRegisterRepo registers and launches in one call. Distinguishing a landed
+        // registration from a failed clone requires splitting that adapter call (follow-up).
         const cloned = await adapter.cloneAndRegisterRepo(name, gitUrl, rootPath);
         runId = cloned.runId;
-        clonedRepoId = cloned.repoId;
         const repos = await adapter.listRepos();
         repo = repos.find((r) => r.id === cloned.repoId);
-        if (!repo) return reply.code(500).send({ error: 'Repo registered but could not be retrieved', repoId: clonedRepoId });
+        if (!repo) return reply.code(500).send({ error: 'Repo registered but could not be retrieved' });
       } else {
         // Local: register then launch onboarding run.
         repo = await adapter.registerRepo(name, rootPath!);
         runId = await adapter.launchOnboardingRun(repo.id, name);
       }
     } catch (err) {
-      if (clonedRepoId !== undefined) {
-        return reply.code(500).send({ error: 'Repo registered but could not be retrieved', repoId: clonedRepoId });
-      }
-      if (repo === undefined && gitUrl && previousRepoIds !== undefined) {
-        // crew#1019: cloneAndRegisterRepo launches internally. Mirror its destination resolution
-        // including adapter.ts wickedDir('repos') (not exported; adapter.ts is fenced), and
-        // require BOTH name and root; a clone failure must not recover a namesake.
-        const expanded = rootPath?.startsWith('~/') ? join(homedir(), rootPath.slice(2)) : rootPath;
-        const cloneRoot = expanded
-          ? (isAbsolute(expanded) ? resolve(expanded) : undefined)
-          : resolve(process.env.HOME ?? process.env.USERPROFILE ?? '/tmp', '.wicked', 'repos', name);
-        if (cloneRoot !== undefined) {
-          try {
-            // registerRepo canonicalizes symlinked destinations before persisting the root.
-            const registeredRoot = await fsp.realpath(cloneRoot).catch(() => cloneRoot);
-            repo = (await adapter.listRepos()).find((r) => !previousRepoIds!.has(r.id) && r.name === name && resolve(r.root_path) === registeredRoot);
-          } catch (lookupErr) {
-            req.log.warn(`cannot check whether repo ${name} registered: ${message(lookupErr)}`);
-          }
-        }
-      }
       if (repo === undefined) return reply.code(400).send({ error: message(err) });
       req.log.warn({ repoId: repo.id }, `repo registered but onboarding launch failed: ${message(err)}`);
       // No run exists to record or file, even when projectId was supplied (crew#1019).
@@ -3581,7 +3557,7 @@ export function registerRoutes(
     if (openedPath === undefined) {
       return reply.code(409).send({ error: `chat '${id}' is not open on this daemon — open it first (POST /chats)` });
     }
-    let path = openedPath;
+    const path = openedPath;
     if (path.eligible.length === 0) {
       return reply.code(409).send({ error: `chat '${id}' has no eligible seat — sign a seat in and re-seat it (POST /chats/:id/seats)` });
     }
@@ -3605,7 +3581,7 @@ export function registerRoutes(
     // One message at a time per chat, on this daemon: the reservation covers the launch, and a
     // continuation's status read → proposal → approval (two continuations racing would both
     // read `awaiting_human` and both hold an edit; the second's approval then fails).
-    let lease = askPaths.reserve(id);
+    const lease = askPaths.reserve(id);
     if (lease === null) {
       return reply.code(409).send({
         code: 'turn_in_flight' as const,
@@ -3648,7 +3624,6 @@ export function registerRoutes(
     const withPreface = (preface: string | null): string => (preface !== null ? `${preface}\n\n${text}` : text);
     try {
       const rules = (await considerations.inForceFor(scope?.projectId ?? null)).rules;
-      let scopeChanged = false;
       // crew#1020: a project/everything chat must see repos attached since open. Admission was
       // under this scope KIND and the kind stays the same, so do not re-run seat admission.
       const scopeRequest = chatScopes.requestOf(id);
@@ -3669,7 +3644,6 @@ export function registerRoutes(
               prepareChatScratch(id, refreshed, rules);
               if (chatScopes.refresh(id, scope, refreshed, engine)) {
                 scope = refreshed;
-                scopeChanged = true;
                 chatTranscripts?.registerRoots(id, refreshed.repos.map((r) => ({ absRoot: resolve(r.rootPath), name: r.name })));
               }
             }
@@ -3681,6 +3655,20 @@ export function registerRoutes(
       if (askPaths.get(id)?.generation !== lease) {
         return reply.code(409).send({ error: `chat '${id}' was closed while the message was in flight; nothing was sent` });
       }
+      const codeGraphDb = chatScopes.engineOf(id)?.codeGraphDb ?? null;
+      if (path.runId !== undefined && codeGraphDb !== path.launchGraphBinding) {
+        askPaths.release(id, lease);
+        return reply.code(409).send({
+          code: 'chat_scope_changed',
+          error: `This chat's repositories changed since it started (${scope?.repos.length ?? 0} now in scope). Start a new chat to read them — this one keeps its original scope.`,
+        });
+      }
+      // Scope publication and delivery are separate: a refused send must not consume an update.
+      // Sort repository identities so membership order alone does not trigger another statement.
+      const scopeKey = JSON.stringify([
+        scope?.repos.map((repo) => [repo.id, repo.name, repo.rootPath]).sort((a, b) => a[0]!.localeCompare(b[0]!)) ?? [],
+        codeGraphDb,
+      ]);
       if (path.runId !== undefined) {
         const view = (await adapter.sessionsDetail()).find((v) => v.session.id === path.runId);
         if (view === undefined) {
@@ -3708,33 +3696,8 @@ export function registerRoutes(
           return reply.code(409).send({ error: `chat '${id}' was closed while the message was in flight; nothing was sent` });
         }
       }
-      const codeGraphDb = chatScopes.engineOf(id)?.codeGraphDb ?? null;
-      if (path.runId !== undefined && codeGraphDb !== path.launchedCodeGraphDb) {
-        // crew#1020: only a parked path may be replaced. Detach and forget its relay state
-        // before cancelling, so the old run's terminal frames cannot answer this message.
-        const previous = path;
-        const oldRunId = path.runId;
-        const reset = askPaths.resetForScope(id, lease);
-        if (reset === undefined) {
-          return reply.code(409).send({ error: `chat '${id}' was closed while the message was in flight; nothing was sent` });
-        }
-        path = reset;
-        lease = reset.generation;
-        try {
-          await adapter.cancelRun(oldRunId);
-          req.log.info({ chatId: id, runId: oldRunId }, 'cancelled ask path because its scope graph changed');
-        } catch (err) {
-          askPaths.restoreForScope(id, lease, previous);
-          askPaths.release(id, lease);
-          return reply.code(502).send({ error: `cannot cancel ask path after scope change: ${message(err)}`, runId: oldRunId });
-        }
-        if (askPaths.get(id)?.generation !== lease) {
-          return reply.code(409).send({ error: `chat '${id}' was closed while the message was in flight; nothing was sent` });
-        }
-        // The thread shows the new run through linkChatRun; no extra 202 wire field is needed.
-      }
       voice = path.pa !== null ? [path.pa] : [];
-      // A random replacement pick reserves every eligible seat until the relay names the PA.
+      // A random pick reserves every eligible seat until the relay names the PA.
       audience = voice.length > 0 ? voice : path.eligible;
       turn = chatTurns.begin(id, audience, text, ASK_TURN_BUDGET_SECS);
       turnId = turn?.turnId ?? turnId;
@@ -3767,6 +3730,7 @@ export function registerRoutes(
           if (turn !== null) chatTurns.abort(id, turn.turnId);
           return reply.code(409).send({ error: `chat '${id}' was closed while its path was launching; the run was cancelled` });
         }
+        path.lastToldScopeKey = scopeKey;
         pending.commit();
         persistAccepted(pending.preface, () => {
           runtime.linkChatRun?.(id, runId);
@@ -3795,9 +3759,9 @@ export function registerRoutes(
       }
       const stepId = askPaths.nextStep(id);
       const pending = await considerations.pendingPreface(id, { inForce: rules });
-      // crew#1020: a later turn must tell its already-running path when the scope changed.
+      // crew#1020: tell the run about a refreshed scope until a continuation accepts it.
       let instructions = withPreface(pending.preface);
-      if (scopeChanged && scope !== undefined) {
+      if (scope !== undefined && scopeKey !== path.lastToldScopeKey) {
         instructions = `${chatScopeStatement(id, scope, rules)}\n\n${instructions}`;
       }
       await adapter.proposePlan(path.runId, { steps: [answerStep(stepId, instructions)] }, turnId);
@@ -3807,6 +3771,7 @@ export function registerRoutes(
         // Closed between the proposal and here: the DELETE cancelled the run this was accepted on.
         return reply.code(409).send({ error: `chat '${id}' was closed while the message was in flight; its path was cancelled` });
       }
+      path.lastToldScopeKey = scopeKey;
       pending.commit();
       persistAccepted(pending.preface, () => undefined);
       return reply.code(202).send({ seats: voice, turnId, runId: path.runId, stepId, ...singleSeat202 });
