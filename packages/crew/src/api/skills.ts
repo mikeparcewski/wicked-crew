@@ -40,7 +40,6 @@ import { z } from 'zod';
 import type { Actor, SkillReadResult } from '../core/types.js';
 import { SkillPathError } from '../skills/contain.js';
 import { finding } from '../skills/guards.js';
-import { installedPluginState } from '../skills/installed.js';
 import type { SkillsRuntime } from '../skills/runtime.js';
 import { budgetPacer } from '../skills/tree.js';
 import {
@@ -179,11 +178,11 @@ export function registerSkillsRoutes(app: FastifyInstance, deps: SkillsRouteDeps
         const s = store();
         const manifest = s.manifest();
         // `current` is VERIFIED on every read (a walk of the generation); paced (crew#852) so a
-        // 15k-file generation does not hold the loop. (wicked-studio#388) The plugin ON DISK, so the
-        // page can say when the root — and therefore every published snapshot — is behind the
-        // operator's install. `publishing` says a publish is running right now (crew#852).
+        // 15k-file generation does not hold the loop. crew#1021: the installed identity is the
+        // runtime's last background probe, shared with health. `publishing` says a publish is
+        // running right now (crew#852).
         const current = await s.currentSnapshotPaced(budgetPacer());
-        return { manifest, revision: manifest.revision, root: s.root, current, installed: installedPluginState(), publishing: s.isPublishing() };
+        return { manifest, revision: manifest.revision, root: s.root, current, installed: runtimeOf().installed(), publishing: s.isPublishing() };
       }),
   );
 

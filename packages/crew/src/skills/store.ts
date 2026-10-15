@@ -207,7 +207,7 @@ import {
   type DiscoveryFinding,
   type PluginSource,
 } from './plugin-source.js';
-import { installedPluginState, type InstalledPluginState } from './installed.js';
+import { installedPluginState, installedPluginStateAsync, type InstalledPluginState } from './installed.js';
 import {
   existsIn,
   extractPluginRootRefs,
@@ -3220,6 +3220,12 @@ export class SkillsStore {
   installedState(): InstalledPluginState | null {
     const injected = this.injectedSource;
     return installedPluginState(injected === null ? {} : { discover: injected });
+  }
+
+  /** crew#1021: runtime probes share the store's source without blocking requests on hash/git. */
+  installedStateAsync(): Promise<InstalledPluginState | null> {
+    const injected = this.injectedSource;
+    return installedPluginStateAsync(injected === null ? {} : { discover: injected });
   }
 
   /**

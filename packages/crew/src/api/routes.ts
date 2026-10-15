@@ -2631,7 +2631,7 @@ export function registerRoutes(
       const freeText = input.workflow === undefined && input.plan === undefined ? { freeText: { notice: FREE_TEXT_NOTICE } } : {};
       // crew#874: the run uses the PUBLISHED generation; when the installed garden is not the one it
       // was built from, the launch answer says so (a recorded proof can disclose which garden ran).
-      const skillsAhead = runtime.skills?.installedAheadFinding({ fresh: true }) ?? null; // fresh: an upgrade just before Send counts (codex r1)
+      const skillsAhead = await runtime.skills?.installedAheadFinding({ fresh: true }) ?? null; // fresh: an upgrade just before Send counts (codex r1)
       const skillsWarning = skillsAhead === null ? {} : { skillsWarning: { kind: skillsAhead.kind, severity: skillsAhead.severity, message: skillsAhead.message } };
       // wicked-core#850: a full-assurance run on a one-CLI roster will wait at a gate for a seat that
       // can evaluate or judge it; the answer names the explicit opt-in to relaunch with.

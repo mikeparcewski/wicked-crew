@@ -74,14 +74,19 @@ const unlock = (file: string): void => {
 };
 const viewPath = (snapshot: string, ...rest: string[]): string => join(snapshot, ...COPILOT_VIEW_SKILLS_REL.split('/'), ...rest);
 /** A provisioner parked until `release()` — the seam every concurrency probe drives. */
-const gatedProvisioner = (state: 'skipped' | 'synced' = 'skipped'): { provisioner: VenvProvisioner; release: () => void; calls: number[] } => {
+const gatedProvisioner = (state: 'skipped' | 'synced' = 'skipped'): { provisioner: VenvProvisioner; release: () => void; entered: Promise<void>; calls: number[] } => {
   const calls: number[] = [];
+  // crew#1021: paced validation can yield many times before provisioning; wait for the actual
+  // boundary rather than assuming one event-loop turn reaches it on a loaded host.
+  let enter!: () => void;
+  const entered = new Promise<void>((resolve) => { enter = resolve; });
   let release: () => void = () => undefined;
   const gate = new Promise<void>((resolve) => {
     release = resolve;
   });
   const provisioner: VenvProvisioner = async (baselineDir) => {
     calls.push(calls.length + 1);
+    enter();
     await gate;
     if (state === 'synced') {
       mkdirSync(join(baselineDir, '.venv', 'bin'), { recursive: true });
@@ -89,7 +94,7 @@ const gatedProvisioner = (state: 'skipped' | 'synced' = 'skipped'): { provisione
     }
     return state;
   };
-  return { provisioner, release: () => release(), calls };
+  return { provisioner, release: () => release(), entered, calls };
 };
 /** A SECOND store instance over the same root — no memo, so `current` is re-verified from disk. */
 const storeOver = (sc: Scaffold): SkillsStore =>
@@ -1213,7 +1218,7 @@ describe('publish is serialized and bound to its root (codex round 2)', () => {
     try {
       v.store.seed();
       const first = v.store.publish(1);
-      await new Promise((resolve) => setImmediate(resolve));
+      await gate.entered;
       expect(v.store.isPublishing()).toBe(true);
       await expect(v.store.publish(1)).rejects.toBeInstanceOf(SkillsPublishInFlightError);
       await expect(v.store.publish(1)).rejects.toMatchObject({ revision: 1 });
@@ -1258,7 +1263,7 @@ describe('publish is serialized and bound to its root (codex round 2)', () => {
       store.seed();
       cpSync(a, b, { recursive: true });
       const inFlight = store.publish(1);
-      await new Promise((resolve) => setImmediate(resolve));
+      await gate.entered;
       rmSync(join(base, 'via'));
       symlinkSync(b, join(base, 'via')); // the root's canonical path now lands in the copy
       gate.release();
@@ -1281,7 +1286,7 @@ describe('publish is serialized and bound to its root (codex round 2)', () => {
     try {
       v.store.seed();
       const inFlight = v.store.publish(1);
-      await new Promise((resolve) => setImmediate(resolve));
+      await gate.entered;
       rmSync(v.root, { recursive: true, force: true });
       gate.release();
       await expect(inFlight).rejects.toBeInstanceOf(SkillsRootChangedError);

@@ -124,3 +124,66 @@ describe('rosterWithStandingFactory', () => {
     expect(seen).toEqual([undefined, '/live/root']);
   });
 });
+
+// crew#1021: the native predicate walks the skills ladder; repeat reads must reuse its answer.
+describe('QE reviewer generation memo (crew#1021)', () => {
+  function fixture(snapshot: string | undefined = '/published/1', admitted: boolean | null = true) {
+    let now = 0;
+    let calls = 0;
+    const env: NodeJS.ProcessEnv = { WICKED_SKILLS_SNAPSHOT: snapshot, CLAUDE_CONFIG_DIR: '/config', HOME: '/home' };
+    const seats = [...REGISTRY.map((s) => ({ ...s })), { ...REGISTRY[0]!, key: 'pi' }, { ...REGISTRY[0]!, key: 'copilot' }];
+    const roster = rosterWithStandingFactory({
+      seatHealth: new SeatHealthTracker(), registry: () => seats, signedIn: () => true,
+      env, worktreeBench: () => new Map(), hostBoundary: () => null,
+      qeAdmitted: () => { calls++; return admitted; }, nowMs: () => now,
+    });
+    return { roster, env, seats, calls: () => calls, advance: (ms: number) => { now += ms; } };
+  }
+
+  it('calls once per seat for ten reads, preserving the entire standing output', () => {
+    const f = fixture();
+    const first = f.roster();
+    for (let i = 1; i < 10; i++) expect(f.roster()).toEqual(first);
+    expect(f.calls()).toBe(5);
+    f.advance(120_000);
+    f.roster();
+    expect(f.calls()).toBe(5); // immutable published directory needs no TTL
+  });
+
+  it('re-judges when any engine ladder input or a seat invocation changes', () => {
+    const f = fixture();
+    f.roster();
+    f.env.WICKED_SKILLS_SNAPSHOT = '/published/2';
+    f.roster();
+    expect(f.calls()).toBe(10);
+    f.env.CLAUDE_CONFIG_DIR = '/other-config';
+    f.roster();
+    expect(f.calls()).toBe(15);
+    f.env.HOME = '/other-home';
+    f.roster();
+    expect(f.calls()).toBe(20);
+    f.seats[0]!.headless_invocation = 'claude --changed {PROMPT}';
+    f.roster();
+    expect(f.calls()).toBe(21);
+  });
+
+  it('expires the mutable fallback after 30 seconds using the injected clock', () => {
+    const f = fixture();
+    delete f.env.WICKED_SKILLS_SNAPSHOT;
+    f.roster();
+    f.advance(29_999);
+    f.roster();
+    expect(f.calls()).toBe(5);
+    f.advance(1);
+    f.roster();
+    expect(f.calls()).toBe(10);
+  });
+
+  it('memoizes null from an addon without the predicate too', () => {
+    const f = fixture('/published/1', null);
+    const first = f.roster();
+    expect(first.every((seat) => seat['qe_reviewer'] === undefined)).toBe(true);
+    expect(f.roster()).toEqual(first);
+    expect(f.calls()).toBe(5);
+  });
+});

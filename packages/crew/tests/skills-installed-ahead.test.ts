@@ -6,14 +6,17 @@ process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { SkillsRuntime, SKILLS_AUTO_REFRESH_ENV } from '../src/skills/runtime.js';
 import { removeScratch } from './setup/scratch.js';
 import { scaffold, type Scaffold } from './support/skills-fixture.js';
 
 const scratch: Scaffold[] = [];
-afterEach(() => {
+const runtimes: SkillsRuntime[] = [];
+afterEach(async () => {
+  vi.restoreAllMocks();
+  await Promise.all(runtimes.splice(0).map((runtime) => runtime.refreshInstalled()));
   for (const sc of scratch.splice(0)) removeScratch(sc.base);
 });
 
@@ -31,24 +34,29 @@ async function booted(): Promise<{ sc: Scaffold; runtime: SkillsRuntime; logs: s
   scratch.push(sc);
   const logs: string[] = [];
   const runtime = new SkillsRuntime({ store: sc.store, log: (m) => logs.push(m), bootSnapshot: undefined, installedTtlMs: 0 });
+  runtimes.push(runtime);
   const health = await runtime.apply();
+  await runtime.refreshInstalled();
   expect(health.state).toBe('published');
   return { sc, runtime, logs };
 }
 
-const aheadOf = (runtime: SkillsRuntime) => runtime.health().findings.find((f) => f.kind === 'skills.installed-ahead');
+const aheadOf = async (runtime: SkillsRuntime) => {
+  await runtime.refreshInstalled();
+  return runtime.health().findings.find((f) => f.kind === 'skills.installed-ahead');
+};
 
 describe('skills.installed-ahead (crew#874)', () => {
   it('is silent while the installed plugin is the baseline the generation was built from', async () => {
     const { runtime } = await booted();
-    expect(aheadOf(runtime)).toBeUndefined();
+    expect(await aheadOf(runtime)).toBeUndefined();
     expect(await runtime.autoRefreshOnBoot({})).toMatchObject({ action: 'none' });
   });
 
   it('names both versions and the remedy once the installed garden moves ahead', async () => {
     const { sc, runtime } = await booted();
     upgrade(sc, '1.1.0');
-    const finding = aheadOf(runtime);
+    const finding = await aheadOf(runtime);
     expect(finding?.severity).toBe('warning');
     expect(finding?.message).toContain('installed wicked-garden 1.1.0 is ahead of the published generation 1 (built from 1.0.0)');
     expect(finding?.message).toContain('POST /skills/refresh-baseline then /skills/publish');
@@ -61,7 +69,7 @@ describe('skills.installed-ahead (crew#874)', () => {
     const outcome = await runtime.autoRefreshOnBoot({});
     expect(outcome).toEqual({ action: 'published', gen: 2, from: '1.0.0', to: '1.1.0' });
     expect(runtime.health().current?.gen).toBe(2);
-    expect(aheadOf(runtime)).toBeUndefined();
+    expect(await aheadOf(runtime)).toBeUndefined();
     expect(logs.some((l) => l.includes('skills.auto-refresh'))).toBe(true);
   });
 
@@ -73,7 +81,7 @@ describe('skills.installed-ahead (crew#874)', () => {
     const outcome = await runtime.autoRefreshOnBoot({});
     expect(outcome.action).toBe('skipped');
     expect(runtime.health().current?.gen).toBe(1);
-    expect(aheadOf(runtime)?.message).toContain('not refreshed automatically: the catalog holds operator changes (skill wicked-garden-gamma is override)');
+    expect((await aheadOf(runtime))?.message).toContain('not refreshed automatically: the catalog holds operator changes (skill wicked-garden-gamma is override)');
   });
 
   it('a refresh with no publish moves the catalog, not the handed generation: the finding stays (codex r1)', async () => {
@@ -82,10 +90,10 @@ describe('skills.installed-ahead (crew#874)', () => {
     const refreshed = sc.store.refreshBaseline(sc.store.revision());
     expect(refreshed.verdict).not.toBe('blocked');
     expect(sc.store.manifest().baseline).toBe(refreshed.baseline);
-    expect(aheadOf(runtime)?.message).toContain('installed wicked-garden 1.1.0 is ahead of the published generation 1 (built from 1.0.0)');
+    expect((await aheadOf(runtime))?.message).toContain('installed wicked-garden 1.1.0 is ahead of the published generation 1 (built from 1.0.0)');
     // …and the boot path still finishes the job: the refresh is a no-op, the publish lands.
     expect(await runtime.autoRefreshOnBoot({})).toMatchObject({ action: 'published', gen: 2 });
-    expect(aheadOf(runtime)).toBeUndefined();
+    expect(await aheadOf(runtime)).toBeUndefined();
   });
 
   it(`${SKILLS_AUTO_REFRESH_ENV}=0 turns the boot refresh off`, async () => {
@@ -93,12 +101,74 @@ describe('skills.installed-ahead (crew#874)', () => {
     upgrade(sc, '1.1.0');
     expect(await runtime.autoRefreshOnBoot({ [SKILLS_AUTO_REFRESH_ENV]: '0' })).toMatchObject({ action: 'skipped' });
     expect(runtime.health().current?.gen).toBe(1);
-    expect(aheadOf(runtime)?.message).toContain(`${SKILLS_AUTO_REFRESH_ENV}=0`);
+    expect((await aheadOf(runtime))?.message).toContain(`${SKILLS_AUTO_REFRESH_ENV}=0`);
   });
 
   it('an installed garden OLDER than the baseline is called behind, never ahead', async () => {
     const { sc, runtime } = await booted();
     upgrade(sc, '0.9.0');
-    expect(aheadOf(runtime)?.message).toContain('installed wicked-garden 0.9.0 is behind the published generation');
+    expect((await aheadOf(runtime))?.message).toContain('installed wicked-garden 0.9.0 is behind the published generation');
+  });
+});
+
+// crew#1021: health and diagnostics read the last probe, never a synchronous bundle hash/git.
+describe('installed probe request isolation (crew#1021)', () => {
+  it('never invokes synchronous installedState from installedAheadFinding or health', async () => {
+    const { sc, runtime } = await booted();
+    const sync = vi.spyOn(sc.store, 'installedState').mockImplementation(() => { throw new Error('request blocked'); });
+    expect(runtime.installedAheadFinding()).toBeNull();
+    runtime.health();
+    expect(sync).not.toHaveBeenCalled();
+  });
+
+  it('starts silently and updates the finding when the background async probe lands', async () => {
+    const sc = scaffold();
+    scratch.push(sc);
+    let finish!: (state: ReturnType<typeof sc.store.installedState>) => void;
+    const pending = new Promise<ReturnType<typeof sc.store.installedState>>((resolve) => { finish = resolve; });
+    vi.spyOn(sc.store, 'installedStateAsync').mockReturnValue(pending);
+    const sync = vi.spyOn(sc.store, 'installedState');
+    const runtime = new SkillsRuntime({ store: sc.store, log: () => {}, bootSnapshot: undefined });
+    runtimes.push(runtime);
+    expect((await runtime.apply()).state).toBe('published');
+    expect(runtime.installedAheadFinding()).toBeNull();
+    expect(runtime.installed()).toBeNull();
+    expect(sync).not.toHaveBeenCalled();
+    upgrade(sc, '1.1.0');
+    finish(sc.store.installedState());
+    await runtime.refreshInstalled();
+    expect(runtime.installedAheadFinding()?.message).toContain('1.1.0 is ahead of');
+  });
+
+  it('fresh:true waits for a successful async refresh and returns its new finding', async () => {
+    const { sc, runtime } = await booted();
+    upgrade(sc, '1.1.0');
+    const finding = await runtime.installedAheadFinding({ fresh: true });
+    expect(finding?.message).toContain('1.1.0 is ahead of');
+  });
+
+  it('fresh:true awaits a bounded, coalesced refresh and falls back to the last value', async () => {
+    const { sc, runtime } = await booted();
+    upgrade(sc, '1.1.0');
+    await runtime.refreshInstalled();
+    let finish!: (value: null) => void;
+    const asyncProbe = vi.spyOn(sc.store, 'installedStateAsync').mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    vi.useFakeTimers();
+    try {
+      let answered = false;
+      const finding = runtime.installedAheadFinding({ fresh: true }).then((value) => { answered = true; return value; });
+      await vi.advanceTimersByTimeAsync(1);
+      expect(asyncProbe).toHaveBeenCalledTimes(1);
+      expect(answered).toBe(false);
+      const second = runtime.installedAheadFinding({ fresh: true });
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect((await finding)?.message).toContain('1.1.0 is ahead of');
+      expect((await second)?.message).toContain('1.1.0 is ahead of');
+      expect(asyncProbe).toHaveBeenCalledTimes(1);
+      finish(null);
+      await Promise.resolve();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -92,6 +92,8 @@ export interface RosterStandingDeps {
    *  the engine cannot answer. Default under the same rule as `worktreeBench`; without it (or with
    *  `worktreeBench` absent) `qe_reviewer` is absent. */
   qeAdmitted?: ((key: string, invocation: string | undefined) => boolean | null) | null;
+  /** crew#1021: clock for the mutable skills fallback admission memo (30 s). */
+  nowMs?: () => number;
   /** (A6) The OS launcher the repository boundary arms with (`hostSandboxLauncher`). */
   hostBoundary?: () => string | null;
   /** (A6) The home directory a command's display writes as `$HOME` (default `os.homedir()`). */
@@ -125,6 +127,30 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
     deps.worktreeBench !== undefined ? deps.worktreeBench : daemon ? (seats: readonly unknown[]) => CoreAdapter.worktreeBenched(seats) : null;
   const qeAdmitted =
     deps.qeAdmitted !== undefined ? deps.qeAdmitted : daemon ? (key: string, inv: string | undefined) => CoreAdapter.qeReviewerAdmitted(key, inv) : null;
+  // crew#1021: the native predicate resolves and walks the skills ladder on every call. Published
+  // generations are immutable; the mutable HOME-derived fallback needs a short expiry instead.
+  const nowMs = deps.nowMs ?? Date.now;
+  let generation = '';
+  const qeMemo = new Map<string, { admitted: boolean | null; at: number }>();
+  const qeAdmission = (key: string, invocation: string | undefined): boolean | null => {
+    const token = JSON.stringify([env['WICKED_SKILLS_SNAPSHOT'], env['CLAUDE_CONFIG_DIR'], env['HOME']]);
+    if (token !== generation) {
+      generation = token;
+      qeMemo.clear();
+    }
+    const memoKey = JSON.stringify([key, invocation]);
+    const now = nowMs();
+    const cached = qeMemo.get(memoKey);
+    if (cached !== undefined && (env['WICKED_SKILLS_SNAPSHOT'] !== undefined || now - cached.at < 30_000)) return cached.admitted;
+    let admitted: boolean | null = null;
+    try {
+      admitted = qeAdmitted === null ? null : qeAdmitted(key, invocation);
+    } catch {
+      admitted = null;
+    }
+    qeMemo.set(memoKey, { admitted, at: now });
+    return admitted;
+  };
   const hostBoundary = deps.hostBoundary ?? (() => hostSandboxLauncher());
   const liveRoot = (): string | undefined => {
     const workerRoot = env['WICKED_WORKER_HOME'];
@@ -228,13 +254,8 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
       const version = seatVersion(seat as { acp?: { verified_version?: unknown } | null }, versions?.read(key), versionPin);
       const account = seatAccount(standing.auth, probed?.account);
       // A4: the engine's QE skill admission for this seat (`null` when it cannot answer).
-      let skillAdmitted: boolean | null = null;
-      try {
-        const inv = (seat as { headless_invocation?: unknown }).headless_invocation;
-        skillAdmitted = qeAdmitted === null ? null : qeAdmitted(key, typeof inv === 'string' ? inv : undefined);
-      } catch {
-        skillAdmitted = null;
-      }
+      const inv = (seat as { headless_invocation?: unknown }).headless_invocation;
+      const skillAdmitted = qeAdmission(key, typeof inv === 'string' ? inv : undefined);
       // A4 / A5: only when the engine can say whether it benches the seat on a bound run.
       const inputs =
         benchedOnBound === null
