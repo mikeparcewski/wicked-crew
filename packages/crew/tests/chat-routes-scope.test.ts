@@ -9,12 +9,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { AskPathIndex } from '../src/api/ask-paths.js';
 import { ChatScopeIndex } from '../src/api/chat-scope.js';
+import { ChatTurnIndex } from '../src/api/chat-turns.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { CoreAdapter } from '../src/core/adapter.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
+import * as projectGraph from '../src/projects/graph.js';
 
 let base: string;
 /** crew#823: the membership index the routes file runs into (a run of the chat's project). */
@@ -22,8 +25,14 @@ let membership: MembershipIndex;
 /** crew#823: what the ask's first message hands the engine. */
 let launched: Array<Record<string, unknown>>;
 let graphFile: string;
+let adapter: CoreAdapter;
+let projectRepoRefs: string[];
+let registryFails: boolean;
 let app: FastifyInstance;
 let chatScopes: ChatScopeIndex;
+let askPaths: AskPathIndex;
+const linkChatRun = vi.fn();
+let chatTurns: ChatTurnIndex;
 let applied: boolean | null;
 /** The injected sign-in probe: `null` (unknown → admitted) unless a test says otherwise. */
 let signedIn: (seatKey: string) => boolean | null = () => null;
@@ -53,12 +62,14 @@ const chatOpen = vi.fn(async (...args: [string, string[], string?, unknown?]) =>
 /** The adapter surface `POST /chats` / `GET /chats/:id` / `DELETE /chats/:id` actually touch. */
 function fakeAdapter(): CoreAdapter {
   return {
-    listRepos: async () => {
+    listRepos: vi.fn(async () => {
+      if (registryFails) throw new Error('registry unreadable');
       const held = holdReposOnce;
       holdReposOnce = null;
       if (held !== null) await held.promise;
       return repos();
-    },
+    }),
+    projectMembers: async () => projectRepoRefs.map((ref) => ({ member_kind: 'crew.repo', member_ref: ref })),
     chatOpen: async (...args: [string, string[], string?, unknown?]) => {
       const out = await chatOpen(...args);
       warmByChat.set(args[0], out.filter((s) => s.ok).map((s) => s.cliKey));
@@ -73,12 +84,13 @@ function fakeAdapter(): CoreAdapter {
     },
     chatClose: async () => undefined,
     chatList: async () => [],
-    launchRun: async (input: Record<string, unknown>) => {
+    launchRun: vi.fn(async (input: Record<string, unknown>) => {
       launched.push(input);
       return `run-p${launched.length}`;
-    },
-    projectGet: async (id: string) => (id === 'p-live' ? { id, status: 'active' } : null),
-    projectMemberAttach: async () => {
+    }),
+    projectGet: vi.fn(async (id: string) => (id === 'p-live' ? { id, status: 'active' } : null)),
+    projectMemberAttach: async (_projectId: string, kind: string, ref: string) => {
+      if (kind === 'crew.repo') projectRepoRefs.push(ref);
       // Parks the FIRST attach only (a reopen's own attach goes straight through).
       const held = holdAttach;
       holdAttach = null;
@@ -105,6 +117,8 @@ function repos() {
 
 
 beforeEach(async () => {
+  projectRepoRefs = [];
+  registryFails = false;
   holdFold = null;
   holdAttach = null;
   holdReposOnce = null;
@@ -119,11 +133,18 @@ beforeEach(async () => {
   warmByChat = new Map();
   sendReaches = null;
   chatScopes = new ChatScopeIndex(join(base, 'chats'));
+  chatTurns = new ChatTurnIndex();
+  askPaths = new AskPathIndex();
+  linkChatRun.mockClear();
   membership = new MembershipIndex();
   launched = [];
   app = Fastify({ logger: false });
-  registerRoutes(app, fakeAdapter(), new GateCache(), new ElicitationCache(), { bus: null, index: membership, log: () => undefined }, undefined, {
+  adapter = fakeAdapter();
+  registerRoutes(app, adapter, new GateCache(), new ElicitationCache(), { bus: null, index: membership, log: () => undefined }, undefined, {
     chatScopes,
+    chatTurns,
+    askPaths,
+    linkChatRun,
     // Never the real dotfile probe: the suite must not read the developer's worker home.
     signedIn: (seatKey) => signedIn(seatKey),
     broadcast: (frame) => broadcast.push(frame),
@@ -536,3 +557,175 @@ describe('POST /chats — named scope kinds (studio#323 R4)', () => {
   });
 });
 
+
+// crew#1020: project membership and the registry can change while the same chat stays open.
+describe('POST /chats/:id/messages — refresh dynamic scopes', () => {
+  const send = (id: string) => app.inject({ method: 'POST', url: `/api/v1/chats/${id}/messages`, payload: { text: 'Where is the entry point?' } });
+
+  it('sees a repo attached after an empty project chat opened, retaining its scratch files', async () => {
+    const opened = await open({ chatId: 'dynamic', clis: ['claude'], projectId: 'p-live' });
+    expect(opened.statusCode).toBe(201);
+    expect(opened.json().scope.repos).toEqual([]);
+    const cwd = opened.json().scope.cwd as string;
+    writeFileSync(join(cwd, 'notes.txt'), 'keep me');
+    const attached = await app.inject({ method: 'POST', url: '/api/v1/projects/p-live/members', payload: { kind: 'crew.repo', ref: 'r1' } });
+    expect(attached.statusCode).toBe(201);
+    expect((await send('dynamic')).statusCode).toBe(202);
+    const detail = await app.inject({ method: 'GET', url: '/api/v1/chats/dynamic' });
+    expect(detail.json().scope.repos).toEqual([expect.objectContaining({ id: 'r1', rootPath: '/srv/repos/alpha' })]);
+    expect(detail.json().scope.cwd).toBe(cwd);
+    expect(chatScopes.engineOf('dynamic')?.readRoots).toEqual(['/srv/repos/alpha']);
+    expect(launched[0]).toMatchObject({ projectId: 'p-live' });
+    for (const field of ['cwd', 'readRoots', 'codeGraphDb']) expect(launched[0]).not.toHaveProperty(field);
+    for (const file of ['AGENTS.md', 'CLAUDE.md']) expect(readFileSync(join(cwd, file), 'utf8')).toContain('/srv/repos/alpha');
+    expect(readFileSync(join(cwd, 'notes.txt'), 'utf8')).toBe('keep me');
+    const instructions = (launched[0]!['plan'] as { steps: Array<{ instructions: string }> }).steps[0]!.instructions;
+    expect(instructions).toContain('/srv/repos/alpha');
+  });
+
+  function park(id: string) {
+    chatTurns.observe({ type: 'chatReply', chat: id, cliKey: 'claude', text: 'Attach the repository and re-ask.', ok: true });
+    adapter.sessionsDetail = async () => [{ session: { id: 'run-p1', status: 'awaiting_human' } }] as Awaited<ReturnType<CoreAdapter['sessionsDetail']>>;
+    const propose = vi.fn<CoreAdapter['proposePlan']>(async () => ({} as Awaited<ReturnType<CoreAdapter['proposePlan']>>));
+    adapter.proposePlan = propose;
+    adapter.confirmGate = vi.fn(async () => 'approved');
+    adapter.cancelRun = vi.fn(async () => 'cancelled');
+    return propose;
+  }
+
+  it.each([false, true])('replaces a launched path when attaching a repo gives the project a graph (cancel fails: %s)', async (cancelFails) => {
+    const binding = vi.spyOn(projectGraph, 'resolveProjectGraphBinding').mockResolvedValue({ binding: null, reason: 'no members' });
+    try {
+      expect((await open({ chatId: 'continuing', clis: ['claude'], primary: 'claude', projectId: 'p-live' })).statusCode).toBe(201);
+      expect((await send('continuing')).statusCode).toBe(202);
+      const original = askPaths.get('continuing')!;
+      expect(original).toMatchObject({ launchedCodeGraphDb: null });
+      const propose = park('continuing');
+      if (cancelFails) vi.mocked(adapter.cancelRun).mockRejectedValue(new Error('cancel unavailable'));
+      const attached = await app.inject({ method: 'POST', url: '/api/v1/projects/p-live/members', payload: { kind: 'crew.repo', ref: 'r1' } });
+      expect(attached.statusCode).toBe(201);
+      binding.mockResolvedValue({ binding: { dbPath: graphFile }, reason: 'project graph ready' });
+      const sent = await send('continuing');
+      expect(sent.statusCode).toBe(202);
+      expect(sent.json()).toMatchObject({ runId: 'run-p2', stepId: 'answer-1', scopeRefreshed: { repos: 1, newPath: true } });
+      expect(adapter.cancelRun).toHaveBeenCalledExactlyOnceWith('run-p1');
+      expect(propose).not.toHaveBeenCalled();
+      expect(launched).toHaveLength(2);
+      expect(adapter.launchRun).toHaveBeenCalledTimes(2);
+      expect(launched[1]).toMatchObject({ projectId: 'p-live', primary: 'claude' });
+      const instructions = (launched[1]!['plan'] as { steps: Array<{ instructions: string }> }).steps[0]!.instructions;
+      expect(instructions).toContain('/srv/repos/alpha');
+      expect(instructions).toContain('Where is the entry point?');
+      const detail = await app.inject({ method: 'GET', url: '/api/v1/chats/continuing' });
+      expect(detail.json().scope.repos).toEqual([expect.objectContaining({ id: 'r1' })]);
+      expect(askPaths.get('continuing')).toMatchObject({
+        eligible: original.eligible, primary: original.primary, pa: original.pa,
+        launchedCodeGraphDb: graphFile, steps: ['answer-1'], busy: false,
+      });
+      expect(askPaths.get('continuing')!.generation).toBeGreaterThan(original.generation);
+      expect(linkChatRun.mock.calls).toEqual([['continuing', 'run-p1'], ['continuing', 'run-p2']]);
+    } finally {
+      binding.mockRestore();
+    }
+  });
+
+  it('continues the same run with a refreshed statement when the graph binding is unchanged', async () => {
+    const binding = vi.spyOn(projectGraph, 'resolveProjectGraphBinding').mockResolvedValue({ binding: { dbPath: graphFile }, reason: 'project graph ready' });
+    try {
+      expect((await open({ chatId: 'same-graph', clis: ['claude'], projectId: 'p-live' })).statusCode).toBe(201);
+      expect((await send('same-graph')).statusCode).toBe(202);
+      const propose = park('same-graph');
+      projectRepoRefs.push('r1');
+      const sent = await send('same-graph');
+      expect(sent.statusCode).toBe(202);
+      expect(sent.json()).toMatchObject({ runId: 'run-p1', stepId: 'answer-2' });
+      expect(sent.json()).not.toHaveProperty('scopeRefreshed');
+      expect(propose.mock.calls[0]?.[0]).toBe('run-p1');
+      expect(propose.mock.calls[0]?.[1].steps[0]?.instructions).toContain('/srv/repos/alpha');
+      expect(adapter.confirmGate).toHaveBeenCalledExactlyOnceWith('run-p1', true);
+      expect(adapter.cancelRun).not.toHaveBeenCalled();
+      expect(launched).toHaveLength(1);
+    } finally {
+      binding.mockRestore();
+    }
+  });
+
+  it('refreshes everything when another repository is registered', async () => {
+    vi.mocked(adapter.listRepos).mockResolvedValueOnce([]);
+    const opened = await open({ chatId: 'dynamic-all', clis: ['claude'], scopeKind: 'everything' });
+    expect(opened.statusCode).toBe(201);
+    expect(opened.json().scope.repos).toEqual([]);
+    expect((await send('dynamic-all')).statusCode).toBe(202);
+    expect(chatScopes.get('dynamic-all')?.repos.map((repo) => repo.id)).toEqual(['r1']);
+    expect(chatScopes.engineOf('dynamic-all')?.readRoots).toEqual(['/srv/repos/alpha']);
+    expect(launched).toHaveLength(1);
+  });
+
+  it('refreshes a changed graph binding even with the same repository list', async () => {
+    const binding = vi.spyOn(projectGraph, 'resolveProjectGraphBinding').mockResolvedValue({ binding: null, reason: 'not indexed yet' });
+    try {
+      expect((await open({ chatId: 'new-graph', clis: ['claude'], projectId: 'p-live' })).statusCode).toBe(201);
+      binding.mockResolvedValue({ binding: { dbPath: graphFile }, reason: 'project graph ready' });
+      expect((await send('new-graph')).statusCode).toBe(202);
+      expect(chatScopes.get('new-graph')?.graph.bound).toBe(true);
+      expect(launched[0]).toMatchObject({ projectId: 'p-live' });
+      expect(launched[0]).not.toHaveProperty('codeGraphDb');
+      expect(chatScopes.engineOf('new-graph')?.codeGraphDb).toBe(graphFile);
+    } finally {
+      binding.mockRestore();
+    }
+  });
+
+  it('does not overwrite a reopened chat while the old message resolves its scope', async () => {
+    expect((await open({ chatId: 'reused', clis: ['claude'], projectId: 'p-live' })).statusCode).toBe(201);
+    let release: () => void = () => undefined;
+    holdReposOnce = { promise: new Promise<void>((done) => { release = done; }), release: () => release() };
+    const sending = send('reused').then((result) => result);
+    await vi.waitFor(() => expect(holdReposOnce).toBeNull());
+    expect((await app.inject({ method: 'DELETE', url: '/api/v1/chats/reused' })).statusCode).toBe(200);
+    const reopened = await open({ chatId: 'reused', clis: ['claude'], repoRefs: ['alpha'] });
+    expect(reopened.statusCode).toBe(201);
+    const statement = readFileSync(join(reopened.json().scope.cwd as string, 'AGENTS.md'), 'utf8');
+    release();
+    expect((await sending).statusCode).toBe(409);
+    expect(chatScopes.get('reused')?.kind).toBe('repos');
+    expect(readFileSync(join(reopened.json().scope.cwd as string, 'AGENTS.md'), 'utf8')).toBe(statement);
+    expect(launched).toEqual([]);
+  });
+
+  it('never re-resolves an explicit repos chat', async () => {
+    expect((await open({ chatId: 'fixed', clis: ['claude'], repoRefs: ['alpha'] })).statusCode).toBe(201);
+    vi.mocked(adapter.listRepos).mockClear();
+    registryFails = true;
+    expect((await send('fixed')).statusCode).toBe(202);
+    expect(adapter.listRepos).not.toHaveBeenCalled();
+    expect(chatScopes.get('fixed')?.repos.map((repo) => repo.id)).toEqual(['r1']);
+  });
+
+  it('keeps the old scope if its project was deleted', async () => {
+    projectRepoRefs = ['r1'];
+    expect((await open({ chatId: 'deleted-project', clis: ['claude'], projectId: 'p-live' })).statusCode).toBe(201);
+    const previous = chatScopes.get('deleted-project');
+    vi.mocked(adapter.projectGet).mockResolvedValue(null);
+    expect((await send('deleted-project')).statusCode).toBe(202);
+    expect(chatScopes.get('deleted-project')).toBe(previous);
+    expect(launched).toHaveLength(1);
+  });
+
+  it('keeps the old scope and still accepts a send when the registry cannot be read', async () => {
+    projectRepoRefs = ['r1'];
+    expect((await open({ chatId: 'unreadable', clis: ['claude'], projectId: 'p-live' })).statusCode).toBe(201);
+    expect((await send('unreadable')).statusCode).toBe(202);
+    const propose = park('unreadable');
+    const previous = chatScopes.get('unreadable');
+    const engine = chatScopes.engineOf('unreadable');
+    registryFails = true;
+    expect((await send('unreadable')).statusCode).toBe(202);
+    expect(chatScopes.get('unreadable')).toBe(previous);
+    expect(chatScopes.engineOf('unreadable')).toEqual(engine);
+    expect(propose).toHaveBeenCalledOnce();
+    expect(propose.mock.calls[0]?.[0]).toBe('run-p1');
+    expect(adapter.cancelRun).not.toHaveBeenCalled();
+    expect(launched).toHaveLength(1);
+  });
+});

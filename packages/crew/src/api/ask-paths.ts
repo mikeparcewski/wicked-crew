@@ -18,11 +18,13 @@ export interface AskPath {
   primary?: string;
   /** The run the conversation is, once the first message launched it. */
   runId?: string;
+  /** crew#1020: the resolved scope's graph binding at launch; a run cannot acquire a new one. */
+  launchedCodeGraphDb?: string | null;
   /** A message of this chat is in flight on this daemon — launching the run or continuing it
    *  (status read → proposal → approval) — so a second one meanwhile is `turn_in_flight`. */
   busy?: boolean;
-  /** Bumped on open; a launch that resolves after the chat was closed and reopened must not
-   *  attach its run to the newcomer. */
+  /** Bumped on open or scope reset; a launch that resolves after the chat was closed and
+   *  reopened must not attach its run to the newcomer. */
   generation: number;
   /** The answer steps added so far (`answer-1`, `answer-2`, …). */
   steps: string[];
@@ -106,13 +108,35 @@ export class AskPathIndex {
 
   /** The first message launched the run; `stepId` is its answer step. False when the chat was
    *  closed (or closed and reopened) while the launch was in flight: the caller cancels the run. */
-  started(chatId: string, generation: number, runId: string, stepId: string): boolean {
+  started(chatId: string, generation: number, runId: string, stepId: string, codeGraphDb: string | null = null): boolean {
     const p = this.paths.get(chatId);
     if (p === undefined || p.generation !== generation) return false;
     p.busy = false;
     p.runId = runId;
+    p.launchedCodeGraphDb = codeGraphDb;
     p.steps.push(stepId);
     return true;
+  }
+
+  /** crew#1020: after cancelling a path whose graph changed, return to first-message launch.
+   * Keep admission and the PA choice; clear the old run's facts. Transfer the message's lease
+   * to a fresh generation so an awaited cancel cannot reset a closed-and-reopened chat, and
+   * work holding the old generation cannot release or attach to this replacement path. */
+  resetForScope(chatId: string, lease: number): AskPath | undefined {
+    const p = this.paths.get(chatId);
+    if (p === undefined || p.generation !== lease || p.busy !== true) return undefined;
+    const next: AskPath = {
+      ...p,
+      generation: this.nextGeneration(chatId),
+      steps: [],
+      classes: {},
+      reviewer: null,
+      helpers: [],
+    };
+    delete next.runId;
+    delete next.launchedCodeGraphDb;
+    this.paths.set(chatId, next);
+    return next;
   }
 
   /** A later message added an answer step. Returns the new step id. */

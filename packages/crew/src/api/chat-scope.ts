@@ -1,6 +1,7 @@
 /**
  * Chat scope (crew#502, acceptance finding F-067): WHAT a chat's seats can see, decided up front
- * and stated — to the seats and to the caller.
+ * and stated — to the seats and to the caller. Project/everything scopes are refreshed before
+ * each message as membership changes (crew#1020).
  *
  * `POST /chats` used to set the seats' cwd only when `repoRef` was sent, and the engine fell back
  * to `current_dir()` — the DAEMON's working directory. Studio's GroupChat never sent `repoRef`, so
@@ -1026,6 +1027,8 @@ type ChatSlot =
   | {
       state: 'live';
       scope: ChatScope;
+      /** crew#1020: retain the open request so dynamic scopes can follow membership changes. */
+      request?: ChatScopeRequest;
       refused: ChatSeatRefusal[];
       /** What the ENGINE was handed at open (F-W1-005): a per-seat retry must re-run the pool's `chat_open` with
        *  the IDENTICAL scope — a different one makes the engine evict every warm seat (Copilot, #426). */
@@ -1122,12 +1125,14 @@ export class ChatScopeIndex {
     token: number,
     refused: ChatSeatRefusal[] = [],
     engine?: EngineChatScope,
+    request?: ChatScopeRequest,
   ): boolean {
     const slot = this.slots.get(chatId);
     if (slot?.state !== 'reserved' || slot.token !== token) return false;
     this.slots.set(chatId, {
       state: 'live',
       scope,
+      ...(request !== undefined ? { request: { ...request, repoRefs: [...request.repoRefs] } } : {}),
       refused: [...refused],
       ...(engine !== undefined ? { engine: { ...engine, readRoots: [...engine.readRoots] } } : {}),
     });
@@ -1140,7 +1145,28 @@ export class ChatScopeIndex {
     return slot?.state === 'live' ? slot.scope : undefined;
   }
 
-  /** The engine scope recorded at open (F-W1-005) — `undefined` for a chat that is not live here. */
+  /** crew#1020: the original request, copied so a refresh cannot mutate the open's intent. */
+  requestOf(chatId: string): ChatScopeRequest | undefined {
+    const slot = this.slots.get(chatId);
+    return slot?.state === 'live' && slot.request !== undefined
+      ? { ...slot.request, repoRefs: [...slot.request.repoRefs] }
+      : undefined;
+  }
+
+  /**
+   * crew#1020: replace a dynamic scope only while the same live chat still holds it; an awaited
+   * resolution must never overwrite a chat closed and reopened under the same id. Admission and
+   * its refusals stay as decided at open: changing a project's members does not change its kind.
+   */
+  refresh(chatId: string, previous: ChatScope, scope: ChatScope, engine: EngineChatScope): boolean {
+    const slot = this.slots.get(chatId);
+    if (slot?.state !== 'live' || slot.scope !== previous) return false;
+    slot.scope = scope;
+    slot.engine = { ...engine, readRoots: [...engine.readRoots] };
+    return true;
+  }
+
+  /** The current engine scope (open, or crew#1020 refresh); `undefined` when not live here. */
   engineOf(chatId: string): EngineChatScope | undefined {
     const slot = this.slots.get(chatId);
     return slot?.state === 'live' && slot.engine !== undefined
