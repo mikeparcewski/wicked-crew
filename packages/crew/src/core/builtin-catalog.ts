@@ -16,6 +16,7 @@
 import type { CatalogEntry, Preset, PresetStep } from 'wicked-crew-api-types';
 import type { PhaseDef, WorkflowDef } from './types.js';
 import { QE_PRESETS } from './qe-acceptance-setting.js';
+import { isSystemWorkflow } from './run-identity.js';
 
 /** What the engine's built-in QE presets require (wicked-core `catalog::builtin_preset_instruments`). */
 const BUILTIN_QE_INSTRUMENTS: readonly string[] = ['distinct_evaluator', 'judge', 'qe_acceptance'];
@@ -47,8 +48,43 @@ export function phaseOfStep(step: PresetStep, entry: CatalogEntry | undefined, p
   };
 }
 
+/**
+ * (DES-CHAT-FIRST-001 C2) The preset's operator-facing descriptor — `title`, `summary`, `use_when` — as
+ * the served def carries it. Only a workflow an operator picks gets one: a SYSTEM workflow (chat,
+ * onboarding, the interactive seams, …) has its own entry points and is offered nowhere, so its def
+ * carries none (the same `isSystemWorkflow` rule as `is_system` and studio's `/` menu). Each field is
+ * copied only when the engine sent a usable value, so an older engine's preset (no fields) serves the
+ * def by id alone. Display data: crew never sends it to the engine ({@link engineDefOf}).
+ */
+export function descriptorOf(preset: Pick<Preset, 'name' | 'title' | 'summary' | 'use_when'>): Pick<WorkflowDef, 'title' | 'summary' | 'use_when'> {
+  if (isSystemWorkflow(preset.name)) return {};
+  const text = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() !== '' ? v : undefined);
+  const title = text(preset.title);
+  const summary = text(preset.summary);
+  const useWhen = Array.isArray(preset.use_when) ? preset.use_when.filter((x): x is string => text(x) !== undefined) : [];
+  return {
+    ...(title !== undefined ? { title } : {}),
+    ...(summary !== undefined ? { summary } : {}),
+    ...(useWhen.length > 0 ? { use_when: useWhen } : {}),
+  };
+}
+
+/** The keys the served def carries for display only; the engine's strict def parser refuses each. */
+const DISPLAY_ONLY_KEYS = ['is_system', 'title', 'summary', 'use_when'] as const;
+
+/** A def as the ENGINE may receive it: the served def without its display-only keys (C2, finding 29). */
+export function engineDefOf(def: WorkflowDef): WorkflowDef {
+  if (!DISPLAY_ONLY_KEYS.some((k) => k in def)) return def;
+  const out = { ...def } as WorkflowDef & Record<string, unknown>;
+  for (const k of DISPLAY_ONLY_KEYS) delete out[k];
+  return out;
+}
+
 /** A preset's def as crew serves it, or `null` when a step names an entry this engine lacks. */
-export function presetDef(preset: Pick<Preset, 'name' | 'steps'>, entries: readonly CatalogEntry[]): WorkflowDef | null {
+export function presetDef(
+  preset: Pick<Preset, 'name' | 'steps'> & Partial<Pick<Preset, 'title' | 'summary' | 'use_when'>>,
+  entries: readonly CatalogEntry[],
+): WorkflowDef | null {
   const byId = new Map(entries.map((e) => [e.id, e]));
   const phases: PhaseDef[] = [];
   let previous: string | null = null;
@@ -58,7 +94,7 @@ export function presetDef(preset: Pick<Preset, 'name' | 'steps'>, entries: reado
     phases.push(phase);
     previous = step.id;
   }
-  return { id: preset.name, phases };
+  return { id: preset.name, phases, ...descriptorOf(preset) };
 }
 
 /** The built-in presets' defs, in name order; a preset that does not compose here is left out (logged). */

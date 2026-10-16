@@ -1,4 +1,4 @@
-import { builtinDefs as deriveBuiltinDefs } from './builtin-catalog.js';
+import { builtinDefs as deriveBuiltinDefs, engineDefOf } from './builtin-catalog.js';
 import { createRequire } from 'node:module';
 import type { BusUnavailable } from './engine-bus.js';
 import { attachEngineBus, detachEngineBus, type EngineBus } from './bus.js';
@@ -3406,7 +3406,8 @@ export class CoreAdapter {
           'binding — the per-run workflow cannot be armed',
       );
     }
-    await (register as (j: string) => Promise<string>).call(this.core, JSON.stringify(def));
+    // Engine input only: never a display-only key (C2 descriptor, `is_system`), which its parser refuses.
+    await (register as (j: string) => Promise<string>).call(this.core, JSON.stringify(engineDefOf(def)));
   }
 
   /**
@@ -3426,9 +3427,8 @@ export class CoreAdapter {
         `workflow id '${def.id}' is a built-in preset: a registered def of that name never runs (a launch resolves the preset first) — save your own preset under another name (PUT /presets/:name)`,
       );
     }
-    // `is_system` is crew's display flag; core's strict def parser rejects the key.
-    const engineDef = { ...(def as WorkflowDef & { is_system?: boolean }) };
-    delete engineDef.is_system;
+    // `is_system` and the C2 descriptor are crew's display data; core's strict def parser rejects them.
+    const engineDef = engineDefOf(def);
     const core = this.core as unknown as Record<string, unknown>;
     const register = core['registerWorkflow'];
     if (typeof register !== 'function') {
