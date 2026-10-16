@@ -109,7 +109,7 @@ jobs:
     needs: [release, version]
     permissions:
       contents: read
-    uses: mikeparcewski/wicked-ci/.github/workflows/smoke.yml@12adcab590fe744829fda6ac4591419f56e45a5d # wicked-ci main after #50 (C5: crews >= 0.13.0 boot on the host seat floor; S08 speaks to a headless chat seat; S04 asserts the host-floor bench on crew >= 0.13.1), on #49 (S04 opts opencode in for the delivery run; a default-roster arm asserts judge_unavailable), on #48 (S04 accepts the wicked-core#902 judge_unavailable gate that names the judge that gave no verdict), on #47 (the verdict keeps each OS's newest attempt; SiriTTSService runner noise), on #46 (S04 follows the preset-era bug plan and the argv-less ACP shim rows: crew 0.9.4's smoke), on #45 (S04 takes the explicit QE skip on a crew that offers it: crew 0.9.3's smoke parked the bug runs at the QE-required deliver refusal), on #44 + v1.4.0 + #42
+    uses: mikeparcewski/wicked-ci/.github/workflows/smoke.yml@0711cf8cc8fe4e0cff7d7793ae23042710f1ec31 # wicked-ci main after #51 (S05 no longer truncates the bus WAL under a live daemon, which corrupted bus.db — crew#1050), on #50 (C5: crews >= 0.13.0 boot on the host seat floor; S08 speaks to a headless chat seat; S04 asserts the host-floor bench on crew >= 0.13.1), on #49 (S04 opts opencode in for the delivery run; a default-roster arm asserts judge_unavailable), on #48 (S04 accepts the wicked-core#902 judge_unavailable gate that names the judge that gave no verdict), on #47 (the verdict keeps each OS's newest attempt; SiriTTSService runner noise), on #46 (S04 follows the preset-era bug plan and the argv-less ACP shim rows: crew 0.9.4's smoke), on #45 (S04 takes the explicit QE skip on a crew that offers it: crew 0.9.3's smoke parked the bug runs at the QE-required deliver refusal), on #44 + v1.4.0 + #42
     with:
       crew_version: ${{ needs.version.outputs.version }}
       # wicked-ci #30 (release verdict crew 0.7.35 §Smoke gate): on a CROSS-REPO workflow_call GitHub
@@ -117,4 +117,4 @@ jobs:
       # default fell back to `github.sha` — crew's own tag commit — and the harness checkout failed
       # ("not our ref"); the smoke gate never ran inside the release run. Pin the harness ref
       # EXPLICITLY to the same SHA as the `uses:` line above (move both together on every re-pin).
-      wicked_ci_ref: 12adcab590fe744829fda6ac4591419f56e45a5d
+      wicked_ci_ref: 0711cf8cc8fe4e0cff7d7793ae23042710f1ec31
