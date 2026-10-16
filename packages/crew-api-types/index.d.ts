@@ -1156,6 +1156,15 @@ export interface RosterSeat {
    */
   recent_bench?: SeatRecentBench;
   /**
+   * (unreleased, wicked-core#976) The engine's HOST-FLOOR bench reason for this seat: on the interim
+   * host floor (`WICKED_SEAT_FLOOR` other than `container`) the engine refuses governed work on any
+   * seat that keeps no per-call check there (anything but claude and a bounded codex), in every run.
+   * The seat still reviews, triages and votes (those calls are ungoverned), so `council_eligible`
+   * does not read it; `chat_admission` and `work_admission` (`host_floor_bench`) do. ABSENT when the
+   * engine does not bench the seat, or its addon cannot say.
+   */
+  host_floor_bench?: string;
+  /**
    * (api-types 0.115.0, A5) Whether a job of each scope kind would give the seat work, including
    * the engine's launcher benches (core#769's codex worktree bench, via `Core.worktreeBenched`).
    * ABSENT on a daemon whose engine addon cannot answer the worktree bench (wicked-core-ts without
@@ -1221,7 +1230,8 @@ export interface SeatRecentBench {
   reason: string;
 }
 
-/** Why a seat would get no work, one code per refusal (api-types 0.115.0). */
+/** Why a seat would get no work, one code per refusal (api-types 0.115.0; `host_floor_bench`
+ *  unreleased, wicked-core#976: the engine refuses the seat's governed work on the host floor). */
 export type SeatWorkReasonCode =
   | 'signed_out'
   | 'not_enabled'
@@ -1229,11 +1239,12 @@ export type SeatWorkReasonCode =
   | 'recent_bench'
   | 'login_pending'
   | 'worktree_bench'
+  | 'host_floor_bench'
   | 'scope_ungoverned';
 
 /** `RosterSeat.work_admission[scope]` (api-types 0.115.0). `source`: `auth` — signed out;
  *  `launcher` — a launch benches it (disabled, reviewer-only, a recent bench, a pending login
- *  check, the engine's worktree bench); `scope` — the scope's governance rule refuses it. */
+ *  check, the engine's worktree bench or host-floor bench); `scope` — the scope's governance rule refuses it. */
 export type SeatWorkAdmission =
   | { ok: true }
   | { ok: false; reason_code: SeatWorkReasonCode; source: 'auth' | 'launcher' | 'scope'; reason: string };
@@ -1250,7 +1261,8 @@ export type SeatQeReviewer =
 
 /**
  * One `RosterSeat.issues` entry (api-types 0.115.0). Today's codes: `signed_out`, `qe_blocked`
- * (problems); `quota`, `usage_limit`, `benched`, `codex_worktree`, `version_unproven`,
+ * (problems); `quota`, `usage_limit`, `benched`, `codex_worktree`, `host_floor` (unreleased,
+ * wicked-core#976), `version_unproven`,
  * `unchecked` (`params.why`: `no_governance` | `no_host_boundary`), `fence_scoped`,
  * `live_check_failed` (warnings); `opt_in`, `no_qe`, `unverified` (notes). A client must tolerate
  * an unknown code.

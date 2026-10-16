@@ -61,6 +61,8 @@ function rosterOver(opts: {
   tracker?: SeatHealthTracker;
   signed?: Record<string, boolean | null>;
   worktree?: Map<string, string> | null;
+  /** The engine's host-floor bench (`Core.worktreeBenched(seats, false)`'s governed-only entries). */
+  hostFloor?: Map<string, string> | null;
   hostBoundary?: string | null;
   probe?: SeatProbe | null;
   versions?: SeatVersionCache | null;
@@ -86,6 +88,7 @@ function rosterOver(opts: {
             },
           } as never),
     worktreeBench: opts.worktree === null ? null : () => opts.worktree ?? new Map([['codex', ENGINE_BENCH]]),
+    hostFloorBench: opts.hostFloor === undefined || opts.hostFloor === null ? null : () => opts.hostFloor!,
     qeAdmitted: ((admit) => (admit === null ? null : (k: string) => (admit === undefined ? true : admit(k))))(opts.qeAdmitted),
     hostBoundary: () => (opts.hostBoundary === undefined ? 'sandbox-exec' : opts.hostBoundary),
     home: HOME,
@@ -95,6 +98,59 @@ function rosterOver(opts: {
 type Seat = Record<string, unknown> & { key: string };
 const seat = (roster: unknown[], key: string): Seat => (roster as Seat[]).find((s) => s.key === key)!;
 const codes = (s: Seat) => (s['issues'] as Array<{ code: string; severity: string }>).map((i) => `${i.severity}:${i.code}`);
+
+const HOST_FLOOR_ENGINE =
+  'runs only on the container floor: on the host floor only claude and a bounded codex keep a per-call check, so a governed unit on this seat is refused (needs_container_floor) — set WICKED_SEAT_FLOOR=container or remove the seat';
+
+describe('wicked-core#976: the host-floor bench', () => {
+  it('a host-floor-benched seat gets no work and no chat in any scope, with its own code and plain copy', () => {
+    const roster = rosterOver({ hostFloor: new Map([['copilot', HOST_FLOOR_ENGINE], ['opencode', HOST_FLOOR_ENGINE]]) })();
+    for (const k of ['copilot', 'opencode']) {
+      const s = seat(roster, k);
+      expect(s['host_floor_bench']).toBe(HOST_FLOOR_ENGINE);
+      const work = s['work_admission'] as Record<string, { ok: boolean; reason_code?: string; source?: string; reason?: string }>;
+      for (const scope of ['unscoped', 'scoped', 'scoped_bound']) {
+        expect(work[scope]).toMatchObject({ ok: false, reason_code: 'host_floor_bench', source: 'launcher' });
+        expect(work[scope]!.reason).toMatch(/WICKED_SEAT_FLOOR=container/);
+        expect(work[scope]!.reason).not.toMatch(/needs_container_floor/);
+      }
+      const chat = s['chat_admission'] as Record<string, { ok: boolean; source?: string; reason?: string }>;
+      for (const scope of ['unscoped', 'scoped', 'scoped_bound']) {
+        expect(chat[scope]).toMatchObject({ ok: false, source: 'engine' });
+        expect(chat[scope]!.reason).toMatch(/run agents in containers/);
+      }
+      expect(s['qe_reviewer']).toMatchObject({ ok: false, reason_code: 'host_floor_bench' });
+      expect(codes(s)).toContain('warning:host_floor');
+      // It still judges, triages and votes (ungoverned engine calls): `council_eligible` — which the
+      // launch turns into the engine's health, a bench on EVERY call — does not read it.
+      expect(s['council_eligible']).toBe(true);
+      expect((toEngineSeat(s) as Record<string, unknown>)['health']).toEqual({ usable: true });
+      expect('host_floor_bench' in (toEngineSeat(s) as Record<string, unknown>)).toBe(false);
+    }
+    // claude keeps a check on the host floor: untouched.
+    const claude = seat(roster, 'claude');
+    expect('host_floor_bench' in claude).toBe(false);
+    expect((claude['work_admission'] as Record<string, unknown>)['unscoped']).toEqual({ ok: true });
+  });
+
+  it('off the host floor (an empty bench) or with an addon that cannot answer, nothing changes', () => {
+    for (const hostFloor of [new Map<string, string>(), null]) {
+      const copilot = seat(rosterOver({ hostFloor })(), 'copilot');
+      expect('host_floor_bench' in copilot).toBe(false);
+      expect((copilot['work_admission'] as Record<string, unknown>)['unscoped']).toEqual({ ok: true });
+      expect(codes(copilot)).not.toContain('warning:host_floor');
+    }
+  });
+
+  it('a signed-out seat leads with the auth refusal; the host floor rides beside it in the chat reason', () => {
+    const roster = rosterOver({ signed: { copilot: false }, hostFloor: new Map([['copilot', HOST_FLOOR_ENGINE]]) })();
+    const copilot = seat(roster, 'copilot');
+    expect((copilot['work_admission'] as Record<string, unknown>)['unscoped']).toMatchObject({ reason_code: 'signed_out', source: 'auth' });
+    const chat = (copilot['chat_admission'] as Record<string, { source?: string; reason?: string }>)['unscoped']!;
+    expect(chat.source).toBe('auth');
+    expect(chat.reason).toMatch(/signed out.*run agents in containers/);
+  });
+});
 
 describe('A5 work_admission and A4 qe_reviewer', () => {
   it('codex is admitted to chats and unbound work, but the engine benches it on bound work (and so for QE)', () => {

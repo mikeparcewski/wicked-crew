@@ -583,7 +583,10 @@ interface CoreConstructor {
   /** core#920 (wicked-core-ts ≥ the release carrying it): the engine's worktree bench as a pure
    *  predicate — the `BenchedSeat` JSON array a run BOUND to one repository benches before routing
    *  (every codex seat unless the host sets `WICKED_CODEX_WORKTREE_OK`). Optional: the pinned addon
-   *  may predate it, and then the roster says nothing about that bench rather than restate it. */
+   *  may predate it, and then the roster says nothing about that bench rather than restate it.
+   *  wicked-core#976: on the interim host floor the array also carries the HOST-FLOOR bench (bound
+   *  or not) — every seat that keeps no per-call check there, entries marked `governed_only: true`
+   *  (the field is absent on every other entry). */
   worktreeBenched?(clisJson: string, bound: boolean): string;
   /** (wicked-core-ts ≥ the release carrying it) Whether this host's skill routing admits the seat
    *  (with its roster invocation template) to the engine's isolated QE reviewer turn. Optional for
@@ -1040,6 +1043,27 @@ export function withRuleDefaults(rule: ConformanceRule): ConformanceRule {
   };
 }
 
+/**
+ * One read of the engine's launch bench (`Core.worktreeBenched`, passed as `predicate`), keeping the
+ * entries whose `governed_only` is `governedOnly` (wicked-core#976: `true` marks the host-floor
+ * bench), keyed by seat with the engine's reason; `null` when the addon has no predicate.
+ */
+export function readLaunchBench(
+  predicate: ((clisJson: string, bound: boolean) => string) | undefined,
+  seats: readonly unknown[],
+  bound: boolean,
+  governedOnly: boolean,
+): Map<string, string> | null {
+  if (predicate === undefined) return null;
+  const benched = JSON.parse(predicate(JSON.stringify(seats), bound)) as Array<{ cli?: unknown; reason?: unknown; governed_only?: unknown }>;
+  const out = new Map<string, string>();
+  for (const b of benched) {
+    if (typeof b.cli !== 'string' || typeof b.reason !== 'string') continue;
+    if ((b.governed_only === true) === governedOnly) out.set(b.cli, b.reason);
+  }
+  return out;
+}
+
 export class CoreAdapter {
   private readonly core: CoreHandleFull;
   private readonly subscription: Subscription;
@@ -1460,11 +1484,23 @@ export class CoreAdapter {
    * engine-shaped (the registry roster, or `toEngineRoster` of a served one). Read at call time.
    */
   static worktreeBenched(seats: readonly unknown[]): Map<string, string> | null {
-    if (typeof Core.worktreeBenched !== 'function') return null;
-    const benched = JSON.parse(Core.worktreeBenched(JSON.stringify(seats), true)) as Array<{ cli?: unknown; reason?: unknown }>;
-    const out = new Map<string, string>();
-    for (const b of benched) if (typeof b.cli === 'string' && typeof b.reason === 'string') out.set(b.cli, b.reason);
-    return out;
+    // The host-floor entries (`governed_only`) are not the worktree bench: `hostFloorBenched` reads them.
+    return CoreAdapter.launchBench(seats, true, false);
+  }
+
+  /**
+   * wicked-core#976: the seats the engine benches from GOVERNED work on the interim host floor (any
+   * run, bound or not — `Core.worktreeBenched(seats, false)`'s `governed_only` entries), keyed by
+   * seat with the engine's reason. Empty off the host floor, and with an addon that predates the
+   * host-floor bench (it marks no entry); `null` when the addon predates the predicate itself. Such a
+   * seat still judges, triages and votes: those engine calls are ungoverned.
+   */
+  static hostFloorBenched(seats: readonly unknown[]): Map<string, string> | null {
+    return CoreAdapter.launchBench(seats, false, true);
+  }
+
+  private static launchBench(seats: readonly unknown[], bound: boolean, governedOnly: boolean): Map<string, string> | null {
+    return readLaunchBench(typeof Core.worktreeBenched === 'function' ? Core.worktreeBenched.bind(Core) : undefined, seats, bound, governedOnly);
   }
 
   /** Liveness probe → `"ok"` (also proves the event pump). */

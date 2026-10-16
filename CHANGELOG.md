@@ -26,6 +26,22 @@ mentioned only where a daemon release depends on them.
 
   Required mode is unchanged.
 
+### Fixed
+- **On the host floor, agents the engine won't give work no longer look ready (wicked-core#976).** On the interim
+  host floor (`WICKED_SEAT_FLOOR` other than `container`), the engine refuses governed work on every agent except
+  claude and a bounded codex, in every run. `GET /roster` now reads that bench from the engine
+  (`Core.worktreeBenched(seats, false)`, its `governed_only` entries), and:
+  - shows it as `host_floor_bench`;
+  - refuses the agent in `chat_admission` for every scope, source `engine`, so a new chat or ask leaves it out with
+    the reason;
+  - refuses it in `work_admission` for every scope and in `qe_reviewer`, with code `host_floor_bench`;
+  - adds a `host_floor` warning, with copy that says to run agents in containers or remove the agent.
+
+  `council_eligible` does not change: those agents still review, triage and vote (calls the host floor doesn't
+  refuse), and `council_eligible: false` would bench them from those too. Needs a wicked-core-ts that carries
+  wicked-core#976. With an older addon nothing is benched, and nothing changes. api-types: `SeatWorkReasonCode` gains
+  `host_floor_bench`, and `RosterSeat` gains `host_floor_bench`.
+
 ## [0.13.0] — 2026-10-16
 
 A minor release (0.x: breaking). Governed seats run in containers by default and ACP is gone from the seats (C5); `WICKED_SEAT_FLOOR=host` is the labelled opt-out. It bundles wicked-studio 0.9.5: the run page opens on the words that kicked the run off and shows the step being worked on. Pins: wicked-core-ts ^0.12.0, wicked-studio ^0.9.5.

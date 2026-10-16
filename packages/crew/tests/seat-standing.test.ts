@@ -112,6 +112,23 @@ describe('chatSeatAdmission — the default seats of a chat, and WHY a seat is n
     }
   });
 
+  it('wicked-core#976: a seat the engine benches on the host floor is refused in every kind and scope, source engine, in plain words', () => {
+    const benched = { ...ungoverned, host_floor_bench: 'runs only on the container floor: …' };
+    for (const kind of ['pool', 'path', 'path-bound'] as const) {
+      for (const scoped of [false, true]) {
+        const v = chatSeatAdmission(benched, 'signed_in', scoped, kind);
+        expect(v.ok).toBe(false);
+        if (v.ok) return;
+        expect(v.source).toBe('engine');
+        expect(v.reason).toMatch(/only claude and codex can have each action checked/);
+        expect(v.reason).toMatch(/WICKED_SEAT_FLOOR=container/);
+      }
+    }
+    // An empty or absent reading is no bench.
+    expect(chatSeatAdmission({ ...ungoverned, host_floor_bench: null }, 'signed_in', false, 'path')).toEqual({ ok: true });
+    expect(chatSeatAdmission({ ...ungoverned, host_floor_bench: '' }, 'signed_in', false, 'path')).toEqual({ ok: true });
+  });
+
   it('F-W1-003 = A (2026-09-15): a NON-ACP (wrapped) seat is not a chat seat — refused in BOTH modes, source scope, with an actionable reason', () => {
     for (const scoped of [false, true]) {
       const v = chatSeatAdmission(noAcp, 'signed_in', scoped);

@@ -32,6 +32,9 @@ export const CREW_ONLY_SEAT_FIELDS: ReadonlySet<string> = new Set([
   // F-W1-005: the daemon's chat admission verdict — the studio picker's source of truth, not an
   // engine field.
   'chat_admission',
+  // wicked-core#976: the engine's own host-floor bench, read back for the studio — the engine
+  // recomputes it at launch.
+  'host_floor_bench',
   // IG1-crew-1: the governance mode crew reads per seat (seat-governance.ts) — a crew reading,
   // never stamped into the engine's roster.
   'governance_mode',

@@ -111,6 +111,13 @@ export interface RosterStandingDeps {
    *  under the same rule as `probe`; `null` (or a test that injects a registry) turns it off, and
    *  then `work_admission` and `qe_reviewer` are absent. */
   worktreeBench?: ((engineSeats: readonly unknown[]) => Map<string, string> | null) | null;
+  /** (wicked-core#976) The engine's host-floor bench: seat key → reason for every seat the engine
+   *  refuses governed work on this host's floor, or `null` when the engine cannot answer. Default:
+   *  `CoreAdapter.hostFloorBenched` under the same rule as `worktreeBench`; `null` turns it off. It
+   *  is stamped as `host_floor_bench` and read by the chat and work admissions — never by
+   *  `council_eligible`, which becomes the engine's `health` and would also bench the seat from
+   *  judging and voting, calls the host floor does not refuse. */
+  hostFloorBench?: ((engineSeats: readonly unknown[]) => Map<string, string> | null) | null;
   /** (A4) The engine's QE reviewer admission for one seat (`Core.qeReviewerAdmitted`), `null` when
    *  the engine cannot answer. Default under the same rule as `worktreeBench`; without it (or with
    *  `worktreeBench` absent) `qe_reviewer` is absent. */
@@ -154,6 +161,8 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
   const versions = deps.versions !== undefined ? deps.versions : daemon ? seatVersions : null;
   const worktreeBench =
     deps.worktreeBench !== undefined ? deps.worktreeBench : daemon ? (seats: readonly unknown[]) => CoreAdapter.worktreeBenched(seats) : null;
+  const hostFloorBench =
+    deps.hostFloorBench !== undefined ? deps.hostFloorBench : daemon ? (seats: readonly unknown[]) => CoreAdapter.hostFloorBenched(seats) : null;
   const qeAdmitted =
     deps.qeAdmitted !== undefined ? deps.qeAdmitted : daemon ? (key: string, inv: string | undefined) => CoreAdapter.qeReviewerAdmitted(key, inv) : null;
   // Published generations are immutable; the mutable HOME-derived fallback expires after 30 s.
@@ -256,6 +265,12 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
     } catch {
       benchedOnBound = null; // an engine that cannot answer says nothing, never a guessed bench
     }
+    let benchedOnHost: Map<string, string> | null = null;
+    try {
+      benchedOnHost = hostFloorBench === null ? null : hostFloorBench(seats);
+    } catch {
+      benchedOnHost = null;
+    }
     const boundary = hostBoundary();
     const decorated = seats.map((seat) => {
       const key = String(seat.key);
@@ -321,7 +336,11 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
       // studio's picker offers exactly the seats an open would seat, from one source of truth (no
       // client-side copy of the rule). Additive on the wire (`RosterSeat` index signature until
       // api-types 0.39.0 types it).
-      const standingSeat = seat as unknown as StandingSeat;
+      const hostFloor = benchedOnHost?.get(key) ?? null;
+      const standingSeat = {
+        ...(seat as unknown as StandingSeat),
+        ...(hostFloor !== null ? { host_floor_bench: hostFloor } : {}),
+      };
       // core#581: a pinned seat whose binary no longer matches the build its ACP admission was
       // proven against says so here (read from the cache; a stale cache refreshes in the
       // background). Absent for an unpinned seat and until the first probe answers.
@@ -356,12 +375,14 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
               loginPending: probed === undefined && (containerSeat || probe?.probes(key) === true) && authFailure === null,
               chatAdmission,
               worktreeBench: benchedOnBound.get(key) ?? null,
+              hostFloorBench: hostFloor,
             };
       return {
         ...seat,
         health,
         signed_in: signed,
         ...(containerSeat ? { sign_in: 'container' as const } : {}),
+        ...(hostFloor !== null ? { host_floor_bench: hostFloor } : {}),
         ...(versionPin !== undefined ? { version_pin: versionPin } : {}),
         ...standing,
         // ASK-C2: the admission an ASK applies (every chat is a path after ASK-C1): `unscoped` =
