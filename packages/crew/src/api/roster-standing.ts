@@ -36,9 +36,9 @@ import {
 import type { SeatHealthTracker } from './seat-health.js';
 import { signedInHeuristic } from './seat-signin.js';
 import { SeatProbe } from './seat-probe.js';
-import { SeatContainerStatus, isContainerLoginCli, isContainerSeatFloor } from './seat-container-login.js';
+import { SeatContainerStatus, isContainerLoginCli, isContainerSeatFloor, isHostSeatFloor } from './seat-container-login.js';
 import { seatGovernanceModes, type GovernanceScopeKind, type SeatGovernanceMode } from './seat-governance.js';
-import { seatStanding, chatSeatAdmission, type StandingSeat, type SeatStanding } from './seat-standing.js';
+import { HOST_FLOOR_UNKNOWN_COPY, seatStanding, chatSeatAdmission, type StandingSeat, type SeatStanding } from './seat-standing.js';
 import { seatVersion, seatVersions, type SeatVersionCache } from './seat-version.js';
 
 // The adapter loads this same addon module. Keep the optional 0.11.1 static local until the
@@ -111,6 +111,13 @@ export interface RosterStandingDeps {
    *  under the same rule as `probe`; `null` (or a test that injects a registry) turns it off, and
    *  then `work_admission` and `qe_reviewer` are absent. */
   worktreeBench?: ((engineSeats: readonly unknown[]) => Map<string, string> | null) | null;
+  /** (wicked-core#976) The engine's host-floor bench: seat key → reason for every seat the engine
+   *  refuses governed work on this host's floor, or `null` when the engine cannot answer. Default:
+   *  `CoreAdapter.hostFloorBenched` under the same rule as `worktreeBench`; `null` turns it off. It
+   *  is stamped as `host_floor_bench` and read by the chat and work admissions — never by
+   *  `council_eligible`, which becomes the engine's `health` and would also bench the seat from
+   *  judging and voting, calls the host floor does not refuse. */
+  hostFloorBench?: ((engineSeats: readonly unknown[]) => Map<string, string> | null) | null;
   /** (A4) The engine's QE reviewer admission for one seat (`Core.qeReviewerAdmitted`), `null` when
    *  the engine cannot answer. Default under the same rule as `worktreeBench`; without it (or with
    *  `worktreeBench` absent) `qe_reviewer` is absent. */
@@ -154,6 +161,12 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
   const versions = deps.versions !== undefined ? deps.versions : daemon ? seatVersions : null;
   const worktreeBench =
     deps.worktreeBench !== undefined ? deps.worktreeBench : daemon ? (seats: readonly unknown[]) => CoreAdapter.worktreeBenched(seats) : null;
+  const hostFloorBench =
+    deps.hostFloorBench !== undefined ? deps.hostFloorBench : daemon ? (seats: readonly unknown[]) => CoreAdapter.hostFloorBenched(seats) : null;
+  // The last host-floor bench the engine answered, with the floor and roster it was read for: a read
+  // that fails later keeps it only for that same floor and roster (a seat added or re-pointed since
+  // is unknown until the engine answers again).
+  let lastHostFloor: { identity: string; bench: Map<string, string> } | null = null;
   const qeAdmitted =
     deps.qeAdmitted !== undefined ? deps.qeAdmitted : daemon ? (key: string, inv: string | undefined) => CoreAdapter.qeReviewerAdmitted(key, inv) : null;
   // Published generations are immutable; the mutable HOME-derived fallback expires after 30 s.
@@ -256,6 +269,23 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
     } catch {
       benchedOnBound = null; // an engine that cannot answer says nothing, never a guessed bench
     }
+    // wicked-core#976: `null` = an addon without the predicate (nothing benched, as before it).
+    // A read that FAILS is not "no bench": off the host floor the engine benches nothing, so
+    // nothing is missed; on it the last reading stands, and with none every seat's admission is
+    // unavailable, said so (fail closed) — never a guessed "admitted".
+    let benchedOnHost: Map<string, string> | null = null;
+    let hostFloorUnknown: string | null = null;
+    if (hostFloorBench !== null) {
+      const identity = JSON.stringify([env['WICKED_SEAT_FLOOR'] ?? null, seats]);
+      try {
+        benchedOnHost = hostFloorBench(seats);
+        if (benchedOnHost !== null) lastHostFloor = { identity, bench: benchedOnHost };
+      } catch {
+        if (!isHostSeatFloor(env)) benchedOnHost = new Map();
+        else if (lastHostFloor !== null && lastHostFloor.identity === identity) benchedOnHost = lastHostFloor.bench;
+        else hostFloorUnknown = HOST_FLOOR_UNKNOWN_COPY;
+      }
+    }
     const boundary = hostBoundary();
     const decorated = seats.map((seat) => {
       const key = String(seat.key);
@@ -321,7 +351,12 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
       // studio's picker offers exactly the seats an open would seat, from one source of truth (no
       // client-side copy of the rule). Additive on the wire (`RosterSeat` index signature until
       // api-types 0.39.0 types it).
-      const standingSeat = seat as unknown as StandingSeat;
+      const hostFloor = benchedOnHost?.get(key) ?? null;
+      const standingSeat = {
+        ...(seat as unknown as StandingSeat),
+        ...(hostFloor !== null ? { host_floor_bench: hostFloor } : {}),
+        ...(hostFloorUnknown !== null ? { host_floor_unknown: hostFloorUnknown } : {}),
+      };
       // core#581: a pinned seat whose binary no longer matches the build its ACP admission was
       // proven against says so here (read from the cache; a stale cache refreshes in the
       // background). Absent for an unpinned seat and until the first probe answers.
@@ -345,8 +380,9 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
       // A4: the engine's QE skill admission for this seat (`null` when it cannot answer).
       const skillAdmitted = admissions.get(key) ?? null;
       // A4 / A5: only when the engine can say whether it benches the seat on a bound run.
+      // …and whether it benches it on the host floor: unread there, the admissions are absent.
       const inputs =
-        benchedOnBound === null
+        benchedOnBound === null || hostFloorUnknown !== null
           ? null
           : {
               enabled_for_council: (seat as { enabled_for_council?: boolean }).enabled_for_council,
@@ -356,12 +392,15 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
               loginPending: probed === undefined && (containerSeat || probe?.probes(key) === true) && authFailure === null,
               chatAdmission,
               worktreeBench: benchedOnBound.get(key) ?? null,
+              hostFloorBench: hostFloor,
             };
       return {
         ...seat,
         health,
         signed_in: signed,
         ...(containerSeat ? { sign_in: 'container' as const } : {}),
+        ...(hostFloor !== null ? { host_floor_bench: hostFloor } : {}),
+        ...(hostFloorUnknown !== null ? { host_floor_unknown: hostFloorUnknown } : {}),
         ...(versionPin !== undefined ? { version_pin: versionPin } : {}),
         ...standing,
         // ASK-C2: the admission an ASK applies (every chat is a path after ASK-C1): `unscoped` =
@@ -395,6 +434,8 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
         governance: s.governance_mode as Record<GovernanceScopeKind, SeatGovernanceMode>,
         hostBoundary: boundary,
         recentBench: s.recent_bench,
+        hostFloorBench: typeof s.host_floor_bench === 'string' ? s.host_floor_bench : null,
+        hostFloorUnknown: typeof s.host_floor_unknown === 'string' ? s.host_floor_unknown : null,
         ...(s.work_admission !== undefined ? { workAdmission: s.work_admission as Record<GovernanceScopeKind, WorkAdmission> } : {}),
         ...(s.qe_reviewer !== undefined ? { qeReviewer: s.qe_reviewer as QeReviewer } : {}),
         rosterQe,

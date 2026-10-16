@@ -133,7 +133,28 @@ export interface StandingSeat {
   credential?: 'required' | 'optional' | string;
   /** A registry-declared free-tier label, when the record carries one (future core). */
   free_tier?: string;
+  /** wicked-core#976: the engine's host-floor bench reason for this seat (`roster-standing.ts`
+   *  stamps it from `CoreAdapter.hostFloorBenched`), absent when the engine does not bench it. */
+  host_floor_bench?: string | null;
+  /** wicked-core#976: present when the engine's host-floor bench could not be read on the host
+   *  floor (and no earlier reading stands): the operator's sentence. The seat is not admitted. */
+  host_floor_unknown?: string | null;
 }
+
+/**
+ * The operator's sentence for a seat the engine benches on the host floor (wicked-core#976): the
+ * engine refuses its governed work there, so a job never gives it any. It still reviews, triages
+ * and votes (those calls are not governed), which is why `council_eligible` does not read it.
+ */
+export const HOST_FLOOR_BENCH_COPY =
+  'agents on this computer run on the host, not in containers, and there only claude and codex can ' +
+  'have each action checked, so jobs give this agent no work — run agents in containers ' +
+  '(WICKED_SEAT_FLOOR=container) or remove it from the roster';
+
+/** The operator's sentence when the host-floor bench could not be read (fail closed). */
+export const HOST_FLOOR_UNKNOWN_COPY =
+  "crew could not read which agents the engine gives work to on this computer, so it is left out " +
+  'for now — try again in a moment; if this keeps happening, check Diagnostics';
 
 export interface SeatStanding {
   auth: SeatAuth;
@@ -314,6 +335,15 @@ export function chatSeatAdmission(
   }
   if (seat.enabled_for_council === false) {
     reasons.push('disabled for the council, so it takes no turn');
+  }
+  // wicked-core#976: an ask is a run, and on the host floor the engine refuses governed work on a
+  // seat that keeps no per-call check there — in every scope. Decided HERE, before any structural
+  // scope rule: no scope remedy ("scope the ask to one repository") can lift it.
+  const hostBenched = typeof seat.host_floor_bench === 'string' && seat.host_floor_bench !== '';
+  const hostUnknown = typeof seat.host_floor_unknown === 'string' && seat.host_floor_unknown !== '';
+  if (hostBenched || hostUnknown) {
+    reasons.push(hostBenched ? HOST_FLOOR_BENCH_COPY : (seat.host_floor_unknown as string));
+    return { ok: false, reason: reasons.join('; '), source: source === 'auth' ? 'auth' : 'engine' };
   }
   if (kind === 'path-bound' || (kind === 'path' && !scoped)) {
     return reasons.length === 0 ? { ok: true } : { ok: false, reason: reasons.join('; '), source };

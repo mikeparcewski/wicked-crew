@@ -26,6 +26,31 @@ mentioned only where a daemon release depends on them.
 
   Required mode is unchanged.
 
+### Fixed
+- **On the host floor, agents the engine won't give work no longer look ready (wicked-core#976).** On the interim
+  host floor (`WICKED_SEAT_FLOOR` other than `container`), the engine refuses governed work on every agent except
+  claude and a bounded codex, in every run. `GET /roster` now reads that bench from the engine
+  (`Core.worktreeBenched(seats, false)`, its `governed_only` entries), and:
+  - shows it as `host_floor_bench`;
+  - adds a `host_floor` warning issue (whatever else is wrong with the agent), with copy that says to run agents in
+    containers or remove the agent;
+  - refuses the agent in `chat_admission` for every scope, before any scope rule, so no scope remedy is offered;
+  - refuses it in `work_admission` for every scope and in `qe_reviewer`, with code `host_floor_bench`.
+
+  Earlier refusals still win. A signed-out agent keeps `signed_out` (source `auth`), and its chat refusal keeps
+  source `auth` with the host-floor sentence added. A disabled, reviewer-only, recently benched or login-pending
+  agent keeps that code in `work_admission`. Only then does `host_floor_bench` apply, and chat refusals otherwise
+  carry source `engine`.
+
+  If crew cannot read the bench on the host floor and has no earlier reading, admission fails closed. Every agent
+  gets `host_floor_unknown` and a `host_floor_unknown` warning, `chat_admission` refuses it, and `work_admission` and
+  `qe_reviewer` are absent. Off the host floor a failed read benches nothing, and nothing is missed.
+
+  `council_eligible` does not change: those agents still review, triage and vote (calls the host floor doesn't
+  refuse), and `council_eligible: false` would bench them from those too. Needs wicked-core-ts 0.12.1 (pinned).
+  api-types: `SeatWorkReasonCode` gains `host_floor_bench`, and `RosterSeat` gains `host_floor_bench` and
+  `host_floor_unknown`.
+
 ## [0.13.0] — 2026-10-16
 
 A minor release (0.x: breaking). Governed seats run in containers by default and ACP is gone from the seats (C5); `WICKED_SEAT_FLOOR=host` is the labelled opt-out. It bundles wicked-studio 0.9.5: the run page opens on the words that kicked the run off and shows the step being worked on. Pins: wicked-core-ts ^0.12.0, wicked-studio ^0.9.5.
