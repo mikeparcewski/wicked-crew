@@ -19,6 +19,7 @@ process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mkdtempSync, writeFileSync } from 'node:fs';
+import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
@@ -363,6 +364,56 @@ describe('CORS pairing (the R2 gap)', () => {
       headers: { Origin: 'http://127.0.0.1:4200' },
     });
     expect(loop.headers.get('access-control-allow-origin')).toBe('http://127.0.0.1:4200');
+  });
+
+  it('local mode: another local page gets no CORS and may not write (crew#1048)', async () => {
+    const read = await fetch(`${localBase}/api/v1/health`, { headers: { Origin: 'http://localhost:4999' } });
+    expect(read.headers.get('access-control-allow-origin')).toBeNull();
+    const write = await fetch(`${localBase}/api/v1/settings`, {
+      method: 'PUT',
+      headers: { Origin: 'http://localhost:4999', 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    expect(write.status).toBe(403);
+    expect(((await write.json()) as { code?: string }).code).toBe('origin_refused');
+  });
+
+  it('local mode: a page under a non-loopback Host (DNS rebinding) is refused, reads included', async () => {
+    // fetch drops a Host override, so speak plain http.
+    const status = await new Promise<number>((done, fail) => {
+      // A plain-http rebound page sends no Origin and no Sec-Fetch-* on a read: only the Host gives it away.
+      const r = httpRequest(`${localBase}/api/v1/health`, { headers: { Host: 'evil.example:7701' } }, (res) => {
+        res.resume();
+        done(res.statusCode ?? 0);
+      });
+      r.on('error', fail);
+      r.end();
+    });
+    expect(status).toBe(403);
+  });
+
+  it('local mode: a foreign page can open neither /ws nor a terminal, and the refused sockets are closed', async () => {
+    const wsBase = localBase.replace(/^http/, 'ws');
+    for (const path of ['/ws', '/ws/terminals/t-guard']) {
+      const outcome = await new Promise<string>((done) => {
+        const ws = new WebSocket(`${wsBase}${path}`, { headers: { Origin: 'http://localhost:4999' } });
+        ws.on('open', () => { ws.close(); done('open'); });
+        ws.on('unexpected-response', (_req, res) => { res.resume(); res.on('end', () => done(String(res.statusCode))); });
+        ws.on('error', () => done('error'));
+      });
+      expect(outcome, path).toBe('403');
+    }
+  });
+
+  it('local mode: the daemon\'s own origin still opens /ws', async () => {
+    const wsBase = localBase.replace(/^http/, 'ws');
+    const outcome = await new Promise<string>((done) => {
+      const ws = new WebSocket(`${wsBase}/ws`, { headers: { Origin: localBase } });
+      ws.on('open', () => { ws.close(); done('open'); });
+      ws.on('unexpected-response', (_req, res) => { done(String(res.statusCode)); });
+      ws.on('error', () => done('error'));
+    });
+    expect(outcome).toBe('open');
   });
 });
 

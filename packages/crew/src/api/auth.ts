@@ -477,7 +477,7 @@ export interface AuthOptions {
 export interface ResolvedAuth {
   mode: AuthMode;
   verifiers: TokenVerifier[];
-  /** `null` = any origin (required mode's default); else an allowlist. Loopback always passes. */
+  /** `null` = any origin (required mode's default); else an allowlist. Studio's dev origin always passes (origin-guard.ts). */
   allowedOrigins: string[] | null;
 }
 

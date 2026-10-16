@@ -764,6 +764,16 @@ function forward(
           if (HOP_BY_HOP.has(name) || value === undefined) continue;
           headers[name] = name === 'location' && typeof value === 'string' ? rewriteLocation(value, bridge, prefix) : value;
         }
+        // crew#1048: a document is untrusted HTML served on the daemon's origin. Sandbox it in the
+        // response itself, so opening it directly (not in studio's sandboxed iframe) gives its
+        // scripts an opaque origin, never the daemon's API. Any upstream CSP still applies too.
+        if (String(res.headers['content-type'] ?? '').toLowerCase().includes('text/html')) {
+          const upstreamCsp = headers['content-security-policy'];
+          headers['content-security-policy'] = [
+            ...(upstreamCsp === undefined ? [] : Array.isArray(upstreamCsp) ? upstreamCsp : [upstreamCsp]),
+            'sandbox allow-scripts',
+          ];
+        }
         reply.raw.writeHead(res.statusCode ?? 502, headers);
         // No `pipeline` and no buffering layer: `pipe` forwards each chunk as it lands, and
         // Node flushes it because we never set a highWaterMark barrier in between.

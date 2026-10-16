@@ -10,6 +10,22 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Security
+- **Only the daemon's own pages, and origins you allow, can drive it from a browser (crew#1048).** With auth off (the
+  local default) crew used to reflect CORS for every `localhost`/`127.0.0.1` port, and `/ws` and `/ws/terminals/:id`
+  (which writes to a PTY) checked no origin at all. So any page in the operator's browser could launch runs, answer
+  gates, change settings or type into a terminal: another dev server, an agent-built app, or a remote site using DNS
+  rebinding. Now, with auth off:
+  - every request's Host must be a loopback name; the worker MCP routes, which the engine checks by unit token, are
+    exempt;
+  - a write or WebSocket upgrade must come from the daemon's own origin, studio's dev server (`:4200`) or
+    `WICKED_CREW_ALLOWED_ORIGINS`;
+  - anything else gets 403 `origin_refused`, and CORS is reflected only for those origins;
+  - interactive documents get `Content-Security-Policy: sandbox allow-scripts` in the response, so one opened directly
+    cannot use the API.
+
+  Required mode is unchanged.
+
 ## [0.13.0] — 2026-10-16
 
 A minor release (0.x: breaking). Governed seats run in containers by default and ACP is gone from the seats (C5); `WICKED_SEAT_FLOOR=host` is the labelled opt-out. It bundles wicked-studio 0.9.5: the run page opens on the words that kicked the run off and shows the step being worked on. Pins: wicked-core-ts ^0.12.0, wicked-studio ^0.9.5.

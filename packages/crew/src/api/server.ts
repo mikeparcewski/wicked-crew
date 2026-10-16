@@ -16,6 +16,7 @@ import { GateCache } from './gate-cache.js';
 import { ElicitationCache } from './elicitation-cache.js';
 import { AskServer } from '../mcp/ask-server.js';
 import { registerAuthHooks, resolveAuth, type AuthOptions } from './auth.js';
+import { corsAllowed, refuseRequest } from './origin-guard.js';
 import { AuditLog } from './audit.js';
 import { EvalRunStore } from './eval-store.js';
 import { RetryIndex } from './retry-index.js';
@@ -133,10 +134,10 @@ const DAEMON_ACTOR: Actor = { id: 'daemon', kind: 'system', trust: 'admin' };
 /** The stall watchdog acts on runs by itself, so its audit lines name IT, not the daemon. */
 const STALL_WATCHDOG_ACTOR: Actor = { id: 'stall-watchdog', kind: 'system', trust: 'admin' };
 
-// Allow the studio (a separate localhost origin, e.g. :4200) to call the
-// daemon's REST API. Restricted to loopback origins — the daemon only binds
-// 127.0.0.1, so this never widens exposure beyond the local machine.
-const LOOPBACK_ORIGIN = /^http:\/\/(127\.0\.0\.1|localhost):\d+$/;
+/** One header value (Node joins repeats into an array only for a few names; take the first). */
+function header(v: string | string[] | undefined): string | undefined {
+  return Array.isArray(v) ? v[0] : v;
+}
 
 /**
  * The bundled studio SPA lives at `dist/studio` next to the compiled server
@@ -1961,18 +1962,10 @@ export async function createServer(
 
   app.addHook('onRequest', async (req, reply) => {
     const origin = req.headers.origin;
-    // Loopback origins are always allowed (the studio on another localhost
-    // port). NON-loopback origins are allowed ONLY when auth is required — the
-    // R2 pairing: a hosted skin needs CORS, and CORS beyond the machine is
-    // safe exactly when every request must carry a bearer token (no ambient
-    // credential exists for a foreign page to ride). An explicit allowlist
-    // (`allowedOrigins` / WICKED_CREW_ALLOWED_ORIGINS) narrows it further.
-    const allowed =
-      origin !== undefined &&
-      (LOOPBACK_ORIGIN.test(origin) ||
-        (auth.mode === 'required' &&
-          (auth.allowedOrigins === null || auth.allowedOrigins.includes(origin))));
-    if (origin && allowed) {
+    // crew#1048: CORS is reflected only for origins allowed to read (origin-guard.ts); the refusal
+    // itself is the hook registered after the websocket plugin, below.
+    const policy = { mode: auth.mode, allowedOrigins: auth.allowedOrigins };
+    if (origin && corsAllowed(origin, policy)) {
       reply.header('Access-Control-Allow-Origin', origin);
       reply.header('Vary', 'Origin');
       reply.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
@@ -2012,6 +2005,25 @@ export async function createServer(
   // upgrade requests (`request.ws`); if auth 401s first, that flag is never
   // set and the plugin's onResponse cleanup skips destroying the raw upgrade
   // socket, which then holds `app.close()` open forever.
+  // crew#1048: which pages may talk to us at all when auth is off (origin-guard.ts). A 403 here, like the
+  // auth hooks, must come AFTER the websocket plugin's own hook for the same reason: a refused
+  // upgrade has to be one the plugin knows about, or its socket holds `app.close()` open.
+  app.addHook('onRequest', async (req, reply) => {
+    const refused = refuseRequest(
+      {
+        method: req.method,
+        path: req.url.split('?')[0] ?? req.url,
+        host: req.headers.host,
+        origin: req.headers.origin,
+        secFetchSite: header(req.headers['sec-fetch-site']),
+        upgrade: header(req.headers.upgrade),
+      },
+      { mode: auth.mode, allowedOrigins: auth.allowedOrigins },
+    );
+    if (refused === null) return;
+    await reply.code(403).send({ code: 'origin_refused', error: refused });
+    return reply;
+  });
   registerAuthHooks(app, auth);
 
   app.get('/ws', { websocket: true }, (socket) => {

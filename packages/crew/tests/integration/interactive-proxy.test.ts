@@ -92,6 +92,10 @@ const server = createServer((req, res) => {
   if (url.pathname === '/api/redirect-foreign') {
     return res.writeHead(302, { location: 'https://example.com/elsewhere' }).end();
   }
+  if (url.pathname === '/d/doc-1/doc/1') {  // a document version: untrusted HTML
+    return res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': "img-src 'self'" })
+      .end('<!doctype html><script>fetch("/api/v1/settings")</script>');
+  }
   if (url.pathname === '/api/stream') {  // SSE: one frame now, close much later
     res.writeHead(200, {'content-type':'text/event-stream','cache-control':'no-cache'});
     res.write('data: first\\n\\n');
@@ -302,6 +306,17 @@ describe('interactive proxy — transport semantics', () => {
   it('leaves a FOREIGN Location alone (rewriting it would invent a target)', async () => {
     const res = await fetch(`${base}${P}/api/redirect-foreign`, { redirect: 'manual' });
     expect(res.headers.get('location')).toBe('https://example.com/elsewhere');
+  });
+
+  it('sandboxes a document\'s HTML in the response, so opening it directly gives it no API access (crew#1048)', async () => {
+    const res = await fetch(`${base}${P}/d/doc-1/doc/1`);
+    const csp = res.headers.get('content-security-policy') ?? '';
+    // fetch joins repeated headers with ", ": the bridge's own policy survives beside ours.
+    expect(csp).toContain('sandbox allow-scripts');
+    expect(csp).not.toContain('allow-same-origin');
+    expect(csp).toContain("img-src 'self'");
+    const json = await fetch(`${base}${P}/api/docs`);
+    expect(json.headers.get('content-security-policy')).toBeNull();
   });
 
   it('SSE: a chunk arrives BEFORE the stream closes (unbuffered)', async () => {
