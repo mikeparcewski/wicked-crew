@@ -2,8 +2,9 @@
 // each carrier, through crew's REAL engine seam (`stub: false`).
 //
 // A build → review run on two seats: the build (a CREATOR) lands on a WRAPPED seat (codex's carrier:
-// one process per unit, `headless_invocation`), the review (an EVALUATOR) on an ACP seat (pi's
-// carrier: a long-lived `session/prompt` process). Each worker does exactly what the garden shim
+// one process per unit, `headless_invocation`), the review (an EVALUATOR) on a second seat. Since
+// C5 (wicked-core#950) removed ACP from the seats, both seats run on the wrapped carrier: the
+// results are told apart by the SEAT the broker recorded, not by the carrier label. Each worker does exactly what the garden shim
 // (`wicked-garden run scripts/mcp/shim.py list|call`) does: it reads `WICKED_MCP_TOKEN` and
 // `WICKED_CREW_URL` from the environment the ENGINE handed it, lists its tools
 // (`POST /api/v1/mcp/tools`) and calls a read and a destructive tool (`POST /api/v1/mcp/call`).
@@ -38,7 +39,7 @@ const CALL_SERVER = join(dirname(fileURLToPath(import.meta.url)), '..', 'fixture
 const RUN_ID = 'it-mcp-shim-e2e-1';
 const WORKFLOW_ID = 'mcp-shim-e2e-wf';
 const WRAPPED_SEAT = 'codex-shim';
-const ACP_SEAT = 'pi-shim';
+const EVALUATOR_SEAT = 'pi-shim';
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 
 /**
@@ -190,7 +191,7 @@ beforeAll(async () => {
       `headless_invocation = ${JSON.stringify(`${process.execPath} ${wrappedCli} {PROMPT}`)}`,
       '',
       '[[cli]]',
-      `key = ${JSON.stringify(ACP_SEAT)}`,
+      `key = ${JSON.stringify(EVALUATOR_SEAT)}`,
       'display_name = "ACP shim seat"',
       `binary = ${JSON.stringify(process.execPath)}`,
       `headless_invocation = ${JSON.stringify(`${process.execPath} ${wrappedCli} {PROMPT}`)}`,
@@ -251,7 +252,7 @@ beforeAll(async () => {
     sessionId: RUN_ID,
     workflow: WORKFLOW_ID,
     entityMode: 'shared',
-    clisJson: JSON.stringify([seat(WRAPPED_SEAT), seat(ACP_SEAT)]),
+    clisJson: JSON.stringify([seat(WRAPPED_SEAT), seat(EVALUATOR_SEAT)]),
   });
   expect(launch.status, JSON.stringify(launch.body)).toBe(201);
 
@@ -262,7 +263,7 @@ beforeAll(async () => {
     const body = (await res.json()) as { run?: { session: Record<string, unknown> } };
     settledStatus = String(body.run?.session['status'] ?? '');
     results = readResults();
-    const both = results.some((r) => r.label === 'wrapped') && results.some((r) => r.label === 'acp');
+    const both = results.some((r) => seatOf(r) === WRAPPED_SEAT) && results.some((r) => seatOf(r) === EVALUATOR_SEAT);
     if (both && (TERMINAL.has(settledStatus) || settledStatus === 'awaiting_human')) break;
     if (Date.now() > deadline) throw new Error(`the run never used the tools on both seats; status ${settledStatus}, results ${JSON.stringify(results)}`);
     await new Promise((r) => setTimeout(r, 200));
@@ -284,9 +285,14 @@ afterAll(async () => {
 const subjectsOf = (r: WorkerResult): string[] =>
   ((r.list?.body['tools'] as Array<{ subject: string }> | undefined) ?? []).map((t) => t.subject);
 
-describe('PROVING (S4): shim → broker end to end on a wrapped and an ACP unit', () => {
+/** The seat the broker says made a result's calls (`POST /mcp/tools` answers with its unit). */
+function seatOf(r: WorkerResult): unknown {
+  return (r.list?.body['unit'] as { seat?: unknown } | undefined)?.seat;
+}
+
+describe('PROVING (S4): shim → broker end to end on a creator and an evaluator seat', () => {
   it('the creator on the WRAPPED seat is armed, lists the destructive tool and calls it', () => {
-    const wrapped = results.find((r) => r.label === 'wrapped');
+    const wrapped = results.find((r) => seatOf(r) === WRAPPED_SEAT);
     expect(wrapped?.armed, JSON.stringify(wrapped)).toEqual({ token: true, url: true });
     expect(wrapped?.list?.status).toBe(wrapped?.viaGardenShim ? 0 : 200);
     expect(wrapped?.list?.body['unit']).toMatchObject({ runId: RUN_ID, seat: WRAPPED_SEAT });
@@ -296,13 +302,13 @@ describe('PROVING (S4): shim → broker end to end on a wrapped and an ACP unit'
     expect(JSON.stringify(wrapped?.destructive?.body['result'])).toContain('noted');
   });
 
-  it('the evaluator on the ACP seat never sees the destructive tool, and its call is denied by the engine', () => {
-    const acp = results.filter((r) => r.label === 'acp');
+  it('the evaluator seat never sees the destructive tool, and its call is denied by the engine', () => {
+    const acp = results.filter((r) => seatOf(r) === EVALUATOR_SEAT);
     expect(acp.length).toBeGreaterThan(0);
     for (const r of acp) {
       expect(r.armed, JSON.stringify(r)).toEqual({ token: true, url: true });
       expect(r.list?.status).toBe(r.viaGardenShim ? 0 : 200);
-      expect(r.list?.body['unit']).toMatchObject({ runId: RUN_ID, seat: ACP_SEAT });
+      expect(r.list?.body['unit']).toMatchObject({ runId: RUN_ID, seat: EVALUATOR_SEAT });
       expect(subjectsOf(r)).toContain('mcp:fx/wt_echo');
       expect(subjectsOf(r), 'an evaluator is never offered a write').not.toContain('mcp:fx/wt_note');
       expect(r.read?.body).toMatchObject({ outcome: 'ok' });
@@ -320,7 +326,7 @@ describe('PROVING (S4): shim → broker end to end on a wrapped and an ACP unit'
     const calls = results.filter((r) => r.read !== undefined).length * 2;
     expect(records).toHaveLength(calls);
     for (const rec of records) expect(rec.attrs['wicked.carrier']).toBe('shim');
-    expect(records.find((r) => r.attrs['wicked.seat'] === ACP_SEAT && r.attrs['mcp.subject'] === 'mcp:fx/wt_note')?.decision).toMatchObject({
+    expect(records.find((r) => r.attrs['wicked.seat'] === EVALUATOR_SEAT && r.attrs['mcp.subject'] === 'mcp:fx/wt_note')?.decision).toMatchObject({
       decision: 'deny',
       by: 'engine:mcp-phase-role',
     });
