@@ -6,7 +6,7 @@ thing: whether a request must prove who it is.
 | | **Local (the default)** | **Team / hosted** |
 |---|---|---|
 | Trigger | nothing — zero config | `WICKED_RUNTIME=team` or `WICKED_CREW_AUTH=required` |
-| Bind / CORS | `127.0.0.1`, loopback origins only | any origin (or an allowlist) — see [CORS pairing](#cors-pairing) |
+| Bind / CORS | `127.0.0.1`; CORS for studio's dev server (`:4200`) and `WICKED_CREW_ALLOWED_ORIGINS` only | any origin (or an allowlist) — see [CORS pairing](#cors-pairing) |
 | Token | none | `Authorization: Bearer <token>` on every `/api/v1` and `/ws` request |
 | Actor | implicit `{id:"local", kind:"human", trust:"admin"}` | resolved from the token |
 
@@ -180,13 +180,36 @@ the same `Actor` through — the shape is already the wire contract's
 
 ## CORS pairing
 
-CORS beyond the machine is allowed **exactly when auth is required** — the R2
-gap's fix. In local mode only loopback origins (`http://127.0.0.1:*`,
-`http://localhost:*`) are reflected, as before. In required mode any origin is
-reflected (bearer auth carries no ambient credential — a foreign page without
-a token holds nothing), and `WICKED_CREW_ALLOWED_ORIGINS` (comma-separated)
-narrows that to an allowlist. `Authorization` is in
-`Access-Control-Allow-Headers` so browser skins can send the token.
+CORS beyond the machine is allowed **exactly when auth is required** (the R2
+gap's fix). In required mode any origin is reflected, because a bearer token
+carries no ambient credential and a foreign page without one holds nothing.
+`WICKED_CREW_ALLOWED_ORIGINS` (comma-separated) narrows that to an allowlist.
+`Authorization` is in `Access-Control-Allow-Headers` so browser skins can send
+the token.
+
+In local mode (auth off) there is no token, so crew guards the browser boundary
+itself (crew#1048, `src/api/origin-guard.ts`):
+
+- **Every request's Host must be a loopback name** (`127.0.0.1`, `localhost`,
+  `[::1]`). A page that reaches the daemon through DNS rebinding arrives under
+  its own name and gets 403 `origin_refused`, plain reads included. The worker
+  MCP routes (`/mcp/call`, `/mcp/tools`, `/mcp/ask`) are exempt: the seat
+  gateway reaches them under a host alias, and the engine checks their unit
+  token in every mode.
+- **A write or a WebSocket upgrade must come from the daemon's own origin, or an
+  allowed one.** Allowed means studio's dev server (`http://127.0.0.1:4200`,
+  `http://localhost:4200`) or an entry in `WICKED_CREW_ALLOWED_ORIGINS`. Any
+  other page (another dev server, an app an agent built) gets 403
+  `origin_refused`, and so does a write marked cross-site by `Sec-Fetch-Site`
+  without an `Origin`. This matters most for `/ws` and `/ws/terminals/:id`,
+  which CORS never covers.
+- **CORS is reflected only for those allowed origins**, so other pages cannot
+  read responses either.
+- **Interactive documents are sandboxed in the response** (`Content-Security-Policy:
+  sandbox allow-scripts`), so a document opened directly, outside studio's
+  sandboxed frame, runs with an opaque origin and cannot use the API.
+
+Required mode is unchanged by this guard.
 
 ## WebSockets
 
