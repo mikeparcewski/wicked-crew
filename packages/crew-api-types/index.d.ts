@@ -801,6 +801,20 @@ export interface WorkUnit {
   operator_rulings?: OperatorRuling[];
   /** (crew#894, wicked-core#810) The phase's worker pool (one creator plus monitors). ABSENT = 1. */
   pool?: number;
+  /**
+   * (api-types 0.124.0; crew#1058) Daemon-resolved: the seats a reassign of this unit is REFUSED
+   * for — the authors of the work it checks (engine `authored_by` plus every earlier Build/Recon
+   * agent unit's seat), served on a Review/Test agent unit of a run whose contract enforces a
+   * distinct evaluator. `POST /runs/:id/reassign` answers 409 for such a target BEFORE it approves
+   * the gate, so a skin offers none of them. ABSENT when no seat is refused, and on an older daemon.
+   */
+  reassign_refused?: string[];
+  /**
+   * (api-types 0.124.0) Engine field (`WorkUnit.authored_by`): every seat this unit was ever
+   * dispatched on as its author, current seat aside (reassigned and failed-over creators). ABSENT
+   * when empty, and on an older engine.
+   */
+  authored_by?: string[];
   /** (crew#894) How that pool was seated, once distributed (see {@link UnitPoolSeating}). ABSENT
    *  for a pool of 1 and before distribution. */
   pool_seating?: UnitPoolSeating;
@@ -1509,6 +1523,13 @@ export interface GateInfo {
    * advisory: it never gates a decision, and is omitted entirely on a normal gate.
    */
   refusal?: { matched: boolean; reason: string };
+  /**
+   * (api-types 0.124.0) WHY the run paused — the `awaitingHuman.gateKind` the live frame carried
+   * (`deliver`, `escalation`, `plan_approval`, …), or the durable row's `gate_kind` after a restart.
+   * A refused hand-over parks at an `escalation` whose `ord` is still the deliver unit: read the
+   * kind, never infer it from the unit. ABSENT on an older daemon and when the engine did not say.
+   */
+  gateKind?: string;
   /** (crew ≥ 0.9.0) The gated unit's persisted receipt (`WorkUnit.assurance`) — what assured the
    *  work this gate asks about. `null` when the unit carries none (no gate evaluated it yet, or an
    *  older engine); ABSENT on an older daemon. */
@@ -1631,7 +1652,9 @@ export interface LaunchPlan {
  * Body of `POST /runs/:id/reassign` — the manual operator lever that reassigns a wedged run's
  * cursor unit through the same engine path the stall-watchdog's automatic escalation uses
  * (crew#442). `cli` omitted lets the engine's council re-pick the seat; when present it must be
- * a seat in the run's own pool (`SessionView.clis`) or the route answers 400.
+ * a seat in the run's own pool (`SessionView.clis`) or the route answers 400. On a run parked at a
+ * gate with `cli` named (crew#1058), the unit is re-seated FIRST and the gate approved after: a seat
+ * the engine refuses (see `WorkUnit.reassign_refused`) is a 409 with the gate still open.
  */
 export interface ReassignRequest {
   cli?: string;
@@ -6366,6 +6389,9 @@ export interface InteractionRequest {
   /** The already-run unit the gate reviews, when attributable. */
   reviewing_ord: number | null;
   prompt: string;
+  /** (api-types 0.124.0 types the engine field) WHY the run paused — mirrors
+   *  `awaitingHuman.gateKind`. `null`/ABSENT on a row written before the field. */
+  gate_kind?: string | null;
   status: 'open' | 'answered' | 'expired' | 'cancelled';
   /**
    * The decision payload (JSON text, e.g. `{"approve":true,"amend":null}`) once resolved. Its
