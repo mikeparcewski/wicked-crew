@@ -11,6 +11,7 @@ mentioned only where a daemon release depends on them.
 ## [Unreleased]
 
 ### Changed
+- **The release smoke runs wicked-ci at `0711cf8` (wicked-ci#51; was `12adcab`), closing crew#1050.** The `bus.db` corruption in the 0.13.0 and 0.13.1 ubuntu smokes was the harness's own fault: S05 truncated `bus.db-wal` under a running daemon, and the daemon's last checkpoint then wrote zeroed pages. wicked-ci#51 removes that probe and adds a selfcheck guard against writing directly to `-wal`/`-shm` files. crew, core-ts and wicked-bus are unchanged. Both pins moved together.
 - **The release smoke runs wicked-ci at `12adcab` (wicked-ci#50; was `181e987`).** crew 0.13.0's and 0.13.1's release smokes failed S04 and S08 because the harness still drove ACP shims and expected pre-C5 routing. That was harness lag, not a regression. wicked-ci#50 boots crews >= 0.13.0 on the host seat floor, gives S08 a headless chat seat, and on crew >= 0.13.1 makes S04 assert the host-floor bench (core#976): copilot and opencode are named and given no governed work, and smoke-judge launches as a second claude seat so evaluator≠creator can be met. wicked-ci#50's own smoke passed against the published crew 0.13.1 (run 38888919403). Both pins (`uses:` and `wicked_ci_ref`) moved together.
 
 ## [0.13.1] — 2026-10-16
