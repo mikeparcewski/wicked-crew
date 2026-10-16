@@ -750,7 +750,7 @@ export function chatScopeStatement(chatId: string, scope: ChatScope, rules?: Rea
       '',
       'This chat covers every repository registered with this daemon, but none is registered yet:',
       'no repository is readable. Say so plainly if asked about code.',
-      'To read a repository, register it with this daemon; it will be in scope on the next message.',
+      'To read a repository, register it with this daemon and start a NEW chat to read it.',
       '',
     );
   } else if (scope.repos.length === 0 && scope.kind === 'project') {

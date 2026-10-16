@@ -44,6 +44,37 @@ mentioned only where a daemon release depends on them.
   reaper still recognizes the old bridge names, so a daemon upgraded from an ACP release reaps what the
   old one left running.
 
+## [0.12.4] — 2026-10-15
+
+A patch release: the daemon's first boot on a fresh state home no longer exits 0 before it listens (#1044, crew#1041). wicked-core-ts stays ^0.11.3 and the bundled UI stays wicked-studio 0.9.4.
+
+### Fixed
+- **The daemon's first boot no longer exits 0 mid-boot (crew#1041).** On a fresh state home, `serve` seeded the skills root and then quit silently before it listened, and the release smoke's S01 failed on 0.12.1, 0.12.2 and 0.12.3. A restart worked because the root was already seeded. Since #1027, `refreshInstalled` (called by boot's auto-refresh) deferred its probe behind an `unref()`'d `setImmediate`. Nothing else held the event loop that early, so the immediate never fired, and the bounded wait's timer was unref'd too, so Node drained the loop with the `await` pending. The deferral's immediate is now ref'd; the deadline timer stays unref'd, since the probe's own I/O holds the loop once it starts.
+
+## [0.12.3] — 2026-10-15
+
+A patch release of the bundled UI: **wicked-studio 0.9.4**, where a run Needs you holds (a stall, an orphan, an open question) reads as waiting on you across the Desk instead of "working" (wicked-studio#807). No daemon change; wicked-core-ts stays ^0.11.3.
+
+## [0.12.2] — 2026-10-15
+
+A patch release: a chat's follow-ups always carry its scope and a chat whose repositories changed is refused at once (#1038), a project's code graph status says "this project" instead of its raw id (#1037), and a remote repository registration survives an onboarding launch failure (#1035). It pins **wicked-core-ts ^0.11.3**, which carries the planner's QE step for QE-required runs (core #967, core#960) and Approve judging a team run's PA step at `judge_unavailable`, `NO CHANGE NEEDED` opening its line, and no engine text in a seat's answer (core #972; core#969, #929, #970). The bundled UI is **wicked-studio 0.9.3**.
+
+### Fixed
+- **Remote repository registration survives an onboarding launch failure (crew#1030, follow-up of #1019).** `POST /api/v1/repos` with `gitUrl` now keeps the registered repo and returns 201 with `{ repo, onboardRunId: null, onboardError }` when onboarding cannot start, as local registration does. Clone or registration failures still return 400.
+- **A project's code graph status no longer shows its raw id (crew#1036).** `GET /projects/:id/graph`'s `detail` (shown as is on the project page, on a chat's scope card, and as the `error` of a query route's 404) now says "This project …" instead of "Project proj_…'s …". The no-repositories case points to the project's Repositories tab instead of the `POST …/members` route. A run or chat whose repo is not a member of the project now reads "repo 'x' is not a member of this project … Attach it on the project's Repositories tab …" (the reason a chat's scope card shows), a member not yet in the graph reads "Refreshing the code graph (the project's Repositories tab) fixes it." instead of the `POST …/graph/refresh` route, and the unfiled-runs project's detail no longer calls itself "the synthesized 'default' project". The `state` values and every other field are unchanged.
+- **Every answer step of a chat carries its scope statement (#1033).** A follow-up was told the scope
+  only when it changed since the last turn, so a seat with no memory of the first turn (codex on the
+  single-shot carrier) answered "the supplied repository contains only `tmp`". Every turn's step now
+  carries the "Repositories in scope" section, as the first one does.
+- **A project chat reads its repositories whether or not the project's code graph is built, and a
+  repository attached after the chat started is refused at once (#1034).** The ask run now declares
+  its scope's repositories as read roots at launch (`extraReadRoots`); before, a project chat with no
+  built graph had no read root for them, and every read was refused. A run's read roots are fixed at
+  launch, so a message whose project (or "everything") scope now resolves to other repositories is
+  refused with 409 `chat_scope_changed` ("Start a new chat to read them"), as a changed graph already
+  was, instead of being accepted into a run that refuses every read of the new repository. The empty
+  "everything" statement now says to register a repository and start a new chat.
+
 ## [0.12.1] — 2026-10-15
 
 A patch release: a launch refused for QE acceptance carries a stable code (#1023), the QE acceptance setting covers the launches the engine makes on its own (#1025), a gate judged by a fallback seat says so (#1024), a registered repository whose onboarding couldn't start keeps its project (#1026), a project chat sees a repository attached after it started or asks for a new chat (#1026), and roster, `/health` and websocket reads no longer block the daemon on skills-root walks (#1027). It pins **wicked-core-ts ^0.11.2**, the engine that carries #1025's and #1024's halves (core #952, #953), the shell-read boundary on every carrier's shell tool (core #955, core#951), the async whole-roster QE admission #1027 uses (core #956), and the fix for concurrent engine-made runs that hung or stopped the engine (core #966, core#957). The bundled UI is **wicked-studio 0.9.2**.
@@ -4124,7 +4155,10 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.12.1...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.12.4...HEAD
+[0.12.4]: https://github.com/mikeparcewski/wicked-crew/compare/v0.12.3...v0.12.4
+[0.12.3]: https://github.com/mikeparcewski/wicked-crew/compare/v0.12.2...v0.12.3
+[0.12.2]: https://github.com/mikeparcewski/wicked-crew/compare/v0.12.1...v0.12.2
 [0.12.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.10.2...v0.11.0

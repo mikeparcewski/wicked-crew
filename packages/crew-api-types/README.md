@@ -14,8 +14,8 @@ consumers keep the workspace reference.
 
 ## Rules
 
-- **Wire shapes only.** Engine-internal types (`LaunchRunInput`, `RepoOnboardRef`, runtime
-  constants) stay in the daemon.
+- **Wire shapes only.** Engine-internal types (`LaunchRunInput`) and runtime
+  constants stay in the daemon.
 - **Zero runtime.** This is a `.d.ts`-only package: no JavaScript, nothing to build. Consumers
   declare it as a devDependency (the published `wicked-crew` tarball never depends on it at
   runtime). Import it with `import type` only — the `exports` map offers just a `types`

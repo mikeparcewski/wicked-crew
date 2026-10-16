@@ -388,7 +388,17 @@ describe('approvals are audited edits of the ledger rules', () => {
     await call('POST', '/mcp/approvals', { subject: 'mcp:fx/wt_plain' });
     writeSpec(TOOLS.map((t) => (t.name === 'wt_plain' ? { ...t, description: 'changed' } : t)));
     const again = (await call('POST', '/mcp/servers/preview', { name: 'fx', kind: 'mcp-stdio', command: process.execPath, args: [FIXTURE_SERVER, specPath] })).json() as McpPreviewResponse;
-    expect(again.policies?.withdrawOnSave).toEqual(['mcp:fx', 'mcp:fx/wt_plain']);
+    // crew#1040: this flaked once in a full release run (withdrawOnSave came back []). Say which
+    // input was off: the ledgers it reads (approvals not visible) or the saved vs probed schema
+    // hashes (no change seen).
+    const why = async (): Promise<string> => JSON.stringify({
+      firstUse: await ledger(FIRST_USE_LEDGER),
+      write: await ledger(WRITE_LEDGER),
+      saved: ((await call('GET', '/mcp/servers')).json() as { servers: Array<{ name: string; tools: Array<{ name: string; schemaHash: string | null }> }> })
+        .servers.find((x) => x.name === 'fx')?.tools.map((t) => [t.name, t.schemaHash]),
+      probed: again.tools.map((t) => [t.name, t.schemaHash]),
+    });
+    expect(again.policies?.withdrawOnSave, await why()).toEqual(['mcp:fx', 'mcp:fx/wt_plain']);
     const refused = await call('POST', '/mcp/servers', { previewHash: again.previewHash, enabledWrites: ['no_such_tool'] });
     expect(refused.statusCode, refused.body).toBe(400);
     expect(await ledger(FIRST_USE_LEDGER)).toEqual(['mcp:fx', 'mcp:fx/wt_plain']);

@@ -385,6 +385,9 @@ describe.skipIf(!POSIX)('POST /projects/:id/graph/refresh — the build itself',
       expect(call![call!.indexOf('--db') + 1]).toBe(fx.dbPath);
     }
     expect(res.body['status']['state']).toBe('ready');
+    // Customer copy (crew#1036): studio shows `detail` as is, so it never names the raw project id.
+    expect(res.body['status']['detail']).toMatch(/^This project's code graph holds 3 co-located repos/);
+    expect(res.body['status']['detail']).not.toContain(PROJECT_ID);
   });
 
   it('a symbol every repo shares comes back once per repo, each attributed', async () => {
@@ -556,6 +559,8 @@ describe.skipIf(!POSIX)('a member repo re-registered at a new path', () => {
     const status = (await get<{ status: StatusBody }>('/graph')).body['status'];
     expect(status['missingRepos']).toEqual(['gamma']);
     expect(status['state']).toBe('ready-single-repo');
+    expect(status['detail']).toMatch(/^This project's code graph holds exactly one repo \(alpha\), with 1 member repo\(s\) missing from it/);
+    expect(status['detail']).not.toContain(PROJECT_ID);
     const row = status['repos'].find((r) => r.repoId === 'gamma');
     expect(row!['indexed']).toBe(false);
     expect(row!['reason']).toContain(from);

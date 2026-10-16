@@ -18,7 +18,6 @@ import type {
   LaunchRunInput,
   LaunchPlan,
   RepoEntry,
-  RepoOnboardRef,
   SessionView,
   RecordedEvent,
   GovernancePolicy,
@@ -1673,6 +1672,10 @@ export class CoreAdapter {
       }
       opts.extraWriteRoots = input.extraWriteRoots;
     }
+    // crew#1034: core-ts has carried `extraReadRoots` since wicked-core#294 (well below crew's pin).
+    if (input.extraReadRoots !== undefined && input.extraReadRoots.length > 0) {
+      opts.extraReadRoots = input.extraReadRoots;
+    }
     if (input.excludeSeats !== undefined && input.excludeSeats.length > 0) {
       // Fail CLOSED on an old addon (napi ignores undeclared fields): a silently-dropped exclusion
       // would let the seat that wrote the work judge it — the one thing the caller asked to rule out.
@@ -2738,10 +2741,10 @@ export class CoreAdapter {
   }
 
   /**
-   * Clone a remote git URL, register it, then launch an `onboarding` workflow run.
+   * Clone a remote git URL and return the persisted `RepoEntry` from registration.
    * `checkoutPath` overrides the default clone destination (`~/.wicked/repos/<name>`).
    */
-  async cloneAndRegisterRepo(name: string, gitUrl: string, checkoutPath?: string): Promise<RepoOnboardRef> {
+  async cloneAndRegister(name: string, gitUrl: string, checkoutPath?: string): Promise<RepoEntry> {
     const reposRoot = wickedDir('repos');
     let cloneDir: string;
     if (checkoutPath) {
@@ -2807,9 +2810,7 @@ export class CoreAdapter {
       }
     }
 
-    const entry = await this.registerRepo(name, cloneDir);
-    const runId = await this.launchOnboardingRun(entry.id, name);
-    return { repoId: entry.id, runId };
+    return this.registerRepo(name, cloneDir);
   }
 
   /**

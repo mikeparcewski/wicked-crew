@@ -10,8 +10,7 @@
  * can no longer drift (task #84; `tests/wire-contract.test.ts` is the guard).
  *
  * What remains in THIS file is engine-internal: inputs the adapter maps onto
- * the native addon (`LaunchRunInput`), shapes that never leave the daemon
- * (`RepoOnboardRef`), and runtime constants (`DEFAULT_SETTINGS`) — a types-only
+ * the native addon (`LaunchRunInput`) and runtime constants (`DEFAULT_SETTINGS`) — a types-only
  * contract package cannot carry values.
  *
  * ONLY `core/adapter.ts` imports from the native addon itself; the rest of the
@@ -71,12 +70,6 @@ export type RunTeamView = Omit<RunTeamResponse, 'units' | 'rows' | 'teamed' | 't
 };
 
 import { DEFAULT_BASE_SKILL_REF, type BaseSkillPolicy } from '../skills/base-skill.js';
-
-/** The run id of the onboarding run started when a repo was registered. */
-export interface RepoOnboardRef {
-  repoId: string;
-  runId: string;
-}
 
 /** The daemon's launch-run input (mapped by the adapter onto the addon's `LaunchOptions`). */
 export interface LaunchRunInput {
@@ -143,6 +136,14 @@ export interface LaunchRunInput {
    * fails the launch with no session persisted. Omit for runs that deliver inside their workdir.
    */
   extraWriteRoots?: string[];
+  /**
+   * ADDITIONAL absolute READ-ONLY roots for the run (wicked-core#294): reads inside them pass the
+   * governed units' boundary, writes stay denied. A chat's ask run declares its scope's
+   * repositories here (crew#1034), so a project chat reads its repositories whether or not the
+   * project's code graph is built. The engine validates each root at launch; an invalid root
+   * fails the launch with no session persisted.
+   */
+  extraReadRoots?: string[];
   /**
    * The PROJECT's co-located code graph this run's governed workers should query instead of the
    * run repo's own — resolved by `projects/graph.ts::resolveProjectGraphBinding`, which is the ONE

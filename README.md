@@ -372,9 +372,9 @@ is the one you need when a worker reports a sibling repo does not exist:
 
 ```
 run 909db7fb: bound to the project graph as 'wicked-studio'.
-run 0df7fb33: repo 'wicked-garden' is not a crew.repo member of project proj_1787…, so the project
-              graph does not describe it; this run uses the repo's own code graph. Attach it with
-              POST /api/v1/projects/proj_1787…/members and refresh the graph to widen future runs.
+run 0df7fb33: repo 'wicked-garden' is not a member of this project, so the project graph does
+              not describe it; this run uses the repo's own code graph. Attach it on the project's
+              Repositories tab and refresh the graph to widen future runs.
 ```
 
 A refresh is `wicked-estate index` per member, bounded at ten minutes **each**, so it is never
