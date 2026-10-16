@@ -191,6 +191,35 @@ describe('wicked-core#976: the host-floor bench', () => {
       expect('host_floor_unknown' in seat(again, 'claude')).toBe(false);
       expect((seat(again, 'claude')['work_admission'] as Record<string, unknown>)['unscoped']).toEqual({ ok: true });
     });
+    it('…but only for the roster it was read for: a seat added (or re-pointed) since is unknown', () => {
+      let calls = 0;
+      let registry: Array<Record<string, unknown>> = REGISTRY;
+      const flaky = () => {
+        calls += 1;
+        if (calls > 1) throw new Error('later failure');
+        return new Map([['copilot', HOST_FLOOR_ENGINE]]);
+      };
+      const accessor = rosterWithStandingFactory({
+        seatHealth: new SeatHealthTracker(),
+        registry: () => registry.map((s) => ({ ...s })),
+        signedIn: () => true,
+        env: { WICKED_WORKER_HOME: '', WICKED_SEAT_FLOOR: 'host' },
+        probe: null,
+        versions: null,
+        versionPins: null,
+        worktreeBench: () => new Map(),
+        hostFloorBench: flaky,
+        qeAdmitted: () => true,
+        hostBoundary: () => null,
+      });
+      accessor();
+      registry = [...REGISTRY, { key: 'smoke-judge', display_name: 'smoke-judge', binary: 'smoke-judge', enabled_for_council: true }];
+      const after = accessor();
+      for (const k of ['smoke-judge', 'claude']) {
+        expect(seat(after, k)['host_floor_unknown'], k).toBeDefined();
+        expect('work_admission' in seat(after, k)).toBe(false);
+      }
+    });
     it('off the host floor a failed read benches nothing (the engine benches nothing there)', () => {
       // No floor chosen (the container floor is pinned against the real addon in host-floor-bench-addon.test.ts).
       const roster = rosterOver({ hostFloor: boom })();
@@ -203,6 +232,8 @@ describe('wicked-core#976: the host-floor bench', () => {
       expect(() => readLaunchBench(() => '{"cli":"pi"}', [], false, true)).toThrow(/array/);
       expect(() => readLaunchBench(() => '[{"cli":"pi"}]', [], false, true)).toThrow(/seat and a reason/);
       expect(() => readLaunchBench(() => 'not json', [], false, true)).toThrow();
+      expect(() => readLaunchBench(() => '[{"cli":"pi","reason":"r","governed_only":"true"}]', [], false, true)).toThrow(/boolean/);
+      expect(() => readLaunchBench(() => '[{"cli":"pi","reason":""}]', [], false, true)).toThrow(/seat and a reason/);
       const roster = rosterOver({
         env: { WICKED_SEAT_FLOOR: 'host' },
         hostFloor: () => readLaunchBench(() => '[null]', [], false, true),

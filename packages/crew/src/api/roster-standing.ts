@@ -163,8 +163,10 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
     deps.worktreeBench !== undefined ? deps.worktreeBench : daemon ? (seats: readonly unknown[]) => CoreAdapter.worktreeBenched(seats) : null;
   const hostFloorBench =
     deps.hostFloorBench !== undefined ? deps.hostFloorBench : daemon ? (seats: readonly unknown[]) => CoreAdapter.hostFloorBenched(seats) : null;
-  // The last host-floor bench the engine answered: a read that fails later keeps it.
-  let lastHostFloor: Map<string, string> | null = null;
+  // The last host-floor bench the engine answered, with the floor and roster it was read for: a read
+  // that fails later keeps it only for that same floor and roster (a seat added or re-pointed since
+  // is unknown until the engine answers again).
+  let lastHostFloor: { identity: string; bench: Map<string, string> } | null = null;
   const qeAdmitted =
     deps.qeAdmitted !== undefined ? deps.qeAdmitted : daemon ? (key: string, inv: string | undefined) => CoreAdapter.qeReviewerAdmitted(key, inv) : null;
   // Published generations are immutable; the mutable HOME-derived fallback expires after 30 s.
@@ -274,12 +276,13 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
     let benchedOnHost: Map<string, string> | null = null;
     let hostFloorUnknown: string | null = null;
     if (hostFloorBench !== null) {
+      const identity = JSON.stringify([env['WICKED_SEAT_FLOOR'] ?? null, seats]);
       try {
         benchedOnHost = hostFloorBench(seats);
-        if (benchedOnHost !== null) lastHostFloor = benchedOnHost;
+        if (benchedOnHost !== null) lastHostFloor = { identity, bench: benchedOnHost };
       } catch {
         if (!isHostSeatFloor(env)) benchedOnHost = new Map();
-        else if (lastHostFloor !== null) benchedOnHost = lastHostFloor;
+        else if (lastHostFloor !== null && lastHostFloor.identity === identity) benchedOnHost = lastHostFloor.bench;
         else hostFloorUnknown = HOST_FLOOR_UNKNOWN_COPY;
       }
     }

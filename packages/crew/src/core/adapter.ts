@@ -1060,8 +1060,11 @@ export function readLaunchBench(
   if (!Array.isArray(benched)) throw new Error('Core.worktreeBenched answered something other than an array');
   const out = new Map<string, string>();
   for (const b of benched as Array<{ cli?: unknown; reason?: unknown; governed_only?: unknown } | null>) {
-    if (b === null || typeof b !== 'object' || typeof b.cli !== 'string' || typeof b.reason !== 'string') {
+    if (b === null || typeof b !== 'object' || typeof b.cli !== 'string' || b.cli === '' || typeof b.reason !== 'string' || b.reason === '') {
       throw new Error('Core.worktreeBenched answered an entry without a seat and a reason');
+    }
+    if (b.governed_only !== undefined && typeof b.governed_only !== 'boolean') {
+      throw new Error('Core.worktreeBenched answered a governed_only that is not a boolean');
     }
     if ((b.governed_only === true) === governedOnly) out.set(b.cli, b.reason);
   }
