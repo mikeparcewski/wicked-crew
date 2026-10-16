@@ -10,6 +10,20 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.13.2] — 2026-10-16
+
+A patch release: container sign-in for every agent, plus workflow descriptions. Pins: wicked-core-ts ^0.13.0, wicked-studio ^0.9.6.
+
+### Fixed
+- **Every agent can sign in on the container floor (wicked-core-ts 0.13.0).**
+  - codex: the device login no longer fails before it starts.
+  - pi: subscription sign-ins for Anthropic, ChatGPT and GitHub Copilot.
+  - opencode: API keys, ChatGPT and Copilot.
+  - copilot: a sign-in route, using its own key on the Copilot route.
+  - Each sign-in is brokered on its own gateway route, and the seat container holds only placeholders.
+  - Each model route now admits only its own agent's seats.
+  - No crew code change: crew already admits all five agents on the container floor.
+
 ### Added
 - **`GET /workflows` describes each built-in workflow (DES-CHAT-FIRST-001 C2; needs the wicked-core-ts release after 0.12.1 that carries the engine's descriptors).** The engine's built-in presets now carry a short `title`, a one-line `summary` and 2–4 `use_when` phrases. Crew copies them into the def it serves for every built-in an operator picks, and for no system workflow (chat, onboarding, demo, the interactive seams and the rest of `SYSTEM_WORKFLOWS`, the same rule as `is_system`). `GET /presets` passes them through as the engine sends them. A saved preset, including a project row that shadows a built-in, has none. The fields are optional (`WorkflowDef` and `Preset`, `wicked-crew-api-types` 0.123.0, additive): on an older engine every workflow is still served, by id. They are display data only. Crew never sends them, or `is_system`, to the engine, whose def parser is strict (`registerWorkflow` and the per-run arm strip them).
 
@@ -4211,7 +4225,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.13.1...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.13.2...HEAD
+[0.13.2]: https://github.com/mikeparcewski/wicked-crew/compare/v0.13.1...v0.13.2
 [0.13.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.12.4...v0.13.0
 [0.12.4]: https://github.com/mikeparcewski/wicked-crew/compare/v0.12.3...v0.12.4
