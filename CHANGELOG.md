@@ -10,6 +10,10 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-10-16
+
+A minor release (0.x: breaking). Governed seats run in containers by default and ACP is gone from the seats (C5); `WICKED_SEAT_FLOOR=host` is the labelled opt-out. It bundles wicked-studio 0.9.5: the run page opens on the words that kicked the run off and shows the step being worked on. Pins: wicked-core-ts ^0.12.0, wicked-studio ^0.9.5.
+
 ### Added
 - **An ask question says who asked, on the wire and after a reload.** The elicitation cache keeps the engine's additive
   `elicitationCreated` fields for a seat's `ask` question (`source: "ask"`, `ord`, `attempt`, and the new `seat`, the
@@ -4155,7 +4159,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.12.4...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.12.4...v0.13.0
 [0.12.4]: https://github.com/mikeparcewski/wicked-crew/compare/v0.12.3...v0.12.4
 [0.12.3]: https://github.com/mikeparcewski/wicked-crew/compare/v0.12.2...v0.12.3
 [0.12.2]: https://github.com/mikeparcewski/wicked-crew/compare/v0.12.1...v0.12.2
