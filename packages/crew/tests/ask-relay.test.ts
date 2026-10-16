@@ -720,7 +720,8 @@ describe('IG1-crew-1 — the path learns the PA\'s governance mode from the run\
         ],
       }),
     );
-    expect(paths.view('c1')!.governance_mode).toMatchObject({ mode: 'os_sandbox', source: 'repo_boundary', class: 'os_sandbox' });
+    // C5: on the interim host floor pi keeps no per-call check (the engine refuses its governed work).
+    expect(paths.view('c1')!.governance_mode).toMatchObject({ mode: 'none', class: 'os_sandbox' });
     relay.onTeamRow(row('wicked.team.path.repicked', { run_id: 'run-1', from: 'pi', to: 'claude', reason: 'timed_out', selection: 'random', pick_seq: 1 }));
     expect(paths.view('c1')!.governance_mode).toMatchObject({ mode: 'admitted', source: 'acp_input_governance' });
     // member.joined carries a joining seat's class.

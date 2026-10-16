@@ -10,7 +10,7 @@
 //   - reconcile bumps gen for absent terminal runs (F8 from DES-002)
 
 import { describe, expect, it } from 'vitest';
-import { ElicitationCache } from '../src/api/elicitation-cache.js';
+import { askerFields, ElicitationCache } from '../src/api/elicitation-cache.js';
 import type { CoreEvent, SessionView } from '../src/core/types.js';
 
 const RUN = 'run-elicit-cache-001';
@@ -192,5 +192,40 @@ describe('ElicitationCache', () => {
     cache.create(makeEntry({ runId: OTHER, elicitationId: 'e-001' }));
     cache.ingest(event('elicitationResolved', { elicitationId: 'e-001', action: 'accept', reason: 'human' }));
     expect(cache.get(OTHER)).toBeDefined();
+  });
+});
+
+describe('ElicitationCache — who asked (ask frames)', () => {
+  it('keeps source, ord, attempt and seat from an ask elicitationCreated frame, and GET returns them', () => {
+    const cache = new ElicitationCache();
+    cache.ingest(event('elicitationCreated', { elicitationId: 'ask-1', message: 'A or B?', options: ['A', 'B'], source: 'ask', ord: 3, attempt: 1, seat: 'pi' }));
+    expect(cache.get(RUN)).toMatchObject({ elicitationId: 'ask-1', source: 'ask', ord: 3, attempt: 1, seat: 'pi' });
+    // A failed POST restores the same entry, asker included.
+    const taken = cache.take(RUN)!;
+    expect(cache.restoreIfUnchanged(RUN, taken.entry, taken.gen)).toBe(true);
+    expect(cache.get(RUN)?.seat).toBe('pi');
+  });
+
+  it('a frame without them (another producer, an older engine) carries none of them', () => {
+    const cache = new ElicitationCache();
+    cache.ingest(event('elicitationCreated', { elicitationId: 'e-1', message: 'q', options: null }));
+    const got = cache.get(RUN)!;
+    for (const k of ['source', 'ord', 'attempt', 'seat']) expect(k in got, k).toBe(false);
+  });
+
+  it('another producer, or no source, carries no asker identity even when it sends the fields (codex crew-r1)', () => {
+    expect(askerFields({ source: 'mcp', ord: 3, attempt: 1, seat: 'pi' })).toEqual({});
+    expect(askerFields({ ord: 3, attempt: 1, seat: 'pi' })).toEqual({});
+    const cache = new ElicitationCache();
+    cache.ingest(event('elicitationCreated', { elicitationId: 'e-2', message: 'q', options: null, source: 'mcp', ord: 3, attempt: 1, seat: 'pi' }));
+    const taken = cache.take(RUN)!;
+    expect(cache.restoreIfUnchanged(RUN, taken.entry, taken.gen)).toBe(true);
+    const got = cache.get(RUN)!;
+    for (const k of ['source', 'ord', 'attempt', 'seat']) expect(k in got, k).toBe(false);
+  });
+
+  it('drops malformed values', () => {
+    expect(askerFields({ source: 'ask', ord: -1, attempt: 1.5, seat: ' ' })).toEqual({ source: 'ask' });
+    expect(askerFields({ source: 'ask', ord: 0, attempt: 0, seat: 'codex#2' })).toEqual({ source: 'ask', ord: 0, attempt: 0, seat: 'codex#2' });
   });
 });

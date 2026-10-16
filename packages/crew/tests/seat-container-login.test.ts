@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { rosterWithStandingFactory } from '../src/api/roster-standing.js';
 import {
-  ARGV_TIMEOUT_MS, SeatContainerStatus, isContainerSeatFloor, parseBrokerStatus, runSeatLogin, type ExecLike,
+  ARGV_TIMEOUT_MS, SeatContainerStatus, defaultSeatFloor, isContainerSeatFloor, parseBrokerStatus, runSeatLogin, type ExecLike,
 } from '../src/api/seat-container-login.js';
 import { SeatHealthTracker } from '../src/api/seat-health.js';
 import { SeatProbe } from '../src/api/seat-probe.js';
@@ -114,6 +114,26 @@ describe('broker status cache', () => {
     }));
     const cache = new SeatContainerStatus({ exec, gatewayDir: '/fixture/gateway' });
     expect(await cache.refresh('codex')).toMatchObject({ signed_in: null, state: 'unknown', reason: 'broker unavailable' });
+  });
+});
+
+describe('defaultSeatFloor (C5)', () => {
+  it('turns the container floor on for a daemon whose operator chose no floor', () => {
+    for (const unset of [{}, { WICKED_SEAT_FLOOR: '' }, { WICKED_SEAT_FLOOR: '  ' }] as NodeJS.ProcessEnv[]) {
+      const env: NodeJS.ProcessEnv = { ...unset };
+      expect(defaultSeatFloor(env)).toBe('container');
+      expect(env['WICKED_SEAT_FLOOR']).toBe('container');
+      expect(isContainerSeatFloor(env)).toBe(true);
+    }
+  });
+
+  it("keeps the operator's choice, including the interim host floor", () => {
+    for (const chosen of ['host', 'container', 'Container']) {
+      const env: NodeJS.ProcessEnv = { WICKED_SEAT_FLOOR: chosen };
+      expect(defaultSeatFloor(env)).toBe(chosen);
+      expect(env['WICKED_SEAT_FLOOR']).toBe(chosen);
+    }
+    expect(isContainerSeatFloor({ WICKED_SEAT_FLOOR: 'host' })).toBe(false);
   });
 });
 

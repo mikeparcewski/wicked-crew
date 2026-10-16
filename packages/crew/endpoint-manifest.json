@@ -684,6 +684,35 @@
       ]
     },
     {
+      "method": "DELETE",
+      "path": "/api/v1/mcp/ask",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": [
+        405
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/mcp/ask",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": [
+        405
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/mcp/ask",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": [
+        200,
+        401,
+        503
+      ]
+    },
+    {
       "method": "POST",
       "path": "/api/v1/mcp/call",
       "requestType": "McpCallBody",

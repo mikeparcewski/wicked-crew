@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import type { Core as CoreHandle, LaunchOptions, Subscription } from 'wicked-core-ts';
+import { AskError, AskUnsupportedError, type AskRequest, type AskTicket, type AskUnit } from './types.js';
 import type {
   EditorGrantsResponse,
   CoreEvent,
@@ -518,6 +519,12 @@ interface BusBridgeMethods {
   busRead?(afterId: number, limit: number, typePrefix?: string | null, includeExpired?: boolean | null): Promise<string>;
 }
 
+interface AskMethods {
+  askUnit?(token: string): Promise<string>;
+  openAsk?(requestJson: string): Promise<string>;
+  closeAsk?(elicitationId: string, reason: string): Promise<boolean>;
+}
+
 /** (wicked-core-ts ≥ the release carrying it) The engine's standing "QE acceptance off" for the
  *  launches it makes on its own — campaign nodes as they dispatch and `wicked.crew.run.requested`
  *  bus requests: a reason (skip a node or request that gives no QE word of its own, only when its
@@ -529,6 +536,7 @@ interface QeHostMethods {
 }
 
 type CoreHandleFull = CoreHandle &
+  AskMethods &
   BusBridgeMethods &
   QeHostMethods &
   GovernanceMethods &
@@ -2641,6 +2649,40 @@ export class CoreAdapter {
 
   async chatClose(chatId: string): Promise<void> {
     await this.core.chatClose(chatId);
+  }
+
+  askSupported(): boolean {
+    return typeof this.core.askUnit === 'function' && typeof this.core.openAsk === 'function' && typeof this.core.closeAsk === 'function';
+  }
+
+  async askUnit(token: string): Promise<AskUnit> {
+    const askUnit = this.core.askUnit;
+    if (typeof askUnit !== 'function') throw new AskUnsupportedError();
+    return this.askCall(async () => JSON.parse(await askUnit.call(this.core, token)) as AskUnit);
+  }
+
+  async openAsk(request: AskRequest): Promise<AskTicket> {
+    const open = this.core.openAsk;
+    if (typeof open !== 'function') throw new AskUnsupportedError();
+    return this.askCall(async () => JSON.parse(await open.call(this.core, JSON.stringify(request))) as AskTicket);
+  }
+
+  async closeAsk(id: string, reason: 'timeout' | 'teardown'): Promise<boolean> {
+    const close = this.core.closeAsk;
+    if (typeof close !== 'function') throw new AskUnsupportedError();
+    return close.call(this.core, id, reason);
+  }
+
+  private async askCall<T>(call: () => Promise<T>): Promise<T> {
+    try {
+      return await call();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      for (const code of ['invalid_token', 'bad_request', 'run_ended'] as const) {
+        if (message.startsWith(`${code}:`)) throw new AskError(code, message);
+      }
+      throw error;
+    }
   }
 
   /**

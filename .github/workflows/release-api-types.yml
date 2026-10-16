@@ -31,7 +31,7 @@ permissions:
   # No release notes, no sync PR — read access is all this job needs for the checkout.
   contents: read
   # OIDC trusted publishing + `npm publish --provenance`: the same tokenless path that
-  # `wicked-crew` (node-release.yml) and `agent-acp-bridges` (release-bridges.yml) already use.
+  # `wicked-crew` (node-release.yml) already uses.
   # No NPM_TOKEN is stored in this repo.
   id-token: write
 

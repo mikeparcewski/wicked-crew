@@ -96,6 +96,18 @@ describe('GET /api/v1/runs/:id/elicitation', () => {
     expect(body.options).toEqual(['yes', 'no']);
   });
 
+  it('an ask question says who asked; another producer\'s fields are not relayed (L15)', async () => {
+    elicitationCache.ingest({ type: 'elicitationCreated', session: RUN, elicitationId: 'ask-1', message: 'A or B?', options: ['A', 'B'], source: 'ask', ord: 3, attempt: 1, seat: 'pi' } as never);
+    let res = await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN}/elicitation` });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ elicitationId: 'ask-1', source: 'ask', ord: 3, attempt: 1, seat: 'pi' });
+    elicitationCache.ingest({ type: 'elicitationCreated', session: RUN, elicitationId: 'e-2', message: 'q', options: null, source: 'mcp', ord: 3, attempt: 1, seat: 'pi' } as never);
+    res = await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN}/elicitation` });
+    const body = res.json<Record<string, unknown>>();
+    expect(body.elicitationId).toBe('e-2');
+    for (const k of ['source', 'ord', 'attempt', 'seat']) expect(k in body, k).toBe(false);
+  });
+
   it('404 with "Run not found" when the run does not exist', async () => {
     mockAdapter.sessions.mockResolvedValue([]);
     const res = await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN}/elicitation` });

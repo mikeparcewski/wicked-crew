@@ -73,8 +73,10 @@ describe('rosterWithStandingFactory', () => {
     expect(of('pi').scoped_bound).toEqual({ ok: true });
     // IG1-crew-1: the roster states the mode per scope kind, read from the engine's class.
     const mode = (key: string) => roster.find((s) => s.key === key)!['governance_mode'] as Record<string, { mode: string; source: string; class: string | null }>;
-    expect(mode('pi')['scoped_bound']).toMatchObject({ mode: 'os_sandbox', source: 'repo_boundary', class: 'os_sandbox' });
+    // C5: on the interim host floor the engine refuses pi's governed work.
+    expect(mode('pi')['scoped_bound']).toMatchObject({ mode: 'none', source: 'none', class: 'os_sandbox' });
     expect(mode('pi')['scoped']).toMatchObject({ mode: 'none', class: 'os_sandbox' });
+    // C5: the executable decides — this seat runs `claude -p`, so its gate hook holds it.
     expect(mode('governed')['scoped']).toMatchObject({ mode: 'admitted', source: 'acp_input_governance' });
     expect(mode('claude')['scoped_bound']).toMatchObject({ mode: 'none', class: null });
     // A governed adapter sits in every mode.

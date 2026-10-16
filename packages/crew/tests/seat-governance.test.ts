@@ -2,13 +2,14 @@
  * IG1-crew-1: the governance mode table (seat-governance.ts) — five built-in seats × three scope
  * kinds, the pin rule, codex's trust flags — and the crew#742 diagnostics/warnings built on it.
  */
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   seatGovernanceDiagnostics,
   seatGovernanceMode,
   seatGovernanceModes,
   seatGovernanceWarnings,
+  runRoot,
   type GovernanceScopeKind,
 } from '../src/api/seat-governance.js';
 import { CREW_ONLY_SEAT_FIELDS, toEngineSeat } from '../src/core/engine-roster.js';
@@ -32,10 +33,12 @@ const SCOPES: GovernanceScopeKind[] = ['unscoped', 'scoped', 'scoped_bound'];
 describe('seatGovernanceMode — five built-in seats × three scope kinds', () => {
   const table: Record<keyof typeof BUILTIN, Record<GovernanceScopeKind, string>> = {
     claude: { unscoped: 'admitted/acp_input_governance', scoped: 'admitted/acp_input_governance', scoped_bound: 'admitted/acp_input_governance' },
-    opencode: { unscoped: 'admitted/acp_input_governance', scoped: 'admitted/acp_input_governance', scoped_bound: 'admitted/acp_input_governance' },
+    // C5: its tool calls were checked over ACP, which is gone: on the interim host floor the engine refuses its governed work.
+    opencode: { unscoped: 'none/none', scoped: 'none/none', scoped_bound: 'none/none' },
     codex: { unscoped: 'os_sandbox/self', scoped: 'os_sandbox/self', scoped_bound: 'os_sandbox/self' },
-    pi: { unscoped: 'none/none', scoped: 'none/none', scoped_bound: 'os_sandbox/repo_boundary' },
-    copilot: { unscoped: 'none/none', scoped: 'none/none', scoped_bound: 'os_sandbox/repo_boundary' },
+    // C5: on the interim host floor only claude and codex keep a per-call check; the engine refuses the rest.
+    pi: { unscoped: 'none/none', scoped: 'none/none', scoped_bound: 'none/none' },
+    copilot: { unscoped: 'none/none', scoped: 'none/none', scoped_bound: 'none/none' },
   };
   for (const [key, row] of Object.entries(table)) {
     for (const scope of SCOPES) {
@@ -61,20 +64,21 @@ describe('seatGovernanceMode — five built-in seats × three scope kinds', () =
 });
 
 describe('seatGovernanceMode — the pin rule, the seat record, codex flags', () => {
-  it('admitted whose pinned build does not match is none (the engine fails it closed)', () => {
+  it('an ACP-only seat reads none on the host floor, pinned or not: the engine refuses its governed work (C5)', () => {
     const drifted = { ...BUILTIN.opencode, version_pin: { matched: false, pinned: '1.2.3', observed: '1.3.0' } };
-    const m = seatGovernanceMode(drifted, 'scoped_bound');
-    expect(m).toMatchObject({ mode: 'none', class: 'acp_input_governance', source: 'none' });
-    expect(m.reason).toMatch(/proven against the build `1\.2\.3`.*reports `1\.3\.0`/);
+    for (const seat of [drifted, BUILTIN.opencode]) {
+      const m = seatGovernanceMode(seat, 'scoped_bound');
+      expect(m).toMatchObject({ mode: 'none', class: 'acp_input_governance', source: 'none' });
+      expect(m.reason).toMatch(/needs_container_floor/);
+    }
   });
-  it('a pinned seat not yet probed stays admitted and says the pin is unprobed', () => {
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- dropped to model a seat with no pin reading
-    const { version_pin: _drop, ...unprobed } = BUILTIN.opencode;
-    expect(seatGovernanceMode(unprobed, 'scoped')).toMatchObject({ mode: 'admitted', reason: expect.stringMatching(/not yet probed/) });
-  });
-  it('acp.os_sandbox on the record is the floor in every scope (seat_record)', () => {
+  it('acp.os_sandbox on the record no longer holds a host-floor seat: the engine refuses it (C5)', () => {
     const armed = { ...BUILTIN.pi, acp: { ...BUILTIN.pi.acp, os_sandbox: true } };
-    for (const scope of SCOPES) expect(seatGovernanceMode(armed, scope)).toMatchObject({ mode: 'os_sandbox', source: 'seat_record' });
+    for (const scope of SCOPES) {
+      const m = seatGovernanceMode(armed, scope);
+      expect(m).toMatchObject({ mode: 'none', source: 'none' });
+      expect(m.reason).toMatch(/needs_container_floor/);
+    }
   });
   it("codex with trust_flags [] or the bypass flag is class none → none, the reason naming the missing adapter", () => {
     for (const flags of [[], ['--dangerously-bypass-approvals-and-sandbox']]) {
@@ -108,21 +112,68 @@ describe('crew#742 — /diagnostics seat governance + /health warnings', () => {
   ]);
   it('per seat: transport, os_sandbox, class, input governance enforced / claimed / unenforced', () => {
     expect(seats.map((s) => [s.cli, s.transport, s.os_sandbox, s.class, s.input_governance])).toEqual([
-      ['claude', 'acp', false, 'acp_input_governance', 'enforced'],
-      ['opencode', 'acp', false, 'acp_input_governance', 'claimed'],
-      ['pi', 'acp', false, 'os_sandbox', 'unenforced'],
+      ['claude', 'wrapped', false, 'acp_input_governance', 'enforced'],
+      ['opencode', 'wrapped', false, 'acp_input_governance', 'unenforced'],
+      ['pi', 'wrapped', false, 'os_sandbox', 'unenforced'],
       ['codex', 'wrapped', false, 'none', 'unenforced'],
       ['copilot', 'wrapped', false, 'os_sandbox', 'unenforced'],
     ]);
-    expect(seats[2]!.governance_mode.scoped_bound).toMatchObject({ mode: 'os_sandbox', source: 'repo_boundary' });
+    expect(seats[2]!.governance_mode.scoped_bound).toMatchObject({ mode: 'none', source: 'none' });
   });
   it('names an ungoverned seat, and floor seats on a host with no launcher; skips disabled seats', () => {
     const withLauncher = seatGovernanceWarnings(seats, 'sandbox-exec');
-    expect(withLauncher.map((w) => w.kind)).toEqual(['seats.ungoverned']);
-    expect(withLauncher[0]!.message).toMatch(/^seat codex runs ungoverned: /);
+    // C5: on the interim host floor opencode and pi are named ungoverned (the engine refuses their
+    // governed work); no seat relies on the host's sandbox launcher any more.
+    expect(withLauncher.map((w) => w.kind)).toEqual(['seats.ungoverned', 'seats.ungoverned', 'seats.ungoverned']);
+    const text = withLauncher.map((w) => w.message).join('\n');
+    for (const cli of ['opencode', 'pi', 'codex']) expect(text).toMatch(new RegExp(`^seat ${cli} runs ungoverned: `, 'm'));
+    expect(text).not.toMatch(/copilot/);
     const noLauncher = seatGovernanceWarnings(seats, null);
-    expect(noLauncher.map((w) => w.kind)).toEqual(['seats.ungoverned', 'seats.os-floor-unarmable']);
-    expect(noLauncher[1]!.message).toMatch(/no OS write boundary can arm on this host.*so pi /);
-    expect(noLauncher[1]!.message).not.toMatch(/copilot/);
+    expect(noLauncher.map((w) => w.kind)).not.toContain('seats.os-floor-unarmable');
+  });
+});
+
+describe('under the container floor (C5)', () => {
+  const prev = process.env['WICKED_SEAT_FLOOR'];
+  afterEach(() => {
+    if (prev === undefined) delete process.env['WICKED_SEAT_FLOOR'];
+    else process.env['WICKED_SEAT_FLOOR'] = prev;
+  });
+  it('reads the seat container, never an ACP permission channel; no host-launcher warning', () => {
+    process.env['WICKED_SEAT_FLOOR'] = 'container';
+    const pi = seatGovernanceMode({ key: 'pi', governance_class: 'acp_input_governance' }, 'unscoped');
+    expect(pi).toMatchObject({ mode: 'os_sandbox', source: 'repo_boundary' });
+    expect(pi.reason).toMatch(/container floor/);
+    expect(pi.reason).not.toMatch(/request_permission/);
+    const claude = seatGovernanceMode({ key: 'claude#2', governance_class: 'acp_input_governance' }, 'scoped');
+    expect(claude).toMatchObject({ mode: 'admitted' });
+    expect(claude.reason).toMatch(/gate hook/);
+    const diag = seatGovernanceDiagnostics([{ ...BUILTIN.pi, enabled_for_council: true }]);
+    expect(seatGovernanceWarnings(diag, null).map((w) => w.kind)).not.toContain('seats.os-floor-unarmable');
+  });
+});
+
+describe('runRoot: the executable decides, not the seat name (C5, codex c5-crew-r3)', () => {
+  it('reads the headless invocation, then the binary, then the key', () => {
+    expect(runRoot({ key: 'claude', headless_invocation: 'pi -p {PROMPT}' })).toBe('pi');
+    expect(runRoot({ key: 'my-claude', headless_invocation: '"/opt/tools/claude" -p {PROMPT}' })).toBe('claude');
+    expect(runRoot({ key: 'x', binary: 'C:\\tools\\codex.cmd' })).toBe('codex');
+    expect(runRoot({ key: 'claude#2' })).toBe('claude');
+  });
+  it('a claude-named seat running pi reads none on the host floor; a claude binary under another name is admitted', () => {
+    expect(seatGovernanceMode({ key: 'claude', governance_class: 'acp_input_governance', headless_invocation: 'pi -p {PROMPT}' }, 'scoped')).toMatchObject({ mode: 'none' });
+    expect(seatGovernanceMode({ key: 'my-claude', governance_class: 'acp_input_governance', headless_invocation: 'claude -p {PROMPT}' }, 'scoped')).toMatchObject({ mode: 'admitted' });
+  });
+  it('a seat running codex with a bounded --sandbox AND a bypass flag reads none, as the engine refuses it (codex c5-crew-r5)', () => {
+    const seat = (trust_flags: string[]) => ({ key: 'runner', governance_class: 'os_sandbox', headless_invocation: 'codex exec {PROMPT}', trust_flags });
+    expect(seatGovernanceMode(seat(['--sandbox', 'workspace-write']), 'scoped')).toMatchObject({ mode: 'os_sandbox', source: 'self' });
+    expect(seatGovernanceMode(seat(['--sandbox', 'workspace-write', '--yolo']), 'scoped')).toMatchObject({ mode: 'none' });
+    expect(seatGovernanceMode(seat(['--sandbox=read-only', '--dangerously-bypass-approvals-and-sandbox']), 'scoped')).toMatchObject({ mode: 'none' });
+    // codex c5-crew-r6: the engine checks the final argv, so a bypass in the invocation counts too.
+    for (const bypass of ['--yolo', '--dangerously-bypass-approvals-and-sandbox']) {
+      expect(seatGovernanceMode({ ...seat(['--sandbox', 'workspace-write']), headless_invocation: `codex exec ${bypass} {PROMPT}` }, 'scoped')).toMatchObject({ mode: 'none' });
+    }
+    expect(seatGovernanceMode({ ...seat([]), headless_invocation: 'codex exec --sandbox read-only "{PROMPT}"' }, 'scoped')).toMatchObject({ mode: 'os_sandbox', source: 'self' });
+    expect(seatGovernanceMode({ ...seat(['--sandbox', 'workspace-write']), headless_invocation: 'codex exec "{PROMPT} --yolo"' }, 'scoped')).toMatchObject({ mode: 'os_sandbox' });
   });
 });

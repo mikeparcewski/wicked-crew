@@ -93,10 +93,9 @@ import {
 import { childEnvWithBootEstateDb } from './governance-store.js';
 
 /**
- * The bridge binaries the engine spawns by bare name on PATH. Mirrors the set audited
- * by `bridge-names.test.ts` (declared dependencies of this package + the shims a real
- * install produces); `bridge-reaper.test.ts` cross-checks this list against those same
- * dependency manifests so a bridge added or dropped there cannot silently drift here.
+ * The ACP bridge binaries a pre-C5 engine spawned by bare name on PATH. ACP is gone from the seats
+ * (C5) and nothing installs a bridge any more; the list stays so the boot sweep still reaps the
+ * orphans a pre-C5 daemon left running after an upgrade (`bridge-reaper.test.ts` pins it).
  */
 export const BRIDGE_BINS: readonly string[] = [
   'agy-acp',

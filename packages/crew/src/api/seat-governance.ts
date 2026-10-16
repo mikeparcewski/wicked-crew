@@ -13,6 +13,8 @@
  * (`core/engine-roster.ts`), so a studio round-trip of the roster never hands it to the engine.
  */
 
+import { isContainerSeatFloor } from './seat-container-login.js';
+
 /** The engine's governance class names (IG1-core-3 `GovernanceClass::as_wire`). */
 export type EngineGovernanceClass = 'acp_input_governance' | 'os_sandbox' | 'none';
 
@@ -50,6 +52,9 @@ export interface SeatGovernanceMode {
 /** The registry fields the mode reads (a `RosterSeat` satisfies it). */
 export interface GovernanceSeatInput {
   key: string;
+  /** The headless invocation the engine launches (its first token is the executable). */
+  headless_invocation?: unknown;
+  binary?: unknown;
   governance_class?: unknown;
   trust_flags?: unknown;
   acp?: { os_sandbox?: unknown; verified_version?: unknown } | null;
@@ -74,10 +79,14 @@ function asClass(v: unknown): EngineGovernanceClass | null {
   return v === 'acp_input_governance' || v === 'os_sandbox' || v === 'none' ? v : null;
 }
 
-/** The seat's own bounded `--sandbox <mode>` among its trust flags (codex). */
+/**
+ * The seat's own bounded `--sandbox <mode>` among its trust flags (codex), exactly the engine's
+ * `codex_sandbox_is_bounded`: a bypass flag anywhere cancels it (codex c5-crew-r5).
+ */
 function ownSandboxMode(trustFlags: unknown): string | null {
   if (!Array.isArray(trustFlags)) return null;
   const flags = trustFlags.filter((f): f is string => typeof f === 'string');
+  if (flags.some((f) => f === '--dangerously-bypass-approvals-and-sandbox' || f === '--yolo')) return null;
   for (let i = 0; i < flags.length; i++) {
     const f = flags[i]!;
     const mode = f === '--sandbox' || f === '-s' ? flags[i + 1] : f.startsWith('--sandbox=') ? f.slice('--sandbox='.length) : undefined;
@@ -86,8 +95,31 @@ function ownSandboxMode(trustFlags: unknown): string | null {
   return null;
 }
 
-function isCodex(seat: GovernanceSeatInput): boolean {
-  return seat.key === 'codex' || seat.key.startsWith('codex-');
+/**
+ * The fixed tokens of the seat's headless invocation after the executable, quote-aware; a token
+ * carrying a `{PLACEHOLDER}` (the prompt and other substituted content) is dropped.
+ */
+function invocationFlags(seat: GovernanceSeatInput): string[] {
+  const inv = typeof seat.headless_invocation === 'string' ? seat.headless_invocation : '';
+  const tokens: string[] = [];
+  for (const m of inv.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)) tokens.push(m[1] ?? m[2] ?? m[3] ?? '');
+  return tokens.slice(1).filter((t) => !/\{[A-Za-z_]+\}/.test(t));
+}
+
+/** The CLI that actually runs for `seat` (C5, codex c5-crew-r3): the executable of its headless
+ *  invocation (quote-aware first token), else its binary, else its key — basename, lower-case, no
+ *  extension — as the engine resolves it, so a `claude` seat running `pi` is judged as pi. */
+export function runRoot(seat: GovernanceSeatInput): string {
+  const inv = typeof seat.headless_invocation === 'string' ? seat.headless_invocation.trim() : '';
+  let exe = '';
+  if (inv !== '') {
+    const m = /^"([^"]*)"|^'([^']*)'|^(\S+)/.exec(inv);
+    exe = (m?.[1] ?? m?.[2] ?? m?.[3] ?? '').trim();
+  }
+  if (exe === '' && typeof seat.binary === 'string') exe = seat.binary;
+  if (exe === '') exe = seat.key.split('#')[0] ?? seat.key;
+  const base = exe.split(/[\\/]/).pop() ?? exe;
+  return base.replace(/\.(exe|cmd|bat|mjs|js)$/i, '').toLowerCase();
 }
 
 function fenceFor(scope: GovernanceScopeKind, roots: GovernanceFenceRoots): SeatGovernanceFence {
@@ -99,17 +131,13 @@ function fenceFor(scope: GovernanceScopeKind, roots: GovernanceFenceRoots): Seat
 }
 
 /**
- * The mode a seat runs under for a scope kind.
+ * The mode a seat runs under for a scope kind (C5, matching wicked-core#950).
  *
- *  - `admitted`: class `acp_input_governance` and — when the seat pins `acp.verified_version` —
- *    the probed `version_pin.matched` is not `false` (a drifted pin fails the engine's governance
- *    closed: `none`).
- *  - `os_sandbox`: class `os_sandbox` with a floor that holds for this scope — `seat_record`
- *    (`acp.os_sandbox`), `self` (codex's own bounded `--sandbox`), or `repo_boundary` (the
- *    engine's boundary around a run BOUND to one repository: worktree + `extraWriteRoots`).
- *    A floor seat whose only floor is the repository boundary, on a scope that binds no
- *    repository, is `none` for that scope.
- *  - `none`: class `none`, no class at all, or the cases above.
+ *  - Container floor (the default): claude reads `admitted` (its gate hook inside the seat
+ *    container); every other seat reads `os_sandbox` / `repo_boundary` (the seat container).
+ *  - Interim host floor: claude reads `admitted` (its gate hook); codex reads `os_sandbox` /
+ *    `self` only with its own bounded `--sandbox`; every other seat reads `none` (the engine
+ *    refuses its governed work: `needs_container_floor`). Class `none` or no class reads `none`.
  */
 export function seatGovernanceMode(
   seat: GovernanceSeatInput,
@@ -119,67 +147,70 @@ export function seatGovernanceMode(
   const cls = asClass(seat.governance_class);
   const fence = fenceFor(scope, roots);
   const none = (reason: string): SeatGovernanceMode => ({ mode: 'none', class: cls, source: 'none', reason, fence });
-  if (cls === null) {
-    return none('the engine reported no governance class for this seat, so nothing is claimed to fence its tool calls');
-  }
-  if (cls === 'none') {
-    return none(
-      isCodex(seat)
-        ? `the engine names its governance class none: codex runs with its own sandbox off (no bounded \`--sandbox\` in its trust flags, or the bypass flag), and ${CODEX_NO_ADAPTER} — only the command-text fences apply`
-        : 'the engine names its governance class none (its record sets `governance_floor = false`) — only the command-text fences apply',
-    );
-  }
-  if (cls === 'acp_input_governance') {
-    const pinned = typeof seat.acp?.verified_version === 'string' ? seat.acp.verified_version : null;
-    if (pinned !== null && seat.version_pin?.matched === false) {
-      const observed = typeof seat.version_pin.observed === 'string' ? `reports \`${seat.version_pin.observed}\`` : 'did not answer `--version`';
-      return none(
-        `its ACP admission is proven against the build \`${pinned}\`, but its binary ${observed} — the engine fails its governance closed, so its tool calls run unchecked`,
-      );
+  // C5: under the container floor (the default) no seat runs over ACP; what holds a governed unit
+  // is its seat container, plus claude's gate hook — never an ACP adapter's permission channel.
+  if (isContainerSeatFloor()) {
+    if (runRoot(seat) === 'claude') {
+      return {
+        mode: 'admitted',
+        class: cls,
+        source: 'acp_input_governance',
+        reason:
+          "its gate hook judges every tool call (a blocking HTTP hook through the model gateway), inside a hardened seat container that mounts only the run's worktree",
+        fence,
+      };
     }
-    return {
-      mode: 'admitted',
-      class: cls,
-      source: 'acp_input_governance',
-      reason:
-        'its admitted ACP adapter sends every tool call through `session/request_permission` to the engine\'s gate' +
-        (pinned === null ? '' : seat.version_pin?.matched === true ? ` (pinned build \`${pinned}\` verified)` : ` (pinned build \`${pinned}\`; not yet probed)`),
-      fence,
-    };
-  }
-  // cls === 'os_sandbox'
-  if (seat.acp?.os_sandbox === true) {
-    return {
-      mode: 'os_sandbox',
-      class: cls,
-      source: 'seat_record',
-      reason: 'its record arms the OS sandbox (`acp.os_sandbox`): the kernel write floor holds its writes to the fenced roots — not a per-call gate, not a read or network jail',
-      fence,
-    };
-  }
-  const own = isCodex(seat) ? ownSandboxMode(seat.trust_flags) : null;
-  if (own !== null) {
-    return {
-      mode: 'os_sandbox',
-      class: cls,
-      source: 'self',
-      reason: `codex runs under its own \`--sandbox ${own}\`, and ${CODEX_NO_ADAPTER}, so it stays on the OS-sandbox floor — not a per-call gate`,
-      fence,
-    };
-  }
-  if (scope === 'scoped_bound') {
     return {
       mode: 'os_sandbox',
       class: cls,
       source: 'repo_boundary',
       reason:
-        "the engine's repository boundary (sandbox-exec / bwrap) holds its writes to the run's worktree and the granted write roots — not a per-call gate, not a read or network jail",
+        "the container floor holds it: a hardened seat container that mounts only the run's worktree, with the model gateway as its only egress — not a per-call gate",
       fence,
     };
   }
+  if (cls === null) {
+    return none('the engine reported no governance class for this seat, so nothing is claimed to fence its tool calls');
+  }
+  const rootKey = runRoot(seat);
+  if (cls === 'none') {
+    return none(
+      rootKey === 'codex'
+        ? `the engine names its governance class none: codex runs with its own sandbox off (no bounded \`--sandbox\` in its trust flags, or the bypass flag), and ${CODEX_NO_ADAPTER} — only the command-text fences apply`
+        : 'the engine names its governance class none (its record sets `governance_floor = false`) — only the command-text fences apply',
+    );
+  }
+  // C5, the interim host floor — exactly wicked-core#950's rule (agy c5-crew-r1): ACP is gone from
+  // the seats, so a governed unit runs only on claude (its gate hook) or on codex in its own bounded
+  // sandbox; the engine refuses every other seat's governed work (needs_container_floor).
+  if (rootKey === 'claude') {
+    return {
+      mode: 'admitted',
+      class: cls,
+      source: 'acp_input_governance',
+      reason: 'its gate hook judges every tool call on the headless carrier (interim host floor)',
+      fence,
+    };
+  }
+  if (rootKey === 'codex') {
+    // The engine checks the FINAL argv (invocation + posture flags), so a bypass in the invocation
+    // template cancels a bounded mode in the trust flags too (codex c5-crew-r6).
+    const own = ownSandboxMode([...invocationFlags(seat), ...(Array.isArray(seat.trust_flags) ? seat.trust_flags : [])]);
+    if (own !== null) {
+      return {
+        mode: 'os_sandbox',
+        class: cls,
+        source: 'self',
+        reason: `codex runs under its own \`--sandbox ${own}\`, and ${CODEX_NO_ADAPTER}, so it stays on the OS-sandbox floor — not a per-call gate`,
+        fence,
+      };
+    }
+    return none(
+      `codex runs without its own bounded \`--sandbox\`, and ${CODEX_NO_ADAPTER}; on the interim host floor the engine refuses its governed work (needs_container_floor)`,
+    );
+  }
   return none(
-    "its only floor is the engine's repository boundary, which arms on a run bound to one repository — " +
-      (scope === 'scoped' ? 'this scope (several repositories or a project) binds none' : 'an unscoped ask binds none'),
+    'its tool calls were checked over ACP, which is removed from the seats; on the interim host floor the engine refuses its governed work (needs_container_floor) — run the container floor',
   );
 }
 
@@ -224,7 +255,8 @@ export function seatGovernanceDiagnostics(seats: readonly DiagnosticSeatInput[])
     return {
       cli: seat.key,
       enabled_for_council: seat.enabled_for_council !== false,
-      transport: seat.acp !== undefined && seat.acp !== null ? 'acp' : 'wrapped',
+      // C5: every seat runs its CLI's headless mode (the wrapped carrier); `acp` is legacy metadata.
+      transport: 'wrapped',
       os_sandbox: seat.acp?.os_sandbox === true,
       class: bound.class,
       input_governance,
@@ -254,7 +286,9 @@ export function seatGovernanceWarnings(seats: readonly SeatGovernanceDiagnostic[
     }
   }
   const boundaryOnly = enabled.filter((s) => s.governance_mode.scoped_bound.source === 'repo_boundary').map((s) => s.cli);
-  if (hostBoundary === null && boundaryOnly.length > 0) {
+  // Under the container floor the seat container is the boundary, not the host's sandbox-exec /
+  // bwrap (codex c5-crew-r1).
+  if (hostBoundary === null && boundaryOnly.length > 0 && !isContainerSeatFloor()) {
     out.push({
       kind: 'seats.os-floor-unarmable',
       severity: 'warning',

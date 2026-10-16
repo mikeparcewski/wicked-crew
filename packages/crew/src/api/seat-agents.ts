@@ -21,6 +21,7 @@
  * Pure: no IO, no clock.
  */
 
+import { isContainerSeatFloor } from './seat-container-login.js';
 import type { SeatRecentBench } from './seat-health.js';
 import type { GovernanceScopeKind, SeatGovernanceMode } from './seat-governance.js';
 import type { SeatAccount } from './seat-scrub.js';
@@ -276,7 +277,7 @@ export function seatIssues(i: IssueInputs): SeatIssue[] {
     }, [{ purpose: 'version', display: `${i.binary} --version` }]);
   } else if (gov.mode === 'none') {
     add('unchecked', 'warning', `nothing checks ${name}'s actions on this version`, { why: 'no_governance' });
-  } else if (gov.source === 'repo_boundary' && i.hostBoundary === null) {
+  } else if (gov.source === 'repo_boundary' && i.hostBoundary === null && !isContainerSeatFloor()) {
     add('unchecked', 'warning', `there is no sandbox tool on this computer, so nothing limits what ${name} writes`, { why: 'no_host_boundary' });
   } else if (gov.source === 'repo_boundary' && i.governance.unscoped.mode === 'none') {
     add('fence_scoped', 'warning', `${name}'s writes are kept inside one repository only when the work is bound to it`);

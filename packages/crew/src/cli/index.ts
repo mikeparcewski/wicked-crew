@@ -6,9 +6,9 @@ import { randomUUID } from 'node:crypto';
 import { CoreAdapter } from '../core/adapter.js';
 import { exportLedgerPackageDir } from '../qe/ledger.js';
 import { engineBusHandoff, type BusUnavailable } from '../core/engine-bus.js';
-import { ensureBridgesOnPath, ensurePiLauncherCommand, PI_ACP_COMMAND_ENV } from '../core/bridge-path.js';
 import { DISABLE_BACKGROUND_TASKS_ENV, ensureForegroundOnlyWorkers } from '../core/worker-env.js';
 import { bridgeReaper, reapOrphansAtBoot, startOrphanSweep } from '../core/bridge-reaper.js';
+import { defaultSeatFloor } from '../api/seat-container-login.js';
 import { daemonSignalLog } from '../core/daemon-signal-log.js';
 import { shutdownWithDeadline } from '../core/shutdown.js';
 import { startServer, type BootStages } from '../api/server.js';
@@ -270,19 +270,12 @@ let adapterRef: CoreAdapter | undefined;
  * legacy-outbox probe), `engine`, then the server's own stages (`api/server.ts` BootStageClock).
  */
 async function bootstrap(opts: BootstrapOpts, bootStartedAt: number = performance.now()): Promise<{ adapter: CoreAdapter; port: number; stages: BootStages }> {
-  // Put the packaged ACP bridge shims on PATH BEFORE the engine exists — the core
-  // spawns bridge binaries by bare name, and every engine subprocess inherits this
-  // environment. Makes a plain `npm install` deployment fully self-contained (no
-  // global installs, no hand-made symlinks).
-  ensureBridgesOnPath();
-  // The pi seat's ACP carrier (community pi-acp) spawns whatever `PI_ACP_PI_COMMAND` names as pi:
-  // point it at the packaged `wicked-pi` launcher, which turns the engine's `WICKED_PI_SKILL_DIRS`
-  // into pi's `--no-skills --skill <dir>…` (F-079). An operator's own value is left alone.
-  // Expected on an install whose `agent-acp-bridges` predates 1.1.0 (no `wicked-pi` bin yet):
-  // ONE warning naming the remedy, not an error on every boot (review of #532, F-3).
-  const piCommand = ensurePiLauncherCommand();
-  if (piCommand === null) {
-    console.warn(`[crew] ${PI_ACP_COMMAND_ENV} not set — no wicked-pi launcher beside the ACP bridges (agent-acp-bridges < 1.1.0): a pi seat over ACP receives no skills; upgrade with \`npm i agent-acp-bridges@^1.1.0\` (bundled with wicked-crew once bridges-v1.1.0 is published)`);
+  // C5: governed seats run in containers (the engine's headless carrier in a hardened seat
+  // container; ACP is gone from the seats). Set BEFORE the engine exists, so it and crew's
+  // sign-in routes read one value. An operator's WICKED_SEAT_FLOOR=host keeps the interim host floor.
+  const floor = defaultSeatFloor();
+  if (floor.toLowerCase() !== 'container') {
+    console.warn(`[crew] WICKED_SEAT_FLOOR=${floor} — governed seats run on the interim HOST floor, not in containers`);
   }
   // crew#844: a worker turn may not end with its commands still running in the background — the
   // evidence would never reach the attempt record. Inherited by every seat; an operator value wins.
@@ -540,8 +533,7 @@ function installShutdownHandlers(): void {
   });
   // Normal exit (`process.exit` anywhere, main() falling off): an 'exit' handler cannot
   // await, so this is the synchronous SIGTERM sweep. After the graceful path above it is
-  // a no-op re-scan; on a plain exit it is the only reaping that happens, and the
-  // bridges' own stdin-EOF watchdog (packages/agent-acp-bridges) is the final backstop.
+  // a no-op re-scan; on a plain exit it is the only reaping that happens.
   process.on('exit', () => {
     bridgeReaper.sweepSync();
   });

@@ -282,11 +282,10 @@ describe('A6 issues', () => {
     });
   });
 
-  it('copilot: writes kept in the repository only (fence_scoped); no host boundary turns it into unchecked', () => {
-    expect(codes(seat(rosterOver({})(), 'copilot'))).toContain('warning:fence_scoped');
-    const noBoundary = seat(rosterOver({ hostBoundary: null })(), 'copilot');
-    expect(codes(noBoundary)).toContain('warning:unchecked');
-    expect((noBoundary['issues'] as Array<{ code: string; params: Record<string, unknown> }>).find((i) => i.code === 'unchecked')!.params).toEqual({ why: 'no_host_boundary' });
+  it('copilot on the interim host floor: nothing checks it (the engine refuses its governed work, C5)', () => {
+    const s = seat(rosterOver({})(), 'copilot');
+    expect(codes(s)).toContain('warning:unchecked');
+    expect((s['issues'] as Array<{ code: string; params: Record<string, unknown> }>).find((i) => i.code === 'unchecked')!.params).toEqual({ why: 'no_governance' });
   });
 
   it('safety sorts before availability within a severity', () => {

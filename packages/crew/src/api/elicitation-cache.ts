@@ -18,8 +18,36 @@ export interface ElicitationEntry {
    * free-text elicitation, and dropped when it does not name one of `options`.
    */
   recommended?: number;
+  /**
+   * (ask) Who asked: the engine's additive `elicitationCreated` fields for a seat's MCP `ask`
+   * question — `source: "ask"`, the asking unit's `ord` and `attempt`, and the `seat` key that asked.
+   * Kept only when well-formed and absent for every other producer, so a skin names the asker
+   * rather than the seat the run is running now.
+   */
+  source?: 'ask';
+  ord?: number;
+  attempt?: number;
+  seat?: string;
   /** When the daemon observed the elicitation — ISO-8601. */
   receivedAt: string;
+}
+
+/** The (ask) asker fields of a frame or entry: only for an ask question (`source: "ask"`), each kept only
+ *  when well-formed. Another producer's frame carries none of them, whatever else it sends. */
+export function askerFields(raw: {
+  source?: unknown;
+  ord?: unknown;
+  attempt?: unknown;
+  seat?: unknown;
+}): Pick<ElicitationEntry, 'source' | 'ord' | 'attempt' | 'seat'> {
+  const count = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v >= 0;
+  if (raw.source !== 'ask') return {};
+  return {
+    source: 'ask' as const,
+    ...(count(raw.ord) ? { ord: raw.ord } : {}),
+    ...(count(raw.attempt) ? { attempt: raw.attempt } : {}),
+    ...(typeof raw.seat === 'string' && raw.seat.trim() !== '' ? { seat: raw.seat } : {}),
+  };
 }
 
 /**
@@ -75,6 +103,7 @@ export class ElicitationCache {
       message: entry.message,
       options: entry.options ?? null,
       ...(recommendedIndex(entry.recommended, entry.options) !== undefined ? { recommended: entry.recommended as number } : {}),
+      ...askerFields(entry),
       receivedAt: new Date().toISOString(),
     });
     this.bumpGen(entry.runId);
@@ -152,6 +181,7 @@ export class ElicitationCache {
         message: String(event.message ?? ''),
         options,
         ...(recommended !== undefined ? { recommended } : {}),
+        ...askerFields(event),
       });
     } else if (event.type === 'elicitationResolved') {
       const entry = this.entries.get(runId);

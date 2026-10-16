@@ -60,6 +60,7 @@ import { z } from 'zod';
 import type { Actor, McpApprovalResponse, McpCallDecision, McpPreviewResponse, McpUsageResponse } from '../core/types.js';
 import { MCP_SERVER_NAME_RE } from '../mcp/classify.js';
 import type { McpBroker } from '../mcp/broker.js';
+import type { AskServer } from '../mcp/ask-server.js';
 import type { McpPolicies } from '../mcp/policies.js';
 import { MCP_PREVIEW_ROLES, MCP_RUN_MODES, McpLedgerEditError } from '../mcp/policies.js';
 import { isWriteGrant, McpRegistryError, type McpRegistry } from '../mcp/registry.js';
@@ -203,6 +204,7 @@ export const McpUsageQuerySchema = z
   .strict();
 
 export interface McpRouteDeps {
+  askServer?: AskServer;
   /** Absent = a directly-driven route set with no registry seam → 503. */
   registry?: McpRegistry;
   /** The broker's call path (S3). Absent → `POST /mcp/call` answers 503. */
@@ -283,6 +285,18 @@ function toConfig(body: z.infer<typeof McpServerConfigSchema>): McpUpstreamConfi
 }
 
 export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): void {
+  // The MCP ask tool (streamable HTTP, stateless): worker-facing, the unit token in Authorization.
+  app.post(`${V}/mcp/ask`, { config: { manifest: { statusCodes: [200, 401, 503] } } }, async (req, reply) => {
+    if (deps.askServer === undefined) return reply.code(503).send({ error: 'ask_unsupported' });
+    return deps.askServer.handle(req, reply);
+  });
+  app.route({
+    method: ['GET', 'DELETE'],
+    url: `${V}/mcp/ask`,
+    config: { manifest: { statusCodes: [405] } },
+    handler: async (_req, reply) => reply.code(405).header('Allow', 'POST').send({ error: 'method_not_allowed' }),
+  });
+
   const registry = (reply: FastifyReply): McpRegistry | null => {
     if (deps.registry !== undefined) return deps.registry;
     void reply.code(503).send({ error: 'the MCP registry is not configured on this daemon', code: 'mcp_unavailable' });
