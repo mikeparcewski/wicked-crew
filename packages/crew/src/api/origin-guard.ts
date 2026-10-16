@@ -87,7 +87,8 @@ export function refuseRequest(req: GuardedRequest, policy: OriginPolicy): string
     return `a ${site} page may not change anything here`;
   }
   const origin = canonicalOrigin(req.origin);
-  if (origin !== null && (origin === own || origin === own.replace(/^http:/, 'https:'))) return null;
+  // The daemon serves plain http, so its own origin is `http://<host>`; any other scheme is another app.
+  if (origin !== null && origin === own) return null;
   if (corsAllowed(req.origin, policy)) return null;
   return `origin '${req.origin}' may not change anything here; allow it with WICKED_CREW_ALLOWED_ORIGINS`;
 }

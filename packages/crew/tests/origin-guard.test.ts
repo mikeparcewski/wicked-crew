@@ -28,6 +28,8 @@ describe('origin guard, auth off (crew#1048)', () => {
     expect(refuseRequest(req({ method: 'POST', origin: 'http://localhost:4999' }), LOCAL)).toMatch(/may not change/);
     expect(refuseRequest(req({ path: '/ws/terminals/t1', origin: 'http://127.0.0.1:5173', upgrade: 'websocket' }), LOCAL)).toMatch(/may not change/);
     expect(refuseRequest(req({ method: 'DELETE', origin: 'null' }), LOCAL)).toMatch(/may not change/);
+    // Same name, other scheme: https://localhost is port 443, a different app (codex r2 #8).
+    expect(refuseRequest(req({ host: 'localhost:80', method: 'POST', origin: 'https://localhost' }), LOCAL)).toMatch(/may not change/);
   });
 
   it('refuses a write that says it is cross-site without an Origin', () => {

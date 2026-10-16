@@ -392,6 +392,20 @@ describe('CORS pairing (the R2 gap)', () => {
     expect(status).toBe(403);
   });
 
+  it('local mode: the seat gateway reaches the unit-token MCP route under its host alias', async () => {
+    const status = await new Promise<number>((done, fail) => {
+      const r = httpRequest(`${localBase}/api/v1/mcp/call`, {
+        method: 'POST',
+        headers: { Host: 'host.lima.internal:7701', 'Content-Type': 'application/json' },
+      }, (res) => { res.resume(); done(res.statusCode ?? 0); });
+      r.on('error', fail);
+      r.end(JSON.stringify({ token: 'wmt_not_a_bound_unit_token', subject: 'mcp:fx/read' }));
+    });
+    // The engine judges the token (401 for an unbound one); the origin guard never answers here.
+    expect(status).not.toBe(403);
+    expect(status).toBe(401);
+  });
+
   it('local mode: a foreign page can open neither /ws nor a terminal, and the refused sockets are closed', async () => {
     const wsBase = localBase.replace(/^http/, 'ws');
     for (const path of ['/ws', '/ws/terminals/t-guard']) {
