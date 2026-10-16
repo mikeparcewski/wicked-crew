@@ -10,6 +10,10 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.13.1] — 2026-10-16
+
+A patch release for C5. On the host floor, the agents the engine won't give governed work are kept out of chat and work admission, which needs wicked-core-ts 0.12.1. Only the daemon's own pages and allowed origins can drive it from a browser. It bundles wicked-studio 0.9.6, whose New job can start a chat. Pins: wicked-core-ts ^0.12.1, wicked-studio ^0.9.6.
+
 ### Security
 - **Only the daemon's own pages, and origins you allow, can drive it from a browser (crew#1048).** With auth off (the
   local default) crew used to reflect CORS for every `localhost`/`127.0.0.1` port, and `/ws` and `/ws/terminals/:id`
@@ -4200,7 +4204,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.13.1...HEAD
+[0.13.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.12.4...v0.13.0
 [0.12.4]: https://github.com/mikeparcewski/wicked-crew/compare/v0.12.3...v0.12.4
 [0.12.3]: https://github.com/mikeparcewski/wicked-crew/compare/v0.12.2...v0.12.3
