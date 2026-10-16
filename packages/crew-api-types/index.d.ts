@@ -5189,6 +5189,18 @@ export interface WorkflowDef {
    * attributed QE PASS, or no push) and is never waived by `reducedAssurance`.
    */
   required_instruments?: string[] | null;
+  /**
+   * (api-types 0.123.0; DES-CHAT-FIRST-001 C2, wicked-core-ts after 0.12.1) How the workflow is
+   * described to an operator: a short display name (`"Build a feature"`). Display data only — the
+   * daemon never sends it to the engine (whose def parser is strict). Served on a built-in that is
+   * not a system workflow, copied from its preset ({@link Preset.title}); ABSENT on a system workflow,
+   * a runtime def, and on any daemon or engine older than the field. Absent ⇒ show the `id`.
+   */
+  title?: string;
+  /** (api-types 0.123.0, C2) One line on what the workflow does. Absent as {@link WorkflowDef.title} is. */
+  summary?: string;
+  /** (api-types 0.123.0, C2) 2–4 short phrases saying when to pick it. Absent as {@link WorkflowDef.title} is. */
+  use_when?: string[];
 }
 
 /** A drop-in workflow definition the ENGINE refused, with the engine's own reason (wicked-crew#718). */
@@ -5791,6 +5803,17 @@ export interface Preset {
    * on every preset it serves (api-types 0.48.0); absent from an older daemon.
    */
   system?: boolean;
+  /**
+   * (api-types 0.123.0; DES-CHAT-FIRST-001 C2, wicked-core-ts after 0.12.1) A short display name,
+   * set by the engine on a built-in row (`created_by: "builtin"`). Absent on a saved preset —
+   * including a project row that shadows a built-in's name — and from an older engine: list it by
+   * `name`.
+   */
+  title?: string;
+  /** (api-types 0.123.0, C2) One line on what the preset does. Absent as {@link Preset.title} is. */
+  summary?: string;
+  /** (api-types 0.123.0, C2) 2–4 short phrases saying when to pick it. Absent as {@link Preset.title} is. */
+  use_when?: string[];
   [k: string]: unknown;
 }
 
