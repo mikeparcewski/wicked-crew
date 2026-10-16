@@ -223,6 +223,10 @@ export interface IssueInputs {
    *  with, `null` when the host has none. */
   hostBoundary: string | null;
   recentBench: RecentBenchWire | undefined;
+  /** wicked-core#976: the engine's host-floor bench reason for the seat (`null`/absent: none). */
+  hostFloorBench?: string | null;
+  /** wicked-core#976: the sentence when that bench could not be read (fail closed). */
+  hostFloorUnknown?: string | null;
   workAdmission?: Record<GovernanceScopeKind, WorkAdmission>;
   qeReviewer?: QeReviewer;
   /** Whether ANY seat on the roster can run QE now (`undefined` when that is not known). */
@@ -274,9 +278,11 @@ export function seatIssues(i: IssueInputs): SeatIssue[] {
     });
   }
 
-  const anyJob = i.workAdmission?.unscoped;
-  if (anyJob !== undefined && !anyJob.ok && anyJob.reason_code === 'host_floor_bench') {
+  // wicked-core#976: from the bench reading itself — whatever refusal leads the admissions.
+  if (typeof i.hostFloorBench === 'string' && i.hostFloorBench !== '') {
     add('host_floor', 'warning', `${name} gets no work here: ${HOST_FLOOR_BENCH_COPY}`);
+  } else if (typeof i.hostFloorUnknown === 'string' && i.hostFloorUnknown !== '') {
+    add('host_floor_unknown', 'warning', `${name}: ${i.hostFloorUnknown}`);
   }
 
   const bound = i.workAdmission?.scoped_bound;

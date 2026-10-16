@@ -1055,10 +1055,14 @@ export function readLaunchBench(
   governedOnly: boolean,
 ): Map<string, string> | null {
   if (predicate === undefined) return null;
-  const benched = JSON.parse(predicate(JSON.stringify(seats), bound)) as Array<{ cli?: unknown; reason?: unknown; governed_only?: unknown }>;
+  const benched: unknown = JSON.parse(predicate(JSON.stringify(seats), bound));
+  // A malformed answer is a failed read (the caller decides what that means), never "no bench".
+  if (!Array.isArray(benched)) throw new Error('Core.worktreeBenched answered something other than an array');
   const out = new Map<string, string>();
-  for (const b of benched) {
-    if (typeof b.cli !== 'string' || typeof b.reason !== 'string') continue;
+  for (const b of benched as Array<{ cli?: unknown; reason?: unknown; governed_only?: unknown } | null>) {
+    if (b === null || typeof b !== 'object' || typeof b.cli !== 'string' || typeof b.reason !== 'string') {
+      throw new Error('Core.worktreeBenched answered an entry without a seat and a reason');
+    }
     if ((b.governed_only === true) === governedOnly) out.set(b.cli, b.reason);
   }
   return out;

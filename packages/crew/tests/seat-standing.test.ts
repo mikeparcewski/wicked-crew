@@ -113,7 +113,11 @@ describe('chatSeatAdmission — the default seats of a chat, and WHY a seat is n
   });
 
   it('wicked-core#976: a seat the engine benches on the host floor is refused in every kind and scope, source engine, in plain words', () => {
-    const benched = { ...ungoverned, host_floor_bench: 'runs only on the container floor: …' };
+    const benched = {
+      ...ungoverned,
+      host_floor_bench:
+        'runs only on the container floor: on the host floor only claude and a bounded codex keep a per-call check, so a governed unit on this seat is refused (needs_container_floor) — set WICKED_SEAT_FLOOR=container or remove the seat',
+    };
     for (const kind of ['pool', 'path', 'path-bound'] as const) {
       for (const scoped of [false, true]) {
         const v = chatSeatAdmission(benched, 'signed_in', scoped, kind);
@@ -122,8 +126,14 @@ describe('chatSeatAdmission — the default seats of a chat, and WHY a seat is n
         expect(v.source).toBe('engine');
         expect(v.reason).toMatch(/only claude and codex can have each action checked/);
         expect(v.reason).toMatch(/WICKED_SEAT_FLOOR=container/);
+        // Decided before the scope rules: no engine jargon, no scope remedy that cannot lift it.
+        expect(v.reason).not.toMatch(/needs_container_floor|governance mode|scope the ask|open the chat unscoped|ACP/);
       }
     }
+    // Unread on the host floor: refused with the unavailable sentence, before the scope rules.
+    const unknown = { ...noAcp, host_floor_unknown: 'crew could not read which agents …' };
+    const u = chatSeatAdmission(unknown, 'signed_in', true, 'path');
+    expect(u).toEqual({ ok: false, source: 'engine', reason: 'crew could not read which agents …' });
     // An empty or absent reading is no bench.
     expect(chatSeatAdmission({ ...ungoverned, host_floor_bench: null }, 'signed_in', false, 'path')).toEqual({ ok: true });
     expect(chatSeatAdmission({ ...ungoverned, host_floor_bench: '' }, 'signed_in', false, 'path')).toEqual({ ok: true });

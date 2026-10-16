@@ -62,7 +62,9 @@ function rosterOver(opts: {
   signed?: Record<string, boolean | null>;
   worktree?: Map<string, string> | null;
   /** The engine's host-floor bench (`Core.worktreeBenched(seats, false)`'s governed-only entries). */
-  hostFloor?: Map<string, string> | null;
+  hostFloor?: Map<string, string> | null | (() => Map<string, string> | null);
+  /** The daemon env (default: no floor chosen). */
+  env?: NodeJS.ProcessEnv;
   hostBoundary?: string | null;
   probe?: SeatProbe | null;
   versions?: SeatVersionCache | null;
@@ -75,7 +77,7 @@ function rosterOver(opts: {
     seatHealth: opts.tracker ?? new SeatHealthTracker(),
     registry: () => (opts.registry ?? REGISTRY).map((s) => ({ ...s })),
     signedIn: (k) => opts.signed?.[k] ?? true,
-    env: { WICKED_WORKER_HOME: '' },
+    env: { WICKED_WORKER_HOME: '', ...(opts.env ?? {}) },
     probe: opts.probe ?? null,
     versions: opts.versions ?? null,
     versionPins:
@@ -88,7 +90,12 @@ function rosterOver(opts: {
             },
           } as never),
     worktreeBench: opts.worktree === null ? null : () => opts.worktree ?? new Map([['codex', ENGINE_BENCH]]),
-    hostFloorBench: opts.hostFloor === undefined || opts.hostFloor === null ? null : () => opts.hostFloor!,
+    hostFloorBench:
+      opts.hostFloor === undefined || opts.hostFloor === null
+        ? null
+        : typeof opts.hostFloor === 'function'
+          ? opts.hostFloor
+          : () => opts.hostFloor as Map<string, string>,
     qeAdmitted: ((admit) => (admit === null ? null : (k: string) => (admit === undefined ? true : admit(k))))(opts.qeAdmitted),
     hostBoundary: () => (opts.hostBoundary === undefined ? 'sandbox-exec' : opts.hostBoundary),
     home: HOME,
@@ -140,6 +147,68 @@ describe('wicked-core#976: the host-floor bench', () => {
       expect((copilot['work_admission'] as Record<string, unknown>)['unscoped']).toEqual({ ok: true });
       expect(codes(copilot)).not.toContain('warning:host_floor');
     }
+  });
+
+  it('the host_floor warning is read off the bench itself, whatever refusal leads the admissions', () => {
+    const roster = rosterOver({
+      signed: { copilot: false },
+      registry: REGISTRY.map((s) => (s.key === 'opencode' ? { ...s, enabled_for_council: false } : s)),
+      hostFloor: new Map([['copilot', HOST_FLOOR_ENGINE], ['opencode', HOST_FLOOR_ENGINE]]),
+    })();
+    expect((seat(roster, 'copilot')['work_admission'] as Record<string, unknown>)['unscoped']).toMatchObject({ reason_code: 'signed_out' });
+    expect((seat(roster, 'opencode')['work_admission'] as Record<string, unknown>)['unscoped']).toMatchObject({ reason_code: 'not_enabled' });
+    for (const k of ['copilot', 'opencode']) expect(codes(seat(roster, k))).toContain('warning:host_floor');
+  });
+
+  describe('a host-floor bench read that fails is never "no bench"', () => {
+    const boom = () => {
+      throw new Error('engine said something odd');
+    };
+    it('on the host floor with no earlier reading: every admission fails closed, disclosed', () => {
+      const roster = rosterOver({ env: { WICKED_SEAT_FLOOR: 'host' }, hostFloor: boom })();
+      for (const k of ['claude', 'copilot', 'opencode']) {
+        const s = seat(roster, k);
+        expect(s['host_floor_unknown']).toMatch(/could not read which agents the engine gives work to/);
+        for (const scope of ['unscoped', 'scoped', 'scoped_bound']) {
+          expect((s['chat_admission'] as Record<string, unknown>)[scope]).toMatchObject({ ok: false, source: 'engine' });
+        }
+        expect('work_admission' in s).toBe(false);
+        expect('qe_reviewer' in s).toBe(false);
+        expect(codes(s)).toContain('warning:host_floor_unknown');
+      }
+    });
+    it('a later failed read keeps the last answer the engine gave', () => {
+      let calls = 0;
+      const flaky = () => {
+        calls += 1;
+        if (calls > 1) throw new Error('later failure');
+        return new Map([['copilot', HOST_FLOOR_ENGINE]]);
+      };
+      const accessor = rosterOver({ env: { WICKED_SEAT_FLOOR: 'host' }, hostFloor: flaky });
+      accessor();
+      const again = accessor();
+      expect(seat(again, 'copilot')['host_floor_bench']).toBe(HOST_FLOOR_ENGINE);
+      expect('host_floor_unknown' in seat(again, 'claude')).toBe(false);
+      expect((seat(again, 'claude')['work_admission'] as Record<string, unknown>)['unscoped']).toEqual({ ok: true });
+    });
+    it('off the host floor a failed read benches nothing (the engine benches nothing there)', () => {
+      // No floor chosen (the container floor is pinned against the real addon in host-floor-bench-addon.test.ts).
+      const roster = rosterOver({ hostFloor: boom })();
+      const copilot = seat(roster, 'copilot');
+      expect('host_floor_unknown' in copilot).toBe(false);
+      expect((copilot['work_admission'] as Record<string, unknown>)['unscoped']).toEqual({ ok: true });
+    });
+    it('a malformed engine answer is a failed read', async () => {
+      const { readLaunchBench } = await import('../src/core/adapter.js');
+      expect(() => readLaunchBench(() => '{"cli":"pi"}', [], false, true)).toThrow(/array/);
+      expect(() => readLaunchBench(() => '[{"cli":"pi"}]', [], false, true)).toThrow(/seat and a reason/);
+      expect(() => readLaunchBench(() => 'not json', [], false, true)).toThrow();
+      const roster = rosterOver({
+        env: { WICKED_SEAT_FLOOR: 'host' },
+        hostFloor: () => readLaunchBench(() => '[null]', [], false, true),
+      })();
+      expect(seat(roster, 'copilot')['host_floor_unknown']).toBeDefined();
+    });
   });
 
   it('a signed-out seat leads with the auth refusal; the host floor rides beside it in the chat reason', () => {

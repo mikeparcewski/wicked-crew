@@ -36,9 +36,9 @@ import {
 import type { SeatHealthTracker } from './seat-health.js';
 import { signedInHeuristic } from './seat-signin.js';
 import { SeatProbe } from './seat-probe.js';
-import { SeatContainerStatus, isContainerLoginCli, isContainerSeatFloor } from './seat-container-login.js';
+import { SeatContainerStatus, isContainerLoginCli, isContainerSeatFloor, isHostSeatFloor } from './seat-container-login.js';
 import { seatGovernanceModes, type GovernanceScopeKind, type SeatGovernanceMode } from './seat-governance.js';
-import { seatStanding, chatSeatAdmission, type StandingSeat, type SeatStanding } from './seat-standing.js';
+import { HOST_FLOOR_UNKNOWN_COPY, seatStanding, chatSeatAdmission, type StandingSeat, type SeatStanding } from './seat-standing.js';
 import { seatVersion, seatVersions, type SeatVersionCache } from './seat-version.js';
 
 // The adapter loads this same addon module. Keep the optional 0.11.1 static local until the
@@ -163,6 +163,8 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
     deps.worktreeBench !== undefined ? deps.worktreeBench : daemon ? (seats: readonly unknown[]) => CoreAdapter.worktreeBenched(seats) : null;
   const hostFloorBench =
     deps.hostFloorBench !== undefined ? deps.hostFloorBench : daemon ? (seats: readonly unknown[]) => CoreAdapter.hostFloorBenched(seats) : null;
+  // The last host-floor bench the engine answered: a read that fails later keeps it.
+  let lastHostFloor: Map<string, string> | null = null;
   const qeAdmitted =
     deps.qeAdmitted !== undefined ? deps.qeAdmitted : daemon ? (key: string, inv: string | undefined) => CoreAdapter.qeReviewerAdmitted(key, inv) : null;
   // Published generations are immutable; the mutable HOME-derived fallback expires after 30 s.
@@ -265,11 +267,21 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
     } catch {
       benchedOnBound = null; // an engine that cannot answer says nothing, never a guessed bench
     }
+    // wicked-core#976: `null` = an addon without the predicate (nothing benched, as before it).
+    // A read that FAILS is not "no bench": off the host floor the engine benches nothing, so
+    // nothing is missed; on it the last reading stands, and with none every seat's admission is
+    // unavailable, said so (fail closed) — never a guessed "admitted".
     let benchedOnHost: Map<string, string> | null = null;
-    try {
-      benchedOnHost = hostFloorBench === null ? null : hostFloorBench(seats);
-    } catch {
-      benchedOnHost = null;
+    let hostFloorUnknown: string | null = null;
+    if (hostFloorBench !== null) {
+      try {
+        benchedOnHost = hostFloorBench(seats);
+        if (benchedOnHost !== null) lastHostFloor = benchedOnHost;
+      } catch {
+        if (!isHostSeatFloor(env)) benchedOnHost = new Map();
+        else if (lastHostFloor !== null) benchedOnHost = lastHostFloor;
+        else hostFloorUnknown = HOST_FLOOR_UNKNOWN_COPY;
+      }
     }
     const boundary = hostBoundary();
     const decorated = seats.map((seat) => {
@@ -340,6 +352,7 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
       const standingSeat = {
         ...(seat as unknown as StandingSeat),
         ...(hostFloor !== null ? { host_floor_bench: hostFloor } : {}),
+        ...(hostFloorUnknown !== null ? { host_floor_unknown: hostFloorUnknown } : {}),
       };
       // core#581: a pinned seat whose binary no longer matches the build its ACP admission was
       // proven against says so here (read from the cache; a stale cache refreshes in the
@@ -364,8 +377,9 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
       // A4: the engine's QE skill admission for this seat (`null` when it cannot answer).
       const skillAdmitted = admissions.get(key) ?? null;
       // A4 / A5: only when the engine can say whether it benches the seat on a bound run.
+      // …and whether it benches it on the host floor: unread there, the admissions are absent.
       const inputs =
-        benchedOnBound === null
+        benchedOnBound === null || hostFloorUnknown !== null
           ? null
           : {
               enabled_for_council: (seat as { enabled_for_council?: boolean }).enabled_for_council,
@@ -383,6 +397,7 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
         signed_in: signed,
         ...(containerSeat ? { sign_in: 'container' as const } : {}),
         ...(hostFloor !== null ? { host_floor_bench: hostFloor } : {}),
+        ...(hostFloorUnknown !== null ? { host_floor_unknown: hostFloorUnknown } : {}),
         ...(versionPin !== undefined ? { version_pin: versionPin } : {}),
         ...standing,
         // ASK-C2: the admission an ASK applies (every chat is a path after ASK-C1): `unscoped` =
@@ -416,6 +431,8 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
         governance: s.governance_mode as Record<GovernanceScopeKind, SeatGovernanceMode>,
         hostBoundary: boundary,
         recentBench: s.recent_bench,
+        hostFloorBench: typeof s.host_floor_bench === 'string' ? s.host_floor_bench : null,
+        hostFloorUnknown: typeof s.host_floor_unknown === 'string' ? s.host_floor_unknown : null,
         ...(s.work_admission !== undefined ? { workAdmission: s.work_admission as Record<GovernanceScopeKind, WorkAdmission> } : {}),
         ...(s.qe_reviewer !== undefined ? { qeReviewer: s.qe_reviewer as QeReviewer } : {}),
         rosterQe,

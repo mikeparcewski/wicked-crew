@@ -1165,6 +1165,13 @@ export interface RosterSeat {
    */
   host_floor_bench?: string;
   /**
+   * (unreleased, wicked-core#976) Present on the host floor when crew could not read the engine's
+   * host-floor bench and holds no earlier reading: the operator's sentence. Admission then fails
+   * closed — `chat_admission` refuses the seat (source `engine`, unless signed out), and
+   * `work_admission` / `qe_reviewer` are ABSENT (not known).
+   */
+  host_floor_unknown?: string;
+  /**
    * (api-types 0.115.0, A5) Whether a job of each scope kind would give the seat work, including
    * the engine's launcher benches (core#769's codex worktree bench, via `Core.worktreeBenched`).
    * ABSENT on a daemon whose engine addon cannot answer the worktree bench (wicked-core-ts without
@@ -1261,8 +1268,8 @@ export type SeatQeReviewer =
 
 /**
  * One `RosterSeat.issues` entry (api-types 0.115.0). Today's codes: `signed_out`, `qe_blocked`
- * (problems); `quota`, `usage_limit`, `benched`, `codex_worktree`, `host_floor` (unreleased,
- * wicked-core#976), `version_unproven`,
+ * (problems); `quota`, `usage_limit`, `benched`, `codex_worktree`, `host_floor` and `host_floor_unknown`
+ * (unreleased, wicked-core#976), `version_unproven`,
  * `unchecked` (`params.why`: `no_governance` | `no_host_boundary`), `fence_scoped`,
  * `live_check_failed` (warnings); `opt_in`, `no_qe`, `unverified` (notes). A client must tolerate
  * an unknown code.

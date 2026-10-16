@@ -27,6 +27,14 @@ export function isContainerSeatFloor(env: NodeJS.ProcessEnv = process.env): bool
   return (env['WICKED_SEAT_FLOOR'] ?? '').trim().toLowerCase() === 'container';
 }
 
+/** Whether the interim HOST floor is chosen — the engine's own rule (`host_floor_chosen`,
+ *  wicked-core#976): `WICKED_SEAT_FLOOR` set to anything but `container`, a typo included. Unset is
+ *  neither floor (a daemon always sets one, {@link defaultSeatFloor}). */
+export function isHostSeatFloor(env: NodeJS.ProcessEnv = process.env): boolean {
+  const v = (env['WICKED_SEAT_FLOOR'] ?? '').trim();
+  return v !== '' && v.toLowerCase() !== 'container';
+}
+
 /** The default seat floor of a crew daemon (C5): governed seats run in containers. Sets
  *  `WICKED_SEAT_FLOOR=container` in `env` unless the operator chose a floor — the engine (in this
  *  process) and crew's sign-in routes and roster then read the same value. `WICKED_SEAT_FLOOR=host`

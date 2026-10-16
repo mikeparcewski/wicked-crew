@@ -35,6 +35,7 @@ export const CREW_ONLY_SEAT_FIELDS: ReadonlySet<string> = new Set([
   // wicked-core#976: the engine's own host-floor bench, read back for the studio — the engine
   // recomputes it at launch.
   'host_floor_bench',
+  'host_floor_unknown',
   // IG1-crew-1: the governance mode crew reads per seat (seat-governance.ts) — a crew reading,
   // never stamped into the engine's roster.
   'governance_mode',
