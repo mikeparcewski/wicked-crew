@@ -2118,6 +2118,12 @@ export function registerRoutes(
       });
     };
     if (!worktreeLive) return fromBranchOr409();
+    // crew#1057: the delivered-worktree sweep (`git worktree remove`) deletes the worktree's files,
+    // its `.git` link among them, BEFORE the directory itself. A git read that runs in that window fails
+    // with no named error ("no merge base between origin/main and HEAD"). A worktree whose `.git`
+    // link was there when this request began and is gone now is being swept, the same as a gone one.
+    const hadGitLink = existsSync(join(workdir, '.git'));
+    const worktreeGoneNow = () => !existsSync(workdir) || (hadGitLink && !existsSync(join(workdir, '.git')));
     // Narrowing is WORKTREE-scoped: a contained-but-outside-the-worktree path (extra write
     // root / repo root) is a valid FILE read but has no meaning as a diff pathspec — rejected
     // explicitly here rather than handing git a `../`-prefixed pathspec and surfacing its
@@ -2150,8 +2156,11 @@ export function registerRoutes(
       // reap). Whatever git said — a spawn into the vanished cwd fails ENOENT (the 0.9.1 release
       // smoke), a git already running exits 128 "Unable to read current working directory" (the
       // 0.9.3 one) — a diff that failed over a worktree that is gone now serves the run branch, as
-      // for a worktree that was already gone. A named base error stays the caller's 400 (codex r1).
-      if (!(err instanceof UnresolvableDiffBaseError) && !existsSync(workdir)) return fromBranchOr409();
+      // for a worktree that was already gone. A ref the CALLER named that does not resolve stays the
+      // caller's 400 (codex r1). The `merge-base` literal names no ref: when the worktree is being
+      // swept, its failure is the sweep's, not the caller's (crew#1057).
+      const callersRef = err instanceof UnresolvableDiffBaseError && err.base !== MERGE_BASE_LITERAL;
+      if (!callersRef && worktreeGoneNow()) return fromBranchOr409();
       return diffError(err);
     }
   });
