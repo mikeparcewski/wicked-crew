@@ -154,9 +154,10 @@ state home, not your home directory (an explicit `WICKED_APPS_EMIT_DEADLETTER` i
 `governance.deadletter` finding, and `wicked-crew governance replay <outbox>` puts them back.
 
 The interactive document bridge (Vibe / Demo documents) is spawned on demand as
-`npx wicked-interactive@^0.12.0` (0.12.0 confines export asset reads to the document's own and approved
+`npx wicked-interactive@^0.14.1` (0.14.1 has the demo import crew's demo runs use and the theme-source upload
+studio's Learn from a brand uses; 0.12.0 confined export asset reads to the document's own and approved
 roots; earlier floors added the recorder browser preflight and the typed `RecorderError` frames crew relays); `WICKED_INTERACTIVE_SPEC` overrides the
-**range** for an operator or a test rig (a semver range only — `^0.12.0`, `0.12.0`, `>=0.12.0 <1.0.0`; tags, paths and `pkg@range`
+**range** for an operator or a test rig (a semver range only — `^0.14.1`, `0.14.1`, `>=0.14.1 <1.0.0`; tags, paths and `pkg@range`
 spellings are refused and the default is used), reported on the boot line, with a warning when the
 override's floor is below the release crew needs.
 

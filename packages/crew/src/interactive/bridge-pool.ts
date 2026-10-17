@@ -165,7 +165,13 @@ const INTERACTIVE_PACKAGE = 'wicked-interactive';
  * can no longer inline a host file into an export. Below it a bridge reads whatever path a document
  * names: the floor follows the security fix.
  */
-export const INTERACTIVE_DEFAULT_RANGE = '^0.12.0';
+/**
+ * 0.14.1: a demo run's import (`PUT /d/:doc/api/demo/import/:chapter` + `POST …/demo/import`, which
+ * `api/recording.ts` calls) shipped in 0.13.0, and studio's "Learn from a brand" upload
+ * (`PUT /d/:doc/api/theme/source`) in 0.14.0, which was tagged but never published; 0.14.1 is the first
+ * build with both. A caret on 0.x pins the minor, so `^0.12.0` spawned 0.12.x, which has neither route.
+ */
+export const INTERACTIVE_DEFAULT_RANGE = '^0.14.1';
 /** The env override of the RANGE (not the package). */
 export const INTERACTIVE_SPEC_ENV = 'WICKED_INTERACTIVE_SPEC';
 /** The default spec — what the daemon spawns with no override. */

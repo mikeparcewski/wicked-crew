@@ -11,6 +11,7 @@ mentioned only where a daemon release depends on them.
 ## [Unreleased]
 
 ### Changed
+- **The interactive bridge floor is `^0.14.1` (was `^0.12.0`).** A caret on 0.x pins the minor, so crew spawned 0.12.x, which has neither the demo import a demo run already calls (`PUT /d/:doc/api/demo/import/:chapter`, wicked-interactive 0.13.0) nor the theme-source upload behind wicked-studio 0.10.0's "Learn from a brand" (`PUT /d/:doc/api/theme/source`, 0.14.x). 0.14.1 is the first published build with both. A `WICKED_INTERACTIVE_SPEC` override below it is still honoured and flagged on the boot line.
 - **Site, README and the npm description say what ships today, in plain words.** The site and README no longer say delivery does not wait on QE acceptance (it does for `feature`, `bug`, `migration` and `mcp-server` since 0.9.0), or that a one-agent roster keeps review on the builder (the run waits unless launched with reduced assurance). The site states the container-runtime prerequisite and the Agents-tab sign-in in *Get it*, says which agents have a sandbox image (Claude Code, Codex, Copilot, OpenCode, Pi), drops the "every unit is auctioned" council section (councils settle concrete disputes only), and retires "the wicked loop" and the remaining ACP-era text. The `wicked-crew` package description takes effect on the next publish.
 
 ### Fixed
