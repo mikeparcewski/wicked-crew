@@ -496,8 +496,9 @@ describe('wave 6 end to end — the governed test-authoring journey', () => {
 
     // (4) The run page keeps its files view after completion (F-7R2-013): worktree or branch, the
     //     diff answers 200 and names the produced files.
+    //     crew#1057: this read can race the delivered-worktree sweep; a failure says what the route answered.
     const diff = await getJson(`/api/v1/runs/${runId}/diff?base=merge-base`);
-    expect(diff.status).toBe(200);
+    expect(diff.status, JSON.stringify(diff.body)).toBe(200);
     expect(['worktree', 'branch']).toContain(diff.body['source']);
     expect(String(diff.body['diff'])).toContain('launch.spec.mjs');
   }, 540_000);
