@@ -38,6 +38,7 @@ import type {
   MemoryCoverageResponse,
   MemoryItem,
   PolicyLandingResult,
+  PolicyReach,
   RejectProposalResponse,
   RetireMemoryResponse,
   QeAcceptanceCheck,
@@ -241,7 +242,7 @@ import { LOCAL_ACTOR, type AuthMode, trustAtLeast } from './auth.js';
 // value lives in the leaf module api-prefix.ts to keep unit-output.ts out of this file's cycle.
 export { API_PREFIX } from './api-prefix.js';
 import { API_PREFIX } from './api-prefix.js';
-import { landPolicyRule, policyProposalToRule } from './policy-landing.js';
+import { landPolicyRule, policyProposalToRule, withdrawLandedRule } from './policy-landing.js';
 import { DecisionLedger } from '../decisions/ledger.js';
 import { DecisionError, DecisionService } from '../decisions/land.js';
 import { ingestDecision } from '../decisions/ingest.js';
@@ -405,6 +406,15 @@ function withinDateRange(
   if (until !== undefined && createdAt > until) return false;
   return true;
 }
+
+/** One `proposal.list` row as the approve route reads it (the wire is untyped JSON from estate). */
+type ProposalRow = {
+  id: string;
+  kind_type?: unknown;
+  payload?: unknown;
+  facets?: unknown;
+  provenance?: Record<string, unknown>;
+};
 
 /** A JSON object whose every value is a string (a facet/intent tuple, axis→value). */
 function isStringRecord(v: unknown): v is Record<string, string> {
@@ -6559,15 +6569,13 @@ export function registerRoutes(
   //   { outcome:'handed_off', payload, landing }     — a POLICY proposal, LANDED here as a steering rule.
   //
   // The policy→steering landing (DES-MEM-FACETED-001 §5.2): estate performs NO rules-write (the
-  // AW-11 invariant) — it marks the proposal approved and hands its `{ rule, severity }` payload
-  // back, and CREW is the one governed rules-write path. On a `handed_off` outcome we recover the
-  // proposal's `kind_type` (which carries the `policy:<steering_type>` the approve response does
-  // NOT echo), shape a `ConformanceRule` from it, and upsert it via the single-writer actor. The
-  // posture mirrors the steering-author landing (crew#388): the estate decision (approve) already
-  // stands, so a landing failure is reported LOUD in-band as `landing.outcome:"failed"` — never a
-  // 500, never the silent no-op that crew#388 exists to end — and `payload` is still returned for
-  // backward compatibility. The MEMORY path is UNTOUCHED: a `promoted` outcome returns immediately
-  // with no extra estate call and no landing.
+  // AW-11 invariant) — CREW is the one governed rules-write path. The route reads the pending row
+  // (its `kind_type` carries the `policy:<steering_type>`), shapes a `ConformanceRule` from it,
+  // upserts it via the single-writer actor, and only THEN asks estate to mark the proposal
+  // approved. A landing failure is reported LOUD in-band as `landing.outcome:"failed"` (never a
+  // 500, never the silent no-op crew#388 exists to end) and leaves the proposal PENDING, so it can
+  // be approved again; an approve estate refuses after the rule landed retires the rule. A MEMORY
+  // proposal is passed straight to estate's approve.
   app.post(
     `${V}/proposals/:id/approve`,
     {
@@ -6594,9 +6602,37 @@ export function registerRoutes(
     if (!edit.success) {
       return reply.code(400).send(invalidBody(edit.error, 'Invalid approve body'));
     }
-    if (edit.data.content !== undefined || edit.data.reach !== undefined) {
+    // A POLICY proposal accepted with a `reach` (no content) is not a copy: crew lands the rule
+    // itself, so the person's reach rides into the landing below (the policy landing reads it).
+    let policyReach: PolicyReach | undefined;
+    // The pending read the accept-with-edit makes anyway, done once and shared with it.
+    let editTool = estateTool;
+    if (edit.data.content === undefined && edit.data.reach !== undefined) {
+      let listed: ListProposalsResponse;
       try {
-        const done = await approveEdited(estateTool, id, edit.data, (runId) => projects.index.projectOf(runId));
+        listed = (await estateTool('proposal.list', { state: 'pending' })) as ListProposalsResponse;
+      } catch (err) {
+        return estateUpstreamError(reply, err);
+      }
+      let reused = false;
+      editTool = async (tool, args) => {
+        if (!reused && tool === 'proposal.list' && args['state'] === 'pending') {
+          reused = true;
+          return listed;
+        }
+        return estateTool(tool, args);
+      };
+      const kind = listed.proposals.find((p) => p.id === id)?.kind_type;
+      if (typeof kind === 'string' && kind.startsWith('policy:')) {
+        if (edit.data.reach === 'pattern') {
+          return reply.code(400).send({ error: 'a rule\'s reach is "project" (its project) or "operator" (every project)' });
+        }
+        policyReach = edit.data.reach;
+      }
+    }
+    if (policyReach === undefined && (edit.data.content !== undefined || edit.data.reach !== undefined)) {
+      try {
+        const done = await approveEdited(editTool, id, edit.data, (runId) => projects.index.projectOf(runId));
         return reply.code(done.status).send(done.body);
       } catch (err) {
         return estateUpstreamError(reply, err);
@@ -6604,6 +6640,17 @@ export function registerRoutes(
     }
     if (editInFlight(id)) {
       return reply.code(409).send({ error: `proposal ${id} is already being accepted` });
+    }
+    // Read the pending row FIRST: a POLICY proposal is landed before estate marks it approved, so
+    // a landing that fails leaves it pending and re-approvable (one decision from the operator's
+    // view: approved WITH its rule, or still pending). The row also carries the `kind_type`
+    // (`policy:<steering_type>`), facets and provenance the approve response does not echo.
+    let row: ProposalRow | undefined;
+    try {
+      const pending = (await estateTool('proposal.list', { state: 'pending' })) as ListProposalsResponse;
+      row = pending.proposals.find((p) => p.id === id) as ProposalRow | undefined;
+    } catch (err) {
+      return estateUpstreamError(reply, err);
     }
     // DC-S4a: a proposal THIS ledger filed for a decision lands through `remember()` — the one
     // landing path, with the human check inside it (§4.5). A payload naming an id the ledger does
@@ -6613,22 +6660,21 @@ export function registerRoutes(
       // The ledger links a proposal to its decision only once the `offered` outcome is written; a
       // proposal crew filed but has not linked yet (the publish window, or a crash in it) names a
       // decision this ledger HOLDS — it must still land through `remember()` (codex on DC-S4a).
-      try {
-        const pending = (await estateTool('proposal.list', { state: 'pending' })) as ListProposalsResponse;
-        const named = (pending.proposals.find((p) => p.id === id)?.payload as { decision?: { id?: unknown } } | undefined)?.decision?.id;
-        if (typeof named === 'string' && decisions.deps.ledger.record(named) !== null) decisionId = named;
-      } catch (err) {
-        return estateUpstreamError(reply, err);
-      }
+      const named = (row?.payload as { decision?: { id?: unknown } } | undefined)?.decision?.id;
+      if (typeof named === 'string' && decisions.deps.ledger.record(named) !== null) decisionId = named;
     }
     if (decisions !== null && decisionId !== null) {
       try {
-        const landed = await decisions.remember(decisionId, actorOf(req), { how: 'needs-you' });
+        const landed = await decisions.remember(decisionId, actorOf(req), {
+          how: 'needs-you',
+          ...(policyReach !== undefined ? { edits: { scope: policyReach === 'operator' ? 'everywhere' : 'project' } } : {}),
+        });
         const view = decisions.deps.ledger.view(decisionId);
         const landing: PolicyLandingResult = {
           outcome: 'landed',
           ruleId: landed.rule_id,
           ...(view !== null ? { steering_type: view.edits?.steering_type ?? view.derived.steering_type } : {}),
+          reach: landed.project !== undefined ? 'project' : 'operator',
           ...(landed.project !== undefined ? { project: landed.project } : {}),
         };
         return {
@@ -6641,58 +6687,57 @@ export function registerRoutes(
         throw err;
       }
     }
-    let approved: ApproveProposalResponse;
-    try {
-      approved = (await estateTool('proposal.approve', { id })) as ApproveProposalResponse;
-    } catch (err) {
-      return estateUpstreamError(reply, err);
-    }
-    // MEMORY proposal (or any future non-policy outcome): estate already promoted it — pass through
-    // verbatim, exactly as before. No extra estate round-trip on the memory path.
-    if (approved.outcome !== 'handed_off') {
+    // Not a pending POLICY proposal (a memory, a knowledge row, or an id that is not pending, which
+    // estate refuses in its own words): estate decides it — pass through verbatim.
+    if (row === undefined || typeof row.kind_type !== 'string' || !row.kind_type.startsWith('policy:')) {
+      let approved: ApproveProposalResponse;
+      try {
+        approved = (await estateTool('proposal.approve', { id })) as ApproveProposalResponse;
+      } catch (err) {
+        return estateUpstreamError(reply, err);
+      }
+      if (approved.outcome === 'handed_off') {
+        // Estate handed off a policy this route did not see pending (a row filed between the list
+        // and the approve): it is approved with no rule. Say so; never a silent drop.
+        const error =
+          `estate approved policy proposal ${id} before crew could land its rule; land it by hand via ` +
+          `POST ${V}/governance/rules`;
+        audit.record('governance.steering.landing_failed', actorOf(req), { detail: { proposalId: id, error } });
+        return { outcome: 'handed_off', payload: approved.payload, landing: { outcome: 'failed', error } };
+      }
       return approved;
     }
-    // POLICY proposal — land the handed-off payload as a steering rule.
+    // POLICY proposal — land the rule, THEN approve it in estate.
+    const policyRow = { ...row, kind_type: row.kind_type };
     const landFailed = (error: string): ApproveProposalResponse => {
       audit.record('governance.steering.landing_failed', actorOf(req), {
         detail: { proposalId: id, error },
       });
-      return { outcome: 'handed_off', payload: approved.payload, landing: { outcome: 'failed', error } };
+      // Nothing was approved: the proposal is still pending, so the operator can approve it again.
+      return {
+        outcome: 'handed_off',
+        payload: policyRow.payload,
+        landing: { outcome: 'failed', error: `${error} (the proposal is still pending)` },
+      };
     };
     // A pre-steering engine would SILENTLY DROP `steering_type` and the other steering fields
     // (ConformanceRule has no deny_unknown_fields), persisting a rule that enforces differently than
-    // authored — the same guard POST /governance/rules applies. Fail loud (before any further estate
-    // round-trip), persist nothing.
+    // authored — the same guard POST /governance/rules applies. Fail loud, persist nothing.
     if (!adapter.steeringSupported()) {
       return landFailed(
         `${new SteeringUnsupportedError('Landing an approved policy proposal').message} — the ` +
           `installed engine would silently drop the rule's steering fields; upgrade wicked-core-ts (>= 0.7.5)`,
       );
     }
-    // Recover the proposal's `kind_type` + `facets`: `proposal.approve` does not echo them, and the
-    // steering type lives ONLY in `kind_type` (`policy:<type>`). The proposal is `approved` now, so
-    // read it back from the approved queue.
-    let proposal: { kind_type?: unknown; facets?: unknown } | undefined;
-    try {
-      const listed = (await estateTool('proposal.list', { state: 'approved' })) as ListProposalsResponse;
-      proposal = listed.proposals.find((p) => p.id === id);
-    } catch (err) {
-      return landFailed(
-        `the policy proposal was approved but its record could not be re-read to land a steering ` +
-          `rule (${message(err)}); land it by hand via POST ${V}/governance/rules`,
-      );
-    }
-    if (proposal === undefined || typeof proposal.kind_type !== 'string') {
-      return landFailed(
-        `the policy proposal was approved but could not be found in the approved queue to recover ` +
-          `its steering type; land it by hand via POST ${V}/governance/rules`,
-      );
-    }
+    // A proposal with no `project` facet keeps the project of the run that filed it.
+    const runId = policyRow.provenance?.['run_id'];
+    const runProject = typeof runId === 'string' && runId !== '' ? projects.index.projectOf(runId) : undefined;
     const built = policyProposalToRule(
       id,
-      proposal.kind_type,
-      approved.payload,
-      isStringRecord(proposal.facets) ? proposal.facets : undefined,
+      policyRow.kind_type,
+      policyRow.payload,
+      isStringRecord(policyRow.facets) ? policyRow.facets : undefined,
+      { ...(runProject !== undefined ? { runProject } : {}), ...(policyReach !== undefined ? { reach: policyReach } : {}) },
     );
     if ('error' in built) {
       return landFailed(built.error);
@@ -6703,7 +6748,21 @@ export function registerRoutes(
       proposalId: id,
     });
     if (landing.outcome === 'failed') return landFailed(landing.error ?? 'the landing failed');
-    return { outcome: 'handed_off', payload: approved.payload, landing };
+    // The rule is in the store: now mark the proposal approved. An approve estate does not confirm
+    // is an upstream error and nothing is undone — estate may have committed it, and a concurrent
+    // approve may share the rule. The proposal is then pending with its rule live (the same state a
+    // crash here leaves): approving again re-lands the same rule id and finishes; rejecting it
+    // retires the rule (see the reject route).
+    let approved: ApproveProposalResponse;
+    try {
+      approved = (await estateTool('proposal.approve', { id })) as ApproveProposalResponse;
+    } catch (err) {
+      audit.record('governance.steering.landing_failed', actorOf(req), {
+        detail: { proposalId: id, ruleId: built.rule.id, error: `rule landed; estate did not confirm the approval: ${message(err)}` },
+      });
+      return estateUpstreamError(reply, err);
+    }
+    return { outcome: 'handed_off', payload: approved.outcome === 'handed_off' ? approved.payload : policyRow.payload, landing };
   });
 
   // POST /proposals/:id/reject → proposal.reject → { ok: true }.
@@ -6730,11 +6789,17 @@ export function registerRoutes(
         throw err;
       }
     }
+    let rejected: RejectProposalResponse;
     try {
-      return (await estateTool('proposal.reject', { id })) as RejectProposalResponse;
+      rejected = (await estateTool('proposal.reject', { id })) as RejectProposalResponse;
     } catch (err) {
       return estateUpstreamError(reply, err);
     }
+    // A policy proposal's rule lands before its approval, so a still-pending proposal may already
+    // have a live rule (a crash or an unconfirmed approve in between): rejecting it withdraws it.
+    const withdrawn = await withdrawLandedRule(adapter, id.trim());
+    if (withdrawn !== null) return reply.code(502).send({ error: withdrawn });
+    return rejected;
   });
 
   // ── Memory management (governed-knowledge surface, DES-MEM-FACETED-001) ───────

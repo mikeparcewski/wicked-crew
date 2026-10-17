@@ -56,14 +56,19 @@ export async function ingestDecision(service: DecisionService, input: HostWords)
   const where = input.runId !== undefined ? `run ${input.runId}` : `chat ${input.chatId ?? '?'}`;
   try {
     const now = service.deps.now?.() ?? Date.now();
-    const inForce = words === '' ? [] : await service.inForce(input.projectId);
+    const [inForce, elsewhere, projectNames] =
+      words === ''
+        ? [[], [], []]
+        : await Promise.all([service.inForce(input.projectId), service.elsewhere(input.projectId), service.projectNames(input.projectId)]);
     const d = deriveDecision({
       words,
       actorKind: 'human',
       authMode,
       wordsSource: 'typed',
       projectId: input.projectId,
+      projectNames,
       inForce,
+      elsewhere,
       recurrence: (key) => ledger.recurrence(key),
       ...(input.labels !== undefined ? { labels: input.labels } : {}),
       now,

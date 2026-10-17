@@ -157,7 +157,7 @@ describe('deterministic:added_by_hand / what_catches as checks', () => {
     expect(o.facts).toEqual({
       proposal: {
         kind_type: 'policy:testing',
-        payload: { rule: 'A feature run includes the `walkthrough_review` step.', severity: 'warn', evidence: { count: 5, window: '5 consecutive runs', run_ids: ['r1', 'r2', 'r3', 'r4', 'r5'], kinds: ['feature'] } },
+        payload: { rule: 'A feature run includes the `walkthrough_review` step.', severity: 'warn', evidence: { count: 5, window: '5 consecutive runs', run_ids: ['r1', 'r2', 'r3', 'r4', 'r5'], kinds: ['feature'] }, reach: 'project' },
         facets: { project: 'proj-1' },
       },
       query: 'added_by_hand',

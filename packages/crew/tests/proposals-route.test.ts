@@ -17,6 +17,7 @@ import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { EstateMcpError } from '../src/core/estate-mcp-client.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
+import { MembershipIndex } from '../src/projects/membership-index.js';
 
 type MockAdapter = {
   sessionsDetail: Mock;
@@ -123,37 +124,54 @@ describe('proposal queue routes (DES-MEM-FACETED-001 §5.0)', () => {
 
   // ── POST /proposals/:id/approve ───────────────────────────────────────────────
 
-  it('approves a memory proposal → promoted, forwarding the id (memory path untouched: no list, no rule write)', async () => {
-    proposalTool.mockResolvedValueOnce({ outcome: 'promoted', active_id: 'm-42' });
+  // The estate stub routes by tool: `proposal.list` answers the pending (or approved) rows,
+  // `proposal.approve` answers `approve` (or throws it), `proposal.reject` answers ok.
+  type Row = { id: string; kind_type: string; payload: unknown; facets: Record<string, string>; provenance: Record<string, string> };
+  const stubEstate = (o: { pending?: Row[]; approved?: Row[]; approve?: unknown }): void => {
+    proposalTool.mockImplementation(async (tool: string, args: Record<string, unknown>) => {
+      if (tool === 'proposal.list') {
+        const rows = args['state'] === 'approved' ? (o.approved ?? []) : (o.pending ?? []);
+        return { proposals: rows.map((r) => ({ ...r, state: args['state'] ?? 'pending', created_at: 1 })) };
+      }
+      if (tool === 'proposal.approve') {
+        if (o.approve instanceof Error) throw o.approve;
+        return o.approve ?? { outcome: 'handed_off', payload: (o.pending ?? []).find((r) => r.id === args['id'])?.payload };
+      }
+      return { ok: true };
+    });
+  };
+  const policy = (id: string, kind_type: string, payload: unknown, facets: Record<string, string> = {}, provenance: Record<string, string> = {}): Row => ({
+    id,
+    kind_type,
+    payload,
+    facets,
+    provenance,
+  });
+  const tools = (): string[] => proposalTool.mock.calls.map((c) => c[0] as string);
+
+  it('approves a memory proposal → promoted, forwarding the id (no rule write)', async () => {
+    stubEstate({
+      pending: [{ id: 'p1', kind_type: 'memory', payload: { content: 'x' }, facets: {}, provenance: {} }],
+      approve: { outcome: 'promoted', active_id: 'm-42' },
+    });
 
     const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/p1/approve' });
 
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ outcome: 'promoted', active_id: 'm-42' });
-    // Only proposal.approve is called — no follow-up proposal.list, and no rule write.
-    expect(proposalTool).toHaveBeenCalledTimes(1);
     expect(proposalTool).toHaveBeenCalledWith('proposal.approve', { id: 'p1' });
+    expect(tools()).toEqual(['proposal.list', 'proposal.approve']);
     expect(adapter.upsertConformanceRule).not.toHaveBeenCalled();
   });
 
   // ── The policy→steering landing (DES-MEM-FACETED-001 §5.2) ────────────────────
 
-  it('lands an approved policy proposal as a steering rule (kind_type policy:<type> → steering_type, {rule,severity} → rule)', async () => {
-    proposalTool
-      .mockResolvedValueOnce({ outcome: 'handed_off', payload: { rule: 'no secrets in logs', severity: 'error' } })
-      .mockResolvedValueOnce({
-        proposals: [
-          {
-            id: 'pol1',
-            kind_type: 'policy:security',
-            payload: { rule: 'no secrets in logs', severity: 'error' },
-            facets: { language: 'rust', repo: 'wicked-crew' },
-            provenance: { run_id: 'r-9' },
-            state: 'approved',
-            created_at: 1,
-          },
-        ],
-      });
+  it('lands a policy proposal as a steering rule BEFORE estate approves it (kind_type policy:<type> → steering_type)', async () => {
+    stubEstate({ pending: [policy('pol1', 'policy:security', { rule: 'no secrets in logs', severity: 'error' }, { language: 'rust', project: 'proj-a' }, { run_id: 'r-9' })] });
+    adapter.upsertConformanceRule.mockImplementation(async () => {
+      // The rule is written while the proposal is still pending: estate has not been asked yet.
+      expect(tools()).not.toContain('proposal.approve');
+    });
 
     const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/pol1/approve' });
 
@@ -161,13 +179,9 @@ describe('proposal queue routes (DES-MEM-FACETED-001 §5.0)', () => {
     expect(res.json()).toEqual({
       outcome: 'handed_off',
       payload: { rule: 'no secrets in logs', severity: 'error' },
-      landing: { outcome: 'landed', ruleId: 'proposal:pol1', steering_type: 'security' },
+      landing: { outcome: 'landed', ruleId: 'proposal:pol1', steering_type: 'security', reach: 'project', project: 'proj-a' },
     });
-    // approve, then a state=approved list to recover the kind_type the approve response omits.
-    expect(proposalTool).toHaveBeenNthCalledWith(1, 'proposal.approve', { id: 'pol1' });
-    expect(proposalTool).toHaveBeenNthCalledWith(2, 'proposal.list', { state: 'approved' });
-    // The rule crew upserts: deterministic id, policy rule_type, statement/severity from the payload,
-    // steering_type from kind_type, only the `language` facet mapped onto Targets, provenance source `proposal`.
+    expect(tools()).toEqual(['proposal.list', 'proposal.approve']);
     expect(adapter.upsertConformanceRule).toHaveBeenCalledTimes(1);
     expect(adapter.upsertConformanceRule).toHaveBeenCalledWith({
       id: 'proposal:pol1',
@@ -175,32 +189,102 @@ describe('proposal queue routes (DES-MEM-FACETED-001 §5.0)', () => {
       statement: 'no secrets in logs',
       severity: 'error',
       confidence: 0.8,
-      targets: { language: 'rust' },
+      targets: { language: 'rust', project: 'proj-a' },
       provenance: { source: 'proposal', ref: 'proposal:pol1', source_kinds: [] },
       steering_type: 'security',
     });
   });
 
-  // ── DC-S3: a policy landing keeps its project and its proposal ref ─────────
+  // ── Scope: a repo- or project-scoped proposal never lands as a rule for every project ──
 
-  const projectProposal = (id: string) => ({
-    proposals: [
-      {
-        id,
-        kind_type: 'policy:development',
-        payload: { rule: 'always run the linter before commit', severity: 'warn' },
-        facets: { project: 'proj-a', language: 'ts' },
-        provenance: {},
-        state: 'approved',
-        created_at: 1,
-      },
-    ],
+  it('a repo-faceted proposal with no project facet lands scoped to the project of the run that filed it', async () => {
+    await app.close();
+    const index = new MembershipIndex();
+    index.set('r-9', 'proj-tc');
+    app = Fastify({ logger: false });
+    registerRoutes(app, adapter as unknown as CoreAdapter, new GateCache(), new ElicitationCache(), { bus: null, index, log: () => undefined }, undefined, {
+      callEstateTool: proposalTool as (t: string, a: Record<string, unknown>) => Promise<unknown>,
+    });
+    await app.ready();
+    stubEstate({ pending: [policy('pr1', 'policy:testing', { rule: 'subtract(a,b) must return a - b', severity: 'warn' }, { repo: 'tiny-calc' }, { run_id: 'r-9' })] });
+
+    const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/pr1/approve' });
+
+    expect((res.json() as { landing: unknown }).landing).toEqual({
+      outcome: 'landed',
+      ruleId: 'proposal:pr1',
+      steering_type: 'testing',
+      reach: 'project',
+      project: 'proj-tc',
+    });
+    expect(adapter.upsertConformanceRule).toHaveBeenCalledWith(expect.objectContaining({ targets: { project: 'proj-tc' } }));
   });
 
+  it('a repo-faceted proposal that resolves to no project is refused, writes nothing and stays pending — never a global rule', async () => {
+    stubEstate({ pending: [policy('pr2', 'policy:testing', { rule: 'subtract(a,b) must return a - b', severity: 'warn' }, { repo: 'tiny-calc' }, { run_id: 'r-orphan' })] });
+
+    const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/pr2/approve' });
+
+    expect(res.statusCode).toBe(200);
+    const landing = (res.json() as { landing: { outcome: string; error: string } }).landing;
+    expect(landing.outcome).toBe('failed');
+    expect(landing.error).toMatch(/repo `tiny-calc`/);
+    expect(landing.error).toMatch(/no project/);
+    expect(landing.error).toMatch(/still pending/);
+    expect(adapter.upsertConformanceRule).not.toHaveBeenCalled();
+    expect(tools()).not.toContain('proposal.approve');
+  });
+
+  // ── Reach: every policy proposal lands with exactly the reach it says ──────────
+
+  it('reach "operator" lands a rule for every project even when the row carries project/repo facets', async () => {
+    stubEstate({ pending: [policy('ro1', 'policy:development', { rule: 'always pin the gh account', severity: 'warn', reach: 'operator' }, { project: 'proj-a', repo: 'r' })] });
+
+    const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/ro1/approve' });
+
+    expect((res.json() as { landing: unknown }).landing).toEqual({ outcome: 'landed', ruleId: 'proposal:ro1', steering_type: 'development', reach: 'operator' });
+    expect(adapter.upsertConformanceRule).toHaveBeenCalledWith(expect.objectContaining({ targets: {} }));
+  });
+
+  it('reach "project" with no project to name is refused, never landed everywhere', async () => {
+    stubEstate({ pending: [policy('rp1', 'policy:development', { rule: 'x', reach: 'project' })] });
+
+    const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/rp1/approve' });
+
+    const landing = (res.json() as { landing: { outcome: string; error: string } }).landing;
+    expect(landing.outcome).toBe('failed');
+    expect(landing.error).toMatch(/reach "operator"/);
+    expect(adapter.upsertConformanceRule).not.toHaveBeenCalled();
+  });
+
+  it('an invalid reach fails loud', async () => {
+    stubEstate({ pending: [policy('rx1', 'policy:development', { rule: 'x', reach: 'galaxy' }, { project: 'p' })] });
+    const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/rx1/approve' });
+    expect((res.json() as { landing: { error: string } }).landing.error).toMatch(/invalid reach/);
+    expect(adapter.upsertConformanceRule).not.toHaveBeenCalled();
+  });
+
+  it('the person may change a rule\'s reach at accept: {reach:"operator"} widens, {reach:"project"} keeps the project', async () => {
+    stubEstate({ pending: [policy('ra1', 'policy:testing', { rule: 'x', reach: 'project' }, { project: 'proj-a' })] });
+    const wide = await app.inject({ method: 'POST', url: '/api/v1/proposals/ra1/approve', payload: { reach: 'operator' } });
+    expect((wide.json() as { landing: { reach: string; project?: string } }).landing).toMatchObject({ outcome: 'landed', reach: 'operator' });
+    expect(adapter.upsertConformanceRule).toHaveBeenLastCalledWith(expect.objectContaining({ targets: {} }));
+
+    stubEstate({ pending: [policy('ra2', 'policy:testing', { rule: 'x', reach: 'operator' }, { project: 'proj-a' })] });
+    const narrow = await app.inject({ method: 'POST', url: '/api/v1/proposals/ra2/approve', payload: { reach: 'project' } });
+    expect((narrow.json() as { landing: unknown }).landing).toMatchObject({ outcome: 'landed', reach: 'project', project: 'proj-a' });
+
+    const bad = await app.inject({ method: 'POST', url: '/api/v1/proposals/ra2/approve', payload: { reach: 'pattern' } });
+    expect(bad.statusCode).toBe(400);
+  });
+
+  // ── DC-S3: a policy landing keeps its project and its proposal ref ─────────
+
+  const projectProposal = (id: string): Row =>
+    policy(id, 'policy:development', { rule: 'always run the linter before commit', severity: 'warn' }, { project: 'proj-a', language: 'ts' });
+
   it('a project-faceted proposal lands with targets.project and ref proposal:<id>, read back intact (DC-S3)', async () => {
-    proposalTool
-      .mockResolvedValueOnce({ outcome: 'handed_off', payload: { rule: 'always run the linter before commit', severity: 'warn' } })
-      .mockResolvedValueOnce(projectProposal('pp1'));
+    stubEstate({ pending: [projectProposal('pp1')] });
 
     const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/pp1/approve' });
 
@@ -217,16 +301,15 @@ describe('proposal queue routes (DES-MEM-FACETED-001 §5.0)', () => {
       outcome: 'landed',
       ruleId: 'proposal:pp1',
       steering_type: 'development',
+      reach: 'project',
       project: 'proj-a',
     });
     expect(adapter.retireConformanceRule).not.toHaveBeenCalled();
   });
 
-  it('an engine without project rules fails a project landing loud and writes nothing — never global (DC-S3)', async () => {
+  it('an engine without project rules fails a project landing loud, writes nothing and approves nothing (DC-S3)', async () => {
     adapter.projectRulesSupported.mockReturnValue(false);
-    proposalTool
-      .mockResolvedValueOnce({ outcome: 'handed_off', payload: { rule: 'always run the linter before commit', severity: 'warn' } })
-      .mockResolvedValueOnce(projectProposal('pp2'));
+    stubEstate({ pending: [projectProposal('pp2')] });
 
     const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/pp2/approve' });
 
@@ -235,15 +318,12 @@ describe('proposal queue routes (DES-MEM-FACETED-001 §5.0)', () => {
     expect(landing.outcome).toBe('failed');
     expect(landing.error).toMatch(/project `proj-a`/);
     expect(adapter.upsertConformanceRule).not.toHaveBeenCalled();
+    expect(tools()).not.toContain('proposal.approve');
   });
 
-  it('an engine without project rules still lands a proposal that names no project (global, as before)', async () => {
+  it('an engine without project rules still lands a proposal that names no project or repo (global, as before)', async () => {
     adapter.projectRulesSupported.mockReturnValue(false);
-    proposalTool
-      .mockResolvedValueOnce({ outcome: 'handed_off', payload: { rule: 'prefer composition' } })
-      .mockResolvedValueOnce({
-        proposals: [{ id: 'pp3', kind_type: 'policy:architecture', payload: { rule: 'prefer composition' }, facets: {}, provenance: {}, state: 'approved', created_at: 3 }],
-      });
+    stubEstate({ pending: [policy('pp3', 'policy:architecture', { rule: 'prefer composition' })] });
 
     const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/pp3/approve' });
 
@@ -262,9 +342,7 @@ describe('proposal queue routes (DES-MEM-FACETED-001 §5.0)', () => {
       provenance: { source: 'proposal', ref: id, source_kinds: [] },
       steering_type: 'development',
     }));
-    proposalTool
-      .mockResolvedValueOnce({ outcome: 'handed_off', payload: { rule: 'always run the linter before commit', severity: 'warn' } })
-      .mockResolvedValueOnce(projectProposal('pp4'));
+    stubEstate({ pending: [projectProposal('pp4')] });
 
     const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/pp4/approve' });
 
@@ -273,16 +351,11 @@ describe('proposal queue routes (DES-MEM-FACETED-001 §5.0)', () => {
     expect(landing.error).toMatch(/targets\.project/);
     expect(landing.error).toMatch(/retired/);
     expect(adapter.retireConformanceRule).toHaveBeenCalledWith('proposal:pp4');
+    expect(tools()).not.toContain('proposal.approve');
   });
 
   it('defaults a missing severity to warn and empty targets when the proposal has no language facet', async () => {
-    proposalTool
-      .mockResolvedValueOnce({ outcome: 'handed_off', payload: { rule: 'prefer composition' } })
-      .mockResolvedValueOnce({
-        proposals: [
-          { id: 'pol2', kind_type: 'policy:architecture', payload: { rule: 'prefer composition' }, facets: {}, provenance: {}, state: 'approved', created_at: 2 },
-        ],
-      });
+    stubEstate({ pending: [policy('pol2', 'policy:architecture', { rule: 'prefer composition' })] });
 
     const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/pol2/approve' });
 
@@ -294,13 +367,7 @@ describe('proposal queue routes (DES-MEM-FACETED-001 §5.0)', () => {
   });
 
   it('normalizes the natural-word severity "warning" (and case/whitespace) to warn so a capture worker\'s policy still lands', async () => {
-    proposalTool
-      .mockResolvedValueOnce({ outcome: 'handed_off', payload: { rule: 'pin the version', severity: ' Warning ' } })
-      .mockResolvedValueOnce({
-        proposals: [
-          { id: 'polw', kind_type: 'policy:testing', payload: { rule: 'pin the version', severity: ' Warning ' }, facets: {}, provenance: {}, state: 'approved', created_at: 5 },
-        ],
-      });
+    stubEstate({ pending: [policy('polw', 'policy:testing', { rule: 'pin the version', severity: ' Warning ' })] });
 
     const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/polw/approve' });
 
@@ -312,11 +379,7 @@ describe('proposal queue routes (DES-MEM-FACETED-001 §5.0)', () => {
   });
 
   it('still fails LOUD on a genuinely invalid severity (not a known synonym)', async () => {
-    proposalTool
-      .mockResolvedValueOnce({ outcome: 'handed_off', payload: { rule: 'x', severity: 'loud' } })
-      .mockResolvedValueOnce({
-        proposals: [{ id: 'polbad', kind_type: 'policy:security', payload: { rule: 'x', severity: 'loud' }, facets: {}, provenance: {}, state: 'approved', created_at: 6 }],
-      });
+    stubEstate({ pending: [policy('polbad', 'policy:security', { rule: 'x', severity: 'loud' })] });
 
     const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/polbad/approve' });
 
@@ -327,12 +390,8 @@ describe('proposal queue routes (DES-MEM-FACETED-001 §5.0)', () => {
     expect(adapter.upsertConformanceRule).not.toHaveBeenCalled();
   });
 
-  it('fails the landing LOUD (never a silent drop) when kind_type does not name a steering type — proposal stays approved, no rule written', async () => {
-    proposalTool
-      .mockResolvedValueOnce({ outcome: 'handed_off', payload: { rule: 'x', severity: 'warn' } })
-      .mockResolvedValueOnce({
-        proposals: [{ id: 'pol3', kind_type: 'policy:bogus', payload: { rule: 'x', severity: 'warn' }, facets: {}, provenance: {}, state: 'approved', created_at: 3 }],
-      });
+  it('fails the landing LOUD (never a silent drop) when kind_type does not name a steering type — proposal stays pending, no rule written', async () => {
+    stubEstate({ pending: [policy('pol3', 'policy:bogus', { rule: 'x', severity: 'warn' })] });
 
     const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/pol3/approve' });
 
@@ -342,14 +401,11 @@ describe('proposal queue routes (DES-MEM-FACETED-001 §5.0)', () => {
     expect(body.landing.outcome).toBe('failed');
     expect(body.landing.error).toContain('does not name a steering type');
     expect(adapter.upsertConformanceRule).not.toHaveBeenCalled();
+    expect(tools()).not.toContain('proposal.approve');
   });
 
   it('fails the landing LOUD when the payload has no `rule` statement', async () => {
-    proposalTool
-      .mockResolvedValueOnce({ outcome: 'handed_off', payload: { severity: 'error' } })
-      .mockResolvedValueOnce({
-        proposals: [{ id: 'pol4', kind_type: 'policy:security', payload: { severity: 'error' }, facets: {}, provenance: {}, state: 'approved', created_at: 4 }],
-      });
+    stubEstate({ pending: [policy('pol4', 'policy:security', { severity: 'error' })] });
 
     const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/pol4/approve' });
 
@@ -361,26 +417,21 @@ describe('proposal queue routes (DES-MEM-FACETED-001 §5.0)', () => {
     expect(adapter.upsertConformanceRule).not.toHaveBeenCalled();
   });
 
-  it('fails the landing LOUD on a pre-steering engine, WITHOUT the extra proposal.list round-trip', async () => {
+  it('fails the landing LOUD on a pre-steering engine and approves nothing', async () => {
     adapter.steeringSupported.mockReturnValue(false);
-    proposalTool.mockResolvedValueOnce({ outcome: 'handed_off', payload: { rule: 'x', severity: 'warn' } });
+    stubEstate({ pending: [policy('pol5', 'policy:security', { rule: 'x', severity: 'warn' })] });
 
     const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/pol5/approve' });
 
     expect(res.statusCode).toBe(200);
     expect((res.json() as { landing: { outcome: string } }).landing.outcome).toBe('failed');
-    // The cheap engine guard runs before the list: only proposal.approve reached the client.
-    expect(proposalTool).toHaveBeenCalledTimes(1);
+    expect(tools()).toEqual(['proposal.list']);
     expect(adapter.upsertConformanceRule).not.toHaveBeenCalled();
   });
 
-  it('fails the landing LOUD when the store refuses the derived rule (approve still stands)', async () => {
+  it('a store that refuses the rule fails the landing loud and leaves the proposal pending, so a second approve lands it', async () => {
     adapter.upsertConformanceRule.mockRejectedValueOnce(new Error('INV-C1: rule id must not be blank'));
-    proposalTool
-      .mockResolvedValueOnce({ outcome: 'handed_off', payload: { rule: 'x', severity: 'warn' } })
-      .mockResolvedValueOnce({
-        proposals: [{ id: 'pol6', kind_type: 'policy:testing', payload: { rule: 'x', severity: 'warn' }, facets: {}, provenance: {}, state: 'approved', created_at: 6 }],
-      });
+    stubEstate({ pending: [policy('pol6', 'policy:testing', { rule: 'x', severity: 'warn' })] });
 
     const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/pol6/approve' });
 
@@ -388,6 +439,58 @@ describe('proposal queue routes (DES-MEM-FACETED-001 §5.0)', () => {
     const landing = (res.json() as { landing: { outcome: string; error: string } }).landing;
     expect(landing.outcome).toBe('failed');
     expect(landing.error).toContain('INV-C1');
+    expect(landing.error).toContain('still pending');
+    expect(tools()).not.toContain('proposal.approve');
+
+    // The operator approves again: the proposal is still pending, so this time it lands and approves.
+    const retry = await app.inject({ method: 'POST', url: '/api/v1/proposals/pol6/approve' });
+    expect((retry.json() as { landing: { outcome: string } }).landing.outcome).toBe('landed');
+    expect(proposalTool).toHaveBeenCalledWith('proposal.approve', { id: 'pol6' });
+  });
+
+  it('an approve estate does not confirm after the rule landed is a 502 that undoes nothing; approving again finishes', async () => {
+    const row = policy('pol7', 'policy:testing', { rule: 'x', severity: 'warn' });
+    stubEstate({ pending: [row], approve: new EstateMcpError('wicked-estate-mcp exited before answering', undefined) });
+
+    const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/pol7/approve' });
+
+    // Estate may have committed the approve, and a concurrent approve may share the rule: never retire.
+    expect(res.statusCode).toBe(502);
+    expect(adapter.upsertConformanceRule).toHaveBeenCalledTimes(1);
+    expect(adapter.retireConformanceRule).not.toHaveBeenCalled();
+
+    stubEstate({ pending: [row] });
+    const retry = await app.inject({ method: 'POST', url: '/api/v1/proposals/pol7/approve' });
+    expect((retry.json() as { landing: { outcome: string; ruleId: string } }).landing).toMatchObject({ outcome: 'landed', ruleId: 'proposal:pol7' });
+  });
+
+  it('rejecting a pending policy proposal whose rule already landed (a crash before the approve) retires the rule', async () => {
+    const row = policy('pol8', 'policy:testing', { rule: 'x', severity: 'warn' });
+    stubEstate({ pending: [row], approve: new EstateMcpError('wicked-estate-mcp exited before answering', undefined) });
+    await app.inject({ method: 'POST', url: '/api/v1/proposals/pol8/approve' });
+    expect(adapter.retireConformanceRule).not.toHaveBeenCalled();
+
+    const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/pol8/reject' });
+
+    expect(res.statusCode).toBe(200);
+    expect(proposalTool).toHaveBeenCalledWith('proposal.reject', { id: 'pol8' });
+    expect(adapter.retireConformanceRule).toHaveBeenCalledWith('proposal:pol8');
+  });
+
+  it('rejecting a proposal with no landed rule retires nothing', async () => {
+    stubEstate({});
+    const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/m1/reject' });
+    expect(res.statusCode).toBe(200);
+    expect(adapter.retireConformanceRule).not.toHaveBeenCalled();
+  });
+
+  it('an id that is not pending is passed to estate, which refuses it in its own words', async () => {
+    stubEstate({ pending: [], approve: new EstateMcpError('proposal zz is approved — only a pending proposal can be approved/rejected', -32602) });
+
+    const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/zz/approve' });
+
+    expect(res.statusCode).toBe(400);
+    expect(adapter.upsertConformanceRule).not.toHaveBeenCalled();
   });
 
   it('400s a whitespace-only id on approve and never calls the client', async () => {
@@ -399,7 +502,7 @@ describe('proposal queue routes (DES-MEM-FACETED-001 §5.0)', () => {
   });
 
   it('maps an estate -32602 invalid-params error to 400', async () => {
-    proposalTool.mockRejectedValueOnce(new EstateMcpError('id (string) required', -32602));
+    stubEstate({ approve: new EstateMcpError('id (string) required', -32602) });
 
     const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/p1/approve' });
 
@@ -409,6 +512,7 @@ describe('proposal queue routes (DES-MEM-FACETED-001 §5.0)', () => {
 
   it('maps any other estate/transport failure to 502', async () => {
     proposalTool.mockRejectedValueOnce(new EstateMcpError('wicked-estate-mcp exited before answering', undefined));
+    // (the first estate call — the pending read — already fails)
 
     const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/p1/approve' });
 
