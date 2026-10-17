@@ -547,6 +547,61 @@ type CoreHandleFull = CoreHandle &
   TeamMethods &
   CampaignMethods;
 
+/**
+ * crew#994: the engine bindings that read the store file directly, on a read-only connection of
+ * their own, instead of asking the actor (wicked-core-ts: the methods that open `self.db_path`).
+ * `Core.spawn` returns before the actor has opened, migrated and seeded that file
+ * (wicked-core `actor::run`), so a read in the first ~100 ms failed with "no such table: meta", or
+ * answered without the rules the engine seeds at boot. Every other call goes through the actor,
+ * which handles it only after its boot, so it is already ordered after it.
+ */
+const STORE_READS_OFF_ACTOR: ReadonlySet<string> = new Set([
+  'campaignList',
+  'projectList',
+  'projectGet',
+  'projectMembers',
+  'memberProjects',
+  'interactionRequests',
+  'listPolicies',
+  'listConformanceRules',
+  'listRuleSets',
+  'listConformanceClaims',
+  'governanceScoreboard',
+  'recallRulesPreview',
+  'considerRules',
+  'previewMcpCalls',
+  'evaluateEditorGrants',
+  'getCoverageReport',
+  'getCoverageReportForRepo',
+  'getGraphKindsForRepo',
+]);
+
+/**
+ * The engine handle with its off-actor store reads held until the actor's boot is done (crew#994).
+ * The actor answers a ping only from its command loop, which it enters after the store is open and
+ * seeded, so the first ping's answer is the moment those reads can run. A ping that fails (the actor
+ * could not open the store and stopped) releases them too: they then fail with the engine's own error.
+ */
+function holdStoreReadsUntilBooted(core: CoreHandleFull): CoreHandleFull {
+  const booted: Promise<void> =
+    typeof core.ping === 'function'
+      ? core.ping().then(
+          () => undefined,
+          () => undefined,
+        )
+      : Promise.resolve();
+  return new Proxy(core, {
+    get(target, prop, receiver) {
+      const value: unknown = Reflect.get(target, prop, receiver);
+      if (typeof value !== 'function') return value;
+      // A napi method must be called on the native object itself, never on this proxy.
+      const method = value as (...args: unknown[]) => unknown;
+      if (typeof prop !== 'string' || !STORE_READS_OFF_ACTOR.has(prop)) return method.bind(target);
+      return (...args: unknown[]) => booted.then(() => method.apply(target, args));
+    },
+  });
+}
+
 /** The napi constructor surface — the static factories live on the class object. */
 interface CoreConstructor {
   spawn(path: string): CoreHandleFull;
@@ -1223,7 +1278,7 @@ export class CoreAdapter {
     if (diskQeAcceptanceMode() === 'off') process.env['WICKED_QE_ACCEPTANCE_OFF'] = QE_OFF_REASON;
     else delete process.env['WICKED_QE_ACCEPTANCE_OFF'];
     try {
-      this.core = this.stub ? Core.spawnStub(opts.dbPath) : Core.spawn(opts.dbPath);
+      this.core = holdStoreReadsUntilBooted(this.stub ? Core.spawnStub(opts.dbPath) : Core.spawn(opts.dbPath));
     } finally {
       // Read once, at spawn: never inherited by the workers this daemon starts.
       delete process.env['WICKED_QE_ACCEPTANCE_OFF'];

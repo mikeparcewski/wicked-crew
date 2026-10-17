@@ -70,6 +70,13 @@ async function call(method: 'GET' | 'POST' | 'DELETE', url: string, payload?: un
   return app.inject({ method, url: `/api/v1${url}`, ...(payload !== undefined ? { payload: payload as object } : {}) });
 }
 
+/** Approve a subject and say so when it did not land (crew#1040: an approval that failed unseen
+ *  surfaced later as "the save withdraws nothing"). */
+async function approve(subject: string): Promise<void> {
+  const res = await call('POST', '/mcp/approvals', { subject });
+  expect(res.statusCode, `${subject}: ${res.body}`).toBe(200);
+}
+
 /** G1: writes register disabled; these tests judge every tool, so each save grants all of them. */
 const grantAll = (p: McpPreviewResponse): string[] => p.tools.filter((t) => t.class !== 'read').map((t) => t.name);
 
@@ -212,7 +219,7 @@ describe('the policy preview matrix (S6 proving test)', () => {
 
   it('judges a disabled tool as unregistered (D-5), as the broker would send it', async () => {
     await register();
-    await call('POST', '/mcp/approvals', { subject: 'mcp:fx' });
+    await approve('mcp:fx');
     const off = await app.inject({ method: 'PATCH', url: `/api/v1/mcp/tools/${encodeURIComponent('mcp:fx/wt_echo')}`, payload: { enabled: false } });
     expect(off.statusCode, off.body).toBe(200);
     const echo = tool(await matrix(), 'wt_echo');
@@ -350,7 +357,7 @@ describe('approvals are audited edits of the ledger rules', () => {
 
   it('an approval never outranks a deny rule', async () => {
     await register();
-    await call('POST', '/mcp/approvals', { subject: 'mcp:fx/wt_plain' });
+    await approve('mcp:fx/wt_plain');
     await upsert({ id: 'SEC-FX-NO-PLAIN', applies_to: ['mcp:fx/wt_plain'], effect: 'deny' });
     const c = cell(tool(await matrix(), 'wt_plain'), 'creator', 'claude', 'autonomous');
     expect(c).toMatchObject({ decision: 'deny', ruleIds: ['SEC-FX-NO-PLAIN'] });
@@ -368,7 +375,7 @@ describe('approvals are audited edits of the ledger rules', () => {
 
   it('a tool dropped and then returned with a changed schema asks on first use again', async () => {
     await register();
-    await call('POST', '/mcp/approvals', { subject: 'mcp:fx/wt_plain' });
+    await approve('mcp:fx/wt_plain');
     const save = async () => {
       const p = (await call('POST', '/mcp/servers/preview', { name: 'fx', kind: 'mcp-stdio', command: process.execPath, args: [FIXTURE_SERVER, specPath] })).json() as McpPreviewResponse;
       expect((await call('POST', '/mcp/servers', { previewHash: p.previewHash, enabledWrites: grantAll(p) })).statusCode).toBe(201);
@@ -384,8 +391,8 @@ describe('approvals are audited edits of the ledger rules', () => {
 
   it('a save refused for a bad write grant withdraws no approval (G1)', async () => {
     await register();
-    await call('POST', '/mcp/approvals', { subject: 'mcp:fx' });
-    await call('POST', '/mcp/approvals', { subject: 'mcp:fx/wt_plain' });
+    await approve('mcp:fx');
+    await approve('mcp:fx/wt_plain');
     writeSpec(TOOLS.map((t) => (t.name === 'wt_plain' ? { ...t, description: 'changed' } : t)));
     const again = (await call('POST', '/mcp/servers/preview', { name: 'fx', kind: 'mcp-stdio', command: process.execPath, args: [FIXTURE_SERVER, specPath] })).json() as McpPreviewResponse;
     // crew#1040: this flaked once in a full release run (withdrawOnSave came back []). Say which
@@ -407,9 +414,9 @@ describe('approvals are audited edits of the ledger rules', () => {
 
   it('a changed schema withdraws the approvals that named it, and so does removing the server', async () => {
     await register();
-    await call('POST', '/mcp/approvals', { subject: 'mcp:fx' });
-    await call('POST', '/mcp/approvals', { subject: 'mcp:fx/wt_plain' });
-    await call('POST', '/mcp/approvals', { subject: 'mcp:fx/wt_echo' });
+    await approve('mcp:fx');
+    await approve('mcp:fx/wt_plain');
+    await approve('mcp:fx/wt_echo');
 
     // wt_plain's schema changes: re-previewing shows what the save withdraws; the save does it.
     writeSpec(TOOLS.map((t) => (t.name === 'wt_plain' ? { ...t, description: 'changed' } : t)));
@@ -441,29 +448,15 @@ describe('G2: a REST tool approval covers where its calls go (real engine)', () 
   };
   const restBody = (url: string) => ({ name: 'notes', kind: 'rest', url, openapi: DOC });
   const preview = async (url: string) => (await call('POST', '/mcp/servers/preview', restBody(url))).json() as McpPreviewResponse;
-  // An inline document previews in a few ms, so these tests reach the engine much sooner after it
-  // opens than the stdio-server tests above (whose spawn takes 300 ms+). That early, a read can fail
-  // with "open estate store read-only … no such table: meta", and an approval can go missing from
-  // the next read (reproduced locally, 1-2 of 3 runs, and on CI): the engine's store is not yet
-  // initialized. Wait until it answers with its seeded ledgers. The race is reported for
-  // wicked-core/crew's adapter, not fixed here.
-  beforeEach(async () => {
-    for (let i = 0; ; i++) {
-      try {
-        if ((await adapter.listConformanceRules()).some((r) => r.id === FIRST_USE_LEDGER)) break;
-      } catch (err) {
-        if (i >= 60) throw err;
-      }
-      if (i >= 60) throw new Error('the engine never answered with its seeded MCP ledgers');
-      await new Promise((r) => setTimeout(r, 50));
-    }
-  });
+  // An inline document previews in a few ms, so these tests reach the engine within its first
+  // ~100 ms. They used to wait here for the engine's seeded ledgers; the adapter now holds its store
+  // reads until the engine has booted (crew#994).
 
   it('a changed base path withdraws the approvals, and an unconfirmed origin change withdraws none', async () => {
     const first = await preview('http://127.0.0.1:9/v1');
     expect((await call('POST', '/mcp/servers', { previewHash: first.previewHash, enabledWrites: ['addNote'], allowOrigin: 'http://127.0.0.1:9' })).statusCode).toBe(201);
-    await call('POST', '/mcp/approvals', { subject: 'mcp:notes' });
-    await call('POST', '/mcp/approvals', { subject: 'mcp:notes/addNote' });
+    await approve('mcp:notes');
+    await approve('mcp:notes/addNote');
     expect(cell(tool(await matrix({ server: 'notes' }), 'addNote'), 'creator', 'claude', 'balanced').decision).toBe('allow');
 
     // Another origin needs confirming: the refused save withdraws nothing.
@@ -486,8 +479,8 @@ describe('G2: a REST tool approval covers where its calls go (real engine)', () 
   it('a changed target withdraws the server approval even when no tool name carries over (codex r1)', async () => {
     const first = await preview('http://127.0.0.1:9/v1');
     expect((await call('POST', '/mcp/servers', { previewHash: first.previewHash, allowOrigin: 'http://127.0.0.1:9' })).statusCode).toBe(201);
-    await call('POST', '/mcp/approvals', { subject: 'mcp:notes' });
-    await call('POST', '/mcp/approvals', { subject: 'mcp:notes/listNotes' });
+    await approve('mcp:notes');
+    await approve('mcp:notes/listNotes');
     // Another base path, and only the other operation: no tool is in both saves.
     const body = { ...restBody('http://127.0.0.1:9/v2'), operations: ['addNote'] };
     const swapped = (await call('POST', '/mcp/servers/preview', body)).json() as McpPreviewResponse;
@@ -498,7 +491,7 @@ describe('G2: a REST tool approval covers where its calls go (real engine)', () 
   it('re-saving a registration from before G2 withdraws its approvals, even when no tool name carries over (codex r2)', async () => {
     const first = (await call('POST', '/mcp/servers/preview', { ...restBody('http://127.0.0.1:9/v1'), operations: ['listNotes'] })).json() as McpPreviewResponse;
     expect((await call('POST', '/mcp/servers', { previewHash: first.previewHash, allowOrigin: 'http://127.0.0.1:9' })).statusCode).toBe(201);
-    await call('POST', '/mcp/approvals', { subject: 'mcp:notes' });
+    await approve('mcp:notes');
     // What a pre-G2 crew wrote: hashes without the target.
     await registry['deps'].store.mutate((file) => {
       for (const t of file.servers[0]!.tools) t.schemaHash = t.observedSchemaHash = toolSchemaHash(t);
