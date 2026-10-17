@@ -10,7 +10,13 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-10-17
+
+A minor release: memory edits and operator memories, policy proposals with an explicit reach, gated-reassign and gate-kind fixes, and the engine's container-floor and judging fixes. Pins: wicked-core-ts ^0.14.0, wicked-studio ^0.10.0, wicked-interactive ^0.14.1 (bridge floor), wicked-crew-api-types 0.126.0.
+
 ### Changed
+- **The engine is wicked-core-ts 0.14.0.** On the container floor: claude's gate hook is a relayed command hook, codex's ChatGPT seat uses its own provider, and a copilot seat always names its model and uses its account's Copilot API host. An evaluator's judge rotation excludes the work's creators, with a disclosed fallback. Every path that cleared a boundary finding waits for the operator, and the hold is vaulted. A plan with no creator step takes no deliver step. Operator memories are recalled in every project (wicked-estate 0.30.0).
+- **The bundled studio is wicked-studio 0.10.0:** the run page is a chat, and Memory is its own Desk tab.
 - **The interactive bridge floor is `^0.14.1` (was `^0.12.0`).** A caret on 0.x pins the minor, so crew spawned 0.12.x, which has neither the demo import a demo run already calls (`PUT /d/:doc/api/demo/import/:chapter`, wicked-interactive 0.13.0) nor the theme-source upload behind wicked-studio 0.10.0's "Learn from a brand" (`PUT /d/:doc/api/theme/source`, 0.14.x). 0.14.1 is the first published build with both. A `WICKED_INTERACTIVE_SPEC` override below it is still honoured and flagged on the boot line.
 - **Site, README and the npm description say what ships today, in plain words.** The site and README no longer say delivery does not wait on QE acceptance (it does for `feature`, `bug`, `migration` and `mcp-server` since 0.9.0), or that a one-agent roster keeps review on the builder (the run waits unless launched with reduced assurance). The site states the container-runtime prerequisite and the Agents-tab sign-in in *Get it*, says which agents have a sandbox image (Claude Code, Codex, Copilot, OpenCode, Pi), drops the "every unit is auctioned" council section (councils settle concrete disputes only), and retires "the wicked loop" and the remaining ACP-era text. The `wicked-crew` package description takes effect on the next publish.
 
@@ -4252,7 +4258,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.13.2...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.13.2...v0.14.0
 [0.13.2]: https://github.com/mikeparcewski/wicked-crew/compare/v0.13.1...v0.13.2
 [0.13.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.12.4...v0.13.0
