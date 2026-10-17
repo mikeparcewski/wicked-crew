@@ -10,6 +10,13 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+- **A reassign the engine refuses no longer approves the gate (#1058).** `POST /runs/:id/reassign` on a run parked at a gate approved the gate first and asked the engine to reassign after. When the engine refused the seat (it authored the work a review checks, and the run requires a distinct evaluator), the route answered 409, but the approve had already re-dispatched the failed seat (E2E run 9c3f20fa: "Reassign to Pi CLI" retried copilot). With a named seat the route now re-seats the parked unit first (the engine's parked-run reassign, wicked-core#773, core-ts 0.13.0), and approves the gate only when the engine accepted the seat. A refused seat is a 409 that says nothing was approved and the gate is still open. Without a named seat (the council's pick) the order is unchanged, because a re-route needs a running unit. A named reassign is also refused (409, nothing changed) at a gate whose approve accepts the parked work instead of re-running it: a unit no judge could rule on (`judge_unavailable`, `qe_reviewer_unavailable`, where the approve is the operator's judgment) and a `review_adjudication` gate (the approve lands with carried items). The new seat would otherwise be recorded on work it never did. Only one gated reassign of a run runs at a time; a second answers 409.
+- **`GET /runs/:id/gate` says what kind of gate it is (`GateInfo.gateKind`).** A refused hand-over parks at an `escalation` gate whose `ord` is still the deliver unit. The read served only the ord and prompt, so a reloaded studio drew the original "Ready to hand it over" card (wicked-studio#814). The kind comes from the live `awaitingHuman` frame, the event-log replay, or the durable row's `gate_kind` after a restart; it is absent when the engine did not say.
+
+### Added
+- **`WorkUnit.reassign_refused` (`wicked-crew-api-types` 0.124.0).** The run DTO lists, on a Review/Test agent unit of a run that enforces a distinct evaluator, the seats a reassign is refused for: the authors of the work it checks. It is the engine's rule (core#933), read from the run view, so a skin can leave those seats off its reassign choices (wicked-studio#813). The engine stays the authority at the write. 0.124.0 also types `GateInfo.gateKind`, `WorkUnit.authored_by` and `InteractionRequest.gate_kind`.
+
 ## [0.13.2] — 2026-10-16
 
 A patch release: container sign-in for every agent, plus workflow descriptions. Pins: wicked-core-ts ^0.13.0, wicked-studio ^0.9.6.

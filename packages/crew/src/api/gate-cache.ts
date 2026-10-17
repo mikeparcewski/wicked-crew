@@ -16,6 +16,13 @@ export interface GateCacheEntry {
    * gate decision; omitted entirely on a normal gate so the wire is byte-identical.
    */
   refusal?: { matched: boolean; reason: string };
+  /**
+   * WHY the run paused (`awaitingHuman.gateKind`; the durable row's `gate_kind`) —
+   * studio#814: without it a reloaded skin could only guess the gate from its unit, and read a
+   * refused hand-over's escalation (cursor still on the deliver unit) as a fresh deliver gate.
+   * ABSENT when the engine did not say (an older engine, a row written before the field).
+   */
+  gateKind?: string;
 }
 
 /**
@@ -78,6 +85,7 @@ function fold(entries: Map<string, GateCacheEntry>, event: CoreEvent): void {
     case 'awaitingHuman':
       if (typeof event.ord === 'number' && typeof event.prompt === 'string') {
         const refusal = detectRefusal(event.prompt);
+        const gateKind = typeof event['gateKind'] === 'string' && event['gateKind'] !== '' ? event['gateKind'] : undefined;
         entries.set(session, {
           ord: event.ord,
           prompt: event.prompt,
@@ -85,6 +93,7 @@ function fold(entries: Map<string, GateCacheEntry>, event: CoreEvent): void {
           receivedAt: observedAt(event),
           // Spread only when matched, so a normal gate's entry is byte-identical (no `refusal` key).
           ...(refusal !== undefined ? { refusal } : {}),
+          ...(gateKind !== undefined ? { gateKind } : {}),
         });
       }
       break;

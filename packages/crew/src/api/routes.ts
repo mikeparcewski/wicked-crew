@@ -77,6 +77,7 @@ import {
   type ChatScopeRequest,
 } from './chat-scope.js';
 import { ASK_TURN_BUDGET_SECS, AskPathIndex, answerStep, isAskTurn } from './ask-paths.js';
+import { reassignRefusedSeats } from '../core/reassign-refusal.js';
 import { allowedRootsFor, isInsideRoot, openWithSystemDefault } from './open-path.js';
 import {
   InvalidDiffBaseError,
@@ -1510,6 +1511,12 @@ export function registerRoutes(
     if (runTimingIndex.isAskPath(view.session.id)) {
       view.session.ask_path = true;
       if (isAskTurn(view)) view.session.ask_turn = true;
+    }
+    // crew#1058: the seats a reassign of each unit is refused for (the work's authors under a
+    // distinct-evaluator contract) — the same rule the reassign route applies. ABSENT when none.
+    for (const unit of view.units) {
+      const refused = reassignRefusedSeats(view, unit.ord);
+      if (refused.length > 0) unit.reassign_refused = refused;
     }
     return view;
   };
@@ -4285,12 +4292,14 @@ export function registerRoutes(
       // detection (issue #419) — otherwise a gate served from the durable row after a restart would
       // silently drop the warning that the live/replay paths carry.
       const refusal = detectRefusal(durableGate.prompt);
+      const gateKind = typeof durableGate['gate_kind'] === 'string' && durableGate['gate_kind'] !== '' ? durableGate['gate_kind'] : undefined;
       const entry = {
         ord: durableGate.ord ?? 0,
         prompt: durableGate.prompt,
         lifecycle: 'open' as const,
         receivedAt: new Date(durableGate.created_at).toISOString(),
         ...(refusal !== undefined ? { refusal } : {}),
+        ...(gateKind !== undefined ? { gateKind } : {}),
       };
       gateCache.adopt(id, entry);
       return entry;
@@ -4615,6 +4624,27 @@ export function registerRoutes(
     }
   });
 
+  /** crew#1058: the runs with a gated reassign (re-seat, then approve) in flight — one at a time. */
+  const gatedReassigns = new Set<string>();
+  /**
+   * codex r1 on #1060: whether approving the run's open gate ACCEPTS the parked unit's work rather
+   * than re-running it (wicked-core `confirm_gate`: a `judge_unavailable` / `qe_reviewer_unavailable`
+   * denial on the cursor unit is judged by the operator; an open `review_adjudication` gate lands
+   * with carried items). Says what the approve does, or `null` when it re-runs the unit.
+   */
+  async function approveAcceptsWork(run: SessionView, ord: number): Promise<string | null> {
+    const unit = run.units.find((u) => u.ord === ord);
+    const denial = (unit as { denial?: { source?: unknown } | null } | undefined)?.denial;
+    if (unit?.status === 'rejected' && (denial?.source === 'judge_unavailable' || denial?.source === 'qe_reviewer_unavailable')) {
+      return 'is the operator\'s judgment of the work as it stands (no judge could rule)';
+    }
+    const open = await resolveOpenGate(run.session.id).catch(() => null);
+    if (open !== null && open !== 'no-log' && open.gateKind === 'review_adjudication') {
+      return 'lands the reviewed work with its carried items';
+    }
+    return null;
+  }
+
   // The manual operator lever (crew#442): recycles a run's CURSOR unit via the same
   // `adapter.reassignUnit` path the stall-watchdog's automatic escalation uses, for when a
   // wedged unit needs recovering and auto-escalation is off, exhausted, or itself failed. Scoped
@@ -4633,17 +4663,16 @@ export function registerRoutes(
     const run = views.find((v) => v.session.id === id);
     if (!run) return reply.code(404).send({ error: 'Run not found' });
     // Wave 6 (F-7R2-007 root fix): a run PARKED at a gate on a dead seat — the stall watchdog's
-    // escalation gate, or a verdict escalation — used to answer 409 here, so the studio's control
-    // needed two calls (approve, then race the engine's re-dispatch of the same dead seat with a
-    // reassign). The ENGINE's `reassign_unit` accepts ONLY an Executing run (wicked-core actor.rs:
-    // "run X is not Executing (status: AwaitingHuman)") — there is no reassign-in-place for a gated
-    // run — so this route performs APPROVE-THEN-REASSIGN in one call: the approve resumes the run
-    // (the engine re-dispatches the cursor unit to its current seat), and the reassign IMMEDIATELY
-    // supersedes that turn (cancels its epoch, closes the seat's session, bumps the attempt) and
-    // re-dispatches to the requested seat or the council's pick. The dead seat is dispatched for
-    // the gap between the two engine calls — a bounded window the engine contract leaves open (a
-    // reassign-as-approval engine op would close it; documented in the PR). Audited as BOTH a gate
-    // decision (`via: 'reassign'`) and a reassign, so the "who approved" trail has no side door.
+    // escalation gate, or a verdict escalation — is reassigned and approved in ONE call. crew#1058:
+    // with a named seat it is REASSIGN-THEN-APPROVE. The engine re-seats a parked run's cursor unit
+    // without dispatching it (wicked-core#773, `reseat_parked_unit`, core-ts >= 0.13.0) and refuses
+    // a seat it cannot honour (an author's seat for a review under a distinct-evaluator contract,
+    // a ballot-only seat, a held plan) with the run untouched, so a refusal is a 409 with the gate
+    // still open; the approve then dispatches the unit once, on the new seat. The old order
+    // (approve, then reassign) approved first, so a refused reassign left the failed seat running
+    // again. Without a named seat (the council's pick) the engine needs a running unit to re-route,
+    // so that path stays approve-then-reassign. Audited as BOTH a gate decision
+    // (`via: 'reassign'`) and a reassign, so the "who approved" trail has no side door.
     // A steering-author propose gate is NOT approvable this way: its approve LANDS the proposal
     // through `POST /runs/:id/gate` (crew#388), and a reassign is not a review of the rules.
     const gated = run.session.status === 'awaiting_human';
@@ -4686,21 +4715,64 @@ export function registerRoutes(
     }
     const cursor = resolveCursorUnit(run);
     const ord = cursor?.ord ?? run.session.unit_ix;
-    try {
-      if (gated) {
-        const who = actorOf(req);
-        adapter.recordGateActor?.(id, `${who.id} (${who.kind})`);
-        const status = await adapter.confirmGate(id, true);
-        audit.record('gate.decided', actorOf(req), {
-          runId: id,
-          detail: { approve: true, via: 'reassign', status },
-        });
-      }
-      await adapter.reassignUnit(id, ord, requestedCli ?? null);
+    const approve = async (): Promise<void> => {
+      if (typeof adapter.confirmGate !== 'function') return; // refused above for a gated run
+      const who = actorOf(req);
+      adapter.recordGateActor?.(id, `${who.id} (${who.kind})`);
+      const status = await adapter.confirmGate(id, true);
+      audit.record('gate.decided', actorOf(req), {
+        runId: id,
+        detail: { approve: true, via: 'reassign', status },
+      });
+    };
+    const reassigned = (approved: boolean): void => {
       audit.record('run.reassigned', actorOf(req), {
         runId: id,
-        detail: { ord, ...(requestedCli !== undefined ? { cli: requestedCli } : {}), ...(gated ? { approved: true } : {}) },
+        detail: { ord, ...(requestedCli !== undefined ? { cli: requestedCli } : {}), ...(gated ? { approved } : {}) },
       });
+    };
+    if (gated && requestedCli !== undefined) {
+      // codex r1 on #1060: an approve that ACCEPTS the parked work instead of re-running the unit —
+      // a `judge_unavailable` / `qe_reviewer_unavailable` denial (the operator judges, the unit
+      // counts) or a `review_adjudication` gate (lands with carried items) — must not follow a
+      // re-seat: the new seat would be recorded on work it never did, and never run.
+      const accepts = await approveAcceptsWork(run, ord);
+      if (accepts !== null) {
+        return reply.code(409).send({
+          error: `run ${id} is parked at a gate whose approve ${accepts}, so a reassign would not run unit ${ord} on '${requestedCli}' — approve, send back or stop it via POST /runs/${id}/gate. Nothing was changed.`,
+        });
+      }
+      // codex r1 on #1060: the re-seat and the approve are two engine commands; a second reassign of
+      // the same run between them would dispatch a seat neither response names.
+      if (gatedReassigns.has(id)) {
+        return reply.code(409).send({ error: `a reassign of run ${id} is already in flight. Nothing was changed.` });
+      }
+      gatedReassigns.add(id);
+      try {
+        try {
+          await adapter.reassignUnit(id, ord, requestedCli);
+        } catch (err) {
+          // The engine refused the seat with the run untouched: nothing was approved.
+          return reply.code(409).send({ error: `${message(err)}. Nothing was approved; the gate is still open.` });
+        }
+        try {
+          await approve();
+        } catch (err) {
+          reassigned(false);
+          return reply.code(409).send({
+            error: `unit ${ord} was re-seated on ${requestedCli}, but approving the gate failed: ${message(err)} — read the run's gate before answering again`,
+          });
+        }
+        reassigned(true);
+        return reply.send({ status: 'ok', ord, cli: requestedCli, approved: true });
+      } finally {
+        gatedReassigns.delete(id);
+      }
+    }
+    try {
+      if (gated) await approve();
+      await adapter.reassignUnit(id, ord, requestedCli ?? null);
+      reassigned(true);
       return reply.send({
         status: 'ok',
         ord,
