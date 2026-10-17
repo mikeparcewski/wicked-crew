@@ -352,6 +352,8 @@ describe('ChatDecisionRecorder', () => {
     h.tick(10_001);
     h.recorder.noteSend('c1', 't2', HUMAN, 'and never skip lint', ['claude', 'opencode']);
     await h.recorder.onReply({ chat: 'c1', cliKey: 'claude', turnId: 't2', ok: true, block: '{"items":[]}' });
+    // The send's sweep is tracked, never awaited on the route: settle it before reading the ledger.
+    await h.recorder.idle();
     // t1 was stale: recorded with what arrived (the recorder's block).
     const t1 = h.ledger.list().filter((d) => d.origin.turn_id === 't1');
     expect(t1).toHaveLength(1);

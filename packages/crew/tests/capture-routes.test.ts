@@ -121,7 +121,12 @@ describe('POST /projects/:id/capture — capture into the proposal queue', () =>
     // The brief names every material, the three capture classes, and the project scope.
     const brief = readFileSync(join(dir, 'CAPTURE.md'), 'utf8');
     for (const f of ['0-notes.md', '1-meeting.md', '2-whiteboard.png']) expect(brief).toContain(join(dir, f));
-    for (const cls of ['"capture":"intent"', '"capture":"decision"', '"capture":"memory"']) expect(brief).toContain(cls);
+    for (const cls of ['"capture":"intent"', '"capture":"choice"', '"capture":"memory"']) expect(brief).toContain(cls);
+    // "decision" names the decision LEDGER's policy rows; the brief files a choice as a memory.
+    // Operator memories and rules carry an explicit reach.
+    expect(brief).toContain('"capture":"memory","reach":"operator"');
+    expect(brief).toContain('"capture":"rule","reach":"operator"');
+    expect(brief).not.toContain('"capture":"decision"');
     expect(brief).toContain('{"project":"proj-1"}');
     expect(brief).toContain('"reach":"pattern"');
   });
@@ -353,8 +358,8 @@ describe('POST /proposals/:id/approve {content?, reach?} — accept with an edit
     expect(estate.mock.calls.map((c) => c[0])).toEqual(['proposal.list']);
   });
 
-  it('refuses to let a decision, an intent, or a memory no capture filed cross projects, writing nothing', async () => {
-    for (const capture of ['decision', 'intent', undefined]) {
+  it('refuses to let a choice (or a legacy "decision"), an intent, or a memory no capture filed cross projects, writing nothing', async () => {
+    for (const capture of ['choice', 'decision', 'intent', undefined]) {
       estate.mockReset();
       stubEstate(pending({ payload: { content: 'We chose Postgres', tier: 'semantic', ...(capture !== undefined ? { capture } : {}) } }));
       const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/p1/approve', payload: { reach: 'pattern' } });
@@ -372,8 +377,27 @@ describe('POST /proposals/:id/approve {content?, reach?} — accept with an edit
     expect(estate.mock.calls.every((c) => c[0] === 'proposal.list')).toBe(true);
   });
 
-  it('a plain approve (no body, or {}) is unchanged: one proposal.approve, no copy', async () => {
-    estate.mockResolvedValue({ outcome: 'promoted', active_id: 'm-1' });
+  it('accepting a memory with reach "operator" files a copy marked operator (estate lands it at the operator scope)', async () => {
+    stubEstate(pending({ payload: { content: 'Prefers tables over prose in replies', tier: 'semantic', capture: 'memory' } }));
+    const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/p1/approve', payload: { reach: 'operator' } });
+    expect(res.statusCode, res.body).toBe(200);
+    const submit = estate.mock.calls.find((c) => c[0] === 'proposal.submit')![1] as Record<string, unknown>;
+    expect((submit['payload'] as Record<string, unknown>)['reach']).toBe('operator');
+    expect(estate.mock.calls.filter((c) => c[0] === 'proposal.list')).toHaveLength(1);
+  });
+
+  it('accepting an operator-filed memory with reach "project" files a project copy (never approves it as operator)', async () => {
+    stubEstate(pending({ payload: { content: 'Prefers tables over prose in replies', tier: 'semantic', capture: 'memory', reach: 'operator' } }));
+    const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/p1/approve', payload: { reach: 'project' } });
+    expect(res.statusCode, res.body).toBe(200);
+    const submit = estate.mock.calls.find((c) => c[0] === 'proposal.submit')![1] as Record<string, unknown>;
+    expect((submit['payload'] as Record<string, unknown>)['reach']).toBe('project');
+  });
+
+  it('a plain approve (no body, or {}) is unchanged: the pending read, one proposal.approve, no copy', async () => {
+    estate.mockImplementation(async (tool: string) =>
+      tool === 'proposal.list' ? { proposals: [pending()] } : { outcome: 'promoted', active_id: 'm-1' },
+    );
     for (const payload of [undefined, {}]) {
       estate.mockClear();
       const res = await app.inject({
@@ -383,7 +407,10 @@ describe('POST /proposals/:id/approve {content?, reach?} — accept with an edit
       });
       expect(res.statusCode).toBe(200);
       expect(res.json()).toEqual({ outcome: 'promoted', active_id: 'm-1' });
-      expect(estate.mock.calls).toEqual([['proposal.approve', { id: 'p1' }]]);
+      expect(estate.mock.calls).toEqual([
+        ['proposal.list', { state: 'pending' }],
+        ['proposal.approve', { id: 'p1' }],
+      ]);
     }
   });
 

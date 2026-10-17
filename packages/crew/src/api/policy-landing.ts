@@ -16,7 +16,7 @@
  */
 
 import type { CoreAdapter } from '../core/adapter.js';
-import type { Actor, ConformanceRule, PolicyLandingResult, SteeringType } from '../core/types.js';
+import type { Actor, ConformanceRule, PolicyLandingResult, PolicyReach, SteeringType } from '../core/types.js';
 import type { AuditLog } from './audit.js';
 import { STEERING_TYPE_VALUES, STEERING_TYPES } from './governance-steering.js';
 
@@ -45,7 +45,8 @@ export function policyProposalToRule(
   kindType: string,
   payload: unknown,
   facets: Record<string, string> | undefined,
-): { rule: ConformanceRule; steeringType: SteeringType } | { error: string } {
+  scope: { runProject?: string; reach?: PolicyReach } = {},
+): { rule: ConformanceRule; steeringType: SteeringType; reach: PolicyReach } | { error: string } {
   const steeringType = kindType.startsWith('policy:') ? kindType.slice('policy:'.length) : '';
   if (!STEERING_TYPES.has(steeringType)) {
     return {
@@ -89,12 +90,40 @@ export function policyProposalToRule(
     };
   }
   const language = facets?.['language'];
-  const project = facets?.['project'];
+  const facetProject = facets?.['project'];
+  const repo = facets?.['repo'];
+  const named = (v: unknown): v is string => typeof v === 'string' && v !== '';
+  // REACH — what the rule is about, the same `reach` word memories use: `operator` = how the operator
+  // works, a rule for EVERY project; `project` = that project's (or repo's) code. The proposer sets
+  // it (`payload.reach`), the person may change it at accept (`scope.reach`); a row with none (filed
+  // before the field) reads as `project` when its facets name a project or repo, else `operator` —
+  // exactly where it landed before. Never widened or narrowed silently: the landing reports it.
+  const rawReach = scope.reach ?? body['reach'];
+  if (rawReach !== undefined && rawReach !== 'project' && rawReach !== 'operator') {
+    return {
+      error: `the policy proposal has an invalid reach ${JSON.stringify(rawReach)} — expected "project" (that project or repo) or "operator" (every project)`,
+    };
+  }
+  const reach: PolicyReach = rawReach ?? (named(facetProject) || named(repo) ? 'project' : 'operator');
+  // DC-S3: a project rule's `targets.project` is the `project` facet, else the project of the run
+  // that filed it (`scope.runProject`, the caller's membership lookup of `provenance.run_id`).
+  const project =
+    reach === 'operator' ? undefined : named(facetProject) ? facetProject : named(scope.runProject) ? scope.runProject : undefined;
+  // The engine's Targets has no repo slot. A project-reach rule that resolves to no project would
+  // land as a rule for EVERY project (the tiny-calc rules that went global), so it fails loud and
+  // writes nothing; the person rejects it, or accepts it with reach "operator" on purpose.
+  if (reach === 'project' && project === undefined) {
+    return {
+      error:
+        `the policy proposal's reach is one project${named(repo) ? ` (repo \`${repo}\`)` : ''}, but it names no project ` +
+        'and the run that filed it is in no project; steering rules are scoped by project, so it would land ' +
+        'as a rule for every project — reject it, or accept it with reach "operator" if it is meant for every project',
+    };
+  }
   const targets: ConformanceRule['targets'] = {};
   if (typeof language === 'string' && language !== '') targets.language = language;
-  // DC-S3: the `project` facet is the rule's `targets.project` — a project decision lands scoped to
-  // that project, never everywhere (E3). The caller probes the engine and reads the rule back.
-  if (typeof project === 'string' && project !== '') targets.project = project;
+  // The caller probes the engine and reads the rule back.
+  if (project !== undefined) targets.project = project;
   const rule: ConformanceRule = {
     id: `proposal:${proposalId}`,
     rule_type: 'policy',
@@ -105,18 +134,41 @@ export function policyProposalToRule(
     // REQUIRED engine-side (f32, no serde default, INV-C2 `[0,1]`); the payload carries none, so a
     // fixed authority — the same 0.8 the steering-author landing defaults to.
     confidence: 0.8,
-    // `language` and `project` map onto the engine's Targets; a `repo` facet has no rule slot.
+    // `language` and `project` map onto the engine's Targets; a `repo` facet has no rule slot (a
+    // project-reach proposal that resolves to no project is refused above).
     targets,
     // The landed rule names the proposal it came from (DC-S3), the same id it is keyed on.
     provenance: { source: 'proposal', ref: `proposal:${proposalId}`, source_kinds: [] },
     steering_type: steeringType as SteeringType,
   };
-  return { rule, steeringType: steeringType as SteeringType };
+  return { rule, steeringType: steeringType as SteeringType, reach };
 }
 
 
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Withdraw the rule a policy proposal landed, once the proposal is rejected. The rule lands BEFORE
+ * estate approves the proposal, so a proposal left pending (a crash between the two, or an approve
+ * estate did not confirm) may already have a live `proposal:<id>` rule; rejecting the proposal must
+ * not leave it in force. Returns `null` when nothing is live (a memory proposal, never landed, or
+ * already retired) or the rule was retired, else the loud reason the retire failed.
+ */
+export async function withdrawLandedRule(
+  adapter: Pick<CoreAdapter, 'readConformanceRule' | 'retireConformanceRule'>,
+  proposalId: string,
+): Promise<string | null> {
+  const id = `proposal:${proposalId}`;
+  try {
+    const stored = await adapter.readConformanceRule(id);
+    if (stored === null || stored.retired === true) return null;
+    await adapter.retireConformanceRule(id);
+    return null;
+  } catch (err) {
+    return `the proposal is rejected but its landed rule ${id} could not be retired (${message(err)}); retire it by hand via DELETE ${V}/governance/rules/${id}`;
+  }
 }
 
 export interface PolicyLandingDeps {
@@ -126,7 +178,7 @@ export interface PolicyLandingDeps {
 
 export async function landPolicyRule(
   deps: PolicyLandingDeps,
-  built: { rule: ConformanceRule; steeringType: SteeringType },
+  built: { rule: ConformanceRule; steeringType: SteeringType; reach?: PolicyReach },
   actor: Actor,
   detail: { via: string; proposalId: string } & Record<string, unknown>,
 ): Promise<PolicyLandingResult> {
@@ -194,6 +246,7 @@ export async function landPolicyRule(
     outcome: 'landed',
     ruleId: built.rule.id,
     steering_type: built.steeringType,
+    reach: built.reach ?? (project !== undefined ? 'project' : 'operator'),
     ...(project !== undefined ? { project } : {}),
   };
 }

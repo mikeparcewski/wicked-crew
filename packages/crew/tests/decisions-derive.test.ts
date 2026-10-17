@@ -157,9 +157,9 @@ describe('deriveDecision — auto needs facts the model cannot set', () => {
 });
 
 describe('deriveDecision — restated, conflict, recurrence, scope', () => {
-  it('the exact key of an in-force rule in this project → restated (B7), no rule', () => {
+  it('the exact key of an in-force rule in this project → restated (B7), no rule (the words name the project)', () => {
     const inForce = [{ id: 'proposal:p1', statement: "Always check the payment provider's records.", project: P }];
-    const d = deriveDecision(base("always check the payment provider's records", { inForce }));
+    const d = deriveDecision(base("always check the payment provider's records", { inForce, projectNames: ['payment'] }));
     expect(d.route).toBe('restated');
     expect(d.rule_ref).toBe('proposal:p1');
   });
@@ -215,3 +215,35 @@ describe('helpers', () => {
     expect(steeringTypeOf('Checkout should feel calmer.')).toBe('design-ux');
   });
 });
+
+describe('deriveDecision — reach (operator 2026-10-17: the operator\'s rules apply in every project)', () => {
+  it('a rule said in a project is for every project unless the words name that project', () => {
+    const p = (words: string) => deriveDecision(base(words, { projectId: 'tiny-calc' }));
+    expect(p('always run the repo checks before a walkthrough').scope).toBe('everywhere');
+    expect(p('always run the tiny-calc checks before a walkthrough').scope).toBe('project');
+    expect(p('in Tiny Calc, never mock the clock').scope).toBe('project');
+    // A word that only contains the id is not naming it.
+    expect(p('always run the tiny-calculator checks').scope).toBe('everywhere');
+    expect(deriveDecision(base('always run the repo checks', { projectId: null })).scope).toBe('everywhere');
+  });
+
+  it('the project\'s display name counts as naming it (ids are opaque)', () => {
+    const d = deriveDecision(base('Always run the Kestrel checks before merging', { projectId: 'proj_01abc234', projectNames: ['Kestrel'] }));
+    expect(d.scope).toBe('project');
+  });
+
+  it('a project-only rule does not swallow an operator-wide one as restated', () => {
+    const inForce = [{ id: 'old', statement: 'Always run the repo checks before a walkthrough.', project: 'tiny-calc' }];
+    const d = deriveDecision(base('always run the repo checks before a walkthrough', { projectId: 'tiny-calc', inForce }));
+    expect(d.scope).toBe('everywhere');
+    expect(d.route).not.toBe('restated');
+  });
+
+  it('an operator-wide rule that contradicts another project\'s rule is offered, never auto or conflict', () => {
+    const elsewhere = [{ id: 'q1', statement: 'Never run the repo checks before a walkthrough.', project: 'heron' }];
+    const d = deriveDecision(base('always run the repo checks before a walkthrough', { projectId: 'kestrel', elsewhere }));
+    expect(d.route).toBe('offer');
+    expect(d.rule_ref).toBeUndefined();
+  });
+});
+

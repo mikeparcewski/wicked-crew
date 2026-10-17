@@ -195,6 +195,8 @@ const HUMAN = { 'x-actor': 'human:operator' };
 const AGENT = { 'x-actor': 'agent:operator' };
 const OBSERVER = { 'x-actor': 'human:observer' };
 const ALWAYS = 'always run the repo checks before a walkthrough';
+/** The same kind of rule, naming the run's project (kestrel): its reach is that project. */
+const ALWAYS_KESTREL = 'always run the kestrel checks before a walkthrough';
 
 async function gateNote(h: Harness, run: string, amend: string, headers: Record<string, string> = HUMAN): Promise<void> {
   const res = await h.app.inject({ method: 'POST', url: `/api/v1/runs/${run}/gate`, headers, payload: { approve: true, amend } });
@@ -209,7 +211,7 @@ async function list(h: Harness, headers: Record<string, string> = HUMAN, q = '')
 }
 
 describe('DC-S4a structured hosts → ledger → one landing path', () => {
-  it('under required, a human gate note "always X" auto-remembers in the run\'s project with ORIGIN', async () => {
+  it('under required, a human gate note "always X" auto-remembers for EVERY project (reach operator) with ORIGIN', async () => {
     const h = await harness();
     await gateNote(h, 'r1', ALWAYS);
     const [d] = await list(h);
@@ -222,15 +224,26 @@ describe('DC-S4a structured hosts → ledger → one landing path', () => {
       rule_id: 'proposal:p1',
       proposal_id: 'p1',
       origin: { actor: { id: 'human-1', kind: 'human', trust: 'operator' }, auth_mode: 'required', run_id: 'r1', words: ALWAYS, words_source: 'typed', redacted: false, choice: 'approve' },
-      derived: { statement: 'Always run the repo checks before a walkthrough.', scope: 'project', steering_type: 'testing', template: 'T1-always' },
+      derived: { statement: 'Always run the repo checks before a walkthrough.', scope: 'everywhere', steering_type: 'testing', template: 'T1-always' },
     });
     const rule = h.rules.get('proposal:p1')!;
-    expect(rule.targets.project).toBe('kestrel');
+    // The operator's own rule is theirs everywhere: no project pins it (operator 2026-10-17).
+    expect(rule.targets.project).toBeUndefined();
     expect(rule.provenance).toEqual({ source: 'proposal', ref: 'proposal:p1', source_kinds: ['operator-words'] });
     expect(rule.severity).toBe('warn');
     expect(rule.effect).toBeUndefined();
-    // The payload estate holds carries only the decision id beside the rule text.
-    expect(h.estate.proposals.get('p1')!.payload).toEqual({ rule: 'Always run the repo checks before a walkthrough.', severity: 'warn', capture: 'decision', decision: { id: d!.id } });
+    // The payload estate holds carries only the decision id and the reach beside the rule text.
+    expect(h.estate.proposals.get('p1')!.payload).toEqual({ rule: 'Always run the repo checks before a walkthrough.', severity: 'warn', capture: 'decision', decision: { id: d!.id }, reach: 'operator' });
+    expect(h.estate.proposals.get('p1')!.facets).toEqual({});
+  });
+
+  it('a rule whose words name the run\'s project lands for that project (reach project)', async () => {
+    const h = await harness();
+    await gateNote(h, 'r1', ALWAYS_KESTREL);
+    const [d] = await list(h);
+    expect(d).toMatchObject({ state: 'remembered', derived: { scope: 'project' } });
+    expect(h.rules.get('proposal:p1')!.targets.project).toBe('kestrel');
+    expect(h.estate.proposals.get('p1')!.payload).toMatchObject({ reach: 'project' });
     expect(h.estate.proposals.get('p1')!.facets).toEqual({ project: 'kestrel' });
     expect(h.frames).toContainEqual({ type: 'decisionChanged', id: d!.id, state: 'remembered', rule_id: 'proposal:p1', project_id: 'kestrel' });
   });
@@ -273,7 +286,8 @@ describe('DC-S4a structured hosts → ledger → one landing path', () => {
       method: 'POST',
       url: `/api/v1/decisions/${d!.id}/remember`,
       headers: HUMAN,
-      payload: { statement: 'Rebase onto main before asking for any review.' },
+      // The person narrows the reach to this project at Remember.
+      payload: { statement: 'Rebase onto main before asking for any review.', scope: 'project' },
     });
     expect(res.statusCode, res.body).toBe(200);
     expect(res.json()).toEqual({ rule_id: 'proposal:p1', proposal_id: 'p1', project: 'kestrel' });
@@ -291,7 +305,8 @@ describe('DC-S4a structured hosts → ledger → one landing path', () => {
     const prefer = decisions.find((d) => d.origin.run_id === 'r2')!;
     const ok = await h.app.inject({ method: 'POST', url: `/api/v1/proposals/${rebase.proposal_id}/approve`, headers: HUMAN });
     expect(ok.statusCode, ok.body).toBe(200);
-    expect(ok.json()).toMatchObject({ outcome: 'handed_off', landing: { outcome: 'landed', ruleId: `proposal:${rebase.proposal_id}`, project: 'kestrel' } });
+    expect(ok.json()).toMatchObject({ outcome: 'handed_off', landing: { outcome: 'landed', ruleId: `proposal:${rebase.proposal_id}`, reach: 'operator' } });
+    expect((ok.json() as { landing: { project?: string } }).landing.project).toBeUndefined();
     expect(h.rules.get(`proposal:${rebase.proposal_id}`)!.provenance.source_kinds).toEqual(['operator-words']);
     expect((await h.app.inject({ method: 'POST', url: `/api/v1/proposals/${prefer.proposal_id}/approve`, headers: AGENT })).statusCode).toBe(403);
     const rej = await h.app.inject({ method: 'POST', url: `/api/v1/proposals/${prefer.proposal_id}/reject`, headers: HUMAN });
@@ -327,7 +342,7 @@ describe('DC-S4a structured hosts → ledger → one landing path', () => {
 
   it('an engine that drops targets.project on upsert → read-back mismatch → retired + landing_failed, never global', async () => {
     const h = await harness({ dropProject: true });
-    await gateNote(h, 'r1', ALWAYS);
+    await gateNote(h, 'r1', ALWAYS_KESTREL);
     const [d] = await list(h);
     expect(d).toMatchObject({ state: 'landing_failed' });
     expect(d!.error).toMatch(/targets\.project reads back null, not "kestrel".*was retired/);
@@ -341,7 +356,8 @@ describe('DC-S4a structured hosts → ledger → one landing path', () => {
       statement: 'Always run the repo checks before a walkthrough.',
       severity: 'warn',
       confidence: 0.8,
-      targets: { project: 'kestrel' },
+      // A rule for every project: the operator-wide restatement it covers (a project-only rule would not).
+      targets: {},
       provenance: { source: 'proposal', ref: 'proposal:old', source_kinds: ['operator-words'] },
     } as ConformanceRule;
     const h = await harness({ inForce: [inForce] });
@@ -351,12 +367,17 @@ describe('DC-S4a structured hosts → ledger → one landing path', () => {
   });
 
   it('widen (B8): the same rule in two projects → one project-less successor superseding both', async () => {
-    const h = await harness();
-    await gateNote(h, 'r1', ALWAYS);
-    await gateNote(h, 'r2', ALWAYS);
-    const decisions = await list(h);
+    const h = await harness({ authMode: 'off' });
+    await gateNote(h, 'r1', ALWAYS, {});
+    await gateNote(h, 'r2', ALWAYS, {});
+    // Each was remembered for its own project (the person chose reach "project" at Remember).
+    for (const d of await list(h, {})) {
+      const r = await h.app.inject({ method: 'POST', url: `/api/v1/decisions/${d.id}/remember`, headers: {}, payload: { scope: 'project' } });
+      expect(r.statusCode, r.body).toBe(200);
+    }
+    const decisions = await list(h, {});
     expect(decisions.map((d) => d.widen)).toEqual([{ projects: ['heron', 'kestrel'] }, { projects: ['heron', 'kestrel'] }]);
-    const res = await h.app.inject({ method: 'POST', url: `/api/v1/decisions/${decisions[0]!.id}/widen`, headers: HUMAN });
+    const res = await h.app.inject({ method: 'POST', url: `/api/v1/decisions/${decisions[0]!.id}/widen`, headers: {} });
     expect(res.statusCode, res.body).toBe(200);
     const { rule_id } = res.json() as { rule_id: string };
     const successor = h.rules.get(rule_id)!;
@@ -364,7 +385,7 @@ describe('DC-S4a structured hosts → ledger → one landing path', () => {
     expect(successor.supersedes).toEqual(['proposal:p1', 'proposal:p2']);
     expect(h.rules.get('proposal:p1')!.retired).toBe(true);
     expect(h.rules.get('proposal:p2')!.retired).toBe(true);
-    expect((await list(h)).map((d) => d.state)).toEqual(['widened', 'widened']);
+    expect((await list(h, {})).map((d) => d.state)).toEqual(['widened', 'widened']);
   });
 
   it('elicitation free text and run inject are hosts; a picked option is a choice', async () => {
@@ -492,14 +513,49 @@ describe('DC-S4a codex adjudication fixes', () => {
     expect((await list(h))[0]).toMatchObject({ state: 'remembered', proposal_id: filed.id, how: 'needs-you' });
   });
 
-  it('a decision whose landing failed can still be dismissed (its proposal is already approved)', async () => {
+  it('a decision whose landing failed leaves its proposal pending (never approved with no rule) and can be dismissed', async () => {
     const h = await harness({ dropProject: true });
-    await gateNote(h, 'r1', ALWAYS);
+    await gateNote(h, 'r1', ALWAYS_KESTREL);
     const [d] = await list(h);
     expect(d!.state).toBe('landing_failed');
+    const queue = async (state: string) =>
+      ((await h.estate.tool('proposal.list', { state })) as { proposals: Array<{ id: string }> }).proposals.map((p) => p.id);
+    expect(await queue('approved')).toEqual([]);
+    expect(await queue('pending')).toHaveLength(1);
     const res = await h.app.inject({ method: 'POST', url: `/api/v1/decisions/${d!.id}/dismiss`, headers: HUMAN, payload: { reason: 'not-a-rule' } });
     expect(res.statusCode, res.body).toBe(200);
     expect((await list(h))[0]!.state).toBe('dismissed');
+    expect(await queue('rejected')).toHaveLength(1);
+  });
+
+  it('an approval estate does not confirm after the rule landed undoes nothing; Remember again finishes, Dismiss withdraws', async () => {
+    const h = await harness();
+    await gateNote(h, 'r1', 'rebase onto main before requesting review');
+    await gateNote(h, 'r2', 'squash fixups before requesting review');
+    const [a, b] = await list(h);
+    const real = h.estate.tool.getMockImplementation()!;
+    h.estate.tool.mockImplementation(async (name: string, args: Record<string, unknown>) => {
+      if (name === 'proposal.approve') throw new Error('store locked');
+      return real(name, args);
+    });
+    for (const d of [a!, b!]) {
+      const res = await h.app.inject({ method: 'POST', url: `/api/v1/decisions/${d.id}/remember`, headers: HUMAN });
+      expect(res.statusCode).toBe(502);
+      expect(res.body).toContain('store locked');
+    }
+    expect(h.adapter.retireConformanceRule).not.toHaveBeenCalled();
+    expect((await list(h)).map((d) => d.state)).toEqual(['landing_failed', 'landing_failed']);
+    h.estate.tool.mockImplementation(real);
+    // Remember again lands the same rule id and approves the still-pending proposal.
+    const again = await h.app.inject({ method: 'POST', url: `/api/v1/decisions/${a!.id}/remember`, headers: HUMAN });
+    expect(again.statusCode, again.body).toBe(200);
+    // Dismiss withdraws the other's live rule: a dismissed decision has nothing in force.
+    const dismissed = await h.app.inject({ method: 'POST', url: `/api/v1/decisions/${b!.id}/dismiss`, headers: HUMAN, payload: { reason: 'not-a-rule' } });
+    expect(dismissed.statusCode, dismissed.body).toBe(200);
+    const states = Object.fromEntries((await list(h)).map((d) => [d.id, d.state]));
+    expect(states[a!.id]).toBe('remembered');
+    expect(states[b!.id]).toBe('dismissed');
+    expect(h.adapter.retireConformanceRule).toHaveBeenCalledTimes(1);
   });
 
   it('widen lands the EFFECTIVE (edited) statement the operator remembered', async () => {
@@ -515,4 +571,29 @@ describe('DC-S4a codex adjudication fixes', () => {
     expect(res.statusCode, res.body).toBe(200);
     expect(h.rules.get((res.json() as { rule_id: string }).rule_id)!.statement).toBe('Rebase on main before any review.');
   });
+
+  it('a reach chosen at accept survives a failed approval and a replay (never widened on retry)', async () => {
+    const h = await harness({ authMode: 'off' });
+    await gateNote(h, 'r1', ALWAYS, {});
+    const [d] = await list(h, {});
+    expect(d!.derived.scope).toBe('everywhere');
+    const real = h.estate.tool.getMockImplementation()!;
+    h.estate.tool.mockImplementation(async (name: string, args: Record<string, unknown>) => {
+      if (name === 'proposal.approve') throw new Error('store locked');
+      return real(name, args);
+    });
+    const failed = await h.app.inject({ method: 'POST', url: `/api/v1/proposals/${d!.proposal_id}/approve`, headers: {}, payload: { reach: 'project' } });
+    expect(failed.statusCode).toBe(502);
+    expect(h.rules.get(`proposal:${d!.proposal_id}`)!.targets.project).toBe('kestrel');
+    h.estate.tool.mockImplementation(real);
+    // "Remember again" without resending the reach keeps the project the landing was attempted with.
+    const again = await h.app.inject({ method: 'POST', url: `/api/v1/decisions/${d!.id}/remember`, headers: {}, payload: {} });
+    expect(again.statusCode, again.body).toBe(200);
+    expect(again.json()).toMatchObject({ project: 'kestrel' });
+    expect(h.rules.get(`proposal:${d!.proposal_id}`)!.targets.project).toBe('kestrel');
+    // A replayed approve reports the effective (edited) reach.
+    const replay = await h.app.inject({ method: 'POST', url: `/api/v1/proposals/${d!.proposal_id}/approve`, headers: {} });
+    expect((replay.json() as { landing: unknown }).landing).toMatchObject({ reach: 'project', project: 'kestrel' });
+  });
 });
+

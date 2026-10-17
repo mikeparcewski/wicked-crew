@@ -7915,18 +7915,35 @@ export interface ListProposalsResponse {
  * landing that could not complete reports `outcome:"failed"` with a loud, operator-readable `error`
  * (recoverable by hand via `POST /governance/rules`) rather than turning the approve into a 500.
  */
+/**
+ * (api-types 0.126.0) What a proposal is ABOUT — the one `reach` word for memories and policies.
+ * `operator`: how the operator works (style, preferences, standing extra steps, standing rules) —
+ * applies in EVERY project (a memory lands at the operator scope every recall includes; a rule lands
+ * with no project). `project`: that project's or repo's code (a rule lands with `targets.project`).
+ * `pattern` (memories only): a general pattern the person lets cross projects.
+ */
+export type PolicyReach = 'project' | 'operator';
+export type MemoryReach = 'project' | 'pattern' | 'operator';
+
 export interface PolicyLandingResult {
-  /** `landed` = the steering rule is in the store; `failed` = the proposal is approved but no rule
-   *  was written — `error` says why. */
+  /** `landed` = the steering rule is in the store and the proposal is approved; `failed` = no rule
+   *  is in force — `error` says why. Since crew 0.13.3 the rule lands BEFORE estate marks the
+   *  proposal approved, so on `failed` from `POST /proposals/:id/approve` the proposal is still
+   *  pending and can be approved again (an older daemon left it approved with no rule). */
   outcome: 'landed' | 'failed';
   /** The upserted rule's id (deterministic `proposal:<proposalId>`, idempotent on replay). Present on `landed`. */
   ruleId?: string;
+  /** (api-types 0.126.0) The reach the rule landed with: `operator` = every project, `project` =
+   *  {@link PolicyLandingResult.project} only. Present on `landed` from crew ≥ 0.13.3. */
+  reach?: PolicyReach;
   /** The steering type derived from the proposal's `kind_type` (`policy:<type>`). Present on `landed`. */
   steering_type?: SteeringType;
   /**
    * (api-types 0.77.0, DC-S3) The project the landed rule is scoped to — the proposal's `project`
-   * facet, kept as `targets.project` and confirmed by reading the rule back. Absent on a landing
-   * with no project (the rule applies everywhere).
+   * facet (else, since crew 0.13.3, the project of the run that filed it), kept as
+   * `targets.project` and confirmed by reading the rule back. Absent on a landing with no project
+   * (the rule applies everywhere). A proposal scoped only to a `repo` that resolves to no project
+   * fails instead of landing everywhere.
    */
   project?: string;
   /** Present iff `outcome:"failed"` — the loud reason the rule did not land. */
@@ -7949,8 +7966,8 @@ export type ApproveProposalResponse =
  * `POST /proposals/:id/approve` body (api-types 0.49.0) — present only for an accept WITH an edit;
  * no body (or `{}`) is the plain approve. estate has no proposal edit, so the daemon submits the
  * edited copy to the same queue (`payload.edited_from = <id>`), approves it, then rejects the
- * original. Memory proposals only (400 otherwise; 404 when `id` is not pending; 409 while another
- * accept of the same `id` is in flight).
+ * original. `content` is for memory proposals only (400 otherwise; 404 when `id` is not pending;
+ * 409 while another accept of the same `id` is in flight); a policy proposal takes `reach` alone.
  */
 export interface ApproveProposalBody {
   /** The edited memory text (replaces `payload.content`). */
@@ -7959,8 +7976,12 @@ export interface ApproveProposalBody {
    *  (the human act that lets a pattern cross projects; refused on anything but a captured memory, `payload.capture: "memory"`).
    *  `"project"`: it stays scoped to its project — gaining the proposing run's project as its
    *  `project` facet when the worker filed none (400 when no project files that run). An accept
-   *  that changes nothing the store keeps approves the original as filed (no copy, no `edited`). */
-  reach?: 'project' | 'pattern';
+   *  that changes nothing the store keeps approves the original as filed (no copy, no `edited`).
+   *  `"operator"` (api-types 0.126.0): the memory is about how the operator works — it lands at the
+   *  operator scope, recalled in every project, with no project/repo facet pinning it to one.
+   *  On a POLICY proposal (`reach` only, no `content`): `"operator"` lands the rule for every
+   *  project, `"project"` for its project (400 when it names none); `"pattern"` is refused. */
+  reach?: MemoryReach;
 }
 
 /**
@@ -8014,7 +8035,8 @@ export interface CaptureImageFile {
  * per-run inbox and launches a repo-less run filed to the project (through `POST /runs`, so its
  * refusals are that route's). The run's output is proposals in the `/proposals` queue — each with
  * `kind_type: "memory"` (or `"policy:<type>"` for a rule), `payload.capture` = `intent` |
- * `decision` | `memory` | `rule`, `provenance.run_id` = the returned `runId`, and `facets.project`
+ * `choice` | `memory` | `rule` (a memory row filed before crew 0.13.3 may say `decision` for a
+ * `choice`; `decision` on a POLICY row means the decision ledger filed it, DES-decision-capture), `provenance.run_id` = the returned `runId`, and `facets.project`
  * unless the team marked a memory `payload.reach: "pattern"` (the user decides on accept).
  */
 export interface CaptureBody {

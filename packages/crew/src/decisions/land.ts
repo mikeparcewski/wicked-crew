@@ -14,7 +14,7 @@ import type { CoreAdapter } from '../core/adapter.js';
 import type { Actor, ConformanceRule, DecisionChangedFrame, SteeringType } from '../core/types.js';
 import { trustAtLeast, type AuthMode } from '../api/auth.js';
 import type { AuditLog } from '../api/audit.js';
-import { landPolicyRule, policyProposalToRule } from '../api/policy-landing.js';
+import { landPolicyRule, policyProposalToRule, withdrawLandedRule } from '../api/policy-landing.js';
 import type { InForceRule } from './derive.js';
 import {
   DECISION_DISMISSED,
@@ -49,7 +49,7 @@ export interface DecisionDeps {
     CoreAdapter,
     'projectRulesSupported' | 'upsertConformanceRule' | 'readConformanceRule' | 'retireConformanceRule' | 'listConformanceRules'
   > &
-    Partial<Pick<CoreAdapter, 'considerRules'>>;
+    Partial<Pick<CoreAdapter, 'considerRules' | 'projectGet'>>;
   audit: AuditLog;
   emit?: DecisionBusEmit | null;
   broadcast?: (frame: DecisionChangedFrame) => void;
@@ -166,6 +166,30 @@ export class DecisionService {
     this.changed(o.id);
   }
 
+  /** Other projects' live rules (an operator-wide rule lands in them too). Fail-soft: `[]` + a log. */
+  async elsewhere(projectId: string | null): Promise<InForceRule[]> {
+    try {
+      const all = await this.deps.adapter.listConformanceRules();
+      return all
+        .filter((r) => r.retired !== true && r.targets?.project !== undefined && r.targets.project !== projectId)
+        .map(toInForce);
+    } catch (err) {
+      this.log(`[decisions] could not read other projects' rules: ${message(err)}`);
+      return [];
+    }
+  }
+
+  /** The names a project goes by besides its id (its display name). Fail-soft: `[]`. */
+  async projectNames(projectId: string | null): Promise<string[]> {
+    if (projectId === null || typeof this.deps.adapter.projectGet !== 'function') return [];
+    try {
+      const p = (await this.deps.adapter.projectGet(projectId)) as { name?: unknown } | null;
+      return typeof p?.name === 'string' && p.name.trim() !== '' ? [p.name] : [];
+    } catch {
+      return [];
+    }
+  }
+
   /** The in-force rules for a project (this project's and the global ones). Fail-soft: `[]` + a log. */
   async inForce(projectId: string | null): Promise<InForceRule[]> {
     const { adapter } = this.deps;
@@ -246,7 +270,7 @@ export class DecisionService {
       kind_type: `policy:${steeringType}`,
       // The payload carries ONLY the decision id beside the rule text: estate proposals are writable
       // by anyone, so crew reads words, actor and ORIGIN from its own ledger (§4.2.4).
-      payload: { rule: statement, severity: 'warn', capture: 'decision', decision: { id: record.id } },
+      payload: { rule: statement, severity: 'warn', capture: 'decision', decision: { id: record.id }, reach: project !== undefined ? 'project' : 'operator' },
       facets: project !== undefined ? { project } : {},
     })) as { id?: unknown };
     if (typeof submitted?.id !== 'string' || submitted.id === '') {
@@ -290,7 +314,8 @@ export class DecisionService {
     const record = this.requireRecord(id);
     const view = this.viewOf(id);
     if (view.state === 'remembered' && view.rule_id !== undefined && view.proposal_id !== undefined) {
-      return { rule_id: view.rule_id, proposal_id: view.proposal_id, ...(view.edits?.scope !== 'everywhere' && record.project_id !== null && record.derived.scope === 'project' ? { project: record.project_id } : {}) };
+      const effective = view.edits?.scope ?? record.derived.scope;
+      return { rule_id: view.rule_id, proposal_id: view.proposal_id, ...(effective === 'project' && record.project_id !== null ? { project: record.project_id } : {}) };
     }
     if (view.state !== 'recorded' && view.state !== 'offered' && view.state !== 'landing_failed') {
       throw new DecisionError(409, `decision ${id} is ${view.state}; it cannot be remembered`);
@@ -298,7 +323,9 @@ export class DecisionService {
     if (opts.how === 'auto' && (record.route !== 'auto' || record.origin.auth_mode !== 'required' || this.deps.authMode !== 'required')) {
       throw new DecisionError(409, `decision ${id} is not auto-eligible (route ${record.route}, auth ${record.origin.auth_mode})`);
     }
-    const edits = opts.edits ?? {};
+    // A retry after a failed landing keeps the edits that landing was attempted with (its reach
+    // above all): the rule may already be live with them.
+    const edits = { ...(view.state === 'landing_failed' ? view.edits ?? {} : {}), ...(opts.edits ?? {}) };
     const statement = (edits.statement ?? record.derived.statement ?? '').trim();
     if (statement === '') throw new DecisionError(409, `decision ${id} has no rule to remember`);
     const scope = edits.scope ?? record.derived.scope;
@@ -309,10 +336,18 @@ export class DecisionService {
     const steeringType = edits.steering_type ?? record.derived.steering_type;
     const supersedes = record.route === 'conflict' && record.rule_ref !== undefined ? [record.rule_ref] : [];
 
+    // The edits this landing is attempted with, recorded on every outcome (a retry reuses them).
+    const editsRecorded = {
+      ...(edits.statement !== undefined && edits.statement !== record.derived.statement ? { statement: edits.statement } : {}),
+      ...(edits.scope !== undefined && edits.scope !== record.derived.scope ? { scope: edits.scope } : {}),
+      ...(edits.steering_type !== undefined && edits.steering_type !== record.derived.steering_type ? { steering_type: edits.steering_type } : {}),
+    };
+    const attempted = Object.keys(editsRecorded).length > 0 ? { edits: editsRecorded } : {};
+    // The rule lands BEFORE estate marks the proposal approved: a landing that fails leaves the
+    // proposal pending (re-rememberable, rejectable), never approved with no rule.
     let proposalId: string;
     try {
       proposalId = view.proposal_id ?? (await this.submitProposal(record, statement, steeringType, project));
-      await this.approve(proposalId);
     } catch (err) {
       if (err instanceof DecisionError) throw err;
       throw new DecisionError(502, `the review queue (estate) refused the landing: ${message(err)}`);
@@ -320,7 +355,7 @@ export class DecisionService {
     const built = policyProposalToRule(
       proposalId,
       `policy:${steeringType}`,
-      { rule: statement, severity: 'warn' },
+      { rule: statement, severity: 'warn', reach: project !== undefined ? 'project' : 'operator' },
       project !== undefined ? { project } : {},
     );
     if ('error' in built) throw new DecisionError(400, built.error);
@@ -337,7 +372,16 @@ export class DecisionService {
     });
     if (landing.outcome !== 'landed' || landing.ruleId === undefined) {
       const error = landing.error ?? 'the landing failed';
-      this.outcome({ id, state: 'landing_failed', by: byOf(actor), proposal_id: proposalId, error });
+      this.outcome({ id, state: 'landing_failed', by: byOf(actor), proposal_id: proposalId, error, ...attempted });
+      throw new DecisionError(502, error);
+    }
+    try {
+      await this.approve(proposalId);
+    } catch (err) {
+      // The rule is live but estate did not confirm the approval (it may have committed it). Nothing
+      // is undone: Remember again re-lands the same rule id and approves; Dismiss retires the rule.
+      const error = `rule ${landing.ruleId} landed but the review queue (estate) did not confirm the approval: ${message(err)} — Remember again to finish, or dismiss to withdraw it`;
+      this.outcome({ id, state: 'landing_failed', by: byOf(actor), proposal_id: proposalId, error, ...attempted });
       throw new DecisionError(502, error);
     }
     for (const old of supersedes) {
@@ -347,11 +391,6 @@ export class DecisionService {
         this.log(`[decisions] retiring superseded rule ${old} failed: ${message(err)}`);
       }
     }
-    const editsRecorded = {
-      ...(edits.statement !== undefined && edits.statement !== record.derived.statement ? { statement: edits.statement } : {}),
-      ...(edits.scope !== undefined && edits.scope !== record.derived.scope ? { scope: edits.scope } : {}),
-      ...(edits.steering_type !== undefined && edits.steering_type !== record.derived.steering_type ? { steering_type: edits.steering_type } : {}),
-    };
     this.outcome({
       id,
       state: 'remembered',
@@ -421,11 +460,15 @@ export class DecisionService {
       try {
         await this.deps.estateTool('proposal.reject', { id: view.proposal_id });
       } catch (err) {
-        // A failed landing leaves its proposal approved (estate rejects only pending ones): the
-        // decision is still dismissable — nothing landed (codex on DC-S4a).
+        // A landing_failed decision's proposal may be approved (a pre-fix landing, or an approve
+        // estate committed without confirming); estate rejects only pending ones. Still dismissable.
         const approved = view.state === 'landing_failed' && (await this.isApproved(view.proposal_id).catch(() => false));
         if (!approved) throw new DecisionError(502, `the review queue (estate) refused the dismissal: ${message(err)}`);
       }
+      // The rule lands before the approval, so a landing_failed decision may have a live rule:
+      // a dismissed decision has nothing in force.
+      const withdrawn = await withdrawLandedRule(this.deps.adapter, view.proposal_id);
+      if (withdrawn !== null) throw new DecisionError(502, withdrawn);
     }
     this.outcome({ id, state: 'dismissed', by: byOf(actor), reason, ...(view.proposal_id !== undefined ? { proposal_id: view.proposal_id } : {}) });
     await this.fact(DECISION_DISMISSED, { decision_id: id, reason }, `dismissed:${id}`);
@@ -453,7 +496,11 @@ export class DecisionService {
     if (view.proposal_id !== undefined) {
       try {
         await this.deps.estateTool('proposal.reject', { id: view.proposal_id });
+        // The rule lands before the approval: a landing_failed decision may have a live rule.
+        const withdrawn = await withdrawLandedRule(this.deps.adapter, view.proposal_id);
+        if (withdrawn !== null) throw new DecisionError(502, withdrawn);
       } catch (err) {
+        if (err instanceof DecisionError) throw err;
         throw new DecisionError(502, `the review queue (estate) refused: ${message(err)}`);
       }
     }
@@ -481,16 +528,15 @@ export class DecisionService {
     try {
       const submitted = (await this.deps.estateTool('proposal.submit', {
         kind_type: `policy:${steeringType}`,
-        payload: { rule: statement, severity: 'warn', capture: 'decision', decision: { id }, widens: supersedes.length },
+        payload: { rule: statement, severity: 'warn', capture: 'decision', decision: { id }, widens: supersedes.length, reach: 'operator' },
         facets: {},
       })) as { id?: unknown };
       if (typeof submitted?.id !== 'string' || submitted.id === '') throw new Error('proposal.submit returned no id');
       proposalId = submitted.id;
-      await this.approve(proposalId);
     } catch (err) {
       throw new DecisionError(502, `the review queue (estate) refused the widening: ${message(err)}`);
     }
-    const built = policyProposalToRule(proposalId, `policy:${steeringType}`, { rule: statement, severity: 'warn' }, {});
+    const built = policyProposalToRule(proposalId, `policy:${steeringType}`, { rule: statement, severity: 'warn', reach: 'operator' }, {});
     if ('error' in built) throw new DecisionError(400, built.error);
     const rule: ConformanceRule = {
       ...built.rule,
@@ -503,7 +549,24 @@ export class DecisionService {
       decisionId: id,
     });
     if (landing.outcome !== 'landed' || landing.ruleId === undefined) {
+      // Withdraw the proposal this widening just filed: nothing landed, and a retry files its own.
+      await this.deps.estateTool('proposal.reject', { id: proposalId }).catch(() => undefined);
       throw new DecisionError(502, landing.error ?? 'the widening failed to land');
+    }
+    try {
+      await this.approve(proposalId);
+    } catch (err) {
+      // Nothing was superseded yet, so the narrower rules still hold: withdraw the successor and its
+      // queue row (a stale row would route to remember() and report the original rule as landed).
+      let retired: string;
+      try {
+        await this.deps.adapter.retireConformanceRule(landing.ruleId);
+        retired = `rule ${landing.ruleId} was retired`;
+      } catch (retireErr) {
+        retired = `retiring rule ${landing.ruleId} FAILED (${message(retireErr)})`;
+      }
+      await this.deps.estateTool('proposal.reject', { id: proposalId }).catch(() => undefined);
+      throw new DecisionError(502, `the review queue (estate) refused the widening after its rule landed: ${message(err)}; ${retired}`);
     }
     for (const old of supersedes) {
       try {

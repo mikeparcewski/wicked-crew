@@ -28,7 +28,13 @@ export interface DeriveInput {
   authMode: 'off' | 'required';
   wordsSource: 'typed' | 'operator-files' | 'cli-transcript';
   projectId: string | null;
+  /** The names the project goes by besides its id (its display name): words naming any of them
+   *  scope the rule to the project. */
+  projectNames?: ReadonlyArray<string>;
   inForce: ReadonlyArray<InForceRule>;
+  /** OTHER projects' in-force rules: an operator-wide rule lands in them too, so a conflict there
+   *  takes a person's click (never auto). */
+  elsewhere?: ReadonlyArray<InForceRule>;
   /** Prior records with the same key (the ledger index); absent = none. */
   recurrence?: (key: string) => { count: number; first_at: number; projects: string[] } | null;
   labels?: DecisionModelLabels;
@@ -280,7 +286,12 @@ export function deriveDecision(input: DeriveInput): Derivation {
   const key = template !== null && polarity !== null ? keyOf(template, polarity, keyBody) : null;
   const recurrenceHit = key !== null ? input.recurrence?.(key) ?? null : null;
   const recurrence = recurrenceHit ?? { count: 0, first_at: input.now ?? Date.now(), projects: [] };
-  const scope: 'project' | 'everywhere' = input.projectId !== null ? 'project' : 'everywhere';
+  // REACH (operator 2026-10-17): a rule the operator states is THEIR rule — every project — unless
+  // the words name the project they were said in. The person sees and can change it at Remember.
+  const scope: 'project' | 'everywhere' =
+    input.projectId !== null && [input.projectId, ...(input.projectNames ?? [])].some((n) => namesProject(words, n))
+      ? 'project'
+      : 'everywhere';
   const steering_type = input.labels?.steering_type ?? steeringTypeOf(statement ?? body);
 
   const base: Omit<Derivation, 'route'> = {
@@ -305,6 +316,8 @@ export function deriveDecision(input: DeriveInput): Derivation {
   const subject = [...new Set(ruleContent)].sort().join(' ');
   for (const rule of input.inForce) {
     if (rule.project !== undefined && rule.project !== input.projectId) continue;
+    // A project-only rule does not cover a rule meant for every project: not a restatement.
+    if (scope === 'everywhere' && rule.project !== undefined) continue;
     const rk = ruleKey(rule.statement);
     if (rk === null) continue;
     if (rk.key === key) return { ...base, route: 'restated', rule_ref: rule.id };
@@ -323,6 +336,18 @@ export function deriveDecision(input: DeriveInput): Derivation {
     return { ...base, route: 'maybe-restated', rule_ref: sameAs };
   }
 
+  // An operator-wide rule lands in every project: one that contradicts another project's rule is
+  // offered (a person decides), never auto-landed and never routed to `conflict`, which would
+  // retire that project's rule.
+  if (scope === 'everywhere') {
+    for (const rule of input.elsewhere ?? []) {
+      const rk = ruleKey(rule.statement);
+      if (rk !== null && rk.subject === subject && subject !== '' && rk.polarity !== polarity) {
+        return { ...base, route: 'offer' };
+      }
+    }
+  }
+
   const autoEligible =
     input.actorKind === 'human' &&
     input.authMode === 'required' &&
@@ -338,6 +363,14 @@ export function deriveDecision(input: DeriveInput): Derivation {
   if (durable && general) return { ...base, route: 'offer' };
   if (modelOffers(input.labels, durable, general, checkable, recurrence.count)) return { ...base, route: 'offer' };
   return { ...base, route: 'ledger' };
+}
+
+/** Do the words name the project (its id, as a word; `-`/`_` read as spaces)? */
+export function namesProject(words: string, projectId: string): boolean {
+  const norm = (s: string) => s.toLowerCase().replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const id = norm(projectId);
+  if (id === '') return false;
+  return ` ${norm(words).replace(/[^a-z0-9 ]+/g, ' ')} `.includes(` ${id} `);
 }
 
 /** The model's offer arm: type ∈ {rule, correction, scope} ∧ codify ∧ D ∧ G ∧ (C ∨ R). */

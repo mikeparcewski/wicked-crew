@@ -68,7 +68,7 @@ export const CaptureSchema = z
 export const ApproveEditSchema = z
   .object({
     content: z.string().trim().min(1).max(16 * 1024).optional(),
-    reach: z.enum(['project', 'pattern']).optional(),
+    reach: z.enum(['project', 'pattern', 'operator']).optional(),
   })
   .strict();
 
@@ -128,11 +128,14 @@ export function captureBrief(projectId: string, paths: readonly string[]): strin
     'wicked-estate `proposal.submit` tool), with kind_type "memory" and:',
     '',
     `- an INTENT — work the user wants done next, one sentence someone could launch: payload {"content":"…","tier":"episodic","capture":"intent"}, facets ${project}`,
-    `- a DECISION — a choice that was made, and why: payload {"content":"…","tier":"semantic","capture":"decision"}, facets ${project}`,
-    `- a MEMORY — a durable fact or way of working: payload {"content":"…","tier":"semantic" or "procedural","capture":"memory"}, facets ${project}.`,
+    `- a CHOICE — something the team chose, and why (a memory, not a rule): payload {"content":"…","tier":"semantic","capture":"choice"}, facets ${project}`,
+    `- a MEMORY about this project — a durable fact about its work: payload {"content":"…","tier":"semantic" or "procedural","capture":"memory"}, facets ${project}.`,
     '  If it is a general pattern that would help on ANY project, write it with no client names, people,',
     '  systems or data and add "reach":"pattern" to the payload — the user decides whether it crosses projects.',
-    `- a RULE the team must follow from now on: kind_type "policy:<architecture|development|security|testing|operations|compliance|design-ux>", payload {"rule":"…","severity":"info|warn|error|critical","capture":"rule"}, facets ${project}`,
+    `- a MEMORY about how the user works — their style, preferences, the extra steps they always take: payload {"content":"…","tier":"semantic" or "procedural","capture":"memory","reach":"operator"}, facets ${project}. It is recalled in every project.`,
+    `- a RULE the team must follow from now on (something a change can be checked against): kind_type "policy:<architecture|development|security|testing|operations|compliance|design-ux>", payload {"rule":"…","severity":"info|warn|error|critical","capture":"rule","reach":"operator"}, facets ${project}.`,
+    '  A rule the user states applies to every project ("reach":"operator") unless the materials tie it to this',
+    '  project or one of its repos: then "reach":"project" (add "repo":"<name>" to the facets for a repo).',
     '',
     'File only what the materials say; never invent. Never include secrets, credentials or personal',
     'data. Filing nothing is fine. Change no code and no file. Report what you filed.',
@@ -342,7 +345,11 @@ async function acceptEdited(
   const sameFacets =
     Object.keys(facets).length === Object.keys(row.facets).length &&
     Object.entries(facets).every(([k, v]) => row.facets[k] === v);
-  if ((edit.content === undefined || edit.content === payload['content']) && sameFacets) {
+  // A reach the row was not filed with is a change of its own, in either direction (`operator`
+  // changes no facet here: estate drops project/repo when it lands an operator memory).
+  const filedReach = typeof payload['reach'] === 'string' ? payload['reach'] : 'project';
+  const sameReach = edit.reach === undefined || edit.reach === filedReach;
+  if ((edit.content === undefined || edit.content === payload['content']) && sameFacets && sameReach) {
     // Nothing the store keeps would change: approve the original as filed.
     return { status: 200, body: (await estateTool('proposal.approve', { id })) as Record<string, unknown> };
   }

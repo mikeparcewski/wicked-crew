@@ -130,7 +130,8 @@ function proposalFacts(p: DiscoveryProposal, project: string): Record<string, un
   return {
     proposal: {
       kind_type: 'policy:testing',
-      payload: { rule: p.rule, severity: 'warn', evidence: p.evidence },
+      // Learned from this project's runs: the rule's reach is this project.
+      payload: { rule: p.rule, severity: 'warn', evidence: p.evidence, reach: 'project' },
       facets: { project },
     },
     query: p.query,
