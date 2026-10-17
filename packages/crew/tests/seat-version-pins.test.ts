@@ -6,7 +6,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   AcpFoldCache,
@@ -17,6 +17,7 @@ import {
 } from '../src/api/diagnostics.js';
 import { rosterWithStandingFactory } from '../src/api/roster-standing.js';
 import { SeatHealthTracker } from '../src/api/seat-health.js';
+import { SEAT_VERSION_RETRY_MS } from '../src/api/seat-version.js';
 
 const acp = (binary: string, verified_version?: string, acp_input_governance = true) => ({
   binary,
@@ -151,5 +152,72 @@ describe('the roster carries version_pin (core#581)', () => {
       matched: false,
     });
     expect(seats.find((s) => s.key === 'plain')?.['version_pin']).toBeUndefined();
+  });
+});
+
+// crew#997 / crew#1004: under boot load a pinned seat's `--version` timed out. The probe read that as
+// "did not answer" (`observed: null, matched: false`) and the cache kept it for a whole TTL, so a
+// working seat read `version.status: unproven` ("not the build its safety checks were proven on").
+describe('a pin probe that timed out (crew#997)', () => {
+  const ONE = [{ key: 'opencode', acp: acp('opencode', '1.17.18') }];
+  /** execFile's timeout: the child was killed (`killed: true`, SIGTERM). */
+  const timedOut = async () => {
+    throw Object.assign(new Error('Command failed: opencode --version'), { killed: true, signal: 'SIGTERM', code: null });
+  };
+  const answers = async () => ({ stdout: '1.17.18\n', stderr: '' });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('is no reading at all: never `matched: false`, never "did not answer"', async () => {
+    const cache = new SeatVersionPinCache(async () => probeSeatVersionPins(ONE, timedOut));
+    await cache.get();
+    expect(cache.read('opencode')).toBeUndefined();
+  });
+
+  it('keeps the seat\'s last answered reading', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-17T00:00:00Z'));
+    let calls = 0;
+    let exec: typeof answers | typeof timedOut = answers;
+    const cache = new SeatVersionPinCache(async () => {
+      calls += 1;
+      return probeSeatVersionPins(ONE, exec);
+    }, 60_000);
+    await cache.get();
+    expect(cache.read('opencode')).toMatchObject({ matched: true, observed: '1.17.18' });
+    exec = timedOut;
+    vi.setSystemTime(new Date(Date.now() + 60_000));
+    await cache.get();
+    expect(calls).toBe(2);
+    expect(cache.read('opencode')).toMatchObject({ matched: true, observed: '1.17.18' });
+  });
+
+  it('is retried soon, not after a whole TTL', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-17T00:00:00Z'));
+    let calls = 0;
+    let exec: typeof answers | typeof timedOut = timedOut;
+    const cache = new SeatVersionPinCache(async () => {
+      calls += 1;
+      return probeSeatVersionPins(ONE, exec);
+    }, 60 * 60_000);
+    await cache.get();
+    expect(calls).toBe(1);
+    exec = answers;
+    vi.setSystemTime(new Date(Date.now() + SEAT_VERSION_RETRY_MS));
+    await cache.get();
+    expect(calls).toBe(2);
+    expect(cache.read('opencode')).toMatchObject({ matched: true });
+  });
+
+  it('a binary that cannot run is still a failed pin (only a timeout is unknown)', async () => {
+    const enoent = async () => {
+      throw Object.assign(new Error('spawn opencode ENOENT'), { code: 'ENOENT' });
+    };
+    const cache = new SeatVersionPinCache(async () => probeSeatVersionPins(ONE, enoent));
+    await cache.get();
+    expect(cache.read('opencode')).toMatchObject({ observed: null, matched: false });
   });
 });

@@ -28,6 +28,7 @@ import { CoreAdapter } from '../core/adapter.js';
 import { execCapped } from '../core/exec.js';
 import { estateExe } from '../projects/graph.js';
 import { stateHomeOfDb } from '../projects/state-home.js';
+import { SEAT_VERSION_KEEP_MS, SEAT_VERSION_RETRY_MS } from './seat-version.js';
 
 // ── ACP fold ─────────────────────────────────────────────────────────────────
 
@@ -173,8 +174,13 @@ export interface SeatVersionPin {
   disclosure: string | null;
 }
 
+/** A probe's reading. `timedOut`: the daemon stopped `--version` at its bound (a slow start on a
+ *  loaded host, crew#997). That is no answer at all, not "did not answer": the cache keeps the seat's
+ *  last answered reading, or has none, and asks again soon. Never on the wire. */
+export type SeatVersionPinProbe = SeatVersionPin & { timedOut?: true };
+
 /** Where readings come from: the probe below, or a test's fixture. */
-export type SeatVersionPinSource = () => Promise<SeatVersionPin[]>;
+export type SeatVersionPinSource = () => Promise<SeatVersionPinProbe[]>;
 
 /** The registry fields the probe reads. */
 interface PinnedSeat {
@@ -188,7 +194,7 @@ interface PinnedSeat {
  * matches only the FIRST line trimmed, byte for byte; `observed` is the first non-empty line, for
  * a human. A probe that cannot run reads `observed: null`, `matched: false`, as in the engine.
  */
-export async function probeSeatVersionPins(roster: unknown[], exec: ExecLike): Promise<SeatVersionPin[]> {
+export async function probeSeatVersionPins(roster: unknown[], exec: ExecLike): Promise<SeatVersionPinProbe[]> {
   const pinned = (roster as PinnedSeat[]).filter(
     (seat) => typeof seat.acp?.verified_version === 'string' && typeof seat.acp?.binary === 'string',
   );
@@ -199,11 +205,14 @@ export async function probeSeatVersionPins(roster: unknown[], exec: ExecLike): P
       const pin = String(seat.acp?.verified_version);
       const governanceClaimed = seat.acp?.acp_input_governance === true;
       let combined: string | null = null;
+      let timedOut = false;
       try {
         const { stdout, stderr } = await exec(binary, ['--version'], { timeout: 10_000 });
         combined = stdout + stderr;
-      } catch {
+      } catch (err) {
         combined = null;
+        // execFile's `timeout` fired and the daemon killed the child (crew#997).
+        timedOut = (err as { killed?: unknown }).killed === true;
       }
       const lines = combined === null ? [] : combined.split('\n').map((l) => l.trim());
       const matched = combined !== null && (lines[0] ?? '') === pin;
@@ -215,7 +224,9 @@ export async function probeSeatVersionPins(roster: unknown[], exec: ExecLike): P
             (observed === null ? 'did not answer `--version`' : `reports \`${observed}\``) +
             ' — so its governance fails closed and every governed turn on it runs unchecked. Re-prove the ' +
             'installed build and move the pin, or pin the install so it cannot drift.';
-      return { cli, binary, pinned: pin, observed, matched, governanceClaimed, disclosure };
+      const reading: SeatVersionPinProbe = { cli, binary, pinned: pin, observed, matched, governanceClaimed, disclosure };
+      if (timedOut) reading.timedOut = true;
+      return reading;
     }),
   );
 }
@@ -235,11 +246,17 @@ export function defaultSeatVersionPinSource(): SeatVersionPinSource | null {
  * and the roster (which is synchronous: it reads the last answer and refreshes in the background).
  * Each refresh spawns one bounded `--version` per pinned seat, so it runs at most once per TTL. A
  * failed probe keeps the previous answer; with no source at all every read is `null`.
+ *
+ * crew#997: a seat whose probe timed out keeps its last answered reading (for at most
+ * {@link SEAT_VERSION_KEEP_MS}), or has no reading; a timeout never reads as `matched: false`. A
+ * refresh with a timed-out seat is retried after {@link SEAT_VERSION_RETRY_MS}, not a whole TTL.
  */
 export class SeatVersionPinCache {
-  private value: { at: number; pins: SeatVersionPin[] } | null = null;
+  private value: { at: number; pins: SeatVersionPin[]; timedOut: boolean } | null = null;
   private inFlight: Promise<SeatVersionPin[] | null> | null = null;
   private failedAt: number | null = null;
+  /** When each seat's kept reading was answered (crew#997). */
+  private readonly answeredAt = new Map<string, number>();
 
   constructor(
     private readonly source: SeatVersionPinSource | null = defaultSeatVersionPinSource(),
@@ -250,7 +267,8 @@ export class SeatVersionPinCache {
   private stale(): boolean {
     const now = Date.now();
     if (this.failedAt !== null && now - this.failedAt < this.ttlMs) return false;
-    return this.value === null || now - this.value.at >= this.ttlMs;
+    if (this.value === null) return true;
+    return now - this.value.at >= (this.value.timedOut ? Math.min(this.ttlMs, SEAT_VERSION_RETRY_MS) : this.ttlMs);
   }
 
   /** A fresh-enough answer, probing when stale; `null` when there is no source. */
@@ -260,8 +278,21 @@ export class SeatVersionPinCache {
     if (this.inFlight !== null) return this.inFlight;
     const source = this.source;
     this.inFlight = source()
-      .then((pins) => {
-        this.value = { at: Date.now(), pins };
+      .then((probed) => {
+        const at = Date.now();
+        const prev = this.value?.pins ?? [];
+        const pins: SeatVersionPin[] = [];
+        for (const { timedOut, ...reading } of probed) {
+          if (timedOut !== true) {
+            this.answeredAt.set(reading.cli, at);
+            pins.push(reading);
+            continue;
+          }
+          const kept = prev.find((p) => p.cli === reading.cli);
+          const answered = this.answeredAt.get(reading.cli);
+          if (kept !== undefined && answered !== undefined && at - answered < SEAT_VERSION_KEEP_MS) pins.push(kept);
+        }
+        this.value = { at, pins, timedOut: probed.some((p) => p.timedOut === true) };
         this.failedAt = null;
         return pins;
       })
