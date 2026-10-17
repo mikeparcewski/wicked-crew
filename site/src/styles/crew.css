@@ -62,7 +62,7 @@ html { scroll-snap-type: y proximity; scroll-padding-top: var(--topbar-h); }
 section {
   scroll-snap-align: start;
 }
-.hero, .idd, .probs, .skins, .byo, .console-sec, .wf, .rail-sec, .council, .studio, .get {
+.hero, .idd, .probs, .skins, .byo, .console-sec, .wf, .rail-sec, .studio, .get {
   min-height: calc(100svh - var(--topbar-h));
   display: flex;
   flex-direction: column;
@@ -81,7 +81,7 @@ section {
 }
 @media (max-width: 760px) {
   html { scroll-snap-type: none; }
-  .hero, .idd, .probs, .skins, .byo, .console-sec, .wf, .rail-sec, .council, .studio, .get { min-height: 0; }
+  .hero, .idd, .probs, .skins, .byo, .console-sec, .wf, .rail-sec, .studio, .get { min-height: 0; }
 }
 
 /* ── Crew background — ITS OWN motif: an EXECUTION / HARNESS SCHEMATIC ──────
@@ -832,88 +832,6 @@ code {
   .rail-gate { flex: 0 0 auto; width: 16px; height: 18px; min-width: 16px; margin: 0; align-self: flex-start; }
 }
 
-/* ── The council ──────────────────────────────────────────────────────── */
-.council { border-top: 1px solid var(--hairline); padding: clamp(48px, 8svh, 96px) 0; }
-.council-stage { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 0.9fr); gap: clamp(16px, 2.4vw, 28px); align-items: stretch; }
-.council-seats { display: grid; grid-template-columns: repeat(3, 1fr); gap: clamp(12px, 1.6vw, 18px); }
-.council-seat {
-  display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--hairline-strong); border-radius: 14px; padding: 18px 16px;
-  background: color-mix(in oklab, var(--surface) 60%, transparent);
-}
-.cs-cli { font-family: var(--font-mono); font-size: 0.74rem; color: color-mix(in oklab, var(--ink) 74%, transparent); }
-.cs-vote { font-family: var(--font-mono); font-weight: 700; font-size: 0.86rem; letter-spacing: 0.08em; width: max-content; padding: 4px 11px; border-radius: 7px; }
-.council-seat.is-pass .cs-vote { color: var(--accent-ink); background: var(--accent); }
-.council-seat.is-rework .cs-vote { color: #fff; background: var(--deny); }
-.council-seat.is-pass { border-color: color-mix(in oklab, var(--accent) 35%, var(--hairline-strong)); }
-.council-seat.is-rework { border-color: color-mix(in oklab, var(--deny) 32%, var(--hairline-strong)); }
-.cs-note { font-family: var(--font-mono); font-size: 0.66rem; line-height: 1.5; color: color-mix(in oklab, var(--ink) 62%, transparent); }
-.council-synth {
-  display: flex; flex-direction: column; justify-content: center; gap: 8px; border-radius: 14px; padding: 20px 18px;
-  border: 1px solid color-mix(in oklab, var(--accent) 38%, var(--hairline-strong));
-  background: color-mix(in oklab, var(--accent) 7%, transparent);
-}
-.cy-k { font-family: var(--font-mono); font-size: 0.58rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint); }
-.cy-v { font-family: var(--font-mono); font-size: 1.1rem; color: var(--ink); }
-.cy-v b { color: var(--deny); }
-.cy-t { font-family: var(--font-mono); font-size: 0.66rem; line-height: 1.5; color: color-mix(in oklab, var(--ink) 64%, transparent); }
-
-/* Automated council — the board auto-cycles three real rounds. The ABSTAIN seat
-   uses the neutral LLM-seat color (never approve, never deny). A PASS synthesis
-   turns the synth panel amber; a REWORK synthesis (default) stays terracotta.
-   min-heights lock the seat/synth boxes so vote + note swaps never reflow. */
-.council-seat.is-abstain .cs-vote { color: #0d1117; background: var(--seat); }
-.council-seat.is-abstain { border-color: color-mix(in oklab, var(--seat) 34%, var(--hairline-strong)); }
-.cs-note { min-height: 2.4em; }                    /* prevents jitter as notes change length */
-.council-synth { min-height: 128px; }
-.council-synth[data-synth="pass"] { border-color: color-mix(in oklab, var(--accent) 40%, var(--hairline-strong)); }
-.council-synth[data-synth="pass"] .cy-v b { color: var(--accent); }
-.council-seat { cursor: pointer; transition: border-color .3s var(--ease), background .3s var(--ease); }
-.cs-vote, .cs-note { transition: opacity .25s var(--ease); }
-
-/* Round rail — same pill idiom as .wf-status; the active round reads amber. */
-.council-rounds { margin-top: 14px; display: flex; gap: 8px; align-items: center; justify-content: center; flex-wrap: wrap; }
-.council-round {
-  font-family: var(--font-mono); font-size: 0.64rem; letter-spacing: 0.02em; color: var(--muted);
-  background: color-mix(in oklab, var(--surface-2) 60%, transparent); border: 1px solid var(--hairline-strong);
-  border-radius: 999px; padding: 6px 13px; cursor: pointer;
-  transition: border-color .2s var(--ease), color .2s var(--ease), background .2s var(--ease);
-}
-.council-round:hover { border-color: color-mix(in oklab, var(--accent) 42%, var(--hairline-strong)); color: var(--ink); }
-.council-round.is-active { color: var(--ink); border-color: color-mix(in oklab, var(--accent) 40%, var(--hairline-strong)); background: color-mix(in oklab, var(--accent) 8%, transparent); }
-.council-status { font-family: var(--font-mono); font-size: 0.6rem; color: var(--faint); margin-left: 6px; }
-@media (prefers-reduced-motion: reduce) { .council-seat, .cs-vote, .cs-note, .council-round { transition: none; } }
-
-/* ── Council mobile: three seats side-by-side crush on a phone. Stack the board
-   — seats become full-width compact rows (cli + vote on one line, the note
-   beneath), the synthesis panel drops below at full width, and the round pills
-   wrap. min-heights that lock the desktop board against reflow are released so
-   the stacked cards don't leave dead space. Desktop layout is untouched. */
-@media (max-width: 600px) {
-  /* Council on a phone → a compact "ballot" shape: each CLI is a tight vote row
-     with a verdict-colored LEFT RAIL (scan pass/rework at a glance), and the
-     synthesis is the prominent card beneath = many sandboxes → one verdict. */
-  .council-stage { grid-template-columns: 1fr; gap: 9px; }
-  .council-seats { grid-template-columns: 1fr; gap: 6px; }
-  .council-seat {
-    flex-direction: row; flex-wrap: wrap; align-items: center; gap: 2px 10px;
-    padding: 9px 12px 9px 13px; border-radius: 10px;
-    border-left: 3px solid var(--hairline-strong);
-  }
-  .council-seat.is-pass { border-left-color: var(--accent); }
-  .council-seat.is-rework { border-left-color: var(--deny); }
-  .cs-cli { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; font-size: 0.74rem; }
-  .cs-vote { order: 2; flex-shrink: 0; font-size: 0.7rem; padding: 3px 9px; }
-  .cs-note { order: 3; flex-basis: 100%; min-height: 0; font-size: 0.64rem; margin-top: 1px; }
-  .council-synth {
-    min-height: 0; padding: 13px 15px; gap: 4px;
-    border-color: color-mix(in oklab, var(--accent) 48%, var(--hairline-strong));
-  }
-  .cy-v { font-size: 1.05rem; }
-  .council-rounds { gap: 6px; margin-top: 2px; }
-  .council-round { font-size: 0.62rem; padding: 5px 9px; }
-  .council-status { flex-basis: 100%; margin-left: 0; text-align: center; }
-}
-
 /* ── The driving interface — the studio ───────────────────────────────── */
 .studio { border-top: 1px solid var(--hairline); padding: clamp(48px, 8svh, 96px) 0; }
 .studio-mock {
@@ -1041,13 +959,12 @@ code {
 
 /* ── Responsive ──────────────────────────────────────────────────────── */
 @media (max-width: 940px) {
-  .get-grid, .ways-grid, .idd-grid, .wf-layout, .council-stage { grid-template-columns: 1fr; }
+  .get-grid, .ways-grid, .idd-grid, .wf-layout { grid-template-columns: 1fr; }
   .lede, .get-intro p, .idd-copy p { max-width: none; }
   .byo-grid { grid-template-columns: repeat(2, 1fr); }
   .studio-cols { grid-template-columns: 1fr; }
 }
 @media (max-width: 520px) {
-  .council-seats { grid-template-columns: 1fr; }
 }
 
 /* ── Phone DENSITY (<=600px) ───────────────────────────────────────────────
@@ -1258,14 +1175,6 @@ code {
   .str-note { flex-basis: 100%; padding-left: 26px; }
 }
 
-/* ── Council routing-seat votes (profile ballots) ──────────────────────── */
-.council-seat.is-p1 .cs-vote, .council-seat.is-p2 .cs-vote, .council-seat.is-p3 .cs-vote {
-  color: var(--accent-ink, #0b0d0e); background: var(--seat);
-}
-.council-seat.is-p1, .council-seat.is-p2, .council-seat.is-p3 {
-  border-color: color-mix(in oklab, var(--seat) 35%, var(--hairline-strong));
-}
-
 /* ── Get-section ToS note ──────────────────────────────────────────────── */
 .get-tos {
   margin-top: 12px; font-size: 13px; line-height: 1.55; opacity: .78;
@@ -1419,5 +1328,5 @@ code {
   .gc-card-l { font-size: 0.62rem; line-height: 1.45; }
 
   /* sections that fit locally but without CI slack: cheaper heading margins */
-  .council .sec-head, .wf .sec-head, .rail-sec .sec-head { margin-bottom: 18px; }
+  .wf .sec-head, .rail-sec .sec-head { margin-bottom: 18px; }
 }

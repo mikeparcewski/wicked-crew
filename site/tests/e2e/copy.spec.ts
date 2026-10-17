@@ -54,7 +54,7 @@ test.describe('inline-tag boundaries render with their spaces', () => {
     for (const phrase of [
       'the document engine',       // .skins sec-sub: "the" + <b>document engine</b>
       'as acyclic-validated JSON', // .wf sec-sub: "as" + <b>acyclic-validated JSON</b>
-      'visible during the run',    // .op-card: <i>during</i> + " the run"
+      'visible during the job',    // .op-card: <i>during</i> + " the job"
     ]) {
       expect(text, `fused inline-tag boundary — expected "${phrase}"`).toContain(phrase);
     }

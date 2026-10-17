@@ -8,40 +8,45 @@ __      _(_) ___| | _____  __| |       ___ _ __ _____      __
 
 # wicked-crew
 
-**The control room for governed agent delivery — drive, gate, and audit the work; the human stays in
-command.**
+**Intent in. Gated work out. crew runs the jobs studio starts, and refuses to call them done without
+proof.**
 
-wicked-crew is the **Govern** arc of the wicked loop (intent → steer → equip → *harness* →
-**verify · govern** → record, all under human authority). You cannot stabilize the harness — the
-coding agents and their models change constantly — so crew is the durable system *around* it: it runs
-the coding-agent CLIs you already use (Claude Code, Codex, and others) as governed workers through
-**durable, multi-agent workflows**, and you drive the run, the gates decide, and every decision is
-audited. State your intent, get gated work out — and every gate says what it actually checked. The engine underneath is **wicked-core**.
+*Your coding agents do the work. A different agent checks it against your rules. You get the
+evidence.* In the wicked platform crew is the control plane: studio is where you direct the work,
+garden supplies the skills, estate holds the record, and crew runs each job between them.
 
-Bring your own CLI and your own subscription — crew drives the agents *you* already pay for, on *your*
-auth and *your* plan. There's no billing, no accounts, no model reselling.
+- **Your agents, sandboxed.** The coding-agent CLIs you already use (Claude Code, Codex, GitHub
+  Copilot, OpenCode, Pi) run as workers in hardened containers, on your own accounts and plans.
+  Your keys stay in a credential broker; a container only ever sees placeholders. No billing, no
+  accounts, no model reselling.
+- **A different agent reviews the work.** Review goes to an agent other than the one that built
+  it, against your rules. When only the builder could review it, the job stops and waits, unless
+  you launch it explicitly as "reduced assurance", which is labelled on the job, every gate and the
+  delivery. crew never turns that on for you.
+- **Tested before delivery, with the evidence.** Jobs that change your app (`feature`, `bug`,
+  `migration`, `mcp-server`) are not delivered until QE acceptance reads an attributed PASS. A gate
+  says what it checked, one failed check stops the job, and "done" is re-derived from evidence,
+  never asserted. Jobs are durable workflows defined as data, crash-resumable, and exportable as
+  evidence.
 
-Under the hood it's a daemon (`wicked-crew serve`) plus CLI and a same-origin browser console — but
-the daemon is the **mechanism, not the pitch.** What you actually get: review routed to a seat
-other than the creator's whenever the roster has an eligible one (a team run refuses to start without one; an
-ordinary run on a too-small roster keeps review on the creator seat and **says so** —
-"evaluator ≠ creator not held"), a deny-dominates gate on a deterministic floor, "done"
-**re-derived from evidence** instead of asserted (a phase with no distinct judge is labelled
-"floor only", an ungated one "approved by default, not verified"), and **workflows-as-data** you can add without touching code. crew
-owns the phase lifecycle, the gates, the evidence, and the crash-safe state; the agent does
-the coding inside a phase.
+Under the hood it's a daemon (`wicked-crew serve`) plus CLI and the bundled studio console. The
+engine underneath is **wicked-core**. (In the API and the code a job is a *run*, and an agent is a
+*seat*.)
 
-> **Local-first today.** Loopback only, in-process engine, local workers and local bus — no cloud, no
-> accounts, nothing leaves your machine. The execution seam is built for a remote runner, but
-> remote/distributed execution is **not shipped**: crew runs on a single host. No cluster, no
-> horizontal scale.
+> **One machine today.** Loopback only, in-process engine, local bus. Agents run in containers on
+> this machine, and model traffic leaves through the credential broker to the providers you signed
+> in. The execution seam is built for a remote runner, but remote/distributed execution is **not
+> shipped**: crew runs on a single host. No cluster, no horizontal scale.
 
 ## Install & quickstart
 
 Requires Node.js ≥ 22 and a container runtime (Rancher Desktop, Docker, Podman, Colima or OrbStack):
 governed agents run each CLI's headless mode in a hardened seat container (crew builds the seat images
 on first use), and you sign each agent in once from studio's Agents tab, in a login container.
-`WICKED_SEAT_FLOOR=host` keeps the labelled interim host floor instead.
+Seat images ship for Claude Code, Codex, GitHub Copilot, OpenCode and Pi. Antigravity has no seat
+image, and a local model or custom binary needs your own image (`WICKED_SEAT_IMAGE_<CLI>`, offline
+seats only). `WICKED_SEAT_FLOOR=host` keeps the labelled interim host floor instead; there, only
+claude and codex are given governed work.
 
 ```bash
 npm install -g wicked-crew     # or run it directly: npx wicked-crew serve
@@ -169,8 +174,8 @@ pay for instead of replacing them.
 - **Gates are real, and they say what they checked.** A gated transition resolves
   **deny-dominates** on the layers that actually ran — a deterministic floor, repo checks,
   policies, an evaluator seat that reads cold evidence only. A transition with none of them is
-  disclosed as "approved by default, not verified", never dressed as a pass. That seat is distinct from the creator's whenever the roster has an eligible one; team runs
-  require it, and an ordinary run that cannot meet it discloses the fallback on the run.
+  disclosed as "approved by default, not verified", never dressed as a pass. That seat is distinct
+  from the creator's; when none is, the run waits unless it was launched with reduced assurance.
 - **Evidence, not assertion.** "Done" is re-derived from evidence at the gate, never claimed by the
   agent that did the work.
 - **Drive it your way.** Headless over CLI + REST/WS, or through the browser console.
@@ -186,8 +191,8 @@ clarify → design → build → adversarial-review → test → review
 
 By default every phase's worker follows garden's role-keyed base skill (`wicked-garden-governed-worker`;
 settings or the workflow definition can override or disable it), read from an immutable skills
-snapshot generation handed to each worker spawn — a cached ACP session keeps the generation it
-started with — so control is consistent instead of an ad-hoc prompt every run. A phase runs a task-specific skill only when its definition names one (`skill_ref`): the
+snapshot generation handed to each worker spawn, so control is consistent instead of an ad-hoc
+prompt every run. A phase runs a task-specific skill only when its definition names one (`skill_ref`): the
 built-in `domain-extraction` and `mcp-server` workflows do; `feature`, `bug` and `migration` rely on
 the base skill. Phases, gates, roles, and any phase skill are all **data** on the workflow definition.
 
@@ -232,9 +237,11 @@ not "proven."
 
 ## Acceptance: the QE gate *(crew 0.6.0, Phase 6a)*
 
-Distinct from the per-phase gates above — which govern the RUN — the **acceptance gate** is an
-assessment you read, not a step delivery waits on: it is computed on `GET`, and neither the engine's
-completion nor the deliver phase consults it today. It answers a different question: *does the QE evidence ledger accept the work this run did to its repo?* This is
+Distinct from the per-phase gates above — which govern the RUN — the **acceptance gate** governs
+**delivery**: when a run's contract requires QE acceptance (see *QE acceptance* above), delivery is
+refused (`409 qe_acceptance_required`) until the ledger holds a PASS attributed to the run (crew
+0.9.0). It can be waived by the run's own lowest-band score, skipped with a reason, or turned off
+per daemon in Settings, and each of those is labelled. The read itself is computed on `GET`. It answers a different question: *does the QE evidence ledger accept the work this run did to its repo?* This is
 the machine gate absorbed from the retired wicked-testing product, and it lives on the daemon: <!-- historical -->
 
 ```
@@ -278,15 +285,13 @@ standalone `/governance/claims` wire:
 
 **Coverage boundary, stated plainly:** in a seat container the floor bounds every seat's effects
 (only the worktree is mounted; the model gateway is its only egress). Deterministic per-tool-call
-input governance is claude's gate hook; the per-tool-call checks other seats had over ACP are gone
-with ACP (the container floor's pause-and-ask replaces them; not built yet), and on the interim host
-floor a governed unit on such a seat is refused. Historically: seats whose adapter was **admitted**
-(`acp_input_governance` in the engine's CLI registry), the built-in **claude** and **opencode** entries. A `clis.toml` override that restates a seat
-without that flag drops the admission. A governed unit routed to any other CLI (Antigravity, Codex,
-pi, copilot, local, …) runs with unchecked tool calls and is reported `unenforced` — it still gets
+input governance is claude's gate hook; other seats get no per-tool-call check yet (the container
+floor's pause-and-ask will replace it; not built), and on the interim host floor a governed unit on
+such a seat is refused. A governed unit on any other seat is reported `unenforced` and gets
 **phase-boundary coverage only**: the in-process output gate and the deliverable floor evaluate the
 unit's *output* after the fact, advisory relative to mid-flight tool-call blocking. "Guardrailed"
-is a verified claim about governed units on admitted seats, not a blanket property of every run.
+is a verified claim about governed units with per-tool-call checks, not a blanket property of every
+run. (The earlier ACP-era admission is in the CHANGELOG.)
 
 ## Event-driven, with sidecars *(built substrate — DES-EXEC-001 §2/§4.2)*
 

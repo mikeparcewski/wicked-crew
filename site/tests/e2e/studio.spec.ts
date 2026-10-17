@@ -24,7 +24,7 @@ test.describe('studio console [data-studio]', () => {
     const gate = studio.locator('[data-studio-gate]');
     await expect(gate).toBeVisible({ timeout: 15_000 });
     await expect(feed.locator('.sf-row')).toHaveCount(7);
-    await expect(feed.locator('.sf-row').last()).toContainText('steering decision required');
+    await expect(feed.locator('.sf-row').last()).toContainText('your decision required');
     const stamp = studio.locator('[data-sg-stamp]');
     await expect(stamp).toHaveText('DENY');
 

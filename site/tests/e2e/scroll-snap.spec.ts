@@ -21,7 +21,7 @@ import { test, expect } from '@playwright/test';
 /** Every section that must be reachable, in document order. */
 const SECTIONS = [
   'hero', 'probs', 'studio', 'skins', 'byo', 'console-sec',
-  'wf', 'rail-sec', 'council', 'same-garden', 'get', 'footer',
+  'wf', 'rail-sec', 'same-garden', 'get', 'footer',
 ];
 
 const VIEWPORTS = [

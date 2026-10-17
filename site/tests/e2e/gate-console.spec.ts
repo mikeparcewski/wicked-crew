@@ -51,7 +51,7 @@ test.describe('gate console [data-gc]', () => {
     const chip = gc.locator('[data-gc-ledger-verdict]');
 
     // verdict.json is not a switch on the transition circuit: the acceptance read is a
-    // separate answer (GET /runs/:id/acceptance) that delivery does not wait on.
+    // separate answer (GET /runs/:id/acceptance) that DELIVERY waits on (crew 0.9.0 EX-03).
     await expect(gc.locator('[data-sw][data-policy="verdict.json"]')).toHaveCount(0);
 
     // Settle on the ledger scene: the QE ledger returned CONDITIONAL — a deny on that read,
@@ -61,7 +61,7 @@ test.describe('gate console [data-gc]', () => {
     await expect(chip).toHaveText('CONDITIONAL');
     await expect(chip).toHaveAttribute('data-v', 'conditional');
     await expect(gc.locator('[data-vline]')).toContainText('CONDITIONAL');
-    await expect(gc.locator('[data-vline]')).toContainText('delivery does not wait on it');
+    await expect(gc.locator('[data-vline]')).toContainText('delivery waits');
 
     // Driving a real circuit switch changes the transition, never the acceptance read.
     const drift = gc.locator('[data-sw][data-policy="schema-drift"]');
