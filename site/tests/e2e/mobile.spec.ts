@@ -26,8 +26,8 @@ test.describe('mobile (390×844)', () => {
     const staticStudio = page.locator('.studio-static');
     await expect(staticStudio).toBeVisible();
     await expect(staticStudio.locator('.sts-steps li')).toHaveCount(3);
-    await expect(staticStudio).toContainText('Launch');
-    await expect(staticStudio).toContainText('Steer');
+    await expect(staticStudio).toContainText('Start');
+    await expect(staticStudio).toContainText('Decide');
   });
 
   test('the static gate verdict replaces the interactive ladder', async ({ page }) => {

@@ -1,4 +1,4 @@
-# A control plane for coding agents: what wicked-crew studio is and why it exists
+# A control plane for coding agents: what wicked-crew is and why it exists
 
 *Status: experimental. Everything below has been exercised end-to-end against real CLI
 agents — but the project is young, local-first, and evolving. Treat it as a working

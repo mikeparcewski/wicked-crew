@@ -54,7 +54,7 @@ No daemon restart is needed. The seat's next check picks up the new entry.
 `GET /api/v1/roster` reports each seat's `auth` (`signed_in`, `signed_out`, `not_required`,
 `unknown`) and says where the reading came from in `auth_source`. In order of precedence:
 
-1. **The seat's own refusal** (`auth_source: "seat-stderr"`). A ballot, a unit or an ACP handshake
+1. **The seat's own refusal** (`auth_source: "seat-stderr"`). A ballot or a unit
    in which the seat said it has no working credential ("Not logged in", "No API key found",
    "OAuth session expired …", a 401) sets `signed_out` for 30 minutes, or
    until the seat's next successful output. The engine's frame is read in full: `kind`, `reason`
@@ -99,9 +99,8 @@ the run parks at a gate. It does not plan a self-graded run.
 A seat **enforces input governance** when every tool call it makes is put to the engine's policy
 gate before it runs:
 
-- an ACP seat whose adapter is admitted (`acp_input_governance = true` in its `[cli.acp]` record;
-  claude's adapter is);
-- a wrapped seat only when it runs claude (the PreToolUse gate-hook is claude-only).
+- a seat that runs claude (the PreToolUse gate-hook is claude-only). The ACP-era admission
+  (`acp_input_governance`) went with ACP; see the CHANGELOG.
 
 Any other seat (today pi, codex, copilot, opencode and agy) runs a governed unit with its tool calls
 unchecked, and the engine emits `governanceUnenforced` for it.
