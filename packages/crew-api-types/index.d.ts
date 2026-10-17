@@ -8504,6 +8504,28 @@ export interface RetireMemoryResponse {
   erased: number;
 }
 
+/**
+ * `POST /memory/edit` body (api-types 0.125.0; wicked-studio's Memory page): change ONE memory's
+ * words. estate has no in-place update, so crew writes `content` as a new memory with the old one's
+ * tier, scope and facets (`memory.capture`), then erases the old one by id. Erase-by-id is checked
+ * before anything is written. When a later step does not answer as expected, crew re-reads the store:
+ * a replacement that landed is a 200; a new copy beside a surviving old memory is taken back out.
+ * 400: empty or unchanged `content`; 404: no memory has that id; 409: an edit of the same memory is in
+ * flight; 501 `estate_upgrade_required`: the estate cannot erase by id (nothing was written); 502: an
+ * estate step failed, and the error says what the store holds now (nothing changed, or which ids remain).
+ */
+export interface EditMemoryBody {
+  memory_id: string;
+  /** The new words (1–4000 chars, trimmed). */
+  content: string;
+}
+
+/** `POST /memory/edit` → 200: the new memory's id and the id of the one it replaced (now erased). */
+export interface EditMemoryResponse {
+  memory_id: string;
+  retired: string;
+}
+
 // ── Team events on the bus (DES-TEAMING-002 §6, wicked-core T1; api-types 0.41.0) ──────────────
 //
 // The `wicked.team.*` facts wicked-core publishes on the cross-product bus (`domain`

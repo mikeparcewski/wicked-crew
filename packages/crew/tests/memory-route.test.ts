@@ -3,6 +3,7 @@
 //   GET  /api/v1/memory/coverage  → memory.coverage
 //   POST /api/v1/memory/retire    → memory.erase {scope_prefix}  (SUBTREE-scoped)
 //   POST /api/v1/memory/retire-item → memory.erase {id}  (exactly ONE memory — studio#206)
+//   POST /api/v1/memory/edit      → memory.list + memory.capture + memory.erase {id} (whole or not at all)
 //
 // Fastify inject() with a mock adapter and a STUBBED estate-mcp client (runtime.callEstateTool) —
 // no `wicked-estate-mcp` process is ever spawned. Covers: browse calls memory.list with only
@@ -423,5 +424,124 @@ describe('memory-management routes (DES-MEM-FACETED-001)', () => {
 
     expect(res.statusCode).toBe(502);
     expect((res.json() as { error: string }).error).toContain('exited before answering');
+  });
+  // ── POST /memory/edit (a new memory replaces the old one; the store decides the answer) ──
+
+  const OLD = { memory_id: 'm1', scope: 'org:acme/doc:ops', content: 'old words', tier: 'episodic', facets: { project: 'p1' }, created_at: 100 };
+  const NO_ERASE_BY_ID = (): EstateMcpError => new EstateMcpError('scope_prefix (non-empty) required for erase', -32602);
+
+  /** A stateful estate: memory.list / capture / erase over one store, with per-call failure hooks. */
+  function store(initial: Array<typeof OLD>, hooks: {
+    capture?: (args: Record<string, unknown>, s: Map<string, typeof OLD>) => unknown;
+    erase?: (id: string, s: Map<string, typeof OLD>) => unknown;
+  } = {}): Map<string, typeof OLD> {
+    const s = new Map(initial.map((m) => [m.memory_id, m]));
+    let n = 0;
+    estateTool.mockImplementation(async (tool: string, args: Record<string, unknown>) => {
+      if (tool === 'memory.list') return { items: [...s.values()] };
+      if (tool === 'memory.capture') {
+        if (hooks.capture !== undefined) return hooks.capture(args, s);
+        const id = `m9${n++ === 0 ? '' : n}`;
+        s.set(id, { ...OLD, memory_id: id, content: String(args['content']), scope: String(args['scope']) });
+        return { memory_id: id };
+      }
+      if (tool === 'memory.erase') {
+        const id = String(args['id']);
+        if (hooks.erase !== undefined) return hooks.erase(id, s);
+        return { deleted_count: s.delete(id) ? 1 : 0 };
+      }
+      throw new Error(`unexpected tool ${tool}`);
+    });
+    return s;
+  }
+  const edit = (payload: Record<string, unknown>) => app.inject({ method: 'POST', url: '/api/v1/memory/edit', payload });
+
+  it('probes erase-by-id, captures the new words with the old tier, scope and facets, then erases the old', async () => {
+    const s = store([OLD, { ...OLD, memory_id: 'm2', content: 'other' }]);
+    const res = await edit({ memory_id: 'm1', content: '  new words ' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ memory_id: 'm9', retired: 'm1' });
+    expect(estateTool.mock.calls).toEqual([
+      ['memory.list', {}],
+      ['memory.erase', { id: 'crew:erase-by-id-probe' }],
+      ['memory.capture', { content: 'new words', scope: 'org:acme/doc:ops', facets: { project: 'p1' }, tier: 'episodic', kind: 'episode' }],
+      ['memory.erase', { id: 'm1' }],
+    ]);
+    expect([...s.keys()].sort()).toEqual(['m2', 'm9']);
+  });
+
+  it('404s an id the store does not hold, and 400s unchanged words, writing nothing', async () => {
+    store([OLD]);
+    expect((await edit({ memory_id: 'nope', content: 'x' })).statusCode).toBe(404);
+    expect((await edit({ memory_id: 'm1', content: 'old words ' })).statusCode).toBe(400);
+    expect(estateTool.mock.calls.map((c) => c[0])).toEqual(['memory.list', 'memory.list']);
+  });
+
+  it('refuses an unknown field, an empty id and empty words without calling the client', async () => {
+    for (const payload of [{ memory_id: 'm1', content: 'x', scope_prefix: 'org:acme' }, { memory_id: '  ', content: 'x' }, { memory_id: 'm1', content: '   ' }, { memory_id: 'm1' }]) {
+      expect((await edit(payload)).statusCode).toBe(400);
+    }
+    expect(estateTool).not.toHaveBeenCalled();
+  });
+
+  it('an estate without erase-by-id answers 501 before anything is written', async () => {
+    const s = store([OLD], { erase: () => { throw NO_ERASE_BY_ID(); } });
+    const res = await edit({ memory_id: 'm1', content: 'new words' });
+    expect(res.statusCode).toBe(501);
+    expect(res.json()).toMatchObject({ code: 'estate_upgrade_required' });
+    expect(estateTool.mock.calls.map((c) => c[0])).not.toContain('memory.capture');
+    expect([...s.keys()]).toEqual(['m1']);
+  });
+
+  it('an erase that throws AFTER deleting is a landed edit (the store, not the answer, decides)', async () => {
+    const s = store([OLD], { erase: (id, st) => { const had = st.delete(id); if (id === 'm1') throw new EstateMcpError('xedge cleanup failed'); return { deleted_count: had ? 1 : 0 }; } });
+    const res = await edit({ memory_id: 'm1', content: 'new words' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ memory_id: 'm9', retired: 'm1' });
+    expect([...s.keys()]).toEqual(['m9']);
+  });
+
+  it('an erase that fails without deleting takes the new copy back out: 502, nothing changed', async () => {
+    const s = store([OLD], { erase: (id, st) => { if (id === 'm1') return { deleted_count: 0 }; return { deleted_count: st.delete(id) ? 1 : 0 }; } });
+    const res = await edit({ memory_id: 'm1', content: 'new words' });
+    expect(res.statusCode).toBe(502);
+    expect((res.json() as { error: string }).error).toMatch(/nothing changed$/);
+    expect([...s.keys()]).toEqual(['m1']);
+  });
+
+  it('a take-back that answers but deletes nothing is caught by the re-read: both remain, named', async () => {
+    store([OLD], { erase: (id) => (id === 'crew:erase-by-id-probe' ? { deleted_count: 0 } : {}) });
+    const res = await edit({ memory_id: 'm1', content: 'new words' });
+    expect(res.statusCode).toBe(502);
+    expect((res.json() as { error: string }).error).toMatch(/both m1 and m9 remain/);
+  });
+
+  it('a capture whose answer is lost but which wrote is found by the re-read and the edit completes', async () => {
+    const s = store([OLD], { capture: (args, st) => { st.set('m7', { ...OLD, memory_id: 'm7', content: String(args['content']) }); throw new EstateMcpError('exited before answering memory.capture'); } });
+    const res = await edit({ memory_id: 'm1', content: 'new words' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ memory_id: 'm7', retired: 'm1' });
+    expect([...s.keys()]).toEqual(['m7']);
+  });
+
+  it('a capture that fails and wrote nothing is a 502 that says nothing changed', async () => {
+    const s = store([OLD], { capture: () => { throw new EstateMcpError('unknown tool: memory.capture', -32602); } });
+    const res = await edit({ memory_id: 'm1', content: 'new words' });
+    // crew built every argument itself: an estate -32602 is upstream (502), never the caller's 400.
+    expect(res.statusCode).toBe(502);
+    expect((res.json() as { error: string }).error).toMatch(/nothing changed$/);
+    expect([...s.keys()]).toEqual(['m1']);
+  });
+
+  it('refuses a second edit of the same memory while one is in flight (409)', async () => {
+    store([OLD]);
+    const base = estateTool.getMockImplementation()!;
+    let release!: () => void;
+    estateTool.mockImplementationOnce(async (tool: string, args: Record<string, unknown>) => { await new Promise<void>((r) => { release = r; }); return base(tool, args); });
+    const first = edit({ memory_id: 'm1', content: 'new words' });
+    await vi.waitFor(() => expect(estateTool).toHaveBeenCalledTimes(1));
+    expect((await edit({ memory_id: 'm1', content: 'other words' })).statusCode).toBe(409);
+    release();
+    expect((await first).statusCode).toBe(200);
   });
 });

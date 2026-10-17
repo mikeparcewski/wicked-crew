@@ -30,6 +30,7 @@ import { buildEvidenceBundle, coreUnitId, evidenceFilename } from './evidence.js
 import { attemptUnavailableReason, capturedAttempts, outputUnavailableReason, resolveUnit, storedAttempt, unitKeysFor } from './unit-output.js';
 import type {
   ApproveProposalResponse,
+  EditMemoryResponse,
   AssuranceReceipt,
   LaunchRunInput,
   ListMemoriesResponse,
@@ -778,6 +779,26 @@ export const RetireMemorySchema = z.object({
 export const RetireMemoryItemSchema = z.object({
   memory_id: z.string().min(1).max(512),
 }).strict();
+
+/** `POST /memory/edit` body (wicked-studio's Memory page): ONE memory's new words. `.strict()`: an
+ *  unknown field is a 400, never read as something wider than one memory. */
+export const EditMemorySchema = z.object({
+  memory_id: z.string().min(1).max(512),
+  content: z.string().min(1).max(4000),
+}).strict();
+
+/** estate `memory.capture`'s `kind` for a tier — the kind natural to it, as estate's own proposal
+ *  approve picks (`kind_for_tier`), so an edited memory keeps the kind its tier implies. */
+const KIND_FOR_TIER: Record<string, string> = {
+  working: 'working', episodic: 'episode', semantic: 'fact', procedural: 'skill', archival: 'archive',
+};
+
+/** The id `POST /memory/edit` probes erase-by-id with: no memory carries it, so the erase deletes nothing. */
+const MEMORY_EDIT_PROBE_ID = 'crew:erase-by-id-probe';
+
+/** The memory ids with an edit in flight: estate has no compare-and-swap, and two edits of one memory
+ *  racing would each write a copy. One daemon, so one edit per memory at a time is enough. */
+const memoryEditsInFlight = new Set<string>();
 
 /** The error an estate from before wicked-estate#188 answers to `memory.erase {id}`: it knows only the
  *  subtree erase, so it refuses the call (deleting nothing) for want of a `scope_prefix`. */
@@ -6926,6 +6947,164 @@ export function registerRoutes(
           });
         }
         return estateUpstreamError(reply, err);
+      }
+    },
+  );
+
+  // POST /memory/edit { memory_id, content } → memory.list (find it) → memory.capture (the new words,
+  // the old tier/scope/facets) → memory.erase { id: old } → { memory_id: new, retired: old }.
+  // estate has no in-place update and no transaction across tools, so an edit is a replacement made in
+  // steps. Erase-by-id is probed BEFORE anything is written (an id no memory has, so nothing is deleted):
+  // an estate without it answers 501 with nothing changed. After a write, any step that does not answer
+  // as expected is reconciled by re-reading the store, never assumed: a replacement that landed is a
+  // 200; a new copy beside a surviving old memory is taken back out (and checked); whatever remains is
+  // named in the 502.
+  app.post(
+    `${V}/memory/edit`,
+    {
+      config: {
+        manifest: {
+          requestType: 'EditMemoryBody',
+          responseType: 'EditMemoryResponse',
+          statusCodes: [200, 400, 404, 409, 501, 502],
+        },
+      },
+    },
+    async (req, reply) => {
+      const parsed = EditMemorySchema.safeParse(req.body);
+      if (!parsed.success) {
+        return reply.code(400).send(invalidBody(parsed.error, 'Invalid edit request'));
+      }
+      const memoryId = parsed.data.memory_id.trim();
+      const content = parsed.data.content.trim();
+      if (memoryId === '') return reply.code(400).send({ error: '`memory_id` must not be empty' });
+      if (content === '') return reply.code(400).send({ error: '`content` must not be empty' });
+      if (memoryEditsInFlight.has(memoryId)) {
+        return reply.code(409).send({ error: `memory ${memoryId} is already being edited` });
+      }
+      memoryEditsInFlight.add(memoryId);
+      // Every estate call here is crew's own (no client argument reaches estate unchecked), so an
+      // estate refusal is an upstream fault: 502, never the 400 `estateUpstreamError` gives -32602.
+      const upstream = (what: string, err: unknown): FastifyReply => reply.code(502).send({ error: `${what}: ${message(err)}` });
+      const listAll = async (): Promise<MemoryItem[]> => {
+        const raw = await estateTool('memory.list', {});
+        const items = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>)['items'] : undefined;
+        if (!Array.isArray(items)) throw new EstateMcpError('memory.list returned an unexpected shape');
+        return items.map(shapeMemoryItem);
+      };
+      const deletedCount = (raw: unknown): unknown =>
+        (typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>)['deleted_count'] : undefined);
+      try {
+        // 1. The memory as it is: its tier, scope and facets ride onto the replacement.
+        let before: MemoryItem[];
+        try {
+          before = await listAll();
+        } catch (err) {
+          return upstream('reading the memory store failed; nothing changed', err);
+        }
+        const old = before.find((m) => m.id === memoryId);
+        if (old === undefined) return reply.code(404).send({ error: `no memory ${memoryId}` });
+        if (old.content.trim() === content) {
+          return reply.code(400).send({ error: 'the new words are the same as the memory\'s; nothing to change' });
+        }
+        // 2. Erase-by-id must exist before anything is written (wicked-estate#188). The probe names an
+        //    id no memory carries, so it deletes nothing.
+        try {
+          await estateTool('memory.erase', { id: MEMORY_EDIT_PROBE_ID });
+        } catch (err) {
+          if (err instanceof EstateMcpError && err.code === -32602 && ESTATE_NO_ERASE_BY_ID.test(err.message)) {
+            return reply.code(501).send({
+              error: 'this wicked-estate cannot erase one memory by id (it needs wicked-estate#188), so it cannot replace one; nothing changed',
+              code: 'estate_upgrade_required',
+            });
+          }
+          return upstream('checking that the store can erase one memory failed; nothing changed', err);
+        }
+        // 3. The new words, as a new memory in the old one's place.
+        const captureArgs: Record<string, unknown> = { content, scope: old.scope, facets: old.facets };
+        if (old.tier !== '') {
+          captureArgs['tier'] = old.tier;
+          const kind = KIND_FOR_TIER[old.tier];
+          if (kind !== undefined) captureArgs['kind'] = kind;
+        }
+        const beforeIds = new Set(before.map((m) => m.id));
+        let newId: string | null = null;
+        let captureErr: unknown = null;
+        try {
+          const captured = await estateTool('memory.capture', captureArgs);
+          const id = typeof captured === 'object' && captured !== null ? (captured as Record<string, unknown>)['memory_id'] : undefined;
+          if (typeof id === 'string' && id !== '') newId = id;
+          else captureErr = new EstateMcpError('memory.capture returned no memory_id');
+        } catch (err) {
+          captureErr = err;
+        }
+        if (newId === null) {
+          // The capture may still have written (a lost answer): look before saying nothing changed.
+          let now: MemoryItem[];
+          try {
+            now = await listAll();
+          } catch (err) {
+            return reply.code(502).send({
+              error: `writing the new words did not answer as expected (${message(captureErr)}) and the store could not be re-read (${message(err)}); a copy of the new words may exist beside ${memoryId}`,
+            });
+          }
+          const copies = now.filter((m) => !beforeIds.has(m.id) && m.content.trim() === content && m.scope === old.scope);
+          if (copies.length !== 1) {
+            return reply.code(502).send({
+              error: copies.length === 0
+                ? `writing the new words failed (${message(captureErr)}); nothing changed`
+                : `writing the new words did not answer as expected (${message(captureErr)}); ${copies.length} copies of them now exist beside ${memoryId}: ${copies.map((m) => m.id).join(', ')}`,
+            });
+          }
+          newId = copies[0]!.id;
+        }
+        // 4. The old memory out.
+        let eraseErr: unknown = null;
+        let deleted: unknown;
+        try {
+          deleted = deletedCount(await estateTool('memory.erase', { id: memoryId }));
+        } catch (err) {
+          eraseErr = err;
+        }
+        if (eraseErr === null && deleted === 1) {
+          const body: EditMemoryResponse = { memory_id: newId, retired: memoryId };
+          return body;
+        }
+        const why = eraseErr !== null ? `retiring ${memoryId} failed (${message(eraseErr)})` : `retiring ${memoryId} removed ${String(deleted)} memories, expected 1`;
+        // 5. Reconcile: what is in the store now decides the answer, never the failed call.
+        const present = async (): Promise<Set<string>> => new Set((await listAll()).map((m) => m.id));
+        let ids: Set<string>;
+        try {
+          ids = await present();
+        } catch (err) {
+          return reply.code(502).send({ error: `${why}, and the store could not be re-read (${message(err)}); ${newId} was written and ${memoryId} may remain` });
+        }
+        if (!ids.has(memoryId) && ids.has(newId)) {
+          // The retire landed even though its answer did not: the edit is complete.
+          const body: EditMemoryResponse = { memory_id: newId, retired: memoryId };
+          return body;
+        }
+        if (!ids.has(newId)) {
+          return reply.code(502).send({ error: ids.has(memoryId) ? `${why}; nothing changed` : `${why}; neither ${memoryId} nor ${newId} is in the store now` });
+        }
+        // Both are there: take the new copy back out, then check that it is gone.
+        try {
+          await estateTool('memory.erase', { id: newId });
+        } catch {
+          // Checked below: the store, not the call, says whether it is gone.
+        }
+        try {
+          ids = await present();
+        } catch (err) {
+          return reply.code(502).send({ error: `${why}; taking ${newId} back out could not be checked (${message(err)}), so both ${memoryId} and ${newId} may remain` });
+        }
+        return reply.code(502).send({
+          error: ids.has(newId) ? `${why}; taking ${newId} back out failed, so both ${memoryId} and ${newId} remain` : `${why}; the new copy was taken back out, so nothing changed`,
+        });
+      } catch (err) {
+        return upstream('editing the memory failed', err);
+      } finally {
+        memoryEditsInFlight.delete(memoryId);
       }
     },
   );

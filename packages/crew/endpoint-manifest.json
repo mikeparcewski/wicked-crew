@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.124.0",
+  "apiTypesVersion": "0.125.0",
   "endpoints": [
     {
       "method": "GET",
@@ -890,6 +890,20 @@
       "statusCodes": [
         200,
         400,
+        502
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/memory/edit",
+      "requestType": "EditMemoryBody",
+      "responseType": "EditMemoryResponse",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        409,
+        501,
         502
       ]
     },
