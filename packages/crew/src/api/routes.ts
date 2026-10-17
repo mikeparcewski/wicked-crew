@@ -4624,6 +4624,27 @@ export function registerRoutes(
     }
   });
 
+  /** crew#1058: the runs with a gated reassign (re-seat, then approve) in flight — one at a time. */
+  const gatedReassigns = new Set<string>();
+  /**
+   * codex r1 on #1060: whether approving the run's open gate ACCEPTS the parked unit's work rather
+   * than re-running it (wicked-core `confirm_gate`: a `judge_unavailable` / `qe_reviewer_unavailable`
+   * denial on the cursor unit is judged by the operator; an open `review_adjudication` gate lands
+   * with carried items). Says what the approve does, or `null` when it re-runs the unit.
+   */
+  async function approveAcceptsWork(run: SessionView, ord: number): Promise<string | null> {
+    const unit = run.units.find((u) => u.ord === ord);
+    const denial = (unit as { denial?: { source?: unknown } | null } | undefined)?.denial;
+    if (unit?.status === 'rejected' && (denial?.source === 'judge_unavailable' || denial?.source === 'qe_reviewer_unavailable')) {
+      return 'is the operator\'s judgment of the work as it stands (no judge could rule)';
+    }
+    const open = await resolveOpenGate(run.session.id).catch(() => null);
+    if (open !== null && open !== 'no-log' && open.gateKind === 'review_adjudication') {
+      return 'lands the reviewed work with its carried items';
+    }
+    return null;
+  }
+
   // The manual operator lever (crew#442): recycles a run's CURSOR unit via the same
   // `adapter.reassignUnit` path the stall-watchdog's automatic escalation uses, for when a
   // wedged unit needs recovering and auto-escalation is off, exhausted, or itself failed. Scoped
@@ -4711,22 +4732,42 @@ export function registerRoutes(
       });
     };
     if (gated && requestedCli !== undefined) {
-      try {
-        await adapter.reassignUnit(id, ord, requestedCli);
-      } catch (err) {
-        // The engine refused the seat with the run untouched: nothing was approved.
-        return reply.code(409).send({ error: `${message(err)}. Nothing was approved; the gate is still open.` });
-      }
-      try {
-        await approve();
-      } catch (err) {
-        reassigned(false);
+      // codex r1 on #1060: an approve that ACCEPTS the parked work instead of re-running the unit —
+      // a `judge_unavailable` / `qe_reviewer_unavailable` denial (the operator judges, the unit
+      // counts) or a `review_adjudication` gate (lands with carried items) — must not follow a
+      // re-seat: the new seat would be recorded on work it never did, and never run.
+      const accepts = await approveAcceptsWork(run, ord);
+      if (accepts !== null) {
         return reply.code(409).send({
-          error: `unit ${ord} now waits on ${requestedCli}, but approving the gate failed: ${message(err)} — approve it to run the unit there`,
+          error: `run ${id} is parked at a gate whose approve ${accepts}, so a reassign would not run unit ${ord} on '${requestedCli}' — approve, send back or stop it via POST /runs/${id}/gate. Nothing was changed.`,
         });
       }
-      reassigned(true);
-      return reply.send({ status: 'ok', ord, cli: requestedCli, approved: true });
+      // codex r1 on #1060: the re-seat and the approve are two engine commands; a second reassign of
+      // the same run between them would dispatch a seat neither response names.
+      if (gatedReassigns.has(id)) {
+        return reply.code(409).send({ error: `a reassign of run ${id} is already in flight. Nothing was changed.` });
+      }
+      gatedReassigns.add(id);
+      try {
+        try {
+          await adapter.reassignUnit(id, ord, requestedCli);
+        } catch (err) {
+          // The engine refused the seat with the run untouched: nothing was approved.
+          return reply.code(409).send({ error: `${message(err)}. Nothing was approved; the gate is still open.` });
+        }
+        try {
+          await approve();
+        } catch (err) {
+          reassigned(false);
+          return reply.code(409).send({
+            error: `unit ${ord} was re-seated on ${requestedCli}, but approving the gate failed: ${message(err)} — read the run's gate before answering again`,
+          });
+        }
+        reassigned(true);
+        return reply.send({ status: 'ok', ord, cli: requestedCli, approved: true });
+      } finally {
+        gatedReassigns.delete(id);
+      }
     }
     try {
       if (gated) await approve();

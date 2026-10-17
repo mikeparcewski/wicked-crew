@@ -131,6 +131,8 @@ describe('POST /runs/:id/reassign on a gate: the engine refuses before anything 
   const calls: string[] = [];
   const recorded: string[] = [];
   let approveFails = false;
+  let release: () => void = () => undefined;
+  const slow = new Promise<void>((r) => { release = r; });
   const unit = (ord: number, stage: string, cli: string, extra: Record<string, unknown> = {}) => ({
     id: `run-authors:u${ord}`, session_id: 'run-authors', ord, description: `u${ord}`, stage,
     assigned_cli: cli, assigned_invocation: null, council_task_ref: null, routing: null, denial_reason: null,
@@ -151,10 +153,23 @@ describe('POST /runs/:id/reassign on a gate: the engine refuses before anything 
 
   beforeAll(async () => {
     const mockAdapter = {
-      sessionsDetail: vi.fn(async () => [
-        authorsView('run-authors'),
-        authorsView('run-reduced', { mode: 'reduced', required: ['distinct_evaluator', 'judge'] }),
-      ]),
+      sessionsDetail: vi.fn(async () => {
+        const judged = authorsView('run-judge');
+        (judged.units[2] as Record<string, unknown>)['status'] = 'rejected';
+        (judged.units[2] as Record<string, unknown>)['denial'] = { source: 'judge_unavailable', reason: 'no eligible judge' };
+        return [
+          authorsView('run-authors'),
+          authorsView('run-reduced', { mode: 'reduced', required: ['distinct_evaluator', 'judge'] }),
+          judged,
+          authorsView('run-adjudication'),
+          authorsView('run-slow'),
+        ];
+      }),
+      interactionRequests: vi.fn(async (id: string) =>
+        id === 'run-adjudication'
+          ? [{ kind: 'gate', ord: 3, prompt: 'Review adjudication', gate_kind: 'review_adjudication', created_at: 1 }]
+          : []),
+      runEvents: vi.fn(async () => []),
       listRepos: vi.fn().mockResolvedValue([]),
       listWorkflows: () => BUILTIN_WORKFLOWS,
       confirmGate: vi.fn(async (id: string, approve: boolean) => {
@@ -167,6 +182,7 @@ describe('POST /runs/:id/reassign on a gate: the engine refuses before anything 
       // with the run untouched.
       reassignUnit: vi.fn(async (id: string, ord: number, cli: string | null) => {
         calls.push(`reassignUnit:${id}:${ord}:${cli}`);
+        if (id === 'run-slow') await slow;
         if (id === 'run-authors' && (cli === 'pi' || cli === 'codex')) {
           throw new Error(`cannot reassign unit 3 to '${cli}': that seat authored the work this review checks (authors: pi, codex), and this run requires a distinct evaluator — reassign it to one of: copilot`);
         }
@@ -207,7 +223,28 @@ describe('POST /runs/:id/reassign on a gate: the engine refuses before anything 
     approveFails = true;
     const failed = await app.inject({ method: 'POST', url: '/api/v1/runs/run-authors/reassign', payload: { cli: 'copilot' } });
     expect(failed.statusCode).toBe(409);
-    expect((failed.json() as { error: string }).error).toContain('now waits on copilot, but approving the gate failed: gate changed');
+    expect((failed.json() as { error: string }).error).toContain('was re-seated on copilot, but approving the gate failed: gate changed');
+  });
+
+  it('a gate whose approve ACCEPTS the parked work (no judge could rule; review adjudication) refuses a reassign, touching nothing', async () => {
+    const judged = await app.inject({ method: 'POST', url: '/api/v1/runs/run-judge/reassign', payload: { cli: 'copilot' } });
+    expect(judged.statusCode).toBe(409);
+    expect((judged.json() as { error: string }).error).toContain("operator's judgment of the work as it stands");
+    const adjudication = await app.inject({ method: 'POST', url: '/api/v1/runs/run-adjudication/reassign', payload: { cli: 'copilot' } });
+    expect(adjudication.statusCode).toBe(409);
+    expect((adjudication.json() as { error: string }).error).toContain('lands the reviewed work with its carried items');
+    expect(calls).toEqual([]);
+  });
+
+  it('a second reassign of the same run while one is in flight is refused (no seat neither response names)', async () => {
+    const first = app.inject({ method: 'POST', url: '/api/v1/runs/run-slow/reassign', payload: { cli: 'copilot' } });
+    await vi.waitFor(() => expect(calls).toContain('reassignUnit:run-slow:3:copilot'));
+    const second = await app.inject({ method: 'POST', url: '/api/v1/runs/run-slow/reassign', payload: { cli: 'codex' } });
+    expect(second.statusCode).toBe(409);
+    expect((second.json() as { error: string }).error).toContain('already in flight');
+    release();
+    expect((await first).statusCode).toBe(200);
+    expect(calls).toEqual(['reassignUnit:run-slow:3:copilot', 'confirmGate:run-slow:true']);
   });
 
   it('without a named seat a gated reassign stays approve-then-reassign (a re-route needs a running unit)', async () => {
