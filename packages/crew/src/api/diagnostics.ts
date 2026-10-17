@@ -252,7 +252,8 @@ export function defaultSeatVersionPinSource(): SeatVersionPinSource | null {
  * refresh with a timed-out seat is retried after {@link SEAT_VERSION_RETRY_MS}, not a whole TTL.
  */
 export class SeatVersionPinCache {
-  private value: { at: number; pins: SeatVersionPin[]; timedOut: boolean } | null = null;
+  /** `kept`: the seats whose reading was kept over a timed-out probe (crew#997). */
+  private value: { at: number; pins: SeatVersionPin[]; timedOut: boolean; kept: Set<string> } | null = null;
   private inFlight: Promise<SeatVersionPin[] | null> | null = null;
   private failedAt: number | null = null;
   /** When each seat's kept reading was answered (crew#997). */
@@ -274,7 +275,7 @@ export class SeatVersionPinCache {
   /** A fresh-enough answer, probing when stale; `null` when there is no source. */
   async get(): Promise<SeatVersionPin[] | null> {
     if (this.source === null) return null;
-    if (!this.stale()) return this.value?.pins ?? null;
+    if (!this.stale()) return this.served();
     if (this.inFlight !== null) return this.inFlight;
     const source = this.source;
     this.inFlight = source()
@@ -282,25 +283,30 @@ export class SeatVersionPinCache {
         const at = Date.now();
         const prev = this.value?.pins ?? [];
         const pins: SeatVersionPin[] = [];
+        const keptCli = new Set<string>();
         for (const { timedOut, ...reading } of probed) {
           if (timedOut !== true) {
             this.answeredAt.set(reading.cli, at);
             pins.push(reading);
             continue;
           }
-          const kept = prev.find((p) => p.cli === reading.cli);
+          // Only a reading of the same binary against the same pin is kept: a moved pin is news.
+          const kept = prev.find((p) => p.cli === reading.cli && p.binary === reading.binary && p.pinned === reading.pinned);
           const answered = this.answeredAt.get(reading.cli);
-          if (kept !== undefined && answered !== undefined && at - answered < SEAT_VERSION_KEEP_MS) pins.push(kept);
+          if (kept !== undefined && answered !== undefined && at - answered < SEAT_VERSION_KEEP_MS) {
+            pins.push(kept);
+            keptCli.add(kept.cli);
+          }
         }
-        this.value = { at, pins, timedOut: probed.some((p) => p.timedOut === true) };
+        this.value = { at, pins, timedOut: probed.some((p) => p.timedOut === true), kept: keptCli };
         this.failedAt = null;
-        return pins;
+        return this.served();
       })
       .catch(() => {
         // A failed refresh backs off for one TTL too: without this a persistent failure would
         // re-probe on every roster read once the last good answer aged out.
         this.failedAt = Date.now();
-        return this.value?.pins ?? null;
+        return this.served();
       })
       .finally(() => {
         this.inFlight = null;
@@ -311,7 +317,17 @@ export class SeatVersionPinCache {
   /** The last answer for `cli`, without waiting; a stale or empty cache starts a refresh. */
   read(cli: string): SeatVersionPin | undefined {
     if (this.source !== null && this.stale()) void this.get();
-    return this.value?.pins.find((p) => p.cli === cli);
+    return this.served()?.find((p) => p.cli === cli);
+  }
+
+  /** The cached readings, less a kept reading past {@link SEAT_VERSION_KEEP_MS} (codex r1 on #997):
+   *  the window holds whether or not a probe has landed since. */
+  private served(): SeatVersionPin[] | null {
+    if (this.value === null) return null;
+    const { pins, kept } = this.value;
+    if (kept.size === 0) return pins;
+    const now = Date.now();
+    return pins.filter((p) => !kept.has(p.cli) || now - (this.answeredAt.get(p.cli) ?? 0) < SEAT_VERSION_KEEP_MS);
   }
 }
 

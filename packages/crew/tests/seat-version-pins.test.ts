@@ -17,7 +17,7 @@ import {
 } from '../src/api/diagnostics.js';
 import { rosterWithStandingFactory } from '../src/api/roster-standing.js';
 import { SeatHealthTracker } from '../src/api/seat-health.js';
-import { SEAT_VERSION_RETRY_MS } from '../src/api/seat-version.js';
+import { SEAT_VERSION_KEEP_MS, SEAT_VERSION_RETRY_MS } from '../src/api/seat-version.js';
 
 const acp = (binary: string, verified_version?: string, acp_input_governance = true) => ({
   binary,
@@ -219,5 +219,47 @@ describe('a pin probe that timed out (crew#997)', () => {
     const cache = new SeatVersionPinCache(async () => probeSeatVersionPins(ONE, enoent));
     await cache.get();
     expect(cache.read('opencode')).toMatchObject({ observed: null, matched: false });
+  });
+});
+
+describe('a timed-out pin probe after the pin moved (crew#997)', () => {
+  it('does not keep a reading taken against the old pin', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-17T00:00:00Z'));
+    let roster = [{ key: 'opencode', acp: acp('opencode', '1.17.18') }];
+    let exec = async (): Promise<{ stdout: string; stderr: string }> => ({ stdout: '1.17.18\n', stderr: '' });
+    const cache = new SeatVersionPinCache(async () => probeSeatVersionPins(roster, exec), 60_000);
+    await cache.get();
+    expect(cache.read('opencode')).toMatchObject({ pinned: '1.17.18', matched: true });
+    roster = [{ key: 'opencode', acp: acp('opencode', '2.0.25') }];
+    exec = async () => {
+      throw Object.assign(new Error('Command failed: opencode --version'), { killed: true, signal: 'SIGTERM' });
+    };
+    vi.setSystemTime(new Date(Date.now() + 60_000));
+    await cache.get();
+    expect(cache.read('opencode')).toBeUndefined();
+    vi.useRealTimers();
+  });
+});
+
+describe('a kept pin reading past its window (crew#997, codex r1)', () => {
+  it('is not served once SEAT_VERSION_KEEP_MS has passed since it was answered, probe or no probe', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-17T00:00:00Z'));
+    const roster = [{ key: 'opencode', acp: acp('opencode', '1.17.18') }];
+    let exec = async (): Promise<{ stdout: string; stderr: string }> => ({ stdout: '1.17.18\n', stderr: '' });
+    const cache = new SeatVersionPinCache(async () => probeSeatVersionPins(roster, exec), 30 * 60_000);
+    await cache.get();
+    exec = async () => {
+      throw Object.assign(new Error('Command failed: opencode --version'), { killed: true, signal: 'SIGTERM' });
+    };
+    // A timeout just inside the window keeps the reading…
+    vi.setSystemTime(new Date(Date.now() + SEAT_VERSION_KEEP_MS - 1_000));
+    await cache.get();
+    expect(cache.read('opencode')).toMatchObject({ matched: true });
+    // …and past the window it is gone, before the next probe lands.
+    vi.setSystemTime(new Date(Date.now() + 2_000));
+    expect(cache.read('opencode')).toBeUndefined();
+    vi.useRealTimers();
   });
 });
