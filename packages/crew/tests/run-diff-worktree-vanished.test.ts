@@ -16,14 +16,20 @@ import { join } from 'node:path';
 import Fastify from 'fastify';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 
-const race = vi.hoisted(() => ({ mode: 'spawn' as 'spawn' | 'running' | 'unlinked' }));
+const race = vi.hoisted(() => ({ mode: 'spawn' as 'spawn' | 'running' | 'unlinked' | 'unlinked-after' | 'real' }));
 vi.mock('../src/api/run-files.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../src/api/run-files.js')>();
   return {
     ...real,
     // The sweep lands between the route's existence check and git's spawn (`spawn`), or while git
     // is already running in the worktree (`running`).
-    worktreeDiff: async (workdir: string, _rel: string | undefined, base: string | undefined) => {
+    worktreeDiff: async (workdir: string, rel: string | undefined, base: string | undefined) => {
+      if (race.mode === 'real') return real.worktreeDiff(workdir, rel, base);
+      if (race.mode === 'unlinked-after') {
+        // git answered, then the sweep removed the `.git` link before the route replied.
+        rmSync(join(workdir, '.git'), { force: true });
+        return { diff: '', truncated: false };
+      }
       if (race.mode === 'unlinked') {
         // The sweep has removed the `.git` link but not yet the directory: the base lookup fails.
         rmSync(join(workdir, '.git'), { force: true });
@@ -95,8 +101,8 @@ describe('GET /runs/:id/diff — the worktree vanished mid-request', () => {
 });
 
 describe('GET /runs/:id/diff?base=merge-base — the sweep is removing the worktree (crew#1057)', () => {
-  const setUp = async (name: string) => {
-    race.mode = 'unlinked';
+  const setUp = async (name: string, mode: 'unlinked' | 'unlinked-after' | 'real' = 'unlinked') => {
+    race.mode = mode;
     const repo = join(base, `repo-${name}`);
     const wt = join(repo, 'wicked-worktrees', 'run-u');
     mkdirSync(repo);
@@ -142,5 +148,25 @@ describe('GET /runs/:id/diff?base=merge-base — the sweep is removing the workt
     await app.close();
     expect(res.statusCode, res.body).toBe(400);
     expect(res.body).toContain('UnresolvableDiffBaseError');
+  });
+
+  it('a read that succeeded while the sweep removed the `.git` link serves the run branch, not the empty answer', async () => {
+    const { app } = await setUp('after', 'unlinked-after');
+    const res = await app.inject({ method: 'GET', url: '/api/v1/runs/run-u/diff?base=merge-base' });
+    await app.close();
+    expect(res.statusCode, res.body).toBe(200);
+    expect((res.json() as { source: string; diff: string })).toMatchObject({ source: 'branch' });
+    expect((res.json() as { diff: string }).diff).toContain('b.txt');
+  });
+
+  it('a worktree already without its `.git` link is never read: git would answer about the repo above it (codex r1)', async () => {
+    const { app, wt } = await setUp('before', 'real');
+    rmSync(join(wt, '.git'), { force: true });
+    const res = await app.inject({ method: 'GET', url: '/api/v1/runs/run-u/diff' });
+    await app.close();
+    expect(res.statusCode, res.body).toBe(200);
+    const body = res.json() as { source: string; diff: string };
+    expect(body.source).toBe('branch');
+    expect(body.diff).toContain('b.txt');
   });
 });

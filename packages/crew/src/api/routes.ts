@@ -2119,11 +2119,13 @@ export function registerRoutes(
     };
     if (!worktreeLive) return fromBranchOr409();
     // crew#1057: the delivered-worktree sweep (`git worktree remove`) deletes the worktree's files,
-    // its `.git` link among them, BEFORE the directory itself. A git read that runs in that window fails
-    // with no named error ("no merge base between origin/main and HEAD"). A worktree whose `.git`
-    // link was there when this request began and is gone now is being swept, the same as a gone one.
-    const hadGitLink = existsSync(join(workdir, '.git'));
-    const worktreeGoneNow = () => !existsSync(workdir) || (hadGitLink && !existsSync(join(workdir, '.git')));
+    // its `.git` link among them, BEFORE the directory itself. A bound run's worktree with no `.git`
+    // link is being swept: git run in it finds the registered repo above it instead, and answers
+    // about that checkout (an empty diff) or fails with no named error ("no merge base between
+    // origin/main and HEAD"). Such a worktree is gone, checked before the read and again after it.
+    const bound = resolved.session.repo_ref !== null;
+    const worktreeIntact = () => existsSync(workdir) && (!bound || existsSync(join(workdir, '.git')));
+    if (!worktreeIntact()) return fromBranchOr409();
     // Narrowing is WORKTREE-scoped: a contained-but-outside-the-worktree path (extra write
     // root / repo root) is a valid FILE read but has no meaning as a diff pathspec — rejected
     // explicitly here rather than handing git a `../`-prefixed pathspec and surfacing its
@@ -2145,12 +2147,16 @@ export function registerRoutes(
     try {
       if (defaultBase !== undefined) {
         try {
-          return { ...(await worktreeDiff(workdir, rel, defaultBase)), source: 'worktree' as const, base: defaultBase };
+          const read = await worktreeDiff(workdir, rel, defaultBase);
+          if (!worktreeIntact()) return fromBranchOr409();
+          return { ...read, source: 'worktree' as const, base: defaultBase };
         } catch (err) {
           if (!(err instanceof UnresolvableDiffBaseError)) throw err;
         }
       }
-      return { ...(await worktreeDiff(workdir, rel, rawBase)), source: 'worktree' as const };
+      const read = await worktreeDiff(workdir, rel, rawBase);
+      if (!worktreeIntact()) return fromBranchOr409();
+      return { ...read, source: 'worktree' as const };
     } catch (err) {
       // The worktree was removed WHILE this request ran (the delivered-worktree sweep, an engine
       // reap). Whatever git said — a spawn into the vanished cwd fails ENOENT (the 0.9.1 release
@@ -2160,7 +2166,7 @@ export function registerRoutes(
       // caller's 400 (codex r1). The `merge-base` literal names no ref: when the worktree is being
       // swept, its failure is the sweep's, not the caller's (crew#1057).
       const callersRef = err instanceof UnresolvableDiffBaseError && err.base !== MERGE_BASE_LITERAL;
-      if (!callersRef && worktreeGoneNow()) return fromBranchOr409();
+      if (!callersRef && !worktreeIntact()) return fromBranchOr409();
       return diffError(err);
     }
   });
