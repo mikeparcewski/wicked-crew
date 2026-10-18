@@ -181,6 +181,37 @@ export interface SeatRecentBench {
   runs: number;
 }
 
+/**
+ * crew#1071: where a seat's recent bench is kept across a daemon restart. The bench used to live in
+ * this tracker's memory only, and the boot replay re-reads only LIVE runs' events, so a bench
+ * recorded by a run that has since ended (cancelled or failed: the normal end of a quota failure)
+ * was gone after a restart. The seat read Ready again, and the next ask was seated on it alone and
+ * failed with the same 429. The daemon wires this to its audit trail: one entry per bench and per
+ * lift, read back at boot by {@link SeatHealthTracker.hydrateBenches}.
+ */
+export interface SeatBenchStore {
+  /** A bench (or a later bench of the same seat) was recorded. */
+  benched(cli: string, rec: SeatBenchRecord): void;
+  /** The seat's bench was lifted before its window ran out: an ok output, a chat reply, or its own
+   *  live sign-in check answering after it. */
+  lifted(cli: string, atMs: number): void;
+}
+
+/** One persisted bench, as {@link SeatBenchStore.benched} receives it and the boot reads it back. */
+export interface SeatBenchRecord {
+  /** Unix millis of the bench (the engine frame's own `ts` when it carried one). */
+  at: number;
+  reason: string;
+  source: string;
+  session?: string;
+  runs: number;
+}
+
+/** One persisted entry read back at boot, oldest first or in any order (it is sorted). */
+export type SeatBenchEntry =
+  | { kind: 'benched'; cli: string; rec: SeatBenchRecord }
+  | { kind: 'lifted'; cli: string; at: number };
+
 /** A seat's own report that it has no credential (`RosterSeat.auth_evidence`). */
 export interface SeatAuthFailure {
   /** ISO-8601 of the report. */
@@ -197,7 +228,9 @@ export interface SeatAuthFailure {
  * In-memory per-seat health, folded from live CoreEvents. In-memory ON PURPOSE: health is a
  * statement about the running platform's ability to reach a CLI right now — a daemon restart
  * genuinely does not know, and "assume active, let the next failure/probe speak" is the honest
- * default (and the one the declarative-roster doctrine implies).
+ * default (and the one the declarative-roster doctrine implies). One exception (crew#1071): the
+ * engine's in-run bench of a seat is its own recorded verdict, not a guess, so it is kept through
+ * the {@link SeatBenchStore} for its window and restored at boot.
  */
 export class SeatHealthTracker {
   private readonly entries = new Map<string, SeatHealth>();
@@ -220,6 +253,48 @@ export class SeatHealthTracker {
     /** Receives the correlation log lines (daemon wires `app.log.warn`). */
     log?: (m: string) => void;
   } = {}) {}
+
+  /** crew#1071: where benches and their lifts are kept across a restart. `null`: memory only. */
+  private benchStore: SeatBenchStore | null = null;
+
+  /** crew#1071: keep every bench and lift from now on in `store` (the daemon's audit trail). */
+  attachBenchStore(store: SeatBenchStore): void {
+    this.benchStore = store;
+  }
+
+  /**
+   * crew#1071: rebuild the benches still inside {@link SEAT_BENCH_WINDOW_MS} from the persisted
+   * entries (the daemon's audit trail), so a restart does not hand a seat that is out of quota its
+   * next ask. Entries are folded in time order: a lift at or after a bench drops it, a later bench
+   * replaces it. Nothing is re-persisted.
+   */
+  hydrateBenches(entries: readonly SeatBenchEntry[], nowMs = Date.now()): void {
+    const ordered = [...entries].sort(
+      (a, b) => (a.kind === 'benched' ? a.rec.at : a.at) - (b.kind === 'benched' ? b.rec.at : b.at),
+    );
+    for (const e of ordered) {
+      if (e.kind === 'lifted') {
+        const cur = this.recentBenches.get(e.cli);
+        if (cur !== undefined && e.at >= cur.at) this.recentBenches.delete(e.cli);
+        continue;
+      }
+      if (nowMs - e.rec.at >= SEAT_BENCH_WINDOW_MS) continue;
+      const cur = this.recentBenches.get(e.cli);
+      if (cur !== undefined && cur.at > e.rec.at) continue;
+      this.recentBenches.set(e.cli, {
+        at: e.rec.at,
+        reason: e.rec.reason,
+        source: e.rec.source,
+        runs: Math.max(1, e.rec.runs),
+        ...(e.rec.session !== undefined ? { session: e.rec.session } : {}),
+      });
+    }
+  }
+
+  /** Drop the seat's bench, and say so to the store when there was one to drop (crew#1071). */
+  private liftBench(key: string, atMs: number): void {
+    if (this.recentBenches.delete(key)) this.benchStore?.lifted(key, atMs);
+  }
 
   /** Fold one CoreEvent into the map. Safe on every event type; unknown types are ignored. */
   ingest(event: CoreEvent): void {
@@ -307,9 +382,9 @@ export class SeatHealthTracker {
         return;
       }
       case 'chatReply': {
-        // A seat that ANSWERED a chat turn did work: the same recovery an ok unit output is. A
-        // chat may seat a council-benched seat (chat admission reads `auth` only), so this is how
-        // a recently benched seat that has recovered says so before the window lifts.
+        // A seat that ANSWERED a chat turn did work: the same recovery an ok unit output is. (An
+        // ask does not seat a seat under an active bench — crew#1071 — so this lifts one only for a
+        // seat that answered anyway: a chat opened before the bench landed.)
         const cliKey = str((event as { cliKey?: unknown }).cliKey);
         if (cliKey !== undefined && (event as { ok?: unknown }).ok === true) this.markActive(cliKey, at);
         return;
@@ -331,8 +406,15 @@ export class SeatHealthTracker {
         // run benching twice — its worker, then its judge — counts once).
         const prev = this.recentBenches.get(cli);
         const active = prev !== undefined && at - prev.at < SEAT_BENCH_WINDOW_MS;
-        const runs = !active ? 1 : session !== undefined && session === prev.session ? prev.runs : prev.runs + 1;
-        this.recentBenches.set(cli, { at, reason, source, runs, ...(session !== undefined ? { session } : {}) });
+        // The same frame folded twice (a replayed log entry after the live frame, or a boot
+        // replay of a live run after the trail already restored its bench) changes nothing.
+        const repeat = prev !== undefined && prev.at === at && prev.session === session && prev.reason === reason;
+        if (!repeat) {
+          const runs = !active ? 1 : session !== undefined && session === prev.session ? prev.runs : prev.runs + 1;
+          const rec = { at, reason, source, runs, ...(session !== undefined ? { session } : {}) };
+          this.recentBenches.set(cli, rec);
+          this.benchStore?.benched(cli, rec);
+        }
         this.stampError(cli, at);
         // The run moves its units OFF the benched seat: the refusing unit fails over (a
         // `stepFailed` naming the new seat, no `unitReassigned`) and a later one is re-seated
@@ -408,7 +490,7 @@ export class SeatHealthTracker {
       ...(prev?.lastErrorAt !== undefined ? { lastErrorAt: prev.lastErrorAt } : {}),
     });
     this.authFailures.delete(key); // …and the seat's own "no credential" report (F-A45-006)
-    this.recentBenches.delete(key); // …and a run's bench of it: the seat just did work
+    this.liftBench(key, atMs); // …and a run's bench of it: the seat just did work
   }
 
   /**
@@ -416,8 +498,8 @@ export class SeatHealthTracker {
    * calls this when the seat's own LIVE sign-in check answered after an account bench (signed out,
    * out of quota). An ok output does the same through {@link markActive}.
    */
-  clearRecentBench(key: string): void {
-    this.recentBenches.delete(key);
+  clearRecentBench(key: string, atMs = Date.now()): void {
+    this.liftBench(key, atMs);
   }
 
   /**

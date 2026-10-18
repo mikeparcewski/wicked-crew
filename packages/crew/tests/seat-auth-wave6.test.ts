@@ -210,4 +210,32 @@ describe('GET /roster + POST /chats with the seat’s own evidence (F-A45-006 / 
     const body = res.json() as { refused: Refusal[] };
     expect(body.refused).toEqual([expect.objectContaining({ cliKey: 'pi', source: 'auth' })]);
   });
+
+  // crew#1071: after a restart an ask was opened with copilot alone (the operator had turned the
+  // others off) and failed on the same 429 — chat admission read `auth` only, never the engine's bench.
+  const piBenched = (): void =>
+    seatHealth.ingest(ev({ type: 'seatBenched', session: 'run-q', ord: 1, cli: 'pi', reason: 'quota_exhausted (no success in the run)', source: 'worker', ts: Date.now() }));
+
+  it('an ask is not seated on a seat the engine benched for quota: refused by name with source engine, the rest seated', async () => {
+    piBenched();
+    const res = await open({ chatId: 'bench-dflt' });
+    expect(res.statusCode).toBe(201);
+    expect((res.json() as { seats: Array<{ cliKey: string }> }).seats.map((x) => x.cliKey)).toEqual(['claude', 'opencode']);
+    const refused = (res.json() as { refused: Refusal[] }).refused;
+    expect(refused).toEqual([expect.objectContaining({ cliKey: 'pi', source: 'engine' })]);
+    expect(refused[0]!.reason).toMatch(/^benched until \d\d:\d\dZ — the engine benched it in a recent run \(out of quota\)/);
+    // The roster's chat admission says the same, so the studio's picker never offers it.
+    const pi = ((await app.inject({ method: 'GET', url: '/api/v1/roster' })).json() as { roster: Array<{ key: string; chat_admission: Record<string, { ok: boolean; source?: string }> }> }).roster.find((s) => s.key === 'pi')!;
+    expect(pi.chat_admission['unscoped']).toMatchObject({ ok: false, source: 'engine' });
+    expect(pi.chat_admission['scoped_bound']).toMatchObject({ ok: false, source: 'engine' });
+  });
+
+  it('an ask naming ONLY the benched seat is refused (409) with the reason, never launched on it', async () => {
+    piBenched();
+    const res = await open({ chatId: 'bench-only', clis: ['pi'] });
+    expect(res.statusCode).toBe(409);
+    const body = res.json() as { error: string; refused: Refusal[] };
+    expect(body.error).toMatch(/benched by the engine in a recent run \(out of quota, say\)/);
+    expect(body.refused).toEqual([expect.objectContaining({ cliKey: 'pi', source: 'engine' })]);
+  });
 });

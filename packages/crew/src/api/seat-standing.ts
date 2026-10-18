@@ -139,6 +139,9 @@ export interface StandingSeat {
   /** wicked-core#976: present when the engine's host-floor bench could not be read on the host
    *  floor (and no earlier reading stands): the operator's sentence. The seat is not admitted. */
   host_floor_unknown?: string | null;
+  /** crew#1071: the engine's bench of this seat that is still active (`RosterSeat.recent_bench`):
+   *  an ask does not seat it until the bench lifts. Absent or `null`: no active bench. */
+  recent_bench?: { kind?: unknown; lifts_at?: unknown; reason?: unknown } | null;
 }
 
 /**
@@ -335,6 +338,20 @@ export function chatSeatAdmission(
   }
   if (seat.enabled_for_council === false) {
     reasons.push('disabled for the council, so it takes no turn');
+  }
+  // crew#1071: an ask is a run, and a launch already benches a seat the engine benched in a recent
+  // run (out of quota, say). Seating it here anyway put an ask on that seat ALONE when the operator
+  // had turned the others off, and it failed with the same refusal. The bench is the engine's own
+  // verdict, so it is refused here by name, with the time it lifts.
+  const bench = seat.recent_bench ?? null;
+  if (bench !== null && authUsable(auth)) {
+    const kind = typeof bench.kind === 'string' && bench.kind !== '' ? bench.kind : 'refusal';
+    const lifts = typeof bench.lifts_at === 'string' ? ` until ${hhmm(bench.lifts_at)}` : '';
+    reasons.push(
+      `benched${lifts} — the engine benched it in a recent run (${kind === 'quota_exhausted' ? 'out of quota' : kind}), ` +
+        'so an ask is not seated on it; sooner once it completes a turn or its own sign-in check answers',
+    );
+    source = 'engine';
   }
   // wicked-core#976: an ask is a run, and on the host floor the engine refuses governed work on a
   // seat that keeps no per-call check there — in every scope. Decided HERE, before any structural

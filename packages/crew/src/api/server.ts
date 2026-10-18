@@ -91,6 +91,7 @@ import {
   stallFrameAction,
 } from './stall-frame-index.js';
 import { SeatHealthTracker } from './seat-health.js';
+import { auditSeatBenchStore, readSeatBenchEntries } from './seat-bench-trail.js';
 import { rosterWithStandingFactory } from './roster-standing.js';
 import { SeatContainerStatus, seatLoginDepsFor } from './seat-container-login.js';
 import { ChatTurnIndex } from './chat-turns.js';
@@ -553,6 +554,19 @@ export async function createServer(
   app.addHook('onClose', async () => {
     await audit.flush(); // don't lose the trail's tail on shutdown
   });
+  // crew#1071: the engine's bench of a seat (out of quota, signed out at work time) is restored
+  // from the trail for the rest of its window before anything can launch, and every bench and
+  // early lift from now on is written there. Best-effort: an unreadable trail boots with no bench.
+  try {
+    seatHealth.hydrateBenches(await readSeatBenchEntries(audit));
+  } catch (err) {
+    app.log.warn(
+      `[roster] seat bench hydrate failed (a seat benched before this boot reads eligible until its next refusal): ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+  seatHealth.attachBenchStore(auditSeatBenchStore(audit));
 
   // The eval RUN history behind `/testing/evals[/:id]` — rooted under the daemon's resolved state
   // home (so a `--db`-isolated daemon keeps its eval history isolated too), synchronous writes, no
