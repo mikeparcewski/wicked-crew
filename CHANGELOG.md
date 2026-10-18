@@ -10,6 +10,14 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.14.2] — 2026-10-18
+
+A patch release: `GET /search` over everything the daemon can read (#1075). Pins: wicked-core-ts ^0.14.2, wicked-studio ^0.10.2, wicked-interactive ^0.14.1 (bridge floor, unchanged), wicked-crew-api-types 0.127.0.
+
+### Changed
+- **The engine is wicked-core-ts 0.14.2.** opencode seats route their model calls through the agent gateway (their model is pinned to a routed provider, and the CLI's own catalogue fetch and autoupdate are off). Any repeated crash with the same failure signature benches a seat, not only lines that say "error".
+- **The bundled studio is wicked-studio 0.10.2:** each composer keeps its own helper choice (the New job wizard's pick never changes who answers an Ask), and a step's message never ends on an empty "Commands run" heading.
+
 ### Added
 - **`GET /search` searches everything the daemon can read (`SearchResponse`, `wicked-crew-api-types` 0.127.0).** One query covers runs, projects, repos, transcripts (live chat transcripts and each finished unit's output), rules, memories (estate `memory.list`) and documents. It answers grouped by type and ranked, with title and snippet match ranges, a total and a cursor per type, and one state row per source (`ready`, `indexing`, `unavailable` with the reason). Every word must match. A title match ranks above a body match, and recent entities rank higher. The index is in memory: the daemon loads no SQLite library (wicked-core#631), so an FTS index belongs in the engine. Nothing is read until the first search, and that read runs off the request path. After that, engine frames and the daemon's own successful writes keep it current, and sources written elsewhere are re-read in the background once past a TTL. A query yields the event loop every few milliseconds, stops at a 300 ms budget (`partial: true`), and stops when the client disconnects. Unit outputs are indexed from a 64 KB head and tail, and each type keeps at most 8 M characters: the least recently updated entities leave first.
 
@@ -4272,7 +4280,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.14.1...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.14.2...HEAD
+[0.14.2]: https://github.com/mikeparcewski/wicked-crew/compare/v0.14.1...v0.14.2
 [0.14.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.13.2...v0.14.0
 [0.13.2]: https://github.com/mikeparcewski/wicked-crew/compare/v0.13.1...v0.13.2
