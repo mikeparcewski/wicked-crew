@@ -184,9 +184,12 @@ export function scopeEstateArgs(tool: string, args: Record<string, unknown>, sco
   return out;
 }
 
-/** The estate server's environment for one relayed call (module doc: which store, whose provenance). */
-export function estateRelayEnv(scope: EstateUnitScope, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  const env = childEnvWithBootEstateDb(base);
+/**
+ * The estate server's environment for one relayed call (module doc: which store, whose provenance),
+ * built on `base`, the daemon's env as every crew child gets it (`childEnvWithBootEstateDb`).
+ */
+export function estateRelayEnv(scope: EstateUnitScope, base: NodeJS.ProcessEnv = childEnvWithBootEstateDb(process.env)): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...base };
   for (const k of Object.keys(env)) if (k.startsWith('WICKED_RUN_')) delete env[k];
   return {
     ...env,
@@ -224,7 +227,7 @@ export function defaultEstateInvoker(io: Pick<EstateMcpIo, 'spawn'> = {}): Estat
       (() =>
         nodeSpawn(estateMcpExe(), ['--readonly'], {
           stdio: ['pipe', 'pipe', 'pipe'],
-          env: estateRelayEnv(scope),
+          env: estateRelayEnv(scope, childEnvWithBootEstateDb(process.env)),
           windowsHide: true,
         }));
     const msg = await callEstateToolRaw(tool, args, { spawn, timeoutMs });
