@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.126.0",
+  "apiTypesVersion": "0.127.0",
   "endpoints": [
     {
       "method": "GET",
@@ -1825,6 +1825,16 @@
       "requestType": null,
       "responseType": null,
       "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/search",
+      "requestType": null,
+      "responseType": "SearchResponse",
+      "statusCodes": [
+        200,
+        400
+      ]
     },
     {
       "method": "GET",

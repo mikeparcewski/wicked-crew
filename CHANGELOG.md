@@ -10,6 +10,9 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Added
+- **`GET /search` searches everything the daemon can read (`SearchResponse`, `wicked-crew-api-types` 0.127.0).** One query covers runs, projects, repos, transcripts (live chat transcripts and each finished unit's output), rules, memories (estate `memory.list`) and documents. It answers grouped by type and ranked, with title and snippet match ranges, a total and a cursor per type, and one state row per source (`ready`, `indexing`, `unavailable` with the reason). Every word must match. A title match ranks above a body match, and recent entities rank higher. The index is in memory: the daemon loads no SQLite library (wicked-core#631), so an FTS index belongs in the engine. Nothing is read until the first search, and that read runs off the request path. After that, engine frames and the daemon's own successful writes keep it current, and sources written elsewhere are re-read in the background once past a TTL. A query yields the event loop every few milliseconds, stops at a 300 ms budget (`partial: true`), and stops when the client disconnects. Unit outputs are indexed from a 64 KB head and tail, and each type keeps at most 8 M characters: the least recently updated entities leave first.
+
 ## [0.14.1] — 2026-10-17
 
 A patch release: a quota bench survives a daemon restart, and an ask is not seated on a benched seat (#1072). Pins: wicked-core-ts ^0.14.1, wicked-studio ^0.10.1, wicked-interactive ^0.14.1 (bridge floor, unchanged).
