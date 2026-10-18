@@ -479,10 +479,12 @@ export class SearchService {
       opts.signal?.throwIfAborted();
     }
     const parsed = parseQuery(q);
+    // The scan's budget starts now: the wait for a first read above is not the scan's time.
+    const scanStart = performance.now();
     const searchable = opts.types.filter((t) => SOURCES_OF[t].some((s) => this.available(s) && this.state(s).loadedAt !== null));
     const { groups, partial } = await this.index.query(parsed, {
       types: searchable, limit: opts.limit, offset: opts.offset,
-      budgetMs: Math.max(1, budget - (performance.now() - started)),
+      budgetMs: Math.max(1, budget - (performance.now() - scanStart)),
       ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
     });
     const sources: SearchSourceState[] = opts.types.map((type) => this.sourceState(type));
@@ -500,7 +502,9 @@ export class SearchService {
     const failed = sts.find((st) => st.error !== null);
     // A source that failed but still holds an earlier read answers from it, and says so.
     if (failed !== undefined && indexed === 0) return { type, state: 'unavailable', indexed, note: failed.error };
-    return { type, state: 'ready', indexed, note: failed !== undefined ? `Showing the last read: ${failed.error}` : null };
+    if (failed !== undefined) return { type, state: 'ready', indexed, note: `Showing the last read: ${failed.error}` };
+    const left = this.index.leftOutOf(type);
+    return { type, state: 'ready', indexed, note: left > 0 ? `The ${left} oldest were left out to keep the index in memory.` : null };
   }
 }
 
@@ -533,6 +537,7 @@ export function registerSearchRoutes(app: FastifyInstance, service: SearchServic
       const q = (one(qs['q']) ?? '').trim();
       if (q.length < MIN_QUERY_CHARS) return reply.code(400).send({ error: `\`q\` needs at least ${MIN_QUERY_CHARS} characters` });
       if (q.length > MAX_QUERY_CHARS) return reply.code(400).send({ error: `\`q\` is longer than ${MAX_QUERY_CHARS} characters` });
+      if (parseQuery(q).terms.join('').length < MIN_QUERY_CHARS) return reply.code(400).send({ error: `\`q\` needs at least ${MIN_QUERY_CHARS} characters of words` });
       const types = parseTypes(one(qs['types']));
       if (types === null) return reply.code(400).send({ error: `\`types\` must be a comma-separated list of: ${SEARCH_TYPES.join(', ')}` });
       const rawLimit = one(qs['limit']);

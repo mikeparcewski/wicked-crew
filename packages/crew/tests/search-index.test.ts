@@ -133,6 +133,24 @@ describe('bounds', () => {
     expect(ix.chars('run')).toBe(200);
   });
 
+  it('replaceType keeps the newest inside the text budget and never folds the rest; it says how many it left out', () => {
+    const ix = new SearchIndex({ maxCharsPerType: 250 });
+    ix.replaceType('run', [
+      run('old', 't', 'o'.repeat(100), { updatedAt: AT - 9 * DAY }),
+      run('new', 't', 'n'.repeat(100), { updatedAt: AT }),
+      run('mid', 't', 'm'.repeat(100), { updatedAt: AT - 5 * DAY }),
+    ]);
+    expect(ix.ids('run').sort()).toEqual(['mid', 'new']);
+    expect(ix.leftOutOf('run')).toBe(1);
+  });
+
+  it('a query with no words matches nothing', async () => {
+    const ix = new SearchIndex();
+    ix.upsert(run('a', 'alpha'));
+    expect((await ix.query(parseQuery('""'), { ...ALL })).groups).toEqual([]);
+    expect((await ix.query(parseQuery('   '), { ...ALL })).groups).toEqual([]);
+  });
+
   it('replaceType drops what the source no longer holds; an unchanged text keeps its fold but takes new facts', async () => {
     const ix = new SearchIndex();
     ix.replaceType('run', [run('a', 'alpha'), run('b', 'beta')]);

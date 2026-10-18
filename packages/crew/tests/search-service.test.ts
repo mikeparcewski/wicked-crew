@@ -142,6 +142,14 @@ describe('one query, every entity', () => {
     release();
   });
 
+  it('the scan gets its own budget after a slow first read (not what the wait left of it)', async () => {
+    const many = Array.from({ length: 3_000 }, (_, i) => view(`r${i}`, `upload job ${i}`));
+    const { svc } = make({ sessionsDetail: vi.fn(async () => { await new Promise((r) => setTimeout(r, 400)); return many; }), budgetMs: 300 });
+    const res = await svc.search('upload', { types: ['run'], limit: 5, offset: 0 });
+    expect(res.partial).toBe(false);
+    expect(res.groups[0]!.total).toBe(3_000);
+  });
+
   it('an aborted query rejects (the client went away)', async () => {
     const { svc } = make();
     const ac = new AbortController();

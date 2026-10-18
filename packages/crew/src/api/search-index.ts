@@ -134,6 +134,7 @@ function countOf(s: string, t: string, first: number, cap: number): number {
 
 /** The match score of one entity, or 0 when a term is missing (every term must match). */
 export function scoreOf(s: Stored, terms: readonly string[], at: number): number {
+  if (terms.length === 0) return 0; // no words match nothing (never everything)
   let score = 0;
   for (const t of terms) {
     const ti = s.titleFold.indexOf(t);
@@ -228,6 +229,7 @@ const yieldTurn = (): Promise<void> => new Promise((r) => setImmediate(r));
 export class SearchIndex {
   private readonly byType = new Map<SearchType, Map<string, Stored>>();
   private readonly charsByType = new Map<SearchType, number>();
+  private readonly leftOut = new Map<SearchType, number>();
   private readonly maxBodyChars: number;
   private readonly maxCharsPerType: number;
 
@@ -264,6 +266,11 @@ export class SearchIndex {
 
   /** Add or replace one entity. */
   upsert(input: SearchDoc): void {
+    this.put(input);
+    this.evict(input.type);
+  }
+
+  private put(input: SearchDoc): void {
     const doc = input.body.length > this.maxBodyChars ? { ...input, body: capText(input.body, this.maxBodyChars) } : input;
     const map = this.mapOf(doc.type);
     const prev = map.get(doc.id);
@@ -275,7 +282,6 @@ export class SearchIndex {
     this.remove(doc.type, doc.id);
     map.set(doc.id, { doc, titleFold: fold(doc.title), bodyFold: fold(doc.body) });
     this.charsByType.set(doc.type, this.chars(doc.type) + doc.body.length);
-    this.evict(doc.type);
   }
 
   remove(type: SearchType, id: string): void {
@@ -291,11 +297,29 @@ export class SearchIndex {
     for (const id of this.ids(type)) if (drop(id)) this.remove(type, id);
   }
 
-  /** A full re-read of a source: upsert what it holds, drop what it no longer does. */
+  /**
+   * A full re-read of a source: hold what it holds, drop what it no longer does. Newest first, and
+   * only while the type's text budget lasts — the rest is never folded, so a re-read of a store past
+   * the budget costs one sort, not an evict per entity.
+   */
   replaceType(type: SearchType, docs: readonly SearchDoc[]): void {
-    const keep = new Set(docs.map((d) => d.id));
+    const ordered = [...docs].sort((a, b) => (b.updatedAt ?? -1) - (a.updatedAt ?? -1));
+    const keep = new Set<string>();
+    let chars = 0;
+    for (const d of ordered) {
+      const len = Math.min(d.body.length, this.maxBodyChars + 3);
+      if (chars + len > this.maxCharsPerType) continue;
+      chars += len;
+      keep.add(d.id);
+    }
     this.removeWhere(type, (id) => !keep.has(id));
-    for (const d of docs) this.upsert(d);
+    for (const d of ordered) if (keep.has(d.id)) this.put(d);
+    this.leftOut.set(type, ordered.length - keep.size);
+  }
+
+  /** Entities the last re-read of `type` left out to stay inside its text budget. */
+  leftOutOf(type: SearchType): number {
+    return this.leftOut.get(type) ?? 0;
   }
 
   /** Over budget: the least recently updated entities leave first (undated ones before dated). */
@@ -305,6 +329,7 @@ export class SearchIndex {
     for (const s of byAge) {
       if (this.chars(type) <= this.maxCharsPerType) break;
       this.remove(type, s.doc.id);
+      this.leftOut.set(type, this.leftOutOf(type) + 1);
     }
   }
 

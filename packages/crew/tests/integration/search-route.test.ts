@@ -67,6 +67,8 @@ describe('GET /api/v1/search — the route set', () => {
   it.each([
     ['no q', '', 'at least 2'],
     ['a one-letter q', '?q=a', 'at least 2'],
+    ['a q of quotes only', '?q=%22%22', 'characters of words'],
+    ['a q of spaces only', '?q=%20%20%20', 'at least 2'],
     ['a 257-char q', `?q=${'x'.repeat(257)}`, 'longer than 256'],
     ['an unknown type', '?q=upload&types=run,widgets', '`types`'],
     ['limit 0', '?q=upload&limit=0', '`limit`'],
