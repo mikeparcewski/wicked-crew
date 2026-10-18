@@ -83,31 +83,19 @@ for (const vp of VIEWPORTS) {
       ).toEqual([]);
     });
 
-    test('the hero still fits once the studio mock raises its gate', async ({ page }) => {
+    test('the job demo’s decisions are on screen without scrolling', async ({ page }) => {
       await page.goto('/');
       await page.evaluate(async () => { await document.fonts.ready; });
-      // The mock auto-plays on load; the gate is the layout-changing state —
-      // an uncapped gate column once stretched the console row +42px.
-      await page.waitForSelector('[data-studio-gate]:not([hidden])', { timeout: 25_000 });
-      await page.waitForTimeout(300);
-
+      const job = page.locator('[data-job]');
+      // The job starts on its own and pauses for the QE verdict, the hero's tallest state.
+      await expect(job.locator('[data-qe="PASS"]')).toBeVisible({ timeout: 30_000 });
+      for (const sel of ['[data-job-kill]', '[data-qe="PASS"]', '[data-qe="CONDITIONAL"]', '[data-gate="4"]']) {
+        await expect(job.locator(sel).first(), `${sel} is below the fold`).toBeInViewport({ ratio: 1 });
+      }
       const usable = await usableHeight(page, vp.height);
       const hero = (await contentHeights(page, '.hero'))[0];
-      expect(
-        hero.content,
-        `.hero content is ${hero.content}px in ${usable}px of usable height with the gate raised`,
-      ).toBeLessThanOrEqual(usable);
-
-      // And the decision itself is on screen — the gate is the hero's argument.
-      for (const action of ['approve', 'steer', 'reject']) {
-        const bottom = await page
-          .locator(`[data-sg-action="${action}"]`)
-          .evaluate((el) => Math.round(el.getBoundingClientRect().bottom));
-        expect(
-          bottom,
-          `the "${action}" control ends ${bottom}px down a ${vp.height}px window`,
-        ).toBeLessThanOrEqual(vp.height);
-      }
+      expect(hero.content, `.hero content is ${hero.content}px in ${usable}px`).toBeLessThanOrEqual(usable);
+      expect(await page.evaluate(() => window.scrollY)).toBe(0);
     });
   });
 }

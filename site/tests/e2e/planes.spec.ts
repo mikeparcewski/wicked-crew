@@ -2,44 +2,8 @@ import { test, expect } from '@playwright/test';
 import { bringIntoView } from './utils';
 
 /**
- * The four-plane story: the "one public API, no privileged clients" section [data-skins]
- * (studio = the console; wicked-interactive = the DOCUMENT ENGINE, not a second UI — its builder
- * moved into studio, so crew spawns and proxies what remains; governed-generation
- * bus trace, Project-model shipped strip) and the shared-chrome SameGarden map
- * (.same-garden) with crew's card as the "you are here" marker.
+ * The shared four-plane map, with crew as "you are here".
  */
-test.describe('one public API, no privileged clients [data-skins]', () => {
-  test('both consumers render, the bus trace carries the real vocabulary, the project strip is honest', async ({ page }) => {
-    await page.goto('/');
-    const skins = page.locator('[data-skins]');
-    await bringIntoView(skins);
-    await expect(skins).toBeVisible();
-
-    // Two skin cards: studio (coder) + wicked-interactive (creator).
-    const cards = skins.locator('.skin-card');
-    await expect(cards).toHaveCount(2);
-    await expect(cards.first()).toContainText('studio');
-    await expect(cards.first()).toContainText('/api/v1');
-    await expect(cards.last()).toContainText('wicked-interactive');
-
-    // The governed-generation proof: a 4-row bus trace ending in the real
-    // draft.completed event (interactive/draft-events.ts vocabulary).
-    const rows = skins.locator('.skin-trace-rows li');
-    await expect(rows).toHaveCount(4);
-    await expect(rows.first()).toContainText('wicked.interactive.doc.created');
-    await expect(rows.last()).toContainText('wicked.interactive.draft.completed');
-
-    // The Project model SHIPPED in crew 0.7.0 (registerProjectRoutes,
-    // packages/crew/src/api/routes.ts) — the strip says so, present tense,
-    // and stakes only route-backed claims (members, activity, gate rollups,
-    // project-scoped blast radius).
-    const landing = skins.locator('.skins-landing');
-    await expect(landing.locator('.skins-landing-chip')).toHaveText('shipped');
-    await expect(landing).toContainText('Project model');
-    await expect(landing).toContainText('blast radius');
-  });
-});
-
 test.describe('SameGarden four-plane map (.same-garden)', () => {
   test('all four planes render with crew as "you are here"', async ({ page }) => {
     await page.goto('/');

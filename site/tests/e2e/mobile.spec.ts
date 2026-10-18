@@ -2,12 +2,10 @@ import { test, expect, devices } from '@playwright/test';
 import { bringIntoView } from './utils';
 
 /**
- * Phone-native fallbacks (≤600px): the interactive studio mock and gate
- * console are desktop affordances — a phone gets the documented static
- * panels (.studio-static, .gc-static) instead.
+ * Phones (390x844): the job demo is the same working demo, stacked. The proof tables reflow, the
+ * four-plane map renders, and the page never scrolls sideways.
  */
-// iPhone 12 geometry/UA only — the full descriptor carries
-// defaultBrowserType: 'webkit', which would switch away from the cached Chromium.
+// iPhone 12 geometry/UA only: the full descriptor's defaultBrowserType would switch to WebKit.
 const iphone12 = devices['iPhone 12'];
 test.use({
   viewport: iphone12.viewport,
@@ -18,46 +16,40 @@ test.use({
 });
 
 test.describe('mobile (390×844)', () => {
-  test('the static studio fallback replaces the interactive console', async ({ page }) => {
+  test('the job demo runs to delivery on a phone', async ({ page }) => {
     await page.goto('/');
-
-    // Interactive mock hidden, static launch → watch → steer story shown.
-    await expect(page.locator('.studio-mock')).toBeHidden();
-    const staticStudio = page.locator('.studio-static');
-    await expect(staticStudio).toBeVisible();
-    await expect(staticStudio.locator('.sts-steps li')).toHaveCount(3);
-    await expect(staticStudio).toContainText('Start');
-    await expect(staticStudio).toContainText('Decide');
+    const job = page.locator('[data-job]');
+    await bringIntoView(job);
+    await job.locator('[data-qe="PASS"]').click({ timeout: 30_000 });
+    await expect(job.locator('.ln').last()).toContainText('evidence bundle ready', { timeout: 10_000 });
+    await expect(job.locator('[data-gate="4"]')).toBeEnabled();
   });
 
-  test('the static gate verdict replaces the interactive ladder', async ({ page }) => {
+  test('no horizontal overflow anywhere on the page', async ({ page }) => {
     await page.goto('/');
-
-    await expect(page.locator('.gc[data-gc]')).toBeHidden();
-    const gcStatic = page.locator('.gc-static');
-    await bringIntoView(gcStatic);
-    await expect(gcStatic).toBeVisible();
-    await expect(gcStatic.locator('.gcs-stamp')).toHaveText('HELD');
-    await expect(gcStatic.locator('.gcs-list li.is-fail')).toHaveCount(1);
-    // The ledger line rides the static panel too: CONDITIONAL reads as a deny on that read.
-    await expect(gcStatic.locator('.gcs-ledger')).toContainText('CONDITIONAL');
+    const overflow = await page.evaluate(
+      () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    );
+    expect(overflow).toBeLessThanOrEqual(0);
   });
 
-  test('the skins section and four-plane map render on a phone', async ({ page }) => {
+  test('the proofs and the four-plane map render on a phone', async ({ page }) => {
     await page.goto('/');
-
-    // Two-skins story: cards stack single-column but stay fully present.
-    const skins = page.locator('[data-skins]');
-    await bringIntoView(skins);
-    await expect(skins).toBeVisible();
-    await expect(skins.locator('.skin-card')).toHaveCount(2);
-    await expect(skins.locator('.skin-trace-rows li')).toHaveCount(4);
-
-    // SameGarden is CSS-only and degrades — all four planes visible.
+    for (const sel of ['.sandbox .tbl', '.tbl--layers', '.flow', '.tbl--wf', '.install--primary']) {
+      const loc = page.locator(sel);
+      await bringIntoView(loc);
+      await expect(loc).toBeVisible();
+    }
     const map = page.locator('.same-garden');
     await bringIntoView(map);
-    await expect(map).toBeVisible();
     await expect(map.locator('.sg-plane')).toHaveCount(4);
-    await expect(map.locator('.sg-card--here')).toBeVisible();
+  });
+
+  test('the hamburger menu lists crew as a site link', async ({ page }) => {
+    await page.goto('/');
+    await page.locator('#menuBtn').click();
+    const menu = page.locator('#mobileMenu');
+    await expect(menu).toBeVisible();
+    await expect(menu.getByRole('link', { name: /crew/ })).toHaveAttribute('href', 'https://wc.wickedagile.com');
   });
 });

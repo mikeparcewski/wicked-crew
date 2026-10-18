@@ -52,9 +52,9 @@ test.describe('inline-tag boundaries render with their spaces', () => {
     await page.goto('/');
     const text = await page.evaluate(() => document.body.innerText.replace(/\s+/g, ' '));
     for (const phrase of [
-      'the document engine',       // .skins sec-sub: "the" + <b>document engine</b>
-      'as acyclic-validated JSON', // .wf sec-sub: "as" + <b>acyclic-validated JSON</b>
-      'visible during the job',    // .op-card: <i>during</i> + " the job"
+      'as a preset (PUT /api/v1/presets/:name).',   // .durable sec-sub: "as a preset (" + <code>
+      'the same /api/v1 and /ws your tools can',   // .durable fact: <code> + " and " + <code>
+      'Terms of service: crew drives CLIs',          // .get-tos: <b> + text
     ]) {
       expect(text, `fused inline-tag boundary — expected "${phrase}"`).toContain(phrase);
     }

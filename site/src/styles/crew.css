@@ -1,31 +1,13 @@
-/* wicked-crew content styles (wc.wickedagile.com) — THE CONTROL PLANE.
-   Positioning: crew is the CONTROL PLANE of the wicked platform — the harness
-   for your agent harnesses. Intent in → governed, gated work out: YOUR
-   installed CLIs run as governed workers through durable, data-driven
-   workflows; review on a distinct eligible seat when the roster has one; deny-dominates
-   gates; one public API (/api/v1), one console (studio).
-
-   Aesthetic: an execution control surface. Signal colors — amber (--accent)
-   = pass / current-flowing / verified energy, terracotta (--deny) = deny /
-   veto, and the chrome's plane-violet (--ctrl, from --plane-control) = the
-   governance voice: kickers, the ledger feed, the plane story. A neutral
-   link-blue marks the LLM seat that can never approve.
-
-   The shared wicked-web chrome (Base/Topbar/Footer + tokens.css) owns theming
-   via [data-theme]; the family palette is inherited. Only crew-specific rules
-   live here. Each major section is viewport-sized and the document scroll
-   SETTLES section-to-section (scroll-snap: y proximity, the chrome default —
-   soft, so a section taller than the viewport is still reachable; mobile falls
-   back to natural scroll). */
+/* wicked-crew content styles (wc.wickedagile.com): the harness for the coding agents you already use.
+   The page is a hook, a working job demo (.job), four short proofs and Get it.
+   Shared chrome (wicked-web Base/Topbar/Footer + tokens.css) owns theming via [data-theme]; only
+   crew rules live here. Signal colors: yellow (--accent) = what you press, green (--ok) = pass,
+   terracotta (--deny) = deny, violet (--ctrl, the control plane) = governance and the council. */
 
 body { padding-top: var(--topbar-h); }
 
 /* Base reset: the `hidden` attribute must win over any component `display`.
-   Several panels (.studio-gate, .gc-plea) use `display: flex` AND ship with the
-   `hidden` attribute, toggled from JS via `.hidden = true/false`. Without this,
-   `display: flex` overrides the UA default `[hidden]{display:none}` and the DENY
-   steering-gate panel renders VISIBLE on load. `!important` guarantees the
-   attribute beats the class rule regardless of specificity/order. */
+   `!important` guarantees the attribute beats any class rule regardless of specificity/order. */
 [hidden] { display: none !important; }
 
 /* Width container. crew's sections all use .wrap; the shared token .wrap rule
@@ -62,16 +44,12 @@ html { scroll-snap-type: y proximity; scroll-padding-top: var(--topbar-h); }
 section {
   scroll-snap-align: start;
 }
-.hero, .idd, .probs, .skins, .byo, .console-sec, .wf, .rail-sec, .studio, .get {
+.hero, .sandbox, .gates, .council, .durable, .get {
   min-height: calc(100svh - var(--topbar-h));
   display: flex;
   flex-direction: column;
   justify-content: safe center;
 }
-/* Alternating section bands — a TRANSLUCENT darkening on every other slide, so
-   the shared blueprint background art (tokens.css body::before/::after) shows
-   THROUGH instead of being painted over. Base sections stay transparent. */
-.idd, .console-sec, .rail-sec, .studio { background: color-mix(in oklab, #000 7%, transparent); }
 /* Reduced motion: snapping moves the viewport for you — the motion the preference asks us to
    suppress. The chrome (wicked-web tokens.css) carries the same rule, but this file re-declares
    `scroll-snap-type` on html at equal specificity later in the cascade, so the guard must live
@@ -81,7 +59,7 @@ section {
 }
 @media (max-width: 760px) {
   html { scroll-snap-type: none; }
-  .hero, .idd, .probs, .skins, .byo, .console-sec, .wf, .rail-sec, .studio, .get { min-height: 0; }
+  .hero, .sandbox, .gates, .council, .durable, .get { min-height: 0; }
 }
 
 /* ── Crew background — ITS OWN motif: an EXECUTION / HARNESS SCHEMATIC ──────
@@ -200,722 +178,112 @@ code {
 .sec-sub { margin: 16px 0 0; max-width: 72ch; font-size: 1rem; line-height: 1.62; color: color-mix(in oklab, var(--ink) 76%, transparent); }
 .sec-sub b { color: var(--ink); }
 
-/* ── Hero ─────────────────────────────────────────────────────────────── */
-/* Padding is a MINIMUM here (the section is min-height flex-centered, so tall
-   viewports still breathe): sized so the hero's content fits 636px of usable
-   height at 1440x700 with slack for CI's taller Linux rendering (crew#337). */
-.hero { position: relative; overflow: hidden; padding: clamp(28px, 5svh, 88px) 0 clamp(22px, 4svh, 64px); }
+/* ── Hero: hook, then the job demo ─────────────────────────────────────── */
+/* HEIGHT BUDGET: hook + demo fit a 1440x700 laptop window with slack (sections-fit.spec.ts).
+   The demo body's height is the variable that absorbs it. */
+.hero { position: relative; overflow: hidden; padding: clamp(10px, 1.8svh, 28px) 0 clamp(10px, 1.6svh, 24px); }
 .grid-floor {
   position: absolute; inset: 0; z-index: -1; pointer-events: none;
   background: radial-gradient(ellipse 60% 60% at 82% 8%, color-mix(in oklab, var(--accent) 16%, transparent), transparent 60%);
 }
-/* Centered hero: headline + short lede span the full container width, then the
-   self-playing line, then tags + CTA. */
 .hero-head { text-align: center; }
-.hero-head h1 { font-size: clamp(2.4rem, 5.4vw, 4.2rem); margin: 14px 0 0; }
-.lede { margin: 20px auto 0; font-size: clamp(1rem, 1.4vw, 1.12rem); line-height: 1.6; color: color-mix(in oklab, var(--ink) 80%, transparent); max-width: 60%; }
-.lede b { color: var(--ink); font-weight: 700; }
-.hero-foot { margin-top: clamp(20px, 3.4svh, 34px); display: flex; flex-direction: column; align-items: center; gap: 15px; }
-.hero-tags { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
-.hero-tags span {
-  font-family: var(--font-mono); font-size: 0.64rem; letter-spacing: 0.08em; text-transform: uppercase;
-  color: var(--muted); border: 1px solid var(--hairline-strong); border-radius: 999px; padding: 5px 12px;
-}
-.hero-cta { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; }
+.hero-head h1 { font-size: clamp(2rem, 3.6vw, 3rem); margin: 0 auto; max-width: 24ch; }
+.lede { margin: 12px auto 0; font-size: clamp(0.98rem, 1.25vw, 1.1rem); line-height: 1.5; color: color-mix(in oklab, var(--ink) 80%, transparent); max-width: 66ch; }
 
-/* ── The governed assembly line ── intent → your CLIs as governed workers →
-   the gate re-derives "done" from evidence (and can refuse) → verified out.
-   Self-playing left→right; the gate cycles PASS, then REJECT→rerun→PASS. ─── */
-.hero-line-wrap { margin-top: clamp(24px, 4.2svh, 46px); }
-.ln-line { display: flex; align-items: center; justify-content: center; gap: 0; }
-.ln-stage {
-  min-width: 0;
-  border: 1px solid var(--hairline-strong); border-radius: 14px;
-  background: color-mix(in oklab, var(--surface) 82%, transparent);
-  box-shadow: 0 30px 66px -46px rgba(0,0,0,.72);
+.job {
+  --job-h: clamp(250px, calc(100svh - 430px), 420px);
+  margin-top: clamp(14px, 2.2svh, 26px);
+  border: 1px solid var(--hairline-strong); border-radius: 14px; overflow: hidden;
+  background: color-mix(in oklab, var(--surface-2) 88%, #000 6%);
+  box-shadow: 0 40px 80px -50px rgba(0,0,0,.8);
 }
-.ln-k { display: block; font-family: var(--font-mono); font-size: 0.54rem; letter-spacing: 0.16em; text-transform: uppercase; color: var(--faint); }
-.ln-sub { display: block; font-family: var(--font-mono); font-size: 0.58rem; color: var(--muted); overflow-wrap: anywhere; }
+.job-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; padding: 8px 12px; border-bottom: 1px solid var(--hairline); background: color-mix(in oklab, var(--canvas) 50%, transparent); }
+.job-dots { display: inline-flex; gap: 6px; }
+.job-dots i { width: 10px; height: 10px; border-radius: 50%; background: color-mix(in oklab, var(--ink) 22%, transparent); }
+.job-t { font-family: var(--font-mono); font-size: 0.74rem; color: color-mix(in oklab, var(--ink) 80%, transparent); flex: 1; min-width: 0; }
+.job-t b { color: var(--ink); }
+.job-note { font-family: var(--font-mono); font-size: 0.64rem; color: var(--muted); }
+.job-btn { font: inherit; font-size: 0.8rem; font-weight: 700; border-radius: 8px; padding: 6px 12px; cursor: pointer; border: 1px solid var(--hairline-strong); background: transparent; color: var(--ink); }
+.job-btn--go { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
+.job-btn--kill { color: var(--deny); border-color: color-mix(in oklab, var(--deny) 55%, transparent); }
+.job-btn:disabled { opacity: 0.45; cursor: default; }
 
-/* end-caps: intent + verified */
-.ln-intent { padding: 13px 15px; display: flex; flex-direction: column; gap: 6px; max-width: 220px; }
-.ln-intent-v { font-family: var(--font-mono); font-size: 0.82rem; color: var(--ink); line-height: 1.35; overflow-wrap: anywhere; }
-.ln-out { padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+/* the track: five phases, each closed by a gate */
+.track { list-style: none; margin: 0; padding: 12px 14px; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; border-bottom: 1px solid var(--hairline); }
+.st { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; border: 1px solid var(--hairline-strong); border-radius: 9px; background: color-mix(in oklab, var(--surface) 55%, transparent); }
+.st-name { font-weight: 700; font-size: 0.9rem; color: var(--muted); }
+.st-gate { font-family: var(--font-mono); font-size: 0.62rem; letter-spacing: 0.04em; padding: 2px 8px; border-radius: 5px; border: 1px solid var(--hairline-strong); background: transparent; color: var(--faint); cursor: pointer; }
+.st-gate:disabled { cursor: default; }
+.st-gate[aria-pressed="true"] { outline: 2px solid var(--ctrl); outline-offset: 1px; }
+.st.is-now { border-color: var(--accent); background: color-mix(in oklab, var(--accent) 12%, transparent); }
+.st.is-now .st-name { color: var(--ink); }
+.st.is-done .st-name { color: var(--ink); }
+.st.is-done .st-gate { color: var(--accent-ink); background: var(--ok); border-color: var(--ok); }
+.st.is-held { border-color: var(--deny); }
+.st.is-held .st-gate { color: #fff; background: var(--deny); border-color: var(--deny); }
+.st.is-down { border-color: var(--deny); border-style: dashed; }
 
-/* crew — the governed box, the centerpiece */
-/* fixed width so the cycling gate text (default → REJECTED → re-derived) can
-   never resize the box and jog the centered line. */
-.ln-crew { padding: 0; overflow: hidden; width: 400px; max-width: 100%; border-color: color-mix(in oklab, var(--accent) 38%, var(--hairline-strong)); }
-.ln-crew-bar {
-  display: flex; align-items: center; gap: 10px; justify-content: space-between;
-  padding: 9px 14px; border-bottom: 1px solid var(--hairline);
-  background: color-mix(in oklab, var(--canvas) 40%, transparent);
-}
-.ln-badge { font-family: var(--font-mono); font-size: 0.58rem; letter-spacing: 0.1em; text-transform: uppercase; background: var(--accent); color: var(--accent-ink); border-radius: 999px; padding: 3px 10px; font-weight: 700; }
-.ln-crew-loc { font-family: var(--font-mono); font-size: 0.6rem; color: var(--muted); }
-.ln-crew-body { padding: 13px 15px 15px; display: flex; flex-direction: column; gap: 10px; }
-.ln-crew-label { font-family: var(--font-mono); font-size: 0.58rem; color: var(--muted); text-align: center; overflow-wrap: anywhere; }
-.ln-workers { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
-.ln-worker {
-  display: flex; align-items: center; gap: 7px; font-family: var(--font-mono); font-size: 0.72rem; color: var(--ink);
-  border: 1px solid var(--hairline-strong); border-radius: 8px; padding: 6px 11px;
-  background: color-mix(in oklab, var(--canvas) 35%, transparent);
-  transition: border-color .25s var(--ease), background .25s var(--ease);
-}
-.ln-worker.is-on { border-color: color-mix(in oklab, var(--accent) 60%, var(--hairline-strong)); background: color-mix(in oklab, var(--accent) 10%, transparent); }
-.ln-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex-shrink: 0; transition: background .25s var(--ease), box-shadow .25s var(--ease); }
-.ln-worker.is-on .ln-dot { background: var(--accent); box-shadow: 0 0 8px -1px var(--accent); }
+.job-body { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); height: var(--job-h); }
+.log { overflow-y: auto; padding: 10px 14px; border-right: 1px solid var(--hairline); display: flex; flex-direction: column; gap: 5px; }
+.ln { margin: 0; font-family: var(--font-mono); font-size: 0.72rem; line-height: 1.45; color: color-mix(in oklab, var(--ink) 74%, transparent); animation: ln-in .25s var(--ease) backwards; }
+.ln b { color: var(--ink); }
+.ln--ok { color: var(--ok); } .ln--ok b { color: var(--ok); }
+.ln--deny { color: var(--deny); } .ln--deny b { color: var(--deny); }
+.ln--warn { color: #e3b341; }
+.ln--ctrl { color: var(--ctrl); } .ln--ctrl b { color: var(--ctrl); }
+@keyframes ln-in { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+.panel { overflow-y: auto; padding: 12px 14px; }
+.panel-empty { margin: 4px 0; font-size: 0.86rem; line-height: 1.5; color: var(--muted); }
+.rc-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; font-weight: 700; }
+.rc-v { font-family: var(--font-mono); font-size: 0.7rem; font-weight: 700; padding: 2px 9px; border-radius: 6px; }
+.rc-v--ok { color: var(--accent-ink); background: var(--ok); }
+.rc-v--deny { color: #fff; background: var(--deny); }
+.rc table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+.rc th { text-align: left; font-weight: 500; color: var(--muted); padding: 5px 10px 5px 0; vertical-align: top; white-space: nowrap; }
+.rc td { padding: 5px 0; color: var(--ink); }
+.rc tr + tr > * { border-top: 1px solid var(--hairline); }
+.ask-q { margin: 0; font-weight: 700; }
+.ask-sub { margin: 4px 0 10px; font-size: 0.82rem; color: var(--muted); }
+.ask-acts { display: flex; flex-wrap: wrap; gap: 6px; }
+.pick { font-family: var(--font-mono); font-size: 0.74rem; font-weight: 700; padding: 6px 12px; border-radius: 7px; cursor: pointer; border: 1px solid var(--hairline-strong); background: transparent; color: var(--ink); }
+.pick--yes { color: var(--accent-ink); background: var(--ok); border-color: var(--ok); }
+.ask-again { margin: 10px 0 0; font-size: 0.82rem; color: var(--muted); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
-.ln-gate {
-  display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: 9px; min-height: 50px;
-  border: 1px dashed color-mix(in oklab, var(--accent) 45%, var(--hairline-strong));
-  background: color-mix(in oklab, var(--accent) 6%, transparent);
-  transition: border-color .3s var(--ease), background .3s var(--ease);
-}
-.ln-gate-node { flex-shrink: 0; font-family: var(--font-mono); font-size: 0.6rem; font-weight: 700; letter-spacing: .06em; color: var(--accent-ink); background: var(--accent); border-radius: 6px; padding: 3px 9px; transition: background .3s var(--ease), color .3s var(--ease); }
-.ln-gate-t { font-family: var(--font-mono); font-size: 0.62rem; color: var(--ink); line-height: 1.4; overflow-wrap: anywhere; }
-.ln-gate-t b { color: var(--ink); font-weight: 700; }
-.ln-gate.is-deny { border-style: solid; border-color: color-mix(in oklab, var(--deny) 55%, var(--hairline-strong)); background: color-mix(in oklab, var(--deny) 9%, transparent); }
-.ln-gate.is-deny .ln-gate-node { background: var(--deny); color: #fff; }
-.ln-gate.is-pass { border-style: solid; border-color: color-mix(in oklab, var(--accent) 60%, var(--hairline-strong)); }
-
-/* flow connectors — animated current between the stages */
-.ln-flow { position: relative; flex: 0 0 clamp(30px, 5vw, 78px); height: 2px; background: var(--hairline-strong); align-self: center; }
-.ln-flow.is-live { background: linear-gradient(90deg, var(--accent), color-mix(in oklab, var(--accent) 20%, var(--hairline-strong))); }
-.ln-pip { position: absolute; top: 50%; left: 0; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 10px -1px var(--accent); transform: translate(-50%, -50%); opacity: 0; }
-.ln-flow.is-live .ln-pip { animation: ln-travel 0.7s var(--ease); }
-@keyframes ln-travel { 0% { left: 0; opacity: 1; } 100% { left: 100%; opacity: 0; } }
-
-/* verified stamp — lands when a run passes */
-.ln-stamp {
-  align-self: flex-start;
-  font-family: var(--font-mono); font-weight: 700; font-size: 0.82rem; letter-spacing: 0.1em;
-  color: var(--accent-ink); background: var(--accent); border-radius: 6px; padding: 6px 12px;
-  border: 1px solid color-mix(in oklab, var(--accent) 70%, #000); transform: rotate(-1.5deg) scale(.9);
-  opacity: 0; transition: opacity .3s var(--ease), transform .3s var(--ease);
-}
-.ln-out.is-done .ln-stamp { opacity: 1; transform: rotate(-1.5deg) scale(1); }
-
-/* stack the line vertically on narrow screens */
-@media (max-width: 900px) {
-  .ln-line { flex-direction: column; }
-  .ln-stage, .ln-intent, .ln-out { max-width: 340px; width: 100%; align-items: stretch; }
-  .ln-flow { flex-basis: 26px; width: 2px; height: 26px; align-self: center; }
-  .ln-flow.is-live { background: linear-gradient(180deg, var(--accent), color-mix(in oklab, var(--accent) 20%, var(--hairline-strong))); }
-  .ln-pip { top: 0; left: 50%; }
-  .ln-flow.is-live .ln-pip { animation: ln-travel-v 0.7s var(--ease); }
-}
-@keyframes ln-travel-v { 0% { top: 0; opacity: 1; } 100% { top: 100%; opacity: 0; } }
-
-/* ── Intent-driven development beat ───────────────────────────────────── */
-.idd { border-top: 1px solid var(--hairline); padding: clamp(40px, 7svh, 84px) 0; }
-.idd-grid { display: grid; grid-template-columns: 1.15fr 0.85fr; gap: clamp(24px, 4vw, 56px); align-items: center; }
-.idd-copy h2 { font-size: clamp(1.5rem, 2.7vw, 2.2rem); margin: 12px 0 0; }
-.idd-copy p { margin: 16px 0 0; font-size: 1rem; line-height: 1.62; color: color-mix(in oklab, var(--ink) 78%, transparent); max-width: 52ch; }
-.idd-copy p b { color: var(--ink); }
-.idd-flow { display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap; }
-.idd-chip {
-  font-family: var(--font-mono); font-size: 0.8rem; letter-spacing: 0.02em; padding: 12px 18px; border-radius: 10px;
-  border: 1px solid var(--hairline-strong); color: var(--ink); background: color-mix(in oklab, var(--surface) 60%, transparent);
-}
-.idd-chip--mid { border-color: color-mix(in oklab, var(--accent) 45%, var(--hairline-strong)); background: color-mix(in oklab, var(--accent) 8%, transparent); }
-.idd-chip--out { border-color: var(--accent); color: var(--accent-ink); background: var(--accent); font-weight: 700; }
-.idd-arrow { font-family: var(--font-mono); color: var(--faint); font-size: 1rem; }
-
-/* ── Bring your own agent (BYO-CLI) ───────────────────────────────────── */
-.byo { border-top: 1px solid var(--hairline); padding: clamp(48px, 8svh, 96px) 0; }
-.byo-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: clamp(12px, 1.6vw, 18px); }
-.byo-card {
-  display: flex; flex-direction: column; align-items: flex-start; gap: 6px; text-align: left;
-  border: 1px solid var(--hairline-strong); border-radius: 14px; padding: 18px 16px; cursor: pointer;
-  background: color-mix(in oklab, var(--surface) 60%, transparent); position: relative;
-  transition: border-color .24s var(--ease), background .24s var(--ease), transform .24s var(--ease);
-}
-.byo-card:hover { transform: translateY(-2px); border-color: color-mix(in oklab, var(--accent) 45%, var(--hairline-strong)); }
-.byo-card.is-active { border-color: var(--accent); background: color-mix(in oklab, var(--accent) 9%, transparent); box-shadow: 0 0 0 1px color-mix(in oklab, var(--accent) 30%, transparent); }
-.byo-dot { width: 9px; height: 9px; border-radius: 50%; border: 1.5px solid var(--hairline-strong); background: transparent; transition: background .24s var(--ease), border-color .24s var(--ease); }
-.byo-card.is-active .byo-dot { background: var(--accent); border-color: var(--accent); box-shadow: 0 0 10px -1px var(--accent); }
-.byo-name { font-family: var(--font-display); font-weight: 800; font-stretch: 110%; font-size: 1.02rem; color: var(--ink); }
-.byo-cli { font-family: var(--font-mono); font-size: 0.74rem; color: color-mix(in oklab, var(--ink) 72%, transparent); }
-.byo-tag { margin-top: 2px; font-family: var(--font-mono); font-size: 0.56rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--faint); border: 1px solid var(--hairline); border-radius: 999px; padding: 3px 9px; }
-.byo-stage {
-  margin-top: 18px; border: 1px solid var(--hairline-strong); border-radius: 14px; overflow: hidden;
-  background: color-mix(in oklab, var(--surface-2) 80%, transparent);
-}
-.byo-stage-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--hairline); background: color-mix(in oklab, var(--canvas) 40%, transparent); }
-.byo-stage-k { font-family: var(--font-mono); font-size: 0.58rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint); }
-.byo-stage-badge { font-family: var(--font-mono); font-size: 0.72rem; font-weight: 700; color: var(--accent-ink); background: var(--accent); border-radius: 7px; padding: 4px 11px; }
-.byo-stage-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 16px 16px 4px; }
-.byo-stage-row code { font-family: var(--font-mono); font-size: 0.8rem; }
-.byo-stage-arr { font-family: var(--font-mono); font-size: 0.66rem; color: var(--faint); }
-.byo-stage-wt { font-family: var(--font-mono); font-size: 0.74rem; color: var(--ink); border: 1px solid color-mix(in oklab, var(--accent) 35%, var(--hairline-strong)); border-radius: 7px; padding: 6px 12px; background: color-mix(in oklab, var(--accent) 6%, transparent); }
-.byo-stage-wt.pop { animation: chip-pop .4s var(--ease); }
-.byo-stage-note { margin: 12px 16px 16px; font-family: var(--font-mono); font-size: 0.7rem; line-height: 1.55; color: color-mix(in oklab, var(--ink) 66%, transparent); }
-.byo-stage-note code { font-size: 0.9em; }
-
-/* ── BYO mobile: the horizontal "CLI → runs in → worktree" flow loses its
-   framing when the cards collapse. Restack the stage as a top-to-bottom flow so
-   "your CLI → dispatched as a governed worker → same lifecycle" stays readable:
-   the head keeps the badge, the row becomes a vertical chain with a DOWN arrow,
-   and the worktree chip wraps instead of overflowing. Desktop is untouched. */
-@media (max-width: 900px) {
-  /* hero: drop the operate-gate / install CTAs on phones */
-  .hero-cta { display: none; }
-  /* intent-driven graph: stack top-to-bottom so the chips never wrap; arrows point DOWN */
-  .idd-flow { flex-direction: column; gap: 8px; }
-  .idd-chip { width: 100%; text-align: center; }
-  .idd-arrow { transform: rotate(90deg); color: var(--accent); font-weight: 700; }
-  /* BYO on phones: the card→hidden-stage click is invisible and reads as broken.
-     Make the cards STATIC display (no click affordance; JS also skips wiring them
-     on mobile) and keep the representative stage always visible below. */
-  .byo-card { cursor: default; }
-  .byo-card:hover { transform: none; border-color: var(--hairline-strong); }
-  .byo-card::after { content: none; }
-  .byo-stage-head { flex-wrap: wrap; gap: 6px 12px; }
-  .byo-stage-row { flex-direction: column; align-items: stretch; gap: 8px; padding: 14px 16px 6px; }
-  .byo-stage-row code { width: max-content; max-width: 100%; }
-  /* re-point the inline "→ runs in →" arrows downward for the vertical stack */
-  .byo-stage-arr { align-self: flex-start; font-size: 0.6rem; position: relative; padding-left: 16px; }
-  .byo-stage-arr::before { content: '↓'; position: absolute; left: 0; color: var(--accent); font-weight: 700; }
-  .byo-stage-wt { width: 100%; text-align: center; overflow-wrap: anywhere; }
-}
-
-/* ── Gate console — narrow mode (<=900px): the horizontal series rail can't fit,
-   so STAND THE CIRCUIT UP — current flows DOWN through the stacked switches (same
-   deny-dominates series metaphor, vertical). This is the BASE narrow block; a
-   second <=900px block further down (search "Narrow mode: the series circuit")
-   layers the toggle-lever geometry and centers the switches to <=260px pills.
-   The two are split by ~200 lines of desktop rules and the source order is load-
-   bearing — keep them separate. ── */
-@media (max-width: 900px) {
-  .gc-rail { flex-direction: column; align-items: stretch; gap: 0; padding: 18px 14px; }
-  /* build/ship end-caps: centered pill rows */
-  .gc-node { height: auto; flex-direction: row; align-items: baseline; justify-content: center; gap: 8px; padding: 10px 14px; align-self: center; min-width: 150px; }
-  /* segments: vertical connectors — the current flows downward */
-  .gc-seg { flex: 0 0 20px; width: 4px; height: 20px; min-width: 0; margin: 0 auto; align-self: center; }
-  .gc-seg.is-live::after { inset: 0; width: 100%; height: 45%; background: linear-gradient(180deg, transparent, var(--accent), transparent); animation: gc-flow-v 1.1s linear infinite; }
-  /* each switch = a row [toggle] policy-name … STATE (the later block caps it to
-     260px and centers it — this sets the pill chrome) */
-  .gc-sw { flex-direction: row; align-items: center; gap: 12px; width: 100%; padding: 9px 13px; border: 1px solid var(--hairline); border-radius: 11px; background: color-mix(in oklab, var(--surface) 55%, transparent); }
-  .gc-sw-well { flex-shrink: 0; }
-  .gc-sw-name { flex: 1; text-align: left; }
-  .gc-sw-state { margin-left: auto; }
-  /* the horizontal "bob" invite doesn't read in a vertical stack — drop it */
-  .gc:not(.is-manual) .gc-sw-well { animation: none; }
-
-  /* studio console in narrow mode: stack the launch form and drop the feed|gate
-     pair to ONE column. NOTE: this is the *only* .studio-cols stacking rule in the
-     file — the desktop default is 1fr 1fr and nothing else collapses it, so 2-up
-     was cramming feed+gate side-by-side even at 386px. Also scroll the terminal
-     and flex the gate buttons. */
-  .studio-cols { grid-template-columns: 1fr; }
-  .studio-launch { align-items: stretch; }
-  .sl-input { min-width: 0; width: 100%; }
-  .sl-go { width: 100%; }
-  .studio-term { overflow-x: auto; }
-  .studio-term .st-line { white-space: nowrap; }
-  .sg-actions .sg-btn { flex: 1 1 auto; }
-}
-@keyframes gc-flow-v { from { transform: translateY(-100%); } to { transform: translateY(350%); } }
-
-/* ── THE GATE CONSOLE (signature) ─────────────────────────────────────── */
-/* The console is designed to fit within ONE viewport (100svh − topbar): it is a
-   centered flex column with compacted internal spacing so the switches, verdict,
-   and all four explainer cards are visible at once without vertical overflow. */
-/* min-height / display / flex-direction / justify-content are inherited from the
-   shared section baseline rule above (safe center). Only the section's own
-   border + compact vertical padding are declared here. */
-.console-sec { border-top: 1px solid var(--hairline); padding: clamp(8px, 1.4svh, 22px) 0; }
-.console-sec > .wrap { width: 100%; }
-.console-sec .sec-head { margin-bottom: clamp(10px, 1.8svh, 20px); }
-.console-sec .sec-head h2 { font-size: clamp(1.55rem, 2.7vw, 2.3rem); }
-.console-sec .sec-sub { font-size: 0.92rem; line-height: 1.5; max-width: 74ch; }
-
-.gc {
-  border: 1px solid var(--hairline-strong); border-radius: 18px; overflow: hidden;
-  background:
-    radial-gradient(ellipse 60% 120% at 50% -10%, color-mix(in oklab, var(--accent) 9%, transparent), transparent 60%),
-    color-mix(in oklab, var(--surface) 62%, transparent);
-  box-shadow: 0 50px 90px -50px rgba(0,0,0,.7);
-}
-.gc-topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; row-gap: 6px; padding: 10px 18px; border-bottom: 1px solid var(--hairline); background: color-mix(in oklab, var(--canvas) 42%, transparent); }
-.gc-phase { font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.02em; color: var(--muted); }
-.gc-phase b { color: var(--ink); }
-.gc-mode { font-family: var(--font-mono); font-size: 0.64rem; letter-spacing: 0.04em; color: var(--accent); border: 1px solid color-mix(in oklab, var(--accent) 40%, var(--hairline-strong)); border-radius: 999px; padding: 4px 11px; }
-.gc.is-manual .gc-mode { color: var(--ink); cursor: pointer; }
-.gc.is-manual .gc-mode:hover { border-color: var(--accent); color: var(--accent); }
-
-/* Persistent, pulsing affordance — the console auto-plays; this tells the visitor
-   they can grab the wheel. Removed the instant they take manual control. */
-.gc-hint {
-  font-family: var(--font-mono); font-size: 0.64rem; letter-spacing: 0.03em; font-weight: 700;
-  color: var(--accent-ink); background: var(--accent); border-radius: 999px;
-  padding: 5px 13px; white-space: nowrap; cursor: default;
-  animation: gc-hint-pulse 1.7s var(--ease) infinite;
-}
-.gc.is-manual .gc-hint { display: none; }
-@keyframes gc-hint-pulse {
-  0%   { box-shadow: 0 0 0 0 color-mix(in oklab, var(--accent) 60%, transparent); }
-  70%  { box-shadow: 0 0 0 9px color-mix(in oklab, var(--accent) 0%, transparent); }
-  100% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--accent) 0%, transparent); }
-}
-/* While the demo plays, the switch handles bob in a stagger — an unmistakable
-   "these are tactile, click me" cue. Stops the moment the visitor drives. */
-.gc:not(.is-manual) .gc-sw-well { animation: gc-sw-invite 2s var(--ease) infinite; }
-.gc:not(.is-manual) .gc-sw:nth-of-type(2) .gc-sw-well { animation-delay: .1s; }
-.gc:not(.is-manual) .gc-sw:nth-of-type(3) .gc-sw-well { animation-delay: .2s; }
-.gc:not(.is-manual) .gc-sw:nth-of-type(4) .gc-sw-well { animation-delay: .3s; }
-.gc:not(.is-manual) .gc-sw:nth-of-type(5) .gc-sw-well { animation-delay: .4s; }
-.gc:not(.is-manual) .gc-sw:nth-of-type(6) .gc-sw-well { animation-delay: .5s; }
-@keyframes gc-sw-invite { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
-
-/* --- the series-circuit rail (full width — no cutoff) --- */
-.gc-rail {
-  display: flex; align-items: flex-start; gap: 0;
-  padding: clamp(20px, 3svh, 34px) clamp(14px, 2.4vw, 34px) clamp(14px, 2svh, 22px);
-  transition: opacity .3s var(--ease), filter .3s var(--ease);
-}
-.gc.is-ungated .gc-rail { opacity: 0.38; filter: grayscale(0.55); }
-.gc-node {
-  flex-shrink: 0; height: 46px; display: flex; flex-direction: column; justify-content: center; gap: 2px;
-  padding: 0 13px; border-radius: 9px; border: 1px solid var(--hairline-strong);
-  background: color-mix(in oklab, var(--canvas) 40%, transparent);
-  transition: border-color .3s var(--ease), box-shadow .3s var(--ease);
-}
-.gc-node-k { font-family: var(--font-mono); font-size: 0.52rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint); }
-.gc-node-v { font-family: var(--font-mono); font-size: 0.88rem; font-weight: 700; color: var(--ink); }
-.gc-src { border-color: color-mix(in oklab, var(--accent) 55%, var(--hairline-strong)); box-shadow: 0 0 0 1px color-mix(in oklab, var(--accent) 22%, transparent); }
-.gc-dst.is-live { border-color: var(--accent); box-shadow: 0 0 22px -4px color-mix(in oklab, var(--accent) 60%, transparent); }
-.gc-dst.is-live .gc-node-v { color: var(--accent); }
-
-.gc-seg {
-  flex: 1 1 auto; min-width: 12px; height: 4px; margin-top: 21px; border-radius: 2px;
-  background: color-mix(in oklab, var(--ink) 12%, transparent);
-  position: relative; overflow: hidden;
-  transition: background .3s var(--ease);
-}
-.gc-seg.is-live { background: color-mix(in oklab, var(--accent) 32%, transparent); box-shadow: 0 0 10px -2px color-mix(in oklab, var(--accent) 55%, transparent); }
-.gc-seg.is-live::after {
-  content: ''; position: absolute; inset: 0; width: 40%;
-  background: linear-gradient(90deg, transparent, var(--accent), transparent);
-  animation: gc-flow 1.1s linear infinite;
-}
-@keyframes gc-flow { from { transform: translateX(-100%); } to { transform: translateX(350%); } }
-
-/* switch: a tactile toggle. closed = up = PASS ; open = down = FAIL. */
-.gc-sw {
-  flex-shrink: 0; display: flex; flex-direction: column; align-items: center; gap: 7px;
-  background: none; border: none; cursor: pointer; padding: 0 clamp(3px, 0.8vw, 9px);
-  -webkit-tap-highlight-color: transparent;
-}
-.gc-sw-well {
-  position: relative; width: 30px; height: 46px; border-radius: 9px;
-  border: 1px solid var(--hairline-strong);
-  background: color-mix(in oklab, var(--canvas) 60%, #000 8%);
-  box-shadow: inset 0 2px 6px rgba(0,0,0,.5);
-  display: block; transition: border-color .25s var(--ease);
-}
-.gc-sw-lever {
-  position: absolute; left: 3px; right: 3px; height: 20px; border-radius: 6px;
-  top: 3px; /* UP = closed/pass */
-  background: linear-gradient(180deg, color-mix(in oklab, var(--accent) 90%, #fff 10%), color-mix(in oklab, var(--accent) 78%, #000 12%));
-  box-shadow: 0 2px 4px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.35);
-  transition: top .2s var(--ease), background .2s var(--ease);
-}
-.gc-sw.is-open .gc-sw-well { border-color: color-mix(in oklab, var(--deny) 60%, var(--hairline-strong)); }
-.gc-sw.is-open .gc-sw-lever {
-  top: 23px; /* DOWN = open/fail */
-  background: linear-gradient(180deg, color-mix(in oklab, var(--deny) 92%, #fff 8%), color-mix(in oklab, var(--deny) 78%, #000 12%));
-}
-.gc-sw.is-hot .gc-sw-well { border-color: color-mix(in oklab, var(--accent) 50%, var(--hairline-strong)); }
-.gc-sw.is-hot.is-open .gc-sw-well { border-color: color-mix(in oklab, var(--deny) 70%, var(--hairline-strong)); box-shadow: inset 0 2px 6px rgba(0,0,0,.5), 0 0 14px -3px var(--deny); }
-.gc-sw:hover .gc-sw-well { border-color: var(--accent); }
-.gc-sw.is-open:hover .gc-sw-well { border-color: var(--deny); }
-.gc-sw-name { font-family: var(--font-mono); font-size: 0.6rem; letter-spacing: 0.01em; color: color-mix(in oklab, var(--ink) 74%, transparent); white-space: nowrap; }
-.gc-sw-state {
-  font-family: var(--font-mono); font-size: 0.52rem; font-weight: 700; letter-spacing: 0.08em;
-  padding: 2px 7px; border-radius: 999px; color: var(--accent-ink); background: var(--accent);
-}
-.gc-sw.is-open .gc-sw-state { color: #fff; background: var(--deny); }
-.gc-sw.is-open .gc-sw-name { color: var(--ink); }
-
-/* the LLM judge seat: veto-only. Closed = ABSTAIN (neutral — NOT an approval);
-   open = VETO (deny). Its lever is never amber, because a model never approves. */
-.gc-sw--agent .gc-sw-well { border-color: color-mix(in oklab, var(--seat) 45%, var(--hairline-strong)); }
-.gc-sw--agent .gc-sw-lever {
-  background: linear-gradient(180deg, color-mix(in oklab, var(--seat) 82%, #fff 10%), color-mix(in oklab, var(--seat) 70%, #000 12%));
-}
-.gc-sw--agent .gc-sw-state { color: #0d1117; background: var(--seat); }
-.gc-sw--agent .gc-sw-name { color: color-mix(in oklab, var(--seat) 80%, var(--ink)); }
-.gc-sw--agent.is-open .gc-sw-lever { background: linear-gradient(180deg, color-mix(in oklab, var(--deny) 92%, #fff 8%), color-mix(in oklab, var(--deny) 78%, #000 12%)); }
-.gc-sw--agent.is-open .gc-sw-state { color: #fff; background: var(--deny); }
-
-/* --- verdict plate + actions --- */
-.gc-panel {
-  border-top: 1px solid var(--hairline); padding: clamp(13px, 2svh, 22px) clamp(18px, 3vw, 40px);
-  display: flex; flex-direction: column; gap: 12px;
-  background: color-mix(in oklab, var(--canvas) 30%, transparent);
-}
-.gc-verdict { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
-.gc-v-stamp {
-  font-family: var(--font-mono); font-weight: 700; font-size: clamp(1.15rem, 2.4vw, 1.6rem); letter-spacing: 0.16em;
-  padding: 6px 16px; border-radius: 9px; flex-shrink: 0;
-  transition: color .25s var(--ease), background .25s var(--ease), border-color .25s var(--ease);
-}
-.gc-verdict[data-verdict="deny"] .gc-v-stamp {
-  color: #fff; background: var(--deny); border: 2px solid color-mix(in oklab, var(--deny) 70%, #000);
-  box-shadow: 0 0 26px -6px color-mix(in oklab, var(--deny) 65%, transparent); transform: rotate(-1.5deg);
-}
-.gc-verdict[data-verdict="allow"] .gc-v-stamp {
-  color: var(--accent-ink); background: var(--accent); border: 2px solid color-mix(in oklab, var(--accent) 70%, #000);
-  box-shadow: 0 0 26px -6px color-mix(in oklab, var(--accent) 70%, transparent); transform: rotate(-1.5deg);
-}
-.gc-verdict[data-verdict="ungated"] .gc-v-stamp {
-  color: var(--ink); background: color-mix(in oklab, var(--ink) 12%, transparent); border: 2px dashed var(--hairline-strong);
-}
-.gc-v-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-.gc-v-line { font-family: var(--font-mono); font-size: 0.8rem; line-height: 1.4; color: var(--ink); }
-.gc-v-sub { font-family: var(--font-mono); font-size: 0.62rem; letter-spacing: 0.03em; color: color-mix(in oklab, var(--ink) 62%, transparent); }
-
-.gc-actions { display: flex; flex-wrap: wrap; gap: 10px; }
-.gc-btn {
-  font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.02em;
-  padding: 9px 15px; border-radius: 8px; border: 1px solid var(--hairline-strong);
-  background: color-mix(in oklab, var(--surface) 70%, transparent); color: var(--ink); cursor: pointer;
-  transition: border-color .2s var(--ease), color .2s var(--ease), background .2s var(--ease);
-}
-.gc-btn:hover { border-color: var(--accent); color: var(--accent); }
-.gc-argue { margin-left: auto; border-color: color-mix(in oklab, var(--seat) 45%, var(--hairline-strong)); color: color-mix(in oklab, var(--seat) 85%, var(--ink)); }
-.gc-argue:hover { background: color-mix(in oklab, var(--seat) 12%, transparent); border-color: var(--seat); color: var(--seat); }
-.gc-argue:disabled { opacity: 0.55; cursor: progress; }
-
-.gc-plea {
-  border: 1px solid var(--hairline); border-radius: 10px; padding: 14px 16px;
-  background: color-mix(in oklab, var(--surface-2) 60%, transparent);
-  display: flex; flex-direction: column; gap: 6px;
-}
-.plea-line { font-family: var(--font-mono); font-size: 0.72rem; line-height: 1.5; color: color-mix(in oklab, var(--ink) 66%, transparent); min-height: 1.08em; }
-.plea-result { color: var(--ink); border-top: 1px dashed var(--hairline-strong); margin-top: 6px; padding-top: 10px; }
-.plea-result b { color: var(--accent); }
-
-/* --- the acceptance feed: verdict.json is READ from the QE evidence ledger.
-       Violet = the control plane's governance voice; the verdict pill carries
-       the live reading (PASS amber · CONDITIONAL violet · FAIL terracotta). --- */
-.gc-ledger {
-  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-  border: 1px solid color-mix(in oklab, var(--ctrl) 30%, var(--hairline-strong));
-  border-radius: 10px; padding: 10px 14px;
-  background: color-mix(in oklab, var(--ctrl) 6%, transparent);
-}
-.gc-ledger-k {
-  font-family: var(--font-mono); font-size: 0.6rem; letter-spacing: 0.08em;
-  text-transform: uppercase; font-weight: 700;
-  color: color-mix(in oklab, var(--ctrl) 82%, var(--ink));
-}
-.gc-ledger-call {
-  font-family: var(--font-mono); font-size: 0.7rem; color: var(--ink);
-  background: color-mix(in oklab, var(--ink) 8%, transparent);
-  border: 1px solid var(--hairline); border-radius: 6px; padding: 3px 9px;
-}
-.gc-ledger-arr { color: var(--faint); font-family: var(--font-mono); font-size: 0.72rem; }
-.gc-ledger-verdict {
-  font-family: var(--font-mono); font-size: 0.66rem; font-weight: 700; letter-spacing: 0.06em;
-  border-radius: 999px; padding: 3px 11px;
-  color: var(--accent-ink); background: var(--accent);
-  transition: background .24s var(--ease), color .24s var(--ease);
-}
-.gc-ledger-verdict[data-v="conditional"] { color: var(--accent-ink); background: var(--ctrl); }
-.gc-ledger-verdict[data-v="fail"] { color: #fff; background: var(--deny); }
-@media (max-width: 560px) {
-  .gc-ledger { padding: 9px 12px; gap: 8px; }
-  .gc-ledger-call { font-size: 0.62rem; overflow-wrap: anywhere; }
-}
-
-/* --- explainer cards that DRIVE the console animation (5: series, deny,
-       judge, ledger, opt-in) --- */
-.gc-cards { list-style: none; display: grid; grid-template-columns: repeat(5, 1fr); gap: clamp(10px, 1.4vw, 16px); margin-top: clamp(12px, 1.8svh, 20px); padding: 0; }
-@media (max-width: 1100px) { .gc-cards { grid-template-columns: repeat(3, 1fr); } }
-.gc-card {
-  width: 100%; height: 100%; text-align: left; display: flex; flex-direction: column; gap: 6px;
-  border: 1px solid var(--hairline-strong); border-radius: 14px; padding: 13px 14px 14px; cursor: pointer;
-  background: color-mix(in oklab, var(--surface) 55%, transparent);
-  transition: border-color .24s var(--ease), background .24s var(--ease), transform .24s var(--ease);
-}
-.gc-card:hover { transform: translateY(-2px); border-color: color-mix(in oklab, var(--accent) 40%, var(--hairline-strong)); }
-.gc-card.is-active { border-color: var(--accent); background: color-mix(in oklab, var(--accent) 9%, transparent); box-shadow: 0 0 0 1px color-mix(in oklab, var(--accent) 28%, transparent); }
-.gc-card-n {
-  width: 28px; height: 28px; display: grid; place-items: center; flex-shrink: 0;
-  font-family: var(--font-mono); font-weight: 700; font-size: 0.82rem; border-radius: 8px;
-  background: color-mix(in oklab, var(--ink) 10%, transparent); color: var(--muted);
-  transition: background .24s var(--ease), color .24s var(--ease);
-}
-.gc-card.is-active .gc-card-n { background: var(--accent); color: var(--accent-ink); }
-.gc-card-t { font-family: var(--font-display); font-weight: 800; font-stretch: 110%; font-size: 1rem; color: var(--ink); }
-.gc-card-l { font-family: var(--font-mono); font-size: 0.65rem; line-height: 1.5; color: color-mix(in oklab, var(--ink) 66%, transparent); }
-
-@media (max-width: 900px) {
-  .gc-cards { grid-template-columns: repeat(2, 1fr); }
-}
-@media (max-width: 900px) {
-  /* Narrow mode: the series circuit — REFINEMENT block. Layers onto the BASE
-     narrow block above (~200 lines up) plus the desktop rules between them, so it
-     centers the rail and constrains the nodes/switches to <=260px pills and sets
-     the toggle-lever geometry. Sits after the desktop rules on purpose: source
-     order means these win. Do not fold into the base block. */
-  .gc-rail { flex-direction: column; align-items: center; gap: 0; padding: 30px 18px 24px; }
-  .gc-node { width: 100%; max-width: 260px; align-items: center; height: auto; padding: 12px; }
-  .gc-node-v, .gc-node-k { text-align: center; }
-  .gc-seg { width: 4px; min-width: 0; height: 24px; margin: 0; flex: none; }
-  .gc-seg.is-live::after { width: 100%; height: 40%; background: linear-gradient(180deg, transparent, var(--accent), transparent); animation: gc-flow-v 1.1s linear infinite; }
-  .gc-sw { flex-direction: row; gap: 12px; width: 100%; max-width: 260px; justify-content: center; }
-  .gc-sw-well { width: 46px; height: 30px; }
-  .gc-sw-lever { top: 3px; left: 3px; width: 20px; right: auto; height: calc(100% - 6px); }
-  .gc-sw.is-open .gc-sw-lever { top: 3px; left: 23px; }
-  .gc-sw--agent.is-open .gc-sw-lever { left: 23px; top: 3px; }
-  .gc-argue { margin-left: 0; }
-}
-@media (max-width: 560px) {
-  .gc-cards { grid-template-columns: 1fr; }
-  /* console topbar: three inline chips overflow a phone — stack them left. */
-  .gc-topbar { flex-direction: column; align-items: flex-start; gap: 8px; padding: 12px 16px; }
-  .gc-mode, .gc-hint { white-space: normal; }
-  /* verdict plate: stack the stamp above its explanation and let the stamp scale
-     to the viewport (upper bound = the tuned desktop 1.6rem). */
-  .gc-verdict { gap: 10px; }
-  .gc-v-stamp { font-size: clamp(1.15rem, 5.6vw, 1.6rem); }
-  .gc-panel { padding: 16px; }
-  .gc-actions { flex-direction: column; }
-  .gc-argue { width: 100%; text-align: center; }
-  .gc-rail { padding: 26px 14px 22px; }
-}
-@keyframes gc-flow-v { from { transform: translateY(-100%); } to { transform: translateY(350%); } }
-
-/* ── Workflows are data ───────────────────────────────────────────────── */
-.wf { border-top: 1px solid var(--hairline); padding: clamp(48px, 8svh, 96px) 0; }
-.wf-layout { display: grid; grid-template-columns: minmax(0, 0.6fr) minmax(0, 1fr); gap: clamp(16px, 2.4vw, 32px); align-items: start; }
-.wf-files { display: flex; flex-direction: column; gap: 10px; }
-.wf-file {
-  display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 12px; text-align: left;
-  border: 1px solid var(--hairline-strong); border-radius: 12px; padding: 14px 16px; cursor: pointer;
-  background: color-mix(in oklab, var(--surface) 58%, transparent);
-  transition: border-color .22s var(--ease), background .22s var(--ease), transform .22s var(--ease);
-}
-.wf-file:hover { transform: translateX(2px); border-color: color-mix(in oklab, var(--accent) 42%, var(--hairline-strong)); }
-.wf-file.is-active { border-color: var(--accent); background: color-mix(in oklab, var(--accent) 9%, transparent); box-shadow: 0 0 0 1px color-mix(in oklab, var(--accent) 28%, transparent); }
-.wf-file-ic { font-family: var(--font-mono); font-size: 0.8rem; color: var(--accent); font-weight: 700; }
-.wf-file-name { font-family: var(--font-mono); font-size: 0.82rem; color: var(--ink); }
-.wf-file-count { font-family: var(--font-mono); font-size: 0.58rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); }
-.wf-drop { font-family: var(--font-mono); font-size: 0.72rem; color: var(--muted); border: 1px dashed var(--hairline-strong); border-radius: 12px; padding: 14px 16px; text-align: center; }
-.wf-drop code { font-size: 0.9em; }
-.wf-preview { border: 1px solid var(--hairline-strong); border-radius: 14px; overflow: hidden; background: color-mix(in oklab, var(--surface-2) 78%, transparent); min-height: 180px; }
-.wf-preview-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--hairline); background: color-mix(in oklab, var(--canvas) 40%, transparent); }
-.wf-preview-name { font-family: var(--font-mono); font-size: 0.78rem; font-weight: 700; color: var(--ink); }
-.wf-preview-ok { font-family: var(--font-mono); font-size: 0.64rem; color: var(--ok); letter-spacing: 0.02em; }
-.wf-phases { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 20px 16px; }
-.wf-phase {
-  font-family: var(--font-mono); font-size: 0.74rem; color: var(--ink);
-  border: 1px solid color-mix(in oklab, var(--accent) 35%, var(--hairline-strong)); border-radius: 8px; padding: 7px 12px;
-  background: color-mix(in oklab, var(--accent) 7%, transparent);
-  animation: wf-in .32s var(--ease) backwards;
-}
-.wf-arr { font-family: var(--font-mono); color: var(--faint); font-size: 0.8rem; }
-@keyframes wf-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
-
-/* Auto-play affordance — a live status pill that doubles as the pin/resume
-   control. Playing state pulses the ▶ glyph; pinned state swaps copy + icon. */
-.wf-status { margin-top: 14px; display: flex; justify-content: center; }
-.wf-status-btn {
-  display: inline-flex; align-items: center; gap: 8px;
-  font-family: var(--font-mono); font-size: 0.66rem; letter-spacing: 0.03em;
-  color: var(--muted); background: color-mix(in oklab, var(--surface-2) 60%, transparent);
-  border: 1px solid var(--hairline-strong); border-radius: 999px; padding: 7px 14px;
-  cursor: pointer; transition: border-color .2s var(--ease), color .2s var(--ease);
-}
-.wf-status-btn:hover { border-color: color-mix(in oklab, var(--accent) 42%, var(--hairline-strong)); color: var(--ink); }
-.wf-status-ic { color: var(--accent); font-size: 0.72rem; }
-.wf-status-btn.is-playing .wf-status-ic { animation: wf-pulse 1.6s var(--ease) infinite; }
-.wf-status-btn.is-pinned { color: var(--ink); border-color: color-mix(in oklab, var(--accent) 34%, var(--hairline-strong)); }
-@keyframes wf-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
-@media (prefers-reduced-motion: reduce) { .wf-status-btn.is-playing .wf-status-ic { animation: none; } }
-
-/* ── The governed lifecycle rail ──────────────────────────────────────── */
-.rail-sec { border-top: 1px solid var(--hairline); padding: clamp(48px, 8svh, 96px) 0; }
-.rail {
-  border: 1px solid var(--hairline-strong); border-radius: 16px; overflow: hidden;
-  background: color-mix(in oklab, var(--surface) 55%, transparent);
-  box-shadow: 0 40px 80px -50px rgba(0,0,0,.6);
-}
-.rail-track {
-  position: relative; display: flex; align-items: flex-start; justify-content: space-between;
-  gap: 4px; padding: clamp(30px, 5vw, 48px) clamp(16px, 3vw, 34px) clamp(24px, 4vw, 38px);
-  overflow-x: auto;
-}
-.rail-phase {
-  position: relative; z-index: 1; flex: 0 0 auto; display: flex; flex-direction: column; align-items: center; gap: 9px;
-  background: none; border: none; cursor: pointer; padding: 0 2px; -webkit-tap-highlight-color: transparent;
-}
-.rail-dot {
-  width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--hairline-strong);
-  background: var(--canvas); transition: border-color .25s var(--ease), background .25s var(--ease), box-shadow .25s var(--ease);
-}
-.rail-phase.is-done .rail-dot { border-color: var(--accent); background: color-mix(in oklab, var(--accent) 55%, var(--canvas)); }
-.rail-phase.is-now .rail-dot { border-color: var(--accent); background: var(--accent); box-shadow: 0 0 16px -2px var(--accent); }
-.rail-name {
-  font-family: var(--font-mono); font-size: 0.66rem; letter-spacing: 0.02em; color: color-mix(in oklab, var(--ink) 70%, transparent); white-space: nowrap;
-  transition: color .25s var(--ease);
-}
-.rail-phase.is-now .rail-name { color: var(--accent); font-weight: 700; }
-.rail-phase.is-done .rail-name { color: var(--ink); }
-.rail-gate {
-  flex: 1 0 22px; align-self: flex-start; margin-top: 2px; display: grid; place-items: center;
-  color: var(--faint); font-size: 0.82rem; min-width: 22px;
-  transition: color .25s var(--ease);
-}
-.rail-gate.is-cleared { color: var(--accent); }
-.rail-token {
-  position: absolute; top: 0; left: 0; width: 26px; height: 26px; border-radius: 50%;
-  border: 2px solid var(--accent); pointer-events: none;
-  transform: translate(-50%, -50%);
-  transition: left .5s var(--ease), top .5s var(--ease);
-  box-shadow: 0 0 18px -2px color-mix(in oklab, var(--accent) 70%, transparent);
-}
-.rail-token::after { content: ''; position: absolute; inset: 5px; border-radius: 50%; background: color-mix(in oklab, var(--accent) 30%, transparent); }
-
-.rail-dock {
-  border-top: 1px solid var(--hairline); padding: 16px clamp(16px, 3vw, 34px) 18px;
-  background: color-mix(in oklab, var(--canvas) 32%, transparent);
-  display: flex; flex-direction: column; gap: 10px;
-}
-.dock-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-.dock-k { font-family: var(--font-mono); font-size: 0.58rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint); }
-.dock-crash {
-  font-family: var(--font-mono); font-size: 0.64rem; letter-spacing: 0.02em; color: var(--deny);
-  background: color-mix(in oklab, var(--deny) 10%, transparent); border: 1px solid color-mix(in oklab, var(--deny) 45%, var(--hairline-strong));
-  border-radius: 7px; padding: 5px 12px; cursor: pointer; transition: background .2s var(--ease), border-color .2s var(--ease);
-}
-.dock-crash:hover { background: color-mix(in oklab, var(--deny) 18%, transparent); border-color: var(--deny); }
-.dock-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.dock-worker {
-  font-family: var(--font-mono); font-size: 0.78rem; font-weight: 700; color: var(--accent-ink); background: var(--accent);
-  border-radius: 7px; padding: 6px 12px; white-space: nowrap;
-}
-.dock-arr { font-family: var(--font-mono); font-size: 0.66rem; color: var(--faint); }
-.dock-evidence {
-  font-family: var(--font-mono); font-size: 0.74rem; color: var(--ink);
-  border: 1px solid color-mix(in oklab, var(--accent) 40%, var(--hairline-strong)); border-radius: 7px; padding: 6px 12px;
-  background: color-mix(in oklab, var(--accent) 7%, transparent);
-}
-.dock-evidence.pop { animation: chip-pop .45s var(--ease); }
-@keyframes chip-pop { 0% { transform: scale(.82); opacity: 0; } 60% { transform: scale(1.04); } 100% { transform: scale(1); opacity: 1; } }
-.dock-note { font-family: var(--font-mono); font-size: 0.66rem; color: color-mix(in oklab, var(--ink) 66%, transparent); }
-.dock-note b { color: var(--ink); }
-.dock-note.flash { animation: note-flash 1s var(--ease); }
-@keyframes note-flash { 0%, 100% { color: var(--muted); } 30% { color: var(--accent); } }
-
-.rail.is-crashed { border-color: color-mix(in oklab, var(--deny) 45%, var(--hairline-strong)); }
-.rail.is-crashed .rail-track { opacity: 0.32; filter: grayscale(0.6); }
-.rail.is-crashed .rail-token { opacity: 0; }
-
-/* ── Rail mobile: the horizontal 6-phase track is wider than a phone, so it
-   overflows / demands an awkward sideways scroll and the run token animates off
-   screen. Rotate the whole track to a VERTICAL rail — phases become left-aligned
-   rows with the diamond gates as connectors — so it fits the viewport and the
-   token travels straight down the left edge. JS places the token from each dot's
-   rect (re-run on resize), so it follows the vertical layout automatically. */
-@media (max-width: 900px) {
-  .rail-track {
-    flex-direction: column; align-items: flex-start; justify-content: flex-start;
-    gap: 0; overflow-x: visible; padding: 22px clamp(18px, 6vw, 28px) 24px;
-  }
-  .rail-phase { flex-direction: row; align-items: center; gap: 12px; width: 100%; padding: 7px 0; }
-  .rail-name { white-space: normal; }
-  .rail-gate { flex: 0 0 auto; width: 16px; height: 18px; min-width: 16px; margin: 0; align-self: flex-start; }
-}
-
-/* ── The driving interface — the studio ───────────────────────────────── */
-.studio { border-top: 1px solid var(--hairline); padding: clamp(48px, 8svh, 96px) 0; }
-.studio-mock {
-  border: 1px solid var(--hairline-strong); border-radius: 16px; overflow: hidden;
-  background: color-mix(in oklab, var(--surface-2) 82%, #000 6%);
-  box-shadow: 0 30px 60px -44px rgba(0,0,0,.7);
-}
-.mock-bar { display: flex; align-items: center; gap: 12px; padding: 9px 14px; border-bottom: 1px solid var(--hairline); background: color-mix(in oklab, var(--canvas) 45%, transparent); }
-.mock-dots { display: inline-flex; gap: 6px; flex-shrink: 0; }
-.mock-dots i { width: 10px; height: 10px; border-radius: 50%; background: color-mix(in oklab, var(--ink) 22%, transparent); }
-.mock-url { font-family: var(--font-mono); font-size: 0.66rem; color: color-mix(in oklab, var(--ink) 70%, transparent); border: 1px solid var(--hairline-strong); border-radius: 999px; padding: 3px 12px; background: color-mix(in oklab, var(--canvas) 40%, transparent); flex: 1; text-align: center; }
-.studio-body { padding: 18px; display: flex; flex-direction: column; gap: 14px; }
-.studio-launch { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; border: 1px solid var(--hairline-strong); border-radius: 10px; padding: 12px 14px; background: color-mix(in oklab, var(--canvas) 35%, transparent); }
-.sl-k { font-family: var(--font-mono); font-size: 0.58rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint); }
-.sl-input { flex: 1; min-width: 180px; font-family: var(--font-mono); font-size: 0.82rem; color: var(--ink); background: transparent; border: none; outline: none; }
-.sl-caret { display: inline-block; width: 8px; height: 1.05em; background: var(--accent); vertical-align: text-bottom; margin-left: 2px; animation: sl-blink 1.1s steps(1) infinite; }
-@keyframes sl-blink { 50% { opacity: 0; } }
-.sl-go { font-family: var(--font-mono); font-size: 0.72rem; font-weight: 700; color: var(--accent-ink); background: var(--accent); border: none; border-radius: 7px; padding: 6px 13px; cursor: pointer; transition: transform .2s var(--ease); }
-.sl-go:hover { transform: translateY(-1px); }
-.studio-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-.studio-feed, .studio-gate { display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--hairline-strong); border-radius: 10px; padding: 14px; background: color-mix(in oklab, var(--surface) 60%, transparent); }
-.sf-k, .sg-k { font-family: var(--font-mono); font-size: 0.58rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint); }
-.sf-row { font-family: var(--font-mono); font-size: 0.72rem; color: color-mix(in oklab, var(--ink) 74%, transparent); }
-.sf-row b { color: var(--ink); }
-.sf-row--gate { color: var(--deny); }
-.sf-row--gate b { color: var(--deny); }
-.sg-stamp { font-family: var(--font-mono); font-weight: 700; font-size: 0.86rem; letter-spacing: 0.12em; width: max-content; color: #fff; background: var(--deny); border-radius: 6px; padding: 5px 12px; }
-.sg-t { font-family: var(--font-mono); font-size: 0.7rem; color: color-mix(in oklab, var(--ink) 70%, transparent); }
-.sg-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 2px; }
-.sg-btn { font-family: var(--font-mono); font-size: 0.68rem; padding: 6px 12px; border-radius: 7px; border: 1px solid var(--hairline-strong); color: color-mix(in oklab, var(--ink) 78%, transparent); background: color-mix(in oklab, var(--surface) 70%, transparent); }
-.sg-btn--ok { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); font-weight: 700; }
-.studio-term { display: flex; flex-direction: column; gap: 5px; border: 1px solid var(--hairline); border-radius: 10px; padding: 12px 14px; background: color-mix(in oklab, var(--surface-2) 70%, #000 6%); }
-.st-line { font-family: var(--font-mono); font-size: 0.74rem; color: var(--ink); white-space: nowrap; overflow-x: auto; }
-.st-p { color: var(--accent); font-weight: 700; margin-right: 8px; }
-.st-c { color: color-mix(in oklab, var(--ink) 46%, transparent); }
-.st-out { color: color-mix(in oklab, var(--ink) 66%, transparent); }
-
-/* Hands-on studio console: launch a run, watch the feed stream, resolve the
-   steering gate. Head compacted (mirrors .console-sec) to buy vertical room; the
-   feed is a FIXED-HEIGHT internal scroll region so streaming rows never grow the
-   section past one viewport — everything else stays constant. */
-.studio .sec-head { margin-bottom: clamp(12px, 2svh, 24px); }
-.studio .sec-head h2 { font-size: clamp(1.55rem, 2.7vw, 2.3rem); }
-.studio .sec-sub { font-size: 0.92rem; line-height: 1.5; max-width: 74ch; }
-
-.studio-launch:focus-within { border-color: color-mix(in oklab, var(--accent) 45%, var(--hairline-strong)); }
-.sl-input::placeholder { color: var(--faint); }
-
-.studio-cols { align-items: stretch; }
-.studio-feed { height: clamp(120px, 22svh, 190px); overflow-y: auto; }
-.studio-gate { overflow-y: auto; }
-.sf-row { animation: wf-in .28s var(--ease) backwards; }
-.sf-row--ok { color: var(--ok); }
-.sf-row--ok b { color: var(--ok); }
-
-.sg-btn { cursor: pointer; transition: border-color .2s var(--ease), color .2s var(--ease), background .2s var(--ease); }
-.sg-btn:hover { border-color: var(--accent); color: var(--accent); }
-.sg-btn--ok:hover { color: var(--accent-ink); background: color-mix(in oklab, var(--accent) 88%, #000 6%); border-color: var(--accent); }
-.sg-btn:disabled { opacity: 0.5; cursor: default; }
-.studio-gate[data-verdict="allow"] .sg-stamp { color: var(--accent-ink); background: var(--accent); }
-
-.sg-amend { display: flex; gap: 8px; margin-top: 6px; }
-.sg-amend input {
-  flex: 1; min-width: 0; font-family: var(--font-mono); font-size: 0.72rem; color: var(--ink);
-  background: color-mix(in oklab, var(--canvas) 35%, transparent);
-  border: 1px solid var(--hairline-strong); border-radius: 7px; padding: 6px 10px; outline: none;
-}
-.sg-amend input:focus { border-color: var(--accent); }
-.sg-amend button { flex-shrink: 0; border: none; cursor: pointer; }
-
-/* Pulsing "resolve the gate" affordance — mirrors the gate console's gc-hint. */
-.sg-cue {
-  width: max-content; margin-top: 2px;
-  font-family: var(--font-mono); font-size: 0.62rem; letter-spacing: 0.03em; font-weight: 700;
-  color: var(--accent-ink); background: var(--accent); border-radius: 999px; padding: 4px 11px;
-  animation: gc-hint-pulse 1.7s var(--ease) infinite;
-}
-
-.honest-note {
-  margin: clamp(20px, 3svh, 34px) 0 0; font-family: var(--font-mono); font-size: 0.72rem; line-height: 1.6;
-  color: color-mix(in oklab, var(--ink) 62%, transparent); max-width: 72ch;
-  border-left: 2px solid var(--hairline-strong); padding-left: 16px;
-}
-.honest-note b { color: var(--ink); }
+/* ── Proof sections ─────────────────────────────────────────────────────── */
+.sandbox, .gates, .council, .durable { border-top: 1px solid var(--hairline); padding: clamp(40px, 7svh, 80px) 0; }
+.gates, .durable { background: color-mix(in oklab, #000 7%, transparent); }
+.two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: clamp(24px, 4vw, 56px); align-items: center; }
+.facts { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.facts li { position: relative; padding-left: 16px; font-size: 0.95rem; line-height: 1.5; color: color-mix(in oklab, var(--ink) 80%, transparent); }
+.facts li::before { content: ''; position: absolute; left: 0; top: 0.6em; width: 6px; height: 6px; border-radius: 50%; background: var(--ctrl); }
+.facts b { color: var(--ink); }
+.facts--row { flex-direction: row; flex-wrap: wrap; gap: 8px 28px; margin-top: 22px; }
+.facts--cards { gap: 10px; }
+.facts--cards li { padding: 14px 16px 14px 30px; border: 1px solid var(--hairline-strong); border-radius: 12px; background: color-mix(in oklab, var(--surface-2) 70%, transparent); }
+.facts--cards li::before { left: 14px; top: 1.45em; }
+.tbl { width: 100%; border-collapse: separate; border-spacing: 0; border: 1px solid var(--hairline-strong); border-radius: 12px; overflow: hidden; background: color-mix(in oklab, var(--surface-2) 75%, transparent); font-size: 0.92rem; }
+.tbl th, .tbl td { text-align: left; padding: 10px 14px; vertical-align: top; }
+.tbl thead th { font-size: 0.78rem; font-weight: 600; color: var(--muted); background: color-mix(in oklab, var(--canvas) 45%, transparent); }
+.tbl tbody th { font-weight: 700; color: var(--ink); white-space: nowrap; }
+.tbl td { color: color-mix(in oklab, var(--ink) 78%, transparent); }
+.tbl tr + tr > *, .tbl tbody tr:first-child > * { border-top: 1px solid var(--hairline); }
+.tbl td.is-yes { color: var(--ok); }
+.tbl--layers td:last-child { color: var(--ink); }
+.labels-k { margin: 22px 0 10px; font-size: 0.92rem; color: var(--muted); }
+.labels { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.labels li { display: flex; flex-direction: column; gap: 4px; padding: 12px 14px; border: 1px solid color-mix(in oklab, var(--ctrl) 40%, var(--hairline-strong)); border-radius: 10px; }
+.labels b { font-family: var(--font-mono); font-size: 0.76rem; color: var(--ctrl); }
+.labels span { font-size: 0.86rem; color: color-mix(in oklab, var(--ink) 76%, transparent); }
+.flow { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; counter-reset: f; }
+.flow li { position: relative; display: flex; flex-direction: column; gap: 6px; padding: 14px; border: 1px solid var(--hairline-strong); border-radius: 12px; background: color-mix(in oklab, var(--surface-2) 70%, transparent); }
+.flow li:nth-child(4) { border-color: var(--ctrl); background: color-mix(in oklab, var(--ctrl) 10%, transparent); }
+.flow b { font-size: 1rem; }
+.flow span { font-size: 0.88rem; line-height: 1.45; color: color-mix(in oklab, var(--ink) 76%, transparent); }
+.flow li + li::before { content: '→'; position: absolute; left: -10px; top: 50%; transform: translate(-50%, -50%); color: var(--faint); font-size: 0.9rem; }
+.tbl--wf td { font-family: var(--font-mono); font-size: 0.78rem; }
+.needs { list-style: none; margin: 18px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.needs li { position: relative; padding-left: 16px; font-size: 0.95rem; color: color-mix(in oklab, var(--ink) 78%, transparent); }
+.needs li::before { content: ''; position: absolute; left: 0; top: 0.6em; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
 
 /* ── Get it / finale ─────────────────────────────────────────────────── */
 .get { border-top: 1px solid var(--hairline); padding: clamp(48px, 8svh, 96px) 0; }
@@ -957,224 +325,6 @@ code {
 .gh-pill:hover { border-color: var(--accent); color: var(--accent); transform: translateY(-2px); }
 .gh-pill span { font-family: var(--font-mono); font-size: 0.82rem; letter-spacing: 0.04em; }
 
-/* ── Responsive ──────────────────────────────────────────────────────── */
-@media (max-width: 940px) {
-  .get-grid, .ways-grid, .idd-grid, .wf-layout { grid-template-columns: 1fr; }
-  .lede, .get-intro p, .idd-copy p { max-width: none; }
-  .byo-grid { grid-template-columns: repeat(2, 1fr); }
-  .studio-cols { grid-template-columns: 1fr; }
-}
-@media (max-width: 520px) {
-}
-
-/* ── Phone DENSITY (<=600px) ───────────────────────────────────────────────
-   The vertical stacks fit the width but blow past a phone's HEIGHT: 8 CLI cards
-   stacked = 1044px, the gate ladder = 837px, the durable rail = 964px — each is
-   1–2.5 screens. This block compresses them so a section reads in ~one screen.
-   Placed last so it wins over the structural collapse blocks above. */
-@media (max-width: 600px) {
-  /* BYO: 8 CLIs → a compact 2-col tile grid (4 rows), not 8 full-width cards.
-     Drop the auth badge, active dot, AND the interactive "dispatched worker"
-     stage — the grid alone tells the story and now fits one screen. */
-  .byo-grid { grid-template-columns: 1fr 1fr; gap: 8px; }
-  .byo-card { padding: 10px 11px; gap: 2px; border-radius: 10px; }
-  .byo-name { font-size: 0.84rem; }
-  .byo-cli { font-size: 0.64rem; }
-  .byo-tag { display: none; }
-  .byo-dot { display: none; }
-  .byo-stage { display: none; }
-  /* no stage to drive on a phone → neutralize the "selected" tile so all 8 read uniformly */
-  .byo-card.is-active { border-color: var(--hairline-strong); background: color-mix(in oklab, var(--surface) 60%, transparent); box-shadow: none; }
-  .byo-card.is-active .byo-name { color: var(--ink); }
-
-  /* Gate console: the interactive series-circuit ladder is a DESKTOP affordance —
-     shrinking it never fit. Hide it (and the switch-referencing explainer cards)
-     and render the phone-native static verdict panel instead. */
-  .gc, .gc-cards { display: none; }
-  .gc-static { display: block; }
-
-  /* Studio: same move — hide the live console mock, show the static
-     launch → watch → steer story. */
-  .studio-mock { display: none; }
-  .studio-static { display: block; }
-
-  /* Durable: a vertical phase timeline reads fine on a phone; keep it tight. */
-  .rail-track { padding: 14px 18px 16px; }
-  .rail-phase { padding: 3px 0; }
-  .rail-gate { height: 9px; }
-  .rail-dock { padding: 12px 16px 14px; }
-}
-
-/* ── Phone-native static panels ────────────────────────────────────────────
-   Hidden on desktop (min-width guard so the ≤600px `display:block` above wins on
-   phones — a plain `display:none` here would lose on source order); shown ≤600px
-   in place of the interactive gate console and studio (desktop-only experiences). */
-@media (min-width: 601px) { .gc-static, .studio-static { display: none; } }
-
-.gc-static {
-  border: 1px solid var(--hairline-strong); border-radius: 14px; overflow: hidden;
-  background: color-mix(in oklab, var(--surface) 55%, transparent);
-}
-.gcs-flow {
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 12px 14px;
-  border-bottom: 1px solid var(--hairline); background: color-mix(in oklab, var(--canvas) 40%, transparent);
-  font-family: var(--font-mono); font-size: 0.9rem; color: var(--ink);
-}
-.gcs-flow b { color: var(--accent); }
-.gcs-arr { color: var(--faint); }
-.gcs-tag { margin-left: auto; font-size: 0.56rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--faint); }
-.gcs-list { list-style: none; margin: 0; padding: 6px 0; }
-.gcs-list li { display: flex; align-items: center; gap: 10px; padding: 7px 14px; font-family: var(--font-mono); font-size: 0.78rem; }
-.gcs-list li::before { content: ''; flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
-.gcs-list li.is-fail::before { background: var(--deny); }
-.gcs-list li.is-abstain::before { background: color-mix(in oklab, var(--ink) 38%, transparent); }
-.gcs-name { flex: 1; color: var(--ink); }
-.gcs-state { font-size: 0.6rem; font-weight: 700; letter-spacing: 0.06em; color: var(--accent); }
-.gcs-list li.is-fail .gcs-state { color: var(--deny); }
-.gcs-list li.is-abstain .gcs-state { color: var(--faint); }
-.gcs-verdict { display: flex; align-items: flex-start; gap: 10px; padding: 12px 14px; border-top: 1px solid var(--hairline); background: color-mix(in oklab, var(--deny) 8%, transparent); }
-.gcs-stamp { flex: 0 0 auto; font-family: var(--font-mono); font-weight: 700; font-size: 0.78rem; letter-spacing: 0.08em; color: #fff; background: var(--deny); border-radius: 6px; padding: 4px 10px; }
-.gcs-vtext { font-family: var(--font-mono); font-size: 0.7rem; line-height: 1.5; color: color-mix(in oklab, var(--ink) 78%, transparent); }
-.gcs-vtext b { color: var(--ink); }
-.gcs-ledger {
-  margin: 0; padding: 10px 14px; border-top: 1px solid var(--hairline);
-  background: color-mix(in oklab, var(--ctrl) 7%, transparent);
-  font-family: var(--font-mono); font-size: 0.66rem; line-height: 1.5;
-  color: color-mix(in oklab, var(--ink) 78%, transparent);
-}
-.gcs-ledger b { color: color-mix(in oklab, var(--ctrl) 85%, var(--ink)); }
-
-.sts-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
-.sts-steps li { display: flex; gap: 12px; align-items: flex-start; border: 1px solid var(--hairline-strong); border-radius: 12px; padding: 13px 14px; background: color-mix(in oklab, var(--surface) 58%, transparent); }
-.sts-n { flex: 0 0 auto; width: 24px; height: 24px; border-radius: 7px; display: grid; place-items: center; font-family: var(--font-mono); font-weight: 700; font-size: 0.8rem; color: var(--accent-ink); background: var(--accent); }
-.sts-steps li > div { font-size: 0.86rem; line-height: 1.45; color: color-mix(in oklab, var(--ink) 82%, transparent); }
-.sts-steps li b { color: var(--ink); }
-.sts-steps code { display: block; margin-top: 6px; font-family: var(--font-mono); font-size: 0.72rem; color: var(--accent); background: color-mix(in oklab, var(--accent) 8%, transparent); border: 1px solid color-mix(in oklab, var(--accent) 25%, var(--hairline-strong)); border-radius: 6px; padding: 5px 9px; width: max-content; max-width: 100%; overflow-wrap: anywhere; }
-.sts-chip { display: inline-block; margin-top: 6px; font-family: var(--font-mono); font-size: 0.66rem; color: var(--deny); background: color-mix(in oklab, var(--deny) 10%, transparent); border: 1px solid color-mix(in oklab, var(--deny) 35%, var(--hairline-strong)); border-radius: 999px; padding: 3px 10px; }
-
-@media (prefers-reduced-motion: reduce) {
-  .btn, .gh-pill, .gc-node, .gc-seg, .rail-dot, .rail-name, .rail-token, .gc-v-stamp, .byo-card, .gc-card, .wf-file { transition: none; }
-  /* hero line: the JS paints a static verified end-state under reduced motion,
-     but these transitions (esp. the .ln-stamp scale/opacity) would still animate. */
-  .ln-worker, .ln-dot, .ln-gate, .ln-gate-node, .ln-stamp { transition: none; }
-  .btn-primary:hover, .gh-pill:hover { transform: none; }
-  .gc-seg.is-live::after, .dock-evidence.pop, .dock-note.flash, .ln-flow.is-live .ln-pip, .sl-caret, .wf-phase, .byo-stage-wt.pop, .gc-hint, .gc-sw-well, .sf-row, .sg-cue { animation: none; }
-  .gc-seg.is-live::after { display: none; }
-}
-
-/* ── Studio insight-rail strip (mock chrome) ───────────────────────────── */
-.studio-railbar {
-  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-  padding: 8px 12px; border-top: 1px solid var(--hairline-strong);
-  font-size: 12px;
-}
-.srb-k { opacity: .55; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; margin-right: 2px; }
-.srb-chip {
-  padding: 2px 8px; border: 1px solid var(--hairline-strong); border-radius: 999px;
-  opacity: .85;
-}
-.srb-chip--hot { border-color: color-mix(in oklab, var(--accent) 45%, var(--hairline-strong)); color: var(--accent); }
-.srb-chip--badge { border-color: color-mix(in oklab, var(--deny) 45%, var(--hairline-strong)); }
-.srb-chip--badge::after { content: ' ●'; color: var(--deny); font-size: 9px; }
-.srb-export {
-  margin-left: auto; padding: 3px 10px; border-radius: 6px; font-weight: 600;
-  background: color-mix(in oklab, var(--accent) 18%, transparent);
-  border: 1px solid color-mix(in oklab, var(--accent) 45%, var(--hairline-strong));
-}
-@media (max-width: 700px) { .srb-export { margin-left: 0; } }
-
-/* ── Operator-rail cards (what the rail answers) ───────────────────────── */
-.op-cards {
-  display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-top: 22px;
-}
-@media (max-width: 940px) { .op-cards { grid-template-columns: repeat(2, 1fr); } }
-@media (max-width: 560px) { .op-cards { grid-template-columns: 1fr; } }
-.op-card {
-  display: flex; flex-direction: column; gap: 6px;
-  padding: 14px; border: 1px solid var(--hairline-strong); border-radius: 10px;
-  background: color-mix(in oklab, #000 6%, transparent);
-}
-.op-k { font-weight: 700; font-size: 13px; letter-spacing: .02em; color: var(--accent); }
-.op-t { font-size: 13px; line-height: 1.5; opacity: .9; }
-
-/* ── One public API, one console + the document engine ─────────────────────────────────────────────
-   The control plane's single contract (/api/v1) with two pure clients: the
-   studio (coder skin, ships inside crew) and wicked-interactive (creator
-   skin — governed generation answered its bus, proven). Violet marks the
-   plane's governance voice; the trace panel reuses the feed's mono grammar. */
-.skins-grid {
-  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px;
-}
-.skin-card {
-  display: flex; flex-direction: column; gap: 7px;
-  border: 1px solid var(--hairline-strong);
-  border-top: 3px solid color-mix(in oklab, var(--ctrl) 55%, var(--hairline-strong));
-  border-radius: 12px; padding: 16px 18px;
-  background: color-mix(in oklab, var(--surface) 55%, transparent);
-}
-.skin-k {
-  font-family: var(--font-mono); font-size: 0.6rem; letter-spacing: 0.08em;
-  text-transform: uppercase; font-weight: 700;
-  color: color-mix(in oklab, var(--ctrl) 82%, var(--ink));
-}
-.skin-name { font-family: var(--font-display); font-weight: 900; font-stretch: 115%; font-size: 1.35rem; color: var(--ink); line-height: 1; }
-.skin-t { margin: 0; font-size: 0.88rem; line-height: 1.55; color: color-mix(in oklab, var(--ink) 78%, transparent); }
-.skin-t b { color: var(--ink); }
-
-/* the governed-generation bus trace — the two-skins proof, full width */
-.skin-trace {
-  grid-column: 1 / -1; overflow: hidden;
-  border: 1px solid color-mix(in oklab, var(--ctrl) 30%, var(--hairline-strong));
-  border-radius: 12px;
-  background: color-mix(in oklab, var(--canvas) 45%, transparent);
-}
-.skin-trace-bar {
-  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-  padding: 10px 16px; border-bottom: 1px solid var(--hairline);
-  background: color-mix(in oklab, var(--ctrl) 7%, transparent);
-}
-.skin-trace-k {
-  font-family: var(--font-mono); font-size: 0.62rem; letter-spacing: 0.08em;
-  text-transform: uppercase; font-weight: 700;
-  color: color-mix(in oklab, var(--ctrl) 82%, var(--ink));
-}
-.skin-trace-tag { margin-left: auto; font-family: var(--font-mono); font-size: 0.56rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--faint); }
-.skin-trace-rows { list-style: none; margin: 0; padding: 8px 0; counter-reset: str; }
-.skin-trace-rows li {
-  display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
-  padding: 7px 16px; font-family: var(--font-mono); font-size: 0.78rem;
-}
-.skin-trace-rows li::before {
-  counter-increment: str; content: counter(str, decimal-leading-zero);
-  flex: 0 0 auto; font-size: 0.62rem; color: var(--faint);
-}
-.skin-trace-rows code { background: none; border: none; padding: 0; font-size: 0.78rem; color: var(--ink); }
-.str-note { font-size: 0.66rem; color: color-mix(in oklab, var(--ink) 58%, transparent); }
-.skin-trace-rows li.str-final code { color: var(--accent); font-weight: 700; }
-.skin-trace-rows li.str-final::before { color: var(--accent); }
-
-/* the Project-model strip — shipped in 0.7.0 (registerProjectRoutes). Block
-   flow (not flex): the strip is a sentence with an inline chip, and flex would
-   break the text nodes into their own wrapped items. */
-.skins-landing {
-  display: block; margin: 16px 0 0; font-size: 0.85rem; line-height: 1.6;
-  color: color-mix(in oklab, var(--ink) 74%, transparent);
-  border-left: 3px solid color-mix(in oklab, var(--ctrl) 55%, var(--hairline-strong));
-  padding-left: 14px;
-}
-.skins-landing b { color: var(--ink); }
-.skins-landing-chip {
-  display: inline-block; margin-right: 8px; vertical-align: 1px;
-  font-family: var(--font-mono); font-size: 0.58rem; font-weight: 700;
-  letter-spacing: 0.1em; text-transform: uppercase;
-  color: var(--accent-ink); background: var(--ctrl); border-radius: 999px; padding: 3px 10px;
-}
-@media (max-width: 760px) {
-  .skins-grid { grid-template-columns: 1fr; gap: 10px; }
-  .skin-trace-rows li { padding: 6px 14px; }
-  .str-note { flex-basis: 100%; padding-left: 26px; }
-}
-
 /* ── Get-section ToS note ──────────────────────────────────────────────── */
 .get-tos {
   margin-top: 12px; font-size: 13px; line-height: 1.55; opacity: .78;
@@ -1201,132 +351,39 @@ code {
 .article-wrap pre { overflow-x: auto; padding: 12px; border: 1px solid var(--hairline-strong); border-radius: 8px; }
 .article-wrap hr { border: 0; border-top: 1px solid var(--hairline-strong); margin: 2em 0; }
 
-/* ── Hero console (the studio mock IS the hero visual) ─────────────────── */
-.hero-console-wrap { width: 100%; max-width: 1080px; margin: clamp(20px, 3.5svh, 38px) auto 0; }
-.hero-console-wrap .studio-mock { margin: 0; }
-@media (max-width: 600px) {
-  /* The phone-density block already displays .studio-static; only nudge spacing here. */
-  .hero-console-wrap .studio-static { margin-top: 4px; }
+
+/* ── Responsive ───────────────────────────────────────────────────────── */
+@media (max-width: 960px) {
+  .get-grid, .two { grid-template-columns: 1fr; }
+  .labels { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .flow { grid-template-columns: 1fr; }
+  .flow li + li::before { content: '↓'; left: 50%; top: -10px; }
+  .job-body { grid-template-columns: 1fr; height: auto; }
+  .log { height: 300px; border-right: 0; border-bottom: 1px solid var(--hairline); }
+  .panel { min-height: 200px; }
+}
+@media (max-width: 640px) {
+  .track { grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 4px; padding: 10px; }
+  .st { flex-direction: column; align-items: stretch; padding: 6px 4px; text-align: center; gap: 4px; }
+  .st-name { font-size: 0.72rem; }
+  .st-gate { padding: 2px 0; }
+  .job-t { flex-basis: 100%; order: 3; }
+  .labels { grid-template-columns: 1fr; }
+  .tbl th, .tbl td { padding: 9px 10px; }
+  .tbl tbody th { white-space: normal; }
+  .tbl--layers thead { display: none; }
+  .tbl--layers tr { display: grid; grid-template-columns: 1fr; }
+  .tbl--layers td { padding-top: 0; }
 }
 
-/* ── The four-problems band ────────────────────────────────────────────── */
-.probs { background: color-mix(in oklab, #000 7%, transparent); padding: clamp(40px, 7svh, 72px) 0; }
-.probs-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; list-style: none; padding: 0; margin: 0; }
-@media (max-width: 940px) { .probs-grid { grid-template-columns: repeat(2, 1fr); } }
-@media (max-width: 560px) { .probs-grid { grid-template-columns: 1fr; } }
-.prob-card {
-  display: flex; flex-direction: column; gap: 8px;
-  padding: 16px 14px; border: 1px solid var(--hairline-strong); border-radius: 10px;
+/* ── Reduced motion ───────────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .ln { animation: none; }
+  .btn, .gh-pill { transition: none; }
+  .gh-pill:hover, .btn-primary:hover { transform: none; }
+  html { scroll-behavior: auto; }
 }
-.prob-n {
-  width: 26px; height: 26px; display: grid; place-items: center;
-  border-radius: 999px; font-weight: 700; font-size: 13px;
-  background: color-mix(in oklab, var(--deny) 20%, transparent);
-  border: 1px solid color-mix(in oklab, var(--deny) 45%, var(--hairline-strong));
-}
-.prob-t { font-size: 13.5px; line-height: 1.55; opacity: .92; }
-.prob-fix { margin-top: auto; font-size: 12.5px; color: var(--accent); }
-.probs-line { display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap; margin-top: 26px; }
-
-/* ── Hero fit: the whole hero (head + console + foot) must fit ONE viewport.
-   Tighter type + a hero-compressed console: terminal row hidden (the gate +
-   rail carry the story), feed capped, paddings reduced. ─────────────────── */
-.hero .hero-head h1 { font-size: clamp(2rem, 4vw, 3.1rem); margin-top: 10px; }
-.hero .lede { margin-top: 12px; max-width: 46em; }
-.hero .kicker { margin-top: 0; }
-.hero-console-wrap { margin-top: clamp(14px, 2.2svh, 24px); }
-.hero-console-wrap .studio-term { display: none; }
-.hero-console-wrap .studio-body { padding: 12px; gap: 10px; }
-.hero-console-wrap .studio-launch { padding: 8px 12px; }
-.hero-console-wrap .studio-feed { height: clamp(110px, 17svh, 158px); }
-.hero-console-wrap .studio-railbar { padding: 6px 10px; }
-.hero .hero-foot { margin-top: clamp(12px, 2svh, 20px); }
-@media (max-height: 850px) and (min-width: 761px) {
-  /* Short laptop viewports (snap-active widths only — phones scroll naturally
-     and keep their tags): give the console the space, shrink the frame. */
-  .hero .hero-head h1 { font-size: clamp(1.8rem, 3.4vw, 2.5rem); }
-  .hero .hero-tags { display: none; }
-
-  /* Feed and gate share ONE height: the gate panel is the taller column when
-     it raises, and an uncapped gate stretched the grid row — the hero grew
-     from 636 to 678 mid-animation (crew#337). Match the columns and compact
-     the gate's chrome instead so approve/steer/reject stay fully visible. */
-  .hero-console-wrap .studio-feed,
-  .hero-console-wrap .studio-gate { height: clamp(96px, 17svh, 130px); }
-  .hero-console-wrap .studio-gate { padding: 10px 12px; gap: 5px; }
-  .hero-console-wrap .sg-stamp { font-size: 0.78rem; padding: 4px 10px; }
-  .hero-console-wrap .sg-btn { padding: 5px 11px; }
-  .hero .hero-cta .btn { padding: 8px 17px; }
-
-  /* ── Fit EVERY section inside a laptop viewport (crew#337) ───────────────
-     A section is only "one screen" if its CONTENT fits `100svh - topbar` =
-     636px of usable height at 1440x700 — measuring the min-height-clamped box
-     is what let #335 report "fits, 0px spare" right up until it didn't.
-     Measured before this pass: .console-sec 804 (+168 over the usable band),
-     .byo 698 (+62), .skins 680 (+44), .hero 666 (+30), .get 647 (+11) — and
-     .council/.wf sat within 12px of the line, close enough for CI's ~24px
-     taller Linux rendering to tip them over.
-
-     The levers, per the studio #133/#134 playbook: section padding, heading
-     margins, measured type/spacing trims, and copy tightened in the page
-     itself — never deleting an interactive payload. Every section now aims
-     for ≥20px of slack so it still fits on CI. Guarded by
-     tests/e2e/sections-fit.spec.ts, which measures content vs usable height. */
-  .byo, .get { padding-block: clamp(18px, 3svh, 40px); }
-  .byo .sec-head { margin-bottom: 10px; }
-  .byo-grid { gap: 10px; }
-  .byo-tag { display: none; }
-  .byo-stage { margin-top: 10px; }
-  .byo-stage-head { padding-block: 9px; }
-  .byo-stage-row { padding-top: 10px; }
-  .byo-stage-note { margin-block: 6px 10px; }
-
-  .get-intro h2 { font-size: clamp(1.6rem, 2.9vw, 2.2rem); }
-  .get-intro p { margin-top: 12px; }
-  .get-tos { margin-top: 10px; }
-
-  /* the hero: minimum paddings are set at the base rule; shave the internal
-     rhythm so the console keeps its size and the section keeps CI slack */
-  .hero .lede { margin-top: 8px; }
-  .hero-console-wrap { margin-top: 12px; }
-  .hero .hero-foot { margin-top: 10px; }
-
-  /* the skins section: tighter head + trace so the API story fits one screen */
-  .skins .sec-head { margin-bottom: 12px; }
-  .skins .sec-head h2 { margin-top: 10px; }
-  .skins-grid { gap: 12px; }
-  .skin-card { padding: 12px 16px; }
-  .skin-trace-bar { padding: 8px 16px; }
-  .skin-trace-rows { padding: 4px 0; }
-  .skin-trace-rows li { padding: 4px 16px; }
-  .skins-landing { margin-top: 12px; }
-
-  /* the bring-your-own grid: heading down to one line at laptop widths (the
-     same type trade the hero makes above), tighter head, cards + stage */
-  .byo .sec-head h2 { margin-top: 10px; font-size: clamp(1.7rem, 2.6vw, 2.4rem); }
-  .byo .sec-sub { margin-top: 12px; }
-  .byo-card { padding-block: 9px; }
-  .byo-stage-note { margin-bottom: 8px; }
-
-  /* the gate console: the deepest offender (+168). Recovered from chrome —
-     bar/rail/panel padding, card type — never from the circuit itself. */
-  .console-sec { padding-block: 6px; }
-  .console-sec .sec-head { margin-bottom: 8px; }
-  .console-sec .sec-head h2 { margin-top: 8px; }
-  .console-sec .sec-sub { margin-top: 10px; }
-  .gc-topbar { padding: 5px 16px; }
-  .gc-rail { padding: 10px clamp(14px, 2.4vw, 34px) 8px; gap: 0; }
-  .gc-sw { gap: 5px; }
-  .gc-panel { padding: 9px clamp(16px, 2.6vw, 32px) 10px; gap: 6px; }
-  .gc-v-stamp { font-size: 1.1rem; padding: 4px 12px; }
-  .gc-btn { padding: 6px 13px; }
-  .gc-ledger { padding: 5px 12px; }
-  .gc-cards { margin-top: 10px; gap: 10px; }
-  .gc-card { padding: 10px 12px 11px; gap: 5px; }
-  .gc-card-n { width: 22px; height: 22px; font-size: 0.7rem; border-radius: 6px; }
-  .gc-card-t { font-size: 0.88rem; }
-  .gc-card-l { font-size: 0.62rem; line-height: 1.45; }
-
-  /* sections that fit locally but without CI slack: cheaper heading margins */
-  .wf .sec-head, .rail-sec .sec-head { margin-bottom: 18px; }
+@media (max-width: 640px) {
+  .tbl--layers tr + tr > * { border-top: 0; }
+  .tbl--layers tr + tr { border-top: 1px solid var(--hairline); }
 }
