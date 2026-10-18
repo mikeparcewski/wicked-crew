@@ -10,6 +10,14 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.15.1] — 2026-10-18
+
+A patch release with no crew code change: a new engine and studio. Pins: wicked-core-ts ^0.15.1, wicked-studio ^0.11.1, wicked-interactive ^0.14.1 (bridge floor, unchanged), wicked-crew-api-types 0.128.0.
+
+### Changed
+- **The engine is wicked-core-ts 0.15.1.** A container claude seat runs what the gate hook allows: the relay answers an allowed call with an explicit PreToolUse allow. A step's creator is never offered as its own monitor. Absolute fence rules use the `//` anchor claude matches, so the engine's Read and Edit deny rules apply again.
+- **The bundled studio is wicked-studio 0.11.1:** the run panel's watcher count and team-step credit, ⌘K ranking by the typed words, and the governance panel's unmount guard.
+
 ## [0.15.0] — 2026-10-18
 
 A minor release: a launch may name its lead agent, the broker relays a container seat's estate calls, and a deliver the engine's seat-credential guard refuses is triaged as that refusal. Pins: wicked-core-ts ^0.15.0, wicked-studio ^0.11.0, wicked-interactive ^0.14.1 (bridge floor, unchanged), wicked-crew-api-types 0.128.0.
@@ -4295,7 +4303,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.1...HEAD
+[0.15.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.14.2...v0.15.0
 [0.14.2]: https://github.com/mikeparcewski/wicked-crew/compare/v0.14.1...v0.14.2
 [0.14.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.14.0...v0.14.1
