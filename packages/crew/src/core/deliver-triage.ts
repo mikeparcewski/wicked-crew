@@ -25,6 +25,10 @@
  *   - `deliver: the repository's checks passed but CHANGED the worktree while running …` /
  *     `deliver: the repository's checks passed but the worktree could not be re-snapshotted …`
  *     (a check script that edits tracked files; inspect).
+ *   - `deliver: SEAT-CREDENTIAL — the work carries a credential the platform put into a seat: …` /
+ *     `deliver: SEAT-CREDENTIAL — the work could not be checked for a seat's credential …` (the
+ *     seat-secret guard, wicked-core#1025: a seat's injected token found in what the push would add,
+ *     named by file and kind, never by value; checked before any re-verify can clear the tree).
  * Every one of them — and every refusal crew's own script prints (`core/deliver.ts`: nothing to
  * deliver, the default branch, a moved verified base, a failed `gh`) — is an OPERATOR decision,
  * never a seat fault. This module recognises them from the excerpt the engine puts on
@@ -111,6 +115,9 @@ export const ENGINE_SNAPSHOT_FAILED_PHRASE = 'deliver: the worktree could not be
 export const ENGINE_REVERIFY_FAILED_PHRASE = "repository's own checks FAILED on";
 /** The engine's post-check proof failing: the checks changed the tree, or it could not be re-snapshotted. */
 export const ENGINE_CHECKS_MUTATED_PHRASE = "deliver: the repository's checks passed but";
+/** The engine's seat-secret guard (wicked-core#1025): the work carries a credential the platform put
+ *  into a seat, or could not be checked for one. Its marker leads the line. */
+export const ENGINE_SEAT_CREDENTIAL_PHRASE = 'deliver: SEAT-CREDENTIAL —';
 
 /**
  * What kind of deliver refusal a failed deliver unit's excerpt carries.
@@ -122,6 +129,7 @@ export const ENGINE_CHECKS_MUTATED_PHRASE = "deliver: the repository's checks pa
  * - `snapshot_failed` — the worktree could not be snapshotted before delivery (engine);
  * - `reverify_failed` — the repository's checks FAILED on the tree that would ship (engine);
  * - `checks_mutated` — the checks passed but changed the tree / could not be re-proven (engine);
+ * - `seat_credential` — the work carries a seat's injected credential, or could not be checked (engine);
  * - `base_moved` — the script found origin/<default> past `WICKED_DELIVER_VERIFIED_BASE` (script);
  * - `preflight_changed` — the crew#426 lockfile/codegen re-sync changed the verified tree (script);
  * - `script_refusal` — any other loud `deliver: …` refusal the script prints (script).
@@ -134,6 +142,7 @@ export type DeliverFailureKind =
   | 'snapshot_failed'
   | 'reverify_failed'
   | 'checks_mutated'
+  | 'seat_credential'
   | 'base_moved'
   | 'preflight_changed'
   | 'script_refusal';
@@ -235,6 +244,7 @@ function triageRefusalPhrases(detail: string): DeliverFailureTriage | null {
   if (detail.includes(ENGINE_SNAPSHOT_FAILED_PHRASE)) return ENGINE('snapshot_failed');
   if (detail.includes(ENGINE_REVERIFY_FAILED_PHRASE)) return ENGINE('reverify_failed');
   if (detail.includes(ENGINE_CHECKS_MUTATED_PHRASE)) return ENGINE('checks_mutated');
+  if (detail.includes(ENGINE_SEAT_CREDENTIAL_PHRASE)) return ENGINE('seat_credential');
   if (detail.includes(DELIVER_BASE_MOVED_MARKER)) {
     return { kind: 'base_moved', author: 'script', disposition: 'escalate', recoverable: false };
   }
