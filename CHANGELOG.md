@@ -10,6 +10,9 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Added
+- **`POST /runs` takes the lead agent (`LaunchRunBody.primary`, `wicked-crew-api-types` 0.128.0).** A launch may name the seat that leads the run (the primary agent, which owns every step not marked `owner: "team"`). It must be a seat in the launch roster that is signed in, else the launch is refused with a 400 that names it; omitted, the engine picks one at random. Either way the run records the choice (`wicked.team.path.started.selection`: `chosen` or `random`). Naming an opt-in seat (opencode) as the lead adds it to the default roster. `GET /health.capabilities.launchPrimary` says the field is accepted, so a client does not send it to an older daemon.
+
 ## [0.14.2] — 2026-10-18
 
 A patch release: `GET /search` over everything the daemon can read (#1075). Pins: wicked-core-ts ^0.14.2, wicked-studio ^0.10.2, wicked-interactive ^0.14.1 (bridge floor, unchanged), wicked-crew-api-types 0.127.0.

@@ -282,6 +282,11 @@ export interface HealthCapabilities {
    * older daemon — read as `'required'`.
    */
   qeAcceptance?: 'required' | 'off';
+  /**
+   * (api-types 0.128.0) `LaunchRunBody.primary` is accepted: a launch may name the seat that leads
+   * the run. ABSENT on an older daemon — do not send the field (its strict schema 400s on it).
+   */
+  launchPrimary?: boolean;
 }
 
 /** One `GET /health.warnings[]` entry (additive; wicked-core#411 / wicked-crew#497). */
@@ -4746,6 +4751,15 @@ export interface LaunchRunBody {
   problem: string;
   sessionId?: string;
   clisJson?: string;
+  /**
+   * (api-types 0.128.0; DES-TEAMING-002 §8.1) The seat that LEADS the run (the primary agent, PA):
+   * a seat key from the launch roster (`clisJson`, else the daemon's default roster). The PA owns
+   * every step not marked `owner: "team"`. Omitted: the engine picks one at random among the
+   * eligible seats; either way the choice is recorded as `wicked.team.path.started.selection`
+   * (`"chosen"` | `"random"`). A key that is not in the roster, or names a signed-out seat, is a 400.
+   * Send only when `GET /health.capabilities.launchPrimary === true`.
+   */
+  primary?: string;
   entityMode?: EntityMode;
   humanConfirm?: string;
   repoRef?: string;

@@ -556,10 +556,51 @@ const ExcludeLinkedIssuesSchema = z
   .max(50)
   .optional();
 
+/**
+ * Why `primary` cannot lead a launch on `clisJson`'s roster, or `null` when it can (DES-TEAMING-002
+ * §8.1). The roster is a JSON array of seats keyed by `key`; a seat crew's standing marks
+ * `council_eligible: false` is signed out or disabled, so it cannot lead. A roster that does not
+ * parse is left to the engine's own parse error (the `engineRosterJson` rule).
+ */
+/**
+ * The default launch roster ({@link defaultLaunchRoster}: no opt-in seats) — plus the opt-in seat a
+ * launch NAMES as its lead (`primary`): naming it is the opt-in.
+ */
+export function launchRosterNaming<T extends { key?: unknown }>(roster: readonly T[], primary: string | undefined): T[] {
+  const base = defaultLaunchRoster(roster);
+  if (primary === undefined || base.some((s) => s.key === primary)) return base;
+  const named = roster.find((s) => s.key === primary);
+  return named === undefined ? base : [...base, named];
+}
+
+export function primaryRefusal(primary: string, clisJson: string): string | null {
+  let roster: unknown;
+  try {
+    roster = JSON.parse(clisJson);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(roster)) return null;
+  const seats = roster.filter((s): s is { key: string; council_eligible?: unknown } =>
+    typeof s === 'object' && s !== null && typeof (s as { key?: unknown }).key === 'string');
+  const keys = seats.map((s) => s.key);
+  const seat = seats.find((s) => s.key === primary);
+  if (seat === undefined) {
+    return `primary names a seat that is not in this launch's roster: ${primary} (roster: ${keys.join(', ') || 'none'})`;
+  }
+  if (seat.council_eligible === false) {
+    return `primary names a seat that is signed out or disabled: ${primary} — sign it in from the Agents page, or pick another seat`;
+  }
+  return null;
+}
+
 export const LaunchSchema = z.object({
   problem: z.string().min(1),
   sessionId: z.string().min(1).optional(),
   clisJson: z.string().min(1).optional(),
+  /** (api-types 0.128.0; DES-TEAMING-002 §8.1) The seat that leads the run (the PA): a key in the
+   *  launch roster. Omitted ⇒ the engine picks at random (`path.started.selection`). */
+  primary: z.string().min(1).optional(),
   entityMode: z.enum(['shared', 'isolated']).optional(),
   humanConfirm: z.string().min(1).optional(),
   repoRef: z.string().min(1).optional(),
@@ -1630,6 +1671,8 @@ export function registerRoutes(
       // api-types 0.120.0: the daemon's QE acceptance setting, read per probe ('off' = every launch
       // that requires QE acceptance skips it, labelled with the setting).
       qeAcceptance: await qeAcceptanceNow(),
+      // api-types 0.128.0: `LaunchRunBody.primary` (the lead agent) is accepted.
+      launchPrimary: true,
     };
     // wicked-core#411 / crew#497: the state-home blocker rides the health probe as a WARNING. The
     // daemon still SERVES (status stays ok — studio must load and show the blocker) but refuses to
@@ -2397,10 +2440,18 @@ export function registerRoutes(
       // (`core/engine-roster.ts`), so a signed-out seat is never convened, never a judge.
       // (operator ruling 2026-10-11) …minus the opt-in seats (opencode): a launch gets one only
       // when it names it.
-      clisJson: b.clisJson ?? JSON.stringify(defaultLaunchRoster(rosterWithStanding())),
+      clisJson: b.clisJson ?? JSON.stringify(launchRosterNaming(rosterWithStanding(), b.primary)),
     };
     // A capture launch (api/capture.ts) reads its materials from a per-run inbox outside every
     // sandbox: the capture route registered it under the run id it minted.
+    // (DES-TEAMING-002 §8.1) The operator's lead-agent choice: crew owns eligibility, the engine
+    // owns the pick. A key that is not in the launch roster, or names a seat the roster marks
+    // signed out, is refused here by name — never handed to the engine to fall back silently.
+    if (b.primary !== undefined) {
+      const refusal = primaryRefusal(b.primary, input.clisJson);
+      if (refusal !== null) return reply.code(400).send({ error: refusal });
+      input.primary = b.primary;
+    }
     const captureRoot = captureLaunchRoots.get(input.sessionId);
     if (captureRoot !== undefined) input.extraWriteRoots = [captureRoot];
     // A demo launch (api/recording.ts) writes every file into the demo root the demo route minted for it.
