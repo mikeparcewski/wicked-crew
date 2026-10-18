@@ -22,6 +22,7 @@ import {
   ENGINE_LIFT_CONFLICT_PHRASE,
   ENGINE_REVERIFY_FAILED_PHRASE,
   ENGINE_RUN_BRANCH_PHRASE,
+  ENGINE_SEAT_CREDENTIAL_PHRASE,
   ENGINE_SNAPSHOT_FAILED_PHRASE,
   triageDeliverFailure,
   type DeliverFailureKind,
@@ -78,6 +79,17 @@ const ENGINE = {
   resnapshotFailed:
     "deliver: the repository's checks passed but the worktree could not be re-snapshotted afterwards " +
     '(git status: exit 128); nothing was pushed — the deliver gate never pushes a tree it cannot prove.',
+  // wicked-core#1025 `seat_secret_guard::deliver_refusal` / `deliver_lift::refuse_seat_credentials`.
+  seatCredential:
+    'deliver: SEAT-CREDENTIAL — the work carries a credential the platform put into a seat: ' +
+    "`debug/env.txt` holds the claude seat's sign-in token (`claude setup-token`, " +
+    'CLAUDE_CODE_OAUTH_TOKEN), base64-encoded. Nothing was pushed — the deliver gate never ships a ' +
+    "seat's credential. Remove it from the run branch (the file, and any commit that carried it) and " +
+    'approve to retry. The value is never shown.',
+  seatCredentialUnchecked:
+    "deliver: SEAT-CREDENTIAL — the work could not be checked for a seat's credential (could not list " +
+    "the work's objects: exit 128); nothing was pushed — the deliver gate never ships a tree it could " +
+    'not check. Approve to retry.',
 };
 
 /** name → expected kind, the phrase the classifier keys on, and whether that phrase sits in the
@@ -94,6 +106,8 @@ const EXPECTED: [keyof typeof ENGINE, DeliverFailureKind, string, 'head' | 'tail
   ['reverifyFailedNoVerify', 'reverify_failed', ENGINE_REVERIFY_FAILED_PHRASE, 'head'],
   ['checksMutated', 'checks_mutated', ENGINE_CHECKS_MUTATED_PHRASE, 'head'],
   ['resnapshotFailed', 'checks_mutated', ENGINE_CHECKS_MUTATED_PHRASE, 'head'],
+  ['seatCredential', 'seat_credential', ENGINE_SEAT_CREDENTIAL_PHRASE, 'head'],
+  ['seatCredentialUnchecked', 'seat_credential', ENGINE_SEAT_CREDENTIAL_PHRASE, 'head'],
 ];
 
 /** `actor.rs` `bounded_excerpt`: head + tail, elision marked, char-counted. */
