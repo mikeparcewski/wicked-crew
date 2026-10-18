@@ -3435,8 +3435,12 @@ export function registerRoutes(
             (scoped && admissionKind === 'path'
               ? 'no seat in standing can be held to an ask that reads several repositories (or a project) ' +
                 'the run cannot bind; scope the ask to one repository, sign a seat in, or open it unscoped'
-              : 'no seat in the roster can take a turn (every seat is signed out or disabled); sign a seat ' +
-                'in from the Agents page, or name seats with `clis`') + ' — see refused',
+              : refused.some((r) => r.source === 'engine')
+                ? 'no seat picked for this ask can take a turn: every one is signed out, disabled, or benched by the ' +
+                  'engine in a recent run (out of quota, say); sign another seat in from the Agents page, turn one ' +
+                  'back on, or wait for the bench to lift'
+                : 'no seat in the roster can take a turn (every seat is signed out or disabled); sign a seat ' +
+                  'in from the Agents page, or name seats with `clis`') + ' — see refused',
           refused,
         });
       }

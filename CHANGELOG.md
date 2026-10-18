@@ -10,6 +10,9 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+- **A seat the engine benched for quota stays benched across a daemon restart, and an ask is never seated on it (#1071).** The bench lived only in the daemon's memory, and the boot replay re-reads only live runs, so after a restart an out-of-quota copilot read Ready again and the next ask was seated on it alone and failed with the same 429. Every bench and every early lift (an ok turn, the seat's own live sign-in check) is now an audit-trail entry (`seat.benched`, `seat.bench_lifted`), and the boot restores the benches still inside their 30-minute window. Chat admission (`POST /chats`, the re-seat, and the roster's `chat_admission`) now refuses a seat under an active bench by name, with `source: "engine"` and the time it lifts; an ask whose only picked seat is benched answers 409 with that reason instead of launching.
+
 ## [0.14.0] — 2026-10-17
 
 A minor release: memory edits and operator memories, policy proposals with an explicit reach, gated-reassign and gate-kind fixes, and the engine's container-floor and judging fixes. Pins: wicked-core-ts ^0.14.0, wicked-studio ^0.10.0, wicked-interactive ^0.14.1 (bridge floor), wicked-crew-api-types 0.126.0.

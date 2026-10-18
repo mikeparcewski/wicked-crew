@@ -16,7 +16,13 @@
 //  * every seat recently benched → no seat left to launch on (the engine's intake refuses the
 //    launch by name, `no_eligible_seat` 409, never a silent hang).
 
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+
+import { AuditLog } from '../src/api/audit.js';
+import { auditSeatBenchStore, readSeatBenchEntries, SEAT_BENCHED_ACTION } from '../src/api/seat-bench-trail.js';
 
 import { rosterWithStandingFactory } from '../src/api/roster-standing.js';
 import { SEAT_BENCH_WINDOW_MS, SeatHealthTracker } from '../src/api/seat-health.js';
@@ -158,4 +164,72 @@ describe('a seat the engine benched in a run is benched at the next launch (seat
       ['opencode', { usable: false, reason: 'recent not_installed' }],
     ]);
   });
+});
+
+// crew#1071: the bench lived in the tracker's memory only, and the boot replay re-reads only LIVE
+// runs. A quota failure normally ends its run, so after a restart copilot read Ready 12 minutes
+// before its stated retry, and the next ask was seated on it alone and got the same 429.
+describe('a bench survives a daemon restart (crew#1071)', () => {
+  /** A daemon's tracker over the trail at `path`, booted the way `createServer` boots it. */
+  async function boot(path: string, nowMs = Date.now()): Promise<{ tracker: SeatHealthTracker; audit: AuditLog }> {
+    const audit = new AuditLog(path, () => undefined);
+    const tracker = new SeatHealthTracker();
+    tracker.hydrateBenches(await readSeatBenchEntries(audit, nowMs), nowMs);
+    tracker.attachBenchStore(auditSeatBenchStore(audit));
+    return { tracker, audit };
+  }
+
+  function withTrail(fn: (path: string) => Promise<void>): () => Promise<void> {
+    return async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'seat-bench-trail-'));
+      try {
+        await fn(join(dir, 'audit.log'));
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+  }
+
+  it('benched, the run ended, the daemon restarted: the seat is still benched, with the same reason, run and lift time', withTrail(async (path) => {
+    const now = Date.now();
+    const first = await boot(path, now);
+    first.tracker.ingest(copilotBenched(now - 60_000));
+    first.tracker.ingest(ev({ type: 'runCancelled', session: RUN }));
+    await first.audit.flush();
+
+    const second = await boot(path, now);
+    expect(second.tracker.recentBenchFor('copilot', now)).toEqual(first.tracker.recentBenchFor('copilot', now));
+    const copilot = rosterOver(second.tracker)().find((s) => s.key === 'copilot')!;
+    expect(copilot.council_eligible).toBe(false);
+    expect(copilot.recent_bench).toMatchObject({ kind: 'quota_exhausted', lifts_at: new Date(now - 60_000 + SEAT_BENCH_WINDOW_MS).toISOString() });
+    // …and the ask path refuses it by the same verdict.
+    expect((copilot.chat_admission as Record<string, unknown>)['unscoped']).toMatchObject({ ok: false, source: 'engine' });
+  }));
+
+  it('a bench lifted before the restart (an ok turn) stays lifted; one past its window is not restored', withTrail(async (path) => {
+    const now = Date.now();
+    const first = await boot(path, now);
+    first.tracker.ingest(copilotBenched(now - 60_000));
+    first.tracker.ingest(ev({ type: 'chatReply', chat: 'c1', cliKey: 'copilot', text: 'hello', ok: true, usage: null, ts: now - 30_000 }));
+    first.tracker.ingest(ev({ type: 'seatBenched', session: 'old', ord: 1, cli: 'opencode', reason: 'not_installed', source: 'worker', ts: now - SEAT_BENCH_WINDOW_MS - 5_000 }));
+    await first.audit.flush();
+
+    const second = await boot(path, now);
+    expect(second.tracker.recentBenchFor('copilot', now)).toBeNull();
+    expect(second.tracker.recentBenchFor('opencode', now)).toBeNull();
+    expect(eligibleSeatKeys(rosterOver(second.tracker)())).toEqual(['claude', 'copilot', 'opencode']);
+  }));
+
+  it('the same frame folded again (a live run replayed at boot) writes nothing new', withTrail(async (path) => {
+    const now = Date.now();
+    const first = await boot(path, now);
+    first.tracker.ingest(copilotBenched(now - 1_000));
+    first.tracker.ingest(copilotBenched(now - 1_000));
+    await first.audit.flush();
+    const second = await boot(path, now);
+    second.tracker.ingest(copilotBenched(now - 1_000));
+    await second.audit.flush();
+    expect(await second.audit.readAll({ action: SEAT_BENCHED_ACTION })).toHaveLength(1);
+    expect(second.tracker.recentBenchFor('copilot', now)?.runs).toBe(1);
+  }));
 });

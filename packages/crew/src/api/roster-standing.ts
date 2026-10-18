@@ -356,6 +356,8 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
         ...(seat as unknown as StandingSeat),
         ...(hostFloor !== null ? { host_floor_bench: hostFloor } : {}),
         ...(hostFloorUnknown !== null ? { host_floor_unknown: hostFloorUnknown } : {}),
+        // crew#1071: an ask does not seat a seat under the engine's active bench.
+        ...(recentBench !== null ? { recent_bench: recentBenchWire(recentBench) } : {}),
       };
       // core#581: a pinned seat whose binary no longer matches the build its ACP admission was
       // proven against says so here (read from the cache; a stale cache refreshes in the
