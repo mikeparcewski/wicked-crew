@@ -2,37 +2,25 @@ import { test, expect } from '@playwright/test';
 import { bringIntoView } from './utils';
 
 /**
- * prefers-reduced-motion: the page must load with zero pageerror events and
- * every key section visible. The widgets render static (no auto-advance);
- * the gate console settles on its manual deny-dominates scene.
+ * prefers-reduced-motion: no page errors, every section visible, and the job demo skips its timing:
+ * it reaches the QE decision at once and each choice lands at once.
  */
 test.use({ contextOptions: { reducedMotion: 'reduce' } });
 
 test.describe('reduced motion', () => {
-  test('page loads clean and every key section renders', async ({ page }) => {
+  test('page loads clean and the job demo runs without waiting', async ({ page }) => {
     const errors: string[] = [];
     page.on('pageerror', (e) => errors.push(e.message));
-
     await page.goto('/');
-    await expect(page.locator('.hero h1')).toBeVisible();
-
-    // Gate console: reduced-motion path hands over control immediately,
-    // settled on the deny-dominates scene.
-    const gc = page.locator('[data-gc]');
-    await bringIntoView(gc);
-    await expect(gc).toHaveClass(/is-manual/);
-    await expect(gc.locator('[data-stamp]')).toHaveText('DENY');
-
-    // Every key section is present and visible.
-    for (const sel of ['[data-studio]', '[data-skins]', '[data-byo]', '[data-wf]', '[data-rail]', '.same-garden', '.install--primary']) {
+    const job = page.locator('[data-job]');
+    await expect(job.locator('[data-qe="PASS"]')).toBeVisible({ timeout: 2_000 });
+    await job.locator('[data-qe="PASS"]').click();
+    await expect(job.locator('.ln').last()).toContainText('evidence bundle ready', { timeout: 1_000 });
+    for (const sel of ['.sandbox', '.gates', '.council', '.durable', '.same-garden', '.install--primary']) {
       const loc = page.locator(sel);
       await bringIntoView(loc);
       await expect(loc).toBeVisible();
     }
-
-    // The studio's reduced path renders the run statically, ending at the gate.
-    await expect(page.locator('[data-studio-gate]')).toBeVisible();
-
     expect(errors).toEqual([]);
   });
 });
