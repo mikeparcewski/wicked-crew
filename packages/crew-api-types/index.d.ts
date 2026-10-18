@@ -10095,7 +10095,11 @@ export interface McpSecretResponse {
 /** `POST /mcp/call`: what the garden shim sends. `token` is the worker's `WICKED_MCP_TOKEN`. */
 export interface McpCallBody {
   token: string;
-  /** `mcp:<server>/<tool>`. */
+  /**
+   * `mcp:<server>/<tool>`. The server name `estate` is reserved (wicked-core#1018): `mcp:estate/<tool>`
+   * is the estate relay, a container seat's way to its run's estate (the read-only graph, memory,
+   * knowledge and rules lookups, and `proposal.submit`), scoped by the daemon to the token's run.
+   */
   subject: string;
   /** The tool's arguments (a JSON object); absent = `{}`. */
   args?: Record<string, unknown>;
@@ -10132,7 +10136,11 @@ export interface McpCallResponse {
   subject: string;
   /** The call record's span id (`GET /mcp/usage` and the run's Governance panel resolve it). */
   callId: string | null;
-  /** The scrubbed `tools/call` result — only when `outcome` is `ok`. */
+  /**
+   * The scrubbed `tools/call` result — only when `outcome` is `ok`. For `mcp:estate/<tool>`, a
+   * JSON-RPC error estate answered (e.g. `-32602`, fix the arguments) is a tool error that keeps
+   * its code: `{ content, isError: true, rpcError: { code, message } }`.
+   */
   result?: Record<string, unknown>;
   /** The rules or gates that decided (deny, ask, withheld). */
   ruleIds: string[];

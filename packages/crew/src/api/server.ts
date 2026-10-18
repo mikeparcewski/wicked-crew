@@ -68,6 +68,7 @@ import { homedir } from 'node:os';
 import { discoverMcpServers } from '../mcp/discovery.js';
 import { probeMcpServer } from '../mcp/probe.js';
 import { budgetFromEnv, MCP_CALL_COMPLETED, McpBroker } from '../mcp/broker.js';
+import { EstateRelay } from '../mcp/estate-relay.js';
 import { McpCallRecordFile } from '../mcp/call-records.js';
 import { emitOnBus, type BusEvent } from '../core/bus.js';
 import { McpRegistry } from '../mcp/registry.js';
@@ -2077,6 +2078,16 @@ export async function createServer(
     records: mcpCallRecords,
     budgetPerUnit: budgetFromEnv(),
     log: (m) => app.log.warn(m),
+    // wicked-core#1018: `mcp:estate/<tool>`, a container seat's way to its run's estate. Each
+    // landed proposal is also written to the audit trail against its run (`estate.proposal.submitted`).
+    estate: new EstateRelay({
+      resolver: () => CoreAdapter.estateScopeResolver(),
+      onProposal: (p) =>
+        audit.record('estate.proposal.submitted', { id: `seat:${p.seat}`, kind: 'agent', trust: 'observer' }, {
+          runId: p.runId,
+          detail: { unit: p.ord, attempt: p.attempt, seat: p.seat, proposalId: p.proposalId, kindType: p.kindType, callId: p.callId },
+        }),
+    }),
     publish: async (record) => {
       broadcast({ type: 'mcpCallCompleted', record } as unknown as CoreEvent);
       if (engineBusDb === undefined) return;

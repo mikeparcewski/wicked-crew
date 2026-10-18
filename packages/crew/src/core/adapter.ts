@@ -655,6 +655,9 @@ interface CoreConstructor {
   evaluateMcpOutput?(requestJson: string): Promise<string>;
   /** DES-MCP-TOOLS-001 S4: the token's unit's visible tool list, judged and recorded nowhere. */
   listMcpTools?(requestJson: string): Promise<string>;
+  /** wicked-core#1018 (wicked-core-ts ≥ the release carrying it): the estate relay's scope for a
+   *  token, `{ unit, projectId, repoId, codeGraphDb }`. Rejects with `invalid_token:` or `bad_request:`. */
+  resolveEstateScope?(requestJson: string): Promise<string>;
 }
 
 /** The engine's two MCP broker calls (`Core.evaluateMcpCall` / `Core.evaluateMcpOutput`). */
@@ -1368,6 +1371,17 @@ export class CoreAdapter {
     const list = Core.listMcpTools;
     if (typeof list !== 'function') return null;
     return (requestJson: string) => list.call(Core, requestJson);
+  }
+
+  /**
+   * The engine's estate scope for a token's unit (`Core.resolveEstateScope`, wicked-core#1018), or
+   * `null` on an addon without it: every `mcp:estate/<tool>` call is then refused, never relayed
+   * unscoped. Read at call time: tests swap the static.
+   */
+  static estateScopeResolver(): ((requestJson: string) => Promise<string>) | null {
+    const resolve = Core.resolveEstateScope;
+    if (typeof resolve !== 'function') return null;
+    return (requestJson: string) => resolve.call(Core, requestJson);
   }
 
   /** Whether the linked engine follows the one-connection bus rule (`Core.busConnectionStats`,

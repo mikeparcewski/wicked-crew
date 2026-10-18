@@ -334,10 +334,26 @@ export async function callEstateTool(
   args: Record<string, unknown>,
   io: EstateMcpIo = {},
 ): Promise<unknown> {
+  return unwrapToolResult(await callEstateToolRaw(tool, args, io));
+}
+
+/**
+ * {@link callEstateTool} without the unwrap: the server's whole `id:2` JSON-RPC response, a
+ * `result` (the MCP envelope, every content block kept) or an `error`. The estate relay
+ * (`mcp/estate-relay.ts`) hands a worker the envelope as the server wrote it, diagnostics block
+ * included, the way garden's shim reads it from a local server. Throws {@link EstateMcpError} on a
+ * transport fault, a failed handshake, an early exit or the timeout; a JSON-RPC `error` answer is
+ * returned, not thrown.
+ */
+export async function callEstateToolRaw(
+  tool: string,
+  args: Record<string, unknown>,
+  io: EstateMcpIo = {},
+): Promise<Record<string, unknown>> {
   const child = (io.spawn ?? (() => defaultSpawn(process.env)))();
   const timeoutMs = io.timeoutMs ?? DEFAULT_ESTATE_MCP_TIMEOUT_MS;
 
-  return new Promise<unknown>((resolvePromise, rejectPromise) => {
+  return new Promise<Record<string, unknown>>((resolvePromise, rejectPromise) => {
     let settled = false;
     let stdoutBuf = '';
     let stderrBuf = '';
@@ -384,13 +400,7 @@ export async function callEstateTool(
         if (!isRecord(msg)) continue;
         const id = msg['id'];
         if (id === TOOLS_CALL_ID) {
-          finish(() => {
-            try {
-              resolvePromise(unwrapToolResult(msg));
-            } catch (err) {
-              rejectPromise(err);
-            }
-          });
+          finish(() => resolvePromise(msg));
           return;
         }
         // A failure of the handshake itself (initialize error, or a parse error with id:null)

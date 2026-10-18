@@ -19,6 +19,10 @@ import type { McpRestMapping, McpToolAnnotations, McpToolClass } from '../core/t
 /** A server name: a lowercase token that is safe inside `mcp:<server>/<tool>` and a keychain account. */
 export const MCP_SERVER_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 
+/** The reserved server name of the broker's estate relay (wicked-core#1018, `estate-relay.ts`):
+ *  `mcp:estate/<tool>` never reaches a registered server, and no server may be saved under it. */
+export const ESTATE_SERVER = 'estate';
+
 export function mcpSubject(server: string, tool: string): string {
   return `mcp:${server}/${tool}`;
 }
