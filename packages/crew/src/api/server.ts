@@ -108,6 +108,7 @@ import { registerStandingOrderRoutes } from '../standing-orders/routes.js';
 import { WatchRegistry } from '../watch/registry.js';
 import { makeDiscoverySource } from './discovery-source.js';
 import { registerWatchRoutes } from './watch-routes.js';
+import type { SearchService } from './search-routes.js';
 import { callEstateTool } from '../core/estate-mcp-client.js';
 import { seatParser } from '../standing-orders/parse.js';
 import { registerGateHistoryRoute, runBand, runPreset, runProject } from '../standing-orders/history.js';
@@ -512,6 +513,8 @@ export async function createServer(
   let watchRegistry: WatchRegistry | null = null;
   // DC-S4b: the studio chat recorder, handed back by `registerRoutes` below (it needs the service built there).
   let chatDecisionRecorder: ChatDecisionRecorder | null = null;
+  // `GET /search`'s index, handed back by `registerRoutes` below; the frame fan-in feeds it late-bound.
+  let searchService: SearchService | null = null;
   // DC-S7: considered · set aside · cited — the rule reads behind the citation verifier, the unit hook
   // and the chat open/send paths (built by `registerRoutes`).
   let considerations: ConsiderationService | null = null;
@@ -1696,6 +1699,8 @@ export async function createServer(
   }
   const onEngineEvent = (event: CoreEvent): void => {
     gateCache.ingest(event);
+    // `GET /search`: frames keep the index current (a no-op until the first search).
+    searchService?.ingest(event);
     elicitationCache.ingest(event);
     askServer.ingest(event);
     seatHealth.ingest(event);
@@ -2194,6 +2199,7 @@ export async function createServer(
   // proposal is keyed by the decision id). Off the boot path; a failure is a logged outcome.
   chatDecisionRecorder = registered.chatRecorder;
   considerations = registered.considerations;
+  searchService = registered.search;
   if (registered.decisions !== null) {
     const decisionsService = registered.decisions;
     decisionsService.track(decisionsService.redrive());

@@ -11125,3 +11125,97 @@ export interface McpInspectLogResponse {
   state: McpInspectState;
   error: string | null;
 }
+
+// ── Global search (`GET /search`; api-types 0.127.0) ─────────────────────────────────────────────
+//
+// One query over every major entity the daemon can read, answered grouped by type, ranked, with a
+// snippet per hit. The daemon keeps an in-memory text index it builds lazily on the first search
+// (off the request path) and keeps current from its own writes and engine frames. A query never
+// holds the event loop: it yields while it scans, stops at a hard time budget (`partial: true`)
+// and stops early when the client disconnects (a superseded query).
+
+/** The searchable entity types, in the order the daemon answers them. */
+export type SearchType = 'run' | 'project' | 'repo' | 'transcript' | 'rule' | 'memory' | 'doc';
+
+/** A half-open `[start, end)` UTF-16 range of matched text inside a hit's `title` or `snippet`. */
+export type SearchSpan = [number, number];
+
+/** Where a hit opens. A skin maps each kind to its own address. */
+export type SearchTarget =
+  | { kind: 'run'; run_id: string; chat_id: string | null }
+  | { kind: 'project'; project_id: string }
+  | { kind: 'repo'; repo_id: string }
+  /** A chat's transcript (a live chat: chat transcripts are kept only while the chat is open). */
+  | { kind: 'chat'; chat_id: string }
+  /** One unit's captured output (its transcript) inside a run. */
+  | { kind: 'unit'; run_id: string; ord: number; chat_id: string | null }
+  | { kind: 'rule'; rule_id: string; steering_type: string | null }
+  | { kind: 'memory'; memory_id: string; scope: string }
+  | { kind: 'doc'; project_id: string; doc: string };
+
+export interface SearchHit {
+  type: SearchType;
+  /** Unique within `type`. */
+  id: string;
+  title: string;
+  /** The matched ranges in `title`. */
+  title_spans: SearchSpan[];
+  /** A short window of the matched body text (whitespace collapsed, `…` where cut); `null` when the hit has no body. */
+  snippet: string | null;
+  snippet_spans: SearchSpan[];
+  /** Higher is better; comparable only within one group. */
+  score: number;
+  /** Unix MILLIS of the entity's last known change, when the daemon knows it. */
+  updated_at: number | null;
+  project_id: string | null;
+  /** The entity's own state word where it has one (a run's status, `retired`, `archived`), else `null`. */
+  status: string | null;
+  target: SearchTarget;
+}
+
+export interface SearchGroup {
+  type: SearchType;
+  /** Every match the query found in this type (a lower bound when `partial`). */
+  total: number;
+  /** This page, best first. */
+  hits: SearchHit[];
+  /** Pass back as `cursor` (with `types=<this type>`) for the next page; `null` on the last page. */
+  next_cursor: string | null;
+}
+
+/**
+ * How much of a type the index holds. `indexing`: the first read of that source is still running
+ * (search again shortly); `unavailable`: the source could not be read (`note` says why), so the
+ * type was not searched.
+ */
+export interface SearchSourceState {
+  type: SearchType;
+  state: 'ready' | 'indexing' | 'unavailable';
+  /** Entities of this type the index holds. */
+  indexed: number;
+  note: string | null;
+}
+
+/**
+ * `GET /search?q=&types=&limit=&cursor=` → 200.
+ *
+ * - `q` (required, 2–256 chars after trimming): words (each must match, case-insensitive, anywhere
+ *   in a title or body) and `"quoted phrases"`. 400 when missing, too short or too long.
+ * - `types`: comma-separated `SearchType`s (default every type). 400 on an unknown type.
+ * - `limit`: hits per group, 1–50 (default 5).
+ * - `cursor`: a group's `next_cursor`; needs exactly one type in `types` (400 otherwise).
+ *
+ * Unit transcripts are indexed from a capped head and tail of each output (the full output stays at
+ * `GET /runs/:id/units/:unit/output`); the oldest transcripts leave the index first when its text
+ * budget is full.
+ */
+export interface SearchResponse {
+  query: string;
+  /** One group per searched type with at least one hit, in `SearchType` order. */
+  groups: SearchGroup[];
+  /** One row per requested type. */
+  sources: SearchSourceState[];
+  /** The time budget ran out before every type was scanned: totals are lower bounds. */
+  partial: boolean;
+  took_ms: number;
+}

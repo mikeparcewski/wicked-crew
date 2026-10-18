@@ -94,6 +94,7 @@ import {
 } from './run-files.js';
 import { DocRunIndex } from '../interactive/doc-run-index.js';
 import { listInteractiveDocs } from '../interactive/docs-index.js';
+import { SearchService, registerSearchRoutes } from './search-routes.js';
 import type { FreshenCheckout } from './chat-freshness.js';
 import { TestSetIndex } from '../qe/test-sets.js';
 import { estateExe, parseEstateTotals, readBlastRadiusPages, resolveProjectGraphBinding } from '../projects/graph.js';
@@ -887,6 +888,8 @@ export interface RegisteredRoutes {
   chatRecorder: ChatDecisionRecorder | null;
   /** DC-S7: considered · set aside · cited, and the rules the seats were told about. */
   considerations: ConsiderationService;
+  /** `GET /search`'s index: the daemon's frame fan-in feeds it (`ingest`). */
+  search: SearchService;
 }
 
 export interface RuntimeDeps {
@@ -7408,5 +7411,33 @@ export function registerRoutes(
     log: (m) => app.log.warn(m),
   });
 
-  return { decideGate, decisions, chatRecorder, considerations };
+  // `GET /search` (api-types 0.127.0): one query over every major entity. The index is read lazily,
+  // on the first search, and kept current from the frames (`search.ingest`, wired in createServer)
+  // and from this daemon's own writes (search-routes.ts).
+  const search = new SearchService({
+    sessionsDetail: () => adapter.sessionsDetail(),
+    workOutput: (unitId) => adapter.workOutput(unitId),
+    projectList: () => adapter.projectList(),
+    listRepos: () => adapter.listRepos(),
+    listRules: () => adapter.listConformanceRules(),
+    projectOf: (id) => projects.index.projectOf(id),
+    runFacts: runTimingIndex,
+    ...(chatTranscripts !== undefined ? { chatsDir: () => chatTranscripts.directory } : {}),
+    memories: async () => {
+      const raw = await estateTool('memory.list', {});
+      const items = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>)['items'] : undefined;
+      if (!Array.isArray(items)) throw new EstateMcpError('memory.list returned an unexpected shape');
+      return items.map(shapeMemoryItem);
+    },
+    docs: async () => (await listInteractiveDocs({
+      adapter,
+      settings: projectSettings,
+      docRuns,
+      ...(runtime.docGrounding !== undefined ? { groundingStore: runtime.docGrounding } : {}),
+    })).docs,
+    log: (m) => app.log.warn(m),
+  });
+  registerSearchRoutes(app, search);
+
+  return { decideGate, decisions, chatRecorder, considerations, search };
 }
