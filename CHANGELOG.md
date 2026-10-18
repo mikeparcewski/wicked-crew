@@ -10,6 +10,14 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-10-18
+
+A minor release: a launch may name its lead agent, the broker relays a container seat's estate calls, and a deliver the engine's seat-credential guard refuses is triaged as that refusal. Pins: wicked-core-ts ^0.15.0, wicked-studio ^0.11.0, wicked-interactive ^0.14.1 (bridge floor, unchanged), wicked-crew-api-types 0.128.0.
+
+### Changed
+- **The engine is wicked-core-ts 0.15.0.** Team members run again, as read-only one-shot sessions in their seats' containers. The built-in presets hand their independent read steps to the team. Container seats reach their run's estate through this daemon's broker. The broker makes no token request of its own: each CLI renews its own sign-in, and claude seats use `claude setup-token`. A credential injected into a seat never leaves with the work.
+- **The bundled studio is wicked-studio 0.11.0:** global search, New job's lead-agent picker, the run page's one right panel and its team view, and the rail's action row on every page.
+
 ### Added
 - **`POST /runs` takes the lead agent (`LaunchRunBody.primary`, `wicked-crew-api-types` 0.128.0).** A launch may name the seat that leads the run (the primary agent, which owns every step not marked `owner: "team"`). It must be a seat in the launch roster that is signed in, else the launch is refused with a 400 that names it; omitted, the engine picks one at random. Either way the run records the choice (`wicked.team.path.started.selection`: `chosen` or `random`). Naming an opt-in seat (opencode) as the lead adds it to the default roster. `GET /health.capabilities.launchPrimary` says the field is accepted, so a client does not send it to an older daemon.
 - **The broker relays a container seat's estate calls (wicked-core#1018, option A).** A seat on the container floor has no estate: the host's SQLite stores are never mounted into it and no store pin reaches it, so every blast-radius, hotspot and recall lookup and every capture proposal was refused there. The broker now answers the reserved subject `mcp:estate/<tool>` on the host. The engine resolves the token to its unit and run scope (`Core.resolveEstateScope`, wicked-core-ts after 0.14.2; on an older engine every estate call is refused, never relayed unscoped). Only the read-only lookups (`SearchEntity`, `RetrieveEntity`, `TraverseGraph`, `Path`, `BlastRadius`, `Lineage`, `RankHotspots`, `Communities`, `RulesInventory`, `rules.recall`, `memory.recall`, `knowledge.recall`) and the inert `proposal.submit` are relayed, to a `wicked-estate-mcp --readonly` spawned on the run's own code graph (graph lookups are refused when the run has none) and this daemon's memory store. A recall's facet intent and a proposal's facets are set to the run's project and repo, and provenance is stamped from the unit. Size arguments are capped, each call has a 30 s deadline, at most 4 run at once, a result over 512 KB is withheld, and the unit's MCP call budget applies. Every relayed call is recorded like any brokered call, and each landed proposal is written to the audit trail against its run (`estate.proposal.submitted`). No registered server may be named `estate`.
@@ -4287,7 +4295,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.14.2...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.14.2...v0.15.0
 [0.14.2]: https://github.com/mikeparcewski/wicked-crew/compare/v0.14.1...v0.14.2
 [0.14.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.13.2...v0.14.0
