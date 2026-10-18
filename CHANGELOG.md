@@ -10,6 +10,14 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.14.1] — 2026-10-17
+
+A patch release: a quota bench survives a daemon restart, and an ask is not seated on a benched seat (#1072). Pins: wicked-core-ts ^0.14.1, wicked-studio ^0.10.1, wicked-interactive ^0.14.1 (bridge floor, unchanged).
+
+### Changed
+- **The engine is wicked-core-ts 0.14.1.** The broker's sign-in refresh sends the provider CLI's User-Agent (Anthropic refreshes stopped failing); the seat image carries wicked-ledger under `/opt/wicked-ledger`, so a container seat's QE unit can record its verdict; opencode seats reach their own server on loopback, and a seat that crashes repeatedly is benched.
+- **The bundled studio is wicked-studio 0.10.1:** the :7721 round-2 E2E fixes (run page scroll, gate labels, Needs you, dead-seat gates, rule reach on Steer).
+
 ### Fixed
 - **A seat the engine benched for quota stays benched across a daemon restart, and an ask is never seated on it (#1071).** The bench lived only in the daemon's memory, and the boot replay re-reads only live runs, so after a restart an out-of-quota copilot read Ready again and the next ask was seated on it alone and failed with the same 429. Every bench and every early lift (an ok turn, the seat's own live sign-in check) is now an audit-trail entry (`seat.benched`, `seat.bench_lifted`), and the boot restores the benches still inside their 30-minute window. Chat admission (`POST /chats`, the re-seat, and the roster's `chat_admission`) now refuses a seat under an active bench by name, with `source: "engine"` and the time it lifts; an ask whose only picked seat is benched answers 409 with that reason instead of launching.
 
@@ -4261,7 +4269,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.14.1...HEAD
+[0.14.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.13.2...v0.14.0
 [0.13.2]: https://github.com/mikeparcewski/wicked-crew/compare/v0.13.1...v0.13.2
 [0.13.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.13.0...v0.13.1
