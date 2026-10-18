@@ -25,6 +25,11 @@
  *       be written is refused and its result withheld. The record then rides `/ws`
  *       (`mcpCallCompleted`) and the bus (`wicked.crew.mcp_call.completed`).
  *
+ * The reserved server `estate` is not a registered upstream: `mcp:estate/<tool>` is the estate
+ * relay (wicked-core#1018, `estate-relay.ts`), a container seat's only way to its run's estate.
+ * Its judge is the relay's own (the token resolved to its unit by the engine, a fixed tool list,
+ * the run's scope); budget, record and publish are the steps above.
+ *
  * A call that ran and then could not be recorded HAS happened upstream; refusing it withholds the
  * result from the worker, it does not undo the side effect. The record is written after the call
  * because the span it records (timing, status, bytes) only exists then.
@@ -42,12 +47,13 @@ import type {
   McpUpstreamKind,
 } from '../core/types.js';
 import type { McpEngineGate } from '../core/adapter.js';
-import { parseMcpSubject } from './classify.js';
+import { ESTATE_SERVER, parseMcpSubject } from './classify.js';
 import type { McpCallRecordSink } from './call-records.js';
 import { classifyUpstreamError, invokeMcpTool, MCP_CALL_TIMEOUT_MS, type Invoker, type UpstreamToolResult } from './invoke.js';
 import { scrubResult } from './redact.js';
 import type { McpRegistry } from './registry.js';
 import { scrubSecrets } from './secrets.js';
+import { ESTATE_PROPOSAL_TOOL, proposalIdOf, rpcErrorEnvelope, scopeEstateArgs, type EstateRelay } from './estate-relay.js';
 
 /** The bus event each call record rides. */
 export const MCP_CALL_COMPLETED = 'wicked.crew.mcp_call.completed';
@@ -112,6 +118,8 @@ export interface McpBrokerDeps {
   budgetPerUnit?: number;
   timeoutMs?: number;
   log?: (message: string) => void;
+  /** The estate relay behind `mcp:estate/<tool>` (wicked-core#1018); absent = those calls are refused. */
+  estate?: EstateRelay;
 }
 
 interface BreakerState {
@@ -157,6 +165,7 @@ export class McpBroker {
     const parts = parseMcpSubject(body.subject);
     if (parts === null) return { status: 400, body: { error: `subject must be mcp:<server>/<tool> (got ${JSON.stringify(body.subject)})`, code: 'bad_request' } };
     const span: Span = { start: this.now(), spanId: randomBytes(8).toString('hex'), subject: body.subject, verdict: null, kind: null, retries: 0, bytesOut: 0 };
+    if (parts.server === ESTATE_SERVER) return this.callEstate(span, body, parts.tool);
 
     // ── 1-3. Resolve and judge ──────────────────────────────────────────────────────────────
     const gate = this.deps.engine();
@@ -310,6 +319,79 @@ export class McpBroker {
     }
     this.publish(record);
     return { status: 200, body: { outcome: 'ok', subject: body.subject, callId: span.spanId, result: scrubbed, ruleIds: verdict.ruleIds } };
+  }
+
+  /**
+   * `mcp:estate/<tool>`: the estate relay (module doc of `estate-relay.ts`). Resolve the token to
+   * its unit and scope, refuse what the relay never makes, spend the unit's budget, run the call on
+   * the host's estate, bound and scrub its result, then record it like any brokered call. A landed
+   * proposal is also handed to the relay's audit hook.
+   */
+  private async callEstate(span: Span, body: McpCallBody, tool: string): Promise<McpBrokerAnswer> {
+    const relay = this.deps.estate;
+    if (relay === undefined) {
+      return this.refuse(span, 'guard_error', 'guard_error', 'broker:estate', [], 'this daemon has no estate relay', 'continue without estate; report it if it persists');
+    }
+    let scope: Awaited<ReturnType<EstateRelay['resolve']>>;
+    try {
+      scope = await relay.resolve(body.token);
+    } catch (err) {
+      const msg = message(err);
+      if (msg.startsWith('invalid_token')) return { status: 401, body: { error: msg, code: 'invalid_token' } };
+      if (msg.startsWith('bad_request')) return { status: 400, body: { error: msg, code: 'bad_request' } };
+      return this.refuse(span, 'guard_error', 'guard_error', 'broker:estate', [], `the token's estate scope could not be read: ${msg}`, 'nothing ran; try again, and report it if it persists');
+    }
+    if (scope === null) {
+      return this.refuse(span, 'guard_error', 'guard_error', 'broker:estate', [], 'the linked engine predates the estate relay (wicked-core-ts has no resolveEstateScope)', 'upgrade the engine; no estate call runs unscoped');
+    }
+    const write = tool === ESTATE_PROPOSAL_TOOL;
+    span.kind = 'mcp-stdio';
+    span.verdict = { decision: 'allow', subject: body.subject, class: write ? 'write' : 'read', ruleIds: [], obligations: [], claimId: '', unit: scope.unit };
+    const refused = relay.refusal(tool, scope);
+    if (refused !== null) return this.refuse(span, 'denied', 'deny', refused.ruleId, [refused.ruleId], refused.reason, refused.remedy, null, null);
+
+    const unitKey = `${scope.unit.runId}:${scope.unit.ord}:${scope.unit.attempt}`;
+    const used = this.used.get(unitKey) ?? 0;
+    if (used >= this.budget) {
+      return this.refuse(span, 'budget_exhausted', 'deny', 'budget', [], `this unit has made its ${this.budget} MCP calls`, 'finish with what you have; the budget is per unit', null, null);
+    }
+    this.used.delete(unitKey);
+    this.used.set(unitKey, used + 1);
+    while (this.used.size > BUDGET_UNITS_MAX) this.used.delete(this.used.keys().next().value as string);
+
+    const args = scopeEstateArgs(tool, body.args ?? {}, scope);
+    let result: Record<string, unknown>;
+    try {
+      const answer = await relay.run({ tool, args, scope, timeoutMs: relay.timeoutMs });
+      result = 'rpcError' in answer ? rpcErrorEnvelope(answer.rpcError) : answer.result;
+    } catch (err) {
+      const failure = classifyUpstreamError(err);
+      const timedOut = /did not answer .* within/.test(failure.message);
+      return this.refuse(span, 'upstream_error', 'allow', 'broker:estate', [], `mcp:estate/${tool} failed: ${failure.message}`, write ? 'keep the proposal in your output; it may or may not have landed' : 'continue without it, or try again later', timedOut ? 'timeout' : failure.errorClass, null);
+    }
+    const scrubbed = scrubResult(result, []);
+    const raw = JSON.stringify(scrubbed);
+    span.bytesOut = Buffer.byteLength(raw, 'utf8');
+    if (span.bytesOut > relay.maxResultBytes) {
+      return this.refuse(span, 'withheld', 'deny', 'broker:estate-bound', ['estate:result-bound'], `mcp:estate/${tool} answered ${span.bytesOut} bytes, over the relay's ${relay.maxResultBytes}-byte bound`, 'narrow the call (a lower limit or depth, a narrower query), or page it with cursor', null, null);
+    }
+    const record = this.record(span, 'ok', 'allow', 'broker:estate', [], scrubbed['isError'] === true ? 'tool_error' : null, null);
+    try {
+      await this.deps.records.append(record);
+    } catch (err) {
+      this.deps.log?.(`[mcp] the call record for ${body.subject} could not be written (${message(err)}); its result is withheld`);
+      return {
+        status: OUTCOME_STATUS.guard_error,
+        body: { outcome: 'guard_error', subject: body.subject, callId: null, ruleIds: [], reason: 'the call could not be recorded (D-3); its result is withheld', remedy: write ? 'the proposal may have landed; keep it in your output' : 'the call ran; its result is not shown' },
+      };
+    }
+    this.publish(record);
+    if (write) {
+      const proposalId = proposalIdOf(scrubbed);
+      const kindType = typeof args['kind_type'] === 'string' ? args['kind_type'] : '';
+      if (proposalId !== null) relay.landed({ ...scope.unit, proposalId, kindType, callId: span.spanId });
+    }
+    return { status: 200, body: { outcome: 'ok', subject: body.subject, callId: span.spanId, result: scrubbed, ruleIds: [] } };
   }
 
   private record(

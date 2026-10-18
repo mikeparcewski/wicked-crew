@@ -33,7 +33,7 @@ import type {
   McpToolStatus,
   McpUpstreamKind,
 } from '../core/types.js';
-import { canonicalJson, deriveToolClass, effectiveToolClass, type HashedRestTarget, type HashedToolShape, mcpSubject, parseMcpSubject, sha256Hex, toolSchemaHash } from './classify.js';
+import { canonicalJson, deriveToolClass, effectiveToolClass, ESTATE_SERVER, type HashedRestTarget, type HashedToolShape, mcpSubject, parseMcpSubject, sha256Hex, toolSchemaHash } from './classify.js';
 import type { McpUpstreamConfig, ProbedTool, ProbeResult, Prober } from './probe.js';
 import type { McpRegistryStore, McpServerRecord, McpToolRecord } from './registry-store.js';
 import { restTarget } from './rest.js';
@@ -143,6 +143,9 @@ export class McpRegistry {
    * save commits, so the OS store and the registry row land together or not at all).
    */
   async preview(config: McpUpstreamConfig, stagedSecret: string | null = null): Promise<McpPreviewResponse> {
+    if (config.name === ESTATE_SERVER) {
+      throw new McpRegistryError(400, 'reserved_name', `"${ESTATE_SERVER}" is reserved: mcp:${ESTATE_SERVER}/<tool> is the broker's estate relay (the seat's own estate), never a registered server; choose another name`);
+    }
     if (stagedSecret !== null) {
       if (!this.deps.secrets.available) {
         throw new McpRegistryError(501, 'secret_store_unavailable', 'this platform has no OS secret store; reference a daemon env variable instead (auth.ref "env:<NAME>")');
