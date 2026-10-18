@@ -45,7 +45,7 @@ import { McpRegistryStore } from '../src/mcp/registry-store.js';
 import { removeScratch } from './setup/scratch.js';
 
 const UNIT = { runId: 'run-b445', ord: 4, attempt: 1, phase: 'unit-4', seat: 'pi' };
-const SCOPED: EstateUnitScope = { unit: UNIT, projectId: 'proj_abc', repoId: 'wicked-core', codeGraphDb: '/state/repo-graphs/k1/estate.db' };
+const SCOPED: EstateUnitScope = { unit: UNIT, projectId: 'proj_abc', repoId: 'repo-core', codeGraphDb: '/state/repo-graphs/k1/estate.db' };
 const BARE: EstateUnitScope = { unit: UNIT, projectId: null, repoId: null, codeGraphDb: null };
 
 function envelope(payload: unknown, diagnostics?: string): Record<string, unknown> {
@@ -57,7 +57,7 @@ function envelope(payload: unknown, diagnostics?: string): Record<string, unknow
 describe('scopeEstateArgs: the run decides project and repo, never the worker', () => {
   it("sets a recall's intent to the run's project and repo, over what the worker asked for", () => {
     const out = scopeEstateArgs('memory.recall', { query: 'q', intent: { project: 'someone-else', cli: 'pi' } }, SCOPED);
-    expect(out['intent']).toEqual({ project: 'proj_abc', repo: 'wicked-core', cli: 'pi' });
+    expect(out['intent']).toEqual({ project: 'proj_abc', repo: 'repo-core', cli: 'pi' });
   });
 
   it('removes a project or repo axis the run has none for, so no other project is reachable', () => {
@@ -71,7 +71,7 @@ describe('scopeEstateArgs: the run decides project and repo, never the worker', 
       { kind_type: 'memory', payload: { content: 'c' }, facets: { project: 'forged', repo: 'forged' }, provenance: { run_id: 'forged' } },
       SCOPED,
     );
-    expect(out['facets']).toEqual({ project: 'proj_abc', repo: 'wicked-core' });
+    expect(out['facets']).toEqual({ project: 'proj_abc', repo: 'repo-core' });
     expect(out).not.toHaveProperty('provenance');
   });
 
@@ -220,7 +220,7 @@ describe('the broker relays mcp:estate/<tool>', () => {
       facets: { project: 'forged' },
     });
     expect(r.status).toBe(200);
-    expect(invocations[0]?.args['facets']).toEqual({ project: 'proj_abc', repo: 'wicked-core' });
+    expect(invocations[0]?.args['facets']).toEqual({ project: 'proj_abc', repo: 'repo-core' });
     expect(landed).toEqual([{ ...UNIT, proposalId: 'prop-123', kindType: 'memory', callId: r.body.callId }]);
     expect(recorded()[0]?.attrs['mcp.class']).toBe('write');
   });
