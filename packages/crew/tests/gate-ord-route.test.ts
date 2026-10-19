@@ -45,6 +45,10 @@ describe('POST /runs/:id/gate with ord', () => {
   const confirmCalls: unknown[][] = [];
   const recorded: Array<{ action: string; detail?: Record<string, unknown> }> = [];
   const gateCache = new GateCache();
+  /** run-race's open gate: ord 3 until the first confirm, ord 4 (deliver) after it. */
+  let raceOrd = 3;
+  /** run-race's row reads, parked until the test releases them — each answers the ord open at release. */
+  const raceReads: Array<() => void> = [];
   const audit = {
     record: vi.fn((action: string, _actor: unknown, fields?: { detail?: Record<string, unknown> }) => {
       recorded.push({ action, ...(fields?.detail !== undefined ? { detail: fields.detail } : {}) });
@@ -61,6 +65,8 @@ describe('POST /runs/:id/gate with ord', () => {
         view('run-empty', 'awaiting_human', 1),
         view('run-stale-cache', 'awaiting_human', 4),
         view('run-cache-only', 'awaiting_human', 2),
+        view('run-two-rows', 'awaiting_human', 6),
+        view('run-race', 'awaiting_human', 3),
       ]),
       listRepos: vi.fn().mockResolvedValue([]),
       listWorkflows: () => BUILTIN_WORKFLOWS,
@@ -73,12 +79,24 @@ describe('POST /runs/:id/gate with ord', () => {
         if (id === 'run-cached') return row(2);
         if (id === 'run-durable') return row(5);
         if (id === 'run-stale-cache') return row(4);
+        // Current wicked-core can hold TWO open gate rows for one ord: a keyed plan_approval gate whose
+        // publisher was lost, plus the unkeyed team_transport row boot recovery writes (round 4, P1-A).
+        if (id === 'run-two-rows') {
+          return [
+            { kind: 'gate', ord: 6, gate_kind: 'plan_approval', prompt: 'Approve the plan before unit 6?', created_at: '2026-09-26T10:00:00Z' },
+            { kind: 'gate', ord: 6, gate_kind: 'team_transport', prompt: 'Approve the plan before unit 6?', created_at: '2026-09-26T10:00:05Z' },
+          ];
+        }
+        if (id === 'run-race') return new Promise<ReturnType<typeof row>>((resolve) => raceReads.push(() => resolve(row(raceOrd))));
         return [];
       }),
       // run-unknown: no event-log binding at all. run-empty: a log that records no open gate.
       runEvents: vi.fn(async (id: string) => (id === 'run-empty' ? [] : null)),
       confirmGate: vi.fn(async (...args: unknown[]) => {
         confirmCalls.push(args);
+        // run-race: the engine's operator-judgment path advances synchronously — the confirm returns
+        // with the ord-4 deliver gate already open (round 4, P1-B).
+        if (args[0] === 'run-race') raceOrd = 4;
         return 'executing';
       }),
     };
@@ -154,6 +172,37 @@ describe('POST /runs/:id/gate with ord', () => {
     expect(confirmCalls).toEqual([]);
     const real = await gate('run-stale-cache', { approve: true, ord: 4 });
     expect(real.statusCode).toBe(200);
+    expect(confirmCalls).toHaveLength(1);
+  });
+
+  it('P1-A (round 4): two open rows for ONE ord — a keyed plan_approval gate plus the team_transport row recovery writes — accept a decision for that ord, a reject included', async () => {
+    const res = await gate('run-two-rows', { approve: false, ord: 6 });
+    expect(res.statusCode).toBe(200);
+    expect(confirmCalls).toHaveLength(1);
+    // Rows that disagree with the named ord still refuse, naming the newest row's ord.
+    const other = await gate('run-two-rows', { approve: true, ord: 5 });
+    expect(other.statusCode).toBe(409);
+    expect(other.json()).toMatchObject({ code: 'gate_changed', openOrd: 6 });
+    expect(confirmCalls).toHaveLength(1);
+  });
+
+  it('P1-B (round 4): two concurrent decisions for ord 3 — the first confirm opens the ord-4 deliver gate; the second re-reads inside the lock and is 409; confirmGate runs once', async () => {
+    raceOrd = 3;
+    raceReads.length = 0;
+    const a = gate('run-race', { approve: true, ord: 3 });
+    const b = gate('run-race', { approve: true, ord: 3 });
+    await vi.waitFor(() => expect(raceReads.length).toBeGreaterThanOrEqual(1));
+    await new Promise((r) => setTimeout(r, 30));
+    // Without the lock both decisions would have read the row by now (both seeing ord 3); under it
+    // the second waits for the first decision — confirm included — before it reads anything.
+    expect(raceReads.length).toBe(1);
+    raceReads.shift()!(); // A reads ord 3 and confirms; the engine opens the ord-4 deliver gate
+    await vi.waitFor(() => expect(raceReads.length).toBe(1));
+    raceReads.shift()!(); // B reads inside the lock: ord 4
+    const [ra, rb] = await Promise.all([a, b]);
+    expect(ra.statusCode).toBe(200);
+    expect(rb.statusCode).toBe(409);
+    expect(rb.json()).toMatchObject({ code: 'gate_changed', openOrd: 4 });
     expect(confirmCalls).toHaveLength(1);
   });
 

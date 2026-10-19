@@ -4479,11 +4479,38 @@ export function registerRoutes(
     return { qeAcceptance };
   }
 
+  /** Per run: the tail of the decisions queued by {@link decideExclusively}. Never rejects. */
+  const gateDecisionTails = new Map<string, Promise<unknown>>();
+
+  /**
+   * Run `fn` alone for the run (crew#1083 round 4; the `McpPolicies.exclusive` pattern of #1082):
+   * after every earlier decision for the same run has settled, and before any later one starts.
+   * The row read and the confirm are separate engine commands and the confirm carries no ord, so
+   * two concurrent decisions could both read the sole open ord-3 row, the first confirm advance
+   * the run to its ord-4 (deliver) gate, and the second confirm answer THAT gate with the delivery
+   * checks evaluated for ord 3 — a studio double-click on Approve is enough. Serialized, the second
+   * re-reads inside the lock and meets ord 4: 409 `gate_changed`. Other runs are not blocked.
+   *
+   * This covers crew's API path only — `POST /runs/:id/gate` and standing orders both decide
+   * through `decideGate`. The complete fix is engine-side: a confirm that carries the ord it
+   * answers (wicked-core#1038).
+   */
+  function decideExclusively<T>(runId: string, fn: () => Promise<T>): Promise<T> {
+    const result = (gateDecisionTails.get(runId) ?? Promise.resolve()).then(fn);
+    const tail = result.catch(() => undefined);
+    gateDecisionTails.set(runId, tail);
+    void tail.then(() => {
+      if (gateDecisionTails.get(runId) === tail) gateDecisionTails.delete(runId);
+    });
+    return result;
+  }
+
   /**
    * THE gate decision path. `POST /runs/:id/gate` answers with it, and so does a standing order
    * (behaviour 10) — the same awaiting check, the same ord check and 409 `gate_changed` /
    * `gate_unknown`, the same `confirmGate`, the same `gate.decided` audit. There is no side path:
-   * an order is just another actor, named on the audit line (`extraDetail.standingOrder`).
+   * an order is just another actor, named on the audit line (`extraDetail.standingOrder`). One
+   * decision at a time per run ({@link decideExclusively}).
    */
   async function decideGate(
     id: string,
@@ -4495,132 +4522,144 @@ export function registerRoutes(
     if (!parsed.success) {
       return { code: 400, body: invalidBody(parsed.error, 'Invalid request body') };
     }
-    const views = await adapter.sessionsDetail();
-    const run = views.find((v) => v.session.id === id);
-    if (!run) return { code: 404, body: { error: 'Run not found' } };
-    if (run.session.status !== 'awaiting_human') {
-      return { code: 409, body: { error: `Run is not awaiting a human gate (status: ${run.session.status})` } };
-    }
-    // The gated unit — the named gate, else the open one, else the unit the run's cursor points at —
-    // and its receipt as it stands when the person decides (wicked-core#850: every gate answer
-    // carries it). An APPROVE that would run the deliver unit passes the delivery checks first.
-    const gated = await gatedUnitOf(run, parsed.data.ord);
-    const assurance = receiptOf(gated);
-    let deliveryCheck: { qeAcceptance: QeAcceptanceCheck | null } | undefined;
-    if (parsed.data.approve && gated !== undefined && isDeliverUnit(gated)) {
-      const refused = await deliverApprovalRefusal(run, gated);
-      if ('refusal' in refused) return refused.refusal;
-      deliveryCheck = { qeAcceptance: refused.qeAcceptance };
-    }
-    // The steering-author landing (crew#388): decided — and the gate prompt captured — BEFORE
-    // the confirm, because a terminal-phase approve prunes the gate cache and moves the run out
-    // of `awaiting_human`. The landing itself runs AFTER a successful approve only. The run is
-    // classified by its recorded name (seam X2), so a partial-stub adapter with no registry cannot
-    // 500 the legacy gate path here.
-    const steeringPropose =
-      parsed.data.approve && isSteeringAuthorRun(run);
-    const gatePrompt = steeringPropose ? gateCache.get(id)?.prompt : undefined;
-    // Decision integrity (api-types 0.44.0; crew#1083 round 3): a decision that names its gate
-    // answers THAT gate or nothing, and it is the RECORD that says which gate is open — the engine's
-    // durable `interaction_requests` row, re-read here, immediately before the confirm. Never the
-    // gate cache: that is a read optimisation for GET, and a stale or late-folded entry there once
-    // let a decision naming ord 3 pass while `confirmGate` (which takes no ord) answered ord 4. One
-    // check, in the one place every decision passes. A request without `ord` is unchanged.
-    if (parsed.data.ord !== undefined) {
-      const rows = typeof adapter.interactionRequests === 'function' ? await adapter.interactionRequests(id, 'open') : null;
-      const openGates = rows?.filter((r) => r.kind === 'gate') ?? [];
-      const row = openGates.length === 1 ? openGates[0] : undefined;
-      if (row === undefined) {
-        return { code: 409, body: {
-          error:
-            `Gate unknown: this decision names the gate before unit ${parsed.data.ord}, but the engine's record `
-            + (rows === null ? 'keeps no durable gate row' : `shows ${openGates.length} open gates`)
-            + ' for this run, so the daemon cannot confirm the named one — refresh and decide again.',
-          code: 'gate_unknown',
-        } };
+    return decideExclusively(id, async () => {
+      const views = await adapter.sessionsDetail();
+      const run = views.find((v) => v.session.id === id);
+      if (!run) return { code: 404, body: { error: 'Run not found' } };
+      if (run.session.status !== 'awaiting_human') {
+        return { code: 409, body: { error: `Run is not awaiting a human gate (status: ${run.session.status})` } };
       }
-      const openOrd = row.ord ?? 0;
-      if (openOrd !== parsed.data.ord) {
-        return { code: 409, body: {
-          error:
-            `Gate changed: this decision was made on the gate before unit ${parsed.data.ord}, but the open gate `
-            + `is before unit ${openOrd} — it was answered or replaced. Read the open gate before deciding.`,
-          code: 'gate_changed',
-          openOrd,
-        } };
+      // Decision integrity (api-types 0.44.0; crew#1083 rounds 3–4): a decision that names its gate
+      // answers THAT gate or nothing, and it is the RECORD that says which gate is open — the
+      // engine's durable `interaction_requests` rows, read first thing inside the lock, so the gated
+      // unit and its delivery checks below are evaluated for the ord the record confirms. Never the
+      // gate cache: that is a read optimisation for GET, and a stale or late-folded entry there once
+      // let a decision naming ord 3 pass while `confirmGate` (which takes no ord) answered ord 4.
+      // Authorized on ORD AGREEMENT, not row count: the engine can hold two open gate rows for one
+      // ord (a keyed plan_approval gate whose publisher was lost, plus the unkeyed team_transport row
+      // boot recovery writes — wicked-core team_gate.rs), and "exactly one row" refused every named
+      // decision on such a run, a correct reject included, with no refresh that could clear it. A
+      // request without `ord` is unchanged.
+      let namedPrompt: string | undefined;
+      if (parsed.data.ord !== undefined) {
+        const rows = typeof adapter.interactionRequests === 'function' ? await adapter.interactionRequests(id, 'open') : null;
+        const openGates = rows?.filter((r) => r.kind === 'gate') ?? [];
+        if (openGates.length === 0) {
+          return { code: 409, body: {
+            error:
+              `Gate unknown: this decision names the gate before unit ${parsed.data.ord}, but the engine's record `
+              + (rows === null ? 'keeps no durable gate row' : 'shows no open gate')
+              + ' for this run, so the daemon cannot confirm the named one — refresh and decide again.',
+            code: 'gate_unknown',
+          } };
+        }
+        const at = (r: { created_at: unknown }): number => new Date(r.created_at as string | number).getTime() || 0;
+        const newest = openGates.reduce((a, b) => (at(b) >= at(a) ? b : a));
+        if (openGates.some((r) => (r.ord ?? 0) !== parsed.data.ord)) {
+          const openOrd = newest.ord ?? 0;
+          return { code: 409, body: {
+            error:
+              `Gate changed: this decision was made on the gate before unit ${parsed.data.ord}, but the open gate `
+              + `is before unit ${openOrd} — it was answered or replaced. Read the open gate before deciding.`,
+            code: 'gate_changed',
+            openOrd,
+          } };
+        }
+        namedPrompt = newest.prompt;
       }
-    }
+      // The gated unit — the named gate, else the open one, else the unit the run's cursor points at —
+      // and its receipt as it stands when the person decides (wicked-core#850: every gate answer
+      // carries it). An APPROVE that would run the deliver unit passes the delivery checks first.
+      const gated = await gatedUnitOf(run, parsed.data.ord);
+      const assurance = receiptOf(gated);
+      let deliveryCheck: { qeAcceptance: QeAcceptanceCheck | null } | undefined;
+      if (parsed.data.approve && gated !== undefined && isDeliverUnit(gated)) {
+        const refused = await deliverApprovalRefusal(run, gated);
+        if ('refusal' in refused) return refused.refusal;
+        deliveryCheck = { qeAcceptance: refused.qeAcceptance };
+      }
+      // The steering-author landing (crew#388): decided — and the gate prompt captured — BEFORE
+      // the confirm, because a terminal-phase approve prunes the gate cache and moves the run out
+      // of `awaiting_human`. The landing itself runs AFTER a successful approve only. The run is
+      // classified by its recorded name (seam X2), so a partial-stub adapter with no registry cannot
+      // 500 the legacy gate path here. On the named path the prompt is the RECORD's — the row this
+      // decision answers (agy, round 4): the cache holds nothing after a restart and another gate's
+      // words after a late frame. A decision without `ord` keeps the cached prompt.
+      const steeringPropose =
+        parsed.data.approve && isSteeringAuthorRun(run);
+      const gatePrompt = steeringPropose ? (namedPrompt ?? gateCache.get(id)?.prompt) : undefined;
     try {
-      // All five positionals, explicit `undefined` for the absent ones (DES-L1 PR-2; the
-      // gate-arms tripwire pins the arity). An engine refusal (no creator to send back to,
-      // an engine older than the arm) surfaces as the existing 409 below.
-      // (operator ruling 2026-10-11) WHO answered: the adapter hands it to the engine with this
-      // confirm, which records it as the judge when this approve answers a `judge_unavailable`
-      // gate ("judged by operator").
-      adapter.recordGateActor?.(id, `${actor.id} (${actor.kind})`);
-      const status = await adapter.confirmGate(
-        id,
-        parsed.data.approve,
-        parsed.data.amend,
-        parsed.data.action,
-        parsed.data.amendScope,
-        parsed.data.plan !== undefined ? toLaunchPlan(parsed.data.plan) : undefined,
-      );
-      // WHO approved/rejected — the gate-decision audit (task #88). The engine
-      // records THAT the gate resolved (interaction_requests / gateDecided);
-      // only this HTTP layer knows the authenticated principal behind it.
-      audit.record('gate.decided', actor, {
-        runId: id,
-        detail: {
-          approve: parsed.data.approve,
-          ...(parsed.data.amend !== undefined ? { amend: parsed.data.amend } : {}),
-          ...(parsed.data.action !== undefined ? { action: parsed.data.action } : {}),
-          ...(parsed.data.amendScope !== undefined ? { amendScope: parsed.data.amendScope } : {}),
-          ...(parsed.data.plan !== undefined ? { planSteps: parsed.data.plan.steps.length } : {}),
-          ...(parsed.data.ord !== undefined ? { ord: parsed.data.ord } : {}),
-          ...extraDetail,
-          status,
-        },
-      });
-      // DC-S4a host: the gate note (amend / request_changes text) — a bare approve or reject is a
-      // `choice`. Post-commit, off the request path; a non-human actor (a standing order) records nothing.
-      if (decisions !== null) {
-        decisions.track(ingestDecision(decisions, {
-          host: 'gate',
-          actor,
-          words: parsed.data.amend ?? '',
-          choice: parsed.data.action ?? (parsed.data.approve ? 'approve' : 'reject'),
-          projectId: projects.index.projectOf(id) ?? null,
+        // All five positionals, explicit `undefined` for the absent ones (DES-L1 PR-2; the
+        // gate-arms tripwire pins the arity). An engine refusal (no creator to send back to,
+        // an engine older than the arm) surfaces as the existing 409 below.
+        // (operator ruling 2026-10-11) WHO answered: the adapter hands it to the engine with this
+        // confirm, which records it as the judge when this approve answers a `judge_unavailable`
+        // gate ("judged by operator").
+        adapter.recordGateActor?.(id, `${actor.id} (${actor.kind})`);
+        const status = await adapter.confirmGate(
+          id,
+          parsed.data.approve,
+          parsed.data.amend,
+          parsed.data.action,
+          parsed.data.amendScope,
+          parsed.data.plan !== undefined ? toLaunchPlan(parsed.data.plan) : undefined,
+        );
+        // WHO approved/rejected — the gate-decision audit (task #88). The engine
+        // records THAT the gate resolved (interaction_requests / gateDecided);
+        // only this HTTP layer knows the authenticated principal behind it.
+        audit.record('gate.decided', actor, {
           runId: id,
-          ...(parsed.data.ord !== undefined ? { ord: parsed.data.ord } : {}),
-        }));
+          detail: {
+            approve: parsed.data.approve,
+            ...(parsed.data.amend !== undefined ? { amend: parsed.data.amend } : {}),
+            ...(parsed.data.action !== undefined ? { action: parsed.data.action } : {}),
+            ...(parsed.data.amendScope !== undefined ? { amendScope: parsed.data.amendScope } : {}),
+            ...(parsed.data.plan !== undefined ? { planSteps: parsed.data.plan.steps.length } : {}),
+            ...(parsed.data.ord !== undefined ? { ord: parsed.data.ord } : {}),
+            ...extraDetail,
+            status,
+          },
+        });
+        // DC-S4a host: the gate note (amend / request_changes text) — a bare approve or reject is a
+        // `choice`. Post-commit, off the request path; a non-human actor (a standing order) records nothing.
+        if (decisions !== null) {
+          decisions.track(ingestDecision(decisions, {
+            host: 'gate',
+            actor,
+            words: parsed.data.amend ?? '',
+            choice: parsed.data.action ?? (parsed.data.approve ? 'approve' : 'reject'),
+            projectId: projects.index.projectOf(id) ?? null,
+            runId: id,
+            ...(parsed.data.ord !== undefined ? { ord: parsed.data.ord } : {}),
+          }));
+        }
+        // APPROVE of the steering-author propose gate = the doctrine's landing moment: the
+        // approved proposal is written to the governance store with `provenance.source: "chat"`,
+        // audited per rule, idempotent on replay, and LOUD on failure — the response carries the
+        // outcome either way, so the studio can show "landed PAT-101" or the explicit error
+        // instead of the silent no-op crew#388 recorded. An approve WITH an amend note still
+        // lands the proposal UNCHANGED: the amend steers the RUN's continuation, not the rule
+        // text (an operator who wants different rules rejects and re-authors). A reject lands
+        // nothing — the run cancels and the proposal stays an artifact.
+        const landing = steeringPropose
+          ? await landSteeringProposal({ adapter, audit, actor }, run, gatePrompt)
+          : undefined;
+        return {
+          code: 200,
+          body: {
+            status,
+            ...(landing !== undefined ? { landing } : {}),
+            assurance,
+            ...(deliveryCheck !== undefined ? { delivery: deliveryCheck } : {}),
+          },
+        };
+      } catch (err) {
+        if (err instanceof PlanLaunchUnsupportedError) {
+          return { code: 501, body: { error: message(err) } };
+        }
+        return { code: 409, body: { error: message(err) } };
       }
-      // APPROVE of the steering-author propose gate = the doctrine's landing moment: the
-      // approved proposal is written to the governance store with `provenance.source: "chat"`,
-      // audited per rule, idempotent on replay, and LOUD on failure — the response carries the
-      // outcome either way, so the studio can show "landed PAT-101" or the explicit error
-      // instead of the silent no-op crew#388 recorded. An approve WITH an amend note still
-      // lands the proposal UNCHANGED: the amend steers the RUN's continuation, not the rule
-      // text (an operator who wants different rules rejects and re-authors). A reject lands
-      // nothing — the run cancels and the proposal stays an artifact.
-      const landing = steeringPropose
-        ? await landSteeringProposal({ adapter, audit, actor }, run, gatePrompt)
-        : undefined;
-      return {
-        code: 200,
-        body: {
-          status,
-          ...(landing !== undefined ? { landing } : {}),
-          assurance,
-          ...(deliveryCheck !== undefined ? { delivery: deliveryCheck } : {}),
-        },
-      };
-    } catch (err) {
-      if (err instanceof PlanLaunchUnsupportedError) {
-        return { code: 501, body: { error: message(err) } };
-      }
-      return { code: 409, body: { error: message(err) } };
-    }
+    });
   }
 
   // The steering gate (§11.1). approve+amend = approve-with-steer; approve:false = reject (cancels).

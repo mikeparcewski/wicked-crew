@@ -375,6 +375,39 @@ describe('GateCache.resolve: a read a live gate event overlapped is run again, n
     expect(cache.get(RUN)).toBeUndefined();
   });
 
+  it('concurrent resolves coalesce on the one read in flight (agy, round 4)', async () => {
+    const cache = new GateCache();
+    let release: () => void = () => undefined;
+    const read = vi.fn(() => new Promise<GateRead>((resolve) => { release = () => resolve(gate(4)); }));
+    const a = cache.resolve(RUN, read);
+    const b = cache.resolve(RUN, read);
+    expect(read).toHaveBeenCalledTimes(1);
+    release();
+    expect(await a).toEqual(gate(4));
+    expect(await b).toEqual(gate(4));
+  });
+
+  it('a frame folded during an overlapped read is evicted BEFORE the re-read; `get` serves nothing unverified and a concurrent resolve waits (agy, round 4)', async () => {
+    const cache = new GateCache();
+    let release: () => void = () => undefined;
+    let calls = 0;
+    const read = vi.fn((): Promise<GateRead> => {
+      if (calls++ === 0) {
+        cache.ingest(awaitingHuman(3)); // lands during the first read
+        return Promise.resolve(gate(4));
+      }
+      return new Promise((resolve) => { release = () => resolve(gate(4)); }); // the re-read, parked
+    });
+    const first = cache.resolve(RUN, read);
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+    expect(cache.get(RUN)).toBeUndefined(); // round 3 left the late ord 3 here until the re-read settled
+    const second = cache.resolve(RUN, read);
+    expect(read).toHaveBeenCalledTimes(2); // no third read: the second caller awaits the one in flight
+    release();
+    expect(await first).toEqual(gate(4));
+    expect(await second).toEqual(gate(4));
+  });
+
   it('an ordered backlog, one frame per read, exhausts the reads: "unstable", the unverified entry evicted, logged once (codex, round 3)', async () => {
     // awaitingHuman(2), resumed(2), awaitingHuman(3) are pumped late, one during each read, while
     // every read finds ord 4 open. Round 2 served the cache's ord 3 here, unverified, and a
@@ -402,12 +435,12 @@ describe('resolveOpenGate: neither a stale row nor a late frame wins a race (cre
   const gateCache = new GateCache({ warn });
   /** The engine's open-gate row per run, by ord. A test moves it exactly when the engine would. */
   const rows = new Map<string, number>([
-    ['late-frame-get', 4], ['late-frame-post', 4], ['late-resumed', 4], ['stale-row-get', 3], ['stale-row-post', 3], ['backlog-get', 4],
+    ['late-frame-get', 4], ['late-frame-post', 4], ['late-resumed', 4], ['stale-row-get', 3], ['stale-row-post', 3], ['backlog-get', 4], ['coalesce', 4],
   ]);
   /** Every run the routes know; `evict-then-move` starts with NO open row (its gate 3 was answered). */
   const runs = [...rows.keys(), 'evict-then-move'];
   /** Runs whose FIRST log read is held until the test releases it. */
-  const parkFirst = new Set(['late-frame-get', 'late-resumed', 'stale-row-get']);
+  const parkFirst = new Set(['late-frame-get', 'late-resumed', 'stale-row-get', 'coalesce']);
   const pending = new Map<string, () => void>();
   /** Frames the engine's pump delivers late — one lands during each log read of that run. */
   const landings = new Map<string, CoreEvent[]>();
@@ -552,6 +585,23 @@ describe('resolveOpenGate: neither a stale row nor a late frame wins a race (cre
     const again = await app.inject({ method: 'GET', url: `/api/v1/runs/${id}/gate` });
     expect(again.statusCode).toBe(200);
     expect(again.json()).toMatchObject({ ord: 4, choices: DISPUTE, recommended: 1 });
+  });
+
+  it('a second GET during an overlapped read waits for the verified answer instead of the late frame (agy, round 4)', async () => {
+    const id = 'coalesce';
+    const first = app.inject({ method: 'GET', url: `/api/v1/runs/${id}/gate` });
+    await vi.waitFor(() => expect(pending.has(id)).toBe(true));
+    gateCache.ingest(lateFrame3(id)); // an unverified ord 3 is in the cache while the read is parked
+    let secondSettled = false;
+    const second = app.inject({ method: 'GET', url: `/api/v1/runs/${id}/gate` }).then((r) => { secondSettled = true; return r; });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(secondSettled).toBe(false); // not served the late frame as a hit
+    expect(rowReads(id)).toBe(1); // and it started no read of its own
+    pending.get(id)!();
+    const [a, b] = await Promise.all([first, second]);
+    expect(a.json()).toMatchObject({ ord: 4, choices: DISPUTE, recommended: 1 });
+    expect(b.json()).toMatchObject({ ord: 4, choices: DISPUTE, recommended: 1 });
+    expect(rowReads(id)).toBe(2); // one hydration: the parked read and its re-read
   });
 
   it('a late frame for an answered gate is evicted by the clean read that finds no gate; when ord 4 then opens, ord 3 cannot answer it (agy, round 3)', async () => {

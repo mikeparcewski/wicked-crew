@@ -1484,7 +1484,15 @@ export function registerWalkthroughRoutes(app: FastifyInstance, adapter: CoreAda
       // The escalation could have been answered while the file was written: say so, rather than a
       // 200 that implies the next recording uses it (codex on WT-W3).
       const after = await deps.resolveOpenGate(id);
-      const still = (await runById(id))?.session.status === 'awaiting_human' && after !== null && after !== 'no-log' && after !== 'unstable' && after.ord === open.ord;
+      if (after === 'unstable') {
+        // Written, but not verifiable right now: live gate events kept landing while the gate was
+        // re-read (crew#1083 round 4). Not "answered meanwhile" — that would be a guess.
+        return reply.code(503).send({
+          error: 'the storyline was written, but the open gate could not be re-read: live gate events kept landing — open the walkthrough again before relying on it',
+          code: 'gate_unstable',
+        });
+      }
+      const still = (await runById(id))?.session.status === 'awaiting_human' && after !== null && after !== 'no-log' && after.ord === open.ord;
       if (!still) {
         return reply.code(409).send({
           error: 'the storyline was written, but the escalation was answered meanwhile; open the walkthrough again before relying on it',

@@ -239,10 +239,28 @@ export class GateCache {
    * unverified entry — an ordinary ordered backlog (`awaitingHuman(2)`, `resumed(2)`,
    * `awaitingHuman(3)`, one landing per read) left the cache holding ord 3 while every read found
    * ord 4. The run is logged once.
+   *
+   * One read in flight per run (agy, round 4): while a read is running, an entry a live frame
+   * folds is unverified, so a concurrent `resolve` awaits the read in flight instead of taking the
+   * entry as a hit, and the entry is evicted before a re-read so a `get` meanwhile serves nothing
+   * unverified either.
    */
   async resolve(runId: string, read: () => Promise<GateRead>): Promise<GateResolution> {
+    const pending = this.inflight.get(runId);
+    if (pending !== undefined) return pending;
     const cached = this.entries.get(runId);
     if (cached) return cached;
+    const resolution = this.hydrate(runId, read).finally(() => {
+      this.inflight.delete(runId);
+    });
+    this.inflight.set(runId, resolution);
+    return resolution;
+  }
+
+  /** In-flight resolutions per run: `resolve` hands every concurrent caller the same one. */
+  private readonly inflight = new Map<string, Promise<GateResolution>>();
+
+  private async hydrate(runId: string, read: () => Promise<GateRead>): Promise<GateResolution> {
     for (let attempt = 1; attempt <= RESOLVE_ATTEMPTS; attempt++) {
       const seen = this.revision(runId);
       let found: GateRead;
@@ -252,7 +270,11 @@ export class GateCache {
         this.entries.delete(runId);
         throw err;
       }
-      if (this.revision(runId) !== seen) continue;
+      if (this.revision(runId) !== seen) {
+        // Whatever a live frame folded during this read is unverified until the re-read settles.
+        this.entries.delete(runId);
+        continue;
+      }
       if (isOpenGate(found)) this.entries.set(runId, found);
       else this.entries.delete(runId);
       return found;
@@ -264,9 +286,13 @@ export class GateCache {
     return 'unstable';
   }
 
-  /** The cached open gate for a run, if any. */
+  /**
+   * The cached open gate for a run, if any — and nothing while a read of it is in flight: an entry
+   * a live frame folded meanwhile is unverified until that read settles, so a sync caller (the GET
+   * route's hit path, a steering prompt) falls through to `resolve` and waits (agy, round 4).
+   */
   get(runId: string): GateCacheEntry | undefined {
-    return this.entries.get(runId);
+    return this.inflight.has(runId) ? undefined : this.entries.get(runId);
   }
 
   /**
