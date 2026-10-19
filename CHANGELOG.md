@@ -10,11 +10,17 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
-### Added
-- **The engine always has a wicked-vault CLI to record held team findings with (crew#1068).** `wicked-vault` (^0.8.0) is now a runtime dependency of the daemon, and before the engine spawns crew exports the absolute path of that package's own `wicked-vault` bin (npm's `.cmd` shim on Windows) as `WICKED_VAULT_BIN`, the variable wicked-core reads per record. A boundary finding held for the operator (wicked-core#959 / #1006) now gets a vault entry under `<evidence root>/team/vault` instead of reading "not vaulted". An operator's own `WICKED_VAULT_BIN` is kept, and an explicit empty value stays empty (the vault switched off on purpose). PATH is not changed. When crew's bin cannot be resolved, or the vault is switched off, the daemon still boots: `GET /health.warnings` (`vault.unresolvable` / `vault.off`), `wicked-crew status` and the new `GET /diagnostics.vault` (`wicked-crew-api-types` 0.130.0) say that held boundary findings will not be vaulted, and name the remedy.
+## [0.15.2] — 2026-10-19
+
+A patch release: the daemon ships wicked-vault and hands the engine its bin, a seat's council and work roles are read separately, `version_unproven` says why, an MCP approval can no longer race a save or removal, and a new engine and studio. Pins: wicked-core-ts ^0.15.2, wicked-studio ^0.11.2, wicked-vault ^0.8.0 (new runtime dependency), wicked-interactive ^0.14.1 (bridge floor, unchanged), wicked-crew-api-types 0.131.0.
 
 ### Changed
+- **The engine is wicked-core-ts 0.15.2.** A claude container sign-in keeps the whole `claude setup-token` token, even when it was copied across the TUI's wrapped rows. Engine startup sweeps member views a crashed engine left behind, never one a live turn holds. Team members read the repository through a read-only per-turn view.
+- **The bundled studio is wicked-studio 0.11.2:** a container sign-in that did not sign the agent in says so, with crew's reason, instead of re-checking as if it had worked.
 - **`wicked-crew status` prints every `/health.warnings[]` message on stderr**, one line each (it printed only the base-skill finding, which is one of those warnings). Stdout stays the runs JSON, and the exit code is unchanged.
+
+### Added
+- **The engine always has a wicked-vault CLI to record held team findings with (crew#1068).** `wicked-vault` (^0.8.0) is now a runtime dependency of the daemon, and before the engine spawns crew exports the absolute path of that package's own `wicked-vault` bin (npm's `.cmd` shim on Windows) as `WICKED_VAULT_BIN`, the variable wicked-core reads per record. A boundary finding held for the operator (wicked-core#959 / #1006) now gets a vault entry under `<evidence root>/team/vault` instead of reading "not vaulted". An operator's own `WICKED_VAULT_BIN` is kept, and an explicit empty value stays empty (the vault switched off on purpose). PATH is not changed. When crew's bin cannot be resolved, or the vault is switched off, the daemon still boots: `GET /health.warnings` (`vault.unresolvable` / `vault.off`), `wicked-crew status` and the new `GET /diagnostics.vault` (`wicked-crew-api-types` 0.130.0) say that held boundary findings will not be vaulted, and name the remedy.
 
 ### Fixed
 - **An MCP approval can no longer land between a save's withdrawal and its commit (#993).** `POST /mcp/servers` withdrew the approvals a changed schema or REST target (G2) invalidated, then saved, as separate steps; a `POST /mcp/approvals` for the same server could run in between, be judged against the registration being replaced, and survive the save, so a tool stood approved against a schema or target the operator never re-approved. `DELETE /mcp/servers/:name` had the same shape. Approve, revoke, and the withdraw-then-save and withdraw-then-remove sequences now run one at a time per server (`McpPolicies.exclusive`): an approval that arrives during a save waits for the commit and is judged against the new registration, and one that arrives during a removal is a 404. Other servers are not held up. No wire change.
@@ -4314,7 +4320,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.1...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.2...HEAD
+[0.15.2]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.1...v0.15.2
 [0.15.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.14.2...v0.15.0
 [0.14.2]: https://github.com/mikeparcewski/wicked-crew/compare/v0.14.1...v0.14.2
