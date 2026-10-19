@@ -23,6 +23,14 @@ export interface GateCacheEntry {
    * ABSENT when the engine did not say (an older engine, a row written before the field).
    */
   gateKind?: string;
+  /**
+   * The answer tokens the engine offered (`awaitingHuman.choices`; issue #969) — e.g. a
+   * `team_dispute` gate's `['approve', 'request_changes', 'reject']`. Without them a client that
+   * missed the live frame could draw only Approve/Reject. ABSENT when the engine offered none.
+   */
+  choices?: string[];
+  /** The index into `choices` of the engine's recommended answer. ABSENT without `choices`. */
+  recommended?: number;
 }
 
 /**
@@ -71,6 +79,20 @@ function observedAt(event: CoreEvent): string {
 }
 
 /**
+ * The answer set an `awaitingHuman` frame offered, kept only when well-formed (issue #969):
+ * `choices` must be a non-empty array of strings, and `recommended` an integer index inside it.
+ * A malformed value is dropped rather than served — a skin would render it as buttons. Spread the
+ * result, so a gate the engine offered nothing on stays byte-identical on the wire.
+ */
+export function offeredChoices(event: CoreEvent): { choices?: string[]; recommended?: number } {
+  const choices: unknown = event['choices'];
+  if (!Array.isArray(choices) || choices.length === 0 || !choices.every((c) => typeof c === 'string')) return {};
+  const recommended: unknown = event['recommended'];
+  const inBounds = Number.isInteger(recommended) && (recommended as number) >= 0 && (recommended as number) < choices.length;
+  return { choices: [...(choices as string[])], ...(inBounds ? { recommended: recommended as number } : {}) };
+}
+
+/**
  * The one rule that turns an event into a cache mutation.
  *
  * Shared verbatim by the live stream and by durable replay so a rebuilt gate cannot disagree with
@@ -78,6 +100,9 @@ function observedAt(event: CoreEvent): string {
  * free to drift, and the drift would only ever show up after a restart — the exact condition nobody
  * exercises.
  */
+/** The event types `fold` acts on — the ones that open or close a run's gate. */
+const GATE_EVENTS = new Set(['awaitingHuman', 'resumed', 'sessionCompleted', 'runCancelled', 'sessionFailed']);
+
 function fold(entries: Map<string, GateCacheEntry>, event: CoreEvent): void {
   const session = typeof event.session === 'string' ? event.session : undefined;
   if (session === undefined) return;
@@ -94,6 +119,7 @@ function fold(entries: Map<string, GateCacheEntry>, event: CoreEvent): void {
           // Spread only when matched, so a normal gate's entry is byte-identical (no `refusal` key).
           ...(refusal !== undefined ? { refusal } : {}),
           ...(gateKind !== undefined ? { gateKind } : {}),
+          ...offeredChoices(event),
         });
       }
       break;
@@ -109,6 +135,45 @@ function fold(entries: Map<string, GateCacheEntry>, event: CoreEvent): void {
 }
 
 /**
+ * The open gate a run's event history records, or `undefined` — the last `awaitingHuman` not
+ * followed by a resumed/terminal event. `events` is the run's log oldest-first. Pure: the same
+ * `fold` the live stream uses, over a scratch map, so a replay cannot disagree with what the live
+ * stream would have produced from the same events (FINDING-051).
+ */
+export function replayOpenGate(runId: string, events: CoreEvent[]): GateCacheEntry | undefined {
+  const replayed = new Map<string, GateCacheEntry>();
+  for (const event of events) fold(replayed, event);
+  return replayed.get(runId);
+}
+
+/**
+ * What one read of a run's open gate from the record yields: the gate; `null` (the record holds
+ * no open gate); `'no-log'` (this build cannot read the log, so nothing can be said);
+ * `'ambiguous'` (the engine's open gate rows disagree on the ord, so the record cannot say which
+ * gate is open — crew#1083 round 5).
+ */
+export type GateRead = GateCacheEntry | null | 'no-log' | 'ambiguous';
+
+/**
+ * What `GateCache.resolve` yields: a read's result, or `'unstable'` — live gate events kept landing
+ * while the record was read, so nothing could be verified (crew#1083 round 3). Retryable.
+ */
+export type GateResolution = GateRead | 'unstable';
+
+/** Narrows a resolution to an open gate: `null`, `'no-log'`, `'ambiguous'` and `'unstable'` are not one. */
+export function isOpenGate(resolution: GateResolution | undefined): resolution is GateCacheEntry {
+  return typeof resolution === 'object' && resolution !== null;
+}
+
+/** The one log call the cache makes (`resolve`): `console` by default, the daemon's logger in `server.ts`. */
+export interface GateCacheLog {
+  warn(message: string): void;
+}
+
+/** How many times `resolve` runs a read that a live gate event overlapped before it stops trying. */
+const RESOLVE_ATTEMPTS = 3;
+
+/**
  * Gate-prompt cache over a durable log (DES-STUDIO-001 §3.3).
  *
  * The prompt is keyed by runId — a paused run has exactly one open gate, before `unit_ix`. Entries
@@ -119,8 +184,9 @@ function fold(entries: Map<string, GateCacheEntry>, event: CoreEvent): void {
  * prune-only, so a daemon restart dropped the map and **nothing could put an entry back**. A parked
  * run then kept holding the operator without being able to say what it was asking. The prompt was
  * never actually lost — core records `awaitingHuman` to the event log (core#139) — it was simply
- * never read. `rebuild` is that read, which demotes this map to what it was always meant to be: a
- * latency optimisation, not the system of record.
+ * never read. `resolve`, fed the route's read of the durable row and the log, is that read, which
+ * demotes this map to what it was always meant to be: a latency optimisation, not the system of
+ * record.
  *
  * NOTE: the full HITL lifecycle from §3.3 (advisory / hard-expiry timers, append-only message log,
  * auto-cancel-on-expiry, synthesized `gateLifecycle` frames) is a deliberate follow-on. This
@@ -129,43 +195,119 @@ function fold(entries: Map<string, GateCacheEntry>, event: CoreEvent): void {
  */
 export class GateCache {
   private readonly entries = new Map<string, GateCacheEntry>();
+  /**
+   * Per-run count of the LIVE gate-opening and gate-closing events `ingest` has folded. `resolve`
+   * compares it across an async read of the record: a read some event overlapped is run again,
+   * never adopted. Never pruned — one number per run seen.
+   */
+  private readonly revisions = new Map<string, number>();
+
+  constructor(private readonly log: GateCacheLog = console) {}
 
   /** Fold one live CoreEvent into the cache. */
   ingest(event: CoreEvent): void {
+    if (typeof event.session === 'string' && GATE_EVENTS.has(event.type)) {
+      this.revisions.set(event.session, this.revision(event.session) + 1);
+    }
     fold(this.entries, event);
   }
 
+  private revision(runId: string): number {
+    return this.revisions.get(runId) ?? 0;
+  }
+
   /**
-   * Rebuild one run's gate from its durable event history and adopt the result (FINDING-051).
+   * The run's open gate: the cached entry, else what `read` finds in the record — the durable row,
+   * the log — adopted and returned once a read completes with no live gate event of the run's
+   * having landed meanwhile. `read` must not consult this cache: it is run again when one does.
    *
-   * `events` is the run's log oldest-first. Folding all of it yields the last `awaitingHuman` not
-   * followed by a resumed/terminal event — i.e. an open gate, or nothing.
+   * Neither side of such an overlap is known to be the newer (crew#1083 review). The record may
+   * have moved on since the read began — a live `awaitingHuman` for the next gate while an older
+   * row was being read — or the engine's pump may have delivered an OLDER frame late: an
+   * `awaitingHuman` for a gate the row already shows answered, or that gate's `resumed`. The
+   * revision counts arrivals, not order, so the cache cannot pick a winner; the first cut let the
+   * live side win and served a late ord-3 frame over a current ord-4 row, which let a decision
+   * naming ord 3 pass the gate check and answer ord 4. So no winner is picked. The read is run
+   * again, from scratch: the engine writes the row with the pause, so a re-read begun after the
+   * overlapping frame arrived reflects whatever that frame announced, and the first read that
+   * completes with nothing having landed is adopted.
    *
-   * Deliberately does NOT cross-check the run's live status first: that costs a `sessionsDetail()`
-   * on a read path, and the write side is already guarded — approving a run that has moved on is
-   * refused by the `status === 'awaiting_human'` check on `POST /runs/:id/gate`. So the worst a
-   * stale replay can do is show a prompt that then declines to be approved, and `reconcile` drops
-   * it on the next list. The failure mode is a confusing read, never a bad write.
+   * A clean read is the record's word in BOTH directions (crew#1083 round 3): a gate it finds
+   * replaces whatever an overlapped `ingest` folded meanwhile, and "no open gate" / "cannot read"
+   * EVICTS it — otherwise a late frame folded during attempt one outlived the clean attempt two
+   * that found its gate already answered, and was served as a cache hit, unread, from then on. A
+   * read that throws evicts the same way. After `RESOLVE_ATTEMPTS` overlapped reads nothing was
+   * verified, so nothing is served: the entry is evicted and the result is `'unstable'`, never the
+   * unverified entry — an ordinary ordered backlog (`awaitingHuman(2)`, `resumed(2)`,
+   * `awaitingHuman(3)`, one landing per read) left the cache holding ord 3 while every read found
+   * ord 4. The run is logged once.
+   *
+   * One read in flight per run (agy, round 4): while a read is running, an entry a live frame
+   * folds is unverified, so a concurrent `resolve` awaits the read in flight instead of taking the
+   * entry as a hit, and the entry is evicted before a re-read so a `get` meanwhile serves nothing
+   * unverified either.
    */
-  rebuild(runId: string, events: CoreEvent[]): GateCacheEntry | undefined {
-    const replayed = new Map<string, GateCacheEntry>();
-    for (const event of events) fold(replayed, event);
-    const entry = replayed.get(runId);
-    if (entry) this.entries.set(runId, entry);
-    return entry;
+  async resolve(runId: string, read: () => Promise<GateRead>): Promise<GateResolution> {
+    const pending = this.inflight.get(runId);
+    if (pending !== undefined) return pending;
+    const cached = this.entries.get(runId);
+    if (cached) return cached;
+    const resolution = this.hydrate(runId, read).finally(() => {
+      this.inflight.delete(runId);
+    });
+    this.inflight.set(runId, resolution);
+    return resolution;
   }
 
-  /** The cached open gate for a run, if any. */
-  get(runId: string): GateCacheEntry | undefined {
-    return this.entries.get(runId);
+  /** In-flight resolutions per run: `resolve` hands every concurrent caller the same one. */
+  private readonly inflight = new Map<string, Promise<GateResolution>>();
+
+  private async hydrate(runId: string, read: () => Promise<GateRead>): Promise<GateResolution> {
+    for (let attempt = 1; attempt <= RESOLVE_ATTEMPTS; attempt++) {
+      const seen = this.revision(runId);
+      let found: GateRead;
+      try {
+        found = await read();
+      } catch (err) {
+        this.entries.delete(runId);
+        throw err;
+      }
+      if (this.revision(runId) !== seen) {
+        // Whatever a live frame folded during this read is unverified until the re-read settles.
+        this.entries.delete(runId);
+        continue;
+      }
+      if (isOpenGate(found)) this.entries.set(runId, found);
+      else this.entries.delete(runId);
+      return found;
+    }
+    this.entries.delete(runId);
+    this.log.warn(
+      `gate cache: live gate events for run ${runId} overlapped ${RESOLVE_ATTEMPTS} reads of its open gate; nothing verified, serving no gate`,
+    );
+    return 'unstable';
   }
 
   /**
-   * Adopt an entry hydrated from the DURABLE `interaction_requests` table (DES-PROJECT-001
-   * §5.3). With that table, this cache is finally what its own comments always claimed — a
-   * latency layer over durable truth: the route reads the table on a miss and parks the result
-   * here so the next poll is a map hit. `rebuild` (event-log replay) remains the fallback for
-   * engines predating the table.
+   * The cached open gate for a run, if any — and nothing while a read of it is in flight: an entry
+   * a live frame folded meanwhile is unverified until that read settles, so a sync caller (the GET
+   * route's hit path, a steering prompt) falls through to `resolve` and waits (agy, round 4).
+   */
+  get(runId: string): GateCacheEntry | undefined {
+    return this.inflight.has(runId) ? undefined : this.entries.get(runId);
+  }
+
+  /**
+   * Drop the run's cached gate: the engine's record shows another gate open, or none (crew#1083
+   * round 7). The next read hydrates from the record.
+   */
+  forget(runId: string): void {
+    this.entries.delete(runId);
+  }
+
+  /**
+   * Seed the run's gate synchronously. Nothing can land between the caller's decision and this
+   * set, so it needs no guard; a read that awaited anything goes through `resolve`.
    */
   adopt(runId: string, entry: GateCacheEntry): void {
     this.entries.set(runId, entry);

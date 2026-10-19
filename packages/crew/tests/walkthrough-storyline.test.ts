@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { WalkthroughStepState } from 'wicked-crew-api-types';
 import { registerRoutes } from '../src/api/routes.js';
+import { registerWalkthroughRoutes } from '../src/api/recording.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
@@ -293,6 +294,38 @@ describe('PUT /runs/:id/walkthrough/storyline (WT-W3)', () => {
       writeFileSync(join(authorDir(), 'storyline.mjs'), 'x'.repeat(256 * 1024 + 1));
       expect((await get()).statusCode).toBe(413);
     });
+  });
+});
+
+describe('PUT /runs/:id/walkthrough/storyline — the post-write gate re-read (crew#1083 round 4)', () => {
+  it('answers 503 gate_unstable, not "answered meanwhile", when the re-read could not be verified', async () => {
+    const roots = mkdtempSync(join(tmpdir(), 'wt-storyline-unstable-'));
+    const evidence = join(roots, 'r1');
+    mkdirSync(join(evidence, 'author'), { recursive: true });
+    const view = runView('r1', evidence, 'awaiting_human', { reviewDenial: 'walkthrough FAIL: chapter 01-pay-once' });
+    const app = Fastify({ logger: false });
+    app.decorateRequest('actor', null as unknown as never);
+    app.addHook('onRequest', async (req) => {
+      (req as unknown as { actor: unknown }).actor = { id: 'human-1', kind: 'human', trust: 'operator' };
+    });
+    // The pre-write read finds the review step's escalation (ord 3); the post-write re-read is
+    // overlapped out by live gate events.
+    const resolveOpenGate = vi.fn<(runId: string) => Promise<{ ord: number } | null | 'no-log' | 'unstable'>>()
+      .mockResolvedValueOnce({ ord: 3 })
+      .mockResolvedValueOnce('unstable');
+    registerWalkthroughRoutes(app, { sessionsDetail: vi.fn(async () => [view]) } as unknown as CoreAdapter, { resolveOpenGate, audit: AuditLog.noop() });
+    await app.ready();
+    try {
+      const res = await app.inject({ method: 'PUT', url: '/api/v1/runs/r1/walkthrough/storyline', payload: { storyline: STORY } });
+      expect(res.statusCode).toBe(503);
+      expect(res.json()).toMatchObject({ code: 'gate_unstable' });
+      expect(resolveOpenGate).toHaveBeenCalledTimes(2);
+      // The write itself happened; only its verification did not.
+      expect(existsSync(join(evidence, 'author', 'walkthrough_plan', 'storyline.mjs'))).toBe(true);
+    } finally {
+      await app.close();
+      removeScratch(roots);
+    }
   });
 });
 

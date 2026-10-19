@@ -1557,7 +1557,15 @@ export interface RunDiff {
   base?: string;
 }
 
-/** The daemon's cached open-gate record (`GET /runs/:id/gate`, DES-STUDIO-001 §3.3). */
+/**
+ * The daemon's cached open-gate record (`GET /runs/:id/gate`, DES-STUDIO-001 §3.3).
+ *
+ * (api-types 0.132.0) The read answers **503** `{ error, code: 'gate_unstable' }` when live gate
+ * events kept landing while the daemon read the run's record and nothing could be verified — retry
+ * — and **409** `{ error, code: 'gate_unknown' }` when the engine's open gate rows disagree on the
+ * ord. It serves the newest of the agreeing rows: the one a decision is judged by.
+ * A decision is never authorized from this record: see {@link GateDecision.ord}.
+ */
 export interface GateInfo {
   runId: string;
   ord: number;
@@ -1578,6 +1586,20 @@ export interface GateInfo {
    * kind, never infer it from the unit. ABSENT on an older daemon and when the engine did not say.
    */
   gateKind?: string;
+  /**
+   * (api-types 0.132.0; issue #969) The answer tokens the engine offered on this gate — mirrors the
+   * opening `awaitingHuman.choices` (e.g. a `team_dispute` gate's
+   * `['approve', 'request_changes', 'reject']`), so a client that missed the live frame (reload,
+   * late join, second tab) renders the same answers. ABSENT on an older daemon and when the engine
+   * offered none; never empty.
+   */
+  choices?: string[];
+  /**
+   * (api-types 0.132.0; issue #969) The index into {@link GateInfo.choices} of the engine's
+   * recommended answer — mirrors `awaitingHuman.recommended`. ABSENT on an older daemon, when the
+   * engine recommended none, and whenever `choices` is absent.
+   */
+  recommended?: number;
   /** (crew ≥ 0.9.0) The gated unit's persisted receipt (`WorkUnit.assurance`) — what assured the
    *  work this gate asks about. `null` when the unit carries none (no gate evaluated it yet, or an
    *  older engine); ABSENT on an older daemon. */
@@ -1674,7 +1696,16 @@ export interface GateDecision {
    * mismatch, confirming nothing: the gate was answered elsewhere or replaced while the decision
    * waited (a skin's undo window). When the daemon cannot tell which gate is open it answers
    * **409** `{ error, code: 'gate_unknown' }` — refresh the gate and decide again. Absent = today's
-   * behaviour (no gate check).
+   * behaviour (no gate check). (api-types 0.132.0) The comparison is made against the engine's
+   * durable open gate rows, read under the run's decision lock immediately before the confirm —
+   * never the daemon's gate cache — and judged by ORD AGREEMENT, not row count:
+   * - no open gate row → **409** `gate_unknown`;
+   * - open rows that disagree on the ord (the record is ambiguous) → **409** `gate_unknown`;
+   * - the rows agree on an ord other than this one → **409** `gate_changed` with `openOrd`;
+   * - the rows agree on this ord — one row or several (a keyed plan gate plus its recovery row) →
+   *   authorized.
+   * The same reading judges a decision without `ord` (ambiguous rows → `gate_unknown`) and a gated
+   * `POST /runs/:id/resume` or `/reassign`.
    */
   ord?: number;
 }

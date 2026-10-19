@@ -157,11 +157,20 @@ export function joinTeam(view: RunTeamView, rows: TeamRow[]): RunTeamResponse {
   return { ...view, teamed: true, units, rows: labelled.filter((r) => r.payload.ord === null) };
 }
 
+type SessionView = import('../core/types.js').SessionView;
+
 export function registerTeamRoutes(
   app: FastifyInstance,
   adapter: CoreAdapter,
   // Defaulted to a NOOP trail so a directly-driven route set never writes the real audit log.
-  security: { audit: AuditLog } = { audit: AuditLog.noop() },
+  security: { audit: AuditLog },
+  // The per-run gate-decision lock (`decideExclusively`) and the record's judgment of the open gate
+  // (`gateForDecision`) from api/routes.ts (crew#1083 rounds 5–7). `judge` takes no lock of its own:
+  // it runs inside `exclusive`, so nothing acquires the lock twice.
+  gateDecisions: {
+    exclusive: <T>(runId: string, fn: () => Promise<T>) => Promise<T>;
+    judge: (run: SessionView, namedOrd: number | undefined) => Promise<{ refusal: { code: number; body: unknown } } | object>;
+  },
 ): void {
   const { audit } = security;
   const actorOf = (req: { actor?: Actor }): Actor => req.actor ?? LOCAL_ACTOR;
@@ -204,10 +213,15 @@ export function registerTeamRoutes(
       if (!parsed.success) {
         return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
       }
+      // A plan edit at a gate confirms it: under the per-run decision lock from this first read of
+      // the run, and judged by the record before anything is proposed or confirmed (crew#1083 round 7).
+      return gateDecisions.exclusive(id, async () => {
       const run = await findRun(id);
       if (run === undefined) return reply.code(404).send({ error: 'Run not found' });
       const plan = toLaunchPlan(parsed.data.plan);
       if (run.session.status === 'awaiting_human') {
+        const decided = await gateDecisions.judge(run, undefined);
+        if ('refusal' in decided) return reply.code(decided.refusal.code).send(decided.refusal.body);
         try {
           // The edit IS the gate answer (T3): the engine proposes it (`plan.proposed{by:"human",
           // kind:"edit"}`), floor-fills and accepts it, or refuses it and re-opens the gate.
@@ -254,6 +268,7 @@ export function registerTeamRoutes(
       } catch (err) {
         return reply.code(unsupported(err) ? 501 : 409).send({ error: message(err) });
       }
+      });
     },
   );
 
