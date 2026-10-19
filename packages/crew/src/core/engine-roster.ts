@@ -15,10 +15,14 @@
  * launch. So the boundary translates:
  *
  *  - crew's standing fields are STRIPPED (they are the studio's, not the engine's);
- *  - `council_eligible` becomes the engine's `health`: `false` ⇒ `{usable: false, reason}` — the seat
+ *  - `council_eligible` + `work_eligible` become the engine's `health` (crew#916, wicked-core#572:
+ *    the seat's two roles are independent, so neither alone benches it): either `true` ⇒
+ *    `{usable: true}` (the engine reads the record's own `enabled_for_council` /
+ *    `seat_eligible_for_work` for which role); neither `true` and one `false` (the daemon serves both,
+ *    so: both `false`) ⇒ `{usable: false, reason}` — the seat
  *    is BENCHED for the run (never convened, never a failover or judge target, named in
- *    `unitDistributed.degradedReason`); `true` ⇒ `{usable: true}`; absent ⇒ no `health` (unknown —
- *    the engine treats the seat as eligible until it fails authentication in the run);
+ *    `unitDistributed.degradedReason`); otherwise no `health` (unknown — the engine treats the seat
+ *    as eligible until it fails authentication in the run);
  *  - a seat that already carries an ENGINE-shaped `health` (`usable` is a boolean) is kept as sent.
  *
  * An engine predating the field ignores `health` (the `AgenticCli` deserializer has no
@@ -48,6 +52,9 @@ export const CREW_ONLY_SEAT_FIELDS: ReadonlySet<string> = new Set([
   'council_eligible',
   'council_ineligible_reason',
   'council_bench',
+  // crew#916 (api-types 0.129.0): the work role's reading, beside the council's.
+  'work_eligible',
+  'work_ineligible_reason',
   // DES-seats-page A1–A6 (api-types 0.115.0): the Agents page's readings — crew's, never the
   // engine's (`version` and `account` would otherwise look like record fields a future engine owns).
   'version',
@@ -68,19 +75,25 @@ function isEngineHealth(v: unknown): v is EngineSeatHealth {
   return typeof v === 'object' && v !== null && typeof (v as { usable?: unknown }).usable === 'boolean';
 }
 
+/** wicked-core#572: a seat whose record takes NEITHER role — no ballot, no work. */
+function hasNoRole(seat: Record<string, unknown>): boolean {
+  return seat['enabled_for_council'] === false && seat['seat_eligible_for_work'] === false;
+}
+
 /**
  * The SHORT bench reason the engine renders inline — `"codex (signed out — launcher)"` in
  * `unitDistributed.degradedReason` — derived from the standing readings themselves (seat-standing.ts
- * `seatStanding` decides `council_eligible`; this names the one cause in two or three words), falling
- * back to the first clause of `council_ineligible_reason` for a cause this table does not know.
+ * `seatStanding` decides `council_eligible` / `work_eligible`; this names the one cause in two or
+ * three words), falling back to the first clause of the standing's own reason for a cause this table
+ * does not know: the work role's when the seat casts no ballot (its council reason is only the flag).
  */
 export function shortBenchReason(seat: Record<string, unknown>): string | undefined {
-  if (seat['enabled_for_council'] === false) return 'not enabled for council';
+  if (hasNoRole(seat)) return 'not enabled for council or work';
   if (seat['auth'] === 'signed_out') return 'signed out';
   // (R5 / R5b, DES-L3 PR-3D) The `inactive` health flip and the crew council-count bench are
   // gone — the engine's per-run ballot ledger is the one bench; a stale client's `council_bench`
   // is still stripped by CREW_ONLY_SEAT_FIELDS, never read.
-  const verbose = seat['council_ineligible_reason'];
+  const verbose = seat['enabled_for_council'] === false ? seat['work_ineligible_reason'] : seat['council_ineligible_reason'];
   if (typeof verbose === 'string' && verbose.trim() !== '') {
     return verbose.split(/\s+—\s+|;\s+/, 1)[0]!.trim().slice(0, 80);
   }
@@ -97,14 +110,17 @@ export function toEngineSeat(seat: unknown): unknown {
     if (!CREW_ONLY_SEAT_FIELDS.has(k)) out[k] = v;
   }
   if (isEngineHealth(s['health'])) out['health'] = s['health'];
-  if (s['council_eligible'] === false) {
+  // crew#916: one role the standing confirms is enough to keep the seat; it is benched when no role
+  // is confirmed and the standing refused one (a reading that names one role only — a client
+  // predating `work_eligible` — fails closed, as it did before the split).
+  if (s['council_eligible'] === true || s['work_eligible'] === true) {
+    out['health'] = { usable: true } satisfies EngineSeatHealth;
+  } else if (s['council_eligible'] === false || s['work_eligible'] === false) {
     const reason = shortBenchReason(s);
     out['health'] = {
       usable: false,
       ...(reason !== undefined ? { reason } : {}),
     } satisfies EngineSeatHealth;
-  } else if (s['council_eligible'] === true) {
-    out['health'] = { usable: true } satisfies EngineSeatHealth;
   }
   return out;
 }
@@ -200,14 +216,15 @@ export function noEligibleSeatBody(
   };
 }
 
-/** The seat keys of a roster the ENGINE would convene — every seat not benched by its `health`. */
+/** The seat keys of a roster the ENGINE would convene — every seat with a role and not benched by its `health`. */
 export function eligibleSeatKeys(seats: readonly unknown[]): string[] {
   const out: string[] = [];
   for (const seat of toEngineRoster(seats)) {
     if (typeof seat !== 'object' || seat === null) continue;
-    const s = seat as { key?: unknown; health?: unknown; enabled_for_council?: unknown };
+    const s = seat as Record<string, unknown> & { key?: unknown; health?: unknown };
     if (typeof s.key !== 'string') continue;
-    if (s.enabled_for_council === false) continue;
+    // crew#916: dropped only with NEITHER role — a work-only or ballot-only seat is convened.
+    if (hasNoRole(s)) continue;
     if (isEngineHealth(s.health) && !s.health.usable) continue;
     out.push(s.key);
   }

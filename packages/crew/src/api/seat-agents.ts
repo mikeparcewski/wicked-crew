@@ -135,22 +135,30 @@ function hostFloorRefusal(i: WorkInputs): Refusal | null {
 
 type Refusal = { ok: false; reason_code: WorkReasonCode; source: WorkRefusalSource; reason: string };
 
+/** The standing's sentence for a shared gate (signed out, bench, login pending), read from a role
+ *  the seat HAS so its own flag's reason does not mask the gate (crew#916). */
+function gateReason(i: WorkInputs): string | undefined {
+  return i.enabled_for_council !== false ? i.standing.council_ineligible_reason : i.standing.work_ineligible_reason;
+}
+
 /** The refusals every scope shares, in order: the first one is the seat's reason. */
 function standingRefusal(i: WorkInputs, opts: { reviewer: boolean }): Refusal | null {
   if (i.standing.auth === 'signed_out') {
-    return { ok: false, reason_code: 'signed_out', source: 'auth', reason: i.standing.council_ineligible_reason ?? 'signed out' };
+    return { ok: false, reason_code: 'signed_out', source: 'auth', reason: gateReason(i) ?? 'signed out' };
   }
-  if (i.enabled_for_council === false) {
-    return { ok: false, reason_code: 'not_enabled', source: 'launcher', reason: 'not enabled for council, so a launch benches it' };
+  // crew#916 (wicked-core#572): `enabled_for_council` covers the ballot only. A seat is benched for
+  // work only when it has neither role; a ballot-only seat is the `reviewer_only` case below.
+  if (i.enabled_for_council === false && i.seat_eligible_for_work === false) {
+    return { ok: false, reason_code: 'not_enabled', source: 'launcher', reason: 'not enabled for council or for work, so a launch benches it' };
   }
   if (!opts.reviewer && i.seat_eligible_for_work === false) {
     return { ok: false, reason_code: 'reviewer_only', source: 'launcher', reason: 'a reviewer-only seat: it reviews work and is never given a unit' };
   }
   if (i.recentBench !== null) {
-    return { ok: false, reason_code: 'recent_bench', source: 'launcher', reason: i.standing.council_ineligible_reason ?? i.recentBench.reason };
+    return { ok: false, reason_code: 'recent_bench', source: 'launcher', reason: gateReason(i) ?? i.recentBench.reason };
   }
   if (i.loginPending) {
-    return { ok: false, reason_code: 'login_pending', source: 'launcher', reason: i.standing.council_ineligible_reason ?? 'login not verified yet' };
+    return { ok: false, reason_code: 'login_pending', source: 'launcher', reason: gateReason(i) ?? 'login not verified yet' };
   }
   return null;
 }

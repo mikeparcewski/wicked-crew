@@ -46,8 +46,9 @@ describe('toEngineSeat', () => {
     // (R5b) No `council_bench` arm any more — the sentence's first clause, the field itself stripped.
     expect(benchedByCouncils['health']).toEqual({ usable: false, reason: 'benched by this daemon’s recent councils: …' });
     expect('council_bench' in benchedByCouncils).toBe(false);
-    const disabled = toEngineSeat({ ...registrySeat, enabled_for_council: false, council_eligible: false, council_ineligible_reason: 'not enabled for council' }) as Record<string, unknown>;
-    expect(disabled['health']).toEqual({ usable: false, reason: 'not enabled for council' });
+    // crew#916: only a seat with NEITHER role is benched for not being enabled.
+    const disabled = toEngineSeat({ ...registrySeat, enabled_for_council: false, seat_eligible_for_work: false, council_eligible: false, council_ineligible_reason: 'not enabled for council', work_eligible: false, work_ineligible_reason: 'not eligible for work (a reviewer-only seat)' }) as Record<string, unknown>;
+    expect(disabled['health']).toEqual({ usable: false, reason: 'not enabled for council or work' });
     // An unknown cause falls back to the first clause of the operator sentence.
     const other = toEngineSeat({ ...registrySeat, council_eligible: false, council_ineligible_reason: 'dispatch budget exhausted — retry later' }) as Record<string, unknown>;
     expect(other['health']).toEqual({ usable: false, reason: 'dispatch budget exhausted' });
@@ -84,14 +85,74 @@ describe('engineRosterJson', () => {
 });
 
 describe('eligibleSeatKeys', () => {
-  it('names the seats the engine would convene: not benched, enabled for council', () => {
+  it('names the seats the engine would convene: not benched, with at least one role', () => {
     const roster = [
       { ...registrySeat, key: 'claude', council_eligible: true },
       { ...registrySeat, key: 'codex', council_eligible: false, council_ineligible_reason: 'signed out' },
       { ...registrySeat, key: 'pi' },
-      { ...registrySeat, key: 'ollama', enabled_for_council: false },
+      { ...registrySeat, key: 'ollama', enabled_for_council: false, seat_eligible_for_work: false },
     ];
     expect(eligibleSeatKeys(roster)).toEqual(['claude', 'pi']);
     expect(toEngineRoster(roster)).toHaveLength(4);
+  });
+});
+
+describe('council vs work eligibility (crew#916, wicked-core#572)', () => {
+  it('a work-only seat (enabled_for_council=false, seat_eligible_for_work=true) is convened and NOT benched', () => {
+    const workOnly = {
+      ...registrySeat,
+      key: 'worker',
+      enabled_for_council: false,
+      seat_eligible_for_work: true,
+      auth: 'signed_in',
+      council_eligible: false,
+      council_ineligible_reason: 'not enabled for council',
+      work_eligible: true,
+    };
+    expect(eligibleSeatKeys([workOnly])).toEqual(['worker']);
+    const [out] = toEngineRoster([workOnly]) as Array<Record<string, unknown>>;
+    expect((out!['health'] as { usable: boolean }).usable).not.toBe(false);
+    expect(out!['enabled_for_council']).toBe(false);
+    expect(out!['seat_eligible_for_work']).toBe(true);
+    expect('work_eligible' in out!).toBe(false);
+    // A plain registry seat with only the ballot flag off is a work seat too.
+    expect(eligibleSeatKeys([{ ...registrySeat, key: 'raw', enabled_for_council: false }])).toEqual(['raw']);
+  });
+
+  it('a seat with both roles off is benched (health.usable:false) and dropped — the built-in agy', () => {
+    const agy = {
+      ...registrySeat,
+      key: 'agy',
+      enabled_for_council: false,
+      seat_eligible_for_work: false,
+      auth: 'signed_in',
+      council_eligible: false,
+      council_ineligible_reason: 'not enabled for council',
+      work_eligible: false,
+      work_ineligible_reason: 'not eligible for work (a reviewer-only seat)',
+    };
+    expect(eligibleSeatKeys([agy])).toEqual([]);
+    expect((toEngineSeat(agy) as Record<string, unknown>)['health']).toEqual({ usable: false, reason: 'not enabled for council or work' });
+    expect(eligibleSeatKeys([{ ...registrySeat, key: 'agy', enabled_for_council: false, seat_eligible_for_work: false }])).toEqual([]);
+  });
+
+  it('a reviewer-only seat (enabled_for_council=true, seat_eligible_for_work=false) stays usable for its ballot', () => {
+    const judge = { ...registrySeat, key: 'judge', seat_eligible_for_work: false, council_eligible: true, work_eligible: false, work_ineligible_reason: 'not eligible for work (a reviewer-only seat)' };
+    expect(eligibleSeatKeys([judge])).toEqual(['judge']);
+    const out = toEngineSeat(judge) as Record<string, unknown>;
+    expect(out['health']).toEqual({ usable: true });
+    expect(out['seat_eligible_for_work']).toBe(false);
+  });
+
+  it('a signed-out work-only seat is benched with the work reason, not the ballot flag', () => {
+    const out = toEngineSeat({
+      ...registrySeat,
+      enabled_for_council: false,
+      council_eligible: false,
+      council_ineligible_reason: 'not enabled for council',
+      work_eligible: false,
+      work_ineligible_reason: 'recent quota_exhausted — the engine benched it',
+    }) as Record<string, unknown>;
+    expect(out['health']).toEqual({ usable: false, reason: 'recent quota_exhausted' });
   });
 });

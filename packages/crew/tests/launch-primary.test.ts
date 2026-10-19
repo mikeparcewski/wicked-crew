@@ -52,7 +52,14 @@ describe('POST /runs takes the lead agent (primary)', () => {
     await app.close();
   });
 
-  const clisJson = roster([{ key: 'claude' }, { key: 'codex' }, { key: 'pi', council_eligible: false }]);
+  const clisJson = roster([
+    { key: 'claude' },
+    { key: 'codex' },
+    { key: 'pi', council_eligible: false, work_eligible: false, work_ineligible_reason: 'signed out — sign it in from the Agents page' },
+    // crew#916: leading is work — a seat that casts no ballot may still lead; a reviewer-only seat may not.
+    { key: 'worker', enabled_for_council: false, council_eligible: false, work_eligible: true },
+    { key: 'judge', seat_eligible_for_work: false, council_eligible: true, work_eligible: false },
+  ]);
 
   it('forwards a roster seat to the engine', async () => {
     const res = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'p', clisJson, primary: 'codex' } });
@@ -70,14 +77,14 @@ describe('POST /runs takes the lead agent (primary)', () => {
   it('refuses a seat that is not in the roster, by name, and launches nothing', async () => {
     const res = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'p', clisJson, primary: 'copilot' } });
     expect(res.statusCode).toBe(400);
-    expect(res.json().error).toMatch(/not in this launch's roster: copilot \(roster: claude, codex, pi\)/);
+    expect(res.json().error).toMatch(/not in this launch's roster: copilot \(roster: claude, codex, pi, worker, judge\)/);
     expect(launchRun).not.toHaveBeenCalled();
   });
 
   it('refuses a signed-out seat as the lead', async () => {
     const res = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'p', clisJson, primary: 'pi' } });
     expect(res.statusCode).toBe(400);
-    expect(res.json().error).toMatch(/signed out or disabled: pi/);
+    expect(res.json().error).toMatch(/cannot take work: pi \(signed out/);
     expect(launchRun).not.toHaveBeenCalled();
   });
 
@@ -94,6 +101,15 @@ describe('POST /runs takes the lead agent (primary)', () => {
 });
 
 describe('primaryRefusal / launchRosterNaming', () => {
+  it('follows the WORK role, not the ballot flag (crew#916, wicked-core#572)', () => {
+    const r = JSON.stringify([
+      { key: 'worker', enabled_for_council: false, council_eligible: false, work_eligible: true },
+      { key: 'judge', council_eligible: true, work_eligible: false, work_ineligible_reason: 'not eligible for work (a reviewer-only seat)' },
+    ]);
+    expect(primaryRefusal('worker', r)).toBeNull();
+    expect(primaryRefusal('judge', r)).toMatch(/cannot take work: judge \(not eligible for work \(a reviewer-only seat\)\)/);
+  });
+
   it('leaves an unparseable roster to the engine', () => {
     expect(primaryRefusal('claude', 'not json')).toBeNull();
     expect(primaryRefusal('claude', '{}')).toBeNull();

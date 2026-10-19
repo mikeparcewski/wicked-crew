@@ -152,12 +152,52 @@ describe('wicked-core#976: the host-floor bench', () => {
   it('the host_floor warning is read off the bench itself, whatever refusal leads the admissions', () => {
     const roster = rosterOver({
       signed: { copilot: false },
-      registry: REGISTRY.map((s) => (s.key === 'opencode' ? { ...s, enabled_for_council: false } : s)),
+      registry: REGISTRY.map((s) => (s.key === 'opencode' ? { ...s, enabled_for_council: false, seat_eligible_for_work: false } : s)),
       hostFloor: new Map([['copilot', HOST_FLOOR_ENGINE], ['opencode', HOST_FLOOR_ENGINE]]),
     })();
     expect((seat(roster, 'copilot')['work_admission'] as Record<string, unknown>)['unscoped']).toMatchObject({ reason_code: 'signed_out' });
     expect((seat(roster, 'opencode')['work_admission'] as Record<string, unknown>)['unscoped']).toMatchObject({ reason_code: 'not_enabled' });
     for (const k of ['copilot', 'opencode']) expect(codes(seat(roster, k))).toContain('warning:host_floor');
+  });
+
+  describe('council vs work eligibility (crew#916, wicked-core#572)', () => {
+    const over = (patch: Record<string, unknown>) =>
+      rosterOver({ worktree: new Map(), registry: REGISTRY.map((s) => (s.key === 'copilot' ? { ...s, ...patch } : s)) })();
+
+    it('a work-only seat is admitted for work and as a QE reviewer — never refused not_enabled — and is convened by the launch', () => {
+      const s = seat(over({ enabled_for_council: false, seat_eligible_for_work: true }), 'copilot');
+      expect(s['council_eligible']).toBe(false);
+      expect(s['work_eligible']).toBe(true);
+      const work = s['work_admission'] as Record<string, { ok: boolean; reason_code?: string }>;
+      for (const scope of ['unscoped', 'scoped_bound']) expect(work[scope]).toEqual({ ok: true });
+      for (const scope of ['unscoped', 'scoped', 'scoped_bound']) expect(work[scope]!.reason_code).not.toBe('not_enabled');
+      expect(s['qe_reviewer']).toEqual({ ok: true });
+      expect((s['chat_admission'] as Record<string, unknown>)['unscoped']).toEqual({ ok: true });
+      expect((toEngineSeat(s) as Record<string, unknown>)['health']).toEqual({ usable: true });
+    });
+
+    it('a seat with neither role is refused not_enabled and benched', () => {
+      const s = seat(over({ enabled_for_council: false, seat_eligible_for_work: false }), 'copilot');
+      expect(s).toMatchObject({ council_eligible: false, work_eligible: false });
+      expect((s['work_admission'] as Record<string, unknown>)['unscoped']).toMatchObject({ ok: false, reason_code: 'not_enabled' });
+      expect(s['qe_reviewer']).toMatchObject({ ok: false, reason_code: 'not_enabled' });
+      expect((toEngineSeat(s) as Record<string, unknown>)['health']).toEqual({ usable: false, reason: 'not enabled for council or work' });
+    });
+
+    it('a reviewer-only seat stays council-eligible and is refused work as reviewer_only', () => {
+      const s = seat(over({ enabled_for_council: true, seat_eligible_for_work: false }), 'copilot');
+      expect(s).toMatchObject({ council_eligible: true, work_eligible: false });
+      expect((s['work_admission'] as Record<string, unknown>)['unscoped']).toMatchObject({ ok: false, reason_code: 'reviewer_only' });
+      expect(s['qe_reviewer']).toEqual({ ok: true });
+      expect((toEngineSeat(s) as Record<string, unknown>)['health']).toEqual({ usable: true });
+    });
+
+    it('a signed-out work-only seat is refused signed_out with the sign-in sentence, not the ballot flag', () => {
+      const roster = rosterOver({ worktree: new Map(), signed: { copilot: false }, registry: REGISTRY.map((s) => (s.key === 'copilot' ? { ...s, enabled_for_council: false } : s)) })();
+      const work = (seat(roster, 'copilot')['work_admission'] as Record<string, { reason_code?: string; reason?: string }>)['unscoped']!;
+      expect(work.reason_code).toBe('signed_out');
+      expect(work.reason).toMatch(/signed out/);
+    });
   });
 
   describe('a host-floor bench read that fails is never "no bench"', () => {
@@ -450,7 +490,7 @@ describe('A6 issues', () => {
       display_name: 'GitHub Copilot CLI',
       binary: 'copilot',
       optIn: false,
-      standing: { auth: 'signed_in', login_check: 'unverified', council_eligible: true },
+      standing: { auth: 'signed_in', login_check: 'unverified', council_eligible: true, work_eligible: true },
       governance: {
         unscoped: { mode: 'none', class: 'os_sandbox', source: 'none', reason: '', fence: { write_roots: [], read_roots: [], network: 'open' } },
         scoped: { mode: 'none', class: 'os_sandbox', source: 'none', reason: '', fence: { write_roots: [], read_roots: [], network: 'open' } },

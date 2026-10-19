@@ -1029,7 +1029,11 @@ export interface RosterSeat {
   key: string;
   display_name: string;
   binary: string;
+  /** wicked-core#572: may cast a council ballot — and nothing more (see `work_eligible`). */
   enabled_for_council: boolean;
+  /** (api-types 0.129.0) wicked-core#572: may be seated for work; absent means true. The engine's
+   *  registry field, passed through verbatim. */
+  seat_eligible_for_work?: boolean;
   category?: string;
   /**
    * Runtime health (crew#274). Additive: absent on a daemon predating the field, and safe to
@@ -1124,6 +1128,18 @@ export interface RosterSeat {
   council_eligible?: boolean;
   /** Present when `council_eligible` is false: the one reason, in the operator's words. */
   council_ineligible_reason?: string;
+  /**
+   * (api-types 0.129.0, crew#916, wicked-core#572) Whether the seat may be seated for WORK as far as
+   * the daemon can tell: `seat_eligible_for_work` not false, `auth` not `signed_out`, no active
+   * engine bench, login check answered. Independent of `council_eligible` — `enabled_for_council`
+   * covers the ballot only, so a work-only seat reads `council_eligible: false, work_eligible: true`
+   * and a reviewer-only seat the reverse. Neither false alone benches the seat: a launch benches it
+   * only when both are false. Never handed to the engine (`clisJson` strips it). ABSENT on a daemon
+   * before 0.129.0.
+   */
+  work_eligible?: boolean;
+  /** (api-types 0.129.0) Present when `work_eligible` is false: the one reason, in the operator's words. */
+  work_ineligible_reason?: string;
   /**
    * Present when THIS daemon's recent councils benched the seat: the engine's own
    * `councilSeatFailed` evidence (`non_zero_exit` / `timed_out`, the derivative `benched` kind
