@@ -5056,9 +5056,12 @@ export function registerRoutes(
     };
     // The record judges the cache (crew#1083 round 7): rows that disagree on the ord are 409
     // `gate_unknown` whether or not something is cached, and a cached entry is served — for its
-    // presentation fields (prompt, choices, recommended) — only when its ord is the record's. An
-    // entry the record does not show (a late frame for an answered gate) is dropped and the gate
-    // read from the record. Only an engine that keeps no rows serves the cache unjudged.
+    // presentation fields (prompt, choices, recommended) — only when its ord is the record's open
+    // row's. With no open row the gate predates the engine's table and its record is the log
+    // (FINDING-051): the entry is served while the run is still parked, so a restarted daemon does
+    // not replay the log on every poll, and dropped once it is not (a late frame for an answered
+    // gate). Any entry not served is dropped and the gate read from the record. Only an engine that
+    // keeps no rows serves the cache unjudged.
     const recorded = await recordedOpenGate(id);
     if (recorded?.state === 'ambiguous') {
       return reply.code(409).send({
@@ -5068,9 +5071,12 @@ export function registerRoutes(
     }
     const cached = gateCache.get(id);
     if (cached) {
-      if (recorded === null || (recorded.state === 'open' && cached.ord === recorded.ord)) {
-        return { runId: id, ...cached, assurance: await receiptAt(cached.ord) };
-      }
+      const servable =
+        recorded === null
+        || (recorded.state === 'open' && cached.ord === recorded.ord)
+        || (recorded.state === 'none'
+          && (await adapter.sessionsDetail()).find((v) => v.session.id === id)?.session.status === 'awaiting_human');
+      if (servable) return { runId: id, ...cached, assurance: await receiptAt(cached.ord) };
       gateCache.forget(id);
     }
 

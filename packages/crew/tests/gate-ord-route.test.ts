@@ -67,6 +67,7 @@ describe('POST /runs/:id/gate with ord', () => {
         view('run-cache-only', 'awaiting_human', 2),
         view('run-two-rows', 'awaiting_human', 6),
         view('run-split', 'awaiting_human', 3),
+        view('run-moved-on', 'executing', 4),
         view('run-race', 'awaiting_human', 3),
       ]),
       listRepos: vi.fn().mockResolvedValue([]),
@@ -243,6 +244,13 @@ describe('POST /runs/:id/gate with ord', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ ord: 4, prompt: 'Approve unit 4?' });
     expect(gateCache.get('run-stale-cache')?.ord).toBe(4);
+  });
+
+  it('round 7: with no open row, a cached entry is not served once the run has moved on (a late frame for an answered gate)', async () => {
+    gateCache.adopt('run-moved-on', { ord: 3, prompt: 'Approve unit 3?', lifecycle: 'open', receivedAt: '2026-09-26T10:00:00Z' });
+    const res = await app.inject({ method: 'GET', url: '/api/v1/runs/run-moved-on/gate' });
+    expect(res.statusCode).toBe(404);
+    expect(gateCache.get('run-moved-on')).toBeUndefined();
   });
 
   it('round 7: rows that disagree are 409 gate_unknown on GET even with an entry cached', async () => {
