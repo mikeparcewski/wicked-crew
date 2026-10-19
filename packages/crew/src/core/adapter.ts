@@ -69,6 +69,7 @@ import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../project
 import { applyGovernanceStoreEnv, isStoreSpec, type GovernanceStoreLocation } from './governance-store.js';
 import { isCouncilSize, isCouncilStaggerMs } from './council-settings.js';
 import { QE_OFF_REASON, launchRequiresQe, qeAcceptanceMode, qeSettingSkipReason } from './qe-acceptance-setting.js';
+import { applyVaultBinEnv, type VaultBinPosture, type VaultBinResolver } from './vault-bin.js';
 
 
 
@@ -1032,6 +1033,12 @@ export interface CoreAdapterOptions {
    * the process carried (the hermetic test arming included) and `/diagnostics` reports `store: null`.
    */
   governanceStore?: GovernanceStoreLocation;
+  /**
+   * (crew#1068) Resolves crew's own `wicked-vault` bin, exported to the engine as `WICKED_VAULT_BIN`
+   * unless the operator booted with the variable set (`core/vault-bin.ts`). Default: the shipped
+   * dependency's bin; tests inject one that fails to prove boot survives it.
+   */
+  resolveVaultBin?: VaultBinResolver;
 }
 
 
@@ -1155,6 +1162,9 @@ export class CoreAdapter {
   /** The bus file whose seams are off because the linked engine has no `Core.busEmit`/`busRead`
    *  (wicked-core#631) — `/health.warnings` says so — else `null`. */
   readonly busSeamsOff: string | null = null;
+  /** (crew#1068) The wicked-vault CLI handed to the engine as `WICKED_VAULT_BIN` at construction —
+   *  `/health.warnings` and `/diagnostics.vault` report it when the engine cannot vault. */
+  readonly vaultBin: VaultBinPosture;
   /** The engine's bus calls, attached for `busDbPath` (core/bus.ts); `null` without a bus. */
   private engineBus: EngineBus | null = null;
   /** What crew last handed the engine's `setQeAcceptanceOff` (the engine starts with the boot value). */
@@ -1264,6 +1274,16 @@ export class CoreAdapter {
     if (!process.env['WICKED_CORE_EXE']) {
       const wcExe = locateWickedCoreExe();
       if (wcExe) process.env['WICKED_CORE_EXE'] = wcExe;
+    }
+
+    // crew#1068: the engine vaults a held team finding with the CLI `WICKED_VAULT_BIN` names (read
+    // per record): crew's own wicked-vault bin, unless the operator chose one (or switched it off).
+    // A bin that cannot be resolved never fails boot; it is reported instead.
+    this.vaultBin = applyVaultBinEnv(process.env, opts.resolveVaultBin);
+    if (this.vaultBin.source === 'unresolvable') {
+      console.error(`[crew] wicked-vault is not resolvable (${this.vaultBin.reason}); held boundary findings will not be vaulted`);
+    } else if (this.vaultBin.source === 'off') {
+      console.error('[crew] wicked-vault is switched off (WICKED_VAULT_BIN is set empty); held boundary findings will not be vaulted');
     }
 
     // The governance store (crew#495): export the engine's store + outbox variables and create the

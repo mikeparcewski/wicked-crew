@@ -895,21 +895,25 @@ async function runStatus(args: string[]): Promise<void> {
   const res = await daemonFetch(port, url);
   if (!res.ok) await failNon2xx('status', res);
   console.log(JSON.stringify(await res.json(), null, 2));
+  // `status` says what the daemon's `/health.warnings[]` says, one line each, on stderr so stdout
+  // stays the JSON a script parses; exit 0 (the daemon is up; this is its configuration state).
   // F-W1-102: a daemon whose base skill is REQUIRED and not handed (the crew-only install — no
-  // wicked-garden) refuses EVERY launch at intake while `/runs` is an honest `[]`. `status` says why,
-  // on stderr so stdout stays the JSON a script parses — quoting the SAME `skills.base-skill` finding
-  // `/health` carries (`baseSkill.finding`, `warnings[]`) and the 422 launch body names; exit 0 (the
-  // daemon is up; this is its configuration state). An older daemon without the field says nothing.
+  // wicked-garden) refuses EVERY launch at intake while `/runs` is an honest `[]` — its
+  // `skills.base-skill` finding is one of those warnings, the same one the 422 launch body names.
+  // crew#1068: so is an engine with no wicked-vault CLI (`vault.unresolvable` / `vault.off`).
+  // A daemon without warnings says nothing.
   const health = await daemonFetch(port, `${base}/health`);
   if (health.ok) {
-    let message: unknown;
+    let warnings: unknown;
     try {
-      const body = (await health.json()) as { baseSkill?: { finding?: { message?: unknown } | null } | null };
-      message = body.baseSkill?.finding?.message;
+      warnings = ((await health.json()) as { warnings?: unknown }).warnings;
     } catch {
-      message = undefined;
+      warnings = undefined;
     }
-    if (typeof message === 'string' && message.length > 0) console.error(`wicked-crew: ${message}`);
+    for (const w of Array.isArray(warnings) ? warnings : []) {
+      const message = (w as { message?: unknown } | null)?.message;
+      if (typeof message === 'string' && message.length > 0) console.error(`wicked-crew: ${message}`);
+    }
   }
 }
 

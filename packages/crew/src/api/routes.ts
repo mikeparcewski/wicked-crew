@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { busSeamsOffWarning, busUnavailableWarning } from '../core/bus-notice.js';
+import { vaultBinWarning, vaultDiagnostics } from '../core/vault-bin.js';
 import { PlanSchema, toLaunchPlan } from './plan-schema.js';
 import type { RecordedStallFrame } from './stall-frame-index.js';
 import { z } from 'zod';
@@ -1714,6 +1715,8 @@ export function registerRoutes(
       // crew#742: a seat that runs ungoverned, or floor seats on a host that cannot arm their
       // boundary, are named before any run starts.
       ...seatGovernanceWarnings(seatGovernanceNow(), hostSandboxLauncher()),
+      // crew#1068: the engine has no wicked-vault CLI to record held boundary findings with.
+      ...[adapter.vaultBin != null ? vaultBinWarning(adapter.vaultBin) : null].filter((w) => w !== null),
     ];
     return {
       status: 'ok',
@@ -1798,6 +1801,9 @@ export function registerRoutes(
         },
         // crew#740: which memory store this daemon reads and writes, and the isolation notice.
         memoryStore: memoryStoreInfo(),
+        // crew#1068: the wicked-vault CLI handed to the engine, with a remedy when it has none.
+        // `null` on a route set driven without the real adapter.
+        vault: adapter.vaultBin != null ? vaultDiagnostics(adapter.vaultBin) : null,
       };
     },
   );
