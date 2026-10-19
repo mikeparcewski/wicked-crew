@@ -140,8 +140,10 @@ function standingRefusal(i: WorkInputs, opts: { reviewer: boolean }): Refusal | 
   if (i.standing.auth === 'signed_out') {
     return { ok: false, reason_code: 'signed_out', source: 'auth', reason: i.standing.council_ineligible_reason ?? 'signed out' };
   }
-  if (i.enabled_for_council === false) {
-    return { ok: false, reason_code: 'not_enabled', source: 'launcher', reason: 'not enabled for council, so a launch benches it' };
+  // crew#916 (wicked-core#572): `enabled_for_council` covers the ballot only. A seat is benched for
+  // work only when it has neither role; a ballot-only seat is the `reviewer_only` case below.
+  if (i.enabled_for_council === false && i.seat_eligible_for_work === false) {
+    return { ok: false, reason_code: 'not_enabled', source: 'launcher', reason: 'not enabled for council or for work, so a launch benches it' };
   }
   if (!opts.reviewer && i.seat_eligible_for_work === false) {
     return { ok: false, reason_code: 'reviewer_only', source: 'launcher', reason: 'a reviewer-only seat: it reviews work and is never given a unit' };

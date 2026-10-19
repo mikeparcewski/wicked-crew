@@ -137,7 +137,7 @@ import {
 import { BASE_SKILL_POLICIES, BASE_SKILL_REF_SHAPE, baseSkillRemedy } from '../skills/base-skill.js';
 import { REQUIRED_GARDEN_VERSION } from '../skills/plugin-source.js';
 import type { EvalRunStore } from './eval-store.js';
-import { engineRosterJson, noEligibleSeatBody, parseNoEligibleSeat } from '../core/engine-roster.js';
+import { engineRosterJson, noEligibleSeatBody, parseNoEligibleSeat, toEngineSeat } from '../core/engine-roster.js';
 import { launchAssuranceNotice } from '../core/assurance.js';
 import { launchRequiresQe, mayRequireQe, qeAcceptanceMode, qeSettingSkipReason } from '../core/qe-acceptance-setting.js';
 import {
@@ -557,12 +557,6 @@ const ExcludeLinkedIssuesSchema = z
   .optional();
 
 /**
- * Why `primary` cannot lead a launch on `clisJson`'s roster, or `null` when it can (DES-TEAMING-002
- * §8.1). The roster is a JSON array of seats keyed by `key`; a seat crew's standing marks
- * `council_eligible: false` is signed out or disabled, so it cannot lead. A roster that does not
- * parse is left to the engine's own parse error (the `engineRosterJson` rule).
- */
-/**
  * The default launch roster ({@link defaultLaunchRoster}: no opt-in seats) — plus the opt-in seat a
  * launch NAMES as its lead (`primary`): naming it is the opt-in.
  */
@@ -573,6 +567,14 @@ export function launchRosterNaming<T extends { key?: unknown }>(roster: readonly
   return named === undefined ? base : [...base, named];
 }
 
+/**
+ * Why `primary` cannot lead a launch on `clisJson`'s roster, or `null` when it can (DES-TEAMING-002
+ * §8.1). The roster is a JSON array of seats keyed by `key`. Leading is WORK (wicked-core#572: the
+ * lead pick follows `seat_eligible_for_work`, not the ballot flag — crew#916), so a seat crew's
+ * standing marks `work_eligible: false` (signed out, benched, or reviewer-only) cannot lead, nor can a
+ * seat the launch would bench (its translated engine `health`). A roster that does not parse is
+ * left to the engine's own parse error (the `engineRosterJson` rule).
+ */
 export function primaryRefusal(primary: string, clisJson: string): string | null {
   let roster: unknown;
   try {
@@ -581,15 +583,24 @@ export function primaryRefusal(primary: string, clisJson: string): string | null
     return null;
   }
   if (!Array.isArray(roster)) return null;
-  const seats = roster.filter((s): s is { key: string; council_eligible?: unknown } =>
+  const seats = roster.filter((s): s is { key: string; work_eligible?: unknown; work_ineligible_reason?: unknown } =>
     typeof s === 'object' && s !== null && typeof (s as { key?: unknown }).key === 'string');
   const keys = seats.map((s) => s.key);
   const seat = seats.find((s) => s.key === primary);
   if (seat === undefined) {
     return `primary names a seat that is not in this launch's roster: ${primary} (roster: ${keys.join(', ') || 'none'})`;
   }
-  if (seat.council_eligible === false) {
-    return `primary names a seat that is signed out or disabled: ${primary} — sign it in from the Agents page, or pick another seat`;
+  if (seat.work_eligible === false) {
+    const why = typeof seat.work_ineligible_reason === 'string' && seat.work_ineligible_reason !== '' ? ` (${seat.work_ineligible_reason})` : '';
+    return `primary names a seat that cannot take work: ${primary}${why} — pick another seat`;
+  }
+  // The engine takes an explicit lead without a health check, so a seat the launch benches (the
+  // translated `health.usable: false` — a reading from a client before `work_eligible` included)
+  // cannot lead either.
+  const health = (toEngineSeat(seat) as { health?: { usable?: unknown; reason?: unknown } }).health;
+  if (health?.usable === false) {
+    const why = typeof health.reason === 'string' && health.reason !== '' ? ` (${health.reason})` : '';
+    return `primary names a seat that cannot take work: ${primary}${why} — pick another seat`;
   }
   return null;
 }

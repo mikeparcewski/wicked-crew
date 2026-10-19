@@ -334,7 +334,7 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
       // (`session.benched_seats`) is the one bench, so there is no bench reading to pass and no
       // health reading to weigh — the roster's standing is the auth picture alone.
       const standing = seatStanding(
-        seat as { key: string; enabled_for_council?: boolean; credential?: string; free_tier?: string },
+        seat as { key: string; enabled_for_council?: boolean; seat_eligible_for_work?: boolean; credential?: string; free_tier?: string },
         signed,
         // F-A45-006: the seat's OWN "no credential" report (a ballot's "No API key found", a
         // worker's 401, an auth ACP fallback) overrides the file probe — `auth` flips, not only

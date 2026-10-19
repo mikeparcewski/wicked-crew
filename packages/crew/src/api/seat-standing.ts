@@ -23,6 +23,9 @@
  *    PREDICTION from the daemon's own records, not the engine's verdict — the engine convenes
  *    whatever roster it is handed and benches a seat only after it fails (F-4R2-007). `unknown`
  *    auth is eligible: refusing a seat the daemon cannot read would bench working keychain seats.
+ *  - `work_eligible` (crew#916, wicked-core#572) — the same gates read for the seat's OTHER role:
+ *    `seat_eligible_for_work` not false instead of `enabled_for_council`. The two flags are
+ *    independent (a ballot-only seat, a work-only seat); neither alone makes the seat unusable.
  *  - chat admission ({@link chatSeatAdmission}) — the seats a chat seats BY DEFAULT: the same
  *    auth predicate (a `signed_out` seat is refused up front with the reason, instead of failing
  *    its first turn), plus the engine's scope rule restated (a SCOPED chat holds only a seat whose
@@ -122,7 +125,11 @@ export function seatAuth(seat: StandingSeat, signedIn: boolean | null): { auth: 
 /** The roster fields standing reads. Structural, so both the wire seat and a test stub satisfy it. */
 export interface StandingSeat {
   key: string;
+  /** wicked-core#572: may cast a council ballot — and nothing more. */
   enabled_for_council?: boolean;
+  /** wicked-core#572: may be seated for work (routing, failover, reassign, the lead pick, the
+   *  agent judge). Absent = true. */
+  seat_eligible_for_work?: boolean;
   acp?: { acp_input_governance?: boolean; os_sandbox?: boolean; verified_version?: unknown } | null;
   /** IG1-core-3: the engine's derived class (`acp_input_governance | os_sandbox | none`). */
   governance_class?: unknown;
@@ -188,6 +195,12 @@ export interface SeatStanding {
   council_eligible: boolean;
   /** Present when `council_eligible` is false: the one reason, in the operator's words. */
   council_ineligible_reason?: string;
+  /** crew#916: whether the seat may be seated for WORK as far as the daemon can tell —
+   *  `seat_eligible_for_work` not false, under the same auth / bench / login gates as
+   *  `council_eligible`. */
+  work_eligible: boolean;
+  /** Present when `work_eligible` is false: the one reason, in the operator's words. */
+  work_ineligible_reason?: string;
 }
 
 /** The cause a "no credential" sentence names: `<source>: <its own words>` when they are plain, else the source alone (crew#771). */
@@ -238,64 +251,72 @@ export function seatStanding(
             ...(probe.signedIn ? {} : { auth_evidence: homeless(probe.detail) }),
           }
         : seatAuth(seat, signedIn);
-  const auth = read.auth;
   const login = loginCheck(seat.key, authFailure, probeInput);
-  const base: SeatStanding = {
+  const gate = standingGate(read, authFailure, probeInput, recentBench);
+  // The shared gate leads: a seat that is signed out (benched, login pending) says so in both
+  // roles, whatever its role flags; a role flag is the reason only when no gate holds.
+  const noRole = seat.enabled_for_council === false && seat.seat_eligible_for_work === false;
+  const councilReason = gate ?? (seat.enabled_for_council === false ? 'not enabled for council' : null);
+  const workReason =
+    gate ??
+    (seat.seat_eligible_for_work === false
+      ? noRole
+        ? 'not enabled for council or work'
+        : 'not eligible for work (a reviewer-only seat)'
+      : null);
+  return {
     ...read,
     ...login,
-    council_eligible: true,
+    council_eligible: councilReason === null,
+    ...(councilReason !== null ? { council_ineligible_reason: councilReason } : {}),
+    work_eligible: workReason === null,
+    ...(workReason !== null ? { work_ineligible_reason: workReason } : {}),
   };
-  if (seat.enabled_for_council === false) {
-    return { ...base, council_eligible: false, council_ineligible_reason: 'not enabled for council' };
-  }
-  if (!authUsable(auth)) {
-    return {
-      ...base,
-      council_eligible: false,
-      council_ineligible_reason:
-        authFailure !== null
-          ? `signed out — the seat itself reported no credential (${noCredentialCause(authFailure)}); sign it in from the Agents page`
-          : read.auth_source === 'probe'
-            ? `signed out — the seat's own auth check says ${probeWords(read.auth_evidence)}; sign it in from the Agents page`
-            : 'signed out — a council would bench this seat on its first ballot; sign it in from the Agents page',
-    };
+}
+
+/**
+ * The reason a seat can take NO role right now, whatever its role flags say (signed out, an active
+ * engine bench, a login check still running), or `null` — the gates `council_eligible` and
+ * `work_eligible` share (crew#916).
+ */
+function standingGate(
+  read: Pick<SeatStanding, 'auth' | 'auth_source' | 'auth_evidence'>,
+  authFailure: SeatAuthFailure | null,
+  probeInput: ProbeInput,
+  recentBench: SeatRecentBench | null,
+): string | null {
+  if (!authUsable(read.auth)) {
+    return authFailure !== null
+      ? `signed out — the seat itself reported no credential (${noCredentialCause(authFailure)}); sign it in from the Agents page`
+      : read.auth_source === 'probe'
+        ? `signed out — the seat's own auth check says ${probeWords(read.auth_evidence)}; sign it in from the Agents page`
+        : 'signed out — a council would bench this seat on its first ballot; sign it in from the Agents page';
   }
   // A seat the ENGINE benched in a recent run on its own refusal (`seatBenched`: out of quota, not
-  // installed, signed out at work time) stays out of councils until the window lifts or it does
-  // work again (`SeatHealthTracker.recentBenchFor`). Its sign-in may read fine — that is the case
-  // this exists for: since wicked-core#590 S5 no ballot finds such a seat before routing, and every
-  // new run handed it a unit. The reason leads with the engine's cause token, so the engine's
+  // installed, signed out at work time) stays out until the window lifts or it does work again
+  // (`SeatHealthTracker.recentBenchFor`). Its sign-in may read fine — that is the case this exists
+  // for: since wicked-core#590 S5 no ballot finds such a seat before routing, and every new run
+  // handed it a unit. The reason leads with the engine's cause token, so the engine's
   // `degradedReason` names it (`copilot (recent quota_exhausted — launcher)`).
   if (recentBench !== null) {
     const cause = recentBench.reason.split(' (', 1)[0]!.trim();
     const run = recentBench.run !== undefined ? ` in run ${recentBench.run.slice(0, 8)}` : '';
-    return {
-      ...base,
-      council_eligible: false,
-      council_ineligible_reason:
-        `recent ${cause} — the engine benched it${run} at ${hhmm(recentBench.at)} (${recentBench.source}: ` +
-        `${recentBench.reason}); eligible again at ${hhmm(recentBench.until)}, or sooner once it completes a turn`,
-    };
+    return (
+      `recent ${cause} — the engine benched it${run} at ${hhmm(recentBench.at)} (${recentBench.source}: ` +
+      `${recentBench.reason}); eligible again at ${hhmm(recentBench.until)}, or sooner once it completes a turn`
+    );
   }
   // crew#645: a seat that HAS a login check which has not answered is not routed to on the file's
   // word — a launch waits for the check (`SeatProbe.ensureFresh`), and anything that routes before
-  // it answers (the seconds after a boot) leaves the seat out of the council. `auth` stays
-  // `unknown`, so a chat still offers it (a chat is not a council; its first refusal signs it out).
+  // it answers (the seconds after a boot) leaves the seat out. `auth` stays `unknown`, so a chat
+  // still offers it (a chat is not a council; its first refusal signs it out).
   if (probeInput === 'pending' && authFailure === null) {
-    return {
-      ...base,
-      council_eligible: false,
-      council_ineligible_reason:
-        "login not verified yet — the seat's own auth check is still running; a launch waits for it, so launch again in a few seconds",
-    };
+    return "login not verified yet — the seat's own auth check is still running; a launch waits for it, so launch again in a few seconds";
   }
-  // (R5 / R5b, DES-L3 PR-3D) No `inactive` arm and no crew-classified bench: `health.status` is
-  // always `active` (observed errors stamp `lastErrorAt` only). The only bench read here is the
-  // ENGINE's own (`recentBench` above — its verdict, carried for a bounded window), never one crew
-  // predicts from its own count of failures. The runtime health reading is therefore not an INPUT
-  // to standing: the parameter is gone rather than silenced, so a caller cannot think it still
-  // decides something.
-  return base;
+  // (R5 / R5b, DES-L3 PR-3D) No `inactive` arm and no crew-classified bench: the only bench read
+  // here is the ENGINE's own (`recentBench` above), never one crew predicts from its own count of
+  // failures. The role flags are the caller's.
+  return null;
 }
 
 /** Why a seat was not seated (F-A45-011; `ChatSeatRefusal.source` on the wire): `auth` — signed
@@ -336,8 +357,11 @@ export function chatSeatAdmission(
     reasons.push('signed out — it cannot take a turn until it is signed in from the Agents page');
     source = 'auth';
   }
-  if (seat.enabled_for_council === false) {
-    reasons.push('disabled for the council, so it takes no turn');
+  // crew#916 (wicked-core#572): an ask is a run, so it seats a seat for WORK. `enabled_for_council`
+  // only says whether the seat casts a ballot; a work-only seat takes a turn. Only a seat with
+  // neither role is refused here.
+  if (seat.enabled_for_council === false && seat.seat_eligible_for_work === false) {
+    reasons.push('disabled for the council and for work, so it takes no turn');
   }
   // crew#1071: an ask is a run, and a launch already benches a seat the engine benched in a recent
   // run (out of quota, say). Seating it here anyway put an ask on that seat ALONE when the operator

@@ -255,15 +255,18 @@ describe('POST /chats — scope lifecycle over a fake engine', () => {
       { key: 'claude', acp: { acp_input_governance: true, os_sandbox: false } },
       { key: 'pi', acp: { acp_input_governance: false, os_sandbox: false } },
       { key: 'codex', acp: { acp_input_governance: false, os_sandbox: true } },
-      { key: 'agy', enabled_for_council: false },
+      // The built-in agy takes neither role (wicked-core#572); a work-only seat casts no ballot
+      // but takes a turn in an ask, which is a run (crew#916).
+      { key: 'agy', enabled_for_council: false, seat_eligible_for_work: false },
+      { key: 'worker', enabled_for_council: false, seat_eligible_for_work: true },
     ]);
     try {
       const scopedRes = await open({ chatId: 'dflt-scoped', repoRefs: ['alpha'] });
       expect(scopedRes.statusCode).toBe(201);
-      expect((scopedRes.json() as { seats: { cliKey: string }[] }).seats.map((x) => x.cliKey)).toEqual(['claude', 'pi', 'codex']);
+      expect((scopedRes.json() as { seats: { cliKey: string }[] }).seats.map((x) => x.cliKey)).toEqual(['claude', 'pi', 'codex', 'worker']);
       const scopedBody = scopedRes.json() as { refused: { cliKey: string; reason: string }[] };
       expect(scopedBody.refused.map((r) => r.cliKey)).toEqual(['agy']);
-      expect(scopedBody.refused[0]!.reason).toMatch(/disabled for the council/);
+      expect(scopedBody.refused[0]!.reason).toMatch(/disabled for the council and for work/);
       expect(broadcast).toEqual([{ type: 'chatSeatRefused', chat: 'dflt-scoped', cliKey: 'agy', reason: scopedBody.refused[0]!.reason, source: 'scope' }]);
     } finally {
       spy.mockRestore();

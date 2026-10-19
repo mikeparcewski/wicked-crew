@@ -49,6 +49,7 @@ describe('seatStanding — what a council would do with the seat, as far as the 
     expect(seatStanding({ key: 'claude', enabled_for_council: true }, true)).toEqual({
       auth: 'signed_in',
       council_eligible: true,
+      work_eligible: true,
       // crew#645: nothing asked the seat, and the standing says so.
       login_check: 'unverified', login_note: expect.stringMatching(/^login unverified/),
     });
@@ -69,6 +70,7 @@ describe('seatStanding — what a council would do with the seat, as far as the 
       free_tier: FREE_TIER_SEATS['opencode'],
       free_tier_source: 'crew-heuristic',
       council_eligible: true,
+      work_eligible: true,
       login_check: 'unverified', login_note: expect.stringMatching(/^login unverified/),
     });
   });
@@ -82,20 +84,55 @@ describe('seatStanding — what a council would do with the seat, as far as the 
   });
 
   it('unknown auth is eligible: refusing a seat the daemon cannot read would bench working keychain seats', () => {
-    expect(seatStanding({ key: 'agy' }, null)).toEqual({ auth: 'unknown', council_eligible: true, login_check: 'unverified', login_note: expect.stringMatching(/^login unverified/) });
+    expect(seatStanding({ key: 'agy' }, null)).toEqual({ auth: 'unknown', council_eligible: true, work_eligible: true, login_check: 'unverified', login_note: expect.stringMatching(/^login unverified/) });
   });
 
   it('the seat’s runtime health is not an INPUT any more — an observed error never makes a seat ineligible (R5); a disabled seat is not eligible', () => {
     // `seatStanding` no longer takes the health reading at all: `inactive` is never produced and the
     // one bench is the engine's per-run ballot ledger, so there is nothing left for health to decide.
     expect(seatStanding({ key: 'claude', enabled_for_council: true }, true).council_eligible).toBe(true);
+    // crew#916: `enabled_for_council: false` takes the ballot away and nothing more.
     const disabled = seatStanding({ key: 'claude', enabled_for_council: false }, true);
     expect(disabled).toEqual({
       auth: 'signed_in',
       council_eligible: false,
       council_ineligible_reason: 'not enabled for council',
+      work_eligible: true,
       login_check: 'unverified', login_note: expect.stringMatching(/^login unverified/),
     });
+  });
+});
+
+describe('seatStanding — the two roles are independent (crew#916, wicked-core#572)', () => {
+  it('a work-only seat (enabled_for_council=false, seat_eligible_for_work=true) is not council-eligible but IS work-eligible', () => {
+    const s = seatStanding({ key: 'worker', enabled_for_council: false, seat_eligible_for_work: true }, true);
+    expect(s).toMatchObject({ council_eligible: false, council_ineligible_reason: 'not enabled for council', work_eligible: true });
+    expect('work_ineligible_reason' in s).toBe(false);
+  });
+
+  it('a reviewer-only seat (enabled_for_council=true, seat_eligible_for_work=false) stays council-eligible and is not work-eligible', () => {
+    const s = seatStanding({ key: 'judge', enabled_for_council: true, seat_eligible_for_work: false }, true);
+    expect(s).toMatchObject({ council_eligible: true, work_eligible: false, work_ineligible_reason: expect.stringMatching(/reviewer-only/) });
+    expect('council_ineligible_reason' in s).toBe(false);
+  });
+
+  it('a seat with neither role (the built-in agy) is eligible for neither, and is not called reviewer-only', () => {
+    const s = seatStanding({ key: 'agy', enabled_for_council: false, seat_eligible_for_work: false }, true);
+    expect(s).toMatchObject({ council_eligible: false, work_eligible: false, work_ineligible_reason: 'not enabled for council or work' });
+  });
+
+  it('the shared gates hold BOTH roles and lead both reasons, whatever the role flags', () => {
+    const s = seatStanding({ key: 'codex', enabled_for_council: false, seat_eligible_for_work: true }, false);
+    expect(s.council_ineligible_reason).toMatch(/^signed out/);
+    expect(s.work_eligible).toBe(false);
+    // A no-role seat that is signed out says signed out, not its role flags.
+    const agy = seatStanding({ key: 'agy', enabled_for_council: false, seat_eligible_for_work: false }, false);
+    expect(agy.council_ineligible_reason).toMatch(/^signed out/);
+    expect(agy.work_ineligible_reason).toMatch(/^signed out/);
+    expect(s.work_ineligible_reason).toMatch(/signed out/);
+    const bench = { kind: 'quota_exhausted', reason: 'quota_exhausted (out of credits)', source: 'worker', at: '2026-10-18T10:00:00Z', until: '2026-10-18T10:30:00Z' } as never;
+    const benched = seatStanding({ key: 'codex', enabled_for_council: true }, true, null, undefined, bench);
+    expect(benched).toMatchObject({ council_eligible: false, work_eligible: false, work_ineligible_reason: expect.stringMatching(/^recent quota_exhausted/) });
   });
 });
 
@@ -196,7 +233,9 @@ describe('ASK-C2 path admission (codex on #810 r9) + IG1-crew-2: standing is the
     expect(chatSeatAdmission(pi, 'signed_in', true, 'path-bound')).toEqual({ ok: true });
     expect(chatSeatAdmission(codexBypass, 'signed_in', true, 'path-bound')).toEqual({ ok: true });
     expect(chatSeatAdmission(wrapped, 'signed_out', true, 'path-bound')).toMatchObject({ ok: false, source: 'auth' });
-    expect(chatSeatAdmission({ key: 'agy', enabled_for_council: false } as never, 'signed_in', true, 'path-bound')).toMatchObject({ ok: false, reason: expect.stringMatching(/disabled/) });
+    expect(chatSeatAdmission({ key: 'agy', enabled_for_council: false, seat_eligible_for_work: false } as never, 'signed_in', true, 'path-bound')).toMatchObject({ ok: false, reason: expect.stringMatching(/disabled/) });
+    // crew#916: an ask is work — a seat that only casts no ballot still takes a turn.
+    expect(chatSeatAdmission({ key: 'worker', enabled_for_council: false } as never, 'signed_in', true, 'path-bound')).toEqual({ ok: true });
   });
   it('path, unscoped: standing only; path, scoped but unbound: admitted and os_sandbox{seat_record | self} take a turn, none is refused by name with the mode', () => {
     expect(chatSeatAdmission(wrapped, 'signed_in', false, 'path')).toEqual({ ok: true });
