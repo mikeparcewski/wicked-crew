@@ -16,8 +16,9 @@
  *    `invalid_answer` when it answered but the engine's first-line, byte-for-byte check rejected it
  *    without naming another build (the pinned build on a later line, in brackets, coloured, after a
  *    `v`, or no version at all). A build is named by its id alone, pre-release and build suffixes
- *    included ({@link buildsNamed}): `1.17.18-beta` is another build; `opencode (1.17.18)`, a
- *    coloured `1.17.18` and `v1.17.18,` only present the pinned one;
+ *    included, and only as a whole token ({@link buildsNamed}): `1.17.18-beta` is another build,
+ *    `1.18.31.4` names none; `opencode (1.17.18)`, a coloured `1.17.18` and `v1.17.18,` only
+ *    present the pinned one;
  *  - `install_source`: how the binary on PATH was installed, read off its resolved path (no
  *    spawn): under `node_modules` = `npm`, under a Homebrew prefix = `brew`, else `other`; `null`
  *    when the binary is not on PATH. It lets the Agents page offer a real update command instead of
@@ -78,13 +79,15 @@ export type SeatVersionUnprovenWhy = 'no_answer' | 'different_build' | 'invalid_
 
 /** The ANSI escapes a `--version` may colour or link its answer with (CSI and OSC sequences). */
 const ANSI_ESCAPE = /\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\))/g;
-/** A build id: a semver core with its pre-release and build suffixes (`1.17.18`, `1.17.18-rc.1`,
- *  `1.17.18+build.5`). The presentation around it (`v`, brackets, a comma) is not part of it. */
-const BUILD_ID = /\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?/g;
+/** A build id, as a whole token: a semver core with its pre-release and build suffixes (`1.17.18`,
+ *  `1.17.18-rc.1`, `1.17.18+build.5`) with no word character or dot on either side, so `1.18.31.4`
+ *  and `x1.18.31` name none (codex r3 on #1084). One leading `v` (`v1.17.18`) is presentation, like
+ *  the brackets or comma around an id, and not part of it. */
+const BUILD_ID = /(?<![\w.])v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)(?![\w.])/g;
 
 /** The builds a `--version` answer names, in order, presentation stripped; `[]` when it names none. */
 export function buildsNamed(answer: string): string[] {
-  return answer.replace(ANSI_ESCAPE, '').match(BUILD_ID) ?? [];
+  return [...answer.replace(ANSI_ESCAPE, '').matchAll(BUILD_ID)].map((m) => m[1]!);
 }
 
 /**

@@ -1236,9 +1236,9 @@ export interface RosterSeat {
  *  `different_build` — the check answered naming a build other than the pinned one (`observed`);
  *  `invalid_answer` — the check answered, but in a shape it cannot confirm (its first line is not
  *  the pinned build byte for byte) and without naming another build. A build is named by its id
- *  alone, pre-release and build suffixes included (`1.18.31`, `1.17.18-rc.1`), never by the
- *  presentation around it: `opencode (1.17.18)`, a colour-coded `1.17.18` and `v1.17.18,` name only
- *  the pinned build; `1.17.18-beta` names another. */
+ *  alone, pre-release and build suffixes included (`1.18.31`, `1.17.18-rc.1`), only as a whole
+ *  token (`1.18.31.4` names none), never by the presentation around it: `opencode (1.17.18)`, a
+ *  colour-coded `1.17.18` and `v1.17.18,` name only the pinned build; `1.17.18-beta` names another. */
 export type SeatVersionUnprovenWhy = 'no_answer' | 'different_build' | 'invalid_answer';
 
 /**

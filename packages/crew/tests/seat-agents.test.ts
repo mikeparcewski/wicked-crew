@@ -554,6 +554,24 @@ describe('A6 issues', () => {
       }
     });
 
+    // codex r3 on #1084: a build id is a whole token. A four-component `1.18.31.4` or an attached
+    // `x1.18.31` names no build, so `observed` never names a build the probe did not report.
+    it('a token that is not exactly a semver id names no build: `1.18.31.4` and `x1.18.31` read invalid_answer without observed; a full suffixed id still reads different_build', async () => {
+      expect(buildsNamed('1.18.31.4')).toEqual([]);
+      expect(buildsNamed('x1.18.31')).toEqual([]);
+      expect(buildsNamed('1.18.31-rc.1+build.7')).toEqual(['1.18.31-rc.1+build.7']);
+      for (const observed of ['1.18.31.4', 'x1.18.31']) {
+        const { version, issue } = await over(observed, { matched: false, observed, pinned: '1.17.18' });
+        expect(version, observed).toMatchObject({ status: 'unproven', why: 'invalid_answer' });
+        expect(version, observed).not.toHaveProperty('observed');
+        expect(issue!.params, observed).toEqual({ why: 'invalid_answer', installed: observed, proven: '1.17.18' });
+      }
+      const full = '1.18.31-rc.1+build.7';
+      const { version, issue } = await over(full, { matched: false, observed: full, pinned: '1.17.18' });
+      expect(version).toMatchObject({ status: 'unproven', why: 'different_build', observed: full });
+      expect(issue!.message).toBe(`opencode ${full} is not the build its safety checks were proven on (1.17.18), so they switch off`);
+    });
+
     // codex r2 on #1084: the installed reading and the pin reading are cached apart. After an
     // upgrade the pin cache refreshes first and the installed one still reads the pinned build for
     // the rest of its TTL; the message must name the build the pin probe saw, never that reading.
