@@ -4403,6 +4403,11 @@ export function registerRoutes(
   async function resolveOpenGate(id: string): Promise<GateCacheEntry | null | 'no-log'> {
     const cached = gateCache.get(id);
     if (cached) return cached;
+    // Taken before the first await: a live event that opens or closes this run's gate while the
+    // durable row / log is read makes the hydrated entry stale, and `adopt`/`rebuild` then keep the
+    // live entry instead (crew#1083 review — a stale ord-3 row must not replace a live ord-4 gate,
+    // nor pass the POST route's `ord` check for it).
+    const revision = gateCache.revision(id);
     const durableRows =
       typeof adapter.interactionRequests === 'function'
         ? await adapter.interactionRequests(id, 'open')
@@ -4429,12 +4434,11 @@ export function registerRoutes(
         ...(gateKind !== undefined ? { gateKind } : {}),
         ...(frame !== undefined ? offeredChoices(frame) : {}),
       };
-      gateCache.adopt(id, entry);
-      return entry;
+      return gateCache.adopt(id, entry, revision) ?? null;
     }
     const events = await adapter.runEvents(id);
     if (events === null) return 'no-log';
-    return gateCache.rebuild(id, events) ?? null;
+    return gateCache.rebuild(id, events, revision) ?? null;
   }
 
   /** The unit an open gate holds: the named `ord`, else the open gate's, else the cursor's. */

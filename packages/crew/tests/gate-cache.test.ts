@@ -268,3 +268,109 @@ describe('GET /runs/:id/gate serves the offered choices (issue #969)', () => {
     },
   );
 });
+
+// crew#1083 review (codex P2): `resolveOpenGate` awaits the durable row and then the log. If a live
+// `resumed` + a new `awaitingHuman` land in that window, adopting the hydrated (older) entry would
+// overwrite the live gate — GET would serve the old prompt, and a POST naming the old ord would pass
+// the `ord` check and answer the new gate. A per-run revision, taken before the first await, makes
+// the live entry win.
+describe('GateCache: a live gate event beats an in-flight hydration (crew#1083 review)', () => {
+  const ord3 = { ord: 3, prompt: 'old gate', lifecycle: 'open' as const, receivedAt: '2026-10-18T00:00:00.000Z' };
+
+  it('adopt keeps the newer live gate when the revision moved', () => {
+    const cache = new GateCache();
+    const seen = cache.revision(RUN);
+    cache.ingest(logged('resumed', { ord: 3 }));
+    cache.ingest(awaitingHuman(4));
+    expect(cache.adopt(RUN, ord3, seen)?.ord).toBe(4);
+    expect(cache.get(RUN)?.ord).toBe(4);
+  });
+
+  it('adopt does not resurrect a gate that closed during the read', () => {
+    const cache = new GateCache();
+    const seen = cache.revision(RUN);
+    cache.ingest(logged('resumed', { ord: 3 }));
+    expect(cache.adopt(RUN, ord3, seen)).toBeUndefined();
+    expect(cache.get(RUN)).toBeUndefined();
+  });
+
+  it('rebuild keeps the newer live gate when the revision moved', () => {
+    const cache = new GateCache();
+    const seen = cache.revision(RUN);
+    cache.ingest(awaitingHuman(4));
+    expect(cache.rebuild(RUN, [awaitingHuman(3)], seen)?.ord).toBe(4);
+  });
+
+  it('an unchanged revision adopts; another run\'s events do not move it', () => {
+    const cache = new GateCache();
+    const seen = cache.revision(RUN);
+    cache.ingest({ type: 'awaitingHuman', session: 'other-run', ord: 9, prompt: 'x' } as CoreEvent);
+    expect(cache.adopt(RUN, ord3, seen)?.ord).toBe(3);
+    expect(cache.get(RUN)?.ord).toBe(3);
+  });
+});
+
+describe('resolveOpenGate: a stale durable row never replaces a live gate (crew#1083 review)', () => {
+  let app: FastifyInstance;
+  const gateCache = new GateCache();
+  const pending = new Map<string, () => void>();
+  const confirmCalls: unknown[][] = [];
+
+  beforeAll(async () => {
+    const mockAdapter = {
+      sessionsDetail: vi.fn().mockResolvedValue(['race-get', 'race-post'].map(awaitingView)),
+      listRepos: vi.fn().mockResolvedValue([]),
+      listWorkflows: () => BUILTIN_WORKFLOWS,
+      interactionRequests: vi.fn(async () => [
+        { kind: 'gate', ord: 3, prompt: 'The team disagrees on unit 3.', gate_kind: 'team_dispute', created_at: 1_785_614_004_730 },
+      ]),
+      // The FIRST log read per run is held until the test releases it; later reads answer at once.
+      runEvents: vi.fn((id: string) =>
+        new Promise((resolve) => {
+          const events = [disputeFrame(id)];
+          if (pending.has(id)) resolve(events);
+          else pending.set(id, () => resolve(events));
+        })),
+      confirmGate: vi.fn(async (...args: unknown[]) => {
+        confirmCalls.push(args);
+        return 'executing';
+      }),
+    };
+    app = Fastify({ logger: false });
+    registerRoutes(app, mockAdapter as unknown as CoreAdapter, gateCache, new ElicitationCache(), undefined, {
+      audit: { record: vi.fn(() => Date.now()) } as unknown as AuditLog,
+      authMode: 'off',
+    });
+    await app.ready();
+  });
+  afterAll(async () => {
+    await app.close();
+  });
+
+  /** While the durable read is parked on the log, another client answers ord 3 and ord 4 opens. */
+  async function answerAndReopenDuring(id: string): Promise<void> {
+    await vi.waitFor(() => expect(pending.has(id)).toBe(true));
+    gateCache.ingest({ type: 'resumed', session: id, ord: 3 } as unknown as CoreEvent);
+    gateCache.ingest({ type: 'awaitingHuman', session: id, ord: 4, prompt: 'Approve unit 4?', gateKind: 'deliver' } as unknown as CoreEvent);
+    pending.get(id)!();
+  }
+
+  it('GET serves the live ord-4 gate, and the cache keeps it', async () => {
+    const res = app.inject({ method: 'GET', url: '/api/v1/runs/race-get/gate' });
+    await answerAndReopenDuring('race-get');
+    const body = (await res).json() as Record<string, unknown>;
+    expect(body).toMatchObject({ ord: 4, prompt: 'Approve unit 4?', gateKind: 'deliver' });
+    expect(body).not.toHaveProperty('choices');
+    expect(gateCache.get('race-get')?.ord).toBe(4);
+  });
+
+  it('a POST naming the stale ord 3 is refused against the live ord 4', async () => {
+    const res = app.inject({ method: 'POST', url: '/api/v1/runs/race-post/gate', payload: { approve: true, ord: 3 } });
+    await answerAndReopenDuring('race-post');
+    const done = await res;
+    expect(done.statusCode).toBe(409);
+    expect(done.json()).toMatchObject({ code: 'gate_changed', openOrd: 4 });
+    expect(confirmCalls).toEqual([]);
+    expect(gateCache.get('race-post')?.ord).toBe(4);
+  });
+});

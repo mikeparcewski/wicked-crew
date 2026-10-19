@@ -100,6 +100,9 @@ export function offeredChoices(event: CoreEvent): { choices?: string[]; recommen
  * free to drift, and the drift would only ever show up after a restart — the exact condition nobody
  * exercises.
  */
+/** The event types `fold` acts on — the ones that open or close a run's gate. */
+const GATE_EVENTS = new Set(['awaitingHuman', 'resumed', 'sessionCompleted', 'runCancelled', 'sessionFailed']);
+
 function fold(entries: Map<string, GateCacheEntry>, event: CoreEvent): void {
   const session = typeof event.session === 'string' ? event.session : undefined;
   if (session === undefined) return;
@@ -152,10 +155,36 @@ function fold(entries: Map<string, GateCacheEntry>, event: CoreEvent): void {
  */
 export class GateCache {
   private readonly entries = new Map<string, GateCacheEntry>();
+  /**
+   * Per-run count of LIVE gate-opening and gate-closing events (crew#1083 review). A read that
+   * hydrates a gate asynchronously (the durable row, the log replay) takes the revision before its
+   * first await and hands it to `adopt`/`rebuild`; if a live event moved the run's gate meanwhile,
+   * the hydrated entry is stale and the live one wins. Never pruned: one number per run seen.
+   */
+  private readonly revisions = new Map<string, number>();
 
   /** Fold one live CoreEvent into the cache. */
   ingest(event: CoreEvent): void {
+    if (typeof event.session === 'string' && GATE_EVENTS.has(event.type)) {
+      this.revisions.set(event.session, this.revision(event.session) + 1);
+    }
     fold(this.entries, event);
+  }
+
+  /** The run's live gate revision — read it BEFORE an async hydration, pass it to `adopt`/`rebuild`. */
+  revision(runId: string): number {
+    return this.revisions.get(runId) ?? 0;
+  }
+
+  /**
+   * Set `entry` unless a live gate event arrived since `seenRevision` was read; then the cache's
+   * current entry (the newer gate, or none if it closed) stands and is returned instead. Without
+   * `seenRevision` the entry is set unconditionally (seeding).
+   */
+  private settle(runId: string, entry: GateCacheEntry | undefined, seenRevision: number | undefined): GateCacheEntry | undefined {
+    if (seenRevision !== undefined && seenRevision !== this.revision(runId)) return this.entries.get(runId);
+    if (entry) this.entries.set(runId, entry);
+    return entry;
   }
 
   /**
@@ -169,13 +198,15 @@ export class GateCache {
    * refused by the `status === 'awaiting_human'` check on `POST /runs/:id/gate`. So the worst a
    * stale replay can do is show a prompt that then declines to be approved, and `reconcile` drops
    * it on the next list. The failure mode is a confusing read, never a bad write.
+   *
+   * What it DOES guard is the race inside one read: pass the `revision(runId)` taken before the
+   * log read began, and a live gate event that landed during it wins over the replay (the POST
+   * route's `ord` check resolves through here, so a stale entry there could confirm the wrong gate).
    */
-  rebuild(runId: string, events: CoreEvent[]): GateCacheEntry | undefined {
+  rebuild(runId: string, events: CoreEvent[], seenRevision?: number): GateCacheEntry | undefined {
     const replayed = new Map<string, GateCacheEntry>();
     for (const event of events) fold(replayed, event);
-    const entry = replayed.get(runId);
-    if (entry) this.entries.set(runId, entry);
-    return entry;
+    return this.settle(runId, replayed.get(runId), seenRevision);
   }
 
   /** The cached open gate for a run, if any. */
@@ -188,10 +219,11 @@ export class GateCache {
    * §5.3). With that table, this cache is finally what its own comments always claimed — a
    * latency layer over durable truth: the route reads the table on a miss and parks the result
    * here so the next poll is a map hit. `rebuild` (event-log replay) remains the fallback for
-   * engines predating the table.
+   * engines predating the table. Pass the `revision(runId)` taken before the row was read, so a
+   * live gate event that landed during the read is not overwritten by the older row.
    */
-  adopt(runId: string, entry: GateCacheEntry): void {
-    this.entries.set(runId, entry);
+  adopt(runId: string, entry: GateCacheEntry, seenRevision?: number): GateCacheEntry | undefined {
+    return this.settle(runId, entry, seenRevision);
   }
 
   /** Drop cache entries whose run is no longer `awaiting_human` (self-healing on reconcile). */
