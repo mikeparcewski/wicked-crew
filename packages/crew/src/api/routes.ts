@@ -23,7 +23,7 @@ import type {
   RepoFinding,
 } from '../core/types.js';
 import { resolveCursorUnit } from '../core/cursor.js';
-import { detectRefusal, offeredChoices, replayOpenGate, type GateCache, type GateCacheEntry, type GateRead } from './gate-cache.js';
+import { detectRefusal, isOpenGate, offeredChoices, replayOpenGate, type GateCache, type GateRead, type GateResolution } from './gate-cache.js';
 import type { ElicitationCache } from './elicitation-cache.js';
 import { acceptanceRequirementOf, buildAcceptanceView } from '../qe/acceptance.js';
 import { runIdentityOf, wireIdentity } from '../core/run-identity.js';
@@ -4400,9 +4400,10 @@ export function registerRoutes(
    * event of the run's having landed meanwhile — `GateCache.resolve` re-runs a read one did
    * overlap, because neither side of such an overlap is known to be the newer (crew#1083 review).
    * The caller has already checked `awaiting_human`. `null` = the record holds no open gate;
-   * `'no-log'` = this build cannot read the log, so nothing can be said.
+   * `'no-log'` = this build cannot read the log, so nothing can be said; `'unstable'` = live gate
+   * events kept landing while the record was read, so nothing was verified (retry).
    */
-  async function resolveOpenGate(id: string): Promise<GateCacheEntry | null | 'no-log'> {
+  async function resolveOpenGate(id: string): Promise<GateResolution> {
     return gateCache.resolve(id, () => readOpenGate(id));
   }
 
@@ -4452,7 +4453,7 @@ export function registerRoutes(
       // A route set whose adapter cannot read the gate (a partial stub without `runEvents`) falls
       // back to the cursor unit, exactly as a log that records no open gate does.
       const open = await resolveOpenGate(run.session.id).catch(() => null);
-      gateOrd = open !== null && open !== 'no-log' ? open.ord : undefined;
+      gateOrd = isOpenGate(open) ? open.ord : undefined;
     }
     const units = run.units ?? [];
     return gateOrd !== undefined
@@ -4500,30 +4501,6 @@ export function registerRoutes(
     if (run.session.status !== 'awaiting_human') {
       return { code: 409, body: { error: `Run is not awaiting a human gate (status: ${run.session.status})` } };
     }
-    // api-types 0.44.0: a decision that names its gate answers THAT gate or nothing. When the
-    // daemon cannot tell which gate is open (no cache, no durable row, no log binding, or a log
-    // recording no open gate) it cannot confirm the named one either, so it refuses — the skin
-    // re-reads the gate and the person decides again. A request without `ord` is unchanged.
-    if (parsed.data.ord !== undefined) {
-      const open = await resolveOpenGate(id);
-      if (open === null || open === 'no-log') {
-        return { code: 409, body: {
-          error:
-            `Gate unknown: this decision names the gate before unit ${parsed.data.ord}, but the daemon cannot `
-            + 'tell which gate is open on this run — refresh and decide again.',
-          code: 'gate_unknown',
-        } };
-      }
-      if (open.ord !== parsed.data.ord) {
-        return { code: 409, body: {
-          error:
-            `Gate changed: this decision was made on the gate before unit ${parsed.data.ord}, but the open gate `
-            + `is before unit ${open.ord} — it was answered or replaced. Read the open gate before deciding.`,
-          code: 'gate_changed',
-          openOrd: open.ord,
-        } };
-      }
-    }
     // The gated unit — the named gate, else the open one, else the unit the run's cursor points at —
     // and its receipt as it stands when the person decides (wicked-core#850: every gate answer
     // carries it). An APPROVE that would run the deliver unit passes the delivery checks first.
@@ -4543,6 +4520,36 @@ export function registerRoutes(
     const steeringPropose =
       parsed.data.approve && isSteeringAuthorRun(run);
     const gatePrompt = steeringPropose ? gateCache.get(id)?.prompt : undefined;
+    // Decision integrity (api-types 0.44.0; crew#1083 round 3): a decision that names its gate
+    // answers THAT gate or nothing, and it is the RECORD that says which gate is open — the engine's
+    // durable `interaction_requests` row, re-read here, immediately before the confirm. Never the
+    // gate cache: that is a read optimisation for GET, and a stale or late-folded entry there once
+    // let a decision naming ord 3 pass while `confirmGate` (which takes no ord) answered ord 4. One
+    // check, in the one place every decision passes. A request without `ord` is unchanged.
+    if (parsed.data.ord !== undefined) {
+      const rows = typeof adapter.interactionRequests === 'function' ? await adapter.interactionRequests(id, 'open') : null;
+      const openGates = rows?.filter((r) => r.kind === 'gate') ?? [];
+      const row = openGates.length === 1 ? openGates[0] : undefined;
+      if (row === undefined) {
+        return { code: 409, body: {
+          error:
+            `Gate unknown: this decision names the gate before unit ${parsed.data.ord}, but the engine's record `
+            + (rows === null ? 'keeps no durable gate row' : `shows ${openGates.length} open gates`)
+            + ' for this run, so the daemon cannot confirm the named one — refresh and decide again.',
+          code: 'gate_unknown',
+        } };
+      }
+      const openOrd = row.ord ?? 0;
+      if (openOrd !== parsed.data.ord) {
+        return { code: 409, body: {
+          error:
+            `Gate changed: this decision was made on the gate before unit ${parsed.data.ord}, but the open gate `
+            + `is before unit ${openOrd} — it was answered or replaced. Read the open gate before deciding.`,
+          code: 'gate_changed',
+          openOrd,
+        } };
+      }
+    }
     try {
       // All five positionals, explicit `undefined` for the absent ones (DES-L1 PR-2; the
       // gate-arms tripwire pins the arity). An engine refusal (no creator to send back to,
@@ -4775,7 +4782,7 @@ export function registerRoutes(
       return 'is the operator\'s judgment of the work as it stands (no judge could rule)';
     }
     const open = await resolveOpenGate(run.session.id).catch(() => null);
-    if (open !== null && open !== 'no-log' && open.gateKind === 'review_adjudication') {
+    if (isOpenGate(open) && open.gateKind === 'review_adjudication') {
       return 'lands the reviewed work with its carried items';
     }
     return null;
@@ -4958,6 +4965,14 @@ export function registerRoutes(
     // runs parked before the engine grew the table. `resolveOpenGate` is that one resolution, shared
     // with the POST route's `ord` check.
     const open = await resolveOpenGate(id);
+    if (open === 'unstable') {
+      // Live gate events kept landing while the record was read, so nothing was verified
+      // (crew#1083 round 3). Retryable: the next read sees a quieter run.
+      return reply.code(503).send({
+        error: 'Gate unstable: live gate events kept landing while the daemon read this run\'s open gate — retry.',
+        code: 'gate_unstable',
+      });
+    }
     if (open === 'no-log') {
       // Now — and only now — 503 is the honest answer: this run really is holding for a human, and
       // this build cannot say what it is asking. Distinct cause, distinct message; answering "no

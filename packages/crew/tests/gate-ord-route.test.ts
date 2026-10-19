@@ -59,14 +59,22 @@ describe('POST /runs/:id/gate with ord', () => {
         view('run-durable', 'awaiting_human', 5),
         view('run-unknown', 'awaiting_human', 1),
         view('run-empty', 'awaiting_human', 1),
+        view('run-stale-cache', 'awaiting_human', 4),
+        view('run-cache-only', 'awaiting_human', 2),
       ]),
       listRepos: vi.fn().mockResolvedValue([]),
       listWorkflows: () => BUILTIN_WORKFLOWS,
-      // The engine's durable open-prompt row: only run-durable has one (a restart emptied the cache).
-      interactionRequests: vi.fn(async (id: string) =>
-        id === 'run-durable'
-          ? [{ kind: 'gate', ord: 5, prompt: 'Approve unit 5?', created_at: '2026-09-26T10:00:00Z' }]
-          : []),
+      // The engine's durable open-gate row — what authorizes a decision that names its gate
+      // (crew#1083 round 3). run-cached: the record agrees with the cached gate. run-durable: only
+      // the row (a restart emptied the cache). run-stale-cache: the cache lags the record (ord 3
+      // cached, ord 4 open). run-cache-only: a cached gate the record does not show.
+      interactionRequests: vi.fn(async (id: string) => {
+        const row = (ord: number) => [{ kind: 'gate', ord, prompt: `Approve unit ${ord}?`, created_at: '2026-09-26T10:00:00Z' }];
+        if (id === 'run-cached') return row(2);
+        if (id === 'run-durable') return row(5);
+        if (id === 'run-stale-cache') return row(4);
+        return [];
+      }),
       // run-unknown: no event-log binding at all. run-empty: a log that records no open gate.
       runEvents: vi.fn(async (id: string) => (id === 'run-empty' ? [] : null)),
       confirmGate: vi.fn(async (...args: unknown[]) => {
@@ -85,6 +93,8 @@ describe('POST /runs/:id/gate with ord', () => {
     confirmCalls.length = 0;
     recorded.length = 0;
     gateCache.adopt('run-cached', { ord: 2, prompt: 'Approve unit 2?', lifecycle: 'open', receivedAt: '2026-09-26T10:00:00Z' });
+    gateCache.adopt('run-stale-cache', { ord: 3, prompt: 'Approve unit 3?', lifecycle: 'open', receivedAt: '2026-09-26T10:00:00Z' });
+    gateCache.adopt('run-cache-only', { ord: 2, prompt: 'Approve unit 2?', lifecycle: 'open', receivedAt: '2026-09-26T10:00:00Z' });
   });
   afterAll(async () => {
     await app.close();
@@ -133,6 +143,25 @@ describe('POST /runs/:id/gate with ord', () => {
     }
     expect(confirmCalls).toEqual([]);
     expect(recorded).toEqual([]);
+  });
+
+  it('decision integrity (crew#1083 round 3): the RECORD authorizes — cache ord 3, row ord 4: ord 3 is refused, ord 4 confirmed', async () => {
+    // A stale or late-folded cache entry once let a decision naming ord 3 pass while confirmGate
+    // (which takes no ord) answered the real ord-4 gate. The row is re-read right before the confirm.
+    const stale = await gate('run-stale-cache', { approve: true, ord: 3 });
+    expect(stale.statusCode).toBe(409);
+    expect(stale.json()).toMatchObject({ code: 'gate_changed', openOrd: 4 });
+    expect(confirmCalls).toEqual([]);
+    const real = await gate('run-stale-cache', { approve: true, ord: 4 });
+    expect(real.statusCode).toBe(200);
+    expect(confirmCalls).toHaveLength(1);
+  });
+
+  it('a cached gate the record does not show authorizes nothing: 409 gate_unknown', async () => {
+    const res = await gate('run-cache-only', { approve: true, ord: 2 });
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ code: 'gate_unknown' });
+    expect(confirmCalls).toEqual([]);
   });
 
   it('without ord, an unresolvable open gate keeps today\'s behaviour (200)', async () => {

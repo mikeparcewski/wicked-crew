@@ -152,6 +152,17 @@ export function replayOpenGate(runId: string, events: CoreEvent[]): GateCacheEnt
  */
 export type GateRead = GateCacheEntry | null | 'no-log';
 
+/**
+ * What `GateCache.resolve` yields: a read's result, or `'unstable'` — live gate events kept landing
+ * while the record was read, so nothing could be verified (crew#1083 round 3). Retryable.
+ */
+export type GateResolution = GateRead | 'unstable';
+
+/** Narrows a resolution to an open gate: `null`, `'no-log'` and `'unstable'` are not one. */
+export function isOpenGate(resolution: GateResolution | undefined): resolution is GateCacheEntry {
+  return typeof resolution === 'object' && resolution !== null;
+}
+
 /** The one log call the cache makes (`resolve`): `console` by default, the daemon's logger in `server.ts`. */
 export interface GateCacheLog {
   warn(message: string): void;
@@ -217,24 +228,40 @@ export class GateCache {
    * naming ord 3 pass the gate check and answer ord 4. So no winner is picked. The read is run
    * again, from scratch: the engine writes the row with the pause, so a re-read begun after the
    * overlapping frame arrived reflects whatever that frame announced, and the first read that
-   * completes with nothing having landed is adopted. After `RESOLVE_ATTEMPTS` overlapped reads the
-   * cache's current entry stands (`null` when there is none) and the run is logged once.
+   * completes with nothing having landed is adopted.
+   *
+   * A clean read is the record's word in BOTH directions (crew#1083 round 3): a gate it finds
+   * replaces whatever an overlapped `ingest` folded meanwhile, and "no open gate" / "cannot read"
+   * EVICTS it — otherwise a late frame folded during attempt one outlived the clean attempt two
+   * that found its gate already answered, and was served as a cache hit, unread, from then on. A
+   * read that throws evicts the same way. After `RESOLVE_ATTEMPTS` overlapped reads nothing was
+   * verified, so nothing is served: the entry is evicted and the result is `'unstable'`, never the
+   * unverified entry — an ordinary ordered backlog (`awaitingHuman(2)`, `resumed(2)`,
+   * `awaitingHuman(3)`, one landing per read) left the cache holding ord 3 while every read found
+   * ord 4. The run is logged once.
    */
-  async resolve(runId: string, read: () => Promise<GateRead>): Promise<GateRead> {
+  async resolve(runId: string, read: () => Promise<GateRead>): Promise<GateResolution> {
     const cached = this.entries.get(runId);
     if (cached) return cached;
     for (let attempt = 1; attempt <= RESOLVE_ATTEMPTS; attempt++) {
       const seen = this.revision(runId);
-      const found = await read();
-      if (this.revision(runId) === seen) {
-        if (found !== null && found !== 'no-log') this.entries.set(runId, found);
-        return found;
+      let found: GateRead;
+      try {
+        found = await read();
+      } catch (err) {
+        this.entries.delete(runId);
+        throw err;
       }
+      if (this.revision(runId) !== seen) continue;
+      if (isOpenGate(found)) this.entries.set(runId, found);
+      else this.entries.delete(runId);
+      return found;
     }
+    this.entries.delete(runId);
     this.log.warn(
-      `gate cache: live gate events for run ${runId} overlapped ${RESOLVE_ATTEMPTS} reads of its open gate; serving the live entry`,
+      `gate cache: live gate events for run ${runId} overlapped ${RESOLVE_ATTEMPTS} reads of its open gate; nothing verified, serving no gate`,
     );
-    return this.entries.get(runId) ?? null;
+    return 'unstable';
   }
 
   /** The cached open gate for a run, if any. */

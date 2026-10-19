@@ -1557,7 +1557,13 @@ export interface RunDiff {
   base?: string;
 }
 
-/** The daemon's cached open-gate record (`GET /runs/:id/gate`, DES-STUDIO-001 §3.3). */
+/**
+ * The daemon's cached open-gate record (`GET /runs/:id/gate`, DES-STUDIO-001 §3.3).
+ *
+ * (api-types 0.131.0) The read answers **503** `{ error, code: 'gate_unstable' }` when live gate
+ * events kept landing while the daemon read the run's record and nothing could be verified — retry.
+ * A decision is never authorized from this record: see {@link GateDecision.ord}.
+ */
 export interface GateInfo {
   runId: string;
   ord: number;
@@ -1688,7 +1694,10 @@ export interface GateDecision {
    * mismatch, confirming nothing: the gate was answered elsewhere or replaced while the decision
    * waited (a skin's undo window). When the daemon cannot tell which gate is open it answers
    * **409** `{ error, code: 'gate_unknown' }` — refresh the gate and decide again. Absent = today's
-   * behaviour (no gate check).
+   * behaviour (no gate check). (api-types 0.131.0) The comparison is made against the engine's
+   * durable gate row, re-read immediately before the confirm — never the daemon's gate cache — so
+   * a named decision answers the gate the record shows open, or nothing: `gate_unknown` when the
+   * record shows no open gate or more than one.
    */
   ord?: number;
 }

@@ -1414,8 +1414,9 @@ export async function readStoryline(
 }
 
 export interface WalkthroughRouteDeps {
-  /** The run's open gate (the routes' shared resolution); `'no-log'` = this build cannot say. */
-  resolveOpenGate?: (runId: string) => Promise<{ ord: number } | null | 'no-log'>;
+  /** The run's open gate (the routes' shared resolution); `'no-log'` = this build cannot say;
+   *  `'unstable'` = live gate events kept landing while it was read (retry). */
+  resolveOpenGate?: (runId: string) => Promise<{ ord: number } | null | 'no-log' | 'unstable'>;
   audit?: AuditLog;
 }
 
@@ -1462,6 +1463,7 @@ export function registerWalkthroughRoutes(app: FastifyInstance, adapter: CoreAda
       if (deps.resolveOpenGate === undefined) return reply.code(503).send({ error: 'this daemon cannot resolve the open gate' });
       const open = await deps.resolveOpenGate(id);
       if (open === 'no-log') return reply.code(503).send({ error: 'gate history is unavailable: this wicked-core build has no event-log read binding' });
+      if (open === 'unstable') return reply.code(503).send({ error: 'the open gate could not be read: live gate events kept landing — retry', code: 'gate_unstable' });
       if (open === null) return noEscalation('no gate is open');
       const isEscalated = (u: WorkUnit | null): u is WorkUnit => u !== null && u.ord === open.ord && u.denial_reason !== null;
       const pair = named.find((p) => isEscalated(p.review) || isEscalated(p.plan));
@@ -1482,7 +1484,7 @@ export function registerWalkthroughRoutes(app: FastifyInstance, adapter: CoreAda
       // The escalation could have been answered while the file was written: say so, rather than a
       // 200 that implies the next recording uses it (codex on WT-W3).
       const after = await deps.resolveOpenGate(id);
-      const still = (await runById(id))?.session.status === 'awaiting_human' && after !== null && after !== 'no-log' && after.ord === open.ord;
+      const still = (await runById(id))?.session.status === 'awaiting_human' && after !== null && after !== 'no-log' && after !== 'unstable' && after.ord === open.ord;
       if (!still) {
         return reply.code(409).send({
           error: 'the storyline was written, but the escalation was answered meanwhile; open the walkthrough again before relying on it',

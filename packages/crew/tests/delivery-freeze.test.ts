@@ -91,7 +91,13 @@ describe('/deliveries/freeze and the deliver gate', () => {
       sessionsDetail: vi.fn().mockResolvedValue([view(RUN, 'awaiting_human'), view('run-review', 'awaiting_human'), view('run-done', 'completed')]),
       listRepos: vi.fn().mockResolvedValue([]),
       listWorkflows: () => BUILTIN_WORKFLOWS,
-      interactionRequests: vi.fn(async () => []),
+      // The engine's durable open-gate row for the gate a test parks its run at, written with the
+      // pause: here the record and the cache agree. A decision is authorized by the record, never the
+      // cache (crew#1083 round 3); the disagreeing case is pinned in gate-ord-route.test.ts.
+      interactionRequests: vi.fn(async (id: string) => {
+        const open = gateCache.get(id);
+        return open === undefined ? [] : [{ kind: 'gate', ord: open.ord, prompt: open.prompt, created_at: open.receivedAt }];
+      }),
       runEvents: vi.fn(async () => null),
       confirmGate: vi.fn(async (...args: unknown[]) => {
         confirmCalls.push(args);

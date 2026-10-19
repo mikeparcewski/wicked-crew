@@ -349,19 +349,50 @@ describe('GateCache.resolve: a read a live gate event overlapped is run again, n
     expect(read).toHaveBeenCalledTimes(1);
   });
 
-  it('after three overlapped reads the live entry stands, nothing read is adopted, and it is logged once', async () => {
-    const warn = vi.fn();
-    const cache = new GateCache({ warn });
-    // Every read is overlapped: a late ord-3 frame lands during each one.
+  it('a clean "no open gate" after an overlapped read EVICTS what the late frame folded (agy, round 3)', async () => {
+    // Attempt one is overlapped by a late awaitingHuman(3), which `ingest` folds into the cache;
+    // attempt two reads cleanly and finds gate 3 already answered. Round 2 returned null and left
+    // ord 3 in the cache, where every later resolve() served it as a hit, unread.
+    for (const clean of [null, 'no-log'] as const) {
+      const cache = new GateCache();
+      const read = reading(cache, [awaitingHuman(3)], gate(3), clean);
+      expect(await cache.resolve(RUN, read)).toBe(clean);
+      expect(cache.get(RUN)).toBeUndefined();
+      expect(read).toHaveBeenCalledTimes(2);
+      // Not a cache hit now: the next resolve reads again.
+      expect(await cache.resolve(RUN, read)).toBe(clean);
+      expect(read).toHaveBeenCalledTimes(3);
+    }
+  });
+
+  it('a read that throws after an overlap evicts what the late frame folded; the error propagates', async () => {
+    const cache = new GateCache();
     const read = vi.fn(async (): Promise<GateRead> => {
       cache.ingest(awaitingHuman(3));
+      throw new Error('binding failed');
+    });
+    await expect(cache.resolve(RUN, read)).rejects.toThrow('binding failed');
+    expect(cache.get(RUN)).toBeUndefined();
+  });
+
+  it('an ordered backlog, one frame per read, exhausts the reads: "unstable", the unverified entry evicted, logged once (codex, round 3)', async () => {
+    // awaitingHuman(2), resumed(2), awaitingHuman(3) are pumped late, one during each read, while
+    // every read finds ord 4 open. Round 2 served the cache's ord 3 here, unverified, and a
+    // decision naming ord 3 then answered ord 4.
+    const warn = vi.fn();
+    const cache = new GateCache({ warn });
+    const backlog = [awaitingHuman(2), logged('resumed', { ord: 2 }), awaitingHuman(3)];
+    const read = vi.fn(async (): Promise<GateRead> => {
+      cache.ingest(backlog.shift()!);
       return gate(4);
     });
-    expect(await cache.resolve(RUN, read)).toMatchObject({ ord: 3 });
-    expect(cache.get(RUN)).not.toEqual(gate(4));
+    expect(await cache.resolve(RUN, read)).toBe('unstable');
+    expect(cache.get(RUN)).toBeUndefined();
     expect(read).toHaveBeenCalledTimes(3);
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn.mock.calls[0]?.[0]).toContain(RUN);
+    // Quiet again: the next resolve reads, and the record's ord 4 is adopted.
+    expect(await cache.resolve(RUN, reading(cache, [], gate(4)))).toEqual(gate(4));
   });
 });
 
@@ -371,19 +402,36 @@ describe('resolveOpenGate: neither a stale row nor a late frame wins a race (cre
   const gateCache = new GateCache({ warn });
   /** The engine's open-gate row per run, by ord. A test moves it exactly when the engine would. */
   const rows = new Map<string, number>([
-    ['late-frame-get', 4], ['late-frame-post', 4], ['late-resumed', 4], ['stale-row-get', 3], ['stale-row-post', 3],
+    ['late-frame-get', 4], ['late-frame-post', 4], ['late-resumed', 4], ['stale-row-get', 3], ['stale-row-post', 3], ['backlog-get', 4],
   ]);
+  /** Every run the routes know; `evict-then-move` starts with NO open row (its gate 3 was answered). */
+  const runs = [...rows.keys(), 'evict-then-move'];
+  /** Runs whose FIRST log read is held until the test releases it. */
+  const parkFirst = new Set(['late-frame-get', 'late-resumed', 'stale-row-get']);
   const pending = new Map<string, () => void>();
+  /** Frames the engine's pump delivers late — one lands during each log read of that run. */
+  const landings = new Map<string, CoreEvent[]>();
   const confirmCalls: unknown[][] = [];
-  const interactionRequests = vi.fn(async (id: string) => [
-    { kind: 'gate', ord: rows.get(id), prompt: `Gate before unit ${rows.get(id)}.`, gate_kind: 'team_dispute', created_at: 1_785_614_004_730 },
-  ]);
+  const interactionRequests = vi.fn(async (id: string) => {
+    const ord = rows.get(id);
+    return ord === undefined ? [] : [{ kind: 'gate', ord, prompt: `Gate before unit ${ord}.`, gate_kind: 'team_dispute', created_at: 1_785_614_004_730 }];
+  });
   /** The run's log: ord 3 offered approve/reject and was answered; ord 4 offers the dispute set. */
   const log = (id: string): CoreEvent[] => [
     disputeFrame(id, { ord: 3, choices: ['approve', 'reject'], recommended: 0 }, 1),
     { type: 'resumed', session: id, ord: 3, ts: 2 } as unknown as CoreEvent,
-    disputeFrame(id, { ord: 4 }, 3),
+    ...(id === 'evict-then-move' ? [] : [disputeFrame(id, { ord: 4 }, 3)]),
   ];
+  // A late frame, if the pump has one for this run, lands during the read. For the parked runs the
+  // FIRST log read is held until the test releases it; later reads answer at once.
+  const runEvents = vi.fn((id: string) => {
+    const late = landings.get(id)?.shift();
+    if (late !== undefined) gateCache.ingest(late);
+    return new Promise<CoreEvent[]>((resolve) => {
+      if (!parkFirst.has(id) || pending.has(id)) resolve(log(id));
+      else pending.set(id, () => resolve(log(id)));
+    });
+  });
   /** The ord-3 frame, delivered by the engine's pump after its row already showed ord 4 open. */
   const lateFrame3 = (id: string): CoreEvent =>
     ({ type: 'awaitingHuman', session: id, ord: 3, prompt: 'Gate before unit 3.', gateKind: 'team_dispute', choices: ['approve', 'reject'], recommended: 0 }) as unknown as CoreEvent;
@@ -396,16 +444,11 @@ describe('resolveOpenGate: neither a stale row nor a late frame wins a race (cre
 
   beforeAll(async () => {
     const mockAdapter = {
-      sessionsDetail: vi.fn().mockResolvedValue([...rows.keys()].map(awaitingView)),
+      sessionsDetail: vi.fn().mockResolvedValue(runs.map(awaitingView)),
       listRepos: vi.fn().mockResolvedValue([]),
       listWorkflows: () => BUILTIN_WORKFLOWS,
       interactionRequests,
-      // The FIRST log read per run is held until the test releases it; later reads answer at once.
-      runEvents: vi.fn((id: string) =>
-        new Promise<CoreEvent[]>((resolve) => {
-          if (pending.has(id)) resolve(log(id));
-          else pending.set(id, () => resolve(log(id)));
-        })),
+      runEvents,
       confirmGate: vi.fn(async (...args: unknown[]) => {
         confirmCalls.push(args);
         return 'executing';
@@ -432,6 +475,7 @@ describe('resolveOpenGate: neither a stale row nor a late frame wins a race (cre
     pending.get(id)!();
   }
   const rowReads = (id: string) => interactionRequests.mock.calls.filter(([run]) => run === id).length;
+  const logReads = (id: string) => runEvents.mock.calls.filter(([run]) => run === id).length;
 
   it('a late ord-3 awaitingHuman during the read of the ord-4 row: GET serves ord 4, from a second read', async () => {
     const id = 'late-frame-get';
@@ -444,15 +488,16 @@ describe('resolveOpenGate: neither a stale row nor a late frame wins a race (cre
     expect(gateCache.get(id)?.ord).toBe(4);
   });
 
-  it('… and a POST naming ord 3 is refused against ord 4; nothing is confirmed', async () => {
+  it('… and a POST naming ord 3 answers to the RECORD, not to the late frame the cache holds: 409, nothing confirmed, no log read', async () => {
     const id = 'late-frame-post';
-    const res = app.inject({ method: 'POST', url: `/api/v1/runs/${id}/gate`, payload: { approve: true, ord: 3 } });
-    await whileFirstReadIsParked(id, () => gateCache.ingest(lateFrame3(id)));
-    const done = await res;
-    expect(done.statusCode).toBe(409);
-    expect(done.json()).toMatchObject({ code: 'gate_changed', openOrd: 4 });
+    gateCache.ingest(lateFrame3(id)); // the cache holds the late ord-3 frame; the record shows ord 4
+    const res = await app.inject({ method: 'POST', url: `/api/v1/runs/${id}/gate`, payload: { approve: true, ord: 3 } });
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ code: 'gate_changed', openOrd: 4 });
     expect(confirmCalls).toEqual([]);
-    expect(gateCache.get(id)?.ord).toBe(4);
+    // A named decision is authorized by the row alone: one row read, no cache or log resolution.
+    expect(rowReads(id)).toBe(1);
+    expect(logReads(id)).toBe(0);
   });
 
   it('a late resumed(3) during the read of the ord-4 row: ord 4 is still served, not a false 404', async () => {
@@ -476,17 +521,57 @@ describe('resolveOpenGate: neither a stale row nor a late frame wins a race (cre
     expect(gateCache.get(id)?.ord).toBe(4);
   });
 
-  it('round 1: … and a POST naming the stale ord 3 is refused against the live ord 4', async () => {
+  it('round 1: … and once the engine has moved the row to ord 4, a POST naming the stale ord 3 is refused and ord 4 is confirmed', async () => {
     const id = 'stale-row-post';
-    const res = app.inject({ method: 'POST', url: `/api/v1/runs/${id}/gate`, payload: { approve: true, ord: 3 } });
-    await whileFirstReadIsParked(id, engineMovesOn(id));
-    const done = await res;
-    expect(done.statusCode).toBe(409);
-    expect(done.json()).toMatchObject({ code: 'gate_changed', openOrd: 4 });
+    engineMovesOn(id)(); // the row is ord 4; the live frames fold ord 4 into the cache
+    const stale = await app.inject({ method: 'POST', url: `/api/v1/runs/${id}/gate`, payload: { approve: true, ord: 3 } });
+    expect(stale.statusCode).toBe(409);
+    expect(stale.json()).toMatchObject({ code: 'gate_changed', openOrd: 4 });
     expect(confirmCalls).toEqual([]);
+    const real = await app.inject({ method: 'POST', url: `/api/v1/runs/${id}/gate`, payload: { approve: true, ord: 4 } });
+    expect(real.statusCode).toBe(200);
+    expect(confirmCalls).toHaveLength(1);
+    expect(logReads(id)).toBe(0);
   });
 
-  it('no read was given up on', () => {
-    expect(warn).not.toHaveBeenCalled();
+  it('an ordered backlog landing one frame per read: GET is a retryable 503 gate_unstable, nothing is served from the cache (codex, round 3)', async () => {
+    const id = 'backlog-get';
+    landings.set(id, [
+      { type: 'awaitingHuman', session: id, ord: 2, prompt: 'Gate before unit 2.' } as unknown as CoreEvent,
+      { type: 'resumed', session: id, ord: 2 } as unknown as CoreEvent,
+      { type: 'awaitingHuman', session: id, ord: 3, prompt: 'Gate before unit 3.' } as unknown as CoreEvent,
+    ]);
+    const res = await app.inject({ method: 'GET', url: `/api/v1/runs/${id}/gate` });
+    expect(res.statusCode).toBe(503);
+    expect(res.json()).toMatchObject({ code: 'gate_unstable' });
+    expect(rowReads(id)).toBe(3);
+    expect(gateCache.get(id)).toBeUndefined();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]?.[0])).toContain(id);
+    // Quiet again: the next GET reads and serves the record's ord 4.
+    const again = await app.inject({ method: 'GET', url: `/api/v1/runs/${id}/gate` });
+    expect(again.statusCode).toBe(200);
+    expect(again.json()).toMatchObject({ ord: 4, choices: DISPUTE, recommended: 1 });
   });
+
+  it('a late frame for an answered gate is evicted by the clean read that finds no gate; when ord 4 then opens, ord 3 cannot answer it (agy, round 3)', async () => {
+    const id = 'evict-then-move';
+    // The pump delivers awaitingHuman(3) during the first log read; the record shows gate 3 answered and nothing open.
+    landings.set(id, [{ type: 'awaitingHuman', session: id, ord: 3, prompt: 'Gate before unit 3.' } as unknown as CoreEvent]);
+    const first = await app.inject({ method: 'GET', url: `/api/v1/runs/${id}/gate` });
+    expect(first.statusCode).toBe(404);
+    expect(gateCache.get(id)).toBeUndefined();
+    expect(rowReads(id)).toBe(2);
+    // Not served from the cache now: another GET reads again, and still finds no gate.
+    expect((await app.inject({ method: 'GET', url: `/api/v1/runs/${id}/gate` })).statusCode).toBe(404);
+    expect(rowReads(id)).toBe(3);
+    // The run pauses at ord 4 before awaitingHuman(4) is pumped: a decision naming ord 3 is refused by the record.
+    rows.set(id, 4);
+    const stale = await app.inject({ method: 'POST', url: `/api/v1/runs/${id}/gate`, payload: { approve: true, ord: 3 } });
+    expect(stale.statusCode).toBe(409);
+    expect(stale.json()).toMatchObject({ code: 'gate_changed', openOrd: 4 });
+    expect(confirmCalls).toEqual([]);
+    expect((await app.inject({ method: 'GET', url: `/api/v1/runs/${id}/gate` })).json()).toMatchObject({ ord: 4 });
+  });
+
 });
