@@ -12,7 +12,7 @@ mentioned only where a daemon release depends on them.
 
 ## [0.15.2] — 2026-10-19
 
-A patch release: the daemon ships wicked-vault and hands the engine its bin, a seat's council and work roles are read separately, `version_unproven` says why, an MCP approval can no longer race a save or removal, and a new engine and studio. Pins: wicked-core-ts ^0.15.2, wicked-studio ^0.11.2, wicked-vault ^0.8.0 (new runtime dependency), wicked-interactive ^0.14.1 (bridge floor, unchanged), wicked-crew-api-types 0.131.0.
+A patch release: the daemon ships wicked-vault and hands the engine its bin, a seat's council and work roles are read separately, `version_unproven` says why, an MCP approval can no longer race a save or removal, and a new engine and studio (#1082, #1084, #1085, #1086; crew#1083 is not in this release). Pins: wicked-core-ts ^0.15.2, wicked-studio ^0.11.2, wicked-vault ^0.8.0 (new runtime dependency), wicked-interactive ^0.14.1 (bridge floor, unchanged), wicked-crew-api-types 0.131.0.
 
 ### Changed
 - **The engine is wicked-core-ts 0.15.2.** A claude container sign-in keeps the whole `claude setup-token` token, even when it was copied across the TUI's wrapped rows. Engine startup sweeps member views a crashed engine left behind, never one a live turn holds. Team members read the repository through a read-only per-turn view.
