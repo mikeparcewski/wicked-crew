@@ -198,7 +198,9 @@ describe('GET /runs/:id/gate serves the offered choices (issue #969)', () => {
       sessionsDetail: vi.fn().mockResolvedValue(ids.map(awaitingView)),
       listRepos: vi.fn().mockResolvedValue([]),
       listWorkflows: () => BUILTIN_WORKFLOWS,
-      interactionRequests: vi.fn(async (id: string) => (id.startsWith('run-durable') ? [durableRow] : [])),
+      // The engine writes each gate's row with the pause, before it emits the frame: the cached runs
+      // have theirs too, and a GET judges the cache by it (crew#1083 round 7).
+      interactionRequests: vi.fn(async (id: string) => (id.startsWith('run-durable') || id === 'run-live' || id === 'run-plain' ? [durableRow] : [])),
       runEvents: vi.fn(async (id: string) => {
         if (id === 'run-durable-nolog') return null;
         if (id === 'run-durable-throws') throw new Error('binding failed');
@@ -508,6 +510,8 @@ describe('resolveOpenGate: neither a stale row nor a late frame wins a race (cre
     pending.get(id)!();
   }
   const rowReads = (id: string) => interactionRequests.mock.calls.filter(([run]) => run === id).length;
+  // One log read per hydration attempt (`readOpenGate` enriches a row from the log, or replays it).
+  // A GET also reads the rows once before it consults the cache (round 7), so GET tests count these.
   const logReads = (id: string) => runEvents.mock.calls.filter(([run]) => run === id).length;
 
   it('a late ord-3 awaitingHuman during the read of the ord-4 row: GET serves ord 4, from a second read', async () => {
@@ -517,7 +521,7 @@ describe('resolveOpenGate: neither a stale row nor a late frame wins a race (cre
     const done = await res;
     expect(done.statusCode).toBe(200);
     expect(done.json()).toMatchObject({ ord: 4, gateKind: 'team_dispute', choices: DISPUTE, recommended: 1 });
-    expect(rowReads(id)).toBe(2);
+    expect(logReads(id)).toBe(2);
     expect(gateCache.get(id)?.ord).toBe(4);
   });
 
@@ -540,7 +544,7 @@ describe('resolveOpenGate: neither a stale row nor a late frame wins a race (cre
     const done = await res;
     expect(done.statusCode).toBe(200);
     expect(done.json()).toMatchObject({ ord: 4, choices: DISPUTE, recommended: 1 });
-    expect(rowReads(id)).toBe(2);
+    expect(logReads(id)).toBe(2);
   });
 
   it('round 1: ord 4 opens while the ord-3 row is being read — GET serves ord 4, from the re-read row', async () => {
@@ -550,7 +554,7 @@ describe('resolveOpenGate: neither a stale row nor a late frame wins a race (cre
     const done = await res;
     expect(done.statusCode).toBe(200);
     expect(done.json()).toMatchObject({ ord: 4, gateKind: 'team_dispute', choices: DISPUTE, recommended: 1 });
-    expect(rowReads(id)).toBe(2);
+    expect(logReads(id)).toBe(2);
     expect(gateCache.get(id)?.ord).toBe(4);
   });
 
@@ -577,7 +581,7 @@ describe('resolveOpenGate: neither a stale row nor a late frame wins a race (cre
     const res = await app.inject({ method: 'GET', url: `/api/v1/runs/${id}/gate` });
     expect(res.statusCode).toBe(503);
     expect(res.json()).toMatchObject({ code: 'gate_unstable' });
-    expect(rowReads(id)).toBe(3);
+    expect(logReads(id)).toBe(3);
     expect(gateCache.get(id)).toBeUndefined();
     expect(warn).toHaveBeenCalledTimes(1);
     expect(String(warn.mock.calls[0]?.[0])).toContain(id);
@@ -596,12 +600,12 @@ describe('resolveOpenGate: neither a stale row nor a late frame wins a race (cre
     const second = app.inject({ method: 'GET', url: `/api/v1/runs/${id}/gate` }).then((r) => { secondSettled = true; return r; });
     await new Promise((r) => setTimeout(r, 50));
     expect(secondSettled).toBe(false); // not served the late frame as a hit
-    expect(rowReads(id)).toBe(1); // and it started no read of its own
+    expect(logReads(id)).toBe(1); // and it started no read of its own
     pending.get(id)!();
     const [a, b] = await Promise.all([first, second]);
     expect(a.json()).toMatchObject({ ord: 4, choices: DISPUTE, recommended: 1 });
     expect(b.json()).toMatchObject({ ord: 4, choices: DISPUTE, recommended: 1 });
-    expect(rowReads(id)).toBe(2); // one hydration: the parked read and its re-read
+    expect(logReads(id)).toBe(2); // one hydration: the parked read and its re-read
   });
 
   it('a late frame for an answered gate is evicted by the clean read that finds no gate; when ord 4 then opens, ord 3 cannot answer it (agy, round 3)', async () => {
@@ -611,10 +615,10 @@ describe('resolveOpenGate: neither a stale row nor a late frame wins a race (cre
     const first = await app.inject({ method: 'GET', url: `/api/v1/runs/${id}/gate` });
     expect(first.statusCode).toBe(404);
     expect(gateCache.get(id)).toBeUndefined();
-    expect(rowReads(id)).toBe(2);
+    expect(logReads(id)).toBe(2);
     // Not served from the cache now: another GET reads again, and still finds no gate.
     expect((await app.inject({ method: 'GET', url: `/api/v1/runs/${id}/gate` })).statusCode).toBe(404);
-    expect(rowReads(id)).toBe(3);
+    expect(logReads(id)).toBe(3);
     // The run pauses at ord 4 before awaitingHuman(4) is pumped: a decision naming ord 3 is refused by the record.
     rows.set(id, 4);
     const stale = await app.inject({ method: 'POST', url: `/api/v1/runs/${id}/gate`, payload: { approve: true, ord: 3 } });

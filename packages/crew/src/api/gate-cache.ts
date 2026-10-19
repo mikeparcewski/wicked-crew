@@ -298,6 +298,14 @@ export class GateCache {
   }
 
   /**
+   * Drop the run's cached gate: the engine's record shows another gate open, or none (crew#1083
+   * round 7). The next read hydrates from the record.
+   */
+  forget(runId: string): void {
+    this.entries.delete(runId);
+  }
+
+  /**
    * Seed the run's gate synchronously. Nothing can land between the caller's decision and this
    * set, so it needs no guard; a read that awaited anything goes through `resolve`.
    */

@@ -3907,12 +3907,31 @@ export function registerRoutes(
       // follow-up told only the question answered "the supplied repository contains only tmp".
       const instructions =
         scope !== undefined ? `${chatScopeStatement(id, scope, rules)}\n\n${withPreface(pending.preface)}` : withPreface(pending.preface);
-      // The continuation answers the path run's gate: one decision at a time per run (crew#1083 round 5).
+      // The continuation answers the path run's gate: under the per-run decision lock it re-reads the
+      // run and is judged by the record before it proposes or confirms anything (crew#1083 round 7).
+      // The status read above is a pre-check that changes nothing; this read is the one that counts.
       const pathRunId = path.runId;
-      await decideExclusively(pathRunId, async () => {
+      const refused = await decideExclusively(pathRunId, async (): Promise<{ code: number; body: unknown } | null> => {
+        const view = (await adapter.sessionsDetail()).find((v) => v.session.id === pathRunId);
+        if (view === undefined || view.session.status !== 'awaiting_human') {
+          return { code: 409, body: {
+            code: 'turn_in_flight',
+            error: `chat '${id}': its path ${pathRunId} is ${view?.session.status ?? 'gone'}, not waiting for your turn — nothing was sent`,
+            chatId: id,
+            runId: pathRunId,
+          } };
+        }
+        const decided = await gateForDecision(view, undefined);
+        if ('refusal' in decided) return decided.refusal;
         await adapter.proposePlan(pathRunId, { steps: [answerStep(stepId, instructions)] }, turnId);
         await adapter.confirmGate(pathRunId, true);
+        return null;
       });
+      if (refused !== null) {
+        askPaths.release(id, lease);
+        if (turn !== null) chatTurns.abort(id, turn.turnId);
+        return reply.code(refused.code).send(refused.body);
+      }
       askPaths.release(id, lease);
       if (!askPaths.continued(id, lease, stepId)) {
         // Closed between the proposal and here: the DELETE cancelled the run this was accepted on.
@@ -4558,12 +4577,15 @@ export function registerRoutes(
    * checks evaluated for ord 3 — a studio double-click on Approve is enough. Serialized, the second
    * re-reads inside the lock and meets ord 4: 409 `gate_changed`. Other runs are not blocked.
    *
-   * Every crew path that confirms a gate takes it, from before its first read of the run through its
-   * confirm (round 5: locking the confirm alone still lets stale checks through): `decideGate`
-   * (`POST /runs/:id/gate`, standing orders), `POST /runs/:id/resume`, `POST /runs/:id/reassign`
-   * (the re-seat included), `POST /runs/:id/plan`'s plan-gate edit (team routes) and the chat ask
-   * path's continuation. This covers crew's API path only; the complete fix is engine-side: a
-   * confirm that carries the ord it answers (wicked-core#1038).
+   * Every crew API path that confirms a gate takes it and is judged by the record
+   * ({@link gateForDecision}) under it: `decideGate` (`POST /runs/:id/gate`, standing orders),
+   * `POST /runs/:id/resume`, `POST /runs/:id/reassign` (the re-seat included), `POST /runs/:id/plan`
+   * (team routes) and the chat ask path's continuation (which re-reads its run inside the lock).
+   * It serializes these paths; it does not bind a confirm to the gate the operator saw. A
+   * decision without an `ord` (`/resume`, `/reassign`, `/plan`) queued behind one that advanced the
+   * run answers the gate the record shows then, and the stall watchdog's `reassignUnit` runs
+   * outside this lock. Both need every confirm bound to the gate it answers: an ord on the engine's
+   * confirm (wicked-core#1038) and the skin sending it.
    */
   function decideExclusively<T>(runId: string, fn: () => Promise<T>): Promise<T> {
     const result = (gateDecisionTails.get(runId) ?? Promise.resolve()).then(fn);
@@ -4849,6 +4871,12 @@ export function registerRoutes(
   });
 
   /**
+   * crew#1058 / #1083 round 7: the runs with a reassign in flight. A second reassign of the same run
+   * is refused before it queues on the decision lock — queued, it would act on the state the first
+   * left (re-seat a worker the first just started, or approve twice).
+   */
+  const reassignsInFlight = new Set<string>();
+  /**
    * codex r1 on #1060: whether approving the run's open gate ACCEPTS the parked unit's work rather
    * than re-running it (wicked-core `confirm_gate`: a `judge_unavailable` / `qe_reviewer_unavailable`
    * denial on the cursor unit is judged by the operator; an open `review_adjudication` gate lands
@@ -4880,10 +4908,15 @@ export function registerRoutes(
     if (!parsed.success) {
       return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
     }
-    // A gated reassign confirms the gate: one decision at a time per run, held from this read of the
-    // run through the re-seat and the confirm (crew#1083 round 5). It also keeps two reassigns of one
-    // run from interleaving between a re-seat and its approve (codex r1 on #1060).
-    return decideExclusively(id, async () => {
+    // One reassign per run at a time, refused rather than queued (crew#1083 round 7), then the gate
+    // decision lock every confirming path shares, held from this read of the run through the re-seat
+    // and the confirm (crew#1083 round 5).
+    if (reassignsInFlight.has(id)) {
+      return reply.code(409).send({ error: `a reassign of run ${id} is already in flight. Nothing was changed.` });
+    }
+    reassignsInFlight.add(id);
+    try {
+    return await decideExclusively(id, async () => {
     const views = await adapter.sessionsDetail();
     const run = views.find((v) => v.session.id === id);
     if (!run) return reply.code(404).send({ error: 'Run not found' });
@@ -4970,8 +5003,8 @@ export function registerRoutes(
           error: `run ${id} is parked at a gate whose approve ${accepts}, so a reassign would not run unit ${ord} on '${requestedCli}' — approve, send back or stop it via POST /runs/${id}/gate. Nothing was changed.`,
         });
       }
-      // The re-seat and the approve are two engine commands; the lock this runs under keeps a second
-      // reassign (or any decision) of the same run from landing between them (codex r1 on #1060).
+      // The re-seat and the approve are two engine commands; the in-flight refusal and the lock this
+      // runs under keep a second reassign (or any decision) of the run from landing between them.
       try {
         await adapter.reassignUnit(id, ord, requestedCli);
       } catch (err) {
@@ -5003,6 +5036,9 @@ export function registerRoutes(
       return reply.code(409).send({ error: message(err) });
     }
     });
+    } finally {
+      reassignsInFlight.delete(id);
+    }
   });
 
   // The gate prompt for a paused run, so a fresh browser can render the gate after a late join.
@@ -5018,8 +5054,25 @@ export function registerRoutes(
       const run = (await adapter.sessionsDetail()).find((v) => v.session.id === id);
       return receiptOf(run?.units?.find((u) => u.ord === ord));
     };
+    // The record judges the cache (crew#1083 round 7): rows that disagree on the ord are 409
+    // `gate_unknown` whether or not something is cached, and a cached entry is served — for its
+    // presentation fields (prompt, choices, recommended) — only when its ord is the record's. An
+    // entry the record does not show (a late frame for an answered gate) is dropped and the gate
+    // read from the record. Only an engine that keeps no rows serves the cache unjudged.
+    const recorded = await recordedOpenGate(id);
+    if (recorded?.state === 'ambiguous') {
+      return reply.code(409).send({
+        error: `Gate unknown: the engine's record shows gates open before units ${recorded.ords.join(' and ')} on this run, so the daemon cannot tell which one is open.`,
+        code: 'gate_unknown',
+      });
+    }
     const cached = gateCache.get(id);
-    if (cached) return { runId: id, ...cached, assurance: await receiptAt(cached.ord) };
+    if (cached) {
+      if (recorded === null || (recorded.state === 'open' && cached.ord === recorded.ord)) {
+        return { runId: id, ...cached, assurance: await receiptAt(cached.ord) };
+      }
+      gateCache.forget(id);
+    }
 
     // A miss is not evidence of anything on its own, so ask the run what it is doing before paying
     // to replay it. Only `awaiting_human` can have an open gate, and that answer is definitive:
@@ -7401,7 +7454,7 @@ export function registerRoutes(
 
   // ── Team (DES-TEAMING-002 T8) — reads and commands over the engine; the live stream is the
   // teamEvent relay (team/ws-relay.ts). Crew publishes no team fact (§4.0).
-  registerTeamRoutes(app, adapter, security, decideExclusively);
+  registerTeamRoutes(app, adapter, security, { exclusive: decideExclusively, judge: gateForDecision });
 
   // ── Campaigns (crew#342 + TH-9) — the engine's durable Run-DAG scheduler over REST ──────────
   // Progress streams as campaign* CoreEvents on the existing allowlist-free /ws relay; these

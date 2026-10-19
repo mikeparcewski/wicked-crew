@@ -41,10 +41,13 @@ describe('GET /runs/:id/gate serves the gate kind (studio#814)', () => {
       sessionsDetail: vi.fn().mockResolvedValue([view('run-live'), view('run-old'), view('run-durable'), view('run-replay')]),
       listRepos: vi.fn().mockResolvedValue([]),
       listWorkflows: () => BUILTIN_WORKFLOWS,
-      interactionRequests: vi.fn(async (id: string) =>
-        id === 'run-durable'
-          ? [{ kind: 'gate', ord: 2, prompt: REFUSED, gate_kind: 'escalation', created_at: 1_785_614_004_730 }]
-          : []),
+      // The engine writes each gate's row with the pause, before it emits the frame, so the live runs
+      // have theirs too; a GET judges the cache by it (crew#1083 round 7). run-replay predates the table.
+      interactionRequests: vi.fn(async (id: string) => {
+        if (id === 'run-durable' || id === 'run-live') return [{ kind: 'gate', ord: 2, prompt: REFUSED, gate_kind: 'escalation', created_at: 1_785_614_004_730 }];
+        if (id === 'run-old') return [{ kind: 'gate', ord: 2, prompt: 'Approve unit 2?', created_at: 1_785_614_004_730 }];
+        return [];
+      }),
       runEvents: vi.fn(async (id: string) =>
         id === 'run-replay'
           ? [

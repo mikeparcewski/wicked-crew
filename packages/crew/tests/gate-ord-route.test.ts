@@ -236,6 +236,22 @@ describe('POST /runs/:id/gate with ord', () => {
     expect(read.json()).toMatchObject({ code: 'gate_unknown' });
   });
 
+  it('round 7: a GET cache hit is judged by the record — a late ord-3 entry cached while the record shows ord 4 is not served', async () => {
+    // beforeEach caches ord 3 for run-stale-cache; its record shows ord 4 open.
+    expect(gateCache.get('run-stale-cache')?.ord).toBe(3);
+    const res = await app.inject({ method: 'GET', url: '/api/v1/runs/run-stale-cache/gate' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ ord: 4, prompt: 'Approve unit 4?' });
+    expect(gateCache.get('run-stale-cache')?.ord).toBe(4);
+  });
+
+  it('round 7: rows that disagree are 409 gate_unknown on GET even with an entry cached', async () => {
+    gateCache.adopt('run-split', { ord: 3, prompt: 'Approve unit 3?', lifecycle: 'open', receivedAt: '2026-09-26T10:00:00Z' });
+    const res = await app.inject({ method: 'GET', url: '/api/v1/runs/run-split/gate' });
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ code: 'gate_unknown' });
+  });
+
   it('a cached gate the record does not show authorizes nothing: 409 gate_unknown', async () => {
     const res = await gate('run-cache-only', { approve: true, ord: 2 });
     expect(res.statusCode).toBe(409);
@@ -247,5 +263,83 @@ describe('POST /runs/:id/gate with ord', () => {
     const res = await gate('run-unknown', { approve: true });
     expect(res.statusCode).toBe(200);
     expect(confirmCalls).toHaveLength(1);
+  });
+});
+
+// crew#1083 round 7: `POST /runs/:id/plan` (team routes) answers a plan gate with the edit, so it
+// takes the per-run decision lock before its first read of the run and is judged by the record
+// before it confirms or proposes anything.
+describe('POST /runs/:id/plan takes the decision lock and is judged by the record (crew#1083 round 7)', () => {
+  let app: FastifyInstance;
+  const gateCache = new GateCache();
+  const confirmCalls: unknown[][] = [];
+  const proposals: string[] = [];
+  const status = new Map<string, string>([['plan-split', 'awaiting_human'], ['plan-race', 'awaiting_human']]);
+  const rows = new Map<string, Array<Record<string, unknown>>>([
+    ['plan-split', [
+      { kind: 'gate', ord: 3, gate_kind: 'plan_approval', prompt: 'Approve the plan?', created_at: 1 },
+      { kind: 'gate', ord: 4, prompt: 'Approve unit 4?', created_at: 2 },
+    ]],
+    ['plan-race', [{ kind: 'gate', ord: 3, gate_kind: 'plan_approval', prompt: 'Approve the plan?', created_at: 1 }]],
+  ]);
+  let parkedConfirm: (() => void) | null = null;
+
+  beforeAll(async () => {
+    const mockAdapter = {
+      sessionsDetail: vi.fn(async () => [...status].map(([id, st]) => view(id, st, 3))),
+      listRepos: vi.fn().mockResolvedValue([]),
+      listWorkflows: () => BUILTIN_WORKFLOWS,
+      interactionRequests: vi.fn(async (id: string) => rows.get(id) ?? []),
+      runEvents: vi.fn(async () => null),
+      confirmGate: vi.fn(async (...args: unknown[]) => {
+        confirmCalls.push(args);
+        const id = args[0] as string;
+        if (id === 'plan-race') {
+          await new Promise<void>((r) => { parkedConfirm = r; });
+          // The plan gate was approved: the run executes, its gate row is answered.
+          status.set(id, 'executing');
+          rows.set(id, []);
+        }
+        return 'executing';
+      }),
+      proposePlan: vi.fn(async (id: string) => {
+        proposals.push(id);
+        return { proposal_id: 'p1', duplicate: false, band: 'low', high_risk: false, floor_added: [] };
+      }),
+    };
+    app = Fastify({ logger: false });
+    registerRoutes(app, mockAdapter as unknown as CoreAdapter, gateCache, new ElicitationCache(), undefined, {
+      audit: { record: vi.fn(() => Date.now()) } as unknown as AuditLog,
+      authMode: 'off',
+    });
+    await app.ready();
+  });
+  afterAll(async () => {
+    await app.close();
+  });
+  const edit = (id: string) => app.inject({ method: 'POST', url: `/api/v1/runs/${id}/plan`, payload: { plan: { steps: [{ catalog: 'build' }] } } });
+
+  it('rows that disagree on the ord: the edit is refused 409 gate_unknown; nothing is confirmed or proposed', async () => {
+    const res = await edit('plan-split');
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ code: 'gate_unknown' });
+    expect(confirmCalls).toEqual([]);
+    expect(proposals).toEqual([]);
+  });
+
+  it('a /gate confirm racing the edit: the edit waits, re-reads the run the confirm left, and confirms nothing — confirmGate runs once', async () => {
+    const decision = app.inject({ method: 'POST', url: '/api/v1/runs/plan-race/gate', payload: { approve: true, ord: 3 } });
+    await vi.waitFor(() => expect(parkedConfirm).not.toBeNull());
+    const res = edit('plan-race');
+    await new Promise((r) => setTimeout(r, 30));
+    expect(confirmCalls).toHaveLength(1); // unlocked, the edit would have read awaiting_human and confirmed too
+    parkedConfirm!();
+    expect((await decision).statusCode).toBe(200);
+    const done = await res;
+    // The plan gate is gone: the edit is not a gate answer any more. It lands as the route's
+    // mid-run edit (T8 (c)), which the engine holds for the next step boundary.
+    expect(done.statusCode).toBe(200);
+    expect(confirmCalls).toHaveLength(1);
+    expect(proposals).toEqual(['plan-race']);
   });
 });

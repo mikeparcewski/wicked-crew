@@ -133,6 +133,8 @@ describe('POST /runs/:id/reassign on a gate: the engine refuses before anything 
   let approveFails = false;
   let release: () => void = () => undefined;
   const slow = new Promise<void>((r) => { release = r; });
+  /** Runs the engine moved to `executing`: a confirm starts the re-seated unit, as the engine does. */
+  const executing = new Set<string>();
   const unit = (ord: number, stage: string, cli: string, extra: Record<string, unknown> = {}) => ({
     id: `run-authors:u${ord}`, session_id: 'run-authors', ord, description: `u${ord}`, stage,
     assigned_cli: cli, assigned_invocation: null, council_task_ref: null, routing: null, denial_reason: null,
@@ -163,7 +165,10 @@ describe('POST /runs/:id/reassign on a gate: the engine refuses before anything 
           judged,
           authorsView('run-adjudication'),
           authorsView('run-slow'),
-        ];
+        ].map((v) => {
+          if (executing.has(v.session.id)) v.session.status = 'executing';
+          return v;
+        });
       }),
       interactionRequests: vi.fn(async (id: string) =>
         id === 'run-adjudication'
@@ -174,6 +179,7 @@ describe('POST /runs/:id/reassign on a gate: the engine refuses before anything 
       listWorkflows: () => BUILTIN_WORKFLOWS,
       confirmGate: vi.fn(async (id: string, approve: boolean) => {
         calls.push(`confirmGate:${id}:${approve}`);
+        if (id === 'run-slow') executing.add(id);
         if (approveFails) throw new Error('gate changed');
         return 'executing';
       }),
@@ -236,22 +242,19 @@ describe('POST /runs/:id/reassign on a gate: the engine refuses before anything 
     expect(calls).toEqual([]);
   });
 
-  it('a second reassign of the same run waits for the first: a re-seat and its approve are never split by another (crew#1083 round 5)', async () => {
-    // The per-run gate-decision lock replaced the old "already in flight" refusal: the second
-    // reassign is judged against the run the first one left, so no seat lands that neither
-    // response names, and nothing lands between a re-seat and its approve.
+  it('a second reassign of the same run while one is in flight is refused before it queues (crew#1083 round 7)', async () => {
+    // Queued behind the first, it would read the run the first left — `executing`, the re-seated
+    // worker just started by the confirm — and interrupt and re-seat that fresh worker. Refused,
+    // nothing it names lands.
     const first = app.inject({ method: 'POST', url: '/api/v1/runs/run-slow/reassign', payload: { cli: 'copilot' } });
     await vi.waitFor(() => expect(calls).toContain('reassignUnit:run-slow:3:copilot'));
-    const second = app.inject({ method: 'POST', url: '/api/v1/runs/run-slow/reassign', payload: { cli: 'codex' } });
-    await new Promise((r) => setTimeout(r, 30));
-    expect(calls).toEqual(['reassignUnit:run-slow:3:copilot']); // the second has not started
+    const second = await app.inject({ method: 'POST', url: '/api/v1/runs/run-slow/reassign', payload: { cli: 'codex' } });
+    expect(second.statusCode).toBe(409);
+    expect((second.json() as { error: string }).error).toBe('a reassign of run run-slow is already in flight. Nothing was changed.');
     release();
     expect((await first).statusCode).toBe(200);
-    expect((await second).statusCode).toBe(200);
-    expect(calls).toEqual([
-      'reassignUnit:run-slow:3:copilot', 'confirmGate:run-slow:true',
-      'reassignUnit:run-slow:3:codex', 'confirmGate:run-slow:true',
-    ]);
+    expect(calls).toEqual(['reassignUnit:run-slow:3:copilot', 'confirmGate:run-slow:true']);
+    expect(executing.has('run-slow')).toBe(true);
   });
 
   it('without a named seat a gated reassign stays approve-then-reassign (a re-route needs a running unit)', async () => {
