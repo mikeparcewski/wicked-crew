@@ -11,10 +11,20 @@
  *  - `proven` / `status`: from the pin reading when the seat pins a build (`proven` = the pinned
  *    build; `status` = `proven` when the pin holds, else `unproven`), `no_pin` otherwise. A pinned
  *    seat whose pin has not been probed yet carries no `version` at all, never a guessed status;
+ *  - `why` (crew#1004, `unproven` only): `no_answer` when the pin's own `--version` probe got no
+ *    answer, `different_build` when it answered with another build;
  *  - `install_source`: how the binary on PATH was installed, read off its resolved path (no
  *    spawn): under `node_modules` = `npm`, under a Homebrew prefix = `brew`, else `other`; `null`
  *    when the binary is not on PATH. It lets the Agents page offer a real update command instead of
  *    guessing one. The path itself never reaches the wire.
+ *
+ * crew#1004, a deliberate choice: `status` comes from the pin reading alone, never from `installed`.
+ * The pin reading mirrors the engine's spawn-time check (`probe_resolved_binary_version`: the pin's
+ * own binary, its first line byte for byte), and the engine switches the seat's safety checks off
+ * when that check gets no answer. So a pin probe with no answer stays `unproven` (fail closed) even
+ * when `installed` reads exactly the pinned build: `why: 'no_answer'` says the build was not shown
+ * to differ, only not confirmed. `installed` equal to `proven` with an unexplained `unproven` is
+ * never served.
  *
  * Cost: one bounded `--version` per seat per {@link SEAT_VERSION_TTL_MS}, in the background; the
  * roster read never waits on it. A test-built server spawns nothing (no source under a runner).
@@ -51,14 +61,16 @@ export interface SeatVersionReading {
   install_source: SeatInstallSource | null;
 }
 
-/** `RosterSeat.version` (api-types 0.115.0). */
-export interface SeatVersion {
+/** Why a pinned seat reads `unproven` (crew#1004; see the module doc). */
+export type SeatVersionUnprovenWhy = 'no_answer' | 'different_build';
+
+/** `RosterSeat.version` (api-types 0.115.0; `why` 0.129.0): `why` exactly when `unproven`. */
+export type SeatVersion = {
   installed: string | null;
   proven: string | null;
-  status: 'proven' | 'unproven' | 'no_pin';
   checked_at: string;
   install_source: SeatInstallSource | null;
-}
+} & ({ status: 'proven' | 'no_pin' } | { status: 'unproven'; why: SeatVersionUnprovenWhy });
 
 /** Runs one version probe; resolves to its combined output, or `null` when it did not answer. */
 export type VersionExec = (cmd: string, args: string[]) => Promise<string | null>;
@@ -239,11 +251,8 @@ export function seatVersion(
   if (reading === undefined) return undefined;
   const pinned = typeof seat.acp?.verified_version === 'string' ? seat.acp.verified_version : null;
   if (pinned !== null && pin === undefined) return undefined;
-  return {
-    installed: reading.installed,
-    proven: pinned,
-    status: pinned === null ? 'no_pin' : pin?.matched === true ? 'proven' : 'unproven',
-    checked_at: reading.checked_at,
-    install_source: reading.install_source,
-  };
+  const base = { installed: reading.installed, proven: pinned, checked_at: reading.checked_at, install_source: reading.install_source };
+  if (pinned === null) return { ...base, status: 'no_pin' };
+  if (pin?.matched === true) return { ...base, status: 'proven' };
+  return { ...base, status: 'unproven', why: pin?.observed === null ? 'no_answer' : 'different_build' };
 }

@@ -1231,21 +1231,31 @@ export interface RosterSeat {
   [k: string]: unknown;
 }
 
-/** `RosterSeat.version` (api-types 0.115.0). */
-export interface SeatVersion {
+/** Why a pinned seat reads `unproven` (api-types 0.129.0, crew#1004): `no_answer` — the pin's own
+ *  `--version` check got no answer, so nothing confirms the build (it was not shown to differ);
+ *  `different_build` — the check answered with a build other than the pinned one. */
+export type SeatVersionUnprovenWhy = 'no_answer' | 'different_build';
+
+/**
+ * `RosterSeat.version` (api-types 0.115.0; `why` 0.129.0). `status`: `proven` — the pin's check
+ * answered with the pinned build; `unproven` — it did not, and governance fails closed, with `why`
+ * saying which case; `no_pin` — the seat pins no build.
+ *
+ * `status` comes from the pin's check alone (it mirrors the engine's spawn-time check), never from
+ * `installed`. So `installed` may equal `proven` while `status` is `unproven`: always with
+ * `why: 'no_answer'` (crew#1004), never unexplained.
+ */
+export type SeatVersion = {
   /** The first non-empty line of the seat's `--version`, home written `~`; `null` when it did not answer. */
   installed: string | null;
   /** The build the seat's governance was proven on (`acp.verified_version`); `null` when it pins none. */
   proven: string | null;
-  /** `proven` — the installed build is the pinned one; `unproven` — it is not (governance fails
-   *  closed); `no_pin` — the seat pins no build. */
-  status: 'proven' | 'unproven' | 'no_pin';
   /** ISO-8601 of the reading. */
   checked_at: string;
   /** How the binary on PATH was installed, from its resolved path: under `node_modules` = `npm`, a
    *  Homebrew prefix = `brew`, else `other`; `null` when it is not on PATH. */
   install_source: 'npm' | 'brew' | 'other' | null;
-}
+} & ({ status: 'proven' | 'no_pin' } | { status: 'unproven'; why: SeatVersionUnprovenWhy });
 
 /** `RosterSeat.account` (api-types 0.115.0). */
 export interface SeatAccount {
@@ -1304,7 +1314,8 @@ export type SeatQeReviewer =
 /**
  * One `RosterSeat.issues` entry (api-types 0.115.0). Today's codes: `signed_out`, `qe_blocked`
  * (problems); `quota`, `usage_limit`, `benched`, `codex_worktree`, `host_floor` and `host_floor_unknown`
- * (unreleased, wicked-core#976), `version_unproven`,
+ * (unreleased, wicked-core#976), `version_unproven` (`params.why`: `no_answer` | `different_build`,
+ * api-types 0.129.0 — the same as `RosterSeat.version.why`),
  * `unchecked` (`params.why`: `no_governance` | `no_host_boundary`), `fence_scoped`,
  * `live_check_failed` (warnings); `opt_in`, `no_qe`, `unverified` (notes). A client must tolerate
  * an unknown code.

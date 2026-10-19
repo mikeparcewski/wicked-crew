@@ -295,7 +295,14 @@ export function seatIssues(i: IssueInputs): SeatIssue[] {
   // Safety: the bound-run mode decides what holds the seat's writes in a job.
   const gov = i.governance.scoped_bound;
   if (i.version?.status === 'unproven') {
-    add('version_unproven', 'warning', `${name} ${i.version.installed ?? '(no version answer)'} is not the build its safety checks were proven on, so they switch off`, {
+    // crew#1004: say which case it is — the pin's check got no answer, or it answered another build.
+    const why = i.version.why;
+    const message =
+      why === 'no_answer'
+        ? `${name}'s version check didn't answer, so its safety checks switch off for now`
+        : `${name}${i.version.installed !== null ? ` ${i.version.installed}` : ''} is not the build its safety checks were proven on, so they switch off`;
+    add('version_unproven', 'warning', message, {
+      why,
       ...(i.version.installed !== null ? { installed: i.version.installed } : {}),
       ...(i.version.proven !== null ? { proven: i.version.proven } : {}),
     }, [{ purpose: 'version', display: `${i.binary} --version` }]);

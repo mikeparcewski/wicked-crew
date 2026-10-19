@@ -481,8 +481,51 @@ describe('A6 issues', () => {
     const roster = rosterOver({ versions, pins: { opencode: { matched: false, observed: 'opencode v2.0.25', pinned: '1.17.18' } } });
     return versions.refresh().then(() => {
       const opencode = seat(roster(), 'opencode');
-      expect(opencode['version']).toEqual({ installed: 'opencode v2.0.25', proven: '1.17.18', status: 'unproven', checked_at: '2026-10-12T20:00:00.000Z', install_source: 'brew' });
+      expect(opencode['version']).toEqual({ installed: 'opencode v2.0.25', proven: '1.17.18', status: 'unproven', why: 'different_build', checked_at: '2026-10-12T20:00:00.000Z', install_source: 'brew' });
       expect(codes(opencode)).toEqual(['warning:version_unproven', 'note:opt_in', 'note:unverified']);
+    });
+  });
+
+  // crew#1004: the roster's version reading and the pin reading must not tell two stories, and the
+  // `version_unproven` code says which case happened.
+  describe('version_unproven says why (crew#1004)', () => {
+    const at = '2026-10-18T12:00:00.000Z';
+    const over = async (installed: string | null, pin: { matched: boolean; observed: string | null; pinned: string }) => {
+      const versions = new SeatVersionCache(async () => [{ cli: 'opencode', installed, checked_at: at, install_source: 'brew' }]);
+      await versions.refresh();
+      const opencode = seat(rosterOver({ versions, pins: { opencode: pin } })(), 'opencode');
+      const issue = (opencode['issues'] as Array<{ code: string; message: string; params: Record<string, unknown> }>).find((i) => i.code === 'version_unproven');
+      return { version: opencode['version'] as Record<string, unknown>, issue };
+    };
+
+    it('installed == pinned and the pin probe got no answer: unproven is always explained as no_answer, never as a different build', async () => {
+      const { version, issue } = await over('1.17.18', { matched: false, observed: null, pinned: '1.17.18' });
+      // Fail closed (the engine's spawn-time check is what the pin reading mirrors), and say so.
+      expect(version).toEqual({ installed: '1.17.18', proven: '1.17.18', status: 'unproven', why: 'no_answer', checked_at: at, install_source: 'brew' });
+      expect(issue).toBeDefined();
+      expect(issue!.params).toEqual({ why: 'no_answer', installed: '1.17.18', proven: '1.17.18' });
+      expect(issue!.message).toBe("opencode's version check didn't answer, so its safety checks switch off for now");
+      expect(issue!.message).not.toContain('is not the build');
+    });
+
+    it('a pin probe with no answer and no version reading either: why no_answer, the "didn\'t answer" message', async () => {
+      const { version, issue } = await over(null, { matched: false, observed: null, pinned: '1.17.18' });
+      expect(version).toMatchObject({ installed: null, status: 'unproven', why: 'no_answer' });
+      expect(issue!.params).toEqual({ why: 'no_answer', proven: '1.17.18' });
+      expect(issue!.message).toBe("opencode's version check didn't answer, so its safety checks switch off for now");
+    });
+
+    it('observed != pinned: why different_build, the "not the build" message', async () => {
+      const { version, issue } = await over('1.18.31', { matched: false, observed: '1.18.31', pinned: '1.17.18' });
+      expect(version).toMatchObject({ installed: '1.18.31', status: 'unproven', why: 'different_build' });
+      expect(issue!.params).toEqual({ why: 'different_build', installed: '1.18.31', proven: '1.17.18' });
+      expect(issue!.message).toBe('opencode 1.18.31 is not the build its safety checks were proven on, so they switch off');
+    });
+
+    it('a pin that holds: proven, no why, no version_unproven', async () => {
+      const { version, issue } = await over('1.17.18', { matched: true, observed: '1.17.18', pinned: '1.17.18' });
+      expect(version).toEqual({ installed: '1.17.18', proven: '1.17.18', status: 'proven', checked_at: at, install_source: 'brew' });
+      expect(issue).toBeUndefined();
     });
   });
 
@@ -544,6 +587,10 @@ describe('A1 version for every seat', () => {
     expect(seatVersion({}, r, undefined)).toMatchObject({ status: 'no_pin', proven: null });
     expect(seatVersion({ acp: { verified_version: '1' } }, r, undefined)).toBeUndefined();
     expect(seatVersion({ acp: { verified_version: '1' } }, r, { matched: true } as never)).toMatchObject({ status: 'proven', proven: '1' });
+    expect(seatVersion({ acp: { verified_version: '1' } }, r, { matched: true } as never)).not.toHaveProperty('why');
+    expect(seatVersion({ acp: { verified_version: '1' } }, r, { matched: false, observed: null } as never)).toMatchObject({ status: 'unproven', why: 'no_answer' });
+    expect(seatVersion({ acp: { verified_version: '1' } }, r, { matched: false, observed: '2' } as never)).toMatchObject({ status: 'unproven', why: 'different_build' });
+    expect(seatVersion({}, r, undefined)).not.toHaveProperty('why');
     expect(seatVersion({}, undefined, undefined)).toBeUndefined();
   });
 
