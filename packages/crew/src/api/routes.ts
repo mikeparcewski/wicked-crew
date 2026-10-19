@@ -1809,7 +1809,7 @@ export function registerRoutes(
           rosterFile: seatRosterFile(),
           hostBoundary: hostSandboxLauncher(),
           seats: seatGovernanceNow(),
-          // The same `seat.work_default` findings `/health.warnings` carries (api-types 0.132.0).
+          // The same `seat.work_default` findings `/health.warnings` carries (api-types 0.133.0).
           roleFindings: seatWorkDefaultNow(),
         },
         // crew#740: which memory store this daemon reads and writes, and the isolation notice.

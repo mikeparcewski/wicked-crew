@@ -292,7 +292,7 @@ export interface HealthCapabilities {
 /** One `GET /health.warnings[]` entry (additive; wicked-core#411 / wicked-crew#497). */
 export interface HealthWarning {
   /** `state-home.unregistered` today; open for later kinds (e.g. `seat.work_default`,
-   *  api-types 0.132.0 — see `DiagnosticsSeatGovernance.roleFindings`). */
+   *  api-types 0.133.0 — see `DiagnosticsSeatGovernance.roleFindings`). */
   kind: string;
   severity: 'warning' | 'error';
   message: string;
@@ -7564,7 +7564,7 @@ export interface DiagnosticsSeatGovernance {
   hostBoundary: string | null;
   seats: DiagnosticsSeatGovernanceEntry[];
   /**
-   * (api-types 0.132.0) Seat-role findings read from the overlay above — the same objects
+   * (api-types 0.133.0) Seat-role findings read from the overlay above — the same objects
    * `GET /health.warnings[]` carries. Today one kind: `seat.work_default`, one per CUSTOM seat the
    * overlay writes `enabled_for_council = false` with no `seat_eligible_for_work` key, which since
    * crew 0.15.2 (#916) is eligible for work by the engine default. Built-in seats never appear; an
