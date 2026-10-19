@@ -21,6 +21,13 @@
  *   the server's approval too: the server asks again on its next first use.
  *
  * Ledger edits are read-modify-write of one rule, so they are serialized here.
+ *
+ * - **One server, one writer (crew#993).** Approving, revoking, and the routes that withdraw then
+ *   change a registration (a save, a removal) run one at a time per server, through
+ *   {@link McpPolicies.exclusive}. An approval that arrives while a save is withdrawing and
+ *   committing waits for the commit, so it is judged against the registration the save left (a
+ *   tool the save dropped is a 404), never against the one the save is replacing. Different
+ *   servers do not wait on each other.
  */
 
 import type {
@@ -140,6 +147,8 @@ function approvalState(tokens: ReadonlySet<string>, server: string, subject: str
 
 export class McpPolicies {
   private chain: Promise<unknown> = Promise.resolve();
+  /** Per server: the tail of the work queued by {@link exclusive}. Never rejects. */
+  private readonly serverTails = new Map<string, Promise<unknown>>();
 
   constructor(
     private readonly registry: McpRegistry,
@@ -260,29 +269,56 @@ export class McpPolicies {
   async approve(subject: string): Promise<string[]> {
     const parts = parseApprovalSubject(subject);
     if (parts === null) throw new McpRegistryError(400, 'bad_subject', 'a subject is mcp:<server> or mcp:<server>/<tool>');
-    const server = (await this.registry.list()).servers.find((s) => s.name === parts.server);
-    if (server === undefined) throw new McpRegistryError(404, 'unknown_server', `no MCP server named ${parts.server}`);
-    if (parts.tool !== null && !server.tools.some((t) => t.name === parts.tool && t.status !== 'gone')) {
-      throw new McpRegistryError(404, 'unknown_tool', `no tool ${subject}`);
-    }
-    const ledgers = parts.tool === null ? [FIRST_USE_LEDGER] : [FIRST_USE_LEDGER, WRITE_LEDGER];
-    return this.edit((rule) => {
-      if (!ledgers.includes(rule.id)) return null;
-      const excludes = rule.excludes ?? [];
-      if (excludes.includes(subject)) return null;
-      return [...excludes, subject];
+    // Judged and written under the server's lock, so a save or removal in flight commits first.
+    return this.exclusive(parts.server, async () => {
+      const server = (await this.registry.list()).servers.find((s) => s.name === parts.server);
+      if (server === undefined) throw new McpRegistryError(404, 'unknown_server', `no MCP server named ${parts.server}`);
+      if (parts.tool !== null && !server.tools.some((t) => t.name === parts.tool && t.status !== 'gone')) {
+        throw new McpRegistryError(404, 'unknown_tool', `no tool ${subject}`);
+      }
+      const ledgers = parts.tool === null ? [FIRST_USE_LEDGER] : [FIRST_USE_LEDGER, WRITE_LEDGER];
+      return this.edit((rule) => {
+        if (!ledgers.includes(rule.id)) return null;
+        const excludes = rule.excludes ?? [];
+        if (excludes.includes(subject)) return null;
+        return [...excludes, subject];
+      });
     });
   }
 
   /** Revoke a subject's approval from both ledgers. 404 when neither holds it. */
   async revoke(subject: string): Promise<string[]> {
-    if (parseApprovalSubject(subject) === null) throw new McpRegistryError(400, 'bad_subject', 'a subject is mcp:<server> or mcp:<server>/<tool>');
-    const changed = await this.withdraw([subject]);
-    if (changed.length === 0) throw new McpRegistryError(404, 'not_approved', `${subject} is not approved`);
-    return changed;
+    const parts = parseApprovalSubject(subject);
+    if (parts === null) throw new McpRegistryError(400, 'bad_subject', 'a subject is mcp:<server> or mcp:<server>/<tool>');
+    return this.exclusive(parts.server, async () => {
+      const changed = await this.withdraw([subject]);
+      if (changed.length === 0) throw new McpRegistryError(404, 'not_approved', `${subject} is not approved`);
+      return changed;
+    });
   }
 
-  /** Remove every listed token from both ledgers (revoke, a changed schema, a removed server). */
+  /**
+   * Run `fn` alone for `server` (crew#993): after every earlier `exclusive` call for the same
+   * server has settled, and before any later one starts. `approve` and `revoke` take it
+   * themselves; a route that withdraws approvals and then changes the registration (save, remove)
+   * wraps the whole sequence in it, so no approval lands between the withdrawal and the change.
+   * Not re-entrant: inside `fn`, call {@link withdraw}, never `approve` or `revoke`, for the same
+   * server. Other servers are not blocked.
+   */
+  exclusive<T>(server: string, fn: () => Promise<T>): Promise<T> {
+    const result = (this.serverTails.get(server) ?? Promise.resolve()).then(fn);
+    const tail = result.catch(() => undefined);
+    this.serverTails.set(server, tail);
+    void tail.then(() => {
+      if (this.serverTails.get(server) === tail) this.serverTails.delete(server);
+    });
+    return result;
+  }
+
+  /**
+   * Remove every listed token from both ledgers (revoke, a changed schema, a removed server).
+   * Callers outside this class hold {@link exclusive} for the server the tokens name.
+   */
   async withdraw(tokens: readonly string[]): Promise<string[]> {
     if (tokens.length === 0) return [];
     const drop = new Set(tokens);

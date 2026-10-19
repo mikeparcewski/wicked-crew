@@ -14,7 +14,7 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AuditLog } from '../src/api/audit.js';
 import { LOCAL_ACTOR } from '../src/api/auth.js';
@@ -61,6 +61,9 @@ let app: FastifyInstance;
 let audit: AuditLog;
 let auditPath: string;
 let registry: McpRegistry;
+let store: McpRegistryStore;
+/** Every ledger write, in order, as `<rule id>:<excludes>` (crew#993 orders them against the save). */
+let events: string[];
 
 function writeSpec(tools: Array<Record<string, unknown>>): void {
   writeFileSync(specPath, JSON.stringify({ tools }));
@@ -129,16 +132,21 @@ beforeEach(async () => {
   base = mkdtempSync(join(tmpdir(), 'crew-mcp-policies-'));
   specPath = join(base, 'spec.json');
   writeSpec(TOOLS);
+  events = [];
   adapter = new CoreAdapter({ dbPath: join(base, 'core.db'), stub: true });
+  store = new McpRegistryStore(join(base, 'state', 'mcp'));
   registry = new McpRegistry({
-    store: new McpRegistryStore(join(base, 'state', 'mcp')),
+    store,
     secrets: noSecrets,
     probe: probeMcpServer,
     discover: () => [],
   });
   const policies = new McpPolicies(registry, {
     listRules: () => adapter.listConformanceRules(),
-    upsertRule: (r) => adapter.upsertConformanceRule(r),
+    upsertRule: async (r) => {
+      await adapter.upsertConformanceRule(r);
+      events.push(`${r.id}:${(r.excludes ?? []).join(',')}`);
+    },
     previewCalls: (j) => adapter.previewMcpCalls(j),
   });
   auditPath = join(base, 'audit.log');
@@ -435,6 +443,106 @@ describe('approvals are audited edits of the ledger rules', () => {
     expect(await ledger(WRITE_LEDGER)).toEqual([]);
     await audit.flush();
     expect(readFileSync(auditPath, 'utf8')).toContain('mcp.approval.withdrawn');
+  });
+});
+
+/**
+ * crew#993: hold the next registry write open. `reached` resolves once the write has been asked
+ * for (the save or removal has already withdrawn by then); `release` lets it run. The write's
+ * commit is logged into `events` as `registry:committed`.
+ */
+function holdNextRegistryWrite(): { reached: Promise<void>; release: () => void } {
+  const original = store.mutate.bind(store);
+  let reach!: () => void;
+  let release!: () => void;
+  const reached = new Promise<void>((r) => (reach = r));
+  const gate = new Promise<void>((r) => (release = r));
+  vi.spyOn(store, 'mutate').mockImplementationOnce(async (fn) => {
+    reach();
+    await gate;
+    const out = await original(fn);
+    events.push('registry:committed');
+    return out;
+  });
+  return { reached, release };
+}
+
+/** Whether `p` settles within `ms`. An approval queued behind a held save must not. */
+async function settlesWithin(p: Promise<unknown>, ms: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<false>((r) => (timer = setTimeout(() => r(false), ms)));
+  try {
+    return await Promise.race([p.then(() => true), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+describe('crew#993: an approval cannot land between a withdrawal and the registry change', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('an approval during a save that withdraws it runs after the save commits, against the new registration', async () => {
+    await register();
+    await approve('mcp:fx/wt_plain');
+    writeSpec(TOOLS.map((t) => (t.name === 'wt_plain' ? { ...t, description: 'changed' } : t)));
+    const again = (await call('POST', '/mcp/servers/preview', { name: 'fx', kind: 'mcp-stdio', command: process.execPath, args: [FIXTURE_SERVER, specPath] })).json() as McpPreviewResponse;
+    expect(again.policies?.withdrawOnSave).toEqual(['mcp:fx/wt_plain']);
+
+    const hold = holdNextRegistryWrite();
+    const save = call('POST', '/mcp/servers', { previewHash: again.previewHash, enabledWrites: grantAll(again) });
+    await hold.reached;
+    // The save has withdrawn the old approval and is about to commit the new schema.
+    expect(await ledger(FIRST_USE_LEDGER)).toEqual([]);
+    events.length = 0;
+    const approval = call('POST', '/mcp/approvals', { subject: 'mcp:fx/wt_plain' });
+    // Before the fix the approval was judged against the registration being replaced and landed here.
+    expect(await settlesWithin(approval, 500)).toBe(false);
+    expect(await ledger(FIRST_USE_LEDGER)).toEqual([]);
+    expect(await ledger(WRITE_LEDGER)).toEqual([]);
+
+    hold.release();
+    expect((await save).statusCode).toBe(201);
+    expect((await approval).statusCode).toBe(200);
+    // Strictly after: the registry commit, then the approval's two ledger writes.
+    expect(events).toEqual(['registry:committed', `${FIRST_USE_LEDGER}:mcp:fx/wt_plain`, `${WRITE_LEDGER}:mcp:fx/wt_plain`]);
+  });
+
+  it('an approval during a server removal waits, then is refused: no token is left for the removed server', async () => {
+    await register();
+    await approve('mcp:fx/wt_echo');
+    const hold = holdNextRegistryWrite();
+    const removal = call('DELETE', '/mcp/servers/fx');
+    await hold.reached;
+    expect(await ledger(FIRST_USE_LEDGER)).toEqual([]);
+    const approval = call('POST', '/mcp/approvals', { subject: 'mcp:fx/wt_plain' });
+    expect(await settlesWithin(approval, 500)).toBe(false);
+
+    hold.release();
+    expect((await removal).statusCode).toBe(200);
+    const refused = await approval;
+    expect(refused.statusCode, refused.body).toBe(404);
+    expect(refused.json()).toMatchObject({ code: 'unknown_server' });
+    expect(await ledger(FIRST_USE_LEDGER)).toEqual([]);
+    expect(await ledger(WRITE_LEDGER)).toEqual([]);
+  });
+
+  it('a save in flight does not hold up approvals for another server', async () => {
+    await register();
+    const other = (await call('POST', '/mcp/servers/preview', { name: 'fy', kind: 'mcp-stdio', command: process.execPath, args: [FIXTURE_SERVER, specPath] })).json() as McpPreviewResponse;
+    expect((await call('POST', '/mcp/servers', { previewHash: other.previewHash, enabledWrites: grantAll(other) })).statusCode).toBe(201);
+    writeSpec(TOOLS.map((t) => (t.name === 'wt_plain' ? { ...t, description: 'changed' } : t)));
+    const again = (await call('POST', '/mcp/servers/preview', { name: 'fx', kind: 'mcp-stdio', command: process.execPath, args: [FIXTURE_SERVER, specPath] })).json() as McpPreviewResponse;
+
+    const hold = holdNextRegistryWrite();
+    const save = call('POST', '/mcp/servers', { previewHash: again.previewHash, enabledWrites: grantAll(again) });
+    await hold.reached;
+    const approval = call('POST', '/mcp/approvals', { subject: 'mcp:fy/wt_echo' });
+    expect(await settlesWithin(approval, 5000)).toBe(true);
+    expect((await approval).statusCode).toBe(200);
+    expect(await ledger(FIRST_USE_LEDGER)).toEqual(['mcp:fy/wt_echo']);
+
+    hold.release();
+    expect((await save).statusCode).toBe(201);
   });
 });
 
