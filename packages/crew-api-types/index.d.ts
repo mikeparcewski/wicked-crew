@@ -1233,8 +1233,10 @@ export interface RosterSeat {
 
 /** Why a pinned seat reads `unproven` (api-types 0.129.0, crew#1004): `no_answer` — the pin's own
  *  `--version` check got no answer, so nothing confirms the build (it was not shown to differ);
- *  `different_build` — the check answered with a build other than the pinned one. */
-export type SeatVersionUnprovenWhy = 'no_answer' | 'different_build';
+ *  `different_build` — the check answered naming a build other than the pinned one;
+ *  `invalid_answer` — the check answered, but in a shape it cannot confirm (its first line is not
+ *  the pinned build byte for byte) and without naming another build. */
+export type SeatVersionUnprovenWhy = 'no_answer' | 'different_build' | 'invalid_answer';
 
 /**
  * `RosterSeat.version` (api-types 0.115.0; `why` 0.129.0). `status`: `proven` — the pin's check
@@ -1243,7 +1245,8 @@ export type SeatVersionUnprovenWhy = 'no_answer' | 'different_build';
  *
  * `status` comes from the pin's check alone (it mirrors the engine's spawn-time check), never from
  * `installed`. So `installed` may equal `proven` while `status` is `unproven`: always with
- * `why: 'no_answer'` (crew#1004), never unexplained.
+ * `why: 'no_answer'` or `why: 'invalid_answer'` (crew#1004), never unexplained and never
+ * `different_build`.
  */
 export type SeatVersion = {
   /** The first non-empty line of the seat's `--version`, home written `~`; `null` when it did not answer. */
@@ -1314,7 +1317,7 @@ export type SeatQeReviewer =
 /**
  * One `RosterSeat.issues` entry (api-types 0.115.0). Today's codes: `signed_out`, `qe_blocked`
  * (problems); `quota`, `usage_limit`, `benched`, `codex_worktree`, `host_floor` and `host_floor_unknown`
- * (unreleased, wicked-core#976), `version_unproven` (`params.why`: `no_answer` | `different_build`,
+ * (unreleased, wicked-core#976), `version_unproven` (`params.why`: `no_answer` | `different_build` | `invalid_answer`,
  * api-types 0.129.0 — the same as `RosterSeat.version.why`),
  * `unchecked` (`params.why`: `no_governance` | `no_host_boundary`), `fence_scoped`,
  * `live_check_failed` (warnings); `opt_in`, `no_qe`, `unverified` (notes). A client must tolerate

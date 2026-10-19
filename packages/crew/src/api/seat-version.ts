@@ -12,7 +12,10 @@
  *    build; `status` = `proven` when the pin holds, else `unproven`), `no_pin` otherwise. A pinned
  *    seat whose pin has not been probed yet carries no `version` at all, never a guessed status;
  *  - `why` (crew#1004, `unproven` only): `no_answer` when the pin's own `--version` probe got no
- *    answer, `different_build` when it answered with another build;
+ *    answer; `different_build` when it answered naming another build (a version token other than
+ *    the pinned one); `invalid_answer` when it answered but the engine's first-line, byte-for-byte
+ *    check rejected it without naming another build (the pinned build on a later line, a prefixed
+ *    form of it, or no version at all);
  *  - `install_source`: how the binary on PATH was installed, read off its resolved path (no
  *    spawn): under `node_modules` = `npm`, under a Homebrew prefix = `brew`, else `other`; `null`
  *    when the binary is not on PATH. It lets the Agents page offer a real update command instead of
@@ -23,8 +26,10 @@
  * own binary, its first line byte for byte), and the engine switches the seat's safety checks off
  * when that check gets no answer. So a pin probe with no answer stays `unproven` (fail closed) even
  * when `installed` reads exactly the pinned build: `why: 'no_answer'` says the build was not shown
- * to differ, only not confirmed. `installed` equal to `proven` with an unexplained `unproven` is
- * never served.
+ * to differ, only not confirmed. Likewise a probe the engine's check rejects although it names the
+ * pinned build (`"\n1.17.18\n"`: the check reads the blank first line) stays `unproven` with
+ * `why: 'invalid_answer'`, never `different_build`. `installed` equal to `proven` with an
+ * unexplained `unproven` is never served.
  *
  * Cost: one bounded `--version` per seat per {@link SEAT_VERSION_TTL_MS}, in the background; the
  * roster read never waits on it. A test-built server spawns nothing (no source under a runner).
@@ -62,7 +67,16 @@ export interface SeatVersionReading {
 }
 
 /** Why a pinned seat reads `unproven` (crew#1004; see the module doc). */
-export type SeatVersionUnprovenWhy = 'no_answer' | 'different_build';
+export type SeatVersionUnprovenWhy = 'no_answer' | 'different_build' | 'invalid_answer';
+
+const VERSION_TOKEN = /\d+\.\d+\.\d+[^\s]*/;
+
+/** Why a rejected pin reading is rejected (see the module doc); the engine's decision is kept. */
+function unprovenWhy(pinned: string, observed: string | null | undefined): SeatVersionUnprovenWhy {
+  if (observed === null || observed === undefined) return 'no_answer';
+  const token = observed.match(VERSION_TOKEN)?.[0];
+  return observed !== pinned && token !== undefined && token !== pinned ? 'different_build' : 'invalid_answer';
+}
 
 /** `RosterSeat.version` (api-types 0.115.0; `why` 0.129.0): `why` exactly when `unproven`. */
 export type SeatVersion = {
@@ -254,5 +268,5 @@ export function seatVersion(
   const base = { installed: reading.installed, proven: pinned, checked_at: reading.checked_at, install_source: reading.install_source };
   if (pinned === null) return { ...base, status: 'no_pin' };
   if (pin?.matched === true) return { ...base, status: 'proven' };
-  return { ...base, status: 'unproven', why: pin?.observed === null ? 'no_answer' : 'different_build' };
+  return { ...base, status: 'unproven', why: unprovenWhy(pinned, pin?.observed) };
 }

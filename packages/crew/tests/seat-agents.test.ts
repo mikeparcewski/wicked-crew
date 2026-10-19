@@ -4,6 +4,7 @@
 import { homedir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 
+import { probeSeatVersionPins } from '../src/api/diagnostics.js';
 import { rosterWithStandingFactory } from '../src/api/roster-standing.js';
 import { liveCheckLiftsBench, seatIssues, displayCommand } from '../src/api/seat-agents.js';
 import { SEAT_BENCH_WINDOW_MS, SeatHealthTracker } from '../src/api/seat-health.js';
@@ -522,6 +523,28 @@ describe('A6 issues', () => {
       expect(issue!.message).toBe('opencode 1.18.31 is not the build its safety checks were proven on, so they switch off');
     });
 
+    it('the pinned build after a leading blank line (the engine rejects it): invalid_answer, never "not the build" beside installed == proven', async () => {
+      // The real probe over the existing fixture: `matched: false, observed: '1.17.18'`.
+      const [probe] = await probeSeatVersionPins(
+        [{ key: 'opencode', acp: { binary: 'opencode', acp_input_governance: true, verified_version: '1.17.18' } }],
+        async () => ({ stdout: '\n1.17.18\n', stderr: '' }),
+      );
+      expect(probe).toMatchObject({ matched: false, observed: '1.17.18' });
+      const installed = firstVersionLine('\n1.17.18\n');
+      const { version, issue } = await over(installed, { matched: probe!.matched, observed: probe!.observed, pinned: probe!.pinned });
+      expect(version).toEqual({ installed: '1.17.18', proven: '1.17.18', status: 'unproven', why: 'invalid_answer', checked_at: at, install_source: 'brew' });
+      expect(issue!.params).toEqual({ why: 'invalid_answer', installed: '1.17.18', proven: '1.17.18' });
+      expect(issue!.message).toBe("opencode's version check answered in a shape its safety checks can't confirm, so they switch off for now");
+      expect(issue!.message).not.toContain('is not the build');
+    });
+
+    it('an answer naming no version, or a prefixed form of the pinned build: invalid_answer; a prefixed other build: different_build', async () => {
+      expect((await over('oops', { matched: false, observed: 'oops', pinned: '1.17.18' })).version).toMatchObject({ why: 'invalid_answer' });
+      expect((await over('opencode v1.17.18', { matched: false, observed: 'opencode v1.17.18', pinned: '1.17.18' })).version).toMatchObject({ why: 'invalid_answer' });
+      expect((await over('opencode v2.0.25', { matched: false, observed: 'opencode v2.0.25', pinned: '1.17.18' })).version).toMatchObject({ why: 'different_build' });
+      expect((await over('1.17.18-beta', { matched: false, observed: '1.17.18-beta', pinned: '1.17.18' })).version).toMatchObject({ why: 'different_build' });
+    });
+
     it('a pin that holds: proven, no why, no version_unproven', async () => {
       const { version, issue } = await over('1.17.18', { matched: true, observed: '1.17.18', pinned: '1.17.18' });
       expect(version).toEqual({ installed: '1.17.18', proven: '1.17.18', status: 'proven', checked_at: at, install_source: 'brew' });
@@ -589,7 +612,8 @@ describe('A1 version for every seat', () => {
     expect(seatVersion({ acp: { verified_version: '1' } }, r, { matched: true } as never)).toMatchObject({ status: 'proven', proven: '1' });
     expect(seatVersion({ acp: { verified_version: '1' } }, r, { matched: true } as never)).not.toHaveProperty('why');
     expect(seatVersion({ acp: { verified_version: '1' } }, r, { matched: false, observed: null } as never)).toMatchObject({ status: 'unproven', why: 'no_answer' });
-    expect(seatVersion({ acp: { verified_version: '1' } }, r, { matched: false, observed: '2' } as never)).toMatchObject({ status: 'unproven', why: 'different_build' });
+    expect(seatVersion({ acp: { verified_version: '1.0.0' } }, r, { matched: false, observed: '2.0.0' } as never)).toMatchObject({ status: 'unproven', why: 'different_build' });
+    expect(seatVersion({ acp: { verified_version: '1.0.0' } }, r, { matched: false, observed: '1.0.0' } as never)).toMatchObject({ status: 'unproven', why: 'invalid_answer' });
     expect(seatVersion({}, r, undefined)).not.toHaveProperty('why');
     expect(seatVersion({}, undefined, undefined)).toBeUndefined();
   });
