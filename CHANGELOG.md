@@ -10,6 +10,9 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+- **An MCP approval can no longer land between a save's withdrawal and its commit (#993).** `POST /mcp/servers` withdrew the approvals a changed schema or REST target (G2) invalidated, then saved, as separate steps; a `POST /mcp/approvals` for the same server could run in between, be judged against the registration being replaced, and survive the save, so a tool stood approved against a schema or target the operator never re-approved. `DELETE /mcp/servers/:name` had the same shape. Approve, revoke, and the withdraw-then-save and withdraw-then-remove sequences now run one at a time per server (`McpPolicies.exclusive`): an approval that arrives during a save waits for the commit and is judged against the new registration, and one that arrives during a removal is a 404. Other servers are not held up. No wire change.
+
 ## [0.15.1] — 2026-10-18
 
 A patch release with no crew code change: a new engine and studio. Pins: wicked-core-ts ^0.15.1, wicked-studio ^0.11.1, wicked-interactive ^0.14.1 (bridge floor, unchanged), wicked-crew-api-types 0.128.0.

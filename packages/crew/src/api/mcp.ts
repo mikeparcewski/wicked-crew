@@ -57,7 +57,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 
-import type { Actor, McpApprovalResponse, McpCallDecision, McpPreviewResponse, McpUsageResponse } from '../core/types.js';
+import type { Actor, McpApprovalResponse, McpCallDecision, McpPreviewResponse, McpServer, McpUsageResponse } from '../core/types.js';
 import { MCP_SERVER_NAME_RE } from '../mcp/classify.js';
 import type { McpBroker } from '../mcp/broker.js';
 import type { AskServer } from '../mcp/ask-server.js';
@@ -297,6 +297,10 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
     handler: async (_req, reply) => reply.code(405).header('Allow', 'POST').send({ error: 'method_not_allowed' }),
   });
 
+  // (crew#993) A withdraw-then-change of one server's registration runs under the policies' lock
+  // for that server, the one approve and revoke take. With no policies there are no approvals to race.
+  const exclusive = <T>(name: string, fn: () => Promise<T>): Promise<T> => (deps.policies === undefined ? fn() : deps.policies.exclusive(name, fn));
+
   const registry = (reply: FastifyReply): McpRegistry | null => {
     if (deps.registry !== undefined) return deps.registry;
     void reply.code(503).send({ error: 'the MCP registry is not configured on this daemon', code: 'mcp_unavailable' });
@@ -361,15 +365,21 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
           await r.checkEgress(parsed.data.previewHash, allowOrigin);
         }
         const held = parsed.data.previewHash === undefined ? null : r.peekPreview(parsed.data.previewHash);
-        if (held !== null && deps.policies !== undefined) {
-          const tokens = await deps.policies.withdrawnBySave(held);
-          if (tokens.length > 0) {
-            const rules = await deps.policies.withdraw(tokens).catch((e: unknown) => { auditPartial(deps, req, e, tokens); throw e; });
-            deps.audit.record('mcp.approval.withdrawn', deps.actorOf(req), { detail: { subjects: tokens, rules, why: 'schema_changed' } });
-            for (const id of rules) deps.audit.record('governance.rule.upserted', deps.actorOf(req), { detail: { id, source: 'mcp-approval' } });
+        const commit = async (): Promise<McpServer> => {
+          if (held !== null && deps.policies !== undefined) {
+            const tokens = await deps.policies.withdrawnBySave(held);
+            if (tokens.length > 0) {
+              const rules = await deps.policies.withdraw(tokens).catch((e: unknown) => { auditPartial(deps, req, e, tokens); throw e; });
+              deps.audit.record('mcp.approval.withdrawn', deps.actorOf(req), { detail: { subjects: tokens, rules, why: 'schema_changed' } });
+              for (const id of rules) deps.audit.record('governance.rule.upserted', deps.actorOf(req), { detail: { id, source: 'mcp-approval' } });
+            }
           }
-        }
-        const server = await r.save(parsed.data.previewHash, enabledWrites, allowOrigin);
+          return r.save(parsed.data.previewHash, enabledWrites, allowOrigin);
+        };
+        // (crew#993) The withdrawal and the save are one step for the server: an approval for it
+        // waits until the save commits, then is judged against the new registration. With no held
+        // preview the save refuses (409) and nothing is withdrawn, so there is nothing to serialize.
+        const server = held === null ? await commit() : await exclusive(held.name, commit);
         deps.audit.record('mcp.server.saved', deps.actorOf(req), {
           detail: {
             name: server.name,
@@ -422,16 +432,20 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
       const r = registry(reply);
       if (r === null) return reply;
       try {
-        await r.get(req.params.name); // 404 before anything is withdrawn
-        if (deps.policies !== undefined) {
-          const tokens = await deps.policies.tokensOf(req.params.name);
-          if (tokens.length > 0) {
-            const rules = await deps.policies.withdraw(tokens).catch((e: unknown) => { auditPartial(deps, req, e, tokens); throw e; });
-            deps.audit.record('mcp.approval.withdrawn', deps.actorOf(req), { detail: { subjects: tokens, rules, why: 'server_removed' } });
-            for (const id of rules) deps.audit.record('governance.rule.upserted', deps.actorOf(req), { detail: { id, source: 'mcp-approval' } });
+        // (crew#993) One step for the server, like the save: no approval lands between the
+        // withdrawal and the removal.
+        await exclusive(req.params.name, async () => {
+          await r.get(req.params.name); // 404 before anything is withdrawn
+          if (deps.policies !== undefined) {
+            const tokens = await deps.policies.tokensOf(req.params.name);
+            if (tokens.length > 0) {
+              const rules = await deps.policies.withdraw(tokens).catch((e: unknown) => { auditPartial(deps, req, e, tokens); throw e; });
+              deps.audit.record('mcp.approval.withdrawn', deps.actorOf(req), { detail: { subjects: tokens, rules, why: 'server_removed' } });
+              for (const id of rules) deps.audit.record('governance.rule.upserted', deps.actorOf(req), { detail: { id, source: 'mcp-approval' } });
+            }
           }
-        }
-        await r.remove(req.params.name);
+          await r.remove(req.params.name);
+        });
         deps.audit.record('mcp.server.removed', deps.actorOf(req), { detail: { name: req.params.name } });
         return { removed: req.params.name };
       } catch (err) {
