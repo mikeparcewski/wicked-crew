@@ -1231,21 +1231,45 @@ export interface RosterSeat {
   [k: string]: unknown;
 }
 
-/** `RosterSeat.version` (api-types 0.115.0). */
-export interface SeatVersion {
+/** Why a pinned seat reads `unproven` (api-types 0.131.0, crew#1004): `no_answer` — the pin's own
+ *  `--version` check got no answer, so nothing confirms the build (it was not shown to differ);
+ *  `different_build` — the check answered naming a build other than the pinned one (`observed`);
+ *  `invalid_answer` — the check answered, but in a shape it cannot confirm (its first line is not
+ *  the pinned build byte for byte) and without naming another build. A build is named by its id
+ *  alone, pre-release and build suffixes included (`1.18.31`, `1.17.18-rc.1`), only as a whole
+ *  token (`1.18.31.4` names none), never by the presentation around it: `opencode (1.17.18)`, a
+ *  colour-coded `1.17.18` and `v1.17.18,` name only the pinned build; `1.17.18-beta` names another. */
+export type SeatVersionUnprovenWhy = 'no_answer' | 'different_build' | 'invalid_answer';
+
+/**
+ * `RosterSeat.version` (api-types 0.115.0; `why` and `observed` 0.131.0). `status`: `proven` — the
+ * pin's check answered with the pinned build; `unproven` — it did not, and governance fails closed,
+ * with `why` saying which case and, on `different_build`, `observed` naming the build the check
+ * saw; `no_pin` — the seat pins no build.
+ *
+ * `status` comes from the pin's check alone (it mirrors the engine's spawn-time check), never from
+ * `installed`. The two are separate snapshots: the seat's own `--version` reading (`installed`,
+ * `checked_at`) and the pin's check are cached apart, each with its own TTL, so for up to one TTL
+ * after an upgrade `installed` may still read the pinned build while `why` is already
+ * `different_build`. The build the check saw is `observed`, never `installed`; `installed` equal to
+ * `proven` says nothing about the pin holding (crew#1004).
+ */
+export type SeatVersion = {
   /** The first non-empty line of the seat's `--version`, home written `~`; `null` when it did not answer. */
   installed: string | null;
-  /** The build the seat's governance was proven on (`acp.verified_version`); `null` when it pins none. */
-  proven: string | null;
-  /** `proven` — the installed build is the pinned one; `unproven` — it is not (governance fails
-   *  closed); `no_pin` — the seat pins no build. */
-  status: 'proven' | 'unproven' | 'no_pin';
-  /** ISO-8601 of the reading. */
+  /** ISO-8601 of the `installed` reading. */
   checked_at: string;
   /** How the binary on PATH was installed, from its resolved path: under `node_modules` = `npm`, a
    *  Homebrew prefix = `brew`, else `other`; `null` when it is not on PATH. */
   install_source: 'npm' | 'brew' | 'other' | null;
-}
+} & (
+  // `proven`: the build the seat's governance was proven on (`acp.verified_version`), `null` only
+  // when it pins none. `observed`: the build the pin's check saw, on `different_build` only.
+  | { status: 'no_pin'; proven: null }
+  | { status: 'proven'; proven: string }
+  | { status: 'unproven'; proven: string; why: 'no_answer' | 'invalid_answer' }
+  | { status: 'unproven'; proven: string; why: 'different_build'; observed: string }
+);
 
 /** `RosterSeat.account` (api-types 0.115.0). */
 export interface SeatAccount {
@@ -1304,7 +1328,10 @@ export type SeatQeReviewer =
 /**
  * One `RosterSeat.issues` entry (api-types 0.115.0). Today's codes: `signed_out`, `qe_blocked`
  * (problems); `quota`, `usage_limit`, `benched`, `codex_worktree`, `host_floor` and `host_floor_unknown`
- * (unreleased, wicked-core#976), `version_unproven`,
+ * (unreleased, wicked-core#976), `version_unproven` (`params.why`: `no_answer` | `different_build` | `invalid_answer`,
+ * api-types 0.131.0 — the same as `RosterSeat.version.why`; `params.observed`, on `different_build`
+ * only: the build the pin's check saw, the same as `RosterSeat.version.observed`; `params.proven`;
+ * `params.installed` when the seat's own `--version` answered),
  * `unchecked` (`params.why`: `no_governance` | `no_host_boundary`), `fence_scoped`,
  * `live_check_failed` (warnings); `opt_in`, `no_qe`, `unverified` (notes). A client must tolerate
  * an unknown code.

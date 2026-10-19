@@ -295,9 +295,22 @@ export function seatIssues(i: IssueInputs): SeatIssue[] {
   // Safety: the bound-run mode decides what holds the seat's writes in a job.
   const gov = i.governance.scoped_bound;
   if (i.version?.status === 'unproven') {
-    add('version_unproven', 'warning', `${name} ${i.version.installed ?? '(no version answer)'} is not the build its safety checks were proven on, so they switch off`, {
-      ...(i.version.installed !== null ? { installed: i.version.installed } : {}),
-      ...(i.version.proven !== null ? { proven: i.version.proven } : {}),
+    // crew#1004: say which case it is — the pin's check got no answer, answered in a shape it
+    // can't confirm, or answered naming another build. That build is the one the pin's check SAW
+    // (`observed`), never `installed`: the two readings are cached apart, so for up to one TTL after
+    // an upgrade `installed` still reads the pinned build while the check already saw the new one.
+    const v = i.version;
+    const message =
+      v.why === 'different_build'
+        ? `${name} ${v.observed} is not the build its safety checks were proven on (${v.proven}), so they switch off`
+        : v.why === 'no_answer'
+          ? `${name}'s version check didn't answer, so its safety checks switch off for now`
+          : `${name}'s version check answered in a shape its safety checks can't confirm, so they switch off for now`;
+    add('version_unproven', 'warning', message, {
+      why: v.why,
+      ...(v.installed !== null ? { installed: v.installed } : {}),
+      proven: v.proven,
+      ...(v.why === 'different_build' ? { observed: v.observed } : {}),
     }, [{ purpose: 'version', display: `${i.binary} --version` }]);
   } else if (gov.mode === 'none') {
     add('unchecked', 'warning', `nothing checks ${name}'s actions on this version`, { why: 'no_governance' });
