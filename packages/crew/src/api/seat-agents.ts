@@ -296,18 +296,21 @@ export function seatIssues(i: IssueInputs): SeatIssue[] {
   const gov = i.governance.scoped_bound;
   if (i.version?.status === 'unproven') {
     // crew#1004: say which case it is — the pin's check got no answer, answered in a shape it
-    // can't confirm, or answered another build.
-    const why = i.version.why;
+    // can't confirm, or answered naming another build. That build is the one the pin's check SAW
+    // (`observed`), never `installed`: the two readings are cached apart, so for up to one TTL after
+    // an upgrade `installed` still reads the pinned build while the check already saw the new one.
+    const v = i.version;
     const message =
-      why === 'no_answer'
-        ? `${name}'s version check didn't answer, so its safety checks switch off for now`
-        : why === 'invalid_answer'
-          ? `${name}'s version check answered in a shape its safety checks can't confirm, so they switch off for now`
-          : `${name}${i.version.installed !== null ? ` ${i.version.installed}` : ''} is not the build its safety checks were proven on, so they switch off`;
+      v.why === 'different_build'
+        ? `${name} ${v.observed} is not the build its safety checks were proven on (${v.proven}), so they switch off`
+        : v.why === 'no_answer'
+          ? `${name}'s version check didn't answer, so its safety checks switch off for now`
+          : `${name}'s version check answered in a shape its safety checks can't confirm, so they switch off for now`;
     add('version_unproven', 'warning', message, {
-      why,
-      ...(i.version.installed !== null ? { installed: i.version.installed } : {}),
-      ...(i.version.proven !== null ? { proven: i.version.proven } : {}),
+      why: v.why,
+      ...(v.installed !== null ? { installed: v.installed } : {}),
+      proven: v.proven,
+      ...(v.why === 'different_build' ? { observed: v.observed } : {}),
     }, [{ purpose: 'version', display: `${i.binary} --version` }]);
   } else if (gov.mode === 'none') {
     add('unchecked', 'warning', `nothing checks ${name}'s actions on this version`, { why: 'no_governance' });

@@ -12,10 +12,12 @@
  *    build; `status` = `proven` when the pin holds, else `unproven`), `no_pin` otherwise. A pinned
  *    seat whose pin has not been probed yet carries no `version` at all, never a guessed status;
  *  - `why` (crew#1004, `unproven` only): `no_answer` when the pin's own `--version` probe got no
- *    answer; `different_build` when it answered naming another build (a version token other than
- *    the pinned one); `invalid_answer` when it answered but the engine's first-line, byte-for-byte
- *    check rejected it without naming another build (the pinned build on a later line, a prefixed
- *    form of it, or no version at all);
+ *    answer; `different_build` when it answered naming another build, which `observed` carries;
+ *    `invalid_answer` when it answered but the engine's first-line, byte-for-byte check rejected it
+ *    without naming another build (the pinned build on a later line, in brackets, coloured, after a
+ *    `v`, or no version at all). A build is named by its id alone, pre-release and build suffixes
+ *    included ({@link buildsNamed}): `1.17.18-beta` is another build; `opencode (1.17.18)`, a
+ *    coloured `1.17.18` and `v1.17.18,` only present the pinned one;
  *  - `install_source`: how the binary on PATH was installed, read off its resolved path (no
  *    spawn): under `node_modules` = `npm`, under a Homebrew prefix = `brew`, else `other`; `null`
  *    when the binary is not on PATH. It lets the Agents page offer a real update command instead of
@@ -28,8 +30,13 @@
  * when `installed` reads exactly the pinned build: `why: 'no_answer'` says the build was not shown
  * to differ, only not confirmed. Likewise a probe the engine's check rejects although it names the
  * pinned build (`"\n1.17.18\n"`: the check reads the blank first line) stays `unproven` with
- * `why: 'invalid_answer'`, never `different_build`. `installed` equal to `proven` with an
- * unexplained `unproven` is never served.
+ * `why: 'invalid_answer'`, never `different_build`.
+ *
+ * `installed` and the pin reading are two snapshots from two caches with their own TTLs
+ * ({@link SEAT_VERSION_TTL_MS} here, the pin cache's in `diagnostics.ts`), so after an upgrade they
+ * disagree for up to one TTL: the pin probe already saw the new build while `installed` still reads
+ * the pinned one. So `different_build` carries `observed`, the build the pin's check saw, and the
+ * `version_unproven` message names that build, never `installed`.
  *
  * Cost: one bounded `--version` per seat per {@link SEAT_VERSION_TTL_MS}, in the background; the
  * roster read never waits on it. A test-built server spawns nothing (no source under a runner).
@@ -69,22 +76,46 @@ export interface SeatVersionReading {
 /** Why a pinned seat reads `unproven` (crew#1004; see the module doc). */
 export type SeatVersionUnprovenWhy = 'no_answer' | 'different_build' | 'invalid_answer';
 
-const VERSION_TOKEN = /\d+\.\d+\.\d+[^\s]*/;
+/** The ANSI escapes a `--version` may colour or link its answer with (CSI and OSC sequences). */
+const ANSI_ESCAPE = /\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\))/g;
+/** A build id: a semver core with its pre-release and build suffixes (`1.17.18`, `1.17.18-rc.1`,
+ *  `1.17.18+build.5`). The presentation around it (`v`, brackets, a comma) is not part of it. */
+const BUILD_ID = /\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?/g;
 
-/** Why a rejected pin reading is rejected (see the module doc); the engine's decision is kept. */
-function unprovenWhy(pinned: string, observed: string | null | undefined): SeatVersionUnprovenWhy {
-  if (observed === null || observed === undefined) return 'no_answer';
-  const token = observed.match(VERSION_TOKEN)?.[0];
-  return observed !== pinned && token !== undefined && token !== pinned ? 'different_build' : 'invalid_answer';
+/** The builds a `--version` answer names, in order, presentation stripped; `[]` when it names none. */
+export function buildsNamed(answer: string): string[] {
+  return answer.replace(ANSI_ESCAPE, '').match(BUILD_ID) ?? [];
 }
 
-/** `RosterSeat.version` (api-types 0.115.0; `why` 0.129.0): `why` exactly when `unproven`. */
+/**
+ * Why a rejected pin reading is rejected (see the module doc); the engine's `matched` decision is
+ * kept, this only explains it. The answer names another build when it names some build and none of
+ * the builds it names is the pinned one; `observed` is then the first build it names.
+ */
+function unprovenWhy(
+  pinned: string,
+  observed: string | null | undefined,
+): { why: 'no_answer' | 'invalid_answer' } | { why: 'different_build'; observed: string } {
+  if (observed === null || observed === undefined) return { why: 'no_answer' };
+  const named = buildsNamed(observed);
+  const pin = buildsNamed(pinned)[0] ?? pinned;
+  if (named.length === 0 || named.includes(pin)) return { why: 'invalid_answer' };
+  return { why: 'different_build', observed: named[0]! };
+}
+
+/** `RosterSeat.version` (api-types 0.115.0; `why` and `observed` 0.130.0): `why` exactly when
+ *  `unproven`; `observed` (the build the pin's check saw) exactly when `why` is `different_build`;
+ *  `proven` is the pinned build, `null` only on `no_pin`. */
 export type SeatVersion = {
   installed: string | null;
-  proven: string | null;
   checked_at: string;
   install_source: SeatInstallSource | null;
-} & ({ status: 'proven' | 'no_pin' } | { status: 'unproven'; why: SeatVersionUnprovenWhy });
+} & (
+  | { status: 'no_pin'; proven: null }
+  | { status: 'proven'; proven: string }
+  | { status: 'unproven'; proven: string; why: 'no_answer' | 'invalid_answer' }
+  | { status: 'unproven'; proven: string; why: 'different_build'; observed: string }
+);
 
 /** Runs one version probe; resolves to its combined output, or `null` when it did not answer. */
 export type VersionExec = (cmd: string, args: string[]) => Promise<string | null>;
@@ -265,8 +296,8 @@ export function seatVersion(
   if (reading === undefined) return undefined;
   const pinned = typeof seat.acp?.verified_version === 'string' ? seat.acp.verified_version : null;
   if (pinned !== null && pin === undefined) return undefined;
-  const base = { installed: reading.installed, proven: pinned, checked_at: reading.checked_at, install_source: reading.install_source };
-  if (pinned === null) return { ...base, status: 'no_pin' };
-  if (pin?.matched === true) return { ...base, status: 'proven' };
-  return { ...base, status: 'unproven', why: unprovenWhy(pinned, pin?.observed) };
+  const base = { installed: reading.installed, checked_at: reading.checked_at, install_source: reading.install_source };
+  if (pinned === null) return { ...base, status: 'no_pin', proven: null };
+  if (pin?.matched === true) return { ...base, status: 'proven', proven: pinned };
+  return { ...base, status: 'unproven', proven: pinned, ...unprovenWhy(pinned, pin?.observed) };
 }

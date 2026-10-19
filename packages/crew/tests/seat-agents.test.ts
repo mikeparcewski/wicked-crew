@@ -2,14 +2,14 @@
 // sign-in reading, version source and engine worktree predicate (no native addon, no CLI spawned).
 
 import { homedir } from 'node:os';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
-import { probeSeatVersionPins } from '../src/api/diagnostics.js';
+import { SeatVersionPinCache, probeSeatVersionPins } from '../src/api/diagnostics.js';
 import { rosterWithStandingFactory } from '../src/api/roster-standing.js';
 import { liveCheckLiftsBench, seatIssues, displayCommand } from '../src/api/seat-agents.js';
 import { SEAT_BENCH_WINDOW_MS, SeatHealthTracker } from '../src/api/seat-health.js';
 import { SeatProbe } from '../src/api/seat-probe.js';
-import { SEAT_VERSION_KEEP_MS, SEAT_VERSION_RETRY_MS, SEAT_VERSION_TTL_MS, SeatVersionCache, firstVersionLine, installSourceOf, probeSeatVersions, seatVersion } from '../src/api/seat-version.js';
+import { SEAT_VERSION_KEEP_MS, SEAT_VERSION_RETRY_MS, SEAT_VERSION_TTL_MS, SeatVersionCache, buildsNamed, firstVersionLine, installSourceOf, probeSeatVersions, seatVersion } from '../src/api/seat-version.js';
 import { toEngineSeat } from '../src/core/engine-roster.js';
 import type { CoreEvent } from '../src/core/types.js';
 
@@ -70,6 +70,8 @@ function rosterOver(opts: {
   probe?: SeatProbe | null;
   versions?: SeatVersionCache | null;
   pins?: Record<string, { matched: boolean; observed: string | null; pinned: string }>;
+  /** A real pin cache, when a test drives both caches over time (crew#1004). */
+  pinCache?: SeatVersionPinCache;
   /** The engine's QE skill admission per seat (default: every seat admitted). `null` = no answer. */
   qeAdmitted?: ((key: string) => boolean | null) | null;
   registry?: Array<Record<string, unknown>>;
@@ -82,14 +84,15 @@ function rosterOver(opts: {
     probe: opts.probe ?? null,
     versions: opts.versions ?? null,
     versionPins:
-      opts.pins === undefined
+      opts.pinCache ??
+      (opts.pins === undefined
         ? null
         : ({
             read: (cli: string) => {
               const p = opts.pins![cli];
               return p === undefined ? undefined : { cli, binary: cli, governanceClaimed: true, disclosure: null, ...p };
             },
-          } as never),
+          } as never)),
     worktreeBench: opts.worktree === null ? null : () => opts.worktree ?? new Map([['codex', ENGINE_BENCH]]),
     hostFloorBench:
       opts.hostFloor === undefined || opts.hostFloor === null
@@ -482,7 +485,7 @@ describe('A6 issues', () => {
     const roster = rosterOver({ versions, pins: { opencode: { matched: false, observed: 'opencode v2.0.25', pinned: '1.17.18' } } });
     return versions.refresh().then(() => {
       const opencode = seat(roster(), 'opencode');
-      expect(opencode['version']).toEqual({ installed: 'opencode v2.0.25', proven: '1.17.18', status: 'unproven', why: 'different_build', checked_at: '2026-10-12T20:00:00.000Z', install_source: 'brew' });
+      expect(opencode['version']).toEqual({ installed: 'opencode v2.0.25', proven: '1.17.18', status: 'unproven', why: 'different_build', observed: '2.0.25', checked_at: '2026-10-12T20:00:00.000Z', install_source: 'brew' });
       expect(codes(opencode)).toEqual(['warning:version_unproven', 'note:opt_in', 'note:unverified']);
     });
   });
@@ -516,11 +519,81 @@ describe('A6 issues', () => {
       expect(issue!.message).toBe("opencode's version check didn't answer, so its safety checks switch off for now");
     });
 
-    it('observed != pinned: why different_build, the "not the build" message', async () => {
+    it('observed != pinned: why different_build with the observed build, the "not the build" message naming it and the pin', async () => {
       const { version, issue } = await over('1.18.31', { matched: false, observed: '1.18.31', pinned: '1.17.18' });
-      expect(version).toMatchObject({ installed: '1.18.31', status: 'unproven', why: 'different_build' });
-      expect(issue!.params).toEqual({ why: 'different_build', installed: '1.18.31', proven: '1.17.18' });
-      expect(issue!.message).toBe('opencode 1.18.31 is not the build its safety checks were proven on, so they switch off');
+      expect(version).toMatchObject({ installed: '1.18.31', status: 'unproven', why: 'different_build', observed: '1.18.31' });
+      expect(issue!.params).toEqual({ why: 'different_build', installed: '1.18.31', proven: '1.17.18', observed: '1.18.31' });
+      expect(issue!.message).toBe('opencode 1.18.31 is not the build its safety checks were proven on (1.17.18), so they switch off');
+    });
+
+    // codex r2 on #1084: presentation around the pinned build is not another build.
+    it('brackets, ANSI colour, a `v` and a comma around the pinned build read invalid_answer; a suffix or another id reads different_build', async () => {
+      expect(buildsNamed('opencode (1.17.18)')).toEqual(['1.17.18']);
+      expect(buildsNamed('\u001b[32m1.17.18\u001b[0m')).toEqual(['1.17.18']);
+      expect(buildsNamed('\u001b]8;;https://example.invalid\u001b\\v1.17.18,\u001b]8;;\u0007')).toEqual(['1.17.18']);
+      expect(buildsNamed('1.17.18-rc.1+build.5 (node 22.1.0)')).toEqual(['1.17.18-rc.1+build.5', '22.1.0']);
+      expect(buildsNamed('nightly')).toEqual([]);
+      for (const observed of ['opencode (1.17.18)', '\u001b[32m1.17.18\u001b[0m', 'v1.17.18,']) {
+        const { version, issue } = await over(observed, { matched: false, observed, pinned: '1.17.18' });
+        expect(version, observed).toMatchObject({ status: 'unproven', why: 'invalid_answer' });
+        expect(version, observed).not.toHaveProperty('observed');
+        expect(issue!.params, observed).toEqual({ why: 'invalid_answer', installed: observed, proven: '1.17.18' });
+        expect(issue!.message, observed).not.toContain('is not the build');
+      }
+      const others: Array<[observed: string, build: string]> = [
+        ['1.17.18-beta', '1.17.18-beta'],
+        ['1.18.31', '1.18.31'],
+        ['opencode (v1.18.31+build.5)', '1.18.31+build.5'],
+        ['\u001b[1m1.17.18-rc.1\u001b[0m', '1.17.18-rc.1'],
+      ];
+      for (const [observed, build] of others) {
+        const { version, issue } = await over(observed, { matched: false, observed, pinned: '1.17.18' });
+        expect(version, observed).toMatchObject({ status: 'unproven', why: 'different_build', observed: build });
+        expect(issue!.params['observed'], observed).toBe(build);
+        expect(issue!.message, observed).toBe(`opencode ${build} is not the build its safety checks were proven on (1.17.18), so they switch off`);
+      }
+    });
+
+    // codex r2 on #1084: the installed reading and the pin reading are cached apart. After an
+    // upgrade the pin cache refreshes first and the installed one still reads the pinned build for
+    // the rest of its TTL; the message must name the build the pin probe saw, never that reading.
+    it('after an upgrade the two caches disagree for up to one TTL: the message and params name the build the pin probe saw, never the stale installed reading', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(new Date('2026-10-19T00:00:00Z'));
+        let binary = '1.17.18';
+        const pinned = [{ key: 'opencode', acp: { binary: 'opencode', acp_input_governance: true, verified_version: '1.17.18' } }];
+        const pins = new SeatVersionPinCache(async () => probeSeatVersionPins(pinned, async () => ({ stdout: `${binary}\n`, stderr: '' })));
+        const versions = new SeatVersionCache(async () =>
+          probeSeatVersions([{ key: 'opencode', binary: 'opencode' }], async () => `${binary}\n`, () => '/opt/homebrew/bin/opencode'),
+        );
+        const read = () => {
+          const opencode = seat(rosterOver({ versions, pinCache: pins })(), 'opencode');
+          const issue = (opencode['issues'] as Array<{ code: string; message: string; params: Record<string, unknown> }>).find((i) => i.code === 'version_unproven');
+          return { version: opencode['version'] as Record<string, unknown>, issue };
+        };
+        await Promise.all([pins.get(), versions.refresh()]);
+        expect(read().version).toEqual({ installed: '1.17.18', proven: '1.17.18', status: 'proven', checked_at: '2026-10-19T00:00:00.000Z', install_source: 'brew' });
+        expect(read().issue).toBeUndefined();
+
+        // The binary is upgraded. One pin TTL later the pin cache sees it; the installed reading
+        // (SEAT_VERSION_TTL_MS, twice as long) still says 1.17.18.
+        binary = '1.18.31';
+        vi.setSystemTime(new Date(Date.now() + 5 * 60_000));
+        await pins.get();
+        const stale = read();
+        expect(stale.version).toEqual({ installed: '1.17.18', proven: '1.17.18', status: 'unproven', why: 'different_build', observed: '1.18.31', checked_at: '2026-10-19T00:00:00.000Z', install_source: 'brew' });
+        expect(stale.issue!.message).toBe('opencode 1.18.31 is not the build its safety checks were proven on (1.17.18), so they switch off');
+        expect(stale.issue!.message).not.toContain('opencode 1.17.18 is');
+        expect(stale.issue!.params).toEqual({ why: 'different_build', installed: '1.17.18', proven: '1.17.18', observed: '1.18.31' });
+
+        // Once the installed reading refreshes too, the two agree.
+        vi.setSystemTime(new Date(Date.now() + 5 * 60_000));
+        await Promise.all([pins.get(), versions.refresh()]);
+        expect(read().version).toMatchObject({ installed: '1.18.31', status: 'unproven', why: 'different_build', observed: '1.18.31', checked_at: '2026-10-19T00:10:00.000Z' });
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('the pinned build after a leading blank line (the engine rejects it): invalid_answer, never "not the build" beside installed == proven', async () => {
@@ -612,7 +685,7 @@ describe('A1 version for every seat', () => {
     expect(seatVersion({ acp: { verified_version: '1' } }, r, { matched: true } as never)).toMatchObject({ status: 'proven', proven: '1' });
     expect(seatVersion({ acp: { verified_version: '1' } }, r, { matched: true } as never)).not.toHaveProperty('why');
     expect(seatVersion({ acp: { verified_version: '1' } }, r, { matched: false, observed: null } as never)).toMatchObject({ status: 'unproven', why: 'no_answer' });
-    expect(seatVersion({ acp: { verified_version: '1.0.0' } }, r, { matched: false, observed: '2.0.0' } as never)).toMatchObject({ status: 'unproven', why: 'different_build' });
+    expect(seatVersion({ acp: { verified_version: '1.0.0' } }, r, { matched: false, observed: '2.0.0' } as never)).toMatchObject({ status: 'unproven', why: 'different_build', observed: '2.0.0' });
     expect(seatVersion({ acp: { verified_version: '1.0.0' } }, r, { matched: false, observed: '1.0.0' } as never)).toMatchObject({ status: 'unproven', why: 'invalid_answer' });
     expect(seatVersion({}, r, undefined)).not.toHaveProperty('why');
     expect(seatVersion({}, undefined, undefined)).toBeUndefined();
