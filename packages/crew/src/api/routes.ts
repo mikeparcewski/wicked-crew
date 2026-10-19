@@ -23,7 +23,7 @@ import type {
   RepoFinding,
 } from '../core/types.js';
 import { resolveCursorUnit } from '../core/cursor.js';
-import { detectRefusal, offeredChoices, type GateCache, type GateCacheEntry } from './gate-cache.js';
+import { detectRefusal, offeredChoices, replayOpenGate, type GateCache, type GateCacheEntry, type GateRead } from './gate-cache.js';
 import type { ElicitationCache } from './elicitation-cache.js';
 import { acceptanceRequirementOf, buildAcceptanceView } from '../qe/acceptance.js';
 import { runIdentityOf, wireIdentity } from '../core/run-identity.js';
@@ -4395,19 +4395,24 @@ export function registerRoutes(
   }
 
   /**
-   * The run's OPEN gate, resolved the way `GET /runs/:id/gate` serves it: the cache, then the
-   * engine's durable `interaction_requests` row (adopted into the cache), then the event-log replay.
-   * The caller has already checked `awaiting_human`. `null` = the log records no open gate;
+   * The run's OPEN gate, resolved the way `GET /runs/:id/gate` serves it: the cache, else a read of
+   * the record (`readOpenGate`) adopted into the cache only once it completes with no live gate
+   * event of the run's having landed meanwhile — `GateCache.resolve` re-runs a read one did
+   * overlap, because neither side of such an overlap is known to be the newer (crew#1083 review).
+   * The caller has already checked `awaiting_human`. `null` = the record holds no open gate;
    * `'no-log'` = this build cannot read the log, so nothing can be said.
    */
   async function resolveOpenGate(id: string): Promise<GateCacheEntry | null | 'no-log'> {
-    const cached = gateCache.get(id);
-    if (cached) return cached;
-    // Taken before the first await: a live event that opens or closes this run's gate while the
-    // durable row / log is read makes the hydrated entry stale, and `adopt`/`rebuild` then keep the
-    // live entry instead (crew#1083 review — a stale ord-3 row must not replace a live ord-4 gate,
-    // nor pass the POST route's `ord` check for it).
-    const revision = gateCache.revision(id);
+    return gateCache.resolve(id, () => readOpenGate(id));
+  }
+
+  /**
+   * One read of the run's open gate from the record: the engine's durable `interaction_requests`
+   * row (DES-PROJECT-001 §5.3), enriched from the event log, else the event-log replay for engines
+   * predating the table. Never consults the cache — `GateCache.resolve` owns that, and runs this
+   * again when a live gate event overlaps it.
+   */
+  async function readOpenGate(id: string): Promise<GateRead> {
     const durableRows =
       typeof adapter.interactionRequests === 'function'
         ? await adapter.interactionRequests(id, 'open')
@@ -4425,7 +4430,7 @@ export function registerRoutes(
       // that throws) leaves both out — the gate is still served, just without the offered answers.
       const events = await adapter.runEvents(id).catch(() => null);
       const frame = events?.filter((e) => e.type === 'awaitingHuman' && e.session === id && e.ord === ord).at(-1);
-      const entry = {
+      return {
         ord,
         prompt: durableGate.prompt,
         lifecycle: 'open' as const,
@@ -4434,11 +4439,10 @@ export function registerRoutes(
         ...(gateKind !== undefined ? { gateKind } : {}),
         ...(frame !== undefined ? offeredChoices(frame) : {}),
       };
-      return gateCache.adopt(id, entry, revision) ?? null;
     }
     const events = await adapter.runEvents(id);
     if (events === null) return 'no-log';
-    return gateCache.rebuild(id, events, revision) ?? null;
+    return replayOpenGate(id, events) ?? null;
   }
 
   /** The unit an open gate holds: the named `ord`, else the open gate's, else the cursor's. */

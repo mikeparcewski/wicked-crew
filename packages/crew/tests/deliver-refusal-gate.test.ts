@@ -23,7 +23,7 @@
 import Fastify from 'fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { LaunchSchema, registerRoutes } from '../src/api/routes.js';
-import { GateCache } from '../src/api/gate-cache.js';
+import { GateCache, replayOpenGate } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
 import { DeliveryIndex, deliveryStateOf, isDeliverConflictStranded } from '../src/api/delivery-index.js';
@@ -192,7 +192,7 @@ describe('DES-L9 deliver refusal → escalation gate: the crew half (PR-L9-crew-
     // warning must NOT fire on it (an operator approving here re-runs a deterministic phase).
     expect(entry).not.toHaveProperty('refusal');
     expect(entry?.receivedAt).toBe(new Date(1_757_000_002_000).toISOString());
-    const replayed = new GateCache().rebuild(RUN_ID, FRAMES);
+    const replayed = replayOpenGate(RUN_ID, FRAMES);
     expect(replayed).toEqual(entry);
   });
 

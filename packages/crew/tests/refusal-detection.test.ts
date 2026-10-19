@@ -8,7 +8,7 @@
 // that refused one tool but did real work elsewhere, must stay unflagged.
 
 import { describe, expect, it } from 'vitest';
-import { GateCache, detectRefusal } from '../src/api/gate-cache.js';
+import { GateCache, detectRefusal, replayOpenGate } from '../src/api/gate-cache.js';
 import type { CoreEvent } from '../src/core/types.js';
 
 const RUN = 'run-419-refusal';
@@ -74,7 +74,7 @@ describe('GateCache carries the refusal warning', () => {
     const prompt = 'Blocked by the managed read-only sandbox: writes are rejected.';
     const live = new GateCache();
     live.ingest(gatePrompt(prompt));
-    const replayed = new GateCache().rebuild(RUN, [gatePrompt(prompt)]);
+    const replayed = replayOpenGate(RUN, [gatePrompt(prompt)]);
     expect(replayed?.refusal).toEqual(live.get(RUN)?.refusal);
     expect(replayed?.refusal?.matched).toBe(true);
   });

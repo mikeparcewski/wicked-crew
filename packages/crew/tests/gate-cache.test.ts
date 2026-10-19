@@ -8,8 +8,8 @@
 // restart: the one condition nobody exercises.
 
 import Fastify, { type FastifyInstance } from 'fastify';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { GateCache } from '../src/api/gate-cache.js';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { GateCache, replayOpenGate, type GateCacheEntry, type GateRead } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import type { AuditLog } from '../src/api/audit.js';
 import { registerRoutes } from '../src/api/routes.js';
@@ -45,16 +45,16 @@ describe('GateCache', () => {
     expect(cache.get(RUN)).toMatchObject({ ord: 2, lifecycle: 'open' });
   });
 
-  it('rebuilds an open gate from the durable log after the cache is gone', () => {
+  it('rebuilds an open gate from the durable log after the cache is gone', async () => {
     // The restart: nothing was ingested, so the map is empty — exactly the 404 state.
     const cache = new GateCache();
     expect(cache.get(RUN)).toBeUndefined();
 
-    const entry = cache.rebuild(RUN, [
+    const entry = await cache.resolve(RUN, async () => replayOpenGate(RUN, [
       logged('sessionStarted'),
       logged('unitDone', { ord: 1 }),
       awaitingHuman(2),
-    ]);
+    ]) ?? null);
     expect(entry).toMatchObject({ ord: 2, prompt: expect.stringContaining('Approve unit 2') });
     // Adopted, so the next read is a cache hit rather than another log replay.
     expect(cache.get(RUN)).toEqual(entry);
@@ -63,16 +63,13 @@ describe('GateCache', () => {
   it('does not resurrect a gate the run already moved past', () => {
     // The whole rule: the LAST awaitingHuman not followed by a resumed/terminal event. Replaying a
     // closed gate would show an operator a question that has already been answered.
-    const cache = new GateCache();
     for (const closing of ['resumed', 'sessionCompleted', 'runCancelled', 'sessionFailed']) {
-      expect(cache.rebuild(RUN, [awaitingHuman(2), logged(closing, { ord: 2 })])).toBeUndefined();
-      expect(cache.get(RUN)).toBeUndefined();
+      expect(replayOpenGate(RUN, [awaitingHuman(2), logged(closing, { ord: 2 })])).toBeUndefined();
     }
   });
 
   it('serves the second gate when a run pauses, resumes, then pauses again', () => {
-    const cache = new GateCache();
-    const entry = cache.rebuild(RUN, [
+    const entry = replayOpenGate(RUN, [
       awaitingHuman(2),
       logged('resumed', { ord: 2 }),
       awaitingHuman(5),
@@ -83,38 +80,34 @@ describe('GateCache', () => {
   it('stamps a replayed gate with the event time, not the replay time', () => {
     // Studio sorts the open-gate list newest-first on `receivedAt`. Stamping a rebuild with "now"
     // would collapse every gate to the restart instant and scramble that order.
-    const cache = new GateCache();
     const ts = 1_785_614_004_730;
-    expect(cache.rebuild(RUN, [awaitingHuman(2, ts)])?.receivedAt).toBe(new Date(ts).toISOString());
+    expect(replayOpenGate(RUN, [awaitingHuman(2, ts)])?.receivedAt).toBe(new Date(ts).toISOString());
   });
 
   it('reports no gate for a run whose history is empty or unknown', () => {
     // An absent history is not an error — a run that emitted nothing, or one predating the log.
-    const cache = new GateCache();
-    expect(cache.rebuild(RUN, [])).toBeUndefined();
-    expect(cache.rebuild(RUN, [logged('unitDone', { ord: 1 })])).toBeUndefined();
+    expect(replayOpenGate(RUN, [])).toBeUndefined();
+    expect(replayOpenGate(RUN, [logged('unitDone', { ord: 1 })])).toBeUndefined();
   });
 
   it('replays only the requested run out of a mixed history', () => {
-    const cache = new GateCache();
     const other: CoreEvent = { type: 'awaitingHuman', session: 'other-run', ord: 9, prompt: 'x' } as CoreEvent;
-    expect(cache.rebuild(RUN, [other])).toBeUndefined();
-    expect(cache.rebuild(RUN, [other, awaitingHuman(2)])?.ord).toBe(2);
+    expect(replayOpenGate(RUN, [other])).toBeUndefined();
+    expect(replayOpenGate(RUN, [other, awaitingHuman(2)])?.ord).toBe(2);
   });
 
-  it('drops a rebuilt entry once the run is no longer awaiting', () => {
+  it('drops a rebuilt entry once the run is no longer awaiting', async () => {
     // Self-healing still applies to an adopted replay — it is a cache, not a second source of truth.
     const cache = new GateCache();
-    cache.rebuild(RUN, [awaitingHuman(2)]);
+    await cache.resolve(RUN, async () => replayOpenGate(RUN, [awaitingHuman(2)]) ?? null);
     cache.reconcile([view(RUN, 'completed')]);
     expect(cache.get(RUN)).toBeUndefined();
   });
 
   it('ignores a malformed gate event rather than caching a blank prompt', () => {
     // A gate with no question is worse than no gate: it renders an empty approval dialog.
-    const cache = new GateCache();
-    expect(cache.rebuild(RUN, [logged('awaitingHuman', { ord: 2 })])).toBeUndefined();
-    expect(cache.rebuild(RUN, [logged('awaitingHuman', { prompt: 'no ord' })])).toBeUndefined();
+    expect(replayOpenGate(RUN, [logged('awaitingHuman', { ord: 2 })])).toBeUndefined();
+    expect(replayOpenGate(RUN, [logged('awaitingHuman', { prompt: 'no ord' })])).toBeUndefined();
   });
 });
 
@@ -169,13 +162,13 @@ describe('GateCache: offered choices (issue #969)', () => {
     expect(cache.get(RUN)).not.toHaveProperty('recommended');
   });
 
-  it('rebuild() from the log after a restart restores choices and recommended', () => {
+  it('a log replay after a restart restores choices and recommended', async () => {
     const live = new GateCache();
     live.ingest(disputeFrame(RUN));
     // The restart: a fresh cache, nothing ingested, then the log replay.
     const restarted = new GateCache();
     expect(restarted.get(RUN)).toBeUndefined();
-    const entry = restarted.rebuild(RUN, [logged('sessionStarted'), logged('unitDone', { ord: 2 }), disputeFrame(RUN)]);
+    const entry = await restarted.resolve(RUN, async () => replayOpenGate(RUN, [logged('sessionStarted'), logged('unitDone', { ord: 2 }), disputeFrame(RUN)]) ?? null);
     expect(entry).toMatchObject({ choices: DISPUTE, recommended: 1 });
     expect(entry).toEqual(live.get(RUN));
   });
@@ -269,67 +262,149 @@ describe('GET /runs/:id/gate serves the offered choices (issue #969)', () => {
   );
 });
 
-// crew#1083 review (codex P2): `resolveOpenGate` awaits the durable row and then the log. If a live
-// `resumed` + a new `awaitingHuman` land in that window, adopting the hydrated (older) entry would
-// overwrite the live gate — GET would serve the old prompt, and a POST naming the old ord would pass
-// the `ord` check and answer the new gate. A per-run revision, taken before the first await, makes
-// the live entry win.
-describe('GateCache: a live gate event beats an in-flight hydration (crew#1083 review)', () => {
-  const ord3 = { ord: 3, prompt: 'old gate', lifecycle: 'open' as const, receivedAt: '2026-10-18T00:00:00.000Z' };
+// crew#1083 review (codex, two rounds): `resolveOpenGate` awaits the durable row and then the log
+// before adopting. A live gate event for the run can land in that window, and NEITHER side is then
+// known to be the newer: the record may have moved on since the read began (ord 3 answered and ord 4
+// opened while an ord-3 row was being read), or the engine's pump may have delivered an OLDER frame
+// late (an `awaitingHuman` for ord 3, or its `resumed`, after the row already shows ord 4). Round 1
+// let the live side win: it served the late ord-3 frame over the current ord-4 row, let a POST
+// naming ord 3 pass the gate check and answer ord 4, and read a late `resumed` as no gate at all.
+// Now no winner is picked. The read is run again, and only a read nothing overlapped is adopted.
+describe('GateCache.resolve: a read a live gate event overlapped is run again, never adopted (crew#1083 review)', () => {
+  /** What a read of the record finds — distinguishable from any ingested frame's entry by `receivedAt`. */
+  const gate = (ord: number): GateCacheEntry => ({ ord, prompt: `Gate before unit ${ord}.`, lifecycle: 'open', receivedAt: '2026-10-18T00:00:00.000Z' });
+  /** A read that ingests `landing` into `cache` while its FIRST call is in flight; call n yields `results[n]` (the last one repeats). */
+  function reading(cache: GateCache, landing: CoreEvent[], ...results: GateRead[]) {
+    let calls = 0;
+    return vi.fn(async (): Promise<GateRead> => {
+      const call = calls++;
+      if (call === 0) for (const event of landing) cache.ingest(event);
+      return results[Math.min(call, results.length - 1)]!;
+    });
+  }
 
-  it('adopt keeps the newer live gate when the revision moved', () => {
+  it('a read nothing overlapped is adopted and returned', async () => {
     const cache = new GateCache();
-    const seen = cache.revision(RUN);
-    cache.ingest(logged('resumed', { ord: 3 }));
-    cache.ingest(awaitingHuman(4));
-    expect(cache.adopt(RUN, ord3, seen)?.ord).toBe(4);
-    expect(cache.get(RUN)?.ord).toBe(4);
+    const read = reading(cache, [], gate(4));
+    expect(await cache.resolve(RUN, read)).toEqual(gate(4));
+    expect(cache.get(RUN)).toEqual(gate(4));
+    expect(read).toHaveBeenCalledTimes(1);
   });
 
-  it('adopt does not resurrect a gate that closed during the read', () => {
+  it('a cached gate is served without a read', async () => {
     const cache = new GateCache();
-    const seen = cache.revision(RUN);
-    cache.ingest(logged('resumed', { ord: 3 }));
-    expect(cache.adopt(RUN, ord3, seen)).toBeUndefined();
+    cache.adopt(RUN, gate(4));
+    const read = reading(cache, [], gate(9));
+    expect(await cache.resolve(RUN, read)).toEqual(gate(4));
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('a late OLDER awaitingHuman during the read: the read is run again and its ord 4 is adopted, not the frame\'s ord 3', async () => {
+    const cache = new GateCache();
+    const read = reading(cache, [awaitingHuman(3)], gate(4));
+    expect(await cache.resolve(RUN, read)).toEqual(gate(4));
+    expect(cache.get(RUN)).toEqual(gate(4));
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
+  it('a late resumed during the read does not turn a real ord-4 gate into "no gate"', async () => {
+    const cache = new GateCache();
+    const read = reading(cache, [logged('resumed', { ord: 3 })], gate(4));
+    expect(await cache.resolve(RUN, read)).toEqual(gate(4));
+    expect(cache.get(RUN)).toEqual(gate(4));
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
+  it('a NEWER gate opening during the read of an older row: the re-read sees the row the engine wrote with it', async () => {
+    // The engine answered ord 3 and paused at ord 4: it wrote the ord-4 row, then emitted both frames.
+    const cache = new GateCache();
+    const read = reading(cache, [logged('resumed', { ord: 3 }), awaitingHuman(4)], gate(3), gate(4));
+    expect(await cache.resolve(RUN, read)).toEqual(gate(4));
+    expect(cache.get(RUN)).toEqual(gate(4));
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
+  it('an overlapped "no open gate" or "no log" read is run again too', async () => {
+    // A read that found nothing while the gate moved is as suspect as one that found a gate.
+    for (const first of [null, 'no-log'] as const) {
+      const cache = new GateCache();
+      const read = reading(cache, [logged('resumed', { ord: 3 })], first, gate(4));
+      expect(await cache.resolve(RUN, read)).toEqual(gate(4));
+      expect(read).toHaveBeenCalledTimes(2);
+    }
+  });
+
+  it('a clean "no open gate" is null and a clean "no log" is no-log; neither is adopted', async () => {
+    const cache = new GateCache();
+    expect(await cache.resolve(RUN, reading(cache, [], null))).toBeNull();
+    expect(await cache.resolve(RUN, reading(cache, [], 'no-log'))).toBe('no-log');
     expect(cache.get(RUN)).toBeUndefined();
   });
 
-  it('rebuild keeps the newer live gate when the revision moved', () => {
+  it('another run\'s gate events do not disturb the read', async () => {
     const cache = new GateCache();
-    const seen = cache.revision(RUN);
-    cache.ingest(awaitingHuman(4));
-    expect(cache.rebuild(RUN, [awaitingHuman(3)], seen)?.ord).toBe(4);
+    const other = { type: 'awaitingHuman', session: 'other-run', ord: 9, prompt: 'x' } as CoreEvent;
+    const read = reading(cache, [other], gate(4));
+    expect(await cache.resolve(RUN, read)).toEqual(gate(4));
+    expect(read).toHaveBeenCalledTimes(1);
   });
 
-  it('an unchanged revision adopts; another run\'s events do not move it', () => {
-    const cache = new GateCache();
-    const seen = cache.revision(RUN);
-    cache.ingest({ type: 'awaitingHuman', session: 'other-run', ord: 9, prompt: 'x' } as CoreEvent);
-    expect(cache.adopt(RUN, ord3, seen)?.ord).toBe(3);
-    expect(cache.get(RUN)?.ord).toBe(3);
+  it('after three overlapped reads the live entry stands, nothing read is adopted, and it is logged once', async () => {
+    const warn = vi.fn();
+    const cache = new GateCache({ warn });
+    // Every read is overlapped: a late ord-3 frame lands during each one.
+    const read = vi.fn(async (): Promise<GateRead> => {
+      cache.ingest(awaitingHuman(3));
+      return gate(4);
+    });
+    expect(await cache.resolve(RUN, read)).toMatchObject({ ord: 3 });
+    expect(cache.get(RUN)).not.toEqual(gate(4));
+    expect(read).toHaveBeenCalledTimes(3);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]?.[0]).toContain(RUN);
   });
 });
 
-describe('resolveOpenGate: a stale durable row never replaces a live gate (crew#1083 review)', () => {
+describe('resolveOpenGate: neither a stale row nor a late frame wins a race (crew#1083 review)', () => {
   let app: FastifyInstance;
-  const gateCache = new GateCache();
+  const warn = vi.fn();
+  const gateCache = new GateCache({ warn });
+  /** The engine's open-gate row per run, by ord. A test moves it exactly when the engine would. */
+  const rows = new Map<string, number>([
+    ['late-frame-get', 4], ['late-frame-post', 4], ['late-resumed', 4], ['stale-row-get', 3], ['stale-row-post', 3],
+  ]);
   const pending = new Map<string, () => void>();
   const confirmCalls: unknown[][] = [];
+  const interactionRequests = vi.fn(async (id: string) => [
+    { kind: 'gate', ord: rows.get(id), prompt: `Gate before unit ${rows.get(id)}.`, gate_kind: 'team_dispute', created_at: 1_785_614_004_730 },
+  ]);
+  /** The run's log: ord 3 offered approve/reject and was answered; ord 4 offers the dispute set. */
+  const log = (id: string): CoreEvent[] => [
+    disputeFrame(id, { ord: 3, choices: ['approve', 'reject'], recommended: 0 }, 1),
+    { type: 'resumed', session: id, ord: 3, ts: 2 } as unknown as CoreEvent,
+    disputeFrame(id, { ord: 4 }, 3),
+  ];
+  /** The ord-3 frame, delivered by the engine's pump after its row already showed ord 4 open. */
+  const lateFrame3 = (id: string): CoreEvent =>
+    ({ type: 'awaitingHuman', session: id, ord: 3, prompt: 'Gate before unit 3.', gateKind: 'team_dispute', choices: ['approve', 'reject'], recommended: 0 }) as unknown as CoreEvent;
+  /** The engine answers ord 3 and pauses at ord 4: it writes the ord-4 row, then emits. */
+  const engineMovesOn = (id: string) => () => {
+    rows.set(id, 4);
+    gateCache.ingest({ type: 'resumed', session: id, ord: 3 } as unknown as CoreEvent);
+    gateCache.ingest({ type: 'awaitingHuman', session: id, ord: 4, prompt: 'Gate before unit 4.', gateKind: 'team_dispute' } as unknown as CoreEvent);
+  };
 
   beforeAll(async () => {
     const mockAdapter = {
-      sessionsDetail: vi.fn().mockResolvedValue(['race-get', 'race-post'].map(awaitingView)),
+      sessionsDetail: vi.fn().mockResolvedValue([...rows.keys()].map(awaitingView)),
       listRepos: vi.fn().mockResolvedValue([]),
       listWorkflows: () => BUILTIN_WORKFLOWS,
-      interactionRequests: vi.fn(async () => [
-        { kind: 'gate', ord: 3, prompt: 'The team disagrees on unit 3.', gate_kind: 'team_dispute', created_at: 1_785_614_004_730 },
-      ]),
+      interactionRequests,
       // The FIRST log read per run is held until the test releases it; later reads answer at once.
       runEvents: vi.fn((id: string) =>
-        new Promise((resolve) => {
-          const events = [disputeFrame(id)];
-          if (pending.has(id)) resolve(events);
-          else pending.set(id, () => resolve(events));
+        new Promise<CoreEvent[]>((resolve) => {
+          if (pending.has(id)) resolve(log(id));
+          else pending.set(id, () => resolve(log(id)));
         })),
       confirmGate: vi.fn(async (...args: unknown[]) => {
         confirmCalls.push(args);
@@ -346,31 +421,72 @@ describe('resolveOpenGate: a stale durable row never replaces a live gate (crew#
   afterAll(async () => {
     await app.close();
   });
-
-  /** While the durable read is parked on the log, another client answers ord 3 and ord 4 opens. */
-  async function answerAndReopenDuring(id: string): Promise<void> {
-    await vi.waitFor(() => expect(pending.has(id)).toBe(true));
-    gateCache.ingest({ type: 'resumed', session: id, ord: 3 } as unknown as CoreEvent);
-    gateCache.ingest({ type: 'awaitingHuman', session: id, ord: 4, prompt: 'Approve unit 4?', gateKind: 'deliver' } as unknown as CoreEvent);
-    pending.get(id)!();
-  }
-
-  it('GET serves the live ord-4 gate, and the cache keeps it', async () => {
-    const res = app.inject({ method: 'GET', url: '/api/v1/runs/race-get/gate' });
-    await answerAndReopenDuring('race-get');
-    const body = (await res).json() as Record<string, unknown>;
-    expect(body).toMatchObject({ ord: 4, prompt: 'Approve unit 4?', gateKind: 'deliver' });
-    expect(body).not.toHaveProperty('choices');
-    expect(gateCache.get('race-get')?.ord).toBe(4);
+  beforeEach(() => {
+    confirmCalls.length = 0;
   });
 
-  it('a POST naming the stale ord 3 is refused against the live ord 4', async () => {
-    const res = app.inject({ method: 'POST', url: '/api/v1/runs/race-post/gate', payload: { approve: true, ord: 3 } });
-    await answerAndReopenDuring('race-post');
+  /** Run `land` while the run's first log read is parked, then release that read. */
+  async function whileFirstReadIsParked(id: string, land: () => void): Promise<void> {
+    await vi.waitFor(() => expect(pending.has(id)).toBe(true));
+    land();
+    pending.get(id)!();
+  }
+  const rowReads = (id: string) => interactionRequests.mock.calls.filter(([run]) => run === id).length;
+
+  it('a late ord-3 awaitingHuman during the read of the ord-4 row: GET serves ord 4, from a second read', async () => {
+    const id = 'late-frame-get';
+    const res = app.inject({ method: 'GET', url: `/api/v1/runs/${id}/gate` });
+    await whileFirstReadIsParked(id, () => gateCache.ingest(lateFrame3(id)));
+    const done = await res;
+    expect(done.statusCode).toBe(200);
+    expect(done.json()).toMatchObject({ ord: 4, gateKind: 'team_dispute', choices: DISPUTE, recommended: 1 });
+    expect(rowReads(id)).toBe(2);
+    expect(gateCache.get(id)?.ord).toBe(4);
+  });
+
+  it('… and a POST naming ord 3 is refused against ord 4; nothing is confirmed', async () => {
+    const id = 'late-frame-post';
+    const res = app.inject({ method: 'POST', url: `/api/v1/runs/${id}/gate`, payload: { approve: true, ord: 3 } });
+    await whileFirstReadIsParked(id, () => gateCache.ingest(lateFrame3(id)));
     const done = await res;
     expect(done.statusCode).toBe(409);
     expect(done.json()).toMatchObject({ code: 'gate_changed', openOrd: 4 });
     expect(confirmCalls).toEqual([]);
-    expect(gateCache.get('race-post')?.ord).toBe(4);
+    expect(gateCache.get(id)?.ord).toBe(4);
+  });
+
+  it('a late resumed(3) during the read of the ord-4 row: ord 4 is still served, not a false 404', async () => {
+    const id = 'late-resumed';
+    const res = app.inject({ method: 'GET', url: `/api/v1/runs/${id}/gate` });
+    await whileFirstReadIsParked(id, () => gateCache.ingest({ type: 'resumed', session: id, ord: 3 } as unknown as CoreEvent));
+    const done = await res;
+    expect(done.statusCode).toBe(200);
+    expect(done.json()).toMatchObject({ ord: 4, choices: DISPUTE, recommended: 1 });
+    expect(rowReads(id)).toBe(2);
+  });
+
+  it('round 1: ord 4 opens while the ord-3 row is being read — GET serves ord 4, from the re-read row', async () => {
+    const id = 'stale-row-get';
+    const res = app.inject({ method: 'GET', url: `/api/v1/runs/${id}/gate` });
+    await whileFirstReadIsParked(id, engineMovesOn(id));
+    const done = await res;
+    expect(done.statusCode).toBe(200);
+    expect(done.json()).toMatchObject({ ord: 4, gateKind: 'team_dispute', choices: DISPUTE, recommended: 1 });
+    expect(rowReads(id)).toBe(2);
+    expect(gateCache.get(id)?.ord).toBe(4);
+  });
+
+  it('round 1: … and a POST naming the stale ord 3 is refused against the live ord 4', async () => {
+    const id = 'stale-row-post';
+    const res = app.inject({ method: 'POST', url: `/api/v1/runs/${id}/gate`, payload: { approve: true, ord: 3 } });
+    await whileFirstReadIsParked(id, engineMovesOn(id));
+    const done = await res;
+    expect(done.statusCode).toBe(409);
+    expect(done.json()).toMatchObject({ code: 'gate_changed', openOrd: 4 });
+    expect(confirmCalls).toEqual([]);
+  });
+
+  it('no read was given up on', () => {
+    expect(warn).not.toHaveBeenCalled();
   });
 });

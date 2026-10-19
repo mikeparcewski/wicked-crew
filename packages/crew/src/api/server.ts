@@ -505,7 +505,7 @@ export async function createServer(
   // exists. Read via `app.endpointManifest` (scripts/generate-endpoint-manifest.ts + the drift
   // test); costs one array push per route at boot, nothing per request.
   app.decorate('endpointManifest', installEndpointManifestHook(app));
-  const gateCache = new GateCache();
+  const gateCache = new GateCache(app.log);
   // Standing orders (behaviour 10): armed once the routes (and so THE gate decision path) exist;
   // the event relays above it read it late-bound.
   let standingOrderEvaluator: StandingOrderEvaluator | null = null;
