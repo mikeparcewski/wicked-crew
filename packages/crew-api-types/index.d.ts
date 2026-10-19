@@ -7476,14 +7476,14 @@ export interface DiagnosticsResponse {
   seatGovernance?: DiagnosticsSeatGovernance;
   /** (api-types 0.97.0, crew#740) The memory store this daemon reads and writes. */
   memoryStore?: MemoryStoreInfo;
-  /** (api-types 0.129.0, crew#1068) The wicked-vault CLI the engine records held team findings with
+  /** (api-types 0.130.0, crew#1068) The wicked-vault CLI the engine records held team findings with
    *  — see `DiagnosticsVault`. `null` on a route set booted without an engine adapter; ABSENT on an
    *  older daemon. */
   vault?: DiagnosticsVault | null;
 }
 
 /**
- * (api-types 0.129.0, crew#1068) `DiagnosticsResponse.vault`: what the daemon exported to the engine
+ * (api-types 0.130.0, crew#1068) `DiagnosticsResponse.vault`: what the daemon exported to the engine
  * as `WICKED_VAULT_BIN` at boot. `shipped` = crew's own `wicked-vault` dependency's bin (an absolute
  * path); `operator` = the operator's own value, kept; `off` = the operator set it empty (the vault is
  * switched off on purpose); `unresolvable` = crew's bin could not be resolved, so nothing was
