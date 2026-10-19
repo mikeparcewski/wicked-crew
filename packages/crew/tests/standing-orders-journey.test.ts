@@ -140,6 +140,13 @@ describe('standing orders — the behaviour-10 journey', () => {
     expect(away.statusCode).toBe(200);
 
     const opened = Date.now();
+    // The engine writes each gate's row with the pause, before it emits the frame — and it is the
+    // row that authorizes the order's decision (crew#1083 round 3), never the frame the cache holds.
+    openRows = [
+      { session_id: 'run-b', kind: 'gate', ord: 0, reviewing_ord: null, gate_kind: 'run_level', prompt: 'Approve unit 0 before it runs?', created_at: Date.now() },
+      { session_id: 'run-a', kind: 'gate', ord: 0, reviewing_ord: null, gate_kind: 'run_level', prompt: 'Approve unit 0 before it runs?', created_at: Date.now() },
+      { session_id: 'run-d', kind: 'gate', ord: 1, reviewing_ord: 0, gate_kind: 'deliver', prompt: 'Deliver?', created_at: Date.now() },
+    ];
     // Away now, and the order is active: project B's intake gate is still out of its scope.
     emit({ type: 'awaitingHuman', session: 'run-b', ord: 0, reviewingOrd: null, prompt: 'Approve unit 0 before it runs?', gateKind: 'run_level' } as CoreEvent);
     emit({ type: 'awaitingHuman', session: 'run-a', ord: 0, reviewingOrd: null, prompt: 'Approve unit 0 before it runs?', gateKind: 'run_level' } as CoreEvent);
