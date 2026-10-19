@@ -1560,7 +1560,7 @@ export interface RunDiff {
 /**
  * The daemon's cached open-gate record (`GET /runs/:id/gate`, DES-STUDIO-001 §3.3).
  *
- * (api-types 0.131.0) The read answers **503** `{ error, code: 'gate_unstable' }` when live gate
+ * (api-types 0.132.0) The read answers **503** `{ error, code: 'gate_unstable' }` when live gate
  * events kept landing while the daemon read the run's record and nothing could be verified — retry.
  * A decision is never authorized from this record: see {@link GateDecision.ord}.
  */
@@ -1585,7 +1585,7 @@ export interface GateInfo {
    */
   gateKind?: string;
   /**
-   * (api-types 0.131.0; issue #969) The answer tokens the engine offered on this gate — mirrors the
+   * (api-types 0.132.0; issue #969) The answer tokens the engine offered on this gate — mirrors the
    * opening `awaitingHuman.choices` (e.g. a `team_dispute` gate's
    * `['approve', 'request_changes', 'reject']`), so a client that missed the live frame (reload,
    * late join, second tab) renders the same answers. ABSENT on an older daemon and when the engine
@@ -1593,7 +1593,7 @@ export interface GateInfo {
    */
   choices?: string[];
   /**
-   * (api-types 0.131.0; issue #969) The index into {@link GateInfo.choices} of the engine's
+   * (api-types 0.132.0; issue #969) The index into {@link GateInfo.choices} of the engine's
    * recommended answer — mirrors `awaitingHuman.recommended`. ABSENT on an older daemon, when the
    * engine recommended none, and whenever `choices` is absent.
    */
@@ -1694,7 +1694,7 @@ export interface GateDecision {
    * mismatch, confirming nothing: the gate was answered elsewhere or replaced while the decision
    * waited (a skin's undo window). When the daemon cannot tell which gate is open it answers
    * **409** `{ error, code: 'gate_unknown' }` — refresh the gate and decide again. Absent = today's
-   * behaviour (no gate check). (api-types 0.131.0) The comparison is made against the engine's
+   * behaviour (no gate check). (api-types 0.132.0) The comparison is made against the engine's
    * durable gate row, re-read immediately before the confirm — never the daemon's gate cache — so
    * a named decision answers the gate the record shows open, or nothing: `gate_unknown` when the
    * record shows no open gate or more than one.
