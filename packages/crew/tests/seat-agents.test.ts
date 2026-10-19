@@ -192,6 +192,14 @@ describe('wicked-core#976: the host-floor bench', () => {
       expect((toEngineSeat(s) as Record<string, unknown>)['health']).toEqual({ usable: true });
     });
 
+    it('a signed-out no-role seat is refused signed_out with the sign-in sentence, not a role-flag message', () => {
+      const roster = rosterOver({ worktree: new Map(), signed: { copilot: false }, registry: REGISTRY.map((s) => (s.key === 'copilot' ? { ...s, enabled_for_council: false, seat_eligible_for_work: false } : s)) })();
+      const work = (seat(roster, 'copilot')['work_admission'] as Record<string, { reason_code?: string; reason?: string }>)['unscoped']!;
+      expect(work.reason_code).toBe('signed_out');
+      expect(work.reason).toMatch(/^signed out/);
+      expect(work.reason).not.toMatch(/reviewer-only|not enabled/);
+    });
+
     it('a signed-out work-only seat is refused signed_out with the sign-in sentence, not the ballot flag', () => {
       const roster = rosterOver({ worktree: new Map(), signed: { copilot: false }, registry: REGISTRY.map((s) => (s.key === 'copilot' ? { ...s, enabled_for_council: false } : s)) })();
       const work = (seat(roster, 'copilot')['work_admission'] as Record<string, { reason_code?: string; reason?: string }>)['unscoped']!;

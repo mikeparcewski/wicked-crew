@@ -116,15 +116,19 @@ describe('seatStanding — the two roles are independent (crew#916, wicked-core#
     expect('council_ineligible_reason' in s).toBe(false);
   });
 
-  it('a seat with neither role (the built-in agy) is eligible for neither', () => {
+  it('a seat with neither role (the built-in agy) is eligible for neither, and is not called reviewer-only', () => {
     const s = seatStanding({ key: 'agy', enabled_for_council: false, seat_eligible_for_work: false }, true);
-    expect(s).toMatchObject({ council_eligible: false, work_eligible: false });
+    expect(s).toMatchObject({ council_eligible: false, work_eligible: false, work_ineligible_reason: 'not enabled for council or work' });
   });
 
-  it('the shared gates hold BOTH roles: a signed-out work-only seat is not work-eligible, and its work reason names the sign-in', () => {
+  it('the shared gates hold BOTH roles and lead both reasons, whatever the role flags', () => {
     const s = seatStanding({ key: 'codex', enabled_for_council: false, seat_eligible_for_work: true }, false);
-    expect(s.council_ineligible_reason).toBe('not enabled for council');
+    expect(s.council_ineligible_reason).toMatch(/^signed out/);
     expect(s.work_eligible).toBe(false);
+    // A no-role seat that is signed out says signed out, not its role flags.
+    const agy = seatStanding({ key: 'agy', enabled_for_council: false, seat_eligible_for_work: false }, false);
+    expect(agy.council_ineligible_reason).toMatch(/^signed out/);
+    expect(agy.work_ineligible_reason).toMatch(/^signed out/);
     expect(s.work_ineligible_reason).toMatch(/signed out/);
     const bench = { kind: 'quota_exhausted', reason: 'quota_exhausted (out of credits)', source: 'worker', at: '2026-10-18T10:00:00Z', until: '2026-10-18T10:30:00Z' } as never;
     const benched = seatStanding({ key: 'codex', enabled_for_council: true }, true, null, undefined, bench);

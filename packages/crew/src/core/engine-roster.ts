@@ -85,7 +85,8 @@ function hasNoRole(seat: Record<string, unknown>): boolean {
  * `unitDistributed.degradedReason` — derived from the standing readings themselves (seat-standing.ts
  * `seatStanding` decides `council_eligible` / `work_eligible`; this names the one cause in two or
  * three words), falling back to the first clause of the standing's own reason for a cause this table
- * does not know: the work role's when the seat casts no ballot (its council reason is only the flag).
+ * does not know (a shared gate — signed out, benched — leads both reasons, so the council's is the
+ * gate's whenever one holds).
  */
 export function shortBenchReason(seat: Record<string, unknown>): string | undefined {
   if (hasNoRole(seat)) return 'not enabled for council or work';
@@ -93,7 +94,7 @@ export function shortBenchReason(seat: Record<string, unknown>): string | undefi
   // (R5 / R5b, DES-L3 PR-3D) The `inactive` health flip and the crew council-count bench are
   // gone — the engine's per-run ballot ledger is the one bench; a stale client's `council_bench`
   // is still stripped by CREW_ONLY_SEAT_FIELDS, never read.
-  const verbose = seat['enabled_for_council'] === false ? seat['work_ineligible_reason'] : seat['council_ineligible_reason'];
+  const verbose = seat['council_ineligible_reason'];
   if (typeof verbose === 'string' && verbose.trim() !== '') {
     return verbose.split(/\s+—\s+|;\s+/, 1)[0]!.trim().slice(0, 80);
   }

@@ -253,8 +253,17 @@ export function seatStanding(
         : seatAuth(seat, signedIn);
   const login = loginCheck(seat.key, authFailure, probeInput);
   const gate = standingGate(read, authFailure, probeInput, recentBench);
-  const councilReason = seat.enabled_for_council === false ? 'not enabled for council' : gate;
-  const workReason = seat.seat_eligible_for_work === false ? 'not eligible for work (a reviewer-only seat)' : gate;
+  // The shared gate leads: a seat that is signed out (benched, login pending) says so in both
+  // roles, whatever its role flags; a role flag is the reason only when no gate holds.
+  const noRole = seat.enabled_for_council === false && seat.seat_eligible_for_work === false;
+  const councilReason = gate ?? (seat.enabled_for_council === false ? 'not enabled for council' : null);
+  const workReason =
+    gate ??
+    (seat.seat_eligible_for_work === false
+      ? noRole
+        ? 'not enabled for council or work'
+        : 'not eligible for work (a reviewer-only seat)'
+      : null);
   return {
     ...read,
     ...login,

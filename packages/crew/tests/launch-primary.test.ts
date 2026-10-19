@@ -110,6 +110,19 @@ describe('primaryRefusal / launchRosterNaming', () => {
     expect(primaryRefusal('judge', r)).toMatch(/cannot take work: judge \(not eligible for work \(a reviewer-only seat\)\)/);
   });
 
+  it('an older roster payload (no work_eligible) still refuses a benched lead — the translated health decides', () => {
+    // A client on the previous contract: a signed-out seat reads `council_eligible: false` only.
+    const r = JSON.stringify([
+      { key: 'claude', council_eligible: true },
+      { key: 'codex', auth: 'signed_out', council_eligible: false, council_ineligible_reason: 'signed out — sign it in from the Agents page' },
+    ]);
+    expect(primaryRefusal('codex', r)).toMatch(/cannot take work: codex \(signed out\)/);
+    expect(primaryRefusal('claude', r)).toBeNull();
+    // An explicit work_eligible:true still admits a work-only seat.
+    const w = JSON.stringify([{ key: 'worker', enabled_for_council: false, council_eligible: false, work_eligible: true }]);
+    expect(primaryRefusal('worker', w)).toBeNull();
+  });
+
   it('leaves an unparseable roster to the engine', () => {
     expect(primaryRefusal('claude', 'not json')).toBeNull();
     expect(primaryRefusal('claude', '{}')).toBeNull();

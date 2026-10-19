@@ -129,7 +129,7 @@ describe('council vs work eligibility (crew#916, wicked-core#572)', () => {
       council_eligible: false,
       council_ineligible_reason: 'not enabled for council',
       work_eligible: false,
-      work_ineligible_reason: 'not eligible for work (a reviewer-only seat)',
+      work_ineligible_reason: 'not enabled for council or work',
     };
     expect(eligibleSeatKeys([agy])).toEqual([]);
     expect((toEngineSeat(agy) as Record<string, unknown>)['health']).toEqual({ usable: false, reason: 'not enabled for council or work' });
@@ -144,12 +144,12 @@ describe('council vs work eligibility (crew#916, wicked-core#572)', () => {
     expect(out['seat_eligible_for_work']).toBe(false);
   });
 
-  it('a signed-out work-only seat is benched with the work reason, not the ballot flag', () => {
+  it('a benched work-only seat is benched with the gate reason, not the ballot flag', () => {
     const out = toEngineSeat({
       ...registrySeat,
       enabled_for_council: false,
       council_eligible: false,
-      council_ineligible_reason: 'not enabled for council',
+      council_ineligible_reason: 'recent quota_exhausted — the engine benched it',
       work_eligible: false,
       work_ineligible_reason: 'recent quota_exhausted — the engine benched it',
     }) as Record<string, unknown>;
