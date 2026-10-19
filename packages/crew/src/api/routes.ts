@@ -23,7 +23,7 @@ import type {
   RepoFinding,
 } from '../core/types.js';
 import { resolveCursorUnit } from '../core/cursor.js';
-import { detectRefusal, type GateCache, type GateCacheEntry } from './gate-cache.js';
+import { detectRefusal, offeredChoices, type GateCache, type GateCacheEntry } from './gate-cache.js';
 import type { ElicitationCache } from './elicitation-cache.js';
 import { acceptanceRequirementOf, buildAcceptanceView } from '../qe/acceptance.js';
 import { runIdentityOf, wireIdentity } from '../core/run-identity.js';
@@ -4414,13 +4414,20 @@ export function registerRoutes(
       // silently drop the warning that the live/replay paths carry.
       const refusal = detectRefusal(durableGate.prompt);
       const gateKind = typeof durableGate['gate_kind'] === 'string' && durableGate['gate_kind'] !== '' ? durableGate['gate_kind'] : undefined;
+      const ord = durableGate.ord ?? 0;
+      // Issue #969: the row has no `choices`/`recommended`, so they come from the newest
+      // `awaitingHuman` for this ord in the event log. A log this build cannot read (null, or a read
+      // that throws) leaves both out — the gate is still served, just without the offered answers.
+      const events = await adapter.runEvents(id).catch(() => null);
+      const frame = events?.filter((e) => e.type === 'awaitingHuman' && e.session === id && e.ord === ord).at(-1);
       const entry = {
-        ord: durableGate.ord ?? 0,
+        ord,
         prompt: durableGate.prompt,
         lifecycle: 'open' as const,
         receivedAt: new Date(durableGate.created_at).toISOString(),
         ...(refusal !== undefined ? { refusal } : {}),
         ...(gateKind !== undefined ? { gateKind } : {}),
+        ...(frame !== undefined ? offeredChoices(frame) : {}),
       };
       gateCache.adopt(id, entry);
       return entry;

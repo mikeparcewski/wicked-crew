@@ -23,6 +23,14 @@ export interface GateCacheEntry {
    * ABSENT when the engine did not say (an older engine, a row written before the field).
    */
   gateKind?: string;
+  /**
+   * The answer tokens the engine offered (`awaitingHuman.choices`; issue #969) — e.g. a
+   * `team_dispute` gate's `['approve', 'request_changes', 'reject']`. Without them a client that
+   * missed the live frame could draw only Approve/Reject. ABSENT when the engine offered none.
+   */
+  choices?: string[];
+  /** The index into `choices` of the engine's recommended answer. ABSENT without `choices`. */
+  recommended?: number;
 }
 
 /**
@@ -71,6 +79,20 @@ function observedAt(event: CoreEvent): string {
 }
 
 /**
+ * The answer set an `awaitingHuman` frame offered, kept only when well-formed (issue #969):
+ * `choices` must be a non-empty array of strings, and `recommended` an integer index inside it.
+ * A malformed value is dropped rather than served — a skin would render it as buttons. Spread the
+ * result, so a gate the engine offered nothing on stays byte-identical on the wire.
+ */
+export function offeredChoices(event: CoreEvent): { choices?: string[]; recommended?: number } {
+  const choices: unknown = event['choices'];
+  if (!Array.isArray(choices) || choices.length === 0 || !choices.every((c) => typeof c === 'string')) return {};
+  const recommended: unknown = event['recommended'];
+  const inBounds = Number.isInteger(recommended) && (recommended as number) >= 0 && (recommended as number) < choices.length;
+  return { choices: [...(choices as string[])], ...(inBounds ? { recommended: recommended as number } : {}) };
+}
+
+/**
  * The one rule that turns an event into a cache mutation.
  *
  * Shared verbatim by the live stream and by durable replay so a rebuilt gate cannot disagree with
@@ -94,6 +116,7 @@ function fold(entries: Map<string, GateCacheEntry>, event: CoreEvent): void {
           // Spread only when matched, so a normal gate's entry is byte-identical (no `refusal` key).
           ...(refusal !== undefined ? { refusal } : {}),
           ...(gateKind !== undefined ? { gateKind } : {}),
+          ...offeredChoices(event),
         });
       }
       break;

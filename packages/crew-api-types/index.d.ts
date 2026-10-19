@@ -1578,6 +1578,20 @@ export interface GateInfo {
    * kind, never infer it from the unit. ABSENT on an older daemon and when the engine did not say.
    */
   gateKind?: string;
+  /**
+   * (api-types 0.129.0; issue #969) The answer tokens the engine offered on this gate — mirrors the
+   * opening `awaitingHuman.choices` (e.g. a `team_dispute` gate's
+   * `['approve', 'request_changes', 'reject']`), so a client that missed the live frame (reload,
+   * late join, second tab) renders the same answers. ABSENT on an older daemon and when the engine
+   * offered none; never empty.
+   */
+  choices?: string[];
+  /**
+   * (api-types 0.129.0; issue #969) The index into {@link GateInfo.choices} of the engine's
+   * recommended answer — mirrors `awaitingHuman.recommended`. ABSENT on an older daemon, when the
+   * engine recommended none, and whenever `choices` is absent.
+   */
+  recommended?: number;
   /** (crew ≥ 0.9.0) The gated unit's persisted receipt (`WorkUnit.assurance`) — what assured the
    *  work this gate asks about. `null` when the unit carries none (no gate evaluated it yet, or an
    *  older engine); ABSENT on an older daemon. */
