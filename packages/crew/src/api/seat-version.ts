@@ -103,7 +103,7 @@ function unprovenWhy(
   return { why: 'different_build', observed: named[0]! };
 }
 
-/** `RosterSeat.version` (api-types 0.115.0; `why` and `observed` 0.130.0): `why` exactly when
+/** `RosterSeat.version` (api-types 0.115.0; `why` and `observed` 0.131.0): `why` exactly when
  *  `unproven`; `observed` (the build the pin's check saw) exactly when `why` is `different_build`;
  *  `proven` is the pinned build, `null` only on `no_pin`. */
 export type SeatVersion = {

@@ -1231,7 +1231,7 @@ export interface RosterSeat {
   [k: string]: unknown;
 }
 
-/** Why a pinned seat reads `unproven` (api-types 0.130.0, crew#1004): `no_answer` — the pin's own
+/** Why a pinned seat reads `unproven` (api-types 0.131.0, crew#1004): `no_answer` — the pin's own
  *  `--version` check got no answer, so nothing confirms the build (it was not shown to differ);
  *  `different_build` — the check answered naming a build other than the pinned one (`observed`);
  *  `invalid_answer` — the check answered, but in a shape it cannot confirm (its first line is not
@@ -1242,7 +1242,7 @@ export interface RosterSeat {
 export type SeatVersionUnprovenWhy = 'no_answer' | 'different_build' | 'invalid_answer';
 
 /**
- * `RosterSeat.version` (api-types 0.115.0; `why` and `observed` 0.130.0). `status`: `proven` — the
+ * `RosterSeat.version` (api-types 0.115.0; `why` and `observed` 0.131.0). `status`: `proven` — the
  * pin's check answered with the pinned build; `unproven` — it did not, and governance fails closed,
  * with `why` saying which case and, on `different_build`, `observed` naming the build the check
  * saw; `no_pin` — the seat pins no build.
@@ -1329,7 +1329,7 @@ export type SeatQeReviewer =
  * One `RosterSeat.issues` entry (api-types 0.115.0). Today's codes: `signed_out`, `qe_blocked`
  * (problems); `quota`, `usage_limit`, `benched`, `codex_worktree`, `host_floor` and `host_floor_unknown`
  * (unreleased, wicked-core#976), `version_unproven` (`params.why`: `no_answer` | `different_build` | `invalid_answer`,
- * api-types 0.130.0 — the same as `RosterSeat.version.why`; `params.observed`, on `different_build`
+ * api-types 0.131.0 — the same as `RosterSeat.version.why`; `params.observed`, on `different_build`
  * only: the build the pin's check saw, the same as `RosterSeat.version.observed`; `params.proven`;
  * `params.installed` when the seat's own `--version` answered),
  * `unchecked` (`params.why`: `no_governance` | `no_host_boundary`), `fence_scoped`,
