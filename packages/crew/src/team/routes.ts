@@ -161,7 +161,10 @@ export function registerTeamRoutes(
   app: FastifyInstance,
   adapter: CoreAdapter,
   // Defaulted to a NOOP trail so a directly-driven route set never writes the real audit log.
-  security: { audit: AuditLog } = { audit: AuditLog.noop() },
+  security: { audit: AuditLog },
+  // The per-run gate-decision lock (`decideExclusively` in api/routes.ts, crew#1083 round 5): the
+  // plan-gate edit below confirms the gate, so it never interleaves with another decision.
+  decideExclusively: <T>(runId: string, fn: () => Promise<T>) => Promise<T>,
 ): void {
   const { audit } = security;
   const actorOf = (req: { actor?: Actor }): Actor => req.actor ?? LOCAL_ACTOR;
@@ -211,7 +214,7 @@ export function registerTeamRoutes(
         try {
           // The edit IS the gate answer (T3): the engine proposes it (`plan.proposed{by:"human",
           // kind:"edit"}`), floor-fills and accepts it, or refuses it and re-opens the gate.
-          const status = await adapter.confirmGate(id, true, undefined, 'edit_plan', undefined, plan);
+          const status = await decideExclusively(id, () => adapter.confirmGate(id, true, undefined, 'edit_plan', undefined, plan));
           // WHO answered the gate, like every other gate answer (POST /runs/:id/gate).
           audit.record('gate.decided', actorOf(req), {
             runId: id,

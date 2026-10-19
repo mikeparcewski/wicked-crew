@@ -1416,7 +1416,7 @@ export async function readStoryline(
 export interface WalkthroughRouteDeps {
   /** The run's open gate (the routes' shared resolution); `'no-log'` = this build cannot say;
    *  `'unstable'` = live gate events kept landing while it was read (retry). */
-  resolveOpenGate?: (runId: string) => Promise<{ ord: number } | null | 'no-log' | 'unstable'>;
+  resolveOpenGate?: (runId: string) => Promise<{ ord: number } | null | 'no-log' | 'unstable' | 'ambiguous'>;
   audit?: AuditLog;
 }
 
@@ -1464,6 +1464,7 @@ export function registerWalkthroughRoutes(app: FastifyInstance, adapter: CoreAda
       const open = await deps.resolveOpenGate(id);
       if (open === 'no-log') return reply.code(503).send({ error: 'gate history is unavailable: this wicked-core build has no event-log read binding' });
       if (open === 'unstable') return reply.code(503).send({ error: 'the open gate could not be read: live gate events kept landing — retry', code: 'gate_unstable' });
+      if (open === 'ambiguous') return reply.code(409).send({ error: 'the engine\'s record shows gates open before more than one unit on this run, so the escalation cannot be identified', code: 'gate_unknown' });
       if (open === null) return noEscalation('no gate is open');
       const isEscalated = (u: WorkUnit | null): u is WorkUnit => u !== null && u.ord === open.ord && u.denial_reason !== null;
       const pair = named.find((p) => isEscalated(p.review) || isEscalated(p.plan));
@@ -1492,7 +1493,7 @@ export function registerWalkthroughRoutes(app: FastifyInstance, adapter: CoreAda
           code: 'gate_unstable',
         });
       }
-      const still = (await runById(id))?.session.status === 'awaiting_human' && after !== null && after !== 'no-log' && after.ord === open.ord;
+      const still = (await runById(id))?.session.status === 'awaiting_human' && after !== null && after !== 'no-log' && after !== 'ambiguous' && after.ord === open.ord;
       if (!still) {
         return reply.code(409).send({
           error: 'the storyline was written, but the escalation was answered meanwhile; open the walkthrough again before relying on it',

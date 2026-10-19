@@ -1561,7 +1561,9 @@ export interface RunDiff {
  * The daemon's cached open-gate record (`GET /runs/:id/gate`, DES-STUDIO-001 §3.3).
  *
  * (api-types 0.132.0) The read answers **503** `{ error, code: 'gate_unstable' }` when live gate
- * events kept landing while the daemon read the run's record and nothing could be verified — retry.
+ * events kept landing while the daemon read the run's record and nothing could be verified — retry
+ * — and **409** `{ error, code: 'gate_unknown' }` when the engine's open gate rows disagree on the
+ * ord. It serves the newest of the agreeing rows: the one a decision is judged by.
  * A decision is never authorized from this record: see {@link GateDecision.ord}.
  */
 export interface GateInfo {
@@ -1695,9 +1697,15 @@ export interface GateDecision {
    * waited (a skin's undo window). When the daemon cannot tell which gate is open it answers
    * **409** `{ error, code: 'gate_unknown' }` — refresh the gate and decide again. Absent = today's
    * behaviour (no gate check). (api-types 0.132.0) The comparison is made against the engine's
-   * durable gate row, re-read immediately before the confirm — never the daemon's gate cache — so
-   * a named decision answers the gate the record shows open, or nothing: `gate_unknown` when the
-   * record shows no open gate or more than one.
+   * durable open gate rows, read under the run's decision lock immediately before the confirm —
+   * never the daemon's gate cache — and judged by ORD AGREEMENT, not row count:
+   * - no open gate row → **409** `gate_unknown`;
+   * - open rows that disagree on the ord (the record is ambiguous) → **409** `gate_unknown`;
+   * - the rows agree on an ord other than this one → **409** `gate_changed` with `openOrd`;
+   * - the rows agree on this ord — one row or several (a keyed plan gate plus its recovery row) →
+   *   authorized.
+   * The same reading judges a decision without `ord` (ambiguous rows → `gate_unknown`) and a gated
+   * `POST /runs/:id/resume` or `/reassign`.
    */
   ord?: number;
 }

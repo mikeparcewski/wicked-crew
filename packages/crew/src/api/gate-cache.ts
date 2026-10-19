@@ -148,9 +148,11 @@ export function replayOpenGate(runId: string, events: CoreEvent[]): GateCacheEnt
 
 /**
  * What one read of a run's open gate from the record yields: the gate; `null` (the record holds
- * no open gate); `'no-log'` (this build cannot read the log, so nothing can be said).
+ * no open gate); `'no-log'` (this build cannot read the log, so nothing can be said);
+ * `'ambiguous'` (the engine's open gate rows disagree on the ord, so the record cannot say which
+ * gate is open — crew#1083 round 5).
  */
-export type GateRead = GateCacheEntry | null | 'no-log';
+export type GateRead = GateCacheEntry | null | 'no-log' | 'ambiguous';
 
 /**
  * What `GateCache.resolve` yields: a read's result, or `'unstable'` — live gate events kept landing
@@ -158,7 +160,7 @@ export type GateRead = GateCacheEntry | null | 'no-log';
  */
 export type GateResolution = GateRead | 'unstable';
 
-/** Narrows a resolution to an open gate: `null`, `'no-log'` and `'unstable'` are not one. */
+/** Narrows a resolution to an open gate: `null`, `'no-log'`, `'ambiguous'` and `'unstable'` are not one. */
 export function isOpenGate(resolution: GateResolution | undefined): resolution is GateCacheEntry {
   return typeof resolution === 'object' && resolution !== null;
 }

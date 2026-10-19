@@ -191,3 +191,78 @@ describe('/deliveries/freeze and the deliver gate', () => {
     await freeze({ frozen: false });
   });
 });
+
+// crew#1083 round 5 (codex, reproduced through both handlers): `/resume` and `/reassign` confirm the
+// gate too, and once bypassed the per-run decision lock. A named ord-4 decision read its snapshot,
+// the other path confirmed ord 4 and opened the ord-5 deliver gate, and the decision then confirmed
+// ord 5 with ord 4's checks — with deliveries frozen. Every gate-confirming path now takes the same
+// lock before it reads the run, and is judged by the record, so whichever runs second meets the
+// deliver gate: a 409, and one confirm.
+describe('every gate-confirming path shares one per-run lock (crew#1083 round 5)', () => {
+  let app: FastifyInstance;
+  const gateCache = new GateCache();
+  const confirmCalls: string[] = [];
+  /** Per run: the ord of the open gate row the engine's record holds. */
+  const rowOrd = new Map<string, number>();
+  /** The first confirm of each run is parked until the test releases it. */
+  const parked = new Map<string, () => void>();
+  const ids = ['mx-gate-resume', 'mx-resume-gate', 'mx-gate-reassign', 'mx-reassign-gate'];
+
+  beforeAll(async () => {
+    const mockAdapter = {
+      sessionsDetail: vi.fn(async () => ids.map((id) => view(id, 'awaiting_human'))),
+      listRepos: vi.fn().mockResolvedValue([]),
+      listWorkflows: () => BUILTIN_WORKFLOWS,
+      interactionRequests: vi.fn(async (id: string) => {
+        const ord = rowOrd.get(id);
+        return ord === undefined ? [] : [{ kind: 'gate', ord, prompt: `Approve unit ${ord}?`, created_at: 1 }];
+      }),
+      runEvents: vi.fn(async () => null),
+      confirmGate: vi.fn(async (id: string) => {
+        confirmCalls.push(id);
+        if (!parked.has(id)) await new Promise<void>((r) => parked.set(id, r));
+        // The engine answered the review gate and paused at the deliver gate, writing its row. The
+        // cache still holds ord 4: the `resumed` / `awaitingHuman` frames are not pumped yet.
+        rowOrd.set(id, DELIVER_ORD);
+        return 'awaiting_human';
+      }),
+      reassignUnit: vi.fn(async () => undefined),
+    };
+    app = Fastify({ logger: false });
+    registerRoutes(app, mockAdapter as unknown as CoreAdapter, gateCache, new ElicitationCache(), undefined, {
+      audit: { record: vi.fn(() => Date.now()) } as unknown as AuditLog,
+      authMode: 'off',
+    });
+    await app.ready();
+    expect((await app.inject({ method: 'PUT', url: '/api/v1/deliveries/freeze', payload: { frozen: true, reason: 'incident 7' } })).statusCode).toBe(200);
+  });
+  afterAll(async () => {
+    await app.close();
+  });
+
+  const post = (id: string, path: 'gate' | 'resume' | 'reassign') =>
+    app.inject({ method: 'POST', url: `/api/v1/runs/${id}/${path}`, payload: path === 'gate' ? { approve: true, ord: 4 } : {} });
+
+  it.each([
+    ['mx-gate-resume', 'gate', 'resume', 'deliveries_frozen'],
+    ['mx-resume-gate', 'resume', 'gate', 'gate_changed'],
+    ['mx-gate-reassign', 'gate', 'reassign', 'deliveries_frozen'],
+    ['mx-reassign-gate', 'reassign', 'gate', 'gate_changed'],
+  ] as const)('%s: the first confirm opens the deliver gate; the second request is 409 %s and confirmGate runs once', async (id, first, second, code) => {
+    rowOrd.set(id, 4);
+    gateCache.adopt(id, { ord: 4, prompt: 'Approve unit 4?', lifecycle: 'open', receivedAt: '2026-09-27T10:00:00Z' });
+    const a = post(id, first);
+    await vi.waitFor(() => expect(parked.has(id)).toBe(true)); // the first is inside its confirm
+    const b = post(id, second);
+    await new Promise((r) => setTimeout(r, 30));
+    // Unlocked, the second would have passed its checks against ord 4 and confirmed by now.
+    expect(confirmCalls.filter((c) => c === id)).toHaveLength(1);
+    parked.get(id)!();
+    const [ra, rb] = await Promise.all([a, b]);
+    expect(ra.statusCode).toBe(200);
+    expect(rb.statusCode).toBe(409);
+    expect(rb.json()).toMatchObject({ code });
+    if (code === 'gate_changed') expect(rb.json()).toMatchObject({ openOrd: DELIVER_ORD });
+    expect(confirmCalls.filter((c) => c === id)).toHaveLength(1);
+  });
+});

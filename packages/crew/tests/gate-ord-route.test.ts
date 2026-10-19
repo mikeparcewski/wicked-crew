@@ -66,6 +66,7 @@ describe('POST /runs/:id/gate with ord', () => {
         view('run-stale-cache', 'awaiting_human', 4),
         view('run-cache-only', 'awaiting_human', 2),
         view('run-two-rows', 'awaiting_human', 6),
+        view('run-split', 'awaiting_human', 3),
         view('run-race', 'awaiting_human', 3),
       ]),
       listRepos: vi.fn().mockResolvedValue([]),
@@ -84,7 +85,14 @@ describe('POST /runs/:id/gate with ord', () => {
         if (id === 'run-two-rows') {
           return [
             { kind: 'gate', ord: 6, gate_kind: 'plan_approval', prompt: 'Approve the plan before unit 6?', created_at: '2026-09-26T10:00:00Z' },
-            { kind: 'gate', ord: 6, gate_kind: 'team_transport', prompt: 'Approve the plan before unit 6?', created_at: '2026-09-26T10:00:05Z' },
+            { kind: 'gate', ord: 6, gate_kind: 'team_transport', prompt: 'Approve the plan before unit 6? (recovered)', created_at: '2026-09-26T10:00:05Z' },
+          ];
+        }
+        // Open rows that DISAGREE on the ord: the record cannot say which gate is open (round 5, P2).
+        if (id === 'run-split') {
+          return [
+            { kind: 'gate', ord: 4, prompt: 'Approve unit 4?', created_at: '2026-09-26T10:00:05Z' },
+            { kind: 'gate', ord: 3, prompt: 'Approve unit 3?', created_at: '2026-09-26T10:00:00Z' },
           ];
         }
         if (id === 'run-race') return new Promise<ReturnType<typeof row>>((resolve) => raceReads.push(() => resolve(row(raceOrd))));
@@ -204,6 +212,28 @@ describe('POST /runs/:id/gate with ord', () => {
     expect(rb.statusCode).toBe(409);
     expect(rb.json()).toMatchObject({ code: 'gate_changed', openOrd: 4 });
     expect(confirmCalls).toHaveLength(1);
+  });
+
+  it('P2 (round 5): GET serves the row a decision is judged by — the newest of the agreeing rows', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/v1/runs/run-two-rows/gate' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ ord: 6, prompt: 'Approve the plan before unit 6? (recovered)', gateKind: 'team_transport' });
+  });
+
+  it('P2 (round 5): rows that disagree on the ord are ambiguous — GET and every decision say gate_unknown, never a self-contradicting gate_changed', async () => {
+    for (const ord of [3, 4]) {
+      const res = await gate('run-split', { approve: true, ord });
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toMatchObject({ code: 'gate_unknown' });
+      expect(res.json().error).toMatch(/units 3 and 4/);
+    }
+    const bare = await gate('run-split', { approve: true });
+    expect(bare.statusCode).toBe(409);
+    expect(bare.json()).toMatchObject({ code: 'gate_unknown' });
+    expect(confirmCalls).toEqual([]);
+    const read = await app.inject({ method: 'GET', url: '/api/v1/runs/run-split/gate' });
+    expect(read.statusCode).toBe(409);
+    expect(read.json()).toMatchObject({ code: 'gate_unknown' });
   });
 
   it('a cached gate the record does not show authorizes nothing: 409 gate_unknown', async () => {
