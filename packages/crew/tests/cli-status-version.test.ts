@@ -157,6 +157,19 @@ describe('wicked-crew status / gate against an answering daemon', () => {
     expect(out.stderr).not.toMatch(STACK_FRAME);
   });
 
+  it('status: a custom seat crew 0.15.2 made work-eligible is named on stderr (seat.work_default); stdout stays the runs JSON; exit 0', async () => {
+    const message =
+      'seat chat-helper is not enabled for council but is now eligible for work (since crew 0.15.2 the two are separate); set seat_eligible_for_work = false to keep it off work';
+    const port = await stubDaemonRoutes({
+      '/api/v1/runs': '[]',
+      '/api/v1/health': JSON.stringify({ status: 'ok', warnings: [{ kind: 'seat.work_default', severity: 'warning', message }] }),
+    });
+    const out = await cli(['status', '--port', String(port)]);
+    expect(out.code).toBe(0);
+    expect(JSON.parse(out.stdout)).toEqual([]);
+    expect(out.stderr.trim()).toBe(`wicked-crew: ${message}`);
+  });
+
   it('status: a daemon whose base skill is handed (finding null) — or one too old to report a posture — prints nothing on stderr', async () => {
     const handed = await stubDaemonRoutes({ '/api/v1/runs': '[]', '/api/v1/health': JSON.stringify({ status: 'ok', baseSkill: { name: 'wicked-garden-governed-worker', present: true, finding: null } }) });
     const out = await cli(['status', '--port', String(handed)]);
