@@ -1579,7 +1579,7 @@ export interface GateInfo {
    */
   gateKind?: string;
   /**
-   * (api-types 0.129.0; issue #969) The answer tokens the engine offered on this gate — mirrors the
+   * (api-types 0.131.0; issue #969) The answer tokens the engine offered on this gate — mirrors the
    * opening `awaitingHuman.choices` (e.g. a `team_dispute` gate's
    * `['approve', 'request_changes', 'reject']`), so a client that missed the live frame (reload,
    * late join, second tab) renders the same answers. ABSENT on an older daemon and when the engine
@@ -1587,7 +1587,7 @@ export interface GateInfo {
    */
   choices?: string[];
   /**
-   * (api-types 0.129.0; issue #969) The index into {@link GateInfo.choices} of the engine's
+   * (api-types 0.131.0; issue #969) The index into {@link GateInfo.choices} of the engine's
    * recommended answer — mirrors `awaitingHuman.recommended`. ABSENT on an older daemon, when the
    * engine recommended none, and whenever `choices` is absent.
    */
