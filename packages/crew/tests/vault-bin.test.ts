@@ -7,6 +7,11 @@
 //     purpose) and reads as the `vault.off` warning.
 //   - an unresolvable bin never fails boot: the real (stub-spawned) adapter constructs, and
 //     `/health.warnings` + `/diagnostics.vault` carry `vault.unresolvable` with the remedy.
+//
+// Every case hands the decision its inputs explicitly (the operator value AND the resolver): none
+// reads the value this test process inherited, so the suite answers the same with WICKED_VAULT_BIN
+// unset, set to a path, or set to "" in the runner's environment. The one case about the daemon's
+// default wiring says what it expects FROM that inherited value.
 
 import Fastify, { type FastifyInstance } from 'fastify';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs';
@@ -161,7 +166,7 @@ describe('applyVaultBinEnv (crew#1068)', () => {
   });
 });
 
-describe('boot with an unresolvable wicked-vault (crew#1068)', () => {
+describe('the adapter\'s vault-bin decision (crew#1068)', () => {
   function routes(adapter: CoreAdapter): FastifyInstance {
     const app = Fastify({ logger: false });
     registerRoutes(
@@ -177,54 +182,68 @@ describe('boot with an unresolvable wicked-vault (crew#1068)', () => {
     return app;
   }
 
-  // The posture is decided from the value the process BOOTED with: a runner that exported its own
-  // WICKED_VAULT_BIN is an operator override, which this case is not about.
-  it.skipIf(BOOT_VAULT_BIN !== undefined)(
-    'the real adapter still boots; /health.warnings and /diagnostics.vault carry vault.unresolvable with the remedy',
-    async () => {
-      delete process.env[VAULT_BIN_ENV];
-      const adapter = new CoreAdapter({
-        dbPath: join(tmp(), 'core.db'),
-        stub: true,
-        resolveVaultBin: () => {
+  it('the real adapter still boots; /health.warnings and /diagnostics.vault carry vault.unresolvable with the remedy', async () => {
+    delete process.env[VAULT_BIN_ENV];
+    const adapter = new CoreAdapter({
+      dbPath: join(tmp(), 'core.db'),
+      stub: true,
+      vaultBin: {
+        operator: undefined,
+        resolve: () => {
           throw new Error("Cannot find module 'wicked-vault/package.json'");
         },
-      });
-      adapters.push(adapter);
-      expect(adapter.vaultBin.source).toBe('unresolvable');
-      expect(VAULT_BIN_ENV in process.env).toBe(false);
-      const app = routes(adapter);
+      },
+    });
+    adapters.push(adapter);
+    expect(adapter.vaultBin.source).toBe('unresolvable');
+    expect(VAULT_BIN_ENV in process.env).toBe(false);
+    const app = routes(adapter);
 
-      const health = (await app.inject({ method: 'GET', url: '/api/v1/health' })).json() as HealthResponse;
-      expect(health.status).toBe('ok');
-      const vault = (health.warnings ?? []).filter((w) => w.kind.startsWith('vault.'));
-      expect(vault).toHaveLength(1);
-      expect(vault[0]!.kind).toBe('vault.unresolvable');
-      expect(vault[0]!.message).toContain('wicked-vault is not resolvable');
-      expect(vault[0]!.message).toContain('held boundary findings will not be vaulted');
-      expect(vault[0]!.message).toContain('reinstall wicked-crew');
+    const health = (await app.inject({ method: 'GET', url: '/api/v1/health' })).json() as HealthResponse;
+    expect(health.status).toBe('ok');
+    const vault = (health.warnings ?? []).filter((w) => w.kind.startsWith('vault.'));
+    expect(vault).toHaveLength(1);
+    expect(vault[0]!.kind).toBe('vault.unresolvable');
+    expect(vault[0]!.message).toContain('wicked-vault is not resolvable');
+    expect(vault[0]!.message).toContain('held boundary findings will not be vaulted');
+    expect(vault[0]!.message).toContain('reinstall wicked-crew');
 
-      const diag = (await app.inject({ method: 'GET', url: '/api/v1/diagnostics' })).json() as DiagnosticsResponse;
-      expect(diag.vault?.source).toBe('unresolvable');
-      expect(diag.vault?.bin).toBeNull();
-      expect(diag.vault?.finding?.kind).toBe('vault.unresolvable');
-      expect(diag.vault?.finding?.remedy).toMatch(/reinstall wicked-crew .* or set WICKED_VAULT_BIN/);
-    },
-  );
+    const diag = (await app.inject({ method: 'GET', url: '/api/v1/diagnostics' })).json() as DiagnosticsResponse;
+    expect(diag.vault?.source).toBe('unresolvable');
+    expect(diag.vault?.bin).toBeNull();
+    expect(diag.vault?.finding?.kind).toBe('vault.unresolvable');
+    expect(diag.vault?.finding?.remedy).toMatch(/reinstall wicked-crew .* or set WICKED_VAULT_BIN/);
+  });
 
-  it.skipIf(BOOT_VAULT_BIN !== undefined || process.platform === 'win32')(
-    'the default boot hands the engine crew\'s own bin and says nothing about the vault',
-    async () => {
-      delete process.env[VAULT_BIN_ENV];
-      const adapter = new CoreAdapter({ dbPath: join(tmp(), 'core.db'), stub: true });
-      adapters.push(adapter);
-      expect(adapter.vaultBin.source).toBe('shipped');
+  it('no operator value: the adapter hands the engine crew\'s own bin and says nothing about the vault', async () => {
+    const adapter = new CoreAdapter({
+      dbPath: join(tmp(), 'core.db'),
+      stub: true,
+      vaultBin: { operator: undefined, resolve: resolveShippedVaultBin },
+    });
+    adapters.push(adapter);
+    expect(adapter.vaultBin.source).toBe('shipped');
+    expect(process.env[VAULT_BIN_ENV]).toBe(resolveShippedVaultBin());
+    const app = routes(adapter);
+    const health = (await app.inject({ method: 'GET', url: '/api/v1/health' })).json() as HealthResponse;
+    expect((health.warnings ?? []).filter((w) => w.kind.startsWith('vault.'))).toEqual([]);
+    const diag = (await app.inject({ method: 'GET', url: '/api/v1/diagnostics' })).json() as DiagnosticsResponse;
+    expect(diag.vault).toEqual({ bin: resolveShippedVaultBin(), source: 'shipped', finding: null });
+  });
+
+  // The daemon passes no `vaultBin`: the decision is then made from the value THIS process booted
+  // with (`BOOT_VAULT_BIN`), which is whatever the runner inherited — so this case states what the
+  // wiring must yield for each of its three states, rather than assuming one of them.
+  it('without the seam, the adapter decides from the value the process booted with', () => {
+    const adapter = new CoreAdapter({ dbPath: join(tmp(), 'core.db'), stub: true });
+    adapters.push(adapter);
+    if (BOOT_VAULT_BIN === undefined) {
+      expect(adapter.vaultBin).toEqual({ source: 'shipped', bin: resolveShippedVaultBin() });
       expect(process.env[VAULT_BIN_ENV]).toBe(resolveShippedVaultBin());
-      const app = routes(adapter);
-      const health = (await app.inject({ method: 'GET', url: '/api/v1/health' })).json() as HealthResponse;
-      expect((health.warnings ?? []).filter((w) => w.kind.startsWith('vault.'))).toEqual([]);
-      const diag = (await app.inject({ method: 'GET', url: '/api/v1/diagnostics' })).json() as DiagnosticsResponse;
-      expect(diag.vault).toEqual({ bin: resolveShippedVaultBin(), source: 'shipped', finding: null });
-    },
-  );
+    } else if (BOOT_VAULT_BIN.trim() === '') {
+      expect(adapter.vaultBin).toEqual({ source: 'off', bin: null });
+    } else {
+      expect(adapter.vaultBin).toEqual({ source: 'operator', bin: BOOT_VAULT_BIN });
+    }
+  });
 });

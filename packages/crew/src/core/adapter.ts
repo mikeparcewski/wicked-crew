@@ -69,7 +69,7 @@ import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../project
 import { applyGovernanceStoreEnv, isStoreSpec, type GovernanceStoreLocation } from './governance-store.js';
 import { isCouncilSize, isCouncilStaggerMs } from './council-settings.js';
 import { QE_OFF_REASON, launchRequiresQe, qeAcceptanceMode, qeSettingSkipReason } from './qe-acceptance-setting.js';
-import { applyVaultBinEnv, type VaultBinPosture, type VaultBinResolver } from './vault-bin.js';
+import { applyVaultBinEnv, BOOT_VAULT_BIN, resolveShippedVaultBin, type VaultBinInputs, type VaultBinPosture } from './vault-bin.js';
 
 
 
@@ -1034,11 +1034,12 @@ export interface CoreAdapterOptions {
    */
   governanceStore?: GovernanceStoreLocation;
   /**
-   * (crew#1068) Resolves crew's own `wicked-vault` bin, exported to the engine as `WICKED_VAULT_BIN`
-   * unless the operator booted with the variable set (`core/vault-bin.ts`). Default: the shipped
-   * dependency's bin; tests inject one that fails to prove boot survives it.
+   * (crew#1068) What the engine's `WICKED_VAULT_BIN` is decided from (`core/vault-bin.ts`): the
+   * operator's boot value, kept when set, else crew's own `wicked-vault` bin. Default — the daemon —
+   * is `BOOT_VAULT_BIN` + the shipped dependency's bin; tests pass both explicitly (a resolver that
+   * fails proves boot survives it) so no case depends on the test process's environment.
    */
-  resolveVaultBin?: VaultBinResolver;
+  vaultBin?: VaultBinInputs;
 }
 
 
@@ -1279,7 +1280,8 @@ export class CoreAdapter {
     // crew#1068: the engine vaults a held team finding with the CLI `WICKED_VAULT_BIN` names (read
     // per record): crew's own wicked-vault bin, unless the operator chose one (or switched it off).
     // A bin that cannot be resolved never fails boot; it is reported instead.
-    this.vaultBin = applyVaultBinEnv(process.env, opts.resolveVaultBin);
+    const vaultInputs = opts.vaultBin ?? { operator: BOOT_VAULT_BIN, resolve: resolveShippedVaultBin };
+    this.vaultBin = applyVaultBinEnv(process.env, vaultInputs.resolve, vaultInputs.operator);
     if (this.vaultBin.source === 'unresolvable') {
       console.error(`[crew] wicked-vault is not resolvable (${this.vaultBin.reason}); held boundary findings will not be vaulted`);
     } else if (this.vaultBin.source === 'off') {

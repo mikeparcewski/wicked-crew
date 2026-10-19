@@ -36,6 +36,15 @@ export type VaultBinPosture =
 /** Resolves the absolute path of the `wicked-vault` bin; throws with the reason it cannot. */
 export type VaultBinResolver = () => string;
 
+/** What the decision is made from. The daemon's one call site (`CoreAdapter`) passes the value the
+ *  process booted with and crew's own resolver; tests pass both explicitly, so no case depends on
+ *  the importing process's environment. */
+export interface VaultBinInputs {
+  /** The operator's `WICKED_VAULT_BIN` as the process booted: `undefined` = none set. */
+  operator: string | undefined;
+  resolve: VaultBinResolver;
+}
+
 const VAULT_PKG = 'wicked-vault';
 
 /**
@@ -62,15 +71,16 @@ export function resolveShippedVaultBin(
 }
 
 /**
- * Hand the engine its wicked-vault CLI in `env` before it spawns. The operator's boot value wins,
- * untouched (`''` = switched off, kept empty); otherwise crew's resolved bin is exported. A bin that
- * cannot be resolved leaves `env` as it was and is reported — it never fails boot.
+ * Hand the engine its wicked-vault CLI in `env` before it spawns. `operator` (the value the process
+ * booted with) wins, untouched (`''` = switched off, kept empty); otherwise `resolve()`'s bin is
+ * exported. A bin that cannot be resolved leaves `env` as it was and is reported — it never fails boot.
+ *
+ * Every input is a plain parameter, deliberately: a default of `BOOT_VAULT_BIN` here would be
+ * substituted for an explicit `undefined` too (that is what a default parameter does), so a caller
+ * saying "no operator value" would silently get the importing process's environment instead. The
+ * daemon passes `BOOT_VAULT_BIN` itself (`CoreAdapter`).
  */
-export function applyVaultBinEnv(
-  env: NodeJS.ProcessEnv = process.env,
-  resolve: VaultBinResolver = resolveShippedVaultBin,
-  operator: string | undefined = BOOT_VAULT_BIN,
-): VaultBinPosture {
+export function applyVaultBinEnv(env: NodeJS.ProcessEnv, resolve: VaultBinResolver, operator: string | undefined): VaultBinPosture {
   if (operator !== undefined) {
     return operator.trim() === '' ? { source: 'off', bin: null } : { source: 'operator', bin: operator };
   }
