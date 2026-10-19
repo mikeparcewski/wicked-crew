@@ -68,6 +68,7 @@ import {
   type GovernanceSeatInput,
   type SeatGovernanceDiagnostic,
 } from './seat-governance.js';
+import { seatWorkDefaultNow } from './seat-work-default.js';
 import { ROSTER_REFRESH_WAIT_MS, rosterWithStandingFactory, type RosterWithStanding } from './roster-standing.js';
 import {
   SeatContainerStatus, isContainerLoginCli, isContainerSeatFloor, loginDetail, runSeatLogin, seatLoginDepsFor, type ExecLike, type SeatLoginDeps,
@@ -1722,6 +1723,9 @@ export function registerRoutes(
       // crew#742: a seat that runs ungoverned, or floor seats on a host that cannot arm their
       // boundary, are named before any run starts.
       ...seatGovernanceWarnings(seatGovernanceNow(), hostSandboxLauncher()),
+      // crew 0.15.2 (#916): a custom seat written council-off with no work flag is now work-eligible
+      // by the engine default; each is named once, so the operator can keep it off work.
+      ...seatWorkDefaultNow(),
       // crew#1068: the engine has no wicked-vault CLI to record held boundary findings with.
       ...[adapter.vaultBin != null ? vaultBinWarning(adapter.vaultBin) : null].filter((w) => w !== null),
     ];
@@ -1805,6 +1809,8 @@ export function registerRoutes(
           rosterFile: seatRosterFile(),
           hostBoundary: hostSandboxLauncher(),
           seats: seatGovernanceNow(),
+          // The same `seat.work_default` findings `/health.warnings` carries (api-types 0.132.0).
+          roleFindings: seatWorkDefaultNow(),
         },
         // crew#740: which memory store this daemon reads and writes, and the isolation notice.
         memoryStore: memoryStoreInfo(),
