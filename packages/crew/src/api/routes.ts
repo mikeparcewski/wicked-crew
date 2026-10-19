@@ -5101,7 +5101,22 @@ export function registerRoutes(
     // daemon restart reads it back instead of replaying the log; the replay stays the FALLBACK for
     // runs parked before the engine grew the table. `resolveOpenGate` is that one resolution, shared
     // with the POST route's `ord` check.
-    const open = await resolveOpenGate(id);
+    let open = await resolveOpenGate(id);
+    // The record judges what the resolver returns too (crew#1083 final review): a stale frame folded
+    // into the cache after GET's record read — during the status read, before any hydration began,
+    // so no revision guard ran — is a cache hit for the resolver. When the answer disagrees with
+    // that read, the record is read once more (it may have moved on, legitimately, meanwhile): an
+    // answer that matches it is served; otherwise the entry is dropped and the gate resolved once
+    // more from the record, and if that still disagrees nothing verified is served.
+    if (recorded?.state === 'open' && isOpenGate(open) && open.ord !== recorded.ord) {
+      const now = await recordedOpenGate(id);
+      const matchesNow = (o: GateResolution): boolean => isOpenGate(o) && now?.state === 'open' && o.ord === now.ord;
+      if (!matchesNow(open)) {
+        gateCache.forget(id);
+        open = await resolveOpenGate(id);
+        if (isOpenGate(open) && !matchesNow(open)) open = 'unstable';
+      }
+    }
     if (open === 'ambiguous') {
       // The engine's open gate rows disagree on the ord (crew#1083 round 5): say so, as a decision
       // naming either gate is told — never pick one.

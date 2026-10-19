@@ -16,6 +16,7 @@ import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import type { AuditLog } from '../src/api/audit.js';
 import { type CoreAdapter } from '../src/core/adapter.js';
+import type { CoreEvent } from '../src/core/types.js';
 import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
 
 function view(id: string, status: string, unitIx: number) {
@@ -349,5 +350,50 @@ describe('POST /runs/:id/plan takes the decision lock and is judged by the recor
     expect(done.statusCode).toBe(200);
     expect(confirmCalls).toHaveLength(1);
     expect(proposals).toEqual(['plan-race']);
+  });
+});
+
+// crew#1083 final review (codex): the GET miss path. GET reads the record (ord 4), finds the cache
+// empty, and reads the run's status; a stale awaitingHuman(3) the pump delivers DURING that status
+// read lands in the cache before any hydration starts, so no revision guard runs and the resolver
+// returned it as a hit. GET now judges the resolver's answer by the record it already read.
+describe('GET /runs/:id/gate: a stale frame folded during the status read is not served (crew#1083 final review)', () => {
+  let app: FastifyInstance;
+  const gateCache = new GateCache();
+  let landDuringStatus: CoreEvent | null = null;
+
+  beforeAll(async () => {
+    const mockAdapter = {
+      sessionsDetail: vi.fn(async () => {
+        if (landDuringStatus !== null) {
+          gateCache.ingest(landDuringStatus);
+          landDuringStatus = null;
+        }
+        return [view('run-miss', 'awaiting_human', 4)];
+      }),
+      listRepos: vi.fn().mockResolvedValue([]),
+      listWorkflows: () => BUILTIN_WORKFLOWS,
+      interactionRequests: vi.fn(async () => [{ kind: 'gate', ord: 4, prompt: 'Approve unit 4?', created_at: 1 }]),
+      runEvents: vi.fn(async () => []),
+      confirmGate: vi.fn(async () => 'executing'),
+    };
+    app = Fastify({ logger: false });
+    registerRoutes(app, mockAdapter as unknown as CoreAdapter, gateCache, new ElicitationCache(), undefined, {
+      audit: { record: vi.fn(() => Date.now()) } as unknown as AuditLog,
+      authMode: 'off',
+    });
+    await app.ready();
+  });
+  afterAll(async () => {
+    await app.close();
+  });
+
+  it('cold cache, row at ord 4, a stale awaitingHuman(3) delivered during the status read → GET serves ord 4', async () => {
+    expect(gateCache.get('run-miss')).toBeUndefined();
+    landDuringStatus = { type: 'awaitingHuman', session: 'run-miss', ord: 3, prompt: 'Approve unit 3?' } as unknown as CoreEvent;
+    const res = await app.inject({ method: 'GET', url: '/api/v1/runs/run-miss/gate' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ ord: 4, prompt: 'Approve unit 4?' });
+    expect(gateCache.get('run-miss')?.ord).toBe(4);
   });
 });
