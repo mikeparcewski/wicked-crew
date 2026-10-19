@@ -56,7 +56,10 @@ describe('seat.work_default (crew 0.15.2, #916)', () => {
     expect(warn(record('agy', 'enabled_for_council = false', 'seat_eligible_for_work = false'))).toEqual([]);
     expect(warn(record('agy', 'enabled_for_council = false'))).toEqual([]);
     expect(warn(record('copilot', 'enabled_for_council = false'))).toEqual([]);
-    expect(warn(record('claude#2', 'enabled_for_council = false'))).toEqual([]);
+  });
+
+  it('keys match exactly, as in the engine: agy#2 in the overlay is a custom seat and warns', () => {
+    expect(warn(record('agy#2', 'enabled_for_council = false')).map((w) => w.message.split(' ')[1])).toEqual(['agy#2']);
   });
 
   it('a council-enabled or council-unset custom seat does not warn', () => {
@@ -64,14 +67,34 @@ describe('seat.work_default (crew 0.15.2, #916)', () => {
     expect(warn(record('judge'))).toEqual([]);
   });
 
-  it('one warning per affected seat, in overlay order; a key written twice is judged by its last record', () => {
+  it('one warning per affected seat, in overlay order', () => {
     const toml = [
       record('a', 'enabled_for_council = false'),
       record('b', 'enabled_for_council = true'),
-      record('c', "enabled_for_council = false   # chat only"),
-      record('a', 'enabled_for_council = false', 'seat_eligible_for_work = false'),
+      record('c', 'enabled_for_council = false   # chat only'),
     ].join('\n');
-    expect(warn(toml).map((w) => w.message.split(' ')[1])).toEqual(['c']);
+    expect(warn(toml).map((w) => w.message.split(' ')[1])).toEqual(['a', 'c']);
+  });
+
+  it("a key written twice folds by the engine rule: an omitted flag inherits the earlier record's value", () => {
+    // The later record omits both flags: the engine keeps the earlier council-off; work stays default.
+    expect(warn([record('chat-helper', 'enabled_for_council = false'), record('chat-helper')].join('\n'))).toHaveLength(1);
+    // The earlier record wrote work = false: the later council-off record inherits it, so no warning.
+    expect(warn([record('chat-helper', 'seat_eligible_for_work = false'), record('chat-helper', 'enabled_for_council = false')].join('\n'))).toEqual([]);
+    // The later record re-enables the council: no warning.
+    expect(warn([record('chat-helper', 'enabled_for_council = false'), record('chat-helper', 'enabled_for_council = true')].join('\n'))).toEqual([]);
+  });
+
+  it('parses TOML, not lines: triple quotes in a comment or a string, and an inline-table roster', () => {
+    const comment = `# prompts may use """ or ''' for multi-line text\n`;
+    const toml = comment + record('after-comment', 'enabled_for_council = false', `notes = 'contains """ too'`);
+    expect(warn(toml).map((w) => w.message.split(' ')[1])).toEqual(['after-comment']);
+    const inline = 'cli = [ { key = "inline", display_name = "x", binary = "/x", headless_invocation = "/x", enabled_for_council = false } ]\n';
+    expect(warn(inline).map((w) => w.message.split(' ')[1])).toEqual(['inline']);
+  });
+
+  it('a malformed overlay throws here; the daemon reads it as no finding (see the wire case)', () => {
+    expect(() => readOverlaySeatRoles('[[cli]]\nkey = "x\n')).toThrow();
   });
 
   it('reads only the record\'s own keys: a [cli.acp] sub-table and a multi-line string do not count', () => {
@@ -151,6 +174,11 @@ describe('seat.work_default on the wire', () => {
     const after = (await app.inject({ method: 'GET', url: '/api/v1/health' })).json() as HealthResponse;
     expect((after.warnings ?? []).filter((w) => w.kind === SEAT_WORK_DEFAULT_KIND)).toEqual([]);
     expect(seatWorkDefaultNow()).toEqual([]);
+  });
+
+  it('a malformed overlay yields no finding (the engine reports the file itself)', () => {
+    overlay('[[cli]]\nkey = "chat-helper\nenabled_for_council = false\n');
+    expect(seatWorkDefaultNow({ HOME: home.home() })).toEqual([]);
   });
 
   it('no overlay: no finding, and roleFindings is an empty list', async () => {
