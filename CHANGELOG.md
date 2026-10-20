@@ -10,8 +10,16 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.15.5] — 2026-10-20
+
+A patch release: the container floor's live check reads the seat's own last step (#1095), and a new engine and studio for the end-to-end container run: seat egress hosts re-applied on every gateway provisioning, an operator retry that re-runs the floor, review items deferred to delivery, the repo-checks scratch moved out of the run worktree, and agy's container seat (still benched). Pins: wicked-core-ts ^0.15.5, wicked-studio ^0.11.5, wicked-vault ^0.8.0, wicked-interactive ^0.14.1 (bridge floor, unchanged), wicked-crew-api-types 0.133.0 (unchanged).
+
+### Changed
+- **The engine is wicked-core-ts 0.15.5.** Each gateway provisioning serves this daemon's `WICKED_SEAT_EGRESS_HOSTS` instead of the allowlist an earlier daemon persisted (wicked-core#1046). A plain approve at an escalated unit's gate re-runs its failed floor once on an unchanged tree, recorded as a `floorRecheck` event (wicked-core#1047). A review answers acceptance items only delivery can show as DEFERRED, and the deliver gate lists them for the operator (wicked-core#1045). The repo-checks floor's scratch (`HOME`, caches, `CARGO_TARGET_DIR`) moves out of `<worktree>/tmp/wicked-checks/` into a per-run leaf under the worker home, capped per repository by `WICKED_REPO_CHECKS_CACHE_CAP_GB` (default 20) (wicked-core#1050). A seat's cargo cache outside its tmpfs HOME is pinned by tests (wicked-core#1048). agy gains a container seat image, carrier and stream-json (wicked-core#1049) and a Gemini API-key sign-in through the gateway's Gemini route (wicked-core#1051); agy stays benched. Every seat image's tag changes, so each rebuilds once on first use.
+- **The bundled studio is wicked-studio 0.11.5:** a container agent's "Its sign-in didn't answer a request" warning shows again, now that crew raises it only when it is real (studio#864).
+
 ### Fixed
-- **The roster no longer warns "its one live request did not answer" for every seat on the container floor.** On that floor the roster reads each seat's sign-in from the credential broker, and the daemon sends no live request. The broker reading was still tagged as a status-only check, which is what the `live_check_failed` warning keys on, so every signed-in container seat carried it. That included seats that were finishing units in the same minute. The live check on the container floor is now the seat's own last unit there, within 30 minutes (a chat's answer is a unit too). An ok output, or an answer the engine's substance gate vetoed, reads `login_check: 'live'`, with `probed_at` set to when the seat answered. A step that timed out or whose CLI failed keeps `status` and still warns, with a message that names the container floor. A seat no step ran on yet reads `status` with no warning, and its `login_note` says only the credential broker answered. A unit the engine failed over to another seat (`failing over to '<seat>'`, which comes with no `unitReassigned`) now credits the next attempt's outcome to the new seat. Before, the failed seat was marked active by its replacement's output. The host floor's check is unchanged. `wicked-crew-api-types` is unchanged: the issue's code and params are the same.
+- **The roster no longer warns "its one live request did not answer" for every seat on the container floor (#1095).** On that floor the roster reads each seat's sign-in from the credential broker, and the daemon sends no live request. The broker reading was still tagged as a status-only check, which is what the `live_check_failed` warning keys on, so every signed-in container seat carried it. That included seats that were finishing units in the same minute. The live check on the container floor is now the seat's own last unit there, within 30 minutes (a chat's answer is a unit too). An ok output, or an answer the engine's substance gate vetoed, reads `login_check: 'live'`, with `probed_at` set to when the seat answered. A step that timed out or whose CLI failed keeps `status` and still warns, with a message that names the container floor. A seat no step ran on yet reads `status` with no warning, and its `login_note` says only the credential broker answered. A unit the engine failed over to another seat (`failing over to '<seat>'`, which comes with no `unitReassigned`) now credits the next attempt's outcome to the new seat. Before, the failed seat was marked active by its replacement's output. The host floor's check is unchanged. `wicked-crew-api-types` is unchanged: the issue's code and params are the same.
 
 ## [0.15.4] — 2026-10-19
 
@@ -4345,7 +4353,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.4...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.5...HEAD
+[0.15.5]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.4...v0.15.5
 [0.15.4]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.3...v0.15.4
 [0.15.3]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.2...v0.15.3
 [0.15.2]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.1...v0.15.2

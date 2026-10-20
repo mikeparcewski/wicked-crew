@@ -1,6 +1,6 @@
 {
   "name": "wicked-crew",
-  "version": "0.15.4",
+  "version": "0.15.5",
   "description": "Runs your coding agents (Claude Code, Codex, Copilot, OpenCode, Pi) in sandboxes; a different agent reviews the work against your rules, and app changes pass acceptance testing before delivery. Intent in, gated work out.",
   "repository": {
     "type": "git",
@@ -34,7 +34,7 @@
     "@modelcontextprotocol/sdk": "^1.31.0",
     "fastify": "^5.12.5",
     "smol-toml": "^1.9.1",
-    "wicked-core-ts": "^0.15.4",
+    "wicked-core-ts": "^0.15.5",
     "wicked-ledger": "^0.6.0",
     "wicked-vault": "^0.8.0",
     "yaml": "^2.4.2",
@@ -51,7 +51,7 @@
     "vitest": "^5.0.2",
     "wicked-bus": "^2.5.0",
     "wicked-crew-api-types": "*",
-    "wicked-studio": "^0.11.4"
+    "wicked-studio": "^0.11.5"
   },
   "engines": {
     "node": ">=22.0.0"
