@@ -10,6 +10,9 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Added
+- **A gate no judge could rule on can re-run its judge (`rejudge`, `wicked-crew-api-types` 0.134.0).** When every eligible judge seat failed as a seat (its image would not build, it was signed out), the unit parks at a `judge_unavailable` escalation. Approve there is the operator's own judgment ("judged by operator"); nothing re-ran the judge once a seat could judge again. `POST /runs/:id/gate {approve: true, action: 'rejudge'}` now does: the engine re-arms the judge on the same work, drawn by its own selection from the run's roster as it stands, re-dispatches the unit without running its seat, and records `judgeRerunRequested`. The result goes through the ordinary gate, so a REJECT, a failed floor or another seatless judge stops there again. Like the other escalation arms it takes no `amend`, `amendScope` or `plan`, and the engine refuses it (409, gate left open) at any other gate and while no judge seat is eligible. `GET /runs/:id/gate` says beforehand: on a `judge_unavailable` gate it carries `rejudge: {available, eligible, missing: [{seat, reason}]}`, read from the engine's new `rejudgeReadiness` each time, so a seat signed in since the pause counts. The field is absent on every other gate and on an engine without the read (wicked-core-ts after 0.15.5).
+
 ## [0.15.5] — 2026-10-20
 
 A patch release: the container floor's live check reads the seat's own last step (#1095), and a new engine and studio for the end-to-end container run: seat egress hosts re-applied on every gateway provisioning, an operator retry that re-runs the floor, review items deferred to delivery, the repo-checks scratch moved out of the run worktree, and agy's container seat (still benched). Pins: wicked-core-ts ^0.15.5, wicked-studio ^0.11.5, wicked-vault ^0.8.0, wicked-interactive ^0.14.1 (bridge floor, unchanged), wicked-crew-api-types 0.133.0 (unchanged).

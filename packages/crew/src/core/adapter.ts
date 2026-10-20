@@ -399,6 +399,18 @@ type ChatMethods = {
   chatList?(): Promise<string>;
 };
 
+/** (rejudge) The engine's answer to "can this gate's judge be re-run now?" (`rejudgeReadiness`). */
+export interface RejudgeReadiness {
+  /** The open gate is a unit's `judge_unavailable` denial — the gate `rejudge` answers. */
+  applies: boolean;
+  /** The engine's judge selection names at least one seat now. */
+  available: boolean;
+  ord: number | null;
+  eligible: string[];
+  missing: Array<{ seat: string; reason: string }>;
+  reason: string | null;
+}
+
 /** The durable event log's read half (core#139 / FINDING-014). */
 type EventLogMethods = {
   /**
@@ -410,6 +422,12 @@ type EventLogMethods = {
    * type away the guard that keeps this daemon running against it.
    */
   runEvents?(runId: string): Promise<string>;
+  /**
+   * (rejudge) Whether a run's open gate can re-run its judge now, as a JSON `RejudgeReadiness`
+   * (`{applies, available, ord, eligible, missing, reason}`). Optional: an addon before the
+   * binding has none, and then `rejudge` is not offered.
+   */
+  rejudgeReadiness?(runId: string): Promise<string>;
 };
 
 /**
@@ -2699,6 +2717,17 @@ export class CoreAdapter {
   async memberProjects(kind: string, ref: string): Promise<string[]> {
     const fn = this.requireProjects(this.core.memberProjects, 'Resolving a member’s projects');
     return JSON.parse(await fn.call(this.core, kind, ref)) as string[];
+  }
+
+  /**
+   * (rejudge) Whether `runId`'s open gate can RE-RUN ITS JUDGE now: the engine's own judge
+   * selection over the run's roster, bench and the registry as they stand (wicked-core
+   * `rejudge_readiness`). `null` when this addon predates the binding — then the gate offers no
+   * `rejudge`, and the engine would refuse the action anyway.
+   */
+  async rejudgeReadiness(runId: string): Promise<RejudgeReadiness | null> {
+    if (typeof this.core.rejudgeReadiness !== 'function') return null;
+    return JSON.parse(await this.core.rejudgeReadiness(runId)) as RejudgeReadiness;
   }
 
   /**
