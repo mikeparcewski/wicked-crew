@@ -11,6 +11,7 @@ import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import type { AuditLog } from '../src/api/audit.js';
 import { type CoreAdapter, type RejudgeReadiness } from '../src/core/adapter.js';
+import type { CoreEvent } from '../src/core/types.js';
 import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
 
 const PROMPT =
@@ -103,6 +104,41 @@ describe('GET /runs/:id/gate — the re-judge offer', () => {
     expect(await gate('run-judge')).not.toHaveProperty('rejudge');
     readiness = null; // an addon without the binding
     expect(await gate('run-judge')).not.toHaveProperty('rejudge');
+  });
+});
+
+describe('GET /runs/:id/gate — the offer rides a cached gate too', () => {
+  let app: FastifyInstance;
+  const sessionsDetail = vi.fn().mockResolvedValue([view('run-cached', 'judge_unavailable')]);
+
+  beforeAll(async () => {
+    const gateCache = new GateCache();
+    gateCache.ingest({ type: 'awaitingHuman', session: 'run-cached', ord: 4, prompt: PROMPT, gateKind: 'escalation' } as unknown as CoreEvent);
+    const mockAdapter = {
+      sessionsDetail,
+      listRepos: vi.fn().mockResolvedValue([]),
+      listWorkflows: () => BUILTIN_WORKFLOWS,
+      interactionRequests: vi.fn(async () => [{ kind: 'gate', ord: 4, prompt: PROMPT, gate_kind: 'escalation', created_at: 1_785_614_004_730 }]),
+      runEvents: vi.fn(async () => []),
+      rejudgeReadiness: vi.fn(async () => READY),
+    };
+    app = Fastify({ logger: false });
+    registerRoutes(app, mockAdapter as unknown as CoreAdapter, gateCache, new ElicitationCache(), undefined, {
+      audit: { record: vi.fn(() => Date.now()) } as unknown as AuditLog,
+      authMode: 'off',
+    });
+    await app.ready();
+  });
+  afterAll(async () => {
+    await app.close();
+  });
+
+  it('a cache hit serves the receipt and the offer from one read of the gated unit', async () => {
+    sessionsDetail.mockClear();
+    const res = await app.inject({ method: 'GET', url: '/api/v1/runs/run-cached/gate' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ ord: 4, gateKind: 'escalation', rejudge: { available: true, eligible: ['pi', 'agy'] } });
+    expect(sessionsDetail).toHaveBeenCalledTimes(1);
   });
 });
 

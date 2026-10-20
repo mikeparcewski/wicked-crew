@@ -39,7 +39,6 @@ import { attemptUnavailableReason, capturedAttempts, outputUnavailableReason, re
 import type {
   ApproveProposalResponse,
   EditMemoryResponse,
-  AssuranceReceipt,
   LaunchRunInput,
   ListMemoriesResponse,
   ListProposalsResponse,
@@ -5058,15 +5057,12 @@ export function registerRoutes(
   app.get(`${V}/runs/:id/gate`, async (req, reply) => {
     const { id } = req.params as { id: string };
     // wicked-core#850: the gate answer carries the gated unit's receipt — what assured the work it asks about.
-    const receiptAt = async (ord: number): Promise<AssuranceReceipt | null> => {
-      const run = (await adapter.sessionsDetail()).find((v) => v.session.id === id);
-      return receiptOf(run?.units?.find((u) => u.ord === ord));
-    };
+    const unitAt = async (ord: number): Promise<WorkUnit | undefined> =>
+      (await adapter.sessionsDetail()).find((v) => v.session.id === id)?.units?.find((u) => u.ord === ord);
     // (rejudge, api-types 0.134.0) A gate whose unit no judge could rule on says whether its judge
     // can be re-run now, and from which seats — the engine's own selection, read each time (a seat
     // signed in since the pause counts). Absent on every other gate and on an addon without the read.
-    const rejudgeAt = async (ord: number, unit?: WorkUnit): Promise<{ rejudge?: RejudgeOffer }> => {
-      const gated = unit ?? (await adapter.sessionsDetail()).find((v) => v.session.id === id)?.units?.find((u) => u.ord === ord);
+    const rejudgeAt = async (ord: number, gated: WorkUnit | undefined): Promise<{ rejudge?: RejudgeOffer }> => {
       const denial = (gated as { denial?: { source?: unknown } | null } | undefined)?.denial;
       if (gated?.status !== 'rejected' || denial?.source !== 'judge_unavailable') return {};
       if (typeof adapter.rejudgeReadiness !== 'function') return {};
@@ -5101,7 +5097,11 @@ export function registerRoutes(
         || (recorded.state === 'open' && cached.ord === recorded.ord)
         || (recorded.state === 'none'
           && (await adapter.sessionsDetail()).find((v) => v.session.id === id)?.session.status === 'awaiting_human');
-      if (servable) return { runId: id, ...cached, assurance: await receiptAt(cached.ord), ...(await rejudgeAt(cached.ord)) };
+      if (servable) {
+        // One read of the gated unit serves both its receipt and its re-judge offer.
+        const gated = await unitAt(cached.ord);
+        return { runId: id, ...cached, assurance: receiptOf(gated), ...(await rejudgeAt(cached.ord, gated)) };
+      }
       gateCache.forget(id);
     }
 
