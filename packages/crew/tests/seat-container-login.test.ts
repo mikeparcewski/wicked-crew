@@ -354,6 +354,20 @@ describe('container floor live check: the seat\'s own last step', () => {
     expect(codes(s)).not.toContain('live_check_failed');
   });
 
+  // codex xreview r2 on #1095: the engine's worker failover re-dispatches the unit on another seat
+  // with no `unitReassigned`; the replacement's answer is its own, and the failed seat keeps its failure.
+  it('credits a failover attempt to the seat it failed over to', () => {
+    const t = new SeatHealthTracker();
+    t.ingest({ type: 'unitDistributed', session: 'r1', ord: 1, cli: 'claude', ts: 1000 } as never);
+    t.ingest({
+      type: 'stepFailed', session: 'r1', ord: 1, attempt: 1, failureKind: 'workerError', ts: 2000,
+      detail: "seat 'claude' failed (worker error); failing over to 'codex' (seats worker-failed on this unit: 1/2)",
+    } as never);
+    t.ingest({ type: 'unitOutputCaptured', session: 'r1', ord: 1, attempt: 2, stepStatus: 'ok', ts: 3000 } as never);
+    expect(t.lastAnswerFor('claude', 4000)).toEqual({ at: new Date(2000).toISOString(), answered: false, why: 'worker_error' });
+    expect(t.lastAnswerFor('codex', 4000)).toEqual({ at: new Date(3000).toISOString(), answered: true });
+  });
+
   it('keeps the newest outcome when an older frame is folded late', () => {
     const t = new SeatHealthTracker();
     t.ingest({ type: 'unitDistributed', session: 'r1', ord: 1, cli: 'codex' } as never);

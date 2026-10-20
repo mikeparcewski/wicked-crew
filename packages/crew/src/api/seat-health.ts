@@ -67,6 +67,11 @@ function excerpt(s: string): string {
 /** The wrapped runner's seat-naming failure message: "(cli `x` exited N) …" (execute_wrapped.rs). */
 const CLI_IN_DETAIL = /\(cli `([^`]+)` exited /;
 
+/** The engine's worker failover (wicked-core `actor.rs`): "seat 'x' failed (worker error); failing
+ *  over to 'y' …". It re-dispatches the unit on `y` with no `unitReassigned`, so this detail is the
+ *  only frame that names the seat the next attempt runs on. */
+const FAILOVER_IN_DETAIL = /; failing over to '([^']+)'/;
+
 /** `acpFallback` kinds that are deliberate routing rather than a failure — never counted:
  *  `governance_requires_wrapped` (crew#276) and `read_only_requires_wrapped` (wicked-core#431 —
  *  an `executes_code: false` unit on an ACP seat not admitted to input governance is routed to the
@@ -398,6 +403,10 @@ export class SeatHealthTracker {
           else if (kind === 'workerError') this.recordAnswer(seat, at, false, 'worker_error');
           else if (kind === 'substanceRejected') this.recordAnswer(seat, at, true);
         }
+        // codex xreview on #1095: the next attempt runs on the failover seat, so its outcome is that
+        // seat's, never the one that just failed.
+        const next = FAILOVER_IN_DETAIL.exec(detail)?.[1];
+        if (next !== undefined && session !== undefined && ord !== undefined) this.assignments.set(`${session}:${ord}`, next);
         return;
       }
       case 'councilSeatFailed': {
