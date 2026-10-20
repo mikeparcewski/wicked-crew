@@ -368,6 +368,23 @@ describe('container floor live check: the seat\'s own last step', () => {
     expect(t.lastAnswerFor('codex', 4000)).toEqual({ at: new Date(3000).toISOString(), answered: true });
   });
 
+  // codex xreview r3 on #1095: a refusal the engine benches first drops the unit's assignment; the
+  // failover detail still names both seats.
+  it('credits a failover attempt to the replacement when the failed seat was benched first', () => {
+    const t = new SeatHealthTracker();
+    t.ingest({ type: 'unitDistributed', session: 'r0', ord: 1, cli: 'codex', ts: 500 } as never);
+    t.ingest({ type: 'stepFailed', session: 'r0', ord: 1, failureKind: 'timedOut', detail: '', ts: 600 } as never);
+    t.ingest({ type: 'unitDistributed', session: 'r1', ord: 1, cli: 'claude', ts: 1000 } as never);
+    t.ingest({ type: 'seatBenched', session: 'r1', cli: 'claude', reason: 'quota_exhausted', source: 'worker', ts: 1500 } as never);
+    t.ingest({
+      type: 'stepFailed', session: 'r1', ord: 1, attempt: 1, failureKind: 'workerError', ts: 2000,
+      detail: "seat 'claude' failed (worker error); failing over to 'codex' (seats worker-failed on this unit: 1/2)",
+    } as never);
+    t.ingest({ type: 'unitOutputCaptured', session: 'r1', ord: 1, attempt: 2, stepStatus: 'ok', ts: 3000 } as never);
+    expect(t.lastAnswerFor('codex', 4000)).toEqual({ at: new Date(3000).toISOString(), answered: true });
+    expect(t.lastAnswerFor('claude', 4000)).toEqual({ at: new Date(2000).toISOString(), answered: false, why: 'worker_error' });
+  });
+
   it('keeps the newest outcome when an older frame is folded late', () => {
     const t = new SeatHealthTracker();
     t.ingest({ type: 'unitDistributed', session: 'r1', ord: 1, cli: 'codex' } as never);

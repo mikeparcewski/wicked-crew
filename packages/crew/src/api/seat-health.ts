@@ -69,8 +69,9 @@ const CLI_IN_DETAIL = /\(cli `([^`]+)` exited /;
 
 /** The engine's worker failover (wicked-core `actor.rs`): "seat 'x' failed (worker error); failing
  *  over to 'y' …". It re-dispatches the unit on `y` with no `unitReassigned`, so this detail is the
- *  only frame that names the seat the next attempt runs on. */
-const FAILOVER_IN_DETAIL = /; failing over to '([^']+)'/;
+ *  only frame that names the seat the next attempt runs on. It names the failed seat too, which
+ *  matters when a `seatBenched` frame for it already dropped the unit's assignment. */
+const FAILOVER_IN_DETAIL = /seat '([^']+)' failed \([^)]*\); failing over to '([^']+)'/;
 
 /** `acpFallback` kinds that are deliberate routing rather than a failure — never counted:
  *  `governance_requires_wrapped` (crew#276) and `read_only_requires_wrapped` (wicked-core#431 —
@@ -380,11 +381,17 @@ export class SeatHealthTracker {
         if (triageDeliverFailure(detail) !== null) return;
         // The detail names the seat when the wrapped runner produced it; otherwise fall back to
         // the unit's assignment (a workerError detail is the CLI's own output and rarely does).
-        const named = CLI_IN_DETAIL.exec(detail)?.[1];
+        const failover = FAILOVER_IN_DETAIL.exec(detail);
+        const named = failover?.[1] ?? CLI_IN_DETAIL.exec(detail)?.[1];
         const assigned =
           session !== undefined && ord !== undefined
             ? this.assignments.get(`${session}:${ord}`)
             : undefined;
+        // codex xreview on #1095: the next attempt runs on the failover seat, so its outcome is that
+        // seat's, never the one that just failed.
+        if (failover?.[2] !== undefined && session !== undefined && ord !== undefined) {
+          this.assignments.set(`${session}:${ord}`, failover[2]);
+        }
         const seat = named ?? assigned;
         if (seat === undefined) return;
         // F-A45-006: the seat's own words beat the file probe — "No API key found" flips `auth`.
@@ -403,10 +410,6 @@ export class SeatHealthTracker {
           else if (kind === 'workerError') this.recordAnswer(seat, at, false, 'worker_error');
           else if (kind === 'substanceRejected') this.recordAnswer(seat, at, true);
         }
-        // codex xreview on #1095: the next attempt runs on the failover seat, so its outcome is that
-        // seat's, never the one that just failed.
-        const next = FAILOVER_IN_DETAIL.exec(detail)?.[1];
-        if (next !== undefined && session !== undefined && ord !== undefined) this.assignments.set(`${session}:${ord}`, next);
         return;
       }
       case 'councilSeatFailed': {
