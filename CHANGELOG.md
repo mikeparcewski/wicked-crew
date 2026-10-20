@@ -10,6 +10,9 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+- **The roster no longer warns "its one live request did not answer" for every seat on the container floor.** On that floor the roster reads each seat's sign-in from the credential broker, and the daemon sends no live request. The broker reading was still tagged as a status-only check, which is what the `live_check_failed` warning keys on, so every signed-in container seat carried it. That included seats that were finishing units in the same minute. The live check on the container floor is now the seat's own last unit there, within 30 minutes (a chat's answer is a unit too). An ok output, or an answer the engine's substance gate vetoed, reads `login_check: 'live'`, with `probed_at` set to when the seat answered. A step that timed out or whose CLI failed keeps `status` and still warns, with a message that names the container floor. A seat no step ran on yet reads `status` with no warning, and its `login_note` says only the credential broker answered. A unit the engine failed over to another seat (`failing over to '<seat>'`, which comes with no `unitReassigned`) now credits the next attempt's outcome to the new seat. Before, the failed seat was marked active by its replacement's output. The host floor's check is unchanged. `wicked-crew-api-types` is unchanged: the issue's code and params are the same.
+
 ## [0.15.4] — 2026-10-19
 
 A patch release: a health warning for custom seats that crew 0.15.2 made eligible for work (`seat.work_default`, #1091), and a new engine and studio for the claude container sign-in and for claude seats working under `~/.wicked/repos`. Pins: wicked-core-ts ^0.15.4, wicked-studio ^0.11.4, wicked-vault ^0.8.0, wicked-interactive ^0.14.1 (bridge floor, unchanged), wicked-crew-api-types 0.133.0. New runtime dependency: smol-toml ^1.9.1.

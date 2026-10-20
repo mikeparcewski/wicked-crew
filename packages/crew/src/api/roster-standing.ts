@@ -33,10 +33,10 @@ import {
   type QeReviewer,
   type WorkAdmission,
 } from './seat-agents.js';
-import type { SeatHealthTracker } from './seat-health.js';
+import { SEAT_ANSWER_WINDOW_MS, type SeatHealthTracker, type SeatLastAnswer } from './seat-health.js';
 import { signedInHeuristic } from './seat-signin.js';
-import { SeatProbe } from './seat-probe.js';
-import { SeatContainerStatus, isContainerLoginCli, isContainerSeatFloor, isHostSeatFloor } from './seat-container-login.js';
+import { SeatProbe, type SeatProbeReading } from './seat-probe.js';
+import { SeatContainerStatus, isContainerLoginCli, isContainerSeatFloor, isHostSeatFloor, type BrokerReading } from './seat-container-login.js';
 import { seatGovernanceModes, type GovernanceScopeKind, type SeatGovernanceMode } from './seat-governance.js';
 import { HOST_FLOOR_UNKNOWN_COPY, seatStanding, chatSeatAdmission, type StandingSeat, type SeatStanding } from './seat-standing.js';
 import { seatVersion, seatVersions, type SeatVersionCache } from './seat-version.js';
@@ -60,6 +60,27 @@ function nativeQeAdmissionBatch(core: QeAddon = Core): RosterStandingDeps['qeAdm
     const rows = JSON.parse(await batch.call(core, JSON.stringify(seats.map(({ key, invocation }) => ({ key, invocation: invocation ?? null }))))) as Array<{ key: string; admitted: boolean }>;
     return new Map(rows.map(({ key, admitted }) => [key, admitted]));
   };
+}
+
+const ANSWER_WINDOW_MIN = SEAT_ANSWER_WINDOW_MS / 60_000;
+
+/**
+ * A container seat's sign-in reading: the credential broker's status, verified live by the seat's
+ * own latest step on this floor. The container floor sends no live request of its own (its status
+ * reads the broker, not the CLI), so the live check is the run path itself: a unit whose output
+ * came back ok (a chat's answer is one) within {@link SEAT_ANSWER_WINDOW_MS} is `live`; a step that did not answer
+ * (timed out, the CLI failed) stays `status` with `via: 'no_answer'`, which the roster warns about;
+ * no step in the window is `status` with `via: 'broker'`, no warning: nothing was asked yet.
+ */
+export function containerLoginReading(broker: BrokerReading, last: SeatLastAnswer | null): SeatProbeReading {
+  const words = broker.reason ?? `broker credential ${broker.state}`;
+  if (broker.signed_in !== true) return { signedIn: broker.signed_in, check: 'status', probedAt: broker.probedAt, detail: words };
+  if (last === null) {
+    return { signedIn: true, check: 'status', probedAt: broker.probedAt, detail: `${words}; no step has run on it in the last ${ANSWER_WINDOW_MIN} minutes`, via: 'broker' };
+  }
+  if (last.answered) return { signedIn: true, check: 'live', probedAt: last.at, detail: `its last step answered at ${last.at.slice(11, 16)}Z`, via: 'step' };
+  const why = last.why === 'timed_out' ? 'it timed out' : 'its CLI failed';
+  return { signedIn: true, check: 'status', probedAt: last.at, detail: `${words}; its last step did not answer (${why})`, via: 'no_answer' };
 }
 
 /** The accessor: the registry roster WITH crew's standing, freshly read on every call. `ready`
@@ -287,6 +308,8 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
       }
     }
     const boundary = hostBoundary();
+    // How each container seat's live check was read ({@link containerLoginReading}).
+    const vias = new Map<string, NonNullable<SeatProbeReading['via']>>();
     const decorated = seats.map((seat) => {
       const key = String(seat.key);
       const health = seatHealth.healthFor(key);
@@ -301,12 +324,7 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
       const probed = containerSeat
         ? broker === undefined
           ? undefined
-          : {
-              signedIn: broker.signed_in,
-              check: 'status' as const,
-              probedAt: broker.probedAt,
-              detail: broker.reason ?? `broker credential ${broker.state}`,
-            }
+          : containerLoginReading(broker, seatHealth.lastAnswerFor(key))
         : probe?.read(key, root);
       // A seat's own "no credential" report that its LIVE sign-in check answered AFTER is stale: the
       // operator signed in since (codex r1 on #996 — it otherwise outranked the fresh probe for 30 min).
@@ -396,6 +414,7 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
               worktreeBench: benchedOnBound.get(key) ?? null,
               hostFloorBench: hostFloor,
             };
+      if (probed?.via !== undefined) vias.set(key, probed.via);
       return {
         ...seat,
         health,
@@ -441,6 +460,7 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
         ...(s.work_admission !== undefined ? { workAdmission: s.work_admission as Record<GovernanceScopeKind, WorkAdmission> } : {}),
         ...(s.qe_reviewer !== undefined ? { qeReviewer: s.qe_reviewer as QeReviewer } : {}),
         rosterQe,
+        ...(vias.has(String(s.key)) ? { containerCheck: vias.get(String(s.key))! } : {}),
         ...(deps.home !== undefined ? { home: deps.home } : {}),
       }),
     }));

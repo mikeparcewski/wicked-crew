@@ -233,6 +233,10 @@ export interface IssueInputs {
   qeReviewer?: QeReviewer;
   /** Whether ANY seat on the roster can run QE now (`undefined` when that is not known). */
   rosterQe: boolean | undefined;
+  /** Present for a container seat (`containerLoginReading`): how its live check was read. The
+   *  container floor sends no live request; its seat's own last step is the check, so only a step
+   *  that did not answer (`no_answer`) warns, and a seat no step ran on yet (`broker`) does not. */
+  containerCheck?: 'step' | 'no_answer' | 'broker';
   home?: string;
 }
 
@@ -321,7 +325,12 @@ export function seatIssues(i: IssueInputs): SeatIssue[] {
   }
 
   if (st.auth === 'signed_in' && st.login_check === 'status') {
-    add('live_check_failed', 'warning', `${name}'s status command says signed in, but its one live request did not answer`, st.probed_at !== undefined ? { checked_at: st.probed_at } : {}, signIn);
+    const checked = st.probed_at !== undefined ? { checked_at: st.probed_at } : {};
+    if (i.containerCheck === undefined) {
+      add('live_check_failed', 'warning', `${name}'s status command says signed in, but its one live request did not answer`, checked, signIn);
+    } else if (i.containerCheck === 'no_answer') {
+      add('live_check_failed', 'warning', `${name}'s credential broker says signed in, but its last step on the container floor did not answer`, checked, signIn);
+    }
   }
 
   if (i.optIn) add('opt_in', 'note', `${name} is opt-in: it is left out of new work unless you pick it`);

@@ -11,6 +11,15 @@ Agents → **Sign in**, which opens that CLI's own login in a disposable login c
 credential goes to the gateway's broker and every governed seat gets a placeholder. Nothing below
 applies to it: a host login (`claude /login` on the host) does not sign a container seat in.
 
+On this floor the roster's `auth` is the broker's status, and the daemon sends no live request of
+its own. The live check is the seat's own work on the floor: its last unit in the past 30 minutes
+(a chat's answer is a unit too). One whose output came back ok, or whose answer the engine's
+substance gate vetoed, makes `login_check` `live` (`probed_at` is when it answered). One that did not answer (the engine's turn ceiling fired, or the CLI failed) leaves
+`login_check` at `status` and raises the `live_check_failed` warning. A seat that no step ran on in
+that window reads `status` with no warning, and its `login_note` says only the broker answered. A
+step the seat refused for want of a credential signs it out, as on the host floor. An environment
+refusal (a trust prompt, a missing terminal) changes nothing: it came before any request.
+
 **Interim host floor (`WICKED_SEAT_FLOOR=host`)** — the rest of this section:
 
 The engine runs every seat under its own configuration home inside the worker home

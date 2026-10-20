@@ -67,6 +67,12 @@ function excerpt(s: string): string {
 /** The wrapped runner's seat-naming failure message: "(cli `x` exited N) …" (execute_wrapped.rs). */
 const CLI_IN_DETAIL = /\(cli `([^`]+)` exited /;
 
+/** The engine's worker failover (wicked-core `actor.rs`): "seat 'x' failed (worker error); failing
+ *  over to 'y' …". It re-dispatches the unit on `y` with no `unitReassigned`, so this detail is the
+ *  only frame that names the seat the next attempt runs on. It names the failed seat too, which
+ *  matters when a `seatBenched` frame for it already dropped the unit's assignment. */
+const FAILOVER_IN_DETAIL = /seat '([^']+)' failed \([^)]*\); failing over to '([^']+)'/;
+
 /** `acpFallback` kinds that are deliberate routing rather than a failure — never counted:
  *  `governance_requires_wrapped` (crew#276) and `read_only_requires_wrapped` (wicked-core#431 —
  *  an `executes_code: false` unit on an ACP seat not admitted to input governance is routed to the
@@ -161,6 +167,30 @@ export const AUTH_FAILURE_WINDOW_MS = 30 * 60 * 1000;
 export const SEAT_BENCH_WINDOW_MS = 30 * 60 * 1000;
 
 /**
+ * How long a seat's last step outcome stands as its live sign-in check on the container floor
+ * (`roster-standing.ts`). There the daemon sends no live request of its own: the credential broker
+ * answers the status, and the seat's own steps are the live check, because they ran on the floor
+ * work runs on (the same seat container, the same broker credential).
+ */
+export const SEAT_ANSWER_WINDOW_MS = 30 * 60 * 1000;
+
+/** Why a seat's step did not answer: the engine's turn ceiling fired (`stepFailed{timedOut}`), or
+ *  the CLI process failed with no ok output (`stepFailed{workerError}`, not a deliver refusal and
+ *  not the seat's own "no credential" report, which signs it out instead). */
+export type SeatNoAnswer = 'timed_out' | 'worker_error';
+
+/** The seat's latest step outcome inside {@link SEAT_ANSWER_WINDOW_MS}. */
+export interface SeatLastAnswer {
+  /** ISO-8601 of the outcome. */
+  at: string;
+  /** `true`: a unit's output came back ok (a chat's answer is one), or the engine vetoed the
+   *  substance of an answer the seat gave. */
+  answered: boolean;
+  /** Present when `answered` is false. */
+  why?: SeatNoAnswer;
+}
+
+/**
  * A seat the engine benched in a run, carried to the next launches (`seatBenched`, wicked-core
  * after #590 S5). Since S5 no ballot finds a dead seat before routing, so a seat that reads signed
  * in but cannot work (out of quota, say) is only found when its first unit refuses. Without this,
@@ -241,6 +271,8 @@ export class SeatHealthTracker {
   /** cli key → the engine's latest in-run bench of the seat (`seatBenched`), cleared by an ok
    *  output or by {@link SEAT_BENCH_WINDOW_MS}. */
   private readonly recentBenches = new Map<string, { at: number; reason: string; source: string; session?: string; runs: number }>();
+  /** cli key → the seat's latest step outcome (container-floor live check, {@link lastAnswerFor}). */
+  private readonly answers = new Map<string, { at: number; answered: boolean; why?: SeatNoAnswer }>();
   /** Default `since` for seats that have never changed state. */
   private readonly startedAt = new Date().toISOString();
 
@@ -328,7 +360,13 @@ export class SeatHealthTracker {
       case 'unitOutputCaptured': {
         if (event.stepStatus !== 'ok' || session === undefined || ord === undefined) return;
         const seat = this.assignments.get(`${session}:${ord}`);
-        if (seat !== undefined) this.markActive(seat, at);
+        if (seat !== undefined) {
+          this.markActive(seat, at);
+          // Only a unit's own outcome is recorded as an answer: a chat's `chatReply` is this same
+          // unit's output read back later (`AskRelay`), stamped when the relay folds it, so it could
+          // otherwise replace a newer step that did not answer.
+          this.recordAnswer(seat, at, true);
+        }
         return;
       }
       case 'stepFailed': {
@@ -343,11 +381,17 @@ export class SeatHealthTracker {
         if (triageDeliverFailure(detail) !== null) return;
         // The detail names the seat when the wrapped runner produced it; otherwise fall back to
         // the unit's assignment (a workerError detail is the CLI's own output and rarely does).
-        const named = CLI_IN_DETAIL.exec(detail)?.[1];
+        const failover = FAILOVER_IN_DETAIL.exec(detail);
+        const named = failover?.[1] ?? CLI_IN_DETAIL.exec(detail)?.[1];
         const assigned =
           session !== undefined && ord !== undefined
             ? this.assignments.get(`${session}:${ord}`)
             : undefined;
+        // codex xreview on #1095: the next attempt runs on the failover seat, so its outcome is that
+        // seat's, never the one that just failed.
+        if (failover?.[2] !== undefined && session !== undefined && ord !== undefined) {
+          this.assignments.set(`${session}:${ord}`, failover[2]);
+        }
         const seat = named ?? assigned;
         if (seat === undefined) return;
         // F-A45-006: the seat's own words beat the file probe — "No API key found" flips `auth`.
@@ -355,7 +399,17 @@ export class SeatHealthTracker {
         // (R5) Every other worker failure is an OBSERVED error, never a status flip: a launch
         // refusal, a load timeout or a worker crash says nothing about whether the seat can take
         // the next turn — the engine's per-run ballot ledger judges that (F-RC2-006).
-        else this.stampError(seat, at);
+        else {
+          this.stampError(seat, at);
+          // …but whether the seat answered is what the container floor's live check reads. A
+          // substance veto came after the seat answered (it is an answer, without the recovery an
+          // ok output gets). An environment refusal (a trust prompt, a missing TTY) is the CLI
+          // refusing its directory before any request: it says nothing about the session either way.
+          const kind = str((event as { failureKind?: unknown }).failureKind);
+          if (kind === 'timedOut') this.recordAnswer(seat, at, false, 'timed_out');
+          else if (kind === 'workerError') this.recordAnswer(seat, at, false, 'worker_error');
+          else if (kind === 'substanceRejected') this.recordAnswer(seat, at, true);
+        }
         return;
       }
       case 'councilSeatFailed': {
@@ -491,6 +545,27 @@ export class SeatHealthTracker {
     });
     this.authFailures.delete(key); // …and the seat's own "no credential" report (F-A45-006)
     this.liftBench(key, atMs); // …and a run's bench of it: the seat just did work
+  }
+
+  /** Keep the seat's newest step outcome; an older frame (a replay folded late) never replaces it. */
+  private recordAnswer(key: string, atMs: number, answered: boolean, why?: SeatNoAnswer): void {
+    const cur = this.answers.get(key);
+    if (cur !== undefined && cur.at > atMs) return;
+    this.answers.set(key, { at: atMs, answered, ...(why !== undefined ? { why } : {}) });
+  }
+
+  /**
+   * The seat's latest step outcome inside {@link SEAT_ANSWER_WINDOW_MS}, or `null` when no step ran
+   * on it in that window. The roster reads it as the container floor's live sign-in check.
+   */
+  lastAnswerFor(key: string, nowMs = Date.now()): SeatLastAnswer | null {
+    const rec = this.answers.get(key);
+    if (rec === undefined) return null;
+    if (nowMs - rec.at >= SEAT_ANSWER_WINDOW_MS) {
+      this.answers.delete(key);
+      return null;
+    }
+    return { at: new Date(rec.at).toISOString(), answered: rec.answered, ...(rec.why !== undefined ? { why: rec.why } : {}) };
   }
 
   /**
