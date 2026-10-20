@@ -122,7 +122,7 @@ import {
 } from './governance-steering.js';
 import { isSteeringAuthorRun, landSteeringProposal } from './steering-landing.js';
 import { inventoryComplete, parseInventoryClaims, type InventoryClaim } from '../core/inventory-claim.js';
-import type { RunInventoryResponse } from 'wicked-crew-api-types';
+import type { RejudgeOffer, RunInventoryResponse } from 'wicked-crew-api-types';
 import { ApproveEditSchema, approveEdited, captureLaunchRoots, editInFlight, FileProposalSchema, registerCaptureRoutes } from './capture.js';
 import { registerTestingRoutes } from './testing.js';
 import { DEMO_PRESET, demoLaunchRoots, registerDemoDocumentRoute, registerDemoRoutes, registerWalkthroughRoutes, walkthroughAcceptance, type BridgeCall } from './recording.js';
@@ -726,9 +726,11 @@ export const LaunchSchema = z.object({
  *  `extend` | `targeted` | `accept_partial` answer the gate of a repo-checks floor that did not
  *  finish (`repo_checks_timeout`) — the engine re-runs the floor on the tree as it stands with 2×
  *  bounds, the targeted test set, or the unfinished checks waived; `accept_suggestion` adopts the
- *  evaluator's discarded, pinned edit as the creator's amendment. The ENGINE refuses each at any
- *  other gate (a 409 naming the gate it answers). */
-export const ESCALATION_ACTIONS = ['extend', 'targeted', 'accept_partial', 'accept_suggestion'] as const;
+ *  evaluator's discarded, pinned edit as the creator's amendment; `rejudge` (api-types 0.134.0)
+ *  re-runs the judge of a `judge_unavailable` gate on the same work, the step's seat not run again.
+ *  The ENGINE refuses each at any other gate (a 409 naming the gate it answers) — and `rejudge`
+ *  while no judge seat is eligible ({@link GateInfo.rejudge} says beforehand). */
+export const ESCALATION_ACTIONS = ['extend', 'targeted', 'accept_partial', 'accept_suggestion', 'rejudge'] as const;
 /** (core#820) A consent gate's answer token: `consent:<choice id>` approves that row of the dry-run
  *  plan (the engine refuses an id its plan does not offer); `reject` stays the decline. */
 export const CONSENT_CHOICE_ACTION = /^consent:[A-Za-z0-9_-]{1,32}$/u; // core `parse_plan` caps a choice id at 32
@@ -766,7 +768,7 @@ export const GateSchema = z.object({
 }).strict().refine(
   (b) => b.action === undefined
     || (b.action === 'approve' || b.action === 'edit_plan' || b.action === 'amend_intent' || isEscalationAction(b.action)) === b.approve,
-  { message: '`action` disagrees with `approve`: request_changes and reject require approve: false; approve, edit_plan, amend_intent, extend, targeted, accept_partial, accept_suggestion and consent:<id> require approve: true', path: ['action'] },
+  { message: '`action` disagrees with `approve`: request_changes and reject require approve: false; approve, edit_plan, amend_intent, extend, targeted, accept_partial, accept_suggestion, rejudge and consent:<id> require approve: true', path: ['action'] },
 ).refine(
   // (wicked-core#555) An intent amendment IS its text: an empty one amends nothing, and the arm's
   // scope is every unit at or after the cursor — which is what makes it reach the evaluator — so
@@ -778,7 +780,7 @@ export const GateSchema = z.object({
   { message: 'amend_intent takes no amendScope or plan — an intent amendment reaches every unit at or after the cursor, which is what makes it reach the evaluator', path: ['amendScope'] },
 ).refine(
   (b) => !isEscalationAction(b.action) || (b.amend === undefined && b.amendScope === undefined && b.plan === undefined),
-  { message: 'extend, targeted, accept_partial, accept_suggestion and consent:<id> take no amend, amendScope or plan — the engine re-runs the floor, adopts the pinned edit, or runs the chosen install as it stands', path: ['action'] },
+  { message: 'extend, targeted, accept_partial, accept_suggestion, rejudge and consent:<id> take no amend, amendScope or plan — the engine re-runs the floor, adopts the pinned edit, re-runs the judge, or runs the chosen install as it stands', path: ['action'] },
 ).refine(
   (b) => (b.action === 'edit_plan') === (b.plan !== undefined) || (b.action === undefined && b.plan !== undefined),
   { message: 'an edited plan answers a plan_approval gate: `plan` needs approve: true with `action` omitted or edit_plan, and edit_plan needs `plan`', path: ['plan'] },
@@ -5060,6 +5062,23 @@ export function registerRoutes(
       const run = (await adapter.sessionsDetail()).find((v) => v.session.id === id);
       return receiptOf(run?.units?.find((u) => u.ord === ord));
     };
+    // (rejudge, api-types 0.134.0) A gate whose unit no judge could rule on says whether its judge
+    // can be re-run now, and from which seats — the engine's own selection, read each time (a seat
+    // signed in since the pause counts). Absent on every other gate and on an addon without the read.
+    const rejudgeAt = async (ord: number, unit?: WorkUnit): Promise<{ rejudge?: RejudgeOffer }> => {
+      const gated = unit ?? (await adapter.sessionsDetail()).find((v) => v.session.id === id)?.units?.find((u) => u.ord === ord);
+      const denial = (gated as { denial?: { source?: unknown } | null } | undefined)?.denial;
+      if (gated?.status !== 'rejected' || denial?.source !== 'judge_unavailable') return {};
+      if (typeof adapter.rejudgeReadiness !== 'function') return {};
+      try {
+        const r = await adapter.rejudgeReadiness(id);
+        if (r === null || !r.applies || r.ord !== ord) return {};
+        return { rejudge: { available: r.available, eligible: r.eligible, missing: r.missing } };
+      } catch {
+        // A failed read offers nothing; the engine still judges a `rejudge` sent anyway.
+        return {};
+      }
+    };
     // The record judges the cache (crew#1083 round 7): rows that disagree on the ord are 409
     // `gate_unknown` whether or not something is cached, and a cached entry is served — for its
     // presentation fields (prompt, choices, recommended) — only when its ord is the record's open
@@ -5082,7 +5101,7 @@ export function registerRoutes(
         || (recorded.state === 'open' && cached.ord === recorded.ord)
         || (recorded.state === 'none'
           && (await adapter.sessionsDetail()).find((v) => v.session.id === id)?.session.status === 'awaiting_human');
-      if (servable) return { runId: id, ...cached, assurance: await receiptAt(cached.ord) };
+      if (servable) return { runId: id, ...cached, assurance: await receiptAt(cached.ord), ...(await rejudgeAt(cached.ord)) };
       gateCache.forget(id);
     }
 
@@ -5152,7 +5171,8 @@ export function registerRoutes(
       // genuinely lost), as does a gate whose `awaitingHuman` predates the log's retention.
       return reply.code(404).send({ error: 'No open gate for this run' });
     }
-    return { runId: id, ...open, assurance: receiptOf(run.units?.find((u) => u.ord === open.ord)) };
+    const gatedUnit = run.units?.find((u) => u.ord === open.ord);
+    return { runId: id, ...open, assurance: receiptOf(gatedUnit), ...(await rejudgeAt(open.ord, gatedUnit)) };
   });
 
   // ── Elicitation (DES-002) ────────────────────────────────────────────────────

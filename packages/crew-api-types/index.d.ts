@@ -1605,6 +1605,34 @@ export interface GateInfo {
    *  work this gate asks about. `null` when the unit carries none (no gate evaluated it yet, or an
    *  older engine); ABSENT on an older daemon. */
   assurance?: AssuranceReceipt | null;
+  /**
+   * (api-types 0.134.0) On a gate whose unit no judge could rule on (`denial.source:
+   * 'judge_unavailable'`): whether its JUDGE CAN BE RE-RUN NOW — `{approve: true, action:
+   * 'rejudge'}` ({@link GateDecision.action}) — and which seats the engine's judge selection would
+   * draw from. ABSENT on every other gate, on an older daemon, and on an engine without the
+   * readiness read (then `rejudge` is not offered).
+   */
+  rejudge?: RejudgeOffer;
+}
+
+/**
+ * (api-types 0.134.0) Whether a `judge_unavailable` gate's judge can be re-run now. `available` —
+ * the engine's judge selection names at least one seat (`eligible`, rotation order, fallback judges
+ * last): `rejudge` re-arms the judge on the same work (the step does not run again; deny-dominates
+ * still folds the result). Otherwise `missing` says which of the run's seats cannot judge this work,
+ * and why — what to fix before re-running it.
+ */
+export interface RejudgeOffer {
+  available: boolean;
+  eligible: string[];
+  missing: RejudgeMissingSeat[];
+}
+
+/** One run seat that cannot judge the gated work now, and why, in the engine's words (`built this
+ *  work`, `benched for this run: quota_exhausted …`, `not usable now: signed out`). */
+export interface RejudgeMissingSeat {
+  seat: string;
+  reason: string;
 }
 
 /**
@@ -1669,6 +1697,15 @@ export interface GateDecision {
     | 'accept_partial'
     | 'accept_suggestion'
     | 'amend_intent'
+    /** (api-types 0.134.0) RE-RUN THE JUDGE of a `judge_unavailable` gate, with `approve: true` and
+     *  nothing else: the engine re-arms the judge on the same work with the run's roster as it
+     *  stands now (never the work's authors or the pinned validator's author), records
+     *  {@link JudgeRerunRequestedEvent} and re-dispatches the unit WITHOUT running its seat; the
+     *  ordinary fold judges the result, so a REJECT, a failed floor or another seatless judge denies
+     *  again. Refused (409, gate left open) at any other gate and when no judge seat is eligible —
+     *  {@link GateInfo.rejudge} says beforehand. Unlike a plain approve there, it is never the
+     *  operator's own judgment. */
+    | 'rejudge'
     /** (core#820) A `consent` gate's choice from its dry-run plan (`awaitingHuman.choices`), with
      *  `approve: true`: `consent:worker` (the default), `consent:operator`, …; `reject` declines. */
     | `consent:${string}`;
@@ -2230,7 +2267,8 @@ export interface DataUsedEvent {
  *   names the error. Before core-ts 0.7.46 the error was dropped and the gate could approve.
  * - `judge_unavailable` — the gate's judge did not run (every eligible judge seat failed, or, since
  *   core-ts 0.7.46 / EX-02, the run requires a judge and none distinct from the creator existed).
- *   A HOLD: sign a judge seat in, then approve to re-run.
+ *   A HOLD: approve = the operator's own judgment (labelled "judged by operator"); once a judge seat
+ *   can rule, `rejudge` re-runs the judge (api-types 0.134.0, {@link GateInfo.rejudge}).
  * Open-ended (`string & {}`) so a newer engine's source parses in an older studio.
  */
 export type UnitDenialSource =
@@ -3178,6 +3216,22 @@ export type QeAcceptanceDecidedEvent = {
   session: string;
   ord: number;
   qe: QeAcceptanceDecision;
+};
+
+/** (api-types 0.134.0) The operator re-armed the judge of a `judge_unavailable` gate
+ *  ({@link GateDecision.action} `rejudge`): attempt `attempt` re-reads attempt `fromAttempt`'s
+ *  captured output with a judge drawn from `seats` (eligible when it was armed); the step's seat does
+ *  not run. Emitted before `resumed`; that attempt's `gateEvaluated` says what the judge ruled.
+ *  `type` alias on purpose. */
+export type JudgeRerunRequestedEvent = {
+  type: 'judgeRerunRequested';
+  session: string;
+  ord: number;
+  attempt: number;
+  fromAttempt: number;
+  seats: string[];
+  previousReason: string;
+  by: string;
 };
 
 /** The gate-evidence events (wicked-core F-036/F-039, extended by wicked-core#431 — api-types 0.33.0
