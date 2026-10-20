@@ -10,8 +10,16 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.15.6] — 2026-10-20
+
+A patch release: a gate no judge could rule on can re-run its judge (#1098), and a new engine and studio: the engine's `rejudge` arm, a gate-hook relay that judges a killed gate hook once more and records every refusal (gate protocol 3), and container seats' cargo builds sized for their memory limit. Pins: wicked-core-ts ^0.15.6, wicked-studio ^0.11.6, wicked-vault ^0.8.0, wicked-interactive ^0.14.1 (bridge floor, unchanged), wicked-crew-api-types 0.134.0.
+
+### Changed
+- **The engine is wicked-core-ts 0.15.6.** A `judge_unavailable` gate can re-run its judge on the same work: the `rejudge` gate action, the `judgeRerunRequested` event and the `rejudgeReadiness` read (wicked-core#1054). The gate-hook relay runs a gate hook killed by a signal once more, only when it left no verdict, and refuses every other failure fail closed, naming the reason in the answer and the daemon's log and recording it as an infra deny (wicked-core#1055). **The gate protocol is now 3**, so a `wicked-core` hook binary from an older engine is refused before a seat launches; the hook binary crew uses by default is the one bundled in the same core-ts platform package, so the two agree. A container seat's cargo build gets at most 2 jobs, no dev/test debuginfo and no incremental state, unless the operator sets those variables (wicked-core#1056). Seat and floor image tags are unchanged.
+- **The bundled studio is wicked-studio 0.11.6:** the judge-unavailable gate offers "Re-run the judge" when a judge seat can rule now, a gate or delivery the operator judged says "Judged by operator", and the gate no longer promises that approving re-runs the check (studio#866).
+
 ### Added
-- **A gate no judge could rule on can re-run its judge (`rejudge`, `wicked-crew-api-types` 0.134.0).** When every eligible judge seat failed as a seat (its image would not build, it was signed out), the unit parks at a `judge_unavailable` escalation. Approve there is the operator's own judgment ("judged by operator"); nothing re-ran the judge once a seat could judge again. `POST /runs/:id/gate {approve: true, action: 'rejudge'}` now does: the engine re-arms the judge on the same work, drawn by its own selection from the run's roster as it stands, re-dispatches the unit without running its seat, and records `judgeRerunRequested`. The result goes through the ordinary gate, so a REJECT, a failed floor or another seatless judge stops there again. Like the other escalation arms it takes no `amend`, `amendScope` or `plan`, and the engine refuses it (409, gate left open) at any other gate and while no judge seat is eligible. `GET /runs/:id/gate` says beforehand: on a `judge_unavailable` gate it carries `rejudge: {available, eligible, missing: [{seat, reason}]}`, read from the engine's new `rejudgeReadiness` each time, so a seat signed in since the pause counts. The field is absent on every other gate and on an engine without the read (wicked-core-ts after 0.15.5).
+- **A gate no judge could rule on can re-run its judge (`rejudge`, `wicked-crew-api-types` 0.134.0, #1098).** When every eligible judge seat failed as a seat (its image would not build, it was signed out), the unit parks at a `judge_unavailable` escalation. Approve there is the operator's own judgment ("judged by operator"); nothing re-ran the judge once a seat could judge again. `POST /runs/:id/gate {approve: true, action: 'rejudge'}` now does: the engine re-arms the judge on the same work, drawn by its own selection from the run's roster as it stands, re-dispatches the unit without running its seat, and records `judgeRerunRequested`. The result goes through the ordinary gate, so a REJECT, a failed floor or another seatless judge stops there again. Like the other escalation arms it takes no `amend`, `amendScope` or `plan`, and the engine refuses it (409, gate left open) at any other gate and while no judge seat is eligible. `GET /runs/:id/gate` says beforehand: on a `judge_unavailable` gate it carries `rejudge: {available, eligible, missing: [{seat, reason}]}`, read from the engine's new `rejudgeReadiness` each time, so a seat signed in since the pause counts. The field is absent on every other gate and on an engine without the read (wicked-core-ts after 0.15.5).
 
 ## [0.15.5] — 2026-10-20
 
@@ -4356,7 +4364,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.5...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.6...HEAD
+[0.15.6]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.5...v0.15.6
 [0.15.5]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.4...v0.15.5
 [0.15.4]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.3...v0.15.4
 [0.15.3]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.2...v0.15.3
