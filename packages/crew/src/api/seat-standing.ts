@@ -443,6 +443,10 @@ function loginCheck(key: string, authFailure: SeatAuthFailure | null, probe: Pro
     return { login_check: 'unverified', login_note: `login unverified — the seat's own auth check could not tell (${probe.detail})` };
   }
   if (probe.check === 'live') return { login_check: 'live' };
+  if (probe.via !== undefined) {
+    // The container floor: the broker answered the status; the seat's own steps are the live check.
+    return { login_check: 'status', login_note: `login unverified — only the credential broker answered (${probe.detail})` };
+  }
   return {
     login_check: 'status',
     login_note: `login unverified — only the CLI's status command answered, and it reads the stored login, not the session (${probe.detail})`,

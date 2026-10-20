@@ -161,6 +161,29 @@ export const AUTH_FAILURE_WINDOW_MS = 30 * 60 * 1000;
 export const SEAT_BENCH_WINDOW_MS = 30 * 60 * 1000;
 
 /**
+ * How long a seat's last step outcome stands as its live sign-in check on the container floor
+ * (`roster-standing.ts`). There the daemon sends no live request of its own: the credential broker
+ * answers the status, and the seat's own steps are the live check, because they ran on the floor
+ * work runs on (the same seat container, the same broker credential).
+ */
+export const SEAT_ANSWER_WINDOW_MS = 30 * 60 * 1000;
+
+/** Why a seat's step did not answer: the engine's turn ceiling fired (`stepFailed{timedOut}`), or
+ *  the CLI process failed with no ok output (`stepFailed{workerError}`, not a deliver refusal and
+ *  not the seat's own "no credential" report, which signs it out instead). */
+export type SeatNoAnswer = 'timed_out' | 'worker_error';
+
+/** The seat's latest step outcome inside {@link SEAT_ANSWER_WINDOW_MS}. */
+export interface SeatLastAnswer {
+  /** ISO-8601 of the outcome. */
+  at: string;
+  /** `true`: a unit output or a chat turn came back ok. */
+  answered: boolean;
+  /** Present when `answered` is false. */
+  why?: SeatNoAnswer;
+}
+
+/**
  * A seat the engine benched in a run, carried to the next launches (`seatBenched`, wicked-core
  * after #590 S5). Since S5 no ballot finds a dead seat before routing, so a seat that reads signed
  * in but cannot work (out of quota, say) is only found when its first unit refuses. Without this,
@@ -241,6 +264,8 @@ export class SeatHealthTracker {
   /** cli key → the engine's latest in-run bench of the seat (`seatBenched`), cleared by an ok
    *  output or by {@link SEAT_BENCH_WINDOW_MS}. */
   private readonly recentBenches = new Map<string, { at: number; reason: string; source: string; session?: string; runs: number }>();
+  /** cli key → the seat's latest step outcome (container-floor live check, {@link lastAnswerFor}). */
+  private readonly answers = new Map<string, { at: number; answered: boolean; why?: SeatNoAnswer }>();
   /** Default `since` for seats that have never changed state. */
   private readonly startedAt = new Date().toISOString();
 
@@ -355,7 +380,14 @@ export class SeatHealthTracker {
         // (R5) Every other worker failure is an OBSERVED error, never a status flip: a launch
         // refusal, a load timeout or a worker crash says nothing about whether the seat can take
         // the next turn — the engine's per-run ballot ledger judges that (F-RC2-006).
-        else this.stampError(seat, at);
+        else {
+          this.stampError(seat, at);
+          // …but a step the seat did not answer is what the container floor's live check reads.
+          // A substance veto or an environment refusal came after the seat answered; neither counts.
+          const kind = str((event as { failureKind?: unknown }).failureKind);
+          if (kind === 'timedOut') this.recordAnswer(seat, at, false, 'timed_out');
+          else if (kind === 'workerError') this.recordAnswer(seat, at, false, 'worker_error');
+        }
         return;
       }
       case 'councilSeatFailed': {
@@ -491,6 +523,28 @@ export class SeatHealthTracker {
     });
     this.authFailures.delete(key); // …and the seat's own "no credential" report (F-A45-006)
     this.liftBench(key, atMs); // …and a run's bench of it: the seat just did work
+    this.recordAnswer(key, atMs, true); // …and it answered (the container floor's live check)
+  }
+
+  /** Keep the seat's newest step outcome; an older frame (a replay folded late) never replaces it. */
+  private recordAnswer(key: string, atMs: number, answered: boolean, why?: SeatNoAnswer): void {
+    const cur = this.answers.get(key);
+    if (cur !== undefined && cur.at > atMs) return;
+    this.answers.set(key, { at: atMs, answered, ...(why !== undefined ? { why } : {}) });
+  }
+
+  /**
+   * The seat's latest step outcome inside {@link SEAT_ANSWER_WINDOW_MS}, or `null` when no step ran
+   * on it in that window. The roster reads it as the container floor's live sign-in check.
+   */
+  lastAnswerFor(key: string, nowMs = Date.now()): SeatLastAnswer | null {
+    const rec = this.answers.get(key);
+    if (rec === undefined) return null;
+    if (nowMs - rec.at >= SEAT_ANSWER_WINDOW_MS) {
+      this.answers.delete(key);
+      return null;
+    }
+    return { at: new Date(rec.at).toISOString(), answered: rec.answered, ...(rec.why !== undefined ? { why: rec.why } : {}) };
   }
 
   /**

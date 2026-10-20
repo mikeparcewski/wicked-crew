@@ -92,6 +92,11 @@ export interface SeatProbeReading {
   detail: string;
   /** (A2) The account KIND the status command stated, when it stated one — never an identifier. */
   account?: SeatAccount;
+  /** Present on the container floor (`roster-standing.ts`): the reading is the credential broker's,
+   *  and `check: 'live'` means the seat's last step there answered (the floor sends no live request
+   *  of its own). `'no_answer'` — its last step did not answer, which the roster warns about;
+   *  `'broker'` — no step ran on it in the window, so only the broker answered. */
+  via?: 'step' | 'no_answer' | 'broker';
 }
 
 /** How long an answer is trusted before a background refresh (the stale answer is served meanwhile). */
