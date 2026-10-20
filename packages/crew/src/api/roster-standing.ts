@@ -67,8 +67,8 @@ const ANSWER_WINDOW_MIN = SEAT_ANSWER_WINDOW_MS / 60_000;
 /**
  * A container seat's sign-in reading: the credential broker's status, verified live by the seat's
  * own latest step on this floor. The container floor sends no live request of its own (its status
- * reads the broker, not the CLI), so the live check is the run path itself: a unit or chat turn
- * that came back ok within {@link SEAT_ANSWER_WINDOW_MS} is `live`; a step that did not answer
+ * reads the broker, not the CLI), so the live check is the run path itself: a unit whose output
+ * came back ok (a chat's answer is one) within {@link SEAT_ANSWER_WINDOW_MS} is `live`; a step that did not answer
  * (timed out, the CLI failed) stays `status` with `via: 'no_answer'`, which the roster warns about;
  * no step in the window is `status` with `via: 'broker'`, no warning: nothing was asked yet.
  */

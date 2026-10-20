@@ -255,18 +255,27 @@ describe('container floor live check: the seat\'s own last step', () => {
     expect(codes(s)).not.toContain('live_check_failed');
   });
 
-  it('counts an ok chat turn as the seat answering', async () => {
+  // codex xreview on #1095: a chat's `chatReply` is a unit's output read back later and stamped when
+  // the relay folds it; it must not stand in for the unit (a newer timeout would be erased).
+  it('reads a chat answer from its unit, never from the later chatReply', async () => {
     const r = rig();
     await r.containerStatus.refresh('codex');
-    r.seatHealth.ingest({ type: 'chatReply', cliKey: 'codex', ok: true, ts: Date.now() - 1000 } as never);
-    expect(r.seat()).toMatchObject({ login_check: 'live' });
+    const now = Date.now();
+    r.unit(1, now - 60_000);
+    r.ok(1, now - 50_000);
+    r.unit(2, now - 40_000);
+    r.failed(2, now - 30_000, 'timedOut');
+    r.seatHealth.ingest({ type: 'chatReply', cliKey: 'codex', ok: true, run_id: 'r1', ord: 1 } as never);
+    expect(r.seat()).toMatchObject({ login_check: 'status' });
+    expect(codes(r.seat())).toContain('live_check_failed');
   });
 
   it.each([
     ['timedOut', true],
     ['workerError', true],
-    // The seat answered: the engine vetoed the substance, or the CLI refused its environment.
+    // The seat answered and the engine vetoed the substance.
     ['substanceRejected', false],
+    // Before any request: says nothing, so the ok before it stands.
     ['environmentRefused', false],
   ] as const)('classifies a later %s step: warns=%s', async (kind, warns) => {
     const r = rig();
@@ -290,6 +299,23 @@ describe('container floor live check: the seat\'s own last step', () => {
       expect(s).toMatchObject({ login_check: 'live' });
       expect(codes(s)).not.toContain('live_check_failed');
     }
+  });
+
+  // codex xreview on #1095: a later answered-but-vetoed step clears an earlier no-answer; an
+  // environment refusal (before any request) leaves it standing.
+  it.each([
+    ['substanceRejected', false],
+    ['environmentRefused', true],
+  ] as const)('after a timeout, a later %s step: still warns=%s', async (kind, warns) => {
+    const r = rig();
+    await r.containerStatus.refresh('codex');
+    const now = Date.now();
+    r.unit(1, now - 40_000);
+    r.failed(1, now - 30_000, 'timedOut');
+    r.unit(2, now - 20_000);
+    r.failed(2, now - 10_000, kind);
+    expect(codes(r.seat()).includes('live_check_failed')).toBe(warns);
+    expect(r.seat()['probed_at']).toBe(new Date(warns ? now - 30_000 : now - 10_000).toISOString());
   });
 
   it('clears the warning when the seat answers again', async () => {

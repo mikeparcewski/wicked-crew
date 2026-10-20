@@ -177,7 +177,8 @@ export type SeatNoAnswer = 'timed_out' | 'worker_error';
 export interface SeatLastAnswer {
   /** ISO-8601 of the outcome. */
   at: string;
-  /** `true`: a unit output or a chat turn came back ok. */
+  /** `true`: a unit's output came back ok (a chat's answer is one), or the engine vetoed the
+   *  substance of an answer the seat gave. */
   answered: boolean;
   /** Present when `answered` is false. */
   why?: SeatNoAnswer;
@@ -353,7 +354,13 @@ export class SeatHealthTracker {
       case 'unitOutputCaptured': {
         if (event.stepStatus !== 'ok' || session === undefined || ord === undefined) return;
         const seat = this.assignments.get(`${session}:${ord}`);
-        if (seat !== undefined) this.markActive(seat, at);
+        if (seat !== undefined) {
+          this.markActive(seat, at);
+          // Only a unit's own outcome is recorded as an answer: a chat's `chatReply` is this same
+          // unit's output read back later (`AskRelay`), stamped when the relay folds it, so it could
+          // otherwise replace a newer step that did not answer.
+          this.recordAnswer(seat, at, true);
+        }
         return;
       }
       case 'stepFailed': {
@@ -382,11 +389,14 @@ export class SeatHealthTracker {
         // the next turn — the engine's per-run ballot ledger judges that (F-RC2-006).
         else {
           this.stampError(seat, at);
-          // …but a step the seat did not answer is what the container floor's live check reads.
-          // A substance veto or an environment refusal came after the seat answered; neither counts.
+          // …but whether the seat answered is what the container floor's live check reads. A
+          // substance veto came after the seat answered (it is an answer, without the recovery an
+          // ok output gets). An environment refusal (a trust prompt, a missing TTY) is the CLI
+          // refusing its directory before any request: it says nothing about the session either way.
           const kind = str((event as { failureKind?: unknown }).failureKind);
           if (kind === 'timedOut') this.recordAnswer(seat, at, false, 'timed_out');
           else if (kind === 'workerError') this.recordAnswer(seat, at, false, 'worker_error');
+          else if (kind === 'substanceRejected') this.recordAnswer(seat, at, true);
         }
         return;
       }
@@ -523,7 +533,6 @@ export class SeatHealthTracker {
     });
     this.authFailures.delete(key); // …and the seat's own "no credential" report (F-A45-006)
     this.liftBench(key, atMs); // …and a run's bench of it: the seat just did work
-    this.recordAnswer(key, atMs, true); // …and it answered (the container floor's live check)
   }
 
   /** Keep the seat's newest step outcome; an older frame (a replay folded late) never replaces it. */
