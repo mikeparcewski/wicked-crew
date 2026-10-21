@@ -1,3 +1,5 @@
+import { registerJsonParser } from './json-parser.js';
+import { createUnitListener, unitPortFromEnv, type UnitListenerState } from './unit-listener.js';
 import Fastify from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
 import fastifyStatic from '@fastify/static';
@@ -481,6 +483,7 @@ declare module 'fastify' {
   interface FastifyInstance {
     /** crew#741 — the boot's stage clock; `startServer` adds `listen` and hands the snapshot back. */
     bootStages?: BootStageClock;
+    unitListenerState: UnitListenerState;
   }
 }
 
@@ -500,6 +503,9 @@ export async function createServer(
       stream: teeStreamWithErrorRing(errorRing),
     },
   });
+  const unitListenerState: UnitListenerState = {};
+  app.decorate('unitListenerState', unitListenerState);
+  app.addHook('onClose', async () => { await unitListenerState.close?.(); });
   // TH-11: accumulate the route table as it registers — the endpoint manifest's one source of
   // truth. Installed FIRST because fastify only fires onRoute for routes added after the hook
   // exists. Read via `app.endpointManifest` (scripts/generate-endpoint-manifest.ts + the drift
@@ -1996,25 +2002,7 @@ export async function createServer(
     }
   });
 
-  // Tolerate an empty body on application/json POSTs (some actions take no body).
-  // Default Fastify v5 rejects "" with FST_ERR_CTP_EMPTY_JSON_BODY.
-  app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body, done) => {
-    if (body === '' || body === undefined || body === null) return done(null, undefined);
-    try {
-      done(null, JSON.parse(body as string));
-    } catch {
-      // A syntactically invalid body is the CLIENT's error: without an explicit statusCode
-      // Fastify reports a parser error as a 500, which misfiles "you sent `{not json`" as a
-      // server fault — on the elicitation answer path that told an operator the daemon broke
-      // when their request did. 400 matches Fastify's own default JSON parser
-      // (FST_ERR_CTP_INVALID_JSON) and every schema-level 400 these routes already return.
-      // The message is a fixed one, never JSON.parse's: V8 quotes the body around the bad token
-      // (`Unexpected token 's', ..."{"value": sk-…"... is not valid JSON`), and Fastify both
-      // answers and logs it, so an unquoted `PUT /mcp/servers/:name/secret` value would leave the
-      // broker in the response and the log (DES-MCP-TOOLS-001 D-2).
-      done(Object.assign(new Error('the request body is not valid JSON'), { statusCode: 400, code: 'FST_ERR_CTP_INVALID_JSON' }));
-    }
-  });
+  registerJsonParser(app);
 
   await app.register(fastifyWebsocket);
 
@@ -2114,6 +2102,7 @@ export async function createServer(
     },
     { audit, authMode: auth.mode },
     {
+      unitListenerState,
       seatHealth,
       deliveryFreeze,
       // wicked-studio#284: the watchdog's remembered frames ride `GET /runs/:id/events`.
@@ -2353,6 +2342,7 @@ export async function createServer(
 }
 
 export interface StartedServer {
+  unit: { port: number; host: string; close: () => Promise<void> };
   app: ReturnType<typeof Fastify>;
   port: number;
   host: string;
@@ -2372,8 +2362,20 @@ export async function startServer(
   host = '127.0.0.1',
   options?: CreateServerOptions,
 ): Promise<StartedServer> {
+  const unitPort = unitPortFromEnv(process.env['WICKED_CREW_UNIT_PORT']);
   const app = await createServer(adapter, options);
-  await app.listen({ port, host });
+  const unitApp = createUnitListener(app.unitRouteDeps);
+  app.unitListenerState.close = () => unitApp.close();
+  try {
+    await app.listen({ port, host });
+    await unitApp.listen({ port: unitPort, host: '127.0.0.1' });
+  } catch (error) {
+    await Promise.allSettled([app.close(), unitApp.close()]);
+    throw new Error(`could not bind crew listeners (main ${host}:${port}, unit 127.0.0.1:${unitPort})`, { cause: error });
+  }
+  const unitAddress = unitApp.server.address();
+  if (unitAddress === null || typeof unitAddress === 'string') throw new Error('unit listener has no TCP address');
+  app.unitListenerState.port = unitAddress.port;
   const clock = app.bootStages ?? new BootStageClock();
   clock.lap('listen');
   const addr = app.server.address();
@@ -2383,6 +2385,9 @@ export async function startServer(
   // DES-MCP-TOOLS-001 S1/S3: the in-process engine hands each governed worker this URL (with its
   // `WICKED_MCP_TOKEN`) as `WICKED_CREW_URL`, so the garden shim reaches THIS daemon's broker. The
   // engine reads the daemon's own env at every spawn; a daemon that never listened hands none.
-  process.env['WICKED_CREW_URL'] = brokerUrlFor(boundHost, boundPort);
-  return { app, port: boundPort, host: boundHost, stages: clock.snapshot() };
+  const unitOrigin = brokerUrlFor('127.0.0.1', unitAddress.port);
+  process.env['WICKED_CREW_URL'] = unitOrigin;
+  process.env['WICKED_SEAT_UNIT_URL'] = unitOrigin;
+  return { app, port: boundPort, host: boundHost, stages: clock.snapshot(),
+    unit: { port: unitAddress.port, host: '127.0.0.1', close: () => unitApp.close() } };
 }

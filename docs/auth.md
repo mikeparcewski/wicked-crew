@@ -262,3 +262,25 @@ launch failed (401): Authentication required: send Authorization: Bearer <token>
 (The second line is the verb's own failure report, so its shape differs per verb — `start` prints
 `launch failed (<status>): …`, `gate` and `status` print `wicked-crew: <verb> failed: <status> …`.
 The advice line above it is the same for every verb, and is printed once per process.)
+
+
+### Host-seat unit listener
+
+At boot a separate Fastify listener binds to `127.0.0.1` on an ephemeral port, or
+`WICKED_CREW_UNIT_PORT` (a decimal integer from 1 to 65535). An invalid or occupied
+port fails startup. Only POST `/api/v1/mcp/call`, POST `/api/v1/mcp/tools`, and
+GET/POST/DELETE `/api/v1/mcp/ask` are registered. They share the main listener's
+handlers and engine token checks; GET and DELETE ask retain their 405 response.
+Every other method/path returns 404, including operator APIs, HEAD and OPTIONS.
+This listener has no CORS, WebSocket or studio fallback.
+
+Both `WICKED_SEAT_UNIT_URL` and `WICKED_CREW_URL` exported to the engine point to
+this unit origin, so unit ask URLs and container gateway upstreams use only that
+port. `/api/v1/health.unitPort` and `/api/v1/diagnostics.daemon.unitPort` report it.
+Crew's own editor conformance runner obtains the main origin from its bound
+server, independently of these environment variables.
+
+Editor-plugin preset units that read `$WICKED_CREW_URL/api/v1/editors` or open
+the conformance host page now receive 404. Those are operator surfaces and are
+not exposed on the unit port; such preset steps require an operator-side flow.
+The daemon's operator-triggered conformance runner still uses the main port.

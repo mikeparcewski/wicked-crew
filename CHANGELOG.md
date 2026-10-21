@@ -10,6 +10,8 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+- Isolate host-seat MCP traffic on a dedicated loopback listener; export its origin to units and report its port in health and diagnostics.
+
 ## [0.15.6] — 2026-10-20
 
 A patch release: a gate no judge could rule on can re-run its judge (#1098), and a new engine and studio: the engine's `rejudge` arm, a gate-hook relay that judges a killed gate hook once more and records every refusal (gate protocol 3), and container seats' cargo builds sized for their memory limit. Pins: wicked-core-ts ^0.15.6, wicked-studio ^0.11.6, wicked-vault ^0.8.0, wicked-interactive ^0.14.1 (bridge floor, unchanged), wicked-crew-api-types 0.134.0.
