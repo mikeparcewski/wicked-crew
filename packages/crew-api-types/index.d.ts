@@ -182,6 +182,8 @@ export type RoutingInfo =
  * inline, so nothing a 0.37.0 client compiled against moves.
  */
 export interface HealthResponse {
+  /** Loopback port serving only unit-token routes. Absent before the listener binds. */
+  unitPort?: number;
   status: string;
   version: string;
   /** The engine actor's answer (`"ok"`), or `"busy"` when the actor did not answer within ~1 s
@@ -7501,6 +7503,8 @@ export interface DiagnosticsComponents {
 
 /** Daemon process runtime facts (`GET /diagnostics`). */
 export interface DiagnosticsDaemon {
+  /** Loopback port serving only unit-token routes. */
+  unitPort?: number;
   /** Milliseconds since this daemon process started. */
   uptimeMs: number;
   /** Epoch ms the process started (now − uptime). */

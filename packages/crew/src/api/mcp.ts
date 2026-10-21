@@ -285,17 +285,7 @@ function toConfig(body: z.infer<typeof McpServerConfigSchema>): McpUpstreamConfi
 }
 
 export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): void {
-  // The MCP ask tool (streamable HTTP, stateless): worker-facing, the unit token in Authorization.
-  app.post(`${V}/mcp/ask`, { config: { manifest: { statusCodes: [200, 401, 503] } } }, async (req, reply) => {
-    if (deps.askServer === undefined) return reply.code(503).send({ error: 'ask_unsupported' });
-    return deps.askServer.handle(req, reply);
-  });
-  app.route({
-    method: ['GET', 'DELETE'],
-    url: `${V}/mcp/ask`,
-    config: { manifest: { statusCodes: [405] } },
-    handler: async (_req, reply) => reply.code(405).header('Allow', 'POST').send({ error: 'method_not_allowed' }),
-  });
+  registerUnitRoutes(app, deps);
 
   // (crew#993) A withdraw-then-change of one server's registration runs under the policies' lock
   // for that server, the one approve and revoke take. With no policies there are no approvals to race.
@@ -490,51 +480,6 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
     },
   );
 
-  // The broker (§6). The body carries a worker's arguments: a malformed one is refused without
-  // echoing any of it, and nothing of the body is logged or audited (the call record is the record).
-  // WORKER-FACING (crew#714): this route and `POST /mcp/tools` below are the two the bearer
-  // boundary exempts (`isUnitTokenRoute`, src/api/auth.ts) — a worker holds no operator bearer,
-  // and the body's capability token is judged by the engine on every call (401 `invalid_token`).
-  // Nothing here reads `req.actor`; keep it that way.
-  app.post(
-    `${V}/mcp/call`,
-    { config: { manifest: { requestType: 'McpCallBody', responseType: 'McpCallResponse', statusCodes: [200, 400, 401, 403, 409, 429, 500, 502, 503, 504] } } },
-    async (req, reply) => {
-      if (deps.broker === undefined) return reply.code(503).send({ error: 'the MCP broker is not configured on this daemon', code: 'mcp_unavailable' });
-      const parsed = McpCallSchema.safeParse(req.body);
-      if (!parsed.success) {
-        return reply.code(400).send({ error: `body: ${parsed.error.issues.map((i) => `${i.path.join('.') || 'body'} ${i.code}`).join('; ')}`, code: 'bad_request' });
-      }
-      const answer = await deps.broker.call({
-        token: parsed.data.token,
-        subject: parsed.data.subject,
-        ...(parsed.data.args !== undefined ? { args: parsed.data.args } : {}),
-      });
-      return reply.code(answer.status).send(answer.body);
-    },
-  );
-
-  // The unit's tool list (S4). Like the call, the token travels in the body so it never reaches a
-  // request log, and nothing of the body is logged or audited. WORKER-FACING, bearer-exempt like
-  // the call above (crew#714): the engine's `listMcpTools` judges the token, not an actor.
-  app.post(
-    `${V}/mcp/tools`,
-    { config: { manifest: { requestType: 'McpToolsBody', responseType: 'McpToolsResponse', statusCodes: [200, 400, 401, 500, 503] } } },
-    async (req, reply) => {
-      const registry = deps.registry;
-      const toolLister = deps.toolLister;
-      if (registry === undefined || toolLister === undefined) {
-        return reply.code(503).send({ error: 'the MCP registry is not configured on this daemon', code: 'mcp_unavailable' });
-      }
-      const parsed = McpToolsSchema.safeParse(req.body);
-      if (!parsed.success) {
-        return reply.code(400).send({ error: `body: ${parsed.error.issues.map((i) => `${i.path.join('.') || 'body'} ${i.code}`).join('; ')}`, code: 'bad_request' });
-      }
-      const answer = await listUnitTools({ registry, lister: toolLister }, parsed.data.token);
-      return reply.code(answer.status).send(answer.body);
-    },
-  );
-
   // (crew#719) RE-KEY only: the server must already be registered and already reference this
   // keychain entry. A NEW server's secret is staged with its preview (`secret` on the preview
   // body) and committed by the save, so the two can no longer half-land.
@@ -681,3 +626,72 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
 
 type McpPolicyQueryRole = import('../mcp/policies.js').McpPolicyQuery['phaseRole'];
 type McpPolicyQueryMode = import('../mcp/policies.js').McpPolicyQuery['mode'];
+
+export type UnitRouteDeps = Pick<McpRouteDeps, 'askServer' | 'registry' | 'broker' | 'toolLister'>;
+
+declare module 'fastify' {
+  interface FastifyInstance {
+    unitRouteDeps: UnitRouteDeps;
+  }
+}
+
+/** The only handlers exposed to governed units, shared with the main listener. */
+export function registerUnitRoutes(app: FastifyInstance, deps: UnitRouteDeps): void {
+  // The MCP ask tool (streamable HTTP, stateless): worker-facing, the unit token in Authorization.
+  app.post(`${V}/mcp/ask`, { config: { manifest: { statusCodes: [200, 401, 503] } } }, async (req, reply) => {
+    if (deps.askServer === undefined) return reply.code(503).send({ error: 'ask_unsupported' });
+    return deps.askServer.handle(req, reply);
+  });
+  app.route({
+    method: ['GET', 'DELETE'],
+    url: `${V}/mcp/ask`,
+    config: { manifest: { statusCodes: [405] } },
+    handler: async (_req, reply) => reply.code(405).header('Allow', 'POST').send({ error: 'method_not_allowed' }),
+  });
+
+  // The broker (§6). The body carries a worker's arguments: a malformed one is refused without
+  // echoing any of it, and nothing of the body is logged or audited (the call record is the record).
+  // WORKER-FACING (crew#714): this route and `POST /mcp/tools` below are the two the bearer
+  // boundary exempts (`isUnitTokenRoute`, src/api/auth.ts) — a worker holds no operator bearer,
+  // and the body's capability token is judged by the engine on every call (401 `invalid_token`).
+  // Nothing here reads `req.actor`; keep it that way.
+  app.post(
+    `${V}/mcp/call`,
+    { config: { manifest: { requestType: 'McpCallBody', responseType: 'McpCallResponse', statusCodes: [200, 400, 401, 403, 409, 429, 500, 502, 503, 504] } } },
+    async (req, reply) => {
+      if (deps.broker === undefined) return reply.code(503).send({ error: 'the MCP broker is not configured on this daemon', code: 'mcp_unavailable' });
+      const parsed = McpCallSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: `body: ${parsed.error.issues.map((i) => `${i.path.join('.') || 'body'} ${i.code}`).join('; ')}`, code: 'bad_request' });
+      }
+      const answer = await deps.broker.call({
+        token: parsed.data.token,
+        subject: parsed.data.subject,
+        ...(parsed.data.args !== undefined ? { args: parsed.data.args } : {}),
+      });
+      return reply.code(answer.status).send(answer.body);
+    },
+  );
+
+  // The unit's tool list (S4). Like the call, the token travels in the body so it never reaches a
+  // request log, and nothing of the body is logged or audited. WORKER-FACING, bearer-exempt like
+  // the call above (crew#714): the engine's `listMcpTools` judges the token, not an actor.
+  app.post(
+    `${V}/mcp/tools`,
+    { config: { manifest: { requestType: 'McpToolsBody', responseType: 'McpToolsResponse', statusCodes: [200, 400, 401, 500, 503] } } },
+    async (req, reply) => {
+      const registry = deps.registry;
+      const toolLister = deps.toolLister;
+      if (registry === undefined || toolLister === undefined) {
+        return reply.code(503).send({ error: 'the MCP registry is not configured on this daemon', code: 'mcp_unavailable' });
+      }
+      const parsed = McpToolsSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: `body: ${parsed.error.issues.map((i) => `${i.path.join('.') || 'body'} ${i.code}`).join('; ')}`, code: 'bad_request' });
+      }
+      const answer = await listUnitTools({ registry, lister: toolLister }, parsed.data.token);
+      return reply.code(answer.status).send(answer.body);
+    },
+  );
+
+}

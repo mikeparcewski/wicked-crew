@@ -1,3 +1,4 @@
+import type { UnitListenerState } from './unit-listener.js';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { busSeamsOffWarning, busUnavailableWarning } from '../core/bus-notice.js';
 import { vaultBinWarning, vaultDiagnostics } from '../core/vault-bin.js';
@@ -955,6 +956,7 @@ export interface RegisteredRoutes {
 }
 
 export interface RuntimeDeps {
+  unitListenerState?: UnitListenerState;
   /** DC-S4a decision capture: the ledger (`<state home>/decisions`), absent = capture off. */
   decisionLedger?: DecisionLedger;
   /** `WICKED_DECISIONS` (off | ledger | on); defaults to `resolveDecisionsMode()`. */
@@ -1411,7 +1413,7 @@ export function registerRoutes(
   // EP-C1 (DES-artifact-editor-plugins §9.1): the editor registry — first-party editors discovered
   // in studio's bundle, installed pack editors and the flags in `daemon-editors.json` — and its
   // routes. A pack installs after garden's gate AND crew's own conformance run (garden's runner
-  // against this daemon's conformance host page, at the URL the daemon exported at boot).
+  // against this daemon's conformance host page, at its bound operator origin).
   const editorRegistry = new EditorRegistry({
     ...(runtime.editorsStateHome !== undefined ? { stateHome: runtime.editorsStateHome } : {}),
     ...(runtime.studioRoot !== undefined ? { studioRoot: runtime.studioRoot } : {}),
@@ -1421,7 +1423,7 @@ export function registerRoutes(
     registry: editorRegistry,
     adapter,
     packCheck: runtime.packCheck ?? gardenPackCheck(discoverLivePlugin()?.path ?? null),
-    conformance: runtime.editorConformance ?? gardenConformance(discoverLivePlugin()?.path ?? null, () => process.env['WICKED_CREW_URL'] ?? null),
+    conformance: runtime.editorConformance ?? gardenConformance(discoverLivePlugin()?.path ?? null, () => boundOrigin(app.server.address())),
     log: (m) => app.log.warn(m),
   });
   const chatRecorder: ChatDecisionRecorder | null =
@@ -1732,6 +1734,7 @@ export function registerRoutes(
     ];
     return {
       status: 'ok',
+      ...(runtime.unitListenerState?.port !== undefined ? { unitPort: runtime.unitListenerState.port } : {}),
       version: PKG_VERSION,
       ping,
       capabilities,
@@ -1783,7 +1786,9 @@ export function registerRoutes(
           coreTs: installedPackageVersion('wicked-core-ts'),
           engineBinaries,
         },
-        daemon: { uptimeMs, startedAt: Date.now() - uptimeMs, port },
+        daemon: { uptimeMs, startedAt: Date.now() - uptimeMs, port,
+          ...(runtime.unitListenerState?.port !== undefined ? { unitPort: runtime.unitListenerState.port } : {}),
+        },
         stores,
         recentErrors: runtime.errorRing?.list() ?? [],
         acp: { byCli },
@@ -7596,10 +7601,14 @@ export function registerRoutes(
     ...(runtime.mcp !== undefined ? { registry: runtime.mcp } : {}),
     log: (m) => app.log.info(m),
   });
-  registerMcpRoutes(app, {
+  const unitRouteDeps = {
     ...(runtime.askServer !== undefined ? { askServer: runtime.askServer } : {}),
     ...(runtime.mcp !== undefined ? { registry: runtime.mcp, toolLister: () => CoreAdapter.mcpToolLister() } : {}),
     ...(runtime.mcpBroker !== undefined ? { broker: runtime.mcpBroker } : {}),
+  };
+  app.decorate('unitRouteDeps', unitRouteDeps);
+  registerMcpRoutes(app, {
+    ...unitRouteDeps,
     ...(mcpPolicies !== undefined ? { policies: mcpPolicies } : {}),
     ...(runtime.mcpCalls !== undefined ? { usage: runtime.mcpCalls } : {}),
     audit,

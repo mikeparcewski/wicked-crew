@@ -29,7 +29,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CoreAdapter } from '../../src/core/adapter.js';
 import { registerDef } from '../support/register-def.js';
-import { createServer } from '../../src/api/server.js';
+import { startServer } from '../../src/api/server.js';
 import type { McpCallRecord } from '../../src/core/types.js';
 import { mcpStateDir } from '../../src/mcp/registry-store.js';
 import { removeScratch } from '../setup/scratch.js';
@@ -64,7 +64,7 @@ function shim(args) {
 export async function useMcp(out, label) {
   const token = process.env.WICKED_MCP_TOKEN;
   const armed = { token: typeof token === 'string' && token.startsWith('wmt_'), url: typeof process.env.WICKED_CREW_URL === 'string' };
-  const result = { label, armed, viaGardenShim: Boolean(process.env.WICKED_GARDEN_SHIM) };
+  const result = { label, armed, crewUrl: process.env.WICKED_CREW_URL, viaGardenShim: Boolean(process.env.WICKED_GARDEN_SHIM) };
   if (armed.token && armed.url) {
     const call = (subject) => result.viaGardenShim
       ? shim(['call', subject, '--args', JSON.stringify({ text: 'hi' })])
@@ -116,6 +116,7 @@ interface Answer {
 interface WorkerResult {
   label: 'wrapped' | 'acp';
   armed: { token: boolean; url: boolean };
+  crewUrl: string;
   viaGardenShim: boolean;
   list?: Answer;
   read?: Answer;
@@ -128,8 +129,10 @@ let out: string;
 let priorHome: string | undefined;
 let priorUserProfile: string | undefined;
 let priorCrewUrl: string | undefined;
+let priorUnitUrl: string | undefined;
+let unitUrl: string;
 let adapter: CoreAdapter;
-let app: Awaited<ReturnType<typeof createServer>>;
+let app: Awaited<ReturnType<typeof startServer>>['app'];
 let baseUrl: string;
 let results: WorkerResult[] = [];
 let settledStatus = '';
@@ -172,6 +175,7 @@ beforeAll(async () => {
   priorHome = process.env['HOME'];
   priorUserProfile = process.env['USERPROFILE'];
   priorCrewUrl = process.env['WICKED_CREW_URL'];
+  priorUnitUrl = process.env['WICKED_SEAT_UNIT_URL'];
   process.env['HOME'] = home;
   process.env['USERPROFILE'] = home;
 
@@ -212,13 +216,12 @@ beforeAll(async () => {
   mkdirSync(join(dir, 'state'));
   adapter = new CoreAdapter({ dbPath: join(dir, 'state', 'core.db'), stub: false });
   baseSkillOff();
-  app = await createServer(adapter);
-  await app.listen({ port: 0, host: '127.0.0.1' });
-  const addr = app.server.address();
-  const port = typeof addr === 'object' && addr ? addr.port : 0;
-  baseUrl = `http://127.0.0.1:${port}`;
-  // What `startServer` does after listening: the engine hands each governed worker this URL.
-  process.env['WICKED_CREW_URL'] = baseUrl;
+  const started = await startServer(adapter, 0, '127.0.0.1');
+  app = started.app;
+  baseUrl = `http://127.0.0.1:${started.port}`;
+  unitUrl = `http://127.0.0.1:${started.unit.port}`;
+  expect(process.env['WICKED_SEAT_UNIT_URL']).toBe(unitUrl);
+  expect(process.env['WICKED_CREW_URL']).toBe(unitUrl);
 
   // Register the fixture server (preview → save) and approve its first use, as the operator does.
   const preview = await postJson('/api/v1/mcp/servers/preview', {
@@ -279,6 +282,8 @@ afterAll(async () => {
   else process.env['USERPROFILE'] = priorUserProfile;
   if (priorCrewUrl === undefined) delete process.env['WICKED_CREW_URL'];
   else process.env['WICKED_CREW_URL'] = priorCrewUrl;
+  if (priorUnitUrl === undefined) delete process.env['WICKED_SEAT_UNIT_URL'];
+  else process.env['WICKED_SEAT_UNIT_URL'] = priorUnitUrl;
   removeScratch(dir);
 });
 
@@ -293,6 +298,7 @@ function seatOf(r: WorkerResult): unknown {
 describe('PROVING (S4): shim → broker end to end on a creator and an evaluator seat', () => {
   it('the creator on the WRAPPED seat is armed, lists the destructive tool and calls it', () => {
     const wrapped = results.find((r) => seatOf(r) === WRAPPED_SEAT);
+    expect(wrapped?.crewUrl).toBe(unitUrl);
     expect(wrapped?.armed, JSON.stringify(wrapped)).toEqual({ token: true, url: true });
     expect(wrapped?.list?.status).toBe(wrapped?.viaGardenShim ? 0 : 200);
     expect(wrapped?.list?.body['unit']).toMatchObject({ runId: RUN_ID, seat: WRAPPED_SEAT });
@@ -306,6 +312,7 @@ describe('PROVING (S4): shim → broker end to end on a creator and an evaluator
     const acp = results.filter((r) => seatOf(r) === EVALUATOR_SEAT);
     expect(acp.length).toBeGreaterThan(0);
     for (const r of acp) {
+      expect(r.crewUrl).toBe(unitUrl);
       expect(r.armed, JSON.stringify(r)).toEqual({ token: true, url: true });
       expect(r.list?.status).toBe(r.viaGardenShim ? 0 : 200);
       expect(r.list?.body['unit']).toMatchObject({ runId: RUN_ID, seat: EVALUATOR_SEAT });

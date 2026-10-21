@@ -475,7 +475,7 @@ async function bootstrap(opts: BootstrapOpts, bootStartedAt: number = performanc
     // daemon's own origin (resolved by the pool from the bound address).
     interactiveBridge: { busDataDir: crewBus.dataDir },
   };
-  const { port, stages: serverStages } = await startServer(
+  const { app, port, stages: serverStages } = await startServer(
     adapter,
     opts.port,
     undefined,
@@ -483,7 +483,7 @@ async function bootstrap(opts: BootstrapOpts, bootStartedAt: number = performanc
   );
   // Now that the port is known, complete the origin stamp (the engine reads it at emit time).
   applyEmitOrigin(emitOrigin({ version: crewVersion, pid: process.pid, coreDbPath: opts.dbPath, port }));
-  installShutdownHandlers();
+  installShutdownHandlers(() => app.close());
   const stages: BootStages = { preflight: preflightMs, engine: engineMs, ...serverStages };
   // One stderr line beside the other `[crew]` boot lines: where the seconds went (crew#741) — the
   // stages are exclusive and sum to `startupMs` within rounding (each stage is rounded on its own)
@@ -493,7 +493,7 @@ async function bootstrap(opts: BootstrapOpts, bootStartedAt: number = performanc
   return { adapter, port, stages };
 }
 
-function installShutdownHandlers(): void {
+function installShutdownHandlers(closeServer: () => Promise<void>): void {
   let shuttingDown = false;
   const shutdown = (): void => {
     if (shuttingDown) return;
@@ -510,6 +510,7 @@ function installShutdownHandlers(): void {
       } catch {
         /* reaping is best-effort */
       }
+      await closeServer();
       // Close the single subscription so the pump thread + tsfn release and the
       // process can exit on its own.
       try {
