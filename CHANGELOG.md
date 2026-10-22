@@ -10,8 +10,16 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.15.7] — 2026-10-22
+
+A patch release: a failed floor's gate takes the operator's own judgment (#1104), and a new engine and studio: the engine's `operator_judgment` arm over a failed repo-checks floor and the studio card that offers it. Pins: wicked-core-ts ^0.15.7, wicked-studio ^0.11.7, wicked-vault ^0.8.0, wicked-interactive ^0.14.1 (bridge floor, unchanged), wicked-crew-api-types 0.135.0.
+
+### Changed
+- **The engine is wicked-core-ts 0.15.7.** A failed repo-checks floor's escalation gate takes the operator's own judgment: the `operator_judgment` gate action with a required rationale, routed into `judge_by_operator`; the gate receipt records `operatorJudges[].floorOverride` ("floor overridden by operator"), the run carries `RunAssurance.floorOverrides` and the delivery receipt aggregates them. The engine refuses it while any other layer of the gate denies, on team member, tool and deliver steps and at every other gate; it never stands in for the judge, and QE acceptance stays required (wicked-core#1061). Seat and floor image tags and the gate protocol are unchanged.
+- **The bundled studio is wicked-studio 0.11.7:** a failed floor's gate offers "Approve as your own judgment" with a required rationale, consequence first, and a gate or delivery whose floor was overridden says "Floor overridden by operator", with who and why (studio#869).
+
 ### Added
-- **A failed floor's gate takes the operator's own judgment (`operator_judgment`, `wicked-crew-api-types` 0.135.0).** When a unit's repo checks fail and the evidence shows the failures are not the work's (load flakes in untouched files, pre-existing reds the floor misclassified), the escalation gate offered only send back, retry with a note, reassign or stop, so runs looped (a governed run parked after 8 attempts). `POST /runs/:id/gate {approve: true, action: 'operator_judgment', amend: <rationale>}` now answers it: the same operator judgment a judge-unavailable gate takes, with its own token because a plain approve at a floor gate is a retry. The rationale is required; a blank one is a 400 and never reaches the engine. The engine records the judgment on the gate receipt with the floor result it overrode (`operatorJudges[].floorOverride`: layer, result id, label "floor overridden by operator") and on the run (`RunAssurance.floorOverrides`). It refuses it (409, gate left open) at every other gate and while any other layer of the same gate also denied. QE acceptance is not waived: a run that requires it still needs its PASS before delivery. The PR body's phase table says "floor overridden by operator (<who>)", and a post-hoc delivery's receipt now lists the run's operator judgments too. Needs the wicked-core-ts release after 0.15.6; an older engine refuses the action by name.
+- **A failed floor's gate takes the operator's own judgment (`operator_judgment`, `wicked-crew-api-types` 0.135.0, #1104).** When a unit's repo checks fail and the evidence shows the failures are not the work's (load flakes in untouched files, pre-existing reds the floor misclassified), the escalation gate offered only send back, retry with a note, reassign or stop, so runs looped (a governed run parked after 8 attempts). `POST /runs/:id/gate {approve: true, action: 'operator_judgment', amend: <rationale>}` now answers it: the same operator judgment a judge-unavailable gate takes, with its own token because a plain approve at a floor gate is a retry. The rationale is required; a blank one is a 400 and never reaches the engine. The engine records the judgment on the gate receipt with the floor result it overrode (`operatorJudges[].floorOverride`: layer, result id, label "floor overridden by operator") and on the run (`RunAssurance.floorOverrides`). It refuses it (409, gate left open) at every other gate and while any other layer of the same gate also denied. QE acceptance is not waived: a run that requires it still needs its PASS before delivery. The PR body's phase table says "floor overridden by operator (<who>)", and a post-hoc delivery's receipt now lists the run's operator judgments too. Needs the wicked-core-ts release after 0.15.6; an older engine refuses the action by name.
 
 ## [0.15.6] — 2026-10-20
 
@@ -4367,7 +4375,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.6...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.7...HEAD
+[0.15.7]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.6...v0.15.7
 [0.15.6]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.5...v0.15.6
 [0.15.5]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.4...v0.15.5
 [0.15.4]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.3...v0.15.4
