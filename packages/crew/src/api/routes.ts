@@ -748,13 +748,21 @@ const isEscalationAction = (a: string | undefined): boolean =>
  *  `amend_intent` (wicked-core#555) approves the gate AND AMENDS THE RUN'S INTENT: `amend` is
  *  what the acceptance list now says (required, non-empty), `approve: true`, and no `amendScope`
  *  — an intent amendment reaches every unit at or after the cursor, which is what makes it reach
- *  the LATER EVALUATOR. It is the only arm that can descope a run mid-flight. */
+ *  the LATER EVALUATOR. It is the only arm that can descope a run mid-flight.
+ *
+ *  `operator_judgment` (api-types 0.135.0, operator ruling 2026-10-21) is "approve as your own
+ *  judgment" at a FAILED REPO-CHECKS FLOOR's escalation gate: `approve: true`, the written rationale
+ *  in `amend` (required, non-empty), no `amendScope` or `plan`. The engine records it on the gate
+ *  receipt as an operator judgment overriding the floor ("floor overridden by operator", on the
+ *  run and the delivery too) and refuses it (409, gate left open) at any other gate and while any
+ *  other layer of the gate also denied. QE acceptance is never waived by it. */
+export const OPERATOR_JUDGMENT_ACTION = 'operator_judgment' as const;
 export const GateSchema = z.object({
   approve: z.boolean(),
   amend: z.string().optional(),
   action: z
     .union([
-      z.enum(['approve', 'request_changes', 'reject', 'edit_plan', 'amend_intent', ...ESCALATION_ACTIONS]),
+      z.enum(['approve', 'request_changes', 'reject', 'edit_plan', 'amend_intent', OPERATOR_JUDGMENT_ACTION, ...ESCALATION_ACTIONS]),
       z.string().regex(CONSENT_CHOICE_ACTION, 'a consent choice is `consent:<choice id>`'),
     ])
     .optional(),
@@ -766,8 +774,16 @@ export const GateSchema = z.object({
   ord: z.number().int().nonnegative().optional(),
 }).strict().refine(
   (b) => b.action === undefined
-    || (b.action === 'approve' || b.action === 'edit_plan' || b.action === 'amend_intent' || isEscalationAction(b.action)) === b.approve,
-  { message: '`action` disagrees with `approve`: request_changes and reject require approve: false; approve, edit_plan, amend_intent, extend, targeted, accept_partial, accept_suggestion, rejudge and consent:<id> require approve: true', path: ['action'] },
+    || (b.action === 'approve' || b.action === 'edit_plan' || b.action === 'amend_intent' || b.action === OPERATOR_JUDGMENT_ACTION || isEscalationAction(b.action)) === b.approve,
+  { message: '`action` disagrees with `approve`: request_changes and reject require approve: false; approve, edit_plan, amend_intent, operator_judgment, extend, targeted, accept_partial, accept_suggestion, rejudge and consent:<id> require approve: true', path: ['action'] },
+).refine(
+  // (operator ruling 2026-10-21) The override's rationale IS its record: a blank one is a 400 here,
+  // before the engine is asked.
+  (b) => b.action !== OPERATOR_JUDGMENT_ACTION || (b.amend !== undefined && b.amend.trim() !== ''),
+  { message: 'operator_judgment needs `amend`: your written rationale — why the failed floor is not the work\'s (an empty one is refused)', path: ['amend'] },
+).refine(
+  (b) => b.action !== OPERATOR_JUDGMENT_ACTION || (b.amendScope === undefined && b.plan === undefined),
+  { message: 'operator_judgment takes no amendScope or plan — it answers the failed floor of the gated unit', path: ['amendScope'] },
 ).refine(
   // (wicked-core#555) An intent amendment IS its text: an empty one amends nothing, and the arm's
   // scope is every unit at or after the cursor — which is what makes it reach the evaluator — so

@@ -739,6 +739,12 @@ export interface WorkUnit {
   /** (api-types 0.102.0; wicked-core#850, core-ts ≥ 0.7.46) The receipt of this unit's LAST gate,
    *  as `gateEvaluated.assurance` carried it. ABSENT until a gate ran, and on an older engine. */
   assurance?: AssuranceReceipt;
+  /** (api-types 0.135.0) Every layer other than the repo-checks floor that denied this unit's last
+   *  gate, plus any earlier denial over the same tree that gate did not ask again — the record
+   *  `operator_judgment` reads (it is refused while any stands). `[]`: known, nothing but the floor
+   *  denied. ABSENT (or `null`): unknown — a unit from before the record, or an older engine. The
+   *  engine's own serialization, so its fields are snake_case (`claim_id`, `rule_ids`, …). */
+  denials_behind?: Array<{ source: string; reason: string; [k: string]: unknown }> | null;
   /** Evaluator≠creator role. Present on def-driven units; absent on legacy/free-text. */
   role?: PhaseRole;
   /** Gate policy for this phase. Present on def-driven units; absent on legacy/free-text. */
@@ -1706,6 +1712,19 @@ export interface GateDecision {
      *  {@link GateInfo.rejudge} says beforehand. Unlike a plain approve there, it is never the
      *  operator's own judgment. */
     | 'rejudge'
+    /** (api-types 0.135.0, operator ruling 2026-10-21) APPROVE AS YOUR OWN JUDGMENT at the
+     *  escalation gate of a FAILED REPO-CHECKS FLOOR (`gateEscalated.condition: 'floor_failed'`,
+     *  `denialSource: 'repo_checks' | 'repo_checks_timeout'`), with `approve: true` and the written
+     *  rationale in `amend` — required, non-empty (a 400 otherwise); no `amendScope` or `plan`. The
+     *  operator judges from the evidence that the failures are not the work's (load flakes,
+     *  pre-existing reds): the unit counts as it stands, its gate receipt records an
+     *  {@link OperatorJudgment} with `floorOverride` set (the floor result it overrode, labelled
+     *  "floor overridden by operator"), and the run ({@link RunAssurance.floorOverrides}) and the
+     *  delivery carry the label. It overrides the floor ONLY: the engine refuses it (409, gate left
+     *  open) when any other layer of the same gate also denied, on a team member's step, on a tool or
+     *  deliver step and at every other gate. QE acceptance is never waived by it — a run that
+     *  requires it still needs its PASS before delivery. Engine: wicked-core-ts after 0.15.6. */
+    | 'operator_judgment'
     /** (core#820) A `consent` gate's choice from its dry-run plan (`awaitingHuman.choices`), with
      *  `approve: true`: `consent:worker` (the default), `consent:operator`, …; `reject` declines. */
     | `consent:${string}`;
@@ -2317,7 +2336,8 @@ export type AssuranceInstrument =
   | 'judge'
   | 'evaluator_pass'
   | 'distinct_evaluator'
-  /** (api-types 0.110.0) The operator judged a gate whose judge could not rule. */
+  /** (api-types 0.110.0) The operator judged a gate whose judge could not rule — or (api-types
+   *  0.135.0) overrode a failed repo-checks floor (`operatorJudges[].floorOverride`). */
   | 'operator_judge'
   | (string & {});
 
@@ -2330,9 +2350,34 @@ export interface OperatorJudgment {
   by: string;
   /** Unix millis. */
   at: number;
+  /** The operator's note; on a floor override, the written rationale (never empty). */
   note: string | null;
-  /** Why the judge could not rule (the gate's denial reason). */
+  /** Why the judge could not rule (the gate's denial reason) — or, on a floor override, why the
+   *  floor denied. */
   reason: string | null;
+  /** (api-types 0.135.0) Set when this judgment OVERRODE a failed repo-checks floor
+   *  ({@link GateDecision.action} `'operator_judgment'`); ABSENT on a judge-unavailable judgment
+   *  and on an older engine. */
+  floorOverride?: FloorOverride;
+}
+
+/**
+ * (api-types 0.135.0, operator ruling 2026-10-21) The failed floor result an operator's judgment
+ * overrode. It answers the repo-checks floor only: every other layer of the gate still denies, and
+ * QE acceptance is untouched.
+ */
+export interface FloorOverride {
+  /** The floor layer that denied: `repo_checks` | `repo_checks_timeout`. */
+  layer: string;
+  /** The floor result overridden — `<run>:unit-<ord>:attempt-<n>:<layer>`, the unit's
+   *  `repoChecksEvaluated` frame for that attempt (or the carried result it stood on). */
+  resultId: string;
+  ord: number;
+  attempt: number;
+  /** The tree the overridden checks ran on, when the report names it. */
+  tree: string | null;
+  /** `floor overridden by operator` — the line to show as-is. */
+  label: string;
 }
 
 /**
@@ -2375,7 +2420,13 @@ export interface RunAssurance {
    *  exactly when `required` holds `qe_acceptance`. ABSENT on an older engine (then a required
    *  `qe_acceptance` is enforced). */
   qe?: QeAcceptanceDecision;
+  /** (api-types 0.135.0) Every failed floor the operator overrode on this run ("floor overridden
+   *  by operator"), each with who, when and the rationale; ABSENT when none or on an older engine. */
+  floorOverrides?: OperatorJudgment[];
 }
+
+/** (api-types 0.135.0) The label an overridden floor carries on the run, the gate and the delivery. */
+export type FloorOverrideLabel = 'floor overridden by operator';
 
 /** (api-types 0.106.0) `QeAcceptanceDecision.status`. */
 export type QeAcceptanceStatus = 'required' | 'waived' | 'skipped' | (string & {});

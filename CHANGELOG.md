@@ -10,6 +10,9 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Added
+- **A failed floor's gate takes the operator's own judgment (`operator_judgment`, `wicked-crew-api-types` 0.135.0).** When a unit's repo checks fail and the evidence shows the failures are not the work's (load flakes in untouched files, pre-existing reds the floor misclassified), the escalation gate offered only send back, retry with a note, reassign or stop, so runs looped (a governed run parked after 8 attempts). `POST /runs/:id/gate {approve: true, action: 'operator_judgment', amend: <rationale>}` now answers it: the same operator judgment a judge-unavailable gate takes, with its own token because a plain approve at a floor gate is a retry. The rationale is required; a blank one is a 400 and never reaches the engine. The engine records the judgment on the gate receipt with the floor result it overrode (`operatorJudges[].floorOverride`: layer, result id, label "floor overridden by operator") and on the run (`RunAssurance.floorOverrides`). It refuses it (409, gate left open) at every other gate and while any other layer of the same gate also denied. QE acceptance is not waived: a run that requires it still needs its PASS before delivery. The PR body's phase table says "floor overridden by operator (<who>)", and a post-hoc delivery's receipt now lists the run's operator judgments too. Needs the wicked-core-ts release after 0.15.6; an older engine refuses the action by name.
+
 ## [0.15.6] — 2026-10-20
 
 A patch release: a gate no judge could rule on can re-run its judge (#1098), and a new engine and studio: the engine's `rejudge` arm, a gate-hook relay that judges a killed gate hook once more and records every refusal (gate protocol 3), and container seats' cargo builds sized for their memory limit. Pins: wicked-core-ts ^0.15.6, wicked-studio ^0.11.6, wicked-vault ^0.8.0, wicked-interactive ^0.14.1 (bridge floor, unchanged), wicked-crew-api-types 0.134.0.
