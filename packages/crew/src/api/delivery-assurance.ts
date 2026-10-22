@@ -27,6 +27,7 @@ import type {
   AssuranceReceipt,
   AssuranceSkip,
   DeliveryAssurance,
+  OperatorJudgment,
   QeAcceptanceCheck,
   QeAcceptanceRefusal,
   SessionView,
@@ -174,6 +175,14 @@ export function aggregateReceipt(view: SessionView, tree: string | null): Assura
   const councils = receipts.flatMap((r) => r.councils ?? []);
   // …and every gate a FALLBACK judge ruled on (wicked-core judge fallback, api-types 0.121.0), in order.
   const judgeFallbacks = receipts.flatMap((r) => r.judgeFallbacks ?? []);
+  // …and every gate the operator judged — a judge-unavailable judgment, or (api-types 0.135.0) a
+  // failed floor overridden ("floor overridden by operator") — so a post-hoc delivery says so too.
+  // The run's own record of each overridden floor joins them (a later rework of that unit cuts a
+  // fresh receipt without it), once each.
+  const operatorJudges: OperatorJudgment[] = [];
+  for (const j of [...receipts.flatMap((r) => r.operatorJudges ?? []), ...(view.session.assurance?.floorOverrides ?? [])]) {
+    if (!operatorJudges.some((o) => o.by === j.by && o.at === j.at && o.floorOverride?.resultId === j.floorOverride?.resultId)) operatorJudges.push(j);
+  }
   for (const r of receipts) {
     for (const i of r.ran) if (!ran.includes(i)) ran.push(i);
     for (const s of r.skipped) {
@@ -181,6 +190,7 @@ export function aggregateReceipt(view: SessionView, tree: string | null): Assura
       if (!skipped.some((k) => k.instrument === s.instrument)) skipped.push(s);
     }
   }
+  if (operatorJudges.length > 0 && !ran.includes('operator_judge')) ran.push('operator_judge');
   return {
     mode: contract.mode,
     required: [...contract.required],
@@ -194,6 +204,7 @@ export function aggregateReceipt(view: SessionView, tree: string | null): Assura
     ...(qe !== undefined ? { qe } : {}),
     ...(councils.length > 0 ? { councils } : {}),
     ...(judgeFallbacks.length > 0 ? { judgeFallbacks } : {}),
+    ...(operatorJudges.length > 0 ? { operatorJudges } : {}),
   };
 }
 

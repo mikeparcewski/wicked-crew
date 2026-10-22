@@ -772,14 +772,30 @@ function withJudgeFallback(gate: string, fallback: string | null): string {
 }
 
 /** (operator ruling 2026-10-11) "judged by operator (<who>)" when the operator judged this phase's
- *  gate because no judge could rule (`assurance.operatorJudges`, core-ts ≥ 0.9.7); else `null`. */
+ *  gate because no judge could rule (`assurance.operatorJudges`, core-ts ≥ 0.9.7); (operator ruling
+ *  2026-10-21) "floor overridden by operator (<who>)" for a judgment that overrode the phase's failed
+ *  repo-checks floor (`operatorJudges[].floorOverride`, api-types 0.135.0) — the engine's label,
+ *  as-is; both, `; `-joined, when the gate carries both; else `null`. */
 export function operatorJudgedLabel(u: { assurance?: unknown }): string | null {
-  const judges = (u.assurance as { operatorJudges?: Array<{ by?: unknown }> } | null | undefined)?.operatorJudges;
+  const judges = (u.assurance as { operatorJudges?: Array<{ by?: unknown; floorOverride?: { label?: unknown } }> } | null | undefined)?.operatorJudges;
   if (!Array.isArray(judges) || judges.length === 0) return null;
-  const who = judges
-    .map((j) => (typeof j.by === 'string' && j.by.trim() !== '' ? j.by.trim() : 'operator'))
-    .join(', ');
-  return `judged by operator (${who})`;
+  const whoOf = (j: { by?: unknown }): string => (typeof j.by === 'string' && j.by.trim() !== '' ? j.by.trim() : 'operator');
+  const overrideLabel = (j: { floorOverride?: { label?: unknown } }): string | null => {
+    const o = j.floorOverride;
+    if (o === undefined || o === null) return null;
+    return typeof o.label === 'string' && o.label.trim() !== '' ? o.label.trim() : 'floor overridden by operator';
+  };
+  const judged = judges.filter((j) => overrideLabel(j) === null).map(whoOf);
+  const overrides = new Map<string, string[]>();
+  for (const j of judges) {
+    const label = overrideLabel(j);
+    if (label !== null) overrides.set(label, [...(overrides.get(label) ?? []), whoOf(j)]);
+  }
+  const lines = [
+    ...[...overrides].map(([label, who]) => `${label} (${who.join(', ')})`),
+    ...(judged.length > 0 ? [`judged by operator (${judged.join(', ')})`] : []),
+  ];
+  return lines.join('; ');
 }
 
 /** (operator ruling 2026-10-14) The engine's disclosure line — `judge: agy (fallback; codex benched: …)` — when
