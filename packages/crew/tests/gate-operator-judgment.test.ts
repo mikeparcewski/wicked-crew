@@ -64,6 +64,8 @@ describe('GateSchema — operator_judgment', () => {
     expect(scoped.success).toBe(false);
     if (scoped.success) return;
     expect(scoped.error.issues.some((i) => /operator_judgment takes no amendScope or plan/.test(i.message))).toBe(true);
+    const planned = GateSchema.safeParse({ approve: true, action: 'operator_judgment', amend: WHY, plan: { steps: [{ description: 'x' }] } });
+    expect(planned.success).toBe(false);
   });
 });
 
@@ -168,6 +170,11 @@ describe('the delivery says "floor overridden by operator"', () => {
     expect(r?.operatorJudges?.map((j) => j.floorOverride?.label)).toEqual(['floor overridden by operator']);
     // Once each: the unit's receipt and the run's record name the same judgment.
     expect(r?.operatorJudges).toHaveLength(1);
+    // Two overrides at the same instant on different units are two records.
+    const twin: OperatorJudgment = { ...OVERRIDE, floorOverride: { ...OVERRIDE.floorOverride!, resultId: 'run-gated:unit-7:attempt-0:repo_checks', ord: 7, attempt: 0 } };
+    v.session.assurance = { mode: 'full', required: ['judge', 'qe_acceptance'], floorOverrides: [OVERRIDE, twin] };
+    expect(aggregateReceipt(v, 'def456')?.operatorJudges).toHaveLength(2);
+    v.session.assurance = { mode: 'full', required: ['judge', 'qe_acceptance'], floorOverrides: [OVERRIDE] };
     // A later rework cut a fresh receipt for the unit: the run's record still puts it on the delivery.
     v.units = [{ id: 'u6', session_id: 'run-posthoc', ord: 6, description: 'build', status: 'done', assurance: { ...receipt, ran: ['repo_checks', 'judge'], operatorJudges: undefined, attempt: 8 } }] as unknown as SessionView['units'];
     const after = aggregateReceipt(v, 'def456');

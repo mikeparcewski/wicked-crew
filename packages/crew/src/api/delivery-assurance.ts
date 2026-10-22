@@ -181,7 +181,7 @@ export function aggregateReceipt(view: SessionView, tree: string | null): Assura
   // fresh receipt without it), once each.
   const operatorJudges: OperatorJudgment[] = [];
   for (const j of [...receipts.flatMap((r) => r.operatorJudges ?? []), ...(view.session.assurance?.floorOverrides ?? [])]) {
-    if (!operatorJudges.some((o) => o.by === j.by && o.at === j.at)) operatorJudges.push(j);
+    if (!operatorJudges.some((o) => o.by === j.by && o.at === j.at && o.floorOverride?.resultId === j.floorOverride?.resultId)) operatorJudges.push(j);
   }
   for (const r of receipts) {
     for (const i of r.ran) if (!ran.includes(i)) ran.push(i);
