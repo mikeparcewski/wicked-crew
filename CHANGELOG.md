@@ -10,6 +10,13 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.15.8] — 2026-10-25
+
+A patch release: a new engine. The floor override now also covers a judge that could not rule, and the repo-checks floor decides by exit codes and a per-repo build guide. No crew source changed since 0.15.7. Pins: wicked-core-ts ^0.15.8, wicked-studio ^0.11.7 (unchanged), wicked-vault ^0.8.0, wicked-interactive ^0.14.1 (bridge floor, unchanged), wicked-crew-api-types 0.135.0 (unchanged).
+
+### Changed
+- **The engine is wicked-core-ts 0.15.8.** A failed repo-checks floor's `operator_judgment` is also offered and taken when the only denial behind the floor is the judge's `judge_unavailable` no-verdict hold, so benched judge seats no longer deadlock the gate; the receipt, the run and the delivery carry both the `floorOverride` and a `judgeStandIn` record ("judge: operator (no judge seat available)"), and QE acceptance stays required (core#1065). The repo-checks floor decides by the exit codes of the processes it launches and the base tree, never by parsing the head's test output; runner facts are data in a per-repo `.wicked/build-guide.json` read from the base only, with detection as the floor when there is no usable guide (core#1066, DES-FLOOR-V2 + DES-BUILD-GUIDE). Seat and floor image tags and the gate protocol (3) are unchanged.
+
 ## [0.15.7] — 2026-10-22
 
 A patch release: a failed floor's gate takes the operator's own judgment (#1104), and a new engine and studio: the engine's `operator_judgment` arm over a failed repo-checks floor and the studio card that offers it. Pins: wicked-core-ts ^0.15.7, wicked-studio ^0.11.7, wicked-vault ^0.8.0, wicked-interactive ^0.14.1 (bridge floor, unchanged), wicked-crew-api-types 0.135.0.
@@ -4375,7 +4382,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.7...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.8...HEAD
+[0.15.8]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.7...v0.15.8
 [0.15.7]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.6...v0.15.7
 [0.15.6]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.5...v0.15.6
 [0.15.5]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.4...v0.15.5
