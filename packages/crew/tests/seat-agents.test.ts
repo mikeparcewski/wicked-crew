@@ -408,10 +408,11 @@ describe('A3 recent_bench', () => {
       kind: 'quota_exhausted',
       runs: 2,
       last_at: new Date(t0 + 2000).toISOString(),
-      // (J4) A second run benching it while it is out is a second quota strike: 30 minutes.
-      lifts_at: new Date(t0 + 2000 + quotaBackoffMs(2)).toISOString(),
+      // (J4) A second run benching it while it is out is the same episode: one quota step, its
+      // lift time moved to the later bench's.
+      lifts_at: new Date(t0 + 2000 + quotaBackoffMs(1)).toISOString(),
       until_source: 'backoff',
-      strikes: 2,
+      strikes: 1,
       source: 'worker',
       reason: 'quota_exhausted (no success in the run)',
     });

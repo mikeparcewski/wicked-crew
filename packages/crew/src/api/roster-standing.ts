@@ -338,6 +338,9 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
       if (recentBench !== null && liveCheckLiftsBench(recentBench, probed)) {
         seatHealth.clearRecentBench(key);
         recentBench = null;
+      } else if (recentBench === null && probed !== undefined && probed.signedIn === true && probed.check === 'live') {
+        // (J4) …and the quota strikes an already-lifted bench left behind.
+        seatHealth.clearQuotaStrikesAfterLiveCheck(key, Date.parse(probed.probedAt));
       }
       const heuristic = containerSeat ? null : signedIn(key, root);
       const signed =

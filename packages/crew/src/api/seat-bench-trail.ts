@@ -79,14 +79,15 @@ export function benchEntryOf(e: AuditEntry): SeatBenchEntry | null {
   };
 }
 
-/** The bench entries a live bench may still stand on (the audit `ts` is never earlier than the bench
+/** The bench entries a live bench may still stand on, in append order (the audit `ts` is never earlier than the bench
  *  itself): (J4) a bench lifts at its own time, up to {@link SEAT_BENCH_MAX_MS} out, and the latest
  *  quota bench's strikes outlive its lift until a good turn. */
 export async function readSeatBenchEntries(audit: AuditLog, nowMs = Date.now()): Promise<SeatBenchEntry[]> {
   const since = nowMs - SEAT_BENCH_MAX_MS;
-  const entries = [
-    ...(await audit.readAll({ action: SEAT_BENCHED_ACTION, since })),
-    ...(await audit.readAll({ action: SEAT_BENCH_LIFTED_ACTION, since })),
-  ];
+  // One read, back in APPEND order (the trail answers newest first): the boot folds the entries in
+  // the order the tracker wrote them, so two records of one millisecond keep their real order.
+  const entries = (await audit.readAll({ since }))
+    .filter((e) => e.action === SEAT_BENCHED_ACTION || e.action === SEAT_BENCH_LIFTED_ACTION)
+    .reverse();
   return entries.map(benchEntryOf).filter((e): e is SeatBenchEntry => e !== null);
 }
