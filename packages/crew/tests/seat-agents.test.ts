@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { SeatVersionPinCache, probeSeatVersionPins } from '../src/api/diagnostics.js';
 import { rosterWithStandingFactory } from '../src/api/roster-standing.js';
 import { liveCheckLiftsBench, seatIssues, displayCommand } from '../src/api/seat-agents.js';
-import { SEAT_BENCH_WINDOW_MS, SeatHealthTracker } from '../src/api/seat-health.js';
+import { SeatHealthTracker, quotaBackoffMs } from '../src/api/seat-health.js';
 import { SeatProbe } from '../src/api/seat-probe.js';
 import { SEAT_VERSION_KEEP_MS, SEAT_VERSION_RETRY_MS, SEAT_VERSION_TTL_MS, SeatVersionCache, buildsNamed, firstVersionLine, installSourceOf, probeSeatVersions, seatVersion } from '../src/api/seat-version.js';
 import { toEngineSeat } from '../src/core/engine-roster.js';
@@ -408,7 +408,11 @@ describe('A3 recent_bench', () => {
       kind: 'quota_exhausted',
       runs: 2,
       last_at: new Date(t0 + 2000).toISOString(),
-      lifts_at: new Date(t0 + 2000 + SEAT_BENCH_WINDOW_MS).toISOString(),
+      // (J4) A second run benching it while it is out is the same episode: one quota step, its
+      // lift time moved to the later bench's.
+      lifts_at: new Date(t0 + 2000 + quotaBackoffMs(1)).toISOString(),
+      until_source: 'backoff',
+      strikes: 1,
       source: 'worker',
       reason: 'quota_exhausted (no success in the run)',
     });
@@ -425,7 +429,7 @@ describe('A3 recent_bench', () => {
 
   it('a live sign-in check after an account bench lifts it; one before it, or a non-account bench, does not', () => {
     const at = '2026-10-12T20:00:00.000Z';
-    const bench = { at, until: at, reason: 'quota_exhausted (3/3)', source: 'worker', runs: 1 };
+    const bench = { at, until: at, untilSource: 'backoff' as const, strikes: 1, reason: 'quota_exhausted (3/3)', source: 'worker', runs: 1 };
     const live = (probedAt: string) => ({ signedIn: true, check: 'live', probedAt });
     expect(liveCheckLiftsBench(bench, live('2026-10-12T20:05:00.000Z'))).toBe(true);
     expect(liveCheckLiftsBench(bench, live('2026-10-12T19:55:00.000Z'))).toBe(false);
@@ -662,7 +666,7 @@ describe('A6 issues', () => {
         scoped_bound: { mode: 'os_sandbox', class: 'os_sandbox', source: 'repo_boundary', reason: '', fence: { write_roots: [], read_roots: [], network: 'open' } },
       },
       hostBoundary: 'sandbox-exec',
-      recentBench: { kind: 'quota_exhausted', runs: 3, last_at: 'x', lifts_at: 'y', source: 'worker', reason: 'quota_exhausted' },
+      recentBench: { kind: 'quota_exhausted', runs: 3, last_at: 'x', lifts_at: 'y', until_source: 'backoff', strikes: 3, source: 'worker', reason: 'quota_exhausted' },
       rosterQe: true,
     });
     expect(issues.map((i) => i.code)).toEqual(['fence_scoped', 'quota', 'unverified']);

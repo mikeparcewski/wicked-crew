@@ -38,7 +38,7 @@ import { signedInHeuristic } from './seat-signin.js';
 import { SeatProbe, type SeatProbeReading } from './seat-probe.js';
 import { SeatContainerStatus, isContainerLoginCli, isContainerSeatFloor, isHostSeatFloor, type BrokerReading } from './seat-container-login.js';
 import { seatGovernanceModes, type GovernanceScopeKind, type SeatGovernanceMode } from './seat-governance.js';
-import { HOST_FLOOR_UNKNOWN_COPY, seatStanding, chatSeatAdmission, type StandingSeat, type SeatStanding } from './seat-standing.js';
+import { HOST_FLOOR_UNKNOWN_COPY, recentBenchReason, seatStanding, chatSeatAdmission, type StandingSeat, type SeatStanding } from './seat-standing.js';
 import { seatVersion, seatVersions, type SeatVersionCache } from './seat-version.js';
 
 // The adapter loads this same addon module. Keep the optional 0.11.1 static local until the
@@ -338,6 +338,9 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
       if (recentBench !== null && liveCheckLiftsBench(recentBench, probed)) {
         seatHealth.clearRecentBench(key);
         recentBench = null;
+      } else if (recentBench === null && probed !== undefined && probed.signedIn === true && probed.check === 'live') {
+        // (J4) …and the quota strikes an already-lifted bench left behind.
+        seatHealth.clearQuotaStrikesAfterLiveCheck(key, Date.parse(probed.probedAt));
       }
       const heuristic = containerSeat ? null : signedIn(key, root);
       const signed =
@@ -432,6 +435,9 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
         ...(version !== undefined ? { version } : {}),
         ...(account !== undefined ? { account } : {}),
         ...(recentBench !== null ? { recent_bench: recentBenchWire(recentBench) } : {}),
+        // (J4) The active bench, flat, for the Nerve Center (`SystemCli.benchedUntil` /
+        // `stateReason`): when it lifts and why, in the operator's words.
+        ...(recentBench !== null ? { benchedUntil: recentBench.until, benchReason: recentBenchReason(recentBench) } : {}),
         ...(inputs !== null ? { work_admission: workAdmission(inputs) } : {}),
         ...(inputs !== null && skillAdmitted !== null ? { qe_reviewer: qeReviewer(inputs, skillAdmitted) } : {}),
       };

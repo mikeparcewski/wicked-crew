@@ -279,6 +279,20 @@ export function seatStanding(
  * engine bench, a login check still running), or `null` — the gates `council_eligible` and
  * `work_eligible` share (crew#916).
  */
+/**
+ * The operator's sentence for a seat the engine benched in a recent run (`RosterSeat.benchReason`,
+ * and `council_ineligible_reason` while it stands). It leads with the engine's cause token, so the
+ * engine's `degradedReason` names it (`copilot (recent quota_exhausted — launcher)`).
+ */
+export function recentBenchReason(recentBench: SeatRecentBench): string {
+  const cause = recentBench.reason.split(' (', 1)[0]!.trim();
+  const run = recentBench.run !== undefined ? ` in run ${recentBench.run.slice(0, 8)}` : '';
+  return (
+    `recent ${cause} — the engine benched it${run} at ${hhmm(recentBench.at)} (${recentBench.source}: ` +
+    `${recentBench.reason}); eligible again at ${hhmm(recentBench.until)}, or sooner once it completes a turn`
+  );
+}
+
 function standingGate(
   read: Pick<SeatStanding, 'auth' | 'auth_source' | 'auth_evidence'>,
   authFailure: SeatAuthFailure | null,
@@ -298,14 +312,7 @@ function standingGate(
   // for: since wicked-core#590 S5 no ballot finds such a seat before routing, and every new run
   // handed it a unit. The reason leads with the engine's cause token, so the engine's
   // `degradedReason` names it (`copilot (recent quota_exhausted — launcher)`).
-  if (recentBench !== null) {
-    const cause = recentBench.reason.split(' (', 1)[0]!.trim();
-    const run = recentBench.run !== undefined ? ` in run ${recentBench.run.slice(0, 8)}` : '';
-    return (
-      `recent ${cause} — the engine benched it${run} at ${hhmm(recentBench.at)} (${recentBench.source}: ` +
-      `${recentBench.reason}); eligible again at ${hhmm(recentBench.until)}, or sooner once it completes a turn`
-    );
-  }
+  if (recentBench !== null) return recentBenchReason(recentBench);
   // crew#645: a seat that HAS a login check which has not answered is not routed to on the file's
   // word — a launch waits for the check (`SeatProbe.ensureFresh`), and anything that routes before
   // it answers (the seconds after a boot) leaves the seat out. `auth` stays `unknown`, so a chat
