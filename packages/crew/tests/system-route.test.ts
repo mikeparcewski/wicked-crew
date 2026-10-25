@@ -130,7 +130,8 @@ async function gatewayUntil(want: string): Promise<SystemSnapshot> {
   let last: SystemSnapshot | undefined;
   for (let i = 0; i < 5; i += 1) {
     last = (await snapshot()).body;
-    const state = last.infra.find((r) => r.key === 'gateway')!.state;
+    const row = last.infra.find((r) => r.key === 'gateway')!;
+    const state = row.state;
     if (state === want) return last;
     expect(state).toBe('unknown');
   }
