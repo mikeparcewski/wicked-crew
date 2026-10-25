@@ -223,6 +223,10 @@ interface QuietPeriodState {
 export class WorkerStallWatchdog {
   /** run id → epoch ms of the last engine event observed for it (or the seed, see sweep). */
   private readonly lastEventAt = new Map<string, number>();
+  /** DES-SYSTEM-VIEW: the newest EVIDENCE of life per run — a relay frame, or a busy child process.
+   *  Kept apart from `lastEventAt`, which a first observation also seeds with "now" (a clock start,
+   *  not evidence), so the system snapshot never reads a seeded clock as a sign of work. */
+  private readonly evidenceAt = new Map<string, { at: number; source: 'relay' | 'process' }>();
   /** run id → last unit ord any of its events named. */
   private readonly lastOrd = new Map<string, number>();
   /** Per-run notification/action latches for the CURRENT quiet period (cleared by any event). */
@@ -262,6 +266,7 @@ export class WorkerStallWatchdog {
       typeof event.session === 'string' && event.session.length > 0 ? event.session : undefined;
     if (session === undefined) return;
     this.lastEventAt.set(session, this.now());
+    this.evidenceAt.set(session, { at: this.now(), source: 'relay' });
     if (typeof event.ord === 'number') this.lastOrd.set(session, event.ord);
     this.quietPeriods.delete(session);
     if (event.type === 'unitDispatched' || event.type === 'unitReassigned') {
@@ -306,6 +311,12 @@ export class WorkerStallWatchdog {
     }
   }
 
+  /** The newest evidence of life this process saw for `runId` (a relay frame or a busy child), or
+   *  `undefined` when it saw none — never the seeded clock of a first observation. */
+  evidence(runId: string): { at: number; source: 'relay' | 'process' } | undefined {
+    return this.evidenceAt.get(runId);
+  }
+
   /** One detection pass. Public so tests drive it directly; the armed interval calls it too. */
   async sweep(): Promise<void> {
     if (this.sweeping) {
@@ -337,6 +348,7 @@ export class WorkerStallWatchdog {
       for (const key of [...this.lastEventAt.keys()]) {
         if (!ids.has(key)) {
           this.lastEventAt.delete(key);
+          this.evidenceAt.delete(key);
           this.lastOrd.delete(key);
           this.quietPeriods.delete(key);
           this.escalationCount.delete(key);
@@ -370,6 +382,7 @@ export class WorkerStallWatchdog {
             );
           }
           this.lastEventAt.set(run.id, now);
+          this.evidenceAt.set(run.id, { at: now, source: 'process' });
           this.quietPeriods.delete(run.id);
           continue;
         }

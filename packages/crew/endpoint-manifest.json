@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.135.0",
+  "apiTypesVersion": "0.136.0",
   "endpoints": [
     {
       "method": "GET",
@@ -2113,6 +2113,15 @@
         409,
         422,
         502
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/system",
+      "requestType": null,
+      "responseType": "SystemSnapshot",
+      "statusCodes": [
+        200
       ]
     },
     {
