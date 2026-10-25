@@ -422,6 +422,27 @@ describe('deliver script, driven for real (crew#317)', () => {
     expect(git(fx.workdir, 'status', '--porcelain').trim()).toBe('');
   }, 60_000);
 
+  // macOS `mktemp` with no template ignores TMPDIR (it writes under the per-user temp root), so in
+  // a sandbox that allows only its private TMPDIR — the repo-checks floor — the script died at its
+  // first `mktemp`. Every temp file and directory the script makes is named under TMPDIR.
+  it('makes every temp file under TMPDIR (macOS mktemp ignores it without a template)', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'README.md'), 'base\nchanged\n');
+    const bin = join(fx.root, 'bin');
+    mkdirSync(bin, { recursive: true });
+    const realMktemp = execFileSync('sh', ['-c', 'command -v mktemp'], { encoding: 'utf8' }).trim();
+    const log = join(fx.root, 'mktemp.log');
+    writeFileSync(join(bin, 'mktemp'), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${log}'\nexec '${realMktemp}' "$@"\n`);
+    chmodSync(join(bin, 'mktemp'), 0o755);
+    const tmp = join(fx.root, 'private-tmp');
+    mkdirSync(tmp);
+    const r = await runDeliver(fx, { intent: 'change the readme', script: { runId: RUN_ID }, env: { TMPDIR: tmp } });
+    expect(r.status, r.output).toBe(0);
+    const calls = readFileSync(log, 'utf8').trim().split('\n');
+    expect(calls.length).toBeGreaterThan(0);
+    for (const c of calls) expect(c, calls.join(' | ')).toMatch(new RegExp(`${tmp.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/wicked-deliver\\.XXXXXX$`));
+  });
+
   it('R1: opens the pull request ON the github.com repository the consent card named (`--repo owner/repo`)', async () => {
     const fx = fixture();
     writeFileSync(join(fx.workdir, 'README.md'), 'base\nchanged\n');

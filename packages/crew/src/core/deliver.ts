@@ -735,7 +735,9 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // gate across a crew upgrade still finds it).
     `  ADONODE=$(command -v node || true); [ -n "$ADONODE" ] || ADONODE=${shellSingleQuote(process.execPath)}`,
     '  [ -x "$ADONODE" ] || { echo "deliver: no node binary to run the Azure DevOps step; nothing was staged, committed or pushed"; exit 1; }',
-    '  TD=$(mktemp -d)',
+    // Under TMPDIR explicitly: macOS `mktemp` without a template ignores TMPDIR, so inside a
+    // sandbox that allows only its private TMPDIR (the repo-checks floor) the script failed here.
+    '  TD=$(mktemp -d "${TMPDIR:-/tmp}/wicked-deliver.XXXXXX")',
     // The helper text rides only in a script composed for an Azure DevOps origin (the script is one
     // argv entry; a GitHub delivery does not pay its bytes).
     ...(ado === null ? [] : [`  cat > "$TD/ado.mjs" <<'WICKED_CREW_ADO_HELPER_EOF'`, ...ADO_HELPER_JS.split('\n'), 'WICKED_CREW_ADO_HELPER_EOF']),
@@ -973,7 +975,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // the daemon did not answer, or the run record was fetched.
     // Cleaned up by the `_outcome` EXIT trap installed at the top (crew#739).
     // The Azure DevOps preamble may already have made it (its helper lives there).
-    '[ -n "$TD" ] || TD=$(mktemp -d)',
+    '[ -n "$TD" ] || TD=$(mktemp -d "${TMPDIR:-/tmp}/wicked-deliver.XXXXXX")',
     // One URL path segment, RFC 3986: unreserved bytes verbatim, everything else `%XX` (byte-wise
     // under LC_ALL=C so multibyte characters encode per byte, as a URL requires). Used only when
     // the composer did not bake the launch id in (Copilot on #525: `/`, `#`, `?` in an id must
@@ -1225,7 +1227,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // an empty base; any git failure breaks out to the loud abort below.
     '    if ! printf "%s\\n" "$CF" | while IFS= read -r F; do',
     '          [ -n "$F" ] || continue;',
-    '          TB=$(mktemp); TO=$(mktemp); TT=$(mktemp);',
+    '          TB=$(mktemp "${TMPDIR:-/tmp}/wicked-deliver.XXXXXX"); TO=$(mktemp "${TMPDIR:-/tmp}/wicked-deliver.XXXXXX"); TT=$(mktemp "${TMPDIR:-/tmp}/wicked-deliver.XXXXXX");',
     '          git show ":1:$F" >"$TB" 2>/dev/null || : >"$TB";',
     '          git show ":2:$F" >"$TO" 2>/dev/null || { rm -f "$TB" "$TO" "$TT"; exit 1; };',
     '          git show ":3:$F" >"$TT" 2>/dev/null || { rm -f "$TB" "$TO" "$TT"; exit 1; };',
