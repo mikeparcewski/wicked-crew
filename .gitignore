@@ -18,7 +18,9 @@ wicked-estate.coverage.json
 scripts/domain/__pycache__/
 .product/
 .claude/
-.wicked/
+.wicked/*
+# The build/test guide the repo-checks floor reads from the base tree (DES-BUILD-GUIDE).
+!.wicked/build-guide.json
 e2e/shots/
 
 # local wicked-brain server artifacts
