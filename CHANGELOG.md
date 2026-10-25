@@ -10,6 +10,13 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.16.1] — 2026-10-25
+
+A patch release: bundles wicked-studio 0.12.1. No daemon change.
+
+### Changed
+- **The bundled studio is wicked-studio 0.12.1.** In a chat window at least 520 px wide, past chats sit as a column beside the conversation instead of over it (studio#907). Narrower windows and phones keep the overlay.
+
 ## [0.16.0] — 2026-10-25
 
 A minor release: `GET /api/v1/system`, the Nerve Center snapshot (#1137); the system chat's history, Close and attachments (#1140); a quota bench that lifts on its own clock (#1138); and the deliver script's temp files under `TMPDIR` (#1142). Bundles wicked-studio 0.12.0 and runs on wicked-core-ts 0.15.10. `wicked-crew-api-types` 0.137.0 (0.136.0 + 0.137.0) is on npm.
@@ -4415,7 +4422,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.1...HEAD
+[0.16.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.9...v0.16.0
 [0.15.9]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.8...v0.15.9
 [0.15.8]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.7...v0.15.8
