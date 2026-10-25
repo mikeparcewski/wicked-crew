@@ -477,9 +477,20 @@ describe('crew#720 deliver, driven for real — Azure DevOps', () => {
     const fx = fixture();
     const auth = `Basic ${Buffer.from(`:${PAT}`).toString('base64')}`;
     const ado = await mockAdo(fx, { auth });
-    const r = await runDeliver(fx, { adoTarget: ado.target }, { AZURE_DEVOPS_EXT_PAT: PAT });
+    // (crew#1142) The Azure DevOps helper's directory is made under TMPDIR: macOS `mktemp` ignores
+    // TMPDIR without a template, and a sandbox that allows only its private TMPDIR refused it.
+    const realMktemp = execFileSync('sh', ['-c', 'command -v mktemp'], { encoding: 'utf8' }).trim();
+    const mktempLog = join(fx.root, 'mktemp.log');
+    writeFileSync(join(fx.bin, 'mktemp'), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${mktempLog}'\nexec '${realMktemp}' "$@"\n`);
+    chmodSync(join(fx.bin, 'mktemp'), 0o755);
+    const tmp = join(fx.root, 'private-tmp');
+    mkdirSync(tmp, { recursive: true });
+    const r = await runDeliver(fx, { adoTarget: ado.target }, { AZURE_DEVOPS_EXT_PAT: PAT, TMPDIR: tmp });
     expect(r.status, r.output).toBe(0);
     expect(r.outcome).toBe('pr');
+    const mktempCalls = readFileSync(mktempLog, 'utf8').trim().split('\n');
+    expect(mktempCalls).toContain(`-d ${tmp}/wicked-deliver.XXXXXX`);
+    for (const c of mktempCalls) expect(c.endsWith('/wicked-deliver.XXXXXX') && c.includes(tmp), mktempCalls.join(' | ')).toBe(true);
     expect(deliveryRecordFrom(r.output)).toEqual({ url: 'https://dev.azure.com/org/proj/_git/repo/pullrequest/77' });
     expect(bareBranches(fx).sort()).toEqual(['main', `wicked/${RUN_ID}`]);
     expect(ado.prBodies).toHaveLength(1);
