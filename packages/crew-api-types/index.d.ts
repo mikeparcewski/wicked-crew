@@ -7055,6 +7055,14 @@ export interface ChatCloseResponse {
   chat: ChatHistoryEntry;
 }
 
+/** `POST /chats/:id/close` → **502** when the chat's run could not be cancelled: the chat IS closed
+ *  and its history kept, but its run may still be running — cancel it from the run (`runId`). */
+export interface ChatCloseCancelFailed {
+  error: string;
+  runId: string;
+  chat: ChatHistoryEntry;
+}
+
 /** What an attachment is to a seat: an image (png, jpeg, gif, webp), text (UTF-8), or a pdf. */
 export type ChatAttachmentKind = 'image' | 'text' | 'pdf';
 
