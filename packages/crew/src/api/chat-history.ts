@@ -14,7 +14,7 @@
  * the old entry to `<id>--<closedAt ms>` first, so a reuse never overwrites a past conversation.
  */
 
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import type { ChatHistoryEntry, ChatStartedOn, ChatTranscriptRecord } from '../core/types.js';
@@ -135,22 +135,40 @@ export class ChatHistoryStore {
   /** A chat was opened: a fresh entry. A CLOSED entry under the same id is kept under a new id. */
   opened(id: string, opts: { startedOn?: ChatStartedOn | undefined; cli: string | null; actorId: string | null }): void {
     if (!this.valid(id)) return;
-    const prev = this.read(id);
-    if (prev !== null && prev.status === 'closed') {
-      const keptId = `${id}--${prev.closedAt ?? this.now()}`;
-      renameSync(this.metaPath(id), this.metaPath(keptId));
-      this.write({ ...prev, id: keptId });
-      if (existsSync(this.keptPath(id))) renameSync(this.keptPath(id), this.keptPath(keptId));
+    let prev = this.read(id);
+    // An entry still `open` here is stale: this daemon only opens an id it does not hold, so that
+    // chat ended without the close fold seeing it. Close it (keeping its transcript) first.
+    if (prev !== null && prev.status === 'open') {
+      this.closed(id);
+      prev = this.read(id);
+    }
+    if (prev !== null) {
+      const keptId = this.freeArchiveId(id, prev.closedAt ?? this.now());
       this.attachments?.rename(id, keptId);
+      if (existsSync(this.keptPath(id))) renameSync(this.keptPath(id), this.keptPath(keptId));
+      this.write({ ...prev, id: keptId });
+      rmSync(this.metaPath(id), { force: true });
     }
     this.write({
       id,
       startedOn: opts.startedOn ?? null,
       cli: opts.cli,
-      createdAt: prev !== null && prev.status === 'open' ? prev.createdAt : this.now(),
+      createdAt: this.now(),
       status: 'open',
       actorId: opts.actorId,
     });
+  }
+
+  /** An archive id for a reused chat id that names NOTHING yet — no entry, no kept transcript, no
+   *  attachments (a client may have chosen `x--T` itself; it is never overwritten). */
+  private freeArchiveId(id: string, closedAt: number): string {
+    const base = `${id}--${closedAt}`;
+    for (let n = 0; ; n += 1) {
+      const candidate = n === 0 ? base : `${base}-${n}`;
+      if (!existsSync(this.metaPath(candidate)) && !existsSync(this.keptPath(candidate)) && !(this.attachments?.exists(candidate) ?? false)) {
+        return candidate;
+      }
+    }
   }
 
   /** The chat's answering CLI became known (the path's primary agent). */
@@ -169,6 +187,10 @@ export class ChatHistoryStore {
       this.ensureDir();
       copyFileSync(live, this.keptPath(id));
       if (process.platform !== 'win32') chmodSync(this.keptPath(id), 0o600);
+      // The copy keeps the conversation's own last-activity time (the list sorts on it), never the
+      // moment of the close (xreview r1 on #1140).
+      const st = statSync(live);
+      utimesSync(this.keptPath(id), st.atime, st.mtime);
     }
     this.write({ ...e, status: 'closed', closedAt: this.now() });
   }
@@ -270,6 +292,8 @@ export class ChatHistoryStore {
       .filter((f) => f.endsWith('.json'))
       .map((f) => this.read(f.slice(0, -5)))
       .filter((e): e is StoredEntry => e !== null)
+      // The EFFECTIVE status (an `open` entry whose chat is not live reads closed) is what filters.
+      .map((e) => (e.status === 'open' && opts.isLive !== undefined && !opts.isLive(e.id) ? { ...e, status: 'closed' as const } : e))
       .filter((e) => opts.status === undefined || opts.status === 'all' || e.status === opts.status)
       .filter((e) => opts.actorId === undefined || opts.actorId === null || e.actorId === opts.actorId)
       .map((e) => ({ e, at: this.updatedAtOf(e) }))

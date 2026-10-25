@@ -46,6 +46,8 @@ describe('system chat: history, close, attachments (server)', () => {
   const launches: LaunchRunInput[] = [];
   /** What the fake seat read: path → bytes. */
   const seatRead = new Map<string, number>();
+  /** Runs whose cancel the fake engine refuses. */
+  const failCancel = new Set<string>();
   let seq = 0;
 
   beforeAll(async () => {
@@ -84,7 +86,10 @@ describe('system chat: history, close, attachments (server)', () => {
       workOutput: async () => '',
       proposePlan: async () => ({ ok: true }),
       confirmGate: async () => 'awaiting_human',
-      cancelRun: async () => 'cancelled',
+      cancelRun: async (runId: string) => {
+        if (failCancel.has(runId)) throw new Error('engine busy');
+        return 'cancelled';
+      },
       chatClose: async () => undefined,
       chatList: async () => [],
       onboardedRepoOf: () => undefined,
@@ -240,6 +245,17 @@ describe('system chat: history, close, attachments (server)', () => {
     expect((await app.inject({ method: 'GET', url: '/api/v1/chats?limit=0' })).statusCode).toBe(400);
   });
 
+  it('Close whose run cannot be cancelled says so (502) — the chat is closed and its history kept', async () => {
+    expect((await app.inject({ method: 'POST', url: '/api/v1/chats', payload: { chatId: 'sys-3', clis: ['claude'], scopeKind: 'system' } })).statusCode).toBe(201);
+    expect((await app.inject({ method: 'POST', url: '/api/v1/chats/sys-3/messages', payload: { text: 'hello' } })).statusCode).toBe(202);
+    await waitFor(() => launches.length === 2, 'the second launch');
+    failCancel.add(`run-sys-${launches.length}`);
+    const res = await app.inject({ method: 'POST', url: '/api/v1/chats/sys-3/close' });
+    expect(res.statusCode).toBe(502);
+    expect(res.json()).toMatchObject({ runId: `run-sys-${launches.length}`, chat: { id: 'sys-3', status: 'closed' } });
+    expect(res.json().error).toMatch(/could not be cancelled/);
+  });
+
   it('DELETE removes the history and the attachments', async () => {
     expect((await app.inject({ method: 'DELETE', url: '/api/v1/chats/sys-1' })).statusCode).toBe(200);
     expect(existsSync(join(home, 'chats', 'attachments', 'sys-1'))).toBe(false);
@@ -247,5 +263,6 @@ describe('system chat: history, close, attachments (server)', () => {
     const list = (await app.inject({ method: 'GET', url: '/api/v1/chats' })).json() as ChatListResponse;
     expect(list.items!.map((i) => i.id)).not.toContain('sys-1');
     await app.inject({ method: 'DELETE', url: '/api/v1/chats/sys-2' });
+    await app.inject({ method: 'DELETE', url: '/api/v1/chats/sys-3' });
   });
 });

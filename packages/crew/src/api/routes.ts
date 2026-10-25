@@ -3775,7 +3775,7 @@ export function registerRoutes(
     text: z.string().min(1).max(65536),
     targets: z.array(z.string().min(1)).min(1).max(8).optional(),
     /** (api-types 0.137.0) Attachment ids from `POST /chats/:id/attachments`. */
-    attachments: z.array(z.string().min(1).max(64)).max(64).optional(),
+    attachments: z.array(z.string().min(1).max(64)).optional(),
   }).strict();
   // F-RECON-017: a message sent while a targeted seat is still answering the previous one is
   // REFUSED, not queued. The engine queues silently (the worker gets the text the instant the
@@ -4207,7 +4207,7 @@ export function registerRoutes(
             status,
             actorId: security.authMode === 'required' ? actorOf(req).id : null,
             liveCli: (cid) => askPaths.get(cid)?.pa ?? null,
-            isLive: (cid) => askPaths.get(cid) !== undefined,
+            isLive: (cid) => askPaths.get(cid) !== undefined || chatScopes.get(cid) !== undefined,
           });
     try {
       const pool = await adapter.chatList().catch((err: unknown) => {
@@ -4226,7 +4226,11 @@ export function registerRoutes(
         };
       });
       const seen = new Set(paths.map((p) => p.chatId));
-      return { chats: [...paths, ...pool.filter((c) => !seen.has(c.chatId))], ...history };
+      // Under `auth: required` a live chat another actor opened is not listed (its history entry
+      // names its opener); local mode lists every live chat, as before.
+      const viewer = security.authMode === 'required' ? actorOf(req).id : null;
+      const mine = (cid: string): boolean => viewer === null || chatHistory === null || chatHistory.entry(cid) === null || chatHistory.visibleTo(cid, viewer);
+      return { chats: [...paths, ...pool.filter((c) => !seen.has(c.chatId))].filter((c) => mine(c.chatId)), ...history };
     } catch (err) {
       // A build that cannot do chat is a capability gap, not a bad request: 501 tells an operator to
       // upgrade rather than to fix a call that was already correct. Branching on the type, not on
@@ -4292,7 +4296,12 @@ export function registerRoutes(
   );
 
   // Ending a chat — shared by DELETE (end + delete its history) and POST /close (end, keep it).
-  const endChat = async (id: string): Promise<{ ok: true } | { ok: false; error: string }> => {
+  const endChat = async (
+    id: string,
+    /** Runs right after the close fold, with NO await before it: the id cannot have been reopened
+     *  yet, so a history operation here can never land on a replacement chat (xreview r1 on #1140). */
+    afterFold?: () => void,
+  ): Promise<{ ok: true; cancelError?: { runId: string; error: string } } | { ok: false; error: string }> => {
     // DES-SYSTEM-CHAT: the answering CLI the history names is the path's PA, while it is known.
     const pa = askPaths.get(id)?.pa;
     if (pa !== undefined && pa !== null) chatHistory?.setCli(id, pa);
@@ -4327,7 +4336,12 @@ export function registerRoutes(
         chatScopes.closeHeld(id, ticket);
         runtime.broadcast?.(frame);
       }
-      if (path?.runId !== undefined) await adapter.cancelRun(path.runId).catch(() => undefined);
+      afterFold?.();
+      if (path?.runId !== undefined) {
+        const runId = path.runId;
+        const cancelled = await adapter.cancelRun(runId).then(() => null, (err: unknown) => message(err));
+        if (cancelled !== null) return { ok: true as const, cancelError: { runId, error: cancelled } };
+      }
       return { ok: true as const };
     } catch (err) {
       return { ok: false as const, error: message(err) };
@@ -4339,22 +4353,27 @@ export function registerRoutes(
 
   app.delete(`${V}/chats/:id`, async (req, reply) => {
     const { id } = req.params as { id: string };
-    const ended = await endChat(id);
-    if (!ended.ok) return reply.code(400).send({ error: ended.error });
     // DES-SYSTEM-CHAT: DELETE also deletes the chat's history and attachments (POST /close keeps them)
-    // — under `auth: required` only its opener's.
+    // — under `auth: required` only its opener's (another actor's chat is not this caller's to end).
     const viewer = security.authMode === 'required' ? actorOf(req).id : null;
-    if (chatHistory === null || chatHistory.entry(id) === null || chatHistory.visibleTo(id, viewer)) {
+    if (chatHistory !== null && chatHistory.entry(id) !== null && !chatHistory.visibleTo(id, viewer)) {
+      return reply.code(404).send({ error: `no chat ${id} on this daemon` });
+    }
+    const removeHistory = (): void => {
       chatHistory?.remove(id);
       chatAttachments.removeChat(id);
-    }
+    };
+    const ended = await endChat(id, removeHistory);
+    if (!ended.ok) return reply.code(400).send({ error: ended.error });
+    // A chat the daemon no longer held (no fold ran): its kept history goes too.
+    if (chatHistory?.entry(id) !== null && chatScopes.get(id) === undefined && askPaths.get(id) === undefined) removeHistory();
     return { ok: true };
   });
 
   // DES-SYSTEM-CHAT (api-types 0.137.0): end the chat and KEEP its history and attachments.
   app.post(
     `${V}/chats/:id/close`,
-    { config: { manifest: { responseType: 'ChatCloseResponse', statusCodes: [200, 400, 404, 501] } } },
+    { config: { manifest: { responseType: 'ChatCloseResponse', statusCodes: [200, 400, 404, 501, 502] } } },
     async (req, reply) => {
       const { id } = req.params as { id: string };
       if (chatHistory === null) return reply.code(501).send({ error: 'this daemon keeps no chat history' });
@@ -4363,12 +4382,20 @@ export function registerRoutes(
       if ((!known && askPaths.get(id) === undefined) || (known && !chatHistory.visibleTo(id, viewer))) {
         return reply.code(404).send({ error: `no chat ${id} on this daemon` });
       }
-      const ended = await endChat(id);
+      // The close fold archives it; closing here too (before the id is free) covers a route set
+      // without the fold, and is a no-op after it.
+      const ended = await endChat(id, () => chatHistory.closed(id));
       if (!ended.ok) return reply.code(400).send({ error: ended.error });
-      // The close fold archived it; a chat with no entry yet (opened before this release) gets none.
-      chatHistory.closed(id);
       const chat = chatHistory.entry(id);
       if (chat === null) return reply.code(404).send({ error: `chat ${id} has no history on this daemon` });
+      if (ended.cancelError !== undefined) {
+        // The chat is ended and its history kept, but its run was NOT cancelled: said, never "ok".
+        return reply.code(502).send({
+          error: `chat ${id} is closed and its history kept, but its run ${ended.cancelError.runId} could not be cancelled (${ended.cancelError.error}) — cancel it from the run`,
+          runId: ended.cancelError.runId,
+          chat,
+        });
+      }
       return { ok: true, chat };
     },
   );
@@ -4381,7 +4408,9 @@ export function registerRoutes(
       const { id } = req.params as { id: string };
       if (chatHistory === null) return reply.code(501).send({ error: 'this daemon keeps no chat history' });
       const viewer = security.authMode === 'required' ? actorOf(req).id : null;
-      const chat = chatHistory.visibleTo(id, viewer) ? chatHistory.entry(id, askPaths.get(id)?.pa ?? null, (cid) => askPaths.get(cid) !== undefined) : null;
+      const chat = chatHistory.visibleTo(id, viewer)
+        ? chatHistory.entry(id, askPaths.get(id)?.pa ?? null, (cid) => askPaths.get(cid) !== undefined || chatScopes.get(cid) !== undefined)
+        : null;
       const messages = chat === null ? null : chatHistory.messages(id);
       if (chat === null || messages === null) return reply.code(404).send({ error: `no chat ${id} in this daemon's history` });
       return { chat, messages, attachments: chatAttachments.list(id) };

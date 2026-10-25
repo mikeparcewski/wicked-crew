@@ -1,6 +1,6 @@
 // DES-SYSTEM-CHAT (crew): the chat history store and the attachments store, as units.
 
-import { existsSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { deflateSync } from 'node:zlib';
@@ -219,5 +219,83 @@ describe('the history store', () => {
     say('left-open', 'user', 'before the restart');
     expect(history.closeOrphaned()).toBe(1);
     expect(history.entry('left-open')).toMatchObject({ status: 'closed', messageCount: 1 });
+  });
+});
+
+describe('xreview r1 on #1140', () => {
+  const setup = (name: string) => {
+    const live = join(scratch, name, 'live');
+    mkdirSync(live, { recursive: true });
+    let t = 1_000_000;
+    const att = new ChatAttachmentStore({ dir: join(scratch, name, 'att') });
+    const history = new ChatHistoryStore({ pathOf: (id) => join(live, `${id}.jsonl`) }, att, { dir: join(scratch, name, 'history'), now: () => t });
+    const say = (id: string, text: string) =>
+      writeFileSync(join(live, `${id}.jsonl`), `${JSON.stringify({ at: t, turnId: 't', kind: 'user', text, seats: [] })}\n`, { flag: 'a' });
+    return { live, history, att, say, setNow: (v: number) => { t = v; } };
+  };
+
+  it('an archive id never overwrites a chat that already holds that id', () => {
+    const { history, say, setNow } = setup('x1');
+    history.opened('x--1000', { cli: null, actorId: 'bob' }); // a client chose this id itself
+    say('x--1000', 'bob speaks');
+    history.opened('x', { cli: null, actorId: 'alice' });
+    say('x', 'alice speaks');
+    setNow(1000);
+    history.closed('x');
+    history.opened('x', { cli: null, actorId: 'alice' });
+    const ids = history.list({}).items.map((i) => i.id).sort();
+    expect(ids).toEqual(['x', 'x--1000', 'x--1000-1']);
+    expect(history.messages('x--1000')!.map((r) => (r.kind === 'user' ? r.text : ''))).toEqual(['bob speaks']);
+    expect(history.messages('x--1000-1')!.map((r) => (r.kind === 'user' ? r.text : ''))).toEqual(['alice speaks']);
+  });
+
+  it('reopening over a stale open entry keeps the earlier conversation', () => {
+    const { history, say } = setup('x2');
+    history.opened('stale', { cli: null, actorId: null });
+    say('stale', 'earlier');
+    history.opened('stale', { cli: null, actorId: null }); // the fold never closed it
+    const kept = history.list({}).items.map((i) => i.id).find((i) => i !== 'stale')!;
+    expect(history.messages(kept)!.map((r) => (r.kind === 'user' ? r.text : ''))).toEqual(['earlier']);
+  });
+
+  it('closing keeps the last-activity time; the status filter uses the effective status', () => {
+    const { live, history, say } = setup('x3');
+    history.opened('old', { cli: null, actorId: null });
+    say('old', 'long ago');
+    const past = new Date(Date.now() - 3_600_000);
+    utimesSync(join(live, 'old.jsonl'), past, past);
+    history.closed('old');
+    expect(Math.abs(Date.parse(history.entry('old')!.updatedAt) - past.getTime())).toBeLessThan(1000);
+    history.opened('ghost', { cli: null, actorId: null });
+    const isLive = (id: string) => id !== 'ghost';
+    expect(history.list({ status: 'open', isLive }).items.map((i) => i.id)).toEqual([]);
+    expect(history.list({ status: 'closed', isLive }).items.map((i) => i.id).sort()).toEqual(['ghost', 'old']);
+  });
+
+  it('moving attachments copies an uploaded .json payload byte for byte', () => {
+    const { history, att } = setup('x4');
+    history.opened('j', { cli: null, actorId: null });
+    const payload = Buffer.from('[1, 2, 3]\n');
+    const [a] = att.add('j', [{ filename: 'list.json', declaredType: 'application/json', data: payload }]);
+    history.closed('j');
+    history.opened('j', { cli: null, actorId: null });
+    const kept = history.list({}).items.map((i) => i.id).find((i) => i !== 'j')!;
+    const moved = att.resolve(kept, [a!.id])[0]!;
+    expect(readFileSync(moved.path).equals(payload)).toBe(true);
+    expect(att.list(kept)[0]).toMatchObject({ chatId: kept, sha256: a!.sha256 });
+  });
+
+  it('a pdf decompression bomb is bounded, never inflated whole', () => {
+    const bomb = deflateSync(Buffer.alloc(64 * 1024 * 1024, 0));
+    const pdf = Buffer.concat([Buffer.from(`%PDF-1.4\n1 0 obj << /Length ${bomb.length} /Filter /FlateDecode >>\nstream\n`, 'latin1'), bomb, Buffer.from('\nendstream\nendobj\n', 'latin1')]);
+    expect(pdf.length).toBeLessThan(ATTACHMENT_MAX_FILE_BYTES);
+    expect(extractPdfText(pdf)).toBe('');
+  });
+
+  it('a payload line that merely starts with the delimiter is data', () => {
+    const b = 'BND';
+    const data = Buffer.from('before\r\n--BNDnot-a-boundary\r\nafter');
+    const body = Buffer.concat([Buffer.from(`--${b}\r\nContent-Disposition: form-data; name="f"; filename="t.txt"\r\n\r\n`), data, Buffer.from(`\r\n--${b}--\r\n`)]);
+    expect(parseMultipart(body, b)[0]!.data.equals(data)).toBe(true);
   });
 });

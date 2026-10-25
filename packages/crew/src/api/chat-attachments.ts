@@ -112,7 +112,15 @@ export function parseMultipart(body: Buffer, boundary: string): UploadedFile[] {
     if (headerEnd < 0) throw new AttachmentError(400, 'attachment_malformed', 'a multipart part has no header end');
     const headers = body.subarray(pos, headerEnd).toString('utf8');
     const dataStart = headerEnd + 4;
-    const next = body.indexOf(Buffer.concat([Buffer.from('\r\n'), delim]), dataStart);
+    // The part ends at the next CRLF + delimiter that is itself followed by CRLF or `--`: a payload
+    // line that merely starts with the delimiter is data (xreview r1 on #1140).
+    const crlfDelim = Buffer.concat([Buffer.from('\r\n'), delim]);
+    let next = body.indexOf(crlfDelim, dataStart);
+    while (next >= 0) {
+      const after = next + crlfDelim.length;
+      if ((body[after] === 0x0d && body[after + 1] === 0x0a) || (body[after] === 0x2d && body[after + 1] === 0x2d)) break;
+      next = body.indexOf(crlfDelim, next + 1);
+    }
     if (next < 0) throw new AttachmentError(400, 'attachment_malformed', 'a multipart part is not terminated');
     const disposition = /^content-disposition:\s*(.+)$/im.exec(headers)?.[1] ?? '';
     const filename = filenameOf(disposition);
@@ -165,12 +173,17 @@ export function safeName(filename: string): string {
 
 // ── text extraction ─────────────────────────────────────────────────────────
 
+/** One pdf content stream inflates to at most this; the whole pdf's streams to at most the total. */
+export const PDF_INFLATE_STREAM_BYTES = 4 * 1024 * 1024;
+export const PDF_INFLATE_TOTAL_BYTES = 16 * 1024 * 1024;
+
 /** Best-effort text from a pdf: the strings shown by `Tj` / `TJ` in its (Flate or plain) content
  *  streams. Good for the common text pdf; a scanned page has none, and says so. */
 export function extractPdfText(data: Buffer, maxChars = ATTACHMENT_TEXT_EXCERPT_CHARS): string {
   const raw = data.toString('latin1');
   const out: string[] = [];
   let total = 0;
+  let inflated = 0;
   const streamRe = /stream\r?\n/g;
   let m: RegExpExecArray | null;
   while ((m = streamRe.exec(raw)) !== null && total < maxChars) {
@@ -180,8 +193,12 @@ export function extractPdfText(data: Buffer, maxChars = ATTACHMENT_TEXT_EXCERPT_
     const dict = raw.slice(Math.max(0, m.index - 400), m.index);
     let content = data.subarray(start, end);
     if (/\/FlateDecode/.test(dict.slice(dict.lastIndexOf('<<')))) {
+      // Bounded: a small stream that inflates to gigabytes (a decompression bomb) is skipped, and
+      // the inflated bytes across the whole pdf are budgeted (xreview r1 on #1140).
+      if (inflated >= PDF_INFLATE_TOTAL_BYTES) break;
       try {
-        content = inflateSync(content);
+        content = inflateSync(content, { maxOutputLength: Math.min(PDF_INFLATE_STREAM_BYTES, PDF_INFLATE_TOTAL_BYTES - inflated) });
+        inflated += content.length;
       } catch {
         streamRe.lastIndex = end;
         continue;
@@ -354,17 +371,28 @@ export class ChatAttachmentStore {
     rmSync(dir, { recursive: true, force: true });
   }
 
-  /** Move a chat's attachments to another id (an archived history entry the id was reused over). */
+  /** Whether any attachment directory exists under `chatId`. */
+  exists(chatId: string): boolean {
+    try {
+      return existsSync(this.chatDir(chatId));
+    } catch {
+      return false;
+    }
+  }
+
+  /** Move a chat's attachments to another id (an archived history entry the id was reused over).
+   *  Never over an occupied destination. */
   rename(fromChatId: string, toChatId: string): void {
     const from = this.chatDir(fromChatId);
     if (!existsSync(from)) return;
     const to = this.chatDir(toChatId);
+    if (existsSync(to)) throw new Error(`refusing to move attachments onto ${toChatId}: it already has some`);
     this.ensureDir(this.dir);
-    rmSync(to, { recursive: true, force: true });
-    // Rewrite each meta's chatId as it moves.
+    // Rewrite each meta's chatId as it moves — a META file is `<attachment id>.json`; an uploaded
+    // payload that merely ends in `.json` is copied byte for byte (xreview r1 on #1140).
     this.ensureDir(to);
     for (const n of readdirSync(from)) {
-      if (n.endsWith('.json')) {
+      if (n.endsWith('.json') && ATTACHMENT_ID.test(n.slice(0, -5))) {
         const meta = JSON.parse(readFileSync(join(from, n), 'utf8')) as StoredMeta;
         writeFileSync(join(to, n), JSON.stringify({ ...meta, chatId: toChatId }), { mode: 0o600 });
       } else {
