@@ -383,6 +383,33 @@ afterEach(() => {
   for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true });
 });
 
+/**
+ * A recording `mktemp` first on the script's PATH (`<root>/bin`, which the login shell's
+ * `.bash_profile` prepends) and a private TMPDIR: every call is logged, then run by the real
+ * `mktemp`. macOS `mktemp` ignores TMPDIR without a template, so the script must always name one.
+ */
+function recordMktemp(root: string): { tmp: string; calls: () => string[]; expectAllUnderTmp: () => void } {
+  const bin = join(root, 'bin');
+  mkdirSync(bin, { recursive: true });
+  const realMktemp = execFileSync('sh', ['-c', 'command -v mktemp'], { encoding: 'utf8' }).trim();
+  const log = join(root, 'mktemp.log');
+  writeFileSync(join(bin, 'mktemp'), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${log}'\nexec '${realMktemp}' "$@"\n`);
+  chmodSync(join(bin, 'mktemp'), 0o755);
+  const tmp = join(root, 'private-tmp');
+  mkdirSync(tmp, { recursive: true });
+  const calls = (): string[] => (existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean) : []);
+  const under = new RegExp(`${tmp.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/wicked-deliver\\.XXXXXX$`);
+  return {
+    tmp,
+    calls,
+    expectAllUnderTmp: () => {
+      const all = calls();
+      expect(all.length).toBeGreaterThan(0);
+      for (const c of all) expect(c, all.join(' | ')).toMatch(under);
+    },
+  };
+}
+
 describe('deliver script, driven for real (crew#317)', () => {
   it('COMMITS the run’s uncommitted work — an UNTRACKED new file rides, pushes it, prints the PR URL last', async () => {
     const fx = fixture();
@@ -428,20 +455,13 @@ describe('deliver script, driven for real (crew#317)', () => {
   it('makes every temp file under TMPDIR (macOS mktemp ignores it without a template)', async () => {
     const fx = fixture();
     writeFileSync(join(fx.workdir, 'README.md'), 'base\nchanged\n');
-    const bin = join(fx.root, 'bin');
-    mkdirSync(bin, { recursive: true });
-    const realMktemp = execFileSync('sh', ['-c', 'command -v mktemp'], { encoding: 'utf8' }).trim();
-    const log = join(fx.root, 'mktemp.log');
-    writeFileSync(join(bin, 'mktemp'), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${log}'\nexec '${realMktemp}' "$@"\n`);
-    chmodSync(join(bin, 'mktemp'), 0o755);
-    const tmp = join(fx.root, 'private-tmp');
-    mkdirSync(tmp);
-    const r = await runDeliver(fx, { intent: 'change the readme', script: { runId: RUN_ID }, env: { TMPDIR: tmp } });
+    const mk = recordMktemp(fx.root);
+    const r = await runDeliver(fx, { intent: 'change the readme', script: { runId: RUN_ID }, env: { TMPDIR: mk.tmp } });
     expect(r.status, r.output).toBe(0);
-    const calls = readFileSync(log, 'utf8').trim().split('\n');
-    expect(calls.length).toBeGreaterThan(0);
-    for (const c of calls) expect(c, calls.join(' | ')).toMatch(new RegExp(`${tmp.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/wicked-deliver\\.XXXXXX$`));
-  });
+    // The run-record directory, at least.
+    expect(mk.calls().some((c) => c.startsWith('-d '))).toBe(true);
+    mk.expectAllUnderTmp();
+  }, 60_000);
 
   it('R1: opens the pull request ON the github.com repository the consent card named (`--repo owner/repo`)', async () => {
     const fx = fixture();
@@ -1215,11 +1235,15 @@ describe('deliver script, driven for real (crew#317)', () => {
     git(fx.clone, 'push', '-q', 'origin', 'main');
     // …and the run adds its OWN bullet to the SAME section — a rebase conflict by construction.
     writeFileSync(join(fx.workdir, 'CHANGELOG.md'), base + '- run TWO change (#411)\n');
+    // The union's three scratch files are made under TMPDIR too.
+    const mk = recordMktemp(fx.root);
 
-    const r = await runDeliver(fx);
+    const r = await runDeliver(fx, { env: { TMPDIR: mk.tmp } });
 
     // It DELIVERS — the union merge kept both additive lines, the rebase continued, the PR opened.
     expect(r.status).toBe(0);
+    expect(mk.calls().filter((c) => !c.startsWith('-d ')).length).toBeGreaterThanOrEqual(3);
+    mk.expectAllUnderTmp();
     expect(r.output).not.toContain('LIFT-CONFLICT');
     expect(originBranches(fx)).toContain(`wicked/${RUN_ID}`);
     const delivered = git(fx.origin, 'show', `wicked/${RUN_ID}:CHANGELOG.md`);
