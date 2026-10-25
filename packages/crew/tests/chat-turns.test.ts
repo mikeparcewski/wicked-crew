@@ -563,7 +563,8 @@ describe('POST /chats/:id/messages — an ask starts a PATH; refuse mid-turn; co
     expect(closeChat).toHaveBeenCalledTimes(1);
     expect(closeChat.mock.calls[0]![0]).toMatchObject({ type: 'chatClosed', chat: 'e057', reason: 'closed' });
     expect(closeChat.mock.calls[0]![1], 'the path run whose retention hold the fold releases').toBe('run-1');
-    expect((await app.inject({ method: 'GET', url: '/api/v1/chats' })).json()).toEqual({ chats: [{ chatId: 'pool-only', seats: ['claude'], idleSecs: 3 }] });
+    // (api-types 0.137.0: the history `items` ride beside the live rows; the live rows are what this pins.)
+    expect((await app.inject({ method: 'GET', url: '/api/v1/chats' })).json().chats).toEqual([{ chatId: 'pool-only', seats: ['claude'], idleSecs: 3 }]);
   });
 
   it('F-E2E-041: two CONCURRENT first messages → exactly one launch; the loser is 409 turn_in_flight; a delta during the launch is already stamped with the winner\'s turn', async () => {
