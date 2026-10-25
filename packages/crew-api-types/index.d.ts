@@ -1203,6 +1203,13 @@ export interface RosterSeat {
    */
   recent_bench?: SeatRecentBench;
   /**
+   * (unreleased, PRODUCT-WORKS J4) The active bench, flat, for the Nerve Center
+   * (`SystemCli.benchedUntil` / `stateReason`): ISO-8601 of when it lifts (`recent_bench.lifts_at`)
+   * and why, in the operator's words. Both present iff `recent_bench` is.
+   */
+  benchedUntil?: string;
+  benchReason?: string;
+  /**
    * (unreleased, wicked-core#976) The engine's HOST-FLOOR bench reason for this seat: on the interim
    * host floor (`WICKED_SEAT_FLOOR` other than `container`) the engine refuses governed work on any
    * seat that keeps no per-call check there (anything but claude and a bounded codex), in every run.
@@ -1299,10 +1306,19 @@ export interface SeatRecentBench {
   runs: number;
   /** ISO-8601 of the latest bench. */
   last_at: string;
-  /** ISO-8601 of when crew stops carrying it to new launches. Crew's window, NOT a provider reset
-   *  time (no provider states one on the wire today). */
+  /** ISO-8601 of when crew stops carrying it to new launches. (unreleased, PRODUCT-WORKS J4) For a
+   *  quota bench (`quota_exhausted`, `usage_limit`): the engine's lift time (the provider's reset time
+   *  when the refusal stated one, else the engine's backoff), or crew's backoff of 15, 30, then 60
+   *  minutes by `strikes`; any other kind keeps crew's 30-minute window. */
   lifts_at: string;
-  /** Who benched it in the run: `worker` or `judge`. */
+  /** (unreleased, J4) Where `lifts_at` came from: the engine's `seatBenched.benchedUntilMs`, crew's
+   *  quota backoff, or the fixed window. */
+  until_source: 'engine' | 'backoff' | 'window';
+  /** (unreleased, J4) Quota benches in a row with no good turn between (the backoff step); 0 on a
+   *  non-quota bench. */
+  strikes: number;
+  /** Who benched it in the run: `worker`, `judge`, or (unreleased, J4) `reprobe` — its quota bench
+   *  fell due and it did not answer the engine's re-probe. */
   source: string;
   /** The engine's own reason, verbatim (technical details). */
   reason: string;

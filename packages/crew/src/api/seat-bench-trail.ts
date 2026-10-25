@@ -1,14 +1,14 @@
 // crew#1071: a seat's recent bench, kept on the daemon's audit trail so it survives a restart.
 //
 // `SeatHealthTracker` folds the engine's `seatBenched` frames into an in-memory bench that keeps the
-// seat out of new launches and asks for SEAT_BENCH_WINDOW_MS. The boot replay re-reads only LIVE
+// seat out of new launches and asks until its lift time (J4: `benchUntil`). The boot replay re-reads only LIVE
 // runs' events, and a quota failure normally ends its run (cancelled or failed), so after a restart
 // the seat read Ready and the next ask was seated on it alone and got the same 429. Each bench and
 // each early lift is now one audit entry; the boot reads the window's entries back.
 
 import type { Actor, AuditEntry } from '../core/types.js';
 import type { AuditLog } from './audit.js';
-import { SEAT_BENCH_WINDOW_MS, type SeatBenchEntry, type SeatBenchStore } from './seat-health.js';
+import { SEAT_BENCH_MAX_MS, type SeatBenchEntry, type SeatBenchStore } from './seat-health.js';
 
 /** The audit action of a bench the engine recorded in a run. */
 export const SEAT_BENCHED_ACTION = 'seat.benched';
@@ -23,7 +23,16 @@ export function auditSeatBenchStore(audit: AuditLog): SeatBenchStore {
     benched: (cli, rec) => {
       audit.record(SEAT_BENCHED_ACTION, DAEMON, {
         ...(rec.session !== undefined ? { runId: rec.session } : {}),
-        detail: { cli, at: rec.at, reason: rec.reason, source: rec.source, runs: rec.runs },
+        detail: {
+          cli,
+          at: rec.at,
+          reason: rec.reason,
+          source: rec.source,
+          runs: rec.runs,
+          ...(rec.until !== undefined ? { until: rec.until } : {}),
+          ...(rec.untilSource !== undefined ? { untilSource: rec.untilSource } : {}),
+          ...(rec.strikes !== undefined ? { strikes: rec.strikes } : {}),
+        },
       });
     },
     lifted: (cli, atMs) => {
@@ -51,6 +60,9 @@ export function benchEntryOf(e: AuditEntry): SeatBenchEntry | null {
   const reason = text(d['reason']);
   const source = text(d['source']);
   if (reason === undefined || source === undefined) return null;
+  const until = num(d['until']);
+  const untilSource = text(d['untilSource']);
+  const strikes = num(d['strikes']);
   return {
     kind: 'benched',
     cli,
@@ -60,13 +72,18 @@ export function benchEntryOf(e: AuditEntry): SeatBenchEntry | null {
       source,
       runs: num(d['runs']) ?? 1,
       ...(typeof e.runId === 'string' ? { session: e.runId } : {}),
+      ...(until !== undefined ? { until } : {}),
+      ...(untilSource === 'engine' || untilSource === 'backoff' || untilSource === 'window' ? { untilSource } : {}),
+      ...(strikes !== undefined ? { strikes } : {}),
     },
   };
 }
 
-/** The bench entries of the last window (the audit `ts` is never earlier than the bench itself). */
+/** The bench entries a live bench may still stand on (the audit `ts` is never earlier than the bench
+ *  itself): (J4) a bench lifts at its own time, up to {@link SEAT_BENCH_MAX_MS} out, and the latest
+ *  quota bench's strikes outlive its lift until a good turn. */
 export async function readSeatBenchEntries(audit: AuditLog, nowMs = Date.now()): Promise<SeatBenchEntry[]> {
-  const since = nowMs - SEAT_BENCH_WINDOW_MS;
+  const since = nowMs - SEAT_BENCH_MAX_MS;
   const entries = [
     ...(await audit.readAll({ action: SEAT_BENCHED_ACTION, since })),
     ...(await audit.readAll({ action: SEAT_BENCH_LIFTED_ACTION, since })),

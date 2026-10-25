@@ -93,6 +93,10 @@ export function isSessionDeath(fallbackKind: string | undefined, reason: string 
   return SESSION_DEATH_CAUSES.some((c) => reason.startsWith(c));
 }
 
+function num(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+}
+
 function str(v: unknown): string | undefined {
   return typeof v === 'string' && v.length > 0 ? v : undefined;
 }
@@ -167,6 +171,45 @@ export const AUTH_FAILURE_WINDOW_MS = 30 * 60 * 1000;
 export const SEAT_BENCH_WINDOW_MS = 30 * 60 * 1000;
 
 /**
+ * (PRODUCT-WORKS J4) A QUOTA bench (`quota_exhausted`, `usage_limit`: a 429, a rate or usage limit)
+ * expires on its own clock instead of the fixed window: the engine's `seatBenched.benchedUntilMs`
+ * when the frame carries one (the provider's reset time when the refusal stated one, else the
+ * engine's own backoff), else a backoff of 15, then 30, then 60 minutes by the seat's consecutive
+ * quota benches with no good turn between ({@link quotaBackoffMs}). A copilot benched for quota on
+ * the rig was otherwise never re-checked inside a run, and every later review had no distinct judge.
+ * Other kinds (`not_logged_in`, `not_installed`, …) keep {@link SEAT_BENCH_WINDOW_MS}.
+ */
+export const QUOTA_BACKOFF_MS: readonly number[] = Object.freeze([15, 30, 60].map((m) => m * 60 * 1000));
+
+/** The furthest a bench's lift time may be (a provider reset beyond it is read as it); also how far
+ *  back the boot reads the bench trail. */
+export const SEAT_BENCH_MAX_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Whether a bench reason is quota-class: its own clock, not the fixed window. */
+export function isQuotaBench(reason: string): boolean {
+  return /quota_exhausted|usage_limit/.test(reason);
+}
+
+/** The backoff of a seat's `strikes`-th quota bench in a row: 15, 30, then 60 minutes. */
+export function quotaBackoffMs(strikes: number): number {
+  const i = Math.min(Math.max(1, Math.floor(strikes)), QUOTA_BACKOFF_MS.length) - 1;
+  return QUOTA_BACKOFF_MS[i]!;
+}
+
+/** Where a bench's lift time came from: the engine's frame (`benchedUntilMs`), crew's own quota
+ *  backoff, or the fixed window of a non-quota bench. */
+export type BenchUntilSource = 'engine' | 'backoff' | 'window';
+
+/** When a bench recorded at `at` lifts, and why that time. */
+export function benchUntil(at: number, reason: string, strikes: number, engineUntil?: number): { until: number; source: BenchUntilSource } {
+  if (engineUntil !== undefined && Number.isFinite(engineUntil) && engineUntil > at) {
+    return { until: Math.min(engineUntil, at + SEAT_BENCH_MAX_MS), source: 'engine' };
+  }
+  if (isQuotaBench(reason)) return { until: at + quotaBackoffMs(strikes), source: 'backoff' };
+  return { until: at + SEAT_BENCH_WINDOW_MS, source: 'window' };
+}
+
+/**
  * How long a seat's last step outcome stands as its live sign-in check on the container floor
  * (`roster-standing.ts`). There the daemon sends no live request of its own: the credential broker
  * answers the status, and the seat's own steps are the live check, because they ran on the floor
@@ -199,8 +242,14 @@ export interface SeatLastAnswer {
 export interface SeatRecentBench {
   /** ISO-8601 of the bench. */
   at: string;
-  /** ISO-8601 of when the seat is eligible again ({@link SEAT_BENCH_WINDOW_MS} after `at`). */
+  /** ISO-8601 of when the seat is eligible again ({@link benchUntil}: the engine's lift time, the
+   *  quota backoff, or {@link SEAT_BENCH_WINDOW_MS} after `at`). */
   until: string;
+  /** (J4) Where `until` came from. */
+  untilSource: BenchUntilSource;
+  /** (J4) The seat's consecutive quota benches with no good turn between (1 on the first): the
+   *  backoff step. 0 on a non-quota bench. */
+  strikes: number;
   /** The engine's bench reason, as it persisted it (`quota_exhausted (no success in the run)`). */
   reason: string;
   /** Who benched it in the run: the unit's `worker`, or a `judge`. */
@@ -235,12 +284,30 @@ export interface SeatBenchRecord {
   source: string;
   session?: string;
   runs: number;
+  /** (J4) Unix millis of when it lifts ({@link benchUntil}); absent on a record written before. */
+  until?: number;
+  /** (J4) Where `until` came from; absent on a record written before. */
+  untilSource?: BenchUntilSource;
+  /** (J4) The quota strikes ({@link SeatRecentBench.strikes}); absent on a record written before. */
+  strikes?: number;
 }
 
 /** One persisted entry read back at boot, oldest first or in any order (it is sorted). */
 export type SeatBenchEntry =
   | { kind: 'benched'; cli: string; rec: SeatBenchRecord }
   | { kind: 'lifted'; cli: string; at: number };
+
+/** One bench as the tracker keeps it. */
+interface BenchRec {
+  at: number;
+  until: number;
+  untilSource: BenchUntilSource;
+  strikes: number;
+  reason: string;
+  source: string;
+  session?: string;
+  runs: number;
+}
 
 /** A seat's own report that it has no credential (`RosterSeat.auth_evidence`). */
 export interface SeatAuthFailure {
@@ -270,7 +337,11 @@ export class SeatHealthTracker {
   private readonly authFailures = new Map<string, { at: number; detail: string; source: SeatAuthFailure['source']; session?: string }>();
   /** cli key → the engine's latest in-run bench of the seat (`seatBenched`), cleared by an ok
    *  output or by {@link SEAT_BENCH_WINDOW_MS}. */
-  private readonly recentBenches = new Map<string, { at: number; reason: string; source: string; session?: string; runs: number }>();
+  private readonly recentBenches = new Map<string, BenchRec>();
+  /** (J4) cli key → the seat's consecutive quota benches with no good turn between, kept after a
+   *  bench's lift time passes (so the next quota bench backs off for longer) and cleared by an ok
+   *  output, a chat reply, a live sign-in check or the engine's `seatBenchLifted`. */
+  private readonly quotaStrikes = new Map<string, number>();
   /** cli key → the seat's latest step outcome (container-floor live check, {@link lastAnswerFor}). */
   private readonly answers = new Map<string, { at: number; answered: boolean; why?: SeatNoAnswer }>();
   /** Default `since` for seats that have never changed state. */
@@ -308,13 +379,29 @@ export class SeatHealthTracker {
       if (e.kind === 'lifted') {
         const cur = this.recentBenches.get(e.cli);
         if (cur !== undefined && e.at >= cur.at) this.recentBenches.delete(e.cli);
+        this.quotaStrikes.delete(e.cli);
         continue;
       }
-      if (nowMs - e.rec.at >= SEAT_BENCH_WINDOW_MS) continue;
+      // A record from before J4 carries no lift time (the window it was written under) and no
+      // strikes: it counts as one strike only while it still stands.
+      const { until, source: untilSource } =
+        e.rec.until !== undefined
+          ? { until: e.rec.until, source: e.rec.untilSource ?? 'engine' }
+          : { until: e.rec.at + SEAT_BENCH_WINDOW_MS, source: 'window' as const };
+      const strikes = e.rec.strikes ?? (isQuotaBench(e.rec.reason) && nowMs < until ? 1 : 0);
+      if (strikes > 0) this.quotaStrikes.set(e.cli, strikes);
+      else this.quotaStrikes.delete(e.cli);
+      if (nowMs >= until) {
+        this.recentBenches.delete(e.cli);
+        continue;
+      }
       const cur = this.recentBenches.get(e.cli);
       if (cur !== undefined && cur.at > e.rec.at) continue;
       this.recentBenches.set(e.cli, {
         at: e.rec.at,
+        until,
+        untilSource,
+        strikes,
         reason: e.rec.reason,
         source: e.rec.source,
         runs: Math.max(1, e.rec.runs),
@@ -325,7 +412,9 @@ export class SeatHealthTracker {
 
   /** Drop the seat's bench, and say so to the store when there was one to drop (crew#1071). */
   private liftBench(key: string, atMs: number): void {
-    if (this.recentBenches.delete(key)) this.benchStore?.lifted(key, atMs);
+    const had = this.recentBenches.delete(key);
+    const struck = this.quotaStrikes.delete(key);
+    if (had || struck) this.benchStore?.lifted(key, atMs);
   }
 
   /** Fold one CoreEvent into the map. Safe on every event type; unknown types are ignored. */
@@ -452,20 +541,29 @@ export class SeatHealthTracker {
         const cli = str(event.cli);
         const reason = str((event as { reason?: unknown }).reason);
         const source = str((event as { source?: unknown }).source);
-        // Only the engine's IN-RUN benches are carried: a `worker` or `judge` refusal. A launcher
+        // Only the engine's IN-RUN benches are carried: a `worker` or `judge` refusal, or (J4) a
+        // `reprobe` — a seat whose quota bench fell due and did not answer its re-probe. A launcher
         // bench is crew's own reading, and a frame with no (or an unknown) source is malformed —
         // neither may bench a seat for the window.
-        if (cli === undefined || reason === undefined || (source !== 'worker' && source !== 'judge')) return;
+        if (cli === undefined || reason === undefined || (source !== 'worker' && source !== 'judge' && source !== 'reprobe')) return;
         // A3: a bench that lands while the last one is still active counts one more run (the same
         // run benching twice — its worker, then its judge — counts once).
         const prev = this.recentBenches.get(cli);
-        const active = prev !== undefined && at - prev.at < SEAT_BENCH_WINDOW_MS;
+        const active = prev !== undefined && at < prev.until;
         // The same frame folded twice (a replayed log entry after the live frame, or a boot
         // replay of a live run after the trail already restored its bench) changes nothing.
         const repeat = prev !== undefined && prev.at === at && prev.session === session && prev.reason === reason;
         if (!repeat) {
-          const runs = !active ? 1 : session !== undefined && session === prev.session ? prev.runs : prev.runs + 1;
-          const rec = { at, reason, source, runs, ...(session !== undefined ? { session } : {}) };
+          const sameRun = active && session !== undefined && session === prev.session;
+          const runs = !active ? 1 : sameRun ? prev.runs : prev.runs + 1;
+          // (J4) A quota bench's backoff grows with every quota bench in a row (no good turn
+          // between); the same run benching it twice while active is one step.
+          const quota = isQuotaBench(reason);
+          const strikes = !quota ? 0 : sameRun && prev.strikes > 0 ? prev.strikes : (this.quotaStrikes.get(cli) ?? 0) + 1;
+          if (strikes > 0) this.quotaStrikes.set(cli, strikes);
+          const engineUntil = num((event as { benchedUntilMs?: unknown }).benchedUntilMs);
+          const { until, source: untilSource } = benchUntil(at, reason, strikes, engineUntil);
+          const rec = { at, until, untilSource, strikes, reason, source, runs, ...(session !== undefined ? { session } : {}) };
           this.recentBenches.set(cli, rec);
           this.benchStore?.benched(cli, rec);
         }
@@ -481,6 +579,13 @@ export class SeatHealthTracker {
             if (seat === cli && key.startsWith(prefix)) this.assignments.delete(key);
           }
         }
+        return;
+      }
+      case 'seatBenchLifted': {
+        // (J4) The engine re-probed a seat whose quota bench fell due and the seat answered: it is
+        // back on that run's roster, and crew stops keeping it out of new launches too.
+        const cli = str(event.cli);
+        if (cli !== undefined) this.liftBench(cli, at);
         return;
       }
       case 'acpFallback': {
@@ -649,13 +754,17 @@ export class SeatHealthTracker {
   recentBenchFor(key: string, nowMs = Date.now()): SeatRecentBench | null {
     const rec = this.recentBenches.get(key);
     if (rec === undefined) return null;
-    if (nowMs - rec.at >= SEAT_BENCH_WINDOW_MS) {
+    if (nowMs >= rec.until) {
+      // Lifted by its clock: its strikes stay, so a seat that is still out of quota backs off
+      // for longer on its next bench.
       this.recentBenches.delete(key);
       return null;
     }
     return {
       at: new Date(rec.at).toISOString(),
-      until: new Date(rec.at + SEAT_BENCH_WINDOW_MS).toISOString(),
+      until: new Date(rec.until).toISOString(),
+      untilSource: rec.untilSource,
+      strikes: rec.strikes,
       reason: rec.reason,
       source: rec.source,
       ...(rec.session !== undefined ? { run: rec.session } : {}),

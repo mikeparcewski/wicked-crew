@@ -39,10 +39,18 @@ export interface RecentBenchWire {
   runs: number;
   /** ISO-8601 of the latest bench. */
   last_at: string;
-  /** ISO-8601 of when crew stops carrying the bench to new launches (sooner on an ok turn). This is
-   *  crew's window, not a provider reset time: no provider states one on the wire today. */
+  /** ISO-8601 of when crew stops carrying the bench to new launches (sooner on an ok turn). (J4) For a
+   *  quota bench it is the engine's lift time (`until_source: 'engine'`: the provider's reset time when
+   *  the refusal stated one, else the engine's backoff) or crew's backoff of 15, 30, then 60 minutes
+   *  by `strikes` (`'backoff'`); any other kind keeps crew's 30-minute window (`'window'`). */
   lifts_at: string;
-  /** Who benched it in the run: `worker` or `judge`. */
+  /** (J4) Where `lifts_at` came from. */
+  until_source: 'engine' | 'backoff' | 'window';
+  /** (J4) The seat's quota benches in a row with no good turn between (the backoff step); 0 on a
+   *  non-quota bench. */
+  strikes: number;
+  /** Who benched it in the run: `worker`, `judge`, or (J4) `reprobe` — its quota bench fell due and
+   *  it did not answer the engine's re-probe. */
   source: string;
   /** The engine's own reason, verbatim (Technical details). */
   reason: string;
@@ -59,6 +67,8 @@ export function recentBenchWire(bench: SeatRecentBench): RecentBenchWire {
     runs: bench.runs,
     last_at: bench.at,
     lifts_at: bench.until,
+    until_source: bench.untilSource,
+    strikes: bench.strikes,
     source: bench.source,
     reason: bench.reason,
   };

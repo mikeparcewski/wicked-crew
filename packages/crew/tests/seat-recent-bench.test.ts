@@ -25,7 +25,7 @@ import { AuditLog } from '../src/api/audit.js';
 import { auditSeatBenchStore, readSeatBenchEntries, SEAT_BENCHED_ACTION } from '../src/api/seat-bench-trail.js';
 
 import { rosterWithStandingFactory } from '../src/api/roster-standing.js';
-import { SEAT_BENCH_WINDOW_MS, SeatHealthTracker } from '../src/api/seat-health.js';
+import { SEAT_BENCH_MAX_MS, SEAT_BENCH_WINDOW_MS, SeatHealthTracker, quotaBackoffMs } from '../src/api/seat-health.js';
 import { eligibleSeatKeys, engineRosterJson } from '../src/core/engine-roster.js';
 import type { CoreEvent } from '../src/core/types.js';
 
@@ -69,7 +69,8 @@ describe('a seat the engine benched in a run is benched at the next launch (seat
     expect(copilot.council_eligible).toBe(false);
     const reason = String(copilot.council_ineligible_reason);
     expect(reason).toMatch(/^recent quota_exhausted — the engine benched it in run 1a2b3c4d at \d\d:\d\dZ \(worker: quota_exhausted \(no success in the run\)\); eligible again at \d\d:\d\dZ/);
-    expect(reason).toContain(`eligible again at ${new Date(now + SEAT_BENCH_WINDOW_MS).toISOString().slice(11, 16)}Z`);
+    // (J4) A first quota bench lifts after the first backoff step (15 min), not the 30-min window.
+    expect(reason).toContain(`eligible again at ${new Date(now + quotaBackoffMs(1)).toISOString().slice(11, 16)}Z`);
 
     // What `launchRun` hands the engine: the launcher's bench verdict, with the short cause the
     // engine prints in `unitDistributed.degradedReason` (`copilot (recent quota_exhausted — launcher)`).
@@ -79,13 +80,13 @@ describe('a seat the engine benched in a run is benched at the next launch (seat
     expect(eligibleSeatKeys(roster)).toEqual(['claude', 'opencode']);
   });
 
-  it('recovers: eligible again once the window has passed, still benched inside it', () => {
+  it('recovers: eligible again once the bench has lifted, still benched before', () => {
     const inside = new SeatHealthTracker();
-    inside.ingest(copilotBenched(Date.now() - SEAT_BENCH_WINDOW_MS + 60_000));
+    inside.ingest(copilotBenched(Date.now() - quotaBackoffMs(1) + 60_000));
     expect(rosterOver(inside)().find((s) => s.key === 'copilot')!.council_eligible).toBe(false);
 
     const expired = new SeatHealthTracker();
-    expired.ingest(copilotBenched(Date.now() - SEAT_BENCH_WINDOW_MS - 1_000));
+    expired.ingest(copilotBenched(Date.now() - quotaBackoffMs(1) - 1_000));
     const copilot = rosterOver(expired)().find((s) => s.key === 'copilot')!;
     expect(copilot.council_eligible).toBe(true);
     expect(copilot.council_ineligible_reason).toBeUndefined();
@@ -201,7 +202,7 @@ describe('a bench survives a daemon restart (crew#1071)', () => {
     expect(second.tracker.recentBenchFor('copilot', now)).toEqual(first.tracker.recentBenchFor('copilot', now));
     const copilot = rosterOver(second.tracker)().find((s) => s.key === 'copilot')!;
     expect(copilot.council_eligible).toBe(false);
-    expect(copilot.recent_bench).toMatchObject({ kind: 'quota_exhausted', lifts_at: new Date(now - 60_000 + SEAT_BENCH_WINDOW_MS).toISOString() });
+    expect(copilot.recent_bench).toMatchObject({ kind: 'quota_exhausted', lifts_at: new Date(now - 60_000 + quotaBackoffMs(1)).toISOString(), strikes: 1, until_source: 'backoff' });
     // …and the ask path refuses it by the same verdict.
     expect((copilot.chat_admission as Record<string, unknown>)['unscoped']).toMatchObject({ ok: false, source: 'engine' });
   }));
@@ -232,4 +233,107 @@ describe('a bench survives a daemon restart (crew#1071)', () => {
     expect(await second.audit.readAll({ action: SEAT_BENCHED_ACTION })).toHaveLength(1);
     expect(second.tracker.recentBenchFor('copilot', now)?.runs).toBe(1);
   }));
+
+  it("(J4) a restart keeps a bench's own lift time and its strikes, even after it lifted", withTrail(async (path) => {
+    const now = Date.now();
+    const first = await boot(path, now);
+    // Benched 40 min ago (lifted after 15), benched again 5 min ago: the second step, 30 min.
+    first.tracker.ingest(ev({ type: 'seatBenched', session: 'r1', ord: 1, cli: 'copilot', reason: 'quota_exhausted', source: 'worker', ts: now - 40 * 60_000 }));
+    first.tracker.ingest(ev({ type: 'seatBenched', session: 'r2', ord: 1, cli: 'copilot', reason: 'quota_exhausted', source: 'worker', ts: now - 5 * 60_000 }));
+    // The engine's own lift time survives too.
+    first.tracker.ingest(ev({ type: 'seatBenched', session: 'r3', ord: 1, cli: 'opencode', reason: 'quota_exhausted', source: 'judge', benchedUntilMs: now + 3 * 60 * 60_000, ts: now - 60_000 }));
+    await first.audit.flush();
+    const second = await boot(path, now);
+    expect(second.tracker.recentBenchFor('copilot', now)).toMatchObject({ strikes: 2, until: new Date(now - 5 * 60_000 + quotaBackoffMs(2)).toISOString() });
+    expect(second.tracker.recentBenchFor('opencode', now)).toMatchObject({ untilSource: 'engine', until: new Date(now + 3 * 60 * 60_000).toISOString() });
+  }));
+});
+
+// PRODUCT-WORKS J4: on the rig, copilot was benched for quota (429) on 10-24 and never re-checked, so
+// every later review had no distinct judge and the operator judged instead. A quota bench now lifts on
+// its own clock: the engine's lift time when the frame carries one, else a 15 / 30 / 60-minute backoff.
+describe('a quota bench expires and backs off (PRODUCT-WORKS J4)', () => {
+  const MIN = 60_000;
+  const benched = (ts: number, extra: Record<string, unknown> = {}, session = RUN): CoreEvent =>
+    ev({ type: 'seatBenched', session, ord: 2, cli: 'copilot', reason: 'quota_exhausted (no success in the run)', source: 'worker', ts, ...extra });
+
+  it('the backoff is 15, then 30, then 60 minutes, and stays at 60', () => {
+    expect([1, 2, 3, 4, 9].map(quotaBackoffMs)).toEqual([15 * MIN, 30 * MIN, 60 * MIN, 60 * MIN, 60 * MIN]);
+  });
+
+  it('a bench expires and the seat returns; a refusal again re-benches it for longer; a good turn resets the backoff', () => {
+    const tracker = new SeatHealthTracker();
+    const t0 = Date.now() - 3 * 60 * MIN;
+    tracker.ingest(benched(t0));
+    expect(tracker.recentBenchFor('copilot', t0 + 14 * MIN)).toMatchObject({ strikes: 1, untilSource: 'backoff' });
+    expect(tracker.recentBenchFor('copilot', t0 + 15 * MIN)).toBeNull();
+    // Still out of quota on its next run: benched again, for 30 minutes.
+    const t1 = t0 + 20 * MIN;
+    tracker.ingest(benched(t1, {}, 'run-2'));
+    expect(tracker.recentBenchFor('copilot', t1 + 1)).toMatchObject({ strikes: 2, until: new Date(t1 + 30 * MIN).toISOString() });
+    expect(tracker.recentBenchFor('copilot', t1 + 30 * MIN)).toBeNull();
+    const t2 = t1 + 31 * MIN;
+    tracker.ingest(benched(t2, {}, 'run-3'));
+    expect(tracker.recentBenchFor('copilot', t2 + 1)).toMatchObject({ strikes: 3, until: new Date(t2 + 60 * MIN).toISOString() });
+    // A good turn: the bench lifts and the backoff starts over.
+    tracker.markActive('copilot', t2 + 2);
+    expect(tracker.recentBenchFor('copilot', t2 + 3)).toBeNull();
+    tracker.ingest(benched(t2 + 10, {}, 'run-4'));
+    expect(tracker.recentBenchFor('copilot', t2 + 11)).toMatchObject({ strikes: 1, until: new Date(t2 + 10 + 15 * MIN).toISOString() });
+  });
+
+  it("the same run benching the seat twice while it is out is one step, not two", () => {
+    const tracker = new SeatHealthTracker();
+    const t0 = Date.now();
+    tracker.ingest(benched(t0));
+    tracker.ingest(ev({ type: 'seatBenched', session: RUN, ord: 3, cli: 'copilot', reason: 'quota_exhausted (no success in the run)', source: 'judge', ts: t0 + 1_000 }));
+    expect(tracker.recentBenchFor('copilot', t0 + 2_000)).toMatchObject({ strikes: 1, runs: 1 });
+  });
+
+  it("uses the engine's lift time (the provider's reset time), bounded to a week", () => {
+    const tracker = new SeatHealthTracker();
+    const t0 = Date.now();
+    tracker.ingest(benched(t0, { benchedUntilMs: t0 + 95 * MIN }));
+    expect(tracker.recentBenchFor('copilot', t0 + 1)).toMatchObject({ untilSource: 'engine', until: new Date(t0 + 95 * MIN).toISOString() });
+    const far = new SeatHealthTracker();
+    far.ingest(benched(t0, { benchedUntilMs: t0 + 30 * 24 * 60 * MIN }));
+    expect(far.recentBenchFor('copilot', t0 + 1)?.until).toBe(new Date(t0 + SEAT_BENCH_MAX_MS).toISOString());
+    // A lift time in the past is not a lift time: the backoff applies.
+    const stale = new SeatHealthTracker();
+    stale.ingest(benched(t0, { benchedUntilMs: t0 - 1 }));
+    expect(stale.recentBenchFor('copilot', t0 + 1)).toMatchObject({ untilSource: 'backoff', until: new Date(t0 + 15 * MIN).toISOString() });
+  });
+
+  it("a failed engine re-probe (source `reprobe`) re-benches it; the engine's `seatBenchLifted` brings it back", () => {
+    const tracker = new SeatHealthTracker();
+    const t0 = Date.now();
+    tracker.ingest(benched(t0));
+    tracker.ingest(ev({ type: 'seatBenched', session: RUN, ord: 4, cli: 'copilot', reason: 'quota_exhausted (no success in the run)', source: 'reprobe', benchedUntilMs: t0 + 45 * MIN, ts: t0 + 15 * MIN }));
+    expect(tracker.recentBenchFor('copilot', t0 + 16 * MIN)).toMatchObject({ source: 'reprobe', untilSource: 'engine', until: new Date(t0 + 45 * MIN).toISOString() });
+    tracker.ingest(ev({ type: 'seatBenchLifted', session: RUN, ord: 5, cli: 'copilot', reason: 'quota_exhausted (no success in the run)', ts: t0 + 46 * MIN }));
+    expect(tracker.recentBenchFor('copilot', t0 + 46 * MIN + 1)).toBeNull();
+    expect(eligibleSeatKeys(rosterOver(tracker)())).toEqual(['claude', 'copilot', 'opencode']);
+  });
+
+  it('a non-quota bench keeps the 30-minute window', () => {
+    const tracker = new SeatHealthTracker();
+    const t0 = Date.now();
+    tracker.ingest(ev({ type: 'seatBenched', session: RUN, ord: 1, cli: 'opencode', reason: 'not_installed', source: 'worker', ts: t0 }));
+    expect(tracker.recentBenchFor('opencode', t0 + 1)).toMatchObject({ strikes: 0, untilSource: 'window', until: new Date(t0 + SEAT_BENCH_WINDOW_MS).toISOString() });
+  });
+
+  it('the roster carries benchedUntil and benchReason for the Nerve Center while the bench stands', () => {
+    const tracker = new SeatHealthTracker();
+    const now = Date.now();
+    tracker.ingest(benched(now, { benchedUntilMs: now + 20 * MIN }));
+    const roster = rosterOver(tracker)();
+    const copilot = roster.find((s) => s.key === 'copilot')!;
+    expect(copilot.benchedUntil).toBe(new Date(now + 20 * MIN).toISOString());
+    expect(copilot.benchReason).toBe(copilot.council_ineligible_reason);
+    expect(String(copilot.benchReason)).toMatch(/^recent quota_exhausted — the engine benched it in run 1a2b3c4d/);
+    expect(copilot.recent_bench).toMatchObject({ lifts_at: copilot.benchedUntil, until_source: 'engine', strikes: 1 });
+    const claude = roster.find((s) => s.key === 'claude')!;
+    expect(claude.benchedUntil).toBeUndefined();
+    expect(claude.benchReason).toBeUndefined();
+  });
 });
