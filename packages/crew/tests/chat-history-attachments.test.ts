@@ -204,6 +204,15 @@ describe('the history store', () => {
     expect(att.count(kept)).toBe(0);
   });
 
+  it('under auth: required an entry is visible to its opener only; local mode sees all', () => {
+    const { history } = setup('h5');
+    history.opened('mine', { cli: null, actorId: 'alice' });
+    expect(history.visibleTo('mine', 'alice')).toBe(true);
+    expect(history.visibleTo('mine', 'bob')).toBe(false);
+    expect(history.visibleTo('mine', null)).toBe(true);
+    expect(history.visibleTo('nope', null)).toBe(false);
+  });
+
   it('boot closes what the previous process left open, keeping the transcript', () => {
     const { history, say } = setup('h4');
     history.opened('left-open', { cli: null, actorId: null });

@@ -239,6 +239,14 @@ export class ChatHistoryStore {
     };
   }
 
+  /** Whether `actorId` may see the entry: entries are per opener under `auth: required`
+   *  (`actorId` null = local mode, everyone). An unknown id is nobody's. */
+  visibleTo(id: string, actorId: string | null): boolean {
+    const e = this.read(id);
+    if (e === null) return false;
+    return actorId === null || e.actorId === null || e.actorId === actorId;
+  }
+
   /** One entry, or null. `liveCli`: the answering CLI the live path knows now. */
   entry(id: string, liveCli?: string | null, isLive?: (id: string) => boolean): ChatHistoryEntry | null {
     const e = this.read(id);

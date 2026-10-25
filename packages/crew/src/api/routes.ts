@@ -4341,9 +4341,13 @@ export function registerRoutes(
     const { id } = req.params as { id: string };
     const ended = await endChat(id);
     if (!ended.ok) return reply.code(400).send({ error: ended.error });
-    // DES-SYSTEM-CHAT: DELETE also deletes the chat's history and attachments (POST /close keeps them).
-    chatHistory?.remove(id);
-    chatAttachments.removeChat(id);
+    // DES-SYSTEM-CHAT: DELETE also deletes the chat's history and attachments (POST /close keeps them)
+    // — under `auth: required` only its opener's.
+    const viewer = security.authMode === 'required' ? actorOf(req).id : null;
+    if (chatHistory === null || chatHistory.entry(id) === null || chatHistory.visibleTo(id, viewer)) {
+      chatHistory?.remove(id);
+      chatAttachments.removeChat(id);
+    }
     return { ok: true };
   });
 
@@ -4354,7 +4358,9 @@ export function registerRoutes(
     async (req, reply) => {
       const { id } = req.params as { id: string };
       if (chatHistory === null) return reply.code(501).send({ error: 'this daemon keeps no chat history' });
-      if (chatHistory.entry(id) === null && askPaths.get(id) === undefined) {
+      const viewer = security.authMode === 'required' ? actorOf(req).id : null;
+      const known = chatHistory.entry(id) !== null;
+      if ((!known && askPaths.get(id) === undefined) || (known && !chatHistory.visibleTo(id, viewer))) {
         return reply.code(404).send({ error: `no chat ${id} on this daemon` });
       }
       const ended = await endChat(id);
@@ -4374,8 +4380,9 @@ export function registerRoutes(
     async (req, reply) => {
       const { id } = req.params as { id: string };
       if (chatHistory === null) return reply.code(501).send({ error: 'this daemon keeps no chat history' });
-      const chat = chatHistory.entry(id, askPaths.get(id)?.pa ?? null, (cid) => askPaths.get(cid) !== undefined);
-      const messages = chatHistory.messages(id);
+      const viewer = security.authMode === 'required' ? actorOf(req).id : null;
+      const chat = chatHistory.visibleTo(id, viewer) ? chatHistory.entry(id, askPaths.get(id)?.pa ?? null, (cid) => askPaths.get(cid) !== undefined) : null;
+      const messages = chat === null ? null : chatHistory.messages(id);
       if (chat === null || messages === null) return reply.code(404).send({ error: `no chat ${id} in this daemon's history` });
       return { chat, messages, attachments: chatAttachments.list(id) };
     },
@@ -4405,9 +4412,11 @@ export function registerRoutes(
       { config: { manifest: { requestType: 'multipart/form-data', responseType: 'ChatAttachmentUploadResponse', statusCodes: [201, 400, 404, 413, 415] } } },
       async (req, reply) => {
         const { id } = req.params as { id: string };
-        // Only a chat this daemon holds (open, or kept in its history) takes files.
-        if (askPaths.get(id) === undefined && chatHistory?.entry(id) == null) {
-          return reply.code(404).send({ error: `no chat ${id} on this daemon` });
+        // Only a chat open on this daemon takes files (a message can only be sent on one), and
+        // under `auth: required` only its opener's.
+        const viewer = security.authMode === 'required' ? actorOf(req).id : null;
+        if (askPaths.get(id) === undefined || (chatHistory !== null && chatHistory.entry(id) !== null && !chatHistory.visibleTo(id, viewer))) {
+          return reply.code(404).send({ error: `no open chat ${id} on this daemon` });
         }
         const boundary = boundaryOf(req.headers['content-type']);
         if (boundary === null || !Buffer.isBuffer(req.body)) {
