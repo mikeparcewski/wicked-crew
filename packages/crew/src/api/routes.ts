@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { listRequirements, getRequirement, patchRequirement } from './requirements.js';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,6 +18,7 @@ import type {
   ConformanceRule,
   CodeGraphData,
   AcpCliDiagnostics,
+  ChatAttachment,
   CoreEvent,
   DiagnosticsSeatGovernanceEntry,
   RecordedEvent,
@@ -27,6 +28,12 @@ import type {
 } from '../core/types.js';
 import { resolveCursorUnit } from '../core/cursor.js';
 import type { InteractionRequest } from '../core/types.js';
+
+/** Create `dir` (private) when missing and answer it — a read root must exist when a run launches. */
+function ensureDir(dir: string): string {
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  return dir;
+}
 
 /** {@link registerRoutes}'s one reading of a run's open gate rows (see `recordedOpenGate`). */
 type RecordedOpenGate =
@@ -216,6 +223,8 @@ import {
   type ErrorRing,
 } from './diagnostics.js';
 import { GovernanceDiagnostics } from './governance-health.js';
+import { ATTACHMENT_LIMITS, ATTACHMENT_MAX_MESSAGE_BYTES, AttachmentError, ChatAttachmentStore, attachmentWire, attachmentsBlock, boundaryOf, parseMultipart, stageForSeat } from './chat-attachments.js';
+import { CHAT_HISTORY_MAX_LIMIT, ChatHistoryStore, decodeCursor } from './chat-history.js';
 import {
   PROBE_TIMEOUT_MS,
   SYSTEM_BUDGET_MS,
@@ -1078,6 +1087,10 @@ export interface RuntimeDeps {
   /** DES-L5 (D-13): the chat transcript at rest — `GET /chats/:id.messages`. Absent ⇒ nothing is
    *  persisted and the field is omitted (a directly-driven route in tests). */
   chatTranscripts?: ChatTranscriptStore;
+  /** DES-SYSTEM-CHAT: the chat history (kept after a chat ends) and the chat attachments.
+   *  Absent ⇒ built here over the transcripts (a directly-driven route set). */
+  chatHistory?: ChatHistoryStore;
+  chatAttachments?: ChatAttachmentStore;
   /** Run→delivered-PR index (CREW-UX-8, crew#321) — `createServer` hydrates one from the audit
    *  trail so a restarted daemon still echoes `delivery`; a directly-driven route set gets a
    *  fresh one. */
@@ -1251,6 +1264,8 @@ export const ChatOpenSchema = z.object({
   scopeKind: z.enum(['system', 'everything', 'project', 'repo', 'repos', 'none']).optional(),
   /** (ASK-C1) The seat the operator chose as the primary agent; omitted ⇒ the engine picks at random. */
   primary: z.string().min(1).optional(),
+  /** (api-types 0.137.0, DES-SYSTEM-CHAT) The page the chat was started on, for the history list. */
+  startedOn: z.object({ route: z.string().min(1).max(512), label: z.string().min(1).max(200) }).strict().optional(),
 }).strict();
 
 /**
@@ -1375,6 +1390,8 @@ export function registerRoutes(
   const chatTurns = runtime.chatTurns ?? new ChatTurnIndex();
   const askPaths = runtime.askPaths ?? new AskPathIndex();
   const chatTranscripts = runtime.chatTranscripts;
+  const chatAttachments = runtime.chatAttachments ?? new ChatAttachmentStore();
+  const chatHistory = runtime.chatHistory ?? (chatTranscripts !== undefined ? new ChatHistoryStore(chatTranscripts, chatAttachments) : null);
   const deliveryIndex = runtime.deliveryIndex ?? new DeliveryIndex();
   // Wave 6: the doc↔run binding and the registered test sets — `createServer` injects the real
   // ones; a directly-driven route set gets an empty index (every run `document_id: null`, no sets).
@@ -1782,6 +1799,9 @@ export function registerRoutes(
       launchPrimary: true,
       // api-types 0.136.0 (DES-SYSTEM-VIEW): `GET /system`, the Nerve Center snapshot, is served.
       system: true,
+      // api-types 0.137.0 (DES-SYSTEM-CHAT): the chat history (list, reopen, close) and attachments.
+      chatList: chatHistory !== null,
+      chatAttachments: true,
     };
     // wicked-core#411 / crew#497: the state-home blocker rides the health probe as a WARNING. The
     // daemon still SERVES (status stays ok — studio must load and show the blocker) but refuses to
@@ -3682,6 +3702,16 @@ export function registerRoutes(
         // DC-S7: only a chat that actually OPENED is preface-eligible — recorded here, after the scope
         // is published, so a refused open leaves no per-chat state behind (codex r1).
         considerations.noteChatOpen(chatId, inForceAtOpen);
+        // DES-SYSTEM-CHAT: the history entry (kept after the chat ends; only DELETE removes it).
+        try {
+          chatHistory?.opened(chatId, {
+            startedOn: b.startedOn,
+            cli: b.primary ?? clis[0] ?? null,
+            actorId: security.authMode === 'required' ? actorOf(req).id : null,
+          });
+        } catch (err) {
+          req.log.warn({ chatId }, `chat history entry not written: ${message(err)}`);
+        }
         // The thread learns of every refused seat the way it learns of everything else — a frame
         // on /ws — AFTER the scope is published, so a reader never sees a refusal for a chat it
         // cannot yet look up.
@@ -3744,6 +3774,8 @@ export function registerRoutes(
   const ChatMessageSchema = z.object({
     text: z.string().min(1).max(65536),
     targets: z.array(z.string().min(1)).min(1).max(8).optional(),
+    /** (api-types 0.137.0) Attachment ids from `POST /chats/:id/attachments`. */
+    attachments: z.array(z.string().min(1).max(64)).max(64).optional(),
   }).strict();
   // F-RECON-017: a message sent while a targeted seat is still answering the previous one is
   // REFUSED, not queued. The engine queues silently (the worker gets the text the instant the
@@ -3773,6 +3805,19 @@ export function registerRoutes(
       return reply.code(409).send({ error: `chat '${id}' has no eligible seat — sign a seat in and re-seat it (POST /chats/:id/seats)` });
     }
     const text = parsed.data.text;
+    // DES-SYSTEM-CHAT: the attachments this message carries — every id this chat's, within the caps,
+    // refused before anything is reserved or sent.
+    let attached: Array<ChatAttachment & { path: string }> = [];
+    if (parsed.data.attachments !== undefined && parsed.data.attachments.length > 0) {
+      try {
+        attached = chatAttachments.resolve(id, parsed.data.attachments);
+      } catch (err) {
+        if (err instanceof AttachmentError) return reply.code(err.status).send(err.body());
+        throw err;
+      }
+    }
+    // What the seats receive: the operator's words, then the attachments block (paths + text).
+    let seatText = text;
     let scope = chatScopes.get(id);
     const storedScope = scope;
     let engine = chatScopes.engineOf(id);
@@ -3812,7 +3857,7 @@ export function registerRoutes(
       try {
         after();
         if (preface !== null) chatTranscripts?.appendSystem(id, turnId, preface);
-        chatTranscripts?.appendUser(id, turnId, text, voice);
+        chatTranscripts?.appendUser(id, turnId, text, voice, attached.map(attachmentWire));
         // The recorder's audience is the turn's AS THE TURN INDEX HOLDS IT NOW: the eligible roster
         // for a random pick, or the PA the relay narrowed it to during the engine awaits above
         // (`path.started` / `path.repicked` may land before this record exists — ASK-C2, codex on
@@ -3834,7 +3879,7 @@ export function registerRoutes(
     };
     // DC-S7: the rules the chat's seats were told about ride the step's instructions, as the
     // preface rode a pool send; told only once the send is accepted (`commit`).
-    const withPreface = (preface: string | null): string => (preface !== null ? `${preface}\n\n${text}` : text);
+    const withPreface = (preface: string | null): string => (preface !== null ? `${preface}\n\n${seatText}` : seatText);
     try {
       const rules = (await considerations.inForceFor(scope?.projectId ?? null)).rules;
       // crew#1020: a project/everything chat must see repos attached since open. Admission was
@@ -3917,6 +3962,21 @@ export function registerRoutes(
           chatTranscripts?.registerRoots(id, scope.repos.map((r) => ({ absRoot: resolve(r.rootPath), name: r.name })));
         }
       }
+      // DES-SYSTEM-CHAT: stage the attachments read-only in the chat's scratch root (a read root of
+      // its run since launch) and list them in the turn's instructions.
+      const attachRoot = scope !== undefined ? join(scope.cwd, 'attachments') : null;
+      if (attached.length > 0) {
+        if (attachRoot === null) {
+          askPaths.release(id, lease);
+          return reply.code(409).send({ error: `chat '${id}' has no scratch root to hand its attachments to the seat; nothing was sent` });
+        }
+        try {
+          seatText = `${text}\n${attachmentsBlock(stageForSeat(attached, attachRoot))}`;
+        } catch (err) {
+          askPaths.release(id, lease);
+          return reply.code(500).send({ error: `could not stage the attachments for the seat: ${message(err)}` });
+        }
+      }
       voice = path.pa !== null ? [path.pa] : [];
       // A random pick reserves every eligible seat until the relay names the PA.
       audience = voice.length > 0 ? voice : path.eligible;
@@ -3945,10 +4005,15 @@ export function registerRoutes(
           ...(scope?.kind === 'project' && codeGraphDb !== null ? { projectGraph: { dbPath: codeGraphDb } } : {}),
           // crew#1034: the scope's repositories are the run's read roots, graph or no graph — the
           // statement tells the seats to read them at their paths, so the boundary must let them.
-          ...(readRoots.length > 0 ? { extraReadRoots: readRoots } : {}),
+          // DES-SYSTEM-CHAT: plus the chat's attachments directory, from launch (a run cannot gain a
+          // read root later), so a file attached on any later turn is readable too.
+          ...(readRoots.length > 0 || attachRoot !== null
+            ? { extraReadRoots: [...readRoots, ...(attachRoot !== null ? [ensureDir(attachRoot)] : [])] }
+            : {}),
         };
         const runId = await adapter.launchRun(input);
-        if (!askPaths.started(id, generation, runId, stepId, input.projectGraph?.dbPath ?? null, input.extraReadRoots ?? [])) {
+        // The scope's roots (not the attachments directory) are what a later turn compares against.
+        if (!askPaths.started(id, generation, runId, stepId, input.projectGraph?.dbPath ?? null, readRoots)) {
           // The chat was closed (End) while the launch was in flight: the run must not outlive it.
           await adapter.cancelRun(runId).catch(() => undefined);
           if (turn !== null) chatTurns.abort(id, turn.turnId);
@@ -4118,7 +4183,32 @@ export function registerRoutes(
   app.get(
     `${V}/chats`,
     { config: { manifest: { responseType: 'ChatListResponse', statusCodes: [200, 400, 501] } } },
-    async (_req, reply) => {
+    async (req, reply) => {
+    // DES-SYSTEM-CHAT (api-types 0.137.0): the paged history rides beside the live rows.
+    const q = req.query as { limit?: string | string[]; cursor?: string | string[]; status?: string | string[] };
+    const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
+    const limitRaw = one(q.limit);
+    const limit = limitRaw === undefined ? undefined : Number(limitRaw);
+    if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > CHAT_HISTORY_MAX_LIMIT)) {
+      return reply.code(400).send({ error: `\`limit\` must be a whole number from 1 to ${CHAT_HISTORY_MAX_LIMIT}` });
+    }
+    const cursor = one(q.cursor);
+    if (cursor !== undefined && decodeCursor(cursor) === null) return reply.code(400).send({ error: '`cursor` is not a cursor this daemon issued' });
+    const status = one(q.status) ?? 'all';
+    if (status !== 'all' && status !== 'open' && status !== 'closed') {
+      return reply.code(400).send({ error: '`status` must be open, closed or all' });
+    }
+    const history =
+      chatHistory === null
+        ? {}
+        : chatHistory.list({
+            ...(limit !== undefined ? { limit } : {}),
+            cursor: cursor ?? null,
+            status,
+            actorId: security.authMode === 'required' ? actorOf(req).id : null,
+            liveCli: (cid) => askPaths.get(cid)?.pa ?? null,
+            isLive: (cid) => askPaths.get(cid) !== undefined,
+          });
     try {
       const pool = await adapter.chatList().catch((err: unknown) => {
         if (err instanceof ChatUnsupportedError) return [];
@@ -4136,7 +4226,7 @@ export function registerRoutes(
         };
       });
       const seen = new Set(paths.map((p) => p.chatId));
-      return { chats: [...paths, ...pool.filter((c) => !seen.has(c.chatId))] };
+      return { chats: [...paths, ...pool.filter((c) => !seen.has(c.chatId))], ...history };
     } catch (err) {
       // A build that cannot do chat is a capability gap, not a bad request: 501 tells an operator to
       // upgrade rather than to fix a call that was already correct. Branching on the type, not on
@@ -4201,14 +4291,17 @@ export function registerRoutes(
     },
   );
 
-  app.delete(`${V}/chats/:id`, async (req, reply) => {
-    const { id } = req.params as { id: string };
+  // Ending a chat — shared by DELETE (end + delete its history) and POST /close (end, keep it).
+  const endChat = async (id: string): Promise<{ ok: true } | { ok: false; error: string }> => {
+    // DES-SYSTEM-CHAT: the answering CLI the history names is the path's PA, while it is known.
+    const pa = askPaths.get(id)?.pa;
+    if (pa !== undefined && pa !== null) chatHistory?.setCli(id, pa);
     // The scratch root goes with the chat at once, whether or not the engine still knew it
     // (crew#502). ASK-C1: the daemon owns the close, so the id is HELD — no grace timer — until
     // this close settles below; a reopen meanwhile is refused and a second DELETE joins this one
     // (nothing of the closed chat can land on a reuse — codex on #808 r5).
     const ticket = chatScopes.holdClose(id);
-    if (ticket === null) return { ok: true };
+    if (ticket === null) return { ok: true as const };
     chatTurns.closed(id);
     // ASK-C1: End cancels the path (`path.ended{status:"cancelled"}`); the engine holds no chat
     // row for an ask, so the daemon closes the id itself and the transcript follows the chat
@@ -4235,13 +4328,100 @@ export function registerRoutes(
         runtime.broadcast?.(frame);
       }
       if (path?.runId !== undefined) await adapter.cancelRun(path.runId).catch(() => undefined);
-      return { ok: true };
+      return { ok: true as const };
     } catch (err) {
-      return reply.code(400).send({ error: message(err) });
+      return { ok: false as const, error: message(err) };
     } finally {
       // Never left held: a fold that threw frees the id here (its own close settles it otherwise).
       chatScopes.closeHeld(id, ticket);
     }
+  };
+
+  app.delete(`${V}/chats/:id`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const ended = await endChat(id);
+    if (!ended.ok) return reply.code(400).send({ error: ended.error });
+    // DES-SYSTEM-CHAT: DELETE also deletes the chat's history and attachments (POST /close keeps them).
+    chatHistory?.remove(id);
+    chatAttachments.removeChat(id);
+    return { ok: true };
+  });
+
+  // DES-SYSTEM-CHAT (api-types 0.137.0): end the chat and KEEP its history and attachments.
+  app.post(
+    `${V}/chats/:id/close`,
+    { config: { manifest: { responseType: 'ChatCloseResponse', statusCodes: [200, 400, 404, 501] } } },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      if (chatHistory === null) return reply.code(501).send({ error: 'this daemon keeps no chat history' });
+      if (chatHistory.entry(id) === null && askPaths.get(id) === undefined) {
+        return reply.code(404).send({ error: `no chat ${id} on this daemon` });
+      }
+      const ended = await endChat(id);
+      if (!ended.ok) return reply.code(400).send({ error: ended.error });
+      // The close fold archived it; a chat with no entry yet (opened before this release) gets none.
+      chatHistory.closed(id);
+      const chat = chatHistory.entry(id);
+      if (chat === null) return reply.code(404).send({ error: `chat ${id} has no history on this daemon` });
+      return { ok: true, chat };
+    },
+  );
+
+  // DES-SYSTEM-CHAT (api-types 0.137.0): reopen a chat — its records, live or kept.
+  app.get(
+    `${V}/chats/:id/messages`,
+    { config: { manifest: { responseType: 'ChatMessagesResponse', statusCodes: [200, 404, 501] } } },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      if (chatHistory === null) return reply.code(501).send({ error: 'this daemon keeps no chat history' });
+      const chat = chatHistory.entry(id, askPaths.get(id)?.pa ?? null, (cid) => askPaths.get(cid) !== undefined);
+      const messages = chatHistory.messages(id);
+      if (chat === null || messages === null) return reply.code(404).send({ error: `no chat ${id} in this daemon's history` });
+      return { chat, messages, attachments: chatAttachments.list(id) };
+    },
+  );
+
+  // DES-SYSTEM-CHAT (api-types 0.137.0): upload files to a chat (multipart/form-data). The body is
+  // buffered by a parser scoped to this route alone, capped a little over the per-message total;
+  // the per-file and per-message caps, and the types (decided from the bytes), are checked before
+  // anything is stored.
+  void app.register(async (scope) => {
+    scope.addContentTypeParser(
+      'multipart/form-data',
+      { parseAs: 'buffer', bodyLimit: ATTACHMENT_MAX_MESSAGE_BYTES + 1024 * 1024 },
+      (_req, body, done) => done(null, body),
+    );
+    scope.setErrorHandler((err, _req, reply) => {
+      if ((err as { code?: unknown }).code === 'FST_ERR_CTP_BODY_TOO_LARGE') {
+        return reply.code(413).send(new AttachmentError(413, 'attachments_too_large', `the upload is over the ${Math.round(ATTACHMENT_MAX_MESSAGE_BYTES / 1048576)} MiB limit per message`).body());
+      }
+      if ((err as { code?: unknown }).code === 'FST_ERR_CTP_INVALID_MEDIA_TYPE') {
+        return reply.code(400).send(new AttachmentError(400, 'attachment_malformed', 'upload files as multipart/form-data').body());
+      }
+      return reply.send(err);
+    });
+    scope.post(
+      `${V}/chats/:id/attachments`,
+      { config: { manifest: { requestType: 'multipart/form-data', responseType: 'ChatAttachmentUploadResponse', statusCodes: [201, 400, 404, 413, 415] } } },
+      async (req, reply) => {
+        const { id } = req.params as { id: string };
+        // Only a chat this daemon holds (open, or kept in its history) takes files.
+        if (askPaths.get(id) === undefined && chatHistory?.entry(id) == null) {
+          return reply.code(404).send({ error: `no chat ${id} on this daemon` });
+        }
+        const boundary = boundaryOf(req.headers['content-type']);
+        if (boundary === null || !Buffer.isBuffer(req.body)) {
+          return reply.code(400).send(new AttachmentError(400, 'attachment_malformed', 'upload files as multipart/form-data with a boundary').body());
+        }
+        try {
+          const attachments = chatAttachments.add(id, parseMultipart(req.body, boundary));
+          return reply.code(201).send({ attachments, limits: ATTACHMENT_LIMITS });
+        } catch (err) {
+          if (err instanceof AttachmentError) return reply.code(err.status).send(err.body());
+          throw err;
+        }
+      },
+    );
   });
 
   // A unit's captured transcript. `unitKey` accepts the fully-qualified id (`run-1:survey`),

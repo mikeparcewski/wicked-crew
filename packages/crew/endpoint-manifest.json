@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.136.0",
+  "apiTypesVersion": "0.137.0",
   "endpoints": [
     {
       "method": "GET",
@@ -130,6 +130,42 @@
       "statusCodes": [
         200,
         400
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/chats/:id/attachments",
+      "requestType": "multipart/form-data",
+      "responseType": "ChatAttachmentUploadResponse",
+      "statusCodes": [
+        201,
+        400,
+        404,
+        413,
+        415
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/chats/:id/close",
+      "requestType": null,
+      "responseType": "ChatCloseResponse",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        501
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/chats/:id/messages",
+      "requestType": null,
+      "responseType": "ChatMessagesResponse",
+      "statusCodes": [
+        200,
+        404,
+        501
       ]
     },
     {

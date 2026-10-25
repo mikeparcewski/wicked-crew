@@ -373,7 +373,8 @@ describe('ASK-C1 — an ask starts a path: the open records eligibility and a ch
     await new Promise((r) => setTimeout(r, 20));
     // Mid-open: no path yet — a message finds nothing to launch against, and the list is empty.
     expect((await app.inject({ method: 'POST', url: '/api/v1/chats/live/messages', payload: { text: 'too early' } })).statusCode).toBe(409);
-    expect((await app.inject({ method: 'GET', url: '/api/v1/chats' })).json()).toEqual({ chats: [] });
+    // (api-types 0.137.0: the history `items` ride beside the live rows; the live rows are what this pins.)
+    expect((await app.inject({ method: 'GET', url: '/api/v1/chats' })).json().chats).toEqual([]);
     // End it while it is still opening, then reuse the id.
     expect((await app.inject({ method: 'DELETE', url: '/api/v1/chats/live' })).statusCode).toBe(200);
     const second = await open({ chatId: 'live', clis: ['claude'], repoRefs: ['alpha'] });
@@ -387,9 +388,9 @@ describe('ASK-C1 — an ask starts a path: the open records eligibility and a ch
     expect((res.json() as { error: string }).error).toMatch(/closed while it was being opened/);
     expect(existsSync(cwd), 'the replacement keeps its scratch root').toBe(true);
     expect(chatScopes.get('live')?.cwd).toBe(cwd);
-    expect((await app.inject({ method: 'GET', url: '/api/v1/chats' })).json()).toEqual({
-      chats: [{ chatId: 'live', seats: ['claude'], idleSecs: null, cwd, codeGraphDb: graphFile, readRoots: ['/srv/repos/alpha'] }],
-    });
+    expect((await app.inject({ method: 'GET', url: '/api/v1/chats' })).json().chats).toEqual(
+      [{ chatId: 'live', seats: ['claude'], idleSecs: null, cwd, codeGraphDb: graphFile, readRoots: ['/srv/repos/alpha'] }],
+    );
     holdAttach = null;
   });
 
@@ -610,8 +611,9 @@ describe('POST /chats/:id/messages — refresh dynamic scopes', () => {
     expect(chatScopes.engineOf('dynamic')?.readRoots).toEqual(['/srv/repos/alpha']);
     expect(launched[0]).toMatchObject({ projectId: 'p-live' });
     for (const field of ['cwd', 'readRoots', 'codeGraphDb']) expect(launched[0]).not.toHaveProperty(field);
-    // crew#1034: the repository is the run's read root whether or not the project graph is built.
-    expect(launched[0]?.extraReadRoots).toEqual(['/srv/repos/alpha']);
+    // crew#1034: the repository is the run's read root whether or not the project graph is built —
+    // and (DES-SYSTEM-CHAT) the chat's attachments directory, from launch; the compared roots stay the scope's.
+    expect(launched[0]?.extraReadRoots).toEqual(['/srv/repos/alpha', join(cwd, 'attachments')]);
     expect(askPaths.get('dynamic')?.launchReadRoots).toEqual(['/srv/repos/alpha']);
     for (const file of ['AGENTS.md', 'CLAUDE.md']) expect(readFileSync(join(cwd, file), 'utf8')).toContain('/srv/repos/alpha');
     expect(readFileSync(join(cwd, 'notes.txt'), 'utf8')).toBe('keep me');
@@ -823,10 +825,11 @@ describe('POST /chats/:id/messages — refresh dynamic scopes', () => {
     projectRepoRefs.push('r1');
     const binding = vi.spyOn(projectGraph, 'resolveProjectGraphBinding').mockResolvedValue({ binding: null, reason: 'not built yet' });
     try {
-      expect((await open({ chatId: 'no-graph', clis: ['claude'], projectId: 'p-live' })).statusCode).toBe(201);
+      const noGraph = await open({ chatId: 'no-graph', clis: ['claude'], projectId: 'p-live' });
+      expect(noGraph.statusCode).toBe(201);
       expect((await send('no-graph')).statusCode).toBe(202);
       expect(launched[0]).not.toHaveProperty('projectGraph');
-      expect(launched[0]?.extraReadRoots).toEqual(['/srv/repos/alpha']);
+      expect(launched[0]?.extraReadRoots).toEqual(['/srv/repos/alpha', join(noGraph.json().scope.cwd as string, 'attachments')]);
       // Unchanged roots and graph: the follow-up continues the same run.
       const propose = park('no-graph');
       expect((await send('no-graph')).statusCode).toBe(202);
@@ -871,10 +874,12 @@ describe('POST /chats/:id/messages — refresh dynamic scopes', () => {
 
   it('an everything chat refuses a repository registered after launch, and its empty statement says to start a new chat (crew#1034)', async () => {
     vi.mocked(adapter.listRepos).mockResolvedValueOnce([]);
-    expect((await open({ chatId: 'retry-scope', clis: ['claude'], scopeKind: 'everything' })).statusCode).toBe(201);
+    const retry = await open({ chatId: 'retry-scope', clis: ['claude'], scopeKind: 'everything' });
+    expect(retry.statusCode).toBe(201);
     vi.mocked(adapter.listRepos).mockResolvedValueOnce([]);
     expect((await send('retry-scope')).statusCode).toBe(202);
-    expect(launched[0]).not.toHaveProperty('extraReadRoots');
+    // No repository read root — only the chat's own attachments directory (DES-SYSTEM-CHAT).
+    expect(launched[0]?.extraReadRoots).toEqual([join(retry.json().scope.cwd as string, 'attachments')]);
     const propose = park('retry-scope');
     const storedScope = chatScopes.get('retry-scope');
     const sent = await send('retry-scope');
@@ -908,7 +913,7 @@ describe('POST /chats/:id/messages — refresh dynamic scopes', () => {
     expect(chatScopes.get('dynamic-all')?.repos.map((repo) => repo.id)).toEqual(['r1']);
     expect(chatScopes.engineOf('dynamic-all')?.readRoots).toEqual(['/srv/repos/alpha']);
     expect(launched).toHaveLength(1);
-    expect(launched[0]?.extraReadRoots).toEqual(['/srv/repos/alpha']);
+    expect(launched[0]?.extraReadRoots).toEqual(['/srv/repos/alpha', join(opened.json().scope.cwd as string, 'attachments')]);
   });
 
   it('refreshes a changed graph binding even with the same repository list', async () => {

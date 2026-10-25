@@ -100,6 +100,8 @@ import { ChatTranscriptStore } from './chat-transcripts.js';
 import { sweepDeliveredWorktree } from './worktree-sweep.js';
 import { installEndpointManifestHook } from './endpoint-manifest.js';
 import { WorkerStallWatchdog } from './stall-watchdog.js';
+import { ChatAttachmentStore } from './chat-attachments.js';
+import { ChatHistoryStore } from './chat-history.js';
 import { RunLivenessSampler } from './run-liveness.js';
 import { resumeRunningCampaigns } from '../campaign/boot-resume.js';
 import { resumeOrphanedRuns } from '../core/run-boot-resume.js';
@@ -1622,6 +1624,10 @@ export async function createServer(
   // written from the stamped frames below, dropped with the chat on `chatClosed`, served on
   // `GET /chats/:id.messages`.
   const chatTranscripts = new ChatTranscriptStore();
+  // DES-SYSTEM-CHAT: the chat history (entries + the transcripts kept when a chat ends) and the
+  // chat attachments, both under `<state home>/chats/`. Only DELETE /chats/:id removes either.
+  const chatAttachments = new ChatAttachmentStore();
+  const chatHistory = new ChatHistoryStore(chatTranscripts, chatAttachments);
   // Chat citations (crew#561, F-RC1-117): what the seat CITED, checked against the very read roots
   // the daemon handed it. Runs off the reply's own path — after the broadcast below — and publishes
   // one `chatCitations` frame per reply; the seat's text is never edited.
@@ -1696,6 +1702,10 @@ export async function createServer(
     // Clear orphaned transcripts at boot. Transcripts for promoted runs that are still
     // non-terminal (rehydrated above into chatRetained) are PRESERVED so Continue-in-Build
     // prefill remains reproducible across a daemon restart (crew#619).
+    // DES-SYSTEM-CHAT: the chats the previous process left open are closed into the history first,
+    // so clearing their live transcripts below never loses a conversation.
+    const kept = chatHistory.closeOrphaned();
+    if (kept > 0) app.log.info(`chat history: closed ${kept} chat(s) the previous daemon left open (history kept)`);
     chatTranscripts.clearOrphaned(new Set(chatRetained.keys()));
   }
   const onEngineEvent = (event: CoreEvent): void => {
@@ -1719,6 +1729,9 @@ export async function createServer(
       considerations?.chatClosed(event.chat);
       // crew#619: retain the transcript when a promoted run is still live — the chat may be
       // idle-TTL'd before the run finishes, and Continue-in-Build needs the transcript.
+      // DES-SYSTEM-CHAT: any close (Close, idle, pool cap, DELETE) keeps the transcript in the
+      // history first; DELETE then removes the history entry itself.
+      chatHistory.closed(event.chat);
       const retaining = chatRetained.get(event.chat);
       if (retaining === undefined || retaining.size === 0) {
         // ONE mechanism for DELETE / idle / pool_cap alike: the transcript goes with the chat.
@@ -2130,6 +2143,8 @@ export async function createServer(
       chatScopes,
       chatTurns,
       chatTranscripts,
+      chatHistory,
+      chatAttachments,
       deliveryIndex,
       // Wave 6: the doc↔run binding (F-4R2-006) and the registered test sets (F-7R2-014).
       docRuns,
