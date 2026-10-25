@@ -10,6 +10,14 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.15.9] — 2026-10-25
+
+A patch release: a new engine and studio. Deliver honors the operator's floor override on the same tree, base and checks, and the refused hand-over offers the operator's judgment when deliver's own re-verify fails. No crew source changed since 0.15.8. Pins: wicked-core-ts ^0.15.9, wicked-studio ^0.11.8, wicked-vault ^0.8.0, wicked-interactive ^0.14.1 (bridge floor, unchanged), wicked-crew-api-types 0.135.0 (unchanged).
+
+### Changed
+- **The engine is wicked-core-ts 0.15.9.** A run whose base was already red could not deliver: the operator overrode the failed floor at every gate, but deliver re-ran the full suites on the unchanged tree, got the same base red and refused. The ordinary guarded floor now records its exact identity (tree, base, and a digest of the stage, package dir and check set), the override carries that key, and deliver stands on the override without re-running the checks only when the tree it ships, its base, the check set it detects and the live worktree are all unchanged; it says so on the unit's output and never records the tree as verified. Anything different re-verifies as before. A failed deliver re-verify now offers "Approve as your own judgment" for exactly that result at the refusal gate; QE acceptance stays required (core#1115). Seat and floor image tags and the gate protocol (3) are unchanged.
+- **The bundled studio is wicked-studio 0.11.8.** The refused hand-over row offers "Approve as your own judgment" between "Deliver again" and "Stop" when the engine's clause sits in its own deliver options, with a required rationale (studio#895).
+
 ## [0.15.8] — 2026-10-25
 
 A patch release: a new engine. The floor override now also covers a judge that could not rule, and the repo-checks floor decides by exit codes and a per-repo build guide. No crew source changed since 0.15.7. Pins: wicked-core-ts ^0.15.8, wicked-studio ^0.11.7 (unchanged), wicked-vault ^0.8.0, wicked-interactive ^0.14.1 (bridge floor, unchanged), wicked-crew-api-types 0.135.0 (unchanged).
@@ -4382,7 +4390,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.8...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.9...HEAD
+[0.15.9]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.8...v0.15.9
 [0.15.8]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.7...v0.15.8
 [0.15.7]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.6...v0.15.7
 [0.15.6]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.5...v0.15.6
