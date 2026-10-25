@@ -10,6 +10,10 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.16.0] — 2026-10-25
+
+A minor release: `GET /api/v1/system`, the Nerve Center snapshot (#1137); the system chat's history, Close and attachments (#1140); a quota bench that lifts on its own clock (#1138); and the deliver script's temp files under `TMPDIR` (#1142). Bundles wicked-studio 0.12.0 and runs on wicked-core-ts 0.15.10. `wicked-crew-api-types` 0.137.0 (0.136.0 + 0.137.0) is on npm.
+
 ### Added
 - **The system chat's history, Close and attachments (`wicked-crew-api-types` 0.137.0, DES-SYSTEM-CHAT).** `GET /health.capabilities` gains `chatList` and `chatAttachments`.
   - `GET /api/v1/chats` now also answers `items` (each chat's id, title, the page it started on, its CLI, created and updated times, message and attachment counts, and status `open` or `closed`), newest first, paged with `?limit=`, `?cursor=` and `?status=`, beside the unchanged live `chats`. The title is the first message, trimmed. `POST /chats` takes `startedOn: {route, label}`.
@@ -24,6 +28,8 @@ mentioned only where a daemon release depends on them.
   - `attention[]` is the union of every item that needs a look, red before yellow, ordered by how much work it blocks; each carries a reason, a remedy, a link target and the one existing action that helps (Sign in, Re-check, open the gate or run). A benched or signed-out CLI that leaves a gate without a distinct judge is red. Every block of `GET /diagnostics` is reachable from the snapshot's rows; `/diagnostics` stays the raw dump.
 
 ### Changed
+- **The engine is wicked-core-ts 0.15.10.** A quota bench expires: the engine records `benched_until` (the provider's reset time, else a 15/30/60-minute backoff) and re-probes a due seat with one READY call before seating it again (core#1118); `seatBenched` gains `benchedUntilMs` and `seatBenchLifted` says a seat is back. `floor probe` writes the build guide back as it was written (core#1119).
+- **The bundled studio is wicked-studio 0.12.0.** Nerve Center on `/watch` and its rail tile (studio#901, reads `GET /api/v1/system`), the floating page-aware system chat with past chats and upload (studio#900, studio#904, reads `chatList` / `chatAttachments`), Settings as one page with General and Theme tabs (studio#905), and gate, session and plan cards that say what the engine recorded (studio#899, studio#902, studio#903).
 - **A quota bench lifts on its own clock, and the roster says when (PRODUCT-WORKS J4).** On the test rig copilot was benched for quota (429) on 10-24 and never re-checked; every later review had no distinct judge, and the operator judged instead. Crew carried an engine bench to new launches for a fixed 30 minutes. A quota bench (`quota_exhausted`, `usage_limit`) now lifts at the engine's `seatBenched.benchedUntilMs` when the frame carries one (the provider's reset time when the refusal stated one, else the engine's backoff; bounded to a week), else after a backoff of 15, then 30, then 60 minutes by the seat's quota benches in a row with no good turn between. Other kinds keep the 30-minute window. A `seatBenched` with `source: "reprobe"` (the engine re-probed a due seat and it did not answer) re-benches it; the new `seatBenchLifted` (it answered) lifts it. Lift time, source and strikes survive a restart through the bench trail, which the boot now reads back a week. `GET /roster` adds `benchedUntil` and `benchReason` on a benched seat (for the Nerve Center's `SystemCli.benchedUntil` / `stateReason`), and `recent_bench` gains `until_source` (`engine` | `backoff` | `window`) and `strikes`. Pairs with wicked-core's quota-bench expiry and re-probe.
 
 ### Fixed
@@ -4409,7 +4415,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.9...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.9...v0.16.0
 [0.15.9]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.8...v0.15.9
 [0.15.8]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.7...v0.15.8
 [0.15.7]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.6...v0.15.7
