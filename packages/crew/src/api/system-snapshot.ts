@@ -17,9 +17,11 @@
  * liveness verdict from fixtures; `routes.ts` wires the daemon's real readers.
  */
 
+import { spawn as nodeSpawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { accessSync, constants as fsConstants, statSync } from 'node:fs';
-import { statfs, stat } from 'node:fs/promises';
+import { setImmediate as yieldNow } from 'node:timers/promises';
+import { lstat, readFile, statfs, stat } from 'node:fs/promises';
 import { cpus, homedir, loadavg } from 'node:os';
 import { delimiter, join } from 'node:path';
 
@@ -43,6 +45,8 @@ import type {
   SystemState,
   SystemTarget,
 } from '../core/types.js';
+import { callEstateToolRaw, estateMcpExe } from '../core/estate-mcp-client.js';
+import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 import { runTouchesWindow } from './seat-record.js';
 
 // ── Bounds ──────────────────────────────────────────────────────────────────
@@ -259,7 +263,7 @@ export async function probeGateway(input: GatewayProbeInput): Promise<SystemInfr
   }
   const e = settled.error;
   const stderr = e.toLowerCase();
-  if (stderr.includes('no such')) {
+  if (/no such (?:object|container)/i.test(e)) {
     return infraRow(
       'gateway',
       'degraded',
@@ -358,8 +362,8 @@ export async function probeBroker(input: BrokerProbeInput): Promise<SystemInfraR
 export interface InteractiveProbeInput {
   /** The bridge roots this daemon knows (its default root and every pooled one). */
   roots: string[];
-  /** `<root>/.wi-serve.json`, or null (`bridge-pool.ts` `readLock`). */
-  readLock: (root: string) => { host: string; port: number; pid: number } | null;
+  /** `<root>/.wi-serve.json`, or null — read asynchronously, inside the probe's bound. */
+  readLock: (root: string) => Promise<{ host: string; port: number; pid: number } | null>;
   /** GET the bridge's `/api/health`; resolves the HTTP status. */
   health: (url: string, timeoutMs: number) => Promise<number>;
   timeoutMs?: number;
@@ -370,9 +374,15 @@ export interface InteractiveProbeInput {
 export async function probeInteractive(input: InteractiveProbeInput): Promise<SystemInfraRow> {
   const started = Date.now();
   const timeoutMs = input.timeoutMs ?? PROBE_TIMEOUT_MS;
-  const bridges = input.roots
-    .map((root) => ({ root, lock: input.readLock(root) }))
+  const locks = await Promise.all(input.roots.map(async (root) => ({ root, read: await settleWithin(() => input.readLock(root), timeoutMs) })));
+  const unread = locks.filter((l) => l.read.kind !== 'ok');
+  const bridges = locks
+    .map(({ root, read }) => ({ root, lock: read.kind === 'ok' ? read.value : null }))
     .filter((b): b is { root: string; lock: { host: string; port: number; pid: number } } => b.lock !== null);
+  if (bridges.length === 0 && unread.length > 0) {
+    const r = unread[0]!.read;
+    return infraRow('interactive', 'unknown', `the bridge lockfile could not be read (${r.kind === 'timeout' ? `no answer within ${secondsWord(timeoutMs)}` : r.kind === 'error' ? r.error : ''})`, 'Re-check.', started, { roots: input.roots.length }, timeoutMs);
+  }
   if (bridges.length === 0) {
     return infraRow('interactive', 'off', 'not running: crew starts the bridge when a document opens', null, started, { roots: input.roots.length });
   }
@@ -403,50 +413,94 @@ export async function probeInteractive(input: InteractiveProbeInput): Promise<Sy
   return infraRow('interactive', 'ok', `answering on ${results.map((r) => `port ${r.port}`).join(', ')}`, null, started, details, timeoutMs);
 }
 
+/** `<root>/.wi-serve.json` read asynchronously (the `bridge-pool.ts` `readLock` shape): a missing
+ *  file, a non-regular one (a FIFO, a link) or an incomplete record is `null`. */
+export async function readBridgeLockAsync(root: string): Promise<{ host: string; port: number; pid: number } | null> {
+  const path = join(root, '.wi-serve.json');
+  try {
+    const st = await lstat(path);
+    if (!st.isFile() || st.size > 64 * 1024) return null;
+    const raw = JSON.parse(await readFile(path, 'utf8')) as { host?: unknown; port?: unknown; pid?: unknown };
+    if (typeof raw.port !== 'number' || typeof raw.pid !== 'number') return null;
+    return { host: typeof raw.host === 'string' && raw.host !== '' ? raw.host : '127.0.0.1', port: raw.port, pid: raw.pid };
+  } catch {
+    return null;
+  }
+}
+
 export interface EstateProbeInput {
-  exe: string;
   /** The memory store the daemon reads and writes (`memoryStoreInfo`). */
   memoryStore: { path: string; source: string; notice: string | null };
-  exec: ExecLike;
+  /** One read-only call: `memory.coverage` on a `wicked-estate-mcp --readonly` (which opens an
+   *  existing store read-only and never creates one). Resolves the tool's JSON-RPC answer. */
+  call: (timeoutMs: number) => Promise<Record<string, unknown>>;
   /** Whether the store file exists (injectable for tests). */
-  exists?: (path: string) => boolean;
+  exists?: (path: string) => Promise<boolean>;
   timeoutMs?: number;
 }
 
-/** Estate, through one read-only call: `wicked-estate stats --db <memory store>`. */
+/** The production estate call: `memory.coverage` on a spawn-per-call `wicked-estate-mcp --readonly`
+ *  pinned to the daemon's memory store and to NO graph store (`:memory:`): a read-only server opens
+ *  an existing store without schema work and never creates one (wicked-estate 0.29). */
+export function estateReadonlyCall(memoryDbPath: string): (timeoutMs: number) => Promise<Record<string, unknown>> {
+  return (timeoutMs) =>
+    callEstateToolRaw('memory.coverage', {}, {
+      timeoutMs,
+      spawn: () =>
+        nodeSpawn(estateMcpExe(), ['--readonly'], {
+          stdio: ['pipe', 'pipe', 'pipe'],
+          env: { ...childEnvWithBootEstateDb(process.env), WICKED_MEMORY_DB: memoryDbPath, WICKED_ESTATE_DB: ':memory:' },
+          windowsHide: true,
+        }),
+    });
+}
+
+/** Estate, through one read-only MCP call on the daemon's memory store. */
 export async function probeEstate(input: EstateProbeInput): Promise<SystemInfraRow> {
   const started = Date.now();
   const timeoutMs = input.timeoutMs ?? PROBE_TIMEOUT_MS;
-  const details: Record<string, unknown> = { memoryStore: input.memoryStore, exe: input.exe };
-  const exists = input.exists ?? ((p: string): boolean => {
-    try {
-      return statSync(p).isFile();
-    } catch {
-      return false;
+  const details: Record<string, unknown> = { memoryStore: input.memoryStore, call: 'memory.coverage (--readonly)' };
+  const exists = input.exists ?? (async (p: string): Promise<boolean> => (await stat(p)).isFile());
+  if (input.memoryStore.path !== ':memory:') {
+    const present = await settleWithin(() => exists(input.memoryStore.path), timeoutMs);
+    if (present.kind === 'timeout') {
+      return infraRow('estate', 'unknown', `the memory store did not answer a stat within ${secondsWord(timeoutMs)}`, 'Re-check.', started, details, timeoutMs);
     }
-  });
-  if (input.memoryStore.path !== ':memory:' && !exists(input.memoryStore.path)) {
-    return infraRow('estate', 'degraded', 'the memory store has not been created yet: nothing has been remembered on this daemon', 'Nothing to fix; it is created on the first memory write.', started, details);
+    if (present.kind === 'error' || !present.value) {
+      return infraRow('estate', 'degraded', 'the memory store has not been created yet: nothing has been remembered on this daemon', 'Nothing to fix; it is created on the first memory write.', started, details);
+    }
   }
-  const settled = await settleWithin(() => input.exec(input.exe, ['stats', '--db', input.memoryStore.path], { timeout: timeoutMs }), timeoutMs);
+  const settled = await settleWithin(() => input.call(timeoutMs), timeoutMs);
   if (settled.kind === 'timeout') {
-    return infraRow('estate', 'unknown', `wicked-estate did not answer within ${secondsWord(timeoutMs)}`, 'Re-check; a store under a long write answers late.', started, details, timeoutMs);
+    return infraRow('estate', 'unknown', `wicked-estate-mcp did not answer within ${secondsWord(timeoutMs)}`, 'Re-check; a store under a long write answers late.', started, details, timeoutMs);
   }
   if (settled.kind === 'error') {
     const missing = settled.error.toLowerCase().includes('enoent');
     return infraRow(
       'estate',
       'down',
-      missing ? `${input.exe} is not installed or not on PATH` : `wicked-estate stats failed: ${settled.error}`,
-      missing ? 'Install wicked-estate (npx wicked-installer) or set WICKED_ESTATE_EXE, then re-check.' : 'Check the memory store with `wicked-estate stats`, then re-check.',
+      missing ? 'wicked-estate-mcp is not installed or not on PATH' : `wicked-estate-mcp failed: ${settled.error}`,
+      missing ? 'Install wicked-estate (npx wicked-installer) or set WICKED_ESTATE_MCP_EXE, then re-check.' : 'Check the memory store, then re-check.',
       started,
       { ...details, error: settled.error },
       timeoutMs,
     );
   }
-  const out = settled.value.stdout;
-  const nodes = /(\d+)\s+nodes?/i.exec(out)?.[1];
-  return infraRow('estate', 'ok', `answered${nodes !== undefined ? ` (${nodes} nodes)` : ''}`, null, started, { ...details, stats: out.slice(0, 400) }, timeoutMs);
+  const answer = settled.value;
+  const rpcError = answer['error'];
+  if (rpcError !== undefined && rpcError !== null) {
+    const msg = typeof (rpcError as { message?: unknown }).message === 'string' ? (rpcError as { message: string }).message.slice(0, 200) : 'an error';
+    return infraRow('estate', 'down', `estate answered ${msg}`, 'Check the memory store, then re-check.', started, { ...details, error: msg }, timeoutMs);
+  }
+  const text = (answer['result'] as { content?: Array<{ text?: unknown }> } | undefined)?.content?.[0]?.text;
+  let total: number | undefined;
+  try {
+    const parsed = typeof text === 'string' ? (JSON.parse(text) as { total?: unknown }) : null;
+    total = typeof parsed?.total === 'number' ? parsed.total : undefined;
+  } catch {
+    total = undefined;
+  }
+  return infraRow('estate', 'ok', `answered a read-only memory.coverage${total !== undefined ? ` (${total} memories)` : ''}`, null, started, details, timeoutMs);
 }
 
 export interface BusProbeInput {
@@ -594,6 +648,12 @@ const str = (v: unknown): string | undefined => (typeof v === 'string' && v !== 
 
 /** A rate / quota bench: the 429 class. */
 const RATE_LIMIT = /quota|rate[ _-]?limit|usage[ _-]?limit|429|too many requests/i;
+/** Frames folded between yields to the event loop. */
+const FOLD_YIELD_EVERY = 2_000;
+/** One run's event-log read inside the week fold; a read past it is skipped (`truncated`). */
+const RUN_READ_TIMEOUT_MS = 10_000;
+/** The whole week fold; past it the in-flight fold is dropped (never cached) and retried later. */
+export const WEEK_FOLD_MAX_MS = 90_000;
 
 export interface WeekFold {
   since: number;
@@ -634,10 +694,10 @@ function median(xs: number[]): number | null {
 
 /** Fold the window's runs into per-CLI stats and the governance week. Ownership follows
  *  `seat-record.ts` (`unitDistributed.cli`, moved by `unitReassigned.newCli`, else `assigned_cli`). */
-export function foldWeek(
+export async function foldWeek(
   runs: ReadonlyArray<{ view: SessionView; events: readonly RecordedEvent[] }>,
   opts: { days: number; now: number; truncated: boolean },
-): WeekFold {
+): Promise<WeekFold> {
   const since = opts.now - opts.days * DAY_MS;
   const clis = new Map<string, SystemCliStats>();
   const durations = new Map<string, number[]>();
@@ -660,12 +720,17 @@ export function foldWeek(
     const owner = new Map<number, string>();
     const ownerOf = (ord: number): string | undefined => owner.get(ord) ?? str(unitRow.get(ord)?.assigned_cli) ?? undefined;
     const ranBy = new Set<string>();
-    const gatedOnce = new Set<number>();
+    const gatedOnce = new Set<string>();
     const dispatchAt = new Map<string, { at: number; cli: string }>();
     const timed = new Set<string>();
     const qeLast = new Map<number, boolean>();
     const sorted = [...events].sort((a, b) => a.ts - b.ts || (num(a.seq) ?? 0) - (num(b.seq) ?? 0));
+    let seen = 0;
     for (const raw of sorted) {
+      // The fold runs on the request thread: yield every few thousand frames so a huge history
+      // never blocks the snapshot's own deadline (or anything else the daemon serves).
+      seen += 1;
+      if (seen % FOLD_YIELD_EVERY === 0) await yieldNow();
       const e = raw as Frame;
       const ord = num(e['ord']);
       if (e.type === 'unitDistributed' && ord !== undefined && str(e['cli']) !== undefined) {
@@ -728,8 +793,11 @@ export function foldWeek(
           const passed = e['combined'] === true && (e['denial'] ?? null) === null;
           if (typeof e['agentVerdict'] === 'string' && e['agentVerdict'] !== '') judgedGates += 1;
           if ((unitRow.get(ord) as { qe_acceptance?: unknown } | undefined)?.qe_acceptance != null) qeLast.set(ord, passed);
-          if (cli === undefined || gatedOnce.has(ord)) break;
-          gatedOnce.add(ord);
+          // Counted against the seat that ran the unit IN the window, once per seat and unit, so a
+          // gate on a unit dispatched before the window (or to another seat) never inflates `gated`.
+          const gk = cli !== undefined ? `${cli}\u0000${ord}` : '';
+          if (cli === undefined || !ranBy.has(gk) || gatedOnce.has(gk)) break;
+          gatedOnce.add(gk);
           const s = stat(cli);
           s.gated += 1;
           if (passed) s.firstPass += 1;
@@ -763,9 +831,10 @@ export function foldWeek(
     s.passPct = s.gated > 0 ? Math.round((s.firstPass / s.gated) * 100) : null;
     s.medianUnitMs = median(durations.get(cli) ?? []);
     const t = tokens.get(cli);
-    if (t?.reported === true) s.tokens = { input: t.input, output: t.output };
+    if (t?.reported === true && t.input + t.output > 0) s.tokens = { input: t.input, output: t.output };
     const c = cost.get(cli);
-    if (c !== undefined) s.costUsd = Math.round(c * 10_000) / 10_000;
+    const rounded = c !== undefined ? Math.round(c * 10_000) / 10_000 : 0;
+    if (rounded > 0) s.costUsd = rounded;
     s.runsRead = runs.length;
     s.truncated = opts.truncated;
   }
@@ -777,7 +846,7 @@ export function foldWeek(
 export async function readWeek(
   views: readonly SessionView[],
   readEvents: (runId: string) => Promise<readonly RecordedEvent[] | null>,
-  opts: { days: number; now: number },
+  opts: { days: number; now: number; runReadTimeoutMs?: number },
 ): Promise<WeekFold | null> {
   const since = opts.now - opts.days * DAY_MS;
   const candidates = views
@@ -785,12 +854,17 @@ export async function readWeek(
     .sort((a, b) => (num(b.session.created_at) ?? -Infinity) - (num(a.session.created_at) ?? -Infinity) || a.session.id.localeCompare(b.session.id));
   const read = candidates.slice(0, SYSTEM_STATS_RUN_CAP);
   const runs: Array<{ view: SessionView; events: readonly RecordedEvent[] }> = [];
+  let skipped = 0;
   for (const view of read) {
-    const events = await readEvents(view.session.id);
-    if (events === null) return null;
-    runs.push({ view, events });
+    const got = await settleWithin(() => readEvents(view.session.id), opts.runReadTimeoutMs ?? RUN_READ_TIMEOUT_MS);
+    if (got.kind !== 'ok') {
+      skipped += 1; // a hung or failed read never wedges the fold: the run is left out, and said so
+      continue;
+    }
+    if (got.value === null) return null;
+    runs.push({ view, events: got.value });
   }
-  return foldWeek(runs, { days: opts.days, now: opts.now, truncated: candidates.length > read.length });
+  return foldWeek(runs, { days: opts.days, now: opts.now, truncated: candidates.length > read.length || skipped > 0 });
 }
 
 /** A short-TTL, in-flight-deduplicated holder for the week fold: the snapshot never waits past its
@@ -799,15 +873,24 @@ export class WeekFoldCache {
   private value: { at: number; fold: WeekFold | null } | null = null;
   private inFlight: Promise<WeekFold | null> | null = null;
 
-  constructor(private readonly ttlMs: number = SYSTEM_STATS_TTL_MS, private readonly now: () => number = Date.now) {}
+  constructor(
+    private readonly ttlMs: number = SYSTEM_STATS_TTL_MS,
+    private readonly now: () => number = Date.now,
+    private readonly maxMs: number = WEEK_FOLD_MAX_MS,
+  ) {}
 
   get(compute: () => Promise<WeekFold | null>): Promise<WeekFold | null> {
     if (this.value !== null && this.now() - this.value.at < this.ttlMs) return Promise.resolve(this.value.fold);
     if (this.inFlight !== null) return this.inFlight;
-    this.inFlight = compute()
-      .then((fold) => {
-        this.value = { at: this.now(), fold };
-        return fold;
+    // Bounded: a fold that never settles is dropped after `maxMs` (never cached), so one wedged
+    // read cannot hold every later snapshot's stats hostage.
+    this.inFlight = settleWithin(compute, this.maxMs)
+      .then((settled) => {
+        if (settled.kind === 'ok') {
+          this.value = { at: this.now(), fold: settled.value };
+          return settled.value;
+        }
+        throw new Error(settled.kind === 'timeout' ? `the 7-day fold did not finish within ${this.maxMs / 1000} s` : settled.error);
       })
       .finally(() => {
         this.inFlight = null;
@@ -1007,7 +1090,18 @@ export function sortRuns(runs: SystemRun[]): SystemRun[] {
 
 // ── Judges ──────────────────────────────────────────────────────────────────
 
+/** A seat's CLI identity: `codex#2` is a second codex seat, not a distinct judge for codex work. */
 const cliKeyOf = (seat: string): string => seat.split('#', 1)[0] ?? seat;
+
+/** Some seat that can work, and a seat that can judge it distinct from it — or `null` when none. */
+export function distinctJudgePair(clis: SystemCli[]): { creator: string; judge: string } | null {
+  for (const c of clis) {
+    if (!c.workEligible || c.state === 'signed_out' || c.state === 'benched') continue;
+    const j = clis.find((x) => x.councilEligible && cliKeyOf(x.cli) !== cliKeyOf(c.cli));
+    if (j !== undefined) return { creator: c.cli, judge: j.cli };
+  }
+  return null;
+}
 
 /** For each unfinished run: the seats that could judge its next gate distinct from its creator, and,
  *  when there are none, the seats in its pool that cannot (with why). */
@@ -1024,11 +1118,13 @@ export function judgeGaps(
     const gatedUnit = gatedOrd !== null ? view.units.find((u) => u.ord === gatedOrd) : undefined;
     const creatorSeat = str(gatedUnit?.assigned_cli) ?? run.seat;
     const creator = creatorSeat !== null ? cliKeyOf(creatorSeat) : null;
-    const poolKeys = (view.session.clis ?? []).map(cliKeyOf);
+    // Roster keys are kept whole (`codex#2` is its own seat); only distinctness compares CLIs.
+    const poolKeys = view.session.clis ?? [];
     const pool = poolKeys.length > 0 ? [...new Set(poolKeys)] : clis.map((c) => c.cli);
-    const candidates = pool.filter((k) => k !== creator && byKey.get(k)?.councilEligible === true);
+    const others = pool.filter((k) => cliKeyOf(k) !== creator);
+    const candidates = others.filter((k) => byKey.get(k)?.councilEligible === true);
     if (candidates.length > 0) continue;
-    const blockedBy = pool.filter((k) => k !== creator).map((k) => byKey.get(k)).filter((c): c is SystemCli => c !== undefined && c.state !== 'signed_in');
+    const blockedBy = others.map((k) => byKey.get(k)).filter((c): c is SystemCli => c !== undefined && c.state !== 'signed_in');
     out.push({ run, creator, blockedBy });
   }
   return out;
@@ -1038,12 +1134,14 @@ export function judgeGaps(
 
 export interface GovernanceInput {
   /** `DiagnosticsGovernance`. */
+  /** `DiagnosticsGovernance`; `null` when diagnostics did not answer (`governanceNote` says why). */
   governance: {
     store: { path: string; source: string } | null;
     records: { total: number | null; sinceBoot: number | null };
     deadletters: { count: number } & Record<string, unknown>;
     findings: Array<{ kind: string; severity: string; message: string }>;
-  };
+  } | null;
+  governanceNote?: string;
   skillsFindings: Array<{ kind?: string; severity?: string; message?: string }>;
   decisions: unknown;
   clis: SystemCli[];
@@ -1060,20 +1158,22 @@ export interface GovernanceInput {
 export function buildGovernance(g: GovernanceInput): SystemGovernanceCard[] {
   const cards: SystemGovernanceCard[] = [];
   const judges = g.clis.filter((c) => c.councilEligible).map((c) => c.cli);
+  const pair = distinctJudgePair(g.clis);
+  const ok = pair !== null && g.judgeGapCount === 0;
   cards.push({
     key: 'judges',
     label: 'Judges available',
-    state: judges.length >= 2 && g.judgeGapCount === 0 ? 'ok' : 'down',
+    state: ok ? 'ok' : 'down',
     value: judges.length,
     reason:
       judges.length === 0
         ? 'no seat can judge: every gate holds for want of a judge'
-        : judges.length === 1
-          ? `only ${judges[0]} can judge, so it cannot judge its own work`
+        : pair === null
+          ? `no seat that can work has a judge distinct from it (${judges.join(', ')} can judge)`
           : g.judgeGapCount > 0
-            ? `${g.judgeGapCount} run(s) have no judge distinct from their creator in their pool (${judges.join(', ')} eligible)`
-            : `a distinct judge can be seated: ${judges.join(', ')}`,
-    remedy: judges.length >= 2 && g.judgeGapCount === 0 ? null : 'Sign in a second CLI (or wait for a bench to lift) so a judge distinct from the creator can be seated.',
+            ? `${g.judgeGapCount} run(s) have no judge distinct from their creator in their pool (${judges.join(', ')} can judge)`
+            : `a distinct judge can be seated (for example ${pair.judge} judging ${pair.creator}); ${judges.join(', ')} can judge`,
+    remedy: ok ? null : 'Sign in another CLI (or wait for a bench to lift) so a judge distinct from the creator can be seated.',
   });
   const week = g.week;
   const weekReason = g.weekNote ?? 'the run store has no event-log read binding on this engine';
@@ -1122,16 +1222,31 @@ export function buildGovernance(g: GovernanceInput): SystemGovernanceCard[] {
     remedy: null,
     ...(week !== null ? { since: week.since } : {}),
   });
-  const dl = g.governance.deadletters.count;
-  cards.push({
-    key: 'dead_letters',
-    label: 'Dead letters',
-    state: dl > 0 ? 'degraded' : 'ok',
-    value: dl,
-    reason: dl > 0 ? `${dl} governance event(s) could not land on the store and wait in the outbox` : 'none: every governance event landed',
-    remedy: dl > 0 ? 'Replay them (`wicked-crew governance replay`, or POST /api/v1/governance/deadletters/replay).' : null,
-    details: { deadletters: g.governance.deadletters },
-  });
+  if (g.governance === null) {
+    const why = g.governanceNote ?? 'diagnostics did not answer';
+    for (const [key, label] of [
+      ['dead_letters', 'Dead letters'],
+      ['steering_rules', 'Steering rules loaded'],
+      ['findings', 'Open findings'],
+      ['store', 'Governance store'],
+    ] as const) {
+      if (key === 'steering_rules') continue;
+      cards.push({ key, label, state: 'unknown', value: null, reason: why, remedy: 'Re-check.' });
+    }
+  }
+  const gov = g.governance;
+  if (gov !== null) {
+    const dl = gov.deadletters.count;
+    cards.push({
+      key: 'dead_letters',
+      label: 'Dead letters',
+      state: dl > 0 ? 'degraded' : 'ok',
+      value: dl,
+      reason: dl > 0 ? `${dl} governance event(s) could not land on the store and wait in the outbox` : 'none: every governance event landed',
+      remedy: dl > 0 ? 'Replay them (`wicked-crew governance replay`, or POST /api/v1/governance/deadletters/replay).' : null,
+      details: { deadletters: gov.deadletters },
+    });
+  }
   cards.push({
     key: 'steering_rules',
     label: 'Steering rules loaded',
@@ -1140,29 +1255,31 @@ export function buildGovernance(g: GovernanceInput): SystemGovernanceCard[] {
     reason: g.steeringRules === null ? (g.steeringNote ?? 'the rule store could not be read') : g.steeringRules === 0 ? 'no steering rules are loaded: gates check no doctrine' : `${g.steeringRules} active rule(s)`,
     remedy: g.steeringRules === 0 ? 'Ingest the steering rules (`wicked-core rules ingest`) or import them in Steering.' : null,
   });
-  const findings = [...g.governance.findings, ...g.skillsFindings.map((f) => ({ kind: f.kind ?? 'skills', severity: f.severity ?? 'warning', message: f.message ?? '' }))];
-  const errors = findings.filter((f) => f.severity === 'error').length;
-  const warnings = findings.filter((f) => f.severity === 'warning').length;
-  cards.push({
-    key: 'findings',
-    label: 'Open findings',
-    state: errors > 0 ? 'down' : warnings > 0 ? 'degraded' : 'ok',
-    value: findings.length,
-    breakdown: { error: errors, warning: warnings, info: findings.length - errors - warnings },
-    reason: findings.length === 0 ? 'none' : (findings.find((f) => f.severity === 'error') ?? findings[0])!.message,
-    remedy: errors + warnings > 0 ? 'Open the finding for its remedy.' : null,
-    details: { governance: g.governance.findings, skills: g.skillsFindings, decisions: g.decisions },
-  });
-  const store = g.governance.store;
-  cards.push({
-    key: 'store',
-    label: 'Governance store',
-    state: store === null ? 'down' : 'ok',
-    value: g.governance.records.total,
-    reason: store === null ? 'no governance store: evidence has nowhere to land' : `${g.governance.records.total ?? 'uncounted'} record(s); ${g.governance.records.sinceBoot ?? 'unknown'} since boot`,
-    remedy: store === null ? 'Start the daemon with a governance store (`--governance-db`).' : null,
-    details: { store, records: g.governance.records },
-  });
+  if (gov !== null) {
+    const findings = [...gov.findings, ...g.skillsFindings.map((f) => ({ kind: f.kind ?? 'skills', severity: f.severity ?? 'warning', message: f.message ?? '' }))];
+    const errors = findings.filter((f) => f.severity === 'error').length;
+    const warnings = findings.filter((f) => f.severity === 'warning').length;
+    cards.push({
+      key: 'findings',
+      label: 'Open findings',
+      state: errors > 0 ? 'down' : warnings > 0 ? 'degraded' : 'ok',
+      value: findings.length,
+      breakdown: { error: errors, warning: warnings, info: findings.length - errors - warnings },
+      reason: findings.length === 0 ? 'none' : (findings.find((f) => f.severity === 'error') ?? findings[0])!.message,
+      remedy: errors + warnings > 0 ? 'Open the finding for its remedy.' : null,
+      details: { governance: gov.findings, skills: g.skillsFindings, decisions: g.decisions },
+    });
+    const store = gov.store;
+    cards.push({
+      key: 'store',
+      label: 'Governance store',
+      state: store === null ? 'down' : 'ok',
+      value: gov.records.total,
+      reason: store === null ? 'no governance store: evidence has nowhere to land' : `${gov.records.total ?? 'uncounted'} record(s); ${gov.records.sinceBoot ?? 'unknown'} since boot`,
+      remedy: store === null ? 'Start the daemon with a governance store (`--governance-db`).' : null,
+      details: { store, records: gov.records },
+    });
+  }
   return cards;
 }
 
@@ -1207,7 +1324,13 @@ export function buildAttention(input: {
         severity: blocks > 0 ? 'red' : 'yellow',
         source: 'cli',
         title: `${c.label} ${c.state === 'benched' ? 'benched' : 'signed out'}`,
-        reason: `${c.stateReason ?? c.state}${blocks > 0 ? `; it leaves ${blocks} run(s) without a distinct judge` : '; another distinct judge is still available'}`,
+        reason: `${c.stateReason ?? c.state}${
+          blocks > 0
+            ? `; it leaves ${blocks} run(s) without a distinct judge`
+            : distinctJudgePair(input.clis) !== null
+              ? '; a distinct judge can still be seated'
+              : '; no run is waiting on it now'
+        }`,
         remedy: c.state === 'benched' ? 'Wait for the bench to lift, or sign the CLI in again if its account changed.' : 'Sign the CLI in.',
         blocks,
         target: { kind: 'cli', cli: c.cli },

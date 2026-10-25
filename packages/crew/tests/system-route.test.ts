@@ -125,10 +125,10 @@ afterAll(async () => {
 });
 
 /** The gateway row until it reads `want`: a loaded host can push one `sh` spawn past the probe's
- *  bound, which honestly reads `unknown` — never the wrong verdict. Up to three reads. */
+ *  bound, which honestly reads `unknown` — never the wrong verdict. Up to five reads. */
 async function gatewayUntil(want: string): Promise<SystemSnapshot> {
   let last: SystemSnapshot | undefined;
-  for (let i = 0; i < 3; i += 1) {
+  for (let i = 0; i < 5; i += 1) {
     last = (await snapshot()).body;
     const state = last.infra.find((r) => r.key === 'gateway')!.state;
     if (state === want) return last;
@@ -185,7 +185,7 @@ describe('GET /api/v1/system', () => {
     writeFileSync(modeFile, 'running', 'utf8');
     const again = await gatewayUntil('ok');
     expect(again.infra.find((r) => r.key === 'gateway')!.state).toBe('ok');
-  }, 60_000);
+  }, 120_000);
 
   it.runIf(posix)('gateway that hangs → unknown after its timeout, and the endpoint still answers within its bound', async () => {
     writeFileSync(modeFile, 'hang', 'utf8');

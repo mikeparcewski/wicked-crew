@@ -1,7 +1,7 @@
 // DES-SYSTEM-VIEW — the pure parts of `GET /system`: every infra state, every liveness verdict, the
 // 7-day CLI fold and the governance cards over fixture stores, and the attention ordering.
 
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import type { RecordedEvent, SessionView, SystemCli } from 'wicked-crew-api-types';
 
 import {
@@ -84,6 +84,8 @@ describe('gateway probe', () => {
   });
   it('no container → degraded (the engine starts it); host floor → off; no runtime → down', async () => {
     expect((await probeGateway({ ...base, exec: async () => { throw new Error('Error: No such object: wicked-agw-x'); } })).state).toBe('degraded');
+    // A stopped runtime whose socket is gone is the runtime down, not "no container yet".
+    expect((await probeGateway({ ...base, exec: async () => { throw new Error('dial unix /var/run/docker.sock: connect: no such file or directory'); } })).state).toBe('down');
     expect((await probeGateway({ ...base, containerFloor: false, exec: never })).state).toBe('off');
     expect((await probeGateway({ ...base, runtime: null, exec: never })).state).toBe('down');
   });
@@ -104,22 +106,31 @@ describe('broker probe', () => {
 describe('interactive probe', () => {
   const lock = { host: '127.0.0.1', port: 4242, pid: 1 };
   it('no lockfile → off; 200 → ok; refused → down; hang → unknown', async () => {
-    expect((await probeInteractive({ roots: ['/r'], readLock: () => null, health: never })).state).toBe('off');
-    expect((await probeInteractive({ roots: ['/r'], readLock: () => lock, health: async () => 200 })).state).toBe('ok');
-    const refused = await probeInteractive({ roots: ['/r'], readLock: () => lock, health: async () => { throw new Error('fetch failed: ECONNREFUSED'); } });
+    expect((await probeInteractive({ roots: ['/r'], readLock: async () => null, health: never })).state).toBe('off');
+    expect((await probeInteractive({ roots: ['/r'], readLock: async () => lock, health: async () => 200 })).state).toBe('ok');
+    const refused = await probeInteractive({ roots: ['/r'], readLock: async () => lock, health: async () => { throw new Error('fetch failed: ECONNREFUSED'); } });
     expect(refused.state).toBe('down');
     expect(refused.reason).toMatch(/4242/);
-    expect((await probeInteractive({ roots: ['/r'], readLock: () => lock, health: never, timeoutMs: 30 })).state).toBe('unknown');
+    expect((await probeInteractive({ roots: ['/r'], readLock: async () => lock, health: never, timeoutMs: 30 })).state).toBe('unknown');
+    // A lockfile read that hangs is inside the bound too (never a blocked event loop).
+    expect((await probeInteractive({ roots: ['/r'], readLock: never, health: never, timeoutMs: 30 })).state).toBe('unknown');
   });
 });
 
 describe('estate, bus, vault probes', () => {
   const store = { path: '/s/memory.db', source: 'explicit', notice: null };
-  it('estate: answered → ok; missing binary → down; hang → unknown; no store yet → degraded', async () => {
-    expect((await probeEstate({ exe: 'wicked-estate', memoryStore: store, exists: () => true, exec: async () => ({ stdout: '12 nodes, 3 edges', stderr: '' }) })).state).toBe('ok');
-    expect((await probeEstate({ exe: 'wicked-estate', memoryStore: store, exists: () => true, exec: async () => { throw new Error('spawn wicked-estate ENOENT'); } })).state).toBe('down');
-    expect((await probeEstate({ exe: 'wicked-estate', memoryStore: store, exists: () => true, exec: never, timeoutMs: 30 })).state).toBe('unknown');
-    expect((await probeEstate({ exe: 'wicked-estate', memoryStore: store, exists: () => false, exec: never })).state).toBe('degraded');
+  it('estate: one read-only call answered → ok; missing binary → down; rpc error → down; hang → unknown; no store yet → degraded (no call)', async () => {
+    const answer = { result: { content: [{ text: JSON.stringify({ total: 12 }) }] } };
+    const ok = await probeEstate({ memoryStore: store, exists: async () => true, call: async () => answer });
+    expect(ok.state).toBe('ok');
+    expect(ok.reason).toMatch(/12 memories/);
+    expect((await probeEstate({ memoryStore: store, exists: async () => true, call: async () => { throw new Error('spawn wicked-estate-mcp ENOENT'); } })).state).toBe('down');
+    expect((await probeEstate({ memoryStore: store, exists: async () => true, call: async () => ({ error: { code: -32603, message: 'db locked' } }) })).state).toBe('down');
+    expect((await probeEstate({ memoryStore: store, exists: async () => true, call: never, timeoutMs: 30 })).state).toBe('unknown');
+    let called = false;
+    const none = await probeEstate({ memoryStore: store, exists: async () => false, call: async () => { called = true; return answer; } });
+    expect(none.state).toBe('degraded');
+    expect(called).toBe(false);
   });
   it('bus: unavailable → down; no file → down; seams off → degraded; watch down → degraded; none → off', async () => {
     const none = { unavailable: null, seamsOff: null, dbPath: null, watchBus: null, tailLagMs: null };
@@ -297,7 +308,12 @@ describe('7-day fold over a fixture run store', () => {
 const seat = (key: string, extra: Partial<RosterSeatLike> = {}): RosterSeatLike => ({ key, display_name: key, auth: 'signed_in', signed_in: true, council_eligible: true, work_eligible: true, ...extra });
 
 describe('clis[], judges and attention', () => {
-  const fold = foldWeek([{ view: runA, events: eventsA }], { days: 7, now: NOW, truncated: false });
+  let fold: Awaited<ReturnType<typeof foldWeek>>;
+  let clis: SystemCli[];
+  beforeAll(async () => {
+    fold = await foldWeek([{ view: runA, events: eventsA }], { days: 7, now: NOW, truncated: false });
+    clis = buildClis({ roster, acp: {}, seatGovernance: [], containerFloor: true, hostBoundary: null, week: fold });
+  });
   const roster = [
     seat('claude', { sign_in: 'container', health: { status: 'active', since: 'x', lastErrorAt: '2026-10-25T10:00:00Z', message: 'rate limited' } }),
     seat('codex', {
@@ -307,8 +323,6 @@ describe('clis[], judges and attention', () => {
     }),
     seat('pi', { auth: 'signed_out', signed_in: false, council_eligible: false, council_ineligible_reason: 'signed out: no credential', login_invocation: 'pi login' }),
   ];
-  const clis = buildClis({ roster, acp: {}, seatGovernance: [], containerFloor: true, hostBoundary: null, week: fold });
-
   it('carries state, why, sign-in and the 7-day record per CLI', () => {
     const byKey = Object.fromEntries(clis.map((c) => [c.cli, c]));
     expect(byKey['claude']).toMatchObject({ state: 'signed_in', stateReason: null, sandbox: 'container', canSignIn: true, lastError: { message: 'rate limited' } });
@@ -363,8 +377,8 @@ describe('clis[], judges and attention', () => {
 });
 
 describe('governance cards over a fixture store', () => {
-  it('judge availability, floors, QE pass rate, gates by you vs judges, dead letters, rules, findings, store', () => {
-    const fold = foldWeek([{ view: runA, events: eventsA }], { days: 7, now: NOW, truncated: false });
+  it('judge availability, floors, QE pass rate, gates by you vs judges, dead letters, rules, findings, store', async () => {
+    const fold = await foldWeek([{ view: runA, events: eventsA }], { days: 7, now: NOW, truncated: false });
     const clis = buildClis({ roster: [seat('claude'), seat('codex')], acp: {}, seatGovernance: [], containerFloor: false, hostBoundary: 'sandbox-exec', week: fold });
     const cards = buildGovernance({
       governance: {
@@ -401,5 +415,68 @@ describe('governance cards over a fixture store', () => {
     expect(s['gates_answered']).toMatchObject({ state: 'unknown', value: null });
     expect(s['store']!.state).toBe('down');
     expect(s['steering_rules']!.state).toBe('unknown');
+  });
+});
+
+describe('review fixes (xreview r1 on #1137)', () => {
+  const cli = (key: string, extra: Partial<SystemCli> = {}): SystemCli =>
+    ({ cli: key, label: key, state: 'signed_in', stateReason: null, canSignIn: false, councilEligible: true, workEligible: true, ...extra }) as SystemCli;
+
+  it('a second seat of another CLI (`codex#2`) is a distinct judge; a second seat of the creator\'s CLI is not', () => {
+    const v = view('r', 'executing', [{ ord: 0, status: 'distributed', assigned_cli: 'claude' }], { clis: ['claude', 'codex#2'] });
+    const run = runLiveness({ view: v, now: NOW, evidence: { at: NOW, source: 'relay' }, gate: null, quietAfterMs: 5 * MIN, stallAfterMs: 15 * MIN });
+    expect(judgeGaps([{ view: v, run }], [cli('claude'), cli('codex#2')])).toHaveLength(0);
+    const same = view('r', 'executing', [{ ord: 0, status: 'distributed', assigned_cli: 'claude' }], { clis: ['claude', 'claude#2'] });
+    expect(judgeGaps([{ view: same, run }], [cli('claude'), cli('claude#2')])).toHaveLength(1);
+  });
+
+  it('a work-only creator with a reviewer-only judge has a distinct judge: the card is ok', () => {
+    const clis = [cli('claude', { councilEligible: false }), cli('codex', { workEligible: false })];
+    const cards = buildGovernance({ governance: null, skillsFindings: [], decisions: null, clis, judgeGapCount: 0, week: null, gatesByYou: 0, steeringRules: 1 });
+    expect(cards.find((c) => c.key === 'judges')).toMatchObject({ state: 'ok', value: 1 });
+    expect(levelOf(buildAttention({ infra: [], clis, runs: [], governance: cards.filter((c) => c.key === 'judges'), gaps: [], blockedByInfra: () => 0 }))).toBe('green');
+  });
+
+  it('diagnostics that did not answer never read as ok or 0: the dependent cards are unknown', () => {
+    const cards = buildGovernance({ governance: null, governanceNote: 'diagnostics did not answer (no answer within 4 s)', skillsFindings: [], decisions: null, clis: [], judgeGapCount: 0, week: null, gatesByYou: null, steeringRules: null });
+    for (const key of ['dead_letters', 'findings', 'store'] as const) {
+      expect(cards.find((c) => c.key === key)).toMatchObject({ state: 'unknown', value: null, reason: 'diagnostics did not answer (no answer within 4 s)' });
+    }
+  });
+
+  it('gated counts only units the seat ran in the window; zero tokens and cost stay absent', async () => {
+    const v = view('w', 'executing', [{ ord: 0, status: 'distributed', assigned_cli: 'claude' }]);
+    const fold = await foldWeek([{ view: v, events: [
+      ev('unitDistributed', D(9), { ord: 0, cli: 'claude' }, 1),
+      ev('unitDispatched', D(9), { ord: 0, attempt: 0 }, 2), // before the window
+      ev('gateEvaluated', D(1), { ord: 0, combined: true, denial: null }, 3),
+      ev('cliUsage', D(1), { ord: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 }, 4),
+    ] }], { days: 7, now: NOW, truncated: false });
+    const claude = fold.clis.get('claude');
+    expect(claude?.gated ?? 0).toBe(0);
+    expect(claude?.tokens).toBeUndefined();
+    expect(claude?.costUsd).toBeUndefined();
+  });
+
+  it('a run whose log read hangs is skipped (truncated), and a fold that never settles is dropped, never cached', async () => {
+    const fold = await readWeek([runA, runB], async (id) => (id === 'run-a' ? eventsA : never()), { days: 7, now: NOW, runReadTimeoutMs: 30 });
+    expect(fold).toMatchObject({ runsRead: 1, truncated: true });
+    let t = 0;
+    const cache = new WeekFoldCache(1000, () => t, 30);
+    await expect(cache.get(never)).rejects.toThrow(/did not finish/);
+    // The wedged fold is gone: the next read computes afresh.
+    let n = 0;
+    await cache.get(async () => { n += 1; return foldWeek([], { days: 7, now: NOW, truncated: false }); });
+    expect(n).toBe(1);
+    t = 1;
+  });
+
+  it('a large history yields while it folds, so a deadline can still fire', async () => {
+    const big = Array.from({ length: 50_000 }, (_, i) => ev('cliUsage', D(1, i), { ord: 0, inputTokens: 1 }, i));
+    let ticked = false;
+    const timer = setTimeout(() => { ticked = true; }, 0);
+    await foldWeek([{ view: view('b', 'executing', [{ ord: 0, status: 'distributed', assigned_cli: 'claude' }]), events: big }], { days: 7, now: NOW, truncated: false });
+    clearTimeout(timer);
+    expect(ticked).toBe(true);
   });
 });

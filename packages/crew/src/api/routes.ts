@@ -167,7 +167,7 @@ import { ProjectSettingsStore } from '../projects/settings.js';
 import type { WatchRegistry } from '../watch/registry.js';
 import { isHumanOperator } from './watch-routes.js';
 import type { DeliverReportFact } from '../core/deliver-text.js';
-import { boundOrigin, InteractiveBridgePool, readLock as readBridgeLock } from '../interactive/bridge-pool.js';
+import { boundOrigin, InteractiveBridgePool } from '../interactive/bridge-pool.js';
 import { defaultInteractiveRoot } from '../interactive/bridge-root.js';
 import {
   composeDeliverText,
@@ -226,6 +226,7 @@ import {
   buildClis,
   buildGovernance,
   diskRow,
+  estateReadonlyCall,
   infraRow,
   judgeGaps,
   livenessThresholds,
@@ -236,6 +237,7 @@ import {
   probeGateway,
   probeInteractive,
   probeVault,
+  readBridgeLockAsync,
   readWeek,
   resolveContainerRuntime,
   runLiveness,
@@ -7762,10 +7764,10 @@ export function registerRoutes(
         }),
         probeInteractive({
           roots: interactiveRoots,
-          readLock: (root) => readBridgeLock(root),
+          readLock: (root) => readBridgeLockAsync(root),
           health: async (url, timeoutMs) => (await fetch(url, { signal: AbortSignal.timeout(timeoutMs) })).status,
         }),
-        probeEstate({ exe: estateExe(), memoryStore: memoryStoreInfo(), exec: systemExec }),
+        probeEstate({ memoryStore: memoryStoreInfo(), call: estateReadonlyCall(memoryStoreInfo().path) }),
         probeBus({
           unavailable: (adapter.busUnavailable as { reason?: unknown } | undefined) ?? null,
           seamsOff: adapter.busSeamsOff ?? null,
@@ -7780,6 +7782,15 @@ export function registerRoutes(
       const [views, settings, openGates, diag, ping, rules, gatesByYou, infraProbed] = await Promise.all([
         viewsP, settingsP, gatesP, diagP, pingP, rulesP, gatesByYouP, infraP,
       ]);
+      // The broker probe refreshed each container seat's sign-in reading: the CLI cards read the
+      // roster AFTER it, so one snapshot never says "broker: signed in" beside "claude: signed out".
+      const rosterNow = (() => {
+        try {
+          return markOptIn(rosterWithStanding()) as unknown as RosterSeatLike[];
+        } catch {
+          return roster;
+        }
+      })();
       const allViews = views.kind === 'ok' ? views.value : [];
 
       // runs[] with computed liveness.
@@ -7846,7 +7857,7 @@ export function registerRoutes(
       const d = diag.kind === 'ok' ? diag.value : null;
       const seatGov = d?.seatGovernance.seats ?? [];
       const clis = buildClis({
-        roster,
+        roster: rosterNow,
         acp: (d?.acp.byCli ?? {}) as Record<string, AcpCliDiagnostics>,
         seatGovernance: seatGov as unknown as DiagnosticsSeatGovernanceEntry[],
         containerFloor,
@@ -7859,7 +7870,7 @@ export function registerRoutes(
       const gaps = judgeGaps(runPairs, clis);
 
       // infra[]: the daemon row first (it answers this request; the engine's ping says if it is free).
-      const daemonStarted = Date.now();
+      const daemonStarted = Date.now() - Math.max(views.ms, ping.ms);
       const pingWord = ping.kind === 'ok' ? ping.value : ping.kind === 'timeout' ? 'no answer' : `error: ${ping.error}`;
       const daemonDetails: Record<string, unknown> = {
         version: PKG_VERSION,
@@ -7883,7 +7894,9 @@ export function registerRoutes(
             : infraRow('stores', 'ok', `${d.stores.length} store file(s), ${Math.round(d.stores.reduce((a, s) => a + s.bytes, 0) / 2 ** 20)} MiB`, null, startedAt, { stores: d.stores });
       const floorWord = containerFloor ? 'container' : isHostSeatFloor() ? 'host' : 'unset';
       const roleFindings = d?.seatGovernance.roleFindings ?? [];
-      const seatFloorRow = infraRow(
+      const seatFloorRow = d === null
+        ? infraRow('seat_floor', 'unknown', `diagnostics did not answer (${diag.kind === 'timeout' ? `no answer within ${PROBE_TIMEOUT_MS / 1000} s` : diag.kind === 'error' ? diag.error : ''})`, 'Re-check.', startedAt, { floor: floorWord }, PROBE_TIMEOUT_MS)
+        : infraRow(
         'seat_floor',
         floorWord === 'host' && (d?.seatGovernance.hostBoundary ?? null) === null ? 'degraded' : roleFindings.length > 0 ? 'degraded' : 'ok',
         floorWord === 'container'
@@ -7909,7 +7922,8 @@ export function registerRoutes(
       ];
 
       const governance = buildGovernance({
-        governance: (d?.governance ?? { store: null, records: { total: null, sinceBoot: null }, deadletters: { count: 0 }, findings: [] }) as GovernanceInput['governance'],
+        governance: (d?.governance ?? null) as GovernanceInput['governance'],
+        ...(d === null ? { governanceNote: `diagnostics did not answer (${diag.kind === 'timeout' ? `no answer within ${PROBE_TIMEOUT_MS / 1000} s` : diag.kind === 'error' ? diag.error : ''})` } : {}),
         skillsFindings: (d?.skills.findings ?? []) as GovernanceInput['skillsFindings'],
         decisions: d?.decisions ?? null,
         clis,
