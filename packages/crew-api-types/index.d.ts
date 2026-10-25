@@ -292,6 +292,17 @@ export interface HealthCapabilities {
    * ({@link SystemSnapshot}). ABSENT on an older daemon — show the older Health cards instead.
    */
   system?: boolean;
+  /**
+   * (api-types 0.137.0, DES-SYSTEM-CHAT) The chat history is served: `GET /chats` carries `items` +
+   * `nextCursor`, `GET /chats/:id/messages` reopens a chat, `POST /chats/:id/close` ends one and keeps
+   * its history. ABSENT on an older daemon — hide the past-chats rail.
+   */
+  chatList?: boolean;
+  /**
+   * (api-types 0.137.0) `POST /chats/:id/attachments` and `ChatMessageBody.attachments` are served.
+   * ABSENT on an older daemon — hide upload.
+   */
+  chatAttachments?: boolean;
 }
 
 /** One `GET /health.warnings[]` entry (additive; wicked-core#411 / wicked-crew#497). */
@@ -6655,6 +6666,8 @@ export interface ChatOpenBody {
    * (`path.started.selection: "random"`).
    */
   primary?: string;
+  /** (api-types 0.137.0, DES-SYSTEM-CHAT) The page the chat was started on, for the history list. */
+  startedOn?: ChatStartedOn;
 }
 
 /** The scope a `POST /chats` caller may name (api-types 0.39.0, studio#323 R4). */
@@ -6915,9 +6928,18 @@ export interface ChatSummary {
   readRoots?: string[];
 }
 
-/** `GET /chats` → 200. */
+/**
+ * `GET /chats` → 200. `chats`: the live engine / ask-path rows, unchanged. From api-types 0.137.0
+ * (DES-SYSTEM-CHAT) also the paged chat HISTORY: `items` newest first by `updatedAt`, and
+ * `nextCursor` to pass as `?cursor=` for the next page (`null` on the last). Query: `?limit=`
+ * (1–100, default 20), `?cursor=`, `?status=open|closed|all` (default `all`). Under
+ * `auth: required` only the caller's own chats are listed. ABSENT on an older daemon (no
+ * `capabilities.chatList`).
+ */
 export interface ChatListResponse {
   chats: ChatSummary[];
+  items?: ChatHistoryEntry[];
+  nextCursor?: string | null;
 }
 
 /**
@@ -6942,7 +6964,8 @@ export interface ChatUsage {
  * "exceeded the N s turn budget … target it on your next message to re-seat it").
  */
 export type ChatTranscriptRecord =
-  | { at: number; turnId: string; kind: 'user'; text: string; seats: string[] }
+  /** `attachments` (api-types 0.137.0): the files the message carried, ABSENT when none. */
+  | { at: number; turnId: string; kind: 'user'; text: string; seats: string[]; attachments?: ChatAttachment[] }
   | { at: number; turnId: string; kind: 'seat'; cliKey: string; text: string; ok: boolean; usage: ChatUsage | null }
   /**
    * The citation verdicts of the `seat` record with the same `turnId` + `cliKey` (api-types 0.68.0,
@@ -6976,6 +6999,133 @@ export type ChatTranscriptRecord =
    * operator sees exactly what crew added; the `user` record keeps the operator's own words.
    */
   | { at: number; turnId: string; kind: 'system'; text: string };
+
+// ── System chat: history, close, attachments (api-types 0.137.0, DES-SYSTEM-CHAT "Crew") ────────
+//
+// The floating system chat's past-chats rail, its Close, and its uploads. Capabilities:
+// `GET /health.capabilities.chatList` (the history list, `POST /chats/:id/close`,
+// `GET /chats/:id/messages`) and `.chatAttachments` (`POST /chats/:id/attachments` and
+// `ChatMessageBody.attachments`). A chat's history is kept until `DELETE /chats/:id`, which still
+// ends the chat AND deletes its history and attachments; `POST /chats/:id/close` ends it and keeps both.
+
+/** The page a chat was started on: studio's route and its human label ("Run 9b43ee44"). */
+export interface ChatStartedOn {
+  route: string;
+  label: string;
+}
+
+/** One past or open system chat, as the history list shows it. */
+export interface ChatHistoryEntry {
+  /** The chat id: `GET /chats/:id/messages` reopens it, `POST /chats/:id/close` ends it. */
+  id: string;
+  /** The first operator message, whitespace-collapsed and cut at 80 characters (an ellipsis
+   *  included); "New chat" before the first message. */
+  title: string;
+  /** Where the chat was started, when the opener said (`ChatOpenBody.startedOn`); else `null`. */
+  startedOn: ChatStartedOn | null;
+  /** The CLI that answers (the chat's primary agent once known, else the operator's choice, else
+   *  its first eligible seat); `null` when none was seated. */
+  cli: string | null;
+  /** ISO-8601. */
+  createdAt: string;
+  /** ISO-8601 of the newest message (or of the open, before any). */
+  updatedAt: string;
+  /** Operator messages plus seat replies (prefaces, citations and decision records excluded). */
+  messageCount: number;
+  /** Files uploaded to the chat. */
+  attachmentCount: number;
+  /** `open`: live on this daemon; `closed`: ended (Close, idle, or a daemon restart), history kept. */
+  status: 'open' | 'closed';
+  /** ISO-8601 of the end; present with `status: 'closed'`. */
+  closedAt?: string;
+}
+
+/** `GET /chats/:id/messages` → 200 (404 for an id with no history). An open chat answers its live
+ *  transcript; a closed one its kept history. Same records as `ChatDetailResponse.messages`. */
+export interface ChatMessagesResponse {
+  chat: ChatHistoryEntry;
+  messages: ChatTranscriptRecord[];
+  attachments: ChatAttachment[];
+}
+
+/** `POST /chats/:id/close` → 200: the chat is ended (its seats released, its run cancelled) and its
+ *  history and attachments are kept. Idempotent: closing a closed chat answers its entry again. */
+export interface ChatCloseResponse {
+  ok: true;
+  chat: ChatHistoryEntry;
+}
+
+/** `POST /chats/:id/close` → **502** when the chat's run could not be cancelled: the chat IS closed
+ *  and its history kept, but its run may still be running — cancel it from the run (`runId`). */
+export interface ChatCloseCancelFailed {
+  error: string;
+  runId: string;
+  chat: ChatHistoryEntry;
+}
+
+/** What an attachment is to a seat: an image (png, jpeg, gif, webp), text (UTF-8), or a pdf. */
+export type ChatAttachmentKind = 'image' | 'text' | 'pdf';
+
+/** One uploaded file. Stored under the state home (`<state home>/chats/attachments/<chat>/`),
+ *  removed with its chat on `DELETE /chats/:id`. */
+export interface ChatAttachment {
+  id: string;
+  chatId: string;
+  /** The uploaded file name, sanitized (no path). */
+  name: string;
+  /** The verified media type (`image/png`, `text/plain`, `application/pdf`, …). */
+  mediaType: string;
+  kind: ChatAttachmentKind;
+  bytes: number;
+  sha256: string;
+  /** ISO-8601. */
+  createdAt: string;
+}
+
+/** The caps an upload and a message are held to (also on every 413). */
+export interface ChatAttachmentLimits {
+  /** One file, bytes. */
+  maxFileBytes: number;
+  /** All files one message references (and one upload request carries), bytes. */
+  maxMessageBytes: number;
+  /** Files per message (and per upload request). */
+  maxFiles: number;
+  /** The media types accepted. */
+  mediaTypes: string[];
+}
+
+/** `POST /chats/:id/attachments` (multipart/form-data, one or more file parts) → 201. */
+export interface ChatAttachmentUploadResponse {
+  attachments: ChatAttachment[];
+  limits: ChatAttachmentLimits;
+}
+
+/**
+ * An upload or a send refused over an attachment: 413 `attachment_too_large` (one file over
+ * `maxFileBytes`) or `attachments_too_large` (the request or the message over `maxMessageBytes`, or
+ * over `maxFiles`); 415 `attachment_type` (not an image, UTF-8 text or pdf, or its bytes do not
+ * match its type); 404 `attachment_unknown` (a message names an id this chat does not have); 400
+ * `attachment_malformed` (not multipart, or no file part).
+ */
+export interface ChatAttachmentError {
+  error: string;
+  code: 'attachment_too_large' | 'attachments_too_large' | 'attachment_type' | 'attachment_unknown' | 'attachment_malformed';
+  /** The file the refusal is about, when one. */
+  name?: string;
+  bytes?: number;
+  limits: ChatAttachmentLimits;
+}
+
+/** `POST /chats/:id/messages` body (named in api-types 0.137.0; `text` and `targets` unchanged). */
+export interface ChatMessageBody {
+  text: string;
+  targets?: string[];
+  /** (api-types 0.137.0) Ids from `POST /chats/:id/attachments` this message carries (at most
+   *  `maxFiles`, together at most `maxMessageBytes`). Each reaches the answering seat as a read-only
+   *  file: a path it can open (images as images where the CLI reads them) plus, for text and pdf,
+   *  the extracted text. Send only when `GET /health.capabilities.chatAttachments === true`. */
+  attachments?: string[];
+}
 
 /** `GET /chats/:id` → 200. */
 export interface ChatDetailResponse {

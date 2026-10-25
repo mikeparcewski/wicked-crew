@@ -30,7 +30,7 @@
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
-import type { ChatCitationItem, ChatTranscriptRecord, ChatUsage, CoreEvent, DecisionView } from '../core/types.js';
+import type { ChatAttachment, ChatCitationItem, ChatTranscriptRecord, ChatUsage, CoreEvent, DecisionView } from '../core/types.js';
 import { DecisionFenceFilter, splitDecisionsBlock } from '../decisions/chat-recorder.js';
 import { crewStateHome } from '../projects/state-home.js';
 import { CHAT_ID } from './chat-scope.js';
@@ -93,6 +93,11 @@ export class ChatTranscriptStore {
     return this.dir;
   }
 
+  /** The live transcript's path (the history copies it when the chat ends — `chat-history.ts`). */
+  pathOf(chatId: string): string | null {
+    return this.fileOf(chatId);
+  }
+
   /** `<dir>/<chatId>.jsonl` — or `null` for an id the chat-id guard refuses (never a path). */
   private fileOf(chatId: string): string | null {
     return CHAT_ID.test(chatId) ? join(this.dir, `${chatId}.jsonl`) : null;
@@ -113,8 +118,15 @@ export class ChatTranscriptStore {
   }
 
   /** The operator's message a send delivered, with the seats the engine reached (the 202's `seats`). */
-  appendUser(chatId: string, turnId: string, text: string, seats: readonly string[]): void {
-    this.append(chatId, { at: this.now(), turnId, kind: 'user', text, seats: [...seats] });
+  appendUser(chatId: string, turnId: string, text: string, seats: readonly string[], attachments?: readonly ChatAttachment[]): void {
+    this.append(chatId, {
+      at: this.now(),
+      turnId,
+      kind: 'user',
+      text,
+      seats: [...seats],
+      ...(attachments !== undefined && attachments.length > 0 ? { attachments: [...attachments] } : {}),
+    });
   }
 
   /** DC-S7: a crew-authored preface the seats received with that turn's message — disclosed, verbatim. */
