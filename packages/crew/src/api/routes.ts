@@ -17,10 +17,13 @@ import { codeGraphDb, codeGraphErrorStatus, requirementsGraph } from '../core/re
 import type {
   ConformanceRule,
   CodeGraphData,
+  AcpCliDiagnostics,
   CoreEvent,
+  DiagnosticsSeatGovernanceEntry,
   RecordedEvent,
   RepoEntry,
   RepoFinding,
+  SystemInfraRow,
 } from '../core/types.js';
 import { resolveCursorUnit } from '../core/cursor.js';
 import type { InteractionRequest } from '../core/types.js';
@@ -70,7 +73,7 @@ import {
 import { seatWorkDefaultNow } from './seat-work-default.js';
 import { ROSTER_REFRESH_WAIT_MS, rosterWithStandingFactory, type RosterWithStanding } from './roster-standing.js';
 import {
-  SeatContainerStatus, isContainerLoginCli, isContainerSeatFloor, loginDetail, runSeatLogin, seatLoginDepsFor, type ExecLike, type SeatLoginDeps,
+  SeatContainerStatus, gatewayDirOf, isContainerLoginCli, isContainerSeatFloor, isHostSeatFloor, loginDetail, runSeatLogin, seatLoginDepsFor, type ExecLike, type SeatLoginDeps,
 } from './seat-container-login.js';
 import type { SeatContainerLoginOutcome } from '../core/types.js';
 import { ChatTurnIndex } from './chat-turns.js';
@@ -165,6 +168,7 @@ import type { WatchRegistry } from '../watch/registry.js';
 import { isHumanOperator } from './watch-routes.js';
 import type { DeliverReportFact } from '../core/deliver-text.js';
 import { boundOrigin, InteractiveBridgePool } from '../interactive/bridge-pool.js';
+import { defaultInteractiveRoot } from '../interactive/bridge-root.js';
 import {
   composeDeliverText,
   configuredPublicOrigin,
@@ -192,7 +196,7 @@ import type { DocGroundingStore } from '../interactive/doc-grounding.js';
 import { registerInteractiveProxy } from '../interactive/proxy-routes.js';
 import { registerInteractiveDocDelete } from '../interactive/doc-delete-routes.js';
 import { registerInteractiveDocChecks } from '../interactive/doc-checks-routes.js';
-import { crewStateHome } from '../projects/state-home.js';
+import { crewStateHome, stateHomeOfDb } from '../projects/state-home.js';
 import { registerInteractiveDocList } from '../interactive/doc-list-routes.js';
 import { REVIEWS_DIRNAME } from '../interactive/review-ledger.js';
 import type { DocLedgerSweep } from '../interactive/doc-ledger-sweep.js';
@@ -212,6 +216,42 @@ import {
   type ErrorRing,
 } from './diagnostics.js';
 import { GovernanceDiagnostics } from './governance-health.js';
+import {
+  PROBE_TIMEOUT_MS,
+  SYSTEM_BUDGET_MS,
+  SYSTEM_STATS_DAYS,
+  WeekFoldCache,
+  assembleSnapshot,
+  buildAttention,
+  buildClis,
+  buildGovernance,
+  diskRow,
+  estateReadonlyCall,
+  infraRow,
+  judgeGaps,
+  livenessThresholds,
+  loadRow,
+  probeBroker,
+  probeBus,
+  probeEstate,
+  probeGateway,
+  probeInteractive,
+  probeVault,
+  readBridgeLockAsync,
+  readWeek,
+  resolveContainerRuntime,
+  runLiveness,
+  settleWithin,
+  skillsRow,
+  sortRuns,
+  stateHomeRow,
+  unfinished,
+  type ExecLike as SystemExecLike,
+  type GovernanceInput,
+  type OpenGateLike,
+  type RosterSeatLike,
+  type RunEvidence,
+} from './system-snapshot.js';
 import { governanceStoreFix, legacyHomeOutboxPath } from '../core/governance-store.js';
 import { UsageError, replayOutboxInto } from '../cli/governance.js';
 import { foldDeadletters } from './governance-health.js';
@@ -998,6 +1038,12 @@ export interface RuntimeDeps {
    *  `GET /runs/:id/events` at serve time so a reloaded page sees the `workerStalled` /
    *  `workerStallEscalated` facts the live socket carried. Absent ⇒ engine events only. */
   stallFrames?: (runId: string) => readonly RecordedStallFrame[];
+  /** DES-SYSTEM-VIEW: the stall watchdog's newest evidence of life for a run (a relay frame or a
+   *  busy child process), read by `GET /system`. Absent ⇒ the durable event log alone. */
+  runEvidence?: (runId: string) => { at: number; source: 'relay' | 'process' } | undefined;
+  /** DES-SYSTEM-VIEW: the system snapshot's command runner (the gateway inspect, estate stats, the
+   *  vault version). Injectable for tests; production uses `execCapped`. */
+  systemExec?: (file: string, args: string[], opts: { timeout: number }) => Promise<{ stdout: string; stderr: string }>;
   /** Run→retry-lineage index (CREW-UX-3) — `createServer` hydrates one from the audit trail so
    *  a restarted daemon still echoes `retry_of`; a directly-driven route set gets a fresh one. */
   retryIndex?: RetryIndex;
@@ -1679,6 +1725,30 @@ export function registerRoutes(
   // fail closed, never off by accident).
   const qeAcceptanceNow = async (): Promise<'required' | 'off'> =>
     qeAcceptanceMode(await Promise.resolve().then(() => adapter.getSettings()).catch(() => null));
+  // The `/health.warnings` list, shared with `GET /system`'s daemon row (DES-SYSTEM-VIEW).
+  const healthWarningsOf = (
+    stateHome: Awaited<ReturnType<NonNullable<typeof runtime.stateHome>['refresh']>> | null,
+    baseSkill: ReturnType<NonNullable<typeof runtime.skills>['baseSkill']> | null,
+  ) => [
+      ...(stateHome === null ? [] : stateHome.findings.map((f) => ({ kind: f.kind, severity: f.severity, message: f.message }))),
+      ...(baseSkill?.finding ? [{ kind: baseSkill.finding.kind, severity: baseSkill.finding.severity, message: baseSkill.finding.message }] : []),
+      // crew#753: a garden older than the minimum is a blocking finding on the first screen too.
+      ...[gardenBlocker()].filter((f): f is NonNullable<typeof f> => f !== null),
+      // DES-TEAMING-002 T0: the daemon's bus did not open at boot, so the engine was handed none
+      // and runs un-teamed. A daemon-level notice (status stays ok: it serves); the per-run
+      // `transport:"none"` record lands with P1.
+      ...(adapter.busUnavailable != null ? [busUnavailableWarning(adapter.busUnavailable)] : []),
+      // wicked-core#631: the engine has the bus but not the calls crew reaches it through.
+      ...(adapter.busSeamsOff != null ? [busSeamsOffWarning(adapter.busSeamsOff)] : []),
+      // crew#742: a seat that runs ungoverned, or floor seats on a host that cannot arm their
+      // boundary, are named before any run starts.
+      ...seatGovernanceWarnings(seatGovernanceNow(), hostSandboxLauncher()),
+      // crew 0.15.2 (#916): a custom seat written council-off with no work flag is now work-eligible
+      // by the engine default; each is named once, so the operator can keep it off work.
+      ...seatWorkDefaultNow(),
+      // crew#1068: the engine has no wicked-vault CLI to record held boundary findings with.
+      ...[adapter.vaultBin != null ? vaultBinWarning(adapter.vaultBin) : null].filter((w) => w !== null),
+    ];
   app.get(`${V}/health`, { config: { manifest: { statusCodes: [200] } } }, async () => {
     const ping = await enginePing();
     // F-E2E-030: what this deployment can keep. A composer reads `capabilities.deliverGate`
@@ -1710,6 +1780,8 @@ export function registerRoutes(
       qeAcceptance: await qeAcceptanceNow(),
       // api-types 0.128.0: `LaunchRunBody.primary` (the lead agent) is accepted.
       launchPrimary: true,
+      // api-types 0.136.0 (DES-SYSTEM-VIEW): `GET /system`, the Nerve Center snapshot, is served.
+      system: true,
     };
     // wicked-core#411 / crew#497: the state-home blocker rides the health probe as a WARNING. The
     // daemon still SERVES (status stays ok — studio must load and show the blocker) but refuses to
@@ -1726,26 +1798,7 @@ export function registerRoutes(
     // `baseSkill.finding` and `/diagnostics.skills.findings[]` (one surface, no new field;
     // `HealthWarning.kind` is open); status stays ok because the daemon serves and studio must load
     // and show it — exactly the state-home blocker's precedent above.
-    const warnings = [
-      ...(stateHome === null ? [] : stateHome.findings.map((f) => ({ kind: f.kind, severity: f.severity, message: f.message }))),
-      ...(baseSkill?.finding ? [{ kind: baseSkill.finding.kind, severity: baseSkill.finding.severity, message: baseSkill.finding.message }] : []),
-      // crew#753: a garden older than the minimum is a blocking finding on the first screen too.
-      ...[gardenBlocker()].filter((f): f is NonNullable<typeof f> => f !== null),
-      // DES-TEAMING-002 T0: the daemon's bus did not open at boot, so the engine was handed none
-      // and runs un-teamed. A daemon-level notice (status stays ok: it serves); the per-run
-      // `transport:"none"` record lands with P1.
-      ...(adapter.busUnavailable != null ? [busUnavailableWarning(adapter.busUnavailable)] : []),
-      // wicked-core#631: the engine has the bus but not the calls crew reaches it through.
-      ...(adapter.busSeamsOff != null ? [busSeamsOffWarning(adapter.busSeamsOff)] : []),
-      // crew#742: a seat that runs ungoverned, or floor seats on a host that cannot arm their
-      // boundary, are named before any run starts.
-      ...seatGovernanceWarnings(seatGovernanceNow(), hostSandboxLauncher()),
-      // crew 0.15.2 (#916): a custom seat written council-off with no work flag is now work-eligible
-      // by the engine default; each is named once, so the operator can keep it off work.
-      ...seatWorkDefaultNow(),
-      // crew#1068: the engine has no wicked-vault CLI to record held boundary findings with.
-      ...[adapter.vaultBin != null ? vaultBinWarning(adapter.vaultBin) : null].filter((w) => w !== null),
-    ];
+    const warnings = healthWarningsOf(stateHome, baseSkill);
     return {
       status: 'ok',
       version: PKG_VERSION,
@@ -1773,10 +1826,9 @@ export function registerRoutes(
     CoreAdapter.eventStoreCounter(),
     runtime.governanceLegacyOutboxPath === undefined ? legacyHomeOutboxPath() : runtime.governanceLegacyOutboxPath,
   );
-  app.get(
-    `${V}/diagnostics`,
-    { config: { manifest: { responseType: 'DiagnosticsResponse', statusCodes: [200] } } },
-    async () => {
+  // The diagnostics body, shared by `GET /diagnostics` (the raw dump) and `GET /system` (the
+  // Nerve Center snapshot, which carries every block of it on its rows — DES-SYSTEM-VIEW).
+  const diagnosticsNow = async () => {
       // `dbPath` is a readonly field of the real adapter; a stub-driven route set may lack it,
       // and diagnostics over an unknown store honestly reports no stores and no ACP record.
       const dbPath = typeof adapter.dbPath === 'string' && adapter.dbPath !== '' ? adapter.dbPath : null;
@@ -1835,7 +1887,11 @@ export function registerRoutes(
         // `null` on a route set driven without the real adapter.
         vault: adapter.vaultBin != null ? vaultDiagnostics(adapter.vaultBin) : null,
       };
-    },
+  };
+  app.get(
+    `${V}/diagnostics`,
+    { config: { manifest: { responseType: 'DiagnosticsResponse', statusCodes: [200] } } },
+    async () => diagnosticsNow(),
   );
 
   // Who am I talking to the daemon as? (task #88). In local mode this is
@@ -7640,6 +7696,258 @@ export function registerRoutes(
       // F-043: the bridge emits where this daemon's interactive seams read — one bus per daemon.
       busDataDir: runtime.interactiveBridgeBusDataDir ?? null,
     });
+  // ── GET /system — the Nerve Center snapshot (DES-SYSTEM-VIEW, api-types 0.136.0) ──
+  // One derived, READ-ONLY answer: the CLIs with their 7-day record, every unfinished run with a
+  // COMPUTED liveness, the infrastructure as real bounded probes, the governance instruments and
+  // `attention[]`. Every probe runs per request (no cached "ok"); only the 7-day fold over the run
+  // store is kept for SYSTEM_STATS_TTL_MS, with its `asOf`. The whole answer is held to
+  // SYSTEM_BUDGET_MS: a part that does not settle in time reads `unknown` (or `null`) with why.
+  const weekFoldCache = new WeekFoldCache();
+  /** One stat of a run's durable event log: read before the 7-day fold, so the fold can never eat
+   *  the time a liveness verdict needs. */
+  const EVIDENCE_TIMEOUT_MS = 1_000;
+  const systemExec: SystemExecLike =
+    runtime.systemExec ?? ((file, args, opts) => execCapped(file, args, { timeout: opts.timeout }));
+  app.get(
+    `${V}/system`,
+    { config: { manifest: { responseType: 'SystemSnapshot', statusCodes: [200] } } },
+    async () => {
+      const startedAt = Date.now();
+      const deadline = startedAt + SYSTEM_BUDGET_MS - 500;
+      const left = (): number => Math.max(0, deadline - Date.now());
+      const dbPath = typeof adapter.dbPath === 'string' && adapter.dbPath !== '' && adapter.dbPath !== ':memory:' ? adapter.dbPath : null;
+      const stateHome = dbPath !== null ? stateHomeOfDb(dbPath) : null;
+      const containerFloor = isContainerSeatFloor();
+      const roster = (() => {
+        try {
+          return markOptIn(rosterWithStanding()) as unknown as RosterSeatLike[];
+        } catch {
+          return [] as RosterSeatLike[];
+        }
+      })();
+
+      // Reads the folds and the run list depend on, each bounded.
+      const viewsP = settleWithin(async () => {
+        const detail = await adapter.sessionsDetail();
+        await backfillEndedAt(detail);
+        return detail.map(decorateRun);
+      }, PROBE_TIMEOUT_MS);
+      const settingsP = settleWithin(() => Promise.resolve(adapter.getSettings()), PROBE_TIMEOUT_MS);
+      const gatesP = settleWithin(
+        async () => (typeof adapter.interactionRequests === 'function' ? await adapter.interactionRequests(undefined, 'open') : null),
+        PROBE_TIMEOUT_MS,
+      );
+      const diagP = settleWithin(() => diagnosticsNow(), PROBE_TIMEOUT_MS);
+      const pingP = settleWithin(() => enginePing(), PROBE_TIMEOUT_MS);
+      const rulesP = settleWithin(async () => {
+        if (typeof adapter.listConformanceRules !== 'function') return null;
+        const rules = await adapter.listConformanceRules();
+        return rules.filter((r) => (r as { retired?: unknown }).retired !== true).length;
+      }, PROBE_TIMEOUT_MS);
+      const gatesByYouP = settleWithin(async () => {
+        const since = Date.now() - SYSTEM_STATS_DAYS * 86_400_000;
+        const entries = await audit.readAll({ action: 'gate.decided', since });
+        return entries.filter((e) => e.actor?.kind === 'human').length;
+      }, PROBE_TIMEOUT_MS);
+
+      // The infra probes, all at once.
+      const gatewayDir = stateHome !== null ? gatewayDirOf(join(stateHome, 'gateway')) : null;
+      const interactiveRoots = [...new Set([defaultInteractiveRoot(stateHome ?? undefined), ...interactiveBridges.keys()])];
+      const watch = runtime.watchRegistry?.() ?? null;
+      const watchHealth = watch !== null ? (() => { try { return watch.health(); } catch { return null; } })() : null;
+      const infraP = Promise.all([
+        probeGateway({ containerFloor, gatewayDir, runtime: containerFloor ? resolveContainerRuntime() : null, exec: systemExec }),
+        probeBroker({
+          containerFloor,
+          clis: roster.map((r) => r.key).filter((k) => isContainerLoginCli(k)),
+          status: (cli) => containerStatus.refreshFresh(cli),
+        }),
+        probeInteractive({
+          roots: interactiveRoots,
+          readLock: (root) => readBridgeLockAsync(root),
+          health: async (url, timeoutMs) => (await fetch(url, { signal: AbortSignal.timeout(timeoutMs) })).status,
+        }),
+        probeEstate({ memoryStore: memoryStoreInfo(), call: estateReadonlyCall(memoryStoreInfo().path) }),
+        probeBus({
+          unavailable: (adapter.busUnavailable as { reason?: unknown } | undefined) ?? null,
+          seamsOff: adapter.busSeamsOff ?? null,
+          dbPath: typeof adapter.busDbPath === 'string' && adapter.busDbPath !== '' ? adapter.busDbPath : null,
+          watchBus: (watchHealth?.sources.bus as 'up' | 'down' | 'degraded' | undefined) ?? null,
+          tailLagMs: watchHealth?.tail_lag_ms ?? null,
+        }),
+        probeVault({ vault: adapter.vaultBin != null ? vaultDiagnostics(adapter.vaultBin) : null, exec: systemExec }),
+        diskRow(stateHome),
+      ]);
+
+      const [views, settings, openGates, diag, ping, rules, gatesByYou, infraProbed] = await Promise.all([
+        viewsP, settingsP, gatesP, diagP, pingP, rulesP, gatesByYouP, infraP,
+      ]);
+      // The broker probe refreshed each container seat's sign-in reading: the CLI cards read the
+      // roster AFTER it, so one snapshot never says "broker: signed in" beside "claude: signed out".
+      const rosterNow = (() => {
+        try {
+          return markOptIn(rosterWithStanding()) as unknown as RosterSeatLike[];
+        } catch {
+          return roster;
+        }
+      })();
+      const allViews = views.kind === 'ok' ? views.value : [];
+
+      // runs[] with computed liveness.
+      const { quietAfterMs, stallAfterMs } = livenessThresholds(
+        settings.kind === 'ok' ? (settings.value as { workerStallMinutes?: number } | null)?.workerStallMinutes : undefined,
+      );
+      const openByRun = new Map<string, OpenGateLike>();
+      if (openGates.kind === 'ok' && openGates.value !== null) {
+        const at = (r: { created_at?: unknown }): number => new Date(r.created_at as string | number).getTime() || 0;
+        for (const r of [...openGates.value].sort((a, b) => at(a) - at(b))) {
+          openByRun.set(r.session_id, { interactionId: r.id, ord: r.ord, kind: r.gate_kind ?? (r.kind === 'elicitation' ? 'question' : null), prompt: r.prompt.slice(0, 280) });
+        }
+      }
+      const now = Date.now();
+      const live = unfinished(allViews);
+      const evidenceOf = async (id: string): Promise<RunEvidence | null> => {
+        let best: RunEvidence | null = null;
+        const relay = runtime.runEvidence?.(id);
+        if (relay !== undefined) best = { at: relay.at, source: relay.source };
+        if (dbPath !== null) {
+          const st = await settleWithin(() => fsp.stat(join(eventsDirOf(dbPath), `${id}.ndjson`)), EVIDENCE_TIMEOUT_MS);
+          if (st.kind === 'ok' && (best === null || st.value.mtimeMs > best.at)) best = { at: Math.floor(st.value.mtimeMs), source: 'event_log' };
+        }
+        return best;
+      };
+      const runPairs = await Promise.all(
+        live.map(async (view) => {
+          const cached = gateCache.get(view.session.id);
+          const gate =
+            openByRun.get(view.session.id) ??
+            (view.session.status === 'awaiting_human' && cached !== undefined
+              ? { interactionId: null, ord: cached.ord, kind: (cached as { gateKind?: string }).gateKind ?? null, prompt: cached.prompt.slice(0, 280) }
+              : null);
+          const run = runLiveness({ view, now, evidence: await evidenceOf(view.session.id), gate: view.session.status === 'awaiting_human' ? gate : null, quietAfterMs, stallAfterMs });
+          return { view, run };
+        }),
+      );
+      // The 7-day fold: cached briefly, never waited on past the budget.
+      const readEvents = async (id: string): Promise<readonly RecordedEvent[] | null> => {
+        const engine = await adapter.runEvents(id);
+        if (engine === null) return null;
+        const daemon = runtime.stallFrames?.(id) ?? [];
+        return daemon.length === 0 ? engine : [...engine, ...(daemon as unknown as RecordedEvent[])];
+      };
+      const week =
+        views.kind === 'ok' && typeof adapter.runEvents === 'function'
+          ? await settleWithin(() => weekFoldCache.get(() => readWeek(allViews, readEvents, { days: SYSTEM_STATS_DAYS, now: Date.now() })), left())
+          : null;
+      const weekFold = week?.kind === 'ok' ? week.value : null;
+      const weekNote =
+        views.kind !== 'ok'
+          ? `the engine did not list its runs within ${PROBE_TIMEOUT_MS / 1000} s`
+          : week === null
+            ? 'the run store has no event-log read binding on this engine'
+            : week.kind === 'timeout'
+              ? 'the 7-day fold did not finish inside this snapshot’s bound; it keeps going and the next read has it'
+              : week.kind === 'error'
+                ? `the 7-day fold failed: ${week.error}`
+                : weekFold === null
+                  ? 'the run store has no event-log read binding on this engine'
+                  : undefined;
+
+      // Diagnostics blocks, for the rows that carry them.
+      const d = diag.kind === 'ok' ? diag.value : null;
+      const seatGov = d?.seatGovernance.seats ?? [];
+      const clis = buildClis({
+        roster: rosterNow,
+        acp: (d?.acp.byCli ?? {}) as Record<string, AcpCliDiagnostics>,
+        seatGovernance: seatGov as unknown as DiagnosticsSeatGovernanceEntry[],
+        containerFloor,
+        hostBoundary: d?.seatGovernance.hostBoundary ?? hostSandboxLauncher(),
+        week: weekFold,
+        ...(weekNote !== undefined ? { weekNote } : {}),
+      });
+
+      const runs = sortRuns(runPairs.map((p) => p.run));
+      const gaps = judgeGaps(runPairs, clis);
+
+      // infra[]: the daemon row first (it answers this request; the engine's ping says if it is free).
+      const daemonStarted = Date.now() - Math.max(views.ms, ping.ms);
+      const pingWord = ping.kind === 'ok' ? ping.value : ping.kind === 'timeout' ? 'no answer' : `error: ${ping.error}`;
+      const daemonDetails: Record<string, unknown> = {
+        version: PKG_VERSION,
+        ping: pingWord,
+        warnings: healthWarningsOf(runtime.stateHome !== undefined ? (d?.stateHome ?? null) : null, runtime.skills?.baseSkill() ?? null),
+        ...(d !== null ? { components: d.components, daemon: d.daemon, recentErrors: d.recentErrors } : {}),
+      };
+      const daemonRow =
+        views.kind !== 'ok'
+          ? infraRow('daemon', 'degraded', `serving, but the engine did not list its runs (${views.kind === 'timeout' ? `no answer within ${PROBE_TIMEOUT_MS / 1000} s` : views.error}): runs[] and the CLI stats are incomplete`, 'Re-check; if the engine stays busy, a large launch may be planning.', daemonStarted, daemonDetails, PROBE_TIMEOUT_MS)
+          : ping.kind === 'ok' && ping.value === ENGINE_BUSY_PING
+            ? infraRow('daemon', 'degraded', 'serving; the engine is busy (its ping did not answer within 1 s)', 'Re-check in a minute; a large launch may be planning.', daemonStarted, daemonDetails)
+            : ping.kind !== 'ok'
+              ? infraRow('daemon', 'unknown', `serving; the engine ping gave ${pingWord}`, 'Re-check.', daemonStarted, daemonDetails, PROBE_TIMEOUT_MS)
+              : infraRow('daemon', 'ok', `serving crew ${PKG_VERSION}; engine ping ${ping.value}`, null, daemonStarted, daemonDetails);
+      const storesRow =
+        d === null
+          ? infraRow('stores', 'unknown', `diagnostics did not answer within ${PROBE_TIMEOUT_MS / 1000} s`, 'Re-check.', startedAt, {}, PROBE_TIMEOUT_MS)
+          : dbPath === null
+            ? infraRow('stores', 'unknown', 'this route set has no core store', null, startedAt, { stores: d.stores })
+            : infraRow('stores', 'ok', `${d.stores.length} store file(s), ${Math.round(d.stores.reduce((a, s) => a + s.bytes, 0) / 2 ** 20)} MiB`, null, startedAt, { stores: d.stores });
+      const floorWord = containerFloor ? 'container' : isHostSeatFloor() ? 'host' : 'unset';
+      const roleFindings = d?.seatGovernance.roleFindings ?? [];
+      const seatFloorRow = d === null
+        ? infraRow('seat_floor', 'unknown', `diagnostics did not answer (${diag.kind === 'timeout' ? `no answer within ${PROBE_TIMEOUT_MS / 1000} s` : diag.kind === 'error' ? diag.error : ''})`, 'Re-check.', startedAt, { floor: floorWord }, PROBE_TIMEOUT_MS)
+        : infraRow(
+        'seat_floor',
+        floorWord === 'host' && (d?.seatGovernance.hostBoundary ?? null) === null ? 'degraded' : roleFindings.length > 0 ? 'degraded' : 'ok',
+        floorWord === 'container'
+          ? 'container floor: governed seats run in hardened containers'
+          : floorWord === 'host'
+            ? (d?.seatGovernance.hostBoundary ?? null) === null
+              ? 'interim host floor, and no OS launcher (sandbox-exec / bwrap) on PATH: floor seats run advisory'
+              : `interim host floor, bounded by ${d?.seatGovernance.hostBoundary}`
+            : 'no seat floor chosen',
+        roleFindings.length > 0 ? (roleFindings[0]?.message ?? 'see the role findings') : 'Install the OS launcher, or run the container floor.',
+        startedAt,
+        { floor: floorWord, rosterFile: d?.seatGovernance.rosterFile ?? null, hostBoundary: d?.seatGovernance.hostBoundary ?? null, roleFindings },
+      );
+      const infra: SystemInfraRow[] = [
+        daemonRow,
+        ...infraProbed.slice(0, 6),
+        d !== null ? skillsRow(d.skills as unknown as Parameters<typeof skillsRow>[0]) : infraRow('skills', 'unknown', 'diagnostics did not answer in time', 'Re-check.', startedAt),
+        stateHomeRow(d === null ? null : (d.stateHome ?? null) as Parameters<typeof stateHomeRow>[0]),
+        storesRow,
+        seatFloorRow,
+        infraProbed[6] as SystemInfraRow,
+        loadRow(),
+      ];
+
+      const governance = buildGovernance({
+        governance: (d?.governance ?? null) as GovernanceInput['governance'],
+        ...(d === null ? { governanceNote: `diagnostics did not answer (${diag.kind === 'timeout' ? `no answer within ${PROBE_TIMEOUT_MS / 1000} s` : diag.kind === 'error' ? diag.error : ''})` } : {}),
+        skillsFindings: (d?.skills.findings ?? []) as GovernanceInput['skillsFindings'],
+        decisions: d?.decisions ?? null,
+        clis,
+        judgeGapCount: gaps.length,
+        week: weekFold,
+        ...(weekNote !== undefined ? { weekNote } : {}),
+        gatesByYou: gatesByYou.kind === 'ok' ? gatesByYou.value : null,
+        steeringRules: rules.kind === 'ok' ? rules.value : null,
+        ...(rules.kind === 'ok' && rules.value === null ? { steeringNote: 'this engine cannot list steering rules' } : rules.kind === 'timeout' ? { steeringNote: `the rule store did not answer within ${PROBE_TIMEOUT_MS / 1000} s` } : rules.kind === 'error' ? { steeringNote: `the rule store could not be read: ${rules.error}` } : {}),
+      });
+      const working = runs.filter((r) => r.liveness !== 'waiting_on_you' && r.liveness !== 'held').length;
+      const attention = buildAttention({
+        infra,
+        clis,
+        runs,
+        governance,
+        gaps,
+        blockedByInfra: (key) =>
+          key === 'gateway' || key === 'broker' ? (containerFloor ? working : 0) : key === 'skills' || key === 'state_home' || key === 'disk' || key === 'load' ? working : 0,
+      });
+      return assembleSnapshot({ startedAt, clis, runs, infra, governance, attention });
+    },
+  );
+
   registerInteractiveProxy(app, adapter, {
     settings: projectSettings,
     pool: interactiveBridges,

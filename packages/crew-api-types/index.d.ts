@@ -287,6 +287,11 @@ export interface HealthCapabilities {
    * the run. ABSENT on an older daemon — do not send the field (its strict schema 400s on it).
    */
   launchPrimary?: boolean;
+  /**
+   * (api-types 0.136.0, DES-SYSTEM-VIEW) `GET /system` is served: the Nerve Center snapshot
+   * ({@link SystemSnapshot}). ABSENT on an older daemon — show the older Health cards instead.
+   */
+  system?: boolean;
 }
 
 /** One `GET /health.warnings[]` entry (additive; wicked-core#411 / wicked-crew#497). */
@@ -8084,6 +8089,285 @@ export interface NoEligibleSeatBody {
   benched: string;
   /** What to do, in operator terms. */
   remedy: string;
+}
+
+// ── System snapshot — the Nerve Center (api-types 0.136.0, DES-SYSTEM-VIEW) ────────────────────
+//
+// `GET /api/v1/system`: ONE derived, read-only snapshot answering "is anything stopping work, why,
+// and what fixes it?" — the CLIs, the unfinished runs, the infrastructure and the governance
+// instruments, plus `attention[]`, the union of every item that needs a look. Every infra row is a
+// real probe run for THIS request under a bounded timeout (a probe that did not answer reads
+// `unknown` with its timeout, never `ok`); liveness is computed from evidence; a number the daemon
+// cannot count is `null` (or the field is absent where the doc says so), never a fabricated 0. The
+// whole snapshot answers within a fixed overall bound (`budgetMs`) even when probes hang.
+// `GET /health.capabilities.system === true` advertises the route. `/diagnostics` stays the raw dump;
+// each of its blocks is reachable from here (see each row's `details`).
+
+/** One state for every infra row and governance card. `off`: the component is not part of this
+ *  deployment right now (the container gateway on the host floor, an interactive bridge nothing has
+ *  started yet) — not a problem and never in `attention[]`. */
+export type SystemState = 'ok' | 'degraded' | 'down' | 'unknown' | 'off';
+
+/** The Nerve Center light: `red` when work is blocked, `yellow` when something needs a look but
+ *  work still flows, `green` when `attention[]` is empty. Derived from `attention[]` only. */
+export type SystemLevel = 'green' | 'yellow' | 'red';
+
+/** The existing action an attention item or row offers (the snapshot itself is read-only):
+ *  `sign_in` — the CLI's sign-in (`POST /seats/:cli/login…` / the Agents page); `recheck` — read
+ *  the snapshot again (every probe runs fresh per read); `open_gate` — the run's open gate;
+ *  `open_run` — the run. */
+export type SystemActionKind = 'sign_in' | 'recheck' | 'open_gate' | 'open_run';
+
+/** Where an item points. A skin maps it to its own route; crew never spells a studio URL. */
+export type SystemTarget =
+  | { kind: 'infra'; key: SystemInfraKey }
+  | { kind: 'cli'; cli: string }
+  | { kind: 'run'; runId: string; gateOrd?: number; interactionId?: string }
+  | { kind: 'governance'; key: SystemGovernanceKey };
+
+export interface SystemAction {
+  kind: SystemActionKind;
+  /** The button's words ("Sign in", "Re-check", "Open the gate", "Open the run"). */
+  label: string;
+}
+
+/** `GET /api/v1/system`. */
+export interface SystemSnapshot {
+  /** ISO-8601 of when this snapshot was assembled (the probes ran just before it). */
+  checkedAt: string;
+  /** The overall bound the daemon held this answer to, in ms. */
+  budgetMs: number;
+  /** How long assembling it took, in ms. */
+  tookMs: number;
+  /** `red` iff some attention item is `red`, else `yellow` iff any item, else `green`. */
+  level: SystemLevel;
+  /** Every item that needs a look, worst first (red before yellow, then by how many runs it
+   *  blocks, then infra › cli › run › governance). Empty when all is clear. */
+  attention: SystemAttentionItem[];
+  /** One entry per CLI on the roster, in roster order. */
+  clis: SystemCli[];
+  /** Every unfinished run (not completed / cancelled / failed), worst first:
+   *  waiting_on_you › held › stalled › quiet › working, then oldest evidence first. */
+  runs: SystemRun[];
+  infra: SystemInfraRow[];
+  governance: SystemGovernanceCard[];
+}
+
+export interface SystemAttentionItem {
+  /** Stable across reads while the same thing is wrong (`infra:gateway`, `cli:copilot`,
+   *  `run:<id>`, `judge:<runId>`, `governance:dead_letters`). */
+  id: string;
+  severity: 'red' | 'yellow';
+  source: 'infra' | 'cli' | 'run' | 'governance';
+  /** The one-line headline ("gateway down", "copilot benched (quota)", "run 9b43ee44 stalled"). */
+  title: string;
+  /** Why, in plain words. */
+  reason: string;
+  /** What fixes it, in plain words. */
+  remedy: string;
+  /** How many unfinished runs it blocks (0 when it blocks none directly). */
+  blocks: number;
+  target: SystemTarget;
+  /** The one existing action that helps, or `null`. */
+  action: SystemAction | null;
+}
+
+// ── clis[] ──
+
+/** `signed_in`: the roster reads the seat signed in (or not needing a sign-in) and no bench is
+ *  active; `signed_out`: it needs a sign-in; `benched`: the engine benched it in a run on its own
+ *  refusal (quota / 429, usage limit, not logged in…) and crew keeps it out of new launches until
+ *  `benchedUntil`; `unknown`: the daemon cannot tell cheaply (the check has not answered). */
+export type SystemCliState = 'signed_in' | 'signed_out' | 'benched' | 'unknown';
+
+export interface SystemCli {
+  cli: string;
+  label: string;
+  state: SystemCliState;
+  /** Why the state is not `signed_in`, in the operator's words; `null` when it is. */
+  stateReason: string | null;
+  /** ISO-8601 of when an active bench lifts; present only with `state: 'benched'`. */
+  benchedUntil?: string;
+  /** Whether the seat can be signed in from studio (a container sign-in or a login command). */
+  canSignIn: boolean;
+  /** May be seated as a judge/council member right now (the roster's `council_eligible`). */
+  councilEligible: boolean;
+  /** May be seated for work right now (the roster's `work_eligible`; absent there reads true). */
+  workEligible: boolean;
+  /** The installed version the roster's background probe read; `null` before the first reading. */
+  version: string | null;
+  /** The ACP version pin, when the seat is pinned: `matched: false` fails its governance closed. */
+  versionPin: { pinned: string; observed: string | null; matched: boolean } | null;
+  /** The engine's governance class for the seat, verbatim; `null` on an engine without it. */
+  governanceClass: string | null;
+  /** The governance mode per scope kind (`RosterSeat.governance_mode`); `null` when unread. */
+  governanceMode: Record<string, string> | null;
+  /** `wrapped` | `acp` — how the seat runs; `null` when the seat governance read failed. */
+  transport: string | null;
+  /** The seat's sandbox in words: `container` (the seat floor), `host:<launcher>`, `os_sandbox`,
+   *  or `none`. */
+  sandbox: string;
+  /** The last seat-level error the daemon observed, or `null`. */
+  lastError: { at: string; message: string } | null;
+  /** The 7-day record folded from the run store; `null` when the engine has no event-log read
+   *  binding, or the fold did not finish inside the snapshot's bound (`statsNote` says which). */
+  stats: SystemCliStats | null;
+  statsNote?: string;
+  /** The `/diagnostics` facts for this CLI, verbatim: `acp` = `acp.byCli[cli]`, `seatGovernance`
+   *  = its `seatGovernance.seats[]` entry, `health` = `RosterSeat.health`. */
+  details: {
+    acp: AcpCliDiagnostics | null;
+    seatGovernance: DiagnosticsSeatGovernanceEntry | null;
+    health: SeatHealth | null;
+  };
+}
+
+/** A CLI's last 7 days, folded from the runs' durable event logs (event time, `ts`). */
+export interface SystemCliStats {
+  days: number;
+  /** Window start, unix millis. Day buckets are 24 h slices from here. */
+  since: number;
+  /** When the fold ran (unix millis) — the stats are cached up to 30 s; every probe is not. */
+  asOf: number;
+  /** Distinct units dispatched to the CLI inside the window. */
+  units: number;
+  /** Of those, the units whose first gate evaluation in the window ran. */
+  gated: number;
+  /** Units whose first gate evaluation passed (combined, no denial). */
+  firstPass: number;
+  /** `round(firstPass / gated * 100)`; `null` when `gated` is 0. */
+  passPct: number | null;
+  /** Median of dispatch → captured output per unit attempt on this CLI, ms; `null` when none
+   *  finished in the window. */
+  medianUnitMs: number | null;
+  /** `seatBenched` frames for the CLI whose reason is a quota / rate / usage limit (the 429s). */
+  rateLimited: number;
+  /** All `seatBenched` frames for the CLI (any reason). */
+  benches: number;
+  /** `acpFallback` frames for the CLI. */
+  fallbacks: number;
+  /** Units dispatched per 24 h slice, oldest first (`days` entries) — the sparkline. */
+  perDay: number[];
+  /** Tokens, only where the CLI reported them (`cliUsage`); ABSENT otherwise, never 0. */
+  tokens?: { input: number; output: number };
+  /** Dollar cost, only where a price was known; ABSENT otherwise, never 0. */
+  costUsd?: number;
+  /** Runs read for the fold, and whether the run cap cut the window. */
+  runsRead: number;
+  truncated: boolean;
+}
+
+// ── runs[] ──
+
+/**
+ * A run's computed liveness:
+ * - `waiting_on_you` — paused at an open gate or question the operator answers (`gate` says which);
+ * - `held` — paused and escalated (a failed floor, a judge that could not rule, a refused
+ *   hand-over: `gateKind: 'escalation'`), or paused with no open gate on record;
+ * - `stalled` — executing with no evidence (an event, unit output or a busy child process) for at
+ *   least `stallAfterMs`;
+ * - `quiet` — executing with no evidence for at least `quietAfterMs`;
+ * - `working` — executing with evidence inside `quietAfterMs`. Never claimed without evidence: a
+ *   run with no evidence on record at all reads `stalled` (or `quiet` when it began recently).
+ */
+export type SystemRunLiveness = 'waiting_on_you' | 'held' | 'stalled' | 'quiet' | 'working';
+
+export interface SystemRun {
+  runId: string;
+  title: string;
+  /** The engine's status (`SessionStatus`). */
+  status: string;
+  liveness: SystemRunLiveness;
+  /** Plain-words why ("waiting on you: plan approval", "no event for 42 min"). */
+  reason: string;
+  /** The cursor unit's phase (`phase_ref`, else `stage`); `null` before planning. */
+  phase: string | null;
+  /** The cursor unit's ord; `null` when none is in flight. */
+  unitOrd: number | null;
+  /** The seat on the cursor unit; `null` when none. */
+  seat: string | null;
+  /** ISO-8601 of the newest evidence of life (an event or a busy process); `null` when none is on
+   *  record. */
+  lastEventAt: string | null;
+  /** Where `lastEventAt` came from: the durable event log, the live relay, or a busy process. */
+  evidence: 'event_log' | 'relay' | 'process' | null;
+  /** ms since `lastEventAt`; `null` when there is none. */
+  quietForMs: number | null;
+  /** The thresholds the verdict used (from `workerStallMinutes`). */
+  quietAfterMs: number;
+  stallAfterMs: number;
+  /** The open gate or question, when the run waits on one. */
+  gate?: { interactionId: string | null; ord: number | null; kind: string | null; prompt: string | null };
+  /** ISO-8601 the run was launched, when known. */
+  createdAt: string | null;
+}
+
+// ── infra[] ──
+
+export type SystemInfraKey =
+  | 'daemon'
+  | 'gateway'
+  | 'broker'
+  | 'interactive'
+  | 'estate'
+  | 'bus'
+  | 'vault'
+  | 'skills'
+  | 'state_home'
+  | 'stores'
+  | 'seat_floor'
+  | 'disk'
+  | 'load';
+
+export interface SystemInfraRow {
+  key: SystemInfraKey;
+  label: string;
+  state: SystemState;
+  /** What the probe saw, in plain words. */
+  reason: string;
+  /** What fixes it; `null` when `ok` / `off`. */
+  remedy: string | null;
+  /** ISO-8601 of when this row's probe settled (or gave up). */
+  checkedAt: string;
+  /** How long the probe took, ms. */
+  durationMs: number;
+  /** The probe's own bound, ms (present on rows that spawn or dial). */
+  timeoutMs?: number;
+  /** The raw probe reading and the `/diagnostics` block(s) this row covers, verbatim
+   *  (daemon: `components`, `daemon`, `recentErrors`, `ping`, `warnings`; stores: `stores`;
+   *  skills: `skills`; state_home: `stateHome`; estate: `memoryStore`; vault: `vault`;
+   *  seat_floor: `rosterFile`, `hostBoundary`, `roleFindings`). */
+  details: Record<string, unknown>;
+}
+
+// ── governance[] ──
+
+export type SystemGovernanceKey =
+  | 'judges'
+  | 'floor_outcomes'
+  | 'qe_acceptance'
+  | 'gates_answered'
+  | 'dead_letters'
+  | 'steering_rules'
+  | 'findings'
+  | 'store';
+
+export interface SystemGovernanceCard {
+  key: SystemGovernanceKey;
+  label: string;
+  state: SystemState;
+  /** The headline number; `null` when the daemon cannot count it. */
+  value: number | null;
+  /** Counts behind the headline (floor outcomes by kind, gates by who…); absent when none. */
+  breakdown?: Record<string, number>;
+  /** Plain words: what the number means and where it came from. */
+  reason: string;
+  remedy: string | null;
+  /** Window start (unix millis) for the 7-day cards; absent on point-in-time cards. */
+  since?: number;
+  /** The `/diagnostics` facts this card covers, verbatim (store/dead_letters/findings:
+   *  `governance`; findings also `decisions` and the skills findings). */
+  details?: Record<string, unknown>;
 }
 
 // ── Memory proposal queue (DES-MEM-FACETED-001 §5.0, api-types 0.21.0) ─────────

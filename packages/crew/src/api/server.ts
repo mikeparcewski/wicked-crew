@@ -2118,6 +2118,8 @@ export async function createServer(
       deliveryFreeze,
       // wicked-studio#284: the watchdog's remembered frames ride `GET /runs/:id/events`.
       stallFrames: (runId) => stallFrameIndex.framesFor(runId),
+      // DES-SYSTEM-VIEW: the watchdog's evidence of life (relay frames, busy children) for `GET /system`.
+      runEvidence: (runId) => stallWatchdog.evidence(runId),
       // The SAME standing accessor the seams and the adapter launch with (F-RECON-002/003).
       rosterWithStanding,
       retryIndex,
