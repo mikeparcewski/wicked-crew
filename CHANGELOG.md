@@ -10,8 +10,15 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.16.2] — 2026-10-26
+
+A patch release: the daemon never exits silently after ready, and it listens before the skills snapshot is verified (#1146; startup about 2 s warm instead of about 57 s); the Nerve Center's disk row turns red before a write can fail. Bundles wicked-studio 0.12.2 and runs on wicked-core-ts 0.15.10. `wicked-crew-api-types` 0.138.0 is on npm.
+
+### Changed
+- **The bundled studio is wicked-studio 0.12.2.** Nerve Center is a compact header over five tabs (studio#911); the rail reads New job, New project, Chat, Search, with hover, pressed, current and focus states on every item (studio#909); and the Desk's run lists and stat rows are quieter and fit a phone (studio#912).
+
 ### Fixed
-- **The daemon no longer dies silently after ready, and it listens before the skills snapshot is verified (crew#1145, `wicked-crew-api-types` 0.138.0).** On the rig a freshly upgraded daemon logged `WICKED_CREW_READY` and exited about a second later; its log ended with a blank line and `Node.js v26.11.1`, Node's fatal trailer with the report missing. The disk was nearly full. A stdout write that fails (ENOSPC on `daemon-stdout.log`, or EPIPE when the reader of a pipe goes away) was an unhandled `'error'`, so Node made it an uncaught exception, and its report went to the same full file. `wicked-crew serve` now:
+- **The daemon no longer dies silently after ready, and it listens before the skills snapshot is verified (crew#1145, #1146, `wicked-crew-api-types` 0.138.0).** On the rig a freshly upgraded daemon logged `WICKED_CREW_READY` and exited about a second later; its log ended with a blank line and `Node.js v26.11.1`, Node's fatal trailer with the report missing. The disk was nearly full. A stdout write that fails (ENOSPC on `daemon-stdout.log`, or EPIPE when the reader of a pipe goes away) was an unhandled `'error'`, so Node made it an uncaught exception, and its report went to the same full file. `wicked-crew serve` now:
   - reports a failed stdout or stderr write once, with the code and the state-home volume's free space, and keeps serving;
   - reports an uncaught exception with its stack and exits 1, and reports an unhandled rejection with its stack and keeps serving;
   - says on every exit the code and the reason (a signal, a fatal error, a failed command), or the stack of the `process.exit` call when none was recorded.
@@ -4432,7 +4439,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.1...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.2...HEAD
+[0.16.2]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.1...v0.16.2
 [0.16.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.9...v0.16.0
 [0.15.9]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.8...v0.15.9
