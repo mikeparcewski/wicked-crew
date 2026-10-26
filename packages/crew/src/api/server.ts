@@ -422,6 +422,15 @@ export interface CreateServerOptions {
     disabled?: boolean;
     source?: () => PluginSource | null;
     provisionVenv?: VenvProvisioner;
+    /**
+     * crew#1145: run the boot ladder AFTER `createServer` returns instead of inside it — the daemon
+     * listens first and the skills seam reports `publishing` until the ladder lands. Every engine
+     * launch (run, resume, gate answer, campaign, reassign) waits for it through the adapter's launch
+     * gate, and the `/skills` routes wait too, so nothing reads the engine input before the ladder
+     * decided it. `wicked-crew serve` sets it; tests that read the seam right after `createServer`
+     * leave it off (or await `app.skillsBootSettled()`).
+     */
+    background?: boolean;
   };
   /**
    * Chat citation verification (crew#561). DEFAULT-ON: every terminal `chatReply` of a chat with
@@ -483,6 +492,8 @@ declare module 'fastify' {
   interface FastifyInstance {
     /** crew#741 — the boot's stage clock; `startServer` adds `listen` and hands the snapshot back. */
     bootStages?: BootStageClock;
+    /** crew#1145 — settles once the skills boot ladder landed (at once when it ran inline or the seam is off). */
+    skillsBootSettled?: () => Promise<void>;
   }
 }
 
@@ -621,6 +632,8 @@ export async function createServer(
   bootClock.lap('setup');
   let skillsRuntime: SkillsRuntime | undefined;
   let skillsStore: SkillsStore | undefined;
+  // crew#1145: the background boot ladder, when `skills.background` is set — `null` when it ran inline.
+  let skillsBoot: Promise<void> | null = null;
   // X-MIG M11: the built-in workflows crew serves are the engine's presets, read once at boot (a
   // test double without the method serves none).
   if (typeof (adapter as Partial<CoreAdapter>).loadBuiltinCatalog === 'function') {
@@ -668,12 +681,31 @@ export async function createServer(
     // `''` — the engine reads it at intake, per launch. Re-applied by PUT /settings
     // and by every publish / refresh (skills/runtime.ts).
     skillsRuntime.configureBaseSkill(bootSettings);
-    await skillsRuntime.apply();
     // crew#874: an installed garden that moved past the baseline, over a catalog with no operator
-    // change, is refreshed and published here — otherwise every run executes the older garden and
-    // `skills.installed-ahead` says so. `WICKED_CREW_SKILLS_AUTO_REFRESH=0` turns it off.
-    await skillsRuntime.autoRefreshOnBoot();
+    // change, is refreshed and published after `apply` — otherwise every run executes the older
+    // garden and `skills.installed-ahead` says so. `WICKED_CREW_SKILLS_AUTO_REFRESH=0` turns it off.
+    if (options?.skills?.background === true) {
+      // crew#1145: off the critical path. The ladder is paced (its walks let the loop turn), the
+      // daemon listens while it runs, and every launch waits for it (the launch gate below).
+      skillsBoot = skillsRuntime.startBoot((health, ms) => {
+        const gen = health.current === null ? '' : ` (generation ${health.current.gen})`;
+        app.log.info(`[skills] boot ladder landed in ${ms}ms: ${health.state}${gen} — launches held while it ran proceed now`);
+      });
+    } else {
+      await skillsRuntime.apply();
+      await skillsRuntime.autoRefreshOnBoot();
+    }
   }
+  if (skillsBoot !== null) {
+    const boot = skillsBoot;
+    // Runtime-guarded like `setRosterProvider`: the integration suites' partial fake adapters lack it.
+    if (typeof (adapter as { setLaunchGate?: unknown }).setLaunchGate === 'function') adapter.setLaunchGate(() => boot);
+    // A close while the ladder runs waits for it: nothing may still write under the root afterwards.
+    app.addHook('onClose', async () => {
+      await boot;
+    });
+  }
+  app.decorate('skillsBootSettled', () => skillsBoot ?? Promise.resolve());
   // Exclusive peers (codex on #846): `venv` is the provisioner path's time, `skills` the rest of
   // the seam (seed, validate, hash, stage, flip) — the stages sum, never double-count.
   const skillsMs = bootClock.lap('skills');
@@ -699,12 +731,21 @@ export async function createServer(
     },
     engine: CoreAdapter.stateHomePreflighter(),
   });
-  const stateHomeAtBoot = await stateHomeWatch.refresh();
-  for (const finding of stateHomeAtBoot.findings) {
-    app.log.error(`[state-home] ${finding.message}`);
-  }
-  if (stateHomeAtBoot.error !== null) {
-    app.log.warn(`[state-home] the state-home preflight could not classify (${stateHomeAtBoot.source}): ${stateHomeAtBoot.error}`);
+  const surveyStateHome = async (): Promise<void> => {
+    const stateHomeAtBoot = await stateHomeWatch.refresh();
+    for (const finding of stateHomeAtBoot.findings) {
+      app.log.error(`[state-home] ${finding.message}`);
+    }
+    if (stateHomeAtBoot.error !== null) {
+      app.log.warn(`[state-home] the state-home preflight could not classify (${stateHomeAtBoot.source}): ${stateHomeAtBoot.error}`);
+    }
+  };
+  await surveyStateHome();
+  // crew#1145: a background ladder decides the snapshot later — survey again once it has.
+  if (skillsBoot !== null) {
+    void skillsBoot.then(surveyStateHome).catch((err: unknown) => {
+      app.log.warn(`[state-home] the post-skills survey failed: ${err instanceof Error ? err.message : String(err)}`);
+    });
   }
 
   // The project seam (DES-PROJECT-001): the bus handle for post-commit event emission + the
@@ -814,6 +855,10 @@ export async function createServer(
   const runSkillGaps = new RunSkillGapIndex();
   await runSkillGaps.hydrate(audit, (m) => app.log.warn(m));
   const skillHeld = (name: string): boolean => skillsRuntime?.holdsSkill(name) ?? false;
+  // crew#1145: the draft / edit / chat seams ask once, for their arm line — answered from the
+  // generation the ladder exported (no re-walk), after a background ladder has landed.
+  const armSkillHeld = (name: string): boolean => skillsRuntime?.exportedHolds(name) ?? false;
+  const armAfter = skillsBoot !== null ? { skillsSettled: skillsBoot } : {};
   // Delivered-PR record (CREW-UX-8, crew#321): same durable pattern — hydrated from the
   // trail's `run.delivered` entries so `session.delivery` survives a daemon restart.
   const deliveryIndex = new DeliveryIndex();
@@ -1300,7 +1345,8 @@ export async function createServer(
       // The roster WITH standing when no override is set (F-RECON-002/003).
       roster: rosterWithStanding,
       // The draft skill the preset runs (draft-skill.ts): asked once, for the arm log line (crew#935).
-      skillHeld,
+      skillHeld: armSkillHeld,
+      ...armAfter,
       onRunFiled: fileRun,
       onRunLaunched: (runId, detail) => { recordRunLaunched(audit, runTimingIndex, DAEMON_ACTOR, runId, detail); },
       // F-046: the create-time grounding sidecar is read under the SAME per-project docs root the
@@ -1334,7 +1380,8 @@ export async function createServer(
       // The roster WITH standing when no override is set (F-RECON-002/003).
       roster: rosterWithStanding,
       // The draft skill the preset runs (draft-skill.ts): asked once, for the arm log line (crew#935).
-      skillHeld,
+      skillHeld: armSkillHeld,
+      ...armAfter,
       // The demo-kind gate: a demo doc's step feedback is declined with an honest error status
       // (demos are made by the Demo experience's `demo` preset now, studio#373).
       resolveDocsRoot: o.resolveDocsRoot ?? interactiveDocsRoot,
@@ -1435,7 +1482,8 @@ export async function createServer(
       // The roster WITH standing when no override is set (F-RECON-002/003).
       roster: rosterWithStanding,
       // The draft skill the preset runs (draft-skill.ts): asked once, for the arm log line (crew#935).
-      skillHeld,
+      skillHeld: armSkillHeld,
+      ...armAfter,
       ...(o.queueSweepMs !== undefined ? { queueSweepMs: o.queueSweepMs } : {}),
       ...(o.landingGateMs !== undefined ? { landingGateMs: o.landingGateMs } : {}),
       resolveDocsRoot: o.resolveDocsRoot ?? interactiveDocsRoot,

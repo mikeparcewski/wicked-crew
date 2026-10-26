@@ -67,7 +67,7 @@ import {
   narrationStamps,
 } from './draft-events.js';
 import { InteractiveHandoffLedger } from './ledger.js';
-import { DRAFT_SKILL, draftQualityClause, draftSkillArmLine, type SkillHeld } from './draft-skill.js';
+import { draftQualityClause, logDraftSkillArmLine, type SkillHeld } from './draft-skill.js';
 import { crewStateHome } from '../projects/state-home.js';
 import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
 import { resolveInteractiveRoot } from './bridge-root.js';
@@ -325,6 +325,8 @@ export interface InteractiveChatOptions {
    *  always runs the skill, and a snapshot without it fails the run before the document work starts (crew#935).
    *  Default: `() => false` (a caller without a skills runtime has no snapshot to hold anything). */
   skillHeld?: SkillHeld;
+  /** crew#1145: the daemon's background skills ladder — the arm line waits for it. Absent = say it now. */
+  skillsSettled?: Promise<unknown>;
   /** The docs root an ask's doc is read from. Default: the shared-default resolution
    *  (`WICKED_INTERACTIVE_ROOT` › `~/wicked-interactive/docs`); the server wires the
    *  per-project `interactiveRoot` setting through here so a project on its own root
@@ -451,7 +453,7 @@ export async function startInteractiveChatSubscriber(
 
   // The workflow is the engine's built-in `interactive-chat` preset (crew#935): nothing to
   // register. The arm line says whether the published snapshot holds the draft skill it runs.
-  log(draftSkillArmLine(INTERACTIVE_CHAT_WORKFLOW, (opts.skillHeld ?? (() => false))(DRAFT_SKILL)));
+  logDraftSkillArmLine(INTERACTIVE_CHAT_WORKFLOW, opts.skillHeld, opts.skillsSettled, log);
 
   const ledger = new InteractiveHandoffLedger(
     opts.ledgerPath ?? join(defaultStateDir(), 'interactive-chat-ledger.json'),

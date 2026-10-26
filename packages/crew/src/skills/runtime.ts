@@ -82,7 +82,7 @@ import { compareSemver, GARDEN_INSTALL_COMMAND, parseSemver, REQUIRED_GARDEN_VER
 import type { InstalledPluginState } from './installed.js';
 import { REFUSED_DIRNAME } from './root-names.js';
 import { SkillsSourceUnavailableError, type CurrentSnapshot, type SkillsStore } from './store.js';
-import type { Pacer } from './tree.js';
+import { budgetPacer, type Pacer } from './tree.js';
 
 /**
  * The seed source named for the boot log by what it IS (Copilot on #480: the line used to hard-code
@@ -184,7 +184,10 @@ function staleRulesFinding(current: CurrentSnapshot, rederived: { moved: number 
 /** The refusal sentinel directory name — from the ONE table of root names (design v3.5 §2); re-exported for the tests. */
 export { REFUSED_DIRNAME };
 
-export type SkillsHealthState = 'published' | 'fallback' | 'blocked' | 'config-error' | 'disabled';
+/** `publishing` (crew#1145): the daemon serves while the boot ladder (seed, verify or publish, export)
+ *  runs in the background; launches wait for it (`CoreAdapter.setLaunchGate`) and the Nerve Center's
+ *  skills row says "publishing". It ends in one of the other states. */
+export type SkillsHealthState = 'published' | 'fallback' | 'blocked' | 'config-error' | 'disabled' | 'publishing';
 
 /** `skills.stale-rules` (F-083) is emitted ahead of its `wicked-crew-api-types` declaration — the next api-types cut adds it to `DiagnosticsSkillsFinding.kind`. */
 /** `skills.base-skill` (crew#554 / DES-L4 PR-⑧): the configured base skill is not in the published generation — an ERROR (the engine refuses launches at intake; `'require'` is the only policy). */
@@ -290,6 +293,10 @@ export class SkillsRuntime {
   private autoRefreshNote: string | null = null;
   /** crew#874: the published generation's `gardenSource`, keyed by its path (immutable per generation). */
   private publishedGardenCache: { path: string; garden: { plugin_version: string; baseline: string } | null } | null = null;
+  /** crew#1145: the boot ladder (`apply` then `autoRefreshOnBoot`); settled at once until `startBoot` runs it. */
+  private bootRun: Promise<void> = Promise.resolve();
+  /** crew#1145: the generation the ladder last verified and exported — read for the seams' arm lines without a re-walk. */
+  private lastVerified: CurrentSnapshot | null = null;
 
   constructor(opts: SkillsRuntimeOptions) {
     this.store = opts.store;
@@ -409,6 +416,57 @@ export class SkillsRuntime {
   }
 
   /**
+   * crew#1145: run the boot ladder — `apply`, then `autoRefreshOnBoot` — WITHOUT holding the daemon's
+   * listen. A warm boot spent 50 s here on the rig (the walk and hash of the current generation)
+   * before the port opened. From this call until the ladder lands, `health()` reports `publishing`;
+   * the daemon's launch gate and the `/skills` routes wait on {@link bootSettled}, so no launch reads
+   * the engine input before the ladder decided it. Never rejects. `onSettled` gets the outcome and
+   * the ladder's wall time, for the boot log.
+   */
+  startBoot(onSettled?: (health: SkillsHealth, ms: number) => void): Promise<void> {
+    this.lastHealth = {
+      state: 'publishing',
+      root: this.store.root,
+      current: null,
+      engineInput: process.env[SKILLS_SNAPSHOT_ENGINE_ENV] ?? null,
+      stateHome: canonicalCrewStateHome(),
+      findings: [],
+      baseSkill: null,
+    };
+    const started = performance.now();
+    this.bootRun = (async () => {
+      try {
+        await this.apply();
+        await this.autoRefreshOnBoot();
+      } catch (err) {
+        // Both never throw by contract; a defect here must still leave a state that refuses launches loudly.
+        this.recordConfigError(err);
+      }
+      onSettled?.(this.health(), Math.round(performance.now() - started));
+    })();
+    return this.bootRun;
+  }
+
+  /** crew#1145: settles once the boot ladder has landed (at once when it ran inline, or never started). */
+  bootSettled(): Promise<void> {
+    return this.bootRun;
+  }
+
+  /**
+   * crew#1145: does the generation the ladder last verified and EXPORTED hold skill `name`? Its
+   * metadata only, no re-walk — for the interactive seams' one arm-time log line, which used to walk
+   * the whole generation per seam on the boot path. Launch admission keeps {@link holdsSkill}.
+   */
+  exportedHolds(name: string): boolean {
+    if (this.lastHealth.state !== 'published' || this.lastVerified === null) return false;
+    try {
+      return this.store.snapshotSkillsOf(this.lastVerified)?.skills.includes(name) ?? false;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * crew#874: at boot, when the installed garden differs from the baseline AND the catalog holds no
    * operator change (`store.pristine()`), refresh the baseline and publish — what the operator would
    * do by hand after every garden upgrade, and the step whose omission ran the rig on garden 12.39.
@@ -511,7 +569,7 @@ export class SkillsRuntime {
     // Say it once per CHANGE, and only once the ladder has run: before `apply` the seam is
     // `disabled` by construction, so a boot-order judgement ("no published snapshot") would log a
     // warning the first ladder outcome contradicts a moment later. The variable is still applied.
-    const settled = this.lastHealth.state !== 'disabled';
+    const settled = this.lastHealth.state !== 'disabled' && this.lastHealth.state !== 'publishing';
     if (settled && message !== this.lastBaseSkillLogged) {
       if (message !== null) {
         this.log(`[skills] skills.base-skill: ${message} (${BASE_SKILL_REF_ENGINE_ENV} ${posture?.engineInput === null ? 'unset' : `= ${posture?.engineInput}`})`);
@@ -696,7 +754,10 @@ export class SkillsRuntime {
       this.log(`[skills] first publish landed with ${ready.published.findings.length} warning(s) (published as found; fix in the editor or upstream): ${named}`);
     }
     if (ready.published !== null) this.notePublished(ready.published);
-    this.afterPublish();
+    // crew#1145: a generation `ensureReady` just verified is exported as verified — the old second
+    // walk of the same generation doubled the warm boot. A first publish is verified here, paced.
+    if (ready.current !== undefined) this.exportCurrent(ready.current);
+    else await this.afterPublishPaced(budgetPacer());
     const health = this.health();
     this.logSourceWarning(health);
     return health;
@@ -851,6 +912,7 @@ export class SkillsRuntime {
   /** Store the ladder's outcome; answer it as `health()` reports it (the live `skills.source` warning included). */
   private record(health: SkillsHealth, verified?: CurrentSnapshot): SkillsHealth {
     this.lastHealth = health;
+    this.lastVerified = health.state === 'published' ? (verified ?? null) : null;
     // The base skill is judged against THIS outcome (crew#554): a generation just published (or
     // refused) changes what the engine is handed, so the variable follows the ladder every time.
     this.refreshBaseSkill(verified);

@@ -7987,8 +7987,10 @@ export interface GovernanceReplayOutcome {
   blocker: string | null;
 }
 
-/** The skills seam's state as `GET /diagnostics` reports it (skills keystone, api-types 0.28.0). */
-export type DiagnosticsSkillsState = 'published' | 'fallback' | 'blocked' | 'config-error' | 'disabled';
+/** The skills seam's state as `GET /diagnostics` reports it (skills keystone, api-types 0.28.0).
+ *  `publishing` (api-types 0.138.0, crew#1145): the daemon is serving while its boot ladder verifies
+ *  or publishes the snapshot in the background; launches wait for it, and it ends in another state. */
+export type DiagnosticsSkillsState = 'published' | 'fallback' | 'blocked' | 'config-error' | 'disabled' | 'publishing';
 
 /** One finding the skills degradation ladder produced (design v3 §3). */
 export interface DiagnosticsSkillsFinding {

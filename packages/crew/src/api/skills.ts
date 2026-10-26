@@ -154,6 +154,11 @@ export function registerSkillsRoutes(app: FastifyInstance, deps: SkillsRouteDeps
   const store = (): SkillsRuntime['store'] => runtimeOf().store;
   const guarded = async (reply: FastifyReply, fn: () => unknown | Promise<unknown>): Promise<unknown> => {
     try {
+      // crew#1145: while the daemon's background boot ladder runs (seed, verify, first publish,
+      // auto-refresh), a read could see a half-seeded root and a write could race the ladder's own
+      // export — every /skills request waits for it to land. Settled at once on an inline boot.
+      const runtime = deps.runtime as Partial<SkillsRuntime> | undefined;
+      if (typeof runtime?.bootSettled === 'function') await runtime.bootSettled();
       return await fn();
     } catch (err) {
       if (err instanceof SkillsUnconfiguredError) return reply.code(503).send({ error: UNCONFIGURED });

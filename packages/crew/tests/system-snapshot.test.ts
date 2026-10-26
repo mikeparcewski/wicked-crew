@@ -166,6 +166,28 @@ describe('derived rows', () => {
     expect((await diskRow('/s', async () => ({ bavail: 6, bsize: GiB, blocks: 100 }))).state).toBe('degraded');
     expect((await diskRow('/s', async () => ({ bavail: 60, bsize: GiB, blocks: 100 }))).state).toBe('ok');
     expect((await diskRow('/s', never, 30)).state).toBe('unknown');
+  });
+
+  it('crew#1145: the skills row says "skills: publishing" while the boot ladder runs in the background', () => {
+    const row = skillsRow({ state: 'publishing', findings: [] });
+    expect(row.state).toBe('degraded');
+    expect(row.reason).toMatch(/^skills: publishing/);
+  });
+
+  it('crew#1145: the disk row is red BEFORE a write can fail — under 5 GiB free or over 95% used; degraded under 10 GiB or over 90% used', async () => {
+    const GiB = 2 ** 30;
+    const disk = async (freeGiB: number, totalGiB: number): Promise<string> =>
+      (await diskRow('/s', async () => ({ bavail: freeGiB, bsize: GiB, blocks: totalGiB }))).state;
+    expect(await disk(4, 1000)).toBe('down'); // under 5 GiB, whatever the size
+    expect(await disk(17, 460)).toBe('down'); // the rig at the silent exit: 96% used
+    expect(await disk(45, 460)).toBe('degraded'); // 90.2% used
+    expect(await disk(8, 70)).toBe('degraded'); // under 10 GiB (88.6% used)
+    expect(await disk(120, 1000)).toBe('ok');
+    const down = await diskRow('/s', async () => ({ bavail: 3, bsize: GiB, blocks: 100 }));
+    expect(down.reason).toMatch(/3 GiB free on the state-home volume \(97% used\)/);
+  });
+
+  it('load rows', () => {
     expect(loadRow(() => ({ load1: 2, cores: 8 }), 'darwin').state).toBe('ok');
     expect(loadRow(() => ({ load1: 16, cores: 8 }), 'darwin').state).toBe('degraded');
     expect(loadRow(() => ({ load1: 90, cores: 14 }), 'darwin').state).toBe('down');

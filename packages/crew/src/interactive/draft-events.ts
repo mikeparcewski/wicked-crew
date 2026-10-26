@@ -42,9 +42,8 @@ import { randomUUID } from 'node:crypto';
 import { InteractiveHandoffLedger } from './ledger.js';
 import { reviewPartitionOf as projectPartitionOf } from './review-ledger.js';
 import {
-  DRAFT_SKILL,
   draftQualityClause,
-  draftSkillArmLine,
+  logDraftSkillArmLine,
   pageBudgetFor,
   runDraftFloor,
   type DraftFloorIo,
@@ -558,6 +557,8 @@ export interface InteractiveDraftOptions {
    *  always runs the skill, and a snapshot without it fails the run before the document work starts (crew#935).
    *  Default: `() => false` (a caller without a skills runtime has no snapshot to hold anything). */
   skillHeld?: SkillHeld;
+  /** crew#1145: the daemon's background skills ladder — the arm line waits for it. Absent = say it now. */
+  skillsSettled?: Promise<unknown>;
   /** Repo-snapshot size budget in bytes (CREW-UX-8 v4; default ~200MB — see
    *  {@link snapshotRepo}). A repo over budget degrades the launch to ungrounded, narrated.
    *  Tests shrink it to exercise the degradation path without a 200MB fixture. */
@@ -684,7 +685,7 @@ export async function startInteractiveDraftSubscriber(
   // The workflow is the engine's built-in `interactive-draft` preset (crew#935): nothing to
   // register. It always runs the draft skill, so the arm line says whether the published snapshot
   // holds it — without it the engine fails each run before the document work starts, naming the fix.
-  log(draftSkillArmLine(INTERACTIVE_DRAFT_WORKFLOW, (opts.skillHeld ?? (() => false))(DRAFT_SKILL)));
+  logDraftSkillArmLine(INTERACTIVE_DRAFT_WORKFLOW, opts.skillHeld, opts.skillsSettled, log);
 
   const ledger = new InteractiveHandoffLedger(
     opts.ledgerPath ?? join(defaultStateDir(), 'interactive-draft-ledger.json'),
