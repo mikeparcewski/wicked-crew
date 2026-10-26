@@ -275,7 +275,7 @@ describe("OS file-manager metadata list (crew-statehome-os-metadata): crew's lis
   it.skipIf(SKIP_CORE_CHECKS)("equals wicked-core's OS_METADATA_PATTERNS (src/state_home.rs)", () => {
     const src = readFileSync(join(requireCoreDir(), 'src', 'state_home.rs'), 'utf8');
     const body = /const OS_METADATA_PATTERNS: &\[&str\] = &\[([^\]]*)\];/.exec(src)?.[1];
-    expect(body, "wicked-core's src/state_home.rs no longer declares OS_METADATA_PATTERNS").toBeDefined();
+    expect(body, "core's src/state_home.rs no longer declares OS_METADATA_PATTERNS").toBeDefined();
     // Rust's `\r`, `\\` and `\"` escapes read the same as JSON's.
     const core = [...(body as string).matchAll(/"(?:[^"\\]|\\.)*"/g)].map((m) => JSON.parse(m[0]) as string).sort();
     expect(core.length).toBeGreaterThan(0);

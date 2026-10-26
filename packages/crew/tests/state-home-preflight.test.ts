@@ -250,7 +250,11 @@ describe('surveyStateHome — crew’s own classification (the fallback for an a
   });
 
   describe('OS file-manager metadata is never a finding (core-statehome-os-metadata)', () => {
-    const META = ['.DS_Store', '.Spotlight-V100', '.Trashes', '.fseventsd', 'Thumbs.db', 'desktop.ini', 'Icon\r', '._anything', '._'];
+    // Windows refuses a CR in a file name (`Icon\r`) and strips a trailing space (`.DS_Store `): those
+    // names are covered on disk elsewhere and by the engine-answer test below on every platform.
+    const onDisk = (names: string[]): string[] =>
+      process.platform === 'win32' ? names.filter((n) => !n.includes('\r') && !n.endsWith(' ')) : names;
+    const META = onDisk(['.DS_Store', '.Spotlight-V100', '.Trashes', '.fseventsd', 'Thumbs.db', 'desktop.ini', 'Icon\r', '._anything', '._']);
     it.each(META)('%j at the state home AND the skills root: sync + async surveys clean, launches allowed', async (name) => {
       const { home, snapshot } = cleanStateHome(scratch());
       writeFileSync(join(home, name), '', 'utf8');
@@ -266,12 +270,13 @@ describe('surveyStateHome — crew’s own classification (the fallback for an a
 
     it('lookalikes and unknown entries still refuse, at both levels, in both surveys', async () => {
       const { home, snapshot } = cleanStateHome(scratch());
-      for (const name of ['.DS_Store.bak', 'stray.txt', '.DS_Store ', 'x._y']) {
+      const lookalikes = onDisk(['.DS_Store.bak', 'stray.txt', '.DS_Store ', 'x._y']);
+      for (const name of lookalikes) {
         writeFileSync(join(home, name), '', 'utf8');
         writeFileSync(join(home, 'skills', name), '', 'utf8');
       }
       writeFileSync(join(home, '.DS_Store'), '', 'utf8');
-      const expected = ['.DS_Store ', '.DS_Store.bak', 'stray.txt', 'x._y'];
+      const expected = [...lookalikes].sort();
       for (const found of [surveyStateHome(home), await surveyStateHomeAsync(home)]) {
         expect(found.filter((u) => u.level === 'state-home').map((u) => u.name).sort()).toEqual(expected);
         expect(found.filter((u) => u.level === 'skills-root').map((u) => u.name).sort()).toEqual(expected);

@@ -191,7 +191,9 @@ describe('a state home the fence cannot classify — said at boot, on /diagnosti
     rmSync(join(home, 'stray.txt'));
     rmSync(join(home, 'skills', 'scratch'), { recursive: true });
     // A Finder visit leaves OS metadata at both surveyed levels: never a finding, never a refusal.
-    for (const meta of ['.DS_Store', '._core.db', '.Spotlight-V100', 'Icon\r']) writeFileSync(join(home, meta), '', 'utf8');
+    // (`Icon\r` is not a legal Windows file name.)
+    const finder = ['.DS_Store', '._core.db', '.Spotlight-V100', ...(process.platform === 'win32' ? [] : ['Icon\r'])];
+    for (const meta of finder) writeFileSync(join(home, meta), '', 'utf8');
     writeFileSync(join(home, 'skills', '.DS_Store'), '', 'utf8');
     writeFileSync(join(home, 'skills', '._manifest.json'), '', 'utf8');
 
