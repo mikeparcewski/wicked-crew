@@ -42,8 +42,14 @@ import {
 } from '../src/skills/store.js';
 import { noVenv, UV_CACHE_DIRNAME } from '../src/skills/venv.js';
 import { STATE_HOME_ROOT_ENVS } from '../src/projects/state-home-preflight.js';
-import { STATE_HOME_ENTRY_NAMES, STATE_HOME_ENTRY_PREFIXES } from '../src/projects/state-home-registry.js';
+import {
+  OS_METADATA_NAMES,
+  OS_METADATA_PREFIXES,
+  STATE_HOME_ENTRY_NAMES,
+  STATE_HOME_ENTRY_PREFIXES,
+} from '../src/projects/state-home-registry.js';
 import { removeScratch } from './setup/scratch.js';
+import { requireCoreDir, SKIP_CORE_CHECKS } from './support/core-checkout.js';
 import { FIXTURE_PLUGIN } from './support/skills-fixture.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -253,6 +259,27 @@ describe("crew's src/ copy of the registry names (projects/state-home-registry.t
   it('prefixes: the file-with-sidecars claims, no more and no fewer', () => {
     const fixturePrefixes = registry.entries.flatMap((e) => (e.prefix !== undefined ? [e.prefix] : [])).sort();
     expect([...STATE_HOME_ENTRY_PREFIXES].sort()).toEqual(fixturePrefixes);
+  });
+});
+
+describe("OS file-manager metadata list (crew-statehome-os-metadata): crew's list = core's = the task contract", () => {
+  // As crew spells it: exact names, plus prefixes written `<prefix>*` (core's spelling).
+  const crewPatterns = [...OS_METADATA_NAMES, ...OS_METADATA_PREFIXES.map((p) => `${p}*`)].sort();
+  it('is exactly the specified contract', () => {
+    expect(crewPatterns).toEqual(
+      ['.DS_Store', '._*', '.Spotlight-V100', '.Trashes', '.fseventsd', 'Thumbs.db', 'desktop.ini', 'Icon\r'].sort(),
+    );
+  });
+  // core's list is a Rust const (wicked-core#1117, src/state_home.rs `OS_METADATA_PATTERNS`); the
+  // shared fixture stays byte-identical with core's copy, so the parity is read from core's source.
+  it.skipIf(SKIP_CORE_CHECKS)("equals wicked-core's OS_METADATA_PATTERNS (src/state_home.rs)", () => {
+    const src = readFileSync(join(requireCoreDir(), 'src', 'state_home.rs'), 'utf8');
+    const body = /const OS_METADATA_PATTERNS: &\[&str\] = &\[([^\]]*)\];/.exec(src)?.[1];
+    expect(body, "core's src/state_home.rs no longer declares OS_METADATA_PATTERNS").toBeDefined();
+    // Rust's `\r`, `\\` and `\"` escapes read the same as JSON's.
+    const core = [...(body as string).matchAll(/"(?:[^"\\]|\\.)*"/g)].map((m) => JSON.parse(m[0]) as string).sort();
+    expect(core.length).toBeGreaterThan(0);
+    expect(crewPatterns).toEqual(core);
   });
 });
 
