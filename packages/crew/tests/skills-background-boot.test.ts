@@ -75,7 +75,8 @@ describe('skills boot off the critical path (crew#1145)', () => {
     const diag = await s.app.inject({ method: 'GET', url: '/api/v1/diagnostics' });
     expect(diag.statusCode).toBe(200);
     expect((diag.json() as { skills: { state: string } }).skills.state).toBe('publishing');
-    expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]).toBeUndefined();
+    // A launch the engine takes on its own meanwhile (a bus request) is refused by a path naming why.
+    expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]).toMatch(/[/\\]skills[/\\]refused[/\\]skills\.publishing$/);
 
     // A launch made now waits at the gate: no `handed` notice, no engine call, until the ladder lands.
     const handed: Array<{ notice: LaunchNotice; engineInput: string | undefined }> = [];
@@ -83,8 +84,17 @@ describe('skills boot off the critical path (crew#1145)', () => {
       if (notice.status === 'handed') handed.push({ notice, engineInput: process.env[SKILLS_SNAPSHOT_ENGINE_ENV] });
     });
     const resume = adapter.resumeRun('no-such-run').catch(() => 'refused');
+    // Launch / onboard ADMISSION waits too: judged against the placeholder it would refuse a base
+    // skill the generation being verified holds (xreview r1 on #1146).
+    let onboardAnswered = false;
+    const onboard = s.app
+      .inject({ method: 'POST', url: '/api/v1/repos', payload: { name: 'held-boot', rootPath: dir } })
+      .finally(() => {
+        onboardAnswered = true;
+      });
     await new Promise((r) => setTimeout(r, 100));
     expect(handed).toEqual([]);
+    expect(onboardAnswered).toBe(false);
 
     release();
     await s.app.skillsBootSettled?.();
@@ -93,6 +103,7 @@ describe('skills boot off the critical path (crew#1145)', () => {
     expect(skills.state).toBe('published');
     expect(skills.current?.gen).toBe(1);
     await resume;
+    await onboard;
     expect(handed).toHaveLength(1);
     // The safety claim: the first launch read the snapshot the ladder exported, not an unset input.
     expect(handed[0]?.engineInput?.endsWith(join('snapshots', '000001'))).toBe(true);

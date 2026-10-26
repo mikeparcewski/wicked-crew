@@ -489,6 +489,8 @@ export interface InteractiveReviewOptions {
   authoringRuns?: (documentId: string, version: number) => string[];
   /** Does the published skills snapshot hold (and enable) this skill? Absent = none are held. */
   skillHeld?: (name: string) => boolean;
+  /** crew#1145: the daemon's background skills ladder — a review waits for it before it reads the held skills. Absent = read now. */
+  skillsSettled?: Promise<unknown>;
   onRunFiled?: (runId: string, projectId: string) => void;
   log?: (message: string) => void;
   logError?: (message: string) => void;
@@ -851,6 +853,9 @@ export async function startInteractiveReviewSubscriber(
     }
 
     try {
+      // crew#1145: asked before the background ladder lands, every reviewer skill reads "not held"
+      // and the run would be registered and handed off without them.
+      if (opts.skillsSettled !== undefined) await opts.skillsSettled;
       await registerDef();
     } catch (err) {
       await emitStatus({ ...scope, state: 'error', message: `Crew could not prepare the review: ${err instanceof Error ? err.message : String(err)}.` });

@@ -1452,6 +1452,7 @@ export async function createServer(
       readDocVersion: readDocVersionViaBridge(interactiveBridges, resolveDocsRoot),
       authoringRuns: (documentId, version) => authoringRunsFromLedgers(docLedgerSources(), documentId, version),
       skillHeld,
+      ...armAfter,
       onRunFiled: fileRun,
       log: (m) => app.log.warn(m),
       logError: (m) => app.log.error(m),

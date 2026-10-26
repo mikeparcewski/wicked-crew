@@ -21,6 +21,10 @@
  *    control plane.
  *  - `exit` always says the code and the recorded reason; with none recorded it adds the stack of
  *    the `exit` call, which names a `process.exit` caller (or shows the loop drained).
+ *  - `SIGHUP` (a closed controlling terminal, `kill -HUP`) is reported and the daemon keeps serving.
+ *    Node's default for it is to die with no `exit` event, so no reason could ever be written; a
+ *    daemon is stopped with SIGTERM. Under `nohup` (how the rig launches it) SIGHUP was already
+ *    ignored, so this changes nothing there. SIGKILL cannot be observed by any process.
  *
  * Every report is written SYNCHRONOUSLY to stderr (fd 2) and appended to `<state home>/daemon-exit.log`
  * (the registered `daemon-` prefix of the state-home fence), each write on its own try: when the
@@ -163,6 +167,9 @@ export function installProcessGuards(opts: ProcessGuardOptions): ProcessGuards {
   const onRejection = (reason: unknown): void => {
     report(`[daemon] unhandled promise rejection (the daemon keeps serving; this is a defect to report): ${describeThrown(reason)} (crew#1145)`);
   };
+  const onHangup = (): void => {
+    report('[daemon] received SIGHUP (the terminal closed, or kill -HUP): ignored, the daemon keeps serving — stop it with SIGTERM (crew#1145)');
+  };
   const onExit = (code: number): void => {
     if (exitReason !== null) {
       report(`[daemon] exiting with code ${code}: ${exitReason}`);
@@ -179,6 +186,7 @@ export function installProcessGuards(opts: ProcessGuardOptions): ProcessGuards {
   proc.on('uncaughtException', onUncaught);
   proc.on('unhandledRejection', onRejection);
   proc.on('exit', onExit);
+  proc.on('SIGHUP', onHangup);
 
   return {
     noteExitReason(reason: string): void {
@@ -191,6 +199,7 @@ export function installProcessGuards(opts: ProcessGuardOptions): ProcessGuards {
       proc.off('uncaughtException', onUncaught);
       proc.off('unhandledRejection', onRejection);
       proc.off('exit', onExit);
+      proc.off('SIGHUP', onHangup);
     },
   };
 }

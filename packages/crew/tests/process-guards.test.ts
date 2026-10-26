@@ -136,6 +136,14 @@ describe('process guards (crew#1145)', () => {
     expect(stderr[1]).toBe('[daemon] exiting with code 0: received SIGTERM at 2026-10-26T00:21:03.000Z');
   });
 
+  it('SIGHUP is reported and survived — Node would otherwise die of it with no exit event to record', () => {
+    const proc = fakeProcess();
+    const { stderr, exits } = setup(proc);
+    proc.emit('SIGHUP', 'SIGHUP');
+    expect(exits).toEqual([]);
+    expect(stderr[0]).toMatch(/^\[daemon\] received SIGHUP .*the daemon keeps serving/);
+  });
+
   it('describes anything thrown, including the values Node prints as nothing', () => {
     expect(describeThrown('')).toBe('(an empty string was thrown)');
     expect(describeThrown(undefined)).toBe('(undefined was thrown)');

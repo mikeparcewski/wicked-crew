@@ -232,7 +232,7 @@ export function disabledSkillsHealth(): SkillsHealth {
  * not fall back: it does not exist, so the engine's "explicit path invalid → launch fails loudly"
  * rung fires, and the path itself names why (`…/refused/skills.blocked`).
  */
-export function refusalPath(root: string, kind: 'skills.blocked' | 'skills.config' | 'skills.garden'): string {
+export function refusalPath(root: string, kind: 'skills.blocked' | 'skills.config' | 'skills.garden' | 'skills.publishing'): string {
   return join(root, REFUSED_DIRNAME, kind);
 }
 
@@ -424,11 +424,17 @@ export class SkillsRuntime {
    * the ladder's wall time, for the boot log.
    */
   startBoot(onSettled?: (health: SkillsHealth, ms: number) => void): Promise<void> {
+    // Launches crew hands the engine wait at the gate; a launch the engine takes on its own (a
+    // `wicked.crew.run.requested` on the bus, consumed inside the engine) does not. Until the ladder
+    // decides, such a launch is refused loudly by a path that names why — never run against the
+    // boot value or the live-plugin fallback the ladder may be about to refuse.
+    const refusal = refusalPath(this.store.root, 'skills.publishing');
+    applySkillsSnapshotEnv(refusal);
     this.lastHealth = {
       state: 'publishing',
       root: this.store.root,
       current: null,
-      engineInput: process.env[SKILLS_SNAPSHOT_ENGINE_ENV] ?? null,
+      engineInput: refusal,
       stateHome: canonicalCrewStateHome(),
       findings: [],
       baseSkill: null,
