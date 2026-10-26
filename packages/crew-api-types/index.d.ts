@@ -1757,6 +1757,17 @@ export interface GateDecision {
      *  deliver step and at every other gate. QE acceptance is never waived by it — a run that
      *  requires it still needs its PASS before delivery. Engine: wicked-core-ts after 0.15.6. */
     | 'operator_judgment'
+    /** (j4-gates) SKIP QE ACCEPTANCE at a gate, with `approve: true` and the written reason in
+     *  `amend` — required, non-empty (a 400 otherwise); no `amendScope` or `plan`. The launch's
+     *  `skipQeAcceptance`, given later: the run's QE decision becomes `skipped` by the operator
+     *  ("QE acceptance skipped by operator: <reason>"), labelled on the run, every later gate and the
+     *  delivery. The engine answers three gates: the gate before the deliver step (the delivery goes
+     *  without a QE PASS; {@link GateDecisionResult} `delivery.qeAcceptance.status: 'skipped'`), the
+     *  escalation gate of a unit only the isolated QE reviewer denied (the unit counts), and a failed
+     *  repo-checks floor's gate with a QE layer behind it (the gate re-opens on the floor alone, where
+     *  `operator_judgment` then applies). Refused (409, gate left open) at every other gate and on a
+     *  run that does not require QE acceptance. Engine: wicked-core-ts after 0.16.3. */
+    | 'skip_qe'
     /** (core#820) A `consent` gate's choice from its dry-run plan (`awaitingHuman.choices`), with
      *  `approve: true`: `consent:worker` (the default), `consent:operator`, …; `reject` declines. */
     | `consent:${string}`;

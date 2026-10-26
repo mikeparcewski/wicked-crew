@@ -348,9 +348,13 @@ export function resolveAcceptanceGate(
   // linkage must read differently from a writer's stamp or a caller's pin — and when several QE
   // runs are attributed, the reader must know the answer was resolved deny-dominates across them.
   const breadth =
-    state.attributedVerdicts > 1
+    (state.attributedVerdicts > 1
       ? `; ${state.attributedVerdicts} QE runs are attributed to this run — deny-dominates across their newest verdicts`
-      : '';
+      : '') +
+    // (j4-gates) The latest QE attempt on the delivered tree governs: say what it superseded.
+    (state.supersededByLatest !== undefined && state.supersededByLatest > 0
+      ? `; ${state.supersededByLatest} earlier verdict${state.supersededByLatest === 1 ? '' : 's'} on this tree, recorded before its latest QE attempt, no longer count${state.supersededByLatest === 1 ? 's' : ''}`
+      : '');
   const cite = `verdict ${state.verdict.id} by ${state.verdict.reviewer} (${describeAttribution(state.attribution)}${breadth})`;
   switch (verdict) {
     case 'PASS':
@@ -570,6 +574,9 @@ export function qeAttemptsFromEvents(events: RecordedEvent[], qeUnitOrds?: numbe
     const ord = (e as { ord?: unknown }).ord;
     if (typeof ord !== 'number' || !ords.has(ord) || typeof e.ts !== 'number') continue;
     if (e.type === 'unitDispatched') {
+      // (j4-gates) A dispatch whose gate never ran (a daemon restart orphaned it) ends where the
+      // next dispatch of the QE unit begins: it judged no tree, and it no longer runs.
+      if (open !== null && open.end === null) open.end = e.ts;
       open = { start: e.ts, end: null, tree: null };
       out.push(open);
     } else if (e.type === 'gateEvaluated' && open !== null && open.end === null) {

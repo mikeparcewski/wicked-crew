@@ -109,6 +109,18 @@ export function qeAcceptanceFromView(view: AcceptanceView): QeAcceptanceCheck {
   };
 }
 
+/** (j4-gates) The check of a delivery the operator approved WITH a QE skip at the deliver gate
+ *  (`action: 'skip_qe'`): satisfied, no verdict read, in the engine's own words for the skip. */
+export function qeAcceptanceSkippedAtGate(reason: string): QeAcceptanceCheck {
+  return {
+    status: 'skipped',
+    satisfied: true,
+    reason: `QE acceptance skipped by operator: ${reason.trim()}`,
+    verdictId: null,
+    reviewer: null,
+  };
+}
+
 /** A check that could not be read at all is a refusal, naming why (deny-dominates). */
 export function unreadableQeAcceptance(err: unknown): QeAcceptanceCheck {
   return {
