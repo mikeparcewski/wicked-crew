@@ -32,6 +32,7 @@ import {
   StateHomePlacementError,
   StateHomeWatch,
   surveyStateHome,
+  surveyStateHomeAsync,
   type UnregisteredStateHomeEntry,
 } from '../src/projects/state-home-preflight.js';
 import { removeScratch } from './setup/scratch.js';
@@ -248,6 +249,38 @@ describe('surveyStateHome — crew’s own classification (the fallback for an a
     expect(surveyStateHome(home)).toEqual([]);
   });
 
+  describe('OS file-manager metadata is never a finding (core-statehome-os-metadata)', () => {
+    const META = ['.DS_Store', '.Spotlight-V100', '.Trashes', '.fseventsd', 'Thumbs.db', 'desktop.ini', 'Icon\r', '._anything', '._'];
+    it.each(META)('%j at the state home AND the skills root: sync + async surveys clean, launches allowed', async (name) => {
+      const { home, snapshot } = cleanStateHome(scratch());
+      writeFileSync(join(home, name), '', 'utf8');
+      writeFileSync(join(home, 'skills', name), '', 'utf8');
+      expect(surveyStateHome(home)).toEqual([]);
+      expect(await surveyStateHomeAsync(home)).toEqual([]);
+      const watch = new StateHomeWatch({ dbPath: join(home, 'core.db'), snapshotPath: () => snapshot, engine: null });
+      const state = await watch.refresh();
+      expect(state.derivedFrom).toBe('snapshot');
+      expect(state.unregistered).toEqual([]);
+      expect(state.refusesLaunches).toBe(false);
+    });
+
+    it('lookalikes and unknown entries still refuse, at both levels, in both surveys', async () => {
+      const { home, snapshot } = cleanStateHome(scratch());
+      for (const name of ['.DS_Store.bak', 'stray.txt', '.DS_Store ', 'x._y']) {
+        writeFileSync(join(home, name), '', 'utf8');
+        writeFileSync(join(home, 'skills', name), '', 'utf8');
+      }
+      writeFileSync(join(home, '.DS_Store'), '', 'utf8');
+      const expected = ['.DS_Store ', '.DS_Store.bak', 'stray.txt', 'x._y'];
+      for (const found of [surveyStateHome(home), await surveyStateHomeAsync(home)]) {
+        expect(found.filter((u) => u.level === 'state-home').map((u) => u.name).sort()).toEqual(expected);
+        expect(found.filter((u) => u.level === 'skills-root').map((u) => u.name).sort()).toEqual(expected);
+      }
+      const watch = new StateHomeWatch({ dbPath: join(home, 'core.db'), snapshotPath: () => snapshot, engine: null });
+      expect((await watch.refresh()).refusesLaunches).toBe(true);
+    });
+  });
+
   it('with no skills root only the top level is surveyed', () => {
     const base = scratch();
     const home = join(base, 'bare');
@@ -362,6 +395,27 @@ describe('StateHomeWatch — the live classification the routes report and gate 
     expect(h.derivedFrom).toBe('db');
     expect(h.refusesLaunches).toBe(false);
     expect(h.findings[0]?.message).toContain('would refuse every worker launch the moment a skills snapshot is handed');
+  });
+
+  it('an engine older than core#1117 that names OS metadata: it is dropped and the refusal lifts; a real entry beside it still refuses', async () => {
+    const meta = (name: string, level: 'state-home' | 'skills-root'): UnregisteredStateHomeEntry => ({ name, path: `/srv/state/${name}`, level });
+    const only = new StateHomeWatch({
+      dbPath: '/srv/state/core.db',
+      snapshotPath: () => '/srv/state/skills/snapshots/000001',
+      engine: async () => engineJson({ unregistered: [meta('.DS_Store', 'state-home'), meta('._x', 'skills-root'), meta('Icon\r', 'state-home')], refusesLaunches: true }),
+    });
+    const clean = await only.refresh();
+    expect(clean.unregistered).toEqual([]);
+    expect(clean.findings).toEqual([]);
+    expect(clean.refusesLaunches).toBe(false);
+    const mixed = new StateHomeWatch({
+      dbPath: '/srv/state/core.db',
+      snapshotPath: () => '/srv/state/skills/snapshots/000001',
+      engine: async () => engineJson({ unregistered: [meta('.DS_Store', 'state-home'), DEBRIS], refusesLaunches: true }),
+    });
+    const dirty = await mixed.refresh();
+    expect(dirty.unregistered.map((u) => u.name)).toEqual([DEBRIS.name]);
+    expect(dirty.refusesLaunches).toBe(true);
   });
 
   it('an engine that cannot answer is reported as an error AND crew classifies instead — never a clean state home nobody checked', async () => {

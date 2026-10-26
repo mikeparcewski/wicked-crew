@@ -190,6 +190,10 @@ describe('a state home the fence cannot classify — said at boot, on /diagnosti
     rmSync(join(home, DEBRIS), { recursive: true });
     rmSync(join(home, 'stray.txt'));
     rmSync(join(home, 'skills', 'scratch'), { recursive: true });
+    // A Finder visit leaves OS metadata at both surveyed levels: never a finding, never a refusal.
+    for (const meta of ['.DS_Store', '._core.db', '.Spotlight-V100', 'Icon\r']) writeFileSync(join(home, meta), '', 'utf8');
+    writeFileSync(join(home, 'skills', '.DS_Store'), '', 'utf8');
+    writeFileSync(join(home, 'skills', '._manifest.json'), '', 'utf8');
 
     const health = (await app.inject({ method: 'GET', url: '/api/v1/health' })).json() as HealthResponse;
     expect(health.status).toBe('ok');
@@ -208,6 +212,18 @@ describe('a state home the fence cannot classify — said at boot, on /diagnosti
       assuranceNotice: expect.objectContaining({ code: 'single_cli_roster' }), // wicked-core#850: a one-CLI roster
     });
     expect(launched).toEqual(['run-after-repair']);
+  });
+
+  it('OS metadata beside a REAL unknown entry: only the unknown entry is named, and the launch is still refused', async () => {
+    writeFileSync(join(home, 'stray2.txt'), '', 'utf8');
+    try {
+      const res = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'still refused' } });
+      expect(res.statusCode).toBe(409);
+      expect((res.json() as StateHomeBlockerBody).unregistered.map((u) => u.name)).toEqual(['stray2.txt']);
+      expect(launched).toEqual(['run-after-repair']);
+    } finally {
+      rmSync(join(home, 'stray2.txt'));
+    }
   });
 
   it("the engine's own intake refusal (core's StateHomeConfigError) is the same typed 409, not a 400", async () => {

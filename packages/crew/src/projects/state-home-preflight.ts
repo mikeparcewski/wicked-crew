@@ -47,7 +47,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 
 import { SKILLS_ROOT_NAMES } from '../skills/root-names.js';
 import { SKILLS_DIRNAME, SNAPSHOTS_DIRNAME } from '../skills/store.js';
-import { isRegisteredStateHomeEntry } from './state-home-registry.js';
+import { isOsMetadataEntry, isRegisteredStateHomeEntry } from './state-home-registry.js';
 
 /** The remedy every message ends with — spelled once, operator terms, no repository paths. */
 export const STATE_HOME_REMEDY =
@@ -229,7 +229,7 @@ interface EnginePreflightJson {
 
 /** Does a skills-root child name match one of the store's registered patterns (exact or `stem*`)? */
 function skillsChildRegistered(name: string): boolean {
-  if (name === SNAPSHOTS_DIRNAME) return true;
+  if (name === SNAPSHOTS_DIRNAME || isOsMetadataEntry(name)) return true;
   return SKILLS_ROOT_NAMES.some(({ pattern }) => {
     if (pattern.includes('/')) return false; // a pattern below the slot, not a root child
     return pattern.endsWith('*') ? name.startsWith(pattern.slice(0, -1)) : name === pattern;
@@ -387,9 +387,13 @@ export class StateHomeWatch {
   private async fromEngine(engine: EnginePreflight, snapshotPath: string | null, dbPath: string, now: number): Promise<StateHomeHealth> {
     try {
       const parsed = JSON.parse(await engine(snapshotPath, dbPath)) as Partial<EnginePreflightJson>;
-      const unregistered = Array.isArray(parsed.unregistered) ? parsed.unregistered : [];
+      const reported = Array.isArray(parsed.unregistered) ? parsed.unregistered : [];
+      // An engine older than wicked-core#1117 still names OS file-manager metadata (`.DS_Store`, `._*`, …)
+      // as unregistered: drop it at both levels, and lift the refusal when that metadata was all it named.
+      // Any other entry, and an engine refusal that names none, stays authoritative.
+      const unregistered = reported.filter((u) => !isOsMetadataEntry(u.name));
       const stateHome = typeof parsed.stateHome === 'string' ? parsed.stateHome : null;
-      const refuses = parsed.refusesLaunches === true;
+      const refuses = parsed.refusesLaunches === true && (reported.length === 0 || unregistered.length > 0);
       return {
         stateHome,
         derivedFrom: parsed.derivedFrom === 'snapshot' || parsed.derivedFrom === 'db' ? parsed.derivedFrom : null,

@@ -63,9 +63,34 @@ export const STATE_HOME_ENTRY_PREFIXES: ReadonlyArray<string> = [
   'team-outbox.ndjson',
 ];
 
-/** Is `topLevel` a name the registry classifies? */
+/**
+ * OS file-manager metadata (Finder, Explorer): never a crew entry and never a configuration error,
+ * at the state home AND the skills root. The same list as wicked-core's `OS_METADATA_PATTERNS`
+ * (src/state_home.rs, wicked-core#1117; a trailing `*` there is a prefix here):
+ * tests/state-home-subtrees.test.ts reads core's source and holds the two equal.
+ */
+export const OS_METADATA_NAMES: ReadonlyArray<string> = [
+  '.DS_Store',
+  '.Spotlight-V100',
+  '.Trashes',
+  '.fseventsd',
+  'Thumbs.db',
+  'desktop.ini',
+  'Icon\r',
+];
+
+/** OS metadata PREFIXES (AppleDouble `._<name>` companions). */
+export const OS_METADATA_PREFIXES: ReadonlyArray<string> = ['._'];
+
+/** Is `name` OS file-manager metadata (exact name or prefix — `.DS_Store.bak` is NOT)? */
+export function isOsMetadataEntry(name: string): boolean {
+  return OS_METADATA_NAMES.includes(name) || OS_METADATA_PREFIXES.some((p) => name.startsWith(p));
+}
+
+/** Is `topLevel` a name the registry classifies (or OS metadata, which never refuses)? */
 export function isRegisteredStateHomeEntry(topLevel: string): boolean {
   return (
+    isOsMetadataEntry(topLevel) ||
     STATE_HOME_ENTRY_NAMES.includes(topLevel) ||
     STATE_HOME_ENTRY_PREFIXES.some((p) => topLevel.startsWith(p))
   );

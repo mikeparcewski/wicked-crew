@@ -10,6 +10,9 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+- **OS file-manager metadata no longer refuses every worker launch.** A Mac user who opened `~/.wicked-crew` in Finder got a `.DS_Store` that crew's state-home survey (`GET /diagnostics.stateHome`, `/health` warnings, the `POST /runs` 409) reported as an unregistered entry. `.DS_Store`, `._*`, `.Spotlight-V100`, `.Trashes`, `.fseventsd`, `Thumbs.db`, `desktop.ini` and `Icon\r` are now ignored at the state home and the skills root, in crew's own survey and in the engine's answer it reports (an engine older than wicked-core#1117 still names them; that refusal lifts when metadata is all it named). Any other unknown entry (including `.DS_Store.bak`) still refuses. The list lives in `state-home-registry.ts` and is the same list as wicked-core#1117's `OS_METADATA_PATTERNS`; a test reads core's source and holds them equal. The engine's own intake refusal stays authoritative, so launches need a wicked-core-ts that carries #1117.
+
 ## [0.16.3] — 2026-10-26
 
 A patch release: runs on wicked-core-ts 0.15.11, whose repo-checks floor cache is capped as a whole and dropped at a run's end (core#1124), and bundles wicked-studio 0.12.3. The release smoke now waits for the background skills publish. No daemon code change.
