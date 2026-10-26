@@ -1709,6 +1709,15 @@ export function registerRoutes(
     const f = runtime.skills?.health().findings.find((x) => x.kind === 'skills.garden' && x.severity === 'error');
     return f === undefined ? null : { kind: f.kind, severity: f.severity, message: f.message };
   };
+  /**
+   * crew#1145: a launch or onboard admitted while the daemon's background skills ladder runs would be
+   * judged against the `publishing` placeholder (no garden finding, no base skill yet) — so the
+   * admission waits for the ladder first. Settled at once on an inline boot or without the seam.
+   */
+  const skillsLanded = async (): Promise<void> => {
+    const skills = runtime.skills as Partial<SkillsRuntime> | undefined;
+    if (typeof skills?.bootSettled === 'function') await skills.bootSettled();
+  };
   /** The typed 422 a launch or onboard answers while {@link gardenBlocker} holds. */
   const gardenRefusalBody = (): import('wicked-crew-api-types').GardenRequiredBody | null => {
     const f = gardenBlocker();
@@ -2395,6 +2404,7 @@ export function registerRoutes(
    * `base_skill_refused`). `null` when the launch would be admitted.
    */
   const onboardRefusal = async (): Promise<{ status: number; body: unknown } | null> => {
+    await skillsLanded();
     const garden = gardenRefusalBody();
     if (garden !== null) return { status: 422, body: garden };
     if (runtime.stateHome !== undefined) {
@@ -2542,7 +2552,9 @@ export function registerRoutes(
     // Read fence cannot classify, the engine refuses this launch at intake (and an engine before
     // that fix refused it at the run's first worker, after councils and the intake gate) — so the
     // daemon answers the typed 409 itself, naming every entry and the remedy, until they are gone.
-    // Re-surveyed per launch: the entries named are the ones there NOW.
+    // Re-surveyed per launch: the entries named are the ones there NOW — after the skills ladder
+    // decided the snapshot (crew#1145), which the survey and the garden check below both read.
+    await skillsLanded();
     if (runtime.stateHome !== undefined) {
       const stateHome = await runtime.stateHome.refresh();
       if (stateHome.refusesLaunches) {

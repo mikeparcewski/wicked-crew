@@ -582,6 +582,9 @@ export function skillsRow(skills: { state: string; findings: Array<{ severity?: 
     case 'blocked':
     case 'config-error':
       return infraRow('skills', 'down', first ?? `skills ${skills.state}: launches are refused`, 'Fix the skills root named in the finding, then re-check.', started, { skills });
+    case 'publishing':
+      // crew#1145: the daemon serves while its boot ladder verifies (or publishes) the snapshot.
+      return infraRow('skills', 'degraded', 'skills: publishing — the daemon verifies the skills snapshot in the background; launches wait until it lands', null, started, { skills });
     case 'disabled':
       return infraRow('skills', 'off', 'the skills seam is disabled on this daemon', null, started, { skills });
     default:
@@ -605,6 +608,15 @@ export function stateHomeRow(home: { refusesLaunches: boolean; findings: Array<{
   return infraRow('state_home', 'ok', 'every entry is classified', null, started, { stateHome: home });
 }
 
+/** crew#1145: the disk row is `down` under this many free bytes (or over 95% used). */
+export const DISK_DOWN_BYTES = 5 * 2 ** 30;
+/** …and `degraded` under this many (or over 90% used). */
+export const DISK_DEGRADED_BYTES = 10 * 2 ** 30;
+
+function usedPercent(free: number, total: number): number {
+  return total > 0 ? Math.round(((total - free) / total) * 100) : 100;
+}
+
 export async function diskRow(
   path: string | null,
   statfsFn: (p: string) => Promise<{ bavail: number | bigint; bsize: number | bigint; blocks: number | bigint }> = statfs,
@@ -619,10 +631,12 @@ export async function diskRow(
   const total = Number(settled.value.blocks) * Number(settled.value.bsize);
   const gib = (n: number): string => `${Math.round((n / 2 ** 30) * 10) / 10} GiB`;
   const details = { path, freeBytes: free, totalBytes: total };
-  if (free < 2 * 2 ** 30) {
-    return infraRow('disk', 'down', `${gib(free)} free on the state-home volume: worktrees, installs and builds will fail`, 'Free disk space (old worktrees, cargo target dirs), then re-check.', started, details);
+  // crew#1145: red BEFORE a write can fail — a full disk once killed the daemon right after ready
+  // (an ENOSPC on its log). Under 5 GiB or over 95% used is down; under 10 GiB or over 90% used is degraded.
+  if (free < DISK_DOWN_BYTES || (total > 0 && free / total < 0.05)) {
+    return infraRow('disk', 'down', `${gib(free)} free on the state-home volume (${usedPercent(free, total)}% used): writes (logs, stores, worktrees, installs) will start to fail`, 'Free disk space (old worktrees, cargo target dirs), then re-check.', started, details);
   }
-  if (free < 10 * 2 ** 30 || (total > 0 && free / total < 0.05)) {
+  if (free < DISK_DEGRADED_BYTES || (total > 0 && free / total < 0.1)) {
     return infraRow('disk', 'degraded', `${gib(free)} free on the state-home volume`, 'Free disk space before the next large run.', started, details);
   }
   return infraRow('disk', 'ok', `${gib(free)} free of ${gib(total)}`, null, started, details);

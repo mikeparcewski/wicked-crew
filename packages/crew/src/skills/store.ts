@@ -1979,7 +1979,7 @@ export class SkillsStore {
    * explicit `WICKED_CREW_SKILLS_SOURCE` checkout or directory as readily as the installed plugin;
    * Copilot on #480); `null` when the root was already seeded.
    */
-  async ensureReady(): Promise<{ seeded: boolean; source: PluginSource | null; published: SkillPublishResult | null }> {
+  async ensureReady(): Promise<{ seeded: boolean; source: PluginSource | null; published: SkillPublishResult | null; current?: CurrentSnapshot }> {
     while (this.publishInFlight !== null) {
       try {
         await this.publishInFlight;
@@ -2012,8 +2012,11 @@ export class SkillsStore {
         this.flipCurrent(meta.parsed.gen);
       }
     }
-    const current = this.currentSnapshot();
-    if (current !== null) return { seeded, source, published: null };
+    // crew#1145: paced — the walk and hash of the current generation was the bulk of a warm boot
+    // (50 s on the rig), and the boot now runs it after the daemon listens, so the loop must turn.
+    // The verified answer is handed back so the caller exports it without walking it a second time.
+    const current = await paced(this.currentSnapshotSteps(), this.makePacer());
+    if (current !== null) return { seeded, source, published: null, current };
     return { seeded, source, published: await this.publish(m.revision) };
   }
 

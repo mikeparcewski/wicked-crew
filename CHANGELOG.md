@@ -10,6 +10,16 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+- **The daemon no longer dies silently after ready, and it listens before the skills snapshot is verified (crew#1145, `wicked-crew-api-types` 0.138.0).** On the rig a freshly upgraded daemon logged `WICKED_CREW_READY` and exited about a second later; its log ended with a blank line and `Node.js v26.11.1`, Node's fatal trailer with the report missing. The disk was nearly full. A stdout write that fails (ENOSPC on `daemon-stdout.log`, or EPIPE when the reader of a pipe goes away) was an unhandled `'error'`, so Node made it an uncaught exception, and its report went to the same full file. `wicked-crew serve` now:
+  - reports a failed stdout or stderr write once, with the code and the state-home volume's free space, and keeps serving;
+  - reports an uncaught exception with its stack and exits 1, and reports an unhandled rejection with its stack and keeps serving;
+  - says on every exit the code and the reason (a signal, a fatal error, a failed command), or the stack of the `process.exit` call when none was recorded.
+  - reports a SIGHUP (a closed terminal, `kill -HUP`) and keeps serving; Node would otherwise die of it with no `exit` event to record. Under `nohup` it was already ignored.
+  Each report is written synchronously to stderr and appended to `<state home>/daemon-exit.log`.
+- **The skills snapshot is verified after the daemon listens.** The same boot spent 50.6 s of 57 s in the `skills` stage, walking and hashing the current generation twice on the main thread. The boot ladder now verifies it once, paced, in the background. `GET /diagnostics` reports skills `publishing` until it lands, and the Nerve Center's skills row reads "skills: publishing". Every engine launch (run, resume, gate answer, campaign, unit reassign), launch and onboarding admission, interactive review, and every `/skills` request waits for it, so the first launch is handed the snapshot the ladder exported. A launch the engine takes on its own meanwhile (a `wicked.crew.run.requested` on the bus) is refused by `WICKED_SKILLS_SNAPSHOT=<state home>/skills/refused/skills.publishing`, never run against the boot value or the live-plugin fallback. On a scratch state home the warm `skills` stage went from 6.4 to 12.2 s to under 100 ms before listen.
+- **The Nerve Center's disk row turns red before a write can fail:** `down` under 5 GiB free or over 95% used, and `degraded` under 10 GiB or over 90% used (it was `down` only under 2 GiB).
+
 ## [0.16.1] — 2026-10-25
 
 A patch release: bundles wicked-studio 0.12.1. No daemon change.

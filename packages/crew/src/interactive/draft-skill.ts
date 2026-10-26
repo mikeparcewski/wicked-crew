@@ -162,6 +162,22 @@ export function draftQualityClause(
 }
 
 /** The one log line a seam writes when it arms, saying which way the gate went and why. */
+/**
+ * Say the arm line — now, or (crew#1145) once the daemon's background skills ladder has landed:
+ * asked before it lands, every seam would report the snapshot as missing while it is only being
+ * verified. Never throws.
+ */
+export function logDraftSkillArmLine(
+  seam: string,
+  skillHeld: SkillHeld | undefined,
+  skillsSettled: Promise<unknown> | undefined,
+  log: (message: string) => void,
+): void {
+  const say = (): void => log(draftSkillArmLine(seam, (skillHeld ?? (() => false))(DRAFT_SKILL)));
+  if (skillsSettled === undefined) say();
+  else void skillsSettled.then(say, say);
+}
+
 export function draftSkillArmLine(seam: string, held: boolean): string {
   return held
     ? `[${seam}] the '${seam}' preset runs skill '${DRAFT_SKILL}' on its drafting steps — the published skills ` +

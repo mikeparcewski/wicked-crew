@@ -1160,6 +1160,8 @@ export class CoreAdapter {
   private readonly subscription: Subscription;
   private readonly listeners = new Set<CoreEventListener>();
   private readonly launchListeners = new Set<LaunchListener>();
+  /** crew#1145: what each engine launch awaits first (`setLaunchGate`); `null` = nothing. */
+  private launchGate: (() => Promise<void>) | null = null;
   private closed = false;
 
   /**
@@ -1493,6 +1495,15 @@ export class CoreAdapter {
     };
   }
 
+  /**
+   * crew#1145: what every engine launch waits for before it is handed — the daemon's background
+   * skills ladder, so no spawn reads `WICKED_SKILLS_SNAPSHOT` before the ladder decided it. `null`
+   * (the default, and every CLI verb that boots inline) waits for nothing. The gate never rejects.
+   */
+  setLaunchGate(gate: (() => Promise<void>) | null): void {
+    this.launchGate = gate;
+  }
+
   /** Register a launch listener (`LaunchNotice`). Returns an unsubscribe function. */
   onLaunch(listener: LaunchListener): () => void {
     this.launchListeners.add(listener);
@@ -1539,6 +1550,8 @@ export class CoreAdapter {
     call: () => Promise<T>,
     workflow?: string,
   ): Promise<T> {
+    // No gate, no extra turn: a launch without one is handed exactly as before.
+    if (this.launchGate !== null) await this.launchGate();
     try {
       this.notifyLaunch({ kind, id, status: 'handed', ...(workflow !== undefined ? { workflow } : {}) });
     } catch (err) {
@@ -2348,6 +2361,7 @@ export class CoreAdapter {
    * Fail-closed on an old addon: method-presence guard, same doctrine as `injectWorkerMessage`.
    */
   async reassignUnit(runId: string, ord: number, newCli?: string | null): Promise<void> {
+    if (this.launchGate !== null) await this.launchGate(); // crew#1145: a reassigned unit spawns a worker — same gate
     if (typeof this.core.reassignUnit !== 'function') {
       throw new Error('Unit reassignment needs wicked-core-ts >= 0.7.6; this build does not support it');
     }

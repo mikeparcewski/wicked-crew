@@ -11,6 +11,7 @@ import { bridgeReaper, reapOrphansAtBoot, startOrphanSweep } from '../core/bridg
 import { defaultSeatFloor } from '../api/seat-container-login.js';
 import { daemonSignalLog } from '../core/daemon-signal-log.js';
 import { shutdownWithDeadline } from '../core/shutdown.js';
+import { describeThrown, installProcessGuards, type ProcessGuards } from '../core/process-guards.js';
 import { startServer, type BootStages } from '../api/server.js';
 import { resolveAuthMode } from '../api/auth.js';
 import { crewStateHome, setCrewStateHome, stateHomeOfDb } from '../projects/state-home.js';
@@ -474,6 +475,9 @@ async function bootstrap(opts: BootstrapOpts, bootStartedAt: number = performanc
     // F-042/F-043: what the spawned bridge is told — the bus dir this daemon's seams read, and the
     // daemon's own origin (resolved by the pool from the bound address).
     interactiveBridge: { busDataDir: crewBus.dataDir },
+    // crew#1145: listen first, then verify / publish the skills snapshot in the background (the
+    // seam reads `publishing`; every launch waits for it). It held the port for 50 s on the rig.
+    skills: { background: true },
   };
   const { port, stages: serverStages } = await startServer(
     adapter,
@@ -492,6 +496,9 @@ async function bootstrap(opts: BootstrapOpts, bootStartedAt: number = performanc
   console.error(`[crew] boot stages: ${Object.entries(stages).map(([name, ms]) => `${name} ${ms}ms`).join(' · ')}`);
   return { adapter, port, stages };
 }
+
+/** crew#1145: the daemon's exit-reason guards (`serve` only) — `null` for every other verb. */
+let processGuards: ProcessGuards | null = null;
 
 function installShutdownHandlers(): void {
   let shuttingDown = false;
@@ -522,12 +529,14 @@ function installShutdownHandlers(): void {
   process.on('SIGTERM', () => {
     const at = Date.now();
     daemonSignalLog.record('SIGTERM', at);
+    processGuards?.noteExitReason(`received SIGTERM at ${new Date(at).toISOString()}`);
     console.warn(`[daemon] received SIGTERM at ${new Date(at).toISOString()} pid=${process.pid} (sender pid unavailable in Node signal callbacks) (crew#411)`);
     shutdown();
   });
   process.on('SIGINT', () => {
     const at = Date.now();
     daemonSignalLog.record('SIGINT', at);
+    processGuards?.noteExitReason(`received SIGINT at ${new Date(at).toISOString()}`);
     console.warn(`[daemon] received SIGINT at ${new Date(at).toISOString()} pid=${process.pid} (sender pid unavailable in Node signal callbacks) (crew#411)`);
     shutdown();
   });
@@ -595,6 +604,10 @@ async function main(): Promise<void> {
       process.exit(await runServiceVerb(argv));
     }
     const opts = parseBootstrap(argv);
+    // crew#1145: from here on the daemon never ends without saying why — a stdio write that fails
+    // (ENOSPC on daemon-stdout.log, EPIPE on a closed pipe) is reported and survived, a fatal throw
+    // or a rejection nobody caught is reported with its stack, and every exit names its reason.
+    processGuards = installProcessGuards({ stateHome: () => stateHomeOfDb(opts.dbPath) });
     // Boot sweep (crew#285): bridges orphaned by a PRIOR daemon generation are
     // reparented to init and would otherwise live forever — shutdown-path reaping
     // can never see them. Conservative: only ppid==1 matches, so another live
@@ -918,6 +931,7 @@ async function runStatus(args: string[]): Promise<void> {
 }
 
 main().catch((err) => {
+  processGuards?.noteExitReason(`the command failed: ${describeThrown(err)}`);
   console.error(err);
   process.exit(1);
 });
