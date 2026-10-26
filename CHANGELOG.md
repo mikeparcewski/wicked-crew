@@ -10,6 +10,15 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.16.3] — 2026-10-26
+
+A patch release: runs on wicked-core-ts 0.15.11, whose repo-checks floor cache is capped as a whole and dropped at a run's end (core#1124), and bundles wicked-studio 0.12.3. The release smoke now waits for the background skills publish. No daemon code change.
+
+### Changed
+- **Runs on wicked-core-ts 0.15.11.** The repo-checks floor cache (`<worker home>/repo-checks`) gets a total cap over every repository (`WICKED_REPO_CHECKS_TOTAL_CAP_GB`, default 40; least recently used run leaves first, never one a floor holds), a leaf no floor has used for 7 days is removed, and a terminal run's cache is dropped by its workdir (core#1122, core#1124). On the test rig one run's cache had reached 17.7 GB.
+- **The bundled studio is wicked-studio 0.12.3.** The Desk's Work tab reads as structured activity with one At a glance strip (studio#910), and the Desk's tabs are four daily views and More (studio#913).
+- **The release smoke reads the skills verdict after the background publish lands.** `release.yml` pins wicked-ci's `smoke.yml` at 98ecc3c (wicked-ci#59): S02 waits while `/diagnostics` reports skills `publishing`. 0.16.2's own release smoke (run 40277224745) read `publishing` 1.2 s after ready and failed S02 on both OSes; the same published set passed with the fixed harness (wicked-ci smoke-selftest 40279078851).
+
 ## [0.16.2] — 2026-10-26
 
 A patch release: the daemon never exits silently after ready, and it listens before the skills snapshot is verified (#1146; startup about 2 s warm instead of about 57 s); the Nerve Center's disk row turns red before a write can fail. Bundles wicked-studio 0.12.2 and runs on wicked-core-ts 0.15.10. `wicked-crew-api-types` 0.138.0 is on npm.
@@ -4439,7 +4448,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.2...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.3...HEAD
+[0.16.3]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.2...v0.16.3
 [0.16.2]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.1...v0.16.2
 [0.16.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.15.9...v0.16.0
