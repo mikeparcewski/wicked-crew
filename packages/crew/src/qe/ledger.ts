@@ -489,16 +489,6 @@ function attribute(root: string, verdicts: VerdictRecord[], subject: ReadSubject
       attributedVerdicts: 0,
     };
   }
-  // (j4-gates) …and within the current tree, the LATEST attempt that judged it governs.
-  let supersededByLatest = 0;
-  if (scoped !== null) {
-    const latest = verdictsFromLatestCurrentTreeAttempt(verdicts, subject.run);
-    if (latest !== null) {
-      verdicts = latest.kept;
-      supersededByLatest = latest.superseded;
-    }
-  }
-
   // Fold to one entry per QE run, in newest-verdict order (verdicts are newest first, so the
   // first verdict seen for a run is its newest, and Map insertion order keeps runs newest-first).
   const byRun = new Map<string, QeRunEntry>();
@@ -541,14 +531,36 @@ function attribute(root: string, verdicts: VerdictRecord[], subject: ReadSubject
   }
 
   if (attributed.length > 0) {
+    // (j4-gates) …and within the current tree, the LATEST attempt that judged it governs. Decided
+    // AFTER attribution and from this run's own verdicts only (codex r1 on #1152): a QE run keeps the
+    // attribution its whole record gives it (an older stamped verdict still ties its newer FAIL to
+    // this run), and another crew run's verdict can never be the one that supersedes this run's.
+    // Each attributed QE run then counts its newest verdict that is NOT superseded; a QE run whose
+    // every verdict predates the latest attempt no longer counts.
+    let current = attributed;
+    let supersededByLatest = 0;
+    if (scoped !== null) {
+      const mine = new Set(attributed.map((a) => a.verdict.run_id));
+      const latest = verdictsFromLatestCurrentTreeAttempt(
+        verdicts.filter((v) => mine.has(v.run_id)),
+        subject.run,
+      );
+      if (latest !== null) {
+        supersededByLatest = latest.superseded;
+        current = attributed.flatMap((a) => {
+          const newest = latest.kept.find((v) => v.run_id === a.verdict.run_id);
+          return newest === undefined ? [] : [{ ...a, verdict: newest }];
+        });
+      }
+    }
     // Deny-dominates ACROSS the attributed QE runs: any newest-per-run non-PASS governs (the
     // newest such, so the reason cites the latest failure); only when every attributed QE run's
     // newest verdict is PASS does the newest PASS govern.
-    const denying = attributed.find((a) => a.verdict.verdict !== 'PASS');
-    const pick = denying ?? attributed[0]!;
+    const denying = current.find((a) => a.verdict.verdict !== 'PASS');
+    const pick = denying ?? current[0]!;
     return {
       ...pick,
-      attributedVerdicts: attributed.length,
+      attributedVerdicts: current.length,
       ...(supersededByLatest > 0 ? { supersededByLatest } : {}),
     };
   }

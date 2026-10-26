@@ -43,6 +43,8 @@ const RUNS = {
   passThenFail: 'run-j4-pass-then-fail',
   failAndPassInLatest: 'run-j4-both-latest',
   skipAtDeliver: 'run-j4-skip',
+  olderStampCarriesNewerFail: 'run-j4-stamp-carries',
+  foreignVerdictSetsNoCutoff: 'run-j4-foreign',
 };
 
 let dir: string;
@@ -99,6 +101,23 @@ function verdictAt(runId: string, n: number, verdict: 'PASS' | 'FAIL', at: numbe
   writeFileSync(join(root, 'verdicts', `v-${runId}-${n}.json`), JSON.stringify({ id: `v-${runId}-${n}`, created_at: iso, run_id: qeRun, verdict, reviewer: 'qe-reviewer', reason: verdict === 'FAIL' ? `FAIL #${n}` : null, crew_run_id: runId }));
 }
 
+/** A QE run + one verdict with every linkage field chosen (codex r1 on #1152). */
+function rawVerdict(
+  ledgerOf: string,
+  qeRun: string,
+  vid: string,
+  verdict: 'PASS' | 'FAIL',
+  at: number,
+  opts: { verdictStamp?: string; runStamp?: string; runStartedAt?: number },
+) {
+  const root = join(evidenceOf(ledgerOf), '.wicked-qe');
+  mkdirSync(join(root, 'runs'), { recursive: true });
+  mkdirSync(join(root, 'verdicts'), { recursive: true });
+  const started = new Date(opts.runStartedAt ?? at).toISOString();
+  writeFileSync(join(root, 'runs', `${qeRun}.json`), JSON.stringify({ id: qeRun, created_at: started, started_at: started, status: 'failed', ...(opts.runStamp !== undefined ? { crew_run_id: opts.runStamp } : {}) }));
+  writeFileSync(join(root, 'verdicts', `${vid}.json`), JSON.stringify({ id: vid, created_at: new Date(at).toISOString(), run_id: qeRun, verdict, reviewer: 'qe-reviewer', reason: verdict === 'FAIL' ? `FAIL ${vid}` : null, ...(opts.verdictStamp !== undefined ? { crew_run_id: opts.verdictStamp } : {}) }));
+}
+
 beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), 'crew-qe-latest-'));
   mkdirSync(join(dir, 'repo'), { recursive: true });
@@ -136,6 +155,22 @@ beforeAll(async () => {
   verdictAt(RUNS.failAndPassInLatest, 1, 'FAIL', T0 + 320);
   verdictAt(RUNS.failAndPassInLatest, 2, 'PASS', T0 + 350);
   verdictAt(RUNS.skipAtDeliver, 1, 'FAIL', T0 + 350);
+  // QE run X is this run's only through an OLDER stamped verdict (its run row predates the crew run
+  // and is unstamped); its newer FAIL inside the latest attempt is unstamped. QE run Y passes there.
+  {
+    const id = RUNS.olderStampCarriesNewerFail;
+    rawVerdict(id, 'qe-x', 'vx-1', 'PASS', T0 + 150, { verdictStamp: id, runStartedAt: T0 - 1000 });
+    rawVerdict(id, 'qe-x', 'vx-2', 'FAIL', T0 + 350, { runStartedAt: T0 - 1000 });
+    rawVerdict(id, 'qe-y', 'vy-1', 'PASS', T0 + 360, { verdictStamp: id, runStamp: id });
+  }
+  // This run: a FAIL in attempt 0, no verdict of its own in attempt 1, a PASS after every gate.
+  // Another crew run's verdict sits inside attempt 1: it must not become the cutoff.
+  {
+    const id = RUNS.foreignVerdictSetsNoCutoff;
+    rawVerdict(id, 'qe-own-1', 'vo-1', 'FAIL', T0 + 150, { verdictStamp: id, runStamp: id });
+    rawVerdict(id, 'qe-own-2', 'vo-2', 'PASS', T0 + 500, { verdictStamp: id, runStamp: id });
+    rawVerdict(id, 'qe-foreign', 'vf-1', 'PASS', T0 + 350, { verdictStamp: 'another-run', runStamp: 'another-run', runStartedAt: T0 - 1000 });
+  }
 });
 
 beforeEach(() => {
@@ -186,6 +221,22 @@ describe('j4-gates — the latest QE attempt on the delivered tree counts', () =
 
   it('deny-dominates still holds inside the latest attempt', async () => {
     const res = await decide(RUNS.failAndPassInLatest);
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().acceptance.reason).toMatch(/^FAIL/);
+    expect(confirmCalls).toEqual([]);
+  });
+});
+
+describe('j4-gates — the cutoff never weakens attribution (codex r1 on #1152)', () => {
+  it('a QE run tied to this run by an older stamped verdict still denies with its newer FAIL', async () => {
+    const res = await decide(RUNS.olderStampCarriesNewerFail);
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().acceptance.reason).toMatch(/^FAIL/);
+    expect(confirmCalls).toEqual([]);
+  });
+
+  it("another run's verdict inside an attempt never supersedes this run's FAIL", async () => {
+    const res = await decide(RUNS.foreignVerdictSetsNoCutoff);
     expect(res.statusCode, res.body).toBe(409);
     expect(res.json().acceptance.reason).toMatch(/^FAIL/);
     expect(confirmCalls).toEqual([]);
