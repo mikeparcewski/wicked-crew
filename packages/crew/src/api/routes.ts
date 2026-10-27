@@ -1,3 +1,4 @@
+import { REVIEW_WORKFLOW } from '../insights/workflow.js';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { busSeamsOffWarning, busUnavailableWarning } from '../core/bus-notice.js';
 import { vaultBinWarning, vaultDiagnostics } from '../core/vault-bin.js';
@@ -1041,9 +1042,18 @@ export interface RegisteredRoutes {
   considerations: ConsiderationService;
   /** `GET /search`'s index: the daemon's frame fan-in feeds it (`ingest`). */
   search: SearchService;
+  /** A run as `GET /runs` serves it: launch time, delivery and project joined from the daemon's own records
+   *  (DES-RUNS-REVIEW-001: the run review folds these, never the engine's bare record). */
+  decorateRun: (view: SessionView) => SessionView;
 }
 
 export interface RuntimeDeps {
+  /** DES-RUNS-REVIEW-001: prepare a `review-recent-work` launch (snapshot, write root, one seat); absent = launched as-is.
+   *  Its coverage is the review schedule's projects, wherever it was launched from (the run is still filed under the
+   *  caller's project). */
+  reviewLaunch?: (input: LaunchRunInput) => Promise<void>;
+  /** The engine refused a prepared review launch: the review is recorded as never run. */
+  reviewLaunchRefused?: (runId: string, reason: string) => void;
   /** DC-S4a decision capture: the ledger (`<state home>/decisions`), absent = capture off. */
   decisionLedger?: DecisionLedger;
   /** `WICKED_DECISIONS` (off | ledger | on); defaults to `resolveDecisionsMode()`. */
@@ -2821,6 +2831,17 @@ export function registerRoutes(
         req.log.warn(`linked-issue resolution failed; launching on the intent alone: ${message(err)}`);
       }
     }
+    // DES-RUNS-REVIEW-001 §3: a hand launch of the run review (`/workflow-review-recent-work`) is prepared like a
+    // scheduled one: its snapshot written, repo-less, one seat, its review directory as the only write root.
+    const isReview = b.workflow === REVIEW_WORKFLOW && runtime.reviewLaunch !== undefined;
+    if (isReview) {
+      try {
+        await (runtime.reviewLaunch as NonNullable<RuntimeDeps['reviewLaunch']>)(input);
+      } catch (err) {
+        return reply.code(409).send({ error: `the review could not be prepared: ${message(err)}` });
+      }
+      deliver = 'none';
+    }
     try {
       const runId = await adapter.launchRun(input);
       // crew#641/#642 (item 5): when a run is promoted from a chat, record how many seats
@@ -2927,6 +2948,7 @@ export function registerRoutes(
       return reply.code(201).send({ runId, ...(linkedIssues !== undefined ? { linkedIssues } : {}), ...freeText, ...skillsWarning, ...assuranceNotice });
     } catch (err) {
       const msg = message(err);
+      if (isReview) runtime.reviewLaunchRefused?.(input.sessionId, msg);
       // DES-TEAMING-002 T3: a plan on an engine without the plan approval gate is an "upgrade the
       // engine" 501 — never a free-text run launched in its place.
       if (err instanceof PlanLaunchUnsupportedError) {
@@ -8545,5 +8567,5 @@ export function registerRoutes(
   });
   registerSearchRoutes(app, search);
 
-  return { decideGate, decisions, chatRecorder, considerations, search };
+  return { decideGate, decisions, chatRecorder, considerations, search, decorateRun };
 }

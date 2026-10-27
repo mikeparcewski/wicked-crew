@@ -11840,6 +11840,187 @@ export interface LearnTopicsResponse {
   topics: LearnTopic[];
 }
 
+// ── workflow schedules + the run review (DES-RUNS-REVIEW-001) ─────────────────────────────────
+// `/api/v1/schedules`: any workflow on a cadence (the default entry reviews recent work every 48 h).
+// `/api/v1/insights`: every review of recent work, its numbers and what happened to each recommendation.
+
+/** A schedule's last outcome: `launched` while its run is open; `refused` = the launch failed. */
+/** `launching` = the run id is reserved and the engine is being asked; it holds the slot across a restart. */
+export type ScheduleOutcome = 'launching' | 'launched' | 'refused' | 'completed' | 'failed' | 'cancelled' | 'skipped';
+
+/** One workflow schedule (`GET /schedules`). */
+export interface WorkflowSchedule {
+  /** Kebab-case; the default entry is `review-recent-work`. */
+  id: string;
+  workflow: string;
+  /** Interval, 24..2160 hours. */
+  everyHours: number;
+  enabled: boolean;
+  /** Projects the run covers; empty = all. */
+  projectIds: string[];
+  repoRef: string | null;
+  problem: string | null;
+  /** ISO-8601. Missed intervals coalesce into one launch; a schedule whose last run is open is skipped. */
+  nextDueAt: string;
+  lastRunId: string | null;
+  lastRunAt: string | null;
+  lastOutcome: ScheduleOutcome | null;
+  /** Why the last attempt was skipped or refused, in plain words; null after a launch. */
+  lastNote: string | null;
+  /** Consecutive refused launches (backoff = min(2^failures, 24) h). */
+  failures: number;
+  createdAt: string;
+  updatedAt: string;
+  /** The `review-recent-work` schedule only: the latest review's date and outcome. */
+  lastReview?: { runId: string; launchedAt: string; endedAt: string | null; status: InsightsReviewStatus } | null;
+}
+
+export interface SchedulesResponse {
+  schedules: WorkflowSchedule[];
+}
+
+/** `PUT /schedules/:id` (human-only). */
+export interface SchedulePutBody {
+  workflow: string;
+  everyHours: number;
+  enabled?: boolean;
+  projectIds?: string[];
+  repoRef?: string | null;
+  problem?: string | null;
+}
+
+/** `POST /schedules/:id/run` ("Run it now", human-only): 409 when its last run is still going or another run works. */
+export interface ScheduleRunResponse {
+  runId: string;
+  schedule: WorkflowSchedule;
+}
+
+export type InsightsMetricId = 'pass_rate' | 'override_rate' | 'unresolved_rate' | 'time_to_pr' | 'floor_minutes' | 'wait_on_people' | 'spend' | 'retries';
+/** `too-few` = below the minimum sample (n < 5) in the window or the baseline: no trend is called. */
+export type InsightsVerdict = 'too-few' | 'no-change' | 'improved' | 'regressed';
+export type InsightsRecommendationKind = 'steering-rule' | 'memory' | 'setting' | 'issue' | 'resolve-stale';
+export type InsightsReviewStatus = 'running' | 'completed' | 'failed' | 'cancelled';
+
+export interface InsightsInterval {
+  lo: number;
+  hi: number;
+}
+
+/** A sample: a rate (Wilson 95 % interval) or a median (bootstrap 95 % interval, with p75/p90). */
+export interface InsightsSampleStat {
+  n: number;
+  value: number | null;
+  interval: InsightsInterval | null;
+  p75?: number | null;
+  p90?: number | null;
+}
+
+export interface InsightsMetricDef {
+  id: InsightsMetricId;
+  label: string;
+  kind: 'rate' | 'median';
+  unit: 'ratio' | 'minutes' | 'usd' | 'count';
+  higherIsBetter: boolean;
+}
+
+export interface InsightsRecommendation {
+  /** `<review run id>:<candidate id>`. */
+  id: string;
+  candidate: string;
+  kind: InsightsRecommendationKind;
+  title: string;
+  evidence: {
+    line: string;
+    runs: Array<{ id: string; title: string }>;
+    metric?: InsightsMetricId;
+    segment?: string;
+    n: number;
+    value?: number | null;
+    baseline?: number | null;
+    interval?: InsightsInterval | null;
+  };
+  expectedEffect: string;
+  confidence: 'high' | 'medium' | 'low';
+  /** What evidence would change our mind. */
+  changeMind: string;
+  /** Crew's ranking key: runs affected + hours at stake + dollars at stake. */
+  impact: number;
+  basis: 'notable' | 'pattern';
+  action: {
+    setting?: string;
+    issue?: { repoRef: string | null; title: string; body: string };
+    runs?: string[];
+    proposal?: { kindType: string; content: string; severity?: string };
+  };
+  state: 'new' | 'accepted' | 'dismissed';
+  reason: string | null;
+  decidedAt: string | null;
+  /** The approve-queue proposal filed for a steering-rule or memory recommendation. */
+  proposalId: string | null;
+  proposalError: string | null;
+}
+
+export interface InsightsReview {
+  runId: string;
+  trigger: 'schedule' | 'manual';
+  scheduleId: string | null;
+  launchedAt: string;
+  endedAt: string | null;
+  status: InsightsReviewStatus;
+  window: { startMs: number; endMs: number };
+  baselineWindows: Array<{ startMs: number; endMs: number }>;
+  projectIds: string[];
+  summary: string | null;
+  /** false = the seat wrote no usable report; crew's own wording is shown, labelled "not interpreted". */
+  interpreted: boolean;
+  totals: Record<string, number> | null;
+  /** The all-runs metrics of this review: one point per metric on the trend lines. */
+  series: Array<{ metric: InsightsMetricId; window: InsightsSampleStat; baseline: InsightsSampleStat; verdict: InsightsVerdict }>;
+  /** What got better, and what is working. */
+  improvements: Array<{ metric: InsightsMetricId; segment: string; line: string }>;
+  regressions: Array<{ metric: InsightsMetricId; segment: string; line: string }>;
+  /** At most five, ranked by impact. */
+  recommendations: InsightsRecommendation[];
+  watching: Array<{ id: string; title: string; line: string }>;
+  error: string | null;
+}
+
+/** `GET /insights`: the review history, newest first. */
+export interface InsightsResponse {
+  reviews: InsightsReview[];
+  /** Recommendations nobody has accepted or dismissed yet, across the history. */
+  newRecommendations: number;
+  running: boolean;
+  lastReview: { runId: string; launchedAt: string; endedAt: string | null; status: InsightsReviewStatus } | null;
+  metrics: InsightsMetricDef[];
+  /** Below this n no trend is called. */
+  minSample: number;
+}
+
+/** What studio opens on Accept: the proposal (approval stays in the approve queue), a settings section, a
+ *  prefilled new-issue page, or the runs list filtered to these runs. */
+export type InsightsAcceptTarget =
+  | { kind: 'proposal'; proposalId: string }
+  | { kind: 'settings'; section: string }
+  | { kind: 'issue'; repoRef: string | null; title: string; body: string; url: string | null }
+  | { kind: 'runs'; runIds: string[] }
+  | { kind: 'none' };
+
+/** `POST /insights/recommendations/:id/accept` (human-only). */
+export interface AcceptRecommendationResponse {
+  recommendation: InsightsRecommendation;
+  open: InsightsAcceptTarget;
+}
+
+/** `POST /insights/recommendations/:id/dismiss` (human-only). A proposal-backed one rejects its proposal. */
+export interface DismissRecommendationBody {
+  reason: string;
+}
+
+export interface DismissRecommendationResponse {
+  recommendation: InsightsRecommendation;
+}
+
 // ── MCP inspector bridge (DES-MCP-INSPECTOR-001 §3) ───────────────────────────────────────────
 // `/api/v1/mcp-inspect/sessions`: one live connection to an MCP server per session, driven by
 // studio's host for an `mcp-server` editor. Start, send and delete are human-only; the log is

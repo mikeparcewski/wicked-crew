@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.141.0",
+  "apiTypesVersion": "0.142.0",
   "endpoints": [
     {
       "method": "GET",
@@ -560,6 +560,41 @@
       "responseType": null,
       "statusCodes": [
         200
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/insights",
+      "requestType": null,
+      "responseType": "InsightsResponse",
+      "statusCodes": [
+        200
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/insights/recommendations/:id/accept",
+      "requestType": null,
+      "responseType": "AcceptRecommendationResponse",
+      "statusCodes": [
+        200,
+        403,
+        404,
+        409
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/insights/recommendations/:id/dismiss",
+      "requestType": "DismissRecommendationBody",
+      "responseType": "DismissRecommendationResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        409,
+        502
       ]
     },
     {
@@ -1868,6 +1903,51 @@
       "requestType": null,
       "responseType": null,
       "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/schedules",
+      "requestType": null,
+      "responseType": "SchedulesResponse",
+      "statusCodes": [
+        200
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/schedules/:id",
+      "requestType": null,
+      "responseType": "{ deleted: true; id: string }",
+      "statusCodes": [
+        200,
+        403,
+        404
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/schedules/:id",
+      "requestType": "SchedulePutBody",
+      "responseType": "WorkflowSchedule",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/schedules/:id/run",
+      "requestType": null,
+      "responseType": "ScheduleRunResponse",
+      "statusCodes": [
+        200,
+        403,
+        404,
+        409,
+        502
+      ]
     },
     {
       "method": "POST",
