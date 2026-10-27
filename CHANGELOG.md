@@ -84,6 +84,21 @@ A patch release for the J1/J4/J6 bricks: the floating chat can use an installed 
   acceptance reason says how many earlier verdicts it superseded.
 
 ### Added
+- **Default evals: the system's own judgments, scored against what really happened (DES-DEFAULT-EVALS-001;
+  api-types 0.140.0).** Eight suites, one per inference point that drifts: what needs you (and what is one
+  item), the floor decision class, the QE verdict, who built it, steering firing, memory recall, prompt
+  routing, and normalizing across projects and surfaces. Real cases are captured from the daemon's own run
+  store each run (escalations with the floor they sit on, the operator's choice at each gate, QE ledger
+  verdicts, unit authorship), with the operator's answer, or a deterministic rule over the case's own
+  evidence, as the label; synthetic cases fill only the classes with fewer than 5 real ones. Scoring is
+  deterministic code: agreement, per-class precision and recall, set and pairwise-merge scores and
+  calibration, each with a Wilson 95 % interval, "too few cases" below n = 5, and a trend against the last
+  run only when the interval excludes it. Real, synthetic, combined and model-labelled figures are always
+  reported apart. A cross-project run lists the inputs judged differently by project or surface.
+  `GET /api/v1/testing/default-evals/suites`, `POST /api/v1/testing/default-evals/run {project?, suites?,
+  baseline?}`, `GET /api/v1/testing/default-evals[/:id]`; history under `<eval store>/default/`;
+  `node dist/evals/run-cli.js` runs it from a shell. The shipped baseline (the test rig's 2026-10-27 run store
+  and the needs-you ruling) counts only when a run asks for it.
 - **Skip QE acceptance at the deliver gate, with a reason (`action: 'skip_qe'`, api-types 0.139.0).** `POST
   /runs/:id/gate` takes `{approve: true, action: 'skip_qe', amend: <reason>}` (a blank reason is a 400).
   At the gate before the deliver step the delivery goes without a QE PASS, and its check says

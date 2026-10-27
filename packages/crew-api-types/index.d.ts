@@ -12210,3 +12210,208 @@ export interface SearchResponse {
   partial: boolean;
   took_ms: number;
 }
+
+// ── Default evals (DES-DEFAULT-EVALS-001; api-types 0.140.0) ─────────────────────────────────────────────
+// `/api/v1/testing/default-evals*`: the system's own judgments (needs-you, floor class, QE verdict, attribution,
+// steering firing, recall, prompt routing, normalization) scored against what really happened. One case shape for
+// every suite; real, synthetic, combined and model-labelled figures are always reported apart.
+
+/** The eight inference points. */
+export type DefaultEvalSuiteId =
+  | 'needs-you'
+  | 'floor-class'
+  | 'qe-verdict'
+  | 'attribution'
+  | 'steering'
+  | 'recall'
+  | 'archetype'
+  | 'normalization';
+
+export type DefaultEvalCaseSource = 'real' | 'synthetic';
+
+/**
+ * Who said what the answer should be. `operator`: the person's choice at a gate (or a ruling); `rule`: a
+ * deterministic consistency rule over the case's own evidence; `fixture`: written into a corpus or the generator;
+ * `model:<seat>`: a model labelled it because nothing else could. Model labels are reported in their own row and
+ * never in the headline (DES §3, determinism).
+ */
+export type DefaultEvalLabelBy = 'operator' | 'rule' | 'fixture' | `model:${string}`;
+
+/** What the system answered: a class, a set (attribution), or a cluster key (needs-you merge). */
+export interface DefaultEvalAnswer {
+  label?: string;
+  labels?: string[];
+  cluster?: string;
+}
+
+export interface DefaultEvalObserved extends DefaultEvalAnswer {
+  /** The classifier's own confidence in `label`, in [0, 1], when it gives one (calibration). */
+  confidence?: number;
+  /** `recorded`: read from the run store as the system said it then. `replay`: the current classifier, run now. */
+  by: 'recorded' | 'replay';
+}
+
+export interface DefaultEvalExpected extends DefaultEvalAnswer {
+  by: DefaultEvalLabelBy;
+  /** Why this is the answer, in a line (the operator's words, or the rule that fired). */
+  why?: string;
+}
+
+export interface DefaultEvalCaseEvidence {
+  runId?: string;
+  ord?: number;
+  seq?: number;
+  decisionId?: string;
+  /** A repo-relative or program-relative file the case was read from (seed cases). */
+  file?: string;
+}
+
+export interface DefaultEvalCase {
+  /** Stable identity: capture is idempotent by it. */
+  id: string;
+  suite: DefaultEvalSuiteId;
+  source: DefaultEvalCaseSource;
+  /** The project (or repo, when the run has no project) the case belongs to; `null` when neither is known. */
+  project: string | null;
+  /** The surface that produced `observed`, when several surfaces answer one question (needs-you). */
+  surface?: string;
+  /**
+   * The canonical input fingerprint: two cases with the same key asked the system the same question. The
+   * normalization suite compares observations per key across projects and surfaces.
+   */
+  inputKey: string;
+  /** The case's input, small and scrubbed (no paths, no prompts beyond a title). */
+  input: Record<string, unknown>;
+  /** `null` when the system's answer is not known yet: a synthetic case waiting on a replay adapter. */
+  observed: DefaultEvalObserved | null;
+  expected: DefaultEvalExpected;
+  evidence?: DefaultEvalCaseEvidence;
+  /** A case from the shipped baseline (the 2026-10-27 rig capture and the needs-you ruling), not this daemon's own
+   *  run store. Only counted when a run asks for the baseline; always disclosed in the counts. */
+  baseline?: true;
+}
+
+/** A proportion with its Wilson 95 % interval. `tooFew` when n is below the minimum (DES §6). */
+export interface DefaultEvalRate {
+  k: number;
+  n: number;
+  value: number | null;
+  lo: number | null;
+  hi: number | null;
+  tooFew: boolean;
+}
+
+export interface DefaultEvalClassScore {
+  label: string;
+  precision: DefaultEvalRate;
+  recall: DefaultEvalRate;
+}
+
+export interface DefaultEvalCalibration {
+  n: number;
+  /** DefaultEvalExpected calibration error over 10 equal-width bins. `null` below the calibration minimum. */
+  ece: number | null;
+  brier: number | null;
+  tooFew: boolean;
+}
+
+/** One slice of a suite's cases (real, synthetic, combined, model-labelled, or one project). */
+export interface DefaultEvalSliceScore {
+  /** Cases in the slice, including those that could not be scored. */
+  cases: number;
+  /** Cases with no observation (a synthetic case with no replay adapter). Never counted as right or wrong. */
+  unscored: number;
+  /** DefaultEvalObserved matched expected: exact class, set equality, or the pair agreement for merges. */
+  agreement: DefaultEvalRate;
+  perClass: DefaultEvalClassScore[];
+  /** Set-valued suites (attribution): micro precision / recall over the set members. */
+  members?: { precision: DefaultEvalRate; recall: DefaultEvalRate };
+  /** Cluster suites (needs-you merge): pairwise precision / recall over "these two are one item". */
+  pairs?: { precision: DefaultEvalRate; recall: DefaultEvalRate };
+  calibration?: DefaultEvalCalibration;
+}
+
+export type DefaultEvalTrend = 'too-few' | 'no-change' | 'improved' | 'regressed' | 'first-run';
+
+export interface DefaultEvalSuiteScore {
+  suite: DefaultEvalSuiteId;
+  title: string;
+  /** Slices that always appear. `model` holds only model-labelled cases; the other three exclude them. */
+  real: DefaultEvalSliceScore;
+  synthetic: DefaultEvalSliceScore;
+  combined: DefaultEvalSliceScore;
+  model: DefaultEvalSliceScore;
+  /** Per project (cross-project runs only), over real + synthetic. */
+  byProject?: Record<string, DefaultEvalSliceScore>;
+  /** Per answerer, when several surfaces answer the same question (needs-you). */
+  bySurface?: Record<string, DefaultEvalSliceScore>;
+  /** Against the last stored run of the same suite and scope, on the combined agreement. */
+  trend: { word: DefaultEvalTrend; previous: number | null; previousRunId: string | null };
+  /** Plain-words notes the suite must carry (why synthetic is unscored, which adapter is missing, …). */
+  notes: string[];
+}
+
+/** One input judged differently by place: the normalization drift a cross-project run surfaces. */
+export interface DefaultEvalDriftKey {
+  inputKey: string;
+  suite: DefaultEvalSuiteId;
+  /** `project` or `surface`: what differed. */
+  axis: 'project' | 'surface';
+  /** place → the observed labels there (sorted, distinct). */
+  observed: Record<string, string[]>;
+  caseIds: string[];
+}
+
+export interface DefaultEvalReport {
+  id: string;
+  createdAt: string;
+  /** `null` = every project (a cross-project run). */
+  project: string | null;
+  suites: DefaultEvalSuiteScore[];
+  drift: DefaultEvalDriftKey[];
+  counts: { real: number; synthetic: number; modelLabelled: number; unscored: number; baseline: number };
+  /** The minimum n a figure needs before it is called (and the calibration minimum). */
+  minimums: { rate: number; calibration: number };
+}
+
+export interface DefaultEvalSummary {
+  id: string;
+  createdAt: string;
+  project: string | null;
+  suites: Array<{ suite: DefaultEvalSuiteId; agreement: number | null; n: number; tooFew: boolean; trend: DefaultEvalTrend }>;
+  drift: number;
+  counts: DefaultEvalReport['counts'];
+}
+
+/** `GET /testing/default-evals/suites`. */
+export interface DefaultEvalSuitesResponse {
+  suites: Array<{
+    id: DefaultEvalSuiteId;
+    title: string;
+    /** Crew can run the current classifier on a case's input (so synthetic cases are scored). */
+    replay: boolean;
+    /** The generator makes synthetic cases for it. */
+    synthetic: boolean;
+    /** Why it cannot replay, when it cannot. */
+    note: string | null;
+  }>;
+}
+
+/** `POST /testing/default-evals/run` body. `project`: one project (or repo) id, or `"all"` (the default). */
+export interface RunDefaultEvalsBody {
+  project?: string;
+  suites?: DefaultEvalSuiteId[];
+  /** Count the shipped baseline cases too (the 2026-10-27 rig capture and the needs-you ruling). */
+  baseline?: boolean;
+}
+
+/** `GET /testing/default-evals`. Newest first. */
+export interface ListDefaultEvalRunsResponse {
+  runs: DefaultEvalSummary[];
+}
+
+/** `GET /testing/default-evals/:id`. */
+export interface DefaultEvalDetail {
+  report: DefaultEvalReport;
+  cases: DefaultEvalCase[];
+}
