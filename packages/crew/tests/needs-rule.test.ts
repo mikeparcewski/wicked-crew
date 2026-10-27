@@ -37,6 +37,7 @@ const dump = JSON.parse(readFileSync(join(__dirname, 'fixtures', 'needs-2026-10-
 };
 const NOW = Date.parse(dump.snapshot_at);
 const HOUR = 3_600_000;
+const iso = (ms: number): string => new Date(ms).toISOString();
 
 /** The dump keeps each run's title; the one run whose stated problem matters to the merge carries the
  *  problem text the definition quotes from the rig (`GET /runs/29bcace4…`). */
@@ -260,3 +261,130 @@ describe('unresolved work keeps the system from going green', () => {
     expect(n.unresolvedSpend).toEqual({ costUsd: 1.5, tokens: { input: 10, output: 5 }, costKnown: 1 });
   });
 });
+
+describe('review fixes (xreview r1 on crew#1159)', () => {
+  const base: DumpRun = { id: 'x', title: 'T', status: 'failed', repo: 'r', workflow: 'bug', created_h_ago: 240, delivery: 'none', retry_of: null, ask_turn: null, archived: false };
+  const calm = infra.map((r) => ({ ...r, state: r.state === 'off' ? 'off' : 'ok' }) as SystemInfraRow);
+  const withEnd = (r: DumpRun, endedHAgo: number): SessionView => {
+    const v = viewOf(r);
+    (v.session as { ended_at?: number }).ended_at = Math.floor((NOW - endedHAgo * HOUR) / 1000);
+    return v;
+  };
+  const needsOf = (views: SessionView[], runs: SystemRun[] = [], gaps: Parameters<typeof buildNeeds>[0]['gaps'] = [], rows = calm) =>
+    buildNeeds({ now: NOW, views, runs, infra: rows, clis, gaps, infraHoldsLive: () => false });
+
+  it('a failure is aged from when it FAILED: launched 10 days ago, failed an hour ago, is stuck', () => {
+    expect(needsOf([withEnd(base, 1)]).attention.map((a) => a.id)).toEqual(['run:x']);
+    const old = needsOf([withEnd(base, 200)]);
+    expect(old.attention).toEqual([]);
+    expect(old.unresolved[0]!.reason).toMatch(/failed 8 day\(s\) ago/);
+  });
+
+  it('an answered ask never comes back through a judge gap or host load', () => {
+    const ask = viewOf(dump.runs.find((r) => r.id === 'b87f42fb')!);
+    const g = dump.runs.find((r) => r.id === 'b87f42fb')!.gate!;
+    const run = runLiveness({ view: ask, now: NOW, evidence: null, gate: { interactionId: 'i', ord: g.ord, kind: g.kind, prompt: g.prompt, receivedAt: g.receivedAt }, quietAfterMs: 5 * 60_000, stallAfterMs: 15 * 60_000 });
+    const gap = { run, creator: 'claude', blockedBy: [clis.find((c) => c.cli === 'copilot')!] };
+    const n = needsOf([ask], [run], [gap], infra);
+    expect(n.attention).toEqual([]);
+  });
+
+  it('held runs whose denial IS the same missing judge are one item; a run held by its own failure keeps its own', () => {
+    const judged = (id: string, denial: string): { view: SessionView; run: SystemRun } => {
+      const view = viewOf({ ...base, id, status: 'awaiting_human', created_h_ago: 5, units_total: 2, units_done: 1, rejected_units: [{ ord: 2, cli: 'codex', denial }], gate: { ord: 2, kind: 'escalation', receivedAt: iso(NOW - HOUR), prompt: 'p' } });
+      const run = runLiveness({ view, now: NOW, evidence: null, gate: { interactionId: id, ord: 2, kind: 'escalation', prompt: 'p', receivedAt: iso(NOW - HOUR) }, quietAfterMs: 5 * 60_000, stallAfterMs: 15 * 60_000 });
+      return { view, run };
+    };
+    const a = judged('j1', 'unit 2 checks work built on `codex` and ran on that same seat; the run requires a distinct evaluator (distinct_evaluator)');
+    const b = judged('j2', 'unit 2 checks work built on `codex` and ran on that same seat; the run requires a distinct evaluator (distinct_evaluator)');
+    const c = judged('j3', 'repo checks floor failed: test: exit 1');
+    const out = [clis.find((x) => x.cli === 'copilot')!];
+    const gaps = [a, b, c].map((p) => ({ run: p.run, creator: 'codex', blockedBy: out }));
+    const n = needsOf([a.view, b.view, c.view], [a.run, b.run, c.run], gaps);
+    expect(n.attention.map((x) => [x.id, x.blocks])).toEqual([['seat:codex:copilot', 2], ['run:j3', 1]]);
+    expect(n.attention[1]!.reason).toMatch(/no distinct judge for codex's work/);
+  });
+
+  it('a slowdown that slows nothing is not counted; an unreadable run list is (never green)', () => {
+    const loaded = calm.map((r) => (r.key === 'load' ? { ...r, state: 'degraded' } : r) as SystemInfraRow);
+    expect(needsOf([], [], [], loaded).attention).toEqual([]);
+    const blind = calm.map((r) => (r.key === 'daemon' ? { ...r, state: 'degraded', reason: 'serving, but the engine did not list its runs' } : r) as SystemInfraRow);
+    const n = needsOf([], [], [], blind);
+    expect(n.attention.map((x) => x.id)).toEqual(['infra:daemon']);
+    expect(needsLevel(n.attention, n.unresolved)).toBe('yellow');
+  });
+
+  it('a resumed failed run that ended again has its cost read again', async () => {
+    const cache = new RunCostCache();
+    let cost = 1;
+    const read = async () => [{ type: 'cliUsage', costUsd: cost }];
+    await cache.fill([{ id: 'r', final: true, stamp: 'failed:100' }], read);
+    cost = 3;
+    await cache.fill([{ id: 'r', final: true, stamp: 'failed:100' }], read);
+    expect(cache.get('r')!.costUsd).toBe(1);
+    await cache.fill([{ id: 'r', final: true, stamp: 'failed:200' }], read);
+    expect(cache.get('r')!.costUsd).toBe(3);
+  });
+
+  const live = (id: string, extra: Partial<DumpRun>, gate: { ord: number; kind: string } | null): { view: SessionView; run: SystemRun } => {
+    const g = gate === null ? null : { ...gate, receivedAt: iso(NOW - 2 * HOUR), prompt: 'p' };
+    const view = viewOf({ ...base, id, status: 'awaiting_human', created_h_ago: 5, ...extra, gate: g });
+    const run = runLiveness({ view, now: NOW, evidence: null, gate: g === null ? null : { interactionId: id, ord: g.ord, kind: g.kind, prompt: 'p', receivedAt: g.receivedAt }, quietAfterMs: 5 * 60_000, stallAfterMs: 15 * 60_000 });
+    return { view, run };
+  };
+
+  it("an earlier unit's old denial never re-labels a run now at its deliver gate", () => {
+    const d = live('d1', { repo: 'wicked-core', units_total: 10, units_done: 9, rejected_units: [{ ord: 4, cli: 'claude', denial: 'dead seat: every eligible seat has now failed it; test: exit 1 base_red_unseparated' }] }, { ord: 10, kind: 'deliver' });
+    // unit 4 is done now (it was retried); its denial text stayed on the row
+    const n = needsOf([d.view], [d.run]);
+    expect(n.attention.map((a) => [a.id, a.title])).toEqual([['run:d1', 'T']]);
+  });
+
+  it('a cancelled retry supersedes nothing: the failure it was meant to redo is still unresolved', () => {
+    const a = withEnd({ ...base, id: 'A' }, 200);
+    const b = viewOf({ ...base, id: 'B', status: 'cancelled', created_h_ago: 100, retry_of: 'A' });
+    expect(needsOf([a, b]).unresolved.map((u) => [u.runId, u.why])).toEqual([['A', 'failed']]);
+  });
+
+  it('an open run whose retry failed is still stuck; a running superseded run is never offered a resolve', () => {
+    const held = live('H', { units_total: 2, units_done: 1, rejected_units: [{ ord: 2, cli: 'claude', denial: 'boom' }] }, { ord: 2, kind: 'escalation' });
+    const retry = withEnd({ ...base, id: 'R', created_h_ago: 1, retry_of: 'H' }, 0.5);
+    const n = needsOf([held.view, retry], [held.run]);
+    expect(n.attention.map((a) => a.id).sort()).toEqual(['run:H', 'run:R']);
+    expect(n.unresolved).toEqual([]);
+    const running = viewOf({ ...base, id: 'E', status: 'executing', created_h_ago: 5 });
+    const done = viewOf({ ...base, id: 'C', status: 'completed', created_h_ago: 1, retry_of: 'E' });
+    const runE = { runId: 'E', liveness: 'working', reason: 'working' } as unknown as SystemRun;
+    expect(needsOf([running, done], [runE]).unresolved).toEqual([]);
+  });
+
+  it('only a run at its deliver gate joins a red base as its fix, and only one', () => {
+    const floor = (id: string) => live(id, { repo: 'wicked-core', units_total: 3, units_done: 1, rejected_units: [{ ord: 2, cli: 'codex', denial: 'test: exit 101 [base_red_unseparated: base red]' }] }, { ord: 2, kind: 'escalation' });
+    const fixAt = (id: string, kind: string) => {
+      const p = live(id, { repo: 'wicked-core', units_total: 3, units_done: 2 }, { ord: 3, kind });
+      (p.view.session as { problem: string }).problem = 'the BASE is red with 39 failures';
+      return p;
+    };
+    const [f1, f2, fx, fy, fz] = [floor('f1'), floor('f2'), fixAt('fx', 'deliver'), fixAt('fy', 'deliver'), fixAt('fz', 'escalation')];
+    const all = [f1, f2, fx, fy, fz];
+    const n = needsOf(all.map((p) => p.view), all.map((p) => p.run));
+    const base = n.attention.find((a) => a.id === 'base:wicked-core:test')!;
+    expect([...base.blockedRunIds!].sort()).toEqual(['f1', 'f2', 'fx']);
+    expect(base.target).toMatchObject({ runId: 'fx' });
+    expect(n.attention.map((a) => a.id)).toEqual(expect.arrayContaining(['run:fy', 'run:fz']));
+  });
+
+  it('no seat at all: red, every eligible run held (never an answered ask), ahead of one run on a tie', () => {
+    const out = clis.map((c) => ({ ...c, state: 'signed_out', workEligible: false, councilEligible: false }) as SystemCli);
+    const ask = viewOf(dump.runs.find((r) => r.id === 'b87f42fb')!);
+    const g = dump.runs.find((r) => r.id === 'b87f42fb')!.gate!;
+    const askRun = runLiveness({ view: ask, now: NOW, evidence: null, gate: { interactionId: 'i', ord: g.ord, kind: g.kind, prompt: g.prompt, receivedAt: g.receivedAt }, quietAfterMs: 5 * 60_000, stallAfterMs: 15 * 60_000 });
+    const h = live('H', { units_total: 2, units_done: 1, rejected_units: [{ ord: 2, cli: 'claude', denial: 'boom' }] }, { ord: 2, kind: 'escalation' });
+    const n = buildNeeds({ now: NOW, views: [ask, h.view], runs: [askRun, h.run], infra: calm, clis: out, gaps: [], infraHoldsLive: () => false });
+    expect(n.attention.map((a) => a.id)).toEqual(['cli:none', 'run:H']);
+    expect(n.attention[0]).toMatchObject({ severity: 'red', blockedRunIds: ['H'] });
+    const idle = buildNeeds({ now: NOW, views: [], runs: [], infra: calm, clis: out, gaps: [], infraHoldsLive: () => false });
+    expect(idle.attention[0]).toMatchObject({ id: 'cli:none', severity: 'red' });
+  });
+});
+

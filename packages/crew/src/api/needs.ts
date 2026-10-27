@@ -62,6 +62,8 @@ const BASE_RED = /base_red_unseparated|the run base [0-9a-f]{6,40} fails this ch
 const CHECK_NAME = /(?:^|[\s(\]—-])([A-Za-z][\w.-]*): exit -?\d+/;
 /** A run whose own stated problem is that its repo's base is red (the fix the group waits on). */
 const STATES_RED_BASE = /\bbase\b[^.\n]{0,40}\bred\b|\bred base\b/i;
+/** A denial that IS the missing judge (the evaluator ran on the creator's seat, or none could judge). */
+const JUDGE_DENIAL = /distinct[_ ]evaluator|no distinct judge|could not be judged|no (seat|judge) (can|could) judge/i;
 /** A dead-seat denial: every eligible seat failed the unit. */
 const DEAD_SEAT = /dead seat|every eligible seat has (now )?failed/i;
 
@@ -116,6 +118,8 @@ export function supersession(views: readonly SessionView[]): Map<string, { by: s
   const out = new Map<string, { by: string; retried: boolean }>();
   for (const v of views) {
     const r = v.session.retry_of;
+    // A cancelled retry carries nothing: the work it was meant to redo is still the original's.
+    if (v.session.status === 'cancelled') continue;
     if (typeof r === 'string' && r !== '' && r !== v.session.id && !out.has(r)) out.set(r, { by: v.session.id, retried: true });
   }
   const done = views
@@ -178,10 +182,14 @@ function gateTarget(run: SystemRun | undefined, runId: string): SystemTarget {
 /** The unit a held run's gate is about, and the words it was denied with. */
 function denialOf(v: SessionView | undefined, run: SystemRun | undefined): string {
   if (v === undefined) return '';
-  const ord = run?.gate?.ord ?? null;
-  const at = ord !== null ? v.units.find((u) => u.ord === ord) : undefined;
-  const own = typeof at?.denial_reason === 'string' ? at.denial_reason : '';
-  if (own !== '') return own;
+  // A live run's cause is its CURRENT gate's denial, and only while it is held there: an earlier
+  // unit's old denial (retried, overridden) never re-labels a deliver gate or a stalled run.
+  if (run !== undefined) {
+    if (run.liveness !== 'held') return '';
+    const ord = run.gate?.ord ?? null;
+    const at = ord !== null ? v.units.find((u) => u.ord === ord) : undefined;
+    if (at !== undefined) return typeof at.denial_reason === 'string' ? at.denial_reason : '';
+  }
   return v.units.map((u) => u.denial_reason ?? '').find((d) => d !== '') ?? '';
 }
 
@@ -239,6 +247,9 @@ export function buildNeeds(input: NeedsInput): Needs {
   const sup = supersession(input.views);
   const unresolved: SystemUnresolvedItem[] = [];
   const members: Member[] = [];
+  /** Runs that are not stuck (answered asks): no later pass (judge gaps, no worker, load) brings them back. */
+  const notStuck = new Set<string>();
+  const eligible = (runId: string): boolean => !notStuck.has(runId) && !sup.has(runId) && byId.get(runId)?.session.archived_at == null;
 
   const costFor = (v: SessionView): SystemUnresolvedItem['cost'] => {
     const c = input.costOf?.(v.session.id);
@@ -271,21 +282,27 @@ export function buildNeeds(input: NeedsInput): Needs {
     const endedAt = secsToMs(v.session.ended_at);
     if (status === 'failed') {
       if (s?.retried === true) continue; // retried: the retry carries the work
+      // Aged from the FAILURE (its end); a run with no end on record is aged from its launch.
+      const failedAt = endedAt ?? secsToMs(v.session.created_at);
       if (s !== undefined) {
         const d = byId.get(s.by);
-        pushUnresolved(v, 'superseded', `failed; superseded by ${short(s.by)}, which ${d !== undefined && DELIVERED.has(d.session.delivery ?? '') ? 'delivered' : 'completed'}`, endedAt, ['close_superseded', 'archive'], s.by);
+        pushUnresolved(v, 'superseded', `failed; superseded by ${short(s.by)}, which ${d !== undefined && DELIVERED.has(d.session.delivery ?? '') ? 'delivered' : 'completed'}`, failedAt, ['close_superseded', 'archive'], s.by);
         continue;
       }
-      const launched = secsToMs(v.session.created_at);
-      if (launched !== null && now - launched > FAILED_FRESH_MS) {
-        pushUnresolved(v, 'failed', `failed ${Math.round((now - (endedAt ?? launched)) / DAY_MS)} day(s) ago and was never retried or archived`, endedAt ?? launched, ['retry', 'archive']);
+      if (failedAt !== null && now - failedAt > FAILED_FRESH_MS) {
+        pushUnresolved(v, 'failed', `failed ${Math.round((now - failedAt) / DAY_MS)} day(s) ago and was never retried or archived`, failedAt, ['retry', 'archive']);
         continue;
       }
-      members.push({ runId: id, view: v, run: undefined, severity: 'red', waitedMs: endedAt });
+      members.push({ runId: id, view: v, run: undefined, severity: 'red', waitedMs: failedAt });
       continue;
     }
     if (run === undefined) continue; // completed / cancelled: resolved
-    if (s !== undefined) {
+    // An open run is superseded only while it is parked at a gate (resolve can close it) and its
+    // successor did not itself fail or get cancelled (then this run is still the work).
+    const successor = s !== undefined ? byId.get(s.by) : undefined;
+    const replaced = s !== undefined && status === 'awaiting_human' && successor?.session.status !== 'failed' && successor?.session.status !== 'cancelled';
+    if (s !== undefined && !replaced) sup.delete(id);
+    if (s !== undefined && replaced) {
       const d = byId.get(s.by);
       const how = s.retried ? `retried as ${short(s.by)}` : `superseded by ${short(s.by)}`;
       const what = d === undefined ? '' : d.session.status === 'completed' || DELIVERED.has(d.session.delivery ?? '') ? `, which ${DELIVERED.has(d.session.delivery ?? '') ? 'delivered' : 'completed'}` : `, which is ${d.session.status.replace(/_/g, ' ')}`;
@@ -293,6 +310,7 @@ export function buildNeeds(input: NeedsInput): Needs {
       continue;
     }
     if (isAnsweredAsk(v, run)) {
+      notStuck.add(id);
       if (gateAt !== null && now - gateAt > PARKED_AFTER_MS) {
         pushUnresolved(v, 'parked', `an answered ask parked at its turn for ${Math.round((now - gateAt) / 3_600_000)} h`, gateAt, ['archive']);
       }
@@ -313,7 +331,7 @@ export function buildNeeds(input: NeedsInput): Needs {
   const infraItems: Array<{ row: SystemInfraRow; kind: 'prevents' | 'slows' }> = [];
   for (const row of input.infra) {
     if (row.state === 'down') infraItems.push({ row, kind: 'prevents' });
-    else if (row.state === 'degraded' && (row.key === 'load' || (row.key === 'skills' && /launches wait/i.test(row.reason)))) infraItems.push({ row, kind: 'slows' });
+    else if (row.state === 'degraded' && (row.key === 'load' || row.key === 'daemon' || (row.key === 'skills' && /launches wait/i.test(row.reason)))) infraItems.push({ row, kind: 'slows' });
     else if (row.state === 'unknown' && WORK_PATH.has(row.key)) infraItems.push({ row, kind: 'slows' });
   }
   // A down component claims the held runs whose denial names it, and the stalled runs on its path
@@ -352,16 +370,39 @@ export function buildNeeds(input: NeedsInput): Needs {
   const left: Member[] = [];
   for (const m of rest) {
     const repo = m.view !== undefined ? repoOf(m.view) : null;
-    const target = m.run !== undefined && m.run.gate !== undefined && repo !== null && STATES_RED_BASE.test(m.view?.session.problem ?? '')
-      ? [...groups.values()].filter((g) => g.key.startsWith(`base:${repo}:`)).sort((a, b) => b.members.length - a.members.length)[0]
+    // The fix waits at its DELIVER gate (its own work is done); one fix per red base.
+    const target = m.run !== undefined && m.run.gate?.kind === 'deliver' && repo !== null && STATES_RED_BASE.test(m.view?.session.problem ?? '')
+      ? [...groups.values()].filter((g) => g.key.startsWith(`base:${repo}:`) && !g.members.some(baseKeyless)).sort((a, b) => b.members.length - a.members.length)[0]
       : undefined;
     if (target !== undefined) target.members.push(m);
     else left.push(m);
   }
   // Runs with no distinct judge and nothing else holding them: one item per set of missing seats.
   const gapByRun = new Map(input.gaps.map((g) => [g.run.runId, g]));
+  const seatKey = (gap: { creator: string | null; blockedBy: SystemCli[] }): string => `seat:${gap.creator ?? ''}:${gap.blockedBy.map((c) => c.cli).sort().join('+')}`;
+  const seatGroup = (key: string, gap: { creator: string | null; blockedBy: SystemCli[] }): Group['build'] => (ms) => {
+    const who = gap.blockedBy.map((c) => `${c.cli} ${c.state === 'benched' ? 'benched' : c.state.replace('_', ' ')}`);
+    return {
+      id: ms.length === 1 ? `judge:${ms[0]!.runId}` : key,
+      severity: 'red',
+      source: 'run',
+      kind: 'prevents',
+      title: ms.length === 1 ? `run ${short(ms[0]!.runId)}: no distinct judge` : `${ms.length} runs: no distinct judge`,
+      reason: `no seat in the pool can judge ${gap.creator ?? 'the creator'}'s work${who.length > 0 ? ` (${who.join(', ')})` : ''}`,
+      remedy: 'Sign in another CLI in the run’s pool, or reassign the unit to a seat whose work another seat can judge.',
+      target: gateTarget(ms[0]!.run, ms[0]!.runId),
+      action: ms[0]!.run?.gate !== undefined ? { kind: 'open_gate', label: 'Open the gate' } : { kind: 'open_run', label: 'Open the run' },
+    };
+  };
   for (const m of left) {
     const gap = gapByRun.get(m.runId);
+    // A held run whose own denial IS the missing judge joins the other runs missing the same seats;
+    // a run held by its own failure keeps its item, the seat gap named in it.
+    if (gap !== undefined && JUDGE_DENIAL.test(denialOf(m.view, m.run))) {
+      const key = seatKey(gap);
+      join(key, m, seatGroup(key, gap));
+      continue;
+    }
     join(`run:${m.runId}`, m, (ms) => {
       const base = runItem(ms[0]!, input.clis);
       if (gap === undefined) return base;
@@ -371,34 +412,20 @@ export function buildNeeds(input: NeedsInput): Needs {
   }
   const memberIds = new Set(members.map((m) => m.runId));
   for (const gap of input.gaps) {
-    if (memberIds.has(gap.run.runId)) continue;
-    const v = byId.get(gap.run.runId);
-    if (v !== undefined && sup.has(v.session.id)) continue;
-    const seats = gap.blockedBy.map((c) => c.cli).sort().join('+');
-    const key = `seat:${gap.creator ?? ''}:${seats}`;
-    join(key, { runId: gap.run.runId, view: v, run: gap.run, severity: 'red', waitedMs: msOf(gap.run.gate?.receivedAt ?? null) }, (ms) => {
-      const who = gap.blockedBy.map((c) => `${c.cli} ${c.state === 'benched' ? 'benched' : c.state.replace('_', ' ')}`);
-      return {
-        id: ms.length === 1 ? `judge:${ms[0]!.runId}` : key,
-        source: 'run',
-        kind: 'prevents',
-        title: ms.length === 1 ? `run ${short(ms[0]!.runId)}: no distinct judge` : `${ms.length} runs: no distinct judge`,
-        reason: `no seat in the pool can judge ${gap.creator ?? 'the creator'}'s work${who.length > 0 ? ` (${who.join(', ')})` : ''}`,
-        remedy: 'Sign in another CLI in the run’s pool, or reassign the unit to a seat whose work another seat can judge.',
-        target: gateTarget(ms[0]!.run, ms[0]!.runId),
-        action: ms[0]!.run?.gate !== undefined ? { kind: 'open_gate', label: 'Open the gate' } : { kind: 'open_run', label: 'Open the run' },
-      };
-    });
+    if (memberIds.has(gap.run.runId) || !eligible(gap.run.runId)) continue;
+    const key = seatKey(gap);
+    join(key, { runId: gap.run.runId, view: byId.get(gap.run.runId), run: gap.run, severity: 'red', waitedMs: msOf(gap.run.gate?.receivedAt ?? null) }, seatGroup(key, gap));
   }
   // No seat can take any work at all: that is its own item, holding every run.
   const anyWorker = input.clis.some((c) => c.workEligible && c.state !== 'signed_out' && c.state !== 'benched');
   if (input.clis.length > 0 && !anyWorker) {
-    const live = input.runs.filter((r) => !sup.has(r.runId)).map((r) => ({ runId: r.runId, view: byId.get(r.runId), run: r, severity: 'red' as const, waitedMs: null }));
+    const live = input.runs.filter((r) => eligible(r.runId)).map((r) => ({ runId: r.runId, view: byId.get(r.runId), run: r, severity: 'red' as const, waitedMs: msOf(r.gate?.receivedAt ?? null) }));
     groups.set('cli:none', {
       key: 'cli:none',
       members: live,
       build: () => ({
         id: 'cli:none',
+        severity: 'red',
         source: 'cli',
         kind: 'prevents',
         title: 'No seat can take work',
@@ -436,13 +463,16 @@ export function buildNeeds(input: NeedsInput): Needs {
     };
     if (row.key === 'load') {
       for (const m of heldMembers) if (m.run!.gate?.kind === 'escalation' && m.view !== undefined && !isAskRun(m.view)) add(m);
-      for (const r of input.runs) if ((r.liveness === 'working' || r.liveness === 'quiet' || r.liveness === 'stalled') && !sup.has(r.runId)) add({ runId: r.runId, view: byId.get(r.runId), run: r, severity: 'yellow', waitedMs: null });
+      for (const r of input.runs) if ((r.liveness === 'working' || r.liveness === 'quiet' || r.liveness === 'stalled') && eligible(r.runId)) add({ runId: r.runId, view: byId.get(r.runId), run: r, severity: 'yellow', waitedMs: null });
     } else {
       for (const m of heldMembers) if (claimed.has(`${row.key}\u0000${m.runId}`)) add(m);
       if (input.infraHoldsLive(row.key)) {
-        for (const r of input.runs) if ((r.liveness === 'working' || r.liveness === 'quiet' || r.liveness === 'stalled') && !sup.has(r.runId)) add({ runId: r.runId, view: byId.get(r.runId), run: r, severity: 'red', waitedMs: null });
+        for (const r of input.runs) if ((r.liveness === 'working' || r.liveness === 'quiet' || r.liveness === 'stalled') && eligible(r.runId)) add({ runId: r.runId, view: byId.get(r.runId), run: r, severity: 'red', waitedMs: null });
       }
     }
+    // A slowdown that slows no work is not stuck work (a down component still prevents new runs).
+    // The one exception: a run list that could not be read, so nothing proves there is no work.
+    if (kind === 'slows' && held.length === 0 && !(row.key === 'daemon' && row.state === 'degraded')) continue;
     const down = row.state === 'down';
     finish(
       { members: held },
@@ -466,7 +496,7 @@ export function buildNeeds(input: NeedsInput): Needs {
       b.blocks - a.blocks ||
       KIND_RANK[a.kind ?? 'prevents'] - KIND_RANK[b.kind ?? 'prevents'] ||
       // A component also holds every NEW run: on a tie it outranks one run's own cause.
-      (a.source === 'infra' ? 0 : 1) - (b.source === 'infra' ? 0 : 1) ||
+      (a.source !== 'run' ? 0 : 1) - (b.source !== 'run' ? 0 : 1) ||
       (msOf(a.waitedSince ?? null) ?? Infinity) - (msOf(b.waitedSince ?? null) ?? Infinity) ||
       (b.unitsLeft ?? 0) - (a.unitsLeft ?? 0) ||
       a.id.localeCompare(b.id),
@@ -550,7 +580,7 @@ export function foldRunCost(events: ReadonlyArray<{ type?: unknown; [k: string]:
 /** Per-run cost, read once per terminal run (it cannot change) and briefly for an open one. The
  *  snapshot never waits past its bound: a run not read yet reads unknown, and the next read has it. */
 export class RunCostCache {
-  private readonly done = new Map<string, { at: number; cost: RunCost; final: boolean }>();
+  private readonly done = new Map<string, { at: number; cost: RunCost; final: boolean; stamp: string }>();
   private inFlight: Promise<void> | null = null;
 
   constructor(private readonly ttlMs = 60_000, private readonly now: () => number = Date.now) {}
@@ -559,20 +589,21 @@ export class RunCostCache {
     return this.done.get(runId)?.cost;
   }
 
-  /** Read every listed run not cached (or stale); resolves when all are read. */
-  fill(runs: ReadonlyArray<{ id: string; final: boolean }>, read: (id: string) => Promise<ReadonlyArray<{ type?: unknown; [k: string]: unknown }> | null>): Promise<void> {
+  /** Read every listed run not cached, stale, or whose `stamp` moved (a failed run resumed and ended
+   *  again has a new end: its cost is read again); resolves when all are read. */
+  fill(runs: ReadonlyArray<{ id: string; final: boolean; stamp?: string }>, read: (id: string) => Promise<ReadonlyArray<{ type?: unknown; [k: string]: unknown }> | null>): Promise<void> {
     if (this.inFlight !== null) return this.inFlight;
     const t = this.now();
     const todo = runs.filter((r) => {
       const c = this.done.get(r.id);
-      return c === undefined || (!c.final && t - c.at > this.ttlMs);
+      return c === undefined || c.stamp !== (r.stamp ?? '') || (!c.final && t - c.at > this.ttlMs);
     });
     if (todo.length === 0) return Promise.resolve();
     this.inFlight = (async () => {
       for (const r of todo) {
         try {
           const events = await read(r.id);
-          if (events !== null) this.done.set(r.id, { at: this.now(), cost: foldRunCost(events), final: r.final });
+          if (events !== null) this.done.set(r.id, { at: this.now(), cost: foldRunCost(events), final: r.final, stamp: r.stamp ?? '' });
         } catch {
           // unreadable: stays unknown, retried next read
         }

@@ -156,6 +156,14 @@ describe('unresolved work and POST /runs/:id/resolve', () => {
     expect((await system()).unresolved).toEqual([]);
   });
 
+  it('two resolves of one parked run are serialized by the run’s decision lock: it is stopped once', async () => {
+    views.push({ session: { ...SESSION, id: 'race', workflow_id: 'bug', problem: 'race it', status: 'awaiting_human', created_at: nowS() - 7200 }, units: [] });
+    const [a, b] = await Promise.all([resolve('race', { action: 'archive', reason: 'one' }), resolve('race', { action: 'archive', reason: 'two' })]);
+    expect([a.statusCode, b.statusCode]).toEqual([200, 200]);
+    expect(cancelled.filter((id) => id === 'race')).toEqual(['race']);
+    expect([a.json().cancelled, b.json().cancelled]).toEqual([true, false]);
+  });
+
   it('a running job is never resolved', async () => {
     const res = await resolve('live', { action: 'archive', reason: 'done with it' });
     expect(res.statusCode).toBe(409);

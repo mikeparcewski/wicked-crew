@@ -8328,7 +8328,9 @@ export interface SystemSnapshot {
   budgetMs: number;
   /** How long assembling it took, in ms. */
   tookMs: number;
-  /** `red` iff some attention item is `red`, else `yellow` iff any item, else `green`. */
+  /** `red` iff some attention item is `red`, else `yellow` iff any item, else `green`. (api-types
+   *  0.140.0, `capabilities.attentionRanked`) `yellow` also when `unresolved[]` is not empty: `green`
+   *  only when both are empty. */
   level: SystemLevel;
   /** Every item that needs a look, worst first (red before yellow, then by how many runs it
    *  blocks, then infra › cli › run › governance). Empty when all is clear.
@@ -8339,7 +8341,8 @@ export interface SystemSnapshot {
    *  holds several runs is ONE item naming them in `blockedRunIds`. Superseded runs, answered asks,
    *  failed runs older than 7 days, benches with an alternative and pending proposals are not in it
    *  (the first three move to `unresolved[]`; proposals are `toReview`). Sorted by runs held, then
-   *  prevents before slows, then the longest wait, then the units left. Its length is the number. */
+   *  prevents before slows, then a component (infra, or no seat at all) before one run's own cause,
+   *  then the longest wait, then the units left. Its length is the number. */
   attention: SystemAttentionItem[];
   /**
    * (api-types 0.140.0) Work nobody has resolved: failed runs not retried and not archived,

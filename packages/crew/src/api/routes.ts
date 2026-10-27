@@ -3070,34 +3070,39 @@ export function registerRoutes(
       const parsed = ResolveSchema.safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
       const b = parsed.data;
-      const views = await adapter.sessionsDetail();
-      const run = views.find((v) => v.session.id === id);
-      if (run === undefined) return reply.code(404).send({ error: 'Run not found' });
-      if (b.action === 'superseded') {
-        if (b.by === id) return reply.code(400).send({ error: '`by` must name another run' });
-        if (!views.some((v) => v.session.id === b.by)) return reply.code(400).send({ error: `\`by\` names an unknown run: ${b.by}` });
-      }
-      const status = run.session.status;
-      if (status === 'planning' || status === 'distributing' || status === 'executing') {
-        return reply.code(409).send({ error: `run ${id} is ${status}: a running job cannot be resolved; stop it first` });
-      }
       const note = b.action === 'archive' ? `resolved: ${b.reason}` : `superseded by ${b.by}${b.reason !== undefined && b.reason !== '' ? `: ${b.reason}` : ''}`;
-      let cancelled = false;
-      try {
-        if (status === 'awaiting_human') {
-          await adapter.cancelRun(id);
-          cancelled = true;
+      // Inside the run's decision lock (the gate path's): the status read, the stop and the archive
+      // are one step, so a gate answered at the same moment can never be stopped by a resolve. The
+      // status is read again inside the lock, right before the stop.
+      const outcome = await decideExclusively(id, async (): Promise<{ code: number; body: unknown }> => {
+        const views = await adapter.sessionsDetail();
+        const run = views.find((v) => v.session.id === id);
+        if (run === undefined) return { code: 404, body: { error: 'Run not found' } };
+        if (b.action === 'superseded') {
+          if (b.by === id) return { code: 400, body: { error: '`by` must name another run' } };
+          if (!views.some((v) => v.session.id === b.by)) return { code: 400, body: { error: `\`by\` names an unknown run: ${b.by}` } };
         }
-        const found = await adapter.archiveRun(id, true, note);
-        if (!found) return reply.code(404).send({ error: 'Run not found' });
-      } catch (e: unknown) {
-        const msg = e instanceof Error ? e.message : String(e);
-        if (/only a terminal run/i.test(msg)) return reply.code(409).send({ error: msg });
-        return reply.code(500).send({ error: msg });
-      }
-      audit.record('run.resolved', actorOf(req), { runId: id, detail: { action: b.action, note, cancelled, ...(b.action === 'superseded' ? { by: b.by } : {}) } });
-      const out: ResolveRunResponse = { runId: id, action: b.action, archived: true, cancelled, note };
-      return out;
+        const status = run.session.status;
+        if (status !== 'awaiting_human' && status !== 'failed' && status !== 'completed' && status !== 'cancelled') {
+          return { code: 409, body: { error: `run ${id} is ${status}: a running job cannot be resolved; stop it first` } };
+        }
+        let cancelled = false;
+        try {
+          if (status === 'awaiting_human') {
+            await adapter.cancelRun(id);
+            cancelled = true;
+          }
+          const found = await adapter.archiveRun(id, true, note);
+          if (!found) return { code: 404, body: { error: 'Run not found' } };
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          return { code: /only a terminal run/i.test(msg) ? 409 : 500, body: { error: msg } };
+        }
+        audit.record('run.resolved', actorOf(req), { runId: id, detail: { action: b.action, note, cancelled, ...(b.action === 'superseded' ? { by: b.by } : {}) } });
+        const out: ResolveRunResponse = { runId: id, action: b.action, archived: true, cancelled, note };
+        return { code: 200, body: out };
+      });
+      return reply.code(outcome.code).send(outcome.body);
     },
   );
 
@@ -8078,7 +8083,7 @@ export function registerRoutes(
         if (toReviewCache !== null && Date.now() - toReviewCache.at < SYSTEM_STATS_TTL_MS) return toReviewCache.value;
         const got = (await estateTool('proposal.list', { state: 'pending' })) as { proposals?: unknown[] } | null;
         const value = Array.isArray(got?.proposals) ? got.proposals.length : null;
-        toReviewCache = { at: Date.now(), value };
+        if (value !== null) toReviewCache = { at: Date.now(), value }; // a failed read is never kept
         return value;
       }, PROBE_TIMEOUT_MS);
       const gatesByYouP = settleWithin(async () => {
@@ -8296,7 +8301,10 @@ export function registerRoutes(
         await settleWithin(
           () =>
             runCosts.fill(
-              first.unresolved.map((u) => ({ id: u.runId, final: ['failed', 'completed', 'cancelled'].includes(byId.get(u.runId)?.session.status ?? '') })),
+              first.unresolved.map((u) => {
+                const s = byId.get(u.runId)?.session;
+                return { id: u.runId, final: ['failed', 'completed', 'cancelled'].includes(s?.status ?? ''), stamp: `${s?.status ?? ''}:${s?.ended_at ?? ''}` };
+              }),
               (id) => adapter.runEvents!(id) as Promise<ReadonlyArray<{ type?: unknown; [k: string]: unknown }> | null>,
             ),
           Math.min(left(), 2_000),
@@ -8313,6 +8321,8 @@ export function registerRoutes(
         costOf: (id) => runCosts.get(id),
       });
       const toReview = await toReviewP;
+      // A run list that could not be read never reads green: the daemon row (degraded, "did not list
+      // its runs") is in attention as a slowdown, and the level stays at least yellow.
       return assembleSnapshot({
         startedAt,
         clis,
