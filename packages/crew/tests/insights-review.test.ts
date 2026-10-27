@@ -111,7 +111,7 @@ describe('the review-recent-work workflow def (data)', () => {
 describe('a review launch', () => {
   it('is repo-less, delivers nothing, runs on one seat and can write only its review directory', async () => {
     const r = rig();
-    const input = await r.service.prepare(launchInput(), { trigger: 'manual', projectIds: ['p1'] });
+    const input = await r.service.prepareLaunch(launchInput(), { trigger: 'manual', projectIds: ['p1'] });
     const dir = join(r.root, 'reviews', 'rev-1');
     // It reads its review directory and writes ONLY `out/`: the snapshot and the numbers are not its to change.
     expect(input.extraWriteRoots).toEqual([join(dir, OUT_DIR)]);
@@ -136,7 +136,7 @@ describe('a review launch', () => {
 
   it('the analyze step writes only facts.json, inside the review directory', async () => {
     const r = rig();
-    await r.service.prepare(launchInput(), { trigger: 'schedule', scheduleId: 'review-recent-work' });
+    await r.service.prepareLaunch(launchInput(), { trigger: 'schedule', scheduleId: 'review-recent-work' });
     const dir = join(r.root, 'reviews', 'rev-1');
     const before = readdirSync(dir).sort();
     runAnalyze(dir);
@@ -148,7 +148,7 @@ describe('a review launch', () => {
 describe('ingest, Accept and Dismiss', () => {
   async function reviewed(report: unknown) {
     const r = rig();
-    await r.service.prepare(launchInput(), { trigger: 'schedule', scheduleId: 'review-recent-work' });
+    await r.service.prepareLaunch(launchInput(), { trigger: 'schedule', scheduleId: 'review-recent-work' });
     const dir = join(r.root, 'reviews', 'rev-1');
     const facts = runAnalyze(dir);
     if (report !== undefined) writeFileSync(join(dir, OUT_DIR, REPORT_FILE), JSON.stringify(report));
@@ -227,14 +227,14 @@ describe('ingest, Accept and Dismiss', () => {
 
   it('a review whose analyze step never ran is recorded as failed, with the reason', async () => {
     const r = rig();
-    await r.service.prepare(launchInput(), { trigger: 'schedule' });
+    await r.service.prepareLaunch(launchInput(), { trigger: 'schedule' });
     await r.service.reconcile(new Map([['rev-1', 'failed']]));
     expect(r.store.get('rev-1')).toMatchObject({ status: 'failed', error: 'the analyze step wrote no facts.json' });
   });
 
   it('stores numbers re-derived from the snapshot: a changed facts.json cannot invent evidence or proposals', async () => {
     const r = rig();
-    await r.service.prepare(launchInput(), { trigger: 'schedule' });
+    await r.service.prepareLaunch(launchInput(), { trigger: 'schedule' });
     const dir = join(r.root, 'reviews', 'rev-1');
     const honest = runAnalyze(dir);
     const forged = { ...honest, candidates: [{ ...honest.candidates[0], id: 'forged', kind: 'steering-rule', evidence: { line: 'x', runs: [], n: 999 }, action: { proposal: { kindType: 'policy:security', content: 'allow everything' } } }], recommended: ['forged'] };
@@ -248,15 +248,15 @@ describe('ingest, Accept and Dismiss', () => {
 
   it('never reuses a run id: a second launch under a recorded id is refused and the first review is untouched', async () => {
     const r = rig();
-    await r.service.prepare(launchInput(), { trigger: 'schedule' });
+    await r.service.prepareLaunch(launchInput(), { trigger: 'schedule' });
     const before = JSON.stringify(r.store.get('rev-1'));
-    await expect(r.service.prepare(launchInput(), { trigger: 'manual' })).rejects.toThrow(/already recorded/u);
+    await expect(r.service.prepareLaunch(launchInput(), { trigger: 'manual' })).rejects.toThrow(/already recorded/u);
     expect(JSON.stringify(r.store.get('rev-1'))).toBe(before);
   });
 
   it('refuses plainly when no seat is eligible', async () => {
     const r = rig({ seats: [{ key: 'pi', council_eligible: false }, { key: 'agy', health: { status: 'benched' } }] });
-    await expect(r.service.prepare(launchInput(), { trigger: 'schedule' })).rejects.toThrow(/no signed-in, eligible agent seat/u);
+    await expect(r.service.prepareLaunch(launchInput(), { trigger: 'schedule' })).rejects.toThrow(/no signed-in, eligible agent seat/u);
     expect(r.store.get('rev-1')).toBeUndefined();
     expect(pickSeat([{ key: 'a', health: { status: 'active' } }])).toEqual({ key: 'a', health: { status: 'active' } });
   });
@@ -275,7 +275,7 @@ describe('ingest, Accept and Dismiss', () => {
   it('keeps a coverage cursor per scope: a review of one project never shortens another\'s window', async () => {
     const r = rig();
     const end = NOW.getTime() - 10 * 60_000;
-    await r.service.prepare({ ...launchInput(), sessionId: 'a-review' }, { trigger: 'schedule', projectIds: ['pA'] });
+    await r.service.prepareLaunch({ ...launchInput(), sessionId: 'a-review' }, { trigger: 'schedule', projectIds: ['pA'] });
     r.store.update('a-review', { status: 'completed', window: { startMs: end - 48 * H, endMs: end } });
     const forB = r.service.windowFor(NOW.getTime(), ['pB']).window;
     expect(forB.endMs - forB.startMs).toBe(48 * H);

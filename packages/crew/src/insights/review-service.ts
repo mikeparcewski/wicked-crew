@@ -1,7 +1,7 @@
 /**
  * The run review around its workflow (DES-RUNS-REVIEW-001 §3, §5, §6):
  *
- *  - {@link ReviewService.prepare} — every launch of `review-recent-work` (a schedule, Run it now, or
+ *  - {@link ReviewService.prepareLaunch} — every launch of `review-recent-work` (a schedule, Run it now, or
  *    `POST /runs`) goes through it: it reads the run store, writes `<reviews dir>/<run>/snapshot.json` and the
  *    handoff, and makes the launch repo-less, delivering nothing, with that directory as its ONLY write root and
  *    `report.json` as its deliverable, on ONE seat.
@@ -136,7 +136,7 @@ export class ReviewService {
    * Make a launch a review launch. Mutates and returns `input`: repo-less, no deliver, one seat, the run directory
    * as the only write root, `report.json` as the only deliverable. Records the review as running.
    */
-  async prepare(input: LaunchRunInput, opts: PrepareOptions): Promise<LaunchRunInput> {
+  async prepareLaunch(input: LaunchRunInput, opts: PrepareOptions): Promise<LaunchRunInput> {
     const now = this.now();
     const runId = input.sessionId;
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(runId) || runId.includes('..')) throw new Error(`a review run id must be one plain path segment: ${runId}`);

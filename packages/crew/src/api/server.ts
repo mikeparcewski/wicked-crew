@@ -1335,7 +1335,7 @@ export async function createServer(
     };
     const review = row.workflow === REVIEW_WORKFLOW;
     if (review) {
-      await reviewService.prepare(input, { trigger, scheduleId: row.id, projectIds: row.projectIds });
+      await reviewService.prepareLaunch(input, { trigger, scheduleId: row.id, projectIds: row.projectIds });
     } else {
       input.clisJson = JSON.stringify(await adapter.seatsForWorkflow(row.workflow));
       if (row.repoRef !== null) input.repoRef = row.repoRef;
@@ -2351,7 +2351,7 @@ export async function createServer(
       stateHome: stateHomeWatch,
       // DES-RUNS-REVIEW-001 §3: a hand launch of the review is prepared like a scheduled one (its coverage = the schedule's).
       reviewLaunch: async (input: LaunchRunInput) => {
-        await reviewService.prepare(input, { trigger: 'manual', scheduleId: null, projectIds: reviewProjects() });
+        await reviewService.prepareLaunch(input, { trigger: 'manual', scheduleId: null, projectIds: reviewProjects() });
       },
       reviewLaunchRefused: (runId: string, reason: string) => reviewService.launchRefused(runId, reason),
       // Routes that say something to the thread (a refused chat seat, F-2R2-007) emit through the
