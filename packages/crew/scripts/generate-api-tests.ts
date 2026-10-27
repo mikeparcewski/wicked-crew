@@ -28,7 +28,8 @@
  */
 
 import { readFileSync, writeFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import type { EndpointEntry, EndpointManifest } from '../src/api/endpoint-manifest.js';
 
@@ -102,11 +103,14 @@ const SAMPLES: Sample[] = [
 
 const BODY_METHODS = new Set(['POST', 'PUT', 'PATCH']);
 
-const manifestPath = fileURLToPath(new URL('../endpoint-manifest.json', import.meta.url));
-const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as EndpointManifest;
-const byKey = new Map(manifest.endpoints.map((e) => [`${e.method} ${e.path}`, e]));
+/** The committed manifest this suite is derived from. */
+export const ENDPOINT_MANIFEST_PATH = fileURLToPath(new URL('../endpoint-manifest.json', import.meta.url));
+/** The committed generated suite. `tests/api-sample-generated-fresh.test.ts` fails when it is stale. */
+export const API_SAMPLE_SUITE_PATH = fileURLToPath(
+  new URL('../tests/generated/api-sample.generated.test.ts', import.meta.url),
+);
 
-function entryOf(s: Sample): EndpointEntry {
+function entryOf(byKey: ReadonlyMap<string, EndpointEntry>, s: Sample): EndpointEntry {
   const entry = byKey.get(`${s.method} ${s.path}`);
   if (entry === undefined) {
     // A sampled endpoint that left the manifest is a REAL finding — the sample table is stale
@@ -138,64 +142,71 @@ function injectCall(method: string, url: string, body: unknown | undefined): str
   return `await app.inject({ method: ${q(method)}, url: ${q(url)}${payload} })`;
 }
 
-const blocks: string[] = [];
-for (const s of SAMPLES) {
-  const entry = entryOf(s);
-  const cases: string[] = [];
+/**
+ * The suite's source for `manifest`, exactly as the script writes it. Pure, so the freshness test
+ * compares it with the committed file (crew#1169: a stale copy made every governed delivery's
+ * codegen re-sync change the verified tree, and the deliver step refused once per run).
+ */
+export function renderApiSampleSuite(manifest: EndpointManifest): string {
+  const byKey = new Map(manifest.endpoints.map((e) => [`${e.method} ${e.path}`, e]));
+  const blocks: string[] = [];
+  for (const s of SAMPLES) {
+    const entry = entryOf(byKey, s);
+    const cases: string[] = [];
 
-  if (s.positive !== undefined) {
-    const url = s.positive.params !== undefined ? substituted(s.path, s.positive.params) : s.path;
-    const codes = entry.statusCodes;
-    const tie =
-      codes.length > 0
-        ? `\n      // The manifest declares this route's codes — the positive must be one of them.\n      expect(${JSON.stringify(codes)}).toContain(res.statusCode);`
-        : '';
-    cases.push(`    it('${s.method} ${s.path} — positive (${s.positive.status})', async () => {
+    if (s.positive !== undefined) {
+      const url = s.positive.params !== undefined ? substituted(s.path, s.positive.params) : s.path;
+      const codes = entry.statusCodes;
+      const tie =
+        codes.length > 0
+          ? `\n      // The manifest declares this route's codes — the positive must be one of them.\n      expect(${JSON.stringify(codes)}).toContain(res.statusCode);`
+          : '';
+      cases.push(`    it('${s.method} ${s.path} — positive (${s.positive.status})', async () => {
       const res = ${injectCall(s.method, url, s.positive.body)};
       expect(res.statusCode).toBe(${s.positive.status});${tie}
     });`);
-  }
+    }
 
-  if (entry.statusCodes.includes(400) && BODY_METHODS.has(s.method)) {
-    cases.push(`    it('${s.method} ${s.path} — 400 on a body the schema refuses', async () => {
+    if (entry.statusCodes.includes(400) && BODY_METHODS.has(s.method)) {
+      cases.push(`    it('${s.method} ${s.path} — 400 on a body the schema refuses', async () => {
       const res = ${injectCall(s.method, s.positive?.params !== undefined ? substituted(s.path, s.positive.params) : s.path, { __unexpected_field__: true })};
       expect(res.statusCode).toBe(400);
     });`);
-  }
+    }
 
-  if (entry.statusCodes.includes(404)) {
-    if (s.path.includes(':')) {
-      cases.push(`    it('${s.method} ${s.path} — 404 for a resource that exists nowhere', async () => {
+    if (entry.statusCodes.includes(404)) {
+      if (s.path.includes(':')) {
+        cases.push(`    it('${s.method} ${s.path} — 404 for a resource that exists nowhere', async () => {
       const res = ${injectCall(s.method, notFoundPath(s.path), BODY_METHODS.has(s.method) ? s.validBody : undefined)};
       expect(res.statusCode).toBe(404);
     });`);
-    } else {
-      // Declared codes are never silently dropped: a 404 with no path param comes from the
-      // BODY naming a missing resource (e.g. POST /runs with an unknown projectId) — state a
-      // fixture hint has to provide.
-      cases.push(
-        `    it.todo('${s.method} ${s.path} — 404 is declared but body-driven (add a fixture hint to SAMPLES)');`,
-      );
+      } else {
+        // Declared codes are never silently dropped: a 404 with no path param comes from the
+        // BODY naming a missing resource (e.g. POST /runs with an unknown projectId) — state a
+        // fixture hint has to provide.
+        cases.push(
+          `    it.todo('${s.method} ${s.path} — 404 is declared but body-driven (add a fixture hint to SAMPLES)');`,
+        );
+      }
     }
-  }
 
-  if (entry.statusCodes.includes(409)) {
-    if (s.conflict !== undefined) {
-      cases.push(`    it('${s.method} ${s.path} — 409 in the conflicting state', async () => {
+    if (entry.statusCodes.includes(409)) {
+      if (s.conflict !== undefined) {
+        cases.push(`    it('${s.method} ${s.path} — 409 in the conflicting state', async () => {
       const res = ${injectCall(s.method, substituted(s.path, s.conflict.params), s.validBody)};
       expect(res.statusCode).toBe(409);
     });`);
-    } else {
-      cases.push(
-        `    it.todo('${s.method} ${s.path} — 409 is declared but needs state no fixture provides yet (add a conflict hint to SAMPLES)');`,
-      );
+      } else {
+        cases.push(
+          `    it.todo('${s.method} ${s.path} — 409 is declared but needs state no fixture provides yet (add a conflict hint to SAMPLES)');`,
+        );
+      }
     }
+
+    blocks.push(`  describe('${s.method} ${s.path}', () => {\n${cases.join('\n\n')}\n  });`);
   }
 
-  blocks.push(`  describe('${s.method} ${s.path}', () => {\n${cases.join('\n\n')}\n  });`);
-}
-
-const out = `/**
+  return `/**
  * GENERATED by scripts/generate-api-tests.ts from endpoint-manifest.json — DO NOT EDIT.
  * Regenerate: npm run generate:api-tests -w packages/crew
  *
@@ -223,7 +234,16 @@ describe('generated API suite (endpoint-manifest sample)', () => {
 ${blocks.join('\n\n')}
 });
 `;
+}
 
-const outPath = fileURLToPath(new URL('../tests/generated/api-sample.generated.test.ts', import.meta.url));
-writeFileSync(outPath, out, 'utf8');
-console.log(`wrote ${outPath} (${SAMPLES.length} sampled endpoints)`);
+/** The committed manifest, parsed. */
+export function committedManifest(): EndpointManifest {
+  return JSON.parse(readFileSync(ENDPOINT_MANIFEST_PATH, 'utf8')) as EndpointManifest;
+}
+
+// Write only when run as the script (`npm run generate:api-tests`), never on import by a test.
+const invokedAs = process.argv[1];
+if (invokedAs !== undefined && import.meta.url === pathToFileURL(resolve(invokedAs)).href) {
+  writeFileSync(API_SAMPLE_SUITE_PATH, renderApiSampleSuite(committedManifest()), 'utf8');
+  console.log(`wrote ${API_SAMPLE_SUITE_PATH} (${SAMPLES.length} sampled endpoints)`);
+}

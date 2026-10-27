@@ -10,6 +10,16 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Every governed delivery to wicked-crew was refused once (crew#1169).** The committed
+  `packages/crew/tests/generated/api-sample.generated.test.ts` still named the manifest of #1018
+  (221 endpoints, api-types 0.120.0). The deliver step regenerates it before it pushes, saw the
+  verified tree change, and refused, so each run paid a full re-verify (about an hour on the rig).
+  The file is regenerated, and `tests/api-sample-generated-fresh.test.ts` now fails when it no
+  longer matches what `npm run generate:api-tests` writes (the generator's render is a pure,
+  importable function).
+
 ## [0.16.5] — 2026-10-27
 
 A patch release for the needs-you, analysis, review and evals work: one "needs you" list ranked by impact, with unresolved work and its cost keeping the system from going green and `POST /runs/:id/resolve` (#1159), in plain words (#1163); analysis chats on the engine's read-only `analyze` workflow (#1160, crew#1157); the `review-recent-work` workflow with a durable workflow scheduler and the insights API (#1161); and default evals that score the system's own judgments (#1162), run on a schedule as the `run-evals` workflow (#1167). `wicked-crew-api-types` 0.143.0 is on npm. Runs on wicked-core-ts 0.15.13 (core#1135, core#1136). Bundles wicked-studio 0.12.3 (unchanged).
