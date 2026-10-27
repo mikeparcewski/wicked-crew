@@ -1048,8 +1048,10 @@ export interface RegisteredRoutes {
 }
 
 export interface RuntimeDeps {
-  /** DES-RUNS-REVIEW-001: prepare a `review-recent-work` launch (snapshot, write root, one seat); absent = launched as-is. */
-  reviewLaunch?: (input: LaunchRunInput, projectId: string | undefined) => Promise<void>;
+  /** DES-RUNS-REVIEW-001: prepare a `review-recent-work` launch (snapshot, write root, one seat); absent = launched as-is.
+   *  Its coverage is the review schedule's projects, wherever it was launched from (the run is still filed under the
+   *  caller's project). */
+  reviewLaunch?: (input: LaunchRunInput) => Promise<void>;
   /** The engine refused a prepared review launch: the review is recorded as never run. */
   reviewLaunchRefused?: (runId: string, reason: string) => void;
   /** DC-S4a decision capture: the ledger (`<state home>/decisions`), absent = capture off. */
@@ -2834,7 +2836,7 @@ export function registerRoutes(
     const isReview = b.workflow === REVIEW_WORKFLOW && runtime.reviewLaunch !== undefined;
     if (isReview) {
       try {
-        await (runtime.reviewLaunch as NonNullable<RuntimeDeps['reviewLaunch']>)(input, b.projectId);
+        await (runtime.reviewLaunch as NonNullable<RuntimeDeps['reviewLaunch']>)(input);
       } catch (err) {
         return reply.code(409).send({ error: `the review could not be prepared: ${message(err)}` });
       }

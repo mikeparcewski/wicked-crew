@@ -79,13 +79,7 @@ export class WorkflowScheduler {
     try {
       await this.exclusive(async () => {
         const status = await this.statusMap();
-        for (const hook of this.deps.onTick ?? []) {
-          try {
-            await hook(status);
-          } catch (err) {
-            this.deps.log(`[schedules] tick hook failed: ${err instanceof Error ? err.message : String(err)}`);
-          }
-        }
+        await this.tick(status);
         this.reconcile(status);
         await this.launchDue(status);
       });
@@ -93,6 +87,16 @@ export class WorkflowScheduler {
       this.deps.log(`[schedules] sweep failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       this.sweeping = false;
+    }
+  }
+
+  private async tick(status: ReadonlyMap<string, string>): Promise<void> {
+    for (const hook of this.deps.onTick ?? []) {
+      try {
+        await hook(status);
+      } catch (err) {
+        this.deps.log(`[schedules] tick hook failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
   }
 
@@ -143,9 +147,14 @@ export class WorkflowScheduler {
   /** "Run it now": the same guards as a sweep, minus "is it due". Resolves to the run id. */
   async runNow(id: string): Promise<string> {
     return this.exclusive(async () => {
-      const row = this.deps.store.get(id);
-      if (row === undefined) throw new Error(`no schedule ${id}`);
-      const why = this.blocker(row, await this.statusMap());
+      if (this.deps.store.get(id) === undefined) throw new Error(`no schedule ${id}`);
+      const status = await this.statusMap();
+      // What a sweep would fold first (agy r1): a review that ended since the last tick is ingested, so this run's
+      // window starts where that one ended rather than re-reviewing it.
+      await this.tick(status);
+      this.reconcile(status);
+      const row = this.deps.store.get(id) as WorkflowSchedule;
+      const why = this.blocker(row, status);
       if (why !== null) throw new ScheduleBusyError(`not started: ${why}`);
       return this.launchOne(row, 'manual');
     });

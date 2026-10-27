@@ -207,6 +207,12 @@ describe('the scheduler', () => {
     expect(r.store.get('nightly')?.nextDueAt).toBe(new Date(T0.getTime() + 49 * H).toISOString());
     await expect(r.scheduler.runNow('nightly')).rejects.toThrow(/last run is still going/u);
     expect(r.launches).toHaveLength(1);
+    // Its run ends: Run it now folds it first (the tick hooks run, the outcome is recorded), then launches.
+    r.runs[runId] = 'completed';
+    const ticksBefore = r.ticks.length;
+    await r.scheduler.runNow('nightly');
+    expect(r.ticks.length).toBe(ticksBefore + 1);
+    expect(r.launches).toHaveLength(2);
   });
 });
 
