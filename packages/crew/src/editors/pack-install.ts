@@ -9,8 +9,10 @@
  *     list (501 `pack_ships_skills_or_blocks`), since their own "Add these" step (§3.2) is not built;
  *  3. the **conformance run**, done by crew itself: garden's `scripts/editor/conformance.py --pack
  *     <root> --host-url <this daemon>` drives studio's conformance host page (served by this daemon)
- *     in headless Chromium against each editor. A failed case, no browser or no runner is a 422 with
- *     the report — an unverified editor is never installed. Only crew's run counts (§12.1, review S13);
+ *     in headless Chromium against each editor. A host with no browser runtime gets crew's own
+ *     (`conformance-runtime.ts`: a private venv with Playwright, made once, B8). A failed case, a
+ *     browser that cannot be provisioned or no runner is a 422 with the report — an unverified
+ *     editor is never installed. Only crew's run counts (§12.1, review S13);
  *     an author's own run is not consulted;
  *  4. the registry reads every editor back from disk at its pinned hash and records it.
  * Nothing is written into the pack. The registry file is `daemon-editors.json`.
@@ -22,6 +24,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 import type { EditorConformanceSummary, InstallEditorRefusal, InstallEditorResponse, PackCheckResult } from '../core/types.js';
 import { execCapped } from '../core/exec.js';
 import { EditorInstallConflict, EditorRegistry, PackEditorSchema, editorEntryDigest, type InstalledPack } from './registry.js';
+import { needsBrowserRuntime, type ConformanceProvisioner } from './conformance-runtime.js';
 
 export type PackCheckRunner = (packRoot: string) => Promise<PackCheckResult>;
 
@@ -171,7 +174,7 @@ export function requiredCases(entry: Record<string, unknown>): string[] {
 export function gardenConformance(
   gardenRoot: string | null,
   hostUrl: () => string | null,
-  deps: { env?: NodeJS.ProcessEnv; exec?: typeof execCapped } = {},
+  deps: { env?: NodeJS.ProcessEnv; exec?: typeof execCapped; provision?: ConformanceProvisioner } = {},
 ): ConformanceRunner {
   const failed = (error: string): EditorConformanceSummary => ({ ok: false, at: new Date().toISOString(), editors: [], error });
   const exec = deps.exec ?? execCapped;
@@ -186,47 +189,61 @@ export function gardenConformance(
     // read differently, e.g. non-ASCII digits, cannot make the two disagree — codex r2).
     const loadS = conformanceLoadSeconds(deps.env);
     const childEnv: NodeJS.ProcessEnv = { ...(deps.env ?? process.env), [CONFORMANCE_TIMEOUT_ENV]: String(loadS) };
-    let stdout = '';
-    for (const bin of ['python3', 'python']) {
-      try {
-        stdout = (await exec(bin, args, { timeout: conformanceCapMs(editors, loadS), windowsHide: true, env: childEnv })).stdout;
-        break;
-      } catch (err) {
-        const e = err as NodeJS.ErrnoException & { stdout?: string };
-        if (e.code === 'ENOENT') continue;
-        // A failing run exits 1 (a case failed) or 3 (no browser) with the JSON report on stdout.
-        if (typeof e.stdout === 'string' && e.stdout.trim() !== '') {
-          stdout = e.stdout;
+    const runWith = async (bins: readonly string[]): Promise<EditorConformanceSummary> => {
+      let stdout = '';
+      for (const bin of bins) {
+        try {
+          stdout = (await exec(bin, args, { timeout: conformanceCapMs(editors, loadS), windowsHide: true, env: childEnv })).stdout;
           break;
+        } catch (err) {
+          const e = err as NodeJS.ErrnoException & { stdout?: string };
+          if (e.code === 'ENOENT') continue;
+          // A failing run exits 1 (a case failed) or 3 (no browser) with the JSON report on stdout.
+          if (typeof e.stdout === 'string' && e.stdout.trim() !== '') {
+            stdout = e.stdout;
+            break;
+          }
+          return failed(`the conformance run did not finish: ${e.message}`);
         }
-        return failed(`the conformance run did not finish: ${e.message}`);
       }
-    }
-    if (stdout === '') return failed('no python interpreter found (python3 / python)');
-    try {
-      const raw = JSON.parse(stdout) as { ok?: unknown; error?: unknown; editors?: unknown };
-      const editors = Array.isArray(raw.editors)
-        ? raw.editors.flatMap((e) => {
-            if (typeof e !== 'object' || e === null) return [];
-            const r = e as { id?: unknown; version?: unknown; sha256?: unknown; ok?: unknown; cases?: unknown; gaps?: unknown };
-            const cases: Record<string, { ok: boolean }> = {};
-            if (typeof r.cases === 'object' && r.cases !== null) {
-              for (const [k, v] of Object.entries(r.cases)) cases[k] = { ok: typeof v === 'object' && v !== null && (v as { ok?: unknown }).ok === true };
-            }
-            const gaps = Array.isArray(r.gaps) ? r.gaps.filter((g): g is string => typeof g === 'string') : [];
-            return [{ id: String(r.id), version: typeof r.version === 'string' ? r.version : '', sha256: typeof r.sha256 === 'string' ? r.sha256 : '', ok: r.ok === true, cases, gaps }];
-          })
-        : [];
-      return {
-        ok: raw.ok === true,
-        at: new Date().toISOString(),
-        editors,
-        ...(typeof raw.error === 'string' ? { error: raw.error } : {}),
-      };
-    } catch {
-      return failed('the conformance run printed no readable report');
-    }
+      if (stdout === '') return failed('no python interpreter found (python3 / python)');
+      return parseConformanceReport(stdout) ?? failed('the conformance run printed no readable report');
+    };
+    const first = await runWith(['python3', 'python']);
+    // B8: no browser runtime on this host. Crew provisions its own (a private venv with Playwright and
+    // its Chromium) and runs the cases again under it; a host where it cannot says what to run.
+    if (first.editors.length > 0 || deps.provision === undefined || !needsBrowserRuntime(first.error)) return first;
+    const provisioned = await deps.provision();
+    if (!provisioned.ok) return failed(`${first.error ?? 'no headless browser'} — ${provisioned.error}`);
+    return runWith([provisioned.python]);
   };
+}
+
+/** garden's `--json` report, or `null` when it is not one. */
+function parseConformanceReport(stdout: string): EditorConformanceSummary | null {
+  try {
+    const raw = JSON.parse(stdout) as { ok?: unknown; error?: unknown; editors?: unknown };
+    const editors = Array.isArray(raw.editors)
+      ? raw.editors.flatMap((e) => {
+          if (typeof e !== 'object' || e === null) return [];
+          const r = e as { id?: unknown; version?: unknown; sha256?: unknown; ok?: unknown; cases?: unknown; gaps?: unknown };
+          const cases: Record<string, { ok: boolean }> = {};
+          if (typeof r.cases === 'object' && r.cases !== null) {
+            for (const [k, v] of Object.entries(r.cases)) cases[k] = { ok: typeof v === 'object' && v !== null && (v as { ok?: unknown }).ok === true };
+          }
+          const gaps = Array.isArray(r.gaps) ? r.gaps.filter((g): g is string => typeof g === 'string') : [];
+          return [{ id: String(r.id), version: typeof r.version === 'string' ? r.version : '', sha256: typeof r.sha256 === 'string' ? r.sha256 : '', ok: r.ok === true, cases, gaps }];
+        })
+      : [];
+    return {
+      ok: raw.ok === true,
+      at: new Date().toISOString(),
+      editors,
+      ...(typeof raw.error === 'string' ? { error: raw.error } : {}),
+    };
+  } catch {
+    return null;
+  }
 }
 
 interface ParsedPack {
