@@ -1,6 +1,6 @@
 /**
  * Workflow schedules (DES-RUNS-REVIEW-001 §2): a durable record per scheduled workflow saying how often the daemon
- * runs it. Generic: any workflow by id. The default entry is `review-recent-work` every 48 h.
+ * runs it. Generic: any workflow by id. The default entries are `review-recent-work` and `run-evals`, every 48 h.
  *
  * Same posture as the learn schedules (`src/learn/schedule-store.ts`): one JSON map in the state home
  * (`daemon-schedules.json`, the `daemon-` prefix the state-home fence already classifies;
@@ -17,6 +17,8 @@ export const MAX_EVERY_HOURS = 2160;
 export const HOUR_MS = 3_600_000;
 export const SCHEDULE_ID = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/u;
 export const DEFAULT_REVIEW_SCHEDULE_ID = 'review-recent-work';
+/** The default evals' schedule (DES-DEFAULT-EVALS-001 §7). */
+export const DEFAULT_EVALS_SCHEDULE_ID = 'run-evals';
 export const DEFAULT_REVIEW_EVERY_HOURS = 48;
 
 /** `launching` = the run id is reserved and the engine is being asked (it survives a restart in that window). */
@@ -108,11 +110,14 @@ export class ScheduleStore {
     this.loaded = loaded;
   }
 
-  /** Seed the default "review recent work every 2 days" once, on a store that has never been written. A person
+  /** Seed the defaults ("review recent work" and "run the default evals", every 2 days) once, on a store that has never been written. A person
    *  who deletes it later keeps it deleted. */
   seedDefault(now: Date): void {
     if (this.loaded || this.rows.size > 0) return;
     this.put(DEFAULT_REVIEW_SCHEDULE_ID, { workflow: 'review-recent-work', everyHours: DEFAULT_REVIEW_EVERY_HOURS, enabled: true }, now);
+    // The default evals (DES-DEFAULT-EVALS-001 §7) on the same cadence. They come due at the same moment, and the
+    // sweep launches one due row at a time in (due, id) order, so `review-recent-work` goes first.
+    this.put(DEFAULT_EVALS_SCHEDULE_ID, { workflow: 'run-evals', everyHours: DEFAULT_REVIEW_EVERY_HOURS, enabled: true }, now);
   }
 
   list(): WorkflowSchedule[] {

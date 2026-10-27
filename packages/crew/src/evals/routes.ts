@@ -27,7 +27,7 @@ import { RIG_SEED } from './seed-rig.js';
 import { steeringCasesFrom } from './steering.js';
 import type { DefaultEvalStore } from './store.js';
 import { syntheticSuites } from './synthetic.js';
-import { SUITE_IDS, type EvalCase, type SuiteId } from './types.js';
+import { SUITE_IDS, type DefaultEvalReport, type EvalCase, type SuiteId } from './types.js';
 
 const V = API_PREFIX;
 
@@ -85,6 +85,26 @@ export async function gatherCases(deps: DefaultEvalDeps, opts: { baseline: boole
   return [...baseline.filter((c) => !liveIds.has(c.id)), ...live, ...steering];
 }
 
+/** Run the default evals over this daemon's store and keep the report: the one path the route, the `run-evals`
+ *  workflow's launch and the schedule share. */
+export async function runAndRecord(
+  deps: DefaultEvalDeps,
+  opts: { project: string | null; baseline: boolean; suites?: SuiteId[]; id: string; now: Date },
+): Promise<DefaultEvalReport> {
+  const cases = await gatherCases(deps, { baseline: opts.baseline });
+  const { report, cases: scored } = await runDefaultEvals({
+    id: opts.id,
+    now: opts.now,
+    project: opts.project,
+    cases,
+    replay: deps.replay,
+    previous: deps.store !== undefined ? await deps.store.previous(opts.project) : {},
+    ...(opts.suites !== undefined ? { suites: opts.suites } : {}),
+  });
+  if (deps.store !== undefined) await deps.store.record({ report, cases: scored });
+  return report;
+}
+
 export function registerDefaultEvalRoutes(app: FastifyInstance, deps: DefaultEvalDeps): void {
   const now = deps.now ?? (() => new Date());
   const newId = deps.newId ?? (() => randomUUID());
@@ -113,17 +133,13 @@ export function registerDefaultEvalRoutes(app: FastifyInstance, deps: DefaultEva
       const parsed = RunBody.safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send({ error: 'invalid default-evals run body', details: parsed.error.issues });
       const project = parsed.data.project === undefined || parsed.data.project === 'all' ? null : parsed.data.project;
-      const cases = await gatherCases(deps, { baseline: parsed.data.baseline === true });
-      const { report, cases: scored } = await runDefaultEvals({
+      const report = await runAndRecord(deps, {
+        project,
+        baseline: parsed.data.baseline === true,
+        ...(parsed.data.suites !== undefined ? { suites: parsed.data.suites } : {}),
         id: newId(),
         now: now(),
-        project,
-        cases,
-        replay: deps.replay,
-        previous: deps.store !== undefined ? await deps.store.previous(project) : {},
-        ...(parsed.data.suites !== undefined ? { suites: parsed.data.suites } : {}),
       });
-      if (deps.store !== undefined) await deps.store.record({ report, cases: scored });
       return report;
     },
   );

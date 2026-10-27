@@ -29,6 +29,7 @@ import { registerInsightsRoutes } from '../insights/routes.js';
 import { ReviewService } from '../insights/review-service.js';
 import { InsightsStore } from '../insights/store.js';
 import { ANALYZE_CLI, REVIEW_WORKFLOW, defaultReviewsDir, loadReviewWorkflow } from '../insights/workflow.js';
+import { RUN_EVALS_CLI, RUN_EVALS_WORKFLOW, defaultEvalRunsDir, loadRunEvalsWorkflow } from '../evals/workflow.js';
 import { registerScheduleRoutes } from '../schedules/routes.js';
 import { WorkflowScheduler, type ScheduledLaunch } from '../schedules/scheduler.js';
 import { DEFAULT_REVIEW_SCHEDULE_ID, ScheduleStore } from '../schedules/store.js';
@@ -1325,6 +1326,11 @@ export async function createServer(
       app.log.warn(`[review] could not register the '${REVIEW_WORKFLOW}' workflow — the run review is off: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+  // DES-DEFAULT-EVALS-001 §7: the default evals as a workflow (`workflows/run-evals.json`). Every launch is prepared
+  // by the daemon, which runs the evals in-process (`runEvalsPrepare`, bound once the routes are registered below);
+  // the Tool step only reads the report copy back.
+  let runEvalsPrepare: ((input: LaunchRunInput) => Promise<void>) | null = null;
+  await registerRunEvals(adapter, (m) => app.log.warn(m));
   const workflowSchedules = new ScheduleStore();
   const reviewProjects = (): string[] => workflowSchedules.get(DEFAULT_REVIEW_SCHEDULE_ID)?.projectIds ?? [];
   const launchScheduled: ScheduledLaunch = async (row, runId, trigger) => {
@@ -1337,7 +1343,10 @@ export async function createServer(
       ...(projectId !== undefined ? { projectId } : {}),
     };
     const review = row.workflow === REVIEW_WORKFLOW;
-    if (review) {
+    if (row.workflow === RUN_EVALS_WORKFLOW) {
+      if (runEvalsPrepare === null) throw new Error('the default evals are not ready yet');
+      await runEvalsPrepare(input);
+    } else if (review) {
       await reviewService.prepareLaunch(input, { trigger, scheduleId: row.id, projectIds: row.projectIds });
     } else {
       input.clisJson = JSON.stringify(await adapter.seatsForWorkflow(row.workflow));
@@ -2403,6 +2412,7 @@ export async function createServer(
   considerations = registered.considerations;
   searchService = registered.search;
   decorateRun = registered.decorateRun;
+  runEvalsPrepare = registered.runEvalsPrepare;
   if (registered.decisions !== null) {
     const decisionsService = registered.decisions;
     decisionsService.track(decisionsService.redrive());
@@ -2556,6 +2566,18 @@ export interface StartedServer {
 export function brokerUrlFor(host: string, port: number): string {
   const h = host === '0.0.0.0' || host === '' ? '127.0.0.1' : host === '::' ? '::1' : host;
   return `http://${h.includes(':') ? `[${h}]` : h}:${port}`;
+}
+
+/** Register `run-evals` with the engine. A refusal warns and never fails the boot. */
+export async function registerRunEvals(adapter: CoreAdapter, warn: (m: string) => void, runsDir: string = defaultEvalRunsDir()): Promise<boolean> {
+  if (typeof (adapter as Partial<CoreAdapter>).registerWorkflow !== 'function') return false;
+  try {
+    await adapter.registerWorkflow(loadRunEvalsWorkflow({ node: process.execPath, runCli: RUN_EVALS_CLI, runsDir }));
+    return true;
+  } catch (err) {
+    warn(`[evals] could not register the '${RUN_EVALS_WORKFLOW}' workflow — scheduled default evals are off: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
 }
 
 export async function startServer(

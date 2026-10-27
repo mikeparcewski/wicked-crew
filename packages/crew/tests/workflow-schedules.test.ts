@@ -12,7 +12,7 @@ import { AuditLog } from '../src/api/audit.js';
 import type { Actor } from '../src/core/types.js';
 import { registerScheduleRoutes } from '../src/schedules/routes.js';
 import { WorkflowScheduler, type ScheduledLaunch } from '../src/schedules/scheduler.js';
-import { DEFAULT_REVIEW_EVERY_HOURS, DEFAULT_REVIEW_SCHEDULE_ID, ScheduleStore } from '../src/schedules/store.js';
+import { DEFAULT_EVALS_SCHEDULE_ID, DEFAULT_REVIEW_EVERY_HOURS, DEFAULT_REVIEW_SCHEDULE_ID, ScheduleStore } from '../src/schedules/store.js';
 import { removeScratch } from './setup/scratch.js';
 
 const dirs: string[] = [];
@@ -62,8 +62,12 @@ describe('the schedule store', () => {
     expect(row?.everyHours).toBe(DEFAULT_REVIEW_EVERY_HOURS);
     expect(row?.enabled).toBe(true);
     expect(row?.nextDueAt).toBe(new Date(T0.getTime() + 48 * H).toISOString());
-    // A person deletes it: a restart does not bring it back.
+    // The default evals (DES-DEFAULT-EVALS-001) are seeded beside it on the same cadence, listed (and so launched) after it.
+    expect(r.store.get(DEFAULT_EVALS_SCHEDULE_ID)).toMatchObject({ workflow: 'run-evals', everyHours: DEFAULT_REVIEW_EVERY_HOURS, enabled: true });
+    expect(r.store.list().map((x) => x.id)).toEqual([DEFAULT_REVIEW_SCHEDULE_ID, DEFAULT_EVALS_SCHEDULE_ID]);
+    // A person deletes them: a restart does not bring either back.
     r.store.delete(DEFAULT_REVIEW_SCHEDULE_ID);
+    r.store.delete(DEFAULT_EVALS_SCHEDULE_ID);
     const again = new ScheduleStore(r.path);
     again.seedDefault(T0);
     expect(again.list()).toEqual([]);
@@ -248,7 +252,8 @@ describe('the schedule routes', () => {
     expect((await app.inject({ method: 'POST', url: `/api/v1/schedules/${DEFAULT_REVIEW_SCHEDULE_ID}/run` })).statusCode).toBe(403);
     actor = undefined;
     expect((await app.inject({ method: 'DELETE', url: `/api/v1/schedules/${DEFAULT_REVIEW_SCHEDULE_ID}` })).json()).toEqual({ deleted: true, id: DEFAULT_REVIEW_SCHEDULE_ID });
-    expect(JSON.parse(readFileSync(r.path, 'utf8')).schedules).toEqual({});
+    // The review row is gone; the default evals' row (seeded beside it) is untouched.
+    expect(Object.keys(JSON.parse(readFileSync(r.path, 'utf8')).schedules)).toEqual([DEFAULT_EVALS_SCHEDULE_ID]);
     await app.close();
   });
 });
