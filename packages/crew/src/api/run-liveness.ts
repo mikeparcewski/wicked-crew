@@ -7,10 +7,15 @@
 //
 // The engine runs in this process (napi), so every worker it spawns, and every test runner or
 // build those workers start, is a DESCENDANT of this daemon. A run's processes are the ones whose
-// working directory sits inside the run's worktree (`<repo>/wicked-worktrees/<run id>`; the
-// checks' base copy lives under it too), so the run id in the cwd attributes a process to a run.
-// A run is BUSY when its processes burned CPU since the previous sample: a test runner or a build
-// burns a core, while a wedged turn waiting on nothing sits at ~0 % (run 753b4d66's idle pi).
+// working directory sits inside a directory the engine named for the run: its worktree
+// (`<repo>/wicked-worktrees/<run id>`), or a checks floor's guarded checkout of the run's tree,
+// which the engine keeps OUTSIDE the worktree (wicked-core `repo_checks::checkout_guarded_tree`:
+// `$TMPDIR/wicked-core-floor/<label>-<pid>-<nonce>`, the label `<run id>-<ord>-a<attempt>` for a
+// unit's floor and `<run id>-<ord>-deliver` for the deliver re-verify). Both are read EXACTLY: the
+// worktree segment equals the run id, and a floor checkout's owner is parsed off the fixed suffix,
+// so one run's processes never count for another whose id is a prefix of it. Before the floor
+// checkout was read, a deliver step's re-verify (an hour of vitest or cargo) read as silence: the
+// watchdog raised `workerStalled` at 15 min and a needs-you at 30 on rig runs 85ddad0d and d3a380b0.
 //
 // One reading per sweep: `ps` for the tree and CPU times, then the cwd of each descendant
 // (`lsof` on macOS, `/proc/<pid>/cwd` on Linux). Windows has no reading: the watchdog keeps the
@@ -100,6 +105,36 @@ export const hostProcessProbe: ProcessProbe = {
   },
 };
 
+/** The directory the engine makes its guarded floor checkouts in (`std::env::temp_dir()/…`). */
+export const FLOOR_CHECKOUT_PARENT = 'wicked-core-floor';
+/** A floor checkout's name: `<run label>-<ord>-a<attempt>-<pid>-<nonce>` or `<run label>-<ord>-deliver-<pid>-<nonce>`. */
+const FLOOR_CHECKOUT_NAME = /^(.+)-\d+-(?:a\d+|deliver)-\d+-\d+$/;
+
+/** The run id as the engine spells it in a checkout label (every char but ASCII alnum and `-` → `_`). */
+function floorLabelOf(runId: string): string {
+  return [...runId].map((c) => (/^[A-Za-z0-9-]$/.test(c) ? c : '_')).join('');
+}
+
+/**
+ * The run `cwd` belongs to: a path segment that IS a run id (`…/wicked-worktrees/<id>/…`), or a
+ * guarded floor checkout (`…/wicked-core-floor/<id>-<ord>-a<n>-<pid>-<nonce>/…`) whose parsed
+ * owner is a run id. Never a prefix or substring: `<id>-tests` is another run.
+ */
+export function runOfCwd(cwd: string, runIds: readonly string[]): string | undefined {
+  const segments = cwd.split('/');
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i] as string;
+    const exact = runIds.find((id) => id === seg);
+    if (exact !== undefined) return exact;
+    if (i > 0 && segments[i - 1] === FLOOR_CHECKOUT_PARENT) {
+      const owner = FLOOR_CHECKOUT_NAME.exec(seg)?.[1];
+      const id = owner === undefined ? undefined : runIds.find((r) => floorLabelOf(r) === owner);
+      if (id !== undefined) return id;
+    }
+  }
+  return undefined;
+}
+
 /**
  * Samples which runs have busy processes. Stateful: CPU is compared with the previous sample of
  * the same pid, so the first sample of a process is a baseline and never reads as busy.
@@ -146,9 +181,7 @@ export class RunLivenessSampler {
       next.set(d.pid, { cpuSec: d.cpuSec, at });
       const cwd = cwds.get(d.pid);
       if (cwd === undefined) continue;
-      // A path SEGMENT equal to the run id (`…/wicked-worktrees/<id>/…`), never a substring.
-      const segments = cwd.split('/');
-      const runId = runIds.find((id) => segments.includes(id));
+      const runId = runOfCwd(cwd, runIds);
       if (runId === undefined) continue;
       const before = this.prev.get(d.pid);
       if (before === undefined) continue; // baseline

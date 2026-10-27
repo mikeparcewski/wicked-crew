@@ -20,7 +20,7 @@ import {
   type WorkerStallEscalatedFrame,
   type WorkerStalledFrame,
 } from '../src/api/stall-watchdog.js';
-import { RunLivenessSampler, parseCpuTime, type ProcRow } from '../src/api/run-liveness.js';
+import { RunLivenessSampler, parseCpuTime, runOfCwd, type ProcRow } from '../src/api/run-liveness.js';
 import { createServer } from '../src/api/server.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent, SessionView, SystemSettings } from '../src/core/types.js';
@@ -251,6 +251,57 @@ describe('RunLivenessSampler: the daemon process tree, attributed by worktree cw
     expect([...busy.keys()]).toEqual(['run-a']);
     expect(busy.get('run-a')).toMatch(/node vitest pid 11/);
     expect(busy.get('run-a')).not.toMatch(/cargo/);
+  });
+
+  // Rig runs 85ddad0d + d3a380b0 (J4, 2026-10-27): the deliver step's re-verify ran an hour of
+  // cargo / vitest in the engine's guarded floor checkout, which lives OUTSIDE the worktree, and the
+  // watchdog flagged the step stalled at 15 min and raised a needs-you at 30.
+  const RUN = 'd3a380b0-ecc0-41bf-a849-4abbe839734e';
+  const OTHER = '85ddad0d-f3c6-464f-9953-2ced3a2f0ba5';
+
+  it('attributes a run worktree and the engine floor checkouts of a run, exactly', () => {
+    const ids = [RUN, OTHER];
+    expect(runOfCwd(`/repo/wicked-worktrees/${RUN}`, ids)).toBe(RUN);
+    expect(runOfCwd(`/private/var/folders/x/T/wicked-core-floor/${RUN}-10-deliver-54026-1793095254625000000/packages/crew`, ids)).toBe(RUN);
+    expect(runOfCwd(`/var/folders/x/T/wicked-core-floor/${OTHER}-6-a1-21960-1793000000000000000`, ids)).toBe(OTHER);
+    expect(runOfCwd(`/repo/wicked-worktrees/${RUN}x`, ids)).toBeUndefined();
+    expect(runOfCwd('/var/folders/x/T/wicked-core-floor/fg-opjudge-4-a0-86793-1', ids)).toBeUndefined();
+    // A floor checkout outside the engine's floor directory is not one.
+    expect(runOfCwd(`/elsewhere/${RUN}-10-deliver-54026-1`, ids)).toBeUndefined();
+  });
+
+  // codex on #1172: a prefix rule credited `build-tests`' processes to a quiet `build`, and
+  // `build-10-a1-…` (unit 10 of `build`) to a run named `build-10`.
+  it('never credits a run with another run whose id it prefixes', () => {
+    expect(runOfCwd('/repo/wicked-worktrees/build-tests', ['build'])).toBeUndefined();
+    expect(runOfCwd('/tmp/wicked-core-floor/build-tests-3-a0-12-34', ['build'])).toBeUndefined();
+    expect(runOfCwd('/tmp/wicked-core-floor/build-10-a1-123-999', ['build', 'build-10'])).toBe('build');
+    expect(runOfCwd('/tmp/wicked-core-floor/build-10-4-deliver-123-999', ['build', 'build-10'])).toBe('build-10');
+    // The engine's label spelling: anything but ASCII alnum and `-` is `_`.
+    expect(runOfCwd('/tmp/wicked-core-floor/run_7-2-a0-1-2', ['run.7'])).toBe('run.7');
+  });
+
+  it('a deliver re-verify burning CPU in its guarded checkout keeps the run busy', async () => {
+    if (process.platform === 'win32') return;
+    let t = 0;
+    let cpu = 0;
+    const floorCwd = `/private/var/folders/x/T/wicked-core-floor/${RUN}-10-deliver-54026-1793095254625000000`;
+    const sampler = new RunLivenessSampler(
+      {
+        table: async () => [
+          { pid: 20, ppid: 1, cpuSec: 0.2, comm: 'bash' },
+          { pid: 21, ppid: 20, cpuSec: cpu, comm: 'node (vitest)' },
+        ],
+        cwds: async () => new Map([[20, `/repo/wicked-worktrees/${RUN}`], [21, floorCwd]]),
+      },
+      1,
+      () => t,
+    );
+    expect(await sampler.busy([RUN])).toEqual(new Map()); // baseline
+    t = 30_000;
+    cpu = 20;
+    const busy = await sampler.busy([RUN]);
+    expect(busy.get(RUN)).toMatch(/vitest\) pid 21/);
   });
 });
 
