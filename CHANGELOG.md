@@ -10,12 +10,19 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.16.6] — 2026-10-27
+
+A patch release for governed-run wall time and the default-evals surface: `/health.capabilities` announces `defaultEvals`, `insights` and `schedules` (#1174); diagnostics no longer tells you to install garden while the skills boot ladder is still publishing (#1170, crew#1149); a floor re-verify in a guarded checkout is not a stall (#1172); every governed delivery to wicked-crew is no longer refused once for a stale generated test (#1171, crew#1169); and crew's own base is no longer red in the repository-checks floor for want of `dist/` (#1177, crew#1173). `wicked-crew-api-types` 0.145.0 is on npm. Runs on wicked-core-ts 0.15.14 (core#1141, core#1145, core#1146, core#1147). Bundles wicked-studio 0.12.3 (unchanged).
+
 ### Added
 
 - **`GET /health.capabilities` announces the default evals, insights and schedules (api-types
   0.145.0).** `defaultEvals`, `insights` and `schedules` are read off the route table the daemon
   serves (`GET /testing/default-evals/suites`, `/insights`, `/schedules`), so a skin can show or
   hide those views without probing each route, and a route set booted without one says `false`.
+
+### Changed
+- **Runs on wicked-core-ts 0.15.14.** Engine changes since 0.15.13: verify reuses the fix floor's checks on the same tree and base, and each creator floor now runs on a clean checkout (core#1145, core#1144); an honest "no change" answer to a red floor is accepted, and an all-base-red floor takes no automatic round (core#1146, core#1142); the judge pool never says a reviewer built the work (core#1147, core#1143); a CI timing test is stable under load (core#1141).
 
 ### Fixed
 
@@ -4597,7 +4604,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.5...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.6...HEAD
+[0.16.6]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.5...v0.16.6
 [0.16.5]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.4...v0.16.5
 [0.16.4]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.3...v0.16.4
 [0.16.3]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.2...v0.16.3
