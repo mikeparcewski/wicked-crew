@@ -178,6 +178,18 @@ describe('the analysis on a fixture run store', () => {
     expect(facts.candidates.find((c) => c.id === 'steering-override-garden-scope-drift')?.action.proposal?.kindType).toBe('policy:operations');
   });
 
+  it('makes one recommendation per regressed metric (the broadest segment), and never counts a Tool unit as an agent', () => {
+    const runs = [
+      ...baseline(20, (at) => run(at, { agents: ['claude'], waitHumanMs: 60_000 })),
+      ...recent(20, (at) => run(at, { agents: ['claude'], waitHumanMs: 6 * 3_600_000 })),
+    ];
+    const facts = analyze(snapshot(runs));
+    expect(facts.regressions.filter((r) => r.metric === 'wait_on_people').length).toBeGreaterThan(0);
+    expect(facts.candidates.filter((c) => c.evidence.metric === 'wait_on_people').map((c) => c.evidence.segment)).toEqual(['all']);
+    const view = { session: { id: 't', status: 'completed', created_at: 1, archived_at: null }, units: [{ assigned_cli: 'bash', routing: { method: 'tool' } }, { assigned_cli: 'codex', routing: { method: 'teamed' } }] };
+    expect(runFactOf(view as never, [], NOW).agents).toEqual(['codex']);
+  });
+
   it('never makes a pattern recommendation from fewer than three runs', () => {
     const runs = [...baseline(20, (at) => run(at)), ...recent(2, (at) => failed(at, { unresolved: true }))];
     expect(analyze(snapshot(runs)).candidates).toEqual([]);

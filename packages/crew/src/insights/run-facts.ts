@@ -150,7 +150,13 @@ export function runFactOf(view: SessionView, events: readonly LooseEvent[], nowM
 
   const outcome = outcomeOf(status, deliverRequested, delivered);
   const archived = s['archived_at'] !== null && s['archived_at'] !== undefined;
-  const agents = [...new Set(view.units.map((u) => str((u as unknown as Record<string, unknown>)['assigned_cli'])).filter((c): c is string => c !== null))].sort();
+  // Agents are the seats that did work: a Tool unit (`routing.method: "tool"`, run by `bash` or `wicked-estate`) is not one.
+  const agents = [...new Set(view.units.flatMap((u) => {
+    const unit = u as unknown as Record<string, unknown>;
+    if ((unit['routing'] as { method?: unknown } | null | undefined)?.method === 'tool') return [];
+    const cli = str(unit['assigned_cli']);
+    return cli === null ? [] : [cli];
+  }))].sort();
   let failureSignature: string | null = null;
   if (outcome === 'failed') {
     if (status === 'completed') failureSignature = 'deliver did not land';

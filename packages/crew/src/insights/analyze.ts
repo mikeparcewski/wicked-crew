@@ -318,7 +318,8 @@ function patternCandidates(runs: readonly RunFact[], nowMs: number): Candidate[]
   // 3. A seat benched for the same reason across runs.
   const benchGroups = new Map<string, RunFact[]>();
   for (const r of runs) for (const b of r.benched) {
-    const key = `${b.cli}\u0000${b.reason.split(' ')[0] ?? b.reason}`;
+    // The reason without its parenthetical detail ("quota_exhausted (no success in the run)" → "quota_exhausted").
+    const key = `${b.cli}\u0000${(b.reason.split(' (')[0] ?? b.reason).trim().slice(0, 60)}`;
     benchGroups.set(key, [...(benchGroups.get(key) ?? []), r]);
   }
   for (const [key, group] of [...benchGroups.entries()].sort(([a], [b]) => a.localeCompare(b))) {
@@ -328,7 +329,7 @@ function patternCandidates(runs: readonly RunFact[], nowMs: number): Candidate[]
     out.push({
       id: `setting-bench-${slug(cli)}-${slug(reason)}`,
       kind: 'setting',
-      title: signin ? `Sign ${cli} back in` : `Check ${cli}'s ${reason.replace(/_/g, ' ')}`,
+      title: signin ? `Sign ${cli} back in` : `Check why ${cli} is benched: ${reason.replace(/_/g, ' ')}`,
       evidence: { line: `${cli} was benched (${reason.replace(/_/g, ' ')}) in ${group.length} runs.`, runs: ev(group), n: group.length },
       expectedEffect: `${cli} takes work again, so runs have more distinct seats and fewer fallbacks.`,
       confidence: confidenceOf(group.length, 'pattern'),
@@ -371,11 +372,12 @@ function regressionCandidates(regressions: readonly MetricResult[], runs: readon
   const out: Candidate[] = [];
   // A segment that counted exactly the runs a broader segment did says the same thing twice: keep the first
   // (`all` comes first, then repo, agent, workflow).
+  // One recommendation per regressed metric: the broadest segment that regressed (`all`, then repo, agent,
+  // workflow). The narrower ones stay listed as regressions; three cards for one cause would crowd out others.
   const seen = new Set<string>();
   for (const r of regressions) {
-    const key = `${r.metric}\u0000${[...r.runs].sort().join(',')}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
+    if (seen.has(r.metric)) continue;
+    seen.add(r.metric);
     const def = METRICS.find((m) => m.id === r.metric) as MetricDef;
     const members = runs.filter((x) => r.runs.includes(x.id));
     const n = r.window.n;
