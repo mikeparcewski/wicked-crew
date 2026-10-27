@@ -168,6 +168,7 @@ import {
   qeAcceptanceNotRequired,
   qeDecisionBypasses,
   qeDecisionOf,
+  qeAcceptanceSkippedAtGate,
   unreadableQeAcceptance,
 } from './delivery-assurance.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
@@ -806,12 +807,21 @@ const isEscalationAction = (a: string | undefined): boolean =>
  *  run and the delivery too) and refuses it (409, gate left open) at any other gate and while any
  *  other layer of the gate also denied. QE acceptance is never waived by it. */
 export const OPERATOR_JUDGMENT_ACTION = 'operator_judgment' as const;
+/** (j4-gates, api-types 0.139.0) SKIP QE ACCEPTANCE at a gate — the launch's `skipQeAcceptance`,
+ *  given later: `approve: true`, the written reason in `amend` (required, non-empty), no
+ *  `amendScope` or `plan`. The engine (wicked-core `HumanDecision::SkipQe`) records the run's QE
+ *  decision as `skipped` by the operator ("QE acceptance skipped by operator: <reason>"), labelled on
+ *  the run, every later gate and the delivery, and answers: the gate before the deliver step (this
+ *  route lets the delivery go without a QE PASS, saying so), the escalation gate of a unit only QE
+ *  denied (it counts), or a failed floor's gate with QE behind it (it re-opens on the floor alone).
+ *  Refused (409, gate left open) everywhere else and on a run that does not require QE. */
+export const SKIP_QE_ACTION = 'skip_qe' as const;
 export const GateSchema = z.object({
   approve: z.boolean(),
   amend: z.string().optional(),
   action: z
     .union([
-      z.enum(['approve', 'request_changes', 'reject', 'edit_plan', 'amend_intent', OPERATOR_JUDGMENT_ACTION, ...ESCALATION_ACTIONS]),
+      z.enum(['approve', 'request_changes', 'reject', 'edit_plan', 'amend_intent', OPERATOR_JUDGMENT_ACTION, SKIP_QE_ACTION, ...ESCALATION_ACTIONS]),
       z.string().regex(CONSENT_CHOICE_ACTION, 'a consent choice is `consent:<choice id>`'),
     ])
     .optional(),
@@ -823,8 +833,8 @@ export const GateSchema = z.object({
   ord: z.number().int().nonnegative().optional(),
 }).strict().refine(
   (b) => b.action === undefined
-    || (b.action === 'approve' || b.action === 'edit_plan' || b.action === 'amend_intent' || b.action === OPERATOR_JUDGMENT_ACTION || isEscalationAction(b.action)) === b.approve,
-  { message: '`action` disagrees with `approve`: request_changes and reject require approve: false; approve, edit_plan, amend_intent, operator_judgment, extend, targeted, accept_partial, accept_suggestion, rejudge and consent:<id> require approve: true', path: ['action'] },
+    || (b.action === 'approve' || b.action === 'edit_plan' || b.action === 'amend_intent' || b.action === OPERATOR_JUDGMENT_ACTION || b.action === SKIP_QE_ACTION || isEscalationAction(b.action)) === b.approve,
+  { message: '`action` disagrees with `approve`: request_changes and reject require approve: false; approve, edit_plan, amend_intent, operator_judgment, skip_qe, extend, targeted, accept_partial, accept_suggestion, rejudge and consent:<id> require approve: true', path: ['action'] },
 ).refine(
   // (operator ruling 2026-10-21) The override's rationale IS its record: a blank one is a 400 here,
   // before the engine is asked.
@@ -833,6 +843,13 @@ export const GateSchema = z.object({
 ).refine(
   (b) => b.action !== OPERATOR_JUDGMENT_ACTION || (b.amendScope === undefined && b.plan === undefined),
   { message: 'operator_judgment takes no amendScope or plan — it answers the failed floor of the gated unit', path: ['amendScope'] },
+).refine(
+  // (j4-gates) A QE skip's reason IS its record, as at launch: a blank one is a 400 here.
+  (b) => b.action !== SKIP_QE_ACTION || (b.amend !== undefined && b.amend.trim() !== ''),
+  { message: 'skip_qe needs `amend`: your written reason for skipping QE acceptance (an empty one is refused)', path: ['amend'] },
+).refine(
+  (b) => b.action !== SKIP_QE_ACTION || (b.amendScope === undefined && b.plan === undefined),
+  { message: 'skip_qe takes no amendScope or plan — it answers the run\'s QE acceptance', path: ['amendScope'] },
 ).refine(
   // (wicked-core#555) An intent amendment IS its text: an empty one amends nothing, and the arm's
   // scope is every unit at or after the cursor — which is what makes it reach the evaluator — so
@@ -4865,8 +4882,17 @@ export function registerRoutes(
   async function deliverApprovalRefusal(
     run: SessionView,
     deliverUnit: WorkUnit,
+    /** (j4-gates) The operator's QE skip this approve carries (`action: 'skip_qe'`, its reason). */
+    skipQeReason?: string,
   ): Promise<{ refusal: { code: number; body: unknown } } | { qeAcceptance: QeAcceptanceCheck | null }> {
     if (deliveryFreeze.state().frozen) return { refusal: { code: 409, body: frozenRefusal(deliveryFreeze.state()) } };
+    // (j4-gates) An explicit operator skip at THIS gate, on a run whose QE acceptance is still
+    // required: the delivery goes without a ledger PASS, and its check says so in the skip's own
+    // words — the engine records the same decision with the confirm (or refuses it, 409, gate open).
+    const decision = qeDecisionOf(run);
+    if (skipQeReason !== undefined && decision !== null && !qeDecisionBypasses(decision)) {
+      return { qeAcceptance: qeAcceptanceSkippedAtGate(skipQeReason) };
+    }
     const qeAcceptance = await qeAcceptanceCheckFor(run);
     if (qeAcceptance !== null && !qeAcceptance.satisfied) {
       return { refusal: { code: 409, body: qeAcceptanceRefusal(run.session.id, qeAcceptance, receiptOf(deliverUnit), 'gate') } };
@@ -4942,7 +4968,11 @@ export function registerRoutes(
       const assurance = receiptOf(gated);
       let deliveryCheck: { qeAcceptance: QeAcceptanceCheck | null } | undefined;
       if (parsed.data.approve && gated !== undefined && isDeliverUnit(gated)) {
-        const refused = await deliverApprovalRefusal(run, gated);
+        const refused = await deliverApprovalRefusal(
+          run,
+          gated,
+          parsed.data.action === SKIP_QE_ACTION ? parsed.data.amend : undefined,
+        );
         if ('refusal' in refused) return refused.refusal;
         deliveryCheck = { qeAcceptance: refused.qeAcceptance };
       }
@@ -5194,7 +5224,7 @@ export function registerRoutes(
   async function approveAcceptsWork(run: SessionView, ord: number, gateKind: string | undefined): Promise<string | null> {
     const unit = run.units.find((u) => u.ord === ord);
     const denial = (unit as { denial?: { source?: unknown } | null } | undefined)?.denial;
-    if (unit?.status === 'rejected' && (denial?.source === 'judge_unavailable' || denial?.source === 'qe_reviewer_unavailable')) {
+    if (unit?.status === 'rejected' && (denial?.source === 'judge_unavailable' || denial?.source === 'qe_reviewer_unavailable' || denial?.source === 'qe_inconclusive')) {
       return 'is the operator\'s judgment of the work as it stands (no judge could rule)';
     }
     if (gateKind === 'review_adjudication') {

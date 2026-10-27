@@ -213,6 +213,39 @@ function verdictsForCurrentTree(verdicts: VerdictRecord[], run: RunLinkage): { k
 }
 
 /**
+ * (j4-gates) The LATEST QE attempt that judged the run's current tree governs: among the verdicts
+ * {@link verdictsForCurrentTree} kept, those recorded BEFORE the newest attempt that judged
+ * `currentTree` and holds a verdict no longer count — an older attempt's FAIL (one a daemon restart
+ * orphaned before its gate ran, or an earlier same-tree re-run) does not outvote the PASS the latest
+ * attempt recorded on the tree being delivered. Inside that attempt, and for anything recorded
+ * after it began (an attempt with no known tree), deny-dominates still holds, so a FAIL on the
+ * current tree still denies. `null` = no attempt is known to have judged the current tree with a
+ * verdict in it: every kept verdict counts, as before.
+ */
+function verdictsFromLatestCurrentTreeAttempt(
+  verdicts: VerdictRecord[],
+  run: RunLinkage,
+): { kept: VerdictRecord[]; superseded: number } | null {
+  const attempts = run.qeAttempts;
+  const tree = run.currentTree;
+  if (attempts === undefined || attempts.length === 0 || tree === undefined || tree === null || tree === '') return null;
+  const inside = (w: QeAttemptWindow, at: number) => at >= w.start && (w.end === null || at <= w.end);
+  const latest = [...attempts]
+    .filter((w) => w.tree === tree)
+    .filter((w) => verdicts.some((v) => {
+      const at = epoch(v.created_at);
+      return at !== null && inside(w, at);
+    }))
+    .sort((a, b) => b.start - a.start)[0];
+  if (latest === undefined) return null;
+  const kept = verdicts.filter((v) => {
+    const at = epoch(v.created_at);
+    return at === null || at >= latest.start;
+  });
+  return { kept, superseded: verdicts.length - kept.length };
+}
+
+/**
  * What a read is scoped to: an explicit QE run (`?qeRun=<id>` — the caller
  * asserts the linkage), or the crew run whose evidence is wanted.
  */
@@ -288,6 +321,11 @@ export interface QeAcceptanceState {
    * verdict to the deny-dominates set `verdict` was resolved over). 1 for a pin.
    */
   attributedVerdicts: number;
+  /**
+   * (j4-gates) How many verdicts on the run's current tree were recorded before the latest QE
+   * attempt that judged it, and no longer count (absent when none).
+   */
+  supersededByLatest?: number;
   /** Read-layer failure detail (a record could not be read or parsed). */
   error?: string;
 }
@@ -375,6 +413,8 @@ interface Picked {
   run: RunRecord | null;
   attribution: QeAttribution;
   attributedVerdicts: number;
+  /** (j4-gates) Verdicts on the current tree recorded before its latest QE attempt (no longer counted). */
+  supersededByLatest?: number;
 }
 
 /** One QE run as the ledger holds it: its newest verdict, its run row, and whether anything of it is stamped. */
@@ -449,7 +489,6 @@ function attribute(root: string, verdicts: VerdictRecord[], subject: ReadSubject
       attributedVerdicts: 0,
     };
   }
-
   // Fold to one entry per QE run, in newest-verdict order (verdicts are newest first, so the
   // first verdict seen for a run is its newest, and Map insertion order keeps runs newest-first).
   const byRun = new Map<string, QeRunEntry>();
@@ -492,12 +531,38 @@ function attribute(root: string, verdicts: VerdictRecord[], subject: ReadSubject
   }
 
   if (attributed.length > 0) {
+    // (j4-gates) …and within the current tree, the LATEST attempt that judged it governs. Decided
+    // AFTER attribution and from this run's own verdicts only (codex r1 on #1152): a QE run keeps the
+    // attribution its whole record gives it (an older stamped verdict still ties its newer FAIL to
+    // this run), and another crew run's verdict can never be the one that supersedes this run's.
+    // Each attributed QE run then counts its newest verdict that is NOT superseded; a QE run whose
+    // every verdict predates the latest attempt no longer counts.
+    let current = attributed;
+    let supersededByLatest = 0;
+    if (scoped !== null) {
+      const mine = new Set(attributed.map((a) => a.verdict.run_id));
+      const latest = verdictsFromLatestCurrentTreeAttempt(
+        verdicts.filter((v) => mine.has(v.run_id)),
+        subject.run,
+      );
+      if (latest !== null) {
+        supersededByLatest = latest.superseded;
+        current = attributed.flatMap((a) => {
+          const newest = latest.kept.find((v) => v.run_id === a.verdict.run_id);
+          return newest === undefined ? [] : [{ ...a, verdict: newest }];
+        });
+      }
+    }
     // Deny-dominates ACROSS the attributed QE runs: any newest-per-run non-PASS governs (the
     // newest such, so the reason cites the latest failure); only when every attributed QE run's
     // newest verdict is PASS does the newest PASS govern.
-    const denying = attributed.find((a) => a.verdict.verdict !== 'PASS');
-    const pick = denying ?? attributed[0]!;
-    return { ...pick, attributedVerdicts: attributed.length };
+    const denying = current.find((a) => a.verdict.verdict !== 'PASS');
+    const pick = denying ?? current[0]!;
+    return {
+      ...pick,
+      attributedVerdicts: current.length,
+      ...(supersededByLatest > 0 ? { supersededByLatest } : {}),
+    };
   }
 
   // Nothing attributed. Say what the ledger DOES hold, so the answer is checkable.
@@ -589,6 +654,7 @@ export async function readLedgerAcceptanceState(
     state.run = picked.run;
     state.attribution = picked.attribution;
     state.attributedVerdicts = picked.attributedVerdicts;
+    if (picked.supersededByLatest !== undefined) state.supersededByLatest = picked.supersededByLatest;
     if (picked.verdict !== null) {
       state.manifestPath = join(root, 'evidence', picked.verdict.run_id, 'manifest.json');
       state.manifest = await readManifest(state.manifestPath);
