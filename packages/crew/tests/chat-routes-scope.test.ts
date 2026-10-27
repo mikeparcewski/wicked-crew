@@ -1019,3 +1019,148 @@ describe('POST /chats/:id/messages — refresh dynamic scopes', () => {
     expect(launched).toHaveLength(1);
   });
 });
+
+// crew#1157: a chat that runs the read-only `analyze` workflow (studio's Understand › Ask).
+describe('POST /chats {workflow: "analyze"} — a read-only, cited analysis chat', () => {
+  const ANALYZE_INSTRUCTIONS =
+    'Answer the operator\'s question about the code in scope, READ-ONLY. Cite `alpha/src/foo.ts:42`. ' +
+    'say `<repository> is not indexed` … Index this repository';
+  const analyzePreset = {
+    name: 'analyze', scope: 'global', created_by: 'builtin', updated_at: 1,
+    steps: [{ catalog: 'understand', id: 'answer', gate: { human_confirm: { unconditional: true } }, skill_ref: 'wicked-garden-search', instructions: ANALYZE_INSTRUCTIONS }],
+  };
+  const withPresets = (presets: unknown[]) => {
+    (adapter as unknown as { listPresets: () => Promise<unknown[]> }).listPresets = async () => presets;
+  };
+  const send = (id: string, text: string) => app.inject({ method: 'POST', url: `/api/v1/chats/${id}/messages`, payload: { text } });
+
+  it('seats ONE helper, proposes no work, and launches the analyze step bound read-only with no deliver and no reviewer; a follow-up is the same step', async () => {
+    withPresets([analyzePreset]);
+    const opened = await open({ chatId: 'an', clis: ['claude', 'codex'], primary: 'codex', repoRefs: ['alpha'], workflow: 'analyze' });
+    expect(opened.statusCode).toBe(201);
+    expect(opened.json().workflow).toBe('analyze');
+    expect(opened.json().seats).toEqual([{ cliKey: 'codex', ok: true }]);
+    expect(askPaths.get('an')?.eligible).toEqual(['codex']);
+    const agents = readFileSync(join(opened.json().scope.cwd as string, 'AGENTS.md'), 'utf8');
+    expect(agents).toContain('This is an analysis');
+    expect(agents, 'no work proposal line in an analysis chat').not.toContain('PLAN+');
+
+    expect((await send('an', 'How does sign-in work?')).statusCode).toBe(202);
+    expect(launched).toHaveLength(1);
+    const input = launched[0]!;
+    expect(input.repoRef).toBe('r1');
+    expect(input).not.toHaveProperty('deliver');
+    expect(input.plan).not.toHaveProperty('monitors');
+    expect(input.plan!.steps).toHaveLength(1);
+    const step = input.plan!.steps[0]!;
+    expect(step).toMatchObject({ catalog: 'understand', id: 'answer-1', gate: { human_confirm: { unconditional: true } }, skill_ref: 'wicked-garden-search' });
+    expect(step).not.toHaveProperty('executor');
+    expect(step).not.toHaveProperty('executes_code');
+    const text = step['instructions'] as string;
+    expect(text.startsWith(ANALYZE_INSTRUCTIONS)).toBe(true);
+    expect(text).toContain('# Chat scope');
+    expect(text).toContain('/srv/repos/alpha');
+    expect(text).not.toContain('PLAN+');
+    expect(text.endsWith('How does sign-in work?')).toBe(true);
+
+    // The follow-up continues the same path with the same read-only step.
+    chatTurns.observe({ type: 'chatReply', chat: 'an', cliKey: 'codex', text: 'See `alpha/src/index.ts:10`.', ok: true });
+    adapter.sessionsDetail = async () => [{ session: { id: 'run-p1', status: 'awaiting_human' } }] as Awaited<ReturnType<CoreAdapter['sessionsDetail']>>;
+    const propose = vi.fn<CoreAdapter['proposePlan']>(async () => ({} as Awaited<ReturnType<CoreAdapter['proposePlan']>>));
+    adapter.proposePlan = propose;
+    adapter.confirmGate = vi.fn(async () => 'approved');
+    expect((await send('an', 'And who calls it?')).statusCode).toBe(202);
+    expect(launched).toHaveLength(1);
+    const next = (propose.mock.calls[0]![1] as { steps: Array<Record<string, unknown>> }).steps[0]!;
+    expect(next).toMatchObject({ catalog: 'understand', id: 'answer-2', skill_ref: 'wicked-garden-search' });
+    expect((next['instructions'] as string).startsWith(ANALYZE_INSTRUCTIONS)).toBe(true);
+  });
+
+  it('a repository with no code graph: the scope says so and the step still carries the not-indexed line and the Index offer', async () => {
+    withPresets([analyzePreset]);
+    entityCount = async () => 0;
+    const opened = await open({ chatId: 'an-cold', clis: ['claude'], repoRefs: ['alpha'], workflow: 'analyze' });
+    expect(opened.statusCode).toBe(201);
+    expect(opened.json().scope.graph.bound).toBe(false);
+    expect((await send('an-cold', 'Where is the entry point?')).statusCode).toBe(202);
+    const text = launched[0]!.plan!.steps[0]!['instructions'] as string;
+    expect(text).toContain('No code graph is bound');
+    expect(text).toContain('is not indexed');
+    expect(text).toContain('Index this repository');
+  });
+
+  it('refuses before reserving anything: a name chats do not run (400), an engine without it (409), a preset shape that could write (409)', async () => {
+    withPresets([analyzePreset]);
+    const bad = await open({ chatId: 'x1', clis: ['claude'], repoRefs: ['alpha'], workflow: 'feature' });
+    expect(bad.statusCode).toBe(400);
+    withPresets([]);
+    const old = await open({ chatId: 'x2', clis: ['claude'], repoRefs: ['alpha'], workflow: 'analyze' });
+    expect(old.statusCode).toBe(409);
+    expect(old.json().error).toMatch(/no built-in 'analyze'/);
+    withPresets([{ ...analyzePreset, steps: [{ ...analyzePreset.steps[0], catalog: 'build' }] }]);
+    expect((await open({ chatId: 'x3', clis: ['claude'], repoRefs: ['alpha'], workflow: 'analyze' })).statusCode).toBe(409);
+    withPresets([{ ...analyzePreset, created_by: 'studio' }]);
+    expect((await open({ chatId: 'x4', clis: ['claude'], repoRefs: ['alpha'], workflow: 'analyze' })).statusCode).toBe(409);
+    for (const id of ['x1', 'x2', 'x3', 'x4']) {
+      expect(existsSync(join(base, 'chats', id)), `${id} left no root`).toBe(false);
+      expect(askPaths.get(id)).toBeUndefined();
+    }
+    // A plain chat still opens on the same id.
+    expect((await open({ chatId: 'x2', clis: ['claude'], repoRefs: ['alpha'] })).statusCode).toBe(201);
+  });
+
+  // xreview on #1160 (codex P2): an answer that proposes work anyway (a `PLAN+` line the engine holds at
+  // a plan_approval gate) is never approved — not by the next message, not by POST /runs/:id/gate.
+  it('a held plan change on an analysis run is never approved: the next message and the gate route refuse it; declining stays open', async () => {
+    withPresets([analyzePreset]);
+    expect((await open({ chatId: 'an-plan', clis: ['claude'], repoRefs: ['alpha'], workflow: 'analyze' })).statusCode).toBe(201);
+    expect((await send('an-plan', 'How does sign-in work?')).statusCode).toBe(202);
+    chatTurns.observe({ type: 'chatReply', chat: 'an-plan', cliKey: 'claude', text: 'PLAN+ {"steps":[{"catalog":"build"}],"touch":["src/a.ts"]}', ok: true });
+    adapter.sessionsDetail = async () => [{ session: { id: 'run-p1', status: 'awaiting_human', unit_ix: 0 }, units: [] }] as unknown as Awaited<ReturnType<CoreAdapter['sessionsDetail']>>;
+    (adapter as unknown as { interactionRequests: () => Promise<unknown[]> }).interactionRequests = async () => [
+      { kind: 'gate', ord: 2, created_at: 1, gate_kind: 'plan_approval', prompt: 'Approve the plan change?' },
+    ];
+    const propose = vi.fn<CoreAdapter['proposePlan']>(async () => ({} as Awaited<ReturnType<CoreAdapter['proposePlan']>>));
+    adapter.proposePlan = propose;
+    const confirm = vi.fn(async () => 'approved');
+    adapter.confirmGate = confirm as unknown as CoreAdapter['confirmGate'];
+    const next = await send('an-plan', 'Go ahead');
+    expect(next.statusCode).toBe(409);
+    expect(next.json().code).toBe('analysis_read_only');
+    expect(propose).not.toHaveBeenCalled();
+    expect(confirm).not.toHaveBeenCalled();
+    const gate = await app.inject({ method: 'POST', url: '/api/v1/runs/run-p1/gate', payload: { approve: true } });
+    expect(gate.statusCode).toBe(409);
+    expect(gate.json().code).toBe('analysis_read_only');
+    const edited = await app.inject({ method: 'POST', url: '/api/v1/runs/run-p1/gate', payload: { approve: true, action: 'edit_plan', plan: { steps: [{ catalog: 'build', id: 'b' }] } } });
+    expect(edited.statusCode).toBe(409);
+    expect(confirm).not.toHaveBeenCalled();
+    const declined = await app.inject({ method: 'POST', url: '/api/v1/runs/run-p1/gate', payload: { approve: false } });
+    expect(declined.json()?.code).not.toBe('analysis_read_only');
+    // A plan edit (the team route) at that gate, or adding a build step, is refused too.
+    const teamEdit = await app.inject({ method: 'POST', url: '/api/v1/runs/run-p1/plan', payload: { plan: { steps: [{ catalog: 'build', id: 'b' }] } } });
+    expect(teamEdit.statusCode).toBe(409);
+    expect(teamEdit.json().code).toBe('analysis_read_only');
+  });
+
+  it('xreview on #1160 (P3): an analysis chat re-seats only its one helper', async () => {
+    withPresets([analyzePreset]);
+    expect((await open({ chatId: 'an-seat', clis: ['claude'], repoRefs: ['alpha'], workflow: 'analyze' })).statusCode).toBe(201);
+    const more = await app.inject({ method: 'POST', url: '/api/v1/chats/an-seat/seats', payload: { clis: ['claude', 'codex'] } });
+    expect(more.statusCode).toBe(409);
+    expect(more.json().code).toBe('analysis_one_seat');
+    const other = await app.inject({ method: 'POST', url: '/api/v1/chats/an-seat/seats', payload: { clis: ['codex'] } });
+    expect(other.statusCode).toBe(409);
+    const same = await app.inject({ method: 'POST', url: '/api/v1/chats/an-seat/seats', payload: { clis: ['claude'] } });
+    expect(same.json()?.code).not.toBe('analysis_one_seat');
+    expect(askPaths.get('an-seat')?.eligible).toEqual(['claude']);
+  });
+
+  it('a plain repo chat is unchanged: it may deliver, asks for a reviewer, and keeps the PLAN+ proposal line', async () => {
+    expect((await open({ chatId: 'plain', clis: ['claude'], repoRefs: ['alpha'] })).statusCode).toBe(201);
+    expect((await send('plain', 'Where is the entry point?')).statusCode).toBe(202);
+    expect(launched[0]).toMatchObject({ repoRef: 'r1', deliver: 'pr', plan: { monitors: { asked: 1 } } });
+    expect(launched[0]!.plan!.steps[0]).not.toHaveProperty('skill_ref');
+    expect(launched[0]!.plan!.steps[0]!['instructions'] as string).toContain('PLAN+');
+  });
+});

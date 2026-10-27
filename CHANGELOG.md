@@ -10,11 +10,30 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Added
+- **Analysis chats: `POST /chats {workflow: "analyze"}` (crew#1157, api-types 0.141.0).** Each turn of the
+  chat is the engine's built-in read-only `analyze` step (wicked-core#1136) re-stated as the ask path's
+  `answer-N` step: the `wicked-garden-search` skill, the preset's instructions (ground in the estate graph
+  through the read-only shim, read to confirm, cite file:line / symbol / graph path, name a repository
+  with no bound graph as not indexed and offer "Index this repository"), then the scope statement and
+  the operator's words. Follow-ups continue the same path. Such a chat seats ONE helper (`primary`, else
+  the first eligible), asks for no reviewer, launches bound to its repository with no `deliver`, and its
+  statement proposes no `PLAN+` work. Only a built-in, global, one-step `understand` preset with no
+  executor, no `executes_code` and no deliverables is accepted (`src/api/chat-workflow.ts`): another name
+  is a 400, an engine without it (or with a shape that could write) a 409, refused before anything is
+  reserved. `GET /health.capabilities.chatWorkflows` names what this engine carries (`[]` on core-ts
+  0.15.12), so studio's Understand › Ask can fall back to a plain chat. `analyze` is a system workflow
+  (its entry point is the chat). An analysis run never takes on work: every approving path (the gate
+  route, standing orders, a gated resume or reassign, the next chat message, a plan edit) refuses a held
+  `plan_approval` change or a write-capable step on it (409 `analysis_read_only`, from the durable launch
+  record); declining stays open. A re-seat may only re-warm its one helper (409 `analysis_one_seat`). Tests: `tests/chat-workflow.test.ts` (acceptance rules, the turn step,
+  a cited answer over a fixture repository through the citation check), `tests/chat-routes-scope.test.ts`
+  (one seat, no deliver, no reviewer, no `PLAN+`, follow-up, not-indexed, refusals, plain chat unchanged).
+
 ### Changed
 - **One "needs you" number: `GET /system.attention[]` is the list of what holds work up, ranked by impact (api-types 0.140.0, `capabilities.attentionRanked`).** Each item is one root cause, with the runs it holds (`blockedRunIds`, `blocks` = its length), `kind` (`prevents`: work can't move until a person acts; `slows`: the system slows it, e.g. host load) and `waitedSince` (the oldest gate's arrival, never a launch time). Runs are merged only on evidence: the same repo failing the same check on a base that fails it too (the run whose own problem is that red base joins it, and its gate is the action), a down component a held run's denial names (or that holds the live runs), or the same seats leaving runs without a distinct judge. Seat problems fold into the run they block, so a bench with an alternative is no longer an item (it stays on the CLIs tab). Host load counts the held runs whose next step it slows. Sorted by runs held, then prevents before slows, then component before a run's own cause, then the longest wait, then the units left. Not counted: superseded runs, answered asks, pending proposals (now `toReview`), degraded components that hold no work, governance cards. On the rig's 2026-10-27 data this gives 5 items (test fixture `tests/fixtures/needs-2026-10-27.json`).
 - **Unresolved work keeps the system from going green.** `GET /system.unresolved[]` lists the runs nobody has resolved: failed runs not retried and not archived (a failure older than 7 days moves here instead of counting as stuck; it never disappears), superseded runs still open or unarchived, and asks parked at their turn gate for over a day. Each item carries its cost (tokens and `costUsd` summed from the run's `cliUsage` frames where known, and wall time) and its resolutions; `unresolvedSpend` sums them. `level` is `green` only when `attention[]` and `unresolved[]` are both empty.
 
-### Added
 - **`POST /runs/:id/resolve` (api-types 0.140.0).** `{action: 'archive', reason}` archives with the reason as the note (a missing or blank reason is a 400); `{action: 'superseded', by}` closes the run as superseded by another existing run. A run parked at a gate is stopped first, then archived; a run that is executing is refused (409). Retry stays `POST /runs {retryOf}`.
 
 ### Fixed

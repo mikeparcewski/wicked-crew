@@ -10,6 +10,7 @@
  */
 
 import { seatGovernanceMode, type GovernanceScopeKind, type GovernanceSeatInput, type SeatGovernanceMode } from './seat-governance.js';
+import type { ChatWorkflow } from './chat-workflow.js';
 export interface AskPath {
   chatId: string;
   /** Seats admitted to the chat at open (signed in, not benched, allowed for the scope). */
@@ -42,6 +43,8 @@ export interface AskPath {
   scopeKind?: GovernanceScopeKind;
   /** The engine's class per seat, from `path.started.governance` / `member.joined.governance_class`. */
   classes: Record<string, string>;
+  /** crew#1157: the read-only workflow every answer step of this chat runs (`POST /chats {workflow}`). */
+  workflow?: ChatWorkflow;
 }
 
 export class AskPathIndex {
@@ -55,11 +58,13 @@ export class AskPathIndex {
     eligible: readonly string[],
     primary?: string,
     governance?: { seats: readonly GovernanceSeatInput[]; scopeKind: GovernanceScopeKind },
+    workflow?: ChatWorkflow,
   ): AskPath {
     const seats: Record<string, GovernanceSeatInput> = {};
     for (const seat of governance?.seats ?? []) if (eligible.includes(seat.key)) seats[seat.key] = seat;
     const path: AskPath = {
       ...(governance !== undefined ? { seats, scopeKind: governance.scopeKind } : {}),
+      ...(workflow !== undefined ? { workflow } : {}),
       classes: {},
       chatId,
       eligible: [...eligible],

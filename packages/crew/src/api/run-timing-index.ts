@@ -62,6 +62,8 @@ export class RunTimingIndex {
   private readonly runToChatId = new Map<string, string>();
   /** crew#854: runs an ask launched (the `run.launched` entry's `askPath`). */
   private readonly askPathRuns = new Set<string>();
+  /** crew#1157: runs an ANALYSIS chat launched → its workflow (the entry's `chatWorkflow`). */
+  private readonly runToChatWorkflow = new Map<string, string>();
   /** crew#552: chained run → the onboarding run it was launched from (`detail.chainedFrom`). */
   private readonly runToChainedFrom = new Map<string, string>();
   /** crew#552: onboarding run → the capture run chained from it (the idempotence key). */
@@ -97,6 +99,8 @@ export class RunTimingIndex {
       const chatId = detail?.['chatId'];
       if (typeof chatId === 'string' && chatId.length > 0) this.runToChatId.set(runId, chatId);
       if (detail?.['askPath'] === true) this.askPathRuns.add(runId);
+      const cw = detail?.['chatWorkflow'];
+      if (typeof cw === 'string' && cw.length > 0) this.runToChatWorkflow.set(runId, cw);
       const deliver = detail?.['deliver'];
       if (deliver === 'pr' || deliver === 'none') this.runToLaunchDeliver.set(runId, deliver);
       this.noteChain(runId, detail);
@@ -175,6 +179,16 @@ export class RunTimingIndex {
   /** Did an ask launch the run (crew#854)? */
   isAskPath(runId: string): boolean {
     return this.askPathRuns.has(runId);
+  }
+
+  /** crew#1157: record the read-only workflow an analysis chat's run runs. */
+  setChatWorkflow(runId: string, workflow: string): void {
+    this.runToChatWorkflow.set(runId, workflow);
+  }
+
+  /** crew#1157: the read-only workflow the run's chat runs (`analyze`), or `undefined` for any other run. */
+  chatWorkflowOf(runId: string): string | undefined {
+    return this.runToChatWorkflow.get(runId);
   }
 
   /** crew#552: a launch entry's chain facts (`chainedFrom`, `autoCapture: false`). */
@@ -348,6 +362,11 @@ export function recordRunLaunched(
   }
   // crew#854: an ask's run, live — the same field a restart rehydrates.
   if (detail['askPath'] === true && runTimingIndex !== undefined) runTimingIndex.setAskPath(runId);
+  // crew#1157: an analysis chat's run, live — the same field a restart rehydrates.
+  const chatWorkflow = detail['chatWorkflow'];
+  if (typeof chatWorkflow === 'string' && chatWorkflow.length > 0 && runTimingIndex !== undefined) {
+    runTimingIndex.setChatWorkflow(runId, chatWorkflow);
+  }
   // crew#552: the chain facts, live — the same fields a restart rehydrates.
   runTimingIndex?.noteChain(runId, detail);
   // crew#762: the launch's delivery decision, live — the same field a restart rehydrates.

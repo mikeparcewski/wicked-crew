@@ -97,7 +97,8 @@ import {
   type ChatSeatRefusal,
   type ChatScopeRequest,
 } from './chat-scope.js';
-import { ASK_TURN_BUDGET_SECS, AskPathIndex, answerStep, isAskTurn } from './ask-paths.js';
+import { ASK_TURN_BUDGET_SECS, AskPathIndex, isAskTurn } from './ask-paths.js';
+import { chatTurnStep, resolveChatWorkflow, servedChatWorkflows, writeCapableStep, type ChatWorkflow } from './chat-workflow.js';
 import { reassignRefusedSeats } from '../core/reassign-refusal.js';
 import { allowedRootsFor, isInsideRoot, openWithSystemDefault } from './open-path.js';
 import {
@@ -1289,6 +1290,9 @@ export const ChatOpenSchema = z.object({
   primary: z.string().min(1).optional(),
   /** (api-types 0.137.0, DES-SYSTEM-CHAT) The page the chat was started on, for the history list. */
   startedOn: z.object({ route: z.string().min(1).max(512), label: z.string().min(1).max(200) }).strict().optional(),
+  /** (api-types 0.141.0, crew#1157) The read-only workflow every turn runs (`analyze`); see
+   *  `chat-workflow.ts`. Omitted ⇒ a plain chat. */
+  workflow: z.string().min(1).max(64).optional(),
 }).strict();
 
 /**
@@ -1801,6 +1805,19 @@ export function registerRoutes(
       // crew#1068: the engine has no wicked-vault CLI to record held boundary findings with.
       ...[adapter.vaultBin != null ? vaultBinWarning(adapter.vaultBin) : null].filter((w) => w !== null),
     ];
+  // crew#1157: the engine's built-in presets are compiled in, so the chat workflows it carries are
+  // read once (on the first probe that can read them) and held until restart.
+  let chatWorkflowsHeld: string[] | null = null;
+  const chatWorkflowsNow = async (): Promise<string[]> => {
+    if (chatWorkflowsHeld !== null) return chatWorkflowsHeld;
+    if (typeof adapter.listPresets !== 'function') return [];
+    try {
+      chatWorkflowsHeld = servedChatWorkflows(await adapter.listPresets());
+      return chatWorkflowsHeld;
+    } catch {
+      return [];
+    }
+  };
   app.get(`${V}/health`, { config: { manifest: { statusCodes: [200] } } }, async () => {
     const ping = await enginePing();
     // F-E2E-030: what this deployment can keep. A composer reads `capabilities.deliverGate`
@@ -1839,6 +1856,9 @@ export function registerRoutes(
       // api-types 0.137.0 (DES-SYSTEM-CHAT): the chat history (list, reopen, close) and attachments.
       chatList: chatHistory !== null,
       chatAttachments: true,
+      // api-types 0.141.0 (crew#1157): the read-only workflows `POST /chats {workflow}` runs on THIS
+      // engine (`analyze` on a core-ts that carries it); `[]` = plain chats only.
+      chatWorkflows: await chatWorkflowsNow(),
     };
     // wicked-core#411 / crew#497: the state-home blocker rides the health probe as a WARNING. The
     // daemon still SERVES (status stays ok — studio must load and show the blocker) but refuses to
@@ -3593,6 +3613,21 @@ export function registerRoutes(
           return reply.code(501).send({ error: message(err) });
         }
       }
+      // crew#1157: a chat that runs a workflow runs a BUILT-IN read-only one, resolved before anything
+      // is reserved or warmed (a 400 for a name chats do not run, a 409 for an engine without it).
+      let workflow: ChatWorkflow | undefined;
+      if (b.workflow !== undefined) {
+        let presets: Awaited<ReturnType<typeof adapter.listPresets>> = [];
+        try {
+          presets = typeof adapter.listPresets === 'function' ? await adapter.listPresets() : [];
+        } catch {
+          presets = [];
+        }
+        const resolved = resolveChatWorkflow(b.workflow, presets);
+        if (!resolved.ok) return reply.code(resolved.status).send({ error: resolved.error });
+        workflow = resolved.workflow;
+      }
+      const statementOpts = { analysis: workflow !== undefined };
       // A chat id this daemon already holds a scope for is LIVE: re-preparing its scratch root and
       // re-opening it would overwrite the statement its seats are reading and (on a changed scope)
       // evict them mid-conversation (Copilot, #518). Close it first, or let the daemon mint the id.
@@ -3641,7 +3676,7 @@ export function registerRoutes(
         if (!chatScopes.owns(chatId, token)) {
           return reply.code(409).send({ error: `chat ${chatId} was closed while it was being opened; open it again` });
         }
-        prepareChatScratch(chatId, scope, inForceAtOpen);
+        prepareChatScratch(chatId, scope, inForceAtOpen, statementOpts);
       } catch (err) {
         // The helper removes only what it created itself (a pre-existing root is preserved) —
         // nothing more is removed here (codex on #808 r4, 3).
@@ -3714,6 +3749,12 @@ export function registerRoutes(
           refused,
         });
       }
+      // crew#1157: a workflow chat is ONE seat — the operator's pick (`primary`), else the first
+      // admitted seat in roster order. The others are not refused; they simply do not sit this chat.
+      if (workflow !== undefined) {
+        const one = b.primary !== undefined && clis.includes(b.primary) ? b.primary : clis[0]!;
+        clis.splice(0, clis.length, one);
+      }
       try {
         // DES-ASK-TEAM-CHAT-001 §5.1 (ASK-C1): an open resolves the scope and ELIGIBILITY and warms
         // nothing — the chat is a path its first message launches, and the engine picks the PA
@@ -3785,7 +3826,7 @@ export function registerRoutes(
         askPaths.open(chatId, clis, b.primary, {
           seats: standing.filter((s) => clis.includes(String(s.key))) as unknown as GovernanceSeatInput[],
           scopeKind: !scoped ? 'unscoped' : admissionKind === 'path-bound' ? 'scoped_bound' : 'scoped',
-        });
+        }, workflow);
         // Register roots for path rewriting (crew#618): absolute host paths in seat replies are
         // rewritten to repo-relative form before being stored in the transcript.
         if (chatTranscripts !== undefined && scope.repos.length > 0) {
@@ -3827,6 +3868,7 @@ export function registerRoutes(
           seats,
           scope,
           refused,
+          ...(workflow !== undefined ? { workflow: workflow.name } : {}),
           ...(projectAttachError !== undefined ? { projectAttachError } : {}),
           ...(singleSeat !== undefined ? { singleSeat } : {}),
         });
@@ -4057,7 +4099,7 @@ export function registerRoutes(
       }
       if (storedScope !== undefined && scope !== undefined && engine !== undefined &&
         (JSON.stringify(scope) !== JSON.stringify(storedScope) || JSON.stringify(engine) !== JSON.stringify(chatScopes.engineOf(id)))) {
-        prepareChatScratch(id, scope, rules);
+        prepareChatScratch(id, scope, rules, { analysis: path.workflow !== undefined });
         if (chatScopes.refresh(id, storedScope, scope, engine)) {
           chatTranscripts?.registerRoots(id, scope.repos.map((r) => ({ absRoot: resolve(r.rootPath), name: r.name })));
         }
@@ -4082,8 +4124,11 @@ export function registerRoutes(
       audience = voice.length > 0 ? voice : path.eligible;
       turn = chatTurns.begin(id, audience, text, ASK_TURN_BUDGET_SECS);
       turnId = turn?.turnId ?? turnId;
-      // A repo-bound path can deliver; project and multi-repo scopes remain read-only asks.
+      // A repo-bound path can deliver; project and multi-repo scopes remain read-only asks. A workflow
+      // chat (crew#1157) never delivers: it is bound to its repository read-only, with no deliver.
       const repoRef = scope?.kind === 'repos' && scope.repos.length === 1 ? scope.repos[0]!.id : undefined;
+      const delivers = repoRef !== undefined && path.workflow === undefined;
+      const statementOpts = { analysis: path.workflow !== undefined };
       const projectId = scope?.projectId;
       if (path.runId === undefined) {
         const stepId = 'answer-1';
@@ -4093,14 +4138,18 @@ export function registerRoutes(
         // `problem`); the scope statement grounds the seats from the first answer step's
         // instructions instead of standing in as the run's title.
         const instructions =
-          scope !== undefined ? `${chatScopeStatement(id, scope, rules)}\n\n${withPreface(pending.preface)}` : withPreface(pending.preface);
+          scope !== undefined ? `${chatScopeStatement(id, scope, rules, statementOpts)}\n\n${withPreface(pending.preface)}` : withPreface(pending.preface);
         const input: LaunchRunInput = {
           problem: text,
           sessionId: randomUUID(),
           clisJson: JSON.stringify(roster),
-          plan: { steps: [answerStep(stepId, instructions)], monitors: { asked: 1 } },
+          // A workflow chat is one seat and asks for no reviewer (crew#1157).
+          plan: {
+            steps: [chatTurnStep(stepId, instructions, path.workflow)],
+            ...(path.workflow === undefined ? { monitors: { asked: 1 } } : {}),
+          },
           ...(path.primary !== undefined ? { primary: path.primary } : {}),
-          ...(repoRef !== undefined ? { repoRef, deliver: 'pr' as const } : {}),
+          ...(repoRef !== undefined ? (delivers ? { repoRef, deliver: 'pr' as const } : { repoRef }) : {}),
           ...(projectId !== undefined ? { projectId } : {}),
           ...(scope?.kind === 'project' && codeGraphDb !== null ? { projectGraph: { dbPath: codeGraphDb } } : {}),
           // crew#1034: the scope's repositories are the run's read roots, graph or no graph — the
@@ -4138,7 +4187,8 @@ export function registerRoutes(
             askPath: true,
             ...(repoRef !== undefined ? { repoRef } : {}),
             ...(projectId !== undefined ? { projectId } : {}),
-            deliver: repoRef !== undefined ? 'pr' : 'none',
+            ...(path.workflow !== undefined ? { chatWorkflow: path.workflow.name } : {}),
+            deliver: delivers ? 'pr' : 'none',
           });
         });
         return reply.code(202).send({
@@ -4150,7 +4200,7 @@ export function registerRoutes(
       // single-shot carrier (codex on the wrapped carrier) remembers nothing of the first turn, so a
       // follow-up told only the question answered "the supplied repository contains only tmp".
       const instructions =
-        scope !== undefined ? `${chatScopeStatement(id, scope, rules)}\n\n${withPreface(pending.preface)}` : withPreface(pending.preface);
+        scope !== undefined ? `${chatScopeStatement(id, scope, rules, statementOpts)}\n\n${withPreface(pending.preface)}` : withPreface(pending.preface);
       // The continuation answers the path run's gate: under the per-run decision lock it re-reads the
       // run and is judged by the record before it proposes or confirms anything (crew#1083 round 7).
       // The status read above is a pre-check that changes nothing; this read is the one that counts.
@@ -4167,7 +4217,7 @@ export function registerRoutes(
         }
         const decided = await gateForDecision(view, undefined);
         if ('refusal' in decided) return decided.refusal;
-        await adapter.proposePlan(pathRunId, { steps: [answerStep(stepId, instructions)] }, turnId);
+        await adapter.proposePlan(pathRunId, { steps: [chatTurnStep(stepId, instructions, path.workflow)] }, turnId);
         await adapter.confirmGate(pathRunId, true);
         return null;
       });
@@ -4236,6 +4286,15 @@ export function registerRoutes(
           error: `chat '${id}' has launched its path (${launched.runId}); its seats are fixed for this ask — open a new chat to seat ${clis.join(', ')}`,
           chatId: id,
           runId: launched.runId,
+        });
+      }
+      // crew#1157 (xreview on #1160): an analysis chat seats ONE helper; a re-seat may re-warm that
+      // seat, never add another.
+      if (launched?.workflow !== undefined && !(clis.length === 1 && launched.eligible.includes(clis[0]!))) {
+        return reply.code(409).send({
+          code: 'analysis_one_seat',
+          error: `chat '${id}' is an analysis (${launched.workflow}) and seats one helper (${launched.eligible.join(', ')}); open a new chat to ask another`,
+          chatId: id,
         });
       }
       if (launched?.busy === true) {
@@ -4912,6 +4971,22 @@ export function registerRoutes(
   async function gateForDecision(
     run: SessionView,
     namedOrd: number | undefined,
+    opts: { declining?: boolean } = {},
+  ): Promise<{ refusal: { code: number; body: unknown } } | { gated: WorkUnit | undefined; prompt: string | undefined; gateKind: string | undefined }> {
+    const decided = await gateOfRecord(run, namedOrd);
+    // crew#1157: every APPROVING path (the gate route, standing orders, a gated resume or reassign, a
+    // plan edit at the gate, the next message of a chat) is judged here, so no path approves a held
+    // plan change on an analysis run. Declining stays open.
+    if (!('refusal' in decided) && opts.declining !== true) {
+      const analysis = analysisPlanRefusal(run.session.id, { gateKind: decided.gateKind });
+      if (analysis !== null) return { refusal: analysis };
+    }
+    return decided;
+  }
+
+  async function gateOfRecord(
+    run: SessionView,
+    namedOrd: number | undefined,
   ): Promise<{ refusal: { code: number; body: unknown } } | { gated: WorkUnit | undefined; prompt: string | undefined; gateKind: string | undefined }> {
     const id = run.session.id;
     const unitAt = (ord: number): WorkUnit | undefined => (run.units ?? []).find((u) => u.ord === ord);
@@ -5004,6 +5079,33 @@ export function registerRoutes(
   }
 
   /**
+   * crew#1157 (xreview on #1160): an ANALYSIS chat's run never takes on work. Its seat is told not to
+   * propose any, but a `PLAN+` line in an answer would still hold a creator addition at a
+   * `plan_approval` gate; approving it (or approving with an edited plan) would let the run write.
+   * Refused here, for every decision path, by the durable launch record: declining stays allowed.
+   */
+  function analysisPlanRefusal(
+    runId: string,
+    held: { gateKind?: string | undefined; plan?: { steps: ReadonlyArray<{ catalog: string; id?: string | undefined; [k: string]: unknown }> } | undefined },
+  ): { code: number; body: unknown } | null {
+    const workflow = runTimingIndex.chatWorkflowOf(runId);
+    if (workflow === undefined) return null;
+    // A held plan change (the gate the engine opens on a `PLAN+` line), or a plan edit with any step
+    // that could write (the same read-only predicate the chat open applies to the workflow).
+    const writes = held.plan?.steps.some((s) => writeCapableStep(s) !== null) === true;
+    if (held.gateKind !== 'plan_approval' && !writes) return null;
+    return {
+      code: 409,
+      body: {
+        code: 'analysis_read_only',
+        error:
+          `run ${runId} is an analysis (${workflow}): it answers questions and changes nothing, so it cannot take on ` +
+          'the work its answer proposed. Decline it here, and start a job for the change.',
+      },
+    };
+  }
+
+  /**
    * THE gate decision path. `POST /runs/:id/gate` answers with it, and so does a standing order
    * (behaviour 10) — the same awaiting check, the same ord check and 409 `gate_changed` /
    * `gate_unknown`, the same `confirmGate`, the same `gate.decided` audit. There is no side path:
@@ -5030,8 +5132,10 @@ export function registerRoutes(
       // Decision integrity (api-types 0.44.0; crew#1083 rounds 3–5): the gate this decision answers
       // is the RECORD's — read first thing inside the lock, so the gated unit and its delivery
       // checks below are the ones the record confirms ({@link gateForDecision}).
-      const decided = await gateForDecision(run, parsed.data.ord);
+      const decided = await gateForDecision(run, parsed.data.ord, { declining: !parsed.data.approve });
       if ('refusal' in decided) return decided.refusal;
+      const analysis = parsed.data.approve ? analysisPlanRefusal(id, { plan: parsed.data.plan }) : null;
+      if (analysis !== null) return analysis;
       // The gated unit and its receipt as it stands when the person decides (wicked-core#850: every
       // gate answer carries it). An APPROVE that would run the deliver unit passes the delivery
       // checks first.
@@ -7904,7 +8008,12 @@ export function registerRoutes(
 
   // ── Team (DES-TEAMING-002 T8) — reads and commands over the engine; the live stream is the
   // teamEvent relay (team/ws-relay.ts). Crew publishes no team fact (§4.0).
-  registerTeamRoutes(app, adapter, security, { exclusive: decideExclusively, judge: gateForDecision });
+  registerTeamRoutes(app, adapter, security, {
+    exclusive: decideExclusively,
+    judge: gateForDecision,
+    // crew#1157: a plan edit on an analysis run may not add a step that could write.
+    readOnlyRefusal: (runId, plan) => analysisPlanRefusal(runId, { plan }),
+  });
 
   // ── Campaigns (crew#342 + TH-9) — the engine's durable Run-DAG scheduler over REST ──────────
   // Progress streams as campaign* CoreEvents on the existing allowlist-free /ws relay; these
