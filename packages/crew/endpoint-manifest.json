@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.139.0",
+  "apiTypesVersion": "0.140.0",
   "endpoints": [
     {
       "method": "GET",
@@ -1758,6 +1758,19 @@
         400,
         404,
         409
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/:id/resolve",
+      "requestType": "ResolveRunRequest",
+      "responseType": "ResolveRunResponse",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        409,
+        500
       ]
     },
     {

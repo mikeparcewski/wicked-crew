@@ -293,6 +293,14 @@ export interface HealthCapabilities {
    */
   system?: boolean;
   /**
+   * (api-types 0.140.0) `GET /system.attention[]` follows the one "needs you" rule (root causes with
+   * `blockedRunIds`, `kind`, `waitedSince`, ranked by impact) and the snapshot carries
+   * `unresolved[]` + `toReview`; `POST /runs/:id/resolve` is served. A skin shows
+   * `attention.length` as its "needs you" number only when this is true; ABSENT on an older daemon,
+   * which keeps its own fold.
+   */
+  attentionRanked?: boolean;
+  /**
    * (api-types 0.137.0, DES-SYSTEM-CHAT) The chat history is served: `GET /chats` carries `items` +
    * `nextCursor`, `GET /chats/:id/messages` reopens a chat, `POST /chats/:id/close` ends one and keeps
    * its history. ABSENT on an older daemon — hide the past-chats rail.
@@ -8288,7 +8296,9 @@ export interface NoEligibleSeatBody {
 export type SystemState = 'ok' | 'degraded' | 'down' | 'unknown' | 'off';
 
 /** The Nerve Center light: `red` when work is blocked, `yellow` when something needs a look but
- *  work still flows, `green` when `attention[]` is empty. Derived from `attention[]` only. */
+ *  work still flows, `green` when `attention[]` is empty. Derived from `attention[]` only.
+ *  (api-types 0.140.0, `capabilities.attentionRanked`) `green` ONLY when `attention[]` AND
+ *  `unresolved[]` are both empty: unresolved work alone reads `yellow`. */
 export type SystemLevel = 'green' | 'yellow' | 'red';
 
 /** The existing action an attention item or row offers (the snapshot itself is read-only):
@@ -8321,8 +8331,30 @@ export interface SystemSnapshot {
   /** `red` iff some attention item is `red`, else `yellow` iff any item, else `green`. */
   level: SystemLevel;
   /** Every item that needs a look, worst first (red before yellow, then by how many runs it
-   *  blocks, then infra › cli › run › governance). Empty when all is clear. */
+   *  blocks, then infra › cli › run › governance). Empty when all is clear.
+   *
+   *  (api-types 0.140.0, `capabilities.attentionRanked`) The ONE "needs you" list: each item is one
+   *  root cause holding work up right now, either because work cannot move until a person acts
+   *  (`kind: 'prevents'`) or because the system itself slows it (`kind: 'slows'`). One cause that
+   *  holds several runs is ONE item naming them in `blockedRunIds`. Superseded runs, answered asks,
+   *  failed runs older than 7 days, benches with an alternative and pending proposals are not in it
+   *  (the first three move to `unresolved[]`; proposals are `toReview`). Sorted by runs held, then
+   *  prevents before slows, then the longest wait, then the units left. Its length is the number. */
   attention: SystemAttentionItem[];
+  /**
+   * (api-types 0.140.0) Work nobody has resolved: failed runs not retried and not archived,
+   * superseded runs still open, asks parked at their turn gate past a day. Each carries what it cost
+   * and how to resolve it (retry, archive with a reason, or close as superseded). Never counted in
+   * `attention[]`, never dropped by age. ABSENT on an older daemon.
+   */
+  unresolved?: SystemUnresolvedItem[];
+  /** (api-types 0.140.0) `unresolved[]`'s summed cost: `costUsd` is `null` when no item's cost is
+   *  known; `costKnown` says how many items carried one. ABSENT on an older daemon. */
+  unresolvedSpend?: { costUsd: number | null; tokens: { input: number; output: number } | null; costKnown: number };
+  /** (api-types 0.140.0) Pending proposals waiting on review: shown as "N to review", never in the
+   *  "needs you" number (no run waits on them). `null` when the queue did not answer in time. ABSENT
+   *  on an older daemon. */
+  toReview?: number | null;
   /** One entry per CLI on the roster, in roster order. */
   clis: SystemCli[];
   /** Every unfinished run (not completed / cancelled / failed), worst first:
@@ -8349,6 +8381,69 @@ export interface SystemAttentionItem {
   target: SystemTarget;
   /** The one existing action that helps, or `null`. */
   action: SystemAction | null;
+  /** (api-types 0.140.0) `prevents`: work cannot move until someone acts; `slows`: the system
+   *  slows it (host load). ABSENT on an older daemon. */
+  kind?: 'prevents' | 'slows';
+  /** (api-types 0.140.0) The runs this one cause holds (`blocks` is its length). For a `slows`
+   *  item, the runs whose next step it slows. ABSENT on an older daemon. */
+  blockedRunIds?: string[];
+  /** (api-types 0.140.0) ISO-8601 of the oldest open gate among the held runs (the gate's
+   *  arrival, never the run's launch); a failed run's end; `null` when unknown. ABSENT on an older
+   *  daemon. */
+  waitedSince?: string | null;
+  /** (api-types 0.140.0) Units not yet done across the held runs. ABSENT on an older daemon. */
+  unitsLeft?: number;
+}
+
+/** (api-types 0.140.0) Why a run is in `unresolved[]`. `failed`: it failed and was neither retried
+ *  (`retry_of`) nor archived; `superseded`: a retry or a later completed run with the same repo,
+ *  workflow and title replaced it, but it is still open or unarchived; `parked`: an ask waits at its
+ *  turn gate past a day. */
+export type SystemUnresolvedWhy = 'failed' | 'superseded' | 'parked';
+
+/** (api-types 0.140.0) The ways to resolve an unresolved run: `retry` (`POST /runs {retryOf}`),
+ *  `archive` (`POST /runs/:id/resolve {action: 'archive', reason}`, a reason is required) and
+ *  `close_superseded` (`POST /runs/:id/resolve {action: 'superseded', by}`). */
+export type SystemResolveKind = 'retry' | 'archive' | 'close_superseded';
+
+/** (api-types 0.140.0) One run nobody has resolved (`SystemSnapshot.unresolved[]`). */
+export interface SystemUnresolvedItem {
+  /** `unresolved:<runId>`. */
+  id: string;
+  runId: string;
+  title: string;
+  /** The engine's status. */
+  status: string;
+  why: SystemUnresolvedWhy;
+  /** Plain words ("failed 9 days ago", "superseded by 6f11390c, which delivered"). */
+  reason: string;
+  /** The run that superseded it, for `why: 'superseded'`. */
+  supersededBy?: string;
+  /** ISO-8601 of when it stopped moving (its end, or its gate's arrival); `null` when unknown. */
+  since: string | null;
+  /** What it cost. `costUsd`/`tokens` are `null` when the run's log carried no usage frame (or was
+   *  not read yet); `wallMs` is launch to end (or to now while open), `null` for an undated run. */
+  cost: { costUsd: number | null; tokens: { input: number; output: number } | null; wallMs: number | null };
+  /** The resolutions that apply, best first. */
+  actions: SystemResolveKind[];
+}
+
+/** (api-types 0.140.0) `POST /runs/:id/resolve`: resolve an unresolved run. `archive` needs a
+ *  non-blank `reason` (a blank or missing one is a 400); `superseded` names the run that replaced it
+ *  in `by` (an existing run, not itself). A run parked at a gate is stopped first, then archived; a
+ *  run that is executing is refused (409). The archive note keeps the reason. */
+export type ResolveRunRequest =
+  | { action: 'archive'; reason: string }
+  | { action: 'superseded'; by: string; reason?: string };
+
+export interface ResolveRunResponse {
+  runId: string;
+  action: 'archive' | 'superseded';
+  archived: true;
+  /** The run was parked at a gate and was stopped before it was archived. */
+  cancelled: boolean;
+  /** The archive note written (`resolved: <reason>` or `superseded by <id>[: <reason>]`). */
+  note: string;
 }
 
 // ── clis[] ──
@@ -8475,8 +8570,9 @@ export interface SystemRun {
   /** The thresholds the verdict used (from `workerStallMinutes`). */
   quietAfterMs: number;
   stallAfterMs: number;
-  /** The open gate or question, when the run waits on one. */
-  gate?: { interactionId: string | null; ord: number | null; kind: string | null; prompt: string | null };
+  /** The open gate or question, when the run waits on one. `receivedAt` (api-types 0.140.0): ISO-8601
+   *  of the gate's arrival; `null`/ABSENT when unknown. */
+  gate?: { interactionId: string | null; ord: number | null; kind: string | null; prompt: string | null; receivedAt?: string | null };
   /** ISO-8601 the run was launched, when known. */
   createdAt: string | null;
 }
