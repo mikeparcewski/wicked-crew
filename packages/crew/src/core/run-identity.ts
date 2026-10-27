@@ -38,6 +38,9 @@ import { baseWorkflowId } from './deliver-text.js';
  */
 export const SYSTEM_WORKFLOWS: ReadonlySet<string> = new Set([
   'chat',
+  // crew#1157: the read-only analysis a chat runs (`POST /chats {workflow}`, studio's Understand
+  // › Ask); it delivers nothing and has its own entry point.
+  'analyze',
   'onboarding',
   'capture-learnings',
   'steering-author',

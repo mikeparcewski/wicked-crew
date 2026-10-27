@@ -170,6 +170,8 @@ export function registerTeamRoutes(
   gateDecisions: {
     exclusive: <T>(runId: string, fn: () => Promise<T>) => Promise<T>;
     judge: (run: SessionView, namedOrd: number | undefined) => Promise<{ refusal: { code: number; body: unknown } } | object>;
+    /** crew#1157: a refusal when `plan` would let a read-only (analysis) run write; `null` otherwise. */
+    readOnlyRefusal?: (runId: string, plan: { steps: Array<{ catalog: string; [k: string]: unknown }> }) => { code: number; body: unknown } | null;
   },
 ): void {
   const { audit } = security;
@@ -219,6 +221,8 @@ export function registerTeamRoutes(
       const run = await findRun(id);
       if (run === undefined) return reply.code(404).send({ error: 'Run not found' });
       const plan = toLaunchPlan(parsed.data.plan);
+      const readOnly = gateDecisions.readOnlyRefusal?.(id, parsed.data.plan as { steps: Array<{ catalog: string; [k: string]: unknown }> }) ?? null;
+      if (readOnly !== null) return reply.code(readOnly.code).send(readOnly.body);
       if (run.session.status === 'awaiting_human') {
         const decided = await gateDecisions.judge(run, undefined);
         if ('refusal' in decided) return reply.code(decided.refusal.code).send(decided.refusal.body);
