@@ -128,6 +128,14 @@ describe('system chat: history, close, attachments (server)', () => {
     expect(health.capabilities).toMatchObject({ chatList: true, chatAttachments: true });
   });
 
+  it('advertises defaultEvals, insights and schedules, each a route this server answers (api-types 0.145.0)', async () => {
+    const health = (await app.inject({ method: 'GET', url: '/api/v1/health' })).json() as HealthResponse;
+    expect(health.capabilities).toMatchObject({ defaultEvals: true, insights: true, schedules: true });
+    for (const url of ['/api/v1/testing/default-evals/suites', '/api/v1/insights', '/api/v1/schedules']) {
+      expect((await app.inject({ method: 'GET', url })).statusCode, url).toBe(200);
+    }
+  });
+
   it('uploads an image and a text file, refuses over-cap and a lying type, and the seat reads each file read-only', async () => {
     const opened = await app.inject({
       method: 'POST',

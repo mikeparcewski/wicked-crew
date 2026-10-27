@@ -10,6 +10,13 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Added
+
+- **`GET /health.capabilities` announces the default evals, insights and schedules (api-types
+  0.145.0).** `defaultEvals`, `insights` and `schedules` are read off the route table the daemon
+  serves (`GET /testing/default-evals/suites`, `/insights`, `/schedules`), so a skin can show or
+  hide those views without probing each route, and a route set booted without one says `false`.
+
 ### Fixed
 
 - **Every governed delivery to wicked-crew was refused once (crew#1169).** The committed

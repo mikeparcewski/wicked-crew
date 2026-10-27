@@ -1219,6 +1219,8 @@ respondsWith<Wire.GateEscalatedEvent, { type: 'gateEscalated'; session: string; 
 // builds today satisfies the named interface; `GET /settings` today is `{ settings }` — a valid
 // SettingsResponse without `path` (PR-L10-6 adds it).
 respondsWith<Wire.HealthCapabilities, { deliverGate: boolean }>();
+// api-types 0.145.0: the evals, insights and schedules surfaces are announced.
+respondsWith<Wire.HealthCapabilities, { deliverGate: boolean; defaultEvals: boolean; insights: boolean; schedules: boolean }>();
 respondsWith<Wire.SettingsResponse, { settings: typeof DEFAULT_SETTINGS }>();
 respondsWith<Wire.SettingsResponse, { settings: Awaited<ReturnType<CoreAdapter['getSettings']>>; path: string }>();
 // `RepoCheckRun`'s seven 0.38.0 keys, spelled as core's `check_run_json` emits them (camelCase);
