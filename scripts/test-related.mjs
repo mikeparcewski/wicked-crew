@@ -54,10 +54,25 @@
 // in birpc, no vitest config or env knob in v3.2 — checked in `node_modules/vitest/dist/chunks`), so
 // the deadline cannot be raised from this side. The retry is the tolerance that closes it; the
 // in-suite `testTimeout`/`hookTimeout` are raised on the same grounds in `vitest.config.ts`.
+//
+// ## crew#1173 — build `dist/` before the tests run
+//
+// The dist-CLI suites (`cli-status-version`, `cli-port-resolution`, `mcp-server`,
+// `governance-replay-cli`, `cli-service`) spawn `packages/crew/dist/cli/index.js` as a child
+// process. CI builds before `test`; the floor runs this script on a fresh checkout, installs with
+// `--ignore-scripts` and has no build key in `checks.json`, so `dist/` never existed there and those
+// suites failed on every crew floor, base and head alike. So before vitest runs, this script empties
+// `dist/` (keeping the `dist/studio` bundle, which is not crew's compiler output) and runs crew's own
+// `npm run build` (`tsc -p tsconfig.json`, about 15 s), every time rather than only when `dist/` is
+// missing: a worktree whose `dist/` was built before the change was edited would otherwise test the
+// old code, and tsc never removes the output of a deleted source. `dist/` is gitignored, so the
+// worktree guard does not see it. If the build fails, the failure is printed, the tests still run
+// for their evidence, and the check fails whatever they report: tsc emits even on a type error, so
+// passing tests after a failed build prove nothing about the build. Nothing is skipped.
 import { spawn, spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { cpus, freemem, loadavg } from 'node:os';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -67,6 +82,8 @@ const CREW = 'packages/crew';
 export const HOST_MARKER = 'WICKED-HOST';
 /** The retry-disclosure marker: what was re-run and why, or why nothing was. */
 export const RETRY_MARKER = 'WICKED-RETRY';
+/** crew's own build (`packages/crew` `build` = `tsc -p tsconfig.json`), run before the tests (crew#1173). */
+export const BUILD_ARGV = ['npm', 'run', 'build'];
 
 /**
  * The failure shapes that earn ONE re-run — all of them DEADLINES, none of them a verdict about the
@@ -275,20 +292,36 @@ function spawnCapturing(argv, cwd, out, err) {
 }
 
 /**
+ * Empty crew's `dist/` before the build (crew#1173), keeping `dist/studio`: that is the studio bundle
+ * `build:with-studio` copies in, not crew's compiler output, so it cannot be stale crew code and a
+ * local checkout should not lose it. A missing `dist/` is fine (the floor's fresh checkout).
+ */
+export function cleanDist(distDir) {
+  if (!existsSync(distDir)) return;
+  for (const name of readdirSync(distDir)) {
+    if (name === 'studio') continue;
+    rmSync(join(distDir, name), { recursive: true, force: true });
+  }
+}
+
+/**
  * Run the targeted suite and return the exit code the check should report.
  *
  * `io.run` is the seam the tests drive: `(argv, cwd) => Promise<{ status, output, spawnError }>`.
+ * `io.build` has the same shape and runs {@link BUILD_ARGV} once, before vitest; `io.cleanDist` empties
+ * `dist/` first ({@link cleanDist}). Both are crew#1173.
  */
 export async function runTargeted(files, io = {}) {
-  const run =
-    io.run ??
-    ((argv, cwd) =>
-      spawnCapturing(
-        argv,
-        cwd,
-        (s) => process.stdout.write(s),
-        (s) => process.stderr.write(s),
-      ));
+  const spawnStreaming = (argv, cwd) =>
+    spawnCapturing(
+      argv,
+      cwd,
+      (s) => process.stdout.write(s),
+      (s) => process.stderr.write(s),
+    );
+  const run = io.run ?? spawnStreaming;
+  const build = io.build ?? spawnStreaming;
+  const clean = io.cleanDist ?? (() => cleanDist(resolve(ROOT, CREW, 'dist')));
   const out = io.out ?? ((line) => process.stdout.write(`${line}\n`));
   const host = io.host ?? hostSnapshot;
   const now = io.now ?? Date.now;
@@ -303,70 +336,92 @@ export async function runTargeted(files, io = {}) {
   }
 
   out(formatHostLine(host(), 'pre'));
-  out(`test-related: ${p.argv.join(' ')} (cwd ${p.cwd})`);
-  const startedMs = now();
-  const first = await run(p.argv, p.cwd);
-  if (first.spawnError != null) {
-    out(`test-related: could not run vitest: ${first.spawnError}`);
-    out(formatHostLine(host(), 'post'));
-    return 1;
+  // crew#1173: the dist-CLI suites spawn dist/cli/index.js, and the floor's checkout has no dist/.
+  // Emptied first: tsc overwrites what it emits but never removes the output of a deleted source.
+  out(`test-related: ${BUILD_ARGV.join(' ')} (cwd ${p.cwd}) — a clean dist/ first, for the dist-CLI suites`);
+  let built;
+  try {
+    clean();
+    built = await build(BUILD_ARGV, p.cwd);
+  } catch (err) {
+    built = { status: 1, output: '', spawnError: `could not clear dist/: ${err instanceof Error ? err.message : String(err)}` };
   }
-  if (first.status === 0) {
-    out(formatHostLine(host(), 'post'));
-    return 0;
+  const buildFailed = built.spawnError != null || built.status !== 0;
+  if (buildFailed) {
+    out(
+      `test-related: the build FAILED (${built.spawnError ?? `exit ${built.status}`}) — running the tests anyway ` +
+        'for their evidence; the check fails whatever they report.',
+    );
   }
+  // The vitest attempt (and its one retry) decides the tests' code; the build's verdict is applied
+  // after it, so a failed build never reads as a pass, and the host line stays the LAST line.
+  const attempt = async () => {
+    out(`test-related: ${p.argv.join(' ')} (cwd ${p.cwd})`);
+    const startedMs = now();
+    const first = await run(p.argv, p.cwd);
+    if (first.spawnError != null) {
+      out(`test-related: could not run vitest: ${first.spawnError}`);
+      return 1;
+    }
+    if (first.status === 0) {
+      return 0;
+    }
 
-  const why = retryableFailureReason(first.output);
-  if (why === null) {
-    out(
-      `${RETRY_MARKER} none — the failure carries no deadline marker, so it is this change's failure and is ` +
-        'recorded as-is (crew#649: the retry must never launder a real failure).',
-    );
-    out(formatHostLine(host(), 'post'));
-    return first.status;
-  }
+    const why = retryableFailureReason(first.output);
+    if (why === null) {
+      out(
+        `${RETRY_MARKER} none — the failure carries no deadline marker, so it is this change's failure and is ` +
+          'recorded as-is (crew#649: the retry must never launder a real failure).',
+      );
+      return first.status;
+    }
 
-  const failed = failedTestFiles(first.output);
-  const elapsedS = (now() - startedMs) / 1000;
-  let retryArgv = null;
-  if (failed.length > 0) {
-    retryArgv = ['npx', 'vitest', 'run', '--no-file-parallelism', ...failed];
-    out(
-      `${RETRY_MARKER} ${why} — re-running the ${failed.length} named file(s) ONCE, serially, before recording ` +
-        `any failure: ${failed.join(', ')}`,
-    );
-  } else if (elapsedS < budgetS / 2) {
-    retryArgv = [...p.argv, '--no-file-parallelism'];
-    out(
-      `${RETRY_MARKER} ${why}, and the output named no test file (a worker died before it reported) — re-running ` +
-        `the whole targeted command ONCE, serially (${elapsedS.toFixed(0)}s of the ${budgetS}s budget used).`,
-    );
-  } else {
-    out(
-      `${RETRY_MARKER} none — ${why}, but the output named no test file and ` +
-        `${elapsedS.toFixed(0)}s of the ${budgetS}s budget is already spent; re-running the whole command could ` +
-        'blow the check bound. Recorded as a failure, INCONCLUSIVE: this verdict may track host load, not the diff (crew#649).',
-    );
-    out(formatHostLine(host(), 'post'));
-    return first.status;
-  }
+    const failed = failedTestFiles(first.output);
+    const elapsedS = (now() - startedMs) / 1000;
+    let retryArgv = null;
+    if (failed.length > 0) {
+      retryArgv = ['npx', 'vitest', 'run', '--no-file-parallelism', ...failed];
+      out(
+        `${RETRY_MARKER} ${why} — re-running the ${failed.length} named file(s) ONCE, serially, before recording ` +
+          `any failure: ${failed.join(', ')}`,
+      );
+    } else if (elapsedS < budgetS / 2) {
+      retryArgv = [...p.argv, '--no-file-parallelism'];
+      out(
+        `${RETRY_MARKER} ${why}, and the output named no test file (a worker died before it reported) — re-running ` +
+          `the whole targeted command ONCE, serially (${elapsedS.toFixed(0)}s of the ${budgetS}s budget used).`,
+      );
+    } else {
+      out(
+        `${RETRY_MARKER} none — ${why}, but the output named no test file and ` +
+          `${elapsedS.toFixed(0)}s of the ${budgetS}s budget is already spent; re-running the whole command could ` +
+          'blow the check bound. Recorded as a failure, INCONCLUSIVE: this verdict may track host load, not the diff (crew#649).',
+      );
+      return first.status;
+    }
 
-  const second = await run(retryArgv, p.cwd);
-  if (second.spawnError != null) {
-    out(`test-related: could not run the re-run: ${second.spawnError}`);
-    out(formatHostLine(host(), 'post'));
-    return first.status;
-  }
-  if (second.status === 0) {
-    out(
-      `${RETRY_MARKER} the re-run passed — every failure the first attempt reported was re-run on its own and ` +
-        'cleared, so it was contention, not this change (crew#649). Reporting exit 0.',
-    );
-  } else {
-    out(`${RETRY_MARKER} the re-run FAILED too — a reproducing failure is this change's, recorded as exit ${second.status}.`);
+    const second = await run(retryArgv, p.cwd);
+    if (second.spawnError != null) {
+      out(`test-related: could not run the re-run: ${second.spawnError}`);
+      return first.status;
+    }
+    if (second.status === 0) {
+      out(
+        `${RETRY_MARKER} the re-run passed — every failure the first attempt reported was re-run on its own and ` +
+          'cleared, so it was contention, not this change (crew#649). Reporting exit 0.',
+      );
+    } else {
+      out(`${RETRY_MARKER} the re-run FAILED too — a reproducing failure is this change's, recorded as exit ${second.status}.`);
+    }
+    return second.status;
+  };
+  const tests = await attempt();
+  const code = buildFailed && tests === 0 ? (built.status !== 0 ? built.status : 1) : tests;
+  if (buildFailed && tests === 0) {
+    out(`test-related: the tests passed, but the build failed — recorded as exit ${code} (crew#1173).`);
   }
   out(formatHostLine(host(), 'post'));
-  return second.status;
+  return code;
 }
 
 const isMain = process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url);

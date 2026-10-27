@@ -142,7 +142,13 @@ describe.skipIf(!supported)('recon fan-out as an engine campaign (crew#390/#391)
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ problem: 'inventory the API surface', repoRefs: ['alpha', 'beta'] }),
       });
-      expect(launch.status).toBe(201);
+      // 201 when the engine planned the campaign within RECON_ACK_WAIT_MS (2 s), else the
+      // documented slow-launch ack: 202 + `launching: true` with the same deterministic run ids
+      // (crew#471). Which one a host gets is the host's load, not the code: under load the 2 s
+      // race went to the ack and a pinned 201 failed (crew#1173). The intake-gate wait below is
+      // the condition this test really depends on.
+      expect([201, 202], JSON.stringify(launch.body)).toContain(launch.status);
+      if (launch.status === 202) expect(launch.body['launching']).toBe(true);
       expect(launch.body['campaignRegistered']).toBe(true);
       const campaign = launch.body['campaign'] as string;
       launchedCampaigns.push(campaign);

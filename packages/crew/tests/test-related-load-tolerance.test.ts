@@ -20,7 +20,8 @@
 // computed URL (tsc does not resolve it; the shape below is the contract this test pins).
 
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -43,6 +44,8 @@ type RunResult = { status: number; output: string; spawnError: string | null };
 interface TestRelated {
   HOST_MARKER: string;
   RETRY_MARKER: string;
+  BUILD_ARGV: string[];
+  cleanDist(distDir: string): void;
   stripAnsi(output: string): string;
   retryableFailureReason(output: string): string | null;
   failedTestFiles(output: string): string[];
@@ -52,6 +55,8 @@ interface TestRelated {
     files: string[],
     io: {
       run: (argv: string[], cwd: string) => Promise<RunResult>;
+      build?: (argv: string[], cwd: string) => Promise<RunResult>;
+      cleanDist?: () => void;
       out: (line: string) => void;
       host?: () => Record<string, unknown>;
       now?: () => number;
@@ -103,12 +108,15 @@ const REAL_FAILURE_OUTPUT = [
 const CREW_FILE = 'packages/crew/src/api/routes.ts';
 
 /** A recorder for `runTargeted`'s io seam: every command it ran, and every line it printed. */
-function recorder(results: RunResult[]) {
+function recorder(results: RunResult[], buildResult: RunResult = { status: 0, output: '', spawnError: null }) {
   const calls: { argv: string[]; cwd: string }[] = [];
+  const builds: { argv: string[]; cwd: string; vitestCallsBefore: number; cleanedBefore: number }[] = [];
+  let cleans = 0;
   const lines: string[] = [];
   let i = 0;
   return {
     calls,
+    builds,
     lines,
     io: {
       run: async (argv: string[], cwd: string): Promise<RunResult> => {
@@ -116,6 +124,14 @@ function recorder(results: RunResult[]) {
         const r = results[Math.min(i, results.length - 1)]!;
         i += 1;
         return r;
+      },
+      // A double: without it every case here would run a real `tsc` build (crew#1173).
+      build: async (argv: string[], cwd: string): Promise<RunResult> => {
+        builds.push({ argv, cwd, vitestCallsBefore: calls.length, cleanedBefore: cleans });
+        return buildResult;
+      },
+      cleanDist: () => {
+        cleans += 1;
       },
       out: (line: string) => lines.push(line),
       host: () => ({ load1: 130.4, load5: 120, cpus: 12, loadPerCpu: 10.87, freeMemMb: 300, swapFreeMb: 12.5, swapUsedMb: 15800 }),
@@ -202,6 +218,74 @@ describe('crew#649 — the targeted check tolerates worker-IPC deaths and record
     expect(pre).toContain('load1=130.40');
     expect(pre).toContain('swapFreeMb=12.50');
     expect(rec.lines[rec.lines.length - 1]!.startsWith(`${mod.HOST_MARKER} label=post`)).toBe(true);
+  });
+
+  // ── crew#1173: the floor's checkout has no dist/, and the dist-CLI suites spawn dist/cli/index.js ──
+  it('empties dist/ and builds it ONCE, before vitest, with crew\'s own build script in packages/crew', async () => {
+    const rec = recorder([
+      { status: 1, output: IPC_DEATH_OUTPUT, spawnError: null },
+      { status: 0, output: ' Test Files  1 passed (1)', spawnError: null },
+    ]);
+    const code = await mod.runTargeted([CREW_FILE], rec.io);
+
+    expect(code).toBe(0);
+    expect(mod.BUILD_ARGV).toEqual(['npm', 'run', 'build']);
+    expect(rec.builds, 'one clean build, not one per attempt').toEqual([
+      { argv: ['npm', 'run', 'build'], cwd: 'packages/crew', vitestCallsBefore: 0, cleanedBefore: 1 },
+    ]);
+  });
+
+  it('a failed build fails the check even when the tests pass — tsc emits on a type error', async () => {
+    const rec = recorder([{ status: 0, output: 'ok', spawnError: null }], { status: 2, output: 'TS2322', spawnError: null });
+    const code = await mod.runTargeted([CREW_FILE], rec.io);
+
+    expect(code, 'passing tests after a failed build prove nothing about the build').toBe(2);
+    expect(rec.calls, 'the tests still run, for their evidence').toHaveLength(1);
+    const text = rec.lines.join('\n');
+    expect(text).toContain('test-related: the build FAILED (exit 2)');
+    expect(text).toContain('the tests passed, but the build failed — recorded as exit 2');
+    expect(rec.lines[rec.lines.length - 1]!.startsWith(`${mod.HOST_MARKER} label=post`), 'the host line stays last').toBe(true);
+  });
+
+  it('a build that cannot even start (or a dist/ that cannot be cleared) fails the check too', async () => {
+    const rec = recorder([{ status: 0, output: 'ok', spawnError: null }], { status: 1, output: '', spawnError: 'spawn npm ENOENT' });
+    expect(await mod.runTargeted([CREW_FILE], rec.io)).toBe(1);
+
+    const locked = recorder([{ status: 0, output: 'ok', spawnError: null }]);
+    locked.io.cleanDist = () => {
+      throw new Error('EACCES');
+    };
+    expect(await mod.runTargeted([CREW_FILE], locked.io)).toBe(1);
+    expect(locked.builds, 'no build over a dist/ that was not cleared').toHaveLength(0);
+    expect(locked.lines.join('\n')).toContain('could not clear dist/: EACCES');
+  });
+
+  it('a failed build AND failing tests report the tests\' code (a real failure is never re-labelled)', async () => {
+    const rec = recorder([{ status: 1, output: REAL_FAILURE_OUTPUT, spawnError: null }], { status: 2, output: '', spawnError: null });
+    expect(await mod.runTargeted([CREW_FILE], rec.io)).toBe(1);
+  });
+
+  it('cleanDist removes stale compiler output, keeps the studio bundle, and tolerates no dist/', () => {
+    const dist = join(mkdtempSync(join(tmpdir(), 'crew-dist-')), 'dist');
+    expect(() => mod.cleanDist(dist), 'the floor\'s fresh checkout has no dist/').not.toThrow();
+    mkdirSync(join(dist, 'cli'), { recursive: true });
+    mkdirSync(join(dist, 'studio'), { recursive: true });
+    writeFileSync(join(dist, 'cli', 'index.js'), '// output of a source the change deleted');
+    writeFileSync(join(dist, 'gone.js'), '');
+    writeFileSync(join(dist, 'studio', 'index.html'), '<html>');
+    mod.cleanDist(dist);
+    expect(readdirSync(dist)).toEqual(['studio']);
+    expect(existsSync(join(dist, 'studio', 'index.html'))).toBe(true);
+    rmSync(dirname(dist), { recursive: true, force: true });
+  });
+
+  it('builds nothing when no crew file was touched (the skip path stays free)', async () => {
+    const rec = recorder([{ status: 0, output: 'ok', spawnError: null }]);
+    const code = await mod.runTargeted(['README.md'], rec.io);
+
+    expect(code).toBe(0);
+    expect(rec.builds).toHaveLength(0);
+    expect(rec.calls).toHaveLength(0);
   });
 
   // ── The input production actually hands these functions (review of #656, defect 1) ───────────
