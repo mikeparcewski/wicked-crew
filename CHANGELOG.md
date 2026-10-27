@@ -19,6 +19,7 @@ mentioned only where a daemon release depends on them.
   The file is regenerated, and `tests/api-sample-generated-fresh.test.ts` now fails when it no
   longer matches what `npm run generate:api-tests` writes (the generator's render is a pure,
   importable function).
+- **While the skills boot ladder is still publishing, diagnostics no longer tells you to install garden (crew#1149, api-types 0.144.0).** `/diagnostics` skills findings and `/health.warnings` carry one info `skills.publishing` finding ("launches wait until they land") instead of the `skills.base-skill` error, which returns as before if the ladder lands without the base skill; the boot state-home survey no longer tries to classify the `refused/skills.publishing` placeholder (the survey after the ladder lands still runs).
 
 ## [0.16.5] — 2026-10-27
 

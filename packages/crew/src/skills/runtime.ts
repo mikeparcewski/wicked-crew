@@ -193,11 +193,11 @@ export type SkillsHealthState = 'published' | 'fallback' | 'blocked' | 'config-e
 /** `skills.base-skill` (crew#554 / DES-L4 PR-⑧): the configured base skill is not in the published generation — an ERROR (the engine refuses launches at intake; `'require'` is the only policy). */
 /** `skills.garden` (crew#753): the installed wicked-garden found at seed is older than {@link REQUIRED_GARDEN_VERSION} — an ERROR; launches and onboarding are refused until a newer garden is installed. */
 /** `skills.publish-warning` (F-E2E-002): one per warning the publish of the CURRENT generation landed with (a broken reference the skill's author owns) — published as found, reported here so the warnings are not only in the daemon log. */
-export type SkillsHealthFindingKind = 'skills.fallback' | 'skills.blocked' | 'skills.config' | 'skills.source' | 'skills.manifest' | 'skills.stale-rules' | 'skills.base-skill' | 'skills.phase-skill' | 'skills.garden' | 'skills.publish-warning' | 'skills.installed-ahead';
+export type SkillsHealthFindingKind = 'skills.fallback' | 'skills.blocked' | 'skills.config' | 'skills.source' | 'skills.manifest' | 'skills.stale-rules' | 'skills.base-skill' | 'skills.phase-skill' | 'skills.garden' | 'skills.publish-warning' | 'skills.installed-ahead' | 'skills.publishing';
 
 export interface SkillsHealthFinding {
   kind: SkillsHealthFindingKind;
-  severity: 'warning' | 'error';
+  severity: 'info' | 'warning' | 'error';
   message: string;
 }
 
@@ -234,6 +234,19 @@ export function disabledSkillsHealth(): SkillsHealth {
  */
 export function refusalPath(root: string, kind: 'skills.blocked' | 'skills.config' | 'skills.garden' | 'skills.publishing'): string {
   return join(root, REFUSED_DIRNAME, kind);
+}
+
+/** crew#1149: the one finding reported while the boot ladder is still publishing (instead of a base-skill error the ladder has not yet judged). */
+const PUBLISHING_FINDING: SkillsHealthFinding = {
+  kind: 'skills.publishing',
+  severity: 'info',
+  message: 'Skills are still publishing; launches wait until they land.',
+};
+
+/** Is `path` the `refused/skills.publishing` placeholder the engine input holds while the ladder runs (either separator)? */
+export function isPublishingPlaceholder(path: string): boolean {
+  const parts = path.split(/[\\/]+/).filter((p) => p !== '');
+  return parts.length >= 2 && parts[parts.length - 1] === 'skills.publishing' && parts[parts.length - 2] === REFUSED_DIRNAME;
 }
 
 export interface SkillsRuntimeOptions {
@@ -540,6 +553,21 @@ export class SkillsRuntime {
   }
 
   /**
+   * crew#1149: the base skill posture as REPORTED. While the ladder is still publishing nothing is
+   * published to judge against, so the posture's "not handed" finding would tell the user to install
+   * what they have; it is withheld (launches wait anyway) and {@link publishingFinding} says why.
+   */
+  reportedBaseSkill(): BaseSkillPosture | null {
+    const posture = this.lastBaseSkill;
+    return this.lastHealth.state === 'publishing' && posture !== null ? { ...posture, finding: null } : posture;
+  }
+
+  /** The single info finding reported while the ladder is publishing; `null` once it has landed. */
+  publishingFinding(): SkillsHealthFinding | null {
+    return this.lastHealth.state === 'publishing' ? PUBLISHING_FINDING : null;
+  }
+
+  /**
    * Re-judge the base skill against the CURRENT published generation and the editor catalog, and
    * export (or delete) `WICKED_BASE_SKILL_REF` accordingly (base-skill.ts). Called by every ladder
    * outcome (`record`), after every publish, after a baseline refresh (the catalog moved, so
@@ -616,6 +644,7 @@ export class SkillsRuntime {
     const base = this.lastHealth;
     // The base skill posture rides EVERY state (crew#554): under fallback / config-error nothing is
     // known to be handed, which is exactly what the operator must see beside the ladder's finding.
+    if (base.state === 'publishing') return this.withBaseSkill({ ...base, findings: [PUBLISHING_FINDING] });
     if (base.state !== 'published' && base.state !== 'blocked') return this.withBaseSkill(base);
     let manifest: SkillManifest;
     try {
@@ -650,7 +679,7 @@ export class SkillsRuntime {
 
   /** The reported block carries the base skill posture and its finding (crew#554) — the seam's one answer to "is the discipline skill handed". */
   private withBaseSkill(health: SkillsHealth): SkillsHealth {
-    const posture = this.lastBaseSkill;
+    const posture = health.state === 'publishing' ? this.reportedBaseSkill() : this.lastBaseSkill;
     const findings = posture?.finding === null || posture?.finding === undefined ? health.findings : [...health.findings, posture.finding];
     return { ...health, findings, baseSkill: posture };
   }

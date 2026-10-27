@@ -12,13 +12,14 @@ process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { startServer, type StartedServer } from '../src/api/server.js';
 import { CoreAdapter, type LaunchNotice } from '../src/core/adapter.js';
 import { DEFAULT_SETTINGS } from '../src/core/types.js';
 import { crewStateHome, setCrewStateHome } from '../src/projects/state-home.js';
 import { SKILLS_SNAPSHOT_ENGINE_ENV } from '../src/skills/engine-env.js';
+import { isPublishingPlaceholder } from '../src/skills/runtime.js';
 import { pluginSourceAt } from '../src/skills/plugin-source.js';
 import type { VenvProvisioner } from '../src/skills/venv.js';
 import { removeScratch } from './setup/scratch.js';
@@ -107,6 +108,84 @@ describe('skills boot off the critical path (crew#1145)', () => {
     expect(handed).toHaveLength(1);
     // The safety claim: the first launch read the snapshot the ladder exported, not an unset input.
     expect(handed[0]?.engineInput?.endsWith(join('snapshots', '000001'))).toBe(true);
+  });
+
+  it('while publishing, diagnostics and health carry one info finding and no base-skill error; the real missing-base-skill error returns once the ladder lands (crew#1149)', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    const provisioner: VenvProvisioner = async (baselineDir) => {
+      await held;
+      mkdirSync(join(baselineDir, '.venv', 'bin'), { recursive: true });
+      writeFileSync(join(baselineDir, '.venv', 'bin', 'python'), '#!/bin/sh\n');
+      return 'synced';
+    };
+    // The state-home survey classifies through the engine's preflighter: record what it is handed.
+    const real = CoreAdapter.stateHomePreflighter();
+    const seen: Array<string | null> = [];
+    let settledCall!: () => void;
+    const afterLanding = new Promise<void>((r) => {
+      settledCall = r;
+    });
+    const spy = vi.spyOn(CoreAdapter, 'stateHomePreflighter').mockReturnValue(
+      real === null
+        ? null
+        : async (snapshotPath, dbPath) => {
+            seen.push(snapshotPath);
+            if (snapshotPath !== null) settledCall();
+            return real(snapshotPath, dbPath);
+          },
+    );
+    const s = await startServer(adapter, 0, '127.0.0.1', {
+      projectEvents: { disabled: true },
+      interactiveWsRelay: { disabled: true },
+      stallWatchdog: { enabled: false },
+      auditPath: join(dir, 'audit.log'),
+      studioRoot: join(dir, 'no-studio'),
+      skills: { source: () => pluginSourceAt(FIXTURE_PLUGIN), provisionVenv: provisioner, background: true },
+    });
+    started.push(s);
+    type Finding = { kind: string; severity: string; message: string };
+    const read = async () => {
+      const d = (await s.app.inject({ method: 'GET', url: '/api/v1/diagnostics' })).json() as {
+        skills: { state: string; findings: Finding[]; baseSkill: { finding: Finding | null } | null };
+      };
+      const h = (await s.app.inject({ method: 'GET', url: '/api/v1/health' })).json() as { warnings?: Finding[] };
+      return { d, h };
+    };
+    try {
+      for (let i = 0; i < 3; i++) {
+        const { d, h } = await read();
+        expect(d.skills.state).toBe('publishing');
+        expect(d.skills.findings.filter((f) => f.kind === 'skills.publishing')).toEqual([
+          { kind: 'skills.publishing', severity: 'info', message: 'Skills are still publishing; launches wait until they land.' },
+        ]);
+        expect(d.skills.findings.some((f) => f.kind === 'skills.base-skill')).toBe(false);
+        expect(d.skills.baseSkill?.finding ?? null).toBeNull();
+        expect((h.warnings ?? []).filter((w) => w.kind === 'skills.publishing')).toHaveLength(1);
+        expect((h.warnings ?? []).some((w) => w.kind === 'skills.base-skill')).toBe(false);
+      }
+      // The boot survey did not hand the placeholder to the engine classifier (agy on #1170: and it
+      // did run, so the check is not vacuous on a host whose addon carries the preflighter).
+      if (real !== null) await vi.waitFor(() => expect(seen.length).toBeGreaterThan(0), { timeout: 10_000 });
+      expect(seen.every((p) => p === null)).toBe(true);
+
+      release();
+      await s.app.skillsBootSettled?.();
+      if (real !== null) await afterLanding; // the post-ladder survey ran with the real snapshot
+      expect(seen.some((p) => p !== null && !isPublishingPlaceholder(p))).toBe(real !== null);
+
+      // The fixture plugin has no default base skill: the genuine error is back, the notice is gone.
+      const { d, h } = await read();
+      expect(d.skills.findings.some((f) => f.kind === 'skills.publishing')).toBe(false);
+      expect(d.skills.findings.find((f) => f.kind === 'skills.base-skill')?.severity).toBe('error');
+      expect(h.warnings?.find((w) => w.kind === 'skills.base-skill')?.severity).toBe('error');
+      expect(h.warnings?.some((w) => w.kind === 'skills.publishing')).toBe(false);
+    } finally {
+      release();
+      spy.mockRestore();
+    }
   });
 
   it('a warm background boot verifies the current generation once and exports it', async () => {

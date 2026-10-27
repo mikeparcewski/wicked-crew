@@ -131,7 +131,7 @@ import { applyCouncilSettings } from '../core/council-settings.js';
 import { builtinPresetSkillRefs, coreSkillRefs, registeredSkillRefs } from '../skills/core-closure.js';
 import type { PluginSource } from '../skills/plugin-source.js';
 import { assertSkillsRootFenced } from '../skills/root-fence.js';
-import { SkillsRuntime } from '../skills/runtime.js';
+import { SkillsRuntime, isPublishingPlaceholder } from '../skills/runtime.js';
 import { SKILLS_SNAPSHOT_ENGINE_ENV } from '../skills/engine-env.js';
 import { assertWickedRootsOutsideStateHome, StateHomeWatch } from '../projects/state-home-preflight.js';
 import { resolveSkillsRoot, SkillsStore } from '../skills/store.js';
@@ -751,7 +751,8 @@ export async function createServer(
     dbPath: typeof adapter.dbPath === 'string' && adapter.dbPath !== '' ? adapter.dbPath : null,
     snapshotPath: () => {
       const v = process.env[SKILLS_SNAPSHOT_ENGINE_ENV];
-      return v === undefined || v === '' ? null : v;
+      // crew#1149: the `refused/skills.publishing` placeholder is no snapshot; survey from the db until the ladder lands.
+      return v === undefined || v === '' || isPublishingPlaceholder(v) ? null : v;
     },
     engine: CoreAdapter.stateHomePreflighter(),
   });
