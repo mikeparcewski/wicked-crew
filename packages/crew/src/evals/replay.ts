@@ -11,6 +11,8 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { childEnvWithBootEstateDb } from '../core/governance-store.js';
+
 import type { EvalCase, Observed, SuiteId } from './types.js';
 
 export interface ReplayAdapter {
@@ -41,7 +43,7 @@ export type RunPython = (args: string[], stdin: string, timeoutMs: number) => Pr
 
 export const runPython: RunPython = (args, stdin, timeoutMs) =>
   new Promise((resolve) => {
-    const child = spawn('python3', args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn('python3', args, { stdio: ['pipe', 'pipe', 'pipe'], env: childEnvWithBootEstateDb(process.env) });
     let stdout = '';
     let stderr = '';
     const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);

@@ -165,13 +165,13 @@ describe('the scorer', () => {
 describe('normalization drift', () => {
   it('flags an input judged differently by project, and not one judged the same', () => {
     const drift = driftKeys([
-      cls('a', 'base_red', 'base_red', { project: 'wicked-core', inputKey: 'floor:base_red' }),
-      cls('b', 'boundary_deny', 'base_red', { project: 'wicked-crew', inputKey: 'floor:base_red' }),
-      cls('c', 'real_fail', 'real_fail', { project: 'wicked-core', inputKey: 'floor:real_fail' }),
-      cls('d', 'real_fail', 'real_fail', { project: 'wicked-crew', inputKey: 'floor:real_fail' }),
+      cls('a', 'base_red', 'base_red', { project: 'repo-core', inputKey: 'floor:base_red' }),
+      cls('b', 'boundary_deny', 'base_red', { project: 'repo-crew', inputKey: 'floor:base_red' }),
+      cls('c', 'real_fail', 'real_fail', { project: 'repo-core', inputKey: 'floor:real_fail' }),
+      cls('d', 'real_fail', 'real_fail', { project: 'repo-crew', inputKey: 'floor:real_fail' }),
     ]);
     expect(drift).toHaveLength(1);
-    expect(drift[0]).toMatchObject({ inputKey: 'floor:base_red', axis: 'project', observed: { 'wicked-core': ['base_red'], 'wicked-crew': ['boundary_deny'] } });
+    expect(drift[0]).toMatchObject({ inputKey: 'floor:base_red', axis: 'project', observed: { 'repo-core': ['base_red'], 'repo-crew': ['boundary_deny'] } });
   });
 
   it('a cross-project run finds a planted mismatch from a classifier that behaves differently by project', async () => {
@@ -234,7 +234,7 @@ describe('synthetic cases', () => {
 const check = (outcome: string, decision: string | null = null) => ({ name: 'test', outcome, envCannotRun: [], decision: decision === null ? null : { outcome: decision } });
 
 describe('capture: the floor class', () => {
-  const runs = [{ session: { id: 'r1', repo_ref: 'wicked-crew' }, units: [] }];
+  const runs = [{ session: { id: 'r1', repo_ref: 'repo-crew' }, units: [] }];
   const events: EventLike[] = [
     { type: 'repoChecksEvaluated', ord: 6, seq: 1, ts: 100, attempt: 2, checks: [check('passed'), check('failed', 'base_red_unseparated')] },
     // The rig's 64f05d3d attempt 2: a floor that RAN, escalated as a boundary deny.
@@ -259,7 +259,7 @@ describe('capture: the floor class', () => {
   it('a boundary deny on a floor that ran is wrong by rule; an operator override relabels a "real" failure', () => {
     const cs = captureFloorCases(input);
     expect(cs).toHaveLength(2);
-    expect(cs[0]).toMatchObject({ project: 'wicked-crew', observed: { label: 'boundary_deny' }, expected: { label: 'base_red', by: 'rule' } });
+    expect(cs[0]).toMatchObject({ project: 'repo-crew', observed: { label: 'boundary_deny' }, expected: { label: 'base_red', by: 'rule' } });
     expect(cs[1]).toMatchObject({ observed: { label: 'real_fail' }, expected: { label: 'inconclusive', by: 'operator' }, evidence: { decisionId: 'd1' } });
     // Idempotent: the same store gives the same ids.
     expect(captureFloorCases(input).map((c) => c.id)).toEqual(cs.map((c) => c.id));
@@ -269,7 +269,7 @@ describe('capture: the floor class', () => {
 describe('capture: QE verdicts', () => {
   it('a FAIL whose own reason says inconclusive is a misread; one tree judged twice should agree', () => {
     const input: CaptureInput = {
-      runs: [{ session: { id: 'r2', repo_ref: 'wicked-core' }, units: [] }],
+      runs: [{ session: { id: 'r2', repo_ref: 'repo-core' }, units: [] }],
       events: () => [{ type: 'qeAcceptanceDecided', ord: 9, seq: 1, ts: Date.parse('2026-10-26T07:00:00Z'), qe: { tree: 'T1' } }],
       decisions: [],
       qeVerdicts: [
@@ -304,7 +304,7 @@ describe('capture: attribution', () => {
     const input: CaptureInput = {
       runs: [
         {
-          session: { id: 'r3', repo_ref: 'wicked-core' },
+          session: { id: 'r3', repo_ref: 'repo-core' },
           units: [
             { ord: 6, stage: 'build', role: 'creator', assigned_cli: 'claude', authored_by: ['claude', 'copilot'] },
             { ord: 8, stage: 'test', role: 'evaluator', assurance: { creator: 'codex' } },
@@ -395,7 +395,7 @@ describe('the archetype replay adapter', () => {
 describe('routes and store', () => {
   it('runs over the daemon’s own store, stores the report, lists it, and calls a trend on the second run', async () => {
     const store = new DefaultEvalStore(tmp());
-    const runs = [{ session: { id: 'r1', repo_ref: 'wicked-crew' }, units: [] }];
+    const runs = [{ session: { id: 'r1', repo_ref: 'repo-crew' }, units: [] }];
     const events: EventLike[] = Array.from({ length: 6 }, (_, i) => [
       { type: 'repoChecksEvaluated', ord: i, seq: i * 2, ts: i * 10, checks: [check('failed', 'base_red_unseparated')] },
       { type: 'gateEscalated', ord: i, seq: i * 2 + 1, ts: i * 10 + 1, condition: 'floor_failed', denialSource: 'repo_checks' },
@@ -449,8 +449,8 @@ describe('the run-evals CLI', () => {
       sent = JSON.parse(String(init.body));
       return new Response(JSON.stringify(report), { status: 200 });
     }) as unknown as typeof fetch;
-    expect(await cliMain(['--project', 'wicked-core'], fake)).toBe(0);
-    expect(sent).toEqual({ project: 'wicked-core' });
+    expect(await cliMain(['--project', 'repo-core'], fake)).toBe(0);
+    expect(sent).toEqual({ project: 'repo-core' });
     const refuse = (async () => new Response('no', { status: 400 })) as unknown as typeof fetch;
     expect(await cliMain([], refuse)).toBe(1);
   });
