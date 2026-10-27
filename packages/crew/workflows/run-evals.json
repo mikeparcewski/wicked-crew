@@ -1,5 +1,5 @@
 {
-  "$comment": "DES-DEFAULT-EVALS-001 §7. Run the default evals: score the system's own judgments (what needs you, floor decisions, QE verdicts, who built it, steering firing, recall, prompt routing, normalizing) against what really happened in this daemon's runs, across every project. One Tool step, deterministic, no seat, no floor: the step asks THIS daemon ({daemon}: crew registers the def once it listens and fills in its bound URL, because a Tool step's environment is cleared to the validator allowlist) to run the evals, and the report is kept where Evaluate reads it. required_instruments is [] on purpose: nothing is built, so there is nothing to judge.",
+  "$comment": "DES-DEFAULT-EVALS-001 §7. Run the default evals: score the system's own judgments (what needs you, floor decisions, QE verdicts, who built it, steering firing, recall, prompt routing, normalizing) against what really happened in this daemon's runs, across every project. The daemon runs the evals itself when it launches this workflow (a schedule, /workflow-run-evals, POST /runs), keeps the report where Evaluate reads it, and writes a copy to {runs_dir}/<run>/report.json. The one Tool step reads that copy back by $WICKED_RUN_ID and prints its summary: no network, no daemon URL, no credentials (a Tool step's environment is cleared to the validator allowlist). No seat, no floor; required_instruments is [] on purpose: nothing is built, so there is nothing to judge.",
   "id": "run-evals",
   "title": "Run the default evals",
   "summary": "Checks how well the system's own judgments agree with what really happened in your runs, per project and across projects.",
@@ -12,7 +12,7 @@
     {
       "id": "evaluate",
       "kind": "recon",
-      "executor": { "type": "tool", "cmd": ["{node}", "{run_cli}", "--daemon", "{daemon}"] },
+      "executor": { "type": "tool", "cmd": ["{node}", "{run_cli}", "--runs-dir", "{runs_dir}"] },
       "instructions": null,
       "gate_type": null,
       "gate": "auto",

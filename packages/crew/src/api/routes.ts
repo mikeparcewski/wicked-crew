@@ -137,7 +137,8 @@ import { inventoryComplete, parseInventoryClaims, type InventoryClaim } from '..
 import type { RejudgeOffer, RunInventoryResponse } from 'wicked-crew-api-types';
 import { ApproveEditSchema, approveEdited, captureLaunchRoots, editInFlight, FileProposalSchema, registerCaptureRoutes } from './capture.js';
 import { registerTestingRoutes } from './testing.js';
-import { registerDefaultEvalRoutes } from '../evals/routes.js';
+import { registerDefaultEvalRoutes, runAndRecord, type DefaultEvalDeps } from '../evals/routes.js';
+import { prepareRunEvalsLaunch, RUN_EVALS_WORKFLOW } from '../evals/workflow.js';
 import { defaultReplaySet } from '../evals/replay.js';
 import type { DefaultEvalStore } from '../evals/store.js';
 import type { DecisionLike, EventLike, RunLike } from '../evals/capture.js';
@@ -1050,6 +1051,8 @@ export interface RegisteredRoutes {
   /** A run as `GET /runs` serves it: launch time, delivery and project joined from the daemon's own records
    *  (DES-RUNS-REVIEW-001: the run review folds these, never the engine's bare record). */
   decorateRun: (view: SessionView) => SessionView;
+  /** DES-DEFAULT-EVALS-001 §7: prepare a `run-evals` launch (run the evals in-process, write the report copy). */
+  runEvalsPrepare: (input: LaunchRunInput) => Promise<void>;
 }
 
 export interface RuntimeDeps {
@@ -1244,6 +1247,8 @@ export interface RuntimeDeps {
   /** The default-evals history (DES-DEFAULT-EVALS-001) — `createServer` builds one beside the eval store; a
    *  directly-driven route set computes and answers runs but stores none unless a test injects one. */
   defaultEvalStore?: DefaultEvalStore;
+  /** (tests) where `run-evals` launches write their report copy; default `~/.wicked/evals` (`defaultEvalRunsDir`). */
+  evalRunsDir?: string;
   /** The skills seam (skills keystone) — `createServer` builds one over the daemon state home
    *  (seeded from the installed plugin, published); a directly-driven route set gets none and
    *  `/skills*` answers 503 unless a test injects one over a fixture root. */
@@ -2841,6 +2846,16 @@ export function registerRoutes(
     }
     // DES-RUNS-REVIEW-001 §3: a hand launch of the run review (`/workflow-review-recent-work`) is prepared like a
     // scheduled one: its snapshot written, repo-less, one seat, its review directory as the only write root.
+    // DES-DEFAULT-EVALS-001 §7: a launch of `run-evals` (`/workflow-run-evals`) is prepared by the daemon, which runs
+    // the evals in-process and writes the report copy its Tool step reads; it delivers nothing.
+    if (b.workflow === RUN_EVALS_WORKFLOW) {
+      try {
+        await runEvalsPrepare(input);
+      } catch (err) {
+        return reply.code(409).send({ error: `the default evals could not be prepared: ${message(err)}` });
+      }
+      deliver = 'none';
+    }
     const isReview = b.workflow === REVIEW_WORKFLOW && runtime.reviewLaunch !== undefined;
     if (isReview) {
       try {
@@ -8114,7 +8129,7 @@ export function registerRoutes(
   // ── Default evals (DES-DEFAULT-EVALS-001) — the system's own judgments, scored against what happened ─────
   // Read-only over the run store (sessions, events, the operator's decisions, QE ledgers, the latest steering
   // eval); the only write is the report, under the eval store's root.
-  registerDefaultEvalRoutes(app, {
+  const defaultEvalDeps: DefaultEvalDeps = {
     ...(runtime.defaultEvalStore !== undefined ? { store: runtime.defaultEvalStore } : {}),
     // Served runs, as GET /runs serves them: the derived title and the project membership join (codex r1).
     runs: async () => (await adapter.sessionsDetail()).map(decorateRun) as unknown as RunLike[],
@@ -8122,7 +8137,8 @@ export function registerRoutes(
     decisions: () => (runtime.decisionLedger?.list({}) ?? []) as unknown as DecisionLike[],
     ...(runtime.evalStore !== undefined ? { steeringEvals: runtime.evalStore } : {}),
     replay: defaultReplaySet({ gardenRoot: gardenRootFor(process.env) }),
-  });
+  };
+  registerDefaultEvalRoutes(app, defaultEvalDeps);
 
   // ── Skills (skills keystone) — the file manager over the daemon-owned garden plugin root ─────
   // Manifest + typed reads, guarded CAS writes, refresh/publish/analyze. `createServer` injects the
@@ -8588,5 +8604,8 @@ export function registerRoutes(
   });
   registerSearchRoutes(app, search);
 
-  return { decideGate, decisions, chatRecorder, considerations, search, decorateRun };
+  const runEvalsPrepare = async (input: LaunchRunInput): Promise<void> => {
+    await prepareRunEvalsLaunch(input, () => runAndRecord(defaultEvalDeps, { project: null, baseline: false, id: randomUUID(), now: new Date() }), runtime.evalRunsDir);
+  };
+  return { decideGate, decisions, chatRecorder, considerations, search, decorateRun, runEvalsPrepare };
 }

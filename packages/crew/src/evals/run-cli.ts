@@ -3,9 +3,11 @@
  * `run-evals` (DES-DEFAULT-EVALS-001 §7): the Tool step of the `run-evals` workflow, and a plain command.
  *
  *   node dist/evals/run-cli.js [--daemon <url>] [--project <id>|all] [--baseline] [--out <file>]
+ *   node dist/evals/run-cli.js --runs-dir <dir>      (the workflow's Tool step)
  *
- * The daemon is `--daemon`, else `$WICKED_CREW_URL` (the daemon exports it to its children, so the workflow's Tool
- * step reaches the daemon that launched it). With neither, it refuses: it never guesses a port.
+ * From a shell, the daemon is `--daemon`, else `$WICKED_CREW_URL`; with neither it refuses (it never guesses a port).
+ * As the `run-evals` workflow's Tool step it calls nothing: the daemon ran the evals when it launched the run and
+ * wrote `<dir>/$WICKED_RUN_ID/report.json`; the step reads that back and prints its summary.
  *
  * It asks the daemon to run the default evals (`POST /api/v1/testing/default-evals/run`), so the daemon's own store
  * is what gets scored and the report is stored where studio reads it. It prints a short plain summary, writes the
@@ -13,7 +15,8 @@
  * 1 when the daemon refused or could not be reached.
  */
 
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 import type { DefaultEvalReport } from './types.js';
 
@@ -23,6 +26,8 @@ export interface CliArgs {
   project: string | null;
   baseline: boolean;
   out: string | null;
+  /** The workflow's mode: read `<runsDir>/$WICKED_RUN_ID/report.json` back instead of calling a daemon. */
+  runsDir: string | null;
 }
 
 export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = process.env): CliArgs {
@@ -31,6 +36,7 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
     project: null,
     baseline: false,
     out: null,
+    runsDir: null,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -46,6 +52,7 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
       args.project = p === 'all' ? null : p;
     } else if (a === '--baseline') args.baseline = true;
     else if (a === '--out') args.out = next();
+    else if (a === '--runs-dir') args.runsDir = next();
     else throw new Error(`unknown argument ${String(a)}`);
   }
   return args;
@@ -79,6 +86,22 @@ export async function main(argv: readonly string[], fetchImpl: typeof fetch = fe
   } catch (err) {
     process.stderr.write(`run-evals: ${err instanceof Error ? err.message : String(err)}\n`);
     return 1;
+  }
+  if (args.runsDir !== null) {
+    const runId = env['WICKED_RUN_ID'];
+    if (runId === undefined || runId === '' || !/^[A-Za-z0-9_.-]+$/.test(runId)) {
+      process.stderr.write('run-evals: --runs-dir needs the run id in WICKED_RUN_ID (the engine hands it to every Tool step)\n');
+      return 1;
+    }
+    let report: DefaultEvalReport;
+    try {
+      report = JSON.parse(readFileSync(join(args.runsDir, runId, 'report.json'), 'utf8')) as DefaultEvalReport;
+    } catch (err) {
+      process.stderr.write(`run-evals: the daemon prepared no report for run ${runId}: ${err instanceof Error ? err.message : String(err)}\n`);
+      return 1;
+    }
+    process.stdout.write(`${summaryLines(report).join('\n')}\n`);
+    return 0;
   }
   if (args.daemon === null) {
     process.stderr.write('run-evals: no daemon named: pass --daemon <url> or set WICKED_CREW_URL (it never guesses a port)\n');

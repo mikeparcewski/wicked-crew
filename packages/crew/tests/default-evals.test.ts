@@ -3,7 +3,7 @@
  * per-project and cross-project runner (a planted normalization mismatch is found), real and synthetic reported
  * apart, the store, the routes and the CLI.
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -26,7 +26,8 @@ import {
 import { archetypeAdapter, type ReplaySet } from '../src/evals/replay.js';
 import { registerDefaultEvalRoutes } from '../src/evals/routes.js';
 import { previousScores, runDefaultEvals } from '../src/evals/runner.js';
-import { fillRunEvalsWorkflow, loadRunEvalsWorkflow } from '../src/evals/workflow.js';
+import { fillRunEvalsWorkflow, loadRunEvalsWorkflow, prepareRunEvalsLaunch } from '../src/evals/workflow.js';
+import type { LaunchRunInput } from '../src/core/types.js';
 import { registerRunEvals } from '../src/api/server.js';
 import { captureArchetypeCases } from '../src/evals/capture.js';
 import { AuditLog } from '../src/api/audit.js';
@@ -571,24 +572,71 @@ describe('review r1', () => {
 });
 
 describe('the run-evals workflow (data)', () => {
-  it('fills its tokens, keeps one deterministic Tool step with no floor and no instruments, and refuses an unfilled token', () => {
-    const def = loadRunEvalsWorkflow({ node: '/bin/node', runCli: '/x/run-cli.js', daemon: 'http://127.0.0.1:7721' });
+  it('fills its tokens, keeps one deterministic Tool step with no floor and no instruments', () => {
+    const def = loadRunEvalsWorkflow({ node: '/bin/node', runCli: '/x/run-cli.js', runsDir: '/r' });
     expect(def.id).toBe('run-evals');
     expect((def as unknown as { required_instruments: unknown[] }).required_instruments).toEqual([]);
     expect(def.phases).toHaveLength(1);
-    expect(def.phases[0]).toMatchObject({ executor: { type: 'tool', cmd: ['/bin/node', '/x/run-cli.js', '--daemon', 'http://127.0.0.1:7721'] }, executes_code: false, verified_evidence: false });
+    expect(def.phases[0]).toMatchObject({ executor: { type: 'tool', cmd: ['/bin/node', '/x/run-cli.js', '--runs-dir', '/r'] }, executes_code: false, verified_evidence: false });
     expect(JSON.stringify(def)).not.toMatch(/\$comment/);
-    expect(() => fillRunEvalsWorkflow({ id: 'run-evals', phases: [{ executor: { type: 'tool', cmd: ['{node}', '{other}', '{run_cli}'] } }] }, { node: 'n', runCli: '{run_cli}', daemon: 'd' })).toThrow(/not filled/);
   });
 
-  it('is registered with the bound URL, and a refusal never fails the boot', async () => {
+  it('refuses a misspelt token in the def and an empty token value (agy r1 on #1167)', () => {
+    const ok = { node: 'n', runCli: 'r', runsDir: 'd' };
+    expect(() => fillRunEvalsWorkflow({ id: 'run-evals', phases: [{ executor: { type: 'tool', cmd: ['{node}', '{other}'] } }] }, ok)).toThrow(/\{other\} was not filled/);
+    expect(() => fillRunEvalsWorkflow({ id: 'run-evals', phases: [] }, { ...ok, runsDir: ' ' })).toThrow(/runsDir token is empty/);
+  });
+
+  it('a launch is prepared in-process: the evals run, their copy is written, and the run is repo-less with no seat', async () => {
+    const dir = tmp();
+    const input = { problem: '', sessionId: 'run-1', clisJson: '["claude"]', repoRef: 'repo-a' } as unknown as LaunchRunInput;
+    const report = (await runDefaultEvals({ id: 'e1', now: new Date(0), project: null, cases: [cls('a', 'x', 'x')], replay: NO_REPLAY, previous: {}, suites: ['floor-class'] })).report;
+    await prepareRunEvalsLaunch(input, async () => report, dir);
+    expect(input).toMatchObject({ workflow: 'run-evals', clisJson: '[]', problem: 'Run the default evals across every project' });
+    expect((input as { repoRef?: string }).repoRef).toBeUndefined();
+    expect(JSON.parse(readFileSync(join(dir, 'run-1', 'report.json'), 'utf8')).id).toBe('e1');
+    // The Tool step reads it back by its run id, calls nothing, and prints the summary.
+    const never = vi.fn();
+    expect(await cliMain(['--runs-dir', dir], never as unknown as typeof fetch, { WICKED_RUN_ID: 'run-1' })).toBe(0);
+    expect(never).not.toHaveBeenCalled();
+    expect(await cliMain(['--runs-dir', dir], never as unknown as typeof fetch, { WICKED_RUN_ID: 'run-2' })).toBe(1);
+    expect(await cliMain(['--runs-dir', dir], never as unknown as typeof fetch, {})).toBe(1);
+  });
+
+  it('registers with its runs dir, and a refusal never fails the boot', async () => {
     const seen: unknown[] = [];
-    const ok = await registerRunEvals({ registerWorkflow: async (d: unknown) => { seen.push(d); return 'run-evals'; } } as unknown as CoreAdapter, 'http://127.0.0.1:7721', () => undefined);
-    expect(ok).toBe(true);
-    expect(JSON.stringify(seen[0])).toContain('"--daemon","http://127.0.0.1:7721"');
+    expect(await registerRunEvals({ registerWorkflow: async (d: unknown) => { seen.push(d); return 'run-evals'; } } as unknown as CoreAdapter, () => undefined, '/runs')).toBe(true);
+    expect(JSON.stringify(seen[0])).toContain('"--runs-dir","/runs"');
     const warned: string[] = [];
-    expect(await registerRunEvals({ registerWorkflow: async () => { throw new Error('bad def'); } } as unknown as CoreAdapter, 'u', (m) => warned.push(m))).toBe(false);
+    expect(await registerRunEvals({ registerWorkflow: async () => { throw new Error('bad def'); } } as unknown as CoreAdapter, (m) => warned.push(m))).toBe(false);
     expect(warned[0]).toMatch(/bad def/);
-    expect(await registerRunEvals({} as CoreAdapter, 'u', () => undefined)).toBe(false);
+    expect(await registerRunEvals({} as CoreAdapter, () => undefined)).toBe(false);
+  });
+
+  it('POST /runs with workflow run-evals runs the evals first and launches with the copy written (no auth or network in the step)', async () => {
+    const dir = tmp();
+    const launched: LaunchRunInput[] = [];
+    const adapter = {
+      sessionsDetail: vi.fn(async () => []),
+      sessions: vi.fn(async () => []),
+      runEvents: vi.fn(async () => []),
+      launchRun: vi.fn(async (input: LaunchRunInput) => { launched.push(input); return input.sessionId; }),
+    } as unknown as CoreAdapter;
+    const app = Fastify({ logger: false });
+    registerRoutes(app, adapter, new GateCache(), new ElicitationCache(), { bus: null, index: new MembershipIndex(), log: () => undefined }, { audit: new AuditLog(join(dir, 'audit.log'), () => undefined), authMode: 'off' }, { evalRunsDir: dir });
+    const res = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'Run the default evals', workflow: 'run-evals' } });
+    expect(res.statusCode).toBe(201);
+    expect(launched[0]).toMatchObject({ workflow: 'run-evals', clisJson: '[]' });
+    const report = JSON.parse(readFileSync(join(dir, launched[0]!.sessionId, 'report.json'), 'utf8')) as DefaultEvalReport;
+    expect(report.project).toBeNull();
+    expect(report.suites.length).toBe(8);
+    await app.close();
+  });
+});
+
+describe('trend with a caller’s own minimum (codex/agy r1 on #1167)', () => {
+  it('a rate marked too few never gets a trend, even above five cases', () => {
+    expect(trendOf(rate(10, 10, 20), { value: 0, n: 50 })).toBe('too-few');
+    expect(trendOf(rate(10, 10), { value: 0, n: 50 })).toBe('improved');
   });
 });

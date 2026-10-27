@@ -12,12 +12,14 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 - **The default evals run on a schedule, as a workflow (DES-DEFAULT-EVALS-001 §7).** `workflows/run-evals.json`
-  (data) is one deterministic Tool step, with no seat and no floor. It asks the daemon that launched it (its
-  bound URL, filled in when the def is registered after the daemon listens) to run the default evals across every project, and the report is kept where Evaluate reads
-  it. `/workflow-run-evals` runs it by hand. A fresh schedule store seeds it beside `review-recent-work`: every
-  48 h, launched after the review. An existing store gets it with `PUT /schedules/run-evals`. `run-cli` never
-  guesses a daemon port: with neither `--daemon` nor `WICKED_CREW_URL` it refuses. The evals' Wilson interval
-  and trend rule are now the run review's (`insights/stats.ts`), so there is one statistics module.
+  is data. Every launch (the schedule, `/workflow-run-evals`, `POST /runs`) is prepared by the daemon, which runs
+  the default evals across every project in-process and keeps the report where Evaluate reads it. Its one Tool
+  step reads the report copy back by `$WICKED_RUN_ID` and prints the summary, so it needs no network, no daemon URL
+  and no credentials: a Tool step's environment is cleared, and a daemon with required auth would refuse it. There
+  is no seat and no floor. A fresh schedule store seeds the row beside `review-recent-work`, every 48 h, launched
+  after the review. An existing store gets it with `PUT /api/v1/schedules/run-evals`. From a shell, `run-cli`
+  never guesses a daemon port: with neither `--daemon` nor `WICKED_CREW_URL` it refuses. The evals' Wilson
+  interval and trend rule are now the run review's (`insights/stats.ts`), so there is one statistics module.
 - **Default evals: the system's own judgments, scored against what really happened (DES-DEFAULT-EVALS-001;
   api-types 0.143.0).** Eight suites, one per inference point that drifts: what needs you (and what is one
   item), the floor decision class, the QE verdict, who built it, steering firing, memory recall, prompt

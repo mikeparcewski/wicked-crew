@@ -52,6 +52,8 @@ export function calibration(points: ReadonlyArray<{ confidence: number; correct:
  */
 export function trendOf(now: Rate, previous: { value: number | null; n: number } | null): TrendWord {
   if (previous === null) return 'first-run';
+  // A rate marked too few (a caller's own minimum can be above five) never gets a trend (codex/agy r1 on #1167).
+  if (now.tooFew) return 'too-few';
   const iv: Interval | null = now.lo !== null && now.hi !== null ? { lo: now.lo, hi: now.hi } : null;
   return compare(now.n, iv, previous.n, previous.value, true);
 }
