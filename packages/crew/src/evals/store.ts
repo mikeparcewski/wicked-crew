@@ -12,8 +12,11 @@ import { appendFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises
 import { join } from 'node:path';
 
 import { defaultEvalStoreRoot } from '../api/eval-store.js';
-import type { DefaultEvalDetail, DefaultEvalReport, DefaultEvalSummary } from './types.js';
-import { summarize } from './runner.js';
+import type { DefaultEvalDetail, DefaultEvalSummary } from './types.js';
+import { previousScores, summarize, type PreviousScores } from './runner.js';
+import { SUITE_IDS } from './types.js';
+
+const SUITE_COUNT = SUITE_IDS.length;
 
 /** `<eval store root>/default`: the steering eval store's root (its env override, else the state home's `evals`). */
 export function defaultEvalsRoot(env: NodeJS.ProcessEnv = process.env): string {
@@ -71,13 +74,18 @@ export class DefaultEvalStore {
     }
   }
 
-  /** The last stored report of the same scope (`null` project = every project). */
-  async previous(project: string | null): Promise<DefaultEvalReport | null> {
+  /** Per suite, the most recent stored score of the same scope (`null` project = every project). A run that
+   *  skipped a suite is passed over for that suite, so a narrower run never erases a trend baseline. */
+  async previous(project: string | null): Promise<PreviousScores> {
+    const out: PreviousScores = {};
     for (const row of await this.list()) {
       if (row.project !== project) continue;
+      if (row.suites !== undefined && row.suites.every((s) => out[s.suite] !== undefined)) continue;
       const d = await this.get(row.id);
-      if (d !== null) return d.report;
+      if (d === null) continue;
+      for (const [k, v] of Object.entries(previousScores([d.report]))) if (out[k as keyof PreviousScores] === undefined) out[k as keyof PreviousScores] = v;
+      if (Object.keys(out).length === SUITE_COUNT) break;
     }
-    return null;
+    return out;
   }
 }

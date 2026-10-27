@@ -120,7 +120,7 @@ export function registerDefaultEvalRoutes(app: FastifyInstance, deps: DefaultEva
         project,
         cases,
         replay: deps.replay,
-        previous: deps.store !== undefined ? await deps.store.previous(project) : null,
+        previous: deps.store !== undefined ? await deps.store.previous(project) : {},
         ...(parsed.data.suites !== undefined ? { suites: parsed.data.suites } : {}),
       });
       if (deps.store !== undefined) await deps.store.record({ report, cases: scored });

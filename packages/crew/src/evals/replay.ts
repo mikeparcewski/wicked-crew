@@ -55,6 +55,8 @@ export const runPython: RunPython = (args, stdin, timeoutMs) =>
       clearTimeout(timer);
       resolve({ code, stdout, stderr });
     });
+    // A python3 that is missing or exits early must not crash the daemon on EPIPE (agy r1).
+    child.stdin.on('error', () => {});
     child.stdin.end(stdin);
   });
 

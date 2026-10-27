@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import Fastify from 'fastify';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   archetypeOfWorkflow,
@@ -25,7 +25,14 @@ import {
 } from '../src/evals/capture.js';
 import { archetypeAdapter, type ReplaySet } from '../src/evals/replay.js';
 import { registerDefaultEvalRoutes } from '../src/evals/routes.js';
-import { runDefaultEvals } from '../src/evals/runner.js';
+import { previousScores, runDefaultEvals } from '../src/evals/runner.js';
+import { captureArchetypeCases } from '../src/evals/capture.js';
+import { AuditLog } from '../src/api/audit.js';
+import { ElicitationCache } from '../src/api/elicitation-cache.js';
+import { GateCache } from '../src/api/gate-cache.js';
+import { registerRoutes } from '../src/api/routes.js';
+import type { CoreAdapter } from '../src/core/adapter.js';
+import { MembershipIndex } from '../src/projects/membership-index.js';
 import { main as cliMain, parseArgs, summaryLines } from '../src/evals/run-cli.js';
 import { driftKeys, scoreSlice, slices } from '../src/evals/score.js';
 import { needsYouSeed } from '../src/evals/seed-needs-you.js';
@@ -192,7 +199,7 @@ describe('normalization drift', () => {
       },
       missing: {},
     };
-    const { report } = await runDefaultEvals({ id: 'x1', now: new Date(0), project: null, cases, replay, previous: null, suites: ['archetype', 'normalization'] });
+    const { report } = await runDefaultEvals({ id: 'x1', now: new Date(0), project: null, cases, replay, previous: {}, suites: ['archetype', 'normalization'] });
     expect(report.drift.map((d) => d.inputKey)).toEqual(['archetype:review pr 12']);
     const norm = report.suites.find((s) => s.suite === 'normalization')!;
     expect(norm.combined.agreement).toMatchObject({ k: 4, n: 5 });
@@ -200,7 +207,7 @@ describe('normalization drift', () => {
     expect(Object.keys(arch.byProject ?? {})).toEqual(['alpha', 'beta']);
 
     // A single-project run never compares projects, so it reports no project drift.
-    const one = await runDefaultEvals({ id: 'x2', now: new Date(0), project: 'beta', cases, replay, previous: null, suites: ['archetype', 'normalization'] });
+    const one = await runDefaultEvals({ id: 'x2', now: new Date(0), project: 'beta', cases, replay, previous: {}, suites: ['archetype', 'normalization'] });
     expect(one.report.drift).toEqual([]);
     expect(one.report.suites.find((s) => s.suite === 'archetype')!.real.cases).toBe(5);
   });
@@ -213,7 +220,7 @@ describe('synthetic cases', () => {
     expect(a.some((c) => c.suite === 'floor-class' && c.expected.label === 'base_red')).toBe(false);
     expect(a.some((c) => c.suite === 'floor-class' && c.expected.label === 'real_fail')).toBe(true);
     expect(generateSynthetic(real)).toEqual(a);
-    const { report } = await runDefaultEvals({ id: 'x', now: new Date(0), project: null, cases: real, replay: NO_REPLAY, previous: null, suites: ['floor-class'] });
+    const { report } = await runDefaultEvals({ id: 'x', now: new Date(0), project: null, cases: real, replay: NO_REPLAY, previous: {}, suites: ['floor-class'] });
     const floor = report.suites[0]!;
     expect(floor.real.agreement).toMatchObject({ k: 5, n: 5 });
     expect(floor.synthetic.cases).toBeGreaterThan(0);
@@ -277,7 +284,7 @@ describe('capture: QE verdicts', () => {
   });
 
   it('reads the verdict a reason states, and nothing when it states none', () => {
-    expect(verdictInReason('All three acceptance criteria satisfied.')).toBe('PASS');
+    expect(verdictInReason('All three acceptance criteria satisfied.')).toBeNull(); // prose, not a verdict token
     expect(verdictInReason('FAIL: criterion 2 not met')).toBe('FAIL');
     expect(verdictInReason('The reviewer looked at it.')).toBeNull();
   });
@@ -293,7 +300,7 @@ describe('capture: attribution', () => {
       { type: 'skillsSnapshotHanded', ord: 6, seq: 5, attempt: 3, cli: 'copilot' },
       { type: 'stepFailed', ord: 6, seq: 6, attempt: 3, detail: "dead seat: 'copilot' exhausted its quota" },
     ];
-    expect(changingSeats(events, 6, 'codex')).toEqual(['claude']);
+    expect(changingSeats(events, 6, 'codex')).toEqual({ authors: ['claude'], last: 'claude' });
     const input: CaptureInput = {
       runs: [
         {
@@ -435,7 +442,7 @@ describe('the run-evals CLI', () => {
   it('parses its arguments and prints a plain summary', async () => {
     expect(parseArgs(['--project', 'all', '--baseline'], {})).toMatchObject({ daemon: 'http://127.0.0.1:7701', project: null, baseline: true });
     expect(() => parseArgs(['--nope'], {})).toThrow(/unknown argument/);
-    const { report } = await runDefaultEvals({ id: 'c1', now: new Date(0), project: null, cases: [cls('a', 'x', 'x')], replay: NO_REPLAY, previous: null, suites: ['floor-class'] });
+    const { report } = await runDefaultEvals({ id: 'c1', now: new Date(0), project: null, cases: [cls('a', 'x', 'x')], replay: NO_REPLAY, previous: {}, suites: ['floor-class'] });
     expect(summaryLines(report).join('\n')).toMatch(/floor-class: too few cases \(n=1\)/);
     let sent: unknown = null;
     const fake = (async (_url: string, init: RequestInit) => {
@@ -446,5 +453,112 @@ describe('the run-evals CLI', () => {
     expect(sent).toEqual({ project: 'wicked-core' });
     const refuse = (async () => new Response('no', { status: 400 })) as unknown as typeof fetch;
     expect(await cliMain([], refuse)).toBe(1);
+  });
+});
+
+// ── review round 1 (codex + agy on crew#1162), each with its case ──────────────────────────────────────────
+
+describe('review r1', () => {
+  it('a floor that never ran, or ran no check, is inconclusive, never a pass; the floor read is the same attempt', () => {
+    expect(floorClassOf({ type: 'repoChecksEvaluated', outcome: 'not_run', passed: false, checks: [], detectError: 'no checks detected' })).toBe('inconclusive');
+    expect(floorClassOf({ type: 'repoChecksEvaluated', passed: false, checks: [] })).toBe('inconclusive');
+    expect(floorClassOf({ type: 'repoChecksEvaluated', checks: [], sandboxError: 'no sandbox' })).toBe('inconclusive');
+    const cs = captureFloorCases({
+      runs: [{ session: { id: 'r9' }, units: [] }],
+      events: () => [
+        { type: 'repoChecksEvaluated', ord: 3, seq: 1, ts: 1, attempt: 0, checks: [check('passed')] },
+        { type: 'gateEscalated', ord: 3, seq: 2, ts: 2, attempt: 1, condition: 'floor_failed', denialSource: 'repo_checks' },
+      ],
+      decisions: [],
+      qeVerdicts: [],
+    });
+    // Attempt 1 has no floor of its own: not attempt 0's passing floor, and never a pass.
+    expect(cs[0]).toMatchObject({ observed: { label: 'inconclusive' }, expected: { label: 'inconclusive' } });
+  });
+
+  it('QE reason parsing reads only explicit verdicts; negated or subordinate prose stays unlabelled', () => {
+    expect(verdictInReason('No tests failed; all acceptance criteria satisfied.')).toBeNull();
+    expect(verdictInReason('Cannot pass: required evidence missing.')).toBeNull();
+    expect(verdictInReason('3 assertions passed, 1 failed: FAIL')).toBe('FAIL');
+    expect(verdictInReason('C1 cannot pass (inconclusive, ENVIRONMENT_ISSUE)')).toBeNull();
+    expect(verdictInReason('Not all assertions were satisfied')).toBeNull();
+    expect(verdictInReason('[scenario-defect] inconclusive: ENVIRONMENT_ISSUE')).toBe('INCONCLUSIVE');
+    expect(verdictInReason('Isolated evidence-only review: PASS. P1-P3 satisfied')).toBe('PASS');
+    expect(verdictInReason('PASS: all available plan assertions satisfied')).toBe('PASS');
+  });
+
+  it('asking for normalization alone still compares every suite’s cases', async () => {
+    const cases = [
+      cls('a', 'base_red', 'base_red', { project: 'core', inputKey: 'floor:base_red' }),
+      cls('b', 'boundary_deny', 'base_red', { project: 'crew', inputKey: 'floor:base_red' }),
+    ];
+    const { report } = await runDefaultEvals({ id: 'n', now: new Date(0), project: null, cases, replay: NO_REPLAY, previous: {}, suites: ['normalization'] });
+    expect(report.suites.map((s) => s.suite)).toEqual(['normalization']);
+    expect(report.suites[0]!.combined.agreement).toMatchObject({ k: 0, n: 1 });
+    expect(report.drift).toHaveLength(1);
+  });
+
+  it('the same prompt in two projects is two cases (one per project), and one repeated in a project is one', () => {
+    const run = (id: string, project: string) => ({ session: { id, project_id: project, workflow_id: 'feature', title: 'Add upload retries' }, units: [] });
+    const cs = captureArchetypeCases({ runs: [run('1', 'A'), run('2', 'A'), run('3', 'B')], events: () => [], decisions: [], qeVerdicts: [] });
+    expect(cs.map((c) => c.project)).toEqual(['A', 'B']);
+  });
+
+  it('a review names ONE creator: the seat that last changed the tree', () => {
+    const events: EventLike[] = [
+      { type: 'skillsSnapshotHanded', ord: 4, seq: 1, attempt: 0, cli: 'claude' },
+      { type: 'repoChecksEvaluated', ord: 4, seq: 2, attempt: 0, changed: [{ path: 'a' }], checks: [] },
+      { type: 'skillsSnapshotHanded', ord: 4, seq: 3, attempt: 1, cli: 'claude' },
+      // Reassigned AFTER its skills were handed: the reassignment is the seat in force.
+      { type: 'unitReassigned', ord: 4, seq: 4, attempt: 1, newCli: 'codex' },
+      { type: 'repoChecksEvaluated', ord: 4, seq: 5, attempt: 1, changed: [{ path: 'b' }], checks: [] },
+    ];
+    const cs = captureAttributionCases({
+      runs: [{ session: { id: 'r5' }, units: [{ ord: 4, stage: 'build', role: 'creator', authored_by: ['claude', 'codex'] }, { ord: 5, role: 'evaluator', assurance: { creator: 'codex' } }] }],
+      events: () => events,
+      decisions: [],
+      qeVerdicts: [],
+    });
+    expect(cs.find((c) => c.id.endsWith(':4:authors'))).toMatchObject({ expected: { labels: ['claude', 'codex'] } });
+    expect(cs.find((c) => c.id.endsWith(':5:creator'))).toMatchObject({ observed: { labels: ['codex'] }, expected: { labels: ['codex'] } });
+  });
+
+  it('a narrower run in between never erases a suite’s trend baseline', async () => {
+    const store = new DefaultEvalStore(tmp());
+    const floor = Array.from({ length: 6 }, (_, i) => cls(`f${i}`, 'base_red', 'base_red'));
+    const arch = Array.from({ length: 6 }, (_, i) => ({ ...cls(`a${i}`, 'build', 'build'), suite: 'archetype' as const }));
+    for (const [id, suites] of [['t1', ['floor-class']], ['t2', ['archetype']]] as const) {
+      const out = await runDefaultEvals({ id, now: new Date(0), project: null, cases: [...floor, ...arch], replay: NO_REPLAY, previous: await store.previous(null), suites: [...suites] });
+      await store.record({ report: out.report, cases: out.cases });
+    }
+    const third = await runDefaultEvals({ id: 't3', now: new Date(0), project: null, cases: floor, replay: NO_REPLAY, previous: await store.previous(null), suites: ['floor-class'] });
+    expect(third.report.suites[0]!.trend).toMatchObject({ word: 'no-change', previousRunId: 't1' });
+    expect(Object.keys(previousScores([third.report]))).toEqual(['floor-class']);
+  });
+
+  it('a steering deny is labelled by the decision on THAT escalation, not a later one', () => {
+    const cs = captureSteeringDenials({
+      runs: [{ session: { id: 'r6' }, units: [] }],
+      events: () => [
+        { type: 'gateEscalated', ord: 1, seq: 1, ts: 10, condition: 'boundary_deny', denialSource: 'input_governance' },
+        { type: 'gateEscalated', ord: 1, seq: 2, ts: 30, condition: 'boundary_deny', denialSource: 'input_governance' },
+      ],
+      decisions: [{ id: 'later', at: 40, origin: { run_id: 'r6', ord: 1, choice: 'approve' } }],
+      qeVerdicts: [],
+    });
+    expect(cs).toHaveLength(1);
+    expect(cs[0]!.evidence).toMatchObject({ decisionId: 'later', seq: 2 });
+  });
+
+  it('through the real route set, a live run’s derived title makes an archetype case', async () => {
+    const dir = tmp();
+    const views = [{ session: { id: 'live-1', workflow_id: 'bug', problem: 'Fix the login crash in the uploader when the file is empty', repo_ref: 'repo-a', status: 'completed', clis: ['claude'], units: [] }, units: [] }];
+    const adapter = { sessionsDetail: vi.fn(async () => views), sessions: vi.fn(async () => ['live-1']), runEvents: vi.fn(async () => []) } as unknown as CoreAdapter;
+    const app = Fastify({ logger: false });
+    registerRoutes(app, adapter, new GateCache(), new ElicitationCache(), { bus: null, index: new MembershipIndex(), log: () => undefined }, { audit: new AuditLog(join(dir, 'audit.log'), () => undefined), authMode: 'off' }, {});
+    const res = await app.inject({ method: 'POST', url: '/api/v1/testing/default-evals/run', payload: { suites: ['archetype'] } });
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as DefaultEvalReport).suites[0]!.real.cases).toBe(1);
+    await app.close();
   });
 });

@@ -8116,7 +8116,8 @@ export function registerRoutes(
   // eval); the only write is the report, under the eval store's root.
   registerDefaultEvalRoutes(app, {
     ...(runtime.defaultEvalStore !== undefined ? { store: runtime.defaultEvalStore } : {}),
-    runs: async () => (await adapter.sessionsDetail()) as unknown as RunLike[],
+    // Served runs, as GET /runs serves them: the derived title and the project membership join (codex r1).
+    runs: async () => (await adapter.sessionsDetail()).map(decorateRun) as unknown as RunLike[],
     events: async (id) => (typeof adapter.runEvents === 'function' ? ((await adapter.runEvents(id)) as unknown as EventLike[] | null) : null),
     decisions: () => (runtime.decisionLedger?.list({}) ?? []) as unknown as DecisionLike[],
     ...(runtime.evalStore !== undefined ? { steeringEvals: runtime.evalStore } : {}),

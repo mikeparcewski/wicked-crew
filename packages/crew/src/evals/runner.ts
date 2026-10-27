@@ -21,6 +21,15 @@ export const SUITE_TITLES: Record<SuiteId, string> = {
   normalization: 'Normalizing: the same input judged the same in every project and surface',
 };
 
+export type PreviousScores = Partial<Record<SuiteId, { runId: string; score: SuiteScore }>>;
+
+/** The most recent score of each suite across stored reports, newest first. */
+export function previousScores(reports: readonly DefaultEvalReport[]): PreviousScores {
+  const out: PreviousScores = {};
+  for (const r of reports) for (const sc of r.suites) if (out[sc.suite] === undefined) out[sc.suite] = { runId: r.id, score: sc };
+  return out;
+}
+
 export interface RunInput {
   id: string;
   now: Date;
@@ -29,8 +38,9 @@ export interface RunInput {
   /** Real cases (captured and seeded) and the steering eval's cases. Synthetic ones are generated here. */
   cases: EvalCase[];
   replay: ReplaySet;
-  /** The last stored report of the same scope, for the trend. */
-  previous: DefaultEvalReport | null;
+  /** Per suite, the most recent stored score of the same scope and its run id (a run that skipped the suite is
+   *  passed over), for the trend. */
+  previous: PreviousScores;
   /** Limit to these suites (all when absent). */
   suites?: SuiteId[];
 }
@@ -60,8 +70,12 @@ function group<K extends string>(cases: readonly EvalCase[], keyOf: (c: EvalCase
 
 export async function runDefaultEvals(input: RunInput): Promise<{ report: DefaultEvalReport; cases: EvalCase[] }> {
   const wanted = new Set<SuiteId>(input.suites ?? SUITE_IDS);
-  const given = dedupe(input.cases).filter((c) => inScope(c, input.project) && wanted.has(c.suite));
-  const synthetic = generateSynthetic(given).filter((c) => wanted.has(c.suite) && !given.some((g) => g.id === c.id));
+  // Normalization is computed over every other suite's cases, so asking for it keeps them all (codex/agy r1);
+  // otherwise only the asked-for suites' cases are read.
+  const reads = (c: EvalCase): boolean => wanted.has('normalization') || wanted.has(c.suite);
+  const given = dedupe(input.cases).filter((c) => inScope(c, input.project) && reads(c));
+  const givenIds = new Set(given.map((c) => c.id));
+  const synthetic = generateSynthetic(given).filter((c) => reads(c) && !givenIds.has(c.id));
   let cases = [...given, ...synthetic];
 
   // Replay: the current classifier answers every case that has no recorded answer.
@@ -69,7 +83,7 @@ export async function runDefaultEvals(input: RunInput): Promise<{ report: Defaul
   const note = (s: SuiteId, line: string): void => {
     notes.set(s, [...(notes.get(s) ?? []), line]);
   };
-  for (const suite of wanted) {
+  for (const suite of SUITE_IDS) {
     const waiting = cases.filter((c) => c.suite === suite && c.observed === null);
     if (waiting.length === 0) continue;
     const adapter = input.replay.adapters[suite];
@@ -91,7 +105,9 @@ export async function runDefaultEvals(input: RunInput): Promise<{ report: Defaul
   const suites: SuiteScore[] = [];
   for (const suite of SUITE_IDS) {
     if (!wanted.has(suite)) continue;
-    const prev = input.previous?.suites.find((s) => s.suite === suite) ?? null;
+    const prevEntry = input.previous[suite];
+    const prev = prevEntry?.score ?? null;
+    const prevId = prevEntry?.runId ?? null;
     if (suite === 'normalization') {
       const { compared, consistent } = normalizationRate(cases, drift);
       const real = scoreSlice([]);
@@ -105,10 +121,10 @@ export async function runDefaultEvals(input: RunInput): Promise<{ report: Defaul
         synthetic: empty,
         combined: real,
         model: empty,
-        trend: { word: trendOf(real.agreement, prev ? { value: prev.combined.agreement.value, n: prev.combined.agreement.n } : null), previous: prev?.combined.agreement.value ?? null, previousRunId: prev ? input.previous!.id : null },
+        trend: { word: trendOf(real.agreement, prev ? { value: prev.combined.agreement.value, n: prev.combined.agreement.n } : null), previous: prev?.combined.agreement.value ?? null, previousRunId: prevId },
         notes: [
           `${compared} input(s) were judged in two or more places; ${drift.length} were judged differently`,
-          ...(input.project !== null ? ['a single-project run compares surfaces only; run every project to compare projects'] : []),
+          ...(input.project !== null ? ['a single-project run compares nothing across places; run every project to compare projects and surfaces'] : []),
         ],
       });
       continue;
@@ -117,6 +133,7 @@ export async function runDefaultEvals(input: RunInput): Promise<{ report: Defaul
     const s = slices(mine);
     const extra = notes.get(suite) ?? [];
     if (mine.length === 0) extra.push('no cases yet');
+    if (suite === 'needs-you' && input.project !== null) extra.push('what needs you is daemon-wide: run every project to score it');
     if (suite === 'recall' && mine.length === 0) {
       extra.push('no labelled recall cases: run the steering eval with a memory store and samples that name expected_memories');
     }
@@ -127,7 +144,7 @@ export async function runDefaultEvals(input: RunInput): Promise<{ report: Defaul
       trend: {
         word: trendOf(s.combined.agreement, prev ? { value: prev.combined.agreement.value, n: prev.combined.agreement.n } : null),
         previous: prev?.combined.agreement.value ?? null,
-        previousRunId: prev ? input.previous!.id : null,
+        previousRunId: prevId,
       },
       notes: extra,
     };

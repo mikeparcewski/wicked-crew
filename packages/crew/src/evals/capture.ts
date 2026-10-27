@@ -98,8 +98,13 @@ interface CheckLike {
 /** What a floor's own check outcomes say it is (the rule the escalation class must agree with). */
 export function floorClassOf(ev: EventLike): FloorClass {
   const checks = (Array.isArray(ev['checks']) ? ev['checks'] : []) as CheckLike[];
+  // A floor that produced no result (detection failed, no sandbox, not run) is inconclusive, never a pass.
+  if (ev['outcome'] === 'not_run' || ev['outcome'] === 'timed_out' || str(ev['detectError']) !== null || str(ev['sandboxError']) !== null) return 'inconclusive';
   const failing = checks.filter((c) => c.outcome !== 'passed' && c.outcome !== 'skipped');
-  if (failing.length === 0) return 'pass';
+  if (failing.length === 0) {
+    if (checks.length === 0) return 'inconclusive';
+    return ev['passed'] === false ? 'inconclusive' : 'pass';
+  }
   if (failing.some((c) => c.outcome === 'timed_out')) return 'inconclusive';
   if (failing.some((c) => Array.isArray(c.envCannotRun) && c.envCannotRun.length > 0)) return 'inconclusive';
   if (failing.some((c) => c.decision?.outcome === 'flaky_twice')) return 'inconclusive';
@@ -110,8 +115,16 @@ export function floorClassOf(ev: EventLike): FloorClass {
 /** What the engine TOLD the operator: the escalation's condition, read with the floor it sits on. */
 export function engineFloorClass(esc: EventLike, floor: EventLike | null): FloorClass {
   if (esc['condition'] === 'boundary_deny') return 'boundary_deny';
+  return ruleFloorClass(esc, floor);
+}
+
+/** What the floor's own evidence says an escalation on it is. An escalation is never a pass: a floor with no
+ *  failing row behind a denial could not say what failed (inconclusive). */
+export function ruleFloorClass(esc: EventLike, floor: EventLike | null): FloorClass {
   if (esc['denialSource'] === 'repo_checks_timeout') return 'inconclusive';
-  return floor !== null ? floorClassOf(floor) : 'real_fail';
+  if (floor === null) return 'inconclusive';
+  const c = floorClassOf(floor);
+  return c === 'pass' ? 'inconclusive' : c;
 }
 
 export function captureFloorCases(input: CaptureInput): EvalCase[] {
@@ -127,9 +140,13 @@ export function captureFloorCases(input: CaptureInput): EvalCase[] {
       const ord = num(esc.ord);
       const ts = num(esc.ts);
       if (ord === null || ts === null) continue;
+      // The floor of the SAME attempt (agy r1): an attempt that escalated without its own floor reads none.
+      const attempt = num(esc['attempt']);
       const floor =
-        [...events].reverse().find((e) => e.type === 'repoChecksEvaluated' && e.ord === ord && (num(e.ts) ?? 0) <= ts) ?? null;
-      const ruleClass: FloorClass = esc['denialSource'] === 'repo_checks_timeout' ? 'inconclusive' : floor !== null ? floorClassOf(floor) : 'real_fail';
+        [...events]
+          .reverse()
+          .find((e) => e.type === 'repoChecksEvaluated' && e.ord === ord && (num(e.ts) ?? 0) <= ts && (attempt === null || num(e['attempt']) === null || num(e['attempt']) === attempt)) ?? null;
+      const ruleClass = ruleFloorClass(esc, floor);
       const observed = engineFloorClass(esc, floor);
       const nextEsc = events.find((e) => e.type === 'gateEscalated' && e.ord === ord && (num(e.ts) ?? 0) > ts);
       const decision = decisionAfter(input.decisions, runId, ord, ts, nextEsc !== undefined ? (num(nextEsc.ts) ?? null) : null);
@@ -167,15 +184,19 @@ export function captureFloorCases(input: CaptureInput): EvalCase[] {
 
 // ── S3: the QE verdict ─────────────────────────────────────────────────────────────────────────────────────────
 
-/** The verdict a QE reason states in its own words, when it states one; `null` when it does not say. */
+/**
+ * The verdict a QE reason states in its own words, read conservatively: only an explicit verdict token counts, at
+ * the very start of the reason (after an optional `[tag]`), or after `verdict:` or a colon (`review: PASS.`).
+ * Prose that merely mentions passing or failing ("no tests failed", "cannot pass") states no verdict: `null`,
+ * and the case is left unlabelled rather than labelled wrong.
+ */
 export function verdictInReason(reason: string): 'PASS' | 'FAIL' | 'INCONCLUSIVE' | null {
-  const head = reason.slice(0, 100);
-  const m = /\b(inconclusive|pass(?:ed)?|fail(?:ed|s)?)\b/i.exec(head);
-  if (m !== null) {
-    const w = m[1]!.toLowerCase();
-    return w.startsWith('inconclusive') ? 'INCONCLUSIVE' : w.startsWith('pass') ? 'PASS' : 'FAIL';
-  }
-  if (/\ball\b.{0,60}\b(satisfied|verified|pass)/i.test(head)) return 'PASS';
+  const head = reason.slice(0, 160);
+  const word = (w: string): 'PASS' | 'FAIL' | 'INCONCLUSIVE' => (/^inc/i.test(w) ? 'INCONCLUSIVE' : /^pass/i.test(w) ? 'PASS' : 'FAIL');
+  const lead = /^\s*(?:\[[^\]]*\]\s*)?(inconclusive|pass|fail)\b(?!\s+(?:to|if|when|because)\b)/i.exec(head);
+  if (lead !== null) return word(lead[1]!);
+  const declared = /(?:\bverdict\s*[:=]|:)\s*(PASS|FAIL|INCONCLUSIVE)\b/.exec(head);
+  if (declared !== null) return word(declared[1]!);
   return null;
 }
 
@@ -238,25 +259,20 @@ export function captureQeCases(input: CaptureInput): EvalCase[] {
 // ── S4: builder attribution ────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * The seats whose attempts on a unit changed the tree. The seat of each attempt is the one the engine handed that
- * attempt's skills to (`skillsSnapshotHanded {attempt, cli}`); the plan-time `unitDistributed.cli` is not it (it
- * can name a seat the unit never ran on), so it is only the last fallback, after the engine's own failover
- * (`stepFailed` "failing over to") and reassignment (`unitReassigned.newCli`) events. An attempt is an author
- * only when its floor recorded changed paths. `null` when the unit ran no floor (nothing to read).
+ * The seats whose attempts on a unit changed the tree, and the last of them. One chronological pass: the seat in
+ * force is the latest of the engine's own seat events for the unit (`skillsSnapshotHanded {cli}` for an attempt,
+ * `unitReassigned.newCli`, a `stepFailed` "failing over to"); the plan-time `unitDistributed.cli` is only the
+ * starting point (it can name a seat the unit never ran on). An attempt is an author only when its floor recorded
+ * changed paths. `null` when the unit ran no floor (nothing to read).
  */
-export function changingSeats(events: readonly EventLike[], ord: number, firstCli: string | null): string[] | null {
-  const handed = new Map<number, string>();
-  for (const e of events) {
-    if (e.ord !== ord || e.type !== 'skillsSnapshotHanded') continue;
-    const attempt = num(e['attempt']);
-    const cli = str(e['cli']);
-    if (attempt !== null && cli !== null) handed.set(attempt, cli);
-  }
+export function changingSeats(events: readonly EventLike[], ord: number, firstCli: string | null): { authors: string[]; last: string | null } | null {
   let cli = firstCli;
+  let last: string | null = null;
   const authors = new Set<string>();
   let sawFloor = false;
   for (const e of events) {
     if (e.ord !== ord) continue;
+    if (e.type === 'skillsSnapshotHanded' && str(e['cli']) !== null) cli = str(e['cli']);
     if (e.type === 'unitReassigned' && str(e['newCli']) !== null) cli = str(e['newCli']);
     if (e.type === 'stepFailed') {
       const m = /failing over to '([^']+)'/.exec(String(e['detail'] ?? ''));
@@ -265,12 +281,13 @@ export function changingSeats(events: readonly EventLike[], ord: number, firstCl
     if (e.type === 'repoChecksEvaluated') {
       sawFloor = true;
       const changed = Array.isArray(e['changed']) ? e['changed'] : [];
-      const attempt = num(e['attempt']);
-      const seat = (attempt !== null ? handed.get(attempt) : undefined) ?? cli;
-      if (changed.length > 0 && seat !== null) authors.add(seat);
+      if (changed.length > 0 && cli !== null) {
+        authors.add(cli);
+        last = cli;
+      }
     }
   }
-  return sawFloor ? [...authors].sort() : null;
+  return sawFloor ? { authors: [...authors].sort(), last } : null;
 }
 
 const NOT_A_SEAT = new Set(['bash', 'tool']);
@@ -283,12 +300,12 @@ export function captureAttributionCases(input: CaptureInput): EvalCase[] {
     const events = sortedEvents(input.events(runId));
     const firstCli = new Map<number, string>();
     for (const e of events) if (e.type === 'unitDistributed' && num(e.ord) !== null && str(e['cli']) !== null && !firstCli.has(e.ord!)) firstCli.set(e.ord!, String(e['cli']));
-    const builders = new Map<number, string[]>();
+    const builders = new Map<number, { authors: string[]; last: string | null }>();
     for (const u of run.units) {
       const ord = num(u['ord']);
       if (ord === null || u['stage'] !== 'build' || u['role'] !== 'creator') continue;
       const seats = changingSeats(events, ord, firstCli.get(ord) ?? str(u['assigned_cli']));
-      if (seats === null || seats.length === 0) continue;
+      if (seats === null || seats.authors.length === 0) continue;
       builders.set(ord, seats);
       const authored = (Array.isArray(u['authored_by']) ? u['authored_by'] : []).filter((x): x is string => typeof x === 'string');
       if (authored.length > 0) {
@@ -301,7 +318,7 @@ export function captureAttributionCases(input: CaptureInput): EvalCase[] {
           inputKey: `attribution:${runId}:${ord}:authors`,
           input: { unit: ord, kind: 'build unit authors' },
           observed: { labels: [...authored].sort(), by: 'recorded' },
-          expected: { labels: seats, by: 'rule', why: 'an author is a seat whose attempt changed the tree' },
+          expected: { labels: seats.authors, by: 'rule', why: 'an author is a seat whose attempt changed the tree' },
           evidence: { runId, ord },
         });
       }
@@ -312,8 +329,10 @@ export function captureAttributionCases(input: CaptureInput): EvalCase[] {
       if (ord === null || u['role'] !== 'evaluator') continue;
       const creator = str((u['assurance'] as Record<string, unknown> | undefined)?.['creator']);
       if (creator === null || NOT_A_SEAT.has(creator)) continue;
-      const before = [...builders.entries()].filter(([o]) => o < ord).flatMap(([, s]) => s);
-      if (before.length === 0) continue;
+      // The receipt's creator is ONE seat: the latest builder's (codex r1). The full author set is scored on the
+      // build unit itself, above.
+      const latest = [...builders.entries()].filter(([o]) => o < ord).sort(([a], [b]) => b - a)[0];
+      if (latest === undefined || latest[1].last === null) continue;
       out.push({
         id: `attribution:${runId}:${ord}:creator`,
         suite: 'attribution',
@@ -322,7 +341,7 @@ export function captureAttributionCases(input: CaptureInput): EvalCase[] {
         inputKey: `attribution:${runId}:${ord}:creator`,
         input: { unit: ord, kind: 'creator named on a reviewing unit' },
         observed: { labels: creator.split(/,\s*/).sort(), by: 'recorded' },
-        expected: { labels: [...new Set(before)].sort(), by: 'rule', why: 'the reviewed work was built by the seats that changed the tree' },
+        expected: { labels: [latest[1].last], by: 'rule', why: 'the creator of reviewed work is the seat that last changed the tree' },
         evidence: { runId, ord },
       });
     }
@@ -344,7 +363,8 @@ export function captureSteeringDenials(input: CaptureInput): EvalCase[] {
       const ord = num(esc.ord);
       const ts = num(esc.ts);
       if (ord === null || ts === null) continue;
-      const d = decisionAfter(input.decisions, runId, ord, ts, null);
+      const next = events.find((e) => e.type === 'gateEscalated' && e.ord === ord && (num(e.ts) ?? 0) > ts);
+      const d = decisionAfter(input.decisions, runId, ord, ts, next !== undefined ? (num(next.ts) ?? null) : null);
       const choice = d?.origin.choice ?? null;
       if (choice === null) continue;
       const letThrough = choice === 'approve' || choice === 'operator_judgment' || choice === 'rejudge';
@@ -363,7 +383,7 @@ export function captureSteeringDenials(input: CaptureInput): EvalCase[] {
           by: 'operator',
           why: letThrough ? 'the operator approved the refused work' : 'the operator stopped or sent back the refused work',
         },
-        evidence: { runId, ord, ...(d !== null ? { decisionId: d.id } : {}) },
+        evidence: { runId, ord, ...(num(esc.seq) !== null ? { seq: num(esc.seq)! } : {}), ...(d !== null ? { decisionId: d.id } : {}) },
       });
     }
   }
@@ -401,8 +421,10 @@ export function captureArchetypeCases(input: CaptureInput): EvalCase[] {
     const label = archetypeOfWorkflow(wf);
     if (label === null) continue;
     const prompt = scrub(title, 200);
-    const key = `${label}\u0000${prompt.toLowerCase()}`;
-    if (seen.has(key)) continue; // one prompt asked twice is one case: repeats are not evidence
+    // One prompt asked twice in one place is one case (repeats are not evidence); the same prompt in another
+    // project is that project's evidence, and the cross-project comparison needs it (codex r1).
+    const key = `${placeOf(s) ?? ''}\u0000${label}\u0000${prompt.toLowerCase()}`;
+    if (seen.has(key)) continue;
     seen.add(key);
     out.push({
       id: `archetype:${String(s['id'])}`,
