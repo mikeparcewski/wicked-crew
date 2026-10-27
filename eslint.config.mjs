@@ -20,6 +20,8 @@ export default tseslint.config(
       '**/coverage/**',
       '**/*.config.{js,cjs,mjs,ts}',
       'packages/*/scripts/**',
+      // A real MCP server's tsc output, installed and called by tests/mcp-installed-server.test.ts: not our source.
+      'packages/crew/tests/fixtures/mcp/unit-convert/**',
     ],
   },
   ...tseslint.configs.recommended,
