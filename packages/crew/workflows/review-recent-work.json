@@ -1,0 +1,54 @@
+{
+  "$comment": "DES-RUNS-REVIEW-001. Review recent work: a read-only, single-seat review of every run since the last review. Cheap by design: one agent seat, one turn, and NO floor (nothing is built, so executes_code is false and nothing is verified by checks). 'analyze' is a Tool step: a deterministic script computes every number (pass rate, time to PR, floor time, waits on people, overrides, spend, retries, unresolved; per repo, agent and workflow; Wilson and bootstrap intervals against the previous 4 windows). 'interpret' only reads those numbers and writes report.json. Crew fills {node}, {analyze_cli} and {reviews_dir} when it registers this def, prepares <reviews_dir>/<run>/snapshot.json at launch, and launches the run repo-less with that directory as its only write root. Crew files the proposals, never the seat. required_instruments is [] on purpose: a review builds nothing and is judged by the person who reads it (the default would require a distinct evaluator and a judge).",
+  "id": "review-recent-work",
+  "title": "Review recent work",
+  "summary": "Looks across every run since the last review and recommends what to improve, with the numbers behind each recommendation.",
+  "use_when": [
+    "You want to know what is slowing runs down, costing the most, or failing again and again",
+    "Every 2 days, on its schedule"
+  ],
+  "required_instruments": [],
+  "phases": [
+    {
+      "id": "analyze",
+      "kind": "recon",
+      "executor": {
+        "type": "tool",
+        "cmd": [
+          "{node}",
+          "{analyze_cli}",
+          "--reviews-dir",
+          "{reviews_dir}"
+        ]
+      },
+      "instructions": null,
+      "gate_type": null,
+      "gate": "auto",
+      "executes_code": false,
+      "verified_evidence": false,
+      "required_deliverables": [],
+      "depends_on": [],
+      "role": "neutral",
+      "skill_ref": null,
+      "allowed_skills": [],
+      "validator_pin": null
+    },
+    {
+      "id": "interpret",
+      "kind": "review",
+      "instructions": "You interpret numbers; you never compute them. Read the handoff file named in the task: it names facts_path (computed by a script from the run store) and report_path (the ONE file you may write). Write report_path as one JSON object: {\"summary\": \"<3 to 5 plain sentences: what improved, what is working, what needs attention>\", \"improvements\": [\"<one line per entry of facts.improvements, in plain words>\"], \"recommendations\": [{\"candidate\": \"<an id from facts.recommended>\", \"title\": \"<plain-language title, at most 90 characters>\", \"expectedEffect\": \"<what changes if this is done>\", \"confidence\": \"high|medium|low\", \"changeMind\": \"<what evidence would change your mind>\"}], \"watching\": [\"<ids from facts.watching worth watching>\"]}. Rules: be balanced: always report what got better and what is working, even when there are problems. Recommend ONLY ids in facts.recommended (at most 5), in that order unless the evidence clearly says otherwise. Never invent a number, a run id or a recommendation: quote numbers exactly as facts.json gives them, with their n. Where facts.json says 'too-few', say 'too few runs to tell', never a trend. Lower a candidate's confidence if its evidence is thin; never raise it above what n supports. Do not open, edit or run anything else: no repository, no tool that writes, no proposals (crew files those). Write report_path before you finish and end your reply with its absolute path.",
+      "gate_type": "execution",
+      "gate": "auto",
+      "executes_code": false,
+      "verified_evidence": false,
+      "required_deliverables": [],
+      "depends_on": [
+        "analyze"
+      ],
+      "role": "creator",
+      "skill_ref": null,
+      "allowed_skills": [],
+      "validator_pin": null
+    }
+  ]
+}

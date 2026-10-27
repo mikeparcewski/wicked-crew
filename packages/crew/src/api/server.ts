@@ -24,6 +24,13 @@ import { GroupIndex } from './group-index.js';
 import { RunTimingIndex, recordRunLaunched } from './run-timing-index.js';
 import { OnboardingCaptureChain } from './onboarding-capture.js';
 import { registerLearnRoutes } from '../learn/routes.js';
+import { registerInsightsRoutes } from '../insights/routes.js';
+import { ReviewService } from '../insights/review-service.js';
+import { InsightsStore } from '../insights/store.js';
+import { ANALYZE_CLI, REVIEW_WORKFLOW, defaultReviewsDir, loadReviewWorkflow } from '../insights/workflow.js';
+import { registerScheduleRoutes } from '../schedules/routes.js';
+import { WorkflowScheduler, type ScheduledLaunch } from '../schedules/scheduler.js';
+import { DEFAULT_REVIEW_SCHEDULE_ID, ScheduleStore } from '../schedules/store.js';
 import { LearnScheduler } from '../learn/scheduler.js';
 import { LearnScheduleStore } from '../learn/schedule-store.js';
 import { GuidanceIndex } from './guidance-index.js';
@@ -83,7 +90,7 @@ import { MembershipIndex } from '../projects/membership-index.js';
 import { writeRunEvidencePointer } from '../projects/charter.js';
 import {
   engineBenchesUnclassifiedSeats, CoreAdapter, type McpEngineGate } from '../core/adapter.js';
-import type { Actor, CoreEvent, SessionView } from '../core/types.js';
+import type { Actor, CoreEvent, LaunchRunInput, SessionView } from '../core/types.js';
 import { resolveCursorUnit } from '../core/cursor.js';
 import {
   STALL_DETECTED_ACTION,
@@ -136,6 +143,7 @@ import { refreshProjectGraphsAfterOnboarding } from '../projects/auto-refresh.js
 
 /** The daemon's own actor on the audit trail (`run.delivered`, `run.ended`, the onboarding `run.launched`). */
 const DAEMON_ACTOR: Actor = { id: 'daemon', kind: 'system', trust: 'admin' };
+const SCHEDULE_ACTOR: Actor = { id: 'workflow-schedule', kind: 'system', trust: 'operator' };
 /** The stall watchdog acts on runs by itself, so its audit lines name IT, not the daemon. */
 const STALL_WATCHDOG_ACTOR: Actor = { id: 'stall-watchdog', kind: 'system', trust: 'admin' };
 
@@ -403,6 +411,12 @@ export interface CreateServerOptions {
   /** DES-learn-workflow §5.3: the learn schedule's tick. ON in the daemon, OFF under a test runner
    *  (the deliveryCache posture); tests drive `LearnScheduler.sweep()` directly. */
   learnSchedule?: {
+    enabled?: boolean;
+    sweepIntervalMs?: number;
+  };
+  /** DES-RUNS-REVIEW-001 §2: the workflow schedules' tick (the run review every 2 days by default). ON in the
+   *  daemon, OFF under a test runner; tests drive `WorkflowScheduler.sweep()` directly. */
+  workflowSchedules?: {
     enabled?: boolean;
     sweepIntervalMs?: number;
   };
@@ -1277,6 +1291,91 @@ export async function createServer(
   }
   app.addHook('onClose', async () => {
     learnScheduler.stop();
+  });
+
+  // DES-RUNS-REVIEW-001: the workflow schedules (any workflow on a cadence; the default entry reviews recent work
+  // every 2 days) and the run review around its workflow. The def is data (`workflows/review-recent-work.json`),
+  // registered with the engine here; the review service prepares each launch and folds each finished review.
+  const insightsStore = new InsightsStore();
+  const reviewService = new ReviewService({
+    store: insightsStore,
+    adapter,
+    reviewsDir: defaultReviewsDir(),
+    estateTool: callEstateTool,
+    log: (m) => app.log.warn(m),
+  });
+  if (typeof (adapter as Partial<CoreAdapter>).registerWorkflow === 'function') {
+    try {
+      await adapter.registerWorkflow(loadReviewWorkflow({ node: process.execPath, analyzeCli: ANALYZE_CLI, reviewsDir: defaultReviewsDir() }));
+    } catch (err) {
+      app.log.warn(`[review] could not register the '${REVIEW_WORKFLOW}' workflow — the run review is off: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  const workflowSchedules = new ScheduleStore();
+  const reviewProjects = (): string[] => workflowSchedules.get(DEFAULT_REVIEW_SCHEDULE_ID)?.projectIds ?? [];
+  const launchScheduled: ScheduledLaunch = async (row, runId, trigger) => {
+    const projectId = row.projectIds[0];
+    const input: LaunchRunInput = {
+      problem: row.problem ?? `Scheduled run of ${row.workflow}`,
+      sessionId: runId,
+      clisJson: '[]',
+      workflow: row.workflow,
+      ...(projectId !== undefined ? { projectId } : {}),
+    };
+    const review = row.workflow === REVIEW_WORKFLOW;
+    if (review) {
+      await reviewService.prepare(input, { trigger, scheduleId: row.id, projectIds: row.projectIds });
+    } else {
+      input.clisJson = JSON.stringify(await adapter.seatsForWorkflow(row.workflow));
+      if (row.repoRef !== null) input.repoRef = row.repoRef;
+    }
+    let launched: string;
+    try {
+      launched = await adapter.launchRun(input);
+    } catch (err) {
+      if (review) reviewService.launchRefused(runId, err instanceof Error ? err.message : String(err));
+      throw err;
+    }
+    try {
+      recordRunLaunched(audit, runTimingIndex, SCHEDULE_ACTOR, launched, {
+        workflow: row.workflow,
+        schedule: row.id,
+        trigger,
+        ...(input.repoRef !== undefined ? { repoRef: input.repoRef } : {}),
+        ...(projectId !== undefined ? { projectId } : {}),
+      });
+      if (projectId !== undefined) fileRun(launched, projectId);
+    } catch (err) {
+      app.log.warn(`[schedules] ${row.id} launched ${launched}, but its bookkeeping failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return launched;
+  };
+  const workflowScheduler = new WorkflowScheduler({
+    store: workflowSchedules,
+    sessionsDetail: () => adapter.sessionsDetail(),
+    launch: launchScheduled,
+    onTick: [(status) => reviewService.reconcile(status)],
+    log: (m) => app.log.info(m),
+  });
+  registerScheduleRoutes(app, {
+    store: workflowSchedules,
+    scheduler: workflowScheduler,
+    knowsWorkflow: (id) => adapter.getWorkflow(id) !== null,
+    lastReview: () => {
+      const r = insightsStore.list()[0];
+      return r === undefined ? null : { runId: r.runId, launchedAt: r.launchedAt, endedAt: r.endedAt, status: r.status };
+    },
+    audit,
+  });
+  registerInsightsRoutes(app, { store: insightsStore, service: reviewService, audit });
+  if (options?.workflowSchedules?.enabled ?? !(process.env['VITEST'] !== undefined || process.env['NODE_ENV'] === 'test')) {
+    // Seeded (and so written to the state home) only by a daemon that runs the tick: a headless boot (the
+    // endpoint-manifest collector, a test) never plants a schedule file in whatever state home it resolves.
+    workflowSchedules.seedDefault(new Date());
+    workflowScheduler.start(options?.workflowSchedules?.sweepIntervalMs);
+  }
+  app.addHook('onClose', async () => {
+    workflowScheduler.stop();
   });
 
   /** The docs root a project's interactive docs live under — the SAME per-project resolution
@@ -2239,6 +2338,11 @@ export async function createServer(
       mcpCalls: mcpCallRecords,
       // wicked-core#411 / crew#497: the live state-home classification the routes report and gate on.
       stateHome: stateHomeWatch,
+      // DES-RUNS-REVIEW-001 §3: a hand launch of the review is prepared like a scheduled one (its coverage = the schedule's).
+      reviewLaunch: async (input: LaunchRunInput) => {
+        await reviewService.prepare(input, { trigger: 'manual', scheduleId: null, projectIds: reviewProjects() });
+      },
+      reviewLaunchRefused: (runId: string, reason: string) => reviewService.launchRefused(runId, reason),
       // Routes that say something to the thread (a refused chat seat, F-2R2-007) emit through the
       // SAME /ws fan-out the engine's frames take.
       broadcast: (frame) => broadcast(frame),

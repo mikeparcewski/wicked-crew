@@ -14,7 +14,8 @@
     "dist",
     "skills",
     "watch",
-    "endpoint-manifest.json"
+    "endpoint-manifest.json",
+    "workflows"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",

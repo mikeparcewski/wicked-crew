@@ -54,6 +54,8 @@ export async function collectLiveEndpointManifest(): Promise<EndpointManifest> {
       projectEvents: { disabled: true },
       interactiveWsRelay: { disabled: true },
       stallWatchdog: { enabled: false },
+      // No schedule tick: an armed one would seed `daemon-schedules.json` into the generating machine's state home.
+      workflowSchedules: { enabled: false },
       // No skills seam: the manifest documents the routes, and an armed seam would seed the
       // generating machine's REAL skills root from its installed plugin. The routes register
       // regardless (they answer 503 unconfigured).
