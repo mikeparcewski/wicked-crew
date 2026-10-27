@@ -6,7 +6,7 @@ import type { RecordedEvent, SessionView, SystemCli } from 'wicked-crew-api-type
 
 import {
   WeekFoldCache,
-  buildAttention,
+  buildNeeds,
   buildClis,
   buildGovernance,
   diskRow,
@@ -356,45 +356,44 @@ describe('clis[], judges and attention', () => {
     expect(byKey['pi']!.stats).toMatchObject({ units: 0, passPct: null, perDay: [0, 0, 0, 0, 0, 0, 0] });
   });
 
-  it('a benched CLI that leaves a gate without a distinct judge is red attention; with a judge left it is yellow', () => {
+  it('a benched CLI that leaves a gate without a distinct judge folds into the run it blocks (red); with a judge left it is no item', () => {
     const gated = view('run-g', 'awaiting_human', [{ ord: 3, status: 'pending', assigned_cli: 'claude' }], { clis: ['claude', 'codex'] });
     const run = runLiveness({ view: gated, now: NOW, evidence: null, gate: { interactionId: 'ir_1', ord: 3, kind: 'review', prompt: 'p' }, quietAfterMs: 5 * MIN, stallAfterMs: 15 * MIN });
     const gaps = judgeGaps([{ view: gated, run }], clis);
     expect(gaps).toHaveLength(1);
     expect(gaps[0]!.blockedBy.map((c) => c.cli)).toEqual(['codex']);
-    const governance = buildGovernance({
-      governance: { store: { path: '/g', source: 'flag' }, records: { total: 3, sinceBoot: 1 }, deadletters: { count: 0 }, findings: [] },
-      skillsFindings: [], decisions: null, clis, judgeGapCount: gaps.length, week: fold, gatesByYou: 1, steeringRules: 4,
-    });
-    const attention = buildAttention({ infra: [], clis, runs: [run], governance, gaps, blockedByInfra: () => 0 });
-    const codex = attention.find((a) => a.id === 'cli:codex')!;
-    expect(codex.severity).toBe('red');
-    expect(codex.reason).toMatch(/without a distinct judge/);
-    expect(attention.find((a) => a.id === 'judge:run-g')!.severity).toBe('red');
-    expect(attention.find((a) => a.id === 'run:run-g')).toMatchObject({ severity: 'yellow', target: { kind: 'run', runId: 'run-g', gateOrd: 3, interactionId: 'ir_1' }, action: { kind: 'open_gate' } });
-    // pi is signed out and also in no pool here: it leaves nothing without a judge, so it is not attention.
-    expect(attention.find((a) => a.id === 'cli:pi')).toBeUndefined();
+    const { attention } = buildNeeds({ now: NOW, views: [gated], runs: [run], infra: [], clis, gaps, infraHoldsLive: () => false });
+    // One cause, one item: the seat problem is part of the run it blocks, never an item of its own.
+    expect(attention.map((a) => a.id)).toEqual(['run:run-g']);
+    expect(attention[0]).toMatchObject({ severity: 'red', kind: 'prevents', blockedRunIds: ['run-g'], target: { kind: 'run', runId: 'run-g', gateOrd: 3, interactionId: 'ir_1' }, action: { kind: 'open_gate' } });
+    expect(attention[0]!.reason).toMatch(/no distinct judge for claude's work \(codex benched\)/);
     expect(levelOf(attention)).toBe('red');
 
-    // A third signed-in judge in the pool: the gate has a distinct judge, codex's bench is yellow.
+    // A third signed-in judge in the pool: the gate has a distinct judge; codex's bench is INFO (CLIs tab).
     const clis2 = buildClis({ roster: [...roster, seat('copilot')], acp: {}, seatGovernance: [], containerFloor: true, hostBoundary: null, week: fold });
     const gated2 = view('run-g', 'awaiting_human', [{ ord: 3, status: 'pending', assigned_cli: 'claude' }], { clis: ['claude', 'codex', 'copilot'] });
     const gaps2 = judgeGaps([{ view: gated2, run }], clis2);
     expect(gaps2).toHaveLength(0);
-    const a2 = buildAttention({ infra: [], clis: clis2, runs: [], governance: [], gaps: gaps2, blockedByInfra: () => 0 });
-    expect(a2.find((a) => a.id === 'cli:codex')!.severity).toBe('yellow');
+    const a2 = buildNeeds({ now: NOW, views: [gated2], runs: [run], infra: [], clis: clis2, gaps: gaps2, infraHoldsLive: () => false }).attention;
+    expect(a2.map((a) => a.id)).toEqual(['run:run-g']);
+    expect(a2[0]!.severity).toBe('yellow');
     expect(levelOf(a2)).toBe('yellow');
     expect(levelOf([])).toBe('green');
   });
 
-  it('a down infra row tops attention, red over yellow, then by what it blocks', async () => {
+  it('a down component on the live path is one item holding the live runs; a stalled run behind it is its, not its own cause', async () => {
     const gw = await probeGateway({ containerFloor: true, gatewayDir: '/g', runtime: '/d', exec: async () => ({ stdout: 'false', stderr: '' }) });
+    const views = [view('q', 'executing', []), view('s', 'executing', [])];
     const quiet = { runId: 'q', liveness: 'quiet', reason: 'quiet', quietForMs: 6 * MIN } as never;
     const stalled = { runId: 's', liveness: 'stalled', reason: 'no event for 40 min', quietForMs: 40 * MIN } as never;
-    const attention = buildAttention({ infra: [gw], clis: [] as SystemCli[], runs: [quiet, stalled], governance: [], gaps: [], blockedByInfra: (k) => (k === 'gateway' ? 2 : 0) });
-    expect(attention.map((a) => a.id)).toEqual(['infra:gateway', 'run:s', 'run:q']);
-    expect(attention[0]).toMatchObject({ severity: 'red', blocks: 2, action: { kind: 'recheck' } });
+    const { attention } = buildNeeds({ now: NOW, views, runs: [quiet, stalled], infra: [gw], clis: [] as SystemCli[], gaps: [], infraHoldsLive: (k) => k === 'gateway' });
+    expect(attention.map((a) => a.id)).toEqual(['infra:gateway']);
+    expect(attention[0]).toMatchObject({ severity: 'red', kind: 'prevents', blocks: 2, action: { kind: 'recheck' } });
+    expect([...attention[0]!.blockedRunIds!].sort()).toEqual(['q', 's']);
     expect(attention[0]!.remedy).toMatch(/docker start/);
+    // Off the live path (the host floor), the gateway holds nothing; the stalled run is its own item.
+    const host = buildNeeds({ now: NOW, views, runs: [quiet, stalled], infra: [gw], clis: [] as SystemCli[], gaps: [], infraHoldsLive: () => false }).attention;
+    expect(host.map((a) => a.id)).toEqual(['run:s', 'infra:gateway']);
   });
 });
 
@@ -456,7 +455,7 @@ describe('review fixes (xreview r1 on #1137)', () => {
     const clis = [cli('claude', { councilEligible: false }), cli('codex', { workEligible: false })];
     const cards = buildGovernance({ governance: null, skillsFindings: [], decisions: null, clis, judgeGapCount: 0, week: null, gatesByYou: 0, steeringRules: 1 });
     expect(cards.find((c) => c.key === 'judges')).toMatchObject({ state: 'ok', value: 1 });
-    expect(levelOf(buildAttention({ infra: [], clis, runs: [], governance: cards.filter((c) => c.key === 'judges'), gaps: [], blockedByInfra: () => 0 }))).toBe('green');
+    expect(levelOf(buildNeeds({ now: NOW, views: [], runs: [], infra: [], clis, gaps: [], infraHoldsLive: () => false }).attention)).toBe('green');
   });
 
   it('diagnostics that did not answer never read as ok or 0: the dependent cards are unknown', () => {

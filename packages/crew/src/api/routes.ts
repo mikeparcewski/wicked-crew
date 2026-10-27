@@ -52,6 +52,7 @@ import type {
   LaunchRunInput,
   ListMemoriesResponse,
   ListProposalsResponse,
+  ResolveRunResponse,
   MemoryCoverageResponse,
   MemoryItem,
   PolicyLandingResult,
@@ -231,9 +232,10 @@ import {
   PROBE_TIMEOUT_MS,
   SYSTEM_BUDGET_MS,
   SYSTEM_STATS_DAYS,
+  SYSTEM_STATS_TTL_MS,
   WeekFoldCache,
   assembleSnapshot,
-  buildAttention,
+  buildNeeds,
   buildClis,
   buildGovernance,
   diskRow,
@@ -263,6 +265,7 @@ import {
   type RosterSeatLike,
   type RunEvidence,
 } from './system-snapshot.js';
+import { RunCostCache } from './needs.js';
 import { governanceStoreFix, legacyHomeOutboxPath } from '../core/governance-store.js';
 import { UsageError, replayOutboxInto } from '../cli/governance.js';
 import { foldDeadletters } from './governance-health.js';
@@ -1831,6 +1834,8 @@ export function registerRoutes(
       launchPrimary: true,
       // api-types 0.136.0 (DES-SYSTEM-VIEW): `GET /system`, the Nerve Center snapshot, is served.
       system: true,
+      // api-types 0.140.0: attention[] is the one needs-you list; unresolved[] + toReview; POST /runs/:id/resolve.
+      attentionRanked: true,
       // api-types 0.137.0 (DES-SYSTEM-CHAT): the chat history (list, reopen, close) and attachments.
       chatList: chatHistory !== null,
       chatAttachments: true,
@@ -3048,6 +3053,59 @@ export function registerRoutes(
       return reply.code(500).send({ error: msg });
     }
   });
+  // ── Resolve an unresolved run (api-types 0.140.0) ─────────────────────────────
+  // Unresolved work (`GET /system.unresolved[]`) is resolved, never hidden: archived WITH a reason,
+  // or closed as superseded naming the run that replaced it (retry is `POST /runs {retryOf}`). A run
+  // parked at a gate is stopped first (no worker is running), then archived; a run that is
+  // executing is refused, so a resolve never ends live work. The note keeps the reason.
+  const ResolveSchema = z.discriminatedUnion('action', [
+    z.object({ action: z.literal('archive'), reason: z.string().trim().min(1, 'a reason is required to archive').max(480) }).strict(),
+    z.object({ action: z.literal('superseded'), by: z.string().min(1), reason: z.string().trim().max(400).optional() }).strict(),
+  ]);
+  app.post(
+    `${V}/runs/:id/resolve`,
+    { config: { manifest: { requestType: 'ResolveRunRequest', responseType: 'ResolveRunResponse', statusCodes: [200, 400, 404, 409, 500] } } },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const parsed = ResolveSchema.safeParse(req.body ?? {});
+      if (!parsed.success) return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
+      const b = parsed.data;
+      const note = b.action === 'archive' ? `resolved: ${b.reason}` : `superseded by ${b.by}${b.reason !== undefined && b.reason !== '' ? `: ${b.reason}` : ''}`;
+      // Inside the run's decision lock (the gate path's): the status read, the stop and the archive
+      // are one step, so a gate answered at the same moment can never be stopped by a resolve. The
+      // status is read again inside the lock, right before the stop.
+      const outcome = await decideExclusively(id, async (): Promise<{ code: number; body: unknown }> => {
+        const views = await adapter.sessionsDetail();
+        const run = views.find((v) => v.session.id === id);
+        if (run === undefined) return { code: 404, body: { error: 'Run not found' } };
+        if (b.action === 'superseded') {
+          if (b.by === id) return { code: 400, body: { error: '`by` must name another run' } };
+          if (!views.some((v) => v.session.id === b.by)) return { code: 400, body: { error: `\`by\` names an unknown run: ${b.by}` } };
+        }
+        const status = run.session.status;
+        if (status !== 'awaiting_human' && status !== 'failed' && status !== 'completed' && status !== 'cancelled') {
+          return { code: 409, body: { error: `run ${id} is ${status}: a running job cannot be resolved; stop it first` } };
+        }
+        let cancelled = false;
+        try {
+          if (status === 'awaiting_human') {
+            await adapter.cancelRun(id);
+            cancelled = true;
+          }
+          const found = await adapter.archiveRun(id, true, note);
+          if (!found) return { code: 404, body: { error: 'Run not found' } };
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          return { code: /only a terminal run/i.test(msg) ? 409 : 500, body: { error: msg } };
+        }
+        audit.record('run.resolved', actorOf(req), { runId: id, detail: { action: b.action, note, cancelled, ...(b.action === 'superseded' ? { by: b.by } : {}) } });
+        const out: ResolveRunResponse = { runId: id, action: b.action, archived: true, cancelled, note };
+        return { code: 200, body: out };
+      });
+      return reply.code(outcome.code).send(outcome.body);
+    },
+  );
+
   // Bulk write-off for campaign backlogs — explicit ids only, never implicit age selection.
   const BulkArchiveSchema = z.object({
     ids: z.array(z.string().min(1)).min(1).max(200),
@@ -7976,6 +8034,8 @@ export function registerRoutes(
   // store is kept for SYSTEM_STATS_TTL_MS, with its `asOf`. The whole answer is held to
   // SYSTEM_BUDGET_MS: a part that does not settle in time reads `unknown` (or `null`) with why.
   const weekFoldCache = new WeekFoldCache();
+  const runCosts = new RunCostCache();
+  let toReviewCache: { at: number; value: number | null } | null = null;
   /** One stat of a run's durable event log: read before the 7-day fold, so the fold can never eat
    *  the time a liveness verdict needs. */
   const EVIDENCE_TIMEOUT_MS = 1_000;
@@ -8016,6 +8076,15 @@ export function registerRoutes(
         if (typeof adapter.listConformanceRules !== 'function') return null;
         const rules = await adapter.listConformanceRules();
         return rules.filter((r) => (r as { retired?: unknown }).retired !== true).length;
+      }, PROBE_TIMEOUT_MS);
+      // Pending proposals: "N to review", never in the needs-you number (no run waits on them).
+      // Kept for SYSTEM_STATS_TTL_MS: a skin polls /system, and each read would spawn the estate client.
+      const toReviewP = settleWithin(async () => {
+        if (toReviewCache !== null && Date.now() - toReviewCache.at < SYSTEM_STATS_TTL_MS) return toReviewCache.value;
+        const got = (await estateTool('proposal.list', { state: 'pending' })) as { proposals?: unknown[] } | null;
+        const value = Array.isArray(got?.proposals) ? got.proposals.length : null;
+        if (value !== null) toReviewCache = { at: Date.now(), value }; // a failed read is never kept
+        return value;
       }, PROBE_TIMEOUT_MS);
       const gatesByYouP = settleWithin(async () => {
         const since = Date.now() - SYSTEM_STATS_DAYS * 86_400_000;
@@ -8074,7 +8143,14 @@ export function registerRoutes(
       if (openGates.kind === 'ok' && openGates.value !== null) {
         const at = (r: { created_at?: unknown }): number => new Date(r.created_at as string | number).getTime() || 0;
         for (const r of [...openGates.value].sort((a, b) => at(a) - at(b))) {
-          openByRun.set(r.session_id, { interactionId: r.id, ord: r.ord, kind: r.gate_kind ?? (r.kind === 'elicitation' ? 'question' : null), prompt: r.prompt.slice(0, 280) });
+          const arrived = at(r);
+          openByRun.set(r.session_id, {
+            interactionId: r.id,
+            ord: r.ord,
+            kind: r.gate_kind ?? (r.kind === 'elicitation' ? 'question' : null),
+            prompt: r.prompt.slice(0, 280),
+            receivedAt: arrived > 0 ? new Date(arrived).toISOString() : (gateCache.get(r.session_id)?.receivedAt ?? null),
+          });
         }
       }
       const now = Date.now();
@@ -8095,7 +8171,7 @@ export function registerRoutes(
           const gate =
             openByRun.get(view.session.id) ??
             (view.session.status === 'awaiting_human' && cached !== undefined
-              ? { interactionId: null, ord: cached.ord, kind: (cached as { gateKind?: string }).gateKind ?? null, prompt: cached.prompt.slice(0, 280) }
+              ? { interactionId: null, ord: cached.ord, kind: (cached as { gateKind?: string }).gateKind ?? null, prompt: cached.prompt.slice(0, 280), receivedAt: cached.receivedAt }
               : null);
           const run = runLiveness({ view, now, evidence: await evidenceOf(view.session.id), gate: view.session.status === 'awaiting_human' ? gate : null, quietAfterMs, stallAfterMs });
           return { view, run };
@@ -8207,17 +8283,57 @@ export function registerRoutes(
         steeringRules: rules.kind === 'ok' ? rules.value : null,
         ...(rules.kind === 'ok' && rules.value === null ? { steeringNote: 'this engine cannot list steering rules' } : rules.kind === 'timeout' ? { steeringNote: `the rule store did not answer within ${PROBE_TIMEOUT_MS / 1000} s` } : rules.kind === 'error' ? { steeringNote: `the rule store could not be read: ${rules.error}` } : {}),
       });
-      const working = runs.filter((r) => r.liveness !== 'waiting_on_you' && r.liveness !== 'held').length;
-      const attention = buildAttention({
+      // The one "needs you" rule (needs.ts): root causes ranked by impact, plus the unresolved work
+      // and what it cost. Per-run cost is read from the run's own log, cached, never waited on past
+      // the budget (an unread run's cost reads unknown and the next read has it).
+      const first = buildNeeds({
+        now,
+        views: allViews,
+        runs,
         infra,
         clis,
-        runs,
-        governance,
         gaps,
-        blockedByInfra: (key) =>
-          key === 'gateway' || key === 'broker' ? (containerFloor ? working : 0) : key === 'skills' || key === 'state_home' || key === 'disk' || key === 'load' ? working : 0,
+        infraHoldsLive: (key) => (key === 'gateway' || key === 'broker' ? containerFloor : key === 'skills' || key === 'state_home' || key === 'disk' || key === 'daemon'),
+        costOf: (id) => runCosts.get(id),
       });
-      return assembleSnapshot({ startedAt, clis, runs, infra, governance, attention });
+      if (typeof adapter.runEvents === 'function' && first.unresolved.length > 0) {
+        const byId = new Map(allViews.map((v) => [v.session.id, v]));
+        await settleWithin(
+          () =>
+            runCosts.fill(
+              first.unresolved.map((u) => {
+                const s = byId.get(u.runId)?.session;
+                return { id: u.runId, final: ['failed', 'completed', 'cancelled'].includes(s?.status ?? ''), stamp: `${s?.status ?? ''}:${s?.ended_at ?? ''}` };
+              }),
+              (id) => adapter.runEvents!(id) as Promise<ReadonlyArray<{ type?: unknown; [k: string]: unknown }> | null>,
+            ),
+          Math.min(left(), 2_000),
+        );
+      }
+      const needs = buildNeeds({
+        now,
+        views: allViews,
+        runs,
+        infra,
+        clis,
+        gaps,
+        infraHoldsLive: (key) => (key === 'gateway' || key === 'broker' ? containerFloor : key === 'skills' || key === 'state_home' || key === 'disk' || key === 'daemon'),
+        costOf: (id) => runCosts.get(id),
+      });
+      const toReview = await toReviewP;
+      // A run list that could not be read never reads green: the daemon row (degraded, "did not list
+      // its runs") is in attention as a slowdown, and the level stays at least yellow.
+      return assembleSnapshot({
+        startedAt,
+        clis,
+        runs,
+        infra,
+        governance,
+        attention: needs.attention,
+        unresolved: needs.unresolved,
+        unresolvedSpend: needs.unresolvedSpend,
+        toReview: toReview.kind === 'ok' ? toReview.value : null,
+      });
     },
   );
 

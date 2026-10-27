@@ -33,6 +33,10 @@ describe('isAskTurn', () => {
     expect(isAskTurn(view('r.1', 'awaiting_human', []))).toBe(false);
     expect(isAskTurn(view('r.1', 'awaiting_human', [unit('r.1', 'answer-1', 0), unit('r.1', 'build-1', 1, 'pending')])), 'Continue in Build').toBe(false);
     expect(isAskTurn(view('r.1', 'awaiting_human', [unit('r.1', 'answer-1', 0, 'distributed')]))).toBe(false);
+    // An answer held at an escalation (input governance refused a call; a dead seat) is not done:
+    // that gate is a real one, never a turn (rig run 68c26704).
+    expect(isAskTurn(view('r.1', 'awaiting_human', [unit('r.1', 'answer-1', 0, 'rejected')])), 'escalated answer').toBe(false);
+    expect(isAskTurn(view('r.1', 'awaiting_human', [unit('r.1', 'answer-1', 0), unit('r.1', 'answer-2', 1, 'pending')])), 'escalated second answer').toBe(false);
     // The run id is matched literally (a `.` is not "any character").
     expect(isAskTurn(view('r.1', 'awaiting_human', [unit('rx1', 'answer-1', 0)]))).toBe(false);
   });

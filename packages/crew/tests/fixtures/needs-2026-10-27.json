@@ -1,0 +1,1891 @@
+{
+ "snapshot_at": "2026-10-27T04:11:50.422Z",
+ "rig": "127.0.0.1:7721 (crew 0.16.3, studio bundle 0.12.3)",
+ "studio_counts_observed": {
+  "home": 21,
+  "needs_page": 51,
+  "nerve_center": 11,
+  "how_studio_computes": {
+   "home": "attentionBadge(needRows) = count of needs-fold rows in sections decision+failure (gate, elicitation, steer-request, failed-run, orphaned-run, stall-escalated, stalled-run). Gate rows exclude ask_turn runs. failed-run rows = status failed, unarchived, in the first 30 runs, not named by any retry_of, not a failed onboarding.",
+   "needs_page": "needCount(rows) over ALL needs-fold rows: decision+failure+other (stranded-run, campaign, repo-graph, stalled-chat)+review (pending proposals, each counted).",
+   "nerve_center": "crew GET /system attention[].length (crew-side derivation: every held / waiting_on_you run, degraded infra, benched/out CLIs)."
+  },
+  "reproduced_from_this_dump": {
+   "home": "7 gate rows (10 awaiting_human minus 3 ask_turn) + 14 failed-run rows = 21",
+   "needs_page": "21 + 30 pending proposals + 0 other (no stranded, no never-indexed repo, no idle chat, no campaign) = 51",
+   "nerve_center": "12 attention items now (6 held + 4 waiting_on_you + host load + copilot benched); 11 at the time of the screenshot (one of the time-varying items: copilot bench / host load / the 0.1h-old run 68c26704 was not there yet)"
+  }
+ },
+ "system": {
+  "level": "red",
+  "attention": [
+   {
+    "severity": "red",
+    "source": "run",
+    "id": "run:1940f173-e812-4d52-9406-fea79a325912",
+    "title": "run 1940f173 held",
+    "reason": "held at an escalation gate (unit 6): the work failed a check or could not be judged",
+    "blocks": 1
+   },
+   {
+    "severity": "red",
+    "source": "run",
+    "id": "run:290a7fee-6b79-484d-812c-22c4814720ba",
+    "title": "run 290a7fee held",
+    "reason": "held at an escalation gate (unit 4): the work failed a check or could not be judged",
+    "blocks": 1
+   },
+   {
+    "severity": "red",
+    "source": "run",
+    "id": "run:2ebd9da2-6e31-4ae3-9335-e3347d04552b",
+    "title": "run 2ebd9da2 held",
+    "reason": "held at an escalation gate (unit 6): the work failed a check or could not be judged",
+    "blocks": 1
+   },
+   {
+    "severity": "red",
+    "source": "run",
+    "id": "run:64f05d3d-95e3-410e-b581-03b3be7cd490",
+    "title": "run 64f05d3d held",
+    "reason": "held at an escalation gate (unit 9): the work failed a check or could not be judged",
+    "blocks": 1
+   },
+   {
+    "severity": "red",
+    "source": "run",
+    "id": "run:68c26704-6137-4e52-af0c-8c5cdbef2a11",
+    "title": "run 68c26704 held",
+    "reason": "held at an escalation gate (unit 1): the work failed a check or could not be judged",
+    "blocks": 1
+   },
+   {
+    "severity": "red",
+    "source": "run",
+    "id": "run:9bd0f728-3bbe-44ca-90d2-31e4bbf3b023",
+    "title": "run 9bd0f728 held",
+    "reason": "held at an escalation gate (unit 8): the work failed a check or could not be judged",
+    "blocks": 1
+   },
+   {
+    "severity": "yellow",
+    "source": "run",
+    "id": "run:29bcace4-5c7d-41d0-9e82-38acdc550d69",
+    "title": "run 29bcace4 waiting on you",
+    "reason": "waiting on you: deliver (unit 10)",
+    "blocks": 1
+   },
+   {
+    "severity": "yellow",
+    "source": "run",
+    "id": "run:7f4e149f-a176-4400-ab27-41a25517eb9a",
+    "title": "run 7f4e149f waiting on you",
+    "reason": "waiting on you: deliver (unit 8)",
+    "blocks": 1
+   },
+   {
+    "severity": "yellow",
+    "source": "run",
+    "id": "run:b87f42fb-5fb7-4729-84a5-aa195c929dc4",
+    "title": "run b87f42fb waiting on you",
+    "reason": "waiting on you: terminal (unit 1)",
+    "blocks": 1
+   },
+   {
+    "severity": "yellow",
+    "source": "run",
+    "id": "run:e43c4560-44cf-421f-828f-018202a1ea36",
+    "title": "run e43c4560 waiting on you",
+    "reason": "waiting on you: terminal (unit 1)",
+    "blocks": 1
+   },
+   {
+    "severity": "yellow",
+    "source": "infra",
+    "id": "infra:load",
+    "title": "Host load: degraded",
+    "reason": "load 51.33 on 14 cores: work will run slowly",
+    "blocks": 0
+   },
+   {
+    "severity": "yellow",
+    "source": "cli",
+    "id": "cli:copilot",
+    "title": "GitHub Copilot CLI benched",
+    "reason": "benched: quota (429) until 04:28 UTC (quota_exhausted (no success in the run)); a distinct judge can still be seated",
+    "blocks": 0
+   }
+  ],
+  "clis": [
+   {
+    "cli": "claude",
+    "state": "signed_in",
+    "reason": null,
+    "workEligible": true,
+    "councilEligible": true
+   },
+   {
+    "cli": "codex",
+    "state": "signed_in",
+    "reason": null,
+    "workEligible": true,
+    "councilEligible": true
+   },
+   {
+    "cli": "pi",
+    "state": "signed_out",
+    "reason": "signed out \u2014 the seat's own auth check says it cannot authenticate (broker credential signed_out); sign it in from the Agents page",
+    "workEligible": false,
+    "councilEligible": false
+   },
+   {
+    "cli": "copilot",
+    "state": "benched",
+    "reason": "benched: quota (429) until 04:28 UTC (quota_exhausted (no success in the run))",
+    "workEligible": false,
+    "councilEligible": false
+   },
+   {
+    "cli": "opencode",
+    "state": "signed_out",
+    "reason": "signed out \u2014 the seat's own auth check says it cannot authenticate (broker credential signed_out); sign it in from the Agents page",
+    "workEligible": false,
+    "councilEligible": false
+   }
+  ],
+  "note_agy": "agy is not on this rig roster but appears in runs benched_seats as not_logged_in",
+  "infra": [
+   {
+    "key": "daemon",
+    "state": "ok",
+    "reason": "serving crew 0.16.3; engine ping ok"
+   },
+   {
+    "key": "gateway",
+    "state": "ok",
+    "reason": "running (wicked-agw-89a7ad09ca9e)"
+   },
+   {
+    "key": "broker",
+    "state": "ok",
+    "reason": "signed in: claude, codex, copilot"
+   },
+   {
+    "key": "interactive",
+    "state": "off",
+    "reason": "not running: crew starts the bridge when a document opens"
+   },
+   {
+    "key": "estate",
+    "state": "ok",
+    "reason": "answered a read-only memory.coverage (0 memories)"
+   },
+   {
+    "key": "bus",
+    "state": "ok",
+    "reason": "bus file present; watch tail lag 0 ms"
+   },
+   {
+    "key": "vault",
+    "state": "ok",
+    "reason": "answers (0.8.0)"
+   },
+   {
+    "key": "skills",
+    "state": "ok",
+    "reason": "a published snapshot is current"
+   },
+   {
+    "key": "state_home",
+    "state": "ok",
+    "reason": "every entry is classified"
+   },
+   {
+    "key": "stores",
+    "state": "ok",
+    "reason": "20 store file(s), 398 MiB"
+   },
+   {
+    "key": "seat_floor",
+    "state": "ok",
+    "reason": "container floor: governed seats run in hardened containers"
+   },
+   {
+    "key": "disk",
+    "state": "ok",
+    "reason": "48.7 GiB free of 460.4 GiB"
+   },
+   {
+    "key": "load",
+    "state": "degraded",
+    "reason": "load 51.33 on 14 cores: work will run slowly"
+   }
+  ],
+  "governance": [
+   {
+    "key": "judges",
+    "state": "ok",
+    "value": 2,
+    "reason": "a distinct judge can be seated (for example codex judging claude); claude, codex can judge"
+   },
+   {
+    "key": "floor_outcomes",
+    "state": "ok",
+    "value": 77,
+    "reason": "32 of 77 repo-checks floors passed"
+   },
+   {
+    "key": "qe_acceptance",
+    "state": "ok",
+    "value": 17,
+    "reason": "2 of 12 QE acceptance gates passed (the QE unit's last gate per run)"
+   },
+   {
+    "key": "gates_answered",
+    "state": "ok",
+    "value": 218,
+    "reason": "125 answered by you, 93 ruled by a judge"
+   },
+   {
+    "key": "dead_letters",
+    "state": "ok",
+    "value": 0,
+    "reason": "none: every governance event landed"
+   },
+   {
+    "key": "steering_rules",
+    "state": "ok",
+    "value": 21,
+    "reason": "21 active rule(s)"
+   },
+   {
+    "key": "findings",
+    "state": "ok",
+    "value": 0,
+    "reason": "none"
+   },
+   {
+    "key": "store",
+    "state": "ok",
+    "value": 1528,
+    "reason": "1528 record(s); 93 since boot"
+   }
+  ],
+  "runs_liveness": [
+   {
+    "runId": "29bcace4-5c7d-41d0-9e82-38acdc550d69",
+    "status": "awaiting_human",
+    "liveness": "waiting_on_you",
+    "reason": "waiting on you: deliver (unit 10)",
+    "quietForMs": 71479633
+   },
+   {
+    "runId": "7f4e149f-a176-4400-ab27-41a25517eb9a",
+    "status": "awaiting_human",
+    "liveness": "waiting_on_you",
+    "reason": "waiting on you: deliver (unit 8)",
+    "quietForMs": 57239913
+   },
+   {
+    "runId": "b87f42fb-5fb7-4729-84a5-aa195c929dc4",
+    "status": "awaiting_human",
+    "liveness": "waiting_on_you",
+    "reason": "waiting on you: terminal (unit 1)",
+    "quietForMs": 3175821
+   },
+   {
+    "runId": "e43c4560-44cf-421f-828f-018202a1ea36",
+    "status": "awaiting_human",
+    "liveness": "waiting_on_you",
+    "reason": "waiting on you: terminal (unit 1)",
+    "quietForMs": 3100014
+   },
+   {
+    "runId": "2ebd9da2-6e31-4ae3-9335-e3347d04552b",
+    "status": "awaiting_human",
+    "liveness": "held",
+    "reason": "held at an escalation gate (unit 6): the work failed a check or could not be judged",
+    "quietForMs": 378306633
+   },
+   {
+    "runId": "64f05d3d-95e3-410e-b581-03b3be7cd490",
+    "status": "awaiting_human",
+    "liveness": "held",
+    "reason": "held at an escalation gate (unit 9): the work failed a check or could not be judged",
+    "quietForMs": 112741285
+   },
+   {
+    "runId": "1940f173-e812-4d52-9406-fea79a325912",
+    "status": "awaiting_human",
+    "liveness": "held",
+    "reason": "held at an escalation gate (unit 6): the work failed a check or could not be judged",
+    "quietForMs": 52978538
+   },
+   {
+    "runId": "9bd0f728-3bbe-44ca-90d2-31e4bbf3b023",
+    "status": "awaiting_human",
+    "liveness": "held",
+    "reason": "held at an escalation gate (unit 8): the work failed a check or could not be judged",
+    "quietForMs": 51917419
+   },
+   {
+    "runId": "290a7fee-6b79-484d-812c-22c4814720ba",
+    "status": "awaiting_human",
+    "liveness": "held",
+    "reason": "held at an escalation gate (unit 4): the work failed a check or could not be judged",
+    "quietForMs": 20319982
+   },
+   {
+    "runId": "68c26704-6137-4e52-af0c-8c5cdbef2a11",
+    "status": "awaiting_human",
+    "liveness": "held",
+    "reason": "held at an escalation gate (unit 1): the work failed a check or could not be judged",
+    "quietForMs": 444043
+   }
+  ]
+ },
+ "runs": [
+  {
+   "pos": 0,
+   "id": "290a7fee",
+   "title": "wicked-core#840: a loopback_socket_masks dir removed after\u2026",
+   "status": "awaiting_human",
+   "repo": "wicked-core",
+   "workflow": "bug",
+   "created_h_ago": 177.8,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [
+    "opencode:not_logged_in",
+    "copilot:quota_exhausted (no success in the run)",
+    "agy:not_logged_in",
+    "pi:not_logged_in"
+   ],
+   "rejected_units": [
+    {
+     "ord": 4,
+     "role": "creator",
+     "cli": "claude",
+     "denial": "dead seat: 'claude' failed unit 4 (worker error) and every eligible seat has now failed it (tried: pi, claude) \u2014 4 of 5 seats benched: opencode (not_logged_in \u2014 judge), copilot (quota_exhausted (no success in the run) \u2014 judge), agy (not_logged_in \u2014 judge), pi (not_logged_in \u2014 worker): (cli `claude` exited 1) API Error: 503 backends required DNS resolution which failed. This is a server-side issue, usually temporary \u2014 try again in a moment. If it persists, check your inference gateway (agw:4005)."
+    }
+   ],
+   "units_total": 7,
+   "units_done": 3,
+   "seat_failures": [
+    {
+     "cli": "claude",
+     "sig": "exit 1: API Error: # backends required DNS resolution which failed. This is a server-side issue, usually temporary \u2014 try again in a moment. If it persists, chec"
+    }
+   ],
+   "gate": {
+    "ord": 4,
+    "kind": "escalation",
+    "receivedAt": "2026-10-26T21:47:44.560Z",
+    "waiting_h": 6.4,
+    "prompt": "Unit 4 (claude) failed on a dead seat: dead seat: 'claude' failed unit 4 (worker error) and every eligible seat has now failed it (tried: pi, claude) \u2014 4 of 5 seats benched: opencode (not_logged_in \u2014 judge), copilot (quota_exhausted (no success in the run) \u2014 judge), agy (not_log\u2026. Reassign the unit ",
+    "judge_skipped": []
+   }
+  },
+  {
+   "pos": 1,
+   "id": "2ebd9da2",
+   "title": "Host seats, phase 1 of the DES-HOST-SEATS",
+   "status": "awaiting_human",
+   "repo": "wicked-core",
+   "workflow": "feature",
+   "created_h_ago": 142.2,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [
+    "copilot:recent quota_exhausted",
+    "opencode:recent quota_exhausted",
+    "agy:not_logged_in",
+    "pi:not_logged_in"
+   ],
+   "rejected_units": [
+    {
+     "ord": 6,
+     "role": "creator",
+     "cli": "codex",
+     "denial": "repo checks floor failed: the repository's own checks pass in the run's worktree (every detected check exits 0 \u2014 done is re-derived by running them, never asserted). test: exit 101 (2107.8s) [regression] \u2014 stdout tail: test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s | running 0 tests | test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s \u2014 stderr tail: `-p wicked-core --test tool_child_lifecycle` | `-p wicked-core --test walkthrough_record` | `-p wicked-council --lib` \u2014 the run base 65aa24f791 fails this check too, but not identically: head-only failures test cancel_kills_entire_process_group_including_gra"
+    }
+   ],
+   "units_total": 11,
+   "units_done": 5,
+   "gate": {
+    "ord": 6,
+    "kind": "escalation",
+    "receivedAt": "2026-10-22T19:06:43.782Z",
+    "waiting_h": 105.1,
+    "prompt": "Unit 6 failed its deterministic floor (repo_checks): repo checks floor failed: the repository's own checks pass in the run's worktree (every detected check exits 0 \u2014 done is re-derived by running them, never asserted). test: exit 101 (2107.8s) [regression] \u2014 stdout tail: test result: ok. 0 pa\u2026 \u2014 con",
+    "judge_skipped": [
+     "copilot (benched for this run: recent quota_exhausted); opencode (benched for this run: recent quota_exhausted)"
+    ]
+   }
+  },
+  {
+   "pos": 2,
+   "id": "64f05d3d",
+   "title": "Mirror core's fix",
+   "status": "awaiting_human",
+   "repo": "wicked-crew",
+   "workflow": "bug",
+   "created_h_ago": 40.4,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [
+    "copilot:quota_exhausted (no success in the run)",
+    "agy:not_logged_in"
+   ],
+   "rejected_units": [
+    {
+     "ord": 9,
+     "role": "evaluator",
+     "cli": "codex",
+     "denial": "repo checks floor failed: the repository's own checks pass in the run's worktree (every detected check exits 0 \u2014 done is re-derived by running them, never asserted). test_targeted: exit 1 (2761.7s) [base_red_unseparated: base red, cannot separate: exclusion disabled (WICKED_FLOOR_EXCLUDE)] \u2014 stdout tail: at least ~22.01s faster with isolate: false \u2014 reuses workers across files instead of one per file | WICKED-RETRY the re-run FAILED too \u2014 a reproducing failure is this change's, recorded as exit 1. | WICKED-HOST label=post load1=52.63 load5=58.89 cpus=14 loadPerCpu=3.76 freeMemMb=2172.45 swapFreeM... \u2014 stderr tail: 218| } | \u276f tests/integration/qe-author-tests-e2e.test.ts:526:17 | \u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af\u23af"
+    }
+   ],
+   "units_total": 10,
+   "units_done": 8,
+   "gate": {
+    "ord": 9,
+    "kind": "escalation",
+    "receivedAt": "2026-10-25T20:52:49.130Z",
+    "waiting_h": 31.3,
+    "prompt": "Unit 9 failed its deterministic floor (repo_checks): repo checks floor failed: the repository's own checks pass in the run's worktree (every detected check exits 0 \u2014 done is re-derived by running them, never asserted). test_targeted: exit 1 (2761.7s) [base_red_unseparated: base red, cannot se\u2026 \u2014 con",
+    "judge_skipped": [
+     "copilot (benched for this run: quota_exhausted (no success in the run))"
+    ]
+   }
+  },
+  {
+   "pos": 3,
+   "id": "29bcace4",
+   "title": "Make wicked-core's own test suite pass",
+   "status": "awaiting_human",
+   "repo": "wicked-core",
+   "workflow": "bug",
+   "created_h_ago": 31.0,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [
+    "copilot:quota_exhausted (no success in the run)",
+    "agy:not_logged_in"
+   ],
+   "units_total": 10,
+   "units_done": 9,
+   "gate": {
+    "ord": 10,
+    "kind": "deliver",
+    "receivedAt": "2026-10-26T08:20:30.781Z",
+    "waiting_h": 19.9,
+    "prompt": "Approve delivery before unit 10 runs. Pushes branch wicked/29bcace4-5c7d-41d0-9e82-38acdc550d69 to mikeparcewski/wicked-core on GitHub and opens a pull request there; merge stays human. Push identity: mikeparcewski (GH_ACCOUNT), pinned by GH_TOKEN \u2014 the phase refuses if that token authenticates as a",
+    "judge_skipped": []
+   }
+  },
+  {
+   "pos": 4,
+   "id": "1940f173",
+   "title": "Make the floor's copies of a repo behave like a real\u2026",
+   "status": "awaiting_human",
+   "repo": "wicked-core",
+   "workflow": "bug",
+   "created_h_ago": 19.8,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [
+    "copilot:recent quota_exhausted",
+    "agy:not_logged_in"
+   ],
+   "rejected_units": [
+    {
+     "ord": 6,
+     "role": "evaluator",
+     "cli": "codex",
+     "denial": "repo checks floor failed: the repository's own checks pass in the run's worktree (every detected check exits 0 \u2014 done is re-derived by running them, never asserted). test: exit 101 (3025.7s) [base_red_unseparated: base red, cannot separate: exclusion disabled (WICKED_FLOOR_EXCLUDE)] \u2014 stdout tail: test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s | running 0 tests | test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s \u2014 stderr tail: `-p wicked-core --test tool_child_lifecycle` | `-p wicked-core --test walkthrough_record` | `-p wicked-council --lib` \u2014 the run base 2b106836ce fails this check too, and its fail"
+    }
+   ],
+   "units_total": 7,
+   "units_done": 5,
+   "gate": {
+    "ord": 6,
+    "kind": "escalation",
+    "receivedAt": "2026-10-26T13:28:51.875Z",
+    "waiting_h": 14.7,
+    "prompt": "Unit 6 failed its deterministic floor (repo_checks): repo checks floor failed: the repository's own checks pass in the run's worktree (every detected check exits 0 \u2014 done is re-derived by running them, never asserted). test: exit 101 (3025.7s) [base_red_unseparated: base red, cannot separate:\u2026 \u2014 con",
+    "judge_skipped": [
+     "copilot (benched for this run: recent quota_exhausted)"
+    ]
+   }
+  },
+  {
+   "pos": 5,
+   "id": "7f4e149f",
+   "title": "Build an editor plugin titled \"Changelog entry\"",
+   "status": "awaiting_human",
+   "repo": "wicked-e2e-j6-plugins",
+   "workflow": "editor-plugin",
+   "created_h_ago": 17.0,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [
+    "copilot:quota_exhausted (no success in the run)",
+    "agy:not_logged_in"
+   ],
+   "units_total": 10,
+   "units_done": 7,
+   "gate": {
+    "ord": 8,
+    "kind": "deliver",
+    "receivedAt": "2026-10-26T12:17:50.500Z",
+    "waiting_h": 15.9,
+    "prompt": "Approve delivery before unit 8 runs. Pushes branch wicked/7f4e149f-a176-4400-ab27-41a25517eb9a to mikeparcewski/wicked-e2e-j6-plugins on GitHub and opens a pull request there; merge stays human. Push identity: mikeparcewski (GH_ACCOUNT), pinned by GH_TOKEN \u2014 the phase refuses if that token authentic",
+    "judge_skipped": []
+   }
+  },
+  {
+   "pos": 6,
+   "id": "9bd0f728",
+   "title": "Build a small MCP server named unit-convert in the\u2026",
+   "status": "awaiting_human",
+   "repo": "wicked-e2e-j6-plugins",
+   "workflow": "mcp-server",
+   "created_h_ago": 17.0,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [
+    "copilot:quota_exhausted (no success in the run)",
+    "agy:not_logged_in"
+   ],
+   "rejected_units": [
+    {
+     "ord": 8,
+     "role": "evaluator",
+     "cli": "codex",
+     "denial": "unit 8 checks work built on `codex` and ran on that same seat; the run requires a distinct evaluator (distinct_evaluator) \u2014 reassign it to a distinct signed-in seat and approve to re-run, or relaunch with reduced assurance"
+    }
+   ],
+   "units_total": 14,
+   "units_done": 7,
+   "gate": {
+    "ord": 8,
+    "kind": "escalation",
+    "receivedAt": "2026-10-26T13:46:32.995Z",
+    "waiting_h": 14.4,
+    "prompt": "Unit 8 (codex) reviewed work built on its own seat: unit 8 checks work built on `codex` and ran on that same seat; the run requires a distinct evaluator (distinct_evaluator) \u2014 reassign it to a distinct signed-in seat and approve to re-run, or relaunch with reduced assurance. Reassign the unit to a d",
+    "judge_skipped": [
+     "evaluated on a seat that built the work, `codex`",
+     "copilot (benched for this run: quota_exhausted (no success in the run))"
+    ]
+   }
+  },
+  {
+   "pos": 7,
+   "id": "b87f42fb",
+   "title": "Use the unit-convert MCP server's convert_length tool to\u2026",
+   "status": "awaiting_human",
+   "repo": null,
+   "workflow": "ask/adhoc",
+   "created_h_ago": 0.9,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": true,
+   "archived": false,
+   "benched_seats": [],
+   "units_total": 1,
+   "units_done": 1,
+   "gate": {
+    "ord": 1,
+    "kind": "terminal",
+    "receivedAt": "2026-10-27T03:18:54.596Z",
+    "waiting_h": 0.9,
+    "prompt": "Approve completion after the final phase (unit 1): answer-1 \u2014 Use the unit-convert MCP server's convert_length tool to convert 5 km to miles. Call the tool itself (do not compute it), then tell me the exact text the tool returned.\n\n---\n[studio context pack \u2014 assembled 2026-10-27T03:18:09.616Z]\nwhere",
+    "judge_skipped": []
+   }
+  },
+  {
+   "pos": 8,
+   "id": "e43c4560",
+   "title": "unit-convert is installed",
+   "status": "awaiting_human",
+   "repo": null,
+   "workflow": "ask/adhoc",
+   "created_h_ago": 0.9,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": true,
+   "archived": false,
+   "benched_seats": [],
+   "units_total": 1,
+   "units_done": 1,
+   "gate": {
+    "ord": 1,
+    "kind": "terminal",
+    "receivedAt": "2026-10-27T03:20:10.403Z",
+    "waiting_h": 0.9,
+    "prompt": "Approve completion after the final phase (unit 1): answer-1 \u2014 unit-convert is installed: studio's MCP page lists it with convert_length and convert_temperature. List the MCP tools you can call, including any through wicked's MCP broker, then call unit-convert's convert_length with value 5, from km, ",
+    "judge_skipped": []
+   }
+  },
+  {
+   "pos": 9,
+   "id": "68c26704",
+   "title": "Where is wicked-core riskiest to change",
+   "status": "awaiting_human",
+   "repo": null,
+   "workflow": "ask/adhoc",
+   "created_h_ago": 0.1,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": true,
+   "archived": false,
+   "benched_seats": [],
+   "rejected_units": [
+    {
+     "ord": 1,
+     "role": "neutral",
+     "cli": "claude",
+     "denial": "input governance denied a tool-call in unit-1 (claim boundary-deny:unit-1)"
+    }
+   ],
+   "units_total": 1,
+   "units_done": 0,
+   "gate": {
+    "ord": 1,
+    "kind": "escalation",
+    "receivedAt": "2026-10-27T04:04:26.373Z",
+    "waiting_h": 0.1,
+    "prompt": "Unit 1 was DENIED by input governance \u2014 a tool call was refused (`Bash`): input governance denied a tool-call in unit-1 (claim boundary-deny:unit-1). The refused call never ran; the phase's output was captured. A refused write outside the unit's boundary denies a unit whose deterministic floor did n",
+    "judge_skipped": []
+   }
+  },
+  {
+   "pos": 10,
+   "id": "89da69fb",
+   "title": "In tiny-math, sum([1,2,3]) returns 5 instead of 6",
+   "status": "failed",
+   "repo": "tiny-math",
+   "workflow": "bug",
+   "created_h_ago": 245.4,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": []
+  },
+  {
+   "pos": 11,
+   "id": "1ff74953",
+   "title": "Read src/math.js in this repo with your tools",
+   "status": "failed",
+   "repo": "tiny-math",
+   "workflow": "ask/adhoc",
+   "created_h_ago": 244.3,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [],
+   "rejected_units": [
+    {
+     "ord": 1,
+     "role": "neutral",
+     "cli": "codex",
+     "denial": "Worker FAILED on unit 1: (cli `codex` exited 1) Reconnecting... 2/5 (workspace routing discovery failed)\nReconnecting... 3/5 (workspace routing discovery failed)\nReconnecting... 4/5 (workspace routing discovery failed)\nReconnecting... 5/5 (workspace routing discovery failed)\nReconnecting... 1/5 (workspace routing discovery failed)\nReconnecting... 2/5 (workspace routing discovery failed)\nReconnecting... 3/5 (workspace routing discovery failed)\nReconnecting... 4/5 (workspace routing discovery failed)\nReconnecting... 5/5 (workspace routing discovery failed)\nworkspace routing discovery failed\nworkspace routing discovery failed"
+    }
+   ]
+  },
+  {
+   "pos": 12,
+   "id": "c2bc93a0",
+   "title": "Read src/math.js and say in one sentence why sum([1,2,3])\u2026",
+   "status": "failed",
+   "repo": "tiny-math",
+   "workflow": "ask/adhoc",
+   "created_h_ago": 244.2,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [],
+   "rejected_units": [
+    {
+     "ord": 1,
+     "role": "neutral",
+     "cli": "codex",
+     "denial": "Worker FAILED on unit 1: (cli `codex` exited 1) Reconnecting... 2/5 (workspace routing discovery failed)\nReconnecting... 3/5 (workspace routing discovery failed)\nReconnecting... 4/5 (workspace routing discovery failed)\nReconnecting... 5/5 (workspace routing discovery failed)\nReconnecting... 1/5 (workspace routing discovery failed)\nReconnecting... 2/5 (workspace routing discovery failed)\nReconnecting... 3/5 (workspace routing discovery failed)\nReconnecting... 4/5 (workspace routing discovery failed)\nReconnecting... 5/5 (workspace routing discovery failed)\nworkspace routing discovery failed\nworkspace routing discovery failed"
+    }
+   ]
+  },
+  {
+   "pos": 13,
+   "id": "dcc4547b",
+   "title": "Say hi.",
+   "status": "failed",
+   "repo": "tiny-math",
+   "workflow": "ask/adhoc",
+   "created_h_ago": 244.2,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [],
+   "rejected_units": [
+    {
+     "ord": 1,
+     "role": "neutral",
+     "cli": "codex",
+     "denial": "Worker FAILED on unit 1: (cli `codex` exited 1) Reconnecting... 2/5 (workspace routing discovery failed)\nReconnecting... 3/5 (workspace routing discovery failed)\nReconnecting... 4/5 (workspace routing discovery failed)\nReconnecting... 5/5 (workspace routing discovery failed)\nReconnecting... 1/5 (workspace routing discovery failed)\nReconnecting... 2/5 (workspace routing discovery failed)\nReconnecting... 3/5 (workspace routing discovery failed)\nReconnecting... 4/5 (workspace routing discovery failed)\nReconnecting... 5/5 (workspace routing discovery failed)\nworkspace routing discovery failed\nworkspace routing discovery failed"
+    }
+   ]
+  },
+  {
+   "pos": 14,
+   "id": "e2c2cd4d",
+   "title": "Read src/math.js in this repo with your tools and tell me\u2026",
+   "status": "failed",
+   "repo": "tiny-math",
+   "workflow": "ask/adhoc",
+   "created_h_ago": 244.1,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [],
+   "rejected_units": [
+    {
+     "ord": 1,
+     "role": "neutral",
+     "cli": "copilot",
+     "denial": "Worker FAILED on unit 1: (cli `copilot` exited 1) WARNING: Image mount is an experimental feature\nwicked-seat-launch: floor canary passed\n\n400 The requested model is not supported.\n\n\nChanges    +0 -0\nDuration   3s\nResume     copilot --resume=9de8a3c5-7814-40bf-bc1c-2a8dcb2d03a8"
+    }
+   ]
+  },
+  {
+   "pos": 15,
+   "id": "6dd64a52",
+   "title": "Read src/math.js in this repo and tell me in one sentence\u2026",
+   "status": "failed",
+   "repo": "tiny-math",
+   "workflow": "ask/adhoc",
+   "created_h_ago": 244.0,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [],
+   "rejected_units": [
+    {
+     "ord": 1,
+     "role": "neutral",
+     "cli": "copilot",
+     "denial": "Worker FAILED on unit 1: (cli `copilot` exited 1) WARNING: Image mount is an experimental feature\nwicked-seat-launch: floor canary passed\n\n400 The requested model is not supported.\n\n\nChanges    +0 -0\nDuration   1s\nResume     copilot --resume=366e278d-57cc-45bf-909e-a2732657df23"
+    }
+   ]
+  },
+  {
+   "pos": 16,
+   "id": "b979f42c",
+   "title": "Read src/math.js in this repo and tell me in one sentence\u2026",
+   "status": "failed",
+   "repo": "tiny-math",
+   "workflow": "ask/adhoc",
+   "created_h_ago": 244.0,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [],
+   "rejected_units": [
+    {
+     "ord": 1,
+     "role": "neutral",
+     "cli": "copilot",
+     "denial": "Worker FAILED on unit 1: (cli `copilot` exited 1) WARNING: Image mount is an experimental feature\nwicked-seat-launch: floor canary passed\n\n400 The requested model is not supported.\n\n\nChanges    +0 -0\nDuration   1s\nResume     copilot --resume=1b63e2d6-e94f-44d1-b02b-b87de711e718"
+    }
+   ]
+  },
+  {
+   "pos": 17,
+   "id": "7bbaab3a",
+   "title": "Read src/math.js in this repo and tell me in one sentence\u2026",
+   "status": "failed",
+   "repo": "tiny-math",
+   "workflow": "ask/adhoc",
+   "created_h_ago": 244.0,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [
+    "copilot:quota_exhausted (no success in the run)"
+   ],
+   "rejected_units": [
+    {
+     "ord": 1,
+     "role": "neutral",
+     "cli": "copilot",
+     "denial": "Worker FAILED on unit 1: (cli `copilot` exited 1) WARNING: Image mount is an experimental feature\nwicked-seat-launch: floor canary passed\n\n429 Too Many Requests\n\n\nChanges    +0 -0\nDuration   1s\nResume     copilot --resume=516bf3f9-9f38-43fe-90aa-d8944f837f9c"
+    }
+   ]
+  },
+  {
+   "pos": 18,
+   "id": "bb505ad8",
+   "title": "Read src/math.js in this repo and tell me in one sentence\u2026",
+   "status": "failed",
+   "repo": "tiny-math",
+   "workflow": "ask/adhoc",
+   "created_h_ago": 243.5,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [
+    "copilot:quota_exhausted (no success in the run)"
+   ],
+   "rejected_units": [
+    {
+     "ord": 1,
+     "role": "neutral",
+     "cli": "copilot",
+     "denial": "Worker FAILED on unit 1: (cli `copilot` exited 1) WARNING: Image mount is an experimental feature\nwicked-seat-launch: floor canary passed\n\n429 Too Many Requests\n\n\nChanges    +0 -0\nDuration   2s\nResume     copilot --resume=07a8548e-c503-46f9-a3a8-050be5a840f6"
+    }
+   ]
+  },
+  {
+   "pos": 19,
+   "id": "449f566e",
+   "title": "Read src/math.js in this repo and tell me in one sentence\u2026",
+   "status": "failed",
+   "repo": "tiny-math",
+   "workflow": "ask/adhoc",
+   "created_h_ago": 241.4,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [
+    "copilot:quota_exhausted (no success in the run)"
+   ],
+   "rejected_units": [
+    {
+     "ord": 1,
+     "role": "neutral",
+     "cli": "copilot",
+     "denial": "Worker FAILED on unit 1: (cli `copilot` exited 1) WARNING: Image mount is an experimental feature\nwicked-seat-launch: floor canary passed\n\n429 Too Many Requests\n\n\nChanges    +0 -0\nDuration   17s\nResume     copilot --resume=2d4f2343-c09b-4351-856f-08766632ac8f"
+    }
+   ]
+  },
+  {
+   "pos": 20,
+   "id": "4b517e33",
+   "title": "Read src/math.js in this repo and tell me in one sentence\u2026",
+   "status": "failed",
+   "repo": "tiny-math",
+   "workflow": "ask/adhoc",
+   "created_h_ago": 233.3,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [
+    "copilot:quota_exhausted (no success in the run)"
+   ],
+   "rejected_units": [
+    {
+     "ord": 1,
+     "role": "neutral",
+     "cli": "copilot",
+     "denial": "Worker FAILED on unit 1: (cli `copilot` exited 1) WARNING: Image mount is an experimental feature\nwicked-seat-launch: floor canary passed\n\n429 Too Many Requests\n\n\nChanges    +0 -0\nDuration   2s\nResume     copilot --resume=f23f8829-454d-4bae-8b9b-c31d056e4761"
+    }
+   ]
+  },
+  {
+   "pos": 21,
+   "id": "78cf6482",
+   "title": "Read src/math.js in this repo and tell me in one sentence\u2026",
+   "status": "failed",
+   "repo": "tiny-math",
+   "workflow": "ask/adhoc",
+   "created_h_ago": 233.1,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [
+    "copilot:quota_exhausted (no success in the run)"
+   ],
+   "rejected_units": [
+    {
+     "ord": 1,
+     "role": "neutral",
+     "cli": "copilot",
+     "denial": "Worker FAILED on unit 1: (cli `copilot` exited 1) WARNING: Image mount is an experimental feature\nwicked-seat-launch: floor canary passed\n\n429 Too Many Requests\n\n\nChanges    +0 -0\nDuration   1s\nResume     copilot --resume=2482973a-9db3-44e7-b992-ccdf4f415060"
+    }
+   ]
+  },
+  {
+   "pos": 22,
+   "id": "11b1b4ea",
+   "title": "In tiny-math, what does mean([2, 4]) return",
+   "status": "failed",
+   "repo": "tiny-math",
+   "workflow": "ask/adhoc",
+   "created_h_ago": 220.5,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [
+    "copilot:quota_exhausted (no success in the run)"
+   ],
+   "rejected_units": [
+    {
+     "ord": 1,
+     "role": "neutral",
+     "cli": "copilot",
+     "denial": "Worker FAILED on unit 1: (cli `copilot` exited 1) WARNING: Image mount is an experimental feature\nwicked-seat-launch: floor canary passed\n\n429 Too Many Requests\n\n\nChanges    +0 -0\nDuration   1s\nResume     copilot --resume=a3ce9d8c-e1af-4534-b089-a2777895dfe0"
+    }
+   ]
+  },
+  {
+   "pos": 23,
+   "id": "f3d30829",
+   "title": "Fix a brick on the PRODUCT-WORKS bar (J1/J4)",
+   "status": "completed",
+   "repo": "wicked-core",
+   "workflow": "bug",
+   "created_h_ago": 47.3,
+   "delivery": "delivered",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [
+    "copilot:quota_exhausted (no success in the run)",
+    "agy:not_logged_in"
+   ],
+   "rejected_units": [
+    {
+     "ord": 8,
+     "role": "neutral",
+     "cli": "bash",
+     "denial": "Worker FAILED on unit 8: deliver: LIFT-CONFLICT \u2014 lifting the run's work onto origin/main (72da31b7de) would conflict in: CHANGELOG.md. The worktree was left exactly as verified (base a9645859f2); nothing was rebased and nothing was pushed. Resolve on the branch (rebase onto origin/main, regenerate any generated files, re-run the repository's checks) and approve to retry the deliver phase.\ndeliver: OUTCOME 28567955bf206b2c191d8bb10d3c791f stranded"
+    }
+   ]
+  },
+  {
+   "pos": 24,
+   "id": "910e3e0b",
+   "title": "Build an editor plugin titled \"Changelog entry\"",
+   "status": "failed",
+   "repo": "wicked-e2e-j6-plugins",
+   "workflow": "editor-plugin",
+   "created_h_ago": 15.6,
+   "delivery": "delivered",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [
+    "copilot:recent quota_exhausted",
+    "agy:not_logged_in"
+   ],
+   "rejected_units": [
+    {
+     "ord": 9,
+     "role": "neutral",
+     "cli": "bash",
+     "denial": "Worker FAILED on unit 9 (triage: The dry-run couldn't find an editor pack in the run output. The `--from-run` lookup under e7f75f7c\u2026 found zero packs (`wicked-pack.json` spec 2 with editors), and the CLI exited with code 2. This is not an environment refusal such as a trust prompt or sandbox check, so no flag will fix it. It is also not a transient failure, so a retry would give the same result. The build step appears not to have): editor install --dry-run: --from-run needs exactly one editor pack (wicked-pack.json spec 2 with editors) under e7f75f7c794795ef010e7d25dc7070b9e98338c3; found 0 (none) \u2014 pass --dir <pack dir>\n\n[exit 2]"
+    }
+   ]
+  },
+  {
+   "pos": 25,
+   "id": "805dcdcb",
+   "title": "Set up tiny-math",
+   "status": "completed",
+   "repo": "tiny-math",
+   "workflow": "onboarding",
+   "created_h_ago": 246.0,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": []
+  },
+  {
+   "pos": 26,
+   "id": "531faaef",
+   "title": "In tiny-math, sum([1,2,3]) returns 5 instead of 6",
+   "status": "completed",
+   "repo": "tiny-math",
+   "workflow": "bug",
+   "created_h_ago": 221.1,
+   "delivery": "pushed",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": []
+  },
+  {
+   "pos": 27,
+   "id": "ede7c46f",
+   "title": "In tiny-math, sum([1,2,3]) returns 5 instead of 6",
+   "status": "completed",
+   "repo": "tiny-math",
+   "workflow": "bug",
+   "created_h_ago": 213.6,
+   "delivery": "pushed",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": []
+  },
+  {
+   "pos": 28,
+   "id": "0d81a55d",
+   "title": "In tiny-math, sum([1,2,3]) returns 5 instead of 6",
+   "status": "completed",
+   "repo": "tiny-math",
+   "workflow": "bug",
+   "created_h_ago": 209.4,
+   "delivery": "pushed",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": []
+  },
+  {
+   "pos": 29,
+   "id": "5cc8e33a",
+   "title": "In tiny-math, sum([1,2,3]) returns 5 instead of 6",
+   "status": "completed",
+   "repo": "tiny-math",
+   "workflow": "bug",
+   "created_h_ago": 202.9,
+   "delivery": "pushed",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": []
+  },
+  {
+   "pos": 30,
+   "id": "8985c44c",
+   "title": "Set up wicked-core",
+   "status": "completed",
+   "repo": "wicked-core",
+   "workflow": "onboarding",
+   "created_h_ago": 178.0,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": []
+  },
+  {
+   "pos": 31,
+   "id": "a3e8991d",
+   "title": "Set up wicked-crew",
+   "status": "completed",
+   "repo": "wicked-crew",
+   "workflow": "onboarding",
+   "created_h_ago": 142.6,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": []
+  },
+  {
+   "pos": 32,
+   "id": "9e35963c",
+   "title": "Set up pi-governance",
+   "status": "completed",
+   "repo": "pi-governance",
+   "workflow": "onboarding",
+   "created_h_ago": 142.6,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": []
+  },
+  {
+   "pos": 33,
+   "id": "63fa2f6a",
+   "title": "Capture learnings from pi-governance",
+   "status": "completed",
+   "repo": "pi-governance",
+   "workflow": "capture-learnings",
+   "created_h_ago": 142.4,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [
+    "opencode:recent quota_exhausted",
+    "copilot:quota_exhausted (no success in the run)"
+   ]
+  },
+  {
+   "pos": 34,
+   "id": "415b4ea6",
+   "title": "Host seats (crew, independent of core)",
+   "status": "completed",
+   "repo": "wicked-crew",
+   "workflow": "feature",
+   "created_h_ago": 137.1,
+   "delivery": "delivered",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [
+    "claude:not_logged_in",
+    "copilot:quota_exhausted (no success in the run)",
+    "opencode:quota_exhausted (no success in the run)",
+    "agy:not_logged_in"
+   ]
+  },
+  {
+   "pos": 35,
+   "id": "a83371c6",
+   "title": "Host seats",
+   "status": "completed",
+   "repo": "pi-governance",
+   "workflow": "feature",
+   "created_h_ago": 130.1,
+   "delivery": "delivered",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [
+    "pi:not_logged_in",
+    "copilot:quota_exhausted (no success in the run)",
+    "opencode:not_logged_in",
+    "agy:not_logged_in"
+   ]
+  },
+  {
+   "pos": 36,
+   "id": "cb014867",
+   "title": "Set up wicked-garden",
+   "status": "completed",
+   "repo": "wicked-garden",
+   "workflow": "onboarding",
+   "created_h_ago": 76.1,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": []
+  },
+  {
+   "pos": 37,
+   "id": "9b43ee44",
+   "title": "Fix wicked-garden CI",
+   "status": "completed",
+   "repo": "wicked-garden",
+   "workflow": "bug",
+   "created_h_ago": 75.0,
+   "delivery": "delivered",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [
+    "copilot:quota_exhausted (no success in the run)",
+    "agy:not_logged_in"
+   ]
+  },
+  {
+   "pos": 38,
+   "id": "1a46a28c",
+   "title": "Set up wicked-e2e-j6-plugins",
+   "status": "completed",
+   "repo": "wicked-e2e-j6-plugins",
+   "workflow": "onboarding",
+   "created_h_ago": 17.1,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": []
+  },
+  {
+   "pos": 39,
+   "id": "7789df1c",
+   "title": "Capture learnings from wicked-e2e-j6-plugins",
+   "status": "completed",
+   "repo": "wicked-e2e-j6-plugins",
+   "workflow": "capture-learnings",
+   "created_h_ago": 17.1,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [
+    "pi:signed out",
+    "opencode:signed out"
+   ]
+  },
+  {
+   "pos": 40,
+   "id": "306fae88",
+   "title": "Build a small MCP server named unit-convert in the\u2026",
+   "status": "completed",
+   "repo": "wicked-e2e-j6-plugins",
+   "workflow": "mcp-server",
+   "created_h_ago": 14.2,
+   "delivery": "delivered",
+   "retry_of": "9bd0f728",
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [
+    "copilot:recent recent quota_exhausted",
+    "agy:not_logged_in"
+   ]
+  },
+  {
+   "pos": 41,
+   "id": "6f11390c",
+   "title": "Build an editor plugin titled \"Changelog entry\"",
+   "status": "completed",
+   "repo": "wicked-e2e-j6-plugins",
+   "workflow": "editor-plugin",
+   "created_h_ago": 1.0,
+   "delivery": "delivered",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [
+    "copilot:quota_exhausted (no success in the run)",
+    "agy:not_logged_in"
+   ]
+  },
+  {
+   "pos": 42,
+   "id": "21ab98d9",
+   "title": "Capture learnings from tiny-math",
+   "status": "cancelled",
+   "repo": "tiny-math",
+   "workflow": "capture-learnings",
+   "created_h_ago": 246.0,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [
+    "opencode:signed out"
+   ],
+   "rejected_units": [
+    {
+     "ord": 1,
+     "role": "neutral",
+     "cli": "claude",
+     "denial": "governance_unproven: input governance denied unit-1 (fail-closed): the unit made tool calls on the wrapped carrier but its gate-hook never ran \u2014 the hook was not loaded (an org `allowManagedHooksOnly` setting blocks `--settings` hooks), so every call went unchecked (core#653)"
+    }
+   ]
+  },
+  {
+   "pos": 43,
+   "id": "9ec286dc",
+   "title": "In the tiny-math repo",
+   "status": "cancelled",
+   "repo": "tiny-math",
+   "workflow": "ask/adhoc",
+   "created_h_ago": 245.9,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [],
+   "rejected_units": [
+    {
+     "ord": 2,
+     "role": "neutral",
+     "cli": "bash",
+     "denial": "deliver refused on unit 2: deliver: the push identity mikeparcewski applies to github.com origins only; this origin is not one, so gh and git use their own credentials\ndeliver: pushing as mikeparcewski (no push identity configured \u2014 not pinned)\ndeliver: origin is not an https remote \u2014 no git credential applies (ssh keys or a local path authenticate the push)\ndeliver: PR text composed from the run record (http://127.0.0.1:7721)\ndeliver: nothing to deliver \u2014 the run produced no committed change (wicked/9ec286dc-04fd-44fb-a83c-9b9077a205c8 is not ahead of origin/main); nothing was pushed\ndeliver: OUTCOME 16cca89ba6ea6c69c974ea5c30d9ef18 failed\n\n[exit 1]"
+    }
+   ]
+  },
+  {
+   "pos": 44,
+   "id": "4f505e7e",
+   "title": "In tiny-math, sum([1,2,3]) returns 5 instead of 6",
+   "status": "cancelled",
+   "repo": "tiny-math",
+   "workflow": "bug",
+   "created_h_ago": 245.7,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [],
+   "rejected_units": [
+    {
+     "ord": 1,
+     "role": "neutral",
+     "cli": "claude",
+     "denial": "governance_unproven: input governance denied unit-1 (fail-closed): the unit made tool calls on the wrapped carrier but its gate-hook never ran \u2014 the hook was not loaded (an org `allowManagedHooksOnly` setting blocks `--settings` hooks), so every call went unchecked (core#653)"
+    }
+   ]
+  },
+  {
+   "pos": 45,
+   "id": "bc5b285e",
+   "title": "In tiny-math, sum([1,2,3]) returns 5 instead of 6",
+   "status": "cancelled",
+   "repo": "tiny-math",
+   "workflow": "bug",
+   "created_h_ago": 245.7,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [],
+   "rejected_units": [
+    {
+     "ord": 1,
+     "role": "neutral",
+     "cli": "claude",
+     "denial": "governance_unproven: input governance denied unit-1 (fail-closed): the unit made tool calls on the wrapped carrier but its gate-hook never ran \u2014 the hook was not loaded (an org `allowManagedHooksOnly` setting blocks `--settings` hooks), so every call went unchecked (core#653)"
+    }
+   ]
+  },
+  {
+   "pos": 46,
+   "id": "9c3f20fa",
+   "title": "In tiny-math, sum([1,2,3]) returns 5 instead of 6",
+   "status": "cancelled",
+   "repo": "tiny-math",
+   "workflow": "bug",
+   "created_h_ago": 245.5,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": []
+  },
+  {
+   "pos": 47,
+   "id": "3d8fcb2e",
+   "title": "In tiny-math, what does clamp() in src/math.js return for\u2026",
+   "status": "cancelled",
+   "repo": "tiny-math",
+   "workflow": "ask/adhoc",
+   "created_h_ago": 245.1,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": []
+  },
+  {
+   "pos": 48,
+   "id": "4d0e24e2",
+   "title": "Use your Read and Bash tools",
+   "status": "cancelled",
+   "repo": "tiny-math",
+   "workflow": "ask/adhoc",
+   "created_h_ago": 244.3,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": []
+  },
+  {
+   "pos": 49,
+   "id": "d43fa2f6",
+   "title": "Read src/math.js in this repo with your tools",
+   "status": "cancelled",
+   "repo": "tiny-math",
+   "workflow": "ask/adhoc",
+   "created_h_ago": 244.0,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": []
+  },
+  {
+   "pos": 50,
+   "id": "f64aa3e1",
+   "title": "Use your tools",
+   "status": "cancelled",
+   "repo": "tiny-math",
+   "workflow": "ask/adhoc",
+   "created_h_ago": 243.4,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": []
+  },
+  {
+   "pos": 51,
+   "id": "f28e1272",
+   "title": "Read src/math.js in this repo with your tools and tell me\u2026",
+   "status": "cancelled",
+   "repo": "tiny-math",
+   "workflow": "ask/adhoc",
+   "created_h_ago": 243.4,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": []
+  },
+  {
+   "pos": 52,
+   "id": "51ba0a44",
+   "title": "In tiny-math, what does clamp() in src/math.js return for\u2026",
+   "status": "cancelled",
+   "repo": "tiny-math",
+   "workflow": "ask/adhoc",
+   "created_h_ago": 222.3,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": []
+  },
+  {
+   "pos": 53,
+   "id": "cdf4462a",
+   "title": "In tiny-math, sum([1,2,3]) returns 5 instead of 6",
+   "status": "cancelled",
+   "repo": "tiny-math",
+   "workflow": "bug",
+   "created_h_ago": 222.1,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": []
+  },
+  {
+   "pos": 54,
+   "id": "bef20223",
+   "title": "In tiny-math, sum([1,2,3]) returns 5 instead of 6",
+   "status": "cancelled",
+   "repo": "tiny-math",
+   "workflow": "bug",
+   "created_h_ago": 221.6,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [],
+   "rejected_units": [
+    {
+     "ord": 6,
+     "role": "evaluator",
+     "cli": "codex",
+     "denial": "the evaluator's verdict is FAIL\nEvaluator: rechecked the fix without modifying the repository.\n\nCommands: file/diff inspection exit 0; `node --test test/math.test.js` exit 0 (3/3); `npm test` exit 1; prescribed ledger resolver exit 1; numeric probes and `git diff --check` exit 0.\n\nCounts: derived 1 / submitted 0 / failed 1 \u2014 QE registration remains blocked. The required ledger package must be supplied; no QE verdict was issued.\n\nITEM 1: PASS \u2014 `src/math.js:6` includes index 0; sum([1,2,3]) returns 6 and sum([]) returns 0.\nITEM 2: PASS \u2014 `src/math.js:12` preserves empty-input RangeError; mean([2,4]) returns 3.\nITEM 3: PASS \u2014 existing tests pass directly. Engine floor record: install 0, test 0"
+    }
+   ]
+  },
+  {
+   "pos": 55,
+   "id": "63c38801",
+   "title": "In tiny-math, sum([1,2,3]) returns 5 instead of 6",
+   "status": "cancelled",
+   "repo": "tiny-math",
+   "workflow": "bug",
+   "created_h_ago": 220.8,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [
+    "copilot:quota_exhausted (no success in the run)"
+   ],
+   "rejected_units": [
+    {
+     "ord": 1,
+     "role": "neutral",
+     "cli": "copilot",
+     "denial": "dead seat: 'copilot' exhausted its quota on unit 1 (quota_exhausted) and no eligible seat remains \u2014 1 of 1 seats benched: copilot (quota_exhausted (no success in the run) \u2014 worker): (cli `copilot` exited 1) WARNING: Image mount is an experimental feature\nwicked-seat-launch: floor canary passed\n\n429 Too Many Requests\n\n\nChanges    +0 -0\nDuration   3s\nResume     copilot --resume=1419c746-ef08-4be6-8442-f8c1f4ce1fb5"
+    }
+   ]
+  },
+  {
+   "pos": 56,
+   "id": "620fb2f3",
+   "title": "In tiny-math, sum([1,2,3]) returns 5 instead of 6",
+   "status": "cancelled",
+   "repo": "tiny-math",
+   "workflow": "bug",
+   "created_h_ago": 213.2,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [],
+   "rejected_units": [
+    {
+     "ord": 1,
+     "role": "neutral",
+     "cli": "opencode",
+     "denial": "dead seat: 'opencode' failed unit 1 (worker error) and every eligible seat has now failed it (tried: opencode) \u2014 no other seat is configured: (cli `opencode` exited 1) ECONNRESET: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()"
+    }
+   ]
+  },
+  {
+   "pos": 57,
+   "id": "b445c17e",
+   "title": "Capture learnings from tiny-math",
+   "status": "cancelled",
+   "repo": "tiny-math",
+   "workflow": "capture-learnings",
+   "created_h_ago": 213.1,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [],
+   "rejected_units": [
+    {
+     "ord": 4,
+     "role": "creator",
+     "cli": "pi",
+     "denial": "the capture phase reported 5 FAILED submission(s) (derived 5, submitted 0) \u2014 the learnings it derived did not reach the proposal queue, so a human has nothing to review"
+    }
+   ]
+  },
+  {
+   "pos": 58,
+   "id": "46e69d38",
+   "title": "In tiny-math, sum([1,2,3]) returns 5 instead of 6",
+   "status": "cancelled",
+   "repo": "tiny-math",
+   "workflow": "bug",
+   "created_h_ago": 213.0,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [
+    "copilot:quota_exhausted (no success in the run)"
+   ],
+   "rejected_units": [
+    {
+     "ord": 1,
+     "role": "neutral",
+     "cli": "copilot",
+     "denial": "dead seat: 'copilot' exhausted its quota on unit 1 (quota_exhausted) and no eligible seat remains \u2014 1 of 1 seats benched: copilot (quota_exhausted (no success in the run) \u2014 worker): (cli `copilot` exited 1) WARNING: Image mount is an experimental feature\nwicked-seat-launch: floor canary passed\n\n429 Too Many Requests\n\n\nChanges    +0 -0\nDuration   1s\nResume     copilot --resume=dc47717c-cd6a-4cc8-939a-88fd9f0a8862"
+    }
+   ]
+  },
+  {
+   "pos": 59,
+   "id": "b9103372",
+   "title": "In tiny-math, what does mean([2, 4]) return",
+   "status": "cancelled",
+   "repo": "tiny-math",
+   "workflow": "ask/adhoc",
+   "created_h_ago": 212.9,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": []
+  },
+  {
+   "pos": 60,
+   "id": "21a8d488",
+   "title": "In tiny-math, sum([1,2,3]) returns 5 instead of 6",
+   "status": "cancelled",
+   "repo": "tiny-math",
+   "workflow": "bug",
+   "created_h_ago": 209.0,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": []
+  },
+  {
+   "pos": 61,
+   "id": "0e4c712a",
+   "title": "In tiny-math, add a median(xs) function to src/math.js",
+   "status": "cancelled",
+   "repo": "tiny-math",
+   "workflow": "feature",
+   "created_h_ago": 203.4,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [],
+   "rejected_units": [
+    {
+     "ord": 6,
+     "role": "evaluator",
+     "cli": "codex",
+     "denial": "QE acceptance: the reviewer's verdict could not be bound: the QE ledger's verdicts could not be read (No such file or directory (os error 2)): the reviewer recorded none"
+    }
+   ]
+  },
+  {
+   "pos": 62,
+   "id": "ac8e45e8",
+   "title": "Capture learnings from tiny-math",
+   "status": "cancelled",
+   "repo": "tiny-math",
+   "workflow": "capture-learnings",
+   "created_h_ago": 202.6,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [],
+   "rejected_units": [
+    {
+     "ord": 4,
+     "role": "creator",
+     "cli": "claude",
+     "denial": "the capture phase reported 4 FAILED submission(s) (derived 4, submitted 0) \u2014 the learnings it derived did not reach the proposal queue, so a human has nothing to review"
+    }
+   ]
+  },
+  {
+   "pos": 63,
+   "id": "86bf54a4",
+   "title": "Capture learnings from wicked-core",
+   "status": "cancelled",
+   "repo": "wicked-core",
+   "workflow": "capture-learnings",
+   "created_h_ago": 178.0,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [],
+   "rejected_units": [
+    {
+     "ord": 5,
+     "role": "evaluator",
+     "cli": "claude",
+     "denial": "the evaluator's verdict is FAIL\nEvaluator section of governed-worker applies. I did not re-run the capture, because evaluators are output-only (E1). I cite the earlier units' output and my own read-only shim calls from this run.\n\nRequirements from the intent, as I numbered them:\n1. Churn: a ranked list of files and directories over ~12 months, plus the repo name and parent project.\n2. Hotspots: cross-reference churn with estate hotspot/blast-radius signals, and read the load-bearing code through the shim.\n3. Capture: submit one proposal per item through the shim's `propose`, covering both memories and policies, tagged repo/project, with honest counts and a closing `wicked-capture-report` lin"
+    }
+   ]
+  },
+  {
+   "pos": 64,
+   "id": "3d3c96a8",
+   "title": "mikeparcewski/wicked-core #997",
+   "status": "cancelled",
+   "repo": "wicked-core",
+   "workflow": "bug",
+   "created_h_ago": 177.5,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [],
+   "rejected_units": [
+    {
+     "ord": 5,
+     "role": "creator",
+     "cli": "codex",
+     "denial": "repo checks floor failed: the repository's own checks pass in the run's worktree (every detected check exits 0 \u2014 done is re-derived by running them, never asserted). cargo-fmt-check: exit 1 (2.0s) \u2014 stdout tail: \u001b(B\u001b[m         let upstream = String::from_utf8_lossy(&run(&[\"logs\", &stub]).stdout).to_string(); | let logs = run(&[\"logs\", &gw.name]); | let gw_logs = format!( (not run after the failure: typecheck, lint, test). The engine ran these itself in the run's worktree; the full tails are on the unit's `repo_checks` record and the `repoChecksEvaluated` event."
+    }
+   ]
+  },
+  {
+   "pos": 65,
+   "id": "a74f51ac",
+   "title": "mikeparcewski/wicked-core #997",
+   "status": "cancelled",
+   "repo": "wicked-core",
+   "workflow": "bug",
+   "created_h_ago": 172.2,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [
+    "opencode:recent quota_exhausted",
+    "copilot:quota_exhausted (no success in the run)",
+    "agy:not_logged_in"
+   ],
+   "rejected_units": [
+    {
+     "ord": 5,
+     "role": "creator",
+     "cli": "claude",
+     "denial": "repo checks floor failed: the repository's own checks pass in the run's worktree (every detected check exits 0 \u2014 done is re-derived by running them, never asserted). test: exit 101 (1828.4s) [regression] \u2014 stdout tail: test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s | running 0 tests | test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s \u2014 stderr tail: `-p wicked-core --test tool_child_lifecycle` | `-p wicked-core --test walkthrough_record` | `-p wicked-council --lib` \u2014 the run base c6a1ddfee7 fails this check too, but not identically: head-only failures test campaign_cancel_kills_the_live_tool_child_throu"
+    }
+   ]
+  },
+  {
+   "pos": 66,
+   "id": "9aa7d444",
+   "title": "Capture learnings from wicked-crew",
+   "status": "cancelled",
+   "repo": "wicked-crew",
+   "workflow": "capture-learnings",
+   "created_h_ago": 142.6,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [
+    "opencode:quota_exhausted (no success in the run)"
+   ],
+   "rejected_units": [
+    {
+     "ord": 5,
+     "role": "evaluator",
+     "cli": "codex",
+     "denial": "the evaluator's verdict is FAIL\nEvaluator role; reviewed unit 4\u2019s capture report, repository guidance, and the capture contract. No files changed.\n\nCommands: read-only file inspections and Git checks exited 0. Proposal listing exited 0 but the broker denied access; I did not retry. Run/evidence lookups returned HTTP 404. No code checks were needed for this proposal-only scope.\n\nCounts: derived 0 / submitted 0 / failed 0 in this evaluator unit. Unit 4 reports 4 / 4 / 0.\n\nITEM 1: FAIL \u2014 Ground proposals through the required capture contract. Unit 4 explicitly read no source; the contract requires each proposal to trace to an opened target (`refs/capture-proposals.md:230`). Documentation corrob"
+    }
+   ]
+  },
+  {
+   "pos": 67,
+   "id": "203bebed",
+   "title": "Capture learnings from wicked-garden",
+   "status": "cancelled",
+   "repo": "wicked-garden",
+   "workflow": "capture-learnings",
+   "created_h_ago": 76.1,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": [
+    "pi:signed out",
+    "opencode:signed out"
+   ]
+  },
+  {
+   "pos": 68,
+   "id": "a06ab729",
+   "title": "Fix wicked-garden CI",
+   "status": "cancelled",
+   "repo": "wicked-garden",
+   "workflow": "bug",
+   "created_h_ago": 75.7,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": []
+  },
+  {
+   "pos": 69,
+   "id": "08c71b48",
+   "title": "Fix wicked-garden#1333 items 1-5 and 7",
+   "status": "cancelled",
+   "repo": "wicked-garden",
+   "workflow": "bug",
+   "created_h_ago": 75.4,
+   "delivery": "none",
+   "retry_of": null,
+   "ask_turn": null,
+   "archived": false,
+   "benched_seats": []
+  }
+ ],
+ "proposals": {
+  "pending": 30,
+  "by_kind": {
+   "knowledge": 17,
+   "policy:architecture": 6,
+   "policy:security": 4,
+   "policy:development": 1,
+   "policy:testing": 2
+  },
+  "oldest_h_ago": 177.9,
+  "newest_h_ago": 142.3,
+  "probe_content": 1,
+  "source_runs": {
+   "86bf54a4": 20,
+   "9aa7d444": 4,
+   "63fa2f6a": 6
+  },
+  "note": "proposals are governed knowledge/policy waiting on review; no run waits on them"
+ },
+ "repos": [
+  {
+   "id": "tiny-math",
+   "registered_h_ago": 246.0,
+   "findings": 0
+  },
+  {
+   "id": "wicked-core",
+   "registered_h_ago": 178.0,
+   "findings": 0
+  },
+  {
+   "id": "wicked-crew",
+   "registered_h_ago": 142.6,
+   "findings": 0
+  },
+  {
+   "id": "pi-governance",
+   "registered_h_ago": 142.6,
+   "findings": 0
+  },
+  {
+   "id": "wicked-garden",
+   "registered_h_ago": 76.1,
+   "findings": 0
+  },
+  {
+   "id": "wicked-e2e-j6-plugins",
+   "registered_h_ago": 17.1,
+   "findings": 0
+  }
+ ],
+ "repo_note": "every repo has a completed onboarding run -> no repo-graph rows",
+ "chats": [
+  {
+   "chatId": "7ffbba81",
+   "seats": [
+    "claude",
+    "codex",
+    "copilot"
+   ],
+   "idleSecs": null
+  },
+  {
+   "chatId": "27409728",
+   "seats": [
+    "claude",
+    "codex",
+    "copilot"
+   ],
+   "idleSecs": null
+  },
+  {
+   "chatId": "f86a88bf",
+   "seats": [
+    "claude",
+    "codex"
+   ],
+   "idleSecs": null
+  }
+ ],
+ "campaigns": {
+  "campaigns": 0
+ },
+ "not_in_dump": "ws-only signals (steer requests, elicitation frames, watchdog stall escalations, orphan reports) are pushed over /ws; GET /runs/:id/elicitation returned 404 for all 10 awaiting runs; no run is executing, so stalled/orphaned rows cannot apply."
+}

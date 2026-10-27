@@ -38,13 +38,13 @@ import type {
   SystemGovernanceCard,
   SystemInfraKey,
   SystemInfraRow,
-  SystemLevel,
   SystemRun,
   SystemRunLiveness,
   SystemSnapshot,
   SystemState,
-  SystemTarget,
+  SystemUnresolvedItem,
 } from '../core/types.js';
+import { needsLevel } from './needs.js';
 import { callEstateToolRaw, estateMcpExe } from '../core/estate-mcp-client.js';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 import { runTouchesWindow } from './seat-record.js';
@@ -1012,6 +1012,8 @@ export interface OpenGateLike {
   ord: number | null;
   kind: string | null;
   prompt: string | null;
+  /** ISO-8601 of the gate's arrival, when known. */
+  receivedAt?: string | null;
 }
 
 export interface RunEvidence {
@@ -1298,130 +1300,9 @@ export function buildGovernance(g: GovernanceInput): SystemGovernanceCard[] {
 }
 
 // ── attention[] ─────────────────────────────────────────────────────────────
+// The one "needs you" rule lives in `needs.ts` (`buildNeeds`); `levelOf` is its level.
 
-const SOURCE_RANK = { infra: 0, cli: 1, run: 2, governance: 3 } as const;
-/** What `down` means in words for the rows where "down" reads oddly. */
-const DOWN_WORD: Partial<Record<SystemInfraKey, string>> = { load: 'saturated', disk: 'nearly full', state_home: 'refusing launches', skills: 'refusing launches' };
-
-export function buildAttention(input: {
-  infra: SystemInfraRow[];
-  clis: SystemCli[];
-  runs: SystemRun[];
-  governance: SystemGovernanceCard[];
-  gaps: Array<{ run: SystemRun; creator: string | null; blockedBy: SystemCli[] }>;
-  /** Runs a down infra row blocks (the container floor's runs for the gateway, …). */
-  blockedByInfra: (key: SystemInfraKey) => number;
-}): SystemAttentionItem[] {
-  const items: SystemAttentionItem[] = [];
-  for (const r of input.infra) {
-    if (r.state === 'ok' || r.state === 'off') continue;
-    const red = r.state === 'down';
-    items.push({
-      id: `infra:${r.key}`,
-      severity: red ? 'red' : 'yellow',
-      source: 'infra',
-      title: `${r.label}: ${r.state === 'unknown' ? 'not answering' : r.state === 'down' ? (DOWN_WORD[r.key] ?? 'down') : 'degraded'}`,
-      reason: r.reason,
-      remedy: r.remedy ?? 'Re-check.',
-      blocks: red ? input.blockedByInfra(r.key) : 0,
-      target: { kind: 'infra', key: r.key },
-      action: { kind: 'recheck', label: 'Re-check' },
-    });
-  }
-  const gapBlockers = new Map<string, number>();
-  for (const gap of input.gaps) for (const c of gap.blockedBy) gapBlockers.set(c.cli, (gapBlockers.get(c.cli) ?? 0) + 1);
-  for (const c of input.clis) {
-    const blocks = gapBlockers.get(c.cli) ?? 0;
-    if (c.state === 'benched' || (c.state === 'signed_out' && blocks > 0)) {
-      items.push({
-        id: `cli:${c.cli}`,
-        severity: blocks > 0 ? 'red' : 'yellow',
-        source: 'cli',
-        title: `${c.label} ${c.state === 'benched' ? 'benched' : 'signed out'}`,
-        reason: `${c.stateReason ?? c.state}${
-          blocks > 0
-            ? `; it leaves ${blocks} run(s) without a distinct judge`
-            : distinctJudgePair(input.clis) !== null
-              ? '; a distinct judge can still be seated'
-              : '; no run is waiting on it now'
-        }`,
-        remedy: c.state === 'benched' ? 'Wait for the bench to lift, or sign the CLI in again if its account changed.' : 'Sign the CLI in.',
-        blocks,
-        target: { kind: 'cli', cli: c.cli },
-        action: c.canSignIn ? { kind: 'sign_in', label: 'Sign in' } : null,
-      });
-    }
-  }
-  for (const gap of input.gaps) {
-    const who = gap.blockedBy.map((c) => `${c.cli} ${c.state === 'benched' ? 'benched' : c.state.replace('_', ' ')}`);
-    items.push({
-      id: `judge:${gap.run.runId}`,
-      severity: 'red',
-      source: 'run',
-      title: `run ${gap.run.runId.slice(0, 8)}: no distinct judge`,
-      reason: `no seat in the run's pool can judge ${gap.creator ?? 'its creator'}'s work${who.length > 0 ? ` (${who.join(', ')})` : ''}`,
-      remedy: 'Sign in another CLI in the run’s pool, or reassign the unit to a seat whose work another seat can judge.',
-      blocks: 1,
-      target: { kind: 'run', runId: gap.run.runId, ...(gap.run.gate?.ord != null ? { gateOrd: gap.run.gate.ord } : {}) },
-      action: gap.run.gate !== undefined ? { kind: 'open_gate', label: 'Open the gate' } : { kind: 'open_run', label: 'Open the run' },
-    });
-  }
-  for (const r of input.runs) {
-    if (r.liveness === 'working') continue;
-    const red = r.liveness === 'stalled' || r.liveness === 'held';
-    const target: SystemTarget = {
-      kind: 'run',
-      runId: r.runId,
-      ...(r.gate?.ord != null ? { gateOrd: r.gate.ord } : {}),
-      ...(r.gate?.interactionId != null ? { interactionId: r.gate.interactionId } : {}),
-    };
-    items.push({
-      id: `run:${r.runId}`,
-      severity: red ? 'red' : 'yellow',
-      source: 'run',
-      title: `run ${r.runId.slice(0, 8)} ${r.liveness.replace(/_/g, ' ')}`,
-      reason: r.reason,
-      remedy:
-        r.liveness === 'waiting_on_you'
-          ? 'Answer the gate.'
-          : r.liveness === 'held'
-            ? 'Open the gate and decide: retry with a note, reassign, or stop.'
-            : r.liveness === 'stalled'
-              ? 'Open the run: reassign the unit or stop the run. The watchdog re-dispatches a silent unit on its own after its escalation threshold.'
-              : 'Nothing yet; it turns stalled if it stays silent.',
-      blocks: red || r.liveness === 'waiting_on_you' ? 1 : 0,
-      target,
-      action: r.gate !== undefined ? { kind: 'open_gate', label: 'Open the gate' } : { kind: 'open_run', label: 'Open the run' },
-    });
-  }
-  for (const c of input.governance) {
-    if (c.state !== 'down' && c.state !== 'degraded') continue;
-    if (c.key === 'judges' && input.gaps.length > 0) continue; // each gap is already its own item
-    items.push({
-      id: `governance:${c.key}`,
-      severity: c.state === 'down' ? 'red' : 'yellow',
-      source: 'governance',
-      title: `${c.label}: ${c.state}`,
-      reason: c.reason,
-      remedy: c.remedy ?? 'Open the card.',
-      blocks: 0,
-      target: { kind: 'governance', key: c.key },
-      action: null,
-    });
-  }
-  return items.sort(
-    (a, b) =>
-      (a.severity === b.severity ? 0 : a.severity === 'red' ? -1 : 1) ||
-      b.blocks - a.blocks ||
-      SOURCE_RANK[a.source] - SOURCE_RANK[b.source] ||
-      a.id.localeCompare(b.id),
-  );
-}
-
-export function levelOf(attention: SystemAttentionItem[]): SystemLevel {
-  if (attention.some((a) => a.severity === 'red')) return 'red';
-  return attention.length > 0 ? 'yellow' : 'green';
-}
+export { buildNeeds, needsLevel as levelOf } from './needs.js';
 
 /** Assemble the wire answer from its parts. */
 export function assembleSnapshot(parts: {
@@ -1431,14 +1312,20 @@ export function assembleSnapshot(parts: {
   infra: SystemInfraRow[];
   governance: SystemGovernanceCard[];
   attention: SystemAttentionItem[];
+  unresolved: SystemUnresolvedItem[];
+  unresolvedSpend: NonNullable<SystemSnapshot['unresolvedSpend']>;
+  toReview: number | null;
 }): SystemSnapshot {
   const now = Date.now();
   return {
     checkedAt: iso(now),
     budgetMs: SYSTEM_BUDGET_MS,
     tookMs: now - parts.startedAt,
-    level: levelOf(parts.attention),
+    level: needsLevel(parts.attention, parts.unresolved),
     attention: parts.attention,
+    unresolved: parts.unresolved,
+    unresolvedSpend: parts.unresolvedSpend,
+    toReview: parts.toReview,
     clis: parts.clis,
     runs: parts.runs,
     infra: parts.infra,
