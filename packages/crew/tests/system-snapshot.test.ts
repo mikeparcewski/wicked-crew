@@ -366,7 +366,7 @@ describe('clis[], judges and attention', () => {
     // One cause, one item: the seat problem is part of the run it blocks, never an item of its own.
     expect(attention.map((a) => a.id)).toEqual(['run:run-g']);
     expect(attention[0]).toMatchObject({ severity: 'red', kind: 'prevents', blockedRunIds: ['run-g'], target: { kind: 'run', runId: 'run-g', gateOrd: 3, interactionId: 'ir_1' }, action: { kind: 'open_gate' } });
-    expect(attention[0]!.reason).toMatch(/no distinct judge for claude's work \(codex benched\)/);
+    expect(attention[0]!.reason).toBe('Waiting for your decision; no independent reviewer for claude’s work (codex benched)');
     expect(levelOf(attention)).toBe('red');
 
     // A third signed-in judge in the pool: the gate has a distinct judge; codex's bench is INFO (CLIs tab).

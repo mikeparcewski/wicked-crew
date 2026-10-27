@@ -95,6 +95,10 @@ export interface Needs {
 }
 
 const short = (id: string): string => id.slice(0, 8);
+/** "1 job", "4 jobs": a count in words, never "job(s)". */
+export const plural = (n: number, one: string, many = `${one}s`): string => `${n} ${n === 1 ? one : many}`;
+/** A job title as a person reads it: identifiers' underscores become spaces. */
+const readable = (t: string): string => t.replace(/_/g, ' ');
 const isoOf = (ms: number | null): string | null => (ms === null || !Number.isFinite(ms) ? null : new Date(ms).toISOString());
 const secsToMs = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v * 1000 : null);
 const msOf = (v: string | null | undefined): number | null => {
@@ -201,42 +205,67 @@ function seatsOut(v: SessionView | undefined, clis: readonly SystemCli[]): strin
     .map((c) => `${c.cli} ${c.state === 'benched' ? `benched${c.benchedUntil !== undefined ? ` until ${c.benchedUntil.slice(11, 16)} UTC` : ''}` : 'signed out'}`);
 }
 
+/** Why a held run is held, in a person's words (the denial's category, never its raw text). */
+function heldWords(denial: string, dead: boolean, noFailover: boolean): string {
+  if (dead) return noFailover ? 'No other helper can take over' : 'Its helper stopped unexpectedly';
+  if (JUDGE_DENIAL.test(denial)) return 'It needs a reviewer other than the helper that built it';
+  // Enforcement that never ran is not a refusal: the calls went unchecked (core#653).
+  if (/governance_unproven|gate-hook never ran|went unchecked/i.test(denial)) return 'Its tool calls ran without the required checks';
+  if (/boundary-deny|denied a tool[- ]call|tool call was refused|refused (a |the )?tool/i.test(denial)) return 'A tool call was refused by the job’s rules';
+  if (/input governance/i.test(denial)) return 'Its input was refused by the job’s rules';
+  if (/floor failed|repo checks/i.test(denial)) return 'Its checks failed';
+  return 'It stopped and waits for your decision';
+}
+
+/** What a gate that waits on you asks, in a person's words. */
+function waitingWords(kind: string | null | undefined): string {
+  if (kind === 'deliver') return 'Ready to deliver';
+  if (kind === 'plan_approval' || kind === 'plan') return 'Waiting for you to approve its plan';
+  if (kind === 'question') return 'It asks you a question';
+  if (kind === 'terminal') return 'Waiting for you to accept it';
+  return 'Waiting for your decision';
+}
+
 function runItem(m: Member, clis: readonly SystemCli[]): ReturnType<Group['build']> {
   const r = m.run;
   const v = m.view;
-  const title = v !== undefined ? titleOf(v) : `run ${short(m.runId)}`;
+  const title = readable(v !== undefined ? titleOf(v) : `job ${short(m.runId)}`);
   if (r === undefined) {
     // A recent failed run: it stopped, and a person decides what happens to the work.
     return {
       id: `run:${m.runId}`,
       source: 'run',
       kind: 'prevents',
-      title: `${title}: failed`,
-      reason: `run ${short(m.runId)} failed${denialOf(v, undefined) !== '' ? `: ${denialOf(v, undefined).slice(0, 200)}` : ''}`,
-      remedy: 'Open the run: retry it, or archive it with a reason.',
+      title,
+      reason: 'It failed',
+      remedy: 'Open the job: retry it, or archive it with a reason.',
       target: { kind: 'run', runId: m.runId },
-      action: { kind: 'open_run', label: 'Open the run' },
+      action: { kind: 'open_run', label: 'Open the job' },
     };
   }
   const denial = denialOf(v, r);
-  const dead = DEAD_SEAT.test(denial);
+  const dead = r.liveness === 'held' && DEAD_SEAT.test(denial);
   const out = dead ? seatsOut(v, clis) : [];
+  const signIn = out.filter((x) => x.endsWith('signed out')).map((x) => x.split(' ')[0]);
   return {
     id: `run:${m.runId}`,
     source: 'run',
     kind: 'prevents',
-    title: dead ? `${title}: dead seat` : title,
-    reason: `${r.reason}${dead && out.length > 0 ? `; no failover: ${out.join(', ')}` : ''}`,
+    title: dead ? `A job lost its helper: ${title}` : title,
+    reason:
+      r.liveness === 'waiting_on_you' ? waitingWords(r.gate?.kind)
+        : r.liveness === 'held' ? heldWords(denial, dead, out.length > 0)
+          : `${r.reason.charAt(0).toUpperCase()}${r.reason.slice(1)}`,
     remedy:
       r.liveness === 'waiting_on_you'
         ? 'Answer the gate.'
         : r.liveness === 'held'
           ? dead
-            ? `Open the gate and approve the retry${out.length > 0 ? `; sign in ${out.filter((s) => s.endsWith('signed out')).map((s) => s.split(' ')[0]).join(' and ') || 'another seat'} to restore failover` : ''}.`
+            ? `Approve the retry${signIn.length > 0 ? `; sign in ${signIn.join(' and ')} so another helper can take over` : ''}${out.length > signIn.length ? ` (${out.filter((x) => !x.endsWith('signed out')).join(', ')})` : ''}.`
             : 'Open the gate and decide: retry with a note, reassign, or stop.'
-          : 'Open the run: reassign the unit or stop the run. The watchdog re-dispatches a silent unit on its own after its escalation threshold.',
+          : 'Open the job: reassign the step or stop it. The watchdog re-dispatches a silent step on its own after its threshold.',
     target: gateTarget(r, m.runId),
-    action: r.gate !== undefined ? { kind: 'open_gate', label: 'Open the gate' } : { kind: 'open_run', label: 'Open the run' },
+    action: r.gate !== undefined ? { kind: 'open_gate', label: 'Open the gate' } : { kind: 'open_run', label: 'Open the job' },
   };
 }
 
@@ -261,7 +290,9 @@ export function buildNeeds(input: NeedsInput): Needs {
     unresolved.push({
       id: `unresolved:${v.session.id}`,
       runId: v.session.id,
-      title: titleOf(v),
+      title: readable(titleOf(v)),
+      repo: repoOf(v),
+      workflow: v.session.workflow_id ?? null,
       status: v.session.status,
       why,
       reason,
@@ -290,7 +321,7 @@ export function buildNeeds(input: NeedsInput): Needs {
         continue;
       }
       if (failedAt !== null && now - failedAt > FAILED_FRESH_MS) {
-        pushUnresolved(v, 'failed', `failed ${Math.round((now - failedAt) / DAY_MS)} day(s) ago and was never retried or archived`, failedAt, ['retry', 'archive']);
+        pushUnresolved(v, 'failed', `failed ${plural(Math.round((now - failedAt) / DAY_MS), 'day')} ago and was never retried or archived`, failedAt, ['retry', 'archive']);
         continue;
       }
       members.push({ runId: id, view: v, run: undefined, severity: 'red', waitedMs: failedAt });
@@ -387,11 +418,11 @@ export function buildNeeds(input: NeedsInput): Needs {
       severity: 'red',
       source: 'run',
       kind: 'prevents',
-      title: ms.length === 1 ? `run ${short(ms[0]!.runId)}: no distinct judge` : `${ms.length} runs: no distinct judge`,
-      reason: `no seat in the pool can judge ${gap.creator ?? 'the creator'}'s work${who.length > 0 ? ` (${who.join(', ')})` : ''}`,
-      remedy: 'Sign in another CLI in the run’s pool, or reassign the unit to a seat whose work another seat can judge.',
+      title: ms.length === 1 ? 'A job has no independent reviewer' : `${ms.length} jobs have no independent reviewer`,
+      reason: `No helper in the pool can review ${gap.creator ?? 'the creator'}’s work${who.length > 0 ? ` (${who.join(', ')})` : ''}`,
+      remedy: 'Sign in another helper in the job’s pool, or reassign the step to a helper whose work another helper can review.',
       target: gateTarget(ms[0]!.run, ms[0]!.runId),
-      action: ms[0]!.run?.gate !== undefined ? { kind: 'open_gate', label: 'Open the gate' } : { kind: 'open_run', label: 'Open the run' },
+      action: ms[0]!.run?.gate !== undefined ? { kind: 'open_gate', label: 'Open the gate' } : { kind: 'open_run', label: 'Open the job' },
     };
   };
   for (const m of left) {
@@ -407,7 +438,7 @@ export function buildNeeds(input: NeedsInput): Needs {
       const base = runItem(ms[0]!, input.clis);
       if (gap === undefined) return base;
       const who = gap.blockedBy.map((c) => `${c.cli} ${c.state === 'benched' ? 'benched' : c.state.replace('_', ' ')}`);
-      return { ...base, severity: 'red', reason: `${base.reason}; no distinct judge for ${gap.creator ?? 'its creator'}'s work${who.length > 0 ? ` (${who.join(', ')})` : ''}` };
+      return { ...base, severity: 'red', reason: `${base.reason}; no independent reviewer for ${gap.creator ?? 'its creator'}’s work${who.length > 0 ? ` (${who.join(', ')})` : ''}` };
     });
   }
   const memberIds = new Set(members.map((m) => m.runId));
@@ -428,8 +459,8 @@ export function buildNeeds(input: NeedsInput): Needs {
         severity: 'red',
         source: 'cli',
         kind: 'prevents',
-        title: 'No seat can take work',
-        reason: `every CLI is signed out or benched (${seatsOut(undefined, input.clis).join(', ')})`,
+        title: 'No helper can take work',
+        reason: `Every helper is signed out or benched (${seatsOut(undefined, input.clis).join(', ')})`,
         remedy: 'Sign a CLI in, or wait for a bench to lift.',
         target: { kind: 'cli', cli: input.clis[0]!.cli },
         action: input.clis.some((c) => c.canSignIn) ? { kind: 'sign_in', label: 'Sign in' } : null,
@@ -482,7 +513,7 @@ export function buildNeeds(input: NeedsInput): Needs {
         source: 'infra',
         kind,
         title: `${row.label}: ${row.state === 'unknown' ? 'not answering' : down ? (DOWN_WORD[row.key] ?? 'down') : 'degraded'}`,
-        reason: `${row.reason}${held.length > 0 ? `; it ${kind === 'slows' ? 'slows the next step of' : 'holds'} ${held.length} run(s)${row.key === 'load' ? ' and every new run' : ''}` : ''}`,
+        reason: `${row.reason}${held.length > 0 ? `; it ${kind === 'slows' ? 'slows the next step of' : 'holds'} ${plural(held.length, 'job')}${row.key === 'load' ? ' and every new one' : ''}` : ''}`,
         remedy: row.remedy ?? 'Re-check.',
         target: { kind: 'infra', key: row.key },
         action: { kind: 'recheck', label: 'Re-check' },
@@ -530,12 +561,15 @@ function baseRedItem(key: string, ms: Member[]): ReturnType<Group['build']> {
     id: key,
     source: 'run',
     kind: 'prevents',
-    title: `${repo}'s base is red inside the floor sandbox`,
-    reason: `${floors.length} run(s) fail \`${check}\` on a base that fails it too${fix !== undefined ? `; the fix ${short(fix.runId)} ("${fixTitle}") waits at its ${fix.run?.gate?.kind?.replace(/_/g, ' ') ?? ''} gate` : ''}`,
+    title: `${readable(repo)}'s base is red inside the floor sandbox`,
+    // The fix is named once (the remedy), never in both lines.
+    // Delivery opens the fix's PR (merge stays a person's), and nothing retries the held jobs on its
+    // own: the sentence says all three steps.
+    reason: `${plural(floors.length, 'job')} ${floors.length === 1 ? 'fails' : 'fail'} \`${check}\` on a base that fails it too.${fix !== undefined ? ' The fix is ready: approve its delivery and merge it, then retry the held jobs.' : ''}`,
     remedy:
       fix !== undefined
-        ? `Approve delivery of ${short(fix.runId)} ("${fixTitle}"), merge it, then retry the held floors.`
-        : 'Make the base green (or use the floor override), then retry the held floors.',
+        ? `Deliver “${readable(fixTitle)}”.`
+        : 'Make the base green (or use the floor override), then retry the held jobs.',
     target: gateTarget((fix ?? ms[0])!.run, (fix ?? ms[0])!.runId),
     action: { kind: 'open_gate', label: fix !== undefined ? 'Open the fix’s gate' : 'Open the gate' },
   };

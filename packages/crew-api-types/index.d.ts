@@ -8432,6 +8432,9 @@ export interface SystemUnresolvedItem {
   id: string;
   runId: string;
   title: string;
+  /** (api-types 0.142.0) The run's repo (`repo_ref`) and workflow, so a skin can group look-alike items; `null` when none. ABSENT before. */
+  repo?: string | null;
+  workflow?: string | null;
   /** The engine's status. */
   status: string;
   why: SystemUnresolvedWhy;

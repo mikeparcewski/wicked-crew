@@ -146,7 +146,8 @@ describe('the needs-you rule over the rig dump of 2026-10-27 (DEFINITION §5)', 
     const load = needs.attention[0]!;
     expect(load).toMatchObject({ kind: 'slows', severity: 'yellow', blocks: 4, waitedSince: null });
     expect([...load.blockedRunIds!].sort()).toEqual(['1940f173', '290a7fee', '2ebd9da2', '64f05d3d']);
-    expect(load.reason).toMatch(/slows the next step of 4 run\(s\) and every new run/);
+    expect(load.reason).toMatch(/slows the next step of 4 jobs and every new one/);
+    expect(load.reason).not.toMatch(/\(s\)/);
   });
 
   it("the core repo's red base is ONE item holding 3 runs, and its action is the fix's deliver gate", () => {
@@ -156,7 +157,9 @@ describe('the needs-you rule over the rig dump of 2026-10-27 (DEFINITION §5)', 
     // The oldest gate's arrival (2ebd9da2, 105.1 h), never a launch time.
     expect(core.waitedSince).toBe('2026-10-22T19:06:43.782Z');
     expect(core.unitsLeft).toBe(1 + 2 + 6);
-    expect(core.remedy).toMatch(/Approve delivery of 29bcace4/);
+    // The fix is named once: the reason says what to do, the remedy names it.
+    expect(core.reason).toBe('2 jobs fail `test` on a base that fails it too. The fix is ready: approve its delivery and merge it, then retry the held jobs.');
+    expect(core.remedy).toBe("Deliver “Make wicked-core's own test suite pass”.");
   });
 
   it("wicked-crew's red base is its own item: the same label in another repo is no evidence of one cause", () => {
@@ -166,10 +169,22 @@ describe('the needs-you rule over the rig dump of 2026-10-27 (DEFINITION §5)', 
   it("the dead seat folds the seats that left no failover into the run's item; no CLI is an item of its own", () => {
     const dead = needs.attention[3]!;
     expect(dead).toMatchObject({ blockedRunIds: ['290a7fee'], action: { kind: 'open_gate' } });
-    expect(dead.title).toMatch(/dead seat/);
-    expect(dead.reason).toMatch(/no failover: pi signed out, copilot benched until 04:28 UTC, opencode signed out/);
-    expect(dead.remedy).toMatch(/sign in pi and opencode/);
+    expect(dead.title).toBe('A job lost its helper: wicked-core#840: a loopback socket masks dir removed after…');
+    expect(dead.reason).toBe('No other helper can take over');
+    expect(dead.remedy).toBe('Approve the retry; sign in pi and opencode so another helper can take over (copilot benched until 04:28 UTC).');
     expect(needs.attention.some((a) => a.source === 'cli')).toBe(false);
+  });
+
+  it('every item reads in plain words: no "(s)", no raw slugs, a held ask says what happened', () => {
+    for (const a of needs.attention) {
+      expect(`${a.title} ${a.reason} ${a.remedy}`, a.id).not.toMatch(/\(s\)/);
+      expect(a.title, a.id).not.toMatch(/_/);
+    }
+    for (const u of needs.unresolved) expect(`${u.title} ${u.reason}`, u.runId).not.toMatch(/\(s\)/);
+    expect(needs.attention[2]!.reason).toBe('1 job fails `test_targeted` on a base that fails it too.');
+    expect(needs.attention[4]).toMatchObject({ title: 'Where is wicked-core riskiest to change', reason: 'A tool call was refused by the job’s rules' });
+    const tiny = needs.unresolved.find((u) => u.runId === '1ff74953')!;
+    expect(tiny).toMatchObject({ repo: 'tiny-math', workflow: 'ask/adhoc', reason: 'failed 10 days ago and was never retried or archived' });
   });
 
   it('an ask held at an ESCALATION is a real gate, even when an older daemon stamped ask_turn on it', () => {
@@ -277,7 +292,7 @@ describe('review fixes (xreview r1 on crew#1159)', () => {
     expect(needsOf([withEnd(base, 1)]).attention.map((a) => a.id)).toEqual(['run:x']);
     const old = needsOf([withEnd(base, 200)]);
     expect(old.attention).toEqual([]);
-    expect(old.unresolved[0]!.reason).toMatch(/failed 8 day\(s\) ago/);
+    expect(old.unresolved[0]!.reason).toMatch(/failed 8 days ago/);
   });
 
   it('an answered ask never comes back through a judge gap or host load', () => {
@@ -302,7 +317,8 @@ describe('review fixes (xreview r1 on crew#1159)', () => {
     const gaps = [a, b, c].map((p) => ({ run: p.run, creator: 'codex', blockedBy: out }));
     const n = needsOf([a.view, b.view, c.view], [a.run, b.run, c.run], gaps);
     expect(n.attention.map((x) => [x.id, x.blocks])).toEqual([['seat:codex:copilot', 2], ['run:j3', 1]]);
-    expect(n.attention[1]!.reason).toMatch(/no distinct judge for codex's work/);
+    expect(n.attention[1]!.reason).toBe('Its checks failed; no independent reviewer for codex’s work (copilot benched)');
+    expect(n.attention[0]!.reason).toBe('No helper in the pool can review codex’s work (copilot benched)');
   });
 
   it('a slowdown that slows nothing is not counted; an unreadable run list is (never green)', () => {
@@ -385,6 +401,29 @@ describe('review fixes (xreview r1 on crew#1159)', () => {
     expect(n.attention[0]).toMatchObject({ severity: 'red', blockedRunIds: ['H'] });
     const idle = buildNeeds({ now: NOW, views: [], runs: [], infra: calm, clis: out, gaps: [], infraHoldsLive: () => false });
     expect(idle.attention[0]).toMatchObject({ id: 'cli:none', severity: 'red' });
+  });
+
+  it('xreview r1 on crew#1163: the words never say something false about a run', () => {
+    const held = (id: string, denial: string) => live(id, { units_total: 2, units_done: 1, rejected_units: [{ ord: 2, cli: 'claude', denial }] }, { ord: 2, kind: 'escalation' });
+    const say = (denial: string): string => { const h = held('w', denial); return needsOf([h.view], [h.run]).attention[0]!.reason; };
+    // enforcement that never ran is not a refusal
+    expect(say('governance_unproven (fail-closed): the unit made tool calls on the wrapped carrier but its gate-hook never ran — so every call went unchecked (core#653)')).toBe('Its tool calls ran without the required checks');
+    expect(say('input governance denied a tool-call in unit-1 (claim boundary-deny:unit-1)')).toBe('A tool call was refused by the job’s rules');
+    expect(say('input governance refused the phase input')).toBe('Its input was refused by the job’s rules');
+    // a crashed CLI is not a failed check
+    expect(say('(cli `codex` exited 1) exit 1: boom')).toBe('It stopped and waits for your decision');
+    expect(say('repo checks floor failed: test: exit 101')).toBe('Its checks failed');
+    // a dead seat with helpers left says its helper stopped, not that none can take over
+    const calmClis = clis.map((c) => ({ ...c, state: 'signed_in', workEligible: true, councilEligible: true }) as SystemCli);
+    const d = held('d', 'dead seat: every eligible seat has now failed it');
+    const n = buildNeeds({ now: NOW, views: [d.view], runs: [d.run], infra: calm, clis: calmClis, gaps: [], infraHoldsLive: () => false });
+    expect(n.attention[0]).toMatchObject({ title: 'A job lost its helper: T', reason: 'Its helper stopped unexpectedly', remedy: 'Approve the retry.' });
+    // an old dead-seat denial never re-titles a run now waiting at its deliver gate
+    const later = live('l', { units_total: 3, units_done: 2, rejected_units: [{ ord: 3, cli: 'claude', denial: 'dead seat: every eligible seat has now failed it' }] }, { ord: 3, kind: 'deliver' });
+    expect(needsOf([later.view], [later.run]).attention[0]).toMatchObject({ title: 'T', reason: 'Ready to deliver' });
+    // a repo slug reads with spaces in the red base's title
+    const f = live('f', { repo: 'my_repo', units_total: 2, units_done: 1, rejected_units: [{ ord: 2, cli: 'codex', denial: 'test: exit 101 [base_red_unseparated: base red]' }] }, { ord: 2, kind: 'escalation' });
+    expect(needsOf([f.view], [f.run]).attention[0]!.title).toBe("my repo's base is red inside the floor sandbox");
   });
 });
 
