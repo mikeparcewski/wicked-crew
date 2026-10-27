@@ -2,8 +2,11 @@
  * Probe an upstream MCP server: connect, `initialize`, page through `tools/list`, disconnect
  * (DES-MCP-TOOLS-001 §8 `POST /mcp/servers/preview` and `/test`).
  *
- * - Bounded: the whole probe has one deadline (10 s by default); a server that hangs is closed and
- *   the probe fails with `timed out`.
+ * - Bounded: the whole probe has one budget ({@link MCP_PROBE_TIMEOUT_MS}, 45 s). A stdio server
+ *   gets all of it to answer `initialize` (a first start right after `npm ci` can take well over
+ *   10 s on a loaded host, j6-cert 2026-10-27); an http server that is not listening yet is tried
+ *   again with a bounded backoff inside the same budget. A server that never answers is closed and
+ *   the probe fails with words that name the server's start, never a seat or a CLI (crew B6).
  * - Hardened env for stdio: the SDK's safe inherited set (HOME, LOGNAME, PATH, SHELL, TERM, USER on
  *   POSIX) plus, when the server has auth, the ONE variable the secret is injected into. Nothing
  *   else of the daemon's env (tokens, `WICKED_*`) reaches the upstream.
@@ -21,7 +24,9 @@ import type { McpAuthConfig, McpRestMapping, McpToolAnnotations, McpUpstreamKind
 import { probeRestServer, type RestEgress } from './rest.js';
 import { scrubSecrets } from './secrets.js';
 
-export const MCP_PROBE_TIMEOUT_MS = 10_000;
+export const MCP_PROBE_TIMEOUT_MS = 45_000;
+/** The waits between http connection attempts while the server is not listening yet. */
+export const MCP_PROBE_RETRY_DELAYS_MS: readonly number[] = [500, 1_000, 2_000, 4_000, 8_000, 8_000, 8_000];
 const STDERR_TAIL_BYTES = 2048;
 const MAX_TOOLS = 512;
 const MAX_PAGES = 32;
@@ -100,15 +105,74 @@ export function transportFor(config: McpUpstreamConfig, secret: string | null): 
   return { transport: http as unknown as Transport, stderrTail: () => '' };
 }
 
+/** Knobs of {@link probeMcpServerWithin}; tests shorten them. */
+export interface ProbeBudget {
+  budgetMs: number;
+  retryDelaysMs: readonly number[];
+  sleep: (ms: number) => Promise<void>;
+  now: () => number;
+}
+
+const DEFAULT_BUDGET: ProbeBudget = {
+  budgetMs: MCP_PROBE_TIMEOUT_MS,
+  retryDelaysMs: MCP_PROBE_RETRY_DELAYS_MS,
+  sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+  now: Date.now,
+};
+
+/** A probe attempt that ran out of time, or found nothing listening: the server may still be starting. */
+class StillStarting extends Error {}
+
+/** An http connection the server refused or never accepted (not listening yet). */
+function notListening(message: string): boolean {
+  return /ECONNREFUSED|ECONNRESET|fetch failed|socket hang up|other side closed/i.test(message);
+}
+
+/** The probe's words when the budget ran out: the server's start, not a seat or a CLI. */
+export function stillStartingMessage(budgetMs: number, kind: McpUpstreamKind): string {
+  const s = Math.round(budgetMs / 1000);
+  return kind === 'mcp-http'
+    ? `the server is still starting: nothing answered MCP initialize at its URL within ${s} s. This is the server's start, not a seat or a CLI: start the server (or wait for it) and probe again`
+    : `the server is still starting: no answer to MCP initialize within ${s} s (a first start right after npm ci can be slow). This is the server's start, not a seat or a CLI: probe again, or run its command by hand to see its output`;
+}
+
 /** The real prober. Every string it returns has `secret` scrubbed out. */
-export const probeMcpServer: Prober = async (config, secret) => {
+export const probeMcpServer: Prober = async (config, secret) => probeMcpServerWithin(config, secret, DEFAULT_BUDGET);
+
+export async function probeMcpServerWithin(config: McpUpstreamConfig, secret: string | null, budget: ProbeBudget): Promise<ProbeResult> {
   if (config.kind === 'rest') return probeRestServer(config, secret);
   const secrets = secret === null ? [] : [secret];
+  const end = budget.now() + budget.budgetMs;
+  let lastTail = '';
+  for (let attempt = 0; ; attempt++) {
+    const remaining = end - budget.now();
+    const outcome = await probeOnce(config, secret, Math.max(remaining, 1));
+    if (outcome.ok) return scrubSecrets(outcome.result, secrets);
+    lastTail = outcome.tail;
+    const retryable = outcome.stillStarting || (config.kind === 'mcp-http' && notListening(outcome.message));
+    const delay = budget.retryDelaysMs[Math.min(attempt, budget.retryDelaysMs.length - 1)] ?? 0;
+    // A stdio attempt that timed out has used the whole budget; an http one that found nothing
+    // listening waits and tries again while the budget lasts. Any other failure is the server's own.
+    if (retryable && config.kind === 'mcp-http' && end - budget.now() > delay) {
+      await budget.sleep(delay);
+      continue;
+    }
+    const message = retryable ? stillStartingMessage(budget.budgetMs, config.kind) : outcome.message;
+    return scrubSecrets({ ok: false, error: lastTail === '' ? message : `${message}; stderr: ${lastTail}` }, secrets);
+  }
+}
+
+type Attempt =
+  | { ok: true; result: ProbeResult }
+  | { ok: false; message: string; tail: string; stillStarting: boolean };
+
+/** One connect + `tools/list`, within `deadlineMs`. Secrets are scrubbed by the caller. */
+async function probeOnce(config: McpUpstreamConfig, secret: string | null, deadlineMs: number): Promise<Attempt> {
   const { transport, stderrTail } = transportFor(config, secret);
   const client = new Client({ name: 'wicked-crew-mcp-probe', version: '1' }, { capabilities: {} });
   let timer: NodeJS.Timeout | undefined;
   const deadline = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`timed out after ${MCP_PROBE_TIMEOUT_MS / 1000} s`)), MCP_PROBE_TIMEOUT_MS);
+    timer = setTimeout(() => reject(new StillStarting('timed out')), deadlineMs);
   });
   const work = (async (): Promise<ProbeResult> => {
     await client.connect(transport);
@@ -133,14 +197,13 @@ export const probeMcpServer: Prober = async (config, secret) => {
     return { ok: true, serverInfo: info === undefined ? null : { name: info.name, version: info.version }, tools };
   })();
   try {
-    return scrubSecrets(await Promise.race([work, deadline]), secrets);
+    return { ok: true, result: await Promise.race([work, deadline]) };
   } catch (err) {
     work.catch(() => undefined);
     const message = err instanceof Error ? err.message : String(err);
-    const tail = stderrTail().trim();
-    return scrubSecrets({ ok: false, error: tail === '' ? message : `${message}; stderr: ${tail}` }, secrets);
+    return { ok: false, message, tail: stderrTail().trim(), stillStarting: err instanceof StillStarting };
   } finally {
     clearTimeout(timer);
     await client.close().catch(() => undefined);
   }
-};
+}

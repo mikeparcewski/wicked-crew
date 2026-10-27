@@ -3,7 +3,7 @@
  *
  *   GET    /mcp/servers                 upstreams, their tools (class, subject, status), health,
  *                                       auth state, and the servers discovered in CLI homes (names only)
- *   POST   /mcp/servers/preview         probe (10 s, hardened env): tools, classes and a previewHash
+ *   POST   /mcp/servers/preview         probe (45 s budget, hardened env): tools, classes and a previewHash
  *                                       (`kind: "rest"`, slice S5a: the tools of an OpenAPI 3 document,
  *                                       each pinned to the base `url`; see `mcp/rest.ts`)
  *   POST   /mcp/servers                 save: `{previewHash, enabledWrites?, allowOrigin?}`; missing, unknown or expired → 409.

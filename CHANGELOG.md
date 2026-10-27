@@ -11,6 +11,25 @@ mentioned only where a daemon release depends on them.
 ## [Unreleased]
 
 ### Fixed
+- **The floating chat can use an installed MCP server (crew#1155, PRODUCT-WORKS J6).** A chat turn is
+  a governed answer step: its seat holds the unit's broker token, but its only native MCP tool is the
+  engine's `ask` (every other `mcp__*` tool is fenced, core#657), so asked to use `unit-convert` it
+  answered that no such tool existed. Every answer step now names the installed, enabled tools (subject,
+  class, one-line description) and the one command that reaches them, garden's broker shim (`shim.py list`
+  / `call mcp:<server>/<tool> --args …`), with what each exit means (`pending_approval` waits for the
+  operator's approval in MCP > Approvals). The broker judges, runs and records every call exactly as for
+  any worker: read tools run, a write or a server's first use waits. Nothing installed, nothing added.
+- **Editor-plugin install no longer needs Python Playwright on the daemon host (B8).** When garden's
+  conformance runner reports "no headless browser", crew provisions its own runtime, once, under the
+  state home (`editor-conformance/venv-playwright-<pin>`: a private venv with Playwright 1.64.0, override
+  `WICKED_CONFORMANCE_PLAYWRIGHT`, and Playwright's Chromium) and runs the cases again under it. A host
+  where that cannot be done still refuses the install (fail closed), naming the step that failed and the
+  one command that fixes it. The operator's own Python is never touched.
+- **The MCP preview probe waits for a cold start (B6).** One 45 s budget (was 10 s) for `initialize` and
+  `tools/list`; an http server that is not listening yet is retried with a bounded backoff inside it. A
+  probe that runs out says "the server is still starting … This is the server's start, not a seat or a
+  CLI" (a 10 s timeout right after `npm ci` was blamed on opencode). A server that crashes still fails at
+  once with its own stderr.
 - **OS file-manager metadata no longer refuses every worker launch.** A Mac user who opened `~/.wicked-crew` in Finder got a `.DS_Store` that crew's state-home survey (`GET /diagnostics.stateHome`, `/health` warnings, the `POST /runs` 409) reported as an unregistered entry. `.DS_Store`, `._*`, `.Spotlight-V100`, `.Trashes`, `.fseventsd`, `Thumbs.db`, `desktop.ini` and `Icon\r` are now ignored at the state home and the skills root, in crew's own survey and in the engine's answer it reports (an engine older than wicked-core#1117 still names them; that refusal lifts when metadata is all it named). Any other unknown entry (including `.DS_Store.bak`) still refuses. The list lives in `state-home-registry.ts` and is the same list as wicked-core#1117's `OS_METADATA_PATTERNS`; a test reads core's source and holds them equal. The engine's own intake refusal stays authoritative, so launches need a wicked-core-ts that carries #1117.
 - **At deliver, the latest QE attempt on the delivered tree is the one that counts (j4-gates).** A QE
   attempt whose gate never ran (a daemon restart orphaned it) now ends where the next dispatch of the QE
