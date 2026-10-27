@@ -8,6 +8,8 @@ import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { MCP_PROBE_TIMEOUT_MS, probeMcpServerWithin, stillStartingMessage, type ProbeBudget } from '../src/mcp/probe.js';
@@ -75,22 +77,51 @@ describe('the MCP probe budget', () => {
     expect(Date.now() - t0).toBeLessThan(10_000);
   }, 20_000);
 
-  it('retries an http server that is not listening yet, within the budget', async () => {
-    // Reserve a port, close it, and start listening there only after a delay.
+  it('keeps polling an http server that is not listening through the whole budget, the last wait cut short', async () => {
+    // A port nothing listens on: every attempt is refused at once. The clock is virtual (sleep moves it).
     const probe = createHttpServer();
     await new Promise<void>((r) => probe.listen(0, '127.0.0.1', r));
     const port = (probe.address() as AddressInfo).port;
     await new Promise<void>((r) => probe.close(() => r()));
-    let refused = 0;
-    const sleep = async (ms: number): Promise<void> => {
-      refused += 1;
-      await new Promise((r) => setTimeout(r, ms));
-    };
-    const r = await probeMcpServerWithin({ name: 'later', kind: 'mcp-http', command: null, args: [], url: `http://127.0.0.1:${port}/mcp`, auth: null }, null, budget(1_500, { sleep }));
-    // Nothing ever listened: retried, then the still-starting words.
-    expect(refused).toBeGreaterThan(0);
+    let now = 0;
+    const waits: number[] = [];
+    const r = await probeMcpServerWithin(
+      { name: 'never', kind: 'mcp-http', command: null, args: [], url: `http://127.0.0.1:${port}/mcp`, auth: null },
+      null,
+      { budgetMs: 45_000, retryDelaysMs: [500, 1_000, 2_000, 4_000, 8_000], sleep: async (ms) => { waits.push(ms); now += ms; }, now: () => now },
+    );
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.error).toContain('nothing answered MCP initialize at its URL within 2 s');
+    if (!r.ok) expect(r.error).toContain('nothing answered MCP initialize at its URL within 45 s');
+    // 0.5+1+2+4+8x4 = 39.5 s, then a 5.25 s wait (not 8 s, and not giving up) leaves 250 ms for one more try.
+    expect(waits.slice(-2)).toEqual([8_000, 5_250]);
+    expect(now).toBe(44_750);
+  }, 20_000);
+
+  it('reaches an http server that starts listening late in the budget', async () => {
+    const reserve = createHttpServer();
+    await new Promise<void>((r) => reserve.listen(0, '127.0.0.1', r));
+    const port = (reserve.address() as AddressInfo).port;
+    await new Promise<void>((r) => reserve.close(() => r()));
+    const late = createHttpServer(async (req, res) => {
+      const server = new McpServer({ name: 'late', version: '1.0.0' });
+      server.registerTool('ping', { description: 'ping' }, async () => ({ content: [{ type: 'text', text: 'pong' }] }));
+      const transport = new StreamableHTTPServerTransport({ enableJsonResponse: true });
+      await server.connect(transport as never);
+      const chunks: Buffer[] = [];
+      for await (const c of req) chunks.push(c as Buffer);
+      const body = chunks.length > 0 ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : undefined;
+      await transport.handleRequest(req, res, body);
+      res.on('close', () => void server.close());
+    });
+    const timer = setTimeout(() => late.listen(port, '127.0.0.1'), 1_200);
+    try {
+      const r = await probeMcpServerWithin({ name: 'late', kind: 'mcp-http', command: null, args: [], url: `http://127.0.0.1:${port}/mcp`, auth: null }, null, budget(6_000, { retryDelaysMs: [200, 400, 800] }));
+      expect(r.ok, JSON.stringify(r)).toBe(true);
+      if (r.ok) expect(r.tools.map((t) => t.name)).toEqual(['ping']);
+    } finally {
+      clearTimeout(timer);
+      await new Promise<void>((r) => late.close(() => r()));
+    }
   }, 20_000);
 
   it('words both transports', () => {

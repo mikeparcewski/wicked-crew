@@ -105,6 +105,9 @@ export function transportFor(config: McpUpstreamConfig, secret: string | null): 
   return { transport: http as unknown as Transport, stderrTail: () => '' };
 }
 
+/** The time kept back for a final http attempt when the next backoff step would overrun the budget. */
+const PROBE_LAST_ATTEMPT_MS = 250;
+
 /** Knobs of {@link probeMcpServerWithin}; tests shorten them. */
 export interface ProbeBudget {
   budgetMs: number;
@@ -152,9 +155,12 @@ export async function probeMcpServerWithin(config: McpUpstreamConfig, secret: st
     const retryable = outcome.stillStarting || (config.kind === 'mcp-http' && notListening(outcome.message));
     const delay = budget.retryDelaysMs[Math.min(attempt, budget.retryDelaysMs.length - 1)] ?? 0;
     // A stdio attempt that timed out has used the whole budget; an http one that found nothing
-    // listening waits and tries again while the budget lasts. Any other failure is the server's own.
-    if (retryable && config.kind === 'mcp-http' && end - budget.now() > delay) {
-      await budget.sleep(delay);
+    // listening waits and tries again until the budget ends — the last wait is cut short so one
+    // more attempt still fits (codex/agy review on #1156: a full 8 s step gave up at 39.5 s of 45).
+    // Any other failure is the server's own.
+    const left = end - budget.now();
+    if (retryable && config.kind === 'mcp-http' && left > PROBE_LAST_ATTEMPT_MS) {
+      await budget.sleep(Math.min(delay, left - PROBE_LAST_ATTEMPT_MS));
       continue;
     }
     const message = retryable ? stillStartingMessage(budget.budgetMs, config.kind) : outcome.message;

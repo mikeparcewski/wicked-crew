@@ -311,7 +311,7 @@ import { registerDecisionRoutes } from '../decisions/routes.js';
 import { ChatDecisionRecorder } from '../decisions/chat-recorder.js';
 import { ConsiderationService } from '../decisions/consider.js';
 import { gardenConformance, gardenPackCheck, type ConformanceRunner, type PackCheckRunner } from '../editors/pack-install.js';
-import { conformanceProvisioner } from '../editors/conformance-runtime.js';
+import { conformanceProvisioner, conformanceRuntimeRoot } from '../editors/conformance-runtime.js';
 import { EditorRegistry } from '../editors/registry.js';
 import { registerEditorRoutes } from '../editors/routes.js';
 import { registerMcpInspectRoutes } from '../mcp-inspect/routes.js';
@@ -1380,7 +1380,7 @@ function pushedOnlyRefusal(runId: string, pushed: { branch: string; remote: stri
 }
 
 /** B8: the editor-conformance browser runtime crew provisions when a host has none (one per process). */
-const editorConformanceRuntime = conformanceProvisioner(() => join(crewStateHome(), 'editor-conformance'));
+const editorConformanceRuntime = conformanceProvisioner(() => conformanceRuntimeRoot());
 
 export function registerRoutes(
   app: FastifyInstance,

@@ -278,8 +278,8 @@ describe('crew#1155: the floating chat uses the installed MCP server', () => {
     const instructions = lastInstructions();
     // What is installed, each tool's class, and that they are not native tools.
     expect(instructions).toContain('## MCP tools installed on this daemon');
-    expect(instructions).toContain('- `mcp:unit-convert/convert_length` (read)');
-    expect(instructions).toContain('- `mcp:unit-convert/convert_temperature` (read)');
+    expect(instructions).toContain('"subject": "mcp:unit-convert/convert_length",\n    "class": "read"');
+    expect(instructions).toContain('"subject": "mcp:unit-convert/convert_temperature",\n    "class": "read"');
     expect(instructions).toContain('NOT native tools');
     // The one way to them: the shim's list and call, on the launcher every governed seat has.
     expect(instructions).toContain(`${CHAT_MCP_SHIM} list`);
@@ -290,7 +290,7 @@ describe('crew#1155: the floating chat uses the installed MCP server', () => {
 
     // The seat follows the instructions: the subject it read, the arguments from the schema, and the request the
     // shim sends with its unit's token. The daemon's broker runs it on the real installed server.
-    const subject = /- `(mcp:unit-convert\/convert_length)`/.exec(instructions)![1]!;
+    const subject = /"subject": "(mcp:unit-convert\/convert_length)"/.exec(instructions)![1]!;
     const res = await chatApp.inject({ method: 'POST', url: '/api/v1/mcp/call', payload: { token: 'wmt_unit', subject, args: { value: 5, from: 'km', to: 'mi' } } });
     expect(res.statusCode, res.body).toBe(200);
     const body = res.json() as McpCallResponse;
@@ -313,7 +313,7 @@ describe('crew#1155: the floating chat uses the installed MCP server', () => {
     const follow = await chatApp.inject({ method: 'POST', url: '/api/v1/chats/mcp-chat-1/messages', payload: { text: 'And 100 C in F?' } });
     expect(follow.statusCode, follow.body).toBe(202);
     const next = proposals.at(-1)!.steps[0]!.instructions;
-    expect(next).toContain('- `mcp:unit-convert/convert_temperature` (read)');
+    expect(next).toContain('"subject": "mcp:unit-convert/convert_temperature"');
     expect(next).toContain(`${CHAT_MCP_SHIM} call mcp:<server>/<tool>`);
   });
 });
