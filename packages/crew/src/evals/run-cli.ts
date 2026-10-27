@@ -4,6 +4,9 @@
  *
  *   node dist/evals/run-cli.js [--daemon <url>] [--project <id>|all] [--baseline] [--out <file>]
  *
+ * The daemon is `--daemon`, else `$WICKED_CREW_URL` (the daemon exports it to its children, so the workflow's Tool
+ * step reaches the daemon that launched it). With neither, it refuses: it never guesses a port.
+ *
  * It asks the daemon to run the default evals (`POST /api/v1/testing/default-evals/run`), so the daemon's own store
  * is what gets scored and the report is stored where studio reads it. It prints a short plain summary, writes the
  * full report to `--out` when given, and exits 0 on a completed run (a regression is a finding, not a failure),
@@ -15,7 +18,8 @@ import { writeFileSync } from 'node:fs';
 import type { DefaultEvalReport } from './types.js';
 
 export interface CliArgs {
-  daemon: string;
+  /** `null` until named: the CLI never guesses a port, since a default could reach another daemon. */
+  daemon: string | null;
   project: string | null;
   baseline: boolean;
   out: string | null;
@@ -23,7 +27,7 @@ export interface CliArgs {
 
 export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = process.env): CliArgs {
   const args: CliArgs = {
-    daemon: env['WICKED_CREW_URL'] ?? `http://127.0.0.1:${env['WICKED_CREW_PORT'] ?? '7701'}`,
+    daemon: env['WICKED_CREW_URL'] !== undefined && env['WICKED_CREW_URL'] !== '' ? env['WICKED_CREW_URL'].replace(/\/+$/, '') : null,
     project: null,
     baseline: false,
     out: null,
@@ -68,12 +72,16 @@ export function summaryLines(r: DefaultEvalReport): string[] {
   return lines;
 }
 
-export async function main(argv: readonly string[], fetchImpl: typeof fetch = fetch): Promise<number> {
+export async function main(argv: readonly string[], fetchImpl: typeof fetch = fetch, env: NodeJS.ProcessEnv = process.env): Promise<number> {
   let args: CliArgs;
   try {
-    args = parseArgs(argv);
+    args = parseArgs(argv, env);
   } catch (err) {
     process.stderr.write(`run-evals: ${err instanceof Error ? err.message : String(err)}\n`);
+    return 1;
+  }
+  if (args.daemon === null) {
+    process.stderr.write('run-evals: no daemon named: pass --daemon <url> or set WICKED_CREW_URL (it never guesses a port)\n');
     return 1;
   }
   const body = { ...(args.project !== null ? { project: args.project } : {}), ...(args.baseline ? { baseline: true } : {}) };

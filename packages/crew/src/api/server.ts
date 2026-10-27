@@ -29,6 +29,7 @@ import { registerInsightsRoutes } from '../insights/routes.js';
 import { ReviewService } from '../insights/review-service.js';
 import { InsightsStore } from '../insights/store.js';
 import { ANALYZE_CLI, REVIEW_WORKFLOW, defaultReviewsDir, loadReviewWorkflow } from '../insights/workflow.js';
+import { RUN_EVALS_CLI, RUN_EVALS_WORKFLOW, loadRunEvalsWorkflow } from '../evals/workflow.js';
 import { registerScheduleRoutes } from '../schedules/routes.js';
 import { WorkflowScheduler, type ScheduledLaunch } from '../schedules/scheduler.js';
 import { DEFAULT_REVIEW_SCHEDULE_ID, ScheduleStore } from '../schedules/store.js';
@@ -2558,6 +2559,18 @@ export function brokerUrlFor(host: string, port: number): string {
   return `http://${h.includes(':') ? `[${h}]` : h}:${port}`;
 }
 
+/** Register `run-evals` with the engine, handing its Tool step this daemon's URL. Never fails the boot. */
+export async function registerRunEvals(adapter: CoreAdapter, daemonUrl: string, warn: (m: string) => void): Promise<boolean> {
+  if (typeof (adapter as Partial<CoreAdapter>).registerWorkflow !== 'function') return false;
+  try {
+    await adapter.registerWorkflow(loadRunEvalsWorkflow({ node: process.execPath, runCli: RUN_EVALS_CLI, daemon: daemonUrl }));
+    return true;
+  } catch (err) {
+    warn(`[evals] could not register the '${RUN_EVALS_WORKFLOW}' workflow — scheduled default evals are off: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+}
+
 export async function startServer(
   adapter: CoreAdapter,
   port = 7701,
@@ -2576,5 +2589,9 @@ export async function startServer(
   // `WICKED_MCP_TOKEN`) as `WICKED_CREW_URL`, so the garden shim reaches THIS daemon's broker. The
   // engine reads the daemon's own env at every spawn; a daemon that never listened hands none.
   process.env['WICKED_CREW_URL'] = brokerUrlFor(boundHost, boundPort);
+  // DES-DEFAULT-EVALS-001 §7: the default evals as a workflow (`workflows/run-evals.json`: one Tool step that asks
+  // THIS daemon to run them). Registered once the daemon listens, because the step is handed the bound URL as an
+  // argument: a Tool step's environment is cleared to the validator allowlist, so WICKED_CREW_URL never reaches it.
+  await registerRunEvals(adapter, brokerUrlFor(boundHost, boundPort), (m) => app.log.warn(m));
   return { app, port: boundPort, host: boundHost, stages: clock.snapshot() };
 }

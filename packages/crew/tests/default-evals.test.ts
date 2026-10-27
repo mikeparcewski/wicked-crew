@@ -26,6 +26,8 @@ import {
 import { archetypeAdapter, type ReplaySet } from '../src/evals/replay.js';
 import { registerDefaultEvalRoutes } from '../src/evals/routes.js';
 import { previousScores, runDefaultEvals } from '../src/evals/runner.js';
+import { fillRunEvalsWorkflow, loadRunEvalsWorkflow } from '../src/evals/workflow.js';
+import { registerRunEvals } from '../src/api/server.js';
 import { captureArchetypeCases } from '../src/evals/capture.js';
 import { AuditLog } from '../src/api/audit.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
@@ -440,7 +442,12 @@ describe('routes and store', () => {
 
 describe('the run-evals CLI', () => {
   it('parses its arguments and prints a plain summary', async () => {
-    expect(parseArgs(['--project', 'all', '--baseline'], {})).toMatchObject({ daemon: 'http://127.0.0.1:7701', project: null, baseline: true });
+    // It never guesses a daemon: no --daemon and no WICKED_CREW_URL is a refusal, not port 7701.
+    expect(parseArgs(['--project', 'all', '--baseline'], {})).toMatchObject({ daemon: null, project: null, baseline: true });
+    expect(parseArgs([], { WICKED_CREW_URL: 'http://127.0.0.1:7721/' }).daemon).toBe('http://127.0.0.1:7721');
+    const never = vi.fn();
+    expect(await cliMain([], never as unknown as typeof fetch, {})).toBe(1);
+    expect(never).not.toHaveBeenCalled();
     expect(() => parseArgs(['--nope'], {})).toThrow(/unknown argument/);
     const { report } = await runDefaultEvals({ id: 'c1', now: new Date(0), project: null, cases: [cls('a', 'x', 'x')], replay: NO_REPLAY, previous: {}, suites: ['floor-class'] });
     expect(summaryLines(report).join('\n')).toMatch(/floor-class: too few cases \(n=1\)/);
@@ -449,10 +456,10 @@ describe('the run-evals CLI', () => {
       sent = JSON.parse(String(init.body));
       return new Response(JSON.stringify(report), { status: 200 });
     }) as unknown as typeof fetch;
-    expect(await cliMain(['--project', 'repo-core'], fake)).toBe(0);
+    expect(await cliMain(['--project', 'repo-core'], fake, { WICKED_CREW_URL: 'http://127.0.0.1:1' })).toBe(0);
     expect(sent).toEqual({ project: 'repo-core' });
     const refuse = (async () => new Response('no', { status: 400 })) as unknown as typeof fetch;
-    expect(await cliMain([], refuse)).toBe(1);
+    expect(await cliMain([], refuse, { WICKED_CREW_URL: 'http://127.0.0.1:1' })).toBe(1);
   });
 });
 
@@ -560,5 +567,28 @@ describe('review r1', () => {
     expect(res.statusCode).toBe(200);
     expect((res.json() as DefaultEvalReport).suites[0]!.real.cases).toBe(1);
     await app.close();
+  });
+});
+
+describe('the run-evals workflow (data)', () => {
+  it('fills its tokens, keeps one deterministic Tool step with no floor and no instruments, and refuses an unfilled token', () => {
+    const def = loadRunEvalsWorkflow({ node: '/bin/node', runCli: '/x/run-cli.js', daemon: 'http://127.0.0.1:7721' });
+    expect(def.id).toBe('run-evals');
+    expect((def as unknown as { required_instruments: unknown[] }).required_instruments).toEqual([]);
+    expect(def.phases).toHaveLength(1);
+    expect(def.phases[0]).toMatchObject({ executor: { type: 'tool', cmd: ['/bin/node', '/x/run-cli.js', '--daemon', 'http://127.0.0.1:7721'] }, executes_code: false, verified_evidence: false });
+    expect(JSON.stringify(def)).not.toMatch(/\$comment/);
+    expect(() => fillRunEvalsWorkflow({ id: 'run-evals', phases: [{ executor: { type: 'tool', cmd: ['{node}', '{other}', '{run_cli}'] } }] }, { node: 'n', runCli: '{run_cli}', daemon: 'd' })).toThrow(/not filled/);
+  });
+
+  it('is registered with the bound URL, and a refusal never fails the boot', async () => {
+    const seen: unknown[] = [];
+    const ok = await registerRunEvals({ registerWorkflow: async (d: unknown) => { seen.push(d); return 'run-evals'; } } as unknown as CoreAdapter, 'http://127.0.0.1:7721', () => undefined);
+    expect(ok).toBe(true);
+    expect(JSON.stringify(seen[0])).toContain('"--daemon","http://127.0.0.1:7721"');
+    const warned: string[] = [];
+    expect(await registerRunEvals({ registerWorkflow: async () => { throw new Error('bad def'); } } as unknown as CoreAdapter, 'u', (m) => warned.push(m))).toBe(false);
+    expect(warned[0]).toMatch(/bad def/);
+    expect(await registerRunEvals({} as CoreAdapter, 'u', () => undefined)).toBe(false);
   });
 });
