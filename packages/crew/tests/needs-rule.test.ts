@@ -149,7 +149,7 @@ describe('the needs-you rule over the rig dump of 2026-10-27 (DEFINITION §5)', 
     expect(load.reason).toMatch(/slows the next step of 4 run\(s\) and every new run/);
   });
 
-  it("wicked-core's red base is ONE item holding 3 runs, and its action is the fix's deliver gate", () => {
+  it("the core repo's red base is ONE item holding 3 runs, and its action is the fix's deliver gate", () => {
     const core = needs.attention[1]!;
     expect(core).toMatchObject({ kind: 'prevents', severity: 'red', blocks: 3, target: { kind: 'run', runId: '29bcace4', gateOrd: 10 } });
     expect([...core.blockedRunIds!].sort()).toEqual(['1940f173', '29bcace4', '2ebd9da2']);
@@ -334,7 +334,7 @@ describe('review fixes (xreview r1 on crew#1159)', () => {
   };
 
   it("an earlier unit's old denial never re-labels a run now at its deliver gate", () => {
-    const d = live('d1', { repo: 'wicked-core', units_total: 10, units_done: 9, rejected_units: [{ ord: 4, cli: 'claude', denial: 'dead seat: every eligible seat has now failed it; test: exit 1 base_red_unseparated' }] }, { ord: 10, kind: 'deliver' });
+    const d = live('d1', { repo: 'repo-a', units_total: 10, units_done: 9, rejected_units: [{ ord: 4, cli: 'claude', denial: 'dead seat: every eligible seat has now failed it; test: exit 1 base_red_unseparated' }] }, { ord: 10, kind: 'deliver' });
     // unit 4 is done now (it was retried); its denial text stayed on the row
     const n = needsOf([d.view], [d.run]);
     expect(n.attention.map((a) => [a.id, a.title])).toEqual([['run:d1', 'T']]);
@@ -359,16 +359,16 @@ describe('review fixes (xreview r1 on crew#1159)', () => {
   });
 
   it('only a run at its deliver gate joins a red base as its fix, and only one', () => {
-    const floor = (id: string) => live(id, { repo: 'wicked-core', units_total: 3, units_done: 1, rejected_units: [{ ord: 2, cli: 'codex', denial: 'test: exit 101 [base_red_unseparated: base red]' }] }, { ord: 2, kind: 'escalation' });
+    const floor = (id: string) => live(id, { repo: 'repo-a', units_total: 3, units_done: 1, rejected_units: [{ ord: 2, cli: 'codex', denial: 'test: exit 101 [base_red_unseparated: base red]' }] }, { ord: 2, kind: 'escalation' });
     const fixAt = (id: string, kind: string) => {
-      const p = live(id, { repo: 'wicked-core', units_total: 3, units_done: 2 }, { ord: 3, kind });
+      const p = live(id, { repo: 'repo-a', units_total: 3, units_done: 2 }, { ord: 3, kind });
       (p.view.session as { problem: string }).problem = 'the BASE is red with 39 failures';
       return p;
     };
     const [f1, f2, fx, fy, fz] = [floor('f1'), floor('f2'), fixAt('fx', 'deliver'), fixAt('fy', 'deliver'), fixAt('fz', 'escalation')];
     const all = [f1, f2, fx, fy, fz];
     const n = needsOf(all.map((p) => p.view), all.map((p) => p.run));
-    const base = n.attention.find((a) => a.id === 'base:wicked-core:test')!;
+    const base = n.attention.find((a) => a.id === 'base:repo-a:test')!;
     expect([...base.blockedRunIds!].sort()).toEqual(['f1', 'f2', 'fx']);
     expect(base.target).toMatchObject({ runId: 'fx' });
     expect(n.attention.map((a) => a.id)).toEqual(expect.arrayContaining(['run:fy', 'run:fz']));
