@@ -5086,7 +5086,7 @@ export function registerRoutes(
    */
   function analysisPlanRefusal(
     runId: string,
-    held: { gateKind?: string | undefined; plan?: { steps: ReadonlyArray<{ catalog: string; id?: string; [k: string]: unknown }> } | undefined },
+    held: { gateKind?: string | undefined; plan?: { steps: ReadonlyArray<{ catalog: string; id?: string | undefined; [k: string]: unknown }> } | undefined },
   ): { code: number; body: unknown } | null {
     const workflow = runTimingIndex.chatWorkflowOf(runId);
     if (workflow === undefined) return null;

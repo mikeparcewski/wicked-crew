@@ -33,7 +33,7 @@ export type ChatWorkflowResolution =
  * The ONE predicate: the chat open applies it to the workflow's step, and an analysis run applies it
  * to every step a plan edit would add (`routes.ts` `analysisPlanRefusal`).
  */
-export function writeCapableStep(step: { catalog: string; id?: string; [k: string]: unknown }): string | null {
+export function writeCapableStep(step: { catalog: string; id?: string | undefined; [k: string]: unknown }): string | null {
   const id = String(step.id ?? step.catalog);
   if (step.catalog !== 'understand') return `its step '${id}' is on catalog entry '${step.catalog}', not 'understand'`;
   if (step['executor'] !== undefined && step['executor'] !== null) return `its step '${id}' names an executor`;
