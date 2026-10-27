@@ -1811,6 +1811,8 @@ export function registerRoutes(
   ) => [
       ...(stateHome === null ? [] : stateHome.findings.map((f) => ({ kind: f.kind, severity: f.severity, message: f.message }))),
       ...(baseSkill?.finding ? [{ kind: baseSkill.finding.kind, severity: baseSkill.finding.severity, message: baseSkill.finding.message }] : []),
+      // crew#1149: while the boot ladder publishes, one info line instead of a base-skill error.
+      ...[runtime.skills?.publishingFinding() ?? null].filter((f) => f !== null).map((f) => ({ kind: f.kind, severity: f.severity, message: f.message })),
       // crew#753: a garden older than the minimum is a blocking finding on the first screen too.
       ...[gardenBlocker()].filter((f): f is NonNullable<typeof f> => f !== null),
       // DES-TEAMING-002 T0: the daemon's bus did not open at boot, so the engine was handed none
@@ -1891,7 +1893,7 @@ export function registerRoutes(
     const stateHome = runtime.stateHome !== undefined ? await runtime.stateHome.refresh() : null;
     // crew#554: the BASE skill posture for the next launch — the composer's confirm line
     // ("discipline skill: <name> gen N" / "MISSING — …"). Cached by the skills runtime: no I/O.
-    const baseSkill = runtime.skills?.baseSkill() ?? null;
+    const baseSkill = runtime.skills?.reportedBaseSkill() ?? null;
     // F-W1-102: the base skill's ERROR rides `warnings` too. A daemon under `require` with no published
     // generation holding the skill (the crew-only install: no wicked-garden) REFUSES every launch at
     // intake — it must never read "status ok, no warnings". The SAME finding object as
@@ -8392,7 +8394,7 @@ export function registerRoutes(
       const daemonDetails: Record<string, unknown> = {
         version: PKG_VERSION,
         ping: pingWord,
-        warnings: healthWarningsOf(runtime.stateHome !== undefined ? (d?.stateHome ?? null) : null, runtime.skills?.baseSkill() ?? null),
+        warnings: healthWarningsOf(runtime.stateHome !== undefined ? (d?.stateHome ?? null) : null, runtime.skills?.reportedBaseSkill() ?? null),
         ...(d !== null ? { components: d.components, daemon: d.daemon, recentErrors: d.recentErrors } : {}),
       };
       const daemonRow =

@@ -55,7 +55,7 @@ function routes(skills: { findings: SkillsHealthFinding[]; basePresent: boolean 
     finding: skills.basePresent ? null : BASE_MISSING,
   };
   const runtime = {
-    skills: { health: () => ({ findings: skills.findings }), baseSkill: () => posture } as unknown as SkillsRuntime,
+    skills: { health: () => ({ findings: skills.findings }), baseSkill: () => posture, reportedBaseSkill: () => posture, publishingFinding: () => null } as unknown as SkillsRuntime,
   } as Partial<RuntimeDeps>;
   const app = Fastify({ logger: false });
   registerRoutes(

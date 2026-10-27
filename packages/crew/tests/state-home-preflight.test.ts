@@ -19,6 +19,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { isPublishingPlaceholder } from '../src/skills/runtime.js';
 import {
   assertWickedRootsOutsideStateHome,
   isEngineStateHomeRefusal,
@@ -540,5 +541,19 @@ describe('the POST /runs 409 body and the engine’s intake refusal', () => {
     expect(isEngineStateHomeRefusal('engine busy: a run is already in flight')).toBe(false);
     expect(isEngineStateHomeRefusal('WICKED_SKILLS_SNAPSHOT=/x is not a usable skills snapshot (…)')).toBe(false);
     expect(isEngineStateHomeRefusal('')).toBe(false);
+  });
+});
+
+describe('isPublishingPlaceholder (crew#1149)', () => {
+  it('matches the refused/skills.publishing placeholder under either separator', () => {
+    expect(isPublishingPlaceholder('/state/skills/refused/skills.publishing')).toBe(true);
+    expect(isPublishingPlaceholder('C:\\state\\skills\\refused\\skills.publishing')).toBe(true);
+  });
+  it('does not match near misses or real snapshots', () => {
+    expect(isPublishingPlaceholder('/state/skills/refused/skills.blocked')).toBe(false);
+    expect(isPublishingPlaceholder('/state/skills/refused/skills.publishing/x')).toBe(false);
+    expect(isPublishingPlaceholder('/state/skills/skills.publishing')).toBe(false);
+    expect(isPublishingPlaceholder('/state/skills/refused/skills.publishing2')).toBe(false);
+    expect(isPublishingPlaceholder('/state/skills/snapshots/000001')).toBe(false);
   });
 });

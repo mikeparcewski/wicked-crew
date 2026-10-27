@@ -963,6 +963,10 @@ respondsWith<Wire.DiagnosticsSkillsFinding['kind'], SkillsHealthFindingKind>();
 respondsWith<SkillsHealthFindingKind, Wire.DiagnosticsSkillsFinding['kind']>();
 // F-083 (api-types 0.36.0): the stale-rules kind is declared, both ways.
 respondsWith<Wire.DiagnosticsSkillsFinding['kind'], 'skills.stale-rules'>();
+// crew#1149: the publishing notice is an info finding, declared on both surfaces.
+respondsWith<Wire.DiagnosticsSkillsFinding['kind'], 'skills.publishing'>();
+respondsWith<Wire.DiagnosticsSkillsFinding['severity'], 'info'>();
+respondsWith<Wire.HealthWarning['severity'], 'info'>();
 respondsWith<Wire.DiagnosticsSkillsFinding['kind'], 'skills.source'>();
 respondsWith<Wire.DiagnosticsSkillsFinding['kind'], 'skills.manifest'>();
 // crew#753 (api-types 0.78.0): an installed garden older than the minimum.
