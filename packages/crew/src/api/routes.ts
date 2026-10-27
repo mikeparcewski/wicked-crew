@@ -1884,6 +1884,11 @@ export function registerRoutes(
       // api-types 0.141.0 (crew#1157): the read-only workflows `POST /chats {workflow}` runs on THIS
       // engine (`analyze` on a core-ts that carries it); `[]` = plain chats only.
       chatWorkflows: await chatWorkflowsNow(),
+      // api-types 0.145.0: the evals, insights and schedules surfaces, read off the route table this
+      // daemon serves, so a route set booted without one says false rather than an invented true.
+      defaultEvals: app.hasRoute({ method: 'GET', url: `${V}/testing/default-evals/suites` }),
+      insights: app.hasRoute({ method: 'GET', url: `${V}/insights` }),
+      schedules: app.hasRoute({ method: 'GET', url: `${V}/schedules` }),
     };
     // wicked-core#411 / crew#497: the state-home blocker rides the health probe as a WARNING. The
     // daemon still SERVES (status stays ok — studio must load and show the blocker) but refuses to

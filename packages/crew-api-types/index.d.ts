@@ -318,6 +318,24 @@ export interface HealthCapabilities {
    * chat instead.
    */
   chatWorkflows?: string[];
+  /**
+   * (api-types 0.145.0) The default evals are served: `GET /testing/default-evals/suites`,
+   * `POST /testing/default-evals/run` and `GET /testing/default-evals[/:id]` (api-types 0.143.0).
+   * ABSENT on an older daemon — read as `false`: probe the route or hide the default-evals view.
+   */
+  defaultEvals?: boolean;
+  /**
+   * (api-types 0.145.0) The run insights are served: `GET /insights` and
+   * `POST /insights/recommendations/:id/{accept,dismiss}`. ABSENT on an older daemon — read as
+   * `false`: hide the Insights link.
+   */
+  insights?: boolean;
+  /**
+   * (api-types 0.145.0) The workflow schedules are served: `GET /schedules`,
+   * `PUT|DELETE /schedules/:id` and `POST /schedules/:id/run`. ABSENT on an older daemon — read as
+   * `false`: hide the schedules view.
+   */
+  schedules?: boolean;
 }
 
 /** One `GET /health.warnings[]` entry (additive; wicked-core#411 / wicked-crew#497). */
