@@ -166,7 +166,9 @@ describe('skills boot off the critical path (crew#1145)', () => {
         expect((h.warnings ?? []).filter((w) => w.kind === 'skills.publishing')).toHaveLength(1);
         expect((h.warnings ?? []).some((w) => w.kind === 'skills.base-skill')).toBe(false);
       }
-      // The boot survey did not hand the placeholder to the engine classifier.
+      // The boot survey did not hand the placeholder to the engine classifier (agy on #1170: and it
+      // did run, so the check is not vacuous on a host whose addon carries the preflighter).
+      if (real !== null) await vi.waitFor(() => expect(seen.length).toBeGreaterThan(0), { timeout: 10_000 });
       expect(seen.every((p) => p === null)).toBe(true);
 
       release();

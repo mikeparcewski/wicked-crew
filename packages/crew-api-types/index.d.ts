@@ -325,6 +325,7 @@ export interface HealthWarning {
   /** `state-home.unregistered` today; open for later kinds (e.g. `seat.work_default`,
    *  api-types 0.133.0 — see `DiagnosticsSeatGovernance.roleFindings`). */
   kind: string;
+  /** `info` (api-types 0.144.0, crew#1149): a notice, never a blocker — `skills.publishing` today. */
   severity: 'info' | 'warning' | 'error';
   message: string;
 }
@@ -8070,7 +8071,7 @@ export interface DiagnosticsSkillsFinding {
    *  not the baseline the published generation was built from — runs use the published (older)
    *  skills; `message` names both versions and the remedy (refresh-baseline, then publish). A
    *  daemon boot refreshes and publishes on its own when nothing in the catalog is user-edited
-   *  (`WICKED_CREW_SKILLS_AUTO_REFRESH=0` turns that off); `skills.publishing` (`info`, crew#1149) =
+   *  (`WICKED_CREW_SKILLS_AUTO_REFRESH=0` turns that off); `skills.publishing` (`info`, api-types 0.144.0, crew#1149) =
    *  the boot ladder is still publishing (state `publishing`): the only finding then, in place of a
    *  `skills.base-skill` error — launches wait until it lands. */
   kind:
