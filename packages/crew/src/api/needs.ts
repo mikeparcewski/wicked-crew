@@ -206,11 +206,14 @@ function seatsOut(v: SessionView | undefined, clis: readonly SystemCli[]): strin
 }
 
 /** Why a held run is held, in a person's words (the denial's category, never its raw text). */
-function heldWords(denial: string, dead: boolean): string {
-  if (dead) return 'No other helper can take over';
+function heldWords(denial: string, dead: boolean, noFailover: boolean): string {
+  if (dead) return noFailover ? 'No other helper can take over' : 'Its helper stopped unexpectedly';
   if (JUDGE_DENIAL.test(denial)) return 'It needs a reviewer other than the helper that built it';
-  if (/input governance|boundary-deny|was refused|denied a tool/i.test(denial)) return 'A tool call was refused by the job’s rules';
-  if (/floor failed|repo checks|exit -?\d+/i.test(denial)) return 'Its checks failed';
+  // Enforcement that never ran is not a refusal: the calls went unchecked (core#653).
+  if (/governance_unproven|gate-hook never ran|went unchecked/i.test(denial)) return 'Its tool calls ran without the required checks';
+  if (/boundary-deny|denied a tool[- ]call|tool call was refused|refused (a |the )?tool/i.test(denial)) return 'A tool call was refused by the job’s rules';
+  if (/input governance/i.test(denial)) return 'Its input was refused by the job’s rules';
+  if (/floor failed|repo checks/i.test(denial)) return 'Its checks failed';
   return 'It stopped and waits for your decision';
 }
 
@@ -241,7 +244,7 @@ function runItem(m: Member, clis: readonly SystemCli[]): ReturnType<Group['build
     };
   }
   const denial = denialOf(v, r);
-  const dead = DEAD_SEAT.test(denial);
+  const dead = r.liveness === 'held' && DEAD_SEAT.test(denial);
   const out = dead ? seatsOut(v, clis) : [];
   const signIn = out.filter((x) => x.endsWith('signed out')).map((x) => x.split(' ')[0]);
   return {
@@ -251,7 +254,7 @@ function runItem(m: Member, clis: readonly SystemCli[]): ReturnType<Group['build
     title: dead ? `A job lost its helper: ${title}` : title,
     reason:
       r.liveness === 'waiting_on_you' ? waitingWords(r.gate?.kind)
-        : r.liveness === 'held' ? heldWords(denial, dead)
+        : r.liveness === 'held' ? heldWords(denial, dead, out.length > 0)
           : `${r.reason.charAt(0).toUpperCase()}${r.reason.slice(1)}`,
     remedy:
       r.liveness === 'waiting_on_you'
@@ -417,9 +420,9 @@ export function buildNeeds(input: NeedsInput): Needs {
       kind: 'prevents',
       title: ms.length === 1 ? 'A job has no independent reviewer' : `${ms.length} jobs have no independent reviewer`,
       reason: `No helper in the pool can review ${gap.creator ?? 'the creator'}’s work${who.length > 0 ? ` (${who.join(', ')})` : ''}`,
-      remedy: 'Sign in another CLI in the run’s pool, or reassign the unit to a seat whose work another seat can judge.',
+      remedy: 'Sign in another helper in the job’s pool, or reassign the step to a helper whose work another helper can review.',
       target: gateTarget(ms[0]!.run, ms[0]!.runId),
-      action: ms[0]!.run?.gate !== undefined ? { kind: 'open_gate', label: 'Open the gate' } : { kind: 'open_run', label: 'Open the run' },
+      action: ms[0]!.run?.gate !== undefined ? { kind: 'open_gate', label: 'Open the gate' } : { kind: 'open_run', label: 'Open the job' },
     };
   };
   for (const m of left) {
@@ -558,9 +561,11 @@ function baseRedItem(key: string, ms: Member[]): ReturnType<Group['build']> {
     id: key,
     source: 'run',
     kind: 'prevents',
-    title: `${repo}'s base is red inside the floor sandbox`,
+    title: `${readable(repo)}'s base is red inside the floor sandbox`,
     // The fix is named once (the remedy), never in both lines.
-    reason: `${plural(floors.length, 'job')} ${floors.length === 1 ? 'fails' : 'fail'} \`${check}\` on a base that fails it too.${fix !== undefined ? ' The fix is ready: approve its delivery, then the held jobs retry.' : ''}`,
+    // Delivery opens the fix's PR (merge stays a person's), and nothing retries the held jobs on its
+    // own: the sentence says all three steps.
+    reason: `${plural(floors.length, 'job')} ${floors.length === 1 ? 'fails' : 'fail'} \`${check}\` on a base that fails it too.${fix !== undefined ? ' The fix is ready: approve its delivery and merge it, then retry the held jobs.' : ''}`,
     remedy:
       fix !== undefined
         ? `Deliver “${readable(fixTitle)}”.`
