@@ -10,6 +10,10 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.16.4] — 2026-10-27
+
+A patch release for the J1/J4/J6 bricks: the floating chat can use an installed MCP server, editor-plugin conformance provisions its own headless browser and the MCP preview probe waits for a cold start (#1156, crew#1155); OS file-manager metadata in the state home no longer refuses launches (#1151), the latest QE attempt on the delivered tree is the one that counts at deliver (#1152), and the operator can skip QE acceptance at the deliver gate with a reason (#1152, `wicked-crew-api-types` 0.139.0 on npm). Runs on wicked-core-ts 0.15.12, which carries the engine side of each (core#1117, core#1133) and core#1127, #1128, #1129, #1130 and #1132. A new test drives an installed MCP server a run built (#1154). Bundles wicked-studio 0.12.3 (unchanged).
+
 ### Fixed
 - **The floating chat can use an installed MCP server (crew#1155, PRODUCT-WORKS J6).** A chat turn is
   a governed answer step: its seat holds the unit's broker token, but its only native MCP tool is the
@@ -54,6 +58,9 @@ mentioned only where a daemon release depends on them.
   also answers it at a verify gate only QE denied, or a failed floor's gate with QE behind it. An engine
   without the action refuses it (409, gate left open). A `qe_inconclusive` denial is, like
   `qe_reviewer_unavailable`, a gate whose approve accepts the work, so a reassign there is refused.
+
+### Changed
+- **Runs on wicked-core-ts 0.15.12.** Engine changes since 0.15.11: OS metadata in the state home is ignored by the engine's intake (core#1117); the floor's copies of a repo honour eol attributes and the base copy has its own git context (core#1127); the core suite passes inside the floor's sandbox (core#1128); a container runtime blip waits inside a bounded window (`WICKED_RUNTIME_WAIT_SECS`, default 180 s) and is never a seat failure, with a new additive `containerRuntimeWait` event (core#1129); a CHANGELOG-only lift conflict is union-merged (core#1130); a daemon restart resumes the interrupted floor and never re-plans (core#1132); an inconclusive QE result is not a FAIL and `skip_qe` is an engine gate action (core#1133).
 
 ## [0.16.3] — 2026-10-26
 
@@ -4493,7 +4500,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.3...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.4...HEAD
+[0.16.4]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.3...v0.16.4
 [0.16.3]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.2...v0.16.3
 [0.16.2]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.1...v0.16.2
 [0.16.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.0...v0.16.1
