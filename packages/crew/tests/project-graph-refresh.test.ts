@@ -236,8 +236,13 @@ function indexCalls(): string[][] {
  * its STUB_INDEX_DELAY_MS sleep, so this resolves while the observed build is still in-flight
  * inside its child — which is what makes the force-aware coalescing tests deterministic about
  * WHICH refresh was running when the second request arrived, instead of racing two injects.
+ *
+ * The bound is a ceiling on that condition, not a pacing: the refresh spawns the estate `--help`
+ * probe and git before the index child starts, and under host load that alone took more than the
+ * old 5 s (crew#1173: "stub never reached 1 index calls" at load ~90). 20 s stays inside the 30 s
+ * test timeout, so a stub that really never starts still fails here, by name.
  */
-async function waitForIndexCalls(n: number, timeoutMs = 5000): Promise<void> {
+async function waitForIndexCalls(n: number, timeoutMs = 20_000): Promise<void> {
   const start = Date.now();
   while (indexCalls().length < n) {
     if (Date.now() - start > timeoutMs) throw new Error(`stub never reached ${n} index calls`);

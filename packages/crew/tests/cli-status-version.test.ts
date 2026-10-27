@@ -11,7 +11,8 @@
 //     daemon consulted (the closed `--port` is ignored).
 //
 // Like the other dist-CLI suites (governance-replay-cli, mcp-server) this needs `dist/` built — CI
-// runs `build:with-studio` before `test`.
+// runs `build:with-studio` before `test`, and the repo-checks floor's `test_targeted`
+// (`scripts/test-related.mjs`) runs `npm run build` before vitest (crew#1173).
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { readFileSync } from 'node:fs';

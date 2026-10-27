@@ -43,6 +43,7 @@ type RunResult = { status: number; output: string; spawnError: string | null };
 interface TestRelated {
   HOST_MARKER: string;
   RETRY_MARKER: string;
+  BUILD_ARGV: string[];
   stripAnsi(output: string): string;
   retryableFailureReason(output: string): string | null;
   failedTestFiles(output: string): string[];
@@ -52,6 +53,7 @@ interface TestRelated {
     files: string[],
     io: {
       run: (argv: string[], cwd: string) => Promise<RunResult>;
+      build?: (argv: string[], cwd: string) => Promise<RunResult>;
       out: (line: string) => void;
       host?: () => Record<string, unknown>;
       now?: () => number;
@@ -103,12 +105,14 @@ const REAL_FAILURE_OUTPUT = [
 const CREW_FILE = 'packages/crew/src/api/routes.ts';
 
 /** A recorder for `runTargeted`'s io seam: every command it ran, and every line it printed. */
-function recorder(results: RunResult[]) {
+function recorder(results: RunResult[], buildResult: RunResult = { status: 0, output: '', spawnError: null }) {
   const calls: { argv: string[]; cwd: string }[] = [];
+  const builds: { argv: string[]; cwd: string; vitestCallsBefore: number }[] = [];
   const lines: string[] = [];
   let i = 0;
   return {
     calls,
+    builds,
     lines,
     io: {
       run: async (argv: string[], cwd: string): Promise<RunResult> => {
@@ -116,6 +120,11 @@ function recorder(results: RunResult[]) {
         const r = results[Math.min(i, results.length - 1)]!;
         i += 1;
         return r;
+      },
+      // A double: without it every case here would run a real `tsc` build (crew#1173).
+      build: async (argv: string[], cwd: string): Promise<RunResult> => {
+        builds.push({ argv, cwd, vitestCallsBefore: calls.length });
+        return buildResult;
       },
       out: (line: string) => lines.push(line),
       host: () => ({ load1: 130.4, load5: 120, cpus: 12, loadPerCpu: 10.87, freeMemMb: 300, swapFreeMb: 12.5, swapUsedMb: 15800 }),
@@ -202,6 +211,39 @@ describe('crew#649 — the targeted check tolerates worker-IPC deaths and record
     expect(pre).toContain('load1=130.40');
     expect(pre).toContain('swapFreeMb=12.50');
     expect(rec.lines[rec.lines.length - 1]!.startsWith(`${mod.HOST_MARKER} label=post`)).toBe(true);
+  });
+
+  // ── crew#1173: the floor's checkout has no dist/, and the dist-CLI suites spawn dist/cli/index.js ──
+  it('builds dist/ ONCE, before vitest, with crew\'s own build script in packages/crew', async () => {
+    const rec = recorder([
+      { status: 1, output: IPC_DEATH_OUTPUT, spawnError: null },
+      { status: 0, output: ' Test Files  1 passed (1)', spawnError: null },
+    ]);
+    const code = await mod.runTargeted([CREW_FILE], rec.io);
+
+    expect(code).toBe(0);
+    expect(mod.BUILD_ARGV).toEqual(['npm', 'run', 'build']);
+    expect(rec.builds, 'one build, not one per attempt').toEqual([
+      { argv: ['npm', 'run', 'build'], cwd: 'packages/crew', vitestCallsBefore: 0 },
+    ]);
+  });
+
+  it('a failed build is disclosed and the tests still run — the exit code is vitest\'s', async () => {
+    const rec = recorder([{ status: 0, output: 'ok', spawnError: null }], { status: 2, output: 'TS2322', spawnError: null });
+    const code = await mod.runTargeted([CREW_FILE], rec.io);
+
+    expect(code, 'the build never decides the check; the tests and the typecheck check do').toBe(0);
+    expect(rec.calls).toHaveLength(1);
+    expect(rec.lines.join('\n')).toContain('test-related: the build FAILED (exit 2)');
+  });
+
+  it('builds nothing when no crew file was touched (the skip path stays free)', async () => {
+    const rec = recorder([{ status: 0, output: 'ok', spawnError: null }]);
+    const code = await mod.runTargeted(['README.md'], rec.io);
+
+    expect(code).toBe(0);
+    expect(rec.builds).toHaveLength(0);
+    expect(rec.calls).toHaveLength(0);
   });
 
   // ── The input production actually hands these functions (review of #656, defect 1) ───────────

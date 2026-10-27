@@ -54,6 +54,19 @@
 // in birpc, no vitest config or env knob in v3.2 — checked in `node_modules/vitest/dist/chunks`), so
 // the deadline cannot be raised from this side. The retry is the tolerance that closes it; the
 // in-suite `testTimeout`/`hookTimeout` are raised on the same grounds in `vitest.config.ts`.
+//
+// ## crew#1173 — build `dist/` before the tests run
+//
+// The dist-CLI suites (`cli-status-version`, `cli-port-resolution`, `mcp-server`,
+// `governance-replay-cli`, `cli-service`) spawn `packages/crew/dist/cli/index.js` as a child
+// process. CI builds before `test`; the floor runs this script on a fresh checkout, installs with
+// `--ignore-scripts` and has no build key in `checks.json`, so `dist/` never existed there and those
+// suites failed on every crew floor, base and head alike. So before vitest runs, this script runs
+// crew's own `npm run build` (`tsc -p tsconfig.json`, about 15 s), every time rather than only when
+// `dist/` is missing: a worktree whose `dist/` was built before the change was edited would
+// otherwise test the old code. `dist/` is gitignored, so the worktree guard does not see it. If the
+// build fails, the failure is printed and the tests still run. The typecheck check reports the
+// compile error, and a dist-CLI suite with no usable `dist/` fails on its own. Nothing is skipped.
 import { spawn, spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { cpus, freemem, loadavg } from 'node:os';
@@ -67,6 +80,8 @@ const CREW = 'packages/crew';
 export const HOST_MARKER = 'WICKED-HOST';
 /** The retry-disclosure marker: what was re-run and why, or why nothing was. */
 export const RETRY_MARKER = 'WICKED-RETRY';
+/** crew's own build (`packages/crew` `build` = `tsc -p tsconfig.json`), run before the tests (crew#1173). */
+export const BUILD_ARGV = ['npm', 'run', 'build'];
 
 /**
  * The failure shapes that earn ONE re-run — all of them DEADLINES, none of them a verdict about the
@@ -278,17 +293,18 @@ function spawnCapturing(argv, cwd, out, err) {
  * Run the targeted suite and return the exit code the check should report.
  *
  * `io.run` is the seam the tests drive: `(argv, cwd) => Promise<{ status, output, spawnError }>`.
+ * `io.build` has the same shape and runs {@link BUILD_ARGV} once, before vitest (crew#1173).
  */
 export async function runTargeted(files, io = {}) {
-  const run =
-    io.run ??
-    ((argv, cwd) =>
-      spawnCapturing(
-        argv,
-        cwd,
-        (s) => process.stdout.write(s),
-        (s) => process.stderr.write(s),
-      ));
+  const spawnStreaming = (argv, cwd) =>
+    spawnCapturing(
+      argv,
+      cwd,
+      (s) => process.stdout.write(s),
+      (s) => process.stderr.write(s),
+    );
+  const run = io.run ?? spawnStreaming;
+  const build = io.build ?? spawnStreaming;
   const out = io.out ?? ((line) => process.stdout.write(`${line}\n`));
   const host = io.host ?? hostSnapshot;
   const now = io.now ?? Date.now;
@@ -303,6 +319,15 @@ export async function runTargeted(files, io = {}) {
   }
 
   out(formatHostLine(host(), 'pre'));
+  // crew#1173: the dist-CLI suites spawn dist/cli/index.js, and the floor's checkout has no dist/.
+  out(`test-related: ${BUILD_ARGV.join(' ')} (cwd ${p.cwd}) — dist/ first, for the dist-CLI suites`);
+  const built = await build(BUILD_ARGV, p.cwd);
+  if (built.spawnError != null || built.status !== 0) {
+    out(
+      `test-related: the build FAILED (${built.spawnError ?? `exit ${built.status}`}) — running the tests anyway; ` +
+        'a dist-CLI suite with no usable dist/ fails on its own, and the typecheck check reports the compile error.',
+    );
+  }
   out(`test-related: ${p.argv.join(' ')} (cwd ${p.cwd})`);
   const startedMs = now();
   const first = await run(p.argv, p.cwd);
