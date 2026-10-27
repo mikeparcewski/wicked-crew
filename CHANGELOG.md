@@ -23,7 +23,10 @@ mentioned only where a daemon release depends on them.
   is a 400, an engine without it (or with a shape that could write) a 409, refused before anything is
   reserved. `GET /health.capabilities.chatWorkflows` names what this engine carries (`[]` on core-ts
   0.15.12), so studio's Understand › Ask can fall back to a plain chat. `analyze` is a system workflow
-  (its entry point is the chat). Tests: `tests/chat-workflow.test.ts` (acceptance rules, the turn step,
+  (its entry point is the chat). An analysis run never takes on work: every approving path (the gate
+  route, standing orders, a gated resume or reassign, the next chat message, a plan edit) refuses a held
+  `plan_approval` change or a write-capable step on it (409 `analysis_read_only`, from the durable launch
+  record); declining stays open. A re-seat may only re-warm its one helper (409 `analysis_one_seat`). Tests: `tests/chat-workflow.test.ts` (acceptance rules, the turn step,
   a cited answer over a fixture repository through the citation check), `tests/chat-routes-scope.test.ts`
   (one seat, no deliver, no reviewer, no `PLAN+`, follow-up, not-indexed, refusals, plain chat unchanged).
 

@@ -1109,6 +1109,53 @@ describe('POST /chats {workflow: "analyze"} — a read-only, cited analysis chat
     expect((await open({ chatId: 'x2', clis: ['claude'], repoRefs: ['alpha'] })).statusCode).toBe(201);
   });
 
+  // xreview on #1160 (codex P2): an answer that proposes work anyway (a `PLAN+` line the engine holds at
+  // a plan_approval gate) is never approved — not by the next message, not by POST /runs/:id/gate.
+  it('a held plan change on an analysis run is never approved: the next message and the gate route refuse it; declining stays open', async () => {
+    withPresets([analyzePreset]);
+    expect((await open({ chatId: 'an-plan', clis: ['claude'], repoRefs: ['alpha'], workflow: 'analyze' })).statusCode).toBe(201);
+    expect((await send('an-plan', 'How does sign-in work?')).statusCode).toBe(202);
+    chatTurns.observe({ type: 'chatReply', chat: 'an-plan', cliKey: 'claude', text: 'PLAN+ {"steps":[{"catalog":"build"}],"touch":["src/a.ts"]}', ok: true });
+    adapter.sessionsDetail = async () => [{ session: { id: 'run-p1', status: 'awaiting_human', unit_ix: 0 }, units: [] }] as unknown as Awaited<ReturnType<CoreAdapter['sessionsDetail']>>;
+    (adapter as unknown as { interactionRequests: () => Promise<unknown[]> }).interactionRequests = async () => [
+      { kind: 'gate', ord: 2, created_at: 1, gate_kind: 'plan_approval', prompt: 'Approve the plan change?' },
+    ];
+    const propose = vi.fn<CoreAdapter['proposePlan']>(async () => ({} as Awaited<ReturnType<CoreAdapter['proposePlan']>>));
+    adapter.proposePlan = propose;
+    const confirm = vi.fn(async () => 'approved');
+    adapter.confirmGate = confirm as unknown as CoreAdapter['confirmGate'];
+    const next = await send('an-plan', 'Go ahead');
+    expect(next.statusCode).toBe(409);
+    expect(next.json().code).toBe('analysis_read_only');
+    expect(propose).not.toHaveBeenCalled();
+    expect(confirm).not.toHaveBeenCalled();
+    const gate = await app.inject({ method: 'POST', url: '/api/v1/runs/run-p1/gate', payload: { approve: true } });
+    expect(gate.statusCode).toBe(409);
+    expect(gate.json().code).toBe('analysis_read_only');
+    const edited = await app.inject({ method: 'POST', url: '/api/v1/runs/run-p1/gate', payload: { approve: true, action: 'edit_plan', plan: { steps: [{ catalog: 'build', id: 'b' }] } } });
+    expect(edited.statusCode).toBe(409);
+    expect(confirm).not.toHaveBeenCalled();
+    const declined = await app.inject({ method: 'POST', url: '/api/v1/runs/run-p1/gate', payload: { approve: false } });
+    expect(declined.json()?.code).not.toBe('analysis_read_only');
+    // A plan edit (the team route) at that gate, or adding a build step, is refused too.
+    const teamEdit = await app.inject({ method: 'POST', url: '/api/v1/runs/run-p1/plan', payload: { plan: { steps: [{ catalog: 'build', id: 'b' }] } } });
+    expect(teamEdit.statusCode).toBe(409);
+    expect(teamEdit.json().code).toBe('analysis_read_only');
+  });
+
+  it('xreview on #1160 (P3): an analysis chat re-seats only its one helper', async () => {
+    withPresets([analyzePreset]);
+    expect((await open({ chatId: 'an-seat', clis: ['claude'], repoRefs: ['alpha'], workflow: 'analyze' })).statusCode).toBe(201);
+    const more = await app.inject({ method: 'POST', url: '/api/v1/chats/an-seat/seats', payload: { clis: ['claude', 'codex'] } });
+    expect(more.statusCode).toBe(409);
+    expect(more.json().code).toBe('analysis_one_seat');
+    const other = await app.inject({ method: 'POST', url: '/api/v1/chats/an-seat/seats', payload: { clis: ['codex'] } });
+    expect(other.statusCode).toBe(409);
+    const same = await app.inject({ method: 'POST', url: '/api/v1/chats/an-seat/seats', payload: { clis: ['claude'] } });
+    expect(same.json()?.code).not.toBe('analysis_one_seat');
+    expect(askPaths.get('an-seat')?.eligible).toEqual(['claude']);
+  });
+
   it('a plain repo chat is unchanged: it may deliver, asks for a reviewer, and keeps the PLAN+ proposal line', async () => {
     expect((await open({ chatId: 'plain', clis: ['claude'], repoRefs: ['alpha'] })).statusCode).toBe(201);
     expect((await send('plain', 'Where is the entry point?')).statusCode).toBe(202);

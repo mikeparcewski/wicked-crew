@@ -98,7 +98,7 @@ import {
   type ChatScopeRequest,
 } from './chat-scope.js';
 import { ASK_TURN_BUDGET_SECS, AskPathIndex, isAskTurn } from './ask-paths.js';
-import { chatTurnStep, resolveChatWorkflow, servedChatWorkflows, type ChatWorkflow } from './chat-workflow.js';
+import { chatTurnStep, resolveChatWorkflow, servedChatWorkflows, writeCapableStep, type ChatWorkflow } from './chat-workflow.js';
 import { reassignRefusedSeats } from '../core/reassign-refusal.js';
 import { allowedRootsFor, isInsideRoot, openWithSystemDefault } from './open-path.js';
 import {
@@ -4288,6 +4288,15 @@ export function registerRoutes(
           runId: launched.runId,
         });
       }
+      // crew#1157 (xreview on #1160): an analysis chat seats ONE helper; a re-seat may re-warm that
+      // seat, never add another.
+      if (launched?.workflow !== undefined && !(clis.length === 1 && launched.eligible.includes(clis[0]!))) {
+        return reply.code(409).send({
+          code: 'analysis_one_seat',
+          error: `chat '${id}' is an analysis (${launched.workflow}) and seats one helper (${launched.eligible.join(', ')}); open a new chat to ask another`,
+          chatId: id,
+        });
+      }
       if (launched?.busy === true) {
         // The first message is launching with the roster as it stands (codex on #808 r3, 4).
         return reply.code(409).send({
@@ -4962,6 +4971,22 @@ export function registerRoutes(
   async function gateForDecision(
     run: SessionView,
     namedOrd: number | undefined,
+    opts: { declining?: boolean } = {},
+  ): Promise<{ refusal: { code: number; body: unknown } } | { gated: WorkUnit | undefined; prompt: string | undefined; gateKind: string | undefined }> {
+    const decided = await gateOfRecord(run, namedOrd);
+    // crew#1157: every APPROVING path (the gate route, standing orders, a gated resume or reassign, a
+    // plan edit at the gate, the next message of a chat) is judged here, so no path approves a held
+    // plan change on an analysis run. Declining stays open.
+    if (!('refusal' in decided) && opts.declining !== true) {
+      const analysis = analysisPlanRefusal(run.session.id, { gateKind: decided.gateKind });
+      if (analysis !== null) return { refusal: analysis };
+    }
+    return decided;
+  }
+
+  async function gateOfRecord(
+    run: SessionView,
+    namedOrd: number | undefined,
   ): Promise<{ refusal: { code: number; body: unknown } } | { gated: WorkUnit | undefined; prompt: string | undefined; gateKind: string | undefined }> {
     const id = run.session.id;
     const unitAt = (ord: number): WorkUnit | undefined => (run.units ?? []).find((u) => u.ord === ord);
@@ -5054,6 +5079,33 @@ export function registerRoutes(
   }
 
   /**
+   * crew#1157 (xreview on #1160): an ANALYSIS chat's run never takes on work. Its seat is told not to
+   * propose any, but a `PLAN+` line in an answer would still hold a creator addition at a
+   * `plan_approval` gate; approving it (or approving with an edited plan) would let the run write.
+   * Refused here, for every decision path, by the durable launch record: declining stays allowed.
+   */
+  function analysisPlanRefusal(
+    runId: string,
+    held: { gateKind?: string | undefined; plan?: { steps: ReadonlyArray<{ catalog: string; id?: string; [k: string]: unknown }> } | undefined },
+  ): { code: number; body: unknown } | null {
+    const workflow = runTimingIndex.chatWorkflowOf(runId);
+    if (workflow === undefined) return null;
+    // A held plan change (the gate the engine opens on a `PLAN+` line), or a plan edit with any step
+    // that could write (the same read-only predicate the chat open applies to the workflow).
+    const writes = held.plan?.steps.some((s) => writeCapableStep(s) !== null) === true;
+    if (held.gateKind !== 'plan_approval' && !writes) return null;
+    return {
+      code: 409,
+      body: {
+        code: 'analysis_read_only',
+        error:
+          `run ${runId} is an analysis (${workflow}): it answers questions and changes nothing, so it cannot take on ` +
+          'the work its answer proposed. Decline it here, and start a job for the change.',
+      },
+    };
+  }
+
+  /**
    * THE gate decision path. `POST /runs/:id/gate` answers with it, and so does a standing order
    * (behaviour 10) — the same awaiting check, the same ord check and 409 `gate_changed` /
    * `gate_unknown`, the same `confirmGate`, the same `gate.decided` audit. There is no side path:
@@ -5080,8 +5132,10 @@ export function registerRoutes(
       // Decision integrity (api-types 0.44.0; crew#1083 rounds 3–5): the gate this decision answers
       // is the RECORD's — read first thing inside the lock, so the gated unit and its delivery
       // checks below are the ones the record confirms ({@link gateForDecision}).
-      const decided = await gateForDecision(run, parsed.data.ord);
+      const decided = await gateForDecision(run, parsed.data.ord, { declining: !parsed.data.approve });
       if ('refusal' in decided) return decided.refusal;
+      const analysis = parsed.data.approve ? analysisPlanRefusal(id, { plan: parsed.data.plan }) : null;
+      if (analysis !== null) return analysis;
       // The gated unit and its receipt as it stands when the person decides (wicked-core#850: every
       // gate answer carries it). An APPROVE that would run the deliver unit passes the delivery
       // checks first.
@@ -7954,7 +8008,12 @@ export function registerRoutes(
 
   // ── Team (DES-TEAMING-002 T8) — reads and commands over the engine; the live stream is the
   // teamEvent relay (team/ws-relay.ts). Crew publishes no team fact (§4.0).
-  registerTeamRoutes(app, adapter, security, { exclusive: decideExclusively, judge: gateForDecision });
+  registerTeamRoutes(app, adapter, security, {
+    exclusive: decideExclusively,
+    judge: gateForDecision,
+    // crew#1157: a plan edit on an analysis run may not add a step that could write.
+    readOnlyRefusal: (runId, plan) => analysisPlanRefusal(runId, { plan }),
+  });
 
   // ── Campaigns (crew#342 + TH-9) — the engine's durable Run-DAG scheduler over REST ──────────
   // Progress streams as campaign* CoreEvents on the existing allowlist-free /ws relay; these

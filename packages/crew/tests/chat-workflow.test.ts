@@ -82,4 +82,21 @@ describe('an analyze answer over a small fixture repository is cited and checkab
     expect(byRaw['alpha/src/session.ts:9']).toBe('unverified');
     expect(result.verified).toBeGreaterThanOrEqual(2);
   });
+
+  // xreview on #1160 (codex P2): a bare symbol or graph path is not something the check can verify,
+  // so the analyze instructions require the file and line beside every one (core#1136). Pinned here:
+  // the bare forms yield nothing to verify, a symbol named before its line ref is checked against
+  // that line, and a symbol on the wrong line is caught.
+  it('a symbol rides with its file:line, which is what gets checked', async () => {
+    root = mkdtempSync(join(tmpdir(), 'analyze-fixture-'));
+    const repo = join(root, 'alpha');
+    mkdirSync(join(repo, 'src'), { recursive: true });
+    writeFileSync(join(repo, 'src', 'auth.ts'), 'import { hash } from "./hash";\n\nexport function signIn(user: string) {\n  return hash(user);\n}\n');
+    const roots = [{ absRoot: repo, name: 'alpha' }];
+    expect((await verifyCitations('It is `alpha::signIn`, via `signIn -> hash`.', roots)).items).toEqual([]);
+    const right = await verifyCitations('`signIn` at `alpha/src/auth.ts:3`', roots);
+    expect(right.items.find((i) => i.raw.includes('auth.ts:3'))?.status).toBe('verified');
+    const wrong = await verifyCitations('`signIn` at `alpha/src/auth.ts:1`', roots);
+    expect(wrong.items.find((i) => i.raw.includes('auth.ts:1'))?.status).not.toBe('verified');
+  });
 });

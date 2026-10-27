@@ -28,13 +28,25 @@ export type ChatWorkflowResolution =
   | { ok: true; workflow: ChatWorkflow }
   | { ok: false; status: 400 | 409; error: string };
 
+/**
+ * Why `step` could write (or run something), or `null` when it is a read-only `understand` agent step.
+ * The ONE predicate: the chat open applies it to the workflow's step, and an analysis run applies it
+ * to every step a plan edit would add (`routes.ts` `analysisPlanRefusal`).
+ */
+export function writeCapableStep(step: { catalog: string; id?: string; [k: string]: unknown }): string | null {
+  const id = String(step.id ?? step.catalog);
+  if (step.catalog !== 'understand') return `its step '${id}' is on catalog entry '${step.catalog}', not 'understand'`;
+  if (step['executor'] !== undefined && step['executor'] !== null) return `its step '${id}' names an executor`;
+  if (step['executes_code'] === true) return `its step '${id}' executes code`;
+  const deliverables = step['required_deliverables'];
+  if (Array.isArray(deliverables) && deliverables.length > 0) return `its step '${id}' declares deliverables`;
+  return null;
+}
+
 /** Why `step` cannot run as a read-only chat turn, or `null` when it can. */
 export function readOnlyStepRefusal(step: PresetStep): string | null {
-  if (step.catalog !== 'understand') return `its step '${step.id}' is on catalog entry '${step.catalog}', not 'understand'`;
-  if (step.executor !== undefined && step.executor !== null) return `its step '${step.id}' names an executor`;
-  if (step.executes_code === true) return `its step '${step.id}' executes code`;
-  const deliverables = step.required_deliverables;
-  if (Array.isArray(deliverables) && deliverables.length > 0) return `its step '${step.id}' declares deliverables`;
+  const writes = writeCapableStep(step);
+  if (writes !== null) return writes;
   if (typeof step.instructions !== 'string' || step.instructions.trim() === '') return `its step '${step.id}' has no instructions`;
   return null;
 }
