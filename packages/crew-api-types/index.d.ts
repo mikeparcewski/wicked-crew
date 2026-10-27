@@ -12211,7 +12211,7 @@ export interface SearchResponse {
   took_ms: number;
 }
 
-// ── Default evals (DES-DEFAULT-EVALS-001; api-types 0.140.0) ─────────────────────────────────────────────
+// ── Default evals (DES-DEFAULT-EVALS-001; api-types 0.143.0) ─────────────────────────────────────────────
 // `/api/v1/testing/default-evals*`: the system's own judgments (needs-you, floor class, QE verdict, attribution,
 // steering firing, recall, prompt routing, normalization) scored against what really happened. One case shape for
 // every suite; real, synthetic, combined and model-labelled figures are always reported apart.

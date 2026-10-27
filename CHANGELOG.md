@@ -11,6 +11,21 @@ mentioned only where a daemon release depends on them.
 ## [Unreleased]
 
 ### Added
+- **Default evals: the system's own judgments, scored against what really happened (DES-DEFAULT-EVALS-001;
+  api-types 0.143.0).** Eight suites, one per inference point that drifts: what needs you (and what is one
+  item), the floor decision class, the QE verdict, who built it, steering firing, memory recall, prompt
+  routing, and normalizing across projects and surfaces. Real cases are captured from the daemon's own run
+  store each run (escalations with the floor they sit on, the operator's choice at each gate, QE ledger
+  verdicts, unit authorship), with the operator's answer, or a deterministic rule over the case's own
+  evidence, as the label; synthetic cases fill only the classes with fewer than 5 real ones. Scoring is
+  deterministic code: agreement, per-class precision and recall, set and pairwise-merge scores and
+  calibration, each with a Wilson 95 % interval, "too few cases" below n = 5, and a trend against the last
+  run only when the interval excludes it. Real, synthetic, combined and model-labelled figures are always
+  reported apart. A cross-project run lists the inputs judged differently by project or surface.
+  `GET /api/v1/testing/default-evals/suites`, `POST /api/v1/testing/default-evals/run {project?, suites?,
+  baseline?}`, `GET /api/v1/testing/default-evals[/:id]`; history under `<eval store>/default/`;
+  `node dist/evals/run-cli.js` runs it from a shell. The shipped baseline (the test rig's 2026-10-27 run store
+  and the needs-you ruling) counts only when a run asks for it.
 - **`POST /runs/:id/resolve` (api-types 0.140.0).** `{action: 'archive', reason}` archives with the reason as the note (a missing or blank reason is a 400); `{action: 'superseded', by}` closes the run as superseded by another existing run. A run parked at a gate is stopped first, then archived; a run that is executing is refused (409). Retry stays `POST /runs {retryOf}`.
 - **Review recent work, on a schedule (DES-RUNS-REVIEW-001, api-types 0.142.0).** A new workflow, `review-recent-work`, is shipped as data (`packages/crew/workflows/review-recent-work.json`) and registered with the engine at boot. Run it by hand as `/workflow-review-recent-work`. It looks at every run since the last review and makes up to five recommendations, ranked by impact, each with its evidence (run ids and n), its expected effect, a confidence (high, medium or low) and what would change our mind. The rest go to a watching list, and every review also says what got better and what is working. It is cheap and read-only: a deterministic Tool step (`analyze`) computes every number, then one agent seat interprets them, with no floor and no judge requirement. The launch is repo-less and delivers nothing. It reads its own `~/.wicked/reviews/<run>/` directory and writes only `out/report.json` there; crew re-derives every stored number from its own snapshot.
   - **The numbers are computed, never guessed:** pass rate, time to PR, time in checks, time waiting on people, overrides, spend, retries and unresolved runs, overall and per repo, agent and workflow. Each is compared with the previous 4 windows. Rates use Wilson 95 % intervals. Durations and spend use medians with p75 and p90, plus a seeded bootstrap interval of the median. A change is notable only when its interval excludes the baseline, and below n = 5 the review says "too few runs to tell".
@@ -84,21 +99,6 @@ A patch release for the J1/J4/J6 bricks: the floating chat can use an installed 
   acceptance reason says how many earlier verdicts it superseded.
 
 ### Added
-- **Default evals: the system's own judgments, scored against what really happened (DES-DEFAULT-EVALS-001;
-  api-types 0.140.0).** Eight suites, one per inference point that drifts: what needs you (and what is one
-  item), the floor decision class, the QE verdict, who built it, steering firing, memory recall, prompt
-  routing, and normalizing across projects and surfaces. Real cases are captured from the daemon's own run
-  store each run (escalations with the floor they sit on, the operator's choice at each gate, QE ledger
-  verdicts, unit authorship), with the operator's answer, or a deterministic rule over the case's own
-  evidence, as the label; synthetic cases fill only the classes with fewer than 5 real ones. Scoring is
-  deterministic code: agreement, per-class precision and recall, set and pairwise-merge scores and
-  calibration, each with a Wilson 95 % interval, "too few cases" below n = 5, and a trend against the last
-  run only when the interval excludes it. Real, synthetic, combined and model-labelled figures are always
-  reported apart. A cross-project run lists the inputs judged differently by project or surface.
-  `GET /api/v1/testing/default-evals/suites`, `POST /api/v1/testing/default-evals/run {project?, suites?,
-  baseline?}`, `GET /api/v1/testing/default-evals[/:id]`; history under `<eval store>/default/`;
-  `node dist/evals/run-cli.js` runs it from a shell. The shipped baseline (the test rig's 2026-10-27 run store
-  and the needs-you ruling) counts only when a run asks for it.
 - **Skip QE acceptance at the deliver gate, with a reason (`action: 'skip_qe'`, api-types 0.139.0).** `POST
   /runs/:id/gate` takes `{approve: true, action: 'skip_qe', amend: <reason>}` (a blank reason is a 400).
   At the gate before the deliver step the delivery goes without a QE PASS, and its check says
