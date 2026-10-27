@@ -1297,9 +1297,20 @@ export async function createServer(
   // every 2 days) and the run review around its workflow. The def is data (`workflows/review-recent-work.json`),
   // registered with the engine here; the review service prepares each launch and folds each finished review.
   const insightsStore = new InsightsStore();
+  // The run review folds runs as `GET /runs` serves them (launch time, delivery, project are the daemon's
+  // joins, not the engine's record): bound once the routes are registered below.
+  let decorateRun: ((view: SessionView) => SessionView) | null = null;
   const reviewService = new ReviewService({
     store: insightsStore,
-    adapter,
+    adapter: {
+      sessionsDetail: async () => {
+        const views = await adapter.sessionsDetail();
+        return decorateRun === null ? views : views.map((v) => (decorateRun as (view: SessionView) => SessionView)(v));
+      },
+      runEvents: (id) => adapter.runEvents(id),
+      seatsForWorkflow: (id) => adapter.seatsForWorkflow(id),
+      listRepos: () => adapter.listRepos(),
+    },
     reviewsDir: defaultReviewsDir(),
     estateTool: callEstateTool,
     log: (m) => app.log.warn(m),
@@ -2387,6 +2398,7 @@ export async function createServer(
   chatDecisionRecorder = registered.chatRecorder;
   considerations = registered.considerations;
   searchService = registered.search;
+  decorateRun = registered.decorateRun;
   if (registered.decisions !== null) {
     const decisionsService = registered.decisions;
     decisionsService.track(decisionsService.redrive());

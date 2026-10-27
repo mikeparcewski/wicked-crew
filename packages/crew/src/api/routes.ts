@@ -1042,6 +1042,9 @@ export interface RegisteredRoutes {
   considerations: ConsiderationService;
   /** `GET /search`'s index: the daemon's frame fan-in feeds it (`ingest`). */
   search: SearchService;
+  /** A run as `GET /runs` serves it: launch time, delivery and project joined from the daemon's own records
+   *  (DES-RUNS-REVIEW-001: the run review folds these, never the engine's bare record). */
+  decorateRun: (view: SessionView) => SessionView;
 }
 
 export interface RuntimeDeps {
@@ -8562,5 +8565,5 @@ export function registerRoutes(
   });
   registerSearchRoutes(app, search);
 
-  return { decideGate, decisions, chatRecorder, considerations, search };
+  return { decideGate, decisions, chatRecorder, considerations, search, decorateRun };
 }

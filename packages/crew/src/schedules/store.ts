@@ -19,8 +19,9 @@ export const SCHEDULE_ID = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/u;
 export const DEFAULT_REVIEW_SCHEDULE_ID = 'review-recent-work';
 export const DEFAULT_REVIEW_EVERY_HOURS = 48;
 
-export type ScheduleOutcome = 'launched' | 'refused' | 'completed' | 'failed' | 'cancelled' | 'skipped';
-const OUTCOMES: ReadonlySet<string> = new Set(['launched', 'refused', 'completed', 'failed', 'cancelled', 'skipped']);
+/** `launching` = the run id is reserved and the engine is being asked (it survives a restart in that window). */
+export type ScheduleOutcome = 'launching' | 'launched' | 'refused' | 'completed' | 'failed' | 'cancelled' | 'skipped';
+const OUTCOMES: ReadonlySet<string> = new Set(['launching', 'launched', 'refused', 'completed', 'failed', 'cancelled', 'skipped']);
 
 export interface WorkflowSchedule {
   id: string;

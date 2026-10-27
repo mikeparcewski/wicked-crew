@@ -100,9 +100,10 @@ export class InsightsStore {
     return this.reviews.find((r) => r.runId === runId);
   }
 
-  /** The latest review that finished with numbers: the next window starts where its window ended. */
-  lastCompleted(): Review | undefined {
-    return this.list().find((r) => r.status === 'completed');
+  /** The latest review that finished with numbers, of one scope (its sorted project ids joined; `''` = all runs):
+   *  that scope's next window starts where this one's ended. No scope given = any review. */
+  lastCompleted(scope?: string): Review | undefined {
+    return this.list().find((r) => r.status === 'completed' && (scope === undefined || [...r.projectIds].sort().join(',') === scope));
   }
 
   running(): Review[] {

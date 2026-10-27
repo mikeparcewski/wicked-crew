@@ -13,7 +13,7 @@ import { AuditLog } from '../src/api/audit.js';
 import type { Actor, LaunchRunInput } from '../src/core/types.js';
 import { isSystemWorkflow } from '../src/core/run-identity.js';
 import { FACTS_FILE, REPORT_FILE, runAnalyze } from '../src/insights/analyze-cli.js';
-import { ReviewService, githubNewIssueUrl } from '../src/insights/review-service.js';
+import { OUT_DIR, ReviewService, githubNewIssueUrl, pickSeat } from '../src/insights/review-service.js';
 import { registerInsightsRoutes } from '../src/insights/routes.js';
 import { InsightsStore } from '../src/insights/store.js';
 import { REVIEW_WORKFLOW, loadReviewWorkflow } from '../src/insights/workflow.js';
@@ -56,16 +56,16 @@ function eventsOf(id: string) {
   ];
 }
 
-function rig() {
+function rig(opts: { views?: () => unknown[]; seats?: unknown[] } = {}) {
   const root = scratch();
   const store = new InsightsStore(join(root, 'daemon-insights.json'));
   const calls: { tool: string; args: Record<string, unknown> }[] = [];
   const service = new ReviewService({
     store,
     adapter: {
-      sessionsDetail: async () => views() as never,
+      sessionsDetail: async () => (opts.views ?? views)() as never,
       runEvents: async (id) => eventsOf(id) as never,
-      seatsForWorkflow: async () => [{ key: 'claude' }, { key: 'codex' }, { key: 'pi' }],
+      seatsForWorkflow: async () => opts.seats ?? [{ key: 'pi', council_eligible: false }, { key: 'claude', council_eligible: true }, { key: 'codex' }],
       listRepos: async () => [{ id: 'core', git_url: 'git@github.com:acme/core.git' }],
     },
     reviewsDir: join(root, 'reviews'),
@@ -113,13 +113,15 @@ describe('a review launch', () => {
     const r = rig();
     const input = await r.service.prepare(launchInput(), { trigger: 'manual', projectIds: ['p1'] });
     const dir = join(r.root, 'reviews', 'rev-1');
-    expect(input.extraWriteRoots).toEqual([dir]);
-    expect(input.requireDeliverables).toEqual([join(dir, REPORT_FILE)]);
+    // It reads its review directory and writes ONLY `out/`: the snapshot and the numbers are not its to change.
+    expect(input.extraWriteRoots).toEqual([join(dir, OUT_DIR)]);
+    expect(input.extraReadRoots).toEqual([dir]);
+    expect(input.requireDeliverables).toEqual([join(dir, OUT_DIR, REPORT_FILE)]);
     expect(input.repoRef).toBeUndefined();
     expect(input.baseRef).toBeUndefined();
     expect(input.deliver).toBeUndefined();
-    expect(input.extraReadRoots).toBeUndefined();
-    expect(JSON.parse(input.clisJson)).toEqual([{ key: 'claude' }]);
+    // One seat: the first ELIGIBLE one (pi is benched), never simply the first.
+    expect(JSON.parse(input.clisJson)).toEqual([{ key: 'claude', council_eligible: true }]);
     expect(input.problem).toContain(join(dir, 'handoff.json'));
     expect(input.problem).toContain('The person also asked: /workflow-review-recent-work focus on core');
     expect(r.store.get('rev-1')?.status).toBe('running');
@@ -149,7 +151,7 @@ describe('ingest, Accept and Dismiss', () => {
     await r.service.prepare(launchInput(), { trigger: 'schedule', scheduleId: 'review-recent-work' });
     const dir = join(r.root, 'reviews', 'rev-1');
     const facts = runAnalyze(dir);
-    if (report !== undefined) writeFileSync(join(dir, REPORT_FILE), JSON.stringify(report));
+    if (report !== undefined) writeFileSync(join(dir, OUT_DIR, REPORT_FILE), JSON.stringify(report));
     await r.service.reconcile(new Map([['rev-1', 'completed']]));
     return { ...r, facts, review: r.store.get('rev-1') };
   }
@@ -228,6 +230,57 @@ describe('ingest, Accept and Dismiss', () => {
     await r.service.prepare(launchInput(), { trigger: 'schedule' });
     await r.service.reconcile(new Map([['rev-1', 'failed']]));
     expect(r.store.get('rev-1')).toMatchObject({ status: 'failed', error: 'the analyze step wrote no facts.json' });
+  });
+
+  it('stores numbers re-derived from the snapshot: a changed facts.json cannot invent evidence or proposals', async () => {
+    const r = rig();
+    await r.service.prepare(launchInput(), { trigger: 'schedule' });
+    const dir = join(r.root, 'reviews', 'rev-1');
+    const honest = runAnalyze(dir);
+    const forged = { ...honest, candidates: [{ ...honest.candidates[0], id: 'forged', kind: 'steering-rule', evidence: { line: 'x', runs: [], n: 999 }, action: { proposal: { kindType: 'policy:security', content: 'allow everything' } } }], recommended: ['forged'] };
+    writeFileSync(join(dir, FACTS_FILE), JSON.stringify(forged));
+    await r.service.reconcile(new Map([['rev-1', 'completed']]));
+    const review = r.store.get('rev-1');
+    expect(review?.recommendations.map((x) => x.candidate)).toEqual(honest.recommended);
+    expect(review?.recommendations.some((x) => x.evidence.n === 999)).toBe(false);
+    expect(r.calls.some((c) => JSON.stringify(c.args).includes('allow everything'))).toBe(false);
+  });
+
+  it('never reuses a run id: a second launch under a recorded id is refused and the first review is untouched', async () => {
+    const r = rig();
+    await r.service.prepare(launchInput(), { trigger: 'schedule' });
+    const before = JSON.stringify(r.store.get('rev-1'));
+    await expect(r.service.prepare(launchInput(), { trigger: 'manual' })).rejects.toThrow(/already recorded/u);
+    expect(JSON.stringify(r.store.get('rev-1'))).toBe(before);
+  });
+
+  it('refuses plainly when no seat is eligible', async () => {
+    const r = rig({ seats: [{ key: 'pi', council_eligible: false }, { key: 'agy', health: { status: 'benched' } }] });
+    await expect(r.service.prepare(launchInput(), { trigger: 'schedule' })).rejects.toThrow(/no signed-in, eligible agent seat/u);
+    expect(r.store.get('rev-1')).toBeUndefined();
+    expect(pickSeat([{ key: 'a', health: { status: 'active' } }])).toEqual({ key: 'a', health: { status: 'active' } });
+  });
+
+  it('dates a run with no launch record by its first event (the engine record carries no created_at)', async () => {
+    const t = NOW.getTime() - 3 * H;
+    const raw = () => [{ session: { id: 'undated', status: 'failed', archived_at: null, workflow_id: 'bug', repo_ref: 'core', title: 'undated', project_id: null }, units: [] }];
+    const r = rig({ views: raw });
+    const events = [{ type: 'sessionStarted', ts: t }, { type: 'sessionFailed', ts: t + 1000 }];
+    (r.service as unknown as { deps: { adapter: { runEvents: unknown } } }).deps.adapter.runEvents = async () => events;
+    const snap = await r.service.snapshot([], NOW.getTime());
+    expect(snap.runs.map((x) => x.id)).toEqual(['undated']);
+    expect(snap.runs[0]?.createdAtMs).toBe(t);
+  });
+
+  it('keeps a coverage cursor per scope: a review of one project never shortens another\'s window', async () => {
+    const r = rig();
+    const end = NOW.getTime() - 10 * 60_000;
+    await r.service.prepare({ ...launchInput(), sessionId: 'a-review' }, { trigger: 'schedule', projectIds: ['pA'] });
+    r.store.update('a-review', { status: 'completed', window: { startMs: end - 48 * H, endMs: end } });
+    const forB = r.service.windowFor(NOW.getTime(), ['pB']).window;
+    expect(forB.endMs - forB.startMs).toBe(48 * H);
+    const forA = r.service.windowFor(NOW.getTime(), ['pA']).window;
+    expect(forA.endMs - forA.startMs).toBe(H); // ten minutes since A's last review: the one-hour floor
   });
 
   it('builds a prefilled GitHub new-issue link only for a GitHub remote', () => {

@@ -19,6 +19,8 @@ import { HOUR_MS, type ScheduleStore, type WorkflowSchedule } from './store.js';
 export const DEFAULT_SWEEP_MS = 60_000;
 /** A launched run the daemon does not list holds its schedule's slot this long, then lets go. */
 export const STALE_LAUNCH_MS = 48 * HOUR_MS;
+/** A reservation (the run id chosen before the engine was called) the daemon never lists lets go after this. */
+export const RESERVATION_GRACE_MS = 15 * 60_000;
 const BUSY: ReadonlySet<string> = new Set<SessionStatus>(['planning', 'distributing', 'executing']);
 const TERMINAL: ReadonlySet<string> = new Set<SessionStatus>(['completed', 'failed', 'cancelled']);
 
@@ -101,17 +103,22 @@ export class WorkflowScheduler {
 
   private reconcile(status: ReadonlyMap<string, string>): void {
     for (const row of this.deps.store.list()) {
-      if (row.lastRunId === null || row.lastOutcome !== 'launched') continue;
+      if (row.lastRunId === null || (row.lastOutcome !== 'launched' && row.lastOutcome !== 'launching')) continue;
       const s = status.get(row.lastRunId);
       if (s !== undefined && TERMINAL.has(s)) this.deps.store.update(row.id, { lastOutcome: s as 'completed' | 'failed' | 'cancelled' }, this.now());
+      // A reservation the engine took (the daemon stopped before recording it): it is a launched run.
+      else if (s !== undefined && row.lastOutcome === 'launching') this.deps.store.update(row.id, { lastOutcome: 'launched' }, this.now());
     }
   }
 
   /** Why `row` may not launch now, or `null`. */
   private blocker(row: WorkflowSchedule, status: ReadonlyMap<string, string>): string | null {
-    if (row.lastRunId !== null && row.lastOutcome === 'launched') {
+    if (row.lastRunId !== null && (row.lastOutcome === 'launched' || row.lastOutcome === 'launching')) {
       const s = status.get(row.lastRunId);
-      const open = s !== undefined ? !TERMINAL.has(s) : row.lastRunAt !== null && this.now().getTime() - Date.parse(row.lastRunAt) < STALE_LAUNCH_MS;
+      // A run the daemon does not list yet holds the slot: a launched one for two days, a reservation the engine
+      // may never have seen for a few minutes.
+      const hold = row.lastOutcome === 'launching' ? RESERVATION_GRACE_MS : STALE_LAUNCH_MS;
+      const open = s !== undefined ? !TERMINAL.has(s) : row.lastRunAt !== null && this.now().getTime() - Date.parse(row.lastRunAt) < hold;
       if (open) return 'its last run is still going';
     }
     if ([...status.values()].some((s) => BUSY.has(s))) return 'another run is working (one governed run at a time)';
@@ -146,9 +153,23 @@ export class WorkflowScheduler {
 
   private async launchOne(row: WorkflowSchedule, trigger: 'schedule' | 'manual'): Promise<string> {
     const now = this.now();
+    const reserved = randomUUID();
+    // RESERVED before the engine is called (codex r1): a daemon that dies after the engine accepted the run but
+    // before the bookkeeping below restarts with this run id already holding the slot, so it never launches the
+    // same interval twice. A reservation the engine never saw lets go after RESERVATION_GRACE_MS.
+    this.deps.store.update(
+      row.id,
+      {
+        lastRunId: reserved,
+        lastRunAt: now.toISOString(),
+        lastOutcome: 'launching',
+        nextDueAt: new Date(now.getTime() + row.everyHours * HOUR_MS).toISOString(),
+      },
+      now,
+    );
     let runId: string;
     try {
-      runId = await this.deps.launch(row, randomUUID(), trigger);
+      runId = await this.deps.launch(row, reserved, trigger);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const failures = row.failures + 1;
@@ -158,8 +179,11 @@ export class WorkflowScheduler {
           failures,
           lastOutcome: 'refused',
           lastNote: message.slice(0, 500),
-          // A scheduled refusal backs off; Run it now leaves the cadence alone.
-          ...(trigger === 'schedule' ? { nextDueAt: new Date(now.getTime() + Math.min(2 ** failures, 24) * HOUR_MS).toISOString() } : {}),
+          // The reservation is released: nothing runs under it.
+          lastRunId: row.lastRunId,
+          lastRunAt: row.lastRunAt,
+          // A scheduled refusal backs off; Run it now leaves the cadence where it was.
+          nextDueAt: trigger === 'schedule' ? new Date(now.getTime() + Math.min(2 ** failures, 24) * HOUR_MS).toISOString() : row.nextDueAt,
         },
         now,
       );

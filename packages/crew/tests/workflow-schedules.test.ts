@@ -139,6 +139,40 @@ describe('the scheduler', () => {
     expect(r.launches).toHaveLength(2);
   });
 
+  it('a daemon that dies between the engine accepting a run and recording it never launches that interval again', async () => {
+    const path = join(scratch(), 'daemon-schedules.json');
+    let restartedLaunches = -1;
+    const r = rig({ path });
+    r.store.put('nightly', { workflow: 'review-recent-work', everyHours: 24 }, T0);
+    // The "engine" accepts the run, and before crew records it the daemon restarts: a new store and scheduler
+    // over the same file see the reserved run id, and the run (parked on a person) holds the slot.
+    (r.scheduler as unknown as { deps: { launch: ScheduledLaunch } }).deps.launch = async (_row, runId) => {
+      const restarted = rig({ path });
+      restarted.runs[runId] = 'awaiting_human';
+      // Even once the next interval is due, the reserved run (parked on a person) holds the slot.
+      restarted.at(49);
+      await restarted.scheduler.sweep();
+      restartedLaunches = restarted.launches.length;
+      expect(restarted.store.get('nightly')?.lastOutcome).toBe('launched');
+      return runId;
+    };
+    r.at(24);
+    await r.scheduler.sweep();
+    expect(restartedLaunches).toBe(0);
+  });
+
+  it('a reservation the engine never saw lets go after a short grace', async () => {
+    const r = rig();
+    r.store.put('nightly', { workflow: 'review-recent-work', everyHours: 24 }, T0);
+    r.store.update('nightly', { lastRunId: 'ghost', lastRunAt: T0.toISOString(), lastOutcome: 'launching', nextDueAt: T0.toISOString() }, T0);
+    r.at(0.1);
+    await r.scheduler.sweep();
+    expect(r.launches).toHaveLength(0);
+    r.at(0.5);
+    await r.scheduler.sweep();
+    expect(r.launches).toHaveLength(1);
+  });
+
   it('waits while another run is working, then launches', async () => {
     const r = rig();
     r.store.put('nightly', { workflow: 'review-recent-work', everyHours: 24 }, T0);

@@ -11845,7 +11845,8 @@ export interface LearnTopicsResponse {
 // `/api/v1/insights`: every review of recent work, its numbers and what happened to each recommendation.
 
 /** A schedule's last outcome: `launched` while its run is open; `refused` = the launch failed. */
-export type ScheduleOutcome = 'launched' | 'refused' | 'completed' | 'failed' | 'cancelled' | 'skipped';
+/** `launching` = the run id is reserved and the engine is being asked; it holds the slot across a restart. */
+export type ScheduleOutcome = 'launching' | 'launched' | 'refused' | 'completed' | 'failed' | 'cancelled' | 'skipped';
 
 /** One workflow schedule (`GET /schedules`). */
 export interface WorkflowSchedule {

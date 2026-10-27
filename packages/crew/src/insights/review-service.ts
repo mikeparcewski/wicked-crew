@@ -18,13 +18,15 @@ import { join } from 'node:path';
 import type { SessionStatus, SessionView } from 'wicked-crew-api-types';
 import type { LaunchRunInput } from '../core/types.js';
 import type { Confidence, Facts, Snapshot, Window } from './analyze.js';
-import { MAX_RECOMMENDATIONS } from './analyze.js';
+import { MAX_RECOMMENDATIONS, analyze } from './analyze.js';
 import { FACTS_FILE, REPORT_FILE, SNAPSHOT_FILE } from './analyze-cli.js';
 import { runFactOf, type LooseEvent, type RunFact } from './run-facts.js';
 import type { InsightsStore, Recommendation, Review } from './store.js';
 import { REVIEW_WORKFLOW } from './workflow.js';
 
 export const HANDOFF_FILE = 'handoff.json';
+/** The seat's ONLY write root inside its review directory: the snapshot and the numbers beside it stay out of reach. */
+export const OUT_DIR = 'out';
 const HOUR = 3_600_000;
 /** The first review looks back this far; later ones start where the last completed review's window ended. */
 export const FIRST_WINDOW_MS = 48 * HOUR;
@@ -90,9 +92,10 @@ export class ReviewService {
     return join(this.deps.reviewsDir, runId);
   }
 
-  /** The review window: from the last completed review's end (else 48 h back), capped at 14 days. */
-  windowFor(nowMs: number): { window: Window; baselineWindows: Window[] } {
-    const last = this.deps.store.lastCompleted();
+  /** The review window: from the end of the last completed review OF THE SAME SCOPE (else 48 h back), capped at
+   *  14 days. A review of other projects never moves this scope's cursor. */
+  windowFor(nowMs: number, projectIds: readonly string[] = []): { window: Window; baselineWindows: Window[] } {
+    const last = this.deps.store.lastCompleted(scopeKey(projectIds));
     const start = Math.max(last?.window.endMs ?? nowMs - FIRST_WINDOW_MS, nowMs - MAX_WINDOW_MS);
     // A review run seconds after the last one still compares a meaningful span.
     const len = Math.max(nowMs - start, HOUR);
@@ -104,7 +107,7 @@ export class ReviewService {
 
   /** Fold the run store into a snapshot (the analyze script's only input). */
   async snapshot(projectIds: readonly string[], nowMs: number): Promise<Snapshot> {
-    const { window, baselineWindows } = this.windowFor(nowMs);
+    const { window, baselineWindows } = this.windowFor(nowMs, projectIds);
     const earliest = Math.min(...baselineWindows.map((w) => w.startMs), window.startMs);
     const views = await this.deps.adapter.sessionsDetail();
     const runs: RunFact[] = [];
@@ -112,14 +115,18 @@ export class ReviewService {
       const s = view.session as unknown as Record<string, unknown>;
       if (s['workflow_id'] === REVIEW_WORKFLOW) continue;
       if (projectIds.length > 0 && !projectIds.includes(String(s['project_id'] ?? ''))) continue;
-      const created = typeof s['created_at'] === 'number' ? (s['created_at'] < 1e12 ? s['created_at'] * 1000 : s['created_at']) : 0;
-      if (created < earliest || created >= window.endMs) continue;
+      const dated = typeof s['created_at'] === 'number' ? (s['created_at'] < 1e12 ? s['created_at'] * 1000 : s['created_at']) : null;
+      // A run dated by the daemon's launch record outside every window is skipped without reading its events.
+      if (dated !== null && (dated < earliest || dated >= window.endMs)) continue;
       let events: LooseEvent[] = [];
       try {
         events = (await this.deps.adapter.runEvents(String(s['id']))) ?? [];
       } catch (err) {
         this.deps.log(`[review] events of ${String(s['id'])} unreadable, counted from its record only: ${err instanceof Error ? err.message : String(err)}`);
       }
+      // An undated run (no launch record: onboarding, campaign nodes, older runs) is dated by its first event.
+      const created = dated ?? Math.min(...events.map((e) => (typeof e.ts === 'number' ? e.ts : Number.POSITIVE_INFINITY)));
+      if (!Number.isFinite(created) || created < earliest || created >= window.endMs) continue;
       runs.push(runFactOf(view, events, nowMs));
     }
     return { version: 1, generatedAtMs: nowMs, window, baselineWindows, projectIds: [...projectIds], runs };
@@ -133,16 +140,27 @@ export class ReviewService {
     const now = this.now();
     const runId = input.sessionId;
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(runId) || runId.includes('..')) throw new Error(`a review run id must be one plain path segment: ${runId}`);
+    // One review per run id: a repeated id never touches the review already recorded under it.
+    if (this.deps.store.get(runId) !== undefined) throw new Error(`a review is already recorded for run ${runId}`);
+    const seat = pickSeat(await this.deps.adapter.seatsForWorkflow(REVIEW_WORKFLOW));
+    if (seat === null) throw new Error('no signed-in, eligible agent seat to interpret the review: sign one in (Agents) and run it again');
     const projectIds = [...(opts.projectIds ?? [])];
     const snap = await this.snapshot(projectIds, now.getTime());
     const dir = this.runDir(runId);
-    mkdirSync(dir, { recursive: true });
+    mkdirSync(this.deps.reviewsDir, { recursive: true });
+    try {
+      mkdirSync(dir); // exclusive: the filesystem decides who owns this id
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') throw new Error(`a review directory already exists for run ${runId}`);
+      throw err;
+    }
+    const out = join(dir, OUT_DIR);
+    mkdirSync(out);
     writeFileSync(join(dir, SNAPSHOT_FILE), JSON.stringify(snap), 'utf8');
     const factsPath = join(dir, FACTS_FILE);
-    const reportPath = join(dir, REPORT_FILE);
+    const reportPath = join(out, REPORT_FILE);
     const handoffPath = join(dir, HANDOFF_FILE);
     writeFileSync(handoffPath, JSON.stringify({ facts_path: factsPath, report_path: reportPath, max_recommendations: MAX_RECOMMENDATIONS }, null, 2), 'utf8');
-    const roster = await this.deps.adapter.seatsForWorkflow(REVIEW_WORKFLOW);
     const asked = input.problem.trim();
     input.problem =
       `Review recent work: interpret the run review computed for ${snap.runs.length} runs ` +
@@ -151,16 +169,17 @@ export class ReviewService {
       `report_path (the one file you write).` +
       (asked !== '' && asked !== REVIEW_WORKFLOW ? `\n\nThe person also asked: ${asked.slice(0, 2000)}` : '');
     input.workflow = REVIEW_WORKFLOW;
-    input.clisJson = JSON.stringify(roster.slice(0, 1));
-    input.extraWriteRoots = [dir];
+    input.clisJson = JSON.stringify([seat]);
+    // The seat reads the review directory and writes ONLY `out/`: the snapshot and facts.json are not its to change.
+    input.extraWriteRoots = [out];
     input.requireDeliverables = [reportPath];
     delete input.repoRef;
     delete input.deliver;
     delete input.baseRef;
     delete input.revisesPr;
     delete input.plan;
-    delete input.extraReadRoots;
     delete input.projectGraph;
+    input.extraReadRoots = [dir];
     this.deps.store.add({
       runId,
       trigger: opts.trigger,
@@ -219,16 +238,21 @@ export class ReviewService {
 
   async ingest(review: Review, status: 'completed' | 'failed' | 'cancelled'): Promise<Review | undefined> {
     const dir = this.runDir(review.runId);
-    const facts = this.readJson(join(dir, FACTS_FILE)) as Facts | null;
     const endedAt = this.now().toISOString();
-    if (facts === null || facts.version !== 1 || !Array.isArray(facts.candidates)) {
+    // The Tool step must have run (its facts.json is the seat's input), but the numbers crew STORES are
+    // re-derived here from the snapshot crew wrote, by the same deterministic code: nothing the run wrote can
+    // change a metric, a candidate, a ranking or a proposal.
+    const ran = existsSync(join(dir, FACTS_FILE));
+    const snapshot = this.readJson(join(dir, SNAPSHOT_FILE)) as Snapshot | null;
+    const facts: Facts | null = ran && snapshot !== null && snapshot.version === 1 && Array.isArray(snapshot.runs) ? analyze(snapshot) : null;
+    if (facts === null) {
       return this.deps.store.update(review.runId, {
         status: status === 'completed' ? 'failed' : status,
         endedAt,
         error: status === 'cancelled' ? 'the review was cancelled before its numbers were computed' : 'the analyze step wrote no facts.json',
       });
     }
-    const report = this.readJson(join(dir, REPORT_FILE)) as Record<string, unknown> | null;
+    const report = this.readJson(join(dir, OUT_DIR, REPORT_FILE)) as Record<string, unknown> | null;
     const merged = mergeReport(review.runId, facts, report);
     for (const rec of merged.recommendations) {
       const p = rec.action.proposal;
@@ -303,6 +327,24 @@ export class ReviewService {
     }
     return { kind: 'none' };
   }
+}
+
+/** The scope a review covers, as one comparable key (its projects, sorted; `''` = every run). */
+export function scopeKey(projectIds: readonly string[]): string {
+  return [...projectIds].sort().join(',');
+}
+
+/** The one seat a review runs on: the first the roster says is eligible and not failing. `null` when none is. */
+export function pickSeat(roster: readonly unknown[]): unknown | null {
+  for (const seat of roster) {
+    if (typeof seat !== 'object' || seat === null) continue;
+    const s = seat as Record<string, unknown>;
+    if (s['council_eligible'] === false) continue;
+    const health = s['health'] as { status?: unknown } | null | undefined;
+    if (health !== null && health !== undefined && typeof health.status === 'string' && health.status !== 'active') continue;
+    return seat;
+  }
+  return null;
 }
 
 /** `https://github.com/<owner>/<repo>/issues/new?title=&body=` for a GitHub remote, else `null`. */
