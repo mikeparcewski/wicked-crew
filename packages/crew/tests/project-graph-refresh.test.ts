@@ -240,7 +240,7 @@ function indexCalls(): string[][] {
  * The bound is a ceiling on that condition, not a pacing: the refresh spawns the estate `--help`
  * probe and git before the index child starts, and under host load that alone took more than the
  * old 5 s (crew#1173: "stub never reached 1 index calls" at load ~90). 20 s stays inside the 30 s
- * test timeout, so a stub that really never starts still fails here, by name.
+ * test timeout (60 s for the cases that wait twice), so a stub that never starts fails here, by name.
  */
 async function waitForIndexCalls(n: number, timeoutMs = 20_000): Promise<void> {
   const start = Date.now();
@@ -685,7 +685,9 @@ describe.skipIf(!POSIX)('two refreshes at once', () => {
  * Ordering is pinned by `waitForIndexCalls`, not by Promise.all luck: the first build is proven
  * in-flight (its child is sleeping inside STUB_INDEX_DELAY_MS) before the second request fires.
  */
-describe.skipIf(!POSIX)('two refreshes at once, one of them forced', () => {
+// Up to two `waitForIndexCalls` ceilings (20 s each) in one case: the budget covers both, so a stub
+// that never starts fails by name rather than at the test timeout.
+describe.skipIf(!POSIX)('two refreshes at once, one of them forced', { timeout: 60_000 }, () => {
   it('a FORCED request during a plain build queues behind it and runs its own forced build', async () => {
     process.env['STUB_INDEX_DELAY_MS'] = '250';
     for (const n of ['alpha', 'beta']) register(n, makeRepo(n));

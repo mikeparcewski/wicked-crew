@@ -23,7 +23,9 @@ mentioned only where a daemon release depends on them.
   The floor runs `.wicked/checks.json` `test_targeted` (`scripts/test-related.mjs`) on a fresh
   checkout with no build step, so the 22 tests that spawn `dist/cli/index.js` (`cli-status-version`,
   `cli-port-resolution`, `cli-service`, `mcp-server`) failed on every crew floor, base and head.
-  The script now runs crew's `npm run build` (about 15 s) before vitest; CI is unchanged. Two tests
+  The script now empties `dist/` (keeping the `dist/studio` bundle) and runs crew's `npm run build`
+  (about 15 s) before vitest, and a failed build fails the check even when the tests pass; CI is
+  unchanged. Two tests
   that failed under host load now wait on their condition: `recon-fanout-campaign` accepts the
   documented slow-launch `202 launching` ack beside `201`, and `project-graph-refresh` waits up to
   20 s (was 5 s) for its stub estate to start.
