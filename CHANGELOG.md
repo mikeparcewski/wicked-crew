@@ -10,6 +10,10 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.16.5] — 2026-10-27
+
+A patch release for the needs-you, analysis, review and evals work: one "needs you" list ranked by impact, with unresolved work and its cost keeping the system from going green and `POST /runs/:id/resolve` (#1159), in plain words (#1163); analysis chats on the engine's read-only `analyze` workflow (#1160, crew#1157); the `review-recent-work` workflow with a durable workflow scheduler and the insights API (#1161); and default evals that score the system's own judgments (#1162), run on a schedule as the `run-evals` workflow (#1167). `wicked-crew-api-types` 0.143.0 is on npm. Runs on wicked-core-ts 0.15.13 (core#1135, core#1136). Bundles wicked-studio 0.12.3 (unchanged).
+
 ### Added
 - **The default evals run on a schedule, as a workflow (DES-DEFAULT-EVALS-001 §7).** `workflows/run-evals.json`
   is data. Every launch (the schedule, `/workflow-run-evals`, `POST /runs`) is prepared by the daemon, which runs
@@ -60,9 +64,9 @@ mentioned only where a daemon release depends on them.
   (one seat, no deliver, no reviewer, no `PLAN+`, follow-up, not-indexed, refusals, plain chat unchanged).
 
 ### Changed
+- **Runs on wicked-core-ts 0.15.13.** Engine changes since 0.15.12: a review is no longer refused as a self-review of work its seat never built, and a print-only `sed` after `cd` into a read root is a read (core#1135); the new built-in read-only `analyze` workflow that analysis chats run (core#1136).
 - **One "needs you" number: `GET /system.attention[]` is the list of what holds work up, ranked by impact (api-types 0.140.0, `capabilities.attentionRanked`).** Each item is one root cause, with the runs it holds (`blockedRunIds`, `blocks` = its length), `kind` (`prevents`: work can't move until a person acts; `slows`: the system slows it, e.g. host load) and `waitedSince` (the oldest gate's arrival, never a launch time). Runs are merged only on evidence: the same repo failing the same check on a base that fails it too (the run whose own problem is that red base joins it, and its gate is the action), a down component a held run's denial names (or that holds the live runs), or the same seats leaving runs without a distinct judge. Seat problems fold into the run they block, so a bench with an alternative is no longer an item (it stays on the CLIs tab). Host load counts the held runs whose next step it slows. Sorted by runs held, then prevents before slows, then component before a run's own cause, then the longest wait, then the units left. Not counted: superseded runs, answered asks, pending proposals (now `toReview`), degraded components that hold no work, governance cards. On the rig's 2026-10-27 data this gives 5 items (test fixture `tests/fixtures/needs-2026-10-27.json`).
 - **Unresolved work keeps the system from going green.** `GET /system.unresolved[]` lists the runs nobody has resolved: failed runs not retried and not archived (a failure older than 7 days moves here instead of counting as stuck; it never disappears), superseded runs still open or unarchived, and asks parked at their turn gate for over a day. Each item carries its cost (tokens and `costUsd` summed from the run's `cliUsage` frames where known, and wall time) and its resolutions; `unresolvedSpend` sums them. `level` is `green` only when `attention[]` and `unresolved[]` are both empty.
-
 - **The needs-you list reads in plain words (api-types 0.142.0).** No "run(s)"/"day(s)": counts are words ("2 jobs", "10 days"). A held run says why in a person's words ("No other helper can take over", "Its checks failed", "A tool call was refused by the job's rules", "Ready to deliver"), not the gate's raw text; a dead seat reads "A job lost its helper: <title>" with the sign-ins that restore failover in its remedy. A red base names its fix once ("The fix is ready: approve its delivery and merge it, then retry the held jobs."; the remedy says: Deliver “<the fix>”). Enforcement that never ran (`governance_unproven`) reads "Its tool calls ran without the required checks", never as a refusal; a crashed CLI is not "Its checks failed". Job titles show identifiers with spaces. `unresolved[]` items carry `repo` and `workflow` so a skin can fold look-alike runs.
 
 ### Fixed
@@ -4558,7 +4562,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.4...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.5...HEAD
+[0.16.5]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.4...v0.16.5
 [0.16.4]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.3...v0.16.4
 [0.16.3]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.2...v0.16.3
 [0.16.2]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.1...v0.16.2
