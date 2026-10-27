@@ -311,6 +311,13 @@ export interface HealthCapabilities {
    * ABSENT on an older daemon — hide upload.
    */
   chatAttachments?: boolean;
+  /**
+   * (api-types 0.141.0, crew#1157) The read-only workflows `ChatOpenBody.workflow` runs on this
+   * daemon's engine — `['analyze']` on a core-ts that carries the built-in `analyze` preset, `[]` on
+   * one that does not. ABSENT on an older daemon (its strict schema refuses `workflow`): open a plain
+   * chat instead.
+   */
+  chatWorkflows?: string[];
 }
 
 /** One `GET /health.warnings[]` entry (additive; wicked-core#411 / wicked-crew#497). */
@@ -6703,6 +6710,14 @@ export interface ChatOpenBody {
   primary?: string;
   /** (api-types 0.137.0, DES-SYSTEM-CHAT) The page the chat was started on, for the history list. */
   startedOn?: ChatStartedOn;
+  /**
+   * (api-types 0.141.0, crew#1157) Run every turn of this chat as a READ-ONLY workflow: `analyze`
+   * answers questions about the repositories in scope from the code graph and the files, each claim
+   * cited, changing nothing. The chat seats ONE helper (`primary`, else the first eligible), asks for
+   * no reviewer, never delivers, and its seats propose no work. A name chats do not run is a 400; an
+   * engine without it is a 409. Send it only when `GET /health.capabilities.chatWorkflows` names it.
+   */
+  workflow?: string;
 }
 
 /** The scope a `POST /chats` caller may name (api-types 0.39.0, studio#323 R4). */
@@ -6850,6 +6865,8 @@ export interface ChatOpenResponse {
    * field; a daemon between #641 and #650 emitted it only when `refused` was non-empty.
    */
   singleSeat?: ChatSingleSeatDegradation;
+  /** (api-types 0.141.0, crew#1157) The workflow every turn runs, when the open named one. */
+  workflow?: string;
 }
 
 /** `POST /chats/:id/messages` → 202. */

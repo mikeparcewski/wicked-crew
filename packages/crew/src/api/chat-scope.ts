@@ -700,7 +700,19 @@ export const CHAT_DECISIONS_DIRECTIVE = `${CHAT_DECISIONS_LINES.join('\n')}\n\n`
  * run in, so the seat answers with the plan and points at Continue in Build (the launch-form
  * prefill) instead. Either way it never attempts the change itself.
  */
-export function chatWorkRequestLines(scope: Pick<ChatScope, 'kind' | 'repos'>): string[] {
+export function chatWorkRequestLines(scope: Pick<ChatScope, 'kind' | 'repos'>, opts: ChatStatementOptions = {}): string[] {
+  // crew#1157: an ANALYSIS chat (`POST /chats {workflow}`) answers questions and never proposes
+  // work: no `PLAN+` line, so nothing in it can open a creator step or a Continue in Build.
+  if (opts.analysis === true) {
+    return [
+      '## Requests for work',
+      '',
+      'This is an analysis: it answers questions about the code and changes nothing. Every write',
+      'is refused. When the message asks for work (build, fix, add, change, write code or docs), do',
+      'NOT attempt it and do NOT propose a plan line: say what would change and where, cited, and',
+      'that a job (not this analysis) makes changes.',
+    ];
+  }
   const head = [
     '## Requests for work',
     '',
@@ -726,7 +738,18 @@ export function chatWorkRequestLines(scope: Pick<ChatScope, 'kind' | 'repos'>): 
   ];
 }
 
-export function chatScopeStatement(chatId: string, scope: ChatScope, rules?: ReadonlyArray<ConformanceRule>): string {
+/** How a chat's statement differs by what the chat runs (crew#1157). */
+export interface ChatStatementOptions {
+  /** The chat runs a read-only analysis workflow (`analyze`): no `PLAN+` work proposals. */
+  analysis?: boolean;
+}
+
+export function chatScopeStatement(
+  chatId: string,
+  scope: ChatScope,
+  rules?: ReadonlyArray<ConformanceRule>,
+  opts: ChatStatementOptions = {},
+): string {
   const lines: string[] = [
     '# Chat scope',
     '',
@@ -856,7 +879,7 @@ export function chatScopeStatement(chatId: string, scope: ChatScope, rules?: Rea
   );
   // crew#855 (DES-ASK-TEAM-CHAT-001 §4.7): a message that asks for WORK is never attempted here —
   // every write outside the scratch root is refused, so an attempt only ends the turn at a denial.
-  lines.push(...chatWorkRequestLines(scope), '');
+  lines.push(...chatWorkRequestLines(scope, opts), '');
   // DC-S7 (§4.7): the project's in-force rules, as `[rule:<id>]` lines the seat can cite.
   if (rules !== undefined && rules.length > 0) lines.push(...rulesStatementLines(rules), '');
   // DC-S4b: every seat, every scope kind — the recorder is chosen from the turn's audience.
@@ -878,7 +901,12 @@ export function chatScopeStatement(chatId: string, scope: ChatScope, rules?: Rea
  * `mode` applies only on creation), and each instruction file is unlinked before it is written
  * exclusively (`wx`) so a planted link cannot redirect the write.
  */
-export function prepareChatScratch(chatId: string, scope: ChatScope, rules?: ReadonlyArray<ConformanceRule>): void {
+export function prepareChatScratch(
+  chatId: string,
+  scope: ChatScope,
+  rules?: ReadonlyArray<ConformanceRule>,
+  opts: ChatStatementOptions = {},
+): void {
   const base = resolve(scope.cwd, '..');
   // The WHOLE chain below the OS temp dir is created and validated one segment at a time (Copilot,
   // #518): a recursive mkdir would follow a planted symlink at `<tmp>/wicked-crew-chats` (the
@@ -916,7 +944,7 @@ export function prepareChatScratch(chatId: string, scope: ChatScope, rules?: Rea
   try {
     assertRealOwnedDirectory(scope.cwd, 'chat scratch root');
     chmodSync(scope.cwd, 0o700);
-    const statement = chatScopeStatement(chatId, scope, rules);
+    const statement = chatScopeStatement(chatId, scope, rules, opts);
     for (const name of ['AGENTS.md', 'CLAUDE.md']) {
       const file = join(scope.cwd, name);
       rmSync(file, { force: true }); // removes a planted LINK itself, never its target
