@@ -563,7 +563,7 @@ function baseRedItem(key: string, ms: Member[]): ReturnType<Group['build']> {
     reason: `${plural(floors.length, 'job')} ${floors.length === 1 ? 'fails' : 'fail'} \`${check}\` on a base that fails it too.${fix !== undefined ? ' The fix is ready: approve its delivery, then the held jobs retry.' : ''}`,
     remedy:
       fix !== undefined
-        ? `The fix: “${readable(fixTitle)}”.`
+        ? `Deliver “${readable(fixTitle)}”.`
         : 'Make the base green (or use the floor override), then retry the held jobs.',
     target: gateTarget((fix ?? ms[0])!.run, (fix ?? ms[0])!.runId),
     action: { kind: 'open_gate', label: fix !== undefined ? 'Open the fix’s gate' : 'Open the gate' },

@@ -159,7 +159,7 @@ describe('the needs-you rule over the rig dump of 2026-10-27 (DEFINITION §5)', 
     expect(core.unitsLeft).toBe(1 + 2 + 6);
     // The fix is named once: the reason says what to do, the remedy names it.
     expect(core.reason).toBe('2 jobs fail `test` on a base that fails it too. The fix is ready: approve its delivery, then the held jobs retry.');
-    expect(core.remedy).toBe("The fix: “Make wicked-core's own test suite pass”.");
+    expect(core.remedy).toBe("Deliver “Make wicked-core's own test suite pass”.");
   });
 
   it("wicked-crew's red base is its own item: the same label in another repo is no evidence of one cause", () => {
