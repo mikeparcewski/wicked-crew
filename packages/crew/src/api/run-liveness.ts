@@ -10,14 +10,12 @@
 // working directory sits inside a directory the engine named for the run: its worktree
 // (`<repo>/wicked-worktrees/<run id>`), or a checks floor's guarded checkout of the run's tree,
 // which the engine keeps OUTSIDE the worktree (wicked-core `repo_checks::checkout_guarded_tree`:
-// `$TMPDIR/wicked-core-floor/<run id>-<ord>-a<attempt>-<pid>-<nonce>`, and
-// `<run id>-<ord>-deliver-<n>-…` for the deliver re-verify) or its check-cache leaf
-// (`<run id>-<hash>-r<hash>`). So a path segment that IS the run id, or starts with `<run id>-`,
-// attributes a process to a run. Before the prefix form was read, a deliver step's re-verify (an
-// hour of vitest or cargo in a guarded checkout) read as silence: the watchdog raised
-// `workerStalled` at 15 min and a needs-you at 30 on rig runs 85ddad0d and d3a380b0.
-// A run is BUSY when its processes burned CPU since the previous sample: a test runner or a build
-// burns a core, while a wedged turn waiting on nothing sits at ~0 % (run 753b4d66's idle pi).
+// `$TMPDIR/wicked-core-floor/<label>-<pid>-<nonce>`, the label `<run id>-<ord>-a<attempt>` for a
+// unit's floor and `<run id>-<ord>-deliver` for the deliver re-verify). Both are read EXACTLY: the
+// worktree segment equals the run id, and a floor checkout's owner is parsed off the fixed suffix,
+// so one run's processes never count for another whose id is a prefix of it. Before the floor
+// checkout was read, a deliver step's re-verify (an hour of vitest or cargo) read as silence: the
+// watchdog raised `workerStalled` at 15 min and a needs-you at 30 on rig runs 85ddad0d and d3a380b0.
 //
 // One reading per sweep: `ps` for the tree and CPU times, then the cwd of each descendant
 // (`lsof` on macOS, `/proc/<pid>/cwd` on Linux). Windows has no reading: the watchdog keeps the
@@ -107,21 +105,34 @@ export const hostProcessProbe: ProcessProbe = {
   },
 };
 
+/** The directory the engine makes its guarded floor checkouts in (`std::env::temp_dir()/…`). */
+export const FLOOR_CHECKOUT_PARENT = 'wicked-core-floor';
+/** A floor checkout's name: `<run label>-<ord>-a<attempt>-<pid>-<nonce>` or `<run label>-<ord>-deliver-<pid>-<nonce>`. */
+const FLOOR_CHECKOUT_NAME = /^(.+)-\d+-(?:a\d+|deliver)-\d+-\d+$/;
+
+/** The run id as the engine spells it in a checkout label (every char but ASCII alnum and `-` → `_`). */
+function floorLabelOf(runId: string): string {
+  return [...runId].map((c) => (/^[A-Za-z0-9-]$/.test(c) ? c : '_')).join('');
+}
+
 /**
- * The run `cwd` belongs to: a path SEGMENT equal to a run id (`…/wicked-worktrees/<id>/…`) or
- * starting with `<id>-` (the engine's floor checkouts and check-cache leaves, see the header),
- * never a bare substring (`<id>2` is another run). When two ids claim one segment the longest
- * wins, so `run-a` never takes `run-a-b`'s processes.
+ * The run `cwd` belongs to: a path segment that IS a run id (`…/wicked-worktrees/<id>/…`), or a
+ * guarded floor checkout (`…/wicked-core-floor/<id>-<ord>-a<n>-<pid>-<nonce>/…`) whose parsed
+ * owner is a run id. Never a prefix or substring: `<id>-tests` is another run.
  */
 export function runOfCwd(cwd: string, runIds: readonly string[]): string | undefined {
-  let best: string | undefined;
-  for (const seg of cwd.split('/')) {
-    for (const id of runIds) {
-      if (id === '' || (seg !== id && !seg.startsWith(`${id}-`))) continue;
-      if (best === undefined || id.length > best.length) best = id;
+  const segments = cwd.split('/');
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i] as string;
+    const exact = runIds.find((id) => id === seg);
+    if (exact !== undefined) return exact;
+    if (i > 0 && segments[i - 1] === FLOOR_CHECKOUT_PARENT) {
+      const owner = FLOOR_CHECKOUT_NAME.exec(seg)?.[1];
+      const id = owner === undefined ? undefined : runIds.find((r) => floorLabelOf(r) === owner);
+      if (id !== undefined) return id;
     }
   }
-  return best;
+  return undefined;
 }
 
 /**

@@ -259,22 +259,33 @@ describe('RunLivenessSampler: the daemon process tree, attributed by worktree cw
   const RUN = 'd3a380b0-ecc0-41bf-a849-4abbe839734e';
   const OTHER = '85ddad0d-f3c6-464f-9953-2ced3a2f0ba5';
 
-  it('attributes the engine floor checkouts and check-cache leaves of a run, never a look-alike', () => {
+  it('attributes a run worktree and the engine floor checkouts of a run, exactly', () => {
     const ids = [RUN, OTHER];
     expect(runOfCwd(`/repo/wicked-worktrees/${RUN}`, ids)).toBe(RUN);
-    expect(runOfCwd(`/private/var/folders/x/T/wicked-core-floor/${RUN}-10-deliver-3-54026-1793095254625000000/packages/crew`, ids)).toBe(RUN);
+    expect(runOfCwd(`/private/var/folders/x/T/wicked-core-floor/${RUN}-10-deliver-54026-1793095254625000000/packages/crew`, ids)).toBe(RUN);
     expect(runOfCwd(`/var/folders/x/T/wicked-core-floor/${OTHER}-6-a1-21960-1793000000000000000`, ids)).toBe(OTHER);
-    expect(runOfCwd(`/home/w/repo-checks/wicked-crew-4c5c0216359f/${RUN}-4b1c092a6556-r4646578621f4/target`, ids)).toBe(RUN);
-    expect(runOfCwd(`/repo/wicked-worktrees/${RUN}x`, ids)).toBeUndefined(); // another id, not a prefix
+    expect(runOfCwd(`/repo/wicked-worktrees/${RUN}x`, ids)).toBeUndefined();
     expect(runOfCwd('/var/folders/x/T/wicked-core-floor/fg-opjudge-4-a0-86793-1', ids)).toBeUndefined();
-    expect(runOfCwd('/repo/wicked-worktrees/run-a-b', ['run-a', 'run-a-b'])).toBe('run-a-b'); // longest wins
+    // A floor checkout outside the engine's floor directory is not one.
+    expect(runOfCwd(`/elsewhere/${RUN}-10-deliver-54026-1`, ids)).toBeUndefined();
+  });
+
+  // codex on #1172: a prefix rule credited `build-tests`' processes to a quiet `build`, and
+  // `build-10-a1-…` (unit 10 of `build`) to a run named `build-10`.
+  it('never credits a run with another run whose id it prefixes', () => {
+    expect(runOfCwd('/repo/wicked-worktrees/build-tests', ['build'])).toBeUndefined();
+    expect(runOfCwd('/tmp/wicked-core-floor/build-tests-3-a0-12-34', ['build'])).toBeUndefined();
+    expect(runOfCwd('/tmp/wicked-core-floor/build-10-a1-123-999', ['build', 'build-10'])).toBe('build');
+    expect(runOfCwd('/tmp/wicked-core-floor/build-10-4-deliver-123-999', ['build', 'build-10'])).toBe('build-10');
+    // The engine's label spelling: anything but ASCII alnum and `-` is `_`.
+    expect(runOfCwd('/tmp/wicked-core-floor/run_7-2-a0-1-2', ['run.7'])).toBe('run.7');
   });
 
   it('a deliver re-verify burning CPU in its guarded checkout keeps the run busy', async () => {
     if (process.platform === 'win32') return;
     let t = 0;
     let cpu = 0;
-    const floorCwd = `/private/var/folders/x/T/wicked-core-floor/${RUN}-10-deliver-3-54026-1793095254625000000`;
+    const floorCwd = `/private/var/folders/x/T/wicked-core-floor/${RUN}-10-deliver-54026-1793095254625000000`;
     const sampler = new RunLivenessSampler(
       {
         table: async () => [

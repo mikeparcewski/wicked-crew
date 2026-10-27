@@ -23,9 +23,10 @@ mentioned only where a daemon release depends on them.
 - **A deliver step re-verifying its tree no longer raises a false "needs you".** The stall
   watchdog's process-liveness reading attributed a process to a run only when a cwd path segment
   equalled the run id. The engine runs a checks floor in a guarded checkout outside the worktree
-  (`$TMPDIR/wicked-core-floor/<run id>-<ord>-deliver-<n>-…`), so an hour of tests there read as
-  silence: `workerStalled` at 15 min and a needs-you at 30 (rig runs 85ddad0d and d3a380b0). A
-  segment that starts with `<run id>-` now counts too.
+  (`$TMPDIR/wicked-core-floor/<run id>-<ord>-deliver-<pid>-<nonce>`), so an hour of tests there
+  read as silence: `workerStalled` at 15 min and a needs-you at 30 (rig runs 85ddad0d and
+  d3a380b0). A floor checkout's owner is now parsed off its fixed name and counted, exactly: a run
+  is never credited with another run whose id it prefixes.
 
 ## [0.16.5] — 2026-10-27
 
