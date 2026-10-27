@@ -18,7 +18,8 @@ import { AskServer } from '../mcp/ask-server.js';
 import { registerAuthHooks, resolveAuth, type AuthOptions } from './auth.js';
 import { corsAllowed, refuseRequest } from './origin-guard.js';
 import { AuditLog } from './audit.js';
-import { EvalRunStore } from './eval-store.js';
+import { defaultEvalStoreRoot, EvalRunStore } from './eval-store.js';
+import { DefaultEvalStore } from '../evals/store.js';
 import { RetryIndex } from './retry-index.js';
 import { GroupIndex } from './group-index.js';
 import { RunTimingIndex, recordRunLaunched } from './run-timing-index.js';
@@ -611,6 +612,8 @@ export async function createServer(
   // option lets a createServer-driven test isolate its history off the real home (symmetric with
   // `auditPath`); production omits it and resolves through the state-home seam.
   const evalStore = new EvalRunStore(options?.evalStoreRoot, (m) => app.log.warn(m));
+  // The default evals (DES-DEFAULT-EVALS-001) keep their history beside it, in `<eval store root>/default`.
+  const defaultEvalStore = new DefaultEvalStore(join(options?.evalStoreRoot ?? defaultEvalStoreRoot(), 'default'));
 
   // Seat sign-in: export the persisted worker-config root as WICKED_WORKER_HOME at boot (the
   // PUT /settings route re-applies it on every change). The engine reads the env PER SPAWN
@@ -2329,6 +2332,7 @@ export async function createServer(
       studioRoot,
       dropDocLedgerRows,
       evalStore,
+      defaultEvalStore,
       // F-043/F-046: the bridge's bus dir and the create-time grounding store reach the proxy.
       interactiveBridgeBusDataDir: options?.interactiveBridge?.busDataDir ?? null,
       // EP-C4: the one pool, shared with the theme seam above.

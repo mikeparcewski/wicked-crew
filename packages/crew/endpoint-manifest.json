@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.142.0",
+  "apiTypesVersion": "0.143.0",
   "endpoints": [
     {
       "method": "GET",
@@ -2310,6 +2310,44 @@
         400,
         500,
         501
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/testing/default-evals",
+      "requestType": null,
+      "responseType": "ListDefaultEvalRunsResponse",
+      "statusCodes": [
+        200
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/testing/default-evals/:id",
+      "requestType": null,
+      "responseType": "DefaultEvalDetail",
+      "statusCodes": [
+        200,
+        404
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/testing/default-evals/run",
+      "requestType": "RunDefaultEvalsBody",
+      "responseType": "DefaultEvalReport",
+      "statusCodes": [
+        200,
+        400
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/testing/default-evals/suites",
+      "requestType": null,
+      "responseType": "DefaultEvalSuitesResponse",
+      "statusCodes": [
+        200
       ]
     },
     {

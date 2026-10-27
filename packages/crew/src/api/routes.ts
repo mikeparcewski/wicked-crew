@@ -137,6 +137,11 @@ import { inventoryComplete, parseInventoryClaims, type InventoryClaim } from '..
 import type { RejudgeOffer, RunInventoryResponse } from 'wicked-crew-api-types';
 import { ApproveEditSchema, approveEdited, captureLaunchRoots, editInFlight, FileProposalSchema, registerCaptureRoutes } from './capture.js';
 import { registerTestingRoutes } from './testing.js';
+import { registerDefaultEvalRoutes } from '../evals/routes.js';
+import { defaultReplaySet } from '../evals/replay.js';
+import type { DefaultEvalStore } from '../evals/store.js';
+import type { DecisionLike, EventLike, RunLike } from '../evals/capture.js';
+import { gardenRootFor } from '../learn/scheduler.js';
 import { DEMO_PRESET, demoLaunchRoots, registerDemoDocumentRoute, registerDemoRoutes, registerWalkthroughRoutes, walkthroughAcceptance, type BridgeCall } from './recording.js';
 import { projectDocsRoot } from '../interactive/project-root.js';
 import { registerSkillsRoutes } from './skills.js';
@@ -1236,6 +1241,9 @@ export interface RuntimeDeps {
    *  (tests) gets one only when it injects it, so a test that never touches the eval routes writes
    *  nothing under `~/.wicked-crew`. */
   evalStore?: EvalRunStore;
+  /** The default-evals history (DES-DEFAULT-EVALS-001) — `createServer` builds one beside the eval store; a
+   *  directly-driven route set computes and answers runs but stores none unless a test injects one. */
+  defaultEvalStore?: DefaultEvalStore;
   /** The skills seam (skills keystone) — `createServer` builds one over the daemon state home
    *  (seeded from the installed plugin, published); a directly-driven route set gets none and
    *  `/skills*` answers 503 unless a test injects one over a fixture root. */
@@ -8101,6 +8109,19 @@ export function registerRoutes(
     // The eval history store: `createServer` supplies a real one (state-home-rooted); a
     // directly-driven route set records nothing unless it injects one (no `~/.wicked-crew` writes).
     ...(runtime.evalStore !== undefined ? { evalStore: runtime.evalStore } : {}),
+  });
+
+  // ── Default evals (DES-DEFAULT-EVALS-001) — the system's own judgments, scored against what happened ─────
+  // Read-only over the run store (sessions, events, the operator's decisions, QE ledgers, the latest steering
+  // eval); the only write is the report, under the eval store's root.
+  registerDefaultEvalRoutes(app, {
+    ...(runtime.defaultEvalStore !== undefined ? { store: runtime.defaultEvalStore } : {}),
+    // Served runs, as GET /runs serves them: the derived title and the project membership join (codex r1).
+    runs: async () => (await adapter.sessionsDetail()).map(decorateRun) as unknown as RunLike[],
+    events: async (id) => (typeof adapter.runEvents === 'function' ? ((await adapter.runEvents(id)) as unknown as EventLike[] | null) : null),
+    decisions: () => (runtime.decisionLedger?.list({}) ?? []) as unknown as DecisionLike[],
+    ...(runtime.evalStore !== undefined ? { steeringEvals: runtime.evalStore } : {}),
+    replay: defaultReplaySet({ gardenRoot: gardenRootFor(process.env) }),
   });
 
   // ── Skills (skills keystone) — the file manager over the daemon-owned garden plugin root ─────

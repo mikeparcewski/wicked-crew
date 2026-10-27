@@ -830,3 +830,36 @@ export function readDocReviewVerdicts(
     return { found: true, rows: [], error: err instanceof Error ? err.message : String(err) };
   }
 }
+
+/** One verdict of a crew run, as the default evals read it (DES-DEFAULT-EVALS-001 S3). */
+export interface RunVerdictRow {
+  id: string;
+  verdict: string;
+  reason: string;
+  /** The tree the writer stamped, when it stamped one. */
+  tree: string | null;
+  createdAt: string;
+}
+
+/**
+ * Every live verdict in a QE ledger root stamped with `crew_run_id` = `runId` (on the verdict or on its run),
+ * newest first. Read-only, canonical JSON only, like {@link readAcceptanceState}. A root that does not exist reads
+ * as no verdicts; one that cannot be parsed throws, for the caller to surface.
+ */
+export function readRunVerdicts(root: string, runId: string): RunVerdictRow[] {
+  if (!existsSync(root)) return [];
+  const rows: RunVerdictRow[] = [];
+  for (const v of listCanonical<VerdictRecord>(root, 'verdicts')) {
+    const run = getCanonical<RunRecord>(root, 'runs', v.run_id);
+    if (stampedCrewRun(v) !== runId && stampedCrewRun(run) !== runId) continue;
+    const tree = (v as unknown as Record<string, unknown>)['tree'] ?? (run as unknown as Record<string, unknown> | null)?.['tree'];
+    rows.push({
+      id: v.id,
+      verdict: String(v.verdict),
+      reason: typeof v.reason === 'string' ? v.reason : '',
+      tree: typeof tree === 'string' && tree !== '' ? tree : null,
+      createdAt: v.created_at,
+    });
+  }
+  return rows;
+}
