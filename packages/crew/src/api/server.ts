@@ -82,7 +82,7 @@ import { AskRelay } from './ask-relay.js';
 import { MembershipIndex } from '../projects/membership-index.js';
 import { writeRunEvidencePointer } from '../projects/charter.js';
 import {
-  engineBenchesUnclassifiedSeats, CoreAdapter } from '../core/adapter.js';
+  engineBenchesUnclassifiedSeats, CoreAdapter, type McpEngineGate } from '../core/adapter.js';
 import type { Actor, CoreEvent, SessionView } from '../core/types.js';
 import { resolveCursorUnit } from '../core/cursor.js';
 import {
@@ -370,6 +370,12 @@ export interface CreateServerOptions {
   seats?: {
     signedIn?: (seatKey: string, workerRoot?: string) => boolean | null;
   };
+  /**
+   * TEST SEAM (crew#1155): the engine gate the MCP broker judges calls with. Default: the linked
+   * engine's (`CoreAdapter.mcpEngineGate()`). Only core's carriers mint a capability token, so a
+   * server-level test of a brokered call hands its own gate here.
+   */
+  mcpEngineGate?: () => McpEngineGate | null;
   stallWatchdog?: {
     enabled?: boolean;
     /** Sweep cadence, ms (default 30 s; tests shorten it). */
@@ -2136,7 +2142,7 @@ export async function createServer(
   const mcpCallRecords = new McpCallRecordFile();
   const mcpBroker = new McpBroker({
     registry: mcpRegistry,
-    engine: () => CoreAdapter.mcpEngineGate(),
+    engine: options?.mcpEngineGate ?? (() => CoreAdapter.mcpEngineGate()),
     records: mcpCallRecords,
     budgetPerUnit: budgetFromEnv(),
     log: (m) => app.log.warn(m),

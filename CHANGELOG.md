@@ -14,8 +14,42 @@ mentioned only where a daemon release depends on them.
 - **One "needs you" number: `GET /system.attention[]` is the list of what holds work up, ranked by impact (api-types 0.140.0, `capabilities.attentionRanked`).** Each item is one root cause, with the runs it holds (`blockedRunIds`, `blocks` = its length), `kind` (`prevents`: work can't move until a person acts; `slows`: the system slows it, e.g. host load) and `waitedSince` (the oldest gate's arrival, never a launch time). Runs are merged only on evidence: the same repo failing the same check on a base that fails it too (the run whose own problem is that red base joins it, and its gate is the action), a down component a held run's denial names (or that holds the live runs), or the same seats leaving runs without a distinct judge. Seat problems fold into the run they block, so a bench with an alternative is no longer an item (it stays on the CLIs tab). Host load counts the held runs whose next step it slows. Sorted by runs held, then prevents before slows, then component before a run's own cause, then the longest wait, then the units left. Not counted: superseded runs, answered asks, pending proposals (now `toReview`), degraded components that hold no work, governance cards. On the rig's 2026-10-27 data this gives 5 items (test fixture `tests/fixtures/needs-2026-10-27.json`).
 - **Unresolved work keeps the system from going green.** `GET /system.unresolved[]` lists the runs nobody has resolved: failed runs not retried and not archived (a failure older than 7 days moves here instead of counting as stuck; it never disappears), superseded runs still open or unarchived, and asks parked at their turn gate for over a day. Each item carries its cost (tokens and `costUsd` summed from the run's `cliUsage` frames where known, and wall time) and its resolutions; `unresolvedSpend` sums them. `level` is `green` only when `attention[]` and `unresolved[]` are both empty.
 
+### Added
+- **`POST /runs/:id/resolve` (api-types 0.140.0).** `{action: 'archive', reason}` archives with the reason as the note (a missing or blank reason is a 400); `{action: 'superseded', by}` closes the run as superseded by another existing run. A run parked at a gate is stopped first, then archived; a run that is executing is refused (409). Retry stays `POST /runs {retryOf}`.
+
 ### Fixed
 - **An ask held at an escalation gate is no longer hidden as an answered turn.** `ask_turn` is stamped only when every answer step is done; an answer refused by input governance or stranded on a dead seat is a real gate (rig run 68c26704).
+
+## [0.16.4] — 2026-10-27
+
+A patch release for the J1/J4/J6 bricks: the floating chat can use an installed MCP server, editor-plugin conformance provisions its own headless browser and the MCP preview probe waits for a cold start (#1156, crew#1155); OS file-manager metadata in the state home no longer refuses launches (#1151), the latest QE attempt on the delivered tree is the one that counts at deliver (#1152), and the operator can skip QE acceptance at the deliver gate with a reason (#1152, `wicked-crew-api-types` 0.139.0 on npm). Runs on wicked-core-ts 0.15.12, which carries the engine side of each (core#1117, core#1133) and core#1127, #1128, #1129, #1130 and #1132. A new test drives an installed MCP server a run built (#1154). Bundles wicked-studio 0.12.3 (unchanged).
+
+### Fixed
+- **The floating chat can use an installed MCP server (crew#1155, PRODUCT-WORKS J6).** A chat turn is
+  a governed answer step: its seat holds the unit's broker token, but its only native MCP tool is the
+  engine's `ask` (every other `mcp__*` tool is fenced, core#657), so asked to use `unit-convert` it
+  answered that no such tool existed. Every answer step now lists the installed, enabled tools (subject,
+  class, a bounded description, as an escaped JSON data block the seat is told never to take
+  instructions from: names and descriptions come from the upstream server) and the one command that
+  reaches them, garden's broker shim (`shim.py list`
+  / `call mcp:<server>/<tool> --args …`), with what each exit means (`pending_approval` waits for the
+  operator's approval in MCP > Approvals). The broker judges, runs and records every call exactly as for
+  any worker: read tools run, a write or a server's first use waits. Nothing installed, nothing added.
+- **Editor-plugin install no longer needs Python Playwright on the daemon host (B8).** When garden's
+  conformance runner reports "no headless browser", crew provisions its own runtime, once, in the OS
+  cache directory (`<cache>/wicked-crew/editor-conformance/venv-playwright-<pin>`, override
+  `WICKED_CONFORMANCE_RUNTIME_DIR`; never the state home, whose unregistered entries refuse launches): a
+  private venv with Playwright 1.64.0 (override `WICKED_CONFORMANCE_PLAYWRIGHT`) and Playwright's
+  Chromium, marked when every step finished so later installs reuse it without the package index. Then
+  it runs the cases again under it. A host where that cannot be done still refuses the install (fail
+  closed), naming the step that failed (python3's own error, not a missing `python`) and the one command
+  that fixes it, and leaves no half-made venv. The operator's own Python is never touched.
+- **The MCP preview probe waits for a cold start (B6).** One 45 s budget (was 10 s) for `initialize` and
+  `tools/list`; an http server that is not listening yet is polled with a bounded backoff through the
+  whole budget (the last wait is cut short so a final attempt still fits). A
+  probe that runs out says "the server is still starting … This is the server's start, not a seat or a
+  CLI" (a 10 s timeout right after `npm ci` was blamed on opencode). A server that crashes still fails at
+  once with its own stderr.
 - **OS file-manager metadata no longer refuses every worker launch.** A Mac user who opened `~/.wicked-crew` in Finder got a `.DS_Store` that crew's state-home survey (`GET /diagnostics.stateHome`, `/health` warnings, the `POST /runs` 409) reported as an unregistered entry. `.DS_Store`, `._*`, `.Spotlight-V100`, `.Trashes`, `.fseventsd`, `Thumbs.db`, `desktop.ini` and `Icon\r` are now ignored at the state home and the skills root, in crew's own survey and in the engine's answer it reports (an engine older than wicked-core#1117 still names them; that refusal lifts when metadata is all it named). Any other unknown entry (including `.DS_Store.bak`) still refuses. The list lives in `state-home-registry.ts` and is the same list as wicked-core#1117's `OS_METADATA_PATTERNS`; a test reads core's source and holds them equal. The engine's own intake refusal stays authoritative, so launches need a wicked-core-ts that carries #1117.
 - **At deliver, the latest QE attempt on the delivered tree is the one that counts (j4-gates).** A QE
   attempt whose gate never ran (a daemon restart orphaned it) now ends where the next dispatch of the QE
@@ -26,7 +60,6 @@ mentioned only where a daemon release depends on them.
   acceptance reason says how many earlier verdicts it superseded.
 
 ### Added
-- **`POST /runs/:id/resolve` (api-types 0.140.0).** `{action: 'archive', reason}` archives with the reason as the note (a missing or blank reason is a 400); `{action: 'superseded', by}` closes the run as superseded by another existing run. A run parked at a gate is stopped first, then archived; a run that is executing is refused (409). Retry stays `POST /runs {retryOf}`.
 - **Skip QE acceptance at the deliver gate, with a reason (`action: 'skip_qe'`, api-types 0.139.0).** `POST
   /runs/:id/gate` takes `{approve: true, action: 'skip_qe', amend: <reason>}` (a blank reason is a 400).
   At the gate before the deliver step the delivery goes without a QE PASS, and its check says
@@ -35,6 +68,9 @@ mentioned only where a daemon release depends on them.
   also answers it at a verify gate only QE denied, or a failed floor's gate with QE behind it. An engine
   without the action refuses it (409, gate left open). A `qe_inconclusive` denial is, like
   `qe_reviewer_unavailable`, a gate whose approve accepts the work, so a reassign there is refused.
+
+### Changed
+- **Runs on wicked-core-ts 0.15.12.** Engine changes since 0.15.11: OS metadata in the state home is ignored by the engine's intake (core#1117); the floor's copies of a repo honour eol attributes and the base copy has its own git context (core#1127); the core suite passes inside the floor's sandbox (core#1128); a container runtime blip waits inside a bounded window (`WICKED_RUNTIME_WAIT_SECS`, default 180 s) and is never a seat failure, with a new additive `containerRuntimeWait` event (core#1129); a CHANGELOG-only lift conflict is union-merged (core#1130); a daemon restart resumes the interrupted floor and never re-plans (core#1132); an inconclusive QE result is not a FAIL and `skip_qe` is an engine gate action (core#1133).
 
 ## [0.16.3] — 2026-10-26
 
@@ -4474,7 +4510,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.3...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.4...HEAD
+[0.16.4]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.3...v0.16.4
 [0.16.3]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.2...v0.16.3
 [0.16.2]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.1...v0.16.2
 [0.16.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.0...v0.16.1

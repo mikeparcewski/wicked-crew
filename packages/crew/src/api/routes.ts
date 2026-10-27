@@ -139,6 +139,7 @@ import { DEMO_PRESET, demoLaunchRoots, registerDemoDocumentRoute, registerDemoRo
 import { projectDocsRoot } from '../interactive/project-root.js';
 import { registerSkillsRoutes } from './skills.js';
 import { registerMcpRoutes } from './mcp.js';
+import { chatMcpToolsFor } from './chat-mcp.js';
 import type { AskServer } from '../mcp/ask-server.js';
 import type { McpBroker } from '../mcp/broker.js';
 import type { McpCallRecordSource } from '../mcp/call-records.js';
@@ -303,6 +304,7 @@ import { LOCAL_ACTOR, type AuthMode, trustAtLeast } from './auth.js';
 // Re-exported so existing `import { API_PREFIX } from './routes.js'` callers keep working; the
 // value lives in the leaf module api-prefix.ts to keep unit-output.ts out of this file's cycle.
 export { API_PREFIX } from './api-prefix.js';
+
 import { API_PREFIX } from './api-prefix.js';
 import { landPolicyRule, policyProposalToRule, withdrawLandedRule } from './policy-landing.js';
 import { DecisionLedger } from '../decisions/ledger.js';
@@ -312,6 +314,7 @@ import { registerDecisionRoutes } from '../decisions/routes.js';
 import { ChatDecisionRecorder } from '../decisions/chat-recorder.js';
 import { ConsiderationService } from '../decisions/consider.js';
 import { gardenConformance, gardenPackCheck, type ConformanceRunner, type PackCheckRunner } from '../editors/pack-install.js';
+import { conformanceProvisioner, conformanceRuntimeRoot } from '../editors/conformance-runtime.js';
 import { EditorRegistry } from '../editors/registry.js';
 import { registerEditorRoutes } from '../editors/routes.js';
 import { registerMcpInspectRoutes } from '../mcp-inspect/routes.js';
@@ -1379,6 +1382,9 @@ function pushedOnlyRefusal(runId: string, pushed: { branch: string; remote: stri
   );
 }
 
+/** B8: the editor-conformance browser runtime crew provisions when a host has none (one per process). */
+const editorConformanceRuntime = conformanceProvisioner(() => conformanceRuntimeRoot());
+
 export function registerRoutes(
   app: FastifyInstance,
   adapter: CoreAdapter,
@@ -1520,7 +1526,7 @@ export function registerRoutes(
     registry: editorRegistry,
     adapter,
     packCheck: runtime.packCheck ?? gardenPackCheck(discoverLivePlugin()?.path ?? null),
-    conformance: runtime.editorConformance ?? gardenConformance(discoverLivePlugin()?.path ?? null, () => process.env['WICKED_CREW_URL'] ?? null),
+    conformance: runtime.editorConformance ?? gardenConformance(discoverLivePlugin()?.path ?? null, () => process.env['WICKED_CREW_URL'] ?? null, { provision: editorConformanceRuntime }),
     log: (m) => app.log.warn(m),
   });
   const chatRecorder: ChatDecisionRecorder | null =
@@ -3961,9 +3967,16 @@ export function registerRoutes(
     };
     // DC-S7: the rules the chat's seats were told about ride the step's instructions, as the
     // preface rode a pool send; told only once the send is accepted (`commit`).
-    const withPreface = (preface: string | null): string => (preface !== null ? `${preface}\n\n${seatText}` : seatText);
+    // crew#1155: the installed MCP tools and the one command that reaches them (the broker), read
+    // per turn so a server installed or disabled since the last turn is reflected.
+    let mcpTools: string | null = null;
+    const withPreface = (preface: string | null): string => {
+      const body = mcpTools !== null ? `${mcpTools}\n\n${seatText}` : seatText;
+      return preface !== null ? `${preface}\n\n${body}` : body;
+    };
     try {
       const rules = (await considerations.inForceFor(scope?.projectId ?? null)).rules;
+      mcpTools = await chatMcpToolsFor(runtime.mcp);
       // crew#1020: a project/everything chat must see repos attached since open. Admission was
       // under this scope KIND and the kind stays the same, so do not re-run seat admission.
       const scopeRequest = chatScopes.requestOf(id);
