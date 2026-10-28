@@ -906,7 +906,7 @@ describe('the run\'s assurance labels (crew#1186)', () => {
     expect(body).toContain('- **QE acceptance waived by score**: waived: impact score 12 at or below the waiver line 20');
     expect(body).not.toContain('Floor overridden');
     const required = composeDeliverText(
-      factsFromRun(withAssurance({ mode: 'full', required: [], qe: { status: 'required', basis: 'diff', score: 40, threshold: 20, reason: 'required: impact score 40', reasons: [], ord: 4, tree: null } }), null),
+      factsFromRun(withAssurance({ mode: 'full', required: ['qe_acceptance'], qe: { status: 'required', basis: 'diff', score: 40, threshold: 20, reason: 'required: impact score 40', reasons: [], ord: 4, tree: null } }), null),
     ).body;
     expect(required).toContain('- QE acceptance: required (required: impact score 40)');
   });
@@ -914,4 +914,26 @@ describe('the run\'s assurance labels (crew#1186)', () => {
   it('leaves the section out when the engine recorded no assurance contract', () => {
     expect(composeDeliverText(factsFromRun(runView(), null)).body).not.toContain('## Assurance');
   });
+
+  it('shows an operator reason as literal text and reads an older contract as QE required (xreview on #1188)', () => {
+    const body = composeDeliverText(
+      factsFromRun(
+        withAssurance({
+          mode: 'full',
+          required: ['qe_acceptance'],
+          qe: { status: 'skipped', basis: 'operator', score: null, threshold: 20, reason: 'QE acceptance skipped by operator: <!-- no passing evidence --> see [log](x) *now*', reasons: [], ord: 5, tree: null },
+        }),
+        null,
+      ),
+    ).body;
+    expect(body).toContain('&lt;!-- no passing evidence --&gt; see \\[log\\](x) \\*now\\*');
+    expect(body).not.toContain('<!--');
+    // An engine that records `required` but no `qe` decision: required, as delivery enforces it.
+    const legacy = composeDeliverText(factsFromRun(withAssurance({ mode: 'full', required: ['qe_acceptance'] }), null)).body;
+    expect(legacy).toContain('- QE acceptance: required (required: this engine records no QE decision)');
+    // …and a contract that does not require QE says nothing about it.
+    const none = composeDeliverText(factsFromRun(withAssurance({ mode: 'full', required: ['judge'] }), null)).body;
+    expect(none).not.toContain('QE acceptance');
+  });
 });
+

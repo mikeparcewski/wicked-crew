@@ -675,6 +675,18 @@ export function composeDeliverText(raw: DeliverTextFacts, links: IssueRefs = iss
   return { title: redactHostPaths(title), body: redactHostPaths(out.join('\n')) };
 }
 
+/** (xreview on #1188) Free text (an operator's reason, a login) as literal Markdown: HTML
+ *  metacharacters are entities and Markdown syntax is backslash-escaped, so `<!-- … -->`, a tag or a
+ *  link shows as written instead of vanishing or rendering; one line, bounded, pipes escaped. */
+function literal(value: string, max = 600): string {
+  const s = cell(value, max)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/([\\`*_[\]])/g, '\\$1');
+  return s;
+}
+
 /** The QE decision's reason without the label it already opens with (`QE acceptance skipped by operator: …`). */
 function qeReasonBody(reason: string, label: string): string {
   const r = oneLine(reason);
@@ -687,23 +699,23 @@ function assuranceSection(a: DeliverAssuranceFact): string[] {
   if (a.mode === 'reduced') {
     out.push('- **Reduced assurance**: the run was launched in reduced-assurance mode, so the distinct evaluator and the judge were waived.');
   } else {
-    out.push(`- Assurance mode: ${cell(a.mode)}.`);
+    out.push(`- Assurance mode: ${literal(a.mode)}.`);
   }
   if (a.qe !== null) {
     const status = a.qe.status;
     if (status === 'skipped') {
       const label = 'QE acceptance skipped by operator';
       const why = qeReasonBody(a.qe.reason, label);
-      out.push(`- **${label}**${why !== '' ? `: ${cell(why, 2000)}` : ''}`);
+      out.push(`- **${label}**${why !== '' ? `: ${literal(why, 2000)}` : ''}`);
     } else if (status === 'waived') {
-      out.push(`- **QE acceptance waived by score**: ${cell(a.qe.reason, 600)}`);
+      out.push(`- **QE acceptance waived by score**: ${literal(a.qe.reason)}`);
     } else {
-      out.push(`- QE acceptance: ${cell(status)}${a.qe.reason.trim() !== '' ? ` (${cell(a.qe.reason, 600)})` : ''}`);
+      out.push(`- QE acceptance: ${literal(status)}${a.qe.reason.trim() !== '' ? ` (${literal(a.qe.reason)})` : ''}`);
     }
   }
   if (a.floorOverrides.length > 0) {
     const byLabel = new Map<string, string[]>();
-    for (const o of a.floorOverrides) byLabel.set(o.label, [...(byLabel.get(o.label) ?? []), `${code(o.phase)} (${cell(o.by)})`]);
+    for (const o of a.floorOverrides) byLabel.set(o.label, [...(byLabel.get(o.label) ?? []), `${code(o.phase)} (${literal(o.by)})`]);
     for (const [label, where] of byLabel) out.push(`- **${cell(label.charAt(0).toUpperCase() + label.slice(1))}**: ${where.join(', ')}`);
   }
   return out;
@@ -714,16 +726,22 @@ function assuranceOf(s: SessionView['session'], units: WorkUnit[]): DeliverAssur
   const a = (s as { assurance?: unknown }).assurance as
     | {
         mode?: unknown;
+        required?: unknown;
         qe?: { status?: unknown; reason?: unknown } | null;
         floorOverrides?: Array<{ by?: unknown; ord?: unknown; floorOverride?: { ord?: unknown; label?: unknown } }>;
       }
     | null
     | undefined;
   if (a === null || a === undefined || typeof a !== 'object') return undefined;
-  const qe =
-    a.qe !== null && a.qe !== undefined && typeof a.qe.status === 'string'
+  // As delivery enforcement reads it (`api/delivery-assurance.ts` `qeDecisionOf`): a QE decision
+  // only when the contract requires `qe_acceptance`, and an older engine's contract with no `qe`
+  // record still reads as required (xreview on #1188).
+  const requiresQe = Array.isArray(a.required) && a.required.includes('qe_acceptance');
+  const qe = !requiresQe
+    ? null
+    : a.qe !== null && a.qe !== undefined && typeof a.qe.status === 'string'
       ? { status: a.qe.status, reason: typeof a.qe.reason === 'string' ? a.qe.reason : '' }
-      : null;
+      : { status: 'required', reason: 'required: this engine records no QE decision' };
   const phaseOf = (ord: unknown): string => {
     const u = typeof ord === 'number' ? units.find((x) => x.ord === ord) : undefined;
     return u !== undefined ? phaseIdOf(u) : typeof ord === 'number' ? `unit ${ord}` : 'a phase';
