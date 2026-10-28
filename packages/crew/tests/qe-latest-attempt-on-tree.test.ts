@@ -45,6 +45,7 @@ const RUNS = {
   skipAtDeliver: 'run-j4-skip',
   olderStampCarriesNewerFail: 'run-j4-stamp-carries',
   foreignVerdictSetsNoCutoff: 'run-j4-foreign',
+  unboundReviewLedgerPass: 'run-1153-unbound',
 };
 
 let dir: string;
@@ -87,7 +88,19 @@ function view(id: string) {
       verified_tree: TREE_B, archived_at: null, archive_note: null,
       assurance: { mode: 'full', required: ['distinct_evaluator', 'judge', 'qe_acceptance'], qe: REQUIRED },
     },
-    units: [unit(1, 'fix', 'done'), { ...unit(QE_ORD, 'verify', 'done'), qe_acceptance: REQUIRED }, unit(DELIVER_ORD, 'deliver', 'pending')],
+    units: [
+      unit(1, 'fix', 'done'),
+      {
+        ...unit(QE_ORD, 'verify', 'done'),
+        qe_acceptance: REQUIRED,
+        // The engine's isolated review record (wicked-core#1153): a PASS, except on the run whose
+        // reviewer's verdict could not be bound.
+        qe_review: id === RUNS.unboundReviewLedgerPass
+          ? { outcome: 'invalid', reason: "the reviewer's verdict could not be bound: the reviewer recorded no verdict", tree: TREE_B, verdict: null }
+          : { outcome: 'pass', reason: 'bound PASS', tree: TREE_B, verdict: 'PASS' },
+      },
+      unit(DELIVER_ORD, 'deliver', 'pending'),
+    ],
   };
 }
 
@@ -164,6 +177,8 @@ beforeAll(async () => {
   verdictAt(RUNS.failAndPassInLatest, 1, 'FAIL', T0 + 320);
   verdictAt(RUNS.failAndPassInLatest, 2, 'PASS', T0 + 350);
   verdictAt(RUNS.skipAtDeliver, 1, 'FAIL', T0 + 350);
+  // A PASS in the ledger (the executor's own) while the isolated reviewer bound nothing.
+  verdictAt(RUNS.unboundReviewLedgerPass, 1, 'PASS', T0 + 350);
   // QE run X is this run's only through an OLDER stamped verdict (its run row predates the crew run
   // and is unstamped); its newer FAIL inside the latest attempt is unstamped. QE run Y passes there.
   {
@@ -334,5 +349,18 @@ describe('studio#923 — the QE-refused deliver gate offers the skip in place, t
     expect(skipped).toHaveLength(1);
     expect(skipped[0]![1]).toMatchObject({ kind: 'human', trust: 'operator' });
     expect(skipped[0]![2]).toMatchObject({ runId: RUNS.skipAtDeliver, detail: { reason: 'seats could not run vitest; checked by hand', ord: DELIVER_ORD } });
+  });
+});
+
+describe('wicked-core#1153 — a ledger PASS counts only beside the engine-bound review', () => {
+  it('refuses delivery when the isolated review bound no verdict, and offers the skip in place', async () => {
+    const res = await decide(RUNS.unboundReviewLedgerPass);
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().acceptance.reason).toContain('the isolated QE review did not bind a PASS (invalid');
+    expect(confirmCalls).toEqual([]);
+    const gate = await app.inject({ method: 'GET', url: `/api/v1/runs/${RUNS.unboundReviewLedgerPass}/gate` });
+    expect(gate.json().skipQe?.action).toBe('skip_qe');
+    const skip = await decide(RUNS.unboundReviewLedgerPass, { action: 'skip_qe', amend: 'reviewed by hand' });
+    expect(skip.statusCode, skip.body).toBe(200);
   });
 });

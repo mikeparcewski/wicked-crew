@@ -4929,11 +4929,39 @@ export function registerRoutes(
     const decision = qeDecisionOf(run);
     if (decision === null) return null;
     if (qeDecisionBypasses(decision)) return qeAcceptanceNotRequired(decision);
+    let check: QeAcceptanceCheck;
     try {
-      return qeAcceptanceFromView(await acceptanceViewOf(run, { forceDeclared: true, treeScoped: where === 'gate' }));
+      check = qeAcceptanceFromView(await acceptanceViewOf(run, { forceDeclared: true, treeScoped: where === 'gate' }));
     } catch (err) {
       return unreadableQeAcceptance(err);
     }
+    // (wicked-core#1153, xreview) The ledger's PASS counts only beside the ENGINE's bound review: a
+    // PASS some other writer put in the ledger (the QE executor's own, say) while the isolated
+    // reviewer's verdict could not be bound is no acceptance. The latest QE unit's record speaks;
+    // an engine that keeps none leaves the ledger's word.
+    const review = engineQeReviewOf(run);
+    if (check.satisfied && review !== null && review.outcome !== 'pass') {
+      return {
+        ...check,
+        satisfied: false,
+        reason: `the isolated QE review did not bind a PASS (${review.outcome}${review.reason ? `: ${review.reason}` : ''}); a PASS in the ledger without it does not count`,
+      };
+    }
+    return check;
+  }
+
+  /** The engine's isolated QE review record on the run's latest QE unit (`units[].qe_review`, the
+   *  unit's last attempt), or `null` when the engine kept none. */
+  function engineQeReviewOf(run: SessionView): { outcome: string; reason: string } | null {
+    let latest: { ord: number; review: { outcome: string; reason: string } } | null = null;
+    for (const u of run.units ?? []) {
+      const r = (u as { qe_review?: { outcome?: unknown; reason?: unknown } | null }).qe_review;
+      if (r === undefined || r === null || typeof r.outcome !== 'string') continue;
+      if (latest === null || u.ord > latest.ord) {
+        latest = { ord: u.ord, review: { outcome: r.outcome, reason: typeof r.reason === 'string' ? r.reason : '' } };
+      }
+    }
+    return latest?.review ?? null;
   }
 
   /**

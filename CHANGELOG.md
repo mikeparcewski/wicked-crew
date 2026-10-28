@@ -24,9 +24,16 @@ mentioned only where a daemon release depends on them.
 
 ### Changed
 
-- **Only a human operator can skip QE acceptance at a gate (studio#923).** `action: 'skip_qe'` from any
-  other actor (a seat's token, a standing order, an observer) is a 403 `{code: 'human_operator_only'}`,
-  refused before anything is read and audited as `gate.skip_qe_refused`. An operator's skip is audited
+- **Only a human operator can skip QE acceptance at a gate (studio#923).** `action: 'skip_qe'` from an
+  operator-trust actor that is not human (a seat's token, a standing order) is a 403 `{code:
+  'human_operator_only'}`, refused before anything is read and audited as `gate.skip_qe_refused`; an
+  actor below operator trust is refused by the daemon's trust check before the route, as for every
+  gate answer.
+- **A ledger PASS counts at delivery only beside the engine's bound QE review (wicked-core#1153).** When
+  the latest QE unit's isolated review (`units[].qe_review`) did not bind a PASS (no verdict recorded,
+  INCONCLUSIVE, a FAIL, no reviewer), a PASS some other writer put in the ledger, such as the QE
+  executor's own, no longer satisfies QE acceptance: the deliver gate refuses and offers the skip in
+  place. An engine that keeps no review record leaves the ledger's word. An operator's skip is audited
   as `gate.qe_skipped` (who, run, gate, reason) beside `gate.decided`.
 
 ## [0.16.6] — 2026-10-27

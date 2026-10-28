@@ -1692,9 +1692,10 @@ export interface GateInfo {
    * `POST /runs/:id/gate {approve: true, action: 'skip_qe', amend: '<reason>', ord}` (the reason is
    * required). The run's QE decision becomes `skipped` by the operator and the delivery goes,
    * labelled "QE acceptance skipped by operator: <reason>" on the run, every later gate and the
-   * delivery. Only a human operator may take it: any other actor (a seat's token, a standing order)
-   * gets a 403 `{code: 'human_operator_only'}`, and both the skip (`gate.qe_skipped`) and a refused
-   * attempt (`gate.skip_qe_refused`) are audited. Read each time: ABSENT once QE passes, on every
+   * delivery. Only a human operator may take it: an operator-trust actor that is not human (a seat's
+   * token, a standing order) gets a 403 `{code: 'human_operator_only'}`, audited as
+   * `gate.skip_qe_refused`; an actor below operator trust is refused 403 by the daemon's trust check
+   * before the route runs, as for every gate answer. The skip is audited as `gate.qe_skipped`. Read each time: ABSENT once QE passes, on every
    * other gate, on a run that does not require QE acceptance, and on an older daemon.
    */
   skipQe?: SkipQeOffer;
