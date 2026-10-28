@@ -21,6 +21,18 @@ export default defineConfig({
     // of sitting at half of it. Tolerance only: nothing here changes what runs or in what order.
     hookTimeout: 30000,
     reporters: ['verbose'],
+    // crew#1173: a test that reads the sibling wicked-core checkout (tests/support/core-checkout.ts)
+    // carries this tag, one per test (never on a suite: scripts/test-related.mjs counts tagged
+    // tests off the source). The repo-checks floor's checkout has no sibling, so test-related.mjs
+    // runs `--tags-filter=!cross-repo` there and prints what it left out; CI and `npm test` run
+    // them, and without a checkout they still fail loudly. Strict tags (vitest's default) make a
+    // misspelt tag an error rather than a test the filter cannot see.
+    tags: [
+      {
+        name: 'cross-repo',
+        description: 'reads the sibling wicked-core checkout; runs in CI, left out of the floor when there is none',
+      },
+    ],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json'],

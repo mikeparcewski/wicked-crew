@@ -622,7 +622,7 @@ describe.skipIf(SKIP_CORE_CHECKS)('the engine refuses an unpinned verified_evide
     }
   };
 
-  it('register() refuses a flagged phase with no pin — and no longer arms one', () => {
+  it('register() refuses a flagged phase with no pin — and no longer arms one', { tags: ['cross-repo'] }, () => {
     const src = workflowRs();
     expect(src).toContain('refuse_unpinned_verified_evidence(&def)?;');
     expect(src).toContain(
@@ -634,12 +634,12 @@ describe.skipIf(SKIP_CORE_CHECKS)('the engine refuses an unpinned verified_evide
     expect(src).not.toContain('fn carry_shadowed_pins(');
   });
 
-  it("crew's pin IS core's built-in evidence floor", () => {
+  it("crew's pin IS core's built-in evidence floor", { tags: ['cross-repo'] }, () => {
     const floors = readFileSync(join(requireCoreDir(), 'src', 'builtin_floors.rs'), 'utf8');
     expect(floors).toContain(`pub const EVIDENCE_FLOOR_PIN: &str = "${EVIDENCE_FLOOR_PIN}";`);
   });
 
-  it('the floor it arms re-derives done from the worktree, committed work included', () => {
+  it('the floor it arms re-derives done from the worktree, committed work included', { tags: ['cross-repo'] }, () => {
     const floors = readFileSync(join(requireCoreDir(), 'src', 'builtin_floors.rs'), 'utf8');
     // The criterion the deliver phase inherits — the product thesis stated as a check.
     expect(floors).toContain(

@@ -27,10 +27,11 @@ import { SKIP_CORE_CHECKS, readCoreJson } from './support/core-checkout.js';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CREW_MANIFEST = join(HERE, '..', 'package.json');
 
-/** Core's built engine version, or `null` under the explicit standalone opt-out (FINDING-094). */
-const builtEngineVersion: string | null = SKIP_CORE_CHECKS
-  ? null
-  : readCoreJson<{ version: string }>('crates', 'wicked-core-ts', 'package.json').version;
+/** Core's built engine version. Read inside the one test that needs it, not at import: a module-level
+ *  read failed the whole file without a checkout, taking the range-semantics tests with it (crew#1173). */
+function builtEngineVersion(): string {
+  return readCoreJson<{ version: string }>('crates', 'wicked-core-ts', 'package.json').version;
+}
 
 function declaredRange(): string {
   const m = JSON.parse(readFileSync(CREW_MANIFEST, 'utf8')) as {
@@ -99,8 +100,9 @@ describe('the declared engine range admits the engine we build against', () => {
   /// Now it skips only under an explicit human opt-out that automation never sets.
   it.skipIf(SKIP_CORE_CHECKS)(
     'the range in crew/package.json admits the version in wicked-core/crates/wicked-core-ts',
+    { tags: ['cross-repo'] },
     () => {
-      const built = builtEngineVersion!;
+      const built = builtEngineVersion();
       const range = declaredRange();
       expect(
         admits(range, built),

@@ -61,6 +61,8 @@ interface TestRelated {
       host?: () => Record<string, unknown>;
       now?: () => number;
       budgetS?: number;
+      coreDir?: () => string | null;
+      crossRepoTests?: () => { count: number; files: string[] };
     },
   ): Promise<number>;
 }
@@ -137,6 +139,10 @@ function recorder(results: RunResult[], buildResult: RunResult = { status: 0, ou
       host: () => ({ load1: 130.4, load5: 120, cpus: 12, loadPerCpu: 10.87, freeMemMb: 300, swapFreeMb: 12.5, swapUsedMb: 15800 }),
       now: () => 0,
       budgetS: 1800,
+      // A sibling checkout is present, so no cross-repo filter: these cases pin the retry and the
+      // build, whatever checkout the host running them has (crew#1173 is
+      // tests/test-related-cross-repo.test.ts).
+      coreDir: () => '/sibling/core-checkout',
     },
   };
 }
