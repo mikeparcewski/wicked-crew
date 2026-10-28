@@ -10,6 +10,32 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Added
+
+- **A QE-refused deliver gate offers "skip QE with a reason" in place (studio#923, api-types 0.146.0).**
+  On rig run 115fabdb the deliver gate refused delivery for an INCONCLUSIVE QE review, and the skin's only
+  skip opened the launch form to start the job again (~2.5 h of governed work), although the engine takes
+  `skip_qe` on that very gate. `GET /runs/:id/gate` now carries `skipQe` on a deliver gate whose QE
+  acceptance check refuses: `{action: 'skip_qe', reasonRequired: true, actor: 'human_operator', label:
+  'QE acceptance skipped by operator', qeAcceptance}`. Answer it with `POST /runs/:id/gate {approve:
+  true, action: 'skip_qe', amend: '<reason>', ord}`: the run's QE decision becomes `skipped` by the
+  operator and the delivery goes, labelled on the run, every later gate and the delivery. The offer is
+  read each time and is absent once QE passes and on every other gate.
+
+### Changed
+
+- **Only a human operator can skip QE acceptance at a gate (studio#923).** `action: 'skip_qe'` from an
+  operator-trust actor that is not human (a seat's token, a standing order) is a 403 `{code:
+  'human_operator_only'}`, refused before anything is read and audited as `gate.skip_qe_refused`; an
+  actor below operator trust is refused by the daemon's trust check before the route, as for every
+  gate answer.
+- **A ledger PASS counts at delivery only beside the engine's bound QE review (wicked-core#1153).** When
+  the latest QE unit's isolated review (`units[].qe_review`) did not bind a PASS (no verdict recorded,
+  INCONCLUSIVE, a FAIL, no reviewer), a PASS some other writer put in the ledger, such as the QE
+  executor's own, no longer satisfies QE acceptance: the deliver gate refuses and offers the skip in
+  place. An engine that keeps no review record leaves the ledger's word. An operator's skip is audited
+  as `gate.qe_skipped` (who, run, gate, reason) beside `gate.decided`.
+
 ## [0.16.6] — 2026-10-27
 
 A patch release for governed-run wall time and the default-evals surface: `/health.capabilities` announces `defaultEvals`, `insights` and `schedules` (#1174); diagnostics no longer tells you to install garden while the skills boot ladder is still publishing (#1170, crew#1149); a floor re-verify in a guarded checkout is not a stall (#1172); every governed delivery to wicked-crew is no longer refused once for a stale generated test (#1171, crew#1169); and crew's own base is no longer red in the repository-checks floor for want of `dist/` (#1177, crew#1173). `wicked-crew-api-types` 0.145.0 is on npm. Runs on wicked-core-ts 0.15.14 (core#1141, core#1145, core#1146, core#1147). Bundles wicked-studio 0.12.3 (unchanged).

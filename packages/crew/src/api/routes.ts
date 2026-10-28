@@ -134,7 +134,7 @@ import {
 } from './governance-steering.js';
 import { isSteeringAuthorRun, landSteeringProposal } from './steering-landing.js';
 import { inventoryComplete, parseInventoryClaims, type InventoryClaim } from '../core/inventory-claim.js';
-import type { RejudgeOffer, RunInventoryResponse } from 'wicked-crew-api-types';
+import type { RejudgeOffer, RunInventoryResponse, SkipQeOffer } from 'wicked-crew-api-types';
 import { ApproveEditSchema, approveEdited, captureLaunchRoots, editInFlight, FileProposalSchema, registerCaptureRoutes } from './capture.js';
 import { registerTestingRoutes } from './testing.js';
 import { registerDefaultEvalRoutes, runAndRecord, type DefaultEvalDeps } from '../evals/routes.js';
@@ -830,6 +830,10 @@ export const OPERATOR_JUDGMENT_ACTION = 'operator_judgment' as const;
  *  denied (it counts), or a failed floor's gate with QE behind it (it re-opens on the floor alone).
  *  Refused (409, gate left open) everywhere else and on a run that does not require QE. */
 export const SKIP_QE_ACTION = 'skip_qe' as const;
+/** (studio#923) The label an operator's QE skip carries on the run, every later gate and the
+ *  delivery — the engine's words ("QE acceptance skipped by operator: <reason>"). */
+export const QE_SKIPPED_BY_OPERATOR_LABEL = 'QE acceptance skipped by operator' as const;
+
 export const GateSchema = z.object({
   approve: z.boolean(),
   amend: z.string().optional(),
@@ -4925,11 +4929,39 @@ export function registerRoutes(
     const decision = qeDecisionOf(run);
     if (decision === null) return null;
     if (qeDecisionBypasses(decision)) return qeAcceptanceNotRequired(decision);
+    let check: QeAcceptanceCheck;
     try {
-      return qeAcceptanceFromView(await acceptanceViewOf(run, { forceDeclared: true, treeScoped: where === 'gate' }));
+      check = qeAcceptanceFromView(await acceptanceViewOf(run, { forceDeclared: true, treeScoped: where === 'gate' }));
     } catch (err) {
       return unreadableQeAcceptance(err);
     }
+    // (wicked-core#1153, xreview) The ledger's PASS counts only beside the ENGINE's bound review: a
+    // PASS some other writer put in the ledger (the QE executor's own, say) while the isolated
+    // reviewer's verdict could not be bound is no acceptance. The latest QE unit's record speaks;
+    // an engine that keeps none leaves the ledger's word.
+    const review = engineQeReviewOf(run);
+    if (check.satisfied && review !== null && review.outcome !== 'pass') {
+      return {
+        ...check,
+        satisfied: false,
+        reason: `the isolated QE review did not bind a PASS (${review.outcome}${review.reason ? `: ${review.reason}` : ''}); a PASS in the ledger without it does not count`,
+      };
+    }
+    return check;
+  }
+
+  /** The engine's isolated QE review record on the run's latest QE unit (`units[].qe_review`, the
+   *  unit's last attempt), or `null` when the engine kept none. */
+  function engineQeReviewOf(run: SessionView): { outcome: string; reason: string } | null {
+    let latest: { ord: number; review: { outcome: string; reason: string } } | null = null;
+    for (const u of run.units ?? []) {
+      const r = (u as { qe_review?: { outcome?: unknown; reason?: unknown } | null }).qe_review;
+      if (r === undefined || r === null || typeof r.outcome !== 'string') continue;
+      if (latest === null || u.ord > latest.ord) {
+        latest = { ord: u.ord, review: { outcome: r.outcome, reason: typeof r.reason === 'string' ? r.reason : '' } };
+      }
+    }
+    return latest?.review ?? null;
   }
 
   /**
@@ -5174,6 +5206,22 @@ export function registerRoutes(
     if (!parsed.success) {
       return { code: 400, body: invalidBody(parsed.error, 'Invalid request body') };
     }
+    // (studio#923) Skipping QE acceptance is the human operator's call alone: a seat's token, a
+    // standing order or any other non-human actor is refused before anything is read, and the
+    // attempt is audited. The engine records WHO skipped it from the same actor (recordGateActor).
+    if (parsed.data.action === SKIP_QE_ACTION && !isHumanOperator(actor)) {
+      audit.record('gate.skip_qe_refused', actor, {
+        runId: id,
+        detail: { reason: 'human_operator_only', ...(parsed.data.ord !== undefined ? { ord: parsed.data.ord } : {}) },
+      });
+      return {
+        code: 403,
+        body: {
+          error: `only a human operator can skip QE acceptance (you are ${actor.kind}/${actor.trust})`,
+          code: 'human_operator_only',
+        },
+      };
+    }
     return decideExclusively(id, async () => {
       const views = await adapter.sessionsDetail();
       const run = views.find((v) => v.session.id === id);
@@ -5231,6 +5279,14 @@ export function registerRoutes(
         // WHO approved/rejected — the gate-decision audit (task #88). The engine
         // records THAT the gate resolved (interaction_requests / gateDecided);
         // only this HTTP layer knows the authenticated principal behind it.
+        // (studio#923) The QE skip's own audit line, beside `gate.decided`: who skipped QE on which
+        // run and gate, and why.
+        if (parsed.data.action === SKIP_QE_ACTION) {
+          audit.record('gate.qe_skipped', actor, {
+            runId: id,
+            detail: { reason: parsed.data.amend ?? '', ...(gated !== undefined ? { ord: gated.ord } : {}), status },
+          });
+        }
         audit.record('gate.decided', actor, {
           runId: id,
           detail: {
@@ -5634,6 +5690,28 @@ export function registerRoutes(
         return {};
       }
     };
+    // (studio#923) A deliver gate whose delivery QE acceptance refuses offers the operator's skip IN
+    // PLACE: `{approve: true, action: 'skip_qe', amend: <reason>, ord}` on this gate, labelled on
+    // the run, every later gate and the delivery — never a relaunch. Read each time (a PASS
+    // recorded since the pause withdraws it). Absent on every other gate.
+    const skipQeAt = async (gated: WorkUnit | undefined): Promise<{ skipQe?: SkipQeOffer }> => {
+      if (gated === undefined || !isDeliverUnit(gated)) return {};
+      const run = (await adapter.sessionsDetail()).find((v) => v.session.id === id);
+      if (run === undefined) return {};
+      const decision = qeDecisionOf(run);
+      if (decision === null || qeDecisionBypasses(decision)) return {};
+      const check = await qeAcceptanceCheckFor(run);
+      if (check === null || check.satisfied) return {};
+      return {
+        skipQe: {
+          action: SKIP_QE_ACTION,
+          reasonRequired: true,
+          actor: 'human_operator',
+          label: QE_SKIPPED_BY_OPERATOR_LABEL,
+          qeAcceptance: check,
+        },
+      };
+    };
     // The record judges the cache (crew#1083 round 7): rows that disagree on the ord are 409
     // `gate_unknown` whether or not something is cached, and a cached entry is served — for its
     // presentation fields (prompt, choices, recommended) — only when its ord is the record's open
@@ -5659,7 +5737,7 @@ export function registerRoutes(
       if (servable) {
         // One read of the gated unit serves both its receipt and its re-judge offer.
         const gated = await unitAt(cached.ord);
-        return { runId: id, ...cached, assurance: receiptOf(gated), ...(await rejudgeAt(cached.ord, gated)) };
+        return { runId: id, ...cached, assurance: receiptOf(gated), ...(await rejudgeAt(cached.ord, gated)), ...(await skipQeAt(gated)) };
       }
       gateCache.forget(id);
     }
@@ -5731,7 +5809,7 @@ export function registerRoutes(
       return reply.code(404).send({ error: 'No open gate for this run' });
     }
     const gatedUnit = run.units?.find((u) => u.ord === open.ord);
-    return { runId: id, ...open, assurance: receiptOf(gatedUnit), ...(await rejudgeAt(open.ord, gatedUnit)) };
+    return { runId: id, ...open, assurance: receiptOf(gatedUnit), ...(await rejudgeAt(open.ord, gatedUnit)), ...(await skipQeAt(gatedUnit)) };
   });
 
   // ── Elicitation (DES-002) ────────────────────────────────────────────────────
