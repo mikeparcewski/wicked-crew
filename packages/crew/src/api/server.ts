@@ -138,6 +138,7 @@ import { resolveSkillsRoot, SkillsStore } from '../skills/store.js';
 import { uvSyncBaseline, type VenvProvisioner } from '../skills/venv.js';
 import {
   DEFAULT_WORKER_STALL_ESCALATE_MINUTES,
+  DEFAULT_WORKER_SILENT_TURN_MINUTES,
   DEFAULT_WORKER_STALL_MINUTES,
 } from '../core/types.js';
 import { daemonSignalLog } from '../core/daemon-signal-log.js';
@@ -398,6 +399,8 @@ export interface CreateServerOptions {
     escalateAction?: 'reassign' | 'notify';
     /** Per-run automatic-reassign budget override — bypasses the settings read (tests). */
     maxEscalations?: number;
+    /** Silent-turn rung override, minutes (crew#972) — bypasses the settings read (tests). */
+    silentTurnMinutes?: number;
     /** Process-liveness override (crew#629): default = the daemon's own process tree
      *  (`RunLivenessSampler`); tests pass a stub or `null` (frame-only clock). */
     busy?: ((runIds: string[]) => Promise<ReadonlyMap<string, string>>) | null;
@@ -1705,6 +1708,10 @@ export async function createServer(
             DEFAULT_WORKER_STALL_ESCALATE_MINUTES,
           action: o?.escalateAction ?? settings.workerStallEscalateAction,
           maxPerRun: o?.maxEscalations ?? settings.workerStallMaxEscalations,
+          silentTurnMinutes:
+            o?.silentTurnMinutes ??
+            settings.workerSilentTurnMinutes ??
+            DEFAULT_WORKER_SILENT_TURN_MINUTES,
         };
       },
       // The watchdog passes its failover TARGET (perf#4: a different seat from the run's pool

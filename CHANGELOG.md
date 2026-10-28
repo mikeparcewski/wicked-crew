@@ -12,6 +12,16 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **A seat that streams nothing is reassigned at 8 minutes, not 30 (crew#972, api-types 0.147.0).** On rig
+  run 115fabdb a codex review streamed no output for 30 minutes, burning about 1 s of seat CPU while it
+  waited on its model, before the stall watchdog reassigned it; pi then did the review in 2 minutes. The
+  armed watchdog now has a silent-turn rung, `workerSilentTurnMinutes` (default 8, `0` = off, integer
+  0..1440 on `PUT /settings`). It acts on a cursor seat that has streamed no output at all since its
+  dispatch, with the same action and budget as the 30-minute rung, after the detection frame, and flags the
+  frame `silentTurn: true`. It never acts on a tool unit, on a worker that returned, after a daemon restart
+  lost the count, or while the run is busy. The busy read now also covers the run's seat containers
+  (`<runtime> stats --no-stream`, the same 5 % CPU share as host processes), so a seat running the repo's
+  tests inside its container is not silent; when the containers cannot be read, that rung does not act.
 - Gate reasons now take precedence over role restrictions in derived seat refusals (#1087).
 
 ## [0.16.7] — 2026-10-28

@@ -7201,6 +7201,15 @@ export function registerRoutes(
           .send({ error: "workerStallEscalateAction must be 'reassign' or 'notify'" });
       }
     }
+    // workerSilentTurnMinutes (crew#972): the silent-turn rung; 0 = off. Same 400-not-drop posture.
+    if (Object.hasOwn(patch, 'workerSilentTurnMinutes')) {
+      const mins = patch.workerSilentTurnMinutes;
+      if (typeof mins !== 'number' || !Number.isInteger(mins) || mins < 0 || mins > 1440) {
+        return reply.code(400).send({
+          error: 'workerSilentTurnMinutes must be an integer between 0 (off) and 1440',
+        });
+      }
+    }
     if (Object.hasOwn(patch, 'workerStallMaxEscalations')) {
       const n = patch.workerStallMaxEscalations;
       if (typeof n !== 'number' || !Number.isInteger(n) || n < 1 || n > 10) {
@@ -7351,6 +7360,7 @@ export function registerRoutes(
       'workerStallEscalateMinutes',
       'workerStallEscalateAction',
       'workerStallMaxEscalations',
+      'workerSilentTurnMinutes',
       'deliverDefault',
       'qeAcceptance',
       'onboardingAutoCapture',
