@@ -408,9 +408,11 @@ export class WorkerStallWatchdog {
         // dispatch is acted on at `silentTurnMs` instead of the 15/30 ladder (rig run 115fabdb: a
         // codex review sat 30 min with ~1 s of seat CPU; pi did it in 2). The busy read above has
         // already re-armed a run whose processes or seat containers are working.
+        // Only a rung SHORTER than the ladder's own act threshold is a silent-turn rung (xreview).
         const silent =
           escalation !== undefined &&
           escalation.silentTurnMs > 0 &&
+          escalation.silentTurnMs < escalation.thresholdMs &&
           busyRead &&
           !unknown &&
           this.silentTurn(run);
@@ -449,7 +451,8 @@ export class WorkerStallWatchdog {
           !this.quietPeriods.get(run.id)?.escalationTriggered
         ) {
           this.quietPeriod(run.id).escalationTriggered = true;
-          await this.escalate(run, quietForMs, escalation, silent);
+          // The frame says `silentTurn` only when this rung, not the ladder, is what acted.
+          await this.escalate(run, quietForMs, escalation, silent && quietForMs < escalation.thresholdMs);
         }
       }
     } finally {
@@ -487,9 +490,11 @@ export class WorkerStallWatchdog {
     // either way — it may act (a directly-driven watchdog in a test).
     if (this.deps.busy === undefined) return { busy: empty, ok: true };
     const now = this.now();
-    // crew#972: a silent-turn rung shorter than the sampling floor must still be sampled first.
+    // crew#972: the busy read compares CPU against the previous sample, so a run is sampled from
+    // half its silent-turn threshold at the latest — the sweep that reaches the threshold has a
+    // baseline (and a process seen for the first time reads as an unknown, never as idle).
     const sampleAfter =
-      silentTurnMs > 0 ? Math.min(LIVENESS_SAMPLE_AFTER_MS, silentTurnMs) : LIVENESS_SAMPLE_AFTER_MS;
+      silentTurnMs > 0 ? Math.min(LIVENESS_SAMPLE_AFTER_MS, silentTurnMs / 2) : LIVENESS_SAMPLE_AFTER_MS;
     const quiet = executing
       .map((r) => r.id)
       .filter((id) => {

@@ -68,9 +68,13 @@ export function parseCpuTime(raw: string): number {
 }
 
 /** `cmd args`, with whether it exited 0 — for reads whose failure must not look like "none". */
-function runChecked(cmd: string, args: string[]): Promise<{ ok: boolean; stdout: string }> {
+function runChecked(
+  cmd: string,
+  args: string[],
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<{ ok: boolean; stdout: string }> {
   return new Promise((resolve) => {
-    execFile(cmd, args, { encoding: 'utf8', timeout: 6_000, maxBuffer: 4 * 1024 * 1024, windowsHide: true }, (err, stdout) => {
+    execFile(cmd, args, { encoding: 'utf8', timeout: 6_000, maxBuffer: 8 * 1024 * 1024, windowsHide: true, env }, (err, stdout) => {
       resolve({ ok: err === null, stdout: typeof stdout === 'string' ? stdout : '' });
     });
   });
@@ -88,7 +92,10 @@ function run(cmd: string, args: string[]): Promise<string> {
 /** The host probe: `ps` everywhere POSIX, cwd via lsof (macOS) or /proc (Linux). */
 export const hostProcessProbe: ProcessProbe = {
   table: async () => {
-    const out = await run('ps', ['-A', '-o', 'pid=,ppid=,time=,comm=']);
+    // (crew#972, xreview) A failed `ps` is an UNKNOWN, never "no process is busy": it throws, so the
+    // watchdog's read fails and the silent-turn rung cannot act on it.
+    const { ok, stdout: out } = await runChecked('ps', ['-A', '-o', 'pid=,ppid=,time=,comm='], childEnvWithBootEstateDb());
+    if (!ok) throw new Error('ps could not be read');
     const rows: ProcRow[] = [];
     for (const line of out.split('\n')) {
       const m = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(line);
@@ -115,6 +122,9 @@ export const hostProcessProbe: ProcessProbe = {
       return out;
     }
     const text = await run('lsof', ['-a', '-d', 'cwd', '-p', pids.join(','), '-Fpn', '-w']);
+    // lsof exits 1 when one of the pids has gone, so its exit code proves nothing; NO output at
+    // all for a live process tree is a failed read (crew#972, xreview).
+    if (text.trim() === '') throw new Error('lsof could not be read');
     let pid: number | undefined;
     for (const line of text.split('\n')) {
       if (line.startsWith('p')) pid = Number(line.slice(1));
@@ -149,11 +159,15 @@ export const BUSY_UNKNOWN_PREFIX = 'unknown: ';
  * `WICKED_CONTAINER_RUNTIME` when set (the only candidate), else docker / podman / nerdctl on PATH,
  * else the desktop install dirs a daemon's PATH often lacks. `null` = none found.
  */
-export function containerRuntime(
+export function containerRuntimeCandidates(
   env: NodeJS.ProcessEnv = process.env,
   exists: (p: string) => boolean = existsSync,
   home: string = homedir(),
-): string | null {
+): string[] {
+  const out: string[] = [];
+  const push = (p: string | null): void => {
+    if (p !== null && !out.includes(p)) out.push(p);
+  };
   const onPath = (name: string): string | null => {
     for (const dir of (env['PATH'] ?? '').split(delimiter)) {
       if (dir === '') continue;
@@ -164,13 +178,11 @@ export function containerRuntime(
   };
   const choice = env['WICKED_CONTAINER_RUNTIME']?.trim();
   if (choice !== undefined && choice !== '') {
-    if (isAbsolute(choice)) return exists(choice) ? choice : null;
-    return onPath(choice);
+    // An explicit choice is the only candidate, as in the engine: never silently swap runtimes.
+    push(isAbsolute(choice) ? (exists(choice) ? choice : null) : onPath(choice));
+    return out;
   }
-  for (const name of ['docker', 'podman', 'nerdctl']) {
-    const p = onPath(name);
-    if (p !== null) return p;
-  }
+  for (const name of ['docker', 'podman', 'nerdctl']) push(onPath(name));
   for (const p of [
     join(home, '.rd/bin/docker'),
     join(home, '.orbstack/bin/docker'),
@@ -180,9 +192,36 @@ export function containerRuntime(
     '/opt/homebrew/bin/podman',
     '/Applications/Docker.app/Contents/Resources/bin/docker',
   ]) {
-    if (exists(p)) return p;
+    if (exists(p)) push(p);
   }
-  return null;
+  return out;
+}
+
+/**
+ * The runtime the engine would select (wicked-core `container_floor::runtime`): the first candidate
+ * whose `version` answers, CACHED for the process once found, as the engine caches its own — so a
+ * runtime that starts later never moves this read off the one the engine's seats run under.
+ * `undefined` = not resolved yet (no candidate answered), retried on the next read.
+ */
+let selectedRuntime: string | undefined;
+
+/** (tests) Forget the cached runtime. */
+export function resetContainerRuntimeCache(): void {
+  selectedRuntime = undefined;
+}
+
+export async function containerRuntime(
+  candidates: string[] = containerRuntimeCandidates(),
+  answers: (rt: string) => Promise<boolean> = async (rt) => (await runChecked(rt, ['version'])).ok,
+): Promise<{ runtime: string | null; installed: boolean }> {
+  if (selectedRuntime !== undefined) return { runtime: selectedRuntime, installed: true };
+  for (const rt of candidates) {
+    if (await answers(rt)) {
+      selectedRuntime = rt;
+      return { runtime: rt, installed: true };
+    }
+  }
+  return { runtime: null, installed: candidates.length > 0 };
 }
 
 /** `12.34%` → 0.1234; NaN when the field is not a percentage. */
@@ -194,9 +233,12 @@ export function parseCpuPercent(raw: string): number {
 /** The host probe: `<runtime> ps` for the seat containers, then one `stats --no-stream` over them. */
 export const hostContainerProbe: ContainerProbe = {
   seats: async () => {
-    if (process.platform === 'win32') return [];
-    const rt = containerRuntime();
-    if (rt === null) return [];
+    // No seat containers on Windows, or when the operator chose the host seat floor.
+    if (process.platform === 'win32' || process.env['WICKED_SEAT_FLOOR'] === 'host') return [];
+    const { runtime: rt, installed } = await containerRuntime();
+    // No runtime installed: no seat can run in a container. One installed that does not answer
+    // is an unknown, never "no container is busy".
+    if (rt === null) return installed ? null : [];
     const ps = await runChecked(rt, ['ps', '--filter', 'name=wicked-seat-', '--format', '{{.Names}}']);
     if (!ps.ok) return null;
     const names = ps.stdout

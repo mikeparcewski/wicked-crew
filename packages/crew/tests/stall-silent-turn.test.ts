@@ -19,6 +19,8 @@ import {
   RunLivenessSampler,
   containerRunTag,
   containerRuntime,
+  containerRuntimeCandidates,
+  resetContainerRuntimeCache,
   parseCpuPercent,
   runOfContainer,
   type ContainerCpu,
@@ -192,12 +194,29 @@ describe('the seat-container busy read (crew#972)', () => {
     expect(Number.isNaN(parseCpuPercent('--'))).toBe(true);
   });
 
-  it('finds the runtime the engine would use', () => {
+  it('lists the runtimes the engine would try, in its order', () => {
     const has = (set: string[]) => (p: string) => set.includes(p);
-    expect(containerRuntime({ PATH: '/a:/b' }, has(['/b/docker']), '/h')).toBe('/b/docker');
-    expect(containerRuntime({ PATH: '/a' }, has(['/h/.rd/bin/docker']), '/h')).toBe('/h/.rd/bin/docker');
-    expect(containerRuntime({ PATH: '/a', WICKED_CONTAINER_RUNTIME: 'podman' }, has(['/a/docker']), '/h')).toBeNull();
-    expect(containerRuntime({ PATH: '/a' }, has([]), '/h')).toBeNull();
+    expect(containerRuntimeCandidates({ PATH: '/a:/b' }, has(['/b/docker', '/a/podman']), '/h')).toEqual(['/b/docker', '/a/podman']);
+    expect(containerRuntimeCandidates({ PATH: '/a' }, has(['/h/.rd/bin/docker']), '/h')).toEqual(['/h/.rd/bin/docker']);
+    // An explicit choice is the only candidate.
+    expect(containerRuntimeCandidates({ PATH: '/a', WICKED_CONTAINER_RUNTIME: 'podman' }, has(['/a/docker']), '/h')).toEqual([]);
+    expect(containerRuntimeCandidates({ PATH: '/a' }, has([]), '/h')).toEqual([]);
+  });
+
+  it('selects the first runtime that answers and keeps it, as the engine does (xreview)', async () => {
+    resetContainerRuntimeCache();
+    let dockerUp = false;
+    const answers = async (rt: string) => (rt === '/b/docker' ? dockerUp : true);
+    // Docker installed but stopped, podman working: the engine's seats run under podman.
+    expect(await containerRuntime(['/b/docker', '/a/podman'], answers)).toEqual({ runtime: '/a/podman', installed: true });
+    // Docker starting later does not move the read off podman (the engine's cached choice).
+    dockerUp = true;
+    expect(await containerRuntime(['/b/docker', '/a/podman'], answers)).toEqual({ runtime: '/a/podman', installed: true });
+    resetContainerRuntimeCache();
+    // Installed, none answering: an unknown; none installed: no containers.
+    expect(await containerRuntime(['/b/docker'], async () => false)).toEqual({ runtime: null, installed: true });
+    expect(await containerRuntime([], async () => true)).toEqual({ runtime: null, installed: false });
+    resetContainerRuntimeCache();
   });
 
   const idleHost = {
@@ -218,4 +237,76 @@ describe('the seat-container busy read (crew#972)', () => {
     const unknown = await reading(null);
     expect(unknown.get(RUN)?.startsWith(BUSY_UNKNOWN_PREFIX)).toBe(true);
   });
+
+  it('a failed ps fails the read instead of reading as idle (xreview)', async () => {
+    const wt = `/repo/wicked-worktrees/${RUN}`;
+    let cpu = 10;
+    let at = 0;
+    const host = {
+      table: async () => [{ pid: 50, ppid: 1, cpuSec: cpu, comm: 'vitest' }],
+      cwds: async () => new Map<number, string>([[50, wt]]),
+    };
+    const sampler = new RunLivenessSampler(host, 1, () => at, { seats: async () => [] });
+    expect((await sampler.busy([RUN])).size).toBe(0); // the baseline
+    cpu = 40; // 30 s of CPU in 30 s
+    at = 30_000;
+    expect((await sampler.busy([RUN])).get(RUN)).toContain('vitest pid 50');
+    const broken = new RunLivenessSampler(
+      { table: async () => { throw new Error('ps could not be read'); }, cwds: async () => new Map() },
+      1,
+      () => 0,
+      { seats: async () => [] },
+    );
+    await expect(broken.busy([RUN])).rejects.toThrow('ps could not be read');
+  });
 });
+
+describe('the silent-turn rung with the real sampler (xreview)', () => {
+  it('at a 1-minute setting a busy host test runner is never reassigned', async () => {
+    const wt = `/repo/wicked-worktrees/${RUN}`;
+    let nowMs = Date.parse('2026-10-28T01:40:37Z');
+    let cpu = 0;
+    const sampler = new RunLivenessSampler(
+      {
+        table: async () => [{ pid: 50, ppid: 1, cpuSec: cpu, comm: 'vitest' }],
+        cwds: async () => new Map<number, string>([[50, wt]]),
+      },
+      1,
+      () => nowMs,
+      { seats: async () => [] },
+    );
+    const frames: AnyFrame[] = [];
+    const reassigns: number[] = [];
+    const wd = new WorkerStallWatchdog({
+      listExecuting: async () => [{ id: RUN, ord: 7, cli: 'codex', seats: ['codex', 'pi'] }],
+      broadcast: (f) => frames.push(f),
+      escalation: {
+        config: () => ({ minutes: 30, silentTurnMinutes: 1 }),
+        reassign: async (_r, ord) => {
+          reassigns.push(ord);
+        },
+      },
+      busy: (ids) => sampler.busy(ids),
+      now: () => nowMs,
+    });
+    dispatch(wd);
+    for (let i = 0; i < 10; i++) {
+      nowMs += 30_000; // the daemon's sweep cadence
+      cpu += 25; // the test runner burns most of a core
+      await wd.sweep();
+    }
+    expect(frames).toEqual([]);
+    expect(reassigns).toEqual([]);
+  });
+
+  it('flags silentTurn only when that rung acted, not the ladder (xreview)', async () => {
+    const { wd, frames, tick } = build({ config: { minutes: 30, silentTurnMinutes: 30 } });
+    dispatch(wd);
+    tick(30 * MIN);
+    await wd.sweep();
+    const [esc] = escalatedOf(frames);
+    expect(esc).toBeDefined();
+    expect(esc?.silentTurn).toBeUndefined();
+  });
+});
+
