@@ -10,6 +10,18 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.16.8] — 2026-10-28
+
+A patch release for the last J4 bricks: a step whose only other seat monitored it still gets a judge (wicked-core#1165, crew#972); a seat that streams nothing is reassigned at 8 minutes instead of 30 (#1187, crew#972); every delivery's PR body carries the run's assurance labels (#1188, crew#1186). On wicked-core-ts ^0.15.16 and wicked-crew-api-types 0.147.0, bundling wicked-studio 0.13.0 (UI v2).
+
+### Changed
+
+- **Runs on wicked-core-ts 0.15.16.** Engine changes since 0.15.15: a step whose only other seat monitored
+  it still gets a judge, disclosed as a team-monitor fallback (core#1165, crew#972); the deliver lift
+  resolves a changelog conflict under main's current `[Unreleased]`, so a release cut no longer strands
+  in-flight runs (core#1163, core#1161); a re-used QE run binds the latest reviewer's verdict (core#1164,
+  core#1162).
+
 ### Fixed
 
 - **A seat that streams nothing is reassigned at 8 minutes, not 30 (crew#972, api-types 0.147.0).** On rig
@@ -4676,7 +4688,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.7...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.8...HEAD
+[0.16.8]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.7...v0.16.8
 [0.16.7]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.6...v0.16.7
 [0.16.6]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.5...v0.16.6
 [0.16.5]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.4...v0.16.5
