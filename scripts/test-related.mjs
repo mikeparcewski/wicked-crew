@@ -69,8 +69,22 @@
 // worktree guard does not see it. If the build fails, the failure is printed, the tests still run
 // for their evidence, and the check fails whatever they report: tsc emits even on a type error, so
 // passing tests after a failed build prove nothing about the build. Nothing is skipped.
+//
+// ## crew#1173 — the cross-repo tests run where the sibling checkout exists, and only there
+//
+// A handful of tests read the sibling `wicked-core` checkout (`tests/support/core-checkout.ts`):
+// core's constants are derived from core's own sources rather than transcribed. The floor's checkout
+// is a lone clone under the system temp dir with no sibling, so those tests failed on every crew
+// floor, base and head alike, and the base could not be separated from the change. The operator's
+// ruling: they run in CI, which checks crew and core out as siblings, and the floor leaves them out
+// and says so. They carry the vitest tag `cross-repo` (declared in `vitest.config.ts`); when this
+// script finds no checkout ({@link coreCheckoutDir}, the same candidates the support module tries)
+// it passes `--tags-filter=!cross-repo` to vitest, on the first run and on the retry, and prints ONE
+// line naming how many it left out, in which files, and why. With a checkout it passes nothing, and
+// everywhere else (a developer's `npm test`, CI) nothing changes: a missing checkout still fails
+// those tests loudly, as the support module's policy says.
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { cpus, freemem, loadavg } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -84,6 +98,67 @@ export const HOST_MARKER = 'WICKED-HOST';
 export const RETRY_MARKER = 'WICKED-RETRY';
 /** crew's own build (`packages/crew` `build` = `tsc -p tsconfig.json`), run before the tests (crew#1173). */
 export const BUILD_ARGV = ['npm', 'run', 'build'];
+
+/** The vitest tag on every test that reads the sibling wicked-core checkout (crew#1173). */
+export const CROSS_REPO_TAG = 'cross-repo';
+/** What vitest is handed when there is no checkout: every test except the cross-repo ones. */
+export const CROSS_REPO_FILTER = [`--tags-filter=!${CROSS_REPO_TAG}`];
+/** What `tests/support/core-checkout.ts` requires of a directory before it counts as core's checkout. */
+const CORE_ARTIFACTS = [join('crates', 'wicked-core-ts', 'package.json')];
+
+/**
+ * The sibling wicked-core checkout the cross-repo tests would use, or `null`. The same rule as
+ * `resolveCoreDir()` in `tests/support/core-checkout.ts` (the parity is pinned by
+ * `tests/test-related-cross-repo.test.ts`): an explicit `WICKED_CORE_DIR` is the only candidate,
+ * otherwise `<repo>/../wicked-core` then `<repo>/../../wicked-core`, and a directory qualifies only
+ * when it carries the artifacts.
+ */
+export function coreCheckoutDir({ override = process.env['WICKED_CORE_DIR'], repoRoot = ROOT } = {}) {
+  const candidates =
+    override !== undefined && override.length > 0
+      ? [override]
+      : [resolve(repoRoot, '..', 'wicked-core'), resolve(repoRoot, '..', '..', 'wicked-core')];
+  for (const dir of candidates) {
+    if (existsSync(dir) && CORE_ARTIFACTS.every((rel) => existsSync(join(dir, rel)))) return dir;
+  }
+  return null;
+}
+
+/**
+ * The tests tagged {@link CROSS_REPO_TAG}, counted off the source: `{ count, files }`, files relative
+ * to `packages/crew`. Each tagged `it` is one test; the tag goes on tests, not on suites, so this
+ * count is the number vitest leaves out (pinned by `tests/test-related-cross-repo.test.ts`).
+ */
+export function crossRepoTests(crewDir = resolve(ROOT, CREW)) {
+  const tag = new RegExp(`tags:\\s*\\[\\s*['"]${CROSS_REPO_TAG}['"]\\s*\\]`, 'g');
+  const files = [];
+  let count = 0;
+  const walk = (dir) => {
+    for (const name of readdirSync(dir).sort()) {
+      const p = join(dir, name);
+      if (statSync(p).isDirectory()) {
+        if (name !== 'node_modules') walk(p);
+      } else if (/\.test\.[cm]?[jt]sx?$/.test(name)) {
+        const n = (readFileSync(p, 'utf8').match(tag) ?? []).length;
+        if (n > 0) {
+          count += n;
+          files.push(p.slice(crewDir.length + 1).replace(/\\/g, '/'));
+        }
+      }
+    }
+  };
+  const tests = join(crewDir, 'tests');
+  if (existsSync(tests)) walk(tests);
+  return { count, files };
+}
+
+/** The one line the floor's evidence carries when the cross-repo tests are left out. */
+export function crossRepoLine({ count, files }) {
+  return (
+    `test-related: left out ${count} cross-repo test(s) (vitest tag \`${CROSS_REPO_TAG}\`, in ${files.join(', ')}): ` +
+    'no sibling wicked-core checkout; CI runs them (crew#1173).'
+  );
+}
 
 /**
  * The failure shapes that earn ONE re-run — all of them DEADLINES, none of them a verdict about the
@@ -326,6 +401,8 @@ export async function runTargeted(files, io = {}) {
   const host = io.host ?? hostSnapshot;
   const now = io.now ?? Date.now;
   const budgetS = io.budgetS ?? checksTimeoutS();
+  const coreDir = io.coreDir ?? coreCheckoutDir;
+  const tagged = io.crossRepoTests ?? crossRepoTests;
 
   const p = plan(files);
   if (p.skip) {
@@ -336,6 +413,9 @@ export async function runTargeted(files, io = {}) {
   }
 
   out(formatHostLine(host(), 'pre'));
+  // crew#1173: no sibling wicked-core checkout → leave the cross-repo tests out, and say so once.
+  const filter = coreDir() === null ? CROSS_REPO_FILTER : [];
+  if (filter.length > 0) out(crossRepoLine(tagged()));
   // crew#1173: the dist-CLI suites spawn dist/cli/index.js, and the floor's checkout has no dist/.
   // Emptied first: tsc overwrites what it emits but never removes the output of a deleted source.
   out(`test-related: ${BUILD_ARGV.join(' ')} (cwd ${p.cwd}) — a clean dist/ first, for the dist-CLI suites`);
@@ -356,9 +436,10 @@ export async function runTargeted(files, io = {}) {
   // The vitest attempt (and its one retry) decides the tests' code; the build's verdict is applied
   // after it, so a failed build never reads as a pass, and the host line stays the LAST line.
   const attempt = async () => {
-    out(`test-related: ${p.argv.join(' ')} (cwd ${p.cwd})`);
+    const argv = [...p.argv, ...filter];
+    out(`test-related: ${argv.join(' ')} (cwd ${p.cwd})`);
     const startedMs = now();
-    const first = await run(p.argv, p.cwd);
+    const first = await run(argv, p.cwd);
     if (first.spawnError != null) {
       out(`test-related: could not run vitest: ${first.spawnError}`);
       return 1;
@@ -380,13 +461,13 @@ export async function runTargeted(files, io = {}) {
     const elapsedS = (now() - startedMs) / 1000;
     let retryArgv = null;
     if (failed.length > 0) {
-      retryArgv = ['npx', 'vitest', 'run', '--no-file-parallelism', ...failed];
+      retryArgv = ['npx', 'vitest', 'run', '--no-file-parallelism', ...filter, ...failed];
       out(
         `${RETRY_MARKER} ${why} — re-running the ${failed.length} named file(s) ONCE, serially, before recording ` +
           `any failure: ${failed.join(', ')}`,
       );
     } else if (elapsedS < budgetS / 2) {
-      retryArgv = [...p.argv, '--no-file-parallelism'];
+      retryArgv = [...argv, '--no-file-parallelism'];
       out(
         `${RETRY_MARKER} ${why}, and the output named no test file (a worker died before it reported) — re-running ` +
           `the whole targeted command ONCE, serially (${elapsedS.toFixed(0)}s of the ${budgetS}s budget used).`,

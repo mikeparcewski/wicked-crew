@@ -50,7 +50,7 @@ describe('the cross-repo guards are live in this environment', () => {
   /// Skipped only under the explicit human opt-out, which no workflow sets — so in CI and in the
   /// release job this is unconditional. A run where the sibling checkout is missing now fails HERE,
   /// naming the cause, instead of one guard exploding and two others reporting green.
-  it.skipIf(CORE_CHECKS_OPTIONAL)('is not running in skip mode', () => {
+  it.skipIf(CORE_CHECKS_OPTIONAL)('is not running in skip mode', { tags: ['cross-repo'] }, () => {
     expect(
       SKIP_CORE_CHECKS,
       'the cross-repo drift guards are in skip mode. Automation must never reach this state: ' +
@@ -63,7 +63,7 @@ describe('the cross-repo guards are live in this environment', () => {
 
   /// Presence of a path string is not presence of a checkout. Assert the artifacts the guards
   /// actually read, so a directory that merely has the right NAME cannot satisfy this.
-  it.skipIf(CORE_CHECKS_OPTIONAL)('resolved a checkout that carries the artifacts', () => {
+  it.skipIf(CORE_CHECKS_OPTIONAL)('resolved a checkout that carries the artifacts', { tags: ['cross-repo'] }, () => {
     const dir = resolveCoreDir();
     expect(dir).not.toBeNull();
     for (const rel of [join('crates', 'wicked-core-ts', 'package.json')]) {

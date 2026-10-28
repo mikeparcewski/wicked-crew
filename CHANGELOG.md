@@ -36,6 +36,18 @@ mentioned only where a daemon release depends on them.
   place. An engine that keeps no review record leaves the ledger's word. An operator's skip is audited
   as `gate.qe_skipped` (who, run, gate, reason) beside `gate.decided`.
 
+### Fixed
+
+- **The repository-checks floor leaves crew's cross-repo tests out, and says so (crew#1173).** Seven
+  tests read the sibling wicked-core checkout (the state-home OS-metadata parity, the deliver phase's
+  three engine-source guards, the two checkout-policy guards and the engine-range guard). The floor's
+  checkout has no sibling, so they failed on every crew floor, base and head alike. They now carry the
+  vitest tag `cross-repo`; `scripts/test-related.mjs` (`test_targeted`) passes `--tags-filter=!cross-repo`
+  when it finds no checkout and prints one line naming what it left out and why. CI, which checks
+  crew and core out as siblings, runs them as before, and a developer run without the sibling still
+  fails them loudly. The engine-range guard reads core's version inside its test, so a missing
+  checkout no longer fails the whole file.
+
 ## [0.16.6] — 2026-10-27
 
 A patch release for governed-run wall time and the default-evals surface: `/health.capabilities` announces `defaultEvals`, `insights` and `schedules` (#1174); diagnostics no longer tells you to install garden while the skills boot ladder is still publishing (#1170, crew#1149); a floor re-verify in a guarded checkout is not a stall (#1172); every governed delivery to wicked-crew is no longer refused once for a stale generated test (#1171, crew#1169); and crew's own base is no longer red in the repository-checks floor for want of `dist/` (#1177, crew#1173). `wicked-crew-api-types` 0.145.0 is on npm. Runs on wicked-core-ts 0.15.14 (core#1141, core#1145, core#1146, core#1147). Bundles wicked-studio 0.12.3 (unchanged).

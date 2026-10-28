@@ -274,7 +274,7 @@ describe("OS file-manager metadata list (crew-statehome-os-metadata): crew's lis
   });
   // core's list is a Rust const (wicked-core#1117, src/state_home.rs `OS_METADATA_PATTERNS`); the
   // shared fixture stays byte-identical with core's copy, so the parity is read from core's source.
-  it.skipIf(SKIP_CORE_CHECKS)("equals wicked-core's OS_METADATA_PATTERNS (src/state_home.rs)", () => {
+  it.skipIf(SKIP_CORE_CHECKS)("equals wicked-core's OS_METADATA_PATTERNS (src/state_home.rs)", { tags: ['cross-repo'] }, () => {
     const src = readFileSync(join(requireCoreDir(), 'src', 'state_home.rs'), 'utf8');
     const body = /const OS_METADATA_PATTERNS: &\[&str\] = &\[([^\]]*)\];/.exec(src)?.[1];
     expect(body, "core's src/state_home.rs no longer declares OS_METADATA_PATTERNS").toBeDefined();
