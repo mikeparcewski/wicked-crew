@@ -10,6 +10,10 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.16.7] — 2026-10-28
+
+A patch release for the J4 deliver bricks: a QE-refused deliver gate offers "skip QE with a reason" in place, human operator only (#1181, studio#923); a ledger PASS counts at delivery only beside the engine's bound QE review (#1181, wicked-core#1153); the floor leaves crew's cross-repo tests out when there is no sibling wicked-core (#1183, crew#1173). On wicked-core-ts ^0.15.15 and wicked-crew-api-types 0.146.0, bundling wicked-studio 0.13.0 (UI v2).
+
 ### Added
 
 - **A QE-refused deliver gate offers "skip QE with a reason" in place (studio#923, api-types 0.146.0).**
@@ -24,17 +28,24 @@ mentioned only where a daemon release depends on them.
 
 ### Changed
 
+- **Runs on wicked-core-ts 0.15.15.** Engine changes since 0.15.14: a JS run's seats find the worktree's
+  dependencies installed for the platform they run on (core#1155, J4 brick); a failed floor's gate keeps
+  the operator's judgment when QE has no bound verdict, and a no-change floor fix keeps the QE record
+  (core#1153); verify reuses the fix floor's checks in any order, with `repoChecksEvaluated.reusedFrom`
+  (core#1152, crew#1180); a seat out of extra usage is benched for quota (core#1069).
+- **Bundles wicked-studio 0.13.0 (UI v2)** as the default local skin (`build:with-studio`), including the
+  gate-dock fixes that render the in-place QE skip (studio#920, studio#922, studio#923).
 - **Only a human operator can skip QE acceptance at a gate (studio#923).** `action: 'skip_qe'` from an
   operator-trust actor that is not human (a seat's token, a standing order) is a 403 `{code:
   'human_operator_only'}`, refused before anything is read and audited as `gate.skip_qe_refused`; an
   actor below operator trust is refused by the daemon's trust check before the route, as for every
-  gate answer.
+  gate answer. An operator's skip is audited as `gate.qe_skipped` (who, run, gate, reason) beside
+  `gate.decided`.
 - **A ledger PASS counts at delivery only beside the engine's bound QE review (wicked-core#1153).** When
   the latest QE unit's isolated review (`units[].qe_review`) did not bind a PASS (no verdict recorded,
   INCONCLUSIVE, a FAIL, no reviewer), a PASS some other writer put in the ledger, such as the QE
   executor's own, no longer satisfies QE acceptance: the deliver gate refuses and offers the skip in
-  place. An engine that keeps no review record leaves the ledger's word. An operator's skip is audited
-  as `gate.qe_skipped` (who, run, gate, reason) beside `gate.decided`.
+  place. An engine that keeps no review record leaves the ledger's word.
 
 ### Fixed
 
@@ -4642,7 +4653,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.6...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.7...HEAD
+[0.16.7]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.6...v0.16.7
 [0.16.6]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.5...v0.16.6
 [0.16.5]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.4...v0.16.5
 [0.16.4]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.3...v0.16.4
