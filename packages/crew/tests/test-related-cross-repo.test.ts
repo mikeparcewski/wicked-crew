@@ -186,6 +186,16 @@ describe("the script's checkout test is the support module's resolver", () => {
     const elsewhere = makeCore(join(tmp, 'elsewhere'));
     expect(mod.coreCheckoutDir({ repoRoot: repo, override: elsewhere })).toBe(elsewhere);
   });
+
+  it('a RELATIVE override is read from packages/crew, where vitest and the support module run (review of #1183)', () => {
+    const root = join(tmp, 'relative');
+    const repo = join(root, 'crew');
+    mkdirSync(join(repo, 'packages', 'crew'), { recursive: true });
+    makeCore(join(root, SIBLING));
+    // From packages/crew, three levels up is <root>; from the repo root it would be above <root>.
+    const rel = join('..', '..', '..', SIBLING);
+    expect(mod.coreCheckoutDir({ repoRoot: repo, override: rel })).toBe(join(root, SIBLING));
+  });
 });
 
 describe('every test that reads the checkout is tagged cross-repo, on the test', () => {

@@ -111,12 +111,14 @@ const CORE_ARTIFACTS = [join('crates', 'wicked-core-ts', 'package.json')];
  * `resolveCoreDir()` in `tests/support/core-checkout.ts` (the parity is pinned by
  * `tests/test-related-cross-repo.test.ts`): an explicit `WICKED_CORE_DIR` is the only candidate,
  * otherwise `<repo>/../wicked-core` then `<repo>/../../wicked-core`, and a directory qualifies only
- * when it carries the artifacts.
+ * when it carries the artifacts. A RELATIVE override is read from `packages/crew`, where vitest (and so
+ * the support module) runs, not from this script's cwd: read from here it could name nothing while
+ * the tests find a checkout, and the filter would drop guards that could have run (review of #1183).
  */
 export function coreCheckoutDir({ override = process.env['WICKED_CORE_DIR'], repoRoot = ROOT } = {}) {
   const candidates =
     override !== undefined && override.length > 0
-      ? [override]
+      ? [resolve(repoRoot, CREW, override)]
       : [resolve(repoRoot, '..', 'wicked-core'), resolve(repoRoot, '..', '..', 'wicked-core')];
   for (const dir of candidates) {
     if (existsSync(dir) && CORE_ARTIFACTS.every((rel) => existsSync(join(dir, rel)))) return dir;
