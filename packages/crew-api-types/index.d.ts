@@ -1685,6 +1685,36 @@ export interface GateInfo {
    * readiness read (then `rejudge` is not offered).
    */
   rejudge?: RejudgeOffer;
+  /**
+   * (api-types 0.146.0; studio#923) On a DELIVER gate whose delivery QE acceptance refuses (no
+   * attributed PASS, an INCONCLUSIVE or unbound review, a FAIL): the operator's skip of QE
+   * acceptance IN PLACE, on this gate — no relaunch. Answer it with
+   * `POST /runs/:id/gate {approve: true, action: 'skip_qe', amend: '<reason>', ord}` (the reason is
+   * required). The run's QE decision becomes `skipped` by the operator and the delivery goes,
+   * labelled "QE acceptance skipped by operator: <reason>" on the run, every later gate and the
+   * delivery. Only a human operator may take it: any other actor (a seat's token, a standing order)
+   * gets a 403 `{code: 'human_operator_only'}`, and both the skip (`gate.qe_skipped`) and a refused
+   * attempt (`gate.skip_qe_refused`) are audited. Read each time: ABSENT once QE passes, on every
+   * other gate, on a run that does not require QE acceptance, and on an older daemon.
+   */
+  skipQe?: SkipQeOffer;
+}
+
+/**
+ * (api-types 0.146.0; studio#923) The operator's in-place QE skip a deliver gate offers
+ * ({@link GateInfo.skipQe}). `action` is the stable choice key (the {@link GateDecision.action}
+ * token); `qeAcceptance` is the check that refuses the delivery now, so the card can say why (an
+ * INCONCLUSIVE review means a re-run of QE may hit the same wall).
+ */
+export interface SkipQeOffer {
+  action: 'skip_qe';
+  /** Always `true`: `amend` must carry a non-empty reason (a 400 otherwise). */
+  reasonRequired: true;
+  /** Always `'human_operator'`: who may take it. */
+  actor: 'human_operator';
+  /** The label the skip carries: `QE acceptance skipped by operator`. */
+  label: string;
+  qeAcceptance: QeAcceptanceCheck;
 }
 
 /**

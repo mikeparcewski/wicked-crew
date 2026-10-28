@@ -49,6 +49,7 @@ const RUNS = {
 
 let dir: string;
 let app: FastifyInstance;
+const audit = { record: vi.fn(() => Date.now()), readAll: vi.fn(async () => []) } as unknown as AuditLog;
 const gateCache = new GateCache();
 const confirmCalls: unknown[][] = [];
 const evidenceOf = (id: string) => join(dir, 'walkthroughs', id);
@@ -139,8 +140,16 @@ beforeAll(async () => {
       return 'executing';
     }),
   };
-  const audit = { record: vi.fn(() => Date.now()), readAll: vi.fn(async () => []) } as unknown as AuditLog;
   app = Fastify({ logger: false });
+  // (studio#923) A request may name its actor (`x-test-actor: kind/trust`), as an authenticated
+  // principal would be: a seat's token is an `agent`, a standing order is `system`.
+  app.addHook('onRequest', async (req) => {
+    const named = req.headers['x-test-actor'];
+    if (typeof named === 'string') {
+      const [kind, trust] = named.split('/');
+      (req as unknown as { actor: unknown }).actor = { id: `test-${kind}`, kind, trust };
+    }
+  });
   registerRoutes(app, mockAdapter as unknown as CoreAdapter, gateCache, new ElicitationCache(), undefined, { audit, authMode: 'off' }, {
     worktreeExists: () => true,
     deliverExec: async () => ({ status: 0, output: '' }),
@@ -175,6 +184,7 @@ beforeAll(async () => {
 
 beforeEach(() => {
   confirmCalls.length = 0;
+  (audit.record as ReturnType<typeof vi.fn>).mockClear();
   for (const id of Object.values(RUNS)) {
     gateCache.adopt(id, { ord: DELIVER_ORD, prompt: 'Approve deliver?', lifecycle: 'open', receivedAt: '2026-10-26T08:20:00Z' });
   }
@@ -266,5 +276,63 @@ describe('j4-gates — skip QE acceptance at the deliver gate, with a reason', (
     const plain = await decide(RUNS.skipAtDeliver);
     expect(plain.statusCode, plain.body).toBe(409);
     expect(confirmCalls).toEqual([]);
+  });
+});
+
+describe('studio#923 — the QE-refused deliver gate offers the skip in place, to a human operator only', () => {
+  const gate = (id: string) => app.inject({ method: 'GET', url: `/api/v1/runs/${id}/gate` });
+  const audited = (action: string) =>
+    (audit.record as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === action);
+
+  it('GET /gate on a QE-refused deliver gate carries the skipQe offer with its stable key', async () => {
+    const res = await gate(RUNS.skipAtDeliver);
+    expect(res.statusCode, res.body).toBe(200);
+    const offer = res.json().skipQe;
+    expect(offer).toMatchObject({
+      action: 'skip_qe',
+      reasonRequired: true,
+      actor: 'human_operator',
+      label: 'QE acceptance skipped by operator',
+      qeAcceptance: { status: 'required', satisfied: false },
+    });
+    expect(offer.qeAcceptance.reason).toMatch(/^FAIL/);
+  });
+
+  it('a deliver gate whose QE passed offers no skip', async () => {
+    const res = await gate(RUNS.failThenPassSameTree);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().skipQe).toBeUndefined();
+  });
+
+  it('a seat (agent) or a standing order (system) is refused 403 and audited; nothing is confirmed', async () => {
+    for (const actor of ['agent/operator', 'system/operator', 'human/observer']) {
+      const res = await app.inject({
+        method: 'POST',
+        url: `/api/v1/runs/${RUNS.skipAtDeliver}/gate`,
+        headers: { 'x-test-actor': actor },
+        payload: { approve: true, ord: DELIVER_ORD, action: 'skip_qe', amend: 'skip it' },
+      });
+      expect(res.statusCode, `${actor}: ${res.body}`).toBe(403);
+      expect(res.json().code).toBe('human_operator_only');
+    }
+    expect(confirmCalls).toEqual([]);
+    expect(audited('gate.skip_qe_refused')).toHaveLength(3);
+    expect(audited('gate.qe_skipped')).toHaveLength(0);
+  });
+
+  it("the human operator's skip is confirmed on this gate and audited with the reason", async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/runs/${RUNS.skipAtDeliver}/gate`,
+      headers: { 'x-test-actor': 'human/operator' },
+      payload: { approve: true, ord: DELIVER_ORD, action: 'skip_qe', amend: 'seats could not run vitest; checked by hand' },
+    });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(confirmCalls).toHaveLength(1);
+    expect(confirmCalls[0]!.slice(1, 4)).toEqual([true, 'seats could not run vitest; checked by hand', 'skip_qe']);
+    const skipped = audited('gate.qe_skipped');
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]![1]).toMatchObject({ kind: 'human', trust: 'operator' });
+    expect(skipped[0]![2]).toMatchObject({ runId: RUNS.skipAtDeliver, detail: { reason: 'seats could not run vitest; checked by hand', ord: DELIVER_ORD } });
   });
 });
