@@ -5,6 +5,8 @@
 // turns `council_eligible` into the engine's bench verdict.
 import { describe, expect, it } from 'vitest';
 
+import { seatStanding } from '../src/api/seat-standing.js';
+import type { SeatRecentBench } from '../src/api/seat-health.js';
 import { CREW_ONLY_SEAT_FIELDS, eligibleSeatKeys, engineRosterJson, toEngineRoster, toEngineSeat } from '../src/core/engine-roster.js';
 
 const registrySeat = {
@@ -154,5 +156,55 @@ describe('council vs work eligibility (crew#916, wicked-core#572)', () => {
       work_ineligible_reason: 'recent quota_exhausted — the engine benched it',
     }) as Record<string, unknown>;
     expect(out['health']).toEqual({ usable: false, reason: 'recent quota_exhausted' });
+  });
+});
+
+describe('gate precedence over role flags (crew#1087)', () => {
+  const BENCH: SeatRecentBench = {
+    at: '2026-10-28T00:00:00.000Z',
+    until: '2026-10-28T01:00:00.000Z',
+    untilSource: 'window',
+    strikes: 1,
+    reason: 'quota_exhausted (no success in the run)',
+    source: 'worker',
+    runs: 1,
+  };
+
+  const ROLES = {
+    'no role': { enabled_for_council: false, seat_eligible_for_work: false },
+    'reviewer-only': { enabled_for_council: true, seat_eligible_for_work: false },
+  };
+  const standingSeat = (roles: Record<string, boolean>, gate: 'signed_out' | 'recent_bench' | 'login_pending' | 'none') => {
+    const base = { ...registrySeat, ...roles };
+    const st = seatStanding(
+      base,
+      gate !== 'signed_out',
+      null,
+      gate === 'login_pending' ? 'pending' : undefined,
+      gate === 'recent_bench' ? BENCH : null,
+    );
+    return { ...base, auth: st.auth, council_eligible: st.council_eligible, council_ineligible_reason: st.council_ineligible_reason, work_eligible: st.work_eligible, work_ineligible_reason: st.work_ineligible_reason };
+  };
+  const health = (s: Record<string, unknown>) => (toEngineSeat(s) as Record<string, unknown>)['health'];
+  const firstClause = (s: Record<string, unknown>) => (s['council_ineligible_reason'] as string).split(/\s+—\s+|;\s+/, 1)[0]!.trim().slice(0, 80);
+
+  for (const [name, roles] of Object.entries(ROLES)) {
+    it(`${name}: signed out names the gate`, () => {
+      expect(health(standingSeat(roles, 'signed_out'))).toEqual({ usable: false, reason: 'signed out' });
+    });
+    it(`${name}: a recent engine bench names the bench`, () => {
+      const s = standingSeat(roles, 'recent_bench');
+      expect(firstClause(s)).toContain('quota_exhausted');
+      expect(health(s)).toEqual({ usable: false, reason: firstClause(s) });
+    });
+    it(`${name}: a login check still pending names the gate`, () => {
+      const s = standingSeat(roles, 'login_pending');
+      expect(health(s)).toEqual({ usable: false, reason: firstClause(s) });
+      expect(firstClause(s)).not.toMatch(/^not (enabled|eligible)/);
+    });
+  }
+  it('no gate: a no-role seat keeps the combined role reason, a reviewer-only seat stays usable', () => {
+    expect(health(standingSeat(ROLES['no role'], 'none'))).toEqual({ usable: false, reason: 'not enabled for council or work' });
+    expect(health(standingSeat(ROLES['reviewer-only'], 'none'))).toEqual({ usable: true });
   });
 });

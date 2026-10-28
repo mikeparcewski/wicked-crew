@@ -75,6 +75,9 @@ function isEngineHealth(v: unknown): v is EngineSeatHealth {
   return typeof v === 'object' && v !== null && typeof (v as { usable?: unknown }).usable === 'boolean';
 }
 
+/** `seatStanding`'s council reason when only the role flag holds (no gate). */
+const COUNCIL_ROLE_ONLY_REASON = 'not enabled for council';
+
 /** wicked-core#572: a seat whose record takes NEITHER role — no ballot, no work. */
 function hasNoRole(seat: Record<string, unknown>): boolean {
   return seat['enabled_for_council'] === false && seat['seat_eligible_for_work'] === false;
@@ -89,12 +92,17 @@ function hasNoRole(seat: Record<string, unknown>): boolean {
  * gate's whenever one holds).
  */
 export function shortBenchReason(seat: Record<string, unknown>): string | undefined {
-  if (hasNoRole(seat)) return 'not enabled for council or work';
   if (seat['auth'] === 'signed_out') return 'signed out';
   // (R5 / R5b, DES-L3 PR-3D) The `inactive` health flip and the crew council-count bench are
   // gone — the engine's per-run ballot ledger is the one bench; a stale client's `council_bench`
   // is still stripped by CREW_ONLY_SEAT_FIELDS, never read.
+  // crew#1087: an active gate leads the role words, as in `seatStanding`; the standing's own
+  // role-only council sentence is not a gate, so a no-role seat with no gate gets the combined one.
   const verbose = seat['council_ineligible_reason'];
+  if (typeof verbose === 'string' && verbose.trim() !== '' && verbose !== COUNCIL_ROLE_ONLY_REASON) {
+    return verbose.split(/\s+—\s+|;\s+/, 1)[0]!.trim().slice(0, 80);
+  }
+  if (hasNoRole(seat)) return 'not enabled for council or work';
   if (typeof verbose === 'string' && verbose.trim() !== '') {
     return verbose.split(/\s+—\s+|;\s+/, 1)[0]!.trim().slice(0, 80);
   }

@@ -6,8 +6,9 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { SeatVersionPinCache, probeSeatVersionPins } from '../src/api/diagnostics.js';
 import { rosterWithStandingFactory } from '../src/api/roster-standing.js';
-import { liveCheckLiftsBench, seatIssues, displayCommand } from '../src/api/seat-agents.js';
-import { SeatHealthTracker, quotaBackoffMs } from '../src/api/seat-health.js';
+import { liveCheckLiftsBench, seatIssues, displayCommand, qeReviewer, workAdmission, type WorkInputs } from '../src/api/seat-agents.js';
+import { SeatHealthTracker, quotaBackoffMs, type SeatRecentBench } from '../src/api/seat-health.js';
+import { seatStanding } from '../src/api/seat-standing.js';
 import { SeatProbe } from '../src/api/seat-probe.js';
 import { SEAT_VERSION_KEEP_MS, SEAT_VERSION_RETRY_MS, SEAT_VERSION_TTL_MS, SeatVersionCache, buildsNamed, firstVersionLine, installSourceOf, probeSeatVersions, seatVersion } from '../src/api/seat-version.js';
 import { toEngineSeat } from '../src/core/engine-roster.js';
@@ -796,5 +797,52 @@ describe('SeatVersionCache — a version probe that did not answer (a slow start
     clock.now += SEAT_VERSION_RETRY_MS;
     versions.read('claude');
     expect(probes()).toBe(n);
+  });
+});
+
+describe('gate precedence over role flags (crew#1087)', () => {
+  const BENCH: SeatRecentBench = {
+    at: '2026-10-28T00:00:00.000Z',
+    until: '2026-10-28T01:00:00.000Z',
+    untilSource: 'window',
+    strikes: 1,
+    reason: 'quota_exhausted (no success in the run)',
+    source: 'worker',
+    runs: 1,
+  };
+
+  const ROLES = {
+    'no role': { enabled_for_council: false, seat_eligible_for_work: false },
+    'reviewer-only': { enabled_for_council: true, seat_eligible_for_work: false },
+  };
+  const inputs = (roles: { enabled_for_council: boolean; seat_eligible_for_work: boolean }, gate: 'signed_out' | 'recent_bench' | 'login_pending' | 'none'): WorkInputs => {
+    const recentBench = gate === 'recent_bench' ? BENCH : null;
+    const loginPending = gate === 'login_pending';
+    const standing = seatStanding({ key: 'codex', ...roles }, gate !== 'signed_out', null, loginPending ? 'pending' : undefined, recentBench);
+    const open = { ok: true } as const;
+    return { ...roles, standing, recentBench, loginPending, chatAdmission: { unscoped: open, scoped: open, scoped_bound: open }, worktreeBench: null };
+  };
+  const SCOPES = ['unscoped', 'scoped', 'scoped_bound'] as const;
+  const GATES = { signed_out: 'signed_out', recent_bench: 'recent_bench', login_pending: 'login_pending' } as const;
+
+  for (const [name, roles] of Object.entries(ROLES)) {
+    for (const [gate, code] of Object.entries(GATES)) {
+      it(`${name}: ${gate} is the reason in every work scope and for QE`, () => {
+        const i = inputs(roles, gate as keyof typeof GATES);
+        const reason = i.standing.council_ineligible_reason!;
+        expect(reason).toBeTruthy();
+        const work = workAdmission(i);
+        for (const k of SCOPES) expect(work[k]).toMatchObject({ ok: false, reason_code: code, reason });
+        expect(qeReviewer(i, true)).toEqual({ ok: false, reason_code: code, reason });
+      });
+    }
+  }
+  it('no gate: a no-role seat is not_enabled; a reviewer-only seat is reviewer_only for work and admitted for QE', () => {
+    const none = inputs(ROLES['no role'], 'none');
+    for (const k of SCOPES) expect(workAdmission(none)[k]).toMatchObject({ ok: false, reason_code: 'not_enabled' });
+    expect(qeReviewer(none, true)).toMatchObject({ ok: false, reason_code: 'not_enabled' });
+    const rev = inputs(ROLES['reviewer-only'], 'none');
+    for (const k of SCOPES) expect(workAdmission(rev)[k]).toMatchObject({ ok: false, reason_code: 'reviewer_only' });
+    expect(qeReviewer(rev, true)).toEqual({ ok: true });
   });
 });

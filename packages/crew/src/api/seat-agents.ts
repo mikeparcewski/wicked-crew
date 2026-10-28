@@ -150,6 +150,13 @@ function standingRefusal(i: WorkInputs, opts: { reviewer: boolean }): Refusal | 
   if (i.standing.auth === 'signed_out') {
     return { ok: false, reason_code: 'signed_out', source: 'auth', reason: i.standing.council_ineligible_reason ?? 'signed out' };
   }
+  // crew#1087: an active gate names itself before the role words do (as `seatStanding` does).
+  if (i.recentBench !== null) {
+    return { ok: false, reason_code: 'recent_bench', source: 'launcher', reason: i.standing.council_ineligible_reason ?? i.recentBench.reason };
+  }
+  if (i.loginPending) {
+    return { ok: false, reason_code: 'login_pending', source: 'launcher', reason: i.standing.council_ineligible_reason ?? 'login not verified yet' };
+  }
   // crew#916 (wicked-core#572): `enabled_for_council` covers the ballot only. A seat is benched for
   // work only when it has neither role; a ballot-only seat is the `reviewer_only` case below.
   if (i.enabled_for_council === false && i.seat_eligible_for_work === false) {
@@ -157,12 +164,6 @@ function standingRefusal(i: WorkInputs, opts: { reviewer: boolean }): Refusal | 
   }
   if (!opts.reviewer && i.seat_eligible_for_work === false) {
     return { ok: false, reason_code: 'reviewer_only', source: 'launcher', reason: 'a reviewer-only seat: it reviews work and is never given a unit' };
-  }
-  if (i.recentBench !== null) {
-    return { ok: false, reason_code: 'recent_bench', source: 'launcher', reason: i.standing.council_ineligible_reason ?? i.recentBench.reason };
-  }
-  if (i.loginPending) {
-    return { ok: false, reason_code: 'login_pending', source: 'launcher', reason: i.standing.council_ineligible_reason ?? 'login not verified yet' };
   }
   return null;
 }

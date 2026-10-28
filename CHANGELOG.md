@@ -10,6 +10,10 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+
+- Gate reasons now take precedence over role restrictions in derived seat refusals (#1087).
+
 ## [0.16.7] — 2026-10-28
 
 A patch release for the J4 deliver bricks: a QE-refused deliver gate offers "skip QE with a reason" in place, human operator only (#1181, studio#923); a ledger PASS counts at delivery only beside the engine's bound QE review (#1181, wicked-core#1153); the floor leaves crew's cross-repo tests out when there is no sibling wicked-core (#1183, crew#1173). On wicked-core-ts ^0.15.15 and wicked-crew-api-types 0.146.0, bundling wicked-studio 0.13.0 (UI v2).
