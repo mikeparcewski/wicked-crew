@@ -2279,6 +2279,13 @@ export type WorkerStallEscalatedFrame = {
    */
   reason?: 'tool_unit' | 'evaluating' | 'evaluator_distinct' | 'no_output' | 'no_eligible_seat';
   /**
+   * (api-types 0.147.0, crew#972; additive) `true` when the SILENT-TURN rung acted: the cursor
+   * unit's seat had streamed no output at all since its dispatch for `workerSilentTurnMinutes`
+   * (default 8), and neither the daemon's process tree nor the seat's container was busy. Absent
+   * when the 15/30-minute ladder acted.
+   */
+  silentTurn?: true;
+  /**
    * The seats the failover pick excluded under evaluator ≠ creator (crew#638; additive): a
    * creator cursor avoids the run's evaluator seats, an evaluator cursor the seats that built its
    * work, an `evaluator_distinct`-routed unit the seat it was routed away from. Present on an `ok`
@@ -5879,6 +5886,17 @@ export interface SystemSettings {
    * Ignored when `workerStallEscalateAction` is `'notify'`.
    */
   workerStallMaxEscalations?: number;
+  /**
+   * The SILENT-TURN rung of the escalation ladder (api-types 0.147.0, crew#972): minutes a seat's
+   * turn may go with NO streamed output at all since its dispatch before the watchdog acts early —
+   * the same action and budget as {@link workerStallEscalateMinutes}, the frame flagged
+   * `silentTurn: true`. Integer 0..1440; `0` = off; absent = the daemon default (8). It applies only
+   * while escalation is armed, only before the seat's first output, never once the worker returned
+   * (its gate evaluation in flight) and never to a tool unit. A run whose own processes or the
+   * seat's container burn CPU (a test runner, a build) is not silent, as for the ladder. Rig run
+   * 115fabdb: a codex review sat 30 min with no output and ~1 s of seat CPU; pi then did it in 2.
+   */
+  workerSilentTurnMinutes?: number;
   /**
    * SKIN-OWNED preference blobs (crew#323). The settings store is shared: alongside the
    * engine's keys it carries the studio's own state — `studio.appearance` (accent/logo/theme),

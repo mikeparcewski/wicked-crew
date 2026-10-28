@@ -241,6 +241,14 @@ export const DEFAULT_WORKER_STALL_MINUTES = 15;
 export const DEFAULT_WORKER_STALL_ESCALATE_MINUTES = 30;
 
 /**
+ * Default `workerSilentTurnMinutes` (crew#972): minutes a seat's turn may stream NO output at all
+ * since its dispatch before the armed watchdog acts early (rig run 115fabdb: a codex review sat 30
+ * min silent with ~1 s of seat CPU, and pi did it in 2). A busy process tree or seat container
+ * still re-arms the clock. `0` turns the rung off.
+ */
+export const DEFAULT_WORKER_SILENT_TURN_MINUTES = 8;
+
+/**
  * Default `workerStallEscalateAction` (crew#341) when escalation is armed: recycle the wedged
  * cursor unit via the engine's `reassignUnit` — routed to a DIFFERENT seat from the run's pool
  * when one is available (perf#4), in place otherwise.
@@ -291,6 +299,8 @@ export const DEFAULT_SETTINGS: CrewSystemSettings = {
   // perf#4 — the escalation ladder is armed by default: 30 silent minutes → reassign the wedged
   // cursor unit to a different seat. An explicit 0 (via PUT /settings or settings.json) disarms.
   workerStallEscalateMinutes: DEFAULT_WORKER_STALL_ESCALATE_MINUTES,
+  // crew#972 — the silent-turn rung: a seat that has streamed nothing for 8 min is reassigned early.
+  workerSilentTurnMinutes: DEFAULT_WORKER_SILENT_TURN_MINUTES,
   // crew#393 — repo-scoped CODE-WORK launches (a def with an `executes_code` phase) DELIVER by
   // default: a completed code run ends with a PR, or with the operator's explicit
   // `deliver: 'none'` (or this setting flipped) saying why not.

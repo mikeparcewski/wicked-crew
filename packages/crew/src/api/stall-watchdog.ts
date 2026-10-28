@@ -42,6 +42,12 @@
 //     seat that stalled once under load stays fully eligible for other runs and for resume.
 //   - action `notify`: the fail-loud rung — surface a `needsYou` frame + an audit entry and
 //     leave the run alone.
+// - THE SILENT-TURN RUNG (crew#972): a cursor seat that has streamed NO output at all since its
+//   dispatch is acted on at `workerSilentTurnMinutes` (default 8) instead of 15/30 — notify and act
+//   in one sweep, same action and budget, the frame flagged `silentTurn: true`. Rig run 115fabdb:
+//   a codex review sat 30 min silent with ~1 s of seat CPU (waiting on its model), and pi then did
+//   it in 2. Never for a tool unit or a worker that returned, never after a restart lost the count,
+//   and never while the run's processes or seat containers are busy (the busy read re-arms first).
 // - A per-run budget (`workerStallMaxEscalations`, default 2) caps AUTOMATIC reassigns: a
 //   worker that wedges deterministically must reach a human, not loop through re-dispatches
 //   forever. A spent budget answers further quiet periods with `outcome: "exhausted"`.
@@ -63,6 +69,7 @@
 // with the remaining budget.
 
 import type { CoreEvent, WorkerStallEscalatedFrame, WorkerStalledFrame } from '../core/types.js';
+import { BUSY_UNKNOWN_PREFIX } from './run-liveness.js';
 import {
   DEFAULT_WORKER_STALL_ESCALATE_ACTION,
   DEFAULT_WORKER_STALL_MAX_ESCALATIONS,
@@ -155,6 +162,13 @@ export interface StallEscalationConfig {
   action?: 'reassign' | 'notify' | undefined;
   /** Automatic reassigns per run before fail-loud (default 2; clamped to ≥ 1). */
   maxPerRun?: number | undefined;
+  /**
+   * The SILENT-TURN rung (crew#972): quiet minutes after which an armed watchdog acts early on a
+   * cursor unit whose seat has streamed NO output since its dispatch. Absent/0/invalid = off (the
+   * daemon wires the `workerSilentTurnMinutes` setting, default 8). Never applies to a tool unit, to
+   * a worker that returned, or while the run's processes or seat containers are busy.
+   */
+  silentTurnMinutes?: number | undefined;
 }
 
 export interface StallWatchdogDeps {
@@ -359,7 +373,7 @@ export class WorkerStallWatchdog {
       }
       const thresholdMs = await this.thresholdMs();
       const escalation = await this.escalationArmed(thresholdMs);
-      const busy = await this.busyRuns(executing);
+      const { busy, ok: busyRead } = await this.busyRuns(executing, escalation?.silentTurnMs ?? 0);
       const now = this.now();
       for (const run of executing) {
         const last = this.lastEventAt.get(run.id);
@@ -371,7 +385,10 @@ export class WorkerStallWatchdog {
           this.lastEventAt.set(run.id, now);
           continue;
         }
-        const reading = busy.get(run.id);
+        const read = busy.get(run.id);
+        // crew#972: an UNKNOWN reading (the seat containers could not be read) is no proof of life.
+        const unknown = read !== undefined && read.startsWith(BUSY_UNKNOWN_PREFIX);
+        const reading = unknown ? undefined : read;
         if (reading !== undefined) {
           // crew#629: the run's own processes are working (a test runner, a build, the floor).
           // A running child is not a stall: re-arm the clock as an event would.
@@ -387,9 +404,26 @@ export class WorkerStallWatchdog {
           continue;
         }
         const quietForMs = now - last;
+        // crew#972 — the SILENT-TURN rung: a seat that has streamed nothing at all since its
+        // dispatch is acted on at `silentTurnMs` instead of the 15/30 ladder (rig run 115fabdb: a
+        // codex review sat 30 min with ~1 s of seat CPU; pi did it in 2). The busy read above has
+        // already re-armed a run whose processes or seat containers are working.
+        const silent =
+          escalation !== undefined &&
+          escalation.silentTurnMs > 0 &&
+          busyRead &&
+          !unknown &&
+          this.silentTurn(run);
+        const detectMs = silent ? Math.min(thresholdMs, escalation.silentTurnMs) : thresholdMs;
+        const actMs =
+          escalation === undefined
+            ? undefined
+            : silent
+              ? Math.min(escalation.thresholdMs, escalation.silentTurnMs)
+              : escalation.thresholdMs;
         // ── stage 1: detect + notify (crew#287, always on) ──────────────────────────────
         const period = this.quietPeriods.get(run.id);
-        if (quietForMs >= thresholdMs && !period?.detectionEmitted) {
+        if (quietForMs >= detectMs && !period?.detectionEmitted) {
           this.quietPeriod(run.id).detectionEmitted = true;
           const ord = this.lastOrd.get(run.id) ?? run.ord;
           const detected: WorkerStalledFrame = {
@@ -402,19 +436,20 @@ export class WorkerStallWatchdog {
           this.log(
             `[stall-watchdog] run ${run.id}${ord !== undefined ? ` (unit ${ord})` : ''} silent for ` +
               `${(quietForMs / 60_000).toFixed(1)} min — workerStalled frame broadcast` +
-              (escalation === undefined
+              (escalation === undefined || actMs === undefined
                 ? ` (detection only: the run was NOT touched; the operator decides)`
-                : ` (escalation armed at ${(escalation.thresholdMs / 60_000).toFixed(1)} min)`),
+                : ` (escalation armed at ${(actMs / 60_000).toFixed(1)} min${silent ? ': the seat has streamed no output since its dispatch' : ''})`),
           );
         }
         // ── stage 2: act (crew#341, default-ON since perf#4) — never before stage 1 ─────
         if (
           escalation !== undefined &&
-          quietForMs >= escalation.thresholdMs &&
+          actMs !== undefined &&
+          quietForMs >= actMs &&
           !this.quietPeriods.get(run.id)?.escalationTriggered
         ) {
           this.quietPeriod(run.id).escalationTriggered = true;
-          await this.escalate(run, quietForMs, escalation);
+          await this.escalate(run, quietForMs, escalation, silent);
         }
       }
     } finally {
@@ -443,22 +478,35 @@ export class WorkerStallWatchdog {
    * while any run is quiet, so the CPU comparison spans one sweep interval. A failing or slow
    * probe reads as "no run busy": the frame-only clock, never a false proof of life.
    */
-  private async busyRuns(executing: ExecutingRun[]): Promise<ReadonlyMap<string, string>> {
+  private async busyRuns(
+    executing: ExecutingRun[],
+    silentTurnMs: number,
+  ): Promise<{ busy: ReadonlyMap<string, string>; ok: boolean }> {
     const empty = new Map<string, string>();
-    if (this.deps.busy === undefined) return empty;
+    // No liveness read wired: the frame-only clock, and the silent-turn rung has no busy proof
+    // either way — it may act (a directly-driven watchdog in a test).
+    if (this.deps.busy === undefined) return { busy: empty, ok: true };
     const now = this.now();
+    // crew#972: a silent-turn rung shorter than the sampling floor must still be sampled first.
+    const sampleAfter =
+      silentTurnMs > 0 ? Math.min(LIVENESS_SAMPLE_AFTER_MS, silentTurnMs) : LIVENESS_SAMPLE_AFTER_MS;
     const quiet = executing
       .map((r) => r.id)
       .filter((id) => {
         const last = this.lastEventAt.get(id);
-        return last !== undefined && now - last >= LIVENESS_SAMPLE_AFTER_MS;
+        return last !== undefined && now - last >= sampleAfter;
       });
-    if (quiet.length === 0) return empty;
+    if (quiet.length === 0) return { busy: empty, ok: true };
     try {
-      return await withTimeout(this.deps.busy(quiet), SWEEP_ENGINE_TIMEOUT_MS, 'process liveness');
+      return {
+        busy: await withTimeout(this.deps.busy(quiet), SWEEP_ENGINE_TIMEOUT_MS, 'process liveness'),
+        ok: true,
+      };
     } catch (err) {
+      // A failed read is no proof of life for the ladder, and no proof of silence for the
+      // silent-turn rung (crew#972): `ok: false` keeps that rung from acting this sweep.
       this.log(`[stall-watchdog] process liveness read failed: ${String(err)}`);
-      return empty;
+      return { busy: empty, ok: false };
     }
   }
 
@@ -488,6 +536,8 @@ export class WorkerStallWatchdog {
         thresholdMs: number;
         action: 'reassign' | 'notify';
         maxPerRun: number;
+        /** crew#972: the silent-turn rung, ms; 0 = off. */
+        silentTurnMs: number;
       }
     | undefined
   > {
@@ -513,9 +563,26 @@ export class WorkerStallWatchdog {
       typeof rawMax === 'number' && Number.isFinite(rawMax) && Math.floor(rawMax) >= 1
         ? Math.min(Math.floor(rawMax), 10)
         : DEFAULT_WORKER_STALL_MAX_ESCALATIONS;
+    const rawSilent = cfg?.silentTurnMinutes;
+    const silentTurnMs =
+      typeof rawSilent === 'number' && Number.isFinite(rawSilent) && rawSilent > 0
+        ? Math.min(rawSilent, 1440) * 60_000
+        : 0;
     // The ladder notifies before it acts: an escalation threshold set below the detection
-    // threshold acts AT the detection threshold, never before it.
-    return { thresholdMs: Math.max(minutes * 60_000, detectMs), action, maxPerRun };
+    // threshold acts AT the detection threshold, never before it. (The silent-turn rung notifies
+    // and acts in the same sweep, the detection frame first.)
+    return { thresholdMs: Math.max(minutes * 60_000, detectMs), action, maxPerRun, silentTurnMs };
+  }
+
+  /**
+   * (crew#972) Whether `run`'s cursor seat has streamed NOTHING since its dispatch: an agent unit
+   * (never a tool command), dispatched while this process watched (a count of 0 — unknown after a
+   * restart reads as not silent), whose worker has not returned (no gate evaluation in flight).
+   */
+  private silentTurn(run: ExecutingRun): boolean {
+    if (run.executor === 'tool') return false;
+    if (this.evaluating.has(run.id)) return false;
+    return this.outputSinceDispatch.get(run.id) === 0;
   }
 
   /** Perform one escalation for `run`, emit its `workerStallEscalated` frame, audit, log. */
@@ -523,6 +590,7 @@ export class WorkerStallWatchdog {
     run: ExecutingRun,
     quietForMs: number,
     escalation: { action: 'reassign' | 'notify'; maxPerRun: number },
+    silent = false,
   ): Promise<void> {
     // Prefer the cursor ord read from the engine THIS sweep (`run.ord`) over the last event's
     // ord: `reassignUnit` validates against the live cursor, and events can predate a rework.
@@ -532,6 +600,7 @@ export class WorkerStallWatchdog {
       session: run.id,
       ...(ord !== undefined ? { ord } : {}),
       quietForMs,
+      ...(silent ? { silentTurn: true as const } : {}),
     };
     let frame: WorkerStallEscalatedFrame;
     if (run.executor === 'tool') {
@@ -650,7 +719,9 @@ export class WorkerStallWatchdog {
     }
     this.emit(frame);
     const where = `run ${run.id}${ord !== undefined ? ` (unit ${ord})` : ''}`;
-    const quiet = `${(quietForMs / 60_000).toFixed(1)} min silent`;
+    const quiet =
+      `${(quietForMs / 60_000).toFixed(1)} min silent` +
+      (silent ? ' (no output from the seat since its dispatch: the silent-turn rung)' : '');
     if (frame.action === 'notify') {
       const why =
         frame.reason === 'evaluator_distinct'

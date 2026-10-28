@@ -3747,6 +3747,14 @@ export class CoreAdapter {
           delete parsed.workerStallMaxEscalations;
         }
       }
+      // workerSilentTurnMinutes (crew#972): integer 0..1440 like the PUT route; garbage falls back
+      // to the default rather than to "act on every sweep".
+      if ('workerSilentTurnMinutes' in parsed) {
+        const v = parsed.workerSilentTurnMinutes;
+        if (typeof v !== 'number' || !Number.isInteger(v) || v < 0 || v > 1440) {
+          delete parsed.workerSilentTurnMinutes;
+        }
+      }
       // worker_config_root (seat sign-in): absolute path or "" (= engine default). A hand-edited
       // relative path is dropped rather than exported as WICKED_WORKER_HOME, where the engine
       // would resolve it against an arbitrary spawn cwd.
