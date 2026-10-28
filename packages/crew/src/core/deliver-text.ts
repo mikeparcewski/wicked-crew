@@ -106,6 +106,19 @@ export interface DeliverRecipeExit {
   exit: number;
 }
 
+/**
+ * (crew#1186) The run's assurance LABELS, read from the run's own contract (`session.assurance`): the
+ * same on every delivery path (the deliver phase and a post-hoc delivery from the stranded card both
+ * compose from the run view). `qe` is `null` when the run does not require QE acceptance.
+ */
+export interface DeliverAssuranceFact {
+  /** `reduced` = launched in reduced-assurance mode (the distinct evaluator and the judge waived). */
+  mode: 'full' | 'reduced' | (string & {});
+  qe: { status: string; reason: string } | null;
+  /** Every failed floor the operator overrode, with the phase it was on and who overrode it. */
+  floorOverrides: Array<{ phase: string; by: string; label: string }>;
+}
+
 /** Everything the composer needs. Built by {@link factsFromRun} or {@link factsFromWorkflow}. */
 export interface DeliverTextFacts {
   runId: string;
@@ -136,6 +149,9 @@ export interface DeliverTextFacts {
    *  evaluator units' output by {@link extractFollowUps}). `[]` = read, none flagged; absent = not
    *  read (a definition-time composition), and the section is left out. */
   followUps?: string[];
+  /** crew#1186: the run's assurance labels (QE decision, overridden floors, reduced assurance);
+   *  absent = not known (a definition-time composition, an older engine) and the section is left out. */
+  assurance?: DeliverAssuranceFact;
   /** crew#860: the creator and evaluator seats' final reports, read from the unit outputs
    *  ({@link reportsFromOutputs}). `[]` = read, nothing reportable; absent = the outputs could not
    *  be read (a definition-time composition, or an adapter without transcripts) — said in the body. */
@@ -539,6 +555,8 @@ export function composeDeliverText(raw: DeliverTextFacts, links: IssueRefs = iss
   }
   out.push('');
 
+  if (f.assurance !== undefined) out.push(...assuranceSection(f.assurance), '');
+
   out.push('## Phases', '');
   if (f.source === 'workflow') {
     out.push(
@@ -655,6 +673,88 @@ export function composeDeliverText(raw: DeliverTextFacts, links: IssueRefs = iss
     ...(f.trailers ?? []),
   );
   return { title: redactHostPaths(title), body: redactHostPaths(out.join('\n')) };
+}
+
+/** (xreview on #1188) Free text (an operator's reason, a login) as literal Markdown: HTML
+ *  metacharacters are entities and Markdown syntax is backslash-escaped, so `<!-- … -->`, a tag or a
+ *  link shows as written instead of vanishing or rendering; one line, bounded, pipes escaped. */
+function literal(value: string, max = 600): string {
+  const s = cell(value, max)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/([\\`*_[\]])/g, '\\$1');
+  return s;
+}
+
+/** The QE decision's reason without the label it already opens with (`QE acceptance skipped by operator: …`). */
+function qeReasonBody(reason: string, label: string): string {
+  const r = oneLine(reason);
+  return r.toLowerCase().startsWith(label.toLowerCase()) ? r.slice(label.length).replace(/^[\s:;,—-]+/, '') : r;
+}
+
+/** (crew#1186) The `## Assurance` section: the labels the run carries, as the run and its gates show them. */
+function assuranceSection(a: DeliverAssuranceFact): string[] {
+  const out = ['## Assurance', ''];
+  if (a.mode === 'reduced') {
+    out.push('- **Reduced assurance**: the run was launched in reduced-assurance mode, so the distinct evaluator and the judge were waived.');
+  } else {
+    out.push(`- Assurance mode: ${literal(a.mode)}.`);
+  }
+  if (a.qe !== null) {
+    const status = a.qe.status;
+    if (status === 'skipped') {
+      const label = 'QE acceptance skipped by operator';
+      const why = qeReasonBody(a.qe.reason, label);
+      out.push(`- **${label}**${why !== '' ? `: ${literal(why, 2000)}` : ''}`);
+    } else if (status === 'waived') {
+      out.push(`- **QE acceptance waived by score**: ${literal(a.qe.reason)}`);
+    } else {
+      out.push(`- QE acceptance: ${literal(status)}${a.qe.reason.trim() !== '' ? ` (${literal(a.qe.reason)})` : ''}`);
+    }
+  }
+  if (a.floorOverrides.length > 0) {
+    const byLabel = new Map<string, string[]>();
+    for (const o of a.floorOverrides) byLabel.set(o.label, [...(byLabel.get(o.label) ?? []), `${code(o.phase)} (${literal(o.by)})`]);
+    for (const [label, where] of byLabel) out.push(`- **${cell(label.charAt(0).toUpperCase() + label.slice(1))}**: ${where.join(', ')}`);
+  }
+  return out;
+}
+
+/** (crew#1186) The assurance labels from the engine's `session.assurance` (`RunAssurance`); absent on an older engine. */
+function assuranceOf(s: SessionView['session'], units: WorkUnit[]): DeliverAssuranceFact | undefined {
+  const a = (s as { assurance?: unknown }).assurance as
+    | {
+        mode?: unknown;
+        required?: unknown;
+        qe?: { status?: unknown; reason?: unknown } | null;
+        floorOverrides?: Array<{ by?: unknown; ord?: unknown; floorOverride?: { ord?: unknown; label?: unknown } }>;
+      }
+    | null
+    | undefined;
+  if (a === null || a === undefined || typeof a !== 'object') return undefined;
+  // As delivery enforcement reads it (`api/delivery-assurance.ts` `qeDecisionOf`): a QE decision
+  // only when the contract requires `qe_acceptance`, and an older engine's contract with no `qe`
+  // record still reads as required (xreview on #1188).
+  const requiresQe = Array.isArray(a.required) && a.required.includes('qe_acceptance');
+  const qe = !requiresQe
+    ? null
+    : a.qe !== null && a.qe !== undefined && typeof a.qe.status === 'string'
+      ? { status: a.qe.status, reason: typeof a.qe.reason === 'string' ? a.qe.reason : '' }
+      : { status: 'required', reason: 'required: this engine records no QE decision' };
+  const phaseOf = (ord: unknown): string => {
+    const u = typeof ord === 'number' ? units.find((x) => x.ord === ord) : undefined;
+    return u !== undefined ? phaseIdOf(u) : typeof ord === 'number' ? `unit ${ord}` : 'a phase';
+  };
+  const floorOverrides = (Array.isArray(a.floorOverrides) ? a.floorOverrides : []).map((o) => ({
+    phase: phaseOf(o.floorOverride?.ord ?? o.ord),
+    by: typeof o.by === 'string' && o.by.trim() !== '' ? o.by.trim() : 'operator',
+    label:
+      typeof o.floorOverride?.label === 'string' && o.floorOverride.label.trim() !== ''
+        ? o.floorOverride.label.trim()
+        : 'floor overridden by operator',
+  }));
+  return { mode: typeof a.mode === 'string' ? a.mode : 'full', qe, floorOverrides };
 }
 
 /** Every string in the facts through {@link redactHostPaths} (plain data: strings, arrays, objects). */
@@ -926,6 +1026,7 @@ export function factsFromRun(
   const s = view.session;
   const units = [...view.units].sort((a, b) => a.ord - b.ord);
   const checks = units.flatMap(checksOf);
+  const assurance = assuranceOf(s, units);
   return {
     runId: s.id,
     // crew#627: the daemon's linked-issues block is taken back out — the PR names the intent.
@@ -963,6 +1064,7 @@ export function factsFromRun(
     trailers: configuredTrailers(),
     ...(resolved.followUps !== undefined ? { followUps: resolved.followUps } : {}),
     ...(resolved.reports !== undefined ? { reports: resolved.reports } : {}),
+    ...(assurance !== undefined ? { assurance } : {}),
   };
 }
 

@@ -22,6 +22,15 @@ mentioned only where a daemon release depends on them.
   lost the count, or while the run is busy. The busy read now also covers the run's seat containers
   (`<runtime> stats --no-stream`, the same 5 % CPU share as host processes), so a seat running the repo's
   tests inside its container is not silent; when the containers cannot be read, that rung does not act.
+- **Every delivery's PR body carries the run's assurance labels (crew#1186).** On rig run 115fabdb the
+  operator skipped QE acceptance in place at the deliver gate. The lift then conflicted, and the post-hoc
+  delivery from the stranded card (wicked-crew#1185) named the floor overrides per phase but not the QE
+  skip. The composer that every delivery path uses (`GET /runs/:id/deliver-text`, read by the deliver
+  phase and the post-hoc lift alike) now opens with an `## Assurance` section, read from the run's own
+  contract (`session.assurance`). It says **Reduced assurance** when the run was launched in that mode.
+  It gives the QE decision as the run records it: **QE acceptance skipped by operator** with its reason,
+  **waived by score**, or required. It names every phase whose failed floor the operator overrode, and
+  who did. A run whose engine recorded no contract gets no section.
 - Gate reasons now take precedence over role restrictions in derived seat refusals (#1087).
 
 ## [0.16.7] — 2026-10-28

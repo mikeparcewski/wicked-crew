@@ -136,6 +136,19 @@ describe('GET /runs/:id/deliver-text (crew#524)', () => {
     expect(text!.body).toContain(`Delivered by [wicked-crew](https://wc.wickedagile.com) run \`${RUN_ID}\`.`);
   });
 
+  it('carries the run\'s QE skip on the text every delivery path composes (crew#1186)', async () => {
+    const v = view();
+    (v.session as { assurance?: unknown }).assurance = {
+      mode: 'full',
+      required: ['qe_acceptance'],
+      qe: { status: 'skipped', basis: 'operator', score: null, threshold: 20, reason: 'QE acceptance skipped by operator: hotfix, reviewed by hand', reasons: [], ord: 3, tree: null },
+    };
+    const { app } = await buildApp([v]);
+    const res = await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN_ID}/deliver-text` });
+    expect(res.statusCode).toBe(200);
+    expect(parseFramedDeliverText(res.body)!.body).toContain('- **QE acceptance skipped by operator**: hotfix, reviewed by hand');
+  });
+
   it('names the workflow the ENGINE RECORDED for a run whose view carries the engine instance id (seam X2)', async () => {
     // The adapter resolves the name from the engine's record (the launch's `sessionStarted`) and
     // attaches it as `run_identity`; the route names that, never a phase-sequence guess.
