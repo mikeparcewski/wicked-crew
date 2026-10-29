@@ -1587,6 +1587,13 @@
       ]
     },
     {
+      "method": "GET",
+      "path": "/api/v1/runs/:id/bus",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
       "method": "POST",
       "path": "/api/v1/runs/:id/cancel",
       "requestType": null,
@@ -1784,6 +1791,27 @@
       ]
     },
     {
+      "method": "GET",
+      "path": "/api/v1/runs/:id/power",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/:id/power",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/:id/power/pause",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
       "method": "POST",
       "path": "/api/v1/runs/:id/reassign",
       "requestType": "ReassignRequest",
@@ -1811,6 +1839,13 @@
     {
       "method": "POST",
       "path": "/api/v1/runs/:id/resume",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/:id/rigor",
       "requestType": null,
       "responseType": null,
       "statusCodes": []
