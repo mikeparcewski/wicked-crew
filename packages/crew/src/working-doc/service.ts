@@ -31,9 +31,12 @@ import type { DocAuthor, SteerRecord, TrailEntry, WorkingDocRecord, WorkingDocSt
 export interface DocBackend {
   /** Create the document with its first version; marks it `phase-report` (the sidecar) before it is used. */
   create(projectId: string, docId: string, runId: string, html: string): Promise<{ head: number }>;
-  /** The head version and its HTML, or null when the document is gone. */
+  /** The head version and ITS HTML (one version, never a torn pair), or null when the document is gone. */
   read(projectId: string, docId: string): Promise<{ head: number; html: string } | null>;
-  /** One feedback batch of content edits on `expectHead`; resolves when its version landed. */
+  /** One version's HTML, or null when there is no such version (yet). */
+  readVersion(projectId: string, docId: string, version: number): Promise<string | null>;
+  /** One feedback batch of content edits on `expectHead`; resolves when ITS version landed (checked by content), or
+   *  `headMoved` when the base was stale. Throws {@link UndeterminedWriteError} when the outcome is not known. */
   edit(projectId: string, docId: string, batch: { expectHead: number; items: Array<{ selector: string; value: string }>; author: string }):
     Promise<{ version: number; parent: number } | { headMoved: true; head: number }>;
 }
@@ -92,7 +95,8 @@ const PLUGIN_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u;
 
 /** A doc name interactive accepts (lowercase, digits, hyphens; ≤ 64): one per run. */
 export function workingDocName(runId: string): string {
-  return `working-${runId.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40)}`;
+  const slug = runId.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+/, '').slice(0, 40).replace(/-+$/, '');
+  return `working-${slug === '' ? 'run' : slug}`;
 }
 
 /** The marker a note ends with, by which `workerMessageInjected` is matched back to its steer. */
@@ -100,30 +104,45 @@ export function steerMarker(runId: string, steerId: string): string {
   return `[working-doc ${runId.slice(0, 8)}:${steerId}]`;
 }
 
-/** The one note a person's version becomes. */
-export function steerNote(version: number, by: string, kind: 'next' | 'standing', texts: Array<{ id: SectionId; text: string }>, marker: string): string {
-  const head = kind === 'standing'
-    ? `Standing operator constraint from the job's working document (version ${version}, by ${by}). Follow it in this step and every later one until it is replaced.`
+/** The one note a person's version becomes: the sections that steer once, and the standing constraint, together. */
+export function steerNote(version: number, by: string, standing: boolean, texts: Array<{ id: SectionId; text: string }>, marker: string): string {
+  const head = standing
+    ? `Operator steering from the job's working document (version ${version}, by ${by}). Its Constraints and steering is standing: follow it in this step and every later one until it is replaced.`
     : `Operator steering from the job's working document (version ${version}, by ${by}).`;
   const lines = texts.map((t) => `- ${SECTION_LABELS[t.id]}: ${t.text.trim() === '' ? '(cleared)' : t.text.trim()}`);
+  return [head, NO_GATE_LINE, ...lines, marker].join('\n');
+}
+
+/** The standing constraint alone, re-sent before every later step. */
+export function standingNote(version: number, by: string, text: string, marker: string): string {
   return [
-    head,
-    'It adds to your brief. It does not answer, skip or change any gate, check, review or QE step.',
-    ...lines,
+    `Standing operator constraint from the job's working document (version ${version}, by ${by}). Follow it in this step and every later one until it is replaced.`,
+    NO_GATE_LINE,
+    `- ${SECTION_LABELS.constraints}: ${text.trim()}`,
     marker,
   ].join('\n');
 }
 
+/** Every note's second line. */
+export const NO_GATE_LINE = 'It adds to your brief. It does not answer, skip or change any gate, check, review or QE step.';
+
 function blankSections(): Record<SectionId, string> {
   return { goal: '', approach: '', decisions: '', constraints: '', questions: '', next: '' };
+}
+
+/** A write whose outcome is not known (no version in time, or a version that is not this batch's). */
+export class UndeterminedWriteError extends Error {
+  constructor(message: string) { super(message); this.name = 'UndeterminedWriteError'; }
 }
 
 export class WorkingDocService {
   private readonly now: () => number;
   /** The newest unit each run dispatched: the step a note injected now is picked up by. */
   private readonly lastOrd = new Map<string, number>();
-  /** One write per run at a time (a second waits its turn). */
+  /** One write per run at a time (a second waits its turn); steering renewals take the same turn. */
   private readonly locks = new Map<string, Promise<unknown>>();
+  /** A standing steer is re-sent once per step that picked it up (a live worker hears it once, not in a loop). */
+  private readonly renewedFor = new Map<string, number | null>();
 
   constructor(private readonly d: WorkingDocDeps) {
     this.now = d.now ?? Date.now;
@@ -152,7 +171,7 @@ export class WorkingDocService {
       const run = await this.d.run(runId);
       if (run === null) return null;
       const docId = workingDocName(runId);
-      const html = initialHtml(run.title, { goal: run.problem.trim().slice(0, 1_500) });
+      const html = initialHtml(run.title, { goal: run.problem.replace(/\r\n?/g, '\n').trim().slice(0, 1_500) });
       const { head } = await this.d.backend.create(run.projectId, docId, runId, html);
       const rec: WorkingDocRecord = {
         runId, projectId: run.projectId, docId, createdAt: this.now(),
@@ -187,7 +206,13 @@ export class WorkingDocService {
       author = { kind: 'human', id: actor.id };
     } else if (input.author === 'plugin') {
       if (plugin === undefined) return { ok: false, code: 400, error: 'a plugin-written version names its plugin' };
-      author = { kind: 'plugin', id: `plugin:${plugin.id}@${plugin.version}` };
+      const pluginActor = `plugin:${plugin.id}@${plugin.version}`;
+      // A plugin's lines come from the plugin itself (its own actor) or from the person's studio hosting it; a worker or
+      // system caller never writes as any plugin.
+      if (!(actor.kind === 'human' || (actor.kind === 'plugin' && actor.id === pluginActor))) {
+        return { ok: false, code: 403, error: 'only the plugin itself, or the studio hosting it, writes a plugin’s lines' };
+      }
+      author = { kind: 'plugin', id: pluginActor };
     } else {
       return { ok: false, code: 400, error: "author is 'operator' or 'plugin'" };
     }
@@ -200,70 +225,113 @@ export class WorkingDocService {
       }
       wanted[k] = v.replace(/\r\n?/g, '\n');
     }
+    await this.reconcile(runId);
     const head = await this.d.backend.read(rec.projectId, rec.docId);
     if (head === null) return { ok: false, code: 404, error: 'the working document is gone' };
     if (head.head !== input.base) return { ok: false, code: 409, error: 'the working document changed since', head: head.head };
+    if (this.d.store.get(runId)?.pending != null) return { ok: false, code: 409, error: 'an earlier edit may still land; read the document again', head: head.head };
     const before = sectionsOf(head.html);
     const changed = changedSections(before, wanted);
     if (changed.length === 0) return { ok: true, version: null, unchanged: true, steer: null, view: await this.view(runId) };
     const surface = plugin !== undefined ? `plugin:${plugin.id}@${plugin.version}` : null;
-    const written = await this.d.backend.edit(rec.projectId, rec.docId, {
-      expectHead: input.base,
-      // interactive's item selector is the bare anchor id (its own `[data-wid=…]` lookup).
-      items: changed.map((id) => ({ selector: anchorOf(id), value: encodeSectionText(wanted[id] ?? '') })),
-      // interactive records the batch's author; crew's trail records the full attribution and the surface.
-      author: author.kind === 'human' ? `${author.id}${surface !== null ? ` via ${surface}` : ''}` : author.id,
-    });
+    const values: Partial<Record<SectionId, string>> = {};
+    for (const id of changed) values[id] = wanted[id] ?? '';
+    let written: { version: number; parent: number } | { headMoved: true; head: number };
+    try {
+      written = await this.d.backend.edit(rec.projectId, rec.docId, {
+        expectHead: input.base,
+        // interactive's item selector is the bare anchor id (its own `[data-wid=…]` lookup).
+        items: changed.map((id) => ({ selector: anchorOf(id), value: encodeSectionText(values[id] ?? '') })),
+        // interactive records the batch's author; crew's trail records the full attribution and the surface.
+        author: author.kind === 'human' ? `${author.id}${surface !== null ? ` via ${surface}` : ''}` : author.id,
+      });
+    } catch (err) {
+      if (err instanceof UndeterminedWriteError) {
+        // Not known whether it landed: remembered, so a later read attributes it if it does — never to the next caller.
+        this.d.store.update(runId, (r) => { r.pending = { expectHead: input.base, author, surface, values, at: this.now(), actor: { id: actor.id, kind: actor.kind } }; });
+      }
+      throw err;
+    }
     if ('headMoved' in written) return { ok: false, code: 409, error: 'the working document changed since', head: written.head };
-    const at = this.now();
-    let steer: SteerRecord | null = null;
-    if (author.kind === 'human') steer = await this.steer(runId, rec, written.version, changed, wanted, author.id);
-    const entry: TrailEntry = { version: written.version, parent: written.parent, author, surface, sections: changed, at, steerId: steer?.id ?? null };
-    this.d.store.update(runId, (r) => { r.trail.push(entry); });
-    this.d.audit?.('run.steered.doc', actor, runId, {
-      version: written.version, sections: changed, author: author.kind === 'human' ? 'operator' : author.id,
-      ...(surface !== null ? { surface } : {}), ...(steer !== null ? { steer: steer.id, sent: steer.error === null } : {}),
-    });
-    this.d.changed?.(runId, written.version);
+    const steer = await this.record(runId, written.version, written.parent, author, surface, changed, values, actor);
     return { ok: true, version: written.version, unchanged: false, steer, view: await this.view(runId) };
   }
 
-  /** A person's changed sections → at most one steering record per kind (`next`, `standing`); the standing one
-   *  replaces any earlier standing steer. Returns the record the trail names (the `next` one if both). */
-  private async steer(runId: string, rec: WorkingDocRecord, version: number, changed: SectionId[], wanted: Partial<Record<SectionId, string>>, by: string): Promise<SteerRecord | null> {
-    const run = await this.d.run(runId);
-    const made: SteerRecord[] = [];
-    for (const kind of ['next', 'standing'] as const) {
-      const ids = changed.filter((id) => SECTION_STEER[id] === kind);
-      if (ids.length === 0) continue;
-      const id = randomUUID().slice(0, 8);
-      const note = steerNote(version, by === 'local' ? 'the operator' : by, kind, ids.map((s) => ({ id: s, text: wanted[s] ?? '' })), steerMarker(runId, id));
-      const s: SteerRecord = { id, version, sections: ids, kind, note, at: this.now(), by, queuedAt: null, pickedUp: null, error: null, ...(kind === 'standing' ? { supersededBy: null, renewals: 0 } : {}) };
-      if (run === null || run.terminal) {
-        s.error = 'the job has ended, so there is no next step to steer';
-      } else {
-        try {
-          await this.d.engine.injectWorkerMessage(runId, note, 'all');
-          s.queuedAt = this.now();
-        } catch (err) {
-          s.error = err instanceof Error ? err.message : String(err);
-        }
-      }
-      made.push(s);
-    }
-    if (made.length === 0) return null;
-    this.d.store.update(runId, (r) => {
-      for (const s of made) {
-        if (s.kind === 'standing') for (const old of r.steers) if (old.kind === 'standing' && old.supersededBy == null && old.id !== s.id) old.supersededBy = s.id;
-        r.steers.push(s);
-      }
+  /** A version that landed: its trail entry, its steer (a person's only), its audit line and the change frame. */
+  private async record(runId: string, version: number, parent: number, author: DocAuthor, surface: string | null, changed: SectionId[], values: Partial<Record<SectionId, string>>, actor: { id: string; kind: string }): Promise<SteerRecord | null> {
+    const steer = author.kind === 'human' ? await this.steer(runId, version, changed, values, author.id) : null;
+    const entry: TrailEntry = { version, parent, author, surface, sections: changed, at: this.now(), steerId: steer?.id ?? null };
+    this.d.store.update(runId, (r) => { r.trail.push(entry); });
+    this.d.audit?.('run.steered.doc', actor, runId, {
+      version, sections: changed, author: author.kind === 'human' ? 'operator' : author.id,
+      ...(surface !== null ? { surface } : {}),
+      ...(steer !== null ? { steer: steer.id, kind: steer.kind, steered: steer.sections, sent: steer.error === null } : {}),
     });
-    void rec;
-    return made.find((s) => s.kind === 'next') ?? made[0] ?? null;
+    this.d.changed?.(runId, version);
+    return steer;
+  }
+
+  /** An edit whose outcome was unknown: once the head moved past it, the version is checked against what it wrote and
+   *  recorded as its author's if (and only if) it is that write. */
+  private async reconcile(runId: string): Promise<void> {
+    const rec = this.d.store.get(runId);
+    const p = rec?.pending;
+    if (rec === undefined || p == null) return;
+    const v = p.expectHead + 1;
+    const html = await this.d.backend.readVersion(rec.projectId, rec.docId, v);
+    if (html === null) {
+      const head = await this.d.backend.read(rec.projectId, rec.docId);
+      // Still nothing after it: the batch is gone (interactive refused it). Only a wait of a minute settles that.
+      if (head !== null && head.head === p.expectHead && this.now() - p.at > 60_000) this.d.store.update(runId, (r) => { r.pending = null; });
+      return;
+    }
+    const got = sectionsOf(html);
+    const ids = Object.keys(p.values) as SectionId[];
+    this.d.store.update(runId, (r) => { r.pending = null; });
+    if (ids.every((id) => got[id] === p.values[id])) await this.record(runId, v, p.expectHead, p.author, p.surface, ids, p.values, p.actor);
   }
 
   /**
-   * The daemon's CoreEvent tap: which step picked a note up, and the standing steer re-sent before every later step.
+   * A person's version → ONE steering note for the run (§9): Goal, Approach and Next for the next step, and Constraints
+   * and steering as a standing constraint (an emptied Constraints is said once, as cleared). The record is stored
+   * BEFORE the engine is asked, so a pickup reported at once is never lost.
+   */
+  private async steer(runId: string, version: number, changed: SectionId[], values: Partial<Record<SectionId, string>>, by: string): Promise<SteerRecord | null> {
+    const steered = changed.filter((id) => SECTION_STEER[id] !== 'record');
+    if (steered.length === 0) return null;
+    const constraints = values.constraints;
+    const standing = steered.includes('constraints') && constraints !== undefined && constraints.trim() !== '';
+    const who = by === 'local' ? 'the operator' : by;
+    const id = randomUUID().slice(0, 8);
+    const marker = steerMarker(runId, id);
+    const s: SteerRecord = {
+      id, version, sections: steered, kind: standing ? 'standing' : 'next',
+      note: steerNote(version, who, standing, steered.map((x) => ({ id: x, text: values[x] ?? '' })), marker),
+      ...(standing ? { standingNote: standingNote(version, who, constraints ?? '', marker), supersededBy: null, renewals: 0 } : {}),
+      at: this.now(), by, queuedAt: null, pickedUp: null, error: null,
+    };
+    const run = await this.d.run(runId);
+    if (run === null || run.terminal) s.error = 'the job has ended, so there is no next step to steer';
+    this.d.store.update(runId, (r) => {
+      // Any edit of Constraints (a new one, or emptied) replaces the standing one before it.
+      if (steered.includes('constraints')) for (const old of r.steers) if (old.kind === 'standing' && old.supersededBy == null) old.supersededBy = id;
+      r.steers.push(s);
+    });
+    if (s.error !== null) return s;
+    try {
+      await this.d.engine.injectWorkerMessage(runId, s.note, 'all');
+      this.d.store.update(runId, (r) => { const x = r.steers.find((y) => y.id === id); if (x !== undefined) x.queuedAt = this.now(); });
+    } catch (err) {
+      this.d.store.update(runId, (r) => { const x = r.steers.find((y) => y.id === id); if (x !== undefined) x.error = err instanceof Error ? err.message : String(err); });
+    }
+    return this.d.store.get(runId)?.steers.find((y) => y.id === id) ?? s;
+  }
+
+  /**
+   * The daemon's CoreEvent tap. `workerMessageInjected` says which step's prompt carried a note (recorded at once);
+   * when that note holds a standing constraint still in force, a copy is queued right away for the step after, so the
+   * next dispatch always finds one waiting (never raced against `unitDone`). A step that hears it twice (a live
+   * worker) does not re-queue twice.
    */
   onEvent(e: CoreEvent): void {
     const ev = e as unknown as Record<string, unknown>;
@@ -275,32 +343,33 @@ export class WorkingDocService {
       this.lastOrd.set(runId, ev['ord']);
       return;
     }
-    if (e.type === 'workerMessageInjected' && typeof ev['message'] === 'string') {
-      const message = ev['message'];
-      const steer = rec.steers.find((s) => message.includes(steerMarker(runId, s.id)));
-      if (steer === undefined || steer.pickedUp !== null) return;
-      const ord = this.lastOrd.get(runId) ?? null;
+    if (e.type !== 'workerMessageInjected' || typeof ev['message'] !== 'string') return;
+    const message = ev['message'];
+    const steer = rec.steers.find((s) => message.includes(steerMarker(runId, s.id)));
+    if (steer === undefined) return;
+    const ord = this.lastOrd.get(runId) ?? null;
+    if (steer.pickedUp === null) {
+      this.d.store.update(runId, (r) => { const s = r.steers.find((x) => x.id === steer.id); if (s !== undefined && s.pickedUp === null) s.pickedUp = { ord, step: null, at: this.now() }; });
+      this.d.changed?.(runId, null);
+      // The step's name, once the run's view is read.
       void this.d.run(runId).then((run) => {
-        this.d.store.update(runId, (r) => {
-          const s = r.steers.find((x) => x.id === steer.id);
-          if (s !== undefined && s.pickedUp === null) s.pickedUp = { ord, step: ord !== null ? run?.stepOf(ord) ?? null : null, at: this.now() };
-        });
+        this.d.store.update(runId, (r) => { const s = r.steers.find((x) => x.id === steer.id); if (s?.pickedUp != null && s.pickedUp.step === null && ord !== null) s.pickedUp.step = run?.stepOf(ord) ?? null; });
         this.d.changed?.(runId, null);
       }).catch((err: unknown) => this.d.log?.(`[working-doc] pickup of ${steer.id} on ${runId}: ${String(err)}`));
-      return;
     }
-    if (e.type === 'unitDone') {
-      // A standing steer is re-sent before every later step, until a later edit replaces it.
-      const standing = rec.steers.find((s) => s.kind === 'standing' && s.supersededBy == null && s.error === null && s.pickedUp !== null);
-      if (standing === undefined) return;
-      void this.d.run(runId).then(async (run) => {
-        if (run === null || run.terminal) return;
-        await this.d.engine.injectWorkerMessage(runId, standing.note, 'all');
-        this.d.store.update(runId, (r) => {
-          const s = r.steers.find((x) => x.id === standing.id);
-          if (s !== undefined) s.renewals = (s.renewals ?? 0) + 1;
-        });
-      }).catch((err: unknown) => this.d.log?.(`[working-doc] standing steer ${standing.id} on ${runId}: ${String(err)}`));
-    }
+    if (steer.kind !== 'standing' || steer.standingNote == null) return;
+    if (this.renewedFor.has(steer.id) && this.renewedFor.get(steer.id) === ord) return;
+    this.renewedFor.set(steer.id, ord);
+    void this.exclusive(runId, async () => {
+      // Re-checked inside the run's turn: a later edit may have replaced it meanwhile.
+      const current = this.d.store.get(runId)?.steers.find((x) => x.id === steer.id);
+      if (current === undefined || current.supersededBy != null || current.error !== null || current.standingNote == null) return;
+      const run = await this.d.run(runId);
+      if (run === null || run.terminal) return;
+      if (this.d.store.get(runId)?.steers.find((x) => x.id === steer.id)?.supersededBy != null) return;
+      await this.d.engine.injectWorkerMessage(runId, current.standingNote, 'all');
+      this.d.store.update(runId, (r) => { const x = r.steers.find((y) => y.id === steer.id); if (x !== undefined) x.renewals = (x.renewals ?? 0) + 1; });
+      this.d.changed?.(runId, null);
+    }).catch((err: unknown) => this.d.log?.(`[working-doc] standing steer ${steer.id} on ${runId}: ${String(err)}`));
   }
 }

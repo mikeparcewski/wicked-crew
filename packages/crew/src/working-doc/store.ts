@@ -56,6 +56,8 @@ export interface SteerRecord {
   pickedUp: { ord: number | null; step: string | null; at: number } | null;
   /** Why it was not sent (the run had ended; the engine refused). */
   error: string | null;
+  /** A standing steer: the constraint alone, re-sent before every later step. */
+  standingNote?: string;
   /** A standing steer: superseded by a later edit of the same section, it is no longer re-sent. */
   supersededBy?: string | null;
   /** A standing steer: how many later steps it was re-sent to. */
@@ -69,6 +71,8 @@ export interface WorkingDocRecord {
   createdAt: number;
   trail: TrailEntry[];
   steers: SteerRecord[];
+  /** An edit whose outcome was not known (no version in time): attributed once the head shows it, never to another. */
+  pending?: { expectHead: number; author: DocAuthor; surface: string | null; values: Partial<Record<SectionId, string>>; at: number; actor: { id: string; kind: string } } | null;
 }
 
 interface FileShape { version: 1; runs: Record<string, WorkingDocRecord> }

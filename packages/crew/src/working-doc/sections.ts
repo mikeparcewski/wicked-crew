@@ -51,7 +51,7 @@ const escapeHtml = (s: string): string => s.replace(/&/g, '&amp;').replace(/</g,
 export function initialHtml(title: string, texts: Partial<Record<SectionId, string>>): string {
   const sections = SECTION_IDS.map((id) => (
     `<section class="wd-section"><h2>${escapeHtml(SECTION_LABELS[id])}</h2>`
-    + `<div class="wd-text" data-wid="${anchorOf(id)}">${escapeHtml(texts[id] ?? '')}</div></section>`
+    + `<div class="wd-text" data-wid="${anchorOf(id)}">${escapeHtml((texts[id] ?? '').replace(/\r\n?/g, '\n'))}</div></section>`
   )).join('\n');
   return '<!doctype html>\n<html lang="en"><head><meta charset="utf-8"><title>'
     + escapeHtml(`Working document: ${title}`)
@@ -61,10 +61,13 @@ export function initialHtml(title: string, texts: Partial<Record<SectionId, stri
     + escapeHtml(`Working document: ${title}`) + '</h1>\n' + sections + '\n</body></html>\n';
 }
 
+/** A numeric reference's character, or the reference as written when it names no character. */
+const codePoint = (cp: number, raw: string): string => (Number.isInteger(cp) && cp >= 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : raw);
+
 const decodeEntities = (s: string): string => s
   .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&#x27;/g, "'")
-  .replace(/&#x([0-9a-f]+);/gi, (_m, n: string) => String.fromCodePoint(parseInt(n, 16)))
-  .replace(/&#(\d+);/g, (_m, n: string) => String.fromCodePoint(Number(n)))
+  .replace(/&#x([0-9a-f]+);/gi, (m, n: string) => codePoint(parseInt(n, 16), m))
+  .replace(/&#(\d+);/g, (m, n: string) => codePoint(Number(n), m))
   .replace(/&amp;/g, '&');
 
 /**

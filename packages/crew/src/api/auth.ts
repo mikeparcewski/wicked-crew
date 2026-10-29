@@ -160,7 +160,7 @@ export function parseTokenFile(json: string, source: string): Map<string, Actor>
     }
     // A plugin acts read-only (DES-PLUGIN-EVENTS §3.4): its one write, its own working-document section, is allowed
     // by kind at that route, never by trust. A token file that grants it more is refused.
-    if (a.kind === 'plugin' && (a.trust !== 'observer' || !/^plugin:[a-z0-9]+(?:-[a-z0-9]+)*@\d+\.\d+\.\d+/u.test(a.id))) {
+    if (a.kind === 'plugin' && (a.trust !== 'observer' || !/^plugin:[a-z0-9]+(?:-[a-z0-9]+)*@\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(a.id))) {
       throw new Error(`${at}: a plugin actor is 'observer' trust with id 'plugin:<id>@<version>'`);
     }
     if (map.has(e.sha256)) {
@@ -539,6 +539,9 @@ export function resolveAuth(options: AuthOptions | undefined, warn: (msg: string
 
 // ── The trust ladder over routes ─────────────────────────────────────────────
 
+/** `POST /runs/:id/working-doc/versions`: the one write a plugin actor may make (its own lines, checked by the route). */
+const WORKING_DOC_VERSIONS_PATH = new RegExp(`^${API_PREFIX}/runs/[^/]+/working-doc/versions$`);
+
 /** `PATCH /projects/:id` (exactly one segment after /projects) — see {@link requiredTrust}. */
 const PROJECT_DETAIL_PATH = new RegExp(`^${API_PREFIX}/projects/[^/]+$`);
 
@@ -685,6 +688,9 @@ export function registerAuthHooks(app: FastifyInstance, auth: ResolvedAuth): voi
     if (isUnitTokenRoute(req.method, path)) return; // no actor to rank: the engine judged the token
     // `actor` is always set here: the onRequest hook either assigned it or
     // already answered 401 (which skips the rest of the lifecycle).
+    // Spike 3: a plugin actor (observer) writes its OWN working-document lines; the route checks that it writes only
+    // as itself and only its own section. Nothing else a plugin sends passes this boundary.
+    if (req.actor?.kind === 'plugin' && req.method === 'POST' && WORKING_DOC_VERSIONS_PATH.test(path)) return;
     const need = requiredTrust(req.method, path, req.body);
     if (!trustAtLeast(req.actor, need)) {
       // RETURN the reply — the idiomatic guarantee that the lifecycle stops

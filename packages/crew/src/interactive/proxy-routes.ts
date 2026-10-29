@@ -36,6 +36,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { InteractiveDocCreateRequest } from 'wicked-crew-api-types';
 import { request as httpRequest, type IncomingHttpHeaders, type IncomingMessage } from 'node:http';
+import { join } from 'node:path';
 import { API_PREFIX } from '../api/api-prefix.js';
 import type { CoreAdapter } from '../core/adapter.js';
 import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
@@ -52,7 +53,7 @@ import {
 } from './doc-grounding.js';
 import { projectDocsRoot } from './project-root.js';
 import { CHAT_POSTED, DEMO_DOC_MOVED_MESSAGE, WORKING_DOC_REFUSED_MESSAGE, isAnswerableDocKind, isIterationAsk, readDocHead } from './chat-events.js';
-import { WORKING_DOC_KIND } from '../working-doc/store.js';
+import { WORKING_DOC_KIND, isWorkingDocDir } from '../working-doc/store.js';
 import { DOC_NAME } from './draft-events.js';
 
 /** The bridge route whose request crew reads before forwarding (F-046) — exact path, any query. */
@@ -205,8 +206,22 @@ export const DOC_EVENTS_BODY_MAX = 1024 * 1024;
 
 /** `true` for the bridge's UI-emit request (method + exact path, query ignored). */
 export function isDocEventsPost(method: string | undefined, target: string): boolean {
+  // Every spelling interactive's router accepts (case-insensitive, trailing slash) is the same route (codex on #1197).
+  const path = (target.split('?')[0] ?? target).toLowerCase().replace(/\/+$/u, '');
+  return method?.toUpperCase() === 'POST' && path === DOC_EVENTS_PATH;
+}
+
+/**
+ * Spike 3: the document a WRITE names in its path (`/d/:doc/…`, `/api/docs/:doc…`), or null. A run's working document
+ * takes no write through the proxy at all: crew writes it, from the run's block.
+ */
+export function pathDocumentId(method: string | undefined, target: string): string | null {
+  const m = (method ?? 'GET').toUpperCase();
+  if (m === 'GET' || m === 'HEAD' || m === 'OPTIONS') return null;
   const path = target.split('?')[0] ?? target;
-  return method === 'POST' && path === DOC_EVENTS_PATH;
+  const hit = /^\/(?:d|api\/docs)\/([^/]+)/iu.exec(path);
+  if (hit === null) return null;
+  try { return decodeURIComponent(hit[1] ?? ''); } catch { return null; }
 }
 
 /**
@@ -520,6 +535,11 @@ export function registerInteractiveProxy(app: FastifyInstance, adapter: CoreAdap
       // F-RECON-013: so is a UI emit — a `chat.posted` ASK on a doc whose kind no seam answers is
       // refused with a typed 422 instead of reaching the bus to be declined in a log line. Every
       // other request stays socket-to-socket transport.
+      const pathDoc = pathDocumentId(req.method, target);
+      if (pathDoc !== null && isWorkingDocDir(join(root, pathDoc))) {
+        deps.log?.(`interactive ${req.method} on ${pathDoc} (project ${projectId}) refused before the bridge: it is a run's working document`);
+        return reply.code(403).send({ code: 'working_doc', document_id: pathDoc, error: WORKING_DOC_REFUSED_MESSAGE });
+      }
       let create: PreparedCreate | null = null;
       let buffered: Pick<PreparedCreate, 'body' | 'contentType'> | null = null;
       let createToken: number | undefined;
@@ -545,7 +565,7 @@ export function registerInteractiveProxy(app: FastifyInstance, adapter: CoreAdap
         // Spike 3: a run's working document takes no event from the browser at all (no edit, ask, review, theme or
         // export request): crew writes it, from the run's block, and nothing about it launches a run.
         const target_doc = eventDocumentId(raw);
-        if (target_doc !== null && readDocHead(root, target_doc)?.kind === WORKING_DOC_KIND) {
+        if (target_doc !== null && (isWorkingDocDir(join(root, target_doc)) || readDocHead(root, target_doc)?.kind === WORKING_DOC_KIND)) {
           deps.log?.(`interactive event on ${target_doc} (project ${projectId}) refused before the bridge: it is a run's working document`);
           return reply.code(403).send({ code: 'working_doc', document_id: target_doc, error: WORKING_DOC_REFUSED_MESSAGE });
         }

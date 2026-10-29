@@ -1902,8 +1902,12 @@ export async function createServer(
     if (kept > 0) app.log.info(`chat history: closed ${kept} chat(s) the previous daemon left open (history kept)`);
     chatTranscripts.clearOrphaned(new Set(chatRetained.keys()));
   }
+  // Power mode spike 3: the working-document service is built further down; it hears the frames through this one
+  // subscription (late-bound), never a second `adapter.onEvent`.
+  let workingDocTap: ((event: CoreEvent) => void) | null = null;
   const onEngineEvent = (event: CoreEvent): void => {
     gateCache.ingest(event);
+    workingDocTap?.(event);
     // `GET /search`: frames keep the index current (a no-op until the first search).
     searchService?.ingest(event);
     elicitationCache.ingest(event);
@@ -2509,7 +2513,7 @@ export async function createServer(
     audit: (action, actor, runId, detail) => audit.record(action, actor as Parameters<typeof audit.record>[1], { runId, detail }),
     log: (m) => app.log.warn(m),
   });
-  adapter.onEvent((e) => workingDocs.onEvent(e));
+  workingDocTap = (e) => workingDocs.onEvent(e);
   registerWorkingDocRoutes(app, { service: workingDocs, exists: async (id) => (await adapter.sessions()).includes(id) });
   registerStandingOrderRoutes(app, {
     store: standingOrders,

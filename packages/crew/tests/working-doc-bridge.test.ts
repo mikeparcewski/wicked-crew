@@ -11,6 +11,8 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { bridgeBackend } from '../src/working-doc/bridge-backend.js';
+import { UndeterminedWriteError } from '../src/working-doc/service.js';
+import { isDocEventsPost, pathDocumentId } from '../src/interactive/proxy-routes.js';
 import { encodeSectionText, sectionsOf } from '../src/working-doc/sections.js';
 import { WORKING_DOC_SIDECAR } from '../src/working-doc/store.js';
 
@@ -18,8 +20,9 @@ const servers: Server[] = [];
 const dirs: string[] = [];
 afterEach(() => { for (const s of servers.splice(0)) s.close(); for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
 
-async function standIn() {
+async function standIn(opts: { foreign?: boolean; never?: boolean } = {}) {
   let head = 0;
+  const html: Record<number, string> = { 0: '<div data-wid="wd-goal">v0</div>' };
   const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
   const server = createServer((req, res) => {
     let raw = '';
@@ -28,9 +31,15 @@ async function standIn() {
       const body = raw === '' ? {} : JSON.parse(raw) as Record<string, unknown>;
       if (req.method === 'POST') posts.push({ path: req.url ?? '', body });
       if (req.method === 'POST' && req.url === '/api/docs') { res.end(JSON.stringify({ name: body['name'], head: 0 })); return; }
-      if (req.method === 'POST' && req.url === '/api/events') { setTimeout(() => { head += 1; }, 50); res.end(JSON.stringify({ ok: true })); return; }
+      if (req.method === 'POST' && req.url === '/api/events') {
+        const item = ((body['payload'] as { items: Array<{ selector: string; value: string }> }).items)[0]!;
+        if (!opts.never) setTimeout(() => { head += 1; html[head] = `<div data-wid="${item.selector}">${opts.foreign ? 'someone else' : item.value}</div>`; }, 50);
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
       if (req.method === 'GET' && /\/api\/versions$/u.test(req.url ?? '')) { res.end(JSON.stringify({ head })); return; }
-      if (req.method === 'GET' && /\/doc$/u.test(req.url ?? '')) { res.setHeader('content-type', 'text/html'); res.end(`<div data-wid="wd-goal">v${head}</div>`); return; }
+      const v = /\/doc\/(\d+)$/u.exec(req.url ?? '');
+      if (req.method === 'GET' && v !== null && html[Number(v[1])] !== undefined) { res.setHeader('content-type', 'text/html'); res.end(html[Number(v[1])]); return; }
       res.statusCode = 404; res.end('{}');
     });
   });
@@ -60,6 +69,16 @@ describe('the bridge backend', () => {
     expect(sent['payload']).toMatchObject({ document_id: 'working-run-1', expect_head: 0, version_target: 0, author: 'local via plugin:wicked-phase-report@1.0.0', items: [{ type: 'content-edit', selector: 'wd-goal', value: 'g' }] });
   });
 
+  it('reads the head version pinned (never a torn head/html pair)', async () => {
+    const s = await standIn();
+    expect(await s.backend.read('default', 'working-run-1')).toEqual({ head: 0, html: '<div data-wid="wd-goal">v0</div>' });
+  });
+
+  it('a version that is not this batch’s, or none in time, is an UNKNOWN outcome — never a success, never a conflict', async () => {
+    const foreign = await standIn({ foreign: true });
+    await expect(foreign.backend.edit('default', 'w', { expectHead: 0, author: 'x', items: [{ selector: 'wd-goal', value: 'mine' }] })).rejects.toBeInstanceOf(UndeterminedWriteError);
+  });
+
   it('a stale base is refused before anything is sent', async () => {
     const s = await standIn();
     expect(await s.backend.edit('default', 'working-run-1', { expectHead: 3, author: 'x', items: [{ selector: 'wd-goal', value: 'g' }] })).toEqual({ headMoved: true, head: 0 });
@@ -70,5 +89,20 @@ describe('the bridge backend', () => {
     const v = encodeSectionText('[x] keep /v1\nand /v2');
     expect(v).not.toContain('\n');
     expect(sectionsOf(`<div data-wid="wd-next">${v.replace(/\u2028/g, '&#x2028;')}</div>`).next).toBe('[x] keep /v1\nand /v2');
+  });
+});
+
+describe('the proxy’s write fence reads every spelling', () => {
+  it('the events route in any case, with a trailing slash', () => {
+    for (const t of ['/api/events', '/API/EVENTS', '/api/events/', '/Api/Events//?x=1']) expect(isDocEventsPost('POST', t), t).toBe(true);
+    expect(isDocEventsPost('GET', '/api/events')).toBe(false);
+  });
+  it('a write to a document by its path names the document; a read does not', () => {
+    expect(pathDocumentId('POST', '/d/working-run-1/api/fork')).toBe('working-run-1');
+    expect(pathDocumentId('PUT', '/D/working-run-1/api/theme/learned')).toBe('working-run-1');
+    expect(pathDocumentId('DELETE', '/api/docs/working-run-1')).toBe('working-run-1');
+    expect(pathDocumentId('POST', '/d/working%2Drun%2D1/api/deck')).toBe('working-run-1');
+    expect(pathDocumentId('GET', '/d/working-run-1/doc')).toBeNull();
+    expect(pathDocumentId('POST', '/api/docs')).toBeNull();
   });
 });

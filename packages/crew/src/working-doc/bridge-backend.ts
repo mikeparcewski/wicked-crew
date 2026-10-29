@@ -10,7 +10,8 @@ import { request as httpRequest } from 'node:http';
 import { join } from 'node:path';
 
 import type { InteractiveBridgePool } from '../interactive/bridge-pool.js';
-import type { DocBackend } from './service.js';
+import { UndeterminedWriteError, type DocBackend } from './service.js';
+import { anchorOf, isSectionId, sectionsOf } from './sections.js';
 import { writeSidecar } from './store.js';
 
 const POLL_MS = 300;
@@ -32,6 +33,8 @@ function call(bridge: { host: string; port: number }, method: string, path: stri
     req.end(payload);
   });
 }
+
+const escapeText = (s: string): string => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 const json = (text: string): Record<string, unknown> => {
   try { return JSON.parse(text) as Record<string, unknown>; } catch { return {}; }
@@ -64,9 +67,17 @@ export function bridgeBackend(pool: Pick<InteractiveBridgePool, 'ensure'>, rootF
       const { bridge } = await bridgeOf(projectId);
       const h = await head(bridge, docId);
       if (h === null) return null;
-      const r = await call(bridge, 'GET', `/d/${encodeURIComponent(docId)}/doc`);
-      if (r.status >= 300) throw new Error(`interactive head read failed (${r.status})`);
+      // The version-pinned read: the HTML is head h's even if a write lands between the two calls.
+      const r = await call(bridge, 'GET', `/d/${encodeURIComponent(docId)}/doc/${h}`);
+      if (r.status >= 300) throw new Error(`interactive version read failed (${r.status})`);
       return { head: h, html: r.text };
+    },
+    async readVersion(projectId, docId, version) {
+      const { bridge } = await bridgeOf(projectId);
+      const r = await call(bridge, 'GET', `/d/${encodeURIComponent(docId)}/doc/${version}`);
+      if (r.status === 404) return null;
+      if (r.status >= 300) throw new Error(`interactive version read failed (${r.status})`);
+      return r.text;
     },
     async edit(projectId, docId, batch) {
       const { bridge } = await bridgeOf(projectId);
@@ -74,7 +85,8 @@ export function bridgeBackend(pool: Pick<InteractiveBridgePool, 'ensure'>, rootF
       // which is sound only because crew is the document's one writer (the proxy refuses every browser event on it,
       // and the service writes one version per run at a time).
       const before = await head(bridge, docId);
-      if (before !== batch.expectHead) return { headMoved: true, head: before ?? batch.expectHead };
+      if (before === null) throw new Error('the working document is gone');
+      if (before !== batch.expectHead) return { headMoved: true, head: before };
       const r = await call(bridge, 'POST', '/api/events', {
         event_type: 'wicked.interactive.feedback.submitted',
         payload: {
@@ -83,15 +95,24 @@ export function bridgeBackend(pool: Pick<InteractiveBridgePool, 'ensure'>, rootF
         },
       });
       if (r.status >= 300) throw new Error(`interactive refused the edit (${r.status}): ${String(json(r.text)['error'] ?? r.text.slice(0, 200))}`);
+      // The batch's version is the one right after its base, and it is THIS batch's only if it says what was written.
+      const mine = batch.expectHead + 1;
       const until = Date.now() + POLL_FOR_MS;
       while (Date.now() < until) {
         await new Promise((res) => setTimeout(res, POLL_MS));
         const h = await head(bridge, docId);
-        if (h !== null && h > batch.expectHead) return { version: h, parent: batch.expectHead };
+        if (h === null || h < mine) continue;
+        const r = await call(bridge, 'GET', `/d/${encodeURIComponent(docId)}/doc/${mine}`);
+        if (r.status >= 300) continue;
+        const got = sectionsOf(r.text);
+        const ours = batch.items.every((it) => {
+          const id = it.selector.replace(/^wd-/u, '');
+          return isSectionId(id) && anchorOf(id) === it.selector && got[id] === sectionsOf(`<div data-wid="${it.selector}">${escapeText(it.value)}</div>`)[id];
+        });
+        if (ours) return { version: mine, parent: batch.expectHead };
+        throw new UndeterminedWriteError(`version ${mine} is not this edit's; it may still land`);
       }
-      // No version: the batch landed nothing (a head that moved, or an edit interactive refused).
-      const h = await head(bridge, docId);
-      return { headMoved: true, head: h ?? batch.expectHead };
+      throw new UndeterminedWriteError(`interactive did not land the edit in ${POLL_FOR_MS / 1000} s; it may still land`);
     },
   };
 }
