@@ -25,6 +25,21 @@ A patch release that ships the run's working document and steering from it (#119
 
 ### Added
 
+- **Power mode, the default way a job runs (program DES-POWER-MODE).** Needs a wicked-core-ts with
+  `Core.supportsPowerMode`; `capabilities.powerMode` says this daemon serves it.
+  - `POST /runs` runs a repo-scoped plan or preset launch in power mode unless the launch sends `power: false` or the new
+    `powerModeDefault` setting (on when unset; a person's switch, 400 on a non-boolean) is off. A power launch has no
+    plan-approval gate: the only human gate is deliver, plus what policy requires. The answer carries `power: true`,
+    or a `powerNotice` saying why a wanted power launch runs phased. The launch audit entry records it.
+  - `GET|POST /runs/:id/power` (the run's `PowerState`; flip the switch), `POST /runs/:id/rigor` (raise only) and
+    `POST /runs/:id/power/pause` (answer a checkpoint pause): people only, audited `run.power_mode.toggled`,
+    `run.rigor.raised` and `run.power_mode.paused`; an engine refusal is a 409 with its reason.
+  - `GET /runs/:id/bus?after=` pages the run's `wicked.run.*` bus mirror (`RunBusPage`); the daemon turns the engine's
+    mirror on at boot (`WICKED_RUN_MIRROR=0` keeps it off).
+  - The delivery's `## Assurance` names the orchestrator, its turns and checkpoints, the planned and delivered rigor,
+    every power flip, and the rigor history row by row.
+  - Insights records planned vs actual for every power run and adds the metric `rigor_raised` (power runs whose rigor
+    rose after intake), so the review can tell when the planner under-sizes a repo.
 - **Power mode wire contract (api-types 0.149.0).** Types only, published ahead of the engine so studio can build
   against them: `LaunchRunBody.power`, `SystemSettings.powerModeDefault` (absent = on), `AgentSession.power`
   (`PowerState`: the switch, rigor, the intake `RigorPlan`, the rigor history of `RigorChange` rows, toggles, the

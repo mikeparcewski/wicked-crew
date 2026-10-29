@@ -112,6 +112,56 @@ describe('the analysis on a fixture run store', () => {
     expect(line).toMatch(/95% CI/u);
   });
 
+  // program DES-POWER-MODE: planned vs actual, so the review can tell when the planner under-sizes a repo.
+  it('counts power runs whose rigor rose after intake, and only power runs', () => {
+    const power = (raised: boolean) => ({
+      plannedRigor: 'standard', finalRigor: raised ? 'high' : 'standard', plannedScore: 30, finalScore: raised ? 55 : 30,
+      raised, estimateMinutes: 30, actualMinutes: 40,
+    });
+    const runs = [
+      ...baseline(20, (at) => run(at, { power: power(false) })),
+      ...recent(20, (at) => run(at, { power: power(at < 34) })),
+      ...recent(5, (at) => run(at, { power: null })),
+    ];
+    const facts = analyze(snapshot(runs));
+    const m = cell(facts, 'rigor_raised');
+    expect(m?.window.n).toBe(20);
+    expect(m?.baseline.value).toBe(0);
+    expect(m?.window.value).toBeGreaterThan(0.5);
+    expect(m?.verdict).toBe('regressed');
+  });
+
+  it('reads planned vs actual off the engine\'s power record, and nothing off a phased run', () => {
+    const view = (power: unknown) =>
+      ({ session: { id: 'x', status: 'completed', ...(power !== undefined ? { power } : {}) }, units: [] }) as never;
+    expect(runFactOf(view(undefined), [], NOW).power).toBeNull();
+    const ended = runFactOf(
+      view({ plan: { rigor: 'standard', score: 30 }, rigor: 'high', outcome: { plannedRigor: 'standard', finalRigor: 'high', plannedScore: 30, finalScore: 58, estimateMinutes: 30, actualMinutes: 41 } }),
+      [],
+      NOW,
+    );
+    expect(ended.power).toMatchObject({ plannedRigor: 'standard', finalRigor: 'high', raised: true, actualMinutes: 41 });
+    const roseThenLowered = runFactOf(
+      view({
+        plan: { rigor: 'standard', score: 30 },
+        rigor: 'standard',
+        outcome: { plannedRigor: 'standard', finalRigor: 'standard', plannedScore: 30, finalScore: 30 },
+        history: [
+          { trigger: 'intake', direction: 'same' },
+          { trigger: 'turn', direction: 'up' },
+          { trigger: 'pre_handoff', direction: 'down' },
+        ],
+      }),
+      [],
+      NOW,
+    );
+    expect(roseThenLowered.power?.raised).toBe(true);
+    const refused = runFactOf(view({ available: false, plan: { rigor: 'high', score: 50, phasedRequired: 'regulated' }, rigor: 'high' }), [], NOW);
+    expect(refused.power).toBeNull();
+    const live = runFactOf(view({ plan: { rigor: 'high', score: 50, estimateMinutes: 20 }, rigor: 'high', outcome: null }), [], NOW);
+    expect(live.power).toMatchObject({ plannedRigor: 'high', finalRigor: 'high', raised: false, estimateMinutes: 20, actualMinutes: null });
+  });
+
   it('does not call noise at small n a trend: 1 of 3 recent runs failing is "too few runs to tell"', () => {
     const runs = [...baseline(20, (at) => run(at)), failed(10), run(20), run(30)];
     const facts = analyze(snapshot(runs));

@@ -752,6 +752,9 @@ export const LaunchSchema = z.object({
    *  "full assurance", the same as omitting it: the launcher never chooses for the caller, and a
    *  full-assurance launch on a one-CLI roster is answered with `assuranceNotice` (`core/assurance.ts`). */
   reducedAssurance: z.boolean().optional(),
+  /** (api-types 0.149.0, program DES-POWER-MODE) Power mode for this launch. Omitted: the daemon's
+   *  `powerModeDefault` setting (on when unset). Applies to a repo-scoped plan or preset launch only. */
+  power: z.boolean().optional(),
   /** QE-IN-APP-WORKFLOWS (api-types 0.106.0) — the operator's EXPLICIT skip of a required QE
    *  acceptance, with a reason (labelled on the run, every gate and the delivery), or its explicit
    *  force (no score waiver). Forwarded only when sent; crew never decides either for the caller,
@@ -1901,6 +1904,8 @@ export function registerRoutes(
       schedules: app.hasRoute({ method: 'GET', url: `${V}/schedules` }),
       // api-types 0.148.0 (power mode spike 3): a run's working document and steering from it.
       workingDoc: app.hasRoute({ method: 'GET', url: `${V}/runs/:id/working-doc` }),
+      // (api-types 0.149.0) Power mode: the routes are served AND the engine runs it.
+      powerMode: powerSupported(),
     };
     // wicked-core#411 / crew#497: the state-home blocker rides the health probe as a WARNING. The
     // daemon still SERVES (status stays ok — studio must load and show the blocker) but refuses to
@@ -2787,6 +2792,29 @@ export function registerRoutes(
     // wicked-core#850 EX-01/EX-02: forwarded only when the caller sent it — crew never waives
     // assurance on anyone's behalf (a one-CLI launch that did not is TOLD so in its answer, below).
     if (b.reducedAssurance === true) input.reducedAssurance = true;
+    // (program DES-POWER-MODE, operator ruling 2026-10-29) POWER MODE is the default way a job runs:
+    // the launch's own word, else the `powerModeDefault` setting (on when unset). Only a repo-scoped
+    // plan or preset launch can run as one orchestrator session, and only on an engine that carries it
+    // (any other launch is phased, said in the answer). A power launch has no plan-approval gate:
+    // the only human gate is deliver, plus what policy requires (a high-risk plan still holds).
+    let powerNotice: string | null = null;
+    // The caller's word, else the setting (read only when the launch did not say).
+    const powerWanted = b.power ?? (b.repoRef !== undefined && (b.workflow !== undefined || b.plan !== undefined)
+      ? ((await adapter.getSettings()).powerModeDefault ?? true)
+      : false);
+    if (powerWanted) {
+      // A plan, or a workflow the engine resolves to a PRESET (a registered def is planned the legacy way
+      // and has no orchestrator build): only those run in power mode, so only those lose run-level gates.
+      const isPreset = b.plan !== undefined || (b.workflow !== undefined && await namesPreset(b.workflow, b.projectId));
+      if (b.repoRef === undefined || !isPreset) {
+        powerNotice = 'power mode runs a repo-scoped plan or preset launch; this launch runs phased';
+      } else if (!powerSupported()) {
+        powerNotice = 'this engine has no power mode; the launch runs phased';
+      } else {
+        input.power = true;
+        input.humanConfirm = 'none';
+      }
+    }
     // QE-IN-APP-WORKFLOWS: the operator's explicit skip (with its reason) or force — forwarded only
     // when sent, never inferred.
     if (b.skipQeAcceptance !== undefined) input.skipQeAcceptanceReason = b.skipQeAcceptance.reason;
@@ -2929,6 +2957,8 @@ export function registerRoutes(
         // trail says what the run will actually do, and whether the daemon decided it.
         deliver,
         ...(deliverDefaulted ? { deliverDefaulted: true } : {}),
+        // program DES-POWER-MODE: the run's resolved switch, and whether the setting decided it.
+        ...(input.power === true ? { power: true, ...(b.power === undefined ? { powerDefaulted: true } : {}) } : {}),
         // wicked-core#850: the caller's explicit assurance choice (the engine persists the contract
         // on the session; this records WHO waived it).
         ...(b.reducedAssurance !== undefined ? { reducedAssurance: b.reducedAssurance } : {}),
@@ -2993,7 +3023,9 @@ export function registerRoutes(
       // can evaluate or judge it; the answer names the explicit opt-in to relaunch with.
       const notice = launchAssuranceNotice({ runId, reducedAssurance: b.reducedAssurance, engineClisJson: engineRosterJson(input.clisJson) });
       const assuranceNotice = notice === null ? {} : { assuranceNotice: notice };
-      return reply.code(201).send({ runId, ...(linkedIssues !== undefined ? { linkedIssues } : {}), ...freeText, ...skillsWarning, ...assuranceNotice });
+      // (program DES-POWER-MODE) Whether the run is in power mode, and why not when it was wanted.
+      const power = { ...(input.power === true ? { power: true } : {}), ...(powerNotice !== null ? { powerNotice } : {}) };
+      return reply.code(201).send({ runId, ...(linkedIssues !== undefined ? { linkedIssues } : {}), ...freeText, ...skillsWarning, ...assuranceNotice, ...power });
     } catch (err) {
       const msg = message(err);
       if (isReview) runtime.reviewLaunchRefused?.(input.sessionId, msg);
@@ -5510,6 +5542,159 @@ export function registerRoutes(
     }
   });
 
+  /** Whether `workflow` names a preset the engine resolves first (built-in or the project's). An engine
+   *  without presets, or a read that fails, answers `false`: the launch then keeps its gates. Hoisted. */
+  async function namesPreset(workflow: string, projectId: string | undefined): Promise<boolean> {
+    if (typeof adapter.listPresets !== 'function') return false;
+    try {
+      return (await adapter.listPresets(projectId)).some((p) => p.name === workflow);
+    } catch {
+      return false;
+    }
+  }
+
+  /** The linked engine runs power mode (an adapter double without the method does not). Hoisted. */
+  function powerSupported(): boolean {
+    return typeof adapter.supportsPowerMode === 'function' && adapter.supportsPowerMode();
+  }
+
+  // ── Power mode (program DES-POWER-MODE; api-types 0.149.0) ─────────────────────────────────────
+  // The engine computes every rigor value; these routes only carry a person's switch, raise or pause
+  // answer to it (human actors only: a worker or plugin bearer gets 403) and read its record back.
+  const RIGORS = ['light', 'standard', 'high', 'highest'] as const;
+  interface RunBusRowOut { eventId: number; seq: number; type: string; runId: string; at: number; payload: Record<string, unknown> }
+  /** A trimmed free-text field: empty is absent (`null`), never `""`. */
+  const textOrNull = (v: string | null | undefined): string | null => (v === undefined || v === null || v.trim() === '' ? null : v.trim());
+  const PowerToggleSchema = z.object({ on: z.boolean(), reason: z.string().trim().max(2000).nullish() }).strict();
+  const RigorRaiseSchema = z.object({ atLeast: z.enum(RIGORS), reason: z.string().trim().min(1).max(2000) }).strict();
+  const PowerPauseSchema = z
+    .object({ decision: z.enum(['continue_high', 'continue', 'switch_phased', 'stop']), note: z.string().trim().max(8000).nullish() })
+    .strict();
+  /** An engine refusal as HTTP: `not_found:` 404, `conflict:` 409, `refused:` / `bad_request:` 409 / 400. */
+  const powerError = (reply: FastifyReply, err: unknown) => {
+    const msg = message(err);
+    const reason = msg.replace(/^(?:Error: )?(?:not_found|conflict|refused|bad_request): /, '');
+    if (/\bnot_found:/.test(msg)) return reply.code(404).send({ error: 'Run not found', reason });
+    if (/\bbad_request:/.test(msg)) return reply.code(400).send({ error: 'Invalid request', reason });
+    return reply.code(409).send({ error: 'Refused', reason });
+  };
+  const powerView = async (id: string): Promise<{ runId: string } & Record<string, unknown> | null> => {
+    const view = (await adapter.sessionsDetail()).find((v) => v.session.id === id);
+    if (view === undefined) return null;
+    const power = (view.session as { power?: Record<string, unknown> | null }).power ?? null;
+    if (power === null) {
+      return {
+        runId: id, on: false, available: false, refusedReason: 'this run was launched phased', rigor: null, plan: null,
+        history: [], toggles: [], orchestrator: { cli: null, ord: null, turns: 0, inTurn: false, sessionRestarts: 0 },
+        turnLog: [], checkpoints: 0, handoff: null, pause: null, outcome: null, floors: [],
+      };
+    }
+    return { runId: id, ...power };
+  };
+
+  app.get(`${V}/runs/:id/power`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const view = await powerView(id);
+    if (view === null) return reply.code(404).send({ error: 'Run not found' });
+    return reply.send(view);
+  });
+
+  app.post(`${V}/runs/:id/power`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const parsed = PowerToggleSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
+    const actor = actorOf(req);
+    if (!isHumanOperator(actor)) return reply.code(403).send({ error: 'Only a person can flip power mode' });
+    if (!powerSupported()) return reply.code(501).send({ error: 'This engine has no power mode' });
+    try {
+      const reason = textOrNull(parsed.data.reason);
+      const st = await adapter.setPowerMode(id, parsed.data.on, actor.id, reason);
+      audit.record('run.power_mode.toggled', actor, { runId: id, detail: { on: parsed.data.on, reason } });
+      return reply.send({ runId: id, ...st });
+    } catch (err) {
+      return powerError(reply, err);
+    }
+  });
+
+  app.post(`${V}/runs/:id/rigor`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const parsed = RigorRaiseSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
+    const actor = actorOf(req);
+    if (!isHumanOperator(actor)) return reply.code(403).send({ error: 'Only a person can raise rigor' });
+    if (!powerSupported()) return reply.code(501).send({ error: 'This engine has no power mode' });
+    try {
+      const st = await adapter.raiseRigor(id, parsed.data.atLeast, actor.id, parsed.data.reason);
+      audit.record('run.rigor.raised', actor, { runId: id, detail: { atLeast: parsed.data.atLeast, reason: parsed.data.reason } });
+      return reply.send({ runId: id, ...st });
+    } catch (err) {
+      return powerError(reply, err);
+    }
+  });
+
+  app.post(`${V}/runs/:id/power/pause`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const parsed = PowerPauseSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
+    const actor = actorOf(req);
+    if (!isHumanOperator(actor)) return reply.code(403).send({ error: 'Only a person can answer a power-mode pause' });
+    if (!powerSupported()) return reply.code(501).send({ error: 'This engine has no power mode' });
+    try {
+      const note = textOrNull(parsed.data.note);
+      const st = await adapter.answerPowerPause(id, parsed.data.decision, note, actor.id);
+      audit.record('run.power_mode.paused', actor, { runId: id, detail: { decision: parsed.data.decision } });
+      if (decisions !== null && note !== null) {
+        decisions.track(ingestDecision(decisions, {
+          host: 'inject', actor, words: note, projectId: projects.index.projectOf(id) ?? null, runId: id,
+        }));
+      }
+      return reply.send({ runId: id, ...st });
+    } catch (err) {
+      return powerError(reply, err);
+    }
+  });
+
+  /** The run's `wicked.run.*` bus mirror after a cursor (`RunBusPage`). Read through the engine's own bus
+   *  read and filtered to this run; a page scans at most 1000 bus rows past the cursor. */
+  app.get(`${V}/runs/:id/bus`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const q = req.query as { after?: string; limit?: string };
+    const after = Math.max(0, Number.parseInt(q.after ?? '0', 10) || 0);
+    const limit = Math.min(500, Math.max(1, Number.parseInt(q.limit ?? '200', 10) || 200));
+    const first = adapter.readBus(after, 1000, 'wicked.run.');
+    if (first === null) return reply.code(503).send({ error: 'This daemon has no bus' });
+    const rows: RunBusRowOut[] = [];
+    // Scan until `limit` rows of THIS run, or the bus tail (bounded: at most 20 batches per request).
+    // The cursor is the last row returned, or `after` when none matched: an empty page means "nothing
+    // yet", never "skipped" (a later read resumes exactly where this one stopped).
+    let scan = after;
+    for (let batch = 0; batch < 20 && rows.length < limit; batch++) {
+      let page: { next?: number; rows?: Array<Record<string, unknown>> };
+      try {
+        page = JSON.parse(await (batch === 0 ? first : adapter.readBus(scan, 1000, 'wicked.run.')!)) as typeof page;
+      } catch (err) {
+        if (rows.length > 0) break;
+        return reply.code(503).send({ error: `The bus could not be read: ${message(err)}` });
+      }
+      const events = page.rows ?? [];
+      if (events.length === 0) break;
+      for (const e of events) {
+        const eventId = Number(e['event_id'] ?? 0);
+        scan = Math.max(scan, eventId);
+        // The engine's read decodes payloads; a non-object payload (another producer's row) is skipped.
+        const payload = e['payload'];
+        if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) continue;
+        const pl = payload as Record<string, unknown>;
+        if (pl['runId'] !== id) continue;
+        rows.push({ eventId, seq: Number(pl['seq'] ?? 0), type: String(e['event_type'] ?? ''), runId: id, at: Number(pl['at'] ?? 0), payload: pl });
+        if (rows.length >= limit) break;
+      }
+      if (typeof page.next === 'number' && page.next <= scan && events.length < 1000) break;
+    }
+    const cursor = rows.length > 0 ? rows[rows.length - 1]!.eventId : after;
+    return reply.send({ rows, cursor });
+  });
+
   /**
    * crew#1058 / #1083 round 7: the runs with a reassign in flight. A second reassign of the same run
    * is refused before it queues on the decision lock — queued, it would act on the state the first
@@ -7295,6 +7480,16 @@ export function registerRoutes(
           .send({ error: "deliverDefault must be 'pr' or 'none'" });
       }
     }
+    // powerModeDefault (api-types 0.149.0, program DES-POWER-MODE): a boolean only. It decides how every
+    // later New job runs, so a typo is a 400 and only a PERSON may change it (a worker's bearer gets 403).
+    if (Object.hasOwn(patch, 'powerModeDefault')) {
+      if (typeof patch.powerModeDefault !== 'boolean') {
+        return reply.code(400).send({ error: 'powerModeDefault must be true or false' });
+      }
+      if (!isHumanOperator(actorOf(req))) {
+        return reply.code(403).send({ error: 'Only a person can change the power mode default (powerModeDefault)' });
+      }
+    }
     // qeAcceptance (api-types 0.120.0): 'required' | 'off' only. 'off' skips QE acceptance on every
     // launch that requires it (labelled with the setting), so a typo must be a 400, never a dropped key.
     // Turning it off waives an assurance instrument on every launch after it, so only a PERSON may
@@ -7397,6 +7592,7 @@ export function registerRoutes(
       'workerSilentTurnMinutes',
       'deliverDefault',
       'qeAcceptance',
+      'powerModeDefault',
       'onboardingAutoCapture',
       'deliverIdentityLogin',
       'deliverIdentityByRepo',

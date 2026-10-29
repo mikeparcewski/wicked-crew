@@ -213,6 +213,13 @@ export interface LaunchRunInput {
    */
   reducedAssurance?: boolean;
   /**
+   * (program DES-POWER-MODE, wicked-core-ts with `Core.supportsPowerMode`) Run in POWER MODE: the PA's
+   * scope step is also the intake QE plan, the `build` step runs as one multi-turn orchestrator session,
+   * and a hand-off NOT-PASS goes back to that session on its own. Set by `POST /runs` from the launch's
+   * `power` or the `powerModeDefault` setting, for a repo-scoped plan or preset launch only.
+   */
+  power?: boolean;
+  /**
    * (QE-IN-APP-WORKFLOWS, wicked-core-ts >= 0.7.49) The operator's EXPLICIT skip of a required QE
    * acceptance, with this reason (core-ts `skipQeAcceptanceReason`), or its explicit force
    * (`forceQeAcceptance`). Sent only when the caller sent them; crew never sets either.
@@ -311,6 +318,9 @@ export const DEFAULT_SETTINGS: CrewSystemSettings = {
   // crew#552 — a completed onboarding run chains capture-learnings (CAPTURE automatic, PROMOTION
   // human-gated). The F-RC1-045/046 blockers are closed (wicked-core#462/#463, crew#553).
   onboardingAutoCapture: true,
+  // program DES-POWER-MODE (operator ruling 2026-10-29) — power mode is the MVP's default way of
+  // running: a New job launches in power mode unless the operator switched it off here or on the job.
+  powerModeDefault: true,
   // crew#554 (wicked-core#468) / DES-L4 PR-⑧ (D-8, D-8b) — every governed agent unit follows the
   // cross-CLI discipline skill, and `'require'` is the ONLY policy: a published generation that
   // lacks the skill REFUSES every launch at intake (the engine's `BaseSkillRefused`) — never a

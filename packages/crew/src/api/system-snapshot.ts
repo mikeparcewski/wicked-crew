@@ -1029,6 +1029,14 @@ export function livenessThresholds(stallMinutes: number | undefined): { quietAft
   return { stallAfterMs, quietAfterMs: Math.min(5 * 60_000, Math.floor(stallAfterMs / 3)) };
 }
 
+/** (program DES-POWER-MODE) The open checkpoint pause of a power run, or `null`. */
+function powerPauseOf(s: unknown): { checkpoint: number | null; why: string | null } | null {
+  const p = (s as { power?: { pause?: { checkpoint?: unknown; reasons?: unknown } | null } | null }).power?.pause;
+  if (p === null || p === undefined || typeof p !== 'object') return null;
+  const reasons = Array.isArray(p.reasons) ? p.reasons.filter((r): r is string => typeof r === 'string') : [];
+  return { checkpoint: typeof p.checkpoint === 'number' ? p.checkpoint : null, why: reasons[0] ?? null };
+}
+
 /** One run's computed liveness. Pure: every input is a reading. */
 export function runLiveness(input: {
   view: SessionView;
@@ -1058,6 +1066,12 @@ export function runLiveness(input: {
       liveness = 'waiting_on_you';
       reason = `waiting on you: ${(gate.kind ?? 'a decision').replace(/_/g, ' ')}${gate.ord !== null ? ` (unit ${gate.ord})` : ''}`;
     }
+  } else if (powerPauseOf(s) !== null) {
+    // (program DES-POWER-MODE, crew#1206) A power run paused at a checkpoint waits on a person while it
+    // stays `executing` (the pause is not an engine gate): it is waiting on you, never quiet or stalled.
+    const p = powerPauseOf(s)!;
+    liveness = 'waiting_on_you';
+    reason = `waiting on you: this grew past its plan${p.checkpoint !== null ? ` (checkpoint ${p.checkpoint})` : ''}${p.why !== null ? `: ${p.why}` : ''}`;
   } else if (evidence === null) {
     const age = createdMs !== null ? now - createdMs : null;
     if (age !== null && age < input.stallAfterMs) {

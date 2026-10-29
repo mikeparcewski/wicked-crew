@@ -123,6 +123,21 @@ export interface DeliverAssuranceFact {
   } | null;
   /** Every failed floor the operator overrode, with the phase it was on and who overrode it. */
   floorOverrides: Array<{ phase: string; by: string; label: string }>;
+  /** (program DES-POWER-MODE) The run's power-mode record: the orchestrator and the rigor history. */
+  power?: DeliverPowerFact;
+}
+
+/** (program DES-POWER-MODE) What the delivery says about a power run. */
+export interface DeliverPowerFact {
+  on: boolean;
+  cli: string | null;
+  turns: number;
+  checkpoints: number;
+  handoffRound: number;
+  planned: { rigor: string; score: number } | null;
+  rigor: string | null;
+  history: Array<{ seq: number; trigger: string; from: string | null; to: string | null; actual: number; by: string; reason: string }>;
+  toggles: Array<{ on: boolean; by: string; reason: string | null }>;
 }
 
 /** Everything the composer needs. Built by {@link factsFromRun} or {@link factsFromWorkflow}. */
@@ -729,6 +744,7 @@ function assuranceSection(a: DeliverAssuranceFact): string[] {
     for (const o of a.floorOverrides) byLabel.set(o.label, [...(byLabel.get(o.label) ?? []), `${code(o.phase)} (${literal(o.by)})`]);
     for (const [label, where] of byLabel) out.push(`- **${cell(label.charAt(0).toUpperCase() + label.slice(1))}**: ${where.join(', ')}`);
   }
+  if (a.power !== undefined) out.push(...powerLines(a.power));
   return out;
 }
 
@@ -765,7 +781,70 @@ function assuranceOf(s: SessionView['session'], units: WorkUnit[]): DeliverAssur
         ? o.floorOverride.label.trim()
         : 'floor overridden by operator',
   }));
-  return { mode: typeof a.mode === 'string' ? a.mode : 'full', qe, floorOverrides };
+  const power = powerOf(s);
+  return { mode: typeof a.mode === 'string' ? a.mode : 'full', qe, floorOverrides, ...(power !== undefined ? { power } : {}) };
+}
+
+/** (program DES-POWER-MODE) The power record from `session.power` (camelCase), absent on a phased run. */
+export function powerOf(s: SessionView['session']): DeliverPowerFact | undefined {
+  const p = (s as { power?: unknown }).power as Record<string, unknown> | null | undefined;
+  if (p === null || p === undefined || typeof p !== 'object') return undefined;
+  // Intake refused power mode (phased required): the run was phased and says nothing about power mode.
+  if (p['available'] === false && num0(((p['orchestrator'] ?? {}) as Record<string, unknown>)['turns']) === 0) return undefined;
+  const str = (v: unknown): string | null => (typeof v === 'string' && v.trim() !== '' ? v.trim() : null);
+  const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+  const orch = (p['orchestrator'] ?? {}) as Record<string, unknown>;
+  const plan = p['plan'] as Record<string, unknown> | null | undefined;
+  const handoff = p['handoff'] as Record<string, unknown> | null | undefined;
+  const history = (Array.isArray(p['history']) ? p['history'] : []) as Array<Record<string, unknown>>;
+  const toggles = (Array.isArray(p['toggles']) ? p['toggles'] : []) as Array<Record<string, unknown>>;
+  return {
+    on: p['on'] === true,
+    cli: str(orch['cli']),
+    turns: num(orch['turns']),
+    checkpoints: num(p['checkpoints']),
+    handoffRound: handoff !== null && handoff !== undefined ? num(handoff['round']) : 0,
+    planned: plan !== null && plan !== undefined && str(plan['rigor']) !== null ? { rigor: str(plan['rigor'])!, score: num(plan['score']) } : null,
+    rigor: str(p['rigor']),
+    history: history.map((r) => ({
+      seq: num(r['seq']),
+      trigger: str(r['trigger']) ?? 'unknown',
+      from: str(r['from']),
+      to: str(r['to']),
+      actual: num(r['actual']),
+      by: str(r['by']) ?? 'engine',
+      reason: Array.isArray(r['reasons']) && typeof r['reasons'][0] === 'string' ? (r['reasons'][0] as string) : '',
+    })),
+    // The launch's own switch is not a flip.
+    toggles: toggles.filter((t) => t['by'] !== 'launch').map((t) => ({ on: t['on'] === true, by: str(t['by']) ?? 'unknown', reason: str(t['reason']) })),
+  };
+}
+
+const num0 = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+
+/** (program DES-POWER-MODE) The power lines of `## Assurance`: who built it, how rigor moved, and why. */
+function powerLines(p: DeliverPowerFact): string[] {
+  const out: string[] = [];
+  const who = p.cli !== null ? ` on ${code(p.cli)}` : '';
+  out.push(
+    `- **Power mode**: one orchestrator session${who}, ${p.turns} turn(s), ${p.checkpoints} checkpoint(s)` +
+      (p.handoffRound > 0 ? `, hand-off round ${p.handoffRound}.` : ', no hand-off.') +
+      (p.on ? '' : ' Switched off before delivery; the rest of the run was phased.'),
+  );
+  if (p.planned !== null) {
+    out.push(`- Rigor: planned ${literal(p.planned.rigor)} (score ${p.planned.score}) at intake; ${literal(p.rigor ?? p.planned.rigor)} at delivery.`);
+  }
+  for (const t of p.toggles) out.push(`- Power switched ${t.on ? 'on' : 'off'} by ${literal(t.by)}${t.reason !== null ? `: ${literal(t.reason)}` : ''}.`);
+  if (p.history.length > 0) {
+    out.push('', '| # | Trigger | Rigor | Score | By | Why |', '|---|---|---|---|---|---|');
+    for (const r of p.history.slice(-30)) {
+      const move = r.from === r.to ? cell(r.to ?? '-') : `${cell(r.from ?? '-')} → ${cell(r.to ?? '-')}`;
+      // Free text (an operator's reason, an actor) is literal: no HTML or Markdown renders in the table.
+      out.push(`| ${r.seq} | ${literal(r.trigger, 40)} | ${move} | ${r.actual} | ${literal(r.by, 120)} | ${literal(r.reason, 200)} |`);
+    }
+    if (p.history.length > 30) out.push('', `_${p.history.length - 30} earlier row(s) are on the run record._`);
+  }
+  return out;
 }
 
 /** (crew#1192) The PASS a `required` QE decision stood on, from the delivery's own QE check: only a

@@ -53,6 +53,52 @@ export interface RunFact {
   failureSignature: string | null;
   /** A failure nobody archived, or a run open for over a day. */
   unresolved: boolean;
+  /** (program DES-POWER-MODE) Planned vs actual of a power run (the planner's calibration input); `null`
+   *  on a phased run. Read from the engine's `session.power` (its `outcome` once the run ended). */
+  power?: RunPowerFact | null;
+}
+
+/** Planned vs actual of one power run. */
+export interface RunPowerFact {
+  plannedRigor: string;
+  finalRigor: string;
+  plannedScore: number;
+  finalScore: number;
+  /** The rigor rose after intake: the planner under-sized the change. */
+  raised: boolean;
+  estimateMinutes: number | null;
+  actualMinutes: number | null;
+}
+
+const RIGOR_RANK: Record<string, number> = { light: 0, standard: 1, high: 2, highest: 3 };
+
+/** (program DES-POWER-MODE) The planned-vs-actual fact of a power run, or `null`. */
+export function powerFactOf(session: Record<string, unknown>): RunPowerFact | null {
+  const p = session['power'] as Record<string, unknown> | null | undefined;
+  if (p === null || p === undefined || typeof p !== 'object') return null;
+  const o = p['outcome'] as Record<string, unknown> | null | undefined;
+  const plan = p['plan'] as Record<string, unknown> | null | undefined;
+  // A run intake refused power mode for (phased required) ran phased: it is no power run.
+  if (p['available'] === false || (plan?.['phasedRequired'] ?? null) !== null) return null;
+  const str = (v: unknown): string | null => (typeof v === 'string' ? v : null);
+  const n = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const plannedRigor = str(o?.['plannedRigor']) ?? str(plan?.['rigor']);
+  if (plannedRigor === null) return null;
+  const finalRigor = str(o?.['finalRigor']) ?? str(p['rigor']) ?? plannedRigor;
+  return {
+    plannedRigor,
+    finalRigor,
+    plannedScore: n(o?.['plannedScore']) ?? n(plan?.['score']) ?? 0,
+    finalScore: n(o?.['finalScore']) ?? n(plan?.['score']) ?? 0,
+    // Rose AFTER intake at any point (a raise later lowered at hand-off still counts), or ended above it.
+    raised:
+      (RIGOR_RANK[finalRigor] ?? 0) > (RIGOR_RANK[plannedRigor] ?? 0) ||
+      (Array.isArray(p['history']) ? (p['history'] as Array<Record<string, unknown>>) : []).some(
+        (r) => r['trigger'] !== 'intake' && r['direction'] === 'up',
+      ),
+    estimateMinutes: n(o?.['estimateMinutes']) ?? n(plan?.['estimateMinutes']),
+    actualMinutes: n(o?.['actualMinutes']),
+  };
 }
 
 /** A run open longer than this is unresolved (it is waiting on someone, or stuck). */
@@ -189,5 +235,6 @@ export function runFactOf(view: SessionView, events: readonly LooseEvent[], nowM
     benched: [...benched.values()],
     failureSignature,
     unresolved,
+    power: powerFactOf(s),
   };
 }

@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import type { Core as CoreHandle, LaunchOptions, Subscription } from 'wicked-core-ts';
+import type { PowerPauseRequest, PowerState, Rigor } from 'wicked-crew-api-types';
 import { AskError, AskUnsupportedError, type AskRequest, type AskTicket, type AskUnit } from './types.js';
 import type {
   EditorGrantsResponse,
@@ -654,6 +655,10 @@ interface CoreConstructor {
    *  Its PRESENCE is the capability: napi ignores an undeclared object field, so an older addon
    *  would drop a plan and run the launch unplanned and UNGATED. */
   supportsPlanLaunch?(): boolean;
+  /** (program DES-POWER-MODE) The addon runs power mode: `LaunchOptions.power`, `setPowerMode`,
+   *  `raiseRigor`, `answerPowerPause` and the power frames. Its PRESENCE is the capability (napi drops an
+   *  undeclared `power` field, so an older addon would launch the run phased without saying so). */
+  supportsPowerMode?(): boolean;
   /** core#920 (wicked-core-ts ≥ the release carrying it): the engine's worktree bench as a pure
    *  predicate — the `BenchedSeat` JSON array a run BOUND to one repository benches before routing
    *  (every codex seat unless the host sets `WICKED_CODEX_WORKTREE_OK`). Optional: the pinned addon
@@ -749,6 +754,12 @@ export function addonSupportsLaunchDeliverables(): boolean {
  *  wicked-core#850, >= 0.7.46)? Same doctrine. */
 export function addonSupportsReducedAssurance(): boolean {
   return addonAtLeast(0, 7, 46);
+}
+
+/** Does the installed addon carry the QE acceptance decision (`LaunchOptions.skipQeAcceptanceReason`
+ *  / `forceQeAcceptance`, `assurance.qe`; QE-IN-APP-WORKFLOWS, >= 0.7.49)? Same doctrine. */
+export function addonSupportsPowerModeStatic(): boolean {
+  return typeof Core.supportsPowerMode === 'function' && Core.supportsPowerMode() === true;
 }
 
 /** Does the installed addon carry the QE acceptance decision (`LaunchOptions.skipQeAcceptanceReason`
@@ -1864,6 +1875,14 @@ export class CoreAdapter {
       }
       opts.reducedAssurance = true;
     }
+    // (program DES-POWER-MODE) Fail CLOSED on an addon without power mode (napi ignores an undeclared
+    // field): the run would launch phased while its launcher reported power mode on.
+    if (input.power === true) {
+      if (!this.supportsPowerMode()) {
+        throw new Error('power mode needs a wicked-core-ts that carries it (Core.supportsPowerMode); this addon would run the launch phased');
+      }
+      opts.power = true;
+    }
     // The daemon's QE acceptance setting (`qeAcceptance: 'off'`, core/qe-acceptance-setting.ts): a
     // launch of a workflow that requires QE acceptance, and that neither skips nor forces it, is
     // skipped through the engine's own skip with a reason naming the setting — so every path that
@@ -2339,6 +2358,34 @@ export class CoreAdapter {
     }
     // JSON-encoded bool by contract (parse, never truthiness-test — 'false' is truthy).
     return JSON.parse(await archive.call(this.core, runId, archived, note ?? null)) as boolean;
+  }
+
+  /** (program DES-POWER-MODE) The linked engine runs power mode (`Core.supportsPowerMode`). */
+  supportsPowerMode(): boolean {
+    return addonSupportsPowerModeStatic() && typeof this.core.setPowerMode === 'function';
+  }
+
+  /** (program DES-POWER-MODE) Flip a run's power switch; resolves to its `PowerState`. */
+  async setPowerMode(runId: string, on: boolean, actor: string, reason: string | null): Promise<PowerState> {
+    if (typeof this.core.setPowerMode !== 'function') throw new Error('refused: this wicked-core build has no power mode');
+    return JSON.parse(await this.core.setPowerMode(runId, on, actor, reason)) as PowerState;
+  }
+
+  /** (program DES-POWER-MODE) Raise a power run's rigor (never lower); resolves to its `PowerState`. */
+  async raiseRigor(runId: string, atLeast: Rigor, actor: string, reason: string): Promise<PowerState> {
+    if (typeof this.core.raiseRigor !== 'function') throw new Error('refused: this wicked-core build has no power mode');
+    return JSON.parse(await this.core.raiseRigor(runId, atLeast, actor, reason)) as PowerState;
+  }
+
+  /** (program DES-POWER-MODE) Answer a power run's checkpoint pause; resolves to its `PowerState`. */
+  async answerPowerPause(runId: string, decision: PowerPauseRequest['decision'], note: string | null, actor: string): Promise<PowerState> {
+    if (typeof this.core.answerPowerPause !== 'function') throw new Error('refused: this wicked-core build has no power mode');
+    return JSON.parse(await this.core.answerPowerPause(runId, decision, note, actor)) as PowerState;
+  }
+
+  /** (program DES-POWER-MODE) The engine's bus read (the `wicked.run.*` mirror), or null without a bus. */
+  readBus(afterId: number, limit: number, typePrefix: string): Promise<string> | null {
+    return this.engineBus === null ? null : this.engineBus.busRead(afterId, limit, typePrefix, false);
   }
 
   /** Inject an operator message into a run's active PTY worker(s). target="all" or a CLI key. */
@@ -3784,6 +3831,8 @@ export class CoreAdapter {
       // qeAcceptance (api-types 0.120.0): 'required' | 'off' only — a hand-edited anything-else reads
       // as the shipped default ('required'), never as off.
       if ('qeAcceptance' in parsed && parsed.qeAcceptance !== 'required' && parsed.qeAcceptance !== 'off') delete parsed.qeAcceptance;
+      // powerModeDefault (program DES-POWER-MODE): a boolean only; anything else reads as the shipped default (on).
+      if ('powerModeDefault' in parsed && typeof parsed.powerModeDefault !== 'boolean') delete parsed.powerModeDefault;
       // onboardingAutoCapture (crew#552): a boolean only; anything else reads as the shipped default.
       if ('onboardingAutoCapture' in parsed && typeof parsed.onboardingAutoCapture !== 'boolean') delete parsed.onboardingAutoCapture;
       // baseSkillRef / baseSkillPolicy (crew#554): the same shapes PUT /settings admits — a string
