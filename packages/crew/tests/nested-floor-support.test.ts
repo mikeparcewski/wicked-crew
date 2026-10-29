@@ -32,6 +32,7 @@ describe('optInWhenFloorCannotArm (crew#1191)', () => {
       adapterAnswering({ armed: true, tool: 'sandbox-exec' }),
       adapterAnswering({}),
       adapterAnswering('not json'),
+      adapterAnswering('null'),
       { core: { hostBoundary: async () => Promise.reject(new Error('no addon')) } },
       { core: {} },
       {},
@@ -46,21 +47,12 @@ describe('optInWhenFloorCannotArm (crew#1191)', () => {
 
 describe('deliveryCannotCome (crew#1191)', () => {
   it('a run parked at a gate cannot deliver in a suite that answers none', () => {
-    expect(deliveryCannotCome({ status: 'awaiting_human', delivery: 'none' }, null, 0)).toBe(true);
+    expect(deliveryCannotCome({ status: 'awaiting_human', delivery: 'none' })).toBe(true);
   });
 
-  it('a running run can still deliver', () => {
-    for (const status of ['running', 'pending', 'planning']) {
-      expect(deliveryCannotCome({ status }, null, 1_000_000)).toBe(false);
+  it('a running run, and an ended one whose delivery field may still resolve late, keep waiting (xreview on #1195)', () => {
+    for (const status of ['running', 'pending', 'planning', 'completed', 'failed']) {
+      expect(deliveryCannotCome({ status, delivery: 'none' })).toBe(false);
     }
-  });
-
-  it('an ended run gets a grace for the post-terminal delivery field, then counts', () => {
-    const ended = { status: 'completed', delivery: 'none' };
-    expect(deliveryCannotCome(ended, 1_000, 1_000)).toBe(false);
-    expect(deliveryCannotCome(ended, 1_000, 15_999)).toBe(false);
-    expect(deliveryCannotCome(ended, 1_000, 16_000)).toBe(true);
-    expect(deliveryCannotCome({ status: 'failed' }, 0, 20_000)).toBe(true);
-    expect(deliveryCannotCome({ status: 'completed', delivery: 'delivered' }, 0, 20_000)).toBe(false);
   });
 });

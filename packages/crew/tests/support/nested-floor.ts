@@ -44,13 +44,13 @@ export async function optInWhenFloorCannotArm(
   const none = { optedIn: false, reason: null, restore: () => undefined };
   const core = (adapter as WithCore).core;
   if (typeof core?.hostBoundary !== 'function') return none;
-  let answer: HostBoundary;
+  let answer: HostBoundary | null;
   try {
     answer = JSON.parse(await core.hostBoundary()) as HostBoundary;
   } catch {
     return none;
   }
-  if (answer.armed !== false) return none;
+  if (answer?.armed !== false) return none;
   const before = env[UNSANDBOXED_OPT_IN_ENV];
   env[UNSANDBOXED_OPT_IN_ENV] = '1';
   return {
@@ -65,21 +65,13 @@ export async function optInWhenFloorCannotArm(
 
 /**
  * A run state from which the delivery a suite waits for can no longer come without a person: the run
- * parked at a gate (these suites launch with `humanConfirm: 'none'` and answer nothing), or it ended
- * without delivering. The waits stop there and report why at once, instead of running out their bound
- * on a run that already decided (crew#1191). `delivery` is resolved after the run ends, so a terminal
- * run is given `graceMs` for the field to land before it counts.
+ * parked at a gate. These suites launch with `humanConfirm: 'none'` and answer nothing, and a deliver
+ * refusal parks the run at its deliver refusal gate, so the waits stop there and report why at once,
+ * instead of running out their bound on a run that already decided (crew#1191). A run that ENDED
+ * without a `delivered` field is not treated as decided: the field is resolved after the run ends and
+ * can land late on a loaded host (`DeliveryResolver.settle`), so that case keeps the original bound
+ * (xreview on #1195).
  */
-export function deliveryCannotCome(
-  session: Record<string, unknown>,
-  terminalSince: number | null,
-  now: number,
-  graceMs = 15_000,
-): boolean {
-  const status = String(session['status']);
-  if (status === 'awaiting_human') return true;
-  if (['completed', 'failed', 'cancelled'].includes(status)) {
-    return terminalSince !== null && now - terminalSince >= graceMs && session['delivery'] !== 'delivered';
-  }
-  return false;
+export function deliveryCannotCome(session: Record<string, unknown>): boolean {
+  return String(session['status']) === 'awaiting_human';
 }

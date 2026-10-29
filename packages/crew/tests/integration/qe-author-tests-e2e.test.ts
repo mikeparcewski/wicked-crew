@@ -214,18 +214,15 @@ async function waitForRun(
   pred: (s: Record<string, unknown>) => boolean,
   label: string,
   ms = 120_000,
-  // crew#1191: waiting for a DELIVERY stops as soon as the run parked or ended without one — the
-  // bound is a backstop for a hang, never the way a refusal is found out.
+  // crew#1191: waiting for a DELIVERY stops as soon as the run parks at a gate (a deliver refusal) —
+  // the bound is a backstop, never the way a refusal is found out.
   opts: { untilDeliveryCannotCome?: boolean } = {},
 ) {
-  let terminalSince: number | null = null;
   return waitFor(async () => {
     const { body } = await getJson(`/api/v1/runs/${runId}`);
     const run = runOf(body);
     if (pred(run.session)) return run;
-    const now = Date.now();
-    if (TERMINAL.has(String(run.session['status']))) terminalSince ??= now;
-    if (opts.untilDeliveryCannotCome === true && deliveryCannotCome(run.session, terminalSince, now)) return DECIDED;
+    if (opts.untilDeliveryCannotCome === true && deliveryCannotCome(run.session)) return DECIDED;
     return null;
   }, label, ms).catch(async (err: unknown) => {
     const { body } = await getJson(`/api/v1/runs/${runId}`);

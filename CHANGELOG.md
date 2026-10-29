@@ -25,7 +25,7 @@ mentioned only where a daemon release depends on them.
   phase that `deliver-e2e` and `qe-author-tests-e2e` launch correctly refused to deliver. When the engine
   itself reports that it cannot arm a boundary, those suites now take its disclosed
   `WICKED_REPO_CHECKS_UNSANDBOXED=1` opt-in for their fixture repository; wherever a boundary arms, nothing
-  changes. Their delivery waits stop as soon as the run parks or ends without delivering, instead of
+  changes. Their delivery waits stop as soon as the run parks at a gate (a deliver refusal), instead of
   waiting out 90 s and 480 s. The real-git strand-and-lift tests (crew#418 A) take their bound from the
   deliver script's own bound per run, not a fixed 90 s.
 
