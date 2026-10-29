@@ -114,7 +114,13 @@ export interface DeliverRecipeExit {
 export interface DeliverAssuranceFact {
   /** `reduced` = launched in reduced-assurance mode (the distinct evaluator and the judge waived). */
   mode: 'full' | 'reduced' | (string & {});
-  qe: { status: string; reason: string } | null;
+  qe: {
+    status: string;
+    reason: string;
+    /** (crew#1192) The attributed PASS a `required` decision stood on at delivery: the ledger verdict's
+     *  id and reviewer (`QeAcceptanceCheck`). */
+    pass?: { verdictId: string; reviewer: string | null };
+  } | null;
   /** Every failed floor the operator overrode, with the phase it was on and who overrode it. */
   floorOverrides: Array<{ phase: string; by: string; label: string }>;
 }
@@ -709,6 +715,11 @@ function assuranceSection(a: DeliverAssuranceFact): string[] {
       out.push(`- **${label}**${why !== '' ? `: ${literal(why, 2000)}` : ''}`);
     } else if (status === 'waived') {
       out.push(`- **QE acceptance waived by score**: ${literal(a.qe.reason)}`);
+    } else if (status === 'required' && a.qe.pass !== undefined) {
+      // (crew#1192) A required QE that delivery stood on an attributed PASS for reads as passed.
+      const p = a.qe.pass;
+      const by = p.reviewer !== null ? `, reviewer ${literal(p.reviewer)}` : '';
+      out.push(`- **QE acceptance passed**: verdict ${code(p.verdictId)}${by}${a.qe.reason.trim() !== '' ? ` (${literal(a.qe.reason)})` : ''}`);
     } else {
       out.push(`- QE acceptance: ${literal(status)}${a.qe.reason.trim() !== '' ? ` (${literal(a.qe.reason)})` : ''}`);
     }
@@ -755,6 +766,30 @@ function assuranceOf(s: SessionView['session'], units: WorkUnit[]): DeliverAssur
         : 'floor overridden by operator',
   }));
   return { mode: typeof a.mode === 'string' ? a.mode : 'full', qe, floorOverrides };
+}
+
+/** (crew#1192) The PASS a `required` QE decision stood on, from the delivery's own QE check: only a
+ *  satisfied check of status `required` (or no status: an older check) that names its verdict. The
+ *  verdict and its reviewer are the ledger's, exactly as the check selected them; no seat is inferred
+ *  from the engine's review record, which can be an older review than the verdict the check read
+ *  (xreview on #1194). */
+function withQePass(
+  a: DeliverAssuranceFact | undefined,
+  check: { status?: string; satisfied: boolean; verdictId: string | null; reviewer: string | null } | null,
+): DeliverAssuranceFact | undefined {
+  if (a === undefined || a.qe === null || a.qe.status !== 'required') return a;
+  if (check === null || !check.satisfied || (check.status ?? 'required') !== 'required') return a;
+  if (typeof check.verdictId !== 'string' || check.verdictId.trim() === '') return a;
+  return {
+    ...a,
+    qe: {
+      ...a.qe,
+      pass: {
+        verdictId: check.verdictId.trim(),
+        reviewer: typeof check.reviewer === 'string' && check.reviewer.trim() !== '' ? check.reviewer.trim() : null,
+      },
+    },
+  };
 }
 
 /** Every string in the facts through {@link redactHostPaths} (plain data: strings, arrays, objects). */
@@ -1021,12 +1056,15 @@ export function factsFromRun(
     followUps?: string[];
     /** crew#860: the seats' final reports, when the caller read the unit outputs. */
     reports?: DeliverReportFact[];
+    /** crew#1192: the run's QE acceptance check as delivery reads it (`qeAcceptanceCheckFor`), when
+     *  the caller read it: a satisfied `required` check with a verdict reads "QE acceptance passed". */
+    qeAcceptance?: { status?: string; satisfied: boolean; verdictId: string | null; reviewer: string | null } | null;
   } = {},
 ): DeliverTextFacts {
   const s = view.session;
   const units = [...view.units].sort((a, b) => a.ord - b.ord);
   const checks = units.flatMap(checksOf);
-  const assurance = assuranceOf(s, units);
+  const assurance = withQePass(assuranceOf(s, units), resolved.qeAcceptance ?? null);
   return {
     runId: s.id,
     // crew#627: the daemon's linked-issues block is taken back out — the PR names the intent.

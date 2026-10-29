@@ -3303,6 +3303,8 @@ export function registerRoutes(
       if (!run) return reply.code(404).send({ error: 'Run not found' });
       const followUps = await evaluatorFollowUps(run);
       const reports = await seatReports(run);
+      // crew#1192: the QE check the deliver gate reads, so a required QE that passed says so.
+      const qeAcceptance = await qeAcceptanceCheckFor(run);
       // The run's preset or workflow NAME, as the engine recorded it (seam X2).
       const text = composeDeliverText(
         factsFromRun(decorateRun(run), runUrlFor(configuredPublicOrigin(), id), {
@@ -3310,6 +3312,7 @@ export function registerRoutes(
           revisesPr: retryIndex.revisesPrFor(id) ?? null,
           ...(followUps !== undefined ? { followUps } : {}),
           ...(reports !== undefined ? { reports } : {}),
+          qeAcceptance,
         }),
       );
       return reply.type('text/plain; charset=utf-8').send(framedDeliverText(text));
@@ -3488,6 +3491,7 @@ export function registerRoutes(
                 revisesPr: revisesPr === null ? null : { number: revisesPr.number, url: revisesPr.url },
                 ...(followUps !== undefined ? { followUps } : {}),
                 ...(reports !== undefined ? { reports } : {}),
+                qeAcceptance,
               }),
               revisesPr,
               // R1 (Copilot on crew#736): the post-hoc delivery binds `gh pr create --repo` to the

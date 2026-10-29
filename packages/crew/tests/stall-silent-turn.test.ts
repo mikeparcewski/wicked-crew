@@ -20,6 +20,7 @@ import {
   containerRunTag,
   containerRuntime,
   containerRuntimeCandidates,
+  lsofCwds,
   resetContainerRuntimeCache,
   parseCpuPercent,
   runOfContainer,
@@ -258,6 +259,78 @@ describe('the seat-container busy read (crew#972)', () => {
       { seats: async () => [] },
     );
     await expect(broken.busy([RUN])).rejects.toThrow('ps could not be read');
+  });
+});
+
+// crew#1193 — rig daemon 0.16.8: three `[stall-watchdog] process liveness read failed: lsof could not
+// be read` warnings over two governed runs. lsof prints nothing when every pid it was handed exited
+// between the ps read and the lsof read (short-lived floor and test children), and that failed the
+// whole sweep's busy read, container reading included.
+describe('an empty lsof read (crew#1193)', () => {
+  const SELF = 4242;
+  const reads = (answers: { lsof: string[]; ps: string }) => {
+    const calls: { lsof: number[][]; ps: number[][] } = { lsof: [], ps: [] };
+    return {
+      calls,
+      reads: {
+        lsof: async (pids: number[]) => {
+          calls.lsof.push(pids);
+          return answers.lsof.shift() ?? '';
+        },
+        ps: async (pids: number[]) => {
+          calls.ps.push(pids);
+          return answers.ps;
+        },
+      },
+    };
+  };
+
+  it('every pid gone between ps and lsof is no processes, not a failed read', async () => {
+    const r = reads({ lsof: [''], ps: `${SELF}\n` });
+    expect((await lsofCwds([50, 51], r.reads, SELF)).size).toBe(0);
+    // ps was asked about the pids AND the daemon itself (the sentinel that the ps read worked).
+    expect(r.calls.ps).toEqual([[50, 51, SELF]]);
+    expect(r.calls.lsof).toHaveLength(1);
+  });
+
+  it('an empty answer while some pids still live asks lsof again about those alone', async () => {
+    const r = reads({ lsof: ['', `p51\nn/repo/wicked-worktrees/${RUN}\n`], ps: ` 51\n${SELF}\n` });
+    const cwds = await lsofCwds([50, 51], r.reads, SELF);
+    expect([...cwds]).toEqual([[51, `/repo/wicked-worktrees/${RUN}`]]);
+    expect(r.calls.lsof).toEqual([[50, 51], [51]]);
+  });
+
+  it('a real lsof failure (live pids, still no output) and an unreadable ps both fail the read', async () => {
+    await expect(lsofCwds([50], reads({ lsof: ['', ''], ps: `50\n${SELF}\n` }).reads, SELF)).rejects.toThrow('lsof could not be read');
+    // ps answered nothing (not even the daemon's own pid): nothing proves the pids are gone.
+    await expect(lsofCwds([50], reads({ lsof: [''], ps: '' }).reads, SELF)).rejects.toThrow('lsof could not be read');
+  });
+
+  it('a non-empty first answer is parsed as before, with no ps re-check', async () => {
+    const r = reads({ lsof: [`p50\nn/a\np51\nn/b\n`], ps: '' });
+    expect([...(await lsofCwds([50, 51], r.reads, SELF))]).toEqual([[50, '/a'], [51, '/b']]);
+    expect(r.calls.ps).toHaveLength(0);
+  });
+
+  it('a failed cwd read leaves only the host half unknown: the container reading still applies', async () => {
+    const OTHER = 'c5320434-99ac-4edf-8fe5-37ad5a283ed6';
+    const sampler = new RunLivenessSampler(
+      {
+        table: async () => [{ pid: 50, ppid: 1, cpuSec: 10, comm: 'vitest' }],
+        cwds: async () => {
+          throw new Error('lsof could not be read');
+        },
+      },
+      1,
+      () => 0,
+      { seats: async () => [{ name: 'wicked-seat-codex-115fabdb-7-ab12cd34', cpuShare: 0.99 }] },
+    );
+    const busy = await sampler.busy([RUN, OTHER]);
+    // The busy container still proves its run alive…
+    expect(busy.get(RUN)).toContain('wicked-seat-codex-115fabdb-7');
+    // …and the run no container showed busy is an unknown (never idle), so the silent-turn rung holds.
+    expect(busy.get(OTHER)?.startsWith(BUSY_UNKNOWN_PREFIX)).toBe(true);
+    expect(busy.get(OTHER)).toContain('host processes');
   });
 });
 
