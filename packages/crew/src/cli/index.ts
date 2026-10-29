@@ -237,6 +237,10 @@ function parseBootstrap(args: string[]): BootstrapOpts {
   // `--bus-db X` wins for all of them. (Exec mediation used to default to a crew-private
   // `<state home>/bus.db` — a second bus file the seams never read.)
   const busDbPath = crewBus.dbPath;
+  // (program DES-PLUGIN-EVENTS §3.1, DES-POWER-MODE) The daemon serves plugins and studio one durable
+  // run stream: the engine mirrors a run's lifecycle and power events onto this bus as `wicked.run.*`
+  // (opt-in in the engine; `WICKED_RUN_MIRROR=0` keeps it off).
+  if (process.env['WICKED_RUN_MIRROR'] === undefined) process.env['WICKED_RUN_MIRROR'] = '1';
   // Pre-T0 exec bus, ONLY for an engine that predates the one-connection rule (see bootstrap):
   // such an engine must not share crew's bus file, so it keeps its old crew-private default.
   // Remove with the fallback once crew's wicked-core-ts floor carries `Core.busConnectionStats`.

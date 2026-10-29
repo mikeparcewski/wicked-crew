@@ -30,7 +30,16 @@ export interface Snapshot {
   runs: RunFact[];
 }
 
-export type MetricId = 'pass_rate' | 'override_rate' | 'unresolved_rate' | 'time_to_pr' | 'floor_minutes' | 'wait_on_people' | 'spend' | 'retries';
+export type MetricId =
+  | 'pass_rate'
+  | 'override_rate'
+  | 'unresolved_rate'
+  | 'time_to_pr'
+  | 'floor_minutes'
+  | 'wait_on_people'
+  | 'spend'
+  | 'retries'
+  | 'rigor_raised';
 export type MetricKind = 'rate' | 'median';
 
 export interface MetricDef {
@@ -50,6 +59,9 @@ export const METRICS: readonly MetricDef[] = [
   { id: 'wait_on_people', label: 'Time waiting on people', kind: 'median', unit: 'minutes', higherIsBetter: false },
   { id: 'spend', label: 'Spend per run', kind: 'median', unit: 'usd', higherIsBetter: false },
   { id: 'retries', label: 'Retries per run', kind: 'median', unit: 'count', higherIsBetter: false },
+  // (program DES-POWER-MODE) Planned vs actual: how often a power run's rigor rose after its intake QE
+  // plan sized it — a repo where this keeps rising is one the planner under-sizes.
+  { id: 'rigor_raised', label: 'Power runs whose rigor rose after intake', kind: 'rate', unit: 'ratio', higherIsBetter: false },
 ];
 
 export interface SampleStat {
@@ -166,6 +178,8 @@ function sampleOf(metric: MetricId, runs: readonly RunFact[]): { ids: string[]; 
       return pick((r) => r.spendReported, (r) => r.spendUsd);
     case 'retries':
       return pick(terminalOf, (r) => r.retries);
+    case 'rigor_raised':
+      return pick((r) => terminalOf(r) && r.power != null, (r) => (r.power?.raised === true ? 1 : 0));
   }
 }
 

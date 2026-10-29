@@ -891,6 +891,36 @@ describe('the run\'s assurance labels (crew#1186)', () => {
     expect(body.indexOf('## Assurance')).toBeLessThan(body.indexOf('## Phases'));
   });
 
+  // program DES-POWER-MODE: a power run's delivery says who built it and how rigor moved, row by row.
+  it('says power mode, the planned and delivered rigor, every flip and the rigor history', () => {
+    const v = withAssurance({ mode: 'full', required: ['qe_acceptance'] });
+    (v.session as { power?: unknown }).power = {
+      on: true,
+      rigor: 'high',
+      plan: { rigor: 'standard', score: 34 },
+      orchestrator: { cli: 'claude', ord: 2, turns: 3, inTurn: false, sessionRestarts: 0 },
+      checkpoints: 3,
+      handoff: { round: 1, maxRounds: 3, steps: [] },
+      toggles: [
+        { at: 1, on: true, by: 'launch', reason: null, stayPhased: [] },
+        { at: 2, on: false, by: 'local (human)', reason: 'look | here', stayPhased: [] },
+        { at: 3, on: true, by: 'local (human)', reason: null, stayPhased: [] },
+      ],
+      history: [
+        { seq: 1, trigger: 'intake', from: 'standard', to: 'standard', actual: 34, by: 'engine', reasons: ['intent score 34'] },
+        { seq: 2, trigger: 'turn', from: 'standard', to: 'high', actual: 58, by: 'engine', reasons: ['sign-in module touched'] },
+      ],
+    };
+    const body = composeDeliverText(factsFromRun(v, null)).body;
+    expect(body).toContain('- **Power mode**: one orchestrator session on `claude`, 3 turn(s), 3 checkpoint(s), hand-off round 1.');
+    expect(body).toContain('- Rigor: planned standard (score 34) at intake; high at delivery.');
+    expect(body).toMatch(/- Power switched off by local \(human\): look .*here\./);
+    expect(body).not.toContain('switched on by launch');
+    expect(body).toContain('| 2 | turn | standard → high | 58 | engine | sign-in module touched |');
+    // A phased run says nothing about power mode.
+    expect(composeDeliverText(factsFromRun(withAssurance({ mode: 'full', required: [] }), null)).body).not.toContain('Power mode');
+  });
+
   it('says reduced assurance, a QE waiver by score, and a required QE as the run records them', () => {
     const body = composeDeliverText(
       factsFromRun(
