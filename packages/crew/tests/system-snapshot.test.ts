@@ -205,6 +205,10 @@ describe('derived rows', () => {
     expect(off.state).toBe('degraded');
     expect(off.reason).toBe('6 GiB free on the state-home volume');
     expect(off.details).toMatchObject({ availableBytes: null });
+    // A small gap that still changes the state is said: the row is degraded, not down, because of the second number.
+    const edge = await diskRow('/s', async () => ({ bavail: 4.5, bsize: GiB, blocks: 40 }), 1000, async () => 5.1 * GiB);
+    expect(edge.state).toBe('degraded');
+    expect(edge.reason).toMatch(/^4\.5 GiB free now · 5\.1 GiB available once macOS clears purgeable space/);
     // A reading below free space is not the important-usage capacity: ignored.
     expect((await diskRow('/s', fs(60, 100), 1000, async () => 1 * GiB)).state).toBe('ok');
     // The available read that throws or hangs never sinks the row.

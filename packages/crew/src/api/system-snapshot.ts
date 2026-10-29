@@ -695,7 +695,10 @@ export async function diskRow(
   const basis = available ?? free;
   const gib = (n: number): string => `${Math.round((n / 2 ** 30) * 10) / 10} GiB`;
   const details = { path, freeBytes: free, totalBytes: total, availableBytes: available };
-  const both = available !== null && available - free >= 2 ** 30;
+  // Both numbers are said when they differ by a GiB or more, or when the second is what kept the row out of a worse
+  // state (the reason never reads "4.5 GiB free" on a row that is not down).
+  const level = (n: number): number => (n < DISK_DOWN_BYTES || (total > 0 && n / total < 0.05) ? 2 : n < DISK_DEGRADED_BYTES || (total > 0 && n / total < 0.1) ? 1 : 0);
+  const both = available !== null && (available - free >= 2 ** 30 || level(available) !== level(free));
   const said = both ? `${gib(free)} free now · ${gib(available)} available once macOS clears purgeable space` : `${gib(free)} free`;
   // crew#1145: red BEFORE a write can fail — a full disk once killed the daemon right after ready
   // (an ENOSPC on its log). Under 5 GiB or over 95% used is down; under 10 GiB or over 90% used is degraded.
