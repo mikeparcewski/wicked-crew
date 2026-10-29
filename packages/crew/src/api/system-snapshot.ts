@@ -88,9 +88,20 @@ export async function settleWithin<T>(fn: () => Promise<T>, timeoutMs: number): 
   }
 }
 
-function errText(err: unknown): string {
+/**
+ * One line that says why a probe failed. A child-process error (`execFile`) reads
+ * "Command failed: <the whole command line>\n<stderr>", so its first line names what crew ran, not
+ * what went wrong. The child's own stderr comes first when it has any, so a probe classifies (and
+ * shows) what the runtime said: on a fresh install, docker's "No such container" read as "the
+ * container runtime refused" and the Nerve Center said "Start Docker" while Docker was running.
+ */
+export function errText(err: unknown): string {
   const raw = err instanceof Error ? err.message : String(err);
-  const line = raw.split('\n', 1)[0]?.trim() ?? '';
+  const stderr = err !== null && typeof err === 'object' && typeof (err as { stderr?: unknown }).stderr === 'string'
+    ? (err as { stderr: string }).stderr
+    : '';
+  const said = stderr.split('\n').map((l) => l.trim()).find((l) => l !== '') ?? '';
+  const line = said !== '' ? said : (raw.split('\n', 1)[0]?.trim() ?? '');
   return line.length > 240 ? `${line.slice(0, 239)}…` : line;
 }
 
@@ -578,7 +589,12 @@ export function skillsRow(skills: { state: string; findings: Array<{ severity?: 
           ? infraRow('skills', 'degraded', first ?? 'a skills warning', 'See the finding.', started, { skills })
           : infraRow('skills', 'ok', 'a published snapshot is current', null, started, { skills });
     case 'fallback':
-      return infraRow('skills', 'degraded', first ?? 'no wicked-garden is installed: the engine resolves its own skills cache', 'Install wicked-garden (npx wicked-installer).', started, { skills });
+      // An error finding here is the required base skill with no published snapshot: the engine
+      // refuses EVERY launch at intake, so it prevents work (down), not merely degrades it. A fresh
+      // `npm i -g wicked-crew` lands here, and the Nerve Center must say so.
+      return errors.length > 0
+        ? infraRow('skills', 'down', 'no wicked-garden is installed, so the engine refuses every launch: the skills every governed worker follows are missing', 'Install wicked-garden (`npx wicked-installer install wicked-garden`), restart `wicked-crew serve`, then re-check.', started, { skills })
+        : infraRow('skills', 'degraded', first ?? 'no wicked-garden is installed: the engine resolves its own skills cache', 'Install wicked-garden (npx wicked-installer).', started, { skills });
     case 'blocked':
     case 'config-error':
       return infraRow('skills', 'down', first ?? `skills ${skills.state}: launches are refused`, 'Fix the skills root named in the finding, then re-check.', started, { skills });
