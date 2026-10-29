@@ -29,7 +29,7 @@ import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
 import { DeliveryIndex, gitWorktreeIsClean, isDeliverConflictStranded } from '../src/api/delivery-index.js';
 import { AuditLog } from '../src/api/audit.js';
-import { runDeliverScript } from '../src/api/post-hoc-deliver.js';
+import { DELIVER_SCRIPT_TIMEOUT_MS, runDeliverScript } from '../src/api/post-hoc-deliver.js';
 import { DELIVER_LIFT_CONFLICT_MARKER, DELIVER_PUSH_REJECTED_MARKER } from '../src/core/deliver.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { RuntimeDeps } from '../src/api/routes.js';
@@ -350,6 +350,16 @@ function originBranches(fx: Fixture): string[] {
     .filter(Boolean);
 }
 
+/**
+ * crew#1191: the bound of a test whose real work is `scripts` runs of the real deliver script. Each
+ * run is bounded by the script's own timeout ({@link DELIVER_SCRIPT_TIMEOUT_MS}) and the test awaits
+ * each one's answer, so its bound is theirs summed (plus the git setup) rather than a fixed 90 s: a
+ * slow host makes the test slow, never red. Measured on the rig host: the three-script test took 33 s
+ * at 1-min load 60 / 14 CPUs and 58 s on a busier run, and ran past the old 90 s at the J4 floor's
+ * load (base and head alike); the one-script test took 5.5 s, past 90 s once at load ~100.
+ */
+const scriptsBudget = (scripts: number): number => scripts * DELIVER_SCRIPT_TIMEOUT_MS + 60_000;
+
 describe('crew#418 A — strand then lift, end-to-end on real git', () => {
   it('a REAL non-changelog rebase conflict reads completed+stranded; clearing it lets POST /deliver lift', async () => {
     const fx = fixture();
@@ -429,7 +439,7 @@ describe('crew#418 A — strand then lift, end-to-end on real git', () => {
     };
     expect(after.run.session['delivery']).toBe('delivered');
     expect(after.run.session['deliverUrl']).toBe('https://github.com/o/r/pull/71');
-  }, 90_000);
+  }, scriptsBudget(3));
 
   it('a REAL push 403 is a PUSH-REJECTED refusal, not a strand — the wire never relabels it completed (N4)', async () => {
     const fx = fixture();
@@ -479,7 +489,7 @@ describe('crew#418 A — strand then lift, end-to-end on real git', () => {
     expect(read.run.session['delivery']).not.toBe('stranded');
     const deliver = read.run.units.find((u) => u.id.endsWith(':deliver'))!;
     expect(deliver.denial_reason).toContain('HTTP 403 authentication failed');
-  }, 90_000);
+  }, scriptsBudget(1));
 });
 
 // wicked-core#431 / #433 — the ENGINE now lifts before the script runs and authors the deliver

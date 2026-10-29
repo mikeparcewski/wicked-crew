@@ -30,6 +30,7 @@ import { registerDef } from '../support/register-def.js';
 import { createServer } from '../../src/api/server.js';
 import { removeScratch } from '../setup/scratch.js';
 import { baseSkillOff } from '../setup/base-skill-off.js';
+import { deliveryCannotCome, optInWhenFloorCannotArm } from '../support/nested-floor.js';
 
 const SEATS = JSON.stringify([
   { key: 'alpha', display_name: 'Alpha', binary: 'alpha', headless_invocation: 'alpha {PROMPT}' },
@@ -70,6 +71,7 @@ let dir: string;
 let origin: string;
 let clone: string;
 let baseUrl: string;
+let restoreFloorOptIn: () => void = () => undefined;
 const savedEnv: Record<string, string | undefined> = {};
 
 function git(cwd: string, ...args: string[]): string {
@@ -126,13 +128,24 @@ async function waitForRun(
   pred: (s: Record<string, unknown>) => boolean,
   label: string,
   ms = 90_000,
+  // crew#1191: waiting for a DELIVERY stops as soon as the run parked or ended without one — the
+  // bound is a backstop for a hang, never the way a refusal is found out.
+  opts: { untilDeliveryCannotCome?: boolean } = {},
 ): Promise<Record<string, unknown>> {
   const deadline = Date.now() + ms;
   let last: Record<string, unknown> = {};
+  let terminalSince: number | null = null;
+  let decided = false;
   while (Date.now() < deadline) {
     const { body } = await getJson(`/api/v1/runs/${runId}`);
     last = sessionOf(body);
     if (pred(last)) return last;
+    const now = Date.now();
+    if (TERMINAL.has(String(last['status']))) terminalSince ??= now;
+    if (opts.untilDeliveryCannotCome === true && deliveryCannotCome(last, terminalSince, now)) {
+      decided = true;
+      break;
+    }
     await new Promise((r) => setTimeout(r, 200));
   }
   // Name the rejected units' denial_reason too: a deliver refusal is text on the unit record, and
@@ -142,7 +155,7 @@ async function waitForRun(
     .filter((u) => u['status'] === 'rejected')
     .map((u) => `${String(u['id'])}: ${String(u['denial_reason'] ?? '(no denial_reason)').slice(0, 600)}`);
   throw new Error(
-    `timed out (${ms}ms) waiting for: ${label} — last status=${String(last['status'])} delivery=${String(last['delivery'])}` +
+    `${decided ? 'the run decided without it' : `timed out (${ms}ms)`} waiting for: ${label} — last status=${String(last['status'])} delivery=${String(last['delivery'])}` +
       (units.length > 0 ? `; rejected units: ${units.join(' | ')}` : ''),
   );
 }
@@ -211,6 +224,9 @@ beforeAll(async () => {
   // ── Boot the daemon in-process against the STUB engine, real HTTP surface ──
   adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: true });
   baseSkillOff(); // run mechanics, not grounding — no published generation here (see tests/setup/base-skill-off.ts)
+  // crew#1191: inside the repo-checks floor (macOS sandbox-exec) the deliver re-verify cannot arm a
+  // nested boundary; take the engine's disclosed opt-in there, and only there (tests/support/nested-floor.ts).
+  restoreFloorOptIn = (await optInWhenFloorCannotArm(adapter)).restore;
   app = await createServer(adapter);
   await app.listen({ port: 0, host: '127.0.0.1' });
   const addr = app.server.address();
@@ -228,6 +244,7 @@ afterAll(async () => {
     await app?.close();
   } finally {
     adapter?.close();
+    restoreFloorOptIn();
     for (const [k, v] of Object.entries(savedEnv)) {
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
@@ -262,6 +279,8 @@ describe('crew#393 end to end — default-on delivery, stranded surfacing, post-
       runId,
       (s) => s['delivery'] === 'delivered',
       'delivery:delivered on the run wire',
+      90_000,
+      { untilDeliveryCannotCome: true },
     );
     expect(session['status']).toBe('completed');
     expect(session['deliverUrl']).toBe('https://github.com/o/r/pull/101');

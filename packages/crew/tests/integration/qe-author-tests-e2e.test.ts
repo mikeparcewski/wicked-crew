@@ -44,6 +44,7 @@ import type { SessionView } from '../../src/core/types.js';
 import { removeScratch } from '../setup/scratch.js';
 import { baseSkillOff } from '../setup/base-skill-off.js';
 import { createRequire } from 'node:module';
+import { deliveryCannotCome, optInWhenFloorCannotArm } from '../support/nested-floor.js';
 
 /**
  * Is the installed `wicked-core-ts` at least `maj.min.pat`? A tests-only twin of the adapter's
@@ -158,6 +159,7 @@ let origin: string;
 let clone: string;
 let baseUrl: string;
 let repoId: string;
+let restoreFloorOptIn: () => void = () => undefined;
 const savedEnv: Record<string, string | undefined> = {};
 
 function git(cwd: string, ...args: string[]): string {
@@ -193,21 +195,37 @@ function scratchBase(): string {
   return process.platform === 'linux' && runnerTemp !== undefined && runnerTemp !== '' ? runnerTemp : tmpdir();
 }
 
-async function waitFor<T>(read: () => Promise<T | null>, label: string, ms = 120_000): Promise<T> {
+/** A wait whose `read` may also say the thing waited for can no longer come (`DECIDED`): it stops then. */
+const DECIDED = Symbol('decided');
+
+async function waitFor<T>(read: () => Promise<T | null | typeof DECIDED>, label: string, ms = 120_000): Promise<T> {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
     const v = await read();
+    if (v === DECIDED) throw new Error(`the run decided without it, waiting for: ${label}`);
     if (v !== null) return v;
     await new Promise((r) => setTimeout(r, 200));
   }
   throw new Error(`timed out (${ms}ms) waiting for: ${label}`);
 }
 
-async function waitForRun(runId: string, pred: (s: Record<string, unknown>) => boolean, label: string, ms = 120_000) {
+async function waitForRun(
+  runId: string,
+  pred: (s: Record<string, unknown>) => boolean,
+  label: string,
+  ms = 120_000,
+  // crew#1191: waiting for a DELIVERY stops as soon as the run parked or ended without one — the
+  // bound is a backstop for a hang, never the way a refusal is found out.
+  opts: { untilDeliveryCannotCome?: boolean } = {},
+) {
+  let terminalSince: number | null = null;
   return waitFor(async () => {
     const { body } = await getJson(`/api/v1/runs/${runId}`);
     const run = runOf(body);
     if (pred(run.session)) return run;
+    const now = Date.now();
+    if (TERMINAL.has(String(run.session['status']))) terminalSince ??= now;
+    if (opts.untilDeliveryCannotCome === true && deliveryCannotCome(run.session, terminalSince, now)) return DECIDED;
     return null;
   }, label, ms).catch(async (err: unknown) => {
     const { body } = await getJson(`/api/v1/runs/${runId}`);
@@ -283,6 +301,9 @@ beforeAll(async () => {
   // ── The daemon in-process over the STUB engine, real HTTP surface ──
   adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: true });
   baseSkillOff(); // run mechanics, not grounding — no published generation here (see tests/setup/base-skill-off.ts)
+  // crew#1191: inside the repo-checks floor (macOS sandbox-exec) the deliver re-verify cannot arm a
+  // nested boundary; take the engine's disclosed opt-in there, and only there (tests/support/nested-floor.ts).
+  restoreFloorOptIn = (await optInWhenFloorCannotArm(adapter)).restore;
   app = await createServer(adapter);
   await app.listen({ port: 0, host: '127.0.0.1' });
   const addr = app.server.address();
@@ -376,6 +397,7 @@ afterAll(async () => {
     await app?.close();
   } finally {
     adapter?.close();
+    restoreFloorOptIn();
     for (const [k, v] of Object.entries(savedEnv)) {
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
@@ -408,7 +430,9 @@ describe('wave 6 end to end — the governed test-authoring journey', () => {
 
     // The run completes AND the wire reports the delivery (the post-terminal resolution is async, so
     // wait for the delivery field itself — status alone is not the finish line).
-    const run = await waitForRun(runId, (s) => s['delivery'] === 'delivered', 'delivery:delivered on the run wire', 480_000);
+    const run = await waitForRun(runId, (s) => s['delivery'] === 'delivered', 'delivery:delivered on the run wire', 480_000, {
+      untilDeliveryCannotCome: true,
+    });
     expect(run.session['status']).toBe('completed');
     expect(run.session['deliverUrl']).toBe('https://github.com/o/r/pull/601');
     const unitIds = run.units.sort((a, b) => a.ord - b.ord).map((u) => u.id.slice(u.id.indexOf(':') + 1));
