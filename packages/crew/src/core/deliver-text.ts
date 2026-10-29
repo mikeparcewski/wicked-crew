@@ -789,6 +789,8 @@ function assuranceOf(s: SessionView['session'], units: WorkUnit[]): DeliverAssur
 export function powerOf(s: SessionView['session']): DeliverPowerFact | undefined {
   const p = (s as { power?: unknown }).power as Record<string, unknown> | null | undefined;
   if (p === null || p === undefined || typeof p !== 'object') return undefined;
+  // Intake refused power mode (phased required): the run was phased and says nothing about power mode.
+  if (p['available'] === false && num0(((p['orchestrator'] ?? {}) as Record<string, unknown>)['turns']) === 0) return undefined;
   const str = (v: unknown): string | null => (typeof v === 'string' && v.trim() !== '' ? v.trim() : null);
   const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
   const orch = (p['orchestrator'] ?? {}) as Record<string, unknown>;
@@ -818,12 +820,15 @@ export function powerOf(s: SessionView['session']): DeliverPowerFact | undefined
   };
 }
 
+const num0 = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+
 /** (program DES-POWER-MODE) The power lines of `## Assurance`: who built it, how rigor moved, and why. */
 function powerLines(p: DeliverPowerFact): string[] {
   const out: string[] = [];
   const who = p.cli !== null ? ` on ${code(p.cli)}` : '';
   out.push(
-    `- **Power mode**: one orchestrator session${who}, ${p.turns} turn(s), ${p.checkpoints} checkpoint(s), hand-off round ${Math.max(1, p.handoffRound)}.` +
+    `- **Power mode**: one orchestrator session${who}, ${p.turns} turn(s), ${p.checkpoints} checkpoint(s)` +
+      (p.handoffRound > 0 ? `, hand-off round ${p.handoffRound}.` : ', no hand-off.') +
       (p.on ? '' : ' Switched off before delivery; the rest of the run was phased.'),
   );
   if (p.planned !== null) {
@@ -834,7 +839,8 @@ function powerLines(p: DeliverPowerFact): string[] {
     out.push('', '| # | Trigger | Rigor | Score | By | Why |', '|---|---|---|---|---|---|');
     for (const r of p.history.slice(-30)) {
       const move = r.from === r.to ? cell(r.to ?? '-') : `${cell(r.from ?? '-')} → ${cell(r.to ?? '-')}`;
-      out.push(`| ${r.seq} | ${cell(r.trigger)} | ${move} | ${r.actual} | ${cell(r.by)} | ${cell(r.reason, 200)} |`);
+      // Free text (an operator's reason, an actor) is literal: no HTML or Markdown renders in the table.
+      out.push(`| ${r.seq} | ${literal(r.trigger, 40)} | ${move} | ${r.actual} | ${literal(r.by, 120)} | ${literal(r.reason, 200)} |`);
     }
     if (p.history.length > 30) out.push('', `_${p.history.length - 30} earlier row(s) are on the run record._`);
   }

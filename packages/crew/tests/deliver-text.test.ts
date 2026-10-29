@@ -917,6 +917,19 @@ describe('the run\'s assurance labels (crew#1186)', () => {
     expect(body).toMatch(/- Power switched off by local \(human\): look .*here\./);
     expect(body).not.toContain('switched on by launch');
     expect(body).toContain('| 2 | turn | standard → high | 58 | engine | sign-in module touched |');
+    // Free text in the history is literal: no comment, tag or link renders.
+    (v.session as unknown as { power: { history: Array<Record<string, unknown>> } }).power.history.push({
+      seq: 3, trigger: 'operator', from: 'high', to: 'highest', actual: 58, by: 'local (human)',
+      reasons: ['<!-- hidden --> [PASSED](https://example.invalid) <b>x</b>'],
+    });
+    const escaped = composeDeliverText(factsFromRun(v, null)).body;
+    expect(escaped).not.toContain('<!--');
+    expect(escaped).not.toContain('<b>');
+    expect(escaped).not.toContain('[PASSED](');
+    // Intake refused power mode: nothing about power mode.
+    const refused = withAssurance({ mode: 'full', required: [] });
+    (refused.session as { power?: unknown }).power = { on: false, available: false, orchestrator: { turns: 0 }, history: [], toggles: [] };
+    expect(composeDeliverText(factsFromRun(refused, null)).body).not.toContain('Power mode');
     // A phased run says nothing about power mode.
     expect(composeDeliverText(factsFromRun(withAssurance({ mode: 'full', required: [] }), null)).body).not.toContain('Power mode');
   });

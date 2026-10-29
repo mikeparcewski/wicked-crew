@@ -78,6 +78,8 @@ export function powerFactOf(session: Record<string, unknown>): RunPowerFact | nu
   if (p === null || p === undefined || typeof p !== 'object') return null;
   const o = p['outcome'] as Record<string, unknown> | null | undefined;
   const plan = p['plan'] as Record<string, unknown> | null | undefined;
+  // A run intake refused power mode for (phased required) ran phased: it is no power run.
+  if (p['available'] === false || (plan?.['phasedRequired'] ?? null) !== null) return null;
   const str = (v: unknown): string | null => (typeof v === 'string' ? v : null);
   const n = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
   const plannedRigor = str(o?.['plannedRigor']) ?? str(plan?.['rigor']);
@@ -88,7 +90,12 @@ export function powerFactOf(session: Record<string, unknown>): RunPowerFact | nu
     finalRigor,
     plannedScore: n(o?.['plannedScore']) ?? n(plan?.['score']) ?? 0,
     finalScore: n(o?.['finalScore']) ?? n(plan?.['score']) ?? 0,
-    raised: (RIGOR_RANK[finalRigor] ?? 0) > (RIGOR_RANK[plannedRigor] ?? 0),
+    // Rose AFTER intake at any point (a raise later lowered at hand-off still counts), or ended above it.
+    raised:
+      (RIGOR_RANK[finalRigor] ?? 0) > (RIGOR_RANK[plannedRigor] ?? 0) ||
+      (Array.isArray(p['history']) ? (p['history'] as Array<Record<string, unknown>>) : []).some(
+        (r) => r['trigger'] !== 'intake' && r['direction'] === 'up',
+      ),
     estimateMinutes: n(o?.['estimateMinutes']) ?? n(plan?.['estimateMinutes']),
     actualMinutes: n(o?.['actualMinutes']),
   };

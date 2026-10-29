@@ -2798,15 +2798,19 @@ export function registerRoutes(
     // (any other launch is phased, said in the answer). A power launch has no plan-approval gate:
     // the only human gate is deliver, plus what policy requires (a high-risk plan still holds).
     let powerNotice: string | null = null;
-    const powerEligible = b.repoRef !== undefined && (b.workflow !== undefined || b.plan !== undefined);
-    if (!powerEligible) {
-      if (b.power === true) powerNotice = 'power mode runs a repo-scoped plan or preset launch; this launch runs phased';
-    } else if (b.power !== false) {
-      // The setting is read only for a launch that could run in power mode and did not say.
-      const powerWanted = b.power ?? (powerSupported() ? ((await adapter.getSettings()).powerModeDefault ?? true) : false);
-      if (powerWanted && !powerSupported()) {
+    // The caller's word, else the setting (read only when the launch did not say).
+    const powerWanted = b.power ?? (b.repoRef !== undefined && (b.workflow !== undefined || b.plan !== undefined)
+      ? ((await adapter.getSettings()).powerModeDefault ?? true)
+      : false);
+    if (powerWanted) {
+      // A plan, or a workflow the engine resolves to a PRESET (a registered def is planned the legacy way
+      // and has no orchestrator build): only those run in power mode, so only those lose run-level gates.
+      const isPreset = b.plan !== undefined || (b.workflow !== undefined && await namesPreset(b.workflow, b.projectId));
+      if (b.repoRef === undefined || !isPreset) {
+        powerNotice = 'power mode runs a repo-scoped plan or preset launch; this launch runs phased';
+      } else if (!powerSupported()) {
         powerNotice = 'this engine has no power mode; the launch runs phased';
-      } else if (powerWanted) {
+      } else {
         input.power = true;
         input.humanConfirm = 'none';
       }
@@ -5538,6 +5542,17 @@ export function registerRoutes(
     }
   });
 
+  /** Whether `workflow` names a preset the engine resolves first (built-in or the project's). An engine
+   *  without presets, or a read that fails, answers `false`: the launch then keeps its gates. Hoisted. */
+  async function namesPreset(workflow: string, projectId: string | undefined): Promise<boolean> {
+    if (typeof adapter.listPresets !== 'function') return false;
+    try {
+      return (await adapter.listPresets(projectId)).some((p) => p.name === workflow);
+    } catch {
+      return false;
+    }
+  }
+
   /** The linked engine runs power mode (an adapter double without the method does not). Hoisted. */
   function powerSupported(): boolean {
     return typeof adapter.supportsPowerMode === 'function' && adapter.supportsPowerMode();
@@ -5547,6 +5562,9 @@ export function registerRoutes(
   // The engine computes every rigor value; these routes only carry a person's switch, raise or pause
   // answer to it (human actors only: a worker or plugin bearer gets 403) and read its record back.
   const RIGORS = ['light', 'standard', 'high', 'highest'] as const;
+  interface RunBusRowOut { eventId: number; seq: number; type: string; runId: string; at: number; payload: Record<string, unknown> }
+  /** A trimmed free-text field: empty is absent (`null`), never `""`. */
+  const textOrNull = (v: string | null | undefined): string | null => (v === undefined || v === null || v.trim() === '' ? null : v.trim());
   const PowerToggleSchema = z.object({ on: z.boolean(), reason: z.string().trim().max(2000).nullish() }).strict();
   const RigorRaiseSchema = z.object({ atLeast: z.enum(RIGORS), reason: z.string().trim().min(1).max(2000) }).strict();
   const PowerPauseSchema = z
@@ -5589,8 +5607,9 @@ export function registerRoutes(
     if (!isHumanOperator(actor)) return reply.code(403).send({ error: 'Only a person can flip power mode' });
     if (!powerSupported()) return reply.code(501).send({ error: 'This engine has no power mode' });
     try {
-      const st = await adapter.setPowerMode(id, parsed.data.on, actor.id, parsed.data.reason ?? null);
-      audit.record('run.power_mode.toggled', actor, { runId: id, detail: { on: parsed.data.on, reason: parsed.data.reason ?? null } });
+      const reason = textOrNull(parsed.data.reason);
+      const st = await adapter.setPowerMode(id, parsed.data.on, actor.id, reason);
+      audit.record('run.power_mode.toggled', actor, { runId: id, detail: { on: parsed.data.on, reason } });
       return reply.send({ runId: id, ...st });
     } catch (err) {
       return powerError(reply, err);
@@ -5621,11 +5640,12 @@ export function registerRoutes(
     if (!isHumanOperator(actor)) return reply.code(403).send({ error: 'Only a person can answer a power-mode pause' });
     if (!powerSupported()) return reply.code(501).send({ error: 'This engine has no power mode' });
     try {
-      const st = await adapter.answerPowerPause(id, parsed.data.decision, parsed.data.note ?? null, actor.id);
+      const note = textOrNull(parsed.data.note);
+      const st = await adapter.answerPowerPause(id, parsed.data.decision, note, actor.id);
       audit.record('run.power_mode.paused', actor, { runId: id, detail: { decision: parsed.data.decision } });
-      if (decisions !== null && (parsed.data.note ?? '') !== '') {
+      if (decisions !== null && note !== null) {
         decisions.track(ingestDecision(decisions, {
-          host: 'inject', actor, words: parsed.data.note ?? '', projectId: projects.index.projectOf(id) ?? null, runId: id,
+          host: 'inject', actor, words: note, projectId: projects.index.projectOf(id) ?? null, runId: id,
         }));
       }
       return reply.send({ runId: id, ...st });
@@ -5641,35 +5661,37 @@ export function registerRoutes(
     const q = req.query as { after?: string; limit?: string };
     const after = Math.max(0, Number.parseInt(q.after ?? '0', 10) || 0);
     const limit = Math.min(500, Math.max(1, Number.parseInt(q.limit ?? '200', 10) || 200));
-    const read = adapter.readBus(after, 1000, 'wicked.run.');
-    if (read === null) return reply.code(503).send({ error: 'This daemon has no bus' });
-    let raw: unknown;
-    try {
-      raw = JSON.parse(await read);
-    } catch (err) {
-      return reply.code(503).send({ error: `The bus could not be read: ${message(err)}` });
-    }
-    const page = raw as { next?: number; rows?: Array<Record<string, unknown>> };
-    const events = page.rows ?? [];
-    const rows: unknown[] = [];
-    let cursor = after;
-    let full = false;
-    for (const e of events) {
-      const eventId = Number(e['event_id'] ?? e['eventId'] ?? 0);
-      if (eventId > cursor) cursor = eventId;
-      const payload = (typeof e['payload'] === 'string' ? JSON.parse(e['payload'] as string) : e['payload']) as Record<string, unknown> | null;
-      if (payload === null || typeof payload !== 'object' || payload['runId'] !== id) continue;
-      rows.push({
-        eventId, seq: Number(payload['seq'] ?? 0), type: String(e['event_type'] ?? e['type'] ?? ''), runId: id,
-        at: Number(payload['at'] ?? 0), payload,
-      });
-      if (rows.length >= limit) {
-        full = true;
-        break;
+    const first = adapter.readBus(after, 1000, 'wicked.run.');
+    if (first === null) return reply.code(503).send({ error: 'This daemon has no bus' });
+    const rows: RunBusRowOut[] = [];
+    // Scan until `limit` rows of THIS run, or the bus tail (bounded: at most 20 batches per request).
+    // The cursor is the last row returned, or `after` when none matched: an empty page means "nothing
+    // yet", never "skipped" (a later read resumes exactly where this one stopped).
+    let scan = after;
+    for (let batch = 0; batch < 20 && rows.length < limit; batch++) {
+      let page: { next?: number; rows?: Array<Record<string, unknown>> };
+      try {
+        page = JSON.parse(await (batch === 0 ? first : adapter.readBus(scan, 1000, 'wicked.run.')!)) as typeof page;
+      } catch (err) {
+        if (rows.length > 0) break;
+        return reply.code(503).send({ error: `The bus could not be read: ${message(err)}` });
       }
+      const events = page.rows ?? [];
+      if (events.length === 0) break;
+      for (const e of events) {
+        const eventId = Number(e['event_id'] ?? 0);
+        scan = Math.max(scan, eventId);
+        // The engine's read decodes payloads; a non-object payload (another producer's row) is skipped.
+        const payload = e['payload'];
+        if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) continue;
+        const pl = payload as Record<string, unknown>;
+        if (pl['runId'] !== id) continue;
+        rows.push({ eventId, seq: Number(pl['seq'] ?? 0), type: String(e['event_type'] ?? ''), runId: id, at: Number(pl['at'] ?? 0), payload: pl });
+        if (rows.length >= limit) break;
+      }
+      if (typeof page.next === 'number' && page.next <= scan && events.length < 1000) break;
     }
-    // Every scanned row was read: the next page starts past the whole scan, matched or not.
-    if (!full && typeof page.next === 'number' && page.next > cursor) cursor = page.next;
+    const cursor = rows.length > 0 ? rows[rows.length - 1]!.eventId : after;
     return reply.send({ rows, cursor });
   });
 

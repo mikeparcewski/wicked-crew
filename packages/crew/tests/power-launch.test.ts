@@ -24,6 +24,7 @@ async function launch(opts: { supports: boolean; setting?: boolean; body: Record
     getSettings: vi.fn().mockResolvedValue({ graphNodeLimit: 150, deliverDefault: 'none', ...(opts.setting !== undefined ? { powerModeDefault: opts.setting } : {}) }),
     getWorkflow: vi.fn().mockReturnValue(READ_ONLY_DEF),
     supportsPowerMode: vi.fn(() => opts.supports),
+    listPresets: vi.fn().mockResolvedValue([{ name: 'bug', scope: 'global', steps: [], created_by: 'builtin', updated_at: 0 }]),
     listRepos: vi.fn().mockResolvedValue([{ id: 'repo-1', name: 'r', root_path: '/nowhere', default_branch: 'main', registered_at: 0 }]),
   };
   const app = Fastify({ logger: false });
@@ -36,6 +37,13 @@ async function launch(opts: { supports: boolean; setting?: boolean; body: Record
 }
 
 describe('POST /runs power mode', () => {
+  it('keeps a registered (non-preset) workflow\'s gates: it has no orchestrator build', async () => {
+    const { res, input } = await launch({ supports: true, body: { workflow: 'my-def', repoRef: 'repo-1', humanConfirm: 'all' } });
+    expect(input?.power).toBeUndefined();
+    expect(input?.humanConfirm).toBe('all');
+    expect(res.json().powerNotice).toMatch(/plan or preset/);
+  });
+
   it('runs a repo-scoped preset launch in power mode by default, with no plan gate', async () => {
     const { res, input } = await launch({ supports: true, body: { workflow: 'bug', repoRef: 'repo-1', humanConfirm: 'before:1' } });
     expect(res.statusCode).toBe(201);
@@ -61,7 +69,7 @@ describe('POST /runs power mode', () => {
     expect(repoless.res.json().powerNotice).toMatch(/repo-scoped/);
     const old = await launch({ supports: false, body: { workflow: 'bug', repoRef: 'repo-1' } });
     expect(old.input?.power).toBeUndefined();
-    expect(old.res.json().powerNotice).toBeUndefined();
+    expect(old.res.json().powerNotice).toMatch(/no power mode/);
     const oldAsked = await launch({ supports: false, body: { workflow: 'bug', repoRef: 'repo-1', power: true } });
     expect(oldAsked.res.json().powerNotice).toMatch(/no power mode/);
   });

@@ -141,6 +141,23 @@ describe('the analysis on a fixture run store', () => {
       NOW,
     );
     expect(ended.power).toMatchObject({ plannedRigor: 'standard', finalRigor: 'high', raised: true, actualMinutes: 41 });
+    const roseThenLowered = runFactOf(
+      view({
+        plan: { rigor: 'standard', score: 30 },
+        rigor: 'standard',
+        outcome: { plannedRigor: 'standard', finalRigor: 'standard', plannedScore: 30, finalScore: 30 },
+        history: [
+          { trigger: 'intake', direction: 'same' },
+          { trigger: 'turn', direction: 'up' },
+          { trigger: 'pre_handoff', direction: 'down' },
+        ],
+      }),
+      [],
+      NOW,
+    );
+    expect(roseThenLowered.power?.raised).toBe(true);
+    const refused = runFactOf(view({ available: false, plan: { rigor: 'high', score: 50, phasedRequired: 'regulated' }, rigor: 'high' }), [], NOW);
+    expect(refused.power).toBeNull();
     const live = runFactOf(view({ plan: { rigor: 'high', score: 50, estimateMinutes: 20 }, rigor: 'high', outcome: null }), [], NOW);
     expect(live.power).toMatchObject({ plannedRigor: 'high', finalRigor: 'high', raised: false, estimateMinutes: 20, actualMinutes: null });
   });

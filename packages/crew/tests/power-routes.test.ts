@@ -53,7 +53,15 @@ async function harness(opts: { supports?: boolean; bus?: unknown } = {}): Promis
     setPowerMode: vi.fn(async (_id: string, on: boolean) => ({ ...POWER, on })),
     raiseRigor: vi.fn(async (_id: string, atLeast: string) => ({ ...POWER, rigor: atLeast })),
     answerPowerPause: vi.fn(async () => POWER),
-    readBus: vi.fn(() => (opts.bus === undefined ? null : Promise.resolve(JSON.stringify(opts.bus)))),
+    updateSettings: vi.fn(async (patch: Record<string, unknown>) => ({ graphNodeLimit: 150, ...patch })),
+    getSettings: vi.fn(async () => ({ graphNodeLimit: 150 })),
+    readBus: vi.fn((after: number) => {
+      if (opts.bus === undefined) return null;
+      const pages = Array.isArray(opts.bus) ? (opts.bus as Array<{ next: number; rows: Array<{ event_id: number }> }>) : [opts.bus as { next: number; rows: Array<{ event_id: number }> }];
+      // The page whose rows start after `after` (the bus's own cursor semantics), else an empty tail.
+      const page = pages.find((p) => p.rows.some((r) => r.event_id > after)) ?? { next: after, rows: [] };
+      return Promise.resolve(JSON.stringify({ next: page.next, rows: page.rows.filter((r) => r.event_id > after) }));
+    }),
   };
   const audit = AuditLog.noop();
   const app = Fastify({ logger: false });
@@ -150,9 +158,51 @@ describe('power mode routes', () => {
     expect(body.rows.map((x) => x.eventId)).toEqual([10, 12]);
     expect(body.rows[0]).toMatchObject({ seq: 3, type: 'wicked.run.rigor.rescored', runId: 'p1' });
     expect(body.cursor).toBe(12);
+    // A row of another run after this run's last: the cursor stays on this run's last row.
     expect(h.adapter.readBus).toHaveBeenCalledWith(9, 1000, 'wicked.run.');
     const limited = await h.app.inject({ method: 'GET', url: '/api/v1/runs/p1/bus?after=9&limit=1', headers: HUMAN });
     expect((limited.json() as { cursor: number }).cursor).toBe(10);
+  });
+
+  it('scans past a full page of other runs, skips non-object payloads, and keeps the cursor at its last row', async () => {
+    const other = Array.from({ length: 1000 }, (_, k) => ({
+      event_id: 101 + k, event_type: 'wicked.run.unit.started', domain: 'wicked-core', subdomain: 'run',
+      payload: k === 0 ? 'plain text payload' : { runId: 'other', seq: k, at: 1 },
+    }));
+    const mine = { event_id: 1101, event_type: 'wicked.run.turn.started', domain: 'wicked-core', subdomain: 'run', payload: { runId: 'p1', seq: 77, at: 2 } };
+    const tail = { event_id: 1102, event_type: 'wicked.run.unit.started', domain: 'wicked-core', subdomain: 'run', payload: { runId: 'other', seq: 78, at: 3 } };
+    const h = await harness({ bus: [{ next: 1100, rows: other }, { next: 1102, rows: [mine, tail] }] });
+    const r = await h.app.inject({ method: 'GET', url: '/api/v1/runs/p1/bus?after=100', headers: HUMAN });
+    expect(r.statusCode).toBe(200);
+    const body = r.json() as { rows: Array<{ eventId: number }>; cursor: number };
+    expect(body.rows.map((x) => x.eventId)).toEqual([1101]);
+    expect(body.cursor).toBe(1101);
+    const none = await h.app.inject({ method: 'GET', url: '/api/v1/runs/p1/bus?after=1101', headers: HUMAN });
+    expect(none.json()).toEqual({ rows: [], cursor: 1101 });
+  });
+
+  it('takes the power mode default from a person only, and only as a boolean', async () => {
+    const h = await harness();
+    const ok = await h.app.inject({ method: 'PUT', url: '/api/v1/settings', headers: HUMAN, payload: { powerModeDefault: false } });
+    expect(ok.statusCode).toBe(200);
+    expect(h.adapter.updateSettings).toHaveBeenCalledWith(expect.objectContaining({ powerModeDefault: false }));
+    expect((await h.app.inject({ method: 'PUT', url: '/api/v1/settings', headers: HUMAN, payload: { powerModeDefault: 'off' } })).statusCode).toBe(400);
+    expect((await h.app.inject({ method: 'PUT', url: '/api/v1/settings', headers: AGENT, payload: { powerModeDefault: true } })).statusCode).toBe(403);
+  });
+
+  it('records a pause answer\'s note as a decision host and not an empty one', async () => {
+    const h = await harness();
+    const r = await h.app.inject({ method: 'POST', url: '/api/v1/runs/p1/power/pause', headers: HUMAN, payload: { decision: 'continue', note: 'keep v1 working' } });
+    expect(r.statusCode).toBe(200);
+    expect(h.adapter.answerPowerPause).toHaveBeenCalledWith('p1', 'continue', 'keep v1 working', 'human-1');
+  });
+
+  it('sends an empty reason or note as absent', async () => {
+    const h = await harness();
+    await h.app.inject({ method: 'POST', url: '/api/v1/runs/p1/power', headers: HUMAN, payload: { on: false, reason: '   ' } });
+    expect(h.adapter.setPowerMode).toHaveBeenCalledWith('p1', false, 'human-1', null);
+    await h.app.inject({ method: 'POST', url: '/api/v1/runs/p1/power/pause', headers: HUMAN, payload: { decision: 'continue', note: ' ' } });
+    expect(h.adapter.answerPowerPause).toHaveBeenCalledWith('p1', 'continue', null, 'human-1');
   });
 
   it('answers 503 for the bus page when the daemon has no bus', async () => {
