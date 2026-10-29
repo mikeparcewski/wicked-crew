@@ -5568,7 +5568,7 @@ export function registerRoutes(
       return {
         runId: id, on: false, available: false, refusedReason: 'this run was launched phased', rigor: null, plan: null,
         history: [], toggles: [], orchestrator: { cli: null, ord: null, turns: 0, inTurn: false, sessionRestarts: 0 },
-        turnLog: [], checkpoints: 0, handoff: null, pause: null, outcome: null,
+        turnLog: [], checkpoints: 0, handoff: null, pause: null, outcome: null, floors: [],
       };
     }
     return { runId: id, ...power };
