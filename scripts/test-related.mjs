@@ -400,6 +400,14 @@ export async function runTargeted(files, io = {}) {
   const build = io.build ?? spawnStreaming;
   const clean = io.cleanDist ?? (() => cleanDist(resolve(ROOT, CREW, 'dist')));
   const out = io.out ?? ((line) => process.stdout.write(`${line}\n`));
+  // wicked-core#1172: the line that starts a re-run goes to BOTH streams. vitest prints its failures on stderr,
+  // so the floor splits each stream at its own copy: what a stream prints after it is the final pass, and a
+  // failure only the first pass named is flaky (passed on retry), not this change's.
+  const err = io.err ?? ((line) => process.stderr.write(`${line}\n`));
+  const startRetry = (line) => {
+    out(line);
+    err(line);
+  };
   const host = io.host ?? hostSnapshot;
   const now = io.now ?? Date.now;
   const budgetS = io.budgetS ?? checksTimeoutS();
@@ -464,13 +472,13 @@ export async function runTargeted(files, io = {}) {
     let retryArgv = null;
     if (failed.length > 0) {
       retryArgv = ['npx', 'vitest', 'run', '--no-file-parallelism', ...filter, ...failed];
-      out(
+      startRetry(
         `${RETRY_MARKER} ${why} — re-running the ${failed.length} named file(s) ONCE, serially, before recording ` +
           `any failure: ${failed.join(', ')}`,
       );
     } else if (elapsedS < budgetS / 2) {
       retryArgv = [...argv, '--no-file-parallelism'];
-      out(
+      startRetry(
         `${RETRY_MARKER} ${why}, and the output named no test file (a worker died before it reported) — re-running ` +
           `the whole targeted command ONCE, serially (${elapsedS.toFixed(0)}s of the ${budgetS}s budget used).`,
       );
