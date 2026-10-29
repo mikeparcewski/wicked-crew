@@ -115,6 +115,16 @@ function accepts<SchemaInput, ContractBody extends SchemaInput>(): ContractBody 
 respondsWith<Wire.CoreEvent, Wire.EvaluatorMutatedWorktreeEvent>();
 respondsWith<Wire.CoreEvent, Wire.RepoChecksEvaluatedEvent>();
 respondsWith<Wire.CoreEvent, Wire.GateEvidenceEvent>();
+// (api-types 0.149.0, power mode) The power frames are `type` aliases, so each relays through the
+// CoreEvent-typed seams unchanged (codex on #1201).
+respondsWith<Wire.CoreEvent, Wire.PowerIntakePlannedEvent>();
+respondsWith<Wire.CoreEvent, Wire.RigorRescoredEvent>();
+respondsWith<Wire.CoreEvent, Wire.PowerCheckpointEvent>();
+respondsWith<Wire.CoreEvent, Wire.PowerTurnStartedEvent>();
+respondsWith<Wire.CoreEvent, Wire.PowerTurnCompletedEvent>();
+respondsWith<Wire.CoreEvent, Wire.PowerHandoffEvent>();
+respondsWith<Wire.CoreEvent, Wire.PowerToggledEvent>();
+respondsWith<Wire.CoreEvent, Wire.PowerEvent>();
 // … and `gateEvaluated.denial` names both new layers alongside the established ones. The literals
 // are SHAPED like wicked-core's `denial_json` output (camelCase, every key present, `null` never
 // absent); the `reason` wording and `phase` values are illustrative, not core's exact strings.
