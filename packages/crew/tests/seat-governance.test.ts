@@ -11,6 +11,7 @@ import {
   seatGovernanceWarnings,
   runRoot,
   type GovernanceScopeKind,
+  type SeatGovernanceDiagnostic,
 } from '../src/api/seat-governance.js';
 import { CREW_ONLY_SEAT_FIELDS, toEngineSeat } from '../src/core/engine-roster.js';
 
@@ -110,6 +111,8 @@ describe('crew#742 — /diagnostics seat governance + /health warnings', () => {
     { key: 'codex', enabled_for_council: true, governance_class: 'none', trust_flags: [] },
     { ...BUILTIN.copilot, enabled_for_council: false },
   ]);
+  // Every seat can run work except copilot (the warnings follow work eligibility, not the council flag).
+  const workEligible = new Set(['claude', 'opencode', 'pi', 'codex']);
   it('per seat: transport, os_sandbox, class, input governance enforced / claimed / unenforced', () => {
     expect(seats.map((s) => [s.cli, s.transport, s.os_sandbox, s.class, s.input_governance])).toEqual([
       ['claude', 'wrapped', false, 'acp_input_governance', 'enforced'],
@@ -120,16 +123,65 @@ describe('crew#742 — /diagnostics seat governance + /health warnings', () => {
     ]);
     expect(seats[2]!.governance_mode.scoped_bound).toMatchObject({ mode: 'none', source: 'none' });
   });
-  it('names an ungoverned seat, and floor seats on a host with no launcher; skips disabled seats', () => {
-    const withLauncher = seatGovernanceWarnings(seats, 'sandbox-exec');
+  it('names an ungoverned seat, and floor seats on a host with no launcher; skips work-ineligible seats', () => {
+    const withLauncher = seatGovernanceWarnings(seats, 'sandbox-exec', workEligible);
     // C5: on the interim host floor opencode and pi are named ungoverned (the engine refuses their
     // governed work); no seat relies on the host's sandbox launcher any more.
     expect(withLauncher.map((w) => w.kind)).toEqual(['seats.ungoverned', 'seats.ungoverned', 'seats.ungoverned']);
     const text = withLauncher.map((w) => w.message).join('\n');
     for (const cli of ['opencode', 'pi', 'codex']) expect(text).toMatch(new RegExp(`^seat ${cli} runs ungoverned: `, 'm'));
     expect(text).not.toMatch(/copilot/);
-    const noLauncher = seatGovernanceWarnings(seats, null);
+    const noLauncher = seatGovernanceWarnings(seats, null, workEligible);
     expect(noLauncher.map((w) => w.kind)).not.toContain('seats.os-floor-unarmable');
+  });
+});
+
+describe('#1087 — the warnings follow work eligibility, not the council flag', () => {
+  const ungoverned = { ...BUILTIN.pi };
+  const governed = { ...BUILTIN.claude };
+  const names = (council: boolean, work: boolean, seat: { key: string }) => {
+    const diag = seatGovernanceDiagnostics([{ ...seat, enabled_for_council: council } as never]);
+    const eligible = new Set(work ? [seat.key] : []);
+    return seatGovernanceWarnings(diag, 'sandbox-exec', eligible).map((w) => w.kind);
+  };
+  const roles: Array<[string, boolean, boolean, boolean]> = [
+    ['work-only', false, true, true],
+    ['ballot-only', true, false, false],
+    ['both', true, true, true],
+    ['neither', false, false, false],
+  ];
+  for (const [label, council, work, warns] of roles) {
+    it(`${label}: an ungoverned seat ${warns ? 'warns' : 'does not'}`, () => {
+      expect(names(council, work, ungoverned)).toEqual(warns ? ['seats.ungoverned'] : []);
+    });
+    it(`${label}: a governed seat never warns`, () => {
+      expect(names(council, work, governed)).toEqual([]);
+    });
+  }
+
+  it('an omitted work flag defaults to eligible (the route derives the set with `!== false`)', () => {
+    const roster: Array<{ key: string; seat_eligible_for_work?: boolean }> = [{ key: 'pi' }, { key: 'codex', seat_eligible_for_work: false }];
+    const eligible = new Set(roster.filter((s) => s.seat_eligible_for_work !== false).map((s) => s.key));
+    expect([...eligible]).toEqual(['pi']);
+  });
+
+  it('seats.os-floor-unarmable names exactly the work-eligible repo_boundary seats on a host floor', () => {
+    const prev = process.env['WICKED_SEAT_FLOOR'];
+    process.env['WICKED_SEAT_FLOOR'] = 'host';
+    try {
+      const boundary = (cli: string, council: boolean): SeatGovernanceDiagnostic => {
+        const [d] = seatGovernanceDiagnostics([{ key: cli, enabled_for_council: council, governance_class: 'os_sandbox' }]);
+        const bound = { ...d!.governance_mode.scoped_bound, source: 'repo_boundary' as const };
+        return { ...d!, governance_mode: { ...d!.governance_mode, scoped_bound: bound } };
+      };
+      const diag = [boundary('work-only', false), boundary('ballot-only', true), boundary('both', true), boundary('neither', false)];
+      const w = seatGovernanceWarnings(diag, null, new Set(['work-only', 'both'])).find((x) => x.kind === 'seats.os-floor-unarmable');
+      expect(w?.message).toContain('so work-only, both —');
+      expect(w?.message).not.toMatch(/ballot-only|neither/);
+    } finally {
+      if (prev === undefined) delete process.env['WICKED_SEAT_FLOOR'];
+      else process.env['WICKED_SEAT_FLOOR'] = prev;
+    }
   });
 });
 
@@ -149,7 +201,7 @@ describe('under the container floor (C5)', () => {
     expect(claude).toMatchObject({ mode: 'admitted' });
     expect(claude.reason).toMatch(/gate hook/);
     const diag = seatGovernanceDiagnostics([{ ...BUILTIN.pi, enabled_for_council: true }]);
-    expect(seatGovernanceWarnings(diag, null).map((w) => w.kind)).not.toContain('seats.os-floor-unarmable');
+    expect(seatGovernanceWarnings(diag, null, new Set(['pi'])).map((w) => w.kind)).not.toContain('seats.os-floor-unarmable');
   });
 });
 

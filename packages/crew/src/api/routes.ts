@@ -1827,7 +1827,10 @@ export function registerRoutes(
       ...(adapter.busSeamsOff != null ? [busSeamsOffWarning(adapter.busSeamsOff)] : []),
       // crew#742: a seat that runs ungoverned, or floor seats on a host that cannot arm their
       // boundary, are named before any run starts.
-      ...seatGovernanceWarnings(seatGovernanceNow(), hostSandboxLauncher()),
+      ...(() => {
+        const gov = seatGovernanceSnapshot();
+        return seatGovernanceWarnings(gov.diagnostics, hostSandboxLauncher(), gov.workEligible);
+      })(),
       // crew 0.15.2 (#916): a custom seat written council-off with no work flag is now work-eligible
       // by the engine default; each is named once, so the operator can keep it off work.
       ...seatWorkDefaultNow(),
@@ -1988,7 +1991,7 @@ export function registerRoutes(
         seatGovernance: {
           rosterFile: seatRosterFile(),
           hostBoundary: hostSandboxLauncher(),
-          seats: seatGovernanceNow(),
+          seats: seatGovernanceSnapshot().diagnostics,
           // The same `seat.work_default` findings `/health.warnings` carries (api-types 0.133.0).
           roleFindings: seatWorkDefaultNow(),
         },
@@ -2097,11 +2100,17 @@ export function registerRoutes(
   );
   /** crew#742: the seats' governance standing, read from the standing roster (empty when the
    *  roster cannot be read — the roster route reports that failure itself). */
-  const seatGovernanceNow = (): SeatGovernanceDiagnostic[] => {
+  const seatGovernanceSnapshot = (): { diagnostics: SeatGovernanceDiagnostic[]; workEligible: ReadonlySet<string> } => {
     try {
-      return seatGovernanceDiagnostics(rosterWithStanding() as unknown as DiagnosticSeatInput[]);
+      // One roster read feeds both: the warnings follow the work role flag (not the council flag, and
+      // not the runtime-gated `work_eligible`), which the published diagnostics do not carry.
+      const roster = rosterWithStanding();
+      return {
+        diagnostics: seatGovernanceDiagnostics(roster as unknown as DiagnosticSeatInput[]),
+        workEligible: new Set(roster.filter((seat) => seat.seat_eligible_for_work !== false).map((seat) => String(seat.key))),
+      };
     } catch {
-      return [];
+      return { diagnostics: [], workEligible: new Set() };
     }
   };
 

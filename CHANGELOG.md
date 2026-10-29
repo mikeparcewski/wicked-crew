@@ -10,6 +10,10 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+
+- Seat governance warnings follow work eligibility, including work-only seats and excluding ballot-only seats (#1087).
+
 ## [0.16.8] — 2026-10-28
 
 A patch release for the last J4 bricks: a step whose only other seat monitored it still gets a judge (wicked-core#1165, crew#972); a seat that streams nothing is reassigned at 8 minutes instead of 30 (#1187, crew#972); every delivery's PR body carries the run's assurance labels (#1188, crew#1186). On wicked-core-ts ^0.15.16 and wicked-crew-api-types 0.147.0, bundling wicked-studio 0.13.0 (UI v2).

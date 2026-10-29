@@ -275,11 +275,17 @@ export interface SeatGovernanceWarning {
 /**
  * The pre-run warnings crew#742 asks for: a seat whose bound-run mode is `none` runs ungoverned;
  * floor seats that rest on the repository boundary on a host with no launcher to arm it
- * (`hostBoundary: null` — no `sandbox-exec` / `bwrap` on PATH) run advisory.
+ * (`hostBoundary: null` — no `sandbox-exec` / `bwrap` on PATH) run advisory. Both warnings are about
+ * governed WORK, so they cover the seats that can run it (`workEligible`: keys whose
+ * `seat_eligible_for_work` is not `false`), not the council flag — a ballot-only seat never runs work.
  */
-export function seatGovernanceWarnings(seats: readonly SeatGovernanceDiagnostic[], hostBoundary: string | null): SeatGovernanceWarning[] {
+export function seatGovernanceWarnings(
+  seats: readonly SeatGovernanceDiagnostic[],
+  hostBoundary: string | null,
+  workEligible: ReadonlySet<string>,
+): SeatGovernanceWarning[] {
   const out: SeatGovernanceWarning[] = [];
-  const enabled = seats.filter((s) => s.enabled_for_council);
+  const enabled = seats.filter((s) => workEligible.has(s.cli));
   for (const s of enabled) {
     if (s.governance_mode.scoped_bound.mode === 'none') {
       out.push({ kind: 'seats.ungoverned', severity: 'warning', message: `seat ${s.cli} runs ungoverned: ${s.governance_mode.scoped_bound.reason}` });
