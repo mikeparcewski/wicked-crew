@@ -87,23 +87,32 @@ export function bridgeBackend(pool: Pick<InteractiveBridgePool, 'ensure'>, rootF
       const before = await head(bridge, docId);
       if (before === null) throw new Error('the working document is gone');
       if (before !== batch.expectHead) return { headMoved: true, head: before };
-      const r = await call(bridge, 'POST', '/api/events', {
-        event_type: 'wicked.interactive.feedback.submitted',
-        payload: {
-          document_id: docId, ts: new Date().toISOString(), version_target: batch.expectHead, expect_head: batch.expectHead,
-          author: batch.author, items: batch.items.map((it) => ({ type: 'content-edit', selector: it.selector, value: it.value })),
-        },
-      });
+      // From here on the batch may have reached interactive: ANY failure is an unknown outcome, never a plain error, so
+      // its author and words are kept until a read shows whether it landed.
+      let r: { status: number; text: string };
+      try {
+        r = await call(bridge, 'POST', '/api/events', {
+          event_type: 'wicked.interactive.feedback.submitted',
+          payload: {
+            document_id: docId, ts: new Date().toISOString(), version_target: batch.expectHead, expect_head: batch.expectHead,
+            author: batch.author, items: batch.items.map((it) => ({ type: 'content-edit', selector: it.selector, value: it.value })),
+          },
+        });
+      } catch (err) {
+        throw new UndeterminedWriteError(`the edit was sent but its answer was lost (${err instanceof Error ? err.message : String(err)}); it may still land`);
+      }
       if (r.status >= 300) throw new Error(`interactive refused the edit (${r.status}): ${String(json(r.text)['error'] ?? r.text.slice(0, 200))}`);
       // The batch's version is the one right after its base, and it is THIS batch's only if it says what was written.
       const mine = batch.expectHead + 1;
       const until = Date.now() + POLL_FOR_MS;
       while (Date.now() < until) {
         await new Promise((res) => setTimeout(res, POLL_MS));
-        const h = await head(bridge, docId);
+        // A failed poll is not the edit's failure: keep looking until the window closes.
+        const h = await head(bridge, docId).catch(() => null);
         if (h === null || h < mine) continue;
-        const r = await call(bridge, 'GET', `/d/${encodeURIComponent(docId)}/doc/${mine}`);
-        if (r.status >= 300) continue;
+        const v = await call(bridge, 'GET', `/d/${encodeURIComponent(docId)}/doc/${mine}`).catch(() => null);
+        if (v === null || v.status >= 300) continue;
+        const r = v;
         const got = sectionsOf(r.text);
         const ours = batch.items.every((it) => {
           const id = it.selector.replace(/^wd-/u, '');

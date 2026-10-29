@@ -20,7 +20,7 @@ const servers: Server[] = [];
 const dirs: string[] = [];
 afterEach(() => { for (const s of servers.splice(0)) s.close(); for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
 
-async function standIn(opts: { foreign?: boolean; never?: boolean } = {}) {
+async function standIn(opts: { foreign?: boolean; never?: boolean; dropEvents?: boolean } = {}) {
   let head = 0;
   const html: Record<number, string> = { 0: '<div data-wid="wd-goal">v0</div>' };
   const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
@@ -31,6 +31,7 @@ async function standIn(opts: { foreign?: boolean; never?: boolean } = {}) {
       const body = raw === '' ? {} : JSON.parse(raw) as Record<string, unknown>;
       if (req.method === 'POST') posts.push({ path: req.url ?? '', body });
       if (req.method === 'POST' && req.url === '/api/docs') { res.end(JSON.stringify({ name: body['name'], head: 0 })); return; }
+      if (req.method === 'POST' && req.url === '/api/events' && opts.dropEvents) { req.socket.destroy(); return; }
       if (req.method === 'POST' && req.url === '/api/events') {
         const item = ((body['payload'] as { items: Array<{ selector: string; value: string }> }).items)[0]!;
         if (!opts.never) setTimeout(() => { head += 1; html[head] = `<div data-wid="${item.selector}">${opts.foreign ? 'someone else' : item.value}</div>`; }, 50);
@@ -79,10 +80,24 @@ describe('the bridge backend', () => {
     await expect(foreign.backend.edit('default', 'w', { expectHead: 0, author: 'x', items: [{ selector: 'wd-goal', value: 'mine' }] })).rejects.toBeInstanceOf(UndeterminedWriteError);
   });
 
+  it('a batch sent whose answer was lost is an UNKNOWN outcome too (kept for its author), never a plain failure', async () => {
+    const s = await standIn({ dropEvents: true });
+    await expect(s.backend.edit('default', 'w', { expectHead: 0, author: 'x', items: [{ selector: 'wd-goal', value: 'mine' }] })).rejects.toBeInstanceOf(UndeterminedWriteError);
+  });
+
   it('a stale base is refused before anything is sent', async () => {
     const s = await standIn();
     expect(await s.backend.edit('default', 'working-run-1', { expectHead: 3, author: 'x', items: [{ selector: 'wd-goal', value: 'g' }] })).toEqual({ headMoved: true, head: 0 });
     expect(s.posts).toHaveLength(0);
+  });
+
+  it('outer spaces and line breaks survive interactive trimming the value', () => {
+    for (const text of ['Keep /v1 working.\n', '\n  indented', '  [x] after spaces', '{a: 1}', '']) {
+      // interactive's parse: `- value: …` trimmed (String.prototype.trim also strips U+2028).
+      const asParsed = encodeSectionText(text).trim();
+      expect(sectionsOf(`<div data-wid="wd-next">${asParsed}</div>`).next, JSON.stringify(text)).toBe(text);
+      expect(/^[[{]/u.test(asParsed), JSON.stringify(text)).toBe(false);
+    }
   });
 
   it('a section keeps its line breaks and a leading bracket through interactive’s line-based feedback file', () => {

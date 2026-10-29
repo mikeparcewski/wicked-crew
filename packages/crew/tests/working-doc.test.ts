@@ -155,26 +155,79 @@ describe('the working document', () => {
   };
   const settle = async () => { for (let i = 0; i < 6; i += 1) await tick(); };
 
-  it('Constraints and steering is standing: each step that picks it up queues a copy for the step after', async () => {
+  it('Constraints and steering is standing: each dispatch that picks a copy up queues the next one', async () => {
     const t = setup();
     await t.service.ensure('run-1');
     const r = await t.service.propose('run-1', { base: 0, author: 'operator', sections: { constraints: 'Keep /v1/invoice.pdf working.' } }, HUMAN);
     if (!r.ok) throw new Error(r.error);
     expect(r.steer?.kind).toBe('standing');
+    expect(t.injected[0]?.message).toContain('It replaces any standing constraint from an earlier version.');
     injectedAt(t, 6, t.injected[0]!.message);
     await settle();
     expect(t.injected).toHaveLength(2);
     expect(t.injected[1]?.message).toMatch(/^Standing operator constraint/u);
+    expect(t.injected[1]?.message).toContain('If you also see a standing constraint from a later version, that one applies instead.');
     expect(t.injected[1]?.message).toContain('- Constraints and steering: Keep /v1/invoice.pdf working.');
-    // A live worker that hears it twice in one step does not make a loop.
-    injectedAt(t, 6, t.injected[1]!.message);
-    await settle();
-    expect(t.injected).toHaveLength(2);
-    // The next step picks the copy up: one more copy for the step after it.
+    // The next step picks THAT copy up: one more copy for the step after it.
     injectedAt(t, 7, t.injected[1]!.message);
     await settle();
     expect(t.injected).toHaveLength(3);
     expect((await t.service.view('run-1')).steers[0]?.renewals).toBe(2);
+  });
+
+  it('a retry of the same unit is another dispatch: its pickup queues the next copy too', async () => {
+    const t = setup();
+    await t.service.ensure('run-1');
+    await t.service.propose('run-1', { base: 0, author: 'operator', sections: { constraints: 'K' } }, HUMAN);
+    const pick = (ord: number, attempt: number, message: string) => {
+      t.service.onEvent({ type: 'unitDispatched', session: 'run-1', ord, attempt } as unknown as CoreEvent);
+      t.service.onEvent({ type: 'workerMessageInjected', session: 'run-1', message, target: 'all' } as unknown as CoreEvent);
+    };
+    pick(6, 0, t.injected[0]!.message);
+    await settle();
+    pick(6, 1, t.injected[1]!.message);
+    await settle();
+    expect(t.injected).toHaveLength(3);
+  });
+
+  it('a live worker that takes the copy in the same step leaves none waiting: the step’s end queues it', async () => {
+    const t = setup();
+    await t.service.ensure('run-1');
+    await t.service.propose('run-1', { base: 0, author: 'operator', sections: { constraints: 'K' } }, HUMAN);
+    injectedAt(t, 6, t.injected[0]!.message);
+    await settle();
+    // The live worker of step 6 takes copy 1 at once (same dispatch): no loop.
+    t.service.onEvent({ type: 'workerMessageInjected', session: 'run-1', message: t.injected[1]!.message, target: 'all' } as unknown as CoreEvent);
+    await settle();
+    expect(t.injected).toHaveLength(2);
+    t.service.onEvent({ type: 'unitDone', session: 'run-1', ord: 6 } as unknown as CoreEvent);
+    await settle();
+    expect(t.injected).toHaveLength(3);
+    // With a copy already waiting, a step's end queues nothing more.
+    t.service.onEvent({ type: 'unitDone', session: 'run-1', ord: 6 } as unknown as CoreEvent);
+    await settle();
+    expect(t.injected).toHaveLength(3);
+  });
+
+  it('the dispatch is known even when it began before the run had a document', async () => {
+    const t = setup();
+    t.service.onEvent({ type: 'unitExecuting', session: 'run-1', ord: 4 } as unknown as CoreEvent);
+    await t.service.ensure('run-1');
+    await t.service.propose('run-1', { base: 0, author: 'operator', sections: { goal: 'x' } }, HUMAN);
+    t.service.onEvent({ type: 'workerMessageInjected', session: 'run-1', message: t.injected[0]!.message, target: 'all' } as unknown as CoreEvent);
+    await settle();
+    expect((await t.service.view('run-1')).steers[0]?.pickedUp?.ord).toBe(4);
+  });
+
+  it('an edit whose outcome was unknown is settled by the next read, with its steer', async () => {
+    const t = setup();
+    await t.service.ensure('run-1');
+    t.backend.holdNext = true;
+    await expect(t.service.propose('run-1', { base: 0, author: 'operator', sections: { next: 'ALICE' } }, HUMAN)).rejects.toThrow(/may still land/u);
+    t.backend.undetermined!();
+    const v = await t.service.view('run-1');
+    expect(v.trail.map((x) => [x.version, x.author.id])).toEqual([[0, 'crew'], [1, 'local']]);
+    expect(t.injected.map((x) => x.message.includes('ALICE'))).toEqual([true]);
   });
 
   it('a pickup reported while the engine is still taking the note is never lost', async () => {

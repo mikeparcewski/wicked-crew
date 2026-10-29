@@ -36,7 +36,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { InteractiveDocCreateRequest } from 'wicked-crew-api-types';
 import { request as httpRequest, type IncomingHttpHeaders, type IncomingMessage } from 'node:http';
-import { join } from 'node:path';
 import { API_PREFIX } from '../api/api-prefix.js';
 import type { CoreAdapter } from '../core/adapter.js';
 import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
@@ -52,8 +51,7 @@ import {
   type DocGroundingStore,
 } from './doc-grounding.js';
 import { projectDocsRoot } from './project-root.js';
-import { CHAT_POSTED, DEMO_DOC_MOVED_MESSAGE, WORKING_DOC_REFUSED_MESSAGE, isAnswerableDocKind, isIterationAsk, readDocHead } from './chat-events.js';
-import { WORKING_DOC_KIND, isWorkingDocDir } from '../working-doc/store.js';
+import { CHAT_POSTED, DEMO_DOC_MOVED_MESSAGE, WORKING_DOC_REFUSED_MESSAGE, isAnswerableDocKind, isIterationAsk, isWorkingDoc, readDocHead } from './chat-events.js';
 import { DOC_NAME } from './draft-events.js';
 
 /** The bridge route whose request crew reads before forwarding (F-046) — exact path, any query. */
@@ -536,7 +534,7 @@ export function registerInteractiveProxy(app: FastifyInstance, adapter: CoreAdap
       // refused with a typed 422 instead of reaching the bus to be declined in a log line. Every
       // other request stays socket-to-socket transport.
       const pathDoc = pathDocumentId(req.method, target);
-      if (pathDoc !== null && isWorkingDocDir(join(root, pathDoc))) {
+      if (pathDoc !== null && isWorkingDoc(root, pathDoc)) {
         deps.log?.(`interactive ${req.method} on ${pathDoc} (project ${projectId}) refused before the bridge: it is a run's working document`);
         return reply.code(403).send({ code: 'working_doc', document_id: pathDoc, error: WORKING_DOC_REFUSED_MESSAGE });
       }
@@ -565,7 +563,7 @@ export function registerInteractiveProxy(app: FastifyInstance, adapter: CoreAdap
         // Spike 3: a run's working document takes no event from the browser at all (no edit, ask, review, theme or
         // export request): crew writes it, from the run's block, and nothing about it launches a run.
         const target_doc = eventDocumentId(raw);
-        if (target_doc !== null && (isWorkingDocDir(join(root, target_doc)) || readDocHead(root, target_doc)?.kind === WORKING_DOC_KIND)) {
+        if (target_doc !== null && isWorkingDoc(root, target_doc)) {
           deps.log?.(`interactive event on ${target_doc} (project ${projectId}) refused before the bridge: it is a run's working document`);
           return reply.code(403).send({ code: 'working_doc', document_id: target_doc, error: WORKING_DOC_REFUSED_MESSAGE });
         }

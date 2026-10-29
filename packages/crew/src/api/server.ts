@@ -125,7 +125,8 @@ import { callEstateTool } from '../core/estate-mcp-client.js';
 import { seatParser } from '../standing-orders/parse.js';
 import { registerGateHistoryRoute, runBand, runPreset, runProject } from '../standing-orders/history.js';
 import { WorkingDocService } from '../working-doc/service.js';
-import { WorkingDocStore, isWorkingDocDir } from '../working-doc/store.js';
+import { WorkingDocStore } from '../working-doc/store.js';
+import { isWorkingDoc as isWorkingDocAt } from '../interactive/chat-events.js';
 import { bridgeBackend } from '../working-doc/bridge-backend.js';
 import { registerWorkingDocRoutes } from '../working-doc/routes.js';
 import { projectDocsRoot as workingDocRoot } from '../interactive/project-root.js';
@@ -1553,7 +1554,7 @@ export async function createServer(
     const o = options.interactiveThemeEvents;
     const resolveDocsRoot = o.resolveDocsRoot ?? interactiveDocsRoot;
     themeSub = await startInteractiveThemeSubscriber(adapter, {
-      isWorkingDoc: (projectId, documentId) => isWorkingDocDir(join(resolveDocsRoot(projectId), documentId)),
+      isWorkingDoc: (projectId, documentId) => isWorkingDocAt(resolveDocsRoot(projectId), documentId),
       ...busOf(o.dbPath),
       ...(o.pollIntervalMs !== undefined ? { pollIntervalMs: o.pollIntervalMs } : {}),
       ...(o.heartbeatMs !== undefined ? { heartbeatMs: o.heartbeatMs } : {}),
@@ -1581,7 +1582,7 @@ export async function createServer(
     const o = options.interactiveReviewEvents;
     const resolveDocsRoot = o.resolveDocsRoot ?? interactiveDocsRoot;
     reviewSub = await startInteractiveReviewSubscriber(adapter, {
-      isWorkingDoc: (projectId, documentId) => isWorkingDocDir(join(resolveDocsRoot(projectId), documentId)),
+      isWorkingDoc: (projectId, documentId) => isWorkingDocAt(resolveDocsRoot(projectId), documentId),
       ...busOf(o.dbPath),
       ...(o.pollIntervalMs !== undefined ? { pollIntervalMs: o.pollIntervalMs } : {}),
       ...(o.heartbeatMs !== undefined ? { heartbeatMs: o.heartbeatMs } : {}),

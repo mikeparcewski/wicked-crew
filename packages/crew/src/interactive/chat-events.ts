@@ -245,6 +245,13 @@ export function isAnswerableDocKind(kind: string): boolean {
   return chatSeamAnswers(kind);
 }
 
+/** Whether a document is a run's working document: crew's sidecar (also before interactive wrote a manifest), or a
+ *  manifest that says `phase-report`. Every seam and every write path asks this one question. */
+export function isWorkingDoc(docsRoot: string, documentId: string): boolean {
+  if (!DOC_NAME.test(documentId)) return false;
+  return existsSync(join(docsRoot, documentId, WORKING_DOC_SIDECAR)) || readDocHead(docsRoot, documentId)?.kind === WORKING_DOC_KIND;
+}
+
 /** Why a run's WORKING DOCUMENT (kind `phase-report`, spike 3) is answered by no seam: it is written only through the
  *  run's working-document block, a person's edit steering the run's next step. No edit, ask, review or theme of it
  *  ever launches a governed run. */

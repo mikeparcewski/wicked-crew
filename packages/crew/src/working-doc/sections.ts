@@ -77,12 +77,13 @@ const decodeEntities = (s: string): string => s
  * undoes both.
  */
 export function encodeSectionText(text: string): string {
-  const one = text.replace(/\r\n?/g, '\n').replace(/\n/g, '\u2028');
-  return /^[[{]/u.test(one) ? `\u200b${one}` : one;
+  // Both ends behind a zero-width space: interactive's trim() would eat outer spaces and line breaks, and a value that
+  // starts with `[` or `{` would be read as YAML. Neither touches U+200B.
+  return `\u200b${text.replace(/\r\n?/g, '\n').replace(/\n/g, '\u2028')}\u200b`;
 }
 
 function decodeSectionText(text: string): string {
-  return text.replace(/^\u200b/u, '').replace(/\u2028/g, '\n');
+  return text.replace(/^\u200b/u, '').replace(/\u200b$/u, '').replace(/\u2028/g, '\n');
 }
 
 /** The text of each section in a version's HTML (a section the version lacks is absent). Only the anchored element's

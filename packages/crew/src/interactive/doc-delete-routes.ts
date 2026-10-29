@@ -53,6 +53,7 @@ import { BridgeUnavailableError, type InteractiveBridgePool, type LiveBridge } f
 import { DOC_NAME } from './draft-events.js';
 import type { DocLedgerSweep } from './doc-ledger-sweep.js';
 import { projectDocsRoot } from './project-root.js';
+import { WORKING_DOC_REFUSED_MESSAGE, isWorkingDoc } from './chat-events.js';
 
 const V = API_PREFIX;
 
@@ -143,6 +144,10 @@ export function registerInteractiveDocDelete(
       const root = await rootFor(projectId);
       if (root === null) {
         return reply.code(404).send({ error: `Project ${projectId} not found` });
+      }
+      // Spike 3: a run's working document is never retired from here (its binding lives with the run).
+      if (isWorkingDoc(root, doc)) {
+        return reply.code(403).send({ code: 'working_doc', document_id: doc, error: WORKING_DOC_REFUSED_MESSAGE });
       }
 
       let bridge: LiveBridge;

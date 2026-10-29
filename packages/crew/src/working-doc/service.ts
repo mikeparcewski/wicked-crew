@@ -107,7 +107,7 @@ export function steerMarker(runId: string, steerId: string): string {
 /** The one note a person's version becomes: the sections that steer once, and the standing constraint, together. */
 export function steerNote(version: number, by: string, standing: boolean, texts: Array<{ id: SectionId; text: string }>, marker: string): string {
   const head = standing
-    ? `Operator steering from the job's working document (version ${version}, by ${by}). Its Constraints and steering is standing: follow it in this step and every later one until it is replaced.`
+    ? `Operator steering from the job's working document (version ${version}, by ${by}). Its Constraints and steering is standing: follow it in this step and every later one until it is replaced. It replaces any standing constraint from an earlier version.`
     : `Operator steering from the job's working document (version ${version}, by ${by}).`;
   const lines = texts.map((t) => `- ${SECTION_LABELS[t.id]}: ${t.text.trim() === '' ? '(cleared)' : t.text.trim()}`);
   return [head, NO_GATE_LINE, ...lines, marker].join('\n');
@@ -116,7 +116,7 @@ export function steerNote(version: number, by: string, standing: boolean, texts:
 /** The standing constraint alone, re-sent before every later step. */
 export function standingNote(version: number, by: string, text: string, marker: string): string {
   return [
-    `Standing operator constraint from the job's working document (version ${version}, by ${by}). Follow it in this step and every later one until it is replaced.`,
+    `Standing operator constraint from the job's working document (version ${version}, by ${by}). Follow it in this step and every later one until it is replaced. If you also see a standing constraint from a later version, that one applies instead.`,
     NO_GATE_LINE,
     `- ${SECTION_LABELS.constraints}: ${text.trim()}`,
     marker,
@@ -137,12 +137,14 @@ export class UndeterminedWriteError extends Error {
 
 export class WorkingDocService {
   private readonly now: () => number;
-  /** The newest unit each run dispatched: the step a note injected now is picked up by. */
-  private readonly lastOrd = new Map<string, number>();
+  /** The newest dispatch of each run (unit and attempt): the step a note injected now is picked up by. */
+  private readonly lastDispatch = new Map<string, { ord: number; attempt: number }>();
+  /** A standing constraint with a copy queued and not yet picked up. */
+  private readonly queued = new Map<string, boolean>();
   /** One write per run at a time (a second waits its turn); steering renewals take the same turn. */
   private readonly locks = new Map<string, Promise<unknown>>();
-  /** A standing steer is re-sent once per step that picked it up (a live worker hears it once, not in a loop). */
-  private readonly renewedFor = new Map<string, number | null>();
+  /** A standing steer is re-queued once per dispatch that picked it up (a live worker hears it once, not in a loop). */
+  private readonly renewedFor = new Map<string, string | null>();
 
   constructor(private readonly d: WorkingDocDeps) {
     this.now = d.now ?? Date.now;
@@ -156,6 +158,8 @@ export class WorkingDocService {
   }
 
   async view(runId: string): Promise<WorkingDocView> {
+    // An edit whose outcome was unknown is settled on every read, not only by the next edit.
+    if (this.d.store.get(runId)?.pending != null) await this.exclusive(runId, () => this.reconcile(runId));
     const rec = this.d.store.get(runId);
     const base = { runId, labels: { ...SECTION_LABELS }, trail: rec?.trail ?? [], steers: rec?.steers ?? [] };
     if (rec === undefined) return { ...base, doc: null, sections: null };
@@ -247,8 +251,13 @@ export class WorkingDocService {
       });
     } catch (err) {
       if (err instanceof UndeterminedWriteError) {
-        // Not known whether it landed: remembered, so a later read attributes it if it does — never to the next caller.
+        // Not known whether it landed: remembered, so a later read attributes it if it does — never to the next caller —
+        // and looked at again on its own shortly, so its steer is not left waiting for someone to read.
         this.d.store.update(runId, (r) => { r.pending = { expectHead: input.base, author, surface, values, at: this.now(), actor: { id: actor.id, kind: actor.kind } }; });
+        for (const ms of [30_000, 75_000]) {
+          const t = setTimeout(() => { void this.exclusive(runId, () => this.reconcile(runId)).catch(() => undefined); }, ms);
+          (t as { unref?: () => void }).unref?.();
+        }
       }
       throw err;
     }
@@ -328,26 +337,41 @@ export class WorkingDocService {
   }
 
   /**
-   * The daemon's CoreEvent tap. `workerMessageInjected` says which step's prompt carried a note (recorded at once);
-   * when that note holds a standing constraint still in force, a copy is queued right away for the step after, so the
-   * next dispatch always finds one waiting (never raced against `unitDone`). A step that hears it twice (a live
-   * worker) does not re-queue twice.
+   * The daemon's CoreEvent tap.
+   *
+   *  - `unitDispatched` / `unitExecuting` (every run, also before its document exists): the dispatch a note injected now
+   *    is picked up by, as `ord` + `attempt` (a retry of the same unit is another dispatch).
+   *  - `workerMessageInjected`: the step whose prompt carried a note (recorded at once, its name read after).
+   *  - A STANDING constraint is kept one copy ahead: when a dispatch picks a copy up, the next copy is queued at once
+   *    (once per dispatch), so the next dispatch finds it waiting — never raced against `unitDone`. A live worker that
+   *    takes the copy in the same dispatch leaves none waiting; then the step's `unitDone` queues it. Every copy says it
+   *    replaces any earlier standing constraint, so a copy already queued when a person replaces it is overruled by the
+   *    newer one (the engine has no way to withdraw a queued note).
    */
   onEvent(e: CoreEvent): void {
     const ev = e as unknown as Record<string, unknown>;
     const runId = typeof ev['session'] === 'string' ? ev['session'] : null;
     if (runId === null) return;
+    if ((e.type === 'unitDispatched' || e.type === 'unitExecuting') && typeof ev['ord'] === 'number') {
+      const attempt = typeof ev['attempt'] === 'number' ? ev['attempt'] : (this.lastDispatch.get(runId)?.ord === ev['ord'] ? this.lastDispatch.get(runId)?.attempt ?? 0 : 0);
+      this.lastDispatch.set(runId, { ord: ev['ord'], attempt });
+      return;
+    }
     const rec = this.d.store.get(runId);
     if (rec === undefined) return;
-    if ((e.type === 'unitDispatched' || e.type === 'unitExecuting') && typeof ev['ord'] === 'number') {
-      this.lastOrd.set(runId, ev['ord']);
+    if (e.type === 'unitDone' || e.type === 'unitDenied') {
+      for (const s of rec.steers) {
+        if (s.kind === 'standing' && s.supersededBy == null && s.error === null && s.pickedUp !== null && this.queued.get(s.id) !== true) this.renew(runId, s.id, null);
+      }
       return;
     }
     if (e.type !== 'workerMessageInjected' || typeof ev['message'] !== 'string') return;
     const message = ev['message'];
     const steer = rec.steers.find((s) => message.includes(steerMarker(runId, s.id)));
     if (steer === undefined) return;
-    const ord = this.lastOrd.get(runId) ?? null;
+    const at = this.lastDispatch.get(runId) ?? null;
+    const ord = at?.ord ?? null;
+    this.queued.set(steer.id, false);
     if (steer.pickedUp === null) {
       this.d.store.update(runId, (r) => { const s = r.steers.find((x) => x.id === steer.id); if (s !== undefined && s.pickedUp === null) s.pickedUp = { ord, step: null, at: this.now() }; });
       this.d.changed?.(runId, null);
@@ -358,18 +382,24 @@ export class WorkingDocService {
       }).catch((err: unknown) => this.d.log?.(`[working-doc] pickup of ${steer.id} on ${runId}: ${String(err)}`));
     }
     if (steer.kind !== 'standing' || steer.standingNote == null) return;
-    if (this.renewedFor.has(steer.id) && this.renewedFor.get(steer.id) === ord) return;
-    this.renewedFor.set(steer.id, ord);
+    const dispatch = at === null ? null : `${at.ord}:${at.attempt}`;
+    if (this.renewedFor.has(steer.id) && this.renewedFor.get(steer.id) === dispatch) return;
+    this.renewedFor.set(steer.id, dispatch);
+    this.renew(runId, steer.id, dispatch);
+  }
+
+  /** Queue one copy of a standing constraint, inside the run's turn, if it is still the one in force. */
+  private renew(runId: string, steerId: string, dispatch: string | null): void {
+    this.queued.set(steerId, true);
     void this.exclusive(runId, async () => {
-      // Re-checked inside the run's turn: a later edit may have replaced it meanwhile.
-      const current = this.d.store.get(runId)?.steers.find((x) => x.id === steer.id);
-      if (current === undefined || current.supersededBy != null || current.error !== null || current.standingNote == null) return;
+      const current = this.d.store.get(runId)?.steers.find((x) => x.id === steerId);
+      if (current === undefined || current.supersededBy != null || current.error !== null || current.standingNote == null) { this.queued.set(steerId, false); return; }
       const run = await this.d.run(runId);
-      if (run === null || run.terminal) return;
-      if (this.d.store.get(runId)?.steers.find((x) => x.id === steer.id)?.supersededBy != null) return;
+      if (run === null || run.terminal || this.d.store.get(runId)?.steers.find((x) => x.id === steerId)?.supersededBy != null) { this.queued.set(steerId, false); return; }
       await this.d.engine.injectWorkerMessage(runId, current.standingNote, 'all');
-      this.d.store.update(runId, (r) => { const x = r.steers.find((y) => y.id === steer.id); if (x !== undefined) x.renewals = (x.renewals ?? 0) + 1; });
+      this.d.store.update(runId, (r) => { const x = r.steers.find((y) => y.id === steerId); if (x !== undefined) x.renewals = (x.renewals ?? 0) + 1; });
       this.d.changed?.(runId, null);
-    }).catch((err: unknown) => this.d.log?.(`[working-doc] standing steer ${steer.id} on ${runId}: ${String(err)}`));
+      void dispatch;
+    }).catch((err: unknown) => { this.queued.set(steerId, false); this.d.log?.(`[working-doc] standing steer ${steerId} on ${runId}: ${String(err)}`); });
   }
 }
