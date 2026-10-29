@@ -58,6 +58,7 @@ interface TestRelated {
       build?: (argv: string[], cwd: string) => Promise<RunResult>;
       cleanDist?: () => void;
       out: (line: string) => void;
+      err?: (line: string) => void;
       host?: () => Record<string, unknown>;
       now?: () => number;
       budgetS?: number;
@@ -115,11 +116,13 @@ function recorder(results: RunResult[], buildResult: RunResult = { status: 0, ou
   const builds: { argv: string[]; cwd: string; vitestCallsBefore: number; cleanedBefore: number }[] = [];
   let cleans = 0;
   const lines: string[] = [];
+  const errLines: string[] = [];
   let i = 0;
   return {
     calls,
     builds,
     lines,
+    errLines,
     io: {
       run: async (argv: string[], cwd: string): Promise<RunResult> => {
         calls.push({ argv, cwd });
@@ -136,6 +139,7 @@ function recorder(results: RunResult[], buildResult: RunResult = { status: 0, ou
         cleans += 1;
       },
       out: (line: string) => lines.push(line),
+      err: (line: string) => errLines.push(line),
       host: () => ({ load1: 130.4, load5: 120, cpus: 12, loadPerCpu: 10.87, freeMemMb: 300, swapFreeMb: 12.5, swapUsedMb: 15800 }),
       now: () => 0,
       budgetS: 1800,
@@ -174,6 +178,23 @@ describe('crew#649 — the targeted check tolerates worker-IPC deaths and record
     expect(rec.calls[0]!.argv).toEqual(['npx', 'vitest', 'related', '--run', '--passWithNoTests', 'src/api/routes.ts']);
     expect(rec.calls[1]!.argv).toEqual(['npx', 'vitest', 'run', '--no-file-parallelism', 'tests/run-diff-base-route.test.ts']);
     expect(rec.lines.join('\n')).toContain(`${mod.RETRY_MARKER} the re-run passed`);
+  });
+
+  it('prints the line that starts a re-run on stderr too, and only that one (wicked-core#1172)', async () => {
+    const rec = recorder([
+      { status: 1, output: IPC_DEATH_OUTPUT, spawnError: null },
+      { status: 1, output: REAL_FAILURE_OUTPUT, spawnError: null },
+    ]);
+    expect(await mod.runTargeted([CREW_FILE], rec.io)).toBe(1);
+    const start = rec.lines.filter((l) => l.startsWith(mod.RETRY_MARKER) && l.includes(' re-running '));
+    expect(start, 'one re-run start on stdout').toHaveLength(1);
+    // vitest prints failures on stderr: the floor splits each stream at its own copy of this line.
+    expect(rec.errLines, 'the same line, once, on stderr').toEqual(start);
+    expect(rec.lines.join('\n')).toContain(`${mod.RETRY_MARKER} the re-run FAILED too`);
+
+    const none = recorder([{ status: 1, output: REAL_FAILURE_OUTPUT, spawnError: null }]);
+    await mod.runTargeted([CREW_FILE], none.io);
+    expect(none.errLines, 'no re-run, nothing on stderr').toEqual([]);
   });
 
   it('an in-suite deadline is re-run the same way — the marker is not the only contention shape', async () => {

@@ -10,6 +10,15 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The targeted check's re-run start line goes to stderr too (wicked-core#1172).** `scripts/test-related.mjs`
+  printed `WICKED-RETRY … re-running …` on stdout only, while vitest prints its failures on stderr, so the engine
+  floor could not tell the final pass's failures from the first pass's. The floor then named tests that cleared on
+  the retry as failing "only with this change" (rig run 62c4f0ff). The line now goes to both streams (`io.err`
+  seam), and an engine with wicked-core#1172 reports such tests as flaky (passed on retry). The check's exit code
+  is unchanged.
+
 ## [0.16.10] — 2026-10-29
 
 A patch release that ships the run's working document and steering from it (#1197, power mode spike 3) and an operator note on `POST /runs/:id/reassign` (#1200, crew#1153); the system-route gateway test no longer depends on the host's free disk (#1200, crew#1199). On wicked-core-ts ^0.15.17 and wicked-crew-api-types 0.148.0, bundling wicked-studio 0.13.0 (UI v2).
