@@ -10,6 +10,18 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.16.9] — 2026-10-29
+
+A patch release for J4 with zero overrides: crew's delivery end-to-end suites pass inside the repository-checks floor (#1195, crew#1191), so a crew run that touches the API no longer needs a floor override; the verify floor stands on a fix-floor override on the same tree instead of asking again (wicked-core#1170, core#1168); the PR body says QE acceptance passed (#1194, crew#1192); an empty `lsof` read no longer fails the stall watchdog's busy read (#1194, crew#1193); seat-governance warnings follow work eligibility (#1190, crew#1087). On wicked-core-ts ^0.15.17 and wicked-crew-api-types 0.147.0, bundling wicked-studio 0.13.0 (UI v2).
+
+### Changed
+
+- **Runs on wicked-core-ts 0.15.17.** Engine changes since 0.15.16: a verify floor whose failing checks were
+  all reused from the creator floor result the operator overrode (same unit and attempt, same tree and base)
+  carries that override, labelled "override carried from fix (unit N), same tree" on the gate, the run and
+  the delivery, instead of opening a second escalation (core#1170, core#1168); the deliver refusal gate says
+  why a changed tree needs a new override (core#1169, core#1114).
+
 ### Fixed
 
 - Seat governance warnings follow work eligibility, including work-only seats and excluding ballot-only seats (#1087).
@@ -4707,7 +4719,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.8...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.9...HEAD
+[0.16.9]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.8...v0.16.9
 [0.16.8]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.7...v0.16.8
 [0.16.7]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.6...v0.16.7
 [0.16.6]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.5...v0.16.6
