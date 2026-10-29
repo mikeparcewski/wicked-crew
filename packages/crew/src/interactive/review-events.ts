@@ -27,6 +27,7 @@
  * introduced — the worker fence is unchanged.
  */
 
+import { WORKING_DOC_REFUSED_MESSAGE } from './chat-events.js';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
@@ -473,6 +474,8 @@ export function rosterWithout(roster: readonly unknown[], excluded: readonly str
 // ── The subscriber ─────────────────────────────────────────────────────────────────────────────
 
 export interface InteractiveReviewOptions {
+  /** Spike 3: whether a document is a run's working document (kind `phase-report`): never answered by a run. */
+  isWorkingDoc?: (projectId: string | undefined, documentId: string) => boolean;
   dbPath?: string;
   pollIntervalMs?: number;
   heartbeatMs?: number;
@@ -787,6 +790,12 @@ export async function startInteractiveReviewSubscriber(
     const request = parseReviewRequested(event.event_type, event.payload);
     if (request === null) return;
     const scope = docScope(request.documentId, request.projectId);
+    // Spike 3: a run's working document is never reviewed by a governed run.
+    if (opts.isWorkingDoc?.(request.projectId, request.documentId) === true) {
+      await emitStatus({ ...scope, state: 'error', message: WORKING_DOC_REFUSED_MESSAGE });
+      log(`[interactive-review] ${request.documentId} is a run's working document — no review run is launched (spike 3)`);
+      return;
+    }
     const key = reviewHandoffKey(request.documentId, request.version, request.reviewers, request.projectId);
     for (const f of inFlight.values()) if (f.key === key) return;
 

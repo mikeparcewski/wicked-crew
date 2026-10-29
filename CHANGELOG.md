@@ -10,6 +10,28 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Added
+
+- **A run's working document, and steering from it (power mode spike 3).** `GET|POST /runs/:id/working-doc` and
+  `POST /runs/:id/working-doc/versions` (api-types 0.148.0, `capabilities.workingDoc`). Each run may have one working
+  document: a wicked-interactive document of kind `phase-report` in the run's project, with the sections Goal,
+  Approach, Decisions, Constraints and steering, Open questions, and Next and trailing work. Versions are
+  interactive's own (write-once, parent-linked, with an author); crew records who wrote each one, through which
+  plugin, and which sections changed.
+  - A person's edit is recorded as theirs, with the plugin that hosted it named as the surface. A plugin's own lines
+    are recorded as `plugin:<id>@<version>` and may touch only its own section (Decisions). A plugin's text is never
+    recorded as a person's, and it never steers.
+  - A person's version becomes one steering note through the operator inject, so it rides the next step's prompt.
+    Goal, Approach and Next go to the next step once. Constraints and steering is a standing steer, re-sent before
+    every later step until a later edit replaces it. Decisions and Open questions are recorded, not sent. The step
+    that picked a note up is recorded, and `/ws` says `workingDocChanged`.
+  - Document text has no power over gates. Steering calls only the inject: no gate answer, plan edit, intent
+    amendment or rigor change. Every note says it changes no gate, check, review or QE step.
+  - No seam ever launches a governed run for a working document. The proxy refuses every browser event on it (403),
+    and the edit, review, theme and chat seams decline it.
+  - `ActorKind` gains `plugin` (`plugin:<id>@<version>`). A token file may give a plugin actor only `observer`
+    trust; its one write is its own working-document section, as itself.
+
 ## [0.16.9] — 2026-10-29
 
 A patch release for J4 with zero overrides: crew's delivery end-to-end suites pass inside the repository-checks floor (#1195, crew#1191), so a crew run that touches the API no longer needs a floor override; the verify floor stands on a fix-floor override on the same tree instead of asking again (wicked-core#1170, core#1168); the PR body says QE acceptance passed (#1194, crew#1192); an empty `lsof` read no longer fails the stall watchdog's busy read (#1194, crew#1193); seat-governance warnings follow work eligibility (#1190, crew#1087). On wicked-core-ts ^0.15.17 and wicked-crew-api-types 0.147.0, bundling wicked-studio 0.13.0 (UI v2).

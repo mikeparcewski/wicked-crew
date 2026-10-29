@@ -67,6 +67,7 @@ import {
   narrationStamps,
 } from './draft-events.js';
 import { InteractiveHandoffLedger } from './ledger.js';
+import { WORKING_DOC_KIND, WORKING_DOC_SIDECAR } from '../working-doc/store.js';
 import { draftQualityClause, logDraftSkillArmLine, type SkillHeld } from './draft-skill.js';
 import { crewStateHome } from '../projects/state-home.js';
 import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
@@ -212,7 +213,10 @@ export function readDocHead(docsRoot: string, documentId: string): DocHead | nul
         ? rawHtmlFile
         : `_v${head}.html`;
     return {
-      kind: typeof manifest.kind === 'string' && manifest.kind.length > 0 ? manifest.kind : 'doc',
+      // A run's working document (spike 3) is kind `phase-report` whatever its manifest says: crew's sidecar marks it,
+      // so every seam that reads the head refuses it, also under an interactive that records no kind.
+      kind: existsSync(join(dir, WORKING_DOC_SIDECAR)) ? WORKING_DOC_KIND
+        : typeof manifest.kind === 'string' && manifest.kind.length > 0 ? manifest.kind : 'doc',
       head,
       headHtmlPath: join(dir, htmlFile),
     };
@@ -241,6 +245,20 @@ export function isAnswerableDocKind(kind: string): boolean {
   return chatSeamAnswers(kind);
 }
 
+/** Whether a document is a run's working document: crew's sidecar (also before interactive wrote a manifest), or a
+ *  manifest that says `phase-report`. Every seam and every write path asks this one question. */
+export function isWorkingDoc(docsRoot: string, documentId: string): boolean {
+  if (!DOC_NAME.test(documentId)) return false;
+  return existsSync(join(docsRoot, documentId, WORKING_DOC_SIDECAR)) || readDocHead(docsRoot, documentId)?.kind === WORKING_DOC_KIND;
+}
+
+/** Why a run's WORKING DOCUMENT (kind `phase-report`, spike 3) is answered by no seam: it is written only through the
+ *  run's working-document block, a person's edit steering the run's next step. No edit, ask, review or theme of it
+ *  ever launches a governed run. */
+export const WORKING_DOC_REFUSED_MESSAGE =
+  "This is a job's working document. It is edited only in the job's conversation, where an edit steers the job's next " +
+  'step. Nothing was changed and nothing was launched.';
+
 /** Why a demo DOCUMENT's feedback or ask has no answerer (studio#373, M9b): demos are made by a
  *  governed run of the `demo` preset, which re-records at its review gate. Studio's Demo mode is
  *  gone (studio#609); the way in is New job › Demo video, or ⌘K "New Demo" (studio#664). */
@@ -253,6 +271,7 @@ export const DEMO_DOC_MOVED_MESSAGE =
  *  (`askRefusalFor`). */
 export function foreignKindAskMessage(kind: string): string {
   if (kind === 'demo') return DEMO_DOC_MOVED_MESSAGE;
+  if (kind === WORKING_DOC_KIND) return WORKING_DOC_REFUSED_MESSAGE;
   return (
     `Asks on documents of kind '${kind}' have no answering seam on this daemon — nothing was launched for ` +
     'this message.'

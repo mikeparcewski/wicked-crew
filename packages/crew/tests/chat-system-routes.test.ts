@@ -130,7 +130,7 @@ describe('system chat: history, close, attachments (server)', () => {
 
   it('advertises defaultEvals, insights and schedules, each a route this server answers (api-types 0.145.0)', async () => {
     const health = (await app.inject({ method: 'GET', url: '/api/v1/health' })).json() as HealthResponse;
-    expect(health.capabilities).toMatchObject({ defaultEvals: true, insights: true, schedules: true });
+    expect(health.capabilities).toMatchObject({ defaultEvals: true, insights: true, schedules: true, workingDoc: true });
     for (const url of ['/api/v1/testing/default-evals/suites', '/api/v1/insights', '/api/v1/schedules']) {
       expect((await app.inject({ method: 'GET', url })).statusCode, url).toBe(200);
     }

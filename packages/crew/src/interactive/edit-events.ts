@@ -53,7 +53,7 @@ import { InteractiveHandoffLedger } from './ledger.js';
 import { draftQualityClause, logDraftSkillArmLine, type SkillHeld } from './draft-skill.js';
 import { crewStateHome } from '../projects/state-home.js';
 import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
-import { DEMO_DOC_MOVED_MESSAGE, readDocHead } from './chat-events.js';
+import { DEMO_DOC_MOVED_MESSAGE, WORKING_DOC_REFUSED_MESSAGE, isWorkingDoc, readDocHead } from './chat-events.js';
 import { resolveInteractiveRoot } from './bridge-root.js';
 import type { CoreAdapter } from '../core/adapter.js';
 import type { CoreEvent, LaunchRunInput } from '../core/types.js';
@@ -690,6 +690,17 @@ export async function startInteractiveEditSubscriber(
       handoff.projectId,
     );
     const head = readDocHead(docsRoot, handoff.documentId);
+    // Spike 3: a run's working document is never edited by a governed run.
+    if (isWorkingDoc(docsRoot, handoff.documentId)) {
+      emitStatus({
+        ...docScope(handoff.documentId, handoff.projectId),
+        version: handoff.version,
+        state: 'error',
+        message: WORKING_DOC_REFUSED_MESSAGE,
+      });
+      log(`[interactive-edit] ${handoff.documentId} is a run's working document — no edit run is launched (spike 3)`);
+      return;
+    }
     if (head !== null && head.kind === 'demo') {
       emitStatus({
         ...docScope(handoff.documentId, handoff.projectId),
