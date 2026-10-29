@@ -911,6 +911,45 @@ describe('the run\'s assurance labels (crew#1186)', () => {
     expect(required).toContain('- QE acceptance: required (required: impact score 40)');
   });
 
+  // crew#1192 — wicked-crew#1190 (rig run 24103407): the isolated reviewer bound a PASS, delivery
+  // stood on it, and the body still read "QE acceptance: required".
+  it('says QE acceptance passed, with the verdict, the reviewer and its seat, when delivery stood on a PASS', () => {
+    const qe = { status: 'required', basis: 'diff', score: 100, threshold: 20, reason: 'required: impact score 100', reasons: [], ord: 9, tree: null };
+    const v = withAssurance({ mode: 'full', required: ['qe_acceptance'], qe });
+    const verify = v.units.find((u) => u.ord === Math.max(...v.units.map((x) => x.ord)))!;
+    (verify as { qe_review?: unknown }).qe_review = {
+      outcome: 'pass',
+      verdict: 'PASS',
+      qe_run_id: '0f0a7802',
+      attempts: [{ attempt: 0, seat: 'pi', status: 'verdict', basis: 'distinct' }],
+    };
+    const pass = { status: 'required', satisfied: true, reason: 'PASS', verdictId: 'cc9fbcf1', reviewer: 'acceptance-test-reviewer' };
+    const body = composeDeliverText(factsFromRun(v, null, { qeAcceptance: pass })).body;
+    expect(body).toContain(
+      '- **QE acceptance passed**: verdict `cc9fbcf1`, reviewer acceptance-test-reviewer on `pi` (required: impact score 100)',
+    );
+    expect(body).not.toContain('- QE acceptance: required');
+    // Without the engine's bound review the seat is not named; the ledger verdict still is.
+    (verify as { qe_review?: unknown }).qe_review = null;
+    expect(composeDeliverText(factsFromRun(v, null, { qeAcceptance: pass })).body).toContain(
+      '- **QE acceptance passed**: verdict `cc9fbcf1`, reviewer acceptance-test-reviewer (required: impact score 100)',
+    );
+    // Unsatisfied, verdict-less, or a check that is not the required one: reads as before.
+    for (const check of [
+      { ...pass, satisfied: false },
+      { ...pass, verdictId: null },
+      { ...pass, status: 'waived' },
+      null,
+    ]) {
+      const b = composeDeliverText(factsFromRun(v, null, { qeAcceptance: check })).body;
+      expect(b).toContain('- QE acceptance: required (required: impact score 100)');
+      expect(b).not.toContain('QE acceptance passed');
+    }
+    // A skipped decision keeps its own label even beside a satisfied check.
+    const skipped = withAssurance({ mode: 'full', required: ['qe_acceptance'], qe: { ...qe, status: 'skipped', basis: 'operator', reason: skipReason } });
+    expect(composeDeliverText(factsFromRun(skipped, null, { qeAcceptance: pass })).body).toContain('- **QE acceptance skipped by operator**');
+  });
+
   it('leaves the section out when the engine recorded no assurance contract', () => {
     expect(composeDeliverText(factsFromRun(runView(), null)).body).not.toContain('## Assurance');
   });

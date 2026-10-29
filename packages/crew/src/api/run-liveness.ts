@@ -121,18 +121,56 @@ export const hostProcessProbe: ProcessProbe = {
       );
       return out;
     }
-    const text = await run('lsof', ['-a', '-d', 'cwd', '-p', pids.join(','), '-Fpn', '-w']);
-    // lsof exits 1 when one of the pids has gone, so its exit code proves nothing; NO output at
-    // all for a live process tree is a failed read (crew#972, xreview).
-    if (text.trim() === '') throw new Error('lsof could not be read');
+    return lsofCwds(pids, {
+      lsof: (ps) => run('lsof', ['-a', '-d', 'cwd', '-p', ps.join(','), '-Fpn', '-w']),
+      ps: (ps) => run('ps', ['-p', ps.join(','), '-o', 'pid=']),
+    });
+  },
+};
+
+/** The two reads {@link lsofCwds} makes, injectable for tests: each answers its stdout ('' on any failure). */
+export interface LsofReads {
+  lsof: (pids: number[]) => Promise<string>;
+  ps: (pids: number[]) => Promise<string>;
+}
+
+/**
+ * The working directory of each of `pids` through `lsof` (macOS). `lsof` exits 1 when one of the pids
+ * has gone, so its exit code proves nothing, and it prints NOTHING when every pid it was given has
+ * exited between the `ps` read and this one — short-lived floor and test children do (crew#1193). So an
+ * empty answer is checked against `ps`, with this daemon's own pid as the sentinel that the `ps` read
+ * itself worked: every pid gone ⇒ no processes (an empty map, a good read); some still alive ⇒ `lsof`
+ * is asked again about those alone, and an empty answer then is a failed read (crew#972, xreview).
+ */
+export async function lsofCwds(pids: number[], reads: LsofReads, selfPid: number = process.pid): Promise<Map<number, string>> {
+  const out = new Map<number, string>();
+  if (pids.length === 0) return out;
+  const parse = (text: string): void => {
     let pid: number | undefined;
     for (const line of text.split('\n')) {
       if (line.startsWith('p')) pid = Number(line.slice(1));
       else if (line.startsWith('n') && pid !== undefined) out.set(pid, line.slice(1));
     }
+  };
+  const text = await reads.lsof(pids);
+  if (text.trim() !== '') {
+    parse(text);
     return out;
-  },
-};
+  }
+  const listed = new Set(
+    (await reads.ps([...pids.filter((p) => p !== selfPid), selfPid]))
+      .split('\n')
+      .map((l) => Number(l.trim()))
+      .filter((n) => Number.isInteger(n) && n > 0),
+  );
+  if (!listed.has(selfPid)) throw new Error('lsof could not be read (and ps could not re-check the pids)');
+  const alive = pids.filter((p) => p !== selfPid && listed.has(p));
+  if (alive.length === 0) return out; // every pid exited: no processes, not an unreadable answer
+  const again = await reads.lsof(alive);
+  if (again.trim() === '') throw new Error('lsof could not be read');
+  parse(again);
+  return out;
+}
 
 /** One seat container's CPU reading: its name and its CPU share of one core, as a fraction. */
 export interface ContainerCpu {
@@ -342,7 +380,15 @@ export class RunLivenessSampler {
         queue.push(c.pid);
       }
     }
-    const cwds = await this.probe.cwds(descendants.map((d) => d.pid));
+    // (crew#1193) A failed cwd read leaves the HOST half unknown; the container half still reads.
+    let cwds: Map<number, string>;
+    let hostUnknown = false;
+    try {
+      cwds = await this.probe.cwds(descendants.map((d) => d.pid));
+    } catch {
+      cwds = new Map();
+      hostUnknown = true;
+    }
     const at = this.now();
     const next = new Map<number, { cpuSec: number; at: number }>();
     const perRun = new Map<string, { burned: number; window: number; top?: ProcRow; topBurn: number }>();
@@ -391,6 +437,13 @@ export class RunLivenessSampler {
         if (runId === undefined || c.cpuShare < BUSY_CPU_SHARE) continue;
         const prev = result.get(runId);
         if (prev === undefined) result.set(runId, `container ${c.name} (${(c.cpuShare * 100).toFixed(1)}% CPU)`);
+      }
+    }
+    // (crew#1193) The host processes could not be read: a run no container showed busy is an
+    // unknown, not "idle" — the silent-turn rung never acts on it.
+    if (hostUnknown) {
+      for (const id of runIds) {
+        if (!result.has(id)) result.set(id, `${BUSY_UNKNOWN_PREFIX}the host processes' working directories could not be read`);
       }
     }
     return result;
