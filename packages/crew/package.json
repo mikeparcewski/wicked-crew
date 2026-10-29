@@ -1,6 +1,6 @@
 {
   "name": "wicked-crew",
-  "version": "0.16.9",
+  "version": "0.16.10",
   "description": "Runs your coding agents (Claude Code, Codex, Copilot, OpenCode, Pi) in sandboxes; a different agent reviews the work against your rules, and app changes pass acceptance testing before delivery. Intent in, gated work out.",
   "repository": {
     "type": "git",

@@ -10,6 +10,10 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.16.10] — 2026-10-29
+
+A patch release that ships the run's working document and steering from it (#1197, power mode spike 3) and an operator note on `POST /runs/:id/reassign` (#1200, crew#1153); the system-route gateway test no longer depends on the host's free disk (#1200, crew#1199). On wicked-core-ts ^0.15.17 and wicked-crew-api-types 0.148.0, bundling wicked-studio 0.13.0 (UI v2).
+
 ### Added
 
 - **A run's working document, and steering from it (power mode spike 3).** `GET|POST /runs/:id/working-doc` and
@@ -4745,7 +4749,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.9...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.10...HEAD
+[0.16.10]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.9...v0.16.10
 [0.16.9]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.8...v0.16.9
 [0.16.8]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.7...v0.16.8
 [0.16.7]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.6...v0.16.7
