@@ -346,6 +346,13 @@ export interface HealthCapabilities {
    * and `POST /runs/:id/working-doc/versions` ({@link WorkingDocView}). ABSENT on an older daemon — read as `false`.
    */
   workingDoc?: boolean;
+  /**
+   * (api-types 0.149.0, power mode) The engine runs POWER MODE: `LaunchRunBody.power`, `GET|POST /runs/:id/power`,
+   * `POST /runs/:id/rigor`, `POST /runs/:id/power/pause`, `GET /runs/:id/bus` ({@link RunBusPage}),
+   * `AgentSession.power` ({@link PowerState}) and the power frames ({@link PowerEvent}).
+   * ABSENT on an older daemon: read as `false` and hide the switch.
+   */
+  powerMode?: boolean | undefined;
 }
 
 // ── A run's working document (program DES-POWER-MODE §8.3, §9; api-types 0.148.0) ──────────────────
@@ -431,6 +438,394 @@ export interface WorkingDocChangedEvent {
   head: number | null;
 }
 
+// ── Power mode (program DES-POWER-MODE; api-types 0.149.0) ──────────────────────────────────────────
+//
+// One orchestrator seat session builds the whole change in many turns; rigor is sized at intake, re-scored at
+// checkpoints from the actual diff, and applied once at hand-off. The ENGINE computes every rigor value: nothing on a
+// request or a plugin can lower it. Field names are camelCase on every surface (session, route, frame, bus row).
+
+/** The operator's word for the engine's floor band (core `review_scale` bands): light 0-19, standard 20-39,
+ *  high 40-69, highest 70-100 (or destructive). */
+export type Rigor = 'light' | 'standard' | 'high' | 'highest';
+
+/** What re-scored the run. `intake` is the QE plan; `commit` / `turn` / `timer` / `pre_handoff` are checkpoints;
+ *  `operator` / `plugin` / `doc_edit` are raises; `toggle` records a power switch flip. */
+export type RigorTrigger =
+  | 'intake' | 'commit' | 'turn' | 'timer' | 'pre_handoff'
+  | 'operator' | 'plugin' | 'doc_edit' | 'toggle';
+
+/** A level rigor can never go below, and who set it. */
+export interface RigorFloor {
+  rigor: Rigor;
+  /** `policy` (the assurance contract / required phases), `compliance` (a steering rule), `qe_plan`, `operator`,
+   *  `plugin`, `doc_edit`. */
+  by: 'policy' | 'compliance' | 'qe_plan' | 'operator' | 'plugin' | 'doc_edit';
+  why: string;
+}
+
+/** What hand-off will apply, as the current rigor sizes it. */
+export interface HandoffRequirements {
+  /** `targeted`: the floor runs the change's targeted tests; `full`: the repo's full suite. */
+  tests: 'targeted' | 'full';
+  /** Reviews on a seat distinct from the orchestrator (never the builder, nor its subagents). `design` is not a
+   *  separate step: the `review` step ({@link HandoffStep}) also judges the orchestrator's approach and counts as the
+   *  band's `design` phase (operator ruling 2026-10-29); it is listed so the card can say so. */
+  reviews: Array<{ kind: 'distinct_seat' | 'design' | 'security'; why: string }>;
+  qeAcceptance: { required: boolean; why: string };
+  /** Named checks beyond the repo's floor (QE plan / plugin added), in order. */
+  checks: string[];
+}
+
+/** The intake QE plan's rigor record (`wicked.run.intake.planned`). The band is the engine's intent score of the
+ *  declared scope; the QE plan (garden qe-risk-assessor + qe-test-strategist) can only RAISE it. */
+export interface RigorPlan {
+  rigor: Rigor;
+  /** The engine's 0-100 intent score and its band (`"20-39"`). */
+  score: number;
+  band: string;
+  highRisk: boolean;
+  /** Plain reasons for the band (the scorer's, then the QE plan's). */
+  reasons: string[];
+  handoff: HandoffRequirements;
+  /** Phases that stay phased even in power mode (policy, a steering rule, or the QE plan), with why. */
+  mandatoryPhases: Array<{ phase: string; why: string }>;
+  /** Non-null when power mode is refused for this run (policy or the plan requires phased), in one line. */
+  phasedRequired: string | null;
+  /** The QE plan's time estimate for the build, minutes; null when it gave none. */
+  estimateMinutes: number | null;
+  /** The QE plan's risks and planned test scenarios (pass 1), plain lines. */
+  risks: string[];
+  scenarios: string[];
+  /** What rigor can never go below. */
+  floors: RigorFloor[];
+  /** The seat that planned (the intake unit's seat), and when (unix millis). */
+  plannedBy: string;
+  at: number;
+}
+
+/** The signals one checkpoint read from the actual diff. */
+export interface RigorSignals {
+  files: number;
+  lines: number;
+  /** Graph dependents within the scorer's hops; null when the graph could not be read. */
+  dependents: number | null;
+  /** Products (top-level areas) the diff spans. */
+  spread: number;
+  newDependencies: number;
+  /** Sensitive areas touched: critical-path markers and steering-rule areas, plain words. */
+  sensitive: string[];
+  struggle: {
+    failedRuns: number;
+    reverts: number;
+    turns: number;
+    elapsedMinutes: number;
+    estimateMinutes: number | null;
+    /** 0-100; at or over the struggle line pauses the session. */
+    score: number;
+  };
+  /** Planned scenarios with no test yet, or new surfaces the plan did not cover. */
+  planGaps: string[];
+}
+
+/** One rigor-history row (`wicked.run.rigor.rescored`), written EVERY time the run is re-scored, raised, lowered or
+ *  toggled — also when nothing changed (`direction: 'same'`). */
+export interface RigorChange {
+  /** 1-based, per run. */
+  seq: number;
+  at: number;
+  trigger: RigorTrigger;
+  /** Rigor before and after. The `intake` row has `from === to` (the planned rigor). Null only on a `toggle` row
+   *  written before intake planned anything. */
+  from: Rigor | null;
+  to: Rigor | null;
+  direction: 'up' | 'down' | 'same';
+  /** The intake score, the score now, and `actual - planned`. */
+  planned: number;
+  actual: number;
+  delta: number;
+  reasons: string[];
+  signals: RigorSignals | null;
+  /** `engine`, a person's actor id, or `plugin:<id>@<version>`. */
+  by: string;
+  /** What held rigor up when a lowering was capped (empty otherwise). */
+  floors: RigorFloor[];
+  /** The checkpoint ordinal (1-based) and the orchestrator turn, when a checkpoint wrote it. */
+  checkpoint: number | null;
+  turn: number | null;
+  /** This checkpoint paused the session ("suddenly complex"); see {@link PowerPause}. */
+  paused: boolean;
+}
+
+/** One flip of the power switch. */
+export interface PowerToggle {
+  at: number;
+  on: boolean;
+  by: string;
+  reason: string | null;
+  /** The phases that stay phased after an Off -> On flip (the plan mandates them). */
+  stayPhased: string[];
+}
+
+/** The session is paused at a checkpoint: a two-band jump, a destructive marker, spread into another product, a new
+ *  dependency in a sensitive area, or struggle past its line. The orchestrator waits at its turn end (the run stays
+ *  `executing`; no engine gate opens under an in-flight unit) until `POST /runs/:id/power/pause`
+ *  ({@link PowerPauseRequest}) answers. */
+export interface PowerPause {
+  at: number;
+  checkpoint: number;
+  reasons: string[];
+  /** `split` is recommended when the diff spans two or more products. */
+  recommended: 'split' | 'switch_phased' | 'continue_high' | 'stop';
+}
+
+/** One hand-off step as it ran. */
+export interface HandoffStep {
+  step: 'rescore' | 'checks' | 'review' | 'security' | 'qe' | 'compliance';
+  /** The hand-off round this row belongs to (1-based): a failed round's rows stay, the next round adds its own. */
+  round: number;
+  ord: number | null;
+  status: 'pending' | 'running' | 'passed' | 'failed' | 'skipped';
+  /** The seat that ran it (never the orchestrator for a review / QE). */
+  seat: string | null;
+  summary: string | null;
+  at: number;
+}
+
+/** A run's power-mode state: `AgentSession.power`, and the body of `GET /runs/:id/power`. */
+export interface PowerState {
+  /** The switch, now. */
+  on: boolean;
+  /** False when policy or the plan requires phased; {@link refusedReason} says why. */
+  available: boolean;
+  refusedReason: string | null;
+  /** Current rigor (null before intake has planned). */
+  rigor: Rigor | null;
+  plan: RigorPlan | null;
+  history: RigorChange[];
+  toggles: PowerToggle[];
+  /** The orchestrator seat session: its seat, the build unit, turns so far, and whether it is in a turn now. */
+  orchestrator: { cli: string | null; ord: number | null; turns: number; inTurn: boolean; sessionRestarts: number };
+  /** Every orchestrator turn so far, oldest first (at most the last 50). */
+  turnLog: PowerTurnRecord[];
+  checkpoints: number;
+  /** The hand-off as it runs: round 1 is the first hand-off; a failure goes back to the SAME session as a new turn
+   *  and starts the next round. After `maxRounds` the run asks the operator. */
+  handoff: { round: number; maxRounds: number; steps: HandoffStep[] } | null;
+  pause: PowerPause | null;
+  /** The insights row for planned vs actual (written when the run ends). */
+  outcome: PowerOutcome | null;
+  /** Floors set after launch (an operator's raise), kept whether or not intake planned anything; the intake plan's own
+   *  are on `plan.floors`. Rigor never goes below any of them. */
+  floors: RigorFloor[];
+}
+
+/** One orchestrator turn as recorded. */
+export interface PowerTurnRecord {
+  turn: number;
+  attempt: number;
+  cli: string;
+  startedAt: number;
+  endedAt: number | null;
+  outcome: 'checkpoint' | 'handoff' | 'paused' | 'failed' | 'cap' | null;
+  summary: string | null;
+}
+
+/** Planned vs actual, recorded when a power run ends (the insights calibration input). */
+export interface PowerOutcome {
+  plannedRigor: Rigor;
+  finalRigor: Rigor;
+  plannedScore: number;
+  finalScore: number;
+  estimateMinutes: number | null;
+  actualMinutes: number;
+  turns: number;
+  checkpoints: number;
+  handoffRounds: number;
+  operatorGates: number;
+  outcome: 'delivered' | 'completed' | 'failed' | 'cancelled';
+}
+
+/** `GET /runs/:id/power` (404 for an unknown run; a run launched phased answers `on: false`). */
+export interface PowerView extends PowerState {
+  runId: string;
+}
+
+/** `POST /runs/:id/power`: flip the switch; 200 answers {@link PowerView}. On -> Off is always allowed (adds rigor;
+ *  the remaining work goes phased). Off -> On is allowed only for phases the plan does not mandate; a phased-required
+ *  run answers 409 {@link PowerConflict}. Human actors only; audited `run.power_mode.toggled`. */
+export interface PowerToggleRequest {
+  on: boolean;
+  reason?: string | null | undefined;
+}
+
+/** `POST /runs/:id/rigor`: raise rigor; 200 answers {@link PowerView}. Never lowers: a lower or equal `atLeast` is
+ *  409 {@link PowerConflict}. The raise becomes a floor. Human actors only; audited `run.rigor.raised`. */
+export interface RigorRaiseRequest {
+  atLeast: Rigor;
+  reason: string;
+}
+
+/** `POST /runs/:id/power/pause`: answer a checkpoint pause ({@link PowerPause}); 200 answers {@link PowerView}.
+ *  `continue_high` raises rigor to at least high (an operator floor), `continue` goes on (the `note`, if any, is the
+ *  next turn's steer), `switch_phased` flips the switch off (the build hands off as it stands), `stop` cancels the
+ *  run. 409 {@link PowerConflict} when the run is not paused. Human actors only; audited `run.power_mode.paused`. */
+export interface PowerPauseRequest {
+  decision: 'continue_high' | 'continue' | 'switch_phased' | 'stop';
+  note?: string | null | undefined;
+}
+
+/** The 409 (and 422) body of the power routes. */
+export interface PowerConflict {
+  error: string;
+  reason: string;
+}
+
+/** `/ws` frame: intake planned the run's rigor (bus `wicked.run.intake.planned`). */
+export type PowerIntakePlannedEvent = {
+  type: 'powerIntakePlanned';
+  session: string;
+  ord: number;
+  plan: RigorPlan;
+};
+
+/** `/ws` frame: the run was re-scored, raised, lowered or toggled (bus `wicked.run.rigor.rescored`). */
+export type RigorRescoredEvent = {
+  type: 'rigorRescored';
+  session: string;
+  change: RigorChange;
+};
+
+/** `/ws` frame: a checkpoint ran (bus `wicked.run.checkpoint.reached`). `picked` = the operator messages and doc
+ *  steers the next turn's prompt carries. */
+export type PowerCheckpointEvent = {
+  type: 'powerCheckpointReached';
+  session: string;
+  ord: number;
+  checkpoint: number;
+  turn: number;
+  trigger: 'commit' | 'turn' | 'timer' | 'pre_handoff';
+  /** The worktree HEAD at the checkpoint (short sha), null before the first commit. */
+  head: string | null;
+  picked: number;
+  rigor: Rigor;
+  paused: boolean;
+  /** The pause this checkpoint opened (also on `PowerState.pause`), else null. */
+  pause: PowerPause | null;
+  at: number;
+};
+
+/** `/ws` frame: an orchestrator turn started (bus `wicked.run.turn.started`). */
+export type PowerTurnStartedEvent = {
+  type: 'powerTurnStarted';
+  session: string;
+  ord: number;
+  attempt: number;
+  turn: number;
+  cli: string;
+};
+
+/** `/ws` frame: an orchestrator turn ended (bus `wicked.run.turn.completed`). `outcome`: `checkpoint` (more turns
+ *  follow), `handoff` (the orchestrator declared hand-off), `paused`, `failed`, `cap` (the turn cap; handed off). */
+export type PowerTurnCompletedEvent = {
+  type: 'powerTurnCompleted';
+  session: string;
+  ord: number;
+  attempt: number;
+  turn: number;
+  cli: string;
+  outcome: 'checkpoint' | 'handoff' | 'paused' | 'failed' | 'cap';
+  /** The orchestrator's one-line summary, or null. */
+  summary: string | null;
+};
+
+export type PowerTurnEvent = PowerTurnStartedEvent | PowerTurnCompletedEvent;
+
+/** `/ws` frame: a hand-off step changed (bus `wicked.run.handoff.stepped`). */
+export type PowerHandoffEvent = {
+  type: 'powerHandoffStepped';
+  session: string;
+  round: number;
+  maxRounds: number;
+  step: HandoffStep;
+};
+
+/** `/ws` frame: the power switch flipped (bus `wicked.run.power.toggled`). */
+export type PowerToggledEvent = {
+  type: 'powerToggled';
+  session: string;
+  toggle: PowerToggle;
+};
+
+/** `/ws` frame: what the orchestrator did in the worktree, read off git by the engine (bus
+ *  `wicked.run.activity.recorded`). Polled about once a minute during a turn and at its end, so rows arrive in
+ *  batches, not keystroke by keystroke. `edit`: a file whose +/- against the run's base changed since the last look
+ *  (`path`, `added`, `removed`: the file's totals against the base, not the delta). `commit`: a new commit (`sha`
+ *  short, `subject`, `added`, `removed` of that commit). Test runs are NOT reported (the headless carrier records
+ *  no exit codes); the hand-off's `checks` step and `repoChecksEvaluated` carry the test results. */
+export type PowerActivityEvent = {
+  type: 'powerActivity';
+  session: string;
+  ord: number;
+  turn: number;
+  at: number;
+  kind: 'edit' | 'commit';
+  path: string | null;
+  added: number | null;
+  removed: number | null;
+  sha: string | null;
+  subject: string | null;
+};
+
+export type PowerEvent =
+  | PowerActivityEvent
+  | PowerIntakePlannedEvent
+  | RigorRescoredEvent
+  | PowerCheckpointEvent
+  | PowerTurnEvent
+  | PowerHandoffEvent
+  | PowerToggledEvent;
+
+/** The engine's bus mirror of the power frames (and the first `wicked.run.*` lifecycle set, DES-PLUGIN-EVENTS §3.1),
+ *  4-segment `wicked.<domain>.<noun>.<verb>`, `domain=wicked-core`. */
+export type RunBusType =
+  | 'wicked.run.intake.planned'
+  | 'wicked.run.rigor.rescored'
+  | 'wicked.run.checkpoint.reached'
+  | 'wicked.run.turn.started'
+  | 'wicked.run.turn.completed'
+  | 'wicked.run.handoff.stepped'
+  | 'wicked.run.power.toggled'
+  | 'wicked.run.activity.recorded'
+  | 'wicked.run.unit.started'
+  | 'wicked.run.unit.finished'
+  | 'wicked.run.checks.evaluated'
+  | 'wicked.run.human.awaited'
+  | 'wicked.run.qe.decided'
+  | 'wicked.run.steer.queued'
+  | 'wicked.run.steer.delivered';
+
+/** One mirrored row as a plugin feed or `GET /runs/:id/bus` serves it. `eventId` is the bus row id (ordered,
+ *  at-least-once: dedupe on it). `seq` is the durable run log's `seq` of the event the row mirrors: a correlation and
+ *  ordering value, strictly increasing within a run but WITH GAPS (the log counter is process-wide and most events
+ *  are not mirrored) — never a continuity check. `payload` is the matching `/ws` frame without `type` and `session`
+ *  (bulky `output` / `log` fields dropped), plus `runId`, `seq` and `at`. */
+export interface RunBusRow {
+  eventId: number;
+  seq: number;
+  type: RunBusType;
+  runId: string;
+  at: number;
+  payload: Record<string, unknown>;
+}
+
+/** `GET /runs/:id/bus?after=<eventId>&limit=<n>`: the run's mirrored rows after a cursor, oldest first. `cursor` is
+ *  the last row's `eventId` (pass it back as `after`); `rows` is empty and `cursor === after` when there are none.
+ *  503 when the daemon has no bus. */
+export interface RunBusPage {
+  rows: RunBusRow[];
+  cursor: number;
+}
+
 /** One `GET /health.warnings[]` entry (additive; wicked-core#411 / wicked-crew#497). */
 export interface HealthWarning {
   /** `state-home.unregistered` today; open for later kinds (e.g. `seat.work_default`,
@@ -446,6 +841,11 @@ export interface AgentSession {
   id: string;
   workflow_id: string;
   problem: string;
+  /**
+   * (api-types 0.149.0) The run's power-mode state ({@link PowerState}); ABSENT or `null` on a run launched phased
+   * before power mode existed, or on an older engine. camelCase inside, unlike the session's own fields.
+   */
+  power?: PowerState | null | undefined;
   /**
    * (api-types 0.113.0; operator ruling 2026-10-12) The run's SHORT JOB TITLE, derived by the daemon
    * at DTO assembly on `GET /runs` and `GET /runs/:id` from {@link problem} — deterministic, at most
@@ -5143,6 +5543,15 @@ export interface GovernanceClaim {
 /** The launch-run request body (`POST /runs`). */
 export interface LaunchRunBody {
   problem: string;
+  /**
+   * (api-types 0.149.0) Run in POWER MODE: one orchestrator session (the `primary` seat, Claude Code by default)
+   * builds the change in many turns, rigor is sized by an intake QE plan and applied at hand-off, and the only human
+   * gate is deliver (plus what policy requires). ABSENT: the daemon's Settings default
+   * ({@link SystemSettings.powerModeDefault}, on when unset). `false` launches phased. Ignored (phased) when the
+   * engine lacks it (`capabilities.powerMode` false). A power launch runs without plan approval (`humanConfirm`
+   * is forced to `none`); a high-risk plan still holds at its gate (policy).
+   */
+  power?: boolean | undefined;
   sessionId?: string;
   clisJson?: string;
   /**
@@ -5382,6 +5791,10 @@ export interface LaunchRunResponse {
   /** (crew ≥ 0.9.0; wicked-core#850) PRESENT when a full-assurance launch's usable seats are all one
    *  CLI: the run will wait at a gate for a distinct seat. ABSENT otherwise. */
   assuranceNotice?: LaunchAssuranceNotice;
+  /** (api-types 0.149.0) PRESENT (`true`) when the run launched in power mode; absent means phased. */
+  power?: boolean | undefined;
+  /** (api-types 0.149.0) Power mode was wanted (the launch or the setting) but the run is phased: why, in one line. */
+  powerNotice?: string | undefined;
 }
 
 /**
@@ -5832,6 +6245,11 @@ export interface GitContributor {
 export interface SystemSettings {
   /** Max nodes returned by wicked-estate graph-view (default 150). */
   graphNodeLimit: number;
+  /**
+   * (api-types 0.149.0) "Power mode for new jobs": the default of `LaunchRunBody.power` when a launch omits it.
+   * ABSENT = `true` (the shipped default is on). Human actors only.
+   */
+  powerModeDefault?: boolean | undefined;
   /**
    * The watch registry's operator settings (TR-W5a, api-types 0.73.0): only `enabled` and
    * `threshold` of a shipped entry, and the LLM lane switch. A `watch` patch needs a human actor
@@ -12068,7 +12486,17 @@ export interface ScheduleRunResponse {
   schedule: WorkflowSchedule;
 }
 
-export type InsightsMetricId = 'pass_rate' | 'override_rate' | 'unresolved_rate' | 'time_to_pr' | 'floor_minutes' | 'wait_on_people' | 'spend' | 'retries';
+export type InsightsMetricId =
+  | 'pass_rate'
+  | 'override_rate'
+  | 'unresolved_rate'
+  | 'time_to_pr'
+  | 'floor_minutes'
+  | 'wait_on_people'
+  | 'spend'
+  | 'retries'
+  /** (api-types 0.149.0, power mode) Power runs whose rigor rose after their intake QE plan sized them. */
+  | 'rigor_raised';
 /** `too-few` = below the minimum sample (n < 5) in the window or the baseline: no trend is called. */
 export type InsightsVerdict = 'too-few' | 'no-change' | 'improved' | 'regressed';
 export type InsightsRecommendationKind = 'steering-rule' | 'memory' | 'setting' | 'issue' | 'resolve-stale';

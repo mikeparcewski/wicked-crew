@@ -25,6 +25,13 @@ A patch release that ships the run's working document and steering from it (#119
 
 ### Added
 
+- **Power mode wire contract (api-types 0.149.0).** Types only, published ahead of the engine so studio can build
+  against them: `LaunchRunBody.power`, `SystemSettings.powerModeDefault` (absent = on), `AgentSession.power`
+  (`PowerState`: the switch, rigor, the intake `RigorPlan`, the rigor history of `RigorChange` rows, toggles, the
+  orchestrator's turns, the hand-off rounds, a checkpoint pause, and the planned-vs-actual `PowerOutcome`),
+  `GET|POST /runs/:id/power`, `POST /runs/:id/rigor`, the `/ws` frames `powerIntakePlanned`, `rigorRescored`,
+  `powerCheckpointReached`, `powerTurnStarted` / `powerTurnCompleted`, `powerHandoffStepped` and `powerToggled`, and
+  their 4-segment bus mirror (`RunBusType`, `RunBusRow`). `capabilities.powerMode` says a daemon serves them.
 - **A run's working document, and steering from it (power mode spike 3).** `GET|POST /runs/:id/working-doc` and
   `POST /runs/:id/working-doc/versions` (api-types 0.148.0, `capabilities.workingDoc`). Each run may have one working
   document: a wicked-interactive document of kind `phase-report` in the run's project, with the sections Goal,
