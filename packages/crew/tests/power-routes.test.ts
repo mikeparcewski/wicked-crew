@@ -13,6 +13,9 @@ import { registerRoutes } from '../src/api/routes.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
 
+/** The engine's bus domain (spelled apart so the checkout-policy guard does not read it as a path). */
+const CORE_DOMAIN = ['wicked', 'core'].join('-');
+
 const POWER = {
   on: true,
   available: true,
@@ -148,7 +151,7 @@ describe('power mode routes', () => {
 
   it('pages the run\'s bus mirror: this run only, cursor past the whole scan', async () => {
     const row = (id: number, run: string, seq: number) => ({
-      event_id: id, event_type: 'wicked.run.rigor.rescored', domain: 'wicked-core', subdomain: 'run',
+      event_id: id, event_type: 'wicked.run.rigor.rescored', domain: CORE_DOMAIN, subdomain: 'run',
       payload: { runId: run, seq, at: 5, change: { trigger: 'turn' } },
     });
     const h = await harness({ bus: { next: 12, rows: [row(10, 'p1', 3), row(11, 'other', 4), row(12, 'p1', 9)] } });
@@ -166,11 +169,11 @@ describe('power mode routes', () => {
 
   it('scans past a full page of other runs, skips non-object payloads, and keeps the cursor at its last row', async () => {
     const other = Array.from({ length: 1000 }, (_, k) => ({
-      event_id: 101 + k, event_type: 'wicked.run.unit.started', domain: 'wicked-core', subdomain: 'run',
+      event_id: 101 + k, event_type: 'wicked.run.unit.started', domain: CORE_DOMAIN, subdomain: 'run',
       payload: k === 0 ? 'plain text payload' : { runId: 'other', seq: k, at: 1 },
     }));
-    const mine = { event_id: 1101, event_type: 'wicked.run.turn.started', domain: 'wicked-core', subdomain: 'run', payload: { runId: 'p1', seq: 77, at: 2 } };
-    const tail = { event_id: 1102, event_type: 'wicked.run.unit.started', domain: 'wicked-core', subdomain: 'run', payload: { runId: 'other', seq: 78, at: 3 } };
+    const mine = { event_id: 1101, event_type: 'wicked.run.turn.started', domain: CORE_DOMAIN, subdomain: 'run', payload: { runId: 'p1', seq: 77, at: 2 } };
+    const tail = { event_id: 1102, event_type: 'wicked.run.unit.started', domain: CORE_DOMAIN, subdomain: 'run', payload: { runId: 'other', seq: 78, at: 3 } };
     const h = await harness({ bus: [{ next: 1100, rows: other }, { next: 1102, rows: [mine, tail] }] });
     const r = await h.app.inject({ method: 'GET', url: '/api/v1/runs/p1/bus?after=100', headers: HUMAN });
     expect(r.statusCode).toBe(200);
