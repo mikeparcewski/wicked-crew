@@ -122,7 +122,7 @@ export const gitReprovisionWorktree: WorktreeReprovisioner = async (repoRoot, ru
 const OUTPUT_CAP_BYTES = 8 * 1024 * 1024;
 
 /** A post-hoc lift talks to a real remote; 5 minutes is generous, hanging forever is not. */
-const SCRIPT_TIMEOUT_MS = 5 * 60_000;
+export const DELIVER_SCRIPT_TIMEOUT_MS = 5 * 60_000;
 
 /**
  * The production {@link DeliverExec}: `bash -lc <script>` in the run's worktree — the exact
@@ -157,7 +157,7 @@ export function runDeliverScript(
         cwd: workdir,
         env: shellEnv,
         maxBuffer: OUTPUT_CAP_BYTES,
-        timeout: SCRIPT_TIMEOUT_MS,
+        timeout: DELIVER_SCRIPT_TIMEOUT_MS,
       },
       (err, stdout, stderr) => {
         // The script folds stderr into stdout (`exec 2>&1`), but bash itself (a spawn failure,
