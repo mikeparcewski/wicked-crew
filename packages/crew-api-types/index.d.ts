@@ -5760,6 +5760,10 @@ export interface LaunchRunResponse {
   /** (crew ≥ 0.9.0; wicked-core#850) PRESENT when a full-assurance launch's usable seats are all one
    *  CLI: the run will wait at a gate for a distinct seat. ABSENT otherwise. */
   assuranceNotice?: LaunchAssuranceNotice;
+  /** (api-types 0.149.0) PRESENT (`true`) when the run launched in power mode; absent means phased. */
+  power?: boolean | undefined;
+  /** (api-types 0.149.0) Power mode was wanted (the launch or the setting) but the run is phased: why, in one line. */
+  powerNotice?: string | undefined;
 }
 
 /**
@@ -12451,7 +12455,17 @@ export interface ScheduleRunResponse {
   schedule: WorkflowSchedule;
 }
 
-export type InsightsMetricId = 'pass_rate' | 'override_rate' | 'unresolved_rate' | 'time_to_pr' | 'floor_minutes' | 'wait_on_people' | 'spend' | 'retries';
+export type InsightsMetricId =
+  | 'pass_rate'
+  | 'override_rate'
+  | 'unresolved_rate'
+  | 'time_to_pr'
+  | 'floor_minutes'
+  | 'wait_on_people'
+  | 'spend'
+  | 'retries'
+  /** (api-types 0.149.0, power mode) Power runs whose rigor rose after their intake QE plan sized them. */
+  | 'rigor_raised';
 /** `too-few` = below the minimum sample (n < 5) in the window or the baseline: no trend is called. */
 export type InsightsVerdict = 'too-few' | 'no-change' | 'improved' | 'regressed';
 export type InsightsRecommendationKind = 'steering-rule' | 'memory' | 'setting' | 'issue' | 'resolve-stale';
