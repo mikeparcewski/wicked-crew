@@ -8437,7 +8437,25 @@ export interface DiagnosticsResponse {
    *  — see `DiagnosticsVault`. `null` on a route set booted without an engine adapter; ABSENT on an
    *  older daemon. */
   vault?: DiagnosticsVault | null;
+  /** (crew#1147) The engine's repo-checks floor cache usage (`Core.floorCacheUsage`): `path` is shown as
+   *  `~/...`, never a home path; `repos` is largest first. The engine walks the cache, so the daemon
+   *  caches this answer for 60 s. `{ error }` when the engine has no worker home; `null` on an addon
+   *  without the static; ABSENT on an older daemon. */
+  floorCache?: DiagnosticsFloorCache | null;
 }
+
+/** `DiagnosticsResponse.floorCache` (crew#1147). Every `path` is `~/...`. */
+export type DiagnosticsFloorCache =
+  | {
+      path: string;
+      bytes: number;
+      totalCapBytes: number;
+      repoCapBytes: number;
+      idleTtlSecs: number;
+      repos: Array<{ name: string; bytes: number; leaves: number }>;
+      logs: { path: string; bytes: number; capBytes: number };
+    }
+  | { error: string };
 
 /**
  * (api-types 0.130.0, crew#1068) `DiagnosticsResponse.vault`: what the daemon exported to the engine

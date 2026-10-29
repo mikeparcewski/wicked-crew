@@ -21,6 +21,7 @@
 import { accessSync, constants as fsConstants, createReadStream, existsSync, readFileSync, statSync } from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import { createRequire } from 'node:module';
+import { homedir } from 'node:os';
 import { basename, delimiter, join } from 'node:path';
 import { createInterface } from 'node:readline';
 
@@ -586,6 +587,59 @@ export class EngineVersionCache {
       .finally(() => {
         this.inFlight = null;
       });
+    return this.inFlight;
+  }
+}
+
+// ── Floor cache ──────────────────────────────────────────────────────────────
+
+/** `Core.floorCacheUsage` walks the cache, so a diagnostics poll reads a copy up to this old (crew#1147). */
+export const FLOOR_CACHE_TTL_MS = 60_000;
+
+/** Show a home path as `~/...` — never the operator's home directory. */
+function tildify(value: unknown, home: string): unknown {
+  if (typeof value === 'string') {
+    return home.length > 1 ? value.split(home).join('~') : value;
+  }
+  if (Array.isArray(value)) return value.map((v) => tildify(v, home));
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, tildify(v, home)]));
+  }
+  return value;
+}
+
+/**
+ * `DiagnosticsResponse.floorCache`: the engine's floor-cache usage, parsed, home paths shown as `~/...`,
+ * cached for 60 s. `null` on an addon without the static; `{ error }` when the read fails.
+ */
+export class FloorCacheCache {
+  private value: { at: number; usage: Record<string, unknown> } | null = null;
+  private inFlight: Promise<Record<string, unknown>> | null = null;
+
+  constructor(
+    private readonly read: (() => Promise<string>) | null = CoreAdapter.floorCacheReader(),
+    private readonly ttlMs: number = FLOOR_CACHE_TTL_MS,
+    private readonly home: string = homedir(),
+  ) {}
+
+  async get(): Promise<Record<string, unknown> | null> {
+    if (this.read === null) return null;
+    if (this.value !== null && Date.now() - this.value.at < this.ttlMs) return this.value.usage;
+    if (this.inFlight !== null) return this.inFlight;
+    const read = this.read;
+    this.inFlight = (async () => {
+      let usage: Record<string, unknown>;
+      try {
+        const parsed: unknown = JSON.parse(await read());
+        usage = tildify(parsed, this.home) as Record<string, unknown>;
+      } catch (err) {
+        usage = tildify({ error: err instanceof Error ? err.message : String(err) }, this.home) as Record<string, unknown>;
+      }
+      this.value = { at: Date.now(), usage };
+      return usage;
+    })().finally(() => {
+      this.inFlight = null;
+    });
     return this.inFlight;
   }
 }
