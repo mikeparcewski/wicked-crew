@@ -1995,6 +1995,12 @@ export interface LaunchPlan {
  */
 export interface ReassignRequest {
   cli?: string;
+  /**
+   * An operator note that rides the retry as the gate approve's amendment (crew#1153). Only a run
+   * parked at a gate takes one — on an executing run a note is a 400. Trimmed; blank counts as
+   * absent; over 8192 UTF-8 bytes is a 400.
+   */
+  note?: string;
 }
 
 /**
