@@ -13,8 +13,8 @@ mentioned only where a daemon release depends on them.
 ### Fixed
 
 - Seat governance warnings follow work eligibility, including work-only seats and excluding ballot-only seats (#1087).
-- The PR body's `## Assurance` section says **QE acceptance passed**, with the verdict id, the reviewer and
-  the seat its isolated review ran on, when a required QE stood on an attributed PASS. It no longer reads
+- The PR body's `## Assurance` section says **QE acceptance passed**, with the verdict id and the reviewer,
+  when a required QE stood on an attributed PASS. It no longer reads
   "QE acceptance: required" for a QE that passed (#1192).
 - The stall watchdog no longer fails its busy read when `lsof` prints nothing because every process it was
   asked about has exited. An empty answer is re-checked with `ps`: no live pid means no processes. A real
