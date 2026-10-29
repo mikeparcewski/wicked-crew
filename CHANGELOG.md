@@ -10,18 +10,9 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
-### Fixed
+## [0.16.11] — 2026-10-29
 
-- **The targeted check's re-run start line goes to stderr too (wicked-core#1172).** `scripts/test-related.mjs`
-  printed `WICKED-RETRY … re-running …` on stdout only, while vitest prints its failures on stderr, so the engine
-  floor could not tell the final pass's failures from the first pass's. The floor then named tests that cleared on
-  the retry as failing "only with this change" (rig run 62c4f0ff). The line now goes to both streams (`io.err`
-  seam), and an engine with wicked-core#1172 reports such tests as flaky (passed on retry). The check's exit code
-  is unchanged.
-
-## [0.16.10] — 2026-10-29
-
-A patch release that ships the run's working document and steering from it (#1197, power mode spike 3) and an operator note on `POST /runs/:id/reassign` (#1200, crew#1153); the system-route gateway test no longer depends on the host's free disk (#1200, crew#1199). On wicked-core-ts ^0.15.17 and wicked-crew-api-types 0.148.0, bundling wicked-studio 0.13.0 (UI v2).
+A feature release: power mode, the default way a job runs (#1201, #1204, program DES-POWER-MODE), on wicked-core-ts ^0.15.18 and wicked-crew-api-types 0.149.0, bundling wicked-studio 0.13.0. It also carries the targeted check's stderr re-run line (#1203, wicked-core#1172).
 
 ### Added
 
@@ -47,6 +38,24 @@ A patch release that ships the run's working document and steering from it (#119
   `GET|POST /runs/:id/power`, `POST /runs/:id/rigor`, the `/ws` frames `powerIntakePlanned`, `rigorRescored`,
   `powerCheckpointReached`, `powerTurnStarted` / `powerTurnCompleted`, `powerHandoffStepped` and `powerToggled`, and
   their 4-segment bus mirror (`RunBusType`, `RunBusRow`). `capabilities.powerMode` says a daemon serves them.
+  - A power run paused at a checkpoint is `waiting_on_you` on `GET /system`, with its own attention item, never quiet
+    or stalled (crew#1206).
+
+### Fixed
+
+- **The targeted check's re-run start line goes to stderr too (wicked-core#1172).** `scripts/test-related.mjs`
+  printed `WICKED-RETRY … re-running …` on stdout only, while vitest prints its failures on stderr, so the engine
+  floor could not tell the final pass's failures from the first pass's. The floor then named tests that cleared on
+  the retry as failing "only with this change" (rig run 62c4f0ff). The line now goes to both streams (`io.err`
+  seam), and an engine with wicked-core#1172 reports such tests as flaky (passed on retry). The check's exit code
+  is unchanged.
+
+## [0.16.10] — 2026-10-29
+
+A patch release that ships the run's working document and steering from it (#1197, power mode spike 3) and an operator note on `POST /runs/:id/reassign` (#1200, crew#1153); the system-route gateway test no longer depends on the host's free disk (#1200, crew#1199). On wicked-core-ts ^0.15.17 and wicked-crew-api-types 0.148.0, bundling wicked-studio 0.13.0 (UI v2).
+
+### Added
+
 - **A run's working document, and steering from it (power mode spike 3).** `GET|POST /runs/:id/working-doc` and
   `POST /runs/:id/working-doc/versions` (api-types 0.148.0, `capabilities.workingDoc`). Each run may have one working
   document: a wicked-interactive document of kind `phase-report` in the run's project, with the sections Goal,
@@ -4780,7 +4789,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.10...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.11...HEAD
+[0.16.11]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.10...v0.16.11
 [0.16.10]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.9...v0.16.10
 [0.16.9]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.8...v0.16.9
 [0.16.8]: https://github.com/mikeparcewski/wicked-crew/compare/v0.16.7...v0.16.8
