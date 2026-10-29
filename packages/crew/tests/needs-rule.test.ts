@@ -427,3 +427,29 @@ describe('review fixes (xreview r1 on crew#1159)', () => {
   });
 });
 
+
+// crew#1206 (program DES-POWER-MODE): a power run paused at a checkpoint stays `executing` (the pause is not
+// an engine gate), yet it waits on a person: waiting on you, with an attention item — never quiet or stalled.
+describe('a power run paused at a checkpoint', () => {
+  const paused = (status: string): SessionView =>
+    ({
+      session: {
+        id: 'pw-paused', workflow_id: 'bug', problem: 'p', status, unit_ix: 1, attempt: 0, created_at: Math.floor((NOW - 3 * 3_600_000) / 1000),
+        power: { on: true, pause: { at: NOW - 3_600_000, checkpoint: 3, reasons: ['rigor jumped two bands at once (light -> high)'], recommended: 'continue_high' } },
+      },
+      units: [],
+    }) as unknown as SessionView;
+
+  it('is waiting on you, however long it has been quiet', () => {
+    const run = runLiveness({ view: paused('executing'), now: NOW, evidence: { at: NOW - 3_600_000 } as never, gate: null, quietAfterMs: 5 * 60_000, stallAfterMs: 15 * 60_000 });
+    expect(run.liveness).toBe('waiting_on_you');
+    expect(run.reason).toMatch(/grew past its plan \(checkpoint 3\)/);
+  });
+
+  it('gets an attention item at the level of an open gate', () => {
+    const view = paused('executing');
+    const run = runLiveness({ view, now: NOW, evidence: null, gate: null, quietAfterMs: 5 * 60_000, stallAfterMs: 15 * 60_000 });
+    const needs = buildNeeds({ now: NOW, views: [view], runs: [run], infra, clis, gaps: [], infraHoldsLive: () => false });
+    expect(JSON.stringify(needs)).toContain('pw-paused');
+  });
+});
