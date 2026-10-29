@@ -124,6 +124,7 @@ respondsWith<Wire.CoreEvent, Wire.PowerTurnStartedEvent>();
 respondsWith<Wire.CoreEvent, Wire.PowerTurnCompletedEvent>();
 respondsWith<Wire.CoreEvent, Wire.PowerHandoffEvent>();
 respondsWith<Wire.CoreEvent, Wire.PowerToggledEvent>();
+respondsWith<Wire.CoreEvent, Wire.PowerActivityEvent>();
 respondsWith<Wire.CoreEvent, Wire.PowerEvent>();
 // … and `gateEvaluated.denial` names both new layers alongside the established ones. The literals
 // are SHAPED like wicked-core's `denial_json` output (camelCase, every key present, `null` never

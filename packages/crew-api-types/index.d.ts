@@ -753,7 +753,28 @@ export type PowerToggledEvent = {
   toggle: PowerToggle;
 };
 
+/** `/ws` frame: what the orchestrator did in the worktree, read off git by the engine (bus
+ *  `wicked.run.activity.recorded`). Polled about once a minute during a turn and at its end, so rows arrive in
+ *  batches, not keystroke by keystroke. `edit`: a file whose +/- against the run's base changed since the last look
+ *  (`path`, `added`, `removed`: the file's totals against the base, not the delta). `commit`: a new commit (`sha`
+ *  short, `subject`, `added`, `removed` of that commit). Test runs are NOT reported (the headless carrier records
+ *  no exit codes); the hand-off's `checks` step and `repoChecksEvaluated` carry the test results. */
+export type PowerActivityEvent = {
+  type: 'powerActivity';
+  session: string;
+  ord: number;
+  turn: number;
+  at: number;
+  kind: 'edit' | 'commit';
+  path: string | null;
+  added: number | null;
+  removed: number | null;
+  sha: string | null;
+  subject: string | null;
+};
+
 export type PowerEvent =
+  | PowerActivityEvent
   | PowerIntakePlannedEvent
   | RigorRescoredEvent
   | PowerCheckpointEvent
@@ -771,6 +792,7 @@ export type RunBusType =
   | 'wicked.run.turn.completed'
   | 'wicked.run.handoff.stepped'
   | 'wicked.run.power.toggled'
+  | 'wicked.run.activity.recorded'
   | 'wicked.run.unit.started'
   | 'wicked.run.unit.finished'
   | 'wicked.run.checks.evaluated'
