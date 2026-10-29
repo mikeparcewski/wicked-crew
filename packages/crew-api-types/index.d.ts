@@ -614,6 +614,9 @@ export interface PowerState {
   pause: PowerPause | null;
   /** The insights row for planned vs actual (written when the run ends). */
   outcome: PowerOutcome | null;
+  /** Floors set after launch (an operator's raise), kept whether or not intake planned anything; the intake plan's own
+   *  are on `plan.floors`. Rigor never goes below any of them. */
+  floors: RigorFloor[];
 }
 
 /** One orchestrator turn as recorded. */
