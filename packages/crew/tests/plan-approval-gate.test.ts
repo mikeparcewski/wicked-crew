@@ -443,7 +443,8 @@ describe.skipIf(!ENGINE_HAS_PLAN_GATE)('the plan approval gate through the real 
 
     const res = await fetch(
       `${ctx.baseUrl}/api/v1/runs`,
-      json({ problem: 'add SSO login', sessionId: 't3-dlv', clisJson: SEATS, workflow: 'feature', repoRef: repoId, deliver: 'pr' }),
+      // Phased explicitly: power mode is the default launch now (program DES-POWER-MODE), tested below.
+      json({ problem: 'add SSO login', sessionId: 't3-dlv', clisJson: SEATS, workflow: 'feature', repoRef: repoId, deliver: 'pr', power: false }),
     );
     expect(res.status, await res.clone().text()).toBe(201);
     const v = await waitFor('the plan_approval pause', async () => {
@@ -473,6 +474,48 @@ describe.skipIf(!ENGINE_HAS_PLAN_GATE)('the plan approval gate through the real 
     expect(planState(v)).toMatchObject({ rev: 2, accepted_rev: 1, preset: 'feature' });
     // No per-run composed def was armed for the launch.
     expect(ctx.adapter.listWorkflows().map((w) => w.id).filter((id) => id.includes('-deliver-'))).toEqual([]);
+  });
+
+  // program DES-POWER-MODE: the DEFAULT launch is a power launch. The PA scope step is also the intake QE plan; the
+  // preset's pre-build phases go (the orchestrator does them in its session) and the band's test_plan and design are
+  // satisfied by the intake plan and the hand-off review. A score that fails closed at 100 is high risk, so the plan
+  // still holds at its gate (policy), and the run's power record exists from launch.
+  it('the default launch on a repo is a power launch: no clarify/test_plan/design steps, the plan still held at high risk', async () => {
+    const origin = join(ctx.dir, 'origin-pw.git');
+    const seed = join(ctx.dir, 'seed-pw');
+    const clone = join(ctx.dir, 'clone-pw');
+    const git = (cwd: string, ...args: string[]) =>
+      execFileSync('git', ['-c', 'commit.gpgsign=false', ...args], { cwd, encoding: 'utf8' });
+    execFileSync('git', ['init', '--bare', '-q', '-b', 'main', origin]);
+    execFileSync('git', ['init', '-q', '-b', 'main', seed]);
+    git(seed, 'config', 'user.email', 'seed@test');
+    git(seed, 'config', 'user.name', 'seed');
+    writeFileSync(join(seed, 'README.md'), '# pw\n');
+    git(seed, 'add', '-A');
+    git(seed, 'commit', '-qm', 'base');
+    git(seed, 'remote', 'add', 'origin', origin);
+    git(seed, 'push', '-q', '-u', 'origin', 'main');
+    execFileSync('git', ['clone', '-q', origin, clone]);
+    await ctx.adapter.registerRepo('t3-power-ws', clone);
+    const repoId = (await ctx.adapter.listRepos()).find((r) => r.name === 't3-power-ws')!.id;
+    const res = await fetch(
+      `${ctx.baseUrl}/api/v1/runs`,
+      json({ problem: 'add SSO login', sessionId: 't3-pw', clisJson: SEATS, workflow: 'feature', repoRef: repoId, deliver: 'pr' }),
+    );
+    expect(res.status, await res.clone().text()).toBe(201);
+    expect((await res.json()).power).toBe(true);
+    const v = await waitFor('the plan_approval pause', async () => {
+      const view = await viewOf(ctx.adapter, 't3-pw');
+      return view?.session.status === 'awaiting_human' ? view : undefined;
+    });
+    const steps = ids('t3-pw', v.units);
+    expect(steps[0]).toBe('pa-scope');
+    for (const gone of ['clarify', 'test_plan', 'design']) expect(steps).not.toContain(gone);
+    expect(steps).toContain('build');
+    expect(steps[steps.length - 1]).toBe('deliver');
+    const power = (v.session as { power?: { on?: boolean; plan?: { rigor?: string } | null } }).power;
+    expect(power?.on).toBe(true);
+    expect(power?.plan?.rigor).toBe('highest');
   });
 
   it('an understand-only plan scores 0 and is not held in auto mode', async () => {
