@@ -10,6 +10,15 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+
+- **crew declares its generated files for the deliver lift (wicked-core#1173).** `.wicked/checks.json` gains
+  `generated`: `packages/crew/endpoint-manifest.json` (`npm run -w packages/crew manifest:endpoints`), then
+  `packages/crew/tests/generated/api-sample.generated.test.ts` (`generate:api-tests`, which reads the manifest).
+  On rig run 62c4f0ff, main moved mid-run and the lift conflicted in CHANGELOG.md and the generated suite, so the
+  run stranded. An engine with wicked-core#1173 now takes main's copy of a declared file, regenerates it in the
+  floor's sandbox and re-verifies. Needs a wicked-core-ts with #1173: older engines refuse the unknown key.
+
 ## [0.16.11] — 2026-10-29
 
 A feature release: power mode, the default way a job runs (#1201, #1204, program DES-POWER-MODE), on wicked-core-ts ^0.15.18 and wicked-crew-api-types 0.149.0, bundling wicked-studio 0.13.0. It also carries the targeted check's stderr re-run line (#1203, wicked-core#1172).

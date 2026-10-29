@@ -4,5 +4,15 @@
   "test": ["npm", "run", "-w", "packages/crew", "test"],
   "test_targeted": ["node", "scripts/test-related.mjs", "{files}"],
   "full": false,
-  "timeout_s": 1800
+  "timeout_s": 1800,
+  "generated": [
+    {
+      "paths": ["packages/crew/endpoint-manifest.json"],
+      "command": ["npm", "run", "-w", "packages/crew", "manifest:endpoints"]
+    },
+    {
+      "paths": ["packages/crew/tests/generated/api-sample.generated.test.ts"],
+      "command": ["npm", "run", "-w", "packages/crew", "generate:api-tests"]
+    }
+  ]
 }
