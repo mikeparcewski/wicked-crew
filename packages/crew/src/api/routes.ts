@@ -910,6 +910,9 @@ const InjectSchema = z.object({
 // same shape the automatic stall-watchdog escalation uses for an unknown failover target.
 const ReassignSchema = z.object({
   cli: z.string().min(1).optional(),
+  /** crew#1153: an operator note that rides a GATED reassign as the approve's amendment. Trimmed in
+   *  the route; blank counts as absent. The byte cap (on the raw note) is checked there too so the 400 names the limit. */
+  note: z.string().optional(),
 }).strict();
 
 export const OpenTerminalSchema = z.object({
@@ -5545,6 +5548,15 @@ export function registerRoutes(
     if (!parsed.success) {
       return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
     }
+    // A blank note is absent whatever its length; the cap is on the RAW bytes of a non-blank note
+    // as sent (padding counts), checked before the trim.
+    const rawNote = parsed.data.note;
+    const note = rawNote?.trim() || undefined;
+    if (note !== undefined && Buffer.byteLength(rawNote!, 'utf8') > GUIDANCE_MAX_BYTES) {
+      return reply.code(400).send({
+        error: `note exceeds the ${GUIDANCE_MAX_BYTES}-byte cap — a note this size belongs in the problem statement or a linked doc`,
+      });
+    }
     // One reassign per run at a time, refused rather than queued (crew#1083 round 7), then the gate
     // decision lock every confirming path shares, held from this read of the run through the re-seat
     // and the confirm (crew#1083 round 5).
@@ -5590,6 +5602,11 @@ export function registerRoutes(
         error: `run ${id} is awaiting a steering-author propose gate — approve or reject it via POST /runs/${id}/gate (the approve lands the proposal); reassign is not a review of the rules`,
       });
     }
+    if (!gated && note !== undefined) {
+      return reply.code(400).send({
+        error: `run ${id} is executing, not parked at a gate — a note rides only a gated reassign (it is the approve's amendment). Nothing was reassigned.`,
+      });
+    }
     const requestedCli = parsed.data.cli;
     if (requestedCli !== undefined) {
       const pool = Array.isArray(run.session.clis) ? run.session.clis : [];
@@ -5613,11 +5630,13 @@ export function registerRoutes(
     }
     const cursor = resolveCursorUnit(run);
     const ord = cursor?.ord ?? run.session.unit_ix;
+    let noteRode = false;
     const approve = async (): Promise<void> => {
       if (typeof adapter.confirmGate !== 'function') return; // refused above for a gated run
       const who = actorOf(req);
       adapter.recordGateActor?.(id, `${who.id} (${who.kind})`);
-      const status = await adapter.confirmGate(id, true);
+      const status = note !== undefined ? await adapter.confirmGate(id, true, note) : await adapter.confirmGate(id, true);
+      noteRode = note !== undefined;
       audit.record('gate.decided', actorOf(req), {
         runId: id,
         detail: { approve: true, via: 'reassign', status },
@@ -5626,7 +5645,7 @@ export function registerRoutes(
     const reassigned = (approved: boolean): void => {
       audit.record('run.reassigned', actorOf(req), {
         runId: id,
-        detail: { ord, ...(requestedCli !== undefined ? { cli: requestedCli } : {}), ...(gated ? { approved } : {}) },
+        detail: { ord, ...(requestedCli !== undefined ? { cli: requestedCli } : {}), ...(gated ? { approved } : {}), ...(noteRode ? { note: true } : {}) },
       });
     };
     if (gated && requestedCli !== undefined) {

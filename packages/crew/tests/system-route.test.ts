@@ -6,7 +6,7 @@
 import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import type { DiagnosticsResponse, HealthResponse, SystemSnapshot } from 'wicked-crew-api-types';
 
@@ -14,6 +14,14 @@ import type { CoreAdapter } from '../src/core/adapter.js';
 import { createServer } from '../src/api/server.js';
 import { PROBE_TIMEOUT_MS, SYSTEM_BUDGET_MS } from '../src/api/system-snapshot.js';
 import { removeScratch } from './setup/scratch.js';
+
+// The disk reading is the real host's by default, so a host under 5% free turns `infra:disk` red and
+// outranks the gateway these tests assert on (crew#1199). Report ample free space; the rest of the
+// module stays real.
+vi.mock('node:fs/promises', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:fs/promises')>()),
+  statfs: async () => ({ bavail: 500_000, bsize: 1_000_000, blocks: 1_000_000 }),
+}));
 
 const ENV_KEYS = ['WICKED_SEAT_FLOOR', 'WICKED_CONTAINER_RUNTIME', 'WICKED_MEMORY_DB', 'WICKED_ESTATE_EXE', 'LOG_LEVEL'] as const;
 const saved: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {};

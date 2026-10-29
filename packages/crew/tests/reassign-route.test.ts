@@ -167,3 +167,138 @@ describe('POST /runs/:id/reassign — the manual operator lever (crew#442)', () 
     expect(await audit.read({ action: 'run.reassigned' })).toEqual([]);
   });
 });
+
+// crew#1153: an operator note rides a GATED reassign as the approve's amendment.
+describe('POST /runs/:id/reassign — the operator note (crew#1153)', () => {
+  let app: FastifyInstance | undefined;
+  let calls: unknown[][];
+  let events: { action: string; detail?: Record<string, unknown> }[];
+  let approveFails: boolean;
+
+  const gatedView = (id: string): SessionView =>
+    ({
+      session: { id, status: 'awaiting_human', unit_ix: 0, clis: ['claude', 'codex'], human_confirm: 'all', workflow_id: 'wf-x' },
+      units: [{ id: `${id}:u0`, ord: 0, assigned_cli: 'claude' }],
+    }) as unknown as SessionView;
+
+  beforeEach(() => {
+    calls = [];
+    events = [];
+    approveFails = false;
+    const views = [gatedView('r-gated'), view('r-exec', 'executing', 0, [{ ord: 0, cli: 'claude' }], ['claude', 'codex'])];
+    const mockAdapter = {
+      sessionsDetail: async (): Promise<SessionView[]> => views,
+      listRepos: async () => [],
+      listWorkflows: () => [],
+      confirmGate: async (...args: unknown[]): Promise<string> => {
+        calls.push(['confirmGate', ...args]);
+        if (approveFails) throw new Error('approve exploded');
+        return 'executing';
+      },
+      reassignUnit: async (runId: string, ord: number, cli?: string | null): Promise<void> => {
+        calls.push(['reassignUnit', runId, ord, cli ?? null]);
+      },
+    } as unknown as CoreAdapter;
+    const audit = {
+      record: (action: string, _actor: unknown, fields?: { detail?: Record<string, unknown> }) => {
+        events.push({ action, ...(fields?.detail !== undefined ? { detail: fields.detail } : {}) });
+        return 0;
+      },
+    } as unknown as AuditLog;
+    app = Fastify({ logger: false });
+    registerRoutes(app, mockAdapter, new GateCache(), new ElicitationCache(), undefined, { audit, authMode: 'off' });
+  });
+
+  afterEach(async () => {
+    await app?.close();
+    app = undefined;
+  });
+
+  const post = (id: string, payload: Record<string, unknown>) =>
+    app!.inject({ method: 'POST', url: `/api/v1/runs/${id}/reassign`, payload });
+  const reassigned = () => events.find((e) => e.action === 'run.reassigned')?.detail;
+
+  it('cli named: re-seats, then approves with the (trimmed) note as the amendment; the audit holds note:true, never the text', async () => {
+    const res = await post('r-gated', { cli: 'codex', note: '  host runtime blip, not the seat  ' });
+    expect(res.statusCode).toBe(200);
+    expect(calls).toEqual([
+      ['reassignUnit', 'r-gated', 0, 'codex'],
+      ['confirmGate', 'r-gated', true, 'host runtime blip, not the seat'],
+    ]);
+    expect(reassigned()).toMatchObject({ approved: true, note: true });
+    expect(JSON.stringify(events)).not.toContain('runtime blip');
+  });
+
+  it('cli omitted: approves with the note, then reassigns', async () => {
+    const res = await post('r-gated', { note: 'retry, the seat was fine' });
+    expect(res.statusCode).toBe(200);
+    expect(calls).toEqual([
+      ['confirmGate', 'r-gated', true, 'retry, the seat was fine'],
+      ['reassignUnit', 'r-gated', 0, null],
+    ]);
+    expect(reassigned()).toMatchObject({ note: true });
+  });
+
+  it('without a note, or with a whitespace note, confirmGate gets exactly two arguments and the audit has no note', async () => {
+    for (const body of [{ cli: 'codex' }, { cli: 'codex', note: '   \n\t ' }, { note: '' }]) {
+      calls.length = 0;
+      events.length = 0;
+      const res = await post('r-gated', body);
+      expect(res.statusCode).toBe(200);
+      expect(calls.find((c) => c[0] === 'confirmGate')).toEqual(['confirmGate', 'r-gated', true]);
+      expect(reassigned()).not.toHaveProperty('note');
+    }
+  });
+
+  it('a failed approve does not claim the note rode it', async () => {
+    approveFails = true;
+    const res = await post('r-gated', { cli: 'codex', note: 'why' });
+    expect(res.statusCode).toBe(409);
+    expect(reassigned()).toMatchObject({ approved: false });
+    expect(reassigned()).not.toHaveProperty('note');
+  });
+
+  it('an executing run with a note is a 400 naming the gated-only rule, and nothing is reassigned', async () => {
+    const res = await post('r-exec', { cli: 'codex', note: 'why' });
+    expect(res.statusCode).toBe(400);
+    expect((res.json() as { error: string }).error).toContain('only a gated reassign');
+    expect(calls).toEqual([]);
+    expect(events).toEqual([]);
+  });
+
+  it('an executing run with a whitespace note still reassigns (the note is absent)', async () => {
+    const res = await post('r-exec', { note: '  ' });
+    expect(res.statusCode).toBe(200);
+    expect(calls).toEqual([['reassignUnit', 'r-exec', 0, null]]);
+  });
+
+  it('caps the RAW note at 8192 UTF-8 bytes (checked before trimming): 8192 passes; 8193, a padded overflow and a multibyte overflow are 400s naming the limit', async () => {
+    const ok = await post('r-gated', { note: 'a'.repeat(8192) });
+    expect(ok.statusCode).toBe(200);
+    calls.length = 0;
+    for (const note of ['a'.repeat(8193), ` ${'a'.repeat(8192)} `, 'é'.repeat(4097)]) {
+      const res = await post('r-gated', { note });
+      expect(res.statusCode).toBe(400);
+      expect((res.json() as { error: string }).error).toContain('8192');
+    }
+    expect(calls).toEqual([]);
+  });
+
+  it('an oversize whitespace-only note is absent, not a 400 — on a gated and on an executing run', async () => {
+    const blank = ' '.repeat(9000);
+    const gated = await post('r-gated', { cli: 'codex', note: blank });
+    expect(gated.statusCode).toBe(200);
+    expect(calls.find((c) => c[0] === 'confirmGate')).toEqual(['confirmGate', 'r-gated', true]);
+    expect(reassigned()).not.toHaveProperty('note');
+    calls.length = 0;
+    const exec = await post('r-exec', { note: blank });
+    expect(exec.statusCode).toBe(200);
+    expect(calls).toEqual([['reassignUnit', 'r-exec', 0, null]]);
+  });
+
+  it('an unknown body field is still a 400', async () => {
+    const res = await post('r-gated', { note: 'x', amend: 'y' });
+    expect(res.statusCode).toBe(400);
+    expect(calls).toEqual([]);
+  });
+});

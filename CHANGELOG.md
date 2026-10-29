@@ -32,6 +32,10 @@ mentioned only where a daemon release depends on them.
   - `ActorKind` gains `plugin` (`plugin:<id>@<version>`). A token file may give a plugin actor only `observer`
     trust; its one write is its own working-document section, as itself.
 
+### Fixed
+
+- `POST /runs/:id/reassign` accepts an optional `note` that rides a gated reassign as the approve's amendment, so the retry learns what was wrong; an executing run refuses a note with a 400, and the audit entry records only `note: true` (#1153). Fixes #1199: the system-route gateway test no longer depends on the host's free disk space.
+
 ## [0.16.9] — 2026-10-29
 
 A patch release for J4 with zero overrides: crew's delivery end-to-end suites pass inside the repository-checks floor (#1195, crew#1191), so a crew run that touches the API no longer needs a floor override; the verify floor stands on a fix-floor override on the same tree instead of asking again (wicked-core#1170, core#1168); the PR body says QE acceptance passed (#1194, crew#1192); an empty `lsof` read no longer fails the stall watchdog's busy read (#1194, crew#1193); seat-governance warnings follow work eligibility (#1190, crew#1087). On wicked-core-ts ^0.15.17 and wicked-crew-api-types 0.147.0, bundling wicked-studio 0.13.0 (UI v2).
