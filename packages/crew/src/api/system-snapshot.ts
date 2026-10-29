@@ -17,7 +17,7 @@
  * liveness verdict from fixtures; `routes.ts` wires the daemon's real readers.
  */
 
-import { spawn as nodeSpawn } from 'node:child_process';
+import { execFile, spawn as nodeSpawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { accessSync, constants as fsConstants, statSync } from 'node:fs';
 import { setImmediate as yieldNow } from 'node:timers/promises';
@@ -633,29 +633,79 @@ function usedPercent(free: number, total: number): number {
   return total > 0 ? Math.round(((total - free) / total) * 100) : 100;
 }
 
+/**
+ * What the volume can still take for important use, in bytes: on macOS the volume's
+ * `NSURLVolumeAvailableCapacityForImportantUsageKey` (free space plus the purgeable space macOS clears on demand,
+ * the "available" Finder shows), read through a one-line JXA script; `null` off macOS or when the read fails. Kept
+ * for {@link DISK_AVAILABLE_TTL_MS} per path: a skin polls `/system`, and each read would spawn `osascript`.
+ */
+export const DISK_AVAILABLE_TTL_MS = 30_000;
+const availableCache = new Map<string, { at: number; value: number | null }>();
+const JXA_AVAILABLE = [
+  'ObjC.import("Foundation");',
+  'var p = $.NSProcessInfo.processInfo.environment.objectForKey("WICKED_DISK_PATH").js;',
+  'var r = Ref();',
+  'var ok = $.NSURL.fileURLWithPath(p).getResourceValueForKeyError(r, $.NSURLVolumeAvailableCapacityForImportantUsageKey, null);',
+  'ok ? String(r[0].js) : ""',
+].join(' ');
+
+export function macAvailableBytes(path: string, timeoutMs: number = PROBE_TIMEOUT_MS, platform: NodeJS.Platform = process.platform): Promise<number | null> {
+  if (platform !== 'darwin') return Promise.resolve(null);
+  const hit = availableCache.get(path);
+  if (hit !== undefined && Date.now() - hit.at < DISK_AVAILABLE_TTL_MS) return Promise.resolve(hit.value);
+  return new Promise((resolve) => {
+    // The path rides the environment, never the script text.
+    execFile('osascript', ['-l', 'JavaScript', '-e', JXA_AVAILABLE], { timeout: timeoutMs, env: { ...process.env, WICKED_DISK_PATH: path } }, (err, stdout) => {
+      const n = err === null ? Number(String(stdout).trim()) : Number.NaN;
+      const value = Number.isFinite(n) && n > 0 ? n : null;
+      if (value !== null) availableCache.set(path, { at: Date.now(), value }); // a failed read is never kept
+      resolve(value);
+    });
+  });
+}
+
+/** Test seam. */
+export function resetDiskAvailableCache(): void { availableCache.clear(); }
+
+/**
+ * The free-disk row. Two numbers where the platform has both (operator 2026-10-29: Finder said 70 GB available while
+ * crew said 13 GB free): free now (`statfs`), and what the volume can take for important use (macOS counts the
+ * purgeable space it clears on demand). The thresholds read the second when it is known (a write that needs room gets
+ * it once macOS purges), else free space; the reason says both.
+ */
 export async function diskRow(
   path: string | null,
   statfsFn: (p: string) => Promise<{ bavail: number | bigint; bsize: number | bigint; blocks: number | bigint }> = statfs,
   timeoutMs: number = PROBE_TIMEOUT_MS,
+  availableFn: (p: string) => Promise<number | null> = statfsFn === statfs ? (p) => macAvailableBytes(p, timeoutMs) : async () => null,
 ): Promise<SystemInfraRow> {
   const started = Date.now();
   if (path === null) return infraRow('disk', 'unknown', 'no state home to measure', null, started);
-  const settled = await settleWithin(() => statfsFn(path), timeoutMs);
+  const [settled, availSettled] = await Promise.all([
+    settleWithin(() => statfsFn(path), timeoutMs),
+    settleWithin(() => availableFn(path), timeoutMs),
+  ]);
   if (settled.kind === 'timeout') return infraRow('disk', 'unknown', `the filesystem did not answer within ${secondsWord(timeoutMs)}`, 'Re-check.', started, { path }, timeoutMs);
   if (settled.kind === 'error') return infraRow('disk', 'unknown', `could not read free space: ${settled.error}`, 'Re-check.', started, { path });
   const free = Number(settled.value.bavail) * Number(settled.value.bsize);
   const total = Number(settled.value.blocks) * Number(settled.value.bsize);
+  const reported = availSettled.kind === 'ok' ? availSettled.value : null;
+  // Only a reading at least as large as free space is the "important usage" capacity; anything else is ignored.
+  const available = reported !== null && reported >= free ? reported : null;
+  const basis = available ?? free;
   const gib = (n: number): string => `${Math.round((n / 2 ** 30) * 10) / 10} GiB`;
-  const details = { path, freeBytes: free, totalBytes: total };
+  const details = { path, freeBytes: free, totalBytes: total, availableBytes: available };
+  const both = available !== null && available - free >= 2 ** 30;
+  const said = both ? `${gib(free)} free now · ${gib(available)} available once macOS clears purgeable space` : `${gib(free)} free`;
   // crew#1145: red BEFORE a write can fail — a full disk once killed the daemon right after ready
   // (an ENOSPC on its log). Under 5 GiB or over 95% used is down; under 10 GiB or over 90% used is degraded.
-  if (free < DISK_DOWN_BYTES || (total > 0 && free / total < 0.05)) {
-    return infraRow('disk', 'down', `${gib(free)} free on the state-home volume (${usedPercent(free, total)}% used): writes (logs, stores, worktrees, installs) will start to fail`, 'Free disk space (old worktrees, cargo target dirs), then re-check.', started, details);
+  if (basis < DISK_DOWN_BYTES || (total > 0 && basis / total < 0.05)) {
+    return infraRow('disk', 'down', `${said} on the state-home volume (${usedPercent(basis, total)}% used): writes (logs, stores, worktrees, installs) will start to fail`, 'Free disk space (old worktrees, cargo target dirs), then re-check.', started, details);
   }
-  if (free < DISK_DEGRADED_BYTES || (total > 0 && free / total < 0.1)) {
-    return infraRow('disk', 'degraded', `${gib(free)} free on the state-home volume`, 'Free disk space before the next large run.', started, details);
+  if (basis < DISK_DEGRADED_BYTES || (total > 0 && basis / total < 0.1)) {
+    return infraRow('disk', 'degraded', `${said} on the state-home volume`, 'Free disk space before the next large run.', started, details);
   }
-  return infraRow('disk', 'ok', `${gib(free)} free of ${gib(total)}`, null, started, details);
+  return infraRow('disk', 'ok', both ? `${said} (of ${gib(total)})` : `${gib(free)} free of ${gib(total)}`, null, started, details);
 }
 
 export function loadRow(read: () => { load1: number; cores: number } = () => ({ load1: loadavg()[0] ?? 0, cores: cpus().length }), platform: NodeJS.Platform = process.platform): SystemInfraRow {
