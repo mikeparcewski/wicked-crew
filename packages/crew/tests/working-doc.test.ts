@@ -66,7 +66,7 @@ function setup(over: Partial<RunFacts> = {}) {
   const audits: Array<{ action: string; detail: Record<string, unknown> }> = [];
   // The ENGINE given to the service has ONE method. Any other call (a gate answer, an amendment, a plan edit) would
   // be a TypeError: steering cannot reach a gate even by mistake.
-  const hooks: { onInject?: (message: string) => void } = {};
+  const hooks: { onInject?: ((message: string) => void) | undefined } = {};
   const engine = Object.freeze({
     injectWorkerMessage: async (runId: string, message: string, target: string) => {
       injected.push({ runId, message, target });
