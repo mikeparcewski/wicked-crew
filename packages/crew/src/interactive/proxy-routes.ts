@@ -51,7 +51,8 @@ import {
   type DocGroundingStore,
 } from './doc-grounding.js';
 import { projectDocsRoot } from './project-root.js';
-import { CHAT_POSTED, DEMO_DOC_MOVED_MESSAGE, isAnswerableDocKind, isIterationAsk, readDocHead } from './chat-events.js';
+import { CHAT_POSTED, DEMO_DOC_MOVED_MESSAGE, WORKING_DOC_REFUSED_MESSAGE, isAnswerableDocKind, isIterationAsk, readDocHead } from './chat-events.js';
+import { WORKING_DOC_KIND } from '../working-doc/store.js';
 import { DOC_NAME } from './draft-events.js';
 
 /** The bridge route whose request crew reads before forwarding (F-046) — exact path, any query. */
@@ -227,6 +228,17 @@ export interface InteractiveAskRefusal {
 
 /** The refusal for an ask on a doc of `kind`, or `null` when a seam answers that kind
  *  (chat-events.ts `isAnswerableDocKind`). */
+/** The `payload.document_id` of a doc events POST body, or null. */
+export function eventDocumentId(raw: Buffer): string | null {
+  try {
+    const body = JSON.parse(raw.toString('utf8')) as { payload?: { document_id?: unknown } };
+    const id = body?.payload?.document_id;
+    return typeof id === 'string' && id !== '' ? id : null;
+  } catch {
+    return null;
+  }
+}
+
 export function askRefusalFor(documentId: string, kind: string): InteractiveAskRefusal | null {
   if (isAnswerableDocKind(kind)) return null;
   return {
@@ -530,6 +542,13 @@ export function registerInteractiveProxy(app: FastifyInstance, adapter: CoreAdap
       } else if (isDocEventsPost(req.method, target)) {
         const raw = await readBody(req.raw, DOC_EVENTS_BODY_MAX);
         if (raw === null) return reply.code(413).send({ error: `event body exceeds ${DOC_EVENTS_BODY_MAX} bytes` });
+        // Spike 3: a run's working document takes no event from the browser at all (no edit, ask, review, theme or
+        // export request): crew writes it, from the run's block, and nothing about it launches a run.
+        const target_doc = eventDocumentId(raw);
+        if (target_doc !== null && readDocHead(root, target_doc)?.kind === WORKING_DOC_KIND) {
+          deps.log?.(`interactive event on ${target_doc} (project ${projectId}) refused before the bridge: it is a run's working document`);
+          return reply.code(403).send({ code: 'working_doc', document_id: target_doc, error: WORKING_DOC_REFUSED_MESSAGE });
+        }
         const ask = askOf(raw);
         // Fail-open on a doc this daemon cannot read (no manifest, not under this root): the bridge
         // and the seams decide, exactly as before — the gate speaks only when the kind is KNOWN.

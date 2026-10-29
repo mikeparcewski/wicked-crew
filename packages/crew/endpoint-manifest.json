@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.147.0",
+  "apiTypesVersion": "0.148.0",
   "endpoints": [
     {
       "method": "GET",
@@ -1894,6 +1894,43 @@
         404,
         409,
         413,
+        503
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/runs/:id/working-doc",
+      "requestType": null,
+      "responseType": "WorkingDocView",
+      "statusCodes": [
+        200,
+        404,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/:id/working-doc",
+      "requestType": null,
+      "responseType": "WorkingDocView",
+      "statusCodes": [
+        200,
+        403,
+        404,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/:id/working-doc/versions",
+      "requestType": "ProposeWorkingDocRequest",
+      "responseType": "ProposeWorkingDocResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        409,
         503
       ]
     },

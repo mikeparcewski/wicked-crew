@@ -29,7 +29,12 @@
 // ── Identity / actor contract (task #88, locked decision #6) ───────────────────
 
 /** What kind of principal an actor is: a person (OAuth/OIDC or local operator), a workload, or an internal process. */
-export type ActorKind = 'human' | 'agent' | 'system';
+/**
+ * Who acted. `plugin` (program DES-PLUGIN-EVENTS §3.4; spike 3): a studio plugin acting as itself, id
+ * `plugin:<id>@<version>`. Its trust is never above `observer` (read-only), and its only write is to its own section of
+ * a run's working document — never as a person, and never a gate, a launch or a steer.
+ */
+export type ActorKind = 'human' | 'agent' | 'system' | 'plugin';
 
 /**
  * The minimal trust ladder: `admin` > `operator` > `observer`.
@@ -336,6 +341,94 @@ export interface HealthCapabilities {
    * `false`: hide the schedules view.
    */
   schedules?: boolean;
+  /**
+   * (api-types 0.148.0, power mode spike 3) A run's working document is served: `GET|POST /runs/:id/working-doc`
+   * and `POST /runs/:id/working-doc/versions` ({@link WorkingDocView}). ABSENT on an older daemon — read as `false`.
+   */
+  workingDoc?: boolean;
+}
+
+// ── A run's working document (program DES-POWER-MODE §8.3, §9; api-types 0.148.0) ──────────────────
+
+/** The working document's sections, in order. */
+export type WorkingDocSectionId = 'goal' | 'approach' | 'decisions' | 'constraints' | 'questions' | 'next';
+
+/** Who wrote a version: a person (the operator), a plugin's own generated lines, or crew (the first version). */
+export type WorkingDocAuthor =
+  | { kind: 'human'; id: string }
+  | { kind: 'plugin'; id: string }
+  | { kind: 'system'; id: 'crew' };
+
+/** One version of the working document, as crew attributed it. */
+export interface WorkingDocTrailEntry {
+  version: number;
+  parent: number | null;
+  author: WorkingDocAuthor;
+  /** The plugin that hosted a person's edit (`plugin:<id>@<version>`), or null. */
+  surface: string | null;
+  sections: WorkingDocSectionId[];
+  /** Unix millis. */
+  at: number;
+  /** The steering note this version made, or null (a plugin's lines and Decisions / Open questions never steer). */
+  steerId: string | null;
+}
+
+/** One steering note a person's version became. It rides the next step's prompt (the operator inject); it never
+ *  answers, skips or changes a gate, check, review or QE step. */
+export interface WorkingDocSteer {
+  id: string;
+  version: number;
+  sections: WorkingDocSectionId[];
+  /** `next`: the next step, once. `standing`: Constraints and steering, re-sent before every later step until a
+   *  later edit replaces it. */
+  kind: 'next' | 'standing';
+  /** Exactly what was sent. */
+  note: string;
+  at: number;
+  by: string;
+  /** When the engine took it (queued for the next step), or null. */
+  queuedAt: number | null;
+  /** The step whose prompt carried it. */
+  pickedUp: { ord: number | null; step: string | null; at: number } | null;
+  /** Why it was not sent (the job had ended, the engine refused), or null. */
+  error: string | null;
+  supersededBy?: string | null;
+  renewals?: number;
+}
+
+/** `GET /runs/:id/working-doc` (and the body of `POST /runs/:id/working-doc`). */
+export interface WorkingDocView {
+  runId: string;
+  /** Null until the run has one. The document is a wicked-interactive document of kind `phase-report`. */
+  doc: { projectId: string; docId: string; head: number } | null;
+  sections: Record<WorkingDocSectionId, string> | null;
+  labels: Record<WorkingDocSectionId, string>;
+  trail: WorkingDocTrailEntry[];
+  steers: WorkingDocSteer[];
+}
+
+/** `POST /runs/:id/working-doc/versions`. `author: 'operator'` only from a person; `author: 'plugin'` writes only the
+ *  plugin's own section (`decisions`). 409 `{head}` when the document moved since `base`. */
+export interface ProposeWorkingDocRequest {
+  base: number;
+  sections: Partial<Record<WorkingDocSectionId, string>>;
+  author: 'operator' | 'plugin';
+  plugin?: { id: string; version: string };
+}
+
+export interface ProposeWorkingDocResponse {
+  /** Null when nothing changed. */
+  version: number | null;
+  unchanged: boolean;
+  steer: WorkingDocSteer | null;
+  view: WorkingDocView;
+}
+
+/** `/ws` frame: a run's working document changed (a version, a steer, a pickup). Re-read `GET /runs/:id/working-doc`. */
+export interface WorkingDocChangedEvent {
+  type: 'workingDocChanged';
+  session: string;
+  head: number | null;
 }
 
 /** One `GET /health.warnings[]` entry (additive; wicked-core#411 / wicked-crew#497). */

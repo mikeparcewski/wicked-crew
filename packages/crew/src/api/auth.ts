@@ -59,7 +59,7 @@ export const LOCAL_ACTOR: Actor = Object.freeze({
 }) as Actor;
 
 const TRUST_RANK: Record<TrustLevel, number> = { observer: 0, operator: 1, admin: 2 };
-const KINDS: ReadonlySet<string> = new Set<ActorKind>(['human', 'agent', 'system']);
+const KINDS: ReadonlySet<string> = new Set<ActorKind>(['human', 'agent', 'system', 'plugin']);
 const TRUSTS: ReadonlySet<string> = new Set<TrustLevel>(['observer', 'operator', 'admin']);
 
 /** True when `actor` sits at or above `min` on the ladder. */
@@ -153,10 +153,15 @@ export function parseTokenFile(json: string, source: string): Map<string, Actor>
       throw new Error(`${at}: 'actor.id' must be a non-empty string (≤128 chars)`);
     }
     if (typeof a.kind !== 'string' || !KINDS.has(a.kind)) {
-      throw new Error(`${at}: 'actor.kind' must be 'human' | 'agent' | 'system'`);
+      throw new Error(`${at}: 'actor.kind' must be 'human' | 'agent' | 'system' | 'plugin'`);
     }
     if (typeof a.trust !== 'string' || !TRUSTS.has(a.trust)) {
       throw new Error(`${at}: 'actor.trust' must be 'observer' | 'operator' | 'admin'`);
+    }
+    // A plugin acts read-only (DES-PLUGIN-EVENTS §3.4): its one write, its own working-document section, is allowed
+    // by kind at that route, never by trust. A token file that grants it more is refused.
+    if (a.kind === 'plugin' && (a.trust !== 'observer' || !/^plugin:[a-z0-9]+(?:-[a-z0-9]+)*@\d+\.\d+\.\d+/u.test(a.id))) {
+      throw new Error(`${at}: a plugin actor is 'observer' trust with id 'plugin:<id>@<version>'`);
     }
     if (map.has(e.sha256)) {
       throw new Error(`${at}: duplicate token hash (also used by an earlier entry)`);

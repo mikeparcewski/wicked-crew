@@ -22,6 +22,7 @@
  * introduced — the worker fence is unchanged.
  */
 
+import { WORKING_DOC_REFUSED_MESSAGE } from './chat-events.js';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
@@ -392,6 +393,8 @@ export function putLearnedThemeViaBridge(
 // ── The subscriber ─────────────────────────────────────────────────────────────────────────────
 
 export interface InteractiveThemeOptions {
+  /** Spike 3: whether a document is a run's working document (kind `phase-report`): never answered by a run. */
+  isWorkingDoc?: (projectId: string | undefined, documentId: string) => boolean;
   dbPath?: string;
   pollIntervalMs?: number;
   heartbeatMs?: number;
@@ -578,6 +581,12 @@ export async function startInteractiveThemeSubscriber(
   async function handleThemeLearned(event: BusEvent): Promise<void> {
     const learned = parseThemeLearned(event.event_type, event.payload);
     if (learned === null) return;
+    // Spike 3: a run's working document is never themed by a governed run.
+    if (opts.isWorkingDoc?.(learned.projectId, learned.documentId) === true) {
+      await emitStatus({ ...docScope(learned.documentId, learned.projectId), state: 'error', message: WORKING_DOC_REFUSED_MESSAGE });
+      log(`[interactive-theme] ${learned.documentId} is a run's working document — no theme run is launched (spike 3)`);
+      return;
+    }
     const key = themeHandoffKey(learned.documentId, learned.ts);
     if (ledger.has(key)) {
       log(`[interactive-theme] handoff ${key} already answered (run ${ledger.get(key)?.runId}) — replay ignored`);

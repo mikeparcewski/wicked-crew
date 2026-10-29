@@ -1896,6 +1896,8 @@ export function registerRoutes(
       defaultEvals: app.hasRoute({ method: 'GET', url: `${V}/testing/default-evals/suites` }),
       insights: app.hasRoute({ method: 'GET', url: `${V}/insights` }),
       schedules: app.hasRoute({ method: 'GET', url: `${V}/schedules` }),
+      // api-types 0.148.0 (power mode spike 3): a run's working document and steering from it.
+      workingDoc: app.hasRoute({ method: 'GET', url: `${V}/runs/:id/working-doc` }),
     };
     // wicked-core#411 / crew#497: the state-home blocker rides the health probe as a WARNING. The
     // daemon still SERVES (status stays ok — studio must load and show the blocker) but refuses to

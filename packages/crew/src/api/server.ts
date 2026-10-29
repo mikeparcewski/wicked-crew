@@ -124,6 +124,13 @@ import type { SearchService } from './search-routes.js';
 import { callEstateTool } from '../core/estate-mcp-client.js';
 import { seatParser } from '../standing-orders/parse.js';
 import { registerGateHistoryRoute, runBand, runPreset, runProject } from '../standing-orders/history.js';
+import { WorkingDocService } from '../working-doc/service.js';
+import { WorkingDocStore, isWorkingDocDir } from '../working-doc/store.js';
+import { bridgeBackend } from '../working-doc/bridge-backend.js';
+import { registerWorkingDocRoutes } from '../working-doc/routes.js';
+import { projectDocsRoot as workingDocRoot } from '../interactive/project-root.js';
+import { jobTitle as workingDocTitle } from './job-title.js';
+import { DEFAULT_PROJECT_ID as WORKING_DOC_DEFAULT_PROJECT } from '../projects/default-project.js';
 import { busRows, openPlanGateRisk } from '../team/routes.js';
 import { isSteeringAuthorRun } from './steering-landing.js';
 import { applyWorkerConfigRoot } from './seat-signin.js';
@@ -1546,6 +1553,7 @@ export async function createServer(
     const o = options.interactiveThemeEvents;
     const resolveDocsRoot = o.resolveDocsRoot ?? interactiveDocsRoot;
     themeSub = await startInteractiveThemeSubscriber(adapter, {
+      isWorkingDoc: (projectId, documentId) => isWorkingDocDir(join(resolveDocsRoot(projectId), documentId)),
       ...busOf(o.dbPath),
       ...(o.pollIntervalMs !== undefined ? { pollIntervalMs: o.pollIntervalMs } : {}),
       ...(o.heartbeatMs !== undefined ? { heartbeatMs: o.heartbeatMs } : {}),
@@ -1573,6 +1581,7 @@ export async function createServer(
     const o = options.interactiveReviewEvents;
     const resolveDocsRoot = o.resolveDocsRoot ?? interactiveDocsRoot;
     reviewSub = await startInteractiveReviewSubscriber(adapter, {
+      isWorkingDoc: (projectId, documentId) => isWorkingDocDir(join(resolveDocsRoot(projectId), documentId)),
       ...busOf(o.dbPath),
       ...(o.pollIntervalMs !== undefined ? { pollIntervalMs: o.pollIntervalMs } : {}),
       ...(o.heartbeatMs !== undefined ? { heartbeatMs: o.heartbeatMs } : {}),
@@ -2475,6 +2484,33 @@ export async function createServer(
     projectOf: (id) => membershipIndex.projectOf(id),
     landsDoctrine: isSteeringAuthorRun,
   });
+  // Program DES-POWER-MODE §8.3/§9 (spike 3): the run's working document — a wicked-interactive document of kind
+  // `phase-report` — and the steering notes a person's edits of it become. Steering rides the engine's operator
+  // inject only; nothing here answers a gate.
+  const workingDocs = new WorkingDocService({
+    store: new WorkingDocStore({ log: (m) => app.log.warn(m) }),
+    backend: bridgeBackend(interactiveBridges, (projectId) => workingDocRoot(adapter, projectSettings, projectId)),
+    engine: { injectWorkerMessage: (runId, message, target) => adapter.injectWorkerMessage(runId, message, target) },
+    run: async (runId) => {
+      const v = (await adapter.sessionsDetail()).find((x) => x.session.id === runId);
+      if (v === undefined) return null;
+      return {
+        title: workingDocTitle(v.session.problem),
+        problem: v.session.problem ?? '',
+        projectId: runProject(v, runId, (id) => membershipIndex.projectOf(id)) ?? WORKING_DOC_DEFAULT_PROJECT,
+        terminal: ['completed', 'cancelled', 'failed'].includes(v.session.status),
+        stepOf: (ord) => {
+          const u = v.units.find((x) => x.ord === ord);
+          return u?.phase_ref ?? (typeof u?.description === 'string' ? (u.description.split(/\s+[—-]\s+/u)[0] ?? null) : null);
+        },
+      };
+    },
+    changed: (runId, head) => broadcast({ type: 'workingDocChanged', session: runId, head } as unknown as Parameters<typeof broadcast>[0]),
+    audit: (action, actor, runId, detail) => audit.record(action, actor as Parameters<typeof audit.record>[1], { runId, detail }),
+    log: (m) => app.log.warn(m),
+  });
+  adapter.onEvent((e) => workingDocs.onEvent(e));
+  registerWorkingDocRoutes(app, { service: workingDocs, exists: async (id) => (await adapter.sessions()).includes(id) });
   registerStandingOrderRoutes(app, {
     store: standingOrders,
     evaluator: standingOrderEvaluator,
