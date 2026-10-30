@@ -68,7 +68,7 @@
  * and in the transcript is the seat's own.
  */
 
-import { readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { execCapped } from '../core/exec.js';
@@ -341,8 +341,11 @@ export function chatCitationDeps(): ChatCitationDeps {
         });
         return stdout.split('\n').filter((l) => l.length > 0);
       } catch {
-        // A listing that FAILED is not an empty repo (see {@link CommitCheck} for the same rule).
-        return null;
+        // A listing that FAILED is not an empty repo (see {@link CommitCheck} for the same rule)...
+        // ...but a root that is not there at all holds no file: a registered repo whose checkout
+        // was removed must not leave every other citation `unchecked` (J3 replay: one such root
+        // in the rig chat's scope).
+        return existsSync(absRoot) ? null : [];
       }
     },
     async commitExists(absRoot, sha) {

@@ -420,6 +420,12 @@ describe('crew#1211 — correct citations relative to a package are verified, no
     expect(alias.items[0]).toMatchObject({ status: 'unverified' });
   });
 
+  it('a registered root whose checkout is gone holds no file: it does not make every other citation unchecked', async () => {
+    const gone = [...roots, { name: 'removed', absRoot: join(scratch, 'removed-checkout') }];
+    const got = await verifyCitations('`run-liveness.ts:3` and `api/stall-watchdog.ts:410`', gone, undefined, BIG_BUDGET);
+    expect(got.items.map((i) => i.status)).toEqual(['verified', 'verified']);
+  });
+
   it('a repo that could not be listed leaves a tail match unchecked, never "unique"', async () => {
     const real = chatCitationDeps();
     const deps: ChatCitationDeps = {
