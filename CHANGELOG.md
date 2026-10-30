@@ -10,6 +10,14 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Changed
+
+- **A plugin may write its own lines under Open questions and Next, not only Decisions.** The Phase report fills a
+  run's working document from the run's events: decisions answered under Decisions, what waits on a person under
+  Open questions, and what the newest hand-off round left under Next. A plugin's write never steers, in any section,
+  Next included. Only a person's edit does. Goal, Approach and Constraints stay a person's
+  (`packages/crew/src/working-doc/sections.ts` `PLUGIN_SECTIONS`).
+
 ### Fixed
 
 - **A fresh install's Nerve Center tells the truth (J1).** On a fresh `npm i -g wicked-crew` with Docker
