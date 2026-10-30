@@ -18,6 +18,14 @@
 //
 // `--dry-run` prints the plan as JSON instead of running it (what the unit test asserts).
 //
+// `--all` (crew#1221) runs the WHOLE suite (`vitest run`) the same way: `.wicked/checks.json` declares
+// `"test": ["node", "scripts/test-related.mjs", "--all"]`, the check a power run at high rigor or above
+// hands off on. Plain `vitest run` built no `dist/` and applied no cross-repo filter, so on the floor's
+// lone checkout the dist-CLI and cross-repo suites failed on base and head alike, the base was always
+// red and every such floor escalated `base_red_unseparated`. `--all` gives the full suite the clean
+// build and the cross-repo filter (with its one disclosed line) described below.
+// It leaves nothing else out, and it does not retry itself: the engine retries the check (see `planAll`).
+//
 // ## crew#649 — the verdict must not track ambient host load
 //
 // When the diff touches a hub module (`src/api/routes.ts`), `vitest related` expands to ~147 files /
@@ -221,6 +229,22 @@ export function planTests(files) {
   if (list.length === 0) return { refuse: 'no test file named — `--tests` needs the files to run' };
   if (bad.length > 0) return { refuse: `not a test file under ${CREW}: ${bad.join(', ')}` };
   return { argv: ['npx', 'vitest', 'run', '--passWithNoTests', ...list], cwd: CREW };
+}
+
+/**
+ * crew#1221: the plan for `--all`, the floor's FULL `test` check: every test in the suite (`vitest run`, no
+ * selection), after the same clean build and with the same cross-repo filter as the targeted command.
+ *
+ * It does NOT retry itself (`retry: false`): its exit is recorded as-is and the ENGINE retries the check
+ * (`rerun.test` is not `self_retry`). The engine's retry is the stronger one: a failing-set retry that passes
+ * never stands on its own, the whole identical retry decides (wicked-core#1198). This script's deadline retry
+ * re-runs the named files alone, so a file that failed an assertion beside a timed-out one, or an unhandled
+ * error vitest names no file for, could clear on it (review of #1222).
+ * It takes no file list: one given is refused rather than ignored.
+ */
+export function planAll(files = []) {
+  if (files.length > 0) return { refuse: `\`--all\` runs the whole suite and takes no files (got ${files.join(', ')})` };
+  return { argv: ['npx', 'vitest', 'run'], cwd: CREW, retry: false };
 }
 
 /**
@@ -483,6 +507,10 @@ export async function runTargeted(files, io = {}) {
     if (first.status === 0) {
       return 0;
     }
+    if (p.retry === false) {
+      out(`${RETRY_MARKER} none — the full suite does not retry itself; the engine's floor retries this check (crew#1221).`);
+      return first.status;
+    }
 
     const why = retryableFailureReason(first.output);
     if (why === null) {
@@ -548,8 +576,10 @@ if (isMain) {
   if (dryRun) args = args.slice(1);
   // wicked-core#1198: `--tests <files>` runs the named test files (the floor's failing-set re-run).
   const testsMode = args[0] === '--tests';
-  const files = testsMode ? args.slice(1) : args;
-  const planOf = testsMode ? planTests : plan;
+  // crew#1221: `--all` runs the whole suite (the floor's full `test` check).
+  const allMode = args[0] === '--all';
+  const files = testsMode || allMode ? args.slice(1) : args;
+  const planOf = testsMode ? planTests : allMode ? planAll : plan;
   // `process.exitCode`, NEVER `process.exit()` (review of #656, defect 2). When stdout/stderr are
   // PIPED — which is exactly how the repo-checks floor runs this — node's streams are asynchronous,
   // and `process.exit()` terminates without draining them: under the pipe backpressure this check

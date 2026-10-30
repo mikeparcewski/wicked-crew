@@ -235,6 +235,10 @@ describe('RunLivenessSampler: the daemon process tree, attributed by worktree cw
       { table: async () => rows, cwds: async (pids) => new Map(pids.flatMap((p) => (cwd.has(p) ? [[p, cwd.get(p) as string] as const] : []))) },
       1,
       () => t,
+      // Host processes only: these tests are about the process tree. Left to the host's container
+      // runtime, a docker on PATH that does not answer (the repo-checks floor's scratch HOME has no
+      // docker context) made every run "unknown" (crew#1221).
+      null,
     );
     const at = (a: number, b: number, c: number, stray: number): ProcRow[] => [
       { pid: 10, ppid: 1, cpuSec: a, comm: '/usr/local/bin/pi' },
@@ -296,6 +300,7 @@ describe('RunLivenessSampler: the daemon process tree, attributed by worktree cw
       },
       1,
       () => t,
+      null, // host processes only, as above (crew#1221)
     );
     expect(await sampler.busy([RUN])).toEqual(new Map()); // baseline
     t = 30_000;

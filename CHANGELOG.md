@@ -12,12 +12,22 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **The full-suite floor check no longer fails on every base (crew#1221).** A power run at high rigor or above hands
+  off on `.wicked/checks.json` `test`, which was plain `vitest run`: no `dist/` build and no cross-repo filter, so on
+  the floor's lone checkout the dist-CLI and cross-repo suites failed on base and head alike, and every such floor
+  escalated `base_red_unseparated`. `test` is now `node scripts/test-related.mjs --all`: the whole suite, after the
+  same clean build and with the same cross-repo filter (and its one disclosed line) as `test_targeted`. It does not
+  retry itself: the engine retries the check, and a scoped pass never stands on its own there. Its failing-set
+  re-run is `--tests` (the same build and filter). Nothing else is left out. CI and a developer's `npm test` are
+  unchanged. Two `stall-seat-liveness` tests about the process tree also read the host's container runtime; a
+  docker on PATH that does not answer (the floor's scratch HOME has no docker context) made them fail, so they now
+  read host processes only. With wicked-core#1202 (`ps` inside the macOS jail) a clean crew change's base is green.
 - **A missing `wicked-estate-mcp` now reads as not installed, not "memory store not created yet".** The estate infra row checks the binary before the store (not installed or not on PATH, estate is optional, `npx wicked-installer` or `WICKED_ESTATE_MCP_EXE`), and `/memory/*` and `/proposals` answer 502 with that reason instead of the raw `spawn … ENOENT` (crew#1213).
 
 ### Changed
 
 - **A failing floor re-runs only the failing test files.** `.wicked/checks.json` declares `rerun` for `test`
-  (vitest over the files) and `test_targeted` (`scripts/test-related.mjs --tests <files>`, which keeps the clean
+  and `test_targeted` (`scripts/test-related.mjs --tests <files>`, which keeps the clean
   build, the cross-repo filter and the one deadline retry). With wicked-core#1198 the engine's retry and its base
   comparison then run only the files the head failed instead of the whole suite. `test_targeted` is marked
   `self_retry`, because it already re-runs its own deadline failures, so the engine does not retry it a second
