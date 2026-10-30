@@ -20,6 +20,7 @@ import {
   probeBroker,
   probeBus,
   probeEstate,
+  estateMcpResolvable,
   probeGateway,
   probeInteractive,
   probeVault,
@@ -122,16 +123,37 @@ describe('estate, bus, vault probes', () => {
   const store = { path: '/s/memory.db', source: 'explicit', notice: null };
   it('estate: one read-only call answered → ok; missing binary → down; rpc error → down; hang → unknown; no store yet → degraded (no call)', async () => {
     const answer = { result: { content: [{ text: JSON.stringify({ total: 12 }) }] } };
-    const ok = await probeEstate({ memoryStore: store, exists: async () => true, call: async () => answer });
+    const ok = await probeEstate({ memoryStore: store, resolvable: () => true, exists: async () => true, call: async () => answer });
     expect(ok.state).toBe('ok');
     expect(ok.reason).toMatch(/12 memories/);
-    expect((await probeEstate({ memoryStore: store, exists: async () => true, call: async () => { throw new Error('spawn wicked-estate-mcp ENOENT'); } })).state).toBe('down');
-    expect((await probeEstate({ memoryStore: store, exists: async () => true, call: async () => ({ error: { code: -32603, message: 'db locked' } }) })).state).toBe('down');
-    expect((await probeEstate({ memoryStore: store, exists: async () => true, call: never, timeoutMs: 30 })).state).toBe('unknown');
+    expect((await probeEstate({ memoryStore: store, resolvable: () => true, exists: async () => true, call: async () => { throw new Error('spawn wicked-estate-mcp ENOENT'); } })).state).toBe('down');
+    expect((await probeEstate({ memoryStore: store, resolvable: () => true, exists: async () => true, call: async () => ({ error: { code: -32603, message: 'db locked' } }) })).state).toBe('down');
+    expect((await probeEstate({ memoryStore: store, resolvable: () => true, exists: async () => true, call: never, timeoutMs: 30 })).state).toBe('unknown');
     let called = false;
-    const none = await probeEstate({ memoryStore: store, exists: async () => false, call: async () => { called = true; return answer; } });
+    const none = await probeEstate({ memoryStore: store, resolvable: () => true, exists: async () => false, call: async () => { called = true; return answer; } });
     expect(none.state).toBe('degraded');
     expect(called).toBe(false);
+  });
+  it('estate: no binary → the not-installed row, with or without a store, before any call; binary + no store keeps "not created yet"', async () => {
+    let called = false;
+    const call = async (): Promise<Record<string, unknown>> => { called = true; return {}; };
+    for (const present of [false, true]) {
+      const row = await probeEstate({ memoryStore: store, resolvable: () => false, exists: async () => present, call });
+      expect(row.state).toBe('down');
+      expect(row.reason).toMatch(/not installed or not on PATH/);
+      expect(JSON.stringify(row)).toMatch(/npx wicked-installer/);
+      expect(JSON.stringify(row)).toMatch(/WICKED_ESTATE_MCP_EXE/);
+      expect(JSON.stringify(row)).not.toMatch(/Nothing to fix/);
+    }
+    expect(called).toBe(false);
+    const none = await probeEstate({ memoryStore: store, resolvable: () => true, exists: async () => false, call });
+    expect(none.state).toBe('degraded');
+    expect(none.reason).toMatch(/not been created yet/);
+  });
+  it('estateMcpResolvable: a path must be an executable file; a bare name is looked up on PATH', () => {
+    expect(estateMcpResolvable({ WICKED_ESTATE_MCP_EXE: '/definitely/not/here/wicked-estate-mcp', PATH: '/usr/bin:/bin' })).toBe(false);
+    expect(estateMcpResolvable({ PATH: '/definitely/not/here' })).toBe(false);
+    expect(estateMcpResolvable({ WICKED_ESTATE_MCP_EXE: process.execPath, PATH: '' })).toBe(true);
   });
   it('bus: unavailable → down; no file → down; seams off → degraded; watch down → degraded; none → off', async () => {
     const none = { unavailable: null, seamsOff: null, dbPath: null, watchBus: null, tailLagMs: null };

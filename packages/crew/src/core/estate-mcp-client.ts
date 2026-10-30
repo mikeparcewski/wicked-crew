@@ -98,6 +98,12 @@ export function estateMcpExe(env: NodeJS.ProcessEnv = process.env): string {
   return override !== undefined && override !== '' ? override : 'wicked-estate-mcp';
 }
 
+/** The install pointer shown wherever a missing `wicked-estate-mcp` is reported (estate is optional). */
+export const ESTATE_INSTALL_HINT = 'Install wicked-estate (npx wicked-installer) or set WICKED_ESTATE_MCP_EXE.';
+
+/** The prefix of the error a failed `spawn` of the estate MCP carries (see the `error` handler below). */
+export const ESTATE_SPAWN_FAILED_PREFIX = 'failed to spawn wicked-estate-mcp:';
+
 /**
  * The memory store this daemon reads and writes.
  *
@@ -420,7 +426,7 @@ export async function callEstateToolRaw(
     }
 
     child.on('error', (err) => {
-      finish(() => rejectPromise(new EstateMcpError(`failed to spawn wicked-estate-mcp: ${err.message}`)));
+      finish(() => rejectPromise(new EstateMcpError(`${ESTATE_SPAWN_FAILED_PREFIX} ${err.message}`)));
     });
     child.on('close', () => {
       finish(() =>

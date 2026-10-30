@@ -45,7 +45,7 @@ import type {
   SystemUnresolvedItem,
 } from '../core/types.js';
 import { needsLevel } from './needs.js';
-import { callEstateToolRaw, estateMcpExe } from '../core/estate-mcp-client.js';
+import { callEstateToolRaw, estateMcpExe, ESTATE_INSTALL_HINT } from '../core/estate-mcp-client.js';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 import { runTouchesWindow } from './seat-record.js';
 
@@ -179,6 +179,14 @@ function isExecutableFile(path: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** Whether `wicked-estate-mcp` can be spawned: `WICKED_ESTATE_MCP_EXE` (a path, or a bare name) when set,
+ *  else `wicked-estate-mcp`; a bare name is looked up on PATH, a path must be an executable file. */
+export function estateMcpResolvable(env: NodeJS.ProcessEnv = process.env): boolean {
+  const exe = estateMcpExe(env);
+  if (exe.includes('/') || exe.includes('\\')) return isExecutableFile(exe);
+  return (env['PATH'] ?? '').split(delimiter).some((dir) => dir !== '' && isExecutableFile(join(dir, exe)));
 }
 
 /** The container runtime CLI the engine would use (`container_floor.rs` `runtime_candidates`):
@@ -447,6 +455,8 @@ export interface EstateProbeInput {
   call: (timeoutMs: number) => Promise<Record<string, unknown>>;
   /** Whether the store file exists (injectable for tests). */
   exists?: (path: string) => Promise<boolean>;
+  /** Whether `wicked-estate-mcp` resolves (injectable for tests). Defaults to {@link estateMcpResolvable}. */
+  resolvable?: () => boolean;
   timeoutMs?: number;
 }
 
@@ -472,6 +482,10 @@ export async function probeEstate(input: EstateProbeInput): Promise<SystemInfraR
   const timeoutMs = input.timeoutMs ?? PROBE_TIMEOUT_MS;
   const details: Record<string, unknown> = { memoryStore: input.memoryStore, call: 'memory.coverage (--readonly)' };
   const exists = input.exists ?? (async (p: string): Promise<boolean> => (await stat(p)).isFile());
+  // No binary is the first thing to say: a missing store is only "nothing remembered yet" when estate is there.
+  if (!(input.resolvable ?? estateMcpResolvable)()) {
+    return infraRow('estate', 'down', 'wicked-estate-mcp is not installed or not on PATH (estate is optional)', `${ESTATE_INSTALL_HINT} Then re-check.`, started, details);
+  }
   if (input.memoryStore.path !== ':memory:') {
     const present = await settleWithin(() => exists(input.memoryStore.path), timeoutMs);
     if (present.kind === 'timeout') {
@@ -491,7 +505,7 @@ export async function probeEstate(input: EstateProbeInput): Promise<SystemInfraR
       'estate',
       'down',
       missing ? 'wicked-estate-mcp is not installed or not on PATH' : `wicked-estate-mcp failed: ${settled.error}`,
-      missing ? 'Install wicked-estate (npx wicked-installer) or set WICKED_ESTATE_MCP_EXE, then re-check.' : 'Check the memory store, then re-check.',
+      missing ? `${ESTATE_INSTALL_HINT} Then re-check.` : 'Check the memory store, then re-check.',
       started,
       { ...details, error: settled.error },
       timeoutMs,
