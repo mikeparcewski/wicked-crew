@@ -131,6 +131,17 @@ function blankSections(): Record<SectionId, string> {
 }
 
 /** A write whose outcome is not known (no version in time, or a version that is not this batch's). */
+/** The orchestrator's notes for one write (from the engine's `powerWorkingNotes` frame). */
+export interface AgentNotes {
+  seat: string;
+  turn: number;
+  approach: string | null;
+  decisions: Array<{ text: string; why: string | null }>;
+}
+
+/** A seat name as it may appear in an author id. */
+const AGENT_SEAT = /^[a-z0-9][a-z0-9-]{0,31}$/;
+
 export class UndeterminedWriteError extends Error {
   constructor(message: string) { super(message); this.name = 'UndeterminedWriteError'; }
 }
@@ -168,12 +179,20 @@ export class WorkingDocService {
     return { ...base, doc: { projectId: rec.projectId, docId: rec.docId, head: head.head }, sections: { ...blankSections(), ...sectionsOf(head.html) } };
   }
 
-  /** The run's working document, created on first ask (its Goal seeded from the run's intent, by crew). */
-  ensure(runId: string): Promise<WorkingDocView | null> {
+  /** The run's working document, created on first ask (its Goal seeded from the run's intent, by crew). The view is
+   *  read after the lock is released: `view()` settles a pending write under the same lock (review on #1218: reading it
+   *  inside deadlocked the run's document). */
+  async ensure(runId: string): Promise<WorkingDocView | null> {
+    if (!(await this.ensureDoc(runId))) return null;
+    return this.view(runId);
+  }
+
+  /** Make the run's document if it has none; `false` when the run is unknown. */
+  private ensureDoc(runId: string): Promise<boolean> {
     return this.exclusive(runId, async () => {
-      if (this.d.store.get(runId) !== undefined) return this.view(runId);
+      if (this.d.store.get(runId) !== undefined) return true;
       const run = await this.d.run(runId);
-      if (run === null) return null;
+      if (run === null) return false;
       const docId = workingDocName(runId);
       const html = initialHtml(run.title, { goal: run.problem.replace(/\r\n?/g, '\n').trim().slice(0, 1_500) });
       const { head } = await this.d.backend.create(run.projectId, docId, runId, html);
@@ -184,7 +203,7 @@ export class WorkingDocService {
       };
       this.d.store.put(rec);
       this.d.changed?.(runId, head);
-      return this.view(runId);
+      return true;
     });
   }
 
@@ -250,20 +269,87 @@ export class WorkingDocService {
         author: author.kind === 'human' ? `${author.id}${surface !== null ? ` via ${surface}` : ''}` : author.id,
       });
     } catch (err) {
-      if (err instanceof UndeterminedWriteError) {
-        // Not known whether it landed: remembered, so a later read attributes it if it does — never to the next caller —
-        // and looked at again on its own shortly, so its steer is not left waiting for someone to read.
-        this.d.store.update(runId, (r) => { r.pending = { expectHead: input.base, author, surface, values, at: this.now(), actor: { id: actor.id, kind: actor.kind } }; });
-        for (const ms of [30_000, 75_000]) {
-          const t = setTimeout(() => { void this.exclusive(runId, () => this.reconcile(runId)).catch(() => undefined); }, ms);
-          (t as { unref?: () => void }).unref?.();
-        }
-      }
+      if (err instanceof UndeterminedWriteError) this.rememberPending(runId, input.base, author, surface, values, actor);
       throw err;
     }
     if ('headMoved' in written) return { ok: false, code: 409, error: 'the working document changed since', head: written.head };
     const steer = await this.record(runId, written.version, written.parent, author, surface, changed, values, actor);
     return { ok: true, version: written.version, unchanged: false, steer, view: await this.view(runId) };
+  }
+
+  /**
+   * (power mode) The orchestrator's own working notes, from the engine's `powerWorkingNotes` frame, written as one
+   * version by `agent:<seat>`. It never steers: only a person's version does. Approach is replaced, unless a person
+   * wrote the current Approach: their edit stands, and the agent's restatement is recorded under Decisions instead.
+   * Each decision is appended under Decisions with its reason. A person's edit racing this write wins: the agent
+   * re-reads and writes again on top of it (twice at most). Resolves to the version written, or `null`.
+   */
+  async agentNotes(runId: string, notes: AgentNotes): Promise<number | null> {
+    const seat = AGENT_SEAT.test(notes.seat) ? notes.seat : 'agent';
+    const id = `agent:${seat}`;
+    if (!(await this.ensureDoc(runId))) return null;
+    return this.exclusive(runId, async () => {
+      const rec = this.d.store.get(runId);
+      if (rec === undefined) return null;
+      await this.reconcile(runId);
+      if (this.d.store.get(runId)?.pending != null) return null;
+      const tag = `${seat}, turn ${notes.turn}`;
+      const humanApproach = [...rec.trail].reverse().find((t) => t.sections.includes('approach'))?.author.kind === 'human';
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const head = await this.d.backend.read(rec.projectId, rec.docId);
+        if (head === null) return null;
+        const before = { ...blankSections(), ...sectionsOf(head.html) };
+        const wanted: Partial<Record<SectionId, string>> = {};
+        const lines: string[] = [];
+        const approach = notes.approach?.trim() ?? '';
+        if (approach !== '') {
+          if (humanApproach) lines.push(`- Approach now (${tag}): ${approach}. Your edit to Approach stands.`);
+          else wanted.approach = approach.slice(0, SECTION_MAX_CHARS);
+        }
+        for (const d of notes.decisions) {
+          const text = d.text.trim();
+          if (text === '') continue;
+          const why = d.why?.trim() ?? '';
+          lines.push(`- ${text}${why !== '' ? `. Why: ${why}` : ''} (${tag})`);
+        }
+        if (lines.length > 0) {
+          // The newest lines are kept when the section is full: the oldest are dropped first.
+          const all = [...(before.decisions ?? '').split('\n').filter((l) => l.trim() !== ''), ...lines];
+          while (all.join('\n').length > SECTION_MAX_CHARS && all.length > 1) all.shift();
+          wanted.decisions = all.join('\n').slice(0, SECTION_MAX_CHARS);
+        }
+        const changed = changedSections(before, wanted);
+        if (changed.length === 0) return null;
+        const values: Partial<Record<SectionId, string>> = {};
+        for (const sid of changed) values[sid] = wanted[sid] ?? '';
+        let written: { version: number; parent: number } | { headMoved: true; head: number };
+        try {
+          written = await this.d.backend.edit(rec.projectId, rec.docId, {
+            expectHead: head.head,
+            items: changed.map((sid) => ({ selector: anchorOf(sid), value: encodeSectionText(values[sid] ?? '') })),
+            author: id,
+          });
+        } catch (err) {
+          // Not known whether it landed: the same recovery as a person's write (review on #1218).
+          if (err instanceof UndeterminedWriteError) this.rememberPending(runId, head.head, { kind: 'agent', id }, null, values, { id, kind: 'agent' });
+          throw err;
+        }
+        if ('headMoved' in written) continue;
+        await this.record(runId, written.version, written.parent, { kind: 'agent', id }, null, changed, values, { id, kind: 'agent' });
+        return written.version;
+      }
+      return null;
+    });
+  }
+
+  /** A write whose outcome is not known: remembered, so a later read attributes it if it lands, never to the next
+   *  caller, and looked at again on its own shortly, so its steer (a person's) is not left waiting for a reader. */
+  private rememberPending(runId: string, expectHead: number, author: DocAuthor, surface: string | null, values: Partial<Record<SectionId, string>>, actor: { id: string; kind: string }): void {
+    this.d.store.update(runId, (r) => { r.pending = { expectHead, author, surface, values, at: this.now(), actor: { id: actor.id, kind: actor.kind } }; });
+    for (const ms of [30_000, 75_000]) {
+      const t = setTimeout(() => { void this.exclusive(runId, () => this.reconcile(runId)).catch(() => undefined); }, ms);
+      (t as { unref?: () => void }).unref?.();
+    }
   }
 
   /** A version that landed: its trail entry, its steer (a person's only), its audit line and the change frame. */
@@ -352,6 +438,20 @@ export class WorkingDocService {
     const ev = e as unknown as Record<string, unknown>;
     const runId = typeof ev['session'] === 'string' ? ev['session'] : null;
     if (runId === null) return;
+    if ((ev['type'] as string) === 'powerWorkingNotes') {
+      const decisions = Array.isArray(ev['decisions'])
+        ? (ev['decisions'] as Array<Record<string, unknown>>)
+            .filter((d) => typeof d['text'] === 'string')
+            .map((d) => ({ text: d['text'] as string, why: typeof d['why'] === 'string' ? d['why'] : null }))
+        : [];
+      void this.agentNotes(runId, {
+        seat: typeof ev['seat'] === 'string' ? ev['seat'] : 'agent',
+        turn: typeof ev['turn'] === 'number' ? ev['turn'] : 0,
+        approach: typeof ev['approach'] === 'string' ? ev['approach'] : null,
+        decisions,
+      }).catch(() => undefined);
+      return;
+    }
     if ((e.type === 'unitDispatched' || e.type === 'unitExecuting') && typeof ev['ord'] === 'number') {
       const attempt = typeof ev['attempt'] === 'number' ? ev['attempt'] : (this.lastDispatch.get(runId)?.ord === ev['ord'] ? this.lastDispatch.get(runId)?.attempt ?? 0 : 0);
       this.lastDispatch.set(runId, { ord: ev['ord'], attempt });

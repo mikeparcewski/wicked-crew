@@ -20,6 +20,15 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **The orchestrator fills the run's working document (power mode, operator ask 2026-10-30).** The engine's
+  `powerWorkingNotes` frame (wicked-core#1195) is written into the run's working document as one version by
+  `agent:<seat>` (author kind `agent`). It replaces Approach and appends each decision, with its reason and turn,
+  under Decisions. It never steers. A person's Approach stands: the agent's restatement is recorded under Decisions
+  instead. A person's edit racing the write wins, and the agent writes again on top of it. The document is made if
+  the run has none yet.
+- **api-types 0.150.0:** the `ToolActivityEvent` (`toolActivity`, live per tool call) and `PowerWorkingNotesEvent`
+  frames; `RunBusType` `wicked.run.tool.started` / `wicked.run.tool.finished` / `wicked.run.notes.recorded`; and
+  `WorkingDocAuthor` `{ kind: 'agent' }`.
 - `GET /api/v1/diagnostics` carries `floorCache` — the engine's repo-checks floor cache usage (`Core.floorCacheUsage`: path as `~/...`, bytes, caps, per-repo sizes, logs), read at most once per 60 s; `null` on an addon without the static (#1147). `DiagnosticsResponse.floorCache` is added to `wicked-crew-api-types`.
 
 ### Fixed

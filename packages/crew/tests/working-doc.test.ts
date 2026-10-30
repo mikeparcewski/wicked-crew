@@ -367,6 +367,84 @@ describe('attribution and refusals', () => {
   });
 });
 
+describe('the orchestrator’s own notes (power mode)', () => {
+  const notes = (over: Record<string, unknown> = {}) => ({
+    type: 'powerWorkingNotes', session: 'run-1', ord: 3, attempt: 0, turn: 1, seat: 'claude', at: 1,
+    approach: 'Add a cached floorCache field to diagnostics', decisions: [{ text: 'A 60 s cache', why: 'the walk is slow' }], ...over,
+  }) as unknown as CoreEvent;
+  const settle = async () => { for (let i = 0; i < 20; i++) await tick(); };
+
+  it('the engine’s notes frame writes Approach and Decisions as agent:<seat>, makes the document if needed, and never steers', async () => {
+    const t = setup();
+    t.service.onEvent(notes());
+    await settle();
+    const v = await t.service.view('run-1');
+    expect(v.sections?.approach).toBe('Add a cached floorCache field to diagnostics');
+    expect(v.sections?.decisions).toBe('- A 60 s cache. Why: the walk is slow (claude, turn 1)');
+    expect(v.trail.at(-1)).toMatchObject({ author: { kind: 'agent', id: 'agent:claude' }, steerId: null, sections: ['approach', 'decisions'] });
+    expect(t.backend.versions.at(-1)?.author).toBe('agent:claude');
+    expect(t.injected).toHaveLength(0);
+    expect(t.audits.at(-1)).toMatchObject({ action: 'run.steered.doc', detail: { author: 'agent:claude' } });
+    // A later turn appends its decisions and restates the approach.
+    t.service.onEvent(notes({ turn: 2, approach: 'Plan B', decisions: [{ text: 'Keep the route', why: null }] }));
+    await settle();
+    const w = await t.service.view('run-1');
+    expect(w.sections?.approach).toBe('Plan B');
+    expect(w.sections?.decisions).toBe('- A 60 s cache. Why: the walk is slow (claude, turn 1)\n- Keep the route (claude, turn 2)');
+    expect(t.injected).toHaveLength(0);
+  });
+
+  it('a person’s Approach stands: the agent’s restatement goes under Decisions', async () => {
+    const t = setup();
+    await t.service.ensure('run-1');
+    const mine = await t.service.propose('run-1', { base: 0, author: 'operator', sections: { approach: 'Do it in the adapter' } }, HUMAN);
+    expect(mine.ok).toBe(true);
+    const steersBefore = t.injected.length;
+    await t.service.agentNotes('run-1', { seat: 'claude', turn: 1, approach: 'Do it in the route', decisions: [] });
+    const v = await t.service.view('run-1');
+    expect(v.sections?.approach).toBe('Do it in the adapter');
+    expect(v.sections?.decisions).toBe('- Approach now (claude, turn 1): Do it in the route. Your edit to Approach stands.');
+    expect(t.injected.length).toBe(steersBefore);
+  });
+
+  it('a person’s write of unknown outcome does not lock the document: notes and the next edit still go through (review on #1218)', async () => {
+    const t = setup();
+    await t.service.ensure('run-1');
+    t.backend.holdNext = true;
+    await expect(t.service.propose('run-1', { base: 0, author: 'operator', sections: { approach: 'Mine' } }, HUMAN)).rejects.toBeInstanceOf(UndeterminedWriteError);
+    const within = <T,>(p: Promise<T>) => Promise.race([p, new Promise<never>((_, no) => setTimeout(() => no(new Error('locked')), 2_000))]);
+    // The agent's notes wait for the pending write to settle, and do not hang the run's lock.
+    await within(t.service.agentNotes('run-1', { seat: 'claude', turn: 1, approach: null, decisions: [{ text: 'A', why: null }] }));
+    t.backend.undetermined?.();
+    const v = await within(t.service.view('run-1'));
+    expect(v.trail.at(-1)?.author).toEqual({ kind: 'human', id: 'local' });
+    const next = await within(t.service.agentNotes('run-1', { seat: 'claude', turn: 1, approach: null, decisions: [{ text: 'B', why: null }] }));
+    expect(next).not.toBeNull();
+    expect((await t.service.view('run-1')).trail.at(-1)?.author).toEqual({ kind: 'agent', id: 'agent:claude' });
+  });
+
+  it('an agent write of unknown outcome is remembered and credited to the agent when it lands (review on #1218)', async () => {
+    const t = setup();
+    await t.service.ensure('run-1');
+    t.backend.holdNext = true;
+    await expect(t.service.agentNotes('run-1', { seat: 'claude', turn: 1, approach: 'Plan', decisions: [] })).rejects.toBeInstanceOf(UndeterminedWriteError);
+    t.backend.undetermined?.();
+    const v = await t.service.view('run-1');
+    expect(v.sections?.approach).toBe('Plan');
+    expect(v.trail.at(-1)).toMatchObject({ author: { kind: 'agent', id: 'agent:claude' }, steerId: null });
+    expect(t.injected).toHaveLength(0);
+  });
+
+  it('a seat name that is not a plain id is written as agent:agent, and an empty note writes nothing', async () => {
+    const t = setup();
+    await t.service.agentNotes('run-1', { seat: 'Claude Code; rm', turn: 1, approach: null, decisions: [{ text: 'x', why: null }] });
+    expect(t.backend.versions.at(-1)?.author).toBe('agent:agent');
+    const n = t.backend.versions.length;
+    expect(await t.service.agentNotes('run-1', { seat: 'claude', turn: 1, approach: '  ', decisions: [{ text: ' ', why: null }] })).toBeNull();
+    expect(t.backend.versions).toHaveLength(n);
+  });
+});
+
 describe('document text has no power over gates', () => {
   it('words that ask for a gate, a skip or lower rigor become a note on the next step’s brief, nothing else', async () => {
     const t = setup();

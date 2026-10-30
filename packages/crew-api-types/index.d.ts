@@ -360,10 +360,12 @@ export interface HealthCapabilities {
 /** The working document's sections, in order. */
 export type WorkingDocSectionId = 'goal' | 'approach' | 'decisions' | 'constraints' | 'questions' | 'next';
 
-/** Who wrote a version: a person (the operator), a plugin's own generated lines, or crew (the first version). */
+/** Who wrote a version: a person (the operator), a plugin's own generated lines, the power orchestrator's own notes
+ *  (`agent`, id `agent:<seat>`: Approach and Decisions only, never a steer), or crew (the first version). */
 export type WorkingDocAuthor =
   | { kind: 'human'; id: string }
   | { kind: 'plugin'; id: string }
+  | { kind: 'agent'; id: string }
   | { kind: 'system'; id: 'crew' };
 
 /** One version of the working document, as crew attributed it. */
@@ -777,7 +779,43 @@ export type PowerActivityEvent = {
   subject: string | null;
 };
 
+/** `/ws` frame: a seat's tool call started or finished, live from its stream as it happens (bus
+ *  `wicked.run.tool.started` / `wicked.run.tool.finished`). Sent for claude seats today; at most 24 frames per 2 s
+ *  and 4000 per attempt, and a call shown starting is always shown finishing. `target` is a repo-relative path, a
+ *  search, or a command with secrets cut, at most 160 characters. */
+export type ToolActivityEvent = {
+  type: 'toolActivity';
+  session: string;
+  ord: number;
+  attempt: number;
+  at: number;
+  id: string;
+  state: 'started' | 'finished';
+  kind: 'read' | 'search' | 'run' | 'test' | 'edit' | 'write' | 'skill' | 'task' | 'other';
+  tool: string;
+  target: string | null;
+  ok: boolean | null;
+  durationMs: number | null;
+};
+
+/** `/ws` frame: new working notes from the power orchestrator's stream (bus `wicked.run.notes.recorded`): its
+ *  approach when stated or restated, and each new decision with its reason. Crew writes them into the run's working
+ *  document as `agent:<seat>`; they never steer. */
+export type PowerWorkingNotesEvent = {
+  type: 'powerWorkingNotes';
+  session: string;
+  ord: number;
+  attempt: number;
+  turn: number;
+  seat: string;
+  at: number;
+  approach: string | null;
+  decisions: Array<{ text: string; why: string | null }>;
+};
+
 export type PowerEvent =
+  | ToolActivityEvent
+  | PowerWorkingNotesEvent
   | PowerActivityEvent
   | PowerIntakePlannedEvent
   | RigorRescoredEvent
@@ -797,6 +835,9 @@ export type RunBusType =
   | 'wicked.run.handoff.stepped'
   | 'wicked.run.power.toggled'
   | 'wicked.run.activity.recorded'
+  | 'wicked.run.tool.started'
+  | 'wicked.run.tool.finished'
+  | 'wicked.run.notes.recorded'
   | 'wicked.run.unit.started'
   | 'wicked.run.unit.finished'
   | 'wicked.run.checks.evaluated'

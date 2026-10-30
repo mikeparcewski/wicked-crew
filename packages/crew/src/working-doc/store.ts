@@ -22,11 +22,12 @@ export const WORKING_DOCS_FILENAME = 'daemon-working-docs.json';
 export const WORKING_DOC_SIDECAR = 'crew-working-doc.json';
 export const WORKING_DOC_KIND = 'phase-report';
 
-/** Who a version is by. A person's edit is `human` (the operator), a plugin's own generated lines `plugin`, the
- *  document crew seeds `system`. */
+/** Who a version is by. A person's edit is `human` (the operator), a plugin's own generated lines `plugin`, the power
+ *  orchestrator's own notes `agent` (`agent:<seat>`), the document crew seeds `system`. Only `human` ever steers. */
 export type DocAuthor =
   | { kind: 'human'; id: string }
   | { kind: 'plugin'; id: string }
+  | { kind: 'agent'; id: string }
   | { kind: 'system'; id: 'crew' };
 
 export interface TrailEntry {
