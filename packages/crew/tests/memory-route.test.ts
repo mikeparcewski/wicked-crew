@@ -275,7 +275,7 @@ describe('memory-management routes (DES-MEM-FACETED-001)', () => {
   });
 
   it('502s a spawn ENOENT with the not-installed text and the install pointer', async () => {
-    estateTool.mockRejectedValueOnce(new EstateMcpError('failed to spawn wicked-estate-mcp: spawn wicked-estate-mcp ENOENT'));
+    estateTool.mockRejectedValueOnce(new EstateMcpError('failed to spawn wicked-estate-mcp: spawn wicked-estate-mcp ENOENT', undefined, 'ENOENT'));
 
     const res = await app.inject({ method: 'GET', url: '/api/v1/memory/coverage' });
 
@@ -297,6 +297,13 @@ describe('memory-management routes (DES-MEM-FACETED-001)', () => {
     const coded = await app.inject({ method: 'GET', url: '/api/v1/memory' });
     expect(coded.statusCode).toBe(502);
     expect((coded.json() as { error: string }).error).toContain('tool failed');
+
+    // A spawn that failed for another reason keeps its message, even when the path names ENOENT.
+    estateTool.mockRejectedValueOnce(new EstateMcpError('failed to spawn wicked-estate-mcp: spawn /opt/ENOENT/wicked-estate-mcp EACCES', undefined, 'EACCES'));
+    const denied = await app.inject({ method: 'GET', url: '/api/v1/memory' });
+    expect(denied.statusCode).toBe(502);
+    expect((denied.json() as { error: string }).error).toContain('EACCES');
+    expect((denied.json() as { error: string }).error).not.toContain('not installed');
   });
 
   // ── GET /memory/coverage ──────────────────────────────────────────────────────

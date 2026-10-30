@@ -168,6 +168,23 @@ describe('estate, bus, vault probes', () => {
       put('wicked-estate-mcp.exe');
       expect(estateMcpResolvable(env, 'win32')).toBe(true);
       expect(estateMcpResolvable(env, 'linux')).toBe(false);
+      // An extensionless override path resolves to its .exe on Windows, as spawn does.
+      expect(estateMcpResolvable({ WICKED_ESTATE_MCP_EXE: join(dir, 'wicked-estate-mcp'), PATH: '' }, 'win32')).toBe(true);
+      expect(estateMcpResolvable({ WICKED_ESTATE_MCP_EXE: join(dir, 'wicked-estate-mcp'), PATH: '' }, 'linux')).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  it('estateMcpResolvable: an empty PATH entry is the current directory, as spawn reads it', async () => {
+    const { mkdtempSync, writeFileSync, chmodSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'estate-resolve-cwd-'));
+    try {
+      writeFileSync(join(dir, 'wicked-estate-mcp'), ''); chmodSync(join(dir, 'wicked-estate-mcp'), 0o755);
+      expect(estateMcpResolvable({ PATH: ':/definitely/not/here' }, 'linux', dir)).toBe(true);
+      expect(estateMcpResolvable({ PATH: '' }, 'linux', dir)).toBe(true);
+      expect(estateMcpResolvable({ PATH: '/definitely/not/here' }, 'linux', dir)).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

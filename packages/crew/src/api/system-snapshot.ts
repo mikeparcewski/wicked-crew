@@ -183,12 +183,18 @@ function isExecutableFile(path: string): boolean {
 
 /** Whether `wicked-estate-mcp` can be spawned: `WICKED_ESTATE_MCP_EXE` (a path, or a bare name) when set,
  *  else `wicked-estate-mcp`; a bare name is looked up on PATH, a path must be an executable file. */
-export function estateMcpResolvable(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): boolean {
+export function estateMcpResolvable(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+  cwd: string = process.cwd(),
+): boolean {
   const exe = estateMcpExe(env);
-  if (exe.includes('/') || exe.includes('\\')) return isExecutableFile(exe);
-  // Shell-free spawn on Windows (libuv) appends `.com` then `.exe` to a bare name, and never a PATHEXT `.cmd`/`.bat` shim.
+  // Shell-free spawn on Windows (libuv) appends `.com` then `.exe` to a bare name AND to a path, and
+  // never a PATHEXT `.cmd`/`.bat` shim.
   const suffixes = platform === 'win32' ? ['', '.com', '.exe'] : [''];
-  return (env['PATH'] ?? '').split(delimiter).some((dir) => dir !== '' && suffixes.some((x) => isExecutableFile(join(dir, exe + x))));
+  if (exe.includes('/') || exe.includes('\\')) return suffixes.some((x) => isExecutableFile(exe + x));
+  // An empty PATH entry is the current directory, as spawn's own lookup reads it.
+  return (env['PATH'] ?? '').split(delimiter).some((dir) => suffixes.some((x) => isExecutableFile(join(dir === '' ? cwd : dir, exe + x))));
 }
 
 /** The container runtime CLI the engine would use (`container_floor.rs` `runtime_candidates`):

@@ -75,10 +75,13 @@ const CLIENT_VERSION: string = ((): string => {
  *  params, -32601 method refused under --readonly, -32603 internal), absent for a transport fault. */
 export class EstateMcpError extends Error {
   readonly code?: number;
-  constructor(message: string, code?: number) {
+  /** The OS error code (`ENOENT`, `EACCES`, ...) when the server process could not be spawned at all. */
+  readonly spawnCode?: string;
+  constructor(message: string, code?: number, spawnCode?: string) {
     super(message);
     this.name = 'EstateMcpError';
     if (code !== undefined) this.code = code;
+    if (spawnCode !== undefined) this.spawnCode = spawnCode;
   }
 }
 
@@ -426,7 +429,7 @@ export async function callEstateToolRaw(
     }
 
     child.on('error', (err) => {
-      finish(() => rejectPromise(new EstateMcpError(`${ESTATE_SPAWN_FAILED_PREFIX} ${err.message}`)));
+      finish(() => rejectPromise(new EstateMcpError(`${ESTATE_SPAWN_FAILED_PREFIX} ${err.message}`, undefined, (err as NodeJS.ErrnoException).code)));
     });
     child.on('close', () => {
       finish(() =>
