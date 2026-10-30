@@ -1938,41 +1938,53 @@ describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI 
     expect([...m.ENGINE_VERDICTS]).toEqual(['caught', 'gap', 'false_positive']);
     // One well-formed `caught` row for the staged sample `x` (double quotes only — it rides inside the fake's single quotes).
     const rowOf = '({ sample: { id: x.id, description: x.description, kind: x.kind, steering_type: x.steering_type }, expected: "allow", fired: [], verdict: "caught" })';
-    const refusals: [string, RegExp, { rowsJs?: string; summaryJs?: string }][] = [
-      ['duplicate id', /results\[6\] names sample alpha@[0-9a-f]{12} a second time — exactly one result per staged sample, never two/, { rowsJs: `const base = samples.map((x) => ${rowOf}); const results = [...base, base[0]];` }],
+    // One CLI spawn (a duplicate id) covers the wiring: exit 1, named, nothing published. Every other
+    // shape goes through the pure verifier on the same rows and staged samples — a spawn each timed
+    // out under host load (#1209).
+    const { samples } = readSamples();
+    const rowFor = (x: Sample): Record<string, unknown> => ({ sample: { id: x.id, description: x.description, kind: x.kind, steering_type: x.steering_type }, expected: 'allow', fired: [], verdict: 'caught' });
+    const caughtRows = samples.map(rowFor);
+    const tally = { total: 6, caught: 6, gaps: 0, false_positives: 0 };
+    const reportOf = (results: unknown[], summary: unknown = tally): unknown => ({ results, summary, degraded: null });
+    const duplicateRe = /results\[6\] names sample alpha@[0-9a-f]{12} a second time — exactly one result per staged sample, never two/;
+    expect(m.verifyEngineReport(reportOf(caughtRows), samples)).toBeNull();
+    const refusals: [string, RegExp, unknown][] = [
+      ['duplicate id', duplicateRe, reportOf([...caughtRows, caughtRows[0]])],
       [
         'extra id',
         /results\[6\] names sample "extra@000000000000", which was not staged — the engine evaluated something other than the pinned samples/,
-        { rowsJs: `const results = samples.map((x) => ${rowOf}); results.push({ sample: { id: "extra@000000000000", description: "d", kind: "good", steering_type: "development" }, expected: "allow", fired: [], verdict: "caught" });` },
+        reportOf([...caughtRows, { sample: { id: 'extra@000000000000', description: 'd', kind: 'good', steering_type: 'development' }, expected: 'allow', fired: [], verdict: 'caught' }]),
       ],
       [
         'missing row',
         /the engine report is incomplete: 5 result row\(s\) for 6 staged sample\(s\) — 1 staged sample\(s\) have no result \("alpha@[0-9a-f]{12}"\); every staged sample must be judged exactly once/,
-        { rowsJs: `const results = samples.slice(1).map((x) => ${rowOf});` },
+        reportOf(samples.slice(1).map(rowFor)),
       ],
-      ['missing verdict', /results\[0\] \(alpha@[0-9a-f]{12}\) carries verdict undefined, not one of caught\|gap\|false_positive/, { rowsJs: `const results = samples.map((x) => { const r = ${rowOf}; delete r.verdict; return r; });` }],
-      ['unknown verdict', /results\[0\] \(alpha@[0-9a-f]{12}\) carries verdict "maybe", not one of caught\|gap\|false_positive/, { rowsJs: `const results = samples.map((x) => ({ ...${rowOf}, verdict: "maybe" }));` }],
-      ['fired not an array', /results\[0\] \(alpha@[0-9a-f]{12}\) carries no `fired` array of rule ids \(got "DOC-1"\)/, { rowsJs: `const results = samples.map((x) => ({ ...${rowOf}, fired: "DOC-1" }));` }],
-      ['fired of non-strings', /results\[0\] \(alpha@[0-9a-f]{12}\) carries no `fired` array of rule ids \(got \[1\]\)/, { rowsJs: `const results = samples.map((x) => ({ ...${rowOf}, fired: [1] }));` }],
+      [
+        'missing verdict',
+        /results\[0\] \(alpha@[0-9a-f]{12}\) carries verdict undefined, not one of caught\|gap\|false_positive/,
+        reportOf(samples.map((x) => { const r = rowFor(x); delete r['verdict']; return r; })),
+      ],
+      ['unknown verdict', /results\[0\] \(alpha@[0-9a-f]{12}\) carries verdict "maybe", not one of caught\|gap\|false_positive/, reportOf(samples.map((x) => ({ ...rowFor(x), verdict: 'maybe' })))],
+      ['fired not an array', /results\[0\] \(alpha@[0-9a-f]{12}\) carries no `fired` array of rule ids \(got "DOC-1"\)/, reportOf(samples.map((x) => ({ ...rowFor(x), fired: 'DOC-1' })))],
+      ['fired of non-strings', /results\[0\] \(alpha@[0-9a-f]{12}\) carries no `fired` array of rule ids \(got \[1\]\)/, reportOf(samples.map((x) => ({ ...rowFor(x), fired: [1] })))],
       [
         'summary mismatch',
         /the engine report's summary does not reconcile with its rows: total 5 != 6, caught 7 != 6 \(the rows tally total 6 · caught 6 · gaps 0 · false_positives 0\)/,
-        { summaryJs: '{ total: 5, caught: 7, gaps: 0, false_positives: 0 }' },
+        reportOf(caughtRows, { total: 5, caught: 7, gaps: 0, false_positives: 0 }),
       ],
-      ['summary field missing', /the engine report's summary does not reconcile with its rows: gaps undefined != 0 \(the rows tally/, { summaryJs: '{ total: results.length, caught: results.length, false_positives: 0 }' }],
+      ['summary field missing', /the engine report's summary does not reconcile with its rows: gaps undefined != 0 \(the rows tally/, reportOf(caughtRows, { total: 6, caught: 6, false_positives: 0 })],
     ];
-    for (const [label, re, opts] of refusals) {
-      okEngine(opts);
-      const r = runWithPath();
-      expect(r.status, label).toBe(1);
-      expect(r.stderr, label).toMatch(/run: TOOL FAILURE \(wicked-core 9\.9\.9-fake\) — /);
-      expect(r.stderr, label).toMatch(re);
-      expect(existsSync(join(outDir, 'report.json')), label).toBe(false);
-      expect(existsSync(join(outDir, 'report.meta.json')), label).toBe(false);
-    }
-    // The pure verifier, on the same shapes, for the summary the tally must equal. All-gap is only
+    for (const [label, re, rep] of refusals) expect(m.verifyEngineReport(rep, samples), label).toMatch(re);
+    okEngine({ rowsJs: `const base = samples.map((x) => ${rowOf}); const results = [...base, base[0]];` });
+    const dup = runWithPath();
+    expect(dup.status, 'duplicate id').toBe(1);
+    expect(dup.stderr, 'duplicate id').toMatch(/run: TOOL FAILURE \(wicked-core 9\.9\.9-fake\) — /);
+    expect(dup.stderr, 'duplicate id').toMatch(duplicateRe);
+    expect(existsSync(join(outDir, 'report.json')), 'duplicate id').toBe(false);
+    expect(existsSync(join(outDir, 'report.meta.json')), 'duplicate id').toBe(false);
+    // The pure verifier, for the summary the tally must equal. All-gap is only
     // VALID over BAD samples — a gap is a bad behavior nothing caught (S14k has the good-sample case).
-    const { samples } = readSamples();
     const badSamples = samples.map((x) => ({ ...x, kind: 'bad' as const }));
     const rows = badSamples.map((x) => ({ sample: { id: x.id, description: x.description, kind: x.kind, steering_type: x.steering_type }, expected: 'deny', fired: [], verdict: 'gap' }));
     expect(m.verifyEngineReport({ results: rows, summary: { total: 6, caught: 0, gaps: 6, false_positives: 0 }, degraded: null }, badSamples)).toBeNull();
@@ -2074,34 +2086,25 @@ describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI 
     );
     expect(m.verifyEngineReport(report(nothingFired, { rule_coverage: { exercised: 0, unexercised: [{ rule_id: 'DOC-0', steering_type: 'development' }], per_type: { development: { exercised: 0, unexercised: 1 } } } }), staged)).toBeNull();
 
-    // Through the CLI — nothing published, the refusal named: codex round 4's exact report (good
-    // samples with expected deny, empty fired, verdict gap — the shape S14h used to bless as a valid
-    // all-gap run), `rule_coverage: null` (which then crashed the summary print AFTER publication),
-    // a report without `degraded`, and a boolean `degraded`.
-    const spawnRefusals: [string, Parameters<typeof okEngine>[0], RegExp][] = [
-      [
-        'good + deny + gap',
-        { rowsJs: 'const results = samples.map((x) => ({ sample: { id: x.id, description: x.description, kind: x.kind, steering_type: x.steering_type }, expected: "deny", fired: [], verdict: "gap" }));' },
-        /results\[0\] \(alpha@[0-9a-f]{12}\) carries expected "deny" but a good sample expects "allow"/,
-      ],
-      ['rule_coverage null', { coverageJs: ', rule_coverage: null' }, /the engine report's `rule_coverage` is malformed: expected an object \{ exercised, unexercised\[\] \}, got null/],
-      [
-        'per_type null (codex round 8)',
-        { coverageJs: ', rule_coverage: { exercised: 0, unexercised: [{ rule_id: "DOC-1", steering_type: "architecture" }], recall_only: 0, per_type: null }' },
-        /the engine report's `rule_coverage` is malformed: per_type null is not an object keyed by steering type/,
-      ],
-      ['degraded absent', { degradedJs: '' }, /the engine report carries no `degraded` field/],
-      ['degraded boolean', { degradedJs: ', degraded: true' }, /the engine report's `degraded` is true, not null or one of facet-only/],
-    ];
-    for (const [label, opts, re] of spawnRefusals) {
-      okEngine(opts);
-      const r = runWithPath();
-      expect(r.status, label).toBe(1);
-      expect(r.stderr, label).toMatch(/run: TOOL FAILURE \(wicked-core 9\.9\.9-fake\) — /);
-      expect(r.stderr, label).toMatch(re);
-      expect(existsSync(join(outDir, 'report.json')), label).toBe(false);
-      expect(existsSync(join(outDir, 'report.meta.json')), label).toBe(false);
-    }
+    // codex round 4's exact report (good samples with expected deny, empty fired, verdict gap — the
+    // shape S14h used to bless as a valid all-gap run), per_type null (round 8), a report without
+    // `degraded`, and a boolean `degraded`: the pure verifier. One CLI spawn keeps the wiring —
+    // nothing published, the refusal named — on `rule_coverage: null`, which once crashed the
+    // summary print AFTER publication (#1209).
+    const goodDenyGap = samples.map((x) => ({ sample: ref(x), expected: 'deny', fired: [], verdict: 'gap' }));
+    expect(m.verifyEngineReport(report(goodDenyGap), samples), 'good + deny + gap').toMatch(/results\[0\] \(alpha@[0-9a-f]{12}\) carries expected "deny" but a good sample expects "allow"/);
+    expect(m.verifyEngineReport(report(okRows, { rule_coverage: { exercised: 0, unexercised: [{ rule_id: 'DOC-1', steering_type: 'architecture' }], recall_only: 0, per_type: null } }), staged), 'per_type null (codex round 8)').toMatch(
+      /the engine report's `rule_coverage` is malformed: per_type null is not an object keyed by steering type/,
+    );
+    expect(m.verifyEngineReport(withoutDegraded, staged), 'degraded absent').toMatch(/the engine report carries no `degraded` field/);
+    expect(m.verifyEngineReport(report(okRows, { degraded: true }), staged), 'degraded boolean').toMatch(/the engine report's `degraded` is true, not null or one of facet-only/);
+    okEngine({ coverageJs: ', rule_coverage: null' });
+    const refused = runWithPath();
+    expect(refused.status, 'rule_coverage null').toBe(1);
+    expect(refused.stderr, 'rule_coverage null').toMatch(/run: TOOL FAILURE \(wicked-core 9\.9\.9-fake\) — /);
+    expect(refused.stderr, 'rule_coverage null').toMatch(/the engine report's `rule_coverage` is malformed: expected an object \{ exercised, unexercised\[\] \}, got null/);
+    expect(existsSync(join(outDir, 'report.json')), 'rule_coverage null').toBe(false);
+    expect(existsSync(join(outDir, 'report.meta.json')), 'rule_coverage null').toBe(false);
     // `degraded: null` (full fidelity) with `rule_coverage` ABSENT: published, and the summary print
     // says "not reported" instead of crashing.
     okEngine({ degradedJs: ', degraded: null', ruleCoverage: false });
