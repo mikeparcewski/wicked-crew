@@ -407,6 +407,34 @@ describe('the orchestrator’s own notes (power mode)', () => {
     expect(t.injected.length).toBe(steersBefore);
   });
 
+  it('a person’s write of unknown outcome does not lock the document: notes and the next edit still go through (review on #1218)', async () => {
+    const t = setup();
+    await t.service.ensure('run-1');
+    t.backend.holdNext = true;
+    await expect(t.service.propose('run-1', { base: 0, author: 'operator', sections: { approach: 'Mine' } }, HUMAN)).rejects.toBeInstanceOf(UndeterminedWriteError);
+    const within = <T,>(p: Promise<T>) => Promise.race([p, new Promise<never>((_, no) => setTimeout(() => no(new Error('locked')), 2_000))]);
+    // The agent's notes wait for the pending write to settle, and do not hang the run's lock.
+    await within(t.service.agentNotes('run-1', { seat: 'claude', turn: 1, approach: null, decisions: [{ text: 'A', why: null }] }));
+    t.backend.undetermined?.();
+    const v = await within(t.service.view('run-1'));
+    expect(v.trail.at(-1)?.author).toEqual({ kind: 'human', id: 'local' });
+    const next = await within(t.service.agentNotes('run-1', { seat: 'claude', turn: 1, approach: null, decisions: [{ text: 'B', why: null }] }));
+    expect(next).not.toBeNull();
+    expect((await t.service.view('run-1')).trail.at(-1)?.author).toEqual({ kind: 'agent', id: 'agent:claude' });
+  });
+
+  it('an agent write of unknown outcome is remembered and credited to the agent when it lands (review on #1218)', async () => {
+    const t = setup();
+    await t.service.ensure('run-1');
+    t.backend.holdNext = true;
+    await expect(t.service.agentNotes('run-1', { seat: 'claude', turn: 1, approach: 'Plan', decisions: [] })).rejects.toBeInstanceOf(UndeterminedWriteError);
+    t.backend.undetermined?.();
+    const v = await t.service.view('run-1');
+    expect(v.sections?.approach).toBe('Plan');
+    expect(v.trail.at(-1)).toMatchObject({ author: { kind: 'agent', id: 'agent:claude' }, steerId: null });
+    expect(t.injected).toHaveLength(0);
+  });
+
   it('a seat name that is not a plain id is written as agent:agent, and an empty note writes nothing', async () => {
     const t = setup();
     await t.service.agentNotes('run-1', { seat: 'Claude Code; rm', turn: 1, approach: null, decisions: [{ text: 'x', why: null }] });

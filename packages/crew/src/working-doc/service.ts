@@ -179,12 +179,20 @@ export class WorkingDocService {
     return { ...base, doc: { projectId: rec.projectId, docId: rec.docId, head: head.head }, sections: { ...blankSections(), ...sectionsOf(head.html) } };
   }
 
-  /** The run's working document, created on first ask (its Goal seeded from the run's intent, by crew). */
-  ensure(runId: string): Promise<WorkingDocView | null> {
+  /** The run's working document, created on first ask (its Goal seeded from the run's intent, by crew). The view is
+   *  read after the lock is released: `view()` settles a pending write under the same lock (review on #1218: reading it
+   *  inside deadlocked the run's document). */
+  async ensure(runId: string): Promise<WorkingDocView | null> {
+    if (!(await this.ensureDoc(runId))) return null;
+    return this.view(runId);
+  }
+
+  /** Make the run's document if it has none; `false` when the run is unknown. */
+  private ensureDoc(runId: string): Promise<boolean> {
     return this.exclusive(runId, async () => {
-      if (this.d.store.get(runId) !== undefined) return this.view(runId);
+      if (this.d.store.get(runId) !== undefined) return true;
       const run = await this.d.run(runId);
-      if (run === null) return null;
+      if (run === null) return false;
       const docId = workingDocName(runId);
       const html = initialHtml(run.title, { goal: run.problem.replace(/\r\n?/g, '\n').trim().slice(0, 1_500) });
       const { head } = await this.d.backend.create(run.projectId, docId, runId, html);
@@ -195,7 +203,7 @@ export class WorkingDocService {
       };
       this.d.store.put(rec);
       this.d.changed?.(runId, head);
-      return this.view(runId);
+      return true;
     });
   }
 
@@ -261,15 +269,7 @@ export class WorkingDocService {
         author: author.kind === 'human' ? `${author.id}${surface !== null ? ` via ${surface}` : ''}` : author.id,
       });
     } catch (err) {
-      if (err instanceof UndeterminedWriteError) {
-        // Not known whether it landed: remembered, so a later read attributes it if it does — never to the next caller —
-        // and looked at again on its own shortly, so its steer is not left waiting for someone to read.
-        this.d.store.update(runId, (r) => { r.pending = { expectHead: input.base, author, surface, values, at: this.now(), actor: { id: actor.id, kind: actor.kind } }; });
-        for (const ms of [30_000, 75_000]) {
-          const t = setTimeout(() => { void this.exclusive(runId, () => this.reconcile(runId)).catch(() => undefined); }, ms);
-          (t as { unref?: () => void }).unref?.();
-        }
-      }
+      if (err instanceof UndeterminedWriteError) this.rememberPending(runId, input.base, author, surface, values, actor);
       throw err;
     }
     if ('headMoved' in written) return { ok: false, code: 409, error: 'the working document changed since', head: written.head };
@@ -287,7 +287,7 @@ export class WorkingDocService {
   async agentNotes(runId: string, notes: AgentNotes): Promise<number | null> {
     const seat = AGENT_SEAT.test(notes.seat) ? notes.seat : 'agent';
     const id = `agent:${seat}`;
-    if ((await this.ensure(runId)) === null) return null;
+    if (!(await this.ensureDoc(runId))) return null;
     return this.exclusive(runId, async () => {
       const rec = this.d.store.get(runId);
       if (rec === undefined) return null;
@@ -322,17 +322,34 @@ export class WorkingDocService {
         if (changed.length === 0) return null;
         const values: Partial<Record<SectionId, string>> = {};
         for (const sid of changed) values[sid] = wanted[sid] ?? '';
-        const written = await this.d.backend.edit(rec.projectId, rec.docId, {
-          expectHead: head.head,
-          items: changed.map((sid) => ({ selector: anchorOf(sid), value: encodeSectionText(values[sid] ?? '') })),
-          author: id,
-        });
+        let written: { version: number; parent: number } | { headMoved: true; head: number };
+        try {
+          written = await this.d.backend.edit(rec.projectId, rec.docId, {
+            expectHead: head.head,
+            items: changed.map((sid) => ({ selector: anchorOf(sid), value: encodeSectionText(values[sid] ?? '') })),
+            author: id,
+          });
+        } catch (err) {
+          // Not known whether it landed: the same recovery as a person's write (review on #1218).
+          if (err instanceof UndeterminedWriteError) this.rememberPending(runId, head.head, { kind: 'agent', id }, null, values, { id, kind: 'agent' });
+          throw err;
+        }
         if ('headMoved' in written) continue;
         await this.record(runId, written.version, written.parent, { kind: 'agent', id }, null, changed, values, { id, kind: 'agent' });
         return written.version;
       }
       return null;
     });
+  }
+
+  /** A write whose outcome is not known: remembered, so a later read attributes it if it lands, never to the next
+   *  caller, and looked at again on its own shortly, so its steer (a person's) is not left waiting for a reader. */
+  private rememberPending(runId: string, expectHead: number, author: DocAuthor, surface: string | null, values: Partial<Record<SectionId, string>>, actor: { id: string; kind: string }): void {
+    this.d.store.update(runId, (r) => { r.pending = { expectHead, author, surface, values, at: this.now(), actor: { id: actor.id, kind: actor.kind } }; });
+    for (const ms of [30_000, 75_000]) {
+      const t = setTimeout(() => { void this.exclusive(runId, () => this.reconcile(runId)).catch(() => undefined); }, ms);
+      (t as { unref?: () => void }).unref?.();
+    }
   }
 
   /** A version that landed: its trail entry, its steer (a person's only), its audit line and the change frame. */
