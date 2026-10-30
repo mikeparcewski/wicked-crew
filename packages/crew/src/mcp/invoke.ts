@@ -126,7 +126,7 @@ export const invokeMcpTool: Invoker = async (config, secret, tool, args, timeout
         ? `the server was up, but ${tool} did not answer`
         : config.kind === 'mcp-stdio'
           ? 'the server was still starting (crew starts a stdio server for each call, and a cold start is slow on a loaded host)'
-          : 'the server did not accept the connection';
+          : 'the connection to the server did not complete (MCP initialize)';
       reject(new UpstreamCallError('timeout', false, `timed out after ${seconds(timeoutMs)}: ${cause}`));
     }, timeoutMs);
   });

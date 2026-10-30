@@ -157,6 +157,16 @@ export function budgetFromEnv(env: NodeJS.ProcessEnv = process.env): number {
   return Number.isInteger(n) && n > 0 ? n : DEFAULT_MCP_CALL_BUDGET;
 }
 
+/**
+ * A timeout from an MCP server names the call's load-scaled bound and how load set it (crew#1212).
+ * A REST tool's deadline is `min(bound, its mapping's own timeout)`, and its message already says
+ * which seconds ran out, so it carries no load note it did not run into (xreview on #1217).
+ */
+export function boundedTimeout(kind: string, failure: UpstreamCallError, note: string): UpstreamCallError {
+  if (failure.errorClass !== 'timeout' || kind === 'rest') return failure;
+  return new UpstreamCallError('timeout', failure.retryable, `${failure.message} (bound ${note})`);
+}
+
 export class McpBroker {
   private readonly invoke: Invoker;
   private readonly now: () => number;
@@ -269,18 +279,17 @@ export class McpBroker {
     // ── 6-7. Invoke, retrying read tools on transient failures only ─────────────────────────
     const secrets = secret === null ? [] : [secret];
     let result: UpstreamToolResult | null = null;
+    // ONE load-scaled deadline for the whole call, retries and their backoff included: each attempt
+    // gets what is left, so three slow attempts cannot outlast the shim's wait (xreview on #1217).
+    const bound = mcpCallBound(this.timeoutMs, this.load());
+    const deadlineAt = this.now() + bound.ms;
     for (let attempt = 0; ; attempt++) {
-      const bound = mcpCallBound(this.timeoutMs, this.load());
       try {
-        result = await this.invoke(target.config, secret, parts.tool, call.args, bound.ms, target.rest);
+        const left = Math.max(1, deadlineAt - this.now());
+        result = await this.invoke(target.config, secret, parts.tool, call.args, left, target.rest);
         break;
       } catch (err) {
-        const classified = classifyUpstreamError(err);
-        // A timeout names the bound it ran out of and how host load set it (crew#1212).
-        const failure =
-          classified.errorClass === 'timeout'
-            ? new UpstreamCallError('timeout', classified.retryable, `${classified.message} (bound ${bound.note})`)
-            : classified;
+        const failure = boundedTimeout(target.config.kind, classifyUpstreamError(err), bound.note);
         if (failure.errorClass === 'boundary') {
           // I6: a REST request that would leave its pinned host was refused before it was sent (or a
           // redirect off the host was not followed). Not the tool's failure, so the breaker is not
@@ -288,9 +297,10 @@ export class McpBroker {
           const reason = scrubResult(`${body.subject} was refused: ${failure.message}`, secrets);
           return this.refuse(span, 'guard_error', 'guard_error', 'broker:rest-host-pin', verdict.ruleIds, reason, 'call it with arguments that keep the request on the API\'s own host and path', 'rest_host_escape');
         }
-        if (verdict.class === 'read' && failure.retryable && attempt < MAX_READ_RETRIES) {
+        const backoff = 200 * (attempt + 1);
+        if (verdict.class === 'read' && failure.retryable && attempt < MAX_READ_RETRIES && deadlineAt - this.now() > backoff) {
           span.retries += 1;
-          await this.sleep(200 * (attempt + 1));
+          await this.sleep(backoff);
           continue;
         }
         breaker.failures += 1;

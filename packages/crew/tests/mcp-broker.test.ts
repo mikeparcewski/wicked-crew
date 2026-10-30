@@ -29,7 +29,7 @@ import { registerMcpRoutes } from '../src/api/mcp.js';
 import { brokerUrlFor } from '../src/api/server.js';
 import { CoreAdapter, type McpEngineGate } from '../src/core/adapter.js';
 import type { McpCallRecord, McpCallResponse, McpPreviewResponse } from '../src/core/types.js';
-import { BREAKER_OPEN_MS, BREAKER_THRESHOLD, budgetFromEnv, McpBroker, type McpBrokerDeps } from '../src/mcp/broker.js';
+import { boundedTimeout, BREAKER_OPEN_MS, BREAKER_THRESHOLD, budgetFromEnv, McpBroker, type McpBrokerDeps } from '../src/mcp/broker.js';
 import { McpCallRecordFile, type McpCallRecordSink } from '../src/mcp/call-records.js';
 import { deriveToolClass } from '../src/mcp/classify.js';
 import { classifyUpstreamError, UpstreamCallError } from '../src/mcp/invoke.js';
@@ -423,6 +423,30 @@ describe('crew#1212: the call deadline scales with host load, and a timeout name
       'mcp:fx/wt_echo failed upstream (timeout): timed out after 90 s: the server was still starting ' +
         '(bound 90 s = 30 s × 3.00 for 1-min load 42.0 on 14 CPUs)',
     );
+  });
+
+  it('retries share ONE deadline: each attempt gets what is left, and none starts once it is spent', async () => {
+    const bounds: number[] = [];
+    await boot({
+      load: () => ({ load1: 42, cores: 14 }),
+      invoke: async (_config, _secret, _tool, _args, timeoutMs) => {
+        bounds.push(timeoutMs);
+        clock += 80_000; // each attempt fails retryably after 80 s
+        throw new UpstreamCallError('transport', true, 'connection reset');
+      },
+    });
+    const r = await mcpCall('mcp:fx/wt_echo', { text: 'hi' });
+    // 90 s in all: the first attempt gets 90 s, the retry the 10 s left, and no third attempt.
+    expect(bounds).toEqual([90_000, 10_000]);
+    expect(r.body.outcome).toBe('upstream_error');
+  });
+
+  it('a REST timeout carries no load note; an MCP timeout does', () => {
+    const t = new UpstreamCallError('timeout', false, 'timed out after 30 s');
+    expect(boundedTimeout('rest', t, '90 s = 30 s × 3.00 for 1-min load 42.0 on 14 CPUs').message).toBe('timed out after 30 s');
+    expect(boundedTimeout('mcp-http', t, '90 s = x').message).toBe('timed out after 30 s (bound 90 s = x)');
+    const other = new UpstreamCallError('transport', true, 'reset');
+    expect(boundedTimeout('mcp-stdio', other, 'n')).toBe(other);
   });
 
   it('an idle host keeps the configured base, and a non-timeout failure carries no bound note', async () => {
