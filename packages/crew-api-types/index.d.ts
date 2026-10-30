@@ -784,9 +784,12 @@ export type PowerActivityEvent = {
 };
 
 /** `/ws` frame: a seat's tool call started or finished, live from its stream as it happens (bus
- *  `wicked.run.tool.started` / `wicked.run.tool.finished`). Sent for claude seats today; at most 24 frames per 2 s
- *  and 4000 per attempt, and a call shown starting is always shown finishing. `target` is a repo-relative path, a
- *  search, or a command with secrets cut, at most 160 characters. */
+ *  `wicked.run.tool.started` / `wicked.run.tool.finished`). Sent for claude, codex (`exec --json` items) and pi
+ *  (`--mode json` tool executions); at most 24 frames per 2 s and 4000 per attempt, and a call shown starting is
+ *  always shown finishing. `target` is a repo-relative path, a search, or a command with secrets cut, at most 160
+ *  characters. (0.151.0) `state: 'working'` (bus `wicked.run.tool.working`) is a quiet seat's heartbeat, any seat,
+ *  copilot included: after 15 s with no frame, one per 15 s while it stays quiet, `id` `working-<attempt>` (update one
+ *  row), `kind: 'working'`, `tool` the seat, `target` `last output N s ago`, `durationMs` that silence. */
 export type ToolActivityEvent = {
   type: 'toolActivity';
   session: string;
@@ -794,8 +797,8 @@ export type ToolActivityEvent = {
   attempt: number;
   at: number;
   id: string;
-  state: 'started' | 'finished';
-  kind: 'read' | 'search' | 'run' | 'test' | 'edit' | 'write' | 'skill' | 'task' | 'other';
+  state: 'started' | 'finished' | 'working';
+  kind: 'read' | 'search' | 'run' | 'test' | 'edit' | 'write' | 'skill' | 'task' | 'other' | 'working';
   tool: string;
   target: string | null;
   ok: boolean | null;
@@ -841,6 +844,7 @@ export type RunBusType =
   | 'wicked.run.activity.recorded'
   | 'wicked.run.tool.started'
   | 'wicked.run.tool.finished'
+  | 'wicked.run.tool.working'
   | 'wicked.run.notes.recorded'
   | 'wicked.run.unit.started'
   | 'wicked.run.unit.finished'
