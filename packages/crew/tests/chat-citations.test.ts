@@ -320,15 +320,26 @@ describe('crew#1211 — correct citations relative to a package are verified, no
     write('packages/crew/src/api/run-liveness.ts', numbered(40, {}));
     // A second `core/types.ts` in another package: a tail match is ambiguous without context.
     write('packages/api-types/src/core/types.ts', numbered(20, {}));
-    const git = (...args: string[]): void => {
-      execFileSync('git', ['-C', crew, ...args], { stdio: 'ignore' });
+    write('packages/old/src/api/auth.ts', numbered(10, {}));
+    write('src/config.ts', numbered(10, {}));
+    const commitAll = (repo: string): void => {
+      execFileSync('git', ['-C', repo, 'add', '-A'], { stdio: 'ignore' });
+      execFileSync('git', ['-C', repo, 'commit', '-q', '-m', 'more'], { stdio: 'ignore' });
     };
-    git('add', '-A');
-    git('commit', '-q', '-m', 'two');
-    const core = join(scratch, 'wicked-core');
-    initRepo(core, 'src/gate_hook.rs', numbered(30, {}));
+    commitAll(crew);
+    const estate = join(scratch, 'wicked-estate');
+    initRepo(estate, 'src/gate_hook.rs', numbered(30, {}));
+    for (const [rel, body] of [
+      ['crates/bus/src/types.ts', numbered(30, {})],
+      ['vendor/wicked-crew/src/auth.ts', numbered(10, {})],
+      ['src/config.ts', numbered(10, {})],
+    ] as const) {
+      mkdirSync(dirname(join(estate, rel)), { recursive: true });
+      writeFileSync(join(estate, rel), body, 'utf8');
+    }
+    commitAll(estate);
     roots = [
-      { name: 'wicked-core', absRoot: core },
+      { name: 'wicked-estate', absRoot: estate },
       { name: 'wicked-crew', absRoot: crew },
     ];
   }, 60_000);
@@ -369,22 +380,60 @@ describe('crew#1211 — correct citations relative to a package are verified, no
     expect(bare.items[0]).toMatchObject({ status: 'unchecked' });
     expect(bare.items[0]?.note).toMatch(/does not say which/);
     expect(bare.unverifiable).toBe(0);
-    // Beside a file the reply already resolved: that package's types.ts.
-    const beside = await verifyCitations(
-      '`packages/api-types/src/core/index.ts` is absent but `api-types/src/core/types.ts` exists, and `core/types.ts:12` is beside it',
+    const declared = await verifyCitations(
+      'Under `packages/api-types/src/`: `core/types.ts:12`.',
       roots,
       undefined,
       BIG_BUDGET,
     );
-    expect(itemOf(beside.items, 'core/types.ts:12')).toMatchObject({
+    expect(declared.items[0]).toMatchObject({
       status: 'verified',
       note: 'found at wicked-crew/packages/api-types/src/core/types.ts',
     });
   });
 
+  // xreview on #1214: a false confirmation is the one failure this check must not have.
+  it('never picks the first of several roots: the same path in two repos is unchecked', async () => {
+    const got = await verifyCitations('`src/config.ts:1`', roots, undefined, BIG_BUDGET);
+    expect(got.items[0]).toMatchObject({ status: 'unchecked' });
+    const named = await verifyCitations('`wicked-estate/src/config.ts:1`', roots, undefined, BIG_BUDGET);
+    expect(named.items[0]).toMatchObject({ status: 'verified' });
+  });
+
+  it('a file found only outside the directory the answer named is not confirmed', async () => {
+    const got = await verifyCitations(
+      'Paths are under `wicked-crew/packages/new/src/`: `api/auth.ts:1`.',
+      roots,
+      undefined,
+      BIG_BUDGET,
+    );
+    expect(got.items[0]).toMatchObject({ status: 'unchecked' });
+    expect(got.items[0]?.note).toMatch(/not under the directory this answer named/);
+  });
+
+  it('a repo named in full confines the search to it; a short alias never widens a bare name', async () => {
+    // wicked-crew has no src/auth.ts; wicked-estate's vendor/wicked-crew/src/auth.ts is not it.
+    const named = await verifyCitations('`wicked-crew/src/auth.ts:1`', roots, undefined, BIG_BUDGET);
+    expect(named.items[0]).toMatchObject({ status: 'unverified' });
+    // `estate` is wicked-estate's short alias, but `estate/types.ts` is not "any types.ts in wicked-estate".
+    const alias = await verifyCitations('`estate/types.ts:25`', [roots[0]!], undefined, BIG_BUDGET);
+    expect(alias.items[0]).toMatchObject({ status: 'unverified' });
+  });
+
+  it('a repo that could not be listed leaves a tail match unchecked, never "unique"', async () => {
+    const real = chatCitationDeps();
+    const deps: ChatCitationDeps = {
+      ...real,
+      listFiles: async (absRoot) => (absRoot === roots[0]!.absRoot ? null : real.listFiles(absRoot)),
+    };
+    const got = await verifyCitations('`api/run-liveness.ts:3`', roots, deps, BIG_BUDGET);
+    expect(got.items[0]).toMatchObject({ status: 'unchecked' });
+  });
+
   it('a range is checked through its last line, and a named symbol anywhere in it', async () => {
     const got = await verifyCitations(
       '`api/run-liveness.ts:30-39` fits; `api/run-liveness.ts:30-90` runs past the end; ' +
+        '`api/run-liveness.ts:30-20` ends before it starts; ' +
         '`silentTurnMinutes` is at `api/stall-watchdog.ts:408-425`.',
       roots,
       undefined,
@@ -393,18 +442,19 @@ describe('crew#1211 — correct citations relative to a package are verified, no
     expect(itemOf(got.items, 'api/run-liveness.ts:30-39')).toMatchObject({ status: 'verified' });
     expect(itemOf(got.items, 'api/run-liveness.ts:30-90')).toMatchObject({ status: 'unverified' });
     expect(itemOf(got.items, 'api/run-liveness.ts:30-90')?.note).toMatch(/41 lines/);
+    expect(itemOf(got.items, 'api/run-liveness.ts:30-20')).toMatchObject({ status: 'unchecked' });
     expect(itemOf(got.items, 'api/stall-watchdog.ts:408-425')).toMatchObject({ status: 'verified' });
   });
 
   it('a path that is in no repo is still unverified, and a `..` never tail-matches', async () => {
     const got = await verifyCitations(
-      '`api/stall-watchdawg.ts:3` and `wicked-crew/../wicked-core/core/types.ts:1`',
+      '`api/stall-watchdawg.ts:3` and `wicked-crew/../wicked-estate/core/types.ts:1`',
       roots,
       undefined,
       BIG_BUDGET,
     );
     expect(itemOf(got.items, 'api/stall-watchdawg.ts:3')).toMatchObject({ status: 'unverified' });
-    expect(itemOf(got.items, 'wicked-crew/../wicked-core/core/types.ts:1')).toMatchObject({ status: 'unverified' });
+    expect(itemOf(got.items, 'wicked-crew/../wicked-estate/core/types.ts:1')).toMatchObject({ status: 'unverified' });
   });
 });
 
