@@ -655,7 +655,7 @@ export function macAvailableBytes(path: string, timeoutMs: number = PROBE_TIMEOU
   if (hit !== undefined && Date.now() - hit.at < DISK_AVAILABLE_TTL_MS) return Promise.resolve(hit.value);
   return new Promise((resolve) => {
     // The path rides the environment, never the script text.
-    execFile('osascript', ['-l', 'JavaScript', '-e', JXA_AVAILABLE], { timeout: timeoutMs, env: { ...process.env, WICKED_DISK_PATH: path } }, (err, stdout) => {
+    execFile('osascript', ['-l', 'JavaScript', '-e', JXA_AVAILABLE], { timeout: timeoutMs, env: { ...childEnvWithBootEstateDb(process.env), WICKED_DISK_PATH: path } }, (err, stdout) => {
       const n = err === null ? Number(String(stdout).trim()) : Number.NaN;
       const value = Number.isFinite(n) && n > 0 ? n : null;
       if (value !== null) availableCache.set(path, { at: Date.now(), value }); // a failed read is never kept
