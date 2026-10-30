@@ -14,5 +14,18 @@
       "paths": ["packages/crew/tests/generated/api-sample.generated.test.ts"],
       "command": ["npm", "run", "-w", "packages/crew", "generate:api-tests"]
     }
-  ]
+  ],
+  "rerun": {
+    "test": {
+      "command": ["npm", "run", "-w", "packages/crew", "test", "--", "--passWithNoTests", "{files}"],
+      "by": "file",
+      "root": "packages/crew"
+    },
+    "test_targeted": {
+      "command": ["node", "scripts/test-related.mjs", "--tests", "{files}"],
+      "by": "file",
+      "root": "packages/crew",
+      "self_retry": true
+    }
+  }
 }

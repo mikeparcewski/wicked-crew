@@ -16,6 +16,12 @@ mentioned only where a daemon release depends on them.
 
 ### Changed
 
+- **A failing floor re-runs only the failing test files.** `.wicked/checks.json` declares `rerun` for `test`
+  (vitest over the files) and `test_targeted` (`scripts/test-related.mjs --tests <files>`, which keeps the clean
+  build, the cross-repo filter and the one deadline retry). With wicked-core#1198 the engine's retry and its base
+  comparison then run only the files the head failed instead of the whole suite. `test_targeted` is marked
+  `self_retry`, because it already re-runs its own deadline failures, so the engine does not retry it a second
+  time. Needs an engine with wicked-core#1198: an older engine refuses the unknown `rerun` key.
 - **A plugin may write its own lines under Open questions and Next, not only Decisions.** The Phase report fills a
   run's working document from the run's events: decisions answered under Decisions, what waits on a person under
   Open questions, and what the newest hand-off round left under Next. A plugin's write never steers, in any section,
