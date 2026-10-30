@@ -155,6 +155,20 @@ describe('callEstateTool', () => {
 
     expect(err).toBeInstanceOf(EstateMcpError);
     expect((err as EstateMcpError).message).toMatch(/exited before answering proposal\.reject/);
+    expect((err as EstateMcpError).spawnCode).toBeUndefined();
+  });
+
+  it('carries the OS code when the server cannot be spawned at all (crew#1213)', async () => {
+    const err = await callEstateTool(
+      'memory.coverage',
+      {},
+      { spawn: () => spawn(join(tmpdir(), 'definitely-not-here', 'wicked-estate-mcp'), [], { stdio: ['pipe', 'pipe', 'pipe'] }), timeoutMs: 5000 },
+    ).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(EstateMcpError);
+    expect((err as EstateMcpError).message).toMatch(/^failed to spawn wicked-estate-mcp: /);
+    expect((err as EstateMcpError).spawnCode).toBe('ENOENT');
+    expect((err as EstateMcpError).code).toBeUndefined();
   });
 });
 

@@ -75,10 +75,13 @@ const CLIENT_VERSION: string = ((): string => {
  *  params, -32601 method refused under --readonly, -32603 internal), absent for a transport fault. */
 export class EstateMcpError extends Error {
   readonly code?: number;
-  constructor(message: string, code?: number) {
+  /** The OS error code (`ENOENT`, `EACCES`, ...) when the server process could not be spawned at all. */
+  readonly spawnCode?: string;
+  constructor(message: string, code?: number, spawnCode?: string) {
     super(message);
     this.name = 'EstateMcpError';
     if (code !== undefined) this.code = code;
+    if (spawnCode !== undefined) this.spawnCode = spawnCode;
   }
 }
 
@@ -97,6 +100,12 @@ export function estateMcpExe(env: NodeJS.ProcessEnv = process.env): string {
   const override = env['WICKED_ESTATE_MCP_EXE'];
   return override !== undefined && override !== '' ? override : 'wicked-estate-mcp';
 }
+
+/** The install pointer shown wherever a missing `wicked-estate-mcp` is reported (estate is optional). */
+export const ESTATE_INSTALL_HINT = 'Install wicked-estate (npx wicked-installer) or set WICKED_ESTATE_MCP_EXE.';
+
+/** The prefix of the error a failed `spawn` of the estate MCP carries (see the `error` handler below). */
+export const ESTATE_SPAWN_FAILED_PREFIX = 'failed to spawn wicked-estate-mcp:';
 
 /**
  * The memory store this daemon reads and writes.
@@ -420,7 +429,7 @@ export async function callEstateToolRaw(
     }
 
     child.on('error', (err) => {
-      finish(() => rejectPromise(new EstateMcpError(`failed to spawn wicked-estate-mcp: ${err.message}`)));
+      finish(() => rejectPromise(new EstateMcpError(`${ESTATE_SPAWN_FAILED_PREFIX} ${err.message}`, undefined, (err as NodeJS.ErrnoException).code)));
     });
     child.on('close', () => {
       finish(() =>

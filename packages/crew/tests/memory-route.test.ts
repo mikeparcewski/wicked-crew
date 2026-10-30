@@ -274,6 +274,38 @@ describe('memory-management routes (DES-MEM-FACETED-001)', () => {
     expect((res.json() as { error: string }).error).toContain('exited before answering');
   });
 
+  it('502s a spawn ENOENT with the not-installed text and the install pointer', async () => {
+    estateTool.mockRejectedValueOnce(new EstateMcpError('failed to spawn wicked-estate-mcp: spawn wicked-estate-mcp ENOENT', undefined, 'ENOENT'));
+
+    const res = await app.inject({ method: 'GET', url: '/api/v1/memory/coverage' });
+
+    expect(res.statusCode).toBe(502);
+    const error = (res.json() as { error: string }).error;
+    expect(error).toContain('wicked-estate is not installed');
+    expect(error).toContain('npx wicked-installer');
+    expect(error).toContain('WICKED_ESTATE_MCP_EXE');
+    expect(error).not.toContain('spawn wicked-estate-mcp ENOENT');
+  });
+
+  it('keeps its own message for a non-spawn error that mentions ENOENT', async () => {
+    estateTool.mockRejectedValueOnce(new EstateMcpError('wicked-estate-mcp exited before answering memory.list: ENOENT: no such file /x/memory.db'));
+    const exited = await app.inject({ method: 'GET', url: '/api/v1/memory' });
+    expect(exited.statusCode).toBe(502);
+    expect((exited.json() as { error: string }).error).toContain('exited before answering');
+
+    estateTool.mockRejectedValueOnce(new EstateMcpError('tool failed: ENOENT data file', -32603));
+    const coded = await app.inject({ method: 'GET', url: '/api/v1/memory' });
+    expect(coded.statusCode).toBe(502);
+    expect((coded.json() as { error: string }).error).toContain('tool failed');
+
+    // A spawn that failed for another reason keeps its message, even when the path names ENOENT.
+    estateTool.mockRejectedValueOnce(new EstateMcpError('failed to spawn wicked-estate-mcp: spawn /opt/ENOENT/wicked-estate-mcp EACCES', undefined, 'EACCES'));
+    const denied = await app.inject({ method: 'GET', url: '/api/v1/memory' });
+    expect(denied.statusCode).toBe(502);
+    expect((denied.json() as { error: string }).error).toContain('EACCES');
+    expect((denied.json() as { error: string }).error).not.toContain('not installed');
+  });
+
   // ── GET /memory/coverage ──────────────────────────────────────────────────────
 
   it('returns coverage counts, forwarding scope_prefix', async () => {

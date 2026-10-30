@@ -10,6 +10,10 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A missing `wicked-estate-mcp` now reads as not installed, not "memory store not created yet".** The estate infra row checks the binary before the store (not installed or not on PATH, estate is optional, `npx wicked-installer` or `WICKED_ESTATE_MCP_EXE`), and `/memory/*` and `/proposals` answer 502 with that reason instead of the raw `spawn … ENOENT` (crew#1213).
+
 ### Changed
 
 - **A plugin may write its own lines under Open questions and Next, not only Decisions.** The Phase report fills a

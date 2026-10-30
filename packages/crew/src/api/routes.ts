@@ -66,7 +66,7 @@ import type {
   WorkUnit,
 } from '../core/types.js';
 import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
-import { callEstateTool, EstateMcpError, memoryStoreInfo } from '../core/estate-mcp-client.js';
+import { callEstateTool, EstateMcpError, ESTATE_INSTALL_HINT, memoryStoreInfo } from '../core/estate-mcp-client.js';
 import { SeatHealthTracker } from './seat-health.js';
 import { applyWorkerConfigRoot, signedInHeuristic } from './seat-signin.js';
 import { applyCouncilSettings, isCouncilSize, isCouncilStaggerMs } from '../core/council-settings.js';
@@ -7665,6 +7665,11 @@ export function registerRoutes(
   const estateUpstreamError = (reply: FastifyReply, err: unknown): FastifyReply => {
     if (err instanceof EstateMcpError && err.code === -32602) {
       return reply.code(400).send({ error: err.message });
+    }
+    // A spawn that failed with ENOENT (the OS code, not text in the message) means estate is not
+    // installed; every other error — EACCES on a path that names ENOENT included — keeps its own message.
+    if (err instanceof EstateMcpError && err.spawnCode === 'ENOENT') {
+      return reply.code(502).send({ error: `wicked-estate is not installed: ${ESTATE_INSTALL_HINT}` });
     }
     return reply.code(502).send({ error: message(err) });
   };
