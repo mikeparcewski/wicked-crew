@@ -49,8 +49,11 @@
 //     reproduce on its own is not evidence. They pass ⇒ exit 0 (every failure observed was re-run
 //     and cleared; the rest of the suite already passed). One still fails ⇒ exit 1, as before.
 //     The re-run is bounded — it is the named files, not the suite — so the check cannot blow the
-//     engine's outer bound by retrying. When the output names no file at all (a worker died before
-//     it reported), the whole command is re-run once, but ONLY if the first attempt left at least
+//     engine's outer bound by retrying. That re-run is taken only when EVERY failure the first pass
+//     reported is a deadline failure, the named files equal vitest's `Test Files  N failed` count and the
+//     summary reports no unhandled `Errors` (crew#1223, `namedRetryRefusal`); otherwise the first pass's
+//     exit is recorded as-is with a `WICKED-RETRY` line naming the rule.
+//     When the output names no file at all (a worker died before it reported), the whole command is re-run once, but ONLY if the first attempt left at least
 //     half the declared `timeout_s` budget unspent.
 //
 //   • RECORD THE HOST. `WICKED-HOST` lines are printed before the run and again as the LAST thing
@@ -374,6 +377,53 @@ export function failedTestFiles(output) {
   return out;
 }
 
+/**
+ * crew#1223: the checks that decide whether a failure set is PURELY deadline failures, so that re-running
+ * only the named files can stand for the whole run. Returns the rule that refuses the named-files retry, or
+ * `null` when every rule holds:
+ *  • every failure the first pass reported (each ` FAIL  <file> > <test>` block, cut at the next header, the
+ *    next `⎯⎯⎯` separator or the summary) carries a deadline marker itself — one assertion failure beside a
+ *    timeout is not cleared because both pass alone;
+ *  • the named files reconcile with vitest's own summary (`Test Files  N failed` equals the files named) — a
+ *    header lost past the 512 KiB capture would otherwise leave a failing file unre-run;
+ *  • the summary reports no unhandled errors (`Errors  N error`) — vitest attributes those to no file, so a
+ *    re-run of the named files cannot clear them.
+ * The engine's own rule (wicked-core#1198) is that a passing failing-set retry never stands for a failure it
+ * did not name; this keeps the self-retry inside that.
+ */
+export function namedRetryRefusal(output, failed) {
+  const text = stripAnsi(output);
+  const lines = text.split('\n');
+  const blocks = [];
+  let cur = null;
+  for (const line of lines) {
+    if (/^\s*FAIL\s+\S/.test(line)) {
+      cur = [line];
+      blocks.push(cur);
+    } else if (cur !== null && (/^\s*⎯/.test(line) || /^\s*(Test Files|Tests|Errors)\s{2,}/.test(line))) {
+      cur = null;
+    } else if (cur !== null) {
+      cur.push(line);
+    }
+  }
+  const notDeadline = blocks.filter((b) => retryableFailureReason(b.join('\n')) === null);
+  if (notDeadline.length > 0) {
+    return `${notDeadline.length} failure(s) are not deadline failures (${notDeadline[0][0].trim()}), and the re-run alone could clear them`;
+  }
+  const summary = /^\s*Test Files\s+(\d+) failed/m.exec(text);
+  if (summary === null) {
+    return "the output carries no `Test Files  N failed` summary to reconcile the named files with";
+  }
+  if (Number(summary[1]) !== failed.length) {
+    return `vitest's summary counts ${summary[1]} failed file(s) but ${failed.length} are named (a FAIL header may be lost)`;
+  }
+  const errs = /^\s*Errors\s+(\d+) errors?/m.exec(text);
+  if (errs !== null) {
+    return `vitest's summary reports ${errs[1]} unhandled error(s), which belong to no file the re-run names`;
+  }
+  return null;
+}
+
 /** The declared outer bound for this check (`.wicked/checks.json`), seconds; 1800 when unreadable. */
 export function checksTimeoutS(root = ROOT) {
   try {
@@ -525,6 +575,14 @@ export async function runTargeted(files, io = {}) {
     const elapsedS = (now() - startedMs) / 1000;
     let retryArgv = null;
     if (failed.length > 0) {
+      const refusal = namedRetryRefusal(first.output, failed);
+      if (refusal !== null) {
+        out(
+          `${RETRY_MARKER} none — ${why}, but ${refusal}; the named-files re-run cannot stand for the whole run, ` +
+            'so the first pass is recorded as-is (crew#1223).',
+        );
+        return first.status;
+      }
       retryArgv = ['npx', 'vitest', 'run', '--no-file-parallelism', ...filter, ...failed];
       startRetry(
         `${RETRY_MARKER} ${why} — re-running the ${failed.length} named file(s) ONCE, serially, before recording ` +
