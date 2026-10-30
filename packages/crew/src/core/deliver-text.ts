@@ -725,9 +725,16 @@ function assuranceSection(a: DeliverAssuranceFact): string[] {
   if (a.qe !== null) {
     const status = a.qe.status;
     if (status === 'skipped') {
-      const label = 'QE acceptance skipped by operator';
-      const why = qeReasonBody(a.qe.reason, label);
-      out.push(`- **${label}**${why !== '' ? `: ${literal(why, 2000)}` : ''}`);
+      // (rig run ea73afc0) The operator JUDGED the QE step (no QE reviewer could run its checks, a
+      // judge-unavailable gate) rather than skipping QE: the engine records it as `skipped` with a reason
+      // that opens "judged by operator (<who>): …" (wicked-core `qe_acceptance::review::operator_judged`).
+      // The label says what happened.
+      const judged = /^judged by operator\b/iu.test(a.qe.reason.trim());
+      const label = judged ? 'QE acceptance judged by operator' : 'QE acceptance skipped by operator';
+      const why = judged ? oneLine(a.qe.reason).replace(/^judged by operator\s*/iu, '') : qeReasonBody(a.qe.reason, label);
+      // A judgment's reason already opens with who: "(local (human)): …".
+      const sep = judged && why.startsWith('(') ? ' ' : ': ';
+      out.push(`- **${label}**${why !== '' ? `${sep}${literal(why, 2000)}` : ''}`);
     } else if (status === 'waived') {
       out.push(`- **QE acceptance waived by score**: ${literal(a.qe.reason)}`);
     } else if (status === 'required' && a.qe.pass !== undefined) {

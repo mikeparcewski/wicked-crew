@@ -891,6 +891,26 @@ describe('the run\'s assurance labels (crew#1186)', () => {
     expect(body.indexOf('## Assurance')).toBeLessThan(body.indexOf('## Phases'));
   });
 
+  // rig run ea73afc0: the operator judged the QE step (its reviewer could not run its checks) at a judge-unavailable
+  // gate; the delivery said "QE acceptance skipped by operator".
+  it('says QE acceptance was judged by the operator when the operator judged the QE step, not skipped', () => {
+    const judged =
+      'judged by operator (local (human)): the QE reviewer could not run its checks (INCONCLUSIVE: no baseline artifact); evidence at ~/x';
+    const body = composeDeliverText(
+      factsFromRun(
+        withAssurance({
+          mode: 'full',
+          required: ['distinct_evaluator', 'judge', 'qe_acceptance'],
+          qe: { status: 'skipped', basis: 'operator', score: null, threshold: 20, reason: judged, reasons: [], ord: 6, tree: null },
+          floorOverrides: [],
+        }),
+        null,
+      ),
+    ).body;
+    expect(body).toContain('- **QE acceptance judged by operator** (local (human)): the QE reviewer could not run its checks');
+    expect(body).not.toContain('QE acceptance skipped by operator');
+  });
+
   // program DES-POWER-MODE: a power run's delivery says who built it and how rigor moved, row by row.
   it('says power mode, the planned and delivered rigor, every flip and the rigor history', () => {
     const v = withAssurance({ mode: 'full', required: ['qe_acceptance'] });

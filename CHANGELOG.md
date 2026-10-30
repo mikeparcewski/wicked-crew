@@ -12,6 +12,11 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **A delivery says "QE acceptance judged by operator" when the operator judged the QE step.** On rig run ea73afc0
+  the QE reviewer could not run its checks and the operator judged the work at that judge-unavailable gate; the PR's
+  `## Assurance` section said "QE acceptance skipped by operator". The engine records that judgment as `skipped`
+  with a reason opening "judged by operator (<who>): …", and the section now labels it as judged, with who and why.
+
 - **The full-suite floor check no longer fails on every base (crew#1221).** A power run at high rigor or above hands
   off on `.wicked/checks.json` `test`, which was plain `vitest run`: no `dist/` build and no cross-repo filter, so on
   the floor's lone checkout the dist-CLI and cross-repo suites failed on base and head alike, and every such floor
