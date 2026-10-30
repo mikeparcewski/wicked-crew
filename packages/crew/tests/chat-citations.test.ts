@@ -293,6 +293,121 @@ describe('verifyCitations — against two real repos (the RC1 Phase 6 defect)', 
   });
 });
 
+describe('crew#1211 — correct citations relative to a package are verified, not struck through (J3)', () => {
+  let scratch: string;
+  let roots: CitationRoot[];
+
+  /** A numbered file of `n` lines whose line `at` reads `body`. */
+  const numbered = (n: number, at: Record<number, string>): string =>
+    Array.from({ length: n }, (_, i) => at[i + 1] ?? `// line ${i + 1}`).join('\n') + '\n';
+
+  beforeAll(() => {
+    scratch = mkdtempSync(join(tmpdir(), 'chat-citations-1211-'));
+    const crew = join(scratch, 'wicked-crew');
+    initRepo(
+      crew,
+      'packages/crew/src/core/types.ts',
+      numbered(280, {
+        232: 'export const DEFAULT_WORKER_STALL_MINUTES = 15;',
+        248: 'export const DEFAULT_WORKER_STALL_ESCALATE_MINUTES = 30;',
+      }),
+    );
+    const write = (rel: string, body: string): void => {
+      mkdirSync(dirname(join(crew, rel)), { recursive: true });
+      writeFileSync(join(crew, rel), body, 'utf8');
+    };
+    write('packages/crew/src/api/stall-watchdog.ts', numbered(600, { 410: 'function silentTurnMinutes() {' }));
+    write('packages/crew/src/api/run-liveness.ts', numbered(40, {}));
+    // A second `core/types.ts` in another package: a tail match is ambiguous without context.
+    write('packages/api-types/src/core/types.ts', numbered(20, {}));
+    const git = (...args: string[]): void => {
+      execFileSync('git', ['-C', crew, ...args], { stdio: 'ignore' });
+    };
+    git('add', '-A');
+    git('commit', '-q', '-m', 'two');
+    const core = join(scratch, 'wicked-core');
+    initRepo(core, 'src/gate_hook.rs', numbered(30, {}));
+    roots = [
+      { name: 'wicked-core', absRoot: core },
+      { name: 'wicked-crew', absRoot: crew },
+    ];
+  }, 60_000);
+
+  afterAll(() => {
+    removeScratch(scratch);
+  });
+
+  it('the J3 answer: a declared package directory resolves every package-relative citation', async () => {
+    const text =
+      'Paths are under `wicked-crew/packages/crew/src/`.\n' +
+      '- `api/stall-watchdog.ts` decides it; see `api/run-liveness.ts:23-30`.\n' +
+      '- `DEFAULT_WORKER_STALL_MINUTES = 15` (`core/types.ts:232`), escalation at `core/types.ts:248`.\n';
+    const got = await verifyCitations(text, roots, undefined, BIG_BUDGET);
+    for (const raw of ['api/stall-watchdog.ts', 'api/run-liveness.ts:23-30', 'core/types.ts:232', 'core/types.ts:248']) {
+      expect(itemOf(got.items, raw), raw).toMatchObject({ status: 'verified' });
+    }
+    expect(itemOf(got.items, 'core/types.ts:232')?.note).toBe(
+      'found at wicked-crew/packages/crew/src/core/types.ts',
+    );
+    expect(got.unverifiable).toBe(0);
+  });
+
+  it('without a declared directory, a unique tail of a tracked file verifies', async () => {
+    const got = await verifyCitations('see `api/stall-watchdog.ts:410` and `crew/api/run-liveness.ts`', roots, undefined, BIG_BUDGET);
+    expect(itemOf(got.items, 'api/stall-watchdog.ts:410')).toMatchObject({ status: 'verified' });
+    expect(itemOf(got.items, 'crew/api/run-liveness.ts')).toMatchObject({ status: 'verified' });
+  });
+
+  it('a root-relative path in the SECOND repo of the chat verifies (not only the first root is tried)', async () => {
+    const got = await verifyCitations('`packages/crew/src/core/types.ts:232`', roots, undefined, BIG_BUDGET);
+    expect(got.items[0]).toMatchObject({ status: 'verified' });
+    expect(got.items[0]?.note).toBeUndefined();
+  });
+
+  it('an ambiguous tail is unchecked — never struck through — unless the reply says which', async () => {
+    const bare = await verifyCitations('`core/types.ts:12`', roots, undefined, BIG_BUDGET);
+    expect(bare.items[0]).toMatchObject({ status: 'unchecked' });
+    expect(bare.items[0]?.note).toMatch(/does not say which/);
+    expect(bare.unverifiable).toBe(0);
+    // Beside a file the reply already resolved: that package's types.ts.
+    const beside = await verifyCitations(
+      '`packages/api-types/src/core/index.ts` is absent but `api-types/src/core/types.ts` exists, and `core/types.ts:12` is beside it',
+      roots,
+      undefined,
+      BIG_BUDGET,
+    );
+    expect(itemOf(beside.items, 'core/types.ts:12')).toMatchObject({
+      status: 'verified',
+      note: 'found at wicked-crew/packages/api-types/src/core/types.ts',
+    });
+  });
+
+  it('a range is checked through its last line, and a named symbol anywhere in it', async () => {
+    const got = await verifyCitations(
+      '`api/run-liveness.ts:30-39` fits; `api/run-liveness.ts:30-90` runs past the end; ' +
+        '`silentTurnMinutes` is at `api/stall-watchdog.ts:408-425`.',
+      roots,
+      undefined,
+      BIG_BUDGET,
+    );
+    expect(itemOf(got.items, 'api/run-liveness.ts:30-39')).toMatchObject({ status: 'verified' });
+    expect(itemOf(got.items, 'api/run-liveness.ts:30-90')).toMatchObject({ status: 'unverified' });
+    expect(itemOf(got.items, 'api/run-liveness.ts:30-90')?.note).toMatch(/41 lines/);
+    expect(itemOf(got.items, 'api/stall-watchdog.ts:408-425')).toMatchObject({ status: 'verified' });
+  });
+
+  it('a path that is in no repo is still unverified, and a `..` never tail-matches', async () => {
+    const got = await verifyCitations(
+      '`api/stall-watchdawg.ts:3` and `wicked-crew/../wicked-core/core/types.ts:1`',
+      roots,
+      undefined,
+      BIG_BUDGET,
+    );
+    expect(itemOf(got.items, 'api/stall-watchdawg.ts:3')).toMatchObject({ status: 'unverified' });
+    expect(itemOf(got.items, 'wicked-crew/../wicked-core/core/types.ts:1')).toMatchObject({ status: 'unverified' });
+  });
+});
+
 describe('the server wiring: one chatCitations frame per reply, after the rewritten reply', () => {
   let scratch: string;
   let app: FastifyInstance;

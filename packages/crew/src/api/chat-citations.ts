@@ -19,9 +19,27 @@
  * | kind     | citation                          | check |
  * |----------|-----------------------------------|-------|
  * | `path`   | `crew/src/api/routes.ts`          | the file exists under a read root |
- * | `line`   | `routes.ts:2264`, `x.ts:80-90`    | the file exists AND has that many lines; when a symbol is named right before the ref, that the symbol is ON that line — otherwise the line it IS on, as a CORRECTION |
+ * | `line`   | `routes.ts:2264`, `x.ts:80-90`    | the file exists AND has that many lines (a range: through its LAST line); when a symbol is named right before the ref, that the symbol is ON that line (in that range) — otherwise the line it IS on, as a CORRECTION |
  * | `symbol` | `execute_wrapped.rs:build_worker_command` | the file exists AND contains the symbol |
  * | `sha`    | `6d77153`, 7–40 hex               | `git rev-parse --verify --quiet <sha>^{commit}` in the repo the text names, else in any read root |
+ *
+ * # Where a cited path is looked for (crew#1211)
+ *
+ * Seats cite paths relative to whatever they were reading, not always to the repo root: on the J3
+ * sweep Claude wrote "Paths are under `wicked-crew/packages/crew/src/`" and then cited
+ * `core/types.ts:232`, and all 7 such citations were struck through as UNVERIFIED although every
+ * one was right. A cited path is looked for, in order:
+ *  1. from a repo root, with or without the repo-name prefix (`wicked-crew/x/y.ts`, `x/y.ts`);
+ *  2. under a directory the reply itself declares (a backticked `a/b/` or `repo/a/b` token);
+ *  3. as the TAIL of a tracked file (`core/types.ts` → `packages/crew/src/core/types.ts`), by whole
+ *     path segments. Several tails ⇒ the one under a declared directory, or beside a file this
+ *     reply already resolved; still several ⇒ `unchecked` ("the citation does not say which").
+ *
+ * The daemon has no record of the files a chat seat opened (`toolInvoked` carries tool names
+ * only), so the reply's own directories stand in for "the files the worker read".
+ *
+ * `unverified` means "there is no such thing in this chat's scope". A citation that names a real
+ * file the pass cannot pin to ONE place is `unchecked`, never `unverified`: it is not wrong.
  *
  * # Why a false positive is worse than a miss
  *
@@ -48,7 +66,7 @@
  */
 
 import { readFileSync, statSync } from 'node:fs';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { execCapped } from '../core/exec.js';
 
@@ -150,6 +168,8 @@ export interface RawCitation {
   path?: string;
   /** The first line of a `line` citation. */
   line?: number;
+  /** The last line of a `line` citation's range (`x.ts:80-90` → 90). */
+  lineEnd?: number;
   /** The symbol of a `symbol` citation, or the one the sentence named before a `line` citation. */
   symbol?: string;
   /** The repo a `sha` citation's sentence named, when it named one. */
@@ -257,9 +277,18 @@ export function extractCitations(text: string, roots: readonly CitationRoot[]): 
       continue;
     }
     if (/^\d/.test(suffix)) {
-      const line = Number.parseInt(suffix.split('-')[0]!, 10);
+      const [first, last] = suffix.split('-');
+      const line = Number.parseInt(first!, 10);
+      const end = last !== undefined ? Number.parseInt(last, 10) : undefined;
       const symbol = symbolNamedBefore(text, m.index);
-      push({ raw, kind: 'line', path, line, ...(symbol !== undefined ? { symbol } : {}) });
+      push({
+        raw,
+        kind: 'line',
+        path,
+        line,
+        ...(end !== undefined && end > line ? { lineEnd: end } : {}),
+        ...(symbol !== undefined ? { symbol } : {}),
+      });
       continue;
     }
     push({ raw, kind: 'symbol', path, symbol: suffix });
@@ -354,6 +383,8 @@ export interface ChatCitationsResult {
 interface Resolved {
   abs: string;
   root: CitationRoot;
+  /** The path from the root, `/`-separated (`packages/crew/src/core/types.ts`). */
+  rel: string;
 }
 
 /**
@@ -374,10 +405,40 @@ function under(root: CitationRoot, rest: string): Resolved | undefined {
   // that leaves them is not resolvable here at all (independent review of #722, HIGH).
   const rel = relative(root.absRoot, abs);
   if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) return undefined;
-  return { abs, root };
+  return { abs, root, rel: rel.split(sep).join('/') };
 }
 
-function resolvePath(path: string, roots: readonly CitationRoot[]): Resolved | undefined {
+/**
+ * The directories a reply DECLARES its paths are under: a backticked token of path segments whose
+ * last segment has no file extension (`wicked-crew/packages/crew/src/`, `packages/crew/src`).
+ * Returned without a trailing slash, in text order, once each.
+ */
+const DIR_HINT_RE = /`((?:[\w.-]+\/)+[\w-]*)\/?`/g;
+export function declaredDirectories(text: string): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(DIR_HINT_RE)) {
+    const dir = m[1]!.replace(/\/+$/, '');
+    if (dir.length === 0 || dir.split('/').some((seg) => seg === '..')) continue;
+    if (!out.includes(dir)) out.push(dir);
+  }
+  return out;
+}
+
+/** `dir` from a root: the repo-name head stripped when it names this root. */
+function dirUnder(root: CitationRoot, dir: string): string {
+  const slash = dir.indexOf('/');
+  const head = slash > 0 ? dir.slice(0, slash) : dir;
+  if (repoAliases(root).includes(head)) return slash > 0 ? dir.slice(slash + 1) : '';
+  return dir;
+}
+
+/**
+ * Every place a cited path may name under the roots, best first: `<repo name>/<rest>` in the root
+ * it names, then the path from EACH root. All of them, not the first: a root-relative path in the
+ * second repo of a chat is not in the first (crew#1211).
+ */
+function pathCandidates(path: string, roots: readonly CitationRoot[]): Resolved[] {
+  const out: Resolved[] = [];
   const slash = path.indexOf('/');
   if (slash > 0) {
     const head = path.slice(0, slash);
@@ -385,16 +446,18 @@ function resolvePath(path: string, roots: readonly CitationRoot[]): Resolved | u
     for (const root of roots) {
       if (repoAliases(root).includes(head)) {
         const at = under(root, rest);
-        if (at !== undefined) return at;
+        if (at !== undefined) out.push(at);
       }
     }
   }
   for (const root of roots) {
     const at = under(root, path);
-    if (at !== undefined) return at;
+    if (at !== undefined) out.push(at);
   }
-  return undefined;
+  return out;
 }
+
+const dirOf = (rel: string): string => rel.slice(0, Math.max(0, rel.lastIndexOf('/')));
 
 /** A word-boundary hit for `symbol`, 1-based; `0` when the file does not contain it. */
 function lineOfSymbol(lines: readonly string[], symbol: string): number {
@@ -438,7 +501,7 @@ export async function verifyCitations(
         const base = rel.split('/').pop();
         if (base === undefined) continue;
         const hits = index.get(base);
-        const entry = { abs: join(root.absRoot, rel), root };
+        const entry: Resolved = { abs: join(root.absRoot, rel), root, rel };
         if (hits === undefined) index.set(base, [entry]);
         else hits.push(entry);
       }
@@ -447,25 +510,64 @@ export async function verifyCitations(
     return index;
   };
 
-  /** The file a path/line/symbol citation names, or how it failed. */
+  /** The directories this reply says its paths are under (crew#1211). */
+  const declared = declaredDirectories(text);
+  /** Files this reply's citations already resolved to: a bare name beside them is theirs. */
+  const resolvedSoFar: Resolved[] = [];
+  const inContext = (h: Resolved): boolean =>
+    declared.some((d) => {
+      const dir = dirUnder(h.root, d);
+      return dir === '' || h.rel.startsWith(`${dir}/`);
+    }) || resolvedSoFar.some((r) => r.root === h.root && dirOf(r.rel) === dirOf(h.rel));
+  const unique = (hits: Resolved[]): Resolved[] =>
+    hits.filter((h, i) => hits.findIndex((o) => o.abs === h.abs) === i);
+  /** One place from several: the only one, else the only one in this reply's context. */
+  const pick = (hits: Resolved[]): { at: Resolved; found: boolean } | { miss: 'ambiguous' } | undefined => {
+    if (hits.length === 1) return { at: hits[0]!, found: true };
+    if (hits.length === 0) return undefined;
+    const preferred = hits.filter(inContext);
+    return preferred.length === 1 ? { at: preferred[0]!, found: true } : { miss: 'ambiguous' };
+  };
+
+  /**
+   * The file a path/line/symbol citation names, or how it failed. `found` is set when the file
+   * was found somewhere other than where the path reads from a repo root.
+   */
   const locate = async (
     c: RawCitation,
-  ): Promise<{ at: Resolved } | { miss: 'none' | 'ambiguous' | 'prose' | 'unknown' }> => {
+  ): Promise<{ at: Resolved; found?: boolean } | { miss: 'none' | 'ambiguous' | 'prose' | 'unknown' }> => {
     const path = c.path!;
-    const direct = resolvePath(path, roots);
-    if (direct !== undefined && deps.fileExists(direct.abs)) return { at: direct };
+    const direct = pathCandidates(path, roots).find((h) => deps.fileExists(h.abs));
+    if (direct !== undefined) return { at: direct };
+    const segments = path.split('/');
+    // A `..` citation is judged where it reads and nowhere else: a tail match would let it land
+    // on a look-alike (see `under`).
+    if (segments.includes('..')) return { miss: 'none' };
+    const fromDeclared = pick(
+      unique(declared.flatMap((d) => pathCandidates(`${d}/${path}`, roots))).filter((h) => deps.fileExists(h.abs)),
+    );
+    if (fromDeclared !== undefined) return fromDeclared;
+    // `git ls-files` lists what is TRACKED, which is not the same as what is on disk: a file
+    // deleted from the working tree is still listed, and reporting it `verified` would be exactly
+    // the kind of false confirmation this pass exists to stop (independent review of #722).
+    const tail = segments.filter((seg) => seg !== '.' && seg !== '').join('/');
+    const hits = ((await indexBasenames()).get(segments[segments.length - 1]!) ?? []).filter((h) => {
+      if (!path.includes('/')) return deps.fileExists(h.abs);
+      // The cited path is the TAIL of the tracked one, by whole segments, with or without the
+      // repo-name head (`crew/core/types.ts` in wicked-crew is `core/types.ts` there).
+      const cited = dirUnder(h.root, tail);
+      return (h.rel === cited || h.rel.endsWith(`/${cited}`)) && deps.fileExists(h.abs);
+    });
+    const picked = pick(hits);
+    if (picked !== undefined) return picked;
     if (!path.includes('/')) {
-      // `git ls-files` lists what is TRACKED, which is not the same as what is on disk: a file
-      // deleted from the working tree is still listed, and reporting it `verified` would be exactly
-      // the kind of false confirmation this pass exists to stop (independent review of #722).
-      const hits = ((await indexBasenames()).get(path) ?? []).filter((h) => deps.fileExists(h.abs));
-      if (hits.length === 1) return { at: hits[0]! };
-      if (hits.length > 1) return { miss: 'ambiguous' };
-      // A repo the daemon could not LIST cannot be said to lack the file.
+      // A repo the daemon could not LIST cannot be said to lack a bare name.
       if (indexPartial) return { miss: 'unknown' };
       // A bare name that is in no repo and carries no line/symbol suffix was probably prose.
       return { miss: c.kind === 'path' ? 'prose' : 'none' };
     }
+    // A path is judged where it reads from each root; a failed listing only means the tail
+    // search had less to go on, as before crew#1211.
     return { miss: 'none' };
   };
 
@@ -563,21 +665,27 @@ export async function verifyCitations(
         });
         continue;
       }
-      items.push({
-        raw: c.raw,
-        kind: c.kind,
-        status: 'unverified',
-        note:
-          found.miss === 'ambiguous'
-            ? "several repos in this chat's scope have a file with that name — the citation does not say which"
-            : "no such file in this chat's scope",
-      });
+      if (found.miss === 'ambiguous') {
+        // The file exists — more than once. That is not a wrong citation, so it is never struck
+        // through as one (crew#1211): it is a reference the pass cannot pin to one place.
+        items.push({
+          raw: c.raw,
+          kind: c.kind,
+          status: 'unchecked',
+          note: "several files in this chat's scope match that path — the citation does not say which",
+        });
+        continue;
+      }
+      items.push({ raw: c.raw, kind: c.kind, status: 'unverified', note: "no such file in this chat's scope" });
       continue;
     }
 
     const at = found.at;
+    resolvedSoFar.push(at);
+    /** Where the file is, when that is not where the cited path reads from a repo root. */
+    const foundAt = found.found === true ? { note: `found at ${at.root.name}/${at.rel}` } : {};
     if (c.kind === 'path') {
-      items.push({ raw: c.raw, kind: 'path', status: 'verified', resolved: `${at.root.name}` });
+      items.push({ raw: c.raw, kind: 'path', status: 'verified', resolved: `${at.root.name}`, ...foundAt });
       continue;
     }
 
@@ -594,7 +702,8 @@ export async function verifyCitations(
 
     if (c.kind === 'symbol') {
       const line = lineOfSymbol(lines, c.symbol!);
-      if (line > 0) items.push({ raw: c.raw, kind: 'symbol', status: 'verified', resolved: `${c.path}:${line}` });
+      if (line > 0)
+        items.push({ raw: c.raw, kind: 'symbol', status: 'verified', resolved: `${c.path}:${line}`, ...foundAt });
       else
         items.push({
           raw: c.raw,
@@ -605,9 +714,10 @@ export async function verifyCitations(
       continue;
     }
 
-    // kind === 'line'
+    // kind === 'line' — a range is checked through its LAST line, and a symbol anywhere in it.
     const line = c.line!;
-    if (line < 1 || line > lines.length) {
+    const end = c.lineEnd ?? line;
+    if (line < 1 || end > lines.length) {
       items.push({
         raw: c.raw,
         kind: 'line',
@@ -617,13 +727,12 @@ export async function verifyCitations(
       continue;
     }
     if (c.symbol === undefined) {
-      items.push({ raw: c.raw, kind: 'line', status: 'verified' });
+      items.push({ raw: c.raw, kind: 'line', status: 'verified', ...foundAt });
       continue;
     }
-    const cited = lines[line - 1]!;
     const re = new RegExp(`\\b${c.symbol.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
-    if (re.test(cited)) {
-      items.push({ raw: c.raw, kind: 'line', status: 'verified' });
+    if (lines.slice(line - 1, end).some((l) => re.test(l))) {
+      items.push({ raw: c.raw, kind: 'line', status: 'verified', ...foundAt });
       continue;
     }
     const actual = lineOfSymbol(lines, c.symbol);

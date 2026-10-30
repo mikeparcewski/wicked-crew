@@ -31,6 +31,16 @@ mentioned only where a daemon release depends on them.
   42.0 on 14 CPUs)". A tool that never answers reads "the server was up, but <tool> did not answer". The bound
   covers the whole call: a read tool's retries share it, so three slow attempts cannot outlast the shim. A REST
   tool's timeout keeps its own mapping deadline and gets no load note.
+- **Correct citations are no longer struck through as UNVERIFIED (crew#1211, J3).** A chat answer said "Paths are
+  under `wicked-crew/packages/crew/src/`" and cited `core/types.ts:232`, `api/run-liveness.ts:23-30` and so on. The
+  citation check looked for those paths only from the repo root, so all 7 were marked unverified and studio struck
+  them through, although each was right. A cited path is now also looked for under a directory the reply declares,
+  and as the tail of a tracked file. If several files match, the reply's declared directories and the files it
+  already cited decide. Every repo in the chat's scope is tried, not only the first. A range (`x.ts:80-90`) is
+  checked through its last line, and a named symbol anywhere in it. A path that matches several files and cannot be
+  pinned to one is `unchecked` ("the citation does not say which"), never `unverified`. Unverified means no such file.
+  Crew has no record of the files a chat seat opened (`toolInvoked` carries tool names only), so the reply's own
+  directories stand in for that.
 - **A fresh install's Nerve Center tells the truth (J1).** On a fresh `npm i -g wicked-crew` with Docker
   running, the Nerve Center said "Work is stopped: Model gateway down — Start Docker". The gateway container
   just did not exist yet. A probe's error kept only the first line of a child-process error, and that line is
