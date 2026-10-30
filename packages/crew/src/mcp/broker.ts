@@ -49,8 +49,18 @@ import type {
 import type { McpEngineGate } from '../core/adapter.js';
 import { ESTATE_SERVER, parseMcpSubject } from './classify.js';
 import type { McpCallRecordSink } from './call-records.js';
-import { classifyUpstreamError, invokeMcpTool, MCP_CALL_TIMEOUT_MS, type Invoker, type UpstreamToolResult } from './invoke.js';
+import {
+  classifyUpstreamError,
+  hostLoad,
+  invokeMcpTool,
+  MCP_CALL_TIMEOUT_MS,
+  mcpCallBound,
+  type HostLoad,
+  type Invoker,
+  type UpstreamToolResult,
+} from './invoke.js';
 import { scrubResult } from './redact.js';
+import { UpstreamCallError } from './upstream-error.js';
 import type { McpRegistry } from './registry.js';
 import { scrubSecrets } from './secrets.js';
 import { ESTATE_PROPOSAL_TOOL, proposalIdOf, rpcErrorEnvelope, scopeEstateArgs, type EstateRelay } from './estate-relay.js';
@@ -116,7 +126,10 @@ export interface McpBrokerDeps {
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   budgetPerUnit?: number;
+  /** The per-call deadline on a host with headroom; scaled with host load at each call (crew#1212). */
   timeoutMs?: number;
+  /** The host load the deadline scales with, read at each call. */
+  load?: () => HostLoad;
   log?: (message: string) => void;
   /** The estate relay behind `mcp:estate/<tool>` (wicked-core#1018); absent = those calls are refused. */
   estate?: EstateRelay;
@@ -150,6 +163,7 @@ export class McpBroker {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly budget: number;
   private readonly timeoutMs: number;
+  private readonly load: () => HostLoad;
   private readonly used = new Map<string, number>();
   private readonly breakers = new Map<string, BreakerState>();
 
@@ -159,6 +173,7 @@ export class McpBroker {
     this.sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.budget = deps.budgetPerUnit ?? budgetFromEnv();
     this.timeoutMs = deps.timeoutMs ?? MCP_CALL_TIMEOUT_MS;
+    this.load = deps.load ?? hostLoad;
   }
 
   async call(body: McpCallBody): Promise<McpBrokerAnswer> {
@@ -255,11 +270,17 @@ export class McpBroker {
     const secrets = secret === null ? [] : [secret];
     let result: UpstreamToolResult | null = null;
     for (let attempt = 0; ; attempt++) {
+      const bound = mcpCallBound(this.timeoutMs, this.load());
       try {
-        result = await this.invoke(target.config, secret, parts.tool, call.args, this.timeoutMs, target.rest);
+        result = await this.invoke(target.config, secret, parts.tool, call.args, bound.ms, target.rest);
         break;
       } catch (err) {
-        const failure = classifyUpstreamError(err);
+        const classified = classifyUpstreamError(err);
+        // A timeout names the bound it ran out of and how host load set it (crew#1212).
+        const failure =
+          classified.errorClass === 'timeout'
+            ? new UpstreamCallError('timeout', classified.retryable, `${classified.message} (bound ${bound.note})`)
+            : classified;
         if (failure.errorClass === 'boundary') {
           // I6: a REST request that would leave its pinned host was refused before it was sent (or a
           // redirect off the host was not followed). Not the tool's failure, so the breaker is not

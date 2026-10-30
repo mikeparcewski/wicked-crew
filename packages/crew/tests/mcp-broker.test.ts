@@ -32,7 +32,7 @@ import type { McpCallRecord, McpCallResponse, McpPreviewResponse } from '../src/
 import { BREAKER_OPEN_MS, BREAKER_THRESHOLD, budgetFromEnv, McpBroker, type McpBrokerDeps } from '../src/mcp/broker.js';
 import { McpCallRecordFile, type McpCallRecordSink } from '../src/mcp/call-records.js';
 import { deriveToolClass } from '../src/mcp/classify.js';
-import { classifyUpstreamError } from '../src/mcp/invoke.js';
+import { classifyUpstreamError, UpstreamCallError } from '../src/mcp/invoke.js';
 import { probeMcpServer } from '../src/mcp/probe.js';
 import { redactDeep } from '../src/mcp/redact.js';
 import { McpRegistry } from '../src/mcp/registry.js';
@@ -403,6 +403,41 @@ describe('the broker never invokes what the registry does not hold as registered
     const unknown = await mcpCall('mcp:fx/wt_nope');
     expect(unknown.body.outcome).toBe('guard_error');
     expect(recorded().map((r) => r.decision.by)).toEqual(['broker', 'broker']);
+  });
+});
+
+describe('crew#1212: the call deadline scales with host load, and a timeout names its bound', () => {
+  it('hands the invoker base × load factor, and the refusal says how the bound was set', async () => {
+    const bounds: number[] = [];
+    await boot({
+      load: () => ({ load1: 42, cores: 14 }),
+      invoke: async (_config, _secret, _tool, _args, timeoutMs) => {
+        bounds.push(timeoutMs);
+        throw new UpstreamCallError('timeout', false, 'timed out after 90 s: the server was still starting');
+      },
+    });
+    const r = await mcpCall('mcp:fx/wt_echo', { text: 'hi' });
+    expect(bounds).toEqual([90_000]);
+    expect(r.body.outcome).toBe('upstream_error');
+    expect(r.body.reason).toBe(
+      'mcp:fx/wt_echo failed upstream (timeout): timed out after 90 s: the server was still starting ' +
+        '(bound 90 s = 30 s × 3.00 for 1-min load 42.0 on 14 CPUs)',
+    );
+  });
+
+  it('an idle host keeps the configured base, and a non-timeout failure carries no bound note', async () => {
+    const bounds: number[] = [];
+    await boot({
+      timeoutMs: 10_000,
+      load: () => ({ load1: 1, cores: 14 }),
+      invoke: async (_config, _secret, _tool, _args, timeoutMs) => {
+        bounds.push(timeoutMs);
+        throw new UpstreamCallError('protocol', false, 'bad params');
+      },
+    });
+    const r = await mcpCall('mcp:fx/wt_echo', { text: 'hi' });
+    expect(bounds).toEqual([10_000]);
+    expect(r.body.reason).toBe('mcp:fx/wt_echo failed upstream (protocol): bad params');
   });
 });
 
