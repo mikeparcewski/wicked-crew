@@ -202,6 +202,27 @@ export function plan(files) {
   };
 }
 
+/** A test file vitest can be handed as a filter: relative to packages/crew, test-shaped, no flag shape. */
+const TEST_FILE = /^(?!-)(?!\/)(?!.*(?:^|\/)\.\.?(?:\/|$))[^\s{}]+\.(test|spec)\.[cm]?[jt]sx?$/;
+
+/**
+ * wicked-core#1198: the plan for `--tests <files>`, the engine's FAILING-SET re-run. `.wicked/checks.json`
+ * declares `rerun.test_targeted = {"command": ["node", "scripts/test-related.mjs", "--tests", "{files}"], ...}`:
+ * when this check fails, the floor's base comparison (and, for a check that does not retry on its own, its
+ * retry) runs only the test files that failed, named as vitest named them (relative to packages/crew). They run
+ * the way the targeted command runs them: the same clean build first, the same cross-repo filter, the same
+ * one deadline retry. Only the selection differs: `vitest run <files>` instead of `vitest related`.
+ * `--passWithNoTests`: on the run base, a file the change added does not exist, and the base cannot fail it.
+ * Anything that is not a test file is refused, not skipped: an empty or malformed list must not pass.
+ */
+export function planTests(files) {
+  const list = files.map((f) => String(f).replace(/\\/g, '/'));
+  const bad = list.filter((f) => !TEST_FILE.test(f));
+  if (list.length === 0) return { refuse: 'no test file named — `--tests` needs the files to run' };
+  if (bad.length > 0) return { refuse: `not a test file under ${CREW}: ${bad.join(', ')}` };
+  return { argv: ['npx', 'vitest', 'run', '--passWithNoTests', ...list], cwd: CREW };
+}
+
 /**
  * Free/used swap in MiB, or `null` where it cannot be read. macOS keeps it in
  * `sysctl vm.swapusage`, Linux in `/proc/meminfo`; every other platform (Windows) answers `null` and
@@ -414,7 +435,12 @@ export async function runTargeted(files, io = {}) {
   const coreDir = io.coreDir ?? coreCheckoutDir;
   const tagged = io.crossRepoTests ?? crossRepoTests;
 
-  const p = plan(files);
+  const p = (io.plan ?? plan)(files);
+  if (p.refuse) {
+    out(`test-related: ${p.refuse}`);
+    out(formatHostLine(host(), 'post'));
+    return 2;
+  }
   if (p.skip) {
     // The skip line stays FIRST (its prefix is the pinned contract of this path), the host line last.
     out(`test-related: ${p.skip}`);
@@ -517,9 +543,13 @@ export async function runTargeted(files, io = {}) {
 
 const isMain = process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
-  const args = process.argv.slice(2);
+  let args = process.argv.slice(2);
   const dryRun = args[0] === '--dry-run';
-  const files = dryRun ? args.slice(1) : args;
+  if (dryRun) args = args.slice(1);
+  // wicked-core#1198: `--tests <files>` runs the named test files (the floor's failing-set re-run).
+  const testsMode = args[0] === '--tests';
+  const files = testsMode ? args.slice(1) : args;
+  const planOf = testsMode ? planTests : plan;
   // `process.exitCode`, NEVER `process.exit()` (review of #656, defect 2). When stdout/stderr are
   // PIPED — which is exactly how the repo-checks floor runs this — node's streams are asynchronous,
   // and `process.exit()` terminates without draining them: under the pipe backpressure this check
@@ -529,9 +559,9 @@ if (isMain) {
   // buffers drain; nothing after this statement keeps the event loop alive.
   if (dryRun) {
     // Pure: the plan as JSON and nothing else — the mapper test parses this stdout.
-    process.stdout.write(`${JSON.stringify(plan(files))}\n`);
+    process.stdout.write(`${JSON.stringify(planOf(files))}\n`);
     process.exitCode = 0;
   } else {
-    process.exitCode = await runTargeted(files);
+    process.exitCode = await runTargeted(files, { plan: planOf });
   }
 }
