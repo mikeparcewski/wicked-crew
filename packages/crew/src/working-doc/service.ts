@@ -131,6 +131,17 @@ function blankSections(): Record<SectionId, string> {
 }
 
 /** A write whose outcome is not known (no version in time, or a version that is not this batch's). */
+/** The orchestrator's notes for one write (from the engine's `powerWorkingNotes` frame). */
+export interface AgentNotes {
+  seat: string;
+  turn: number;
+  approach: string | null;
+  decisions: Array<{ text: string; why: string | null }>;
+}
+
+/** A seat name as it may appear in an author id. */
+const AGENT_SEAT = /^[a-z0-9][a-z0-9-]{0,31}$/;
+
 export class UndeterminedWriteError extends Error {
   constructor(message: string) { super(message); this.name = 'UndeterminedWriteError'; }
 }
@@ -266,6 +277,64 @@ export class WorkingDocService {
     return { ok: true, version: written.version, unchanged: false, steer, view: await this.view(runId) };
   }
 
+  /**
+   * (power mode) The orchestrator's own working notes, from the engine's `powerWorkingNotes` frame, written as one
+   * version by `agent:<seat>`. It never steers: only a person's version does. Approach is replaced, unless a person
+   * wrote the current Approach: their edit stands, and the agent's restatement is recorded under Decisions instead.
+   * Each decision is appended under Decisions with its reason. A person's edit racing this write wins: the agent
+   * re-reads and writes again on top of it (twice at most). Resolves to the version written, or `null`.
+   */
+  async agentNotes(runId: string, notes: AgentNotes): Promise<number | null> {
+    const seat = AGENT_SEAT.test(notes.seat) ? notes.seat : 'agent';
+    const id = `agent:${seat}`;
+    if ((await this.ensure(runId)) === null) return null;
+    return this.exclusive(runId, async () => {
+      const rec = this.d.store.get(runId);
+      if (rec === undefined) return null;
+      await this.reconcile(runId);
+      if (this.d.store.get(runId)?.pending != null) return null;
+      const tag = `${seat}, turn ${notes.turn}`;
+      const humanApproach = [...rec.trail].reverse().find((t) => t.sections.includes('approach'))?.author.kind === 'human';
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const head = await this.d.backend.read(rec.projectId, rec.docId);
+        if (head === null) return null;
+        const before = { ...blankSections(), ...sectionsOf(head.html) };
+        const wanted: Partial<Record<SectionId, string>> = {};
+        const lines: string[] = [];
+        const approach = notes.approach?.trim() ?? '';
+        if (approach !== '') {
+          if (humanApproach) lines.push(`- Approach now (${tag}): ${approach}. Your edit to Approach stands.`);
+          else wanted.approach = approach.slice(0, SECTION_MAX_CHARS);
+        }
+        for (const d of notes.decisions) {
+          const text = d.text.trim();
+          if (text === '') continue;
+          const why = d.why?.trim() ?? '';
+          lines.push(`- ${text}${why !== '' ? `. Why: ${why}` : ''} (${tag})`);
+        }
+        if (lines.length > 0) {
+          // The newest lines are kept when the section is full: the oldest are dropped first.
+          const all = [...(before.decisions ?? '').split('\n').filter((l) => l.trim() !== ''), ...lines];
+          while (all.join('\n').length > SECTION_MAX_CHARS && all.length > 1) all.shift();
+          wanted.decisions = all.join('\n').slice(0, SECTION_MAX_CHARS);
+        }
+        const changed = changedSections(before, wanted);
+        if (changed.length === 0) return null;
+        const values: Partial<Record<SectionId, string>> = {};
+        for (const sid of changed) values[sid] = wanted[sid] ?? '';
+        const written = await this.d.backend.edit(rec.projectId, rec.docId, {
+          expectHead: head.head,
+          items: changed.map((sid) => ({ selector: anchorOf(sid), value: encodeSectionText(values[sid] ?? '') })),
+          author: id,
+        });
+        if ('headMoved' in written) continue;
+        await this.record(runId, written.version, written.parent, { kind: 'agent', id }, null, changed, values, { id, kind: 'agent' });
+        return written.version;
+      }
+      return null;
+    });
+  }
+
   /** A version that landed: its trail entry, its steer (a person's only), its audit line and the change frame. */
   private async record(runId: string, version: number, parent: number, author: DocAuthor, surface: string | null, changed: SectionId[], values: Partial<Record<SectionId, string>>, actor: { id: string; kind: string }): Promise<SteerRecord | null> {
     const steer = author.kind === 'human' ? await this.steer(runId, version, changed, values, author.id) : null;
@@ -352,6 +421,20 @@ export class WorkingDocService {
     const ev = e as unknown as Record<string, unknown>;
     const runId = typeof ev['session'] === 'string' ? ev['session'] : null;
     if (runId === null) return;
+    if ((ev['type'] as string) === 'powerWorkingNotes') {
+      const decisions = Array.isArray(ev['decisions'])
+        ? (ev['decisions'] as Array<Record<string, unknown>>)
+            .filter((d) => typeof d['text'] === 'string')
+            .map((d) => ({ text: d['text'] as string, why: typeof d['why'] === 'string' ? d['why'] : null }))
+        : [];
+      void this.agentNotes(runId, {
+        seat: typeof ev['seat'] === 'string' ? ev['seat'] : 'agent',
+        turn: typeof ev['turn'] === 'number' ? ev['turn'] : 0,
+        approach: typeof ev['approach'] === 'string' ? ev['approach'] : null,
+        decisions,
+      }).catch(() => undefined);
+      return;
+    }
     if ((e.type === 'unitDispatched' || e.type === 'unitExecuting') && typeof ev['ord'] === 'number') {
       const attempt = typeof ev['attempt'] === 'number' ? ev['attempt'] : (this.lastDispatch.get(runId)?.ord === ev['ord'] ? this.lastDispatch.get(runId)?.attempt ?? 0 : 0);
       this.lastDispatch.set(runId, { ord: ev['ord'], attempt });
