@@ -171,6 +171,23 @@ describe('event-derived working-document lines, written by crew', () => {
     expect((await plain.view('run-1')).eventLines).toBe(false);
   });
 
+  it('the orchestrator’s turn summary is the Approach, as the agent, unless it stated one (rig run 1d372696)', async () => {
+    const t = setup(powerRun());
+    t.service.onEvent({ type: 'powerTurnCompleted', session: 'run-1', ord: 2, attempt: 0, turn: 1, cli: 'claude', outcome: 'handoff', summary: 'S14h and S14k now spawn the CLI twice' } as unknown as CoreEvent);
+    await new Promise((r) => setTimeout(r, 30));
+    expect((await t.sections()).approach).toBe('S14h and S14k now spawn the CLI twice');
+    const view = await t.service.view('run-1');
+    expect(view.trail.find((x) => x.sections.includes('approach'))?.author).toEqual({ kind: 'agent', id: 'agent:claude' });
+    expect(view.sections?.goal).toBe('Fix the estate row.');
+    // Once the orchestrator states its own APPROACH, a later summary does not replace it.
+    t.service.onEvent({ type: 'powerWorkingNotes', session: 'run-1', ord: 2, attempt: 0, turn: 2, seat: 'claude', at: 1, approach: 'Trim the spawns', decisions: [] } as unknown as CoreEvent);
+    await new Promise((r) => setTimeout(r, 30));
+    t.service.onEvent({ type: 'powerTurnCompleted', session: 'run-1', ord: 2, attempt: 0, turn: 2, cli: 'claude', outcome: 'handoff', summary: 'done' } as unknown as CoreEvent);
+    await new Promise((r) => setTimeout(r, 30));
+    expect((await t.sections()).approach).toBe('Trim the spawns');
+    expect(t.injected).toEqual([]);
+  });
+
   it('reconciling keeps a person’s lines in place and takes back only generated ones', () => {
     expect(reconcileSection('questions', 'Mine\nWaiting on you · Deliver · since 10:00', [])).toBe('Mine');
     expect(reconcileSection('decisions', 'Mine', ['A · answered 10:00'])).toBe('Mine\nA · answered 10:00');

@@ -166,6 +166,8 @@ export class WorkingDocService {
   private readonly renewedFor = new Map<string, string | null>();
   /** One pending event-lines write per run (a burst of events becomes one write). */
   private readonly linesDue = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Runs whose orchestrator wrote its own APPROACH line: its turn summaries then never replace it. */
+  private readonly approachNoted = new Set<string>();
 
   constructor(private readonly d: WorkingDocDeps) {
     this.now = d.now ?? Date.now;
@@ -520,7 +522,22 @@ export class WorkingDocService {
     const runId = typeof ev['session'] === 'string' ? ev['session'] : null;
     if (runId === null) return;
     if (LINE_EVENTS.has(ev['type'] as string)) this.linesSoon(runId);
+    if ((ev['type'] as string) === 'powerTurnCompleted') {
+      // (rig run 1d372696) The orchestrator wrote no APPROACH line, so the document stayed empty. Its own turn
+      // summary is the Approach, as the agent, unless it stated one itself or a person wrote it (agentNotes).
+      const summary = typeof ev['summary'] === 'string' ? ev['summary'].trim() : '';
+      if (summary !== '' && !this.approachNoted.has(runId)) {
+        void this.agentNotes(runId, {
+          seat: typeof ev['cli'] === 'string' ? ev['cli'] : 'agent',
+          turn: typeof ev['turn'] === 'number' ? ev['turn'] : 0,
+          approach: summary,
+          decisions: [],
+        }).catch(() => undefined);
+      }
+      return;
+    }
     if ((ev['type'] as string) === 'powerWorkingNotes') {
+      if (typeof ev['approach'] === 'string' && ev['approach'].trim() !== '') this.approachNoted.add(runId);
       const decisions = Array.isArray(ev['decisions'])
         ? (ev['decisions'] as Array<Record<string, unknown>>)
             .filter((d) => typeof d['text'] === 'string')
