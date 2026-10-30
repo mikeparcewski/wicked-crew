@@ -54,9 +54,11 @@ describe('wicked-core#1198 — the failing-set re-run', () => {
       rerun?: Record<string, { command?: string[]; by?: string; root?: string; self_retry?: boolean }>;
     };
     // The same runner and environment as the check itself; only the selection differs.
-    expect(checks.test).toEqual(['npm', 'run', '-w', 'packages/crew', 'test']);
+    // crew#1221: the full suite runs through the script too (`--all`, which does not retry itself), so its
+    // failing set re-runs through `--tests` (clean build, cross-repo filter) and the engine's retry decides.
+    expect(checks.test).toEqual(['node', 'scripts/test-related.mjs', '--all']);
     expect(checks.rerun?.['test']).toEqual({
-      command: ['npm', 'run', '-w', 'packages/crew', 'test', '--', '--passWithNoTests', '{files}'],
+      command: ['node', 'scripts/test-related.mjs', '--tests', '{files}'],
       by: 'file',
       root: 'packages/crew',
     });

@@ -1,7 +1,7 @@
 {
   "typecheck": ["npm", "run", "-w", "packages/crew", "typecheck"],
   "lint": ["npm", "run", "-w", "packages/crew", "lint"],
-  "test": ["npm", "run", "-w", "packages/crew", "test"],
+  "test": ["node", "scripts/test-related.mjs", "--all"],
   "test_targeted": ["node", "scripts/test-related.mjs", "{files}"],
   "full": false,
   "timeout_s": 1800,
@@ -17,7 +17,7 @@
   ],
   "rerun": {
     "test": {
-      "command": ["npm", "run", "-w", "packages/crew", "test", "--", "--passWithNoTests", "{files}"],
+      "command": ["node", "scripts/test-related.mjs", "--tests", "{files}"],
       "by": "file",
       "root": "packages/crew"
     },
