@@ -23,6 +23,13 @@ mentioned only where a daemon release depends on them.
   install command. The npm README's Install section now lists every prerequisite: Node, a container runtime,
   a CLI and wicked-garden, plus the optional wicked-estate.
 
+- **The free-disk row says free now and what macOS can make available.** On the rig Finder said 70 GB available
+  while `/system` said 13 GB free, because Finder counts the purgeable space macOS clears on demand. On macOS the
+  disk row now also reads the volume's important-usage capacity (`NSURLVolumeAvailableCapacityForImportantUsageKey`,
+  through a one-line `osascript` JXA call, kept 30 s), reports it as `details.availableBytes`, and bases the
+  down/degraded thresholds on it. The reason reads "6 GiB free now · 70 GiB available once macOS clears purgeable
+  space". Off macOS, or when the read fails, the row is free space alone, as before.
+
 - **crew declares its generated files for the deliver lift (wicked-core#1173).** `.wicked/checks.json` gains
   `generated`: `packages/crew/endpoint-manifest.json` (`npm run -w packages/crew manifest:endpoints`), then
   `packages/crew/tests/generated/api-sample.generated.test.ts` (`generate:api-tests`, which reads the manifest).

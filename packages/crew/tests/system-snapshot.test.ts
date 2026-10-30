@@ -10,6 +10,7 @@ import {
   buildClis,
   buildGovernance,
   diskRow,
+  macAvailableBytes,
   foldWeek,
   gatewayName,
   judgeGaps,
@@ -185,6 +186,39 @@ describe('derived rows', () => {
     expect(await disk(120, 1000)).toBe('ok');
     const down = await diskRow('/s', async () => ({ bavail: 3, bsize: GiB, blocks: 100 }));
     expect(down.reason).toMatch(/3 GiB free on the state-home volume \(97% used\)/);
+  });
+
+  it('operator 2026-10-29: the disk row says free now AND what macOS can make available, and the thresholds read the second', async () => {
+    const GiB = 2 ** 30;
+    const fs = (freeGiB: number, totalGiB: number) => async () => ({ bavail: freeGiB, bsize: GiB, blocks: totalGiB });
+    // 6 GiB free, 70 GiB available once purgeable space is cleared: not "down", and both numbers are said.
+    const row = await diskRow('/s', fs(6, 460), 1000, async () => 70 * GiB);
+    expect(row.state).toBe('ok');
+    expect(row.reason).toBe('6 GiB free now · 70 GiB available once macOS clears purgeable space (of 460 GiB)');
+    expect(row.details).toMatchObject({ freeBytes: 6 * GiB, availableBytes: 70 * GiB });
+    // Little purgeable space: the thresholds still hold on what is really available.
+    const low = await diskRow('/s', fs(3, 460), 1000, async () => 4 * GiB);
+    expect(low.state).toBe('down');
+    expect(low.reason).toMatch(/^3 GiB free now · 4 GiB available once macOS clears purgeable space on the state-home volume/);
+    // Off macOS (or a failed read): free space alone, as before.
+    const off = await diskRow('/s', fs(6, 100), 1000, async () => null);
+    expect(off.state).toBe('degraded');
+    expect(off.reason).toBe('6 GiB free on the state-home volume');
+    expect(off.details).toMatchObject({ availableBytes: null });
+    // A small gap that still changes the state is said: the row is degraded, not down, because of the second number.
+    const edge = await diskRow('/s', async () => ({ bavail: 4.5, bsize: GiB, blocks: 40 }), 1000, async () => 5.1 * GiB);
+    expect(edge.state).toBe('degraded');
+    expect(edge.reason).toMatch(/^4\.5 GiB free now · 5\.1 GiB available once macOS clears purgeable space/);
+    // A reading below free space is not the important-usage capacity: ignored.
+    expect((await diskRow('/s', fs(60, 100), 1000, async () => 1 * GiB)).state).toBe('ok');
+    // The available read that throws or hangs never sinks the row.
+    expect((await diskRow('/s', fs(60, 100), 30, () => new Promise(() => {}))).state).toBe('ok');
+    expect((await diskRow('/s', fs(60, 100), 1000, async () => { throw new Error('no osascript'); })).state).toBe('ok');
+  });
+
+  it('macAvailableBytes reads nothing off macOS', async () => {
+    expect(await macAvailableBytes('/s', 1000, 'linux')).toBeNull();
+    expect(await macAvailableBytes('/s', 1000, 'win32')).toBeNull();
   });
 
   it('load rows', () => {
