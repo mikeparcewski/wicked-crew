@@ -225,6 +225,7 @@ import { AuditLog } from './audit.js';
 import {
   AcpFoldCache,
   EngineVersionCache,
+  FloorCacheCache,
   eventsDirOf,
   installedPackageVersion,
   hostSandboxLauncher,
@@ -1941,6 +1942,7 @@ export function registerRoutes(
   // can never turn this GET into an event-log re-reader or a `--version` spawner per request.
   const acpFoldCache = new AcpFoldCache();
   const engineVersionCache = new EngineVersionCache();
+  const floorCacheCache = new FloorCacheCache();
   // The governance block (crew#495): the store the engine's emit seam writes to (as the adapter
   // exported it — `null` on a boot that resolved none), its record count through the engine
   // binding when the addon has one, and the dead-letter outbox folded on change. Built at boot so
@@ -1956,13 +1958,14 @@ export function registerRoutes(
       // `dbPath` is a readonly field of the real adapter; a stub-driven route set may lack it,
       // and diagnostics over an unknown store honestly reports no stores and no ACP record.
       const dbPath = typeof adapter.dbPath === 'string' && adapter.dbPath !== '' ? adapter.dbPath : null;
-      const [stores, byCli, engineBinaries, governance] = await Promise.all([
+      const [stores, byCli, engineBinaries, governance, floorCache] = await Promise.all([
         dbPath !== null ? listStoreFiles(dbPath) : Promise.resolve([]),
         dbPath !== null
           ? acpFoldCache.get(eventsDirOf(dbPath))
           : Promise.resolve<Awaited<ReturnType<AcpFoldCache['get']>>>({}),
         engineVersionCache.get(),
         governanceDiagnostics.health(),
+        floorCacheCache.get(),
       ]);
       const uptimeMs = Math.round(process.uptime() * 1000);
       const addr = app.server.address();
@@ -2010,6 +2013,8 @@ export function registerRoutes(
         // crew#1068: the wicked-vault CLI handed to the engine, with a remedy when it has none.
         // `null` on a route set driven without the real adapter.
         vault: adapter.vaultBin != null ? vaultDiagnostics(adapter.vaultBin) : null,
+        // crew#1147: the repo-checks floor cache's disk usage (cached 60 s); `null` on an addon without it.
+        floorCache,
       };
   };
   app.get(

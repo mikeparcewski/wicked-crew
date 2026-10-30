@@ -18,6 +18,10 @@ mentioned only where a daemon release depends on them.
   Next included. Only a person's edit does. Goal, Approach and Constraints stay a person's
   (`packages/crew/src/working-doc/sections.ts` `PLUGIN_SECTIONS`).
 
+### Added
+
+- `GET /api/v1/diagnostics` carries `floorCache` — the engine's repo-checks floor cache usage (`Core.floorCacheUsage`: path as `~/...`, bytes, caps, per-repo sizes, logs), read at most once per 60 s; `null` on an addon without the static (#1147). `DiagnosticsResponse.floorCache` is added to `wicked-crew-api-types`.
+
 ### Fixed
 
 - **A chat's MCP call no longer times out at a fixed 30 s on a loaded host (crew#1212, J6).** The first call

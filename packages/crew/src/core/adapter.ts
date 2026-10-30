@@ -650,6 +650,10 @@ interface CoreConstructor {
    *  only under exec. One without it opens-and-closes its bus connections, which on a file crew's
    *  seams also hold drops their locks (F-E2E-021), so crew does not hand such an engine the bus. */
   busConnectionStats?(path: string): string | null;
+  /** The repo-checks floor cache's disk usage (wicked-core#1122; wicked-core-ts ≥ the release carrying
+   *  it): JSON `{ path, bytes, totalCapBytes, repoCapBytes, idleTtlSecs, repos, logs }`, or `{ error }`
+   *  with no worker home. It WALKS the cache — callers cache the answer (crew#1147). */
+  floorCacheUsage?(): Promise<string>;
   /** DES-TEAMING-002 T3 (wicked-core-ts ≥ the release carrying it): the addon carries the plan
    *  approval gate — `LaunchOptions.planJson` / `deliverStepJson` and `confirmGate(…, planJson)`.
    *  Its PRESENCE is the capability: napi ignores an undeclared object field, so an older addon
@@ -1441,6 +1445,13 @@ export class CoreAdapter {
    *  DES-TEAMING-002 T0) and may therefore be handed the daemon's bus on every boot. */
   static engineHoldsBusConnection(): boolean {
     return typeof Core.busConnectionStats === 'function';
+  }
+
+  /** The engine's floor-cache usage read (`Core.floorCacheUsage`, crew#1147), or `null` on an addon without it. */
+  static floorCacheReader(): (() => Promise<string>) | null {
+    const fn = Core.floorCacheUsage;
+    if (typeof fn !== 'function') return null;
+    return (): Promise<string> => fn.call(Core);
   }
 
   static eventStoreCounter(): ((dbPath: string) => Promise<number>) | null {
