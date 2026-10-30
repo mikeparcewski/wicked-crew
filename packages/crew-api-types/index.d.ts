@@ -415,7 +415,8 @@ export interface WorkingDocView {
 }
 
 /** `POST /runs/:id/working-doc/versions`. `author: 'operator'` only from a person; `author: 'plugin'` writes only the
- *  plugin's own section (`decisions`). 409 `{head}` when the document moved since `base`. */
+ *  plugin's own lines, under `decisions`, `questions` and `next` (never `goal`, `approach` or `constraints`: 403). A
+ *  plugin's write never steers, in any section (`steer` is null). 409 `{head}` when the document moved since `base`. */
 export interface ProposeWorkingDocRequest {
   base: number;
   sections: Partial<Record<WorkingDocSectionId, string>>;

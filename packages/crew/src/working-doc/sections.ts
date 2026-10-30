@@ -31,8 +31,10 @@ export const SECTION_STEER: Readonly<Record<SectionId, SteerKind>> = {
   questions: 'record',
 };
 
-/** The sections a PLUGIN may write (its own generated lines). Everything else is a person's. */
-export const PLUGIN_SECTIONS: ReadonlySet<SectionId> = new Set<SectionId>(['decisions']);
+/** The sections a PLUGIN may write (its own generated lines: decisions answered, what waits on a person, what a
+ *  hand-off left to do). Goal, Approach and Constraints are a person's. A plugin's write never steers, in any section:
+ *  only a person's edit does (`record` in the service). */
+export const PLUGIN_SECTIONS: ReadonlySet<SectionId> = new Set<SectionId>(['decisions', 'questions', 'next']);
 
 /** Most characters one section holds. */
 export const SECTION_MAX_CHARS = 4_000;

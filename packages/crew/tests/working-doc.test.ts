@@ -316,13 +316,21 @@ describe('attribution and refusals', () => {
     expect(ok.ok && ok.view.trail.at(-1)?.author).toEqual({ kind: 'plugin', id: 'plugin:wicked-phase-report@0.13.1' });
     expect(t.backend.versions[1]?.author).toBe('plugin:wicked-phase-report@0.13.1');
     expect(t.injected).toHaveLength(0);
-    for (const s of ['goal', 'approach', 'constraints', 'next', 'questions']) {
+    for (const s of ['goal', 'approach', 'constraints']) {
       const r = await t.service.propose('run-1', { base: 1, author: 'plugin', plugin: { id: 'wicked-phase-report', version: '0.13.1' }, sections: { [s]: 'Approve the deliver gate.' } }, HUMAN);
       expect(r, s).toMatchObject({ ok: false, code: 403 });
     }
+    // Open questions and Next take its lines too (what waits on a person, what a hand-off left) — and even Next, which
+    // steers when a person saves it, never steers when a plugin writes it.
+    const q = await t.service.propose('run-1', { base: 1, author: 'plugin', plugin: { id: 'wicked-phase-report', version: '0.13.1' }, sections: { questions: 'Waiting on you · Deliver · since 20:10' } }, HUMAN);
+    expect(q).toMatchObject({ ok: true, version: 2, steer: null });
+    const n = await t.service.propose('run-1', { base: 2, author: 'plugin', plugin: { id: 'wicked-phase-report', version: '0.13.1' }, sections: { next: 'After hand-off round 1 · the review asked for changes' } }, HUMAN);
+    expect(n).toMatchObject({ ok: true, version: 3, steer: null });
+    expect(n.ok && n.view.trail.at(-1)).toMatchObject({ author: { kind: 'plugin', id: 'plugin:wicked-phase-report@0.13.1' }, sections: ['next'], steerId: null });
+    expect(t.injected).toHaveLength(0);
     // No plugin named: refused, never defaulted to a person.
-    expect(await t.service.propose('run-1', { base: 1, author: 'plugin', sections: { decisions: 'x' } }, HUMAN)).toMatchObject({ ok: false, code: 400 });
-    expect(t.backend.versions).toHaveLength(2);
+    expect(await t.service.propose('run-1', { base: 3, author: 'plugin', sections: { decisions: 'x' } }, HUMAN)).toMatchObject({ ok: false, code: 400 });
+    expect(t.backend.versions).toHaveLength(4);
   });
 
   it('a worker or system caller never writes as a plugin', async () => {
