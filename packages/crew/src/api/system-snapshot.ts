@@ -183,11 +183,11 @@ function isExecutableFile(path: string): boolean {
 
 /** Whether `wicked-estate-mcp` can be spawned: `WICKED_ESTATE_MCP_EXE` (a path, or a bare name) when set,
  *  else `wicked-estate-mcp`; a bare name is looked up on PATH, a path must be an executable file. */
-export function estateMcpResolvable(env: NodeJS.ProcessEnv = process.env): boolean {
+export function estateMcpResolvable(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): boolean {
   const exe = estateMcpExe(env);
   if (exe.includes('/') || exe.includes('\\')) return isExecutableFile(exe);
-  // Node's spawn on Windows finds `wicked-estate-mcp.exe` for the bare name, so try the PATHEXT suffixes there.
-  const suffixes = process.platform === 'win32' ? ['', ...(env['PATHEXT'] ?? '.EXE;.CMD;.BAT').split(';').filter((e) => e !== '')] : [''];
+  // Shell-free spawn on Windows (libuv) appends `.com` then `.exe` to a bare name, and never a PATHEXT `.cmd`/`.bat` shim.
+  const suffixes = platform === 'win32' ? ['', '.com', '.exe'] : [''];
   return (env['PATH'] ?? '').split(delimiter).some((dir) => dir !== '' && suffixes.some((x) => isExecutableFile(join(dir, exe + x))));
 }
 

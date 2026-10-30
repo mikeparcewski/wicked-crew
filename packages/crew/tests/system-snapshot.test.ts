@@ -155,6 +155,23 @@ describe('estate, bus, vault probes', () => {
     expect(estateMcpResolvable({ PATH: '/definitely/not/here' })).toBe(false);
     expect(estateMcpResolvable({ WICKED_ESTATE_MCP_EXE: process.execPath, PATH: '' })).toBe(true);
   });
+  it('estateMcpResolvable on Windows: .exe/.com resolve, a .cmd shim does not, PATHEXT is ignored', async () => {
+    const { mkdtempSync, writeFileSync, chmodSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'estate-resolve-'));
+    try {
+      const put = (n: string): void => { writeFileSync(join(dir, n), ''); chmodSync(join(dir, n), 0o755); };
+      const env = { PATH: dir, PATHEXT: '.CMD' };
+      put('wicked-estate-mcp.cmd');
+      expect(estateMcpResolvable(env, 'win32')).toBe(false);
+      put('wicked-estate-mcp.exe');
+      expect(estateMcpResolvable(env, 'win32')).toBe(true);
+      expect(estateMcpResolvable(env, 'linux')).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
   it('bus: unavailable → down; no file → down; seams off → degraded; watch down → degraded; none → off', async () => {
     const none = { unavailable: null, seamsOff: null, dbPath: null, watchBus: null, tailLagMs: null };
     expect((await probeBus({ ...none, unavailable: { reason: 'locked' } })).state).toBe('down');
