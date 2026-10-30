@@ -186,7 +186,9 @@ function isExecutableFile(path: string): boolean {
 export function estateMcpResolvable(env: NodeJS.ProcessEnv = process.env): boolean {
   const exe = estateMcpExe(env);
   if (exe.includes('/') || exe.includes('\\')) return isExecutableFile(exe);
-  return (env['PATH'] ?? '').split(delimiter).some((dir) => dir !== '' && isExecutableFile(join(dir, exe)));
+  // Node's spawn on Windows finds `wicked-estate-mcp.exe` for the bare name, so try the PATHEXT suffixes there.
+  const suffixes = process.platform === 'win32' ? ['', ...(env['PATHEXT'] ?? '.EXE;.CMD;.BAT').split(';').filter((e) => e !== '')] : [''];
+  return (env['PATH'] ?? '').split(delimiter).some((dir) => dir !== '' && suffixes.some((x) => isExecutableFile(join(dir, exe + x))));
 }
 
 /** The container runtime CLI the engine would use (`container_floor.rs` `runtime_candidates`):
