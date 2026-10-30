@@ -20,6 +20,17 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **A chat's MCP call no longer times out at a fixed 30 s on a loaded host (crew#1212, J6).** The first call
+  after approval failed with `upstream_error: timed out after 30 s` at host load 40-47 on 14 CPUs. Crew starts a
+  stdio MCP server for each call, and the fastmcp + OpenTelemetry server's cold start alone took 10.9 s at that load
+  (1.5 s at rest). The deadline now scales with host load the way the engine's repo-checks floor does:
+  `30 s × clamp(load1 / CPUs, 1, 3)`, so 90 s at most, inside garden's broker shim's 150 s wait. The MCP SDK's own
+  request timeouts (60 s for `initialize`) now sit past that deadline, so the deadline is the one that fires. A
+  timeout now names its cause and its bound: "timed out after 90 s: the server was still starting (crew starts a
+  stdio server for each call, and a cold start is slow on a loaded host) (bound 90 s = 30 s × 3.00 for 1-min load
+  42.0 on 14 CPUs)". A tool that never answers reads "the server was up, but <tool> did not answer". The bound
+  covers the whole call: a read tool's retries share it, so three slow attempts cannot outlast the shim. A REST
+  tool's timeout keeps its own mapping deadline and gets no load note.
 - **A fresh install's Nerve Center tells the truth (J1).** On a fresh `npm i -g wicked-crew` with Docker
   running, the Nerve Center said "Work is stopped: Model gateway down — Start Docker". The gateway container
   just did not exist yet. A probe's error kept only the first line of a child-process error, and that line is
