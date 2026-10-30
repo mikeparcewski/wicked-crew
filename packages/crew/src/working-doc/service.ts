@@ -26,6 +26,7 @@ import {
   sectionsOf, type SectionId,
 } from './sections.js';
 import type { DocAuthor, SteerRecord, TrailEntry, WorkingDocRecord, WorkingDocStore } from './store.js';
+import { LINE_EVENTS, PHASE_REPORT_AUTHOR, docLines, foldLines, reconcileSection } from './event-lines.js';
 
 /** How crew reads and writes interactive documents (the bridge in production, a fake in tests). */
 export interface DocBackend {
@@ -64,6 +65,13 @@ export interface WorkingDocDeps {
   /** A change worth telling studio about (`workingDocChanged` on `/ws`). */
   changed?(runId: string, head: number | null): void;
   audit?(action: string, actor: { id: string; kind: string }, runId: string, detail: Record<string, unknown>): void;
+  /** The run's recorded events (the engine's log), from which crew writes the document's event-derived lines
+   *  (Decisions answered, Open questions, Next). `null` when the log cannot be read. Absent: no such lines. */
+  events?(runId: string): Promise<readonly CoreEvent[] | null>;
+  /** How long after a line-relevant event the lines are brought up to date (one write per burst). */
+  linesDelayMs?: number;
+  /** How long to wait before trying the lines again while a person's write of unknown outcome settles. */
+  linesRetryMs?: number;
   now?(): number;
   log?(m: string): void;
 }
@@ -75,6 +83,8 @@ export interface WorkingDocView {
   labels: Record<SectionId, string>;
   trail: TrailEntry[];
   steers: SteerRecord[];
+  /** Crew writes the event-derived lines itself ({@link WorkingDocService.syncLines}): a host plugin writes none. */
+  eventLines: boolean;
 }
 
 export type ProposeResult =
@@ -156,6 +166,14 @@ export class WorkingDocService {
   private readonly locks = new Map<string, Promise<unknown>>();
   /** A standing steer is re-queued once per dispatch that picked it up (a live worker hears it once, not in a loop). */
   private readonly renewedFor = new Map<string, string | null>();
+  /** One pending event-lines write per run (a burst of events becomes one write). */
+  private readonly linesDue = new Map<string, ReturnType<typeof setTimeout>>();
+  /** The run's line syncs, one after another. */
+  private readonly linesChain = new Map<string, Promise<unknown>>();
+  /** Whether the engine's event log can be read here: unknown until the first read (studio keeps writing if not). */
+  private eventLog: boolean | null = null;
+  /** Runs whose orchestrator wrote its own APPROACH line: its turn summaries then never replace it. */
+  private readonly approachNoted = new Set<string>();
 
   constructor(private readonly d: WorkingDocDeps) {
     this.now = d.now ?? Date.now;
@@ -172,11 +190,30 @@ export class WorkingDocService {
     // An edit whose outcome was unknown is settled on every read, not only by the next edit.
     if (this.d.store.get(runId)?.pending != null) await this.exclusive(runId, () => this.reconcile(runId));
     const rec = this.d.store.get(runId);
-    const base = { runId, labels: { ...SECTION_LABELS }, trail: rec?.trail ?? [], steers: rec?.steers ?? [] };
+    const base = { runId, labels: { ...SECTION_LABELS }, trail: rec?.trail ?? [], steers: rec?.steers ?? [], eventLines: await this.eventLines(runId) };
     if (rec === undefined) return { ...base, doc: null, sections: null };
     const head = await this.d.backend.read(rec.projectId, rec.docId);
     if (head === null) return { ...base, doc: null, sections: null };
     return { ...base, doc: { projectId: rec.projectId, docId: rec.docId, head: head.head }, sections: { ...blankSections(), ...sectionsOf(head.html) } };
+  }
+
+  /** Whether crew writes the event lines: it has an event log it can read (probed once when unknown). A daemon whose
+   *  engine binding has no log says false, so the studio plugin keeps writing them (xreview on #1224). */
+  private async eventLines(runId: string): Promise<boolean> {
+    if (this.d.events === undefined) return false;
+    if (this.eventLog === null) {
+      try {
+        this.eventLog = (await this.d.events(runId)) !== null;
+      } catch {
+        return false;
+      }
+    }
+    return this.eventLog;
+  }
+
+  /** Catch up every document crew holds (after a daemon restart, no further event may come for a run). */
+  catchUp(): void {
+    for (const rec of this.d.store.all()) this.linesSoon(rec.runId);
   }
 
   /** The run's working document, created on first ask (its Goal seeded from the run's intent, by crew). The view is
@@ -184,6 +221,8 @@ export class WorkingDocService {
    *  inside deadlocked the run's document). */
   async ensure(runId: string): Promise<WorkingDocView | null> {
     if (!(await this.ensureDoc(runId))) return null;
+    // A document made after the run's last line-relevant event still gets its lines (xreview on #1224).
+    this.linesSoon(runId);
     return this.view(runId);
   }
 
@@ -342,6 +381,89 @@ export class WorkingDocService {
     });
   }
 
+  /**
+   * The document's EVENT-DERIVED lines (Decisions answered, Open questions, Next), brought up to date from the run's
+   * own recorded events and written by crew as the Phase report plugin's actor ({@link PHASE_REPORT_AUTHOR}), whether
+   * or not anyone has the run open (rig run ea73afc0: only a viewing tab wrote them). Like every plugin line they
+   * never steer, and a person's own lines in those sections stay as they are, in place. A power run gets its document
+   * here if it has none; any other run only once it has one. A person's edit racing this write wins: crew re-reads and
+   * writes again on top of it (3 tries at most). Resolves to the version written, or `null` (nothing to change, no
+   * log, no document).
+   */
+  async syncLines(runId: string): Promise<number | null> {
+    // One sync per run at a time, each reading the log afresh (xreview on #1224: two overlapping reads could let an
+    // older snapshot restore an answered question after a newer one wrote).
+    const prev = this.linesChain.get(runId) ?? Promise.resolve();
+    const next = prev.then(() => this.syncLinesNow(runId), () => this.syncLinesNow(runId));
+    this.linesChain.set(runId, next.catch(() => null));
+    return next;
+  }
+
+  private async syncLinesNow(runId: string): Promise<number | null> {
+    if (this.d.events === undefined) return null;
+    const events = await this.d.events(runId);
+    if (events === null) {
+      this.eventLog = false;
+      return null;
+    }
+    this.eventLog = true;
+    const model = foldLines(events);
+    if (!model.power && this.d.store.get(runId) === undefined) return null;
+    if (!(await this.ensureDoc(runId))) return null;
+    const lines = docLines(model);
+    const id = PHASE_REPORT_AUTHOR;
+    return this.exclusive(runId, async () => {
+      const rec = this.d.store.get(runId);
+      if (rec === undefined) return null;
+      await this.reconcile(runId);
+      if (this.d.store.get(runId)?.pending != null) {
+        // A person's write of unknown outcome is still settling: try again once it has (it settles within ~75 s).
+        this.linesSoon(runId, this.d.linesRetryMs ?? 15_000);
+        return null;
+      }
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const head = await this.d.backend.read(rec.projectId, rec.docId);
+        if (head === null) return null;
+        const before = { ...blankSections(), ...sectionsOf(head.html) };
+        const wanted: Partial<Record<SectionId, string>> = {};
+        for (const sid of ['decisions', 'questions', 'next'] as const) {
+          const text = reconcileSection(sid, before[sid], lines[sid], SECTION_MAX_CHARS);
+          if (text !== null) wanted[sid] = text;
+        }
+        const changed = changedSections(before, wanted);
+        if (changed.length === 0) return null;
+        const values: Partial<Record<SectionId, string>> = {};
+        for (const sid of changed) values[sid] = wanted[sid] ?? '';
+        let written: { version: number; parent: number } | { headMoved: true; head: number };
+        try {
+          written = await this.d.backend.edit(rec.projectId, rec.docId, {
+            expectHead: head.head,
+            items: changed.map((sid) => ({ selector: anchorOf(sid), value: encodeSectionText(values[sid] ?? '') })),
+            author: id,
+          });
+        } catch (err) {
+          if (err instanceof UndeterminedWriteError) this.rememberPending(runId, head.head, { kind: 'plugin', id }, null, values, { id, kind: 'plugin' });
+          throw err;
+        }
+        if ('headMoved' in written) continue;
+        await this.record(runId, written.version, written.parent, { kind: 'plugin', id }, null, changed, values, { id, kind: 'plugin' });
+        return written.version;
+      }
+      return null;
+    });
+  }
+
+  /** Bring the event-derived lines up to date shortly (a burst of events becomes one write). */
+  private linesSoon(runId: string, delayMs?: number): void {
+    if (this.d.events === undefined || this.linesDue.has(runId)) return;
+    const t = setTimeout(() => {
+      this.linesDue.delete(runId);
+      void this.syncLines(runId).catch((err: unknown) => this.d.log?.(`[working-doc] lines for ${runId}: ${String(err)}`));
+    }, delayMs ?? this.d.linesDelayMs ?? 1_500);
+    (t as { unref?: () => void }).unref?.();
+    this.linesDue.set(runId, t);
+  }
+
   /** A write whose outcome is not known: remembered, so a later read attributes it if it lands, never to the next
    *  caller, and looked at again on its own shortly, so its steer (a person's) is not left waiting for a reader. */
   private rememberPending(runId: string, expectHead: number, author: DocAuthor, surface: string | null, values: Partial<Record<SectionId, string>>, actor: { id: string; kind: string }): void {
@@ -438,7 +560,23 @@ export class WorkingDocService {
     const ev = e as unknown as Record<string, unknown>;
     const runId = typeof ev['session'] === 'string' ? ev['session'] : null;
     if (runId === null) return;
+    if (LINE_EVENTS.has(ev['type'] as string)) this.linesSoon(runId);
+    if ((ev['type'] as string) === 'powerTurnCompleted') {
+      // (rig run 1d372696) The orchestrator wrote no APPROACH line, so the document stayed empty. Its own turn
+      // summary is the Approach, as the agent, unless it stated one itself or a person wrote it (agentNotes).
+      const summary = typeof ev['summary'] === 'string' ? ev['summary'].trim() : '';
+      if (summary !== '' && !this.approachNoted.has(runId)) {
+        void this.agentNotes(runId, {
+          seat: typeof ev['cli'] === 'string' ? ev['cli'] : 'agent',
+          turn: typeof ev['turn'] === 'number' ? ev['turn'] : 0,
+          approach: summary,
+          decisions: [],
+        }).catch(() => undefined);
+      }
+      return;
+    }
     if ((ev['type'] as string) === 'powerWorkingNotes') {
+      if (typeof ev['approach'] === 'string' && ev['approach'].trim() !== '') this.approachNoted.add(runId);
       const decisions = Array.isArray(ev['decisions'])
         ? (ev['decisions'] as Array<Record<string, unknown>>)
             .filter((d) => typeof d['text'] === 'string')

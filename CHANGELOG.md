@@ -12,6 +12,21 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **Crew writes the working document's event-derived lines itself, so a run nobody views gets them.** On rig run ea73afc0
+  every Decisions, Open questions and Next line came from whichever studio tab had the run open (versions v2-v13, at the
+  times a page was open); a run nobody viewed got none. `WorkingDocService.syncLines` now folds the run's own recorded
+  events (`adapter.runEvents`) a moment after each line-relevant event: answered gates and checkpoint pauses under
+  Decisions, what waits on a person under Open questions (taken back once answered), and what the newest hand-off round
+  left under Next (taken back once a later round passes it). The words are the Phase report plugin's, line for line.
+  They are written as `plugin:wicked-phase-report@0.14.0` under the crew#1197/#1216 rules: they never steer, a person's
+  own lines in those sections stay in place, and a person's racing edit wins. A power run gets its document here; any
+  other run gets lines once it has one. The studio plugin now only needs to render and take a person's edits (lane
+  ui-gaps).
+- **The working document is made at intake and its Approach does not depend on the model.** On rig run 1d372696 the
+  orchestrator wrote no APPROACH or DECISION lines, so no document was ever made and even Goal read "Not started". A
+  power run's document is now made at its intake (Goal seeded from the run's intent), and each orchestrator turn's
+  own summary (`powerTurnCompleted.summary`) is written as the Approach, as `agent:<seat>`, unless the orchestrator
+  stated its own APPROACH or a person wrote it. It never steers.
 - **A delivery says "QE acceptance judged by operator" when the operator judged the QE step.** On rig run ea73afc0
   the QE reviewer could not run its checks and the operator judged the work at that judge-unavailable gate; the PR's
   `## Assurance` section said "QE acceptance skipped by operator". The engine records that judgment as `skipped`
