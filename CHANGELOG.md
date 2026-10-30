@@ -19,7 +19,9 @@ mentioned only where a daemon release depends on them.
   same clean build and with the same cross-repo filter (and its one disclosed line) as `test_targeted`. It does not
   retry itself: the engine retries the check, and a scoped pass never stands on its own there. Its failing-set
   re-run is `--tests` (the same build and filter). Nothing else is left out. CI and a developer's `npm test` are
-  unchanged.
+  unchanged. Two `stall-seat-liveness` tests about the process tree also read the host's container runtime; a
+  docker on PATH that does not answer (the floor's scratch HOME has no docker context) made them fail, so they now
+  read host processes only. With wicked-core#1202 (`ps` inside the macOS jail) a clean crew change's base is green.
 - **A missing `wicked-estate-mcp` now reads as not installed, not "memory store not created yet".** The estate infra row checks the binary before the store (not installed or not on PATH, estate is optional, `npx wicked-installer` or `WICKED_ESTATE_MCP_EXE`), and `/memory/*` and `/proposals` answer 502 with that reason instead of the raw `spawn … ENOENT` (crew#1213).
 
 ### Changed
