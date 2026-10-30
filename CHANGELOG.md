@@ -12,6 +12,17 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **A fresh install's Nerve Center tells the truth (J1).** On a fresh `npm i -g wicked-crew` with Docker
+  running, the Nerve Center said "Work is stopped: Model gateway down — Start Docker". The gateway container
+  just did not exist yet. A probe's error kept only the first line of a child-process error, and that line is
+  `Command failed: <the command line>`, so docker's "No such container" never reached the check that reads
+  "not started (the engine starts it before the first seat)". Probe errors now read the child's stderr first,
+  so every infra row shows what the runtime said, not the command crew ran. The same install also hid what
+  really stops work: with no wicked-garden, the engine refuses every launch, but the skills row was only
+  `degraded`. That fallback with an error finding is now `down`, so it is listed as stopping work, with the
+  install command. The npm README's Install section now lists every prerequisite: Node, a container runtime,
+  a CLI and wicked-garden, plus the optional wicked-estate.
+
 - **crew declares its generated files for the deliver lift (wicked-core#1173).** `.wicked/checks.json` gains
   `generated`: `packages/crew/endpoint-manifest.json` (`npm run -w packages/crew manifest:endpoints`), then
   `packages/crew/tests/generated/api-sample.generated.test.ts` (`generate:api-tests`, which reads the manifest).
