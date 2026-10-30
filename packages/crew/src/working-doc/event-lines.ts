@@ -81,14 +81,13 @@ export function foldLines(events: readonly CoreEvent[]): LinesModel {
         m.finished = at;
         answerPause(m, e.type === 'runCancelled' ? 'stop' : 'continue', false, at);
         break;
+      // Any resume or unit start after a gate opened answers it, whatever its ord (ea73afc0: the ord-4 escalation
+      // resumed at ord 3 in the same second and read "Waiting on you" for the rest of the run). The same rule as the
+      // studio plugin (lane ui-gaps).
       case 'resumed':
-        if (m.finished !== null && at >= m.finished) m.finished = null;
-        for (const g of m.gates) if (g.ord === ord && g.answeredAt === null) g.answeredAt = at;
-        break;
       case 'unitExecuting':
-        if (ord === null) break;
         if (m.finished !== null && at >= m.finished) m.finished = null;
-        for (const g of m.gates) if (g.ord <= ord && g.answeredAt === null && g.openedAt <= at) g.answeredAt = at;
+        for (const g of m.gates) if (g.answeredAt === null && g.openedAt <= at) g.answeredAt = at;
         break;
       case 'awaitingHuman':
         if (ord !== null) m.gates.push({ ord, kind: word(ev['gateKind']) ?? 'question', openedAt: at, answeredAt: null });

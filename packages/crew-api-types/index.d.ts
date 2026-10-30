@@ -414,6 +414,10 @@ export interface WorkingDocView {
   labels: Record<WorkingDocSectionId, string>;
   trail: WorkingDocTrailEntry[];
   steers: WorkingDocSteer[];
+  /** (0.151.0) `true` when crew itself writes the document's event-derived lines (Decisions answered, Open questions,
+   *  Next) from the run's own log, as `plugin:wicked-phase-report@…`: a host plugin then writes none of its own and
+   *  only renders and takes a person's edits. ABSENT on an older daemon — read as `false` (the plugin keeps writing). */
+  eventLines?: boolean;
 }
 
 /** `POST /runs/:id/working-doc/versions`. `author: 'operator'` only from a person; `author: 'plugin'` writes only the

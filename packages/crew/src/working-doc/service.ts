@@ -81,6 +81,8 @@ export interface WorkingDocView {
   labels: Record<SectionId, string>;
   trail: TrailEntry[];
   steers: SteerRecord[];
+  /** Crew writes the event-derived lines itself ({@link WorkingDocService.syncLines}): a host plugin writes none. */
+  eventLines: boolean;
 }
 
 export type ProposeResult =
@@ -180,7 +182,7 @@ export class WorkingDocService {
     // An edit whose outcome was unknown is settled on every read, not only by the next edit.
     if (this.d.store.get(runId)?.pending != null) await this.exclusive(runId, () => this.reconcile(runId));
     const rec = this.d.store.get(runId);
-    const base = { runId, labels: { ...SECTION_LABELS }, trail: rec?.trail ?? [], steers: rec?.steers ?? [] };
+    const base = { runId, labels: { ...SECTION_LABELS }, trail: rec?.trail ?? [], steers: rec?.steers ?? [], eventLines: this.d.events !== undefined };
     if (rec === undefined) return { ...base, doc: null, sections: null };
     const head = await this.d.backend.read(rec.projectId, rec.docId);
     if (head === null) return { ...base, doc: null, sections: null };

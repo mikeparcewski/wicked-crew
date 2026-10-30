@@ -155,6 +155,22 @@ describe('event-derived working-document lines, written by crew', () => {
     expect(docLines(foldLines(log)).questions).toEqual([]);
   });
 
+  it('any resume after a gate opened answers it, whatever its ord (ea73afc0: ord-4 gate, ord-3 resume)', () => {
+    seq = 0;
+    const log = [ev('awaitingHuman', min(1), { ord: 4, gateKind: 'escalation' }), ev('resumed', min(1), { ord: 3 })];
+    const lines = docLines(foldLines(log));
+    expect(lines.questions).toEqual([]);
+    expect(lines.decisions).toEqual([`A failed check or review · answered ${clock(min(1))}`]);
+  });
+
+  it('the view says crew writes these lines (eventLines), so a host plugin writes none', async () => {
+    const t = setup(powerRun());
+    await t.service.ensure('run-1');
+    expect((await t.service.view('run-1')).eventLines).toBe(true);
+    const plain = new WorkingDocService({ store: new WorkingDocStore({ stateHome: home() }), backend: new FakeBackend(), engine: { injectWorkerMessage: async () => 'q' }, run: async () => null });
+    expect((await plain.view('run-1')).eventLines).toBe(false);
+  });
+
   it('reconciling keeps a person’s lines in place and takes back only generated ones', () => {
     expect(reconcileSection('questions', 'Mine\nWaiting on you · Deliver · since 10:00', [])).toBe('Mine');
     expect(reconcileSection('decisions', 'Mine', ['A · answered 10:00'])).toBe('Mine\nA · answered 10:00');
