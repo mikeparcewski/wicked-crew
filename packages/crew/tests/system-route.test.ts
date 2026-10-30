@@ -23,7 +23,7 @@ vi.mock('node:fs/promises', async (importOriginal) => ({
   statfs: async () => ({ bavail: 500_000, bsize: 1_000_000, blocks: 1_000_000 }),
 }));
 
-const ENV_KEYS = ['WICKED_SEAT_FLOOR', 'WICKED_CONTAINER_RUNTIME', 'WICKED_MEMORY_DB', 'WICKED_ESTATE_EXE', 'LOG_LEVEL'] as const;
+const ENV_KEYS = ['WICKED_SEAT_FLOOR', 'WICKED_CONTAINER_RUNTIME', 'WICKED_MEMORY_DB', 'WICKED_ESTATE_EXE', 'WICKED_ESTATE_MCP_EXE', 'LOG_LEVEL'] as const;
 const saved: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {};
 
 let scratch: string;
@@ -81,6 +81,9 @@ beforeAll(async () => {
   // Estate is probed against a store that does not exist yet: no binary is spawned on the operator's.
   process.env['WICKED_MEMORY_DB'] = join(scratch, 'memory.db');
   process.env['WICKED_ESTATE_EXE'] = join(scratch, 'no-such-estate');
+  // The estate MCP binary resolves (any executable; it is never spawned while the store is missing), so
+  // the row reads "store not created yet" whether or not this host has wicked-estate installed (crew#1213).
+  process.env['WICKED_ESTATE_MCP_EXE'] = process.execPath;
   process.env['LOG_LEVEL'] = 'error';
 
   const views = [
