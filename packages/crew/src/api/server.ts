@@ -2512,6 +2512,9 @@ export async function createServer(
     },
     changed: (runId, head) => broadcast({ type: 'workingDocChanged', session: runId, head } as unknown as Parameters<typeof broadcast>[0]),
     audit: (action, actor, runId, detail) => audit.record(action, actor as Parameters<typeof audit.record>[1], { runId, detail }),
+    // The run's own log: crew writes the event-derived lines (Decisions, Open questions, Next) whether or not a tab
+    // has the run open.
+    events: async (runId) => (await adapter.runEvents(runId)) as unknown as CoreEvent[] | null,
     log: (m) => app.log.warn(m),
   });
   workingDocTap = (e) => workingDocs.onEvent(e);
