@@ -41,7 +41,7 @@ let seq = 0;
 const ev = (type: string, ts: number, extra: Record<string, unknown> = {}): CoreEvent =>
   ({ type, session: 'run-1', ts, seq: ++seq, ...extra }) as unknown as CoreEvent;
 
-function setup(log: CoreEvent[]) {
+function setup(log: CoreEvent[], over: { events?: (runId: string) => Promise<readonly CoreEvent[] | null> } = {}) {
   const backend = new FakeBackend();
   const injected: string[] = [];
   const audits: Array<{ action: string; actor: { id: string; kind: string }; detail: Record<string, unknown> }> = [];
@@ -52,8 +52,9 @@ function setup(log: CoreEvent[]) {
     engine: Object.freeze({ injectWorkerMessage: async (_r: string, m: string) => { injected.push(m); return 'queued'; } }),
     run: async () => facts,
     audit: (action, actor, _r, detail) => audits.push({ action, actor, detail }),
-    events: async () => log,
+    events: over.events ?? (async () => log),
     linesDelayMs: 0,
+    linesRetryMs: 5,
     now: () => 1_000,
   });
   const sections = async () => sectionsOf(backend.versions.at(-1)!.html);
@@ -186,6 +187,78 @@ describe('event-derived working-document lines, written by crew', () => {
     await new Promise((r) => setTimeout(r, 30));
     expect((await t.sections()).approach).toBe('Trim the spawns');
     expect(t.injected).toEqual([]);
+  });
+
+  // xreview on #1224 (codex, agy): the size cap trimmed a person's line, a long history re-added what it trimmed on
+  // every sync, overlapping reads restored an answered question, a pending write dropped the lines for good, a
+  // document made after the last event got none, and eventLines said true with no readable log.
+  it('the size cap keeps a person’s line, keeps the newest generated ones, and converges', async () => {
+    seq = 0;
+    const log: CoreEvent[] = [ev('powerIntakePlanned', min(0))];
+    for (let i = 0; i < 150; i += 1) log.push(ev('awaitingHuman', min(i), { ord: 1, gateKind: 'escalation' }), ev('resumed', min(i), { ord: 1 }));
+    const t = setup(log);
+    await t.service.ensure('run-1');
+    const head = t.backend.versions.length - 1;
+    const mine = `Mine: ${'x'.repeat(2_000)}`;
+    expect((await t.service.propose('run-1', { base: head, sections: { decisions: mine }, author: 'operator' }, { id: 'local', kind: 'human' })).ok).toBe(true);
+    await t.service.syncLines('run-1');
+    const d = (await t.sections()).decisions ?? '';
+    expect(d.split('\n')[0]).toBe(mine);
+    expect(d.length).toBeLessThanOrEqual(4_000);
+    expect(d.split('\n').at(-1)).toBe(`A failed check or review · answered ${clock(min(149))}`);
+    const n = t.backend.versions.length;
+    expect(await t.service.syncLines('run-1')).toBeNull();
+    expect(await t.service.syncLines('run-1')).toBeNull();
+    expect(t.backend.versions.length).toBe(n);
+  });
+
+  it('two overlapping syncs never let the older log restore an answered question', async () => {
+    const open = powerRun();
+    const answered = [...open, ev('resumed', min(80), { ord: 3 })];
+    let release: (() => void) | null = null;
+    let calls = 0;
+    const t = setup(open, {
+      events: async () => {
+        calls += 1;
+        if (calls === 1) {
+          await new Promise<void>((r) => { release = r; });
+          return open;
+        }
+        return answered;
+      },
+    });
+    const first = t.service.syncLines('run-1');
+    await new Promise((r) => setTimeout(r, 5));
+    const second = t.service.syncLines('run-1');
+    release!();
+    await Promise.all([first, second]);
+    expect((await t.sections()).questions).toBe('');
+  });
+
+  it('a pending person’s write delays the lines, it does not drop them', async () => {
+    const t = setup(powerRun());
+    await t.service.ensure('run-1');
+    const store = (t.service as unknown as { d: { store: WorkingDocStore } }).d.store;
+    store.update('run-1', (r) => { r.pending = { expectHead: 99, author: { kind: 'human', id: 'local' }, surface: null, values: {}, at: 1_000, actor: { id: 'local', kind: 'human' } }; });
+    expect(await t.service.syncLines('run-1')).toBeNull();
+    store.update('run-1', (r) => { r.pending = null; });
+    await new Promise((r) => setTimeout(r, 40));
+    expect((await t.sections()).questions).toContain('Waiting on you · A failed check or review');
+  });
+
+  it('a document made after the run’s last event still gets its lines', async () => {
+    seq = 0;
+    const t = setup([ev('awaitingHuman', min(1), { ord: 1, gateKind: 'deliver' })]);
+    expect(await t.service.syncLines('run-1')).toBeNull();
+    await t.service.ensure('run-1');
+    await new Promise((r) => setTimeout(r, 30));
+    expect((await t.sections()).questions).toBe(`Waiting on you · Deliver · since ${clock(min(1))}`);
+  });
+
+  it('eventLines is false when the engine has no readable event log', async () => {
+    const t = setup(powerRun(), { events: async () => null });
+    await t.service.ensure('run-1');
+    expect((await t.service.view('run-1')).eventLines).toBe(false);
   });
 
   it('reconciling keeps a person’s lines in place and takes back only generated ones', () => {

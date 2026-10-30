@@ -70,6 +70,8 @@ export interface WorkingDocDeps {
   events?(runId: string): Promise<readonly CoreEvent[] | null>;
   /** How long after a line-relevant event the lines are brought up to date (one write per burst). */
   linesDelayMs?: number;
+  /** How long to wait before trying the lines again while a person's write of unknown outcome settles. */
+  linesRetryMs?: number;
   now?(): number;
   log?(m: string): void;
 }
@@ -166,6 +168,10 @@ export class WorkingDocService {
   private readonly renewedFor = new Map<string, string | null>();
   /** One pending event-lines write per run (a burst of events becomes one write). */
   private readonly linesDue = new Map<string, ReturnType<typeof setTimeout>>();
+  /** The run's line syncs, one after another. */
+  private readonly linesChain = new Map<string, Promise<unknown>>();
+  /** Whether the engine's event log can be read here: unknown until the first read (studio keeps writing if not). */
+  private eventLog: boolean | null = null;
   /** Runs whose orchestrator wrote its own APPROACH line: its turn summaries then never replace it. */
   private readonly approachNoted = new Set<string>();
 
@@ -184,11 +190,30 @@ export class WorkingDocService {
     // An edit whose outcome was unknown is settled on every read, not only by the next edit.
     if (this.d.store.get(runId)?.pending != null) await this.exclusive(runId, () => this.reconcile(runId));
     const rec = this.d.store.get(runId);
-    const base = { runId, labels: { ...SECTION_LABELS }, trail: rec?.trail ?? [], steers: rec?.steers ?? [], eventLines: this.d.events !== undefined };
+    const base = { runId, labels: { ...SECTION_LABELS }, trail: rec?.trail ?? [], steers: rec?.steers ?? [], eventLines: await this.eventLines(runId) };
     if (rec === undefined) return { ...base, doc: null, sections: null };
     const head = await this.d.backend.read(rec.projectId, rec.docId);
     if (head === null) return { ...base, doc: null, sections: null };
     return { ...base, doc: { projectId: rec.projectId, docId: rec.docId, head: head.head }, sections: { ...blankSections(), ...sectionsOf(head.html) } };
+  }
+
+  /** Whether crew writes the event lines: it has an event log it can read (probed once when unknown). A daemon whose
+   *  engine binding has no log says false, so the studio plugin keeps writing them (xreview on #1224). */
+  private async eventLines(runId: string): Promise<boolean> {
+    if (this.d.events === undefined) return false;
+    if (this.eventLog === null) {
+      try {
+        this.eventLog = (await this.d.events(runId)) !== null;
+      } catch {
+        return false;
+      }
+    }
+    return this.eventLog;
+  }
+
+  /** Catch up every document crew holds (after a daemon restart, no further event may come for a run). */
+  catchUp(): void {
+    for (const rec of this.d.store.all()) this.linesSoon(rec.runId);
   }
 
   /** The run's working document, created on first ask (its Goal seeded from the run's intent, by crew). The view is
@@ -196,6 +221,8 @@ export class WorkingDocService {
    *  inside deadlocked the run's document). */
   async ensure(runId: string): Promise<WorkingDocView | null> {
     if (!(await this.ensureDoc(runId))) return null;
+    // A document made after the run's last line-relevant event still gets its lines (xreview on #1224).
+    this.linesSoon(runId);
     return this.view(runId);
   }
 
@@ -364,9 +391,22 @@ export class WorkingDocService {
    * log, no document).
    */
   async syncLines(runId: string): Promise<number | null> {
+    // One sync per run at a time, each reading the log afresh (xreview on #1224: two overlapping reads could let an
+    // older snapshot restore an answered question after a newer one wrote).
+    const prev = this.linesChain.get(runId) ?? Promise.resolve();
+    const next = prev.then(() => this.syncLinesNow(runId), () => this.syncLinesNow(runId));
+    this.linesChain.set(runId, next.catch(() => null));
+    return next;
+  }
+
+  private async syncLinesNow(runId: string): Promise<number | null> {
     if (this.d.events === undefined) return null;
     const events = await this.d.events(runId);
-    if (events === null) return null;
+    if (events === null) {
+      this.eventLog = false;
+      return null;
+    }
+    this.eventLog = true;
     const model = foldLines(events);
     if (!model.power && this.d.store.get(runId) === undefined) return null;
     if (!(await this.ensureDoc(runId))) return null;
@@ -376,20 +416,19 @@ export class WorkingDocService {
       const rec = this.d.store.get(runId);
       if (rec === undefined) return null;
       await this.reconcile(runId);
-      if (this.d.store.get(runId)?.pending != null) return null;
+      if (this.d.store.get(runId)?.pending != null) {
+        // A person's write of unknown outcome is still settling: try again once it has (it settles within ~75 s).
+        this.linesSoon(runId, this.d.linesRetryMs ?? 15_000);
+        return null;
+      }
       for (let attempt = 0; attempt < 3; attempt++) {
         const head = await this.d.backend.read(rec.projectId, rec.docId);
         if (head === null) return null;
         const before = { ...blankSections(), ...sectionsOf(head.html) };
         const wanted: Partial<Record<SectionId, string>> = {};
         for (const sid of ['decisions', 'questions', 'next'] as const) {
-          let text = reconcileSection(sid, before[sid], lines[sid]);
-          if (text === null) continue;
-          // A full section keeps its newest lines: the oldest go first.
-          const all = text.split('\n');
-          while (all.join('\n').length > SECTION_MAX_CHARS && all.length > 1) all.shift();
-          text = all.join('\n').slice(0, SECTION_MAX_CHARS);
-          wanted[sid] = text;
+          const text = reconcileSection(sid, before[sid], lines[sid], SECTION_MAX_CHARS);
+          if (text !== null) wanted[sid] = text;
         }
         const changed = changedSections(before, wanted);
         if (changed.length === 0) return null;
@@ -415,12 +454,12 @@ export class WorkingDocService {
   }
 
   /** Bring the event-derived lines up to date shortly (a burst of events becomes one write). */
-  private linesSoon(runId: string): void {
+  private linesSoon(runId: string, delayMs?: number): void {
     if (this.d.events === undefined || this.linesDue.has(runId)) return;
     const t = setTimeout(() => {
       this.linesDue.delete(runId);
       void this.syncLines(runId).catch((err: unknown) => this.d.log?.(`[working-doc] lines for ${runId}: ${String(err)}`));
-    }, this.d.linesDelayMs ?? 1_500);
+    }, delayMs ?? this.d.linesDelayMs ?? 1_500);
     (t as { unref?: () => void }).unref?.();
     this.linesDue.set(runId, t);
   }

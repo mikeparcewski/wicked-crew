@@ -2518,6 +2518,8 @@ export async function createServer(
     log: (m) => app.log.warn(m),
   });
   workingDocTap = (e) => workingDocs.onEvent(e);
+  // After a restart no further event may come for a run: bring every held document's lines up to date once.
+  workingDocs.catchUp();
   registerWorkingDocRoutes(app, { service: workingDocs, exists: async (id) => (await adapter.sessions()).includes(id) });
   registerStandingOrderRoutes(app, {
     store: standingOrders,

@@ -200,16 +200,38 @@ export function docLines(m: LinesModel): { decisions: string[]; questions: strin
 
 /** The lines these sections take back (the plugin's `MINE`): an open question, a hand-off follow-up. */
 const MINE: Readonly<Record<'questions' | 'next', RegExp>> = { questions: /^Waiting on you · /u, next: /^After hand-off round \d+ · /u };
+/** A generated decision line (an answered gate, an answered pause): only these are ever trimmed. */
+const GENERATED_DECISION = /^(?:.+ · answered \d{2}:\d{2}|Checkpoint \d+ pause.* · \d{2}:\d{2})$/u;
+
+/** Is `line` one this module writes in `section`? */
+export function isGenerated(section: 'decisions' | 'questions' | 'next', line: string): boolean {
+  return section === 'decisions' ? GENERATED_DECISION.test(line) : MINE[section].test(line);
+}
 
 /**
  * A section's new text with the generated lines brought up to date, or null when nothing changes. A person's lines
- * stay as they are, in place. Decisions only ever gain lines; in Open questions and Next, generated lines that no
- * longer hold are taken out (the plugin's `reconcileSection`).
+ * stay as they are, in place, and are never trimmed. Decisions only ever gain lines; in Open questions and Next,
+ * generated lines that no longer hold are taken out (the plugin's `reconcileSection`). When everything would not fit
+ * in `max` characters, only the NEWEST generated lines that fit beside the person's are kept, so the same log always
+ * gives the same text (xreview on wicked-crew#1224: trimming from the top deleted a person's line, and a long history
+ * re-added what it had trimmed on every sync).
  */
-export function reconcileSection(section: 'decisions' | 'questions' | 'next', current: string, wanted: readonly string[]): string | null {
+export function reconcileSection(section: 'decisions' | 'questions' | 'next', current: string, wanted: readonly string[], max = Infinity): string | null {
   const lines = current.split('\n').map((l) => l.trim()).filter((l) => l !== '');
-  const kept = section === 'decisions' ? lines : lines.filter((l) => !MINE[section].test(l) || wanted.includes(l));
-  const add = wanted.filter((w) => !kept.includes(w));
+  const human = lines.filter((l) => !isGenerated(section, l));
+  let room = max - human.join('\n').length - (human.length > 0 ? 1 : 0);
+  const fits: string[] = [];
+  for (let i = wanted.length - 1; i >= 0; i -= 1) {
+    const w = wanted[i]!;
+    if (w.length + (fits.length > 0 ? 1 : 0) > room) break;
+    room -= w.length + (fits.length > 0 ? 1 : 0);
+    fits.unshift(w);
+  }
+  const capped = fits.length === wanted.length;
+  const kept = section === 'decisions' && capped
+    ? lines
+    : lines.filter((l) => !isGenerated(section, l) || fits.includes(l));
+  const add = fits.filter((w) => !kept.includes(w));
   const out = [...kept, ...add];
   return out.join('\n') === lines.join('\n') ? null : out.join('\n');
 }
