@@ -11,7 +11,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
-  VOICE_MODEL, VoiceService, cleanTranscript, defaultVoiceDir, findWhisper, isWav, wavProblem, type VoiceDeps, type VoiceSpawn,
+  VOICE_MODEL, VoiceService, cleanTranscript, defaultVoiceDir, findWhisper, isWav, parseWhisperVersion, wavProblem, whisperSupported, type VoiceDeps, type VoiceSpawn,
 } from '../src/voice/service.js';
 import { VoiceDashboardStore, VOICE_DASHBOARD_FILENAME, type VoiceWidgetManifest } from '../src/voice/dashboard.js';
 import { registerVoiceRoutes } from '../src/voice/routes.js';
@@ -58,7 +58,7 @@ afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
 const BIN = '/opt/whisper/whisper-cli';
 function service(extra: Partial<VoiceDeps> = {}): VoiceService {
-  return new VoiceService({ dir, bin: BIN, exists: (p) => p === BIN || existsSync(p), ...extra });
+  return new VoiceService({ dir, bin: BIN, exists: (p) => p === BIN || existsSync(p), versionOf: () => 'whisper.cpp version: 1.9.5', ...extra });
 }
 function putModel(): void { writeFileSync(join(dir, VOICE_MODEL.file), 'model'); }
 
@@ -78,6 +78,28 @@ describe('voice: finding the pieces', () => {
     expect(defaultVoiceDir({}, 'linux', '/h')).toBe('/h/.cache/wicked-crew/voice');
     expect(defaultVoiceDir({ WICKED_CREW_VOICE_DIR: '/v' }, 'darwin', '/h')).toBe('/v');
     expect(defaultVoiceDir({}, 'darwin', '/h')).not.toMatch(/\.wicked-crew/);
+  });
+
+
+  it('an engine too old to keep stdin output off disk (1.7.x writes `-.txt`) is refused before any audio is sent (codex on #1238)', async () => {
+    expect(parseWhisperVersion('whisper.cpp version: 1.9.5\n')).toBe('1.9.5');
+    expect(parseWhisperVersion('error: unknown argument: --version')).toBeNull();
+    expect(whisperSupported('1.9.5')).toBe(true);
+    expect(whisperSupported('1.8.0')).toBe(true);
+    expect(whisperSupported('2.0.0')).toBe(true);
+    expect(whisperSupported('1.7.4')).toBe(false);
+    expect(whisperSupported(null)).toBe(false);
+    putModel();
+    const f = fakeSpawn('x');
+    for (const out of [null, 'whisper.cpp version: 1.7.4']) {
+      const old = service({ spawn: f.spawn as unknown as VoiceSpawn, versionOf: () => out, platform: 'darwin' });
+      expect(old.status()).toMatchObject({ ready: false, engine: { found: true, supported: false } });
+      expect(old.status().engine.install).toMatch(/too old.*1\.8\.0.*brew upgrade whisper-cpp/);
+      await expect(old.transcribe(wav())).rejects.toMatchObject({ status: 409, code: 'voice_engine_outdated' });
+    }
+    expect(f.calls).toEqual([]);
+    const ok = service({ versionOf: () => 'whisper.cpp version: 1.9.5' });
+    expect(ok.status()).toMatchObject({ ready: true, engine: { version: '1.9.5', supported: true, install: null } });
   });
 
   it('status names what is missing: the engine (with the install line) and the model', () => {
@@ -103,6 +125,8 @@ describe('voice: transcribe', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]!.bin).toBe(BIN);
     expect(calls[0]!.args).toEqual(expect.arrayContaining(['-m', join(dir, VOICE_MODEL.file), '-f', '-', '-nt', '-np', '-l', 'en']));
+    // A stdin run prints its text only as the `-otxt` output, which goes to stdout (whisper.cpp 1.9.5, seen live).
+    expect(calls[0]!.args).toContain('-otxt');
     expect(calls[0]!.stdin.equals(audio)).toBe(true);
     expect(readdirSync(dir)).toEqual(before);
   });
@@ -208,7 +232,7 @@ describe('voice: the model download', () => {
     mkdirSync(locked);
     chmodSync(locked, 0o500);
     try {
-      const s = new VoiceService({ dir: locked, bin: BIN, exists: (p) => p === BIN || existsSync(p), fetch: (async () => body(bytes)) as unknown as typeof fetch });
+      const s = new VoiceService({ dir: locked, bin: BIN, exists: (p) => p === BIN || existsSync(p), versionOf: () => 'whisper.cpp version: 1.9.5', fetch: (async () => body(bytes)) as unknown as typeof fetch });
       s.startDownload();
       await waitFor(() => s.status().model.download?.state === 'failed');
       expect(s.status().model).toMatchObject({ present: false, download: { state: 'failed', error: expect.stringMatching(/EACCES|permission/i) } });

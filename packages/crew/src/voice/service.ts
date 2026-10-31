@@ -18,11 +18,12 @@
  * partial just skips that beat).
  */
 
-import { spawn as nodeSpawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
+import { spawn as nodeSpawn, spawnSync, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createWriteStream, existsSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 import { homedir, platform as osPlatform } from 'node:os';
 import { delimiter, join } from 'node:path';
@@ -47,6 +48,7 @@ export const TRANSCRIBE_THREADS = 4;
 
 export type VoiceErrorCode =
   | 'voice_engine_missing'
+  | 'voice_engine_outdated'
   | 'voice_model_missing'
   | 'voice_audio_invalid'
   | 'voice_audio_too_large'
@@ -85,8 +87,12 @@ export interface VoiceStatusBody {
     found: boolean;
     /** Where it was found (a path); null when not found. */
     path: string | null;
-    /** How to install it on this platform, when it is not found. */
+    /** How to install (or upgrade) it on this platform, when it is missing or too old. */
     install: string | null;
+    /** The version it reports (`--version`); null when not found or when it reports none (too old). */
+    version: string | null;
+    /** It is new enough: a stdin transcription prints its text to stdout and writes no file. */
+    supported: boolean;
   };
   model: {
     name: string;
@@ -115,6 +121,8 @@ export interface VoiceDeps {
   timeoutMs?: number;
   /** The model to fetch and use (tests give their own checksum). */
   model?: VoiceModel;
+  /** What `<bin> --version` prints (tests stand it in); null when it fails. */
+  versionOf?: (bin: string) => string | null;
 }
 
 export interface VoiceModel { name: string; file: string; url: string; sha1: string; approxBytes: number; source: string }
@@ -133,6 +141,45 @@ export function installHint(plat: NodeJS.Platform): string {
   if (plat === 'darwin') return 'Install whisper.cpp with Homebrew: brew install whisper-cpp (it provides whisper-cli).';
   if (plat === 'win32') return 'Download whisper.cpp for Windows from github.com/ggml-org/whisper.cpp/releases, then set WICKED_CREW_WHISPER_BIN to whisper-cli.exe.';
   return 'Install whisper.cpp from your package manager or build it from github.com/ggml-org/whisper.cpp, so whisper-cli is on PATH (or set WICKED_CREW_WHISPER_BIN).';
+}
+
+/** The oldest engine voice runs: it must report `--version` (whisper.cpp 1.8.0 does not), and be at least this. */
+export const MIN_WHISPER = [1, 8, 0] as const;
+
+/** `whisper.cpp version: 1.9.5` → `1.9.5`; anything else → null. */
+export function parseWhisperVersion(out: string | null): string | null {
+  const m = out === null ? null : /version:?\s*v?(\d+)\.(\d+)\.(\d+)/i.exec(out);
+  return m === null ? null : `${m[1]}.${m[2]}.${m[3]}`;
+}
+
+/**
+ * Is this engine safe to hand audio on stdin? From whisper.cpp 1.8.0 a stdin run (`-f -`) writes its `-otxt` output
+ * to stdout; 1.7.x writes it to a FILE named `-.txt` in the working directory, which would keep a transcript on disk.
+ * 1.8.0 itself cannot say its version, so voice asks for an engine that reports one (`--version`) at 1.8.0 or later,
+ * and refuses the rest before any audio is sent.
+ */
+export function whisperSupported(version: string | null): boolean {
+  if (version === null) return false;
+  const v = version.split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((v[i] ?? 0) !== MIN_WHISPER[i]) return (v[i] ?? 0) > MIN_WHISPER[i]!;
+  }
+  return true;
+}
+
+function runVersion(bin: string): string | null {
+  try {
+    const r = spawnSync(bin, ['--version'], { encoding: 'utf8', timeout: 5000, windowsHide: true, env: childEnvWithBootEstateDb(process.env) });
+    return r.status === 0 ? `${r.stdout ?? ''}${r.stderr ?? ''}` : null;
+  } catch {
+    return null;
+  }
+}
+
+/** How to upgrade whisper.cpp here, in one line. */
+export function upgradeHint(plat: NodeJS.Platform): string {
+  if (plat === 'darwin') return 'Upgrade it: brew upgrade whisper-cpp.';
+  return 'Install a current whisper.cpp from github.com/ggml-org/whisper.cpp (or set WICKED_CREW_WHISPER_BIN to one).';
 }
 
 /** Find the whisper.cpp CLI: `WICKED_CREW_WHISPER_BIN`, else `whisper-cli` (or the older `whisper-cpp`) on PATH. */
@@ -202,6 +249,9 @@ export class VoiceService {
   private readonly spawnImpl: VoiceSpawn;
   private readonly timeoutMs: number;
   private readonly model: VoiceModel;
+  private readonly versionOf: (bin: string) => string | null;
+  /** `--version` per engine path, read once. */
+  private readonly versions = new Map<string, string | null>();
   private download: VoiceDownloadState | null = null;
   /** The download in flight: removal aborts it and bumps the generation, so it can never land afterwards. */
   private inflight: { gen: number; abort: AbortController } | null = null;
@@ -218,6 +268,7 @@ export class VoiceService {
     this.spawnImpl = deps.spawn ?? nodeSpawn;
     this.timeoutMs = deps.timeoutMs ?? TRANSCRIBE_TIMEOUT_MS;
     this.model = deps.model ?? VOICE_MODEL;
+    this.versionOf = deps.versionOf ?? runVersion;
   }
 
   modelPath(): string {
@@ -229,6 +280,15 @@ export class VoiceService {
     return findWhisper(this.env, this.plat, this.exists);
   }
 
+  private engineVersion(bin: string): string | null {
+    if (!this.versions.has(bin)) this.versions.set(bin, parseWhisperVersion(this.versionOf(bin)));
+    return this.versions.get(bin) ?? null;
+  }
+
+  private tooOld(bin: string): string {
+    return `whisper.cpp at ${bin} is too old for voice: it needs 1.8.0 or later (one that answers --version), so a transcription never writes a file. ${upgradeHint(this.plat)}`;
+  }
+
   private modelBytes(): number | null {
     const p = this.modelPath();
     if (!this.exists(p)) return null;
@@ -238,10 +298,15 @@ export class VoiceService {
   status(): VoiceStatusBody {
     const path = this.bin();
     const bytes = this.modelBytes();
+    const version = path !== null ? this.engineVersion(path) : null;
+    const supported = path !== null && whisperSupported(version);
     return {
       local: true,
-      ready: path !== null && bytes !== null,
-      engine: { name: 'whisper.cpp', found: path !== null, path, install: path === null ? installHint(this.plat) : null },
+      ready: supported && bytes !== null,
+      engine: {
+        name: 'whisper.cpp', found: path !== null, path, version, supported,
+        install: path === null ? installHint(this.plat) : supported ? null : this.tooOld(path),
+      },
       model: {
         name: this.model.name, present: bytes !== null, bytes, approxBytes: this.model.approxBytes,
         source: this.model.source, download: this.download === null ? null : { ...this.download },
@@ -344,14 +409,18 @@ export class VoiceService {
   private ready(): string {
     const bin = this.bin();
     if (bin === null) throw new VoiceError(409, 'voice_engine_missing', `whisper.cpp is not installed on this machine. ${installHint(this.plat)}`);
+    if (!whisperSupported(this.engineVersion(bin))) throw new VoiceError(409, 'voice_engine_outdated', this.tooOld(bin));
     if (this.modelBytes() === null) throw new VoiceError(409, 'voice_model_missing', 'The speech model is not on this machine yet; download it first (it needs your consent).');
     return bin;
   }
 
   private run(bin: string, audio: Buffer): Promise<string> {
-    const args = ['-m', this.modelPath(), '-f', '-', '-nt', '-np', '-l', 'en', '-t', String(TRANSCRIBE_THREADS)];
+    // `-f -` reads the WAV from stdin; with stdin as the input, whisper-cli (1.8.0 and later, checked in `ready()`)
+    // writes its output "file" to stdout, and `-otxt` is the format it writes there (without it a stdin run prints
+    // nothing: 1.9.5, seen live). No file is written. An older engine would write `-.txt`, so it never gets here.
+    const args = ['-m', this.modelPath(), '-f', '-', '-otxt', '-nt', '-np', '-l', 'en', '-t', String(TRANSCRIBE_THREADS)];
     return new Promise<string>((resolve, reject) => {
-      const child = this.spawnImpl(bin, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+      const child = this.spawnImpl(bin, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: childEnvWithBootEstateDb(this.env) });
       let out = '';
       let err = '';
       let settled = false;
