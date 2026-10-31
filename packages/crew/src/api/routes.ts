@@ -6163,8 +6163,12 @@ export function registerRoutes(
       /** Guards against stale-tab submissions: must match the current elicitation's id. */
       elicitationId: z.string().min(1),
       action: z.enum(['accept', 'decline', 'cancel']),
-      /** Required when action is "accept" (response must be non-empty); must be absent for decline/cancel. */
-      content: z.object({ response: z.string().min(1) }).optional(),
+      /** Required when action is "accept"; must be absent for decline/cancel. `response` answers a free-text or
+       *  single-choice question; `values` (api-types 0.158.0) a multi-select one. */
+      content: z.union([
+        z.object({ response: z.string().min(1) }).strict(),
+        z.object({ values: z.array(z.string().min(1)).min(1).max(100) }).strict(),
+      ]).optional(),
     })
     .strict()
     .superRefine((val, ctx) => {
@@ -6187,9 +6191,9 @@ export function registerRoutes(
     }
     const body = parsed.data;
 
-    // 1b. Accept requires content.response — validated here, before any state query, so
-    //     the 400 is deterministic regardless of run-existence / cache state (P2).
-    if (body.action === 'accept' && !body.content?.response) {
+    // 1b. Accept requires content (a response, or a multi-select's values) — validated here, before any state
+    //     query, so the 400 is deterministic regardless of run-existence / cache state (P2).
+    if (body.action === 'accept' && body.content === undefined) {
       return reply.code(400).send({ error: 'action:accept requires content.response' });
     }
 
@@ -6210,23 +6214,34 @@ export function registerRoutes(
     }
 
     // 5. Accept-specific validation.
+    let response: string | null = null;
+    let picked: string[] | null = null;
     if (body.action === 'accept') {
-      // 5a. content.response must be present.
-      if (typeof body.content?.response !== 'string') {
+      const refuse = (error: string) => {
         elicitationCache.restoreIfUnchanged(id, taken.entry, taken.gen);
-        return reply.code(400).send({ error: 'action:accept requires content.response' });
-      }
-      // 5b. Enum check: if the schema constrained the response, honour it.
-      if (
-        taken.entry.options !== null &&
-        !taken.entry.options.includes(body.content.response)
-      ) {
-        elicitationCache.restoreIfUnchanged(id, taken.entry, taken.gen);
-        return reply.code(400).send({ error: 'response must be one of the allowed options' });
+        return reply.code(400).send({ error });
+      };
+      const multi = taken.entry.multi;
+      if (multi !== undefined) {
+        // 5a. A multi-select is answered with `values`: distinct options, min..=max of them, sent in option order.
+        if (body.content === undefined || !('values' in body.content)) return refuse('this question takes content.values (pick several)');
+        const values = body.content.values;
+        const options = taken.entry.options ?? [];
+        if (values.some((v) => !options.includes(v))) return refuse('values must be among the allowed options');
+        if (new Set(values).size !== values.length) return refuse('values must name each option once');
+        if (values.length < multi.min || values.length > multi.max) return refuse(`pick ${multi.min} to ${multi.max} of the options`);
+        picked = options.filter((o) => values.includes(o));
+        response = JSON.stringify(picked);
+      } else {
+        // 5b. content.response must be present; `values` answers only a multi-select.
+        if (body.content === undefined || !('response' in body.content)) return refuse('action:accept requires content.response');
+        // 5c. Enum check: if the schema constrained the response, honour it.
+        if (taken.entry.options !== null && !taken.entry.options.includes(body.content.response)) {
+          return refuse('response must be one of the allowed options');
+        }
+        response = body.content.response;
       }
     }
-
-    const response = body.action === 'accept' ? body.content!.response : null;
 
     // 6. Forward to the actor.
     try {
@@ -6244,12 +6259,12 @@ export function registerRoutes(
     });
     // DC-S4a host: a free-text answer is words; a picked option (or a decline) is a `choice`.
     if (decisions !== null) {
-      const picked = taken.entry.options !== null;
+      const hasOptions = taken.entry.options !== null;
       decisions.track(ingestDecision(decisions, {
         host: 'elicitation',
         actor: actorOf(req),
-        words: response !== null && !picked ? response : '',
-        ...(response !== null && picked ? { choice: response } : body.action !== 'accept' ? { choice: body.action } : {}),
+        words: response !== null && !hasOptions ? response : '',
+        ...(picked !== null ? { choice: picked.join(', ') } : response !== null && hasOptions ? { choice: response } : body.action !== 'accept' ? { choice: body.action } : {}),
         projectId: projects.index.projectOf(id) ?? null,
         runId: id,
         elicitationId: taken.entry.elicitationId,

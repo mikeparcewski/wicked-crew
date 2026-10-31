@@ -52,6 +52,18 @@ mentioned only where a daemon release depends on them.
   cost; `GET /runs/:id/units/:ord/inspections` reads them back, and a `/ws` frame `unitInspection` carries each
   change. api-types 0.155.0: `UnitInspection*`, and `UsageProgressEvent` (the engine's live `usageProgress` token
   total, wicked-core#1212).
+
+- **Guided asks: one typed `Ask` shape, and multi-select questions end to end.** api-types 0.158.0 adds `Ask`,
+  `AskOption`, `AskKind` (`confirm`, `choose`, `pick`, `text`, `scale`, `confirm_reason`), `AskAnswer` and `AskHost`:
+  a rendering contract the existing shapes map onto (a gate's `choices` + `recommended` + `gateKind`, an
+  elicitation's `options` + `recommended` + `multi`), answered through each host's own route (design DES-GUIDED-CHAT).
+  A seat's `ask` tool takes `multi: {min?, max?}` (needs `choices`; refused before the engine when the bounds do not
+  fit) and answers with `answers: string[]` beside `answer`. The elicitation cache relays the engine frame's `multi`
+  (`ElicitationInfo.multi`, kept only when well-formed against `options`), and `POST /runs/:id/elicitation` takes
+  `content: {values}` for it: distinct options, `min..=max` of them, forwarded as the JSON array of the picks in option
+  order. `values` on a single-choice question, and `response` on a multi-select one, are a 400 that keeps the question
+  open. Needs the wicked-core release that carries ask `multi`; an older engine refuses a multi ask as `bad_request`.
+
 - **Every run proposes what it learned to the approve queue.** Over the 7 days to 2026-10-30 the rig ran 37 runs and
   filed 0 proposals: only the separate capture-learnings preset and onboarding's chain ever proposed anything, and the
   engine's per-run memory is an "it completed" line in its own store. Now a run's record is read at its checkpoints

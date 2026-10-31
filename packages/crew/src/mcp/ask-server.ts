@@ -11,10 +11,16 @@ const inputSchema = z.object({
   question: z.string().min(1).max(8192),
   choices: z.array(z.string().min(1).max(512)).min(2).max(100).optional(),
   recommended: z.number().int().min(0).describe('index into choices you recommend').optional(),
+  multi: z.object({
+    min: z.number().int().min(1).optional(),
+    max: z.number().int().min(1).optional(),
+  }).strict().describe('let the operator pick several of choices: at least min (default 1), at most max (default all)').optional(),
 }).strict();
 const outputSchema = z.object({
   status: z.enum(['answered', 'declined', 'no_answer']),
   answer: z.string().optional(),
+  /** A multi-select's picks, in the order of `choices`. */
+  answers: z.array(z.string()).optional(),
   reason: z.enum(['timeout', 'cancelled', 'run_ended']).optional(),
 });
 
@@ -29,6 +35,16 @@ function noAnswer(reason: 'timeout' | 'cancelled' | 'run_ended', seconds: number
   return result({ status: 'no_answer', reason }, `No answer: ${text} ${CONTINUE}`);
 }
 
+/** A multi-select answer as the engine records it (a JSON array of the picked choices), or null. */
+function pickedOf(answer: string): string[] | null {
+  try {
+    const v: unknown = JSON.parse(answer);
+    return Array.isArray(v) && v.every((x) => typeof x === 'string') ? v : null;
+  } catch {
+    return null;
+  }
+}
+
 /** A JSON-RPC request id (a string or a number; null is not cancellable). */
 function isRequestId(v: unknown): v is string | number {
   return typeof v === 'string' || typeof v === 'number';
@@ -41,6 +57,13 @@ function badInput(args: z.infer<typeof inputSchema>): string | undefined {
   if (args.choices !== undefined && new Set(args.choices).size < 2) return 'choices must hold at least 2 distinct entries';
   if (args.recommended !== undefined && (args.choices === undefined || args.recommended >= args.choices.length)) {
     return 'recommended must index choices';
+  }
+  if (args.multi !== undefined) {
+    if (args.choices === undefined) return 'multi requires choices';
+    const n = new Set(args.choices).size;
+    const min = args.multi.min ?? 1;
+    const max = args.multi.max ?? n;
+    if (min > max || max > n) return `multi must pick 1 <= min <= max <= ${n} choices`;
   }
   return undefined;
 }
@@ -146,8 +169,11 @@ export class AskServer {
           token, question: args.question,
           ...(choices !== undefined ? { choices } : {}),
           ...(recommended !== undefined ? { recommended } : {}),
+          ...(args.multi !== undefined ? {
+            multi: { ...(args.multi.min !== undefined ? { min: args.multi.min } : {}), ...(args.multi.max !== undefined ? { max: args.multi.max } : {}) },
+          } : {}),
         });
-        return this.wait(unit, opened, arrived + unit.timeoutSecs * 1000, signal);
+        return this.wait(unit, opened, arrived + unit.timeoutSecs * 1000, signal, args.multi !== undefined);
       });
       // Omitting sessionIdGenerator leaves it undefined (stateless). The SDK's transport
       // declarations predate exactOptionalPropertyTypes; its runtime satisfies Transport.
@@ -180,7 +206,7 @@ export class AskServer {
    * even while the engine's ticket is still on its way (a late ticket is closed at once). A close that fails cannot wedge
    * anything: the engine owns the run's queue.
    */
-  private wait(unit: AskUnit, opened: Promise<AskTicket>, deadline: number, signal: AbortSignal): Promise<CallToolResult> {
+  private wait(unit: AskUnit, opened: Promise<AskTicket>, deadline: number, signal: AbortSignal, multi = false): Promise<CallToolResult> {
     return new Promise((resolve, reject) => {
       const remaining = deadline - this.now();
       // The callback runs later, after every binding below exists.
@@ -204,7 +230,7 @@ export class AskServer {
       const onAbort = (): void => settle(noAnswer('cancelled', unit.timeoutSecs), 'teardown');
       const call: Call = {
         runId: unit.runId,
-        resolved: (event) => settle(this.outcome(event, deadline, unit.timeoutSecs)),
+        resolved: (event) => settle(this.outcome(event, deadline, unit.timeoutSecs, multi)),
         runEnded: () => settle(noAnswer('run_ended', unit.timeoutSecs)),
       };
       this.calls.add(call);
@@ -229,11 +255,16 @@ export class AskServer {
     });
   }
 
-  private outcome(event: CoreEvent, deadline: number, seconds: number): CallToolResult {
+  private outcome(event: CoreEvent, deadline: number, seconds: number, multi = false): CallToolResult {
     if (event.reason === 'timeout' || this.now() >= deadline) return noAnswer('timeout', seconds);
     if (event.reason === 'teardown') return noAnswer('run_ended', seconds);
     if (event.action === 'accept') {
       const answer = typeof event.answer === 'string' ? event.answer : '';
+      const answers = multi ? pickedOf(answer) : null;
+      if (answers !== null) {
+        const words = answers.join(', ');
+        return result({ status: 'answered', answer: words, answers }, `The operator picked: ${words}`);
+      }
       return result({ status: 'answered', answer }, `The operator answered: ${answer}`);
     }
     if (event.action === 'decline') return result({ status: 'declined' }, `The operator declined to answer. ${CONTINUE}`);

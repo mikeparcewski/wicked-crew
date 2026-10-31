@@ -28,6 +28,11 @@ export interface ElicitationEntry {
   ord?: number;
   attempt?: number;
   seat?: string;
+  /**
+   * (api-types 0.158.0) A multi-select: the answer picks `min..=max` of `options`. Kept only when well-formed
+   * against `options` (the engine normalises both bounds); absent on a single-choice or free-text question.
+   */
+  multi?: { min: number; max: number };
   /** When the daemon observed the elicitation — ISO-8601. */
   receivedAt: string;
 }
@@ -59,6 +64,15 @@ export function recommendedIndex(raw: unknown, options: readonly unknown[] | nul
   if (!Array.isArray(options) || options.length === 0) return undefined;
   if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 0 || raw >= options.length) return undefined;
   return raw;
+}
+
+/** A multi-select's bounds, kept only when both are integers with `1 <= min <= max <= options.length`. */
+export function multiBounds(raw: unknown, options: readonly unknown[] | null | undefined): { min: number; max: number } | undefined {
+  if (!Array.isArray(options) || options.length < 2 || typeof raw !== 'object' || raw === null) return undefined;
+  const { min, max } = raw as { min?: unknown; max?: unknown };
+  const int = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v);
+  if (!int(min) || !int(max) || min < 1 || min > max || max > options.length) return undefined;
+  return { min, max };
 }
 
 /** Session statuses that mean the run will never elicit again. */
@@ -104,6 +118,7 @@ export class ElicitationCache {
       options: entry.options ?? null,
       ...(recommendedIndex(entry.recommended, entry.options) !== undefined ? { recommended: entry.recommended as number } : {}),
       ...askerFields(entry),
+      ...(multiBounds(entry.multi, entry.options) !== undefined ? { multi: multiBounds(entry.multi, entry.options)! } : {}),
       receivedAt: new Date().toISOString(),
     });
     this.bumpGen(entry.runId);
@@ -182,6 +197,7 @@ export class ElicitationCache {
         options,
         ...(recommended !== undefined ? { recommended } : {}),
         ...askerFields(event),
+        ...(multiBounds(event.multi, options) !== undefined ? { multi: multiBounds(event.multi, options)! } : {}),
       });
     } else if (event.type === 'elicitationResolved') {
       const entry = this.entries.get(runId);
