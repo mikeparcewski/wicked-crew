@@ -127,7 +127,7 @@ export function registerProductRoutes(app: FastifyInstance, adapter: CoreAdapter
           unknown.push({ ...ref, reason: 'not a registered repository of this project' });
           continue;
         }
-        const detail = await getRequirement(repo, ref.key);
+        const detail = await getRequirement(repo, ref.key, adapter);
         if (detail === null) unknown.push({ ...ref, reason: 'no such requirement in the repository' });
         else rows.push({ ...ref, title: detail.title, statement: detail.statement });
       }

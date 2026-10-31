@@ -1,6 +1,6 @@
 /**
  * Requirements service — server-side search + overrides sidecar (api/requirements.ts).
- * Fixture-driven: a small requirements_graph.json in a temp dir; overrides written by
+ * Fixture-driven: a small graph served by an estate stand-in (the engine's read); overrides written by
  * the service itself (atomic sidecar), never into the derived artifact.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
@@ -14,6 +14,9 @@ import {
   listRequirements,
   getRequirement,
   patchRequirement,
+  type EstateRequirementsGraph,
+  type EstateRequirementsRead,
+  type RequirementsGraphReader,
 } from '../src/api/requirements.js';
 import type { RepoEntry } from '../src/core/types.js';
 
@@ -49,6 +52,36 @@ function repoAt(root: string): RepoEntry {
     default_branch: 'main',
     registered_at: 0,
     code_graph_db: codeGraphAt(root),
+  };
+}
+
+/**
+ * The estate stand-in. The service reads a repository's graph from its estate store through the
+ * engine (`getRequirementsGraphForRepo`; operator ruling 2026-10-31); here the "engine" answers from
+ * a JSON document in the test's temp dir — deliberately NOT a path inside the repository, which the
+ * service no longer reads. `null` graph when nothing was written (not built yet).
+ */
+const ESTATE_STANDIN = 'estate-graph.standin.json';
+/** The repo's code graph exists (the engine reads only an indexed repo); its content is the
+ * engine's business, never this package's. */
+async function markIndexed(root: string): Promise<void> {
+  await mkdir(dirname(codeGraphAt(root)), { recursive: true });
+  await writeFile(codeGraphAt(root), '', 'utf8');
+}
+const estateReads: string[] = [];
+function estateAt(root: string): RequirementsGraphReader {
+  return {
+    async getRequirementsGraphForRepo(repoRef: string) {
+      estateReads.push(repoRef);
+      try {
+        const graph = JSON.parse(await readFile(join(root, ESTATE_STANDIN), 'utf8')) as EstateRequirementsGraph & {
+          metadata?: { coverage?: unknown };
+        };
+        return { graph, coverage: (graph.metadata?.coverage ?? null) as EstateRequirementsRead['coverage'] };
+      } catch {
+        return { graph: null, coverage: null };
+      }
+    },
   };
 }
 
@@ -106,7 +139,8 @@ async function fixtureRepo(): Promise<string> {
       },
     },
   };
-  await writeFile(join(dir, 'requirements_graph.json'), JSON.stringify(graph), 'utf8');
+  await markIndexed(root);
+  await writeFile(join(root, ESTATE_STANDIN), JSON.stringify(graph), 'utf8');
   return root;
 }
 
@@ -117,7 +151,7 @@ describe('requirements service', () => {
   });
 
   it('lists the whole corpus with pagination metadata', async () => {
-    const page = await listRequirements(repoAt(root), { offset: 0, limit: 50 });
+    const page = await listRequirements(repoAt(root), { offset: 0, limit: 50 }, estateAt(root));
     expect(page).not.toBeNull();
     expect(page!.corpus).toBe(3);
     expect(page!.total).toBe(3);
@@ -126,7 +160,7 @@ describe('requirements service', () => {
 
   it('returns null when the artifact has not been generated', async () => {
     const empty = await mkdtemp(join(tmpdir(), 'req-empty-'));
-    expect(await listRequirements(repoAt(empty), { offset: 0, limit: 10 })).toBeNull();
+    expect(await listRequirements(repoAt(empty), { offset: 0, limit: 10 }, estateAt(empty))).toBeNull();
   });
 
   // FINDING-065. The two sources are not interchangeable: the artifact is an evidence-gated
@@ -134,46 +168,46 @@ describe('requirements service', () => {
   // the live store by hours. A caller that cannot tell which one answered cannot tell stale
   // from current — the exact confusion this module's header records as already observed.
   it('names which source served the corpus', async () => {
-    const page = await listRequirements(repoAt(root), { offset: 0, limit: 50 });
-    expect(page!.source).toBe('artifact');
+    const page = await listRequirements(repoAt(root), { offset: 0, limit: 50 }, estateAt(root));
+    expect(page!.source).toBe('store');
   });
 
   it('whitespace-only statements are dropped at the service boundary', async () => {
     // Fixture REQ-001 in auth/session has a real statement; simulate a blank one via a
     // fresh fixture write is heavier than needed — assert the mapping contract directly:
     // a summary statement is never whitespace (trimmed or empty).
-    const page = await listRequirements(repoAt(root), { offset: 0, limit: 50 });
+    const page = await listRequirements(repoAt(root), { offset: 0, limit: 50 }, estateAt(root));
     for (const item of page!.items) {
       expect(item.statement).toBe(item.statement.trim());
     }
   });
 
   it('search matches the actual rule STATEMENTS, not just titles', async () => {
-    const hit = await listRequirements(repoAt(root), { q: 'jurisdiction applied', offset: 0, limit: 10 });
+    const hit = await listRequirements(repoAt(root), { q: 'jurisdiction applied', offset: 0, limit: 10 }, estateAt(root));
     expect(hit!.items.map((i) => i.reqId)).toEqual(['REQ-001']);
     expect(hit!.items[0]!.statement).toBe('sum then tax');
   });
 
   it('search is tokenized AND-match across id, domain, title, description', async () => {
-    const tax = await listRequirements(repoAt(root), { q: 'tax jurisdiction', offset: 0, limit: 10 });
+    const tax = await listRequirements(repoAt(root), { q: 'tax jurisdiction', offset: 0, limit: 10 }, estateAt(root));
     expect(tax!.items.map((i) => i.reqId)).toEqual(['REQ-001']);
-    const cross = await listRequirements(repoAt(root), { q: 'session timeout', offset: 0, limit: 10 });
+    const cross = await listRequirements(repoAt(root), { q: 'session timeout', offset: 0, limit: 10 }, estateAt(root));
     expect(cross!.items.map((i) => i.domain)).toEqual(['auth/session']);
-    const none = await listRequirements(repoAt(root), { q: 'tax session', offset: 0, limit: 10 });
+    const none = await listRequirements(repoAt(root), { q: 'tax session', offset: 0, limit: 10 }, estateAt(root));
     expect(none!.total).toBe(0); // AND semantics — terms in different requirements don't match
   });
 
   it('risk filter surfaces data-derived risk from business rules', async () => {
-    const risky = await listRequirements(repoAt(root), { risk: 'risk', offset: 0, limit: 10 });
+    const risky = await listRequirements(repoAt(root), { risk: 'risk', offset: 0, limit: 10 }, estateAt(root));
     expect(risky!.items.map((i) => i.reqId)).toEqual(['REQ-002']);
     expect(risky!.items[0]!.riskSource).toBe('data');
-    const calm = await listRequirements(repoAt(root), { risk: 'no-risk', offset: 0, limit: 10 });
+    const calm = await listRequirements(repoAt(root), { risk: 'no-risk', offset: 0, limit: 10 }, estateAt(root));
     expect(calm!.total).toBe(2);
   });
 
   it('pagination slices after filtering', async () => {
-    const p1 = await listRequirements(repoAt(root), { offset: 0, limit: 2 });
-    const p2 = await listRequirements(repoAt(root), { offset: 2, limit: 2 });
+    const p1 = await listRequirements(repoAt(root), { offset: 0, limit: 2 }, estateAt(root));
+    const p2 = await listRequirements(repoAt(root), { offset: 2, limit: 2 }, estateAt(root));
     expect(p1!.items.length).toBe(2);
     expect(p2!.items.length).toBe(1);
     expect(p1!.total).toBe(3);
@@ -181,14 +215,14 @@ describe('requirements service', () => {
 
   it('patch writes the overrides sidecar, never the artifact, and merges at read', async () => {
     const before = await readFile(
-      join(root, '.wicked-estate', 'requirements', 'requirements_graph.json'),
+      join(root, ESTATE_STANDIN),
       'utf8',
     );
     const detail = await patchRequirement(repoAt(root), 'auth/session::REQ-001', {
       risk: true,
       notes: 'flagged in review',
       title: 'Sessions MUST expire after inactivity',
-    });
+    }, estateAt(root));
     expect(detail!.risk).toBe(true);
     expect(detail!.riskSource).toBe('operator');
     expect(detail!.notes).toBe('flagged in review');
@@ -196,7 +230,7 @@ describe('requirements service', () => {
     expect(detail!.sourceTitle).toBe('Sessions expire after inactivity');
     expect(detail!.edited).toBe(true);
     const after = await readFile(
-      join(root, '.wicked-estate', 'requirements', 'requirements_graph.json'),
+      join(root, ESTATE_STANDIN),
       'utf8',
     );
     expect(after).toBe(before); // derived artifact untouched
@@ -210,17 +244,17 @@ describe('requirements service', () => {
   });
 
   it('operator risk override wins over data-derived risk (and can clear it)', async () => {
-    await patchRequirement(repoAt(root), 'billing/invoices::REQ-002', { risk: false });
-    const page = await listRequirements(repoAt(root), { risk: 'risk', offset: 0, limit: 10 });
+    await patchRequirement(repoAt(root), 'billing/invoices::REQ-002', { risk: false }, estateAt(root));
+    const page = await listRequirements(repoAt(root), { risk: 'risk', offset: 0, limit: 10 }, estateAt(root));
     expect(page!.total).toBe(0);
-    const detail = await getRequirement(repoAt(root), 'billing/invoices::REQ-002');
+    const detail = await getRequirement(repoAt(root), 'billing/invoices::REQ-002', estateAt(root));
     expect(detail!.riskSource).toBe('operator');
   });
 
   it('overrides survive artifact regeneration (cache invalidates on mtime)', async () => {
-    await patchRequirement(repoAt(root), 'auth/session::REQ-001', { risk: true });
+    await patchRequirement(repoAt(root), 'auth/session::REQ-001', { risk: true }, estateAt(root));
     // Simulate `wicked-core domain-graph` regenerating the artifact.
-    const artPath = join(root, '.wicked-estate', 'requirements', 'requirements_graph.json');
+    const artPath = join(root, ESTATE_STANDIN);
     const graph = JSON.parse(await readFile(artPath, 'utf8')) as {
       domains: Record<string, { requirements: Record<string, { title: string }> }>;
     };
@@ -228,30 +262,30 @@ describe('requirements service', () => {
     await writeFile(artPath, JSON.stringify(graph), 'utf8');
     const future = new Date(Date.now() + 5000);
     await utimes(artPath, future, future);
-    const detail = await getRequirement(repoAt(root), 'auth/session::REQ-001');
+    const detail = await getRequirement(repoAt(root), 'auth/session::REQ-001', estateAt(root));
     expect(detail!.risk).toBe(true); // override survived
     expect(detail!.sourceTitle).toBe('Regenerated title'); // fresh artifact picked up
   });
 
   it('patching an unknown requirement 404s as null', async () => {
-    expect(await patchRequirement(repoAt(root), 'nope::REQ-9', { risk: true })).toBeNull();
+    expect(await patchRequirement(repoAt(root), 'nope::REQ-9', { risk: true }, estateAt(root))).toBeNull();
   });
 
   // The artifact-path twin of the store orphan test: a regeneration that renames a domain or
   // reqId strands the override keyed by the old spelling. Counted, never silently dropped.
   it('counts override keys stranded by artifact regeneration', async () => {
-    await patchRequirement(repoAt(root), 'auth/session::REQ-001', { risk: true });
+    await patchRequirement(repoAt(root), 'auth/session::REQ-001', { risk: true }, estateAt(root));
     const ovPath = join(root, '.wicked-estate', 'requirements', 'requirements_overrides.json');
     const ov = JSON.parse(await readFile(ovPath, 'utf8')) as Record<string, unknown>;
     ov['renamed-domain::REQ-404'] = { notes: 'keyed by a domain the regen dropped' };
     await writeFile(ovPath, JSON.stringify(ov), 'utf8');
     const future = new Date(Date.now() + 5000);
     await utimes(ovPath, future, future);
-    const page = await listRequirements(repoAt(root), { offset: 0, limit: 10 });
-    expect(page!.source).toBe('artifact');
+    const page = await listRequirements(repoAt(root), { offset: 0, limit: 10 }, estateAt(root));
+    expect(page!.source).toBe('store');
     expect(page!.orphanedOverrides).toBe(1);
     // The still-matching override keeps applying.
-    const detail = await getRequirement(repoAt(root), 'auth/session::REQ-001');
+    const detail = await getRequirement(repoAt(root), 'auth/session::REQ-001', estateAt(root));
     expect(detail!.risk).toBe(true);
   });
 });
@@ -313,18 +347,21 @@ describe('requirements service — coverage label + corroboration (domain-model 
         },
       },
     };
-    await writeFile(join(dir, 'requirements_graph.json'), JSON.stringify(graph), 'utf8');
+    await markIndexed(root);
+  await writeFile(join(root, ESTATE_STANDIN), JSON.stringify(graph), 'utf8');
     return root;
   }
 
   it('carries the coverage label and the corpus-wide validated / unconfirmed counts', async () => {
-    const page = await listRequirements(repoAt(await coreShapedRepo()), { offset: 0, limit: 50 });
+    const r_ = await coreShapedRepo();
+    const page = await listRequirements(repoAt(r_), { offset: 0, limit: 50 }, estateAt(r_));
     expect(page?.coverage).toEqual({ mappedPct: 82, minPct: 80, behaviorBearing: 100, mapped: 82, resolved: 70, unmapped: 18 });
     expect(page?.corroboration).toEqual({ validated: 1, unconfirmed: 1 });
   });
 
   it('marks each item validated (with its count) or unconfirmed (with why)', async () => {
-    const page = await listRequirements(repoAt(await coreShapedRepo()), { offset: 0, limit: 50 });
+    const r_ = await coreShapedRepo();
+    const page = await listRequirements(repoAt(r_), { offset: 0, limit: 50 }, estateAt(r_));
     const by = new Map(page?.items.map((i) => [i.title, i]));
     expect(by.get('sum')?.corroboration).toEqual({ status: 'validated', sources: 3, callSites: 1, tests: 1, docs: 1, extraExtractors: 0 });
     expect(by.get('scripts')?.corroboration).toMatchObject({
@@ -334,7 +371,7 @@ describe('requirements service — coverage label + corroboration (domain-model 
     });
     expect(by.get('odd')?.corroboration).toBeNull();
     expect(page?.corroboration).toEqual({ validated: 1, unconfirmed: 1 }); // `odd` counts as neither
-    const detail = await getRequirement(repoAt(await coreShapedRepo()), 'src::REQ-002');
+    const detail = await getRequirement(repoAt(r_), 'src::REQ-002', estateAt(r_));
     expect(detail?.corroboration?.why?.code).toBe('config_only');
   });
 
@@ -355,10 +392,62 @@ describe('requirements service — coverage label + corroboration (domain-model 
   });
 
   it('a graph built before the fields reads null and 0/0, never a guess', async () => {
-    const page = await listRequirements(repoAt(await fixtureRepo()), { offset: 0, limit: 50 });
+    const r_ = await fixtureRepo();
+    const page = await listRequirements(repoAt(r_), { offset: 0, limit: 50 }, estateAt(r_));
     expect(page?.coverage).toBeNull();
     expect(page?.corroboration).toEqual({ validated: 0, unconfirmed: 0 });
     expect(page?.items.every((i) => i.corroboration === null)).toBe(true);
+  });
+});
+
+describe('requirements service — the graph comes from estate (operator ruling 2026-10-31)', () => {
+  it('serves what the engine reads from estate, with the live coverage label, and never a repo file', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'req-estate-'));
+    // A stale artifact in the checkout is NOT a source any more.
+    await mkdir(join(root, '.wicked-estate', 'requirements'), { recursive: true });
+    await writeFile(
+      join(root, '.wicked-estate', 'requirements', 'requirements_graph.json'),
+      JSON.stringify({ domains: { stale: { requirements: { 'REQ-001': { title: 'from the file' } } } } }),
+      'utf8',
+    );
+    await markIndexed(root);
+    const calls: string[] = [];
+    const engine: RequirementsGraphReader = {
+      async getRequirementsGraphForRepo(repoRef) {
+        calls.push(repoRef);
+        return {
+          graph: {
+            metadata: { coverage: { mapped_pct: 100, min_pct: 80, behavior_bearing: 1, mapped: 1, resolved: 1, unmapped: 0 } },
+            domains: {
+              src: {
+                requirements: {
+                  'REQ-001': { title: 'sum', business_rules: [{ id: 'RULE-1', statement: 'the sum of every element' }] },
+                },
+              },
+            },
+          },
+          // The engine's label is recomputed from the store's counts at read time and wins over
+          // the one the build stored.
+          coverage: { mapped_pct: 3, min_pct: 80, behavior_bearing: 100, mapped: 3, resolved: 1, unmapped: 97 },
+        };
+      },
+    };
+    const page = await listRequirements({ ...repoAt(root), id: 'tiny-math' }, { offset: 0, limit: 10 }, engine);
+    expect(calls).toEqual(['tiny-math']);
+    expect(page!.source).toBe('store');
+    expect(page!.items.map((i) => [i.key, i.statement])).toEqual([['src::REQ-001', 'the sum of every element']]);
+    expect(page!.coverage).toMatchObject({ mappedPct: 3, minPct: 80 });
+  });
+
+  it('answers null (not generated) when estate holds no graph, whatever files sit in the repo', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'req-estate-none-'));
+    await markIndexed(root);
+    const none: RequirementsGraphReader = {
+      async getRequirementsGraphForRepo() {
+        return { graph: null, coverage: { mapped_pct: 3, min_pct: 80, behavior_bearing: 100, mapped: 3, resolved: 1, unmapped: 97 } };
+      },
+    };
+    expect(await listRequirements(repoAt(root), { offset: 0, limit: 10 }, none)).toBeNull();
   });
 });
 
@@ -368,9 +457,9 @@ describe('requirements service — one source, one SQLite library (crew#548)', (
     await mkdir(dirname(codeGraphAt(root)), { recursive: true });
     // Whatever sits at the code-graph path is never opened: an unreadable "db" must not matter.
     await writeFile(codeGraphAt(root), 'not a database', 'utf8');
-    expect(await listRequirements(repoAt(root), { offset: 0, limit: 10 })).toBeNull();
-    expect(await getRequirement(repoAt(root), 'x::y')).toBeNull();
-    expect(await patchRequirement(repoAt(root), 'x::y', { notes: 'n' })).toBeNull();
+    expect(await listRequirements(repoAt(root), { offset: 0, limit: 10 }, estateAt(root))).toBeNull();
+    expect(await getRequirement(repoAt(root), 'x::y', estateAt(root))).toBeNull();
+    expect(await patchRequirement(repoAt(root), 'x::y', { notes: 'n' }, estateAt(root))).toBeNull();
   });
 
   it('src/ carries no `node:sqlite` outside comments (the daemon holds exactly one SQLite library per db file)', async () => {
