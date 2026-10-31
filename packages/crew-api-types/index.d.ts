@@ -13280,8 +13280,13 @@ export interface VoiceStatus {
     found: boolean;
     /** Where the CLI was found; `null` when it was not. */
     path: string | null;
-    /** How to install it on this platform, when it is not found; else `null`. */
+    /** How to install (or upgrade) it on this platform, when it is missing or too old; else `null`. */
     install: string | null;
+    /** (api-types 0.158.0) The version it reports (`--version`); `null` when not found, or too old to report one. */
+    version: string | null;
+    /** (api-types 0.158.0) New enough for voice (1.8.0 or later, reporting `--version`): a stdin transcription prints
+     *  its text and writes no file. An older engine is refused with 409 `voice_engine_outdated`, before any audio. */
+    supported: boolean;
   };
   model: {
     /** `base.en`. */
@@ -13313,7 +13318,7 @@ export interface PostVoiceModelBody {
 /**
  * `POST /voice/transcribe` with an `audio/wav` body (16 kHz mono 16-bit, at most 8 MiB). The audio is held in
  * memory for the call and dropped: never stored, logged or audited. Errors carry `code`:
- * `voice_engine_missing` / `voice_model_missing` (409), `voice_audio_invalid` (400/415),
+ * `voice_engine_missing` / `voice_engine_outdated` / `voice_model_missing` (409), `voice_audio_invalid` (400/415),
  * `voice_audio_too_large` (413), `voice_busy` (429: one runs and one waits), `voice_timeout` (504), `voice_failed` (500).
  */
 export interface VoiceTranscribeResponse {

@@ -12,6 +12,12 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **Voice: transcriptions print their text, and only on an engine that writes no file** (api-types 0.158.0). Seen live
+  on whisper.cpp 1.9.5: with the WAV on stdin, `whisper-cli` prints nothing unless an output format is named, so every
+  transcription came back empty; crew now passes `-otxt`, which such an engine writes to stdout. whisper.cpp 1.7.x
+  would write that output to a `-.txt` file, so voice now asks the engine its version (`--version`) and needs 1.8.0 or
+  later: `GET /voice/status` says `engine.version` and `engine.supported` (with the upgrade line in `install`), and
+  `POST /voice/transcribe` answers 409 `voice_engine_outdated` before any audio is handed over.
 - **An editor says how it looks on studio's Plugins page** (program DES-LEARN §2). A studio-bundle editor's
   `editor.json` may declare `description` (one line) and `visuals` (`icon`, `color`, `preview` as one file or
   `{light, dark}`, `live`), naming `.svg` / `.png` / `.webp` files beside it. The registry reads each once, bounded
