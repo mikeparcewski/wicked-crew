@@ -284,6 +284,9 @@ import { RetryIndex } from './retry-index.js';
 import { SEAT_RECORD_DEFAULT_DAYS, SEAT_RECORD_MAX_DAYS, seatRecord } from './seat-record.js';
 import { jobTitle } from './job-title.js';
 import { DeliveryFreeze, frozenRefusal, isDeliverUnit, registerDeliveryFreezeRoutes } from './delivery-freeze.js';
+import { VoiceService, defaultVoiceDir } from '../voice/service.js';
+import { VoiceDashboardStore } from '../voice/dashboard.js';
+import { registerVoiceRoutes } from '../voice/routes.js';
 import { GroupIndex } from './group-index.js';
 import { RunTimingIndex, recordRunLaunched } from './run-timing-index.js';
 import { GuidanceIndex } from './guidance-index.js';
@@ -867,6 +870,9 @@ export const GateSchema = z.object({
   /** api-types 0.44.0 — the gate this decision answers (its unit `ord`). A mismatch with the run's
    *  open gate is a 409 `gate_changed`: the decision was made on a gate that is no longer open. */
   ord: z.number().int().nonnegative().optional(),
+  /** (api-types 0.156.0, DES-VOICE) The person answered by voice and confirmed it on screen: recorded on the
+   *  `gate.decided` audit line and the decided-gate history ("by voice, confirmed"). It grants nothing. */
+  input: z.literal('voice').optional(),
 }).strict().refine(
   (b) => b.action === undefined
     || (b.action === 'approve' || b.action === 'edit_plan' || b.action === 'amend_intent' || b.action === OPERATOR_JUDGMENT_ACTION || b.action === SKIP_QE_ACTION || isEscalationAction(b.action)) === b.approve,
@@ -1102,6 +1108,10 @@ export interface RuntimeDeps {
   /** Freeze deliveries (studio idea 15) — `createServer` hydrates one from the audit trail so a
    *  restart keeps the freeze; a directly-driven route set gets a fresh (thawed) switch. */
   deliveryFreeze?: DeliveryFreeze;
+  /** Voice mode (DES-VOICE): the local speech-to-text service and the per-person dashboard store. A
+   *  directly-driven route set gets a service over the default voice dir and a dashboard store over the state
+   *  home (a test runner's own temp one), or none when no state home resolves. */
+  voice?: { service: VoiceService; dashboard: VoiceDashboardStore | null };
   /** DES-L9: how `revisesPr` is resolved to a PR head branch (`gh pr view`, 5 s). Injectable so
    *  route tests answer without gh; production uses `core/deliver.ts::resolvePullRequest`. */
   resolvePullRequest?: (repoRoot: string, number: number) => Promise<PullRequestResolution>;
@@ -1462,6 +1472,11 @@ export function registerRoutes(
   const seatHealth = runtime.seatHealth ?? new SeatHealthTracker();
   const deliveryFreeze = runtime.deliveryFreeze ?? new DeliveryFreeze();
   registerDeliveryFreezeRoutes(app, { freeze: deliveryFreeze, audit });
+  const voice = runtime.voice ?? {
+    service: new VoiceService({ dir: defaultVoiceDir() }),
+    dashboard: (() => { try { return VoiceDashboardStore.under(crewStateHome()); } catch { return null; } })(),
+  };
+  registerVoiceRoutes(app, { voice: voice.service, dashboard: voice.dashboard, audit });
   const openWithOs = runtime.openWithOs ?? openWithSystemDefault;
   const signedIn = runtime.signedIn ?? signedInHeuristic;
   const retryIndex = runtime.retryIndex ?? new RetryIndex();
@@ -1925,6 +1940,9 @@ export function registerRoutes(
       workingDoc: app.hasRoute({ method: 'GET', url: `${V}/runs/:id/working-doc` }),
       // (api-types 0.149.0) Power mode: the routes are served AND the engine runs it.
       powerMode: powerSupported(),
+      // (api-types 0.156.0, DES-VOICE) Voice mode's routes are served: local speech to text, the model with
+      // consent, and the per-person dashboard. Whether transcription can run now is `GET /voice/status`.
+      voice: app.hasRoute({ method: 'POST', url: `${V}/voice/transcribe` }),
     };
     // wicked-core#411 / crew#497: the state-home blocker rides the health probe as a WARNING. The
     // daemon still SERVES (status stays ok — studio must load and show the blocker) but refuses to
@@ -5413,6 +5431,7 @@ export function registerRoutes(
             ...(parsed.data.amendScope !== undefined ? { amendScope: parsed.data.amendScope } : {}),
             ...(parsed.data.plan !== undefined ? { planSteps: parsed.data.plan.steps.length } : {}),
             ...(parsed.data.ord !== undefined ? { ord: parsed.data.ord } : {}),
+            ...(parsed.data.input !== undefined ? { input: parsed.data.input } : {}),
             ...extraDetail,
             status,
           },

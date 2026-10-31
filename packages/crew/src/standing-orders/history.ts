@@ -38,6 +38,8 @@ export interface DecidedGateRow {
   band: string | null;
   creator: { seat: string; phase: string | null; ord: number } | null;
   orderApprovable: boolean;
+  /** (api-types 0.156.0) Answered by voice and confirmed on screen; absent for a typed or tapped answer. */
+  input?: 'voice';
 }
 
 export interface GateHistoryDeps {
@@ -136,6 +138,7 @@ export async function decidedGates(deps: GateHistoryDeps, since: number | undefi
         decision,
         actor: actorId,
         byOrder: actorId.startsWith('standing-order:'),
+        ...(detail['input'] === 'voice' ? { input: 'voice' as const } : {}),
         gateKind,
         phase,
         projectId: runProject(view, runId, deps.projectOf) ?? null,

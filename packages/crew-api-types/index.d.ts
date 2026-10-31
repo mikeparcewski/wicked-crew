@@ -353,6 +353,12 @@ export interface HealthCapabilities {
    * ABSENT on an older daemon: read as `false` and hide the switch.
    */
   powerMode?: boolean | undefined;
+  /**
+   * (api-types 0.156.0, DES-VOICE) Voice mode's routes are served: `GET /voice/status`, `POST|DELETE /voice/model`,
+   * `POST /voice/transcribe` and `GET|PUT /voice/dashboard`. Whether transcription can run NOW (the engine and
+   * the model are on this machine) is {@link VoiceStatus.ready}. ABSENT on an older daemon: read as `false`.
+   */
+  voice?: boolean;
 }
 
 // ── A run's working document (program DES-POWER-MODE §8.3, §9; api-types 0.148.0) ──────────────────
@@ -2416,6 +2422,12 @@ export interface GateDecision {
    * `POST /runs/:id/resume` or `/reassign`.
    */
   ord?: number;
+  /**
+   * (api-types 0.156.0, DES-VOICE) The person answered by voice: studio matched the spoken words to this
+   * answer, showed it on screen and the person confirmed it, then the usual undo window ran. Recorded on the
+   * `gate.decided` audit line and {@link DecidedGate.input}; it grants nothing a typed answer does not.
+   */
+  input?: 'voice';
 }
 
 /**
@@ -11308,6 +11320,8 @@ export interface DecidedGate {
   creator: { seat: string; phase: string | null; ord: number } | null;
   /** A standing order could have approved this gate (a phase-review gate of a run that lands no doctrine). */
   orderApprovable: boolean;
+  /** (api-types 0.156.0) Answered by voice and confirmed on screen ({@link GateDecision.input}); absent otherwise. */
+  input?: 'voice';
 }
 
 /** `GET /gates/decided`'s 200. A malformed `since` answers 400. */
@@ -13225,4 +13239,108 @@ export interface ListDefaultEvalRunsResponse {
 export interface DefaultEvalDetail {
   report: DefaultEvalReport;
   cases: DefaultEvalCase[];
+}
+
+// ── Voice mode, phase 1 (program DES-VOICE; api-types 0.156.0) ─────────────────────────────────────────
+
+/**
+ * `GET /voice/status` (and the answer of `POST|DELETE /voice/model`). Speech to text runs on THIS machine:
+ * whisper.cpp's CLI plus one model file. Every voice route is the human operator's alone, on loopback
+ * (403 `human_operator_only` / `voice_loopback_only`).
+ */
+export interface VoiceStatus {
+  /** Audio is transcribed on this machine and never sent anywhere. Always `true` in phase 1. */
+  local: true;
+  /** The engine and the model are both here: `POST /voice/transcribe` can run. */
+  ready: boolean;
+  engine: {
+    name: 'whisper.cpp';
+    found: boolean;
+    /** Where the CLI was found; `null` when it was not. */
+    path: string | null;
+    /** How to install it on this platform, when it is not found; else `null`. */
+    install: string | null;
+  };
+  model: {
+    /** `base.en`. */
+    name: string;
+    present: boolean;
+    /** The model file's size; `null` when absent. */
+    bytes: number | null;
+    /** What the consent says before anything is fetched. */
+    approxBytes: number;
+    /** Where it is fetched from (`huggingface.co/ggerganov/whisper.cpp`). */
+    source: string;
+    /** A download in progress, or the last one's failure; `null` when none. */
+    download: {
+      state: 'running' | 'failed';
+      receivedBytes: number;
+      totalBytes: number | null;
+      startedAt: string;
+      error: string | null;
+    } | null;
+  };
+}
+
+/** `POST /voice/model`: the person's consent to fetch the model (202 = started; 200 = already here; 409
+ *  `voice_download_running`). Audited `voice.model.download_started`. `DELETE /voice/model` removes it. */
+export interface PostVoiceModelBody {
+  consent: true;
+}
+
+/**
+ * `POST /voice/transcribe` with an `audio/wav` body (16 kHz mono 16-bit, at most 8 MiB). The audio is held in
+ * memory for the call and dropped: never stored, logged or audited. Errors carry `code`:
+ * `voice_engine_missing` / `voice_model_missing` (409), `voice_audio_invalid` (400/415),
+ * `voice_audio_too_large` (413), `voice_busy` (429: one runs and one waits), `voice_timeout` (504), `voice_failed` (500).
+ */
+export interface VoiceTranscribeResponse {
+  /** The words, one line; empty when nothing was said. */
+  text: string;
+  ms: number;
+  model: string;
+}
+
+/** A section a widget registers in the `voice-dashboard` panel slot (the `panels[]` shape of a run plugin). */
+export interface VoicePanelDecl {
+  slot: 'voice-dashboard';
+  id: string;
+  title: string;
+  /** 1-99, lower first. */
+  order: number;
+}
+
+/**
+ * A USER-MADE dashboard widget: a declarative plugin (no code, nothing framed) that shows one field of
+ * `GET /system` or `GET /diagnostics` as a number or a chart. `metric.path` is a field path:
+ * `infra[key=load].details.load1`, `runs.length`, `toReview`.
+ */
+export interface VoiceWidgetManifest {
+  /** `user.<slug>`. */
+  id: string;
+  title: string;
+  version: 1;
+  kind: 'metric';
+  panels: [VoicePanelDecl];
+  metric: {
+    source: 'system' | 'diagnostics';
+    path: string;
+    display: 'number' | 'chart';
+    unit?: string;
+  };
+  createdAt?: string;
+}
+
+/** `GET /voice/dashboard`: this person's dashboard (keyed by actor id). `layout: null` = never saved. */
+export interface VoiceDashboard {
+  /** Widget ids in order: `builtin.<id>` or a user widget's `user.<slug>`. */
+  layout: string[] | null;
+  widgets: VoiceWidgetManifest[];
+  updatedAt: string | null;
+}
+
+/** `PUT /voice/dashboard` (at most 24 on the layout, 16 user widgets; every `user.*` on the layout is in `widgets`). */
+export interface PutVoiceDashboardBody {
+  layout: string[];
+  widgets: VoiceWidgetManifest[];
 }

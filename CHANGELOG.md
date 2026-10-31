@@ -12,6 +12,20 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **Voice mode, phase 1: speech to text on this machine** (program DES-VOICE). Studio's voice mode records speech in
+  the browser and posts it as a 16 kHz mono WAV to `POST /voice/transcribe`; crew hands the bytes to whisper.cpp's CLI on
+  stdin and answers `{text, ms, model}`. The audio is held in memory for the call and dropped: never written to disk,
+  logged, audited or sent anywhere. The CLI is found on PATH (`whisper-cli`) or named by `WICKED_CREW_WHISPER_BIN`;
+  crew does not install it, and `GET /voice/status` names the install command for the platform. The one model
+  (`ggml-base.en.bin`, 142 MiB) is fetched only on the person's consent (`POST /voice/model {consent: true}`, audited),
+  checked against whisper.cpp's published SHA-1 and kept in the voice cache dir (`WICKED_CREW_VOICE_DIR`, default the
+  OS cache dir, outside the state home); `DELETE /voice/model` removes it. One transcription runs and one waits; a third
+  answers 429 `voice_busy`. A gate answer may carry `input: "voice"` (the person confirmed a spoken answer on screen):
+  it is kept on the `gate.decided` audit line and `GET /gates/decided` says it (`DecidedGate.input`); it grants nothing.
+  `GET|PUT /voice/dashboard` keeps each person's voice-dashboard layout and the metric widgets they made (declarative
+  user plugins in the `voice-dashboard` panel slot) in `daemon-voice-dashboard.json`. Every voice route is the human
+  operator's alone and loopback only. `capabilities.voice` says the routes are served (api-types 0.156.0 `VoiceStatus`,
+  `VoiceTranscribeResponse`, `VoiceDashboard`, `VoiceWidgetManifest`).
 - **"Is this going well?": an in-flight check on a working step** (operator 2026-10-30: "if it's been running long you
   can have an agent analyze right there, to make sure no tokens are wasted and no problems are occurring").
   `POST /runs/:id/units/:ord/inspect` (a human operator only, audited `unit.inspected`; 409 `not_working` for a step
