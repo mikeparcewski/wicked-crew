@@ -12328,6 +12328,23 @@ export interface EditorControl {
 }
 
 /**
+ * How an editor looks on studio's Plugins page (program DES-LEARN §2; api-types 0.155.0). Every image is a `data:` URL
+ * (`image/svg+xml`, `image/png` or `image/webp`, base64) the registry read from the editor's own files, bounded (icon
+ * 16 KB, preview 200 KB) and never through a link: no path and no remote URL is on the wire. Each field is optional;
+ * a file that is missing, too big or not the image its name says is left out (the editor is still served).
+ */
+export interface EditorVisuals {
+  /** Drawn on `color`, at about 18 px. */
+  icon?: string;
+  /** `#rrggbb`. */
+  color?: string;
+  /** A 16:9 picture of the editor at work; a `dark` one is used on a dark theme (else `light`). */
+  preview?: { light?: string; dark?: string };
+  /** The editor offers a live preview on its own sample (reserved: studio draws one for run plugins today). */
+  live?: boolean;
+}
+
+/**
  * One registered editor, as Settings → Editors renders it. No path is on the wire: the bundle is
  * fetched at `entry_url` (`GET /editors/:id/:version/entry`, the §8.2 headers, re-hashed per serve).
  * First-party editors ship inside studio's bundle (`<studio dist>/editors/<id>/editor.json` +
@@ -12359,6 +12376,11 @@ export interface EditorView {
   /** `studio-bundle`: first-party, shipped with studio. `pack`: a third-party pack the operator installed. */
   source: 'studio-bundle' | 'pack';
   entry_url: string;
+  /** Its one line for the Plugins page (at most 160 characters). Absent when the manifest has none, and from a daemon
+   *  that predates the field (api-types 0.155.0). */
+  description?: string;
+  /** Its icon, colour and preview (api-types 0.155.0). Absent when it declares none that read. */
+  visuals?: EditorVisuals;
 }
 
 /** `GET /editors` (operator+). */

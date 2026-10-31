@@ -29,8 +29,9 @@ import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readd
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 
-import type { EditorPermission, EditorView } from '../core/types.js';
+import type { EditorPermission, EditorView, EditorVisuals } from '../core/types.js';
 import { parseSurfaces } from './surfaces.js';
+import { declaredDescription, declaredVisuals, resolveVisuals } from './visuals.js';
 import { crewStateHome } from '../projects/state-home.js';
 
 /** The persisted flags file, under the registered `daemon-` prefix. */
@@ -96,6 +97,10 @@ const EditorManifestFields = z.object({
   permissions: z.array(z.object({ id: z.enum(EDITOR_PERMISSIONS), why: z.string().min(1) })),
   limits: z.object({ bundleBytes: z.number().int().min(1).max(HOST_BUNDLE_CAP_BYTES) }).optional(),
   surfaces: SurfacesField,
+  /** The Plugins page's one line and look (program DES-LEARN §2). Cosmetic: a malformed value is dropped, never a
+   *  reason to refuse the editor. */
+  description: z.unknown().optional().transform(declaredDescription),
+  visuals: z.unknown().optional().transform(declaredVisuals),
 });
 export const EditorManifestSchema = EditorManifestFields.superRefine(surfacesMatchProtocol);
 export type EditorManifest = z.infer<typeof EditorManifestFields>;
@@ -113,6 +118,8 @@ export interface EditorRecord {
   enabled: boolean;
   /** For a pack editor: the pack it came from. Never on the wire. */
   pack?: InstalledPack;
+  /** Its declared visuals with each image read into a `data:` URL (`visuals.ts`). */
+  visuals?: EditorVisuals;
 }
 
 /** One installed pack editor, as `daemon-editors.json` records it. */
@@ -271,7 +278,8 @@ export function discoverStudioEditors(
       log?.(`[editors] ${manifest.id}: entry loads from outside itself (${outside.slice(0, 3).join(', ')})`);
       continue;
     }
-    out.push({ manifest, sha256: sha256Of(buf), bytes: buf.byteLength, entryPath, firstParty: true, source: 'studio-bundle' });
+    const visuals = resolveVisuals(join(dir, name), manifest.visuals, (m) => log?.(`[editors] ${manifest.id}: visual ${m}; left out`));
+    out.push({ manifest, sha256: sha256Of(buf), bytes: buf.byteLength, entryPath, firstParty: true, source: 'studio-bundle', ...(visuals !== undefined ? { visuals } : {}) });
   }
   return out;
 }
@@ -336,8 +344,9 @@ export function readPackEditor(pack: InstalledPack, id: string, log?: (msg: stri
   if (outside.length > 0) return why(`entry loads from outside itself (${outside.slice(0, 3).join(', ')})`);
   const sha = sha256Of(buf);
   if (sha !== m.sha256 || sha !== pack.sha256) return why('its entry no longer matches the hash it was installed with');
-  const manifest: EditorManifest = { id: m.id, title: m.title, version: m.version, protocol: m.protocol, kinds: m.kinds, entry: m.entry, sizes: m.sizes, permissions: m.permissions, ...(m.panels !== undefined ? { panels: m.panels } : {}), ...(m.limits !== undefined ? { limits: m.limits } : {}), ...(m.surfaces !== undefined ? { surfaces: m.surfaces } : {}) };
-  return { manifest, sha256: sha, bytes: buf.byteLength, entryPath, firstParty: false, source: 'pack', pack };
+  const manifest: EditorManifest = { id: m.id, title: m.title, version: m.version, protocol: m.protocol, kinds: m.kinds, entry: m.entry, sizes: m.sizes, permissions: m.permissions, ...(m.panels !== undefined ? { panels: m.panels } : {}), ...(m.limits !== undefined ? { limits: m.limits } : {}), ...(m.surfaces !== undefined ? { surfaces: m.surfaces } : {}), ...(m.description !== undefined ? { description: m.description } : {}), ...(m.visuals !== undefined ? { visuals: m.visuals } : {}) };
+  const visuals = resolveVisuals(pack.root, m.visuals, (msg) => log?.(`[editors] ${id} (pack ${pack.name}): visual ${msg}; left out`));
+  return { manifest, sha256: sha, bytes: buf.byteLength, entryPath, firstParty: false, source: 'pack', pack, ...(visuals !== undefined ? { visuals } : {}) };
 }
 
 const InstalledPackSchema = z.object({
@@ -537,6 +546,8 @@ export class EditorRegistry {
       enabled: r.enabled,
       source: r.source,
       entry_url: `/api/v1/editors/${encodeURIComponent(m.id)}/${encodeURIComponent(m.version)}/entry`,
+      ...(m.description !== undefined ? { description: m.description } : {}),
+      ...(r.visuals !== undefined ? { visuals: structuredClone(r.visuals) } : {}),
     };
   }
 }
