@@ -288,6 +288,7 @@ import { DeliveryFreeze, frozenRefusal, isDeliverUnit, registerDeliveryFreezeRou
 import { VoiceService, defaultVoiceDir } from '../voice/service.js';
 import { VoiceDashboardStore } from '../voice/dashboard.js';
 import { registerVoiceRoutes } from '../voice/routes.js';
+import { VoiceInjectInputs } from '../voice/inject-input.js';
 import { GroupIndex } from './group-index.js';
 import { RunTimingIndex, recordRunLaunched } from './run-timing-index.js';
 import { GuidanceIndex } from './guidance-index.js';
@@ -933,10 +934,20 @@ export const GuidanceSchema = z.object({
 /** ~8KB — a guidance note is operator prose, not a document store. */
 const GUIDANCE_MAX_BYTES = 8192;
 
+/** `POST /runs/:id/cancel` (api-types `CancelRunRequest`): optional, so a bodiless cancel stays valid. */
+const CancelSchema = z.object({
+  reason: z.string().trim().max(2000).optional(),
+  input: z.literal('voice').optional(),
+}).strict();
+
 const InjectSchema = z.object({
   message: z.string().min(1),
   /** `"all"` broadcasts to every active worker; any other value is a CLI key. */
   target: z.string().min(1).default('all'),
+  /** (api-types 0.161.0, DES-VOICE) The person said this note and confirmed it on screen. A person's only (403 for
+   *  any other actor); kept on the `run.injected` audit line and stamped on the note's queued/injected frames so the
+   *  thread says "You (by voice)". It grants nothing a typed note does not. */
+  input: z.literal('voice').optional(),
 }).strict();
 
 // The manual reassign lever (crew#442): `cli` omitted lets the engine's council re-pick, the
@@ -1140,6 +1151,9 @@ export interface RuntimeDeps {
    *  `GET /runs/:id/events` at serve time so a reloaded page sees the `workerStalled` /
    *  `workerStallEscalated` facts the live socket carried. Absent ⇒ engine events only. */
   stallFrames?: (runId: string) => readonly RecordedStallFrame[];
+  /** (DES-VOICE) The notes said by voice, shared with the `/ws` path that stamps their frames. Absent ⇒ this route
+   *  set keeps its own (a directly-driven test). */
+  voiceInputs?: VoiceInjectInputs;
   /** DES-SYSTEM-VIEW: the stall watchdog's newest evidence of life for a run (a relay frame or a
    *  busy child process), read by `GET /system`. Absent ⇒ the durable event log alone. */
   runEvidence?: (runId: string) => { at: number; source: 'relay' | 'process' } | undefined;
@@ -1489,6 +1503,7 @@ export function registerRoutes(
     dashboard: (() => { try { return VoiceDashboardStore.under(crewStateHome()); } catch { return null; } })(),
   };
   registerVoiceRoutes(app, { voice: voice.service, dashboard: voice.dashboard, audit });
+  const voiceInputs = runtime.voiceInputs ?? new VoiceInjectInputs();
   const openWithOs = runtime.openWithOs ?? openWithSystemDefault;
   const signedIn = runtime.signedIn ?? signedInHeuristic;
   const retryIndex = runtime.retryIndex ?? new RetryIndex();
@@ -5567,14 +5582,21 @@ export function registerRoutes(
   );
 
   // Cancel a running or paused run (distinct third action, §11.1).
+  // (api-types 0.161.0, DES-VOICE) An optional body: the person's `reason` (said or typed) and `input: "voice"`, both
+  // kept on the `run.cancelled` audit line. A bodiless cancel is unchanged; voice is a person's only (403).
   app.post(`${V}/runs/:id/cancel`, async (req, reply) => {
     const { id } = req.params as { id: string };
+    const parsed = CancelSchema.safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
+    const reason = parsed.data.reason !== undefined && parsed.data.reason !== '' ? parsed.data.reason : null;
+    const spoken = parsed.data.input === 'voice';
+    if (spoken && !isHumanOperator(actorOf(req))) return reply.code(403).send({ error: 'Only a person speaks: input "voice" is a person\'s stop' });
     const views = await adapter.sessionsDetail();
     const run = views.find((v) => v.session.id === id);
     if (!run) return reply.code(404).send({ error: 'Run not found' });
     try {
       const status = await adapter.cancelRun(id);
-      audit.record('run.cancelled', actorOf(req), { runId: id, detail: { status } });
+      audit.record('run.cancelled', actorOf(req), { runId: id, detail: { status, ...(reason !== null ? { reason } : {}), ...(spoken ? { input: 'voice' } : {}) } });
       return reply.send({ status });
     } catch (err) {
       return reply.code(409).send({ error: message(err) });
@@ -5674,11 +5696,15 @@ export function registerRoutes(
     if (!parsed.success) {
       return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
     }
+    const spoken = parsed.data.input === 'voice';
+    if (spoken && !isHumanOperator(actorOf(req))) return reply.code(403).send({ error: 'Only a person speaks: input "voice" is a person\'s note' });
     const ids = await adapter.sessions();
     if (!ids.includes(id)) return reply.code(404).send({ error: 'Run not found' });
     try {
+      // Remembered BEFORE the engine call: its queued frame can reach /ws before the call returns.
+      if (spoken) voiceInputs.remember(id, parsed.data.message);
       await adapter.injectWorkerMessage(id, parsed.data.message, parsed.data.target);
-      audit.record('run.injected', actorOf(req), { runId: id, detail: { target: parsed.data.target } });
+      audit.record('run.injected', actorOf(req), { runId: id, detail: { target: parsed.data.target, ...(spoken ? { input: 'voice' } : {}) } });
       // DC-S4a host: the operator's mid-run steering text (review S9).
       if (decisions !== null) {
         decisions.track(ingestDecision(decisions, {
@@ -6396,7 +6422,8 @@ export function registerRoutes(
       .map((t) => t.trim())
       .filter(Boolean);
     const wanted = names.length > 0 ? new Set(names) : null;
-    const filtered = wanted ? events.filter((e) => wanted.has(e.type)) : events;
+    // DES-VOICE: a note said by voice reads "You (by voice)" on a reloaded thread too (this daemon's memory).
+    const filtered = (wanted ? events.filter((e) => wanted.has(e.type)) : events).map((e) => voiceInputs.stamp(e));
     return { runId: id, total: events.length, returned: filtered.length, events: filtered };
   });
 

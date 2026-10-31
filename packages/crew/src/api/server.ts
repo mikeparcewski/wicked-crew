@@ -35,6 +35,7 @@ import { registerPersonaRoutes } from '../persona/routes.js';
 import { PersonaStore } from '../persona/store.js';
 import { registerSetupRoutes } from '../setup/routes.js';
 import { voiceBlock } from '../persona/voice.js';
+import { VoiceInjectInputs } from '../voice/inject-input.js';
 import { registerInsightsRoutes } from '../insights/routes.js';
 import { ReviewService } from '../insights/review-service.js';
 import { InsightsStore } from '../insights/store.js';
@@ -1905,6 +1906,8 @@ export async function createServer(
   // CoreEvent stream below; `POST /chats/:id/messages` refuses a send to a busy seat and the
   // chat frames leave here stamped with the `turn_id` they answer.
   const chatTurns = new ChatTurnIndex();
+  /** DES-VOICE: the notes said by voice (the inject route remembers, the event path and the events read stamp). */
+  const voiceInputs = new VoiceInjectInputs();
   // ASK-C2 (DES-ASK-TEAM-CHAT-001 §5.2): the ask relay — the answer unit's deltas as chatDelta, the
   // step.completed row's output as the chatReply, both fed back through the fold below so the turn
   // index stamps them and the transcript/recorder/citations/ws consumers are unchanged.
@@ -2057,7 +2060,8 @@ export async function createServer(
     const stamped = chatTurns.decorate(event);
     // crew#618 Acceptance 1: rewrite the chatReply frame ONCE — before both observe (persist) and
     // broadcast (/ws → studio render/promote). `observe`'s own rewrite pass is then a no-op.
-    const rewritten = chatTranscripts.rewriteEvent(stamped);
+    // DES-VOICE: a note said by voice says so on its queued/injected frames ("You (by voice)").
+    const rewritten = voiceInputs.stamp(chatTranscripts.rewriteEvent(stamped));
     chatTranscripts.observe(rewritten);
     // DC-S4b: the seat's `wicked-decisions` block was cut out of the reply above; the recorder takes
     // it (once) and, when every seat of the turn has answered, records the operator's words — off
@@ -2446,6 +2450,7 @@ export async function createServer(
       deliveryFreeze,
       // wicked-studio#284: the watchdog's remembered frames ride `GET /runs/:id/events`.
       stallFrames: (runId) => stallFrameIndex.framesFor(runId),
+      voiceInputs,
       // DES-SYSTEM-VIEW: the watchdog's evidence of life (relay frames, busy children) for `GET /system`.
       runEvidence: (runId) => stallWatchdog.evidence(runId),
       personaVoice: (projectId) => {

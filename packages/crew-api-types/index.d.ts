@@ -409,6 +409,9 @@ export interface WorkingDocSteer {
   error: string | null;
   supersededBy?: string | null;
   renewals?: number;
+  /** (0.161.0, DES-VOICE) The person said the edit and confirmed it on screen: the thread says "You (by voice)".
+   *  ABSENT on a typed edit (and on an older daemon). It grants nothing. */
+  input?: 'voice';
 }
 
 /** `GET /runs/:id/working-doc` (and the body of `POST /runs/:id/working-doc`). */
@@ -434,6 +437,9 @@ export interface ProposeWorkingDocRequest {
   sections: Partial<Record<WorkingDocSectionId, string>>;
   author: 'operator' | 'plugin';
   plugin?: { id: string; version: string };
+  /** (0.161.0, DES-VOICE) The person said this edit and confirmed it on screen. On `author: 'operator'` only (400
+   *  otherwise); kept on the steer ({@link WorkingDocSteer.input}) and the `run.steered.doc` audit line. */
+  input?: 'voice';
 }
 
 export interface ProposeWorkingDocResponse {
@@ -4313,6 +4319,28 @@ export interface WorkerMessageInjectedEvent {
   message: string;
   /** `"all"` or the cli_key that was targeted. */
   target: string;
+  /** (0.161.0, DES-VOICE) Stamped by crew when the note was sent with {@link InjectMessageRequest.input} `voice`
+   *  (on `/ws` and `GET /runs/:id/events`; also on the `workerMessageQueued` frame). Crew remembers spoken notes in
+   *  memory, so one sent before a daemon restart reads as typed here; its `run.injected` audit line keeps it. */
+  input?: 'voice';
+}
+
+/** `POST /runs/:id/cancel` (0.161.0): the body is optional; a bodiless cancel is unchanged. */
+export interface CancelRunRequest {
+  /** Why the person stopped it (≤ 2000 characters), said or typed: kept on the `run.cancelled` audit line. */
+  reason?: string;
+  /** (DES-VOICE) The person said the stop and confirmed it on screen. A person's only (403 otherwise). */
+  input?: 'voice';
+}
+
+/** `POST /runs/:id/inject`: an operator note into the run's active worker(s). */
+export interface InjectMessageRequest {
+  message: string;
+  /** `"all"` (the default) or a CLI key. */
+  target?: string;
+  /** (0.161.0, DES-VOICE) The person said this note and confirmed it on screen. A person's only (403 for a worker or
+   *  plugin bearer); kept on the `run.injected` audit line and stamped on the note's frames. Grants nothing. */
+  input?: 'voice';
 }
 
 /** A unit was stopped and re-dispatched to a different CLI (or re-routed via council). */

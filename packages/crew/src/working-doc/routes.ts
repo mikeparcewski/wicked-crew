@@ -8,7 +8,7 @@
  *  - `POST /runs/:id/working-doc/versions {base, sections, author, plugin?}` (operator+): one version. `author:
  *    'operator'` only from a person (403 otherwise); `author: 'plugin'` writes only the plugin's own section. A
  *    person's version becomes one steering note (see `service.ts`); a plugin's never does. 409 `{head}` when the
- *    document moved since `base`.
+ *    document moved since `base`. `input: 'voice'` (a person's own edit only) marks one said by voice.
  *
  * Nothing here answers a gate or launches a run.
  */
@@ -73,6 +73,7 @@ export function registerWorkingDocRoutes(app: FastifyInstance, deps: { service: 
         sections: body['sections'] as Record<string, unknown>,
         author: body['author'] as 'operator' | 'plugin',
         plugin: pluginRef,
+        input: body['input'] as 'voice' | undefined,
       }, actor);
       if (!r.ok) return reply.code(r.code).send({ error: r.error, ...(r.head !== undefined ? { head: r.head } : {}) });
       return { version: r.version, unchanged: r.unchanged, steer: r.steer, view: r.view };
