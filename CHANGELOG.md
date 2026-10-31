@@ -23,6 +23,14 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **A requirements generation keeps going until its target** (api-types 0.163.0, domain-graph-3). Settings →
+  `requirementsGraph` takes `maxPages` (1..200), `maxMinutes` (1..1440) and `pageSize` (50..2000) beside
+  `minCoveragePct`; the daemon exports them as `WICKED_DOMAIN_MAX_PAGES` / `WICKED_DOMAIN_MAX_MINUTES` /
+  `WICKED_DOMAIN_PAGE_SIZE` for the domain-extraction run's host steps (wicked-garden), which map page after page
+  and ask when the budget is spent. `GET /repos/:id/requirements` answers its `notGenerated` 404 with the mapped share
+  so far (`coverage`, "3% of behaviours mapped · target 80%") when the repository has a store. api-types:
+  `StepRepeatedEvent` (`stepRepeated`, one per loop rewind), `CoreEvent.repeatLine` on a `repeat` ask,
+  `RequirementsNotGenerated.coverage`, the three settings.
 - **Nerve Center: seat images** (api-types 0.162.0, wicked-core#1225). `GET /system` has an infra row `seat_images`
   read from the engine's `seat-image status --json`. It reports whether each roster seat's image, the floor image and
   the operator's base are present and held against a container runtime's image cleanup, plus the runtime VM's disk.

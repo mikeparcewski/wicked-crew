@@ -5,7 +5,14 @@ import { vaultBinWarning, vaultDiagnostics } from '../core/vault-bin.js';
 import { PlanSchema, toLaunchPlan } from './plan-schema.js';
 import type { RecordedStallFrame } from './stall-frame-index.js';
 import { z } from 'zod';
-import { listRequirements, getRequirement, patchRequirement, readRequirementsGraph, REQUIREMENTS_NOT_GENERATED } from './requirements.js';
+import {
+  listRequirements,
+  listRequirementsRead,
+  getRequirement,
+  patchRequirement,
+  readRequirementsGraph,
+  REQUIREMENTS_NOT_GENERATED,
+} from './requirements.js';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { readFileSync, existsSync, mkdirSync } from 'node:fs';
@@ -72,7 +79,11 @@ import { NO_LEARNINGS_WORKFLOWS, type RunLearningsService } from '../learnings/s
 import { SeatHealthTracker } from './seat-health.js';
 import { applyWorkerConfigRoot, signedInHeuristic } from './seat-signin.js';
 import { applyCouncilSettings, isCouncilSize, isCouncilStaggerMs } from '../core/council-settings.js';
-import { applyRequirementsGraphSettings, isRequirementsGraphSettings } from '../core/requirements-graph-setting.js';
+import {
+  applyRequirementsGraphSettings,
+  isRequirementsGraphSettings,
+  REQUIREMENTS_GRAPH_SETTINGS_RULE,
+} from '../core/requirements-graph-setting.js';
 import { defaultLaunchRoster, markOptIn } from '../core/opt-in-seats.js';
 import { chatSeatAdmission, homeless, type StandingSeat } from './seat-standing.js';
 import {
@@ -7000,8 +7011,9 @@ export function registerRoutes(
       return reply.code(400).send(invalidBody(parsed.error, 'Invalid query'));
     }
     let page: Awaited<ReturnType<typeof listRequirements>>;
+    let coverage: Awaited<ReturnType<typeof listRequirementsRead>>['coverage'] = null;
     try {
-      page = await listRequirements(repo, parsed.data, adapter);
+      ({ page, coverage } = await listRequirementsRead(repo, parsed.data, adapter));
     } catch (err) {
       // wicked-core#406: a CURRENT engine with no repo-graph root is a 503, not a 500.
       const status = codeGraphErrorStatus(err);
@@ -7009,8 +7021,12 @@ export function registerRoutes(
       return reply.code(status).send({ error: message(err) });
     }
     if (page === null) {
-      // Not generated yet is a state, typed by `code`, not a refusal (lane repo-page).
-      return reply.code(404).send(REQUIREMENTS_NOT_GENERATED);
+      // Not generated yet is a state, typed by `code`, not a refusal (lane repo-page). It says how
+      // much is mapped so far (domain-graph-3: "3% of behaviours mapped · target 80%"), from the
+      // very engine read the page used, when the repository has a store to count.
+      return reply
+        .code(404)
+        .send(coverage === null ? REQUIREMENTS_NOT_GENERATED : { ...REQUIREMENTS_NOT_GENERATED, coverage });
     }
     // Overrides keyed by ids the corpus no longer mints (an estate id-scheme migration re-keys
     // method/field SymbolIds) would otherwise vanish without a trace — the count is on the page
@@ -7603,7 +7619,7 @@ export function registerRoutes(
     if (Object.hasOwn(patch, 'requirementsGraph') && !isRequirementsGraphSettings(patch.requirementsGraph)) {
       return reply
         .code(400)
-        .send({ error: 'requirementsGraph.minCoveragePct must be a whole percentage between 1 and 100' });
+        .send({ error: REQUIREMENTS_GRAPH_SETTINGS_RULE });
     }
     if (Object.hasOwn(patch, 'worker_config_root')) {
       const root = patch.worker_config_root;

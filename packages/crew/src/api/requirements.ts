@@ -332,6 +332,16 @@ let tmpSeq = 0;
  * from estate or the overrides sidecar changes; `null` when no graph has been built yet (the
  * route's 404). */
 async function buildIndex(repo: RepoEntry, reader: RequirementsGraphReader): Promise<RepoIndex | null> {
+  return (await buildIndexRead(repo, reader)).index;
+}
+
+/** {@link buildIndex}, with the coverage of the very read it was built from: what a page that
+ * finds no graph says about the share mapped so far (domain-graph-3; codex r1/r2 on #1250 — never
+ * a second read, never another request's). */
+async function buildIndexRead(
+  repo: RepoEntry,
+  reader: RequirementsGraphReader,
+): Promise<{ index: RepoIndex | null; coverage: RequirementsCoverage | null }> {
   const [read, ovMtime] = await Promise.all([
     readRequirementsGraph(repo, reader),
     mtimeMs(requirementsOverrides(repo)),
@@ -339,7 +349,7 @@ async function buildIndex(repo: RepoEntry, reader: RequirementsGraphReader): Pro
   const graph = read.graph;
   if (graph === null || typeof graph !== 'object') {
     cache.delete(repoKey(repo)); // nothing built (any more): no stale index survives
-    return null;
+    return { index: null, coverage: coverageOf(read.coverage ?? undefined) };
   }
   const token = createHash('sha1')
     .update(JSON.stringify(graph))
@@ -347,7 +357,7 @@ async function buildIndex(repo: RepoEntry, reader: RequirementsGraphReader): Pro
     .digest('hex');
   const cached = cache.get(repoKey(repo));
   if (cached && cached.sourceToken === token && cached.overridesMtimeMs === ovMtime) {
-    return cached;
+    return { index: cached, coverage: cached.coverage };
   }
   const overrides = await readOverrides(repo);
 
@@ -408,7 +418,7 @@ async function buildIndex(repo: RepoEntry, reader: RequirementsGraphReader): Pro
     unconfirmed: entries.filter((e) => e.summary.corroboration?.status === 'unconfirmed').length,
   };
   cache.set(repoKey(repo), index);
-  return index;
+  return { index, coverage: index.coverage };
 }
 
 export interface RequirementsQuery {
@@ -466,8 +476,22 @@ export async function listRequirements(
   query: RequirementsQuery,
   reader: RequirementsGraphReader,
 ): Promise<RequirementsPage | null> {
-  const index = await buildIndex(repo, reader);
-  if (index === null) return null;
+  return (await listRequirementsRead(repo, query, reader)).page;
+}
+
+/** {@link listRequirements}, with the share mapped so far when there is no graph yet: both from one
+ * engine read (the route's notGenerated answer carries it). */
+export async function listRequirementsRead(
+  repo: RepoEntry,
+  query: RequirementsQuery,
+  reader: RequirementsGraphReader,
+): Promise<{ page: RequirementsPage | null; coverage: RequirementsCoverage | null }> {
+  const { index, coverage } = await buildIndexRead(repo, reader);
+  if (index === null) return { page: null, coverage };
+  return { page: pageOf(index, query), coverage };
+}
+
+function pageOf(index: RepoIndex, query: RequirementsQuery): RequirementsPage {
   const terms = (query.q ?? '')
     .toLowerCase()
     .split(/\s+/)
