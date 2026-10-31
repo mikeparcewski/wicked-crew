@@ -2686,8 +2686,14 @@ export function registerRoutes(
     if (garden !== null) return reply.code(422).send(garden);
     // A run on a repo whose folder is gone could only fail at its first worktree or floor, with the
     // spawn's ENOENT for a reason: refused here by name, before the engine sees it.
+    // A registry that cannot be read here refuses nothing: the engine judges the ref as before.
     if (b.repoRef !== undefined) {
-      const target = (await adapter.listRepos()).find((r) => r.id === b.repoRef);
+      let target: RepoEntry | undefined;
+      try {
+        target = (await adapter.listRepos()).find((r) => r.id === b.repoRef);
+      } catch {
+        target = undefined;
+      }
       if (target !== undefined && refusedMissingFolder(target, reply)) return reply;
     }
     // crew#645: an expired login reads signed out BEFORE routing — wait (bounded) for every seat's

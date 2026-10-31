@@ -209,7 +209,7 @@ describe('Nerve Center and Needs-you carry a missing folder as a fixable item', 
     const here = join(dir, 'here');
     mkdirSync(here);
     const gone = join(dir, 'target');
-    const repos = await withFolderFindings([repo('wicked-core', here), repo('tiny-math', gone)]);
+    const repos = await withFolderFindings([repo('core-repo', here), repo('tiny-math', gone)]);
     const row = reposRow({ kind: 'ok', value: repos, ms: 1 });
     expect(row.key).toBe('repos');
     expect(row.label).toBe('Repositories');
