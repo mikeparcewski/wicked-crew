@@ -63,6 +63,8 @@ export interface SteerRecord {
   supersededBy?: string | null;
   /** A standing steer: how many later steps it was re-sent to. */
   renewals?: number;
+  /** (DES-VOICE) The person said the edit and confirmed it on screen ("You (by voice)"). Absent = typed. */
+  input?: 'voice';
 }
 
 export interface WorkingDocRecord {
@@ -73,7 +75,7 @@ export interface WorkingDocRecord {
   trail: TrailEntry[];
   steers: SteerRecord[];
   /** An edit whose outcome was not known (no version in time): attributed once the head shows it, never to another. */
-  pending?: { expectHead: number; author: DocAuthor; surface: string | null; values: Partial<Record<SectionId, string>>; at: number; actor: { id: string; kind: string } } | null;
+  pending?: { expectHead: number; author: DocAuthor; surface: string | null; values: Partial<Record<SectionId, string>>; at: number; actor: { id: string; kind: string }; input?: 'voice' } | null;
 }
 
 interface FileShape { version: 1; runs: Record<string, WorkingDocRecord> }

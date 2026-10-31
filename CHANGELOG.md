@@ -18,6 +18,17 @@ mentioned only where a daemon release depends on them.
   and habits, never rigor, gates, checks or what the seat may do. The PA's scope step, reviewers, judges and QE never
   get it. No personality saved, or a phased run, sends none. Needs a wicked-core-ts that carries `voice`; an older
   addon drops the field and the orchestrator runs without a voice.
+- **Voice: a note said by voice says so on the thread** (api-types 0.161.0, program DES-VOICE §3). `POST
+  /runs/:id/inject` and `POST /runs/:id/working-doc/versions` take `input: "voice"` (a person's only: 403 on inject for
+  a worker or plugin bearer, 400 on a working-document edit not authored by the operator). It is kept on the
+  `run.injected` / `run.steered.doc` audit lines and on the working document's steer (`WorkingDocSteer.input`), and crew
+  stamps it on that send's own `workerMessageQueued` / `workerMessageInjected` frames (matched by message and target, at
+  or after the send) on `/ws` and `GET /runs/:id/events`, so studio's thread says "You (by voice)". A typed note with the
+  same words stays plain, and a send the engine refuses labels nothing. Spoken sends are remembered in memory (32 per
+  run, 256 runs): after a daemon restart an older spoken note reads as typed on the thread, and its audit line still
+  says voice. It grants nothing a typed note does not. `POST /runs/:id/cancel` takes an optional `{reason, input}` body
+  (`CancelRunRequest`): the person's reason for stopping, said or typed, and voice, on the `run.cancelled` audit
+  line; a bodiless cancel is unchanged.
 
 - **Voice: transcriptions print their text, and only on an engine that writes no file** (api-types 0.158.0). Seen live
   on whisper.cpp 1.9.5: with the WAV on stdin, `whisper-cli` prints nothing unless an output format is named, so every

@@ -98,6 +98,9 @@ export interface ProposeInput {
   author: 'operator' | 'plugin';
   /** The plugin that hosted the edit (`operator`) or wrote it (`plugin`). */
   plugin?: { id: string; version: string } | undefined;
+  /** (api-types 0.161.0, DES-VOICE) A person's edit said by voice and confirmed on screen: kept on its steer and
+   *  audit line, so the thread says "You (by voice)". A person's (`author: 'operator'`) only. */
+  input?: 'voice' | undefined;
 }
 
 const PLUGIN_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
@@ -261,6 +264,9 @@ export class WorkingDocService {
     if (plugin !== undefined && (!PLUGIN_ID.test(plugin.id) || !PLUGIN_VERSION.test(plugin.version))) {
       return { ok: false, code: 400, error: 'plugin must be {id, version}' };
     }
+    if (input.input !== undefined && (input.input !== 'voice' || input.author !== 'operator')) {
+      return { ok: false, code: 400, error: "input is 'voice', on a person's own edit (author 'operator') only" };
+    }
     let author: DocAuthor;
     if (input.author === 'operator') {
       // A person's words are a person's only: a worker, system or plugin caller never writes as the operator.
@@ -308,11 +314,11 @@ export class WorkingDocService {
         author: author.kind === 'human' ? `${author.id}${surface !== null ? ` via ${surface}` : ''}` : author.id,
       });
     } catch (err) {
-      if (err instanceof UndeterminedWriteError) this.rememberPending(runId, input.base, author, surface, values, actor);
+      if (err instanceof UndeterminedWriteError) this.rememberPending(runId, input.base, author, surface, values, actor, input.input);
       throw err;
     }
     if ('headMoved' in written) return { ok: false, code: 409, error: 'the working document changed since', head: written.head };
-    const steer = await this.record(runId, written.version, written.parent, author, surface, changed, values, actor);
+    const steer = await this.record(runId, written.version, written.parent, author, surface, changed, values, actor, input.input);
     return { ok: true, version: written.version, unchanged: false, steer, view: await this.view(runId) };
   }
 
@@ -466,8 +472,8 @@ export class WorkingDocService {
 
   /** A write whose outcome is not known: remembered, so a later read attributes it if it lands, never to the next
    *  caller, and looked at again on its own shortly, so its steer (a person's) is not left waiting for a reader. */
-  private rememberPending(runId: string, expectHead: number, author: DocAuthor, surface: string | null, values: Partial<Record<SectionId, string>>, actor: { id: string; kind: string }): void {
-    this.d.store.update(runId, (r) => { r.pending = { expectHead, author, surface, values, at: this.now(), actor: { id: actor.id, kind: actor.kind } }; });
+  private rememberPending(runId: string, expectHead: number, author: DocAuthor, surface: string | null, values: Partial<Record<SectionId, string>>, actor: { id: string; kind: string }, spoken?: 'voice'): void {
+    this.d.store.update(runId, (r) => { r.pending = { expectHead, author, surface, values, at: this.now(), actor: { id: actor.id, kind: actor.kind }, ...(spoken !== undefined ? { input: spoken } : {}) }; });
     for (const ms of [30_000, 75_000]) {
       const t = setTimeout(() => { void this.exclusive(runId, () => this.reconcile(runId)).catch(() => undefined); }, ms);
       (t as { unref?: () => void }).unref?.();
@@ -475,14 +481,15 @@ export class WorkingDocService {
   }
 
   /** A version that landed: its trail entry, its steer (a person's only), its audit line and the change frame. */
-  private async record(runId: string, version: number, parent: number, author: DocAuthor, surface: string | null, changed: SectionId[], values: Partial<Record<SectionId, string>>, actor: { id: string; kind: string }): Promise<SteerRecord | null> {
-    const steer = author.kind === 'human' ? await this.steer(runId, version, changed, values, author.id) : null;
+  private async record(runId: string, version: number, parent: number, author: DocAuthor, surface: string | null, changed: SectionId[], values: Partial<Record<SectionId, string>>, actor: { id: string; kind: string }, spoken?: 'voice'): Promise<SteerRecord | null> {
+    const steer = author.kind === 'human' ? await this.steer(runId, version, changed, values, author.id, spoken) : null;
     const entry: TrailEntry = { version, parent, author, surface, sections: changed, at: this.now(), steerId: steer?.id ?? null };
     this.d.store.update(runId, (r) => { r.trail.push(entry); });
     this.d.audit?.('run.steered.doc', actor, runId, {
       version, sections: changed, author: author.kind === 'human' ? 'operator' : author.id,
       ...(surface !== null ? { surface } : {}),
       ...(steer !== null ? { steer: steer.id, kind: steer.kind, steered: steer.sections, sent: steer.error === null } : {}),
+      ...(spoken !== undefined && author.kind === 'human' ? { input: spoken } : {}),
     });
     this.d.changed?.(runId, version);
     return steer;
@@ -505,7 +512,7 @@ export class WorkingDocService {
     const got = sectionsOf(html);
     const ids = Object.keys(p.values) as SectionId[];
     this.d.store.update(runId, (r) => { r.pending = null; });
-    if (ids.every((id) => got[id] === p.values[id])) await this.record(runId, v, p.expectHead, p.author, p.surface, ids, p.values, p.actor);
+    if (ids.every((id) => got[id] === p.values[id])) await this.record(runId, v, p.expectHead, p.author, p.surface, ids, p.values, p.actor, p.input);
   }
 
   /**
@@ -513,7 +520,7 @@ export class WorkingDocService {
    * and steering as a standing constraint (an emptied Constraints is said once, as cleared). The record is stored
    * BEFORE the engine is asked, so a pickup reported at once is never lost.
    */
-  private async steer(runId: string, version: number, changed: SectionId[], values: Partial<Record<SectionId, string>>, by: string): Promise<SteerRecord | null> {
+  private async steer(runId: string, version: number, changed: SectionId[], values: Partial<Record<SectionId, string>>, by: string, spoken?: 'voice'): Promise<SteerRecord | null> {
     const steered = changed.filter((id) => SECTION_STEER[id] !== 'record');
     if (steered.length === 0) return null;
     const constraints = values.constraints;
@@ -526,6 +533,7 @@ export class WorkingDocService {
       note: steerNote(version, who, standing, steered.map((x) => ({ id: x, text: values[x] ?? '' })), marker),
       ...(standing ? { standingNote: standingNote(version, who, constraints ?? '', marker), supersededBy: null, renewals: 0 } : {}),
       at: this.now(), by, queuedAt: null, pickedUp: null, error: null,
+      ...(spoken !== undefined ? { input: spoken } : {}),
     };
     const run = await this.d.run(runId);
     if (run === null || run.terminal) s.error = 'the job has ended, so there is no next step to steer';
