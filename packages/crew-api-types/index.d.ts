@@ -12328,7 +12328,7 @@ export interface EditorControl {
 }
 
 /**
- * How an editor looks on studio's Plugins page (program DES-LEARN §2; api-types 0.155.0). Every image is a `data:` URL
+ * How an editor looks on studio's Plugins page (program DES-LEARN §2; api-types 0.156.0). Every image is a `data:` URL
  * (`image/svg+xml`, `image/png` or `image/webp`, base64) the registry read from the editor's own files, bounded (icon
  * 16 KB, preview 200 KB) and never through a link: no path and no remote URL is on the wire. Each field is optional;
  * a file that is missing, too big or not the image its name says is left out (the editor is still served).
@@ -12377,9 +12377,9 @@ export interface EditorView {
   source: 'studio-bundle' | 'pack';
   entry_url: string;
   /** Its one line for the Plugins page (at most 160 characters). Absent when the manifest has none, and from a daemon
-   *  that predates the field (api-types 0.155.0). */
+   *  that predates the field (api-types 0.156.0). */
   description?: string;
-  /** Its icon, colour and preview (api-types 0.155.0). Absent when it declares none that read. */
+  /** Its icon, colour and preview (api-types 0.156.0). Absent when it declares none that read. */
   visuals?: EditorVisuals;
 }
 
