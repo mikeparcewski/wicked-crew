@@ -9,6 +9,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  corroborationOf,
+  coverageOf,
   listRequirements,
   getRequirement,
   patchRequirement,
@@ -331,8 +333,25 @@ describe('requirements service — coverage label + corroboration (domain-model 
       why: { code: 'config_only', text: 'A configuration entry: no code, test or doc in the index refers to it.' },
     });
     expect(by.get('odd')?.corroboration).toBeNull();
+    expect(page?.corroboration).toEqual({ validated: 1, unconfirmed: 1 }); // `odd` counts as neither
     const detail = await getRequirement(repoAt(await coreShapedRepo()), 'src::REQ-002');
     expect(detail?.corroboration?.why?.code).toBe('config_only');
+  });
+
+  it.each([
+    ['a recognised status with no counts', { status: 'validated' }],
+    ['a count that is not an integer', { status: 'validated', sources: 2.5, call_sites: 2.5, tests: 0, docs: 0, extra_extractors: 0 }],
+    ['sources that are not the sum of the kinds', { status: 'validated', sources: 4, call_sites: 1, tests: 1, docs: 0, extra_extractors: 0 }],
+    ['validated below two sources', { status: 'validated', sources: 1, call_sites: 1, tests: 0, docs: 0, extra_extractors: 0 }],
+    ['unconfirmed with no why', { status: 'unconfirmed', sources: 0, call_sites: 0, tests: 0, docs: 0, extra_extractors: 0 }],
+    ['unconfirmed with an empty sentence', { status: 'unconfirmed', sources: 0, call_sites: 0, tests: 0, docs: 0, extra_extractors: 0, why: { code: 'dead_code', text: ' ' } }],
+  ])('%s is no mark at all (null), never a defaulted one', (_label, raw) => {
+    expect(corroborationOf(raw as Parameters<typeof corroborationOf>[0])).toBeNull();
+  });
+
+  it('a coverage label with a missing or out-of-range field is no label', () => {
+    expect(coverageOf({ mapped_pct: 82, min_pct: 80 })).toBeNull();
+    expect(coverageOf({ mapped_pct: 182, min_pct: 80, behavior_bearing: 1, mapped: 1, resolved: 1, unmapped: 0 })).toBeNull();
   });
 
   it('a graph built before the fields reads null and 0/0, never a guess', async () => {

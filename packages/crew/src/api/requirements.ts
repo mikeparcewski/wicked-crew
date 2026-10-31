@@ -112,22 +112,34 @@ export interface RequirementsCoverage {
   unmapped: number;
 }
 
-const count = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0);
+/** A count as the artifact must carry it: a finite, non-negative integer — else `null`. */
+const count = (v: unknown): number | null => (typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : null);
 
-/** The artifact's corroboration in wire shape, or `null` when absent or malformed (never invented). */
+/** At or above this many independent sources an item is validated (core's `VALIDATED_MIN_SOURCES`). */
+const VALIDATED_MIN_SOURCES = 2;
+
+/**
+ * The artifact's corroboration in wire shape, or `null` when absent or malformed — never invented
+ * and never defaulted: every count must be present, `sources` must be their sum, the status must
+ * agree with it, and an unconfirmed item must say why (a non-empty code and sentence). A record
+ * that fails any of those is not shown as a mark at all, rather than as a mark it does not support.
+ */
 export function corroborationOf(raw: ArtifactCorroboration | undefined): RequirementCorroboration | null {
   if (raw === undefined || raw === null || typeof raw !== 'object') return null;
   if (raw.status !== 'validated' && raw.status !== 'unconfirmed') return null;
-  const out: RequirementCorroboration = {
-    status: raw.status,
-    sources: count(raw.sources),
-    callSites: count(raw.call_sites),
-    tests: count(raw.tests),
-    docs: count(raw.docs),
-    extraExtractors: count(raw.extra_extractors),
-  };
-  const why = raw.why;
-  if (why && typeof why.code === 'string' && typeof why.text === 'string') {
+  const sources = count(raw.sources);
+  const callSites = count(raw.call_sites);
+  const tests = count(raw.tests);
+  const docs = count(raw.docs);
+  const extraExtractors = count(raw.extra_extractors);
+  if (sources === null || callSites === null || tests === null || docs === null || extraExtractors === null) return null;
+  if (sources !== callSites + tests + docs + extraExtractors) return null;
+  if ((raw.status === 'validated') !== (sources >= VALIDATED_MIN_SOURCES)) return null;
+  const out: RequirementCorroboration = { status: raw.status, sources, callSites, tests, docs, extraExtractors };
+  if (raw.status === 'unconfirmed') {
+    const why = raw.why;
+    if (!why || typeof why.code !== 'string' || typeof why.text !== 'string') return null;
+    if (why.code.trim() === '' || why.text.trim() === '') return null;
     out.why = { code: why.code, text: why.text };
   }
   return out;
@@ -136,8 +148,7 @@ export function corroborationOf(raw: ArtifactCorroboration | undefined): Require
 /** The artifact's coverage label in wire shape, or `null` on a pre-1.1.0 artifact. */
 export function coverageOf(raw: ArtifactCoverage | undefined): RequirementsCoverage | null {
   if (raw === undefined || raw === null || typeof raw !== 'object') return null;
-  if (typeof raw.mapped_pct !== 'number' || typeof raw.min_pct !== 'number') return null;
-  return {
+  const out = {
     mappedPct: count(raw.mapped_pct),
     minPct: count(raw.min_pct),
     behaviorBearing: count(raw.behavior_bearing),
@@ -145,6 +156,11 @@ export function coverageOf(raw: ArtifactCoverage | undefined): RequirementsCover
     resolved: count(raw.resolved),
     unmapped: count(raw.unmapped),
   };
+  // Every field present and an integer, percentages in range — or no label at all.
+  if (Object.values(out).some((v) => v === null)) return null;
+  const c = out as RequirementsCoverage;
+  if (c.mappedPct > 100 || c.minPct < 1 || c.minPct > 100) return null;
+  return c;
 }
 
 /** Product-functional requirements come from CODE; statements extracted from
