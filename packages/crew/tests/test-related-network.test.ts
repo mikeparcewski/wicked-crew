@@ -96,7 +96,7 @@ describe('the container floor leaves the network tests out (DES-FLOOR-CONTAINER)
     expect(rec.calls).toEqual([
       ['npx', 'vitest', 'related', '--run', '--passWithNoTests', 'src/x.ts', '--tags-filter=!cross-repo', '--tags-filter=!network'],
     ]);
-    expect(rec.lines.some((l) => l.includes('cross-repo test'))).toBe(true);
+    expect(rec.lines.some((l) => l.includes('tagged `cross-repo`'))).toBe(true);
     expect(rec.lines.filter((l) => l.includes('tagged `network`'))).toEqual([NETWORK_LINE]);
   });
 

@@ -10,6 +10,13 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Changed
+
+- **`test-related` words the cross-repo line like the network line (#1244).** It now reads "left out the tests
+  tagged `cross-repo` (N in the repository, in …; only those this run selected were affected): no sibling
+  wicked-core checkout; CI runs them (crew#1173)". The count and files were always the repository's, so a targeted
+  run no longer claims it left out tests it never selected. The filter and when it applies are unchanged.
+
 ### Added
 
 - **The power orchestrator talks in your personality** (wicked-core#1216). A power launch from `POST /runs` now

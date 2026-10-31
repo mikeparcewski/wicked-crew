@@ -103,7 +103,7 @@ describe('crew#1221 — the full-suite floor check', () => {
     expect(h.calls).toEqual([['npx', 'vitest', 'run', ...mod.CROSS_REPO_FILTER]]);
     const leftOut = h.lines.filter((l) => l.startsWith('test-related: left out '));
     expect(leftOut).toHaveLength(1);
-    expect(leftOut[0]).toContain('3 cross-repo test(s)');
+    expect(leftOut[0]).toContain('tagged `cross-repo` (3 in the repository');
     expect(leftOut[0]).toContain('tests/core-checkout-policy.test.ts');
   });
 
