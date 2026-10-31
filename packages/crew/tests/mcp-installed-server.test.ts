@@ -146,7 +146,7 @@ afterAll(async () => {
 });
 
 describe('J6: the MCP server a /workflow-mcp-server run built, installed and used', () => {
-  it('is listed with both of its tools, read-only, and their input schemas', async () => {
+  it('is listed with both of its tools, read-only, and their input schemas', { tags: ['network'] }, async () => {
     const { status, body } = await api<McpServersResponse>('GET', '/mcp/servers');
     expect(status).toBe(200);
     const server = body.servers.find((s) => s.name === 'unit-convert');
@@ -164,7 +164,7 @@ describe('J6: the MCP server a /workflow-mcp-server run built, installed and use
     expect(server!.counts).toMatchObject({ total: 2, enabled: 2, read: 2, write: 0, destructive: 0 });
   });
 
-  it('answers a worker call through the broker with a real conversion', async () => {
+  it('answers a worker call through the broker with a real conversion', { tags: ['network'] }, async () => {
     const km = await api<McpCallResponse>('POST', '/mcp/call', { token: 'wmt_unit', subject: 'mcp:unit-convert/convert_length', args: { value: 5, from: 'km', to: 'mi' } });
     expect(km.status, JSON.stringify(km.body)).toBe(200);
     expect(km.body.outcome).toBe('ok');
@@ -176,7 +176,7 @@ describe('J6: the MCP server a /workflow-mcp-server run built, installed and use
     expect(textOf(c.body)).toBe('100 C = 212 F');
   });
 
-  it("returns the tool's own error for an impossible temperature, and never reads a secret", async () => {
+  it("returns the tool's own error for an impossible temperature, and never reads a secret", { tags: ['network'] }, async () => {
     const r = await api<McpCallResponse>('POST', '/mcp/call', { token: 'wmt_unit', subject: 'mcp:unit-convert/convert_temperature', args: { value: -500, from: 'C', to: 'K' } });
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     expect(r.body.outcome).toBe('ok');
@@ -266,7 +266,7 @@ describe('crew#1155: the floating chat uses the installed MCP server', () => {
   const lastInstructions = (): string =>
     (launches.at(-1)!.plan as unknown as { steps: Array<{ instructions: string }> }).steps[0]!.instructions;
 
-  it("hands the chat turn the installed tools and the broker command, and the seat's call returns the tool's answer", async () => {
+  it("hands the chat turn the installed tools and the broker command, and the seat's call returns the tool's answer", { tags: ['network'] }, async () => {
     const opened = await chatApp.inject({ method: 'POST', url: '/api/v1/chats', payload: { chatId: 'mcp-chat-1', clis: ['claude'], scopeKind: 'system' } });
     expect(opened.statusCode, opened.body).toBe(201);
     const sent = await chatApp.inject({
@@ -298,7 +298,7 @@ describe('crew#1155: the floating chat uses the installed MCP server', () => {
     expect(textOf(body)).toBe('5 km = 3.10685596119 mi');
   });
 
-  it('carries the block on a follow-up turn too, and drops a server the operator disabled', async () => {
+  it('carries the block on a follow-up turn too, and drops a server the operator disabled', { tags: ['network'] }, async () => {
     const off = await chatApp.inject({ method: 'PATCH', url: '/api/v1/mcp/servers/unit-convert', payload: { enabled: false } });
     expect(off.statusCode, off.body).toBe(200);
     const opened = await chatApp.inject({ method: 'POST', url: '/api/v1/chats', payload: { chatId: 'mcp-chat-2', clis: ['claude'], scopeKind: 'system' } });

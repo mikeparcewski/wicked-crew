@@ -386,7 +386,7 @@ describe('crew#649 — the targeted check tolerates worker-IPC deaths and record
       .split('\n')
       .filter((l) => !l.trim().startsWith('//'))
       .join('\n');
-    expect(entry).toContain('process.exitCode = await runTargeted(files, { plan: planOf })');
+    expect(entry).toContain('process.exitCode = await runTargeted(files, { plan: planOf, noNetwork })');
     expect(entry, 'process.exit() can drop buffered stdout under pipe backpressure').not.toMatch(
       /process\.exit\s*\(/,
     );
