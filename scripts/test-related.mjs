@@ -201,8 +201,8 @@ export function networkLine({ count, files }) {
 /** The one line the floor's evidence carries when the cross-repo tests are left out. */
 export function crossRepoLine({ count, files }) {
   return (
-    `test-related: left out ${count} cross-repo test(s) (vitest tag \`${CROSS_REPO_TAG}\`, in ${files.join(', ')}): ` +
-    'no sibling wicked-core checkout; CI runs them (crew#1173).'
+    `test-related: left out the tests tagged \`${CROSS_REPO_TAG}\` (${count} in the repository, in ${files.join(', ')}; ` +
+    'only those this run selected were affected): no sibling wicked-core checkout; CI runs them (crew#1173).'
   );
 }
 

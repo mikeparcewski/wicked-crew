@@ -104,10 +104,10 @@ describe('the floor leaves the cross-repo tests out when there is no sibling che
     expect(rec.calls[1]).toEqual([
       'npx', 'vitest', 'run', '--no-file-parallelism', '--tags-filter=!cross-repo', 'tests/deliver-e2e.test.ts',
     ]);
-    const said = rec.lines.filter((l) => l.includes('cross-repo test'));
+    const said = rec.lines.filter((l) => l.includes('tagged `cross-repo`'));
     expect(said).toEqual([
-      'test-related: left out 7 cross-repo test(s) (vitest tag `cross-repo`, in tests/a.test.ts, tests/b.test.ts): ' +
-        'no sibling wicked-core checkout; CI runs them (crew#1173).',
+      'test-related: left out the tests tagged `cross-repo` (7 in the repository, in tests/a.test.ts, tests/b.test.ts; ' +
+        'only those this run selected were affected): no sibling wicked-core checkout; CI runs them (crew#1173).',
     ]);
     // Said before the tests run, and the host telemetry stays the last line.
     expect(rec.lines.indexOf(said[0]!)).toBeLessThan(rec.lines.findIndex((l) => l.includes('vitest related')));
