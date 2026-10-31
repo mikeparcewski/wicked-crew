@@ -17,7 +17,7 @@
  * The answer is a record (`<dir>/<runId>.json`, newest first) and a `/ws` frame `unitInspection`.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -150,39 +150,57 @@ export function parseInspectReply(text: string | null): Pick<InspectionRecord, '
     }
     if (!isRecord(v) || typeof v['verdict'] !== 'string' || !VERDICTS.has(v['verdict'])) continue;
     const s = (k: string, max: number): string | null => (typeof v[k] === 'string' && (v[k] as string).trim() !== '' ? (v[k] as string).trim().slice(0, max) : null);
-    const action = typeof v['action'] === 'string' && ACTIONS.has(v['action']) ? (v['action'] as InspectAction) : 'let_run';
+    // A malformed action (or a steer with no note) is not an answer: crew's own reading stands (xreview on #1233).
+    if (typeof v['action'] !== 'string' || !ACTIONS.has(v['action'])) return null;
+    const action = v['action'] as InspectAction;
+    const note = action === 'steer' ? s('note', 600) : null;
+    if (action === 'steer' && note === null) return null;
     return {
       verdict: v['verdict'] as InspectVerdict,
       doing: s('doing', 240),
       progress: s('progress', 240),
       evidence: Array.isArray(v['evidence']) ? v['evidence'].filter((e): e is string => typeof e === 'string' && e.trim() !== '').map((e) => e.trim().slice(0, 240)).slice(0, 5) : [],
       action,
-      note: action === 'steer' ? s('note', 600) : null,
+      note,
     };
   }
   return null;
 }
 
-/** Every balanced `{…}` in `text` (strings respected), outermost, in order. */
+/** Every balanced `{…}` in `text` that parses as JSON, in order of where it ends: each `{` is tried as a start, so
+ *  prose with a stray brace before the answer does not hide it (xreview on #1233). */
 function jsonObjects(text: string): string[] {
-  const out: string[] = [];
-  let depth = 0;
-  let start = -1;
-  let inStr = false;
-  let esc = false;
-  for (let i = 0; i < text.length; i += 1) {
-    const ch = text[i]!;
-    if (inStr) {
-      if (esc) esc = false;
-      else if (ch === '\\') esc = true;
-      else if (ch === '"') inStr = false;
-      continue;
+  const out: Array<{ end: number; raw: string }> = [];
+  for (let start = text.indexOf('{'); start !== -1; start = text.indexOf('{', start + 1)) {
+    let depth = 0;
+    let inStr = false;
+    let esc = false;
+    for (let i = start; i < text.length; i += 1) {
+      const ch = text[i]!;
+      if (inStr) {
+        if (esc) esc = false;
+        else if (ch === '\\') esc = true;
+        else if (ch === '"') inStr = false;
+        continue;
+      }
+      if (ch === '"') inStr = true;
+      else if (ch === '{') depth += 1;
+      else if (ch === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          const raw = text.slice(start, i + 1);
+          try {
+            JSON.parse(raw);
+            out.push({ end: i, raw });
+          } catch {
+            /* not JSON */
+          }
+          break;
+        }
+      }
     }
-    if (ch === '"' && depth > 0) inStr = true;
-    else if (ch === '{') { if (depth === 0) start = i; depth += 1; }
-    else if (ch === '}' && depth > 0) { depth -= 1; if (depth === 0) out.push(text.slice(start, i + 1)); }
   }
-  return out;
+  return out.sort((a, b) => a.end - b.end).map((o) => o.raw);
 }
 
 /** The check run's brief: the reading and the recent frames, inline (the seat needs no tool to read them). */
@@ -215,10 +233,13 @@ export function inspectBrief(view: RunView, ord: number, reading: UnitReading, f
 }
 
 /** The in-flight checks of one daemon. */
+/** The in-flight checks of one daemon. */
 export class InspectService {
   private readonly now: () => number;
-  /** Check run id → the record it answers. */
-  private readonly pending = new Map<string, { runId: string; id: string; timer: NodeJS.Timeout | null }>();
+  /** Check run id → the record it answers. Kept until the record's answer is saved (`finalizing` meanwhile). */
+  private readonly pending = new Map<string, { runId: string; id: string; timer: NodeJS.Timeout | null; finalizing: boolean }>();
+  /** A start in flight per step: a second ask for the same step joins it (xreview on #1233). */
+  private readonly starting = new Map<string, Promise<InspectionRecord>>();
 
   constructor(private readonly deps: InspectServiceDeps) {
     this.now = deps.now ?? Date.now;
@@ -249,7 +270,7 @@ export class InspectService {
     this.deps.broadcast({ type: 'unitInspection', session: rec.runId, ord: rec.ord, inspection: rec });
   }
 
-  /** A record still `checking` that no check of this daemon answers (it restarted mid-check) ends with crew's reading. */
+  /** A record still `checking` that no check of this daemon owns (it restarted mid-check) ends with crew's reading. */
   settle(runId: string): InspectionRecord[] {
     for (const r of this.list(runId)) {
       if (r.state === 'checking' && (r.checkRunId === null || !this.pending.has(r.checkRunId))) {
@@ -259,9 +280,47 @@ export class InspectService {
     return this.list(runId);
   }
 
+  /**
+   * At boot, before anything resumes: every check a restart interrupted is stopped (its run cancelled, so it can
+   * never spend past its bound unwatched; xreview on #1233) and answered with crew's reading. Never throws.
+   */
+  async recover(): Promise<void> {
+    let names: string[] = [];
+    try {
+      names = existsSync(this.deps.dir) ? readdirSync(this.deps.dir).filter((n) => n.endsWith('.json')) : [];
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      const runId = decodeURIComponent(name.slice(0, -'.json'.length));
+      for (const r of this.list(runId)) {
+        if (r.state !== 'checking' || (r.checkRunId !== null && this.pending.has(r.checkRunId))) continue;
+        if (r.checkRunId !== null) {
+          try {
+            await this.deps.adapter.cancelRun(r.checkRunId);
+          } catch {
+            /* already ended */
+          }
+        }
+        this.finishWithReading(r, 'Studio\'s service restarted during the check, so crew stopped it; this is crew\'s own reading from when it was asked.');
+      }
+    }
+  }
+
   /** Start a check on step `ord` of `runId` for `requestedBy`. Answers at once with the record (`state: checking`). */
-  async start(runId: string, ord: number, requestedBy: string): Promise<InspectionRecord> {
+  start(runId: string, ord: number, requestedBy: string): Promise<InspectionRecord> {
+    const k = `${runId}:${ord}`;
+    const open = this.starting.get(k);
+    if (open !== undefined) return open;
+    const p = this.startOnce(runId, ord, requestedBy).finally(() => this.starting.delete(k));
+    this.starting.set(k, p);
+    return p;
+  }
+
+  private async startOnce(runId: string, ord: number, requestedBy: string): Promise<InspectionRecord> {
     this.settle(runId);
+    const already = this.list(runId).find((r) => r.ord === ord && r.state === 'checking');
+    if (already !== undefined) return already;
     const view = ((await this.deps.adapter.sessionsDetail()) as RunView[]).find((v) => v.session.id === runId);
     if (view === undefined) throw new InspectError(404, 'not_found', 'Run not found');
     const unit = view.units.find((u) => u.ord === ord);
@@ -269,8 +328,6 @@ export class InspectService {
     if (workingOrd(view) !== ord) {
       throw new InspectError(409, 'not_working', `Step ${ord} is not working now, so there is nothing to check.`);
     }
-    const already = this.list(runId).find((r) => r.ord === ord && r.state === 'checking');
-    if (already !== undefined) return already;
     const now = this.now();
     const events = ((await this.deps.adapter.runEvents(runId)) ?? []) as Record<string, unknown>[];
     const reading = readUnit(events, ord, now);
@@ -291,7 +348,14 @@ export class InspectService {
       return rec;
     }
     rec.seat = String(seat['key']);
+    // Armed BEFORE the launch, under the id the run will have (xreview on #1233): a frame of the check run that
+    // arrives while the launch is still answering is this record's, and its clock runs from the ask.
     const checkRunId = this.deps.newId();
+    rec.checkRunId = checkRunId;
+    const timer = setTimeout(() => void this.expire(checkRunId), this.deps.timeoutMs ?? INSPECT_TIMEOUT_MS);
+    timer.unref?.();
+    this.pending.set(checkRunId, { runId, id: rec.id, timer, finalizing: false });
+    this.save(rec);
     const input: LaunchRunInput = {
       problem: inspectBrief(view, ord, reading, timeline(events, ord)),
       sessionId: checkRunId,
@@ -300,18 +364,21 @@ export class InspectService {
     };
     try {
       const launched = await this.deps.adapter.launchRun(input);
-      rec.checkRunId = launched;
+      if (launched !== checkRunId) this.deps.log(`[inspect] ${runId}#${ord}: the engine named the check run ${launched}, not ${checkRunId}`);
     } catch (err) {
-      this.finishWithReading(rec, `The check could not start on ${rec.seat} (${err instanceof Error ? err.message : String(err)}), so this is crew's own reading.`);
-      return rec;
+      const p = this.pending.get(checkRunId);
+      if (p !== undefined && !p.finalizing) {
+        this.pending.delete(checkRunId);
+        if (p.timer !== null) clearTimeout(p.timer);
+        const cur = this.recordOf(runId, rec.id) ?? rec;
+        cur.checkRunId = null;
+        if (cur.state === 'checking') this.finishWithReading(cur, `The check could not start on ${rec.seat} (${err instanceof Error ? err.message : String(err)}), so this is crew's own reading.`);
+      }
+      return this.recordOf(runId, rec.id) ?? rec;
     }
-    this.deps.launched?.(rec.checkRunId, runId);
-    const timer = setTimeout(() => void this.expire(rec.checkRunId!), this.deps.timeoutMs ?? INSPECT_TIMEOUT_MS);
-    timer.unref?.();
-    this.pending.set(rec.checkRunId, { runId, id: rec.id, timer });
-    this.save(rec);
-    this.deps.log(`[inspect] ${runId}#${ord} → ${INSPECT_WORKFLOW} ${rec.checkRunId} on ${rec.seat}`);
-    return rec;
+    this.deps.launched?.(checkRunId, runId);
+    this.deps.log(`[inspect] ${runId}#${ord} → ${INSPECT_WORKFLOW} ${checkRunId} on ${rec.seat}`);
+    return this.recordOf(runId, rec.id) ?? rec;
   }
 
   private finishWithReading(rec: InspectionRecord, why: string): void {
@@ -327,19 +394,35 @@ export class InspectService {
     return this.list(runId).find((r) => r.id === id) ?? null;
   }
 
+  /** Take the check over for its ending: `null` when another path already ends it. It stays owned (so `settle` never
+   *  reads it as orphaned) until {@link release}. */
+  private claim(checkRunId: string): { runId: string; id: string } | null {
+    const p = this.pending.get(checkRunId);
+    if (p === undefined || p.finalizing) return null;
+    p.finalizing = true;
+    if (p.timer !== null) clearTimeout(p.timer);
+    return { runId: p.runId, id: p.id };
+  }
+
+  private release(checkRunId: string): void {
+    this.pending.delete(checkRunId);
+  }
+
   /** Stop the check run (crew's own run, never the step's) and answer with crew's reading. */
   private async stopCheck(checkRunId: string, why: string): Promise<void> {
-    const p = this.pending.get(checkRunId);
-    if (p === undefined) return;
-    this.pending.delete(checkRunId);
-    if (p.timer !== null) clearTimeout(p.timer);
+    const p = this.claim(checkRunId);
+    if (p === null) return;
     try {
-      await this.deps.adapter.cancelRun(checkRunId);
-    } catch (err) {
-      this.deps.log(`[inspect] could not stop check run ${checkRunId}: ${err instanceof Error ? err.message : String(err)}`);
+      try {
+        await this.deps.adapter.cancelRun(checkRunId);
+      } catch (err) {
+        this.deps.log(`[inspect] could not stop check run ${checkRunId}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      const rec = this.recordOf(p.runId, p.id);
+      if (rec !== null && rec.state === 'checking') this.finishWithReading(rec, why);
+    } finally {
+      this.release(checkRunId);
     }
-    const rec = this.recordOf(p.runId, p.id);
-    if (rec !== null && rec.state === 'checking') this.finishWithReading(rec, why);
   }
 
   private expire(checkRunId: string): Promise<void> {
@@ -356,19 +439,18 @@ export class InspectService {
     const type = event['type'];
     if (type === 'usageProgress' || type === 'cliUsage') {
       const rec = this.recordOf(p.runId, p.id);
-      if (rec === null) return;
+      if (rec === null || rec.state !== 'checking') return;
       const i = typeof event['inputTokens'] === 'number' ? event['inputTokens'] : 0;
       const o = typeof event['outputTokens'] === 'number' ? event['outputTokens'] : 0;
       const c = typeof event['costUsd'] === 'number' ? event['costUsd'] : null;
       rec.cost = { inputTokens: i, outputTokens: o, costUsd: c };
+      this.save(rec);
+      if (p.finalizing) return;
       const maxUsd = this.deps.maxCostUsd ?? INSPECT_MAX_COST_USD;
       const maxTok = this.deps.maxTokens ?? INSPECT_MAX_TOKENS;
       if ((c !== null && c > maxUsd) || i + o > maxTok) {
-        this.save(rec);
         void this.stopCheck(session, `The check reached its budget (${c !== null && c > maxUsd ? `$${maxUsd.toFixed(2)}` : `${Math.round(maxTok / 1000)}k tokens`}), so crew stopped it; this is crew's own reading.`);
-        return;
       }
-      this.save(rec);
       return;
     }
     if (type === 'awaitingHuman') {
@@ -379,27 +461,30 @@ export class InspectService {
   }
 
   private async finish(checkRunId: string, how: string): Promise<void> {
-    const p = this.pending.get(checkRunId);
-    if (p === undefined) return;
-    this.pending.delete(checkRunId);
-    if (p.timer !== null) clearTimeout(p.timer);
-    const rec = this.recordOf(p.runId, p.id);
-    if (rec === null || rec.state !== 'checking') return;
-    let reply: string | null = null;
+    const p = this.claim(checkRunId);
+    if (p === null) return;
     try {
-      reply = await this.deps.replyOf(checkRunId);
-    } catch (err) {
-      this.deps.log(`[inspect] reading check run ${checkRunId}: ${err instanceof Error ? err.message : String(err)}`);
+      let reply: string | null = null;
+      try {
+        reply = await this.deps.replyOf(checkRunId);
+      } catch (err) {
+        this.deps.log(`[inspect] reading check run ${checkRunId}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      // Read the record AFTER the await: a usage frame may have moved its cost meanwhile.
+      const rec = this.recordOf(p.runId, p.id);
+      if (rec === null || rec.state !== 'checking') return;
+      const answer = how === 'sessionCompleted' ? parseInspectReply(reply) : null;
+      if (answer === null) {
+        this.finishWithReading(rec, how === 'sessionCompleted'
+          ? `${rec.seat ?? 'The seat'}'s answer could not be read, so this is crew's own reading.`
+          : `The check on ${rec.seat ?? 'its seat'} did not finish, so this is crew's own reading.`);
+        return;
+      }
+      Object.assign(rec, { ...answer, state: 'done', finishedAt: this.now(), source: 'seat', why: null } satisfies Partial<InspectionRecord>);
+      this.save(rec);
+    } finally {
+      this.release(checkRunId);
     }
-    const answer = how === 'sessionCompleted' ? parseInspectReply(reply) : null;
-    if (answer === null) {
-      this.finishWithReading(rec, how === 'sessionCompleted'
-        ? `${rec.seat ?? 'The seat'}'s answer could not be read, so this is crew's own reading.`
-        : `The check on ${rec.seat ?? 'its seat'} did not finish, so this is crew's own reading.`);
-      return;
-    }
-    Object.assign(rec, { ...answer, state: 'done', finishedAt: this.now(), source: 'seat', why: null } satisfies Partial<InspectionRecord>);
-    this.save(rec);
   }
 }
 

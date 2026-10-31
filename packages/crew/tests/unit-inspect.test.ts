@@ -71,8 +71,7 @@ describe("crew's own reading of a working step", () => {
   it('reads a fixture loop as looping, with the repeated call as evidence, and suggests a steer', () => {
     const r = readUnit(loopFixture(), 2, T0 + 5 * MIN);
     expect(r.verdict).toBe('looping');
-    expect(r.evidence).toContain('Ran `npm test -- payments/charge.test.ts` 4 times, 4 failed');
-    expect(r.evidence.some((e) => e.startsWith('Edited `src/payments/charge.ts` 4 times'))).toBe(true);
+    expect(r.evidence).toEqual(['Ran `npm test -- payments/charge.test.ts` 4 times, 4 failed']);
     expect(r.action).toBe('steer');
     expect(r.note).toMatch(/repeating yourself/);
     expect(r.calls).toBe(9);
@@ -111,7 +110,7 @@ describe("crew's own reading of a working step", () => {
       usage(T0 + 2 * MIN, 200_000, 1000), usage(T0 + 4 * MIN, 600_000, 2000)];
     const r = readUnit(ev, 2, T0 + 5 * MIN);
     expect(r.verdict).toBe('wasteful');
-    expect(r.evidence[0]).toMatch(/^602k tokens in the 5 min since/);
+    expect(r.evidence[0]).toMatch(/^552k tokens in the 5 min since/);
     expect(r.usage).toEqual({ inputTokens: 600_000, outputTokens: 2000, costUsd: null, source: 'live' });
   });
 
@@ -143,7 +142,7 @@ describe("crew's own reading of a working step", () => {
 });
 
 /** An adapter double: one executing run (step 2 working on claude), a roster, launches and cancels recorded. */
-function rig(opts: { roster?: unknown[]; events?: Ev[]; launchFails?: boolean; unitStatus?: string; timeoutMs?: number } = {}) {
+function rig(opts: { roster?: unknown[]; events?: Ev[]; launchFails?: boolean; unitStatus?: string; timeoutMs?: number; onLaunch?: (id: string) => void; reply?: () => Promise<string | null> } = {}) {
   const dir = scratch();
   const launches: LaunchRunInput[] = [];
   const cancels: string[] = [];
@@ -168,13 +167,15 @@ function rig(opts: { roster?: unknown[]; events?: Ev[]; launchFails?: boolean; u
     launchRun: async (input: LaunchRunInput) => {
       if (opts.launchFails === true) throw new Error('refused: no seat');
       launches.push(input);
+      opts.onLaunch?.(input.sessionId);
+      await new Promise((res) => setTimeout(res, 5));
       return input.sessionId;
     },
     cancelRun: async (id: string) => { cancels.push(id); return 'cancelled'; },
   };
   const service = new InspectService({
     adapter,
-    replyOf: async () => reply,
+    replyOf: opts.reply ?? (async () => reply),
     dir: join(dir, 'inspections'),
     broadcast: (f) => frames.push(f),
     log: () => undefined,
@@ -346,3 +347,82 @@ describe('POST /runs/:id/units/:ord/inspect', () => {
     await a.close();
   });
 });
+
+describe('xreview on #1233', () => {
+  it('counts an edit seen by the stream and by git once, and needs 6 edits to one file to call it a loop', () => {
+    const ev: Ev[] = [dispatched(T0)];
+    for (let i = 0; i < 3; i += 1) {
+      ev.push(...call(T0 + i * 60_000, 'Edit', 'edit', 'src/a.ts', true));
+      ev.push({ type: 'powerActivity', session: RUN, ord: 2, turn: 1, ts: T0 + i * 60_000 + 30_000, kind: 'edit', path: 'src/a.ts', added: 3, removed: 1 });
+    }
+    for (let i = 0; i < 2; i += 1) ev.push(...call(T0 + 200_000 + i * 1000, 'Edit', 'edit', 'src/a.ts', true));
+    const r = readUnit(ev, 2, T0 + 4 * MIN);
+    expect(r.edits).toEqual([{ path: 'src/a.ts', count: 5 }]);
+    expect(r.verdict).toBe('progressing');
+    // Git's edits stand in only where the stream said nothing of its edits.
+    const gitOnly = readUnit([dispatched(T0), { type: 'powerActivity', session: RUN, ord: 2, turn: 1, ts: T0 + 1000, kind: 'edit', path: 'src/b.ts' }], 2, T0 + MIN);
+    expect(gitOnly.edits).toEqual([{ path: 'src/b.ts', count: 1 }]);
+  });
+
+  it('does not call the tokens of the turn that made the last output waste', () => {
+    // 420k by the time it last said something; the turn's own total lands 200 ms later; a long quiet build follows.
+    const ev = [dispatched(T0), usage(T0 + MIN, 100_000, 100), said(T0 + 10 * MIN, 'Running the full build now.'),
+      usage(T0 + 10 * MIN + 200, 520_000, 2000)];
+    expect(readUnit(ev, 2, T0 + 13 * MIN + 30_000).verdict).toBe('progressing');
+  });
+
+  it('a second ask while one is starting joins it: one check run, one record', async () => {
+    const r = rig();
+    const [a, b] = await Promise.all([r.service.start(RUN, 2, 'human-1'), r.service.start(RUN, 2, 'human-2')]);
+    expect(a.id).toBe(b.id);
+    expect(r.launches).toHaveLength(1);
+  });
+
+  it('a check run that ends before its launch answers is still this record\'s', async () => {
+    let svc: InspectService | null = null;
+    const r = rig({ onLaunch: (id) => { svc!.onEvent({ type: 'sessionCompleted', session: id }); } });
+    svc = r.service;
+    r.setReply('{"verdict":"progressing","doing":"d","progress":"p","evidence":[],"action":"let_run","note":""}');
+    await r.service.start(RUN, 2, 'human-1');
+    await new Promise((res) => setTimeout(res, 30));
+    expect(r.service.list(RUN)[0]).toMatchObject({ state: 'done', source: 'seat', verdict: 'progressing', action: 'let_run' });
+  });
+
+  it('a read while the answer is being read is not taken for a restart', async () => {
+    let release: (v: string) => void = () => undefined;
+    const r = rig({ reply: () => new Promise<string>((res) => { release = res; }) });
+    const rec = await r.service.start(RUN, 2, 'human-1');
+    r.service.onEvent({ type: 'sessionCompleted', session: rec.checkRunId });
+    await new Promise((res) => setTimeout(res, 5));
+    expect(r.service.settle(RUN)[0]!.state).toBe('checking');
+    expect((await r.service.start(RUN, 2, 'human-1')).id).toBe(rec.id);
+    expect(r.launches).toHaveLength(1);
+    release('{"verdict":"stuck","action":"stop","evidence":["x"]}');
+    await new Promise((res) => setTimeout(res, 20));
+    expect(r.service.list(RUN)[0]).toMatchObject({ state: 'done', source: 'seat', verdict: 'stuck', action: 'stop' });
+  });
+
+  it('at boot, a check a restart interrupted is cancelled and answered with crew\'s reading', async () => {
+    const r = rig();
+    const rec = await r.service.start(RUN, 2, 'human-1');
+    // A new daemon over the same directory.
+    const cancels: string[] = [];
+    const fresh = new InspectService({
+      adapter: { sessionsDetail: async () => [], runEvents: async () => [], seatsForWorkflow: async () => [], launchRun: async () => 'x', cancelRun: async (id: string) => { cancels.push(id); } },
+      replyOf: async () => null, dir: join(r.dir, 'inspections'), broadcast: () => undefined, log: () => undefined, newId: () => 'n',
+    });
+    await fresh.recover();
+    expect(cancels).toEqual([rec.checkRunId]);
+    expect(fresh.list(RUN)[0]).toMatchObject({ state: 'done', source: 'crew' });
+    expect(fresh.list(RUN)[0]!.why).toMatch(/restarted during the check, so crew stopped it/);
+  });
+
+  it('a malformed action or a steer with no note is not an answer; prose with a stray brace hides nothing', () => {
+    expect(parseInspectReply('{"verdict":"stuck","action":"stpo"}')).toBeNull();
+    expect(parseInspectReply('{"verdict":"looping","action":"steer","note":""}')).toBeNull();
+    expect(parseInspectReply('{"verdict":"stuck"}')).toBeNull();
+    const reply = 'It is stuck on `if (amount < 0) {` in charge.ts.\n{"verdict":"looping","doing":"d","evidence":[],"action":"steer","note":"Stop editing charge.ts; read the test."}';
+    expect(parseInspectReply(reply)).toMatchObject({ verdict: 'looping', action: 'steer', note: 'Stop editing charge.ts; read the test.' });
+  });
+});
+

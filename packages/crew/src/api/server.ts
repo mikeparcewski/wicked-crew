@@ -1435,6 +1435,8 @@ export async function createServer(
       app.log.warn(`[inspect] could not register the '${INSPECT_WORKFLOW}' workflow — checks answer with crew's own reading: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+  // A check a restart interrupted is stopped and answered now, so it never runs on unwatched past its bound.
+  void unitInspect.recover();
   registerInspectRoutes(app, { service: unitInspect, audit });
   // DES-DEFAULT-EVALS-001 §7: the default evals as a workflow (`workflows/run-evals.json`). Every launch is prepared
   // by the daemon, which runs the evals in-process (`runEvalsPrepare`, bound once the routes are registered below);

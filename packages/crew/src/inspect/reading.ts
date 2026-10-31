@@ -38,6 +38,9 @@ export const LOOP_FAILING_RERUN = 3;
 export const LOOP_SAME_FILE_EDITS = 6;
 /** Tokens spent since the last new words or edit that read as waste... */
 export const WASTE_TOKENS = 400_000;
+/** A usage total sent this soon after an output still belongs to the turn that made it (the engine sends at most one
+ *  per 3 s, after the message that carried the output). */
+export const USAGE_SETTLE_MS = 5_000;
 /** ...when that last new output is at least this old. */
 export const WASTE_MIN_MS = 3 * 60_000;
 
@@ -140,6 +143,7 @@ export function readUnit(events: readonly Frame[] | null | undefined, ord: numbe
   const byId = new Map<string, number>();
   const edits = new Map<string, number>();
   const editTimes: number[] = [];
+  const gitEdits: Array<{ path: string | null; at: number | null }> = [];
   let deltas = 0;
   let chars = 0;
   let saidAt: number | null = null;
@@ -167,6 +171,8 @@ export function readUnit(events: readonly Frame[] | null | undefined, ord: numbe
         const ok = typeof e['ok'] === 'boolean' ? e['ok'] : null;
         if (e['state'] === 'finished' && prev !== undefined) {
           calls[prev] = { ...calls[prev]!, open: false, ok, durationMs: num(e['durationMs']) };
+          // An edit's change lands when it finishes.
+          if ((calls[prev]!.kind === 'edit' || calls[prev]!.kind === 'write') && at !== null) editTimes.push(at);
           continue;
         }
         const call: ReadingCall = {
@@ -180,7 +186,9 @@ export function readUnit(events: readonly Frame[] | null | undefined, ord: numbe
       }
       case 'powerActivity':
         sign(at);
-        if (e['kind'] === 'edit') edited(str(e['path']), at);
+        // Power mode reads the same edits back off git: counted only where the seat's stream says nothing of its
+        // edits (xreview on #1233: an edit seen by both was counted twice).
+        if (e['kind'] === 'edit') gitEdits.push({ path: str(e['path']), at });
         break;
       case 'unitOutputDelta': {
         const text = str(e['text']);
@@ -219,6 +227,7 @@ export function readUnit(events: readonly Frame[] | null | undefined, ord: numbe
     }
   }
 
+  if (!calls.some((c) => c.kind === 'edit' || c.kind === 'write')) for (const g of gitEdits) edited(g.path, g.at);
   const byKind: Record<string, number> = {};
   for (const c of calls) byKind[c.kind] = (byKind[c.kind] ?? 0) + 1;
   const open = calls.filter((c) => c.open).map((c) => ({ tool: c.tool, target: c.target, forMs: c.at !== null ? Math.max(0, now - c.at) : 0 }));
@@ -253,7 +262,8 @@ export function readUnit(events: readonly Frame[] | null | undefined, ord: numbe
   if (verdict === 'progressing') {
     const counts = new Map<string, { call: ReadingCall; n: number; failed: number }>();
     for (const c of calls) {
-      if (c.kind === 'skill' || c.kind === 'task') continue;
+      // Edits are counted per file below ({@link LOOP_SAME_FILE_EDITS}): several edits to one file are normal work.
+      if (c.kind === 'skill' || c.kind === 'task' || c.kind === 'edit' || c.kind === 'write') continue;
       const k = callKey(c);
       const cur = counts.get(k) ?? { call: c, n: 0, failed: 0 };
       cur.n += 1;
@@ -264,7 +274,7 @@ export function readUnit(events: readonly Frame[] | null | undefined, ord: numbe
     for (const { call, n, failed } of counts.values()) {
       const what = call.target !== null ? `\`${oneLine(call.target, 80)}\`` : call.tool;
       if ((call.kind === 'run' || call.kind === 'test') && failed >= LOOP_FAILING_RERUN) loops.push(`Ran ${what} ${n} times, ${failed} failed`);
-      else if (n >= LOOP_SAME_CALL) loops.push(`${call.kind === 'read' ? 'Read' : call.kind === 'search' ? 'Searched' : call.kind === 'edit' || call.kind === 'write' ? 'Edited' : 'Ran'} ${what} ${n} times`);
+      else if (n >= LOOP_SAME_CALL) loops.push(`${call.kind === 'read' ? 'Read' : call.kind === 'search' ? 'Searched' : 'Ran'} ${what} ${n} times`);
     }
     for (const { path, count } of editList) {
       if (count >= LOOP_SAME_FILE_EDITS && !loops.some((l) => l.includes(path))) loops.push(`Edited ${path} ${count} times`);
@@ -281,10 +291,12 @@ export function readUnit(events: readonly Frame[] | null | undefined, ord: numbe
   if (verdict === 'progressing' && usageAt.length > 0) {
     const lastOutput = Math.max(saidAt ?? -Infinity, editTimes.length > 0 ? Math.max(...editTimes) : -Infinity, startedAt ?? -Infinity);
     const latest = usageAt[usageAt.length - 1]!;
-    // The total when it last said or changed something (the newest snapshot at or before it; none = 0).
-    const before = [...usageAt].reverse().find((u) => u.at <= lastOutput)?.total ?? 0;
+    // The total when it last said or changed something: the newest snapshot up to the settle window after it (the
+    // total that turn's own message sent, xreview on #1233); none = 0. Only tokens spent after that are waste.
+    const settled = lastOutput + USAGE_SETTLE_MS;
+    const before = [...usageAt].reverse().find((u) => u.at <= settled)?.total ?? 0;
     const spent = latest.total - before;
-    if (Number.isFinite(lastOutput) && spent >= WASTE_TOKENS && now - lastOutput >= WASTE_MIN_MS) {
+    if (Number.isFinite(lastOutput) && latest.at > settled && spent >= WASTE_TOKENS && now - lastOutput >= WASTE_MIN_MS) {
       verdict = 'wasteful';
       evidence.push(`${tokens(spent)} tokens in the ${mins(now - lastOutput)} since it last said or changed anything`);
       action = 'steer';
