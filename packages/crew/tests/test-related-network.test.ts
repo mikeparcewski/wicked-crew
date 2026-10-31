@@ -69,8 +69,9 @@ function recorder(opts: { coreDir: string | null; offline: boolean }, results: R
 }
 
 const NETWORK_LINE =
-  'test-related: left out 5 network test(s) (vitest tag `network`, in tests/mcp-installed-server.test.ts): ' +
-  'the container checks floor has no network (WICKED_CHECKS_FLOOR=container); CI runs them.';
+  'test-related: left out the tests tagged `network` (5 in the repository, in tests/mcp-installed-server.test.ts; ' +
+  'only those this run selected were affected): the container checks floor has no network ' +
+  '(WICKED_CHECKS_FLOOR=container); CI runs them.';
 
 describe('the container floor leaves the network tests out (DES-FLOOR-CONTAINER)', () => {
   it('in the container floor: the filter rides the first run and the retry, and ONE line says what and why', async () => {
@@ -85,7 +86,7 @@ describe('the container floor leaves the network tests out (DES-FLOOR-CONTAINER)
     expect(rec.calls[1]).toEqual([
       'npx', 'vitest', 'run', '--no-file-parallelism', '--tags-filter=!network', 'tests/deliver-e2e.test.ts',
     ]);
-    expect(rec.lines.filter((l) => l.includes('network test'))).toEqual([NETWORK_LINE]);
+    expect(rec.lines.filter((l) => l.includes('tagged `network`'))).toEqual([NETWORK_LINE]);
     expect(rec.lines[rec.lines.length - 1]).toMatch(/^WICKED-HOST label=post /);
   });
 
@@ -96,14 +97,14 @@ describe('the container floor leaves the network tests out (DES-FLOOR-CONTAINER)
       ['npx', 'vitest', 'related', '--run', '--passWithNoTests', 'src/x.ts', '--tags-filter=!cross-repo', '--tags-filter=!network'],
     ]);
     expect(rec.lines.some((l) => l.includes('cross-repo test'))).toBe(true);
-    expect(rec.lines.filter((l) => l.includes('network test'))).toEqual([NETWORK_LINE]);
+    expect(rec.lines.filter((l) => l.includes('tagged `network`'))).toEqual([NETWORK_LINE]);
   });
 
   it('anywhere else: no network filter and nothing said', async () => {
     const rec = recorder({ coreDir: '/somewhere/core', offline: false }, [{ status: 0, output: '', spawnError: null }]);
     expect(await mod.runTargeted(['packages/crew/src/x.ts'], rec.io)).toBe(0);
     expect(rec.calls).toEqual([['npx', 'vitest', 'related', '--run', '--passWithNoTests', 'src/x.ts']]);
-    expect(rec.lines.join('\n')).not.toContain('network test');
+    expect(rec.lines.join('\n')).not.toContain('tagged `network`');
   });
 
   it('a caller that does not say runs with the network (the CLI passes the probe)', async () => {
@@ -121,13 +122,17 @@ describe('the container floor leaves the network tests out (DES-FLOOR-CONTAINER)
     expect(mod.NETWORK_FILTER).toEqual(['--tags-filter=!network']);
   });
 
-  it('every test of the registry-installing file carries the tag, and the tag is declared', () => {
+  it('every test of the registry-installing file carries the tag in its own options, and the tag is declared', () => {
     const src = readFileSync(resolve(CREW_DIR, 'tests/mcp-installed-server.test.ts'), 'utf8');
-    const its = (src.match(/\n {2}it\(/g) ?? []).length;
+    // Each test declaration, from `it(` to the start of its body: the options object sits between
+    // the title and the body, so a tag in a comment or another call never counts for it.
+    const heads = [...src.matchAll(/\bit(?:\.\w+)?\(([\s\S]*?)(?:async\s*)?\(\)\s*=>\s*\{/g)].map((m) => m[1]!);
+    expect(heads.length).toBeGreaterThan(0);
+    for (const head of heads) {
+      expect(head.replace(/\/\/[^\n]*/g, ''), head).toMatch(/\{\s*tags:\s*\[\s*'network'\s*\]\s*\}\s*,\s*$/);
+    }
     const tagged = mod.networkTests(CREW_DIR);
-    expect(its).toBeGreaterThan(0);
     expect(tagged.files).toContain('tests/mcp-installed-server.test.ts');
-    expect(tagged.count).toBeGreaterThanOrEqual(its);
     const tags = (config as { test?: { tags?: { name: string }[] } }).test?.tags ?? [];
     expect(tags.map((t) => t.name)).toContain(mod.NETWORK_TAG);
   });

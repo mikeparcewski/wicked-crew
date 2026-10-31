@@ -192,8 +192,9 @@ export function networkTests(crewDir = resolve(ROOT, CREW)) {
 /** The one line the floor's evidence carries when the network tests are left out. */
 export function networkLine({ count, files }) {
   return (
-    `test-related: left out ${count} network test(s) (vitest tag \`${NETWORK_TAG}\`, in ${files.join(', ')}): ` +
-    'the container checks floor has no network (WICKED_CHECKS_FLOOR=container); CI runs them.'
+    `test-related: left out the tests tagged \`${NETWORK_TAG}\` (${count} in the repository, in ${files.join(', ')}; ` +
+    'only those this run selected were affected): the container checks floor has no network ' +
+    '(WICKED_CHECKS_FLOOR=container); CI runs them.'
   );
 }
 
