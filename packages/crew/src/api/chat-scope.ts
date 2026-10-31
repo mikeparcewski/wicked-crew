@@ -47,7 +47,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import type { CoreAdapter } from '../core/adapter.js';
 import { execCapped } from '../core/exec.js';
-import { codeGraphDb } from '../core/repoPaths.js';
+import { codeGraphDb, REPO_FOLDER_MISSING, repoFolderMissing } from '../core/repoPaths.js';
 import type { ChatScope, ChatScopeRepo, ChatScopeRequestKind, RepoEntry } from '../core/types.js';
 import { freshnessClause, type CheckoutFreshness, type FreshenCheckout } from './chat-freshness.js';
 import { estateExe, parseEstateTotals, resolveProjectGraphBinding, type ProjectGraphBindingDecision } from '../projects/graph.js';
@@ -87,7 +87,7 @@ export interface EngineChatScope {
 
 export type ChatScopeResolution =
   | { ok: true; scope: ChatScope; engine: EngineChatScope }
-  | { ok: false; status: 400 | 404 | 409; error: string; missing?: string[] };
+  | { ok: false; status: 400 | 404 | 409; error: string; missing?: string[]; code?: typeof REPO_FOLDER_MISSING };
 
 /** The reads the resolver needs — injectable so the resolver is testable without an engine. */
 export interface ChatScopeDeps {
@@ -416,6 +416,12 @@ async function resolveScopeOnly(
         error: `Repo ${missing.map((m) => `'${m}'`).join(', ')} not found`,
         missing,
       };
+    }
+    // A named repo whose folder is gone: its seats would be pointed at a read root that is not
+    // there, so the chat is refused in the finding's words before anything is opened.
+    const gone = found.map(repoFolderMissing).filter((f) => f !== null);
+    if (gone.length > 0) {
+      return { ok: false, status: 409, code: REPO_FOLDER_MISSING, error: gone.map((f) => f.message).join(' ') };
     }
     // Every registered repo, with THIS chat's repos in scope: the base must not be part of any.
     const overlap = refuseOverlap(repos, base, new Set(found.map((r) => r.id)), log);

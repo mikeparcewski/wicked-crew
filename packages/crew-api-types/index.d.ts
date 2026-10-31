@@ -9271,7 +9271,10 @@ export type SystemInfraKey =
   | 'stores'
   | 'seat_floor'
   | 'disk'
-  | 'load';
+  | 'load'
+  /** (0.152.0) The registered repositories' folders: `down` while any is missing (moved or deleted),
+   *  naming each with its path; `details.missing` lists `{ id, name, path }`. ABSENT before. */
+  | 'repos';
 
 export interface SystemInfraRow {
   key: SystemInfraKey;

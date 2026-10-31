@@ -49,7 +49,7 @@ export const PARKED_AFTER_MS = DAY_MS;
 /** The live components whose `down` (or silence) holds every live run. */
 const WORK_PATH: ReadonlySet<SystemInfraKey> = new Set(['daemon', 'gateway', 'broker']);
 /** What `down` means in words for the rows where "down" reads oddly. */
-const DOWN_WORD: Partial<Record<SystemInfraKey, string>> = { load: 'saturated', disk: 'nearly full', state_home: 'refusing launches', skills: 'refusing launches' };
+const DOWN_WORD: Partial<Record<SystemInfraKey, string>> = { load: 'saturated', disk: 'nearly full', state_home: 'refusing launches', skills: 'refusing launches', repos: 'folder missing' };
 /** A held run's denial names the component it died on. */
 const CITES: Partial<Record<SystemInfraKey, RegExp>> = {
   gateway: /\b(inference gateway|agw[:\s]|gateway)\b/i,

@@ -15,6 +15,7 @@
  * field. One producer, one consumer, nothing to keep in step.
  */
 
+import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import type { RepoEntry, RepoFinding } from './types.js';
@@ -96,4 +97,68 @@ export function requirementsGraph(repo: RepoEntry): string {
 
 export function requirementsOverrides(repo: RepoEntry): string {
   return join(repo.root_path, '.wicked-estate', 'requirements', 'requirements_overrides.json');
+}
+
+// ── A registered folder that is gone ─────────────────────────────────────────
+
+/**
+ * The finding crew adds to a repo whose registered folder is gone (moved, deleted, an unmounted
+ * volume). On the rig, tiny-math was registered under a lane folder named `target`; a cleanup that
+ * removed every `target/` as build output deleted it, and every spawn with that cwd failed. Node
+ * reports a missing spawn `cwd` as `spawn <binary> ENOENT`, so the repo page said "spawn
+ * wicked-estate ENOENT" (and git history "git executable not found") about a binary that was
+ * installed. Crew's own finding, beside the engine's: derived on every read, never stored.
+ */
+export const REPO_FOLDER_MISSING = 'repo_folder_missing';
+
+/** What a person reads about a missing folder, and what fixes it. There is no way to unregister a
+ *  repo (core has none, crew#753), so re-linking it is the remedy: registering the same name again
+ *  at the folder's new place replaces the record (core upserts by the name's slug). */
+export function repoFolderMissingMessage(rootPath: string): string {
+  return (
+    `This repository's folder is missing: ${rootPath}. Re-link it: register it again under the same ` +
+    'name at its folder\'s new place, or put the folder back.'
+  );
+}
+
+/** The `repo_folder_missing` finding a repo record carries, or `null` when its folder is there. */
+export function repoFolderMissing(repo: Pick<RepoEntry, 'findings'>): RepoFinding | null {
+  return repo.findings?.find((f) => f.code === REPO_FOLDER_MISSING) ?? null;
+}
+
+/** The body every refusal over a missing folder answers (409: the registration, not the request,
+ *  is wrong), so a route, a launch and a chat say it in the same words. */
+export function repoFolderMissingBody(finding: RepoFinding): { code: typeof REPO_FOLDER_MISSING; error: string; path: string | null } {
+  return { code: REPO_FOLDER_MISSING, error: finding.message, path: finding.path };
+}
+
+/** Whether `path` is a directory. A path that is ABSENT (or not a directory) answers `false`; any
+ *  other failure (EACCES, an unreadable mount) answers `true`, because the folder may well be
+ *  there and the spawn's own error then says what is wrong. */
+export async function isDirectoryPresent(path: string): Promise<boolean> {
+  try {
+    return (await stat(path)).isDirectory();
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    return !(code === 'ENOENT' || code === 'ENOTDIR');
+  }
+}
+
+/** Every repo, each with a `repo_folder_missing` finding when its folder is gone (and never two). */
+export async function withFolderFindings(
+  repos: RepoEntry[],
+  present: (path: string) => Promise<boolean> = isDirectoryPresent,
+): Promise<RepoEntry[]> {
+  return Promise.all(
+    repos.map(async (repo) => {
+      const others = (repo.findings ?? []).filter((f) => f.code !== REPO_FOLDER_MISSING);
+      if (repo.root_path === '' || (await present(repo.root_path))) {
+        return others.length === (repo.findings ?? []).length ? repo : { ...repo, findings: others };
+      }
+      return {
+        ...repo,
+        findings: [...others, { code: REPO_FOLDER_MISSING, message: repoFolderMissingMessage(repo.root_path), path: repo.root_path }],
+      };
+    }),
+  );
 }

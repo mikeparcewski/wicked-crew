@@ -27,6 +27,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { childEnvWithBootEstateDb } from './governance-store.js';
+import { isDirectoryPresent } from './repoPaths.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -59,6 +60,23 @@ export class ExecOutputTooLarge extends Error {
         `a larger repo can hit it where a smaller one does not.`,
     );
     this.name = 'ExecOutputTooLarge';
+  }
+}
+
+/** The folder a child was to run in is gone, so it never started.
+ *
+ *  Node reports a missing spawn `cwd` exactly like a missing binary (`spawn <file> ENOENT`, code
+ *  `ENOENT`), so a moved or deleted repo folder read as "wicked-estate is not installed" or "git
+ *  executable not found" (rig, tiny-math). This names the folder; its `code` is NOT `ENOENT`, so no
+ *  caller's missing-binary branch claims it. */
+export class ExecCwdMissing extends Error {
+  readonly code = 'ERR_CWD_MISSING';
+  constructor(
+    readonly file: string,
+    readonly cwd: string,
+  ) {
+    super(`the folder ${file} was to run in is missing: ${cwd} (nothing was started)`);
+    this.name = 'ExecCwdMissing';
   }
 }
 
@@ -123,6 +141,11 @@ export async function execCapped(
     });
   } catch (err) {
     if (isMaxBufferError(err)) throw new ExecOutputTooLarge(file, maxBuffer);
+    // Only on a failed spawn, so a healthy call pays nothing: ENOENT with a cwd that is not there
+    // is the folder, not the binary.
+    if ((err as { code?: unknown }).code === 'ENOENT' && typeof opts.cwd === 'string' && !(await isDirectoryPresent(opts.cwd))) {
+      throw new ExecCwdMissing(file, opts.cwd);
+    }
     throw err;
   }
 }
