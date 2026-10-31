@@ -1,6 +1,7 @@
 import Fastify from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
 import fastifyStatic from '@fastify/static';
+import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,6 +25,9 @@ import { RetryIndex } from './retry-index.js';
 import { GroupIndex } from './group-index.js';
 import { RunTimingIndex, recordRunLaunched } from './run-timing-index.js';
 import { OnboardingCaptureChain } from './onboarding-capture.js';
+import { DISTILL_WORKFLOW, RunLearningsService, defaultLearningsDir, loadDistillWorkflow, runLearningsMode } from '../learnings/service.js';
+import { memoryContents, proposalRows, submitLearning } from '../learnings/estate.js';
+import { recallLearnings } from '../learnings/recall.js';
 import { registerLearnRoutes } from '../learn/routes.js';
 import { registerInsightsRoutes } from '../insights/routes.js';
 import { ReviewService } from '../insights/review-service.js';
@@ -1338,6 +1342,61 @@ export async function createServer(
       app.log.warn(`[review] could not register the '${REVIEW_WORKFLOW}' workflow — the run review is off: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+  // Run learnings (src/learnings): every run proposes what it learned to the approve queue — template
+  // learnings at its checkpoints, the rest distilled at its end by one cheap seat that did not build it.
+  const LEARNINGS_ACTOR: Actor = { id: 'run-learnings', kind: 'system', trust: 'operator' };
+  const runLearnings = new RunLearningsService({
+    adapter: {
+      sessionsDetail: () => adapter.sessionsDetail(),
+      runEvents: (id) => adapter.runEvents(id),
+      seatsForWorkflow: (id) => adapter.seatsForWorkflow(id),
+      launchRun: (input) => adapter.launchRun(input),
+    },
+    submit: submitLearning,
+    listProposals: async () => proposalRows(await callEstateTool('proposal.list', {})),
+    listMemoryContents: async () => memoryContents(await callEstateTool('memory.list', {})),
+    launched: (distillRunId, sourceRunId, projectId) => {
+      try {
+        recordRunLaunched(audit, runTimingIndex, LEARNINGS_ACTOR, distillRunId, {
+          workflow: DISTILL_WORKFLOW,
+          chainedFrom: sourceRunId,
+          deliver: 'none',
+          ...(projectId !== null ? { projectId } : {}),
+        });
+        if (projectId !== null) {
+          membershipIndex.set(distillRunId, projectId);
+          projectBus?.emit(
+            MEMBERSHIP_ATTACHED,
+            { project_id: projectId, member: { kind: 'crew.run', ref: distillRunId }, actor: 'run-learnings' },
+            membershipAttachedKey(projectId, 'crew.run', distillRunId, Date.now()),
+          );
+        }
+        broadcast({
+          type: 'runChained',
+          session: distillRunId,
+          from: sourceRunId,
+          workflow: DISTILL_WORKFLOW,
+          ...(projectId !== null ? { project_id: projectId } : {}),
+        } as unknown as CoreEvent);
+      } catch (err) {
+        app.log.warn(`[learnings] ${distillRunId} launched, but its bookkeeping failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    },
+    learningsDir: defaultLearningsDir(),
+    mode: runLearningsMode(),
+    log: (m) => app.log.info(m),
+    newRunId: () => randomUUID(),
+  });
+  if (typeof (adapter as Partial<CoreAdapter>).registerWorkflow === 'function') {
+    try {
+      await adapter.registerWorkflow(loadDistillWorkflow());
+    } catch (err) {
+      app.log.warn(`[learnings] could not register the '${DISTILL_WORKFLOW}' workflow — run learnings are filed undistilled: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  // A run whose end was interrupted by a restart (its handoff written, its distil run finished while the daemon was
+  // down, a submit that failed) is finished now, off the boot path.
+  void runLearnings.recover();
   // DES-DEFAULT-EVALS-001 §7: the default evals as a workflow (`workflows/run-evals.json`). Every launch is prepared
   // by the daemon, which runs the evals in-process (`runEvalsPrepare`, bound once the routes are registered below);
   // the Tool step only reads the report copy back.
@@ -2119,6 +2178,7 @@ export async function createServer(
     // off the hot path, logged. Only runs THIS daemon launched are known here, by design.
     // crew#552: an onboarding completion queues its capture; a chained capture's end frees the slot.
     onboardingCapture.onEvent(event);
+    runLearnings.onEvent(event);
     if (event.type === 'sessionCompleted' && session !== undefined) {
       const onboardedRepo = adapter.onboardedRepoOf(session);
       if (onboardedRepo !== undefined) {
@@ -2389,6 +2449,10 @@ export async function createServer(
         await reviewService.prepareLaunch(input, { trigger: 'manual', scheduleId: null, projectIds: reviewProjects() });
       },
       reviewLaunchRefused: (runId: string, reason: string) => reviewService.launchRefused(runId, reason),
+      runLearnings,
+      ...(runLearningsMode() !== 'off'
+        ? { recallLearnings: (problem: string, repo: string | null, project: string | null) => recallLearnings(callEstateTool, problem, repo, project) }
+        : {}),
       // Routes that say something to the thread (a refused chat seat, F-2R2-007) emit through the
       // SAME /ws fan-out the engine's frames take.
       broadcast: (frame) => broadcast(frame),

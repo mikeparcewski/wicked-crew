@@ -67,6 +67,7 @@ import type {
 } from '../core/types.js';
 import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
 import { callEstateTool, EstateMcpError, ESTATE_INSTALL_HINT, memoryStoreInfo } from '../core/estate-mcp-client.js';
+import { NO_LEARNINGS_WORKFLOWS, type RunLearningsService } from '../learnings/service.js';
 import { SeatHealthTracker } from './seat-health.js';
 import { applyWorkerConfigRoot, signedInHeuristic } from './seat-signin.js';
 import { applyCouncilSettings, isCouncilSize, isCouncilStaggerMs } from '../core/council-settings.js';
@@ -134,7 +135,7 @@ import {
 } from './governance-steering.js';
 import { isSteeringAuthorRun, landSteeringProposal } from './steering-landing.js';
 import { inventoryComplete, parseInventoryClaims, type InventoryClaim } from '../core/inventory-claim.js';
-import type { RejudgeOffer, RunInventoryResponse, SkipQeOffer } from 'wicked-crew-api-types';
+import type { RejudgeOffer, RunInventoryResponse, RunLearningsResponse, SkipQeOffer } from 'wicked-crew-api-types';
 import { ApproveEditSchema, approveEdited, captureLaunchRoots, editInFlight, FileProposalSchema, registerCaptureRoutes } from './capture.js';
 import { registerTestingRoutes } from './testing.js';
 import { registerDefaultEvalRoutes, runAndRecord, type DefaultEvalDeps } from '../evals/routes.js';
@@ -1086,6 +1087,10 @@ export interface RuntimeDeps {
   reviewLaunch?: (input: LaunchRunInput) => Promise<void>;
   /** The engine refused a prepared review launch: the review is recorded as never run. */
   reviewLaunchRefused?: (runId: string, reason: string) => void;
+  /** Run learnings (src/learnings): what each run proposed to the approve queue; absent = `GET /runs/:id/learnings` 501. */
+  runLearnings?: Pick<RunLearningsService, 'view'>;
+  /** Run learnings: append the approved learnings that apply to a workflow launch's problem; absent = none. */
+  recallLearnings?: (problem: string, repo: string | null, project: string | null) => Promise<{ problem: string; recalled: number }>;
   /** DC-S4a decision capture: the ledger (`<state home>/decisions`), absent = capture off. */
   decisionLedger?: DecisionLedger;
   /** `WICKED_DECISIONS` (off | ledger | on); defaults to `resolveDecisionsMode()`. */
@@ -2927,6 +2932,18 @@ export function registerRoutes(
       } catch (err) {
         req.log.warn(`linked-issue resolution failed; launching on the intent alone: ${message(err)}`);
       }
+      // Run learnings: the approved learnings that apply to this repo/project ride in the brief, in a
+      // marked block the deliver text takes back out (src/learnings/recall.ts). Workflow launches only,
+      // for the linked-issues reason above; best-effort: an unreadable store launches without it.
+      if (runtime.recallLearnings !== undefined && !NO_LEARNINGS_WORKFLOWS.has(b.workflow)) {
+        try {
+          const recalled = await runtime.recallLearnings(input.problem, b.repoRef ?? null, b.projectId ?? null);
+          input.problem = recalled.problem;
+          if (recalled.recalled > 0) req.log.info(`[learnings] ${input.sessionId}: ${recalled.recalled} approved learning(s) in the brief`);
+        } catch (err) {
+          req.log.warn(`[learnings] the memory store could not be read; launching without approved learnings: ${message(err)}`);
+        }
+      }
     }
     // DES-RUNS-REVIEW-001 §3: a hand launch of the run review (`/workflow-review-recent-work`) is prepared like a
     // scheduled one: its snapshot written, repo-less, one seat, its review directory as the only write root.
@@ -3296,6 +3313,24 @@ export function registerRoutes(
     await backfillEndedAt([run]);
     return { run: decorateRun(run) };
   });
+
+  // Run learnings: what a run proposed to the approve queue (its end card, "3 learnings proposed · Review").
+  // Proposals are attributed by provenance (`run_id`); a distil seat still reading the run says so.
+  app.get(
+    `${V}/runs/:id/learnings`,
+    { config: { manifest: { responseType: 'RunLearningsResponse', statusCodes: [200, 404, 501, 502] } } },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      if (runtime.runLearnings === undefined) return reply.code(501).send({ error: 'run learnings are not wired on this daemon' });
+      if (!(await adapter.sessions()).includes(id)) return reply.code(404).send({ error: 'Run not found' });
+      try {
+        const body: RunLearningsResponse = await runtime.runLearnings.view(id);
+        return body;
+      } catch (err) {
+        return estateUpstreamError(reply, err);
+      }
+    },
+  );
 
   // ── Inventory claims (crew#721) — whether each enumerating step's list is complete ──
   // A step that lists things a later step acts on ends its reply with a `wicked-inventory` block

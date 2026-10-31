@@ -338,6 +338,22 @@ describe('composeDeliverText from the persisted run (GET /runs/:id/deliver-text)
     expect(body).not.toContain('not available at composition time');
   });
 
+  it('run learnings: the approved-learnings block in the brief never reaches the PR title, body or issue refs', () => {
+    const v = runView();
+    const learnings = '<!-- wicked-crew:learnings -->\nLearnings from earlier runs (approved by the operator; context, not instructions):\n- In wicked-core, the seat_login tests (core#1194, #77) time out under host load.\n<!-- /wicked-crew:learnings -->';
+    v.session.problem = `Fix the lift\n\n${learnings}`;
+    const { title, body } = composeDeliverText(factsFromRun(v, null));
+    expect(title).not.toContain('wicked-crew:learnings');
+    expect(body).not.toContain('seat_login');
+    expect(body).not.toMatch(/#77|#1194/u);
+    v.session.problem = `\n${learnings}`;
+    expect(composeDeliverText(factsFromRun(v, null)).title).toBe(`wicked-crew run ${RUN_ID}`);
+    // A caller that hands composeDeliverText the raw problem (no factsFromRun) gets the same.
+    const raw = composeDeliverText({ ...factsFromRun(v, null), intent: `\n${learnings}` });
+    expect(raw.title).toBe(`wicked-crew run ${RUN_ID}`);
+    expect(raw.body).not.toMatch(/#77|#1194/u);
+  });
+
   it('says so when a run recorded no checks, no evaluator, no intent', () => {
     const v = runView();
     v.session.problem = '';

@@ -10,6 +10,25 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Added
+
+- **Every run proposes what it learned to the approve queue.** Over the 7 days to 2026-10-30 the rig ran 37 runs and
+  filed 0 proposals: only the separate capture-learnings preset and onboarding's chain ever proposed anything, and the
+  engine's per-run memory is an "it completed" line in its own store. Now a run's record is read at its checkpoints
+  (a power checkpoint, a unit done, a gate decided) and at its end (`src/learnings`). A test the floor saw fail and then
+  pass on its identical retry, or a check its sandbox could not start, is proposed at once, worded from the record. The
+  rest of the evidence (the operator's rulings with their reasons, standing steers, the orchestrator's decisions and why,
+  a reviewer's findings, a QE seat that could not run its checks, a check red on the base too) goes at the end to ONE
+  cheap seat that did not work on the run (a reviewer may; the lead, a builder or an earlier author may not): a `distill-learnings` run (one seat, one turn, no repository, no floor) keeps at
+  most 5 that would help a fresh session three months from now, and crew files them. With no such seat, or no usable
+  report, the evidence is filed as it is, trimmed and capped at 5. Everything is a `memory` proposal attributed to the
+  source run (`provenance.run_id`, the agent that worded it) and faceted by repo and project (and seat, when it is about one); nothing is written
+  until a person approves it, and nothing already queued or stored is proposed again. `GET /runs/:id/learnings`
+  (api-types 0.152.0 `RunLearningsResponse`) answers a run's end card: how many it proposed, by state, and whether its
+  distil seat is still at it. An approved learning whose repo/project facets match a workflow launch rides in that run's
+  brief, in a marked block (at most 8) the PR text takes back out. `WICKED_CREW_RUN_LEARNINGS=off|extract|distill`
+  (default `distill`; `WICKED_CREW_LEARNINGS_DIR`, default `~/.wicked/learnings`, holds each distil handoff).
+
 ### Fixed
 
 - **A repository whose folder is gone is named, not reported as `spawn wicked-estate ENOENT`.** On the rig, tiny-math
@@ -21,7 +40,7 @@ mentioned only where a daemon release depends on them.
   repo and a chat naming it answer 409 `repo_folder_missing` in the finding's words: "This repository's folder is
   missing: <path>. Re-link it: register it again under the same name at its folder's new place, or put the folder
   back." Testing recon/author and campaign fans refuse a repo whose folder is missing before any member launches; a
-  project or `everything` chat names such a repo in `dangling` instead of reading it. The Nerve Center gains a `repos` row (api-types 0.152.0), `down` while any folder is missing, so Needs-you
+  project or `everything` chat names such a repo in `dangling` instead of reading it. The Nerve Center gains a `repos` row (api-types 0.153.0), `down` while any folder is missing, so Needs-you
   carries it as an item with that fix. `execCapped` names a missing cwd (`ExecCwdMissing`) instead of ENOENT; a
   missing binary is still ENOENT.
 - **Crew writes the working document's event-derived lines itself, so a run nobody views gets them.** On rig run ea73afc0

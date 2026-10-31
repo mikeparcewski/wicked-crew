@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.152.0",
+  "apiTypesVersion": "0.153.0",
   "endpoints": [
     {
       "method": "GET",
@@ -1776,6 +1776,18 @@
       "statusCodes": [
         200,
         404
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/runs/:id/learnings",
+      "requestType": null,
+      "responseType": "RunLearningsResponse",
+      "statusCodes": [
+        200,
+        404,
+        501,
+        502
       ]
     },
     {

@@ -6662,6 +6662,33 @@ export interface RunInventoryUnit {
 }
 
 /**
+ * `GET /runs/:id/learnings` — what a run proposed to the approve queue (run learnings, crew src/learnings).
+ * Every learning is a `memory` proposal attributed to the run (`provenance.run_id`); nothing is used until a
+ * person approves it on the Memory page. `distilling` is true while the run's distil seat (one cheap seat
+ * that did not build the run) is still reading its evidence.
+ */
+export interface RunLearningsResponse {
+  runId: string;
+  proposed: number;
+  pending: number;
+  approved: number;
+  rejected: number;
+  distilling: boolean;
+  items: Array<{
+    /** The proposal id (approve or reject it through `/proposals/:id/*`). */
+    id: string;
+    state: string;
+    /** `gotcha` | `decision` | `pattern` | `steering`, as filed. */
+    capture: string | null;
+    content: string;
+    /** Who worded it: `crew` (from the run's record) or the distil seat. */
+    agent: string | null;
+    /** Unix seconds. */
+    createdAt: number | null;
+  }>;
+}
+
+/**
  * `GET /runs/:id/inventory` (404 for an unknown run). `complete` is true only when at least one
  * unit claimed an inventory, every claim is `full` and every finished unit's output was readable;
  * a unit whose output could not be read is listed in `unreadUnits`. `readable: false` when the
@@ -7405,7 +7432,7 @@ export interface ChatScope {
    *  0.35.0, F-2R2-008) names the UI action that would change a `bound: false` outcome, when one
    *  would: `projects.graph.refresh` = build the project graph from the project page. */
   graph: { bound: boolean; reason: string; repoLabel?: string; action?: ProjectGraphAction };
-  /** `crew.repo` members of the project whose registry record is gone — named, not readable. (0.152.0) Also
+  /** `crew.repo` members of the project whose registry record is gone — named, not readable. (0.153.0) Also
    *  any repo in scope (project or `everything`) whose folder is missing (`repo_folder_missing`). */
   dangling: string[];
 }
@@ -9273,7 +9300,7 @@ export type SystemInfraKey =
   | 'seat_floor'
   | 'disk'
   | 'load'
-  /** (0.152.0) The registered repositories' folders: `down` while any is missing (moved or deleted),
+  /** (0.153.0) The registered repositories' folders: `down` while any is missing (moved or deleted),
    *  naming each with its path; `details.missing` lists `{ id, name, path }`. ABSENT before. */
   | 'repos';
 
