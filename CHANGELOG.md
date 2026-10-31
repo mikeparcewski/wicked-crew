@@ -23,6 +23,20 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **Nerve Center: seat images** (api-types 0.162.0, wicked-core#1225). `GET /system` has an infra row `seat_images`
+  read from the engine's `seat-image status --json`. It reports whether each roster seat's image, the floor image and
+  the operator's base are present and held against a container runtime's image cleanup, plus the runtime VM's disk.
+  - **Degraded:** a roster image is missing (the next unit builds it first, which takes minutes), an image is not yet
+    held, the base is missing, or the VM disk reaches 75%. A kubelet's image GC deletes every image no container holds
+    from 85%, so the warning comes before that cleanup runs.
+  - **Down:** a missing image cannot be built (the operator's base is gone with no `WICKED_SEAT_BASE_DOCKERFILE`, or an
+    operator image is missing), or the disk reaches 92%.
+  - **Unknown:** the engine, the roster or the disk cannot be read.
+
+  Missing or unheld images are a "needs you" item with the new action `rebuild_seat_images` ("Rebuild seat images").
+  The action is not offered while a rebuild runs, while the disk is past the warning line (free the disk first), or when
+  a rebuild cannot help. It calls `POST /system/seat-images/rebuild`, which only a person can use. That route runs one
+  `wicked-core seat-image build <roster seats>` at a time, in the background, and the row shows its live output.
 - **The power orchestrator talks in your personality** (wicked-core#1216). A power launch from `POST /runs` now
   carries the voice block of the personality for its project (the project's override, else yours) to the engine as
   `LaunchOptions.voice`; the engine appends it to the orchestrator's brief only, behind a line saying it shapes tone

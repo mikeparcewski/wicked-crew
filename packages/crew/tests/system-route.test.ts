@@ -6,7 +6,7 @@
 import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import type { DiagnosticsResponse, HealthResponse, SystemSnapshot } from 'wicked-crew-api-types';
 
@@ -23,11 +23,12 @@ vi.mock('node:fs/promises', async (importOriginal) => ({
   statfs: async () => ({ bavail: 500_000, bsize: 1_000_000, blocks: 1_000_000 }),
 }));
 
-const ENV_KEYS = ['WICKED_SEAT_FLOOR', 'WICKED_CONTAINER_RUNTIME', 'WICKED_MEMORY_DB', 'WICKED_ESTATE_EXE', 'WICKED_ESTATE_MCP_EXE', 'LOG_LEVEL'] as const;
+const ENV_KEYS = ['WICKED_SEAT_FLOOR', 'WICKED_CONTAINER_RUNTIME', 'WICKED_CORE_EXE', 'WICKED_MEMORY_DB', 'WICKED_ESTATE_EXE', 'WICKED_ESTATE_MCP_EXE', 'LOG_LEVEL'] as const;
 const saved: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {};
 
 let scratch: string;
 let modeFile: string;
+let seatStatusFile: string;
 let app: FastifyInstance;
 
 const posix = process.platform !== 'win32';
@@ -75,6 +76,23 @@ beforeAll(async () => {
     'utf8',
   );
   chmodSync(runtime, 0o755);
+
+  // The fake engine: `seat-image status --json` prints the status file (the row's real exec path).
+  seatStatusFile = join(scratch, 'seat-status.json');
+  writeFileSync(seatStatusFile, JSON.stringify(seatStatus({})), 'utf8');
+  const core = join(scratch, 'fake-wicked-core');
+  writeFileSync(
+    core,
+    [
+      '#!/bin/sh',
+      `[ "$1 $2" = "seat-image status" ] && exec cat '${seatStatusFile}'`,
+      'exit 2',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  chmodSync(core, 0o755);
+  process.env['WICKED_CORE_EXE'] = core;
 
   process.env['WICKED_SEAT_FLOOR'] = 'container';
   process.env['WICKED_CONTAINER_RUNTIME'] = runtime;
@@ -135,6 +153,21 @@ afterAll(async () => {
   removeScratch(scratch);
 });
 
+/** A `wicked-core seat-image status --json` answer: every image present and held, the VM disk at
+ *  40 %, unless `over` says otherwise. */
+function seatStatus(over: { claudePresent?: boolean; usedPct?: number }): unknown {
+  const seat = (cli: string, present = true) => ({ cli, image: `wicked-seat-${cli}:1`, present, held: present, operatorImage: false });
+  return {
+    runtime: 'docker',
+    base: { image: 'wicked-seat-base:rust', present: true, held: true },
+    baseRecipe: false,
+    floor: { image: 'wicked-floor:1', present: true, held: true },
+    seats: ['claude', 'codex', 'pi', 'copilot', 'agy', 'opencode'].map((c) => seat(c, c === 'claude' ? (over.claudePresent ?? true) : true)),
+    disk: { totalBytes: 100 * 2 ** 30, availBytes: (100 - (over.usedPct ?? 40)) * 2 ** 30, usedPct: over.usedPct ?? 40 },
+    imageGcHighPct: 85,
+  };
+}
+
 /** The gateway row until it reads `want`: a loaded host can push one `sh` spawn past the probe's
  *  bound, which honestly reads `unknown` — never the wrong verdict. Up to five reads. */
 async function gatewayUntil(want: string): Promise<SystemSnapshot> {
@@ -168,7 +201,7 @@ describe('GET /api/v1/system', () => {
     expect(body.budgetMs).toBe(SYSTEM_BUDGET_MS);
     expect(Array.isArray(body.attention) && Array.isArray(body.clis) && Array.isArray(body.runs)).toBe(true);
     expect(body.infra.map((r) => r.key)).toEqual([
-      'daemon', 'gateway', 'broker', 'interactive', 'estate', 'bus', 'vault', 'skills', 'state_home', 'stores', 'seat_floor', 'repos', 'disk', 'load',
+      'daemon', 'gateway', 'broker', 'interactive', 'estate', 'bus', 'vault', 'skills', 'state_home', 'stores', 'seat_floor', 'seat_images', 'repos', 'disk', 'load',
     ]);
     const byId = Object.fromEntries(body.runs.map((r) => [r.runId, r]));
     expect(byId['run-gate']).toMatchObject({ liveness: 'waiting_on_you', gate: { interactionId: 'ir_gate1', ord: 1, kind: 'plan_approval' } });
@@ -242,4 +275,52 @@ describe('GET /api/v1/system', () => {
     expect(row('daemon')['version']).toBe(diag.components.crew);
     expect(typeof row('daemon')['ping']).toBe('string');
   });
+});
+
+describe('seat images on GET /system', () => {
+  afterEach(() => {
+    writeFileSync(seatStatusFile, JSON.stringify(seatStatus({})), 'utf8');
+  });
+
+  async function seatRow(): Promise<{ body: SystemSnapshot; row: SystemSnapshot['infra'][number] }> {
+    // A loaded host can push the fake engine's spawn past the probe's bound (an honest `unknown`).
+    let body: SystemSnapshot | undefined;
+    for (let i = 0; i < 5; i += 1) {
+      body = (await snapshot()).body;
+      const row = body.infra.find((r) => r.key === 'seat_images')!;
+      if (row.state !== 'unknown') return { body, row };
+    }
+    return { body: body!, row: body!.infra.find((r) => r.key === 'seat_images')! };
+  }
+
+  it.runIf(posix)('present and held, disk at 40 %: ok, nothing in attention', async () => {
+    writeFileSync(seatStatusFile, JSON.stringify(seatStatus({})), 'utf8');
+    const { body, row } = await seatRow();
+    expect(row.state).toBe('ok');
+    expect(row.reason).toMatch(/present and held; runtime VM disk 40% used/);
+    expect(body.attention.find((a) => a.id === 'infra:seat_images')).toBeUndefined();
+  }, 60_000);
+
+  it.runIf(posix)('a roster seat image missing: a fixable item with "Rebuild seat images", even with no run held', async () => {
+    writeFileSync(seatStatusFile, JSON.stringify(seatStatus({ claudePresent: false })), 'utf8');
+    const { body, row } = await seatRow();
+    expect(row.state).toBe('degraded');
+    expect(row.reason).toMatch(/seat images missing: claude/);
+    expect(body.attention.find((a) => a.id === 'infra:seat_images')).toMatchObject({
+      severity: 'yellow',
+      kind: 'slows',
+      action: { kind: 'rebuild_seat_images', label: 'Rebuild seat images' },
+    });
+  }, 60_000);
+
+  it.runIf(posix)('the VM disk past 75 %: a warning naming the 85 % image cleanup, before it runs', async () => {
+    writeFileSync(seatStatusFile, JSON.stringify(seatStatus({ usedPct: 80 })), 'utf8');
+    const { body, row } = await seatRow();
+    expect(row.state).toBe('degraded');
+    expect(row.reason).toMatch(/80% used.*from 85% a kubelet's image cleanup/);
+    expect(row.remedy).toMatch(/docker volume prune/);
+    // A rebuild does not free disk: the item re-checks.
+    expect(body.attention.find((a) => a.id === 'infra:seat_images')!.action).toMatchObject({ kind: 'recheck' });
+  }, 60_000);
+
 });

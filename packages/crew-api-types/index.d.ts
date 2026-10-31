@@ -9420,8 +9420,33 @@ export type SystemLevel = 'green' | 'yellow' | 'red';
 /** The existing action an attention item or row offers (the snapshot itself is read-only):
  *  `sign_in` — the CLI's sign-in (`POST /seats/:cli/login…` / the Agents page); `recheck` — read
  *  the snapshot again (every probe runs fresh per read); `open_gate` — the run's open gate;
- *  `open_run` — the run. */
-export type SystemActionKind = 'sign_in' | 'recheck' | 'open_gate' | 'open_run';
+ *  `open_run` — the run. (0.162.0) `rebuild_seat_images` — `POST /system/seat-images/rebuild`
+ *  (the `seat_images` row: missing or unheld seat images); a skin that does not know a kind shows
+ *  the item without its button. */
+export type SystemActionKind = 'sign_in' | 'recheck' | 'open_gate' | 'open_run' | 'rebuild_seat_images';
+
+/** (0.162.0) `POST /api/v1/system/seat-images/rebuild` (a person only: 403 `{ error }` for an agent
+ *  or plugin bearer) → 202 once the engine process started; 409 while a rebuild runs; 503 on the
+ *  host floor, when crew cannot reach or start the engine binary, when the engine's seat image
+ *  status does not answer, when the roster cannot be read, or when no roster seat has an engine seat
+ *  image (`started: false` with why). A running rebuild is 409 before anything else is asked. The rebuild runs `wicked-core seat-image build <roster seats>` in the background (minutes;
+ *  it also holds an operator's own image); its progress reads on the `seat_images` row
+ *  (`details.rebuild`). */
+export interface RebuildSeatImagesResponse {
+  started: boolean;
+  /** Why it did not start; absent when it did. */
+  reason?: string;
+  rebuild: {
+    running: boolean;
+    startedAt: string;
+    finishedAt: string | null;
+    rc: number | null;
+    tail: string[];
+    /** The last output line that reads as a failure; `null` when none. */
+    error: string | null;
+    clis: string[];
+  } | null;
+}
 
 /** Where an item points. A skin maps it to its own route; crew never spells a studio URL. */
 export type SystemTarget =
@@ -9717,7 +9742,18 @@ export type SystemInfraKey =
   | 'load'
   /** (0.155.0) The registered repositories' folders: `down` while any is missing (moved or deleted),
    *  naming each with its path; `details.missing` lists `{ id, name, path }`. ABSENT before. */
-  | 'repos';
+  | 'repos'
+  /** (0.162.0) The container seats' images (wicked-core `seat-image status`): `down` when a missing
+   *  seat image cannot be built (the operator's base is gone with no recipe, or an operator image is
+   *  missing) or the runtime VM disk is at 92 % or more; `degraded` when roster images are missing
+   *  (the next unit builds each first), not yet held against a runtime's image cleanup, the base is
+   *  missing, or the VM disk is at 75 % or more (a kubelet deletes unheld images from 85 %);
+   *  `unknown` when the engine, the roster or the disk could not be read. `details`: `images`
+   *  (`base`, `baseRecipe`, `holdSupported`, `floor`, `seats[]` with `present`/`held`/
+   *  `operatorImage`), `disk` (`totalBytes`, `availBytes`, `usedPct`), `missing`, `unheld`,
+   *  `imageGcHighPct`, `rebuild` (a running or the last rebuild, its output's last lines live).
+   *  `off` on the host floor. ABSENT before. */
+  | 'seat_images';
 
 export interface SystemInfraRow {
   key: SystemInfraKey;

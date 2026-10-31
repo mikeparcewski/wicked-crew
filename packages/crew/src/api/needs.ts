@@ -362,7 +362,7 @@ export function buildNeeds(input: NeedsInput): Needs {
   const infraItems: Array<{ row: SystemInfraRow; kind: 'prevents' | 'slows' }> = [];
   for (const row of input.infra) {
     if (row.state === 'down') infraItems.push({ row, kind: 'prevents' });
-    else if (row.state === 'degraded' && (row.key === 'load' || row.key === 'daemon' || (row.key === 'skills' && /launches wait/i.test(row.reason)))) infraItems.push({ row, kind: 'slows' });
+    else if (row.state === 'degraded' && (row.key === 'load' || row.key === 'daemon' || row.key === 'seat_images' || (row.key === 'skills' && /launches wait/i.test(row.reason)))) infraItems.push({ row, kind: 'slows' });
     else if (row.state === 'unknown' && WORK_PATH.has(row.key)) infraItems.push({ row, kind: 'slows' });
   }
   // A down component claims the held runs whose denial names it, and the stalled runs on its path
@@ -503,7 +503,9 @@ export function buildNeeds(input: NeedsInput): Needs {
     }
     // A slowdown that slows no work is not stuck work (a down component still prevents new runs).
     // The one exception: a run list that could not be read, so nothing proves there is no work.
-    if (kind === 'slows' && held.length === 0 && !(row.key === 'daemon' && row.state === 'degraded')) continue;
+    // The seat images warn ahead of the work: a missing image costs the next unit a build, and a
+    // filling runtime disk is said before a kubelet's image cleanup runs.
+    if (kind === 'slows' && held.length === 0 && !(row.key === 'daemon' && row.state === 'degraded') && row.key !== 'seat_images') continue;
     const down = row.state === 'down';
     finish(
       { members: held },
@@ -516,7 +518,7 @@ export function buildNeeds(input: NeedsInput): Needs {
         reason: `${row.reason}${held.length > 0 ? `; it ${kind === 'slows' ? 'slows the next step of' : 'holds'} ${plural(held.length, 'job')}${row.key === 'load' ? ' and every new one' : ''}` : ''}`,
         remedy: row.remedy ?? 'Re-check.',
         target: { kind: 'infra', key: row.key },
-        action: { kind: 'recheck', label: 'Re-check' },
+        action: seatImagesRebuildFixes(row) ? { kind: 'rebuild_seat_images', label: 'Rebuild seat images' } : { kind: 'recheck', label: 'Re-check' },
       },
     );
   }
@@ -648,3 +650,31 @@ export class RunCostCache {
     return this.inFlight;
   }
 }
+
+/** Whether the seat images row is one "Rebuild seat images" fixes: a roster image or the floor image
+ *  is missing, an image is not yet held, or the base is missing and has a recipe (a rebuild builds
+ *  and holds them). Not while a rebuild runs, not with the VM disk past the warning line (a rebuild
+ *  writes gigabytes; the disk comes first), and not when a missing image cannot be built (an operator
+ *  base with no recipe, an operator's own image). */
+export function seatImagesRebuildFixes(row: SystemInfraRow): boolean {
+  if (row.key !== 'seat_images' || (row.state !== 'down' && row.state !== 'degraded')) return false;
+  const d = row.details as {
+    missing?: unknown;
+    unheld?: unknown;
+    disk?: { usedPct?: unknown } | null;
+    rebuild?: { running?: unknown } | null;
+    images?: { floor?: { present?: unknown }; base?: { present?: unknown } | null; baseRecipe?: unknown; seats?: Array<{ present?: unknown; operatorImage?: unknown }> };
+  };
+  if (d.rebuild?.running === true) return false;
+  if (typeof d.disk?.usedPct === 'number' && d.disk.usedPct >= SEAT_DISK_WARN_PCT) return false;
+  const n = (v: unknown): number => (Array.isArray(v) ? v.length : 0);
+  const baseGone = d.images?.base?.present === false;
+  const baseRebuildable = baseGone && d.images?.baseRecipe === true;
+  // A base nothing can rebuild: a build of any engine seat image fails on it.
+  if (baseGone && !baseRebuildable) return false;
+  if ((d.images?.seats ?? []).some((x) => x.present === false && x.operatorImage === true)) return false;
+  return n(d.missing) > 0 || n(d.unheld) > 0 || d.images?.floor?.present === false || baseRebuildable;
+}
+
+/** VM disk used, % (seat-images.ts `SEAT_DISK_WARN_PCT`), from which a rebuild is not offered. */
+const SEAT_DISK_WARN_PCT = 75;
