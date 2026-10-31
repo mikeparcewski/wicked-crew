@@ -349,7 +349,10 @@ export class VoiceService {
   }
 
   private run(bin: string, audio: Buffer): Promise<string> {
-    const args = ['-m', this.modelPath(), '-f', '-', '-nt', '-np', '-l', 'en', '-t', String(TRANSCRIBE_THREADS)];
+    // `-f -` reads the WAV from stdin; with stdin as the input, whisper-cli writes its output "file" to stdout, and
+    // `-otxt` is the format it writes there (without it, a stdin run prints nothing: whisper.cpp 1.9.5). No file is
+    // written either way.
+    const args = ['-m', this.modelPath(), '-f', '-', '-otxt', '-nt', '-np', '-l', 'en', '-t', String(TRANSCRIBE_THREADS)];
     return new Promise<string>((resolve, reject) => {
       const child = this.spawnImpl(bin, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
       let out = '';

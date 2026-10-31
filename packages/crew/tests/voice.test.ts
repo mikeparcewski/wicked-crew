@@ -103,6 +103,8 @@ describe('voice: transcribe', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]!.bin).toBe(BIN);
     expect(calls[0]!.args).toEqual(expect.arrayContaining(['-m', join(dir, VOICE_MODEL.file), '-f', '-', '-nt', '-np', '-l', 'en']));
+    // A stdin run prints its text only as the `-otxt` output, which goes to stdout (whisper.cpp 1.9.5, seen live).
+    expect(calls[0]!.args).toContain('-otxt');
     expect(calls[0]!.stdin.equals(audio)).toBe(true);
     expect(readdirSync(dir)).toEqual(before);
   });
