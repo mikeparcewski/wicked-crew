@@ -90,6 +90,21 @@ describe('crew#1223 — the named-files retry needs a purely-deadline failure se
     expect(r.text).toContain(`${mod.RETRY_MARKER} none — 1 file(s) named but vitest's summary counts 2 failed;`);
   });
 
+  it('a test NAME quoting a deadline marker does not make its assertion failure a deadline', async () => {
+    const out = [
+      ...TIMEOUT_A,
+      '',
+      ' FAIL  tests/b.test.ts > reports Test timed out in 30000ms correctly',
+      'AssertionError: expected 1 to be 2',
+      '',
+      ' Test Files  2 failed | 8 passed (10)',
+    ].join('\n');
+    const r = await drive(out);
+    expect(r.code).toBe(1);
+    expect(r.calls).toHaveLength(1);
+    expect(r.text).toContain(`${mod.RETRY_MARKER} none — a non-deadline failure in tests/b.test.ts;`);
+  });
+
   it('consecutive FAIL headers share the one error body that follows, so a grouped timeout is still a deadline failure', async () => {
     const out = [
       ' FAIL  tests/a.test.ts > first',

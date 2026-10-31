@@ -377,13 +377,21 @@ export function failedTestFiles(output) {
   return out;
 }
 
+/** True when the first non-blank line of an error body OPENS with a deadline marker (after an optional `Error: `). */
+function isDeadlineError(body) {
+  const first = body.find((l) => l.trim() !== '');
+  if (first === undefined) return false;
+  const line = first.trim().replace(/^Error:\s*/, '');
+  return RETRYABLE_FAILURES.some(({ re }) => new RegExp(`^(?:${re.source})`).test(line));
+}
+
 /**
  * crew#1223: the checks that decide whether a failure set is PURELY deadline failures, so that re-running
  * only the named files can stand for the whole run. Returns the rule that refuses the named-files retry, or
  * `null` when every rule holds:
  *  • every failure the first pass reported (each ` FAIL  <file> > <test>` block, cut at the next header, the
- *    next `⎯⎯⎯` separator or the summary) carries a deadline marker itself — one assertion failure beside a
- *    timeout is not cleared because both pass alone;
+ *    next `⎯⎯⎯` separator or the summary) IS a deadline: the first line of its error body (never its
+ *    header, where a test name may quote a marker) opens with a deadline marker — one assertion failure beside a timeout is not cleared because both pass alone;
  *  • the named files reconcile with vitest's own summary (`Test Files  N failed` equals the files named) — a
  *    header lost past the 512 KiB capture would otherwise leave a failing file unre-run;
  *  • the summary reports no unhandled errors (`Errors  N error`) — vitest attributes those to no file, so a
@@ -412,7 +420,7 @@ export function namedRetryRefusal(output, failed) {
       if (line.trim() !== '') cur.hasBody = true;
     }
   }
-  const bad = blocks.find((b) => retryableFailureReason([...b.headers, ...b.body].join('\n')) === null);
+  const bad = blocks.find((b) => !isDeadlineError(b.body));
   if (bad !== undefined) return `a non-deadline failure in ${bad.files[0]}`;
   const summary = /^\s*Test Files\s+(?:\d+ \w+ \| )*?(\d+) failed/m.exec(text);
   const counted = summary === null ? 0 : Number(summary[1]);
