@@ -6,45 +6,35 @@
  * (`getRequirementsGraphForRepo`, the same one-library path as `getCoverageReportForRepo`), with
  * the coverage label recomputed from the store's own counts at read time.
  *
- * HISTORY (kept because the rule still holds): until crew 0.16 this module read the
- * `<repo>/.wicked-estate/requirements/requirements_graph.json` artifact.
+ * HISTORY: until crew 0.16 this module read the `<repo>/.wicked-estate/requirements/
+ * requirements_graph.json` artifact, and before 0.7.35 it ALSO opened the code-graph store through
+ * a second SQLite library (`node:sqlite`) — the F-E2E-021 class that corrupted the bus db (one
+ * library per db file per process — crew#541, crew#548). That rule still holds: the store is read
+ * ONLY by the engine, through core-ts.
  *
- * ONE source (crew#548, F-RC1-041 — FIX-IT-ALL L10-3): until 0.7.35 this module ALSO opened the
- * repo's code-graph store through a second SQLite library (`node:sqlite`, read-only, per request)
- * and served the live `nodes.requirement` rows first, falling back to the artifact. The engine
- * holds the same file open in-process through its own rusqlite (`getCoverageReportForRepo`), and
- * a second library on one SQLite file in one process is the F-E2E-021 class that corrupted the
- * bus db (one library per db file per process — crew#541). The store path is DELETED: the
- * artifact `wicked-core domain-graph` regenerates when its coverage bar passes is the only
- * source, and `RequirementsPage.source` always reads `'artifact'`. Named loss: a repo whose
- * domain-graph never passed its coverage bar answers the existing 404 ("requirements_graph.json
- * not generated") where the live store used to answer — the observed lag the old header cited as
- * the reason the store went primary; not on any RC2 journey (register BC-64). Live freshness, if
- * wanted later, is ONE additive core-ts read (`requirementsIndexJson`), never a second library.
+ * Why server-side: 15k+ requirements — shipping them to the browser for JS-side filtering is not
+ * search. The daemon builds a flat index and queries run here: tokenized AND-match over
+ * id/domain/title/statements, risk + domain filters, offset/limit pagination. One engine read
+ * serves a repository for `REQUIREMENTS_READ_TTL_MS`; the index is rebuilt when the read's content
+ * (graph + coverage label) or the overrides sidecar's mtime changes.
  *
- * Why server-side: 15k+ requirements — shipping them to the browser for JS-side
- * filtering is not search. The daemon builds a flat index (cached, invalidated on
- * artifact/overrides mtime), and queries run here: tokenized AND-match over
- * id/domain/title/statements, risk + domain filters, offset/limit pagination.
- *
- * Why an OVERRIDES sidecar: the artifact is DERIVED (regenerated from the estate
- * store), so operator edits written into it would be clobbered on the next
- * `domain-graph` run. Edits live in `requirements_overrides.json` beside the artifact,
- * keyed `domain::reqId`, and are merged at read time — the overlay survives
- * regeneration and keeps provenance honest (`riskSource: operator` vs `data`).
+ * Why an OVERRIDES sidecar: the graph is DERIVED (rebuilt into the estate store by each
+ * `domain-graph` run), so operator edits written into it would be clobbered on the next build.
+ * Edits live in `requirements_overrides.json` (repoPaths), keyed `domain::reqId`, and are merged
+ * at read time — the overlay survives a rebuild (the engine keeps each requirement's id across
+ * builds) and keeps provenance honest (`riskSource: operator` vs `data`).
  *
  * ORPHANED OVERRIDES: an override key matches by exact string, so a key the corpus no
- * longer mints simply stops matching — silently. That happens on an artifact regeneration
- * that renames a domain or reqId. The index therefore COUNTS the keys that matched no row
+ * longer mints simply stops matching — silently. That happens on a rebuild that regroups a
+ * domain or retires a requirement. The index therefore COUNTS the keys that matched no row
  * and surfaces the count as `orphanedOverrides` on every page, so the edits' existence is
  * never invisible. It does NOT re-key them: guessing the mapping here would attach an
  * operator's risk note to the wrong requirement.
  */
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { readFile, writeFile, rename, mkdir, stat } from 'node:fs/promises';
 import { dirname } from 'node:path';
-
-import { existsSync } from 'node:fs';
 
 import { codeGraphDb, requirementsOverrides } from '../core/repoPaths.js';
 import type { RepoEntry } from '../core/types.js';

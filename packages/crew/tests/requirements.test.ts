@@ -3,7 +3,7 @@
  * Fixture-driven: a small graph served by an estate stand-in (the engine's read); overrides written by
  * the service itself (atomic sidecar), never into the graph.
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { mkdtemp, mkdir, readdir, writeFile, readFile, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -15,6 +15,7 @@ import {
   getRequirement,
   patchRequirement,
   forgetRequirementsReads,
+  REQUIREMENTS_READ_TTL_MS,
   type EstateRequirementsGraph,
   type EstateRequirementsRead,
   type RequirementsGraphReader,
@@ -274,6 +275,41 @@ describe('requirements service', () => {
     ]);
     await patchRequirement(repoAt(root), 'auth/session::REQ-001', { notes: 'n' }, estateAt(root));
     expect(estateReads).toEqual(['fixture']);
+  });
+
+  it('past the read window a changed graph, a changed label, or no graph at all shows — the index is not cleared by hand', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const repo = repoAt(root);
+      const first = await listRequirements(repo, { offset: 0, limit: 50 }, estateAt(root));
+      expect(first!.items.map((i) => i.title)).toContain('Sessions expire after inactivity');
+      const path = join(root, ESTATE_STANDIN);
+      const graph = JSON.parse(await readFile(path, 'utf8')) as {
+        metadata: Record<string, unknown>;
+        domains: Record<string, { requirements: Record<string, { title: string }> }>;
+      };
+      graph.domains['auth/session']!.requirements['REQ-001']!.title = 'Rebuilt title';
+      await writeFile(path, JSON.stringify(graph), 'utf8');
+      // Inside the window the read is reused …
+      const same = await listRequirements(repo, { offset: 0, limit: 50 }, estateAt(root));
+      expect(same!.items.map((i) => i.title)).not.toContain('Rebuilt title');
+      // … past it, the new content rebuilds the retained index.
+      vi.setSystemTime(Date.now() + REQUIREMENTS_READ_TTL_MS + 1);
+      const rebuilt = await listRequirements(repo, { offset: 0, limit: 50 }, estateAt(root));
+      expect(rebuilt!.items.map((i) => i.title)).toContain('Rebuilt title');
+      // A label-only change (a later page mapped more) shows too.
+      graph.metadata['coverage'] = { mapped_pct: 50, min_pct: 80, behavior_bearing: 2, mapped: 1, resolved: 1, unmapped: 1 };
+      await writeFile(path, JSON.stringify(graph), 'utf8');
+      vi.setSystemTime(Date.now() + REQUIREMENTS_READ_TTL_MS + 1);
+      const relabelled = await listRequirements(repo, { offset: 0, limit: 50 }, estateAt(root));
+      expect(relabelled!.coverage).toMatchObject({ mappedPct: 50 });
+      // And a graph that is gone answers null, not the old index.
+      await writeFile(path, 'gone', 'utf8');
+      vi.setSystemTime(Date.now() + REQUIREMENTS_READ_TTL_MS + 1);
+      expect(await listRequirements(repo, { offset: 0, limit: 50 }, estateAt(root))).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('a repository not indexed yet answers null without asking the engine', async () => {
