@@ -285,7 +285,10 @@ export function discoverStudioEditors(
 }
 
 /** A pack editor's manifest entry: the shared shape plus its pinned hash and a pack-relative entry. */
-export const PackEditorSchema = EditorManifestFields.extend({
+/** A pack editor's manifest entry. No `description` / `visuals` yet: garden's pack gate (spec 2) refuses both keys
+ *  (PK060), and a pack is another party's directory, so its images would need descriptor-anchored reads; studio-bundle
+ *  editors only for now (post-mvp: garden pack schema + anchored reads). */
+export const PackEditorSchema = EditorManifestFields.omit({ description: true, visuals: true }).extend({
   entry: z.string().regex(/\.html$/u),
   sha256: z.string().regex(/^[0-9a-f]{64}$/u),
 }).superRefine(surfacesMatchProtocol);
@@ -344,9 +347,8 @@ export function readPackEditor(pack: InstalledPack, id: string, log?: (msg: stri
   if (outside.length > 0) return why(`entry loads from outside itself (${outside.slice(0, 3).join(', ')})`);
   const sha = sha256Of(buf);
   if (sha !== m.sha256 || sha !== pack.sha256) return why('its entry no longer matches the hash it was installed with');
-  const manifest: EditorManifest = { id: m.id, title: m.title, version: m.version, protocol: m.protocol, kinds: m.kinds, entry: m.entry, sizes: m.sizes, permissions: m.permissions, ...(m.panels !== undefined ? { panels: m.panels } : {}), ...(m.limits !== undefined ? { limits: m.limits } : {}), ...(m.surfaces !== undefined ? { surfaces: m.surfaces } : {}), ...(m.description !== undefined ? { description: m.description } : {}), ...(m.visuals !== undefined ? { visuals: m.visuals } : {}) };
-  const visuals = resolveVisuals(pack.root, m.visuals, (msg) => log?.(`[editors] ${id} (pack ${pack.name}): visual ${msg}; left out`));
-  return { manifest, sha256: sha, bytes: buf.byteLength, entryPath, firstParty: false, source: 'pack', pack, ...(visuals !== undefined ? { visuals } : {}) };
+  const manifest: EditorManifest = { id: m.id, title: m.title, version: m.version, protocol: m.protocol, kinds: m.kinds, entry: m.entry, sizes: m.sizes, permissions: m.permissions, ...(m.panels !== undefined ? { panels: m.panels } : {}), ...(m.limits !== undefined ? { limits: m.limits } : {}), ...(m.surfaces !== undefined ? { surfaces: m.surfaces } : {}) };
+  return { manifest, sha256: sha, bytes: buf.byteLength, entryPath, firstParty: false, source: 'pack', pack };
 }
 
 const InstalledPackSchema = z.object({

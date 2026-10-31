@@ -12,13 +12,14 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
-- **An editor says how it looks on studio's Plugins page** (program DES-LEARN §2). An editor's manifest may declare
-  `description` (one line) and `visuals` (`icon`, `color`, `preview` as one file or `{light, dark}`, `live`), naming image
-  files beside it (`.svg`, `.png`, `.webp`). The registry reads each once, bounded (icon 16 KB, preview 200 KB), never
-  through a link or out of its directory, checks it is the image its name says, and puts it on `GET /editors` as a
-  `data:` URL: `EditorView.description` and `EditorView.visuals` (api-types 0.155.0 `EditorVisuals`). No path and no
-  remote URL reaches the browser, and no image is served from crew's origin. A bad image is left out with a logged
-  reason; the editor is still served. Studio's first-party editors declare theirs from studio's own build.
+- **An editor says how it looks on studio's Plugins page** (program DES-LEARN §2). A studio-bundle editor's
+  `editor.json` may declare `description` (one line) and `visuals` (`icon`, `color`, `preview` as one file or
+  `{light, dark}`, `live`), naming `.svg` / `.png` / `.webp` files beside it. The registry reads each once, bounded
+  (icon 16 KB, preview 200 KB), never through a link (checked, then opened with O_NOFOLLOW and matched to the checked
+  inode) or out of its directory, checks it is the image its name says, and puts it on `GET /editors` as a `data:` URL:
+  `EditorView.description` and `EditorView.visuals` (api-types 0.155.0 `EditorVisuals`). No path and no remote URL
+  reaches the browser, and no image is served from crew's origin. A bad image is left out with a logged reason; the
+  editor is still served. Pack editors carry neither yet: garden's pack gate refuses both keys (PK060).
 
 - **Voice mode, phase 1: speech to text on this machine** (program DES-VOICE). Studio's voice mode records speech in
   the browser and posts it as a 16 kHz mono WAV to `POST /voice/transcribe`; crew hands the bytes to whisper.cpp's CLI on

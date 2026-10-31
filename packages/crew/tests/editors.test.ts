@@ -17,6 +17,7 @@ import { BUNDLE_CSP_BASE, bundleHeaders, requestOrigin, shellCsp } from '../src/
 import { CONFORMANCE_CASES, gardenConformance, gardenPackCheck, installPack, PackInstallError, type ConformanceRunner, type PackCheckRunner } from '../src/editors/pack-install.js';
 import { EditorRegistry, EDITORS_STATE_FILENAME, discoverStudioEditors, externalReferences, readCapped, sha256Of } from '../src/editors/registry.js';
 import { registerEditorRoutes, serveBundle } from '../src/editors/routes.js';
+import { readNoFollow } from '../src/editors/visuals.js';
 
 const scratches: string[] = [];
 afterEach(() => {
@@ -268,15 +269,12 @@ describe('pack install: the gate, crew\'s conformance run, then the registry', (
     expect(again.get('acme-terms')!.entryPath).toBe(join(root, 'editors', 'acme-terms', 'index.html'));
   });
 
-  it('a pack editor’s visuals are read from inside its pack, onto the wire; installed and read back after a restart', async () => {
-    const { reg, home } = registry();
-    const svg = '<svg xmlns="http://www.w3.org/2000/svg"><circle r="4"/></svg>';
-    const root = makePack({ editorExtra: { description: 'Checks your terms.', visuals: { icon: 'editors/acme-terms/icon.svg', color: '#0f766e' } } });
-    writeFileSync(join(root, 'editors', 'acme-terms', 'icon.svg'), svg);
+  it('a pack editor carries no visuals yet (garden’s gate refuses the keys): its digest and wire view are as before', async () => {
+    const { reg } = registry();
+    const root = makePack();
     const res = await installPack(root, undefined, { check: passCheck, conformance: conformant(), registry: reg });
-    const want = { icon: `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`, color: '#0f766e' };
-    expect(res.editors[0]).toMatchObject({ description: 'Checks your terms.', visuals: want });
-    expect(EditorRegistry.view(new EditorRegistry({ stateHome: home }).get('acme-terms')!)).toMatchObject({ description: 'Checks your terms.', visuals: want });
+    expect(res.editors[0]).not.toHaveProperty('visuals');
+    expect(res.editors[0]).not.toHaveProperty('description');
   });
 
   it('a failed or impossible conformance run installs nothing (422), naming the cases that did not pass', async () => {
@@ -750,6 +748,20 @@ describe('visuals: how an editor looks on the Plugins page (program DES-LEARN §
     expect(logs.find((l) => l.includes('linked.svg'))).toMatch(/symlink/);
     expect(logs.find((l) => l.includes('big.png'))).toMatch(/over its 204800-byte cap/);
     expect(logs.find((l) => l.includes('fake.png'))).toMatch(/not a png image/);
+    // codex on crew#1234: what was checked is what is read. A link at the open is refused (O_NOFOLLOW), and a file
+    // replaced after its check (another inode) is not read.
+    const dir = mkdtempSync(join(tmpdir(), 'editors-swap-'));
+    scratches.push(dir);
+    writeFileSync(join(dir, 'a.svg'), SVG);
+    symlinkSync(join(outside, 'x.svg'), join(dir, 'link.svg'));
+    expect(() => readNoFollow(join(dir, 'link.svg'), 1024)).toThrow(/ELOOP|EMLINK/);
+    const checked = statSync(join(dir, 'a.svg'));
+    rmSync(join(dir, 'a.svg'));
+    writeFileSync(join(dir, 'b.tmp'), SVG);
+    writeFileSync(join(dir, 'a.svg'), SVG);
+    rmSync(join(dir, 'b.tmp'));
+    expect(readNoFollow(join(dir, 'a.svg'), 1024, checked)).toBeNull();
+    expect(readNoFollow(join(dir, 'a.svg'), 1024)?.toString()).toBe(SVG);
     // A path out of the directory, a remote URL or an unknown type is never even tried.
     const escaping = withVisuals({ icon: '../../index.html', preview: 'https://cdn.example/p.png', color: '#123456' }, {});
     const r = discoverStudioEditors(escaping)[0]!;
