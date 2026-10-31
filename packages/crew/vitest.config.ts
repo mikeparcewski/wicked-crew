@@ -32,6 +32,13 @@ export default defineConfig({
         name: 'cross-repo',
         description: 'reads the sibling wicked-core checkout; runs in CI, left out of the floor when there is none',
       },
+      // DES-FLOOR-CONTAINER: a test that needs the network (an `npm ci` from the registry). The container
+      // checks floor has none and sets WICKED_CHECKS_FLOOR=container; scripts/test-related.mjs then runs
+      // `--tags-filter=!network` and prints what it left out. CI and `npm test` run them.
+      {
+        name: 'network',
+        description: 'needs the network; runs in CI, left out of the container checks floor (no network)',
+      },
     ],
     coverage: {
       provider: 'v8',

@@ -143,7 +143,12 @@ export function coreCheckoutDir({ override = process.env['WICKED_CORE_DIR'], rep
  * count is the number vitest leaves out (pinned by `tests/test-related-cross-repo.test.ts`).
  */
 export function crossRepoTests(crewDir = resolve(ROOT, CREW)) {
-  const tag = new RegExp(`tags:\\s*\\[\\s*['"]${CROSS_REPO_TAG}['"]\\s*\\]`, 'g');
+  return taggedTests(CROSS_REPO_TAG, crewDir);
+}
+
+/** The tests carrying the vitest tag `name`, counted off the source: `{ count, files }`. */
+function taggedTests(name, crewDir) {
+  const tag = new RegExp(`tags:\\s*\\[\\s*['"]${name}['"]\\s*\\]`, 'g');
   const files = [];
   let count = 0;
   const walk = (dir) => {
@@ -163,6 +168,34 @@ export function crossRepoTests(crewDir = resolve(ROOT, CREW)) {
   const tests = join(crewDir, 'tests');
   if (existsSync(tests)) walk(tests);
   return { count, files };
+}
+
+/**
+ * The vitest tag on every test that needs the network (an `npm ci` from the registry). The container
+ * checks floor (wicked-core DES-FLOOR-CONTAINER) runs the checks with no network and sets
+ * `WICKED_CHECKS_FLOOR=container`; there, and only there, these tests are left out with one line.
+ */
+export const NETWORK_TAG = 'network';
+/** What vitest is handed in a floor with no network: every test except the network ones. */
+export const NETWORK_FILTER = [`--tags-filter=!${NETWORK_TAG}`];
+
+/** Whether these checks run in the container floor, which has no network. */
+export function noNetwork(env = process.env) {
+  return env['WICKED_CHECKS_FLOOR'] === 'container';
+}
+
+/** The tests tagged {@link NETWORK_TAG}, counted off the source like {@link crossRepoTests}. */
+export function networkTests(crewDir = resolve(ROOT, CREW)) {
+  return taggedTests(NETWORK_TAG, crewDir);
+}
+
+/** The one line the floor's evidence carries when the network tests are left out. */
+export function networkLine({ count, files }) {
+  return (
+    `test-related: left out the tests tagged \`${NETWORK_TAG}\` (${count} in the repository, in ${files.join(', ')}; ` +
+    'only those this run selected were affected): the container checks floor has no network ' +
+    '(WICKED_CHECKS_FLOOR=container); CI runs them.'
+  );
 }
 
 /** The one line the floor's evidence carries when the cross-repo tests are left out. */
@@ -534,6 +567,9 @@ export async function runTargeted(files, io = {}) {
   const budgetS = io.budgetS ?? checksTimeoutS();
   const coreDir = io.coreDir ?? coreCheckoutDir;
   const tagged = io.crossRepoTests ?? crossRepoTests;
+  // The CLI passes {@link noNetwork}; a caller that says nothing runs with the network (the tests' io).
+  const offline = io.noNetwork ?? (() => false);
+  const networkTagged = io.networkTests ?? networkTests;
 
   const p = (io.plan ?? plan)(files);
   if (p.refuse) {
@@ -550,8 +586,14 @@ export async function runTargeted(files, io = {}) {
 
   out(formatHostLine(host(), 'pre'));
   // crew#1173: no sibling wicked-core checkout → leave the cross-repo tests out, and say so once.
-  const filter = coreDir() === null ? CROSS_REPO_FILTER : [];
+  const filter = coreDir() === null ? [...CROSS_REPO_FILTER] : [];
   if (filter.length > 0) out(crossRepoLine(tagged()));
+  // DES-FLOOR-CONTAINER: the container checks floor has no network → leave the network tests out, and
+  // say so once. vitest ANDs repeated `--tags-filter` flags.
+  if (offline()) {
+    filter.push(...NETWORK_FILTER);
+    out(networkLine(networkTagged()));
+  }
   // crew#1173: the dist-CLI suites spawn dist/cli/index.js, and the floor's checkout has no dist/.
   // Emptied first: tsc overwrites what it emits but never removes the output of a deleted source.
   out(`test-related: ${BUILD_ARGV.join(' ')} (cwd ${p.cwd}) — a clean dist/ first, for the dist-CLI suites`);
@@ -676,6 +718,6 @@ if (isMain) {
     process.stdout.write(`${JSON.stringify(planOf(files))}\n`);
     process.exitCode = 0;
   } else {
-    process.exitCode = await runTargeted(files, { plan: planOf });
+    process.exitCode = await runTargeted(files, { plan: planOf, noNetwork });
   }
 }
