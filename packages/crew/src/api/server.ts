@@ -25,7 +25,7 @@ import { RetryIndex } from './retry-index.js';
 import { GroupIndex } from './group-index.js';
 import { RunTimingIndex, recordRunLaunched } from './run-timing-index.js';
 import { OnboardingCaptureChain } from './onboarding-capture.js';
-import { INSPECT_WORKFLOW, InspectService, loadInspectWorkflow } from '../inspect/service.js';
+import { INSPECT_WORKFLOW, InspectService, defaultInspectionsDir, loadInspectWorkflow } from '../inspect/service.js';
 import { registerInspectRoutes } from '../inspect/routes.js';
 import { DISTILL_WORKFLOW, RunLearningsService, defaultLearningsDir, loadDistillWorkflow, runLearningsMode } from '../learnings/service.js';
 import { memoryContents, proposalRows, submitLearning } from '../learnings/estate.js';
@@ -1416,7 +1416,7 @@ export async function createServer(
       const unit = view?.units.find((u) => u.ord === 1) ?? view?.units[0];
       return view !== undefined && unit !== undefined ? adapter.workOutput(coreUnitId(checkRunId, unit)) : null;
     },
-    dir: join(crewStateHome(), 'inspections'),
+    dir: defaultInspectionsDir(),
     broadcast: (frame) => broadcast(frame as unknown as CoreEvent),
     launched: (checkRunId, sourceRunId) => {
       try {

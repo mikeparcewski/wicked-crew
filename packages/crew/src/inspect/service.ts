@@ -18,6 +18,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -486,6 +487,16 @@ export class InspectService {
       this.release(checkRunId);
     }
   }
+}
+
+/**
+ * Where the records live: `WICKED_CREW_INSPECTIONS_DIR`, else `~/.wicked/inspections` — beside run learnings, NOT in the
+ * daemon state home: core refuses every launch whose state home holds a top-level entry its fence registry
+ * (tests/fixtures/state-home-subtrees.json, embedded in core) does not classify, so a new entry there needs a core
+ * release first. Records are keyed by run id (unique), so two daemons sharing the directory never collide.
+ */
+export function defaultInspectionsDir(env: NodeJS.ProcessEnv = process.env): string {
+  return env['WICKED_CREW_INSPECTIONS_DIR'] ?? join(homedir(), '.wicked', 'inspections');
 }
 
 /** The `inspect-unit` workflow def (data), as registered with the engine. */
