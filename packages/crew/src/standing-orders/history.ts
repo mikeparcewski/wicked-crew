@@ -38,7 +38,7 @@ export interface DecidedGateRow {
   band: string | null;
   creator: { seat: string; phase: string | null; ord: number } | null;
   orderApprovable: boolean;
-  /** (api-types 0.155.0) Answered by voice and confirmed on screen; absent for a typed or tapped answer. */
+  /** (api-types 0.156.0) Answered by voice and confirmed on screen; absent for a typed or tapped answer. */
   input?: 'voice';
 }
 

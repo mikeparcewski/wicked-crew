@@ -354,7 +354,7 @@ export interface HealthCapabilities {
    */
   powerMode?: boolean | undefined;
   /**
-   * (api-types 0.155.0, DES-VOICE) Voice mode's routes are served: `GET /voice/status`, `POST|DELETE /voice/model`,
+   * (api-types 0.156.0, DES-VOICE) Voice mode's routes are served: `GET /voice/status`, `POST|DELETE /voice/model`,
    * `POST /voice/transcribe` and `GET|PUT /voice/dashboard`. Whether transcription can run NOW (the engine and
    * the model are on this machine) is {@link VoiceStatus.ready}. ABSENT on an older daemon: read as `false`.
    */
@@ -2423,7 +2423,7 @@ export interface GateDecision {
    */
   ord?: number;
   /**
-   * (api-types 0.155.0, DES-VOICE) The person answered by voice: studio matched the spoken words to this
+   * (api-types 0.156.0, DES-VOICE) The person answered by voice: studio matched the spoken words to this
    * answer, showed it on screen and the person confirmed it, then the usual undo window ran. Recorded on the
    * `gate.decided` audit line and {@link DecidedGate.input}; it grants nothing a typed answer does not.
    */
@@ -11320,7 +11320,7 @@ export interface DecidedGate {
   creator: { seat: string; phase: string | null; ord: number } | null;
   /** A standing order could have approved this gate (a phase-review gate of a run that lands no doctrine). */
   orderApprovable: boolean;
-  /** (api-types 0.155.0) Answered by voice and confirmed on screen ({@link GateDecision.input}); absent otherwise. */
+  /** (api-types 0.156.0) Answered by voice and confirmed on screen ({@link GateDecision.input}); absent otherwise. */
   input?: 'voice';
 }
 
@@ -13241,7 +13241,7 @@ export interface DefaultEvalDetail {
   cases: DefaultEvalCase[];
 }
 
-// ── Voice mode, phase 1 (program DES-VOICE; api-types 0.155.0) ─────────────────────────────────────────
+// ── Voice mode, phase 1 (program DES-VOICE; api-types 0.156.0) ─────────────────────────────────────────
 
 /**
  * `GET /voice/status` (and the answer of `POST|DELETE /voice/model`). Speech to text runs on THIS machine:

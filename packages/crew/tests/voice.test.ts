@@ -3,7 +3,7 @@
 
 import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -11,7 +11,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
-  VOICE_MODEL, VoiceService, cleanTranscript, defaultVoiceDir, findWhisper, isWav, type VoiceDeps, type VoiceSpawn,
+  VOICE_MODEL, VoiceService, cleanTranscript, defaultVoiceDir, findWhisper, isWav, wavProblem, type VoiceDeps, type VoiceSpawn,
 } from '../src/voice/service.js';
 import { VoiceDashboardStore, VOICE_DASHBOARD_FILENAME, type VoiceWidgetManifest } from '../src/voice/dashboard.js';
 import { registerVoiceRoutes } from '../src/voice/routes.js';
@@ -34,7 +34,9 @@ interface FakeChild extends EventEmitter { stdin: PassThrough; stdout: PassThrou
 /** A whisper-cli stand-in: records what it was given, answers `out` with exit `code`. */
 function fakeSpawn(out: string, code = 0, opts: { hang?: boolean } = {}) {
   const calls: Array<{ bin: string; args: string[]; stdin: Buffer }> = [];
+  const live = { now: 0, max: 0 };
   const spawn = vi.fn((bin: string, args: string[]) => {
+    live.now += 1; live.max = Math.max(live.max, live.now);
     const child = new EventEmitter() as FakeChild;
     child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
     child.kill = () => { setImmediate(() => child.emit('close', null)); return true; };
@@ -43,11 +45,11 @@ function fakeSpawn(out: string, code = 0, opts: { hang?: boolean } = {}) {
     child.stdin.on('finish', () => {
       calls.push({ bin, args, stdin: Buffer.concat(chunks) });
       if (opts.hang === true) return;
-      setImmediate(() => { child.stdout.end(out); child.stderr.end(code === 0 ? '' : 'error: bad model\n'); child.emit('close', code); });
+      setTimeout(() => { live.now -= 1; child.stdout.end(out); child.stderr.end(code === 0 ? '' : 'error: bad model\n'); child.emit('close', code); }, 5);
     });
     return child;
   });
-  return { spawn, calls };
+  return { spawn, calls, live };
 }
 
 let dir: string;
@@ -133,6 +135,48 @@ describe('voice: transcribe', () => {
     await expect(Promise.all([a, b])).resolves.toHaveLength(2);
   });
 
+
+  it('never runs two at once: the slot is handed to the waiter, and a later caller queues behind it (agy P2)', async () => {
+    putModel();
+    const f = fakeSpawn('hi');
+    const s = service({ spawn: f.spawn as unknown as VoiceSpawn });
+    const a = s.transcribe(wav());
+    const b = s.transcribe(wav());
+    await a; // A done: B now holds the slot; C must wait, not start beside it
+    const c = s.transcribe(wav());
+    await Promise.all([b, c]);
+    expect(f.calls).toHaveLength(3);
+    expect(f.live.max).toBe(1);
+  });
+
+  it('a waiter whose model was removed meanwhile is told so, and spawns nothing (agy P2)', async () => {
+    putModel();
+    const f = fakeSpawn('hi');
+    const s = service({ spawn: f.spawn as unknown as VoiceSpawn });
+    const a = s.transcribe(wav());
+    const b = s.transcribe(wav());
+    s.removeModel();
+    await a;
+    await expect(b).rejects.toMatchObject({ status: 409, code: 'voice_model_missing' });
+    expect(f.calls).toHaveLength(1);
+  });
+
+  it('refuses a WAV that is not 16 kHz mono 16-bit PCM, or has no audio, before the engine starts (codex P3)', async () => {
+    putModel();
+    const f = fakeSpawn('x');
+    const s = service({ spawn: f.spawn as unknown as VoiceSpawn });
+    const headerOnly = Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WAVE'), Buffer.alloc(33)]);
+    const stereo = wav(); stereo.writeUInt16LE(2, 22);
+    const rate = wav(); rate.writeUInt32LE(44100, 24);
+    const empty = wav(0);
+    const truncated = wav().subarray(0, 60);
+    for (const bad of [headerOnly, stereo, rate, empty, truncated]) {
+      await expect(s.transcribe(bad)).rejects.toMatchObject({ status: 400, code: 'voice_audio_invalid' });
+    }
+    expect(wavProblem(stereo)).toMatch(/2 channel/);
+    expect(f.calls).toEqual([]);
+  });
+
   it('cleanTranscript drops tags and folds whitespace; isWav reads the header', () => {
     expect(cleanTranscript(' [00:00.000 --> 00:02.000]  hello\n world [BLANK_AUDIO] ')).toBe('hello world');
     expect(isWav(wav())).toBe(true);
@@ -154,6 +198,45 @@ describe('voice: the model download', () => {
     await waitFor(() => s.status().model.download?.state === 'failed');
     expect(s.status().model).toMatchObject({ present: false, download: { state: 'failed', error: expect.stringMatching(/checksum/) } });
     expect(readdirSync(dir)).toEqual([]);
+  });
+
+
+  it('a write that fails (EACCES) marks the download failed; the daemon does not crash (codex/agy P1)', async () => {
+    if (process.getuid?.() === 0) return; // root writes anywhere
+    const bytes = Buffer.from('pretend model bytes');
+    const locked = join(dir, 'locked');
+    mkdirSync(locked);
+    chmodSync(locked, 0o500);
+    try {
+      const s = new VoiceService({ dir: locked, bin: BIN, exists: (p) => p === BIN || existsSync(p), fetch: (async () => body(bytes)) as unknown as typeof fetch });
+      s.startDownload();
+      await waitFor(() => s.status().model.download?.state === 'failed');
+      expect(s.status().model).toMatchObject({ present: false, download: { state: 'failed', error: expect.stringMatching(/EACCES|permission/i) } });
+    } finally {
+      chmodSync(locked, 0o700);
+    }
+  });
+
+  it('removing the model cancels a download in flight: it never lands afterwards (codex/agy P2)', async () => {
+    const bytes = Buffer.from('pretend model bytes');
+    const sha = createHash('sha1').update(bytes).digest('hex');
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((r) => { release = r; });
+    const slow = (async (_u: string, init?: { signal?: AbortSignal }) => {
+      await gate;
+      if (init?.signal?.aborted === true) throw new Error('aborted');
+      return body(bytes);
+    }) as unknown as typeof fetch;
+    const s = service({ fetch: slow, model: { ...VOICE_MODEL, sha1: sha } });
+    s.startDownload();
+    expect(s.removeModel()).toEqual({ removed: false });
+    expect(s.status().model.download).toBeNull();
+    release();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(s.status().model).toMatchObject({ present: false, download: null });
+    expect(readdirSync(dir)).toEqual([]);
+    // And a fresh start after removal works.
+    expect(s.startDownload()).toEqual({ started: true });
   });
 
   it('a matching file lands under its name; a second start does nothing', async () => {
@@ -226,6 +309,22 @@ describe('voice routes', () => {
       expect(res.json()).toMatchObject({ code: 'human_operator_only' });
     }
     expect(spawn.calls).toEqual([]);
+  });
+
+
+  it('the fence runs before the body is read: a refused caller gets 403, never 413 (agy P3)', async () => {
+    app = await build(service());
+    const big = Buffer.alloc(9 * 1024 * 1024);
+    const res = await app.inject({ method: 'POST', url: '/api/v1/voice/transcribe', remoteAddress: '10.0.0.7', headers: { 'content-type': 'audio/wav' }, payload: big });
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toMatchObject({ code: 'voice_loopback_only' });
+  });
+
+  it('only the transcribe route speaks of audio/wav: another voice route with a wrong media type does not (agy P3)', async () => {
+    app = await build(service());
+    const res = await app.inject({ method: 'POST', url: '/api/v1/voice/model', headers: { 'content-type': 'application/xml' }, payload: '<yes/>' });
+    expect(res.statusCode).toBe(415);
+    expect(res.body).not.toMatch(/audio\/wav/);
   });
 
   it('refuses a caller that is not on loopback', async () => {

@@ -870,7 +870,7 @@ export const GateSchema = z.object({
   /** api-types 0.44.0 — the gate this decision answers (its unit `ord`). A mismatch with the run's
    *  open gate is a 409 `gate_changed`: the decision was made on a gate that is no longer open. */
   ord: z.number().int().nonnegative().optional(),
-  /** (api-types 0.155.0, DES-VOICE) The person answered by voice and confirmed it on screen: recorded on the
+  /** (api-types 0.156.0, DES-VOICE) The person answered by voice and confirmed it on screen: recorded on the
    *  `gate.decided` audit line and the decided-gate history ("by voice, confirmed"). It grants nothing. */
   input: z.literal('voice').optional(),
 }).strict().refine(
@@ -1940,7 +1940,7 @@ export function registerRoutes(
       workingDoc: app.hasRoute({ method: 'GET', url: `${V}/runs/:id/working-doc` }),
       // (api-types 0.149.0) Power mode: the routes are served AND the engine runs it.
       powerMode: powerSupported(),
-      // (api-types 0.155.0, DES-VOICE) Voice mode's routes are served: local speech to text, the model with
+      // (api-types 0.156.0, DES-VOICE) Voice mode's routes are served: local speech to text, the model with
       // consent, and the per-person dashboard. Whether transcription can run now is `GET /voice/status`.
       voice: app.hasRoute({ method: 'POST', url: `${V}/voice/transcribe` }),
     };

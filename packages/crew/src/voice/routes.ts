@@ -58,24 +58,42 @@ export function registerVoiceRoutes(app: FastifyInstance, deps: VoiceRouteDeps):
   const actorOf = (req: { actor?: Actor }): Actor => req.actor ?? LOCAL_ACTOR;
 
   void app.register(async (scope) => {
-    // The recording arrives as raw bytes, buffered by a parser scoped to these routes alone.
-    for (const type of ['audio/wav', 'audio/x-wav', 'audio/wave']) {
-      scope.addContentTypeParser(type, { parseAs: 'buffer', bodyLimit: VOICE_MAX_AUDIO_BYTES + 1024 }, (_req, body, done) => done(null, body));
-    }
-    scope.setErrorHandler((err, _req, reply) => {
-      const code = (err as { code?: unknown }).code;
-      if (code === 'FST_ERR_CTP_BODY_TOO_LARGE') {
-        return reply.code(413).send({ error: `The recording is over ${Math.round(VOICE_MAX_AUDIO_BYTES / 1048576)} MiB; speak in shorter turns.`, code: 'voice_audio_too_large' });
-      }
-      if (code === 'FST_ERR_CTP_INVALID_MEDIA_TYPE') {
-        return reply.code(415).send({ error: 'Send the recording as audio/wav.', code: 'voice_audio_invalid' });
-      }
-      return reply.send(err);
-    });
-    scope.addHook('preHandler', async (req, reply) => {
+    // The fence runs on request, before any body is read: a refused caller never gets to stream audio in.
+    scope.addHook('onRequest', async (req, reply) => {
       const refused = voiceRefusal(req as FastifyRequest & { actor?: Actor });
       if (refused !== null) return reply.code(403).send(refused);
       return undefined;
+    });
+
+    // The recording arrives as raw bytes, buffered by a parser scoped to the transcribe route alone (and its
+    // media-type error speaks only for that route).
+    void scope.register(async (audio) => {
+      for (const type of ['audio/wav', 'audio/x-wav', 'audio/wave']) {
+        audio.addContentTypeParser(type, { parseAs: 'buffer', bodyLimit: VOICE_MAX_AUDIO_BYTES + 1024 }, (_req, body, done) => done(null, body));
+      }
+      audio.setErrorHandler((err, _req, reply) => {
+        const code = (err as { code?: unknown }).code;
+        if (code === 'FST_ERR_CTP_BODY_TOO_LARGE') {
+          return reply.code(413).send({ error: `The recording is over ${Math.round(VOICE_MAX_AUDIO_BYTES / 1048576)} MiB; speak in shorter turns.`, code: 'voice_audio_too_large' });
+        }
+        if (code === 'FST_ERR_CTP_INVALID_MEDIA_TYPE') {
+          return reply.code(415).send({ error: 'Send the recording as audio/wav.', code: 'voice_audio_invalid' });
+        }
+        return reply.send(err);
+      });
+      audio.post(
+        `${V}/voice/transcribe`,
+        { config: { manifest: { requestType: 'audio/wav', responseType: 'VoiceTranscribeResponse', statusCodes: [200, 400, 403, 409, 413, 415, 429, 500, 504] } } },
+        async (req, reply) => {
+          if (!Buffer.isBuffer(req.body)) return reply.code(415).send({ error: 'Send the recording as audio/wav.', code: 'voice_audio_invalid' });
+          try {
+            // Nothing about the audio is logged or audited: not its bytes, not its words.
+            return await deps.voice.transcribe(req.body);
+          } catch (e) {
+            return fail(reply, e);
+          }
+        },
+      );
     });
 
     scope.get(
@@ -109,20 +127,6 @@ export function registerVoiceRoutes(app: FastifyInstance, deps: VoiceRouteDeps):
         const { removed } = deps.voice.removeModel();
         if (removed) deps.audit.record('voice.model.removed', actorOf(req), { detail: { model: deps.voice.status().model.name } });
         return deps.voice.status();
-      },
-    );
-
-    scope.post(
-      `${V}/voice/transcribe`,
-      { config: { manifest: { requestType: 'audio/wav', responseType: 'VoiceTranscribeResponse', statusCodes: [200, 400, 403, 409, 413, 415, 429, 500, 504] } } },
-      async (req, reply) => {
-        if (!Buffer.isBuffer(req.body)) return reply.code(415).send({ error: 'Send the recording as audio/wav.', code: 'voice_audio_invalid' });
-        try {
-          // Nothing about the audio is logged or audited: not its bytes, not its words.
-          return await deps.voice.transcribe(req.body);
-        } catch (e) {
-          return fail(reply, e);
-        }
       },
     );
 
