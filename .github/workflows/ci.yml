@@ -62,9 +62,29 @@ env:
   WICKED_MEMORY_EMBEDDER: hash
 
 jobs:
+  # One job, two OS legs. The macOS leg exists because the governed floor is moving into Linux seat
+  # containers (DES-FLOOR-CONTAINER): once it does, the operator's own macOS host stops exercising the
+  # crew + engine pair on every change, and the release matrix (release.yml, ubuntu + macos) would be
+  # the first place a macOS-only break showed up — after the tag. So every PR now builds the engine
+  # from source and runs the full suite on macOS too, with the same sibling-checkout handling.
+  #
+  # The ubuntu leg keeps its historical check name so anything keyed on it (a future required-check
+  # rule, dashboards) is unaffected. Lint and typecheck run on the ubuntu leg only: they are static,
+  # platform-independent analyses of the same sources, so a second run adds runner minutes and no
+  # coverage. The macOS leg runs install, engine build + link, the release-shaped build and the whole
+  # test suite. fail-fast is off so one OS going red never cancels the other leg's evidence.
   check:
-    name: lint · typecheck · build · test
-    runs-on: ubuntu-latest
+    name: ${{ matrix.check_name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            check_name: lint · typecheck · build · test
+          - os: macos-latest
+            check_name: macOS · build · test
     steps:
       - name: Checkout wicked-crew
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -199,11 +219,23 @@ jobs:
           bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --die-with-parent -- /bin/true
           echo "bwrap can arm a boundary on this runner"
 
+      # The same floor on macOS arms Seatbelt (sandbox-exec), which ships with the OS — nothing to
+      # install. The smoke line applies a write-denying profile so a runner image that ever loses or
+      # restricts sandbox-exec fails THIS step, not a deliver test, mirroring the bwrap line above.
+      - name: Check the checks sandbox (sandbox-exec) can arm on macOS
+        if: runner.os == 'macOS'
+        run: |
+          sandbox-exec -p '(version 1)(allow default)(deny file-write* (subpath "/usr"))' /usr/bin/true
+          echo "sandbox-exec can arm a boundary on this runner"
+
+      # Ubuntu leg only — static, platform-independent analyses (see the job comment).
       - name: Lint (eslint)
+        if: runner.os == 'Linux'
         working-directory: wicked-crew
         run: npm run -w packages/crew lint
 
       - name: Typecheck (tsc --noEmit)
+        if: runner.os == 'Linux'
         working-directory: wicked-crew
         run: npm run -w packages/crew typecheck
 
