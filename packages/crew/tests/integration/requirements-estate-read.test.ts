@@ -28,7 +28,9 @@ afterAll(() => {
 describe('CoreAdapter.getRequirementsGraphForRepo', () => {
   it('an engine without the read is an error naming the upgrade', async () => {
     const core = (adapter as unknown as { core: Record<string, unknown> }).core;
-    delete core['getRequirementsGraphForRepo'];
+    // Shadowed, not deleted: an engine built from wicked-core main carries the read as a prototype
+    // method, which `delete` on the instance never removes (crew main CI, 2026-10-31).
+    core['getRequirementsGraphForRepo'] = undefined;
     await expect(adapter.getRequirementsGraphForRepo('tiny-math')).rejects.toThrow(/upgrade wicked-core-ts/);
   });
 
