@@ -104,21 +104,51 @@ export interface RequirementsGraphReader {
   getRequirementsGraphForRepo(repoRef: string): Promise<EstateRequirementsRead>;
 }
 
-const inflight = new Map<string, Promise<EstateRequirementsRead>>();
+/** How long one engine read of a repository's graph serves later reads. A request that reads the
+ * same repository several times (product compose over many requirements, the project aggregates'
+ * two passes, PATCH then re-read) costs ONE read — the engine recomputes coverage over the whole
+ * store on each. A build that lands is visible within this window. */
+export const REQUIREMENTS_READ_TTL_MS = 5_000;
 
-/** The repository's requirements graph from estate. Concurrent reads of one repository share one
- * engine call (a page and a detail fetched together recompute coverage once). A repo whose daemon
- * resolved no graph root throws `CodeGraphRootUnresolvableError` (the routes' 503); a repo whose
- * graph is not built yet has nothing to read (`graph: null`, the routes' 404). */
+const reads = new Map<string, { at: number; read: Promise<EstateRequirementsRead> }>();
+
+/** One key for everything cached about a repository: its id AND where it is registered. */
+function repoKey(repo: RepoEntry): string {
+  return `${repo.id}\0${repo.root_path}`;
+}
+
+/** Forget what was read for `repo` (or everything): the next read asks the engine again. */
+export function forgetRequirementsReads(repo?: RepoEntry): void {
+  if (repo === undefined) {
+    reads.clear();
+    cache.clear();
+    return;
+  }
+  reads.delete(repoKey(repo));
+  cache.delete(repoKey(repo));
+}
+
+/** The repository's requirements graph from estate. Reads of one repository within
+ * {@link REQUIREMENTS_READ_TTL_MS} — concurrent or not — share one engine call; a failed read is
+ * never kept. A repo whose daemon resolved no graph root throws `CodeGraphRootUnresolvableError`
+ * (the routes' 503); a repo not indexed yet has nothing to read (`graph: null`, the 404) and costs
+ * no engine call. */
 export async function readRequirementsGraph(
   repo: RepoEntry,
   reader: RequirementsGraphReader,
 ): Promise<EstateRequirementsRead> {
-  if (!existsSync(codeGraphDb(repo))) return { graph: null, coverage: null };
-  const pending = inflight.get(repo.id);
-  if (pending) return pending;
-  const read = reader.getRequirementsGraphForRepo(repo.id).finally(() => inflight.delete(repo.id));
-  inflight.set(repo.id, read);
+  const key = repoKey(repo);
+  if (!existsSync(codeGraphDb(repo))) {
+    forgetRequirementsReads(repo);
+    return { graph: null, coverage: null };
+  }
+  const hit = reads.get(key);
+  if (hit && Date.now() - hit.at < REQUIREMENTS_READ_TTL_MS) return hit.read;
+  const read = reader.getRequirementsGraphForRepo(repo.id);
+  reads.set(key, { at: Date.now(), read });
+  read.catch(() => {
+    if (reads.get(key)?.read === read) reads.delete(key);
+  });
   return read;
 }
 
@@ -317,12 +347,15 @@ async function buildIndex(repo: RepoEntry, reader: RequirementsGraphReader): Pro
     mtimeMs(requirementsOverrides(repo)),
   ]);
   const graph = read.graph;
-  if (graph === null || typeof graph !== 'object') return null; // not generated yet
+  if (graph === null || typeof graph !== 'object') {
+    cache.delete(repoKey(repo)); // nothing built (any more): no stale index survives
+    return null;
+  }
   const token = createHash('sha1')
     .update(JSON.stringify(graph))
     .update(JSON.stringify(read.coverage ?? null))
     .digest('hex');
-  const cached = cache.get(repo.root_path);
+  const cached = cache.get(repoKey(repo));
   if (cached && cached.sourceToken === token && cached.overridesMtimeMs === ovMtime) {
     return cached;
   }
@@ -384,7 +417,7 @@ async function buildIndex(repo: RepoEntry, reader: RequirementsGraphReader): Pro
     validated: entries.filter((e) => e.summary.corroboration?.status === 'validated').length,
     unconfirmed: entries.filter((e) => e.summary.corroboration?.status === 'unconfirmed').length,
   };
-  cache.set(repo.root_path, index);
+  cache.set(repoKey(repo), index);
   return index;
 }
 
@@ -520,6 +553,7 @@ export async function patchRequirement(
   const tmp = `${path}.tmp-${process.pid}-${++tmpSeq}`;
   await writeFile(tmp, JSON.stringify(overrides, null, 2), 'utf8');
   await rename(tmp, path);
-  cache.delete(repo.root_path); // next read rebuilds with the new overrides
+  // The overrides changed, the graph did not: the index rebuilds from the read already in hand.
+  cache.delete(repoKey(repo));
   return getRequirement(repo, key, reader);
 }

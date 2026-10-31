@@ -1,7 +1,7 @@
 /**
  * Requirements service — server-side search + overrides sidecar (api/requirements.ts).
  * Fixture-driven: a small graph served by an estate stand-in (the engine's read); overrides written by
- * the service itself (atomic sidecar), never into the derived artifact.
+ * the service itself (atomic sidecar), never into the graph.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { mkdtemp, mkdir, readdir, writeFile, readFile, utimes } from 'node:fs/promises';
@@ -14,6 +14,7 @@ import {
   listRequirements,
   getRequirement,
   patchRequirement,
+  forgetRequirementsReads,
   type EstateRequirementsGraph,
   type EstateRequirementsRead,
   type RequirementsGraphReader,
@@ -41,8 +42,8 @@ function codeGraphAt(root: string): string {
  * The service takes the whole entry rather than a root path, because `code_graph_db` is resolved by
  * the engine and never re-derived by this package — that re-derivation is what FINDING-069 was.
  *
- * The fixtures leave the file absent (or unreadable — see the `one source` block): the artifact is
- * the only source the service reads.
+ * The service never opens that file itself (see the `one source` block): it only checks the repo is
+ * indexed, and the engine (here the estate stand-in) reads the graph.
  */
 function repoAt(root: string): RepoEntry {
   return {
@@ -147,6 +148,8 @@ async function fixtureRepo(): Promise<string> {
 describe('requirements service', () => {
   let root: string;
   beforeEach(async () => {
+    forgetRequirementsReads();
+    estateReads.length = 0;
     root = await fixtureRepo();
   });
 
@@ -158,15 +161,13 @@ describe('requirements service', () => {
     expect(page!.items.map((i) => i.key)).toContain('billing/invoices::REQ-001');
   });
 
-  it('returns null when the artifact has not been generated', async () => {
+  it('returns null when no graph has been built', async () => {
     const empty = await mkdtemp(join(tmpdir(), 'req-empty-'));
     expect(await listRequirements(repoAt(empty), { offset: 0, limit: 10 }, estateAt(empty))).toBeNull();
   });
 
-  // FINDING-065. The two sources are not interchangeable: the artifact is an evidence-gated
-  // snapshot that regenerates only when `domain-graph` clears its coverage bar, so it can lag
-  // the live store by hours. A caller that cannot tell which one answered cannot tell stale
-  // from current — the exact confusion this module's header records as already observed.
+  // FINDING-065: a caller must be able to tell which source answered. Since the operator ruling of
+  // 2026-10-31 it is the repository's estate store, read through the engine.
   it('names which source served the corpus', async () => {
     const page = await listRequirements(repoAt(root), { offset: 0, limit: 50 }, estateAt(root));
     expect(page!.source).toBe('store');
@@ -213,7 +214,7 @@ describe('requirements service', () => {
     expect(p1!.total).toBe(3);
   });
 
-  it('patch writes the overrides sidecar, never the artifact, and merges at read', async () => {
+  it('patch writes the overrides sidecar, never the graph, and merges at read', async () => {
     const before = await readFile(
       join(root, ESTATE_STANDIN),
       'utf8',
@@ -233,7 +234,7 @@ describe('requirements service', () => {
       join(root, ESTATE_STANDIN),
       'utf8',
     );
-    expect(after).toBe(before); // derived artifact untouched
+    expect(after).toBe(before); // the graph is untouched
     const ov = JSON.parse(
       await readFile(
         join(root, '.wicked-estate', 'requirements', 'requirements_overrides.json'),
@@ -251,29 +252,47 @@ describe('requirements service', () => {
     expect(detail!.riskSource).toBe('operator');
   });
 
-  it('overrides survive artifact regeneration (cache invalidates on mtime)', async () => {
+  it('overrides survive a rebuild of the graph in estate (the index follows the read content)', async () => {
     await patchRequirement(repoAt(root), 'auth/session::REQ-001', { risk: true }, estateAt(root));
-    // Simulate `wicked-core domain-graph` regenerating the artifact.
+    // Simulate `wicked-core domain-graph` rebuilding the graph in estate.
     const artPath = join(root, ESTATE_STANDIN);
     const graph = JSON.parse(await readFile(artPath, 'utf8')) as {
       domains: Record<string, { requirements: Record<string, { title: string }> }>;
     };
     graph.domains['auth/session']!.requirements['REQ-001']!.title = 'Regenerated title';
     await writeFile(artPath, JSON.stringify(graph), 'utf8');
-    const future = new Date(Date.now() + 5000);
-    await utimes(artPath, future, future);
+    forgetRequirementsReads(); // the next read asks the engine again (past the read window)
     const detail = await getRequirement(repoAt(root), 'auth/session::REQ-001', estateAt(root));
     expect(detail!.risk).toBe(true); // override survived
-    expect(detail!.sourceTitle).toBe('Regenerated title'); // fresh artifact picked up
+    expect(detail!.sourceTitle).toBe('Regenerated title'); // the rebuilt graph is picked up
+  });
+
+  it('one request reading a repository several times asks the engine once', async () => {
+    await Promise.all([
+      listRequirements(repoAt(root), { offset: 0, limit: 10 }, estateAt(root)),
+      getRequirement(repoAt(root), 'auth/session::REQ-001', estateAt(root)),
+    ]);
+    await patchRequirement(repoAt(root), 'auth/session::REQ-001', { notes: 'n' }, estateAt(root));
+    expect(estateReads).toEqual(['fixture']);
+  });
+
+  it('a repository not indexed yet answers null without asking the engine', async () => {
+    const bare = await mkdtemp(join(tmpdir(), 'req-unindexed-'));
+    const never: RequirementsGraphReader = {
+      getRequirementsGraphForRepo: async () => {
+        throw new Error('the engine was asked about a repository with no code graph');
+      },
+    };
+    expect(await listRequirements(repoAt(bare), { offset: 0, limit: 10 }, never)).toBeNull();
   });
 
   it('patching an unknown requirement 404s as null', async () => {
     expect(await patchRequirement(repoAt(root), 'nope::REQ-9', { risk: true }, estateAt(root))).toBeNull();
   });
 
-  // The artifact-path twin of the store orphan test: a regeneration that renames a domain or
-  // reqId strands the override keyed by the old spelling. Counted, never silently dropped.
-  it('counts override keys stranded by artifact regeneration', async () => {
+  // A rebuild that renames a domain or reqId strands the override keyed by the old spelling.
+  // Counted, never silently dropped.
+  it('counts override keys stranded by a rebuild', async () => {
     await patchRequirement(repoAt(root), 'auth/session::REQ-001', { risk: true }, estateAt(root));
     const ovPath = join(root, '.wicked-estate', 'requirements', 'requirements_overrides.json');
     const ov = JSON.parse(await readFile(ovPath, 'utf8')) as Record<string, unknown>;
@@ -291,14 +310,14 @@ describe('requirements service', () => {
 });
 
 
-// crew#548 (F-RC1-041 — FIX-IT-ALL L10-3, register BC-64): the live-store read is GONE. The engine
-// holds the repo's code-graph file open through its own rusqlite; a second SQLite library on the
-// same file in the same process is the F-E2E-021 class (one library per db file per process,
-// crew#541). The artifact is the one source; a repo without one answers null (the route's 404).
+// crew#548 (F-RC1-041 — FIX-IT-ALL L10-3, register BC-64): crew never opens the store itself. The
+// engine holds the repo's code-graph file open through its own rusqlite; a second SQLite library on
+// the same file in the same process is the F-E2E-021 class (one library per db file per process,
+// crew#541). The graph is read through the engine (`getRequirementsGraphForRepo`).
 /**
  * Operator ruling 2026-10-31: the graph is built at the configured minimum and labelled with its
- * share; every item is validated (with its count) or unconfirmed (with why). The artifact is the
- * shape `wicked-core domain-graph --repo-root` writes at crew's read path (domain-model 1.1.0).
+ * share; every item is validated (with its count) or unconfirmed (with why). The document is the
+ * shape the engine reads back from estate (domain-model 1.1.0).
  */
 describe('requirements service — coverage label + corroboration (domain-model 1.1.0)', () => {
   async function coreShapedRepo(): Promise<string> {
@@ -452,7 +471,7 @@ describe('requirements service — the graph comes from estate (operator ruling 
 });
 
 describe('requirements service — one source, one SQLite library (crew#548)', () => {
-  it('a repo with a code-graph db but NO artifact answers null — the store is never read', async () => {
+  it('a repo whose estate holds no graph answers null — crew never opens the store itself', async () => {
     const root = await mkdtemp(join(tmpdir(), 'req-nostore-'));
     await mkdir(dirname(codeGraphAt(root)), { recursive: true });
     // Whatever sits at the code-graph path is never opened: an unreadable "db" must not matter.

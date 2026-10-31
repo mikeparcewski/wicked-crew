@@ -6906,20 +6906,18 @@ export function registerRoutes(
     }
   });
 
-  // ── Domain-model browser (crew#44) ────────────────────────────────────────
-  // Reads the `requirements_graph.json` artifact produced by `wicked-core domain-graph`.
-  // Path: `.wicked-estate/requirements/requirements_graph.json` relative to cwd.
-
-  app.get(`${V}/domain-graph`, async (_req, reply) => {
-    const path = join(process.cwd(), '.wicked-estate', 'requirements', 'requirements_graph.json');
-    try {
-      const content = await fsp.readFile(path, 'utf8');
-      return { graph: JSON.parse(content) as unknown };
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { graph: null };
-      return reply.code(500).send({ error: message(err) });
-    }
-  });
+  // ── Domain-model browser (crew#44) — RETIRED ──────────────────────────────
+  // This read `<daemon cwd>/.wicked-estate/requirements/requirements_graph.json`. A requirements
+  // graph lives in its repository's estate store now (operator ruling 2026-10-31) and has a
+  // repository: `GET /repos/:id/domain-graph` and `GET /repos/:id/requirements` read it. Answering
+  // from a file here would serve a stale graph forever, so the route says where to go instead.
+  app.get(`${V}/domain-graph`, async (_req, reply) =>
+    reply.code(410).send({
+      error:
+        'The daemon-wide domain graph is retired: a requirements graph belongs to a repository and lives in its estate store. Read GET /api/v1/repos/:id/domain-graph or GET /api/v1/repos/:id/requirements.',
+      code: 'movedToRepository',
+    }),
+  );
 
   // ── Per-repo domain graph ─────────────────────────────────────────────────
   // The graph is read from the repo's estate store through the engine (operator ruling 2026-10-31:

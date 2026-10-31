@@ -16,6 +16,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 
 import type { CoreAdapter } from '../core/adapter.js';
+import { codeGraphErrorStatus } from '../core/repoPaths.js';
 import { AggregateHttpError, membersOf } from './project-aggregates.js';
 import { getRequirement } from './requirements.js';
 
@@ -127,7 +128,15 @@ export function registerProductRoutes(app: FastifyInstance, adapter: CoreAdapter
           unknown.push({ ...ref, reason: 'not a registered repository of this project' });
           continue;
         }
-        const detail = await getRequirement(repo, ref.key, adapter);
+        let detail: Awaited<ReturnType<typeof getRequirement>>;
+        try {
+          detail = await getRequirement(repo, ref.key, adapter);
+        } catch (err) {
+          // A repo whose daemon resolved no graph root is the same 503 as the repo surfaces.
+          const status = codeGraphErrorStatus(err);
+          if (status === null) throw err;
+          return reply.code(status).send({ error: err instanceof Error ? err.message : String(err) });
+        }
         if (detail === null) unknown.push({ ...ref, reason: 'no such requirement in the repository' });
         else rows.push({ ...ref, title: detail.title, statement: detail.statement });
       }
