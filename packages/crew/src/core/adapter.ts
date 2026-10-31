@@ -71,6 +71,7 @@ import { applyGovernanceStoreEnv, isStoreSpec, type GovernanceStoreLocation } fr
 import { isCouncilSize, isCouncilStaggerMs } from './council-settings.js';
 import { QE_OFF_REASON, launchRequiresQe, qeAcceptanceMode, qeSettingSkipReason } from './qe-acceptance-setting.js';
 import { applyVaultBinEnv, BOOT_VAULT_BIN, resolveShippedVaultBin, type VaultBinInputs, type VaultBinPosture } from './vault-bin.js';
+import { withFolderFindings } from './repoPaths.js';
 
 
 
@@ -3157,8 +3158,10 @@ export class CoreAdapter {
   }
 
   /** List every registered repo. */
+  /** Every registered repo, each with crew's `repo_folder_missing` finding when its folder is gone,
+   *  so every consumer can refuse by name before it spawns there (see `repoPaths.ts`). */
   async listRepos(): Promise<RepoEntry[]> {
-    return JSON.parse(await this.core.listRepos()) as RepoEntry[];
+    return withFolderFindings(JSON.parse(await this.core.listRepos()) as RepoEntry[]);
   }
 
   // ── Governance reads (crew#40) ──────────────────────────────────────────────

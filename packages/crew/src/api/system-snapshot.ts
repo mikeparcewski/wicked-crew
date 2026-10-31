@@ -29,6 +29,7 @@ import type {
   AcpCliDiagnostics,
   DiagnosticsSeatGovernanceEntry,
   RecordedEvent,
+  RepoEntry,
   SeatHealth,
   SessionView,
   SystemAttentionItem,
@@ -48,6 +49,7 @@ import { needsLevel } from './needs.js';
 import { callEstateToolRaw, estateMcpExe, ESTATE_INSTALL_HINT } from '../core/estate-mcp-client.js';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 import { runTouchesWindow } from './seat-record.js';
+import { repoFolderMissing } from '../core/repoPaths.js';
 
 // ── Bounds ──────────────────────────────────────────────────────────────────
 
@@ -140,6 +142,7 @@ const LABELS: Record<SystemInfraKey, string> = {
   seat_floor: 'Seat floor',
   disk: 'Free disk',
   load: 'Host load',
+  repos: 'Repositories',
 };
 
 export function infraRow(
@@ -644,6 +647,39 @@ export function stateHomeRow(home: { refusesLaunches: boolean; findings: Array<{
     return infraRow('state_home', 'degraded', home.findings[0]?.message ?? 'a state-home warning', home.remedy ?? 'See the finding.', started, { stateHome: home });
   }
   return infraRow('state_home', 'ok', 'every entry is classified', null, started, { stateHome: home });
+}
+
+/**
+ * The registered repositories' folders → a row: `down` while any is missing, naming each with its
+ * path, so the Nerve Center and Needs-you carry it as a fixable item instead of the spawn ENOENT a
+ * repo page used to show (rig, tiny-math). The finding is crew's own (`repo_folder_missing`, read on
+ * every `listRepos`); this only counts it.
+ */
+export function reposRow(read: Settled<RepoEntry[]>): SystemInfraRow {
+  const started = Date.now() - read.ms;
+  if (read.kind === 'timeout') {
+    return infraRow('repos', 'unknown', `the repository list did not answer within ${PROBE_TIMEOUT_MS / 1000} s`, 'Re-check.', started, {}, PROBE_TIMEOUT_MS);
+  }
+  if (read.kind === 'error') return infraRow('repos', 'unknown', `the repository list could not be read: ${read.error}`, 'Re-check.', started);
+  const repos = read.value;
+  const missing = repos.flatMap((r) => {
+    const f = repoFolderMissing(r);
+    return f === null ? [] : [{ id: r.id, name: r.name, path: r.root_path }];
+  });
+  if (missing.length === 0) {
+    return infraRow('repos', 'ok', repos.length === 0 ? 'no repository is registered' : `${repos.length === 1 ? 'the 1 registered repository has its folder' : `all ${repos.length} registered repositories have their folders`}`, null, started, { registered: repos.length });
+  }
+  const named = missing.map((m) => `${m.name} (${m.path})`).join(', ');
+  return infraRow(
+    'repos',
+    'down',
+    missing.length === 1
+      ? `This repository's folder is missing: ${named}. Its code map, history, chats and new jobs cannot run.`
+      : `${missing.length} repositories' folders are missing: ${named}. Their code maps, history, chats and new jobs cannot run.`,
+    `Re-link ${missing.length === 1 ? 'it' : 'each'}: register it again under the same name at its folder's new place, or put the folder back.`,
+    started,
+    { registered: repos.length, missing },
+  );
 }
 
 /** crew#1145: the disk row is `down` under this many free bytes (or over 95% used). */

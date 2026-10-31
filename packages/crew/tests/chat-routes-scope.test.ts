@@ -3,6 +3,7 @@
 // are pinned here with `app.inject` and a scratch base under mkdtemp (never the real
 // `<tmp>/wicked-crew-chats`).
 
+import { REPO_FOLDER_MISSING, repoFolderMissingMessage } from '../src/core/repoPaths.js';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -114,6 +115,9 @@ function fakeAdapter(): CoreAdapter {
   } as unknown as CoreAdapter;
 }
 
+/** When true, alpha's folder is gone: the record carries crew's `repo_folder_missing` finding. */
+let alphaFolderGone = false;
+
 function repos() {
   return [
     {
@@ -123,6 +127,7 @@ function repos() {
       default_branch: 'main',
       registered_at: 1,
       code_graph_db: graphFile,
+      ...(alphaFolderGone ? { findings: [{ code: REPO_FOLDER_MISSING, message: repoFolderMissingMessage('/srv/repos/alpha'), path: '/srv/repos/alpha' }] } : {}),
     },
   ];
 }
@@ -131,6 +136,7 @@ function repos() {
 beforeEach(async () => {
   projectRepoRefs = [];
   registryFails = false;
+  alphaFolderGone = false;
   holdFold = null;
   holdAttach = null;
   holdReposOnce = null;
@@ -392,6 +398,14 @@ describe('ASK-C1 — an ask starts a path: the open records eligibility and a ch
       [{ chatId: 'live', seats: ['claude'], idleSecs: null, cwd, codeGraphDb: graphFile, readRoots: ['/srv/repos/alpha'] }],
     );
     holdAttach = null;
+  });
+
+  it('opening a chat that names a repo whose folder is missing is refused (409) with the path', async () => {
+    alphaFolderGone = true;
+    const res = await open({ chatId: 'gone-now', clis: ['claude'], repoRefs: ['alpha'] });
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toEqual({ error: repoFolderMissingMessage('/srv/repos/alpha'), code: REPO_FOLDER_MISSING, path: '/srv/repos/alpha' });
+    expect(chatOpen).not.toHaveBeenCalled();
   });
 
   it('crew#823: an ask in a project scope files its run in the chat\'s project and is titled by the question; the scope statement rides the step instructions', async () => {

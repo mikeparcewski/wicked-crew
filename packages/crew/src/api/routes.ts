@@ -14,7 +14,7 @@ import { isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { videoPalette } from '../appearance/video-palette.js';
 import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, GovernanceReplayUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, addonSupportsQeOverride, addonSupportsReducedAssurance, humanGatePhaseIds, settingsFilePath } from '../core/adapter.js';
-import { codeGraphDb, codeGraphErrorStatus, requirementsGraph } from '../core/repoPaths.js';
+import { codeGraphDb, codeGraphErrorStatus, repoFolderMissing, repoFolderMissingBody, requirementsGraph } from '../core/repoPaths.js';
 import type {
   ConformanceRule,
   CodeGraphData,
@@ -268,6 +268,7 @@ import {
   skillsRow,
   sortRuns,
   stateHomeRow,
+  reposRow,
   unfinished,
   type ExecLike as SystemExecLike,
   type GovernanceInput,
@@ -400,6 +401,18 @@ function codeGraphDbOr503(repo: RepoEntry, reply: FastifyReply): string | null {
     void reply.code(status).send({ error: message(err) });
     return null;
   }
+}
+
+/**
+ * `true` after answering **409** when the repo's registered folder is gone, BEFORE anything spawns
+ * there: Node reports a missing spawn `cwd` as `spawn <binary> ENOENT`, which named an installed
+ * binary as the fault (rig, tiny-math). The words are the finding's, the same everywhere.
+ */
+function refusedMissingFolder(repo: RepoEntry, reply: FastifyReply): boolean {
+  const missing = repoFolderMissing(repo);
+  if (missing === null) return false;
+  void reply.code(409).send(repoFolderMissingBody(missing));
+  return true;
 }
 
 function message(err: unknown): string {
@@ -2581,6 +2594,7 @@ export function registerRoutes(
     const repos = await adapter.listRepos();
     const repo = repos.find((r) => r.id === id);
     if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
+    if (refusedMissingFolder(repo, reply)) return reply;
     const body = OnboardBodySchema.safeParse(req.body ?? {});
     if (!body.success) return reply.code(400).send(invalidBody(body.error, 'Invalid request body'));
     const refused = await onboardRefusal();
@@ -2675,6 +2689,18 @@ export function registerRoutes(
     // crew#753: a garden older than the minimum refuses the launch by name (found vs required).
     const garden = gardenRefusalBody();
     if (garden !== null) return reply.code(422).send(garden);
+    // A run on a repo whose folder is gone could only fail at its first worktree or floor, with the
+    // spawn's ENOENT for a reason: refused here by name, before the engine sees it.
+    // A registry that cannot be read here refuses nothing: the engine judges the ref as before.
+    if (b.repoRef !== undefined) {
+      let target: RepoEntry | undefined;
+      try {
+        target = (await adapter.listRepos()).find((r) => r.id === b.repoRef);
+      } catch {
+        target = undefined;
+      }
+      if (target !== undefined && refusedMissingFolder(target, reply)) return reply;
+    }
     // crew#645: an expired login reads signed out BEFORE routing — wait (bounded) for every seat's
     // missing or stale login check, so the standing below is the seats' own answer.
     if (b.clisJson === undefined) await rosterWithStanding.ready?.();
@@ -3808,6 +3834,7 @@ export function registerRoutes(
         return reply.code(resolution.status).send({
           error: resolution.error,
           ...(resolution.missing !== undefined ? { missing: resolution.missing } : {}),
+          ...(resolution.code !== undefined ? { code: resolution.code, path: resolution.path ?? null } : {}),
         });
       }
       const { scope, engine } = resolution;
@@ -6766,6 +6793,7 @@ export function registerRoutes(
     const repos = await adapter.listRepos();
     const repo = repos.find((r) => r.id === id);
     if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
+    if (refusedMissingFolder(repo, reply)) return reply;
 
     const graphPath = requirementsGraph(repo);
     const dbPath = codeGraphDbOr503(repo, reply);
@@ -6921,12 +6949,13 @@ export function registerRoutes(
 
   app.get(
     `${V}/repos/:id/graph`,
-    { config: { manifest: { responseType: 'RepoGraphResponse', statusCodes: [200, 404, 500, 503] } } },
+    { config: { manifest: { responseType: 'RepoGraphResponse', statusCodes: [200, 404, 409, 500, 503] } } },
     async (req, reply) => {
     const { id } = req.params as { id: string };
     const repos = await adapter.listRepos();
     const repo = repos.find((r) => r.id === id);
     if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
+    if (refusedMissingFolder(repo, reply)) return reply;
 
     const dbPath = codeGraphDbOr503(repo, reply);
     if (dbPath === null) return reply;
@@ -7012,6 +7041,7 @@ export function registerRoutes(
     const repos = await adapter.listRepos();
     const repo = repos.find((r) => r.id === id);
     if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
+    if (refusedMissingFolder(repo, reply)) return reply;
     const dbPath = codeGraphDbOr503(repo, reply);
     if (dbPath === null) return reply;
     if (!existsSync(dbPath)) {
@@ -7059,6 +7089,7 @@ export function registerRoutes(
     const repos = await adapter.listRepos();
     const repo = repos.find((r) => r.id === id);
     if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
+    if (refusedMissingFolder(repo, reply)) return reply;
 
     try {
       const { stdout } = await execCapped(
@@ -7096,6 +7127,7 @@ export function registerRoutes(
     const repos = await adapter.listRepos();
     const repo = repos.find((r) => r.id === id);
     if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
+    if (refusedMissingFolder(repo, reply)) return reply;
 
     try {
       const { stdout } = await execCapped(
@@ -8624,6 +8656,8 @@ export function registerRoutes(
         if (value !== null) toReviewCache = { at: Date.now(), value }; // a failed read is never kept
         return value;
       }, PROBE_TIMEOUT_MS);
+      // The registered repositories' folders (repo_folder_missing): a missing one is a fixable item.
+      const reposP = settleWithin(() => adapter.listRepos(), PROBE_TIMEOUT_MS);
       const gatesByYouP = settleWithin(async () => {
         const since = Date.now() - SYSTEM_STATS_DAYS * 86_400_000;
         const entries = await audit.readAll({ action: 'gate.decided', since });
@@ -8659,8 +8693,8 @@ export function registerRoutes(
         diskRow(stateHome),
       ]);
 
-      const [views, settings, openGates, diag, ping, rules, gatesByYou, infraProbed] = await Promise.all([
-        viewsP, settingsP, gatesP, diagP, pingP, rulesP, gatesByYouP, infraP,
+      const [views, settings, openGates, diag, ping, rules, gatesByYou, infraProbed, reposRead] = await Promise.all([
+        viewsP, settingsP, gatesP, diagP, pingP, rulesP, gatesByYouP, infraP, reposP,
       ]);
       // The broker probe refreshed each container seat's sign-in reading: the CLI cards read the
       // roster AFTER it, so one snapshot never says "broker: signed in" beside "claude: signed out".
@@ -8804,6 +8838,7 @@ export function registerRoutes(
         stateHomeRow(d === null ? null : (d.stateHome ?? null) as Parameters<typeof stateHomeRow>[0]),
         storesRow,
         seatFloorRow,
+        reposRow(reposRead),
         infraProbed[6] as SystemInfraRow,
         loadRow(),
       ];

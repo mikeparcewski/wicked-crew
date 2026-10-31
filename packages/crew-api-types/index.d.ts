@@ -7432,7 +7432,8 @@ export interface ChatScope {
    *  0.35.0, F-2R2-008) names the UI action that would change a `bound: false` outcome, when one
    *  would: `projects.graph.refresh` = build the project graph from the project page. */
   graph: { bound: boolean; reason: string; repoLabel?: string; action?: ProjectGraphAction };
-  /** `crew.repo` members of the project whose registry record is gone — named, not readable. */
+  /** `crew.repo` members of the project whose registry record is gone — named, not readable. (0.153.0) Also
+   *  any repo in scope (project or `everything`) whose folder is missing (`repo_folder_missing`). */
   dangling: string[];
 }
 
@@ -9298,7 +9299,10 @@ export type SystemInfraKey =
   | 'stores'
   | 'seat_floor'
   | 'disk'
-  | 'load';
+  | 'load'
+  /** (0.153.0) The registered repositories' folders: `down` while any is missing (moved or deleted),
+   *  naming each with its path; `details.missing` lists `{ id, name, path }`. ABSENT before. */
+  | 'repos';
 
 export interface SystemInfraRow {
   key: SystemInfraKey;

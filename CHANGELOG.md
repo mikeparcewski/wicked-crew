@@ -31,6 +31,18 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **A repository whose folder is gone is named, not reported as `spawn wicked-estate ENOENT`.** On the rig, tiny-math
+  was registered under a lane folder named `target`, and a cleanup that removed every `target/` as build output
+  deleted it. Node reports a missing spawn `cwd` exactly like a missing binary, so the repo page said "couldn't load
+  the code map: spawn wicked-estate ENOENT" and its history said "git executable not found on server". `listRepos` now
+  carries crew's own `repo_folder_missing` finding (path and fix) for a repo whose folder is missing. The repo routes
+  that spawn there (code map, blast radius, domain graph, git history, contributors, onboarding), a launch naming the
+  repo and a chat naming it answer 409 `repo_folder_missing` in the finding's words: "This repository's folder is
+  missing: <path>. Re-link it: register it again under the same name at its folder's new place, or put the folder
+  back." Testing recon/author and campaign fans refuse a repo whose folder is missing before any member launches; a
+  project or `everything` chat names such a repo in `dangling` instead of reading it. The Nerve Center gains a `repos` row (api-types 0.153.0), `down` while any folder is missing, so Needs-you
+  carries it as an item with that fix. `execCapped` names a missing cwd (`ExecCwdMissing`) instead of ENOENT; a
+  missing binary is still ENOENT.
 - **Crew writes the working document's event-derived lines itself, so a run nobody views gets them.** On rig run ea73afc0
   every Decisions, Open questions and Next line came from whichever studio tab had the run open (versions v2-v13, at the
   times a page was open); a run nobody viewed got none. `WorkingDocService.syncLines` now folds the run's own recorded
