@@ -9428,8 +9428,8 @@ export type SystemActionKind = 'sign_in' | 'recheck' | 'open_gate' | 'open_run' 
 /** (0.162.0) `POST /api/v1/system/seat-images/rebuild` (a person only: 403 `{ error }` for an agent
  *  or plugin bearer) → 202 once the engine process started; 409 while a rebuild runs; 503 on the
  *  host floor, when crew cannot reach or start the engine binary, when the engine's seat image
- *  status does not answer, or when no roster seat has an engine seat image (`started: false` with
- *  why). The rebuild runs `wicked-core seat-image build <roster seats>` in the background (minutes;
+ *  status does not answer, when the roster cannot be read, or when no roster seat has an engine seat
+ *  image (`started: false` with why). A running rebuild is 409 before anything else is asked. The rebuild runs `wicked-core seat-image build <roster seats>` in the background (minutes;
  *  it also holds an operator's own image); its progress reads on the `seat_images` row
  *  (`details.rebuild`). */
 export interface RebuildSeatImagesResponse {
@@ -9442,6 +9442,8 @@ export interface RebuildSeatImagesResponse {
     finishedAt: string | null;
     rc: number | null;
     tail: string[];
+    /** The last output line that reads as a failure; `null` when none. */
+    error: string | null;
     clis: string[];
   } | null;
 }

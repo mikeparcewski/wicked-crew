@@ -74,7 +74,7 @@ import { applyWorkerConfigRoot, signedInHeuristic } from './seat-signin.js';
 import { applyCouncilSettings, isCouncilSize, isCouncilStaggerMs } from '../core/council-settings.js';
 import { applyRequirementsGraphSettings, isRequirementsGraphSettings } from '../core/requirements-graph-setting.js';
 import { defaultLaunchRoster, markOptIn } from '../core/opt-in-seats.js';
-import { chatSeatAdmission, type StandingSeat } from './seat-standing.js';
+import { chatSeatAdmission, homeless, type StandingSeat } from './seat-standing.js';
 import {
   seatGovernanceDiagnostics,
   seatGovernanceWarnings,
@@ -8794,11 +8794,21 @@ export function registerRoutes(
         const out: RebuildSeatImagesResponse = { started: false, reason: 'seats run on the host floor: there are no seat images to rebuild', rebuild: null };
         return reply.code(503).send(out);
       }
+      // A rebuild already running is 409 before anything else is asked of a busy runtime.
+      const active = seatImageRebuilder.current();
+      if (active?.running === true) {
+        const out: RebuildSeatImagesResponse = { started: false, reason: 'a rebuild is already running', rebuild: active };
+        return reply.code(409).send(out);
+      }
       // The roster's seats the engine has a seat image for (it refuses a name it does not know).
-      const roster = rosterSeatClis() ?? [];
+      const roster = rosterSeatClis();
+      if (roster === null) {
+        const out: RebuildSeatImagesResponse = { started: false, reason: 'the roster could not be read', rebuild: active };
+        return reply.code(503).send(out);
+      }
       const st = await settleWithin(seatImageStatus, PROBE_TIMEOUT_MS);
       if (st.kind !== 'ok' || st.value === null) {
-        const why = st.kind === 'timeout' ? 'the engine did not answer its seat image status in time' : st.kind === 'error' ? st.error : 'the engine gave no seat image status';
+        const why = st.kind === 'timeout' ? 'the engine did not answer its seat image status in time' : st.kind === 'error' ? homeless(st.error) : 'the engine gave no seat image status';
         const out: RebuildSeatImagesResponse = { started: false, reason: why, rebuild: seatImageRebuilder.current() };
         return reply.code(503).send(out);
       }
@@ -8909,7 +8919,7 @@ export function registerRoutes(
         }),
         probeVault({ vault: adapter.vaultBin != null ? vaultDiagnostics(adapter.vaultBin) : null, exec: systemExec }),
         diskRow(stateHome),
-        probeSeatImages({ containerFloor, clis: rosterSeatClis(), status: seatImageStatus, rebuild: seatImageRebuilder.current() }),
+        probeSeatImages({ containerFloor, clis: rosterSeatClis(), status: seatImageStatus, rebuild: () => seatImageRebuilder.current() }),
       ]);
 
       const [views, settings, openGates, diag, ping, rules, gatesByYou, infraProbed, reposRead] = await Promise.all([

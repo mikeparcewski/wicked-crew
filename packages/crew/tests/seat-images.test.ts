@@ -15,6 +15,7 @@ import {
   parseSeatImageStatus,
   probeSeatImages,
   SeatImageRebuilder,
+  spawnLines,
   type SeatImageStatus,
   type SpawnLines,
 } from '../src/api/seat-images.js';
@@ -38,7 +39,7 @@ function status(over: Partial<SeatImageStatus> = {}, seats: Partial<Record<strin
 const diskAt = (usedPct: number) => ({ totalBytes: 100 * 2 ** 30, availBytes: (100 - usedPct) * 2 ** 30, usedPct });
 
 const probe = (st: SeatImageStatus | null, extra: Partial<Parameters<typeof probeSeatImages>[0]> = {}) =>
-  probeSeatImages({ containerFloor: true, clis: ['claude', 'codex', 'agy'], status: async () => st, rebuild: null, ...extra });
+  probeSeatImages({ containerFloor: true, clis: ['claude', 'codex', 'agy'], status: async () => st, rebuild: () => null, ...extra });
 
 describe('parseSeatImageStatus', () => {
   it('reads the engine answer, field by field, and refuses anything else', () => {
@@ -118,6 +119,29 @@ describe('the seat_images row', () => {
     expect(seatImagesRebuildFixes(full)).toBe(false);
   });
 
+  it('a missing base nothing can rebuild never offers a rebuild, even for unheld images', async () => {
+    const row = await probe(status({ base: { image: 'wicked-seat-base:rust', present: false, held: false } }, { claude: { held: false } }));
+    expect(row.details['unheld']).toEqual(['claude']);
+    expect(seatImagesRebuildFixes(row)).toBe(false);
+  });
+
+  it('when every roster seat runs an operator image, the seat base does not count', async () => {
+    const op = { operatorImage: true };
+    const row = await probe(status({ base: { image: 'wicked-seat-base:rust', present: false, held: false } }, { claude: op, codex: op, agy: op }));
+    expect(row.state).toBe('ok');
+  });
+
+  it('a pressed disk comes first in the remedy, before any image fix, for the runtime read', async () => {
+    const row = await probe(status({ disk: diskAt(95), runtime: '/opt/podman' }, { claude: { present: false, held: false, operatorImage: true } }));
+    expect(row.state).toBe('down');
+    expect(row.remedy).toMatch(/^Free space in the container runtime VM first: dangling volumes \(`podman volume prune`/);
+    expect(row.remedy).toMatch(/Then: Rebuild or re-pull your own seat image/);
+    expect(row.remedy).not.toMatch(/docker/);
+    // A missing image under a pressed disk: never "held and survive".
+    const missing = await probe(status({ disk: diskAt(80) }, { codex: { present: false, held: false } }));
+    expect(missing.remedy).not.toMatch(/held and survive/);
+  });
+
   it('with the disk pressed AND an image unheld, says both and never claims the images are held', async () => {
     const row = await probe(status({ disk: diskAt(80) }, { claude: { held: false } }));
     expect(row.reason).toMatch(/not held against image cleanup: claude/);
@@ -132,7 +156,7 @@ describe('the seat_images row', () => {
   });
 
   it('never reads ok without every reading: engine silent, older engine, roster unreadable, disk unread', async () => {
-    const silent = await probeSeatImages({ containerFloor: true, clis: ['claude'], status: () => new Promise(() => {}), rebuild: null, timeoutMs: 20 });
+    const silent = await probeSeatImages({ containerFloor: true, clis: ['claude'], status: () => new Promise(() => {}), rebuild: () => null, timeoutMs: 20 });
     expect(silent.state).toBe('unknown');
     const old = await probe(null);
     expect(old.state).toBe('unknown');
@@ -145,21 +169,24 @@ describe('the seat_images row', () => {
 
   it('spells home paths ~ in an engine error', async () => {
     const home = process.env['HOME'] ?? '/home/x';
-    const row = await probeSeatImages({ containerFloor: true, clis: ['claude'], status: async () => { throw new Error(`spawn ${home}/bin/wicked-core ENOENT`); }, rebuild: null });
+    const row = await probeSeatImages({ containerFloor: true, clis: ['claude'], status: async () => { throw new Error(`spawn ${home}/bin/wicked-core ENOENT`); }, rebuild: () => null });
     expect(row.reason).toContain('~/bin/wicked-core');
     expect(row.reason).not.toContain(home);
   });
 
   it('says a running rebuild (and offers no second one); a failed one only while it is not fixed', async () => {
     const running = await probe(status({}, { codex: { present: false, held: false } }), {
-      rebuild: { running: true, startedAt: '2026-10-31T20:00:00.000Z', finishedAt: null, rc: null, tail: [], clis: ['codex'] },
+      rebuild: () => ({ running: true, startedAt: '2026-10-31T20:00:00.000Z', finishedAt: null, rc: null, tail: [], error: null, clis: ['codex'] }),
     });
     expect(running.reason).toMatch(/rebuilding since 2026-10-31T20:00:00.000Z/);
+    expect(running.remedy).toMatch(/^Wait for the running rebuild/);
     expect(seatImagesRebuildFixes(running)).toBe(false);
-    const failedRebuild = { running: false, startedAt: 'a', finishedAt: 'b', rc: 1, tail: ['codex: pull access denied'], clis: ['codex'] };
-    const failed = await probe(status({}, { codex: { present: false, held: false } }), { rebuild: failedRebuild });
-    expect(failed.reason).toMatch(/the last rebuild failed \(exit 1\): codex: pull access denied/);
-    const healed = await probe(status(), { rebuild: failedRebuild });
+    // The failure is named by its own line, never by a later seat's success.
+    const failedRebuild = { running: false, startedAt: 'a', finishedAt: 'b', rc: 1, tail: ['claude: building x failed: pull access denied', 'codex: built y'], error: 'claude: building x failed: pull access denied', clis: ['claude', 'codex'] };
+    const failed = await probe(status({}, { codex: { present: false, held: false } }), { rebuild: () => failedRebuild });
+    expect(failed.reason).toMatch(/the last rebuild failed \(exit 1\): claude: building x failed/);
+    expect(failed.reason).not.toMatch(/codex: built y/);
+    const healed = await probe(status(), { rebuild: () => failedRebuild });
     expect(healed.state).toBe('ok');
     expect(healed.reason).not.toMatch(/failed/);
   });
@@ -188,7 +215,9 @@ describe('SeatImageRebuilder', () => {
     expect(await r.start(['claude'])).toMatchObject({ started: false, reason: 'a rebuild is already running' });
     h.line('#5 [2/4] RUN npm install');
     h.line(`claude: building failed in ${process.env['HOME'] ?? '/home/x'}/x`);
-    expect(r.current()!.tail).toEqual(['claude: building failed in ~/x']);
+    h.line('codex: built wicked-seat-codex:1');
+    expect(r.current()!.tail).toEqual(['claude: building failed in ~/x', 'codex: built wicked-seat-codex:1']);
+    expect(r.current()!.error).toBe('claude: building failed in ~/x');
     h.release(1);
     await new Promise((res) => setTimeout(res, 0));
     expect(r.current()).toMatchObject({ running: false, rc: 1 });
@@ -210,6 +239,25 @@ describe('SeatImageRebuilder', () => {
   });
 });
 
+describe('spawnLines (the real runner)', () => {
+  it.runIf(process.platform !== 'win32')('ends a process that ignores SIGTERM past its bound, and keeps the start of an overlong line', async () => {
+    const lines: string[] = [];
+    const h = spawnLines('/bin/sh', ['-c', `printf '%s\\n' "$(printf 'x%.0s' $(seq 1 600))"; trap '' TERM; sleep 30`], {
+      // Long enough for the shell to set its trap and print (a loaded host starts a shell slowly).
+      timeout: 2_000,
+      killAfterMs: 200,
+      onLine: (l) => lines.push(l),
+    });
+    await h.started;
+    const t0 = Date.now();
+    const rc = await h.done;
+    expect(Date.now() - t0).toBeLessThan(8_000);
+    expect(rc).not.toBe(0);
+    expect(lines[0]!.startsWith('xxx')).toBe(true);
+    expect(lines[0]!.length).toBeLessThanOrEqual(600);
+  }, 15_000);
+});
+
 describe('POST /system/seat-images/rebuild', () => {
   const apps: FastifyInstance[] = [];
   const saved = process.env['WICKED_SEAT_FLOOR'];
@@ -219,7 +267,8 @@ describe('POST /system/seat-images/rebuild', () => {
     else process.env['WICKED_SEAT_FLOOR'] = saved;
   });
 
-  async function harness(st: SeatImageStatus | null = status({}, { codex: { present: false, held: false } })) {
+  async function harness(st: SeatImageStatus | null = status({}, { codex: { present: false, held: false } }), roster: Array<{ key: string }> | null = [{ key: 'claude' }, { key: 'codex' }, { key: 'gemini' }]) {
+    let statusOk = true;
     process.env['WICKED_SEAT_FLOOR'] = 'container';
     const h = heldRunner();
     const app = Fastify({ logger: false });
@@ -241,14 +290,20 @@ describe('POST /system/seat-images/rebuild', () => {
       { audit: AuditLog.noop(), authMode: 'required' },
       {
         seatImageRebuilder: new SeatImageRebuilder(() => '/opt/wicked-core', h.run),
-        seatImageStatus: async () => st,
+        seatImageStatus: async () => {
+          if (!statusOk) throw new Error('FAKE runtime busy');
+          return st;
+        },
         // The roster names a seat the engine has no image for: it is never passed to the build.
-        rosterWithStanding: (() => [{ key: 'claude' }, { key: 'codex' }, { key: 'gemini' }]) as unknown as NonNullable<RuntimeDeps['rosterWithStanding']>,
+        rosterWithStanding: (() => {
+          if (roster === null) throw new Error('FAKE roster unreadable');
+          return roster;
+        }) as unknown as NonNullable<RuntimeDeps['rosterWithStanding']>,
       },
     );
     await app.ready();
     apps.push(app);
-    return { app, h };
+    return { app, h, failStatus: () => { statusOk = false; } };
   }
 
   const HUMAN = { 'x-actor': 'human:operator' };
@@ -273,6 +328,23 @@ describe('POST /system/seat-images/rebuild', () => {
     expect(second.statusCode).toBe(409);
     expect(h.calls).toHaveLength(1);
     h.release(0);
+  });
+
+  it('a press while a rebuild runs is 409 even when the busy runtime cannot answer a status', async () => {
+    const { app, h, failStatus } = await harness();
+    expect((await post(app, HUMAN)).statusCode).toBe(202);
+    failStatus();
+    expect((await post(app, HUMAN)).statusCode).toBe(409);
+    expect(h.calls).toHaveLength(1);
+    h.release(0);
+  });
+
+  it('an unreadable roster is 503, never a build of nothing', async () => {
+    const { app, h } = await harness(undefined, null);
+    const res = await post(app, HUMAN);
+    expect(res.statusCode).toBe(503);
+    expect((res.json() as { reason: string }).reason).toMatch(/roster could not be read/);
+    expect(h.calls).toHaveLength(0);
   });
 
   it('is 503 on the host floor and when the engine gives no status, and runs nothing', async () => {

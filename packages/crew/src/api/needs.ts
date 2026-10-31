@@ -670,7 +670,8 @@ export function seatImagesRebuildFixes(row: SystemInfraRow): boolean {
   const n = (v: unknown): number => (Array.isArray(v) ? v.length : 0);
   const baseGone = d.images?.base?.present === false;
   const baseRebuildable = baseGone && d.images?.baseRecipe === true;
-  if (baseGone && !baseRebuildable && n(d.missing) > 0) return false;
+  // A base nothing can rebuild: a build of any engine seat image fails on it.
+  if (baseGone && !baseRebuildable) return false;
   if ((d.images?.seats ?? []).some((x) => x.present === false && x.operatorImage === true)) return false;
   return n(d.missing) > 0 || n(d.unheld) > 0 || d.images?.floor?.present === false || baseRebuildable;
 }
