@@ -71,6 +71,7 @@ import { NO_LEARNINGS_WORKFLOWS, type RunLearningsService } from '../learnings/s
 import { SeatHealthTracker } from './seat-health.js';
 import { applyWorkerConfigRoot, signedInHeuristic } from './seat-signin.js';
 import { applyCouncilSettings, isCouncilSize, isCouncilStaggerMs } from '../core/council-settings.js';
+import { applyRequirementsGraphSettings, isRequirementsGraphSettings } from '../core/requirements-graph-setting.js';
 import { defaultLaunchRoster, markOptIn } from '../core/opt-in-seats.js';
 import { chatSeatAdmission, type StandingSeat } from './seat-standing.js';
 import {
@@ -7492,6 +7493,12 @@ export function registerRoutes(
         .code(400)
         .send({ error: 'councilSpawnStaggerMs must be an integer between 0 and 30000' });
     }
+    // Requirements-graph minimum coverage (operator ruling 2026-10-31): `{ minCoveragePct: 1..100 }`.
+    if (Object.hasOwn(patch, 'requirementsGraph') && !isRequirementsGraphSettings(patch.requirementsGraph)) {
+      return reply
+        .code(400)
+        .send({ error: 'requirementsGraph.minCoveragePct must be a whole percentage between 1 and 100' });
+    }
     if (Object.hasOwn(patch, 'worker_config_root')) {
       const root = patch.worker_config_root;
       if (typeof root !== 'string' || (root !== '' && !isAbsolute(root))) {
@@ -7715,6 +7722,7 @@ export function registerRoutes(
       'baseSkillPolicy',
       'councilSize',
       'councilSpawnStaggerMs',
+      'requirementsGraph',
     ];
     const safe: Partial<import('../core/types.js').CrewSystemSettings> = {};
     for (const key of allowed) {
@@ -7743,6 +7751,8 @@ export function registerRoutes(
     applyWorkerConfigRoot(settings.worker_config_root);
     // …and the council size + stagger, read by the engine per council (wicked-core#888).
     applyCouncilSettings(settings);
+    // …and the requirements-graph minimum, read by the engine's coverage check and domain-graph step.
+    applyRequirementsGraphSettings(settings);
     // Re-judge and re-export the BASE skill (crew#554) — the engine reads WICKED_BASE_SKILL_REF at
     // intake, per launch, so this alone makes a changed name or policy live at the next launch.
     // Only when the patch named either key: an unrelated settings write must not re-log the seam.

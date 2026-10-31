@@ -41,6 +41,21 @@ mentioned only where a daemon release depends on them.
   user plugins in the `voice-dashboard` panel slot) in `daemon-voice-dashboard.json`. Every voice route is the human
   operator's alone and loopback only. `capabilities.voice` says the routes are served (api-types 0.156.0 `VoiceStatus`,
   `VoiceTranscribeResponse`, `VoiceDashboard`, `VoiceWidgetManifest`).
+- **The requirements graph: a minimum coverage setting, its coverage label and each item's corroboration** (operator
+  ruling 2026-10-31; pairs with wicked-core#1215, which writes the graph where crew reads it). Settings
+  `requirementsGraph.minCoveragePct` (a whole percentage 1..100, default 80; `PUT /settings` refuses anything else with
+  400, a hand-edited invalid value reads as the default). The daemon exports it as
+  `WICKED_REQUIREMENTS_MIN_COVERAGE_PCT` at boot and on every change (the council settings' seam), and the engine's
+  coverage check and `domain-graph` step read it: a repository's graph is built once that share of its behaviours is
+  mapped; below it the `domain-extraction` run says "N% mapped, minimum M%" and keeps the mapping for the next run.
+  `GET /repos/:id/requirements` now carries the graph's `coverage` (`mappedPct`, `minPct`, counts; "82% of behaviours
+  mapped") and `corroboration {validated, unconfirmed}` over the corpus, and every item (list and detail) its
+  `corroboration`: `validated` with its count of independent sources (callers, tests, docs, agreeing extractor seats),
+  or `unconfirmed` with `why {code, text}` (e.g. "src/actor.rs names it, but the code index skipped that file").
+  `null` on a graph built before those fields, never a guess. api-types 0.159.0: `SystemSettings.requirementsGraph`,
+  `RequirementCorroboration`, `RequirementsCoverage`, `RequirementSummary.corroboration`,
+  `RequirementsPage.coverage` / `.corroboration`.
+
 - **"Is this going well?": an in-flight check on a working step** (operator 2026-10-30: "if it's been running long you
   can have an agent analyze right there, to make sure no tokens are wasted and no problems are occurring").
   `POST /runs/:id/units/:ord/inspect` (a human operator only, audited `unit.inspected`; 409 `not_working` for a step
