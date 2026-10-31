@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.154.0",
+  "apiTypesVersion": "0.155.0",
   "endpoints": [
     {
       "method": "GET",
@@ -2479,6 +2479,79 @@
         409,
         500,
         501
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/voice/dashboard",
+      "requestType": null,
+      "responseType": "VoiceDashboard",
+      "statusCodes": [
+        200,
+        403,
+        503
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/voice/dashboard",
+      "requestType": "PutVoiceDashboardBody",
+      "responseType": "VoiceDashboard",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        503
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/voice/model",
+      "requestType": null,
+      "responseType": "VoiceStatus",
+      "statusCodes": [
+        200,
+        403
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/voice/model",
+      "requestType": "PostVoiceModelBody",
+      "responseType": "VoiceStatus",
+      "statusCodes": [
+        200,
+        202,
+        400,
+        403,
+        409
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/voice/status",
+      "requestType": null,
+      "responseType": "VoiceStatus",
+      "statusCodes": [
+        200,
+        403
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/voice/transcribe",
+      "requestType": "audio/wav",
+      "responseType": "VoiceTranscribeResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        409,
+        413,
+        415,
+        429,
+        500,
+        504
       ]
     },
     {
