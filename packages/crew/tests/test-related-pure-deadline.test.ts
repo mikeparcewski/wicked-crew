@@ -5,7 +5,7 @@
 // runTargeted's io seams; no vitest is spawned.
 import { beforeAll, describe, expect, it } from 'vitest';
 
-type RunResult = { status: number; output: string; spawnError: string | null };
+type RunResult = { status: number; output: string; spawnError: string | null; truncated?: boolean };
 interface TestRelated {
   RETRY_MARKER: string;
   runTargeted(
@@ -33,10 +33,10 @@ const TIMEOUT_A = [' FAIL  tests/a.test.ts > slow', 'Error: Test timed out in 30
 const ASSERT_B = [' FAIL  tests/b.test.ts > wrong', 'AssertionError: expected 1 to be 2 // Object.is equality'];
 const pass: RunResult = { status: 0, output: ' Test Files  1 passed (1)', spawnError: null };
 
-async function drive(firstOutput: string, rerun: RunResult = pass) {
+async function drive(firstOutput: string, rerun: RunResult = pass, truncated = false) {
   const calls: string[][] = [];
   const lines: string[] = [];
-  const results: RunResult[] = [{ status: 1, output: firstOutput, spawnError: null }, rerun];
+  const results: RunResult[] = [{ status: 1, output: firstOutput, spawnError: null, truncated }, rerun];
   const code = await mod.runTargeted(['packages/crew/src/x.ts'], {
     run: async (argv) => {
       calls.push(argv);
@@ -134,5 +134,43 @@ describe('crew#1223 — the named-files retry needs a purely-deadline failure se
     const r = await drive(out, { status: 1, output: '', spawnError: null });
     expect(r.code).toBe(1);
     expect(r.calls).toHaveLength(2);
+  });
+});
+
+describe('crew#1223 review of #1239 — a deadline must be the whole failure, and the whole output', () => {
+  it('a test title with a newline that puts a deadline marker above an AssertionError is not a deadline', async () => {
+    const out = [
+      ' FAIL  tests/a.test.ts > renders:',
+      'Test timed out in 30000ms.',
+      'AssertionError: expected 1 to be 2 // Object.is equality',
+      '',
+      ' Test Files  1 failed | 9 passed (10)',
+    ].join('\n');
+    const r = await drive(out);
+    expect(r.code).toBe(1);
+    expect(r.calls).toHaveLength(1);
+    expect(r.text).toContain(`${mod.RETRY_MARKER} none — a non-deadline failure in tests/a.test.ts;`);
+  });
+
+  it('a real timeout whose body carries only its own Error line and hints is still a deadline', async () => {
+    const out = [
+      ' FAIL  tests/a.test.ts > slow',
+      'Error: Test timed out in 30000ms.',
+      'If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".',
+      '',
+      ' Test Files  1 failed | 9 passed (10)',
+    ].join('\n');
+    const r = await drive(out);
+    expect(r.code).toBe(0);
+    expect(r.calls).toHaveLength(2);
+  });
+
+  it('a capture that overflowed 512 KiB refuses the named-files re-run, even when the count reconciles', async () => {
+    // The kept tail names only a timeout in a.test.ts; an assertion in the same file was printed earlier and lost.
+    const out = [...TIMEOUT_A, '', ' Test Files  1 failed | 9 passed (10)'].join('\n');
+    const r = await drive(out, pass, true);
+    expect(r.code).toBe(1);
+    expect(r.calls).toHaveLength(1);
+    expect(r.text).toContain(`${mod.RETRY_MARKER} none — the output passed the 512 KiB capture, so a failure may be lost;`);
   });
 });

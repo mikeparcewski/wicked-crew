@@ -377,12 +377,22 @@ export function failedTestFiles(output) {
   return out;
 }
 
-/** True when the first non-blank line of an error body OPENS with a deadline marker (after an optional `Error: `). */
+/** True when the line OPENS with a deadline marker (after an optional `Error: `). */
+function opensWithDeadline(raw) {
+  const line = raw.trim().replace(/^Error:\s*/, '');
+  return RETRYABLE_FAILURES.some(({ re }) => new RegExp(`^(?:${re.source})`).test(line));
+}
+
+/**
+ * True when an error body is a deadline and nothing else: its first non-blank line opens with a deadline
+ * marker, and no line of it is another error (`AssertionError: …`, `TypeError: …`, `Error: …` that is not a
+ * deadline). The second rule matters because vitest prints the full test name in the header, so a title with a
+ * newline puts its own text on the first body line, above the real diagnostic (codex on #1239).
+ */
 function isDeadlineError(body) {
   const first = body.find((l) => l.trim() !== '');
-  if (first === undefined) return false;
-  const line = first.trim().replace(/^Error:\s*/, '');
-  return RETRYABLE_FAILURES.some(({ re }) => new RegExp(`^(?:${re.source})`).test(line));
+  if (first === undefined || !opensWithDeadline(first)) return false;
+  return !body.some((l) => /^\s*(?:[A-Za-z]*Error|AssertionError)(?:\s*\[[^\]]*\])?:/.test(l) && !opensWithDeadline(l));
 }
 
 /**
@@ -396,10 +406,15 @@ function isDeadlineError(body) {
  *    header lost past the 512 KiB capture would otherwise leave a failing file unre-run;
  *  • the summary reports no unhandled errors (`Errors  N error`) — vitest attributes those to no file, so a
  *    re-run of the named files cannot clear them.
+ *  • the capture did not overflow (`truncated`): past 512 KiB a failure may be gone without a trace the
+ *    count can see, when it shared a file with a timeout that was kept.
  * The engine's own rule (wicked-core#1198) is that a passing failing-set retry never stands for a failure it
  * did not name; this keeps the self-retry inside that.
  */
-export function namedRetryRefusal(output, failed) {
+export function namedRetryRefusal(output, failed, { truncated = false } = {}) {
+  // The capture keeps the last 512 KiB. Once it overflowed, a failure printed earlier may be gone, and the file
+  // count cannot see it when it shared a file with a retained timeout (codex on #1239).
+  if (truncated) return 'the output passed the 512 KiB capture, so a failure may be lost';
   const text = stripAnsi(output);
   // A block is the consecutive FAIL headers vitest prints for failures sharing ONE error body, plus that body.
   const blocks = [];
@@ -457,16 +472,20 @@ function spawnCapturing(argv, cwd, out, err) {
     });
     const CAP = 512 * 1024;
     let buf = '';
+    let truncated = false;
     const take = (sink) => (chunk) => {
       const s = chunk.toString();
       sink(s);
       buf += s;
-      if (buf.length > CAP) buf = buf.slice(-CAP);
+      if (buf.length > CAP) {
+        buf = buf.slice(-CAP);
+        truncated = true;
+      }
     };
     child.stdout?.on('data', take(out));
     child.stderr?.on('data', take(err));
-    child.on('error', (err) => done({ status: 1, output: buf, spawnError: err.message }));
-    child.on('close', (code) => done({ status: code ?? 1, output: buf, spawnError: null }));
+    child.on('error', (err) => done({ status: 1, output: buf, spawnError: err.message, truncated }));
+    child.on('close', (code) => done({ status: code ?? 1, output: buf, spawnError: null, truncated }));
   });
 }
 
@@ -582,7 +601,7 @@ export async function runTargeted(files, io = {}) {
     const elapsedS = (now() - startedMs) / 1000;
     let retryArgv = null;
     if (failed.length > 0) {
-      const refusal = namedRetryRefusal(first.output, failed);
+      const refusal = namedRetryRefusal(first.output, failed, { truncated: first.truncated === true });
       if (refusal !== null) {
         out(
           `${RETRY_MARKER} none — ${refusal}; the named-files re-run cannot stand for the whole run (${why}), ` +
