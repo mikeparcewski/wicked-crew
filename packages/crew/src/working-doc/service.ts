@@ -148,14 +148,19 @@ export function goalFrom(problem: string): string {
   const at = text.indexOf(LINKED_ISSUES_MARKER);
   const body = (at === -1 ? text : text.slice(0, at)).trim();
   if (body.length <= GOAL_MAX_CHARS) return body;
-  // Room for the ellipsis inside the cap; back up to the last whitespace unless the cut already fell on one.
+  // Room for the ellipsis inside the cap; back up to the last whitespace (any Unicode space, the
+  // same `\s` as the boundary test) unless the cut already fell on one.
   const room = GOAL_MAX_CHARS - 1;
   let end = room;
   if (!/\s/u.test(body[room] ?? '')) {
     const head = body.slice(0, room);
-    const space = Math.max(head.lastIndexOf(' '), head.lastIndexOf('\n'), head.lastIndexOf('\t'));
+    let space = head.length - 1;
+    while (space > 0 && !/\s/u.test(head[space] ?? '')) space -= 1;
     if (space > 0) end = space;
   }
+  // Never between the two halves of a surrogate pair (an emoji, a long unbroken token).
+  const last = body.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
   const kept = body.slice(0, end).trimEnd();
   return `${kept}…`;
 }
