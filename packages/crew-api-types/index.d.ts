@@ -6662,6 +6662,33 @@ export interface RunInventoryUnit {
 }
 
 /**
+ * `GET /runs/:id/learnings` — what a run proposed to the approve queue (run learnings, crew src/learnings).
+ * Every learning is a `memory` proposal attributed to the run (`provenance.run_id`); nothing is used until a
+ * person approves it on the Memory page. `distilling` is true while the run's distil seat (one cheap seat
+ * that did not build the run) is still reading its evidence.
+ */
+export interface RunLearningsResponse {
+  runId: string;
+  proposed: number;
+  pending: number;
+  approved: number;
+  rejected: number;
+  distilling: boolean;
+  items: Array<{
+    /** The proposal id (approve or reject it through `/proposals/:id/*`). */
+    id: string;
+    state: string;
+    /** `gotcha` | `decision` | `pattern` | `steering`, as filed. */
+    capture: string | null;
+    content: string;
+    /** Who worded it: `crew` (from the run's record) or the distil seat. */
+    agent: string | null;
+    /** Unix seconds. */
+    createdAt: number | null;
+  }>;
+}
+
+/**
  * `GET /runs/:id/inventory` (404 for an unknown run). `complete` is true only when at least one
  * unit claimed an inventory, every claim is `full` and every finished unit's output was readable;
  * a unit whose output could not be read is listed in `unreadUnits`. `readable: false` when the

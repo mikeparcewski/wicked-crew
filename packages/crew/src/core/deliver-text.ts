@@ -32,6 +32,12 @@ import { homedir } from 'node:os';
 
 import type { GateSpec, PhaseDef, SessionView, WorkUnit } from './types.js';
 import { stripLinkedIssues } from './linked-issues.js';
+import { stripRunLearnings } from '../learnings/recall.js';
+
+/** The intent without the daemon's appended blocks: linked-issue text (crew#627) and approved learnings. */
+function intentOnly(problem: string): string {
+  return stripRunLearnings(stripLinkedIssues(problem));
+}
 import { rewriteHostPaths, withRootAliases, type ChatRepoRoot } from './host-paths.js';
 
 /**
@@ -423,7 +429,7 @@ function sameRepo(ref: string, repoRef: string | null | undefined): boolean {
 export function issueRefs(rawIntent: string, repoRef?: string | null): IssueRefs {
   // The daemon's linked-issues block (crew#627) is issue TEXT, not the intent: its mentions are
   // never the run's references.
-  const intent = stripLinkedIssues(rawIntent);
+  const intent = intentOnly(rawIntent);
   const normalize = (prefix: string | undefined, n: string): string => {
     if (prefix === undefined || prefix === '') return `#${n}`;
     if (!prefix.includes('/') && repoRef !== undefined && repoRef !== null && prefix === repoRef) return `#${n}`;
@@ -464,7 +470,7 @@ export function issueRefs(rawIntent: string, repoRef?: string | null): IssueRefs
  */
 export function adoWorkItemIds(rawIntent: string): string[] {
   const out: string[] = [];
-  for (const m of stripLinkedIssues(rawIntent).matchAll(/(?<![\w#])AB#(\d+)\b/gi)) {
+  for (const m of intentOnly(rawIntent).matchAll(/(?<![\w#])AB#(\d+)\b/gi)) {
     const id = String(Number(m[1]));
     if (id !== '0' && !out.includes(id)) out.push(id);
   }
@@ -547,7 +553,7 @@ export function composeDeliverText(raw: DeliverTextFacts, links: IssueRefs = iss
   const f = redactFacts(raw);
   const title = deliverTitle(f.intent, f.runId, f.workflowId);
   const { fixes, refs } = links;
-  const intent = stripLinkedIssues(f.intent).replace(/\r\n?/g, '\n').replace(CONTROL_CHARS, ' ').trim();
+  const intent = intentOnly(f.intent).replace(/\r\n?/g, '\n').replace(CONTROL_CHARS, ' ').trim();
   const out: string[] = [];
 
   out.push('## Intent', '', intent === '' ? '_(the run recorded no intent)_' : intent, '');
@@ -1154,7 +1160,7 @@ export function factsFromRun(
   return {
     runId: s.id,
     // crew#627: the daemon's linked-issues block is taken back out — the PR names the intent.
-    intent: stripLinkedIssues(s.problem ?? ''),
+    intent: intentOnly(s.problem ?? ''),
     // An explicit `null` is the resolver's answer (a user plan, free text): no workflow line, never
     // the engine's synthetic `wf-<run>` id.
     workflowId: resolved.workflowId !== undefined ? resolved.workflowId : baseWorkflowId(s.workflow_id, s.id),
@@ -1204,7 +1210,7 @@ export function factsFromWorkflow(input: {
 }): DeliverTextFacts {
   return {
     runId: input.runId,
-    intent: stripLinkedIssues(input.intent ?? ''),
+    intent: intentOnly(input.intent ?? ''),
     workflowId: input.workflowId,
     repoRef: input.repoRef,
     runUrl: input.runUrl,
