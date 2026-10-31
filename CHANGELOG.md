@@ -46,7 +46,7 @@ mentioned only where a daemon release depends on them.
   mapped") and `corroboration {validated, unconfirmed}` over the corpus, and every item (list and detail) its
   `corroboration`: `validated` with its count of independent sources (callers, tests, docs, agreeing extractor seats),
   or `unconfirmed` with `why {code, text}` (e.g. "src/actor.rs names it, but the code index skipped that file").
-  `null` on a graph built before those fields, never a guess. api-types 0.156.0: `SystemSettings.requirementsGraph`,
+  `null` on a graph built before those fields, never a guess. api-types 0.159.0: `SystemSettings.requirementsGraph`,
   `RequirementCorroboration`, `RequirementsCoverage`, `RequirementSummary.corroboration`,
   `RequirementsPage.coverage` / `.corroboration`.
 

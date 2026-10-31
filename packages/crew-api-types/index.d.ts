@@ -6363,7 +6363,7 @@ export interface SystemSettings {
    */
   councilSpawnStaggerMs?: number;
   /**
-   * (api-types 0.156.0, operator ruling 2026-10-31) The requirements graph's minimum coverage:
+   * (api-types 0.159.0, operator ruling 2026-10-31) The requirements graph's minimum coverage:
    * `minCoveragePct`, a whole percentage 1..100, default 80. A repository's requirements graph is
    * built, and shown labelled with its share ("82% of behaviours mapped"), once at least this share
    * of its behaviour-bearing code is mapped; below it the `domain-extraction` run says "N% mapped,
@@ -6565,7 +6565,7 @@ export interface SettingsResponse {
 
 // ── Requirements management (server-side search + overrides; crew api/requirements.ts) ──
 /**
- * (0.156.0, operator ruling 2026-10-31 "validation by duplication") How many INDEPENDENT sources in
+ * (0.159.0, operator ruling 2026-10-31 "validation by duplication") How many INDEPENDENT sources in
  * the repository support a requirement beyond the extractor's own statement, as `wicked-core
  * domain-graph` computed it: distinct callers (`callSites`), tests, docs that name it, and extractor
  * seats beyond the first. `validated` at 2 or more; otherwise `unconfirmed`, and `why` says what is
@@ -6584,7 +6584,7 @@ export interface RequirementCorroboration {
 }
 
 /**
- * (0.156.0) The share of behaviour-bearing code a requirements graph maps, and the minimum it was
+ * (0.159.0) The share of behaviour-bearing code a requirements graph maps, and the minimum it was
  * built at (`SystemSettings.requirementsGraph.minCoveragePct`): label the graph "82% of behaviours
  * mapped". `mappedPct` is floored, so it never reads above the minimum it was compared to.
  */
@@ -6608,7 +6608,7 @@ export interface RequirementSummary {
   risk: boolean;
   riskSource: 'operator' | 'data' | null;
   edited: boolean;
-  /** (0.156.0) Validated or unconfirmed (with why). `null` on a graph built before the field;
+  /** (0.159.0) Validated or unconfirmed (with why). `null` on a graph built before the field;
    *  ABSENT from an older daemon. */
   corroboration?: RequirementCorroboration | null;
 }
@@ -6642,10 +6642,10 @@ export interface RequirementsPage {
    * the annotation workflow, then re-apply or delete the stale keys.
    */
   orphanedOverrides?: number;
-  /** (0.156.0) The graph's coverage label; `null` on a graph built before the field, ABSENT from an
+  /** (0.159.0) The graph's coverage label; `null` on a graph built before the field, ABSENT from an
    *  older daemon. */
   coverage?: RequirementsCoverage | null;
-  /** (0.156.0) How many requirements of the whole corpus are validated / unconfirmed. */
+  /** (0.159.0) How many requirements of the whole corpus are validated / unconfirmed. */
   corroboration?: { validated: number; unconfirmed: number };
 }
 
