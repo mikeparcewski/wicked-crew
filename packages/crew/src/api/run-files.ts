@@ -10,7 +10,7 @@
 
 import { constants as fsConstants, promises as fsp, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
+import { ExecCwdMissing, execCapped, ExecOutputTooLarge } from '../core/exec.js';
 import { deliverExclusionByName, deliverExclusionReason } from '../core/deliver-exclusions.js';
 
 /** File-content cap (DES-FEEDBACK-002 §3.3): past this, `content` holds the first 512 KB and
@@ -255,6 +255,9 @@ async function gitQuery(workdir: string, args: string[]): Promise<string | null>
     return stdout.trim();
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') throw err;
+    // A workdir swept mid-request is an operational failure, never "unresolvable base" (the route
+    // then serves the run branch): before ExecCwdMissing it arrived here as ENOENT.
+    if (err instanceof ExecCwdMissing) throw err;
     if (err instanceof ExecOutputTooLarge) throw err;
     const proc = err as { killed?: boolean; signal?: string | null };
     if (proc.killed === true || (proc.signal !== undefined && proc.signal !== null)) throw err;

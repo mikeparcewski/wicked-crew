@@ -20,7 +20,8 @@ mentioned only where a daemon release depends on them.
   that spawn there (code map, blast radius, domain graph, git history, contributors, onboarding), a launch naming the
   repo and a chat naming it answer 409 `repo_folder_missing` in the finding's words: "This repository's folder is
   missing: <path>. Re-link it: register it again under the same name at its folder's new place, or put the folder
-  back." The Nerve Center gains a `repos` row (api-types 0.152.0), `down` while any folder is missing, so Needs-you
+  back." Testing recon/author and campaign fans refuse a repo whose folder is missing before any member launches; a
+  project or `everything` chat names such a repo in `dangling` instead of reading it. The Nerve Center gains a `repos` row (api-types 0.152.0), `down` while any folder is missing, so Needs-you
   carries it as an item with that fix. `execCapped` names a missing cwd (`ExecCwdMissing`) instead of ENOENT; a
   missing binary is still ENOENT.
 - **Crew writes the working document's event-derived lines itself, so a run nobody views gets them.** On rig run ea73afc0

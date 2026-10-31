@@ -150,7 +150,7 @@ export function registerCampaignRoutes(
           repoRefs: body.repoRefs,
         });
         if (!scope.ok) {
-          return reply.code(scope.status).send({ error: scope.error });
+          return reply.code(scope.status).send({ error: scope.error, ...(scope.code !== undefined ? { code: scope.code, path: scope.path ?? null } : {}) });
         }
         const multiscope = body.projectId !== undefined || body.repoRefs !== undefined;
         const fanned = fanScenarios(body.scenarios, scope.repos);

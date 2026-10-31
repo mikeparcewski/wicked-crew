@@ -7405,7 +7405,8 @@ export interface ChatScope {
    *  0.35.0, F-2R2-008) names the UI action that would change a `bound: false` outcome, when one
    *  would: `projects.graph.refresh` = build the project graph from the project page. */
   graph: { bound: boolean; reason: string; repoLabel?: string; action?: ProjectGraphAction };
-  /** `crew.repo` members of the project whose registry record is gone — named, not readable. */
+  /** `crew.repo` members of the project whose registry record is gone — named, not readable. (0.152.0) Also
+   *  any repo in scope (project or `everything`) whose folder is missing (`repo_folder_missing`). */
   dangling: string[];
 }
 

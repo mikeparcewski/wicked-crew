@@ -21,6 +21,8 @@
  */
 
 import type { CoreAdapter } from '../core/adapter.js';
+import { REPO_FOLDER_MISSING, repoFolderMissing, repoFolderMissingBody } from '../core/repoPaths.js';
+import type { RepoEntry } from '../core/types.js';
 
 /** The two optional launch-body fields, as parsed by the route's zod schema. */
 export interface MultiscopeFields {
@@ -36,7 +38,7 @@ export interface ScopedRepo {
 
 export type ScopeResolution =
   | { ok: true; repos: ScopedRepo[] }
-  | { ok: false; status: 400 | 404 | 409; error: string };
+  | { ok: false; status: 400 | 404 | 409; error: string; code?: typeof REPO_FOLDER_MISSING; path?: string | null };
 
 /**
  * Resolve the launch scope. Throws only what the adapter throws (notably
@@ -64,6 +66,12 @@ export async function resolveScopeRepos(
       repos.push({ id, name });
     }
   };
+  // A repo whose folder is gone would fail inside the engine, after earlier members of a fan had
+  // already launched: refused up front, in the finding's words, before anything launches.
+  const gone = (hit: RepoEntry): ScopeResolution | null => {
+    const f = repoFolderMissing(hit);
+    return f === null ? null : { ok: false, status: 409, ...repoFolderMissingBody(f) };
+  };
 
   for (const ref of repoRefs ?? []) {
     const hit = byId.get(ref) ?? byName.get(ref);
@@ -76,6 +84,8 @@ export async function resolveScopeRepos(
           `(POST /api/v1/repos) or pick a ref from GET /api/v1/repos`,
       };
     }
+    const refused = gone(hit);
+    if (refused !== null) return refused;
     admit(hit.id, hit.name);
   }
 
@@ -131,6 +141,8 @@ export async function resolveScopeRepos(
             `/members/${m.id}) or re-register the repo, then retry`,
         };
       }
+      const refused = gone(hit);
+      if (refused !== null) return refused;
       admit(hit.id, hit.name);
     }
   }

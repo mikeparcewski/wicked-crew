@@ -413,7 +413,7 @@ export function registerTestingRoutes(
         return reply.code(500).send({ error: message(err) });
       }
       if (!scope.ok) {
-        return reply.code(scope.status).send({ error: scope.error });
+        return reply.code(scope.status).send({ error: scope.error, ...(scope.code !== undefined ? { code: scope.code, path: scope.path ?? null } : {}) });
       }
       // The shared campaign label every fanned run files under (audit detail + response) — and,
       // for a real fan (≥ 2 repos), the id of the ENGINE campaign it registers (crew#390).
@@ -713,7 +713,7 @@ export function registerTestingRoutes(
         if (err instanceof ProjectsUnsupportedError) return reply.code(501).send({ error: err.message });
         return reply.code(500).send({ error: message(err) });
       }
-      if (!scope.ok) return reply.code(scope.status).send({ error: scope.error });
+      if (!scope.ok) return reply.code(scope.status).send({ error: scope.error, ...(scope.code !== undefined ? { code: scope.code, path: scope.path ?? null } : {}) });
       if (scope.repos.length === 0) {
         return reply.code(400).send({
           error:

@@ -26,6 +26,8 @@ import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
 import { AuditLog } from '../src/api/audit.js';
 import { resolveChatScope } from '../src/api/chat-scope.js';
+import { resolveScopeRepos } from '../src/api/multiscope.js';
+import { worktreeDiff } from '../src/api/run-files.js';
 import { buildNeeds } from '../src/api/needs.js';
 import { reposRow } from '../src/api/system-snapshot.js';
 import { CoreAdapter } from '../src/core/adapter.js';
@@ -198,7 +200,7 @@ posixOnly('repo routes, launch and chat refuse a missing folder by name (409), s
         entityCount: async () => 1,
       },
     );
-    expect(res).toEqual({ ok: false, status: 409, code: REPO_FOLDER_MISSING, error: repoFolderMissingMessage(gone) });
+    expect(res).toEqual({ ok: false, status: 409, code: REPO_FOLDER_MISSING, error: repoFolderMissingMessage(gone), path: gone });
   });
 });
 
@@ -237,5 +239,52 @@ describe('Nerve Center and Needs-you carry a missing folder as a fixable item', 
     expect(buildNeeds({ now: Date.now(), views: [], runs: [], infra: [ok], clis: [], gaps: [], infraHoldsLive: () => false }).attention).toEqual([]);
     expect(reposRow({ kind: 'timeout', ms: 4000 }).state).toBe('unknown');
     expect(reposRow({ kind: 'error', error: 'engine gone', ms: 1 }).reason).toContain('engine gone');
+  });
+});
+
+describe('xreview on #1228', () => {
+  it('codex 1: a workdir gone before an explicit base resolves is the folder, never an "unresolvable base" 400', async () => {
+    const err = await worktreeDiff(join(dir, 'swept-worktree'), undefined, 'main').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ExecCwdMissing);
+  });
+
+  it('codex 2: project and everything chats name a missing-folder repo in dangling, never as a read root', async () => {
+    const here = join(dir, 'here');
+    mkdirSync(here);
+    const gone = join(dir, 'target');
+    const listRepos = () => withFolderFindings([repo('ok', here), repo('tiny-math', gone)]);
+    const deps = {
+      listRepos,
+      projectRepoRefs: async () => ['ok', 'tiny-math'],
+      bindProjectGraph: async () => ({ binding: null, reason: 'unbound' }),
+      scratchBase: join(dir, 'chats'),
+      entityCount: async () => 1,
+    };
+    for (const req of [
+      { chatId: 'p', projectId: 'p1', repoRefs: [] },
+      { chatId: 'e', kind: 'everything' as const, repoRefs: [] },
+    ]) {
+      const res = await resolveChatScope(req, deps);
+      expect(res.ok).toBe(true);
+      if (!res.ok) continue;
+      expect(res.scope.repos.map((r) => r.id)).toEqual(['ok']);
+      expect(res.scope.dangling).toEqual(['tiny-math']);
+      expect(res.engine.readRoots).toEqual([here]);
+    }
+  });
+
+  it('codex 3: a testing/campaign fan naming a missing-folder repo is refused before anything launches', async () => {
+    const here = join(dir, 'here');
+    mkdirSync(here);
+    const gone = join(dir, 'target');
+    const adapter = {
+      listRepos: () => withFolderFindings([repo('ok', here), repo('tiny-math', gone)]),
+      projectGet: async () => ({ id: 'p1', status: 'active' }),
+      projectMembers: async () => [{ member_kind: 'crew.repo', member_ref: 'ok' }, { member_kind: 'crew.repo', member_ref: 'tiny-math' }],
+    } as unknown as CoreAdapter;
+    const want = { ok: false, status: 409, code: REPO_FOLDER_MISSING, error: repoFolderMissingMessage(gone), path: gone };
+    expect(await resolveScopeRepos(adapter, { repoRefs: ['ok', 'tiny-math'] })).toEqual(want);
+    expect(await resolveScopeRepos(adapter, { projectId: 'p1' })).toEqual(want);
+    expect(await resolveScopeRepos(adapter, { repoRefs: ['ok'] })).toEqual({ ok: true, repos: [{ id: 'ok', name: 'ok' }] });
   });
 });

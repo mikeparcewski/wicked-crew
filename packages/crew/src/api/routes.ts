@@ -3793,7 +3793,7 @@ export function registerRoutes(
         return reply.code(resolution.status).send({
           error: resolution.error,
           ...(resolution.missing !== undefined ? { missing: resolution.missing } : {}),
-          ...(resolution.code !== undefined ? { code: resolution.code } : {}),
+          ...(resolution.code !== undefined ? { code: resolution.code, path: resolution.path ?? null } : {}),
         });
       }
       const { scope, engine } = resolution;
