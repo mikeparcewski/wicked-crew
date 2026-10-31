@@ -134,7 +134,9 @@ describe('the seat_images row', () => {
   it('a pressed disk comes first in the remedy, before any image fix, for the runtime read', async () => {
     const row = await probe(status({ disk: diskAt(95), runtime: '/opt/podman' }, { claude: { present: false, held: false, operatorImage: true } }));
     expect(row.state).toBe('down');
-    expect(row.remedy).toMatch(/^Free space in the container runtime VM first: dangling volumes \(`podman volume prune`/);
+    // podman's `volume prune` would take named volumes too: never suggested there.
+    expect(row.remedy).toMatch(/^Free space in the container runtime VM first: the dangling volumes you no longer need \(`podman volume ls --filter dangling=true`/);
+    expect(row.remedy).not.toMatch(/volume prune/);
     expect(row.remedy).toMatch(/Then: Rebuild or re-pull your own seat image/);
     expect(row.remedy).not.toMatch(/docker/);
     // A missing image under a pressed disk: never "held and survive".
@@ -242,20 +244,25 @@ describe('SeatImageRebuilder', () => {
 describe('spawnLines (the real runner)', () => {
   it.runIf(process.platform !== 'win32')('ends a process that ignores SIGTERM past its bound, and keeps the start of an overlong line', async () => {
     const lines: string[] = [];
-    const h = spawnLines('/bin/sh', ['-c', `printf '%s\\n' "$(printf 'x%.0s' $(seq 1 600))"; trap '' TERM; sleep 30`], {
-      // Long enough for the shell to set its trap and print (a loaded host starts a shell slowly).
-      timeout: 2_000,
+    // An unterminated 600-char line (START…), then its end (…END) later: the start is kept, the
+    // rest of that line is dropped, and the next line is read again.
+    const script = `printf 'START%s' "$(printf 'x%.0s' $(seq 1 600))"; sleep 0.3; printf 'END\\nnext\\n'; trap '' TERM; sleep 30`;
+    const h = spawnLines('/bin/sh', ['-c', script], {
+      // Long enough for the shell to print and set its trap (a loaded host starts a shell slowly).
+      timeout: 3_000,
       killAfterMs: 200,
       onLine: (l) => lines.push(l),
     });
     await h.started;
     const t0 = Date.now();
     const rc = await h.done;
-    expect(Date.now() - t0).toBeLessThan(8_000);
+    expect(Date.now() - t0).toBeLessThan(10_000);
     expect(rc).not.toBe(0);
-    expect(lines[0]!.startsWith('xxx')).toBe(true);
-    expect(lines[0]!.length).toBeLessThanOrEqual(600);
-  }, 15_000);
+    expect(lines[0]!.startsWith('STARTxxx')).toBe(true);
+    expect(lines[0]!.length).toBe(240);
+    expect(lines.some((l) => l.includes('END'))).toBe(false);
+    expect(lines).toContain('next');
+  }, 20_000);
 });
 
 describe('POST /system/seat-images/rebuild', () => {

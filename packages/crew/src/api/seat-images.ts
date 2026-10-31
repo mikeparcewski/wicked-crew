@@ -235,8 +235,12 @@ export async function probeSeatImages(input: SeatImagesProbeInput): Promise<Syst
   const allHeld = st.holdSupported && unheld.length === 0 && !mustBuild && !baseGone && operatorMissing.length === 0;
   // The runtime the engine reads (its CLI), so the cleanup goes to the right one.
   const rt = basename(st.runtime) || 'docker';
-  const cache = rt === 'docker' ? ` and build cache (\`${rt} builder prune\`)` : ' and its build cache';
-  const freeDisk = `Free space in the container runtime VM first: dangling volumes (\`${rt} volume prune\` removes anonymous volumes no container uses)${cache}.${allHeld ? ' The seat images are held and survive the cleanup.' : ''}`;
+  // docker's `volume prune` removes only anonymous volumes no container uses; podman's removes every
+  // unused volume, named ones too, so it is never suggested there.
+  const volumes = rt === 'docker'
+    ? 'dangling volumes (`docker volume prune` removes anonymous volumes no container uses) and build cache (`docker builder prune`)'
+    : `the dangling volumes you no longer need (\`${rt} volume ls --filter dangling=true\`, then remove them by name) and its build cache`;
+  const freeDisk = `Free space in the container runtime VM first: ${volumes}.${allHeld ? ' The seat images are held and survive the cleanup.' : ''}`;
   const fix = rebuilding
     ? 'Wait for the running rebuild to finish, then re-check.'
     : operatorMissing.length > 0
