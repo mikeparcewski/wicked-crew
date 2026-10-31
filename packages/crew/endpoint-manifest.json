@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.154.0",
+  "apiTypesVersion": "0.155.0",
   "endpoints": [
     {
       "method": "GET",
@@ -1872,6 +1872,29 @@
         200,
         404,
         501
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/:id/units/:ord/inspect",
+      "requestType": null,
+      "responseType": "UnitInspectionResponse",
+      "statusCodes": [
+        202,
+        400,
+        403,
+        404,
+        409
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/runs/:id/units/:ord/inspections",
+      "requestType": null,
+      "responseType": "UnitInspectionsResponse",
+      "statusCodes": [
+        200,
+        400
       ]
     },
     {

@@ -1,0 +1,27 @@
+{
+  "$comment": "The in-flight check (crew src/inspect): a person asked 'Is this going well?' about a working step. Crew launches this one-seat, one-turn run on a seat that is NOT the step's own, with the step's record inline in the task. It is read-only by construction: one neutral phase that executes no code (the engine's read-only write posture), no repository, no write roots, no floor, no judge. Its reply is one JSON object crew parses; it never steers, stops or edits anything. Crew stops it at a wall-clock limit and a token/cost budget and then answers with its own reading.",
+  "id": "inspect-unit",
+  "title": "Check on a working step",
+  "summary": "Reads a working step's record and says whether it is progressing, looping, stuck or wasteful, with one recommended action.",
+  "use_when": [
+    "A person asked whether a long-running step is going well"
+  ],
+  "required_instruments": [],
+  "phases": [
+    {
+      "id": "inspect",
+      "kind": "recon",
+      "instructions": "You check on another agent's step while it works, for the person running it, and you only read. The task above holds everything: the step's record so far (calls, edits, words, tokens, crew's own reading) and its recent activity. Do not open, run, search or edit anything: no tool at all; answer from what you were given. Judge ONE of: \"progressing\" (it is moving toward the step's goal: say what it is doing and roughly how far along it is), \"looping\" (it repeats the same calls or edits on the same files without new results: name them, with counts), \"stuck\" (it waits on nothing, or one process has run far too long with no result), \"wasteful\" (it spends tokens without new output or changes). Crew's own reading is a hint you may overrule, with evidence from the record. Recommend ONE action: \"let_run\", \"steer\" (then write the note to send the agent: one or two plain sentences that tell it what to do differently) or \"stop\" (only when more time cannot help). Reply with exactly one JSON object on one line and nothing else: {\"verdict\": \"progressing|looping|stuck|wasteful\", \"doing\": \"<what it is doing, one sentence>\", \"progress\": \"<roughly how far along, one sentence>\", \"evidence\": [\"<at most 3 short facts from the record>\"], \"action\": \"let_run|steer|stop\", \"note\": \"<the steer note, or empty>\"}. Keep it under 120 words.",
+      "gate_type": "execution",
+      "gate": "auto",
+      "executes_code": false,
+      "verified_evidence": false,
+      "required_deliverables": [],
+      "depends_on": [],
+      "role": "neutral",
+      "skill_ref": null,
+      "allowed_skills": [],
+      "validator_pin": null
+    }
+  ]
+}
