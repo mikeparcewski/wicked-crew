@@ -38,6 +38,8 @@ export interface AskRequest {
   question: string;
   choices?: string[];
   recommended?: number;
+  /** (guided asks) The operator may pick several of `choices` (wicked-core ask `multi`; bounds default 1 and all). */
+  multi?: { min?: number; max?: number };
 }
 
 export interface AskAdapter {

@@ -2503,6 +2503,8 @@ export interface CoreEvent {
   seat?: string;
   /** `elicitationCreated`: an ordered set of valid responses; `null` / absent = free-text. */
   options?: string[] | null;
+  /** `elicitationCreated` (api-types 0.158.0): a multi-select's bounds (`propType: "array"`). Absent otherwise. */
+  multi?: ElicitationMulti;
   /**
    * `elicitationCreated` (C3; wicked-core-ts >= 0.7.35, api-types 0.83.0): the index into `options`
    * of the option the PRODUCER of the options recommends (the field's JSON Schema `default`).
@@ -6664,14 +6666,130 @@ export interface ElicitationInfo {
   ord?: number;
   attempt?: number;
   seat?: string;
+  /**
+   * (api-types 0.158.0, guided asks) The person may pick SEVERAL of `options`: at least `min`, at most `max`
+   * (both always set, `1 <= min <= max <= options.length`). Answer it with `content: {values}`; the engine records
+   * the picks as a JSON array in `options` order. ABSENT on a single-choice or free-text question and on an older
+   * daemon.
+   */
+  multi?: ElicitationMulti;
   receivedAt: string;
 }
 
-/** `POST /runs/:id/elicitation` body. `content` is required for accept, absent otherwise. */
+/** (api-types 0.158.0) How many of a multi-select elicitation's options an answer picks. */
+export interface ElicitationMulti {
+  min: number;
+  max: number;
+}
+
+/**
+ * `POST /runs/:id/elicitation` body. `content` is required for accept, absent otherwise: `{response}` answers a
+ * free-text or single-choice question (one of `options`); `{values}` (api-types 0.158.0) answers a multi-select one
+ * ({@link ElicitationInfo.multi}): distinct entries of `options`, `min..=max` of them. Crew answers 400 to `values` on
+ * a question that is not multi-select, and to `response` on one that is.
+ */
 export interface ElicitationResponse {
   elicitationId: string;
   action: 'accept' | 'decline' | 'cancel';
-  content?: { response: string };
+  content?: { response: string } | { values: string[] };
+}
+
+// ── Guided asks (api-types 0.158.0; design DES-GUIDED-CHAT) ─────────────────────────────────────────────────────
+//
+// ONE typed shape for every question a person answers inline: an engine gate, a seat's or MCP server's elicitation,
+// a power-mode pause, a plugin's proposal, a studio setup step. It is a RENDERING contract: the wire shapes that
+// exist stay as they are and map onto it (GateInfo.choices + recommended + gateKind → `choose`; ElicitationInfo
+// options/multi → `choose` / `pick` / `text`), and every answer still goes through its host's own route
+// (`POST /runs/:id/gate` with a GateDecision, `POST /runs/:id/elicitation`, …). Governance is the host's: an ask
+// never widens who may answer, and a gate's ask is always `answeredBy: 'person'`.
+
+/** The six ways a person answers. */
+export type AskKind =
+  /** Yes / no (two options; picking one is the answer). */
+  | 'confirm'
+  /** Choose one of 2..n options. */
+  | 'choose'
+  /** Pick several (`multi` bounds). */
+  | 'pick'
+  /** Short text. */
+  | 'text'
+  /** A point on a scale (named steps, or a number range). */
+  | 'scale'
+  /** Confirm, with a required reason (a danger move: stop, reject, skip QE, override). */
+  | 'confirm_reason';
+
+/** Which route answers the ask. */
+export type AskHost = 'gate' | 'elicitation' | 'chat' | 'learn' | 'plugin' | 'power';
+
+/** One option of a `confirm` / `choose` / `pick` / `confirm_reason` ask. */
+export interface AskOption {
+  /** Stable within the ask. */
+  id: string;
+  /** What the person reads (and the voice vocabulary). */
+  label: string;
+  /** One line under the label. */
+  sub?: string;
+  /** What happens if this option is taken, shown while it is hovered or selected ("If you choose this: …"). */
+  consequence?: string;
+  /** The wire answer: a gate action token, an elicitation option, a pause decision. */
+  token: string;
+  tone?: 'primary' | 'neutral' | 'danger';
+  /** The engine's (or producer's) recommendation: marked, and preselected unless the host says otherwise. */
+  recommended?: boolean;
+  /** Taking it asks for a reason first (kept with the record). */
+  needsReason?: boolean;
+  /** Shown but not choosable; the string says why ("Frozen: nothing merges there"). */
+  disabled?: string;
+  /** A small tag ("default", "current release"). */
+  meta?: string;
+}
+
+/** A named-step scale, or a number range. */
+export type AskScale =
+  | { steps: string[]; consequences?: string[] }
+  | { min: number; max: number; step: number; labels: [string, string] };
+
+export interface Ask {
+  /** Gate: `<runId>:<ord>`; elicitation: its `elicitationId`; otherwise the host's own id. */
+  id: string;
+  host: AskHost;
+  /** Who asks, in words ("Codex asks", "The engine asks"). */
+  from: { kind: 'engine' | 'seat' | 'plugin' | 'studio'; id: string; label: string };
+  /** One sentence, a question. */
+  prompt: string;
+  /** One line under the question. */
+  detail?: string;
+  kind: AskKind;
+  options?: AskOption[];
+  /** `pick`: how many (defaults: 1 and every option). */
+  multi?: { min?: number; max?: number };
+  /** Preselected: an option id (`choose` / `confirm`), option ids (`pick`), a step index or value (`scale`). */
+  default?: string | string[] | number;
+  scale?: AskScale;
+  text?: { placeholder?: string; maxChars?: number; optional?: boolean };
+  /** A follow-up shown in the same card once the first part is answered (pick the steps, then say what). */
+  then?: Ask;
+  /** A gate is always `'person'`. */
+  answeredBy: 'person' | 'any';
+  /** The answer waits this long, with Undo, before it is sent (a gate: 10 000). */
+  undoMs?: number;
+  /** The answered line: `{label}`, `{labels}` and `{text}` are filled ("You chose: {label}"). */
+  record: string;
+}
+
+/** What a person answered: the host turns it into its own wire body. */
+export interface AskAnswer {
+  askId: string;
+  /** `confirm` / `choose` / `confirm_reason`: the option taken. */
+  option?: string;
+  /** `pick`: the options picked, in the ask's order. */
+  options?: string[];
+  /** `text`, and a `then` text. */
+  text?: string;
+  /** `scale`: the step index or value. */
+  value?: number;
+  /** A `needsReason` option's reason. */
+  reason?: string;
 }
 
 // ── Inventory claims (wicked-crew#721) — whether each enumerating step's list is complete ──

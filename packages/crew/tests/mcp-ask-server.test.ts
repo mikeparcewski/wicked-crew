@@ -301,6 +301,41 @@ describe('ask MCP over HTTP', () => {
     expect(await response.json()).toEqual({ error: 'ask_unsupported' });
   });
 
+  it('a multi-select: multi reaches the engine, and the picks come back as answers (guided asks)', async () => {
+    const f = await fixture();
+    f.adapter.openAsk.mockImplementation(async () => {
+      f.ingest({ answer: '["main","develop"]' });
+      return { ...f.unit, elicitationId: 'ask-1' };
+    });
+    const c = await f.client();
+    const res = await c.callTool({ name: 'ask', arguments: { question: 'Which?', choices: ['main', 'release', 'develop'], multi: { max: 2 } } });
+    expect(f.adapter.openAsk).toHaveBeenCalledWith(expect.objectContaining({ choices: ['main', 'release', 'develop'], multi: { max: 2 } }));
+    expect(res).toMatchObject({ structuredContent: { status: 'answered', answer: 'main, develop', answers: ['main', 'develop'] }, content: [{ type: 'text', text: 'The operator picked: main, develop' }] });
+  });
+
+  it.each([
+    [{ multi: {} }, 'multi requires choices'],
+    [{ choices: ['a', 'b'], multi: { min: 2, max: 1 } }, 'multi must pick'],
+    [{ choices: ['a', 'a', 'b'], multi: { max: 3 } }, 'multi must pick'],
+  ])('refuses a malformed multi %j before the engine sees it', async (extra, words) => {
+    const f = await fixture();
+    const c = await f.client();
+    const res = await c.callTool({ name: 'ask', arguments: { question: 'Which?', ...extra } });
+    expect(res).toMatchObject({ isError: true });
+    expect(JSON.stringify(res.content)).toContain(words);
+    expect(f.adapter.openAsk).not.toHaveBeenCalled();
+  });
+
+  it('a single-choice answer that looks like an array stays the answer', async () => {
+    const f = await fixture();
+    f.adapter.openAsk.mockImplementation(async () => {
+      f.ingest({ answer: '["x"]' });
+      return { ...f.unit, elicitationId: 'ask-1' };
+    });
+    const c = await f.client();
+    expect(await c.callTool({ name: 'ask', arguments: { question: 'Which?', choices: ['["x"]', 'y'] } })).toMatchObject({ structuredContent: { status: 'answered', answer: '["x"]' } });
+  });
+
   it('keeps an answer that arrives before the open ticket', async () => {
     const f = await fixture();
     f.adapter.openAsk.mockImplementation(async () => {
