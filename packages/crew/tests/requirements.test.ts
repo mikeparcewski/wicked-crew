@@ -259,6 +259,90 @@ describe('requirements service', () => {
 // holds the repo's code-graph file open through its own rusqlite; a second SQLite library on the
 // same file in the same process is the F-E2E-021 class (one library per db file per process,
 // crew#541). The artifact is the one source; a repo without one answers null (the route's 404).
+/**
+ * Operator ruling 2026-10-31: the graph is built at the configured minimum and labelled with its
+ * share; every item is validated (with its count) or unconfirmed (with why). The artifact is the
+ * shape `wicked-core domain-graph --repo-root` writes at crew's read path (domain-model 1.1.0).
+ */
+describe('requirements service — coverage label + corroboration (domain-model 1.1.0)', () => {
+  async function coreShapedRepo(): Promise<string> {
+    const root = await mkdtemp(join(tmpdir(), 'req-cov-'));
+    const dir = join(root, '.wicked-estate', 'requirements');
+    await mkdir(dir, { recursive: true });
+    const rule = { id: 'RULE-001', statement: 'sum adds every element', confidence: 0.9 };
+    const base = { legacy_components: ['src/math.js#sum'], data_access: [], dependencies: [], validations: [], error_paths: [] };
+    const graph = {
+      metadata: {
+        schema_version: '1.1.0',
+        migration_mode: 'functional',
+        coverage: { mapped_pct: 82, min_pct: 80, behavior_bearing: 100, mapped: 82, resolved: 70, unmapped: 18 },
+      },
+      domains: {
+        src: {
+          requirements: {
+            'REQ-001': {
+              ...base,
+              title: 'sum',
+              description: 'adds',
+              status: 'active',
+              business_rules: [rule],
+              corroboration: { status: 'validated', sources: 3, call_sites: 1, tests: 1, docs: 1, extra_extractors: 0 },
+            },
+            'REQ-002': {
+              ...base,
+              title: 'scripts',
+              description: 'package scripts',
+              status: 'review',
+              business_rules: [rule],
+              corroboration: {
+                status: 'unconfirmed',
+                sources: 0,
+                call_sites: 0,
+                tests: 0,
+                docs: 0,
+                extra_extractors: 0,
+                why: { code: 'config_only', text: 'A configuration entry: no code, test or doc in the index refers to it.' },
+              },
+            },
+            // A malformed record is never invented into a mark.
+            'REQ-003': { ...base, title: 'odd', description: 'x', business_rules: [rule], corroboration: { status: 'maybe' } },
+          },
+          entities: {},
+        },
+      },
+    };
+    await writeFile(join(dir, 'requirements_graph.json'), JSON.stringify(graph), 'utf8');
+    return root;
+  }
+
+  it('carries the coverage label and the corpus-wide validated / unconfirmed counts', async () => {
+    const page = await listRequirements(repoAt(await coreShapedRepo()), { offset: 0, limit: 50 });
+    expect(page?.coverage).toEqual({ mappedPct: 82, minPct: 80, behaviorBearing: 100, mapped: 82, resolved: 70, unmapped: 18 });
+    expect(page?.corroboration).toEqual({ validated: 1, unconfirmed: 1 });
+  });
+
+  it('marks each item validated (with its count) or unconfirmed (with why)', async () => {
+    const page = await listRequirements(repoAt(await coreShapedRepo()), { offset: 0, limit: 50 });
+    const by = new Map(page?.items.map((i) => [i.title, i]));
+    expect(by.get('sum')?.corroboration).toEqual({ status: 'validated', sources: 3, callSites: 1, tests: 1, docs: 1, extraExtractors: 0 });
+    expect(by.get('scripts')?.corroboration).toMatchObject({
+      status: 'unconfirmed',
+      sources: 0,
+      why: { code: 'config_only', text: 'A configuration entry: no code, test or doc in the index refers to it.' },
+    });
+    expect(by.get('odd')?.corroboration).toBeNull();
+    const detail = await getRequirement(repoAt(await coreShapedRepo()), 'src::REQ-002');
+    expect(detail?.corroboration?.why?.code).toBe('config_only');
+  });
+
+  it('a graph built before the fields reads null and 0/0, never a guess', async () => {
+    const page = await listRequirements(repoAt(await fixtureRepo()), { offset: 0, limit: 50 });
+    expect(page?.coverage).toBeNull();
+    expect(page?.corroboration).toEqual({ validated: 0, unconfirmed: 0 });
+    expect(page?.items.every((i) => i.corroboration === null)).toBe(true);
+  });
+});
+
 describe('requirements service — one source, one SQLite library (crew#548)', () => {
   it('a repo with a code-graph db but NO artifact answers null — the store is never read', async () => {
     const root = await mkdtemp(join(tmpdir(), 'req-nostore-'));

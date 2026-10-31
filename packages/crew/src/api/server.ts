@@ -143,6 +143,7 @@ import { busRows, openPlanGateRisk } from '../team/routes.js';
 import { isSteeringAuthorRun } from './steering-landing.js';
 import { applyWorkerConfigRoot } from './seat-signin.js';
 import { applyCouncilSettings } from '../core/council-settings.js';
+import { applyRequirementsGraphSettings } from '../core/requirements-graph-setting.js';
 import { builtinPresetSkillRefs, coreSkillRefs, registeredSkillRefs } from '../skills/core-closure.js';
 import type { PluginSource } from '../skills/plugin-source.js';
 import { assertSkillsRootFenced } from '../skills/root-fence.js';
@@ -645,6 +646,8 @@ export async function createServer(
   applyWorkerConfigRoot(bootSettings.worker_config_root);
   // Council size + spawn stagger (wicked-core#888): the same boot + on-change env seam.
   applyCouncilSettings(bootSettings);
+  // Requirements-graph minimum coverage (operator ruling 2026-10-31): the same boot + on-change seam.
+  applyRequirementsGraphSettings(bootSettings);
 
   // The skills seam (skills keystone): boot-time only — there is NO skills setting to re-apply on
   // PUT /settings (codex round 5: `skills_root` and its env override are retired). The store hangs

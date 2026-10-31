@@ -39,7 +39,27 @@ import { dirname } from 'node:path';
 import { requirementsGraph, requirementsOverrides } from '../core/repoPaths.js';
 import type { RepoEntry } from '../core/types.js';
 
+interface ArtifactCorroboration {
+  status?: unknown;
+  sources?: unknown;
+  call_sites?: unknown;
+  tests?: unknown;
+  docs?: unknown;
+  extra_extractors?: unknown;
+  why?: { code?: unknown; text?: unknown } | null;
+}
+
+interface ArtifactCoverage {
+  mapped_pct?: unknown;
+  min_pct?: unknown;
+  behavior_bearing?: unknown;
+  mapped?: unknown;
+  resolved?: unknown;
+  unmapped?: unknown;
+}
+
 interface ArtifactRequirement {
+  corroboration?: ArtifactCorroboration;
   title?: string;
   description?: string;
   status?: string;
@@ -65,6 +85,68 @@ export interface RequirementOverride {
 
 export type RequirementCategory = 'functional' | 'config-data';
 
+/**
+ * How many independent sources support a requirement (operator ruling 2026-10-31, "validation by
+ * duplication"), as `wicked-core domain-graph` computed it (domain-model 1.1.0
+ * `requirement.corroboration`): `validated` at two or more (callers, tests, docs, agreeing extractor
+ * seats), else `unconfirmed` with why. `null` on an artifact built before the field.
+ */
+export interface RequirementCorroboration {
+  status: 'validated' | 'unconfirmed';
+  sources: number;
+  callSites: number;
+  tests: number;
+  docs: number;
+  extraExtractors: number;
+  /** Present when unconfirmed: a stable code and the sentence to show on the item. */
+  why?: { code: string; text: string };
+}
+
+/** The share of behaviours the graph maps (domain-model 1.1.0 `metadata.coverage`). */
+export interface RequirementsCoverage {
+  mappedPct: number;
+  minPct: number;
+  behaviorBearing: number;
+  mapped: number;
+  resolved: number;
+  unmapped: number;
+}
+
+const count = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0);
+
+/** The artifact's corroboration in wire shape, or `null` when absent or malformed (never invented). */
+export function corroborationOf(raw: ArtifactCorroboration | undefined): RequirementCorroboration | null {
+  if (raw === undefined || raw === null || typeof raw !== 'object') return null;
+  if (raw.status !== 'validated' && raw.status !== 'unconfirmed') return null;
+  const out: RequirementCorroboration = {
+    status: raw.status,
+    sources: count(raw.sources),
+    callSites: count(raw.call_sites),
+    tests: count(raw.tests),
+    docs: count(raw.docs),
+    extraExtractors: count(raw.extra_extractors),
+  };
+  const why = raw.why;
+  if (why && typeof why.code === 'string' && typeof why.text === 'string') {
+    out.why = { code: why.code, text: why.text };
+  }
+  return out;
+}
+
+/** The artifact's coverage label in wire shape, or `null` on a pre-1.1.0 artifact. */
+export function coverageOf(raw: ArtifactCoverage | undefined): RequirementsCoverage | null {
+  if (raw === undefined || raw === null || typeof raw !== 'object') return null;
+  if (typeof raw.mapped_pct !== 'number' || typeof raw.min_pct !== 'number') return null;
+  return {
+    mappedPct: count(raw.mapped_pct),
+    minPct: count(raw.min_pct),
+    behaviorBearing: count(raw.behavior_bearing),
+    mapped: count(raw.mapped),
+    resolved: count(raw.resolved),
+    unmapped: count(raw.unmapped),
+  };
+}
+
 /** Product-functional requirements come from CODE; statements extracted from
  * lockfiles, manifests, data fixtures, and docs are honest observations about
  * those assets but are NOT product behavior — they class as config-data so the
@@ -89,6 +171,8 @@ export interface RequirementSummary {
   risk: boolean;
   riskSource: 'operator' | 'data' | null;
   edited: boolean;
+  /** Validated (with its source count) or unconfirmed (with why); `null` on an older artifact. */
+  corroboration: RequirementCorroboration | null;
 }
 
 export interface RequirementDetail extends RequirementSummary {
@@ -118,6 +202,9 @@ interface RepoIndex {
   total: number;
   /** Override keys that matched NO row — stale after a re-index/migration (module header). */
   orphanedOverrides: number;
+  coverage: RequirementsCoverage | null;
+  validated: number;
+  unconfirmed: number;
 }
 
 /** Keys in the overrides sidecar that no corpus row claimed — counted, never dropped silently. */
@@ -173,7 +260,10 @@ async function buildIndex(repo: RepoEntry): Promise<RepoIndex | null> {
   }
 
   const raw = await readFile(requirementsGraph(repo), 'utf8');
-  const graph = JSON.parse(raw) as { domains?: Record<string, ArtifactDomain> };
+  const graph = JSON.parse(raw) as {
+    metadata?: { coverage?: ArtifactCoverage };
+    domains?: Record<string, ArtifactDomain>;
+  };
   const overrides = await readOverrides(repo);
 
   const entries: IndexEntry[] = [];
@@ -209,6 +299,7 @@ async function buildIndex(repo: RepoEntry): Promise<RepoIndex | null> {
         risk,
         riskSource,
         edited: ov !== undefined,
+        corroboration: corroborationOf(req.corroboration),
       };
       // Statements are part of the haystack: searching the requirements means
       // searching the actual rule text, not just titles and ids.
@@ -225,6 +316,9 @@ async function buildIndex(repo: RepoEntry): Promise<RepoIndex | null> {
     overridesMtimeMs: ovMtime,
     total: entries.length,
     orphanedOverrides: countOrphanedOverrides(overrides, byKey),
+    coverage: coverageOf(graph.metadata?.coverage),
+    validated: entries.filter((e) => e.summary.corroboration?.status === 'validated').length,
+    unconfirmed: entries.filter((e) => e.summary.corroboration?.status === 'unconfirmed').length,
   };
   cache.set(repo.root_path, index);
   return index;
@@ -258,6 +352,13 @@ export interface RequirementsPage {
    * never silent; deliberately NOT re-keyed (module header says why).
    */
   orphanedOverrides: number;
+  /**
+   * The share of behaviours the graph maps and the minimum it was built at ("82% of behaviours
+   * mapped"); `null` on an artifact built before domain-model 1.1.0.
+   */
+  coverage: RequirementsCoverage | null;
+  /** How many requirements of the whole corpus are validated / unconfirmed (0/0 on an older artifact). */
+  corroboration: { validated: number; unconfirmed: number };
 }
 
 /**
@@ -301,6 +402,8 @@ export async function listRequirements(
     items: matched.slice(query.offset, query.offset + query.limit),
     source: 'artifact',
     orphanedOverrides: index.orphanedOverrides,
+    coverage: index.coverage,
+    corroboration: { validated: index.validated, unconfirmed: index.unconfirmed },
   };
 }
 

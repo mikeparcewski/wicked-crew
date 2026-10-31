@@ -6362,6 +6362,15 @@ export interface SystemSettings {
    * Exported as `WICKED_COUNCIL_SPAWN_STAGGER_MS`, read per council. Absent = the default.
    */
   councilSpawnStaggerMs?: number;
+  /**
+   * (api-types 0.156.0, operator ruling 2026-10-31) The requirements graph's minimum coverage:
+   * `minCoveragePct`, a whole percentage 1..100, default 80. A repository's requirements graph is
+   * built, and shown labelled with its share ("82% of behaviours mapped"), once at least this share
+   * of its behaviour-bearing code is mapped; below it the `domain-extraction` run says "N% mapped,
+   * minimum M%" and keeps the mapping for the next run. The daemon exports it as
+   * `WICKED_REQUIREMENTS_MIN_COVERAGE_PCT` at boot and on every change. Absent = the default.
+   */
+  requirementsGraph?: { minCoveragePct?: number };
   /*
    * There is NO skills setting (skills keystone, api-types 0.28.0). The daemon-owned skills root is
    * `<state home>/skills` — the directory holding `manifest.json`, `baseline/<hash>/`, `effective/`,
@@ -6555,6 +6564,39 @@ export interface SettingsResponse {
 }
 
 // ── Requirements management (server-side search + overrides; crew api/requirements.ts) ──
+/**
+ * (0.156.0, operator ruling 2026-10-31 "validation by duplication") How many INDEPENDENT sources in
+ * the repository support a requirement beyond the extractor's own statement, as `wicked-core
+ * domain-graph` computed it: distinct callers (`callSites`), tests, docs that name it, and extractor
+ * seats beyond the first. `validated` at 2 or more; otherwise `unconfirmed`, and `why` says what is
+ * missing — show `why.text` on the item. `why.code` is one of `unindexed_file` (a file the code index
+ * skipped names it, so its callers there are not counted), `dead_code`, `config_only`,
+ * `single_caller`, `test_only`, `doc_only`, `extractors_only`.
+ */
+export interface RequirementCorroboration {
+  status: 'validated' | 'unconfirmed';
+  sources: number;
+  callSites: number;
+  tests: number;
+  docs: number;
+  extraExtractors: number;
+  why?: { code: string; text: string };
+}
+
+/**
+ * (0.156.0) The share of behaviour-bearing code a requirements graph maps, and the minimum it was
+ * built at (`SystemSettings.requirementsGraph.minCoveragePct`): label the graph "82% of behaviours
+ * mapped". `mappedPct` is floored, so it never reads above the minimum it was compared to.
+ */
+export interface RequirementsCoverage {
+  mappedPct: number;
+  minPct: number;
+  behaviorBearing: number;
+  mapped: number;
+  resolved: number;
+  unmapped: number;
+}
+
 export interface RequirementSummary {
   key: string;
   domain: string;
@@ -6566,6 +6608,9 @@ export interface RequirementSummary {
   risk: boolean;
   riskSource: 'operator' | 'data' | null;
   edited: boolean;
+  /** (0.156.0) Validated or unconfirmed (with why). `null` on a graph built before the field;
+   *  ABSENT from an older daemon. */
+  corroboration?: RequirementCorroboration | null;
 }
 
 export interface RequirementDetail extends RequirementSummary {
@@ -6597,6 +6642,11 @@ export interface RequirementsPage {
    * the annotation workflow, then re-apply or delete the stale keys.
    */
   orphanedOverrides?: number;
+  /** (0.156.0) The graph's coverage label; `null` on a graph built before the field, ABSENT from an
+   *  older daemon. */
+  coverage?: RequirementsCoverage | null;
+  /** (0.156.0) How many requirements of the whole corpus are validated / unconfirmed. */
+  corroboration?: { validated: number; unconfirmed: number };
 }
 
 /**
