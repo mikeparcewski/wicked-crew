@@ -17,7 +17,6 @@ import {
   CODE_GRAPH_ROOT_UNRESOLVABLE,
   CodeGraphRootUnresolvableError,
   codeGraphDb,
-  requirementsGraph,
   requirementsOverrides,
 } from '../src/core/repoPaths.js';
 import type { RepoEntry } from '../src/core/types.js';
@@ -95,10 +94,7 @@ describe('repoPaths', () => {
     expect(() => codeGraphDb(inTree)).toThrow(/wicked-core#170/);
   });
 
-  it('derives the requirements artifacts, which the engine does not publish', () => {
-    expect(requirementsGraph(repo())).toBe(
-      '/repos/demo/.wicked-estate/requirements/requirements_graph.json',
-    );
+  it('derives the requirements overrides sidecar, which the engine does not publish', () => {
     expect(requirementsOverrides(repo())).toBe(
       '/repos/demo/.wicked-estate/requirements/requirements_overrides.json',
     );

@@ -84,17 +84,11 @@ export class CodeGraphRootUnresolvableError extends Error {
 }
 
 /**
- * The requirements artifacts a repo's domain extraction writes.
- *
- * A DIFFERENT path family from the code graph (`.wicked-estate/requirements/`, written by
- * `wicked-core domain-graph`) and still derived here, because the engine does not publish it. Same
- * hazard, smaller blast radius: it is written and read by this package plus one core subcommand whose
- * `--out` this package passes. Tracked with the rest of the cross-repo path pins.
+ * The operator-overrides sidecar for a repo's requirements (`requirements_overrides.json`): edits
+ * crew keeps beside the checkout and merges at read time. Derived here because the engine does not
+ * publish it. The graph itself is read from the repo's estate store through the engine (operator
+ * ruling 2026-10-31), not from a file.
  */
-export function requirementsGraph(repo: RepoEntry): string {
-  return join(repo.root_path, '.wicked-estate', 'requirements', 'requirements_graph.json');
-}
-
 export function requirementsOverrides(repo: RepoEntry): string {
   return join(repo.root_path, '.wicked-estate', 'requirements', 'requirements_overrides.json');
 }

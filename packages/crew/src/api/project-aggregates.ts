@@ -3,9 +3,9 @@
  * already exist (design: program-2026-09 design/DES-W4-CR5-PRODUCT-AGGREGATES.md, posted on the
  * issue). No new source:
  *
- *  - requirements: `listRequirements` over each repo's `requirements_graph.json` artifact (the one
- *    source, crew#548);
- *  - domain: the same artifact, summarised per domain (full graphs stay on
+ *  - requirements: `listRequirements` over each repo's requirements graph, read from its estate
+ *    store through the engine (the one source; operator ruling 2026-10-31);
+ *  - domain: the same graph, summarised per domain (full graphs stay on
  *    `GET /repos/:id/domain-graph`; N 15k-requirement graphs in one body is not a view);
  *  - coverage: `adapter.getCoverageReportForRepo` per repo, never the vacuous store-wide report.
  *
@@ -14,14 +14,11 @@
  * gone). The studio Product view (wicked-studio#157 / #158) reads these.
  */
 
-import { readFile } from 'node:fs/promises';
-
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
 import type { CoreAdapter } from '../core/adapter.js';
 import { ProjectsUnsupportedError } from '../core/adapter.js';
-import { requirementsGraph } from '../core/repoPaths.js';
 import type {
   ProjectAggregateRowBase,
   ProjectAggregateTotals,
@@ -36,7 +33,7 @@ import type {
   RepoEntry,
 } from '../core/types.js';
 import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
-import { listRequirements, type RequirementSummary } from './requirements.js';
+import { listRequirements, readRequirementsGraph, type RequirementSummary } from './requirements.js';
 
 const V = '/api/v1';
 
@@ -141,8 +138,8 @@ export async function projectRequirements(
     const base = { repo: repoOf(m), total: 0, corpus: 0, orphanedOverrides: 0, items: [] as RequirementSummary[] };
     if (m.repo === null) return { ...base, state: 'dangling', reason: DANGLING };
     try {
-      const page = await listRequirements(m.repo, { ...filters, offset: 0, limit: 0 });
-      if (page === null) return { ...base, state: 'absent', reason: 'requirements_graph.json not generated for this repo yet' };
+      const page = await listRequirements(m.repo, { ...filters, offset: 0, limit: 0 }, adapter);
+      if (page === null) return { ...base, state: 'absent', reason: 'no requirements graph has been built for this repo yet' };
       return { ...base, state: 'ok', total: page.total, corpus: page.corpus, orphanedOverrides: page.orphanedOverrides };
     } catch (err) {
       return { ...base, state: 'error', reason: message(err) };
@@ -162,8 +159,8 @@ export async function projectRequirements(
       const limit = Math.min(want, row.total - skip);
       skip = 0;
       want -= limit;
-      return listRequirements(members[i]!.repo!, { ...filters, offset, limit })
-        .then((page): ProjectRequirementsRow => (page === null ? { ...cleared(row), state: 'absent', reason: 'requirements_graph.json disappeared while reading' } : { ...row, items: page.items }))
+      return listRequirements(members[i]!.repo!, { ...filters, offset, limit }, adapter)
+        .then((page): ProjectRequirementsRow => (page === null ? { ...cleared(row), state: 'absent', reason: 'the requirements graph disappeared while reading' } : { ...row, items: page.items }))
         .catch((err: unknown): ProjectRequirementsRow => ({ ...cleared(row), state: 'error', reason: message(err) }));
     }),
   );
@@ -177,16 +174,11 @@ export async function projectRequirements(
   };
 }
 
-/** The artifact's domains, summarised. `null` when the artifact is absent. */
-async function domainsOf(repo: RepoEntry): Promise<DomainSummary[] | null> {
-  let raw: string;
-  try {
-    raw = await readFile(requirementsGraph(repo), 'utf8');
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
-    throw err;
-  }
-  const graph = JSON.parse(raw) as { domains?: Record<string, { description?: unknown; requirements?: unknown; entities?: unknown }> };
+/** The repo's domains as its estate store holds them, summarised. `null` before a graph is built. */
+async function domainsOf(repo: RepoEntry, adapter: CoreAdapter): Promise<DomainSummary[] | null> {
+  const read = await readRequirementsGraph(repo, adapter);
+  if (read.graph === null) return null;
+  const graph = read.graph as { domains?: Record<string, { description?: unknown; requirements?: unknown; entities?: unknown }> };
   const count = (v: unknown): number => (typeof v === 'object' && v !== null ? Object.keys(v).length : 0);
   return Object.entries(graph.domains ?? {}).map(([name, d]) => ({
     name,
@@ -201,9 +193,9 @@ export async function projectDomain(adapter: CoreAdapter, projectId: string): Pr
   const rows = await mapBounded(members, async (m): Promise<ProjectDomainRow> => {
     if (m.repo === null) return { repo: repoOf(m), state: 'dangling', reason: DANGLING, domains: [] };
     try {
-      const domains = await domainsOf(m.repo);
+      const domains = await domainsOf(m.repo, adapter);
       return domains === null
-        ? { repo: repoOf(m), state: 'absent', reason: 'requirements_graph.json not generated for this repo yet', domains: [] }
+        ? { repo: repoOf(m), state: 'absent', reason: 'no requirements graph has been built for this repo yet', domains: [] }
         : { repo: repoOf(m), state: 'ok', domains };
     } catch (err) {
       return { repo: repoOf(m), state: 'error', reason: message(err), domains: [] };

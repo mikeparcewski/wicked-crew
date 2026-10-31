@@ -6757,10 +6757,10 @@ export interface RequirementsPage {
   source: 'store' | 'artifact';
   /**
    * Keys in `requirements_overrides.json` that matched NO requirement in the corpus. Operator
-   * edits are keyed by SymbolId (store) or `domain::reqId` (artifact); an estate id-scheme
-   * migration re-mints method/field SymbolIds, so overrides keyed by the old ids stop matching and
-   * would otherwise vanish silently. Non-zero means edits exist that no row is showing — re-run
-   * the annotation workflow, then re-apply or delete the stale keys.
+   * edits are keyed by `domain::reqId` whatever the source (older daemons serving `'store'` keyed
+   * them by SymbolId). The engine keeps a requirement's id across builds, so a key stops matching
+   * when its requirement is retired or its domain regrouped. Non-zero means edits exist that no
+   * row is showing — re-apply or delete the stale keys.
    */
   orphanedOverrides?: number;
   /** (0.159.0) The graph's coverage label; `null` on a graph built before the field, ABSENT from an

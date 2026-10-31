@@ -1,42 +1,42 @@
 /**
- * REQUIREMENTS SERVICE — server-side search + operator overrides over the evidence-gated
- * `requirements_graph.json` artifact.
+ * REQUIREMENTS SERVICE — server-side search + operator overrides over a repository's requirements
+ * graph, read from the repository's ESTATE store (operator ruling 2026-10-31: the graph is saved to
+ * estate, never a JSON file in the repo). `wicked-core domain-graph` saves it there
+ * (`persist_domain_model`); the engine reads it back READ-ONLY through core-ts
+ * (`getRequirementsGraphForRepo`, the same one-library path as `getCoverageReportForRepo`), with
+ * the coverage label recomputed from the store's own counts at read time.
  *
- * ONE source (crew#548, F-RC1-041 — FIX-IT-ALL L10-3): until 0.7.35 this module ALSO opened the
- * repo's code-graph store through a second SQLite library (`node:sqlite`, read-only, per request)
- * and served the live `nodes.requirement` rows first, falling back to the artifact. The engine
- * holds the same file open in-process through its own rusqlite (`getCoverageReportForRepo`), and
- * a second library on one SQLite file in one process is the F-E2E-021 class that corrupted the
- * bus db (one library per db file per process — crew#541). The store path is DELETED: the
- * artifact `wicked-core domain-graph` regenerates when its coverage bar passes is the only
- * source, and `RequirementsPage.source` always reads `'artifact'`. Named loss: a repo whose
- * domain-graph never passed its coverage bar answers the existing 404 ("requirements_graph.json
- * not generated") where the live store used to answer — the observed lag the old header cited as
- * the reason the store went primary; not on any RC2 journey (register BC-64). Live freshness, if
- * wanted later, is ONE additive core-ts read (`requirementsIndexJson`), never a second library.
+ * HISTORY: until crew 0.16 this module read the `<repo>/.wicked-estate/requirements/
+ * requirements_graph.json` artifact, and before 0.7.35 it ALSO opened the code-graph store through
+ * a second SQLite library (`node:sqlite`) — the F-E2E-021 class that corrupted the bus db (one
+ * library per db file per process — crew#541, crew#548). That rule still holds: the store is read
+ * ONLY by the engine, through core-ts.
  *
- * Why server-side: 15k+ requirements — shipping them to the browser for JS-side
- * filtering is not search. The daemon builds a flat index (cached, invalidated on
- * artifact/overrides mtime), and queries run here: tokenized AND-match over
- * id/domain/title/statements, risk + domain filters, offset/limit pagination.
+ * Why server-side: 15k+ requirements — shipping them to the browser for JS-side filtering is not
+ * search. The daemon builds a flat index and queries run here: tokenized AND-match over
+ * id/domain/title/statements, risk + domain filters, offset/limit pagination. One engine read
+ * serves a repository for `REQUIREMENTS_READ_TTL_MS`; the index is rebuilt when the read's content
+ * (graph + coverage label) or the overrides sidecar's mtime changes.
  *
- * Why an OVERRIDES sidecar: the artifact is DERIVED (regenerated from the estate
- * store), so operator edits written into it would be clobbered on the next
- * `domain-graph` run. Edits live in `requirements_overrides.json` beside the artifact,
- * keyed `domain::reqId`, and are merged at read time — the overlay survives
- * regeneration and keeps provenance honest (`riskSource: operator` vs `data`).
+ * Why an OVERRIDES sidecar: the graph is DERIVED (rebuilt into the estate store by each
+ * `domain-graph` run), so operator edits written into it would be clobbered on the next build.
+ * Edits live in `requirements_overrides.json` (repoPaths), keyed `domain::reqId`, and are merged
+ * at read time — the overlay survives a rebuild (the engine keeps each requirement's id across
+ * builds) and keeps provenance honest (`riskSource: operator` vs `data`).
  *
  * ORPHANED OVERRIDES: an override key matches by exact string, so a key the corpus no
- * longer mints simply stops matching — silently. That happens on an artifact regeneration
- * that renames a domain or reqId. The index therefore COUNTS the keys that matched no row
+ * longer mints simply stops matching — silently. That happens on a rebuild that regroups a
+ * domain or retires a requirement. The index therefore COUNTS the keys that matched no row
  * and surfaces the count as `orphanedOverrides` on every page, so the edits' existence is
  * never invisible. It does NOT re-key them: guessing the mapping here would attach an
  * operator's risk note to the wrong requirement.
  */
+import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { readFile, writeFile, rename, mkdir, stat } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
-import { requirementsGraph, requirementsOverrides } from '../core/repoPaths.js';
+import { codeGraphDb, requirementsOverrides } from '../core/repoPaths.js';
 import type { RepoEntry } from '../core/types.js';
 
 interface ArtifactCorroboration {
@@ -74,6 +74,72 @@ interface ArtifactRequirement {
 interface ArtifactDomain {
   description?: string;
   requirements?: Record<string, ArtifactRequirement>;
+}
+
+/** The domain-model document the engine reads back from estate (`load_domain_graph`). */
+export interface EstateRequirementsGraph {
+  metadata?: { coverage?: ArtifactCoverage };
+  domains?: Record<string, ArtifactDomain>;
+}
+
+/** What the engine answers for one repository: its graph (null until a build reached the minimum)
+ * and the coverage label from the store's own counts (present either way). */
+export interface EstateRequirementsRead {
+  graph: EstateRequirementsGraph | null;
+  coverage: ArtifactCoverage | null;
+}
+
+/** The one read this module needs from the engine — `CoreAdapter.getRequirementsGraphForRepo`. */
+export interface RequirementsGraphReader {
+  getRequirementsGraphForRepo(repoRef: string): Promise<EstateRequirementsRead>;
+}
+
+/** How long one engine read of a repository's graph serves later reads. A request that reads the
+ * same repository several times (product compose over many requirements, the project aggregates'
+ * two passes, PATCH then re-read) costs ONE read — the engine recomputes coverage over the whole
+ * store on each. A build that lands is visible within this window. */
+export const REQUIREMENTS_READ_TTL_MS = 5_000;
+
+const reads = new Map<string, { at: number; read: Promise<EstateRequirementsRead> }>();
+
+/** One key for everything cached about a repository: its id AND where it is registered. */
+function repoKey(repo: RepoEntry): string {
+  return `${repo.id}\0${repo.root_path}`;
+}
+
+/** Forget what was read for `repo` (or everything): the next read asks the engine again. */
+export function forgetRequirementsReads(repo?: RepoEntry): void {
+  if (repo === undefined) {
+    reads.clear();
+    cache.clear();
+    return;
+  }
+  reads.delete(repoKey(repo));
+  cache.delete(repoKey(repo));
+}
+
+/** The repository's requirements graph from estate. Reads of one repository within
+ * {@link REQUIREMENTS_READ_TTL_MS} — concurrent or not — share one engine call; a failed read is
+ * never kept. A repo whose daemon resolved no graph root throws `CodeGraphRootUnresolvableError`
+ * (the routes' 503); a repo not indexed yet has nothing to read (`graph: null`, the 404) and costs
+ * no engine call. */
+export async function readRequirementsGraph(
+  repo: RepoEntry,
+  reader: RequirementsGraphReader,
+): Promise<EstateRequirementsRead> {
+  const key = repoKey(repo);
+  if (!existsSync(codeGraphDb(repo))) {
+    forgetRequirementsReads(repo);
+    return { graph: null, coverage: null };
+  }
+  const hit = reads.get(key);
+  if (hit && Date.now() - hit.at < REQUIREMENTS_READ_TTL_MS) return hit.read;
+  const read = reader.getRequirementsGraphForRepo(repo.id);
+  reads.set(key, { at: Date.now(), read });
+  read.catch(() => {
+    if (reads.get(key)?.read === read) reads.delete(key);
+  });
+  return read;
 }
 
 export interface RequirementOverride {
@@ -212,8 +278,8 @@ interface IndexEntry {
 interface RepoIndex {
   entries: IndexEntry[];
   byKey: Map<string, IndexEntry>;
-  /** mtime of the artifact that built this index. */
-  sourceMtimeMs: number;
+  /** Content hash of the estate read that built this index. */
+  sourceToken: string;
   overridesMtimeMs: number;
   total: number;
   /** Override keys that matched NO row — stale after a re-index/migration (module header). */
@@ -262,24 +328,27 @@ async function readOverrides(repo: RepoEntry): Promise<Record<string, Requiremen
 const cache = new Map<string, RepoIndex>();
 let tmpSeq = 0;
 
-/** The artifact-built index for `repo` — cached, rebuilt when the artifact or the overrides
- * sidecar changes mtime; `null` when the artifact does not exist yet (the route's 404). */
-async function buildIndex(repo: RepoEntry): Promise<RepoIndex | null> {
-  const [artMtime, ovMtime] = await Promise.all([
-    mtimeMs(requirementsGraph(repo)),
+/** The index for `repo`, built from its graph in estate — cached, rebuilt when the graph read back
+ * from estate or the overrides sidecar changes; `null` when no graph has been built yet (the
+ * route's 404). */
+async function buildIndex(repo: RepoEntry, reader: RequirementsGraphReader): Promise<RepoIndex | null> {
+  const [read, ovMtime] = await Promise.all([
+    readRequirementsGraph(repo, reader),
     mtimeMs(requirementsOverrides(repo)),
   ]);
-  if (artMtime < 0) return null; // no artifact — requirements not generated yet
-  const cached = cache.get(repo.root_path);
-  if (cached && cached.sourceMtimeMs === artMtime && cached.overridesMtimeMs === ovMtime) {
+  const graph = read.graph;
+  if (graph === null || typeof graph !== 'object') {
+    cache.delete(repoKey(repo)); // nothing built (any more): no stale index survives
+    return null;
+  }
+  const token = createHash('sha1')
+    .update(JSON.stringify(graph))
+    .update(JSON.stringify(read.coverage ?? null))
+    .digest('hex');
+  const cached = cache.get(repoKey(repo));
+  if (cached && cached.sourceToken === token && cached.overridesMtimeMs === ovMtime) {
     return cached;
   }
-
-  const raw = await readFile(requirementsGraph(repo), 'utf8');
-  const graph = JSON.parse(raw) as {
-    metadata?: { coverage?: ArtifactCoverage };
-    domains?: Record<string, ArtifactDomain>;
-  };
   const overrides = await readOverrides(repo);
 
   const entries: IndexEntry[] = [];
@@ -328,15 +397,17 @@ async function buildIndex(repo: RepoEntry): Promise<RepoIndex | null> {
   const index: RepoIndex = {
     entries,
     byKey,
-    sourceMtimeMs: artMtime,
+    sourceToken: token,
     overridesMtimeMs: ovMtime,
     total: entries.length,
     orphanedOverrides: countOrphanedOverrides(overrides, byKey),
-    coverage: coverageOf(graph.metadata?.coverage),
+    // The label from the store's own counts at read time (a later run that maps more shows up
+    // without a rebuild); the build's own label only when an engine sent none.
+    coverage: coverageOf(read.coverage ?? graph.metadata?.coverage),
     validated: entries.filter((e) => e.summary.corroboration?.status === 'validated').length,
     unconfirmed: entries.filter((e) => e.summary.corroboration?.status === 'unconfirmed').length,
   };
-  cache.set(repo.root_path, index);
+  cache.set(repoKey(repo), index);
   return index;
 }
 
@@ -356,9 +427,9 @@ export interface RequirementsPage {
   limit: number;
   items: RequirementSummary[];
   /**
-   * Which source served this corpus. Always `'artifact'` since 0.7.35 (crew#548 — the live-store
-   * read through a second SQLite library is gone; module header); the `'store'` arm stays in the
-   * wire type (`wicked-crew-api-types`) for readers of older daemons. (FINDING-065)
+   * Which source served this corpus: `'store'`, the repository's estate store read through the
+   * engine (operator ruling 2026-10-31; module header). `'artifact'` was the
+   * `requirements_graph.json` file older daemons read. (FINDING-065)
    */
   source: 'store' | 'artifact';
   /**
@@ -393,8 +464,9 @@ export const REQUIREMENTS_NOT_GENERATED = {
 export async function listRequirements(
   repo: RepoEntry,
   query: RequirementsQuery,
+  reader: RequirementsGraphReader,
 ): Promise<RequirementsPage | null> {
-  const index = await buildIndex(repo);
+  const index = await buildIndex(repo, reader);
   if (index === null) return null;
   const terms = (query.q ?? '')
     .toLowerCase()
@@ -416,7 +488,7 @@ export async function listRequirements(
     offset: query.offset,
     limit: query.limit,
     items: matched.slice(query.offset, query.offset + query.limit),
-    source: 'artifact',
+    source: 'store',
     orphanedOverrides: index.orphanedOverrides,
     coverage: index.coverage,
     corroboration: { validated: index.validated, unconfirmed: index.unconfirmed },
@@ -426,8 +498,9 @@ export async function listRequirements(
 export async function getRequirement(
   repo: RepoEntry,
   key: string,
+  reader: RequirementsGraphReader,
 ): Promise<RequirementDetail | null> {
-  const index = await buildIndex(repo);
+  const index = await buildIndex(repo, reader);
   const entry = index?.byKey.get(key);
   if (index === null || entry === undefined) return null;
   const overrides = await readOverrides(repo);
@@ -452,8 +525,9 @@ export async function patchRequirement(
   repo: RepoEntry,
   key: string,
   patch: RequirementOverride,
+  reader: RequirementsGraphReader,
 ): Promise<RequirementDetail | null> {
-  const index = await buildIndex(repo);
+  const index = await buildIndex(repo, reader);
   if (index === null || !index.byKey.has(key)) return null;
   const overrides = await readOverrides(repo);
   const next: RequirementOverride = { ...overrides[key] };
@@ -469,6 +543,7 @@ export async function patchRequirement(
   const tmp = `${path}.tmp-${process.pid}-${++tmpSeq}`;
   await writeFile(tmp, JSON.stringify(overrides, null, 2), 'utf8');
   await rename(tmp, path);
-  cache.delete(repo.root_path); // next read rebuilds with the new overrides
-  return getRequirement(repo, key);
+  // The overrides changed, the graph did not: the index rebuilds from the read already in hand.
+  cache.delete(repoKey(repo));
+  return getRequirement(repo, key, reader);
 }

@@ -208,6 +208,16 @@ mentioned only where a daemon release depends on them.
 
 ### Changed
 
+- **Requirements are read from estate, not from a JSON file in the repo** (operator ruling 2026-10-31,
+  wicked-core#1223). `GET /repos/:id/requirements` (list, detail, PATCH), `GET /repos/:id/domain-graph`, the project
+  requirements and domain aggregates, and product compose read the repository's requirements graph from its estate
+  store through the engine (`getRequirementsGraphForRepo`). That is the same read-only, one-library path as the
+  per-repo coverage. `<repo>/.wicked-estate/requirements/requirements_graph.json` is no longer read. The coverage
+  label ("N% mapped, minimum M%") comes from the store's own counts at read time, so a later extraction page shows
+  without a rebuild. `RequirementsPage.source` is `'store'`. A repo whose daemon resolved no graph root answers 503
+  with the engine's diagnosis, like the other graph surfaces. An engine without the read answers an error naming the
+  upgrade. The operator-overrides sidecar (`requirements_overrides.json`) is unchanged.
+
 - **A failing floor re-runs only the failing test files.** `.wicked/checks.json` declares `rerun` for `test`
   and `test_targeted` (`scripts/test-related.mjs --tests <files>`, which keeps the clean
   build, the cross-repo filter and the one deadline retry). With wicked-core#1198 the engine's retry and its base

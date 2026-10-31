@@ -49,6 +49,7 @@ import type {
   CampaignDef,
 } from './types.js';
 import { DEFAULT_SETTINGS } from './types.js';
+import type { EstateRequirementsRead } from '../api/requirements.js';
 import { BASE_SKILL_REF_SHAPE } from '../skills/base-skill.js';
 import { execCapped } from './exec.js';
 import { composeDeliverWorkflow, DELIVER_PHASE_ID, deliverPresetStep, deliverIdentityFor, deliverRepoFor, isGitHubLogin, pushIdentityOf, readDeliverOriginUrl } from './deliver.js';
@@ -325,6 +326,10 @@ type GovernanceMethods = {
   // FINDING-009: coverage for ONE registered repo, computed over that repo's OWN code graph (not the
   // vacuous daemon store). Returns a JSON string like `getCoverageReport`; an unknown repo REJECTS.
   getCoverageReportForRepo(repoRef: string): Promise<string>;
+  // Operator ruling 2026-10-31: ONE repo's requirements graph, read from that repo's OWN estate
+  // store, with the coverage label from the store's counts. JSON `{graph, coverage}`; an unknown repo
+  // REJECTS. Absent on engines before core#1223.
+  getRequirementsGraphForRepo?(repoRef: string): Promise<string>;
   // #122: node-count-by-kind summary of ONE repo's code graph, over that repo's OWN store. Returns a
   // JSON string (array of {kind,count}); an unknown repo REJECTS.
   getGraphKindsForRepo(repoRef: string): Promise<string>;
@@ -595,6 +600,7 @@ const STORE_READS_OFF_ACTOR: ReadonlySet<string> = new Set([
   'evaluateEditorGrants',
   'getCoverageReport',
   'getCoverageReportForRepo',
+  'getRequirementsGraphForRepo',
   'getGraphKindsForRepo',
 ]);
 
@@ -3208,6 +3214,25 @@ export class CoreAdapter {
     return parseEngineJson<CoverageReport | null>(
       await this.core.getCoverageReportForRepo(repoRef),
       'getCoverageReportForRepo',
+    );
+  }
+
+  /**
+   * ONE registered repo's requirements graph, read from that repo's OWN estate store (the source of
+   * truth `wicked-core domain-graph` saves into; never a file in the checkout), with the coverage
+   * label from the store's counts. `graph` is null until a build reached the minimum. The core
+   * rejects an unknown repo; an engine without the read throws, naming what is needed.
+   */
+  async getRequirementsGraphForRepo(repoRef: string): Promise<EstateRequirementsRead> {
+    if (typeof this.core.getRequirementsGraphForRepo !== 'function') {
+      throw new Error(
+        'this wicked-core engine cannot read the requirements graph from estate (it needs the core-ts ' +
+          'binding getRequirementsGraphForRepo); upgrade wicked-core-ts',
+      );
+    }
+    return parseEngineJson<EstateRequirementsRead>(
+      await this.core.getRequirementsGraphForRepo(repoRef),
+      'getRequirementsGraphForRepo',
     );
   }
 

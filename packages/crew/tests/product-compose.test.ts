@@ -19,10 +19,11 @@ describe('POST /projects/:id/product/compose (crew#372)', () => {
   beforeAll(async () => {
     base = mkdtempSync(join(tmpdir(), 'product-compose-'));
     const root = join(base, 'alpha');
-    mkdirSync(join(root, '.wicked-estate', 'requirements'), { recursive: true });
-    writeFileSync(
-      join(root, '.wicked-estate', 'requirements', 'requirements_graph.json'),
-      JSON.stringify({
+    // The repo's requirements graph as the engine reads it from its estate store (operator ruling
+    // 2026-10-31: never a file in the repo).
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, 'estate.db'), '');
+    const estateGraph = {
         metadata: { schema_version: '1.0.0', migration_mode: 'x' },
         domains: {
           billing: {
@@ -33,13 +34,27 @@ describe('POST /projects/:id/product/compose (crew#372)', () => {
             entities: {},
           },
         },
-      }),
-    );
-    const repos = [{ id: 'alpha', name: 'alpha', root_path: root }, { id: 'outsider', name: 'outsider', root_path: root }];
+      };
+    const repos = [
+      { id: 'alpha', name: 'alpha', root_path: root, code_graph_db: join(root, 'estate.db') },
+      { id: 'outsider', name: 'outsider', root_path: root, code_graph_db: join(root, 'estate.db') },
+      // A member whose daemon resolved no repo-graph root (wicked-core#406).
+      {
+        id: 'rootless',
+        name: 'rootless',
+        root_path: root,
+        code_graph_db: '',
+        findings: [{ code: 'code_graph_root_unresolvable', message: 'no repo-graph root resolves for this daemon', path: null }],
+      },
+    ];
     const adapter = {
       projectGet: vi.fn(async (id: string) => (id === 'p1' ? { id } : null)),
-      projectMembers: vi.fn(async () => [{ member_kind: 'crew.repo', member_ref: 'alpha' }]),
+      projectMembers: vi.fn(async () => [
+        { member_kind: 'crew.repo', member_ref: 'alpha' },
+        { member_kind: 'crew.repo', member_ref: 'rootless' },
+      ]),
       listRepos: vi.fn(async () => repos),
+      getRequirementsGraphForRepo: vi.fn(async (ref: string) => ({ graph: ref === 'alpha' ? estateGraph : null, coverage: null })),
     };
     app = Fastify({ logger: false });
     app.post('/api/v1/runs', async (req, reply) => {
@@ -60,6 +75,13 @@ describe('POST /projects/:id/product/compose (crew#372)', () => {
 
   const compose = (payload: unknown, headers: Record<string, string> = {}) =>
     app.inject({ method: 'POST', url: '/api/v1/projects/p1/product/compose', payload: payload as Record<string, unknown>, headers });
+
+  it('a requirement of a member with no repo-graph root answers 503 with the diagnosis, and nothing launches', async () => {
+    const res = await compose({ requirements: [{ repoId: 'rootless', key: 'billing::r1' }] });
+    expect(res.statusCode, res.body).toBe(503);
+    expect(res.json().error).toMatch(/no repo-graph root resolves/);
+    expect(launched).toEqual([]);
+  });
 
   it('re-reads each requirement and launches produce → review (human gate) via POST /runs, filed, no deliver', async () => {
     const res = await compose(
