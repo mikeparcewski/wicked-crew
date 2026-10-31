@@ -59,8 +59,7 @@ describe('crew#1223 — the named-files retry needs a purely-deadline failure se
     const r = await drive(out);
     expect(r.code).toBe(1);
     expect(r.calls).toHaveLength(1);
-    expect(r.text).toContain(`${mod.RETRY_MARKER} none`);
-    expect(r.text).toContain('not deadline failures');
+    expect(r.text).toContain(`${mod.RETRY_MARKER} none — a non-deadline failure in tests/b.test.ts;`);
   });
 
   it('a timeout plus an unhandled error vitest attributes to no file is recorded as-is', async () => {
@@ -68,7 +67,7 @@ describe('crew#1223 — the named-files retry needs a purely-deadline failure se
     const r = await drive(out);
     expect(r.code).toBe(1);
     expect(r.calls).toHaveLength(1);
-    expect(r.text).toContain('unhandled error');
+    expect(r.text).toContain(`${mod.RETRY_MARKER} none — an unhandled error outside any file;`);
   });
 
   it("a deadline marker in the Unhandled Errors section is not the last FAIL block's own", async () => {
@@ -88,7 +87,22 @@ describe('crew#1223 — the named-files retry needs a purely-deadline failure se
     const r = await drive(out);
     expect(r.code).toBe(1);
     expect(r.calls).toHaveLength(1);
-    expect(r.text).toContain("summary counts 2 failed file(s) but 1 are named");
+    expect(r.text).toContain(`${mod.RETRY_MARKER} none — 1 file(s) named but vitest's summary counts 2 failed;`);
+  });
+
+  it('consecutive FAIL headers share the one error body that follows, so a grouped timeout is still a deadline failure', async () => {
+    const out = [
+      ' FAIL  tests/a.test.ts > first',
+      ' FAIL  tests/a.test.ts > second',
+      ' FAIL  tests/c.test.ts > third',
+      'Error: Hook timed out in 10000ms.',
+      '',
+      ' Test Files  2 failed | 8 passed (10)',
+    ].join('\n');
+    const r = await drive(out);
+    expect(r.code).toBe(0);
+    expect(r.calls).toHaveLength(2);
+    expect(r.calls[1]).toEqual(expect.arrayContaining(['tests/a.test.ts', 'tests/c.test.ts']));
   });
 
   it('a pure deadline failure whose files reconcile is still re-run once, and exit 0 when the re-run passes', async () => {

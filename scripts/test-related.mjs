@@ -393,34 +393,33 @@ export function failedTestFiles(output) {
  */
 export function namedRetryRefusal(output, failed) {
   const text = stripAnsi(output);
-  const lines = text.split('\n');
+  // A block is the consecutive FAIL headers vitest prints for failures sharing ONE error body, plus that body.
   const blocks = [];
   let cur = null;
-  for (const line of lines) {
-    if (/^\s*FAIL\s+\S/.test(line)) {
-      cur = [line];
-      blocks.push(cur);
+  for (const line of text.split('\n')) {
+    const header = /^\s*FAIL\s+(\S+)/.exec(line);
+    if (header !== null) {
+      if (cur !== null && !cur.hasBody) cur.headers.push(line);
+      else {
+        cur = { headers: [line], files: [], body: [], hasBody: false };
+        blocks.push(cur);
+      }
+      cur.files.push(header[1].replace(/\\/g, '/'));
     } else if (cur !== null && (/^\s*⎯/.test(line) || /^\s*(Test Files|Tests|Errors)\s{2,}/.test(line))) {
       cur = null;
     } else if (cur !== null) {
-      cur.push(line);
+      cur.body.push(line);
+      if (line.trim() !== '') cur.hasBody = true;
     }
   }
-  const notDeadline = blocks.filter((b) => retryableFailureReason(b.join('\n')) === null);
-  if (notDeadline.length > 0) {
-    return `${notDeadline.length} failure(s) are not deadline failures (${notDeadline[0][0].trim()}), and the re-run alone could clear them`;
+  const bad = blocks.find((b) => retryableFailureReason([...b.headers, ...b.body].join('\n')) === null);
+  if (bad !== undefined) return `a non-deadline failure in ${bad.files[0]}`;
+  const summary = /^\s*Test Files\s+(?:\d+ \w+ \| )*?(\d+) failed/m.exec(text);
+  const counted = summary === null ? 0 : Number(summary[1]);
+  if (counted !== failed.length) {
+    return `${failed.length} file(s) named but vitest's summary counts ${counted} failed`;
   }
-  const summary = /^\s*Test Files\s+(\d+) failed/m.exec(text);
-  if (summary === null) {
-    return "the output carries no `Test Files  N failed` summary to reconcile the named files with";
-  }
-  if (Number(summary[1]) !== failed.length) {
-    return `vitest's summary counts ${summary[1]} failed file(s) but ${failed.length} are named (a FAIL header may be lost)`;
-  }
-  const errs = /^\s*Errors\s+(\d+) errors?/m.exec(text);
-  if (errs !== null) {
-    return `vitest's summary reports ${errs[1]} unhandled error(s), which belong to no file the re-run names`;
-  }
+  if (/^\s*Errors\s+\d+ errors?/m.test(text)) return 'an unhandled error outside any file';
   return null;
 }
 
@@ -578,7 +577,7 @@ export async function runTargeted(files, io = {}) {
       const refusal = namedRetryRefusal(first.output, failed);
       if (refusal !== null) {
         out(
-          `${RETRY_MARKER} none — ${why}, but ${refusal}; the named-files re-run cannot stand for the whole run, ` +
+          `${RETRY_MARKER} none — ${refusal}; the named-files re-run cannot stand for the whole run (${why}), ` +
             'so the first pass is recorded as-is (crew#1223).',
         );
         return first.status;
