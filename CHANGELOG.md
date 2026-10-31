@@ -17,7 +17,7 @@ mentioned only where a daemon release depends on them.
   `{light, dark}`, `live`), naming `.svg` / `.png` / `.webp` files beside it. The registry reads each once, bounded
   (icon 16 KB, preview 200 KB), never through a link (checked, then opened with O_NOFOLLOW and matched to the checked
   inode) or out of its directory, checks it is the image its name says, and puts it on `GET /editors` as a `data:` URL:
-  `EditorView.description` and `EditorView.visuals` (api-types 0.156.0 `EditorVisuals`). No path and no remote URL
+  `EditorView.description` and `EditorView.visuals` (api-types 0.157.0 `EditorVisuals`). No path and no remote URL
   reaches the browser, and no image is served from crew's origin. A bad image is left out with a logged reason; the
   editor is still served. Pack editors carry neither yet: garden's pack gate refuses both keys (PK060).
 
