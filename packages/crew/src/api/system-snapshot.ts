@@ -143,6 +143,7 @@ const LABELS: Record<SystemInfraKey, string> = {
   disk: 'Free disk',
   load: 'Host load',
   repos: 'Repositories',
+  seat_images: 'Seat images',
 };
 
 export function infraRow(

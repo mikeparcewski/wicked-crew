@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.161.0",
+  "apiTypesVersion": "0.162.0",
   "endpoints": [
     {
       "method": "GET",
@@ -2417,6 +2417,18 @@
       "responseType": "SystemSnapshot",
       "statusCodes": [
         200
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/system/seat-images/rebuild",
+      "requestType": null,
+      "responseType": "RebuildSeatImagesResponse",
+      "statusCodes": [
+        202,
+        403,
+        409,
+        503
       ]
     },
     {

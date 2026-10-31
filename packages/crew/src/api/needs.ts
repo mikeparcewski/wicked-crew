@@ -362,7 +362,7 @@ export function buildNeeds(input: NeedsInput): Needs {
   const infraItems: Array<{ row: SystemInfraRow; kind: 'prevents' | 'slows' }> = [];
   for (const row of input.infra) {
     if (row.state === 'down') infraItems.push({ row, kind: 'prevents' });
-    else if (row.state === 'degraded' && (row.key === 'load' || row.key === 'daemon' || (row.key === 'skills' && /launches wait/i.test(row.reason)))) infraItems.push({ row, kind: 'slows' });
+    else if (row.state === 'degraded' && (row.key === 'load' || row.key === 'daemon' || row.key === 'seat_images' || (row.key === 'skills' && /launches wait/i.test(row.reason)))) infraItems.push({ row, kind: 'slows' });
     else if (row.state === 'unknown' && WORK_PATH.has(row.key)) infraItems.push({ row, kind: 'slows' });
   }
   // A down component claims the held runs whose denial names it, and the stalled runs on its path
@@ -503,7 +503,9 @@ export function buildNeeds(input: NeedsInput): Needs {
     }
     // A slowdown that slows no work is not stuck work (a down component still prevents new runs).
     // The one exception: a run list that could not be read, so nothing proves there is no work.
-    if (kind === 'slows' && held.length === 0 && !(row.key === 'daemon' && row.state === 'degraded')) continue;
+    // The seat images warn ahead of the work: a missing image costs the next unit a build, and a
+    // filling runtime disk is said before a kubelet's image cleanup runs.
+    if (kind === 'slows' && held.length === 0 && !(row.key === 'daemon' && row.state === 'degraded') && row.key !== 'seat_images') continue;
     const down = row.state === 'down';
     finish(
       { members: held },
@@ -516,7 +518,7 @@ export function buildNeeds(input: NeedsInput): Needs {
         reason: `${row.reason}${held.length > 0 ? `; it ${kind === 'slows' ? 'slows the next step of' : 'holds'} ${plural(held.length, 'job')}${row.key === 'load' ? ' and every new one' : ''}` : ''}`,
         remedy: row.remedy ?? 'Re-check.',
         target: { kind: 'infra', key: row.key },
-        action: { kind: 'recheck', label: 'Re-check' },
+        action: seatImagesRebuildFixes(row) ? { kind: 'rebuild_seat_images', label: 'Rebuild seat images' } : { kind: 'recheck', label: 'Re-check' },
       },
     );
   }
@@ -647,4 +649,21 @@ export class RunCostCache {
     });
     return this.inFlight;
   }
+}
+
+/** Whether the seat images row is one "Rebuild seat images" fixes: a roster image or the floor image
+ *  is missing, or an image is not yet held (a rebuild builds and holds them). Not a missing base with
+ *  no recipe, an operator's own image, or a full disk: a rebuild cannot fix those. */
+export function seatImagesRebuildFixes(row: SystemInfraRow): boolean {
+  if (row.key !== 'seat_images' || (row.state !== 'down' && row.state !== 'degraded')) return false;
+  const d = row.details as {
+    missing?: unknown;
+    unheld?: unknown;
+    images?: { floor?: { present?: unknown }; base?: { present?: unknown } | null; baseRecipe?: unknown; seats?: Array<{ present?: unknown; operatorImage?: unknown }> };
+  };
+  const baseUnbuildable = d.images?.base?.present === false && d.images?.baseRecipe !== true;
+  const operatorMissing = (d.images?.seats ?? []).some((x) => x.present === false && x.operatorImage === true);
+  if (baseUnbuildable || operatorMissing) return false;
+  const n = (v: unknown): number => (Array.isArray(v) ? v.length : 0);
+  return n(d.missing) > 0 || n(d.unheld) > 0 || d.images?.floor?.present === false;
 }

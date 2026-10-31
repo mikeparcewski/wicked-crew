@@ -53,6 +53,7 @@ import type {
   LaunchRunInput,
   ListMemoriesResponse,
   ListProposalsResponse,
+  RebuildSeatImagesResponse,
   ResolveRunResponse,
   MemoryCoverageResponse,
   MemoryItem,
@@ -277,6 +278,7 @@ import {
   type RosterSeatLike,
   type RunEvidence,
 } from './system-snapshot.js';
+import { parseSeatImageStatus, probeSeatImages, SEAT_IMAGES_TIMEOUT_MS, SeatImageRebuilder, type SeatImageStatus } from './seat-images.js';
 import { RunCostCache } from './needs.js';
 import { governanceStoreFix, legacyHomeOutboxPath } from '../core/governance-store.js';
 import { UsageError, replayOutboxInto } from '../cli/governance.js';
@@ -1128,6 +1130,10 @@ export interface RuntimeDeps {
   decisionsEmit?: DecisionBusEmit | null;
   /** The watch registry (TR-W5a), for the `watch.*` settings guard; absent or `null` = no registry. */
   watchRegistry?: () => WatchRegistry | null;
+  /** The seat images row's reading (`wicked-core seat-image status --json`); tests inject it. */
+  seatImageStatus?: () => Promise<SeatImageStatus | null>;
+  /** The "Rebuild seat images" runner; tests inject it. */
+  seatImageRebuilder?: SeatImageRebuilder;
   /** Freeze deliveries (studio idea 15) — `createServer` hydrates one from the audit trail so a
    *  restart keeps the freeze; a directly-driven route set gets a fresh (thawed) switch. */
   deliveryFreeze?: DeliveryFreeze;
@@ -8750,6 +8756,62 @@ export function registerRoutes(
       // F-043: the bridge emits where this daemon's interactive seams read — one bus per daemon.
       busDataDir: runtime.interactiveBridgeBusDataDir ?? null,
     });
+  // The seat images row (`seat_images`) and its fix: the engine's `seat-image status --json`, read
+  // per request, and one background `seat-image build` at a time.
+  const coreExe = (): string | null => process.env['WICKED_CORE_EXE'] || null;
+  const engineRun = async (file: string, args: string[], opts: { timeout: number }): Promise<{ rc: number; stdout: string; stderr: string }> => {
+    try {
+      return { rc: 0, ...(await execCapped(file, args, opts)) };
+    } catch (err) {
+      const e = err as { code?: unknown; stdout?: unknown; stderr?: unknown; message?: string };
+      return {
+        rc: typeof e.code === 'number' && e.code !== 0 ? e.code : 1,
+        stdout: typeof e.stdout === 'string' ? e.stdout : '',
+        stderr: typeof e.stderr === 'string' && e.stderr !== '' ? e.stderr : (e.message ?? 'failed'),
+      };
+    }
+  };
+  const seatImageRebuilder = runtime.seatImageRebuilder ?? new SeatImageRebuilder(coreExe, engineRun);
+  const seatImageStatus =
+    runtime.seatImageStatus ??
+    (async () => {
+      const exe = coreExe();
+      if (exe === null) throw new Error('WICKED_CORE_EXE is not set');
+      const r = await engineRun(exe, ['seat-image', 'status', '--json'], { timeout: SEAT_IMAGES_TIMEOUT_MS });
+      if (r.rc !== 0) throw new Error(loginDetail(r.stderr) || `exit ${r.rc}`);
+      return parseSeatImageStatus(r.stdout);
+    });
+  // The roster's container seats: the images that matter on this daemon.
+  const containerSeatClis = (): string[] => {
+    try {
+      return rosterWithStanding().map((r) => String(r.key)).filter((k) => isContainerLoginCli(k));
+    } catch {
+      return [];
+    }
+  };
+  // ── POST /system/seat-images/rebuild — the seat images row's fix (api-types 0.162.0) ──
+  // A person's only: it builds images in the container runtime for minutes. One at a time; the
+  // progress reads on the `seat_images` row.
+  app.post(
+    `${V}/system/seat-images/rebuild`,
+    { config: { manifest: { responseType: 'RebuildSeatImagesResponse', statusCodes: [202, 403, 409, 503] } } },
+    async (req, reply) => {
+      if (!isHumanOperator(actorOf(req))) return reply.code(403).send({ error: 'Only a person can rebuild the seat images' });
+      if (!isContainerSeatFloor()) {
+        const out: RebuildSeatImagesResponse = { started: false, reason: 'seats run on the host floor: there are no seat images to rebuild', rebuild: null };
+        return reply.code(503).send(out);
+      }
+      const r = seatImageRebuilder.start(containerSeatClis());
+      if (r.started) {
+        audit.record('system.seat_images.rebuild', actorOf(req), { detail: { clis: r.state.clis } });
+        const out: RebuildSeatImagesResponse = { started: true, rebuild: r.state };
+        return reply.code(202).send(out);
+      }
+      const out: RebuildSeatImagesResponse = { started: false, reason: r.reason, rebuild: r.state };
+      return reply.code(r.state?.running === true ? 409 : 503).send(out);
+    },
+  );
+
   // ── GET /system — the Nerve Center snapshot (DES-SYSTEM-VIEW, api-types 0.136.0) ──
   // One derived, READ-ONLY answer: the CLIs with their 7-day record, every unfinished run with a
   // COMPUTED liveness, the infrastructure as real bounded probes, the governance instruments and
@@ -8758,6 +8820,7 @@ export function registerRoutes(
   // SYSTEM_BUDGET_MS: a part that does not settle in time reads `unknown` (or `null`) with why.
   const weekFoldCache = new WeekFoldCache();
   const runCosts = new RunCostCache();
+
   let toReviewCache: { at: number; value: number | null } | null = null;
   /** One stat of a run's durable event log: read before the 7-day fold, so the fold can never eat
    *  the time a liveness verdict needs. */
@@ -8844,6 +8907,7 @@ export function registerRoutes(
         }),
         probeVault({ vault: adapter.vaultBin != null ? vaultDiagnostics(adapter.vaultBin) : null, exec: systemExec }),
         diskRow(stateHome),
+        probeSeatImages({ containerFloor, clis: containerSeatClis(), status: seatImageStatus, rebuild: seatImageRebuilder.current() }),
       ]);
 
       const [views, settings, openGates, diag, ping, rules, gatesByYou, infraProbed, reposRead] = await Promise.all([
@@ -8991,6 +9055,7 @@ export function registerRoutes(
         stateHomeRow(d === null ? null : (d.stateHome ?? null) as Parameters<typeof stateHomeRow>[0]),
         storesRow,
         seatFloorRow,
+        infraProbed[7] as SystemInfraRow,
         reposRow(reposRead),
         infraProbed[6] as SystemInfraRow,
         loadRow(),
