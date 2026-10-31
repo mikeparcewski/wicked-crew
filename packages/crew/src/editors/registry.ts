@@ -29,8 +29,9 @@ import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readd
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 
-import type { EditorPermission, EditorView } from '../core/types.js';
+import type { EditorPermission, EditorView, EditorVisuals } from '../core/types.js';
 import { parseSurfaces } from './surfaces.js';
+import { declaredDescription, declaredVisuals, resolveVisuals } from './visuals.js';
 import { crewStateHome } from '../projects/state-home.js';
 
 /** The persisted flags file, under the registered `daemon-` prefix. */
@@ -96,6 +97,10 @@ const EditorManifestFields = z.object({
   permissions: z.array(z.object({ id: z.enum(EDITOR_PERMISSIONS), why: z.string().min(1) })),
   limits: z.object({ bundleBytes: z.number().int().min(1).max(HOST_BUNDLE_CAP_BYTES) }).optional(),
   surfaces: SurfacesField,
+  /** The Plugins page's one line and look (program DES-LEARN §2). Cosmetic: a malformed value is dropped, never a
+   *  reason to refuse the editor. */
+  description: z.unknown().optional().transform(declaredDescription),
+  visuals: z.unknown().optional().transform(declaredVisuals),
 });
 export const EditorManifestSchema = EditorManifestFields.superRefine(surfacesMatchProtocol);
 export type EditorManifest = z.infer<typeof EditorManifestFields>;
@@ -113,6 +118,8 @@ export interface EditorRecord {
   enabled: boolean;
   /** For a pack editor: the pack it came from. Never on the wire. */
   pack?: InstalledPack;
+  /** Its declared visuals with each image read into a `data:` URL (`visuals.ts`). */
+  visuals?: EditorVisuals;
 }
 
 /** One installed pack editor, as `daemon-editors.json` records it. */
@@ -271,13 +278,17 @@ export function discoverStudioEditors(
       log?.(`[editors] ${manifest.id}: entry loads from outside itself (${outside.slice(0, 3).join(', ')})`);
       continue;
     }
-    out.push({ manifest, sha256: sha256Of(buf), bytes: buf.byteLength, entryPath, firstParty: true, source: 'studio-bundle' });
+    const visuals = resolveVisuals(join(dir, name), manifest.visuals, (m) => log?.(`[editors] ${manifest.id}: visual ${m}; left out`));
+    out.push({ manifest, sha256: sha256Of(buf), bytes: buf.byteLength, entryPath, firstParty: true, source: 'studio-bundle', ...(visuals !== undefined ? { visuals } : {}) });
   }
   return out;
 }
 
 /** A pack editor's manifest entry: the shared shape plus its pinned hash and a pack-relative entry. */
-export const PackEditorSchema = EditorManifestFields.extend({
+/** A pack editor's manifest entry. No `description` / `visuals` yet: garden's pack gate (spec 2) refuses both keys
+ *  (PK060), and a pack is another party's directory, so its images would need descriptor-anchored reads; studio-bundle
+ *  editors only for now (post-mvp: garden pack schema + anchored reads). */
+export const PackEditorSchema = EditorManifestFields.omit({ description: true, visuals: true }).extend({
   entry: z.string().regex(/\.html$/u),
   sha256: z.string().regex(/^[0-9a-f]{64}$/u),
 }).superRefine(surfacesMatchProtocol);
@@ -537,6 +548,8 @@ export class EditorRegistry {
       enabled: r.enabled,
       source: r.source,
       entry_url: `/api/v1/editors/${encodeURIComponent(m.id)}/${encodeURIComponent(m.version)}/entry`,
+      ...(m.description !== undefined ? { description: m.description } : {}),
+      ...(r.visuals !== undefined ? { visuals: structuredClone(r.visuals) } : {}),
     };
   }
 }
