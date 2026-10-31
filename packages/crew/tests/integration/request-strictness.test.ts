@@ -100,6 +100,7 @@ beforeAll(async () => {
   git('config', 'user.email', 'test@example.invalid');
   git('config', 'user.name', 'strictness fixture');
   git('commit', '-q', '--allow-empty', '-m', 'root');
+  git('commit', '-q', '--allow-empty', '-m', 'second');
   repoId = (await adapter.registerRepo('strictness-fixture', repoDir)).id;
 });
 
@@ -199,5 +200,50 @@ describe('the other request surfaces reject unknown fields too', () => {
     );
     expect(res.status).toBe(400);
     expect(((await res.json()) as ErrorBody).error).toContain('limitt');
+  });
+});
+
+// Lane repo-page: a repository with no requirements graph is a typed state, not a refusal. Studio
+// showed crew's bare 404 sentence as "the daemon refused this — requirements_graph.json not
+// generated for this repo yet". The fixture repo has never had the graph generated.
+describe('requirements not generated yet (repo page)', () => {
+  it('answers 404 with code notGenerated and the workflow that generates it', async () => {
+    const res = await fetch(`${baseUrl}/api/v1/repos/${encodeURIComponent(repoId)}/requirements`);
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({
+      error: 'No requirements graph yet for this repository',
+      code: 'notGenerated',
+      workflow: 'domain-extraction',
+    });
+  });
+
+  it('an unknown repository is still a plain 404, with no code', async () => {
+    const res = await fetch(`${baseUrl}/api/v1/repos/no-such-repo/requirements`);
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as ErrorBody & { code?: unknown };
+    expect(body.code).toBeUndefined();
+  });
+});
+
+// Lane repo-page: the repo page lists the latest 20 commits; its "Show all" asks for more.
+describe('git-history ?limit', () => {
+  const history = (q: string): Promise<Response> =>
+    fetch(`${baseUrl}/api/v1/repos/${encodeURIComponent(repoId)}/git-history${q}`);
+
+  it('returns at most `limit` commits, newest first', async () => {
+    const one = await history('?limit=1');
+    expect(one.status).toBe(200);
+    const { commits } = (await one.json()) as { commits: { message: string }[] };
+    expect(commits.map((c) => c.message)).toEqual(['second']);
+    const all = (await (await history('')).json()) as { commits: { message: string }[] };
+    expect(all.commits.map((c) => c.message)).toEqual(['second', 'root']);
+  });
+
+  it('rejects an out-of-range limit and an unknown parameter', async () => {
+    expect((await history('?limit=0')).status).toBe(400);
+    expect((await history('?limit=501')).status).toBe(400);
+    const typo = await history('?limitt=5');
+    expect(typo.status).toBe(400);
+    expect(((await typo.json()) as ErrorBody).error).toContain('limitt');
   });
 });

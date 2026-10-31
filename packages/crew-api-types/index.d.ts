@@ -6277,6 +6277,7 @@ export interface RepoGraphResponse {
   finding?: RepoFinding;
 }
 
+/** One row of `GET /repos/:id/git-history` (`?limit=` 1..500, default 20; newest first). */
 export interface GitCommit {
   sha: string;
   shortSha: string;
@@ -6564,6 +6565,18 @@ export interface RequirementsPage {
    * the annotation workflow, then re-apply or delete the stale keys.
    */
   orphanedOverrides?: number;
+}
+
+/**
+ * `GET /repos/:id/requirements` 404 when the repository's `requirements_graph.json` has not been
+ * generated (0.154.0). A state, not a refusal: `code` is the discriminator a client matches on, and
+ * `workflow` names the preset that generates the graph (its last step runs `wicked-core domain-graph`).
+ * Any other 404 on the route (an unknown repo) carries no `code`.
+ */
+export interface RequirementsNotGenerated {
+  error: string;
+  code: 'notGenerated';
+  workflow: string;
 }
 
 export interface RequirementPatch {

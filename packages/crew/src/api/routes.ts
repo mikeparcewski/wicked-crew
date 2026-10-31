@@ -5,7 +5,7 @@ import { vaultBinWarning, vaultDiagnostics } from '../core/vault-bin.js';
 import { PlanSchema, toLaunchPlan } from './plan-schema.js';
 import type { RecordedStallFrame } from './stall-frame-index.js';
 import { z } from 'zod';
-import { listRequirements, getRequirement, patchRequirement } from './requirements.js';
+import { listRequirements, getRequirement, patchRequirement, REQUIREMENTS_NOT_GENERATED } from './requirements.js';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { readFileSync, existsSync, mkdirSync } from 'node:fs';
@@ -6868,7 +6868,8 @@ export function registerRoutes(
       return reply.code(status).send({ error: message(err) });
     }
     if (page === null) {
-      return reply.code(404).send({ error: 'requirements_graph.json not generated for this repo yet' });
+      // Not generated yet is a state, typed by `code`, not a refusal (lane repo-page).
+      return reply.code(404).send(REQUIREMENTS_NOT_GENERATED);
     }
     // Overrides keyed by ids the corpus no longer mints (an estate id-scheme migration re-keys
     // method/field SymbolIds) would otherwise vanish without a trace — the count is on the page
@@ -7084,17 +7085,25 @@ export function registerRoutes(
     },
   );
 
+  // `?limit=` (1..500, default 20): the repo page shows the latest 20; its "Show all" asks for more.
+  const GitHistoryQuerySchema = z.object({
+    limit: z.coerce.number().int().min(1).max(500).default(20),
+  }).strict();
   app.get(`${V}/repos/:id/git-history`, async (req, reply) => {
     const { id } = req.params as { id: string };
     const repos = await adapter.listRepos();
     const repo = repos.find((r) => r.id === id);
     if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
     if (refusedMissingFolder(repo, reply)) return reply;
+    const query = GitHistoryQuerySchema.safeParse(req.query);
+    if (!query.success) {
+      return reply.code(400).send(invalidBody(query.error, 'Invalid query'));
+    }
 
     try {
       const { stdout } = await execCapped(
         'git',
-        ['log', '--pretty=format:%H\x1f%h\x1f%s\x1f%an\x1f%ar', '-n', '20'],
+        ['log', '--pretty=format:%H\x1f%h\x1f%s\x1f%an\x1f%ar', '-n', String(query.data.limit)],
         { timeout: 10_000, cwd: repo.root_path },
       );
       const commits = stdout.trim().split('\n').filter(Boolean).map((line) => {

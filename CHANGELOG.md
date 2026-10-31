@@ -31,6 +31,13 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- **A repository with no requirements graph says so, typed, instead of a refusal.** `GET /repos/:id/requirements`
+  answered a bare 404 sentence ("requirements_graph.json not generated for this repo yet") that studio could only show
+  as "the daemon refused this — …" on the repository page. It now answers 404
+  `{error: "No requirements graph yet for this repository", code: "notGenerated", workflow: "domain-extraction"}`
+  (api-types 0.154.0 `RequirementsNotGenerated`); an unknown repository stays a plain 404 with no `code`.
+  `GET /repos/:id/git-history` takes `?limit=` (1..500, default 20) so the repository page's "Show all" can list more
+  than the latest 20 commits; an unknown query parameter is a 400 (lane repo-page).
 - **A repository whose folder is gone is named, not reported as `spawn wicked-estate ENOENT`.** On the rig, tiny-math
   was registered under a lane folder named `target`, and a cleanup that removed every `target/` as build output
   deleted it. Node reports a missing spawn `cwd` exactly like a missing binary, so the repo page said "couldn't load
