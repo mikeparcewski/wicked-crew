@@ -5586,7 +5586,8 @@ export function registerRoutes(
   // kept on the `run.cancelled` audit line. A bodiless cancel is unchanged; voice is a person's only (403).
   app.post(`${V}/runs/:id/cancel`, async (req, reply) => {
     const { id } = req.params as { id: string };
-    const parsed = CancelSchema.safeParse(req.body ?? {});
+    // A bodiless cancel arrives as undefined, null or '' (an empty text/plain body): all three are no body.
+    const parsed = CancelSchema.safeParse(req.body === undefined || req.body === null || req.body === '' ? {} : req.body);
     if (!parsed.success) return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
     const reason = parsed.data.reason !== undefined && parsed.data.reason !== '' ? parsed.data.reason : null;
     const spoken = parsed.data.input === 'voice';
@@ -5701,9 +5702,16 @@ export function registerRoutes(
     const ids = await adapter.sessions();
     if (!ids.includes(id)) return reply.code(404).send({ error: 'Run not found' });
     try {
-      // Remembered BEFORE the engine call: its queued frame can reach /ws before the call returns.
-      if (spoken) voiceInputs.remember(id, parsed.data.message);
-      await adapter.injectWorkerMessage(id, parsed.data.message, parsed.data.target);
+      // Remembered BEFORE the engine call (its queued frame can reach /ws before the call returns), and forgotten if
+      // the engine refuses it: a send that never happened labels nothing and evicts nothing.
+      const token = spoken ? voiceInputs.remember(id, parsed.data.message, parsed.data.target) : null;
+      try {
+        await adapter.injectWorkerMessage(id, parsed.data.message, parsed.data.target);
+      } catch (err) {
+        if (token !== null) voiceInputs.forget(id, token);
+        throw err;
+      }
+      if (token !== null) voiceInputs.settle(id);
       audit.record('run.injected', actorOf(req), { runId: id, detail: { target: parsed.data.target, ...(spoken ? { input: 'voice' } : {}) } });
       // DC-S4a host: the operator's mid-run steering text (review S9).
       if (decisions !== null) {
@@ -6423,7 +6431,8 @@ export function registerRoutes(
       .filter(Boolean);
     const wanted = names.length > 0 ? new Set(names) : null;
     // DES-VOICE: a note said by voice reads "You (by voice)" on a reloaded thread too (this daemon's memory).
-    const filtered = (wanted ? events.filter((e) => wanted.has(e.type)) : events).map((e) => voiceInputs.stamp(e));
+    const stamped = voiceInputs.stampHistory(id, events);
+    const filtered = wanted ? stamped.filter((e) => wanted.has(e.type)) : stamped;
     return { runId: id, total: events.length, returned: filtered.length, events: filtered };
   });
 
