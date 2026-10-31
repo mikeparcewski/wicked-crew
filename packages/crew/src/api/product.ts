@@ -105,7 +105,7 @@ export function reviewInstructions(projectId: string, rows: ReadonlyArray<Compos
 export function registerProductRoutes(app: FastifyInstance, adapter: CoreAdapter): void {
   app.post(
     `${V}/projects/:id/product/compose`,
-    { config: { manifest: { requestType: 'ProductComposeBody', responseType: 'ProductComposeResponse', statusCodes: [202, 400, 404, 409, 422, 501] } } },
+    { config: { manifest: { requestType: 'ProductComposeBody', responseType: 'ProductComposeResponse', statusCodes: [202, 400, 404, 409, 422, 501, 503] } } },
     async (req: FastifyRequest, reply) => {
       const { id } = req.params as { id: string };
       const parsed = ProductComposeSchema.safeParse(req.body);
