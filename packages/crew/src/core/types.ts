@@ -222,6 +222,15 @@ export interface LaunchRunInput {
    */
   power?: boolean;
   /**
+   * (program DES-LEARN §3.3, wicked-core#1216) The person's VOICE BLOCK for a POWER launch: their
+   * personality for the run's project (the project's override, else the person's own), which the
+   * engine appends to the orchestrator's brief only, behind a governance line (tone and habits, never
+   * rigor, gates, checks or permissions). The PA's scope step, reviewers, judges and QE never receive it.
+   * Set by `POST /runs` on a power launch when a personality is saved; never on a phased run. An addon
+   * without it drops the field, so the orchestrator runs without a voice (tone only, nothing to refuse).
+   */
+  voice?: string;
+  /**
    * (QE-IN-APP-WORKFLOWS, wicked-core-ts >= 0.7.49) The operator's EXPLICIT skip of a required QE
    * acceptance, with this reason (core-ts `skipQeAcceptanceReason`), or its explicit force
    * (`forceQeAcceptance`). Sent only when the caller sent them; crew never sets either.

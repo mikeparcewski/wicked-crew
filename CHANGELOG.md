@@ -12,6 +12,13 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **The power orchestrator talks in your personality** (wicked-core#1216). A power launch from `POST /runs` now
+  carries the voice block of the personality for its project (the project's override, else yours) to the engine as
+  `LaunchOptions.voice`; the engine appends it to the orchestrator's brief only, behind a line saying it shapes tone
+  and habits, never rigor, gates, checks or what the seat may do. The PA's scope step, reviewers, judges and QE never
+  get it. No personality saved, or a phased run, sends none. Needs a wicked-core-ts that carries `voice`; an older
+  addon drops the field and the orchestrator runs without a voice.
+
 - **Voice: transcriptions print their text, and only on an engine that writes no file** (api-types 0.158.0). Seen live
   on whisper.cpp 1.9.5: with the WAV on stdin, `whisper-cli` prints nothing unless an output format is named, so every
   transcription came back empty; crew now passes `-otxt`, which such an engine writes to stdout. whisper.cpp 1.7.x

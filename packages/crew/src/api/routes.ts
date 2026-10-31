@@ -2884,6 +2884,11 @@ export function registerRoutes(
       } else {
         input.power = true;
         input.humanConfirm = 'none';
+        // DES-LEARN §3.3 / wicked-core#1216: the orchestrator talks to the person in their personality
+        // for this project (the project's override, else theirs). The engine hands it to the
+        // orchestrator only; reviewers, judges and QE never hear it.
+        const { voice } = voiceFor(b.projectId);
+        if (voice !== undefined) input.voice = voice;
       }
     }
     // QE-IN-APP-WORKFLOWS: the operator's explicit skip (with its reason) or force — forwarded only
