@@ -28,7 +28,7 @@ export function learningSubmitEnv(runId: string, agent: string, base: NodeJS.Pro
 }
 
 export async function submitLearning(runId: string, agent: string, args: SubmitArgs): Promise<string | null> {
-  const env = learningSubmitEnv(runId, agent);
+  const env = learningSubmitEnv(runId, agent, childEnvWithBootEstateDb(process.env));
   const db = env['WICKED_MEMORY_DB'];
   if (resolveMemoryDb(process.env).source !== 'explicit' && typeof db === 'string') {
     try {
@@ -38,7 +38,13 @@ export async function submitLearning(runId: string, agent: string, args: SubmitA
     }
   }
   const res = (await callEstateTool('proposal.submit', args as unknown as Record<string, unknown>, {
-    spawn: () => nodeSpawn(estateMcpExe(), [], { stdio: ['pipe', 'pipe', 'pipe'], env, windowsHide: true }),
+    spawn: () =>
+      nodeSpawn(estateMcpExe(), [], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        // The daemon's boot-time estate db, never its exported governance store (crew#495).
+        env: learningSubmitEnv(runId, agent, childEnvWithBootEstateDb(process.env)),
+        windowsHide: true,
+      }),
   })) as { id?: unknown } | null;
   return typeof res?.id === 'string' && res.id !== '' ? res.id : null;
 }

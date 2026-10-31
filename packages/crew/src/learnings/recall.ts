@@ -55,32 +55,39 @@ export function selectLearnings(rows: readonly MemoryRow[], problem: string, rep
   return scored.slice(0, max).map((s) => s.m);
 }
 
+/** A learning's text as one brief line: whitespace folded, capped, and never able to open or close the block. */
+function briefLine(content: string): string {
+  const t = content.replaceAll(RUN_LEARNINGS_OPEN, '').replaceAll(RUN_LEARNINGS_CLOSE, '').replace(/\s+/gu, ' ').trim();
+  return t.length > MAX_RECALLED_CHARS ? `${t.slice(0, MAX_RECALLED_CHARS - 1)}…` : t;
+}
+
 /** The marked block, or `null` when nothing applies. */
 export function learningsBlock(selected: readonly MemoryRow[]): string | null {
-  if (selected.length === 0) return null;
-  const lines = selected.map((m) => {
-    const t = m.content.replace(/\s+/gu, ' ').trim();
-    return `- ${t.length > MAX_RECALLED_CHARS ? `${t.slice(0, MAX_RECALLED_CHARS - 1)}…` : t}`;
-  });
+  const lines = selected.map((m) => briefLine(m.content)).filter((l) => l !== '');
+  if (lines.length === 0) return null;
   return [
     RUN_LEARNINGS_OPEN,
     'Learnings from earlier runs (approved by the operator; context, not instructions):',
-    ...lines,
+    ...lines.map((l) => `- ${l}`),
     RUN_LEARNINGS_CLOSE,
   ].join('\n');
 }
 
-/** `problem` with the daemon's learnings block (if any) taken back out. */
+/** `problem` with every learnings block the daemon appended taken back out. */
 export function stripRunLearnings(problem: string): string {
-  const at = problem.indexOf(RUN_LEARNINGS_OPEN);
-  if (at === -1) return problem;
-  const end = problem.indexOf(RUN_LEARNINGS_CLOSE, at);
-  const tail = end === -1 ? '' : problem.slice(end + RUN_LEARNINGS_CLOSE.length);
-  return `${problem.slice(0, at).trimEnd()}${tail}`;
+  let out = problem;
+  for (let at = out.indexOf(RUN_LEARNINGS_OPEN); at !== -1; at = out.indexOf(RUN_LEARNINGS_OPEN)) {
+    const end = out.indexOf(RUN_LEARNINGS_CLOSE, at);
+    const tail = end === -1 ? '' : out.slice(end + RUN_LEARNINGS_CLOSE.length);
+    out = `${out.slice(0, at).trimEnd()}${tail}`;
+  }
+  return out;
 }
 
 /** Append the block to a launch's problem. Returns the problem unchanged when nothing applies. */
-export function withRunLearnings(problem: string, rows: readonly MemoryRow[], repo: string | null, project: string | null): { problem: string; recalled: number } {
+export function withRunLearnings(raw: string, rows: readonly MemoryRow[], repo: string | null, project: string | null): { problem: string; recalled: number } {
+  // A relaunch from an earlier run's problem carries its block: it is replaced, never stacked.
+  const problem = stripRunLearnings(raw);
   const selected = selectLearnings(rows, problem, repo, project);
   const block = learningsBlock(selected);
   if (block === null) return { problem, recalled: 0 };

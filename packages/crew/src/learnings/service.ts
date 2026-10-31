@@ -33,6 +33,8 @@ export const OUT_DIR = 'out';
 export const REPORT_FILE = 'report.json';
 /** Written once a source run's learnings were filed at its end: a resume's second terminal frame files nothing. */
 export const FILED_FILE = 'filed.json';
+/** The distil run launched for a source run (its id and seat). */
+export const DISTILL_FILE = 'distill.json';
 /** The agent named on a learning crew worded itself (a template, or raw evidence). */
 export const CREW_AGENT = 'crew';
 /** The most learnings one run proposes from its end (the distil seat's, or the raw fallback). */
@@ -51,6 +53,7 @@ export const NO_LEARNINGS_WORKFLOWS: ReadonlySet<string> = new Set([
   'learn',
 ]);
 
+const TERMINAL: ReadonlySet<string> = new Set(['completed', 'failed', 'cancelled']);
 const CHECKPOINT_EVENTS: ReadonlySet<string> = new Set(['powerCheckpointReached', 'unitDone', 'gateDecided']);
 const END_EVENTS: ReadonlySet<string> = new Set(['sessionCompleted', 'sessionFailed', 'runCancelled']);
 
@@ -148,11 +151,16 @@ export function learningsOfRun(runId: string, rows: readonly ProposalRow[]): Run
     }));
 }
 
-/** A distil report's learnings, validated: known kind, sane length, at most {@link MAX_END_LEARNINGS}. */
+/**
+ * A distil report's learnings, validated: known kind, sane length, at most {@link MAX_END_LEARNINGS}. `null` when
+ * there is no usable report: none, malformed, or entries none of which survive validation. An explicitly EMPTY list is
+ * the seat's judgment (nothing durable) and is kept as `[]`.
+ */
 export function parseDistillReport(raw: unknown): Array<{ kind: LearningKind; content: string }> | null {
   if (!isRecord(raw) || !Array.isArray(raw['learnings'])) return null;
+  const entries = raw['learnings'];
   const out: Array<{ kind: LearningKind; content: string }> = [];
-  for (const e of raw['learnings']) {
+  for (const e of entries) {
     if (!isRecord(e)) continue;
     const kind = typeof e['kind'] === 'string' && KINDS.has(e['kind']) ? (e['kind'] as LearningKind) : 'gotcha';
     const content = typeof e['content'] === 'string' ? e['content'].replace(/\s+/gu, ' ').trim() : '';
@@ -160,7 +168,7 @@ export function parseDistillReport(raw: unknown): Array<{ kind: LearningKind; co
     out.push({ kind, content });
     if (out.length >= MAX_END_LEARNINGS) break;
   }
-  return out;
+  return entries.length > 0 && out.length === 0 ? null : out;
 }
 
 interface DistillRecord {
@@ -170,9 +178,14 @@ interface DistillRecord {
 }
 
 export class RunLearningsService {
-  /** Runs with a sweep in flight, and those that asked for another while it ran. */
-  private readonly sweeping = new Set<string>();
-  private readonly again = new Map<string, 'checkpoint' | 'end'>();
+  /**
+   * Every sweep and reconcile runs on ONE daemon-wide queue: the dedupe read and the submits that follow it are
+   * atomic across runs (two runs that hit the same flaky test propose it once), and a run's end, its distil report
+   * and a resume's second terminal frame never interleave. A task already queued and not yet started is not queued
+   * twice.
+   */
+  private tail: Promise<void> = Promise.resolve();
+  private readonly queued = new Set<string>();
   /** distil run id → its source run (rebuilt from disk after a restart). */
   private readonly distills = new Map<string, string>();
   private distillsLoaded = false;
@@ -183,16 +196,35 @@ export class RunLearningsService {
     return join(this.deps.learningsDir, sourceRunId);
   }
 
+  private enqueue(key: string, task: () => Promise<void>): Promise<void> {
+    if (this.queued.has(key)) return this.tail;
+    this.queued.add(key);
+    this.tail = this.tail.then(async () => {
+      this.queued.delete(key);
+      try {
+        await task();
+      } catch (err) {
+        this.deps.log(`[learnings] ${key} failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    });
+    return this.tail;
+  }
+
   /** Fold one engine frame. Never throws. */
   onEvent(event: { type: string; session?: unknown }): void {
     if (this.deps.mode === 'off') return;
     const session = event.session;
     if (typeof session !== 'string' || session === '') return;
     if (END_EVENTS.has(event.type)) {
-      void this.onEnd(session);
+      void this.enqueue(`end:${session}`, () => this.onEnd(session));
     } else if (CHECKPOINT_EVENTS.has(event.type)) {
-      void this.sweep(session, 'checkpoint');
+      void this.enqueue(`checkpoint:${session}`, () => this.sweepOnce(session, 'checkpoint'));
     }
+  }
+
+  /** Read the run's record and file what is new (a test's direct entry; frames go through {@link onEvent}). */
+  sweep(runId: string, phase: 'checkpoint' | 'end'): Promise<void> {
+    return this.enqueue(`${phase}:${runId}`, () => (phase === 'end' ? this.onEnd(runId) : this.sweepOnce(runId, 'checkpoint')));
   }
 
   private async onEnd(runId: string): Promise<void> {
@@ -202,26 +234,33 @@ export class RunLearningsService {
       await this.reconcileDistill(runId, source);
       return;
     }
-    await this.sweep(runId, 'end');
+    await this.sweepOnce(runId, 'end');
   }
 
-  /** Read the run's record, file what is new. One sweep per run at a time; a request during one re-runs it after. */
-  async sweep(runId: string, phase: 'checkpoint' | 'end'): Promise<void> {
-    if (this.sweeping.has(runId)) {
-      if (this.again.get(runId) !== 'end') this.again.set(runId, phase);
-      return;
-    }
-    this.sweeping.add(runId);
-    try {
-      await this.sweepOnce(runId, phase);
-    } catch (err) {
-      this.deps.log(`[learnings] ${phase} sweep of ${runId} failed: ${err instanceof Error ? err.message : String(err)}`);
-    } finally {
-      this.sweeping.delete(runId);
-      const next = this.again.get(runId);
-      this.again.delete(runId);
-      if (next !== undefined) void this.sweep(runId, next);
-    }
+  /**
+   * After a restart: finish every run whose end was interrupted. A handoff with no distil run (the daemon stopped
+   * before the launch) is ended again; a distil run that ended while the daemon was down is reconciled; one the
+   * daemon no longer knows is filed raw. Never throws.
+   */
+  recover(): Promise<void> {
+    if (this.deps.mode === 'off') return Promise.resolve();
+    return this.enqueue('recover', async () => {
+      if (!existsSync(this.deps.learningsDir)) return;
+      const views = new Map((await this.deps.adapter.sessionsDetail()).map((v) => [v.session.id, v] as const));
+      for (const name of readdirSync(this.deps.learningsDir)) {
+        const dir = join(this.deps.learningsDir, name);
+        if (existsSync(join(dir, FILED_FILE))) continue;
+        const rec = this.readJson(join(dir, DISTILL_FILE));
+        const child = isRecord(rec) && typeof rec['distillRunId'] === 'string' ? rec['distillRunId'] : null;
+        if (child === null) {
+          if (views.has(name)) await this.sweepOnce(name, 'end');
+          continue;
+        }
+        this.distills.set(child, name);
+        const status = views.get(child)?.session.status;
+        if (status === undefined || TERMINAL.has(status)) await this.reconcileDistill(child, name);
+      }
+    });
   }
 
   private async viewOf(runId: string): Promise<SessionView | null> {
@@ -233,38 +272,38 @@ export class RunLearningsService {
     if (view === null) return;
     const workflow = String(view.session.workflow_id ?? '');
     if (NO_LEARNINGS_WORKFLOWS.has(workflow)) return;
-    if (phase === 'end' && existsSync(join(this.dirOf(runId), FILED_FILE))) return;
+    const dir = this.dirOf(runId);
+    if (phase === 'end' && (existsSync(join(dir, FILED_FILE)) || this.distillOf(runId) !== null)) return;
     const events = (await this.deps.adapter.runEvents(runId)) ?? [];
     const candidates = extractLearnings(view, events);
     const known = await this.knownTexts();
     const fresh = (c: LearningCandidate): boolean => !known.has(normalizeLearning(c.content));
+    let failed = 0;
     for (const c of candidates.filter((x) => x.form === 'template' && fresh(x))) {
-      await this.file(view, CREW_AGENT, c.kind, c.content, c.cli);
-      known.add(normalizeLearning(c.content));
+      if ((await this.file(view, CREW_AGENT, c.kind, c.content, c.cli)) === null) failed += 1;
+      else known.add(normalizeLearning(c.content));
     }
     if (phase !== 'end') return;
     const material = candidates.filter((x) => x.form === 'material' && fresh(x));
-    const dir = this.dirOf(runId);
-    mkdirSync(this.deps.learningsDir, { recursive: true });
-    try {
-      mkdirSync(dir); // exclusive: one end per run, whichever frame gets here first
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'EEXIST') return;
-      throw err;
-    }
+    mkdirSync(dir, { recursive: true });
     if (material.length === 0) {
-      this.markFiled(runId, { distilled: false, filed: 0 });
+      if (failed === 0) this.markFiled(runId, { distilled: false, filed: 0 });
       return;
     }
     const launched = this.deps.mode === 'distill' ? await this.launchDistill(view, material, known) : null;
-    if (launched === null) await this.fileRaw(view, material);
+    if (launched === null) await this.fileRaw(view, material, failed);
   }
 
-  /** The normalized text of every proposal still in play (pending or approved) and every stored memory. */
+  /** The distil run recorded for a source run, if one was launched. */
+  private distillOf(sourceRunId: string): string | null {
+    const rec = this.readJson(join(this.dirOf(sourceRunId), DISTILL_FILE));
+    return isRecord(rec) && typeof rec['distillRunId'] === 'string' ? rec['distillRunId'] : null;
+  }
+
+  /** The normalized text of every proposal in the queue (a person's rejection is not proposed again) and every stored memory. */
   private async knownTexts(): Promise<Set<string>> {
     const out = new Set<string>();
     for (const p of await this.deps.listProposals()) {
-      if (p.state === 'rejected') continue;
       const text = p.payload['content'];
       if (typeof text === 'string') out.add(normalizeLearning(text));
     }
@@ -296,14 +335,21 @@ export class RunLearningsService {
   }
 
   /** No distil seat: the evidence as it is, trimmed and capped, for a person to edit or reject. */
-  private async fileRaw(view: SessionView, material: readonly LearningCandidate[]): Promise<void> {
-    const ordered = [...material].sort((a, b) => (FALLBACK_ORDER[a.source] ?? 9) - (FALLBACK_ORDER[b.source] ?? 9)).slice(0, MAX_END_LEARNINGS);
+  /** `failedBefore`: submits of this end that already failed. The run is marked filed only when none did, so a
+   *  failed submit is retried on the next recovery (the dedupe keeps what landed from landing twice). */
+  private async fileRaw(view: SessionView, material: readonly LearningCandidate[], failedBefore = 0): Promise<void> {
+    const ordered = material
+      .filter((c) => c.content.length >= MIN_LEARNING_CHARS)
+      .sort((a, b) => (FALLBACK_ORDER[a.source] ?? 9) - (FALLBACK_ORDER[b.source] ?? 9))
+      .slice(0, MAX_END_LEARNINGS);
     let filed = 0;
+    let failed = failedBefore;
     for (const c of ordered) {
-      if (c.content.length < MIN_LEARNING_CHARS) continue;
       if ((await this.file(view, CREW_AGENT, c.kind, c.content, c.cli)) !== null) filed += 1;
+      else failed += 1;
     }
-    this.markFiled(view.session.id, { distilled: false, filed });
+    if (failed === 0) this.markFiled(view.session.id, { distilled: false, filed });
+    else this.deps.log(`[learnings] ${view.session.id}: ${failed} learning(s) could not be proposed; retried at the next recovery`);
   }
 
   private markFiled(sourceRunId: string, what: Record<string, unknown>): void {
@@ -322,6 +368,7 @@ export class RunLearningsService {
       if (!isRecord(seat)) continue;
       const key = typeof seat['key'] === 'string' ? seat['key'] : null;
       if (key === null || builders.has(key)) continue;
+      if (typeof seat['cli'] === 'string' && builders.has(seat['cli'])) continue;
       if (seat['council_eligible'] === false) continue;
       const health = seat['health'];
       if (isRecord(health) && typeof health['status'] === 'string' && health['status'] !== 'active') continue;
@@ -370,7 +417,7 @@ export class RunLearningsService {
     );
     const distillRunId = this.deps.newRunId();
     const record: DistillRecord = { sourceRunId, distillRunId, seat: String(seat['key']) };
-    writeFileSync(join(dir, 'distill.json'), JSON.stringify(record), 'utf8');
+    writeFileSync(join(dir, DISTILL_FILE), JSON.stringify(record), 'utf8');
     this.distills.set(distillRunId, sourceRunId);
     const projectId = projectOf(view);
     const input: LaunchRunInput = {
@@ -392,7 +439,7 @@ export class RunLearningsService {
       return launched;
     } catch (err) {
       this.distills.delete(distillRunId);
-      writeFileSync(join(dir, 'distill.json'), JSON.stringify({ ...record, distillRunId: null, refused: err instanceof Error ? err.message : String(err) }), 'utf8');
+      writeFileSync(join(dir, DISTILL_FILE), JSON.stringify({ ...record, distillRunId: null, refused: err instanceof Error ? err.message : String(err) }), 'utf8');
       this.deps.log(`[learnings] distill launch for ${sourceRunId} refused (${err instanceof Error ? err.message : String(err)}); filing the evidence as it is`);
       return null;
     }
@@ -401,13 +448,20 @@ export class RunLearningsService {
   /** After a restart: which distil run belongs to which source run, from the handoff directories. */
   private loadDistills(): void {
     if (this.distillsLoaded) return;
-    this.distillsLoaded = true;
-    if (!existsSync(this.deps.learningsDir)) return;
-    for (const name of readdirSync(this.deps.learningsDir)) {
-      const rec = this.readJson(join(this.deps.learningsDir, name, 'distill.json'));
-      if (isRecord(rec) && typeof rec['distillRunId'] === 'string' && typeof rec['sourceRunId'] === 'string') {
-        this.distills.set(rec['distillRunId'], rec['sourceRunId']);
+    try {
+      if (existsSync(this.deps.learningsDir)) {
+        for (const name of readdirSync(this.deps.learningsDir)) {
+          if (existsSync(join(this.deps.learningsDir, name, FILED_FILE))) continue;
+          const rec = this.readJson(join(this.deps.learningsDir, name, DISTILL_FILE));
+          if (isRecord(rec) && typeof rec['distillRunId'] === 'string' && typeof rec['sourceRunId'] === 'string') {
+            this.distills.set(rec['distillRunId'], rec['sourceRunId']);
+          }
+        }
       }
+      this.distillsLoaded = true;
+    } catch (err) {
+      // Read again on the next frame.
+      this.deps.log(`[learnings] the learnings directory is unreadable: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -427,7 +481,7 @@ export class RunLearningsService {
     try {
       const view = await this.viewOf(sourceRunId);
       if (view === null) return;
-      const rec = this.readJson(join(dir, 'distill.json'));
+      const rec = this.readJson(join(dir, DISTILL_FILE));
       const seat = isRecord(rec) && typeof rec['seat'] === 'string' ? rec['seat'] : CREW_AGENT;
       const report = parseDistillReport(this.readJson(join(dir, OUT_DIR, REPORT_FILE)));
       if (report === null) {
@@ -439,12 +493,18 @@ export class RunLearningsService {
       }
       const known = await this.knownTexts();
       let filed = 0;
+      let failed = 0;
       for (const l of report) {
         if (known.has(normalizeLearning(l.content))) continue;
-        if ((await this.file(view, seat, l.kind, l.content, null)) !== null) filed += 1;
+        if ((await this.file(view, seat, l.kind, l.content, null)) === null) {
+          failed += 1;
+          continue;
+        }
+        filed += 1;
         known.add(normalizeLearning(l.content));
       }
-      this.markFiled(sourceRunId, { distilled: true, distillRunId, seat, filed });
+      if (failed === 0) this.markFiled(sourceRunId, { distilled: true, distillRunId, seat, filed });
+      else this.deps.log(`[learnings] ${sourceRunId}: ${failed} distilled learning(s) could not be proposed; retried at the next recovery`);
     } catch (err) {
       this.deps.log(`[learnings] reconciling distill-learnings ${distillRunId} failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {

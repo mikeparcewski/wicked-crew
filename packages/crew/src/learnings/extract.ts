@@ -95,15 +95,20 @@ export function projectOf(view: SessionView): string | null {
   return str((view.session as unknown as Record<string, unknown>)['project_id']);
 }
 
-/** Every seat that built in this run: the power-mode lead and each creator unit's seat. */
+/** Every seat that worked on this run: the power-mode lead, each non-reviewing unit's seat and every earlier author of it. */
 export function creatorSeats(view: SessionView): string[] {
   const out = new Set<string>();
   const team = (view.session as unknown as Record<string, unknown>)['team'];
   const primary = isRecord(team) && isRecord(team['primary']) ? str(team['primary']['cli']) : null;
   if (primary !== null) out.add(primary);
   for (const u of view.units as unknown as Record<string, unknown>[]) {
+    // Every seat that did the run's work: a creator, and a neutral step's seat (triage, recon, plan). Only a
+    // reviewing seat (an evaluator) may distil, since it judged the work rather than producing it.
+    if (u['role'] === 'evaluator') continue;
     const cli = str(u['assigned_cli']);
-    if (cli !== null && u['role'] === 'creator') out.add(cli);
+    if (cli !== null) out.add(cli);
+    // A reassigned or failed-over unit: every seat that authored it built this run too.
+    for (const author of strings(u['authored_by'])) out.add(author);
   }
   return [...out];
 }

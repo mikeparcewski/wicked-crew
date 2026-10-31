@@ -1394,6 +1394,9 @@ export async function createServer(
       app.log.warn(`[learnings] could not register the '${DISTILL_WORKFLOW}' workflow — run learnings are filed undistilled: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+  // A run whose end was interrupted by a restart (its handoff written, its distil run finished while the daemon was
+  // down, a submit that failed) is finished now, off the boot path.
+  void runLearnings.recover();
   // DES-DEFAULT-EVALS-001 §7: the default evals as a workflow (`workflows/run-evals.json`). Every launch is prepared
   // by the daemon, which runs the evals in-process (`runEvalsPrepare`, bound once the routes are registered below);
   // the Tool step only reads the report copy back.

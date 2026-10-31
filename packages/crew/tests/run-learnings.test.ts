@@ -5,7 +5,7 @@
 // approved learning rides in the next matching launch's brief and never in its PR text.
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Fastify from 'fastify';
@@ -57,9 +57,9 @@ function runView(over: { id?: string; status?: string; workflow?: string; units?
       id: over.id ?? 'run-1',
       status: over.status ?? 'completed',
       workflow_id: over.workflow ?? 'bug',
-      problem: 'Fix wicked-core issue #1166\n\nmore',
-      title: 'Fix wicked-core issue #1166',
-      repo_ref: 'wicked-core',
+      problem: 'Fix acme-core issue #1166\n\nmore',
+      title: 'Fix acme-core issue #1166',
+      repo_ref: 'acme-core',
       project_id: 'proj-a',
       team: { primary: { cli: 'claude' } },
     },
@@ -121,7 +121,7 @@ describe('extractLearnings: what a run\'s record says it learned', () => {
     const templates = c.filter((x) => x.form === 'template');
     expect(templates).toHaveLength(1);
     expect(templates[0]).toMatchObject({ kind: 'gotcha', source: 'repo_checks' });
-    expect(templates[0]!.content).toContain('In wicked-core, the test `tests/bridge-reaper.test.ts > finds a child` (repo check `test`) is flaky');
+    expect(templates[0]!.content).toContain('In acme-core, the test `tests/bridge-reaper.test.ts > finds a child` (repo check `test`) is flaky');
     const material = c.filter((x) => x.form === 'material');
     expect(material.map((m) => m.source).sort()).toEqual(['operator_ruling', 'qe_review', 'repo_checks', 'review', 'steer', 'working_notes']);
     const ruling = material.find((m) => m.source === 'operator_ruling')!;
@@ -187,7 +187,7 @@ describe('RunLearningsService: proposals, never writes', () => {
     h.svc.onEvent({ type: 'powerCheckpointReached', session: 'run-1' });
     await settle();
     expect(h.submitted).toHaveLength(1);
-    expect(h.submitted[0]).toMatchObject({ runId: 'run-1', agent: 'crew', args: { kind_type: 'memory', facets: { repo: 'wicked-core', project: 'proj-a' }, payload: { capture: 'gotcha', tier: 'semantic', reach: 'project' } } });
+    expect(h.submitted[0]).toMatchObject({ runId: 'run-1', agent: 'crew', args: { kind_type: 'memory', facets: { repo: 'acme-core', project: 'proj-a' }, payload: { capture: 'gotcha', tier: 'semantic', reach: 'project' } } });
     expect(h.launches).toHaveLength(0);
     // A second checkpoint proposes nothing twice.
     h.svc.onEvent({ type: 'unitDone', session: 'run-1' });
@@ -219,7 +219,7 @@ describe('RunLearningsService: proposals, never writes', () => {
       join(runDir, OUT_DIR, REPORT_FILE),
       JSON.stringify({
         learnings: [
-          { kind: 'gotcha', content: 'In wicked-core, the seat_login tests time out when the host is loaded; a floor failure in them is not evidence against a change.', evidence: ['e1'] },
+          { kind: 'gotcha', content: 'In acme-core, the seat_login tests time out when the host is loaded; a floor failure in them is not evidence against a change.', evidence: ['e1'] },
           { kind: 'gotcha', content: 'short' },
           { kind: 'steering', content: 'In wicked-crew, every test-related refusal line starts with "WICKED-RETRY none" and names the rule that refused.' },
         ],
@@ -316,6 +316,116 @@ describe('RunLearningsService: proposals, never writes', () => {
   });
 });
 
+describe('RunLearningsService under overlap, failure and restart (xreview on crew#1227)', () => {
+  it('overlapping terminal frames of a distil run file its report once', async () => {
+    const h = harness();
+    h.svc.onEvent({ type: 'sessionCompleted', session: 'run-1' });
+    await settle();
+    writeFileSync(join(h.dir, 'run-1', OUT_DIR, REPORT_FILE), JSON.stringify({ learnings: [{ kind: 'gotcha', content: 'In acme-core, the seat_login tests time out when the host is loaded; re-run before debugging.' }] }));
+    h.svc.onEvent({ type: 'sessionCompleted', session: 'distill-1' });
+    h.svc.onEvent({ type: 'sessionFailed', session: 'distill-1' });
+    h.svc.onEvent({ type: 'runCancelled', session: 'distill-1' });
+    await settle();
+    expect(h.submitted.filter((x) => x.agent === 'codex')).toHaveLength(1);
+  });
+
+  it('two runs that hit the same flaky test propose it once', async () => {
+    const h = harness();
+    h.views.push(runView({ id: 'run-2' }));
+    h.svc.onEvent({ type: 'unitDone', session: 'run-1' });
+    h.svc.onEvent({ type: 'unitDone', session: 'run-2' });
+    await settle();
+    expect(h.submitted).toHaveLength(1);
+  });
+
+  it('a submit that fails leaves the end retryable, and recovery files it without doubling what landed', async () => {
+    const h = harness({ mode: 'extract' });
+    const svc = h.svc as unknown as { deps: { submit: (...a: unknown[]) => Promise<string | null> } };
+    const real = svc.deps.submit;
+    let calls = 0;
+    svc.deps.submit = async (...a: unknown[]) => (++calls === 3 ? Promise.reject(new Error('estate down')) : real(...a));
+    h.svc.onEvent({ type: 'sessionCompleted', session: 'run-1' });
+    await settle();
+    expect(existsSync(join(h.dir, 'run-1', FILED_FILE))).toBe(false);
+    const landed = h.submitted.length;
+    expect(landed).toBe(MAX_END_LEARNINGS); // 1 template + 4 of 5 raw; one failed
+    svc.deps.submit = real;
+    await h.svc.recover();
+    expect(existsSync(join(h.dir, 'run-1', FILED_FILE))).toBe(true);
+    const contents = h.submitted.map((x) => x.args.payload['content']);
+    expect(new Set(contents).size).toBe(contents.length);
+  });
+
+  it('after a restart: a handoff with no launch is ended again; a distil run that ended while down is reconciled', async () => {
+    const h = harness();
+    // The daemon stopped right after the directory was made.
+    mkdirSync(join(h.dir, 'run-1'), { recursive: true });
+    await h.svc.recover();
+    expect(h.launches).toHaveLength(1);
+
+    // A fresh service (the restart) over the same directory: the distil run finished while it was down.
+    writeFileSync(join(h.dir, 'run-1', OUT_DIR, REPORT_FILE), JSON.stringify({ learnings: [{ kind: 'pattern', content: 'In acme-core, CHANGELOG.md is owned by the release tooling; a change never edits it by hand.' }] }));
+    h.views.push({ session: { id: 'distill-1', status: 'completed', workflow_id: DISTILL_WORKFLOW, problem: 'p' }, units: [] } as unknown as SessionView);
+    const again = harness();
+    const next = new RunLearningsService({ ...(again.svc as unknown as { deps: Record<string, unknown> }).deps, learningsDir: h.dir, adapter: { ...(again.svc as unknown as { deps: { adapter: Record<string, unknown> } }).deps.adapter, sessionsDetail: async () => h.views } } as never);
+    await next.recover();
+    expect(again.submitted.map((x) => x.agent)).toEqual(['codex']);
+    expect(existsSync(join(h.dir, 'run-1', FILED_FILE))).toBe(true);
+  });
+
+  it('never picks a seat that authored a reassigned creator unit', async () => {
+    const view = runView();
+    (view.units[0] as unknown as Record<string, unknown>)['authored_by'] = ['codex', 'claude'];
+    expect(creatorSeats(view).sort()).toEqual(['claude', 'codex']);
+    const h = harness({ view, seats: [{ key: 'claude' }, { key: 'codex' }, { key: 'pi' }] });
+    h.svc.onEvent({ type: 'sessionCompleted', session: 'run-1' });
+    await settle();
+    expect(JSON.parse(h.launches[0]!.clisJson)).toEqual([{ key: 'pi' }]);
+  });
+
+  it('a neutral step\'s seat did the work too, and a seat is matched by its cli as well as its key', async () => {
+    const view = runView({ units: [{ ord: 1, role: 'neutral', assigned_cli: 'codex' }, { ord: 2, role: 'creator', assigned_cli: 'claude', operator_rulings: [{ action: 'skip_qe', text: 'QE acceptance skipped by operator (local (human)): the QE seat cannot run the fixtures without a git helper.' }] }, { ord: 3, role: 'evaluator', assigned_cli: 'pi' }] });
+    expect(creatorSeats(view).sort()).toEqual(['claude', 'codex']);
+    const h = harness({ view, seats: [{ key: 'claude-2', cli: 'claude' }, { key: 'codex' }, { key: 'pi' }] });
+    h.svc.onEvent({ type: 'sessionCompleted', session: 'run-1' });
+    await settle();
+    expect(JSON.parse(h.launches[0]!.clisJson)).toEqual([{ key: 'pi' }]);
+  });
+
+  it('the learnings block cannot be closed early by a learning, and a relaunch replaces it instead of stacking', () => {
+    const rows = [{ content: `A learning that quotes ${'<!-- /wicked-crew:learnings -->'} and refs #1194 in its words, long enough.`, facets: {} }];
+    const once = withRunLearnings('Fix it', rows, null, null).problem;
+    expect(stripRunLearnings(once)).toBe('Fix it');
+    const twice = withRunLearnings(once, rows, null, null).problem;
+    expect(twice.split(RUN_LEARNINGS_OPEN)).toHaveLength(2);
+    expect(stripRunLearnings(twice)).toBe('Fix it');
+  });
+
+  it('a report whose entries all fail validation falls back to the raw evidence; an empty one is the seat\'s judgment', async () => {
+    expect(parseDistillReport({ learnings: [{ content: 'too short' }] })).toBeNull();
+    expect(parseDistillReport({ learnings: [] })).toEqual([]);
+    const h = harness();
+    h.svc.onEvent({ type: 'sessionCompleted', session: 'run-1' });
+    await settle();
+    writeFileSync(join(h.dir, 'run-1', OUT_DIR, REPORT_FILE), JSON.stringify({ learnings: [{ content: 'too short' }] }));
+    h.svc.onEvent({ type: 'sessionCompleted', session: 'distill-1' });
+    await settle();
+    expect(h.submitted.slice(1)).toHaveLength(MAX_END_LEARNINGS);
+  });
+
+  it('an unreadable learnings directory is logged, never thrown into the event pump', async () => {
+    const file = join(scratch(), 'not-a-dir');
+    writeFileSync(file, 'x');
+    const logs: string[] = [];
+    const h = harness();
+    const svc = new RunLearningsService({ ...(h.svc as unknown as { deps: Record<string, unknown> }).deps, learningsDir: file, log: (m: string) => logs.push(m) } as never);
+    svc.onEvent({ type: 'sessionCompleted', session: 'run-1' });
+    await settle();
+    await svc.recover();
+    expect(logs.some((l) => /unreadable|failed/u.test(l))).toBe(true);
+  });
+});
+
 describe('the distil workflow and its report', () => {
   it('is one seat, one turn, no floor, no judge', () => {
     const def = loadDistillWorkflow();
@@ -353,7 +463,7 @@ describe('estate: attributed submits', () => {
 describe('approved learnings reach the next run\'s brief', () => {
   const rows = memoryRows({
     items: [
-      { content: 'In wicked-core, the seat_login tests time out under host load.', facets: { repo: 'wicked-core' }, created_at: 2 },
+      { content: 'In acme-core, the seat_login tests time out under host load.', facets: { repo: 'acme-core' }, created_at: 2 },
       { content: 'In wicked-crew, refusal lines start with WICKED-RETRY none.', facets: { repo: 'wicked-crew' }, created_at: 3 },
       { content: 'The operator wants tables in replies.', facets: {}, created_at: 1 },
       { content: 'Project B only: never touch the billing schema.', facets: { project: 'proj-b' }, created_at: 4 },
@@ -362,14 +472,14 @@ describe('approved learnings reach the next run\'s brief', () => {
   });
 
   it('applies a memory only where its repo/project facets match', () => {
-    expect(appliesTo({ repo: 'wicked-core' }, 'wicked-core', null)).toBe(true);
-    expect(appliesTo({ repo: 'wicked-core' }, 'wicked-crew', null)).toBe(false);
-    expect(appliesTo({ project: 'proj-b' }, 'wicked-core', 'proj-a')).toBe(false);
+    expect(appliesTo({ repo: 'acme-core' }, 'acme-core', null)).toBe(true);
+    expect(appliesTo({ repo: 'acme-core' }, 'wicked-crew', null)).toBe(false);
+    expect(appliesTo({ project: 'proj-b' }, 'acme-core', 'proj-a')).toBe(false);
     expect(appliesTo({}, null, null)).toBe(true);
   });
 
   it('appends the matching ones in a marked block, scoped first, and the deliver text takes it back out', () => {
-    const { problem, recalled } = withRunLearnings('Fix seat_login flake', rows, 'wicked-core', 'proj-a');
+    const { problem, recalled } = withRunLearnings('Fix seat_login flake', rows, 'acme-core', 'proj-a');
     expect(recalled).toBe(2);
     expect(problem.startsWith('Fix seat_login flake\n\n' + RUN_LEARNINGS_OPEN)).toBe(true);
     expect(problem.indexOf('seat_login tests time out')).toBeLessThan(problem.indexOf('tables in replies'));
@@ -386,7 +496,7 @@ describe('approved learnings reach the next run\'s brief', () => {
       sessionsDetail: vi.fn(async () => []),
       sessions: vi.fn(async () => ['run-1']),
       runEvents: vi.fn(async () => null),
-      listRepos: vi.fn(async () => [{ id: 'wicked-core', name: 'wicked-core', root_path: '/srv/wicked-core', registered_at: 1 }]),
+      listRepos: vi.fn(async () => [{ id: 'acme-core', name: 'acme-core', root_path: '/srv/acme-core', registered_at: 1 }]),
       getWorkflow: vi.fn((id: string) => (id === 'bug' ? bug : null)),
       getSettings: vi.fn(async () => ({ deliverDefault: 'none' })),
       launchRun: vi.fn(async (input: LaunchRunInput) => {
@@ -400,7 +510,7 @@ describe('approved learnings reach the next run\'s brief', () => {
     const estate = async (tool: string) => {
       if (broken) throw new Error('estate down');
       expect(tool).toBe('memory.list');
-      return { items: [{ content: 'In wicked-core, the seat_login tests time out under host load.', facets: { repo: 'wicked-core' } }] };
+      return { items: [{ content: 'In acme-core, the seat_login tests time out under host load.', facets: { repo: 'acme-core' } }] };
     };
     const runtime: Partial<RuntimeDeps> = {
       resolveLinkedIssues: async () => ({ issues: [], block: null }),
@@ -411,12 +521,12 @@ describe('approved learnings reach the next run\'s brief', () => {
     registerRoutes(app, adapter, new GateCache(), new ElicitationCache(), { bus: null, index: new MembershipIndex(), log: () => undefined }, { audit: AuditLog.noop(), authMode: 'off' }, runtime);
     await app.ready();
     try {
-      const res = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'Fix the flake', repoRef: 'wicked-core', workflow: 'bug' } });
+      const res = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'Fix the flake', repoRef: 'acme-core', workflow: 'bug' } });
       expect(res.statusCode, res.body).toBe(201);
       expect(launched[0]!.problem).toContain(RUN_LEARNINGS_OPEN);
       expect(launched[0]!.problem).toContain('seat_login tests time out under host load');
       broken = true;
-      const again = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'Fix the flake', repoRef: 'wicked-core', workflow: 'bug' } });
+      const again = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'Fix the flake', repoRef: 'acme-core', workflow: 'bug' } });
       expect(again.statusCode, again.body).toBe(201);
       expect(launched[1]!.problem).toBe('Fix the flake');
 
@@ -431,30 +541,40 @@ describe('approved learnings reach the next run\'s brief', () => {
 });
 
 // The whole loop against a real estate server, when this host has one (CI has none: skipped there).
-const hasEstate = (process.env['PATH'] ?? '').split(':').some((d) => d !== '' && existsSync(join(d, 'wicked-estate-mcp')));
+// Opt-in (WICKED_TEST_REAL_ESTATE=1): it starts a writable server, so every store it opens is pinned to scratch.
+const hasEstate =
+  process.env['WICKED_TEST_REAL_ESTATE'] === '1' && (process.env['PATH'] ?? '').split(':').some((d) => d !== '' && existsSync(join(d, 'wicked-estate-mcp')));
 describe.skipIf(!hasEstate)('with a real wicked-estate-mcp: proposed, not written; approved, then recalled', () => {
   it('a run\'s learning is a pending proposal attributed to the run until a person approves it, then it is in the next brief', async () => {
     const { callEstateTool } = await import('../src/core/estate-mcp-client.js');
     const { submitLearning } = await import('../src/learnings/estate.js');
-    const before = process.env['WICKED_MEMORY_DB'];
-    process.env['WICKED_MEMORY_DB'] = join(scratch(), 'memory.db');
+    const pinned = ['WICKED_MEMORY_DB', 'WICKED_HOME', 'WICKED_ESTATE_DB', 'WICKED_KNOWLEDGE_DB', 'WICKED_XEDGE_DB'] as const;
+    const before = Object.fromEntries(pinned.map((k) => [k, process.env[k]]));
+    const home = scratch();
+    process.env['WICKED_MEMORY_DB'] = join(home, 'memory.db');
+    process.env['WICKED_HOME'] = home;
+    process.env['WICKED_ESTATE_DB'] = ':memory:';
+    process.env['WICKED_KNOWLEDGE_DB'] = join(home, 'knowledge.db');
+    process.env['WICKED_XEDGE_DB'] = join(home, 'xedge.db');
     try {
-      const content = 'In wicked-core, the seat_login tests time out when the host is loaded; re-run them before debugging a change.';
-      const id = await submitLearning('run-42', 'codex', { kind_type: 'memory', payload: { content, capture: 'gotcha', tier: 'semantic', reach: 'project' }, facets: { repo: 'wicked-core' } });
+      const content = 'In acme-core, the seat_login tests time out when the host is loaded; re-run them before debugging a change.';
+      const id = await submitLearning('run-42', 'codex', { kind_type: 'memory', payload: { content, capture: 'gotcha', tier: 'semantic', reach: 'project' }, facets: { repo: 'acme-core' } });
       expect(id).toBeTruthy();
       const rows = proposalRows(await callEstateTool('proposal.list', {}));
       expect(rows.find((r) => r.id === id)).toMatchObject({ state: 'pending', provenance: { run_id: 'run-42', run_agent: 'codex' } });
       // Nothing is written without approval: the store holds no memory, and a launch recalls nothing.
       expect(memoryRows(await callEstateTool('memory.list', {}))).toEqual([]);
-      expect((await recallLearnings(callEstateTool, 'Fix it', 'wicked-core', null)).recalled).toBe(0);
+      expect((await recallLearnings(callEstateTool, 'Fix it', 'acme-core', null)).recalled).toBe(0);
       await callEstateTool('proposal.approve', { id });
-      const next = await recallLearnings(callEstateTool, 'Fix it', 'wicked-core', null);
+      const next = await recallLearnings(callEstateTool, 'Fix it', 'acme-core', null);
       expect(next.recalled).toBe(1);
       expect(next.problem).toContain(content);
       expect((await recallLearnings(callEstateTool, 'Fix it', 'wicked-crew', null)).recalled).toBe(0);
     } finally {
-      if (before === undefined) delete process.env['WICKED_MEMORY_DB'];
-      else process.env['WICKED_MEMORY_DB'] = before;
+      for (const k of pinned) {
+        if (before[k] === undefined) delete process.env[k];
+        else process.env[k] = before[k];
+      }
     }
   }, 60_000);
 });

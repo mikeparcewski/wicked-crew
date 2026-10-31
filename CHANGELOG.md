@@ -19,10 +19,10 @@ mentioned only where a daemon release depends on them.
   pass on its identical retry, or a check its sandbox could not start, is proposed at once, worded from the record. The
   rest of the evidence (the operator's rulings with their reasons, standing steers, the orchestrator's decisions and why,
   a reviewer's findings, a QE seat that could not run its checks, a check red on the base too) goes at the end to ONE
-  cheap seat that did not build the run: a `distill-learnings` run (one seat, one turn, no repository, no floor) keeps at
+  cheap seat that did not work on the run (a reviewer may; the lead, a builder or an earlier author may not): a `distill-learnings` run (one seat, one turn, no repository, no floor) keeps at
   most 5 that would help a fresh session three months from now, and crew files them. With no such seat, or no usable
   report, the evidence is filed as it is, trimmed and capped at 5. Everything is a `memory` proposal attributed to the
-  source run (`provenance.run_id`, the agent that worded it) and faceted by repo, project and seat; nothing is written
+  source run (`provenance.run_id`, the agent that worded it) and faceted by repo and project (and seat, when it is about one); nothing is written
   until a person approves it, and nothing already queued or stored is proposed again. `GET /runs/:id/learnings`
   (api-types 0.152.0 `RunLearningsResponse`) answers a run's end card: how many it proposed, by state, and whether its
   distil seat is still at it. An approved learning whose repo/project facets match a workflow launch rides in that run's

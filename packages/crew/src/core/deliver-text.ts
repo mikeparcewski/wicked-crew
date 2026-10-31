@@ -546,12 +546,12 @@ const FOOTER_LINK = '[wicked-crew](https://wc.wickedagile.com)';
  * `links` defaults to the issue references of `f.intent`; the embedded-fallback path passes the
  * references of the FULL intent while `f.intent` is the bounded copy ({@link composeEmbeddedDeliverText}).
  */
-export function composeDeliverText(raw: DeliverTextFacts, links: IssueRefs = issueRefs(raw.intent, raw.repoRef)): DeliverText {
+export function composeDeliverText(raw: DeliverTextFacts, links: IssueRefs = issueRefs(intentOnly(raw.intent), raw.repoRef)): DeliverText {
   // crew#886: redact the FACTS, not only the text — the title and table cells are cut to a width,
   // and a cut through a home path would no longer match it (codex on crew#887). The output pass
   // below stays as the backstop.
   const f = redactFacts(raw);
-  const title = deliverTitle(f.intent, f.runId, f.workflowId);
+  const title = deliverTitle(intentOnly(f.intent), f.runId, f.workflowId);
   const { fixes, refs } = links;
   const intent = intentOnly(f.intent).replace(/\r\n?/g, '\n').replace(CONTROL_CHARS, ' ').trim();
   const out: string[] = [];
