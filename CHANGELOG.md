@@ -141,6 +141,14 @@ mentioned only where a daemon release depends on them.
   project or `everything` chat names such a repo in `dangling` instead of reading it. The Nerve Center gains a `repos` row (api-types 0.155.0), `down` while any folder is missing, so Needs-you
   carries it as an item with that fix. `execCapped` names a missing cwd (`ExecCwdMissing`) instead of ENOENT; a
   missing binary is still ENOENT.
+- **`test_targeted`'s deadline retry no longer clears a failure that is not a deadline (crew#1223).**
+  `scripts/test-related.mjs` re-ran only the named failing files once when the output carried a deadline marker, so an
+  assertion failure beside a timeout in another file, a timeout beside an unhandled `Errors  1 error`, or FAIL headers lost
+  past the 512 KiB capture all re-ran clean and exited 0. The named-files retry is now taken only when every reported
+  failure is itself a deadline failure (its error body is a deadline and carries no other error line, so a test
+  title that quotes a marker does not count), the named files equal vitest's `Test Files  N failed` count, the summary
+  reports no unhandled errors, and the 512 KiB capture never overflowed. Otherwise the first pass's exit is recorded as-is, with a `WICKED-RETRY` line naming the
+  rule that refused. No marker, the full suite, and the no-file whole-command retry are unchanged.
 - **Crew writes the working document's event-derived lines itself, so a run nobody views gets them.** On rig run ea73afc0
   every Decisions, Open questions and Next line came from whichever studio tab had the run open (versions v2-v13, at the
   times a page was open); a run nobody viewed got none. `WorkingDocService.syncLines` now folds the run's own recorded
